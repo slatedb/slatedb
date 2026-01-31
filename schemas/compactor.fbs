@@ -1,0 +1,47 @@
+include "common.fbs";
+include "sst.fbs";
+
+union CompactionSpec {
+    TieredCompactionSpec,
+}
+
+enum CompactionStatus : byte {
+    /// The compaction has been submitted but not yet started.
+    Submitted = 0,
+    /// The compaction is currently running.
+    Running,
+    /// The compaction finished successfully.
+    Completed,
+    /// The compaction failed. It might or might not have started before failure.
+    Failed,
+}
+
+table TieredCompactionSpec {
+    // input L0 SSTable IDs
+    ssts: [Ulid];
+
+    // input Sorted Run IDs
+    sorted_runs: [uint32];
+}
+
+table Compaction {
+    // ID of compaction
+    id: Ulid (required);
+
+    // Specificaiton defining the work to be done for this compaction
+    spec: CompactionSpec (required);
+
+    // Current lifecycle status for this compaction
+    status: CompactionStatus;
+
+    // Output SSTs already produced by this compaction.
+    output_ssts: [CompactedSsTable];
+}
+
+table CompactionsV1 {
+    // Fencing token to ensure single active compactor
+    compactor_epoch: uint64;
+
+    // In-flight compactions as of the last update
+    recent_compactions: [Compaction] (required);
+}

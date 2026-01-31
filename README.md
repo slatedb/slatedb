@@ -114,6 +114,12 @@ SlateDB uses the [`object_store`](https://docs.rs/object_store/latest/object_sto
 
 Visit [slatedb.io](https://slatedb.io) to learn more.
 
+## Bindings
+
+- [Go](https://github.com/slatedb/slatedb/tree/main/slatedb-go) (official)
+- [Python](https://github.com/slatedb/slatedb/tree/main/slatedb-py) (official)
+- [Ruby](https://github.com/catkins/slatedb-rb)
+
 ## Features
 
 - [x] Basic API (get, put, delete)
@@ -137,15 +143,23 @@ Visit [slatedb.io](https://slatedb.io) to learn more.
 
 Check out [CONTRIBUTING.md](CONTRIBUTING.md) for fun (and useful) projects to work on.
 
+## Release Schedule
+
+SlateDB follows Semantic Versioning. We release new versions approximately every 2 months at the end of each even month (February, April, and so on). We guarantee forward/backward compatibility for storage formats between adjacent versions, but we do not currently guarantee API compatibility at this time (we reserve the right to break compile-time API compatibility).
+
 ## Adopters
 
 See who's using SlateDB.
 
 - [Embucket](https://www.embucket.com)
+- [Malstrom](https://github.com/MalstromDevelopers/malstrom)
+- [Massive](https://massive.com)
 - [Merklemap](https://merklemap.com)
 - [Responsive](https://responsive.dev)
+- [s2-lite](https://github.com/s2-streamstore/s2)
 - [SQLync](https://sqlync.com)
 - [Tensorlake](https://www.tensorlake.ai)
+- [ZeroFS](https://zerofs.net)
 
 ## Talks
 

@@ -66,16 +66,16 @@
 //!
 //! ```
 //! use slatedb::{Db, Error};
-//! use slatedb::clock::DefaultLogicalClock;
 //! use slatedb::object_store::memory::InMemory;
+//! use slatedb_common::clock::DefaultSystemClock;
 //! use std::sync::Arc;
 //!
 //! #[tokio::main]
 //! async fn main() -> Result<(), Error> {
 //!     let object_store = Arc::new(InMemory::new());
-//!     let clock = Arc::new(DefaultLogicalClock::new());
+//!     let clock = Arc::new(DefaultSystemClock::new());
 //!     let db = Db::builder("test_db", object_store)
-//!         .with_logical_clock(clock)
+//!         .with_system_clock(clock)
 //!         .build()
 //!         .await?;
 //!     Ok(())
@@ -117,29 +117,28 @@ use crate::batch_write::WRITE_BATCH_TASK_NAME;
 use crate::cached_object_store::stats::CachedObjectStoreStats;
 use crate::cached_object_store::CachedObjectStore;
 use crate::cached_object_store::FsCacheStorage;
-use crate::clock::DefaultLogicalClock;
-use crate::clock::DefaultSystemClock;
-use crate::clock::LogicalClock;
-use crate::clock::SystemClock;
+#[cfg(feature = "compaction_filters")]
+use crate::compaction_filter::CompactionFilterSupplier;
+use crate::compactions_store::CompactionsStore;
+use crate::compactor::stats::CompactionStats;
 use crate::compactor::CompactorEventHandler;
 use crate::compactor::SizeTieredCompactionSchedulerSupplier;
 use crate::compactor::COMPACTOR_TASK_NAME;
 use crate::compactor::{CompactionSchedulerSupplier, Compactor};
-use crate::compactor_executor::TokioCompactionExecutor;
-use crate::compactor_stats::CompactionStats;
+use crate::compactor_executor::{TokioCompactionExecutor, TokioCompactionExecutorOptions};
 use crate::config::default_block_cache;
 use crate::config::default_meta_cache;
 use crate::config::CompactorOptions;
 use crate::config::GarbageCollectorOptions;
-use crate::config::SizeTieredCompactionSchedulerOptions;
 use crate::config::{Settings, SstBlockSize};
 use crate::db::Db;
 use crate::db::DbInner;
 use crate::db_cache::SplitCache;
 use crate::db_cache::{DbCache, DbCacheWrapper};
-use crate::db_state::CoreDbState;
+use crate::db_state::ManifestCore;
 use crate::dispatcher::MessageHandlerExecutor;
 use crate::error::SlateDBError;
+use crate::format::sst::{BlockTransformer, SsTableFormat};
 use crate::garbage_collector::GarbageCollector;
 use crate::garbage_collector::GC_TASK_NAME;
 use crate::manifest::store::{FenceableManifest, ManifestStore, StoredManifest};
@@ -150,10 +149,11 @@ use crate::object_stores::ObjectStores;
 use crate::paths::PathResolver;
 use crate::rand::DbRand;
 use crate::retrying_object_store::RetryingObjectStore;
-use crate::sst::SsTableFormat;
 use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
 use crate::utils::WatchableOnceCell;
+use slatedb_common::clock::DefaultSystemClock;
+use slatedb_common::clock::SystemClock;
 
 /// A builder for creating a new Db instance.
 ///
@@ -165,7 +165,6 @@ pub struct DbBuilder<P: Into<Path>> {
     main_object_store: Arc<dyn ObjectStore>,
     wal_object_store: Option<Arc<dyn ObjectStore>>,
     memory_cache: Option<Arc<dyn DbCache>>,
-    logical_clock: Option<Arc<dyn LogicalClock>>,
     system_clock: Option<Arc<dyn SystemClock>>,
     gc_runtime: Option<Handle>,
     compaction_runtime: Option<Handle>,
@@ -174,6 +173,9 @@ pub struct DbBuilder<P: Into<Path>> {
     seed: Option<u64>,
     sst_block_size: Option<SstBlockSize>,
     merge_operator: Option<MergeOperatorType>,
+    block_transformer: Option<Arc<dyn BlockTransformer>>,
+    #[cfg(feature = "compaction_filters")]
+    compaction_filter_supplier: Option<Arc<dyn CompactionFilterSupplier>>,
 }
 
 impl<P: Into<Path>> DbBuilder<P> {
@@ -185,7 +187,6 @@ impl<P: Into<Path>> DbBuilder<P> {
             settings: Settings::default(),
             wal_object_store: None,
             memory_cache: None,
-            logical_clock: None,
             system_clock: None,
             gc_runtime: None,
             compaction_runtime: None,
@@ -194,6 +195,9 @@ impl<P: Into<Path>> DbBuilder<P> {
             seed: None,
             sst_block_size: None,
             merge_operator: None,
+            block_transformer: None,
+            #[cfg(feature = "compaction_filters")]
+            compaction_filter_supplier: None,
         }
     }
 
@@ -219,13 +223,6 @@ impl<P: Into<Path>> DbBuilder<P> {
     /// [`slatedb::db_cache::SplitCache`] is used by default.
     pub fn with_memory_cache(mut self, memory_cache: Arc<dyn DbCache>) -> Self {
         self.memory_cache = Some(memory_cache);
-        self
-    }
-
-    /// Sets the logical clock to use for the database. Logical timestamps are used for
-    /// TTL expiration. If unset, SlateDB defaults to using system time.
-    pub fn with_logical_clock(mut self, clock: Arc<dyn LogicalClock>) -> Self {
-        self.logical_clock = Some(clock);
         self
     }
 
@@ -308,16 +305,75 @@ impl<P: Into<Path>> DbBuilder<P> {
         self
     }
 
+    /// Sets the block transformer to use for the database. The block transformer
+    /// allows custom encoding/decoding of block data before storage and after
+    /// retrieval. This can be used for encryption or other transformations.
+    ///
+    /// The transformer is applied after compression on write and before
+    /// decompression on read. The checksum is calculated on the transformed data.
+    ///
+    /// # Arguments
+    ///
+    /// * `block_transformer` - An Arc-wrapped block transformer implementation.
+    ///
+    /// # Returns
+    ///
+    /// The builder instance for chaining.
+    pub fn with_block_transformer(mut self, block_transformer: Arc<dyn BlockTransformer>) -> Self {
+        self.block_transformer = Some(block_transformer);
+        self
+    }
+
+    /// Sets the compaction filter supplier for the database. The filter supplier
+    /// creates filter instances that can inspect, drop, or modify entries during
+    /// compaction.
+    ///
+    /// **Warning:** Enabling compaction filters may affect snapshot consistency.
+    /// Use compaction filters only if you know the consequences of using them.
+    ///
+    /// See [`crate::CompactionFilter`] for detailed documentation, examples, and the
+    /// filter API.
+    ///
+    /// # Arguments
+    ///
+    /// * `supplier` - An Arc-wrapped compaction filter supplier implementation.
+    ///
+    /// # Returns
+    ///
+    /// The builder instance for chaining.
+    #[cfg(feature = "compaction_filters")]
+    pub fn with_compaction_filter_supplier(
+        mut self,
+        supplier: Arc<dyn CompactionFilterSupplier>,
+    ) -> Self {
+        self.compaction_filter_supplier = Some(supplier);
+        self
+    }
+
     /// Builds and opens the database.
     pub async fn build(self) -> Result<Db, crate::Error> {
         let path = self.path.into();
         // TODO: proper URI generation, for now it works just as a flag
         let wal_object_store_uri = self.wal_object_store.as_ref().map(|_| String::new());
 
-        let retrying_main_object_store = Arc::new(RetryingObjectStore::new(self.main_object_store));
-        let retrying_wal_object_store: Option<Arc<dyn ObjectStore>> = self
-            .wal_object_store
-            .map(|s| Arc::new(RetryingObjectStore::new(s)) as Arc<dyn ObjectStore>);
+        let rand = Arc::new(self.seed.map(DbRand::new).unwrap_or_default());
+        let system_clock = self
+            .system_clock
+            .unwrap_or_else(|| Arc::new(DefaultSystemClock::new()));
+
+        let retrying_main_object_store = Arc::new(RetryingObjectStore::new(
+            self.main_object_store,
+            rand.clone(),
+            system_clock.clone(),
+        ));
+        let retrying_wal_object_store: Option<Arc<dyn ObjectStore>> =
+            self.wal_object_store.map(|s| {
+                Arc::new(RetryingObjectStore::new(
+                    s,
+                    rand.clone(),
+                    system_clock.clone(),
+                )) as Arc<dyn ObjectStore>
+            });
 
         // Log the database opening
         if let Ok(settings_json) = self.settings.to_json_string() {
@@ -332,11 +388,6 @@ impl<P: Into<Path>> DbBuilder<P> {
             );
         }
 
-        let rand = Arc::new(self.seed.map(DbRand::new).unwrap_or_default());
-
-        let logical_clock = self
-            .logical_clock
-            .unwrap_or_else(|| Arc::new(DefaultLogicalClock::new()));
         let memory_cache = self.memory_cache.or_else(|| {
             let block_cache = default_block_cache();
             let meta_cache = default_meta_cache();
@@ -348,11 +399,9 @@ impl<P: Into<Path>> DbBuilder<P> {
             ))
         });
 
-        let system_clock = self
-            .system_clock
-            .unwrap_or_else(|| Arc::new(DefaultSystemClock::new()));
-
         let merge_operator = self.merge_operator.or(self.settings.merge_operator.clone());
+        #[cfg(feature = "compaction_filters")]
+        let compaction_filter_supplier = self.compaction_filter_supplier.clone();
 
         // Setup the components
         let stat_registry = Arc::new(StatRegistry::new());
@@ -361,6 +410,7 @@ impl<P: Into<Path>> DbBuilder<P> {
             filter_bits_per_key: self.settings.filter_bits_per_key,
             compression_codec: self.settings.compression_codec,
             block_size: self.sst_block_size.unwrap_or_default().as_bytes(),
+            block_transformer: self.block_transformer.clone(),
             ..SsTableFormat::default()
         };
 
@@ -401,9 +451,13 @@ impl<P: Into<Path>> DbBuilder<P> {
         let manifest_store = Arc::new(ManifestStore::new(
             &path,
             maybe_cached_main_object_store.clone(),
-            system_clock.clone(),
         ));
-        let latest_manifest = StoredManifest::try_load(manifest_store.clone()).await?;
+        let compactions_store = Arc::new(CompactionsStore::new(
+            &path,
+            maybe_cached_main_object_store.clone(),
+        ));
+        let latest_manifest =
+            StoredManifest::try_load(manifest_store.clone(), system_clock.clone()).await?;
 
         // Validate WAL object store configuration
         if let Some(latest_manifest) = &latest_manifest {
@@ -456,8 +510,9 @@ impl<P: Into<Path>> DbBuilder<P> {
         let stored_manifest = match latest_manifest {
             Some(manifest) => manifest,
             None => {
-                let state = CoreDbState::new_with_wal_object_store(wal_object_store_uri);
-                StoredManifest::create_new_db(manifest_store.clone(), state).await?
+                let state = ManifestCore::new_with_wal_object_store(wal_object_store_uri);
+                StoredManifest::create_new_db(manifest_store.clone(), state, system_clock.clone())
+                    .await?
             }
         };
         let mut manifest = FenceableManifest::init_writer(
@@ -477,7 +532,6 @@ impl<P: Into<Path>> DbBuilder<P> {
         let inner = Arc::new(
             DbInner::new(
                 settings,
-                logical_clock,
                 system_clock.clone(),
                 rand.clone(),
                 table_store.clone(),
@@ -540,23 +594,28 @@ impl<P: Into<Path>> DbBuilder<P> {
                 .unwrap_or_else(|| tokio_handle.clone());
             let scheduler_supplier = self
                 .compaction_scheduler_supplier
-                .unwrap_or_else(default_compaction_scheduler_supplier);
+                .unwrap_or(Arc::new(SizeTieredCompactionSchedulerSupplier));
             let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
             let scheduler = Arc::from(scheduler_supplier.compaction_scheduler(&compactor_options));
             let stats = Arc::new(CompactionStats::new(inner.stat_registry.clone()));
             let executor = Arc::new(TokioCompactionExecutor::new(
-                compaction_handle,
-                compactor_options.clone(),
-                tx,
-                uncached_table_store.clone(),
-                rand.clone(),
-                stats.clone(),
-                system_clock.clone(),
-                manifest_store.clone(),
-                merge_operator.clone(),
+                TokioCompactionExecutorOptions {
+                    handle: compaction_handle,
+                    options: compactor_options.clone(),
+                    worker_tx: tx,
+                    table_store: uncached_table_store.clone(),
+                    rand: rand.clone(),
+                    stats: stats.clone(),
+                    clock: system_clock.clone(),
+                    manifest_store: manifest_store.clone(),
+                    merge_operator: merge_operator.clone(),
+                    #[cfg(feature = "compaction_filters")]
+                    compaction_filter_supplier: compaction_filter_supplier.clone(),
+                },
             ));
             let handler = CompactorEventHandler::new(
                 manifest_store.clone(),
+                compactions_store.clone(),
                 compactor_options.clone(),
                 scheduler,
                 executor,
@@ -579,6 +638,7 @@ impl<P: Into<Path>> DbBuilder<P> {
             let gc_options = self.settings.garbage_collector_options.unwrap_or_default();
             let gc = GarbageCollector::new(
                 manifest_store.clone(),
+                compactions_store.clone(),
                 uncached_table_store.clone(),
                 gc_options,
                 inner.stat_registry.clone(),
@@ -677,6 +737,7 @@ pub struct GarbageCollectorBuilder<P: Into<Path>> {
     options: GarbageCollectorOptions,
     stat_registry: Arc<StatRegistry>,
     system_clock: Arc<dyn SystemClock>,
+    rand: Arc<DbRand>,
 }
 
 impl<P: Into<Path>> GarbageCollectorBuilder<P> {
@@ -688,6 +749,7 @@ impl<P: Into<Path>> GarbageCollectorBuilder<P> {
             options: GarbageCollectorOptions::default(),
             stat_registry: Arc::new(StatRegistry::new()),
             system_clock: Arc::new(DefaultSystemClock::default()),
+            rand: Arc::new(DbRand::default()),
         }
     }
 
@@ -710,6 +772,12 @@ impl<P: Into<Path>> GarbageCollectorBuilder<P> {
         self
     }
 
+    /// Sets the random number generator seed to use for the garbage collector.
+    pub fn with_seed(mut self, seed: u64) -> Self {
+        self.rand = Arc::new(DbRand::new(seed));
+        self
+    }
+
     /// Sets the WAL object store to use for the garbage collector.
     #[allow(unused)]
     pub fn with_wal_object_store(mut self, wal_object_store: Arc<dyn ObjectStore>) -> Self {
@@ -720,18 +788,29 @@ impl<P: Into<Path>> GarbageCollectorBuilder<P> {
     /// Builds and returns a GarbageCollector instance.
     pub fn build(self) -> GarbageCollector {
         let path: Path = self.path.into();
-        let retrying_main_object_store = Arc::new(RetryingObjectStore::new(self.main_object_store));
-        let retrying_wal_object_store = self
-            .wal_object_store
-            .map(|s| Arc::new(RetryingObjectStore::new(s)) as Arc<dyn ObjectStore>);
+        let retrying_main_object_store = Arc::new(RetryingObjectStore::new(
+            self.main_object_store,
+            self.rand.clone(),
+            self.system_clock.clone(),
+        ));
+        let retrying_wal_object_store = self.wal_object_store.map(|s| {
+            Arc::new(RetryingObjectStore::new(
+                s,
+                self.rand.clone(),
+                self.system_clock.clone(),
+            )) as Arc<dyn ObjectStore>
+        });
         let manifest_store = Arc::new(ManifestStore::new(
             &path,
             retrying_main_object_store.clone(),
-            self.system_clock.clone(),
+        ));
+        let compactions_store = Arc::new(CompactionsStore::new(
+            &path,
+            retrying_main_object_store.clone(),
         ));
         let table_store = Arc::new(TableStore::new(
             ObjectStores::new(
-                retrying_main_object_store.clone(),
+                retrying_main_object_store,
                 retrying_wal_object_store.clone(),
             ),
             SsTableFormat::default(), // read only SSTs can use default
@@ -740,6 +819,7 @@ impl<P: Into<Path>> GarbageCollectorBuilder<P> {
         ));
         GarbageCollector::new(
             manifest_store,
+            compactions_store,
             table_store,
             self.options,
             self.stat_registry,
@@ -754,7 +834,7 @@ impl<P: Into<Path>> GarbageCollectorBuilder<P> {
 pub struct CompactorBuilder<P: Into<Path>> {
     path: P,
     main_object_store: Arc<dyn ObjectStore>,
-    tokio_handle: Handle,
+    compaction_runtime: Handle,
     options: CompactorOptions,
     scheduler_supplier: Option<Arc<dyn CompactionSchedulerSupplier>>,
     rand: Arc<DbRand>,
@@ -762,6 +842,9 @@ pub struct CompactorBuilder<P: Into<Path>> {
     system_clock: Arc<dyn SystemClock>,
     closed_result: WatchableOnceCell<Result<(), SlateDBError>>,
     merge_operator: Option<MergeOperatorType>,
+    block_transformer: Option<Arc<dyn BlockTransformer>>,
+    #[cfg(feature = "compaction_filters")]
+    compaction_filter_supplier: Option<Arc<dyn CompactionFilterSupplier>>,
 }
 
 #[allow(unused)]
@@ -770,7 +853,7 @@ impl<P: Into<Path>> CompactorBuilder<P> {
         Self {
             path,
             main_object_store,
-            tokio_handle: Handle::current(),
+            compaction_runtime: Handle::current(),
             options: CompactorOptions::default(),
             scheduler_supplier: None,
             rand: Arc::new(DbRand::default()),
@@ -778,13 +861,16 @@ impl<P: Into<Path>> CompactorBuilder<P> {
             system_clock: Arc::new(DefaultSystemClock::default()),
             closed_result: WatchableOnceCell::new(),
             merge_operator: None,
+            block_transformer: None,
+            #[cfg(feature = "compaction_filters")]
+            compaction_filter_supplier: None,
         }
     }
 
     /// Sets the tokio handle to use for background tasks.
     #[allow(unused)]
-    pub fn with_tokio_handle(mut self, tokio_handle: Handle) -> Self {
-        self.tokio_handle = tokio_handle;
+    pub fn with_runtime(mut self, compaction_runtime: Handle) -> Self {
+        self.compaction_runtime = compaction_runtime;
         self
     }
 
@@ -808,8 +894,8 @@ impl<P: Into<Path>> CompactorBuilder<P> {
     }
 
     /// Sets the random number generator to use for the compactor.
-    pub fn with_rand(mut self, rand: Arc<DbRand>) -> Self {
-        self.rand = rand;
+    pub fn with_seed(mut self, seed: u64) -> Self {
+        self.rand = Arc::new(DbRand::new(seed));
         self
     }
 
@@ -828,43 +914,83 @@ impl<P: Into<Path>> CompactorBuilder<P> {
         self
     }
 
+    /// Sets the block transformer to use for the compactor.
+    pub fn with_block_transformer(mut self, block_transformer: Arc<dyn BlockTransformer>) -> Self {
+        self.block_transformer = Some(block_transformer);
+        self
+    }
+
+    /// Sets the compaction filter supplier for the compactor. The filter supplier
+    /// creates filter instances that can inspect, drop, or modify entries during
+    /// compaction.
+    ///
+    /// **Warning:** Enabling compaction filters may affect snapshot consistency.
+    /// Use compaction filters only if you know the consequences of using them.
+    ///
+    /// See [`crate::CompactionFilter`] for detailed documentation, examples, and the
+    /// filter API.
+    ///
+    /// # Arguments
+    ///
+    /// * `supplier` - An Arc-wrapped compaction filter supplier implementation.
+    ///
+    /// # Returns
+    ///
+    /// The builder instance for chaining.
+    #[cfg(feature = "compaction_filters")]
+    pub fn with_compaction_filter_supplier(
+        mut self,
+        supplier: Arc<dyn CompactionFilterSupplier>,
+    ) -> Self {
+        self.compaction_filter_supplier = Some(supplier);
+        self
+    }
+
     /// Builds and returns a Compactor instance.
     pub fn build(self) -> Compactor {
         let path: Path = self.path.into();
-        let retrying_main_object_store = Arc::new(RetryingObjectStore::new(self.main_object_store));
+        let retrying_main_object_store = Arc::new(RetryingObjectStore::new(
+            self.main_object_store,
+            self.rand.clone(),
+            self.system_clock.clone(),
+        ));
         let manifest_store = Arc::new(ManifestStore::new(
             &path,
             retrying_main_object_store.clone(),
-            self.system_clock.clone(),
         ));
+        let compactions_store = Arc::new(CompactionsStore::new(
+            &path,
+            retrying_main_object_store.clone(),
+        ));
+        let sst_format = SsTableFormat {
+            block_transformer: self.block_transformer.clone(),
+            ..SsTableFormat::default()
+        };
         let table_store = Arc::new(TableStore::new(
-            ObjectStores::new(retrying_main_object_store.clone(), None),
-            SsTableFormat::default(), // read only SSTs can use default
+            ObjectStores::new(retrying_main_object_store, None),
+            sst_format,
             path,
             None, // no need for cache in GC
         ));
 
         let scheduler_supplier = self
             .scheduler_supplier
-            .unwrap_or_else(default_compaction_scheduler_supplier);
+            .unwrap_or(Arc::new(SizeTieredCompactionSchedulerSupplier));
 
         Compactor::new(
             manifest_store,
+            compactions_store,
             table_store,
             self.options,
             scheduler_supplier,
-            self.tokio_handle,
+            self.compaction_runtime,
             self.rand,
             self.stat_registry,
             self.system_clock,
             self.closed_result,
             self.merge_operator,
+            #[cfg(feature = "compaction_filters")]
+            self.compaction_filter_supplier,
         )
     }
-}
-
-fn default_compaction_scheduler_supplier() -> Arc<dyn CompactionSchedulerSupplier> {
-    Arc::new(SizeTieredCompactionSchedulerSupplier::new(
-        SizeTieredCompactionSchedulerOptions::default(),
-    ))
 }

@@ -1,4 +1,4 @@
-use crate::db_state::{CoreDbState, SsTableId};
+use crate::db_state::{ManifestCore, SsTableId};
 use crate::error::SlateDBError;
 use crate::iter::KeyValueIterator;
 use crate::mem_table::WritableKVTable;
@@ -90,7 +90,7 @@ pub(crate) struct WalReplayIterator<'a> {
 impl WalReplayIterator<'_> {
     pub(crate) async fn range(
         wal_id_range: Range<u64>,
-        db_state: &CoreDbState,
+        db_state: &ManifestCore,
         options: WalReplayOptions,
         table_store: Arc<TableStore>,
     ) -> Result<Self, SlateDBError> {
@@ -131,7 +131,7 @@ impl WalReplayIterator<'_> {
     }
 
     pub(crate) async fn new(
-        db_state: &CoreDbState,
+        db_state: &ManifestCore,
         options: WalReplayOptions,
         table_store: Arc<TableStore>,
     ) -> Result<Self, SlateDBError> {
@@ -230,7 +230,7 @@ impl WalReplayIterator<'_> {
 
                     // if the table is full, we'll overflow the row to the next iterator.
                     let meta = table.metadata();
-                    if self.table_store.estimate_encoded_size(
+                    if self.table_store.estimate_encoded_size_compacted(
                         meta.entry_num + 1,
                         meta.entries_size_in_bytes + row_entry.estimated_size(),
                     ) > self.options.max_memtable_bytes
@@ -255,7 +255,7 @@ impl WalReplayIterator<'_> {
                 if table_overflowed
                     || self
                         .table_store
-                        .estimate_encoded_size(meta.entry_num, meta.entries_size_in_bytes)
+                        .estimate_encoded_size_compacted(meta.entry_num, meta.entries_size_in_bytes)
                         > self.options.min_memtable_bytes
                 {
                     break;
@@ -283,12 +283,12 @@ impl WalReplayIterator<'_> {
 mod tests {
     use super::{WalReplayIterator, WalReplayOptions};
     use crate::bytes_range::BytesRange;
-    use crate::db_state::{CoreDbState, SsTableId};
+    use crate::db_state::{ManifestCore, SsTableId};
+    use crate::format::sst::SsTableFormat;
     use crate::iter::{IterationOrder, KeyValueIterator};
     use crate::mem_table::WritableKVTable;
     use crate::object_stores::ObjectStores;
     use crate::proptest_util::{rng, sample};
-    use crate::sst::SsTableFormat;
     use crate::tablestore::TableStore;
     use crate::types::RowEntry;
     use crate::{error::SlateDBError, test_utils};
@@ -308,7 +308,7 @@ mod tests {
         let table_store = test_table_store();
         write_empty_wal(1, Arc::clone(&table_store)).await.unwrap();
         let mut replay_iter = WalReplayIterator::new(
-            &CoreDbState::new(),
+            &ManifestCore::new(),
             WalReplayOptions::default(),
             Arc::clone(&table_store),
         )
@@ -336,7 +336,7 @@ mod tests {
             .unwrap();
 
         let mut replay_iter = WalReplayIterator::new(
-            &CoreDbState::new(),
+            &ManifestCore::new(),
             WalReplayOptions::default(),
             Arc::clone(&table_store),
         )
@@ -371,7 +371,7 @@ mod tests {
 
         let min_memtable_bytes = 1024;
         let mut replay_iter = WalReplayIterator::new(
-            &CoreDbState::new(),
+            &ManifestCore::new(),
             WalReplayOptions {
                 min_memtable_bytes,
                 ..WalReplayOptions::default()
@@ -423,7 +423,7 @@ mod tests {
 
         let max_memtable_bytes = 1024;
         let mut replay_iter = WalReplayIterator::new(
-            &CoreDbState::new(),
+            &ManifestCore::new(),
             WalReplayOptions {
                 min_memtable_bytes: usize::MAX,
                 max_memtable_bytes,
@@ -487,7 +487,7 @@ mod tests {
         .await
         .unwrap();
 
-        let mut db_state = CoreDbState::new();
+        let mut db_state = ManifestCore::new();
         db_state.replay_after_wal_id = replay_after_wal_id;
         db_state.next_wal_sst_id = replay_after_wal_id + 1;
 
@@ -526,7 +526,7 @@ mod tests {
 
         // Set min_seq to skip the first half of entries
         let min_seq = 500;
-        let mut db_state = CoreDbState::new();
+        let mut db_state = ManifestCore::new();
         db_state.last_l0_seq = min_seq;
         db_state.last_l0_clock_tick = 0;
 
@@ -561,7 +561,7 @@ mod tests {
         Arc::new(TableStore::new(
             ObjectStores::new(object_store.clone(), None),
             SsTableFormat::default(),
-            path.clone(),
+            path,
             None,
         ))
     }

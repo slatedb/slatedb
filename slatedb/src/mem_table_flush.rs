@@ -45,6 +45,10 @@ impl MemtableFlusher {
         self.manifest.refresh().await?;
         let mut wguard_state = self.db_inner.state.write();
         wguard_state.merge_remote_manifest(self.manifest.prepare_dirty()?);
+        self.db_inner
+            .db_stats
+            .l0_sst_count
+            .set(wguard_state.state().core().l0.len() as i64);
         Ok(())
     }
 
@@ -190,6 +194,10 @@ impl MemtableFlusher {
                     // at this point we know the data in the memtable is durably stored
                     // so notify the relevant listeners
                     imm_memtable.table().notify_durable(Ok(()));
+                    fail_point!(
+                        Arc::clone(&self.db_inner.fp_registry),
+                        "before-l0-durable-seq-update"
+                    );
                     self.db_inner
                         .oracle
                         .last_remote_persisted_seq

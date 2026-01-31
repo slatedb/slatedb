@@ -15,25 +15,26 @@ use tokio::task::JoinHandle;
 use ulid::Ulid;
 
 use crate::bytes_generator::OrderedBytesGenerator;
-use crate::clock::{DefaultSystemClock, SystemClock};
 use crate::compactor::stats::CompactionStats;
 use crate::compactor::CompactorMessage;
 use crate::compactor_executor::{
     CompactionExecutor, StartCompactionJobArgs, TokioCompactionExecutor,
+    TokioCompactionExecutorOptions,
 };
 use crate::compactor_state::{Compaction, CompactionSpec, SourceId};
 use crate::config::{CompactorOptions, CompressionCodec};
 use crate::db_state::{SsTableHandle, SsTableId};
 use crate::error::SlateDBError;
+use crate::format::sst::SsTableFormat;
 use crate::manifest::store::{ManifestStore, StoredManifest};
 use crate::object_stores::ObjectStores;
 use crate::rand::DbRand;
-use crate::sst::SsTableFormat;
 use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
 use crate::types::RowEntry;
 use crate::types::ValueDeletable;
 use crate::utils::IdGenerator;
+use slatedb_common::clock::{DefaultSystemClock, SystemClock};
 
 pub struct CompactionExecuteBench {
     path: Path,
@@ -254,7 +255,8 @@ impl CompactionExecuteBench {
             destination: 0,
             ssts,
             sorted_runs: vec![],
-            compaction_logical_clock_tick: manifest.db_state().last_l0_clock_tick,
+            output_ssts: vec![],
+            compaction_clock_tick: manifest.db_state().last_l0_clock_tick,
             retention_min_seq: Some(manifest.db_state().recent_snapshot_min_seq),
             is_dest_last_run,
         })
@@ -285,13 +287,15 @@ impl CompactionExecuteBench {
             })
             .collect();
         info!("loaded compaction job");
+
         StartCompactionJobArgs {
             id: rand.rng().gen_ulid(system_clock.as_ref()),
             compaction_id: job.id(),
             destination: 0,
             ssts: vec![],
             sorted_runs: srs,
-            compaction_logical_clock_tick: state.last_l0_clock_tick,
+            output_ssts: vec![],
+            compaction_clock_tick: state.last_l0_clock_tick,
             retention_min_seq: Some(state.recent_snapshot_min_seq),
             is_dest_last_run,
         }
@@ -320,25 +324,23 @@ impl CompactionExecuteBench {
         let stats = Arc::new(CompactionStats::new(registry.clone()));
         let os = self.object_store.clone();
 
-        let manifest_store = Arc::new(ManifestStore::new(
-            &self.path,
-            os.clone(),
-            self.system_clock.clone(),
-        ));
+        let manifest_store = Arc::new(ManifestStore::new(&self.path, os.clone()));
 
-        let executor = TokioCompactionExecutor::new(
-            Handle::current(),
-            Arc::new(compactor_options),
-            tx,
-            table_store.clone(),
-            self.rand.clone(),
-            stats.clone(),
-            self.system_clock.clone(),
-            manifest_store.clone(),
-            None,
-        );
+        let executor = TokioCompactionExecutor::new(TokioCompactionExecutorOptions {
+            handle: Handle::current(),
+            options: Arc::new(compactor_options),
+            worker_tx: tx,
+            table_store: table_store.clone(),
+            rand: self.rand.clone(),
+            stats: stats.clone(),
+            clock: self.system_clock.clone(),
+            manifest_store: manifest_store.clone(),
+            merge_operator: None,
+            #[cfg(feature = "compaction_filters")]
+            compaction_filter_supplier: None,
+        });
 
-        let manifest = StoredManifest::load(manifest_store).await?;
+        let manifest = StoredManifest::load(manifest_store, self.system_clock.clone()).await?;
 
         let sources: Vec<SourceId> = source_sr_ids
             .clone()

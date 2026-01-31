@@ -1,8 +1,7 @@
-use crate::clock::SystemClock;
 use crate::db_cache::DbCache;
+use crate::format::sst::{BlockTransformer, SsTableFormat};
 use crate::manifest::store::ManifestStore;
 use crate::object_stores::ObjectStores;
-use crate::sst::SsTableFormat;
 use crate::tablestore::TableStore;
 use object_store::path::Path;
 use object_store::ObjectStore;
@@ -17,14 +16,18 @@ pub(crate) struct DefaultStoreProvider {
     pub(crate) path: Path,
     pub(crate) object_store: Arc<dyn ObjectStore>,
     pub(crate) block_cache: Option<Arc<dyn DbCache>>,
-    pub(crate) system_clock: Arc<dyn SystemClock>,
+    pub(crate) block_transformer: Option<Arc<dyn BlockTransformer>>,
 }
 
 impl StoreProvider for DefaultStoreProvider {
     fn table_store(&self) -> Arc<TableStore> {
+        let sst_format = SsTableFormat {
+            block_transformer: self.block_transformer.clone(),
+            ..SsTableFormat::default()
+        };
         Arc::new(TableStore::new(
             ObjectStores::new(Arc::clone(&self.object_store), None),
-            SsTableFormat::default(),
+            sst_format,
             self.path.clone(),
             self.block_cache.clone(),
         ))
@@ -34,7 +37,6 @@ impl StoreProvider for DefaultStoreProvider {
         Arc::new(ManifestStore::new(
             &self.path,
             Arc::clone(&self.object_store),
-            Arc::clone(&self.system_clock),
         ))
     }
 }

@@ -88,6 +88,39 @@ impl BytesRange {
         )
     }
 
+    /// Build a half-open range `[prefix, prefix+1)` covering all keys that start with
+    /// `prefix`.
+    ///
+    /// - Empty prefix returns `(..)` so callers can scan the entire keyspace.
+    /// - If the prefix is all `0xff`, the end bound is unbounded rather than overflowing.
+    pub(crate) fn from_prefix(prefix: &[u8]) -> Self {
+        if prefix.is_empty() {
+            return Self::new(Unbounded, Unbounded);
+        }
+
+        let start = Bytes::copy_from_slice(prefix);
+        let end = Self::increment_prefix(prefix)
+            .map(Excluded)
+            .unwrap_or(Unbounded);
+        Self::new(Included(start), end)
+    }
+
+    /// Compute the smallest byte string that is lexicographically greater than any key
+    /// starting with `prefix`. Returns `None` when `prefix` is all `0xff`.
+    fn increment_prefix(prefix: &[u8]) -> Option<Bytes> {
+        let mut upper_bound = prefix.to_vec();
+
+        for i in (0..upper_bound.len()).rev() {
+            if upper_bound[i] != u8::MAX {
+                upper_bound[i] += 1;
+                upper_bound.truncate(i + 1);
+                return Some(Bytes::from(upper_bound));
+            }
+        }
+
+        None
+    }
+
     #[cfg(test)]
     pub(crate) fn from_ref<K, T>(range: T) -> Self
     where
@@ -146,7 +179,7 @@ pub(crate) mod tests {
     use crate::proptest_util::sample;
 
     use bytes::Bytes;
-    use proptest::proptest;
+    use proptest::{prop_assert, proptest};
     use std::ops::Bound;
     use std::ops::Bound::Unbounded;
     use std::ops::RangeBounds;
@@ -163,6 +196,75 @@ pub(crate) mod tests {
     fn test_arbitrary_empty_range() {
         proptest!(|(range in arbitrary::empty_range(10))| {
             assert!(range.empty());
+        });
+    }
+
+    #[test]
+    fn test_from_prefix_builds_half_open_range() {
+        let range = BytesRange::from_prefix(b"ab");
+        let start = Bytes::from("ab");
+        let end = Bytes::from("ac");
+        assert_eq!(range.start_bound(), Bound::Included(&start));
+        assert_eq!(range.end_bound(), Bound::Excluded(&end));
+    }
+
+    #[test]
+    fn test_from_prefix_handles_all_ff_prefix() {
+        let prefix = vec![0xff, 0xff];
+        let range = BytesRange::from_prefix(&prefix);
+        let start = Bytes::from(prefix);
+        assert_eq!(range.start_bound(), Bound::Included(&start));
+        assert_eq!(range.end_bound(), Bound::Unbounded);
+    }
+
+    #[test]
+    fn test_from_prefix_allows_empty_prefix() {
+        let range = BytesRange::from_prefix(b"");
+        assert_eq!(range.start_bound(), Bound::Unbounded);
+        assert_eq!(range.end_bound(), Bound::Unbounded);
+    }
+
+    #[test]
+    fn test_from_prefix_contains_all_prefixed_keys() {
+        proptest!(|(
+            prefix in arbitrary::nonempty_bytes(8),
+            suffix in arbitrary::bytes(8)
+        )| {
+            let range = BytesRange::from_prefix(&prefix);
+            let mut combined = prefix.to_vec();
+            combined.extend_from_slice(&suffix);
+            let key = Bytes::from(combined);
+            prop_assert!(range.contains(&key));
+        });
+    }
+
+    #[test]
+    fn test_from_prefix_unbounded_for_empty_prefix() {
+        proptest!(|(key in arbitrary::bytes(12))| {
+            let range = BytesRange::from_prefix(b"");
+            prop_assert!(range.contains(&key));
+        });
+    }
+
+    #[test]
+    fn test_from_prefix_filters_keys_by_prefix() {
+        proptest!(|(
+            prefix in arbitrary::nonempty_bytes(8),
+            suffix in arbitrary::bytes(8)
+        )| {
+            let range = BytesRange::from_prefix(&prefix);
+
+            // Any key starting with the prefix should be contained.
+            let mut prefixed = prefix.to_vec();
+            prefixed.extend_from_slice(&suffix);
+            let prefixed = Bytes::from(prefixed);
+            prop_assert!(range.contains(&prefixed));
+
+            // A key with a different first byte should be rejected.
+            let mut non_prefixed = prefix.to_vec();
+            non_prefixed[0] = non_prefixed[0].wrapping_add(1);
+            let non_prefixed = Bytes::from(non_prefixed);
+            prop_assert!(!range.contains(&non_prefixed));
         });
     }
 

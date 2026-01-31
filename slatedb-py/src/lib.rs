@@ -14,17 +14,17 @@
 )]
 
 use ::slatedb::admin::{load_object_store_from_env, Admin};
+use ::slatedb::compactor::{CompactionRequest, CompactionSpec, SourceId};
 use ::slatedb::config::{
     CheckpointOptions, CheckpointScope, DbReaderOptions, DurabilityLevel, FlushOptions, FlushType,
     GarbageCollectorDirectoryOptions, GarbageCollectorOptions, MergeOptions, PutOptions,
     ReadOptions, ScanOptions, Settings, Ttl, WriteOptions,
 };
-use ::slatedb::object_store::memory::InMemory;
 use ::slatedb::object_store::ObjectStore;
-use ::slatedb::DBTransaction;
 use ::slatedb::Db;
 use ::slatedb::DbReader;
 use ::slatedb::DbSnapshot;
+use ::slatedb::DbTransaction;
 use ::slatedb::Error;
 use ::slatedb::IsolationLevel;
 use ::slatedb::MergeOperator;
@@ -41,6 +41,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::runtime::Runtime;
 use tokio::sync::Mutex;
+use ulid::Ulid;
 use uuid::Uuid;
 
 static RUNTIME: OnceCell<Runtime> = OnceCell::new();
@@ -96,11 +97,7 @@ fn resolve_object_store_py(
     if let Some(u) = url {
         return Db::resolve_object_store(u).map_err(map_error);
     }
-    if let Some(env) = env_file {
-        return load_object_store_from_env(Some(env))
-            .map_err(|e| InvalidError::new_err(e.to_string()));
-    }
-    Ok(Arc::new(InMemory::new()))
+    load_object_store_from_env(env_file).map_err(|e| InvalidError::new_err(e.to_string()))
 }
 
 fn build_gc_options_from_kwargs(
@@ -110,6 +107,8 @@ fn build_gc_options_from_kwargs(
     wal_min_age: Option<u64>,
     compacted_interval: Option<u64>,
     compacted_min_age: Option<u64>,
+    compactions_interval: Option<u64>,
+    compactions_min_age: Option<u64>,
     require_interval: bool,
     for_once: bool,
 ) -> PyResult<GarbageCollectorOptions> {
@@ -157,6 +156,12 @@ fn build_gc_options_from_kwargs(
             require_interval,
             for_once,
         )?,
+        compactions_options: build_dir(
+            compactions_interval,
+            compactions_min_age,
+            require_interval,
+            for_once,
+        )?,
     })
 }
 
@@ -183,6 +188,8 @@ fn slatedb(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PySlateDBReader>()?;
     m.add_class::<PySlateDBSnapshot>()?;
     m.add_class::<PySlateDBTransaction>()?;
+    m.add_class::<PyCompactionSpec>()?;
+    m.add_class::<PyCompactionRequest>()?;
     m.add_class::<PySlateDBAdmin>()?;
     m.add_class::<PyWriteBatch>()?;
     m.add_class::<PyDbIterator>()?;
@@ -601,6 +608,27 @@ impl PySlateDB {
         })
     }
 
+    #[pyo3(signature = (prefix))]
+    fn scan_prefix(&self, prefix: Vec<u8>) -> PyResult<PyDbIterator> {
+        let db = self.inner.clone();
+        let rt = get_runtime();
+        let iter = rt.block_on(async { db.scan_prefix(prefix).await.map_err(map_error) })?;
+        Ok(PyDbIterator::from_iter(iter))
+    }
+
+    #[pyo3(signature = (prefix))]
+    fn scan_prefix_async<'py>(
+        &self,
+        py: Python<'py>,
+        prefix: Vec<u8>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let db = self.inner.clone();
+        future_into_py(py, async move {
+            let iter = db.scan_prefix(prefix).await.map_err(map_error)?;
+            Ok(PyDbIterator::from_iter(iter))
+        })
+    }
+
     #[pyo3(signature = (key))]
     fn delete(&self, py: Python<'_>, key: Vec<u8>) -> PyResult<()> {
         if key.is_empty() {
@@ -679,6 +707,61 @@ impl PySlateDB {
         future_into_py(py, async move {
             let iter = db
                 .scan_with_options(start..end, &opts)
+                .await
+                .map_err(map_error)?;
+            Ok(PyDbIterator::from_iter(iter))
+        })
+    }
+
+    #[pyo3(signature = (prefix, *, durability_filter = None, dirty = None, read_ahead_bytes = None, cache_blocks = None, max_fetch_tasks = None))]
+    fn scan_prefix_with_options(
+        &self,
+        prefix: Vec<u8>,
+        durability_filter: Option<String>,
+        dirty: Option<bool>,
+        read_ahead_bytes: Option<usize>,
+        cache_blocks: Option<bool>,
+        max_fetch_tasks: Option<usize>,
+    ) -> PyResult<PyDbIterator> {
+        let opts = build_scan_options(
+            durability_filter,
+            dirty,
+            read_ahead_bytes,
+            cache_blocks,
+            max_fetch_tasks,
+        )?;
+        let db = self.inner.clone();
+        let rt = get_runtime();
+        let iter = rt.block_on(async {
+            db.scan_prefix_with_options(&prefix, &opts)
+                .await
+                .map_err(map_error)
+        })?;
+        Ok(PyDbIterator::from_iter(iter))
+    }
+
+    #[pyo3(signature = (prefix, *, durability_filter = None, dirty = None, read_ahead_bytes = None, cache_blocks = None, max_fetch_tasks = None))]
+    fn scan_prefix_with_options_async<'py>(
+        &self,
+        py: Python<'py>,
+        prefix: Vec<u8>,
+        durability_filter: Option<String>,
+        dirty: Option<bool>,
+        read_ahead_bytes: Option<usize>,
+        cache_blocks: Option<bool>,
+        max_fetch_tasks: Option<usize>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let opts = build_scan_options(
+            durability_filter,
+            dirty,
+            read_ahead_bytes,
+            cache_blocks,
+            max_fetch_tasks,
+        )?;
+        let db = self.inner.clone();
+        future_into_py(py, async move {
+            let iter = db
+                .scan_prefix_with_options(&prefix, &opts)
                 .await
                 .map_err(map_error)?;
             Ok(PyDbIterator::from_iter(iter))
@@ -1207,6 +1290,27 @@ impl PySlateDBSnapshot {
         })
     }
 
+    #[pyo3(signature = (prefix))]
+    fn scan_prefix(&self, prefix: Vec<u8>) -> PyResult<PyDbIterator> {
+        let snapshot = self.inner_ref()?;
+        let rt = get_runtime();
+        let iter = rt.block_on(async { snapshot.scan_prefix(prefix).await.map_err(map_error) })?;
+        Ok(PyDbIterator::from_iter(iter))
+    }
+
+    #[pyo3(signature = (prefix))]
+    fn scan_prefix_async<'py>(
+        &self,
+        py: Python<'py>,
+        prefix: Vec<u8>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let snapshot = self.inner_ref()?;
+        future_into_py(py, async move {
+            let iter = snapshot.scan_prefix(prefix).await.map_err(map_error)?;
+            Ok(PyDbIterator::from_iter(iter))
+        })
+    }
+
     #[pyo3(signature = (start, end = None, *, durability_filter = None, dirty = None, read_ahead_bytes = None, cache_blocks = None, max_fetch_tasks = None))]
     fn scan_with_options(
         &self,
@@ -1281,6 +1385,62 @@ impl PySlateDBSnapshot {
         })
     }
 
+    #[pyo3(signature = (prefix, *, durability_filter = None, dirty = None, read_ahead_bytes = None, cache_blocks = None, max_fetch_tasks = None))]
+    fn scan_prefix_with_options(
+        &self,
+        prefix: Vec<u8>,
+        durability_filter: Option<String>,
+        dirty: Option<bool>,
+        read_ahead_bytes: Option<usize>,
+        cache_blocks: Option<bool>,
+        max_fetch_tasks: Option<usize>,
+    ) -> PyResult<PyDbIterator> {
+        let opts = build_scan_options(
+            durability_filter,
+            dirty,
+            read_ahead_bytes,
+            cache_blocks,
+            max_fetch_tasks,
+        )?;
+        let snapshot = self.inner_ref()?;
+        let rt = get_runtime();
+        let iter = rt.block_on(async {
+            snapshot
+                .scan_prefix_with_options(&prefix, &opts)
+                .await
+                .map_err(map_error)
+        })?;
+        Ok(PyDbIterator::from_iter(iter))
+    }
+
+    #[pyo3(signature = (prefix, *, durability_filter = None, dirty = None, read_ahead_bytes = None, cache_blocks = None, max_fetch_tasks = None))]
+    fn scan_prefix_with_options_async<'py>(
+        &self,
+        py: Python<'py>,
+        prefix: Vec<u8>,
+        durability_filter: Option<String>,
+        dirty: Option<bool>,
+        read_ahead_bytes: Option<usize>,
+        cache_blocks: Option<bool>,
+        max_fetch_tasks: Option<usize>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let opts = build_scan_options(
+            durability_filter,
+            dirty,
+            read_ahead_bytes,
+            cache_blocks,
+            max_fetch_tasks,
+        )?;
+        let snapshot = self.inner_ref()?;
+        future_into_py(py, async move {
+            let iter = snapshot
+                .scan_prefix_with_options(&prefix, &opts)
+                .await
+                .map_err(map_error)?;
+            Ok(PyDbIterator::from_iter(iter))
+        })
+    }
+
     fn close(&mut self) -> PyResult<()> {
         self.inner = None; // drop snapshot; unregisters in Drop
         Ok(())
@@ -1295,11 +1455,11 @@ impl PySlateDBSnapshot {
 
 #[pyclass(name = "SlateDBTransaction")]
 struct PySlateDBTransaction {
-    inner: Option<DBTransaction>, // None after commit/rollback
+    inner: Option<DbTransaction>, // None after commit/rollback
 }
 
 impl PySlateDBTransaction {
-    fn inner_ref(&self) -> PyResult<&DBTransaction> {
+    fn inner_ref(&self) -> PyResult<&DbTransaction> {
         self.inner
             .as_ref()
             .ok_or_else(|| ClosedError::new_err("transaction is closed"))
@@ -1506,6 +1666,28 @@ impl PySlateDBTransaction {
         future_into_py(py, async move { Ok(PyDbIterator::from_iter(iter)) })
     }
 
+    #[pyo3(signature = (prefix))]
+    fn scan_prefix(&self, prefix: Vec<u8>) -> PyResult<PyDbIterator> {
+        let txn = self.inner_ref()?;
+        let rt = get_runtime();
+        let iter = rt.block_on(async { txn.scan_prefix(prefix).await.map_err(map_error) })?;
+        Ok(PyDbIterator::from_iter(iter))
+    }
+
+    #[pyo3(signature = (prefix))]
+    fn scan_prefix_async<'py>(
+        &self,
+        py: Python<'py>,
+        prefix: Vec<u8>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let txn = self.inner_ref()?;
+        let rt = get_runtime();
+        let iter = py.allow_threads(|| {
+            rt.block_on(async { txn.scan_prefix(prefix).await.map_err(map_error) })
+        })?;
+        future_into_py(py, async move { Ok(PyDbIterator::from_iter(iter)) })
+    }
+
     #[pyo3(signature = (start, end = None, *, durability_filter = None, dirty = None, read_ahead_bytes = None, cache_blocks = None, max_fetch_tasks = None))]
     fn scan_with_options(
         &self,
@@ -1574,6 +1756,63 @@ impl PySlateDBTransaction {
         let iter = py.allow_threads(|| {
             rt.block_on(async {
                 txn.scan_with_options(start..end, &opts)
+                    .await
+                    .map_err(map_error)
+            })
+        })?;
+        future_into_py(py, async move { Ok(PyDbIterator::from_iter(iter)) })
+    }
+
+    #[pyo3(signature = (prefix, *, durability_filter = None, dirty = None, read_ahead_bytes = None, cache_blocks = None, max_fetch_tasks = None))]
+    fn scan_prefix_with_options(
+        &self,
+        prefix: Vec<u8>,
+        durability_filter: Option<String>,
+        dirty: Option<bool>,
+        read_ahead_bytes: Option<usize>,
+        cache_blocks: Option<bool>,
+        max_fetch_tasks: Option<usize>,
+    ) -> PyResult<PyDbIterator> {
+        let opts = build_scan_options(
+            durability_filter,
+            dirty,
+            read_ahead_bytes,
+            cache_blocks,
+            max_fetch_tasks,
+        )?;
+        let txn = self.inner_ref()?;
+        let rt = get_runtime();
+        let iter = rt.block_on(async {
+            txn.scan_prefix_with_options(&prefix, &opts)
+                .await
+                .map_err(map_error)
+        })?;
+        Ok(PyDbIterator::from_iter(iter))
+    }
+
+    #[pyo3(signature = (prefix, *, durability_filter = None, dirty = None, read_ahead_bytes = None, cache_blocks = None, max_fetch_tasks = None))]
+    fn scan_prefix_with_options_async<'py>(
+        &self,
+        py: Python<'py>,
+        prefix: Vec<u8>,
+        durability_filter: Option<String>,
+        dirty: Option<bool>,
+        read_ahead_bytes: Option<usize>,
+        cache_blocks: Option<bool>,
+        max_fetch_tasks: Option<usize>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let opts = build_scan_options(
+            durability_filter,
+            dirty,
+            read_ahead_bytes,
+            cache_blocks,
+            max_fetch_tasks,
+        )?;
+        let txn = self.inner_ref()?;
+        let rt = get_runtime();
+        let iter = py.allow_threads(|| {
+            rt.block_on(async {
+                txn.scan_prefix_with_options(&prefix, &opts)
                     .await
                     .map_err(map_error)
             })
@@ -1676,7 +1915,7 @@ impl PySlateDBReader {
         checkpoint_lifetime: Option<u64>,
         max_memtable_bytes: Option<u64>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let object_store = resolve_object_store_py(url.as_deref(), env_file.clone())?;
+        let object_store = resolve_object_store_py(url.as_deref(), env_file)?;
         let merge_operator = parse_merge_operator(merge_operator)?;
         future_into_py(py, async move {
             let mut options = DbReaderOptions {
@@ -1878,6 +2117,27 @@ impl PySlateDBReader {
         })
     }
 
+    #[pyo3(signature = (prefix))]
+    fn scan_prefix(&self, prefix: Vec<u8>) -> PyResult<PyDbIterator> {
+        let reader = self.inner.clone();
+        let rt = get_runtime();
+        let iter = rt.block_on(async { reader.scan_prefix(prefix).await.map_err(map_error) })?;
+        Ok(PyDbIterator::from_iter(iter))
+    }
+
+    #[pyo3(signature = (prefix))]
+    fn scan_prefix_async<'py>(
+        &self,
+        py: Python<'py>,
+        prefix: Vec<u8>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let reader = self.inner.clone();
+        future_into_py(py, async move {
+            let iter = reader.scan_prefix(prefix).await.map_err(map_error)?;
+            Ok(PyDbIterator::from_iter(iter))
+        })
+    }
+
     #[pyo3(signature = (start, end = None, *, durability_filter = None, dirty = None, read_ahead_bytes = None, cache_blocks = None, max_fetch_tasks = None))]
     fn scan_with_options(
         &self,
@@ -1952,6 +2212,62 @@ impl PySlateDBReader {
         })
     }
 
+    #[pyo3(signature = (prefix, *, durability_filter = None, dirty = None, read_ahead_bytes = None, cache_blocks = None, max_fetch_tasks = None))]
+    fn scan_prefix_with_options(
+        &self,
+        prefix: Vec<u8>,
+        durability_filter: Option<String>,
+        dirty: Option<bool>,
+        read_ahead_bytes: Option<usize>,
+        cache_blocks: Option<bool>,
+        max_fetch_tasks: Option<usize>,
+    ) -> PyResult<PyDbIterator> {
+        let opts = build_scan_options(
+            durability_filter,
+            dirty,
+            read_ahead_bytes,
+            cache_blocks,
+            max_fetch_tasks,
+        )?;
+        let reader = self.inner.clone();
+        let rt = get_runtime();
+        let iter = rt.block_on(async {
+            reader
+                .scan_prefix_with_options(&prefix, &opts)
+                .await
+                .map_err(map_error)
+        })?;
+        Ok(PyDbIterator::from_iter(iter))
+    }
+
+    #[pyo3(signature = (prefix, *, durability_filter = None, dirty = None, read_ahead_bytes = None, cache_blocks = None, max_fetch_tasks = None))]
+    fn scan_prefix_with_options_async<'py>(
+        &self,
+        py: Python<'py>,
+        prefix: Vec<u8>,
+        durability_filter: Option<String>,
+        dirty: Option<bool>,
+        read_ahead_bytes: Option<usize>,
+        cache_blocks: Option<bool>,
+        max_fetch_tasks: Option<usize>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let opts = build_scan_options(
+            durability_filter,
+            dirty,
+            read_ahead_bytes,
+            cache_blocks,
+            max_fetch_tasks,
+        )?;
+        let reader = self.inner.clone();
+        future_into_py(py, async move {
+            let iter = reader
+                .scan_prefix_with_options(&prefix, &opts)
+                .await
+                .map_err(map_error)?;
+            Ok(PyDbIterator::from_iter(iter))
+        })
+    }
+
     fn close(&self) -> PyResult<()> {
         let db_reader = self.inner.clone();
         let rt = get_runtime();
@@ -1964,6 +2280,97 @@ impl PySlateDBReader {
             py,
             async move { db_reader.close().await.map_err(map_error) },
         )
+    }
+}
+
+#[pyclass(name = "SlateDBCompactionRequest")]
+#[allow(dead_code)]
+struct PyCompactionRequest {
+    inner: CompactionRequest,
+}
+
+#[derive(Debug)]
+enum CompactionSourceInput {
+    SortedRun(u32),
+    Sst(Ulid),
+}
+
+impl<'py> FromPyObject<'py> for CompactionSourceInput {
+    fn extract_bound(ob: &Bound<'py, PyAny>) -> PyResult<Self> {
+        let dict = ob.downcast::<PyDict>().map_err(|_| {
+            InvalidError::new_err("compaction source must be a dict with a single key")
+        })?;
+        if dict.len() != 1 {
+            return Err(InvalidError::new_err(
+                "compaction source dict must have exactly one key",
+            ));
+        }
+        let mut iter = dict.iter();
+        let (key, value) = iter.next().ok_or_else(|| {
+            InvalidError::new_err("compaction source dict must have exactly one key")
+        })?;
+        let key: String = key
+            .extract()
+            .map_err(|_| InvalidError::new_err("compaction source key must be a string"))?;
+        match key.as_str() {
+            "SortedRun" => {
+                let id: u32 = value.extract().map_err(|_| {
+                    InvalidError::new_err("compaction source SortedRun value must be an int")
+                })?;
+                Ok(Self::SortedRun(id))
+            }
+            "Sst" => {
+                let ulid_str: String = value.extract().map_err(|_| {
+                    InvalidError::new_err("compaction source Sst value must be a ULID string")
+                })?;
+                let ulid = Ulid::from_string(&ulid_str)
+                    .map_err(|e| InvalidError::new_err(format!("invalid SST ULID: {e}")))?;
+                Ok(Self::Sst(ulid))
+            }
+            _ => Err(InvalidError::new_err(
+                "compaction source key must be 'SortedRun' or 'Sst'",
+            )),
+        }
+    }
+}
+
+#[pyclass(name = "CompactionSpec")]
+struct PyCompactionSpec {
+    inner: CompactionSpec,
+}
+
+#[pymethods]
+impl PyCompactionSpec {
+    #[new]
+    #[pyo3(signature = (sources, destination))]
+    fn new(sources: Vec<CompactionSourceInput>, destination: u32) -> Self {
+        let sources = sources
+            .into_iter()
+            .map(|source| match source {
+                CompactionSourceInput::SortedRun(id) => SourceId::SortedRun(id),
+                CompactionSourceInput::Sst(ulid) => SourceId::Sst(ulid),
+            })
+            .collect();
+        Self {
+            inner: CompactionSpec::new(sources, destination),
+        }
+    }
+}
+
+#[pymethods]
+impl PyCompactionRequest {
+    #[staticmethod]
+    fn full() -> Self {
+        Self {
+            inner: CompactionRequest::Full,
+        }
+    }
+
+    #[staticmethod]
+    fn spec(spec: PyRef<'_, PyCompactionSpec>) -> Self {
+        Self {
+            inner: CompactionRequest::Spec(spec.inner.clone()),
+        }
     }
 }
 
@@ -2058,6 +2465,152 @@ impl PySlateDBAdmin {
                 .list_manifests(range)
                 .await
                 .map_err(|e| InvalidError::new_err(e.to_string()))
+        })
+    }
+
+    #[pyo3(signature = (id = None))]
+    fn read_compactions(&self, id: Option<u64>) -> PyResult<Option<String>> {
+        let admin = self.inner.clone();
+        let rt = get_runtime();
+        rt.block_on(async move {
+            admin
+                .read_compactions(id)
+                .await
+                .map_err(|e| InvalidError::new_err(e.to_string()))
+        })
+    }
+
+    #[pyo3(signature = (id = None))]
+    fn read_compactions_async<'py>(
+        &self,
+        py: Python<'py>,
+        id: Option<u64>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let admin = self.inner.clone();
+        future_into_py(py, async move {
+            admin
+                .read_compactions(id)
+                .await
+                .map_err(|e| InvalidError::new_err(e.to_string()))
+        })
+    }
+
+    #[pyo3(signature = (start = None, end = None))]
+    fn list_compactions(&self, start: Option<u64>, end: Option<u64>) -> PyResult<String> {
+        let admin = self.inner.clone();
+        let rt = get_runtime();
+        rt.block_on(async move {
+            let range = match (start, end) {
+                (Some(s), Some(e)) => s..e,
+                (Some(s), None) => s..u64::MAX,
+                (None, Some(e)) => u64::MIN..e,
+                (None, None) => u64::MIN..u64::MAX,
+            };
+            admin
+                .list_compactions(range)
+                .await
+                .map_err(|e| InvalidError::new_err(e.to_string()))
+        })
+    }
+
+    #[pyo3(signature = (start = None, end = None))]
+    fn list_compactions_async<'py>(
+        &self,
+        py: Python<'py>,
+        start: Option<u64>,
+        end: Option<u64>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let admin = self.inner.clone();
+        future_into_py(py, async move {
+            let range = match (start, end) {
+                (Some(s), Some(e)) => s..e,
+                (Some(s), None) => s..u64::MAX,
+                (None, Some(e)) => u64::MIN..e,
+                (None, None) => u64::MIN..u64::MAX,
+            };
+            admin
+                .list_compactions(range)
+                .await
+                .map_err(|e| InvalidError::new_err(e.to_string()))
+        })
+    }
+
+    #[pyo3(signature = (id, compactions_id = None))]
+    fn read_compaction(&self, id: String, compactions_id: Option<u64>) -> PyResult<Option<String>> {
+        let admin = self.inner.clone();
+        let compaction_id = Ulid::from_string(&id)
+            .map_err(|e| InvalidError::new_err(format!("invalid compaction ULID: {e}")))?;
+        let rt = get_runtime();
+        rt.block_on(async move {
+            let compaction = admin
+                .read_compaction(compaction_id, compactions_id)
+                .await
+                .map_err(|e| InvalidError::new_err(e.to_string()))?;
+            let compaction_json = match compaction {
+                Some(compaction) => Some(
+                    serde_json::to_string(&compaction)
+                        .map_err(|e| InvalidError::new_err(e.to_string()))?,
+                ),
+                None => None,
+            };
+            Ok(compaction_json)
+        })
+    }
+
+    #[pyo3(signature = (id, compactions_id = None))]
+    fn read_compaction_async<'py>(
+        &self,
+        py: Python<'py>,
+        id: String,
+        compactions_id: Option<u64>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let admin = self.inner.clone();
+        let compaction_id = Ulid::from_string(&id)
+            .map_err(|e| InvalidError::new_err(format!("invalid compaction ULID: {e}")))?;
+        future_into_py(py, async move {
+            let compaction = admin
+                .read_compaction(compaction_id, compactions_id)
+                .await
+                .map_err(|e| InvalidError::new_err(e.to_string()))?;
+            let compaction_json = match compaction {
+                Some(compaction) => Some(
+                    serde_json::to_string(&compaction)
+                        .map_err(|e| InvalidError::new_err(e.to_string()))?,
+                ),
+                None => None,
+            };
+            Ok(compaction_json)
+        })
+    }
+
+    #[pyo3(signature = (spec))]
+    fn submit_compaction(&self, spec: PyRef<'_, PyCompactionSpec>) -> PyResult<String> {
+        let admin = self.inner.clone();
+        let spec = spec.inner.clone();
+        let rt = get_runtime();
+        rt.block_on(async move {
+            let compaction = admin
+                .submit_compaction(spec)
+                .await
+                .map_err(|e| InvalidError::new_err(e.to_string()))?;
+            serde_json::to_string(&compaction).map_err(|e| InvalidError::new_err(e.to_string()))
+        })
+    }
+
+    #[pyo3(signature = (spec))]
+    fn submit_compaction_async<'py>(
+        &self,
+        py: Python<'py>,
+        spec: PyRef<'_, PyCompactionSpec>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let admin = self.inner.clone();
+        let spec = spec.inner.clone();
+        future_into_py(py, async move {
+            let compaction = admin
+                .submit_compaction(spec)
+                .await
+                .map_err(|e| InvalidError::new_err(e.to_string()))?;
+            serde_json::to_string(&compaction).map_err(|e| InvalidError::new_err(e.to_string()))
         })
     }
 
@@ -2343,7 +2896,7 @@ impl PySlateDBAdmin {
         })
     }
 
-    #[pyo3(signature = (*, manifest_interval = None, manifest_min_age = None, wal_interval = None, wal_min_age = None, compacted_interval = None, compacted_min_age = None))]
+    #[pyo3(signature = (*, manifest_interval = None, manifest_min_age = None, wal_interval = None, wal_min_age = None, compacted_interval = None, compacted_min_age = None, compactions_interval = None, compactions_min_age = None))]
     fn run_gc_once(
         &self,
         manifest_interval: Option<u64>,
@@ -2352,6 +2905,8 @@ impl PySlateDBAdmin {
         wal_min_age: Option<u64>,
         compacted_interval: Option<u64>,
         compacted_min_age: Option<u64>,
+        compactions_interval: Option<u64>,
+        compactions_min_age: Option<u64>,
     ) -> PyResult<()> {
         let admin = self.inner.clone();
         let rt = get_runtime();
@@ -2362,6 +2917,8 @@ impl PySlateDBAdmin {
             wal_min_age,
             compacted_interval,
             compacted_min_age,
+            compactions_interval,
+            compactions_min_age,
             false,
             true,
         )?;
@@ -2373,7 +2930,7 @@ impl PySlateDBAdmin {
         })
     }
 
-    #[pyo3(signature = (*, manifest_interval = None, manifest_min_age = None, wal_interval = None, wal_min_age = None, compacted_interval = None, compacted_min_age = None))]
+    #[pyo3(signature = (*, manifest_interval = None, manifest_min_age = None, wal_interval = None, wal_min_age = None, compacted_interval = None, compacted_min_age = None, compactions_interval = None, compactions_min_age = None))]
     fn run_gc_once_async<'py>(
         &self,
         py: Python<'py>,
@@ -2383,6 +2940,8 @@ impl PySlateDBAdmin {
         wal_min_age: Option<u64>,
         compacted_interval: Option<u64>,
         compacted_min_age: Option<u64>,
+        compactions_interval: Option<u64>,
+        compactions_min_age: Option<u64>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let admin = self.inner.clone();
         let opts = build_gc_options_from_kwargs(
@@ -2392,6 +2951,8 @@ impl PySlateDBAdmin {
             wal_min_age,
             compacted_interval,
             compacted_min_age,
+            compactions_interval,
+            compactions_min_age,
             false,
             true,
         )?;
@@ -2403,7 +2964,7 @@ impl PySlateDBAdmin {
         })
     }
 
-    #[pyo3(signature = (*, manifest_interval = None, manifest_min_age = None, wal_interval = None, wal_min_age = None, compacted_interval = None, compacted_min_age = None))]
+    #[pyo3(signature = (*, manifest_interval = None, manifest_min_age = None, wal_interval = None, wal_min_age = None, compacted_interval = None, compacted_min_age = None, compactions_interval = None, compactions_min_age = None))]
     fn run_gc(
         &self,
         manifest_interval: Option<u64>,
@@ -2412,6 +2973,8 @@ impl PySlateDBAdmin {
         wal_min_age: Option<u64>,
         compacted_interval: Option<u64>,
         compacted_min_age: Option<u64>,
+        compactions_interval: Option<u64>,
+        compactions_min_age: Option<u64>,
     ) -> PyResult<()> {
         let admin = self.inner.clone();
         let rt = get_runtime();
@@ -2422,13 +2985,15 @@ impl PySlateDBAdmin {
             wal_min_age,
             compacted_interval,
             compacted_min_age,
+            compactions_interval,
+            compactions_min_age,
             true,
             false,
         )?;
         rt.block_on(async move { admin.run_gc(opts).await.map_err(map_error) })
     }
 
-    #[pyo3(signature = (*, manifest_interval = None, manifest_min_age = None, wal_interval = None, wal_min_age = None, compacted_interval = None, compacted_min_age = None))]
+    #[pyo3(signature = (*, manifest_interval = None, manifest_min_age = None, wal_interval = None, wal_min_age = None, compacted_interval = None, compacted_min_age = None, compactions_interval = None, compactions_min_age = None))]
     fn run_gc_async<'py>(
         &self,
         py: Python<'py>,
@@ -2438,6 +3003,8 @@ impl PySlateDBAdmin {
         wal_min_age: Option<u64>,
         compacted_interval: Option<u64>,
         compacted_min_age: Option<u64>,
+        compactions_interval: Option<u64>,
+        compactions_min_age: Option<u64>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let admin = self.inner.clone();
         let opts = build_gc_options_from_kwargs(
@@ -2447,6 +3014,8 @@ impl PySlateDBAdmin {
             wal_min_age,
             compacted_interval,
             compacted_min_age,
+            compactions_interval,
+            compactions_min_age,
             true,
             false,
         )?;

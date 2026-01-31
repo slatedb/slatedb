@@ -1,10 +1,12 @@
-use crate::clock::LogicalClock;
 use crate::compactor::{CompactionScheduler, CompactionSchedulerSupplier};
-use crate::compactor_state::{CompactionSpec, CompactorState, SourceId};
+use crate::compactor_state::{CompactionSpec, SourceId};
+use crate::compactor_state_protocols::CompactorStateView;
 use crate::config::{CompactorOptions, PutOptions, WriteOptions};
+use crate::db_state::{SortedRun, SsTableHandle, SsTableId};
 use crate::error::SlateDBError;
+use crate::format::row::SstRowCodecV0;
 use crate::iter::{IterationOrder, KeyValueIterator};
-use crate::row_codec::SstRowCodecV0;
+use crate::tablestore::TableStore;
 use crate::types::{KeyValue, RowAttributes, RowEntry, ValueDeletable};
 use async_trait::async_trait;
 use bytes::{BufMut, Bytes, BytesMut};
@@ -16,15 +18,20 @@ use object_store::{
     PutPayload, PutResult,
 };
 use rand::{Rng, RngCore};
+use std::cmp::Ordering as CmpOrdering;
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
 use std::ops::Bound::{Excluded, Included, Unbounded};
 use std::ops::{Bound, RangeBounds};
 use std::sync::atomic::AtomicUsize;
-use std::sync::atomic::{AtomicI64, Ordering};
-use std::sync::{Arc, Once};
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::sync::Once;
+use std::thread;
+use std::time::Duration;
 use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_subscriber::EnvFilter;
+use ulid::Ulid;
 
 /// Asserts that the iterator returns the exact set of expected values in correct order.
 pub(crate) async fn assert_iterator<T: KeyValueIterator>(iterator: &mut T, entries: Vec<RowEntry>) {
@@ -58,7 +65,7 @@ pub(crate) async fn assert_next_entry<T: KeyValueIterator>(
     assert_eq!(actual_entry, expected_entry.clone())
 }
 
-pub fn assert_kv(kv: &KeyValue, key: &[u8], val: &[u8]) {
+pub(crate) fn assert_kv(kv: &KeyValue, key: &[u8], val: &[u8]) {
     assert_eq!(kv.key, key);
     assert_eq!(kv.value, val);
 }
@@ -126,29 +133,6 @@ impl KeyValueIterator for TestIterator {
     }
 }
 
-#[derive(Debug)]
-pub(crate) struct TestClock {
-    pub(crate) ticker: AtomicI64,
-}
-
-impl TestClock {
-    pub(crate) fn new() -> TestClock {
-        TestClock {
-            ticker: AtomicI64::new(0),
-        }
-    }
-
-    pub(crate) fn set(&self, tick: i64) {
-        self.ticker.store(tick, Ordering::SeqCst);
-    }
-}
-
-impl LogicalClock for TestClock {
-    fn now(&self) -> i64 {
-        self.ticker.load(Ordering::SeqCst)
-    }
-}
-
 pub(crate) fn gen_rand_bytes(n: usize) -> Bytes {
     let mut rng = rand::rng();
     let random_bytes: Vec<u8> = (0..n).map(|_| rng.random::<u8>()).collect();
@@ -170,7 +154,8 @@ use crate::bytes_generator::OrderedBytesGenerator;
 use crate::bytes_range::BytesRange;
 use crate::db::Db;
 use crate::db_iter::DbIterator;
-use crate::sst::{EncodedSsTable, SsTableFormat};
+use crate::format::sst::{EncodedSsTable, SsTableFormat};
+use crate::{MergeOperator, MergeOperatorError};
 pub(crate) use assert_debug_snapshot;
 
 pub(crate) fn decode_codec_entries(
@@ -281,7 +266,7 @@ pub(crate) async fn seed_database(
     Ok(())
 }
 
-pub(crate) fn build_test_sst(format: &SsTableFormat, num_blocks: usize) -> EncodedSsTable {
+pub(crate) async fn build_test_sst(format: &SsTableFormat, num_blocks: usize) -> EncodedSsTable {
     let mut rng = rand::rng();
     let mut keygen = OrderedBytesGenerator::new_with_suffix(&[], &[0u8; 16]);
     let mut encoded_sst_builder = format.table_builder();
@@ -291,31 +276,102 @@ pub(crate) fn build_test_sst(format: &SsTableFormat, num_blocks: usize) -> Encod
         val.put_bytes(0u8, 32);
         rng.fill_bytes(&mut val);
         let row = RowEntry::new(k, ValueDeletable::Value(val.freeze()), 0u64, None, None);
-        encoded_sst_builder.add(row).unwrap();
+        encoded_sst_builder.add(row).await.unwrap();
     }
-    encoded_sst_builder.build().unwrap()
+    encoded_sst_builder.build().await.unwrap()
+}
+
+/// Builds RowEntry values from (key, seq, value) tuples and sorts by key asc/seq desc.
+pub(crate) fn build_row_entries(specs: Vec<(Bytes, u64, ValueDeletable)>) -> Vec<RowEntry> {
+    let mut entries = specs
+        .into_iter()
+        .map(|(key, seq, value)| RowEntry::new(key, value, seq, None, None))
+        .collect::<Vec<_>>();
+    entries.sort_by(|left, right| match left.key.cmp(&right.key) {
+        CmpOrdering::Equal => right.seq.cmp(&left.seq),
+        other => other,
+    });
+    entries
+}
+
+/// Writes entries into SSTs, splitting when the accumulated block size exceeds `max_sst_size`.
+pub(crate) async fn write_ssts(
+    table_store: &Arc<TableStore>,
+    entries: &[RowEntry],
+    max_sst_size: usize,
+) -> Vec<SsTableHandle> {
+    if entries.is_empty() {
+        return Vec::new();
+    }
+
+    let mut output_ssts = Vec::new();
+    let mut writer = table_store.table_writer(SsTableId::Compacted(Ulid::new()));
+    let mut bytes_written = 0usize;
+
+    for (index, entry) in entries.iter().cloned().enumerate() {
+        if let Some(block_size) = writer.add(entry).await.unwrap() {
+            bytes_written += block_size;
+        }
+
+        if bytes_written > max_sst_size {
+            output_ssts.push(writer.close().await.unwrap());
+            bytes_written = 0;
+
+            if index + 1 < entries.len() {
+                writer = table_store.table_writer(SsTableId::Compacted(Ulid::new()));
+            } else {
+                return output_ssts;
+            }
+        }
+    }
+
+    output_ssts.push(writer.close().await.unwrap());
+    output_ssts
+}
+
+/// Builds SortedRun inputs from nested entry sets, writing each set as one or more SSTs.
+pub(crate) async fn build_sorted_runs(
+    table_store: &Arc<TableStore>,
+    sr_entry_sets: &[Vec<Vec<RowEntry>>],
+    max_sst_size: usize,
+) -> Vec<SortedRun> {
+    let mut sorted_runs = Vec::new();
+
+    for (sr_id, sr_sst_sets) in sr_entry_sets.iter().enumerate() {
+        let mut sr_ssts = Vec::new();
+        for entries in sr_sst_sets {
+            let ssts = write_ssts(table_store, entries, max_sst_size).await;
+            sr_ssts.extend(ssts);
+        }
+        sorted_runs.push(SortedRun {
+            id: sr_id as u32,
+            ssts: sr_ssts,
+        });
+    }
+
+    sorted_runs
 }
 
 /// A compactor that compacts if there are L0s and `should_compact` returns true.
 /// All SSTs from L0 and all sorted runs are always compacted into sorted run 0.
 #[derive(Clone)]
 pub(crate) struct OnDemandCompactionScheduler {
-    pub(crate) should_compact: Arc<dyn Fn(&CompactorState) -> bool + Send + Sync>,
+    pub(crate) should_compact: Arc<dyn Fn(&CompactorStateView) -> bool + Send + Sync>,
 }
 
 impl OnDemandCompactionScheduler {
-    fn new(should_compact: Arc<dyn Fn(&CompactorState) -> bool + Send + Sync>) -> Self {
+    fn new(should_compact: Arc<dyn Fn(&CompactorStateView) -> bool + Send + Sync>) -> Self {
         Self { should_compact }
     }
 }
 
 impl CompactionScheduler for OnDemandCompactionScheduler {
-    fn maybe_schedule_compaction(&self, state: &CompactorState) -> Vec<CompactionSpec> {
+    fn propose(&self, state: &CompactorStateView) -> Vec<CompactionSpec> {
         if !(self.should_compact)(state) {
             return vec![];
         }
 
-        let db_state = state.db_state();
+        let db_state = state.manifest();
 
         // always compact into sorted run 0
         let next_sr_id = 0;
@@ -341,7 +397,9 @@ pub(crate) struct OnDemandCompactionSchedulerSupplier {
 }
 
 impl OnDemandCompactionSchedulerSupplier {
-    pub(crate) fn new(should_compact: Arc<dyn Fn(&CompactorState) -> bool + Send + Sync>) -> Self {
+    pub(crate) fn new(
+        should_compact: Arc<dyn Fn(&CompactorStateView) -> bool + Send + Sync>,
+    ) -> Self {
         Self {
             scheduler: OnDemandCompactionScheduler::new(should_compact),
         }
@@ -357,23 +415,6 @@ impl CompactionSchedulerSupplier for OnDemandCompactionSchedulerSupplier {
     }
 }
 
-// A flag so we only initialize logging once.
-static INIT_LOGGING: Once = Once::new();
-
-/// Initialize logging for tests so we get log output. Uses `RUST_LOG` environment
-/// variable to set the log level, or defaults to `debug` if not set.
-#[ctor::ctor]
-fn init_tracing() {
-    INIT_LOGGING.call_once(|| {
-        let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("debug"));
-        tracing_subscriber::fmt()
-            .with_env_filter(filter)
-            .with_span_events(FmtSpan::NEW | FmtSpan::CLOSE)
-            .with_test_writer()
-            .init();
-    });
-}
-
 /// An ObjectStore wrapper that injects a transient timeout on the first N `put_opts` calls
 /// to exercise retry logic. All operations delegate to the inner store otherwise.
 #[derive(Debug)]
@@ -384,6 +425,9 @@ pub(crate) struct FlakyObjectStore {
     put_opts_attempts: AtomicUsize,
     // Put options: if set, always return Precondition error (non-retryable)
     put_precondition_always: std::sync::atomic::AtomicBool,
+    // Put options: if set, write succeeds but returns AlreadyExists error
+    // This simulates a timeout that occurs after the write completes but before the response
+    put_succeeds_but_returns_already_exists: std::sync::atomic::AtomicBool,
     // Head: transient failures on first N attempts
     fail_first_head: AtomicUsize,
     head_attempts: AtomicUsize,
@@ -408,6 +452,7 @@ impl FlakyObjectStore {
             fail_first_put_opts: AtomicUsize::new(fail_first_put_opts),
             put_opts_attempts: AtomicUsize::new(0),
             put_precondition_always: std::sync::atomic::AtomicBool::new(false),
+            put_succeeds_but_returns_already_exists: std::sync::atomic::AtomicBool::new(false),
             fail_first_head: AtomicUsize::new(0),
             head_attempts: AtomicUsize::new(0),
             fail_first_list: AtomicUsize::new(0),
@@ -421,6 +466,14 @@ impl FlakyObjectStore {
 
     pub(crate) fn with_put_precondition_always(self) -> Self {
         self.put_precondition_always.store(true, Ordering::SeqCst);
+        self
+    }
+
+    /// Configure the store to write data successfully but return an AlreadyExists error.
+    /// This simulates a timeout that occurs after the write completes but before the response.
+    pub(crate) fn with_put_succeeds_but_returns_already_exists(self) -> Self {
+        self.put_succeeds_but_returns_already_exists
+            .store(true, Ordering::SeqCst);
         self
     }
 
@@ -541,6 +594,21 @@ impl ObjectStore for FlakyObjectStore {
                 source: Box::new(std::io::Error::other("injected precondition")),
             });
         }
+        // Simulate: write succeeds but returns AlreadyExists error (timeout after write)
+        if self
+            .put_succeeds_but_returns_already_exists
+            .load(Ordering::SeqCst)
+        {
+            // Actually write the data
+            let _ = self.inner.put_opts(location, payload, opts).await?;
+            // But return an error as if we didn't get the response
+            return Err(object_store::Error::AlreadyExists {
+                path: location.to_string(),
+                source: Box::new(std::io::Error::other(
+                    "injected already exists after successful write",
+                )),
+            });
+        }
         if self
             .fail_first_put_opts
             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| {
@@ -654,5 +722,238 @@ impl ObjectStore for FlakyObjectStore {
 
     async fn rename_if_not_exists(&self, from: &Path, to: &Path) -> object_store::Result<()> {
         self.inner.rename_if_not_exists(from, to).await
+    }
+}
+
+pub(crate) struct StringConcatMergeOperator;
+
+impl MergeOperator for StringConcatMergeOperator {
+    fn merge(
+        &self,
+        _key: &Bytes,
+        existing_value: Option<Bytes>,
+        value: Bytes,
+    ) -> Result<Bytes, MergeOperatorError> {
+        let mut result = BytesMut::new();
+        existing_value.inspect(|v| result.extend_from_slice(v.as_ref()));
+        result.extend_from_slice(value.as_ref());
+        Ok(result.freeze())
+    }
+}
+
+/// Extract library name from a file path
+/// e.g., "/Users/.../slatedb/src/db.rs" -> "slatedb"
+/// e.g., "/.cargo/registry/.../parking_lot-0.12.1/src/mutex.rs" -> "parking_lot"
+/// e.g., "/rustc/.../library/std/src/sync/mutex.rs" -> "std"
+fn extract_library(path: &str) -> String {
+    // Check for .cargo/registry paths (external crates)
+    if let Some(idx) = path.find(".cargo/registry/") {
+        let after_registry = &path[idx..];
+        // Format: .cargo/registry/src/<hash>/<crate-name>-<version>/...
+        // Split: [".cargo", "registry", "src", "<hash>", "<crate-name-version>", ...]
+        if let Some(crate_start) = after_registry.split('/').nth(4) {
+            // Remove version suffix (e.g., "parking_lot-0.12.1" -> "parking_lot")
+            if let Some(dash_idx) = crate_start.rfind('-') {
+                // Check if what follows the dash looks like a version
+                let after_dash = &crate_start[dash_idx + 1..];
+                if after_dash
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c.is_ascii_digit())
+                {
+                    return crate_start[..dash_idx].to_string();
+                }
+            }
+            return crate_start.to_string();
+        }
+    }
+
+    // Check for rustc paths (std library)
+    if path.contains("/rustc/") {
+        if let Some(idx) = path.find("/library/") {
+            let after_library = &path[idx + 9..];
+            if let Some(lib_name) = after_library.split('/').next() {
+                return lib_name.to_string();
+            }
+        }
+    }
+
+    // Check for local workspace crates (look for /src/ and take the directory before it)
+    if let Some(src_idx) = path.rfind("/src/") {
+        let before_src = &path[..src_idx];
+        if let Some(last_slash) = before_src.rfind('/') {
+            return before_src[last_slash + 1..].to_string();
+        }
+    }
+
+    "-".to_string()
+}
+
+/// Format a backtrace as a table, showing all frames
+pub(crate) fn format_backtrace(bt: &backtrace::Backtrace) -> String {
+    // Collect frame info: (library, filename, line, function_name)
+    let mut frames: Vec<(String, String, String, String)> = Vec::new();
+
+    for frame in bt.frames() {
+        for symbol in frame.symbols() {
+            let name = symbol
+                .name()
+                .map(|n| n.to_string())
+                .unwrap_or_else(|| "<unknown>".to_string());
+
+            let (library, filename, line) =
+                if let (Some(f), Some(l)) = (symbol.filename(), symbol.lineno()) {
+                    let path_str = f.to_string_lossy();
+                    let lib = extract_library(&path_str);
+                    let file = f
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_else(|| "-".to_string());
+                    (lib, file, l.to_string())
+                } else {
+                    ("-".to_string(), "-".to_string(), "-".to_string())
+                };
+
+            frames.push((library, filename, line, name));
+        }
+    }
+
+    if frames.is_empty() {
+        return "  (no relevant frames found - try RUST_BACKTRACE=1)\n".to_string();
+    }
+
+    // Calculate column widths
+    let lib_width = frames
+        .iter()
+        .map(|(l, _, _, _)| l.len())
+        .max()
+        .unwrap_or(0)
+        .max(7); // min width for "Library"
+    let file_width = frames
+        .iter()
+        .map(|(_, f, _, _)| f.len())
+        .max()
+        .unwrap_or(0)
+        .max(4); // min width for "File"
+    let line_width = frames
+        .iter()
+        .map(|(_, _, l, _)| l.len())
+        .max()
+        .unwrap_or(0)
+        .max(4); // min width for "Line"
+    let func_width = frames.iter().map(|(_, _, _, f)| f.len()).max().unwrap_or(0);
+
+    let mut output = String::new();
+
+    // Header: Library | File | Line | Function
+    output.push_str(&format!(
+        "  {:<lib_width$} | {:<file_width$} | {:>line_width$} | {:<func_width$}\n",
+        "Library", "File", "Line", "Function"
+    ));
+    output.push_str(&format!(
+        "  {:-<lib_width$}-+-{:-<file_width$}-+-{:->line_width$}-+-{:-<func_width$}\n",
+        "", "", "", ""
+    ));
+
+    // Rows
+    for (library, filename, line, func) in &frames {
+        output.push_str(&format!(
+            "  {:<lib_width$} | {:<file_width$} | {:>line_width$} | {:<func_width$}\n",
+            library, filename, line, func
+        ));
+    }
+
+    output
+}
+
+static INIT_LOGGING: Once = Once::new();
+static INIT_DEADLOCK_DETECTOR: Once = Once::new();
+
+/// Initialize tracing/logging for tests. Uses `RUST_LOG` environment
+/// variable to set the log level, or defaults to `debug` if not set.
+pub(crate) fn init_logging() {
+    INIT_LOGGING.call_once(|| {
+        let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("debug"));
+        tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_span_events(FmtSpan::NEW | FmtSpan::CLOSE)
+            .with_test_writer()
+            .init();
+    });
+}
+
+/// Start the deadlock detector thread that periodically checks for parking_lot deadlocks.
+pub(crate) fn init_deadlock_detector() {
+    INIT_DEADLOCK_DETECTOR.call_once(|| {
+        thread::spawn(|| loop {
+            thread::sleep(Duration::from_secs(10));
+            let deadlocks = parking_lot::deadlock::check_deadlock();
+            if deadlocks.is_empty() {
+                continue;
+            }
+
+            let separator = "=".repeat(60);
+            eprintln!("\n{separator}");
+            eprintln!("DEADLOCK DETECTED: {} deadlock(s) found", deadlocks.len());
+            eprintln!("{separator}\n");
+
+            for (i, threads) in deadlocks.iter().enumerate() {
+                eprintln!("--- Deadlock #{} ({} threads) ---\n", i + 1, threads.len());
+                for (j, t) in threads.iter().enumerate() {
+                    eprintln!("Thread {} (id: {:?}):", j + 1, t.thread_id());
+                    eprintln!("{}", format_backtrace(t.backtrace()));
+                }
+            }
+
+            eprintln!("{separator}\n");
+        });
+    });
+}
+
+/// Initialize all test infrastructure (logging and deadlock detection).
+pub(crate) fn init_test_infrastructure() {
+    init_logging();
+    init_deadlock_detector();
+}
+
+#[cfg(test)]
+mod tests {
+    use parking_lot::Mutex;
+    use std::sync::Arc;
+    use std::thread;
+    use std::time::Duration;
+
+    /// Test to verify the deadlock detector is working.
+    /// This test intentionally creates a deadlock and is ignored by default.
+    /// Run with: cargo test --package slatedb test_deadlock_detector -- --ignored --nocapture
+    /// The deadlock detector should print deadlock info after ~10 seconds.
+    #[test]
+    #[ignore]
+    fn test_deadlock_detector_should_detect_deadlock() {
+        let lock_a = Arc::new(Mutex::new(()));
+        let lock_b = Arc::new(Mutex::new(()));
+
+        let lock_a_clone = lock_a.clone();
+        let lock_b_clone = lock_b.clone();
+
+        // Thread 1: acquire lock_a, then try to acquire lock_b
+        let thread1 = thread::spawn(move || {
+            let _guard_a = lock_a_clone.lock();
+            thread::sleep(Duration::from_millis(100)); // Give thread2 time to acquire lock_b
+            let _guard_b = lock_b_clone.lock(); // This will deadlock
+        });
+
+        // Thread 2: acquire lock_b, then try to acquire lock_a
+        let thread2 = thread::spawn(move || {
+            let _guard_b = lock_b.lock();
+            thread::sleep(Duration::from_millis(100)); // Give thread1 time to acquire lock_a
+            let _guard_a = lock_a.lock(); // This will deadlock
+        });
+
+        // Wait for the deadlock detector to report (it checks every 10 seconds)
+        // This test will hang indefinitely due to the deadlock - that's expected.
+        // The deadlock detector should print the deadlock info to the logs.
+        thread1.join().unwrap();
+        thread2.join().unwrap();
     }
 }

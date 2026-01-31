@@ -11,6 +11,9 @@ const websiteRoot = path.resolve(__dirname, '..');
 const wrappersDir = path.join(websiteRoot, 'src/content/docs/rfcs');
 const repoRfcsDir = path.resolve(websiteRoot, '..', 'rfcs');
 
+// Files in `rfcs/` that are useful in-repo but should not render on the website.
+const excludedRfcFiles = new Set(['0000-template.md']);
+
 function yamlEscape(str) {
   return JSON.stringify(str);
 }
@@ -37,6 +40,45 @@ function stripToc(content) {
   return withoutToc.replace(/\n{3,}/g, '\n\n');
 }
 
+function rewriteRfcLinks(content, rfcFileNames) {
+  const rfcSet = rfcFileNames ? new Set(rfcFileNames) : null;
+
+  function rewriteUrl(url) {
+    const hasAngle = url.startsWith('<') && url.endsWith('>');
+    const raw = hasAngle ? url.slice(1, -1) : url;
+
+    if (/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(raw)) return null;
+    if (raw.startsWith('#') || raw.startsWith('/')) return null;
+
+    const [pathAndQuery, hash] = raw.split('#', 2);
+    const [pathname, query] = pathAndQuery.split('?', 2);
+    if (!pathname.endsWith('.md')) return null;
+
+    const filename = path.basename(pathname);
+    if (rfcSet && !rfcSet.has(filename)) return null;
+
+    const slug = filename.replace(/\.md$/, '');
+    const next = `/rfcs/${slug}${query ? `?${query}` : ''}${hash ? `#${hash}` : ''}`;
+    return hasAngle ? `<${next}>` : next;
+  }
+
+  const inlineLinks = content.replace(
+    /(?<!!)\[([^\]]+)\]\(([^)\s]+)([^)]*)\)/g,
+    (match, text, url, rest) => {
+      const next = rewriteUrl(url);
+      return next ? `[${text}](${next}${rest})` : match;
+    }
+  );
+
+  return inlineLinks.replace(
+    /^\s*\[([^\]]+)\]:\s*(\S+)(\s+.*)?$/gm,
+    (match, label, url, rest = '') => {
+      const next = rewriteUrl(url);
+      return next ? `[${label}]: ${next}${rest}` : match;
+    }
+  );
+}
+
 // Escape HTML character entities and raw HTML so Markdown renders them as text.
 function escapeHtmlEntities(str) {
   return str
@@ -59,6 +101,7 @@ export async function generateRfcWrappers() {
     const rfcFiles = entries
       .filter((e) => e.isFile() && e.name.endsWith('.md'))
       .map((e) => e.name)
+      .filter((name) => !excludedRfcFiles.has(name))
       .sort();
 
     // Remove wrappers that no longer have a source.
@@ -95,7 +138,8 @@ export async function generateRfcWrappers() {
       // Trim the first H1, strip any generated TOC, escape HTML entities, then write content as MDX.
       const contentWithoutH1 = raw.replace(/^\s*#\s+.+?(\r?\n)+/, '');
       const withoutToc = stripToc(contentWithoutH1);
-      const safeContent = escapeHtmlEntities(withoutToc);
+      const withRfcLinks = rewriteRfcLinks(withoutToc, rfcFiles);
+      const safeContent = escapeHtmlEntities(withRfcLinks);
 
       const body = `${frontmatter}\n${safeContent}\n`;
 
@@ -111,7 +155,8 @@ export async function generateRfcWrappers() {
 }
 
 // Allow running directly: `node ./scripts/generate-rfcs.js`
-if (import.meta.url === pathToFileUrl(process.argv[1]).href) {
+const argv1 = process.argv[1];
+if (argv1 && import.meta.url === pathToFileUrl(argv1).href) {
   generateRfcWrappers();
 }
 

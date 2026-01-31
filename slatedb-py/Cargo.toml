@@ -21,10 +21,15 @@ bench = false
 # enabled on non-macOS and non-iOS targets.
 pyo3 = { workspace = true }
 pyo3-async-runtimes = { workspace = true, features = ["tokio-runtime"] }
-slatedb = { workspace = true }
+slatedb = { workspace = true, features = ["all"] }
 once_cell = { workspace = true }
 tokio = { workspace = true, features = ["fs", "macros", "sync", "rt", "rt-multi-thread", "signal"] }
 uuid = { workspace = true, features = ["v4", "serde"] }
 bytes = { workspace = true }
 log = { workspace = true }
 chrono = { workspace = true }
+serde_json = { workspace = true }
+ulid = { workspace = true }
+
+[lints]
+workspace = true

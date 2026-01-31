@@ -35,8 +35,9 @@ var _ = Describe("Configuration", func() {
 					MaxConcurrentCompactions: 2,
 				},
 				ObjectStoreCacheOptions: &slatedb.ObjectStoreCacheOptions{
-					MaxCacheSizeBytes: 134217728,
-					RootFolder:        "/tmp/base",
+					MaxCacheSizeBytes:         134217728,
+					RootFolder:                "/tmp/base",
+					PreloadDiskCacheOnStartup: slatedb.AllSst,
 				},
 			}
 		})

@@ -7,7 +7,6 @@ use crate::types::{KeyValue, ValueDeletable};
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum IterationOrder {
     Ascending,
-    #[allow(dead_code)]
     Descending,
 }
 
@@ -17,7 +16,7 @@ pub(crate) enum IterationOrder {
 /// See: https://github.com/slatedb/slatedb/issues/12
 
 #[async_trait]
-pub trait KeyValueIterator: Send + Sync {
+pub(crate) trait KeyValueIterator: Send + Sync {
     /// Performs any expensive initialization required before regular iteration.
     ///
     /// This method should be idempotent and can be called multiple times, only
@@ -75,8 +74,19 @@ pub trait KeyValueIterator: Send + Sync {
     async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError>;
 }
 
+/// Iterator trait that tracks bytes processed for progress reporting.
+///
+/// This extends `KeyValueIterator` with progress tracking capability.
+/// Only iterators used in the compaction pipeline implement this trait.
+/// The bottom-most iterator (MergeIterator) tracks actual bytes, while
+/// wrapper iterators delegate to their inner iterator.
+pub(crate) trait TrackedKeyValueIterator: KeyValueIterator {
+    /// Returns the total bytes processed (key + value length) by this iterator.
+    fn bytes_processed(&self) -> u64;
+}
+
 /// Initializes the iterator contained in the option, propagating `None` unchanged.
-pub async fn init_optional_iterator<T: KeyValueIterator>(
+pub(crate) async fn init_optional_iterator<T: KeyValueIterator>(
     iter: Option<T>,
 ) -> Result<Option<T>, SlateDBError> {
     match iter {
@@ -104,6 +114,31 @@ impl<'a> KeyValueIterator for Box<dyn KeyValueIterator + 'a> {
 
     async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
         self.as_mut().seek(next_key).await
+    }
+}
+
+#[async_trait]
+impl<'a> KeyValueIterator for Box<dyn TrackedKeyValueIterator + 'a> {
+    async fn init(&mut self) -> Result<(), SlateDBError> {
+        self.as_mut().init().await
+    }
+
+    async fn next(&mut self) -> Result<Option<KeyValue>, SlateDBError> {
+        self.as_mut().next().await
+    }
+
+    async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
+        self.as_mut().next_entry().await
+    }
+
+    async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
+        self.as_mut().seek(next_key).await
+    }
+}
+
+impl<'a> TrackedKeyValueIterator for Box<dyn TrackedKeyValueIterator + 'a> {
+    fn bytes_processed(&self) -> u64 {
+        self.as_ref().bytes_processed()
     }
 }
 

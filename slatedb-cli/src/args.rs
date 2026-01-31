@@ -1,5 +1,6 @@
 use clap::{ArgGroup, Parser, Subcommand, ValueEnum};
-use slatedb::FindOption;
+use slatedb::compactor::CompactionRequest;
+use slatedb::seq_tracker::FindOption;
 use std::collections::HashMap;
 use std::time::Duration;
 use uuid::Uuid;
@@ -46,6 +47,37 @@ pub(crate) enum CliCommands {
         /// Optionally specify an end id for the range of manifests to lookup
         #[arg(short, long)]
         end: Option<u64>,
+    },
+
+    /// Reads the latest compactions file and outputs a readable
+    /// String representation
+    ReadCompactions {
+        /// Specify a specific compactions id to read, if this is
+        /// not specified the latest compactions will be returned
+        #[arg(short, long)]
+        id: Option<u64>,
+    },
+
+    /// Lists all available compactions files
+    ListCompactions {
+        /// Optionally specify a start id for the range of compactions to lookup
+        #[arg(short, long)]
+        start: Option<u64>,
+
+        /// Optionally specify an end id for the range of compactions to lookup
+        #[arg(short, long)]
+        end: Option<u64>,
+    },
+
+    /// Reads a specific compaction by ULID from a compactions file
+    ReadCompaction {
+        /// The ULID of the compaction to read
+        #[arg(short, long)]
+        id: String,
+
+        /// Optional compactions file id to read from. If not set, uses the latest file.
+        #[arg(long)]
+        compactions_id: Option<u64>,
     },
 
     /// Create a new checkpoint pointing to the database's current state.
@@ -110,7 +142,7 @@ pub(crate) enum CliCommands {
 
     /// Runs a garbage collection for a specific resource type once
     RunGarbageCollection {
-        /// the type of resource to clean up (manifest, wal, compacted)
+        /// the type of resource to clean up (manifest, wal, compacted, compactions)
         #[arg(short, long)]
         resource: GcResource,
 
@@ -119,6 +151,9 @@ pub(crate) enum CliCommands {
         #[clap(value_parser = humantime::parse_duration)]
         min_age: Duration,
     },
+
+    /// Runs the compactor until interrupted (Ctrl-C).
+    RunCompactor,
 
     /// Converts a sequence number to its corresponding timestamp using the latest manifest's sequence tracker.
     SeqToTs {
@@ -134,12 +169,36 @@ pub(crate) enum CliCommands {
         round: FindOption,
     },
 
+    /// Submit a compaction request.
+    #[command(group(
+        ArgGroup::new("compaction_request")
+            .args(["full", "spec"])
+            .required(true)
+    ))]
+    SubmitCompaction {
+        /// Compaction scheduler name (only "size-tiered" is supported).
+        #[arg(long, default_value = "size-tiered")]
+        scheduler: String,
+
+        /// Submit a full JSON-encoded compaction request.
+        ///
+        /// ## Examples
+        /// ```json
+        /// "Full"
+        /// ```
+        /// ```json
+        /// {"Spec":{"sources":[{"SortedRun":3},{"Sst":"01H8FQ5K6K7QK6EJ0E9HNF1J2B"}],"destination":7}}
+        /// ```
+        #[arg(long, value_parser = parse_compaction_request)]
+        request: CompactionRequest,
+    },
+
     /// Schedules a period garbage collection job
     #[command(group(
-    ArgGroup::new("gc_config")
-        .args(["manifest", "wal", "compacted"])
-        .multiple(true)
-        .required(true)
+        ArgGroup::new("gc_config")
+            .args(["manifest", "wal", "compacted", "compactions"])
+            .multiple(true)
+            .required(true)
     ))]
     ScheduleGarbageCollection {
         /// Configuration for manifest garbage collection should be set in the
@@ -162,6 +221,13 @@ pub(crate) enum CliCommands {
         /// the period is how often to attempt a GC
         #[arg(long, value_parser = parse_gc_schedule)]
         compacted: Option<GcSchedule>,
+
+        /// Configuration for compactions file garbage collection should be set in the
+        /// format min_age=<duration>,period=<duration> -- the min_age is the
+        /// minimum file age that should be considered for collection and
+        /// the period is how often to attempt a GC
+        #[arg(long, value_parser = parse_gc_schedule)]
+        compactions: Option<GcSchedule>,
     },
 }
 
@@ -170,6 +236,7 @@ pub(crate) enum GcResource {
     Manifest,
     Wal,
     Compacted,
+    Compactions,
 }
 
 fn parse_gc_schedule(s: &str) -> Result<GcSchedule, String> {
@@ -189,10 +256,7 @@ fn parse_gc_schedule(s: &str) -> Result<GcSchedule, String> {
         .ok_or_else(|| "Missing or invalid 'min_age'".to_string())
         .and_then(|v| {
             humantime::parse_duration(v).map_err(|e| {
-                "Could not parse min_age as duration: "
-                    .to_string()
-                    .to_owned()
-                    + e.to_string().as_str()
+                "Could not parse min_age as duration: ".to_string() + e.to_string().as_str()
             })
         })?;
     let period = parts
@@ -214,6 +278,10 @@ pub(crate) struct GcSchedule {
 
 pub(crate) fn parse_args() -> CliArgs {
     CliArgs::parse()
+}
+
+fn parse_compaction_request(s: &str) -> Result<CompactionRequest, String> {
+    serde_json::from_str(s).map_err(|e| format!("Invalid compaction request JSON: {e}"))
 }
 
 fn parse_find_option(s: &str) -> Result<FindOption, String> {

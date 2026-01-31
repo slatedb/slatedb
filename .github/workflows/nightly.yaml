@@ -3,8 +3,8 @@ name: Nightly Benchmarks
 on:
   schedule:
     # Run at midnight Pacific (8 AM UTC)
-    - cron: '0 8 * * *'
-  workflow_dispatch:  # Allow manual trigger
+    - cron: "0 8 * * *"
+  workflow_dispatch: # Allow manual trigger
 
 permissions:
   # Required for storing benchmark results
@@ -34,7 +34,7 @@ jobs:
         uses: benchmark-action/github-action-benchmark@v1
         with:
           name: cargo bench
-          tool: 'cargo'
+          tool: "cargo"
           output-file-path: output.txt
           github-token: ${{ secrets.GITHUB_TOKEN }}
           external-data-json-path: ./microbenchmarks-cache/benchmark-data.json
@@ -134,6 +134,65 @@ jobs:
           echo "Mermaid diagrams added to GitHub Actions summary!"
           echo "Total diagrams: $(ls -1 target/bencher/results/mermaid/*.mermaid 2>/dev/null | wc -l)"
 
+  transaction-benchmarks:
+    runs-on: warp-ubuntu-latest-x64-16x
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y traceroute
+          sudo snap install aws-cli --classic
+
+      - name: Download previous transaction mermaid plots
+        uses: actions/cache/restore@v4
+        with:
+          path: ./target/bencher/transaction-results/mermaid
+          key: ${{ runner.os }}-txn-mermaid-plots-${{ github.run_id }}
+          restore-keys: |
+            ${{ runner.os }}-txn-mermaid-plots-
+
+      - name: Run transaction benchmark
+        env:
+          CLOUD_PROVIDER: aws
+          AWS_ACCESS_KEY_ID: ${{ secrets.TIGRIS_AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.TIGRIS_AWS_SECRET_ACCESS_KEY }}
+          AWS_BUCKET: ${{ secrets.TIGRIS_AWS_BUCKET_BENCHER }}
+          AWS_REGION: auto
+          AWS_ENDPOINT: https://t3.storage.dev
+          SLATEDB_BENCH_CLEAN: true
+          RUST_LOG: info
+        run: |
+          aws s3 rm --endpoint-url $AWS_ENDPOINT s3://${{ secrets.TIGRIS_AWS_BUCKET_BENCHER }} --recursive
+          ./slatedb-bencher/benchmark-transaction.sh
+
+      - name: Save transaction mermaid plots cache
+        uses: actions/cache/save@v4
+        with:
+          path: ./target/bencher/transaction-results/mermaid
+          key: ${{ runner.os }}-txn-mermaid-plots-${{ github.run_id }}
+
+      - name: Add transaction mermaid diagrams to summary
+        run: |
+          echo "# SlateDB Transaction Benchmark Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          # Add each mermaid diagram to the summary
+          for mermaid_file in target/bencher/transaction-results/mermaid/*.mermaid; do
+            if [ -f "$mermaid_file" ]; then
+              echo "" >> $GITHUB_STEP_SUMMARY
+              echo '```mermaid' >> $GITHUB_STEP_SUMMARY
+              cat "$mermaid_file" >> $GITHUB_STEP_SUMMARY
+              echo '```' >> $GITHUB_STEP_SUMMARY
+              echo "" >> $GITHUB_STEP_SUMMARY
+            fi
+          done
+
+          echo "Transaction mermaid diagrams added to GitHub Actions summary!"
+          echo "Total diagrams: $(ls -1 target/bencher/transaction-results/mermaid/*.mermaid 2>/dev/null | wc -l)"
+
   microbenchmark-pprofs:
     runs-on: ubuntu-latest
     steps:
@@ -208,6 +267,7 @@ jobs:
         env:
           RUSTFLAGS: "--cfg dst --cfg tokio_unstable --cfg slow"
           RUST_LOG: "info"
+          RUST_BACKTRACE: "1"
           SLATEDB_DST_ROOT: "./"
 
   detect-flaky-tests:

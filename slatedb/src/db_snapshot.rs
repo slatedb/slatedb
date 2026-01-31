@@ -62,7 +62,7 @@ impl DbSnapshot {
         key: K,
         options: &ReadOptions,
     ) -> Result<Option<Bytes>, crate::Error> {
-        self.db_inner.check_closed()?;
+        self.db_inner.status()?;
         let db_state = self.db_inner.state.read().view();
         self.db_inner
             .reader
@@ -111,7 +111,7 @@ impl DbSnapshot {
             .end_bound()
             .map(|b| Bytes::copy_from_slice(b.as_ref()));
         let range = (start, end);
-        self.db_inner.check_closed()?;
+        self.db_inner.status()?;
         let db_state = self.db_inner.state.read().view();
         self.db_inner
             .reader
@@ -125,6 +125,41 @@ impl DbSnapshot {
             )
             .await
             .map_err(Into::into)
+    }
+
+    /// Scan all keys that share the provided prefix using the default scan options.
+    ///
+    /// ## Arguments
+    /// - `prefix`: the key prefix to scan
+    ///
+    /// ## Returns
+    /// - `Result<DbIterator, SlateDBError>`: An iterator with the results of the scan
+    pub async fn scan_prefix<P>(&self, prefix: P) -> Result<DbIterator, crate::Error>
+    where
+        P: AsRef<[u8]> + Send,
+    {
+        self.scan_prefix_with_options(prefix, &ScanOptions::default())
+            .await
+    }
+
+    /// Scan all keys that share the provided prefix with custom options.
+    ///
+    /// ## Arguments
+    /// - `prefix`: the key prefix to scan
+    /// - `options`: the scan options to use
+    ///
+    /// ## Returns
+    /// - `Result<DbIterator, SlateDBError>`: An iterator with the results of the scan
+    pub async fn scan_prefix_with_options<P>(
+        &self,
+        prefix: P,
+        options: &ScanOptions,
+    ) -> Result<DbIterator, crate::Error>
+    where
+        P: AsRef<[u8]> + Send,
+    {
+        self.scan_with_options(BytesRange::from_prefix(prefix.as_ref()), options)
+            .await
     }
 }
 
@@ -201,6 +236,7 @@ mod tests {
             manifest_update_timeout: Duration::from_secs(300),
             compactor_options: Some(CompactorOptions {
                 poll_interval: Duration::from_millis(100),
+                scheduler_options: Default::default(),
                 ..Default::default()
             }),
             max_unflushed_bytes: 16 * 1024,
@@ -638,6 +674,7 @@ mod tests {
             manifest_update_timeout: Duration::from_secs(300),
             compactor_options: Some(CompactorOptions {
                 poll_interval: Duration::from_millis(100),
+                scheduler_options: Default::default(),
                 ..Default::default()
             }),
             max_unflushed_bytes: 16 * 1024,

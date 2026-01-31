@@ -61,17 +61,15 @@ mod tests {
     use crate::admin::AdminBuilder;
     use crate::checkpoint::Checkpoint;
     use crate::checkpoint::CheckpointCreateResult;
-    use crate::clock::DefaultSystemClock;
-    use crate::clock::SystemClock;
     use crate::config::{CheckpointOptions, CheckpointScope, Settings};
     use crate::db::Db;
     use crate::db_state::SsTableId;
+    use crate::format::sst::SsTableFormat;
     use crate::iter::KeyValueIterator;
     use crate::manifest::store::ManifestStore;
     use crate::manifest::Manifest;
     use crate::object_stores::ObjectStores;
     use crate::proptest_util::{rng, sample};
-    use crate::sst::SsTableFormat;
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
     use crate::tablestore::TableStore;
     use crate::test_utils;
@@ -80,6 +78,8 @@ mod tests {
     use object_store::memory::InMemory;
     use object_store::path::Path;
     use object_store::ObjectStore;
+    use slatedb_common::clock::DefaultSystemClock;
+    use slatedb_common::clock::SystemClock;
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -91,11 +91,7 @@ mod tests {
         // open and close the db to init the manifest and trigger another write
         let db = Db::open(path.clone(), object_store.clone()).await.unwrap();
         db.close().await.unwrap();
-        let manifest_store = ManifestStore::new(
-            &path,
-            object_store.clone(),
-            Arc::new(DefaultSystemClock::new()),
-        );
+        let manifest_store = ManifestStore::new(&path, object_store.clone());
         let (_, before_checkpoint) = manifest_store.read_latest_manifest().await.unwrap();
 
         let CheckpointCreateResult {
@@ -130,11 +126,7 @@ mod tests {
             .await
             .unwrap();
         db.close().await.unwrap();
-        let manifest_store = ManifestStore::new(
-            &path,
-            object_store.clone(),
-            Arc::new(DefaultSystemClock::new()),
-        );
+        let manifest_store = ManifestStore::new(&path, object_store.clone());
         let checkpoint_time = DefaultSystemClock::default().now();
 
         let CheckpointCreateResult {
@@ -258,11 +250,7 @@ mod tests {
             })
             .await
             .unwrap();
-        let manifest_store = ManifestStore::new(
-            &path,
-            object_store.clone(),
-            Arc::new(DefaultSystemClock::new()),
-        );
+        let manifest_store = ManifestStore::new(&path, object_store.clone());
         let (_, manifest) = manifest_store.read_latest_manifest().await.unwrap();
         let checkpoint = manifest
             .core
@@ -325,11 +313,7 @@ mod tests {
 
         admin.delete_checkpoint(id).await.unwrap();
 
-        let manifest_store = ManifestStore::new(
-            &path,
-            object_store.clone(),
-            Arc::new(DefaultSystemClock::new()),
-        );
+        let manifest_store = ManifestStore::new(&path, object_store.clone());
         let (_, manifest) = manifest_store.read_latest_manifest().await.unwrap();
         assert!(!manifest.core.checkpoints.iter().any(|c| c.id == id));
     }
@@ -377,11 +361,7 @@ mod tests {
             .await
             .unwrap();
 
-        let manifest_store = ManifestStore::new(
-            &path,
-            object_store.clone(),
-            Arc::new(DefaultSystemClock::new()),
-        );
+        let manifest_store = ManifestStore::new(&path, object_store.clone());
         let manifest = manifest_store
             .read_manifest(checkpoint.manifest_id)
             .await
@@ -434,11 +414,7 @@ mod tests {
         let admin = AdminBuilder::new(path.clone(), object_store.clone()).build();
         let db = Db::open(path.clone(), object_store.clone()).await.unwrap();
         db.close().await.unwrap();
-        let manifest_store = ManifestStore::new(
-            &path,
-            object_store.clone(),
-            Arc::new(DefaultSystemClock::new()),
-        );
+        let manifest_store = ManifestStore::new(&path, object_store.clone());
 
         let checkpoint_name = "my_checkpoint".to_string();
         let CheckpointCreateResult {
@@ -469,11 +445,7 @@ mod tests {
         let admin = AdminBuilder::new(path.clone(), object_store.clone()).build();
         let db = Db::open(path.clone(), object_store.clone()).await.unwrap();
         db.close().await.unwrap();
-        let manifest_store = ManifestStore::new(
-            &path,
-            object_store.clone(),
-            Arc::new(DefaultSystemClock::new()),
-        );
+        let manifest_store = ManifestStore::new(&path, object_store.clone());
 
         // Create multiple checkpoints without names
         admin

@@ -258,11 +258,7 @@ impl WriteBatch {
         let key = Bytes::copy_from_slice(key.as_ref());
         self.ops.insert(
             SequencedKey::new(key.clone(), self.write_idx),
-            WriteOp::Merge(
-                key.clone(),
-                Bytes::copy_from_slice(value.as_ref()),
-                options.clone(),
-            ),
+            WriteOp::Merge(key, Bytes::copy_from_slice(value.as_ref()), options.clone()),
         );
 
         self.write_idx += 1;
@@ -316,6 +312,7 @@ impl WriteBatch {
                 it,
                 false,
                 now,
+                None,
             ));
         }
 

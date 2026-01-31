@@ -11,7 +11,7 @@ use slatedb::{
         foyer::{FoyerCache, FoyerCacheOptions},
         DbCache, SplitCache,
     },
-    Error,
+    Error, IsolationLevel,
 };
 use tracing::info;
 
@@ -52,6 +52,7 @@ pub(crate) struct BencherArgs {
 pub(crate) enum BencherCommands {
     Db(BenchmarkDbArgs),
     Compaction(BenchmarkCompactionArgs),
+    Transaction(BenchmarkTransactionArgs),
 }
 
 #[derive(Args, Clone)]
@@ -87,6 +88,7 @@ impl DbArgs {
         let block_cache = self.block_cache_size.map(|capacity| {
             Arc::new(FoyerCache::new_with_opts(FoyerCacheOptions {
                 max_capacity: capacity,
+                ..Default::default()
             })) as Arc<dyn DbCache>
         });
 
@@ -97,6 +99,7 @@ impl DbArgs {
             self.meta_cache_size.map(|capacity| {
                 Arc::new(FoyerCache::new_with_opts(FoyerCacheOptions {
                     max_capacity: capacity,
+                    ..Default::default()
                 })) as Arc<dyn DbCache>
             })
         };
@@ -176,11 +179,16 @@ pub(crate) struct BenchmarkDbArgs {
     pub(crate) get_hit_percentage: u32,
 }
 
-impl BenchmarkDbArgs {
-    pub(crate) fn key_gen_supplier(&self) -> Box<dyn Fn() -> Box<dyn KeyGenerator>> {
-        let key_len = self.key_len;
-        let key_count = self.key_count;
-        let supplier: Box<dyn Fn() -> Box<dyn KeyGenerator>> = match self.key_generator {
+/// Trait for types that can supply key generators
+pub(crate) trait KeyGeneratorSupplier {
+    fn key_generator(&self) -> KeyGeneratorType;
+    fn key_len(&self) -> usize;
+    fn key_count(&self) -> u64;
+
+    fn key_gen_supplier(&self) -> Box<dyn Fn() -> Box<dyn KeyGenerator>> {
+        let key_len = self.key_len();
+        let key_count = self.key_count();
+        let supplier: Box<dyn Fn() -> Box<dyn KeyGenerator>> = match self.key_generator() {
             KeyGeneratorType::Random => {
                 info!(key_len, "using random key generator");
                 Box::new(move || Box::new(RandomKeyGenerator::new(key_len)))
@@ -192,6 +200,20 @@ impl BenchmarkDbArgs {
         };
 
         supplier
+    }
+}
+
+impl KeyGeneratorSupplier for BenchmarkDbArgs {
+    fn key_generator(&self) -> KeyGeneratorType {
+        self.key_generator.clone()
+    }
+
+    fn key_len(&self) -> usize {
+        self.key_len
+    }
+
+    fn key_count(&self) -> u64 {
+        self.key_count
     }
 }
 
@@ -227,6 +249,17 @@ impl Display for KeyGeneratorType {
                 KeyGeneratorType::FixedSet => KEY_GENERATOR_TYPE_FIXEDSET,
             }
         )
+    }
+}
+
+fn parse_isolation_level(s: &str) -> Result<IsolationLevel, String> {
+    match s.to_lowercase().as_str() {
+        "snapshot" => Ok(IsolationLevel::Snapshot),
+        "serializable" => Ok(IsolationLevel::SerializableSnapshot),
+        _ => Err(format!(
+            "invalid isolation level: '{}'. Valid options: 'snapshot', 'serializable'",
+            s
+        )),
     }
 }
 
@@ -308,4 +341,95 @@ pub(crate) struct CompactionClearArgs {
         default_value_t = 4
     )]
     pub(crate) num_ssts: usize,
+}
+
+#[derive(Args, Clone)]
+#[command(about = "Benchmark SlateDB transactions.")]
+pub(crate) struct BenchmarkTransactionArgs {
+    #[clap(flatten)]
+    pub(crate) db_args: DbArgs,
+
+    #[arg(long, help = "The duration in seconds to run the benchmark for.")]
+    pub(crate) duration: Option<u32>,
+
+    #[arg(
+        long,
+        help = "The key generator to use.",
+        default_value_t = KeyGeneratorType::FixedSet
+    )]
+    pub(crate) key_generator: KeyGeneratorType,
+
+    #[arg(
+        long,
+        help = "The number of keys to generate for FixedSet key generator.",
+        default_value_t = 100_000
+    )]
+    pub(crate) key_count: u64,
+
+    #[arg(
+        long,
+        help = "The length of the keys to generate.",
+        default_value_t = 16
+    )]
+    pub(crate) key_len: usize,
+
+    #[arg(long, help = "The number of concurrent workers.", default_value_t = 4)]
+    pub(crate) concurrency: u32,
+
+    #[arg(
+        long,
+        help = "The length of the values to generate.",
+        default_value_t = 1024
+    )]
+    pub(crate) val_len: usize,
+
+    #[arg(
+        long,
+        help = "Number of operations per transaction.",
+        default_value_t = 10
+    )]
+    pub(crate) transaction_size: u32,
+
+    #[arg(
+        long,
+        help = "Percentage of transactions that should abort/rollback.",
+        default_value_t = 10
+    )]
+    pub(crate) abort_percentage: u32,
+
+    #[arg(
+        long,
+        help = "Use WriteBatch instead of Transaction for comparison.",
+        default_value_t = false
+    )]
+    pub(crate) use_write_batch: bool,
+
+    #[arg(
+        long,
+        help = "Isolation level: 'snapshot' or 'serializable'.",
+        value_parser = parse_isolation_level,
+        default_value = "snapshot"
+    )]
+    pub(crate) isolation_level: IsolationLevel,
+
+    #[arg(
+        long,
+        help = "Whether to await durable writes.",
+        default_value_t = false
+    )]
+    pub(crate) await_durable: bool,
+}
+
+impl KeyGeneratorSupplier for BenchmarkTransactionArgs {
+    fn key_generator(&self) -> KeyGeneratorType {
+        self.key_generator.clone()
+    }
+
+    fn key_len(&self) -> usize {
+        self.key_len
+    }
+
+    fn key_count(&self) -> u64 {
+        self.key_count
+    }
 }

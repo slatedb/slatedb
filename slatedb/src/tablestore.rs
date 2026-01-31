@@ -13,18 +13,20 @@ use object_store::{ObjectStore, PutMode, PutOptions};
 use tokio::io::AsyncWriteExt;
 use ulid::Ulid;
 
+use crate::blob::ReadOnlyBlob;
 use crate::db_cache::{CachedEntry, DbCache};
 use crate::db_state::{SsTableHandle, SsTableId};
 use crate::error::SlateDBError;
 use crate::filter::BloomFilter;
 use crate::flatbuffer_types::SsTableIndexOwned;
+use crate::format::block::Block;
+use crate::format::sst::{EncodedSsTable, SsTableFormat};
 use crate::object_stores::{ObjectStoreType, ObjectStores};
 use crate::paths::PathResolver;
-use crate::sst::{EncodedSsTable, EncodedSsTableBuilder, SsTableFormat};
+use crate::sst_builder::EncodedSsTableBuilder;
 use crate::types::RowEntry;
-use crate::{blob::ReadOnlyBlob, block::Block};
 
-pub struct TableStore {
+pub(crate) struct TableStore {
     object_stores: ObjectStores,
     sst_format: SsTableFormat,
     path_resolver: PathResolver,
@@ -68,7 +70,7 @@ pub(crate) struct SstFileMetadata {
 }
 
 impl TableStore {
-    pub fn new<P: Into<Path>>(
+    pub(crate) fn new<P: Into<Path>>(
         object_stores: ObjectStores,
         sst_format: SsTableFormat,
         root_path: P,
@@ -83,7 +85,7 @@ impl TableStore {
         )
     }
 
-    pub fn new_with_fp_registry(
+    pub(crate) fn new_with_fp_registry(
         object_stores: ObjectStores,
         sst_format: SsTableFormat,
         path_resolver: PathResolver,
@@ -298,9 +300,15 @@ impl TableStore {
         Ok(SsTableHandle::new(*id, info))
     }
 
+    /// Reads the Bloom filter of an SSTable.
+    ///
+    /// ## Arguments
+    /// - `handle`: The handle of the SSTable to read the filter from.
+    /// - `cache_blocks`: Whether to cache the filter after reading it.
     pub(crate) async fn read_filter(
         &self,
         handle: &SsTableHandle,
+        cache_blocks: bool,
     ) -> Result<Option<Arc<BloomFilter>>, SlateDBError> {
         if let Some(ref cache) = self.cache {
             if let Some(filter) = cache
@@ -316,22 +324,30 @@ impl TableStore {
         let path = self.path(&handle.id);
         let obj = ReadOnlyObject { object_store, path };
         let filter = self.sst_format.read_filter(&handle.info, &obj).await?;
-        if let Some(ref cache) = self.cache {
-            if let Some(filter) = filter.as_ref() {
-                cache
-                    .insert(
-                        (handle.id, handle.info.filter_offset).into(),
-                        CachedEntry::with_bloom_filter(filter.clone()),
-                    )
-                    .await;
+        if cache_blocks {
+            if let Some(ref cache) = self.cache {
+                if let Some(filter) = filter.as_ref() {
+                    cache
+                        .insert(
+                            (handle.id, handle.info.filter_offset).into(),
+                            CachedEntry::with_bloom_filter(filter.clone()),
+                        )
+                        .await;
+                }
             }
         }
         Ok(filter)
     }
 
+    /// Reads the index of an SSTable.
+    ///
+    /// ## Arguments
+    /// - `handle`: The handle of the SSTable to read the index from.
+    /// - `cache_blocks`: Whether to cache the index blocks after reading them.
     pub(crate) async fn read_index(
         &self,
         handle: &SsTableHandle,
+        cache_blocks: bool,
     ) -> Result<Arc<SsTableIndexOwned>, SlateDBError> {
         if let Some(ref cache) = self.cache {
             if let Some(index) = cache
@@ -347,13 +363,15 @@ impl TableStore {
         let path = self.path(&handle.id);
         let obj = ReadOnlyObject { object_store, path };
         let index = Arc::new(self.sst_format.read_index(&handle.info, &obj).await?);
-        if let Some(ref cache) = self.cache {
-            cache
-                .insert(
-                    (handle.id, handle.info.index_offset).into(),
-                    CachedEntry::with_sst_index(index.clone()),
-                )
-                .await;
+        if cache_blocks {
+            if let Some(ref cache) = self.cache {
+                cache
+                    .insert(
+                        (handle.id, handle.info.index_offset).into(),
+                        CachedEntry::with_sst_index(index.clone()),
+                    )
+                    .await;
+            }
         }
         Ok(index)
     }
@@ -494,9 +512,18 @@ impl TableStore {
         self.path_resolver.table_path(id)
     }
 
-    pub(crate) fn estimate_encoded_size(&self, entry_num: usize, entries_size: usize) -> usize {
+    pub(crate) fn estimate_encoded_size_compacted(
+        &self,
+        entry_num: usize,
+        entries_size: usize,
+    ) -> usize {
         self.sst_format
-            .estimate_encoded_size(entry_num, entries_size)
+            .estimate_encoded_size_compacted(entry_num, entries_size)
+    }
+
+    pub(crate) fn estimate_encoded_size_wal(&self, entry_num: usize, entries_size: usize) -> usize {
+        self.sst_format
+            .estimate_encoded_size_wal(entry_num, entries_size)
     }
 }
 
@@ -535,14 +562,14 @@ impl EncodedSsTableWriter<'_> {
     /// Adds an entry to the SSTable and returns the size of the block that was finished if any.
     /// The block size is calculated after applying any compression if enabled.
     /// The block size is None if the builder has not finished compacting a block yet.
-    pub async fn add(&mut self, entry: RowEntry) -> Result<Option<usize>, SlateDBError> {
-        let block_size = self.builder.add(entry)?;
+    pub(crate) async fn add(&mut self, entry: RowEntry) -> Result<Option<usize>, SlateDBError> {
+        let block_size = self.builder.add(entry).await?;
         self.drain_blocks().await?;
         Ok(block_size)
     }
 
-    pub async fn close(mut self) -> Result<SsTableHandle, SlateDBError> {
-        let mut encoded_sst = self.builder.build()?;
+    pub(crate) async fn close(mut self) -> Result<SsTableHandle, SlateDBError> {
+        let mut encoded_sst = self.builder.build().await?;
         while let Some(block) = encoded_sst.unconsumed_blocks.pop_front() {
             self.writer.write_all(block.encoded_bytes.as_ref()).await?;
         }
@@ -593,23 +620,23 @@ mod tests {
     use std::collections::VecDeque;
     use std::sync::Arc;
 
-    use crate::clock::DefaultSystemClock;
     use crate::db_cache::test_utils::TestCache;
     use crate::db_cache::SplitCache;
     use crate::db_cache::{DbCache, DbCacheWrapper};
     use crate::error;
+    use crate::format::block::Block;
+    use crate::format::sst::SsTableFormat;
     use crate::object_stores::ObjectStores;
+    use crate::rand::DbRand;
     use crate::retrying_object_store::RetryingObjectStore;
-    use crate::sst::SsTableFormat;
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
     use crate::stats::StatRegistry;
     use crate::tablestore::TableStore;
     use crate::test_utils::FlakyObjectStore;
     use crate::test_utils::{assert_iterator, build_test_sst};
     use crate::types::{RowEntry, ValueDeletable};
-    use crate::{
-        block::Block, block_iterator::BlockIterator, db_state::SsTableId, iter::KeyValueIterator,
-    };
+    use crate::{block_iterator::BlockIterator, db_state::SsTableId, iter::KeyValueIterator};
+    use slatedb_common::clock::DefaultSystemClock;
 
     const ROOT: &str = "/root";
 
@@ -791,13 +818,17 @@ mod tests {
 
         // write a wal sst
         let mut sst1 = ts.table_builder();
-        sst1.add(RowEntry::new_value(b"key", b"value", 0)).unwrap();
-        let table = sst1.build().unwrap();
+        sst1.add(RowEntry::new_value(b"key", b"value", 0))
+            .await
+            .unwrap();
+        let table = sst1.build().await.unwrap();
         ts.write_sst(&wal_id, table, false).await.unwrap();
 
         let mut sst2 = ts.table_builder();
-        sst2.add(RowEntry::new_value(b"key", b"value", 0)).unwrap();
-        let table2 = sst2.build().unwrap();
+        sst2.add(RowEntry::new_value(b"key", b"value", 0))
+            .await
+            .unwrap();
+        let table2 = sst2.build().await.unwrap();
 
         // write another wal sst with the same id.
         let result = ts.write_sst(&wal_id, table2, false).await;
@@ -836,7 +867,7 @@ mod tests {
             ObjectStores::new(os.clone(), None),
             format,
             Path::from("/root"),
-            Some(wrapper),
+            Some(wrapper.clone()),
         ));
 
         // Create and write SST
@@ -858,7 +889,7 @@ mod tests {
         let handle = writer.close().await.unwrap();
 
         // Read the index
-        let index = ts.read_index(&handle).await.unwrap();
+        let index = ts.read_index(&handle, true).await.unwrap();
 
         // Test 1: SST hit
         let blocks = ts
@@ -871,12 +902,12 @@ mod tests {
         // Check that all blocks are now in cache
         for i in 0..20 {
             let offset = index.borrow().block_meta().get(i).offset();
+            let cached = wrapper
+                .get_block(&(handle.id, offset).into())
+                .await
+                .unwrap_or(None);
             assert!(
-                block_cache
-                    .get_block(&(handle.id, offset).into())
-                    .await
-                    .unwrap_or(None)
-                    .is_some(),
+                cached.is_some(),
                 "Block with offset {} should be in cache",
                 offset
             );
@@ -885,11 +916,11 @@ mod tests {
         // Partially clear the cache (remove blocks 5..10 and 15..20)
         for i in 5..10 {
             let offset = index.borrow().block_meta().get(i).offset();
-            block_cache.remove(&(handle.id, offset).into()).await;
+            wrapper.remove(&(handle.id, offset).into()).await;
         }
         for i in 15..20 {
             let offset = index.borrow().block_meta().get(i).offset();
-            block_cache.remove(&(handle.id, offset).into()).await;
+            wrapper.remove(&(handle.id, offset).into()).await;
         }
 
         // Test 2: Partial cache hit, everything should be returned since missing blocks are returned from sst
@@ -902,12 +933,12 @@ mod tests {
         // Check that all blocks are again in cache
         for i in 0..20 {
             let offset = index.borrow().block_meta().get(i).offset();
+            let cached = wrapper
+                .get_block(&(handle.id, offset).into())
+                .await
+                .unwrap_or(None);
             assert!(
-                block_cache
-                    .get_block(&(handle.id, offset).into())
-                    .await
-                    .unwrap_or(None)
-                    .is_some(),
+                cached.is_some(),
                 "Block with offset {} should be in cache after partial hit",
                 offset
             );
@@ -928,7 +959,7 @@ mod tests {
         for i in 0..20 {
             let offset = index.borrow().block_meta().get(i).offset();
             assert!(
-                block_cache
+                wrapper
                     .get_block(&(handle.id, offset).into())
                     .await
                     .unwrap_or(None)
@@ -950,6 +981,123 @@ mod tests {
             .await
             .unwrap();
         assert_blocks(&blocks, &expected_data[15..20]).await;
+    }
+
+    #[tokio::test]
+    async fn test_read_index_honors_cache_blocks() {
+        let main_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let format = SsTableFormat {
+            min_filter_keys: u32::MAX,
+            ..SsTableFormat::default()
+        };
+        let writer = TableStore::new(
+            ObjectStores::new(main_store.clone(), None),
+            format.clone(),
+            Path::from(ROOT),
+            None,
+        );
+
+        let mut builder = writer.table_builder();
+        builder
+            .add(RowEntry::new_value(b"key1", b"value1", 0))
+            .await
+            .unwrap();
+        builder
+            .add(RowEntry::new_value(b"key2", b"value2", 0))
+            .await
+            .unwrap();
+        let id = SsTableId::Compacted(ulid::Ulid::new());
+        let handle = writer
+            .write_sst(&id, builder.build().await.unwrap(), false)
+            .await
+            .unwrap();
+
+        let meta_cache = Arc::new(TestCache::new());
+        let cache = Arc::new(
+            SplitCache::new()
+                .with_meta_cache(Some(meta_cache.clone()))
+                .build(),
+        );
+        let reader = TableStore::new(
+            ObjectStores::new(main_store.clone(), None),
+            format,
+            Path::from(ROOT),
+            Some(cache),
+        );
+        assert_eq!(meta_cache.entry_count(), 0);
+
+        let _ = reader.read_index(&handle, false).await.unwrap();
+        assert!(meta_cache
+            .get_index(&(handle.id, handle.info.index_offset).into())
+            .await
+            .unwrap()
+            .is_none());
+
+        let _ = reader.read_index(&handle, true).await.unwrap();
+        assert!(meta_cache
+            .get_index(&(handle.id, handle.info.index_offset).into())
+            .await
+            .unwrap()
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn test_read_filter_honors_cache_blocks() {
+        let main_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let format = SsTableFormat {
+            min_filter_keys: 1,
+            ..SsTableFormat::default()
+        };
+        let writer = TableStore::new(
+            ObjectStores::new(main_store.clone(), None),
+            format.clone(),
+            Path::from(ROOT),
+            None,
+        );
+
+        let mut builder = writer.table_builder();
+        builder
+            .add(RowEntry::new_value(b"key1", b"value1", 0))
+            .await
+            .unwrap();
+        builder
+            .add(RowEntry::new_value(b"key2", b"value2", 0))
+            .await
+            .unwrap();
+        let id = SsTableId::Compacted(ulid::Ulid::new());
+        let handle = writer
+            .write_sst(&id, builder.build().await.unwrap(), false)
+            .await
+            .unwrap();
+
+        let meta_cache = Arc::new(TestCache::new());
+        let cache = Arc::new(
+            SplitCache::new()
+                .with_meta_cache(Some(meta_cache.clone()))
+                .build(),
+        );
+        let reader = TableStore::new(
+            ObjectStores::new(main_store.clone(), None),
+            format,
+            Path::from(ROOT),
+            Some(cache),
+        );
+        assert_eq!(meta_cache.entry_count(), 0);
+
+        let filter = reader.read_filter(&handle, false).await.unwrap();
+        assert!(filter.is_some());
+        assert!(meta_cache
+            .get_filter(&(handle.id, handle.info.filter_offset).into())
+            .await
+            .unwrap()
+            .is_none());
+
+        let _ = reader.read_filter(&handle, true).await.unwrap();
+        assert!(meta_cache
+            .get_filter(&(handle.id, handle.info.filter_offset).into())
+            .await
+            .unwrap()
+            .is_some());
     }
 
     #[tokio::test]
@@ -975,24 +1123,29 @@ mod tests {
             ObjectStores::new(os.clone(), None),
             SsTableFormat::default(),
             Path::from("/root"),
-            Some(wrapper),
+            Some(wrapper.clone()),
         ));
         let id = SsTableId::Compacted(ulid::Ulid::new());
-        let sst = build_test_sst(&ts.sst_format, 3);
+        let sst = build_test_sst(&ts.sst_format, 3).await;
         let sst_bytes = sst.remaining_as_bytes();
         let sst_info = sst.info.clone();
 
         ts.write_sst(&id, sst, true).await.unwrap();
 
-        let index = ts.sst_format.read_index_raw(&sst_info, &sst_bytes).unwrap();
+        let index = ts
+            .sst_format
+            .read_index_raw(&sst_info, &sst_bytes)
+            .await
+            .unwrap();
         let block_metas = index.borrow().block_meta();
         for i in 0..block_metas.len() {
             let block_meta = block_metas.get(i);
             let block = ts
                 .sst_format
                 .read_block_raw(&sst_info, &index, i, &sst_bytes)
+                .await
                 .unwrap();
-            let cached_block = block_cache
+            let cached_block = wrapper
                 .get_block(&(id, block_meta.offset()).into())
                 .await
                 .unwrap();
@@ -1018,13 +1171,17 @@ mod tests {
             Some(wrapper),
         ));
         let id = SsTableId::Compacted(ulid::Ulid::new());
-        let sst = build_test_sst(&ts.sst_format, 3);
+        let sst = build_test_sst(&ts.sst_format, 3).await;
         let sst_bytes = sst.remaining_as_bytes();
         let sst_info = sst.info.clone();
 
         ts.write_sst(&id, sst, false).await.unwrap();
 
-        let index = ts.sst_format.read_index_raw(&sst_info, &sst_bytes).unwrap();
+        let index = ts
+            .sst_format
+            .read_index_raw(&sst_info, &sst_bytes)
+            .await
+            .unwrap();
         let block_metas = index.borrow().block_meta();
         for i in 0..block_metas.len() {
             let block_meta = block_metas.get(i);
@@ -1206,7 +1363,11 @@ mod tests {
         // Given a flaky store that times out on the first put_opts
         let base: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let flaky = Arc::new(FlakyObjectStore::new(base.clone(), 1));
-        let retrying = Arc::new(RetryingObjectStore::new(flaky.clone()));
+        let retrying = Arc::new(RetryingObjectStore::new(
+            flaky.clone(),
+            Arc::new(DbRand::default()),
+            Arc::new(DefaultSystemClock::new()),
+        ));
 
         let format = SsTableFormat {
             block_size: 64,
@@ -1222,7 +1383,7 @@ mod tests {
 
         // Build an SST and compute expected bytes
         let id = SsTableId::Compacted(ulid::Ulid::new());
-        let sst = build_test_sst(&format, 3);
+        let sst = build_test_sst(&format, 3).await;
         let expected_bytes = sst.remaining_as_bytes();
 
         // When writing via TableStore (should retry once)
@@ -1343,7 +1504,7 @@ mod tests {
         ) {
             let os = Arc::new(InMemory::new());
             let format = SsTableFormat { block_size, ..SsTableFormat::default() };
-            let ts = Arc::new(TableStore::new(ObjectStores::new(os.clone(), None),
+            let ts = Arc::new(TableStore::new(ObjectStores::new(os, None),
                 format, Path::from(ROOT), None));
             if let Some(bytes) = block_size.checked_mul(num_blocks) {
                 assert_eq!(num_blocks, ts.bytes_to_blocks(bytes));

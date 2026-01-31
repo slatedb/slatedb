@@ -4,12 +4,12 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::clock::SystemClock;
 use crate::error::SlateDBError;
-use crate::iter::KeyValueIterator;
+use crate::iter::{KeyValueIterator, TrackedKeyValueIterator};
 use crate::seq_tracker::{FindOption, SequenceTracker};
-use crate::types::RowEntry;
 use crate::types::ValueDeletable::Tombstone;
+use crate::types::{RowEntry, ValueDeletable};
+use slatedb_common::clock::SystemClock;
 
 /// A retention iterator that filters entries based on retention time and handles expired/tombstoned keys.
 ///
@@ -36,8 +36,6 @@ pub(crate) struct RetentionIterator<T: KeyValueIterator> {
     system_clock: Arc<dyn SystemClock>,
     /// Historical sequence metadata used to translate sequence numbers into wall-clock timestamps.
     sequence_tracker: Arc<SequenceTracker>,
-    /// The total number of bytes processed so far
-    total_bytes_processed: u64,
 }
 
 impl<T: KeyValueIterator> RetentionIterator<T> {
@@ -60,7 +58,6 @@ impl<T: KeyValueIterator> RetentionIterator<T> {
             system_clock,
             sequence_tracker,
             buffer: RetentionBuffer::new(),
-            total_bytes_processed: 0,
         })
     }
 
@@ -85,9 +82,15 @@ impl<T: KeyValueIterator> RetentionIterator<T> {
             // filter out any expired entries -- eventually we can consider
             // abstracting this away into generic, pluggable compaction filters
             // but for now we do it inline
+            let is_merge = matches!(&entry.value, ValueDeletable::Merge(_));
             let entry = match entry.expire_ts.as_ref() {
                 Some(expire_ts) if *expire_ts <= compaction_start_ts => {
-                    // insert a tombstone instead of just filtering out the
+                    if is_merge {
+                        // just skip expired merge entries rather than write a tombstone
+                        // as earlier merges may still be un-expired
+                        continue;
+                    }
+                    // for values, insert a tombstone instead of just filtering out the
                     // value in the iterator because this may otherwise "revive"
                     // an older version of the KV pair that has a larger TTL in
                     // a lower level of the LSM tree
@@ -101,6 +104,7 @@ impl<T: KeyValueIterator> RetentionIterator<T> {
                 }
                 _ => entry,
             };
+
             let entry_seq = entry.seq;
 
             // always keep the entry with latest version.
@@ -148,10 +152,11 @@ impl<T: KeyValueIterator> RetentionIterator<T> {
                 .map(|min_seq| entry_seq > min_seq)
                 .unwrap_or(false);
 
-            let continue_retain = continue_retain_by_time || continue_retain_by_seq;
+            let continue_retain = continue_retain_by_time || continue_retain_by_seq || is_merge;
             if !continue_retain {
-                // if we find the first entry that neither in retention window by time nor by seq,
-                // we should break the loop to filter out the earlier versions of the same key.
+                // if we find the first non-merge entry that's neither in retention window by time
+                // nor by seq we should break the loop to filter out the earlier versions of the
+                // same key.
                 break;
             }
         }
@@ -169,10 +174,6 @@ impl<T: KeyValueIterator> RetentionIterator<T> {
         }
 
         filtered_versions
-    }
-
-    pub(crate) fn total_bytes_processed(&self) -> u64 {
-        self.total_bytes_processed
     }
 }
 
@@ -197,11 +198,7 @@ impl<T: KeyValueIterator> KeyValueIterator for RetentionIterator<T> {
                 RetentionBufferState::NeedPush => {
                     // Fetch next entry from upstream iterator
                     let entry = match self.inner.next_entry().await? {
-                        Some(entry) => {
-                            self.total_bytes_processed +=
-                                entry.key.len() as u64 + entry.value.len() as u64;
-                            entry
-                        }
+                        Some(entry) => entry,
                         None => {
                             // No more entries from upstream, mark end of input
                             self.buffer.mark_end_of_input();
@@ -253,6 +250,12 @@ impl<T: KeyValueIterator> KeyValueIterator for RetentionIterator<T> {
         self.buffer.clear();
         self.inner.seek(next_key).await?;
         Ok(())
+    }
+}
+
+impl<T: TrackedKeyValueIterator> TrackedKeyValueIterator for RetentionIterator<T> {
+    fn bytes_processed(&self) -> u64 {
+        self.inner.bytes_processed()
     }
 }
 
@@ -929,11 +932,70 @@ mod tests {
         ],
         filter_tombstone: true, // tombstone is not in the tail, so not filtered out
     })]
-    #[tokio::test]
+    #[case(RetentionIteratorTestCase {
+        name: "filter_out_expired_merge_entries",
+        input_entries: vec![
+            RowEntry::new_merge(b"key1", b"value3", 3).with_create_ts(950).with_expire_ts(1100), // Not expired
+            RowEntry::new_merge(b"key1", b"value2", 2).with_create_ts(900).with_expire_ts(950), // Expired
+            RowEntry::new_merge(b"key1", b"value1", 1).with_create_ts(850).with_expire_ts(1200), // Not expired
+        ],
+        retention_timeout: Some(Duration::ZERO),
+        retention_min_seq: None,
+        system_clock_ts: 1000,
+        compaction_start_ts: 1000,
+        expected_entries: vec![
+            RowEntry::new_merge(b"key1", b"value3", 3).with_create_ts(950).with_expire_ts(1100), // Not expired
+            RowEntry::new_merge(b"key1", b"value1", 1).with_create_ts(850).with_expire_ts(1200), // Not expired
+        ],
+        filter_tombstone: false,
+    })]
+    #[case(RetentionIteratorTestCase {
+        name: "retain_up_to_first_non_merge_entry",
+        input_entries: vec![
+            RowEntry::new_merge(b"key1", b"value5", 5).with_create_ts(1050),
+            RowEntry::new_merge(b"key1", b"value4", 4).with_create_ts(1000),
+            RowEntry::new_merge(b"key1", b"value3", 3).with_create_ts(950),
+            RowEntry::new_value(b"key1", b"value2", 2).with_create_ts(900),
+            RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(850),
+        ],
+        retention_timeout: Some(Duration::ZERO),
+        retention_min_seq: None,
+        system_clock_ts: 1000,
+        compaction_start_ts: 1000,
+        expected_entries: vec![
+            RowEntry::new_merge(b"key1", b"value5", 5).with_create_ts(1050),
+            RowEntry::new_merge(b"key1", b"value4", 4).with_create_ts(1000),
+            RowEntry::new_merge(b"key1", b"value3", 3).with_create_ts(950),
+            RowEntry::new_value(b"key1", b"value2", 2).with_create_ts(900),
+        ],
+        filter_tombstone: false,
+    })]
+    #[case(RetentionIteratorTestCase {
+        name: "retain_up_to_first_non_merge_entry_when_seq_num_provided",
+        input_entries: vec![
+            RowEntry::new_value(b"key1", b"value5", 5).with_create_ts(1050),
+            RowEntry::new_merge(b"key1", b"value4", 4).with_create_ts(1000),
+            RowEntry::new_merge(b"key1", b"value3", 3).with_create_ts(950),
+            RowEntry::new_value(b"key1", b"value2", 2).with_create_ts(900),
+            RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(850),
+        ],
+        retention_timeout: Some(Duration::ZERO),
+        retention_min_seq: Some(4),
+        system_clock_ts: 1000,
+        compaction_start_ts: 1000,
+        expected_entries: vec![
+            RowEntry::new_value(b"key1", b"value5", 5).with_create_ts(1050),
+            RowEntry::new_merge(b"key1", b"value4", 4).with_create_ts(1000),
+            RowEntry::new_merge(b"key1", b"value3", 3).with_create_ts(950),
+            RowEntry::new_value(b"key1", b"value2", 2).with_create_ts(900),
+        ],
+        filter_tombstone: false,
+    })]
+    #[test]
     #[cfg(feature = "test-util")]
-    async fn test_retention_iterator_table_driven(#[case] test_case: RetentionIteratorTestCase) {
-        use crate::clock::MockSystemClock;
+    fn test_retention_iterator_table_driven(#[case] test_case: RetentionIteratorTestCase) {
         use crate::test_utils::TestIterator;
+        use slatedb_common::clock::MockSystemClock;
 
         // Test the apply_retention_filter function directly since TestIterator doesn't support create_ts
         let mut versions = std::collections::BTreeMap::new();
@@ -1024,9 +1086,9 @@ mod tests {
         #[case] clock_now: i64,
         #[case] timeout_ms: u64,
     ) {
-        use crate::clock::MockSystemClock;
         use crate::test_utils::TestIterator;
         use chrono::TimeZone;
+        use slatedb_common::clock::MockSystemClock;
 
         let mut sorted_points = tracker_points;
         sorted_points.sort_by_key(|(seq, _)| *seq);
@@ -1057,11 +1119,11 @@ mod tests {
         let filtered = RetentionIterator::<TestIterator>::apply_retention_filter(
             versions,
             0,
-            system_clock.clone(),
+            system_clock,
             Some(timeout),
             None,
             false,
-            tracker.clone(),
+            tracker,
         );
 
         let derived_ts = sorted_points

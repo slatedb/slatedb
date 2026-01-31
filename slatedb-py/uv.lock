@@ -476,7 +476,7 @@ wheels = [
 
 [[package]]
 name = "slatedb"
-version = "0.8.2"
+version = "0.10.0"
 source = { editable = "." }
 
 [package.optional-dependencies]

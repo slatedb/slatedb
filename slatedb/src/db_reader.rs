@@ -1,10 +1,8 @@
 use crate::bytes_range::BytesRange;
-use crate::clock::{
-    DefaultLogicalClock, DefaultSystemClock, LogicalClock, MonotonicClock, SystemClock,
-};
+use crate::clock::MonotonicClock;
 use crate::config::{CheckpointOptions, DbReaderOptions, ReadOptions, ScanOptions};
 use crate::db_read::DbRead;
-use crate::db_state::CoreDbState;
+use crate::db_state::ManifestCore;
 use crate::db_stats::DbStats;
 use crate::dispatcher::{MessageFactory, MessageHandler, MessageHandlerExecutor};
 use crate::error::SlateDBError;
@@ -29,6 +27,7 @@ use object_store::path::Path;
 use object_store::ObjectStore;
 use once_cell::sync::Lazy;
 use parking_lot::RwLock;
+use slatedb_common::clock::{DefaultSystemClock, SystemClock};
 use std::collections::VecDeque;
 use std::ops::{RangeBounds, Sub};
 use std::sync::Arc;
@@ -84,7 +83,7 @@ impl DbStateReader for CheckpointState {
         &self.imm_memtable
     }
 
-    fn core(&self) -> &CoreDbState {
+    fn core(&self) -> &ManifestCore {
         &self.manifest.core
     }
 }
@@ -96,11 +95,11 @@ impl DbReaderInner {
         options: DbReaderOptions,
         checkpoint_id: Option<Uuid>,
         closed_result_watcher: WatchableOnceCell<Result<(), SlateDBError>>,
-        logical_clock: Arc<dyn LogicalClock>,
         system_clock: Arc<dyn SystemClock>,
         rand: Arc<DbRand>,
     ) -> Result<Self, SlateDBError> {
-        let mut manifest = StoredManifest::load(Arc::clone(&manifest_store)).await?;
+        let mut manifest =
+            StoredManifest::load(Arc::clone(&manifest_store), system_clock.clone()).await?;
         if !manifest.db_state().initialized {
             return Err(SlateDBError::InvalidDBState);
         }
@@ -109,7 +108,7 @@ impl DbReaderInner {
             Self::get_or_create_checkpoint(&mut manifest, checkpoint_id, &options, rand.clone())
                 .await?;
 
-        let replay_new_wals = checkpoint_id.is_none();
+        let replay_new_wals = checkpoint_id.is_none() && !options.skip_wal_replay;
         let initial_state = Arc::new(
             Self::build_initial_checkpoint_state(
                 Arc::clone(&manifest_store),
@@ -122,7 +121,7 @@ impl DbReaderInner {
         );
 
         let mono_clock = Arc::new(MonotonicClock::new(
-            logical_clock.clone(),
+            system_clock.clone(),
             initial_state.core().last_l0_clock_tick,
         ));
 
@@ -138,7 +137,7 @@ impl DbReaderInner {
         let state = RwLock::new(initial_state);
         let reader = Reader {
             table_store: Arc::clone(&table_store),
-            db_stats: db_stats.clone(),
+            db_stats,
             mono_clock: Arc::clone(&mono_clock),
             oracle: oracle.clone(),
             merge_operator: options.merge_operator.clone(),
@@ -205,7 +204,7 @@ impl DbReaderInner {
             .await
     }
 
-    fn should_reestablish_checkpoint(&self, latest: &CoreDbState) -> bool {
+    fn should_reestablish_checkpoint(&self, latest: &ManifestCore) -> bool {
         let read_guard = self.state.read();
         let current_state = read_guard.core();
         latest.replay_after_wal_id > current_state.replay_after_wal_id
@@ -239,6 +238,9 @@ impl DbReaderInner {
     }
 
     async fn maybe_replay_new_wals(&self) -> Result<(), SlateDBError> {
+        if self.options.skip_wal_replay {
+            return Ok(());
+        }
         let last_seen_wal_id = self.table_store.last_seen_wal_id().await?;
         let last_replayed_wal_id = self.state.read().last_wal_id;
         if last_seen_wal_id > last_replayed_wal_id {
@@ -390,7 +392,7 @@ impl DbReaderInner {
     async fn replay_wal_into(
         table_store: Arc<TableStore>,
         reader_options: &DbReaderOptions,
-        core: &CoreDbState,
+        core: &ManifestCore,
         into_tables: &mut VecDeque<Arc<ImmutableMemtable>>,
         replay_new_wals: bool,
     ) -> Result<(u64, u64), SlateDBError> {
@@ -453,7 +455,7 @@ impl DbReaderInner {
         if let Some(result) = closed_result_reader.read() {
             return match result {
                 Ok(()) => Err(SlateDBError::Closed),
-                Err(e) => Err(e.clone()),
+                Err(e) => Err(e),
             };
         }
         Ok(())
@@ -475,7 +477,11 @@ impl MessageHandler<DbReaderMessage> for ManifestPoller {
 
     async fn handle(&mut self, message: DbReaderMessage) -> Result<(), SlateDBError> {
         assert!(matches!(message, DbReaderMessage::PollManifest));
-        let mut manifest = StoredManifest::load(Arc::clone(&self.inner.manifest_store)).await?;
+        let mut manifest = StoredManifest::load(
+            Arc::clone(&self.inner.manifest_store),
+            self.inner.system_clock.clone(),
+        )
+        .await?;
 
         let latest_manifest = manifest.manifest();
         if self
@@ -496,7 +502,11 @@ impl MessageHandler<DbReaderMessage> for ManifestPoller {
         _messages: BoxStream<'async_trait, DbReaderMessage>,
         _result: Result<(), SlateDBError>,
     ) -> Result<(), SlateDBError> {
-        let mut manifest = StoredManifest::load(Arc::clone(&self.inner.manifest_store)).await?;
+        let mut manifest = StoredManifest::load(
+            Arc::clone(&self.inner.manifest_store),
+            self.inner.system_clock.clone(),
+        )
+        .await?;
         let checkpoint_id = self.inner.state.read().checkpoint.id;
         if Some(checkpoint_id) != self.inner.user_checkpoint_id {
             info!(
@@ -547,14 +557,13 @@ impl DbReader {
             path,
             object_store,
             block_cache: options.block_cache.clone(),
-            system_clock: clock.clone(),
+            block_transformer: options.block_transformer.clone(),
         };
 
         Self::open_internal(
             &store_provider,
             checkpoint_id,
             options,
-            Arc::new(DefaultLogicalClock::default()),
             clock,
             Arc::new(DbRand::default()),
         )
@@ -566,7 +575,6 @@ impl DbReader {
         store_provider: &dyn StoreProvider,
         checkpoint_id: Option<Uuid>,
         options: DbReaderOptions,
-        logical_clock: Arc<dyn LogicalClock>,
         system_clock: Arc<dyn SystemClock>,
         rand: Arc<DbRand>,
     ) -> Result<Self, SlateDBError> {
@@ -584,7 +592,6 @@ impl DbReader {
                 options,
                 checkpoint_id,
                 closed_result_watcher,
-                logical_clock,
                 system_clock,
                 rand,
             )
@@ -819,6 +826,41 @@ impl DbReader {
             .map_err(Into::into)
     }
 
+    /// Scan all keys that share the provided prefix using the default scan options.
+    ///
+    /// ## Arguments
+    /// - `prefix`: the key prefix to scan
+    ///
+    /// ## Returns
+    /// - `Result<DbIterator, Error>`: An iterator with the results of the scan
+    pub async fn scan_prefix<P>(&self, prefix: P) -> Result<DbIterator, crate::Error>
+    where
+        P: AsRef<[u8]> + Send,
+    {
+        self.scan_prefix_with_options(prefix, &ScanOptions::default())
+            .await
+    }
+
+    /// Scan all keys that share the provided prefix with custom options.
+    ///
+    /// ## Arguments
+    /// - `prefix`: the key prefix to scan
+    /// - `options`: the scan options to use
+    ///
+    /// ## Returns
+    /// - `Result<DbIterator, Error>`: An iterator with the results of the scan
+    pub async fn scan_prefix_with_options<P>(
+        &self,
+        prefix: P,
+        options: &ScanOptions,
+    ) -> Result<DbIterator, crate::Error>
+    where
+        P: AsRef<[u8]> + Send,
+    {
+        self.scan_with_options(BytesRange::from_prefix(prefix.as_ref()), options)
+            .await
+    }
+
     /// Close the database reader.
     ///
     /// ## Returns
@@ -875,10 +917,10 @@ impl DbRead for DbReader {
 
 #[cfg(test)]
 mod tests {
-    use crate::clock::{DefaultLogicalClock, DefaultSystemClock, LogicalClock, SystemClock};
     use crate::config::{CheckpointOptions, CheckpointScope, Settings};
     use crate::db_reader::{DbReader, DbReaderOptions};
-    use crate::db_state::CoreDbState;
+    use crate::db_state::ManifestCore;
+    use crate::format::sst::SsTableFormat;
     use crate::manifest::store::{ManifestStore, StoredManifest};
     use crate::manifest::Manifest;
     use crate::object_stores::ObjectStores;
@@ -886,7 +928,6 @@ mod tests {
     use crate::proptest_util::rng::new_test_rng;
     use crate::proptest_util::sample;
     use crate::rand::DbRand;
-    use crate::sst::SsTableFormat;
     use crate::store_provider::StoreProvider;
     use crate::tablestore::TableStore;
     use crate::{error::SlateDBError, test_utils, Db};
@@ -895,6 +936,7 @@ mod tests {
     use object_store::memory::InMemory;
     use object_store::path::Path;
     use object_store::ObjectStore;
+    use slatedb_common::clock::{DefaultSystemClock, SystemClock};
     use std::collections::BTreeMap;
     use std::ops::RangeFull;
     use std::sync::Arc;
@@ -952,7 +994,6 @@ mod tests {
             &test_provider,
             Some(checkpoint_result.id),
             DbReaderOptions::default(),
-            test_provider.logical_clock.clone(),
             test_provider.system_clock.clone(),
             test_provider.rand.clone(),
         )
@@ -1005,7 +1046,7 @@ mod tests {
         let test_provider = TestProvider::new(path, Arc::clone(&object_store));
         let manifest_store = test_provider.manifest_store();
 
-        let parent_manifest = Manifest::initial(CoreDbState::new());
+        let parent_manifest = Manifest::initial(ManifestCore::new());
         let parent_path = "/tmp/parent_store".to_string();
         let source_checkpoint_id = uuid::Uuid::new_v4();
 
@@ -1015,6 +1056,7 @@ mod tests {
             parent_path,
             source_checkpoint_id,
             Arc::new(DbRand::default()),
+            Arc::new(DefaultSystemClock::new()),
         )
         .await
         .unwrap();
@@ -1195,25 +1237,125 @@ mod tests {
         assert_eq!(result.to_string(), "Unavailable error: io error (oops)");
     }
 
+    #[tokio::test]
+    async fn skip_wal_replay_should_not_see_wal_only_writes() {
+        use crate::config::{FlushOptions, FlushType};
+
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_kv_store");
+        let test_provider = TestProvider::new(path.clone(), Arc::clone(&object_store));
+
+        // Create a DB and write some data, then flush memtable to L0 SSTs
+        let db = test_provider.new_db(Settings::default()).await.unwrap();
+        let flushed_key = b"flushed_key";
+        let flushed_value = b"flushed_value";
+        db.put(flushed_key, flushed_value).await.unwrap();
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::MemTable,
+        })
+        .await
+        .unwrap();
+
+        // Write more data that stays in WAL (not flushed to L0)
+        let wal_only_key = b"wal_only_key";
+        let wal_only_value = b"wal_only_value";
+        db.put(wal_only_key, wal_only_value).await.unwrap();
+        // Only flush to WAL, not to L0 SSTs
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::Wal,
+        })
+        .await
+        .unwrap();
+
+        // Open a reader with skip_wal_replay=true
+        let reader_options = DbReaderOptions {
+            skip_wal_replay: true,
+            ..DbReaderOptions::default()
+        };
+        let reader = test_provider
+            .new_db_reader(reader_options.clone(), None)
+            .await
+            .unwrap();
+
+        // Should see the L0 flushed data
+        assert_eq!(
+            reader.get(flushed_key).await.unwrap(),
+            Some(Bytes::from_static(flushed_value))
+        );
+
+        // Should NOT see the WAL-only data
+        assert_eq!(reader.get(wal_only_key).await.unwrap(), None);
+
+        // After flushing memtable to L0, a NEW reader should see the data
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::MemTable,
+        })
+        .await
+        .unwrap();
+
+        // Open a new reader - it should see the newly flushed data
+        let reader2 = test_provider
+            .new_db_reader(reader_options, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            reader2.get(wal_only_key).await.unwrap(),
+            Some(Bytes::from_static(wal_only_value))
+        );
+    }
+
+    #[tokio::test]
+    async fn skip_wal_replay_should_see_l0_data() {
+        use crate::config::{FlushOptions, FlushType};
+
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_kv_store");
+        let test_provider = TestProvider::new(path.clone(), Arc::clone(&object_store));
+
+        // Create a DB and write data, then flush memtable to L0 SSTs
+        let db = test_provider.new_db(Settings::default()).await.unwrap();
+        let key = b"test_key";
+        let value = b"test_value";
+        db.put(key, value).await.unwrap();
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::MemTable,
+        })
+        .await
+        .unwrap();
+
+        // Open a reader with skip_wal_replay=true
+        let reader_options = DbReaderOptions {
+            skip_wal_replay: true,
+            ..DbReaderOptions::default()
+        };
+        let reader = test_provider
+            .new_db_reader(reader_options, None)
+            .await
+            .unwrap();
+
+        // Should see the L0 data
+        assert_eq!(
+            reader.get(key).await.unwrap(),
+            Some(Bytes::from_static(value))
+        );
+    }
+
     struct TestProvider {
         object_store: Arc<dyn ObjectStore>,
         path: Path,
         fp_registry: Arc<FailPointRegistry>,
-        logical_clock: Arc<dyn LogicalClock>,
         system_clock: Arc<dyn SystemClock>,
         rand: Arc<DbRand>,
     }
 
     impl TestProvider {
         fn new(path: Path, object_store: Arc<dyn ObjectStore>) -> Self {
-            let logical_clock = Arc::new(DefaultLogicalClock::new());
             let system_clock = Arc::new(DefaultSystemClock::new());
             let rand = Arc::new(DbRand::default());
             TestProvider {
                 object_store,
                 path,
                 fp_registry: Arc::new(FailPointRegistry::new()),
-                logical_clock,
                 system_clock,
                 rand,
             }
@@ -1237,8 +1379,7 @@ mod tests {
                 self,
                 checkpoint,
                 options,
-                self.logical_clock.clone() as Arc<dyn LogicalClock>,
-                self.system_clock.clone() as Arc<dyn SystemClock>,
+                self.system_clock.clone(),
                 self.rand.clone(),
             )
             .await
@@ -1260,7 +1401,6 @@ mod tests {
             Arc::new(ManifestStore::new(
                 &self.path,
                 Arc::clone(&self.object_store),
-                self.system_clock.clone(),
             ))
         }
     }

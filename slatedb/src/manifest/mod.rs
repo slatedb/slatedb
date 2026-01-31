@@ -5,7 +5,6 @@ use std::ops::Bound;
 use std::sync::Arc;
 
 use crate::bytes_range::BytesRange;
-use crate::db_state::{CoreDbState, SortedRun, SsTableHandle, SsTableId};
 use crate::rand::DbRand;
 use crate::utils::IdGenerator;
 use bytes::Bytes;
@@ -15,18 +14,21 @@ use uuid::Uuid;
 
 pub(crate) mod store;
 
+// TODO: should probably move these into manifest/mod.rs (this file)
+pub use crate::db_state::{ManifestCore, SortedRun, SsTableHandle, SsTableId, SsTableInfo};
+
 #[derive(Clone, Serialize, PartialEq, Debug)]
 pub(crate) struct Manifest {
     // todo: try to make this writable only from module
     pub(crate) external_dbs: Vec<ExternalDb>,
-    pub(crate) core: CoreDbState,
+    pub(crate) core: ManifestCore,
     // todo: try to make this writable only from module
     pub(crate) writer_epoch: u64,
     pub(crate) compactor_epoch: u64,
 }
 
 impl Manifest {
-    pub(crate) fn initial(core: CoreDbState) -> Self {
+    pub(crate) fn initial(core: ManifestCore) -> Self {
         Self {
             external_dbs: vec![],
             core,
@@ -150,7 +152,7 @@ impl Manifest {
 
             // Now we can zip the manifests together
             let mut external_dbs = vec![];
-            let mut core = CoreDbState::new();
+            let mut core = ManifestCore::new();
 
             for (manifest, _) in ranges {
                 // First, we need to add all the external dbs
@@ -214,11 +216,11 @@ impl Manifest {
 #[cfg(test)]
 mod tests {
     use crate::bytes_range::BytesRange;
-    use crate::clock::DefaultSystemClock;
     use crate::manifest::store::{ManifestStore, StoredManifest};
+    use slatedb_common::clock::{DefaultSystemClock, SystemClock};
 
     use crate::config::CheckpointOptions;
-    use crate::db_state::{CoreDbState, SortedRun, SsTableHandle, SsTableId, SsTableInfo};
+    use crate::db_state::{ManifestCore, SortedRun, SsTableHandle, SsTableId, SsTableInfo};
     use crate::rand::DbRand;
     use bytes::Bytes;
     use object_store::memory::InMemory;
@@ -235,34 +237,32 @@ mod tests {
     #[tokio::test]
     async fn test_init_clone_manifest() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let clock: Arc<dyn SystemClock> = Arc::new(DefaultSystemClock::new());
 
         let parent_path = Path::from("/tmp/test_parent");
-        let parent_manifest_store = Arc::new(ManifestStore::new(
-            &parent_path,
-            object_store.clone(),
-            Arc::new(DefaultSystemClock::default()),
-        ));
-        let mut parent_manifest =
-            StoredManifest::create_new_db(parent_manifest_store, CoreDbState::new())
-                .await
-                .unwrap();
+        let parent_manifest_store =
+            Arc::new(ManifestStore::new(&parent_path, object_store.clone()));
+        let mut parent_manifest = StoredManifest::create_new_db(
+            parent_manifest_store,
+            ManifestCore::new(),
+            clock.clone(),
+        )
+        .await
+        .unwrap();
         let checkpoint = parent_manifest
             .write_checkpoint(uuid::Uuid::new_v4(), &CheckpointOptions::default())
             .await
             .unwrap();
 
         let clone_path = Path::from("/tmp/test_clone");
-        let clone_manifest_store = Arc::new(ManifestStore::new(
-            &clone_path,
-            object_store.clone(),
-            Arc::new(DefaultSystemClock::default()),
-        ));
+        let clone_manifest_store = Arc::new(ManifestStore::new(&clone_path, object_store.clone()));
         let clone_stored_manifest = StoredManifest::create_uninitialized_clone(
             Arc::clone(&clone_manifest_store),
             parent_manifest.manifest(),
             parent_path.to_string(),
             checkpoint.id,
             Arc::new(DbRand::default()),
+            Arc::new(DefaultSystemClock::new()),
         )
         .await
         .unwrap();
@@ -295,17 +295,17 @@ mod tests {
     #[tokio::test]
     async fn test_write_new_checkpoint() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let clock: Arc<dyn SystemClock> = Arc::new(DefaultSystemClock::new());
 
         let path = Path::from("/tmp/test_db");
-        let manifest_store = Arc::new(ManifestStore::new(
-            &path,
-            object_store.clone(),
-            Arc::new(DefaultSystemClock::default()),
-        ));
-        let mut manifest =
-            StoredManifest::create_new_db(Arc::clone(&manifest_store), CoreDbState::new())
-                .await
-                .unwrap();
+        let manifest_store = Arc::new(ManifestStore::new(&path, object_store.clone()));
+        let mut manifest = StoredManifest::create_new_db(
+            Arc::clone(&manifest_store),
+            ManifestCore::new(),
+            clock.clone(),
+        )
+        .await
+        .unwrap();
 
         let checkpoint = manifest
             .write_checkpoint(uuid::Uuid::new_v4(), &CheckpointOptions::default())
@@ -319,26 +319,30 @@ mod tests {
 
     struct SstEntry {
         sst_alias: &'static str,
-        first_key: Bytes,
+        first_entry: Bytes,
         visible_range: Option<BytesRange>,
     }
 
     impl SstEntry {
-        fn regular(sst_alias: &'static str, first_key: &'static str) -> Self {
+        fn regular(sst_alias: &'static str, first_entry: &'static str) -> Self {
             Self {
                 sst_alias,
-                first_key: Bytes::copy_from_slice(first_key.as_bytes()),
+                first_entry: Bytes::copy_from_slice(first_entry.as_bytes()),
                 visible_range: None,
             }
         }
 
-        fn projected<T>(sst_alias: &'static str, first_key: &'static str, visible_range: T) -> Self
+        fn projected<T>(
+            sst_alias: &'static str,
+            first_entry: &'static str,
+            visible_range: T,
+        ) -> Self
         where
             T: RangeBounds<&'static str>,
         {
             Self {
                 sst_alias,
-                first_key: Bytes::copy_from_slice(first_key.as_bytes()),
+                first_entry: Bytes::copy_from_slice(first_entry.as_bytes()),
                 visible_range: Some(BytesRange::from_ref(visible_range)),
             }
         }
@@ -537,12 +541,12 @@ mod tests {
     where
         F: FnMut(&str) -> SsTableId,
     {
-        let mut core = CoreDbState::new();
+        let mut core = ManifestCore::new();
         for entry in &manifest.l0 {
             core.l0.push_back(SsTableHandle::new_compacted(
                 sst_id_fn(entry.sst_alias),
                 SsTableInfo {
-                    first_key: Some(entry.first_key.clone()),
+                    first_entry: Some(entry.first_entry.clone()),
                     ..SsTableInfo::default()
                 },
                 entry.visible_range.clone(),
@@ -557,7 +561,7 @@ mod tests {
                         SsTableHandle::new_compacted(
                             sst_id_fn(entry.sst_alias),
                             SsTableInfo {
-                                first_key: Some(entry.first_key.clone()),
+                                first_entry: Some(entry.first_entry.clone()),
                                 ..SsTableInfo::default()
                             },
                             entry.visible_range.clone(),
@@ -587,9 +591,9 @@ mod tests {
                     .map(|a| a.as_str())
                     .unwrap_or("UNKNOWN");
 
-                let first_key = handle
+                let first_entry = handle
                     .info
-                    .first_key
+                    .first_entry
                     .as_ref()
                     .map(|k| format!("{:?}", k))
                     .unwrap();
@@ -607,10 +611,10 @@ mod tests {
                 };
 
                 error_msg.push_str(&format!(
-                    "{}. {} (first_key: {}, visible_range: {}){}\n",
+                    "{}. {} (first_entry: {}, visible_range: {}){}\n",
                     idx + 1,
                     id_str,
-                    first_key,
+                    first_entry,
                     visible_range,
                     result
                 ));
@@ -622,9 +626,9 @@ mod tests {
             for (idx, handle) in expected.core.l0.iter().enumerate() {
                 let id_str = sst_aliases.get(&handle.id).unwrap();
 
-                let first_key = handle
+                let first_entry = handle
                     .info
-                    .first_key
+                    .first_entry
                     .as_ref()
                     .map(|k| format!("{:?}", k))
                     .unwrap();
@@ -636,10 +640,10 @@ mod tests {
                     .unwrap_or_else(|| "None".to_string());
 
                 error_msg.push_str(&format!(
-                    "{}. {} (first_key: {}, visible_range: {})\n",
+                    "{}. {} (first_entry: {}, visible_range: {})\n",
                     idx + 1,
                     id_str,
-                    first_key,
+                    first_entry,
                     visible_range
                 ));
             }

@@ -1,20 +1,22 @@
+use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fmt::{Display, Formatter};
 
 use log::{error, info};
+use serde::{Deserialize, Serialize};
 use ulid::Ulid;
 
-use crate::db_state::{CoreDbState, SortedRun, SsTableHandle};
+use crate::db_state::{ManifestCore, SortedRun, SsTableHandle};
 use crate::error::SlateDBError;
 use crate::manifest::Manifest;
-use crate::transactional_object::DirtyObject;
+use slatedb_txn_obj::DirtyObject;
 
 /// Identifier for a compaction input source.
 ///
 /// A `SourceId` distinguishes between two kinds of inputs a compaction can read:
 /// an existing compacted sorted run (identified by its run id), or an L0 SSTable
 /// (identified by its ULID).
-#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SourceId {
     SortedRun(u32),
     Sst(Ulid),
@@ -67,7 +69,7 @@ impl SourceId {
 
 /// Immutable spec that describes a compaction. Currently, this only holds the
 /// input sources and destination SR id for a compaction.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CompactionSpec {
     /// Input sources for the compaction.
     sources: Vec<SourceId>,
@@ -103,7 +105,43 @@ impl Display for CompactionSpec {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         let displayed_sources: Vec<String> =
             self.sources().iter().map(|s| format!("{}", s)).collect();
-        write!(f, "{:?} -> {}", displayed_sources, self.destination())
+        write!(f, "{:?} -> SR({})", displayed_sources, self.destination())
+    }
+}
+
+/// Lifecycle status for a compaction.
+///
+/// State transitions:
+/// ```text
+/// Submitted <-> Running --> Completed
+///     |             |
+///     |             v
+///     +----------> Failed
+/// ```
+///
+/// `Completed` and `Failed` are terminal states.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub enum CompactionStatus {
+    /// The compaction has been submitted but not yet started.
+    Submitted,
+    /// The compaction is currently running.
+    Running,
+    /// The compaction finished successfully.
+    Completed,
+    /// The compaction failed. It might or might not have started before failure.
+    Failed,
+}
+
+impl CompactionStatus {
+    fn active(self) -> bool {
+        matches!(
+            self,
+            CompactionStatus::Submitted | CompactionStatus::Running
+        )
+    }
+
+    fn finished(self) -> bool {
+        matches!(self, CompactionStatus::Completed | CompactionStatus::Failed)
     }
 }
 
@@ -111,14 +149,20 @@ impl Display for CompactionSpec {
 ///
 /// A compaction is the unit tracked by the compactor: it has a stable `id` (ULID) and a `spec`
 /// (what to compact and where).
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) struct Compaction {
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Compaction {
     /// Stable id (ULID) used to track this compaction across messages and attempts.
     id: Ulid,
     /// What to compact (sources) and where to write (destination).
     spec: CompactionSpec,
     /// Total number of bytes processed so far for this compaction.
     bytes_processed: u64,
+    /// Current status for this compaction.
+    ///
+    /// This is tracked only in memory at the moment.
+    status: CompactionStatus,
+    /// Output SSTs produced by this compaction, if any.
+    output_ssts: Vec<SsTableHandle>,
 }
 
 impl Compaction {
@@ -127,14 +171,26 @@ impl Compaction {
             id,
             spec,
             bytes_processed: 0,
+            status: CompactionStatus::Submitted,
+            output_ssts: Vec::new(),
         }
+    }
+
+    pub(crate) fn with_status(mut self, status: CompactionStatus) -> Self {
+        self.status = status;
+        self
+    }
+
+    pub(crate) fn with_output_ssts(mut self, output_ssts: Vec<SsTableHandle>) -> Self {
+        self.output_ssts = output_ssts;
+        self
     }
 
     /// Returns all sorted run sources for this compaction.
     ///
     /// ## Arguments
     /// - `db_state`: The current core DB state from the manifest.
-    pub(crate) fn get_sorted_runs(&self, db_state: &CoreDbState) -> Vec<SortedRun> {
+    pub(crate) fn get_sorted_runs(&self, db_state: &ManifestCore) -> Vec<SortedRun> {
         let srs_by_id: HashMap<u32, &SortedRun> =
             db_state.compacted.iter().map(|sr| (sr.id, sr)).collect();
 
@@ -150,7 +206,7 @@ impl Compaction {
     ///
     /// ## Arguments
     /// - `db_state`: The current core DB state from the manifest.
-    pub(crate) fn get_ssts(&self, db_state: &CoreDbState) -> Vec<SsTableHandle> {
+    pub(crate) fn get_ssts(&self, db_state: &ManifestCore) -> Vec<SsTableHandle> {
         let ssts_by_id: HashMap<Ulid, &SsTableHandle> = db_state
             .l0
             .iter()
@@ -166,18 +222,52 @@ impl Compaction {
     }
 
     /// The stable id (ULID) used to track this compaction across messages and attempts.
-    pub(crate) fn id(&self) -> Ulid {
+    pub fn id(&self) -> Ulid {
         self.id
     }
 
     /// Returns the immutable compaction spec describing inputs and destination.
-    pub(crate) fn spec(&self) -> &CompactionSpec {
+    pub fn spec(&self) -> &CompactionSpec {
         &self.spec
     }
 
     /// Sets bytes processed so far for this compaction.
     pub(crate) fn set_bytes_processed(&mut self, bytes: u64) {
         self.bytes_processed = bytes;
+    }
+
+    /// Gets the bytes processed so far.
+    pub fn bytes_processed(&self) -> u64 {
+        self.bytes_processed
+    }
+
+    /// Returns the current status of this compaction.
+    pub fn status(&self) -> CompactionStatus {
+        self.status
+    }
+
+    /// Sets the output SSTs produced by this compaction.
+    pub(crate) fn set_output_ssts(&mut self, output_ssts: Vec<SsTableHandle>) {
+        assert!(
+            output_ssts.starts_with(self.output_ssts.as_slice()),
+            "new output SSTs must always extend previous output SSTs"
+        );
+        self.output_ssts = output_ssts;
+    }
+
+    /// Returns the output SSTs produced by this compaction.
+    pub fn output_ssts(&self) -> &Vec<SsTableHandle> {
+        &self.output_ssts
+    }
+
+    /// Sets the current status of this compaction.
+    pub(crate) fn set_status(&mut self, status: CompactionStatus) {
+        self.status = status;
+    }
+
+    /// Returns true if the compaction is active (submitted or running).
+    pub fn active(&self) -> bool {
+        self.status.active()
     }
 }
 
@@ -189,11 +279,142 @@ impl Display for Compaction {
             .iter()
             .map(|s| format!("{}", s))
             .collect();
-        write!(f, "{:?} -> {}", displayed_sources, self.spec.destination(),)?;
+        write!(
+            f,
+            "{:?} -> SR({})",
+            displayed_sources,
+            self.spec.destination(),
+        )?;
         if self.bytes_processed > 0 {
-            write!(f, " ({} bytes processed)", self.bytes_processed)?;
+            let human_bytes_processed = crate::utils::format_bytes_si(self.bytes_processed);
+
+            write!(f, " ({} processed)", human_bytes_processed)?;
         }
         Ok(())
+    }
+}
+
+/// Represents an immutable in-memory view of .compactions file that is suitable
+/// to expose to end-users.
+#[derive(Clone, Debug, Serialize)]
+pub struct CompactionsCore {
+    /// The set of recent compactions tracked by this compactor. These may
+    /// be pending, in progress, or recently completed (either with success
+    /// or failure).
+    recent_compactions: BTreeMap<Ulid, Compaction>,
+}
+
+impl CompactionsCore {
+    pub(crate) fn new() -> Self {
+        Self {
+            recent_compactions: BTreeMap::new(),
+        }
+    }
+
+    pub(crate) fn with_compactions(mut self, compactions: BTreeMap<Ulid, Compaction>) -> Self {
+        self.recent_compactions = compactions;
+        self
+    }
+
+    /// Returns an iterator over all recent compactions. Recent compactions include all
+    /// active (submitted or running) compactions as well as the most recently finished
+    /// compaction (failed or completed).
+    pub fn recent_compactions(&self) -> impl Iterator<Item = &Compaction> {
+        self.recent_compactions.values()
+    }
+}
+
+/// Container for compactions tracked by the compactor alongside its epoch.
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct Compactions {
+    // The current compactor's epoch.
+    pub(crate) compactor_epoch: u64,
+    pub(crate) core: CompactionsCore,
+}
+
+impl Compactions {
+    pub(crate) fn new(compactor_epoch: u64) -> Self {
+        Self {
+            compactor_epoch,
+            core: CompactionsCore::new(),
+        }
+    }
+
+    pub(crate) fn with_compactions(mut self, compactions: Vec<Compaction>) -> Self {
+        let recent_compactions = compactions
+            .into_iter()
+            .map(|c| (c.id(), c))
+            .collect::<BTreeMap<Ulid, Compaction>>();
+        self.core.recent_compactions = recent_compactions;
+        self
+    }
+
+    /// Inserts a new compaction to be tracked.
+    pub(crate) fn insert(&mut self, compaction: Compaction) {
+        self.core
+            .recent_compactions
+            .insert(compaction.id, compaction);
+    }
+
+    /// Returns the tracked compaction for the specified id, if any.
+    pub(crate) fn get(&self, compaction_id: &Ulid) -> Option<&Compaction> {
+        self.core.recent_compactions.get(compaction_id)
+    }
+
+    pub(crate) fn get_mut(&mut self, compaction_id: &Ulid) -> Option<&mut Compaction> {
+        self.core.recent_compactions.get_mut(compaction_id)
+    }
+
+    /// Returns true if the specified compaction id is being tracked.
+    #[cfg(test)]
+    pub(crate) fn contains(&self, compaction_id: &Ulid) -> bool {
+        self.core.recent_compactions.contains_key(compaction_id)
+    }
+
+    /// Returns an iterator over all tracked compactions.
+    pub(crate) fn iter(&self) -> impl Iterator<Item = &Compaction> {
+        self.core.recent_compactions.values()
+    }
+
+    /// Returns an iterator over mutable compactions.
+    pub(crate) fn iter_mut(&mut self) -> impl Iterator<Item = &mut Compaction> {
+        self.core.recent_compactions.values_mut()
+    }
+
+    /// Returns an iterator over all active (submitted or running) compactions.
+    pub(crate) fn iter_active(&self) -> impl Iterator<Item = &Compaction> {
+        self.core.recent_compactions.values().filter(|c| c.active())
+    }
+
+    /// Returns an iterator over all compactions with the given status.
+    pub(crate) fn iter_with_status(
+        &self,
+        status: CompactionStatus,
+    ) -> impl Iterator<Item = &Compaction> {
+        self.core
+            .recent_compactions
+            .values()
+            .filter(move |c| c.status() == status)
+    }
+
+    /// Keeps the most recently finished compaction and any active compactions, and removes others.
+    pub(crate) fn retain_active_and_last_finished(&mut self) {
+        let latest_finished = self
+            .core
+            .recent_compactions
+            .iter()
+            .filter_map(|(_, c)| {
+                if c.status().finished() {
+                    Some(c.id())
+                } else {
+                    None
+                }
+            })
+            .max();
+
+        self.core
+            .recent_compactions
+            .retain(|id, compaction| compaction.active() || Some(id) == latest_finished.as_ref());
     }
 }
 
@@ -204,22 +425,28 @@ impl Display for Compaction {
 /// - track in-flight compactions by id (ULID).
 pub struct CompactorState {
     manifest: DirtyObject<Manifest>,
-    compactions: BTreeMap<Ulid, Compaction>,
+    compactions: DirtyObject<Compactions>,
 }
 
 impl CompactorState {
-    /// Creates a new compactor state seeded with the provided dirty manifest. Compactions are
-    /// initialized empty.
-    pub(crate) fn new(manifest: DirtyObject<Manifest>) -> Self {
+    /// Creates a new compactor state seeded with the provided dirty manifest and compactions.
+    pub(crate) fn new(
+        manifest: DirtyObject<Manifest>,
+        compactions: DirtyObject<Compactions>,
+    ) -> Self {
+        assert_eq!(
+            manifest.value.compactor_epoch,
+            compactions.value.compactor_epoch
+        );
         Self {
             manifest,
-            compactions: BTreeMap::new(),
+            compactions,
         }
     }
 
     /// Returns the current in-memory core DB state derived from the manifest.
-    pub(crate) fn db_state(&self) -> &CoreDbState {
-        self.manifest.core()
+    pub(crate) fn db_state(&self) -> &ManifestCore {
+        &self.manifest.value.core
     }
 
     /// Returns the local dirty manifest that will be written back after compactions.
@@ -228,8 +455,68 @@ impl CompactorState {
     }
 
     /// Returns an iterator over all in-flight compactions.
-    pub(crate) fn compactions(&self) -> impl Iterator<Item = &Compaction> {
-        self.compactions.values()
+    pub(crate) fn active_compactions(&self) -> impl Iterator<Item = &Compaction> {
+        self.compactions.value.iter_active()
+    }
+
+    pub(crate) fn compactions_with_status(
+        &self,
+        status: CompactionStatus,
+    ) -> impl Iterator<Item = &Compaction> {
+        self.compactions.value.iter_with_status(status)
+    }
+
+    /// Returns the dirty compactions tracked by this state.
+    pub(crate) fn compactions(&self) -> &DirtyObject<Compactions> {
+        &self.compactions
+    }
+
+    /// Replaces the tracked dirty compactions with the provided value.
+    pub(crate) fn set_compactions(&mut self, compactions: DirtyObject<Compactions>) {
+        assert_eq!(
+            self.manifest.value.compactor_epoch,
+            compactions.value.compactor_epoch
+        );
+        self.compactions = compactions;
+    }
+
+    /// Merges the remote compactions view into the compactor's local state.
+    ///
+    /// This preserves local in-flight compactions while pulling in newly submitted remote
+    /// compactions (e.g. external scheduling requests).
+    pub(crate) fn merge_remote_compactions(
+        &mut self,
+        mut remote_compactions: DirtyObject<Compactions>,
+    ) {
+        let mut merged = BTreeMap::new();
+
+        for compaction in self.compactions.value.iter() {
+            merged.insert(compaction.id(), compaction.clone());
+        }
+
+        for compaction in remote_compactions.value.iter() {
+            if let Entry::Vacant(v) = merged.entry(compaction.id()) {
+                // The compactor should control all compaction state transitions. If the
+                // compactor finds a new remote compaction (a compaction that the compactor
+                // didn't create), it must be in `Submitted` status (the beginning status).
+                if !matches!(compaction.status(), CompactionStatus::Submitted) {
+                    error!(
+                        "skipping remote commpaction with unexpected (non-Submitted) status [compaction={:?}]",
+                        compaction,
+                    );
+                    continue;
+                }
+                v.insert(compaction.clone());
+            }
+        }
+
+        let mut merged_compactions = Compactions {
+            compactor_epoch: self.compactions.value.compactor_epoch,
+            core: CompactionsCore::new().with_compactions(merged),
+        };
+        merged_compactions.retain_active_and_last_finished();
+        remote_compactions.value = merged_compactions;
+        self.set_compactions(remote_compactions);
     }
 
     /// Merges the remote (writer) manifest view into the compactor's local state.
@@ -242,7 +529,7 @@ impl CompactorState {
         let my_db_state = self.db_state();
         let last_compacted_l0 = my_db_state.l0_last_compacted;
         let mut merged_l0s = VecDeque::new();
-        let writer_l0 = &remote_manifest.core().l0;
+        let writer_l0 = &remote_manifest.value.core.l0;
         for writer_l0_sst in writer_l0 {
             let writer_l0_id = writer_l0_sst.id.unwrap_compacted_id();
             // todo: this is brittle. we are relying on the l0 list always being updated in
@@ -259,7 +546,7 @@ impl CompactorState {
         }
 
         // write out the merged core db state and manifest
-        let merged = CoreDbState {
+        let merged = ManifestCore {
             initialized: remote_manifest.value.core.initialized,
             l0_last_compacted: my_db_state.l0_last_compacted,
             l0: merged_l0s,
@@ -286,7 +573,8 @@ impl CompactorState {
         let spec = compaction.spec();
         if self
             .compactions
-            .values()
+            .value
+            .iter_active()
             .map(|c| c.spec())
             .any(|c| c.destination() == spec.destination())
         {
@@ -308,31 +596,39 @@ impl CompactorState {
         }
         info!("accepted submitted compaction [compaction={}]", compaction);
 
-        self.compactions.insert(compaction.id(), compaction);
+        self.compactions
+            .value
+            .core
+            .recent_compactions
+            .insert(compaction.id(), compaction);
         Ok(())
     }
 
-    /// Removes a compaction from the in-flight map (called after completion or failure).
-    pub(crate) fn remove_compaction(&mut self, compaction_id: &Ulid) {
-        self.compactions.remove(compaction_id);
-    }
-
-    /// Mutates a running compaction in place if it exists.
+    /// Mutates a compaction in place if it exists, then trims retained state.
     pub(crate) fn update_compaction<F>(&mut self, compaction_id: &Ulid, f: F)
     where
         F: FnOnce(&mut Compaction),
     {
-        if let Some(compaction) = self.compactions.get_mut(compaction_id) {
+        if let Some(compaction) = self
+            .compactions
+            .value
+            .core
+            .recent_compactions
+            .get_mut(compaction_id)
+        {
             f(compaction);
         }
+        self.compactions.value.retain_active_and_last_finished();
     }
 
     /// Applies the effects of a finished compaction to the in-memory manifest.
     ///
     /// This removes compacted L0 SSTs and source SRs, inserts the output SR in id-descending
-    /// order, updates `l0_last_compacted`, and removes the compaction from the in-flight map.
+    /// order, updates `l0_last_compacted`, and marks the compaction finished (retaining the most
+    /// recent finished compaction for GC; see #1044).
     pub(crate) fn finish_compaction(&mut self, compaction_id: Ulid, output_sr: SortedRun) {
-        if let Some(compaction) = self.compactions.get(&compaction_id) {
+        let mut db_state = self.db_state().clone();
+        if let Some(compaction) = self.compactions.value.get_mut(&compaction_id) {
             let spec = compaction.spec();
             info!("finished compaction [spec={}]", spec);
             // reconstruct l0
@@ -347,7 +643,6 @@ impl CompactorState {
                 .chain(std::iter::once(&SourceId::SortedRun(spec.destination())))
                 .filter_map(|id| id.maybe_unwrap_sorted_run())
                 .collect();
-            let mut db_state = self.db_state().clone();
             let new_l0: VecDeque<SsTableHandle> = db_state
                 .l0
                 .iter()
@@ -371,7 +666,7 @@ impl CompactorState {
                 }
             }
             if !inserted {
-                new_compacted.push(output_sr.clone());
+                new_compacted.push(output_sr);
             }
             Self::assert_compacted_srs_in_id_order(&new_compacted);
             let first_source = spec
@@ -386,12 +681,9 @@ impl CompactorState {
             db_state.l0 = new_l0;
             db_state.compacted = new_compacted;
             self.manifest.value.core = db_state;
-            if self.compactions.remove(&compaction_id).is_none() {
-                error!(
-                    "scheduled compaction not found [compaction_id={}]",
-                    compaction_id
-                );
-            }
+            self.update_compaction(&compaction_id, |c| {
+                c.set_status(CompactionStatus::Completed);
+            });
         } else {
             error!("compaction not found [compaction_id={}]", compaction_id);
         }
@@ -415,7 +707,6 @@ mod tests {
 
     use super::*;
     use crate::checkpoint::Checkpoint;
-    use crate::clock::{DefaultSystemClock, SystemClock};
     use crate::compactor_state::SourceId::Sst;
     use crate::config::Settings;
     use crate::db::Db;
@@ -427,9 +718,161 @@ mod tests {
     use object_store::memory::InMemory;
     use object_store::path::Path;
     use object_store::ObjectStore;
+    use slatedb_common::clock::{DefaultSystemClock, SystemClock};
+    use slatedb_txn_obj::test_utils::new_dirty_object;
     use tokio::runtime::{Handle, Runtime};
 
     const PATH: &str = "/test/db";
+
+    #[test]
+    fn test_trim_keeps_latest_finished_and_active_compactions() {
+        let mut compactions = Compactions::new(0);
+        let oldest_finished = Ulid::from_parts(1, 0);
+        let latest_finished = Ulid::from_parts(2, 0);
+        let active = Ulid::from_parts(3, 0);
+
+        compactions.insert(compaction_with_status(
+            oldest_finished,
+            CompactionStatus::Completed,
+        ));
+        compactions.insert(compaction_with_status(
+            latest_finished,
+            CompactionStatus::Completed,
+        ));
+        compactions.insert(compaction_with_status(active, CompactionStatus::Submitted));
+
+        compactions.retain_active_and_last_finished();
+
+        assert!(compactions.contains(&active));
+        assert!(compactions.contains(&latest_finished));
+        assert!(!compactions.contains(&oldest_finished));
+    }
+
+    #[test]
+    fn test_compaction_status_active_and_finished() {
+        assert!(CompactionStatus::Submitted.active());
+        assert!(CompactionStatus::Running.active());
+        assert!(!CompactionStatus::Completed.active());
+        assert!(!CompactionStatus::Failed.active());
+
+        assert!(!CompactionStatus::Submitted.finished());
+        assert!(!CompactionStatus::Running.finished());
+        assert!(CompactionStatus::Completed.finished());
+        assert!(CompactionStatus::Failed.finished());
+    }
+
+    #[test]
+    fn test_trim_keeps_only_most_recent_finished_when_no_active() {
+        let mut compactions = Compactions::new(0);
+        let older = Ulid::from_parts(10, 0);
+        let middle = Ulid::from_parts(20, 0);
+        let newest = Ulid::from_parts(30, 0);
+
+        compactions.insert(compaction_with_status(older, CompactionStatus::Completed));
+        compactions.insert(compaction_with_status(middle, CompactionStatus::Failed));
+        compactions.insert(compaction_with_status(newest, CompactionStatus::Completed));
+
+        compactions.retain_active_and_last_finished();
+
+        assert!(!compactions.contains(&older));
+        assert!(!compactions.contains(&middle));
+        assert!(compactions.contains(&newest));
+    }
+
+    #[test]
+    fn test_trim_preserves_all_active_when_no_finished() {
+        let mut compactions = Compactions::new(0);
+        let submitted = Ulid::from_parts(1, 0);
+        let running = Ulid::from_parts(2, 0);
+
+        compactions.insert(compaction_with_status(
+            submitted,
+            CompactionStatus::Submitted,
+        ));
+        compactions.insert(compaction_with_status(running, CompactionStatus::Running));
+
+        compactions.retain_active_and_last_finished();
+
+        assert!(compactions.contains(&submitted));
+        assert!(compactions.contains(&running));
+    }
+
+    #[test]
+    fn test_merge_remote_compactions_preserves_local_and_adds_remote() {
+        let manifest = new_dirty_manifest();
+        let compactor_epoch = manifest.value.compactor_epoch;
+        let local_running = Ulid::from_parts(1, 0);
+        let local_finished = Ulid::from_parts(2, 0);
+
+        let mut local_compactions = new_dirty_compactions(compactor_epoch);
+        local_compactions.value.insert(compaction_with_status(
+            local_running,
+            CompactionStatus::Running,
+        ));
+        local_compactions.value.insert(compaction_with_status(
+            local_finished,
+            CompactionStatus::Completed,
+        ));
+
+        let mut state = CompactorState::new(manifest, local_compactions);
+
+        let remote_submitted = Ulid::from_parts(3, 0);
+        let mut remote_compactions = new_dirty_compactions(compactor_epoch);
+        remote_compactions.value.insert(compaction_with_status(
+            remote_submitted,
+            CompactionStatus::Submitted,
+        ));
+
+        state.merge_remote_compactions(remote_compactions);
+
+        let merged = &state.compactions.value;
+        assert!(merged.contains(&local_running));
+        assert_eq!(
+            merged.get(&local_running).expect("not found").status(),
+            CompactionStatus::Running
+        );
+        assert!(merged.contains(&local_finished));
+        assert_eq!(
+            merged.get(&local_finished).expect("not found").status(),
+            CompactionStatus::Completed
+        );
+        assert!(merged.contains(&remote_submitted));
+        assert_eq!(
+            merged.get(&remote_submitted).expect("not found").status(),
+            CompactionStatus::Submitted
+        );
+    }
+
+    #[test]
+    fn test_merge_remote_compactions_drops_non_submitted_remote() {
+        let manifest = new_dirty_manifest();
+        let compactor_epoch = manifest.value.compactor_epoch;
+
+        let local_running = Ulid::from_parts(1, 0);
+        let mut local_compactions = new_dirty_compactions(compactor_epoch);
+        local_compactions.value.insert(compaction_with_status(
+            local_running,
+            CompactionStatus::Running,
+        ));
+        let mut state = CompactorState::new(manifest, local_compactions);
+
+        let remote_running = Ulid::from_parts(3, 0);
+        let mut remote_compactions = new_dirty_compactions(compactor_epoch);
+        remote_compactions.value.insert(compaction_with_status(
+            remote_running,
+            CompactionStatus::Running,
+        ));
+
+        state.merge_remote_compactions(remote_compactions);
+
+        let merged = &state.compactions.value;
+        assert!(merged.contains(&local_running));
+        assert_eq!(
+            merged.get(&local_running).expect("not found").status(),
+            CompactionStatus::Running
+        );
+        assert!(!merged.contains(&remote_running));
+    }
 
     #[test]
     fn test_should_register_compaction() {
@@ -442,12 +885,12 @@ mod tests {
         // when:
         let compaction = Compaction::new(compaction_id, spec.clone());
         state
-            .add_compaction(compaction.clone())
+            .add_compaction(compaction)
             .expect("failed to add compaction");
 
         // then:
-        let mut compactions = state.compactions();
-        let expected = Compaction::new(compaction_id, spec.clone());
+        let mut compactions = state.active_compactions();
+        let expected = Compaction::new(compaction_id, spec);
         assert_eq!(compactions.next().expect("compaction not found"), &expected);
         assert!(compactions.next().is_none());
     }
@@ -462,7 +905,7 @@ mod tests {
         let spec = build_l0_compaction(&before_compaction.l0, 0);
         let compaction = Compaction::new(compaction_id, spec);
         state
-            .add_compaction(compaction.clone())
+            .add_compaction(compaction)
             .expect("failed to add compaction");
 
         // when:
@@ -511,7 +954,7 @@ mod tests {
         let spec = build_l0_compaction(&before_compaction.l0, 0);
         let compaction = Compaction::new(compaction_id, spec);
         state
-            .add_compaction(compaction.clone())
+            .add_compaction(compaction)
             .expect("failed to add compaction");
 
         // when:
@@ -520,10 +963,10 @@ mod tests {
             id: 0,
             ssts: compacted_ssts,
         };
-        state.finish_compaction(compaction_id, sr.clone());
+        state.finish_compaction(compaction_id, sr);
 
         // then:
-        assert_eq!(state.compactions().count(), 0)
+        assert_eq!(state.active_compactions().count(), 0)
     }
 
     #[test]
@@ -572,7 +1015,7 @@ mod tests {
         );
         let compaction = Compaction::new(compaction_id, spec);
         state
-            .add_compaction(compaction.clone())
+            .add_compaction(compaction)
             .expect("failed to add compaction");
         state.finish_compaction(
             compaction_id,
@@ -642,7 +1085,7 @@ mod tests {
         );
         let compaction = Compaction::new(compaction_id, spec);
         state
-            .add_compaction(compaction.clone())
+            .add_compaction(compaction)
             .expect("failed to add compaction");
         state.finish_compaction(
             compaction_id,
@@ -684,7 +1127,9 @@ mod tests {
     #[test]
     fn test_should_merge_db_state_with_new_checkpoints() {
         // given:
-        let mut state = CompactorState::new(new_dirty_manifest());
+        let manifest = new_dirty_manifest();
+        let compactions = new_dirty_compactions(manifest.value.compactor_epoch);
+        let mut state = CompactorState::new(manifest, compactions);
         // mimic an externally added checkpoint
         let mut dirty = new_dirty_manifest();
         let checkpoint = Checkpoint {
@@ -721,7 +1166,7 @@ mod tests {
             0,
         );
         let compaction = Compaction::new(compaction_id, spec);
-        let result = state.add_compaction(compaction.clone());
+        let result = state.add_compaction(compaction);
 
         // then:
         assert!(result.is_ok());
@@ -752,13 +1197,21 @@ mod tests {
         let compaction_id = rand.rng().gen_ulid(system_clock.as_ref());
         let spec = CompactionSpec::new(sources, 0);
         let compaction = Compaction::new(compaction_id, spec);
-        let result = state.add_compaction(compaction.clone());
+        let result = state.add_compaction(compaction);
 
         // or simply:
         assert!(result.is_ok());
     }
 
     // test helpers
+
+    fn new_dirty_compactions(compactor_epoch: u64) -> DirtyObject<Compactions> {
+        new_dirty_object(1u64, Compactions::new(compactor_epoch))
+    }
+
+    fn compaction_with_status(id: Ulid, status: CompactionStatus) -> Compaction {
+        Compaction::new(id, CompactionSpec::new(vec![], 0)).with_status(status)
+    }
 
     fn run_for<T, F>(duration: Duration, mut f: F) -> Option<T>
     where
@@ -867,15 +1320,15 @@ mod tests {
         let system_clock: Arc<dyn SystemClock> = Arc::new(DefaultSystemClock::new());
         let rand: Arc<DbRand> = Arc::new(DbRand::default());
 
-        let manifest_store = Arc::new(ManifestStore::new(
-            &Path::from(PATH),
-            os.clone(),
-            system_clock.clone(),
-        ));
+        let manifest_store = Arc::new(ManifestStore::new(&Path::from(PATH), os.clone()));
         let stored_manifest = tokio_handle
-            .block_on(StoredManifest::load(manifest_store))
+            .block_on(StoredManifest::load(
+                manifest_store,
+                Arc::new(DefaultSystemClock::new()),
+            ))
             .unwrap();
-        let state = CompactorState::new(stored_manifest.prepare_dirty().unwrap());
+        let compactions = new_dirty_compactions(stored_manifest.manifest().compactor_epoch);
+        let state = CompactorState::new(stored_manifest.prepare_dirty().unwrap(), compactions);
         (os, stored_manifest, state, system_clock, rand)
     }
 }

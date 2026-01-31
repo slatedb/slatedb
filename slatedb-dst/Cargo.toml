@@ -26,6 +26,7 @@ parking_lot = { workspace = true }
 rand = { workspace = true }
 rusqlite = { version = "0.37.0", features = ["bundled"] }
 slatedb = { workspace = true, features = ["lz4", "snappy", "test-util", "wal_disable", "zlib", "zstd"] }
+slatedb-common = { workspace = true }
 thiserror.workspace = true
 tokio = { workspace = true, features = ["macros", "test-util", "rt"] }
 tracing = { workspace = true }
@@ -33,6 +34,7 @@ tracing-subscriber = { workspace = true, features = ["fmt", "env-filter"] }
 
 [dev-dependencies]
 rstest = { workspace = true }
+slatedb-common = { workspace = true, features = ["test-util"] }
 sysinfo = { workspace = true }
 
 [lints]

@@ -25,7 +25,7 @@ pub(crate) struct CachedObjectStore {
 }
 
 impl CachedObjectStore {
-    pub fn new(
+    pub(crate) fn new(
         object_store: Arc<dyn ObjectStore>,
         cache_storage: Arc<dyn LocalCacheStorage>,
         part_size_bytes: usize,
@@ -46,14 +46,14 @@ impl CachedObjectStore {
         }))
     }
 
-    pub async fn start_evictor(&self) {
+    pub(crate) async fn start_evictor(&self) {
         self.cache_storage.start_evictor().await;
     }
 
     /// Load files into cache up to a maximum number of bytes.
     /// This method fetches objects from the provided paths and stores them in the cache
     /// until the specified max_bytes limit is reached.
-    pub async fn load_files_to_cache(
+    pub(crate) async fn load_files_to_cache(
         &self,
         file_paths: Vec<Path>,
         max_bytes: usize,
@@ -113,7 +113,7 @@ impl CachedObjectStore {
         Ok(())
     }
 
-    pub async fn cached_head(&self, location: &Path) -> object_store::Result<ObjectMeta> {
+    pub(crate) async fn cached_head(&self, location: &Path) -> object_store::Result<ObjectMeta> {
         let entry = self.cache_storage.entry(location, self.part_size_bytes);
         match entry.read_head().await {
             Ok(Some((meta, _))) => Ok(meta),
@@ -136,7 +136,7 @@ impl CachedObjectStore {
         }
     }
 
-    pub async fn cached_get_opts(
+    pub(crate) async fn cached_get_opts(
         &self,
         location: &Path,
         opts: GetOptions,
@@ -580,10 +580,10 @@ mod tests {
     use crate::cached_object_store::stats::CachedObjectStoreStats;
     use crate::cached_object_store::storage_fs::FsCacheStorage;
     use crate::cached_object_store::{storage::PartID, storage_fs::FsCacheEntry};
-    use crate::clock::DefaultSystemClock;
     use crate::rand::DbRand;
     use crate::stats::StatRegistry;
     use crate::test_utils::gen_rand_bytes;
+    use slatedb_common::clock::DefaultSystemClock;
 
     fn new_test_cache_folder() -> std::path::PathBuf {
         let mut rng = rand::rng();
@@ -735,7 +735,7 @@ mod tests {
         let stats_registry = StatRegistry::new();
         let stats = Arc::new(CachedObjectStoreStats::new(&stats_registry));
         let cache_storage = Arc::new(FsCacheStorage::new(
-            test_cache_folder.clone(),
+            test_cache_folder,
             None,
             None,
             stats.clone(),
@@ -825,7 +825,7 @@ mod tests {
         let stats_registry = StatRegistry::new();
         let stats = Arc::new(CachedObjectStoreStats::new(&stats_registry));
         let cache_storage = Arc::new(FsCacheStorage::new(
-            test_cache_folder.clone(),
+            test_cache_folder,
             None,
             None,
             stats.clone(),
@@ -848,7 +848,7 @@ mod tests {
         let stats_registry = StatRegistry::new();
         let stats = Arc::new(CachedObjectStoreStats::new(&stats_registry));
         let cache_storage = Arc::new(FsCacheStorage::new(
-            test_cache_folder.clone(),
+            test_cache_folder,
             None,
             None,
             stats.clone(),

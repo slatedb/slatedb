@@ -31,7 +31,7 @@ use std::sync::Arc;
 /// A [`DbIteratorRangeTracker`] can be passed to [`DbIterator`] optionally. If it's passed, you can retrieve
 /// the range of keys scanned by [`DbIterator`] from it.
 #[derive(Debug)]
-pub struct DbIteratorRangeTracker {
+pub(crate) struct DbIteratorRangeTracker {
     inner: Mutex<DbIteratorRangeTrackerInner>,
 }
 
@@ -43,7 +43,7 @@ struct DbIteratorRangeTrackerInner {
 }
 
 impl DbIteratorRangeTracker {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             inner: Mutex::new(DbIteratorRangeTrackerInner {
                 first_key: None,
@@ -53,7 +53,7 @@ impl DbIteratorRangeTracker {
         }
     }
 
-    pub fn track_key(&self, key: &Bytes) {
+    fn track_key(&self, key: &Bytes) {
         let mut inner = self.inner.lock();
 
         inner.first_key = Some(match &inner.first_key {
@@ -71,7 +71,7 @@ impl DbIteratorRangeTracker {
         inner.has_data = true;
     }
 
-    pub fn get_range(&self) -> Option<BytesRange> {
+    pub(crate) fn get_range(&self) -> Option<BytesRange> {
         let inner = self.inner.lock();
         match (&inner.first_key, &inner.last_key) {
             (Some(first), Some(last)) => {
@@ -85,7 +85,7 @@ impl DbIteratorRangeTracker {
         }
     }
 
-    pub fn has_data(&self) -> bool {
+    pub(crate) fn has_data(&self) -> bool {
         self.inner.lock().has_data
     }
 }
@@ -260,7 +260,16 @@ impl DbIterator {
         };
 
         if let Some(merge_operator) = merge_operator {
-            iter = Box::new(MergeOperatorIterator::new(merge_operator, iter, true, now));
+            iter = Box::new(MergeOperatorIterator::new(
+                merge_operator,
+                iter,
+                true,
+                now,
+                // Its important not to set a snapshot seq num barrier for this merge iterator
+                // The entries in the write batch iterator have seq num u64::MAX and any merges
+                // there need to be merged with the entries from the other iterators.
+                None,
+            ));
         } else {
             // When no merge operator is configured, wrap with iterator that errors on merge operands
             iter = Box::new(MergeOperatorRequiredIterator::new(iter));

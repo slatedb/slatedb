@@ -5,7 +5,7 @@ pub(crate) mod runner {
 
     pub(crate) fn new(source_file: &'static str, rng_seed: Option<[u8; 32]>) -> TestRunner {
         let rng = rng::new_test_rng(rng_seed);
-        let mut config = proptest::test_runner::contextualize_config(Config::default().clone());
+        let mut config = proptest::test_runner::contextualize_config(Config::default());
         config.source_file = Some(source_file);
         TestRunner::new_with_rng(config, rng)
     }
@@ -72,10 +72,7 @@ pub(crate) mod arbitrary {
                         Included(start.clone()),
                         Excluded(end.clone())
                     )),
-                    Just(BytesRange::new(
-                        Excluded(start.clone()),
-                        Included(end.clone())
-                    )),
+                    Just(BytesRange::new(Excluded(start), Included(end))),
                 ]
             })
     }
@@ -86,7 +83,7 @@ pub(crate) mod arbitrary {
                 Just(BytesRange::new(Unbounded, Included(a.clone()))),
                 Just(BytesRange::new(Unbounded, Excluded(a.clone()))),
                 Just(BytesRange::new(Included(a.clone()), Unbounded)),
-                Just(BytesRange::new(Excluded(a.clone()), Unbounded)),
+                Just(BytesRange::new(Excluded(a), Unbounded)),
             ]
         })
     }
@@ -106,10 +103,7 @@ pub(crate) mod arbitrary {
                     Included(a.clone()),
                     Excluded(a_extended.clone())
                 )),
-                Just(BytesRange::new(
-                    Excluded(a.clone()),
-                    Included(a_extended.clone())
-                )),
+                Just(BytesRange::new(Excluded(a), Included(a_extended))),
             ]
         })
     }
@@ -141,7 +135,7 @@ pub(crate) mod arbitrary {
             prop_oneof![
                 Just(BytesRange::new(Excluded(a.clone()), Excluded(a.clone()))),
                 Just(BytesRange::new(Included(a.clone()), Excluded(a.clone()))),
-                Just(BytesRange::new(Excluded(a.clone()), Included(a.clone()))),
+                Just(BytesRange::new(Excluded(a.clone()), Included(a))),
             ]
         })
     }
@@ -172,11 +166,11 @@ pub(crate) mod arbitrary {
                 ),
                 (
                     Just(range1.clone()),
-                    Just(BytesRange::new(Unbounded, Included(end.clone())))
+                    Just(BytesRange::new(Unbounded, Included(end)))
                 ),
                 (
                     Just(range1.clone()),
-                    Just(BytesRange::new(Included(start.clone()), Unbounded))
+                    Just(BytesRange::new(Included(start), Unbounded))
                 ),
                 (
                     Just(range1.clone()),

@@ -1,7 +1,6 @@
 package slatedb
 
 /*
-#cgo LDFLAGS: -lslatedb_go
 #include "slatedb.h"
 #include <stdlib.h>
 #include <string.h>
@@ -78,6 +77,15 @@ const (
 	DurabilityRemote DurabilityLevel = 1 // Only data persisted to object storage
 )
 
+// PreloadLevel represents different levels of cache preloading on startup
+type PreloadLevel string
+
+const (
+	NoPreload PreloadLevel = ""       // Default, no preloading during database startup
+	L0Sst     PreloadLevel = "L0Sst"  // Preload only L0 SSTs (most recently written files)
+	AllSst    PreloadLevel = "AllSst" // Preload all SSTs (both L0 and compacted levels)
+)
+
 // WriteOptions controls write operation behavior
 type WriteOptions struct {
 	AwaitDurable bool // Default: true
@@ -109,6 +117,7 @@ type DbReaderOptions struct {
 	ManifestPollInterval uint64 // How often to poll for updates (in milliseconds). Default: 10000 (10s) if 0
 	CheckpointLifetime   uint64 // How long checkpoints should live (in milliseconds). Default: 600000 (10m) if 0
 	MaxMemtableBytes     uint64 // Max size of in-memory table for WAL buffering. Default: 67108864 (64MB) if 0
+	SkipWalReplay        bool   // When true, skip WAL replay entirely (only see compacted data). Default: false
 }
 
 // Settings represents SlateDB configuration that mirrors Rust's Settings struct exactly
@@ -143,12 +152,12 @@ type CompactorOptions struct {
 
 // ObjectStoreCacheOptions represents object store caching configuration
 type ObjectStoreCacheOptions struct {
-	RootFolder                string `json:"root_folder,omitempty"`
-	ScanInterval              string `json:"scan_interval,omitempty"`
-	MaxCacheSizeBytes         uint64 `json:"max_cache_size_bytes,omitempty"`
-	PartSizeBytes             uint64 `json:"part_size_bytes,omitempty"`
-	CachePuts                 *bool  `json:"cache_puts,omitempty"`
-	PreloadDiskCacheOnStartup *bool  `json:"preload_disk_cache_on_startup,omitempty"`
+	RootFolder                string       `json:"root_folder,omitempty"`
+	ScanInterval              string       `json:"scan_interval,omitempty"`
+	MaxCacheSizeBytes         uint64       `json:"max_cache_size_bytes,omitempty"`
+	PartSizeBytes             uint64       `json:"part_size_bytes,omitempty"`
+	CachePuts                 *bool        `json:"cache_puts,omitempty"`
+	PreloadDiskCacheOnStartup PreloadLevel `json:"preload_disk_cache_on_startup,omitempty"`
 }
 
 // GarbageCollectorOptions represents garbage collection configuration
@@ -158,9 +167,10 @@ type ObjectStoreCacheOptions struct {
 // - Empty GarbageCollectorOptions{}: Garbage collection enabled with Rust defaults
 // - Specific directory options: Garbage collection enabled for all directories, options applied to specific directories
 type GarbageCollectorOptions struct {
-	Manifest  *GarbageCollectorDirectoryOptions `json:"manifest_options,omitempty"`
-	Wal       *GarbageCollectorDirectoryOptions `json:"wal_options,omitempty"`
-	Compacted *GarbageCollectorDirectoryOptions `json:"compacted_options,omitempty"`
+	Manifest    *GarbageCollectorDirectoryOptions `json:"manifest_options,omitempty"`
+	Wal         *GarbageCollectorDirectoryOptions `json:"wal_options,omitempty"`
+	Compacted   *GarbageCollectorDirectoryOptions `json:"compacted_options,omitempty"`
+	Compactions *GarbageCollectorDirectoryOptions `json:"compactions_options,omitempty"`
 }
 
 // GarbageCollectorDirectoryOptions represents per-directory GC configuration
@@ -364,7 +374,7 @@ func MergeSettings(base, override *Settings) *Settings {
 			if override.ObjectStoreCacheOptions.CachePuts != nil {
 				merged.CachePuts = override.ObjectStoreCacheOptions.CachePuts
 			}
-			if override.ObjectStoreCacheOptions.PreloadDiskCacheOnStartup != nil {
+			if override.ObjectStoreCacheOptions.PreloadDiskCacheOnStartup != NoPreload {
 				merged.PreloadDiskCacheOnStartup = override.ObjectStoreCacheOptions.PreloadDiskCacheOnStartup
 			}
 			result.ObjectStoreCacheOptions = &merged
@@ -485,5 +495,6 @@ func convertToCReaderOptions(opts *DbReaderOptions) *C.CSdbReaderOptions {
 		manifest_poll_interval_ms: C.uint64_t(opts.ManifestPollInterval),
 		checkpoint_lifetime_ms:    C.uint64_t(opts.CheckpointLifetime),
 		max_memtable_bytes:        C.uint64_t(opts.MaxMemtableBytes),
+		skip_wal_replay:           C.bool(opts.SkipWalReplay),
 	}
 }

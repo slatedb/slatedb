@@ -51,6 +51,49 @@ class InternalError(Exception):
     """Raised for unexpected internal errors."""
 
 
+class CompactionSourceSortedRun(TypedDict):
+    SortedRun: int
+
+
+class CompactionSourceSst(TypedDict):
+    Sst: str
+
+
+CompactionSource = CompactionSourceSortedRun | CompactionSourceSst
+
+
+class CompactionSpec:
+    """Represents a compaction spec for admin submission."""
+
+    def __init__(self, sources: list[CompactionSource], destination: int) -> None:
+        """
+        Args:
+            sources: List of sources, each {"SortedRun": int} or {"Sst": "<ulid>"}.
+            destination: Sorted run id for the compaction output.
+        """
+        ...
+
+
+class SlateDBCompactionRequest:
+    """Represents a compaction request for admin submission."""
+
+    @staticmethod
+    def full() -> SlateDBCompactionRequest:
+        """Create a full compaction request."""
+        ...
+
+    @staticmethod
+    def spec(spec: CompactionSpec) -> SlateDBCompactionRequest:
+        """
+        Create a spec-based compaction request.
+
+        Example:
+            >>> spec = CompactionSpec([{"SortedRun": 3}], 3)
+            >>> req = SlateDBCompactionRequest.spec(spec)
+        """
+        ...
+
+
 class SlateDB:
     """
     Read/write interface to a SlateDB database.
@@ -369,6 +412,41 @@ class SlateDB:
         """
         ...
 
+    def scan_prefix(self, prefix: bytes) -> DbIterator:
+        """
+        Iterate over keys sharing a prefix using default scan options.
+
+        Args:
+            prefix: Prefix to match; empty scans all keys.
+
+        Returns:
+            :class:`DbIterator` yielding ``(key, value)`` pairs for the prefix.
+
+        Examples:
+            >>> for k, v in db.scan_prefix(b"pre"):
+            ...     print((k, v))
+            (b'pre1', b'v1')
+            (b'pre2', b'v2')
+        """
+        ...
+
+    async def scan_prefix_async(self, prefix: bytes) -> DbIterator:
+        """
+        Async variant of ``scan_prefix``.
+
+        Args:
+            prefix: Prefix to match; empty scans all keys.
+
+        Returns:
+            :class:`DbIterator` suitable for ``async for``.
+
+        Example:
+            >>> it = await db.scan_prefix_async(b"pre")
+            >>> async for k, v in it:
+            ...     print((k, v))
+        """
+        ...
+
     def scan_with_options(
         self,
         start: bytes,
@@ -400,6 +478,38 @@ class SlateDB:
             ...     print((k, v))
             (b'a', b'v')
             (b'b', b'v2')
+        """
+        ...
+
+    def scan_prefix_with_options(
+        self,
+        prefix: bytes,
+        *,
+        durability_filter: Literal["remote", "memory"] | None = None,
+        dirty: bool | None = None,
+        read_ahead_bytes: int | None = None,
+        cache_blocks: bool | None = None,
+        max_fetch_tasks: int | None = None,
+    ) -> DbIterator:
+        """
+        Iterate over a prefix with custom scan options.
+
+        Args:
+            prefix: Prefix to match; empty scans all keys.
+            durability_filter: Restrict sources ("remote" or "memory").
+            dirty: Include unflushed data if ``True``.
+            read_ahead_bytes: Read-ahead size hint.
+            cache_blocks: Cache blocks during iteration if ``True``.
+            max_fetch_tasks: Limit background fetch task count.
+
+        Returns:
+            :class:`DbIterator` over the requested prefix.
+
+        Examples:
+            >>> for k, v in db.scan_prefix_with_options(b"pre", cache_blocks=True):
+            ...     print((k, v))
+            (b'pre1', b'v1')
+            (b'pre2', b'v2')
         """
         ...
 
@@ -435,6 +545,37 @@ class SlateDB:
             ...     print((k, v))
             (b'a', b'v')
             (b'a2', b'v2')
+        """
+        ...
+
+    async def scan_prefix_with_options_async(
+        self,
+        prefix: bytes,
+        *,
+        durability_filter: Literal["remote", "memory"] | None = None,
+        dirty: bool | None = None,
+        read_ahead_bytes: int | None = None,
+        cache_blocks: bool | None = None,
+        max_fetch_tasks: int | None = None,
+    ) -> DbIterator:
+        """
+        Async variant of ``scan_prefix_with_options``.
+
+        Args:
+            prefix: Prefix to match; empty scans all keys.
+            durability_filter: Restrict sources ("remote" or "memory").
+            dirty: Include unflushed data if ``True``.
+            read_ahead_bytes: Read-ahead size hint.
+            cache_blocks: Cache blocks during iteration if ``True``.
+            max_fetch_tasks: Limit background fetch task count.
+
+        Returns:
+            :class:`DbIterator` over the requested prefix for async iteration.
+
+        Example:
+            >>> it = await db.scan_prefix_with_options_async(b"pre", cache_blocks=True)
+            >>> async for k, v in it:
+            ...     print((k, v))
         """
         ...
 
@@ -841,6 +982,41 @@ class SlateDBSnapshot:
         """
         ...
 
+    def scan_prefix(self, prefix: bytes) -> DbIterator:
+        """
+        Iterate over keys with a shared prefix in the snapshot.
+
+        Args:
+            prefix: Prefix to match; empty scans all keys.
+
+        Returns:
+            :class:`DbIterator` over ``(key, value)`` pairs at the snapshot.
+
+        Examples:
+            >>> for k, v in snap.scan_prefix(b"sp"):
+            ...     print((k, v))
+            (b'sp1', b'v1')
+            (b'sp2', b'v2')
+        """
+        ...
+
+    async def scan_prefix_async(self, prefix: bytes) -> DbIterator:
+        """
+        Async variant of ``scan_prefix``.
+
+        Args:
+            prefix: Prefix to match; empty scans all keys.
+
+        Returns:
+            :class:`DbIterator` for async iteration at the snapshot.
+
+        Example:
+            >>> it = await snap.scan_prefix_async(b"sp")
+            >>> async for k, v in it:
+            ...     print((k, v))
+        """
+        ...
+
     def scan_with_options(
         self,
         start: bytes,
@@ -876,6 +1052,36 @@ class SlateDBSnapshot:
         """
         ...
 
+    def scan_prefix_with_options(
+        self,
+        prefix: bytes,
+        *,
+        durability_filter: Literal["remote", "memory"] | None = None,
+        dirty: bool | None = None,
+        read_ahead_bytes: int | None = None,
+        cache_blocks: bool | None = None,
+        max_fetch_tasks: int | None = None,
+    ) -> DbIterator:
+        """
+        Iterate over a prefix with custom scan options in the snapshot.
+
+        Args:
+            prefix: Prefix to match; empty scans all keys.
+            durability_filter: Restrict sources ("remote" or "memory").
+            dirty: Ignored for snapshots (reads are committed-only).
+            read_ahead_bytes: Read-ahead size hint.
+            cache_blocks: Cache blocks during iteration if ``True``.
+            max_fetch_tasks: Limit background fetch task count.
+
+        Returns:
+            :class:`DbIterator` over the requested prefix.
+
+        Examples:
+            >>> for k, v in snap.scan_prefix_with_options(b"sp", cache_blocks=True):
+            ...     print((k, v))
+        """
+        ...
+
     async def scan_with_options_async(
         self,
         start: bytes,
@@ -908,6 +1114,37 @@ class SlateDBSnapshot:
             ...     print((k, v))
             (b'a', b'v')
             (b'a2', b'v2')
+        """
+        ...
+
+    async def scan_prefix_with_options_async(
+        self,
+        prefix: bytes,
+        *,
+        durability_filter: Literal["remote", "memory"] | None = None,
+        dirty: bool | None = None,
+        read_ahead_bytes: int | None = None,
+        cache_blocks: bool | None = None,
+        max_fetch_tasks: int | None = None,
+    ) -> DbIterator:
+        """
+        Async variant of ``scan_prefix_with_options``.
+
+        Args:
+            prefix: Prefix to match; empty scans all keys.
+            durability_filter: Restrict sources ("remote" or "memory").
+            dirty: Ignored for snapshots (reads are committed-only).
+            read_ahead_bytes: Read-ahead size hint.
+            cache_blocks: Cache blocks during iteration if ``True``.
+            max_fetch_tasks: Limit background fetch task count.
+
+        Returns:
+            :class:`DbIterator` for async iteration over the requested prefix.
+
+        Example:
+            >>> it = await snap.scan_prefix_with_options_async(b\"sp\", cache_blocks=True)
+            >>> async for k, v in it:
+            ...     print((k, v))
         """
         ...
 
@@ -1058,6 +1295,39 @@ class SlateDBTransaction:
         """
         ...
 
+    def scan_prefix(self, prefix: bytes) -> DbIterator:
+        """
+        Iterate over keys with a shared prefix within the transaction.
+
+        Args:
+            prefix: Prefix to match; empty scans all keys.
+
+        Returns:
+            :class:`DbIterator` over ``(key, value)`` pairs reflecting in-transaction writes.
+
+        Examples:
+            >>> for k, v in txn.scan_prefix(b"tp"):
+            ...     print((k, v))
+        """
+        ...
+
+    async def scan_prefix_async(self, prefix: bytes) -> DbIterator:
+        """
+        Async variant of ``scan_prefix`` for transactions.
+
+        Args:
+            prefix: Prefix to match; empty scans all keys.
+
+        Returns:
+            :class:`DbIterator` suitable for ``async for`` and reflecting in-transaction writes.
+
+        Example:
+            >>> it = await txn.scan_prefix_async(b"tp")
+            >>> async for k, v in it:
+            ...     print((k, v))
+        """
+        ...
+
     def scan_with_options(
         self,
         start: bytes,
@@ -1094,6 +1364,36 @@ class SlateDBTransaction:
         """
         ...
 
+    def scan_prefix_with_options(
+        self,
+        prefix: bytes,
+        *,
+        durability_filter: Literal["remote", "memory"] | None = None,
+        dirty: bool | None = None,
+        read_ahead_bytes: int | None = None,
+        cache_blocks: bool | None = None,
+        max_fetch_tasks: int | None = None,
+    ) -> DbIterator:
+        """
+        Iterate over a prefix with custom scan options within the transaction.
+
+        Args:
+            prefix: Prefix to match; empty scans all keys.
+            durability_filter: Restrict sources ("remote" or "memory").
+            dirty: Include unflushed data if ``True``.
+            read_ahead_bytes: Read-ahead size hint.
+            cache_blocks: Cache blocks during iteration if ``True``.
+            max_fetch_tasks: Limit background fetch task count.
+
+        Returns:
+            :class:`DbIterator` over the requested prefix reflecting in-transaction writes.
+
+        Examples:
+            >>> for k, v in txn.scan_prefix_with_options(b"tp", cache_blocks=True):
+            ...     print((k, v))
+        """
+        ...
+
     async def scan_with_options_async(
         self,
         start: bytes,
@@ -1127,6 +1427,37 @@ class SlateDBTransaction:
             ...     print((k, v))
             (b'a', b'v')
             (b'a2', b'v2')
+        """
+        ...
+
+    async def scan_prefix_with_options_async(
+        self,
+        prefix: bytes,
+        *,
+        durability_filter: Literal["remote", "memory"] | None = None,
+        dirty: bool | None = None,
+        read_ahead_bytes: int | None = None,
+        cache_blocks: bool | None = None,
+        max_fetch_tasks: int | None = None,
+    ) -> DbIterator:
+        """
+        Async variant of ``scan_prefix_with_options`` within the transaction.
+
+        Args:
+            prefix: Prefix to match; empty scans all keys.
+            durability_filter: Restrict sources ("remote" or "memory").
+            dirty: Include unflushed data if ``True``.
+            read_ahead_bytes: Read-ahead size hint.
+            cache_blocks: Cache blocks during iteration if ``True``.
+            max_fetch_tasks: Limit background fetch task count.
+
+        Returns:
+            :class:`DbIterator` for async iteration over the requested prefix reflecting in-transaction writes.
+
+        Example:
+            >>> it = await txn.scan_prefix_with_options_async(b\"tp\", cache_blocks=True)
+            >>> async for k, v in it:
+            ...     print((k, v))
         """
         ...
 
@@ -1424,6 +1755,39 @@ class SlateDBReader:
         """
         ...
 
+    def scan_prefix(self, prefix: bytes) -> DbIterator:
+        """
+        Iterate over keys with a shared prefix using the reader.
+
+        Args:
+            prefix: Prefix to match; empty scans all keys.
+
+        Returns:
+            :class:`DbIterator` yielding ``(key, value)`` pairs.
+
+        Examples:
+            >>> for k, v in reader.scan_prefix(b"pre"):
+            ...     print((k, v))
+        """
+        ...
+
+    async def scan_prefix_async(self, prefix: bytes) -> DbIterator:
+        """
+        Async variant of ``scan_prefix``.
+
+        Args:
+            prefix: Prefix to match; empty scans all keys.
+
+        Returns:
+            :class:`DbIterator` suitable for ``async for``.
+
+        Example:
+            >>> it = await reader.scan_prefix_async(b"pre")
+            >>> async for k, v in it:
+            ...     print((k, v))
+        """
+        ...
+
     def scan_with_options(
         self,
         start: bytes,
@@ -1459,6 +1823,36 @@ class SlateDBReader:
         """
         ...
 
+    def scan_prefix_with_options(
+        self,
+        prefix: bytes,
+        *,
+        durability_filter: Literal["remote", "memory"] | None = None,
+        dirty: bool | None = None,
+        read_ahead_bytes: int | None = None,
+        cache_blocks: bool | None = None,
+        max_fetch_tasks: int | None = None,
+    ) -> DbIterator:
+        """
+        Iterate over a prefix with custom scan options using the reader.
+
+        Args:
+            prefix: Prefix to match; empty scans all keys.
+            durability_filter: Restrict sources ("remote" or "memory").
+            dirty: Ignored by readers; reads are committed-only.
+            read_ahead_bytes: Read-ahead size hint.
+            cache_blocks: Cache blocks during iteration if ``True``.
+            max_fetch_tasks: Limit background fetch task count.
+
+        Returns:
+            :class:`DbIterator` over the requested prefix.
+
+        Examples:
+            >>> for k, v in reader.scan_prefix_with_options(b"pre", cache_blocks=True):
+            ...     print((k, v))
+        """
+        ...
+
     async def scan_with_options_async(
         self,
         start: bytes,
@@ -1491,6 +1885,37 @@ class SlateDBReader:
             ...     print((k, v))
             (b'a', b'v')
             (b'a2', b'v2')
+        """
+        ...
+
+    async def scan_prefix_with_options_async(
+        self,
+        prefix: bytes,
+        *,
+        durability_filter: Literal["remote", "memory"] | None = None,
+        dirty: bool | None = None,
+        read_ahead_bytes: int | None = None,
+        cache_blocks: bool | None = None,
+        max_fetch_tasks: int | None = None,
+    ) -> DbIterator:
+        """
+        Async variant of ``scan_prefix_with_options`` using the reader.
+
+        Args:
+            prefix: Prefix to match; empty scans all keys.
+            durability_filter: Restrict sources ("remote" or "memory").
+            dirty: Ignored by readers.
+            read_ahead_bytes: Read-ahead size hint.
+            cache_blocks: Cache blocks during iteration if ``True``.
+            max_fetch_tasks: Limit background fetch task count.
+
+        Returns:
+            :class:`DbIterator` for async iteration over the requested prefix.
+
+        Example:
+            >>> it = await reader.scan_prefix_with_options_async(b\"pre\", cache_blocks=True)
+            >>> async for k, v in it:
+            ...     print((k, v))
         """
         ...
 
@@ -1797,6 +2222,95 @@ class SlateDBAdmin:
         """
         ...
 
+    def read_compactions(self, id: int | None = None) -> str | None:
+        """
+        Read the latest or a specific compactions file as a JSON string.
+
+        Args:
+            id: Optional compactions file id to read. If ``None``, reads the latest.
+
+        Returns:
+            JSON string of the compactions file, or ``None`` if none exist.
+        """
+        ...
+
+    async def read_compactions_async(self, id: int | None = None) -> str | None:
+        """
+        Async variant of ``read_compactions``.
+
+        Args:
+            id: Optional compactions file id to read.
+
+        Returns:
+            JSON string of the compactions file, or ``None``.
+        """
+        ...
+
+    def list_compactions(self, start: int | None = None, end: int | None = None) -> str:
+        """
+        List compactions files within an optional [start, end) range as JSON.
+
+        Args:
+            start: Optional inclusive start id.
+            end: Optional exclusive end id.
+
+        Returns:
+            JSON string containing a list of compactions file metadata.
+        """
+        ...
+
+    async def list_compactions_async(self, start: int | None = None, end: int | None = None) -> str:
+        """
+        Async variant of ``list_compactions``.
+
+        Args:
+            start: Optional inclusive start id.
+            end: Optional exclusive end id.
+
+        Returns:
+            JSON string containing a list of compactions file metadata.
+        """
+        ...
+
+    def read_compaction(self, id: str, compactions_id: int | None = None) -> str | None:
+        """
+        Read a specific compaction by ULID from a compactions file.
+
+        Args:
+            id: ULID of the compaction to read.
+            compactions_id: Optional compactions file id to read from. If ``None``, reads latest.
+
+        Returns:
+            JSON string of the compaction, or ``None`` if not found.
+        """
+        ...
+
+    async def read_compaction_async(
+        self, id: str, compactions_id: int | None = None
+    ) -> str | None:
+        """
+        Async variant of ``read_compaction``.
+        """
+        ...
+
+    def submit_compaction(self, spec: CompactionSpec) -> str:
+        """
+        Submit a compaction request and return the submitted compaction.
+
+        Args:
+            spec: Compaction spec describing the sources and destination.
+
+        Returns:
+            JSON string of the submitted compaction.
+        """
+        ...
+
+    async def submit_compaction_async(self, spec: CompactionSpec) -> str:
+        """
+        Async variant of ``submit_compaction``.
+        """
+        ...
+
     def create_checkpoint(
         self,
         *,
@@ -1846,9 +2360,12 @@ class SlateDBAdmin:
         """
         ...
 
-    def list_checkpoints(self) -> list[Checkpoint]:
+    def list_checkpoints(self, name: str | None = None) -> list[Checkpoint]:
         """
         List known checkpoints for the database path/object store.
+
+        Args:
+            name: Optional checkpoint name. When present, only exact matches will be returned.
 
         Returns:
             A list of :class:`Checkpoint` metadata dicts.
@@ -1859,12 +2376,15 @@ class SlateDBAdmin:
         """
         ...
 
-    async def list_checkpoints_async(self) -> list[Checkpoint]:
+    async def list_checkpoints_async(self, name: str | None = None) -> list[Checkpoint]:
         """
         Async variant of ``list_checkpoints``.
 
         Returns:
             A list of :class:`Checkpoint` metadata dicts.
+
+        Args:
+            name: Optional checkpoint name. When present, only exact matches will be returned.
 
         Examples:
             >>> await admin.list_checkpoints_async()

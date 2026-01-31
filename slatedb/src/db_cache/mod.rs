@@ -11,6 +11,7 @@
 //!
 //! To use the cache, you need to configure the [DbOptions](crate::config::DbOptions) with the desired cache implementation.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -18,12 +19,11 @@ use chrono::{DateTime, TimeDelta, Utc};
 use log::{debug, error, trace};
 use parking_lot::Mutex;
 
-use crate::clock::SystemClock;
 use crate::db_cache::stats::DbCacheStats;
+use crate::format::block::Block;
 use crate::stats::StatRegistry;
-use crate::{
-    block::Block, db_state::SsTableId, filter::BloomFilter, flatbuffer_types::SsTableIndexOwned,
-};
+use crate::{db_state::SsTableId, filter::BloomFilter, flatbuffer_types::SsTableIndexOwned};
+use slatedb_common::clock::SystemClock;
 
 #[cfg(feature = "foyer")]
 pub mod foyer;
@@ -37,6 +37,9 @@ mod serde;
 pub const DEFAULT_MAX_CAPACITY: u64 = 64 * 1024 * 1024;
 pub const DEFAULT_BLOCK_CACHE_CAPACITY: u64 = 512 * 1024 * 1024;
 pub const DEFAULT_META_CACHE_CAPACITY: u64 = 128 * 1024 * 1024;
+
+/// Atomic counter to generate unique scope IDs for `DbCacheWrapper` instances.
+static NEXT_CACHE_SCOPE_ID: AtomicU64 = AtomicU64::new(0);
 
 /// A trait for slatedb's in-memory cache.
 ///
@@ -140,16 +143,38 @@ pub trait DbCache: Send + Sync {
 
 /// A key used to identify a cached entry.
 ///
-/// The key is a tuple of an SSTable ID and a block ID.
-/// The tuple is private to this module, so the implementation details
-/// of the cache are not exposed publicly.
+/// The key is composed of a scope ID (set per [`DbCacheWrapper`] instance), an SSTable ID,
+/// and a block ID. The fields are private to this module, so the implementation details of the
+/// cache are not exposed publicly.
 #[non_exhaustive]
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub struct CachedKey(SsTableId, u64);
+pub struct CachedKey {
+    /// Scope identifier set per `DbCacheWrapper`. This ensures that multiple `Db` instances
+    /// sharing the same underlying cache do not collide on WAL or compacted file entries.
+    /// Scope `0` is reserved for legacy keys created before scoping existed; new wrappers
+    /// always receive unique scope IDs starting at `1`.
+    pub(crate) scope_id: u64,
+    pub(crate) sst_id: SsTableId,
+    pub(crate) block_id: u64,
+}
+
+impl CachedKey {
+    fn with_scope(&self, scope_id: u64) -> Self {
+        Self {
+            scope_id,
+            sst_id: self.sst_id,
+            block_id: self.block_id,
+        }
+    }
+}
 
 impl From<(SsTableId, u64)> for CachedKey {
     fn from((sst_id, block_id): (SsTableId, u64)) -> Self {
-        Self(sst_id, block_id)
+        Self {
+            scope_id: 0,
+            sst_id,
+            block_id,
+        }
     }
 }
 
@@ -322,9 +347,9 @@ impl DbCache for SplitCache {
 
     #[allow(dead_code)]
     async fn remove(&self, key: &CachedKey) {
-        // Because `CachedKey` is uniquely identified by (SST ID, offset), given a `CachedKey`, it
-        // will only appear in the block cache or meta cache, which is safe and will not cause duplicate
-        // deletion.
+        // Because `CachedKey` is uniquely identified by (scope ID, SST ID, offset), given a
+        // `CachedKey`, it will only appear in the block cache or meta cache, which is safe and
+        // will not cause duplicate deletion.
         if let Some(ref cache) = self.block_cache {
             cache.remove(key).await;
         }
@@ -339,17 +364,27 @@ impl DbCache for SplitCache {
     }
 }
 
-pub struct DbCacheWrapper {
+/// Wraps a [`DbCache`] to add statistics, error logging, and cache scoping.
+///
+/// ## Scoping
+/// When multiple `Db` instances share the same underlying cache object, this wrapper assigns a
+/// unique `scope_id` so their entries do not collide. All cache operations transparently rewrite
+/// keys to include the wrapper's `scope_id`, isolating WAL and compacted SST entries per wrapper.
+pub(crate) struct DbCacheWrapper {
     stats: DbCacheStats,
     system_clock: Arc<dyn SystemClock>,
     cache: Arc<dyn DbCache>,
+    /// Unique identifier applied to every key passed through this wrapper. This prevents different
+    /// `DbCacheWrapper` instances that share the same cache from clobbering each other's entries.
+    /// Legacy keys use scope `0`; new wrappers are assigned distinct, non-zero scopes.
+    scope_id: u64,
     // Records the last time that the wrapper logged an error from the wrapped cache at error
     // level. Used to ensure we only log at error level once every ERROR_LOG_INTERVAL.
     last_err_log_time: Mutex<Option<DateTime<Utc>>>,
 }
 
 impl DbCacheWrapper {
-    pub fn new(
+    pub(crate) fn new(
         cache: Arc<dyn DbCache>,
         stats_registry: &StatRegistry,
         system_clock: Arc<dyn SystemClock>,
@@ -357,6 +392,7 @@ impl DbCacheWrapper {
         Self {
             stats: DbCacheStats::new(stats_registry),
             cache,
+            scope_id: NEXT_CACHE_SCOPE_ID.fetch_add(1, Ordering::Relaxed),
             last_err_log_time: Mutex::new(None),
             system_clock,
         }
@@ -368,6 +404,10 @@ impl DbCacheWrapper {
 const ERROR_LOG_INTERVAL: TimeDelta = TimeDelta::seconds(1);
 
 impl DbCacheWrapper {
+    fn scoped_key(&self, key: &CachedKey) -> CachedKey {
+        key.with_scope(self.scope_id)
+    }
+
     fn record_get_err(&self, block_type: &str, err: &crate::Error) {
         let log_at_err = {
             let mut guard = self.last_err_log_time.lock();
@@ -401,7 +441,8 @@ impl DbCacheWrapper {
 #[async_trait]
 impl DbCache for DbCacheWrapper {
     async fn get_block(&self, key: &CachedKey) -> Result<Option<CachedEntry>, crate::Error> {
-        let entry = match self.cache.get_block(key).await {
+        let scoped_key = self.scoped_key(key);
+        let entry = match self.cache.get_block(&scoped_key).await {
             Ok(e) => e,
             Err(err) => {
                 self.record_get_err("block", &err);
@@ -417,7 +458,8 @@ impl DbCache for DbCacheWrapper {
     }
 
     async fn get_index(&self, key: &CachedKey) -> Result<Option<CachedEntry>, crate::Error> {
-        let entry = match self.cache.get_index(key).await {
+        let scoped_key = self.scoped_key(key);
+        let entry = match self.cache.get_index(&scoped_key).await {
             Ok(e) => e,
             Err(err) => {
                 self.record_get_err("index", &err);
@@ -433,7 +475,8 @@ impl DbCache for DbCacheWrapper {
     }
 
     async fn get_filter(&self, key: &CachedKey) -> Result<Option<CachedEntry>, crate::Error> {
-        let entry = match self.cache.get_filter(key).await {
+        let scoped_key = self.scoped_key(key);
+        let entry = match self.cache.get_filter(&scoped_key).await {
             Ok(e) => e,
             Err(err) => {
                 self.record_get_err("filter", &err);
@@ -449,12 +492,14 @@ impl DbCache for DbCacheWrapper {
     }
 
     async fn insert(&self, key: CachedKey, value: CachedEntry) {
-        self.cache.insert(key, value).await
+        let scoped_key = self.scoped_key(&key);
+        self.cache.insert(scoped_key, value).await
     }
 
     #[allow(dead_code)]
     async fn remove(&self, key: &CachedKey) {
-        self.cache.remove(key).await
+        let scoped_key = self.scoped_key(key);
+        self.cache.remove(&scoped_key).await
     }
 
     fn entry_count(&self) -> u64 {
@@ -569,16 +614,19 @@ pub(crate) mod test_utils {
 #[cfg(test)]
 mod tests {
 
-    use crate::clock::DefaultSystemClock;
     use crate::db_cache::{CachedEntry, CachedKey, DbCache, DbCacheWrapper, SplitCache};
     use crate::db_state::SsTableId;
+    use crate::filter::BloomFilterBuilder;
+    use crate::format::block::BlockBuilder;
+    use slatedb_common::clock::DefaultSystemClock;
 
     use crate::flatbuffer_types::test_utils::assert_index_clamped;
 
     use crate::db_cache::test_utils::TestCache;
-    use crate::sst::{EncodedSsTable, SsTableFormat};
+    use crate::format::sst::{EncodedSsTable, SsTableFormat};
     use crate::stats::{ReadableStat, StatRegistry};
     use crate::test_utils::build_test_sst;
+    use crate::types::RowEntry;
     use rstest::{fixture, rstest};
     use std::sync::Arc;
     use ulid::Ulid;
@@ -587,7 +635,10 @@ mod tests {
 
     #[rstest]
     #[tokio::test]
-    async fn test_should_count_filter_hits(cache: DbCacheWrapper, sst: EncodedSsTable) {
+    async fn test_should_count_filter_hits(
+        cache: DbCacheWrapper,
+        #[future(awt)] sst: EncodedSsTable,
+    ) {
         // given:
         let key = CachedKey::from((SST_ID, 12345u64));
         cache
@@ -625,7 +676,10 @@ mod tests {
 
     #[rstest]
     #[tokio::test]
-    async fn test_should_count_index_hits(cache: DbCacheWrapper, sst: EncodedSsTable) {
+    async fn test_should_count_index_hits(
+        cache: DbCacheWrapper,
+        #[future(awt)] sst: EncodedSsTable,
+    ) {
         // given:
         let key = CachedKey::from((SST_ID, 12345u64));
         cache
@@ -650,11 +704,11 @@ mod tests {
     async fn test_should_clamp_entries_to_cache(
         cache: DbCacheWrapper,
         sst_format: SsTableFormat,
-        sst: EncodedSsTable,
+        #[future(awt)] sst: EncodedSsTable,
     ) {
         // given:
         let bytes = sst.remaining_as_bytes();
-        let index = Arc::new(sst_format.read_index_raw(&sst.info, &bytes).unwrap());
+        let index = Arc::new(sst_format.read_index_raw(&sst.info, &bytes).await.unwrap());
         let key = CachedKey::from((SST_ID, 12345u64));
         cache
             .insert(key.clone(), CachedEntry::with_sst_index(index.clone()))
@@ -688,12 +742,13 @@ mod tests {
     async fn test_should_count_data_block_hits(
         cache: DbCacheWrapper,
         sst_format: SsTableFormat,
-        sst: EncodedSsTable,
+        #[future(awt)] sst: EncodedSsTable,
     ) {
         // given:
         let data = sst.remaining_as_bytes();
         let block = sst_format
             .read_block_raw(&sst.info, &sst.index, 0, &data)
+            .await
             .unwrap();
         let key = CachedKey::from((SST_ID, 12345u64));
         cache
@@ -726,6 +781,90 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn test_cache_wrapper_scopes_keys() {
+        let registry_a = StatRegistry::new();
+        let registry_b = StatRegistry::new();
+        let system_clock = Arc::new(DefaultSystemClock::default());
+        let shared_cache: Arc<dyn DbCache> = Arc::new(TestCache::new());
+        let cache_a = DbCacheWrapper::new(shared_cache.clone(), &registry_a, system_clock.clone());
+        let cache_b = DbCacheWrapper::new(shared_cache.clone(), &registry_b, system_clock);
+        assert_ne!(cache_a.scope_id, cache_b.scope_id);
+
+        let mut builder = BloomFilterBuilder::new(1);
+        builder.add_key(b"a");
+        let filter = Arc::new(builder.build());
+        let key = CachedKey::from((SST_ID, 1u64));
+
+        cache_a
+            .insert(key.clone(), CachedEntry::with_bloom_filter(filter.clone()))
+            .await;
+
+        assert!(cache_a.get_filter(&key).await.unwrap().is_some());
+        assert!(cache_b.get_filter(&key).await.unwrap().is_none());
+
+        cache_b
+            .insert(key.clone(), CachedEntry::with_bloom_filter(filter))
+            .await;
+
+        assert_eq!(2, shared_cache.entry_count());
+    }
+
+    #[tokio::test]
+    async fn test_cache_wrapper_scopes_index_entries() {
+        let registry_a = StatRegistry::new();
+        let registry_b = StatRegistry::new();
+        let system_clock = Arc::new(DefaultSystemClock::default());
+        let shared_cache: Arc<dyn DbCache> = Arc::new(TestCache::new());
+        let cache_a = DbCacheWrapper::new(shared_cache.clone(), &registry_a, system_clock.clone());
+        let cache_b = DbCacheWrapper::new(shared_cache.clone(), &registry_b, system_clock);
+
+        let sst = build_test_sst(&SsTableFormat::default(), 1).await;
+        let index = Arc::new(sst.index);
+        let key = CachedKey::from((SST_ID, 2u64));
+
+        cache_a
+            .insert(key.clone(), CachedEntry::with_sst_index(index.clone()))
+            .await;
+
+        assert!(cache_a.get_index(&key).await.unwrap().is_some());
+        assert!(cache_b.get_index(&key).await.unwrap().is_none());
+
+        cache_b
+            .insert(key.clone(), CachedEntry::with_sst_index(index))
+            .await;
+
+        assert_eq!(2, shared_cache.entry_count());
+    }
+
+    #[tokio::test]
+    async fn test_cache_wrapper_scopes_block_entries() {
+        let registry_a = StatRegistry::new();
+        let registry_b = StatRegistry::new();
+        let system_clock = Arc::new(DefaultSystemClock::default());
+        let shared_cache: Arc<dyn DbCache> = Arc::new(TestCache::new());
+        let cache_a = DbCacheWrapper::new(shared_cache.clone(), &registry_a, system_clock.clone());
+        let cache_b = DbCacheWrapper::new(shared_cache.clone(), &registry_b, system_clock);
+
+        let mut builder = BlockBuilder::new(4096);
+        assert!(builder.add(RowEntry::new_value(b"k1", b"v1", 0)));
+        let block = Arc::new(builder.build().unwrap());
+        let key = CachedKey::from((SST_ID, 3u64));
+
+        cache_a
+            .insert(key.clone(), CachedEntry::with_block(block.clone()))
+            .await;
+
+        assert!(cache_a.get_block(&key).await.unwrap().is_some());
+        assert!(cache_b.get_block(&key).await.unwrap().is_none());
+
+        cache_b
+            .insert(key.clone(), CachedEntry::with_block(block))
+            .await;
+
+        assert_eq!(2, shared_cache.entry_count());
+    }
+
     #[fixture]
     fn cache() -> DbCacheWrapper {
         let registry = StatRegistry::new();
@@ -750,7 +889,7 @@ mod tests {
     }
 
     #[fixture]
-    fn sst(sst_format: SsTableFormat) -> EncodedSsTable {
-        build_test_sst(&sst_format, 1)
+    async fn sst(sst_format: SsTableFormat) -> EncodedSsTable {
+        build_test_sst(&sst_format, 1).await
     }
 }

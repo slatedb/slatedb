@@ -115,10 +115,10 @@ impl DbCache for FoyerHybridCache {
 
 #[cfg(test)]
 mod tests {
-    use crate::block::BlockBuilder;
     use crate::db_cache::foyer_hybrid::FoyerHybridCache;
     use crate::db_cache::{CachedEntry, CachedKey, DbCache};
     use crate::db_state::SsTableId;
+    use crate::format::block::BlockBuilder;
     use crate::types::RowAttributes;
     use foyer::{DirectFsDeviceOptions, Engine, HybridCacheBuilder};
     use rand::RngCore;
@@ -133,7 +133,7 @@ mod tests {
         let (cache, _dir) = setup().await;
         let mut items = HashMap::new();
         for b in 0u64..256 {
-            let k = CachedKey(SST_ID, b);
+            let k = CachedKey::from((SST_ID, b));
             let v = build_block();
             cache.insert(k.clone(), v.clone()).await;
             items.insert(k, v);

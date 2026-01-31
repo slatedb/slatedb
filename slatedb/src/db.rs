@@ -26,14 +26,16 @@ use std::sync::Arc;
 use bytes::Bytes;
 use fail_parallel::FailPointRegistry;
 use object_store::path::Path;
-use object_store::registry::{DefaultObjectStoreRegistry, ObjectStoreRegistry};
-use object_store::ObjectStore;
+use object_store::prefix::PrefixStore;
+use object_store::{parse_url_opts, ObjectStore};
 
 use crate::compactor::COMPACTOR_TASK_NAME;
-use crate::db_transaction::DBTransaction;
+use crate::db_transaction::DbTransaction;
 use crate::dispatcher::MessageHandlerExecutor;
 use crate::garbage_collector::GC_TASK_NAME;
 use crate::transaction_manager::IsolationLevel;
+use crate::CloseReason;
+use log::{info, trace, warn};
 use parking_lot::RwLock;
 use std::time::Duration;
 use tokio::sync::mpsc::UnboundedSender;
@@ -43,7 +45,6 @@ use crate::batch_write::{WriteBatchMessage, WRITE_BATCH_TASK_NAME};
 use crate::bytes_range::BytesRange;
 use crate::cached_object_store::CachedObjectStore;
 use crate::clock::MonotonicClock;
-use crate::clock::{LogicalClock, SystemClock};
 use crate::config::{
     FlushOptions, FlushType, MergeOptions, PreloadLevel, PutOptions, ReadOptions, ScanOptions,
     Settings, WriteOptions,
@@ -55,6 +56,7 @@ use crate::db_state::{DbState, SsTableId};
 use crate::db_stats::DbStats;
 use crate::error::SlateDBError;
 use crate::manifest::store::FenceableManifest;
+use crate::manifest::Manifest;
 use crate::mem_table::WritableKVTable;
 use crate::mem_table_flush::{MemtableFlushMsg, MEMTABLE_FLUSHER_TASK_NAME};
 use crate::oracle::{DbOracle, Oracle};
@@ -65,15 +67,15 @@ use crate::sst_iter::SstIteratorOptions;
 use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
 use crate::transaction_manager::TransactionManager;
-use crate::utils::{MonotonicSeq, SendSafely};
+use crate::utils::{format_bytes_si, MonotonicSeq, SendSafely};
 use crate::wal_buffer::{WalBufferManager, WAL_BUFFER_TASK_NAME};
 use crate::wal_replay::{WalReplayIterator, WalReplayOptions};
-use log::{info, trace, warn};
+use slatedb_common::clock::SystemClock;
+use slatedb_txn_obj::DirtyObject;
 
-pub mod builder;
-use crate::manifest::Manifest;
-use crate::transactional_object::DirtyObject;
 pub use builder::DbBuilder;
+
+pub(crate) mod builder;
 
 pub(crate) struct DbInner {
     pub(crate) state: Arc<RwLock<DbState>>,
@@ -101,9 +103,8 @@ pub(crate) struct DbInner {
 }
 
 impl DbInner {
-    pub async fn new(
+    pub(crate) async fn new(
         settings: Settings,
-        logical_clock: Arc<dyn LogicalClock>,
         system_clock: Arc<dyn SystemClock>,
         rand: Arc<DbRand>,
         table_store: Arc<TableStore>,
@@ -115,7 +116,7 @@ impl DbInner {
         merge_operator: Option<crate::merge_operator::MergeOperatorType>,
     ) -> Result<Self, SlateDBError> {
         // both last_seq and last_committed_seq will be updated after WAL replay.
-        let last_l0_seq = manifest.core().last_l0_seq;
+        let last_l0_seq = manifest.value.core.last_l0_seq;
         let last_seq = MonotonicSeq::new(last_l0_seq);
         let last_committed_seq = MonotonicSeq::new(last_l0_seq);
         let last_remote_persisted_seq = MonotonicSeq::new(last_l0_seq);
@@ -126,8 +127,8 @@ impl DbInner {
         ));
 
         let mono_clock = Arc::new(MonotonicClock::new(
-            logical_clock,
-            manifest.core().last_l0_clock_tick,
+            system_clock.clone(),
+            manifest.value.core.last_l0_clock_tick,
         ));
 
         // state are mostly manifest, including IMM, L0, etc.
@@ -181,26 +182,26 @@ impl DbInner {
     }
 
     /// Get the value for a given key.
-    pub async fn get_with_options<K: AsRef<[u8]>>(
+    pub(crate) async fn get_with_options<K: AsRef<[u8]>>(
         &self,
         key: K,
         options: &ReadOptions,
     ) -> Result<Option<Bytes>, SlateDBError> {
         self.db_stats.get_requests.inc();
-        self.check_closed()?;
+        self.status()?;
         let db_state = self.state.read().view();
         self.reader
             .get_with_options(key, options, &db_state, None, None)
             .await
     }
 
-    pub async fn scan_with_options(
+    pub(crate) async fn scan_with_options(
         &self,
         range: BytesRange,
         options: &ScanOptions,
     ) -> Result<DbIterator, SlateDBError> {
         self.db_stats.scan_requests.inc();
-        self.check_closed()?;
+        self.status()?;
         let db_state = self.state.read().view();
         self.reader
             .scan_with_options(range, options, &db_state, None, None, None)
@@ -252,18 +253,17 @@ impl DbInner {
         return true;
     }
 
-    pub async fn write_with_options(
+    pub(crate) async fn write_with_options(
         &self,
         batch: WriteBatch,
         options: &WriteOptions,
     ) -> Result<(), SlateDBError> {
-        self.check_closed()?;
+        self.db_stats.write_batch_count.inc();
+        self.db_stats.write_ops.add(batch.ops.len() as u64);
+        self.status()?;
         if batch.ops.is_empty() {
             return Ok(());
         }
-        // record write batch and number of operations
-        self.db_stats.write_batch_count.inc();
-        self.db_stats.write_ops.add(batch.ops.len() as u64);
 
         let (tx, rx) = tokio::sync::oneshot::channel();
         let batch_msg = WriteBatchMessage {
@@ -301,7 +301,7 @@ impl DbInner {
                         .iter()
                         .map(|imm| {
                             let metadata = imm.table().metadata();
-                            self.table_store.estimate_encoded_size(
+                            self.table_store.estimate_encoded_size_compacted(
                                 metadata.entry_num,
                                 metadata.entries_size_in_bytes,
                             )
@@ -311,23 +311,26 @@ impl DbInner {
                 (wal_size_bytes, imm_memtable_size_bytes)
             };
             let total_mem_size_bytes = wal_size_bytes + imm_memtable_size_bytes;
+            self.db_stats
+                .total_mem_size_bytes
+                .set(total_mem_size_bytes as i64);
 
             trace!(
                 "checking backpressure [total_mem_size_bytes={}, wal_size_bytes={}, imm_memtable_size_bytes={}, max_unflushed_bytes={}]",
-                total_mem_size_bytes,
-                wal_size_bytes,
-                imm_memtable_size_bytes,
-                self.settings.max_unflushed_bytes,
+                format_bytes_si(total_mem_size_bytes as u64),
+                format_bytes_si(wal_size_bytes as u64),
+                format_bytes_si(imm_memtable_size_bytes as u64),
+                format_bytes_si(self.settings.max_unflushed_bytes as u64),
             );
 
             if total_mem_size_bytes >= self.settings.max_unflushed_bytes {
                 self.db_stats.backpressure_count.inc();
                 warn!(
                     "unflushed memtable size exceeds max_unflushed_bytes. applying backpressure. [total_mem_size_bytes={}, wal_size_bytes={}, imm_memtable_size_bytes={}, max_unflushed_bytes={}]",
-                    total_mem_size_bytes,
-                    wal_size_bytes,
-                    imm_memtable_size_bytes,
-                    self.settings.max_unflushed_bytes,
+                    format_bytes_si(total_mem_size_bytes as u64),
+                    format_bytes_si(wal_size_bytes as u64),
+                    format_bytes_si(imm_memtable_size_bytes as u64),
+                    format_bytes_si(self.settings.max_unflushed_bytes as u64),
                 );
 
                 let maybe_oldest_unflushed_memtable = {
@@ -409,6 +412,75 @@ impl DbInner {
         self.flush_immutable_memtables().await
     }
 
+    /// Flush in-memory writes to disk. See [`Db::flush`] for details.
+    ///
+    /// `check_status` exists so we can call flush in [`Db::close`] after marking the
+    /// database as closed.
+    ///
+    /// ## Arguments
+    /// - `check_status`: if true, checks the database status before flushing.
+    ///
+    /// ## Returns
+    /// - `Ok(())` if the flush was successful.
+    /// - `Err(SlateDBError)` if there was an error flushing the database. If
+    ///   `check_status` is true, this may return `SlateDBError::Closed` if the database
+    ///   has already been closed.
+    pub(crate) async fn flush(&self, check_status: bool) -> Result<(), SlateDBError> {
+        if self.wal_enabled {
+            self.flush_with_options(
+                FlushOptions {
+                    flush_type: FlushType::Wal,
+                },
+                check_status,
+            )
+            .await
+        } else {
+            self.flush_with_options(
+                FlushOptions {
+                    flush_type: FlushType::MemTable,
+                },
+                check_status,
+            )
+            .await
+        }
+    }
+
+    /// Flush in-memory writes to disk with custom options. See [`Db::flush_with_options`]
+    /// for details.
+    ///
+    /// `check_status` exists so we can call flush in [`Db::close`] after marking the
+    /// database as closed.
+    ///
+    /// ## Arguments
+    /// - `options`: the flush options to use.
+    /// - `check_status`: if true, checks the database status before flushing.
+    ///
+    /// ## Returns
+    /// - `Ok(())` if the flush was successful.
+    /// - `Err(SlateDBError)` if there was an error flushing the database. If
+    ///   `check_status` is true, this may return `SlateDBError::Closed` if the database
+    ///   has already been closed.
+    pub(crate) async fn flush_with_options(
+        &self,
+        options: FlushOptions,
+        check_status: bool,
+    ) -> Result<(), SlateDBError> {
+        self.db_stats.flush_requests.inc();
+        if check_status {
+            self.status()?;
+        }
+        match options.flush_type {
+            FlushType::Wal => {
+                if self.wal_enabled {
+                    self.flush_wals().await
+                } else {
+                    Err(SlateDBError::WalDisabled)
+                }
+            }
+            FlushType::MemTable => self.flush_memtables().await,
+        }
+    }
+
     async fn replay_wal(&self) -> Result<(), SlateDBError> {
         let sst_iter_options = SstIteratorOptions {
             max_fetch_tasks: 1,
@@ -464,10 +536,11 @@ impl DbInner {
         {
             Some(PreloadLevel::AllSst) => {
                 // Preload both L0 and compacted SSTs
-                let l0_count = current_state.manifest.core().l0.len();
+                let l0_count = current_state.manifest.value.core.l0.len();
                 let compacted_count: usize = current_state
                     .manifest
-                    .core()
+                    .value
+                    .core
                     .compacted
                     .iter()
                     .map(|level| level.ssts.len())
@@ -481,7 +554,8 @@ impl DbInner {
                 all_sst_paths.extend(
                     current_state
                         .manifest
-                        .core()
+                        .value
+                        .core
                         .l0
                         .iter()
                         .map(|sst_handle| path_resolver.table_path(&sst_handle.id)),
@@ -491,7 +565,8 @@ impl DbInner {
                 all_sst_paths.extend(
                     current_state
                         .manifest
-                        .core()
+                        .value
+                        .core
                         .compacted
                         .iter()
                         .flat_map(|level| &level.ssts)
@@ -511,7 +586,8 @@ impl DbInner {
                 // Preload only L0 SSTs
                 let l0_sst_paths: Vec<object_store::path::Path> = current_state
                     .manifest
-                    .core()
+                    .value
+                    .core
                     .l0
                     .iter()
                     .map(|sst_handle| path_resolver.table_path(&sst_handle.id))
@@ -541,7 +617,7 @@ impl DbInner {
     ///   (state.closed_result_reader() returns Ok(())).
     /// - `Err(e)` if the DB was closed with an error, where `e` is the error
     ///   (state.closed_result_reader() returns Err(e)).
-    pub(crate) fn check_closed(&self) -> Result<(), SlateDBError> {
+    pub(crate) fn status(&self) -> Result<(), SlateDBError> {
         let closed_result_reader = {
             let state = self.state.read();
             state.closed_result_reader()
@@ -549,13 +625,14 @@ impl DbInner {
         if let Some(result) = closed_result_reader.read() {
             return match result {
                 Ok(()) => Err(SlateDBError::Closed),
-                Err(e) => Err(e.clone()),
+                Err(e) => Err(e),
             };
         }
         Ok(())
     }
 }
 
+#[derive(Clone)]
 pub struct Db {
     pub(crate) inner: Arc<DbInner>,
     task_executor: Arc<MessageHandlerExecutor>,
@@ -646,6 +723,29 @@ impl Db {
     /// }
     /// ```
     pub async fn close(&self) -> Result<(), crate::Error> {
+        let should_flush = match self.status() {
+            // If already closed, don't close again.
+            Err(e) if matches!(e.kind(), crate::ErrorKind::Closed(CloseReason::Clean)) => {
+                return Err(e);
+            }
+            // If in failed state, allow close, but don't flush since the database
+            // might be in a bad state. Note that multiple close() calls will always
+            // run when in a failed state (vs. a clean closure, which will return
+            // Error::Closed(CloseReason::Clean) on subsequent calls).
+            Err(_) => false,
+            // Flush outstanding writes if the database is still open.
+            Ok(_) => true,
+        };
+
+        // Mark the database as closed before flushing.
+        self.inner.state.write().closed_result().write(Ok(()));
+
+        if should_flush {
+            if let Err(e) = self.inner.flush(false).await {
+                warn!("failed to flush db during close [error={:?}]", e);
+            }
+        }
+
         if let Err(e) = self.task_executor.shutdown_task(COMPACTOR_TASK_NAME).await {
             warn!("failed to shutdown compactor task [error={:?}]", e);
         }
@@ -674,7 +774,6 @@ impl Db {
             warn!("failed to shutdown memtable writer task [error={:?}]", e);
         }
 
-        self.inner.state.write().closed_result().write(Ok(()));
         info!("db closed");
         Ok(())
     }
@@ -717,7 +816,7 @@ impl Db {
     /// }
     /// ```
     pub async fn snapshot(&self) -> Result<Arc<DbSnapshot>, crate::Error> {
-        self.inner.check_closed()?;
+        self.inner.status()?;
         let seq = self.inner.oracle.last_committed_seq();
         let snapshot = DbSnapshot::new(self.inner.clone(), self.inner.txn_manager.clone(), seq);
         Ok(snapshot)
@@ -894,6 +993,95 @@ impl Db {
         let range = (start, end);
         self.inner
             .scan_with_options(BytesRange::from(range), options)
+            .await
+            .map_err(Into::into)
+    }
+
+    /// Scan all keys that share the provided prefix using the default scan options.
+    ///
+    /// ## Arguments
+    /// - `prefix`: the key prefix to scan
+    ///
+    /// ## Returns
+    /// - `Result<DbIterator, Error>`: An iterator with the results of the scan
+    ///
+    /// ## Examples
+    ///
+    /// ```
+    /// use slatedb::{Db, Error};
+    /// use slatedb::object_store::{ObjectStore, memory::InMemory};
+    /// use std::sync::Arc;
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> Result<(), Error> {
+    ///     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    ///     let db = Db::open("test_db", object_store).await?;
+    ///     db.put(b"ab", b"v0").await?;
+    ///     db.put(b"aba", b"v1").await?;
+    ///     db.put(b"b", b"v2").await?;
+    ///
+    ///     let mut iter = db.scan_prefix(b"ab").await?;
+    ///     assert_eq!(Some((b"ab", b"v0").into()), iter.next().await?);
+    ///     assert_eq!(Some((b"aba", b"v1").into()), iter.next().await?);
+    ///     assert_eq!(None, iter.next().await?);
+    ///     Ok(())
+    /// }
+    /// ```
+    pub async fn scan_prefix<P>(&self, prefix: P) -> Result<DbIterator, crate::Error>
+    where
+        P: AsRef<[u8]> + Send,
+    {
+        self.scan_prefix_with_options(prefix, &ScanOptions::default())
+            .await
+    }
+
+    /// Scan all keys that share the provided prefix with custom options.
+    ///
+    /// ## Arguments
+    /// - `prefix`: the key prefix to scan
+    /// - `options`: the scan options to use
+    ///
+    /// ## Returns
+    /// - `Result<DbIterator, Error>`: An iterator with the results of the scan
+    ///
+    /// ## Examples
+    ///
+    /// ```
+    /// use slatedb::{Db, Error};
+    /// use slatedb::config::ScanOptions;
+    /// use slatedb::object_store::{ObjectStore, memory::InMemory};
+    /// use std::sync::Arc;
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> Result<(), Error> {
+    ///     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    ///     let db = Db::open("test_db", object_store).await?;
+    ///     db.put(b"x1", b"v1").await?;
+    ///     db.put(b"x2", b"v2").await?;
+    ///     db.put(b"y", b"v3").await?;
+    ///
+    ///     let options = ScanOptions {
+    ///         cache_blocks: false,
+    ///         ..ScanOptions::default()
+    ///     };
+    ///     let mut iter = db.scan_prefix_with_options(b"x", &options).await?;
+    ///     assert_eq!(Some((b"x1", b"v1").into()), iter.next().await?);
+    ///     assert_eq!(Some((b"x2", b"v2").into()), iter.next().await?);
+    ///     assert_eq!(None, iter.next().await?);
+    ///     Ok(())
+    /// }
+    /// ```
+    pub async fn scan_prefix_with_options<P>(
+        &self,
+        prefix: P,
+        options: &ScanOptions,
+    ) -> Result<DbIterator, crate::Error>
+    where
+        P: AsRef<[u8]> + Send,
+    {
+        let range = BytesRange::from_prefix(prefix.as_ref());
+        self.inner
+            .scan_with_options(range, options)
             .await
             .map_err(Into::into)
     }
@@ -1261,17 +1449,7 @@ impl Db {
     /// }
     /// ```
     pub async fn flush(&self) -> Result<(), crate::Error> {
-        if self.inner.wal_enabled {
-            self.flush_with_options(FlushOptions {
-                flush_type: FlushType::Wal,
-            })
-            .await
-        } else {
-            self.flush_with_options(FlushOptions {
-                flush_type: FlushType::MemTable,
-            })
-            .await
-        }
+        self.inner.flush(true).await.map_err(Into::into)
     }
 
     /// Flush in-memory writes to disk with custom options.
@@ -1310,17 +1488,10 @@ impl Db {
     /// }
     /// ```
     pub async fn flush_with_options(&self, options: FlushOptions) -> Result<(), crate::Error> {
-        match options.flush_type {
-            FlushType::Wal => {
-                if self.inner.wal_enabled {
-                    self.inner.flush_wals().await
-                } else {
-                    Err(SlateDBError::WalDisabled)
-                }
-            }
-            FlushType::MemTable => self.inner.flush_memtables().await,
-        }
-        .map_err(Into::into)
+        self.inner
+            .flush_with_options(options, true)
+            .await
+            .map_err(Into::into)
     }
 
     /// Get the metrics registry for the database.
@@ -1334,7 +1505,7 @@ impl Db {
     /// - `isolation_level`: the isolation level for the transaction
     ///
     /// ## Returns
-    /// - `Result<DBTransaction, crate::Error>`: the transaction handle
+    /// - `Result<DbTransaction, crate::Error>`: the transaction handle
     ///
     /// ## Examples
     ///
@@ -1354,10 +1525,10 @@ impl Db {
     pub async fn begin(
         &self,
         isolation_level: IsolationLevel,
-    ) -> Result<DBTransaction, crate::Error> {
-        self.inner.check_closed()?;
+    ) -> Result<DbTransaction, crate::Error> {
+        self.inner.status()?;
         let seq = self.inner.oracle.last_committed_seq();
-        let txn = DBTransaction::new(
+        let txn = DbTransaction::new(
             self.inner.clone(),
             self.inner.txn_manager.clone(),
             seq,
@@ -1374,12 +1545,37 @@ impl Db {
     /// ## Returns
     /// - `Result<Arc<dyn ObjectStore>, crate::Error>`: the resolved object store
     pub fn resolve_object_store(url: &str) -> Result<Arc<dyn ObjectStore>, crate::Error> {
-        let registry = DefaultObjectStoreRegistry::new();
         let url = url
             .try_into()
             .map_err(|e| SlateDBError::InvalidObjectStoreURL(url.to_string(), e))?;
-        let (object_store, _) = registry.resolve(&url).map_err(SlateDBError::from)?;
+        // Lowercase env keys because parse_url_opts only recognizes lower case option keys.
+        let env_vars = std::env::vars().map(|(key, value)| (key.to_ascii_lowercase(), value));
+        let (object_store, path) = parse_url_opts(&url, env_vars).map_err(SlateDBError::from)?;
+        let object_store: Arc<dyn ObjectStore> = if path.as_ref().is_empty() {
+            Arc::from(object_store)
+        } else {
+            let object_store = Arc::from(object_store);
+            Arc::new(PrefixStore::new(object_store, path))
+        };
         Ok(object_store)
+    }
+
+    /// Check the database status.
+    ///
+    /// This is a passive check that does not perform any I/O. The status is checked at
+    /// least every [`Settings::manifest_poll_interval`], but might also be updated based
+    /// on other internal events or user-facing operations.
+    ///
+    /// Once a database is closed, either normally or due to an error, it can't be reopened.
+    /// A new `Db` instance must be created to access the database again.
+    ///
+    /// ## Returns
+    /// - `Ok(())` if the DB is still open.
+    /// - `Err(ErrorKind::Closed)` if the DB was closed normally.
+    /// - `Err(e)` if the DB was closed with an error, where `e` is the error that caused
+    ///   the closure.
+    pub fn status(&self) -> Result<(), crate::Error> {
+        self.inner.status().map_err(|e| e.into())
     }
 }
 
@@ -1408,51 +1604,48 @@ impl DbRead for Db {
 
 #[cfg(test)]
 mod tests {
-    use async_trait::async_trait;
-    use chrono::TimeDelta;
-    #[cfg(feature = "test-util")]
-    use chrono::{TimeZone, Utc};
-    use fail_parallel::FailPointRegistry;
-    use std::collections::BTreeMap;
-    use std::collections::Bound::Included;
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::time::Duration;
-
     use super::*;
     use crate::cached_object_store::stats::{
         OBJECT_STORE_CACHE_PART_ACCESS, OBJECT_STORE_CACHE_PART_HITS,
     };
     use crate::cached_object_store::{CachedObjectStore, FsCacheStorage};
     use crate::cached_object_store_stats::CachedObjectStoreStats;
-    use crate::clock::DefaultSystemClock;
-    #[cfg(feature = "test-util")]
-    use crate::clock::MockSystemClock;
     use crate::config::DurabilityLevel::{Memory, Remote};
     use crate::config::{
         CompactorOptions, GarbageCollectorDirectoryOptions, GarbageCollectorOptions,
-        ObjectStoreCacheOptions, Settings, SizeTieredCompactionSchedulerOptions, Ttl,
+        ObjectStoreCacheOptions, PutOptions, Settings, Ttl, WriteOptions,
     };
     use crate::db::builder::GarbageCollectorBuilder;
-    use crate::db_state::CoreDbState;
+    use crate::db_state::ManifestCore;
     use crate::db_stats::IMMUTABLE_MEMTABLE_FLUSHES;
+    use crate::format::sst::SsTableFormat;
     use crate::iter::KeyValueIterator;
     use crate::manifest::store::{ManifestStore, StoredManifest};
     use crate::object_stores::ObjectStores;
     use crate::proptest_util::arbitrary;
     use crate::proptest_util::sample;
     use crate::rand::DbRand;
-    #[cfg(feature = "test-util")]
     use crate::seq_tracker::FindOption;
-    use crate::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier;
-    use crate::sst::SsTableFormat;
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
-    use crate::test_utils::{assert_iterator, OnDemandCompactionSchedulerSupplier, TestClock};
+    use crate::test_utils::{
+        assert_iterator, OnDemandCompactionSchedulerSupplier, StringConcatMergeOperator,
+    };
     use crate::types::RowEntry;
     use crate::{proptest_util, test_utils, CloseReason, KeyValue};
+    use async_trait::async_trait;
+    use chrono::TimeDelta;
+    use chrono::{TimeZone, Utc};
+    use fail_parallel::FailPointRegistry;
     use futures::{future, future::join_all, StreamExt};
     use object_store::memory::InMemory;
     use object_store::ObjectStore;
     use proptest::test_runner::{TestRng, TestRunner};
+    use slatedb_common::clock::DefaultSystemClock;
+    use slatedb_common::clock::MockSystemClock;
+    use std::collections::BTreeMap;
+    use std::collections::Bound::Included;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
     use tokio::runtime::Runtime;
     use tracing::info;
 
@@ -1477,6 +1670,93 @@ mod tests {
         kv_store.delete(key).await.unwrap();
         assert_eq!(None, kv_store.get(key).await.unwrap());
         kv_store.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_scan_prefix_returns_matching_keys() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let kv_store = Db::builder("/tmp/test_scan_prefix", object_store)
+            .with_settings(test_db_options(0, 1024, None))
+            .build()
+            .await
+            .unwrap();
+
+        kv_store.put(b"ab", b"v0").await.unwrap();
+        kv_store.put(b"aba", b"v1").await.unwrap();
+        kv_store.put(b"abb", b"v2").await.unwrap();
+        kv_store.put(b"ac", b"v3").await.unwrap();
+
+        let mut iter = kv_store.scan_prefix(b"ab").await.unwrap();
+        assert_eq!(iter.next().await.unwrap().unwrap().key.as_ref(), b"ab");
+        assert_eq!(iter.next().await.unwrap().unwrap().key.as_ref(), b"aba");
+        assert_eq!(iter.next().await.unwrap().unwrap().key.as_ref(), b"abb");
+        assert_eq!(iter.next().await.unwrap(), None);
+
+        kv_store.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_scan_prefix_with_options_handles_unbounded_end() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let kv_store = Db::builder("/tmp/test_scan_prefix_unbounded", object_store)
+            .with_settings(test_db_options(0, 1024, None))
+            .build()
+            .await
+            .unwrap();
+
+        kv_store.put(&[0xff, 0xff], b"v0").await.unwrap();
+        kv_store.put(&[0xff, 0xff, 0x00], b"v1").await.unwrap();
+        kv_store.put(&[0xff, 0xff, 0x10], b"v2").await.unwrap();
+        kv_store.put(&[0xff, 0xff, 0xff], b"v4").await.unwrap();
+        kv_store.put(&[0xff, 0xfe], b"v3").await.unwrap();
+
+        let scan_options = ScanOptions {
+            cache_blocks: false,
+            ..ScanOptions::default()
+        };
+        let mut iter = kv_store
+            .scan_prefix_with_options(&[0xff, 0xff], &scan_options)
+            .await
+            .unwrap();
+        assert_eq!(
+            iter.next().await.unwrap().unwrap().key.as_ref(),
+            &[0xff, 0xff]
+        );
+        assert_eq!(
+            iter.next().await.unwrap().unwrap().key.as_ref(),
+            &[0xff, 0xff, 0x00]
+        );
+        assert_eq!(
+            iter.next().await.unwrap().unwrap().key.as_ref(),
+            &[0xff, 0xff, 0x10]
+        );
+        assert_eq!(
+            iter.next().await.unwrap().unwrap().key.as_ref(),
+            &[0xff, 0xff, 0xff]
+        );
+        assert_eq!(iter.next().await.unwrap(), None);
+
+        kv_store.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_resolve_object_store_local_prefix_store_writes_to_path() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let prefix_path = temp_dir.path().join("prefix-store");
+        let url = format!("file://{}", prefix_path.display());
+
+        let object_store = Db::resolve_object_store(&url).unwrap();
+        let location = object_store::path::Path::from("nested/file.txt");
+        let payload = Bytes::from_static(b"local prefix payload");
+
+        object_store
+            .put(&location, payload.clone().into())
+            .await
+            .unwrap();
+
+        let expected_path = prefix_path.join("nested").join("file.txt");
+        let stored = tokio::fs::read(&expected_path).await.unwrap();
+        assert_eq!(stored, payload.to_vec());
     }
 
     #[test]
@@ -1562,14 +1842,190 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_close_triggers_flush_when_open() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let db_options_no_flush_interval = {
+            let mut db_options = test_db_options(0, 1024, None);
+            db_options.flush_interval = None;
+            db_options
+        };
+        let kv_store = Db::builder("/tmp/test_close_triggers_flush", object_store)
+            .with_settings(db_options_no_flush_interval)
+            .build()
+            .await
+            .unwrap();
+
+        kv_store
+            .put_with_options(
+                b"test_key",
+                b"test_value",
+                &PutOptions::default(),
+                &WriteOptions {
+                    await_durable: false,
+                },
+            )
+            .await
+            .unwrap();
+
+        // Sanity check: WAL has buffered entries before close.
+        assert_eq!(kv_store.inner.wal_buffer.buffered_wal_entries_count(), 1);
+        assert_eq!(
+            kv_store
+                .metrics()
+                .lookup(crate::db_stats::WAL_BUFFER_FLUSHES)
+                .unwrap()
+                .get(),
+            0
+        );
+
+        kv_store.close().await.unwrap();
+
+        // close() should trigger a flush when the db is open.
+        assert_eq!(kv_store.inner.wal_buffer.buffered_wal_entries_count(), 0);
+        assert_eq!(
+            kv_store
+                .metrics()
+                .lookup(crate::db_stats::WAL_BUFFER_FLUSHES)
+                .unwrap()
+                .get(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn test_close_twice_returns_closed_clean() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let db = Db::builder("/tmp/test_close_twice_returns_closed_clean", object_store)
+            .with_settings(test_db_options(0, 1024, None))
+            .build()
+            .await
+            .unwrap();
+
+        db.close().await.unwrap();
+        let err = db.close().await.unwrap_err();
+        assert_eq!(err.kind(), crate::ErrorKind::Closed(CloseReason::Clean));
+    }
+
+    #[tokio::test]
+    async fn test_close_failed_state_does_not_flush() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let db_options_no_flush_interval = {
+            let mut db_options = test_db_options(0, 1024, None);
+            db_options.flush_interval = None;
+            db_options
+        };
+        let db = Db::builder("/tmp/test_close_failed_state_no_flush", object_store)
+            .with_settings(db_options_no_flush_interval)
+            .build()
+            .await
+            .unwrap();
+
+        db.put_with_options(
+            b"test_key",
+            b"test_value",
+            &PutOptions::default(),
+            &WriteOptions {
+                await_durable: false,
+            },
+        )
+        .await
+        .unwrap();
+
+        // Sanity check: WAL has buffered entries before close.
+        assert_eq!(db.inner.wal_buffer.buffered_wal_entries_count(), 1);
+        assert_eq!(
+            db.metrics()
+                .lookup(crate::db_stats::WAL_BUFFER_FLUSHES)
+                .unwrap()
+                .get(),
+            0
+        );
+
+        // Simulate a failed state (e.g. fenced).
+        db.inner
+            .state
+            .write()
+            .closed_result()
+            .write(Err(crate::error::SlateDBError::Fenced));
+
+        // close() should succeed but not flush when failed.
+        db.close().await.unwrap();
+
+        assert_eq!(db.inner.wal_buffer.buffered_wal_entries_count(), 1);
+        assert_eq!(
+            db.metrics()
+                .lookup(crate::db_stats::WAL_BUFFER_FLUSHES)
+                .unwrap()
+                .get(),
+            0
+        );
+        let status_err = db.status().unwrap_err();
+        assert_eq!(
+            status_err.kind(),
+            crate::ErrorKind::Closed(CloseReason::Fenced)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_clean_close_flushes_pending_wal() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let db_options_no_flush_interval = {
+            let mut db_options = test_db_options(0, 1024, None);
+            db_options.flush_interval = None;
+            db_options
+        };
+        let db = Db::builder("/tmp/test_clean_close_flushes_pending_wal", object_store)
+            .with_settings(db_options_no_flush_interval)
+            .build()
+            .await
+            .unwrap();
+
+        db.put_with_options(
+            b"test_key",
+            b"test_value",
+            &PutOptions::default(),
+            &WriteOptions {
+                await_durable: false,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(db.inner.wal_buffer.buffered_wal_entries_count(), 1);
+        assert_eq!(
+            db.metrics()
+                .lookup(crate::db_stats::WAL_BUFFER_FLUSHES)
+                .unwrap()
+                .get(),
+            0
+        );
+
+        db.close().await.unwrap();
+
+        assert_eq!(db.inner.wal_buffer.buffered_wal_entries_count(), 0);
+        assert_eq!(
+            db.metrics()
+                .lookup(crate::db_stats::WAL_BUFFER_FLUSHES)
+                .unwrap()
+                .get(),
+            1
+        );
+        let status_err = db.status().unwrap_err();
+        assert_eq!(
+            status_err.kind(),
+            crate::ErrorKind::Closed(CloseReason::Clean)
+        );
+    }
+
+    #[tokio::test]
     async fn test_get_with_default_ttl_and_read_uncommitted() {
-        let clock = Arc::new(TestClock::new());
+        let clock = Arc::new(MockSystemClock::new());
         let ttl = 100;
 
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let kv_store = Db::builder("/tmp/test_kv_store", object_store)
             .with_settings(test_db_options_with_ttl(0, 1024, None, Some(ttl)))
-            .with_logical_clock(clock.clone())
+            .with_system_clock(clock.clone())
             .build()
             .await
             .unwrap();
@@ -1578,10 +2034,20 @@ mod tests {
         let value = b"test_value";
 
         // insert at t=0
-        kv_store.put(key, value).await.unwrap();
+        kv_store
+            .put_with_options(
+                key,
+                value,
+                &PutOptions::default(),
+                &WriteOptions {
+                    await_durable: false,
+                },
+            )
+            .await
+            .unwrap();
 
         // advance clock to t=99 --> still returned
-        clock.ticker.store(99, Ordering::SeqCst);
+        clock.set(99);
         assert_eq!(
             Some(Bytes::from_static(value)),
             kv_store
@@ -1591,7 +2057,7 @@ mod tests {
         );
 
         // advance clock to t=100 --> no longer returned
-        clock.ticker.store(100, Ordering::SeqCst);
+        clock.set(100);
         assert_eq!(
             None,
             kv_store
@@ -1605,13 +2071,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_with_row_override_ttl_and_read_uncommitted() {
-        let clock = Arc::new(TestClock::new());
+        let clock = Arc::new(MockSystemClock::new());
         let default_ttl = 100;
 
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let kv_store = Db::builder("/tmp/test_kv_store", object_store)
             .with_settings(test_db_options_with_ttl(0, 1024, None, Some(default_ttl)))
-            .with_logical_clock(clock.clone())
+            .with_system_clock(clock.clone())
             .build()
             .await
             .unwrap();
@@ -1627,13 +2093,15 @@ mod tests {
                 &PutOptions {
                     ttl: Ttl::ExpireAfter(50),
                 },
-                &WriteOptions::default(),
+                &WriteOptions {
+                    await_durable: false,
+                },
             )
             .await
             .unwrap();
 
         // advance clock to t=49 --> still returned
-        clock.ticker.store(49, Ordering::SeqCst);
+        clock.set(49);
         assert_eq!(
             Some(Bytes::from_static(value)),
             kv_store
@@ -1643,7 +2111,7 @@ mod tests {
         );
 
         // advance clock to t=50 --> no longer returned
-        clock.ticker.store(50, Ordering::SeqCst);
+        clock.set(50);
         assert_eq!(
             None,
             kv_store
@@ -1657,13 +2125,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_with_default_ttl_and_read_committed() {
-        let clock = Arc::new(TestClock::new());
+        let clock = Arc::new(MockSystemClock::new());
         let ttl = 100;
 
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let kv_store = Db::builder("/tmp/test_kv_store", object_store)
             .with_settings(test_db_options_with_ttl(0, 1024, None, Some(ttl)))
-            .with_logical_clock(clock.clone())
+            .with_system_clock(clock.clone())
             .build()
             .await
             .unwrap();
@@ -1673,11 +2141,31 @@ mod tests {
         let value = b"test_value";
 
         // insert at t=0
-        kv_store.put(key, value).await.unwrap();
+        kv_store
+            .put_with_options(
+                key,
+                value,
+                &PutOptions::default(),
+                &WriteOptions {
+                    await_durable: false,
+                },
+            )
+            .await
+            .unwrap();
 
         // advance clock to t=99 --> still returned
-        clock.ticker.store(99, Ordering::SeqCst);
-        kv_store.put(key_other, value).await.unwrap(); // fake data to advance clock
+        clock.set(99);
+        kv_store
+            .put_with_options(
+                key_other,
+                value,
+                &PutOptions::default(),
+                &WriteOptions {
+                    await_durable: false,
+                },
+            )
+            .await
+            .unwrap(); // fake data to advance clock
         kv_store.flush().await.unwrap();
         assert_eq!(
             Some(Bytes::from_static(value)),
@@ -1688,7 +2176,7 @@ mod tests {
         );
 
         // advance clock to t=100 without flushing --> still returned
-        clock.ticker.store(100, Ordering::SeqCst);
+        clock.set(100);
         assert_eq!(
             Some(Bytes::from_static(value)),
             kv_store
@@ -1698,7 +2186,17 @@ mod tests {
         );
 
         // advance durable clock time to t=100 by flushing -- no longer returned
-        kv_store.put(key_other, value).await.unwrap(); // fake data to advance clock
+        kv_store
+            .put_with_options(
+                key_other,
+                value,
+                &PutOptions::default(),
+                &WriteOptions {
+                    await_durable: false,
+                },
+            )
+            .await
+            .unwrap(); // fake data to advance clock
         kv_store.flush().await.unwrap();
         assert_eq!(
             None,
@@ -1810,10 +2308,10 @@ mod tests {
         db.flush().await.unwrap();
 
         let state = db.inner.state.read().view();
-        assert_eq!(1, state.state.manifest.core().l0.len());
-        let sst = state.state.manifest.core().l0.front().unwrap();
-        let index = db.inner.table_store.read_index(sst).await.unwrap();
-        assert!(index.borrow().block_meta().len() >= 3);
+        assert_eq!(1, state.state.manifest.value.core.l0.len());
+        let sst = state.state.manifest.value.core.l0.front().unwrap();
+        let index = db.inner.table_store.read_index(sst, true).await.unwrap();
+        assert!(!index.borrow().block_meta().is_empty());
         assert_eq!(
             Some(Bytes::copy_from_slice(last_val.as_bytes())),
             db.get(b"key").await.unwrap()
@@ -1823,13 +2321,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_with_row_override_ttl_and_read_committed() {
-        let clock = Arc::new(TestClock::new());
+        let clock = Arc::new(MockSystemClock::new());
         let ttl = 100;
 
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let kv_store = Db::builder("/tmp/test_kv_store", object_store)
             .with_settings(test_db_options_with_ttl(0, 1024, None, Some(ttl)))
-            .with_logical_clock(clock.clone())
+            .with_system_clock(clock.clone())
             .build()
             .await
             .unwrap();
@@ -1846,14 +2344,26 @@ mod tests {
                 &PutOptions {
                     ttl: Ttl::ExpireAfter(50),
                 },
-                &WriteOptions::default(),
+                &WriteOptions {
+                    await_durable: false,
+                },
             )
             .await
             .unwrap();
 
         // advance clock to t=49 --> still returned
-        clock.ticker.store(49, Ordering::SeqCst);
-        kv_store.put(key_other, value).await.unwrap(); // fake data to advance clock
+        clock.set(49);
+        kv_store
+            .put_with_options(
+                key_other,
+                value,
+                &PutOptions::default(),
+                &WriteOptions {
+                    await_durable: false,
+                },
+            )
+            .await
+            .unwrap(); // fake data to advance clock
         kv_store.flush().await.unwrap();
         assert_eq!(
             Some(Bytes::from_static(value)),
@@ -1864,7 +2374,7 @@ mod tests {
         );
 
         // advance clock to t=50 without flushing --> still returned
-        clock.ticker.store(50, Ordering::SeqCst);
+        clock.set(50);
         assert_eq!(
             Some(Bytes::from_static(value)),
             kv_store
@@ -1874,7 +2384,17 @@ mod tests {
         );
 
         // advance durable clock time to t=100 by flushing -- no longer returned
-        kv_store.put(key_other, value).await.unwrap(); // fake data to advance clock
+        kv_store
+            .put_with_options(
+                key_other,
+                value,
+                &PutOptions::default(),
+                &WriteOptions {
+                    await_durable: false,
+                },
+            )
+            .await
+            .unwrap(); // fake data to advance clock
         kv_store.flush().await.unwrap();
         assert_eq!(
             None,
@@ -1889,24 +2409,54 @@ mod tests {
 
     #[tokio::test]
     async fn test_scan_with_default_ttl_and_read_uncommitted() {
-        let clock = Arc::new(TestClock::new());
+        let clock = Arc::new(MockSystemClock::new());
         let ttl = 100;
 
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let kv_store = Db::builder("/tmp/test_kv_store", object_store)
             .with_settings(test_db_options_with_ttl(0, 1024, None, Some(ttl)))
-            .with_logical_clock(clock.clone())
+            .with_system_clock(clock.clone())
             .build()
             .await
             .unwrap();
 
         // insert keys at t=0
-        kv_store.put(b"key1", b"value1").await.unwrap();
-        kv_store.put(b"key2", b"value2").await.unwrap();
-        kv_store.put(b"key3", b"value3").await.unwrap();
+        kv_store
+            .put_with_options(
+                b"key1",
+                b"value1",
+                &PutOptions::default(),
+                &WriteOptions {
+                    await_durable: false,
+                },
+            )
+            .await
+            .unwrap();
+        kv_store
+            .put_with_options(
+                b"key2",
+                b"value2",
+                &PutOptions::default(),
+                &WriteOptions {
+                    await_durable: false,
+                },
+            )
+            .await
+            .unwrap();
+        kv_store
+            .put_with_options(
+                b"key3",
+                b"value3",
+                &PutOptions::default(),
+                &WriteOptions {
+                    await_durable: false,
+                },
+            )
+            .await
+            .unwrap();
 
         // advance clock to t=99 --> still returned
-        clock.ticker.store(99, Ordering::SeqCst);
+        clock.set(99);
         let mut iter = kv_store
             .scan_with_options(
                 &b"key1"[..]..&b"key4"[..],
@@ -1930,7 +2480,7 @@ mod tests {
         assert_eq!(iter.next().await.unwrap(), None);
 
         // advance clock to t=100 --> no longer returned
-        clock.ticker.store(100, Ordering::SeqCst);
+        clock.set(100);
         let mut iter = kv_store
             .scan_with_options(
                 &b"key1"[..]..&b"key4"[..],
@@ -1946,13 +2496,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_scan_with_row_override_ttl_and_read_uncommitted() {
-        let clock = Arc::new(TestClock::new());
+        let clock = Arc::new(MockSystemClock::new());
         let default_ttl = 100;
 
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let kv_store = Db::builder("/tmp/test_kv_store", object_store)
             .with_settings(test_db_options_with_ttl(0, 1024, None, Some(default_ttl)))
-            .with_logical_clock(clock.clone())
+            .with_system_clock(clock.clone())
             .build()
             .await
             .unwrap();
@@ -1965,7 +2515,9 @@ mod tests {
                 &PutOptions {
                     ttl: Ttl::ExpireAfter(50),
                 },
-                &WriteOptions::default(),
+                &WriteOptions {
+                    await_durable: false,
+                },
             )
             .await
             .unwrap();
@@ -1976,7 +2528,9 @@ mod tests {
                 &PutOptions {
                     ttl: Ttl::ExpireAfter(75),
                 },
-                &WriteOptions::default(),
+                &WriteOptions {
+                    await_durable: false,
+                },
             )
             .await
             .unwrap();
@@ -1987,13 +2541,15 @@ mod tests {
                 &PutOptions {
                     ttl: Ttl::ExpireAfter(100),
                 },
-                &WriteOptions::default(),
+                &WriteOptions {
+                    await_durable: false,
+                },
             )
             .await
             .unwrap();
 
         // advance clock to t=49 --> all still returned
-        clock.ticker.store(49, Ordering::SeqCst);
+        clock.set(49);
         let mut iter = kv_store
             .scan_with_options(
                 &b"key1"[..]..&b"key4"[..],
@@ -2008,7 +2564,7 @@ mod tests {
         assert_eq!(iter.next().await.unwrap(), None);
 
         // advance clock to t=50 --> key1 expired, key2 and key3 still returned
-        clock.ticker.store(50, Ordering::SeqCst);
+        clock.set(50);
         let mut iter = kv_store
             .scan_with_options(
                 &b"key1"[..]..&b"key4"[..],
@@ -2022,7 +2578,7 @@ mod tests {
         assert_eq!(iter.next().await.unwrap(), None);
 
         // advance clock to t=75 --> key1 and key2 expired, only key3 returned
-        clock.ticker.store(75, Ordering::SeqCst);
+        clock.set(75);
         let mut iter = kv_store
             .scan_with_options(
                 &b"key1"[..]..&b"key4"[..],
@@ -2035,7 +2591,7 @@ mod tests {
         assert_eq!(iter.next().await.unwrap(), None);
 
         // advance clock to t=100 --> all expired
-        clock.ticker.store(100, Ordering::SeqCst);
+        clock.set(100);
         let mut iter = kv_store
             .scan_with_options(
                 &b"key1"[..]..&b"key4"[..],
@@ -2051,13 +2607,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_scan_with_default_ttl_and_read_committed() {
-        let clock = Arc::new(TestClock::new());
+        let clock = Arc::new(MockSystemClock::new());
         let ttl = 100;
 
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let kv_store = Db::builder("/tmp/test_kv_store", object_store)
             .with_settings(test_db_options_with_ttl(0, 1024, None, Some(ttl)))
-            .with_logical_clock(clock.clone())
+            .with_system_clock(clock.clone())
             .build()
             .await
             .unwrap();
@@ -2065,13 +2621,53 @@ mod tests {
         let key_other = b"time_advancing_key";
 
         // insert keys at t=0
-        kv_store.put(b"key1", b"value1").await.unwrap();
-        kv_store.put(b"key2", b"value2").await.unwrap();
-        kv_store.put(b"key3", b"value3").await.unwrap();
+        kv_store
+            .put_with_options(
+                b"key1",
+                b"value1",
+                &PutOptions::default(),
+                &WriteOptions {
+                    await_durable: false,
+                },
+            )
+            .await
+            .unwrap();
+        kv_store
+            .put_with_options(
+                b"key2",
+                b"value2",
+                &PutOptions::default(),
+                &WriteOptions {
+                    await_durable: false,
+                },
+            )
+            .await
+            .unwrap();
+        kv_store
+            .put_with_options(
+                b"key3",
+                b"value3",
+                &PutOptions::default(),
+                &WriteOptions {
+                    await_durable: false,
+                },
+            )
+            .await
+            .unwrap();
 
         // advance clock to t=99 --> still returned
-        clock.ticker.store(99, Ordering::SeqCst);
-        kv_store.put(key_other, b"value").await.unwrap(); // fake data to advance clock
+        clock.set(99);
+        kv_store
+            .put_with_options(
+                key_other,
+                b"value",
+                &PutOptions::default(),
+                &WriteOptions {
+                    await_durable: false,
+                },
+            )
+            .await
+            .unwrap(); // fake data to advance clock
         kv_store.flush().await.unwrap();
 
         let mut iter = kv_store
@@ -2088,7 +2684,7 @@ mod tests {
         assert_eq!(iter.next().await.unwrap(), None);
 
         // advance clock to t=100 without flushing --> still returned
-        clock.ticker.store(100, Ordering::SeqCst);
+        clock.set(100);
         let mut iter = kv_store
             .scan_with_options(
                 &b"key1"[..]..&b"key4"[..],
@@ -2103,7 +2699,17 @@ mod tests {
         assert_eq!(iter.next().await.unwrap(), None);
 
         // advance durable clock time to t=100 by flushing -- no longer returned
-        kv_store.put(key_other, b"value").await.unwrap(); // fake data to advance clock
+        kv_store
+            .put_with_options(
+                key_other,
+                b"value",
+                &PutOptions::default(),
+                &WriteOptions {
+                    await_durable: false,
+                },
+            )
+            .await
+            .unwrap(); // fake data to advance clock
         kv_store.flush().await.unwrap();
 
         let mut iter = kv_store
@@ -2121,13 +2727,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_scan_with_row_override_ttl_and_read_committed() {
-        let clock = Arc::new(TestClock::new());
+        let clock = Arc::new(MockSystemClock::new());
         let default_ttl = 100;
 
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let kv_store = Db::builder("/tmp/test_kv_store", object_store)
             .with_settings(test_db_options_with_ttl(0, 1024, None, Some(default_ttl)))
-            .with_logical_clock(clock.clone())
+            .with_system_clock(clock.clone())
             .build()
             .await
             .unwrap();
@@ -2142,7 +2748,9 @@ mod tests {
                 &PutOptions {
                     ttl: Ttl::ExpireAfter(50),
                 },
-                &WriteOptions::default(),
+                &WriteOptions {
+                    await_durable: false,
+                },
             )
             .await
             .unwrap();
@@ -2153,14 +2761,26 @@ mod tests {
                 &PutOptions {
                     ttl: Ttl::ExpireAfter(75),
                 },
-                &WriteOptions::default(),
+                &WriteOptions {
+                    await_durable: false,
+                },
             )
             .await
             .unwrap();
 
         // advance clock to t=49 --> all still returned
-        clock.ticker.store(49, Ordering::SeqCst);
-        kv_store.put(key_other, b"value").await.unwrap(); // fake data to advance clock
+        clock.set(49);
+        kv_store
+            .put_with_options(
+                key_other,
+                b"value",
+                &PutOptions::default(),
+                &WriteOptions {
+                    await_durable: false,
+                },
+            )
+            .await
+            .unwrap(); // fake data to advance clock
         kv_store.flush().await.unwrap();
 
         let mut iter = kv_store
@@ -2176,7 +2796,7 @@ mod tests {
         assert_eq!(iter.next().await.unwrap(), None);
 
         // advance clock to t=50 without flushing --> still returned (durable clock hasn't advanced)
-        clock.ticker.store(50, Ordering::SeqCst);
+        clock.set(50);
         let mut iter = kv_store
             .scan_with_options(
                 &b"key1"[..]..&b"key3"[..],
@@ -2190,7 +2810,17 @@ mod tests {
         assert_eq!(iter.next().await.unwrap(), None);
 
         // advance durable clock time to t=50 by flushing -- key1 expired
-        kv_store.put(key_other, b"value").await.unwrap(); // fake data to advance clock
+        kv_store
+            .put_with_options(
+                key_other,
+                b"value",
+                &PutOptions::default(),
+                &WriteOptions {
+                    await_durable: false,
+                },
+            )
+            .await
+            .unwrap(); // fake data to advance clock
         kv_store.flush().await.unwrap();
 
         let mut iter = kv_store
@@ -2205,8 +2835,18 @@ mod tests {
         assert_eq!(iter.next().await.unwrap(), None);
 
         // advance durable clock time to t=75 by flushing -- both keys expired
-        clock.ticker.store(75, Ordering::SeqCst);
-        kv_store.put(key_other, b"value").await.unwrap(); // fake data to advance clock
+        clock.set(75);
+        kv_store
+            .put_with_options(
+                key_other,
+                b"value",
+                &PutOptions::default(),
+                &WriteOptions {
+                    await_durable: false,
+                },
+            )
+            .await
+            .unwrap(); // fake data to advance clock
         kv_store.flush().await.unwrap();
 
         let mut iter = kv_store
@@ -2704,9 +3344,6 @@ mod tests {
     #[tokio::test]
     async fn test_concurrent_batch_writes_consistency() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let compaction_scheduler = Arc::new(SizeTieredCompactionSchedulerSupplier::new(
-            SizeTieredCompactionSchedulerOptions::default(),
-        ));
         let kv_store = Arc::new(
             Db::builder("/tmp/test_concurrent_kv_store", object_store)
                 .with_settings(test_db_options(
@@ -2719,9 +3356,9 @@ mod tests {
                         max_sst_size: 256,
                         max_concurrent_compactions: 1,
                         manifest_update_timeout: Duration::from_secs(300),
+                        ..Default::default()
                     }),
                 ))
-                .with_compaction_scheduler_supplier(compaction_scheduler)
                 .build()
                 .await
                 .unwrap(),
@@ -2836,7 +3473,7 @@ mod tests {
     async fn test_wal_disabled() {
         use crate::{test_utils::assert_iterator, types::RowEntry};
 
-        let clock = Arc::new(TestClock::new());
+        let clock = Arc::new(MockSystemClock::new());
         let mut options = test_db_options(0, 256, None);
         options.wal_enabled = false;
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
@@ -2850,16 +3487,15 @@ mod tests {
         ));
         let db = Db::builder(path.clone(), object_store.clone())
             .with_settings(options)
-            .with_logical_clock(clock.clone())
+            .with_system_clock(clock.clone())
             .build()
             .await
             .unwrap();
-        let manifest_store = Arc::new(ManifestStore::new(
-            &path,
-            object_store.clone(),
-            Arc::new(DefaultSystemClock::new()),
-        ));
-        let mut stored_manifest = StoredManifest::load(manifest_store.clone()).await.unwrap();
+        let manifest_store = Arc::new(ManifestStore::new(&path, object_store.clone()));
+        let mut stored_manifest =
+            StoredManifest::load(manifest_store.clone(), Arc::new(DefaultSystemClock::new()))
+                .await
+                .unwrap();
         let write_options = WriteOptions {
             await_durable: false,
         };
@@ -2882,7 +3518,7 @@ mod tests {
         let write_options = WriteOptions {
             await_durable: true,
         };
-        clock.ticker.store(10, Ordering::SeqCst);
+        clock.set(10);
         db.put_with_options(
             &[b'c'; 32],
             &[b'l'; 32],
@@ -2930,13 +3566,11 @@ mod tests {
             .build()
             .await
             .unwrap();
-        let clock = Arc::new(DefaultSystemClock::new());
-        let manifest_store = Arc::new(ManifestStore::new(
-            &Path::from(path),
-            object_store.clone(),
-            clock.clone(),
-        ));
-        let mut stored_manifest = StoredManifest::load(manifest_store.clone()).await.unwrap();
+        let manifest_store = Arc::new(ManifestStore::new(&Path::from(path), object_store.clone()));
+        let mut stored_manifest =
+            StoredManifest::load(manifest_store.clone(), Arc::new(DefaultSystemClock::new()))
+                .await
+                .unwrap();
         let sst_format = SsTableFormat {
             min_filter_keys: 10,
             ..SsTableFormat::default()
@@ -3016,12 +3650,11 @@ mod tests {
             .await
             .unwrap();
 
-        let manifest_store = Arc::new(ManifestStore::new(
-            &Path::from(path),
-            object_store.clone(),
-            Arc::new(DefaultSystemClock::new()),
-        ));
-        let mut stored_manifest = StoredManifest::load(manifest_store.clone()).await.unwrap();
+        let manifest_store = Arc::new(ManifestStore::new(&Path::from(path), object_store.clone()));
+        let mut stored_manifest =
+            StoredManifest::load(manifest_store.clone(), Arc::new(DefaultSystemClock::new()))
+                .await
+                .unwrap();
         let sst_format = SsTableFormat {
             min_filter_keys: 10,
             ..SsTableFormat::default()
@@ -3134,7 +3767,6 @@ mod tests {
         assert!(found_keys.contains(key2.as_slice()));
     }
 
-    #[cfg(feature = "test-util")]
     async fn test_sequence_tracker_persisted_across_flush_and_reload_impl(wal_enabled: bool) {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = "/tmp/test_sequence_tracker_flush";
@@ -3146,23 +3778,20 @@ mod tests {
         }
         #[cfg(not(feature = "wal_disable"))]
         let _ = wal_enabled;
-        let logical_clock = Arc::new(TestClock::new());
         let system_clock = Arc::new(MockSystemClock::new());
 
         let kv_store = Db::builder(path, object_store.clone())
             .with_settings(settings.clone())
             .with_system_clock(system_clock.clone())
-            .with_logical_clock(logical_clock.clone())
             .build()
             .await
             .unwrap();
 
-        let manifest_store = Arc::new(ManifestStore::new(
-            &Path::from(path),
-            object_store.clone(),
-            Arc::new(DefaultSystemClock::new()),
-        ));
-        let mut stored_manifest = StoredManifest::load(manifest_store.clone()).await.unwrap();
+        let manifest_store = Arc::new(ManifestStore::new(&Path::from(path), object_store.clone()));
+        let mut stored_manifest =
+            StoredManifest::load(manifest_store.clone(), Arc::new(DefaultSystemClock::new()))
+                .await
+                .unwrap();
         let write_options = WriteOptions {
             await_durable: false,
         };
@@ -3170,7 +3799,6 @@ mod tests {
 
         let timestamps_ms = [0_i64, 60_000, 120_000];
         for (idx, ts) in timestamps_ms.iter().enumerate() {
-            logical_clock.ticker.store(*ts, Ordering::SeqCst);
             system_clock.set(*ts);
             let key = format!("key-{idx}").into_bytes();
             let value = format!("value-{idx}").into_bytes();
@@ -3227,7 +3855,6 @@ mod tests {
         let reopened = Db::builder(path, object_store.clone())
             .with_settings(settings)
             .with_system_clock(system_clock.clone())
-            .with_logical_clock(logical_clock.clone())
             .build()
             .await
             .unwrap();
@@ -3246,18 +3873,16 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg(feature = "test-util")]
     async fn test_sequence_tracker_persisted_across_flush_and_reload_wal_enabled() {
         test_sequence_tracker_persisted_across_flush_and_reload_impl(true).await;
     }
 
     #[tokio::test]
-    #[cfg(all(feature = "test-util", feature = "wal_disable"))]
+    #[cfg(feature = "wal_disable")]
     async fn test_sequence_tracker_persisted_across_flush_and_reload_wal_disabled() {
         test_sequence_tracker_persisted_across_flush_and_reload_impl(false).await;
     }
 
-    #[cfg(feature = "test-util")]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_sequence_tracker_not_ahead_of_last_l0_seq_when_flush_races_with_writes() {
         let fp_registry = Arc::new(FailPointRegistry::new());
@@ -3306,7 +3931,7 @@ mod tests {
         };
 
         let mut froze_memtable = false;
-        for _ in 0..200 {
+        for _ in 0..6000 {
             {
                 let guard = db.inner.state.read();
                 if !guard.state().imm_memtable.is_empty() {
@@ -3332,7 +3957,7 @@ mod tests {
 
         let manifest_state = {
             let guard = db.inner.state.read();
-            guard.state().manifest.core().clone()
+            guard.state().manifest.value.core.clone()
         };
         let last_l0_seq = manifest_state.last_l0_seq;
         assert!(
@@ -3434,7 +4059,7 @@ mod tests {
 
         // Verify that the memtable has not been flushed by checking the db for error state
         assert!(
-            kv_store.inner.check_closed().is_ok(),
+            kv_store.inner.status().is_ok(),
             "DB should not have an error state"
         );
     }
@@ -3623,7 +4248,7 @@ mod tests {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let kv_store = Db::builder("/tmp/test_kv_store", object_store.clone())
             .with_settings(test_db_options(0, 1024, None))
-            .with_logical_clock(Arc::new(TestClock::new()))
+            .with_system_clock(Arc::new(MockSystemClock::new()))
             .build()
             .await
             .unwrap();
@@ -3658,25 +4283,43 @@ mod tests {
         let path = "/tmp/test_kv_store";
         let mut next_wal_id = 1;
         let kv_store = Db::builder(path, object_store.clone())
-            .with_settings(test_db_options(0, 128, None))
-            .with_logical_clock(Arc::new(TestClock::new()))
+            // with l0_sst_size_bytes = 600 all large puts should be flushed in one L0 SST
+            .with_settings(test_db_options(0, 600, None))
+            .with_system_clock(Arc::new(MockSystemClock::new()))
             .build()
             .await
             .unwrap();
         // increment wal id for the empty wal
         next_wal_id += 1;
 
+        // do all flushes manually
+        let write_opts = WriteOptions {
+            await_durable: false,
+        };
+
         // do a few writes that will result in l0 flushes
         let l0_count: u64 = 3;
         for i in 0..l0_count {
             kv_store
-                .put(&[b'a' + i as u8; 16], &[b'b' + i as u8; 48])
+                .put_with_options(
+                    &[b'a' + i as u8; 16],
+                    &[b'b' + i as u8; 48],
+                    &PutOptions::default(),
+                    &write_opts,
+                )
                 .await
                 .unwrap();
+            kv_store.flush().await.unwrap();
             kv_store
-                .put(&[b'j' + i as u8; 16], &[b'k' + i as u8; 48])
+                .put_with_options(
+                    &[b'j' + i as u8; 16],
+                    &[b'k' + i as u8; 48],
+                    &PutOptions::default(),
+                    &write_opts,
+                )
                 .await
                 .unwrap();
+            kv_store.flush().await.unwrap();
             next_wal_id += 2;
         }
 
@@ -3684,7 +4327,12 @@ mod tests {
         let sst_count: u64 = 5;
         for i in 0..sst_count {
             kv_store
-                .put(&i.to_be_bytes(), &i.to_be_bytes())
+                .put_with_options(
+                    &i.to_be_bytes(),
+                    &i.to_be_bytes(),
+                    &PutOptions::default(),
+                    &write_opts,
+                )
                 .await
                 .unwrap();
             kv_store.flush().await.unwrap();
@@ -3696,7 +4344,7 @@ mod tests {
         // recover and validate that sst files are loaded on recovery.
         let kv_store_restored = Db::builder(path, object_store.clone())
             .with_settings(test_db_options(0, 128, None))
-            .with_logical_clock(Arc::new(TestClock::new()))
+            .with_system_clock(Arc::new(MockSystemClock::new()))
             .build()
             .await
             .unwrap();
@@ -3716,12 +4364,11 @@ mod tests {
         kv_store_restored.close().await.unwrap();
 
         // validate that the manifest file exists.
-        let manifest_store = Arc::new(ManifestStore::new(
-            &Path::from(path),
-            object_store.clone(),
-            Arc::new(DefaultSystemClock::new()),
-        ));
-        let stored_manifest = StoredManifest::load(manifest_store).await.unwrap();
+        let manifest_store = Arc::new(ManifestStore::new(&Path::from(path), object_store.clone()));
+        let stored_manifest =
+            StoredManifest::load(manifest_store, Arc::new(DefaultSystemClock::new()))
+                .await
+                .unwrap();
         let db_state = stored_manifest.db_state();
         assert_eq!(db_state.next_wal_sst_id, next_wal_id);
     }
@@ -3733,20 +4380,47 @@ mod tests {
         let path = "/tmp/test_kv_store";
         let db = Db::builder(path, object_store.clone())
             .with_settings(test_db_options(0, 256, None))
-            .with_logical_clock(Arc::new(TestClock::new()))
+            .with_system_clock(Arc::new(MockSystemClock::new()))
             .build()
             .await
             .unwrap();
 
-        db.put(b"key1", b"val1").await.unwrap();
-        db.put(b"key2", b"val2").await.unwrap();
-        db.put(b"key3", b"val3").await.unwrap();
+        db.put_with_options(
+            b"key1",
+            b"val1",
+            &PutOptions::default(),
+            &WriteOptions {
+                await_durable: false,
+            },
+        )
+        .await
+        .unwrap();
+        db.put_with_options(
+            b"key2",
+            b"val2",
+            &PutOptions::default(),
+            &WriteOptions {
+                await_durable: false,
+            },
+        )
+        .await
+        .unwrap();
+        db.put_with_options(
+            b"key3",
+            b"val3",
+            &PutOptions::default(),
+            &WriteOptions {
+                await_durable: false,
+            },
+        )
+        .await
+        .unwrap();
         db.flush().await.unwrap();
         db.close().await.unwrap();
 
         let db_restored = Db::builder(path, object_store.clone())
             .with_settings(test_db_options(0, 256, None))
-            .with_logical_clock(Arc::new(TestClock::new()))
+            .with_system_clock(Arc::new(MockSystemClock::new()))
             .build()
             .await
             .unwrap();
@@ -3763,6 +4437,61 @@ mod tests {
             ],
         )
         .await;
+    }
+
+    #[tokio::test]
+    async fn test_read_merges_from_snapshot_across_compaction() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = "/tmp/testdb";
+        let should_compact_l0 = Arc::new(AtomicBool::new(false));
+        let this_should_compact_l0 = should_compact_l0.clone();
+        let compaction_scheduler = Arc::new(OnDemandCompactionSchedulerSupplier::new(Arc::new(
+            move |_state| this_should_compact_l0.swap(false, Ordering::SeqCst),
+        )));
+        let db = Db::builder(path, object_store.clone())
+            .with_settings(test_db_options(0, 1024 * 1024, None))
+            .with_merge_operator(Arc::new(StringConcatMergeOperator {}))
+            .with_compaction_scheduler_supplier(compaction_scheduler)
+            .build()
+            .await
+            .unwrap();
+        let db = Arc::new(db);
+
+        db.merge(b"foo", b"0").await.unwrap();
+        let snapshot = db.snapshot().await.unwrap();
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::MemTable,
+        })
+        .await
+        .unwrap();
+        db.merge(b"foo", b"1").await.unwrap();
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::MemTable,
+        })
+        .await
+        .unwrap();
+
+        // await a compaction
+        should_compact_l0.store(true, Ordering::SeqCst);
+        let db_poll = db.clone();
+        tokio::time::timeout(Duration::from_secs(10), async move {
+            loop {
+                {
+                    let db_state = db_poll.inner.state.read();
+                    if !db_state.state().core().compacted.is_empty() {
+                        return;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+
+        let result = snapshot.get(b"foo").await.unwrap();
+        assert_eq!(result, Some(Bytes::copy_from_slice(b"0")));
+        let result = db.get(b"foo").await.unwrap();
+        assert_eq!(result, Some(Bytes::copy_from_slice(b"01")));
     }
 
     #[tokio::test]
@@ -4237,11 +4966,7 @@ mod tests {
         // on close().
         db.close().await.unwrap();
 
-        let manifest_store = ManifestStore::new(
-            &Path::from(path),
-            object_store.clone(),
-            Arc::new(DefaultSystemClock::new()),
-        );
+        let manifest_store = ManifestStore::new(&Path::from(path), object_store.clone());
         let table_store = Arc::new(TableStore::new(
             ObjectStores::new(object_store.clone(), None),
             SsTableFormat::default(),
@@ -4276,12 +5001,10 @@ mod tests {
             .build()
             .await
             .unwrap();
-        let ms = ManifestStore::new(
-            &Path::from(path),
-            object_store.clone(),
-            Arc::new(DefaultSystemClock::new()),
-        );
-        let mut sm = StoredManifest::load(Arc::new(ms)).await.unwrap();
+        let ms = ManifestStore::new(&Path::from(path), object_store.clone());
+        let mut sm = StoredManifest::load(Arc::new(ms), Arc::new(DefaultSystemClock::new()))
+            .await
+            .unwrap();
 
         // write enough to fill up a few l0 SSTs
         for i in 0..4 {
@@ -4371,6 +5094,7 @@ mod tests {
                 max_sst_size: 256,
                 max_concurrent_compactions: 1,
                 manifest_update_timeout: Duration::from_secs(300),
+                ..Default::default()
             }),
         ))
         .await;
@@ -4386,6 +5110,7 @@ mod tests {
                 manifest_update_timeout: Duration::from_secs(300),
                 max_sst_size: 256,
                 max_concurrent_compactions: 1,
+                ..Default::default()
             }),
         ))
         .await
@@ -4458,23 +5183,42 @@ mod tests {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = "/tmp/test_kv_store";
 
-        let clock = Arc::new(TestClock::new());
+        let clock = Arc::new(MockSystemClock::new());
         let db = Db::builder(path, object_store.clone())
             .with_settings(test_db_options(0, 128, None))
-            .with_logical_clock(clock.clone())
+            .with_system_clock(clock.clone())
             .build()
             .await
             .unwrap();
 
         // When:
         // put with time = 10
-        clock.ticker.store(10, Ordering::SeqCst);
-        db.put(b"1", b"1").await.unwrap();
+        clock.set(10);
+        db.put_with_options(
+            b"1",
+            b"1",
+            &PutOptions::default(),
+            &WriteOptions {
+                await_durable: false,
+            },
+        )
+        .await
+        .unwrap();
 
         // Then:
         // put with time goes backwards, should fail
-        clock.ticker.store(5, Ordering::SeqCst);
-        match db.put(b"1", b"1").await {
+        clock.set(5);
+        match db
+            .put_with_options(
+                b"1",
+                b"1",
+                &PutOptions::default(),
+                &WriteOptions {
+                    await_durable: false,
+                },
+            )
+            .await
+        {
             Ok(_) => panic!("expected an error on inserting backwards time"),
             Err(e) => assert_eq!(e.to_string(), "Invalid error: invalid clock tick, must be monotonic. last_tick=`10`, next_tick=`5`"),
         }
@@ -4486,28 +5230,47 @@ mod tests {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = "/tmp/test_kv_store";
 
-        let clock = Arc::new(TestClock::new());
+        let clock = Arc::new(MockSystemClock::new());
         let db = Db::builder(path, object_store.clone())
             .with_settings(test_db_options(0, 128, None))
-            .with_logical_clock(clock.clone())
+            .with_system_clock(clock.clone())
             .build()
             .await
             .unwrap();
 
         // When:
         // put with time = 10
-        clock.ticker.store(10, Ordering::SeqCst);
-        db.put(b"1", b"1").await.unwrap();
+        clock.set(10);
+        db.put_with_options(
+            b"1",
+            b"1",
+            &PutOptions::default(),
+            &WriteOptions {
+                await_durable: false,
+            },
+        )
+        .await
+        .unwrap();
         db.flush().await.unwrap();
 
         let db2 = Db::builder(path, object_store.clone())
             .with_settings(test_db_options(0, 128, None))
-            .with_logical_clock(clock.clone())
+            .with_system_clock(clock.clone())
             .build()
             .await
             .unwrap();
-        clock.ticker.store(5, Ordering::SeqCst);
-        match db2.put(b"1", b"1").await {
+        clock.set(5);
+        match db2
+            .put_with_options(
+                b"1",
+                b"1",
+                &PutOptions::default(),
+                &WriteOptions {
+                    await_durable: false,
+                },
+            )
+            .await
+        {
             Ok(_) => panic!("expected an error on inserting backwards time"),
             Err(e) => assert_eq!(e.to_string(), "Invalid error: invalid clock tick, must be monotonic. last_tick=`10`, next_tick=`5`"),
         }
@@ -4556,45 +5319,59 @@ mod tests {
 
     #[tokio::test]
     async fn test_recover_clock_tick_from_wal() {
-        let clock = Arc::new(TestClock::new());
+        let clock = Arc::new(MockSystemClock::new());
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = "/tmp/test_kv_store";
 
         let db = Db::builder(path, object_store.clone())
             .with_settings(test_db_options(0, 1024, None))
-            .with_logical_clock(clock.clone())
+            .with_system_clock(clock.clone())
             .build()
             .await
             .unwrap();
 
-        clock.ticker.store(10, Ordering::SeqCst);
-        db.put(&[b'a'; 4], &[b'j'; 8])
-            .await
-            .expect("write batch failed");
-        clock.ticker.store(11, Ordering::SeqCst);
-        db.put(&[b'b'; 4], &[b'k'; 8])
-            .await
-            .expect("write batch failed");
+        clock.set(10);
+        db.put_with_options(
+            &[b'a'; 4],
+            &[b'j'; 8],
+            &PutOptions::default(),
+            &WriteOptions {
+                await_durable: false,
+            },
+        )
+        .await
+        .expect("write batch failed");
+        clock.set(11);
+        db.put_with_options(
+            &[b'b'; 4],
+            &[b'k'; 8],
+            &PutOptions::default(),
+            &WriteOptions {
+                await_durable: false,
+            },
+        )
+        .await
+        .expect("write batch failed");
 
         // close the db to flush the manifest
+        db.flush().await.unwrap();
         db.close().await.unwrap();
 
         // check the last_l0_clock_tick persisted in the manifest, it should be
         // i64::MIN because no WAL SST has yet made its way into L0
-        let manifest_store = Arc::new(ManifestStore::new(
-            &Path::from(path),
-            object_store.clone(),
-            Arc::new(DefaultSystemClock::new()),
-        ));
-        let stored_manifest = StoredManifest::load(manifest_store).await.unwrap();
+        let manifest_store = Arc::new(ManifestStore::new(&Path::from(path), object_store.clone()));
+        let stored_manifest =
+            StoredManifest::load(manifest_store, Arc::new(DefaultSystemClock::new()))
+                .await
+                .unwrap();
         let db_state = stored_manifest.db_state();
         let last_clock_tick = db_state.last_l0_clock_tick;
         assert_eq!(last_clock_tick, i64::MIN);
 
-        let clock = Arc::new(TestClock::new());
+        let clock = Arc::new(MockSystemClock::new());
         let db = Db::builder(path, object_store.clone())
             .with_settings(test_db_options(0, 1024, None))
-            .with_logical_clock(clock.clone())
+            .with_system_clock(clock.clone())
             .build()
             .await
             .unwrap();
@@ -4604,24 +5381,24 @@ mod tests {
 
     #[tokio::test]
     async fn test_should_update_manifest_clock_tick_on_l0_flush() {
-        let clock = Arc::new(TestClock::new());
+        let clock = Arc::new(MockSystemClock::new());
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = "/tmp/test_kv_store";
 
         let db = Db::builder(path, object_store.clone())
             .with_settings(test_db_options(0, 32, None))
-            .with_logical_clock(clock.clone())
+            .with_system_clock(clock.clone())
             .build()
             .await
             .unwrap();
 
         // this will exceed the l0_sst_size_bytes, meaning a clean shutdown
         // will update the manifest
-        clock.ticker.store(10, Ordering::SeqCst);
+        clock.set(10);
         db.put(&[b'a'; 4], &[b'j'; 8])
             .await
             .expect("write batch failed");
-        clock.ticker.store(11, Ordering::SeqCst);
+        clock.set(11);
         db.put(&[b'b'; 4], &[b'k'; 8])
             .await
             .expect("write batch failed");
@@ -4632,12 +5409,11 @@ mod tests {
 
         // check the last_clock_tick persisted in the manifest, it should be
         // i64::MIN because no WAL SST has yet made its way into L0
-        let manifest_store = Arc::new(ManifestStore::new(
-            &Path::from(path),
-            object_store.clone(),
-            Arc::new(DefaultSystemClock::new()),
-        ));
-        let stored_manifest = StoredManifest::load(manifest_store).await.unwrap();
+        let manifest_store = Arc::new(ManifestStore::new(&Path::from(path), object_store.clone()));
+        let stored_manifest =
+            StoredManifest::load(manifest_store, Arc::new(DefaultSystemClock::new()))
+                .await
+                .unwrap();
         let db_state = stored_manifest.db_state();
         let last_clock_tick = db_state.last_l0_clock_tick;
         assert_eq!(last_clock_tick, 11);
@@ -4646,7 +5422,7 @@ mod tests {
     #[tokio::test]
     #[cfg(feature = "wal_disable")]
     async fn test_recover_clock_tick_from_manifest() {
-        let clock = Arc::new(TestClock::new());
+        let clock = Arc::new(MockSystemClock::new());
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = "/tmp/test_kv_store";
         let mut options = test_db_options(0, 32, None);
@@ -4654,16 +5430,16 @@ mod tests {
 
         let db = Db::builder(path, object_store.clone())
             .with_settings(options)
-            .with_logical_clock(clock.clone())
+            .with_system_clock(clock.clone())
             .build()
             .await
             .unwrap();
 
-        clock.ticker.store(10, Ordering::SeqCst);
+        clock.set(10);
         db.put(&[b'a'; 4], &[b'j'; 28])
             .await
             .expect("write batch failed");
-        clock.ticker.store(11, Ordering::SeqCst);
+        clock.set(11);
         db.put(&[b'b'; 4], &[b'k'; 28])
             .await
             .expect("write batch failed");
@@ -4672,12 +5448,12 @@ mod tests {
         db.flush().await.unwrap();
         db.close().await.unwrap();
 
-        let clock = Arc::new(TestClock::new());
+        let clock = Arc::new(MockSystemClock::new());
         let mut options = test_db_options(0, 32, None);
         options.wal_enabled = false;
         let db = Db::builder(path, object_store.clone())
             .with_settings(options)
-            .with_logical_clock(clock.clone())
+            .with_system_clock(clock.clone())
             .build()
             .await
             .unwrap();
@@ -4794,12 +5570,11 @@ mod tests {
         db1.put(b"k", b"v").await.unwrap();
 
         // Fence the db by opening a new one
-        let manifest_store = Arc::new(ManifestStore::new(
-            &Path::from(path),
-            object_store.clone(),
-            Arc::new(DefaultSystemClock::new()),
-        ));
-        let stored_manifest = StoredManifest::load(manifest_store.clone()).await.unwrap();
+        let manifest_store = Arc::new(ManifestStore::new(&Path::from(path), object_store.clone()));
+        let stored_manifest =
+            StoredManifest::load(manifest_store.clone(), Arc::new(DefaultSystemClock::new()))
+                .await
+                .unwrap();
         FenceableManifest::init_writer(
             stored_manifest,
             Duration::from_secs(300),
@@ -4905,9 +5680,9 @@ mod tests {
 
     async fn wait_for_manifest_condition(
         sm: &mut StoredManifest,
-        cond: impl Fn(&CoreDbState) -> bool,
+        cond: impl Fn(&ManifestCore) -> bool,
         timeout: Duration,
-    ) -> CoreDbState {
+    ) -> ManifestCore {
         let start = tokio::time::Instant::now();
         while start.elapsed() < timeout {
             let manifest = sm.refresh().await.unwrap();
@@ -5108,27 +5883,6 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(v, Some(Bytes::from(b"bar".as_ref())));
-    }
-
-    // Merge operator test helpers
-    struct StringConcatMergeOperator;
-
-    impl crate::merge_operator::MergeOperator for StringConcatMergeOperator {
-        fn merge(
-            &self,
-            _key: &Bytes,
-            existing_value: Option<Bytes>,
-            value: Bytes,
-        ) -> Result<Bytes, crate::merge_operator::MergeOperatorError> {
-            match existing_value {
-                Some(existing) => {
-                    let mut merged = existing.to_vec();
-                    merged.extend_from_slice(&value);
-                    Ok(Bytes::from(merged))
-                }
-                None => Ok(value),
-            }
-        }
     }
 
     #[tokio::test]
@@ -5363,6 +6117,10 @@ mod tests {
                 interval: None,
                 min_age: Duration::from_millis(0),
             }),
+            compactions_options: Some(GarbageCollectorDirectoryOptions {
+                interval: None,
+                min_age: Duration::from_millis(0),
+            }),
         };
 
         let gc = GarbageCollectorBuilder::new(path.clone(), object_store.clone())
@@ -5405,8 +6163,7 @@ mod tests {
             .expect("flush failed");
 
         // Read the latest manifest and verify it references the L0 SST.
-        let manifest_store =
-            ManifestStore::new(&path, object_store.clone(), db.inner.system_clock.clone());
+        let manifest_store = ManifestStore::new(&path, object_store.clone());
         let (_, manifest) = manifest_store
             .read_latest_manifest()
             .await
@@ -5443,5 +6200,143 @@ mod tests {
         );
 
         db.close().await.expect("failed to close DB");
+    }
+
+    /// Tests that when reading from L0 with DurabilityLevel::Remote, we observe data at
+    /// an earlier durability watermark until the watermark is updated, at which point we
+    /// observe data at the new watermark.
+    ///
+    /// This test validates the fix in flush.rs that ensures the retention iterator
+    /// considers the durable watermark when flushing memtable to L0. Without this fix,
+    /// the L0 SST would only contain the latest value (seq2), and remote readers would
+    /// incorrectly fail to find the durable value (seq1).
+    ///
+    /// See: https://github.com/slatedb/slatedb/pull/1189#issuecomment-3736149180
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn should_return_durable_value_when_reading_from_l0_with_remote_durability() {
+        // Given: a DB with failpoint registry
+        let fp_registry = Arc::new(FailPointRegistry::new());
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = "/tmp/test_durable_read_from_l0";
+        let mut settings = test_db_options(0, 1024, None);
+        settings.flush_interval = None; // Disable auto-flush so we control when flush happens
+        let db = Db::builder(path, object_store.clone())
+            .with_settings(settings)
+            .with_fp_registry(fp_registry.clone())
+            .build()
+            .await
+            .unwrap();
+
+        // Write value1 without awaiting durable, then manually flush WAL only
+        db.put_with_options(
+            b"key",
+            b"value1",
+            &PutOptions::default(),
+            &WriteOptions {
+                await_durable: false,
+            },
+        )
+        .await
+        .unwrap();
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::Wal,
+        })
+        .await
+        .unwrap(); // WAL flush makes seq1 durable
+
+        let seq_after_first_write = db.inner.oracle.last_remote_persisted_seq();
+
+        // Write value2 without awaiting durable - seq2 is in WAL buffer but not flushed
+        db.put_with_options(
+            b"key",
+            b"value2",
+            &PutOptions::default(),
+            &WriteOptions {
+                await_durable: false,
+            },
+        )
+        .await
+        .unwrap();
+
+        // Verify seq hasn't advanced yet (value2 not durable)
+        assert_eq!(
+            db.inner.oracle.last_remote_persisted_seq(),
+            seq_after_first_write,
+            "expected durable seq to not advance before WAL flush"
+        );
+
+        // Pause before updating durable seq after L0 flush
+        fail_parallel::cfg(fp_registry.clone(), "before-l0-durable-seq-update", "pause").unwrap();
+
+        // Trigger memtable flush to L0 in background (it will pause at failpoint)
+        let db_clone = db.clone();
+        let flush_handle = tokio::spawn(async move {
+            db_clone
+                .flush_with_options(FlushOptions {
+                    flush_type: FlushType::MemTable,
+                })
+                .await
+        });
+
+        // Wait for L0 to appear in manifest (indicating flush has written SST)
+        let manifest_store = Arc::new(ManifestStore::new(&Path::from(path), object_store.clone()));
+        let mut stored_manifest =
+            StoredManifest::load(manifest_store, Arc::new(DefaultSystemClock::new()))
+                .await
+                .unwrap();
+        wait_for_manifest_condition(
+            &mut stored_manifest,
+            |s| !s.l0.is_empty(),
+            Duration::from_secs(30),
+        )
+        .await;
+
+        // Verify durable seq hasn't advanced yet (we're paused at failpoint)
+        assert_eq!(
+            db.inner.oracle.last_remote_persisted_seq(),
+            seq_after_first_write,
+            "expected durable seq to not advance while paused at failpoint"
+        );
+
+        // When: Read with DurabilityLevel::Remote while paused at failpoint
+        let value = db
+            .get_with_options(b"key", &ReadOptions::new().with_durability_filter(Remote))
+            .await
+            .unwrap();
+
+        // Then: Should see value1 (the durable value at seq1), not value2 (seq2)
+        assert_eq!(
+            value,
+            Some(Bytes::from("value1")),
+            "expected to read durable value1 when durability filter is Remote"
+        );
+
+        // Also verify Memory durability sees the latest value
+        let value_memory = db
+            .get_with_options(b"key", &ReadOptions::new().with_durability_filter(Memory))
+            .await
+            .unwrap();
+        assert_eq!(
+            value_memory,
+            Some(Bytes::from("value2")),
+            "expected to read latest value2 when durability filter is Memory"
+        );
+
+        // Resume the failpoint
+        fail_parallel::cfg(fp_registry.clone(), "before-l0-durable-seq-update", "off").unwrap();
+        flush_handle.await.unwrap().unwrap();
+
+        // After durable seq advances, Remote read should now return value2
+        let value_after = db
+            .get_with_options(b"key", &ReadOptions::new().with_durability_filter(Remote))
+            .await
+            .unwrap();
+        assert_eq!(
+            value_after,
+            Some(Bytes::from("value2")),
+            "expected to read value2 after durable seq advances"
+        );
+
+        db.close().await.unwrap();
     }
 }

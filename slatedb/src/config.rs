@@ -58,6 +58,11 @@
 //! max_sst_size = 1073741824
 //! max_concurrent_compactions = 4
 //!
+//! [compactor_options.scheduler_options]
+//! min_compaction_sources = "4"
+//! max_compaction_sources = "8"
+//! include_size_threshold = "4.0"
+//!
 //! [object_store_cache_options]
 //! root_folder = "/tmp/slatedb-cache"
 //! max_cache_size_bytes = 17179869184
@@ -73,6 +78,10 @@
 //! min_age = "60s"
 //!
 //! [garbage_collector_options.compacted_options]
+//! interval = "300s"
+//! min_age = "86400s"
+//!
+//! [garbage_collector_options.compactions_options]
 //! interval = "300s"
 //! min_age = "86400s"
 //! ```
@@ -93,7 +102,12 @@
 //!  "compactor_options": {
 //!    "poll_interval": "5s",
 //!    "max_sst_size": 1073741824,
-//!    "max_concurrent_compactions": 4
+//!    "max_concurrent_compactions": 4,
+//!    "scheduler_options": {
+//!      "min_compaction_sources": "4",
+//!      "max_compaction_sources": "8",
+//!      "include_size_threshold": "4.0"
+//!    }
 //!  },
 //!  "compression_codec": null,
 //!  "object_store_cache_options": {
@@ -112,6 +126,10 @@
 //!      "min_age": "60s"
 //!    },
 //!    "compacted_options": {
+//!      "interval": "300s",
+//!      "min_age": "86400s"
+//!    },
+//!    "compactions_options": {
 //!      "interval": "300s",
 //!      "min_age": "86400s"
 //!    }
@@ -135,6 +153,10 @@
 //!   poll_interval: '5s'
 //!   max_sst_size: 1073741824
 //!   max_concurrent_compactions: 4
+//!   scheduler_options:
+//!     min_compaction_sources: "4"
+//!     max_compaction_sources: "8"
+//!     include_size_threshold: "4.0"
 //! compression_codec: null
 //! object_store_cache_options:
 //!   root_folder: /tmp/slatedb-cache
@@ -151,12 +173,17 @@
 //!   compacted_options:
 //!     interval: '300s'
 //!     min_age: '86400s'
+//!   compactions_options:
+//!     interval: '300s'
+//!     min_age: '86400s'
 //! ```
 //!
 use duration_str::{deserialize_duration, deserialize_option_duration};
 use figment::providers::{Env, Format, Json, Toml, Yaml};
 use figment::{Figment, Metadata, Provider};
+use log::warn;
 use serde::{Deserialize, Serialize, Serializer};
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 use std::{str::FromStr, time::Duration};
@@ -165,6 +192,7 @@ use uuid::Uuid;
 use crate::error::SlateDBError;
 
 use crate::db_cache::DbCache;
+use crate::format::sst::BlockTransformer;
 use crate::garbage_collector::{DEFAULT_INTERVAL, DEFAULT_MIN_AGE};
 use crate::merge_operator::MergeOperatorType;
 
@@ -245,6 +273,9 @@ pub struct ReadOptions {
     pub dirty: bool,
     /// Whether or not fetched blocks should be cached
     pub cache_blocks: bool,
+    #[cfg(dst)]
+    /// Force the current timestamp for DST operations. See #719 for details.
+    pub now: i64,
 }
 
 impl Default for ReadOptions {
@@ -253,6 +284,8 @@ impl Default for ReadOptions {
             durability_filter: DurabilityLevel::default(),
             dirty: false,
             cache_blocks: true,
+            #[cfg(dst)]
+            now: 0,
         }
     }
 }
@@ -298,6 +331,9 @@ pub struct ScanOptions {
     /// The maximum number of concurrent tasks for fetching blocks during scans.
     /// Higher values can improve throughput but use more resources. The default is 1.
     pub max_fetch_tasks: usize,
+    #[cfg(dst)]
+    /// Force the current timestamp for DST operations. See #719 for details.
+    pub now: i64,
 }
 
 impl Default for ScanOptions {
@@ -309,6 +345,8 @@ impl Default for ScanOptions {
             read_ahead_bytes: 1,
             cache_blocks: false,
             max_fetch_tasks: 1,
+            #[cfg(dst)]
+            now: 0,
         }
     }
 }
@@ -385,6 +423,9 @@ pub struct WriteOptions {
     /// Whether `put` calls should block until the write has been durably committed
     /// to the DB.
     pub await_durable: bool,
+    #[cfg(dst)]
+    /// Force the current timestamp for DST operations. See #719 for details.
+    pub now: i64,
 }
 
 impl Default for WriteOptions {
@@ -392,6 +433,8 @@ impl Default for WriteOptions {
     fn default() -> Self {
         Self {
             await_durable: true,
+            #[cfg(dst)]
+            now: 0,
         }
     }
 }
@@ -670,8 +713,8 @@ impl std::fmt::Debug for Settings {
                     .as_ref()
                     .map(|_| "Some(merge_operator)")
                     .unwrap_or("None"),
-            )
-            .finish()
+            );
+        data.finish()
     }
 }
 
@@ -743,6 +786,44 @@ impl Settings {
     /// # Arguments
     ///
     /// * `prefix` - A string that specifies the prefix for the environment variables to be considered.
+    /// * `default` - The base `Settings` value to merge environment overrides into.
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(Settings)` if the environment variables were successfully read and parsed.
+    /// * `Err(Error)` if there was an error reading or parsing the environment variables.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use slatedb::config::Settings;
+    ///
+    /// // Assuming environment variables like SLATEDB_FLUSH_INTERVAL, SLATEDB_WAL_ENABLED, etc. are set
+    /// let config = Settings::from_env_with_default("SLATEDB_", Settings::default()).expect("Failed to load options from env");
+    /// ```
+    pub fn from_env_with_default(
+        prefix: &str,
+        default: Settings,
+    ) -> Result<Settings, crate::Error> {
+        Figment::from(default)
+            .merge(Env::prefixed(prefix))
+            .extract()
+            .map_err(|e| SlateDBError::InvalidConfigurationFormat(Box::new(e)).into())
+    }
+
+    /// Loads Settings from environment variables with a specified prefix.
+    ///
+    /// This function attempts to create a Settings instance by reading environment variables
+    /// that start with the given prefix. Nested options are separated by a dot (.) in the environment variable names.
+    ///
+    /// For example, if the prefix is "SLATEDB_" and there's an environment variable named "SLATEDB_DB_FLUSH_INTERVAL",
+    /// it would correspond to the `flush_interval` field within the `Settings` struct.
+    /// If there is an environment variable named "SLATEDB_OBJECT_STORE_CACHE_OPTIONS.ROOT_FOLDER",
+    /// it would correspond to the `root_folder` field within the `ObjectStoreCacheOptions` within `Settings`".
+    ///
+    /// # Arguments
+    ///
+    /// * `prefix` - A string that specifies the prefix for the environment variables to be considered.
     ///
     /// # Returns
     ///
@@ -758,10 +839,7 @@ impl Settings {
     /// let config = Settings::from_env("SLATEDB_").expect("Failed to load options from env");
     /// ```
     pub fn from_env(prefix: &str) -> Result<Settings, crate::Error> {
-        Figment::from(Settings::default())
-            .merge(Env::prefixed(prefix))
-            .extract()
-            .map_err(|e| SlateDBError::InvalidConfigurationFormat(Box::new(e)).into())
+        Settings::from_env_with_default(prefix, Settings::default())
     }
 
     /// Loads Settings from multiple configuration sources in a specific order.
@@ -808,7 +886,7 @@ impl Provider for Settings {
     fn data(
         &self,
     ) -> Result<figment::value::Map<figment::Profile, figment::value::Dict>, figment::Error> {
-        figment::providers::Serialized::defaults(Settings::default()).data()
+        figment::providers::Serialized::defaults(self.clone()).data()
     }
 }
 
@@ -858,6 +936,22 @@ pub struct DbReaderOptions {
 
     #[serde(skip)]
     pub merge_operator: Option<MergeOperatorType>,
+
+    /// An optional block transformer for custom encoding/decoding of blocks.
+    /// Can be used for encryption, custom encoding, etc.
+    #[serde(skip)]
+    pub block_transformer: Option<Arc<dyn BlockTransformer>>,
+
+    /// When true, skip WAL replay entirely. The reader will only see data that has been
+    /// compacted into L0 or lower levels. This is useful for read-heavy workloads that
+    /// don't need to see the most recent uncommitted writes and want to minimize the
+    /// cost of opening many readers.
+    ///
+    /// When combined with manifest polling (no explicit checkpoint), the reader will
+    /// still see newly compacted data as manifests are updated.
+    ///
+    /// Defaults to false.
+    pub skip_wal_replay: bool,
 }
 
 impl Default for DbReaderOptions {
@@ -868,6 +962,8 @@ impl Default for DbReaderOptions {
             max_memtable_bytes: 64 * 1024 * 1024,
             block_cache: default_block_cache(),
             merge_operator: None,
+            block_transformer: None,
+            skip_wal_replay: false,
         }
     }
 }
@@ -889,6 +985,7 @@ pub(crate) fn default_block_cache() -> Option<Arc<dyn DbCache>> {
         return Some(Arc::new(crate::db_cache::foyer::FoyerCache::new_with_opts(
             crate::db_cache::foyer::FoyerCacheOptions {
                 max_capacity: crate::db_cache::DEFAULT_BLOCK_CACHE_CAPACITY,
+                ..Default::default()
             },
         )));
     }
@@ -912,6 +1009,7 @@ pub(crate) fn default_meta_cache() -> Option<Arc<dyn DbCache>> {
         return Some(Arc::new(crate::db_cache::foyer::FoyerCache::new_with_opts(
             crate::db_cache::foyer::FoyerCacheOptions {
                 max_capacity: crate::db_cache::DEFAULT_META_CACHE_CAPACITY,
+                ..Default::default()
             },
         )));
     }
@@ -975,6 +1073,10 @@ pub struct CompactorOptions {
 
     /// The maximum number of concurrent compactions to execute at once
     pub max_concurrent_compactions: usize,
+
+    /// Scheduler-specific options expressed as string key/value pairs.
+    #[serde(default)]
+    pub scheduler_options: HashMap<String, String>,
 }
 
 /// Default options for the compactor. Currently, only a
@@ -988,28 +1090,29 @@ impl Default for CompactorOptions {
             manifest_update_timeout: Duration::from_secs(300),
             max_sst_size: 256 * 1024 * 1024,
             max_concurrent_compactions: 4,
+            scheduler_options: HashMap::new(),
         }
     }
 }
 
 // Implement Debug manually for CompactorOptions.
-// This is needed because CompactorOptions contains a boxed trait object
-// (`Arc<dyn CompactionSchedulerSupplier>`), which doesn't implement Debug.
 impl std::fmt::Debug for CompactorOptions {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CompactorOptions")
             .field("poll_interval", &self.poll_interval)
+            .field("manifest_update_timeout", &self.manifest_update_timeout)
             .field("max_sst_size", &self.max_sst_size)
             .field(
                 "max_concurrent_compactions",
                 &self.max_concurrent_compactions,
             )
+            .field("scheduler_options", &self.scheduler_options)
             .finish()
     }
 }
 
 /// Options for the Size-Tiered Compaction Scheduler
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug)]
 pub struct SizeTieredCompactionSchedulerOptions {
     /// The minimum number of sources to include together in a single compaction step.
     pub min_compaction_sources: usize,
@@ -1033,6 +1136,73 @@ impl Default for SizeTieredCompactionSchedulerOptions {
     }
 }
 
+impl From<&HashMap<String, String>> for SizeTieredCompactionSchedulerOptions {
+    fn from(map: &HashMap<String, String>) -> Self {
+        let mut options = SizeTieredCompactionSchedulerOptions::default();
+        for (key, value) in map {
+            match key.as_str() {
+                "min_compaction_sources" => match value.parse::<usize>() {
+                    Ok(parsed) => options.min_compaction_sources = parsed,
+                    Err(err) => {
+                        warn!(
+                            "invalid scheduler option value for min_compaction_sources: '{}': {}",
+                            value, err
+                        );
+                    }
+                },
+                "max_compaction_sources" => match value.parse::<usize>() {
+                    Ok(parsed) => options.max_compaction_sources = parsed,
+                    Err(err) => {
+                        warn!(
+                            "invalid scheduler option value for max_compaction_sources: '{}': {}",
+                            value, err
+                        );
+                    }
+                },
+                "include_size_threshold" => match value.parse::<f32>() {
+                    Ok(parsed) => options.include_size_threshold = parsed,
+                    Err(err) => {
+                        warn!(
+                            "invalid scheduler option value for include_size_threshold: '{}': {}",
+                            value, err
+                        );
+                    }
+                },
+                _ => {
+                    warn!("unknown scheduler option '{}'; ignoring", key);
+                }
+            }
+        }
+
+        options
+    }
+}
+
+impl From<HashMap<String, String>> for SizeTieredCompactionSchedulerOptions {
+    fn from(map: HashMap<String, String>) -> Self {
+        Self::from(&map)
+    }
+}
+
+impl From<SizeTieredCompactionSchedulerOptions> for HashMap<String, String> {
+    fn from(options: SizeTieredCompactionSchedulerOptions) -> Self {
+        let mut map = HashMap::new();
+        map.insert(
+            "min_compaction_sources".to_string(),
+            options.min_compaction_sources.to_string(),
+        );
+        map.insert(
+            "max_compaction_sources".to_string(),
+            options.max_compaction_sources.to_string(),
+        );
+        map.insert(
+            "include_size_threshold".to_string(),
+            options.include_size_threshold.to_string(),
+        );
+        map
+    }
+}
+
 /// Garbage collector options.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct GarbageCollectorOptions {
@@ -1044,6 +1214,10 @@ pub struct GarbageCollectorOptions {
 
     /// Garbage collection options for the compacted directory.
     pub compacted_options: Option<GarbageCollectorDirectoryOptions>,
+
+    /// Garbage collection options for the compactions directory, which
+    /// contains compactor job state `.compactions` files.
+    pub compactions_options: Option<GarbageCollectorDirectoryOptions>,
 }
 
 impl GarbageCollectorOptions {
@@ -1051,6 +1225,7 @@ impl GarbageCollectorOptions {
         self.manifest_options.is_none()
             && self.wal_options.is_none()
             && self.compacted_options.is_none()
+            && self.compactions_options.is_none()
     }
 }
 
@@ -1082,12 +1257,14 @@ pub struct GarbageCollectorDirectoryOptions {
 /// * Manifest options: interval of 60 seconds, min age of 1 day
 /// * WAL options: interval of 60 seconds, min age of 1 minute
 /// * Compacted options: interval of 60 seconds, min age of 1 day
+/// * Compactions options: interval of 60 seconds, min age of 1 day
 impl Default for GarbageCollectorOptions {
     fn default() -> Self {
         Self {
             manifest_options: None,
             wal_options: None,
             compacted_options: None,
+            compactions_options: None,
         }
     }
 }
@@ -1181,6 +1358,7 @@ where
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::path::PathBuf;
 
     use super::*;
@@ -1229,6 +1407,24 @@ mod tests {
                 Some(PathBuf::from("/tmp/slatedb-root")),
                 options.object_store_cache_options.root_folder
             );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn test_db_options_env_with_default_respects_overrides() {
+        figment::Jail::expect_with(|_jail| {
+            let options = Settings::from_env_with_default(
+                "SLATEDB_",
+                Settings {
+                    flush_interval: Some(Duration::from_millis(40)),
+                    ..Default::default()
+                },
+            )
+            .expect("failed to load db options from environment");
+
+            assert_eq!(Some(Duration::from_millis(40)), options.flush_interval);
+
             Ok(())
         });
     }
@@ -1330,5 +1526,21 @@ object_store_cache_options:
         assert!(!options.dirty);
         assert_eq!(options.read_ahead_bytes, 1);
         assert!(!options.cache_blocks);
+    }
+
+    #[test]
+    fn test_size_tiered_compaction_scheduler_options_roundtrip() {
+        let options = SizeTieredCompactionSchedulerOptions {
+            min_compaction_sources: 3,
+            max_compaction_sources: 9,
+            include_size_threshold: 7.0,
+        };
+
+        let map: HashMap<String, String> = options.into();
+        let roundtripped = SizeTieredCompactionSchedulerOptions::from(map);
+
+        assert_eq!(roundtripped.min_compaction_sources, 3);
+        assert_eq!(roundtripped.max_compaction_sources, 9);
+        assert_eq!(roundtripped.include_size_threshold, 7.0);
     }
 }

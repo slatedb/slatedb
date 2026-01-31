@@ -15,6 +15,7 @@ use tokio::{
 use tracing::instrument;
 
 use crate::oracle::Oracle;
+use crate::utils::format_bytes_si;
 use crate::{
     clock::MonotonicClock,
     db_state::{DbState, SsTableId},
@@ -85,7 +86,7 @@ struct WalBufferManagerInner {
 }
 
 impl WalBufferManager {
-    pub fn new(
+    pub(crate) fn new(
         wal_id_incrementor: Arc<dyn WalIdStore + Send + Sync>,
         db_state: Arc<RwLock<DbState>>,
         db_stats: DbStats,
@@ -119,7 +120,7 @@ impl WalBufferManager {
         }
     }
 
-    pub async fn init(
+    pub(crate) async fn init(
         self: &Arc<Self>,
         task_executor: Arc<MessageHandlerExecutor>,
     ) -> Result<(), SlateDBError> {
@@ -146,7 +147,7 @@ impl WalBufferManager {
     }
 
     #[cfg(test)]
-    pub fn buffered_wal_entries_count(&self) -> usize {
+    pub(crate) fn buffered_wal_entries_count(&self) -> usize {
         let guard = self.inner.read();
         let flushing_wal_entries_count = guard
             .immutable_wals
@@ -157,21 +158,21 @@ impl WalBufferManager {
         current_wal_entries_count + flushing_wal_entries_count
     }
 
-    pub fn recent_flushed_wal_id(&self) -> u64 {
+    pub(crate) fn recent_flushed_wal_id(&self) -> u64 {
         let inner = self.inner.read();
         inner.recent_flushed_wal_id
     }
 
     #[cfg(test)] // used in compactor.rs
-    pub fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         let inner = self.inner.read();
         inner.current_wal.is_empty() && inner.immutable_wals.is_empty()
     }
 
     /// Returns the total size of all unflushed WALs in bytes.
-    pub fn estimated_bytes(&self) -> Result<usize, SlateDBError> {
+    pub(crate) fn estimated_bytes(&self) -> Result<usize, SlateDBError> {
         let inner = self.inner.read();
-        let current_wal_size = self.table_store.estimate_encoded_size(
+        let current_wal_size = self.table_store.estimate_encoded_size_wal(
             inner.current_wal.metadata().entry_num,
             inner.current_wal.metadata().entries_size_in_bytes,
         );
@@ -182,16 +183,15 @@ impl WalBufferManager {
             .map(|(_, wal)| {
                 let metadata = wal.metadata();
                 self.table_store
-                    .estimate_encoded_size(metadata.entry_num, metadata.entries_size_in_bytes)
+                    .estimate_encoded_size_wal(metadata.entry_num, metadata.entries_size_in_bytes)
             })
             .sum::<usize>();
-
         Ok(current_wal_size + imm_wal_size)
     }
 
     /// Append row entries to the current WAL. return the last seq number of the WAL.
     /// TODO: validate the seq number is always increasing.
-    pub fn append(&self, entries: &[RowEntry]) -> Result<Arc<KVTable>, SlateDBError> {
+    pub(crate) fn append(&self, entries: &[RowEntry]) -> Result<Arc<KVTable>, SlateDBError> {
         // TODO: check if the wal buffer is in a fatal error state.
 
         let inner = self.inner.write();
@@ -205,18 +205,18 @@ impl WalBufferManager {
     /// is not very strict, we have to ensure a write batch into a single WAL file.
     ///
     /// It's the caller's duty to call `maybe_trigger_flush` after calling `append`.
-    pub fn maybe_trigger_flush(&self) -> Result<Arc<KVTable>, SlateDBError> {
+    pub(crate) fn maybe_trigger_flush(&self) -> Result<Arc<KVTable>, SlateDBError> {
         // check the size of the current wal
         let (current_wal, need_flush, flush_tx) = {
             let inner = self.inner.read();
-            let current_wal_size = self.table_store.estimate_encoded_size(
+            let current_wal_size = self.table_store.estimate_encoded_size_wal(
                 inner.current_wal.metadata().entry_num,
                 inner.current_wal.metadata().entries_size_in_bytes,
             );
             trace!(
                 "checking flush trigger [current_wal_size={}, max_wal_bytes_size={}]",
-                current_wal_size,
-                self.max_wal_bytes_size,
+                format_bytes_si(current_wal_size as u64),
+                format_bytes_si(self.max_wal_bytes_size as u64),
             );
             let need_flush = current_wal_size >= self.max_wal_bytes_size;
             (
@@ -265,7 +265,7 @@ impl WalBufferManager {
     }
 
     #[instrument(level = "trace", skip_all, err(level = tracing::Level::DEBUG))]
-    pub async fn flush(&self) -> Result<(), SlateDBError> {
+    pub(crate) async fn flush(&self) -> Result<(), SlateDBError> {
         let flush_tx = self
             .inner
             .read()
@@ -340,10 +340,10 @@ impl WalBufferManager {
         let mut sst_builder = self.table_store.table_builder();
         let mut iter = wal.iter();
         while let Some(entry) = iter.next_entry().await? {
-            sst_builder.add(entry)?;
+            sst_builder.add(entry).await?;
         }
 
-        let encoded_sst = sst_builder.build()?;
+        let encoded_sst = sst_builder.build().await?;
         self.table_store
             .write_sst(&SsTableId::Wal(wal_id), encoded_sst, false)
             .await?;
@@ -369,7 +369,7 @@ impl WalBufferManager {
     /// This information of the last applied seq is used to determine if the immutable wals can be recycled.
     ///
     /// It's the caller's duty to ensure the seq is monotonically increasing.
-    pub fn track_last_applied_seq(&self, seq: u64) {
+    pub(crate) fn track_last_applied_seq(&self, seq: u64) {
         {
             let mut inner = self.inner.write();
             inner.last_applied_seq = Some(seq);
@@ -411,7 +411,7 @@ impl WalBufferManager {
     }
 
     #[allow(dead_code)]
-    pub async fn close(&self) -> Result<(), SlateDBError> {
+    pub(crate) async fn close(&self) -> Result<(), SlateDBError> {
         let task_executor = {
             let inner = self.inner.read();
             inner
@@ -490,18 +490,19 @@ impl MessageHandler<WalFlushWork> for WalFlushHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::clock::{DefaultSystemClock, MonotonicClock};
+    use crate::clock::MonotonicClock;
     use crate::manifest::store::test_utils::new_dirty_manifest;
     use crate::object_stores::ObjectStores;
-    use crate::sst::SsTableFormat;
+    use crate::sst_builder::SsTableFormat;
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
     use crate::stats::StatRegistry;
     use crate::tablestore::TableStore;
-    use crate::test_utils::TestClock;
     use crate::types::{RowEntry, ValueDeletable};
     use crate::utils::MonotonicSeq;
     use bytes::Bytes;
     use object_store::{memory::InMemory, path::Path, ObjectStore};
+    use slatedb_common::clock::DefaultSystemClock;
+    use slatedb_common::MockSystemClock;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
     use std::time::Duration;
@@ -516,7 +517,7 @@ mod tests {
         }
     }
 
-    async fn setup_wal_buffer() -> (Arc<WalBufferManager>, Arc<TableStore>, Arc<TestClock>) {
+    async fn setup_wal_buffer() -> (Arc<WalBufferManager>, Arc<TableStore>, Arc<MockSystemClock>) {
         let wal_id_store: Arc<dyn WalIdStore + Send + Sync> = Arc::new(MockWalIdStore {
             next_id: AtomicU64::new(1),
         });
@@ -527,7 +528,7 @@ mod tests {
             Path::from("/root"),
             None,
         ));
-        let test_clock = Arc::new(TestClock::new());
+        let test_clock = Arc::new(MockSystemClock::new());
         let mono_clock = Arc::new(MonotonicClock::new(test_clock.clone(), 0));
         let system_clock = Arc::new(DefaultSystemClock::new());
         let oracle = Arc::new(DbOracle::new(
@@ -637,7 +638,7 @@ mod tests {
         }
 
         // Wait for background flush
-        assert_eq!(wal_buffer.recent_flushed_wal_id(), 10);
+        assert_eq!(wal_buffer.recent_flushed_wal_id(), 11);
     }
 
     #[tokio::test]

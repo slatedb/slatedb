@@ -2,16 +2,20 @@ use crate::args::{parse_args, CliArgs, CliCommands, GcResource, GcSchedule};
 use chrono::{TimeZone, Utc};
 use object_store::path::Path;
 use slatedb::admin::{self, Admin, AdminBuilder};
-use slatedb::config::{
-    CheckpointOptions, GarbageCollectorDirectoryOptions, GarbageCollectorOptions,
+use slatedb::compactor::{
+    CompactionRequest, CompactionSchedulerSupplier, SizeTieredCompactionSchedulerSupplier,
 };
-use slatedb::FindOption;
+use slatedb::config::{
+    CheckpointOptions, CompactorOptions, GarbageCollectorDirectoryOptions, GarbageCollectorOptions,
+};
+use slatedb::seq_tracker::FindOption;
 use std::error::Error;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 use tracing::debug;
 use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_subscriber::EnvFilter;
+use ulid::Ulid;
 use uuid::Uuid;
 
 mod args;
@@ -44,6 +48,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
     match args.command {
         CliCommands::ReadManifest { id } => exec_read_manifest(&admin, id).await?,
         CliCommands::ListManifests { start, end } => exec_list_manifest(&admin, start, end).await?,
+        CliCommands::ReadCompactions { id } => exec_read_compactions(&admin, id).await?,
+        CliCommands::ListCompactions { start, end } => {
+            exec_list_compactions(&admin, start, end).await?
+        }
+        CliCommands::ReadCompaction { id, compactions_id } => {
+            exec_read_compaction(&admin, id, compactions_id).await?
+        }
         CliCommands::CreateCheckpoint {
             lifetime,
             source,
@@ -57,11 +68,16 @@ async fn main() -> Result<(), Box<dyn Error>> {
         CliCommands::RunGarbageCollection { resource, min_age } => {
             exec_gc_once(&admin, resource, min_age).await?
         }
+        CliCommands::RunCompactor => admin.run_compactor(cancellation_token.clone()).await?,
         CliCommands::ScheduleGarbageCollection {
             manifest,
             wal,
             compacted,
-        } => schedule_gc(&admin, manifest, wal, compacted).await?,
+            compactions,
+        } => schedule_gc(&admin, manifest, wal, compacted, compactions).await?,
+        CliCommands::SubmitCompaction { scheduler, request } => {
+            exec_submit_compaction(&admin, scheduler, request).await?
+        }
 
         CliCommands::SeqToTs { seq, round } => {
             exec_seq_to_ts(&admin, seq, matches!(round, FindOption::RoundUp)).await?
@@ -86,6 +102,18 @@ async fn exec_read_manifest(admin: &Admin, id: Option<u64>) -> Result<(), Box<dy
     Ok(())
 }
 
+async fn exec_read_compactions(admin: &Admin, id: Option<u64>) -> Result<(), Box<dyn Error>> {
+    match admin.read_compactions(id).await? {
+        None => {
+            println!("no compactions file found")
+        }
+        Some(compactions) => {
+            println!("{}", compactions);
+        }
+    }
+    Ok(())
+}
+
 async fn exec_list_manifest(
     admin: &Admin,
     start: Option<u64>,
@@ -99,6 +127,66 @@ async fn exec_list_manifest(
     };
 
     println!("{}", admin.list_manifests(range).await?);
+    Ok(())
+}
+
+async fn exec_list_compactions(
+    admin: &Admin,
+    start: Option<u64>,
+    end: Option<u64>,
+) -> Result<(), Box<dyn Error>> {
+    let range = match (start, end) {
+        (Some(s), Some(e)) => s..e,
+        (Some(s), None) => s..u64::MAX,
+        (None, Some(e)) => u64::MIN..e,
+        _ => u64::MIN..u64::MAX,
+    };
+
+    println!("{}", admin.list_compactions(range).await?);
+    Ok(())
+}
+
+async fn exec_submit_compaction(
+    admin: &Admin,
+    scheduler: String,
+    request: CompactionRequest,
+) -> Result<(), Box<dyn Error>> {
+    let state = admin.read_compactor_state_view().await?;
+    let supplier = match scheduler.as_str() {
+        "size-tiered" => SizeTieredCompactionSchedulerSupplier,
+        _ => {
+            return Err(Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("unsupported scheduler: {scheduler}"),
+            )))
+        }
+    };
+    let scheduler = supplier.compaction_scheduler(&CompactorOptions::default());
+    let specs = scheduler.generate(&state, &request)?;
+    let mut compactions = Vec::with_capacity(specs.len());
+    for spec in specs {
+        compactions.push(admin.submit_compaction(spec).await?);
+    }
+    let compaction_json = serde_json::to_string(&compactions)?;
+    println!("{}", compaction_json);
+    Ok(())
+}
+
+async fn exec_read_compaction(
+    admin: &Admin,
+    id: String,
+    compactions_id: Option<u64>,
+) -> Result<(), Box<dyn Error>> {
+    let compaction_id = Ulid::from_string(&id)?;
+    match admin.read_compaction(compaction_id, compactions_id).await? {
+        None => {
+            println!("no compaction found");
+        }
+        Some(compaction) => {
+            let compaction_json = serde_json::to_string(&compaction)?;
+            println!("{}", compaction_json);
+        }
+    }
     Ok(())
 }
 
@@ -159,16 +247,25 @@ async fn exec_gc_once(
             manifest_options: create_gc_dir_opts(min_age),
             wal_options: None,
             compacted_options: None,
+            compactions_options: None,
         },
         GcResource::Wal => GarbageCollectorOptions {
             manifest_options: None,
             wal_options: create_gc_dir_opts(min_age),
             compacted_options: None,
+            compactions_options: None,
         },
         GcResource::Compacted => GarbageCollectorOptions {
             manifest_options: None,
             wal_options: None,
             compacted_options: create_gc_dir_opts(min_age),
+            compactions_options: None,
+        },
+        GcResource::Compactions => GarbageCollectorOptions {
+            manifest_options: None,
+            wal_options: None,
+            compacted_options: None,
+            compactions_options: create_gc_dir_opts(min_age),
         },
     };
     admin.run_gc_once(gc_opts).await?;
@@ -180,6 +277,7 @@ async fn schedule_gc(
     manifest_schedule: Option<GcSchedule>,
     wal_schedule: Option<GcSchedule>,
     compacted_schedule: Option<GcSchedule>,
+    compactions_schedule: Option<GcSchedule>,
 ) -> Result<(), Box<dyn Error>> {
     fn create_gc_dir_opts(schedule: GcSchedule) -> Option<GarbageCollectorDirectoryOptions> {
         Some(GarbageCollectorDirectoryOptions {
@@ -191,6 +289,7 @@ async fn schedule_gc(
         manifest_options: manifest_schedule.and_then(create_gc_dir_opts),
         wal_options: wal_schedule.and_then(create_gc_dir_opts),
         compacted_options: compacted_schedule.and_then(create_gc_dir_opts),
+        compactions_options: compactions_schedule.and_then(create_gc_dir_opts),
     };
 
     admin.run_gc(gc_opts).await?;

@@ -34,12 +34,12 @@ use std::sync::Arc;
 use std::time::Duration;
 use tracing::instrument;
 
-use crate::clock::SystemClock;
 use crate::config::WriteOptions;
 use crate::dispatcher::MessageHandler;
 use crate::types::RowEntry;
 use crate::utils::WatchableOnceCellReader;
 use crate::{batch::WriteBatch, db::DbInner, error::SlateDBError};
+use slatedb_common::clock::SystemClock;
 
 pub(crate) const WRITE_BATCH_TASK_NAME: &str = "writer";
 
@@ -83,7 +83,7 @@ impl MessageHandler<WriteBatchMessage> for WriteBatchEventHandler {
             options,
             done,
         } = message;
-        let result = self.db_inner.write_batch(batch).await;
+        let result = self.db_inner.write_batch(batch, &options).await;
         // if this is the first write and the WAL is disabled, make sure users are flushing
         // their memtables in a timely manner.
         if self.is_first_write && !self.db_inner.wal_enabled && options.await_durable {
@@ -117,8 +117,14 @@ impl DbInner {
     async fn write_batch(
         &self,
         batch: WriteBatch,
+        options: &WriteOptions,
     ) -> Result<WatchableOnceCellReader<Result<(), SlateDBError>>, SlateDBError> {
+        let _options = options;
+        #[cfg(not(dst))]
         let now = self.mono_clock.now().await?;
+        #[cfg(dst)]
+        // Force the current timestamp for DST operations. See #719 for details.
+        let now = options.now;
         let commit_seq = self.oracle.last_seq.next();
 
         // Check for transaction conflicts before proceeding with the write batch

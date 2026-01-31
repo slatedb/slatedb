@@ -7,9 +7,9 @@
 //! Each iteration, or step, in the simulation runs a single action to perform
 //! on the database. The action is determined by a [DstDistribution] implementation.
 //! If the action is a read (get or scan), the simulation verifies the result
-//! against an in-memory [BTreeMap] copy of the database ([Dst::state]). If the action
-//! is a write (put or delete), the simulation updates both the database and the
-//! in-memory copy.
+//! against a SQLite-backed copy of the database (stored in memory by default)
+//! ([Dst::state]). If the action is a write (put or delete), the simulation updates
+//! both the database and the SQLite-backed copy.
 //!
 //! [DstAction] contains the (currently) supported actions:
 //!
@@ -17,16 +17,14 @@
 //! - [DstAction::Get]
 //! - [DstAction::Scan]
 //! - [DstAction::Flush]
-//! - [DstAction::AdvanceTime]
+//! - [DstAction::AdvanceSystemClock]
 //!
 //! [Dst] expects to be run with completely deterministic components for time, random
 //! numbers, and scheduling (the async runtime). SlateDB provides the following
 //! components to make this possible:
 //!
 //! - [SystemClock]: A mock system clock is provided by
-//!   [MockSystemClock](slatedb::clock::MockSystemClock).
-//! - [LogicalClock](slatedb::clock::LogicalClock): A mock logical clock is provided
-//!   by [MockLogicalClock](slatedb::clock::MockLogicalClock).
+//!   [MockSystemClock](slatedb_common::clock::MockSystemClock).
 //! - [DbRand]: Can be made deterministic by providing a seed in [DbRand::new].
 //! - [Runtime](tokio::runtime::Runtime): A single threaded Tokio runtime with a
 //!   rng_seed provided. This requires `RUSTFLAGS="--cfg tokio_unstable"` and Tokio's
@@ -47,15 +45,13 @@
 //! # // RUSTDOCFLAGS="--cfg tokio_unstable"
 //! # #[cfg(tokio_unstable)] {
 //! # use slatedb::*;
-//! # use slatedb::clock::MockSystemClock;
-//! # use slatedb::clock::MockLogicalClock;
+//! # use slatedb_common::clock::MockSystemClock;
 //! # use slatedb::object_store::memory::InMemory;
 //! # use slatedb_dst::*;
 //! # use slatedb_dst::utils::*;
 //! # use std::sync::Arc;
 //! # use std::rc::Rc;
 //! let system_clock = Arc::new(MockSystemClock::new());
-//! let logical_clock = Arc::new(MockLogicalClock::new());
 //! let rand = Rc::new(DbRand::new(12345));
 //! let dst_opts = DstOptions::default();
 //! let runtime = build_runtime(5678);
@@ -63,7 +59,6 @@
 //!     let db = DbBuilder::new("test_db", Arc::new(InMemory::new()))
 //!         .with_seed(1234)
 //!         .with_system_clock(system_clock.clone())
-//!         .with_logical_clock(logical_clock.clone())
 //!         .build()
 //!         .await
 //!         .unwrap();
@@ -91,15 +86,16 @@ use rand::distr::Uniform;
 use rand::seq::IteratorRandom;
 use rand::Rng;
 use rand::RngCore;
-use slatedb::clock::SystemClock;
 use slatedb::config::PutOptions;
 use slatedb::config::ReadOptions;
 use slatedb::config::ScanOptions;
+use slatedb::config::Ttl;
 use slatedb::config::WriteOptions;
 use slatedb::Db;
 use slatedb::DbRand;
 use slatedb::Error;
 use slatedb::WriteBatch;
+use slatedb_common::clock::SystemClock;
 use std::future::Future;
 use std::ops::Bound;
 use std::ops::RangeBounds;
@@ -167,7 +163,7 @@ pub enum DstAction {
     /// Calls flush() on the DB.
     Flush,
     /// Advances the system clock by the given duration.
-    AdvanceTime(Duration),
+    AdvanceSystemClock(Duration),
 }
 
 impl std::fmt::Display for DstAction {
@@ -183,8 +179,8 @@ impl std::fmt::Display for DstAction {
                 write!(f, "Scan")
             }
             DstAction::Flush => write!(f, "Flush"),
-            DstAction::AdvanceTime(duration) => {
-                write!(f, "AdvanceTime({:?})", duration)
+            DstAction::AdvanceSystemClock(duration) => {
+                write!(f, "AdvanceSystemClock({:?})", duration)
             }
         }
     }
@@ -227,7 +223,9 @@ impl std::fmt::Debug for DstAction {
                 )
             }
             DstAction::Flush => write!(f, "Flush"),
-            DstAction::AdvanceTime(duration) => write!(f, "AdvanceTime({:?})", duration),
+            DstAction::AdvanceSystemClock(duration) => {
+                write!(f, "AdvanceSystemClock({:?})", duration)
+            }
         }
     }
 }
@@ -253,13 +251,18 @@ pub trait DstDistribution {
 ///   and to advance time between 1ms and 10 seconds.
 pub struct DefaultDstDistribution {
     options: DstOptions,
+    system_clock: Arc<dyn SystemClock>,
     rand: Rc<DbRand>,
 }
 
 /// Helper functions for generating DST actions.
 impl DefaultDstDistribution {
-    pub fn new(rand: Rc<DbRand>, options: DstOptions) -> Self {
-        Self { options, rand }
+    pub fn new(options: DstOptions, system_clock: Arc<dyn SystemClock>, rand: Rc<DbRand>) -> Self {
+        Self {
+            options,
+            system_clock,
+            rand,
+        }
     }
 
     /// Generate a write action with puts and deletes.
@@ -271,7 +274,7 @@ impl DefaultDstDistribution {
         let mut write_ops = Vec::new();
         let write_options = self.get_write_options();
         let mut remaining_bytes =
-            self.sample_log10_uniform(1..self.options.max_write_batch_bytes) as i64;
+            self.sample_log10_uniform(1..self.options.max_write_batch_bytes as u64) as i64;
         while remaining_bytes > 0 {
             if self.is_put_operation() {
                 let key = self.gen_key(state);
@@ -310,18 +313,25 @@ impl DefaultDstDistribution {
         } else if start_key == end_key {
             end_key.push(b'\0');
         }
-        DstAction::Scan(start_key.clone(), end_key.clone(), ScanOptions::default())
+        DstAction::Scan(
+            start_key.clone(),
+            end_key.clone(),
+            ScanOptions {
+                now: self.system_clock.now().timestamp_millis(),
+                ..Default::default()
+            },
+        )
     }
 
     fn sample_flush(&self) -> DstAction {
         DstAction::Flush
     }
 
-    /// Generates an advance time action. The duration is sampled using a log-uniform
-    /// distribution. The range is hard coded as 1..300_000 (1ms to 5 minutes).
-    fn sample_advance_time(&self) -> DstAction {
-        let sleep_ms = self.sample_log10_uniform(1..300_000).into();
-        DstAction::AdvanceTime(Duration::from_millis(sleep_ms))
+    /// Generates an advance time action for the system clock. The duration is sampled using
+    /// a log-uniform distribution. The range is hard coded as 1..300_000 (1ms to 5 minutes).
+    fn sample_advance_system_time(&self) -> DstAction {
+        let sleep_ms = self.sample_log10_uniform(1..300_000);
+        DstAction::AdvanceSystemClock(Duration::from_millis(sleep_ms))
     }
 
     /// Samples a value from a log-uniform distribution. The log is a log10 (common log).
@@ -335,7 +345,7 @@ impl DefaultDstDistribution {
     ///
     /// For DST, evenly sampling across orders of magnitude seems to expose the most bugs.
     #[inline]
-    fn sample_log10_uniform<R: RangeBounds<u32>>(&self, range: R) -> u32 {
+    fn sample_log10_uniform<R: RangeBounds<u64>>(&self, range: R) -> u64 {
         let min = match range.start_bound() {
             Bound::Unbounded => 1,
             Bound::Included(min) => *min,
@@ -343,7 +353,7 @@ impl DefaultDstDistribution {
         };
         assert!(min > 0, "min must be > 0");
         let max = match range.end_bound() {
-            Bound::Unbounded => u32::MAX,
+            Bound::Unbounded => u64::MAX,
             Bound::Included(max) => *max,
             Bound::Excluded(max) => max - 1,
         };
@@ -354,7 +364,7 @@ impl DefaultDstDistribution {
         let log10_dist = Uniform::new(min_log10, max_log10).expect("non-empty weights and all ≥ 0");
         let u = log10_dist.sample(&mut self.rand.rng());
         // Go back to original range. Clamping biases the end of the range, but is fine for DST.
-        (10f64.powf(u) as u32).clamp(min, max)
+        (10f64.powf(u) as u64).clamp(min, max)
     }
 
     /// Generates a key for actions that require a key. The key can be either a key that's
@@ -370,7 +380,7 @@ impl DefaultDstDistribution {
         if let Some(existing_key) = self.maybe_get_existing_key(state) {
             return existing_key;
         }
-        let key_len = self.sample_log10_uniform(1..self.options.max_key_bytes as u32) as usize;
+        let key_len = self.sample_log10_uniform(1..self.options.max_key_bytes as u64) as usize;
         let mut bytes = vec![0; key_len];
         self.rand.rng().fill_bytes(&mut bytes);
         bytes
@@ -382,11 +392,12 @@ impl DefaultDstDistribution {
     /// improved in the future.
     #[inline]
     fn maybe_get_existing_key(&self, state: &SQLiteState) -> Option<Vec<u8>> {
+        let now = self.system_clock.now().timestamp_millis();
         let hit_probability = self.rand.rng().random_range(0.0..1.0);
-        let is_db_hit = !state.is_empty() && self.rand.rng().random_bool(hit_probability);
+        let is_db_hit = !state.is_empty(now) && self.rand.rng().random_bool(hit_probability);
 
         if is_db_hit {
-            let keys = state.keys().unwrap_or_default();
+            let keys = state.keys(now).unwrap_or_default();
             let existing_key = keys
                 .into_iter()
                 .choose(&mut self.rand.rng())
@@ -405,7 +416,7 @@ impl DefaultDstDistribution {
     /// See [DefaultDstDistribution::sample_log10_uniform] for more details.
     #[inline]
     fn gen_val(&self) -> Vec<u8> {
-        let val_len = self.sample_log10_uniform(1..self.options.max_val_bytes) as usize;
+        let val_len = self.sample_log10_uniform(1..self.options.max_val_bytes as u64) as usize;
         let mut bytes = vec![0; val_len];
         self.rand.rng().fill_bytes(&mut bytes);
         bytes
@@ -413,7 +424,13 @@ impl DefaultDstDistribution {
 
     #[inline]
     fn gen_put_options(&self) -> PutOptions {
-        PutOptions::default()
+        let ttl = if self.rand.rng().random_bool(0.9) {
+            Ttl::NoExpiry
+        } else {
+            Ttl::ExpireAfter(self.sample_log10_uniform(1..=i64::MAX as u64))
+        };
+
+        PutOptions { ttl }
     }
 
     /// Generates write options for actions that require write options.
@@ -425,12 +442,17 @@ impl DefaultDstDistribution {
         let mut rng = self.rand.rng();
         WriteOptions {
             await_durable: rng.random_bool(0.5),
+            now: self.system_clock.now().timestamp_millis(),
+            ..Default::default()
         }
     }
 
     #[inline]
     fn gen_read_options(&self) -> ReadOptions {
-        ReadOptions::default()
+        ReadOptions {
+            now: self.system_clock.now().timestamp_millis(),
+            ..Default::default()
+        }
     }
 
     /// Returns true if the operation is a put, false if it is a delete.
@@ -455,7 +477,7 @@ impl DstDistribution for DefaultDstDistribution {
             1 => self.sample_get(state),
             2 => self.sample_scan(state),
             3 => self.sample_flush(),
-            4 => self.sample_advance_time(),
+            4 => self.sample_advance_system_time(),
             _ => unreachable!(),
         }
     }
@@ -540,7 +562,7 @@ impl Dst {
                     self.run_scan(&start_key, &end_key, &scan_options).await?
                 }
                 DstAction::Flush => self.run_flush().await?,
-                DstAction::AdvanceTime(duration) => self.advance_time(duration).await,
+                DstAction::AdvanceSystemClock(duration) => self.advance_system_time(duration).await,
             }
             step_count += 1;
         }
@@ -574,14 +596,14 @@ impl Dst {
             0f64
         };
         self.poll_await(future, flush_probability).await?;
-        self.state.write_batch(write_ops)?;
+        self.state.write_batch(write_ops, write_options.now)?;
         Ok(())
     }
 
     async fn run_get(&mut self, key: &Vec<u8>, read_options: &ReadOptions) -> Result<(), Error> {
         let future = self.db.get_with_options(key, read_options);
         let result = self.poll_await(future, 0f64).await?;
-        let expected_val = self.state.get(key)?;
+        let expected_val = self.state.get(key, read_options.now)?;
         let actual_val = result.map(|b| b.to_vec());
         assert_eq!(expected_val, actual_val);
         Ok(())
@@ -600,7 +622,7 @@ impl Dst {
         }
         let future = self.db.scan_with_options(start_key..end_key, scan_options);
         let mut actual_itr = self.poll_await(future, 0f64).await?;
-        let expected_itr = self.state.scan(start_key, end_key)?;
+        let expected_itr = self.state.scan(start_key, end_key, scan_options.now)?;
 
         for (expected_key, expected_val) in expected_itr {
             let actual_key_val = actual_itr
@@ -619,8 +641,8 @@ impl Dst {
         self.db.flush().await
     }
 
-    async fn advance_time(&self, duration: Duration) {
-        debug!("advance_time [duration={:?}]", duration);
+    async fn advance_system_time(&self, duration: Duration) {
+        debug!("advance_system_time [duration={:?}]", duration);
         self.system_clock.clone().advance(duration).await;
     }
 
@@ -651,7 +673,8 @@ impl Dst {
                 }
                 Poll::Pending => {
                     let sleep_ms = self.rand.rng().random_range(0..10);
-                    self.advance_time(Duration::from_millis(sleep_ms)).await;
+                    self.advance_system_time(Duration::from_millis(sleep_ms))
+                        .await;
                     if self.rand.rng().random_bool(flush_probability) {
                         self.db.flush().await?;
                     }

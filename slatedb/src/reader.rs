@@ -2,7 +2,7 @@ use crate::batch::{WriteBatch, WriteBatchIterator};
 use crate::bytes_range::BytesRange;
 use crate::clock::MonotonicClock;
 use crate::config::{DurabilityLevel, ReadOptions, ScanOptions};
-use crate::db_state::CoreDbState;
+use crate::db_state::ManifestCore;
 use crate::db_stats::DbStats;
 use crate::iter::{IterationOrder, KeyValueIterator};
 use crate::mem_table::{ImmutableMemtable, KVTable};
@@ -10,6 +10,7 @@ use crate::oracle::Oracle;
 use crate::sorted_run_iterator::SortedRunIterator;
 use crate::sst_iter::{SstIterator, SstIteratorOptions};
 use crate::tablestore::TableStore;
+#[cfg(not(dst))]
 use crate::utils::get_now_for_read;
 use crate::utils::{build_concurrent, compute_max_parallel};
 use crate::{db_iter::DbIteratorRangeTracker, error::SlateDBError, DbIterator};
@@ -22,7 +23,7 @@ use std::sync::Arc;
 pub(crate) trait DbStateReader {
     fn memtable(&self) -> Arc<KVTable>;
     fn imm_memtable(&self) -> &VecDeque<Arc<ImmutableMemtable>>;
-    fn core(&self) -> &CoreDbState;
+    fn core(&self) -> &ManifestCore;
 }
 
 struct IteratorSources {
@@ -35,6 +36,7 @@ struct IteratorSources {
 pub(crate) struct Reader {
     pub(crate) table_store: Arc<TableStore>,
     pub(crate) db_stats: DbStats,
+    #[allow(dead_code)] // unused during DST
     pub(crate) mono_clock: Arc<MonotonicClock>,
     pub(crate) oracle: Arc<dyn Oracle>,
     pub(crate) merge_operator: Option<crate::merge_operator::MergeOperatorType>,
@@ -278,7 +280,11 @@ impl Reader {
         write_batch: Option<WriteBatch>,
         max_seq: Option<u64>,
     ) -> Result<Option<Bytes>, SlateDBError> {
+        #[cfg(not(dst))]
         let now = get_now_for_read(self.mono_clock.clone(), options.durability_filter).await?;
+        #[cfg(dst)]
+        // Force the current timestamp for DST operations. See #719 for details.
+        let now = options.now;
         let max_seq = self.prepare_max_seq(max_seq, options.durability_filter, options.dirty);
         let key_slice = key.as_ref();
         let target_key = Bytes::copy_from_slice(key_slice);
@@ -356,8 +362,11 @@ impl Reader {
         range_tracker: Option<Arc<DbIteratorRangeTracker>>,
     ) -> Result<DbIterator, SlateDBError> {
         let max_seq = self.prepare_max_seq(max_seq, options.durability_filter, options.dirty);
+        #[cfg(not(dst))]
         let now = get_now_for_read(self.mono_clock.clone(), options.durability_filter).await?;
-
+        #[cfg(dst)]
+        // Force the current timestamp for DST operations. See #719 for details.
+        let now = options.now;
         let read_ahead_blocks = self.table_store.bytes_to_blocks(options.read_ahead_bytes);
 
         let sst_iter_options = SstIteratorOptions {
@@ -397,16 +406,16 @@ mod tests {
     use crate::merge_operator::{MergeOperator, MergeOperatorError};
     use crate::types::{RowEntry, ValueDeletable};
     use rstest::rstest;
+    use slatedb_common::clock::{MockSystemClock, SystemClock};
 
     use crate::batch::WriteBatch;
-    use crate::clock::{LogicalClock, MonotonicClock};
+    use crate::clock::MonotonicClock;
     use crate::db_state::{SortedRun, SsTableHandle, SsTableId};
+    use crate::format::sst::SsTableFormat;
     use crate::object_stores::ObjectStores;
     use crate::oracle::DbReaderOracle;
-    use crate::sst::SsTableFormat;
     use crate::stats::StatRegistry;
     use crate::tablestore::TableStore;
-    use crate::test_utils::TestClock;
     use object_store::{memory::InMemory, path::Path, ObjectStore};
     use std::collections::HashMap;
     use ulid::Ulid;
@@ -436,7 +445,7 @@ mod tests {
     struct TestDbState {
         memtable: Arc<KVTable>,
         imm_memtable: VecDeque<Arc<ImmutableMemtable>>,
-        core: CoreDbState,
+        core: ManifestCore,
         table_store: Arc<TableStore>,
     }
 
@@ -453,7 +462,7 @@ mod tests {
             Self {
                 memtable: Arc::new(KVTable::new()),
                 imm_memtable: VecDeque::new(),
-                core: CoreDbState::new(),
+                core: ManifestCore::new(),
                 table_store,
             }
         }
@@ -520,10 +529,10 @@ mod tests {
             let mut builder = self.table_store.table_builder();
 
             for entry in entries {
-                builder.add(entry)?;
+                builder.add(entry).await?;
             }
 
-            let encoded = builder.build()?;
+            let encoded = builder.build().await?;
             let id = SsTableId::Compacted(Ulid::new());
             self.table_store.write_sst(&id, encoded, false).await
         }
@@ -538,7 +547,7 @@ mod tests {
             &self.imm_memtable
         }
 
-        fn core(&self) -> &CoreDbState {
+        fn core(&self) -> &ManifestCore {
             &self.core
         }
     }
@@ -1268,18 +1277,19 @@ mod tests {
         #[case] test_case: LayerPriorityTestCase,
     ) -> Result<(), SlateDBError> {
         // Create test database state and populate it
+
         let mut test_db_state = TestDbState::new().await;
         let write_batch = populate_db_state(&mut test_db_state, test_case.entries).await?;
 
         // Create Reader with test clock
         let stat_registry = StatRegistry::new();
         let db_stats = DbStats::new(&stat_registry);
-        let test_clock = Arc::new(TestClock::new());
+        let test_clock = Arc::new(MockSystemClock::new());
         // Set the clock to the test case's "now" value for TTL filtering
         if let Some(now) = test_case.now {
             test_clock.set(now);
         }
-        let mono_clock = Arc::new(MonotonicClock::new(test_clock as Arc<dyn LogicalClock>, 0));
+        let mono_clock = Arc::new(MonotonicClock::new(test_clock as Arc<dyn SystemClock>, 0));
 
         // Create Oracle with appropriate last_committed_seq
         let oracle = Arc::new(DbReaderOracle::new(crate::utils::MonotonicSeq::new(0)));
@@ -1738,17 +1748,18 @@ mod tests {
         #[case] test_case: ScanTestCase,
     ) -> Result<(), SlateDBError> {
         // Create test database state and populate it
+
         let mut test_db_state = TestDbState::new().await;
         let write_batch = populate_db_state(&mut test_db_state, test_case.entries).await?;
 
         // Create Reader with test clock
         let stat_registry = StatRegistry::new();
         let db_stats = DbStats::new(&stat_registry);
-        let test_clock = Arc::new(TestClock::new());
+        let test_clock = Arc::new(MockSystemClock::new());
         if let Some(now) = test_case.now {
             test_clock.set(now);
         }
-        let mono_clock = Arc::new(MonotonicClock::new(test_clock as Arc<dyn LogicalClock>, 0));
+        let mono_clock = Arc::new(MonotonicClock::new(test_clock as Arc<dyn SystemClock>, 0));
 
         // Create Oracle with appropriate last_committed_seq
         let oracle = Arc::new(DbReaderOracle::new(crate::utils::MonotonicSeq::new(0)));

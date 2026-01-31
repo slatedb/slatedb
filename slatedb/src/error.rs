@@ -10,7 +10,7 @@ use crate::error::SlateDBError::{
     LatestTransactionalObjectVersionMissing, TransactionalObjectVersionExists,
 };
 use crate::merge_operator::MergeOperatorError;
-use crate::transactional_object::TransactionalObjectError;
+use slatedb_txn_obj::TransactionalObjectError;
 
 #[non_exhaustive]
 #[derive(Clone, Debug, ThisError)]
@@ -98,6 +98,9 @@ pub(crate) enum SlateDBError {
     #[cfg(any(feature = "snappy", feature = "zlib", feature = "zstd"))]
     #[error("error compressing block")]
     BlockCompressionError,
+
+    #[error("error transforming block")]
+    BlockTransformError,
 
     #[error("Invalid RowFlags. #{message}. encoded_bits=`{encoded_bits:#b}`, known_bits=`{known_bits:#b}`")]
     InvalidRowFlags {
@@ -208,8 +211,18 @@ pub(crate) enum SlateDBError {
     #[error("iterator not initialized")]
     IteratorNotInitialized,
 
+    #[cfg(feature = "compaction_filters")]
+    #[error("compaction filter error: {0}")]
+    CompactionFilterError(Arc<crate::compaction_filter::CompactionFilterError>),
+
     #[error("invalid sequence number ordering during merge. expected sequence numbers in descending order, but found {current_seq} followed by {next_seq}")]
     InvalidSequenceOrder { current_seq: u64, next_seq: u64 },
+
+    #[error("undefined environment variable {key}")]
+    UndefinedEnvironmentVariable { key: String },
+
+    #[error("invalid environment variable {key} value `{value}`")]
+    InvalidEnvironmentVariable { key: String, value: String },
 }
 
 impl From<TransactionalObjectError> for SlateDBError {
@@ -235,6 +248,7 @@ impl From<TransactionalObjectError> for SlateDBError {
             TransactionalObjectError::InvalidObjectState => {
                 SlateDBError::InvalidTransactionalObjectState
             }
+            other => SlateDBError::TransactionalObjectError(Arc::new(other)),
         }
     }
 }
@@ -255,6 +269,13 @@ impl From<object_store::Error> for SlateDBError {
 impl From<foyer::Error> for SlateDBError {
     fn from(value: foyer::Error) -> Self {
         Self::FoyerError(Arc::new(value))
+    }
+}
+
+#[cfg(feature = "compaction_filters")]
+impl From<crate::compaction_filter::CompactionFilterError> for SlateDBError {
+    fn from(value: crate::compaction_filter::CompactionFilterError) -> Self {
+        Self::CompactionFilterError(Arc::new(value))
     }
 }
 
@@ -474,6 +495,8 @@ impl From<SlateDBError> for Error {
             SlateDBError::MergeOperatorMissing => Error::invalid(msg),
             SlateDBError::IteratorNotInitialized => Error::invalid(msg),
             SlateDBError::InvalidSequenceOrder { .. } => Error::data(msg),
+            SlateDBError::UndefinedEnvironmentVariable { .. } => Error::invalid(msg),
+            SlateDBError::InvalidEnvironmentVariable { .. } => Error::invalid(msg),
 
             // Data errors
             SlateDBError::InvalidFlatbuffer(err) => Error::data(msg).with_source(Box::new(err)),
@@ -487,6 +510,7 @@ impl From<SlateDBError> for Error {
             SlateDBError::BlockDecompressionError => Error::data(msg),
             #[cfg(any(feature = "snappy", feature = "zlib", feature = "zstd"))]
             SlateDBError::BlockCompressionError => Error::data(msg),
+            SlateDBError::BlockTransformError => Error::data(msg),
             SlateDBError::InvalidRowFlags { .. } => Error::data(msg),
             SlateDBError::CheckpointMissing(_) => Error::data(msg),
             SlateDBError::InvalidVersion { .. } => Error::data(msg),
@@ -505,6 +529,8 @@ impl From<SlateDBError> for Error {
 
             // Internal errors
             SlateDBError::CompactionExecutorFailed => Error::internal(msg),
+            #[cfg(feature = "compaction_filters")]
+            SlateDBError::CompactionFilterError(_) => Error::internal(msg),
             SlateDBError::SeekKeyOutOfKeyRange { .. } => Error::internal(msg),
             SlateDBError::ReadChannelError(err) => Error::internal(msg).with_source(Box::new(err)),
             SlateDBError::BackgroundTaskExists(_) => Error::internal(msg),
