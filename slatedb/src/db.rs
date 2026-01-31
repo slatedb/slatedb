@@ -1893,6 +1893,20 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_close_twice_returns_closed_clean() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let db = Db::builder("/tmp/test_close_twice_returns_closed_clean", object_store)
+            .with_settings(test_db_options(0, 1024, None))
+            .build()
+            .await
+            .unwrap();
+
+        db.close().await.unwrap();
+        let err = db.close().await.unwrap_err();
+        assert_eq!(err.kind(), crate::ErrorKind::Closed(CloseReason::Clean));
+    }
+
+    #[tokio::test]
     async fn test_get_with_default_ttl_and_read_uncommitted() {
         let clock = Arc::new(MockSystemClock::new());
         let ttl = 100;
