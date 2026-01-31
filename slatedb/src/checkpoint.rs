@@ -54,6 +54,21 @@ impl Db {
         let result = rx.await.map_err(SlateDBError::ReadChannelError)?;
         result.map_err(Into::into)
     }
+
+    /// Restores the db to a checkpoint and closes the db.
+    /// A new instance of the db should be opened to start using it at the restored state.
+    pub(crate) async fn restore_checkpoint(&self, id: Uuid) -> Result<(), crate::Error> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.inner.memtable_flush_notifier.send_safely(
+            self.inner.state.read().closed_result_reader(),
+            MemtableFlushMsg::RestoreCheckpoint { id, sender: tx },
+        )?;
+
+        rx.await.map_err(SlateDBError::ReadChannelError)??;
+
+        // The db should be closed here as the in-memory states (active txns, snapshots, oracle etc) might be stale.
+        self.close().await
+    }
 }
 
 #[cfg(test)]
