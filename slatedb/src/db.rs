@@ -34,6 +34,7 @@ use crate::db_transaction::DbTransaction;
 use crate::dispatcher::MessageHandlerExecutor;
 use crate::garbage_collector::GC_TASK_NAME;
 use crate::transaction_manager::IsolationLevel;
+use crate::CloseReason;
 use log::{info, trace, warn};
 use parking_lot::RwLock;
 use std::time::Duration;
@@ -257,13 +258,12 @@ impl DbInner {
         batch: WriteBatch,
         options: &WriteOptions,
     ) -> Result<(), SlateDBError> {
+        self.db_stats.write_batch_count.inc();
+        self.db_stats.write_ops.add(batch.ops.len() as u64);
         self.status()?;
         if batch.ops.is_empty() {
             return Ok(());
         }
-        // record write batch and number of operations
-        self.db_stats.write_batch_count.inc();
-        self.db_stats.write_ops.add(batch.ops.len() as u64);
 
         let (tx, rx) = tokio::sync::oneshot::channel();
         let batch_msg = WriteBatchMessage {
@@ -410,6 +410,75 @@ impl DbInner {
         };
 
         self.flush_immutable_memtables().await
+    }
+
+    /// Flush in-memory writes to disk. See [`Db::flush`] for details.
+    ///
+    /// `check_status` exists so we can call flush in [`Db::close`] after marking the
+    /// database as closed.
+    ///
+    /// ## Arguments
+    /// - `check_status`: if true, checks the database status before flushing.
+    ///
+    /// ## Returns
+    /// - `Ok(())` if the flush was successful.
+    /// - `Err(SlateDBError)` if there was an error flushing the database. If
+    ///   `check_status` is true, this may return `SlateDBError::Closed` if the database
+    ///   has already been closed.
+    pub(crate) async fn flush(&self, check_status: bool) -> Result<(), SlateDBError> {
+        if self.wal_enabled {
+            self.flush_with_options(
+                FlushOptions {
+                    flush_type: FlushType::Wal,
+                },
+                check_status,
+            )
+            .await
+        } else {
+            self.flush_with_options(
+                FlushOptions {
+                    flush_type: FlushType::MemTable,
+                },
+                check_status,
+            )
+            .await
+        }
+    }
+
+    /// Flush in-memory writes to disk with custom options. See [`Db::flush_with_options`]
+    /// for details.
+    ///
+    /// `check_status` exists so we can call flush in [`Db::close`] after marking the
+    /// database as closed.
+    ///
+    /// ## Arguments
+    /// - `options`: the flush options to use.
+    /// - `check_status`: if true, checks the database status before flushing.
+    ///
+    /// ## Returns
+    /// - `Ok(())` if the flush was successful.
+    /// - `Err(SlateDBError)` if there was an error flushing the database. If
+    ///   `check_status` is true, this may return `SlateDBError::Closed` if the database
+    ///   has already been closed.
+    pub(crate) async fn flush_with_options(
+        &self,
+        options: FlushOptions,
+        check_status: bool,
+    ) -> Result<(), SlateDBError> {
+        self.db_stats.flush_requests.inc();
+        if check_status {
+            self.status()?;
+        }
+        match options.flush_type {
+            FlushType::Wal => {
+                if self.wal_enabled {
+                    self.flush_wals().await
+                } else {
+                    Err(SlateDBError::WalDisabled)
+                }
+            }
+            FlushType::MemTable => self.flush_memtables().await,
+        }
     }
 
     async fn replay_wal(&self) -> Result<(), SlateDBError> {
@@ -654,8 +723,25 @@ impl Db {
     /// }
     /// ```
     pub async fn close(&self) -> Result<(), crate::Error> {
-        if self.status().is_ok() {
-            if let Err(e) = self.flush().await {
+        let should_flush = match self.status() {
+            // If already closed, don't close again.
+            Err(e) if matches!(e.kind(), crate::ErrorKind::Closed(CloseReason::Clean)) => {
+                return Err(e);
+            }
+            // If in failed state, allow close, but don't flush since the database
+            // might be in a bad state. Note that multiple close() calls will always
+            // run when in a failed state (vs. a clean closure, which will return
+            // Error::Closed(CloseReason::Clean) on subsequent calls).
+            Err(_) => false,
+            // Flush outstanding writes if the database is still open.
+            Ok(_) => true,
+        };
+
+        // Mark the database as closed before flushing.
+        self.inner.state.write().closed_result().write(Ok(()));
+
+        if should_flush {
+            if let Err(e) = self.inner.flush(false).await {
                 warn!("failed to flush db during close [error={:?}]", e);
             }
         }
@@ -688,7 +774,6 @@ impl Db {
             warn!("failed to shutdown memtable writer task [error={:?}]", e);
         }
 
-        self.inner.state.write().closed_result().write(Ok(()));
         info!("db closed");
         Ok(())
     }
@@ -1364,17 +1449,7 @@ impl Db {
     /// }
     /// ```
     pub async fn flush(&self) -> Result<(), crate::Error> {
-        if self.inner.wal_enabled {
-            self.flush_with_options(FlushOptions {
-                flush_type: FlushType::Wal,
-            })
-            .await
-        } else {
-            self.flush_with_options(FlushOptions {
-                flush_type: FlushType::MemTable,
-            })
-            .await
-        }
+        self.inner.flush(true).await.map_err(Into::into)
     }
 
     /// Flush in-memory writes to disk with custom options.
@@ -1413,17 +1488,10 @@ impl Db {
     /// }
     /// ```
     pub async fn flush_with_options(&self, options: FlushOptions) -> Result<(), crate::Error> {
-        match options.flush_type {
-            FlushType::Wal => {
-                if self.inner.wal_enabled {
-                    self.inner.flush_wals().await
-                } else {
-                    Err(SlateDBError::WalDisabled)
-                }
-            }
-            FlushType::MemTable => self.inner.flush_memtables().await,
-        }
-        .map_err(Into::into)
+        self.inner
+            .flush_with_options(options, true)
+            .await
+            .map_err(Into::into)
     }
 
     /// Get the metrics registry for the database.
@@ -1821,6 +1889,131 @@ mod tests {
                 .unwrap()
                 .get(),
             1
+        );
+    }
+
+    #[tokio::test]
+    async fn test_close_twice_returns_closed_clean() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let db = Db::builder("/tmp/test_close_twice_returns_closed_clean", object_store)
+            .with_settings(test_db_options(0, 1024, None))
+            .build()
+            .await
+            .unwrap();
+
+        db.close().await.unwrap();
+        let err = db.close().await.unwrap_err();
+        assert_eq!(err.kind(), crate::ErrorKind::Closed(CloseReason::Clean));
+    }
+
+    #[tokio::test]
+    async fn test_close_failed_state_does_not_flush() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let db_options_no_flush_interval = {
+            let mut db_options = test_db_options(0, 1024, None);
+            db_options.flush_interval = None;
+            db_options
+        };
+        let db = Db::builder("/tmp/test_close_failed_state_no_flush", object_store)
+            .with_settings(db_options_no_flush_interval)
+            .build()
+            .await
+            .unwrap();
+
+        db.put_with_options(
+            b"test_key",
+            b"test_value",
+            &PutOptions::default(),
+            &WriteOptions {
+                await_durable: false,
+            },
+        )
+        .await
+        .unwrap();
+
+        // Sanity check: WAL has buffered entries before close.
+        assert_eq!(db.inner.wal_buffer.buffered_wal_entries_count(), 1);
+        assert_eq!(
+            db.metrics()
+                .lookup(crate::db_stats::WAL_BUFFER_FLUSHES)
+                .unwrap()
+                .get(),
+            0
+        );
+
+        // Simulate a failed state (e.g. fenced).
+        db.inner
+            .state
+            .write()
+            .closed_result()
+            .write(Err(crate::error::SlateDBError::Fenced));
+
+        // close() should succeed but not flush when failed.
+        db.close().await.unwrap();
+
+        assert_eq!(db.inner.wal_buffer.buffered_wal_entries_count(), 1);
+        assert_eq!(
+            db.metrics()
+                .lookup(crate::db_stats::WAL_BUFFER_FLUSHES)
+                .unwrap()
+                .get(),
+            0
+        );
+        let status_err = db.status().unwrap_err();
+        assert_eq!(
+            status_err.kind(),
+            crate::ErrorKind::Closed(CloseReason::Fenced)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_clean_close_flushes_pending_wal() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let db_options_no_flush_interval = {
+            let mut db_options = test_db_options(0, 1024, None);
+            db_options.flush_interval = None;
+            db_options
+        };
+        let db = Db::builder("/tmp/test_clean_close_flushes_pending_wal", object_store)
+            .with_settings(db_options_no_flush_interval)
+            .build()
+            .await
+            .unwrap();
+
+        db.put_with_options(
+            b"test_key",
+            b"test_value",
+            &PutOptions::default(),
+            &WriteOptions {
+                await_durable: false,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(db.inner.wal_buffer.buffered_wal_entries_count(), 1);
+        assert_eq!(
+            db.metrics()
+                .lookup(crate::db_stats::WAL_BUFFER_FLUSHES)
+                .unwrap()
+                .get(),
+            0
+        );
+
+        db.close().await.unwrap();
+
+        assert_eq!(db.inner.wal_buffer.buffered_wal_entries_count(), 0);
+        assert_eq!(
+            db.metrics()
+                .lookup(crate::db_stats::WAL_BUFFER_FLUSHES)
+                .unwrap()
+                .get(),
+            1
+        );
+        let status_err = db.status().unwrap_err();
+        assert_eq!(
+            status_err.kind(),
+            crate::ErrorKind::Closed(CloseReason::Clean)
         );
     }
 
