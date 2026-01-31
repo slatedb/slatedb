@@ -411,12 +411,63 @@ impl DbInner {
         self.flush_immutable_memtables().await
     }
 
+    /// Flush in-memory writes to disk. See [`Db::flush`] for details.
+    ///
+    /// `check_status` exists so we can call flush in [`Db::close`] after marking the
+    /// database as closed.
+    ///
+    /// ## Arguments
+    /// - `check_status`: if true, checks the database status before flushing.
+    ///
+    /// ## Returns
+    /// - `Ok(())` if the flush was successful.
+    /// - `Err(SlateDBError)` if there was an error flushing the database. If
+    ///   `check_status` is true, this may return `SlateDBError::Closed` if the database
+    ///   has already been closed.
+    pub(crate) async fn flush(&self, check_status: bool) -> Result<(), SlateDBError> {
+        if self.wal_enabled {
+            self.flush_with_options(
+                FlushOptions {
+                    flush_type: FlushType::Wal,
+                },
+                check_status,
+            )
+            .await
+        } else {
+            self.flush_with_options(
+                FlushOptions {
+                    flush_type: FlushType::MemTable,
+                },
+                check_status,
+            )
+            .await
+        }
+    }
+
+    /// Flush in-memory writes to disk with custom options. See [`Db::flush_with_options`]
+    /// for details.
+    ///
+    /// `check_status` exists so we can call flush in [`Db::close`] after marking the
+    /// database as closed.
+    ///
+    /// ## Arguments
+    /// - `options`: the flush options to use.
+    /// - `check_status`: if true, checks the database status before flushing.
+    ///
+    /// ## Returns
+    /// - `Ok(())` if the flush was successful.
+    /// - `Err(SlateDBError)` if there was an error flushing the database. If
+    ///   `check_status` is true, this may return `SlateDBError::Closed` if the database
+    ///   has already been closed.
     pub(crate) async fn flush_with_options(
         &self,
         options: FlushOptions,
+        check_status: bool,
     ) -> Result<(), SlateDBError> {
         self.db_stats.flush_requests.inc();
-        self.status()?;
+        if check_status {
+            self.status()?;
+        }
         match options.flush_type {
             FlushType::Wal => {
                 if self.wal_enabled {
@@ -671,13 +722,15 @@ impl Db {
     /// }
     /// ```
     pub async fn close(&self) -> Result<(), crate::Error> {
-        if self.status().is_ok() {
-            if let Err(e) = self.flush().await {
+        let should_flush = self.status().is_ok();
+
+        self.inner.state.write().closed_result().write(Ok(()));
+
+        if should_flush {
+            if let Err(e) = self.inner.flush(false).await {
                 warn!("failed to flush db during close [error={:?}]", e);
             }
         }
-
-        self.inner.state.write().closed_result().write(Ok(()));
 
         if let Err(e) = self.task_executor.shutdown_task(COMPACTOR_TASK_NAME).await {
             warn!("failed to shutdown compactor task [error={:?}]", e);
@@ -1382,17 +1435,7 @@ impl Db {
     /// }
     /// ```
     pub async fn flush(&self) -> Result<(), crate::Error> {
-        if self.inner.wal_enabled {
-            self.flush_with_options(FlushOptions {
-                flush_type: FlushType::Wal,
-            })
-            .await
-        } else {
-            self.flush_with_options(FlushOptions {
-                flush_type: FlushType::MemTable,
-            })
-            .await
-        }
+        self.inner.flush(true).await.map_err(Into::into)
     }
 
     /// Flush in-memory writes to disk with custom options.
@@ -1432,7 +1475,7 @@ impl Db {
     /// ```
     pub async fn flush_with_options(&self, options: FlushOptions) -> Result<(), crate::Error> {
         self.inner
-            .flush_with_options(options)
+            .flush_with_options(options, true)
             .await
             .map_err(Into::into)
     }
