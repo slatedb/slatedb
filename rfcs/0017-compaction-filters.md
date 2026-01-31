@@ -155,8 +155,11 @@ pub trait CompactionFilter: Send + Sync {
     /// Called after processing all entries.
     ///
     /// Use this hook to flush state, log statistics, or clean up resources.
-    /// This method is infallible since compaction output has already been written.
-    async fn on_compaction_end(&mut self);
+    /// Return `Err` to abort the compaction with an error.
+    ///
+    /// Note: This is only called after all entries have been processed. If compaction
+    /// fails due to an earlier error, this method is not invoked.
+    async fn on_compaction_end(&mut self) -> Result<(), CompactionEndError>;
 }
 ```
 
@@ -187,30 +190,25 @@ pub trait CompactionFilterSupplier: Send + Sync {
 ### Error Types
 
 ```rust
-/// Error returned by `create_compaction_filter`. Aborts the compaction job.
-#[derive(Debug, Error)]
-#[error("filter creation failed: {0}")]
-pub struct CreationError(#[source] pub Box<dyn std::error::Error + Send + Sync>);
-
-/// Error returned by `filter`. Aborts the compaction job.
-#[derive(Debug, Error)]
-#[error("filter error: {0}")]
-pub struct FilterError(#[source] pub Box<dyn std::error::Error + Send + Sync>);
-
-/// Container for all compaction filter errors.
-///
-/// Used internally by the compactor to handle errors from both
-/// filter creation and per-entry filtering.
+/// Errors that can occur during compaction filter operations.
 #[derive(Debug, Error)]
 pub enum CompactionFilterError {
-    #[error(transparent)]
-    Creation(#[from] CreationError),
-    #[error(transparent)]
-    Filter(#[from] FilterError),
+    /// Filter creation failed in `create_compaction_filter`. This aborts the
+    /// compaction.
+    #[error("filter creation failed: {0}")]
+    CreationError(#[source] Box<dyn std::error::Error + Send + Sync>),
+
+    /// Filter failed while processing an entry. This aborts the compaction.
+    #[error("filter error: {0}")]
+    FilterError(#[source] Box<dyn std::error::Error + Send + Sync>),
+
+    /// Filter failed during `on_compaction_end`. This aborts the compaction.
+    #[error("compaction end error: {0}")]
+    CompactionEndError(#[source] Box<dyn std::error::Error + Send + Sync>),
 }
 ```
 
-These error types wrap the underlying cause, preserving error chains for debugging. The `#[source]` attribute enables `std::error::Error::source()` to return the wrapped error. The `CompactionFilterError` enum provides a unified type for the compactor to handle all filter-related errors.
+These error types wrap the underlying cause, preserving error chains for debugging. The `#[source]` attribute enables `std::error::Error::source()` to return the wrapped error.
 
 ### Configuration
 
@@ -359,11 +357,11 @@ at once.
 
 ### Error Handling
 
-| Method                       | Error Type      | Behavior                          |
-|------------------------------|-----------------|-----------------------------------|
-| `create_compaction_filter()` | `CreationError` | Aborts compaction job             |
-| `filter()`                   | `FilterError`   | Aborts compaction job             |
-| `on_compaction_end()`        | Infallible      | Cleanup cannot fail compaction    |
+| Method                       | Error Type            | Behavior                          |
+|------------------------------|-----------------------|-----------------------------------|
+| `create_compaction_filter()` | `CreationError`       | Aborts compaction job             |
+| `filter()`                   | `FilterError`         | Aborts compaction job             |
+| `on_compaction_end()`        | `CompactionEndError`  | Aborts compaction job             |
 
 Creating a fresh filter instance per compaction provides:
 
@@ -410,7 +408,7 @@ let db = Db::builder("mydb", object_store)
 ```rust
 use slatedb::{
     CompactionFilter, CompactionFilterSupplier, CompactionJobContext,
-    CompactionFilterDecision, CreationError, FilterError, RowEntry, ValueDeletable,
+    CompactionFilterDecision, CompactionFilterError, RowEntry, ValueDeletable,
 };
 use bytes::Bytes;
 use std::sync::Arc;
@@ -427,7 +425,7 @@ impl CompactionFilter for PrefixDroppingFilter {
     async fn filter(
         &mut self,
         entry: &RowEntry,
-    ) -> Result<CompactionFilterDecision, FilterError> {
+    ) -> Result<CompactionFilterDecision, CompactionFilterError> {
         if entry.key.starts_with(&self.prefix) {
             self.dropped_count += 1;
             // Use Tombstone to shadow older versions in lower levels
@@ -437,12 +435,13 @@ impl CompactionFilter for PrefixDroppingFilter {
         Ok(CompactionFilterDecision::Keep)
     }
 
-    async fn on_compaction_end(&mut self) {
+    async fn on_compaction_end(&mut self) -> Result<(), CompactionFilterError> {
         tracing::info!(
             "Compaction dropped {} entries with prefix {:?}",
             self.dropped_count,
             self.prefix
         );
+        Ok(())
     }
 }
 
@@ -455,7 +454,7 @@ impl CompactionFilterSupplier for PrefixDroppingFilterSupplier {
     async fn create_compaction_filter(
         &self,
         _context: &CompactionJobContext,
-    ) -> Result<Box<dyn CompactionFilter>, CreationError> {
+    ) -> Result<Box<dyn CompactionFilter>, CompactionFilterError> {
         Ok(Box::new(PrefixDroppingFilter {
             prefix: self.prefix.clone(),
             dropped_count: 0,

@@ -713,8 +713,8 @@ impl std::fmt::Debug for Settings {
                     .as_ref()
                     .map(|_| "Some(merge_operator)")
                     .unwrap_or("None"),
-            )
-            .finish()
+            );
+        data.finish()
     }
 }
 

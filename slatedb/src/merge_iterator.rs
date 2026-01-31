@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 
 use crate::error::SlateDBError;
-use crate::iter::KeyValueIterator;
+use crate::iter::{KeyValueIterator, TrackedKeyValueIterator};
 use crate::types::{RowEntry, ValueDeletable};
 use std::cmp::{Ordering, Reverse};
 use std::collections::{BinaryHeap, VecDeque};
@@ -74,6 +74,8 @@ pub(crate) struct MergeIterator<'a> {
     dedup: bool,
     /// Tracks whether the iterator has performed its heavy initialization step.
     initialized: bool,
+    /// Counter to track bytes processed (key + value length) for progress reporting.
+    bytes_processed: u64,
 }
 
 impl<'a> MergeIterator<'a> {
@@ -92,6 +94,7 @@ impl<'a> MergeIterator<'a> {
                 .collect(),
             dedup: true,
             initialized: false,
+            bytes_processed: 0,
         })
     }
 
@@ -140,6 +143,11 @@ impl<'a> MergeIterator<'a> {
                 self.iterators.push(Reverse(iterator_state));
             }
             self.current = self.iterators.pop().map(|r| r.0);
+
+            // Track bytes processed for progress reporting
+            let entry_bytes = current_kv.key.len() as u64 + current_kv.value.len() as u64;
+            self.bytes_processed += entry_bytes;
+
             return Ok(Some(current_kv));
         }
         Ok(None)
@@ -205,6 +213,12 @@ impl KeyValueIterator for MergeIterator<'_> {
 
         self.current = self.iterators.pop().map(|r| r.0);
         Ok(())
+    }
+}
+
+impl TrackedKeyValueIterator for MergeIterator<'_> {
+    fn bytes_processed(&self) -> u64 {
+        self.bytes_processed
     }
 }
 

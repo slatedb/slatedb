@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::error::SlateDBError;
-use crate::iter::KeyValueIterator;
+use crate::iter::{KeyValueIterator, TrackedKeyValueIterator};
 use crate::seq_tracker::{FindOption, SequenceTracker};
 use crate::types::ValueDeletable::Tombstone;
 use crate::types::{RowEntry, ValueDeletable};
@@ -36,8 +36,6 @@ pub(crate) struct RetentionIterator<T: KeyValueIterator> {
     system_clock: Arc<dyn SystemClock>,
     /// Historical sequence metadata used to translate sequence numbers into wall-clock timestamps.
     sequence_tracker: Arc<SequenceTracker>,
-    /// The total number of bytes processed so far
-    total_bytes_processed: u64,
 }
 
 impl<T: KeyValueIterator> RetentionIterator<T> {
@@ -60,7 +58,6 @@ impl<T: KeyValueIterator> RetentionIterator<T> {
             system_clock,
             sequence_tracker,
             buffer: RetentionBuffer::new(),
-            total_bytes_processed: 0,
         })
     }
 
@@ -178,10 +175,6 @@ impl<T: KeyValueIterator> RetentionIterator<T> {
 
         filtered_versions
     }
-
-    pub(crate) fn total_bytes_processed(&self) -> u64 {
-        self.total_bytes_processed
-    }
 }
 
 #[async_trait]
@@ -205,11 +198,7 @@ impl<T: KeyValueIterator> KeyValueIterator for RetentionIterator<T> {
                 RetentionBufferState::NeedPush => {
                     // Fetch next entry from upstream iterator
                     let entry = match self.inner.next_entry().await? {
-                        Some(entry) => {
-                            self.total_bytes_processed +=
-                                entry.key.len() as u64 + entry.value.len() as u64;
-                            entry
-                        }
+                        Some(entry) => entry,
                         None => {
                             // No more entries from upstream, mark end of input
                             self.buffer.mark_end_of_input();
@@ -261,6 +250,12 @@ impl<T: KeyValueIterator> KeyValueIterator for RetentionIterator<T> {
         self.buffer.clear();
         self.inner.seek(next_key).await?;
         Ok(())
+    }
+}
+
+impl<T: TrackedKeyValueIterator> TrackedKeyValueIterator for RetentionIterator<T> {
+    fn bytes_processed(&self) -> u64 {
+        self.inner.bytes_processed()
     }
 }
 

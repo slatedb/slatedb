@@ -6,7 +6,7 @@ use thiserror::Error;
 
 use crate::{
     error::SlateDBError,
-    iter::KeyValueIterator,
+    iter::{KeyValueIterator, TrackedKeyValueIterator},
     types::{RowEntry, ValueDeletable},
     utils::{is_not_expired, merge_options},
 };
@@ -51,12 +51,12 @@ pub enum MergeOperatorError {
 ///         let mut total = existing_value
 ///             .map(|v| u64::from_le_bytes(v.as_ref().try_into().unwrap()))
 ///             .unwrap_or(0);
-///         
+///
 ///         for operand in operands {
 ///             let increment = u64::from_le_bytes(operand.as_ref().try_into().unwrap());
 ///             total += increment;
 ///         }
-///         
+///
 ///         Ok(Bytes::copy_from_slice(&total.to_le_bytes()))
 ///     }
 /// }
@@ -163,6 +163,12 @@ impl<T: KeyValueIterator> KeyValueIterator for MergeOperatorRequiredIterator<T> 
 
     async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
         self.delegate.seek(next_key).await
+    }
+}
+
+impl<T: TrackedKeyValueIterator> TrackedKeyValueIterator for MergeOperatorRequiredIterator<T> {
+    fn bytes_processed(&self) -> u64 {
+        self.delegate.bytes_processed()
     }
 }
 
@@ -407,6 +413,12 @@ impl<T: KeyValueIterator> KeyValueIterator for MergeOperatorIterator<T> {
 
     async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
         self.delegate.seek(next_key).await
+    }
+}
+
+impl<T: TrackedKeyValueIterator> TrackedKeyValueIterator for MergeOperatorIterator<T> {
+    fn bytes_processed(&self) -> u64 {
+        self.delegate.bytes_processed()
     }
 }
 

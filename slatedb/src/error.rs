@@ -211,6 +211,10 @@ pub(crate) enum SlateDBError {
     #[error("iterator not initialized")]
     IteratorNotInitialized,
 
+    #[cfg(feature = "compaction_filters")]
+    #[error("compaction filter error: {0}")]
+    CompactionFilterError(Arc<crate::compaction_filter::CompactionFilterError>),
+
     #[error("invalid sequence number ordering during merge. expected sequence numbers in descending order, but found {current_seq} followed by {next_seq}")]
     InvalidSequenceOrder { current_seq: u64, next_seq: u64 },
 
@@ -265,6 +269,13 @@ impl From<object_store::Error> for SlateDBError {
 impl From<foyer::Error> for SlateDBError {
     fn from(value: foyer::Error) -> Self {
         Self::FoyerError(Arc::new(value))
+    }
+}
+
+#[cfg(feature = "compaction_filters")]
+impl From<crate::compaction_filter::CompactionFilterError> for SlateDBError {
+    fn from(value: crate::compaction_filter::CompactionFilterError) -> Self {
+        Self::CompactionFilterError(Arc::new(value))
     }
 }
 
@@ -518,6 +529,8 @@ impl From<SlateDBError> for Error {
 
             // Internal errors
             SlateDBError::CompactionExecutorFailed => Error::internal(msg),
+            #[cfg(feature = "compaction_filters")]
+            SlateDBError::CompactionFilterError(_) => Error::internal(msg),
             SlateDBError::SeekKeyOutOfKeyRange { .. } => Error::internal(msg),
             SlateDBError::ReadChannelError(err) => Error::internal(msg).with_source(Box::new(err)),
             SlateDBError::BackgroundTaskExists(_) => Error::internal(msg),

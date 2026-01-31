@@ -9,12 +9,16 @@ use futures::future::{join, join_all};
 use parking_lot::Mutex;
 use tokio::task::JoinHandle;
 
+#[cfg(feature = "compaction_filters")]
+use crate::compaction_filter::CompactionFilterSupplier;
+#[cfg(feature = "compaction_filters")]
+use crate::compaction_filter_iterator::CompactionFilterIterator;
 use crate::compactor::CompactorMessage;
 use crate::compactor::CompactorMessage::CompactionJobFinished;
 use crate::config::CompactorOptions;
 use crate::db_state::{SortedRun, SsTableHandle, SsTableId};
 use crate::error::SlateDBError;
-use crate::iter::KeyValueIterator;
+use crate::iter::{KeyValueIterator, TrackedKeyValueIterator};
 use crate::manifest::store::{ManifestStore, StoredManifest};
 use crate::merge_iterator::MergeIterator;
 use crate::merge_operator::{
@@ -135,14 +139,6 @@ impl<T: KeyValueIterator> ResumingIterator<T> {
         Ok(resuming_iter)
     }
 
-    /// Returns a reference to the wrapped iterator.
-    ///
-    /// ## Returns
-    /// - `&T`: the wrapped iterator.
-    fn inner(&self) -> &T {
-        self.iterator.inner()
-    }
-
     /// Returns the resume start cursor, if any. This is the (key, seq) tuple
     /// used to initialize the iterator.
     fn start(&self) -> Option<&(Bytes, u64)> {
@@ -165,6 +161,12 @@ impl<T: KeyValueIterator> KeyValueIterator for ResumingIterator<T> {
     }
 }
 
+impl<T: TrackedKeyValueIterator> TrackedKeyValueIterator for ResumingIterator<T> {
+    fn bytes_processed(&self) -> u64 {
+        self.iterator.bytes_processed()
+    }
+}
+
 /// Executes compaction jobs produced by the compactor.
 pub(crate) trait CompactionExecutor {
     /// Starts executing a compaction job asynchronously.
@@ -177,35 +179,42 @@ pub(crate) trait CompactionExecutor {
     fn is_stopped(&self) -> bool;
 }
 
+/// Options for creating a [`TokioCompactionExecutor`].
+pub(crate) struct TokioCompactionExecutorOptions {
+    pub handle: tokio::runtime::Handle,
+    pub options: Arc<CompactorOptions>,
+    pub worker_tx: tokio::sync::mpsc::UnboundedSender<CompactorMessage>,
+    pub table_store: Arc<TableStore>,
+    pub rand: Arc<DbRand>,
+    pub stats: Arc<CompactionStats>,
+    pub clock: Arc<dyn SystemClock>,
+    pub manifest_store: Arc<ManifestStore>,
+    pub merge_operator: Option<MergeOperatorType>,
+    #[cfg(feature = "compaction_filters")]
+    pub compaction_filter_supplier: Option<Arc<dyn CompactionFilterSupplier>>,
+}
+
 pub(crate) struct TokioCompactionExecutor {
     inner: Arc<TokioCompactionExecutorInner>,
 }
 
 impl TokioCompactionExecutor {
-    pub(crate) fn new(
-        handle: tokio::runtime::Handle,
-        options: Arc<CompactorOptions>,
-        worker_tx: tokio::sync::mpsc::UnboundedSender<CompactorMessage>,
-        table_store: Arc<TableStore>,
-        rand: Arc<DbRand>,
-        stats: Arc<CompactionStats>,
-        clock: Arc<dyn SystemClock>,
-        manifest_store: Arc<ManifestStore>,
-        merge_operator: Option<MergeOperatorType>,
-    ) -> Self {
+    pub(crate) fn new(opts: TokioCompactionExecutorOptions) -> Self {
         Self {
             inner: Arc::new(TokioCompactionExecutorInner {
-                options,
-                handle,
-                worker_tx,
-                table_store,
-                rand,
+                options: opts.options,
+                handle: opts.handle,
+                worker_tx: opts.worker_tx,
+                table_store: opts.table_store,
+                rand: opts.rand,
                 tasks: Arc::new(Mutex::new(HashMap::new())),
-                stats,
-                clock,
+                stats: opts.stats,
+                clock: opts.clock,
                 is_stopped: AtomicBool::new(false),
-                manifest_store,
-                merge_operator,
+                manifest_store: opts.manifest_store,
+                merge_operator: opts.merge_operator,
+                #[cfg(feature = "compaction_filters")]
+                compaction_filter_supplier: opts.compaction_filter_supplier,
             }),
         }
     }
@@ -241,16 +250,17 @@ pub(crate) struct TokioCompactionExecutorInner {
     is_stopped: AtomicBool,
     manifest_store: Arc<ManifestStore>,
     merge_operator: Option<MergeOperatorType>,
+    #[cfg(feature = "compaction_filters")]
+    compaction_filter_supplier: Option<Arc<dyn CompactionFilterSupplier>>,
 }
 
 impl TokioCompactionExecutorInner {
     /// Builds input iterators for all sources (L0 and SR) and wraps them with optional
-    /// merge and retention logic.
+    /// merge, retention, and compaction filter logic.
     async fn load_iterators<'a>(
         &self,
         job_args: &'a StartCompactionJobArgs,
-    ) -> Result<ResumingIterator<RetentionIterator<Box<dyn KeyValueIterator + 'a>>>, SlateDBError>
-    {
+    ) -> Result<ResumingIterator<Box<dyn TrackedKeyValueIterator + 'a>>, SlateDBError> {
         let resume_cursor = match job_args.output_ssts.last() {
             Some(output_sst) => {
                 last_written_key_and_seq(self.table_store.clone(), output_sst).await?
@@ -286,17 +296,18 @@ impl TokioCompactionExecutorInner {
         let sr_merge_iter = MergeIterator::new(sr_iters)?.with_dedup(false);
 
         let merge_iter = MergeIterator::new([l0_merge_iter, sr_merge_iter])?.with_dedup(false);
-        let merge_iter = if let Some(merge_operator) = self.merge_operator.clone() {
-            Box::new(MergeOperatorIterator::new(
-                merge_operator,
-                merge_iter,
-                false,
-                job_args.compaction_clock_tick,
-                job_args.retention_min_seq,
-            ))
-        } else {
-            Box::new(MergeOperatorRequiredIterator::new(merge_iter)) as Box<dyn KeyValueIterator>
-        };
+        let merge_iter: Box<dyn TrackedKeyValueIterator> =
+            if let Some(merge_operator) = self.merge_operator.clone() {
+                Box::new(MergeOperatorIterator::new(
+                    merge_operator,
+                    merge_iter,
+                    false,
+                    job_args.compaction_clock_tick,
+                    job_args.retention_min_seq,
+                ))
+            } else {
+                Box::new(MergeOperatorRequiredIterator::new(merge_iter))
+            };
 
         let stored_manifest =
             StoredManifest::load(self.manifest_store.clone(), self.clock.clone()).await?;
@@ -311,7 +322,26 @@ impl TokioCompactionExecutorInner {
         )
         .await?;
         retention_iter.init().await?;
-        let resuming_iter = ResumingIterator::new(retention_iter, resume_cursor).await?;
+
+        // Apply compaction filter if configured
+        #[cfg(feature = "compaction_filters")]
+        if let Some(supplier) = &self.compaction_filter_supplier {
+            use crate::compaction_filter::CompactionJobContext;
+            let context = CompactionJobContext {
+                destination: job_args.destination,
+                is_dest_last_run: job_args.is_dest_last_run,
+                compaction_clock_tick: job_args.compaction_clock_tick,
+                retention_min_seq: job_args.retention_min_seq,
+            };
+            let filter = supplier.create_compaction_filter(&context).await?;
+            let filter_iter = CompactionFilterIterator::new(retention_iter, filter);
+            let boxed: Box<dyn TrackedKeyValueIterator> = Box::new(filter_iter);
+            let resuming_iter = ResumingIterator::new(boxed, resume_cursor).await?;
+            return Ok(resuming_iter);
+        }
+
+        let boxed: Box<dyn TrackedKeyValueIterator> = Box::new(retention_iter);
+        let resuming_iter = ResumingIterator::new(boxed, resume_cursor).await?;
         Ok(resuming_iter)
     }
 
@@ -371,11 +401,8 @@ impl TokioCompactionExecutorInner {
             let duration_since_last_report =
                 self.clock.now().signed_duration_since(last_progress_report);
             if duration_since_last_report > TimeDelta::seconds(1) {
-                self.send_compaction_progress(
-                    args.id,
-                    start_bytes_processed + all_iter.inner().total_bytes_processed(),
-                    &output_ssts,
-                );
+                let total_bytes = start_bytes_processed + all_iter.bytes_processed();
+                self.send_compaction_progress(args.id, total_bytes, &output_ssts);
                 last_progress_report = self.clock.now();
             }
 
@@ -395,11 +422,8 @@ impl TokioCompactionExecutorInner {
                 self.stats.bytes_compacted.add(sst.info.filter_offset);
                 output_ssts.push(sst);
                 bytes_written = 0;
-                self.send_compaction_progress(
-                    args.id,
-                    start_bytes_processed + all_iter.inner().total_bytes_processed(),
-                    &output_ssts,
-                );
+                let total_bytes = start_bytes_processed + all_iter.bytes_processed();
+                self.send_compaction_progress(args.id, total_bytes, &output_ssts);
                 last_progress_report = self.clock.now();
             }
         }
@@ -955,17 +979,19 @@ mod tests {
         } else {
             Some(0)
         };
-        let executor = TokioCompactionExecutor::new(
+        let executor = TokioCompactionExecutor::new(TokioCompactionExecutorOptions {
             handle,
             options,
-            tx,
-            table_store.clone(),
-            Arc::new(DbRand::new(100u64)),
-            Arc::new(CompactionStats::new(Arc::new(StatRegistry::new()))),
+            worker_tx: tx,
+            table_store: table_store.clone(),
+            rand: Arc::new(DbRand::new(100u64)),
+            stats: Arc::new(CompactionStats::new(Arc::new(StatRegistry::new()))),
             clock,
             manifest_store,
             merge_operator,
-        );
+            #[cfg(feature = "compaction_filters")]
+            compaction_filter_supplier: None,
+        });
 
         // Materialize L0 SSTs from the provided entry sets. Use a huge max size so
         // each entry set stays in a single SST, keeping the inputs predictable.
@@ -1157,17 +1183,19 @@ mod tests {
                 .await
                 .unwrap();
 
-                let executor = TokioCompactionExecutor::new(
+                let executor = TokioCompactionExecutor::new(TokioCompactionExecutorOptions {
                     handle,
                     options,
-                    tx,
-                    table_store.clone(),
-                    Arc::new(DbRand::new(100u64)),
-                    Arc::new(CompactionStats::new(Arc::new(StatRegistry::new()))),
+                    worker_tx: tx,
+                    table_store: table_store.clone(),
+                    rand: Arc::new(DbRand::new(100u64)),
+                    stats: Arc::new(CompactionStats::new(Arc::new(StatRegistry::new()))),
                     clock,
                     manifest_store,
                     merge_operator,
-                );
+                    #[cfg(feature = "compaction_filters")]
+                    compaction_filter_supplier: None,
+                });
 
                 let mut l0_ssts = Vec::new();
                 for entries in &l0_entry_sets {
@@ -1259,32 +1287,125 @@ mod tests {
         });
     }
 
+    /// Test context for compaction executor tests.
+    struct TestContext {
+        executor: TokioCompactionExecutor,
+        table_store: Arc<TableStore>,
+        rx: tokio::sync::mpsc::UnboundedReceiver<CompactorMessage>,
+    }
+
+    /// Builder for creating test context with configurable options.
+    struct TestContextBuilder {
+        path: String,
+        merge_operator: Option<MergeOperatorType>,
+        #[cfg(feature = "compaction_filters")]
+        compaction_filter_supplier: Option<Arc<dyn CompactionFilterSupplier>>,
+    }
+
+    impl TestContextBuilder {
+        fn new(path: &str) -> Self {
+            Self {
+                path: path.to_string(),
+                merge_operator: None,
+                #[cfg(feature = "compaction_filters")]
+                compaction_filter_supplier: None,
+            }
+        }
+
+        fn with_merge_operator(mut self, merge_operator: MergeOperatorType) -> Self {
+            self.merge_operator = Some(merge_operator);
+            self
+        }
+
+        #[cfg(feature = "compaction_filters")]
+        fn with_compaction_filter_supplier(
+            mut self,
+            supplier: Arc<dyn CompactionFilterSupplier>,
+        ) -> Self {
+            self.compaction_filter_supplier = Some(supplier);
+            self
+        }
+
+        async fn build(self) -> TestContext {
+            let handle = tokio::runtime::Handle::current();
+            let options = Arc::new(CompactorOptions::default());
+            let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+            let os = Arc::new(InMemory::new());
+            let clock = Arc::new(DefaultSystemClock::new());
+            let db = Db::builder(self.path.clone(), os.clone())
+                .with_system_clock(clock.clone())
+                .build()
+                .await
+                .unwrap();
+            let table_store = db.inner.table_store.clone();
+            let manifest_store = Arc::new(ManifestStore::new(
+                &Path::from(self.path.as_str()),
+                os.clone(),
+            ));
+
+            let executor = TokioCompactionExecutor::new(TokioCompactionExecutorOptions {
+                handle,
+                options,
+                worker_tx: tx,
+                table_store: table_store.clone(),
+                rand: Arc::new(DbRand::new(100u64)),
+                stats: Arc::new(CompactionStats::new(Arc::new(StatRegistry::new()))),
+                clock,
+                manifest_store,
+                merge_operator: self.merge_operator,
+                #[cfg(feature = "compaction_filters")]
+                compaction_filter_supplier: self.compaction_filter_supplier,
+            });
+
+            TestContext {
+                executor,
+                table_store,
+                rx,
+            }
+        }
+    }
+
+    impl TestContext {
+        /// Runs a compaction job and waits for the result.
+        async fn run_compaction(
+            mut self,
+            ssts: Vec<SsTableHandle>,
+            is_dest_last_run: bool,
+            retention_min_seq: Option<u64>,
+        ) -> Result<SortedRun, SlateDBError> {
+            let compaction = StartCompactionJobArgs {
+                id: Ulid::new(),
+                compaction_id: Ulid::new(),
+                destination: 0,
+                ssts,
+                sorted_runs: vec![],
+                output_ssts: vec![],
+                compaction_clock_tick: 0,
+                is_dest_last_run,
+                retention_min_seq,
+            };
+            self.executor.start_compaction_job(compaction);
+
+            tokio::time::timeout(Duration::from_secs(5), async move {
+                loop {
+                    let msg = self.rx.recv().await.unwrap();
+                    if let CompactorMessage::CompactionJobFinished { id: _, result } = msg {
+                        return result;
+                    }
+                }
+            })
+            .await
+            .unwrap()
+        }
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn test_compaction_job_should_retain_merges_newer_than_retention_min_seq_num() {
-        let handle = tokio::runtime::Handle::current();
-        let options = Arc::new(CompactorOptions::default());
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let os = Arc::new(InMemory::new());
-        let path = "testdb".to_string();
-        let clock = Arc::new(DefaultSystemClock::new());
-        let db = Db::builder(path.clone(), os.clone())
-            .with_system_clock(clock.clone())
+        let ctx = TestContextBuilder::new("testdb")
+            .with_merge_operator(Arc::new(StringConcatMergeOperator {}))
             .build()
-            .await
-            .unwrap();
-        let table_store = db.inner.table_store.clone();
-        let manifest_store = Arc::new(ManifestStore::new(&Path::from(path.as_str()), os.clone()));
-        let executor = TokioCompactionExecutor::new(
-            handle,
-            options,
-            tx,
-            table_store.clone(),
-            Arc::new(DbRand::new(100u64)),
-            Arc::new(CompactionStats::new(Arc::new(StatRegistry::new()))),
-            clock,
-            manifest_store.clone(),
-            Some(Arc::new(StringConcatMergeOperator {})),
-        );
+            .await;
+        let table_store = ctx.table_store.clone();
 
         // write some merges
         let mut sst_builder = table_store.table_builder();
@@ -1312,32 +1433,10 @@ mod tests {
             .unwrap();
         let retention_min_seq_num = 2;
 
-        // start a compaction of a single sst
-        let compaction = StartCompactionJobArgs {
-            id: Ulid::new(),
-            compaction_id: Ulid::new(),
-            destination: 0,
-            ssts: vec![l0],
-            sorted_runs: vec![],
-            output_ssts: vec![],
-            compaction_clock_tick: 0,
-            is_dest_last_run: false,
-            retention_min_seq: Some(retention_min_seq_num),
-        };
-        executor.start_compaction_job(compaction);
-
-        // wait for it to finish
-        let result = tokio::time::timeout(Duration::from_secs(5), async move {
-            loop {
-                let msg = rx.recv().await.unwrap();
-                if let CompactorMessage::CompactionJobFinished { id: _, result } = msg {
-                    return result;
-                }
-            }
-        })
-        .await
-        .unwrap()
-        .unwrap();
+        let result = ctx
+            .run_compaction(vec![l0], false, Some(retention_min_seq_num))
+            .await
+            .unwrap();
 
         assert_eq!(1, result.ssts.len());
         let sst = result.ssts[0].clone();
@@ -1370,5 +1469,290 @@ mod tests {
         );
         assert_eq!(next.seq, retention_min_seq_num);
         assert!(iter.next_entry().await.unwrap().is_none());
+    }
+
+    #[cfg(feature = "compaction_filters")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_compaction_job_with_filter_success() {
+        use crate::compaction_filter::{
+            CompactionFilter, CompactionFilterDecision, CompactionFilterError,
+            CompactionFilterSupplier, CompactionJobContext,
+        };
+
+        /// A filter that tests all decision types:
+        /// - "drop:" prefix -> Drop (remove entry)
+        /// - "modify:" prefix -> Modify (append "_modified" suffix)
+        /// - "tombstone:" prefix -> Modify to Tombstone
+        /// - other prefixes -> Keep (unchanged)
+        struct TestFilter;
+
+        #[async_trait::async_trait]
+        impl CompactionFilter for TestFilter {
+            async fn filter(
+                &mut self,
+                entry: &RowEntry,
+            ) -> Result<CompactionFilterDecision, CompactionFilterError> {
+                if entry.key.starts_with(b"drop:") {
+                    Ok(CompactionFilterDecision::Drop)
+                } else if entry.key.starts_with(b"modify:") {
+                    if let Some(value) = entry.value.as_bytes() {
+                        let mut new_value = value.to_vec();
+                        new_value.extend_from_slice(b"_modified");
+                        Ok(CompactionFilterDecision::Modify(ValueDeletable::Value(
+                            Bytes::from(new_value),
+                        )))
+                    } else {
+                        Ok(CompactionFilterDecision::Keep)
+                    }
+                } else if entry.key.starts_with(b"tombstone:") {
+                    Ok(CompactionFilterDecision::Modify(ValueDeletable::Tombstone))
+                } else {
+                    Ok(CompactionFilterDecision::Keep)
+                }
+            }
+
+            async fn on_compaction_end(&mut self) -> Result<(), CompactionFilterError> {
+                Ok(())
+            }
+        }
+
+        struct TestFilterSupplier;
+
+        #[async_trait::async_trait]
+        impl CompactionFilterSupplier for TestFilterSupplier {
+            async fn create_compaction_filter(
+                &self,
+                _context: &CompactionJobContext,
+            ) -> Result<Box<dyn CompactionFilter>, CompactionFilterError> {
+                Ok(Box::new(TestFilter))
+            }
+        }
+
+        let ctx = TestContextBuilder::new("testdb_filter_all_decisions")
+            .with_compaction_filter_supplier(Arc::new(TestFilterSupplier))
+            .build()
+            .await;
+        let table_store = ctx.table_store.clone();
+
+        // Write entries with different prefixes
+        // Note: entries must be added in sorted key order
+        // Lexicographic order: drop: < keep: < modify: < tombstone:
+        let mut sst_builder = table_store.table_builder();
+        sst_builder
+            .add(RowEntry::new_value(b"drop:key1", b"value1", 1))
+            .await
+            .unwrap();
+        sst_builder
+            .add(RowEntry::new_value(b"drop:key2", b"value2", 2))
+            .await
+            .unwrap();
+        sst_builder
+            .add(RowEntry::new_value(b"keep:key3", b"value3", 3))
+            .await
+            .unwrap();
+        sst_builder
+            .add(RowEntry::new_value(b"keep:key4", b"value4", 4))
+            .await
+            .unwrap();
+        sst_builder
+            .add(RowEntry::new_value(b"modify:key5", b"value5", 5))
+            .await
+            .unwrap();
+        sst_builder
+            .add(RowEntry::new_value(b"modify:key6", b"value6", 6))
+            .await
+            .unwrap();
+        sst_builder
+            .add(RowEntry::new_value(b"tombstone:key7", b"value7", 7))
+            .await
+            .unwrap();
+        sst_builder
+            .add(RowEntry::new_value(b"tombstone:key8", b"value8", 8))
+            .await
+            .unwrap();
+        let encoded_sst = sst_builder.build().await.unwrap();
+        let id = SsTableId::Compacted(Ulid::new());
+        let l0 = table_store
+            .write_sst(&id, encoded_sst, false)
+            .await
+            .unwrap();
+
+        let result = ctx.run_compaction(vec![l0], true, None).await.unwrap();
+
+        // Verify the output SST
+        assert_eq!(1, result.ssts.len());
+        let sst = result.ssts[0].clone();
+        let mut iter = SstIterator::new(
+            SstView::Borrowed(&sst, BytesRange::from(..)),
+            table_store.clone(),
+            SstIteratorOptions::default(),
+        )
+        .unwrap();
+        iter.init().await.unwrap();
+
+        // drop:key1 and drop:key2 should be DROPPED (not present)
+
+        // keep:key3 - unchanged (Keep decision)
+        let next = iter.next_entry().await.unwrap().unwrap();
+        assert_eq!(next.key, Bytes::from(b"keep:key3".as_slice()));
+        assert_eq!(
+            next.value,
+            ValueDeletable::Value(Bytes::from(b"value3".as_slice()))
+        );
+
+        // keep:key4 - unchanged (Keep decision)
+        let next = iter.next_entry().await.unwrap().unwrap();
+        assert_eq!(next.key, Bytes::from(b"keep:key4".as_slice()));
+        assert_eq!(
+            next.value,
+            ValueDeletable::Value(Bytes::from(b"value4".as_slice()))
+        );
+
+        // modify:key5 - value modified (Modify decision)
+        let next = iter.next_entry().await.unwrap().unwrap();
+        assert_eq!(next.key, Bytes::from(b"modify:key5".as_slice()));
+        assert_eq!(
+            next.value,
+            ValueDeletable::Value(Bytes::from(b"value5_modified".as_slice()))
+        );
+
+        // modify:key6 - value modified (Modify decision)
+        let next = iter.next_entry().await.unwrap().unwrap();
+        assert_eq!(next.key, Bytes::from(b"modify:key6".as_slice()));
+        assert_eq!(
+            next.value,
+            ValueDeletable::Value(Bytes::from(b"value6_modified".as_slice()))
+        );
+
+        // tombstone:key7 - converted to tombstone (Modify to Tombstone decision)
+        let next = iter.next_entry().await.unwrap().unwrap();
+        assert_eq!(next.key, Bytes::from(b"tombstone:key7".as_slice()));
+        assert!(next.value.is_tombstone());
+
+        // tombstone:key8 - converted to tombstone (Modify to Tombstone decision)
+        let next = iter.next_entry().await.unwrap().unwrap();
+        assert_eq!(next.key, Bytes::from(b"tombstone:key8".as_slice()));
+        assert!(next.value.is_tombstone());
+
+        // No more entries
+        assert!(iter.next_entry().await.unwrap().is_none());
+    }
+
+    #[cfg(feature = "compaction_filters")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_compaction_job_aborts_on_filter_creation_error() {
+        use crate::compaction_filter::{
+            CompactionFilter, CompactionFilterError, CompactionFilterSupplier, CompactionJobContext,
+        };
+
+        struct FailingFilterSupplier;
+
+        #[async_trait::async_trait]
+        impl CompactionFilterSupplier for FailingFilterSupplier {
+            async fn create_compaction_filter(
+                &self,
+                _context: &CompactionJobContext,
+            ) -> Result<Box<dyn CompactionFilter>, CompactionFilterError> {
+                Err(CompactionFilterError::CreationError(
+                    "intentional failure".into(),
+                ))
+            }
+        }
+
+        let ctx = TestContextBuilder::new("testdb_filter_fail")
+            .with_compaction_filter_supplier(Arc::new(FailingFilterSupplier))
+            .build()
+            .await;
+        let table_store = ctx.table_store.clone();
+
+        // Write a simple entry
+        let mut sst_builder = table_store.table_builder();
+        sst_builder
+            .add(RowEntry::new_value(b"key1", b"value1", 1))
+            .await
+            .unwrap();
+        let encoded_sst = sst_builder.build().await.unwrap();
+        let id = SsTableId::Compacted(Ulid::new());
+        let l0 = table_store
+            .write_sst(&id, encoded_sst, false)
+            .await
+            .unwrap();
+
+        let result = ctx.run_compaction(vec![l0], true, None).await;
+
+        // The compaction should have failed
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, SlateDBError::CompactionFilterError(_)));
+    }
+
+    #[cfg(feature = "compaction_filters")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_compaction_job_aborts_on_compaction_end_error() {
+        use crate::compaction_filter::{
+            CompactionFilter, CompactionFilterDecision, CompactionFilterError,
+            CompactionFilterSupplier, CompactionJobContext,
+        };
+
+        /// A filter that keeps all entries but fails on on_compaction_end.
+        struct FailOnEndFilter;
+
+        #[async_trait::async_trait]
+        impl CompactionFilter for FailOnEndFilter {
+            async fn filter(
+                &mut self,
+                _entry: &RowEntry,
+            ) -> Result<CompactionFilterDecision, CompactionFilterError> {
+                Ok(CompactionFilterDecision::Keep)
+            }
+
+            async fn on_compaction_end(&mut self) -> Result<(), CompactionFilterError> {
+                Err(CompactionFilterError::CompactionEndError(
+                    "intentional failure on compaction end".into(),
+                ))
+            }
+        }
+
+        struct FailOnEndFilterSupplier;
+
+        #[async_trait::async_trait]
+        impl CompactionFilterSupplier for FailOnEndFilterSupplier {
+            async fn create_compaction_filter(
+                &self,
+                _context: &CompactionJobContext,
+            ) -> Result<Box<dyn CompactionFilter>, CompactionFilterError> {
+                Ok(Box::new(FailOnEndFilter))
+            }
+        }
+
+        let ctx = TestContextBuilder::new("testdb_filter_end_fail")
+            .with_compaction_filter_supplier(Arc::new(FailOnEndFilterSupplier))
+            .build()
+            .await;
+        let table_store = ctx.table_store.clone();
+
+        // Write a simple entry
+        let mut sst_builder = table_store.table_builder();
+        sst_builder
+            .add(RowEntry::new_value(b"key1", b"value1", 1))
+            .await
+            .unwrap();
+        let encoded_sst = sst_builder.build().await.unwrap();
+        let id = SsTableId::Compacted(Ulid::new());
+        let l0 = table_store
+            .write_sst(&id, encoded_sst, false)
+            .await
+            .unwrap();
+
+        let result = ctx.run_compaction(vec![l0], true, None).await;
+
+        // The compaction should have failed due to on_compaction_end error
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, SlateDBError::CompactionFilterError(_)),
+            "Expected CompactionFilterError, got: {:?}",
+            err
+        );
     }
 }
