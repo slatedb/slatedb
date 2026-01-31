@@ -143,7 +143,7 @@ impl EncodedWalSsTableBuilder {
         }
 
         let entry_size = entry.estimated_size();
-        assert!(self.block_builder.add(entry));
+        self.block_builder.add(entry)?;
         self.entries_count += 1;
         self.entries_size_bytes += entry_size;
 

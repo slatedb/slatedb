@@ -30,6 +30,9 @@ pub(crate) enum SlateDBError {
     #[error("empty block")]
     EmptyBlock,
 
+    #[error("empty RowEntry key")]
+    EmptyKey,
+
     #[error("empty manifest")]
     EmptyManifest,
 
@@ -509,6 +512,7 @@ impl From<SlateDBError> for Error {
             SlateDBError::InvalidTransactionalObjectState => Error::data(msg),
             SlateDBError::EmptyManifest => Error::data(msg),
             SlateDBError::EmptyBlock => Error::data(msg),
+            SlateDBError::EmptyKey => Error::data(msg),
             SlateDBError::EmptyBlockMeta => Error::data(msg),
             SlateDBError::EmptySSTable => Error::data(msg),
             SlateDBError::ChecksumMismatch => Error::data(msg),

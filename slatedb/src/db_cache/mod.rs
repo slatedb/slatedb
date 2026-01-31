@@ -847,7 +847,7 @@ mod tests {
         let cache_b = DbCacheWrapper::new(shared_cache.clone(), &registry_b, system_clock);
 
         let mut builder = BlockBuilder::new(4096);
-        assert!(builder.add(RowEntry::new_value(b"k1", b"v1", 0)));
+        assert!(builder.add(RowEntry::new_value(b"k1", b"v1", 0)).unwrap());
         let block = Arc::new(builder.build().unwrap());
         let key = CachedKey::from((SST_ID, 3u64));
 
