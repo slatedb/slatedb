@@ -6,8 +6,8 @@ members = [
     "slatedb-common",
     "slatedb-bencher",
     "slatedb-cli",
+    "slatedb-c",
     "slatedb-dst",
-    "slatedb-go",
     "slatedb-py",
     "slatedb-txn-obj",
 ]

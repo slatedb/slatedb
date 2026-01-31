@@ -4,7 +4,7 @@ use slatedb::Error as SlateError;
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 
-// Error codes that will be exposed to C/Go
+// Error codes that will be exposed to C
 #[repr(C)]
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub enum CSdbError {

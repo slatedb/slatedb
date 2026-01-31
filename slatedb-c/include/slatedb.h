@@ -1,7 +1,7 @@
 /* WARNING: This file is auto-generated. Do not modify manually. */
 
-#ifndef SLATEDB_GO_H
-#define SLATEDB_GO_H
+#ifndef SLATEDB_C_H
+#define SLATEDB_C_H
 
 /* Generated with cbindgen:0.27.0 */
 
@@ -231,7 +231,7 @@ typedef struct CSdbScanResult {
 
 #define Checkpoint_VT_NAME 16
 
-// Initialize logging for SlateDB Go bindings
+// Initialize logging for SlateDB C bindings
 // This should be called once before using any other SlateDB functions
 //
 // # Safety
@@ -484,4 +484,4 @@ void slatedb_free_value(struct CSdbValue value);
 
 void slatedb_free_scan_result(struct CSdbScanResult result);
 
-#endif  /* SLATEDB_GO_H */
+#endif  /* SLATEDB_C_H */
