@@ -34,6 +34,7 @@ use crate::db_transaction::DbTransaction;
 use crate::dispatcher::MessageHandlerExecutor;
 use crate::garbage_collector::GC_TASK_NAME;
 use crate::transaction_manager::IsolationLevel;
+use crate::CloseReason;
 use log::{info, trace, warn};
 use parking_lot::RwLock;
 use std::time::Duration;
@@ -722,8 +723,21 @@ impl Db {
     /// }
     /// ```
     pub async fn close(&self) -> Result<(), crate::Error> {
-        let should_flush = self.status().is_ok();
+        let should_flush = match self.status() {
+            // If already closed, don't close again.
+            Err(e) if matches!(e.kind(), crate::ErrorKind::Closed(CloseReason::Clean)) => {
+                return Err(e);
+            }
+            // If in failed state, allow close, but don't flush since the database
+            // might be in a bad state. Note that multiple close() calls will always
+            // run when in a failed state (vs. a clean closure, which will return
+            // Error::Closed(CloseReason::Clean) on subsequent calls).
+            Err(_) => false,
+            // Flush outstanding writes if the database is still open.
+            Ok(_) => true,
+        };
 
+        // Mark the database as closed before flushing.
         self.inner.state.write().closed_result().write(Ok(()));
 
         if should_flush {
