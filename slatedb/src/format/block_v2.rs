@@ -163,8 +163,7 @@ impl BlockBuilderV2 {
         self.current_size() + entry_size + restart_overhead <= self.block_size
     }
 
-    /// Add an entry to the block. Returns true if the entry was added.
-    #[must_use]
+    /// Add an entry to the block. Returns Ok(true) if the entry was added.
     pub(crate) fn add(&mut self, entry: RowEntry) -> Result<bool, SlateDBError> {
         if entry.key.is_empty() {
             return Err(SlateDBError::EmptyKey);

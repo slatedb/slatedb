@@ -122,7 +122,6 @@ impl BlockBuilder {
         self.size() + entry.encoded_size(key_prefix_len) <= self.block_size
     }
 
-    #[must_use]
     pub(crate) fn add(&mut self, entry: RowEntry) -> Result<bool, SlateDBError> {
         if entry.key.is_empty() {
             return Err(SlateDBError::EmptyKey);
