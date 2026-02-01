@@ -135,13 +135,13 @@ impl EncodedSsTableBuilder<'_> {
     }
 
     /// Sets the compression codec for compressing the blocks
-    pub(crate) fn with_compression_codec(mut self, codec: CompressionCodec) -> Self {
+    fn with_compression_codec(mut self, codec: CompressionCodec) -> Self {
         self.compression_codec = Some(codec);
         self
     }
 
     /// Sets the block transformer for transforming the blocks
-    pub(crate) fn with_block_transformer(mut self, transformer: Arc<dyn BlockTransformer>) -> Self {
+    fn with_block_transformer(mut self, transformer: Arc<dyn BlockTransformer>) -> Self {
         self.block_transformer = Some(transformer);
         self
     }
