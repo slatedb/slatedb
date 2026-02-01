@@ -142,6 +142,7 @@ pub(crate) fn convert_reader_options(c_opts: *const CSdbReaderOptions) -> DbRead
         block_cache: defaults.block_cache,
         merge_operator: defaults.merge_operator,
         block_transformer: defaults.block_transformer,
+        skip_wal_replay: opts.skip_wal_replay,
     }
 }
 

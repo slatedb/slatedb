@@ -1,5 +1,6 @@
 use crate::error::SlateDBError;
-use crate::row_codec::{SstRowCodecV0, SstRowEntry};
+use crate::format::row::{SstRowCodecV0, SstRowEntry};
+use crate::format::sst::{CHECKSUM_SIZE, OFFSET_SIZE};
 use crate::types::RowEntry;
 use crate::utils::clamp_allocated_size_bytes;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
@@ -66,10 +67,8 @@ impl Block {
         number_of_blocks: usize,
     ) -> usize {
         let mut ans = entries_size_encoded;
-        let offset_len = std::mem::size_of::<u16>();
-        let checksum_len = std::mem::size_of::<u32>();
-        ans += offset_len * entry_num;
-        ans += checksum_len * number_of_blocks;
+        ans += OFFSET_SIZE * entry_num;
+        ans += CHECKSUM_SIZE * number_of_blocks;
         ans
     }
 }
@@ -123,12 +122,13 @@ impl BlockBuilder {
         self.size() + entry.encoded_size(key_prefix_len) <= self.block_size
     }
 
-    #[must_use]
-    pub(crate) fn add(&mut self, entry: RowEntry) -> bool {
-        assert!(!entry.key.is_empty(), "key must not be empty");
+    pub(crate) fn add(&mut self, entry: RowEntry) -> Result<bool, SlateDBError> {
+        if entry.key.is_empty() {
+            return Err(SlateDBError::EmptyKey);
+        }
 
         if !self.would_fit(&entry) {
-            return false;
+            return Ok(false);
         }
 
         let key_prefix_len = compute_prefix(&self.first_key, &entry.key);
@@ -151,7 +151,7 @@ impl BlockBuilder {
             self.first_key = Bytes::copy_from_slice(entry.key.as_ref());
         }
 
-        true
+        Ok(true)
     }
 
     #[cfg(test)]
@@ -168,7 +168,7 @@ impl BlockBuilder {
             attrs.ts,
             attrs.expire_ts,
         );
-        self.add(entry)
+        self.add(entry).unwrap_or(false)
     }
 
     #[allow(dead_code)]
@@ -181,7 +181,7 @@ impl BlockBuilder {
             attrs.ts,
             attrs.expire_ts,
         );
-        self.add(entry)
+        self.add(entry).unwrap_or(false)
     }
 
     pub(crate) fn is_empty(&self) -> bool {
@@ -221,7 +221,7 @@ mod tests {
         let mut builder = BlockBuilder::new(4096);
 
         for entry in &test_case.entries {
-            assert!(builder.add(entry.clone()));
+            assert!(builder.add(entry.clone()).unwrap());
         }
 
         builder.build().expect("Failed to build block")
@@ -309,7 +309,7 @@ mod tests {
     fn test_block(#[case] test_case: BlockTestCase) {
         let block = build_block(&test_case);
         let encoded = block.encode();
-        let decoded = Block::decode(encoded.clone());
+        let decoded = Block::decode(encoded);
         let block_data = &block.data;
         let block_offsets = &block.offsets;
         // Decode the block data using offsets and validate each decoded entry
@@ -361,7 +361,7 @@ mod tests {
     async fn test_should_clamp_allocated_size(#[case] case: ClampAllocTestCase) {
         let mut builder = BlockBuilder::new(4096);
         for e in case.entries.iter() {
-            assert!(builder.add(e.clone()));
+            assert!(builder.add(e.clone()).unwrap());
         }
         let block = builder.build().unwrap();
         let encoded = block.encode();

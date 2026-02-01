@@ -166,7 +166,7 @@ impl GarbageCollector {
         stat_registry: Arc<StatRegistry>,
         system_clock: Arc<dyn SystemClock>,
     ) -> Self {
-        let stats = Arc::new(GcStats::new(stat_registry.clone()));
+        let stats = Arc::new(GcStats::new(stat_registry));
         let wal_gc_task = WalGcTask::new(
             manifest_store.clone(),
             table_store.clone(),
@@ -176,12 +176,12 @@ impl GarbageCollector {
         let compacted_gc_task = CompactedGcTask::new(
             manifest_store.clone(),
             compactions_store.clone(),
-            table_store.clone(),
+            table_store,
             stats.clone(),
             options.compacted_options,
         );
         let compactions_gc_task = CompactionsGcTask::new(
-            compactions_store.clone(),
+            compactions_store,
             stats.clone(),
             options.compactions_options,
         );
@@ -303,7 +303,7 @@ mod tests {
     use crate::{
         db_state::{ManifestCore, SortedRun, SsTableHandle, SsTableId},
         manifest::store::{ManifestStore, StoredManifest},
-        sst::SsTableFormat,
+        sst_builder::SsTableFormat,
         tablestore::TableStore,
     };
 
@@ -1175,7 +1175,7 @@ mod tests {
         let table_store = Arc::new(TableStore::new(
             ObjectStores::new(local_object_store.clone(), None),
             sst_format,
-            path.clone(),
+            path,
             None,
         ));
 

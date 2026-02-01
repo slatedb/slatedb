@@ -1,6 +1,6 @@
 [package]
-name = "slatedb-go"
-description = "Go FFI bindings for SlateDB"
+name = "slatedb-c"
+description = "C FFI bindings for SlateDB"
 publish = false
 version.workspace = true
 edition.workspace = true
@@ -9,22 +9,18 @@ license.workspace = true
 homepage.workspace = true
 
 [lib]
-name = "slatedb_go"
+name = "slatedb_c"
 crate-type = ["cdylib", "staticlib"]
 doc = false
 bench = false
 
 [dependencies]
-slatedb = { workspace = true }
-object_store = { workspace = true, features = ["aws"] }
+slatedb = { workspace = true, features = ["all"] }
 tokio = { workspace = true, features = ["fs", "macros", "sync", "rt", "rt-multi-thread", "signal"] }
-once_cell = { workspace = true }
 log = { workspace = true }
 env_logger = "0.11"
-rand = { workspace = true }
 uuid = { workspace = true }
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
+serde_json = { workspace = true }
 
 [build-dependencies]
 cbindgen = "0.27"

@@ -1,7 +1,7 @@
 /* WARNING: This file is auto-generated. Do not modify manually. */
 
-#ifndef SLATEDB_GO_H
-#define SLATEDB_GO_H
+#ifndef SLATEDB_C_H
+#define SLATEDB_C_H
 
 /* Generated with cbindgen:0.27.0 */
 
@@ -113,6 +113,8 @@ typedef struct CSdbReaderOptions {
     uint64_t checkpoint_lifetime_ms;
     // Max size of in-memory table for WAL buffering
     uint64_t max_memtable_bytes;
+    // When true, skip WAL replay entirely (only see compacted data)
+    bool skip_wal_replay;
 } CSdbReaderOptions;
 
 typedef struct CSdbKeyValue {
@@ -139,7 +141,7 @@ typedef struct CSdbScanResult {
 
 #define BytesRange_VT_END_BOUND 6
 
-#define SsTableInfo_VT_FIRST_KEY 4
+#define SsTableInfo_VT_FIRST_ENTRY 4
 
 #define SsTableInfo_VT_INDEX_OFFSET 6
 
@@ -152,6 +154,8 @@ typedef struct CSdbScanResult {
 #define SsTableInfo_VT_COMPRESSION_FORMAT 14
 
 #define BlockMeta_VT_OFFSET 4
+
+#define BlockMeta_VT_FIRST_KEY 6
 
 #define SsTableIndex_VT_BLOCK_META 4
 
@@ -170,6 +174,8 @@ typedef struct CSdbScanResult {
 #define Compaction_VT_SPEC 8
 
 #define Compaction_VT_STATUS 10
+
+#define Compaction_VT_OUTPUT_SSTS 12
 
 #define CompactionsV1_VT_COMPACTOR_EPOCH 4
 
@@ -225,7 +231,7 @@ typedef struct CSdbScanResult {
 
 #define Checkpoint_VT_NAME 16
 
-// Initialize logging for SlateDB Go bindings
+// Initialize logging for SlateDB C bindings
 // This should be called once before using any other SlateDB functions
 //
 // # Safety
@@ -478,4 +484,4 @@ void slatedb_free_value(struct CSdbValue value);
 
 void slatedb_free_scan_result(struct CSdbScanResult result);
 
-#endif  /* SLATEDB_GO_H */
+#endif  /* SLATEDB_C_H */

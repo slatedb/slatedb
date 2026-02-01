@@ -1046,7 +1046,7 @@ mod tests {
 
     fn new_memory_manifest_store() -> Arc<ManifestStore> {
         let os = Arc::new(InMemory::new());
-        Arc::new(ManifestStore::new(&Path::from(ROOT), os.clone()))
+        Arc::new(ManifestStore::new(&Path::from(ROOT), os))
     }
 
     fn new_checkpoint(manifest_id: u64) -> Checkpoint {

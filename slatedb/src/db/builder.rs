@@ -117,13 +117,15 @@ use crate::batch_write::WRITE_BATCH_TASK_NAME;
 use crate::cached_object_store::stats::CachedObjectStoreStats;
 use crate::cached_object_store::CachedObjectStore;
 use crate::cached_object_store::FsCacheStorage;
+#[cfg(feature = "compaction_filters")]
+use crate::compaction_filter::CompactionFilterSupplier;
 use crate::compactions_store::CompactionsStore;
 use crate::compactor::stats::CompactionStats;
 use crate::compactor::CompactorEventHandler;
 use crate::compactor::SizeTieredCompactionSchedulerSupplier;
 use crate::compactor::COMPACTOR_TASK_NAME;
 use crate::compactor::{CompactionSchedulerSupplier, Compactor};
-use crate::compactor_executor::TokioCompactionExecutor;
+use crate::compactor_executor::{TokioCompactionExecutor, TokioCompactionExecutorOptions};
 use crate::config::default_block_cache;
 use crate::config::default_meta_cache;
 use crate::config::CompactorOptions;
@@ -136,6 +138,7 @@ use crate::db_cache::{DbCache, DbCacheWrapper};
 use crate::db_state::ManifestCore;
 use crate::dispatcher::MessageHandlerExecutor;
 use crate::error::SlateDBError;
+use crate::format::sst::{BlockTransformer, SsTableFormat};
 use crate::garbage_collector::GarbageCollector;
 use crate::garbage_collector::GC_TASK_NAME;
 use crate::manifest::store::{FenceableManifest, ManifestStore, StoredManifest};
@@ -146,7 +149,6 @@ use crate::object_stores::ObjectStores;
 use crate::paths::PathResolver;
 use crate::rand::DbRand;
 use crate::retrying_object_store::RetryingObjectStore;
-use crate::sst::{BlockTransformer, SsTableFormat};
 use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
 use crate::utils::WatchableOnceCell;
@@ -172,6 +174,8 @@ pub struct DbBuilder<P: Into<Path>> {
     sst_block_size: Option<SstBlockSize>,
     merge_operator: Option<MergeOperatorType>,
     block_transformer: Option<Arc<dyn BlockTransformer>>,
+    #[cfg(feature = "compaction_filters")]
+    compaction_filter_supplier: Option<Arc<dyn CompactionFilterSupplier>>,
 }
 
 impl<P: Into<Path>> DbBuilder<P> {
@@ -192,6 +196,8 @@ impl<P: Into<Path>> DbBuilder<P> {
             sst_block_size: None,
             merge_operator: None,
             block_transformer: None,
+            #[cfg(feature = "compaction_filters")]
+            compaction_filter_supplier: None,
         }
     }
 
@@ -318,6 +324,32 @@ impl<P: Into<Path>> DbBuilder<P> {
         self
     }
 
+    /// Sets the compaction filter supplier for the database. The filter supplier
+    /// creates filter instances that can inspect, drop, or modify entries during
+    /// compaction.
+    ///
+    /// **Warning:** Enabling compaction filters may affect snapshot consistency.
+    /// Use compaction filters only if you know the consequences of using them.
+    ///
+    /// See [`crate::CompactionFilter`] for detailed documentation, examples, and the
+    /// filter API.
+    ///
+    /// # Arguments
+    ///
+    /// * `supplier` - An Arc-wrapped compaction filter supplier implementation.
+    ///
+    /// # Returns
+    ///
+    /// The builder instance for chaining.
+    #[cfg(feature = "compaction_filters")]
+    pub fn with_compaction_filter_supplier(
+        mut self,
+        supplier: Arc<dyn CompactionFilterSupplier>,
+    ) -> Self {
+        self.compaction_filter_supplier = Some(supplier);
+        self
+    }
+
     /// Builds and opens the database.
     pub async fn build(self) -> Result<Db, crate::Error> {
         let path = self.path.into();
@@ -368,6 +400,8 @@ impl<P: Into<Path>> DbBuilder<P> {
         });
 
         let merge_operator = self.merge_operator.or(self.settings.merge_operator.clone());
+        #[cfg(feature = "compaction_filters")]
+        let compaction_filter_supplier = self.compaction_filter_supplier.clone();
 
         // Setup the components
         let stat_registry = Arc::new(StatRegistry::new());
@@ -565,15 +599,19 @@ impl<P: Into<Path>> DbBuilder<P> {
             let scheduler = Arc::from(scheduler_supplier.compaction_scheduler(&compactor_options));
             let stats = Arc::new(CompactionStats::new(inner.stat_registry.clone()));
             let executor = Arc::new(TokioCompactionExecutor::new(
-                compaction_handle,
-                compactor_options.clone(),
-                tx,
-                uncached_table_store.clone(),
-                rand.clone(),
-                stats.clone(),
-                system_clock.clone(),
-                manifest_store.clone(),
-                merge_operator.clone(),
+                TokioCompactionExecutorOptions {
+                    handle: compaction_handle,
+                    options: compactor_options.clone(),
+                    worker_tx: tx,
+                    table_store: uncached_table_store.clone(),
+                    rand: rand.clone(),
+                    stats: stats.clone(),
+                    clock: system_clock.clone(),
+                    manifest_store: manifest_store.clone(),
+                    merge_operator: merge_operator.clone(),
+                    #[cfg(feature = "compaction_filters")]
+                    compaction_filter_supplier: compaction_filter_supplier.clone(),
+                },
             ));
             let handler = CompactorEventHandler::new(
                 manifest_store.clone(),
@@ -772,7 +810,7 @@ impl<P: Into<Path>> GarbageCollectorBuilder<P> {
         ));
         let table_store = Arc::new(TableStore::new(
             ObjectStores::new(
-                retrying_main_object_store.clone(),
+                retrying_main_object_store,
                 retrying_wal_object_store.clone(),
             ),
             SsTableFormat::default(), // read only SSTs can use default
@@ -805,6 +843,8 @@ pub struct CompactorBuilder<P: Into<Path>> {
     closed_result: WatchableOnceCell<Result<(), SlateDBError>>,
     merge_operator: Option<MergeOperatorType>,
     block_transformer: Option<Arc<dyn BlockTransformer>>,
+    #[cfg(feature = "compaction_filters")]
+    compaction_filter_supplier: Option<Arc<dyn CompactionFilterSupplier>>,
 }
 
 #[allow(unused)]
@@ -822,6 +862,8 @@ impl<P: Into<Path>> CompactorBuilder<P> {
             closed_result: WatchableOnceCell::new(),
             merge_operator: None,
             block_transformer: None,
+            #[cfg(feature = "compaction_filters")]
+            compaction_filter_supplier: None,
         }
     }
 
@@ -878,6 +920,32 @@ impl<P: Into<Path>> CompactorBuilder<P> {
         self
     }
 
+    /// Sets the compaction filter supplier for the compactor. The filter supplier
+    /// creates filter instances that can inspect, drop, or modify entries during
+    /// compaction.
+    ///
+    /// **Warning:** Enabling compaction filters may affect snapshot consistency.
+    /// Use compaction filters only if you know the consequences of using them.
+    ///
+    /// See [`crate::CompactionFilter`] for detailed documentation, examples, and the
+    /// filter API.
+    ///
+    /// # Arguments
+    ///
+    /// * `supplier` - An Arc-wrapped compaction filter supplier implementation.
+    ///
+    /// # Returns
+    ///
+    /// The builder instance for chaining.
+    #[cfg(feature = "compaction_filters")]
+    pub fn with_compaction_filter_supplier(
+        mut self,
+        supplier: Arc<dyn CompactionFilterSupplier>,
+    ) -> Self {
+        self.compaction_filter_supplier = Some(supplier);
+        self
+    }
+
     /// Builds and returns a Compactor instance.
     pub fn build(self) -> Compactor {
         let path: Path = self.path.into();
@@ -899,7 +967,7 @@ impl<P: Into<Path>> CompactorBuilder<P> {
             ..SsTableFormat::default()
         };
         let table_store = Arc::new(TableStore::new(
-            ObjectStores::new(retrying_main_object_store.clone(), None),
+            ObjectStores::new(retrying_main_object_store, None),
             sst_format,
             path,
             None, // no need for cache in GC
@@ -921,6 +989,8 @@ impl<P: Into<Path>> CompactorBuilder<P> {
             self.system_clock,
             self.closed_result,
             self.merge_operator,
+            #[cfg(feature = "compaction_filters")]
+            self.compaction_filter_supplier,
         )
     }
 }

@@ -51,8 +51,10 @@ impl Debug for SsTableHandle {
 
 impl SsTableHandle {
     pub(crate) fn new(id: SsTableId, info: SsTableInfo) -> Self {
-        let effective_range = match info.first_key.clone() {
-            Some(physical_first_key) => BytesRange::new(Included(physical_first_key), Unbounded),
+        let effective_range = match info.first_entry.clone() {
+            Some(physical_first_entry) => {
+                BytesRange::new(Included(physical_first_entry), Unbounded)
+            }
             None => BytesRange::new_empty(),
         };
 
@@ -69,12 +71,12 @@ impl SsTableHandle {
         info: SsTableInfo,
         visible_range: Option<BytesRange>,
     ) -> Self {
-        let mut effective_range = match info.first_key.clone() {
-            Some(physical_first_key) => {
-                BytesRange::new(Included(physical_first_key.clone()), Unbounded)
+        let mut effective_range = match info.first_entry.clone() {
+            Some(physical_first_entry) => {
+                BytesRange::new(Included(physical_first_entry), Unbounded)
             }
             None => {
-                unreachable!("SST always has a first key.")
+                unreachable!("SST always has a first entry.")
             }
         };
         if let Some(visible_range) = &visible_range {
@@ -222,12 +224,14 @@ impl Debug for SsTableId {
     }
 }
 
-/// Metadata information about an SSTable. See [`crate::sst::EncodedSsTableBuilder`] for
+/// Metadata information about an SSTable. See [`crate::sst_builder::EncodedSsTableBuilder`] for
 /// more information on the format of the SSTable and its metadata.
 #[derive(Clone, Debug, PartialEq, Serialize, Default)]
 pub struct SsTableInfo {
-    /// The first key in the SSTable, if any.
-    pub first_key: Option<Bytes>,
+    /// The first entry in the SSTable, if any.
+    /// The first entry is a key in an SST for compacted data
+    /// and it is a sequence number in a WAL SST.
+    pub first_entry: Option<Bytes>,
     /// The offset of the index block within the SSTable file.
     pub index_offset: u64,
     /// The length of the index block within the SSTable file.
@@ -525,7 +529,7 @@ impl DbState {
         if let Some(result) = self.closed_result.reader().read() {
             return match result {
                 Ok(()) => Err(SlateDBError::Closed),
-                Err(e) => Err(e.clone()),
+                Err(e) => Err(e),
             };
         }
         let old_memtable = std::mem::replace(&mut self.memtable, WritableKVTable::new());
@@ -548,7 +552,7 @@ impl DbState {
         if let Some(result) = self.closed_result.reader().read() {
             return match result {
                 Ok(()) => Err(SlateDBError::Closed),
-                Err(e) => Err(e.clone()),
+                Err(e) => Err(e),
             };
         }
         assert!(self.memtable.is_empty());
@@ -792,15 +796,15 @@ mod tests {
         SortedRun { id, ssts }
     }
 
-    fn create_compacted_sst_handle(first_key: Option<Bytes>) -> SsTableHandle {
-        let sst_info = create_sst_info(first_key);
+    fn create_compacted_sst_handle(first_entry: Option<Bytes>) -> SsTableHandle {
+        let sst_info = create_sst_info(first_entry);
         let sst_id = SsTableId::Compacted(ulid::Ulid::new());
-        SsTableHandle::new(sst_id, sst_info.clone())
+        SsTableHandle::new(sst_id, sst_info)
     }
 
-    fn create_sst_info(first_key: Option<Bytes>) -> SsTableInfo {
+    fn create_sst_info(first_entry: Option<Bytes>) -> SsTableInfo {
         SsTableInfo {
-            first_key,
+            first_entry,
             index_offset: 0,
             index_len: 0,
             filter_offset: 0,

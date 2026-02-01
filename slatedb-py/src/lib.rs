@@ -1915,7 +1915,7 @@ impl PySlateDBReader {
         checkpoint_lifetime: Option<u64>,
         max_memtable_bytes: Option<u64>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let object_store = resolve_object_store_py(url.as_deref(), env_file.clone())?;
+        let object_store = resolve_object_store_py(url.as_deref(), env_file)?;
         let merge_operator = parse_merge_operator(merge_operator)?;
         future_into_py(py, async move {
             let mut options = DbReaderOptions {

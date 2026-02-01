@@ -1,506 +1,92 @@
+//! SSTable (Sorted String Table) encoding and building.
+//!
+//! This module provides the core data structures and builders for creating and reading
+//! SSTables, the persistent on-disk format used by SlateDB for storing sorted key-value
+//! data.
+//!
+//! # SSTable Format
+//!
+//! An SSTable consists of the following components, written sequentially:
+//!
+//! ```text
+//! +------------------+
+//! |   Data Blocks    |  <- Key-value entries, optionally compressed
+//! +------------------+
+//! |   Filter Block   |  <- Bloom filter for efficient key lookups (optional)
+//! +------------------+
+//! |   Index Block    |  <- Block metadata (offsets, first keys)
+//! +------------------+
+//! |   SST Info       |  <- Table metadata (key range, compression, etc.)
+//! +------------------+
+//! |  Metadata offset |  <- Metadata offset (8 bytes)
+//! +------------------+
+//! |     Version      |  <- Format version (2 bytes)
+//! +------------------+
+//! ```
+//!
+//! Each block is followed by a CRC32 checksum for data integrity verification.
+//!
+//! # Key Components
+//!
+//! - [`EncodedSsTableBuilder`]: Builder for constructing SSTables from entries
+//!
+//! The builder reuses shared components from the [`crate::format::sst`] module:
+//! - [`EncodedSsTableBlockBuilder`]: For encoding data blocks
+//! - [`EncodedSsTableFooterBuilder`]: For encoding the footer
+//! - [`BlockTransformer`]: Trait for custom block transformations (e.g., encryption)
+//!
+//! # Compression
+//!
+//! SSTables support optional compression via the [`CompressionCodec`] enum:
+//! - Snappy (feature: `snappy`)
+//! - LZ4 (feature: `lz4`)
+//! - Zstd (feature: `zstd`)
+//! - Zlib (feature: `zlib`)
+//!
+//! Compression is applied per-block before the checksum is computed.
+//!
+//! # Block Transformation
+//!
+//! The [`BlockTransformer`] trait allows custom transformations on block data,
+//! such as encryption. Transformations are applied after compression on write
+//! and before decompression on read.
+
 use std::collections::VecDeque;
-#[cfg(feature = "zlib")]
-use std::io::{Read, Write};
-use std::ops::Range;
 use std::sync::Arc;
 
-use async_trait::async_trait;
-use bytes::{Buf, BufMut, Bytes};
+use bytes::Bytes;
 use flatbuffers::DefaultAllocator;
 
-use crate::block::Block;
-use crate::db_state::{SsTableInfo, SsTableInfoCodec};
-use crate::filter::{BloomFilter, BloomFilterBuilder};
-use crate::flatbuffer_types::{
-    BlockMeta, BlockMetaArgs, FlatBufferSsTableInfoCodec, SsTableIndex, SsTableIndexArgs,
-    SsTableIndexOwned,
+use crate::config::CompressionCodec;
+use crate::db_state::SsTableInfoCodec;
+use crate::error::SlateDBError;
+use crate::filter::BloomFilterBuilder;
+use crate::flatbuffer_types::{BlockMeta, BlockMetaArgs};
+use crate::format::block::BlockBuilder;
+use crate::format::sst::{
+    EncodedSsTableBlock, EncodedSsTableBlockBuilder, EncodedSsTableFooterBuilder,
 };
-use crate::row_codec;
 use crate::types::RowEntry;
 use crate::utils::compute_index_key;
-use crate::{blob::ReadOnlyBlob, config::CompressionCodec};
-use crate::{block::BlockBuilder, error::SlateDBError};
 
-pub(crate) const SST_FORMAT_VERSION: u16 = 1;
-
-// 8 bytes for the metadata offset + 2 bytes for the version
-const NUM_FOOTER_BYTES: usize = 10;
-const NUM_FOOTER_BYTES_LONG: u64 = NUM_FOOTER_BYTES as u64;
-
-pub(crate) const SIZEOF_U16: usize = std::mem::size_of::<u16>();
-pub(crate) const SIZEOF_U32: usize = std::mem::size_of::<u32>();
-pub(crate) const SIZEOF_U64: usize = std::mem::size_of::<u64>();
-pub(crate) const CHECKSUM_SIZE: usize = SIZEOF_U32;
-pub(crate) const OFFSET_SIZE: usize = SIZEOF_U16;
-pub(crate) const METADATA_OFFSET_SIZE: usize = SIZEOF_U64;
-pub(crate) const VERSION_SIZE: usize = SIZEOF_U16;
-
-/// Trait for transforming block data before storage and after retrieval.
-///
-/// This can be used to implement encryption, custom encoding, or other
-/// transformations on block data. The transformer is applied after compression
-/// on write and before decompression on read.
-///
-/// The trait is async to allow implementations to use `spawn_blocking` for
-/// CPU-intensive operations (like encryption) or to call external services
-/// (like a KMS).
-///
-/// # Example
-///
-/// ```
-/// use async_trait::async_trait;
-/// use bytes::Bytes;
-/// use slatedb::{BlockTransformer, Error};
-///
-/// struct XorTransformer {
-///     key: u8,
-/// }
-///
-/// #[async_trait]
-/// impl BlockTransformer for XorTransformer {
-///     async fn encode(&self, data: Bytes) -> Result<Bytes, Error> {
-///         let transformed: Vec<u8> = data.iter().map(|b| b ^ self.key).collect();
-///         Ok(Bytes::from(transformed))
-///     }
-///
-///     async fn decode(&self, data: Bytes) -> Result<Bytes, Error> {
-///         self.encode(data).await
-///     }
-/// }
-/// ```
-#[async_trait]
-pub trait BlockTransformer: Send + Sync {
-    /// Encode (transform) block data before storage.
-    async fn encode(&self, data: Bytes) -> Result<Bytes, crate::error::Error>;
-
-    /// Decode (inverse transform) block data after retrieval.
-    async fn decode(&self, data: Bytes) -> Result<Bytes, crate::error::Error>;
-}
-
-#[derive(Clone)]
-pub(crate) struct SsTableFormat {
-    pub(crate) block_size: usize,
-    pub(crate) min_filter_keys: u32,
-    pub(crate) sst_codec: Box<dyn SsTableInfoCodec>,
-    pub(crate) filter_bits_per_key: u32,
-    pub(crate) compression_codec: Option<CompressionCodec>,
-    pub(crate) block_transformer: Option<Arc<dyn BlockTransformer>>,
-}
-
-impl Default for SsTableFormat {
-    fn default() -> Self {
-        Self {
-            block_size: 4096,
-            min_filter_keys: 0,
-            sst_codec: Box::new(FlatBufferSsTableInfoCodec {}),
-            filter_bits_per_key: 10,
-            compression_codec: None,
-            block_transformer: None,
-        }
-    }
-}
+// Re-export for backwards compatibility
+pub(crate) use crate::format::sst::{BlockTransformer, EncodedSsTable, SsTableFormat};
 
 impl SsTableFormat {
-    pub(crate) async fn read_info(
-        &self,
-        obj: &impl ReadOnlyBlob,
-    ) -> Result<SsTableInfo, SlateDBError> {
-        let obj_len = obj.len().await?;
-        if obj_len <= NUM_FOOTER_BYTES_LONG {
-            return Err(SlateDBError::EmptySSTable);
-        }
-        // Get the size of the metadata
-        let header = obj
-            .read_range((obj_len - NUM_FOOTER_BYTES_LONG)..obj_len)
-            .await?;
-        assert!(header.len() == NUM_FOOTER_BYTES);
-
-        // Last 2 bytes of the header represent the version
-        let version = header.slice(8..NUM_FOOTER_BYTES).get_u16();
-        // TODO: Support older and newer versions
-        if version != SST_FORMAT_VERSION {
-            return Err(SlateDBError::InvalidVersion {
-                expected_version: SST_FORMAT_VERSION,
-                actual_version: version,
-            });
-        }
-
-        // First 8 bytes of the header represent the metadata offset
-        let sst_metadata_offset = header.slice(0..8).get_u64();
-        let sst_metadata_bytes = obj
-            .read_range(sst_metadata_offset..obj_len - NUM_FOOTER_BYTES_LONG)
-            .await?;
-        SsTableInfo::decode(sst_metadata_bytes, &*self.sst_codec)
-    }
-
-    pub(crate) async fn read_filter(
-        &self,
-        info: &SsTableInfo,
-        obj: &impl ReadOnlyBlob,
-    ) -> Result<Option<Arc<BloomFilter>>, SlateDBError> {
-        let mut filter = None;
-        if info.filter_len > 0 {
-            let filter_end = info.filter_offset + info.filter_len;
-            let filter_offset_range = info.filter_offset..filter_end;
-            let filter_bytes = obj.read_range(filter_offset_range).await?;
-            let compression_codec = info.compression_codec;
-            filter = Some(Arc::new(
-                self.decode_filter(filter_bytes, compression_codec).await?,
-            ));
-        }
-        Ok(filter)
-    }
-
-    #[allow(dead_code)]
-    pub(crate) async fn read_filter_raw(
-        &self,
-        info: &SsTableInfo,
-        sst_bytes: &Bytes,
-    ) -> Result<Option<Arc<BloomFilter>>, SlateDBError> {
-        if info.filter_len == 0 {
-            return Ok(None);
-        }
-        let filter_end = info.filter_offset + info.filter_len;
-        let filter_offset_range = info.filter_offset as usize..filter_end as usize;
-        let filter_bytes = sst_bytes.slice(filter_offset_range);
-        let compression_codec = info.compression_codec;
-        Ok(Some(Arc::new(
-            self.decode_filter(filter_bytes, compression_codec).await?,
-        )))
-    }
-
-    pub(crate) async fn decode_filter(
-        &self,
-        bytes: Bytes,
-        compression_codec: Option<CompressionCodec>,
-    ) -> Result<BloomFilter, SlateDBError> {
-        let filter_bytes = self.validate_checksum(bytes)?;
-
-        let untransformed_bytes = match &self.block_transformer {
-            Some(t) => t
-                .decode(filter_bytes)
-                .await
-                .map_err(|_| SlateDBError::BlockTransformError)?,
-            None => filter_bytes,
-        };
-        let decompressed_bytes = match compression_codec {
-            Some(c) => Self::decompress(untransformed_bytes, c)?,
-            None => untransformed_bytes,
-        };
-
-        Ok(BloomFilter::decode(&decompressed_bytes))
-    }
-
-    pub(crate) async fn read_index(
-        &self,
-        info: &SsTableInfo,
-        obj: &impl ReadOnlyBlob,
-    ) -> Result<SsTableIndexOwned, SlateDBError> {
-        let index_off = info.index_offset;
-        let index_end = index_off + info.index_len;
-        let index_bytes = obj.read_range(index_off..index_end).await?;
-        let compression_codec = info.compression_codec;
-        self.decode_index(index_bytes, compression_codec).await
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn read_index_raw(
-        &self,
-        info: &SsTableInfo,
-        sst_bytes: &Bytes,
-    ) -> Result<SsTableIndexOwned, SlateDBError> {
-        let index_off = info.index_offset as usize;
-        let index_end = index_off + info.index_len as usize;
-        let index_bytes: Bytes = sst_bytes.slice(index_off..index_end);
-        let compression_codec = info.compression_codec;
-        self.decode_index(index_bytes, compression_codec).await
-    }
-
-    async fn decode_index(
-        &self,
-        bytes: Bytes,
-        compression_codec: Option<CompressionCodec>,
-    ) -> Result<SsTableIndexOwned, SlateDBError> {
-        let index_bytes = self.validate_checksum(bytes)?;
-
-        let untransformed_bytes = match &self.block_transformer {
-            Some(t) => t
-                .decode(index_bytes)
-                .await
-                .map_err(|_| SlateDBError::BlockTransformError)?,
-            None => index_bytes,
-        };
-        let decompressed_bytes = match compression_codec {
-            Some(c) => Self::decompress(untransformed_bytes, c)?,
-            None => untransformed_bytes,
-        };
-
-        Ok(SsTableIndexOwned::new(decompressed_bytes)?)
-    }
-
-    /// Decompresses the compressed data using the specified compression codec.
-    fn decompress(
-        #[allow(unused_variables)] compressed_data: Bytes,
-        compression_option: CompressionCodec,
-    ) -> Result<Bytes, SlateDBError> {
-        match compression_option {
-            #[cfg(feature = "snappy")]
-            CompressionCodec::Snappy => Ok(Bytes::from(
-                snap::raw::Decoder::new()
-                    .decompress_vec(&compressed_data)
-                    .map_err(|_| SlateDBError::BlockDecompressionError)?,
-            )),
-            #[cfg(feature = "zlib")]
-            CompressionCodec::Zlib => {
-                let mut decoder = flate2::read::ZlibDecoder::new(&compressed_data[..]);
-                let mut decompressed = Vec::new();
-                decoder
-                    .read_to_end(&mut decompressed)
-                    .map_err(|_| SlateDBError::BlockDecompressionError)?;
-                Ok(Bytes::from(decompressed))
-            }
-            #[cfg(feature = "lz4")]
-            CompressionCodec::Lz4 => {
-                let decompressed = lz4_flex::block::decompress_size_prepended(&compressed_data)
-                    .map_err(|_| SlateDBError::BlockDecompressionError)?;
-                Ok(Bytes::from(decompressed))
-            }
-            #[cfg(feature = "zstd")]
-            CompressionCodec::Zstd => {
-                let decompressed = zstd::stream::decode_all(&compressed_data[..])
-                    .map_err(|_| SlateDBError::BlockDecompressionError)?;
-                Ok(Bytes::from(decompressed))
-            }
-        }
-    }
-
-    fn block_range(
-        &self,
-        blocks: Range<usize>,
-        info: &SsTableInfo,
-        index: &SsTableIndex,
-    ) -> Range<u64> {
-        let mut end_offset = info.filter_offset;
-        if blocks.end < index.block_meta().len() {
-            let next_block_meta = index.block_meta().get(blocks.end);
-            end_offset = next_block_meta.offset();
-        }
-        let start_offset = index.block_meta().get(blocks.start).offset();
-        start_offset..end_offset
-    }
-
-    pub(crate) async fn read_blocks(
-        &self,
-        info: &SsTableInfo,
-        index_owned: &SsTableIndexOwned,
-        blocks: Range<usize>,
-        obj: &impl ReadOnlyBlob,
-    ) -> Result<VecDeque<Block>, SlateDBError> {
-        let index = index_owned.borrow();
-        assert!(blocks.start <= blocks.end);
-        assert!(blocks.end <= index.block_meta().len());
-        if blocks.start == blocks.end {
-            return Ok(VecDeque::new());
-        }
-        let range = self.block_range(blocks.clone(), info, &index);
-        let start_range = range.start;
-        let bytes: Bytes = obj.read_range(range).await?;
-        let mut decoded_blocks = VecDeque::new();
-        let compression_codec = info.compression_codec;
-        for block in blocks {
-            let block_meta = index.block_meta().get(block);
-            let block_bytes_start = usize::try_from(block_meta.offset() - start_range).expect(
-                "attempted to read byte data with size \
-                larger than 32 bits on a 32-bit system",
-            );
-            let block_bytes = if block == index.block_meta().len() - 1 {
-                bytes.slice(block_bytes_start..)
-            } else {
-                let next_block_meta = index.block_meta().get(block + 1);
-                let block_bytes_end = usize::try_from(next_block_meta.offset() - start_range)
-                    .expect(
-                        "attempted to read byte data with size \
-                        larger than 32 bits on a 32-bit system",
-                    );
-                bytes.slice(block_bytes_start..block_bytes_end)
-            };
-            decoded_blocks.push_back(self.decode_block(block_bytes, compression_codec).await?);
-        }
-        Ok(decoded_blocks)
-    }
-
-    async fn decode_block(
-        &self,
-        bytes: Bytes,
-        compression_codec: Option<CompressionCodec>,
-    ) -> Result<Block, SlateDBError> {
-        let block_bytes = self.validate_checksum(bytes)?;
-        let untransformed_bytes = match &self.block_transformer {
-            Some(t) => t
-                .decode(block_bytes)
-                .await
-                .map_err(|_| SlateDBError::BlockTransformError)?,
-            None => block_bytes,
-        };
-        let decompressed_bytes = match compression_codec {
-            Some(c) => Self::decompress(untransformed_bytes, c)?,
-            None => untransformed_bytes,
-        };
-
-        Ok(Block::decode(decompressed_bytes))
-    }
-
-    pub(crate) async fn read_block(
-        &self,
-        info: &SsTableInfo,
-        index: &SsTableIndexOwned,
-        block: usize,
-        obj: &impl ReadOnlyBlob,
-    ) -> Result<Block, SlateDBError> {
-        let mut blocks = self.read_blocks(info, index, block..block + 1, obj).await?;
-        Ok(blocks.pop_front().expect("expected a block to be returned"))
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn read_block_raw(
-        &self,
-        info: &SsTableInfo,
-        index_owned: &SsTableIndexOwned,
-        block: usize,
-        sst_bytes: &Bytes,
-    ) -> Result<Block, SlateDBError> {
-        let index = index_owned.borrow();
-        let range = self.block_range(block..block + 1, info, &index);
-        let range = range.start as usize..range.end as usize;
-        let bytes: Bytes = sst_bytes.slice(range);
-        let compression_codec = info.compression_codec;
-        self.decode_block(bytes, compression_codec).await
-    }
-
     pub(crate) fn table_builder(&self) -> EncodedSsTableBuilder<'_> {
-        EncodedSsTableBuilder::new(
+        let mut builder = EncodedSsTableBuilder::new(
             self.block_size,
             self.min_filter_keys,
             self.sst_codec.clone(),
             self.filter_bits_per_key,
-            self.compression_codec,
-            self.block_transformer.clone(),
-        )
-    }
-
-    /// validate checksum and return the actual data bytes
-    fn validate_checksum(&self, bytes: Bytes) -> Result<Bytes, SlateDBError> {
-        let checksum_sz = std::mem::size_of::<u32>();
-        let data_bytes = bytes.slice(..bytes.len() - checksum_sz);
-        let mut checksum_bytes = bytes.slice(bytes.len() - checksum_sz..);
-        let checksum = crc32fast::hash(&data_bytes);
-        let stored_checksum = checksum_bytes.get_u32();
-        if checksum != stored_checksum {
-            return Err(SlateDBError::ChecksumMismatch);
+        );
+        if let Some(codec) = self.compression_codec {
+            builder = builder.with_compression_codec(codec);
         }
-        Ok(data_bytes)
-    }
-
-    /// The function estimates the size of the SST (Sorted String Table) without considering compression effects.
-    pub(crate) fn estimate_encoded_size(
-        &self,
-        entry_num: usize,
-        estimated_entries_size: usize,
-    ) -> usize {
-        if entry_num == 0 {
-            return 0;
+        if let Some(ref transformer) = self.block_transformer {
+            builder = builder.with_block_transformer(transformer.clone());
         }
-
-        let entries_size_encoded =
-            row_codec::SstRowCodecV0::estimate_encoded_size(entry_num, estimated_entries_size);
-
-        // estimate sum of Block
-        let number_of_blocks = usize::div_ceil(entries_size_encoded, self.block_size);
-        let mut ans =
-            Block::estimate_encoded_size(entry_num, entries_size_encoded, number_of_blocks);
-
-        // estimate sum of BloomFilter
-        if entry_num >= self.min_filter_keys as usize {
-            ans += BloomFilter::estimate_encoded_size(entry_num as u32, self.filter_bits_per_key);
-        }
-
-        // estimate sum of Index
-        let guess_at_average_first_key_size_bytes = 12;
-        ans += (number_of_blocks * guess_at_average_first_key_size_bytes + OFFSET_SIZE)
-            + CHECKSUM_SIZE;
-
-        // estimate sum of Metadata
-        ans += guess_at_average_first_key_size_bytes + 4 * SIZEOF_U64 + SIZEOF_U16;
-
-        ans += METADATA_OFFSET_SIZE + VERSION_SIZE;
-
-        ans
-    }
-}
-
-impl SsTableInfo {
-    pub(crate) fn encode(info: &SsTableInfo, buf: &mut Vec<u8>, sst_codec: &dyn SsTableInfoCodec) {
-        let data = &sst_codec.encode(info);
-        buf.extend_from_slice(data);
-        buf.put_u32(crc32fast::hash(data));
-    }
-
-    pub(crate) fn decode(
-        raw_info: Bytes,
-        sst_codec: &dyn SsTableInfoCodec,
-    ) -> Result<SsTableInfo, SlateDBError> {
-        if raw_info.len() <= 4 {
-            return Err(SlateDBError::EmptyBlockMeta);
-        }
-        let data = raw_info.slice(..raw_info.len() - 4).clone();
-        let checksum = raw_info.slice(raw_info.len() - 4..).get_u32();
-        if checksum != crc32fast::hash(&data) {
-            return Err(SlateDBError::ChecksumMismatch);
-        }
-
-        let info = sst_codec.decode(&data)?;
-        Ok(info)
-    }
-}
-
-pub(crate) struct EncodedSsTableBlock {
-    pub(crate) offset: u64,
-    pub(crate) block: Block,
-    pub(crate) encoded_bytes: Bytes,
-}
-
-impl EncodedSsTableBlock {
-    pub(crate) fn len(&self) -> usize {
-        self.encoded_bytes.len()
-    }
-}
-
-pub(crate) struct EncodedSsTable {
-    pub(crate) info: SsTableInfo,
-    pub(crate) index: SsTableIndexOwned,
-    pub(crate) filter: Option<Arc<BloomFilter>>,
-    pub(crate) unconsumed_blocks: VecDeque<EncodedSsTableBlock>,
-    pub(crate) footer: Bytes,
-}
-
-impl EncodedSsTable {
-    pub(crate) fn put_remaining<T: BufMut>(&self, buf: &mut T) {
-        for chunk in self.unconsumed_blocks.iter() {
-            buf.put_slice(chunk.encoded_bytes.as_ref())
-        }
-        buf.put_slice(self.footer.as_ref());
-    }
-
-    pub(crate) fn remaining_as_bytes(&self) -> Bytes {
-        let total_size = self
-            .unconsumed_blocks
-            .iter()
-            .map(|chunk| chunk.encoded_bytes.len())
-            .sum::<usize>()
-            + self.footer.len();
-        let mut data = Vec::<u8>::with_capacity(total_size);
-        self.put_remaining(&mut data);
-        Bytes::from(data)
+        builder
     }
 }
 
@@ -530,8 +116,6 @@ impl EncodedSsTableBuilder<'_> {
         min_filter_keys: u32,
         sst_codec: Box<dyn SsTableInfoCodec>,
         filter_bits_per_key: u32,
-        compression_codec: Option<CompressionCodec>,
-        block_transformer: Option<Arc<dyn BlockTransformer>>,
     ) -> Self {
         Self {
             current_len: 0,
@@ -547,49 +131,21 @@ impl EncodedSsTableBuilder<'_> {
             filter_builder: BloomFilterBuilder::new(filter_bits_per_key),
             index_builder: flatbuffers::FlatBufferBuilder::new(),
             sst_codec,
-            compression_codec,
-            block_transformer,
+            compression_codec: None,
+            block_transformer: None,
         }
     }
 
-    /// Compresses the data using the specified compression codec.
-    fn compress(
-        #[allow(unused_variables)] data: Bytes,
-        c: CompressionCodec,
-    ) -> Result<Bytes, SlateDBError> {
-        match c {
-            #[cfg(feature = "snappy")]
-            CompressionCodec::Snappy => {
-                let compressed = snap::raw::Encoder::new()
-                    .compress_vec(&data)
-                    .map_err(|_| SlateDBError::BlockCompressionError)?;
-                Ok(Bytes::from(compressed))
-            }
-            #[cfg(feature = "zlib")]
-            CompressionCodec::Zlib => {
-                let mut encoder =
-                    flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
-                encoder
-                    .write_all(&data)
-                    .map_err(|_| SlateDBError::BlockCompressionError)?;
-                Ok(Bytes::from(
-                    encoder
-                        .finish()
-                        .map_err(|_| SlateDBError::BlockCompressionError)?,
-                ))
-            }
-            #[cfg(feature = "lz4")]
-            CompressionCodec::Lz4 => {
-                let compressed = lz4_flex::block::compress_prepend_size(&data);
-                Ok(Bytes::from(compressed))
-            }
-            #[cfg(feature = "zstd")]
-            CompressionCodec::Zstd => {
-                let compressed = zstd::bulk::compress(&data, 3)
-                    .map_err(|_| SlateDBError::BlockCompressionError)?;
-                Ok(Bytes::from(compressed))
-            }
-        }
+    /// Sets the compression codec for compressing the blocks
+    fn with_compression_codec(mut self, codec: CompressionCodec) -> Self {
+        self.compression_codec = Some(codec);
+        self
+    }
+
+    /// Sets the block transformer for transforming the blocks
+    fn with_block_transformer(mut self, transformer: Arc<dyn BlockTransformer>) -> Self {
+        self.block_transformer = Some(transformer);
+        self
     }
 
     /// Adds an entry to the SSTable and returns the size of the block that was finished if any.
@@ -615,7 +171,7 @@ impl EncodedSsTableBuilder<'_> {
         }
         self.current_block_max_key = Some(entry.key.clone());
 
-        assert!(self.builder.add(entry));
+        self.builder.add(entry)?;
 
         Ok(block_size)
     }
@@ -654,7 +210,14 @@ impl EncodedSsTableBuilder<'_> {
 
         let new_builder = BlockBuilder::new(self.block_size);
         let builder = std::mem::replace(&mut self.builder, new_builder);
-        let block = self.prepare_block(builder, self.current_len).await?;
+        let mut block_builder = EncodedSsTableBlockBuilder::new(builder, self.current_len);
+        if let Some(codec) = self.compression_codec {
+            block_builder = block_builder.with_compression_codec(codec);
+        }
+        if let Some(transformer) = self.block_transformer.clone() {
+            block_builder = block_builder.with_block_transformer(transformer);
+        }
+        let block = block_builder.build().await?;
         let block_meta = BlockMeta::create(
             &mut self.index_builder,
             &BlockMetaArgs {
@@ -670,37 +233,6 @@ impl EncodedSsTableBuilder<'_> {
         self.first_key = None;
 
         Ok(Some(block_size))
-    }
-
-    async fn prepare_block(
-        &mut self,
-        builder: BlockBuilder,
-        offset: u64,
-    ) -> Result<EncodedSsTableBlock, SlateDBError> {
-        let block = builder.build()?;
-        let encoded_block = block.encode();
-        let compressed_block = match self.compression_codec {
-            Some(c) => Self::compress(encoded_block, c)?,
-            None => encoded_block,
-        };
-        let transformed_block = match &self.block_transformer {
-            Some(t) => t
-                .encode(compressed_block)
-                .await
-                .map_err(|_| SlateDBError::BlockTransformError)?,
-            None => compressed_block,
-        };
-        let checksum = crc32fast::hash(&transformed_block);
-        let total_block_size = transformed_block.len() + std::mem::size_of::<u32>();
-        let mut encoded_bytes = Vec::with_capacity(total_block_size);
-        encoded_bytes.put(transformed_block);
-        encoded_bytes.put_u32(checksum);
-        let sst_block = EncodedSsTableBlock {
-            offset,
-            block,
-            encoded_bytes: Bytes::from(encoded_bytes),
-        };
-        Ok(sst_block)
     }
 
     /// Builds the SST from the current state.
@@ -736,81 +268,37 @@ impl EncodedSsTableBuilder<'_> {
     ///
     pub(crate) async fn build(mut self) -> Result<EncodedSsTable, SlateDBError> {
         self.finish_block().await?;
-        let mut buf = Vec::new();
-        let mut maybe_filter = None;
-        let mut filter_len = 0;
-        let filter_offset = self.current_len + buf.len() as u64;
+
+        // Build footer (includes index building)
+        let mut footer_builder = EncodedSsTableFooterBuilder::new(
+            self.current_len,
+            self.sst_first_key,
+            &*self.sst_codec,
+            self.index_builder,
+            self.block_meta,
+        );
+        if let Some(codec) = self.compression_codec {
+            footer_builder = footer_builder.with_compression_codec(codec);
+        }
+        if let Some(transformer) = self.block_transformer.clone() {
+            footer_builder = footer_builder.with_block_transformer(transformer);
+        }
+
+        // Add filter if enough keys
         if self.num_keys >= self.min_filter_keys {
             let filter = Arc::new(self.filter_builder.build());
             let encoded_filter = filter.encode();
-            let compressed_filter = match self.compression_codec {
-                None => encoded_filter,
-                Some(c) => Self::compress(encoded_filter, c)?,
-            };
-            let transformed_filter = match &self.block_transformer {
-                Some(t) => t
-                    .encode(compressed_filter)
-                    .await
-                    .map_err(|_| SlateDBError::BlockTransformError)?,
-                None => compressed_filter,
-            };
-            let checksum = crc32fast::hash(&transformed_filter);
-            filter_len = transformed_filter.len() + std::mem::size_of::<u32>();
-            buf.put(transformed_filter);
-            buf.put_u32(checksum);
-            maybe_filter = Some(filter);
+            footer_builder = footer_builder.with_filter(filter, encoded_filter);
         }
 
-        // write the index block
-        let vector = self.index_builder.create_vector(&self.block_meta);
-        let index_wip = SsTableIndex::create(
-            &mut self.index_builder,
-            &SsTableIndexArgs {
-                block_meta: Some(vector),
-            },
-        );
-        self.index_builder.finish(index_wip, None);
-        let index_block = Bytes::from(self.index_builder.finished_data().to_vec());
-        let index = SsTableIndexOwned::new(index_block.clone())?;
-        let index_block = match self.compression_codec {
-            None => index_block,
-            Some(c) => Self::compress(index_block, c)?,
-        };
-        let index_block = match &self.block_transformer {
-            Some(t) => t
-                .encode(index_block)
-                .await
-                .map_err(|_| SlateDBError::BlockTransformError)?,
-            None => index_block,
-        };
-        let checksum = crc32fast::hash(&index_block);
-        let index_offset = self.current_len + buf.len() as u64;
-        let index_len = index_block.len() + std::mem::size_of::<u32>();
-        buf.put(index_block);
-        buf.put_u32(checksum);
+        let footer = footer_builder.build().await?;
 
-        let meta_offset = self.current_len + buf.len() as u64;
-        let info = SsTableInfo {
-            first_key: self.sst_first_key,
-            index_offset,
-            index_len: index_len as u64,
-            filter_offset,
-            filter_len: filter_len as u64,
-            compression_codec: self.compression_codec,
-        };
-        SsTableInfo::encode(&info, &mut buf, &*self.sst_codec);
-
-        // write the metadata offset at the end of the file. FlatBuffer internal
-        // representation is not intended to be used directly.
-        buf.put_u64(meta_offset);
-        // write the version at the end of the file.
-        buf.put_u16(SST_FORMAT_VERSION);
         Ok(EncodedSsTable {
-            info,
-            index,
-            filter: maybe_filter,
+            info: footer.info,
+            index: footer.index,
+            filter: footer.filter,
             unconsumed_blocks: self.blocks,
-            footer: Bytes::from(buf),
+            footer: footer.encoded_bytes,
         })
     }
 
@@ -822,20 +310,23 @@ impl EncodedSsTableBuilder<'_> {
 #[cfg(test)]
 mod tests {
     use rstest::rstest;
+    use std::ops::Range;
 
-    use std::sync::Arc;
-    use std::vec;
-
-    use bytes::BytesMut;
+    use async_trait::async_trait;
+    use bytes::{BufMut, BytesMut};
     use object_store::memory::InMemory;
     use object_store::path::Path;
     use object_store::ObjectStore;
+    use std::sync::Arc;
+    use std::vec;
 
     use super::*;
+    use crate::blob::ReadOnlyBlob;
     use crate::block_iterator::BlockIterator;
     use crate::bytes_range::BytesRange;
     use crate::db_state::SsTableId;
     use crate::filter::filter_hash;
+    use crate::format::block::Block;
     use crate::iter::IterationOrder::Ascending;
     use crate::object_stores::ObjectStores;
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
@@ -847,27 +338,27 @@ mod tests {
         let mut format = SsTableFormat::default();
 
         // Test with zero entries
-        assert_eq!(format.estimate_encoded_size(0, 0), 0);
+        assert_eq!(format.estimate_encoded_size_compacted(0, 0), 0);
 
         // Test with one entry
         let encoded_entry_size = 100;
-        let size = format.estimate_encoded_size(1, encoded_entry_size);
+        let size = format.estimate_encoded_size_compacted(1, encoded_entry_size);
         assert!(size > 0);
 
         // Test with multiple entries with not trigger bloom filter
         format.min_filter_keys = 1000;
         let num_entries = 100;
         let total_size = encoded_entry_size * num_entries;
-        let size = format.estimate_encoded_size(num_entries, total_size);
+        let size = format.estimate_encoded_size_compacted(num_entries, total_size);
         assert!(size > total_size); // Should be larger due to overhead
 
         // Test with entries that should trigger bloom filter
         let num_entries = format.min_filter_keys as usize * 10;
         let total_size = encoded_entry_size * num_entries;
-        let size_with_filter = format.estimate_encoded_size(num_entries, total_size);
+        let size_with_filter = format.estimate_encoded_size_compacted(num_entries, total_size);
         format.min_filter_keys = format.min_filter_keys * 10 + 1;
         let size_without_filter =
-            format.estimate_encoded_size(num_entries, encoded_entry_size * num_entries);
+            format.estimate_encoded_size_compacted(num_entries, encoded_entry_size * num_entries);
         assert!(size_with_filter > size_without_filter); // Should be larger due to bloom filter
     }
 
@@ -1074,8 +565,8 @@ mod tests {
         let sst_info = sst_handle.info;
         assert_eq!(
             b"key1",
-            sst_info.first_key.unwrap().as_ref(),
-            "first key in sst info should be correct"
+            sst_info.first_entry.unwrap().as_ref(),
+            "first entry in sst info should be correct"
         );
 
         // construct sst info from the raw bytes and validate that it matches the original info.
@@ -1089,8 +580,8 @@ mod tests {
         assert_eq!(1, index.borrow().block_meta().len());
         assert_eq!(
             b"key1",
-            sst_info_from_store.first_key.unwrap().as_ref(),
-            "first key in sst info should be correct after reading from store"
+            sst_info_from_store.first_entry.unwrap().as_ref(),
+            "first entry in sst info should be correct after reading from store"
         );
         assert_eq!(
             b"",
@@ -1156,8 +647,8 @@ mod tests {
         assert_eq!(1, index.borrow().block_meta().len());
         assert_eq!(
             b"key1",
-            sst_handle.info.first_key.unwrap().as_ref(),
-            "first key in sst info should be correct"
+            sst_handle.info.first_entry.unwrap().as_ref(),
+            "first entry in sst info should be correct"
         );
     }
 
@@ -1237,8 +728,8 @@ mod tests {
         assert_eq!(1, index.borrow().block_meta().len());
         assert_eq!(
             b"key1",
-            sst_handle.info.first_key.unwrap().as_ref(),
-            "first key in sst info should be correct"
+            sst_handle.info.first_entry.unwrap().as_ref(),
+            "first entry in sst info should be correct"
         );
     }
 
@@ -1356,8 +847,8 @@ mod tests {
         let sst_info = sst_handle.info;
         assert_eq!(
             b"key1",
-            sst_info.first_key.unwrap().as_ref(),
-            "first key in sst info should be correct"
+            sst_info.first_entry.unwrap().as_ref(),
+            "first entry in sst info should be correct"
         );
 
         // construct sst info from the raw bytes and validate that it matches the original info.
@@ -1611,8 +1102,8 @@ mod tests {
         assert_eq!(1, index.borrow().block_meta().len());
         assert_eq!(
             b"key1",
-            sst_handle.info.first_key.unwrap().as_ref(),
-            "first key in sst info should be correct"
+            sst_handle.info.first_entry.unwrap().as_ref(),
+            "first entry in sst info should be correct"
         );
     }
 
@@ -1659,8 +1150,8 @@ mod tests {
         assert_eq!(1, index.borrow().block_meta().len());
         assert_eq!(
             b"key1",
-            sst_handle.info.first_key.unwrap().as_ref(),
-            "first key in sst info should be correct with compression + transformer"
+            sst_handle.info.first_entry.unwrap().as_ref(),
+            "first entry in sst info should be correct with compression + transformer"
         );
     }
 }

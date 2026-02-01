@@ -192,9 +192,9 @@ use uuid::Uuid;
 use crate::error::SlateDBError;
 
 use crate::db_cache::DbCache;
+use crate::format::sst::BlockTransformer;
 use crate::garbage_collector::{DEFAULT_INTERVAL, DEFAULT_MIN_AGE};
 use crate::merge_operator::MergeOperatorType;
-use crate::sst::BlockTransformer;
 
 /// Enum representing different levels of cache preloading on startup
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq)]
@@ -713,8 +713,8 @@ impl std::fmt::Debug for Settings {
                     .as_ref()
                     .map(|_| "Some(merge_operator)")
                     .unwrap_or("None"),
-            )
-            .finish()
+            );
+        data.finish()
     }
 }
 
@@ -941,6 +941,17 @@ pub struct DbReaderOptions {
     /// Can be used for encryption, custom encoding, etc.
     #[serde(skip)]
     pub block_transformer: Option<Arc<dyn BlockTransformer>>,
+
+    /// When true, skip WAL replay entirely. The reader will only see data that has been
+    /// compacted into L0 or lower levels. This is useful for read-heavy workloads that
+    /// don't need to see the most recent uncommitted writes and want to minimize the
+    /// cost of opening many readers.
+    ///
+    /// When combined with manifest polling (no explicit checkpoint), the reader will
+    /// still see newly compacted data as manifests are updated.
+    ///
+    /// Defaults to false.
+    pub skip_wal_replay: bool,
 }
 
 impl Default for DbReaderOptions {
@@ -952,6 +963,7 @@ impl Default for DbReaderOptions {
             block_cache: default_block_cache(),
             merge_operator: None,
             block_transformer: None,
+            skip_wal_replay: false,
         }
     }
 }

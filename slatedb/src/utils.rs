@@ -1,8 +1,12 @@
+use crate::block_iterator::BlockIterator;
 use crate::clock::MonotonicClock;
 use crate::config::DurabilityLevel;
 use crate::config::DurabilityLevel::{Memory, Remote};
 use crate::db_state::SortedRun;
+use crate::db_state::SsTableHandle;
 use crate::error::SlateDBError;
+use crate::iter::{IterationOrder, KeyValueIterator};
+use crate::tablestore::TableStore;
 use crate::types::RowEntry;
 use bytes::{BufMut, Bytes};
 use futures::FutureExt;
@@ -111,6 +115,7 @@ where
     handle.spawn(wrapped)
 }
 
+#[allow(dead_code)] // unused during DST
 pub(crate) async fn get_now_for_read(
     mono_clock: Arc<MonotonicClock>,
     durability_level: DurabilityLevel,
@@ -156,6 +161,45 @@ pub(crate) fn merge_options<T>(
         (None, next) => next,
         (current, None) => current,
     }
+}
+
+/// Determines the last key and sequence number written by an output SST.
+///
+/// ## Arguments
+/// - `table_store`: Table store for reading the SST index and blocks.
+/// - `output_sst`: Output SST already written for a compaction being resumed.
+///
+/// ## Returns
+/// - `Ok(Some((Bytes, u64)))`: last key and sequence number from the final block.
+/// - `Ok(None)`: when the SST contains no data blocks.
+///
+/// ## Errors
+/// - `SlateDBError`: if reading the index or blocks fails.
+pub(crate) async fn last_written_key_and_seq(
+    table_store: Arc<TableStore>,
+    output_sst: &SsTableHandle,
+) -> Result<Option<(Bytes, u64)>, SlateDBError> {
+    let index = table_store.read_index(output_sst, false).await?;
+    let num_blocks = index.borrow().block_meta().len();
+    if num_blocks == 0 {
+        return Ok(None);
+    }
+    let last_block_idx = num_blocks - 1;
+    let mut blocks = table_store
+        .read_blocks_using_index(output_sst, index, last_block_idx..last_block_idx + 1, false)
+        .await?;
+    let Some(block) = blocks.pop_front() else {
+        return Ok(None);
+    };
+
+    // Sort descending so we get the last row from the last block, which
+    // should be the last written key/seq.
+    let mut block_iter = BlockIterator::new(block, IterationOrder::Descending);
+    block_iter.init().await?;
+    Ok(block_iter
+        .next_entry()
+        .await?
+        .map(|entry| (entry.key, entry.seq)))
 }
 
 fn bytes_into_minimal_vec(bytes: &Bytes) -> Vec<u8> {
@@ -437,6 +481,37 @@ pub(crate) fn compute_max_parallel(l0_count: usize, srs: &[SortedRun], cap: usiz
     total_ssts.min(cap).max(1)
 }
 
+/// Estimate the total number of bytes before `key` across sorted runs.
+///
+/// This is a best-effort estimate based on SST boundaries and metadata-only
+/// size estimates; it does not read SST contents. For exmple, if we have:
+///
+/// - Run 1: SSTs [a (10 bytes), k (20 bytes), z (30 bytes)]
+/// - Run 2: SSTs [b (40 bytes), f (50 bytes)]
+///
+/// and we call `estimate_bytes_before_key` with `key = "m"`, the result will be:
+///
+/// - From Run 1: SST "a" (10 bytes) is before "m", SST "k" and "z" are after because
+///   k < m < z.
+/// - From Run 2: SST "b" (40 bytes) is before "m", SST "f" is after because
+///   f < m and it's the last SST.
+pub(crate) fn estimate_bytes_before_key(sorted_runs: &[SortedRun], key: &Bytes) -> u64 {
+    sorted_runs
+        .iter()
+        .map(|sorted_run| {
+            let Some(idx) = sorted_run.find_sst_with_range_covering_key_idx(key) else {
+                return 0;
+            };
+            sorted_run
+                .ssts
+                .iter()
+                .take(idx)
+                .map(|sst| sst.estimate_size())
+                .sum::<u64>()
+        })
+        .sum()
+}
+
 /// Concurrently build items with a bounded level of parallelism.
 ///
 /// This function maps each input to an async task using the provided factory `f`,
@@ -540,7 +615,7 @@ pub(crate) fn split_unwind_result(
     Option<Box<dyn std::any::Any + Send>>,
 ) {
     match unwind_result {
-        Ok(result) => (result.clone(), None),
+        Ok(result) => (result, None),
         Err(payload) => (Err(SlateDBError::BackgroundTaskPanic(name)), Some(payload)),
     }
 }
@@ -569,7 +644,7 @@ pub(crate) fn split_join_result(
     Option<Box<dyn std::any::Any + Send>>,
 ) {
     match join_result {
-        Ok(task_result) => (task_result.clone(), None),
+        Ok(task_result) => (task_result, None),
         Err(join_error) => {
             if join_error.is_cancelled() {
                 (Err(SlateDBError::BackgroundTaskCancelled(name)), None)
@@ -614,25 +689,79 @@ pub(crate) fn format_bytes_si(bytes: u64) -> String {
     format!("{:.2} {}", value, UNITS[unit_index])
 }
 
+// ============================================================================
+// Varint encoding (LEB128)
+// ============================================================================
+
+/// Encode a u32 value using LEB128 varint encoding.
+///
+/// LEB128 (Little Endian Base 128) encodes integers in 7-bit groups,
+/// using the high bit as a continuation flag. This allows small values
+/// to be encoded in fewer bytes (e.g., values < 128 use only 1 byte).
+#[allow(dead_code)]
+pub(crate) fn encode_varint(buf: &mut Vec<u8>, mut value: u32) {
+    while value >= 0x80 {
+        buf.push((value as u8) | 0x80);
+        value >>= 7;
+    }
+    buf.push(value as u8);
+}
+
+/// Decode a u32 value using LEB128 varint encoding.
+///
+/// Reads bytes from the buffer, advancing the slice, until a byte
+/// without the continuation bit (high bit = 0) is found.
+#[allow(dead_code)]
+pub(crate) fn decode_varint(buf: &mut &[u8]) -> u32 {
+    let mut result = 0u32;
+    let mut shift = 0;
+    loop {
+        let byte = buf[0];
+        *buf = &buf[1..];
+        result |= ((byte & 0x7F) as u32) << shift;
+        if byte & 0x80 == 0 {
+            break;
+        }
+        shift += 7;
+    }
+    result
+}
+
+/// Calculate the encoded length of a u32 varint without actually encoding it.
+#[allow(dead_code)]
+pub(crate) fn varint_len(mut value: u32) -> usize {
+    let mut len = 1;
+    while value >= 0x80 {
+        value >>= 7;
+        len += 1;
+    }
+    len
+}
+
 #[cfg(test)]
 mod tests {
     use rstest::rstest;
     use slatedb_common::MockSystemClock;
 
     use crate::clock::MonotonicClock;
+    use crate::db_state::{SortedRun, SsTableHandle, SsTableId, SsTableInfo};
     use crate::error::SlateDBError;
+    use crate::types::RowEntry;
     use crate::utils::{
         build_concurrent, bytes_into_minimal_vec, clamp_allocated_size_bytes, compute_index_key,
-        compute_max_parallel, format_bytes_si, panic_string, spawn_bg_task, BitReader, BitWriter,
-        WatchableOnceCell,
+        compute_max_parallel, estimate_bytes_before_key, format_bytes_si, last_written_key_and_seq,
+        panic_string, spawn_bg_task, BitReader, BitWriter, WatchableOnceCell,
     };
+    use crate::Db;
     use bytes::{BufMut, Bytes, BytesMut};
+    use object_store::memory::InMemory;
     use parking_lot::Mutex;
     use std::any::Any;
     use std::collections::VecDeque;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
     use std::time::Duration;
+    use ulid::Ulid;
 
     struct ResultCaptor<T: Clone> {
         error: Mutex<Option<Result<T, SlateDBError>>>,
@@ -654,6 +783,16 @@ mod tests {
         fn captured(&self) -> Option<Result<T, SlateDBError>> {
             self.error.lock().clone()
         }
+    }
+
+    fn make_compacted_sst(start_key: &str, size: u64) -> SsTableHandle {
+        let info = SsTableInfo {
+            first_entry: Some(Bytes::from(start_key.as_bytes().to_vec())),
+            index_offset: size.saturating_sub(1),
+            index_len: 1,
+            ..Default::default()
+        };
+        SsTableHandle::new_compacted(SsTableId::Compacted(Ulid::new()), info, None)
     }
 
     #[test]
@@ -893,6 +1032,56 @@ mod tests {
         assert_ne!(clamped.as_ptr(), slice.as_ptr());
     }
 
+    #[tokio::test]
+    async fn test_last_written_key_and_seq_from_output_sst() {
+        let os = Arc::new(InMemory::new());
+        let path = "testdb-last-written".to_string();
+        let clock = Arc::new(MockSystemClock::new());
+        let db = Db::builder(path, os.clone())
+            .with_system_clock(clock.clone())
+            .build()
+            .await
+            .unwrap();
+        let table_store = db.inner.table_store.clone();
+
+        let mut sst_builder = table_store.table_builder();
+        sst_builder
+            .add(RowEntry::new_value(b"a", b"1", 1))
+            .await
+            .unwrap();
+        sst_builder
+            .add(RowEntry::new_value(b"b", b"2", 2))
+            .await
+            .unwrap();
+        let encoded_sst = sst_builder.build().await.unwrap();
+        let _sst1 = table_store
+            .write_sst(&SsTableId::Compacted(Ulid::new()), encoded_sst, false)
+            .await
+            .unwrap();
+
+        let mut sst_builder = table_store.table_builder();
+        sst_builder
+            .add(RowEntry::new_value(b"m", b"3", 3))
+            .await
+            .unwrap();
+        sst_builder
+            .add(RowEntry::new_value(b"z", b"4", 4))
+            .await
+            .unwrap();
+        let encoded_sst = sst_builder.build().await.unwrap();
+        let sst2 = table_store
+            .write_sst(&SsTableId::Compacted(Ulid::new()), encoded_sst, false)
+            .await
+            .unwrap();
+
+        let (last_key, last_seq) = last_written_key_and_seq(table_store.clone(), &sst2)
+            .await
+            .unwrap()
+            .expect("missing last entry");
+        assert_eq!(last_key, Bytes::from(b"z".as_slice()));
+        assert_eq!(last_seq, 4);
+    }
+
     #[rstest]
     #[case("alternating_bits", vec![true, false, true, false, true, false, true, false], vec![], vec![], vec![0xAA])]
     #[case("u64_value", vec![], vec![(0xAB, 8)], vec![], vec![0xAB])]
@@ -1040,6 +1229,28 @@ mod tests {
         assert_eq!(compute_max_parallel(10, &[], 8), 8);
         // Clamp to at least 1 even when cap = 0
         assert_eq!(compute_max_parallel(0, &[], 0), 1);
+    }
+
+    #[test]
+    fn test_estimate_bytes_before_key() {
+        let run1 = SortedRun {
+            id: 1,
+            ssts: vec![
+                make_compacted_sst("a", 10),
+                make_compacted_sst("k", 20), // k < m < z, so only "a" counts
+                make_compacted_sst("z", 30),
+            ],
+        };
+        let run2 = SortedRun {
+            id: 2,
+            // f < m < ..., so only "b" counts
+            ssts: vec![make_compacted_sst("b", 40), make_compacted_sst("f", 50)],
+        };
+
+        let key = Bytes::from("m");
+        let total = estimate_bytes_before_key(&[run1, run2], &key);
+
+        assert_eq!(total, 10 + 40);
     }
 
     // Filters out None; collects only Some(T)
@@ -1307,5 +1518,136 @@ mod tests {
                 panic!("expected &str, got {:?}", p);
             }
         }
+    }
+
+    // ============================================================================
+    // Varint (LEB128) encoding tests
+    // ============================================================================
+
+    #[rstest]
+    #[case(0, 1)] // 0 fits in 1 byte
+    #[case(1, 1)] // 1 fits in 1 byte
+    #[case(127, 1)] // max value for 1 byte (0x7F)
+    #[case(128, 2)] // min value requiring 2 bytes (0x80)
+    #[case(16383, 2)] // max value for 2 bytes (0x3FFF)
+    #[case(16384, 3)] // min value requiring 3 bytes (0x4000)
+    #[case(2097151, 3)] // max value for 3 bytes (0x1FFFFF)
+    #[case(2097152, 4)] // min value requiring 4 bytes (0x200000)
+    #[case(268435455, 4)] // max value for 4 bytes (0xFFFFFFF)
+    #[case(268435456, 5)] // min value requiring 5 bytes (0x10000000)
+    #[case(u32::MAX, 5)] // max u32 requires 5 bytes
+    fn should_calculate_varint_len(#[case] value: u32, #[case] expected_len: usize) {
+        // when: calculating the varint length
+        let len = super::varint_len(value);
+
+        // then: the length matches expected
+        assert_eq!(len, expected_len);
+    }
+
+    #[rstest]
+    #[case(0, vec![0x00])]
+    #[case(1, vec![0x01])]
+    #[case(127, vec![0x7F])]
+    #[case(128, vec![0x80, 0x01])]
+    #[case(255, vec![0xFF, 0x01])]
+    #[case(300, vec![0xAC, 0x02])]
+    #[case(16384, vec![0x80, 0x80, 0x01])]
+    #[case(u32::MAX, vec![0xFF, 0xFF, 0xFF, 0xFF, 0x0F])]
+    fn should_encode_varint(#[case] value: u32, #[case] expected: Vec<u8>) {
+        // given: an empty buffer
+        let mut buf = Vec::new();
+
+        // when: encoding the value
+        super::encode_varint(&mut buf, value);
+
+        // then: the encoded bytes match expected
+        assert_eq!(buf, expected);
+    }
+
+    #[rstest]
+    #[case(vec![0x00], 0)]
+    #[case(vec![0x01], 1)]
+    #[case(vec![0x7F], 127)]
+    #[case(vec![0x80, 0x01], 128)]
+    #[case(vec![0xFF, 0x01], 255)]
+    #[case(vec![0xAC, 0x02], 300)]
+    #[case(vec![0x80, 0x80, 0x01], 16384)]
+    #[case(vec![0xFF, 0xFF, 0xFF, 0xFF, 0x0F], u32::MAX)]
+    fn should_decode_varint(#[case] bytes: Vec<u8>, #[case] expected: u32) {
+        // given: a buffer with encoded varint
+        let mut buf: &[u8] = &bytes;
+
+        // when: decoding the value
+        let value = super::decode_varint(&mut buf);
+
+        // then: the decoded value matches expected and buffer is consumed
+        assert_eq!(value, expected);
+        assert!(buf.is_empty());
+    }
+
+    #[rstest]
+    #[case(0)]
+    #[case(1)]
+    #[case(127)]
+    #[case(128)]
+    #[case(255)]
+    #[case(16383)]
+    #[case(16384)]
+    #[case(2097151)]
+    #[case(2097152)]
+    #[case(268435455)]
+    #[case(268435456)]
+    #[case(u32::MAX)]
+    fn should_roundtrip_varint(#[case] value: u32) {
+        // given: an encoded varint
+        let mut buf = Vec::new();
+        super::encode_varint(&mut buf, value);
+
+        // when: decoding it back
+        let mut slice: &[u8] = &buf;
+        let decoded = super::decode_varint(&mut slice);
+
+        // then: the value matches and encoded length is correct
+        assert_eq!(decoded, value);
+        assert!(slice.is_empty());
+        assert_eq!(buf.len(), super::varint_len(value));
+    }
+
+    #[test]
+    fn should_decode_varint_with_trailing_data() {
+        // given: a buffer with varint followed by extra data
+        let bytes = vec![0xAC, 0x02, 0xFF, 0xAB, 0xCD];
+        let mut buf: &[u8] = &bytes;
+
+        // when: decoding the varint
+        let value = super::decode_varint(&mut buf);
+
+        // then: only the varint bytes are consumed
+        assert_eq!(value, 300);
+        assert_eq!(buf, &[0xFF, 0xAB, 0xCD]);
+    }
+
+    #[test]
+    fn should_decode_multiple_varints() {
+        // given: a buffer with multiple varints
+        let mut buf = Vec::new();
+        super::encode_varint(&mut buf, 1);
+        super::encode_varint(&mut buf, 300);
+        super::encode_varint(&mut buf, 16384);
+        super::encode_varint(&mut buf, u32::MAX);
+
+        // when: decoding them sequentially
+        let mut slice: &[u8] = &buf;
+        let v1 = super::decode_varint(&mut slice);
+        let v2 = super::decode_varint(&mut slice);
+        let v3 = super::decode_varint(&mut slice);
+        let v4 = super::decode_varint(&mut slice);
+
+        // then: all values are correctly decoded
+        assert_eq!(v1, 1);
+        assert_eq!(v2, 300);
+        assert_eq!(v3, 16384);
+        assert_eq!(v4, u32::MAX);
+        assert!(slice.is_empty());
     }
 }

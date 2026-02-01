@@ -16,7 +16,7 @@ impl DbInner {
         let meta = guard.memtable().metadata();
         if self
             .table_store
-            .estimate_encoded_size(meta.entry_num, meta.entries_size_in_bytes)
+            .estimate_encoded_size_compacted(meta.entry_num, meta.entries_size_in_bytes)
             < self.settings.l0_sst_size_bytes
         {
             Ok(())

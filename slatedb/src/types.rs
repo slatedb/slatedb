@@ -21,13 +21,20 @@ where
 }
 
 /// Represents a key-value pair that may be a tombstone.
+///
+/// This is the entry type passed to compaction for each key value pair.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct RowEntry {
-    pub(crate) key: Bytes,
-    pub(crate) value: ValueDeletable,
-    pub(crate) seq: u64,
-    pub(crate) create_ts: Option<i64>,
-    pub(crate) expire_ts: Option<i64>,
+pub struct RowEntry {
+    /// The key bytes.
+    pub key: Bytes,
+    /// The value, which may be a regular value, merge operand, or tombstone.
+    pub value: ValueDeletable,
+    /// The sequence number of this entry.
+    pub seq: u64,
+    /// The creation timestamp (if set).
+    pub create_ts: Option<i64>,
+    /// The expiration timestamp (if set).
+    pub expire_ts: Option<i64>,
 }
 
 impl RowEntry {
@@ -149,31 +156,42 @@ pub(crate) struct RowAttributes {
     pub(crate) expire_ts: Option<i64>,
 }
 
-/// Represents a value that may be a tombstone.
-/// Equivalent to `Option<Bytes>`, but used internally
-/// to prevent type confusion between `None` indicating
-/// that a key does not exist, and `Tombstone` indicating
-/// that the key exists but has a tombstone value.
+/// Represents a value for a key.
+///
+/// This enum distinguishes between:
+/// - `Value`: A regular value entry
+/// - `Merge`: A merge operand (used with merge operators)
+/// - `Tombstone`: A deletion marker
+///
+/// Compaction filters receive this type to determine entry type and decide
+/// how to handle each entry.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) enum ValueDeletable {
+pub enum ValueDeletable {
+    /// A regular value.
     Value(Bytes),
+    /// A merge operand (used with merge operators).
     Merge(Bytes),
+    /// A tombstone (deletion marker).
     Tombstone,
 }
 
+#[allow(clippy::len_without_is_empty)]
 impl ValueDeletable {
-    pub(crate) fn len(&self) -> usize {
+    /// Returns the length of the value in bytes, or 0 for tombstones.
+    pub fn len(&self) -> usize {
         match self {
             ValueDeletable::Value(v) | ValueDeletable::Merge(v) => v.len(),
             ValueDeletable::Tombstone => 0,
         }
     }
 
-    pub(crate) fn is_tombstone(&self) -> bool {
+    /// Returns true if this is a tombstone (deletion marker).
+    pub fn is_tombstone(&self) -> bool {
         matches!(self, ValueDeletable::Tombstone)
     }
 
-    pub(crate) fn as_bytes(&self) -> Option<Bytes> {
+    /// Returns the value bytes if this is a Value or Merge, None for Tombstone.
+    pub fn as_bytes(&self) -> Option<Bytes> {
         match self {
             ValueDeletable::Value(v) | ValueDeletable::Merge(v) => Some(v.clone()),
             ValueDeletable::Tombstone => None,
@@ -184,7 +202,7 @@ impl ValueDeletable {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::row_codec::SstRowEntry;
+    use crate::format::row::SstRowEntry;
     use rstest::rstest;
 
     // Tombstone encoding:

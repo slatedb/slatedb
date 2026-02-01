@@ -118,12 +118,12 @@ impl SsTableInfoCodec for FlatBufferSsTableInfoCodec {
 
 impl FlatBufferSsTableInfoCodec {
     pub(crate) fn sst_info(info: &FbSsTableInfo) -> SsTableInfo {
-        let first_key: Option<Bytes> = info
-            .first_key()
-            .map(|key| Bytes::copy_from_slice(key.bytes()));
+        let first_entry: Option<Bytes> = info
+            .first_entry()
+            .map(|entry| Bytes::copy_from_slice(entry.bytes()));
 
         SsTableInfo {
-            first_key,
+            first_entry,
             index_offset: info.index_offset(),
             index_len: info.index_len(),
             filter_offset: info.filter_offset(),
@@ -341,7 +341,13 @@ impl FlatBufferCompactionsCodec {
     fn compaction(compaction: &FbCompaction) -> Result<CompactorCompaction, SlateDBError> {
         let spec = Self::compaction_spec(compaction)?;
         let status = CompactionStatus::from(compaction.status());
-        Ok(CompactorCompaction::new(compaction.id().ulid(), spec).with_status(status))
+        let output_ssts = compaction
+            .output_ssts()
+            .map(|ssts| ssts.iter().map(Self::compacted_sst).collect())
+            .unwrap_or_default();
+        Ok(CompactorCompaction::new(compaction.id().ulid(), spec)
+            .with_status(status)
+            .with_output_ssts(output_ssts))
     }
 
     fn compaction_spec(compaction: &FbCompaction) -> Result<CompactorCompactionSpec, SlateDBError> {
@@ -367,6 +373,15 @@ impl FlatBufferCompactionsCodec {
         }
     }
 
+    fn compacted_sst(compacted_sst: CompactedSsTable) -> SsTableHandle {
+        let id = Compacted(compacted_sst.id().ulid());
+        let info = FlatBufferSsTableInfoCodec::sst_info(&compacted_sst.info());
+        let visible_range = compacted_sst
+            .visible_range()
+            .map(FlatBufferManifestCodec::decode_bytes_range);
+        SsTableHandle::new_compacted(id, info, visible_range)
+    }
+
     pub(crate) fn create_from_compactions(compactions: &CompactorCompactions) -> Bytes {
         let builder = FlatBufferBuilder::new();
         let mut db_fb_builder = DbFlatBufferBuilder::new(builder);
@@ -390,15 +405,15 @@ impl<'b> DbFlatBufferBuilder<'b> {
     }
 
     fn add_sst_info(&mut self, info: &SsTableInfo) -> WIPOffset<FbSsTableInfo<'b>> {
-        let first_key = match info.first_key.as_ref() {
+        let first_entry = match info.first_entry.as_ref() {
             None => None,
-            Some(first_key_vector) => Some(self.builder.create_vector(first_key_vector)),
+            Some(first_entry_vector) => Some(self.builder.create_vector(first_entry_vector)),
         };
 
         FbSsTableInfo::create(
             &mut self.builder,
             &SsTableInfoArgs {
-                first_key,
+                first_entry,
                 index_offset: info.index_offset,
                 index_len: info.index_len,
                 filter_offset: info.filter_offset,
@@ -527,6 +542,8 @@ impl<'b> DbFlatBufferBuilder<'b> {
         let id = self.add_ulid(&compaction.id());
         let (spec_type, spec) = self.add_compaction_spec(compaction.spec());
         let status = FbCompactionStatus::from(compaction.status());
+        let output_ssts = (!compaction.output_ssts().is_empty())
+            .then(|| self.add_compacted_ssts(compaction.output_ssts().iter()));
         FbCompaction::create(
             &mut self.builder,
             &FbCompactionArgs {
@@ -534,6 +551,7 @@ impl<'b> DbFlatBufferBuilder<'b> {
                 spec_type,
                 spec: Some(spec),
                 status,
+                output_ssts,
             },
         )
     }
@@ -785,7 +803,7 @@ mod tests {
     use std::collections::VecDeque;
 
     use crate::flatbuffer_types::test_utils::assert_index_clamped;
-    use crate::sst::SsTableFormat;
+    use crate::format::sst::SsTableFormat;
     use crate::test_utils::build_test_sst;
     use bytes::{BufMut, Bytes, BytesMut};
     use chrono::{DateTime, Utc};
@@ -858,11 +876,11 @@ mod tests {
 
     #[test]
     fn test_should_encode_decode_ssts_with_visible_ranges() {
-        fn new_sst_handle(first_key: &[u8], visible_range: Option<BytesRange>) -> SsTableHandle {
+        fn new_sst_handle(first_entry: &[u8], visible_range: Option<BytesRange>) -> SsTableHandle {
             SsTableHandle::new_compacted(
                 SsTableId::Compacted(ulid::Ulid::new()),
                 SsTableInfo {
-                    first_key: Some(Bytes::copy_from_slice(first_key)),
+                    first_entry: Some(Bytes::copy_from_slice(first_entry)),
                     ..Default::default()
                 },
                 visible_range,
@@ -1023,11 +1041,27 @@ mod tests {
 
     #[test]
     fn test_should_encode_decode_compactions() {
+        fn new_output_sst(first_key: &[u8], visible_range: Option<BytesRange>) -> SsTableHandle {
+            SsTableHandle::new_compacted(
+                SsTableId::Compacted(ulid::Ulid::new()),
+                SsTableInfo {
+                    first_entry: Some(Bytes::copy_from_slice(first_key)),
+                    ..Default::default()
+                },
+                visible_range,
+            )
+        }
+
+        let output_ssts = vec![
+            new_output_sst(b"a", None),
+            new_output_sst(b"m", Some(BytesRange::from_ref("n"..="z"))),
+        ];
         let compaction_l0 = Compaction::new(
             ulid::Ulid::new(),
             CompactionSpec::new(vec![SourceId::Sst(ulid::Ulid::new())], 0),
         )
-        .with_status(CompactionStatus::Running);
+        .with_status(CompactionStatus::Running)
+        .with_output_ssts(output_ssts);
         let compaction_sr = Compaction::new(
             ulid::Ulid::new(),
             CompactionSpec::new(vec![SourceId::SortedRun(5), SourceId::SortedRun(3)], 3),
