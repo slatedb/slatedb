@@ -59,16 +59,35 @@ use crate::db_state::SsTableInfoCodec;
 use crate::error::SlateDBError;
 use crate::filter::BloomFilterBuilder;
 use crate::flatbuffer_types::{BlockMeta, BlockMetaArgs};
-use crate::format::block::BlockBuilder;
+#[cfg(test)]
+use crate::format::sst::SST_FORMAT_VERSION_V2;
 use crate::format::sst::{
-    EncodedSsTable, EncodedSsTableBlock, EncodedSsTableBlockBuilder, EncodedSsTableFooterBuilder,
-    SsTableFormat,
+    BlockBuilder, EncodedSsTable, EncodedSsTableBlock, EncodedSsTableBlockBuilder,
+    EncodedSsTableFooterBuilder, SsTableFormat, SST_FORMAT_VERSION,
 };
 use crate::types::RowEntry;
 use crate::utils::compute_index_key;
 use crate::BlockTransformer;
 use bytes::Bytes;
 use flatbuffers::DefaultAllocator;
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub(crate) enum BlockFormat {
+    V1,
+    #[allow(dead_code)]
+    V2,
+}
+
+impl BlockFormat {
+    /// Returns the SST format version corresponding to this block format.
+    #[cfg(test)]
+    pub(crate) fn sst_format_version(self) -> u16 {
+        match self {
+            BlockFormat::V1 => SST_FORMAT_VERSION,
+            BlockFormat::V2 => SST_FORMAT_VERSION_V2,
+        }
+    }
+}
 
 impl SsTableFormat {
     pub(crate) fn table_builder(&self) -> EncodedSsTableBuilder<'_> {
@@ -99,6 +118,8 @@ pub(crate) struct EncodedSsTableBuilder<'a> {
     current_len: u64,
     blocks: VecDeque<EncodedSsTableBlock>,
     block_size: usize,
+    block_format: BlockFormat,
+    sst_format_version: u16,
     min_filter_keys: u32,
     num_keys: u32,
     filter_builder: BloomFilterBuilder,
@@ -123,7 +144,9 @@ impl EncodedSsTableBuilder<'_> {
             sst_first_key: None,
             current_block_max_key: None,
             block_size,
-            builder: BlockBuilder::new(block_size),
+            block_format: BlockFormat::V1,
+            builder: BlockBuilder::new_v1(block_size),
+            sst_format_version: SST_FORMAT_VERSION,
             min_filter_keys,
             num_keys: 0,
             filter_builder: BloomFilterBuilder::new(filter_bits_per_key),
@@ -131,6 +154,13 @@ impl EncodedSsTableBuilder<'_> {
             sst_codec,
             compression_codec: None,
             block_transformer: None,
+        }
+    }
+
+    fn new_block_builder(&self) -> BlockBuilder {
+        match self.block_format {
+            BlockFormat::V1 => BlockBuilder::new_v1(self.block_size),
+            BlockFormat::V2 => BlockBuilder::new_v2(self.block_size),
         }
     }
 
@@ -143,6 +173,24 @@ impl EncodedSsTableBuilder<'_> {
     /// Sets the block transformer for transforming the blocks
     fn with_block_transformer(mut self, transformer: Arc<dyn BlockTransformer>) -> Self {
         self.block_transformer = Some(transformer);
+        self
+    }
+
+    /// Sets the block format and derives the SST format version from it.
+    /// This ensures consistency between block format and SST version.
+    ///
+    /// # Panics
+    /// Panics if called after data has been added to the builder, as this would
+    /// result in mixed block types within the SST.
+    #[cfg(test)]
+    pub(crate) fn with_block_format(mut self, block_format: BlockFormat) -> Self {
+        assert!(
+            self.num_keys == 0,
+            "cannot change block format after data has been added"
+        );
+        self.block_format = block_format;
+        self.sst_format_version = block_format.sst_format_version();
+        self.builder = self.new_block_builder();
         self
     }
 
@@ -206,7 +254,7 @@ impl EncodedSsTableBuilder<'_> {
             return Ok(None);
         }
 
-        let new_builder = BlockBuilder::new(self.block_size);
+        let new_builder = self.new_block_builder();
         let builder = std::mem::replace(&mut self.builder, new_builder);
         let mut block_builder = EncodedSsTableBlockBuilder::new(builder, self.current_len);
         if let Some(codec) = self.compression_codec {
@@ -274,6 +322,7 @@ impl EncodedSsTableBuilder<'_> {
             &*self.sst_codec,
             self.index_builder,
             self.block_meta,
+            self.sst_format_version,
         );
         if let Some(codec) = self.compression_codec {
             footer_builder = footer_builder.with_compression_codec(codec);
@@ -1151,5 +1200,30 @@ mod tests {
             sst_handle.info.first_entry.unwrap().as_ref(),
             "first entry in sst info should be correct with compression + transformer"
         );
+    }
+
+    #[test]
+    fn should_allow_with_block_format_before_adding_data() {
+        // given: a builder with no data
+        let format = SsTableFormat::default();
+        let builder = format.table_builder();
+
+        // when/then: with_block_format should succeed before adding any data
+        let _ = builder.with_block_format(BlockFormat::V2);
+    }
+
+    #[tokio::test]
+    #[should_panic(expected = "cannot change block format after data has been added")]
+    async fn should_panic_with_block_format_after_adding_data() {
+        // given: a builder that has had data added
+        let format = SsTableFormat::default();
+        let mut builder = format.table_builder();
+        builder
+            .add_value(b"key1", b"value1", gen_attrs(1))
+            .await
+            .unwrap();
+
+        // when/then: with_block_format should panic
+        let _ = builder.with_block_format(BlockFormat::V2);
     }
 }
