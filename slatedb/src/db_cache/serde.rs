@@ -180,7 +180,7 @@ mod tests {
     use crate::flatbuffer_types::{
         BlockMeta, BlockMetaArgs, SsTableIndex, SsTableIndexArgs, SsTableIndexOwned,
     };
-    use crate::format::block::BlockBuilder;
+    use crate::format::sst::BlockBuilder;
     use crate::iter::IterationOrder;
     use crate::test_utils::assert_iterator;
     use crate::types::RowEntry;
@@ -223,7 +223,7 @@ mod tests {
             RowEntry::new_merge(b"biz", b"baz", 1),
             RowEntry::new_tombstone(b"bla", 2),
         ];
-        let mut builder = BlockBuilder::new(4096);
+        let mut builder = BlockBuilder::new_v1(4096);
         for row in rows.iter() {
             assert!(builder.add(row.clone()).unwrap());
         }
