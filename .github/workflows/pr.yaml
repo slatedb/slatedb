@@ -71,6 +71,7 @@ jobs:
           fetch-depth: 0
 
       # Install specific version of flatc (24.3.25)
+      # NOTE: when changing the flatc version adapt slatedb/src/generated/README.md
       - name: Install flatc
         run: |
           wget https://github.com/google/flatbuffers/releases/download/v24.3.25/Linux.flatc.binary.g++-13.zip
