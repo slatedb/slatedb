@@ -7,6 +7,8 @@ use std::ops::{Bound, Range, RangeBounds};
 use std::sync::Arc;
 use tokio::task::JoinHandle;
 
+use crate::block_iterator::BlockLike;
+use crate::block_iterator_v2::BlockIteratorV2;
 use crate::bytes_range::BytesRange;
 use crate::db_state::{SsTableHandle, SsTableId};
 use crate::db_stats::DbStats;
@@ -14,6 +16,7 @@ use crate::error::SlateDBError;
 use crate::filter::{self, BloomFilter};
 use crate::flatbuffer_types::{SsTableIndex, SsTableIndexOwned};
 use crate::format::block::Block;
+use crate::format::sst::{SST_FORMAT_VERSION, SST_FORMAT_VERSION_V2};
 use crate::{
     block_iterator::BlockIterator,
     iter::{init_optional_iterator, KeyValueIterator},
@@ -25,6 +28,46 @@ use crate::{
 enum FetchTask {
     InFlight(JoinHandle<Result<VecDeque<Arc<Block>>, SlateDBError>>),
     Finished(VecDeque<Arc<Block>>),
+}
+
+enum DataBlockIterator<B: BlockLike> {
+    V1(BlockIterator<B>),
+    V2(BlockIteratorV2<B>),
+}
+
+impl<B: BlockLike> DataBlockIterator<B> {
+    fn new_ascending(block: B, sst_version: u16) -> Result<Self, SlateDBError> {
+        match sst_version {
+            SST_FORMAT_VERSION => Ok(Self::V1(BlockIterator::new_ascending(block))),
+            SST_FORMAT_VERSION_V2 => Ok(Self::V2(BlockIteratorV2::new_ascending(block))),
+            _ => Err(SlateDBError::InvalidVersion {
+                format_name: "SST",
+                supported_versions: vec![SST_FORMAT_VERSION, SST_FORMAT_VERSION_V2],
+                actual_version: sst_version,
+            }),
+        }
+    }
+
+    async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
+        match self {
+            Self::V1(iter) => iter.next_entry().await,
+            Self::V2(iter) => iter.next_entry().await,
+        }
+    }
+
+    async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
+        match self {
+            Self::V1(iter) => iter.seek(next_key).await,
+            Self::V2(iter) => iter.seek(next_key).await,
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        match self {
+            Self::V1(iter) => iter.is_empty(),
+            Self::V2(iter) => iter.is_empty(),
+        }
+    }
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -102,7 +145,7 @@ impl SstView<'_> {
 
 struct IteratorState {
     initialized: bool,
-    current_iter: Option<BlockIterator<Arc<Block>>>,
+    current_iter: Option<DataBlockIterator<Arc<Block>>>,
 }
 
 impl IteratorState {
@@ -121,7 +164,7 @@ impl IteratorState {
         self.initialized
     }
 
-    fn advance(&mut self, iterator: BlockIterator<Arc<Block>>) {
+    fn advance(&mut self, iterator: DataBlockIterator<Arc<Block>>) {
         self.initialized = true;
         self.current_iter = Some(iterator);
     }
@@ -221,6 +264,10 @@ pub(crate) struct InternalSstIterator<'a> {
     fetch_tasks: VecDeque<FetchTask>,
     table_store: Arc<TableStore>,
     options: SstIteratorOptions,
+    /// The SST format version, used to select the appropriate block iterator.
+    /// This is `None` until `ensure_metadata_loaded` is called, since the version
+    /// is read from the SST footer which is lazily loaded.
+    sst_version: Option<u16>,
 }
 
 impl<'a> InternalSstIterator<'a> {
@@ -241,6 +288,7 @@ impl<'a> InternalSstIterator<'a> {
             fetch_tasks: VecDeque::new(),
             table_store,
             options,
+            sst_version: None,
         })
     }
 
@@ -401,10 +449,13 @@ impl<'a> InternalSstIterator<'a> {
     async fn next_iter(
         &mut self,
         spawn_fetches: bool,
-    ) -> Result<Option<BlockIterator<Arc<Block>>>, SlateDBError> {
+    ) -> Result<Option<DataBlockIterator<Arc<Block>>>, SlateDBError> {
         if self.index.is_none() {
             return Ok(None);
         }
+        let sst_version = self
+            .sst_version
+            .ok_or(SlateDBError::IteratorNotInitialized)?;
         loop {
             if spawn_fetches {
                 self.spawn_fetches();
@@ -417,7 +468,7 @@ impl<'a> InternalSstIterator<'a> {
                     }
                     FetchTask::Finished(blocks) => {
                         if let Some(block) = blocks.pop_front() {
-                            return Ok(Some(BlockIterator::new_ascending(block)));
+                            return Ok(Some(DataBlockIterator::new_ascending(block, sst_version)?));
                         } else {
                             self.fetch_tasks.pop_front();
                         }
@@ -432,7 +483,7 @@ impl<'a> InternalSstIterator<'a> {
     }
 
     async fn advance_block(&mut self) -> Result<(), SlateDBError> {
-        self.fetch_index().await?;
+        self.ensure_metadata_loaded().await?;
         if !self.state.is_finished() {
             if let Some(mut iter) = self.next_iter(true).await? {
                 match self.view.start_key() {
@@ -455,7 +506,19 @@ impl<'a> InternalSstIterator<'a> {
         self.state.stop();
     }
 
-    async fn fetch_index(&mut self) -> Result<(), SlateDBError> {
+    async fn ensure_sst_version(&mut self) -> Result<(), SlateDBError> {
+        if self.sst_version.is_none() {
+            let version = self
+                .table_store
+                .read_sst_version(self.view.table_as_ref())
+                .await?;
+            self.sst_version = Some(version);
+        }
+        Ok(())
+    }
+
+    async fn ensure_metadata_loaded(&mut self) -> Result<(), SlateDBError> {
+        self.ensure_sst_version().await?;
         if self.index.is_none() {
             let index = self
                 .table_store
