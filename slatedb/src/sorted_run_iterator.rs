@@ -538,4 +538,175 @@ mod tests {
         }
         SortedRun { id: 0, ssts }
     }
+
+    mod mixed_version_tests {
+        use super::*;
+        use crate::sst_builder::BlockFormat;
+
+        async fn build_sst_v1(
+            table_store: &Arc<TableStore>,
+            keys_and_values: &[(&[u8], &[u8])],
+        ) -> SsTableHandle {
+            let mut builder = table_store.table_builder();
+            for (key, value) in keys_and_values {
+                builder.add_value(key, value, gen_attrs(0)).await.unwrap();
+            }
+            let encoded = builder.build().await.unwrap();
+            let id = SsTableId::Compacted(ulid::Ulid::new());
+            table_store.write_sst(&id, encoded, false).await.unwrap()
+        }
+
+        async fn build_sst_v2(
+            table_store: &Arc<TableStore>,
+            keys_and_values: &[(&[u8], &[u8])],
+        ) -> SsTableHandle {
+            let mut builder = table_store
+                .table_builder()
+                .with_block_format(BlockFormat::V2);
+            for (key, value) in keys_and_values {
+                builder.add_value(key, value, gen_attrs(0)).await.unwrap();
+            }
+            let encoded = builder.build().await.unwrap();
+            let id = SsTableId::Compacted(ulid::Ulid::new());
+            table_store.write_sst(&id, encoded, false).await.unwrap()
+        }
+
+        #[tokio::test]
+        async fn should_iterate_sorted_run_with_mixed_v1_and_v2_ssts() {
+            // given: a sorted run with alternating v1 and v2 SSTs
+            let root_path = Path::from("");
+            let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+            let format = SsTableFormat {
+                min_filter_keys: 10,
+                ..SsTableFormat::default()
+            };
+            let table_store = Arc::new(TableStore::new(
+                ObjectStores::new(object_store, None),
+                format,
+                root_path,
+                None,
+            ));
+
+            // Build a sorted run with v1, v2, v1, v2 SSTs
+            let sst1_v1 = build_sst_v1(
+                &table_store,
+                &[(b"key01", b"value01"), (b"key02", b"value02")],
+            )
+            .await;
+            let sst2_v2 = build_sst_v2(
+                &table_store,
+                &[(b"key03", b"value03"), (b"key04", b"value04")],
+            )
+            .await;
+            let sst3_v1 = build_sst_v1(
+                &table_store,
+                &[(b"key05", b"value05"), (b"key06", b"value06")],
+            )
+            .await;
+            let sst4_v2 = build_sst_v2(
+                &table_store,
+                &[(b"key07", b"value07"), (b"key08", b"value08")],
+            )
+            .await;
+
+            let sorted_run = SortedRun {
+                id: 0,
+                ssts: vec![sst1_v1, sst2_v2, sst3_v1, sst4_v2],
+            };
+
+            // when: iterating over the sorted run
+            let mut iter = SortedRunIterator::new_owned_initialized(
+                ..,
+                sorted_run,
+                table_store.clone(),
+                SstIteratorOptions::default(),
+            )
+            .await
+            .unwrap();
+
+            // then: all keys should be returned in order across both v1 and v2 SSTs
+            for i in 1..=8 {
+                let kv = iter.next().await.unwrap().unwrap();
+                let expected_key = format!("key{:02}", i);
+                let expected_value = format!("value{:02}", i);
+                assert_eq!(kv.key.as_ref(), expected_key.as_bytes());
+                assert_eq!(kv.value.as_ref(), expected_value.as_bytes());
+            }
+
+            let kv = iter.next().await.unwrap();
+            assert!(kv.is_none());
+        }
+
+        #[tokio::test]
+        async fn should_seek_through_mixed_v1_and_v2_ssts() {
+            // given: a sorted run with alternating v1 and v2 SSTs
+            let root_path = Path::from("");
+            let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+            let format = SsTableFormat {
+                min_filter_keys: 10,
+                ..SsTableFormat::default()
+            };
+            let table_store = Arc::new(TableStore::new(
+                ObjectStores::new(object_store, None),
+                format,
+                root_path,
+                None,
+            ));
+
+            // Build a sorted run with v1, v2, v1, v2 SSTs
+            let sst1_v1 = build_sst_v1(
+                &table_store,
+                &[(b"key01", b"value01"), (b"key02", b"value02")],
+            )
+            .await;
+            let sst2_v2 = build_sst_v2(
+                &table_store,
+                &[(b"key03", b"value03"), (b"key04", b"value04")],
+            )
+            .await;
+            let sst3_v1 = build_sst_v1(
+                &table_store,
+                &[(b"key05", b"value05"), (b"key06", b"value06")],
+            )
+            .await;
+            let sst4_v2 = build_sst_v2(
+                &table_store,
+                &[(b"key07", b"value07"), (b"key08", b"value08")],
+            )
+            .await;
+
+            let sorted_run = SortedRun {
+                id: 0,
+                ssts: vec![sst1_v1, sst2_v2, sst3_v1, sst4_v2],
+            };
+
+            let mut iter = SortedRunIterator::new_owned_initialized(
+                ..,
+                sorted_run,
+                table_store.clone(),
+                SstIteratorOptions::default(),
+            )
+            .await
+            .unwrap();
+
+            // when: seeking to key05 (which is in a v1 SST after a v2 SST)
+            iter.seek(b"key05").await.unwrap();
+
+            // then: we should get key05 and subsequent keys
+            let kv = iter.next().await.unwrap().unwrap();
+            assert_eq!(kv.key.as_ref(), b"key05");
+            assert_eq!(kv.value.as_ref(), b"value05");
+
+            let kv = iter.next().await.unwrap().unwrap();
+            assert_eq!(kv.key.as_ref(), b"key06");
+            assert_eq!(kv.value.as_ref(), b"value06");
+
+            // Seek again to a v2 SST
+            iter.seek(b"key07").await.unwrap();
+
+            let kv = iter.next().await.unwrap().unwrap();
+            assert_eq!(kv.key.as_ref(), b"key07");
+            assert_eq!(kv.value.as_ref(), b"value07");
+        }
+    }
 }
