@@ -140,10 +140,11 @@ pub(crate) enum SlateDBError {
     CheckpointMissing(Uuid),
 
     #[error(
-        "byte format version mismatch. expected_version=`{expected_version}`, actual_version=`{actual_version}`"
+        "unsupported {format_name} format version. supported_versions=`{supported_versions:?}`, actual_version=`{actual_version}`"
     )]
     InvalidVersion {
-        expected_version: u16,
+        format_name: &'static str,
+        supported_versions: Vec<u16>,
         actual_version: u16,
     },
 

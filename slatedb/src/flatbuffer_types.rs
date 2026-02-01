@@ -153,7 +153,8 @@ impl ObjectCodec<Manifest> for FlatBufferManifestCodec {
         let version = u16::from_be_bytes([bytes[0], bytes[1]]);
         if version != MANIFEST_FORMAT_VERSION {
             return Err(Box::new(SlateDBError::InvalidVersion {
-                expected_version: MANIFEST_FORMAT_VERSION,
+                format_name: "manifest",
+                supported_versions: vec![MANIFEST_FORMAT_VERSION],
                 actual_version: version,
             }));
         }
@@ -314,7 +315,8 @@ impl FlatBufferCompactionsCodec {
         let version = u16::from_be_bytes([bytes[0], bytes[1]]);
         if version != COMPACTIONS_FORMAT_VERSION {
             return Err(SlateDBError::InvalidVersion {
-                expected_version: COMPACTIONS_FORMAT_VERSION,
+                format_name: "compactions",
+                supported_versions: vec![COMPACTIONS_FORMAT_VERSION],
                 actual_version: version,
             });
         }
@@ -808,7 +810,7 @@ mod tests {
     use bytes::{BufMut, Bytes, BytesMut};
     use chrono::{DateTime, Utc};
 
-    use super::{root_generated, MANIFEST_FORMAT_VERSION};
+    use super::{root_generated, COMPACTIONS_FORMAT_VERSION, MANIFEST_FORMAT_VERSION};
 
     #[test]
     fn test_should_encode_decode_manifest_checkpoints() {
@@ -992,13 +994,15 @@ mod tests {
         match codec.decode(&invalid_bytes) {
             Err(err) => {
                 let Some(SlateDBError::InvalidVersion {
-                    expected_version,
+                    format_name,
+                    supported_versions,
                     actual_version,
                 }) = err.downcast_ref()
                 else {
                     panic!("Expected SlateDBError::InvalidVersion but got {:?}", err);
                 };
-                assert_eq!(*expected_version, MANIFEST_FORMAT_VERSION);
+                assert_eq!(*format_name, "manifest");
+                assert_eq!(*supported_versions, vec![MANIFEST_FORMAT_VERSION]);
                 assert_eq!(*actual_version, MANIFEST_FORMAT_VERSION + 1);
             }
             _ => panic!("Should fail with version mismatch"),
@@ -1122,13 +1126,15 @@ mod tests {
         match result {
             Err(err) => {
                 let Some(SlateDBError::InvalidVersion {
-                    expected_version,
+                    format_name,
+                    supported_versions,
                     actual_version,
                 }) = err.downcast_ref()
                 else {
                     panic!("Expected SlateDBError::InvalidVersion but got {:?}", err);
                 };
-                assert_eq!(*expected_version, super::COMPACTIONS_FORMAT_VERSION);
+                assert_eq!(*format_name, "compactions");
+                assert_eq!(*supported_versions, vec![COMPACTIONS_FORMAT_VERSION]);
                 assert_eq!(*actual_version, invalid_version);
             }
             _ => panic!("Should fail with version mismatch"),

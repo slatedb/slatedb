@@ -63,6 +63,13 @@ impl<B: BlockLike> BlockIteratorV2<B> {
         Self::new(block, IterationOrder::Ascending)
     }
 
+    pub(crate) fn is_empty(&self) -> bool {
+        match &self.inner {
+            BlockIteratorInner::Ascending(state) => state.is_empty(),
+            BlockIteratorInner::Descending(state) => state.is_empty(),
+        }
+    }
+
     fn decode_first_key_at_restart(block: &B, restart_idx: usize) -> Bytes {
         let restart_offset = block.offsets()[restart_idx] as usize;
         let mut data = &block.data()[restart_offset..];
@@ -265,6 +272,10 @@ pub(crate) struct DescendingBlockIteratorV2<B: BlockLike> {
 }
 
 impl<B: BlockLike> DescendingBlockIteratorV2<B> {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.exhausted
+    }
+
     pub(crate) fn new(block: B) -> Self {
         let num_restarts = block.offsets().len();
         let initial_key = if num_restarts == 0 {
