@@ -617,7 +617,7 @@ mod tests {
     use crate::db_cache::{CachedEntry, CachedKey, DbCache, DbCacheWrapper, SplitCache};
     use crate::db_state::SsTableId;
     use crate::filter::BloomFilterBuilder;
-    use crate::format::block::BlockBuilder;
+    use crate::format::sst::BlockBuilder;
     use slatedb_common::clock::DefaultSystemClock;
 
     use crate::flatbuffer_types::test_utils::assert_index_clamped;
@@ -846,7 +846,7 @@ mod tests {
         let cache_a = DbCacheWrapper::new(shared_cache.clone(), &registry_a, system_clock.clone());
         let cache_b = DbCacheWrapper::new(shared_cache.clone(), &registry_b, system_clock);
 
-        let mut builder = BlockBuilder::new(4096);
+        let mut builder = BlockBuilder::new_v1(4096);
         assert!(builder.add(RowEntry::new_value(b"k1", b"v1", 0)).unwrap());
         let block = Arc::new(builder.build().unwrap());
         let key = CachedKey::from((SST_ID, 3u64));

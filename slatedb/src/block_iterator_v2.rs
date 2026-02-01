@@ -63,6 +63,13 @@ impl<B: BlockLike> BlockIteratorV2<B> {
         Self::new(block, IterationOrder::Ascending)
     }
 
+    pub(crate) fn is_empty(&self) -> bool {
+        match &self.inner {
+            BlockIteratorInner::Ascending(state) => state.is_empty(),
+            BlockIteratorInner::Descending(state) => state.is_empty(),
+        }
+    }
+
     fn decode_first_key_at_restart(block: &B, restart_idx: usize) -> Bytes {
         let restart_offset = block.offsets()[restart_idx] as usize;
         let mut data = &block.data()[restart_offset..];
@@ -265,6 +272,10 @@ pub(crate) struct DescendingBlockIteratorV2<B: BlockLike> {
 }
 
 impl<B: BlockLike> DescendingBlockIteratorV2<B> {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.exhausted
+    }
+
     pub(crate) fn new(block: B) -> Self {
         let num_restarts = block.offsets().len();
         let initial_key = if num_restarts == 0 {
@@ -408,7 +419,7 @@ impl<B: BlockLike> KeyValueIterator for DescendingBlockIteratorV2<B> {
 mod tests {
     use super::*;
     use crate::format::block::Block;
-    use crate::format::block_v2::BlockBuilderV2;
+    use crate::format::sst::BlockBuilder;
     use crate::types::ValueDeletable;
 
     fn make_entry(key: &[u8], value: &[u8], seq: u64) -> RowEntry {
@@ -422,7 +433,7 @@ mod tests {
     }
 
     fn build_test_block(entries: &[(&[u8], &[u8])], restart_interval: usize) -> Block {
-        let mut builder = BlockBuilderV2::new_with_restart_interval(4096, restart_interval);
+        let mut builder = BlockBuilder::new_v2_with_restart_interval(4096, restart_interval);
         for (i, (key, value)) in entries.iter().enumerate() {
             let _ = builder.add(make_entry(key, value, i as u64));
         }
@@ -547,7 +558,7 @@ mod tests {
     #[tokio::test]
     async fn should_binary_search_restarts_correctly() {
         // given: a block with many entries and small restart interval
-        let mut builder = BlockBuilderV2::new_with_restart_interval(16384, 4);
+        let mut builder = BlockBuilder::new_v2_with_restart_interval(16384, 4);
         for i in 0..100 {
             let key = format!("key_{:05}", i);
             let value = format!("value_{}", i);
@@ -646,7 +657,7 @@ mod tests {
     #[tokio::test]
     async fn should_handle_entries_with_timestamps() {
         // given: a block with entries that have timestamps
-        let mut builder = BlockBuilderV2::new(4096);
+        let mut builder = BlockBuilder::new_v2(4096);
         let _ = builder.add(RowEntry::new(
             Bytes::from("key1"),
             ValueDeletable::Value(Bytes::from("value1")),
@@ -680,7 +691,7 @@ mod tests {
     #[tokio::test]
     async fn should_iterate_block_with_many_restart_points() {
         // given: a block with restart_interval=1 (every entry is a restart)
-        let mut builder = BlockBuilderV2::new_with_restart_interval(4096, 1);
+        let mut builder = BlockBuilder::new_v2_with_restart_interval(4096, 1);
         for i in 0..10 {
             let key = format!("key_{}", i);
             let value = format!("val_{}", i);
@@ -738,7 +749,7 @@ mod tests {
     #[tokio::test]
     async fn should_iterate_entries_with_merge_operands() {
         // given: a block with merge operand entries
-        let mut builder = BlockBuilderV2::new(4096);
+        let mut builder = BlockBuilder::new_v2(4096);
         let _ = builder.add(RowEntry::new(
             Bytes::from("key1"),
             ValueDeletable::Value(Bytes::from("base")),
@@ -954,7 +965,7 @@ mod tests {
     #[tokio::test]
     async fn should_iterate_descending_block_with_many_restart_points() {
         // given: a block with restart_interval=4 (restart point every 4 entries)
-        let mut builder = BlockBuilderV2::new_with_restart_interval(4096, 4);
+        let mut builder = BlockBuilder::new_v2_with_restart_interval(4096, 4);
         for i in 0..20 {
             let key = format!("key_{:02}", i);
             let value = format!("val_{}", i);
@@ -979,7 +990,7 @@ mod tests {
     #[tokio::test]
     async fn should_seek_descending_with_many_restart_points() {
         // given: a block with restart_interval=4 (restart point every 4 entries)
-        let mut builder = BlockBuilderV2::new_with_restart_interval(4096, 4);
+        let mut builder = BlockBuilder::new_v2_with_restart_interval(4096, 4);
         for i in 0..20 {
             let key = format!("key_{:02}", i);
             let value = format!("val_{}", i);
@@ -1062,7 +1073,7 @@ mod tests {
     #[tokio::test]
     async fn should_seek_descending_via_block_iterator_v2() {
         // given: a block with entries and restart_interval=4
-        let mut builder = BlockBuilderV2::new_with_restart_interval(4096, 4);
+        let mut builder = BlockBuilder::new_v2_with_restart_interval(4096, 4);
         for i in 0..20 {
             let key = format!("key_{:02}", i);
             let value = format!("val_{}", i);
