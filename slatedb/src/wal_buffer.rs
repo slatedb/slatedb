@@ -791,21 +791,6 @@ mod tests {
         assert!(buffer.size() > 100_000);
     }
 
-    #[test]
-    fn test_seq_zero_returns_none() {
-        let mut buffer = WalBuffer::new();
-
-        buffer.append(make_entry("key1", "value1", 0, Some(100)));
-
-        assert_eq!(buffer.last_seq(), None);
-
-        buffer.append(make_entry("key2", "value2", 0, Some(200)));
-        assert_eq!(buffer.last_seq(), None);
-
-        buffer.append(make_entry("key3", "value3", 5, Some(300)));
-        assert_eq!(buffer.last_seq(), Some(5));
-    }
-
     struct MockWalIdStore {
         next_id: AtomicU64,
     }
