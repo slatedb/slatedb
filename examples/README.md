@@ -12,7 +12,7 @@ This directory contains example programs demonstrating how to use [SlateDB](http
     path = "src/tracing_subscriber.rs"
     test = false
     ```
-3. Add any required dependencies to the `Cargo.toml file.
+3. Add any required dependencies to the `Cargo.toml` file.
 
 ## Running the examples
 

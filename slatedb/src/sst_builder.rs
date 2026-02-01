@@ -171,7 +171,7 @@ impl EncodedSsTableBuilder<'_> {
         }
         self.current_block_max_key = Some(entry.key.clone());
 
-        assert!(self.builder.add(entry));
+        self.builder.add(entry)?;
 
         Ok(block_size)
     }

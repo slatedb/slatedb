@@ -163,13 +163,14 @@ impl BlockBuilderV2 {
         self.current_size() + entry_size + restart_overhead <= self.block_size
     }
 
-    /// Add an entry to the block. Returns true if the entry was added.
-    #[must_use]
-    pub(crate) fn add(&mut self, entry: RowEntry) -> bool {
-        assert!(!entry.key.is_empty(), "key must not be empty");
+    /// Add an entry to the block. Returns Ok(true) if the entry was added.
+    pub(crate) fn add(&mut self, entry: RowEntry) -> Result<bool, SlateDBError> {
+        if entry.key.is_empty() {
+            return Err(SlateDBError::EmptyKey);
+        }
 
         if !self.would_fit(&entry) {
-            return false;
+            return Ok(false);
         }
 
         let shared_bytes = if self.is_restart_point() {
@@ -202,7 +203,7 @@ impl BlockBuilderV2 {
         self.last_key = entry.key;
         self.counter += 1;
 
-        true
+        Ok(true)
     }
 
     /// Check if the block is empty.
@@ -235,7 +236,7 @@ impl BlockBuilderV2 {
             attrs.ts,
             attrs.expire_ts,
         );
-        self.add(entry)
+        self.add(entry).unwrap_or(false)
     }
 
     #[cfg(test)]
@@ -270,7 +271,7 @@ mod tests {
         let added = builder.add(make_entry(b"key1", b"value1", 1));
 
         // then: entry is added and block builds successfully
-        assert!(added);
+        assert!(added.unwrap());
         let block = builder.build().expect("build failed");
 
         // Block should have one restart point at offset 0
@@ -287,7 +288,9 @@ mod tests {
         for i in 0..10 {
             let key = format!("key_{:03}", i);
             let value = format!("value_{}", i);
-            assert!(builder.add(make_entry(key.as_bytes(), value.as_bytes(), i as u64)));
+            assert!(builder
+                .add(make_entry(key.as_bytes(), value.as_bytes(), i as u64))
+                .unwrap());
         }
 
         // then: block has correct number of restart points (0, 4, 8)
@@ -541,7 +544,7 @@ mod tests {
         let added = builder.add(entry);
 
         // then: entry is added successfully
-        assert!(added);
+        assert!(added.unwrap());
 
         let block = builder.build().expect("build failed");
 

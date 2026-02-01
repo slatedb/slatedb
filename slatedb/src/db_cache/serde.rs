@@ -225,7 +225,7 @@ mod tests {
         ];
         let mut builder = BlockBuilder::new(4096);
         for row in rows.iter() {
-            assert!(builder.add(row.clone()));
+            assert!(builder.add(row.clone()).unwrap());
         }
         let block = Arc::new(builder.build().unwrap());
         let entry = CachedEntry {

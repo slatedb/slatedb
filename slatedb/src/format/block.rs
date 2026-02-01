@@ -122,12 +122,13 @@ impl BlockBuilder {
         self.size() + entry.encoded_size(key_prefix_len) <= self.block_size
     }
 
-    #[must_use]
-    pub(crate) fn add(&mut self, entry: RowEntry) -> bool {
-        assert!(!entry.key.is_empty(), "key must not be empty");
+    pub(crate) fn add(&mut self, entry: RowEntry) -> Result<bool, SlateDBError> {
+        if entry.key.is_empty() {
+            return Err(SlateDBError::EmptyKey);
+        }
 
         if !self.would_fit(&entry) {
-            return false;
+            return Ok(false);
         }
 
         let key_prefix_len = compute_prefix(&self.first_key, &entry.key);
@@ -150,7 +151,7 @@ impl BlockBuilder {
             self.first_key = Bytes::copy_from_slice(entry.key.as_ref());
         }
 
-        true
+        Ok(true)
     }
 
     #[cfg(test)]
@@ -167,7 +168,7 @@ impl BlockBuilder {
             attrs.ts,
             attrs.expire_ts,
         );
-        self.add(entry)
+        self.add(entry).unwrap_or(false)
     }
 
     #[allow(dead_code)]
@@ -180,7 +181,7 @@ impl BlockBuilder {
             attrs.ts,
             attrs.expire_ts,
         );
-        self.add(entry)
+        self.add(entry).unwrap_or(false)
     }
 
     pub(crate) fn is_empty(&self) -> bool {
@@ -220,7 +221,7 @@ mod tests {
         let mut builder = BlockBuilder::new(4096);
 
         for entry in &test_case.entries {
-            assert!(builder.add(entry.clone()));
+            assert!(builder.add(entry.clone()).unwrap());
         }
 
         builder.build().expect("Failed to build block")
@@ -360,7 +361,7 @@ mod tests {
     async fn test_should_clamp_allocated_size(#[case] case: ClampAllocTestCase) {
         let mut builder = BlockBuilder::new(4096);
         for e in case.entries.iter() {
-            assert!(builder.add(e.clone()));
+            assert!(builder.add(e.clone()).unwrap());
         }
         let block = builder.build().unwrap();
         let encoded = block.encode();
