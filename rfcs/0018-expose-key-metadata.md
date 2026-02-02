@@ -4,18 +4,17 @@ Table of Contents:
 
 <!-- TOC start (generated with https://github.com/derlin/bitdowntoc) -->
 
-- [Expose Key Metadata](#expose-key-metadata)
-  - [Summary](#summary)
-  - [Motivation](#motivation)
-  - [Goals](#goals)
-  - [Non-Goals](#non-goals)
-  - [Design](#design)
-    - [1. Metadata Query Interface](#1-metadata-query-interface)
-    - [2. Modify Put/Write Return Types](#2-modify-putwrite-return-types)
-    - [3. Support Query by Version](#3-support-query-by-version)
-  - [Impact Analysis](#impact-analysis)
-  - [Testing](#testing)
-  - [Alternatives](#alternatives)
+- [Summary](#summary)
+- [Motivation](#motivation)
+- [Goals](#goals)
+- [Non-Goals](#non-goals)
+- [Design](#design)
+   * [1. Metadata Query Interface](#1-metadata-query-interface)
+   * [2. Modify Put/Write Return Types](#2-modify-putwrite-return-types)
+   * [3. Support Query by Version](#3-support-query-by-version)
+- [Impact Analysis](#impact-analysis)
+- [Testing](#testing)
+- [Alternatives](#alternatives)
 
 <!-- TOC end -->
 
@@ -32,7 +31,7 @@ This RFC proposes three related API improvements:
 
 1.  **Modify Write API Return Types**: Change the return type of `db.put()`, `db.delete()`, and `db.merge()` (including their `_with_options` variants) from `Result<(), ...>` to `Result<u64, ...>` to return the assigned sequence number.
 2.  **Simplify Batch Write Return Type**: Change the return type of `db.write()` from `Result<(), ...>` to `Result<u64, ...>` to return the commit sequence number.
-3.  **New Metadata Query Interface**: Introduce `get_meta()` and `scan_meta()` interfaces, allowing users to query key metadata (sequence number, creation timestamp, expiration timestamp, etc.).
+3.  **New Metadata Query Interface**: Introduce `get_meta()`, `get_meta_with_options()`, `scan_meta()`, and `scan_meta_with_options()` interfaces, allowing users to query key metadata (sequence number, creation timestamp, expiration timestamp, etc.).
 4.  **Support Query by Version**: Add a `read_at_seq` option to `ReadOptions`, enabling users to read a specific historical version of a key via its sequence number.
 
 <!-- TOC --><a name="motivation"></a>
