@@ -160,7 +160,7 @@ The `WalReader` will not interact with any SlateDB components (garbage collector
 
 ### WAL and Memtable Synchronization
 
-`batch_write.rs` currently writes to the WAL `KVTable` (or `WalBuffer`) and memtable `KVTable` in paralle. It is possible that the memtable might get flushed to L0 before the WAL file is written to object storage. If this happens, there is a brief window where an entry might be durably written but not end up in the WAL. Consider the following sequence of events:
+`batch_write.rs` currently writes to the WAL `KVTable` (or `WalBuffer`) and memtable `KVTable` in parallel. It is possible that the memtable might get flushed to L0 before the WAL file is written to object storage. If this happens, there is a brief window where an entry might be durably written but not end up in the WAL. Consider the following sequence of events:
 
 1. t0: `batch_write.rs` calls self.wal_buffer.append(&entries)?.durable_watcher();
 2. t1: `batch_write.rs` calls self.write_entries_to_memtable(entries);
