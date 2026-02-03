@@ -338,13 +338,15 @@ impl DbInner {
                     guard.state().imm_memtable.back().cloned()
                 };
 
-                let maybe_oldest_unflushed_wal = self.wal_buffer.oldest_unflushed_wal();
+                let watcher_for_oldest_unflushed_wal =
+                    self.wal_buffer.watcher_for_oldest_unflushed_wal();
 
                 // There is a window of time after mem_size_bytes is larger than max_unflushed_bytes
                 // but before we get the memtable and wal table. During that time, if the memtable and/or
                 // wal table are fully flushed out, we should short circuit since the select! will always
                 // time out.
-                if maybe_oldest_unflushed_memtable.is_none() && maybe_oldest_unflushed_wal.is_none()
+                if maybe_oldest_unflushed_memtable.is_none()
+                    && watcher_for_oldest_unflushed_wal.is_none()
                 {
                     continue;
                 }
@@ -358,8 +360,8 @@ impl DbInner {
                 };
 
                 let await_flush_wal = async {
-                    if let Some(oldest_unflushed_wal) = maybe_oldest_unflushed_wal {
-                        oldest_unflushed_wal.await_durable().await
+                    if let Some(mut watcher) = watcher_for_oldest_unflushed_wal {
+                        watcher.await_value().await
                     } else {
                         std::future::pending().await
                     }

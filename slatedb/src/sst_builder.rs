@@ -54,9 +54,6 @@
 use std::collections::VecDeque;
 use std::sync::Arc;
 
-use bytes::Bytes;
-use flatbuffers::DefaultAllocator;
-
 use crate::config::CompressionCodec;
 use crate::db_state::SsTableInfoCodec;
 use crate::error::SlateDBError;
@@ -64,13 +61,14 @@ use crate::filter::BloomFilterBuilder;
 use crate::flatbuffer_types::{BlockMeta, BlockMetaArgs};
 use crate::format::block::BlockBuilder;
 use crate::format::sst::{
-    EncodedSsTableBlock, EncodedSsTableBlockBuilder, EncodedSsTableFooterBuilder,
+    EncodedSsTable, EncodedSsTableBlock, EncodedSsTableBlockBuilder, EncodedSsTableFooterBuilder,
+    SsTableFormat,
 };
 use crate::types::RowEntry;
 use crate::utils::compute_index_key;
-
-// Re-export for backwards compatibility
-pub(crate) use crate::format::sst::{BlockTransformer, EncodedSsTable, SsTableFormat};
+use crate::BlockTransformer;
+use bytes::Bytes;
+use flatbuffers::DefaultAllocator;
 
 impl SsTableFormat {
     pub(crate) fn table_builder(&self) -> EncodedSsTableBuilder<'_> {
@@ -111,7 +109,7 @@ pub(crate) struct EncodedSsTableBuilder<'a> {
 
 impl EncodedSsTableBuilder<'_> {
     /// Create a builder based on target block size.
-    fn new(
+    pub(crate) fn new(
         block_size: usize,
         min_filter_keys: u32,
         sst_codec: Box<dyn SsTableInfoCodec>,

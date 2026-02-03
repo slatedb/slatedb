@@ -25,6 +25,7 @@ use crate::object_stores::{ObjectStoreType, ObjectStores};
 use crate::paths::PathResolver;
 use crate::sst_builder::EncodedSsTableBuilder;
 use crate::types::RowEntry;
+use crate::wal::wal_sst_builder::EncodedWalSsTableBuilder;
 
 pub(crate) struct TableStore {
     object_stores: ObjectStores,
@@ -176,6 +177,10 @@ impl TableStore {
 
     pub(crate) fn table_builder(&self) -> EncodedSsTableBuilder<'_> {
         self.sst_format.table_builder()
+    }
+
+    pub(crate) fn wal_table_builder(&self) -> EncodedWalSsTableBuilder {
+        self.sst_format.wal_table_builder()
     }
 
     pub(crate) async fn write_sst(
@@ -514,16 +519,20 @@ impl TableStore {
 
     pub(crate) fn estimate_encoded_size_compacted(
         &self,
-        entry_num: usize,
-        entries_size: usize,
+        num_entries: usize,
+        size_entries: usize,
     ) -> usize {
         self.sst_format
-            .estimate_encoded_size_compacted(entry_num, entries_size)
+            .estimate_encoded_size_compacted(num_entries, size_entries)
     }
 
-    pub(crate) fn estimate_encoded_size_wal(&self, entry_num: usize, entries_size: usize) -> usize {
+    pub(crate) fn estimate_encoded_size_wal(
+        &self,
+        num_entries: usize,
+        size_entries: usize,
+    ) -> usize {
         self.sst_format
-            .estimate_encoded_size_wal(entry_num, entries_size)
+            .estimate_encoded_size_wal(num_entries, size_entries)
     }
 }
 

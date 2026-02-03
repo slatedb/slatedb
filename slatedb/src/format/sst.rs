@@ -739,13 +739,11 @@ impl SsTableFormat {
         if entry_num == 0 {
             return 0;
         }
-        let mut ans = self.estimate_encoded_size_data_index_metadata(
+        self.estimate_encoded_size_data_index_metadata(
             entry_num,
             estimated_entries_size,
             SEQNUM_SIZE,
-        );
-        ans += self.estimate_encoded_size_filter(entry_num);
-        ans
+        )
     }
 
     fn estimate_encoded_size_data_index_metadata(

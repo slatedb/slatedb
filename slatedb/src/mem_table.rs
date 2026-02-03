@@ -350,10 +350,6 @@ impl KVTable {
         self.durable.reader()
     }
 
-    pub(crate) async fn await_durable(&self) -> Result<(), SlateDBError> {
-        self.durable.reader().await_value().await
-    }
-
     pub(crate) fn notify_durable(&self, result: Result<(), SlateDBError>) {
         self.durable.write(result);
     }
