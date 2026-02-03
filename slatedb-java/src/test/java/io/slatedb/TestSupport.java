@@ -38,11 +38,11 @@ final class TestSupport {
         }
     }
 
-    /// Creates a temporary database directory and a local file-based object store URL.
+    /// Creates a temporary database directory and an in-memory object store URL.
     static DbContext createDbContext() throws Exception {
         Path dbPath = Files.createTempDirectory("slatedb-java-db");
         Path objectStoreRoot = Files.createTempDirectory("slatedb-java-store");
-        String objectStoreUrl = "file://" + objectStoreRoot.toAbsolutePath();
+        String objectStoreUrl = "memory://";
         return new DbContext(dbPath, objectStoreRoot, objectStoreUrl);
     }
 
