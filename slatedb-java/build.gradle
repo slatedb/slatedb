@@ -2,7 +2,7 @@ plugins {
     id 'java-library'
 }
 
-group = 'com.slatedb'
+group = 'io.slatedb'
 version = '0.1.0-SNAPSHOT'
 
 def minimumJava = 24
