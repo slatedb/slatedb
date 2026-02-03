@@ -205,7 +205,7 @@ All integers are in little endian.
 | size of the compressed array of offsets                        |
 | (4-bytes unsigned integer, little endian)                      |
 +----------------------------------------------------------------+
-| compression codec offets                                       |
+| compression codec offsets                                       |
 | (1-byte unsigned integer, little endian)                       |
 +----------------------------------------------------------------+
 | CRC32 checksum (4-bytes, unsigned integer, little endian)      |
