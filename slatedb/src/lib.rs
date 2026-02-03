@@ -58,6 +58,7 @@ pub use rand::DbRand;
 pub use transaction_manager::IsolationLevel;
 pub use types::KeyValue;
 pub use types::{RowEntry, ValueDeletable};
+pub use wal_reader::{WalFile, WalReader};
 
 pub mod admin;
 pub mod cached_object_store;
@@ -140,6 +141,7 @@ mod utils;
 mod wal;
 mod wal_buffer;
 mod wal_id;
+mod wal_reader;
 mod wal_replay;
 
 // Initialize test infrastructure (deadlock detector, tracing) for all tests.
