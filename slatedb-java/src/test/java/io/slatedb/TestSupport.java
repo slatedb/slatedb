@@ -4,6 +4,8 @@ import org.junit.jupiter.api.Assertions;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.List;
 
 /// Test helpers for SlateDB JUnit tests.
 ///
@@ -17,13 +19,14 @@ final class TestSupport {
 
     /// Loads the native SlateDB library once for the test JVM.
     ///
-    /// Tests are skipped if the library path is not provided via
-    /// `SLATEDB_C_LIB` or `-Dslatedb.c.lib`.
+    /// Tests fail if the library path is not provided via `SLATEDB_C_LIB` or
+    /// `-Dslatedb.c.lib` and a default build artifact cannot be found.
     static void ensureNativeReady() throws Exception {
         Path nativeLib = findNativeLibrary();
         Assertions.assertTrue(
             nativeLib != null && Files.exists(nativeLib),
-            "Set SLATEDB_C_LIB or -Dslatedb.c.lib to the slatedb_c native library"
+            "Set SLATEDB_C_LIB or -Dslatedb.c.lib to the slatedb_c native library " +
+                "(expected filename: " + expectedLibraryFileName() + ")"
         );
         synchronized (INIT_LOCK) {
             if (initialized) {
@@ -43,7 +46,8 @@ final class TestSupport {
         return new DbContext(dbPath, objectStoreRoot, objectStoreUrl);
     }
 
-    /// Resolves the native library path from `SLATEDB_C_LIB` or `-Dslatedb.c.lib`.
+    /// Resolves the native library path from `SLATEDB_C_LIB`, `-Dslatedb.c.lib`,
+    /// or the default build output paths under `target/`.
     private static Path findNativeLibrary() {
         String env = System.getenv("SLATEDB_C_LIB");
         if (env != null && !env.isBlank()) {
@@ -53,7 +57,38 @@ final class TestSupport {
         if (prop != null && !prop.isBlank()) {
             return Path.of(prop);
         }
+        String libName = expectedLibraryFileName();
+        Path cwd = Path.of("").toAbsolutePath();
+        Path repoRoot = cwd.getParent();
+
+        List<Path> candidates = new ArrayList<>();
+        candidates.add(cwd.resolve("target").resolve("debug").resolve(libName));
+        candidates.add(cwd.resolve("target").resolve("release").resolve(libName));
+        if (repoRoot != null && !repoRoot.equals(cwd)) {
+            candidates.add(repoRoot.resolve("target").resolve("debug").resolve(libName));
+            candidates.add(repoRoot.resolve("target").resolve("release").resolve(libName));
+        }
+
+        for (Path candidate : candidates) {
+            if (Files.exists(candidate)) {
+                return candidate;
+            }
+        }
+
         return null;
+    }
+
+    /// Determines the expected native library filename for the current OS.
+    /// @return The expected filename (e.g., `libslatedb_c.so`, `slatedb_c.dll`, `libslatedb_c.dylib`).
+    private static String expectedLibraryFileName() {
+        String osName = System.getProperty("os.name", "").toLowerCase();
+        if (osName.contains("win")) {
+            return "slatedb_c.dll";
+        }
+        if (osName.contains("mac")) {
+            return "libslatedb_c.dylib";
+        }
+        return "libslatedb_c.so";
     }
 
     /// Paths and URL used by tests for a file-backed object store.
