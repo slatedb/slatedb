@@ -5,13 +5,22 @@ plugins {
 group = 'com.slatedb'
 version = '0.1.0-SNAPSHOT'
 
+def minimumJava = 24
+def currentJava = JavaVersion.current()
+def toolchainVersion = currentJava.isCompatibleWith(JavaVersion.toVersion(minimumJava))
+    ? Integer.parseInt(currentJava.majorVersion)
+    : minimumJava
+
 java {
-    sourceCompatibility = JavaVersion.VERSION_24
-    targetCompatibility = JavaVersion.VERSION_24
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(toolchainVersion)
+    }
+    sourceCompatibility = JavaVersion.toVersion(minimumJava)
+    targetCompatibility = JavaVersion.toVersion(minimumJava)
 }
 
 tasks.withType(JavaCompile).configureEach {
-    options.release = 24
+    options.release = minimumJava
 }
 
 repositories {
