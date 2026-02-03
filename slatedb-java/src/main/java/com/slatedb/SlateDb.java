@@ -52,6 +52,20 @@ public final class SlateDb implements AutoCloseable {
         return new SlateDb(Native.open(path, url, envFile));
     }
 
+    /**
+     * Stores a value for the given key.
+     */
+    public void put(byte[] key, byte[] value) {
+        Native.put(handle, key, value);
+    }
+
+    /**
+     * Returns the value for the given key, or {@code null} if not found.
+     */
+    public byte[] get(byte[] key) {
+        return Native.get(handle, key);
+    }
+
     @Override
     public void close() {
         Native.close(handle);
@@ -66,6 +80,8 @@ public final class SlateDb implements AutoCloseable {
         private static final GroupLayout RESULT_LAYOUT = createResultLayout();
         private static final GroupLayout HANDLE_RESULT_LAYOUT =
             MemoryLayout.structLayout(HANDLE_LAYOUT.withName("handle"), RESULT_LAYOUT.withName("result"));
+        private static final GroupLayout VALUE_LAYOUT =
+            MemoryLayout.structLayout(ValueLayout.ADDRESS.withName("data"), ValueLayout.JAVA_LONG.withName("len"));
 
         private static final VarHandle HANDLE_PTR =
             HANDLE_LAYOUT.varHandle(MemoryLayout.PathElement.groupElement("ptr"));
@@ -73,6 +89,10 @@ public final class SlateDb implements AutoCloseable {
             RESULT_LAYOUT.varHandle(MemoryLayout.PathElement.groupElement("error"));
         private static final VarHandle RESULT_MESSAGE =
             RESULT_LAYOUT.varHandle(MemoryLayout.PathElement.groupElement("message"));
+        private static final VarHandle VALUE_DATA =
+            VALUE_LAYOUT.varHandle(MemoryLayout.PathElement.groupElement("data"));
+        private static final VarHandle VALUE_LEN =
+            VALUE_LAYOUT.varHandle(MemoryLayout.PathElement.groupElement("len"));
         private static final VarHandle HANDLE_RESULT_HANDLE_PTR =
             HANDLE_RESULT_LAYOUT.varHandle(
                 MemoryLayout.PathElement.groupElement("handle"),
@@ -92,8 +112,11 @@ public final class SlateDb implements AutoCloseable {
         private static volatile boolean initialized;
         private static MethodHandle initLoggingHandle;
         private static MethodHandle openHandle;
+        private static MethodHandle putHandle;
+        private static MethodHandle getHandle;
         private static MethodHandle closeHandle;
         private static MethodHandle freeResultHandle;
+        private static MethodHandle freeValueHandle;
 
         private static GroupLayout createResultLayout() {
             long padding = Math.max(0, ValueLayout.ADDRESS.byteAlignment() - ValueLayout.JAVA_INT.byteSize());
@@ -175,6 +198,77 @@ public final class SlateDb implements AutoCloseable {
             }
         }
 
+        static void put(MemorySegment handlePtr, byte[] key, byte[] value) {
+            Objects.requireNonNull(key, "key");
+            Objects.requireNonNull(value, "value");
+            ensureInitialized();
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment handleStruct = arena.allocate(HANDLE_LAYOUT);
+                HANDLE_PTR.set(handleStruct, handlePtr);
+                MemorySegment keySegment = toByteArray(arena, key);
+                MemorySegment valueSegment = toByteArray(arena, value);
+                MemorySegment result = (MemorySegment) putHandle.invokeExact(
+                    (SegmentAllocator) arena,
+                    handleStruct,
+                    keySegment,
+                    (long) key.length,
+                    valueSegment,
+                    (long) value.length,
+                    MemorySegment.NULL,
+                    MemorySegment.NULL
+                );
+                checkResult(result);
+            } catch (Throwable t) {
+                throw wrap(t);
+            }
+        }
+
+        static byte[] get(MemorySegment handlePtr, byte[] key) {
+            Objects.requireNonNull(key, "key");
+            ensureInitialized();
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment handleStruct = arena.allocate(HANDLE_LAYOUT);
+                HANDLE_PTR.set(handleStruct, handlePtr);
+                MemorySegment keySegment = toByteArray(arena, key);
+                MemorySegment valueOut = arena.allocate(VALUE_LAYOUT);
+                MemorySegment result = (MemorySegment) getHandle.invokeExact(
+                    (SegmentAllocator) arena,
+                    handleStruct,
+                    keySegment,
+                    (long) key.length,
+                    MemorySegment.NULL,
+                    valueOut
+                );
+                int error = (int) RESULT_ERROR.get(result);
+                MemorySegment messageSegment = (MemorySegment) RESULT_MESSAGE.get(result);
+                String message = readMessage(messageSegment);
+                RuntimeException failure = (error == 0) ? null
+                    : (error == 2 ? null : new SlateDbException(error, message));
+                freeResult(result, failure);
+                if (failure != null) {
+                    throw failure;
+                }
+                if (error == 2) {
+                    return null;
+                }
+                long len = (long) VALUE_LEN.get(valueOut);
+                MemorySegment data = (MemorySegment) VALUE_DATA.get(valueOut);
+                if (len < 0 || len > Integer.MAX_VALUE) {
+                    RuntimeException sizeError = new IllegalStateException("SlateDB value too large: " + len);
+                    freeValue(valueOut, sizeError);
+                    throw sizeError;
+                }
+                byte[] bytes = new byte[(int) len];
+                if (len > 0) {
+                    MemorySegment.copy(data, 0, MemorySegment.ofArray(bytes), 0, len);
+                }
+                freeValue(valueOut, null);
+                return bytes;
+            } catch (Throwable t) {
+                throw wrap(t);
+            }
+        }
+
         private static void ensureInitialized() {
             if (!initialized) {
                 loadLibrary();
@@ -191,10 +285,28 @@ public final class SlateDb implements AutoCloseable {
                     FunctionDescriptor.of(RESULT_LAYOUT, ValueLayout.ADDRESS));
                 openHandle = downcall(lookup, "slatedb_open",
                     FunctionDescriptor.of(HANDLE_RESULT_LAYOUT, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS));
+                putHandle = downcall(lookup, "slatedb_put_with_options",
+                    FunctionDescriptor.of(RESULT_LAYOUT,
+                        HANDLE_LAYOUT,
+                        ValueLayout.ADDRESS,
+                        ValueLayout.JAVA_LONG,
+                        ValueLayout.ADDRESS,
+                        ValueLayout.JAVA_LONG,
+                        ValueLayout.ADDRESS,
+                        ValueLayout.ADDRESS));
+                getHandle = downcall(lookup, "slatedb_get_with_options",
+                    FunctionDescriptor.of(RESULT_LAYOUT,
+                        HANDLE_LAYOUT,
+                        ValueLayout.ADDRESS,
+                        ValueLayout.JAVA_LONG,
+                        ValueLayout.ADDRESS,
+                        ValueLayout.ADDRESS));
                 closeHandle = downcall(lookup, "slatedb_close",
                     FunctionDescriptor.of(RESULT_LAYOUT, HANDLE_LAYOUT));
                 freeResultHandle = downcall(lookup, "slatedb_free_result",
                     FunctionDescriptor.ofVoid(RESULT_LAYOUT));
+                freeValueHandle = downcall(lookup, "slatedb_free_value",
+                    FunctionDescriptor.ofVoid(VALUE_LAYOUT));
                 initialized = true;
             }
         }
@@ -213,6 +325,14 @@ public final class SlateDb implements AutoCloseable {
             MemorySegment segment = arena.allocate(bytes.length + 1, 1);
             MemorySegment.copy(MemorySegment.ofArray(bytes), 0, segment, 0, bytes.length);
             segment.set(ValueLayout.JAVA_BYTE, bytes.length, (byte) 0);
+            return segment;
+        }
+
+        private static MemorySegment toByteArray(Arena arena, byte[] value) {
+            MemorySegment segment = arena.allocate(value.length, 1);
+            if (value.length > 0) {
+                MemorySegment.copy(MemorySegment.ofArray(value), 0, segment, 0, value.length);
+            }
             return segment;
         }
 
@@ -248,6 +368,19 @@ public final class SlateDb implements AutoCloseable {
                 freeResultHandle.invokeExact(result);
             } catch (Throwable t) {
                 RuntimeException failure = new RuntimeException("Failed to free SlateDB result", t);
+                if (pending != null) {
+                    pending.addSuppressed(failure);
+                } else {
+                    throw failure;
+                }
+            }
+        }
+
+        private static void freeValue(MemorySegment value, RuntimeException pending) {
+            try {
+                freeValueHandle.invokeExact(value);
+            } catch (Throwable t) {
+                RuntimeException failure = new RuntimeException("Failed to free SlateDB value", t);
                 if (pending != null) {
                     pending.addSuppressed(failure);
                 } else {
