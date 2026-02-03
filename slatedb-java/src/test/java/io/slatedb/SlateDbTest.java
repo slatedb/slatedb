@@ -115,19 +115,23 @@ class SlateDbTest {
         TestSupport.ensureNativeReady();
         TestSupport.DbContext context = TestSupport.createDbContext();
 
-        Path objectStoreFile = Files.createTempFile("slatedb-java-store", ".tmp");
-        String objectStoreUrl = "file://" + objectStoreFile.toAbsolutePath();
+        Path cacheRootDir = Files.createTempDirectory("slatedb-java-cache");
 
         SlateDb.Builder builder = SlateDb.builder(
             context.dbPath().toAbsolutePath().toString(),
-            objectStoreUrl,
+            context.objectStoreUrl(),
             null
         );
 
         SlateDb db = null;
         try {
+            String cacheRoot = cacheRootDir.toAbsolutePath().toString().replace("\\", "\\\\");
+            String settingsJson = SlateDb.settingsDefault()
+                .replace("\"root_folder\":null", "\"root_folder\":\"" + cacheRoot + "\"")
+                .replace("\"part_size_bytes\":4194304", "\"part_size_bytes\":0");
+            builder.withSettingsJson(settingsJson);
             db = builder.build();
-            Assertions.fail("Expected builder.build() to fail with an invalid object store path");
+            Assertions.fail("Expected builder.build() to fail with an invalid cache part size");
         } catch (RuntimeException expected) {
             Assertions.assertThrows(IllegalStateException.class,
                 () -> builder.withSettingsJson(SlateDb.settingsDefault()));
@@ -136,7 +140,7 @@ class SlateDbTest {
                 db.close();
             }
             Assertions.assertDoesNotThrow(builder::close);
-            Files.deleteIfExists(objectStoreFile);
+            Files.deleteIfExists(cacheRootDir);
         }
     }
 
@@ -215,11 +219,16 @@ class SlateDbTest {
     void readerGetAndScan() throws Exception {
         TestSupport.ensureNativeReady();
         TestSupport.DbContext context = TestSupport.createDbContext();
+        String readerObjectStoreUrl = "file://" + context.objectStoreRoot().toAbsolutePath();
 
         byte[] key = "reader-key".getBytes(StandardCharsets.UTF_8);
         byte[] value = "reader-value".getBytes(StandardCharsets.UTF_8);
 
-        try (SlateDb db = SlateDb.open(context.dbPath().toAbsolutePath().toString(), context.objectStoreUrl(), null)) {
+        try (SlateDb db = SlateDb.open(
+            context.dbPath().toAbsolutePath().toString(),
+            readerObjectStoreUrl,
+            null
+        )) {
             db.put(key, value);
             db.flush();
         }
@@ -233,7 +242,7 @@ class SlateDbTest {
 
         try (SlateDb.SlateDbReader reader = SlateDb.openReader(
             context.dbPath().toAbsolutePath().toString(),
-            context.objectStoreUrl(),
+            readerObjectStoreUrl,
             null,
             null,
             readerOptions
@@ -253,18 +262,23 @@ class SlateDbTest {
     void readerCloseIsIdempotentAndGuardsMethods() throws Exception {
         TestSupport.ensureNativeReady();
         TestSupport.DbContext context = TestSupport.createDbContext();
+        String readerObjectStoreUrl = "file://" + context.objectStoreRoot().toAbsolutePath();
 
         byte[] key = "reader-close-key".getBytes(StandardCharsets.UTF_8);
         byte[] value = "reader-close-value".getBytes(StandardCharsets.UTF_8);
 
-        try (SlateDb db = SlateDb.open(context.dbPath().toAbsolutePath().toString(), context.objectStoreUrl(), null)) {
+        try (SlateDb db = SlateDb.open(
+            context.dbPath().toAbsolutePath().toString(),
+            readerObjectStoreUrl,
+            null
+        )) {
             db.put(key, value);
             db.flush();
         }
 
         SlateDb.SlateDbReader reader = SlateDb.openReader(
             context.dbPath().toAbsolutePath().toString(),
-            context.objectStoreUrl(),
+            readerObjectStoreUrl,
             null,
             null,
             null

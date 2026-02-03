@@ -548,6 +548,57 @@ public final class SlateDb implements AutoCloseable {
                 MemoryLayout.PathElement.groupElement("result"),
                 MemoryLayout.PathElement.groupElement("message"));
 
+        private static final boolean VARHANDLE_REQUIRES_OFFSET =
+            RESULT_ERROR.coordinateTypes().size() == 2;
+
+        private static int getInt(VarHandle handle, MemorySegment segment) {
+            return (int) (VARHANDLE_REQUIRES_OFFSET ? handle.get(segment, 0L) : handle.get(segment));
+        }
+
+        private static long getLong(VarHandle handle, MemorySegment segment) {
+            return (long) (VARHANDLE_REQUIRES_OFFSET ? handle.get(segment, 0L) : handle.get(segment));
+        }
+
+        private static boolean getBoolean(VarHandle handle, MemorySegment segment) {
+            return (boolean) (VARHANDLE_REQUIRES_OFFSET ? handle.get(segment, 0L) : handle.get(segment));
+        }
+
+        private static MemorySegment getAddress(VarHandle handle, MemorySegment segment) {
+            return (MemorySegment) (VARHANDLE_REQUIRES_OFFSET ? handle.get(segment, 0L) : handle.get(segment));
+        }
+
+        private static void setInt(VarHandle handle, MemorySegment segment, int value) {
+            if (VARHANDLE_REQUIRES_OFFSET) {
+                handle.set(segment, 0L, value);
+            } else {
+                handle.set(segment, value);
+            }
+        }
+
+        private static void setLong(VarHandle handle, MemorySegment segment, long value) {
+            if (VARHANDLE_REQUIRES_OFFSET) {
+                handle.set(segment, 0L, value);
+            } else {
+                handle.set(segment, value);
+            }
+        }
+
+        private static void setBoolean(VarHandle handle, MemorySegment segment, boolean value) {
+            if (VARHANDLE_REQUIRES_OFFSET) {
+                handle.set(segment, 0L, value);
+            } else {
+                handle.set(segment, value);
+            }
+        }
+
+        private static void setAddress(VarHandle handle, MemorySegment segment, MemorySegment value) {
+            if (VARHANDLE_REQUIRES_OFFSET) {
+                handle.set(segment, 0L, value);
+            } else {
+                handle.set(segment, value);
+            }
+        }
+
         private static final long HANDLE_RESULT_RESULT_OFFSET =
             HANDLE_RESULT_LAYOUT.byteOffset(MemoryLayout.PathElement.groupElement("result"));
         private static final long READER_HANDLE_RESULT_OFFSET =
@@ -754,8 +805,8 @@ public final class SlateDb implements AutoCloseable {
                 MemorySegment envSegment = toCString(arena, envFile);
                 MemorySegment handleResult =
                     (MemorySegment) openHandle.invokeExact((SegmentAllocator) arena, pathSegment, urlSegment, envSegment);
-                int error = (int) HANDLE_RESULT_ERROR.get(handleResult);
-                MemorySegment messageSegment = (MemorySegment) HANDLE_RESULT_MESSAGE.get(handleResult);
+                int error = (int) getInt(HANDLE_RESULT_ERROR, handleResult);
+                MemorySegment messageSegment = (MemorySegment) getAddress(HANDLE_RESULT_MESSAGE, handleResult);
                 String message = readMessage(messageSegment);
                 MemorySegment resultSlice = handleResult.asSlice(HANDLE_RESULT_RESULT_OFFSET, RESULT_LAYOUT.byteSize());
                 RuntimeException failure = (error == 0) ? null : new SlateDbException(error, message);
@@ -763,7 +814,7 @@ public final class SlateDb implements AutoCloseable {
                 if (failure != null) {
                     throw failure;
                 }
-                MemorySegment handlePtr = (MemorySegment) HANDLE_RESULT_HANDLE_PTR.get(handleResult);
+                MemorySegment handlePtr = (MemorySegment) getAddress(HANDLE_RESULT_HANDLE_PTR, handleResult);
                 if (handlePtr == null || handlePtr.equals(MemorySegment.NULL)) {
                     throw new SlateDbException(-1, "SlateDB returned a null handle");
                 }
@@ -823,7 +874,7 @@ public final class SlateDb implements AutoCloseable {
             try (Arena arena = Arena.ofConfined()) {
                 MemorySegment handleStruct =
                     (MemorySegment) builderBuildHandle.invokeExact((SegmentAllocator) arena, builderPtr);
-                MemorySegment handlePtr = (MemorySegment) HANDLE_PTR.get(handleStruct);
+                MemorySegment handlePtr = (MemorySegment) getAddress(HANDLE_PTR, handleStruct);
                 if (handlePtr == null || handlePtr.equals(MemorySegment.NULL)) {
                     throw new SlateDbException(-1, "SlateDB builder failed to create a database");
                 }
@@ -868,8 +919,8 @@ public final class SlateDb implements AutoCloseable {
                     checkpointSegment,
                     optionsSegment
                 );
-                int error = (int) READER_HANDLE_RESULT_ERROR.get(handleResult);
-                MemorySegment messageSegment = (MemorySegment) READER_HANDLE_RESULT_MESSAGE.get(handleResult);
+                int error = (int) getInt(READER_HANDLE_RESULT_ERROR, handleResult);
+                MemorySegment messageSegment = (MemorySegment) getAddress(READER_HANDLE_RESULT_MESSAGE, handleResult);
                 String message = readMessage(messageSegment);
                 MemorySegment resultSlice =
                     handleResult.asSlice(READER_HANDLE_RESULT_OFFSET, RESULT_LAYOUT.byteSize());
@@ -878,7 +929,7 @@ public final class SlateDb implements AutoCloseable {
                 if (failure != null) {
                     throw failure;
                 }
-                MemorySegment handlePtr = (MemorySegment) READER_HANDLE_RESULT_HANDLE_PTR.get(handleResult);
+                MemorySegment handlePtr = (MemorySegment) getAddress(READER_HANDLE_RESULT_HANDLE_PTR, handleResult);
                 if (handlePtr == null || handlePtr.equals(MemorySegment.NULL)) {
                     throw new SlateDbException(-1, "SlateDB returned a null reader handle");
                 }
@@ -912,7 +963,7 @@ public final class SlateDb implements AutoCloseable {
             ensureInitialized();
             try (Arena arena = Arena.ofConfined()) {
                 MemorySegment handleStruct = arena.allocate(HANDLE_LAYOUT);
-                HANDLE_PTR.set(handleStruct, handlePtr);
+                setAddress(HANDLE_PTR, handleStruct, handlePtr);
                 MemorySegment result = (MemorySegment) closeHandle.invokeExact((SegmentAllocator) arena, handleStruct);
                 checkResult(result);
             } catch (Throwable t) {
@@ -925,7 +976,7 @@ public final class SlateDb implements AutoCloseable {
             ensureInitialized();
             try (Arena arena = Arena.ofConfined()) {
                 MemorySegment handleStruct = arena.allocate(HANDLE_LAYOUT);
-                HANDLE_PTR.set(handleStruct, handlePtr);
+                setAddress(HANDLE_PTR, handleStruct, handlePtr);
                 MemorySegment keySegment = toByteArray(arena, key);
                 MemorySegment optionsSegment = toWriteOptions(arena, options);
                 MemorySegment result = (MemorySegment) deleteHandle.invokeExact(
@@ -945,7 +996,7 @@ public final class SlateDb implements AutoCloseable {
             ensureInitialized();
             try (Arena arena = Arena.ofConfined()) {
                 MemorySegment handleStruct = arena.allocate(HANDLE_LAYOUT);
-                HANDLE_PTR.set(handleStruct, handlePtr);
+                setAddress(HANDLE_PTR, handleStruct, handlePtr);
                 MemorySegment result = (MemorySegment) flushHandle.invokeExact((SegmentAllocator) arena, handleStruct);
                 checkResult(result);
             } catch (Throwable t) {
@@ -962,7 +1013,7 @@ public final class SlateDb implements AutoCloseable {
             ensureInitialized();
             try (Arena arena = Arena.ofConfined()) {
                 MemorySegment handleStruct = arena.allocate(HANDLE_LAYOUT);
-                HANDLE_PTR.set(handleStruct, handlePtr);
+                setAddress(HANDLE_PTR, handleStruct, handlePtr);
                 MemorySegment startKeySegment = startKey == null ? MemorySegment.NULL : toByteArray(arena, startKey);
                 MemorySegment endKeySegment = endKey == null ? MemorySegment.NULL : toByteArray(arena, endKey);
                 MemorySegment optionsSegment = toScanOptions(arena, options);
@@ -996,7 +1047,7 @@ public final class SlateDb implements AutoCloseable {
             ensureInitialized();
             try (Arena arena = Arena.ofConfined()) {
                 MemorySegment handleStruct = arena.allocate(HANDLE_LAYOUT);
-                HANDLE_PTR.set(handleStruct, handlePtr);
+                setAddress(HANDLE_PTR, handleStruct, handlePtr);
                 MemorySegment prefixSegment = prefix == null ? MemorySegment.NULL : toByteArray(arena, prefix);
                 MemorySegment optionsSegment = toScanOptions(arena, options);
                 MemorySegment iteratorOut = arena.allocate(ValueLayout.ADDRESS);
@@ -1023,15 +1074,15 @@ public final class SlateDb implements AutoCloseable {
             ensureInitialized();
             try (Arena arena = Arena.ofConfined()) {
                 MemorySegment handleStruct = arena.allocate(HANDLE_LAYOUT);
-                HANDLE_PTR.set(handleStruct, handlePtr);
+                setAddress(HANDLE_PTR, handleStruct, handlePtr);
                 MemorySegment valueOut = arena.allocate(VALUE_LAYOUT);
                 MemorySegment result = (MemorySegment) metricsHandle.invokeExact(
                     (SegmentAllocator) arena,
                     handleStruct,
                     valueOut
                 );
-                int error = (int) RESULT_ERROR.get(result);
-                MemorySegment messageSegment = (MemorySegment) RESULT_MESSAGE.get(result);
+                int error = (int) getInt(RESULT_ERROR, result);
+                MemorySegment messageSegment = (MemorySegment) getAddress(RESULT_MESSAGE, result);
                 String message = readMessage(messageSegment);
                 RuntimeException failure = (error == 0) ? null : new SlateDbException(error, message);
                 freeResult(result, failure);
@@ -1050,7 +1101,7 @@ public final class SlateDb implements AutoCloseable {
             ensureInitialized();
             try (Arena arena = Arena.ofConfined()) {
                 MemorySegment handleStruct = arena.allocate(HANDLE_LAYOUT);
-                HANDLE_PTR.set(handleStruct, handlePtr);
+                setAddress(HANDLE_PTR, handleStruct, handlePtr);
                 MemorySegment keySegment = toByteArray(arena, key);
                 MemorySegment optionsSegment = toReadOptions(arena, options);
                 MemorySegment valueOut = arena.allocate(VALUE_LAYOUT);
@@ -1062,8 +1113,8 @@ public final class SlateDb implements AutoCloseable {
                     optionsSegment,
                     valueOut
                 );
-                int error = (int) RESULT_ERROR.get(result);
-                MemorySegment messageSegment = (MemorySegment) RESULT_MESSAGE.get(result);
+                int error = (int) getInt(RESULT_ERROR, result);
+                MemorySegment messageSegment = (MemorySegment) getAddress(RESULT_MESSAGE, result);
                 String message = readMessage(messageSegment);
                 RuntimeException failure = (error == 0) ? null
                     : (error == 2 ? null : new SlateDbException(error, message));
@@ -1092,7 +1143,7 @@ public final class SlateDb implements AutoCloseable {
             ensureInitialized();
             try (Arena arena = Arena.ofConfined()) {
                 MemorySegment handleStruct = arena.allocate(HANDLE_LAYOUT);
-                HANDLE_PTR.set(handleStruct, handlePtr);
+                setAddress(HANDLE_PTR, handleStruct, handlePtr);
                 MemorySegment keySegment = toByteArray(arena, key);
                 MemorySegment valueSegment = toByteArray(arena, value);
                 MemorySegment putOptionsSegment = toPutOptions(arena, putOptions);
@@ -1118,7 +1169,7 @@ public final class SlateDb implements AutoCloseable {
             ensureInitialized();
             try (Arena arena = Arena.ofConfined()) {
                 MemorySegment handleStruct = arena.allocate(READER_HANDLE_LAYOUT);
-                READER_HANDLE_PTR.set(handleStruct, readerHandle);
+                setAddress(READER_HANDLE_PTR, handleStruct, readerHandle);
                 MemorySegment keySegment = toByteArray(arena, key);
                 MemorySegment optionsSegment = toReadOptions(arena, options);
                 MemorySegment valueOut = arena.allocate(VALUE_LAYOUT);
@@ -1130,8 +1181,8 @@ public final class SlateDb implements AutoCloseable {
                     optionsSegment,
                     valueOut
                 );
-                int error = (int) RESULT_ERROR.get(result);
-                MemorySegment messageSegment = (MemorySegment) RESULT_MESSAGE.get(result);
+                int error = (int) getInt(RESULT_ERROR, result);
+                MemorySegment messageSegment = (MemorySegment) getAddress(RESULT_MESSAGE, result);
                 String message = readMessage(messageSegment);
                 RuntimeException failure = (error == 0) ? null
                     : (error == 2 ? null : new SlateDbException(error, message));
@@ -1157,7 +1208,7 @@ public final class SlateDb implements AutoCloseable {
             ensureInitialized();
             try (Arena arena = Arena.ofConfined()) {
                 MemorySegment handleStruct = arena.allocate(READER_HANDLE_LAYOUT);
-                READER_HANDLE_PTR.set(handleStruct, readerHandle);
+                setAddress(READER_HANDLE_PTR, handleStruct, readerHandle);
                 MemorySegment startKeySegment = startKey == null ? MemorySegment.NULL : toByteArray(arena, startKey);
                 MemorySegment endKeySegment = endKey == null ? MemorySegment.NULL : toByteArray(arena, endKey);
                 MemorySegment optionsSegment = toScanOptions(arena, options);
@@ -1191,7 +1242,7 @@ public final class SlateDb implements AutoCloseable {
             ensureInitialized();
             try (Arena arena = Arena.ofConfined()) {
                 MemorySegment handleStruct = arena.allocate(READER_HANDLE_LAYOUT);
-                READER_HANDLE_PTR.set(handleStruct, readerHandle);
+                setAddress(READER_HANDLE_PTR, handleStruct, readerHandle);
                 MemorySegment prefixSegment = prefix == null ? MemorySegment.NULL : toByteArray(arena, prefix);
                 MemorySegment optionsSegment = toScanOptions(arena, options);
                 MemorySegment iteratorOut = arena.allocate(ValueLayout.ADDRESS);
@@ -1221,7 +1272,7 @@ public final class SlateDb implements AutoCloseable {
             ensureInitialized();
             try (Arena arena = Arena.ofConfined()) {
                 MemorySegment handleStruct = arena.allocate(READER_HANDLE_LAYOUT);
-                READER_HANDLE_PTR.set(handleStruct, readerHandle);
+                setAddress(READER_HANDLE_PTR, handleStruct, readerHandle);
                 MemorySegment result =
                     (MemorySegment) readerCloseHandle.invokeExact((SegmentAllocator) arena, handleStruct);
                 checkResult(result);
@@ -1239,8 +1290,8 @@ public final class SlateDb implements AutoCloseable {
                     iterPtr,
                     kvOut
                 );
-                int error = (int) RESULT_ERROR.get(result);
-                MemorySegment messageSegment = (MemorySegment) RESULT_MESSAGE.get(result);
+                int error = (int) getInt(RESULT_ERROR, result);
+                MemorySegment messageSegment = (MemorySegment) getAddress(RESULT_MESSAGE, result);
                 String message = readMessage(messageSegment);
                 RuntimeException failure = (error == 0) ? null
                     : (error == 2 ? null : new SlateDbException(error, message));
@@ -1362,7 +1413,7 @@ public final class SlateDb implements AutoCloseable {
             ensureInitialized();
             try (Arena arena = Arena.ofConfined()) {
                 MemorySegment handleStruct = arena.allocate(HANDLE_LAYOUT);
-                HANDLE_PTR.set(handleStruct, handlePtr);
+                setAddress(HANDLE_PTR, handleStruct, handlePtr);
                 MemorySegment optionsSegment = toWriteOptions(arena, options);
                 MemorySegment result = (MemorySegment) writeBatchWriteHandle.invokeExact(
                     (SegmentAllocator) arena,
@@ -1590,8 +1641,8 @@ public final class SlateDb implements AutoCloseable {
                 return MemorySegment.NULL;
             }
             MemorySegment segment = arena.allocate(PUT_OPTIONS_LAYOUT);
-            PUT_OPTIONS_TTL_TYPE.set(segment, options.ttlType.code);
-            PUT_OPTIONS_TTL_VALUE.set(segment, options.ttlValueMs);
+            setInt(PUT_OPTIONS_TTL_TYPE, segment, options.ttlType.code);
+            setLong(PUT_OPTIONS_TTL_VALUE, segment, options.ttlValueMs);
             return segment;
         }
 
@@ -1600,7 +1651,7 @@ public final class SlateDb implements AutoCloseable {
                 return MemorySegment.NULL;
             }
             MemorySegment segment = arena.allocate(WRITE_OPTIONS_LAYOUT);
-            WRITE_OPTIONS_AWAIT_DURABLE.set(segment, options.awaitDurable);
+            setBoolean(WRITE_OPTIONS_AWAIT_DURABLE, segment, options.awaitDurable);
             return segment;
         }
 
@@ -1609,9 +1660,9 @@ public final class SlateDb implements AutoCloseable {
                 return MemorySegment.NULL;
             }
             MemorySegment segment = arena.allocate(READ_OPTIONS_LAYOUT);
-            READ_OPTIONS_DURABILITY.set(segment, options.durabilityFilter.code);
-            READ_OPTIONS_DIRTY.set(segment, options.dirty);
-            READ_OPTIONS_CACHE_BLOCKS.set(segment, options.cacheBlocks);
+            setInt(READ_OPTIONS_DURABILITY, segment, options.durabilityFilter.code);
+            setBoolean(READ_OPTIONS_DIRTY, segment, options.dirty);
+            setBoolean(READ_OPTIONS_CACHE_BLOCKS, segment, options.cacheBlocks);
             return segment;
         }
 
@@ -1620,11 +1671,11 @@ public final class SlateDb implements AutoCloseable {
                 return MemorySegment.NULL;
             }
             MemorySegment segment = arena.allocate(SCAN_OPTIONS_LAYOUT);
-            SCAN_OPTIONS_DURABILITY.set(segment, options.durabilityFilter.code);
-            SCAN_OPTIONS_DIRTY.set(segment, options.dirty);
-            SCAN_OPTIONS_READ_AHEAD_BYTES.set(segment, options.readAheadBytes);
-            SCAN_OPTIONS_CACHE_BLOCKS.set(segment, options.cacheBlocks);
-            SCAN_OPTIONS_MAX_FETCH_TASKS.set(segment, options.maxFetchTasks);
+            setInt(SCAN_OPTIONS_DURABILITY, segment, options.durabilityFilter.code);
+            setBoolean(SCAN_OPTIONS_DIRTY, segment, options.dirty);
+            setLong(SCAN_OPTIONS_READ_AHEAD_BYTES, segment, options.readAheadBytes);
+            setBoolean(SCAN_OPTIONS_CACHE_BLOCKS, segment, options.cacheBlocks);
+            setLong(SCAN_OPTIONS_MAX_FETCH_TASKS, segment, options.maxFetchTasks);
             return segment;
         }
 
@@ -1633,10 +1684,10 @@ public final class SlateDb implements AutoCloseable {
                 return MemorySegment.NULL;
             }
             MemorySegment segment = arena.allocate(READER_OPTIONS_LAYOUT);
-            READER_OPTIONS_MANIFEST_POLL_INTERVAL.set(segment, options.manifestPollIntervalMs);
-            READER_OPTIONS_CHECKPOINT_LIFETIME.set(segment, options.checkpointLifetimeMs);
-            READER_OPTIONS_MAX_MEMTABLE_BYTES.set(segment, options.maxMemtableBytes);
-            READER_OPTIONS_SKIP_WAL_REPLAY.set(segment, options.skipWalReplay);
+            setLong(READER_OPTIONS_MANIFEST_POLL_INTERVAL, segment, options.manifestPollIntervalMs);
+            setLong(READER_OPTIONS_CHECKPOINT_LIFETIME, segment, options.checkpointLifetimeMs);
+            setLong(READER_OPTIONS_MAX_MEMTABLE_BYTES, segment, options.maxMemtableBytes);
+            setBoolean(READER_OPTIONS_SKIP_WAL_REPLAY, segment, options.skipWalReplay);
             return segment;
         }
 
@@ -1670,8 +1721,8 @@ public final class SlateDb implements AutoCloseable {
         }
 
         private static byte[] copyValue(MemorySegment valueOut, RuntimeException pending) {
-            long len = (long) VALUE_LEN.get(valueOut);
-            MemorySegment data = (MemorySegment) VALUE_DATA.get(valueOut);
+            long len = (long) getLong(VALUE_LEN, valueOut);
+            MemorySegment data = (MemorySegment) getAddress(VALUE_DATA, valueOut);
             if (len < 0 || len > Integer.MAX_VALUE) {
                 RuntimeException sizeError = new IllegalStateException("SlateDB value too large: " + len);
                 freeValue(valueOut, sizeError);
@@ -1713,8 +1764,8 @@ public final class SlateDb implements AutoCloseable {
         }
 
         private static void checkResult(MemorySegment result) {
-            int error = (int) RESULT_ERROR.get(result);
-            MemorySegment messageSegment = (MemorySegment) RESULT_MESSAGE.get(result);
+            int error = (int) getInt(RESULT_ERROR, result);
+            MemorySegment messageSegment = (MemorySegment) getAddress(RESULT_MESSAGE, result);
             String message = readMessage(messageSegment);
             RuntimeException failure = (error == 0) ? null : new SlateDbException(error, message);
             freeResult(result, failure);
