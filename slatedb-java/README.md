@@ -1,16 +1,194 @@
-# SlateDB Java (Stub)
+<a href="https://slatedb.io">
+  <img src="https://github.com/slatedb/slatedb/blob/main/website/public/img/slatedb-gh-banner.png?raw=true" alt="SlateDB" width="100%">
+</a>
 
-This is a minimal Java 24 FFI-based binding for SlateDB backed by `slatedb-c`.
+# SlateDB Java
 
-**Build Steps**
-1. Build the native library from the repo root:
-   `cargo build -p slatedb-c`
-2. Locate the native library artifact:
-   `macOS: target/debug/libslatedb_c.dylib`, `Linux: target/debug/libslatedb_c.so`, `Windows: target/debug/slatedb_c.dll`
-3. Build the Java binding:
-   `./gradlew build` (from `slatedb-java`)
+SlateDB Java is a Java 24 binding for SlateDB built on the `slatedb-c` FFI library. It uses the Java Foreign Function and Memory (FFM) API to call native SlateDB directly, so there is no JNI wrapper layer.
 
-**Run Notes**
-- The native library name is `slatedb_c` (e.g. `libslatedb_c.dylib` on macOS).
-- Set `-Djava.library.path=...` to the directory containing the native library, or call `SlateDb.loadLibrary("<absolute path>")`.
-- When running code that uses FFI, you may need `--enable-native-access=ALL-UNNAMED`.
+## Introduction
+
+[SlateDB](https://slatedb.io) is an embedded storage engine built as a log-structured merge-tree that writes data to object storage (S3, GCS, ABS, MinIO, Tigris, and more). These Java bindings expose the core SlateDB API (get/put/delete, scans, batching, and readers) with minimal overhead.
+
+## Requirements
+
+- Java 24 (required for the FFM API used by these bindings)
+- Rust toolchain (to build `slatedb-c`)
+- A supported object store (for local development, use `memory://` or `file://` URLs)
+
+## Build the Native Library
+
+From the repository root:
+
+```bash
+cargo build -p slatedb-c
+```
+
+Native library locations:
+- macOS: `target/debug/libslatedb_c.dylib`
+- Linux: `target/debug/libslatedb_c.so`
+- Windows: `target/debug/slatedb_c.dll`
+
+Optional release build:
+
+```bash
+cargo build -p slatedb-c --release
+```
+
+## Build the JAR
+
+From `slatedb-java`:
+
+```bash
+./gradlew jar
+```
+
+The JAR will be written to:
+
+```
+slatedb-java/build/libs/slatedb-java-<version>.jar
+```
+
+## Hello World
+
+1. Create `HelloSlateDb.java`:
+
+```java
+import io.slatedb.SlateDb;
+
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+
+public final class HelloSlateDb {
+    public static void main(String[] args) throws Exception {
+        if (args.length != 1) {
+            System.err.println("Usage: HelloSlateDb <absolute path to slatedb_c native library>");
+            System.exit(2);
+        }
+
+        // Load the native library and initialize logging
+        SlateDb.loadLibrary(args[0]);
+        SlateDb.initLogging("info");
+
+        // Local database path and local object store
+        Path dbPath = Files.createTempDirectory("slatedb-java-db");
+        Path objectStoreRoot = Files.createTempDirectory("slatedb-java-store");
+        String objectStoreUrl = "file://" + objectStoreRoot.toAbsolutePath();
+
+        byte[] key = "hello-key".getBytes(StandardCharsets.UTF_8);
+        byte[] value = "hello-value".getBytes(StandardCharsets.UTF_8);
+
+        try (SlateDb db = SlateDb.open(dbPath.toString(), objectStoreUrl, null)) {
+            // Put + Get
+            db.put(key, value);
+            byte[] loaded = db.get(key);
+            System.out.println("loaded=" + new String(loaded, StandardCharsets.UTF_8));
+
+            // Delete
+            db.delete(key);
+
+            // Batch write
+            try (SlateDb.WriteBatch batch = SlateDb.newWriteBatch()) {
+                batch.put("hello-a".getBytes(StandardCharsets.UTF_8), "value-a".getBytes(StandardCharsets.UTF_8));
+                batch.put("hello-b".getBytes(StandardCharsets.UTF_8), "value-b".getBytes(StandardCharsets.UTF_8));
+                db.write(batch);
+            }
+
+            // Scan by prefix
+            try (SlateDb.ScanIterator iter = db.scanPrefix("hello-".getBytes(StandardCharsets.UTF_8))) {
+                SlateDb.KeyValue kv;
+                while ((kv = iter.next()) != null) {
+                    System.out.println(
+                        new String(kv.key(), StandardCharsets.UTF_8) + "=" +
+                        new String(kv.value(), StandardCharsets.UTF_8)
+                    );
+                }
+            }
+        }
+    }
+}
+```
+
+2. Compile (from the repository root):
+
+```bash
+javac -cp slatedb-java/build/libs/slatedb-java-<version>.jar HelloSlateDb.java
+```
+
+3. Run (use the path to your `slatedb_c` native library):
+
+```bash
+java --enable-native-access=ALL-UNNAMED \
+  -cp slatedb-java/build/libs/slatedb-java-<version>.jar:. \
+  HelloSlateDb /absolute/path/to/libslatedb_c.dylib
+```
+
+If you prefer `java.library.path` instead of `SlateDb.loadLibrary(path)`, set the directory containing the native library and call `SlateDb.loadLibrary()` with no arguments.
+
+```bash
+java --enable-native-access=ALL-UNNAMED \
+  -Djava.library.path=/absolute/path/to/native/lib/dir \
+  -cp slatedb-java/build/libs/slatedb-java-<version>.jar:. \
+  HelloSlateDb
+```
+
+## API Overview
+
+Core types:
+- `SlateDb`: Read/write database handle. Always close it (try-with-resources recommended).
+- `SlateDbReader`: Read-only handle for snapshot-style reads.
+- `WriteBatch`: Batch of put/delete operations written atomically.
+- `ScanIterator`: Iterator for range scans and prefix scans.
+
+Key operations:
+- `put`, `get`, `delete` for basic CRUD.
+- `write(WriteBatch)` for atomic batches.
+- `scan(startKey, endKey)` and `scanPrefix(prefix)` for range and prefix scans.
+- `flush()` to force writes to object storage.
+
+## Settings and Configuration
+
+You can configure SlateDB with JSON settings or a builder:
+
+```java
+String settings = SlateDb.settingsDefault();
+
+try (SlateDb.Builder builder = SlateDb.builder(dbPath, objectStoreUrl, null)) {
+    builder.withSettingsJson(settings)
+           .withSstBlockSize(SlateDb.SstBlockSize.KIB_4);
+    try (SlateDb db = builder.build()) {
+        // use db
+    }
+}
+```
+
+The settings helpers:
+- `settingsDefault()`: Returns the default JSON settings.
+- `settingsFromFile(path)`: Loads settings from JSON/TOML/YAML.
+- `settingsFromEnv(prefix)`: Loads settings from environment variables.
+- `settingsLoad()`: Auto-detect settings from well-known files and env.
+
+## Testing
+
+JUnit tests require access to the native library. Set one of these before running tests:
+
+- `SLATEDB_C_LIB=/absolute/path/to/libslatedb_c.dylib`
+- `-Dslatedb.c.lib=/absolute/path/to/libslatedb_c.dylib`
+
+Then run:
+
+```bash
+./gradlew test
+```
+
+## Troubleshooting
+
+Common issues:
+- `UnsatisfiedLinkError`: The JVM cannot find `slatedb_c`. Verify `java.library.path` or call `SlateDb.loadLibrary(<absolute path>)`.
+- `IllegalStateException: SlateDb is closed`: You are using a closed handle. Create a new `SlateDb` instance instead.
+- Native access warnings: Use `--enable-native-access=ALL-UNNAMED` when running or testing.
+
+## License
+
+SlateDB is licensed under the Apache License, Version 2.0.

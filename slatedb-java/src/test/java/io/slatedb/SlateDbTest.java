@@ -3,6 +3,7 @@ package io.slatedb;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
+import java.lang.reflect.Field;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -26,6 +27,25 @@ class SlateDbTest {
             byte[] loaded = db.get(key);
             Assertions.assertArrayEquals(value, loaded);
         }
+    }
+
+    @Test
+    void closeIsIdempotentAndGuardsMethods() throws Exception {
+        TestSupport.ensureNativeReady();
+        TestSupport.DbContext context = TestSupport.createDbContext();
+
+        byte[] key = "close-key".getBytes(StandardCharsets.UTF_8);
+        byte[] value = "close-value".getBytes(StandardCharsets.UTF_8);
+
+        SlateDb db = SlateDb.open(context.dbPath().toAbsolutePath().toString(), context.objectStoreUrl(), null);
+        try {
+            db.put(key, value);
+        } finally {
+            db.close();
+        }
+
+        Assertions.assertDoesNotThrow(db::close);
+        Assertions.assertThrows(IllegalStateException.class, () -> db.get(key));
     }
 
     @Test
@@ -87,6 +107,36 @@ class SlateDbTest {
                 db.put(key, value);
                 Assertions.assertArrayEquals(value, db.get(key));
             }
+        }
+    }
+
+    @Test
+    void builderBuildFailureClosesBuilder() throws Exception {
+        TestSupport.ensureNativeReady();
+        TestSupport.DbContext context = TestSupport.createDbContext();
+
+        Path objectStoreFile = Files.createTempFile("slatedb-java-store", ".tmp");
+        String objectStoreUrl = "file://" + objectStoreFile.toAbsolutePath();
+
+        SlateDb.Builder builder = SlateDb.builder(
+            context.dbPath().toAbsolutePath().toString(),
+            objectStoreUrl,
+            null
+        );
+
+        SlateDb db = null;
+        try {
+            db = builder.build();
+            Assertions.fail("Expected builder.build() to fail with an invalid object store path");
+        } catch (RuntimeException expected) {
+            Assertions.assertThrows(IllegalStateException.class,
+                () -> builder.withSettingsJson(SlateDb.settingsDefault()));
+        } finally {
+            if (db != null) {
+                db.close();
+            }
+            Assertions.assertDoesNotThrow(builder::close);
+            Files.deleteIfExists(objectStoreFile);
         }
     }
 
@@ -200,6 +250,37 @@ class SlateDbTest {
     }
 
     @Test
+    void readerCloseIsIdempotentAndGuardsMethods() throws Exception {
+        TestSupport.ensureNativeReady();
+        TestSupport.DbContext context = TestSupport.createDbContext();
+
+        byte[] key = "reader-close-key".getBytes(StandardCharsets.UTF_8);
+        byte[] value = "reader-close-value".getBytes(StandardCharsets.UTF_8);
+
+        try (SlateDb db = SlateDb.open(context.dbPath().toAbsolutePath().toString(), context.objectStoreUrl(), null)) {
+            db.put(key, value);
+            db.flush();
+        }
+
+        SlateDb.SlateDbReader reader = SlateDb.openReader(
+            context.dbPath().toAbsolutePath().toString(),
+            context.objectStoreUrl(),
+            null,
+            null,
+            null
+        );
+
+        try {
+            Assertions.assertArrayEquals(value, reader.get(key));
+            reader.close();
+            Assertions.assertDoesNotThrow(reader::close);
+            Assertions.assertThrows(IllegalStateException.class, () -> reader.get(key));
+        } finally {
+            reader.close();
+        }
+    }
+
+    @Test
     void writeBatchPutAndDelete() throws Exception {
         TestSupport.ensureNativeReady();
         TestSupport.DbContext context = TestSupport.createDbContext();
@@ -265,6 +346,29 @@ class SlateDbTest {
     }
 
     @Test
+    void writeBatchFailureConsumesBatch() throws Exception {
+        TestSupport.ensureNativeReady();
+        TestSupport.DbContext context = TestSupport.createDbContext();
+
+        byte[] key = "batch-fail-key".getBytes(StandardCharsets.UTF_8);
+        byte[] value = "batch-fail-value".getBytes(StandardCharsets.UTF_8);
+
+        try (SlateDb db = SlateDb.open(context.dbPath().toAbsolutePath().toString(), context.objectStoreUrl(), null);
+             SlateDb.WriteBatch batch = SlateDb.newWriteBatch()) {
+            batch.put(key, value);
+            db.write(batch);
+
+            Field consumedField = SlateDb.WriteBatch.class.getDeclaredField("consumed");
+            consumedField.setAccessible(true);
+            consumedField.setBoolean(batch, false);
+
+            Assertions.assertThrows(RuntimeException.class, () -> db.write(batch));
+            Assertions.assertThrows(IllegalStateException.class, () -> batch.put(key, value));
+            Assertions.assertThrows(IllegalStateException.class, () -> db.write(batch));
+        }
+    }
+
+    @Test
     void writeRejectsClosedBatch() throws Exception {
         TestSupport.ensureNativeReady();
         TestSupport.DbContext context = TestSupport.createDbContext();
@@ -275,4 +379,5 @@ class SlateDbTest {
             Assertions.assertThrows(IllegalStateException.class, () -> db.write(batch));
         }
     }
+
 }
