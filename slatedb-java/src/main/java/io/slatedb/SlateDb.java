@@ -1,4 +1,4 @@
-package com.slatedb;
+package io.slatedb;
 
 import java.lang.foreign.Arena;
 import java.lang.foreign.FunctionDescriptor;

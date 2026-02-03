@@ -1,4 +1,4 @@
-package com.slatedb;
+package io.slatedb;
 
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
