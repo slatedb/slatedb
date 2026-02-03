@@ -6,9 +6,12 @@ group = 'com.slatedb'
 version = '0.1.0-SNAPSHOT'
 
 java {
-    toolchain {
-        languageVersion = JavaLanguageVersion.of(24)
-    }
+    sourceCompatibility = JavaVersion.VERSION_24
+    targetCompatibility = JavaVersion.VERSION_24
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.release = 24
 }
 
 repositories {
