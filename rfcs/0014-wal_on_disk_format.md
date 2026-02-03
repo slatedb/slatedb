@@ -34,7 +34,22 @@ Table of Contents:
 
 <!-- TOC end -->
 
-Status: Draft
+Status: **Rejected**
+
+In the discussion, we realized that having blocks that can be loaded separately makes also sense for the
+WAL.
+The separately loadable blocks need indices in the file format that point to the blocks.
+If we add blocks and indices to a new WAL format, the new format would be really similar to the
+existing SST format since also the new WAL format would need versioning and metadata similar to the
+one in the existing SST format.
+The only component of the existing SST format that is not needed for the WAL format is the filter.
+Not encoding the filter is allowed in the existing SST format when there are fewer keys in the SST
+than set in config `min_filter_keys`.
+Thus, not encoding filters for the WAL would also not justify a new format.
+Additionally, it is not impossible that filters for WAL files might be interesting for future use cases.
+Given all of these arguments, we decided to reject this RFC about a new persistence format for the WAL
+and re-use the existing SST format instead.
+
 
 Authors:
 
@@ -43,12 +58,12 @@ Authors:
 <!-- TOC --><a name="summary"></a>
 ## Summary
 
-This RFC proposes a dedicated persistence format for the write-ahead log (WAL). 
-The new format tries to minimize the overhead when adding incoming records to WAL and 
+This RFC proposes a dedicated persistence format for the write-ahead log (WAL).
+The new format tries to minimize the overhead when adding incoming records to WAL and
 flushing the buffered WAL to object store.
 Tightly bound to the new persistence format is an in-memory data structure for batching and flushing WAL records.
-This RFC only specifies the persistence format and some desirable properties of the in-memory data structure. 
-No exact implementation of the in-memory data structure is provided, so that the in-memory structure can be 
+This RFC only specifies the persistence format and some desirable properties of the in-memory data structure.
+No exact implementation of the in-memory data structure is provided, so that the in-memory structure can be
 modified without the need of new RFC.
 
 <!-- Briefly explain what this RFC changes and why. Prefer 3–6 sentences. -->
@@ -56,30 +71,30 @@ modified without the need of new RFC.
 <!-- TOC --><a name="motivation"></a>
 ## Motivation
 
-Currently, the WAL is buffered in memory in a `KVTable`. 
-That is the same data structure that is used for the memtable. 
-The `KVTable` is a skip map -- an ordered map based on a skip list -- that keeps all incoming key-value pairs ordered by key. 
+Currently, the WAL is buffered in memory in a `KVTable`.
+That is the same data structure that is used for the memtable.
+The `KVTable` is a skip map -- an ordered map based on a skip list -- that keeps all incoming key-value pairs ordered by key.
 While this is beneficial for the memtable for reading and flushing, it adds unnecessary overhead for the WAL.
 The WAL merely needs to maintain records in the order they are ingested to ensure durability and recovery.
 
-In object storage, the WAL is stored as a sorted string table (SST). 
-Encoding the SST from a `KVTable` also implies overhead that is unnecessary for the WAL. 
-For example, filters and indices are not needed for a WAL object that stores records in the same order they were 
+In object storage, the WAL is stored as a sorted string table (SST).
+Encoding the SST from a `KVTable` also implies overhead that is unnecessary for the WAL.
+For example, filters and indices are not needed for a WAL object that stores records in the same order they were
 ingested and also reads those records sequentially in that order.
 
-Separating the format of the WAL from the format of the SST allows the WAL format to model sequential writes in 
-lock-step with the monotonically increasing sequence number. 
+Separating the format of the WAL from the format of the SST allows the WAL format to model sequential writes in
+lock-step with the monotonically increasing sequence number.
 Sequence numbers are assigned to each ingested record according to the write snapshot they belong to.
 Having a WAL format model sequential writes is an advantage when records need to be read in the same order they were ingested.
-This kind of sequential read is the main read pattern of a write-ahead *log* by definition. 
-The most prominent example for this sequential read pattern is the recovery of a database state. 
-With the current SST format that is also used to store WAL objects, 
+This kind of sequential read is the main read pattern of a write-ahead *log* by definition.
+The most prominent example for this sequential read pattern is the recovery of a database state.
+With the current SST format that is also used to store WAL objects,
 the records are sorted by key not by the sequence number making sequential reads by sequence number costly.
 
-For these reasons, the WAL can be implemented with a first-in first-out (FIFO) data structure in memory and with a persistence 
+For these reasons, the WAL can be implemented with a first-in first-out (FIFO) data structure in memory and with a persistence
 format that sequentially stores and loads records without any specific indices or filters.
 
-The overhead of using the skip map and the SST format for the WAL can be seen in the two flamegraphs included in 
+The overhead of using the skip map and the SST format for the WAL can be seen in the two flamegraphs included in
 GitHub issue [#1085](https://github.com/slatedb/slatedb/issues/1085).
 The overhead hinders higher ingest throughput into SlateDB.
 
@@ -93,8 +108,8 @@ The overhead hinders higher ingest throughput into SlateDB.
 <!-- TOC --><a name="non-goals"></a>
 ## Non-Goals
 
-- Specify the implementation of the in-memory data structure. 
-Merely, some desirable properties will be mentioned.  
+- Specify the implementation of the in-memory data structure.
+Merely, some desirable properties will be mentioned.
 
 <!-- TOC --><a name="design"></a>
 ## Design
@@ -310,7 +325,7 @@ SlateDB features and components that this RFC interacts with. Check all that app
 
 <!-- Describe performance and cost implications of this change. -->
 
-- **Latency (reads/writes/compactions):** 
+- **Latency (reads/writes/compactions):**
 The latency for writes with durability guarantee mainly depends on the configured flush interval
 (i.e., `flush_interval`) that is used to decide when the in-memory WAL data structure is flushed to object storage.
 The latency of writes might be less since fewer bytes need to be flushed to object store with the new WAL format.
@@ -318,7 +333,7 @@ However, if there is a difference in latency, I expect that the difference will 
 The latency for writes without durability guarantee might be lower if the in-memory data structure is a simple FIFO
 data structure as recommended in this RFC, since writes to the in-memory WAL are faster.
 A WAL object is read for recovery.
-If we define the latency of recovery as the time until the in-memory state is re-established then the new persistence 
+If we define the latency of recovery as the time until the in-memory state is re-established then the new persistence
 format might decrease the latency of recovery because the records in the WAL do not need to be re-sorted according
 to the sequence number.
 The latency of compaction is not affected by the new persistence format.
@@ -337,7 +352,7 @@ The throughput of compaction is not affected by the new persistence format.
 If the WAL is stored on S3 Express to reduce latency, the new format reduces transfer costs
 (i.e. data uploads, currently $0.0032 per GB).
 - **Space, read, and write amplification:**
-All three amplifications are reduced. 
+All three amplifications are reduced.
 
 <!-- TOC --><a name="observability"></a>
 ### Observability
@@ -378,11 +393,11 @@ All three amplifications are reduced.
 
 <!-- Describe the testing plan for this change. -->
 
-- Unit tests: 
+- Unit tests:
 	- Adapt unit existing unit tests and add new unit tests where needed.
-- Integration tests: 
+- Integration tests:
 	- Adapt existing unit tests if needed,
-	- Write integration tests for migration from the old to the new persistence format  
+	- Write integration tests for migration from the old to the new persistence format
 - Fault-injection/chaos tests: No
 - Deterministic simulation tests: No
 - Formal methods verification: No
