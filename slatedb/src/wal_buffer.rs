@@ -802,6 +802,12 @@ mod tests {
     }
 
     async fn setup_wal_buffer() -> (Arc<WalBufferManager>, Arc<TableStore>, Arc<MockSystemClock>) {
+        setup_wal_buffer_with_flush_interval(Duration::from_millis(10)).await
+    }
+
+    async fn setup_wal_buffer_with_flush_interval(
+        flush_interval: Duration,
+    ) -> (Arc<WalBufferManager>, Arc<TableStore>, Arc<MockSystemClock>) {
         let wal_id_store: Arc<dyn WalIdStore + Send + Sync> = Arc::new(MockWalIdStore {
             next_id: AtomicU64::new(1),
         });
@@ -829,8 +835,8 @@ mod tests {
             oracle,
             table_store.clone(),
             mono_clock,
-            1000,                            // max_wal_bytes_size
-            Some(Duration::from_millis(10)), // max_flush_interval
+            1000,                 // max_wal_bytes_size
+            Some(flush_interval), // max_flush_interval
         ));
         let task_executor = Arc::new(MessageHandlerExecutor::new(
             db_state.read().closed_result(),
@@ -885,23 +891,21 @@ mod tests {
         assert!(iter.next_entry().await.unwrap().is_none());
     }
 
-    #[ignore]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_size_based_flush_triggering() {
-        let (wal_buffer, _, _) = setup_wal_buffer().await;
+        let (wal_buffer, _, _) = setup_wal_buffer_with_flush_interval(Duration::MAX).await;
 
         // Append entries until we exceed the size threshold
         let mut seq = 1;
-        while wal_buffer.estimated_bytes().unwrap() < 115 * 10 {
+        while wal_buffer.estimated_bytes().unwrap() < wal_buffer.max_wal_bytes_size {
             let entry = make_entry(&format!("key{}", seq), &format!("value{}", seq), seq, None);
             wal_buffer.append(&[entry]).unwrap();
-            let mut reader = wal_buffer.maybe_trigger_flush().unwrap();
-            reader.await_value().await.unwrap();
             seq += 1;
         }
+        let mut reader = wal_buffer.maybe_trigger_flush().unwrap();
+        reader.await_value().await.unwrap();
 
-        // Wait for background flush
-        assert_eq!(wal_buffer.recent_flushed_wal_id(), 11);
+        assert_eq!(wal_buffer.recent_flushed_wal_id(), 1);
     }
 
     #[tokio::test]
