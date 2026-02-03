@@ -12,6 +12,7 @@ import java.lang.foreign.ValueLayout;
 import java.lang.invoke.MethodHandle;
 import java.lang.invoke.VarHandle;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.util.Objects;
 
 /**
@@ -53,6 +54,13 @@ public final class SlateDb implements AutoCloseable {
     }
 
     /**
+     * Creates a new write batch for atomic operations.
+     */
+    public static WriteBatch newWriteBatch() {
+        return Native.newWriteBatch();
+    }
+
+    /**
      * Stores a value for the given key.
      */
     public void put(byte[] key, byte[] value) {
@@ -64,6 +72,28 @@ public final class SlateDb implements AutoCloseable {
      */
     public byte[] get(byte[] key) {
         return Native.get(handle, key);
+    }
+
+    /**
+     * Writes a batch atomically using default write options.
+     */
+    public void write(WriteBatch batch) {
+        write(batch, WriteOptions.DEFAULT);
+    }
+
+    /**
+     * Writes a batch atomically using custom write options.
+     */
+    public void write(WriteBatch batch, WriteOptions options) {
+        Objects.requireNonNull(batch, "batch");
+        if (batch.closed) {
+            throw new IllegalStateException("WriteBatch is closed");
+        }
+        if (batch.consumed) {
+            throw new IllegalStateException("WriteBatch already consumed");
+        }
+        Native.writeBatchWrite(handle, batch.batchPtr, options == null ? WriteOptions.DEFAULT : options);
+        batch.consumed = true;
     }
 
     @Override
@@ -82,6 +112,9 @@ public final class SlateDb implements AutoCloseable {
             MemoryLayout.structLayout(HANDLE_LAYOUT.withName("handle"), RESULT_LAYOUT.withName("result"));
         private static final GroupLayout VALUE_LAYOUT =
             MemoryLayout.structLayout(ValueLayout.ADDRESS.withName("data"), ValueLayout.JAVA_LONG.withName("len"));
+        private static final GroupLayout PUT_OPTIONS_LAYOUT = createPutOptionsLayout();
+        private static final GroupLayout WRITE_OPTIONS_LAYOUT =
+            MemoryLayout.structLayout(ValueLayout.JAVA_BOOLEAN.withName("await_durable"));
 
         private static final VarHandle HANDLE_PTR =
             HANDLE_LAYOUT.varHandle(MemoryLayout.PathElement.groupElement("ptr"));
@@ -93,6 +126,12 @@ public final class SlateDb implements AutoCloseable {
             VALUE_LAYOUT.varHandle(MemoryLayout.PathElement.groupElement("data"));
         private static final VarHandle VALUE_LEN =
             VALUE_LAYOUT.varHandle(MemoryLayout.PathElement.groupElement("len"));
+        private static final VarHandle PUT_OPTIONS_TTL_TYPE =
+            PUT_OPTIONS_LAYOUT.varHandle(MemoryLayout.PathElement.groupElement("ttl_type"));
+        private static final VarHandle PUT_OPTIONS_TTL_VALUE =
+            PUT_OPTIONS_LAYOUT.varHandle(MemoryLayout.PathElement.groupElement("ttl_value"));
+        private static final VarHandle WRITE_OPTIONS_AWAIT_DURABLE =
+            WRITE_OPTIONS_LAYOUT.varHandle(MemoryLayout.PathElement.groupElement("await_durable"));
         private static final VarHandle HANDLE_RESULT_HANDLE_PTR =
             HANDLE_RESULT_LAYOUT.varHandle(
                 MemoryLayout.PathElement.groupElement("handle"),
@@ -115,6 +154,12 @@ public final class SlateDb implements AutoCloseable {
         private static MethodHandle putHandle;
         private static MethodHandle getHandle;
         private static MethodHandle closeHandle;
+        private static MethodHandle writeBatchNewHandle;
+        private static MethodHandle writeBatchPutHandle;
+        private static MethodHandle writeBatchPutWithOptionsHandle;
+        private static MethodHandle writeBatchDeleteHandle;
+        private static MethodHandle writeBatchWriteHandle;
+        private static MethodHandle writeBatchCloseHandle;
         private static MethodHandle freeResultHandle;
         private static MethodHandle freeValueHandle;
 
@@ -130,6 +175,23 @@ public final class SlateDb implements AutoCloseable {
                 ValueLayout.JAVA_INT.withName("error"),
                 MemoryLayout.paddingLayout(padding),
                 ValueLayout.ADDRESS.withName("message")
+            );
+        }
+
+        private static GroupLayout createPutOptionsLayout() {
+            long offset = ValueLayout.JAVA_INT.byteSize();
+            long alignment = ValueLayout.JAVA_LONG.byteAlignment();
+            long padding = (alignment - (offset % alignment)) % alignment;
+            if (padding == 0) {
+                return MemoryLayout.structLayout(
+                    ValueLayout.JAVA_INT.withName("ttl_type"),
+                    ValueLayout.JAVA_LONG.withName("ttl_value")
+                );
+            }
+            return MemoryLayout.structLayout(
+                ValueLayout.JAVA_INT.withName("ttl_type"),
+                MemoryLayout.paddingLayout(padding),
+                ValueLayout.JAVA_LONG.withName("ttl_value")
             );
         }
 
@@ -183,6 +245,23 @@ public final class SlateDb implements AutoCloseable {
             }
         }
 
+        static WriteBatch newWriteBatch() {
+            ensureInitialized();
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment batchOut = arena.allocate(ValueLayout.ADDRESS);
+                MemorySegment result =
+                    (MemorySegment) writeBatchNewHandle.invokeExact((SegmentAllocator) arena, batchOut);
+                checkResult(result);
+                MemorySegment batchPtr = batchOut.get(ValueLayout.ADDRESS, 0);
+                if (batchPtr == null || batchPtr.equals(MemorySegment.NULL)) {
+                    throw new SlateDbException(-1, "SlateDB returned a null WriteBatch");
+                }
+                return new WriteBatch(batchPtr);
+            } catch (Throwable t) {
+                throw wrap(t);
+            }
+        }
+
         static void close(MemorySegment handlePtr) {
             if (handlePtr == null || handlePtr.equals(MemorySegment.NULL)) {
                 return;
@@ -192,6 +271,101 @@ public final class SlateDb implements AutoCloseable {
                 MemorySegment handleStruct = arena.allocate(HANDLE_LAYOUT);
                 HANDLE_PTR.set(handleStruct, handlePtr);
                 MemorySegment result = (MemorySegment) closeHandle.invokeExact((SegmentAllocator) arena, handleStruct);
+                checkResult(result);
+            } catch (Throwable t) {
+                throw wrap(t);
+            }
+        }
+
+        static void writeBatchPut(MemorySegment batchPtr, byte[] key, byte[] value) {
+            Objects.requireNonNull(key, "key");
+            Objects.requireNonNull(value, "value");
+            ensureInitialized();
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment keySegment = toByteArray(arena, key);
+                MemorySegment valueSegment = toByteArray(arena, value);
+                MemorySegment result = (MemorySegment) writeBatchPutHandle.invokeExact(
+                    (SegmentAllocator) arena,
+                    batchPtr,
+                    keySegment,
+                    (long) key.length,
+                    valueSegment,
+                    (long) value.length
+                );
+                checkResult(result);
+            } catch (Throwable t) {
+                throw wrap(t);
+            }
+        }
+
+        static void writeBatchPutWithOptions(MemorySegment batchPtr, byte[] key, byte[] value, PutOptions options) {
+            Objects.requireNonNull(key, "key");
+            Objects.requireNonNull(value, "value");
+            ensureInitialized();
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment keySegment = toByteArray(arena, key);
+                MemorySegment valueSegment = toByteArray(arena, value);
+                MemorySegment optionsSegment = toPutOptions(arena, options);
+                MemorySegment result = (MemorySegment) writeBatchPutWithOptionsHandle.invokeExact(
+                    (SegmentAllocator) arena,
+                    batchPtr,
+                    keySegment,
+                    (long) key.length,
+                    valueSegment,
+                    (long) value.length,
+                    optionsSegment
+                );
+                checkResult(result);
+            } catch (Throwable t) {
+                throw wrap(t);
+            }
+        }
+
+        static void writeBatchDelete(MemorySegment batchPtr, byte[] key) {
+            Objects.requireNonNull(key, "key");
+            ensureInitialized();
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment keySegment = toByteArray(arena, key);
+                MemorySegment result = (MemorySegment) writeBatchDeleteHandle.invokeExact(
+                    (SegmentAllocator) arena,
+                    batchPtr,
+                    keySegment,
+                    (long) key.length
+                );
+                checkResult(result);
+            } catch (Throwable t) {
+                throw wrap(t);
+            }
+        }
+
+        static void writeBatchWrite(MemorySegment handlePtr, MemorySegment batchPtr, WriteOptions options) {
+            ensureInitialized();
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment handleStruct = arena.allocate(HANDLE_LAYOUT);
+                HANDLE_PTR.set(handleStruct, handlePtr);
+                MemorySegment optionsSegment = toWriteOptions(arena, options);
+                MemorySegment result = (MemorySegment) writeBatchWriteHandle.invokeExact(
+                    (SegmentAllocator) arena,
+                    handleStruct,
+                    batchPtr,
+                    optionsSegment
+                );
+                checkResult(result);
+            } catch (Throwable t) {
+                throw wrap(t);
+            }
+        }
+
+        static void writeBatchClose(MemorySegment batchPtr) {
+            if (batchPtr == null || batchPtr.equals(MemorySegment.NULL)) {
+                return;
+            }
+            ensureInitialized();
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment result = (MemorySegment) writeBatchCloseHandle.invokeExact(
+                    (SegmentAllocator) arena,
+                    batchPtr
+                );
                 checkResult(result);
             } catch (Throwable t) {
                 throw wrap(t);
@@ -307,6 +481,35 @@ public final class SlateDb implements AutoCloseable {
                     FunctionDescriptor.ofVoid(RESULT_LAYOUT));
                 freeValueHandle = downcall(lookup, "slatedb_free_value",
                     FunctionDescriptor.ofVoid(VALUE_LAYOUT));
+                writeBatchNewHandle = downcall(lookup, "slatedb_write_batch_new",
+                    FunctionDescriptor.of(RESULT_LAYOUT, ValueLayout.ADDRESS));
+                writeBatchPutHandle = downcall(lookup, "slatedb_write_batch_put",
+                    FunctionDescriptor.of(RESULT_LAYOUT,
+                        ValueLayout.ADDRESS,
+                        ValueLayout.ADDRESS,
+                        ValueLayout.JAVA_LONG,
+                        ValueLayout.ADDRESS,
+                        ValueLayout.JAVA_LONG));
+                writeBatchPutWithOptionsHandle = downcall(lookup, "slatedb_write_batch_put_with_options",
+                    FunctionDescriptor.of(RESULT_LAYOUT,
+                        ValueLayout.ADDRESS,
+                        ValueLayout.ADDRESS,
+                        ValueLayout.JAVA_LONG,
+                        ValueLayout.ADDRESS,
+                        ValueLayout.JAVA_LONG,
+                        ValueLayout.ADDRESS));
+                writeBatchDeleteHandle = downcall(lookup, "slatedb_write_batch_delete",
+                    FunctionDescriptor.of(RESULT_LAYOUT,
+                        ValueLayout.ADDRESS,
+                        ValueLayout.ADDRESS,
+                        ValueLayout.JAVA_LONG));
+                writeBatchWriteHandle = downcall(lookup, "slatedb_write_batch_write",
+                    FunctionDescriptor.of(RESULT_LAYOUT,
+                        HANDLE_LAYOUT,
+                        ValueLayout.ADDRESS,
+                        ValueLayout.ADDRESS));
+                writeBatchCloseHandle = downcall(lookup, "slatedb_write_batch_close",
+                    FunctionDescriptor.of(RESULT_LAYOUT, ValueLayout.ADDRESS));
                 initialized = true;
             }
         }
@@ -333,6 +536,25 @@ public final class SlateDb implements AutoCloseable {
             if (value.length > 0) {
                 MemorySegment.copy(MemorySegment.ofArray(value), 0, segment, 0, value.length);
             }
+            return segment;
+        }
+
+        private static MemorySegment toPutOptions(Arena arena, PutOptions options) {
+            if (options == null) {
+                return MemorySegment.NULL;
+            }
+            MemorySegment segment = arena.allocate(PUT_OPTIONS_LAYOUT);
+            PUT_OPTIONS_TTL_TYPE.set(segment, options.ttlType.code);
+            PUT_OPTIONS_TTL_VALUE.set(segment, options.ttlValueMs);
+            return segment;
+        }
+
+        private static MemorySegment toWriteOptions(Arena arena, WriteOptions options) {
+            if (options == null) {
+                return MemorySegment.NULL;
+            }
+            MemorySegment segment = arena.allocate(WRITE_OPTIONS_LAYOUT);
+            WRITE_OPTIONS_AWAIT_DURABLE.set(segment, options.awaitDurable);
             return segment;
         }
 
@@ -407,6 +629,102 @@ public final class SlateDb implements AutoCloseable {
 
         public int getErrorCode() {
             return errorCode;
+        }
+    }
+
+    public enum TtlType {
+        DEFAULT(0),
+        NO_EXPIRY(1),
+        EXPIRE_AFTER(2);
+
+        private final int code;
+
+        TtlType(int code) {
+            this.code = code;
+        }
+    }
+
+    public static final class PutOptions {
+        private final TtlType ttlType;
+        private final long ttlValueMs;
+
+        private PutOptions(TtlType ttlType, long ttlValueMs) {
+            this.ttlType = Objects.requireNonNull(ttlType, "ttlType");
+            if (ttlValueMs < 0) {
+                throw new IllegalArgumentException("ttlValueMs must be >= 0");
+            }
+            this.ttlValueMs = ttlValueMs;
+        }
+
+        public static PutOptions defaultTtl() {
+            return new PutOptions(TtlType.DEFAULT, 0);
+        }
+
+        public static PutOptions noExpiry() {
+            return new PutOptions(TtlType.NO_EXPIRY, 0);
+        }
+
+        public static PutOptions expireAfter(Duration ttl) {
+            Objects.requireNonNull(ttl, "ttl");
+            return expireAfterMillis(ttl.toMillis());
+        }
+
+        public static PutOptions expireAfterMillis(long ttlMillis) {
+            return new PutOptions(TtlType.EXPIRE_AFTER, ttlMillis);
+        }
+    }
+
+    public static final class WriteOptions {
+        public static final WriteOptions DEFAULT = new WriteOptions(true);
+
+        private final boolean awaitDurable;
+
+        public WriteOptions(boolean awaitDurable) {
+            this.awaitDurable = awaitDurable;
+        }
+    }
+
+    public static final class WriteBatch implements AutoCloseable {
+        private MemorySegment batchPtr;
+        private boolean closed;
+        private boolean consumed;
+
+        private WriteBatch(MemorySegment batchPtr) {
+            this.batchPtr = batchPtr;
+        }
+
+        public void put(byte[] key, byte[] value) {
+            ensureOpen();
+            Native.writeBatchPut(batchPtr, key, value);
+        }
+
+        public void put(byte[] key, byte[] value, PutOptions options) {
+            ensureOpen();
+            Native.writeBatchPutWithOptions(batchPtr, key, value, options);
+        }
+
+        public void delete(byte[] key) {
+            ensureOpen();
+            Native.writeBatchDelete(batchPtr, key);
+        }
+
+        @Override
+        public void close() {
+            if (closed) {
+                return;
+            }
+            Native.writeBatchClose(batchPtr);
+            closed = true;
+            batchPtr = MemorySegment.NULL;
+        }
+
+        private void ensureOpen() {
+            if (closed) {
+                throw new IllegalStateException("WriteBatch is closed");
+            }
+            if (consumed) {
+                throw new IllegalStateException("WriteBatch already consumed");
+            }
         }
     }
 }
