@@ -73,7 +73,7 @@ impl Block {
     }
 }
 
-pub(crate) struct BlockBuilder {
+pub(super) struct BlockBuilderV1 {
     offsets: Vec<u16>,
     data: Vec<u8>,
     block_size: usize,
@@ -95,7 +95,7 @@ fn compute_prefix_chunks<const N: usize>(lhs: &[u8], rhs: &[u8]) -> usize {
         .count()
 }
 
-impl BlockBuilder {
+impl BlockBuilderV1 {
     pub(crate) fn new(block_size: usize) -> Self {
         Self {
             offsets: Vec::new(),
@@ -218,7 +218,7 @@ mod tests {
     }
 
     fn build_block(test_case: &BlockTestCase) -> Block {
-        let mut builder = BlockBuilder::new(4096);
+        let mut builder = BlockBuilderV1::new(4096);
 
         for entry in &test_case.entries {
             assert!(builder.add(entry.clone()).unwrap());
@@ -359,7 +359,7 @@ mod tests {
     })]
     #[tokio::test]
     async fn test_should_clamp_allocated_size(#[case] case: ClampAllocTestCase) {
-        let mut builder = BlockBuilder::new(4096);
+        let mut builder = BlockBuilderV1::new(4096);
         for e in case.entries.iter() {
             assert!(builder.add(e.clone()).unwrap());
         }

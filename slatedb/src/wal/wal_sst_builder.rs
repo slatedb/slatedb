@@ -56,10 +56,9 @@ use crate::config::CompressionCodec;
 use crate::db_state::SsTableInfoCodec;
 use crate::error::SlateDBError;
 use crate::flatbuffer_types::{BlockMeta, BlockMetaArgs};
-use crate::format::block::BlockBuilder;
 use crate::format::sst::{
-    BlockTransformer, EncodedSsTable, EncodedSsTableBlock, EncodedSsTableBlockBuilder,
-    EncodedSsTableFooterBuilder, SsTableFormat,
+    BlockBuilder, BlockTransformer, EncodedSsTable, EncodedSsTableBlock,
+    EncodedSsTableBlockBuilder, EncodedSsTableFooterBuilder, SsTableFormat, SST_FORMAT_VERSION,
 };
 use crate::types::RowEntry;
 use bytes::Bytes;
@@ -109,7 +108,7 @@ impl EncodedWalSsTableBuilder {
             blocks: VecDeque::new(),
             block_meta: Vec::new(),
             block_size_config: block_size,
-            block_builder: BlockBuilder::new(block_size),
+            block_builder: BlockBuilder::new_v1(block_size),
             index_builder: flatbuffers::FlatBufferBuilder::new(),
             sst_codec,
             compression_codec: None,
@@ -188,7 +187,7 @@ impl EncodedWalSsTableBuilder {
             return Ok(None);
         }
 
-        let new_builder = BlockBuilder::new(self.block_size_config);
+        let new_builder = BlockBuilder::new_v1(self.block_size_config);
         let builder = std::mem::replace(&mut self.block_builder, new_builder);
         let mut block_builder = EncodedSsTableBlockBuilder::new(builder, self.data_size);
         if let Some(codec) = self.compression_codec {
@@ -250,6 +249,7 @@ impl EncodedWalSsTableBuilder {
             &*self.sst_codec,
             self.index_builder,
             self.block_meta,
+            SST_FORMAT_VERSION,
         );
         if let Some(codec) = self.compression_codec {
             footer_builder = footer_builder.with_compression_codec(codec);
