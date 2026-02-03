@@ -1428,15 +1428,19 @@ public final class SlateDb implements AutoCloseable {
             if (messageSegment == null || messageSegment.equals(MemorySegment.NULL)) {
                 return null;
             }
+            MemorySegment bytesSegment = messageSegment.reinterpret((long) Integer.MAX_VALUE + 1);
             long len = 0;
-            while (messageSegment.get(ValueLayout.JAVA_BYTE, len) != 0) {
-                len++;
+            while (true) {
                 if (len > Integer.MAX_VALUE) {
                     throw new IllegalStateException("SlateDB error message is too large");
                 }
+                if (bytesSegment.get(ValueLayout.JAVA_BYTE, len) == 0) {
+                    break;
+                }
+                len++;
             }
             byte[] bytes = new byte[(int) len];
-            MemorySegment.copy(messageSegment, 0, MemorySegment.ofArray(bytes), 0, len);
+            MemorySegment.copy(bytesSegment, 0, MemorySegment.ofArray(bytes), 0, len);
             return new String(bytes, StandardCharsets.UTF_8);
         }
 
@@ -1459,7 +1463,8 @@ public final class SlateDb implements AutoCloseable {
             }
             byte[] bytes = new byte[(int) len];
             if (len > 0) {
-                MemorySegment.copy(data, 0, MemorySegment.ofArray(bytes), 0, len);
+                MemorySegment dataSegment = data.reinterpret(len);
+                MemorySegment.copy(dataSegment, 0, MemorySegment.ofArray(bytes), 0, len);
             }
             freeValue(valueOut, pending);
             return bytes;
