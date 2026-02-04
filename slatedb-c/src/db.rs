@@ -11,7 +11,7 @@ use crate::config::{
 use crate::error::{
     create_error_result, create_handle_error_result, create_handle_success_result,
     create_success_result, safe_str_from_ptr, slate_error_to_code, CSdbError, CSdbHandleResult,
-    CSdbResult,
+    CSdbResult, CSdbBuilderResult, message_to_cstring,
 };
 use crate::object_store::create_object_store;
 use crate::types::{
@@ -418,10 +418,16 @@ pub extern "C" fn slatedb_builder_new(
     path: *const c_char,
     url: *const c_char,
     env_file: *const c_char,
-) -> *mut slatedb::DbBuilder<String> {
+) -> CSdbBuilderResult {
     let path_str = match safe_str_from_ptr(path) {
         Ok(s) => s.to_string(),
-        Err(_) => return std::ptr::null_mut(),
+        Err(err) => return CSdbBuilderResult{
+            builder: std::ptr::null_mut(),
+            result: CSdbResult {
+                error: err,
+                message: message_to_cstring("Invalid path").into_raw(),
+            }
+        },
     };
 
     let url_str: Option<&str> = if url.is_null() {
@@ -429,7 +435,13 @@ pub extern "C" fn slatedb_builder_new(
     } else {
         match safe_str_from_ptr(url) {
             Ok(s) => Some(s),
-            Err(_) => return std::ptr::null_mut(),
+            Err(err) => return CSdbBuilderResult{
+                builder: std::ptr::null_mut(),
+                result: CSdbResult {
+                    error: err,
+                    message: message_to_cstring("Invalid URL").into_raw(),
+                }
+            },
         }
     };
     let env_file_str = if env_file.is_null() {
@@ -437,16 +449,28 @@ pub extern "C" fn slatedb_builder_new(
     } else {
         match safe_str_from_ptr(env_file) {
             Ok(s) => Some(s.to_string()),
-            Err(_) => return std::ptr::null_mut(),
+            Err(err) => return CSdbBuilderResult{
+                builder: std::ptr::null_mut(),
+                result: CSdbResult {
+                    error: err,
+                    message: message_to_cstring("Invalid env file path").into_raw(),
+                }
+            },
         }
     };
     let object_store = match create_object_store(url_str, env_file_str) {
         Ok(store) => store,
-        Err(_) => return std::ptr::null_mut(),
+        Err(err) => return CSdbBuilderResult{
+            builder: std::ptr::null_mut(),
+            result: err,
+        },
     };
 
     let builder = Db::builder(path_str, object_store);
-    Box::into_raw(Box::new(builder))
+    CSdbBuilderResult{
+        builder: Box::into_raw(Box::new(builder)),
+        result: create_success_result(),
+    }
 }
 
 /// Set settings on DbBuilder from JSON
@@ -459,19 +483,22 @@ pub extern "C" fn slatedb_builder_new(
 pub unsafe extern "C" fn slatedb_builder_with_settings(
     builder: *mut slatedb::DbBuilder<String>,
     settings_json: *const c_char,
-) -> bool {
-    if builder.is_null() || settings_json.is_null() {
-        return false;
+) -> CSdbResult {
+    if builder.is_null() {
+        return create_error_result(CSdbError::InvalidHandle, "Invalid pointer to builder");
+    }
+    if settings_json.is_null() {
+        return create_error_result(CSdbError::InvalidHandle, "Invalid pointer to settings json");
     }
 
     let settings_str = match safe_str_from_ptr(settings_json) {
         Ok(s) => s,
-        Err(_) => return false,
+        Err(err) => return create_error_result(err, "Invalid settings json"),
     };
 
     let settings: Settings = match serde_json::from_str(settings_str) {
         Ok(s) => s,
-        Err(_) => return false,
+        Err(err) => return create_error_result(CSdbError::InvalidArgument, &format!("Invalid settings json: {}", err)),
     };
 
     let builder_ref = &mut *builder;
@@ -480,7 +507,7 @@ pub unsafe extern "C" fn slatedb_builder_with_settings(
     let new_builder = old_builder.with_settings(settings);
     std::ptr::write(builder_ref, new_builder);
 
-    true
+    create_success_result()
 }
 
 /// Set SST block size on DbBuilder
@@ -492,9 +519,9 @@ pub unsafe extern "C" fn slatedb_builder_with_settings(
 pub unsafe extern "C" fn slatedb_builder_with_sst_block_size(
     builder: *mut slatedb::DbBuilder<String>,
     size: u8,
-) -> bool {
+) -> CSdbResult {
     if builder.is_null() {
-        return false;
+        return create_error_result(CSdbError::InvalidHandle, "Invalid pointer to builder");
     }
 
     let block_size = match size {
@@ -505,7 +532,7 @@ pub unsafe extern "C" fn slatedb_builder_with_sst_block_size(
         5 => SstBlockSize::Block16Kib,
         6 => SstBlockSize::Block32Kib,
         7 => SstBlockSize::Block64Kib,
-        _ => return false,
+        _ => return create_error_result(CSdbError::InvalidArgument, &format!("Invalid block size: {}", size)),
     };
 
     let builder_ref = &mut *builder;
@@ -514,7 +541,7 @@ pub unsafe extern "C" fn slatedb_builder_with_sst_block_size(
     let new_builder = old_builder.with_sst_block_size(block_size);
     std::ptr::write(builder_ref, new_builder);
 
-    true
+    create_success_result()
 }
 
 /// Build the database from DbBuilder
@@ -525,9 +552,9 @@ pub unsafe extern "C" fn slatedb_builder_with_sst_block_size(
 #[no_mangle]
 pub unsafe extern "C" fn slatedb_builder_build(
     builder: *mut slatedb::DbBuilder<String>,
-) -> CSdbHandle {
+) -> CSdbHandleResult {
     if builder.is_null() {
-        return CSdbHandle::null();
+        return create_handle_error_result(CSdbError::InvalidHandle, "Invalid builder handle");
     }
 
     let builder_owned = Box::from_raw(builder);
@@ -535,15 +562,15 @@ pub unsafe extern "C" fn slatedb_builder_build(
     // Create a dedicated runtime for this DB instance
     let rt = match Builder::new_multi_thread().enable_all().build() {
         Ok(rt) => rt,
-        Err(_) => return CSdbHandle::null(),
+        Err(err) => return create_handle_error_result(CSdbError::InternalError, &err.to_string()),
     };
 
     match rt.block_on(builder_owned.build()) {
         Ok(db) => {
-            let ffi = SlateDbFFI { rt, db };
-            CSdbHandle(Box::into_raw(Box::new(ffi)))
+            let ffi = Box::new(SlateDbFFI { rt, db });
+            create_handle_success_result(CSdbHandle(Box::into_raw(ffi)))
         }
-        Err(_) => CSdbHandle::null(),
+        Err(err) => create_handle_error_result(CSdbError::InternalError, &err.to_string()),
     }
 }
 

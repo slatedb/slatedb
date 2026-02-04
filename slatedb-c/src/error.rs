@@ -40,19 +40,27 @@ pub struct CSdbHandleResult {
 }
 
 #[repr(C)]
+pub struct CSdbBuilderResult {
+    pub builder: *mut slatedb::DbBuilder<String>,
+    pub result: CSdbResult,
+}
+
+#[repr(C)]
 pub struct CSdbReaderHandleResult {
     pub handle: CSdbReaderHandle,
     pub result: CSdbResult,
 }
 
+pub(crate) fn message_to_cstring(s: &str) -> CString {
+    CString::new(s).unwrap_or_else(|_| CString::new("Invalid UTF-8").unwrap())
+}
+
 pub(crate) fn create_handle_error_result(error: CSdbError, message: &str) -> CSdbHandleResult {
-    let c_message =
-        CString::new(message).unwrap_or_else(|_| CString::new("Invalid UTF-8").unwrap());
     CSdbHandleResult {
         handle: CSdbHandle::null(),
         result: CSdbResult {
             error,
-            message: c_message.into_raw(),
+            message: message_to_cstring(message).into_raw(),
         },
     }
 }
@@ -68,13 +76,11 @@ pub(crate) fn create_reader_handle_error_result(
     error: CSdbError,
     message: &str,
 ) -> CSdbReaderHandleResult {
-    let c_message =
-        CString::new(message).unwrap_or_else(|_| CString::new("Invalid UTF-8").unwrap());
     CSdbReaderHandleResult {
         handle: CSdbReaderHandle::null(),
         result: CSdbResult {
             error,
-            message: c_message.into_raw(),
+            message: message_to_cstring(message).into_raw(),
         },
     }
 }
@@ -90,11 +96,9 @@ pub(crate) fn create_reader_handle_success_result(
 
 // Helper functions for error handling
 pub(crate) fn create_error_result(error: CSdbError, message: &str) -> CSdbResult {
-    let c_message =
-        CString::new(message).unwrap_or_else(|_| CString::new("Invalid UTF-8").unwrap());
     CSdbResult {
         error,
-        message: c_message.into_raw(),
+        message: message_to_cstring(message).into_raw(),
     }
 }
 
