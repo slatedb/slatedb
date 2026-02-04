@@ -3,18 +3,18 @@ package io.slatedb;
 import java.lang.foreign.MemorySegment;
 
 /// Iterator over scan results. Always close after use.
-public final class ScanIterator implements AutoCloseable {
+public final class SlateDbScanIterator implements AutoCloseable {
     private MemorySegment iterPtr;
     private boolean closed;
 
-    ScanIterator(MemorySegment iterPtr) {
+    SlateDbScanIterator(MemorySegment iterPtr) {
         this.iterPtr = iterPtr;
     }
 
     /// Returns the next key/value pair, or `null` when the iterator is exhausted.
     ///
-    /// @return Next [KeyValue], or `null` if the scan is complete.
-    public KeyValue next() {
+    /// @return Next [SlateDbKeyValue], or `null` if the scan is complete.
+    public SlateDbKeyValue next() {
         ensureOpen();
         return Native.iteratorNext(iterPtr);
     }

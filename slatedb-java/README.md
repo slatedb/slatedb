@@ -54,10 +54,10 @@ slatedb-java/build/libs/slatedb-java-<version>.jar
 1. Create `HelloSlateDb.java`:
 
 ```java
-import io.slatedb.KeyValue;
-import io.slatedb.ScanIterator;
+import io.slatedb.SlateDbKeyValue;
+import io.slatedb.SlateDbScanIterator;
 import io.slatedb.SlateDb;
-import io.slatedb.WriteBatch;
+import io.slatedb.SlateDbWriteBatch;
 
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -92,15 +92,15 @@ public final class HelloSlateDb {
             db.delete(key);
 
             // Batch write
-            try (WriteBatch batch = SlateDb.newWriteBatch()) {
+            try (SlateDbWriteBatch batch = SlateDb.newWriteBatch()) {
                 batch.put("hello-a".getBytes(StandardCharsets.UTF_8), "value-a".getBytes(StandardCharsets.UTF_8));
                 batch.put("hello-b".getBytes(StandardCharsets.UTF_8), "value-b".getBytes(StandardCharsets.UTF_8));
                 db.write(batch);
             }
 
             // Scan by prefix
-            try (ScanIterator iter = db.scanPrefix("hello-".getBytes(StandardCharsets.UTF_8))) {
-                KeyValue kv;
+            try (SlateDbScanIterator iter = db.scanPrefix("hello-".getBytes(StandardCharsets.UTF_8))) {
+                SlateDbKeyValue kv;
                 while ((kv = iter.next()) != null) {
                     System.out.println(
                         new String(kv.key(), StandardCharsets.UTF_8) + "=" +
@@ -141,12 +141,12 @@ java --enable-native-access=ALL-UNNAMED \
 Core types:
 - `SlateDb`: Read/write database handle. Always close it (try-with-resources recommended).
 - `SlateDbReader`: Read-only handle for snapshot-style reads.
-- `WriteBatch`: Batch of put/delete operations written atomically.
-- `ScanIterator`: Iterator for range scans and prefix scans.
+- `SlateDbWriteBatch`: Batch of put/delete operations written atomically.
+- `SlateDbScanIterator`: Iterator for range scans and prefix scans.
 
 Key operations:
 - `put`, `get`, `delete` for basic CRUD.
-- `write(WriteBatch)` for atomic batches.
+- `write(SlateDbWriteBatch)` for atomic batches.
 - `scan(startKey, endKey)` and `scanPrefix(prefix)` for range and prefix scans.
 - `flush()` to force writes to object storage.
 

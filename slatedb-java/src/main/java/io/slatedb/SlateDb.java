@@ -17,8 +17,8 @@ import java.util.Objects;
 ///   [#loadLibrary(String)].
 /// - Open a database with [#open(String,String,String)] or configure a builder via
 ///   [#builder(String,String,String)].
-/// - Always close resources ([SlateDb], [SlateDbReader], [WriteBatch],
-///   [ScanIterator]) with try-with-resources.
+/// - Always close resources ([SlateDb], [SlateDbReader], [SlateDbWriteBatch],
+///   [SlateDbScanIterator]) with try-with-resources.
 ///
 ///
 /// ### Threading
@@ -58,7 +58,7 @@ import java.util.Objects;
 ///             byte[] loaded = db.get(key);
 ///             System.out.println(new String(loaded, StandardCharsets.UTF_8));
 ///
-///             try (WriteBatch batch = SlateDb.newWriteBatch()) {
+///             try (SlateDbWriteBatch batch = SlateDb.newWriteBatch()) {
 ///                 batch.put("hello-a".getBytes(StandardCharsets.UTF_8),
 ///                     "value-a".getBytes(StandardCharsets.UTF_8));
 ///                 batch.put("hello-b".getBytes(StandardCharsets.UTF_8),
@@ -66,8 +66,8 @@ import java.util.Objects;
 ///                 db.write(batch);
 ///             }
 ///
-///             try (ScanIterator iter = db.scanPrefix("hello-".getBytes(StandardCharsets.UTF_8))) {
-///                 KeyValue kv;
+///             try (SlateDbScanIterator iter = db.scanPrefix("hello-".getBytes(StandardCharsets.UTF_8))) {
+///                 SlateDbKeyValue kv;
 ///                 while ((kv = iter.next()) != null) {
 ///                     System.out.println(
 ///                         new String(kv.key(), StandardCharsets.UTF_8) + "=" +
@@ -214,9 +214,9 @@ public final class SlateDb implements AutoCloseable {
     ///
     /// A batch is consumed after a write attempt (success or failure) and cannot be reused.
     ///
-    /// @return A new [WriteBatch] instance. Always close it.
-    public static WriteBatch newWriteBatch() {
-        return new WriteBatch(Native.newWriteBatch());
+    /// @return A new [SlateDbWriteBatch] instance. Always close it.
+    public static SlateDbWriteBatch newWriteBatch() {
+        return new SlateDbWriteBatch(Native.newWriteBatch());
     }
 
     /// Writes a value into the database with default options.
@@ -296,7 +296,7 @@ public final class SlateDb implements AutoCloseable {
     /// @param batch batch to write (must be open and unconsumed).
     /// @throws SlateDbException if the write fails.
     /// @throws IllegalStateException if the batch is closed or already consumed.
-    public void write(WriteBatch batch) {
+    public void write(SlateDbWriteBatch batch) {
         ensureOpen();
         write(batch, WriteOptions.DEFAULT);
     }
@@ -311,20 +311,20 @@ public final class SlateDb implements AutoCloseable {
     /// @throws IllegalStateException if the batch is closed or already consumed.
     /// ### Example
     /// ```java
-    /// try (WriteBatch batch = SlateDb.newWriteBatch()) {
+    /// try (SlateDbWriteBatch batch = SlateDb.newWriteBatch()) {
     ///     batch.put("a".getBytes(StandardCharsets.UTF_8), "v1".getBytes(StandardCharsets.UTF_8));
     ///     batch.put("b".getBytes(StandardCharsets.UTF_8), "v2".getBytes(StandardCharsets.UTF_8));
     ///     db.write(batch);
     /// }
     /// ```
-    public void write(WriteBatch batch, WriteOptions options) {
+    public void write(SlateDbWriteBatch batch, WriteOptions options) {
         ensureOpen();
         Objects.requireNonNull(batch, "batch");
         if (batch.isClosed()) {
-            throw new IllegalStateException("WriteBatch is closed");
+            throw new IllegalStateException("SlateDbWriteBatch is closed");
         }
         if (batch.isConsumed()) {
-            throw new IllegalStateException("WriteBatch already consumed");
+            throw new IllegalStateException("SlateDbWriteBatch already consumed");
         }
         try {
             Native.writeBatchWrite(handle, batch.handle(), options == null ? WriteOptions.DEFAULT : options);
@@ -348,21 +348,21 @@ public final class SlateDb implements AutoCloseable {
     ///
     /// @param startKey inclusive lower bound, or `null`.
     /// @param endKey exclusive upper bound, or `null`.
-    /// @return A [ScanIterator] over the range. Always close it.
+    /// @return A [SlateDbScanIterator] over the range. Always close it.
     /// @throws SlateDbException if the scan fails.
     /// ### Example
     /// ```java
-    /// try (ScanIterator iter = db.scan(
+    /// try (SlateDbScanIterator iter = db.scan(
     ///     "a".getBytes(StandardCharsets.UTF_8),
     ///     "z".getBytes(StandardCharsets.UTF_8)
     /// )) {
-    ///     KeyValue kv;
+    ///     SlateDbKeyValue kv;
     ///     while ((kv = iter.next()) != null) {
     ///         // consume kv
     ///     }
     /// }
     /// ```
-    public ScanIterator scan(byte[] startKey, byte[] endKey) {
+    public SlateDbScanIterator scan(byte[] startKey, byte[] endKey) {
         ensureOpen();
         return scan(startKey, endKey, null);
     }
@@ -373,19 +373,19 @@ public final class SlateDb implements AutoCloseable {
     /// @param startKey inclusive lower bound, or `null`.
     /// @param endKey exclusive upper bound, or `null`.
     /// @param options scan options or `null` for defaults.
-    /// @return A [ScanIterator] over the range. Always close it.
+    /// @return A [SlateDbScanIterator] over the range. Always close it.
     /// @throws SlateDbException if the scan fails.
-    public ScanIterator scan(byte[] startKey, byte[] endKey, ScanOptions options) {
+    public SlateDbScanIterator scan(byte[] startKey, byte[] endKey, ScanOptions options) {
         ensureOpen();
-        return new ScanIterator(Native.scan(handle, startKey, endKey, options));
+        return new SlateDbScanIterator(Native.scan(handle, startKey, endKey, options));
     }
 
     /// Creates a scan iterator for the provided key prefix using default scan options.
     ///
     /// @param prefix key prefix to scan.
-    /// @return A [ScanIterator] over the prefix. Always close it.
+    /// @return A [SlateDbScanIterator] over the prefix. Always close it.
     /// @throws SlateDbException if the scan fails.
-    public ScanIterator scanPrefix(byte[] prefix) {
+    public SlateDbScanIterator scanPrefix(byte[] prefix) {
         ensureOpen();
         return scanPrefix(prefix, null);
     }
@@ -394,11 +394,11 @@ public final class SlateDb implements AutoCloseable {
     ///
     /// @param prefix key prefix to scan.
     /// @param options scan options or `null` for defaults.
-    /// @return A [ScanIterator] over the prefix. Always close it.
+    /// @return A [SlateDbScanIterator] over the prefix. Always close it.
     /// @throws SlateDbException if the scan fails.
-    public ScanIterator scanPrefix(byte[] prefix, ScanOptions options) {
+    public SlateDbScanIterator scanPrefix(byte[] prefix, ScanOptions options) {
         ensureOpen();
-        return new ScanIterator(Native.scanPrefix(handle, prefix, options));
+        return new SlateDbScanIterator(Native.scanPrefix(handle, prefix, options));
     }
 
     /// Returns a JSON string containing SlateDB metrics.
