@@ -10,8 +10,8 @@ use crate::config::{
 };
 use crate::error::{
     create_error_result, create_handle_error_result, create_handle_success_result,
-    create_success_result, safe_str_from_ptr, slate_error_to_code, CSdbError, CSdbHandleResult,
-    CSdbResult, CSdbBuilderResult, message_to_cstring,
+    create_success_result, message_to_cstring, safe_str_from_ptr, slate_error_to_code,
+    CSdbBuilderResult, CSdbError, CSdbHandleResult, CSdbResult,
 };
 use crate::object_store::create_object_store;
 use crate::types::{
@@ -421,13 +421,15 @@ pub extern "C" fn slatedb_builder_new(
 ) -> CSdbBuilderResult {
     let path_str = match safe_str_from_ptr(path) {
         Ok(s) => s.to_string(),
-        Err(err) => return CSdbBuilderResult{
-            builder: std::ptr::null_mut(),
-            result: CSdbResult {
-                error: err,
-                message: message_to_cstring("Invalid path").into_raw(),
+        Err(err) => {
+            return CSdbBuilderResult {
+                builder: std::ptr::null_mut(),
+                result: CSdbResult {
+                    error: err,
+                    message: message_to_cstring("Invalid path").into_raw(),
+                },
             }
-        },
+        }
     };
 
     let url_str: Option<&str> = if url.is_null() {
@@ -435,13 +437,15 @@ pub extern "C" fn slatedb_builder_new(
     } else {
         match safe_str_from_ptr(url) {
             Ok(s) => Some(s),
-            Err(err) => return CSdbBuilderResult{
-                builder: std::ptr::null_mut(),
-                result: CSdbResult {
-                    error: err,
-                    message: message_to_cstring("Invalid URL").into_raw(),
+            Err(err) => {
+                return CSdbBuilderResult {
+                    builder: std::ptr::null_mut(),
+                    result: CSdbResult {
+                        error: err,
+                        message: message_to_cstring("Invalid URL").into_raw(),
+                    },
                 }
-            },
+            }
         }
     };
     let env_file_str = if env_file.is_null() {
@@ -449,25 +453,29 @@ pub extern "C" fn slatedb_builder_new(
     } else {
         match safe_str_from_ptr(env_file) {
             Ok(s) => Some(s.to_string()),
-            Err(err) => return CSdbBuilderResult{
-                builder: std::ptr::null_mut(),
-                result: CSdbResult {
-                    error: err,
-                    message: message_to_cstring("Invalid env file path").into_raw(),
+            Err(err) => {
+                return CSdbBuilderResult {
+                    builder: std::ptr::null_mut(),
+                    result: CSdbResult {
+                        error: err,
+                        message: message_to_cstring("Invalid env file path").into_raw(),
+                    },
                 }
-            },
+            }
         }
     };
     let object_store = match create_object_store(url_str, env_file_str) {
         Ok(store) => store,
-        Err(err) => return CSdbBuilderResult{
-            builder: std::ptr::null_mut(),
-            result: err,
-        },
+        Err(err) => {
+            return CSdbBuilderResult {
+                builder: std::ptr::null_mut(),
+                result: err,
+            }
+        }
     };
 
     let builder = Db::builder(path_str, object_store);
-    CSdbBuilderResult{
+    CSdbBuilderResult {
         builder: Box::into_raw(Box::new(builder)),
         result: create_success_result(),
     }
@@ -498,7 +506,12 @@ pub unsafe extern "C" fn slatedb_builder_with_settings(
 
     let settings: Settings = match serde_json::from_str(settings_str) {
         Ok(s) => s,
-        Err(err) => return create_error_result(CSdbError::InvalidArgument, &format!("Invalid settings json: {}", err)),
+        Err(err) => {
+            return create_error_result(
+                CSdbError::InvalidArgument,
+                &format!("Invalid settings json: {}", err),
+            )
+        }
     };
 
     let builder_ref = &mut *builder;
@@ -532,7 +545,12 @@ pub unsafe extern "C" fn slatedb_builder_with_sst_block_size(
         5 => SstBlockSize::Block16Kib,
         6 => SstBlockSize::Block32Kib,
         7 => SstBlockSize::Block64Kib,
-        _ => return create_error_result(CSdbError::InvalidArgument, &format!("Invalid block size: {}", size)),
+        _ => {
+            return create_error_result(
+                CSdbError::InvalidArgument,
+                &format!("Invalid block size: {}", size),
+            )
+        }
     };
 
     let builder_ref = &mut *builder;
