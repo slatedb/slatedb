@@ -26,6 +26,8 @@ final class Native {
     private static final GroupLayout RESULT_LAYOUT = createResultLayout();
     private static final GroupLayout HANDLE_RESULT_LAYOUT =
         MemoryLayout.structLayout(HANDLE_LAYOUT.withName("handle"), RESULT_LAYOUT.withName("result"));
+    private static final GroupLayout BUILDER_RESULT_LAYOUT =
+        MemoryLayout.structLayout(ValueLayout.ADDRESS.withName("builder"), RESULT_LAYOUT.withName("result"));
     private static final GroupLayout VALUE_LAYOUT =
         MemoryLayout.structLayout(ValueLayout.ADDRESS.withName("data"), ValueLayout.JAVA_LONG.withName("len"));
     private static final GroupLayout PUT_OPTIONS_LAYOUT = createPutOptionsLayout();
@@ -112,6 +114,16 @@ final class Native {
         HANDLE_RESULT_LAYOUT.varHandle(
             MemoryLayout.PathElement.groupElement("result"),
             MemoryLayout.PathElement.groupElement("message"));
+    private static final VarHandle BUILDER_RESULT_BUILDER_PTR =
+        BUILDER_RESULT_LAYOUT.varHandle(MemoryLayout.PathElement.groupElement("builder"));
+    private static final VarHandle BUILDER_RESULT_ERROR =
+        BUILDER_RESULT_LAYOUT.varHandle(
+            MemoryLayout.PathElement.groupElement("result"),
+            MemoryLayout.PathElement.groupElement("error"));
+    private static final VarHandle BUILDER_RESULT_MESSAGE =
+        BUILDER_RESULT_LAYOUT.varHandle(
+            MemoryLayout.PathElement.groupElement("result"),
+            MemoryLayout.PathElement.groupElement("message"));
     private static final VarHandle READER_HANDLE_RESULT_HANDLE_PTR =
         READER_HANDLE_RESULT_LAYOUT.varHandle(
             MemoryLayout.PathElement.groupElement("handle"),
@@ -125,6 +137,7 @@ final class Native {
             MemoryLayout.PathElement.groupElement("result"),
             MemoryLayout.PathElement.groupElement("message"));
 
+    private static final int ERROR_INVALID_ARGUMENT = 1;
     private static final boolean VARHANDLE_REQUIRES_OFFSET =
         RESULT_ERROR.coordinateTypes().size() == 2;
 
@@ -178,6 +191,8 @@ final class Native {
 
     private static final long HANDLE_RESULT_RESULT_OFFSET =
         HANDLE_RESULT_LAYOUT.byteOffset(MemoryLayout.PathElement.groupElement("result"));
+    private static final long BUILDER_RESULT_RESULT_OFFSET =
+        BUILDER_RESULT_LAYOUT.byteOffset(MemoryLayout.PathElement.groupElement("result"));
     private static final long READER_HANDLE_RESULT_OFFSET =
         READER_HANDLE_RESULT_LAYOUT.byteOffset(MemoryLayout.PathElement.groupElement("result"));
     private static final long KEY_VALUE_KEY_OFFSET =
@@ -408,10 +423,25 @@ final class Native {
             MemorySegment pathSegment = toCString(arena, path);
             MemorySegment urlSegment = toCString(arena, url);
             MemorySegment envSegment = toCString(arena, envFile);
-            MemorySegment builderPtr =
-                (MemorySegment) builderNewHandle.invokeExact(pathSegment, urlSegment, envSegment);
+            MemorySegment builderResult = (MemorySegment) builderNewHandle.invokeExact(
+                (SegmentAllocator) arena,
+                pathSegment,
+                urlSegment,
+                envSegment
+            );
+            int error = (int) getInt(BUILDER_RESULT_ERROR, builderResult);
+            MemorySegment messageSegment = (MemorySegment) getAddress(BUILDER_RESULT_MESSAGE, builderResult);
+            String message = readMessage(messageSegment);
+            RuntimeException failure = (error == 0) ? null : new SlateDbException(error, message);
+            MemorySegment resultSlice =
+                builderResult.asSlice(BUILDER_RESULT_RESULT_OFFSET, RESULT_LAYOUT.byteSize());
+            freeResult(resultSlice, failure);
+            if (failure != null) {
+                throw failure;
+            }
+            MemorySegment builderPtr = (MemorySegment) getAddress(BUILDER_RESULT_BUILDER_PTR, builderResult);
             if (builderPtr == null || builderPtr.equals(MemorySegment.NULL)) {
-                throw new IllegalStateException("Failed to create SlateDB builder");
+                throw new SlateDbException(-1, "SlateDB returned a null builder");
             }
             return builderPtr;
         } catch (Throwable t) {
@@ -424,10 +454,12 @@ final class Native {
         ensureInitialized();
         try (Arena arena = Arena.ofConfined()) {
             MemorySegment settingsSegment = toCString(arena, settingsJson);
-            boolean ok = (boolean) builderWithSettingsHandle.invokeExact(builderPtr, settingsSegment);
-            if (!ok) {
-                throw new IllegalArgumentException("Invalid settings JSON");
-            }
+            MemorySegment result = (MemorySegment) builderWithSettingsHandle.invokeExact(
+                (SegmentAllocator) arena,
+                builderPtr,
+                settingsSegment
+            );
+            checkResultAllowInvalidArgument(result, "Invalid settings JSON");
         } catch (Throwable t) {
             throw wrap(t);
         }
@@ -436,11 +468,13 @@ final class Native {
     static void builderWithSstBlockSize(MemorySegment builderPtr, SstBlockSize blockSize) {
         Objects.requireNonNull(blockSize, "blockSize");
         ensureInitialized();
-        try {
-            boolean ok = (boolean) builderWithSstBlockSizeHandle.invokeExact(builderPtr, blockSize.code());
-            if (!ok) {
-                throw new IllegalArgumentException("Invalid SST block size: " + blockSize);
-            }
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment result = (MemorySegment) builderWithSstBlockSizeHandle.invokeExact(
+                (SegmentAllocator) arena,
+                builderPtr,
+                blockSize.code()
+            );
+            checkResultAllowInvalidArgument(result, "Invalid SST block size: " + blockSize);
         } catch (Throwable t) {
             throw wrap(t);
         }
@@ -449,11 +483,21 @@ final class Native {
     static MemorySegment builderBuild(MemorySegment builderPtr) {
         ensureInitialized();
         try (Arena arena = Arena.ofConfined()) {
-            MemorySegment handleStruct =
+            MemorySegment handleResult =
                 (MemorySegment) builderBuildHandle.invokeExact((SegmentAllocator) arena, builderPtr);
-            MemorySegment handlePtr = (MemorySegment) getAddress(HANDLE_PTR, handleStruct);
+            int error = (int) getInt(HANDLE_RESULT_ERROR, handleResult);
+            MemorySegment messageSegment = (MemorySegment) getAddress(HANDLE_RESULT_MESSAGE, handleResult);
+            String message = readMessage(messageSegment);
+            MemorySegment resultSlice =
+                handleResult.asSlice(HANDLE_RESULT_RESULT_OFFSET, RESULT_LAYOUT.byteSize());
+            RuntimeException failure = (error == 0) ? null : new SlateDbException(error, message);
+            freeResult(resultSlice, failure);
+            if (failure != null) {
+                throw failure;
+            }
+            MemorySegment handlePtr = (MemorySegment) getAddress(HANDLE_RESULT_HANDLE_PTR, handleResult);
             if (handlePtr == null || handlePtr.equals(MemorySegment.NULL)) {
-                throw new SlateDbException(-1, "SlateDB builder failed to create a database");
+                throw new SlateDbException(-1, "SlateDB builder returned a null handle");
             }
             return handlePtr;
         } catch (Throwable t) {
@@ -1079,16 +1123,16 @@ final class Native {
             metricsHandle = downcall(lookup, "slatedb_metrics",
                 FunctionDescriptor.of(RESULT_LAYOUT, HANDLE_LAYOUT, ValueLayout.ADDRESS));
             builderNewHandle = downcall(lookup, "slatedb_builder_new",
-                FunctionDescriptor.of(ValueLayout.ADDRESS,
+                FunctionDescriptor.of(BUILDER_RESULT_LAYOUT,
                     ValueLayout.ADDRESS,
                     ValueLayout.ADDRESS,
                     ValueLayout.ADDRESS));
             builderWithSettingsHandle = downcall(lookup, "slatedb_builder_with_settings",
-                FunctionDescriptor.of(ValueLayout.JAVA_BOOLEAN, ValueLayout.ADDRESS, ValueLayout.ADDRESS));
+                FunctionDescriptor.of(RESULT_LAYOUT, ValueLayout.ADDRESS, ValueLayout.ADDRESS));
             builderWithSstBlockSizeHandle = downcall(lookup, "slatedb_builder_with_sst_block_size",
-                FunctionDescriptor.of(ValueLayout.JAVA_BOOLEAN, ValueLayout.ADDRESS, ValueLayout.JAVA_BYTE));
+                FunctionDescriptor.of(RESULT_LAYOUT, ValueLayout.ADDRESS, ValueLayout.JAVA_BYTE));
             builderBuildHandle = downcall(lookup, "slatedb_builder_build",
-                FunctionDescriptor.of(HANDLE_LAYOUT, ValueLayout.ADDRESS));
+                FunctionDescriptor.of(HANDLE_RESULT_LAYOUT, ValueLayout.ADDRESS));
             builderFreeHandle = downcall(lookup, "slatedb_builder_free",
                 FunctionDescriptor.ofVoid(ValueLayout.ADDRESS));
             readerOpenHandle = downcall(lookup, "slatedb_reader_open",
@@ -1345,6 +1389,25 @@ final class Native {
         MemorySegment messageSegment = (MemorySegment) getAddress(RESULT_MESSAGE, result);
         String message = readMessage(messageSegment);
         RuntimeException failure = (error == 0) ? null : new SlateDbException(error, message);
+        freeResult(result, failure);
+        if (failure != null) {
+            throw failure;
+        }
+    }
+
+    private static void checkResultAllowInvalidArgument(MemorySegment result, String defaultInvalidMessage) {
+        int error = (int) getInt(RESULT_ERROR, result);
+        MemorySegment messageSegment = (MemorySegment) getAddress(RESULT_MESSAGE, result);
+        String message = readMessage(messageSegment);
+        RuntimeException failure = null;
+        if (error != 0) {
+            if (error == ERROR_INVALID_ARGUMENT) {
+                String detail = (message == null || message.isBlank()) ? defaultInvalidMessage : message;
+                failure = new IllegalArgumentException(detail);
+            } else {
+                failure = new SlateDbException(error, message);
+            }
+        }
         freeResult(result, failure);
         if (failure != null) {
             throw failure;
