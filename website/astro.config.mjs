@@ -103,7 +103,11 @@ export default defineConfig({
 						{
 							label: 'Garbage Collection',
 							link: '/docs/design/gc/',
-						}/*,
+						},
+                                                {
+                                                        label: 'Change Data Capture',
+                                                        link: '/docs/design/change-data-capture/',
+                                                }/*,
 						{
 							label: 'Caching',
 							link: '/docs/design/caching/',
