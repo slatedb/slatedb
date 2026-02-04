@@ -194,7 +194,7 @@ Consumers are responsible for bootstrapping and backfilling their state. SlateDB
 The following guidelines are recommended:
 
 1. Begin streaming WAL changes using `WalReader`.
-2. Create a clone of the current database using `Db::clone()`. This will provide a consistent snapshot of all L0 and compacted SSTs up to the current checkpoint (which was created after the `WalReader` stream began).
+2. Create a clone of the current database using `Admin::create_clone()`. This will provide a consistent snapshot of all L0 and compacted SSTs up to the current checkpoint (which was created after the `WalReader` stream began).
 3. Use `DbReader::scan()` on the clone to read all existing data in the database.
    - If the database is large, scans in non-overlapping key ranges can be parallelized.
    - If desired, rows with seqnums greater than or equal to the starting seqnum of the `WalReader` stream can be skipped to avoid processing duplicate data.
