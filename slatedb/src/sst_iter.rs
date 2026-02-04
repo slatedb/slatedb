@@ -7,6 +7,8 @@ use std::ops::{Bound, Range, RangeBounds};
 use std::sync::Arc;
 use tokio::task::JoinHandle;
 
+use crate::block_iterator::BlockLike;
+use crate::block_iterator_v2::BlockIteratorV2;
 use crate::bytes_range::BytesRange;
 use crate::db_state::{SsTableHandle, SsTableId};
 use crate::db_stats::DbStats;
@@ -14,6 +16,7 @@ use crate::error::SlateDBError;
 use crate::filter::{self, BloomFilter};
 use crate::flatbuffer_types::{SsTableIndex, SsTableIndexOwned};
 use crate::format::block::Block;
+use crate::format::sst::{SST_FORMAT_VERSION, SST_FORMAT_VERSION_V2};
 use crate::{
     block_iterator::BlockIterator,
     iter::{init_optional_iterator, KeyValueIterator},
@@ -25,6 +28,46 @@ use crate::{
 enum FetchTask {
     InFlight(JoinHandle<Result<VecDeque<Arc<Block>>, SlateDBError>>),
     Finished(VecDeque<Arc<Block>>),
+}
+
+enum DataBlockIterator<B: BlockLike> {
+    V1(BlockIterator<B>),
+    V2(BlockIteratorV2<B>),
+}
+
+impl<B: BlockLike> DataBlockIterator<B> {
+    fn new_ascending(block: B, sst_version: u16) -> Result<Self, SlateDBError> {
+        match sst_version {
+            SST_FORMAT_VERSION => Ok(Self::V1(BlockIterator::new_ascending(block))),
+            SST_FORMAT_VERSION_V2 => Ok(Self::V2(BlockIteratorV2::new_ascending(block))),
+            _ => Err(SlateDBError::InvalidVersion {
+                format_name: "SST",
+                supported_versions: vec![SST_FORMAT_VERSION, SST_FORMAT_VERSION_V2],
+                actual_version: sst_version,
+            }),
+        }
+    }
+
+    async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
+        match self {
+            Self::V1(iter) => iter.next_entry().await,
+            Self::V2(iter) => iter.next_entry().await,
+        }
+    }
+
+    async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
+        match self {
+            Self::V1(iter) => iter.seek(next_key).await,
+            Self::V2(iter) => iter.seek(next_key).await,
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        match self {
+            Self::V1(iter) => iter.is_empty(),
+            Self::V2(iter) => iter.is_empty(),
+        }
+    }
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -102,7 +145,7 @@ impl SstView<'_> {
 
 struct IteratorState {
     initialized: bool,
-    current_iter: Option<BlockIterator<Arc<Block>>>,
+    current_iter: Option<DataBlockIterator<Arc<Block>>>,
 }
 
 impl IteratorState {
@@ -121,7 +164,7 @@ impl IteratorState {
         self.initialized
     }
 
-    fn advance(&mut self, iterator: BlockIterator<Arc<Block>>) {
+    fn advance(&mut self, iterator: DataBlockIterator<Arc<Block>>) {
         self.initialized = true;
         self.current_iter = Some(iterator);
     }
@@ -221,6 +264,10 @@ pub(crate) struct InternalSstIterator<'a> {
     fetch_tasks: VecDeque<FetchTask>,
     table_store: Arc<TableStore>,
     options: SstIteratorOptions,
+    /// The SST format version, used to select the appropriate block iterator.
+    /// This is `None` until `ensure_metadata_loaded` is called, since the version
+    /// is read from the SST footer which is lazily loaded.
+    sst_version: Option<u16>,
 }
 
 impl<'a> InternalSstIterator<'a> {
@@ -241,6 +288,7 @@ impl<'a> InternalSstIterator<'a> {
             fetch_tasks: VecDeque::new(),
             table_store,
             options,
+            sst_version: None,
         })
     }
 
@@ -401,10 +449,13 @@ impl<'a> InternalSstIterator<'a> {
     async fn next_iter(
         &mut self,
         spawn_fetches: bool,
-    ) -> Result<Option<BlockIterator<Arc<Block>>>, SlateDBError> {
+    ) -> Result<Option<DataBlockIterator<Arc<Block>>>, SlateDBError> {
         if self.index.is_none() {
             return Ok(None);
         }
+        let sst_version = self
+            .sst_version
+            .ok_or(SlateDBError::IteratorNotInitialized)?;
         loop {
             if spawn_fetches {
                 self.spawn_fetches();
@@ -417,7 +468,7 @@ impl<'a> InternalSstIterator<'a> {
                     }
                     FetchTask::Finished(blocks) => {
                         if let Some(block) = blocks.pop_front() {
-                            return Ok(Some(BlockIterator::new_ascending(block)));
+                            return Ok(Some(DataBlockIterator::new_ascending(block, sst_version)?));
                         } else {
                             self.fetch_tasks.pop_front();
                         }
@@ -432,7 +483,7 @@ impl<'a> InternalSstIterator<'a> {
     }
 
     async fn advance_block(&mut self) -> Result<(), SlateDBError> {
-        self.fetch_index().await?;
+        self.ensure_metadata_loaded().await?;
         if !self.state.is_finished() {
             if let Some(mut iter) = self.next_iter(true).await? {
                 match self.view.start_key() {
@@ -455,7 +506,19 @@ impl<'a> InternalSstIterator<'a> {
         self.state.stop();
     }
 
-    async fn fetch_index(&mut self) -> Result<(), SlateDBError> {
+    async fn ensure_sst_version(&mut self) -> Result<(), SlateDBError> {
+        if self.sst_version.is_none() {
+            let version = self
+                .table_store
+                .read_sst_version(self.view.table_as_ref())
+                .await?;
+            self.sst_version = Some(version);
+        }
+        Ok(())
+    }
+
+    async fn ensure_metadata_loaded(&mut self) -> Result<(), SlateDBError> {
+        self.ensure_sst_version().await?;
         if self.index.is_none() {
             let index = self
                 .table_store
@@ -844,6 +907,7 @@ mod tests {
     use crate::filter;
     use crate::format::sst::SsTableFormat;
     use crate::object_stores::ObjectStores;
+    use crate::sst_builder::BlockFormat;
     use crate::stats::{ReadableStat, StatRegistry};
     use crate::test_utils::{assert_kv, gen_attrs};
     use crate::types::ValueDeletable;
@@ -1541,5 +1605,347 @@ mod tests {
             .await
             .unwrap()
             .is_none());
+    }
+
+    async fn build_v2_sst(
+        table_store: &Arc<TableStore>,
+        keys_and_values: &[(&[u8], &[u8])],
+    ) -> SsTableHandle {
+        let mut builder = table_store
+            .table_builder()
+            .with_block_format(BlockFormat::V2);
+        for (key, value) in keys_and_values {
+            builder.add_value(key, value, gen_attrs(0)).await.unwrap();
+        }
+        let encoded = builder.build().await.unwrap();
+        let id = SsTableId::Compacted(ulid::Ulid::new());
+        table_store.write_sst(&id, encoded, false).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn should_iterate_v2_sst_scan() {
+        // given: a V2 SST with multiple keys
+        let root_path = Path::from("");
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let format = SsTableFormat {
+            min_filter_keys: 10,
+            ..SsTableFormat::default()
+        };
+        let table_store = Arc::new(TableStore::new(
+            ObjectStores::new(object_store, None),
+            format,
+            root_path,
+            None,
+        ));
+
+        let keys_and_values = vec![
+            (b"key1".as_slice(), b"value1".as_slice()),
+            (b"key2".as_slice(), b"value2".as_slice()),
+            (b"key3".as_slice(), b"value3".as_slice()),
+            (b"key4".as_slice(), b"value4".as_slice()),
+        ];
+        let sst_handle = build_v2_sst(&table_store, &keys_and_values).await;
+
+        // when: iterating over the SST
+        let sst_iter_options = SstIteratorOptions {
+            cache_blocks: true,
+            ..SstIteratorOptions::default()
+        };
+        let mut iter = SstIterator::new_owned_initialized(
+            ..,
+            sst_handle,
+            table_store.clone(),
+            sst_iter_options,
+        )
+        .await
+        .unwrap()
+        .expect("Expected Some(iter) but got None");
+
+        // then: all keys should be returned in order
+        for (expected_key, expected_value) in &keys_and_values {
+            let kv = iter.next().await.unwrap().unwrap();
+            assert_eq!(kv.key, *expected_key);
+            assert_eq!(kv.value, *expected_value);
+        }
+        assert!(iter.next().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn should_iterate_v2_sst_for_key() {
+        // given: a V2 SST with multiple keys
+        let root_path = Path::from("");
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let format = SsTableFormat {
+            min_filter_keys: 10,
+            ..SsTableFormat::default()
+        };
+        let table_store = Arc::new(TableStore::new(
+            ObjectStores::new(object_store, None),
+            format,
+            root_path,
+            None,
+        ));
+
+        let keys_and_values = vec![
+            (b"key1".as_slice(), b"value1".as_slice()),
+            (b"key2".as_slice(), b"value2".as_slice()),
+            (b"key3".as_slice(), b"value3".as_slice()),
+            (b"key4".as_slice(), b"value4".as_slice()),
+        ];
+        let sst_handle = build_v2_sst(&table_store, &keys_and_values).await;
+
+        // when: searching for key2
+        let mut iter = SstIterator::for_key_with_stats_initialized(
+            &sst_handle,
+            b"key2",
+            table_store.clone(),
+            SstIteratorOptions::default(),
+            None,
+        )
+        .await
+        .expect("iterator construction should succeed")
+        .expect("expected iterator for present key");
+
+        // then: key2 should be found
+        let entry = iter
+            .next_entry()
+            .await
+            .expect("iteration should succeed")
+            .expect("expected entry for present key");
+        assert_eq!(entry.key.as_ref(), b"key2");
+        match entry.value {
+            ValueDeletable::Value(value) => assert_eq!(value.as_ref(), b"value2"),
+            other => panic!("expected value, found {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn should_iterate_v2_sst_with_many_keys() {
+        // given: a V2 SST with many keys to test prefix compression
+        let root_path = Path::from("");
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let format = SsTableFormat {
+            block_size: 256,
+            min_filter_keys: 1000,
+            ..SsTableFormat::default()
+        };
+        let table_store = Arc::new(TableStore::new(
+            ObjectStores::new(object_store, None),
+            format,
+            root_path,
+            None,
+        ));
+
+        // Create keys with shared prefixes to exercise prefix compression
+        let mut builder = table_store
+            .table_builder()
+            .with_block_format(BlockFormat::V2);
+
+        let num_keys = 100;
+        for i in 0..num_keys {
+            let key = format!("prefix_{:04}", i);
+            let value = format!("value_{:04}", i);
+            builder
+                .add_value(key.as_bytes(), value.as_bytes(), gen_attrs(i))
+                .await
+                .unwrap();
+        }
+
+        let encoded = builder.build().await.unwrap();
+        let id = SsTableId::Compacted(ulid::Ulid::new());
+        let sst_handle = table_store.write_sst(&id, encoded, false).await.unwrap();
+
+        // when: iterating over all keys
+        let sst_iter_options = SstIteratorOptions {
+            cache_blocks: true,
+            ..SstIteratorOptions::default()
+        };
+        let mut iter = SstIterator::new_owned_initialized(
+            ..,
+            sst_handle,
+            table_store.clone(),
+            sst_iter_options,
+        )
+        .await
+        .unwrap()
+        .expect("Expected Some(iter) but got None");
+
+        // then: all keys should be returned in order
+        for i in 0..num_keys {
+            let kv = iter.next().await.unwrap().unwrap();
+            let expected_key = format!("prefix_{:04}", i);
+            let expected_value = format!("value_{:04}", i);
+            assert_eq!(kv.key, expected_key.as_bytes());
+            assert_eq!(kv.value, expected_value.as_bytes());
+        }
+        assert!(iter.next().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn should_seek_v2_sst_across_multiple_blocks() {
+        // given: a V2 SST with small block_size to force multiple blocks
+        let root_path = Path::from("");
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let format = SsTableFormat {
+            block_size: 128, // Small block size to force multiple blocks
+            min_filter_keys: 1000,
+            ..SsTableFormat::default()
+        };
+        let table_store = Arc::new(TableStore::new(
+            ObjectStores::new(object_store, None),
+            format,
+            root_path,
+            None,
+        ));
+
+        // Create keys that will span multiple blocks
+        let mut builder = table_store
+            .table_builder()
+            .with_block_format(BlockFormat::V2);
+
+        let num_keys = 50;
+        for i in 0..num_keys {
+            let key = format!("key_{:04}", i);
+            let value = format!("value_{:04}", i);
+            builder
+                .add_value(key.as_bytes(), value.as_bytes(), gen_attrs(i))
+                .await
+                .unwrap();
+        }
+
+        let encoded = builder.build().await.unwrap();
+        let id = SsTableId::Compacted(ulid::Ulid::new());
+        let sst_handle = table_store.write_sst(&id, encoded, false).await.unwrap();
+
+        // Verify we have multiple blocks
+        let index = table_store.read_index(&sst_handle, true).await.unwrap();
+        assert!(
+            index.borrow().block_meta().len() > 1,
+            "Expected multiple blocks but got {}",
+            index.borrow().block_meta().len()
+        );
+
+        // when: seeking to a key in a later block (key_0030)
+        let seek_key = b"key_0030";
+        let mut iter = SstIterator::new_borrowed_initialized(
+            BytesRange::from_slice(seek_key.as_ref()..),
+            &sst_handle,
+            table_store.clone(),
+            SstIteratorOptions::default(),
+        )
+        .await
+        .unwrap()
+        .expect("Expected Some(iter) but got None");
+
+        // then: should iterate from key_0030 onwards
+        for i in 30..num_keys {
+            let kv = iter.next().await.unwrap().unwrap();
+            let expected_key = format!("key_{:04}", i);
+            let expected_value = format!("value_{:04}", i);
+            assert_eq!(kv.key, expected_key.as_bytes());
+            assert_eq!(kv.value, expected_value.as_bytes());
+        }
+        assert!(iter.next().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn should_return_none_for_missing_key_in_v2_sst() {
+        // given: a V2 SST with multiple blocks
+        let root_path = Path::from("");
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let format = SsTableFormat {
+            block_size: 128,
+            min_filter_keys: 1000,
+            ..SsTableFormat::default()
+        };
+        let table_store = Arc::new(TableStore::new(
+            ObjectStores::new(object_store, None),
+            format,
+            root_path,
+            None,
+        ));
+
+        let mut builder = table_store
+            .table_builder()
+            .with_block_format(BlockFormat::V2);
+
+        // Add keys with gaps (only even numbers)
+        for i in (0..50).step_by(2) {
+            let key = format!("key_{:04}", i);
+            let value = format!("value_{:04}", i);
+            builder
+                .add_value(key.as_bytes(), value.as_bytes(), gen_attrs(i))
+                .await
+                .unwrap();
+        }
+
+        let encoded = builder.build().await.unwrap();
+        let id = SsTableId::Compacted(ulid::Ulid::new());
+        let sst_handle = table_store.write_sst(&id, encoded, false).await.unwrap();
+
+        // when: searching for a non-existent key (odd number)
+        let mut iter = SstIterator::for_key_with_stats_initialized(
+            &sst_handle,
+            b"key_0025", // This key doesn't exist
+            table_store.clone(),
+            SstIteratorOptions::default(),
+            None,
+        )
+        .await
+        .expect("iterator construction should succeed")
+        .expect("expected iterator");
+
+        // then: should return None since key doesn't exist
+        let entry = iter.next_entry().await.expect("iteration should succeed");
+        assert!(entry.is_none(), "expected None for missing key");
+    }
+
+    #[tokio::test]
+    async fn should_seek_past_last_key_in_v2_sst() {
+        // given: a V2 SST
+        let root_path = Path::from("");
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let format = SsTableFormat {
+            block_size: 128,
+            min_filter_keys: 1000,
+            ..SsTableFormat::default()
+        };
+        let table_store = Arc::new(TableStore::new(
+            ObjectStores::new(object_store, None),
+            format,
+            root_path,
+            None,
+        ));
+
+        let mut builder = table_store
+            .table_builder()
+            .with_block_format(BlockFormat::V2);
+
+        for i in 0..20 {
+            let key = format!("key_{:04}", i);
+            let value = format!("value_{:04}", i);
+            builder
+                .add_value(key.as_bytes(), value.as_bytes(), gen_attrs(i))
+                .await
+                .unwrap();
+        }
+
+        let encoded = builder.build().await.unwrap();
+        let id = SsTableId::Compacted(ulid::Ulid::new());
+        let sst_handle = table_store.write_sst(&id, encoded, false).await.unwrap();
+
+        // when: seeking past the last key
+        let mut iter = SstIterator::new_borrowed_initialized(
+            BytesRange::from_slice(b"zzz".as_ref()..),
+            &sst_handle,
+            table_store.clone(),
+            SstIteratorOptions::default(),
+        )
+        .await
+        .unwrap()
+        .expect("Expected Some(iter) but got None");
+
+        // then: should return None immediately
+        assert!(iter.next().await.unwrap().is_none());
     }
 }

@@ -6,7 +6,8 @@ use crate::filter::BloomFilter;
 use crate::flatbuffer_types::{
     BlockMeta, FlatBufferSsTableInfoCodec, SsTableIndex, SsTableIndexArgs, SsTableIndexOwned,
 };
-use crate::format::block::{Block, BlockBuilder};
+use crate::format::block::{Block, BlockBuilderV1};
+use crate::format::block_v2::BlockBuilderV2;
 use crate::format::row;
 use async_trait::async_trait;
 use bytes::{Buf, BufMut, Bytes};
@@ -24,6 +25,79 @@ const NUM_FOOTER_BYTES: usize = 10;
 const NUM_FOOTER_BYTES_LONG: u64 = NUM_FOOTER_BYTES as u64;
 const SEQNUM_SIZE: usize = size_of::<u64>();
 pub(crate) const SST_FORMAT_VERSION: u16 = 1;
+pub(crate) const SST_FORMAT_VERSION_V2: u16 = 2;
+
+fn is_supported_version(version: u16) -> bool {
+    matches!(version, SST_FORMAT_VERSION | SST_FORMAT_VERSION_V2)
+}
+
+#[allow(private_interfaces)]
+pub(crate) enum BlockBuilder {
+    V1(BlockBuilderV1),
+    V2(BlockBuilderV2),
+}
+
+impl BlockBuilder {
+    pub(crate) fn new_v1(block_size: usize) -> Self {
+        Self::V1(BlockBuilderV1::new(block_size))
+    }
+
+    pub(crate) fn new_v2(block_size: usize) -> Self {
+        Self::V2(BlockBuilderV2::new(block_size))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_v2_with_restart_interval(block_size: usize, restart_interval: usize) -> Self {
+        Self::V2(BlockBuilderV2::new_with_restart_interval(
+            block_size,
+            restart_interval,
+        ))
+    }
+
+    pub(crate) fn would_fit(&self, entry: &crate::types::RowEntry) -> bool {
+        match self {
+            Self::V1(builder) => builder.would_fit(entry),
+            Self::V2(builder) => builder.would_fit(entry),
+        }
+    }
+
+    pub(crate) fn add(
+        &mut self,
+        entry: crate::types::RowEntry,
+    ) -> Result<bool, crate::error::SlateDBError> {
+        match self {
+            Self::V1(builder) => builder.add(entry),
+            Self::V2(builder) => builder.add(entry),
+        }
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        match self {
+            Self::V1(builder) => builder.is_empty(),
+            Self::V2(builder) => builder.is_empty(),
+        }
+    }
+
+    pub(crate) fn build(self) -> Result<Block, SlateDBError> {
+        match self {
+            Self::V1(builder) => builder.build(),
+            Self::V2(builder) => builder.build(),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn add_value(
+        &mut self,
+        key: &[u8],
+        value: &[u8],
+        attrs: crate::types::RowAttributes,
+    ) -> bool {
+        match self {
+            Self::V1(builder) => builder.add_value(key, value, attrs),
+            Self::V2(builder) => builder.add_value(key, value, attrs),
+        }
+    }
+}
 pub(crate) const SIZEOF_U16: usize = size_of::<u16>();
 pub(crate) const SIZEOF_U32: usize = size_of::<u32>();
 pub(crate) const SIZEOF_U64: usize = size_of::<u64>();
@@ -194,6 +268,8 @@ pub(crate) struct EncodedSsTableFooterBuilder<'a, 'b> {
     block_meta: Vec<flatbuffers::WIPOffset<BlockMeta<'b>>>,
     /// filter block
     filter: Option<(Arc<BloomFilter>, Bytes)>,
+    /// SST format version
+    sst_format_version: u16,
 }
 
 impl<'a, 'b> EncodedSsTableFooterBuilder<'a, 'b> {
@@ -203,6 +279,7 @@ impl<'a, 'b> EncodedSsTableFooterBuilder<'a, 'b> {
         sst_codec: &'a dyn SsTableInfoCodec,
         index_builder: flatbuffers::FlatBufferBuilder<'b, DefaultAllocator>,
         block_meta: Vec<flatbuffers::WIPOffset<BlockMeta<'b>>>,
+        sst_format_version: u16,
     ) -> Self {
         Self {
             blocks_size: blocks_len,
@@ -213,6 +290,7 @@ impl<'a, 'b> EncodedSsTableFooterBuilder<'a, 'b> {
             index_builder,
             block_meta,
             filter: None,
+            sst_format_version,
         }
     }
 
@@ -285,7 +363,7 @@ impl<'a, 'b> EncodedSsTableFooterBuilder<'a, 'b> {
         SsTableInfo::encode(&info, &mut buf, self.sst_info_codec);
 
         buf.put_u64(meta_offset);
-        buf.put_u16(SST_FORMAT_VERSION);
+        buf.put_u16(self.sst_format_version);
 
         Ok(EncodedSsTableFooter {
             info,
@@ -424,32 +502,48 @@ impl Default for SsTableFormat {
 }
 
 impl SsTableFormat {
-    pub(crate) async fn read_info(
+    async fn read_footer_header(
         &self,
         obj: &impl ReadOnlyBlob,
-    ) -> Result<SsTableInfo, SlateDBError> {
+    ) -> Result<(u64, u16), SlateDBError> {
         let obj_len = obj.len().await?;
         if obj_len <= NUM_FOOTER_BYTES_LONG {
             return Err(SlateDBError::EmptySSTable);
         }
-        // Get the size of the metadata
         let header = obj
             .read_range((obj_len - NUM_FOOTER_BYTES_LONG)..obj_len)
             .await?;
         assert!(header.len() == NUM_FOOTER_BYTES);
 
-        // Last 2 bytes of the header represent the version
         let version = header.slice(8..NUM_FOOTER_BYTES).get_u16();
-        // TODO: Support older and newer versions
-        if version != SST_FORMAT_VERSION {
+        let sst_metadata_offset = header.slice(0..8).get_u64();
+        Ok((sst_metadata_offset, version))
+    }
+
+    fn validate_version(&self, version: u16) -> Result<(), SlateDBError> {
+        if !is_supported_version(version) {
             return Err(SlateDBError::InvalidVersion {
-                expected_version: SST_FORMAT_VERSION,
+                format_name: "SST",
+                supported_versions: vec![SST_FORMAT_VERSION, SST_FORMAT_VERSION_V2],
                 actual_version: version,
             });
         }
+        Ok(())
+    }
 
-        // First 8 bytes of the header represent the metadata offset
-        let sst_metadata_offset = header.slice(0..8).get_u64();
+    pub(crate) async fn read_version(&self, obj: &impl ReadOnlyBlob) -> Result<u16, SlateDBError> {
+        let (_, version) = self.read_footer_header(obj).await?;
+        self.validate_version(version)?;
+        Ok(version)
+    }
+
+    pub(crate) async fn read_info(
+        &self,
+        obj: &impl ReadOnlyBlob,
+    ) -> Result<SsTableInfo, SlateDBError> {
+        let (sst_metadata_offset, version) = self.read_footer_header(obj).await?;
+        self.validate_version(version)?;
+        let obj_len = obj.len().await?;
         let sst_metadata_bytes = obj
             .read_range(sst_metadata_offset..obj_len - NUM_FOOTER_BYTES_LONG)
             .await?;
@@ -739,13 +833,11 @@ impl SsTableFormat {
         if entry_num == 0 {
             return 0;
         }
-        let mut ans = self.estimate_encoded_size_data_index_metadata(
+        self.estimate_encoded_size_data_index_metadata(
             entry_num,
             estimated_entries_size,
             SEQNUM_SIZE,
-        );
-        ans += self.estimate_encoded_size_filter(entry_num);
-        ans
+        )
     }
 
     fn estimate_encoded_size_data_index_metadata(

@@ -118,7 +118,7 @@ mod tests {
     use crate::db_cache::foyer_hybrid::FoyerHybridCache;
     use crate::db_cache::{CachedEntry, CachedKey, DbCache};
     use crate::db_state::SsTableId;
-    use crate::format::block::BlockBuilder;
+    use crate::format::sst::BlockBuilder;
     use crate::types::RowAttributes;
     use foyer::{DirectFsDeviceOptions, Engine, HybridCacheBuilder};
     use rand::RngCore;
@@ -155,7 +155,7 @@ mod tests {
 
     fn build_block() -> CachedEntry {
         let mut rng = rand::rng();
-        let mut builder = BlockBuilder::new(1024);
+        let mut builder = BlockBuilder::new_v1(1024);
         loop {
             let mut k = vec![0u8; 32];
             rng.fill_bytes(&mut k);

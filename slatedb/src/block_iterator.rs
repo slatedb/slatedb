@@ -178,7 +178,7 @@ impl<B: BlockLike> BlockIterator<B> {
 mod tests {
     use crate::block_iterator::BlockIterator;
     use crate::bytes_range::BytesRange;
-    use crate::format::block::BlockBuilder;
+    use crate::format::sst::BlockBuilder;
     use crate::iter::KeyValueIterator;
     use crate::proptest_util::{arbitrary, sample};
     use crate::test_utils::{assert_iterator, assert_next_entry, gen_attrs, gen_empty_attrs};
@@ -189,7 +189,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_iterator() {
-        let mut block_builder = BlockBuilder::new(1024);
+        let mut block_builder = BlockBuilder::new_v1(1024);
         assert!(block_builder.add_value(b"donkey", b"kong", gen_attrs(1)));
         assert!(block_builder.add_value(b"kratos", b"atreus", gen_attrs(2)));
         assert!(block_builder.add_value(b"super", b"mario", gen_attrs(3)));
@@ -206,7 +206,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_seek_to_existing_key() {
-        let mut block_builder = BlockBuilder::new(1024);
+        let mut block_builder = BlockBuilder::new_v1(1024);
         assert!(block_builder.add_value(b"donkey", b"kong", gen_attrs(1)));
         assert!(block_builder.add_value(b"kratos", b"atreus", gen_attrs(2)));
         assert!(block_builder.add_value(b"super", b"mario", gen_attrs(3)));
@@ -222,7 +222,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_seek_to_nonexisting_key() {
-        let mut block_builder = BlockBuilder::new(1024);
+        let mut block_builder = BlockBuilder::new_v1(1024);
         assert!(block_builder.add_value(b"donkey", b"kong", gen_attrs(1)));
         assert!(block_builder.add_value(b"kratos", b"atreus", gen_attrs(2)));
         assert!(block_builder.add_value(b"super", b"mario", gen_attrs(3)));
@@ -238,7 +238,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_seek_to_key_beyond_last_key() {
-        let mut block_builder = BlockBuilder::new(1024);
+        let mut block_builder = BlockBuilder::new_v1(1024);
         assert!(block_builder.add_value(b"donkey", b"kong", gen_attrs(1)));
         assert!(block_builder.add_value(b"kratos", b"atreus", gen_attrs(2)));
         assert!(block_builder.add_value(b"super", b"mario", gen_attrs(3)));
@@ -250,7 +250,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_seek_to_key_skips_records_prior_to_next_key() {
-        let mut block_builder = BlockBuilder::new(1024);
+        let mut block_builder = BlockBuilder::new_v1(1024);
         assert!(block_builder.add_value(b"donkey", b"kong", gen_empty_attrs()));
         assert!(block_builder.add_value(b"kratos", b"atreus", gen_empty_attrs()));
         assert!(block_builder.add_value(b"super", b"mario", gen_empty_attrs()));
@@ -263,7 +263,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_seek_to_key_with_iterator_at_seek_point() {
-        let mut block_builder = BlockBuilder::new(1024);
+        let mut block_builder = BlockBuilder::new_v1(1024);
         assert!(block_builder.add_value(b"donkey", b"kong", gen_empty_attrs()));
         assert!(block_builder.add_value(b"kratos", b"atreus", gen_empty_attrs()));
         assert!(block_builder.add_value(b"super", b"mario", gen_empty_attrs()));
@@ -283,7 +283,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_seek_to_key_beyond_last_key_in_block() {
-        let mut block_builder = BlockBuilder::new(1024);
+        let mut block_builder = BlockBuilder::new_v1(1024);
         assert!(block_builder.add_value(b"donkey", b"kong", gen_attrs(1)));
         assert!(block_builder.add_value(b"kratos", b"atreus", gen_attrs(2)));
         assert!(block_builder.add_value(b"super", b"mario", gen_attrs(3)));
@@ -299,7 +299,7 @@ mod tests {
         let runtime = Runtime::new().unwrap();
         let sample_table = sample::table(runner.rng(), 5, 10);
 
-        let mut block_builder = BlockBuilder::new(1024);
+        let mut block_builder = BlockBuilder::new_v1(1024);
         for (key, value) in &sample_table {
             block_builder.add_value(key, value, gen_empty_attrs());
         }
@@ -324,7 +324,7 @@ mod tests {
     #[tokio::test]
     async fn should_binary_search_in_large_block() {
         // given: a block with many entries
-        let mut block_builder = BlockBuilder::new(16384);
+        let mut block_builder = BlockBuilder::new_v1(16384);
         for i in 0..100u32 {
             let key = format!("key_{:05}", i);
             let value = format!("value_{}", i);
@@ -353,7 +353,7 @@ mod tests {
     #[tokio::test]
     async fn should_seek_to_first_key_in_block() {
         // given: a block with multiple entries
-        let mut block_builder = BlockBuilder::new(1024);
+        let mut block_builder = BlockBuilder::new_v1(1024);
         assert!(block_builder.add_value(b"apple", b"1", gen_empty_attrs()));
         assert!(block_builder.add_value(b"banana", b"2", gen_empty_attrs()));
         assert!(block_builder.add_value(b"cherry", b"3", gen_empty_attrs()));
@@ -371,7 +371,7 @@ mod tests {
     #[tokio::test]
     async fn should_seek_to_last_key_in_block() {
         // given: a block with multiple entries
-        let mut block_builder = BlockBuilder::new(1024);
+        let mut block_builder = BlockBuilder::new_v1(1024);
         assert!(block_builder.add_value(b"apple", b"1", gen_empty_attrs()));
         assert!(block_builder.add_value(b"banana", b"2", gen_empty_attrs()));
         assert!(block_builder.add_value(b"cherry", b"3", gen_empty_attrs()));
@@ -390,7 +390,7 @@ mod tests {
     #[tokio::test]
     async fn should_seek_to_key_before_first() {
         // given: a block with entries
-        let mut block_builder = BlockBuilder::new(1024);
+        let mut block_builder = BlockBuilder::new_v1(1024);
         assert!(block_builder.add_value(b"banana", b"2", gen_empty_attrs()));
         assert!(block_builder.add_value(b"cherry", b"3", gen_empty_attrs()));
         let block = block_builder.build().unwrap();
@@ -407,7 +407,7 @@ mod tests {
     #[tokio::test]
     async fn should_seek_with_shared_prefix_keys() {
         // given: a block with keys that share prefixes (tests prefix encoding interaction)
-        let mut block_builder = BlockBuilder::new(4096);
+        let mut block_builder = BlockBuilder::new_v1(4096);
         assert!(block_builder.add_value(b"user:1000", b"alice", gen_empty_attrs()));
         assert!(block_builder.add_value(b"user:1001", b"bob", gen_empty_attrs()));
         assert!(block_builder.add_value(b"user:1002", b"carol", gen_empty_attrs()));
@@ -435,7 +435,7 @@ mod tests {
     #[tokio::test]
     async fn should_seek_multiple_times_sequentially() {
         // given: a block with multiple entries
-        let mut block_builder = BlockBuilder::new(1024);
+        let mut block_builder = BlockBuilder::new_v1(1024);
         assert!(block_builder.add_value(b"a", b"1", gen_empty_attrs()));
         assert!(block_builder.add_value(b"b", b"2", gen_empty_attrs()));
         assert!(block_builder.add_value(b"c", b"3", gen_empty_attrs()));
@@ -461,7 +461,7 @@ mod tests {
     #[tokio::test]
     async fn should_seek_forward_only_from_current_position() {
         // given: a block with entries and an iterator advanced past the first entry
-        let mut block_builder = BlockBuilder::new(1024);
+        let mut block_builder = BlockBuilder::new_v1(1024);
         assert!(block_builder.add_value(b"a", b"1", gen_empty_attrs()));
         assert!(block_builder.add_value(b"b", b"2", gen_empty_attrs()));
         assert!(block_builder.add_value(b"c", b"3", gen_empty_attrs()));
@@ -484,7 +484,7 @@ mod tests {
     #[tokio::test]
     async fn should_seek_in_single_entry_block() {
         // given: a block with only one entry
-        let mut block_builder = BlockBuilder::new(1024);
+        let mut block_builder = BlockBuilder::new_v1(1024);
         assert!(block_builder.add_value(b"only", b"one", gen_empty_attrs()));
         let block = block_builder.build().unwrap();
 
@@ -515,7 +515,7 @@ mod tests {
     #[tokio::test]
     async fn should_decode_key_at_index_correctly() {
         // given: a block with entries that have shared prefixes
-        let mut block_builder = BlockBuilder::new(4096);
+        let mut block_builder = BlockBuilder::new_v1(4096);
         assert!(block_builder.add_value(b"prefix_aaa", b"1", gen_empty_attrs()));
         assert!(block_builder.add_value(b"prefix_bbb", b"2", gen_empty_attrs()));
         assert!(block_builder.add_value(b"prefix_ccc", b"3", gen_empty_attrs()));
