@@ -3812,7 +3812,7 @@ mod tests {
         assert_eq!(kv_store.inner.wal_buffer.buffered_wal_entries_count(), 0);
 
         let wal_reader = WalReader::new(path, wal_object_store);
-        let wal_files = wal_reader.list(0..u64::MAX).await.unwrap();
+        let wal_files = wal_reader.list(..).await.unwrap();
         assert_eq!(wal_files.len(), 2); // first file is the fencing operation
         let rows = wal_files[1] // second file contains the actual write
             .rows()

@@ -45,7 +45,7 @@ async fn test_wal_reader_lists_and_reads() {
     .unwrap();
 
     let wal_reader = WalReader::new(path, object_store.clone());
-    let wal_files = wal_reader.list(0..u64::MAX).await.unwrap();
+    let wal_files = wal_reader.list(..).await.unwrap();
     assert!(!wal_files.is_empty());
 
     let mut rows = Vec::new();

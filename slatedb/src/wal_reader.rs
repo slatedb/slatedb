@@ -1,4 +1,4 @@
-use std::ops::Range;
+use std::ops::RangeBounds;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
@@ -94,7 +94,7 @@ impl WalReader {
 
     /// Lists WAL files in ascending order by their ID within the specified range.
     /// If `range` is unbounded, all WAL files are returned.
-    pub async fn list(&self, range: Range<u64>) -> Result<Vec<WalFile>, crate::Error> {
+    pub async fn list<R: RangeBounds<u64>>(&self, range: R) -> Result<Vec<WalFile>, crate::Error> {
         self.stats.list_calls.inc();
         let result = self.table_store.list_wal_ssts(range).await;
         Ok(result?
@@ -191,7 +191,7 @@ mod tests {
         .unwrap();
 
         let wal_reader = WalReader::new(path, main_store.clone());
-        let wal_files = wal_reader.list(0..u64::MAX).await.unwrap();
+        let wal_files = wal_reader.list(..).await.unwrap();
         assert!(!wal_files.is_empty());
         let mut rows = Vec::new();
         for wal_file in wal_files {
@@ -227,7 +227,7 @@ mod tests {
         .unwrap();
 
         let wal_reader = WalReader::new(path, wal_store.clone());
-        let wal_files = wal_reader.list(0..u64::MAX).await.unwrap();
+        let wal_files = wal_reader.list(..).await.unwrap();
         assert!(!wal_files.is_empty());
         let mut rows = Vec::new();
         for wal_file in wal_files {
