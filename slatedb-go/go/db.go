@@ -621,10 +621,14 @@ func (b *Builder) Build() (*DB, error) {
 		defer C.free(unsafe.Pointer(cEnvFile))
 	}
 
-	builderPtr := C.slatedb_builder_new(cPath, cURL, cEnvFile)
-	if builderPtr == nil {
+	newResult := C.slatedb_builder_new(cPath, cURL, cEnvFile)
+	if r := newResult.result; r.error != C.Success {
+		return nil, resultToError(r)
+	}
+	if newResult.builder == nil {
 		return nil, errors.New("failed to create database builder")
 	}
+	builderPtr := newResult.builder
 	// Note: Don't defer free here - slatedb_builder_build() consumes the builder
 
 	// Apply settings
@@ -645,25 +649,28 @@ func (b *Builder) Build() (*DB, error) {
 		cSettingsJSON := C.CString(string(settingsJSON))
 		defer C.free(unsafe.Pointer(cSettingsJSON))
 
-		if !C.slatedb_builder_with_settings(builderPtr, cSettingsJSON) {
+		if r := C.slatedb_builder_with_settings(builderPtr, cSettingsJSON); r.error != C.Success {
 			C.slatedb_builder_free(builderPtr) // Free on error
-			return nil, errors.New("failed to apply settings to builder")
+			return nil, resultToError(r)
 		}
 	}
 
 	// Apply SST block size if provided
 	if b.sstBlockSize != nil {
-		if !C.slatedb_builder_with_sst_block_size(builderPtr, C.uchar(*b.sstBlockSize)) {
+		if r := C.slatedb_builder_with_sst_block_size(builderPtr, C.uchar(*b.sstBlockSize)); r.error != C.Success {
 			C.slatedb_builder_free(builderPtr) // Free on error
-			return nil, errors.New("failed to apply SST block size to builder")
+			return nil, resultToError(r)
 		}
 	}
 
 	// Build the database - this consumes the builder, so no need to free after this point
-	handle := C.slatedb_builder_build(builderPtr)
-	if handle._0 == nil {
+	buildResult := C.slatedb_builder_build(builderPtr)
+	if r := buildResult.result; r.error != C.Success {
+		return nil, resultToError(r)
+	}
+	if buildResult.handle._0 == nil {
 		return nil, errors.New("failed to build database")
 	}
 
-	return &DB{handle: handle}, nil
+	return &DB{handle: buildResult.handle}, nil
 }
