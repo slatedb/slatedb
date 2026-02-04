@@ -15,7 +15,7 @@ Use WAL-based CDC when you need:
 - A simple, append-only feed that can be replayed.
 - Integration with downstream systems like Kafka, Pulsar, or data lakes.
 
-WAL-based CDC is not a bootstrap, backfill, or snapshot API. If you need an initial full copy of data, combine a snapshot with WAL tailing as described below.
+WAL-based CDC is not a bootstrap or backfill API. If you need an initial full copy of data, combine a backfill with WAL tailing as described below.
 
 ## What WalReader reads
 
@@ -105,16 +105,17 @@ async fn tail_wal(object_store: Arc<dyn ObjectStore>, path: &str) -> anyhow::Res
 
 This pattern is safe and idempotent as long as you persist the cursor after each emitted row and skip any rows with `seq <= last_seq` when resuming.
 
-## Snapshot plus streaming
+## Backfills plus streaming
 
-If you need a full snapshot and then a change stream:
+If you need a full backfill of data not in the WAL along with the WAL change stream:
 
 1. Start a WAL tailer and buffer changes.
-2. Take a snapshot using a range scan over the database.
+2. Clone the database using `Admin::create_clone`.
+2. Range scan (`Db::scan_rows`) over the cloned database to read old data.
 3. Apply the buffered WAL changes in sequence order.
 4. Continue tailing WALs from the stored cursor.
 
-This avoids gaps between the snapshot and the live stream. Your sink should still be idempotent because a snapshot and WAL stream can overlap.
+This avoids gaps between the backfill and the live stream. Your sink should be idempotent if the backfill and WAL stream can overlap.
 
 ## Resumability and ordering
 
