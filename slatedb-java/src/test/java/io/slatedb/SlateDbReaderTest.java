@@ -41,8 +41,8 @@ class SlateDbReaderTest {
         )) {
             Assertions.assertArrayEquals(value, reader.get(key));
 
-            try (ScanIterator iter = reader.scanPrefix("reader-".getBytes(StandardCharsets.UTF_8))) {
-                KeyValue kv = iter.next();
+            try (SlateDbScanIterator iter = reader.scanPrefix("reader-".getBytes(StandardCharsets.UTF_8))) {
+                SlateDbKeyValue kv = iter.next();
                 Assertions.assertNotNull(kv);
                 Assertions.assertArrayEquals(key, kv.key());
                 Assertions.assertArrayEquals(value, kv.value());

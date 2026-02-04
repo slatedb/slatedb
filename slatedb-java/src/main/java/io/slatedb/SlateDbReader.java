@@ -39,8 +39,8 @@ public final class SlateDbReader implements AutoCloseable {
     ///
     /// @param startKey inclusive lower bound, or `null`.
     /// @param endKey exclusive upper bound, or `null`.
-    /// @return A [ScanIterator]. Always close it.
-    public ScanIterator scan(byte[] startKey, byte[] endKey) {
+    /// @return A [SlateDbScanIterator]. Always close it.
+    public SlateDbScanIterator scan(byte[] startKey, byte[] endKey) {
         ensureOpen();
         return scan(startKey, endKey, null);
     }
@@ -50,17 +50,17 @@ public final class SlateDbReader implements AutoCloseable {
     /// @param startKey inclusive lower bound, or `null`.
     /// @param endKey exclusive upper bound, or `null`.
     /// @param options scan options or `null` for defaults.
-    /// @return A [ScanIterator]. Always close it.
-    public ScanIterator scan(byte[] startKey, byte[] endKey, ScanOptions options) {
+    /// @return A [SlateDbScanIterator]. Always close it.
+    public SlateDbScanIterator scan(byte[] startKey, byte[] endKey, ScanOptions options) {
         ensureOpen();
-        return new ScanIterator(Native.readerScan(handle, startKey, endKey, options));
+        return new SlateDbScanIterator(Native.readerScan(handle, startKey, endKey, options));
     }
 
     /// Creates a scan iterator for the provided key prefix using default scan options.
     ///
     /// @param prefix key prefix to scan.
-    /// @return A [ScanIterator]. Always close it.
-    public ScanIterator scanPrefix(byte[] prefix) {
+    /// @return A [SlateDbScanIterator]. Always close it.
+    public SlateDbScanIterator scanPrefix(byte[] prefix) {
         ensureOpen();
         return scanPrefix(prefix, null);
     }
@@ -69,10 +69,10 @@ public final class SlateDbReader implements AutoCloseable {
     ///
     /// @param prefix key prefix to scan.
     /// @param options scan options or `null` for defaults.
-    /// @return A [ScanIterator]. Always close it.
-    public ScanIterator scanPrefix(byte[] prefix, ScanOptions options) {
+    /// @return A [SlateDbScanIterator]. Always close it.
+    public SlateDbScanIterator scanPrefix(byte[] prefix, ScanOptions options) {
         ensureOpen();
-        return new ScanIterator(Native.readerScanPrefix(handle, prefix, options));
+        return new SlateDbScanIterator(Native.readerScanPrefix(handle, prefix, options));
     }
 
     /// Closes the reader handle.

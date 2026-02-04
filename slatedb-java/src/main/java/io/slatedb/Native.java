@@ -1,7 +1,7 @@
 package io.slatedb;
 
 import io.slatedb.SlateDb.*;
-import io.slatedb.KeyValue;
+import io.slatedb.SlateDbKeyValue;
 
 import java.lang.foreign.Arena;
 import java.lang.foreign.FunctionDescriptor;
@@ -524,7 +524,7 @@ final class Native {
             checkResult(result);
             MemorySegment batchPtr = batchOut.get(ValueLayout.ADDRESS, 0);
             if (batchPtr == null || batchPtr.equals(MemorySegment.NULL)) {
-                throw new SlateDbException(-1, "SlateDB returned a null WriteBatch");
+                throw new SlateDbException(-1, "SlateDB returned a null SlateDbWriteBatch");
             }
             return batchPtr;
         } catch (Throwable t) {
@@ -857,7 +857,7 @@ final class Native {
         }
     }
 
-    static KeyValue iteratorNext(MemorySegment iterPtr) {
+    static SlateDbKeyValue iteratorNext(MemorySegment iterPtr) {
         ensureInitialized();
         try (Arena arena = Arena.ofConfined()) {
             MemorySegment kvOut = arena.allocate(KEY_VALUE_LAYOUT);
@@ -1313,7 +1313,7 @@ final class Native {
         return bytes;
     }
 
-    private static KeyValue copyKeyValuePair(MemorySegment kvOut) {
+    private static SlateDbKeyValue copyKeyValuePair(MemorySegment kvOut) {
         MemorySegment keySegment = kvOut.asSlice(KEY_VALUE_KEY_OFFSET, VALUE_LAYOUT.byteSize());
         MemorySegment valueSegment = kvOut.asSlice(KEY_VALUE_VALUE_OFFSET, VALUE_LAYOUT.byteSize());
         RuntimeException failure = null;
@@ -1336,7 +1336,7 @@ final class Native {
         if (failure != null) {
             throw failure;
         }
-        return new KeyValue(keyBytes, valueBytes);
+        return new SlateDbKeyValue(keyBytes, valueBytes);
     }
 
     private static void checkResult(MemorySegment result) {

@@ -5,7 +5,7 @@ import org.junit.jupiter.api.Test;
 
 import java.nio.charset.StandardCharsets;
 
-class ScanIteratorTest {
+class SlateDbScanIteratorTest {
     @Test
     void scanAndSeekWithOptions() throws Exception {
         TestSupport.ensureNativeReady();
@@ -30,18 +30,18 @@ class ScanIteratorTest {
                 .maxFetchTasks(1)
                 .build();
 
-            try (ScanIterator iter = db.scan(null, null, scanOptions)) {
-                KeyValue first = iter.next();
+            try (SlateDbScanIterator iter = db.scan(null, null, scanOptions)) {
+                SlateDbKeyValue first = iter.next();
                 Assertions.assertNotNull(first);
 
                 iter.seek(keyB);
-                KeyValue afterSeek = iter.next();
+                SlateDbKeyValue afterSeek = iter.next();
                 Assertions.assertNotNull(afterSeek);
                 Assertions.assertArrayEquals(keyB, afterSeek.key());
                 Assertions.assertArrayEquals(valueB, afterSeek.value());
             }
 
-            try (ScanIterator iter = db.scanPrefix("scan-".getBytes(StandardCharsets.UTF_8))) {
+            try (SlateDbScanIterator iter = db.scanPrefix("scan-".getBytes(StandardCharsets.UTF_8))) {
                 int count = 0;
                 while (iter.next() != null) {
                     count++;

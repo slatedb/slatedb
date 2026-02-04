@@ -6,13 +6,13 @@ import java.lang.foreign.MemorySegment;
 
 /// A batch of write operations that can be executed atomically.
 ///
-/// Batches are consumed by [SlateDb#write(WriteBatch)] and cannot be reused.
-public final class WriteBatch implements AutoCloseable {
+/// Batches are consumed by [SlateDb#write(SlateDbWriteBatch)] and cannot be reused.
+public final class SlateDbWriteBatch implements AutoCloseable {
     private MemorySegment batchPtr;
     private boolean closed;
     private boolean consumed;
 
-    WriteBatch(MemorySegment batchPtr) {
+    SlateDbWriteBatch(MemorySegment batchPtr) {
         this.batchPtr = batchPtr;
     }
 
@@ -74,10 +74,10 @@ public final class WriteBatch implements AutoCloseable {
 
     private void ensureOpen() {
         if (closed) {
-            throw new IllegalStateException("WriteBatch is closed");
+            throw new IllegalStateException("SlateDbWriteBatch is closed");
         }
         if (consumed) {
-            throw new IllegalStateException("WriteBatch already consumed");
+            throw new IllegalStateException("SlateDbWriteBatch already consumed");
         }
     }
 }

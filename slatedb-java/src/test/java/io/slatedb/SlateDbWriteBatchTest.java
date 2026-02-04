@@ -7,7 +7,7 @@ import java.lang.reflect.Field;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 
-class WriteBatchTest {
+class SlateDbWriteBatchTest {
     @Test
     void writeBatchPutAndDelete() throws Exception {
         TestSupport.ensureNativeReady();
@@ -19,7 +19,7 @@ class WriteBatchTest {
         byte[] value2 = "batch-value-2".getBytes(StandardCharsets.UTF_8);
 
         try (SlateDb db = SlateDb.open(context.dbPath().toAbsolutePath().toString(), context.objectStoreUrl(), null);
-             WriteBatch batch = SlateDb.newWriteBatch()) {
+             SlateDbWriteBatch batch = SlateDb.newWriteBatch()) {
             batch.put(key1, value1);
             batch.put(key2, value2);
             batch.delete(key1);
@@ -43,7 +43,7 @@ class WriteBatchTest {
         SlateDb.WriteOptions writeOptions = new SlateDb.WriteOptions(false);
 
         try (SlateDb db = SlateDb.open(context.dbPath().toAbsolutePath().toString(), context.objectStoreUrl(), null);
-             WriteBatch batch = SlateDb.newWriteBatch()) {
+             SlateDbWriteBatch batch = SlateDb.newWriteBatch()) {
             batch.put(key, value, putOptions);
             db.write(batch, writeOptions);
 
@@ -60,7 +60,7 @@ class WriteBatchTest {
         byte[] value = "batch-guard-value".getBytes(StandardCharsets.UTF_8);
 
         try (SlateDb db = SlateDb.open(context.dbPath().toAbsolutePath().toString(), context.objectStoreUrl(), null);
-             WriteBatch batch = SlateDb.newWriteBatch()) {
+             SlateDbWriteBatch batch = SlateDb.newWriteBatch()) {
             batch.put(key, value);
             db.write(batch);
 
@@ -82,11 +82,11 @@ class WriteBatchTest {
         byte[] value = "batch-fail-value".getBytes(StandardCharsets.UTF_8);
 
         try (SlateDb db = SlateDb.open(context.dbPath().toAbsolutePath().toString(), context.objectStoreUrl(), null);
-             WriteBatch batch = SlateDb.newWriteBatch()) {
+             SlateDbWriteBatch batch = SlateDb.newWriteBatch()) {
             batch.put(key, value);
             db.write(batch);
 
-            Field consumedField = WriteBatch.class.getDeclaredField("consumed");
+            Field consumedField = SlateDbWriteBatch.class.getDeclaredField("consumed");
             consumedField.setAccessible(true);
             consumedField.setBoolean(batch, false);
 
@@ -102,7 +102,7 @@ class WriteBatchTest {
         TestSupport.DbContext context = TestSupport.createDbContext();
 
         try (SlateDb db = SlateDb.open(context.dbPath().toAbsolutePath().toString(), context.objectStoreUrl(), null)) {
-            WriteBatch batch = SlateDb.newWriteBatch();
+            SlateDbWriteBatch batch = SlateDb.newWriteBatch();
             batch.close();
             Assertions.assertThrows(IllegalStateException.class, () -> db.write(batch));
         }
