@@ -1633,6 +1633,7 @@ mod tests {
         assert_iterator, OnDemandCompactionSchedulerSupplier, StringConcatMergeOperator,
     };
     use crate::types::RowEntry;
+    use crate::wal_reader::WalReader;
     use crate::{proptest_util, test_utils, CloseReason, KeyValue};
     use async_trait::async_trait;
     use chrono::TimeDelta;
@@ -3768,6 +3769,63 @@ mod tests {
         // Verify our keys are in the SST
         assert!(found_keys.contains(key1.as_slice()));
         assert!(found_keys.contains(key2.as_slice()));
+    }
+
+    #[tokio::test]
+    async fn test_memtable_flush_also_flushes_wal() {
+        let main_object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let wal_object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = "/tmp/test_memtable_flush_also_flushes_wal";
+        let mut settings = test_db_options(0, 1024, None);
+        settings.flush_interval = None;
+
+        let kv_store = Db::builder(path, main_object_store)
+            .with_settings(settings)
+            .with_wal_object_store(wal_object_store.clone())
+            .build()
+            .await
+            .unwrap();
+
+        let key = b"wal_flush_key";
+        let value = b"wal_flush_value";
+        kv_store
+            .put_with_options(
+                key,
+                value,
+                &PutOptions::default(),
+                &WriteOptions {
+                    await_durable: false,
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(kv_store.inner.wal_buffer.buffered_wal_entries_count(), 1);
+
+        kv_store
+            .flush_with_options(FlushOptions {
+                flush_type: FlushType::MemTable,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(kv_store.inner.wal_buffer.buffered_wal_entries_count(), 0);
+
+        let wal_reader = WalReader::new(path, wal_object_store);
+        let wal_files = wal_reader.list(0..u64::MAX).await.unwrap();
+        assert_eq!(wal_files.len(), 2); // first file is the fencing operation
+        let rows = wal_files[1] // second file contains the actual write
+            .rows()
+            .await
+            .expect("expected successful WAL rows read");
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
+        assert_eq!(row.key.as_ref(), key);
+        assert_eq!(
+            row.value.as_bytes().expect("expected bytes").as_ref(),
+            value
+        );
+        assert_eq!(row.seq, 1);
     }
 
     async fn test_sequence_tracker_persisted_across_flush_and_reload_impl(wal_enabled: bool) {
