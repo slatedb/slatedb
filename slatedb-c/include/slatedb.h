@@ -94,6 +94,11 @@ typedef struct CSdbScanOptions {
     uint64_t max_fetch_tasks;
 } CSdbScanOptions;
 
+typedef struct CSdbBuilderResult {
+    struct DbBuilder_String *builder;
+    struct CSdbResult result;
+} CSdbBuilderResult;
+
 // Type-safe wrapper around a pointer to DbReaderFFI.
 // This provides better type safety than raw pointers.
 typedef struct CSdbReaderHandle {
@@ -379,7 +384,7 @@ struct CSdbResult slatedb_scan_prefix_with_options(struct CSdbHandle handle,
 struct CSdbResult slatedb_metrics(struct CSdbHandle handle, struct CSdbValue *value_out);
 
 // Create a new DbBuilder
-struct DbBuilder_String *slatedb_builder_new(const char *path,
+struct CSdbBuilderResult slatedb_builder_new(const char *path,
                                              const char *url,
                                              const char *env_file);
 
@@ -389,21 +394,23 @@ struct DbBuilder_String *slatedb_builder_new(const char *path,
 //
 // - `builder` must be a valid pointer to a DbBuilder
 // - `settings_json` must be a valid C string pointer
-bool slatedb_builder_with_settings(struct DbBuilder_String *builder, const char *settings_json);
+struct CSdbResult slatedb_builder_with_settings(struct DbBuilder_String *builder,
+                                                const char *settings_json);
 
 // Set SST block size on DbBuilder
 //
 // # Safety
 //
 // - `builder` must be a valid pointer to a DbBuilder
-bool slatedb_builder_with_sst_block_size(struct DbBuilder_String *builder, uint8_t size);
+struct CSdbResult slatedb_builder_with_sst_block_size(struct DbBuilder_String *builder,
+                                                      uint8_t size);
 
 // Build the database from DbBuilder
 //
 // # Safety
 //
 // - `builder` must be a valid pointer to a DbBuilder that was previously allocated
-struct CSdbHandle slatedb_builder_build(struct DbBuilder_String *builder);
+struct CSdbHandleResult slatedb_builder_build(struct DbBuilder_String *builder);
 
 // Free DbBuilder
 //
