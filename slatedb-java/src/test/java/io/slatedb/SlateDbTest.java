@@ -8,6 +8,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 
 class SlateDbTest {
+    private static final int ERROR_INTERNAL = 5;
     @Test
     void openPutGetClose() throws Exception {
         TestSupport.ensureNativeReady();
@@ -104,6 +105,40 @@ class SlateDbTest {
                 db.put(key, value);
                 Assertions.assertArrayEquals(value, db.get(key));
             }
+        }
+    }
+
+    @Test
+    void builderInvalidUrlReportsNativeError() throws Exception {
+        TestSupport.ensureNativeReady();
+        TestSupport.DbContext context = TestSupport.createDbContext();
+
+        SlateDb.SlateDbException failure = Assertions.assertThrows(
+            SlateDb.SlateDbException.class,
+            () -> SlateDb.builder(context.dbPath().toAbsolutePath().toString(), "bogus://", null)
+        );
+        Assertions.assertEquals(ERROR_INTERNAL, failure.getErrorCode());
+        Assertions.assertNotNull(failure.getMessage());
+    }
+
+    @Test
+    void builderWithInvalidSettingsJsonThrowsIllegalArgumentException() throws Exception {
+        TestSupport.ensureNativeReady();
+        TestSupport.DbContext context = TestSupport.createDbContext();
+
+        try (SlateDb.Builder builder = SlateDb.builder(
+            context.dbPath().toAbsolutePath().toString(),
+            context.objectStoreUrl(),
+            null
+        )) {
+            IllegalArgumentException failure = Assertions.assertThrows(
+                IllegalArgumentException.class,
+                () -> builder.withSettingsJson("{\"broken\":")
+            );
+            Assertions.assertTrue(
+                failure.getMessage() != null && failure.getMessage().contains("Invalid settings json"),
+                "Expected native error message to mention invalid settings json"
+            );
         }
     }
 
