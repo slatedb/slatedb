@@ -75,7 +75,7 @@ fn compute_prefix_chunks<const N: usize>(lhs: &[u8], rhs: &[u8]) -> usize {
 }
 
 /// Builder for BlockV2 with restart points.
-pub(crate) struct BlockBuilderV2 {
+pub(super) struct BlockBuilderV2 {
     data: Vec<u8>,
     restarts: Vec<u16>,
     block_size: usize,
@@ -643,7 +643,7 @@ mod tests {
 #[cfg(test)]
 mod block_size_comparison {
     use super::*;
-    use crate::format::block::BlockBuilder;
+    use crate::format::sst::BlockBuilder;
     use crate::types::ValueDeletable;
 
     const BLOCK_SIZE: usize = 64 * 1024; // 64KB blocks
@@ -671,7 +671,7 @@ mod block_size_comparison {
     }
 
     fn build_v1_block(entries: &[RowEntry]) -> usize {
-        let mut builder = BlockBuilder::new(BLOCK_SIZE);
+        let mut builder = BlockBuilder::new_v1(BLOCK_SIZE);
         for entry in entries {
             let _ = builder.add(entry.clone());
         }

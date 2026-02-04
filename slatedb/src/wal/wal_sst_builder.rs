@@ -56,14 +56,26 @@ use crate::config::CompressionCodec;
 use crate::db_state::SsTableInfoCodec;
 use crate::error::SlateDBError;
 use crate::flatbuffer_types::{BlockMeta, BlockMetaArgs};
-use crate::format::block::BlockBuilder;
 use crate::format::sst::{
-    BlockTransformer, EncodedSsTable, EncodedSsTableBlock, EncodedSsTableBlockBuilder,
-    EncodedSsTableFooterBuilder,
+    BlockBuilder, BlockTransformer, EncodedSsTable, EncodedSsTableBlock,
+    EncodedSsTableBlockBuilder, EncodedSsTableFooterBuilder, SsTableFormat, SST_FORMAT_VERSION,
 };
 use crate::types::RowEntry;
 use bytes::Bytes;
 use flatbuffers::DefaultAllocator;
+
+impl SsTableFormat {
+    pub(crate) fn wal_table_builder(&self) -> EncodedWalSsTableBuilder {
+        let mut builder = EncodedWalSsTableBuilder::new(self.block_size, self.sst_codec.clone());
+        if let Some(codec) = self.compression_codec {
+            builder = builder.with_compression_codec(codec);
+        }
+        if let Some(ref transformer) = self.block_transformer {
+            builder = builder.with_block_transformer(transformer.clone());
+        }
+        builder
+    }
+}
 
 /// Builds a WAL SSTable from entries.
 ///
@@ -90,14 +102,13 @@ pub(crate) struct EncodedWalSsTableBuilder {
 
 impl EncodedWalSsTableBuilder {
     /// Create a builder based on target block size.
-    #[allow(unused)]
     pub(crate) fn new(block_size: usize, sst_codec: Box<dyn SsTableInfoCodec>) -> Self {
         Self {
             data_size: 0,
             blocks: VecDeque::new(),
             block_meta: Vec::new(),
             block_size_config: block_size,
-            block_builder: BlockBuilder::new(block_size),
+            block_builder: BlockBuilder::new_v1(block_size),
             index_builder: flatbuffers::FlatBufferBuilder::new(),
             sst_codec,
             compression_codec: None,
@@ -110,21 +121,18 @@ impl EncodedWalSsTableBuilder {
     }
 
     /// Sets the compression codec for compressing data blocks and index blocks
-    #[allow(unused)]
     pub(crate) fn with_compression_codec(mut self, codec: CompressionCodec) -> Self {
         self.compression_codec = Some(codec);
         self
     }
 
     /// Sets the block transformer for transforming data blocks and index blocks
-    #[allow(unused)]
     pub(crate) fn with_block_transformer(mut self, transformer: Arc<dyn BlockTransformer>) -> Self {
         self.block_transformer = Some(transformer);
         self
     }
 
     /// Adds an entry to the WAL SSTable and returns the size of the block that was finished if any.
-    #[allow(unused)]
     pub(crate) async fn add(&mut self, entry: RowEntry) -> Result<Option<usize>, SlateDBError> {
         // Track first sequence number for SST info
         let is_sst_first_seq = self.sst_first_seq.is_none();
@@ -169,18 +177,17 @@ impl EncodedWalSsTableBuilder {
         self.add(entry).await
     }
 
-    #[allow(unused)]
+    #[cfg(test)]
     pub(crate) fn next_block(&mut self) -> Option<EncodedSsTableBlock> {
         self.blocks.pop_front()
     }
 
-    #[allow(unused)]
     async fn finish_block(&mut self) -> Result<Option<usize>, SlateDBError> {
         if self.is_drained() {
             return Ok(None);
         }
 
-        let new_builder = BlockBuilder::new(self.block_size_config);
+        let new_builder = BlockBuilder::new_v1(self.block_size_config);
         let builder = std::mem::replace(&mut self.block_builder, new_builder);
         let mut block_builder = EncodedSsTableBlockBuilder::new(builder, self.data_size);
         if let Some(codec) = self.compression_codec {
@@ -233,7 +240,6 @@ impl EncodedWalSsTableBuilder {
     /// Note: Unlike regular SSTs, WAL SSTs have no bloom filter.
     /// The index first_key field contains the min sequence number (as bytes) for each block.
     /// SST info contains the first sequence number of the SST instead of the first key.
-    #[allow(unused)]
     pub(crate) async fn build(mut self) -> Result<EncodedSsTable, SlateDBError> {
         self.finish_block().await?;
 
@@ -243,6 +249,7 @@ impl EncodedWalSsTableBuilder {
             &*self.sst_codec,
             self.index_builder,
             self.block_meta,
+            SST_FORMAT_VERSION,
         );
         if let Some(codec) = self.compression_codec {
             footer_builder = footer_builder.with_compression_codec(codec);
