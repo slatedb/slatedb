@@ -4,18 +4,17 @@ Table of Contents:
 
 <!-- TOC start (generated with https://github.com/derlin/bitdowntoc) -->
 
-- [Expose Key Metadata](#expose-key-metadata)
-  - [Summary](#summary)
-  - [Motivation](#motivation)
-  - [Goals](#goals)
-  - [Non-Goals](#non-goals)
-  - [Design](#design)
-    - [1. Metadata Query Interface](#1-metadata-query-interface)
-    - [2. Modify Put/Write Return Types](#2-modify-putwrite-return-types)
-    - [3. Support Query by Version](#3-support-query-by-version)
-  - [Impact Analysis](#impact-analysis)
-  - [Testing](#testing)
-  - [Alternatives](#alternatives)
+- [Summary](#summary)
+- [Motivation](#motivation)
+- [Goals](#goals)
+- [Non-Goals](#non-goals)
+- [Design](#design)
+   * [1. Metadata Query Interface](#1-metadata-query-interface)
+   * [2. Modify Put/Write Return Types](#2-modify-putwrite-return-types)
+   * [3. Support Query by Version](#3-support-query-by-version)
+- [Impact Analysis](#impact-analysis)
+- [Testing](#testing)
+- [Alternatives](#alternatives)
 
 <!-- TOC end -->
 
@@ -80,7 +79,7 @@ Users cannot query a specific historical version of a key using a sequence numbe
 
 ```rust
 // Get metadata for a single key
-pub async fn get_meta<K: AsRef<[u8]>>(&self, key: K) -> Result<Option<Metadata>, crate::Error>;
+pub async fn get_meta<K: AsRef<[u8]>>(&self, key: K) -> Result<Option<RowMetadata>, crate::Error>;
 
 // Scan values (unchanged)
 pub async fn scan<K, T>(&self, range: T) -> Result<DbIterator, crate::Error>
@@ -104,8 +103,8 @@ where
     K: AsRef<[u8]> + Send,
     T: RangeBounds<K> + Send;
 
-// Metadata structure
-pub struct Metadata {
+// Row-level metadata structure
+pub struct RowMetadata {
     pub seq: u64,
     pub create_ts: Option<i64>, // None if not specified during write
     pub expire_ts: Option<i64>, // None if no TTL set
@@ -113,7 +112,7 @@ pub struct Metadata {
 
 pub struct KeyMetadata {
     pub key: Bytes,
-    pub metadata: Metadata,
+    pub metadata: RowMetadata,
 }
 ```
 
