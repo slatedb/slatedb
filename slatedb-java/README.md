@@ -54,7 +54,10 @@ slatedb-java/build/libs/slatedb-java-<version>.jar
 1. Create `HelloSlateDb.java`:
 
 ```java
+import io.slatedb.KeyValue;
+import io.slatedb.ScanIterator;
 import io.slatedb.SlateDb;
+import io.slatedb.WriteBatch;
 
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -89,15 +92,15 @@ public final class HelloSlateDb {
             db.delete(key);
 
             // Batch write
-            try (SlateDb.WriteBatch batch = SlateDb.newWriteBatch()) {
+            try (WriteBatch batch = SlateDb.newWriteBatch()) {
                 batch.put("hello-a".getBytes(StandardCharsets.UTF_8), "value-a".getBytes(StandardCharsets.UTF_8));
                 batch.put("hello-b".getBytes(StandardCharsets.UTF_8), "value-b".getBytes(StandardCharsets.UTF_8));
                 db.write(batch);
             }
 
             // Scan by prefix
-            try (SlateDb.ScanIterator iter = db.scanPrefix("hello-".getBytes(StandardCharsets.UTF_8))) {
-                SlateDb.KeyValue kv;
+            try (ScanIterator iter = db.scanPrefix("hello-".getBytes(StandardCharsets.UTF_8))) {
+                KeyValue kv;
                 while ((kv = iter.next()) != null) {
                     System.out.println(
                         new String(kv.key(), StandardCharsets.UTF_8) + "=" +
@@ -176,6 +179,8 @@ JUnit tests require access to the native library. Set one of these before runnin
 - `SLATEDB_C_LIB=/absolute/path/to/libslatedb_c.dylib`
 - `-Dslatedb.c.lib=/absolute/path/to/libslatedb_c.dylib`
 
+If unset, tests will try to load `libslatedb_c.<os extension>` from `target/debug` or `target/release`.
+
 Then run:
 
 ```bash
@@ -186,7 +191,6 @@ Then run:
 
 Common issues:
 - `UnsatisfiedLinkError`: The JVM cannot find `slatedb_c`. Verify `java.library.path` or call `SlateDb.loadLibrary(<absolute path>)`.
-- `IllegalStateException: SlateDb is closed`: You are using a closed handle. Create a new `SlateDb` instance instead.
 - Native access warnings: Use `--enable-native-access=ALL-UNNAMED` when running or testing.
 
 ## License
