@@ -38,8 +38,8 @@ class SlateDbWriteBatchTest {
         byte[] key = "batch-opts-key".getBytes(StandardCharsets.UTF_8);
         byte[] value = "batch-opts-value".getBytes(StandardCharsets.UTF_8);
 
-        SlateDb.PutOptions putOptions = SlateDb.PutOptions.expireAfter(Duration.ofMinutes(5));
-        SlateDb.WriteOptions writeOptions = new SlateDb.WriteOptions(false);
+        SlateDbConfig.PutOptions putOptions = SlateDbConfig.PutOptions.expireAfter(Duration.ofMinutes(5));
+        SlateDbConfig.WriteOptions writeOptions = new SlateDbConfig.WriteOptions(false);
 
         try (SlateDb db = SlateDb.open(context.dbPath().toAbsolutePath().toString(), context.objectStoreUrl(), null);
              SlateDbWriteBatch batch = SlateDb.newWriteBatch()) {

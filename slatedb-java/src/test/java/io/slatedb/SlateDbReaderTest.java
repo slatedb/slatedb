@@ -25,7 +25,7 @@ class SlateDbReaderTest {
             db.flush();
         }
 
-        SlateDb.ReaderOptions readerOptions = SlateDb.ReaderOptions.builder()
+        SlateDbConfig.ReaderOptions readerOptions = SlateDbConfig.ReaderOptions.builder()
             .manifestPollInterval(Duration.ofMillis(200))
             .checkpointLifetime(Duration.ofSeconds(1))
             .maxMemtableBytes(1024 * 1024)

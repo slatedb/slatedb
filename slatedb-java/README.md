@@ -140,6 +140,7 @@ java --enable-native-access=ALL-UNNAMED \
 
 Core types:
 - `SlateDb`: Read/write database handle. Always close it (try-with-resources recommended).
+- `SlateDbConfig`: Options and enums for reads, writes, scans, and readers.
 - `SlateDbReader`: Read-only handle for snapshot-style reads.
 - `SlateDbWriteBatch`: Batch of put/delete operations written atomically.
 - `SlateDbScanIterator`: Iterator for range scans and prefix scans.
@@ -159,7 +160,7 @@ String settings = SlateDb.settingsDefault();
 
 try (SlateDb.Builder builder = SlateDb.builder(dbPath, objectStoreUrl, null)) {
     builder.withSettingsJson(settings)
-           .withSstBlockSize(SlateDb.SstBlockSize.KIB_4);
+           .withSstBlockSize(SlateDbConfig.SstBlockSize.KIB_4);
     try (SlateDb db = builder.build()) {
         // use db
     }

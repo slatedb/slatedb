@@ -1,6 +1,6 @@
 package io.slatedb;
 
-import io.slatedb.SlateDb.PutOptions;
+import io.slatedb.SlateDbConfig.PutOptions;
 
 import java.lang.foreign.MemorySegment;
 

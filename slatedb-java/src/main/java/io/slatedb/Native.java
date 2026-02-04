@@ -1,6 +1,7 @@
 package io.slatedb;
 
-import io.slatedb.SlateDb.*;
+import io.slatedb.SlateDb.SlateDbException;
+import io.slatedb.SlateDbConfig.*;
 import io.slatedb.SlateDbKeyValue;
 
 import java.lang.foreign.Arena;
