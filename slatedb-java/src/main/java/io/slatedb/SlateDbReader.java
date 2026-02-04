@@ -1,0 +1,97 @@
+package io.slatedb;
+
+import io.slatedb.SlateDb.ReadOptions;
+import io.slatedb.SlateDb.ScanOptions;
+
+import java.lang.foreign.MemorySegment;
+
+/// Read-only SlateDB handle.
+///
+/// Readers provide a stable, read-only view of the database and should be closed when done.
+public final class SlateDbReader implements AutoCloseable {
+    private MemorySegment handle;
+    private boolean closed;
+
+    SlateDbReader(MemorySegment handle) {
+        this.handle = handle;
+    }
+
+    /// Reads a value using default read options.
+    ///
+    /// @param key key to read.
+    /// @return The value for the key, or `null` if the key does not exist.
+    public byte[] get(byte[] key) {
+        ensureOpen();
+        return get(key, null);
+    }
+
+    /// Reads a value with custom read options.
+    ///
+    /// @param key key to read.
+    /// @param options read options or `null` for defaults.
+    /// @return The value for the key, or `null` if the key does not exist.
+    public byte[] get(byte[] key, ReadOptions options) {
+        ensureOpen();
+        return Native.readerGet(handle, key, options);
+    }
+
+    /// Creates a scan iterator over the range `[startKey, endKey)` using default scan options.
+    ///
+    /// @param startKey inclusive lower bound, or `null`.
+    /// @param endKey exclusive upper bound, or `null`.
+    /// @return A [ScanIterator]. Always close it.
+    public ScanIterator scan(byte[] startKey, byte[] endKey) {
+        ensureOpen();
+        return scan(startKey, endKey, null);
+    }
+
+    /// Creates a scan iterator over the range `[startKey, endKey)` using custom scan options.
+    ///
+    /// @param startKey inclusive lower bound, or `null`.
+    /// @param endKey exclusive upper bound, or `null`.
+    /// @param options scan options or `null` for defaults.
+    /// @return A [ScanIterator]. Always close it.
+    public ScanIterator scan(byte[] startKey, byte[] endKey, ScanOptions options) {
+        ensureOpen();
+        return new ScanIterator(Native.readerScan(handle, startKey, endKey, options));
+    }
+
+    /// Creates a scan iterator for the provided key prefix using default scan options.
+    ///
+    /// @param prefix key prefix to scan.
+    /// @return A [ScanIterator]. Always close it.
+    public ScanIterator scanPrefix(byte[] prefix) {
+        ensureOpen();
+        return scanPrefix(prefix, null);
+    }
+
+    /// Creates a scan iterator for the provided key prefix using custom scan options.
+    ///
+    /// @param prefix key prefix to scan.
+    /// @param options scan options or `null` for defaults.
+    /// @return A [ScanIterator]. Always close it.
+    public ScanIterator scanPrefix(byte[] prefix, ScanOptions options) {
+        ensureOpen();
+        return new ScanIterator(Native.readerScanPrefix(handle, prefix, options));
+    }
+
+    /// Closes the reader handle.
+    ///
+    /// This method is idempotent. After closing, all operations on the instance
+    /// will throw [IllegalStateException].
+    @Override
+    public void close() {
+        if (closed) {
+            return;
+        }
+        Native.readerClose(handle);
+        handle = MemorySegment.NULL;
+        closed = true;
+    }
+
+    private void ensureOpen() {
+        if (closed || handle == null || handle.equals(MemorySegment.NULL)) {
+            throw new IllegalStateException("SlateDbReader is closed");
+        }
+    }
+}
