@@ -158,7 +158,7 @@ let mut iter = db.scan_rows_with_options(
 2.  **Value Type Handling**:
     - `RowEntry.value` is of type `ValueDeletable`, which can be:
       - `ValueDeletable::Value(Bytes)` - Regular value
-      - `ValueDeletable::Merge(Bytes)` - Merge operation. **Important**: If a key has multiple merge operations, only the **latest merge** is returned. The merge values are not applied/combined.
+      - `ValueDeletable::Merge(Bytes)` - Merge operation. **Important**: If a key has multiple merge operations, only the **latest merge delta value itself** is returned. The merge values are not applied/combined.
       - `ValueDeletable::Tombstone` - Deleted key
 3.  **Tombstone and Expired Key Handling**: 
     - **Tombstones**: `get_row` and `scan_rows` can return tombstones (`ValueDeletable::Tombstone`), allowing users to see that a key has been deleted along with its metadata (seq, timestamps).
