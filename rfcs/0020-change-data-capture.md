@@ -99,25 +99,25 @@ SlateDB's CDC design is based loosely on RocksDB's [`getUpdatesSince`](https://g
 /// Represents a single WAL file stored in object storage. Contains metadata about the
 /// WAL file as well as methods to read its contents.
 pub struct WalFile {
-   /// The unique identifier for this `WalBatch`. Corresponds to the SST filename without
+   /// The unique identifier for this `WalFile`. Corresponds to the SST filename without
    /// the extension. For example, file `000123.sst` would have id `123`.
    pub id: u64,
 
-   /// The time this `WalBatch` was written to object storage.
+   /// The time this `WalFile` was written to object storage.
    pub create_time: DateTime<Utc>,
 
-   /// The size of this `WalBatch` in bytes.
+   /// The size of this `WalFile` in bytes.
    pub size_bytes: u64,
 }
 
-impl WalBatch {
+impl WalFile {
    // TODO: should we expose a metadata() method that returns min/max seqnum, timestamps, etc?
    // Users can compute this themselves by reading the rows, but it might be more performant
    // for very large WAL files to expose metadata directly. I was aiming to keep the API surface
    // minimal for now.
 
-   /// Reads and returns all `RowEntry`s in this `WalBatch`. Raises an error if the
-   /// `WalBatch` could not be read.
+   /// Reads and returns all `RowEntry`s in this `WalFile`. Raises an error if the
+   /// `WalFile` could not be read.
    pub async fn rows(&self) -> Result<Vec<RowEntry>, crate::Error>;
 }
 
@@ -315,7 +315,7 @@ Notably, this RFC does not preclude us from implementing any of the above altern
 
 ## Open Questions
 
-- Should we make `WalBuffer` public instead of introducing `WalBatch`?
+- Should we make `WalBuffer` public instead of introducing `WalFile`?
 
 ## References
 
