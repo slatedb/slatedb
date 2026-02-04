@@ -3734,9 +3734,10 @@ mod tests {
             .get();
         assert!(final_flush_count > initial_flush_count);
 
-        // Verify that the WAL has not been flushed
+        // Verify that the WAL was also flushed since we guarantee
+        // memtable data is persisted in the WAL prior to L0 flush.
         let recent_flushed_wal_id = kv_store.inner.wal_buffer.recent_flushed_wal_id();
-        assert_eq!(recent_flushed_wal_id, 0);
+        assert_eq!(recent_flushed_wal_id, 2);
 
         // Verify that the data is still accessible after flush
         let retrieved_value1 = kv_store.get(key1).await.unwrap().unwrap();
