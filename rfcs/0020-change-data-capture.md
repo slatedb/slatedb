@@ -169,8 +169,8 @@ The `WalReader` will not interact with any SlateDB components (garbage collector
 
 In this case, the CDC feed would not see data that is durably written to the database. We considered two options to address this:
 
-- Replay all writes in the database greater than the max seqnum in the last WAL file. This would require that we prevent the L0 writer and compactor from deleting seqnums that haven't yet been written to the WAL. We would then need to scan all SSTs (and SRs) from top to bottom until we reach the max seqnum in the last WAL file.
-- Ensure that WAL files are written to object storage before memtables are flushed to L0. This would require that we block memtable flushes until the WAL write is confirmed.
+1. Replay all writes in the database greater than the max seqnum in the last WAL file. This would require that we prevent the L0 writer and compactor from deleting seqnums that haven't yet been written to the WAL. We would then need to scan all SSTs (and SRs) from top to bottom until we reach the max seqnum in the last WAL file.
+2. Ensure that WAL files are written to object storage before memtables are flushed to L0. This would require that we block memtable flushes until the WAL write is confirmed.
 
 This RFC proposes that we pursue option (2): blocking memtable flushes until the WAL write is confirmed. This is simpler to implement and makes the database semantics easier to reason about (any data in the DB is guaranteed to be in the WAL).
 
