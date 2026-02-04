@@ -29,8 +29,8 @@ Authors:
 
 This RFC proposes three related API improvements:
 
-1.  **Modify Write API Return Types**: Change the return type of `db.put()`, `db.delete()`, and `db.merge()` (including their `_with_options` variants) from `Result<(), ...>` to `Result<u64, ...>` to return the assigned sequence number.
-2.  **Simplify Batch Write Return Type**: Change the return type of `db.write()` from `Result<(), ...>` to `Result<u64, ...>` to return the commit sequence number.
+1.  **Modify Write API Return Types**: Change the return type of `db.put()`, `db.delete()`, and `db.merge()` (including their `_with_options` variants) from `Result<(), ...>` to `Result<WriteHandle, ...>` to return a write handle containing the assigned sequence number.
+2.  **Enrich Batch Write Return Type**: Change the return type of `db.write()` from `Result<(), ...>` to `Result<WriteHandle, ...>` to return a write handle containing the commit sequence number. This design allows for future extensions such as `await_durability()`.
 3.  **New Metadata Query Interface**: Introduce `get_meta()`, `get_meta_with_options()`, `scan_meta()`, and `scan_meta_with_options()` interfaces, allowing users to query key metadata (sequence number, creation timestamp, expiration timestamp, etc.).
 4.  **Support Query by Version**: Add a `read_at_seq` option to `ReadOptions`, enabling users to read a specific historical version of a key via its sequence number.
 
@@ -153,6 +153,26 @@ let mut iter = db.scan_meta_with_options(
 > [!WARNING]
 > **Breaking Change**: All existing code using `db.put`, `db.delete`, `db.merge`, and `db.write` (and their `_with_options` variants) must be updated to handle the new return type.
 
+**WriteHandle Structure**:
+
+```rust
+/// Handle returned from write operations, containing metadata about the write.
+/// This structure is designed to be extensible for future enhancements.
+pub struct WriteHandle {
+    seq: u64,
+}
+
+impl WriteHandle {
+    /// Returns the sequence number assigned to this write operation.
+    pub fn seqnum(&self) -> u64 {
+        self.seq
+    }
+    
+    // Future extensions can be added here, for example:
+    // pub async fn await_durability(&self) -> Result<(), Error> { ... }
+}
+```
+
 **Single Key Operations**:
 
 ```rust
@@ -161,38 +181,38 @@ pub async fn put<K, V>(&self, key: K, value: V) -> Result<(), crate::Error>
 pub async fn delete<K>(&self, key: K) -> Result<(), crate::Error>
 pub async fn merge<K, V>(&self, key: K, value: V) -> Result<(), crate::Error>
 
-// New interface. Returns seq: u64
-pub async fn put<K, V>(&self, key: K, value: V) -> Result<u64, crate::Error>
-pub async fn delete<K>(&self, key: K) -> Result<u64, crate::Error>
-pub async fn merge<K, V>(&self, key: K, value: V) -> Result<u64, crate::Error>
+// New interface. Returns WriteHandle containing the assigned sequence number.
+pub async fn put<K, V>(&self, key: K, value: V) -> Result<WriteHandle, crate::Error>
+pub async fn delete<K>(&self, key: K) -> Result<WriteHandle, crate::Error>
+pub async fn merge<K, V>(&self, key: K, value: V) -> Result<WriteHandle, crate::Error>
 ```
 
 **Batch Operations**:
 
 ```rust
-// New interface. Returns the commit sequence number for the batch.
+// New interface. Returns WriteHandle containing the commit sequence number for the batch.
 // In the current implementation, all operations in a batch share the same sequence number.
-// This u64 represents that shared sequence number.
-pub async fn write(&self, batch: WriteBatch) -> Result<u64, crate::Error>
+pub async fn write(&self, batch: WriteBatch) -> Result<WriteHandle, crate::Error>
 ```
 
 **Migration Example**:
 
 ```rust
-// Single key operation
-let seq = db.put(b"key", b"value").await?;
-println!("Seq: {}", seq);
+// Single key operation - get sequence number
+let handle = db.put(b"key", b"value").await?;
+println!("Seq: {}", handle.seqnum());
 
+// Batch operation
 let mut batch = WriteBatch::new();
 batch.put(b"key1", b"value1");
 batch.put(b"key2", b"value2");
 batch.delete(b"key1");
 
-let seq = db.write(batch).await?;
-println!("Batch committed at seq: {}", seq);
+let handle = db.write(batch).await?;
+println!("Batch committed at seq: {}", handle.seqnum());
 // All operations in the batch share this sequence number
 
-// Option 2: Ignore return values
+// Option 2: Ignore return values (if you don't need the sequence number)
 let _ = db.put(b"key", b"value").await?;
 
 let mut batch2 = WriteBatch::new();
@@ -202,9 +222,10 @@ let _ = db.write(batch2).await?;
 
 **Implementation Details**:
 
-- Modify `DbInner::write_with_options` to return `u64` (the assigned `commit_seq`).
-- `put()`, `delete()`, and `merge()` return the `u64` received from `DbInner`.
+- Modify `DbInner::write_with_options` to return `WriteHandle` (containing the assigned `commit_seq`).
+- `put()`, `delete()`, and `merge()` return the `WriteHandle` received from `DbInner`.
 - Both `put`, `delete`, and `merge` operations share the same underlying write pipeline.
+- `WriteHandle` is a simple wrapper around `u64` for now, but provides extensibility for future features.
 
 <!-- TOC --><a name="3-support-query-by-version"></a>
 ### 3. Support Query by Version
@@ -228,7 +249,8 @@ impl ReadOptions {
 
 ```rust
 // Write and get version number
-let seq = db.put(b"my_key", b"value1").await?;
+let handle = db.put(b"my_key", b"value1").await?;
+let seq = handle.seqnum();
 
 // Subsequent update
 db.put(b"my_key", b"value2").await?;
@@ -262,10 +284,12 @@ impl ScanOptions {
 
 ```rust
 // Write some data
-let seq1 = db.put(b"key1", b"value1_v1").await?;
+let handle1 = db.put(b"key1", b"value1_v1").await?;
+let seq1 = handle1.seqnum();
 db.put(b"key2", b"value2_v1").await?;
 
-let seq2 = db.put(b"key1", b"value1_v2").await?;
+let handle2 = db.put(b"key1", b"value1_v2").await?;
+let seq2 = handle2.seqnum();
 db.put(b"key2", b"value2_v2").await?;
 
 // Scan at historical version
@@ -304,8 +328,9 @@ while let Some((key, value)) = iter.next().await? {
     - `scan()` return type changes from `DbIterator` to `DbValueIterator`
     - All custom iterator implementations need updates.
 2.  **Put/Write Return Type Modification**:
-    - All `put()`, `put_with_options()`, `delete()`, `delete_with_options()`, `merge()`, `merge_with_options()`, `write()`, and `write_with_options()` calls must be updated to handle the new `Result<u64, ...>` return type.
-    - Language bindings (Go/Python) must be updated to return the sequence number to the caller. For example, in Go, the method signatures will change from returning `error` to returning `(uint64, error)`. Note that for `write()`, all operations in the batch share the same sequence number in the current implementation.
+    - All `put()`, `put_with_options()`, `delete()`, `delete_with_options()`, `merge()`, `merge_with_options()`, `write()`, and `write_with_options()` calls must be updated to handle the new `Result<WriteHandle, ...>` return type.
+    - To access the sequence number, call `.seqnum()` on the returned `WriteHandle`.
+    - Language bindings (Go/Python) must be updated accordingly. For example, in Go, consider exposing a `WriteHandle` type with a `Seqnum()` method, or alternatively return `(uint64, error)` directly. Note that for `write()`, all operations in the batch share the same sequence number in the current implementation.
 
 **Backward Compatibility**:
 
