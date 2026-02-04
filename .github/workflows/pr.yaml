@@ -221,7 +221,7 @@ jobs:
         working-directory: ./slatedb-java
         env:
           SLATEDB_C_LIB: "${{ github.workspace }}/target/release/libslatedb_c.so"
-        run: ./gradlew test
+        run: ./gradlew check
 
   microbenchmarks:
     runs-on: ubuntu-latest
