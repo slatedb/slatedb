@@ -46,7 +46,7 @@ From `slatedb-java`:
 The JAR will be written to:
 
 ```
-slatedb-java/build/libs/slatedb-java-<version>.jar
+slatedb-java/build/libs/slatedb-<version>.jar
 ```
 
 ## Hello World
@@ -116,14 +116,14 @@ public final class HelloSlateDb {
 2. Compile (from the repository root):
 
 ```bash
-javac -cp slatedb-java/build/libs/slatedb-java-<version>.jar HelloSlateDb.java
+javac -cp slatedb-java/build/libs/slatedb-<version>.jar HelloSlateDb.java
 ```
 
 3. Run (use the path to your `slatedb_c` native library):
 
 ```bash
 java --enable-native-access=ALL-UNNAMED \
-  -cp slatedb-java/build/libs/slatedb-java-<version>.jar:. \
+  -cp slatedb-java/build/libs/slatedb-<version>.jar:. \
   HelloSlateDb /absolute/path/to/libslatedb_c.dylib
 ```
 
@@ -132,7 +132,7 @@ If you prefer `java.library.path` instead of `SlateDb.loadLibrary(path)`, set th
 ```bash
 java --enable-native-access=ALL-UNNAMED \
   -Djava.library.path=/absolute/path/to/native/lib/dir \
-  -cp slatedb-java/build/libs/slatedb-java-<version>.jar:. \
+  -cp slatedb-java/build/libs/slatedb-<version>.jar:. \
   HelloSlateDb
 ```
 
