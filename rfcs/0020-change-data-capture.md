@@ -197,7 +197,7 @@ The following guidelines are recommended:
 2. Create a clone of the current database using `Admin::create_clone()`. This will provide a consistent snapshot of all L0 and compacted SSTs up to the current checkpoint (which was created after the `WalReader` stream began).
 3. Use `DbReader::scan()` on the clone to read all existing data in the database.
    - If the database is large, scans in non-overlapping key ranges can be parallelized.
-   - If desired, rows with seqnums greater than or equal to the starting seqnum of the `WalReader` stream can be skipped to avoid processing duplicate data.
+   - If desired, rows with seqnums greater than or equal to the starting seqnum of the `WalReader` stream can be skipped to avoid processing duplicate data. This will require the forthcoming `scan_row` API introduced in [#1247](https://github.com/slatedb/slatedb/pull/1247).
 
 This approach provides key-ordered rather than seqnum-ordered bootstrapping. If seqnum-ordered bootstrapping is required, users will need to implement their own logic to read all SSTs and sort the data by seqnum.
 
