@@ -4,17 +4,18 @@ Table of Contents:
 
 <!-- TOC start (generated with https://github.com/derlin/bitdowntoc) -->
 
-- [Summary](#summary)
-- [Motivation](#motivation)
-- [Goals](#goals)
-- [Non-Goals](#non-goals)
-- [Design](#design)
-   * [1. Metadata Query Interface](#1-metadata-query-interface)
-   * [2. Modify Put/Write Return Types](#2-modify-putwrite-return-types)
-   * [3. Support Query by Version](#3-support-query-by-version)
-- [Impact Analysis](#impact-analysis)
-- [Testing](#testing)
-- [Alternatives](#alternatives)
+- [Expose Key Metadata](#expose-key-metadata)
+  - [Summary](#summary)
+  - [Motivation](#motivation)
+  - [Goals](#goals)
+  - [Non-Goals](#non-goals)
+  - [Design](#design)
+    - [1. Metadata Query Interface](#1-metadata-query-interface)
+    - [2. Modify Put/Write Return Types](#2-modify-putwrite-return-types)
+    - [3. Support Query by Version](#3-support-query-by-version)
+  - [Impact Analysis](#impact-analysis)
+  - [Testing](#testing)
+  - [Alternatives](#alternatives)
 
 <!-- TOC end -->
 
@@ -72,8 +73,8 @@ Users cannot query a specific historical version of a key using a sequence numbe
 <!-- TOC --><a name="1-metadata-query-interface"></a>
 ### 1. Metadata Query Interface
 
-> [!WARNING]
-> **Breaking Change**: The `KeyValueIterator` trait is renamed to `KeyIterator`, and `DbIterator` (the return type of `scan()`) is renamed to `DbValueIterator` to distinguish it from the new `DbMetaIterator`.
+> [!NOTE]
+> This change introduces a new `DbMetaIterator` type alongside the existing `DbIterator`. The existing iterator types and their naming remain unchanged.
 
 **Public API**:
 
@@ -81,8 +82,8 @@ Users cannot query a specific historical version of a key using a sequence numbe
 // Get metadata for a single key
 pub async fn get_meta<K: AsRef<[u8]>>(&self, key: K) -> Result<Option<Metadata>, crate::Error>;
 
-// Scan values (return type changed)
-pub async fn scan<K, T>(&self, range: T) -> Result<DbValueIterator, crate::Error>
+// Scan values (unchanged)
+pub async fn scan<K, T>(&self, range: T) -> Result<DbIterator, crate::Error>
 where
     K: AsRef<[u8]> + Send,
     T: RangeBounds<K> + Send;
@@ -140,10 +141,10 @@ let mut iter = db.scan_meta_with_options(
 
 **Implementation Details**:
 
-1.  **Iterator Refactoring**:
-    - Rename `KeyValueIterator` trait to `KeyIterator`.
-    - Add `next_value()` and `next_meta()` methods.
-    - `DbValueIterator` and `DbMetaIterator` wrap the underlying iterator respectively.
+1.  **New Iterator Type**:
+    - Introduce `DbMetaIterator` to iterate over metadata.
+    - Existing `KeyValueIterator` trait and `DbIterator` type remain unchanged.
+    - `DbMetaIterator` wraps the underlying iterator and provides metadata-specific iteration.
 2.  **Tombstone and Expired Key Handling**: Both `get_meta` and `scan_meta` will skip keys that are either expired (based on TTL) or deleted (Tombstones), returning `None` for a single-key query or omitting them from a scan. This ensures consistency with existing `get` and `scan` behavior.
 3.  **Multi-Version Behavior**: `scan_meta` returns metadata for the **latest visible version** of each key (consistent with `scan` behavior). If a key has multiple versions at different sequence numbers, only the metadata of the version visible at the current time (or specified `read_at_seq`) is returned.
 
@@ -322,11 +323,10 @@ while let Some((key, value)) = iter.next().await? {
 
 **Breaking Changes**:
 
-1.  **Iterator Refactoring**:
-    - `KeyValueIterator` trait is renamed to `KeyIterator` (internal trait, not part of public API)
-    - `DbIterator` struct is renamed to `DbValueIterator` to distinguish from `DbMetaIterator`
-    - `scan()` return type changes from `DbIterator` to `DbValueIterator`
-    - All custom iterator implementations need updates.
+1.  **New Iterator Type**:
+    - A new `DbMetaIterator` type is introduced for metadata iteration.
+    - Existing `KeyValueIterator` trait and `DbIterator` type remain unchanged.
+    - No breaking changes to existing iterator usage.
 2.  **Put/Write Return Type Modification**:
     - All `put()`, `put_with_options()`, `delete()`, `delete_with_options()`, `merge()`, `merge_with_options()`, `write()`, and `write_with_options()` calls must be updated to handle the new `Result<WriteHandle, ...>` return type.
     - To access the sequence number, call `.seqnum()` on the returned `WriteHandle`.
@@ -340,14 +340,14 @@ while let Some((key, value)) = iter.next().await? {
 
 **Migration Path**:
 
+No migration needed for existing iterator usage. Simply use the new `DbMetaIterator` for metadata queries:
+
 ```rust
-// Old code
-use slatedb::iter::KeyValueIterator;
+// Existing code continues to work
 let mut iter: DbIterator = db.scan(..).await?;
 
-// New code
-use slatedb::iter::KeyIterator;
-let mut iter: DbValueIterator = db.scan(..).await?;
+// New metadata iteration
+let mut meta_iter: DbMetaIterator = db.scan_meta(..).await?;
 ```
 
 <!-- TOC --><a name="testing"></a>
@@ -383,9 +383,9 @@ let mut iter: DbValueIterator = db.scan(..).await?;
 
 - **Reason for Rejection**: Introducing a new API would lead to functional overlap. Modifying the existing `put()` return type, while a breaking change, maintains architectural simplicity and consistency.
 
-**3. Keep Existing Naming (KeyValueIterator)**
+**3. Rename KeyValueIterator to KeyIterator**
 
-- **Reason for Rejection**: The name `KeyValueIterator` does not accurately reflect its new responsibility (iterating over both Values and Metadata). Given SlateDB is in its early stages, semantic corrections now lay a better foundation for future API clarity.
+- **Reason for Rejection**: `KeyValueIterator` accurately reflects that it iterates over key-value pairs. Renaming would introduce unnecessary breaking changes without meaningful semantic improvement. The new `DbMetaIterator` clearly distinguishes metadata iteration from value iteration.
 
 **4. No Change (Status Quo)**
 
