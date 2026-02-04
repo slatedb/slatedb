@@ -80,7 +80,6 @@ class SlateDbReaderTest {
             Assertions.assertArrayEquals(value, reader.get(key));
             reader.close();
             Assertions.assertDoesNotThrow(reader::close);
-            Assertions.assertThrows(IllegalStateException.class, () -> reader.get(key));
         } finally {
             reader.close();
         }

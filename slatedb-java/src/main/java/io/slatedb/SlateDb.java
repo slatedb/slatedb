@@ -28,7 +28,10 @@ import java.util.Objects;
 ///
 /// ### Hello World
 /// ```java
+/// import io.slatedb.SlateDbKeyValue;
+/// import io.slatedb.SlateDbScanIterator;
 /// import io.slatedb.SlateDb;
+/// import io.slatedb.SlateDbWriteBatch;
 ///
 /// import java.nio.charset.StandardCharsets;
 /// import java.nio.file.Files;
@@ -229,7 +232,6 @@ public final class SlateDb implements AutoCloseable {
     /// db.put("key".getBytes(StandardCharsets.UTF_8), "value".getBytes(StandardCharsets.UTF_8));
     /// ```
     public void put(byte[] key, byte[] value) {
-        ensureOpen();
         Native.put(handle, key, value);
     }
 
@@ -241,7 +243,6 @@ public final class SlateDb implements AutoCloseable {
     /// @param writeOptions write options or `null` for defaults.
     /// @throws SlateDbException if the write fails.
     public void put(byte[] key, byte[] value, PutOptions putOptions, WriteOptions writeOptions) {
-        ensureOpen();
         Native.put(handle, key, value, putOptions, writeOptions);
     }
 
@@ -255,7 +256,6 @@ public final class SlateDb implements AutoCloseable {
     /// byte[] value = db.get("key".getBytes(StandardCharsets.UTF_8));
     /// ```
     public byte[] get(byte[] key) {
-        ensureOpen();
         return Native.get(handle, key);
     }
 
@@ -266,7 +266,6 @@ public final class SlateDb implements AutoCloseable {
     /// @return The value for the key, or `null` if the key does not exist.
     /// @throws SlateDbException if the read fails.
     public byte[] get(byte[] key, ReadOptions options) {
-        ensureOpen();
         return Native.get(handle, key, options);
     }
 
@@ -275,7 +274,6 @@ public final class SlateDb implements AutoCloseable {
     /// @param key key to delete.
     /// @throws SlateDbException if the delete fails.
     public void delete(byte[] key) {
-        ensureOpen();
         delete(key, WriteOptions.DEFAULT);
     }
 
@@ -285,7 +283,6 @@ public final class SlateDb implements AutoCloseable {
     /// @param options write options or `null` for defaults.
     /// @throws SlateDbException if the delete fails.
     public void delete(byte[] key, WriteOptions options) {
-        ensureOpen();
         Native.delete(handle, key, options);
     }
 
@@ -295,9 +292,7 @@ public final class SlateDb implements AutoCloseable {
     ///
     /// @param batch batch to write (must be open and unconsumed).
     /// @throws SlateDbException if the write fails.
-    /// @throws IllegalStateException if the batch is closed or already consumed.
     public void write(SlateDbWriteBatch batch) {
-        ensureOpen();
         write(batch, WriteOptions.DEFAULT);
     }
 
@@ -308,7 +303,6 @@ public final class SlateDb implements AutoCloseable {
     /// @param batch batch to write (must be open and unconsumed).
     /// @param options write options or `null` for defaults.
     /// @throws SlateDbException if the write fails.
-    /// @throws IllegalStateException if the batch is closed or already consumed.
     /// ### Example
     /// ```java
     /// try (SlateDbWriteBatch batch = SlateDb.newWriteBatch()) {
@@ -318,14 +312,7 @@ public final class SlateDb implements AutoCloseable {
     /// }
     /// ```
     public void write(SlateDbWriteBatch batch, WriteOptions options) {
-        ensureOpen();
         Objects.requireNonNull(batch, "batch");
-        if (batch.isClosed()) {
-            throw new IllegalStateException("SlateDbWriteBatch is closed");
-        }
-        if (batch.isConsumed()) {
-            throw new IllegalStateException("SlateDbWriteBatch already consumed");
-        }
         try {
             Native.writeBatchWrite(handle, batch.handle(), options == null ? WriteOptions.DEFAULT : options);
         } finally {
@@ -339,7 +326,6 @@ public final class SlateDb implements AutoCloseable {
     ///
     /// @throws SlateDbException if the flush fails.
     public void flush() {
-        ensureOpen();
         Native.flush(handle);
     }
 
@@ -363,7 +349,6 @@ public final class SlateDb implements AutoCloseable {
     /// }
     /// ```
     public SlateDbScanIterator scan(byte[] startKey, byte[] endKey) {
-        ensureOpen();
         return scan(startKey, endKey, null);
     }
 
@@ -376,7 +361,6 @@ public final class SlateDb implements AutoCloseable {
     /// @return A [SlateDbScanIterator] over the range. Always close it.
     /// @throws SlateDbException if the scan fails.
     public SlateDbScanIterator scan(byte[] startKey, byte[] endKey, ScanOptions options) {
-        ensureOpen();
         return new SlateDbScanIterator(Native.scan(handle, startKey, endKey, options));
     }
 
@@ -386,7 +370,6 @@ public final class SlateDb implements AutoCloseable {
     /// @return A [SlateDbScanIterator] over the prefix. Always close it.
     /// @throws SlateDbException if the scan fails.
     public SlateDbScanIterator scanPrefix(byte[] prefix) {
-        ensureOpen();
         return scanPrefix(prefix, null);
     }
 
@@ -397,7 +380,6 @@ public final class SlateDb implements AutoCloseable {
     /// @return A [SlateDbScanIterator] over the prefix. Always close it.
     /// @throws SlateDbException if the scan fails.
     public SlateDbScanIterator scanPrefix(byte[] prefix, ScanOptions options) {
-        ensureOpen();
         return new SlateDbScanIterator(Native.scanPrefix(handle, prefix, options));
     }
 
@@ -405,14 +387,12 @@ public final class SlateDb implements AutoCloseable {
     ///
     /// @return JSON string with runtime and storage metrics.
     public String metrics() {
-        ensureOpen();
         return Native.metrics(handle);
     }
 
     /// Closes the database handle.
     ///
-    /// This method is idempotent. After closing, all operations on the instance
-    /// will throw [IllegalStateException].
+    /// This method is idempotent.
     @Override
     public void close() {
         if (closed) {
@@ -421,12 +401,6 @@ public final class SlateDb implements AutoCloseable {
         Native.close(handle);
         handle = MemorySegment.NULL;
         closed = true;
-    }
-
-    private void ensureOpen() {
-        if (closed || handle == null || handle.equals(MemorySegment.NULL)) {
-            throw new IllegalStateException("SlateDb is closed");
-        }
     }
 
     /// Runtime exception thrown when SlateDB returns an error code.
@@ -795,9 +769,7 @@ public final class SlateDb implements AutoCloseable {
         ///
         /// @param settingsJson JSON string describing SlateDB settings.
         /// @throws IllegalArgumentException if the JSON is invalid.
-        /// @throws IllegalStateException if the builder is closed.
         public Builder withSettingsJson(String settingsJson) {
-            ensureOpen();
             Native.builderWithSettings(builderPtr, settingsJson);
             return this;
         }
@@ -806,9 +778,7 @@ public final class SlateDb implements AutoCloseable {
         ///
         /// @param blockSize block size enum value.
         /// @throws IllegalArgumentException if the block size is invalid.
-        /// @throws IllegalStateException if the builder is closed.
         public Builder withSstBlockSize(SstBlockSize blockSize) {
-            ensureOpen();
             Native.builderWithSstBlockSize(builderPtr, blockSize);
             return this;
         }
@@ -817,7 +787,6 @@ public final class SlateDb implements AutoCloseable {
         ///
         /// @return An open [SlateDb] instance. Always close it.
         /// @throws SlateDbException if the native build fails.
-        /// @throws IllegalStateException if the builder is closed.
         /// ### Example
         /// ```java
         /// String settings = SlateDb.settingsDefault();
@@ -830,7 +799,6 @@ public final class SlateDb implements AutoCloseable {
         /// }
         /// ```
         public SlateDb build() {
-            ensureOpen();
             try {
                 MemorySegment handlePtr = Native.builderBuild(builderPtr);
                 return new SlateDb(handlePtr);
@@ -853,11 +821,6 @@ public final class SlateDb implements AutoCloseable {
             closed = true;
         }
 
-        private void ensureOpen() {
-            if (closed || builderPtr == null || builderPtr.equals(MemorySegment.NULL)) {
-                throw new IllegalStateException("Builder is closed");
-            }
-        }
     }
 
 

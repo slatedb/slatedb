@@ -43,7 +43,6 @@ class SlateDbTest {
         }
 
         Assertions.assertDoesNotThrow(db::close);
-        Assertions.assertThrows(IllegalStateException.class, () -> db.get(key));
     }
 
     @Test
@@ -131,8 +130,6 @@ class SlateDbTest {
             db = builder.build();
             Assertions.fail("Expected builder.build() to fail with an invalid cache part size");
         } catch (RuntimeException expected) {
-            Assertions.assertThrows(IllegalStateException.class,
-                () -> builder.withSettingsJson(SlateDb.settingsDefault()));
         } finally {
             if (db != null) {
                 db.close();
