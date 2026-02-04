@@ -1,20 +1,21 @@
-# Expose Key Metadata
+# Expose Row Information
 
 Table of Contents:
 
 <!-- TOC start (generated with https://github.com/derlin/bitdowntoc) -->
 
-- [Summary](#summary)
-- [Motivation](#motivation)
-- [Goals](#goals)
-- [Non-Goals](#non-goals)
-- [Design](#design)
-   * [1. Metadata Query Interface](#1-metadata-query-interface)
-   * [2. Modify Put/Write Return Types](#2-modify-putwrite-return-types)
-   * [3. Support Query by Version](#3-support-query-by-version)
-- [Impact Analysis](#impact-analysis)
-- [Testing](#testing)
-- [Alternatives](#alternatives)
+- [Expose Row Information](#expose-row-information)
+  - [Summary](#summary)
+  - [Motivation](#motivation)
+  - [Goals](#goals)
+  - [Non-Goals](#non-goals)
+  - [Design](#design)
+    - [1. Row Query Interface](#1-row-query-interface)
+    - [2. Modify Put/Write Return Types](#2-modify-putwrite-return-types)
+    - [3. Support Query by Version](#3-support-query-by-version)
+  - [Impact Analysis](#impact-analysis)
+  - [Testing](#testing)
+  - [Alternatives](#alternatives)
 
 <!-- TOC end -->
 
@@ -31,7 +32,7 @@ This RFC proposes three related API improvements:
 
 1.  **Modify Write API Return Types**: Change the return type of `db.put()`, `db.delete()`, and `db.merge()` (including their `_with_options` variants) from `Result<(), ...>` to `Result<WriteHandle, ...>` to return a write handle containing the assigned sequence number.
 2.  **Enrich Batch Write Return Type**: Change the return type of `db.write()` from `Result<(), ...>` to `Result<WriteHandle, ...>` to return a write handle containing the commit sequence number. This design allows for future extensions such as `await_durability()`.
-3.  **New Metadata Query Interface**: Introduce `get_meta()`, `get_meta_with_options()`, `scan_meta()`, and `scan_meta_with_options()` interfaces, allowing users to query key metadata (sequence number, creation timestamp, expiration timestamp, etc.).
+3.  **New Row Query Interface**: Introduce `get_row()`, `get_row_with_options()`, `scan_rows()`, and `scan_rows_with_options()` interfaces, allowing users to query complete row information including metadata (sequence number, creation timestamp, expiration timestamp) and value.
 4.  **Support Query by Version**: Add a `read_at_seq` option to `ReadOptions`, enabling users to read a specific historical version of a key via its sequence number.
 
 <!-- TOC --><a name="motivation"></a>
@@ -39,7 +40,7 @@ This RFC proposes three related API improvements:
 
 In practical applications, users often need to retrieve metadata information for keys. Currently, SlateDB has the following pain points:
 
-**1. Unable to Query Key Metadata**
+**1. Unable to Query Row Information and Metadata**
 
 Users need to obtain metadata such as TTL, sequence number, and creation time, but currently **no API provides this information**—even the `get()` method only returns the value itself.
 
@@ -54,7 +55,7 @@ Users cannot query a specific historical version of a key using a sequence numbe
 <!-- TOC --><a name="goals"></a>
 ## Goals
 
-- Enable retrieval of key metadata (supporting both single-key queries and range scans).
+- Enable retrieval of complete row information including metadata (supporting both single-key queries and range scans).
 - Return the sequence number assigned after a write operation (put, delete, merge, or batch write).
 - Support reading historical versions of a key by specifying a sequence number.
 
@@ -69,17 +70,24 @@ Users cannot query a specific historical version of a key using a sequence numbe
 <!-- TOC --><a name="design"></a>
 ## Design
 
-<!-- TOC --><a name="1-metadata-query-interface"></a>
-### 1. Metadata Query Interface
+<!-- TOC --><a name="1-row-query-interface"></a>
+### 1. Row Query Interface
 
 > [!NOTE]
-> This change introduces a new `DbMetaIterator` type alongside the existing `DbIterator`. The existing iterator types and their naming remain unchanged.
+> This change introduces new row query APIs that reuse the existing `RowEntry` type for returning complete row information. Since decoding metadata requires decoding the entire row, there is no performance penalty for returning the full row data.
 
 **Public API**:
 
 ```rust
-// Get metadata for a single key
-pub async fn get_meta<K: AsRef<[u8]>>(&self, key: K) -> Result<Option<RowMetadata>, crate::Error>;
+// Get complete row information for a single key
+pub async fn get_row<K: AsRef<[u8]>>(&self, key: K) -> Result<Option<RowEntry>, crate::Error>;
+
+// Get row with options (new)
+pub async fn get_row_with_options<K: AsRef<[u8]>>(
+    &self,
+    key: K,
+    options: &ReadOptions,
+) -> Result<Option<RowEntry>, crate::Error>;
 
 // Scan values (unchanged)
 pub async fn scan<K, T>(&self, range: T) -> Result<DbIterator, crate::Error>
@@ -87,52 +95,56 @@ where
     K: AsRef<[u8]> + Send,
     T: RangeBounds<K> + Send;
 
-// Scan metadata (new)
-pub async fn scan_meta<K, T>(&self, range: T) -> Result<DbMetaIterator, crate::Error>
+// Scan rows (new) - returns complete row information
+pub async fn scan_rows<K, T>(&self, range: T) -> Result<DbRowIterator, crate::Error>
 where
     K: AsRef<[u8]> + Send,
     T: RangeBounds<K> + Send;
 
-// Scan metadata with options (new)
-pub async fn scan_meta_with_options<K, T>(
+// Scan rows with options (new)
+pub async fn scan_rows_with_options<K, T>(
     &self,
     range: T,
     options: &ScanOptions,
-) -> Result<DbMetaIterator, crate::Error>
+) -> Result<DbRowIterator, crate::Error>
 where
     K: AsRef<[u8]> + Send,
     T: RangeBounds<K> + Send;
 
-// Row-level metadata structure
-pub struct RowMetadata {
-    pub seq: u64,
-    pub create_ts: Option<i64>, // None if not specified during write
-    pub expire_ts: Option<i64>, // None if no TTL set
-}
-
-pub struct KeyMetadata {
+// RowEntry is already public and contains all necessary information
+pub struct RowEntry {
     pub key: Bytes,
-    pub metadata: RowMetadata,
+    pub value: ValueDeletable,  // Can be Value, Merge, or Tombstone
+    pub seq: u64,
+    pub create_ts: Option<i64>,
+    pub expire_ts: Option<i64>,
 }
 ```
 
 **Usage Example**:
 
 ```rust
-// Get single metadata
-let metadata = db.get_meta(b"my_key").await?;
-if let Some(meta) = metadata {
-    println!("Seq: {}, TTL: {:?}", meta.seq, meta.expire_ts);
+// Get complete row information
+let row = db.get_row(b"my_key").await?;
+if let Some(entry) = row {
+    println!("Key: {:?}", entry.key);
+    println!("Seq: {}, Created: {:?}, Expires: {:?}", 
+             entry.seq, entry.create_ts, entry.expire_ts);
+    match entry.value {
+        ValueDeletable::Value(v) => println!("Value: {:?}", v),
+        ValueDeletable::Merge(m) => println!("Merge: {:?}", m),
+        ValueDeletable::Tombstone => println!("Tombstone"),
+    }
 }
 
-// Scan metadata range
-let mut iter = db.scan_meta(b"a"..b"z").await?;
-while let Some(KeyMetadata { key, metadata }) = iter.next().await? {
-    println!("Key: {:?}, Seq: {}", key, metadata.seq);
+// Scan rows in a range
+let mut iter = db.scan_rows(b"a"..b"z").await?;
+while let Some(row_entry) = iter.next().await? {
+    println!("Key: {:?}, Seq: {}", row_entry.key, row_entry.seq);
 }
 
-// Scan metadata with options
-let mut iter = db.scan_meta_with_options(
+// Scan rows with options
+let mut iter = db.scan_rows_with_options(
     b"a"..b"z",
     &ScanOptions::default()
 ).await?;
@@ -140,12 +152,19 @@ let mut iter = db.scan_meta_with_options(
 
 **Implementation Details**:
 
-1.  **New Iterator Type**:
-    - Introduce `DbMetaIterator` to iterate over metadata.
-    - Existing `KeyValueIterator` trait and `DbIterator` type remain unchanged.
-    - `DbMetaIterator` wraps the underlying iterator and provides metadata-specific iteration.
-2.  **Tombstone and Expired Key Handling**: Both `get_meta` and `scan_meta` will skip keys that are either expired (based on TTL) or deleted (Tombstones), returning `None` for a single-key query or omitting them from a scan. This ensures consistency with existing `get` and `scan` behavior.
-3.  **Multi-Version Behavior**: `scan_meta` returns metadata for the **latest visible version** of each key (consistent with `scan` behavior). If a key has multiple versions at different sequence numbers, only the metadata of the version visible at the current time (or specified `read_at_seq`) is returned.
+1.  **Reuse Existing `RowEntry` Type**:
+    - `RowEntry` is already public and contains all necessary fields: `key`, `value`, `seq`, `create_ts`, and `expire_ts`.
+    - Since decoding metadata requires decoding the entire row, returning complete `RowEntry` has no performance penalty.
+    - Introduce `DbRowIterator` to iterate over `RowEntry` objects.
+2.  **Value Type Handling**:
+    - `RowEntry.value` is of type `ValueDeletable`, which can be:
+      - `ValueDeletable::Value(Bytes)` - Regular value
+      - `ValueDeletable::Merge(Bytes)` - Merge operation. **Important**: If a key has multiple merge operations, only the **latest merge** is returned. The merge values are not applied/combined.
+      - `ValueDeletable::Tombstone` - Deleted key
+3.  **Tombstone and Expired Key Handling**: 
+    - **Tombstones**: `get_row` and `scan_rows` can return tombstones (`ValueDeletable::Tombstone`), allowing users to see that a key has been deleted along with its metadata (seq, timestamps).
+    - **Expired Keys**: By default, expired keys (based on TTL) are skipped. Future options may allow including expired keys.
+4.  **Multi-Version Behavior**: `scan_rows` returns the **latest visible version** of each key (consistent with `scan` behavior). If a key has multiple versions at different sequence numbers, only the version visible at the current time (or specified `read_at_seq`) is returned.
 
 <!-- TOC --><a name="2-modify-putwrite-return-types"></a>
 ### 2. Modify Put/Write Return Types
@@ -322,10 +341,12 @@ while let Some((key, value)) = iter.next().await? {
 
 **Breaking Changes**:
 
-1.  **New Iterator Type**:
-    - A new `DbMetaIterator` type is introduced for metadata iteration.
+1.  **New Row Query APIs**:
+    - New APIs introduced: `get_row()`, `get_row_with_options()`, `scan_rows()`, `scan_rows_with_options()`.
+    - A new `DbRowIterator` type is introduced for row iteration.
+    - These APIs reuse the existing public `RowEntry` type.
     - Existing `KeyValueIterator` trait and `DbIterator` type remain unchanged.
-    - No breaking changes to existing iterator usage.
+    - No breaking changes to existing APIs.
 2.  **Put/Write Return Type Modification**:
     - All `put()`, `put_with_options()`, `delete()`, `delete_with_options()`, `merge()`, `merge_with_options()`, `write()`, and `write_with_options()` calls must be updated to handle the new `Result<WriteHandle, ...>` return type.
     - To access the sequence number, call `.seqnum()` on the returned `WriteHandle`.
@@ -333,20 +354,23 @@ while let Some((key, value)) = iter.next().await? {
 
 **Backward Compatibility**:
 
-- `get_meta()` and `scan_meta()` are new APIs.
+- `get_row()`, `get_row_with_options()`, `scan_rows()`, and `scan_rows_with_options()` are new APIs.
+- They return the existing `RowEntry` type, which is already public.
 - `ReadOptions.read_at_seq` extends existing `get_with_options()` and `scan_with_options()`, defaults to `None`.
 - No impact on any storage formats (WAL/SST/Manifest).
 
 **Migration Path**:
 
-No migration needed for existing iterator usage. Simply use the new `DbMetaIterator` for metadata queries:
+No migration needed for existing code. Simply use the new row query APIs when you need complete row information:
 
 ```rust
 // Existing code continues to work
+let value = db.get(b"key").await?;
 let mut iter: DbIterator = db.scan(..).await?;
 
-// New metadata iteration
-let mut meta_iter: DbMetaIterator = db.scan_meta(..).await?;
+// New row query APIs
+let row = db.get_row(b"key").await?;
+let mut row_iter: DbRowIterator = db.scan_rows(..).await?;
 ```
 
 <!-- TOC --><a name="testing"></a>
@@ -354,20 +378,19 @@ let mut meta_iter: DbMetaIterator = db.scan_meta(..).await?;
 
 **Unit Tests**:
 
-- Metadata query: Normal cases, expired keys, sequence number monotonicity.
+- Row query: Normal cases, expired keys, tombstones, merge operations, sequence number monotonicity.
 - Put/Write return values: Verify correctness of sequence numbers.
 - Versioned query: Read historical versions, expired key handling, behavior after Compaction.
 
 **Integration Tests**:
 
-- End-to-end workflow: Combined use of metadata query and versioned query.
+- End-to-end workflow: Combined use of row query and versioned query.
 - Versioned query across multiple storage layers.
 - Consistency of metadata during concurrent writes.
 
 **Performance Testing**:
 
-- `get_meta`/`scan_meta` vs full `get`/`scan` performance comparison.
-  - Expected: `scan_meta` should be significantly faster than `scan` for large values, as it skips value deserialization.
+- `get_row`/`scan_rows` performance: Since these return complete row information, they decode both metadata and value. Performance should be similar to existing `get`/`scan` operations.
 - `get_with_options(read_at_seq)` performance.
 - Performance Goal: Impact of new features on existing operations < 5%.
 
@@ -376,15 +399,15 @@ let mut meta_iter: DbMetaIterator = db.scan_meta(..).await?;
 
 **1. Dedicated Specialized Interfaces (e.g., `get_ttl`, `get_seqnum`, etc.)**
 
-- **Reason for Rejection**: This would rapidly expand the API surface area and increase user learning costs. A single generic interface `get_meta` maintains API simplicity.
+- **Reason for Rejection**: This would rapidly expand the API surface area and increase user learning costs. A single generic interface `get_row` that returns complete row information (including metadata) maintains API simplicity.
 
 **2. Introduce `put_with_metadata()` Method**
 
 - **Reason for Rejection**: Introducing a new API would lead to functional overlap. Modifying the existing `put()` return type, while a breaking change, maintains architectural simplicity and consistency.
 
-**3. Rename KeyValueIterator to KeyIterator**
+**3. Return Only Metadata (RowMetadata) Instead of Complete Row (RowEntry)**
 
-- **Reason for Rejection**: `KeyValueIterator` accurately reflects that it iterates over key-value pairs. Renaming would introduce unnecessary breaking changes without meaningful semantic improvement. The new `DbMetaIterator` clearly distinguishes metadata iteration from value iteration.
+- **Reason for Rejection**: Since decoding metadata requires decoding the entire row, returning only metadata would not improve performance. Returning the complete `RowEntry` provides more value to users while utilizing an existing public type, reducing API complexity.
 
 **4. No Change (Status Quo)**
 
