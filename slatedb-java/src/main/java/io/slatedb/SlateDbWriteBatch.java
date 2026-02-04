@@ -21,7 +21,6 @@ public final class SlateDbWriteBatch implements AutoCloseable {
     /// @param key key to write (non-empty).
     /// @param value value to write.
     public void put(byte[] key, byte[] value) {
-        ensureOpen();
         Native.writeBatchPut(batchPtr, key, value);
     }
 
@@ -31,7 +30,6 @@ public final class SlateDbWriteBatch implements AutoCloseable {
     /// @param value value to write.
     /// @param options put options or `null` for defaults.
     public void put(byte[] key, byte[] value, PutOptions options) {
-        ensureOpen();
         Native.writeBatchPutWithOptions(batchPtr, key, value, options);
     }
 
@@ -39,7 +37,6 @@ public final class SlateDbWriteBatch implements AutoCloseable {
     ///
     /// @param key key to delete.
     public void delete(byte[] key) {
-        ensureOpen();
         Native.writeBatchDelete(batchPtr, key);
     }
 
@@ -60,24 +57,7 @@ public final class SlateDbWriteBatch implements AutoCloseable {
         return batchPtr;
     }
 
-    boolean isClosed() {
-        return closed;
-    }
-
-    boolean isConsumed() {
-        return consumed;
-    }
-
     void markConsumed() {
         consumed = true;
-    }
-
-    private void ensureOpen() {
-        if (closed) {
-            throw new IllegalStateException("SlateDbWriteBatch is closed");
-        }
-        if (consumed) {
-            throw new IllegalStateException("SlateDbWriteBatch already consumed");
-        }
     }
 }

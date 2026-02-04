@@ -21,7 +21,6 @@ public final class SlateDbReader implements AutoCloseable {
     /// @param key key to read.
     /// @return The value for the key, or `null` if the key does not exist.
     public byte[] get(byte[] key) {
-        ensureOpen();
         return get(key, null);
     }
 
@@ -31,7 +30,6 @@ public final class SlateDbReader implements AutoCloseable {
     /// @param options read options or `null` for defaults.
     /// @return The value for the key, or `null` if the key does not exist.
     public byte[] get(byte[] key, ReadOptions options) {
-        ensureOpen();
         return Native.readerGet(handle, key, options);
     }
 
@@ -41,7 +39,6 @@ public final class SlateDbReader implements AutoCloseable {
     /// @param endKey exclusive upper bound, or `null`.
     /// @return A [SlateDbScanIterator]. Always close it.
     public SlateDbScanIterator scan(byte[] startKey, byte[] endKey) {
-        ensureOpen();
         return scan(startKey, endKey, null);
     }
 
@@ -52,7 +49,6 @@ public final class SlateDbReader implements AutoCloseable {
     /// @param options scan options or `null` for defaults.
     /// @return A [SlateDbScanIterator]. Always close it.
     public SlateDbScanIterator scan(byte[] startKey, byte[] endKey, ScanOptions options) {
-        ensureOpen();
         return new SlateDbScanIterator(Native.readerScan(handle, startKey, endKey, options));
     }
 
@@ -61,7 +57,6 @@ public final class SlateDbReader implements AutoCloseable {
     /// @param prefix key prefix to scan.
     /// @return A [SlateDbScanIterator]. Always close it.
     public SlateDbScanIterator scanPrefix(byte[] prefix) {
-        ensureOpen();
         return scanPrefix(prefix, null);
     }
 
@@ -71,14 +66,12 @@ public final class SlateDbReader implements AutoCloseable {
     /// @param options scan options or `null` for defaults.
     /// @return A [SlateDbScanIterator]. Always close it.
     public SlateDbScanIterator scanPrefix(byte[] prefix, ScanOptions options) {
-        ensureOpen();
         return new SlateDbScanIterator(Native.readerScanPrefix(handle, prefix, options));
     }
 
     /// Closes the reader handle.
     ///
-    /// This method is idempotent. After closing, all operations on the instance
-    /// will throw [IllegalStateException].
+    /// This method is idempotent.
     @Override
     public void close() {
         if (closed) {
@@ -89,9 +82,4 @@ public final class SlateDbReader implements AutoCloseable {
         closed = true;
     }
 
-    private void ensureOpen() {
-        if (closed || handle == null || handle.equals(MemorySegment.NULL)) {
-            throw new IllegalStateException("SlateDbReader is closed");
-        }
-    }
 }

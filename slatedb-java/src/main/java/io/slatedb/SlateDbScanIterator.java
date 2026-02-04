@@ -15,7 +15,6 @@ public final class SlateDbScanIterator implements AutoCloseable {
     ///
     /// @return Next [SlateDbKeyValue], or `null` if the scan is complete.
     public SlateDbKeyValue next() {
-        ensureOpen();
         return Native.iteratorNext(iterPtr);
     }
 
@@ -23,7 +22,6 @@ public final class SlateDbScanIterator implements AutoCloseable {
     ///
     /// @param key key to seek to.
     public void seek(byte[] key) {
-        ensureOpen();
         Native.iteratorSeek(iterPtr, key);
     }
 
@@ -38,11 +36,5 @@ public final class SlateDbScanIterator implements AutoCloseable {
         Native.iteratorClose(iterPtr);
         iterPtr = MemorySegment.NULL;
         closed = true;
-    }
-
-    private void ensureOpen() {
-        if (closed || iterPtr == null || iterPtr.equals(MemorySegment.NULL)) {
-            throw new IllegalStateException("Iterator is closed");
-        }
     }
 }
