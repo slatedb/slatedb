@@ -131,7 +131,7 @@ public final class SlateDb implements AutoCloseable {
     ///
     /// @param path path to the settings file.
     /// @return JSON string containing the loaded settings.
-    /// @throws IllegalArgumentException if the file cannot be parsed.
+    /// @throws IllegalStateException if the file cannot be read or parsed.
     public static String settingsFromFile(String path) {
         return Native.settingsFromFile(path);
     }
