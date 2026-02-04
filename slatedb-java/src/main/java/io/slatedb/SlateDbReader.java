@@ -1,7 +1,7 @@
 package io.slatedb;
 
-import io.slatedb.SlateDb.ReadOptions;
-import io.slatedb.SlateDb.ScanOptions;
+import io.slatedb.SlateDbConfig.ReadOptions;
+import io.slatedb.SlateDbConfig.ScanOptions;
 
 import java.lang.foreign.MemorySegment;
 

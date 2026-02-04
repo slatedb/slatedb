@@ -97,7 +97,7 @@ class SlateDbTest {
             null
         )) {
             builder.withSettingsJson(settingsJson)
-                .withSstBlockSize(SlateDb.SstBlockSize.KIB_4);
+                .withSstBlockSize(SlateDbConfig.SstBlockSize.KIB_4);
             try (SlateDb db = builder.build()) {
                 byte[] key = "builder-key".getBytes(StandardCharsets.UTF_8);
                 byte[] value = "builder-value".getBytes(StandardCharsets.UTF_8);
@@ -148,15 +148,15 @@ class SlateDbTest {
         byte[] value = "opts-value".getBytes(StandardCharsets.UTF_8);
 
         try (SlateDb db = SlateDb.open(context.dbPath().toAbsolutePath().toString(), context.objectStoreUrl(), null)) {
-            db.put(key, value, SlateDb.PutOptions.noExpiry(), new SlateDb.WriteOptions(false));
-            SlateDb.ReadOptions readOptions = SlateDb.ReadOptions.builder()
-                .durabilityFilter(SlateDb.Durability.MEMORY)
+            db.put(key, value, SlateDbConfig.PutOptions.noExpiry(), new SlateDbConfig.WriteOptions(false));
+            SlateDbConfig.ReadOptions readOptions = SlateDbConfig.ReadOptions.builder()
+                .durabilityFilter(SlateDbConfig.Durability.MEMORY)
                 .dirty(false)
                 .cacheBlocks(true)
                 .build();
             Assertions.assertArrayEquals(value, db.get(key, readOptions));
 
-            db.delete(key, new SlateDb.WriteOptions(false));
+            db.delete(key, new SlateDbConfig.WriteOptions(false));
             Assertions.assertNull(db.get(key));
 
             String metrics = db.metrics();

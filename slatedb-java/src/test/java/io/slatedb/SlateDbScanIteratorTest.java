@@ -23,8 +23,8 @@ class SlateDbScanIteratorTest {
             db.put(keyB, valueB);
             db.put(keyC, valueC);
 
-            SlateDb.ScanOptions scanOptions = SlateDb.ScanOptions.builder()
-                .durabilityFilter(SlateDb.Durability.MEMORY)
+            SlateDbConfig.ScanOptions scanOptions = SlateDbConfig.ScanOptions.builder()
+                .durabilityFilter(SlateDbConfig.Durability.MEMORY)
                 .readAheadBytes(1)
                 .cacheBlocks(false)
                 .maxFetchTasks(1)
