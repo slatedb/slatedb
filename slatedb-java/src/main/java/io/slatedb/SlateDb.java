@@ -350,7 +350,7 @@ public final class SlateDb implements SlateDbReadable {
     /// }
     /// ```
     public SlateDbScanIterator scan(byte[] startKey, byte[] endKey) {
-        return scan(startKey, endKey, null);
+        return scan(startKey, endKey, ScanOptions.DEFAULT);
     }
 
     /// Creates a scan iterator over the range `[startKey, endKey)` using custom scan options.
@@ -371,7 +371,7 @@ public final class SlateDb implements SlateDbReadable {
     /// @return A [SlateDbScanIterator] over the prefix. Always close it.
     /// @throws SlateDbException if the scan fails.
     public SlateDbScanIterator scanPrefix(byte[] prefix) {
-        return scanPrefix(prefix, null);
+        return scanPrefix(prefix, ScanOptions.DEFAULT);
     }
 
     /// Creates a scan iterator for the provided key prefix using custom scan options.
@@ -488,6 +488,4 @@ public final class SlateDb implements SlateDbReadable {
         }
 
     }
-
-
 }
