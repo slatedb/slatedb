@@ -28,6 +28,7 @@ import java.util.Objects;
 /// underlying native runtime manages its own thread pool. Avoid using closed instances.
 ///
 /// ### Hello World
+///
 /// ```java
 /// import io.slatedb.SlateDbKeyValue;
 /// import io.slatedb.SlateDbScanIterator;
@@ -82,6 +83,12 @@ import java.util.Objects;
 ///         }
 ///     }
 /// }
+///
+/// ### URL Formats
+///
+/// SlateDB uses Rust's `object_store` URL format (`memory://`, `file:///...`). See
+/// [ObjectStore::parse_url_opts](https://docs.rs/object_store/latest/object_store/fn.parse_url_opts.html)
+/// for details.
 /// ```
 public final class SlateDb implements SlateDbReadable {
     private MemorySegment handle;
@@ -155,7 +162,7 @@ public final class SlateDb implements SlateDbReadable {
     /// Opens a SlateDB handle with default settings.
     ///
     /// @param path filesystem path for the database.
-    /// @param url object store URL (for local dev, `file:///...`). If `null`, the object store is resolved from environment variables.
+    /// @param url object store URL in `object_store` URL format (`memory://`, `file:///...`). If `null`, the object store is resolved from environment variables. See [ObjectStore::parse_url_opts](https://docs.rs/object_store/latest/object_store/fn.parse_url_opts.html) for details.
     /// @param envFile optional env file for object store configuration. May be `null`.
     /// @return An open [SlateDb] instance. Always close it.
     /// @throws SlateDbException if the native open fails.
@@ -172,7 +179,7 @@ public final class SlateDb implements SlateDbReadable {
     /// Opens a read-only SlateDB reader.
     ///
     /// @param path filesystem path for the database.
-    /// @param url object store URL (for local dev, `file:///...`). If `null`, the object store is resolved from environment variables.
+    /// @param url object store URL in `object_store` URL format (`memory://`, `file:///...`). If `null`, the object store is resolved from environment variables. See [ObjectStore::parse_url_opts](https://docs.rs/object_store/latest/object_store/fn.parse_url_opts.html) for details.
     /// @param envFile optional env file for object store configuration. May be `null`.
     /// @param checkpointId optional checkpoint identifier to read from. May be `null`.
     /// @param options reader options or `null` for defaults.
@@ -208,7 +215,7 @@ public final class SlateDb implements SlateDbReadable {
     /// Creates a new [Builder] for configuring and opening a SlateDB instance.
     ///
     /// @param path filesystem path for the database.
-    /// @param url object store URL (for local dev, `file:///...`). If `null`, the object store is resolved from environment variables.
+    /// @param url object store URL in `object_store` URL format (`memory://`, `file:///...`). If `null`, the object store is resolved from environment variables. See [ObjectStore::parse_url_opts](https://docs.rs/object_store/latest/object_store/fn.parse_url_opts.html) for details.
     /// @param envFile optional env file for object store configuration. May be `null`.
     /// @return A builder that must be closed if not used.
     public static Builder builder(String path, String url, String envFile) {
