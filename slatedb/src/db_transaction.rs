@@ -64,6 +64,8 @@ pub struct DbTransaction {
     isolation_level: IsolationLevel,
     /// Range trackers for scanned ranges (used for SSI conflict detection)
     range_trackers: Mutex<Vec<Arc<DbIteratorRangeTracker>>>,
+    /// Keys that should be excluded from write conflict detection when committing.
+    untracked_write_keys: RwLock<HashSet<Bytes>>,
 }
 
 impl DbTransaction {
@@ -84,6 +86,7 @@ impl DbTransaction {
             db_inner,
             isolation_level,
             range_trackers: Mutex::new(Vec::new()),
+            untracked_write_keys: RwLock::new(HashSet::new()),
         }
     }
 
@@ -340,6 +343,23 @@ impl DbTransaction {
         Ok(())
     }
 
+    /// Mark written keys as untracked for conflict detection.
+    ///
+    /// Keys marked with this method are still written atomically with the rest of the
+    /// transaction, but are excluded from transaction conflict detection on commit.
+    ///
+    /// ## Arguments
+    /// - `keys`: an iterator of keys to exclude from write conflict tracking
+    pub fn unmark_write<K, I>(&self, keys: I) -> Result<(), crate::Error>
+    where
+        K: AsRef<[u8]>,
+        I: IntoIterator<Item = K>,
+    {
+        let mut untracked_keys = self.untracked_write_keys.write();
+        untracked_keys.extend(keys.into_iter().map(|k| Bytes::copy_from_slice(k.as_ref())));
+        Ok(())
+    }
+
     /// Merge a key-value pair into the transaction.
     pub fn merge<K, V>(&self, key: K, value: V) -> Result<(), crate::Error>
     where
@@ -432,9 +452,17 @@ impl DbTransaction {
         // Take the write_batch for submission to the database.
         let write_batch = self.write_batch.read().clone();
 
-        // Track the write keys from write batch
-        let write_keys = write_batch.keys();
-        self.txn_manager.track_write_keys(&self.txn_id, &write_keys);
+        // Track only write keys that were not explicitly unmarked.
+        let tracked_write_keys = {
+            let untracked_write_keys = self.untracked_write_keys.read();
+            write_batch
+                .keys()
+                .into_iter()
+                .filter(|key| !untracked_write_keys.contains(key))
+                .collect()
+        };
+        self.txn_manager
+            .track_write_keys(&self.txn_id, &tracked_write_keys);
 
         // Submit the WriteBatch to the database for processing. The batch is sent to a
         // dedicated background task (in batch_write.rs) that processes all WriteBatches
@@ -1351,6 +1379,83 @@ mod tests {
         assert!(
             result.is_err(),
             "Transaction should conflict because k2 was modified"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_unmark_write_ignores_write_write_conflicts() {
+        let object_store: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
+        let db = crate::Db::open("test_unmark_write_ww", object_store)
+            .await
+            .unwrap();
+
+        db.put(b"k1", b"v1").await.unwrap();
+
+        let txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
+        txn.put(b"k1", b"v2").unwrap();
+        txn.unmark_write([b"k1"]).unwrap();
+
+        db.put(b"k1", b"v3").await.unwrap();
+
+        let result = txn.commit().await;
+        assert!(
+            result.is_ok(),
+            "Transaction should not conflict for untracked write key"
+        );
+
+        let value = db.get(b"k1").await.unwrap();
+        assert_eq!(value, Some(Bytes::from_static(b"v2")));
+    }
+
+    #[tokio::test]
+    async fn test_unmark_write_only_excludes_selected_keys() {
+        let object_store: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
+        let db = crate::Db::open("test_unmark_write_partial", object_store)
+            .await
+            .unwrap();
+
+        db.put(b"k1", b"v1").await.unwrap();
+        db.put(b"k2", b"v2").await.unwrap();
+
+        let txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
+        txn.put(b"k1", b"v1_txn").unwrap();
+        txn.put(b"k2", b"v2_txn").unwrap();
+        txn.unmark_write([b"k1"]).unwrap();
+
+        db.put(b"k2", b"v2_db").await.unwrap();
+
+        let result = txn.commit().await;
+        assert!(
+            result.is_err(),
+            "Transaction should still conflict on tracked key k2"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_unmark_write_avoids_read_write_conflicts_for_others() {
+        let object_store: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
+        let db = crate::Db::open("test_unmark_write_rw", object_store)
+            .await
+            .unwrap();
+
+        db.put(b"k1", b"v1").await.unwrap();
+
+        let reader_txn = db
+            .begin(IsolationLevel::SerializableSnapshot)
+            .await
+            .unwrap();
+        let _ = reader_txn.get(b"k1").await.unwrap();
+
+        let writer_txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
+        writer_txn.put(b"k1", b"v2").unwrap();
+        writer_txn.unmark_write([b"k1"]).unwrap();
+        writer_txn.commit().await.unwrap();
+
+        reader_txn.put(b"k2", b"v2").unwrap();
+        let result = reader_txn.commit().await;
+        assert!(
+            result.is_ok(),
+            "Reader transaction should not conflict with untracked write key"
         );
     }
 }
