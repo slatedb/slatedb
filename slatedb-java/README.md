@@ -72,7 +72,7 @@ public final class HelloSlateDb {
 
         // Load the native library and initialize logging
         SlateDb.loadLibrary(args[0]);
-        SlateDb.initLogging("info");
+        SlateDb.initLogging(SlateDbConfig.LogLevel.INFO);
 
         // Local database path and local object store
         Path dbPath = Files.createTempDirectory("slatedb-java-db");

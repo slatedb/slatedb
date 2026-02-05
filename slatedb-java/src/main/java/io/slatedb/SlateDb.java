@@ -47,7 +47,7 @@ import java.util.Objects;
 ///
 ///         // Load native library and init logging
 ///         SlateDb.loadLibrary(args[0]);
-///         SlateDb.initLogging("info");
+///         SlateDb.initLogging(SlateDbConfig.LogLevel.INFO);
 ///
 ///         // Local database path and local object store
 ///         Path dbPath = Files.createTempDirectory("slatedb-java-db");
@@ -112,9 +112,10 @@ public final class SlateDb implements SlateDbReadable {
 
     /// Initializes SlateDB logging using a log level (for example, `"info"` or `"debug"`).
     ///
-    /// @param level the log level string understood by SlateDB.
-    public static void initLogging(String level) {
-        Native.initLogging(level);
+    /// @param level the log level enum value understood by SlateDB.
+    public static void initLogging(LogLevel level) {
+        Objects.requireNonNull(level, "level");
+        Native.initLogging(level.value());
     }
 
     /// Returns the default SlateDB settings as a JSON string.
@@ -419,6 +420,7 @@ public final class SlateDb implements SlateDbReadable {
             return errorCode;
         }
     }
+
 
     /// Builder for creating a SlateDB instance with custom settings.
     ///

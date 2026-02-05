@@ -69,6 +69,25 @@ public final class SlateDbConfig {
         }
     }
 
+    /// Log levels supported by SlateDB logging.
+    public enum LogLevel {
+        TRACE("trace"),
+        DEBUG("debug"),
+        INFO("info"),
+        WARN("warn"),
+        ERROR("error");
+
+        private final String value;
+
+        LogLevel(String value) {
+            this.value = value;
+        }
+
+        public String value() {
+            return value;
+        }
+    }
+
     /// Options for put operations.
     public static final class PutOptions {
         private final TtlType ttlType;

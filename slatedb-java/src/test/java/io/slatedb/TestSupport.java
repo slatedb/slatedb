@@ -33,7 +33,7 @@ final class TestSupport {
                 return;
             }
             SlateDb.loadLibrary(nativeLib.toAbsolutePath().toString());
-            SlateDb.initLogging("info");
+            SlateDb.initLogging(SlateDbConfig.LogLevel.INFO);
             initialized = true;
         }
     }
