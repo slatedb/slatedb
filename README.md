@@ -164,6 +164,7 @@ See who's using SlateDB.
 
 ## Talks
 
+- [SlateDB - Object native LSM tree](https://www.youtube.com/watch?v=KEtVKZMPY0Q) (Almog Gavra, 2026)
 - [Internals of SlateDB: An Embedded Key-Value Store Built on Object Storage](https://www.youtube.com/watch?v=gcTRXZeKbNg) (Vignesh Chandramohan, 2025)
 - [Internals of SlateDB — by Vignesh Chandramohan](https://www.youtube.com/watch?v=qqF_zFWqFYk) (Vignesh Chandramohan, 2025)
 - [Database Internals - SlateDB](https://www.youtube.com/watch?v=wEAcNoJOBFI) (Chris Riccomini, 2024)
