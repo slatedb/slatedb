@@ -1,6 +1,3 @@
-#![allow(dead_code)]
-use std::cmp::Ordering;
-
 use async_trait::async_trait;
 use bytes::{Bytes, BytesMut};
 
@@ -130,13 +127,18 @@ impl<B: BlockLike> AscendingState<B> {
         self.exhausted || self.offset_in_block >= self.block.data().len()
     }
 
-    /// Returns the largest restart index where the key at that restart point is <= target.
+    /// Returns the restart index to start scanning from when seeking to target.
+    ///
+    /// When a restart point has key exactly equal to target, we return the PREVIOUS
+    /// restart point to ensure we don't miss any entries with that key that might
+    /// exist before the found restart point.
     fn find_restart_for_key(&self, target: &[u8]) -> usize {
         let restarts = self.block.offsets();
         if restarts.is_empty() {
             return 0;
         }
 
+        // Binary search to find the first restart where key >= target
         let mut low = 0;
         let mut high = restarts.len();
 
@@ -144,13 +146,23 @@ impl<B: BlockLike> AscendingState<B> {
             let mid = low + (high - low) / 2;
             let restart_key = BlockIteratorV2::decode_first_key_at_restart(&self.block, mid);
 
-            match restart_key.as_ref().cmp(target) {
-                Ordering::Less => low = mid + 1,
-                Ordering::Equal => return mid,
-                Ordering::Greater => high = mid,
+            if restart_key.as_ref() < target {
+                low = mid + 1;
+            } else {
+                high = mid;
             }
         }
 
+        // low is now the first restart where key >= target (or restarts.len() if none)
+        if low < restarts.len() {
+            let restart_key = BlockIteratorV2::decode_first_key_at_restart(&self.block, low);
+            if restart_key.as_ref() == target {
+                // Key equals target - go back one to not miss entries with this key
+                return low.saturating_sub(1);
+            }
+        }
+
+        // Key at low is > target (or no such restart exists), use the one before
         low.saturating_sub(1)
     }
 
@@ -1091,5 +1103,120 @@ mod tests {
 
         let kv = iter.next_entry().await.unwrap().unwrap();
         assert_eq!(kv.key.as_ref(), b"key_09");
+    }
+
+    // ==================== Duplicate Key Edge Case Tests ====================
+
+    #[tokio::test]
+    async fn should_seek_finds_all_entries_with_duplicate_keys_across_restarts() {
+        // given: a block with duplicate keys spanning multiple restart regions
+        let mut builder = BlockBuilder::new_v2_with_restart_interval(4096, 2);
+        // 6 entries with same key, restart_interval=2 means restarts at 0, 2, 4
+        for i in 0..6 {
+            let value = format!("val_{}", i);
+            let _ = builder.add(make_entry(b"dup", value.as_bytes(), i as u64));
+        }
+        let block = builder.build().expect("build failed");
+
+        assert_eq!(block.offsets().len(), 3); // restarts at entries 0, 2, 4
+
+        let mut iter = BlockIteratorV2::new_ascending(&block);
+
+        // when: seeking to "dup"
+        iter.seek(b"dup").await.unwrap();
+
+        // then: should find all 6 entries starting from the first
+        for expected_seq in 0..6u64 {
+            let kv = iter.next_entry().await.unwrap().unwrap();
+            assert_eq!(kv.key.as_ref(), b"dup");
+            assert_eq!(
+                kv.seq, expected_seq,
+                "expected seq {} but got {}",
+                expected_seq, kv.seq
+            );
+        }
+
+        assert!(iter.next_entry().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn should_seek_with_duplicate_keys_at_specific_restart() {
+        // given: entries where duplicate keys start at a restart point
+        // [a, a] [dup, dup] [dup, dup] [b, b]
+        //  ^r0     ^r1        ^r2       ^r3
+        let mut builder = BlockBuilder::new_v2_with_restart_interval(4096, 2);
+        let _ = builder.add(make_entry(b"a", b"v0", 0));
+        let _ = builder.add(make_entry(b"a", b"v1", 1));
+        let _ = builder.add(make_entry(b"dup", b"v2", 2)); // restart 1
+        let _ = builder.add(make_entry(b"dup", b"v3", 3));
+        let _ = builder.add(make_entry(b"dup", b"v4", 4)); // restart 2
+        let _ = builder.add(make_entry(b"dup", b"v5", 5));
+        let _ = builder.add(make_entry(b"b", b"v6", 6)); // restart 3
+        let _ = builder.add(make_entry(b"b", b"v7", 7));
+        let block = builder.build().expect("build failed");
+
+        assert_eq!(block.offsets().len(), 4);
+
+        let mut iter = BlockIteratorV2::new_ascending(&block);
+
+        // when: seeking to "dup"
+        iter.seek(b"dup").await.unwrap();
+
+        // then: should find all 4 "dup" entries starting from seq=2
+        let kv = iter.next_entry().await.unwrap().unwrap();
+        assert_eq!(kv.key.as_ref(), b"dup");
+        assert_eq!(kv.seq, 2);
+
+        let kv = iter.next_entry().await.unwrap().unwrap();
+        assert_eq!(kv.key.as_ref(), b"dup");
+        assert_eq!(kv.seq, 3);
+
+        let kv = iter.next_entry().await.unwrap().unwrap();
+        assert_eq!(kv.key.as_ref(), b"dup");
+        assert_eq!(kv.seq, 4);
+
+        let kv = iter.next_entry().await.unwrap().unwrap();
+        assert_eq!(kv.key.as_ref(), b"dup");
+        assert_eq!(kv.seq, 5);
+
+        // next should be "b"
+        let kv = iter.next_entry().await.unwrap().unwrap();
+        assert_eq!(kv.key.as_ref(), b"b");
+    }
+
+    #[tokio::test]
+    async fn should_seek_with_dup_key_straddling_first_restart() {
+        // given: a block where duplicate keys start in the FIRST restart region
+        // This tests that we don't go to restart -1 (which doesn't exist)
+        // Layout with restart_interval=2:
+        // restart 0: [dup, dup]    - key "dup"
+        // restart 1: [dup, dup]    - key "dup"
+        // restart 2: [z, z]        - key "z"
+        let mut builder = BlockBuilder::new_v2_with_restart_interval(4096, 2);
+        let _ = builder.add(make_entry(b"dup", b"v0", 0)); // restart 0
+        let _ = builder.add(make_entry(b"dup", b"v1", 1));
+        let _ = builder.add(make_entry(b"dup", b"v2", 2)); // restart 1
+        let _ = builder.add(make_entry(b"dup", b"v3", 3));
+        let _ = builder.add(make_entry(b"z", b"v4", 4)); // restart 2
+        let _ = builder.add(make_entry(b"z", b"v5", 5));
+        let block = builder.build().expect("build failed");
+
+        assert_eq!(block.offsets().len(), 3);
+
+        let mut iter = BlockIteratorV2::new_ascending(&block);
+
+        // when: seeking to "dup"
+        iter.seek(b"dup").await.unwrap();
+
+        // then: should find ALL dup entries starting from the very first one (seq=0)
+        for expected_seq in 0..4u64 {
+            let kv = iter.next_entry().await.unwrap().unwrap();
+            assert_eq!(kv.key.as_ref(), b"dup");
+            assert_eq!(kv.seq, expected_seq);
+        }
+
+        // next should be "z"
+        let kv = iter.next_entry().await.unwrap().unwrap();
+        assert_eq!(kv.key.as_ref(), b"z");
     }
 }

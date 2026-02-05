@@ -59,11 +59,9 @@ use crate::db_state::SsTableInfoCodec;
 use crate::error::SlateDBError;
 use crate::filter::BloomFilterBuilder;
 use crate::flatbuffer_types::{BlockMeta, BlockMetaArgs};
-#[cfg(test)]
-use crate::format::sst::SST_FORMAT_VERSION_V2;
 use crate::format::sst::{
     BlockBuilder, EncodedSsTable, EncodedSsTableBlock, EncodedSsTableBlockBuilder,
-    EncodedSsTableFooterBuilder, SsTableFormat, SST_FORMAT_VERSION,
+    EncodedSsTableFooterBuilder, SsTableFormat, SST_FORMAT_VERSION, SST_FORMAT_VERSION_V2,
 };
 use crate::types::RowEntry;
 use crate::utils::compute_index_key;
@@ -71,17 +69,23 @@ use crate::BlockTransformer;
 use bytes::Bytes;
 use flatbuffers::DefaultAllocator;
 
+/// SST block format version.
+///
+/// This enum is only available under `#[cfg(test)]` for integration tests
+/// to verify backward compatibility between V1 and V2 formats.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub(crate) enum BlockFormat {
+#[allow(unreachable_pub)] // Exported conditionally under #[cfg(test)] in lib.rs
+pub enum BlockFormat {
+    /// Original block format (V1) with per-entry offsets.
+    #[allow(dead_code)] // Used in tests
     V1,
-    #[allow(dead_code)]
+    /// Prefix compression block format (V2) with restart points.
     V2,
 }
 
 impl BlockFormat {
     /// Returns the SST format version corresponding to this block format.
-    #[cfg(test)]
-    pub(crate) fn sst_format_version(self) -> u16 {
+    fn sst_format_version(self) -> u16 {
         match self {
             BlockFormat::V1 => SST_FORMAT_VERSION,
             BlockFormat::V2 => SST_FORMAT_VERSION_V2,
@@ -97,6 +101,9 @@ impl SsTableFormat {
             self.sst_codec.clone(),
             self.filter_bits_per_key,
         );
+        if let Some(block_format) = self.block_format {
+            builder = builder.with_block_format(block_format);
+        }
         if let Some(codec) = self.compression_codec {
             builder = builder.with_compression_codec(codec);
         }
@@ -144,9 +151,9 @@ impl EncodedSsTableBuilder<'_> {
             sst_first_key: None,
             current_block_max_key: None,
             block_size,
-            block_format: BlockFormat::V1,
-            builder: BlockBuilder::new_v1(block_size),
-            sst_format_version: SST_FORMAT_VERSION,
+            block_format: BlockFormat::V2,
+            builder: BlockBuilder::new_v2(block_size),
+            sst_format_version: SST_FORMAT_VERSION_V2,
             min_filter_keys,
             num_keys: 0,
             filter_builder: BloomFilterBuilder::new(filter_bits_per_key),
@@ -182,7 +189,6 @@ impl EncodedSsTableBuilder<'_> {
     /// # Panics
     /// Panics if called after data has been added to the builder, as this would
     /// result in mixed block types within the SST.
-    #[cfg(test)]
     pub(crate) fn with_block_format(mut self, block_format: BlockFormat) -> Self {
         assert!(
             self.num_keys == 0,
@@ -369,12 +375,11 @@ mod tests {
 
     use super::*;
     use crate::blob::ReadOnlyBlob;
-    use crate::block_iterator::BlockIterator;
+    use crate::block_iterator_v2::BlockIteratorV2;
     use crate::bytes_range::BytesRange;
     use crate::db_state::SsTableId;
     use crate::filter::filter_hash;
     use crate::format::block::Block;
-    use crate::iter::IterationOrder::Ascending;
     use crate::object_stores::ObjectStores;
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
     use crate::tablestore::TableStore;
@@ -409,11 +414,11 @@ mod tests {
         assert!(size_with_filter > size_without_filter); // Should be larger due to bloom filter
     }
 
-    fn next_block_to_iter(builder: &mut EncodedSsTableBuilder) -> BlockIterator<Block> {
+    fn next_block_to_iter(builder: &mut EncodedSsTableBuilder) -> BlockIteratorV2<Block> {
         let block = builder.next_block();
         assert!(block.is_some());
         let block = block.unwrap().block;
-        BlockIterator::new(block, Ascending)
+        BlockIteratorV2::new_ascending(block)
     }
 
     #[tokio::test]
@@ -515,7 +520,7 @@ mod tests {
             .read_block_raw(&encoded.info, &index, 0, &raw_sst)
             .await
             .unwrap();
-        let mut iter = BlockIterator::new_ascending(block);
+        let mut iter = BlockIteratorV2::new_ascending(block);
         assert_iterator(
             &mut iter,
             vec![RowEntry::new_value(&[b'a'; 8], &[b'1'; 8], 0).with_create_ts(1)],
@@ -525,7 +530,7 @@ mod tests {
             .read_block_raw(&encoded.info, &index, 1, &raw_sst)
             .await
             .unwrap();
-        let mut iter = BlockIterator::new_ascending(block);
+        let mut iter = BlockIteratorV2::new_ascending(block);
         assert_iterator(
             &mut iter,
             vec![RowEntry::new_value(&[b'b'; 8], &[b'2'; 8], 0).with_create_ts(2)],
@@ -535,7 +540,7 @@ mod tests {
             .read_block_raw(&encoded.info, &index, 2, &raw_sst)
             .await
             .unwrap();
-        let mut iter = BlockIterator::new_ascending(block);
+        let mut iter = BlockIteratorV2::new_ascending(block);
         assert_iterator(
             &mut iter,
             vec![RowEntry::new_value(&[b'c'; 8], &[b'3'; 8], 0).with_create_ts(3)],
@@ -852,7 +857,7 @@ mod tests {
 
         // then:
         for expected_entries in expected_blocks {
-            let mut iter = BlockIterator::new(blocks.pop_front().unwrap(), Ascending);
+            let mut iter = BlockIteratorV2::new_ascending(blocks.pop_front().unwrap());
             assert_iterator(&mut iter, expected_entries).await;
         }
         assert!(blocks.is_empty())
@@ -1225,5 +1230,127 @@ mod tests {
 
         // when/then: with_block_format should panic
         let _ = builder.with_block_format(BlockFormat::V2);
+    }
+
+    #[test]
+    fn should_default_to_block_format_v2() {
+        // given/when: create a new builder
+        let format = SsTableFormat::default();
+        let builder = format.table_builder();
+
+        // then: it should default to V2 block format
+        assert_eq!(builder.block_format, BlockFormat::V2);
+        assert_eq!(builder.sst_format_version, SST_FORMAT_VERSION_V2);
+    }
+
+    #[test]
+    fn should_use_v1_format_version_when_explicitly_configured() {
+        // given: a builder configured to use V1 format
+        let format = SsTableFormat::default();
+        let builder = format.table_builder().with_block_format(BlockFormat::V1);
+
+        // then: the builder should have V1 format settings
+        assert_eq!(builder.block_format, BlockFormat::V1);
+        assert_eq!(builder.sst_format_version, SST_FORMAT_VERSION);
+    }
+
+    #[tokio::test]
+    async fn should_read_v1_sst_written_with_explicit_config() {
+        // given: an SST built with explicit V1 configuration
+        let root_path = Path::from("");
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let format = SsTableFormat::default();
+        let table_store = TableStore::new(
+            ObjectStores::new(object_store, None),
+            format.clone(),
+            root_path,
+            None,
+        );
+        let mut builder = table_store
+            .table_builder()
+            .with_block_format(BlockFormat::V1);
+        builder
+            .add_value(b"key1", b"value1", gen_attrs(1))
+            .await
+            .unwrap();
+        builder
+            .add_value(b"key2", b"value2", gen_attrs(2))
+            .await
+            .unwrap();
+        let encoded = builder.build().await.unwrap();
+        let sst_handle = table_store
+            .write_sst(&SsTableId::Wal(0), encoded, false)
+            .await
+            .unwrap();
+
+        // when: reading the SST back
+        let mut iter = SstIterator::new_owned_initialized(
+            ..,
+            sst_handle,
+            Arc::new(table_store),
+            SstIteratorOptions::default(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        // then: all data should be readable
+        assert_iterator(
+            &mut iter,
+            vec![
+                RowEntry::new_value(b"key1", b"value1", 0).with_create_ts(1),
+                RowEntry::new_value(b"key2", b"value2", 0).with_create_ts(2),
+            ],
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn should_read_v2_sst_written_with_default() {
+        // given: an SST built with default settings (V2)
+        let root_path = Path::from("");
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let format = SsTableFormat::default();
+        let table_store = TableStore::new(
+            ObjectStores::new(object_store, None),
+            format.clone(),
+            root_path,
+            None,
+        );
+        let mut builder = table_store.table_builder();
+        builder
+            .add_value(b"key1", b"value1", gen_attrs(1))
+            .await
+            .unwrap();
+        builder
+            .add_value(b"key2", b"value2", gen_attrs(2))
+            .await
+            .unwrap();
+        let encoded = builder.build().await.unwrap();
+        let sst_handle = table_store
+            .write_sst(&SsTableId::Wal(1), encoded, false)
+            .await
+            .unwrap();
+
+        // when: reading the SST back
+        let mut iter = SstIterator::new_owned_initialized(
+            ..,
+            sst_handle,
+            Arc::new(table_store),
+            SstIteratorOptions::default(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        // then: all data should be readable
+        assert_iterator(
+            &mut iter,
+            vec![
+                RowEntry::new_value(b"key1", b"value1", 0).with_create_ts(1),
+                RowEntry::new_value(b"key2", b"value2", 0).with_create_ts(2),
+            ],
+        )
+        .await;
     }
 }

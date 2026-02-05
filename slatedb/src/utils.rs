@@ -1,10 +1,12 @@
 use crate::block_iterator::BlockIterator;
+use crate::block_iterator_v2::BlockIteratorV2;
 use crate::clock::MonotonicClock;
 use crate::config::DurabilityLevel;
 use crate::config::DurabilityLevel::{Memory, Remote};
 use crate::db_state::SortedRun;
 use crate::db_state::SsTableHandle;
 use crate::error::SlateDBError;
+use crate::format::sst::{SST_FORMAT_VERSION, SST_FORMAT_VERSION_V2};
 use crate::iter::{IterationOrder, KeyValueIterator};
 use crate::tablestore::TableStore;
 use crate::types::RowEntry;
@@ -194,12 +196,27 @@ pub(crate) async fn last_written_key_and_seq(
 
     // Sort descending so we get the last row from the last block, which
     // should be the last written key/seq.
-    let mut block_iter = BlockIterator::new(block, IterationOrder::Descending);
-    block_iter.init().await?;
-    Ok(block_iter
-        .next_entry()
-        .await?
-        .map(|entry| (entry.key, entry.seq)))
+    let sst_version = table_store.read_sst_version(output_sst).await?;
+    let entry = match sst_version {
+        SST_FORMAT_VERSION => {
+            let mut block_iter = BlockIterator::new(block, IterationOrder::Descending);
+            block_iter.init().await?;
+            block_iter.next_entry().await?
+        }
+        SST_FORMAT_VERSION_V2 => {
+            let mut block_iter = BlockIteratorV2::new(block, IterationOrder::Descending);
+            block_iter.init().await?;
+            block_iter.next_entry().await?
+        }
+        _ => {
+            return Err(SlateDBError::InvalidVersion {
+                format_name: "SST",
+                supported_versions: vec![SST_FORMAT_VERSION, SST_FORMAT_VERSION_V2],
+                actual_version: sst_version,
+            });
+        }
+    };
+    Ok(entry.map(|e| (e.key, e.seq)))
 }
 
 fn bytes_into_minimal_vec(bytes: &Bytes) -> Vec<u8> {
@@ -746,6 +763,7 @@ mod tests {
     use crate::clock::MonotonicClock;
     use crate::db_state::{SortedRun, SsTableHandle, SsTableId, SsTableInfo};
     use crate::error::SlateDBError;
+    use crate::sst_builder::BlockFormat;
     use crate::types::RowEntry;
     use crate::utils::{
         build_concurrent, bytes_into_minimal_vec, clamp_allocated_size_bytes, compute_index_key,
@@ -1080,6 +1098,47 @@ mod tests {
             .expect("missing last entry");
         assert_eq!(last_key, Bytes::from(b"z".as_slice()));
         assert_eq!(last_seq, 4);
+    }
+
+    #[tokio::test]
+    async fn should_get_last_written_key_and_seq_from_v1_sst() {
+        // given: an SST built with V1 block format
+        let os = Arc::new(InMemory::new());
+        let path = "testdb-last-written-v1".to_string();
+        let clock = Arc::new(MockSystemClock::new());
+        let db = Db::builder(path, os.clone())
+            .with_system_clock(clock.clone())
+            .build()
+            .await
+            .unwrap();
+        let table_store = db.inner.table_store.clone();
+
+        let mut sst_builder = table_store
+            .table_builder()
+            .with_block_format(BlockFormat::V1);
+        sst_builder
+            .add(RowEntry::new_value(b"aaa", b"1", 10))
+            .await
+            .unwrap();
+        sst_builder
+            .add(RowEntry::new_value(b"zzz", b"2", 20))
+            .await
+            .unwrap();
+        let encoded_sst = sst_builder.build().await.unwrap();
+        let sst = table_store
+            .write_sst(&SsTableId::Compacted(Ulid::new()), encoded_sst, false)
+            .await
+            .unwrap();
+
+        // when: getting last written key and seq
+        let (last_key, last_seq) = last_written_key_and_seq(table_store.clone(), &sst)
+            .await
+            .unwrap()
+            .expect("missing last entry");
+
+        // then: should return the last key and seq from the V1 formatted SST
+        assert_eq!(last_key, Bytes::from(b"zzz".as_slice()));
+        assert_eq!(last_seq, 20);
     }
 
     #[rstest]

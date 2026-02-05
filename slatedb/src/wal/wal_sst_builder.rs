@@ -58,7 +58,7 @@ use crate::error::SlateDBError;
 use crate::flatbuffer_types::{BlockMeta, BlockMetaArgs};
 use crate::format::sst::{
     BlockBuilder, BlockTransformer, EncodedSsTable, EncodedSsTableBlock,
-    EncodedSsTableBlockBuilder, EncodedSsTableFooterBuilder, SsTableFormat, SST_FORMAT_VERSION,
+    EncodedSsTableBlockBuilder, EncodedSsTableFooterBuilder, SsTableFormat, SST_FORMAT_VERSION_V2,
 };
 use crate::types::RowEntry;
 use bytes::Bytes;
@@ -108,7 +108,7 @@ impl EncodedWalSsTableBuilder {
             blocks: VecDeque::new(),
             block_meta: Vec::new(),
             block_size_config: block_size,
-            block_builder: BlockBuilder::new_v1(block_size),
+            block_builder: BlockBuilder::new_v2(block_size),
             index_builder: flatbuffers::FlatBufferBuilder::new(),
             sst_codec,
             compression_codec: None,
@@ -187,7 +187,7 @@ impl EncodedWalSsTableBuilder {
             return Ok(None);
         }
 
-        let new_builder = BlockBuilder::new_v1(self.block_size_config);
+        let new_builder = BlockBuilder::new_v2(self.block_size_config);
         let builder = std::mem::replace(&mut self.block_builder, new_builder);
         let mut block_builder = EncodedSsTableBlockBuilder::new(builder, self.data_size);
         if let Some(codec) = self.compression_codec {
@@ -249,7 +249,7 @@ impl EncodedWalSsTableBuilder {
             &*self.sst_codec,
             self.index_builder,
             self.block_meta,
-            SST_FORMAT_VERSION,
+            SST_FORMAT_VERSION_V2,
         );
         if let Some(codec) = self.compression_codec {
             footer_builder = footer_builder.with_compression_codec(codec);
@@ -276,18 +276,17 @@ impl EncodedWalSsTableBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::block_iterator::BlockIterator;
+    use crate::block_iterator_v2::BlockIteratorV2;
     use crate::flatbuffer_types::FlatBufferSsTableInfoCodec;
     use crate::format::block::Block;
-    use crate::iter::IterationOrder::Ascending;
     use crate::test_utils::assert_iterator;
     use crate::types::ValueDeletable;
 
-    fn next_block_to_iter(builder: &mut EncodedWalSsTableBuilder) -> BlockIterator<Block> {
+    fn next_block_to_iter(builder: &mut EncodedWalSsTableBuilder) -> BlockIteratorV2<Block> {
         let block = builder.next_block();
         assert!(block.is_some());
         let block = block.unwrap().block;
-        BlockIterator::new(block, Ascending)
+        BlockIteratorV2::new_ascending(block)
     }
 
     #[tokio::test]
@@ -391,7 +390,7 @@ mod tests {
             5u64.to_be_bytes()
         );
         let block = encoded.unconsumed_blocks.pop_front().unwrap();
-        let mut iter = BlockIterator::new(block.block, Ascending);
+        let mut iter = BlockIteratorV2::new_ascending(block.block);
         let expected = vec![
             RowEntry::new_value(b"zebra", b"val1", 5).with_create_ts(100),
             RowEntry::new_value(b"apple", b"val2", 2).with_create_ts(200),
@@ -423,7 +422,7 @@ mod tests {
 
         // Then
         let block = encoded.unconsumed_blocks.pop_front().unwrap();
-        let mut iter = BlockIterator::new(block.block, Ascending);
+        let mut iter = BlockIteratorV2::new_ascending(block.block);
         let expected = vec![
             RowEntry::new_tombstone(b"key1", 1).with_create_ts(100),
             RowEntry::new_value(b"key2", b"value2", 2).with_create_ts(200),
@@ -454,7 +453,7 @@ mod tests {
 
         // Then
         let block = encoded.unconsumed_blocks.pop_front().unwrap();
-        let mut iter = BlockIterator::new(block.block, Ascending);
+        let mut iter = BlockIteratorV2::new_ascending(block.block);
         let expected = vec![
             RowEntry::new_merge(b"key1", b"merge_value", 1).with_create_ts(100),
             RowEntry::new_value(b"key2", b"value2", 2).with_create_ts(200),
@@ -526,7 +525,7 @@ mod tests {
 
         // Then
         let block = encoded.unconsumed_blocks.pop_front().unwrap();
-        let mut iter = BlockIterator::new(block.block, Ascending);
+        let mut iter = BlockIteratorV2::new_ascending(block.block);
         let expected = vec![
             RowEntry::new_value(b"key1", b"", 1).with_create_ts(1),
             RowEntry::new_value(b"key2", b"value2", 2).with_create_ts(2),
@@ -550,7 +549,7 @@ mod tests {
 
         // Then
         let block = encoded.unconsumed_blocks.pop_front().unwrap();
-        let mut iter = BlockIterator::new(block.block, Ascending);
+        let mut iter = BlockIteratorV2::new_ascending(block.block);
         let expected = vec![RowEntry::new_value(b"key1", &large_value, 1).with_create_ts(1)];
         assert_iterator(&mut iter, expected).await;
     }
@@ -575,7 +574,7 @@ mod tests {
         );
         assert_eq!(encoded.unconsumed_blocks.len(), 1);
         let block = encoded.unconsumed_blocks.pop_front().unwrap();
-        let mut iter = BlockIterator::new(block.block, Ascending);
+        let mut iter = BlockIteratorV2::new_ascending(block.block);
         let expected =
             vec![RowEntry::new_value(b"only_key", b"only_value", 42).with_create_ts(100)];
         assert_iterator(&mut iter, expected).await;
@@ -626,7 +625,7 @@ mod tests {
 
         // Then
         let block = encoded.unconsumed_blocks.pop_front().unwrap();
-        let mut iter = BlockIterator::new(block.block, Ascending);
+        let mut iter = BlockIteratorV2::new_ascending(block.block);
         let expected = vec![
             RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(1),
             RowEntry::new_value(b"key1", b"value2", 2).with_create_ts(2),
@@ -654,7 +653,7 @@ mod tests {
 
         // Then
         let block = encoded.unconsumed_blocks.pop_front().unwrap();
-        let mut iter = BlockIterator::new(block.block, Ascending);
+        let mut iter = BlockIteratorV2::new_ascending(block.block);
         let expected = vec![
             RowEntry::new_value(b"key1", b"value1", 1)
                 .with_create_ts(100)
@@ -721,7 +720,7 @@ mod tests {
             .decompress_vec(compressed)
             .unwrap();
         assert_eq!(decompressed, block.block.encode().as_ref());
-        let mut iter = BlockIterator::new(block.block, Ascending);
+        let mut iter = BlockIteratorV2::new_ascending(block.block);
         let expected = vec![
             RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(100),
             RowEntry::new_value(b"key2", b"value2", 2).with_create_ts(200),
@@ -758,7 +757,7 @@ mod tests {
             &compressed_with_checksum[..compressed_with_checksum.len() - CHECKSUM_SIZE];
         let decompressed = lz4_flex::block::decompress_size_prepended(compressed).unwrap();
         assert_eq!(decompressed, block.block.encode().as_ref());
-        let mut iter = BlockIterator::new(block.block, Ascending);
+        let mut iter = BlockIteratorV2::new_ascending(block.block);
         let expected = vec![
             RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(100),
             RowEntry::new_value(b"key2", b"value2", 2).with_create_ts(200),
@@ -795,7 +794,7 @@ mod tests {
             &compressed_with_checksum[..compressed_with_checksum.len() - CHECKSUM_SIZE];
         let decompressed = zstd::stream::decode_all(compressed).unwrap();
         assert_eq!(decompressed, block.block.encode().as_ref());
-        let mut iter = BlockIterator::new(block.block, Ascending);
+        let mut iter = BlockIteratorV2::new_ascending(block.block);
         let expected = vec![
             RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(100),
             RowEntry::new_value(b"key2", b"value2", 2).with_create_ts(200),
@@ -835,7 +834,7 @@ mod tests {
         let mut decompressed = Vec::new();
         decoder.read_to_end(&mut decompressed).unwrap();
         assert_eq!(decompressed, block.block.encode().as_ref());
-        let mut iter = BlockIterator::new(block.block, Ascending);
+        let mut iter = BlockIteratorV2::new_ascending(block.block);
         let expected = vec![
             RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(100),
             RowEntry::new_value(b"key2", b"value2", 2).with_create_ts(200),
@@ -955,7 +954,7 @@ mod tests {
 
             // Then - block data should still be readable
             let block = encoded.unconsumed_blocks.pop_front().unwrap();
-            let mut iter = BlockIterator::new(block.block, Ascending);
+            let mut iter = BlockIteratorV2::new_ascending(block.block);
             let expected = vec![
                 RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(100),
                 RowEntry::new_value(b"key2", b"value2", 2).with_create_ts(200),
