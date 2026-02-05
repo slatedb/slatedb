@@ -83,7 +83,7 @@ import java.util.Objects;
 ///     }
 /// }
 /// ```
-public final class SlateDb implements AutoCloseable {
+public final class SlateDb implements SlateDbReadable {
     private MemorySegment handle;
     private boolean closed;
 
