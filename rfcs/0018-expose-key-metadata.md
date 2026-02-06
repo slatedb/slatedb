@@ -61,10 +61,7 @@ Users cannot query a specific historical version of a key using a sequence numbe
 <!-- TOC --><a name="non-goals"></a>
 ## Non-Goals
 
-- No modification of the underlying storage format or SST file structure.
-- No implementation of full MVCC transaction semantics.
-- No changes to existing TTL expiration mechanisms or compaction logic.
-
+- No change/modification for underlying behavior of any API.
 
 <!-- TOC --><a name="design"></a>
 ## Design
