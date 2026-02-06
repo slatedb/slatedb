@@ -1549,7 +1549,7 @@ mod tests {
                         .begin(IsolationLevel::SerializableSnapshot)
                         .await
                         .unwrap();
-                    txn.merge(b"counter", &MERGE_INCREMENT).unwrap();
+                    txn.merge(b"counter", MERGE_INCREMENT).unwrap();
                     txn.unmark_write([b"counter"]).unwrap();
                     txn.commit().await.unwrap();
                 }));
