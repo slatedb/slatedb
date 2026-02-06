@@ -8,6 +8,7 @@ use crate::dispatcher::MessageHandlerExecutor;
 use crate::error::SlateDBError;
 use crate::garbage_collector::GC_TASK_NAME;
 use crate::manifest::store::{ManifestStore, StoredManifest};
+use core::ops::Bound;
 use slatedb_common::clock::SystemClock;
 
 use crate::clone;
@@ -15,6 +16,7 @@ use crate::object_stores::{ObjectStoreType, ObjectStores};
 use crate::rand::DbRand;
 use crate::seq_tracker::FindOption;
 use crate::utils::{IdGenerator, WatchableOnceCell};
+use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use fail_parallel::FailPointRegistry;
 use object_store::path::Path;
@@ -31,6 +33,7 @@ use tokio_util::sync::CancellationToken;
 use ulid::Ulid;
 use uuid::Uuid;
 
+use crate::bytes_range::BytesRange;
 pub use crate::db::builder::AdminBuilder;
 use slatedb_txn_obj::TransactionalObject;
 
@@ -48,6 +51,36 @@ pub struct Admin {
     pub(crate) system_clock: Arc<dyn SystemClock>,
     /// The random number generator to use for randomness.
     pub(crate) rand: Arc<DbRand>,
+}
+
+#[derive(Clone)]
+pub struct SourceDatabase {
+    pub(crate) path: Path,
+    pub(crate) checkpoint: Uuid,
+    pub(crate) visible_range: BytesRange,
+}
+
+impl SourceDatabase {
+    pub fn new(
+        path: Path,
+        checkpoint: Uuid,
+        start_bound: Bound<Bytes>,
+        end_bound: Bound<Bytes>,
+    ) -> SourceDatabase {
+        SourceDatabase {
+            path,
+            checkpoint,
+            visible_range: BytesRange::new(start_bound, end_bound),
+        }
+    }
+
+    pub fn into_path(self) -> SourceDatabase {
+        SourceDatabase {
+            path: self.path,
+            checkpoint: self.checkpoint,
+            visible_range: self.visible_range,
+        }
+    }
 }
 
 impl Admin {
@@ -559,6 +592,19 @@ impl Admin {
             Arc::new(FailPointRegistry::new()),
             self.system_clock.clone(),
             self.rand.clone(),
+        )
+        .await?;
+        Ok(())
+    }
+
+    pub async fn create_multi_clone(
+        &self,
+        sources: Vec<SourceDatabase>,
+    ) -> Result<(), Box<dyn Error>> {
+        clone::create_multi_clone(
+            self.path.clone(),
+            sources,
+            self.object_stores.store_of(ObjectStoreType::Main).clone(),
         )
         .await?;
         Ok(())

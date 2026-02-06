@@ -1607,15 +1607,17 @@ impl DbRead for Db {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::admin::SourceDatabase;
     use crate::cached_object_store::stats::{
         OBJECT_STORE_CACHE_PART_ACCESS, OBJECT_STORE_CACHE_PART_HITS,
     };
     use crate::cached_object_store::{CachedObjectStore, FsCacheStorage};
     use crate::cached_object_store_stats::CachedObjectStoreStats;
+    use crate::clone::create_multi_clone;
     use crate::config::DurabilityLevel::{Memory, Remote};
     use crate::config::{
-        CompactorOptions, GarbageCollectorDirectoryOptions, GarbageCollectorOptions,
-        ObjectStoreCacheOptions, PutOptions, Settings, Ttl, WriteOptions,
+        CheckpointOptions, CheckpointScope, CompactorOptions, GarbageCollectorDirectoryOptions,
+        GarbageCollectorOptions, ObjectStoreCacheOptions, PutOptions, Settings, Ttl, WriteOptions,
     };
     use crate::db::builder::GarbageCollectorBuilder;
     use crate::db_state::ManifestCore;
@@ -1646,6 +1648,7 @@ mod tests {
     use slatedb_common::clock::MockSystemClock;
     use std::collections::BTreeMap;
     use std::collections::Bound::Included;
+    use std::ops::RangeFull;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
     use tokio::runtime::Runtime;
@@ -6340,5 +6343,91 @@ mod tests {
         );
 
         db.close().await.unwrap();
+    }
+
+    #[cfg(feature = "wal_disable")]
+    #[tokio::test]
+    async fn test_create_multi_clone() -> Result<(), Box<dyn std::error::Error>> {
+        // Define prefixes for different key ranges
+        let ranges = ["a".."e", "e".."i", "i".."m"];
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        // Disable WAL since it's unsupported for multi_clone
+        let options = Settings {
+            wal_enabled: false,
+            ..Settings::default()
+        };
+
+        let mut source_paths = vec![];
+        let mut checkpoints = vec![];
+
+        for (idx, _) in ranges.iter().enumerate() {
+            let path = Path::from(format!("/tmp/test_source{}", idx + 1));
+            let db = Db::builder(path.clone(), object_store.clone())
+                .with_settings(options.clone())
+                .build()
+                .await
+                .unwrap();
+
+            source_paths.push(path.clone());
+
+            for key in 'a'..='z' {
+                for suffix in 0..10 {
+                    let key = format!("{}#{}", key, suffix);
+                    let value = format!("{}@{}", key, idx);
+                    db.put_with_options(
+                        &key,
+                        &value,
+                        &PutOptions::default(),
+                        &WriteOptions {
+                            await_durable: false,
+                        },
+                    )
+                    .await?;
+                }
+            }
+
+            let checkpoint = db
+                .create_checkpoint(CheckpointScope::All, &CheckpointOptions::default())
+                .await?;
+            checkpoints.push(checkpoint.id);
+
+            db.close().await?;
+        }
+
+        let clone_path = Path::from("/tmp/test_multi_clone");
+
+        // Define source databases for multi-clone with specific visible ranges
+        let sources: Vec<SourceDatabase> = source_paths
+            .iter()
+            .zip(ranges.iter())
+            .zip(checkpoints.iter())
+            .map(|((path, range), checkpoint)| SourceDatabase {
+                path: path.clone(),
+                visible_range: BytesRange::new(
+                    range.start_bound().map(|b| Bytes::from(*b)),
+                    range.end_bound().map(|b| Bytes::from(*b)),
+                ),
+                checkpoint: *checkpoint,
+            })
+            .collect();
+
+        // Create multi-clone from the sources
+        create_multi_clone(clone_path.clone(), sources, object_store.clone()).await?;
+
+        // Open the cloned database and verify it contains all the expected data
+        let clone_db = Db::builder(clone_path.clone(), object_store.clone())
+            .with_settings(options)
+            .build()
+            .await?;
+
+        let mut iter = clone_db.scan::<Vec<u8>, RangeFull>(..).await?;
+
+        while let Some(kv) = iter.next().await? {
+            println!("{:?}", kv);
+        }
+
+        clone_db.close().await?;
+
+        Ok(())
     }
 }
