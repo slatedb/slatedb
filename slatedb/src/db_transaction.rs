@@ -346,10 +346,40 @@ impl DbTransaction {
     /// Mark written keys as untracked for conflict detection.
     ///
     /// Keys marked with this method are still written atomically with the rest of the
-    /// transaction, but are excluded from transaction conflict detection on commit.
+    /// transaction, but are excluded from transaction conflict detection on commit for
+    /// both this transaction and other transactions.
+    ///
+    /// This means:
+    /// - If another transaction reads a key written with an `unmark_write` by this transaction, that key
+    ///   will not cause a read-write conflict.
+    /// - If another transaction writes a key written with an `unmark_write` by this transaction, that key
+    ///   will not cause a write-write conflict.
+    ///
+    /// You may call `unmark_write` either before or after writing a key in the transaction.
+    /// Once a key is unmarked, it cannot be marked again within the same transaction and
+    /// remains unmarked for the duration of this transaction, even if `put`, `merge`, or
+    /// `delete` is called on the same key later in the transaction.
     ///
     /// ## Arguments
     /// - `keys`: an iterator of keys to exclude from write conflict tracking
+    ///
+    /// ## Examples
+    /// ```rust
+    /// # async fn example() -> Result<(), slatedb::Error> {
+    /// # use std::sync::Arc;
+    /// # use slatedb::object_store::memory::InMemory;
+    /// use slatedb::{Db, IsolationLevel};
+    ///
+    /// # let object_store = Arc::new(InMemory::new());
+    /// # let db = Db::open("test_path", object_store).await?;
+    /// let txn = db.begin(IsolationLevel::Snapshot).await?;
+    /// txn.put(b"counter", b"1")?;
+    /// txn.unmark_write([b"counter"])?;
+    /// txn.put(b"counter", b"2")?;
+    /// txn.commit().await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn unmark_write<K, I>(&self, keys: I) -> Result<(), crate::Error>
     where
         K: AsRef<[u8]>,
@@ -515,9 +545,42 @@ impl Drop for DbTransaction {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::merge_operator::{MergeOperator, MergeOperatorError};
     use crate::object_store::memory::InMemory;
     use rstest::rstest;
     use std::sync::Arc;
+
+    struct CounterMergeOperator;
+
+    impl MergeOperator for CounterMergeOperator {
+        fn merge(
+            &self,
+            _key: &Bytes,
+            existing_value: Option<Bytes>,
+            value: Bytes,
+        ) -> Result<Bytes, MergeOperatorError> {
+            let existing = existing_value
+                .map(|v| u64::from_le_bytes(v.as_ref().try_into().unwrap()))
+                .unwrap_or(0);
+            let operand = u64::from_le_bytes(value.as_ref().try_into().unwrap());
+            Ok(Bytes::copy_from_slice(&(existing + operand).to_le_bytes()))
+        }
+
+        fn merge_batch(
+            &self,
+            _key: &Bytes,
+            existing_value: Option<Bytes>,
+            operands: &[Bytes],
+        ) -> Result<Bytes, MergeOperatorError> {
+            let mut total = existing_value
+                .map(|v| u64::from_le_bytes(v.as_ref().try_into().unwrap()))
+                .unwrap_or(0);
+            for operand in operands {
+                total += u64::from_le_bytes(operand.as_ref().try_into().unwrap());
+            }
+            Ok(Bytes::copy_from_slice(&total.to_le_bytes()))
+        }
+    }
 
     #[tokio::test]
     async fn test_txn_basic_visibility() {
@@ -1457,5 +1520,48 @@ mod tests {
             result.is_ok(),
             "Reader transaction should not conflict with untracked write key"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_unmark_write_merge_counter_aggregates_under_high_concurrency() {
+        const CONCURRENT_TXNS: usize = 32;
+        const ROUNDS: usize = 20;
+        const MERGE_INCREMENT: [u8; 8] = 1u64.to_le_bytes();
+        const EXPECTED: u64 = (CONCURRENT_TXNS * ROUNDS) as u64;
+
+        let object_store: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
+        let db = crate::Db::builder("test_unmark_write_merge_counter", object_store)
+            .with_merge_operator(Arc::new(CounterMergeOperator))
+            .build()
+            .await
+            .unwrap();
+
+        for _ in 0..ROUNDS {
+            let barrier = Arc::new(tokio::sync::Barrier::new(CONCURRENT_TXNS));
+            let mut handles = Vec::with_capacity(CONCURRENT_TXNS);
+
+            for _ in 0..CONCURRENT_TXNS {
+                let db = db.clone();
+                let barrier = barrier.clone();
+                handles.push(tokio::spawn(async move {
+                    barrier.wait().await;
+                    let txn = db
+                        .begin(IsolationLevel::SerializableSnapshot)
+                        .await
+                        .unwrap();
+                    txn.merge(b"counter", &MERGE_INCREMENT).unwrap();
+                    txn.unmark_write([b"counter"]).unwrap();
+                    txn.commit().await.unwrap();
+                }));
+            }
+
+            for handle in handles {
+                handle.await.unwrap();
+            }
+        }
+
+        let value = db.get(b"counter").await.unwrap().unwrap();
+        let total = u64::from_le_bytes(value.as_ref().try_into().unwrap());
+        assert_eq!(total, EXPECTED);
     }
 }
