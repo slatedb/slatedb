@@ -31,7 +31,7 @@ This RFC proposes three related API improvements:
 
 1.  **Modify Write API Return Types**: Change the return type of `db.put()`, `db.delete()`, `db.merge()`, and `db.write()` (including their `_with_options` variants) from `Result<(), ...>` to `Result<WriteHandle, ...>` to return a write handle containing the assigned sequence number. This design allows for future extensions such as `await_durability()`.
 2.  **New Row Query Interface**: Introduce `get_row()`, `get_row_with_options()`, `scan_rows()`, and `scan_rows_with_options()` interfaces, allowing users to query complete row information including metadata (sequence number, creation timestamp, expiration timestamp) and value.
-3.  **Support Query by Version**: Add a `read_at_seq` option to `SnapshotOptions`, enabling users to create snapshots at specific sequence numbers and read historical versions of keys.
+3.  **Support Query by Version**: Add a `seqnum` option to `SnapshotOptions`, enabling users to create snapshots at specific sequence numbers and read historical versions of keys.
 
 <!-- TOC --><a name="motivation"></a>
 ## Motivation
@@ -159,7 +159,7 @@ let mut iter = db.scan_rows_with_options(
 3.  **Tombstone and Expired Key Handling**: 
     - **Tombstones**: `get_row` and `scan_rows` can return tombstones (`ValueDeletable::Tombstone`), allowing users to see that a key has been deleted along with its metadata (seq, timestamps).
     - **Expired Keys**: By default, expired keys (based on TTL) are skipped. Future options may allow including expired keys.
-4.  **Multi-Version Behavior**: `scan_rows` returns the **latest visible version** of each key (consistent with `scan` behavior). If a key has multiple versions at different sequence numbers, only the version visible at the current time (or specified `read_at_seq`) is returned.
+4.  **Multi-Version Behavior**: `scan_rows` returns the **latest visible version** of each key (consistent with `scan` behavior). If a key has multiple versions at different sequence numbers, only the version visible at the current time (or specified snapshot sequence number) is returned.
 
 <!-- TOC --><a name="2-modify-putwrite-return-types"></a>
 ### 2. Modify Put/Write Return Types
@@ -244,16 +244,16 @@ let _ = db.write(batch2).await?;
 <!-- TOC --><a name="3-support-query-by-version"></a>
 ### 3. Support Query by Version
 
-Add a `read_at_seq` field to `SnapshotOptions` to create snapshots at specific sequence numbers:
+Add a `seqnum` field to `SnapshotOptions` to create snapshots at specific sequence numbers:
 
 ```rust
 pub struct SnapshotOptions {
-    pub read_at_seq: Option<u64>,  // New: create snapshot at specific sequence number
+    pub seqnum: Option<u64>,  // New: create snapshot at specific sequence number
 }
 
 impl SnapshotOptions {
     pub fn read_at(self, seq: u64) -> Self {
-        Self { read_at_seq: Some(seq), ..self }
+        Self { seqnum: Some(seq), ..self }
     }
 }
 
@@ -283,7 +283,7 @@ let old_value = snapshot.get(b"my_key").await?;
 assert_eq!(old_value, Some(Bytes::from("value1")));
 ```
 
-Snapshots created with `read_at_seq` can be used with all read operations:
+Snapshots created with `seqnum` can be used with all read operations:
 
 **Usage Example**:
 
@@ -316,17 +316,17 @@ while let Some(row_entry) = row_iter.next().await? {
 
 **Implementation Details**:
 
-- **Snapshot-Based Versioning**: Extend the existing `Snapshot` mechanism to support creating snapshots at specific sequence numbers via `SnapshotOptions::read_at_seq`.
-- **Error Handling**: If `read_at_seq < min_seq` (the minimum retained sequence number), return an error indicating the requested version is no longer available.
+- **Snapshot-Based Versioning**: Extend the existing `Snapshot` mechanism to support creating snapshots at specific sequence numbers via `SnapshotOptions::seqnum`.
+- **Error Handling**: If `seqnum < min_seq` (the minimum retained sequence number), return an error indicating the requested version is no longer available.
 - **API Integration**: 
   - `snapshot_with_options(SnapshotOptions::default().read_at(seq))` creates a snapshot view at the specified sequence number.
   - All read operations on the snapshot (`get`, `scan`, `get_row`, `scan_rows`) will see data as of that sequence number.
 - **Compaction Impact**:
-  - Historical versions may be removed by compaction. If the requested `read_at_seq` is older than `min_seq`, an error is returned.
-  - Otherwise, the query will return the latest available version `v` such that `v.seq <= read_at_seq`.
+  - Historical versions may be removed by compaction. If the requested `seqnum` is older than `min_seq`, an error is returned.
+  - Otherwise, the query will return the latest available version `v` such that `v.seq <= seqnum`.
 
 > [!IMPORTANT]
-> **Historical Version Availability**: Snapshots at specific sequence numbers do not guarantee that all historical versions are available. As SSTs are compacted, older versions are purged. If `read_at_seq < min_seq`, `snapshot_with_options` will return an error. Users should not rely on this for long-term data archival unless they manage version retention.
+> **Historical Version Availability**: Snapshots at specific sequence numbers do not guarantee that all historical versions are available. As SSTs are compacted, older versions are purged. If `seqnum < min_seq`, `snapshot_with_options` will return an error. Users should not rely on this for long-term data archival unless they manage version retention.
 
 <!-- TOC --><a name="impact-analysis"></a>
 ## Impact Analysis
@@ -349,7 +349,7 @@ while let Some(row_entry) = row_iter.next().await? {
 - `get_row()`, `get_row_with_options()`, `scan_rows()`, and `scan_rows_with_options()` are new APIs.
 - They return the existing `RowEntry` type, which is already public.
 - `snapshot_with_options()` is a new API that extends existing snapshot functionality.
-- `SnapshotOptions.read_at_seq` allows creating snapshots at specific sequence numbers, returning an error if `read_at_seq < min_seq`.
+- `SnapshotOptions.seqnum` allows creating snapshots at specific sequence numbers, returning an error if `seqnum < min_seq`.
 - No impact on any storage formats (WAL/SST/Manifest).
 
 **Migration Path**:
@@ -384,7 +384,7 @@ let mut row_iter: DbRowIterator = db.scan_rows(..).await?;
 **Performance Testing**:
 
 - `get_row`/`scan_rows` performance: Since these return complete row information, they decode both metadata and value. Performance should be similar to existing `get`/`scan` operations.
-- `get_with_options(read_at_seq)` performance.
+- `get_with_options` with specified snapshot sequence number.
 - Performance Goal: Impact of new features on existing operations < 5%.
 
 <!-- TOC --><a name="alternatives"></a>
