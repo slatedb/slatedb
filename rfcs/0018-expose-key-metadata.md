@@ -29,10 +29,9 @@ Authors:
 
 This RFC proposes three related API improvements:
 
-1.  **Modify Write API Return Types**: Change the return type of `db.put()`, `db.delete()`, and `db.merge()` (including their `_with_options` variants) from `Result<(), ...>` to `Result<WriteHandle, ...>` to return a write handle containing the assigned sequence number.
-2.  **Enrich Batch Write Return Type**: Change the return type of `db.write()` from `Result<(), ...>` to `Result<WriteHandle, ...>` to return a write handle containing the commit sequence number. This design allows for future extensions such as `await_durability()`.
-3.  **New Row Query Interface**: Introduce `get_row()`, `get_row_with_options()`, `scan_rows()`, and `scan_rows_with_options()` interfaces, allowing users to query complete row information including metadata (sequence number, creation timestamp, expiration timestamp) and value.
-4.  **Support Query by Version**: Add a `seqnum` option to `SnapshotOptions`, enabling users to create snapshots at specific sequence numbers and read historical versions of keys.
+1.  **Modify Write API Return Types**: Change the return type of `db.put()`, `db.delete()`, `db.merge()`, and `db.write()` (including their `_with_options` variants) from `Result<(), ...>` to `Result<WriteHandle, ...>` to return a write handle containing the assigned sequence number. This design allows for future extensions such as `await_durability()`.
+2.  **New Row Query Interface**: Introduce `get_row()`, `get_row_with_options()`, `scan_rows()`, and `scan_rows_with_options()` interfaces, allowing users to query complete row information including metadata (sequence number, creation timestamp, expiration timestamp) and value.
+3.  **Support Query by Version**: Add a `seqnum` option to `SnapshotOptions`, enabling users to create snapshots at specific sequence numbers and read historical versions of keys.
 
 <!-- TOC --><a name="motivation"></a>
 ## Motivation
