@@ -402,7 +402,6 @@ let mut row_iter: DbRowIterator = db.scan_rows(..).await?;
 
 - `get_row`/`scan_rows` performance: Since these return complete row information, they decode both metadata and value. Performance should be similar to existing `get`/`scan` operations.
 - `get_with_options` with specified snapshot sequence number.
-- Performance Goal: Impact of new features on existing operations < 5%.
 
 <!-- TOC --><a name="alternatives"></a>
 ## Alternatives
