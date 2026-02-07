@@ -8,6 +8,10 @@ Table of Contents:
 - [Motivation](#motivation)
 - [Goals](#goals)
 - [Non-Goals](#non-goals)
+- [Use Cases](#use-cases)
+   * [Change Data Capture (CDC)](#change-data-capture-cdc)
+   * [Durability Guarantees](#durability-guarantees)
+   * [TTL Management](#ttl-management)
 - [Design](#design)
    * [1. Row Query Interface](#1-row-query-interface)
    * [2. Modify Put/Write Return Types](#2-modify-putwrite-return-types)
@@ -61,6 +65,58 @@ Users cannot query a specific historical version of a key using a sequence numbe
 ## Non-Goals
 
 - No change/modification for underlying behavior of any API.
+
+<!-- TOC --><a name="use-cases"></a>
+## Use Cases
+
+<!-- TOC --><a name="change-data-capture-cdc"></a>
+### Change Data Capture (CDC)
+
+Applications can use the sequence number and timestamp from `WriteHandle` to implement CDC pipelines:
+
+```rust
+// Capture write metadata for CDC
+let handle = db.put(b"user:123", user_data).await?;
+let change_event = ChangeEvent {
+    key: b"user:123".to_vec(),
+    seqnum: handle.seqnum(),
+    timestamp: handle.create_ts(),
+    operation: Operation::Put,
+};
+cdc_stream.publish(change_event).await?;
+```
+
+The CDC consumer can then use `get_row()` to retrieve the complete row information including the value, or use the sequence number to create a snapshot for consistent reads.
+
+<!-- TOC --><a name="durability-guarantees"></a>
+### Durability Guarantees
+
+Applications requiring strong durability guarantees can use the sequence number to verify that writes have been persisted:
+
+```rust
+// Write with durability tracking
+let handle = db.put(b"critical_data", value).await?;
+let write_seqnum = handle.seqnum();
+
+// All writes with sequence numbers <= write_seqnum are guaranteed to be durable
+// Applications can use this for replication, backup, or recovery checkpoints
+checkpoint_manager.record_durable_seqnum(write_seqnum).await?;
+```
+
+<!-- TOC --><a name="ttl-management"></a>
+### TTL Management
+
+Applications can query how long until a key expires using `get_row()`:
+
+```rust
+// Query remaining TTL for a key
+if let Some(entry) = db.get_row(b"session:abc123").await? {
+    if let Some(expire_ts) = entry.expire_ts {
+        let ttl_seconds = (expire_ts - current_time_micros()) / 1_000_000;
+        println!("Key expires in {} seconds", ttl_seconds);
+    }
+}
+```
 
 <!-- TOC --><a name="design"></a>
 ## Design
