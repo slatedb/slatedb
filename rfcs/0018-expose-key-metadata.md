@@ -393,7 +393,9 @@ let mut row_iter: DbRowIterator = db.scan_rows(..).await?;
 
 **1. Dedicated Specialized Interfaces (e.g., `get_ttl`, `get_seqnum`, etc.)**
 
-- **Reason for Rejection**: This would rapidly expand the API surface area and increase user learning costs. A single generic interface `get_row` that returns complete row information (including metadata) maintains API simplicity.
+- **Reason for Rejection**: 
+  1.  **API Complexity**: This would rapidly expand the API surface area and increase user learning costs. A single generic interface `get_row` that returns complete row information (including metadata) maintains API simplicity.
+  2.  **Atomicity**: Some use cases (like CDC) require retrieving both the key/value and its metadata atomically. Separate methods would prevent this (unless a snapshot is created). Returning the complete `RowEntry` naturally supports atomic access.
 
 **2. Introduce `put_with_metadata()` Method**
 
