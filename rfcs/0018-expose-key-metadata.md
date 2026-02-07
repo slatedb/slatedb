@@ -174,12 +174,18 @@ let mut iter = db.scan_rows_with_options(
 /// This structure is designed to be extensible for future enhancements.
 pub struct WriteHandle {
     seq: u64,
+    create_ts: u64,
 }
 
 impl WriteHandle {
     /// Returns the sequence number assigned to this write operation.
     pub fn seqnum(&self) -> u64 {
         self.seq
+    }
+    
+    /// Returns the creation timestamp assigned to this write operation.
+    pub fn create_ts(&self) -> u64 {
+        self.create_ts
     }
     
     // Future extensions can be added here, for example:
@@ -226,9 +232,9 @@ pub async fn commit_with_options(self, options: &WriteOptions) -> Result<WriteHa
 **Migration Example**:
 
 ```rust
-// Single key operation - get sequence number
+// Single key operation - get sequence number and timestamp
 let handle = db.put(b"key", b"value").await?;
-println!("Seq: {}", handle.seqnum());
+println!("Seq: {}, Created at: {}", handle.seqnum(), handle.create_ts());
 
 // Batch operation
 let mut batch = WriteBatch::new();
@@ -237,10 +243,17 @@ batch.put(b"key2", b"value2");
 batch.delete(b"key1");
 
 let handle = db.write(batch).await?;
-println!("Batch committed at seq: {}", handle.seqnum());
-// All operations in the batch share this sequence number
+println!("Batch committed at seq: {}, ts: {}", handle.seqnum(), handle.create_ts());
+// All operations in the batch share this sequence number and timestamp
 
-// Option 2: Ignore return values (if you don't need the sequence number)
+// If you need the full RowEntry, use get_row with the seqnum
+let row = db.get_row(b"key").await?;
+if let Some(entry) = row {
+    assert_eq!(entry.seq, handle.seqnum());
+    assert_eq!(entry.create_ts, handle.create_ts());
+}
+
+// Option 2: Ignore return values (if you don't need the metadata)
 let _ = db.put(b"key", b"value").await?;
 
 let mut batch2 = WriteBatch::new();
@@ -250,11 +263,12 @@ let _ = db.write(batch2).await?;
 
 **Implementation Details**:
 
-- Modify `DbInner::write_with_options` to return `WriteHandle` (containing the assigned `commit_seq`).
+- Modify `DbInner::write_with_options` to return `WriteHandle` (containing the assigned `commit_seq` and `create_ts`).
 - `put()`, `delete()`, and `merge()` return the `WriteHandle` received from `DbInner`.
 - Both `put`, `delete`, and `merge` operations share the same underlying write pipeline.
-- `WriteHandle` is a simple wrapper around `u64` for now, but provides extensibility for future features.
-- **Note on Transactions**: Within a transaction, the individual write operations (`put`, `delete`, `merge`) do not return `WriteHandle` because sequence numbers are not known during transaction execution. However, `DbTransaction::commit()` and `commit_with_options()` **do** return `WriteHandle`, allowing users to access the commit sequence number assigned when the transaction is successfully committed.
+- `WriteHandle` contains the sequence number and creation timestamp assigned to the write operation.
+- The `create_ts` is assigned at the same time as the `commit_seq` during write batch processing.
+- **Note on Transactions**: Within a transaction, the individual write operations (`put`, `delete`, `merge`) do not return `WriteHandle` because sequence numbers are not known during transaction execution. However, `DbTransaction::commit()` and `commit_with_options()` **do** return `WriteHandle`, allowing users to access the commit sequence number and timestamp assigned when the transaction is successfully committed.
 
 <!-- TOC --><a name="3-support-query-by-version"></a>
 ### 3. Support Query by Version
