@@ -195,7 +195,7 @@ pub async fn put<K, V>(&self, key: K, value: V) -> Result<(), crate::Error>
 pub async fn delete<K>(&self, key: K) -> Result<(), crate::Error>
 pub async fn merge<K, V>(&self, key: K, value: V) -> Result<(), crate::Error>
 
-// New interface. Returns WriteHandle containing the assigned sequence number.
+// New interface. Returns WriteHandle with the assigned sequence number.
 pub async fn put<K, V>(&self, key: K, value: V) -> Result<WriteHandle, crate::Error>
 pub async fn delete<K>(&self, key: K) -> Result<WriteHandle, crate::Error>
 pub async fn merge<K, V>(&self, key: K, value: V) -> Result<WriteHandle, crate::Error>
@@ -204,9 +204,23 @@ pub async fn merge<K, V>(&self, key: K, value: V) -> Result<WriteHandle, crate::
 **Batch Operations**:
 
 ```rust
-// New interface. Returns WriteHandle containing the commit sequence number for the batch.
-// In the current implementation, all operations in a batch share the same sequence number.
+// Old interface
+pub async fn write(&self, batch: WriteBatch) -> Result<(), crate::Error>
+
+// New interface. Returns WriteHandle with the batch commit sequence number.
 pub async fn write(&self, batch: WriteBatch) -> Result<WriteHandle, crate::Error>
+```
+
+**Transaction Commit Operations**:
+
+```rust
+// Old interface
+pub async fn commit(self) -> Result<(), crate::Error>
+pub async fn commit_with_options(self, options: &WriteOptions) -> Result<(), crate::Error>
+
+// New interface. Returns WriteHandle with the commit sequence number.
+pub async fn commit(self) -> Result<WriteHandle, crate::Error>
+pub async fn commit_with_options(self, options: &WriteOptions) -> Result<WriteHandle, crate::Error>
 ```
 
 **Migration Example**:
@@ -240,6 +254,7 @@ let _ = db.write(batch2).await?;
 - `put()`, `delete()`, and `merge()` return the `WriteHandle` received from `DbInner`.
 - Both `put`, `delete`, and `merge` operations share the same underlying write pipeline.
 - `WriteHandle` is a simple wrapper around `u64` for now, but provides extensibility for future features.
+- **Note on Transactions**: Within a transaction, the individual write operations (`put`, `delete`, `merge`) do not return `WriteHandle` because sequence numbers are not known during transaction execution. However, `DbTransaction::commit()` and `commit_with_options()` **do** return `WriteHandle`, allowing users to access the commit sequence number assigned when the transaction is successfully committed.
 
 <!-- TOC --><a name="3-support-query-by-version"></a>
 ### 3. Support Query by Version
