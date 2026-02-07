@@ -322,6 +322,7 @@ while let Some(row_entry) = row_iter.next().await? {
   - If data has not yet been written (`seq > max_seq`), it is not visible.
   - The snapshot acts as a view of the database at a specific `seqnum`. If no data satisfies the visibility condition, it simply returns empty results (`None` or empty iterator).
   - **Note**: Users should not rely on specific sequence number snapshots for long-term data archival unless they explicitly manage version retention (e.g., by disabling compaction or setting appropriate retention periods).
+- **Version Retention**: Currently, historical versions are implicitly retained if they are visible to any active open snapshot. If a snapshot with `seqnum` is kept open, the compaction process will presume data visible to it (i.e. `seqnum >= min_seq`). Once the snapshot is dropped, older versions may be reclaimed by compaction. Future improvements may introduce explicit retention policies (e.g., time-based or count-based), but they are out of scope for this RFC.
 - **API Integration**: 
   - `snapshot_with_options(SnapshotOptions::default().read_at(seq))` creates a snapshot view at the specified sequence number.
   - All read operations on the snapshot (`get`, `scan`, `get_row`, `scan_rows`) will see data as of that sequence number.
