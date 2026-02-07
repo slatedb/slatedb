@@ -317,16 +317,17 @@ while let Some(row_entry) = row_iter.next().await? {
 **Implementation Details**:
 
 - **Snapshot-Based Versioning**: Extend the existing `Snapshot` mechanism to support creating snapshots at specific sequence numbers via `SnapshotOptions::seqnum`.
-- **Error Handling**: If `seqnum < min_seq` (the minimum retained sequence number), return an error indicating the requested version is no longer available.
+- **Snapshot Visibility**: If `seqnum < min_seq` (the minimum retained sequence number) or if `seqnum` is in the future, the snapshot operation succeeds. However, read operations effectively use `min(seqnum, max_seq)` logic combined with visibility checks:
+  - If data has been compacted (`seq < min_seq`), it is not visible.
+  - If data has not yet been written (`seq > max_seq`), it is not visible.
+  - The snapshot acts as a view of the database at a specific `seqnum`. If no data satisfies the visibility condition, it simply returns empty results (`None` or empty iterator).
+  - **Note**: Users should not rely on specific sequence number snapshots for long-term data archival unless they explicitly manage version retention (e.g., by disabling compaction or setting appropriate retention periods).
 - **API Integration**: 
   - `snapshot_with_options(SnapshotOptions::default().read_at(seq))` creates a snapshot view at the specified sequence number.
   - All read operations on the snapshot (`get`, `scan`, `get_row`, `scan_rows`) will see data as of that sequence number.
 - **Compaction Impact**:
-  - Historical versions may be removed by compaction. If the requested `seqnum` is older than `min_seq`, an error is returned.
+  - Historical versions may be removed by compaction. If the requested `seqnum` is older than `min_seq`, query results will be empty.
   - Otherwise, the query will return the latest available version `v` such that `v.seq <= seqnum`.
-
-> [!IMPORTANT]
-> **Historical Version Availability**: Snapshots at specific sequence numbers do not guarantee that all historical versions are available. As SSTs are compacted, older versions are purged. If `seqnum < min_seq`, `snapshot_with_options` will return an error. Users should not rely on this for long-term data archival unless they manage version retention.
 
 <!-- TOC --><a name="impact-analysis"></a>
 ## Impact Analysis
@@ -349,7 +350,7 @@ while let Some(row_entry) = row_iter.next().await? {
 - `get_row()`, `get_row_with_options()`, `scan_rows()`, and `scan_rows_with_options()` are new APIs.
 - They return the existing `RowEntry` type, which is already public.
 - `snapshot_with_options()` is a new API that extends existing snapshot functionality.
-- `SnapshotOptions.seqnum` allows creating snapshots at specific sequence numbers, returning an error if `seqnum < min_seq`.
+- `SnapshotOptions.seqnum` allows creating snapshots at specific sequence numbers.
 - No impact on any storage formats (WAL/SST/Manifest).
 
 **Migration Path**:
