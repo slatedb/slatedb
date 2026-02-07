@@ -120,7 +120,7 @@ pub struct RowEntry {
 
 ```rust
 // Get complete row information
-let row = db.get_row(b"my_key").await?;
+let row = db.get_row(b"key").await?;
 if let Some(entry) = row {
     println!("Key: {:?}", entry.key);
     println!("Seq: {}, Created: {:?}, Expires: {:?}", 
@@ -280,21 +280,21 @@ pub fn snapshot_with_options(&self, options: SnapshotOptions) -> Result<DbSnapsh
 
 ```rust
 // Write and get version number
-let handle = db.put(b"my_key", b"value1").await?;
+let handle = db.put(b"key", b"value1").await?;
 let seq1 = handle.seqnum();
 
 // Subsequent update
-db.put(b"my_key", b"value2").await?;
+db.put(b"key", b"value2").await?;
 
 // Create snapshot at seq1
 let snapshot = db.snapshot_with_options(SnapshotOptions::default().read_at(seq1))?;
 
 // Current value
-let current_value = db.get(b"my_key").await?;
+let current_value = db.get(b"key").await?;
 assert_eq!(current_value, Some(Bytes::from("value2")));
 
 // Read old version via snapshot
-let old_value = snapshot.get(b"my_key").await?;
+let old_value = snapshot.get(b"key").await?;
 assert_eq!(old_value, Some(Bytes::from("value1")));
 ```
 
