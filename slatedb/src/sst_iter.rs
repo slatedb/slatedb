@@ -48,6 +48,7 @@ impl<B: BlockLike> DataBlockIterator<B> {
         }
     }
 
+    // PR: Do we really need this method? Can't we add when needed?
     #[allow(dead_code)] // Kept for potential future use
     fn new_ascending(block: B, sst_version: u16) -> Result<Self, SlateDBError> {
         Self::new(block, sst_version, IterationOrder::Ascending)
@@ -435,6 +436,7 @@ impl<'a> InternalSstIterator<'a> {
             return;
         };
 
+        // PR: Do we need to duplicate the logic? Only the lines I commented with //different seems different, can we unify and do a match just for those lines? Add comments on why we are doing it.
         match self.options.order {
             IterationOrder::Ascending => {
                 while self.fetch_tasks.len() < self.options.max_fetch_tasks
@@ -447,7 +449,7 @@ impl<'a> InternalSstIterator<'a> {
                     let table = self.view.table_as_ref().clone();
                     let table_store = self.table_store.clone();
                     let blocks_start = self.next_block_idx_to_fetch;
-                    let blocks_end = self.next_block_idx_to_fetch + blocks_to_fetch;
+                    let blocks_end = self.next_block_idx_to_fetch + blocks_to_fetch; // different
                     let index = index.clone();
                     let cache_blocks = self.options.cache_blocks;
                     self.fetch_tasks
@@ -461,7 +463,7 @@ impl<'a> InternalSstIterator<'a> {
                                 )
                                 .await
                         })));
-                    self.next_block_idx_to_fetch = blocks_end;
+                    self.next_block_idx_to_fetch = blocks_end; // different.
                 }
             }
             IterationOrder::Descending => {
@@ -575,8 +577,8 @@ impl<'a> InternalSstIterator<'a> {
 
     fn stop(&mut self) {
         if let Some(index) = self.index.as_ref() {
-            // For descending order, stopping means we've gone to the beginning
             // For ascending order, stopping means we've gone to the end
+            // For descending order, stopping means we've gone to the beginning
             match self.options.order {
                 IterationOrder::Ascending => {
                     let num_blocks = index.borrow().block_meta().len();
@@ -723,6 +725,7 @@ impl KeyValueIterator for InternalSstIterator<'_> {
             self.fetch_tasks.clear();
             self.next_block_idx_to_fetch = match self.options.order {
                 IterationOrder::Ascending => block_idx,
+                // PR: does spawn_fetch() handle the +1 case? explain, and then remove the comment.
                 IterationOrder::Descending => block_idx + 1, // For descending, set to block_idx + 1 so we fetch backwards from there
             };
 
@@ -2095,6 +2098,7 @@ mod tests {
     }
 
     /// Test: full iteration in descending order across multiple blocks
+    /// // PR: Does this test anything more than the previous test with 1000 keys? If not delete it.
     #[tokio::test]
     async fn test_full_descending_iteration() {
         let root_path = Path::from("");
