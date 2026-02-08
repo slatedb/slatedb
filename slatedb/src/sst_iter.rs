@@ -19,7 +19,7 @@ use crate::format::block::Block;
 use crate::format::sst::{SST_FORMAT_VERSION, SST_FORMAT_VERSION_V2};
 use crate::{
     block_iterator::BlockIterator,
-    iter::{init_optional_iterator, KeyValueIterator},
+    iter::{init_optional_iterator, IterationOrder, KeyValueIterator},
     partitioned_keyspace,
     tablestore::TableStore,
     types::RowEntry,
@@ -36,16 +36,20 @@ enum DataBlockIterator<B: BlockLike> {
 }
 
 impl<B: BlockLike> DataBlockIterator<B> {
-    fn new_ascending(block: B, sst_version: u16) -> Result<Self, SlateDBError> {
+    fn new(block: B, sst_version: u16, order: IterationOrder) -> Result<Self, SlateDBError> {
         match sst_version {
-            SST_FORMAT_VERSION => Ok(Self::V1(BlockIterator::new_ascending(block))),
-            SST_FORMAT_VERSION_V2 => Ok(Self::V2(BlockIteratorV2::new_ascending(block))),
+            SST_FORMAT_VERSION => Ok(Self::V1(BlockIterator::new(block, order))),
+            SST_FORMAT_VERSION_V2 => Ok(Self::V2(BlockIteratorV2::new(block, order))),
             _ => Err(SlateDBError::InvalidVersion {
                 format_name: "SST",
                 supported_versions: vec![SST_FORMAT_VERSION, SST_FORMAT_VERSION_V2],
                 actual_version: sst_version,
             }),
         }
+    }
+
+    fn new_ascending(block: B, sst_version: u16) -> Result<Self, SlateDBError> {
+        Self::new(block, sst_version, IterationOrder::Ascending)
     }
 
     async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
@@ -76,6 +80,7 @@ pub(crate) struct SstIteratorOptions {
     pub(crate) blocks_to_fetch: usize,
     pub(crate) cache_blocks: bool,
     pub(crate) eager_spawn: bool,
+    pub(crate) order: IterationOrder,
 }
 
 impl Default for SstIteratorOptions {
@@ -85,6 +90,7 @@ impl Default for SstIteratorOptions {
             blocks_to_fetch: 1,
             cache_blocks: true,
             eager_spawn: false,
+            order: IterationOrder::Ascending,
         }
     }
 }
@@ -468,7 +474,7 @@ impl<'a> InternalSstIterator<'a> {
                     }
                     FetchTask::Finished(blocks) => {
                         if let Some(block) = blocks.pop_front() {
-                            return Ok(Some(DataBlockIterator::new_ascending(block, sst_version)?));
+                            return Ok(Some(DataBlockIterator::new(block, sst_version, self.options.order)?));
                         } else {
                             self.fetch_tasks.pop_front();
                         }
@@ -1434,6 +1440,7 @@ mod tests {
                 blocks_to_fetch: 256,
                 cache_blocks: true,
                 eager_spawn: false,
+                order: IterationOrder::Ascending,
             },
         )
         .await
@@ -1449,6 +1456,7 @@ mod tests {
                 blocks_to_fetch: 1,
                 cache_blocks: true,
                 eager_spawn: false,
+                order: IterationOrder::Ascending,
             },
         )
         .await

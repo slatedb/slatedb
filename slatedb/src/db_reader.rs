@@ -13,6 +13,7 @@ use crate::oracle::DbReaderOracle;
 use crate::rand::DbRand;
 use crate::reader::{DbStateReader, Reader};
 use crate::sst_iter::SstIteratorOptions;
+use crate::iter::IterationOrder;
 use crate::stats::StatRegistry;
 use crate::store_provider::{DefaultStoreProvider, StoreProvider};
 use crate::tablestore::TableStore;
@@ -401,6 +402,7 @@ impl DbReaderInner {
             blocks_to_fetch: 256,
             cache_blocks: true,
             eager_spawn: true,
+            order: IterationOrder::Ascending,
         };
 
         let replay_options = WalReplayOptions {

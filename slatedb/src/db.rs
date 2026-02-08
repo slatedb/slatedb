@@ -64,6 +64,7 @@ use crate::paths::PathResolver;
 use crate::rand::DbRand;
 use crate::reader::Reader;
 use crate::sst_iter::SstIteratorOptions;
+use crate::iter::IterationOrder;
 use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
 use crate::transaction_manager::TransactionManager;
@@ -489,6 +490,7 @@ impl DbInner {
             blocks_to_fetch: 256,
             cache_blocks: false,
             eager_spawn: true,
+            order: IterationOrder::Ascending,
         };
 
         let replay_options = WalReplayOptions {
