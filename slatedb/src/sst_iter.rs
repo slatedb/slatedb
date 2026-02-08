@@ -554,8 +554,17 @@ impl<'a> InternalSstIterator<'a> {
 
     fn stop(&mut self) {
         if let Some(index) = self.index.as_ref() {
-            let num_blocks = index.borrow().block_meta().len();
-            self.next_block_idx_to_fetch = num_blocks;
+            // For descending order, stopping means we've gone to the beginning
+            // For ascending order, stopping means we've gone to the end
+            match self.options.order {
+                IterationOrder::Ascending => {
+                    let num_blocks = index.borrow().block_meta().len();
+                    self.next_block_idx_to_fetch = num_blocks;
+                }
+                IterationOrder::Descending => {
+                    self.next_block_idx_to_fetch = 0;
+                }
+            }
         }
         self.state.stop();
     }
@@ -653,9 +662,26 @@ impl KeyValueIterator for InternalSstIterator<'_> {
                 .as_ref()
                 .expect("metadata must be initialized")
                 .clone();
-            let block_idx =
-                Self::first_block_with_data_including_or_after_key(&index.borrow(), next_key);
-            if block_idx < self.next_block_idx_to_fetch {
+            
+            // For descending order, find the last block with the key
+            // For ascending order, find the first block with or after the key
+            let block_idx = match self.options.order {
+                IterationOrder::Ascending => {
+                    Self::first_block_with_data_including_or_after_key(&index.borrow(), next_key)
+                }
+                IterationOrder::Descending => {
+                    Self::last_block_with_data_including_key(&index.borrow(), next_key)
+                        .unwrap_or(self.block_idx_range.start)
+                }
+            };
+            
+            // Check if block is in the already-fetched direction
+            let already_fetched = match self.options.order {
+                IterationOrder::Ascending => block_idx < self.next_block_idx_to_fetch,
+                IterationOrder::Descending => block_idx >= self.next_block_idx_to_fetch,
+            };
+            
+            if already_fetched {
                 while let Some(mut block_iter) = self.next_iter(false).await? {
                     block_iter.seek(next_key).await?;
                     if !block_iter.is_empty() {
@@ -666,7 +692,11 @@ impl KeyValueIterator for InternalSstIterator<'_> {
             }
 
             self.fetch_tasks.clear();
-            self.next_block_idx_to_fetch = block_idx;
+            self.next_block_idx_to_fetch = match self.options.order {
+                IterationOrder::Ascending => block_idx,
+                IterationOrder::Descending => block_idx + 1, // For descending, set to block_idx + 1 so we fetch backwards from there
+            };
+            
             if let Some(mut block_iter) = self.next_iter(true).await? {
                 block_iter.seek(next_key).await?;
                 self.state.advance(block_iter);
