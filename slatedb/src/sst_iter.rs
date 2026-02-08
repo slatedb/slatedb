@@ -147,6 +147,15 @@ impl SstView<'_> {
             Unbounded => false,
         }
     }
+
+    /// Check whether a key is below the range of this view.
+    fn key_precedes(&self, key: &[u8]) -> bool {
+        match self.start_key() {
+            Included(start) => key < start,
+            Excluded(start) => key <= start,
+            Unbounded => false,
+        }
+    }
 }
 
 struct IteratorState {
@@ -540,9 +549,20 @@ impl<'a> InternalSstIterator<'a> {
         self.ensure_metadata_loaded().await?;
         if !self.state.is_finished() {
             if let Some(mut iter) = self.next_iter(true).await? {
-                match self.view.start_key() {
-                    Included(start_key) | Excluded(start_key) => iter.seek(start_key).await?,
-                    Unbounded => (),
+                // For descending order, seek to end_key; for ascending, seek to start_key
+                match self.options.order {
+                    IterationOrder::Ascending => {
+                        match self.view.start_key() {
+                            Included(start_key) | Excluded(start_key) => iter.seek(start_key).await?,
+                            Unbounded => (),
+                        }
+                    }
+                    IterationOrder::Descending => {
+                        match self.view.end_key() {
+                            Included(end_key) | Excluded(end_key) => iter.seek(end_key).await?,
+                            Unbounded => (),
+                        }
+                    }
                 }
                 self.state.advance(iter);
             } else {
@@ -628,8 +648,16 @@ impl KeyValueIterator for InternalSstIterator<'_> {
                 Some(kv) => {
                     if self.view.contains(&kv.key) {
                         return Ok(Some(kv));
-                    } else if self.view.key_exceeds(&kv.key) {
-                        self.stop()
+                    } else {
+                        // For ascending order, stop if key exceeds the range
+                        // For descending order, stop if key precedes the range
+                        let should_stop = match self.options.order {
+                            IterationOrder::Ascending => self.view.key_exceeds(&kv.key),
+                            IterationOrder::Descending => self.view.key_precedes(&kv.key),
+                        };
+                        if should_stop {
+                            self.stop()
+                        }
                     }
                 }
                 None => self.advance_block().await?,
@@ -2064,4 +2092,69 @@ mod tests {
         // then: should return None immediately
         assert!(iter.next().await.unwrap().is_none());
     }
+
+    /// Test: full iteration in descending order across multiple blocks
+    #[tokio::test]
+    async fn test_full_descending_iteration() {
+        let root_path = Path::from("");
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let format = SsTableFormat {
+            block_size: 128, // Small block size to ensure multiple blocks
+            min_filter_keys: 100,
+            ..SsTableFormat::default()
+        };
+        let table_store = Arc::new(TableStore::new(
+            ObjectStores::new(object_store, None),
+            format,
+            root_path.clone(),
+            None,
+        ));
+        
+        // Build an SST with enough data for multiple blocks
+        let mut builder = table_store.table_builder();
+        for i in 0..30 {
+            builder
+                .add_value(
+                    format!("key{:03}", i).as_bytes(),
+                    format!("value{:03}", i).as_bytes(),
+                    gen_attrs(i),
+                )
+                .await
+                .unwrap();
+        }
+        let encoded = builder.build().await.unwrap();
+        let id = SsTableId::Compacted(ulid::Ulid::new());
+        table_store.write_sst(&id, encoded, false).await.unwrap();
+        let sst_handle = table_store.open_sst(&id).await.unwrap();
+        
+        let index = table_store.read_index(&sst_handle, true).await.unwrap();
+        let num_blocks = index.borrow().block_meta().len();
+        assert!(num_blocks >= 2, "Test requires at least 2 blocks, got {}", num_blocks);
+        
+        // Full iteration in descending order
+        let sst_iter_options = SstIteratorOptions {
+            cache_blocks: true,
+            order: IterationOrder::Descending,
+            ..SstIteratorOptions::default()
+        };
+        let mut iter = SstIterator::new_owned_initialized(
+            ..,
+            sst_handle,
+            table_store.clone(),
+            sst_iter_options,
+        )
+        .await
+        .unwrap()
+        .expect("Expected Some(iter) but got None");
+        
+        // Should iterate backwards from key029 to key000
+        for i in (0..30).rev() {
+            let kv = iter.next().await.unwrap().unwrap();
+            assert_eq!(kv.key, format!("key{:03}", i).as_bytes());
+            assert_eq!(kv.value, format!("value{:03}", i).as_bytes());
+        }
+        
+        assert!(iter.next().await.unwrap().is_none());
+    }
 }
+
