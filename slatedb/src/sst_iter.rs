@@ -48,6 +48,7 @@ impl<B: BlockLike> DataBlockIterator<B> {
         }
     }
 
+    #[allow(dead_code)] // Kept for potential future use
     fn new_ascending(block: B, sst_version: u16) -> Result<Self, SlateDBError> {
         Self::new(block, sst_version, IterationOrder::Ascending)
     }
@@ -433,7 +434,7 @@ impl<'a> InternalSstIterator<'a> {
         let Some(index) = self.index.as_ref() else {
             return;
         };
-        
+
         match self.options.order {
             IterationOrder::Ascending => {
                 while self.fetch_tasks.len() < self.options.max_fetch_tasks
@@ -521,9 +522,13 @@ impl<'a> InternalSstIterator<'a> {
                             IterationOrder::Ascending => blocks.pop_front(),
                             IterationOrder::Descending => blocks.pop_back(),
                         };
-                        
+
                         if let Some(block) = block {
-                            return Ok(Some(DataBlockIterator::new(block, sst_version, self.options.order)?));
+                            return Ok(Some(DataBlockIterator::new(
+                                block,
+                                sst_version,
+                                self.options.order,
+                            )?));
                         } else {
                             self.fetch_tasks.pop_front();
                         }
@@ -551,18 +556,14 @@ impl<'a> InternalSstIterator<'a> {
             if let Some(mut iter) = self.next_iter(true).await? {
                 // For descending order, seek to end_key; for ascending, seek to start_key
                 match self.options.order {
-                    IterationOrder::Ascending => {
-                        match self.view.start_key() {
-                            Included(start_key) | Excluded(start_key) => iter.seek(start_key).await?,
-                            Unbounded => (),
-                        }
-                    }
-                    IterationOrder::Descending => {
-                        match self.view.end_key() {
-                            Included(end_key) | Excluded(end_key) => iter.seek(end_key).await?,
-                            Unbounded => (),
-                        }
-                    }
+                    IterationOrder::Ascending => match self.view.start_key() {
+                        Included(start_key) | Excluded(start_key) => iter.seek(start_key).await?,
+                        Unbounded => (),
+                    },
+                    IterationOrder::Descending => match self.view.end_key() {
+                        Included(end_key) | Excluded(end_key) => iter.seek(end_key).await?,
+                        Unbounded => (),
+                    },
                 }
                 self.state.advance(iter);
             } else {
@@ -690,7 +691,7 @@ impl KeyValueIterator for InternalSstIterator<'_> {
                 .as_ref()
                 .expect("metadata must be initialized")
                 .clone();
-            
+
             // For descending order, find the last block with the key
             // For ascending order, find the first block with or after the key
             let block_idx = match self.options.order {
@@ -702,13 +703,13 @@ impl KeyValueIterator for InternalSstIterator<'_> {
                         .unwrap_or(self.block_idx_range.start)
                 }
             };
-            
+
             // Check if block is in the already-fetched direction
             let already_fetched = match self.options.order {
                 IterationOrder::Ascending => block_idx < self.next_block_idx_to_fetch,
                 IterationOrder::Descending => block_idx >= self.next_block_idx_to_fetch,
             };
-            
+
             if already_fetched {
                 while let Some(mut block_iter) = self.next_iter(false).await? {
                     block_iter.seek(next_key).await?;
@@ -724,7 +725,7 @@ impl KeyValueIterator for InternalSstIterator<'_> {
                 IterationOrder::Ascending => block_idx,
                 IterationOrder::Descending => block_idx + 1, // For descending, set to block_idx + 1 so we fetch backwards from there
             };
-            
+
             if let Some(mut block_iter) = self.next_iter(true).await? {
                 block_iter.seek(next_key).await?;
                 self.state.advance(block_iter);
@@ -1090,7 +1091,7 @@ mod tests {
         .await
         .unwrap()
         .expect("Expected Some(iter) but got None");
-        
+
         // Expected keys based on order
         let expected_keys = match order {
             IterationOrder::Ascending => vec![b"key1", b"key2", b"key3", b"key4"],
@@ -1100,7 +1101,7 @@ mod tests {
             IterationOrder::Ascending => vec![b"value1", b"value2", b"value3", b"value4"],
             IterationOrder::Descending => vec![b"value4", b"value3", b"value2", b"value1"],
         };
-        
+
         for (expected_key, expected_value) in expected_keys.iter().zip(expected_values.iter()) {
             let kv = iter.next().await.unwrap().unwrap();
             assert_eq!(kv.key, expected_key.as_slice());
@@ -1395,7 +1396,7 @@ mod tests {
         .await
         .unwrap()
         .expect("Expected Some(iter) but got None");
-        
+
         match order {
             IterationOrder::Ascending => {
                 for i in 0..1000 {
@@ -2109,7 +2110,7 @@ mod tests {
             root_path.clone(),
             None,
         ));
-        
+
         // Build an SST with enough data for multiple blocks
         let mut builder = table_store.table_builder();
         for i in 0..30 {
@@ -2126,11 +2127,15 @@ mod tests {
         let id = SsTableId::Compacted(ulid::Ulid::new());
         table_store.write_sst(&id, encoded, false).await.unwrap();
         let sst_handle = table_store.open_sst(&id).await.unwrap();
-        
+
         let index = table_store.read_index(&sst_handle, true).await.unwrap();
         let num_blocks = index.borrow().block_meta().len();
-        assert!(num_blocks >= 2, "Test requires at least 2 blocks, got {}", num_blocks);
-        
+        assert!(
+            num_blocks >= 2,
+            "Test requires at least 2 blocks, got {}",
+            num_blocks
+        );
+
         // Full iteration in descending order
         let sst_iter_options = SstIteratorOptions {
             cache_blocks: true,
@@ -2146,15 +2151,14 @@ mod tests {
         .await
         .unwrap()
         .expect("Expected Some(iter) but got None");
-        
+
         // Should iterate backwards from key029 to key000
         for i in (0..30).rev() {
             let kv = iter.next().await.unwrap().unwrap();
             assert_eq!(kv.key, format!("key{:03}", i).as_bytes());
             assert_eq!(kv.value, format!("value{:03}", i).as_bytes());
         }
-        
+
         assert!(iter.next().await.unwrap().is_none());
     }
 }
-

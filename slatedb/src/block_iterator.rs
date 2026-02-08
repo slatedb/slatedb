@@ -111,6 +111,7 @@ impl<B: BlockLike> BlockIterator<B> {
         }
     }
 
+    #[allow(dead_code)] // Used in other modules
     pub(crate) fn new_ascending(block: B) -> Self {
         Self::new(block, Ascending)
     }
