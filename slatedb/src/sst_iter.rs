@@ -424,31 +424,65 @@ impl<'a> InternalSstIterator<'a> {
         let Some(index) = self.index.as_ref() else {
             return;
         };
-        while self.fetch_tasks.len() < self.options.max_fetch_tasks
-            && self.block_idx_range.contains(&self.next_block_idx_to_fetch)
-        {
-            let blocks_to_fetch = min(
-                self.options.blocks_to_fetch,
-                self.block_idx_range.end - self.next_block_idx_to_fetch,
-            );
-            let table = self.view.table_as_ref().clone();
-            let table_store = self.table_store.clone();
-            let blocks_start = self.next_block_idx_to_fetch;
-            let blocks_end = self.next_block_idx_to_fetch + blocks_to_fetch;
-            let index = index.clone();
-            let cache_blocks = self.options.cache_blocks;
-            self.fetch_tasks
-                .push_back(FetchTask::InFlight(tokio::spawn(async move {
-                    table_store
-                        .read_blocks_using_index(
-                            &table,
-                            index,
-                            blocks_start..blocks_end,
-                            cache_blocks,
-                        )
-                        .await
-                })));
-            self.next_block_idx_to_fetch = blocks_end;
+        
+        match self.options.order {
+            IterationOrder::Ascending => {
+                while self.fetch_tasks.len() < self.options.max_fetch_tasks
+                    && self.block_idx_range.contains(&self.next_block_idx_to_fetch)
+                {
+                    let blocks_to_fetch = min(
+                        self.options.blocks_to_fetch,
+                        self.block_idx_range.end - self.next_block_idx_to_fetch,
+                    );
+                    let table = self.view.table_as_ref().clone();
+                    let table_store = self.table_store.clone();
+                    let blocks_start = self.next_block_idx_to_fetch;
+                    let blocks_end = self.next_block_idx_to_fetch + blocks_to_fetch;
+                    let index = index.clone();
+                    let cache_blocks = self.options.cache_blocks;
+                    self.fetch_tasks
+                        .push_back(FetchTask::InFlight(tokio::spawn(async move {
+                            table_store
+                                .read_blocks_using_index(
+                                    &table,
+                                    index,
+                                    blocks_start..blocks_end,
+                                    cache_blocks,
+                                )
+                                .await
+                        })));
+                    self.next_block_idx_to_fetch = blocks_end;
+                }
+            }
+            IterationOrder::Descending => {
+                // For descending, fetch blocks going backwards
+                while self.fetch_tasks.len() < self.options.max_fetch_tasks
+                    && self.next_block_idx_to_fetch > self.block_idx_range.start
+                {
+                    let blocks_to_fetch = min(
+                        self.options.blocks_to_fetch,
+                        self.next_block_idx_to_fetch - self.block_idx_range.start,
+                    );
+                    let table = self.view.table_as_ref().clone();
+                    let table_store = self.table_store.clone();
+                    let blocks_end = self.next_block_idx_to_fetch;
+                    let blocks_start = blocks_end - blocks_to_fetch;
+                    let index = index.clone();
+                    let cache_blocks = self.options.cache_blocks;
+                    self.fetch_tasks
+                        .push_back(FetchTask::InFlight(tokio::spawn(async move {
+                            table_store
+                                .read_blocks_using_index(
+                                    &table,
+                                    index,
+                                    blocks_start..blocks_end,
+                                    cache_blocks,
+                                )
+                                .await
+                        })));
+                    self.next_block_idx_to_fetch = blocks_start;
+                }
+            }
         }
     }
 
@@ -473,7 +507,13 @@ impl<'a> InternalSstIterator<'a> {
                         *fetch_task = FetchTask::Finished(blocks);
                     }
                     FetchTask::Finished(blocks) => {
-                        if let Some(block) = blocks.pop_front() {
+                        // For descending order, pop from back; for ascending, pop from front
+                        let block = match self.options.order {
+                            IterationOrder::Ascending => blocks.pop_front(),
+                            IterationOrder::Descending => blocks.pop_back(),
+                        };
+                        
+                        if let Some(block) = block {
                             return Ok(Some(DataBlockIterator::new(block, sst_version, self.options.order)?));
                         } else {
                             self.fetch_tasks.pop_front();
@@ -482,7 +522,15 @@ impl<'a> InternalSstIterator<'a> {
                 }
             } else {
                 assert!(self.fetch_tasks.is_empty());
-                assert_eq!(self.next_block_idx_to_fetch, self.block_idx_range.end);
+                // For descending order, check that we've gone back to start
+                match self.options.order {
+                    IterationOrder::Ascending => {
+                        assert_eq!(self.next_block_idx_to_fetch, self.block_idx_range.end);
+                    }
+                    IterationOrder::Descending => {
+                        assert_eq!(self.next_block_idx_to_fetch, self.block_idx_range.start);
+                    }
+                }
                 return Ok(None);
             }
         }
@@ -533,7 +581,11 @@ impl<'a> InternalSstIterator<'a> {
             let block_idx_range =
                 InternalSstIterator::blocks_covering_view(&index.borrow(), &self.view);
             self.block_idx_range = block_idx_range.clone();
-            self.next_block_idx_to_fetch = block_idx_range.start;
+            // For descending order, start from the end and work backwards
+            self.next_block_idx_to_fetch = match self.options.order {
+                IterationOrder::Ascending => block_idx_range.start,
+                IterationOrder::Descending => block_idx_range.end,
+            };
             self.index = Some(index);
             if self.options.eager_spawn {
                 self.spawn_fetches();
