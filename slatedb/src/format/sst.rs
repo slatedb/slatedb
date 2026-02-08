@@ -26,6 +26,7 @@ const NUM_FOOTER_BYTES_LONG: u64 = NUM_FOOTER_BYTES as u64;
 const SEQNUM_SIZE: usize = size_of::<u64>();
 pub(crate) const SST_FORMAT_VERSION: u16 = 1;
 pub(crate) const SST_FORMAT_VERSION_V2: u16 = 2;
+pub(crate) const SST_FORMAT_VERSION_LATEST: u16 = SST_FORMAT_VERSION_V2;
 
 fn is_supported_version(version: u16) -> bool {
     matches!(version, SST_FORMAT_VERSION | SST_FORMAT_VERSION_V2)
@@ -44,6 +45,10 @@ impl BlockBuilder {
 
     pub(crate) fn new_v2(block_size: usize) -> Self {
         Self::V2(BlockBuilderV2::new(block_size))
+    }
+
+    pub(crate) fn new_latest(block_size: usize) -> Self {
+        Self::new_v2(block_size)
     }
 
     #[cfg(test)]

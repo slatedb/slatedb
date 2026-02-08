@@ -176,7 +176,6 @@ pub struct DbBuilder<P: Into<Path>> {
     block_transformer: Option<Arc<dyn BlockTransformer>>,
     #[cfg(feature = "compaction_filters")]
     compaction_filter_supplier: Option<Arc<dyn CompactionFilterSupplier>>,
-    block_format: Option<crate::sst_builder::BlockFormat>,
 }
 
 impl<P: Into<Path>> DbBuilder<P> {
@@ -199,16 +198,7 @@ impl<P: Into<Path>> DbBuilder<P> {
             block_transformer: None,
             #[cfg(feature = "compaction_filters")]
             compaction_filter_supplier: None,
-            block_format: None,
         }
-    }
-
-    /// Sets the block format for SST files. This is only available in tests
-    /// to verify backward compatibility between V1 and V2 formats.
-    #[cfg(test)]
-    pub fn with_block_format(mut self, block_format: crate::sst_builder::BlockFormat) -> Self {
-        self.block_format = Some(block_format);
-        self
     }
 
     /// Sets the database settings.
@@ -415,13 +405,23 @@ impl<P: Into<Path>> DbBuilder<P> {
 
         // Setup the components
         let stat_registry = Arc::new(StatRegistry::new());
+        let block_format = {
+            #[cfg(test)]
+            {
+                self.settings.block_format
+            }
+            #[cfg(not(test))]
+            {
+                None
+            }
+        };
         let sst_format = SsTableFormat {
             min_filter_keys: self.settings.min_filter_keys,
             filter_bits_per_key: self.settings.filter_bits_per_key,
             compression_codec: self.settings.compression_codec,
             block_size: self.sst_block_size.unwrap_or_default().as_bytes(),
             block_transformer: self.block_transformer.clone(),
-            block_format: self.block_format,
+            block_format,
             ..SsTableFormat::default()
         };
 

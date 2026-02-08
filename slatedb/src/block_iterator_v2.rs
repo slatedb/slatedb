@@ -1372,4 +1372,149 @@ mod tests {
         let kv = iter.next_entry().await.unwrap().unwrap();
         assert_eq!(kv.key.as_ref(), b"a");
     }
+
+    // ==================== Property-Based Tests ====================
+
+    mod proptests {
+        use super::*;
+        use proptest::prelude::*;
+        use proptest::test_runner::TestCaseError;
+
+        /// Strategy that generates a sorted list of (key, seq) pairs where keys
+        /// may have duplicates. Each key is 1-4 lowercase letters, and there can
+        /// be 1-36 copies of any given key (with increasing seq numbers). Using
+        /// up to 36 copies ensures duplicate keys can span more than 2 restart
+        /// points even with the default restart interval of 16.
+        fn sorted_entries_strategy() -> impl Strategy<Value = Vec<(Vec<u8>, u64)>> {
+            prop::collection::vec(
+                (prop::collection::vec(b'a'..=b'z', 1..=4), 1..=36usize),
+                2..=10,
+            )
+            .prop_map(|key_specs| {
+                let mut entries = Vec::new();
+                let mut seq = 0u64;
+                let mut key_specs = key_specs;
+                key_specs.sort_by(|a, b| a.0.cmp(&b.0));
+                key_specs.dedup_by(|a, b| a.0 == b.0);
+                for (key, count) in key_specs {
+                    for _ in 0..count {
+                        entries.push((key.clone(), seq));
+                        seq += 1;
+                    }
+                }
+                entries
+            })
+        }
+
+        fn build_block_from_entries(entries: &[(Vec<u8>, u64)], restart_interval: usize) -> Block {
+            let mut builder = BlockBuilder::new_v2_with_restart_interval(65536, restart_interval);
+            for (key, seq) in entries {
+                let _ = builder.add(make_entry(key, b"v", *seq));
+            }
+            builder.build().expect("build failed")
+        }
+
+        fn distinct_keys(entries: &[(Vec<u8>, u64)]) -> Vec<Vec<u8>> {
+            let mut keys: Vec<Vec<u8>> = entries.iter().map(|(k, _)| k.clone()).collect();
+            keys.dedup();
+            keys
+        }
+
+        proptest! {
+            #[test]
+            fn should_seek_and_iterate_ascending(
+                entries in sorted_entries_strategy(),
+                restart_interval in 2..=16usize,
+            ) {
+                let rt = tokio::runtime::Runtime::new().unwrap();
+                let result: Result<(), TestCaseError> = rt.block_on(async {
+                    let block = build_block_from_entries(&entries, restart_interval);
+
+                    for seek_key in &distinct_keys(&entries) {
+                        let mut iter = BlockIteratorV2::new_ascending(&block);
+                        iter.seek(seek_key).await.unwrap();
+
+                        // Collect all expected entries at or after the seek key
+                        let expected: Vec<_> = entries.iter()
+                            .filter(|(k, _)| k >= seek_key)
+                            .collect();
+
+                        // First entry should be the first occurrence of the seek key
+                        let first = iter.next_entry().await.unwrap();
+                        prop_assert!(first.is_some(), "seek to {:?} should find an entry", seek_key);
+                        let first = first.unwrap();
+                        prop_assert_eq!(
+                            first.key.as_ref(), expected[0].0.as_slice(),
+                            "first key mismatch after seek to {:?}", seek_key
+                        );
+                        prop_assert_eq!(
+                            first.seq, expected[0].1,
+                            "first seq mismatch after seek to {:?}", seek_key
+                        );
+
+                        // Remaining entries should match in order
+                        for (expected_key, expected_seq) in &expected[1..] {
+                            let entry = iter.next_entry().await.unwrap();
+                            prop_assert!(entry.is_some());
+                            let entry = entry.unwrap();
+                            prop_assert_eq!(entry.key.as_ref(), expected_key.as_slice());
+                            prop_assert_eq!(entry.seq, *expected_seq);
+                        }
+
+                        prop_assert!(iter.next_entry().await.unwrap().is_none());
+                    }
+                    Ok(())
+                });
+                result?;
+            }
+
+            #[test]
+            fn should_seek_and_iterate_descending(
+                entries in sorted_entries_strategy(),
+                restart_interval in 2..=16usize,
+            ) {
+                let rt = tokio::runtime::Runtime::new().unwrap();
+                let result: Result<(), TestCaseError> = rt.block_on(async {
+                    let block = build_block_from_entries(&entries, restart_interval);
+
+                    for seek_key in &distinct_keys(&entries) {
+                        let mut iter = DescendingBlockIteratorV2::new(&block);
+                        iter.seek(seek_key).await.unwrap();
+
+                        // Collect all expected entries at or before the seek key, reversed
+                        let expected: Vec<_> = entries.iter()
+                            .filter(|(k, _)| k <= seek_key)
+                            .rev()
+                            .collect();
+
+                        // First entry should be the last occurrence of the seek key
+                        let first = iter.next_entry().await.unwrap();
+                        prop_assert!(first.is_some(), "descending seek to {:?} should find an entry", seek_key);
+                        let first = first.unwrap();
+                        prop_assert_eq!(
+                            first.key.as_ref(), expected[0].0.as_slice(),
+                            "first key mismatch after descending seek to {:?}", seek_key
+                        );
+                        prop_assert_eq!(
+                            first.seq, expected[0].1,
+                            "first seq mismatch after descending seek to {:?}", seek_key
+                        );
+
+                        // Remaining entries should match in reverse order
+                        for (expected_key, expected_seq) in &expected[1..] {
+                            let entry = iter.next_entry().await.unwrap();
+                            prop_assert!(entry.is_some());
+                            let entry = entry.unwrap();
+                            prop_assert_eq!(entry.key.as_ref(), expected_key.as_slice());
+                            prop_assert_eq!(entry.seq, *expected_seq);
+                        }
+
+                        prop_assert!(iter.next_entry().await.unwrap().is_none());
+                    }
+                    Ok(())
+                });
+                result?;
+            }
+        }
+    }
 }

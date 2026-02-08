@@ -61,7 +61,8 @@ use crate::filter::BloomFilterBuilder;
 use crate::flatbuffer_types::{BlockMeta, BlockMetaArgs};
 use crate::format::sst::{
     BlockBuilder, EncodedSsTable, EncodedSsTableBlock, EncodedSsTableBlockBuilder,
-    EncodedSsTableFooterBuilder, SsTableFormat, SST_FORMAT_VERSION, SST_FORMAT_VERSION_V2,
+    EncodedSsTableFooterBuilder, SsTableFormat, SST_FORMAT_VERSION, SST_FORMAT_VERSION_LATEST,
+    SST_FORMAT_VERSION_V2,
 };
 use crate::types::RowEntry;
 use crate::utils::compute_index_key;
@@ -152,8 +153,8 @@ impl EncodedSsTableBuilder<'_> {
             current_block_max_key: None,
             block_size,
             block_format: BlockFormat::V2,
-            builder: BlockBuilder::new_v2(block_size),
-            sst_format_version: SST_FORMAT_VERSION_V2,
+            builder: BlockBuilder::new_latest(block_size),
+            sst_format_version: SST_FORMAT_VERSION_LATEST,
             min_filter_keys,
             num_keys: 0,
             filter_builder: BloomFilterBuilder::new(filter_bits_per_key),
@@ -375,6 +376,7 @@ mod tests {
 
     use super::*;
     use crate::blob::ReadOnlyBlob;
+    use crate::block_iterator::BlockLike;
     use crate::block_iterator_v2::BlockIteratorV2;
     use crate::bytes_range::BytesRange;
     use crate::db_state::SsTableId;
@@ -1256,7 +1258,9 @@ mod tests {
 
     #[tokio::test]
     async fn should_read_v1_sst_written_with_explicit_config() {
-        // given: an SST built with explicit V1 configuration
+        // given: an SST built with explicit V1 configuration and enough entries
+        // to distinguish V1 (per-entry offsets) from V2 (restart point offsets)
+        let num_entries = 20;
         let root_path = Path::from("");
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let format = SsTableFormat::default();
@@ -1269,19 +1273,38 @@ mod tests {
         let mut builder = table_store
             .table_builder()
             .with_block_format(BlockFormat::V1);
-        builder
-            .add_value(b"key1", b"value1", gen_attrs(1))
-            .await
-            .unwrap();
-        builder
-            .add_value(b"key2", b"value2", gen_attrs(2))
-            .await
-            .unwrap();
+        let mut expected = Vec::new();
+        for i in 0..num_entries {
+            let key = format!("key_{:03}", i);
+            let value = format!("value_{}", i);
+            builder
+                .add_value(key.as_bytes(), value.as_bytes(), gen_attrs(i as i64))
+                .await
+                .unwrap();
+            expected.push(
+                RowEntry::new_value(key.as_bytes(), value.as_bytes(), 0).with_create_ts(i as i64),
+            );
+        }
         let encoded = builder.build().await.unwrap();
         let sst_handle = table_store
             .write_sst(&SsTableId::Wal(0), encoded, false)
             .await
             .unwrap();
+
+        // then: the stored SST should be V1 format
+        let version = table_store.read_sst_version(&sst_handle).await.unwrap();
+        assert_eq!(version, SST_FORMAT_VERSION);
+
+        // then: V1 blocks should have one offset per entry
+        let blocks = table_store.read_blocks(&sst_handle, 0..1).await.unwrap();
+        let block = &blocks[0];
+        // V1: offsets.len() == number of entries in the block, which should be
+        // much larger than 1 (unlike V2 which would have ~1 restart point)
+        assert_eq!(
+            block.offsets().len(),
+            num_entries,
+            "V1 blocks should have one offset per entry"
+        );
 
         // when: reading the SST back
         let mut iter = SstIterator::new_owned_initialized(
@@ -1295,19 +1318,14 @@ mod tests {
         .unwrap();
 
         // then: all data should be readable
-        assert_iterator(
-            &mut iter,
-            vec![
-                RowEntry::new_value(b"key1", b"value1", 0).with_create_ts(1),
-                RowEntry::new_value(b"key2", b"value2", 0).with_create_ts(2),
-            ],
-        )
-        .await;
+        assert_iterator(&mut iter, expected).await;
     }
 
     #[tokio::test]
     async fn should_read_v2_sst_written_with_default() {
-        // given: an SST built with default settings (V2)
+        // given: an SST built with default settings (V2) and enough entries
+        // to distinguish V2 (restart point offsets) from V1 (per-entry offsets)
+        let num_entries = 20;
         let root_path = Path::from("");
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let format = SsTableFormat::default();
@@ -1318,19 +1336,38 @@ mod tests {
             None,
         );
         let mut builder = table_store.table_builder();
-        builder
-            .add_value(b"key1", b"value1", gen_attrs(1))
-            .await
-            .unwrap();
-        builder
-            .add_value(b"key2", b"value2", gen_attrs(2))
-            .await
-            .unwrap();
+        let mut expected = Vec::new();
+        for i in 0..num_entries {
+            let key = format!("key_{:03}", i);
+            let value = format!("value_{}", i);
+            builder
+                .add_value(key.as_bytes(), value.as_bytes(), gen_attrs(i as i64))
+                .await
+                .unwrap();
+            expected.push(
+                RowEntry::new_value(key.as_bytes(), value.as_bytes(), 0).with_create_ts(i as i64),
+            );
+        }
         let encoded = builder.build().await.unwrap();
         let sst_handle = table_store
             .write_sst(&SsTableId::Wal(1), encoded, false)
             .await
             .unwrap();
+
+        // then: the stored SST should be V2 format
+        let version = table_store.read_sst_version(&sst_handle).await.unwrap();
+        assert_eq!(version, SST_FORMAT_VERSION_LATEST);
+
+        // then: V2 blocks should have fewer offsets than entries (restart points only)
+        let blocks = table_store.read_blocks(&sst_handle, 0..1).await.unwrap();
+        let block = &blocks[0];
+        // V2 default restart interval is 16, so 20 entries -> 2 restart points
+        assert!(
+            block.offsets().len() < num_entries,
+            "V2 blocks should have fewer offsets (restart points) than entries: {} offsets vs {} entries",
+            block.offsets().len(),
+            num_entries,
+        );
 
         // when: reading the SST back
         let mut iter = SstIterator::new_owned_initialized(
@@ -1344,13 +1381,6 @@ mod tests {
         .unwrap();
 
         // then: all data should be readable
-        assert_iterator(
-            &mut iter,
-            vec![
-                RowEntry::new_value(b"key1", b"value1", 0).with_create_ts(1),
-                RowEntry::new_value(b"key2", b"value2", 0).with_create_ts(2),
-            ],
-        )
-        .await;
+        assert_iterator(&mut iter, expected).await;
     }
 }
