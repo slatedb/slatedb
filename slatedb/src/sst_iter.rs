@@ -48,12 +48,6 @@ impl<B: BlockLike> DataBlockIterator<B> {
         }
     }
 
-    // PR: Do we really need this method? Can't we add when needed?
-    #[allow(dead_code)] // Kept for potential future use
-    fn new_ascending(block: B, sst_version: u16) -> Result<Self, SlateDBError> {
-        Self::new(block, sst_version, IterationOrder::Ascending)
-    }
-
     async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
         match self {
             Self::V1(iter) => iter.next_entry().await,
@@ -431,14 +425,22 @@ impl<'a> InternalSstIterator<'a> {
         start_block_id..end_block_id_exclusive
     }
 
+    /// Spawns fetch tasks for blocks based on iteration order.
+    ///
+    /// For ascending order: Fetches blocks forward from `next_block_idx_to_fetch`, incrementing it
+    /// as blocks are scheduled. Stops when reaching `block_idx_range.end`.
+    ///
+    /// For descending order: Fetches blocks backward from `next_block_idx_to_fetch - 1`,
+    /// decrementing `next_block_idx_to_fetch` as blocks are scheduled. Stops when reaching
+    /// `block_idx_range.start`.
     fn spawn_fetches(&mut self) {
         let Some(index) = self.index.as_ref() else {
             return;
         };
 
-        // PR: Do we need to duplicate the logic? Only the lines I commented with //different seems different, can we unify and do a match just for those lines? Add comments on why we are doing it.
         match self.options.order {
             IterationOrder::Ascending => {
+                // Fetch blocks forward: next_block_idx_to_fetch advances toward block_idx_range.end
                 while self.fetch_tasks.len() < self.options.max_fetch_tasks
                     && self.block_idx_range.contains(&self.next_block_idx_to_fetch)
                 {
@@ -449,7 +451,7 @@ impl<'a> InternalSstIterator<'a> {
                     let table = self.view.table_as_ref().clone();
                     let table_store = self.table_store.clone();
                     let blocks_start = self.next_block_idx_to_fetch;
-                    let blocks_end = self.next_block_idx_to_fetch + blocks_to_fetch; // different
+                    let blocks_end = self.next_block_idx_to_fetch + blocks_to_fetch;
                     let index = index.clone();
                     let cache_blocks = self.options.cache_blocks;
                     self.fetch_tasks
@@ -463,11 +465,11 @@ impl<'a> InternalSstIterator<'a> {
                                 )
                                 .await
                         })));
-                    self.next_block_idx_to_fetch = blocks_end; // different.
+                    self.next_block_idx_to_fetch = blocks_end;
                 }
             }
             IterationOrder::Descending => {
-                // For descending, fetch blocks going backwards
+                // Fetch blocks backward: next_block_idx_to_fetch retreats toward block_idx_range.start
                 while self.fetch_tasks.len() < self.options.max_fetch_tasks
                     && self.next_block_idx_to_fetch > self.block_idx_range.start
                 {
@@ -556,16 +558,21 @@ impl<'a> InternalSstIterator<'a> {
         self.ensure_metadata_loaded().await?;
         if !self.state.is_finished() {
             if let Some(mut iter) = self.next_iter(true).await? {
-                // For descending order, seek to end_key; for ascending, seek to start_key
-                match self.options.order {
-                    IterationOrder::Ascending => match self.view.start_key() {
-                        Included(start_key) | Excluded(start_key) => iter.seek(start_key).await?,
-                        Unbounded => (),
-                    },
-                    IterationOrder::Descending => match self.view.end_key() {
-                        Included(end_key) | Excluded(end_key) => iter.seek(end_key).await?,
-                        Unbounded => (),
-                    },
+                // Only seek on the first block to position at the range boundary.
+                // For subsequent blocks, iterate through the entire block in the specified order.
+                if !self.state.is_initialized() {
+                    match self.options.order {
+                        IterationOrder::Ascending => match self.view.start_key() {
+                            Included(start_key) | Excluded(start_key) => {
+                                iter.seek(start_key).await?
+                            }
+                            Unbounded => (),
+                        },
+                        IterationOrder::Descending => match self.view.end_key() {
+                            Included(end_key) | Excluded(end_key) => iter.seek(end_key).await?,
+                            Unbounded => (),
+                        },
+                    }
                 }
                 self.state.advance(iter);
             } else {
@@ -725,8 +732,7 @@ impl KeyValueIterator for InternalSstIterator<'_> {
             self.fetch_tasks.clear();
             self.next_block_idx_to_fetch = match self.options.order {
                 IterationOrder::Ascending => block_idx,
-                // PR: does spawn_fetch() handle the +1 case? explain, and then remove the comment.
-                IterationOrder::Descending => block_idx + 1, // For descending, set to block_idx + 1 so we fetch backwards from there
+                IterationOrder::Descending => block_idx + 1,
             };
 
             if let Some(mut block_iter) = self.next_iter(true).await? {
@@ -2097,8 +2103,117 @@ mod tests {
         assert!(iter.next().await.unwrap().is_none());
     }
 
-    /// Test: full iteration in descending order across multiple blocks
-    /// // PR: Does this test anything more than the previous test with 1000 keys? If not delete it.
+    /// Test: iteration with both start and end bounds where the keys are in the middle of blocks
+    /// and neither the first nor last block of the SST is included in the range.
+    #[tokio::test]
+    async fn test_range_iteration_middle_blocks_ascending() {
+        test_range_iteration_middle_blocks_with_order(IterationOrder::Ascending).await;
+    }
+
+    #[tokio::test]
+    async fn test_range_iteration_middle_blocks_descending() {
+        test_range_iteration_middle_blocks_with_order(IterationOrder::Descending).await;
+    }
+
+    async fn test_range_iteration_middle_blocks_with_order(order: IterationOrder) {
+        let root_path = Path::from("");
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let format = SsTableFormat {
+            block_size: 128, // Small block size to ensure multiple blocks
+            min_filter_keys: 100,
+            ..SsTableFormat::default()
+        };
+        let table_store = Arc::new(TableStore::new(
+            ObjectStores::new(object_store, None),
+            format,
+            root_path.clone(),
+            None,
+        ));
+
+        // Build an SST with enough keys to span multiple blocks
+        // Using key pattern: key000, key001, ..., key099
+        let mut builder = table_store.table_builder();
+        for i in 0..100 {
+            builder
+                .add_value(
+                    format!("key{:03}", i).as_bytes(),
+                    format!("value{:03}", i).as_bytes(),
+                    gen_attrs(i),
+                )
+                .await
+                .unwrap();
+        }
+        let encoded = builder.build().await.unwrap();
+        let id = SsTableId::Compacted(ulid::Ulid::new());
+        table_store.write_sst(&id, encoded, false).await.unwrap();
+        let sst_handle = table_store.open_sst(&id).await.unwrap();
+
+        let index = table_store.read_index(&sst_handle, true).await.unwrap();
+        let num_blocks = index.borrow().block_meta().len();
+        assert!(
+            num_blocks >= 4,
+            "Test requires at least 4 blocks, got {}",
+            num_blocks
+        );
+
+        // Use start and end keys that:
+        // 1. Are not at the first key of any block (using middle range key020..key079)
+        // 2. Exclude the first block entirely (start > first block's last key)
+        // 3. Exclude the last block entirely (end < last block's first key)
+        // 4. Are guaranteed to exist in the SST (key020 through key079)
+        let start_key = b"key020";
+        let end_key = b"key079";
+
+        let sst_iter_options = SstIteratorOptions {
+            max_fetch_tasks: 3,
+            blocks_to_fetch: 3,
+            cache_blocks: true,
+            eager_spawn: false,
+            order,
+        };
+        let mut iter = SstIterator::new_owned_initialized(
+            BytesRange::from_slice(start_key.as_ref()..=end_key.as_ref()),
+            sst_handle,
+            table_store.clone(),
+            sst_iter_options,
+        )
+        .await
+        .unwrap()
+        .expect("Expected Some(iter) but got None");
+
+        // Expected keys based on order
+        let start_idx = 20;
+        let end_idx = 79; // inclusive
+        let expected_count = end_idx - start_idx + 1;
+
+        let mut count = 0;
+        match order {
+            IterationOrder::Ascending => {
+                for i in start_idx..=end_idx {
+                    let kv = iter.next().await.unwrap()
+                        .unwrap_or_else(|| panic!("Expected key{:03} in ascending order, but got None. Count so far: {}", i, count));
+                    assert_eq!(kv.key, format!("key{:03}", i).as_bytes(),
+                        "Key mismatch in ascending order at position {}", count);
+                    assert_eq!(kv.value, format!("value{:03}", i).as_bytes());
+                    count += 1;
+                }
+            }
+            IterationOrder::Descending => {
+                for i in (start_idx..=end_idx).rev() {
+                    let kv = iter.next().await.unwrap()
+                        .unwrap_or_else(|| panic!("Expected key{:03} in descending order, but got None. Count so far: {}", i, count));
+                    assert_eq!(kv.key, format!("key{:03}", i).as_bytes(),
+                        "Key mismatch in descending order at position {}, expected key{:03}", count, i);
+                    assert_eq!(kv.value, format!("value{:03}", i).as_bytes());
+                    count += 1;
+                }
+            }
+        }
+
+        assert_eq!(count, expected_count, "Should iterate exactly {} keys", expected_count);
+        assert!(iter.next().await.unwrap().is_none(), "Should have no more keys");
+    }
+
     #[tokio::test]
     async fn test_full_descending_iteration() {
         let root_path = Path::from("");
