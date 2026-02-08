@@ -1005,6 +1005,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_one_block_sst_iter() {
+        test_one_block_sst_iter_with_order(IterationOrder::Ascending).await;
+        test_one_block_sst_iter_with_order(IterationOrder::Descending).await;
+    }
+
+    async fn test_one_block_sst_iter_with_order(order: IterationOrder) {
         let root_path = Path::from("");
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let format = SsTableFormat {
@@ -1043,9 +1048,9 @@ mod tests {
         let index = table_store.read_index(&sst_handle, true).await.unwrap();
         assert_eq!(index.borrow().block_meta().len(), 1);
 
-        // TODO: Need to verify argument types
         let sst_iter_options = SstIteratorOptions {
             cache_blocks: true,
+            order,
             ..SstIteratorOptions::default()
         };
         let mut iter = SstIterator::new_owned_initialized(
@@ -1057,18 +1062,22 @@ mod tests {
         .await
         .unwrap()
         .expect("Expected Some(iter) but got None");
-        let kv = iter.next().await.unwrap().unwrap();
-        assert_eq!(kv.key, b"key1".as_slice());
-        assert_eq!(kv.value, b"value1".as_slice());
-        let kv = iter.next().await.unwrap().unwrap();
-        assert_eq!(kv.key, b"key2".as_slice());
-        assert_eq!(kv.value, b"value2".as_slice());
-        let kv = iter.next().await.unwrap().unwrap();
-        assert_eq!(kv.key, b"key3".as_slice());
-        assert_eq!(kv.value, b"value3".as_slice());
-        let kv = iter.next().await.unwrap().unwrap();
-        assert_eq!(kv.key, b"key4".as_slice());
-        assert_eq!(kv.value, b"value4".as_slice());
+        
+        // Expected keys based on order
+        let expected_keys = match order {
+            IterationOrder::Ascending => vec![b"key1", b"key2", b"key3", b"key4"],
+            IterationOrder::Descending => vec![b"key4", b"key3", b"key2", b"key1"],
+        };
+        let expected_values = match order {
+            IterationOrder::Ascending => vec![b"value1", b"value2", b"value3", b"value4"],
+            IterationOrder::Descending => vec![b"value4", b"value3", b"value2", b"value1"],
+        };
+        
+        for (expected_key, expected_value) in expected_keys.iter().zip(expected_values.iter()) {
+            let kv = iter.next().await.unwrap().unwrap();
+            assert_eq!(kv.key, expected_key.as_slice());
+            assert_eq!(kv.value, expected_value.as_slice());
+        }
         let kv = iter.next().await.unwrap();
         assert!(kv.is_none());
     }
@@ -1303,6 +1312,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_many_block_sst_iter() {
+        test_many_block_sst_iter_with_order(IterationOrder::Ascending).await;
+        test_many_block_sst_iter_with_order(IterationOrder::Descending).await;
+    }
+
+    async fn test_many_block_sst_iter_with_order(order: IterationOrder) {
         let root_path = Path::from("");
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let format = SsTableFormat {
@@ -1337,11 +1351,11 @@ mod tests {
         let index = table_store.read_index(&sst_handle, true).await.unwrap();
         assert_eq!(index.borrow().block_meta().len(), 10);
 
-        // TODO: verify cache_blocks=true is intended
         let sst_iter_options = SstIteratorOptions {
             max_fetch_tasks: 3,
             blocks_to_fetch: 3,
             cache_blocks: true,
+            order,
             ..SstIteratorOptions::default()
         };
         let mut iter = SstIterator::new_owned_initialized(
@@ -1353,10 +1367,22 @@ mod tests {
         .await
         .unwrap()
         .expect("Expected Some(iter) but got None");
-        for i in 0..1000 {
-            let kv = iter.next().await.unwrap().unwrap();
-            assert_eq!(kv.key, format!("key{}", i));
-            assert_eq!(kv.value, format!("value{}", i));
+        
+        match order {
+            IterationOrder::Ascending => {
+                for i in 0..1000 {
+                    let kv = iter.next().await.unwrap().unwrap();
+                    assert_eq!(kv.key, format!("key{}", i));
+                    assert_eq!(kv.value, format!("value{}", i));
+                }
+            }
+            IterationOrder::Descending => {
+                for i in (0..1000).rev() {
+                    let kv = iter.next().await.unwrap().unwrap();
+                    assert_eq!(kv.key, format!("key{}", i));
+                    assert_eq!(kv.value, format!("value{}", i));
+                }
+            }
         }
 
         let next = iter.next().await.unwrap();
