@@ -78,25 +78,59 @@ impl<B: BlockLike> KeyValueIterator for BlockIterator<B> {
             return Ok(());
         }
 
-        // Binary search to find the first key >= next_key
-        let mut low = self.off_off;
-        let mut high = num_entries;
+        match self.ordering {
+            Ascending => {
+                // Binary search to find the first key >= next_key
+                let mut low = self.off_off;
+                let mut high = num_entries;
 
-        while low < high {
-            let mid = low + (high - low) / 2;
-            let mid_key = self.decode_key_at_index(mid)?;
+                while low < high {
+                    let mid = low + (high - low) / 2;
+                    let mid_key = self.decode_key_at_index(mid)?;
 
-            match mid_key.as_ref().cmp(next_key) {
-                Ordering::Less => {
-                    low = mid + 1;
+                    match mid_key.as_ref().cmp(next_key) {
+                        Ordering::Less => {
+                            low = mid + 1;
+                        }
+                        Ordering::Equal | Ordering::Greater => {
+                            high = mid;
+                        }
+                    }
                 }
-                Ordering::Equal | Ordering::Greater => {
-                    high = mid;
+
+                self.off_off = low;
+            }
+            Descending => {
+                // Binary search to find the last key <= next_key
+                // Strategy: find first physical index where key > next_key, then go back one
+                let mut low = 0;
+                let mut high = num_entries;
+
+                while low < high {
+                    let mid = low + (high - low) / 2;
+                    let mid_key = self.decode_key_at_index(mid)?;
+
+                    if mid_key.as_ref() <= next_key {
+                        low = mid + 1;
+                    } else {
+                        high = mid;
+                    }
+                }
+
+                // low is now the first physical index where key > next_key
+                // (or num_entries if all keys <= next_key)
+                if low > 0 {
+                    // There's at least one key <= next_key
+                    // The last such key is at physical index (low - 1)
+                    // Convert to descending off_off: off_off = num_entries - 1 - physical_idx
+                    let physical_idx = low - 1;
+                    self.off_off = num_entries - 1 - physical_idx;
+                } else {
+                    // All keys are > next_key, position past the end (empty)
+                    self.off_off = num_entries;
                 }
             }
         }
-
-        self.off_off = low;
         Ok(())
     }
 }
@@ -180,7 +214,8 @@ mod tests {
     use crate::block_iterator::BlockIterator;
     use crate::bytes_range::BytesRange;
     use crate::format::sst::BlockBuilder;
-    use crate::iter::KeyValueIterator;
+    use crate::iter::{IterationOrder, KeyValueIterator};
+    use crate::iter::IterationOrder::Descending;
     use crate::proptest_util::{arbitrary, sample};
     use crate::test_utils::{assert_iterator, assert_next_entry, gen_attrs, gen_empty_attrs};
     use crate::types::RowEntry;
@@ -533,5 +568,109 @@ mod tests {
 
         let key2 = iter.decode_key_at_index(2).unwrap();
         assert_eq!(key2.as_ref(), b"prefix_ccc");
+    }
+
+    // ----- Descending iteration seek tests -----
+
+    #[tokio::test]
+    async fn should_seek_descending_to_exact_key() {
+        // given: a block with multiple entries
+        let mut block_builder = BlockBuilder::new_v1(1024);
+        assert!(block_builder.add_value(b"apple", b"1", gen_empty_attrs()));
+        assert!(block_builder.add_value(b"banana", b"2", gen_empty_attrs()));
+        assert!(block_builder.add_value(b"cherry", b"3", gen_empty_attrs()));
+        let block = block_builder.build().unwrap();
+
+        // when: seeking to exact key in descending order
+        let mut iter = BlockIterator::new(&block, Descending);
+        iter.seek(b"banana").await.unwrap();
+
+        // then: should iterate backwards from banana
+        let kv = iter.next().await.unwrap().unwrap();
+        test_utils::assert_kv(&kv, b"banana", b"2");
+        let kv = iter.next().await.unwrap().unwrap();
+        test_utils::assert_kv(&kv, b"apple", b"1");
+        assert!(iter.next().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn should_seek_descending_beyond_last_key() {
+        // given: a block with keys apple, banana, cherry
+        let mut block_builder = BlockBuilder::new_v1(1024);
+        assert!(block_builder.add_value(b"apple", b"1", gen_empty_attrs()));
+        assert!(block_builder.add_value(b"banana", b"2", gen_empty_attrs()));
+        assert!(block_builder.add_value(b"cherry", b"3", gen_empty_attrs()));
+        let block = block_builder.build().unwrap();
+
+        // when: seeking to key beyond last key (zzz > cherry)
+        let mut iter = BlockIterator::new(&block, Descending);
+        iter.seek(b"zzz").await.unwrap();
+
+        // then: should start from the last key and iterate backwards
+        let kv = iter.next().await.unwrap().unwrap();
+        test_utils::assert_kv(&kv, b"cherry", b"3");
+        let kv = iter.next().await.unwrap().unwrap();
+        test_utils::assert_kv(&kv, b"banana", b"2");
+        let kv = iter.next().await.unwrap().unwrap();
+        test_utils::assert_kv(&kv, b"apple", b"1");
+        assert!(iter.next().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn should_seek_descending_to_key_before_first() {
+        // given: a block with keys banana, cherry, dragon
+        let mut block_builder = BlockBuilder::new_v1(1024);
+        assert!(block_builder.add_value(b"banana", b"2", gen_empty_attrs()));
+        assert!(block_builder.add_value(b"cherry", b"3", gen_empty_attrs()));
+        assert!(block_builder.add_value(b"dragon", b"4", gen_empty_attrs()));
+        let block = block_builder.build().unwrap();
+
+        // when: seeking to key before first key (apple < banana)
+        let mut iter = BlockIterator::new(&block, Descending);
+        iter.seek(b"apple").await.unwrap();
+
+        // then: should be empty (no keys <= apple)
+        assert!(iter.next().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn should_seek_descending_to_key_between_entries() {
+        // given: a block with keys apple, cherry, dragon
+        let mut block_builder = BlockBuilder::new_v1(1024);
+        assert!(block_builder.add_value(b"apple", b"1", gen_empty_attrs()));
+        assert!(block_builder.add_value(b"cherry", b"3", gen_empty_attrs()));
+        assert!(block_builder.add_value(b"dragon", b"4", gen_empty_attrs()));
+        let block = block_builder.build().unwrap();
+
+        // when: seeking to "banana" which is between apple and cherry
+        let mut iter = BlockIterator::new(&block, Descending);
+        iter.seek(b"banana").await.unwrap();
+
+        // then: should position at last key <= banana, which is apple
+        let kv = iter.next().await.unwrap().unwrap();
+        test_utils::assert_kv(&kv, b"apple", b"1");
+        assert!(iter.next().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn should_full_descending_iteration_work() {
+        // given: a block with multiple entries
+        let mut block_builder = BlockBuilder::new_v1(1024);
+        assert!(block_builder.add_value(b"apple", b"1", gen_empty_attrs()));
+        assert!(block_builder.add_value(b"banana", b"2", gen_empty_attrs()));
+        assert!(block_builder.add_value(b"cherry", b"3", gen_empty_attrs()));
+        let block = block_builder.build().unwrap();
+
+        // when: iterating in descending order without seek
+        let mut iter = BlockIterator::new(block, Descending);
+
+        // then: should iterate from last to first
+        let kv = iter.next().await.unwrap().unwrap();
+        test_utils::assert_kv(&kv, b"cherry", b"3");
+        let kv = iter.next().await.unwrap().unwrap();
+        test_utils::assert_kv(&kv, b"banana", b"2");
+        let kv = iter.next().await.unwrap().unwrap();
+        test_utils::assert_kv(&kv, b"apple", b"1");
+        assert!(iter.next().await.unwrap().is_none());
     }
 }

@@ -1557,8 +1557,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_descending_seek_beyond_last_key() {
-        // Test calling seek() to a key beyond the last key and iterating backwards.
-        // Uses V2 format similar to should_seek_past_last_key_in_v2_sst but with descending order.
+        // Test both V1 (production format) and V2 handle descending seek correctly.
+        // V1 would fail before the bug fix in BlockIterator::seek().
+        test_descending_seek_beyond_last_key_with_format(BlockFormat::V1).await;
+        test_descending_seek_beyond_last_key_with_format(BlockFormat::V2).await;
+    }
+
+    async fn test_descending_seek_beyond_last_key_with_format(block_format: BlockFormat) {
         let root_path = Path::from("");
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let format = SsTableFormat {
@@ -1573,10 +1578,13 @@ mod tests {
             None,
         ));
 
-        // Build SST with V2 format (keys 0-99)
-        let mut builder = table_store
-            .table_builder()
-            .with_block_format(BlockFormat::V2);
+        // Build SST with specified format (keys 0-99)
+        let mut builder = table_store.table_builder();
+        let mut builder = match block_format {
+            BlockFormat::V1 => builder,
+            BlockFormat::V2 => builder.with_block_format(BlockFormat::V2),
+        };
+
         for i in 0..100 {
             builder
                 .add_value(
