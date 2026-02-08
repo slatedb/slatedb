@@ -1579,7 +1579,7 @@ mod tests {
         ));
 
         // Build SST with specified format (keys 0-99)
-        let mut builder = table_store.table_builder();
+        let builder = table_store.table_builder();
         let mut builder = match block_format {
             BlockFormat::V1 => builder,
             BlockFormat::V2 => builder.with_block_format(BlockFormat::V2),
@@ -1618,9 +1618,15 @@ mod tests {
         iter.seek(b"key999").await.unwrap();
 
         // Should iterate backwards from key099
-        let kv1 = iter.next().await.unwrap()
+        let kv1 = iter
+            .next()
+            .await
+            .unwrap()
             .expect("Expected first key but got None");
-        let kv2 = iter.next().await.unwrap()
+        let kv2 = iter
+            .next()
+            .await
+            .unwrap()
             .expect("Expected second key but got None");
 
         assert_eq!(kv1.key.as_ref(), b"key099");
@@ -2262,28 +2268,52 @@ mod tests {
         match order {
             IterationOrder::Ascending => {
                 for i in start_idx..=end_idx {
-                    let kv = iter.next().await.unwrap()
-                        .unwrap_or_else(|| panic!("Expected key{:03} in ascending order, but got None. Count so far: {}", i, count));
-                    assert_eq!(kv.key, format!("key{:03}", i).as_bytes(),
-                        "Key mismatch in ascending order at position {}", count);
+                    let kv = iter.next().await.unwrap().unwrap_or_else(|| {
+                        panic!(
+                            "Expected key{:03} in ascending order, but got None. Count so far: {}",
+                            i, count
+                        )
+                    });
+                    assert_eq!(
+                        kv.key,
+                        format!("key{:03}", i).as_bytes(),
+                        "Key mismatch in ascending order at position {}",
+                        count
+                    );
                     assert_eq!(kv.value, format!("value{:03}", i).as_bytes());
                     count += 1;
                 }
             }
             IterationOrder::Descending => {
                 for i in (start_idx..=end_idx).rev() {
-                    let kv = iter.next().await.unwrap()
-                        .unwrap_or_else(|| panic!("Expected key{:03} in descending order, but got None. Count so far: {}", i, count));
-                    assert_eq!(kv.key, format!("key{:03}", i).as_bytes(),
-                        "Key mismatch in descending order at position {}, expected key{:03}", count, i);
+                    let kv = iter.next().await.unwrap().unwrap_or_else(|| {
+                        panic!(
+                            "Expected key{:03} in descending order, but got None. Count so far: {}",
+                            i, count
+                        )
+                    });
+                    assert_eq!(
+                        kv.key,
+                        format!("key{:03}", i).as_bytes(),
+                        "Key mismatch in descending order at position {}, expected key{:03}",
+                        count,
+                        i
+                    );
                     assert_eq!(kv.value, format!("value{:03}", i).as_bytes());
                     count += 1;
                 }
             }
         }
 
-        assert_eq!(count, expected_count, "Should iterate exactly {} keys", expected_count);
-        assert!(iter.next().await.unwrap().is_none(), "Should have no more keys");
+        assert_eq!(
+            count, expected_count,
+            "Should iterate exactly {} keys",
+            expected_count
+        );
+        assert!(
+            iter.next().await.unwrap().is_none(),
+            "Should have no more keys"
+        );
     }
 
     #[tokio::test]

@@ -214,8 +214,8 @@ mod tests {
     use crate::block_iterator::BlockIterator;
     use crate::bytes_range::BytesRange;
     use crate::format::sst::BlockBuilder;
-    use crate::iter::{IterationOrder, KeyValueIterator};
     use crate::iter::IterationOrder::Descending;
+    use crate::iter::KeyValueIterator;
     use crate::proptest_util::{arbitrary, sample};
     use crate::test_utils::{assert_iterator, assert_next_entry, gen_attrs, gen_empty_attrs};
     use crate::types::RowEntry;
