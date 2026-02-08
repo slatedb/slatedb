@@ -45,6 +45,11 @@ impl BlockLike for Arc<Block> {
     }
 }
 
+/// Type alias for the latest block iterator version.
+/// Note: B is constrained to BlockLike by BlockIteratorV2's definition.
+#[cfg(test)]
+pub(crate) type BlockIteratorLatest<B> = crate::block_iterator_v2::BlockIteratorV2<B>;
+
 pub(crate) struct BlockIterator<B: BlockLike> {
     block: B,
     off_off: usize,

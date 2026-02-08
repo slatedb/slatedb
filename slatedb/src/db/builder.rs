@@ -405,12 +405,23 @@ impl<P: Into<Path>> DbBuilder<P> {
 
         // Setup the components
         let stat_registry = Arc::new(StatRegistry::new());
+        let block_format = {
+            #[cfg(test)]
+            {
+                self.settings.block_format
+            }
+            #[cfg(not(test))]
+            {
+                None
+            }
+        };
         let sst_format = SsTableFormat {
             min_filter_keys: self.settings.min_filter_keys,
             filter_bits_per_key: self.settings.filter_bits_per_key,
             compression_codec: self.settings.compression_codec,
             block_size: self.sst_block_size.unwrap_or_default().as_bytes(),
             block_transformer: self.block_transformer.clone(),
+            block_format,
             ..SsTableFormat::default()
         };
 

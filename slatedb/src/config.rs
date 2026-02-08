@@ -678,6 +678,12 @@ pub struct Settings {
     /// during reads and compactions to produce the final result.
     #[serde(skip)]
     pub merge_operator: Option<MergeOperatorType>,
+
+    /// The block format for SST files. This is only available in tests
+    /// to verify backward compatibility between V1 and V2 formats.
+    #[cfg(test)]
+    #[serde(skip)]
+    pub block_format: Option<crate::sst_builder::BlockFormat>,
 }
 
 // Implement Debug manually for DbOptions.
@@ -909,6 +915,8 @@ impl Default for Settings {
             filter_bits_per_key: 10,
             default_ttl: None,
             merge_operator: None,
+            #[cfg(test)]
+            block_format: None,
         }
     }
 }

@@ -81,7 +81,7 @@ impl DbInner {
 
 #[cfg(test)]
 mod tests {
-    use crate::block_iterator::BlockIterator;
+    use crate::block_iterator::BlockIteratorLatest;
     use crate::db::Db;
     use crate::db_state::{SsTableHandle, SsTableId};
     use crate::error::SlateDBError;
@@ -135,7 +135,7 @@ mod tests {
             .unwrap();
         let mut found_entries = Vec::new();
         for block in blocks {
-            let mut block_iter = BlockIterator::new_ascending(block);
+            let mut block_iter = BlockIteratorLatest::new_ascending(block);
             block_iter.init().await.unwrap();
 
             while let Some(entry) = block_iter.next_entry().await.unwrap() {

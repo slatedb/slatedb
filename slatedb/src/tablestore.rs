@@ -654,7 +654,7 @@ mod tests {
     use crate::test_utils::FlakyObjectStore;
     use crate::test_utils::{assert_iterator, build_test_sst};
     use crate::types::{RowEntry, ValueDeletable};
-    use crate::{block_iterator::BlockIterator, db_state::SsTableId, iter::KeyValueIterator};
+    use crate::{block_iterator::BlockIteratorLatest, db_state::SsTableId, iter::KeyValueIterator};
     use slatedb_common::clock::DefaultSystemClock;
 
     const ROOT: &str = "/root";
@@ -1218,7 +1218,7 @@ mod tests {
         let mut expected_iter = expected.iter();
 
         while let (Some(block), Some(expected_item)) = (block_iter.next(), expected_iter.next()) {
-            let mut iter = BlockIterator::new_ascending(block.clone());
+            let mut iter = BlockIteratorLatest::new_ascending(block.clone());
             let kv = iter.next().await.unwrap().unwrap();
             assert_eq!(kv.key, expected_item.0);
             assert_eq!(ValueDeletable::Value(kv.value), expected_item.1);
