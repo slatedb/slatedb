@@ -1557,11 +1557,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_descending_seek_beyond_last_key() {
-        // Test seeking beyond the last key and iterating backwards.
-        // Similar to the 1000-key test pattern but seeks to 1001 and iterates backwards.
+        // Test calling seek() to a key beyond the last key and iterating backwards.
+        // Uses V2 format similar to should_seek_past_last_key_in_v2_sst but with descending order.
         let root_path = Path::from("");
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let format = SsTableFormat {
+            block_size: 128,
             min_filter_keys: 3,
             ..SsTableFormat::default()
         };
@@ -1572,12 +1573,15 @@ mod tests {
             None,
         ));
 
-        let mut builder = table_store.table_builder();
-        for i in 0..1000 {
+        // Build SST with V2 format (keys 0-99)
+        let mut builder = table_store
+            .table_builder()
+            .with_block_format(BlockFormat::V2);
+        for i in 0..100 {
             builder
                 .add_value(
-                    format!("key{}", i).as_bytes(),
-                    format!("value{}", i).as_bytes(),
+                    format!("key{:03}", i).as_bytes(),
+                    format!("value{:03}", i).as_bytes(),
                     gen_attrs(i),
                 )
                 .await
@@ -1585,16 +1589,13 @@ mod tests {
         }
 
         let encoded = builder.build().await.unwrap();
-        table_store
-            .write_sst(&SsTableId::Wal(0), encoded, false)
-            .await
-            .unwrap();
-        let sst_handle = table_store.open_sst(&SsTableId::Wal(0)).await.unwrap();
+        let id = SsTableId::Compacted(ulid::Ulid::new());
+        let sst_handle = table_store.write_sst(&id, encoded, false).await.unwrap();
 
-        // Seek to key1001 (beyond last key which is key999) and iterate backwards
-        let mut iter = SstIterator::new_owned_initialized(
-            BytesRange::from_slice(b"key0".as_ref()..=b"key1001".as_ref()),
-            sst_handle,
+        // Initialize iterator in descending order with full range
+        let mut iter = SstIterator::new_borrowed_initialized(
+            ..,
+            &sst_handle,
             table_store.clone(),
             SstIteratorOptions {
                 order: IterationOrder::Descending,
@@ -1605,15 +1606,17 @@ mod tests {
         .unwrap()
         .expect("Expected Some(iter) but got None");
 
-        // Should get at least 2 keys starting from the end
+        // Seek to key999 (beyond the last key which is key099)
+        iter.seek(b"key999").await.unwrap();
+
+        // Should iterate backwards from key099
         let kv1 = iter.next().await.unwrap()
             .expect("Expected first key but got None");
         let kv2 = iter.next().await.unwrap()
             .expect("Expected second key but got None");
 
-        // First key should be key999 (the last key in the SST)
-        assert_eq!(kv1.key.as_ref(), b"key999");
-        assert_eq!(kv2.key.as_ref(), b"key998");
+        assert_eq!(kv1.key.as_ref(), b"key099");
+        assert_eq!(kv2.key.as_ref(), b"key098");
     }
 
     #[tokio::test]
