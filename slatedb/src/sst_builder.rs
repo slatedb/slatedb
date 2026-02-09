@@ -1239,14 +1239,14 @@ mod tests {
     }
 
     #[test]
-    fn should_default_to_block_format_v2() {
+    fn should_default_to_latest_block_format() {
         // given/when: create a new builder
         let format = SsTableFormat::default();
         let builder = format.table_builder();
 
-        // then: it should default to V2 block format
-        assert_eq!(builder.block_format, BlockFormat::V2);
-        assert_eq!(builder.sst_format_version, SST_FORMAT_VERSION_V2);
+        // then: it should default to latest block format (currently V2)
+        assert_eq!(builder.block_format, BlockFormat::Latest);
+        assert_eq!(builder.sst_format_version, SST_FORMAT_VERSION_LATEST);
     }
 
     #[test]
