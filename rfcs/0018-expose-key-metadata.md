@@ -444,18 +444,36 @@ while let Some(row_entry) = iter.next_row().await? {
 **Implementation Details**:
 
 - **Snapshot-Based Versioning**: Extend the existing `Snapshot` mechanism to support creating snapshots at specific sequence numbers via `SnapshotOptions::seqnum`.
-- **Snapshot Visibility**: If `seqnum < min_seq` (the minimum retained sequence number) or if `seqnum` is in the future, the snapshot operation succeeds. However, read operations effectively use `min(seqnum, max_seq)` logic combined with visibility checks:
-  - If data has been compacted (`seq < min_seq`), it is not visible.
-  - If data has not yet been written (`seq > max_seq`), it is not visible.
-  - The snapshot acts as a view of the database at a specific `seqnum`. If no data satisfies the visibility condition, it simply returns empty results (`None` or empty iterator).
-  - **Note**: Users should not rely on specific sequence number snapshots for long-term data archival unless they explicitly manage version retention (e.g., by disabling compaction or setting appropriate retention periods).
-- **Version Retention**: Currently, historical versions are implicitly retained if they are visible to any active open snapshot. If a snapshot with `seqnum` is kept open, the compaction process will presume data visible to it (i.e. `seqnum >= min_seq`). Once the snapshot is dropped, older versions may be reclaimed by compaction. Future improvements may introduce explicit retention policies (e.g., time-based or count-based), but they are out of scope for this RFC.
+
+- **Version Retention and Availability**:
+  > [!IMPORTANT]
+  > **Understanding Historical Version Availability**
+  > 
+  > Historical versions are **not guaranteed to be available indefinitely**. Version retention is currently controlled by:
+  > 
+  > 1. **Active Snapshots**: Historical versions are retained as long as there are open snapshots that reference them. The compactor uses `db_state.recent_snapshot_min_seq` to determine the minimum sequence number to retain.
+  > 2. **Per-Key Retention**: The `min_seq` is **per-key**, not global:
+  >    - If key `k1` is written once with `seq=1` and never updated, it will remain available with `seq=1` indefinitely
+  >    - If key `k2` is written with `seq=2` and later overwritten with `seq=123456`, the old version `(k2, seq=2)` will eventually be compacted away
+  >    - There is no single global `min_seq` that applies to all keys
+  > 3. **Future Enhancement - Time Travel**: A planned feature (tracked in [#1263](https://github.com/slatedb/slatedb/issues/1263)) will allow configuring a retention window (e.g., 24 hours) to guarantee version availability within that time period, regardless of snapshot lifecycle.
+  > 
+  > **Best Practices**:
+  > - For short-term version queries (e.g., CDC, debugging), use `snapshot_with_options()` and keep the snapshot open as needed
+  > - For long-term archival, use a separate backup mechanism rather than relying on SlateDB's version history
+  > - Once time travel is implemented, configure an appropriate retention window for your use case
+
+- **Snapshot Visibility**: 
+  - Creating a snapshot with `seqnum` always succeeds, even if `seqnum < min_seq` or `seqnum > max_seq`
+  - Read operations on the snapshot use visibility checks:
+    - If data has been compacted (`seq < min_seq` for that key), it is not visible
+    - If data has not yet been written (`seq > max_seq`), it is not visible
+    - If no data satisfies the visibility condition, queries return empty results (`None` or empty iterator)
+
 - **API Integration**: 
-  - `snapshot_with_options(SnapshotOptions::default().read_at(seq))` creates a snapshot view at the specified sequence number.
-  - All read operations on the snapshot (`get`, `scan`, `get_row`, `scan_rows`) will see data as of that sequence number.
-- **Compaction Impact**:
-  - Historical versions may be removed by compaction. If the requested `seqnum` is older than `min_seq`, query results will be empty.
-  - Otherwise, the query will return the latest available version `v` such that `v.seq <= seqnum`.
+  - `snapshot_with_options(SnapshotOptions::default().read_at(seq))` creates a snapshot view at the specified sequence number
+  - All read operations on the snapshot (`get`, `scan`, `get_row`) will see data as of that sequence number
+  - The snapshot can be used with both `next()` and `next_row()` methods on iterators
 
 <!-- TOC --><a name="impact-analysis"></a>
 ## Impact Analysis
