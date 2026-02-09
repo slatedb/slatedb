@@ -546,6 +546,7 @@ impl<P: Into<Path>> DbBuilder<P> {
                 system_clock.clone(),
                 rand.clone(),
                 table_store.clone(),
+                manifest_store.clone(),
                 manifest.prepare_dirty()?,
                 memtable_flush_tx,
                 write_tx,

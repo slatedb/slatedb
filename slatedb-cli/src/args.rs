@@ -1,6 +1,8 @@
 use clap::{ArgGroup, Parser, Subcommand, ValueEnum};
 use slatedb::compactor::CompactionRequest;
+use slatedb::config::CompressionCodec;
 use slatedb::seq_tracker::FindOption;
+use slatedb::SstBlockSize;
 use std::collections::HashMap;
 use std::time::Duration;
 use uuid::Uuid;
@@ -138,6 +140,28 @@ pub(crate) enum CliCommands {
         /// all checkpoints will be returned.
         #[arg(short, long)]
         name: Option<String>,
+    },
+
+    /// Restore the database's state to a previous state referenced by the checkpoint.
+    RestoreCheckpoint {
+        /// The id of the checkpoint (e.g. 01740ee5-6459-44af-9a45-85deb6e468e3) to restore to.
+        #[arg(short, long)]
+        #[clap(value_parser = uuid::Uuid::parse_str)]
+        id: Uuid,
+
+        /// The target size in bytes of the l0 SSTables that will be generated from replaying the WALs of
+        /// this checkpoint.
+        #[arg(short, long)]
+        l0_sst_size_bytes: Option<usize>,
+
+        /// The block size for SSTable blocks
+        #[arg(short, long)]
+        #[clap(value_parser = parse_sst_block_size)]
+        sst_block_size: Option<SstBlockSize>,
+
+        /// The compression algorithm to use for SSTables.
+        #[arg(short, long)]
+        compression_codec: Option<CompressionCodec>,
     },
 
     /// Runs a garbage collection for a specific resource type once
@@ -282,6 +306,13 @@ pub(crate) fn parse_args() -> CliArgs {
 
 fn parse_compaction_request(s: &str) -> Result<CompactionRequest, String> {
     serde_json::from_str(s).map_err(|e| format!("Invalid compaction request JSON: {e}"))
+}
+
+fn parse_sst_block_size(bytes: &str) -> Result<Option<SstBlockSize>, String> {
+    let size: usize = bytes
+        .parse()
+        .map_err(|e| format!("could not parse sst_block_size to usize: {}", e))?;
+    Ok(Some(SstBlockSize::new(size).map_err(|e| e.to_string())?))
 }
 
 fn parse_find_option(s: &str) -> Result<FindOption, String> {

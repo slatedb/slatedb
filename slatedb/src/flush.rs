@@ -17,8 +17,23 @@ impl DbInner {
         imm_table: Arc<KVTable>,
         write_cache: bool,
     ) -> Result<SsTableHandle, SlateDBError> {
+        let iter = self.iter_imm_table(imm_table.clone()).await?;
+        let handle = self.flush_table_iter(id, iter, write_cache).await?;
+
+        self.mono_clock
+            .fetch_max_last_durable_tick(imm_table.last_tick());
+
+        Ok(handle)
+    }
+
+    pub(crate) async fn flush_table_iter<T: KeyValueIterator>(
+        &self,
+        id: &db_state::SsTableId,
+        mut iter: T,
+        write_cache: bool,
+    ) -> Result<SsTableHandle, SlateDBError> {
         let mut sst_builder = self.table_store.table_builder();
-        let mut iter = self.iter_imm_table(imm_table.clone()).await?;
+
         while let Some(entry) = iter.next_entry().await? {
             sst_builder.add(entry).await?;
         }
@@ -28,9 +43,6 @@ impl DbInner {
             .table_store
             .write_sst(id, encoded_sst, write_cache)
             .await?;
-
-        self.mono_clock
-            .fetch_max_last_durable_tick(imm_table.last_tick());
 
         Ok(handle)
     }

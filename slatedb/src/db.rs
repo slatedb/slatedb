@@ -55,7 +55,7 @@ use crate::db_snapshot::DbSnapshot;
 use crate::db_state::{DbState, SsTableId};
 use crate::db_stats::DbStats;
 use crate::error::SlateDBError;
-use crate::manifest::store::FenceableManifest;
+use crate::manifest::store::{FenceableManifest, ManifestStore};
 use crate::manifest::Manifest;
 use crate::mem_table::WritableKVTable;
 use crate::mem_table_flush::{MemtableFlushMsg, MEMTABLE_FLUSHER_TASK_NAME};
@@ -81,6 +81,7 @@ pub(crate) struct DbInner {
     pub(crate) state: Arc<RwLock<DbState>>,
     pub(crate) settings: Settings,
     pub(crate) table_store: Arc<TableStore>,
+    pub(crate) manifest_store: Arc<ManifestStore>,
     pub(crate) memtable_flush_notifier: UnboundedSender<MemtableFlushMsg>,
     pub(crate) write_notifier: UnboundedSender<WriteBatchMessage>,
     pub(crate) db_stats: DbStats,
@@ -108,6 +109,7 @@ impl DbInner {
         system_clock: Arc<dyn SystemClock>,
         rand: Arc<DbRand>,
         table_store: Arc<TableStore>,
+        manifest_store: Arc<ManifestStore>,
         manifest: DirtyObject<Manifest>,
         memtable_flush_notifier: UnboundedSender<MemtableFlushMsg>,
         write_notifier: UnboundedSender<WriteBatchMessage>,
@@ -166,6 +168,7 @@ impl DbInner {
             oracle,
             wal_enabled,
             table_store,
+            manifest_store,
             memtable_flush_notifier,
             wal_buffer,
             write_notifier,
@@ -211,11 +214,11 @@ impl DbInner {
     /// Fences all writers with an older epoch than the provided `manifest` by flushing
     /// an empty WAL file that acts as a barrier. Any parallel old writers will fail with
     /// `SlateDBError::Fenced` when trying to "re-write" this file.
-    async fn fence_writers(
+    pub(crate) async fn fence_writers(
         &self,
         manifest: &mut FenceableManifest,
         next_wal_id: u64,
-    ) -> Result<(), SlateDBError> {
+    ) -> Result<u64, SlateDBError> {
         let mut empty_wal_id = next_wal_id;
 
         loop {
@@ -228,9 +231,7 @@ impl DbInner {
                 )
                 .await
             {
-                Ok(_) => {
-                    return Ok(());
-                }
+                Ok(_) => return Ok(empty_wal_id),
                 Err(SlateDBError::Fenced) => {
                     manifest.refresh().await?;
                     self.state
