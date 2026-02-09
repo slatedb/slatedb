@@ -14,11 +14,6 @@ Table of Contents:
    * [TTL Management](#ttl-management)
 - [Design](#design)
    * [1. Row Query Interface](#1-row-query-interface)
-   * [2. Modify Put/Write Return Types](#2-modify-putwrite-return-types)
-   * [3. Support Query by Version](#3-support-query-by-version)
-- [Impact Analysis](#impact-analysis)
-- [Testing](#testing)
-- [Alternatives](#alternatives)
 
 <!-- TOC end -->
 
@@ -140,36 +135,45 @@ pub async fn get_row_with_options<K: AsRef<[u8]>>(
     options: &ReadOptions,
 ) -> Result<Option<RowEntry>, crate::Error>;
 
-// Scan values (unchanged)
+// Scan API (unchanged) - returns DbIterator
 pub async fn scan<K, T>(&self, range: T) -> Result<DbIterator, crate::Error>
 where
     K: AsRef<[u8]> + Send,
     T: RangeBounds<K> + Send;
 
-// Scan rows (new) - returns complete row information
-pub async fn scan_rows<K, T>(&self, range: T) -> Result<DbRowIterator, crate::Error>
-where
-    K: AsRef<[u8]> + Send,
-    T: RangeBounds<K> + Send;
-
-// Scan rows with options (new)
-pub async fn scan_rows_with_options<K, T>(
-    &self,
-    range: T,
-    options: &ScanOptions,
-) -> Result<DbRowIterator, crate::Error>
-where
-    K: AsRef<[u8]> + Send,
-    T: RangeBounds<K> + Send;
+// DbIterator methods
+impl DbIterator {
+    // Existing method - returns key-value pairs (unchanged)
+    pub async fn next(&mut self) -> Result<Option<KeyValue>, crate::Error>;
+    
+    // Renamed from next_key_value() - returns complete row information
+    pub async fn next_row(&mut self) -> Result<Option<RowEntry>, crate::Error>;
+}
 
 // RowEntry is already public and contains all necessary information
 pub struct RowEntry {
     pub key: Bytes,
-    pub value: ValueDeletable,  // Can be Value, Merge, or Tombstone
+    pub value: ValueDeletable,  // See note below on ValueDeletable behavior
     pub seq: u64,
     pub create_ts: Option<i64>,
     pub expire_ts: Option<i64>,
 }
+
+// ValueDeletable type definition (unchanged)
+pub enum ValueDeletable {
+    Value(Bytes),      // Regular value
+    Merge(Bytes),      // Merge operation value
+    Tombstone,         // Deleted key marker
+}
+```
+
+> [!IMPORTANT]
+> **ValueDeletable Behavior in `next_row()`**
+> 
+> While `ValueDeletable` has three variants (`Value`, `Merge`, `Tombstone`), **`next_row()` will never return entries with `Tombstone`** in practice:
+> - **Tombstones are filtered out** by the underlying iterator (same as `next()` behavior)
+> - Users will only see `ValueDeletable::Value` or `ValueDeletable::Merge` in returned `RowEntry` objects
+> - For merge operations: if a base value exists, returns `Value` with the computed result; otherwise returns `Merge` with the final merge value
 ```
 
 **Usage Example**:
@@ -181,41 +185,61 @@ if let Some(entry) = row {
     println!("Key: {:?}", entry.key);
     println!("Seq: {}, Created: {:?}, Expires: {:?}", 
              entry.seq, entry.create_ts, entry.expire_ts);
+    
+    // Handle ValueDeletable variants (Tombstone will never appear here)
     match entry.value {
         ValueDeletable::Value(v) => println!("Value: {:?}", v),
-        ValueDeletable::Merge(m) => println!("Merge: {:?}", m),
-        ValueDeletable::Tombstone => println!("Tombstone"),
+        ValueDeletable::Merge(m) => println!("Merge value: {:?}", m),
+        ValueDeletable::Tombstone => unreachable!("next_row() never returns Tombstone"),
     }
 }
 
-// Scan rows in a range
-let mut iter = db.scan_rows(b"a"..b"z").await?;
-while let Some(row_entry) = iter.next().await? {
-    println!("Key: {:?}, Seq: {}", row_entry.key, row_entry.seq);
+// Scan rows using DbIterator::next_row()
+let mut iter = db.scan(b"a"..b"z").await?;
+while let Some(row_entry) = iter.next_row().await? {
+    match row_entry.value {
+        ValueDeletable::Value(v) => {
+            println!("Key: {:?}, Value: {:?}, Seq: {}", 
+                     row_entry.key, v, row_entry.seq);
+        }
+        ValueDeletable::Merge(m) => {
+            println!("Key: {:?}, Merge: {:?}, Seq: {}", 
+                     row_entry.key, m, row_entry.seq);
+        }
+        ValueDeletable::Tombstone => unreachable!(),
+    }
 }
 
-// Scan rows with options
-let mut iter = db.scan_rows_with_options(
-    b"a"..b"z",
-    &ScanOptions::default()
-).await?;
+// You can still use next() for key-value pairs (no need to match)
+let mut iter = db.scan(b"a"..b"z").await?;
+while let Some((key, value)) = iter.next().await? {
+    println!("Key: {:?}, Value: {:?}", key, value);
+}
 ```
 
 **Implementation Details**:
 
-1.  **Reuse Existing `RowEntry` Type**:
-    - `RowEntry` is already public and contains all necessary fields: `key`, `value`, `seq`, `create_ts`, and `expire_ts`.
-    - Since decoding metadata requires decoding the entire row, returning complete `RowEntry` has no performance penalty.
-    - Introduce `DbRowIterator` to iterate over `RowEntry` objects.
-2.  **Value Type Handling**:
-    - `RowEntry.value` is of type `ValueDeletable`, which can be:
-      - `ValueDeletable::Value(Bytes)` - Regular value
-      - `ValueDeletable::Merge(Bytes)` - Merge operation. **Important**: If a key has multiple merge operations, only the **latest merge delta value itself** is returned. The merge values are not applied/combined.
-      - `ValueDeletable::Tombstone` - Deleted key
-3.  **Tombstone and Expired Key Handling**: 
-    - **Tombstones**: `get_row` and `scan_rows` can return tombstones (`ValueDeletable::Tombstone`), allowing users to see that a key has been deleted along with its metadata (seq, timestamps).
-    - **Expired Keys**: By default, expired keys (based on TTL) are skipped. Future options may allow including expired keys.
-4.  **Multi-Version Behavior**: `scan_rows` returns the **latest visible version** of each key (consistent with `scan` behavior). If a key has multiple versions at different sequence numbers, only the version visible at the current time (or specified snapshot sequence number) is returned.
+1.  **Rename `next_key_value()` to `next_row()`**:
+    - Rename the existing `DbIterator::next_key_value()` method to `next_row()`.
+    - Change return type from `Result<Option<KeyValue>, SlateDBError>` to `Result<Option<RowEntry>, SlateDBError>`.
+    - The public wrapper `next()` continues to call the internal iterator and return `KeyValue`.
+    - `next_row()` becomes a public method that returns the full `RowEntry`.
+
+2.  **`RowEntry.value` Behavior**:
+    - `RowEntry.value` remains as `ValueDeletable` type (no type changes needed).
+    - `next_row()` will **never** return entries with `Tombstone` values:
+      - The underlying iterator already filters out tombstones (consistent with `next()` behavior).
+    - For **Merge Operations**:
+      - If merge operator is configured and merges are resolved, returns `ValueDeletable::Value` with the computed result.
+      - If no base value exists for merges, returns `ValueDeletable::Merge` with the final merge value.
+      - This is consistent with how `KeyValueIterator::next()` handles merges (see line 42-44 in iter.rs).
+
+3.  **Implement `get_row()` Using `scan()`**:
+    - `get_row(key)` internally calls `scan(key..=key)` to get a `DbIterator`.
+    - Then calls `next_row()` on the iterator to get the `RowEntry`.
+    - This reuses existing scan logic and avoids code duplication.
+
+4.  **Multi-Version Behavior**: `next_row()` returns the **latest visible version** of each key (consistent with `next()` behavior). If a key has multiple versions at different sequence numbers, only the version visible at the current time (or specified snapshot sequence number) is returned.
 
 <!-- TOC --><a name="2-modify-putwrite-return-types"></a>
 ### 2. Modify Put/Write Return Types
@@ -392,9 +416,9 @@ while let Some((key, value)) = iter.next().await? {
     println!("Key: {:?}, Value: {:?}", key, value);
 }
 
-// Row queries also work with snapshots
-let mut row_iter = snapshot.scan_rows(b"key1"..=b"key2").await?;
-while let Some(row_entry) = row_iter.next().await? {
+// Row queries also work with snapshots using next_row()
+let mut iter = snapshot.scan(b"key1"..=b"key2").await?;
+while let Some(row_entry) = iter.next_row().await? {
     println!("Key: {:?}, Seq: {}", row_entry.key, row_entry.seq);
 }
 ```
@@ -421,11 +445,11 @@ while let Some(row_entry) = row_iter.next().await? {
 **Breaking Changes**:
 
 1.  **New Row Query APIs**:
-    - New APIs introduced: `get_row()`, `get_row_with_options()`, `scan_rows()`, `scan_rows_with_options()`.
-    - A new `DbRowIterator` type is introduced for row iteration.
-    - These APIs reuse the existing public `RowEntry` type.
-    - Existing `KeyValueIterator` trait and `DbIterator` type remain unchanged.
-    - No breaking changes to existing APIs.
+    - New APIs introduced: `get_row()`, `get_row_with_options()`.
+    - `DbIterator::next_key_value()` renamed to `next_row()` with return type changed to `Result<Option<RowEntry>, crate::Error>`.
+    - `RowEntry.value` remains as `ValueDeletable` type (no breaking changes to the type itself).
+    - `next_row()` never returns `Tombstone` values (tombstones are filtered out by the underlying iterator).
+    - Existing `next()` method on `DbIterator` remains unchanged.
 2.  **Put/Write Return Type Modification**:
     - All `put()`, `put_with_options()`, `delete()`, `delete_with_options()`, `merge()`, `merge_with_options()`, `write()`, and `write_with_options()` calls must be updated to handle the new `Result<WriteHandle, ...>` return type.
     - To access the sequence number, call `.seqnum()` on the returned `WriteHandle`.
@@ -446,11 +470,17 @@ No migration needed for existing code. Simply use the new row query APIs when yo
 ```rust
 // Existing code continues to work
 let value = db.get(b"key").await?;
-let mut iter: DbIterator = db.scan(..).await?;
+let mut iter = db.scan(..).await?;
+while let Some((key, value)) = iter.next().await? {
+    // ...
+}
 
 // New row query APIs
 let row = db.get_row(b"key").await?;
-let mut row_iter: DbRowIterator = db.scan_rows(..).await?;
+let mut iter = db.scan(..).await?;
+while let Some(row_entry) = iter.next_row().await? {
+    // Access metadata: row_entry.seq, row_entry.create_ts, row_entry.expire_ts
+}
 ```
 
 <!-- TOC --><a name="testing"></a>
