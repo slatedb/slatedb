@@ -204,7 +204,8 @@ mod tests {
     use rstest::rstest;
 
     use super::*;
-    use crate::block_iterator::BlockIterator;
+    use crate::block_iterator::BlockIteratorLatest;
+    use crate::format::sst::BlockBuilder;
     use crate::test_utils::assert_iterator;
     use crate::{
         test_utils::{assert_debug_snapshot, decode_codec_entries},
@@ -359,7 +360,7 @@ mod tests {
     })]
     #[tokio::test]
     async fn test_should_clamp_allocated_size(#[case] case: ClampAllocTestCase) {
-        let mut builder = BlockBuilderV1::new(4096);
+        let mut builder = BlockBuilder::new_latest(4096);
         for e in case.entries.iter() {
             assert!(builder.add(e.clone()).unwrap());
         }
@@ -376,7 +377,7 @@ mod tests {
         assert_eq!(block.data, block_clamped.data);
         assert_eq!(block.offsets, block_clamped.offsets);
         assert_ne!(block.data.as_ptr(), block_clamped.data.as_ptr());
-        let mut iter = BlockIterator::new_ascending(block_clamped);
+        let mut iter = BlockIteratorLatest::new_ascending(block_clamped);
         assert_iterator(&mut iter, case.entries).await;
     }
 
