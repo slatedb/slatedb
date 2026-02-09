@@ -149,14 +149,16 @@ where
 
 // DbIterator methods
 impl DbIterator {
-    // Modified to return complete row information instead of KeyValue
-    // Internally, next_key_value() is renamed to next_row() and returns RowEntry
-    pub async fn next(&mut self) -> Result<Option<RowEntry>, crate::Error>;
+    // Returns KeyValue for normal scan usage (default behavior)
+    pub async fn next(&mut self) -> Result<Option<KeyValue>, crate::Error>;
+    
+    // Returns complete row information including metadata
+    pub async fn next_row(&mut self) -> Result<Option<RowEntry>, crate::Error>;
 }
 ```
 
 > [!NOTE]
-> **Implementation Note**: Internally, the `next_key_value()` method is renamed to `next_row()` and modified to return `RowEntry`. The public `next()` method calls `next_row()` and returns the `RowEntry` directly.
+> **Implementation Note**: Internally, the existing `next_key_value()` method is renamed to `next_row()` and modified to return `RowEntry`. The public `next()` method calls `next_row()` internally, extracts the `KeyValue` from the `RowEntry`, and returns it. The public `next_row()` method exposes the complete `RowEntry` directly.
 
 ```rust
 // RowEntry is already public and contains all necessary information
@@ -198,13 +200,19 @@ if let Some(entry) = row {
     match entry.value {
         ValueDeletable::Value(v) => println!("Value: {:?}", v),
         ValueDeletable::Merge(m) => println!("Merge value: {:?}", m),
-        ValueDeletable::Tombstone => unreachable!("next() never returns Tombstone"),
+        ValueDeletable::Tombstone => unreachable!("get_row() never returns Tombstone"),
     }
 }
 
-// Scan rows using DbIterator::next()
+// Normal scan usage - returns KeyValue (no need to match on ValueDeletable)
 let mut iter = db.scan(b"a"..b"z").await?;
-while let Some(row_entry) = iter.next().await? {
+while let Some((key, value)) = iter.next().await? {
+    println!("Key: {:?}, Value: {:?}", key, value);
+}
+
+// Scan with complete row information - returns RowEntry
+let mut iter = db.scan(b"a"..b"z").await?;
+while let Some(row_entry) = iter.next_row().await? {
     match row_entry.value {
         ValueDeletable::Value(v) => {
             println!("Key: {:?}, Value: {:?}, Seq: {}", 
@@ -221,27 +229,29 @@ while let Some(row_entry) = iter.next().await? {
 
 **Implementation Details**:
 
-1.  **Modify `DbIterator::next()` to Return `RowEntry`**:
-    - Change `DbIterator::next()` return type from `Result<Option<KeyValue>, crate::Error>` to `Result<Option<RowEntry>, crate::Error>`.
-    - Rename the internal `next_key_value()` method to `next_row()` and change its return type to `Result<Option<RowEntry>, SlateDBError>`.
-    - `next()` will call `next_row()` internally and return the `RowEntry` directly.
-    - Since decoding metadata requires decoding the entire row, returning complete `RowEntry` has no performance penalty.
+1.  **Add `DbIterator::next_row()` Method**:
+    - Add a new public method `next_row()` with return type `Result<Option<RowEntry>, crate::Error>`.
+    - Rename the internal `next_key_value()` method to an internal `next_row_internal()` and change its return type to `Result<Option<RowEntry>, SlateDBError>`.
+    - The public `next()` method calls `next_row_internal()` internally, extracts `KeyValue` from the `RowEntry`, and returns it (maintaining backward compatibility).
+    - The public `next_row()` method calls `next_row_internal()` and returns the complete `RowEntry` directly.
+    - Since decoding metadata requires decoding the entire row, there is no performance penalty for providing both methods.
 
 2.  **`RowEntry.value` Behavior**:
     - `RowEntry.value` remains as `ValueDeletable` type (no type changes needed).
-    - `next()` will **never** return entries with `Tombstone` values:
+    - Both `next()` and `next_row()` will **never** return entries with `Tombstone` values:
       - The underlying iterator already filters out tombstones.
     - For **Merge Operations**:
       - If merge operator is configured and merges are resolved, returns `ValueDeletable::Value` with the computed result.
       - If no base value exists for merges, returns `ValueDeletable::Merge` with the final merge value.
       - This is consistent with how `KeyValueIterator::next()` handles merges (see line 42-44 in iter.rs).
+    - `next()` extracts the value from `ValueDeletable` and returns it as `Bytes` in the `KeyValue` tuple, so normal scan usage doesn't need to match on `ValueDeletable`.
 
 3.  **Implement `get_row()` Using `scan()`**:
     - `get_row(key)` internally calls `scan(key..=key)` to get a `DbIterator`.
-    - Then calls `next()` on the iterator to get the `RowEntry`.
+    - Then calls `next_row()` on the iterator to get the `RowEntry`.
     - This reuses existing scan logic and avoids code duplication.
 
-4.  **Multi-Version Behavior**: `next()` returns the **latest visible version** of each key. If a key has multiple versions at different sequence numbers, only the version visible at the current time (or specified snapshot sequence number) is returned.
+4.  **Multi-Version Behavior**: Both `next()` and `next_row()` return the **latest visible version** of each key. If a key has multiple versions at different sequence numbers, only the version visible at the current time (or specified snapshot sequence number) is returned.
 
 <!-- TOC --><a name="2-modify-putwrite-return-types"></a>
 ### 2. Modify Put/Write Return Types
@@ -423,21 +433,18 @@ db.put(b"key2", b"value2_v2").await?;
 // Create snapshot at seq1
 let snapshot = db.snapshot_with_options(SnapshotOptions::default().read_at(seq1))?;
 
-// Scan at historical version via snapshot
+// Normal scan at historical version via snapshot
 let mut iter = snapshot.scan(b"key1"..=b"key2").await?;
-while let Some(row_entry) = iter.next().await? {
+while let Some((key, value)) = iter.next().await? {
     // Will return value1_v1 and value2_v1
-    match row_entry.value {
-        ValueDeletable::Value(v) => println!("Key: {:?}, Value: {:?}", row_entry.key, v),
-        ValueDeletable::Merge(m) => println!("Key: {:?}, Merge: {:?}", row_entry.key, m),
-        ValueDeletable::Tombstone => unreachable!(),
-    }
+    println!("Key: {:?}, Value: {:?}", key, value);
 }
 
-// Row queries also work with snapshots
+// Scan with complete row information at historical version
 let mut iter = snapshot.scan(b"key1"..=b"key2").await?;
-while let Some(row_entry) = iter.next().await? {
-    println!("Key: {:?}, Seq: {}", row_entry.key, row_entry.seq);
+while let Some(row_entry) = iter.next_row().await? {
+    println!("Key: {:?}, Seq: {}, Value: {:?}", 
+             row_entry.key, row_entry.seq, row_entry.value);
 }
 ```
 
@@ -481,11 +488,11 @@ while let Some(row_entry) = iter.next().await? {
 **Breaking Changes**:
 
 1.  **New Row Query APIs**:
-    - New APIs introduced: `get_row()`, `get_row_with_options()`.
-    - `DbIterator::next()` return type changed from `Result<Option<KeyValue>, crate::Error>` to `Result<Option<RowEntry>, crate::Error>`.
-    - Internal `next_key_value()` method renamed to `next_row()` and modified to return `RowEntry`.
+    - New APIs introduced: `get_row()`, `get_row_with_options()`, `DbIterator::next_row()`.
+    - `DbIterator::next()` maintains backward compatibility (still returns `Result<Option<KeyValue>, crate::Error>`).
+    - Internal `next_key_value()` method renamed to `next_row_internal()` and modified to return `RowEntry`.
     - `RowEntry.value` remains as `ValueDeletable` type (no breaking changes to the type itself).
-    - `next()` never returns `Tombstone` values (tombstones are filtered out by the underlying iterator).
+    - Neither `next()` nor `next_row()` return `Tombstone` values (tombstones are filtered out by the underlying iterator).
 2.  **Put/Write Return Type Modification**:
     - All `put()`, `put_with_options()`, `delete()`, `delete_with_options()`, `merge()`, `merge_with_options()`, `write()`, and `write_with_options()` calls must be updated to handle the new `Result<WriteHandle, ...>` return type.
     - To access the sequence number, call `.seqnum()` on the returned `WriteHandle`.
@@ -493,29 +500,28 @@ while let Some(row_entry) = iter.next().await? {
 
 **Backward Compatibility**:
 
-- `get_row()` and `get_row_with_options()` are new APIs.
+- `get_row()`, `get_row_with_options()`, and `DbIterator::next_row()` are new APIs.
 - They return the existing `RowEntry` type, which is already public.
-- `DbIterator::next()` return type changed from `KeyValue` to `RowEntry` (breaking change for existing scan users).
+- `DbIterator::next()` maintains backward compatibility (still returns `KeyValue`).
 - `snapshot_with_options()` is a new API that extends existing snapshot functionality.
 - `SnapshotOptions.seqnum` allows creating snapshots at specific sequence numbers.
 - No impact on any storage formats (WAL/SST/Manifest).
 
 **Migration Path**:
 
-No migration needed for existing code. Simply use the new row query APIs when you need complete row information:
+No migration needed for existing code. `DbIterator::next()` maintains backward compatibility:
 
 ```rust
-// Migration: Update existing scan code
-// Before:
-// let mut iter = db.scan(..).await?;
-// while let Some((key, value)) = iter.next().await? {
-//     // ...
-// }
-
-// After:
+// Existing scan code continues to work unchanged
 let mut iter = db.scan(..).await?;
-while let Some(row_entry) = iter.next().await? {
-    // Extract value from RowEntry
+while let Some((key, value)) = iter.next().await? {
+    // No changes needed
+}
+
+// When you need complete row information, use next_row()
+let mut iter = db.scan(..).await?;
+while let Some(row_entry) = iter.next_row().await? {
+    // Access metadata: row_entry.seq, row_entry.create_ts, row_entry.expire_ts
     match row_entry.value {
         ValueDeletable::Value(v) => {
             // Use row_entry.key and v
@@ -525,7 +531,6 @@ while let Some(row_entry) = iter.next().await? {
         }
         ValueDeletable::Tombstone => unreachable!(),
     }
-    // Access metadata: row_entry.seq, row_entry.create_ts, row_entry.expire_ts
 }
 
 // New row query APIs
@@ -550,7 +555,8 @@ let row = db.get_row(b"key").await?;
 **Performance Testing**:
 
 - `get_row()` performance: Since it returns complete row information, it decodes both metadata and value. Performance should be similar to existing `get()` operations.
-- `scan()` with `next()` returning `RowEntry`: Performance should be similar to the previous `next()` returning `KeyValue`, as metadata is already decoded during iteration.
+- `scan()` with `next()` returning `KeyValue`: Performance should remain unchanged (backward compatible).
+- `scan()` with `next_row()` returning `RowEntry`: Performance should be similar to `next()`, as metadata is already decoded during iteration.
 - `get_with_options` with specified snapshot sequence number.
 
 <!-- TOC --><a name="alternatives"></a>
