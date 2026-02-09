@@ -425,9 +425,13 @@ let snapshot = db.snapshot_with_options(SnapshotOptions::default().read_at(seq1)
 
 // Scan at historical version via snapshot
 let mut iter = snapshot.scan(b"key1"..=b"key2").await?;
-while let Some((key, value)) = iter.next().await? {
+while let Some(row_entry) = iter.next().await? {
     // Will return value1_v1 and value2_v1
-    println!("Key: {:?}, Value: {:?}", key, value);
+    match row_entry.value {
+        ValueDeletable::Value(v) => println!("Key: {:?}, Value: {:?}", row_entry.key, v),
+        ValueDeletable::Merge(m) => println!("Key: {:?}, Merge: {:?}", row_entry.key, m),
+        ValueDeletable::Tombstone => unreachable!(),
+    }
 }
 
 // Row queries also work with snapshots
@@ -489,8 +493,9 @@ while let Some(row_entry) = iter.next().await? {
 
 **Backward Compatibility**:
 
-- `get_row()`, `get_row_with_options()`, `scan_rows()`, and `scan_rows_with_options()` are new APIs.
+- `get_row()` and `get_row_with_options()` are new APIs.
 - They return the existing `RowEntry` type, which is already public.
+- `DbIterator::next()` return type changed from `KeyValue` to `RowEntry` (breaking change for existing scan users).
 - `snapshot_with_options()` is a new API that extends existing snapshot functionality.
 - `SnapshotOptions.seqnum` allows creating snapshots at specific sequence numbers.
 - No impact on any storage formats (WAL/SST/Manifest).
@@ -500,20 +505,31 @@ while let Some(row_entry) = iter.next().await? {
 No migration needed for existing code. Simply use the new row query APIs when you need complete row information:
 
 ```rust
-// Existing code continues to work
-let value = db.get(b"key").await?;
+// Migration: Update existing scan code
+// Before:
+// let mut iter = db.scan(..).await?;
+// while let Some((key, value)) = iter.next().await? {
+//     // ...
+// }
+
+// After:
 let mut iter = db.scan(..).await?;
-while let Some((key, value)) = iter.next().await? {
-    // ...
+while let Some(row_entry) = iter.next().await? {
+    // Extract value from RowEntry
+    match row_entry.value {
+        ValueDeletable::Value(v) => {
+            // Use row_entry.key and v
+        }
+        ValueDeletable::Merge(m) => {
+            // Use row_entry.key and m
+        }
+        ValueDeletable::Tombstone => unreachable!(),
+    }
+    // Access metadata: row_entry.seq, row_entry.create_ts, row_entry.expire_ts
 }
 
 // New row query APIs
 let row = db.get_row(b"key").await?;
-let mut iter = db.scan(..).await?;
-while let Some(row_entry) = iter.next().await? {
-    // Access metadata: row_entry.seq, row_entry.create_ts, row_entry.expire_ts
-    // Access value: match row_entry.value { ... }
-}
 ```
 
 <!-- TOC --><a name="testing"></a>
@@ -533,7 +549,8 @@ while let Some(row_entry) = iter.next().await? {
 
 **Performance Testing**:
 
-- `get_row`/`scan_rows` performance: Since these return complete row information, they decode both metadata and value. Performance should be similar to existing `get`/`scan` operations.
+- `get_row()` performance: Since it returns complete row information, it decodes both metadata and value. Performance should be similar to existing `get()` operations.
+- `scan()` with `next()` returning `RowEntry`: Performance should be similar to the previous `next()` returning `KeyValue`, as metadata is already decoded during iteration.
 - `get_with_options` with specified snapshot sequence number.
 
 <!-- TOC --><a name="alternatives"></a>
