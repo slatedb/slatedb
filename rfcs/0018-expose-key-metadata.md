@@ -159,7 +159,6 @@ impl DbIterator {
 > **Implementation Note**: Internally, the `next_key_value()` method is renamed to `next_row()` and modified to return `RowEntry`. The public `next()` method calls `next_row()` and returns the `RowEntry` directly.
 
 ```rust
-
 // RowEntry is already public and contains all necessary information
 pub struct RowEntry {
     pub key: Bytes,
@@ -184,7 +183,6 @@ pub enum ValueDeletable {
 > - **Tombstones are filtered out** by the underlying iterator
 > - Users will only see `ValueDeletable::Value` or `ValueDeletable::Merge` in returned `RowEntry` objects
 > - For merge operations: if a base value exists, returns `Value` with the computed result; otherwise returns `Merge` with the final merge value
-```
 
 **Usage Example**:
 
