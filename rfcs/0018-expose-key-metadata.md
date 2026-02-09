@@ -4,16 +4,22 @@ Table of Contents:
 
 <!-- TOC start (generated with https://github.com/derlin/bitdowntoc) -->
 
-- [Summary](#summary)
-- [Motivation](#motivation)
-- [Goals](#goals)
-- [Non-Goals](#non-goals)
-- [Use Cases](#use-cases)
-   * [Change Data Capture (CDC)](#change-data-capture-cdc)
-   * [Durability Guarantees](#durability-guarantees)
-   * [TTL Management](#ttl-management)
-- [Design](#design)
-   * [1. Row Query Interface](#1-row-query-interface)
+- [Expose Row Information](#expose-row-information)
+  - [Summary](#summary)
+  - [Motivation](#motivation)
+  - [Goals](#goals)
+  - [Non-Goals](#non-goals)
+  - [Use Cases](#use-cases)
+    - [Change Data Capture (CDC)](#change-data-capture-cdc)
+    - [Durability Guarantees](#durability-guarantees)
+    - [TTL Management](#ttl-management)
+  - [Design](#design)
+    - [1. Row Query Interface](#1-row-query-interface)
+    - [2. Modify Put/Write Return Types](#2-modify-putwrite-return-types)
+    - [3. Support Query by Version](#3-support-query-by-version)
+  - [Impact Analysis](#impact-analysis)
+  - [Testing](#testing)
+  - [Alternatives](#alternatives)
 
 <!-- TOC end -->
 
@@ -253,8 +259,12 @@ while let Some((key, value)) = iter.next().await? {
 /// Handle returned from write operations, containing metadata about the write.
 /// This structure is designed to be extensible for future enhancements.
 pub struct WriteHandle {
+    /// The sequence number of this entry.
     seq: u64,
-    create_ts: u64,
+    /// The creation timestamp (if set).
+    create_ts: Option<i64>,
+    /// The expiration timestamp (if set).
+    expire_ts: Option<i64>,
 }
 
 impl WriteHandle {
@@ -264,8 +274,13 @@ impl WriteHandle {
     }
     
     /// Returns the creation timestamp assigned to this write operation.
-    pub fn create_ts(&self) -> u64 {
+    pub fn create_ts(&self) -> Option<i64> {
         self.create_ts
+    }
+    
+    /// Returns the expiration timestamp assigned to this write operation.
+    pub fn expire_ts(&self) -> Option<i64> {
+        self.expire_ts
     }
     
     // Future extensions can be added here, for example:
@@ -312,9 +327,11 @@ pub async fn commit_with_options(self, options: &WriteOptions) -> Result<WriteHa
 **Migration Example**:
 
 ```rust
-// Single key operation - get sequence number and timestamp
+// Single key operation - get sequence number and timestamps
 let handle = db.put(b"key", b"value").await?;
-println!("Seq: {}, Created at: {}", handle.seqnum(), handle.create_ts());
+println!("Seq: {}", handle.seqnum());
+println!("Created at: {:?}", handle.create_ts());
+println!("Expires at: {:?}", handle.expire_ts());
 
 // Batch operation
 let mut batch = WriteBatch::new();
@@ -323,14 +340,15 @@ batch.put(b"key2", b"value2");
 batch.delete(b"key1");
 
 let handle = db.write(batch).await?;
-println!("Batch committed at seq: {}, ts: {}", handle.seqnum(), handle.create_ts());
-// All operations in the batch share this sequence number and timestamp
+println!("Batch committed at seq: {}", handle.seqnum());
+// All operations in the batch share this sequence number and timestamps
 
 // If you need the full RowEntry, use get_row with the seqnum
 let row = db.get_row(b"key").await?;
 if let Some(entry) = row {
     assert_eq!(entry.seq, handle.seqnum());
     assert_eq!(entry.create_ts, handle.create_ts());
+    assert_eq!(entry.expire_ts, handle.expire_ts());
 }
 
 // Option 2: Ignore return values (if you don't need the metadata)
@@ -343,12 +361,12 @@ let _ = db.write(batch2).await?;
 
 **Implementation Details**:
 
-- Modify `DbInner::write_with_options` to return `WriteHandle` (containing the assigned `commit_seq` and `create_ts`).
+- Modify `DbInner::write_with_options` to return `WriteHandle` (containing the assigned `commit_seq`, `create_ts`, and `expire_ts`).
 - `put()`, `delete()`, and `merge()` return the `WriteHandle` received from `DbInner`.
 - Both `put`, `delete`, and `merge` operations share the same underlying write pipeline.
-- `WriteHandle` contains the sequence number and creation timestamp assigned to the write operation.
-- The `create_ts` is assigned at the same time as the `commit_seq` during write batch processing.
-- **Note on Transactions**: Within a transaction, the individual write operations (`put`, `delete`, `merge`) do not return `WriteHandle` because sequence numbers are not known during transaction execution. However, `DbTransaction::commit()` and `commit_with_options()` **do** return `WriteHandle`, allowing users to access the commit sequence number and timestamp assigned when the transaction is successfully committed.
+- `WriteHandle` contains the sequence number, creation timestamp, and expiration timestamp assigned to the write operation.
+- The `create_ts` and `expire_ts` are assigned at the same time as the `commit_seq` during write batch processing.
+- **Note on Transactions**: Within a transaction, the individual write operations (`put`, `delete`, `merge`) do not return `WriteHandle` because sequence numbers are not known during transaction execution. However, `DbTransaction::commit()` and `commit_with_options()` **do** return `WriteHandle`, allowing users to access the commit sequence number and timestamps assigned when the transaction is successfully committed.
 
 <!-- TOC --><a name="3-support-query-by-version"></a>
 ### 3. Support Query by Version
