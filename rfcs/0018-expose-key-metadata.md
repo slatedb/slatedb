@@ -34,7 +34,7 @@ Authors:
 This RFC proposes three related API improvements:
 
 1.  **Modify Write API Return Types**: Change the return type of `db.put()`, `db.delete()`, `db.merge()`, and `db.write()` (including their `_with_options` variants) from `Result<(), ...>` to `Result<WriteHandle, ...>` to return a write handle containing the assigned sequence number and timestamps. This design allows for future extensions such as `await_durability()`.
-2.  **New Row Query Interface**: Introduce `get_row()` and `get_row_with_options()` to query complete row information. Additionally, add a new `DbIterator::next_row()` method that returns `RowEntry`, allowing users to access complete row entries (including metadata: sequence number, creation timestamp, expiration timestamp) when using `scan()`. The existing `DbIterator::next()` continues to return `KeyValue` for backward compatibility.
+2.  **New Row Query Interface**: Introduce `get_row()` and `get_row_with_options()` for single-key row queries that return `RowEntry`. For scans, add `DbIterator::next_row()` which returns `RowEntry` (including metadata: sequence number, creation timestamp, expiration timestamp). The existing `DbIterator::next()` continues to return `KeyValue` for backward compatibility.
 3.  **Support Query by Version**: Add a `seqnum` option to `SnapshotOptions`, enabling users to create snapshots at specific sequence numbers and read historical versions of keys.
 
 <!-- TOC --><a name="motivation"></a>
