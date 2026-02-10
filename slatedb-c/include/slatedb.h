@@ -14,14 +14,12 @@
 
 typedef enum CSdbError {
     Success = 0,
-    InvalidArgument = 1,
-    NotFound = 2,
-    AlreadyExists = 3,
-    IOError = 4,
-    InternalError = 5,
-    NullPointer = 6,
-    InvalidHandle = 7,
-    InvalidProvider = 8,
+    Transaction = 1,
+    Closed = 2,
+    Unavailable = 3,
+    Invalid = 4,
+    Data = 5,
+    Internal = 6,
 } CSdbError;
 
 // Contains the iterator and a reference to the owner to ensure proper lifetime management

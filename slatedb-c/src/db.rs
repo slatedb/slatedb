@@ -9,9 +9,10 @@ use crate::config::{
     convert_write_options,
 };
 use crate::error::{
-    create_error_result, create_handle_error_result, create_handle_success_result,
-    create_none_result, create_success_result, message_to_cstring, safe_str_from_ptr,
-    slate_error_to_code, CSdbBuilderResult, CSdbError, CSdbHandleResult, CSdbResult,
+    create_error_result, create_handle_error_result, create_handle_error_result_from_slate_error,
+    create_handle_success_result, create_success_result, message_to_cstring, safe_str_from_ptr,
+    slate_error_to_error_result, create_none_result, CSdbBuilderResult, CSdbError, CSdbHandleResult,
+    CSdbResult,
 };
 use crate::object_store::create_object_store;
 use crate::types::{
@@ -38,7 +39,7 @@ pub extern "C" fn slatedb_open(
     // Create a dedicated runtime for this DB instance
     let rt = match Builder::new_multi_thread().enable_all().build() {
         Ok(rt) => rt,
-        Err(err) => return create_handle_error_result(CSdbError::InternalError, &err.to_string()),
+        Err(err) => return create_handle_error_result(CSdbError::Invalid, &err.to_string()),
     };
 
     let url_str: Option<&str> = if url.is_null() {
@@ -75,7 +76,7 @@ pub extern "C" fn slatedb_open(
             let ffi = Box::new(SlateDbFFI { rt, db });
             create_handle_success_result(CSdbHandle(Box::into_raw(ffi)))
         }
-        Err(err) => create_handle_error_result(CSdbError::InternalError, &err.to_string()),
+        Err(err) => create_handle_error_result_from_slate_error(&err),
     }
 }
 
@@ -97,11 +98,11 @@ pub unsafe extern "C" fn slatedb_put_with_options(
     write_options: *const CSdbWriteOptions,
 ) -> CSdbResult {
     if handle.is_null() {
-        return create_error_result(CSdbError::InvalidHandle, "Invalid database handle");
+        return create_error_result(CSdbError::Invalid, "Invalid database handle");
     }
 
     if key.is_null() || value.is_null() {
-        return create_error_result(CSdbError::NullPointer, "Key or value is null");
+        return create_error_result(CSdbError::Invalid, "Key or value is null");
     }
 
     let key_slice = unsafe { std::slice::from_raw_parts(key, key_len) };
@@ -119,13 +120,7 @@ pub unsafe extern "C" fn slatedb_put_with_options(
         &rust_write_opts,
     )) {
         Ok(_) => create_success_result(),
-        Err(e) => {
-            let error_code = slate_error_to_code(&e);
-            create_error_result(
-                error_code,
-                &format!("Put with options operation failed: {}", e),
-            )
-        }
+        Err(e) => slate_error_to_error_result(&e),
     }
 }
 
@@ -142,11 +137,11 @@ pub unsafe extern "C" fn slatedb_delete_with_options(
     write_options: *const CSdbWriteOptions,
 ) -> CSdbResult {
     if handle.is_null() {
-        return create_error_result(CSdbError::InvalidHandle, "Invalid database handle");
+        return create_error_result(CSdbError::Invalid, "Invalid database handle");
     }
 
     if key.is_null() {
-        return create_error_result(CSdbError::NullPointer, "Key is null");
+        return create_error_result(CSdbError::Invalid, "Key is null");
     }
 
     let key_slice = unsafe { std::slice::from_raw_parts(key, key_len) };
@@ -157,13 +152,7 @@ pub unsafe extern "C" fn slatedb_delete_with_options(
     let inner = handle.as_inner();
     match inner.block_on(inner.db.delete_with_options(key_slice, &rust_write_opts)) {
         Ok(_) => create_success_result(),
-        Err(e) => {
-            let error_code = slate_error_to_code(&e);
-            create_error_result(
-                error_code,
-                &format!("Delete with options operation failed: {}", e),
-            )
-        }
+        Err(e) => slate_error_to_error_result(&e),
     }
 }
 
@@ -182,11 +171,11 @@ pub unsafe extern "C" fn slatedb_get_with_options(
     value_out: *mut CSdbValue,
 ) -> CSdbResult {
     if handle.is_null() {
-        return create_error_result(CSdbError::InvalidHandle, "Invalid database handle");
+        return create_error_result(CSdbError::Invalid, "Invalid database handle");
     }
 
     if key.is_null() || value_out.is_null() {
-        return create_error_result(CSdbError::NullPointer, "Key or value_out is null");
+        return create_error_result(CSdbError::Invalid, "Key or value_out is null");
     }
 
     let key_slice = unsafe { std::slice::from_raw_parts(key, key_len) };
@@ -211,47 +200,35 @@ pub unsafe extern "C" fn slatedb_get_with_options(
 
             create_success_result()
         }
-        Ok(None) => create_none_result(),
-        Err(e) => {
-            let error_code = slate_error_to_code(&e);
-            create_error_result(
-                error_code,
-                &format!("Get with options operation failed: {}", e),
-            )
-        }
+        Ok(None) => create_error_result(CSdbError::Invalid, "Key not found"),
+        Err(e) => slate_error_to_error_result(&e),
     }
 }
 
 #[no_mangle]
 pub extern "C" fn slatedb_flush(mut handle: CSdbHandle) -> CSdbResult {
     if handle.is_null() {
-        return create_error_result(CSdbError::InvalidHandle, "Invalid database handle");
+        return create_error_result(CSdbError::Invalid, "Invalid database handle");
     }
 
     let inner = unsafe { handle.as_inner() };
     match inner.block_on(inner.db.flush()) {
         Ok(_) => create_success_result(),
-        Err(e) => {
-            let error_code = slate_error_to_code(&e);
-            create_error_result(error_code, &format!("Flush operation failed: {}", e))
-        }
+        Err(e) => slate_error_to_error_result(&e),
     }
 }
 
 #[no_mangle]
 pub extern "C" fn slatedb_close(handle: CSdbHandle) -> CSdbResult {
     if handle.is_null() {
-        return create_error_result(CSdbError::InvalidHandle, "Invalid database handle");
+        return create_error_result(CSdbError::Invalid, "Invalid database handle");
     }
 
     unsafe {
         let inner = Box::from_raw(handle.0);
         match inner.block_on(inner.db.close()) {
             Ok(_) => create_success_result(),
-            Err(e) => {
-                let error_code = slate_error_to_code(&e);
-                create_error_result(error_code, &format!("Close operation failed: {}", e))
-            }
+            Err(e) => slate_error_to_error_result(&e),
         }
         // inner (SlateDbFFI) is automatically dropped here along with its runtime and DB
     }
@@ -275,11 +252,11 @@ pub unsafe extern "C" fn slatedb_scan_with_options(
     iterator_ptr: *mut *mut CSdbIterator,
 ) -> CSdbResult {
     if handle.is_null() {
-        return create_error_result(CSdbError::NullPointer, "Database handle is null");
+        return create_error_result(CSdbError::Invalid, "Database handle is null");
     }
 
     if iterator_ptr.is_null() {
-        return create_error_result(CSdbError::NullPointer, "Iterator output pointer is null");
+        return create_error_result(CSdbError::Invalid, "Iterator output pointer is null");
     }
 
     // Extract raw pointer before borrowing handle
@@ -307,10 +284,7 @@ pub unsafe extern "C" fn slatedb_scan_with_options(
             }
             create_success_result()
         }
-        Err(e) => {
-            let error_code = slate_error_to_code(&e);
-            create_error_result(error_code, &format!("Scan operation failed: {}", e))
-        }
+        Err(e) => slate_error_to_error_result(&e),
     }
 }
 
@@ -329,15 +303,15 @@ pub unsafe extern "C" fn slatedb_scan_prefix_with_options(
     iterator_ptr: *mut *mut CSdbIterator,
 ) -> CSdbResult {
     if handle.is_null() {
-        return create_error_result(CSdbError::NullPointer, "Database handle is null");
+        return create_error_result(CSdbError::Invalid, "Database handle is null");
     }
 
     if iterator_ptr.is_null() {
-        return create_error_result(CSdbError::NullPointer, "Iterator output pointer is null");
+        return create_error_result(CSdbError::Invalid, "Iterator output pointer is null");
     }
 
     if prefix.is_null() && prefix_len > 0 {
-        return create_error_result(CSdbError::NullPointer, "Prefix pointer is null");
+        return create_error_result(CSdbError::Invalid, "Prefix pointer is null");
     }
 
     let prefix_slice = if prefix_len == 0 {
@@ -360,10 +334,7 @@ pub unsafe extern "C" fn slatedb_scan_prefix_with_options(
             }
             create_success_result()
         }
-        Err(e) => {
-            let error_code = slate_error_to_code(&e);
-            create_error_result(error_code, &format!("Scan prefix operation failed: {}", e))
-        }
+        Err(e) => slate_error_to_error_result(&e),
     }
 }
 
@@ -377,10 +348,10 @@ pub unsafe extern "C" fn slatedb_metrics(
     value_out: *mut CSdbValue,
 ) -> CSdbResult {
     if handle.is_null() {
-        return create_error_result(CSdbError::InvalidHandle, "Invalid database handle");
+        return create_error_result(CSdbError::Invalid, "Invalid database handle");
     }
     if value_out.is_null() {
-        return create_error_result(CSdbError::NullPointer, "value_out is null");
+        return create_error_result(CSdbError::Invalid, "value_out is null");
     }
     let inner = handle.as_inner();
     let metrics = inner.db.metrics();
@@ -402,7 +373,7 @@ pub unsafe extern "C" fn slatedb_metrics(
             create_success_result()
         }
         Err(e) => create_error_result(
-            CSdbError::InternalError,
+            CSdbError::Internal,
             &format!("Metrics serialization failed: {}", e),
         ),
     }
@@ -496,10 +467,10 @@ pub unsafe extern "C" fn slatedb_builder_with_settings(
     settings_json: *const c_char,
 ) -> CSdbResult {
     if builder.is_null() {
-        return create_error_result(CSdbError::InvalidHandle, "Invalid pointer to builder");
+        return create_error_result(CSdbError::Invalid, "Invalid pointer to builder");
     }
     if settings_json.is_null() {
-        return create_error_result(CSdbError::InvalidHandle, "Invalid pointer to settings json");
+        return create_error_result(CSdbError::Invalid, "Invalid pointer to settings json");
     }
 
     let settings_str = match safe_str_from_ptr(settings_json) {
@@ -511,7 +482,7 @@ pub unsafe extern "C" fn slatedb_builder_with_settings(
         Ok(s) => s,
         Err(err) => {
             return create_error_result(
-                CSdbError::InvalidArgument,
+                CSdbError::Invalid,
                 &format!("Invalid settings json: {}", err),
             )
         }
@@ -537,7 +508,7 @@ pub unsafe extern "C" fn slatedb_builder_with_sst_block_size(
     size: u8,
 ) -> CSdbResult {
     if builder.is_null() {
-        return create_error_result(CSdbError::InvalidHandle, "Invalid pointer to builder");
+        return create_error_result(CSdbError::Invalid, "Invalid pointer to builder");
     }
 
     let block_size = match size {
@@ -550,7 +521,7 @@ pub unsafe extern "C" fn slatedb_builder_with_sst_block_size(
         7 => SstBlockSize::Block64Kib,
         _ => {
             return create_error_result(
-                CSdbError::InvalidArgument,
+                CSdbError::Invalid,
                 &format!("Invalid block size: {}", size),
             )
         }
@@ -575,7 +546,7 @@ pub unsafe extern "C" fn slatedb_builder_build(
     builder: *mut slatedb::DbBuilder<String>,
 ) -> CSdbHandleResult {
     if builder.is_null() {
-        return create_handle_error_result(CSdbError::InvalidHandle, "Invalid builder handle");
+        return create_handle_error_result(CSdbError::Invalid, "Invalid builder handle");
     }
 
     let builder_owned = Box::from_raw(builder);
@@ -583,7 +554,7 @@ pub unsafe extern "C" fn slatedb_builder_build(
     // Create a dedicated runtime for this DB instance
     let rt = match Builder::new_multi_thread().enable_all().build() {
         Ok(rt) => rt,
-        Err(err) => return create_handle_error_result(CSdbError::InternalError, &err.to_string()),
+        Err(err) => return create_handle_error_result(CSdbError::Internal, &err.to_string()),
     };
 
     match rt.block_on(builder_owned.build()) {
@@ -591,7 +562,7 @@ pub unsafe extern "C" fn slatedb_builder_build(
             let ffi = Box::new(SlateDbFFI { rt, db });
             create_handle_success_result(CSdbHandle(Box::into_raw(ffi)))
         }
-        Err(err) => create_handle_error_result(CSdbError::InternalError, &err.to_string()),
+        Err(err) => create_handle_error_result_from_slate_error(&err),
     }
 }
 

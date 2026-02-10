@@ -98,7 +98,7 @@ func (r *DbReader) Get(key []byte) ([]byte, error) {
 //	value, err := reader.GetWithOptions([]byte("user:123"), readOpts)
 func (r *DbReader) GetWithOptions(key []byte, opts *ReadOptions) ([]byte, error) {
 	if len(key) == 0 {
-		return nil, ErrInvalidArgument
+		return nil, ErrInvalid
 	}
 
 	keyPtr := (*C.uint8_t)(unsafe.Pointer(&key[0]))

@@ -1,6 +1,6 @@
 use crate::error::{
     create_error_result, create_none_result, create_success_result, slate_error_to_code, CSdbError,
-    CSdbResult,
+    CSdbResult, slate_error_to_error_result,
 };
 use crate::types::{CSdbIterator, CSdbKeyValue};
 
@@ -18,11 +18,11 @@ pub unsafe extern "C" fn slatedb_iterator_next(
     kv_out: *mut CSdbKeyValue,
 ) -> CSdbResult {
     if iter.is_null() {
-        return create_error_result(CSdbError::NullPointer, "Iterator pointer is null");
+        return create_error_result(CSdbError::Invalid, "Iterator pointer is null");
     }
 
     if kv_out.is_null() {
-        return create_error_result(CSdbError::NullPointer, "Output pointer is null");
+        return create_error_result(CSdbError::Invalid, "Output pointer is null");
     }
 
     let iter_ffi = unsafe { &mut *iter };
@@ -30,7 +30,7 @@ pub unsafe extern "C" fn slatedb_iterator_next(
 
     // Validate owner pointer is still alive (basic check)
     if !iter_ffi.is_owner_valid() {
-        return create_error_result(CSdbError::InvalidHandle, "Invalid database handle");
+        return create_error_result(CSdbError::Invalid, "Invalid database handle");
     }
 
     match CSdbIterator::block_on_with_owner(owner, iter_ffi.iter.next()) {
@@ -56,10 +56,7 @@ pub unsafe extern "C" fn slatedb_iterator_next(
             create_success_result()
         }
         Ok(None) => create_none_result(),
-        Err(e) => {
-            let error_code = slate_error_to_code(&e);
-            create_error_result(error_code, &format!("Iterator next failed: {}", e))
-        }
+        Err(e) => slate_error_to_error_result(&e),
     }
 }
 
@@ -74,14 +71,11 @@ pub unsafe extern "C" fn slatedb_iterator_seek(
     key_len: usize,
 ) -> CSdbResult {
     if iter.is_null() {
-        return create_error_result(CSdbError::NullPointer, "Iterator pointer is null");
+        return create_error_result(CSdbError::Invalid, "Iterator pointer is null");
     }
 
     if key.is_null() || key_len == 0 {
-        return create_error_result(
-            CSdbError::InvalidArgument,
-            "Seek key cannot be null or empty",
-        );
+        return create_error_result(CSdbError::Invalid, "Seek key cannot be null or empty");
     }
 
     let iter_ffi = unsafe { &mut *iter };
@@ -89,17 +83,14 @@ pub unsafe extern "C" fn slatedb_iterator_seek(
 
     // Validate owner pointer is still alive (basic check)
     if !iter_ffi.is_owner_valid() {
-        return create_error_result(CSdbError::InvalidHandle, "Invalid database handle");
+        return create_error_result(CSdbError::Invalid, "Invalid database handle");
     }
 
     let key_slice = unsafe { std::slice::from_raw_parts(key, key_len) };
 
     match CSdbIterator::block_on_with_owner(owner, iter_ffi.iter.seek(key_slice)) {
         Ok(_) => create_success_result(),
-        Err(e) => {
-            let error_code = slate_error_to_code(&e);
-            create_error_result(error_code, &format!("Iterator seek failed: {}", e))
-        }
+        Err(e) => slate_error_to_error_result(&e),
     }
 }
 
@@ -109,7 +100,7 @@ pub unsafe extern "C" fn slatedb_iterator_seek(
 #[no_mangle]
 pub unsafe extern "C" fn slatedb_iterator_close(iter: *mut CSdbIterator) -> CSdbResult {
     if iter.is_null() {
-        return create_error_result(CSdbError::NullPointer, "Iterator pointer is null");
+        return create_error_result(CSdbError::Invalid, "Iterator pointer is null");
     }
 
     // Simply drop the iterator - this frees all resources

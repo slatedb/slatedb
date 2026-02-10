@@ -10,19 +10,20 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"unsafe"
 )
 
 // Error definitions
 var (
-	ErrInvalidArgument = errors.New("invalid argument")
-	ErrNotFound        = errors.New("key not found")
-	ErrAlreadyExists   = errors.New("key already exists")
-	ErrIOError         = errors.New("I/O error")
-	ErrInternalError   = errors.New("internal error")
-	ErrNullPointer     = errors.New("null pointer")
-	ErrInvalidHandle   = errors.New("invalid handle")
-	ErrInvalidProvider = errors.New("invalid provider")
+	ErrTransaction = errors.New("transaction error")
+	ErrClosed      = errors.New("closed")
+	ErrUnvailable  = errors.New("unavailable")
+	ErrInvalid     = errors.New("invalid")
+	ErrData        = errors.New("data error")
+	ErrInternal    = errors.New("internal error")
+
+	ErrNotFound = errors.New("key not found")
 )
 
 // DB represents a SlateDB database connection
@@ -50,24 +51,20 @@ func resultToError(result C.struct_CSdbResult) error {
 	switch result.error {
 	case C.Success:
 		return nil
-	case C.InvalidArgument:
-		baseErr = ErrInvalidArgument
-	case C.NotFound:
-		baseErr = ErrNotFound
-	case C.AlreadyExists:
-		baseErr = ErrAlreadyExists
-	case C.IOError:
-		baseErr = ErrIOError
-	case C.InternalError:
-		baseErr = ErrInternalError
-	case C.NullPointer:
-		baseErr = ErrNullPointer
-	case C.InvalidHandle:
-		baseErr = ErrInvalidHandle
-	case C.InvalidProvider:
-		baseErr = ErrInvalidProvider
+	case C.Transaction:
+		baseErr = ErrTransaction
+	case C.Closed:
+		baseErr = ErrClosed
+	case C.Unavailable:
+		baseErr = ErrUnvailable
+	case C.Invalid:
+		baseErr = ErrInvalid
+	case C.Data:
+		baseErr = ErrData
+	case C.Internal:
+		baseErr = ErrInternal
 	default:
-		baseErr = ErrInternalError
+		baseErr = ErrInternal
 	}
 
 	// Include detailed error message if available
@@ -145,7 +142,7 @@ func (db *DB) Delete(key []byte) error {
 //	err := db.PutWithOptions([]byte("session:123"), []byte("data"), putOpts, writeOpts)
 func (db *DB) PutWithOptions(key, value []byte, putOpts *PutOptions, writeOpts *WriteOptions) error {
 	if len(key) == 0 {
-		return ErrInvalidArgument
+		return ErrInvalid
 	}
 
 	var keyPtr *C.uint8_t
@@ -188,7 +185,7 @@ func (db *DB) PutWithOptions(key, value []byte, putOpts *PutOptions, writeOpts *
 //	err := db.DeleteWithOptions([]byte("temp:123"), writeOpts)
 func (db *DB) DeleteWithOptions(key []byte, writeOpts *WriteOptions) error {
 	if len(key) == 0 {
-		return ErrInvalidArgument
+		return ErrInvalid
 	}
 
 	keyPtr := (*C.uint8_t)(unsafe.Pointer(&key[0]))
@@ -221,7 +218,7 @@ func (db *DB) DeleteWithOptions(key []byte, writeOpts *WriteOptions) error {
 //	value, err := db.GetWithOptions([]byte("user:123"), readOpts)
 func (db *DB) GetWithOptions(key []byte, readOpts *ReadOptions) ([]byte, error) {
 	if len(key) == 0 {
-		return nil, ErrInvalidArgument
+		return nil, ErrInvalid
 	}
 
 	keyPtr := (*C.uint8_t)(unsafe.Pointer(&key[0]))

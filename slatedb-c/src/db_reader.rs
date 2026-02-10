@@ -11,9 +11,10 @@ use crate::config::{
     convert_range_bounds, convert_read_options, convert_reader_options, convert_scan_options,
 };
 use crate::error::{
-    create_error_result, create_none_result, create_reader_handle_error_result,
-    create_reader_handle_success_result, create_success_result, safe_str_from_ptr,
-    slate_error_to_code, CSdbError, CSdbReaderHandleResult, CSdbResult,
+    create_error_result, create_reader_handle_error_result,
+    create_reader_handle_error_result_from_slate_error, create_reader_handle_success_result,
+    create_success_result, safe_str_from_ptr, slate_error_to_error_result, CSdbError,
+    CSdbReaderHandleResult, CSdbResult, create_none_result
 };
 use crate::object_store::create_object_store;
 use crate::types::{CSdbIterator, CSdbReadOptions, CSdbScanOptions, CSdbValue};
@@ -103,7 +104,7 @@ pub extern "C" fn slatedb_reader_open(
                 Ok(uuid) => Some(uuid),
                 Err(err) => {
                     return create_reader_handle_error_result(
-                        CSdbError::InvalidArgument,
+                        CSdbError::Invalid,
                         &format!("Invalid checkpoint_id format '{id_str}': {err}"),
                     )
                 }
@@ -119,7 +120,7 @@ pub extern "C" fn slatedb_reader_open(
     let rt = match Builder::new_multi_thread().enable_all().build() {
         Ok(rt) => rt,
         Err(err) => {
-            return create_reader_handle_error_result(CSdbError::InternalError, &err.to_string())
+            return create_reader_handle_error_result(CSdbError::Internal, &err.to_string())
         }
     };
 
@@ -158,7 +159,7 @@ pub extern "C" fn slatedb_reader_open(
             let ffi = Box::new(SlateDbReaderFFI { rt, reader });
             create_reader_handle_success_result(CSdbReaderHandle(Box::into_raw(ffi)))
         }
-        Err(err) => create_reader_handle_error_result(CSdbError::InternalError, &err.to_string()),
+        Err(err) => create_reader_handle_error_result_from_slate_error(&err),
     }
 }
 
@@ -177,11 +178,11 @@ pub unsafe extern "C" fn slatedb_reader_get_with_options(
     value_out: *mut CSdbValue,
 ) -> CSdbResult {
     if handle.is_null() {
-        return create_error_result(CSdbError::InvalidHandle, "Invalid reader handle");
+        return create_error_result(CSdbError::Invalid, "Invalid reader handle");
     }
 
     if key.is_null() || value_out.is_null() {
-        return create_error_result(CSdbError::NullPointer, "Key or value_out is null");
+        return create_error_result(CSdbError::Invalid, "Key or value_out is null");
     }
 
     let key_slice = unsafe { std::slice::from_raw_parts(key, key_len) };
@@ -204,13 +205,7 @@ pub unsafe extern "C" fn slatedb_reader_get_with_options(
             create_success_result()
         }
         Ok(None) => create_none_result(),
-        Err(e) => {
-            let error_code = slate_error_to_code(&e);
-            create_error_result(
-                error_code,
-                &format!("Get with options operation failed: {}", e),
-            )
-        }
+        Err(e) => slate_error_to_error_result(&e),
     }
 }
 
@@ -232,11 +227,11 @@ pub unsafe extern "C" fn slatedb_reader_scan_with_options(
     iterator_ptr: *mut *mut CSdbIterator,
 ) -> CSdbResult {
     if handle.is_null() {
-        return create_error_result(CSdbError::InvalidHandle, "Invalid reader handle");
+        return create_error_result(CSdbError::Invalid, "Invalid reader handle");
     }
 
     if iterator_ptr.is_null() {
-        return create_error_result(CSdbError::NullPointer, "Iterator pointer is null");
+        return create_error_result(CSdbError::Invalid, "Iterator pointer is null");
     }
 
     // Convert range bounds
@@ -256,10 +251,7 @@ pub unsafe extern "C" fn slatedb_reader_scan_with_options(
             }
             create_success_result()
         }
-        Err(e) => {
-            let error_code = slate_error_to_code(&e);
-            create_error_result(error_code, &format!("Scan operation failed: {}", e))
-        }
+        Err(e) => slate_error_to_error_result(&e),
     }
 }
 
@@ -278,15 +270,15 @@ pub unsafe extern "C" fn slatedb_reader_scan_prefix_with_options(
     iterator_ptr: *mut *mut CSdbIterator,
 ) -> CSdbResult {
     if handle.is_null() {
-        return create_error_result(CSdbError::InvalidHandle, "Invalid reader handle");
+        return create_error_result(CSdbError::Invalid, "Invalid reader handle");
     }
 
     if iterator_ptr.is_null() {
-        return create_error_result(CSdbError::NullPointer, "Iterator pointer is null");
+        return create_error_result(CSdbError::Invalid, "Iterator pointer is null");
     }
 
     if prefix.is_null() && prefix_len > 0 {
-        return create_error_result(CSdbError::NullPointer, "Prefix pointer is null");
+        return create_error_result(CSdbError::Invalid, "Prefix pointer is null");
     }
 
     let prefix_slice = if prefix_len == 0 {
@@ -312,17 +304,14 @@ pub unsafe extern "C" fn slatedb_reader_scan_prefix_with_options(
             }
             create_success_result()
         }
-        Err(e) => {
-            let error_code = slate_error_to_code(&e);
-            create_error_result(error_code, &format!("Scan prefix operation failed: {}", e))
-        }
+        Err(e) => slate_error_to_error_result(&e),
     }
 }
 
 #[no_mangle]
 pub extern "C" fn slatedb_reader_close(handle: CSdbReaderHandle) -> CSdbResult {
     if handle.is_null() {
-        return create_error_result(CSdbError::InvalidHandle, "Invalid reader handle");
+        return create_error_result(CSdbError::Invalid, "Invalid reader handle");
     }
 
     let inner = unsafe { Box::from_raw(handle.0) };
@@ -330,9 +319,6 @@ pub extern "C" fn slatedb_reader_close(handle: CSdbReaderHandle) -> CSdbResult {
     // Close the reader
     match inner.block_on(inner.reader.close()) {
         Ok(_) => create_success_result(),
-        Err(e) => {
-            let error_code = slate_error_to_code(&e);
-            create_error_result(error_code, &format!("Close operation failed: {}", e))
-        }
+        Err(e) => slate_error_to_error_result(&e),
     }
 }

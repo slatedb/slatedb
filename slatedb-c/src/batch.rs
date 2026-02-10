@@ -1,6 +1,6 @@
 use crate::config::{convert_put_options, convert_write_options};
 use crate::error::{
-    create_error_result, create_success_result, slate_error_to_code, CSdbError, CSdbResult,
+    create_error_result, create_success_result, slate_error_to_error_result, CSdbError, CSdbResult,
 };
 use crate::types::{CSdbHandle, CSdbPutOptions, CSdbWriteBatch, CSdbWriteOptions};
 use slatedb::WriteBatch;
@@ -17,7 +17,7 @@ pub unsafe extern "C" fn slatedb_write_batch_new(
     batch_out: *mut *mut CSdbWriteBatch,
 ) -> CSdbResult {
     if batch_out.is_null() {
-        return create_error_result(CSdbError::NullPointer, "Output pointer is null");
+        return create_error_result(CSdbError::Invalid, "Output pointer is null");
     }
 
     let batch = CSdbWriteBatch {
@@ -45,13 +45,13 @@ pub unsafe extern "C" fn slatedb_write_batch_put(
     value_len: usize,
 ) -> CSdbResult {
     if batch.is_null() {
-        return create_error_result(CSdbError::NullPointer, "WriteBatch pointer is null");
+        return create_error_result(CSdbError::Invalid, "WriteBatch pointer is null");
     }
     if key.is_null() {
-        return create_error_result(CSdbError::NullPointer, "Key pointer is null");
+        return create_error_result(CSdbError::Invalid, "Key pointer is null");
     }
     if value.is_null() {
-        return create_error_result(CSdbError::NullPointer, "Value pointer is null");
+        return create_error_result(CSdbError::Invalid, "Value pointer is null");
     }
 
     let batch_ref = unsafe { &mut *batch };
@@ -62,22 +62,19 @@ pub unsafe extern "C" fn slatedb_write_batch_put(
 
         // Validate key/value sizes (match Rust core validation)
         if key_slice.is_empty() {
-            return create_error_result(CSdbError::InvalidArgument, "Key cannot be empty");
+            return create_error_result(CSdbError::Invalid, "Key cannot be empty");
         }
         if key_len > u16::MAX as usize {
-            return create_error_result(CSdbError::InvalidArgument, "Key size must be <= u16::MAX");
+            return create_error_result(CSdbError::Invalid, "Key size must be <= u16::MAX");
         }
         if value_len > u32::MAX as usize {
-            return create_error_result(
-                CSdbError::InvalidArgument,
-                "Value size must be <= u32::MAX",
-            );
+            return create_error_result(CSdbError::Invalid, "Value size must be <= u32::MAX");
         }
 
         wb.put(key_slice, value_slice);
         create_success_result()
     } else {
-        create_error_result(CSdbError::InvalidArgument, "WriteBatch already consumed")
+        create_error_result(CSdbError::Invalid, "WriteBatch already consumed")
     }
 }
 
@@ -97,13 +94,13 @@ pub unsafe extern "C" fn slatedb_write_batch_put_with_options(
     options: *const CSdbPutOptions,
 ) -> CSdbResult {
     if batch.is_null() {
-        return create_error_result(CSdbError::NullPointer, "WriteBatch pointer is null");
+        return create_error_result(CSdbError::Invalid, "WriteBatch pointer is null");
     }
     if key.is_null() {
-        return create_error_result(CSdbError::NullPointer, "Key pointer is null");
+        return create_error_result(CSdbError::Invalid, "Key pointer is null");
     }
     if value.is_null() {
-        return create_error_result(CSdbError::NullPointer, "Value pointer is null");
+        return create_error_result(CSdbError::Invalid, "Value pointer is null");
     }
 
     let batch_ref = unsafe { &mut *batch };
@@ -114,16 +111,13 @@ pub unsafe extern "C" fn slatedb_write_batch_put_with_options(
 
         // Validate key/value sizes (match Rust core validation)
         if key_slice.is_empty() {
-            return create_error_result(CSdbError::InvalidArgument, "Key cannot be empty");
+            return create_error_result(CSdbError::Invalid, "Key cannot be empty");
         }
         if key_len > u16::MAX as usize {
-            return create_error_result(CSdbError::InvalidArgument, "Key size must be <= u16::MAX");
+            return create_error_result(CSdbError::Invalid, "Key size must be <= u16::MAX");
         }
         if value_len > u32::MAX as usize {
-            return create_error_result(
-                CSdbError::InvalidArgument,
-                "Value size must be <= u32::MAX",
-            );
+            return create_error_result(CSdbError::Invalid, "Value size must be <= u32::MAX");
         }
 
         // Convert options
@@ -132,7 +126,7 @@ pub unsafe extern "C" fn slatedb_write_batch_put_with_options(
 
         create_success_result()
     } else {
-        create_error_result(CSdbError::InvalidArgument, "WriteBatch already consumed")
+        create_error_result(CSdbError::Invalid, "WriteBatch already consumed")
     }
 }
 
@@ -147,10 +141,10 @@ pub unsafe extern "C" fn slatedb_write_batch_delete(
     key_len: usize,
 ) -> CSdbResult {
     if batch.is_null() {
-        return create_error_result(CSdbError::NullPointer, "WriteBatch pointer is null");
+        return create_error_result(CSdbError::Invalid, "WriteBatch pointer is null");
     }
     if key.is_null() {
-        return create_error_result(CSdbError::NullPointer, "Key pointer is null");
+        return create_error_result(CSdbError::Invalid, "Key pointer is null");
     }
 
     let batch_ref = unsafe { &mut *batch };
@@ -160,16 +154,16 @@ pub unsafe extern "C" fn slatedb_write_batch_delete(
 
         // Validate key size (match Rust core validation)
         if key_slice.is_empty() {
-            return create_error_result(CSdbError::InvalidArgument, "Key cannot be empty");
+            return create_error_result(CSdbError::Invalid, "Key cannot be empty");
         }
         if key_len > u16::MAX as usize {
-            return create_error_result(CSdbError::InvalidArgument, "Key size must be <= u16::MAX");
+            return create_error_result(CSdbError::Invalid, "Key size must be <= u16::MAX");
         }
 
         wb.delete(key_slice);
         create_success_result()
     } else {
-        create_error_result(CSdbError::InvalidArgument, "WriteBatch already consumed")
+        create_error_result(CSdbError::Invalid, "WriteBatch already consumed")
     }
 }
 
@@ -185,10 +179,10 @@ pub unsafe extern "C" fn slatedb_write_batch_write(
     options: *const CSdbWriteOptions,
 ) -> CSdbResult {
     if handle.is_null() {
-        return create_error_result(CSdbError::NullPointer, "Database handle is null");
+        return create_error_result(CSdbError::Invalid, "Database handle is null");
     }
     if batch.is_null() {
-        return create_error_result(CSdbError::NullPointer, "WriteBatch pointer is null");
+        return create_error_result(CSdbError::Invalid, "WriteBatch pointer is null");
     }
 
     let db_ref = handle.as_inner();
@@ -198,7 +192,7 @@ pub unsafe extern "C" fn slatedb_write_batch_write(
     let wb = match batch_ref.batch.take() {
         Some(b) => b,
         None => {
-            return create_error_result(CSdbError::InvalidArgument, "WriteBatch already consumed");
+            return create_error_result(CSdbError::Invalid, "WriteBatch already consumed");
         }
     };
 
@@ -208,10 +202,7 @@ pub unsafe extern "C" fn slatedb_write_batch_write(
     // Execute the write
     match db_ref.block_on(async { db_ref.db.write_with_options(wb, &write_options).await }) {
         Ok(_) => create_success_result(),
-        Err(e) => create_error_result(
-            slate_error_to_code(&e),
-            &format!("Failed to write batch: {}", e),
-        ),
+        Err(e) => slate_error_to_error_result(&e),
     }
 }
 
@@ -221,7 +212,7 @@ pub unsafe extern "C" fn slatedb_write_batch_write(
 #[no_mangle]
 pub unsafe extern "C" fn slatedb_write_batch_close(batch: *mut CSdbWriteBatch) -> CSdbResult {
     if batch.is_null() {
-        return create_error_result(CSdbError::NullPointer, "WriteBatch pointer is null");
+        return create_error_result(CSdbError::Invalid, "WriteBatch pointer is null");
     }
 
     // Simply drop the WriteBatch - this frees all resources

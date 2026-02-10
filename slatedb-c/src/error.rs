@@ -1,22 +1,20 @@
 use crate::types::CSdbHandle;
 use crate::CSdbReaderHandle;
-use slatedb::Error as SlateError;
+use slatedb::{Error as SlateError, ErrorKind};
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 
-// Error codes that will be exposed to C
+// Error codes that will be exposed to C, they must match slate ErrorKind enum
 #[repr(C)]
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub enum CSdbError {
     Success = 0,
-    InvalidArgument = 1,
-    NotFound = 2,
-    AlreadyExists = 3,
-    IOError = 4,
-    InternalError = 5,
-    NullPointer = 6,
-    InvalidHandle = 7,
-    InvalidProvider = 8,
+    Transaction = 1,
+    Closed = 2,
+    Unavailable = 3,
+    Invalid = 4,
+    Data = 5,
+    Internal = 6,
 }
 
 // Result type for returning both error codes and messages
@@ -67,6 +65,13 @@ pub(crate) fn create_handle_error_result(error: CSdbError, message: &str) -> CSd
     }
 }
 
+pub(crate) fn create_handle_error_result_from_slate_error(error: &SlateError) -> CSdbHandleResult {
+    CSdbHandleResult {
+        handle: CSdbHandle::null(),
+        result: slate_error_to_error_result(error),
+    }
+}
+
 pub(crate) fn create_handle_success_result(handler: CSdbHandle) -> CSdbHandleResult {
     CSdbHandleResult {
         handle: handler,
@@ -85,6 +90,15 @@ pub(crate) fn create_reader_handle_error_result(
             none: false,
             message: message_to_cstring(message).into_raw(),
         },
+    }
+}
+
+pub(crate) fn create_reader_handle_error_result_from_slate_error(
+    error: &SlateError,
+) -> CSdbReaderHandleResult {
+    CSdbReaderHandleResult {
+        handle: CSdbReaderHandle::null(),
+        result: slate_error_to_error_result(error),
     }
 }
 
@@ -124,28 +138,26 @@ pub(crate) fn create_none_result() -> CSdbResult {
 
 pub(crate) fn safe_str_from_ptr(ptr: *const c_char) -> Result<&'static str, CSdbError> {
     if ptr.is_null() {
-        return Err(CSdbError::NullPointer);
+        return Err(CSdbError::Invalid);
     }
 
-    unsafe {
-        CStr::from_ptr(ptr)
-            .to_str()
-            .map_err(|_| CSdbError::InvalidArgument)
-    }
+    unsafe { CStr::from_ptr(ptr).to_str().map_err(|_| CSdbError::Invalid) }
 }
 
 pub(crate) fn slate_error_to_code(error: &SlateError) -> CSdbError {
-    // Use string matching since we can't pattern match on the exact variants
-    let error_str = format!("{:?}", error);
-    if error_str.contains("NotFound") {
-        CSdbError::NotFound
-    } else if error_str.contains("AlreadyExists") {
-        CSdbError::AlreadyExists
-    } else if error_str.contains("InvalidRequest") {
-        CSdbError::InvalidArgument
-    } else if error_str.contains("IO") {
-        CSdbError::IOError
-    } else {
-        CSdbError::InternalError
+    match error.kind() {
+        ErrorKind::Transaction => CSdbError::Transaction,
+        ErrorKind::Closed(_) => CSdbError::Closed,
+        ErrorKind::Unavailable => CSdbError::Unavailable,
+        ErrorKind::Invalid => CSdbError::Invalid,
+        ErrorKind::Data => CSdbError::Data,
+        _ => CSdbError::Internal,
+    }
+}
+
+pub(crate) fn slate_error_to_error_result(error: &SlateError) -> CSdbResult {
+    CSdbResult {
+        error: slate_error_to_code(error),
+        message: message_to_cstring(error.to_string().as_str()).into_raw(),
     }
 }
