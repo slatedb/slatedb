@@ -34,7 +34,7 @@ Authors:
 This RFC proposes three related API improvements:
 
 1.  **Modify Write API Return Types**: Change the return type of `db.put()`, `db.delete()`, `db.merge()`, and `db.write()` (including their `_with_options` variants) from `Result<(), ...>` to `Result<WriteHandle, ...>` to return a write handle containing the assigned sequence number and timestamps. This design allows for future extensions such as `await_durability()`.
-2.  **New Row Query Interface**: Introduce `get_row()` and `get_row_with_options()` to query complete row information. Additionally, modify `DbIterator::next()` to return `RowEntry` instead of `KeyValue`, allowing users to access complete row entries (including metadata: sequence number, creation timestamp, expiration timestamp) when using `scan()`.
+2.  **New Row Query Interface**: Introduce `get_row()` and `get_row_with_options()` to query complete row information. Additionally, add a new `DbIterator::next_row()` method that returns `RowEntry`, allowing users to access complete row entries (including metadata: sequence number, creation timestamp, expiration timestamp) when using `scan()`. The existing `DbIterator::next()` continues to return `KeyValue` for backward compatibility.
 3.  **Support Query by Version**: Add a `seqnum` option to `SnapshotOptions`, enabling users to create snapshots at specific sequence numbers and read historical versions of keys.
 
 <!-- TOC --><a name="motivation"></a>
@@ -138,7 +138,7 @@ impl DbIterator {
 ```
 
 > [!NOTE]
-> **Implementation Note**: Internally, the existing `next_key_value()` method is renamed to `next_row()` and modified to return `RowEntry`. The public `next()` method calls `next_row()` internally, extracts the `KeyValue` from the `RowEntry`, and returns it. The public `next_row()` method exposes the complete `RowEntry` directly.
+> **Implementation Note**: Internally, the existing `next_key_value()` method is renamed to `next_row()` and modified to return `RowEntry`. The public `next()` method calls `next_row()` internally, extracts the `KeyValue` from the `RowEntry`, and returns it.
 
 ```rust
 // RowEntry is already public and contains all necessary information
@@ -159,11 +159,12 @@ pub enum ValueDeletable {
 ```
 
 > [!IMPORTANT]
-> **ValueDeletable Behavior in `next()`**
+> **ValueDeletable Behavior in `next_row()`**
 > 
-> While `ValueDeletable` has three variants (`Value`, `Merge`, `Tombstone`), **`next()` will never return entries with `Tombstone`** in practice:
+> While `ValueDeletable` has three variants (`Value`, `Merge`, `Tombstone`), **neither `next()` nor `next_row()` will return entries with `Tombstone`** in practice:
 > - **Tombstones are filtered out** by the underlying iterator
-> - Users will only see `ValueDeletable::Value` or `ValueDeletable::Merge` in returned `RowEntry` objects
+> - `next()` returns `KeyValue` (extracts the value from `ValueDeletable`, so users don't need to match on it)
+> - `next_row()` returns `RowEntry`, where users will only see `ValueDeletable::Value` or `ValueDeletable::Merge`
 > - For merge operations: if a base value exists, returns `Value` with the computed result; otherwise returns `Merge` with the final merge value
 
 **Usage Example**:
@@ -210,10 +211,8 @@ while let Some(row_entry) = iter.next_row().await? {
 **Implementation Details**:
 
 1.  **Add `DbIterator::next_row()` Method**:
-    - Add a new public method `next_row()` with return type `Result<Option<RowEntry>, crate::Error>`.
-    - Rename the internal `next_key_value()` method to an internal `next_row_internal()` and change its return type to `Result<Option<RowEntry>, SlateDBError>`.
-    - The public `next()` method calls `next_row_internal()` internally, extracts `KeyValue` from the `RowEntry`, and returns it (maintaining backward compatibility).
-    - The public `next_row()` method calls `next_row_internal()` and returns the complete `RowEntry` directly.
+    - Rename the existing internal `next_key_value()` method to `next_row()` and make it public, with return type `Result<Option<RowEntry>, crate::Error>`.
+    - The public `next()` method calls `next_row()` internally, extracts `KeyValue` from the `RowEntry`, and returns it (maintaining backward compatibility).
     - Since decoding metadata requires decoding the entire row, there is no performance penalty for providing both methods.
 
 2.  **`RowEntry.value` Behavior**:
@@ -460,7 +459,7 @@ while let Some(row_entry) = iter.next_row().await? {
 - **API Integration**: 
   - `snapshot_with_options(SnapshotOptions::default().read_at(seq))` creates a snapshot view at the specified sequence number
   - All read operations on the snapshot (`get`, `scan`, `get_row`) will see data as of that sequence number
-  - The snapshot can be used with `next()` method on iterators to retrieve complete row information
+  - The snapshot can be used with `next()` and `next_row()` methods on iterators to retrieve key-value pairs or complete row information respectively
 
 <!-- TOC --><a name="impact-analysis"></a>
 ## Impact Analysis
@@ -470,7 +469,7 @@ while let Some(row_entry) = iter.next_row().await? {
 1.  **New Row Query APIs**:
     - New APIs introduced: `get_row()`, `get_row_with_options()`, `DbIterator::next_row()`.
     - `DbIterator::next()` maintains backward compatibility (still returns `Result<Option<KeyValue>, crate::Error>`).
-    - Internal `next_key_value()` method renamed to `next_row_internal()` and modified to return `RowEntry`.
+    - Internal `next_key_value()` method renamed to `next_row()` and made public, returning `RowEntry`.
     - `RowEntry.value` remains as `ValueDeletable` type (no breaking changes to the type itself).
     - Neither `next()` nor `next_row()` return `Tombstone` values (tombstones are filtered out by the underlying iterator).
 2.  **Put/Write Return Type Modification**:
