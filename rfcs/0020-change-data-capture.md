@@ -8,6 +8,7 @@ Table of Contents:
 
 - [Summary](#summary)
 - [Motivation](#motivation)
+   - [Background](#background)
    - [Current State](#current-state)
 - [Goals](#goals)
 - [Non-Goals](#non-goals)
@@ -32,7 +33,6 @@ Table of Contents:
 - [Testing](#testing)
 - [Rollout](#rollout)
 - [Alternatives](#alternatives)
-- [Open Questions](#open-questions)
 - [References](#references)
 - [Updates](#updates)
 
@@ -52,20 +52,66 @@ This RFC proposes change data capture (CDC) support in SlateDB. A `WalReader` st
 
 CDC is the practice of capturing changes to data in a database. Change events are streamed to CDC consumers in write-order. CDC event consumers use the CDC feed to replicate data to other systems, trigger downstream processes, maintain an audit log, and so on. Many databases provide first-class CDC support, such as PostgreSQL's logical replication, MySQL's binlog replication, and MongoDB's change streams. SlateDB CDC support will allow users to more easily integrate SlateDB into their data ecosystem.
 
+### Background
+
+CDC pipelines typically have two phases:
+
+1. **Bootstrap / backfill**: initialize a consumer by reading the existing dataset (often as a consistent snapshot).
+2. **Streaming**: continuously consume new mutations as they occur.
+
+The key challenge is ensuring the cutover from snapshot → stream is correct (no missed data and, ideally, no duplicates).
+Most systems solve this by choosing a **high-watermark** in a database's durability/replication log (LSN, binlog position,
+oplog timestamp, etc.), and then coordinating the snapshot and stream around that boundary.
+Common patterns include:
+
+- **Snapshot-then-stream**: take a consistent snapshot, record the corresponding log position, then start streaming from that position.
+- **Stream-then-snapshot**: start streaming first, then take a snapshot later and de-duplicate (or ignore) streamed events already covered by the snapshot.
+- **Pure log replay**: if the log is retained long enough and contains sufficient information, rebuild state by replaying the log from an initial point.
+
+CDC is most commonly implemented by reading an existing write/replication log (WAL/binlog/oplog/commitlog). Log-based CDC
+provides a natural ordering and low overhead on the write path, but introduces operational concerns around log retention and
+consumer lag. Depending on the database architecture, ordering may be global (single-leader log) or only per shard/partition
+(distributed logs), which affects whether consumers must merge multiple streams.
+
+#### PostgreSQL
+
+PostgreSQL CDC is commonly built on **logical decoding** / **logical replication**, which decodes row-level changes out of the
+WAL. Consumers use a **replication slot** (an LSN-based resume point) and a logical decoding output plugin to stream changes.
+Replication slots also act as backpressure on retention: the server must keep WAL needed by the slot until the consumer advances.
+PostgreSQL can pair streaming with an initial table copy so consumers can bootstrap from a consistent snapshot and then continue
+from the corresponding LSN.
+
+#### MySQL
+
+MySQL CDC is typically built on the **binary log (binlog)**. Consumers resume from a binlog file+offset or a GTID set, and
+stream transaction events in commit order. For bootstrapping, systems take a consistent snapshot and record the binlog position
+(or GTID) at the snapshot boundary, then stream binlog events after that point. Row-based binlogging is commonly required to
+reliably capture row-level mutations.
+
+#### Cassandra
+
+Apache Cassandra provides CDC by exposing a copy of **commitlog segments** for tables with CDC enabled. CDC output is
+**node-local** (each node emits mutations it applies), so consumers typically tail CDC per node and then de-duplicate/reconcile
+events across replicas. Retention is bounded by local disk and configured CDC space limits, so slow consumers can fall behind
+and lose events.
+
+#### MongoDB
+
+MongoDB exposes CDC via **change streams**, which are built on the replica set **oplog**. Consumers subscribe with an
+aggregation pipeline and receive a stream of change events plus a **resume token** that allows restarting without missing events
+(subject to oplog retention). Bootstrapping is typically done by taking an initial collection scan/dump and then starting the
+change stream from an operation time or resume token captured at the snapshot boundary.
+
 ### Current State
 
-SlateDB does not directly support CDC. Users that wish to receive near-realtime
-updates of their SlateDB have the following options:
+SlateDB does not directly support CDC. Users that wish to receive near-realtime updates of their SlateDB have the following options:
 
 1. Scan the database for changes
 2. Dual write to SlateDB and an external message queue
 3. Implement their own CDC solution by directly reading SlateDB's WAL and/or
    compacted SSTs.
 
-(1) and (2) are not optimal designs. (3) is the correct architecture, but it
-is not a simple implementation. This RFC proposes that we implement (3) in
-SlateDB so users can stream changes out of SlateDB without additional
-infrastructure.
+(1) and (2) are not optimal designs. (3) is the correct architecture, but it is not a simple implementation. This RFC proposes that we implement (3) in SlateDB so users can stream changes out of SlateDB without additional infrastructure.
 
 ## Goals
 
