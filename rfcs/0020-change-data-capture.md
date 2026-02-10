@@ -124,7 +124,7 @@ SlateDB does not directly support CDC. Users that wish to receive near-realtime 
 
 ## Non-Goals
 
-- WAL checkpointing and WAL retention policies. WAL garbage collection is independent of the `WalReader`. The `WalReader` must stay ahead of whatever mechanism is used (likely SlateDB's garbage collector with WAL `min_age` configured).
+- WAL checkpointing and WAL retention policies. WAL garbage collection is independent of the `WalReader`. The `WalReader` must stay ahead of whatever mechanism is used (likely SlateDB's garbage collector with WAL `min_age` configured). There is no guarantee that the WAL files are not garbage collected. Long-running consumers should copy WAL files to a separate location if they want to ensure they are not lost.
 - TTL-based row-expiration events. Clients must implement their own logic to handle TTL expirations.
 - Merge operator events. Merge writes will be exposed as-is; the consumer is responsible for applying the merge logic.
 - Streaming directly from the writer client. Users will need to create a `WalReader`.
