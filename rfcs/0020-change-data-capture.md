@@ -345,6 +345,18 @@ Several alternatives were considered but rejected:
 
 Notably, this RFC does not preclude us from implementing any of the above alternatives. They are simply not proposed in this RFC.
 
+### WAL and Memtable Synchronization
+
+This RFC proposes blocking memtable flushes on WAL flushes (when `wal_enabled=true`) to guarantee that any data visible in the DB is also present in the WAL.
+
+During discussion, [an alternative was suggested](https://github.com/slatedb/slatedb/pull/634#discussion_r2789422085): filter the memtable during flush so we only flush rows with `seq <= last_remote_persisted_seq`, and carry forward rows with `seq > last_remote_persisted_seq` into a new or existing memtable so they can be flushed later once the WAL is durably persisted remotely. This avoids the explicit synchronization step.
+
+A concern with this approach is that, in the degenerate case, the carry-forward set could grow large, though it won't grow unbounded since `Db::maybe_apply_backpressure` includes `imm_memtables` in its memory usage calculation.
+
+If we ever adopt this approach, one implementation would be to move `seq > last_remote_persisted_seq` rows into the oldest immutable memtable that is not currently flushing (falling back to the active memtable if no immutable memtables exist). This avoids creating a new memtable, but it requires mutating an "immutable" memtable and can cause L0 file sizes to deviate from the configured target (either small durable-only L0 files, or oversized L0 files if the filtered rows accumulate across multiple flushes). An alternative is to create a new memtable containing just the filtered rows and push it onto the `imm_memtables` `VecDeque`, but that can increase the number of very small L0 files.
+
+For now, we keep the synchronization-based implementation; if it becomes a performance bottleneck, this filtering approach should be faster and can be revisited.
+
 ## Future work
 
 ### Bootstraps and Backfills
