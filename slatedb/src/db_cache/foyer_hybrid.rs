@@ -155,7 +155,7 @@ mod tests {
 
     fn build_block() -> CachedEntry {
         let mut rng = rand::rng();
-        let mut builder = BlockBuilder::new_v1(1024);
+        let mut builder = BlockBuilder::new_latest(1024);
         loop {
             let mut k = vec![0u8; 32];
             rng.fill_bytes(&mut k);

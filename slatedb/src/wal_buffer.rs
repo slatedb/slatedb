@@ -87,7 +87,7 @@ struct WalBufferManagerInner {
 /// failure.
 /// Since the `WalBuffer` does not maintain the order by key it saves some CPU cycles compared to
 /// a [`KVTable`].
-pub(crate) struct WalBuffer {
+struct WalBuffer {
     /// queue for the entries
     entries: VecDeque<RowEntry>,
     /// watcher to await durability
@@ -447,7 +447,7 @@ impl WalBufferManager {
 
 impl WalBuffer {
     /// Creates a new empty `WalBuffer`.
-    pub(crate) fn new() -> Self {
+    fn new() -> Self {
         Self {
             entries: VecDeque::new(),
             durable: WatchableOnceCell::new(),
@@ -457,7 +457,7 @@ impl WalBuffer {
         }
     }
 
-    pub(crate) fn append(&mut self, entry: RowEntry) {
+    fn append(&mut self, entry: RowEntry) {
         if let Some(ts) = entry.create_ts {
             self.last_tick = ts;
         }
@@ -472,38 +472,38 @@ impl WalBuffer {
     }
 
     /// Returns a watcher that can be used to await durability.
-    pub(crate) fn durable_watcher(&self) -> WatchableOnceCellReader<Result<(), SlateDBError>> {
+    fn durable_watcher(&self) -> WatchableOnceCellReader<Result<(), SlateDBError>> {
         self.durable.reader()
     }
 
     /// Awaits until the WAL is durable (flushed to storage).
     #[cfg(test)]
-    pub(crate) async fn await_durable(&self) -> Result<(), SlateDBError> {
+    async fn await_durable(&self) -> Result<(), SlateDBError> {
         self.durable.reader().await_value().await
     }
 
     /// Notifies that the WAL has been made durable (or failed).
-    pub(crate) fn notify_durable(&self, result: Result<(), SlateDBError>) {
+    fn notify_durable(&self, result: Result<(), SlateDBError>) {
         self.durable.write(result);
     }
 
     /// Returns true if the buffer is empty.
-    pub(crate) fn is_empty(&self) -> bool {
+    fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
 
     /// Returns the number of entries in the buffer.
-    pub(crate) fn len(&self) -> usize {
+    fn len(&self) -> usize {
         self.entries.len()
     }
 
     /// Returns the size of entries in bytes.
-    pub(crate) fn size(&self) -> usize {
+    fn size(&self) -> usize {
         self.entries_size
     }
 
     /// Returns the last sequence number written to this buffer.
-    pub(crate) fn last_seq(&self) -> Option<u64> {
+    fn last_seq(&self) -> Option<u64> {
         if self.last_seq == 0 {
             None
         } else {
@@ -512,7 +512,7 @@ impl WalBuffer {
     }
 
     /// Returns the last tick (timestamp) written to this buffer.
-    pub(crate) fn last_tick(&self) -> i64 {
+    fn last_tick(&self) -> i64 {
         self.last_tick
     }
 }

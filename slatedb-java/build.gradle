@@ -1,0 +1,38 @@
+plugins {
+    id 'java-library'
+}
+
+group = 'io.slatedb'
+version = '0.1.0-SNAPSHOT'
+
+def minimumJava = 24
+def currentJava = JavaVersion.current()
+def toolchainVersion = currentJava.isCompatibleWith(JavaVersion.toVersion(minimumJava))
+    ? Integer.parseInt(currentJava.majorVersion)
+    : minimumJava
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(toolchainVersion)
+    }
+    sourceCompatibility = JavaVersion.toVersion(minimumJava)
+    targetCompatibility = JavaVersion.toVersion(minimumJava)
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.release = minimumJava
+}
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    testImplementation 'org.junit.jupiter:junit-jupiter:5.10.2'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher:1.10.2'
+}
+
+test {
+    useJUnitPlatform()
+    jvmArgs '--enable-native-access=ALL-UNNAMED'
+}
