@@ -10,7 +10,6 @@ Table of Contents:
   - [Goals](#goals)
   - [Non-Goals](#non-goals)
   - [Use Cases](#use-cases)
-    - [Change Data Capture (CDC)](#change-data-capture-cdc)
     - [Durability Guarantees](#durability-guarantees)
     - [TTL Management](#ttl-management)
   - [Design](#design)
@@ -69,25 +68,6 @@ Users cannot query a specific historical version of a key using a sequence numbe
 
 <!-- TOC --><a name="use-cases"></a>
 ## Use Cases
-
-<!-- TOC --><a name="change-data-capture-cdc"></a>
-### Change Data Capture (CDC)
-
-Applications can use the sequence number and timestamp from `WriteHandle` to implement CDC pipelines:
-
-```rust
-// Capture write metadata for CDC
-let handle = db.put(b"user:123", user_data).await?;
-let change_event = ChangeEvent {
-    key: b"user:123".to_vec(),
-    seqnum: handle.seqnum(),
-    timestamp: handle.create_ts(),
-    operation: Operation::Put,
-};
-cdc_stream.publish(change_event).await?;
-```
-
-The CDC consumer can then use `get_row()` to retrieve the complete row information including the value, or use the sequence number to create a snapshot for consistent reads.
 
 <!-- TOC --><a name="durability-guarantees"></a>
 ### Durability Guarantees
@@ -466,7 +446,7 @@ while let Some(row_entry) = iter.next_row().await? {
   > 3. **Future Enhancement - Time Travel**: A planned feature (tracked in [#1263](https://github.com/slatedb/slatedb/issues/1263)) will allow configuring a retention window (e.g., 24 hours) to guarantee version availability within that time period, regardless of snapshot lifecycle.
   > 
   > **Best Practices**:
-  > - For short-term version queries (e.g., CDC, debugging), use `snapshot_with_options()` and keep the snapshot open as needed
+  > - For short-term version queries (e.g., debugging), use `snapshot_with_options()` and keep the snapshot open as needed
   > - For long-term archival, use a separate backup mechanism rather than relying on SlateDB's version history
   > - Once time travel is implemented, configure an appropriate retention window for your use case
 
@@ -566,7 +546,7 @@ let row = db.get_row(b"key").await?;
 
 - **Reason for Rejection**: 
   1.  **API Complexity**: This would rapidly expand the API surface area and increase user learning costs. A single generic interface `get_row` that returns complete row information (including metadata) maintains API simplicity.
-  2.  **Atomicity**: Some use cases (like CDC) require retrieving both the key/value and its metadata atomically. Separate methods would prevent this (unless a snapshot is created). Returning the complete `RowEntry` naturally supports atomic access.
+  2.  **Atomicity**: Some use cases require retrieving both the key/value and its metadata atomically. Separate methods would prevent this (unless a snapshot is created). Returning the complete `RowEntry` naturally supports atomic access.
 
 **2. Introduce `put_with_metadata()` Method**
 
