@@ -143,19 +143,16 @@ impl ReadOnlyBlob for ReadOnlyObject<'_> {
     }
 
     async fn read_range(&self, range: Range<u64>) -> Result<Bytes, SlateDBError> {
-        let bytes = self
-            .object_store
-            .get_range(&self.path, range.clone())
-            .await?;
         self.stats.inc_reads();
+        let bytes = self.object_store.get_range(&self.path, range).await?;
         self.stats.add_bytes(bytes.len() as u64);
         Ok(bytes)
     }
 
     async fn read(&self) -> Result<Bytes, SlateDBError> {
+        self.stats.inc_reads();
         let file = self.object_store.get(&self.path).await?;
         let bytes = file.bytes().await?;
-        self.stats.inc_reads();
         self.stats.add_bytes(bytes.len() as u64);
         Ok(bytes)
     }
@@ -413,8 +410,9 @@ impl TableStore {
             path,
             stats: &blob_stats,
         };
-        let info = self.sst_format.read_info(&obj).await?;
+        let result = self.sst_format.read_info(&obj).await;
         self.stats.accumulate(&blob_stats);
+        let info = result?;
         Ok(SsTableHandle::new(*id, info))
     }
 
@@ -424,7 +422,12 @@ impl TableStore {
     ) -> Result<u16, SlateDBError> {
         let object_store = self.object_stores.store_for(&handle.id);
         let path = self.path(&handle.id);
-        let obj = ReadOnlyObject { object_store, path };
+        let blob_stats = BlobReadStats::default();
+        let obj = ReadOnlyObject {
+            object_store,
+            path,
+            stats: &blob_stats,
+        };
         self.sst_format.read_version(&obj).await
     }
 
@@ -456,8 +459,9 @@ impl TableStore {
             path,
             stats: &blob_stats,
         };
-        let filter = self.sst_format.read_filter(&handle.info, &obj).await?;
+        let result = self.sst_format.read_filter(&handle.info, &obj).await;
         self.stats.accumulate(&blob_stats);
+        let filter = result?;
         if cache_blocks {
             if let Some(ref cache) = self.cache {
                 if let Some(filter) = filter.as_ref() {
@@ -501,8 +505,9 @@ impl TableStore {
             path,
             stats: &blob_stats,
         };
-        let index = Arc::new(self.sst_format.read_index(&handle.info, &obj).await?);
+        let result = self.sst_format.read_index(&handle.info, &obj).await;
         self.stats.accumulate(&blob_stats);
+        let index = Arc::new(result?);
         if cache_blocks {
             if let Some(ref cache) = self.cache {
                 cache
@@ -530,7 +535,13 @@ impl TableStore {
             path,
             stats: &blob_stats,
         };
-        let index = self.sst_format.read_index(&handle.info, &obj).await?;
+        let index = match self.sst_format.read_index(&handle.info, &obj).await {
+            Ok(idx) => idx,
+            Err(e) => {
+                self.stats.accumulate(&blob_stats);
+                return Err(e);
+            }
+        };
         let result = self
             .sst_format
             .read_blocks(&handle.info, &index, blocks, &obj)
@@ -620,17 +631,34 @@ impl TableStore {
 
         // Merge uncached blocks with blocks_read and prepare blocks for caching
         let mut blocks_to_cache = vec![];
+        let mut read_error: Option<SlateDBError> = None;
         for (range, range_blocks) in uncached_ranges.into_iter().zip(uncached_blocks) {
-            let index_borrow = index.borrow();
-            for (block_num, block_read) in range.zip(range_blocks?) {
-                let block = Arc::new(block_read);
-                if cache_blocks {
-                    let block_meta = index_borrow.block_meta().get(block_num);
-                    let offset = block_meta.offset();
-                    blocks_to_cache.push((handle.id, offset, block.clone()));
+            match range_blocks {
+                Ok(range_blocks) => {
+                    let index_borrow = index.borrow();
+                    for (block_num, block_read) in range.zip(range_blocks) {
+                        let block = Arc::new(block_read);
+                        if cache_blocks {
+                            let block_meta = index_borrow.block_meta().get(block_num);
+                            let offset = block_meta.offset();
+                            blocks_to_cache.push((handle.id, offset, block.clone()));
+                        }
+                        blocks_read.insert(block_num - blocks.start, block);
+                    }
                 }
-                blocks_read.insert(block_num - blocks.start, block);
+                Err(e) => {
+                    read_error = Some(e);
+                    break;
+                }
             }
+        }
+
+        // Always accumulate stats, even on error
+        self.stats.accumulate(&blob_stats);
+
+        // Return error if any read failed
+        if let Some(e) = read_error {
+            return Err(e);
         }
 
         // Cache the newly read blocks if caching is enabled
@@ -643,7 +671,6 @@ impl TableStore {
             }
         }
 
-        self.stats.accumulate(&blob_stats);
         Ok(blocks_read)
     }
 
@@ -661,7 +688,13 @@ impl TableStore {
             path,
             stats: &blob_stats,
         };
-        let index = self.sst_format.read_index(&handle.info, &obj).await?;
+        let index = match self.sst_format.read_index(&handle.info, &obj).await {
+            Ok(idx) => idx,
+            Err(e) => {
+                self.stats.accumulate(&blob_stats);
+                return Err(e);
+            }
+        };
         let result = self
             .sst_format
             .read_block(&handle.info, &index, block, &obj)
