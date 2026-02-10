@@ -6322,7 +6322,6 @@ mod tests {
 
         let gc = GarbageCollectorBuilder::new(path.clone(), object_store.clone())
             .with_options(gc_options)
-            .with_stat_registry(db.metrics())
             .with_system_clock(db.inner.system_clock.clone())
             .build();
 

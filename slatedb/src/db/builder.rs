@@ -155,6 +155,7 @@ use crate::rand::DbRand;
 use crate::retrying_object_store::RetryingObjectStore;
 use crate::stats::StatRegistry;
 use crate::store_provider::DefaultStoreProvider;
+use crate::tablestore::stats::TableStoreStats;
 use crate::tablestore::TableStore;
 use crate::utils::WatchableOnceCell;
 use slatedb_common::clock::DefaultSystemClock;
@@ -434,6 +435,7 @@ impl<P: Into<Path>> DbBuilder<P> {
         // Create path resolver, db stats, and table store
         let path_resolver = PathResolver::new_with_external_ssts(path.clone(), external_ssts);
         let db_stats = DbStats::new(stat_registry.as_ref());
+        let table_store_stats = TableStoreStats::new(stat_registry.clone());
         let table_store = Arc::new(TableStore::new_with_fp_registry(
             ObjectStores::new(
                 maybe_cached_main_object_store.clone(),
@@ -449,7 +451,7 @@ impl<P: Into<Path>> DbBuilder<P> {
                     system_clock.clone(),
                 )) as Arc<dyn DbCache>
             }),
-            stat_registry.clone(),
+            table_store_stats.clone(),
         ));
 
         // Get next WAL ID before writing manifest
@@ -537,7 +539,7 @@ impl<P: Into<Path>> DbBuilder<P> {
             path_resolver.clone(),
             self.fp_registry.clone(),
             None,
-            stat_registry.clone(),
+            table_store_stats.clone(),
         ));
 
         let compactor_builder = self.compactor_builder.or_else(|| {
