@@ -53,7 +53,7 @@ use crate::db_iter::DbIterator;
 use crate::db_read::DbRead;
 use crate::db_snapshot::DbSnapshot;
 use crate::db_state::{DbState, SsTableId};
-use crate::db_stats::DbStats;
+use crate::db_stats::{DbStats, BYTES_READ_FROM_OBJECT_STORE, READS_TO_OBJECT_STORE};
 use crate::error::SlateDBError;
 use crate::manifest::store::FenceableManifest;
 use crate::manifest::Manifest;
@@ -112,6 +112,7 @@ impl DbInner {
         memtable_flush_notifier: UnboundedSender<MemtableFlushMsg>,
         write_notifier: UnboundedSender<WriteBatchMessage>,
         stat_registry: Arc<StatRegistry>,
+        db_stats: DbStats,
         fp_registry: Arc<FailPointRegistry>,
         merge_operator: Option<crate::merge_operator::MergeOperatorType>,
     ) -> Result<Self, SlateDBError> {
@@ -134,7 +135,6 @@ impl DbInner {
         // state are mostly manifest, including IMM, L0, etc.
         let state = Arc::new(RwLock::new(DbState::new(manifest)));
 
-        let db_stats = DbStats::new(stat_registry.as_ref());
         let wal_enabled = DbInner::wal_enabled_in_options(&settings);
 
         let reader = Reader {
@@ -159,6 +159,11 @@ impl DbInner {
         ));
 
         let txn_manager = Arc::new(TransactionManager::new(rand.clone()));
+
+        // Register table store stats with the registry
+        let table_store_stats = table_store.stats();
+        stat_registry.register(READS_TO_OBJECT_STORE, table_store_stats.reads_stat());
+        stat_registry.register(BYTES_READ_FROM_OBJECT_STORE, table_store_stats.bytes_stat());
 
         let db_inner = Self {
             state,
