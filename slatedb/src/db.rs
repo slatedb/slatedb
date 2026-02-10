@@ -118,6 +118,7 @@ impl DbInner {
         memtable_flush_notifier: UnboundedSender<MemtableFlushMsg>,
         write_notifier: UnboundedSender<WriteBatchMessage>,
         stat_registry: Arc<StatRegistry>,
+        db_stats: DbStats,
         fp_registry: Arc<FailPointRegistry>,
         merge_operator: Option<crate::merge_operator::MergeOperatorType>,
     ) -> Result<Self, SlateDBError> {
@@ -140,7 +141,6 @@ impl DbInner {
         let db_state = DbState::new(manifest, status_reporter.clone());
         let state = Arc::new(RwLock::new(db_state));
 
-        let db_stats = DbStats::new(stat_registry.as_ref());
         let wal_enabled = DbInner::wal_enabled_in_options(&settings);
 
         let reader = Reader {
@@ -3510,6 +3510,7 @@ mod tests {
             sst_format,
             path.clone(),
             None,
+            Arc::new(StatRegistry::new()),
         ));
         let db = Db::builder(path.clone(), object_store.clone())
             .with_settings(options)
@@ -3606,6 +3607,7 @@ mod tests {
             sst_format,
             path,
             None,
+            Arc::new(StatRegistry::new()),
         ));
 
         // Write data a few times such that each loop results in a memtable flush
@@ -3789,6 +3791,7 @@ mod tests {
             sst_format,
             path,
             None,
+            Arc::new(StatRegistry::new()),
         ));
 
         // Write some data to populate the memtable
@@ -5166,6 +5169,7 @@ mod tests {
             SsTableFormat::default(),
             path,
             None,
+            Arc::new(StatRegistry::new()),
         ));
 
         // Get the next WAL SST ID based on what's currently in the object store
@@ -6380,6 +6384,7 @@ mod tests {
             SsTableFormat::default(),
             path.clone(),
             None,
+            Arc::new(StatRegistry::new()),
         );
         let compacted_ssts = table_store
             .list_compacted_ssts(..)

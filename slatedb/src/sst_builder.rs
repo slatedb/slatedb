@@ -394,6 +394,7 @@ mod tests {
     use crate::format::block::Block;
     use crate::object_stores::ObjectStores;
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
+    use crate::stats::StatRegistry;
     use crate::tablestore::TableStore;
     use crate::test_utils::{assert_iterator, build_test_sst, gen_attrs, gen_empty_attrs};
 
@@ -446,6 +447,7 @@ mod tests {
             format,
             root_path,
             None,
+            Arc::new(StatRegistry::new()),
         );
         let mut builder = table_store.table_builder();
         builder
@@ -501,6 +503,7 @@ mod tests {
             format.clone(),
             root_path,
             None,
+            Arc::new(StatRegistry::new()),
         );
         let mut builder = table_store.table_builder();
         builder
@@ -599,6 +602,7 @@ mod tests {
             format.clone(),
             root_path,
             None,
+            Arc::new(StatRegistry::new()),
         );
         let mut builder = table_store.table_builder();
         for k in 1..=8 {
@@ -681,6 +685,7 @@ mod tests {
             format,
             root_path,
             None,
+            Arc::new(StatRegistry::new()),
         );
         let mut builder = table_store.table_builder();
         builder
@@ -750,6 +755,7 @@ mod tests {
             format,
             root_path.clone(),
             None,
+            Arc::new(StatRegistry::new()),
         );
         let mut builder = table_store.table_builder();
         builder
@@ -777,6 +783,7 @@ mod tests {
             format,
             root_path,
             None,
+            Arc::new(StatRegistry::new()),
         );
         let sst_handle = table_store.open_sst(&SsTableId::Wal(0)).await.unwrap();
         let index = table_store.read_index(&sst_handle, true).await.unwrap();
@@ -837,6 +844,7 @@ mod tests {
             format.clone(),
             root_path,
             None,
+            Arc::new(StatRegistry::new()),
         );
         let mut builder = table_store.table_builder();
         builder
@@ -889,6 +897,7 @@ mod tests {
             format,
             root_path,
             None,
+            Arc::new(StatRegistry::new()),
         );
         let mut builder = table_store.table_builder();
         builder
@@ -957,6 +966,7 @@ mod tests {
             format.clone(),
             root_path,
             None,
+            Arc::new(StatRegistry::new()),
         );
         let mut builder = table_store.table_builder();
         builder
@@ -1012,6 +1022,7 @@ mod tests {
             format,
             root_path,
             None,
+            Arc::new(StatRegistry::new()),
         ));
         let mut builder = table_store.table_builder();
         for key in 'a'..='z' {
@@ -1135,6 +1146,7 @@ mod tests {
             format,
             root_path,
             None,
+            Arc::new(StatRegistry::new()),
         );
         let mut builder = table_store.table_builder();
         builder
@@ -1192,6 +1204,7 @@ mod tests {
             format,
             root_path,
             None,
+            Arc::new(StatRegistry::new()),
         );
         let mut builder = table_store.table_builder();
         builder
@@ -1279,6 +1292,7 @@ mod tests {
             format.clone(),
             root_path,
             None,
+            Arc::new(StatRegistry::new()),
         );
         let mut builder = table_store
             .table_builder()
@@ -1345,6 +1359,7 @@ mod tests {
             format.clone(),
             root_path,
             None,
+            Arc::new(StatRegistry::new()),
         );
         let mut builder = table_store.table_builder();
         let mut expected = Vec::new();

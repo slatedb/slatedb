@@ -71,6 +71,7 @@ mod tests {
     use crate::object_stores::ObjectStores;
     use crate::proptest_util::{rng, sample};
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
+    use crate::stats::StatRegistry;
     use crate::tablestore::TableStore;
     use crate::test_utils;
     use bytes::Bytes;
@@ -389,6 +390,7 @@ mod tests {
             SsTableFormat::default(),
             path.clone(),
             None,
+            Arc::new(StatRegistry::new()),
         ));
         let sst_handle = table_store.open_sst(table_id).await.unwrap();
 

@@ -195,6 +195,7 @@ mod tests {
     use crate::format::sst::SsTableFormat;
     use crate::proptest_util;
     use crate::proptest_util::sample;
+    use crate::stats::StatRegistry;
     use crate::test_utils::{assert_kv, gen_attrs};
     use crate::types::KeyValue;
 
@@ -221,6 +222,7 @@ mod tests {
             format,
             root_path.clone(),
             None,
+            Arc::new(StatRegistry::new()),
         ));
         let mut builder = table_store.table_builder();
         builder
@@ -278,6 +280,7 @@ mod tests {
             format,
             root_path.clone(),
             None,
+            Arc::new(StatRegistry::new()),
         ));
         let mut builder = table_store.table_builder();
         builder
@@ -339,6 +342,7 @@ mod tests {
             format,
             root_path.clone(),
             None,
+            Arc::new(StatRegistry::new()),
         ));
         let key_gen = OrderedBytesGenerator::new_with_byte_range(&[b'a'; 16], b'a', b'z');
         let mut test_case_key_gen = key_gen.clone();
@@ -383,6 +387,7 @@ mod tests {
             format,
             root_path.clone(),
             None,
+            Arc::new(StatRegistry::new()),
         ));
         let key_gen = OrderedBytesGenerator::new_with_byte_range(&[b'a'; 16], b'a', b'z');
         let mut expected_key_gen = key_gen.clone();
@@ -421,6 +426,7 @@ mod tests {
             format,
             root_path.clone(),
             None,
+            Arc::new(StatRegistry::new()),
         ));
         let key_gen = OrderedBytesGenerator::new_with_byte_range(&[b'a'; 16], b'a', b'z');
         let val_gen = OrderedBytesGenerator::new_with_byte_range(&[0u8; 16], 0u8, 26u8);
@@ -447,6 +453,7 @@ mod tests {
             SsTableFormat::default(),
             root_path.clone(),
             None,
+            Arc::new(StatRegistry::new()),
         ));
 
         let mut rng = proptest_util::rng::new_test_rng(None);
@@ -587,6 +594,7 @@ mod tests {
                 format,
                 root_path,
                 None,
+                Arc::new(StatRegistry::new()),
             ));
 
             // Build a sorted run with v1, v2, v1, v2 SSTs
@@ -653,6 +661,7 @@ mod tests {
                 format,
                 root_path,
                 None,
+                Arc::new(StatRegistry::new()),
             ));
 
             // Build a sorted run with v1, v2, v1, v2 SSTs

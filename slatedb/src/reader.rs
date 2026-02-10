@@ -463,6 +463,7 @@ mod tests {
                 SsTableFormat::default(),
                 Path::from("/test"),
                 None,
+                Arc::new(StatRegistry::new()),
             ));
 
             Self {

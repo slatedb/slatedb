@@ -289,6 +289,7 @@ mod tests {
     use crate::mem_table::WritableKVTable;
     use crate::object_stores::ObjectStores;
     use crate::proptest_util::{rng, sample};
+    use crate::stats::StatRegistry;
     use crate::tablestore::TableStore;
     use crate::types::RowEntry;
     use crate::{error::SlateDBError, test_utils};
@@ -563,6 +564,7 @@ mod tests {
             SsTableFormat::default(),
             path,
             None,
+            Arc::new(StatRegistry::new()),
         ))
     }
 

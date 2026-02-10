@@ -77,6 +77,7 @@ use crate::format::sst::SsTableFormat;
 use crate::iter::{EmptyIterator, RowEntryIterator};
 use crate::object_stores::ObjectStores;
 use crate::sst_iter::{SstIterator, SstIteratorOptions};
+use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
 use crate::types::RowEntry;
 
@@ -199,6 +200,7 @@ impl WalReader {
             sst_format,
             path.into(),
             None,
+            Arc::new(StatRegistry::new()),
         ));
         Self { table_store }
     }

@@ -3690,6 +3690,7 @@ mod tests {
             sst_format,
             Path::from(PATH),
             None,
+            Arc::new(StatRegistry::new()),
         ));
         (manifest_store, compactions_store, table_store)
     }
