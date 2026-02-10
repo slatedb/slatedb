@@ -92,7 +92,7 @@ Applications can query how long until a key expires using `get_row()`:
 ```rust
 // Query remaining TTL for a key
 if let Some(entry) = db.get_row(b"session:abc123").await? {
-    if let Some(expire_ts) = entry.expire_ts {
+    if let Some(expire_ts) = entry.expire_ts() {
         let ttl_seconds = (expire_ts - current_time_micros()) / 1_000_000;
         println!("Key expires in {} seconds", ttl_seconds);
     }
@@ -141,13 +141,21 @@ impl DbIterator {
 > **Implementation Note**: Internally, the existing `next_key_value()` method is renamed to `next_row()` and modified to return `RowEntry`. The public `next()` method calls `next_row()` internally, extracts the `KeyValue` from the `RowEntry`, and returns it.
 
 ```rust
-// RowEntry is already public and contains all necessary information
+// RowEntry is already public; fields are pub(crate) with getter methods
 pub struct RowEntry {
-    pub key: Bytes,
-    pub value: ValueDeletable,  // See note below on ValueDeletable behavior
-    pub seq: u64,
-    pub create_ts: Option<i64>,
-    pub expire_ts: Option<i64>,
+    pub(crate) key: Bytes,
+    pub(crate) value: ValueDeletable,
+    pub(crate) seq: u64,
+    pub(crate) create_ts: Option<i64>,
+    pub(crate) expire_ts: Option<i64>,
+}
+
+impl RowEntry {
+    pub fn key(&self) -> &[u8] { &self.key }
+    pub fn value(&self) -> &ValueDeletable { &self.value }
+    pub fn seq(&self) -> u64 { self.seq }
+    pub fn create_ts(&self) -> Option<i64> { self.create_ts }
+    pub fn expire_ts(&self) -> Option<i64> { self.expire_ts }
 }
 
 // ValueDeletable type definition (unchanged)
@@ -173,12 +181,12 @@ pub enum ValueDeletable {
 // Get complete row information
 let row = db.get_row(b"key").await?;
 if let Some(entry) = row {
-    println!("Key: {:?}", entry.key);
+    println!("Key: {:?}", entry.key());
     println!("Seq: {}, Created: {:?}, Expires: {:?}", 
-             entry.seq, entry.create_ts, entry.expire_ts);
+             entry.seq(), entry.create_ts(), entry.expire_ts());
     
     // Handle ValueDeletable variants (Tombstone will never appear here)
-    match entry.value {
+    match entry.value() {
         ValueDeletable::Value(v) => println!("Value: {:?}", v),
         ValueDeletable::Merge(m) => println!("Merge value: {:?}", m),
         ValueDeletable::Tombstone => unreachable!("get_row() never returns Tombstone"),
@@ -194,14 +202,14 @@ while let Some((key, value)) = iter.next().await? {
 // Scan with complete row information - returns RowEntry
 let mut iter = db.scan(b"a"..b"z").await?;
 while let Some(row_entry) = iter.next_row().await? {
-    match row_entry.value {
+    match row_entry.value() {
         ValueDeletable::Value(v) => {
             println!("Key: {:?}, Value: {:?}, Seq: {}", 
-                     row_entry.key, v, row_entry.seq);
+                     row_entry.key(), v, row_entry.seq());
         }
         ValueDeletable::Merge(m) => {
             println!("Key: {:?}, Merge: {:?}, Seq: {}", 
-                     row_entry.key, m, row_entry.seq);
+                     row_entry.key(), m, row_entry.seq());
         }
         ValueDeletable::Tombstone => unreachable!(),
     }
@@ -331,9 +339,9 @@ println!("Batch committed at seq: {}", handle.seqnum());
 // If you need the full RowEntry, use get_row with the seqnum
 let row = db.get_row(b"key").await?;
 if let Some(entry) = row {
-    assert_eq!(entry.seq, handle.seqnum());
-    assert_eq!(entry.create_ts, handle.create_ts());
-    assert_eq!(entry.expire_ts, handle.expire_ts());
+    assert_eq!(entry.seq(), handle.seqnum());
+    assert_eq!(entry.create_ts(), handle.create_ts());
+    assert_eq!(entry.expire_ts(), handle.expire_ts());
 }
 
 // Option 2: Ignore return values (if you don't need the metadata)
@@ -423,7 +431,7 @@ while let Some((key, value)) = iter.next().await? {
 let mut iter = snapshot.scan(b"key1"..=b"key2").await?;
 while let Some(row_entry) = iter.next_row().await? {
     println!("Key: {:?}, Seq: {}, Value: {:?}", 
-             row_entry.key, row_entry.seq, row_entry.value);
+             row_entry.key(), row_entry.seq(), row_entry.value());
 }
 ```
 
@@ -500,13 +508,13 @@ while let Some((key, value)) = iter.next().await? {
 // When you need complete row information, use next_row()
 let mut iter = db.scan(..).await?;
 while let Some(row_entry) = iter.next_row().await? {
-    // Access metadata: row_entry.seq, row_entry.create_ts, row_entry.expire_ts
-    match row_entry.value {
+    // Access metadata: row_entry.seq(), row_entry.create_ts(), row_entry.expire_ts()
+    match row_entry.value() {
         ValueDeletable::Value(v) => {
-            // Use row_entry.key and v
+            // Use row_entry.key() and v
         }
         ValueDeletable::Merge(m) => {
-            // Use row_entry.key and m
+            // Use row_entry.key() and m
         }
         ValueDeletable::Tombstone => unreachable!(),
     }
