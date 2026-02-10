@@ -313,10 +313,6 @@ Several alternatives were considered but rejected:
 
 Notably, this RFC does not preclude us from implementing any of the above alternatives. They are simply not proposed in this RFC.
 
-## Open Questions
-
-- Should we make `WalBuffer` public instead of introducing `WalFile`?
-
 ## References
 
 - Githb issue [#249](https://github.com/slatedb/slatedb/issues/249) (CDC Streaming to support data sinks and event driven architectures)
