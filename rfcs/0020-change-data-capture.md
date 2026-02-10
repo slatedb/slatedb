@@ -46,7 +46,7 @@ Authors:
 
 ## Summary
 
-This RFC proposes change data capture (CDC) support in SlateDB. A `WalReader` struct is proposed, which allows to poll for available WAL files and read their contents. Users can poll repeatedly to assemble a stream of changes to the database.
+This RFC proposes change data capture (CDC) support in SlateDB. A `WalReader` struct is proposed, which allows to poll for available WAL files and read their contents. Users can poll repeatedly to assemble a stream of changes to the database. Bootstrapping and backfilling are outside the scope of this RFC, however some basic guidelines are discussed in future work.
 
 ## Motivation
 
@@ -233,20 +233,6 @@ To implement this, we will modify `mem_table_flush.rs` to check if `self.db_inne
 
 If the WAL is disabled, `mem_table_flush.rs` will proceed as normal.
 
-### Bootstraps and Backfills
-
-Consumers are responsible for bootstrapping and backfilling their state. SlateDB provides no built-in support for this.
-
-The following guidelines are recommended:
-
-1. Begin streaming WAL changes using `WalReader`.
-2. Create a clone of the current database using `Admin::create_clone()`. This will provide a consistent snapshot of all L0 and compacted SSTs up to the current checkpoint (which was created after the `WalReader` stream began).
-3. Use `DbReader::scan()` on the clone to read all existing data in the database.
-   - If the database is large, scans in non-overlapping key ranges can be parallelized.
-   - If desired, rows with seqnums greater than or equal to the starting seqnum of the `WalReader` stream can be skipped to avoid processing duplicate data. This will require the forthcoming `scan_row` API introduced in [#1247](https://github.com/slatedb/slatedb/pull/1247).
-
-This approach provides key-ordered rather than seqnum-ordered bootstrapping. If seqnum-ordered bootstrapping is required, users will need to implement their own logic to read all SSTs and sort the data by seqnum.
-
 ## Impact Analysis
 
 SlateDB features and components that this RFC interacts with. Check all that apply.
@@ -358,6 +344,26 @@ Several alternatives were considered but rejected:
 - Implementing a `ScanOptions::range` API that would allow scans to read only data in a specific seqnum range. This would allow users to implement their own CDC solution by repeatedly scanning starting from seqnum 0 and scanning in batches until they reach the latest seqnum. This was rejected due to performance concerns; scanning the entire database repeatedly would be inefficient for large databases.
 
 Notably, this RFC does not preclude us from implementing any of the above alternatives. They are simply not proposed in this RFC.
+
+## Future work
+
+### Bootstraps and Backfills
+
+Consumers are responsible for bootstrapping or backfilling initial state outside of the CDC pipeline. SlateDB provides no built-in support for this at the moment.
+
+Users can currently bootstrap data using `Db::scan()`, but there is no easy way to do a clean cut over to the WAL stream. Users may choose to simply accept duplicates, or they can use key/value payloads to de-duplicate data. For example, if a value contains a unique ID field, users can de-duplicate using this field.
+
+Various fields in the manifest might be considered, but they are insufficient. The `wal_id_last_seen` field in the manifest is insufficient because subsequent WAL files might be written. Those writes are marked durable and exposed to `scan()` operations. The `last_l0_seq` contains the last sequence number written to L0, but writes with later sequence numbers might be persisted to the WAL (see [0011-transaction.md](0011-transaction.md) for sequence number details).
+
+To provide a clean cutover, we need to expose the sequence number at the point the `scan()` is executed. [#1247](https://github.com/slatedb/slatedb/pull/1247) proposes exactly this. With `scan()`, `DbIterator` will be extended to have a `next_row()` function, which will return a `RowEntry`. The `RowEntry` will contain the sequence number of the row. Users can keep track of the highest sequence number seen during the scan, and then use that sequence number as a boundary when processing the WAL stream to avoid duplicates. This approach provides key-ordered rather than seqnum-ordered bootstrapping. If seqnum-ordered bootstrapping is required, users will need to implement their own logic to read all SSTs and sort the data by seqnum.
+
+### Database diffs
+
+There was [some discussion](https://github.com/slatedb/slatedb/pull/634#discussion_r2778273686) in this RFC about periodic replication. The example cited was an hourly replication feed into Apache Iceberg:
+
+> Consider the case of replicating SlateDB to Iceberg, once every hour or so. We wouldn't need all the updates for this case, it is enough to only get the keys that were updated since previous replication, and just the most recent update for every key. The changes can be coalesced on the read side. Alternate approach for this scenario would be to compare two checkpoints and return the diffs. Wal based approach is more generally applicable, and is simpler. Do you see value in also adding the "only get the recent update since last time" approach for a future, different RFC?
+
+This is an interesting idea, but it is outside the scope of this RFC.
 
 ## References
 
