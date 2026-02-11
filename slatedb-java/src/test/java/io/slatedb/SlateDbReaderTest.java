@@ -1,74 +1,90 @@
 package io.slatedb;
 
-import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
-import java.nio.charset.StandardCharsets;
+import static java.nio.charset.StandardCharsets.UTF_8;
+import static org.junit.jupiter.api.Assertions.*;
+
 import java.time.Duration;
 
 class SlateDbReaderTest {
-    @Test
-    void readerGetAndScan() throws Exception {
-        TestSupport.ensureNativeReady();
-        TestSupport.DbContext context = TestSupport.createDbContext();
-        String readerObjectStoreUrl = "file://" + context.objectStoreRoot().toAbsolutePath();
+    private static final SlateDbConfig.ReaderOptions DEFAULT_READER_OPTIONS = SlateDbConfig.ReaderOptions.builder()
+        .manifestPollInterval(Duration.ofMillis(200))
+        .checkpointLifetime(Duration.ofSeconds(1))
+        .maxMemtableBytes(1024 * 1024)
+        .skipWalReplay(false)
+        .build();
 
-        byte[] key = "reader-key".getBytes(StandardCharsets.UTF_8);
-        byte[] value = "reader-value".getBytes(StandardCharsets.UTF_8);
-
-        try (SlateDb db = SlateDb.open(
-            context.dbPath().toAbsolutePath().toString(),
-            readerObjectStoreUrl,
-            null
-        )) {
+    private static void createSlateDB(
+        final TestSupport.DbContext context,
+        final String url,
+        final byte[] key,
+        final byte[] value
+    ) {
+        try (SlateDb db = SlateDb.open(context.dbPath().toAbsolutePath().toString(), url, null)) {
             db.put(key, value);
             db.flush();
         }
+    }
 
-        SlateDbConfig.ReaderOptions readerOptions = SlateDbConfig.ReaderOptions.builder()
-            .manifestPollInterval(Duration.ofMillis(200))
-            .checkpointLifetime(Duration.ofSeconds(1))
-            .maxMemtableBytes(1024 * 1024)
-            .skipWalReplay(false)
-            .build();
+    @Test
+    void readerGetAndScan() throws Exception {
+        TestSupport.ensureNativeReady();
+        final var context = TestSupport.createDbContext();
+        final var readerObjectStoreUrl = "file://" + context.objectStoreRoot().toAbsolutePath();
 
-        try (SlateDbReader reader = SlateDb.openReader(
+        final var key = "reader-key".getBytes(UTF_8);
+        final var value = "reader-value".getBytes(UTF_8);
+        createSlateDB(context, readerObjectStoreUrl, key, value);
+
+        try (final var reader = SlateDb.openReader(
             context.dbPath().toAbsolutePath().toString(),
             readerObjectStoreUrl,
             null,
             null,
-            readerOptions
+            DEFAULT_READER_OPTIONS
         )) {
-            Assertions.assertArrayEquals(value, reader.get(key));
+            assertArrayEquals(value, reader.get(key));
 
-            try (SlateDbScanIterator iter = reader.scanPrefix("reader-".getBytes(StandardCharsets.UTF_8))) {
-                SlateDbKeyValue kv = iter.next();
-                Assertions.assertNotNull(kv);
-                Assertions.assertArrayEquals(key, kv.key());
-                Assertions.assertArrayEquals(value, kv.value());
+            try (SlateDbScanIterator iter = reader.scanPrefix("reader-".getBytes(UTF_8))) {
+                final var kv = iter.next();
+                assertNotNull(kv);
+                assertArrayEquals(key, kv.key());
+                assertArrayEquals(value, kv.value());
             }
+        }
+    }
+
+    @Test
+    void readerGetMissingKey() throws Exception {
+        TestSupport.ensureNativeReady();
+        final var context = TestSupport.createDbContext();
+        final var readerObjectStoreUrl = "file://" + context.objectStoreRoot().toAbsolutePath();
+
+        createSlateDB(context, readerObjectStoreUrl, "key".getBytes(UTF_8), "value".getBytes(UTF_8));
+
+        try (final var reader = SlateDb.openReader(
+            context.dbPath().toAbsolutePath().toString(),
+            readerObjectStoreUrl,
+            null,
+            null,
+            DEFAULT_READER_OPTIONS
+        )) {
+            assertNull(reader.get("missing".getBytes(UTF_8)));
         }
     }
 
     @Test
     void readerCloseIsIdempotentAndGuardsMethods() throws Exception {
         TestSupport.ensureNativeReady();
-        TestSupport.DbContext context = TestSupport.createDbContext();
-        String readerObjectStoreUrl = "file://" + context.objectStoreRoot().toAbsolutePath();
+        final var context = TestSupport.createDbContext();
+        final var readerObjectStoreUrl = "file://" + context.objectStoreRoot().toAbsolutePath();
 
-        byte[] key = "reader-close-key".getBytes(StandardCharsets.UTF_8);
-        byte[] value = "reader-close-value".getBytes(StandardCharsets.UTF_8);
+        final var key = "reader-close-key".getBytes(UTF_8);
+        final var value = "reader-close-value".getBytes(UTF_8);
+        createSlateDB(context, readerObjectStoreUrl, key, value);
 
-        try (SlateDb db = SlateDb.open(
-            context.dbPath().toAbsolutePath().toString(),
-            readerObjectStoreUrl,
-            null
-        )) {
-            db.put(key, value);
-            db.flush();
-        }
-
-        SlateDbReader reader = SlateDb.openReader(
+        final var reader = SlateDb.openReader(
             context.dbPath().toAbsolutePath().toString(),
             readerObjectStoreUrl,
             null,
@@ -77,9 +93,9 @@ class SlateDbReaderTest {
         );
 
         try {
-            Assertions.assertArrayEquals(value, reader.get(key));
+            assertArrayEquals(value, reader.get(key));
             reader.close();
-            Assertions.assertDoesNotThrow(reader::close);
+            assertDoesNotThrow(reader::close);
         } finally {
             reader.close();
         }

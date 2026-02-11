@@ -1,6 +1,10 @@
 package io.slatedb;
 
 import org.junit.jupiter.api.Assertions;
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import org.junit.jupiter.api.Test;
 
 import java.nio.charset.StandardCharsets;
@@ -177,26 +181,26 @@ class SlateDbTest {
     @Test
     void putGetDeleteWithOptionsAndMetrics() throws Exception {
         TestSupport.ensureNativeReady();
-        TestSupport.DbContext context = TestSupport.createDbContext();
+        final var context = TestSupport.createDbContext();
 
-        byte[] key = "opts-key".getBytes(StandardCharsets.UTF_8);
-        byte[] value = "opts-value".getBytes(StandardCharsets.UTF_8);
+        final var key = "opts-key".getBytes(StandardCharsets.UTF_8);
+        final var value = "opts-value".getBytes(StandardCharsets.UTF_8);
 
-        try (SlateDb db = SlateDb.open(context.dbPath().toAbsolutePath().toString(), context.objectStoreUrl(), null)) {
+        try (final SlateDb db = SlateDb.open(context.dbPath().toAbsolutePath().toString(), context.objectStoreUrl(), null)) {
             db.put(key, value, SlateDbConfig.PutOptions.noExpiry(), new SlateDbConfig.WriteOptions(false));
-            SlateDbConfig.ReadOptions readOptions = SlateDbConfig.ReadOptions.builder()
+            final var readOptions = SlateDbConfig.ReadOptions.builder()
                 .durabilityFilter(SlateDbConfig.Durability.MEMORY)
                 .dirty(false)
                 .cacheBlocks(true)
                 .build();
-            Assertions.assertArrayEquals(value, db.get(key, readOptions));
+            assertArrayEquals(value, db.get(key, readOptions));
 
             db.delete(key, new SlateDbConfig.WriteOptions(false));
-            Assertions.assertNull(db.get(key));
+            assertNull(db.get(key));
 
-            String metrics = db.metrics();
-            Assertions.assertNotNull(metrics);
-            Assertions.assertTrue(metrics.startsWith("{"));
+            final var metrics = db.metrics();
+            assertNotNull(metrics);
+            assertTrue(metrics.startsWith("{"));
         }
     }
 }
