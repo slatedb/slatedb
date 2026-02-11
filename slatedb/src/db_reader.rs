@@ -442,6 +442,60 @@ impl DbReaderInner {
         Ok((last_wal_id, last_committed_seq))
     }
 
+    async fn refresh_to_latest(&self) -> Result<(), SlateDBError> {
+        self.check_closed()?;
+
+        let mut manifest =
+            StoredManifest::load(Arc::clone(&self.manifest_store), self.system_clock.clone())
+                .await?;
+
+        let latest_manifest = manifest.manifest();
+        if self.should_reestablish_checkpoint(&latest_manifest.core) {
+            let checkpoint = self.replace_checkpoint(&mut manifest).await?;
+            self.reestablish_checkpoint(checkpoint).await?;
+        } else {
+            self.maybe_replay_new_wals().await?;
+        }
+
+        self.maybe_refresh_checkpoint(&mut manifest).await
+    }
+
+    async fn switch_to_checkpoint(&self, checkpoint_id: Uuid) -> Result<(), SlateDBError> {
+        self.check_closed()?;
+
+        // Load the latest manifest to find the checkpoint
+        let stored_manifest =
+            StoredManifest::load(Arc::clone(&self.manifest_store), self.system_clock.clone())
+                .await?;
+
+        // Find the checkpoint in the manifest
+        let checkpoint = stored_manifest
+            .db_state()
+            .find_checkpoint(checkpoint_id)
+            .ok_or(SlateDBError::CheckpointMissing(checkpoint_id))?
+            .clone();
+
+        // Build checkpoint state (no WAL replay for user-specified checkpoints)
+        let new_state = Self::build_initial_checkpoint_state(
+            Arc::clone(&self.manifest_store),
+            Arc::clone(&self.table_store),
+            &self.options,
+            checkpoint,
+            false, // don't replay new WALs - point-in-time view
+        )
+        .await?;
+
+        // Update oracle and state
+        self.oracle
+            .last_remote_persisted_seq
+            .store_if_greater(new_state.last_remote_persisted_seq);
+
+        let mut write_guard = self.state.write();
+        *write_guard = Arc::new(new_state);
+
+        Ok(())
+    }
+
     /// Returns an error if the reader has been closed.
     ///
     /// ## Returns
@@ -609,6 +663,46 @@ impl DbReader {
             inner,
             task_executor,
         })
+    }
+
+    /// Manually refresh the reader to the latest manifest state.
+    ///
+    /// This performs the same operation as the automatic manifest poller:
+    /// - Loads the latest manifest from storage
+    /// - If compaction or WAL changes require it, creates a new checkpoint
+    /// - Otherwise, replays any new WAL entries
+    ///
+    /// Useful when:
+    /// - You want to immediately see recently written data without waiting for the poll interval
+    /// - The reader was opened with a specific checkpoint and you want to see newer data
+    ///
+    /// Note: If opened with a user-provided checkpoint, this will switch to a new
+    /// internally-managed checkpoint pointing at the latest manifest.
+    ///
+    /// ## Errors
+    /// - `Error`: if the reader is closed or storage cannot be accessed
+    pub async fn refresh(&self) -> Result<(), crate::Error> {
+        self.inner.refresh_to_latest().await.map_err(Into::into)
+    }
+
+    /// Switch to reading from a specific checkpoint.
+    ///
+    /// This loads the manifest referenced by the checkpoint and rebuilds the reader's
+    /// internal state to reflect that point in time. No WAL entries beyond the checkpoint
+    /// will be replayed, giving you a point-in-time view.
+    ///
+    /// ## Arguments
+    /// - `checkpoint_id` - The UUID of an existing checkpoint
+    ///
+    /// ## Errors
+    /// - `Error` with `ErrorKind::Data`: if the checkpoint does not exist
+    /// - `Error` with `ErrorKind::Closed`: if the reader has been closed
+    /// - `Error` with `ErrorKind::Unavailable`: if storage cannot be accessed
+    pub async fn set_checkpoint(&self, checkpoint_id: Uuid) -> Result<(), crate::Error> {
+        self.inner
+            .switch_to_checkpoint(checkpoint_id)
+            .await
+            .map_err(Into::into)
     }
 
     /// Get a value from the database with default read options.
@@ -1337,6 +1431,177 @@ mod tests {
         assert_eq!(
             reader.get(key).await.unwrap(),
             Some(Bytes::from_static(value))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_refresh_sees_new_data() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_kv_store");
+        let test_provider = TestProvider::new(path.clone(), Arc::clone(&object_store));
+
+        let db = test_provider.new_db(Settings::default()).await.unwrap();
+
+        // Write initial data
+        db.put(b"key1", b"value1").await.unwrap();
+        db.flush().await.unwrap();
+
+        // Open reader
+        let reader = test_provider
+            .new_db_reader(DbReaderOptions::default(), None)
+            .await
+            .unwrap();
+
+        // Verify initial data is visible
+        assert_eq!(
+            reader.get(b"key1").await.unwrap(),
+            Some(Bytes::from_static(b"value1"))
+        );
+
+        // Write more data after reader was opened
+        db.put(b"key2", b"value2").await.unwrap();
+        db.flush().await.unwrap();
+
+        // Before refresh, key2 should not be visible
+        assert_eq!(reader.get(b"key2").await.unwrap(), None);
+
+        // After refresh, key2 should be visible
+        reader.refresh().await.unwrap();
+        assert_eq!(
+            reader.get(b"key2").await.unwrap(),
+            Some(Bytes::from_static(b"value2"))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_set_checkpoint_switches_view() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_kv_store");
+        let test_provider = TestProvider::new(path.clone(), Arc::clone(&object_store));
+
+        let db = test_provider.new_db(Settings::default()).await.unwrap();
+
+        // Write v1 and create checkpoint1
+        db.put(b"key", b"v1").await.unwrap();
+        let checkpoint1 = db
+            .create_checkpoint(CheckpointScope::All, &CheckpointOptions::default())
+            .await
+            .unwrap();
+
+        // Write v2 and create checkpoint2
+        db.put(b"key", b"v2").await.unwrap();
+        let checkpoint2 = db
+            .create_checkpoint(CheckpointScope::All, &CheckpointOptions::default())
+            .await
+            .unwrap();
+
+        // Open reader at checkpoint2 (should see v2)
+        let reader = test_provider
+            .new_db_reader(DbReaderOptions::default(), Some(checkpoint2.id))
+            .await
+            .unwrap();
+        assert_eq!(
+            reader.get(b"key").await.unwrap(),
+            Some(Bytes::from_static(b"v2"))
+        );
+
+        // Switch to checkpoint1 (should see v1)
+        reader.set_checkpoint(checkpoint1.id).await.unwrap();
+        assert_eq!(
+            reader.get(b"key").await.unwrap(),
+            Some(Bytes::from_static(b"v1"))
+        );
+
+        // Switch back to checkpoint2 (should see v2 again)
+        reader.set_checkpoint(checkpoint2.id).await.unwrap();
+        assert_eq!(
+            reader.get(b"key").await.unwrap(),
+            Some(Bytes::from_static(b"v2"))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_set_checkpoint_missing_returns_error() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_kv_store");
+        let test_provider = TestProvider::new(path.clone(), Arc::clone(&object_store));
+
+        let _db = test_provider.new_db(Settings::default()).await.unwrap();
+
+        let reader = test_provider
+            .new_db_reader(DbReaderOptions::default(), None)
+            .await
+            .unwrap();
+
+        // Try to switch to a non-existent checkpoint
+        let random_uuid = Uuid::new_v4();
+        let result = reader.set_checkpoint(random_uuid).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err.kind(), crate::error::ErrorKind::Data),
+            "Expected ErrorKind::Data, got {:?}",
+            err.kind()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_refresh_on_closed_reader_returns_error() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_kv_store");
+        let test_provider = TestProvider::new(path.clone(), Arc::clone(&object_store));
+
+        let _db = test_provider.new_db(Settings::default()).await.unwrap();
+
+        let reader = test_provider
+            .new_db_reader(DbReaderOptions::default(), None)
+            .await
+            .unwrap();
+
+        // Close the reader
+        reader.close().await.unwrap();
+
+        // Attempt to refresh should fail
+        let result = reader.refresh().await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err.kind(), crate::error::ErrorKind::Closed(_)),
+            "Expected ErrorKind::Closed, got {:?}",
+            err.kind()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_set_checkpoint_on_closed_reader_returns_error() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_kv_store");
+        let test_provider = TestProvider::new(path.clone(), Arc::clone(&object_store));
+
+        let db = test_provider.new_db(Settings::default()).await.unwrap();
+
+        // Create a checkpoint we can try to switch to
+        let checkpoint = db
+            .create_checkpoint(CheckpointScope::All, &CheckpointOptions::default())
+            .await
+            .unwrap();
+
+        let reader = test_provider
+            .new_db_reader(DbReaderOptions::default(), None)
+            .await
+            .unwrap();
+
+        // Close the reader
+        reader.close().await.unwrap();
+
+        // Attempt to set_checkpoint should fail
+        let result = reader.set_checkpoint(checkpoint.id).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err.kind(), crate::error::ErrorKind::Closed(_)),
+            "Expected ErrorKind::Closed, got {:?}",
+            err.kind()
         );
     }
 
