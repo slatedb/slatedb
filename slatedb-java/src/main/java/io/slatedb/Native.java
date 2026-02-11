@@ -2,7 +2,6 @@ package io.slatedb;
 
 import io.slatedb.SlateDb.SlateDbException;
 import io.slatedb.SlateDbConfig.*;
-import io.slatedb.SlateDbKeyValue;
 
 import java.lang.foreign.Arena;
 import java.lang.foreign.FunctionDescriptor;
@@ -51,8 +50,8 @@ final class Native {
         HANDLE_LAYOUT.varHandle(MemoryLayout.PathElement.groupElement("ptr"));
     private static final VarHandle RESULT_ERROR =
         RESULT_LAYOUT.varHandle(MemoryLayout.PathElement.groupElement("error"));
-    private static final VarHandle RESULT_NULL =
-            RESULT_LAYOUT.varHandle(MemoryLayout.PathElement.groupElement("null"));
+    private static final VarHandle RESULT_NONE =
+            RESULT_LAYOUT.varHandle(MemoryLayout.PathElement.groupElement("none"));
     private static final VarHandle RESULT_MESSAGE =
         RESULT_LAYOUT.varHandle(MemoryLayout.PathElement.groupElement("message"));
     private static final VarHandle VALUE_DATA =
@@ -247,15 +246,12 @@ final class Native {
     private static GroupLayout createResultLayout() {
         final List<MemoryLayout> elements = new ArrayList<>();
         elements.add(ValueLayout.JAVA_INT.withName("error"));
-        elements.add(ValueLayout.JAVA_BOOLEAN.withName("null"));
-        long padding = Math.max(0, ValueLayout.ADDRESS.byteAlignment() - (ValueLayout.JAVA_INT.byteSize() + ValueLayout.JAVA_BOOLEAN.byteSize()));
+        elements.add(ValueLayout.JAVA_BOOLEAN.withName("none"));
+        final long size = ValueLayout.JAVA_INT.byteSize() + ValueLayout.JAVA_BOOLEAN.byteSize();
+        final long padding = Math.max(0, ValueLayout.ADDRESS.byteAlignment() - size);
         if (padding != 0) {
             elements.add(MemoryLayout.paddingLayout(padding));
         }
-//        padding = Math. max(0, ValueLayout.ADDRESS.byteAlignment() - ValueLayout.JAVA_BOOLEAN.byteSize());
-//        if (padding != 0) {
-//            elements.add(MemoryLayout.paddingLayout(padding));
-//        }
         elements.add(ValueLayout.ADDRESS.withName("message"));
         return MemoryLayout.structLayout(elements.toArray(new MemoryLayout[0]));
     }
@@ -741,7 +737,7 @@ final class Native {
                 valueOut
             );
             int error = (int) getInt(RESULT_ERROR, result);
-            final boolean isNull = getBoolean(RESULT_NULL, result);
+            final boolean isNone = getBoolean(RESULT_NONE, result);
             MemorySegment messageSegment = (MemorySegment) getAddress(RESULT_MESSAGE, result);
             String message = readMessage(messageSegment);
             RuntimeException failure = (error == 0) ? null : new SlateDbException(error, message);
@@ -749,7 +745,7 @@ final class Native {
             if (failure != null) {
                 throw failure;
             }
-            if (isNull) {
+            if (isNone) {
                 return null;
             }
             return copyValue(valueOut, null);
@@ -809,7 +805,7 @@ final class Native {
                 valueOut
             );
             int error = (int) getInt(RESULT_ERROR, result);
-            final boolean isNull = getBoolean(RESULT_NULL, result);
+            final boolean isNone = getBoolean(RESULT_NONE, result);
             MemorySegment messageSegment = (MemorySegment) getAddress(RESULT_MESSAGE, result);
             String message = readMessage(messageSegment);
             RuntimeException failure = (error == 0) ? null : new SlateDbException(error, message);
@@ -817,7 +813,7 @@ final class Native {
             if (failure != null) {
                 throw failure;
             }
-            if (isNull) {
+            if (isNone) {
                 return null;
             }
             return copyValue(valueOut, null);
@@ -918,7 +914,7 @@ final class Native {
                 kvOut
             );
             int error = (int) getInt(RESULT_ERROR, result);
-            boolean isNull = getBoolean(RESULT_NULL, result);
+            boolean isNone = getBoolean(RESULT_NONE, result);
             MemorySegment messageSegment = (MemorySegment) getAddress(RESULT_MESSAGE, result);
             String message = readMessage(messageSegment);
             RuntimeException failure = (error == 0) ? null : new SlateDbException(error, message);
@@ -926,7 +922,7 @@ final class Native {
             if (failure != null) {
                 throw failure;
             }
-            if (isNull) {
+            if (isNone) {
                 return null;
             }
             return copyKeyValuePair(kvOut);

@@ -426,8 +426,8 @@ pub extern "C" fn slatedb_builder_new(
                 builder: std::ptr::null_mut(),
                 result: CSdbResult {
                     error: err,
+                    none: false,
                     message: message_to_cstring("Invalid path").into_raw(),
-                    null: false,
                 },
             }
         }
@@ -443,8 +443,8 @@ pub extern "C" fn slatedb_builder_new(
                     builder: std::ptr::null_mut(),
                     result: CSdbResult {
                         error: err,
+                        none: false,
                         message: message_to_cstring("Invalid URL").into_raw(),
-                        null: false,
                     },
                 }
             }
@@ -460,8 +460,8 @@ pub extern "C" fn slatedb_builder_new(
                     builder: std::ptr::null_mut(),
                     result: CSdbResult {
                         error: err,
+                        none: false,
                         message: message_to_cstring("Invalid env file path").into_raw(),
-                        null: false,
                     },
                 }
             }

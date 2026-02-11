@@ -47,7 +47,7 @@ typedef struct SlateDbReaderFFI SlateDbReaderFFI;
 
 typedef struct CSdbResult {
     enum CSdbError error;
-    bool null;
+    bool none;
     char *message;
 } CSdbResult;
 
