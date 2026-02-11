@@ -119,6 +119,12 @@ impl MemtableFlusher {
                 rguard.state().imm_memtable.back().cloned()
             }
         } {
+            if self.db_inner.wal_enabled {
+                let last_seq = imm_memtable.table().last_seq().unwrap_or(0);
+                if self.db_inner.oracle.last_remote_persisted_seq.load() < last_seq {
+                    self.db_inner.flush_wals().await?;
+                }
+            }
             let id = SsTableId::Compacted(
                 self.db_inner
                     .rand
@@ -194,10 +200,6 @@ impl MemtableFlusher {
                     // at this point we know the data in the memtable is durably stored
                     // so notify the relevant listeners
                     imm_memtable.table().notify_durable(Ok(()));
-                    fail_point!(
-                        Arc::clone(&self.db_inner.fp_registry),
-                        "before-l0-durable-seq-update"
-                    );
                     self.db_inner
                         .oracle
                         .last_remote_persisted_seq

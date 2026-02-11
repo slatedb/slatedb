@@ -1633,6 +1633,7 @@ mod tests {
         assert_iterator, OnDemandCompactionSchedulerSupplier, StringConcatMergeOperator,
     };
     use crate::types::RowEntry;
+    use crate::wal_reader::WalReader;
     use crate::{proptest_util, test_utils, CloseReason, KeyValue};
     use async_trait::async_trait;
     use chrono::TimeDelta;
@@ -3734,9 +3735,10 @@ mod tests {
             .get();
         assert!(final_flush_count > initial_flush_count);
 
-        // Verify that the WAL has not been flushed
+        // Verify that the WAL was also flushed since we guarantee
+        // memtable data is persisted in the WAL prior to L0 flush.
         let recent_flushed_wal_id = kv_store.inner.wal_buffer.recent_flushed_wal_id();
-        assert_eq!(recent_flushed_wal_id, 0);
+        assert_eq!(recent_flushed_wal_id, 2);
 
         // Verify that the data is still accessible after flush
         let retrieved_value1 = kv_store.get(key1).await.unwrap().unwrap();
@@ -3767,6 +3769,72 @@ mod tests {
         // Verify our keys are in the SST
         assert!(found_keys.contains(key1.as_slice()));
         assert!(found_keys.contains(key2.as_slice()));
+    }
+
+    #[tokio::test]
+    async fn test_memtable_flush_also_flushes_wal() {
+        let main_object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let wal_object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = "/tmp/test_memtable_flush_also_flushes_wal";
+        let mut settings = test_db_options(0, 1024, None);
+        settings.flush_interval = None;
+
+        let kv_store = Db::builder(path, main_object_store)
+            .with_settings(settings)
+            .with_wal_object_store(wal_object_store.clone())
+            .build()
+            .await
+            .unwrap();
+
+        let key = b"wal_flush_key";
+        let value = b"wal_flush_value";
+        kv_store
+            .put_with_options(
+                key,
+                value,
+                &PutOptions::default(),
+                &WriteOptions {
+                    await_durable: false,
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(kv_store.inner.wal_buffer.buffered_wal_entries_count(), 1);
+
+        kv_store
+            .flush_with_options(FlushOptions {
+                flush_type: FlushType::MemTable,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(kv_store.inner.wal_buffer.buffered_wal_entries_count(), 0);
+
+        let wal_reader = WalReader::new(path, wal_object_store);
+        let wal_files = wal_reader.list(..).await.unwrap();
+        assert_eq!(wal_files.len(), 2); // first file is the fencing operation
+        let mut rows = Vec::new();
+        let mut wal_iter = wal_files[1] // second file contains the actual write
+            .iterator()
+            .await
+            .expect("expected successful WAL iterator call")
+            .expect("expected WAL file to exist");
+        while let Some(entry) = wal_iter
+            .next_entry()
+            .await
+            .expect("expected successful WAL rows read")
+        {
+            rows.push(entry);
+        }
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
+        assert_eq!(row.key.as_ref(), key);
+        assert_eq!(
+            row.value.as_bytes().expect("expected bytes").as_ref(),
+            value
+        );
+        assert_eq!(row.seq, 1);
     }
 
     async fn test_sequence_tracker_persisted_across_flush_and_reload_impl(wal_enabled: bool) {
@@ -6203,143 +6271,5 @@ mod tests {
         );
 
         db.close().await.expect("failed to close DB");
-    }
-
-    /// Tests that when reading from L0 with DurabilityLevel::Remote, we observe data at
-    /// an earlier durability watermark until the watermark is updated, at which point we
-    /// observe data at the new watermark.
-    ///
-    /// This test validates the fix in flush.rs that ensures the retention iterator
-    /// considers the durable watermark when flushing memtable to L0. Without this fix,
-    /// the L0 SST would only contain the latest value (seq2), and remote readers would
-    /// incorrectly fail to find the durable value (seq1).
-    ///
-    /// See: https://github.com/slatedb/slatedb/pull/1189#issuecomment-3736149180
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn should_return_durable_value_when_reading_from_l0_with_remote_durability() {
-        // Given: a DB with failpoint registry
-        let fp_registry = Arc::new(FailPointRegistry::new());
-        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let path = "/tmp/test_durable_read_from_l0";
-        let mut settings = test_db_options(0, 1024, None);
-        settings.flush_interval = None; // Disable auto-flush so we control when flush happens
-        let db = Db::builder(path, object_store.clone())
-            .with_settings(settings)
-            .with_fp_registry(fp_registry.clone())
-            .build()
-            .await
-            .unwrap();
-
-        // Write value1 without awaiting durable, then manually flush WAL only
-        db.put_with_options(
-            b"key",
-            b"value1",
-            &PutOptions::default(),
-            &WriteOptions {
-                await_durable: false,
-            },
-        )
-        .await
-        .unwrap();
-        db.flush_with_options(FlushOptions {
-            flush_type: FlushType::Wal,
-        })
-        .await
-        .unwrap(); // WAL flush makes seq1 durable
-
-        let seq_after_first_write = db.inner.oracle.last_remote_persisted_seq();
-
-        // Write value2 without awaiting durable - seq2 is in WAL buffer but not flushed
-        db.put_with_options(
-            b"key",
-            b"value2",
-            &PutOptions::default(),
-            &WriteOptions {
-                await_durable: false,
-            },
-        )
-        .await
-        .unwrap();
-
-        // Verify seq hasn't advanced yet (value2 not durable)
-        assert_eq!(
-            db.inner.oracle.last_remote_persisted_seq(),
-            seq_after_first_write,
-            "expected durable seq to not advance before WAL flush"
-        );
-
-        // Pause before updating durable seq after L0 flush
-        fail_parallel::cfg(fp_registry.clone(), "before-l0-durable-seq-update", "pause").unwrap();
-
-        // Trigger memtable flush to L0 in background (it will pause at failpoint)
-        let db_clone = db.clone();
-        let flush_handle = tokio::spawn(async move {
-            db_clone
-                .flush_with_options(FlushOptions {
-                    flush_type: FlushType::MemTable,
-                })
-                .await
-        });
-
-        // Wait for L0 to appear in manifest (indicating flush has written SST)
-        let manifest_store = Arc::new(ManifestStore::new(&Path::from(path), object_store.clone()));
-        let mut stored_manifest =
-            StoredManifest::load(manifest_store, Arc::new(DefaultSystemClock::new()))
-                .await
-                .unwrap();
-        wait_for_manifest_condition(
-            &mut stored_manifest,
-            |s| !s.l0.is_empty(),
-            Duration::from_secs(30),
-        )
-        .await;
-
-        // Verify durable seq hasn't advanced yet (we're paused at failpoint)
-        assert_eq!(
-            db.inner.oracle.last_remote_persisted_seq(),
-            seq_after_first_write,
-            "expected durable seq to not advance while paused at failpoint"
-        );
-
-        // When: Read with DurabilityLevel::Remote while paused at failpoint
-        let value = db
-            .get_with_options(b"key", &ReadOptions::new().with_durability_filter(Remote))
-            .await
-            .unwrap();
-
-        // Then: Should see value1 (the durable value at seq1), not value2 (seq2)
-        assert_eq!(
-            value,
-            Some(Bytes::from("value1")),
-            "expected to read durable value1 when durability filter is Remote"
-        );
-
-        // Also verify Memory durability sees the latest value
-        let value_memory = db
-            .get_with_options(b"key", &ReadOptions::new().with_durability_filter(Memory))
-            .await
-            .unwrap();
-        assert_eq!(
-            value_memory,
-            Some(Bytes::from("value2")),
-            "expected to read latest value2 when durability filter is Memory"
-        );
-
-        // Resume the failpoint
-        fail_parallel::cfg(fp_registry.clone(), "before-l0-durable-seq-update", "off").unwrap();
-        flush_handle.await.unwrap().unwrap();
-
-        // After durable seq advances, Remote read should now return value2
-        let value_after = db
-            .get_with_options(b"key", &ReadOptions::new().with_durability_filter(Remote))
-            .await
-            .unwrap();
-        assert_eq!(
-            value_after,
-            Some(Bytes::from("value2")),
-            "expected to read value2 after durable seq advances"
-        );
-
-        db.close().await.unwrap();
     }
 }
