@@ -55,7 +55,6 @@ SlateDB features and components that this RFC interacts with. Check all that app
 
 ### Time, Retention, and Derived State
 
-- [ ] Logical clocks
 - [ ] Time to live (TTL)
 - [ ] Compaction filters
 - [ ] Merge operator
