@@ -690,6 +690,8 @@ pub struct AdminBuilder<P: Into<Path>> {
     wal_object_store: Option<Arc<dyn ObjectStore>>,
     system_clock: Arc<dyn SystemClock>,
     rand: Arc<DbRand>,
+    #[cfg(feature = "compaction_filters")]
+    compaction_filter_supplier: Option<Arc<dyn CompactionFilterSupplier>>,
 }
 
 impl<P: Into<Path>> AdminBuilder<P> {
@@ -701,6 +703,8 @@ impl<P: Into<Path>> AdminBuilder<P> {
             wal_object_store: None,
             system_clock: Arc::new(DefaultSystemClock::new()),
             rand: Arc::new(DbRand::default()),
+            #[cfg(feature = "compaction_filters")]
+            compaction_filter_supplier: None,
         }
     }
 
@@ -726,6 +730,19 @@ impl<P: Into<Path>> AdminBuilder<P> {
         self
     }
 
+    /// Sets the compaction filter supplier for the compactor run by this admin.
+    ///
+    /// When running a standalone compactor via [`Admin::run_compactor`], ensure it is
+    /// configured with the same filter supplier as the `DbBuilder`.
+    #[cfg(feature = "compaction_filters")]
+    pub fn with_compaction_filter_supplier(
+        mut self,
+        supplier: Arc<dyn CompactionFilterSupplier>,
+    ) -> Self {
+        self.compaction_filter_supplier = Some(supplier);
+        self
+    }
+
     /// Builds and returns an Admin instance.
     pub fn build(self) -> Admin {
         // No retrying object stores here, since we don't want to retry admin operations
@@ -734,6 +751,8 @@ impl<P: Into<Path>> AdminBuilder<P> {
             object_stores: ObjectStores::new(self.main_object_store, self.wal_object_store),
             system_clock: self.system_clock,
             rand: self.rand,
+            #[cfg(feature = "compaction_filters")]
+            compaction_filter_supplier: self.compaction_filter_supplier,
         }
     }
 }
