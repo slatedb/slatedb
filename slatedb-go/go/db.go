@@ -237,12 +237,12 @@ func (db *DB) GetWithOptions(key []byte, readOpts *ReadOptions) ([]byte, error) 
 	)
 	defer C.slatedb_free_result(result)
 
-	if result.error == C.NotFound {
-		return nil, ErrNotFound
-	}
-
 	if result.error != C.Success {
 		return nil, resultToError(result)
+	}
+
+	if result.none {
+		return nil, ErrNotFound
 	}
 
 	if value.data == nil || value.len == 0 {

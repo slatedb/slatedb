@@ -1,5 +1,6 @@
 use crate::error::{
-    create_error_result, create_success_result, slate_error_to_code, CSdbError, CSdbResult,
+    create_error_result, create_none_result, create_success_result, slate_error_to_code, CSdbError,
+    CSdbResult,
 };
 use crate::types::{CSdbIterator, CSdbKeyValue};
 
@@ -54,10 +55,7 @@ pub unsafe extern "C" fn slatedb_iterator_next(
 
             create_success_result()
         }
-        Ok(None) => {
-            // End of iteration - return NotFound to indicate end
-            create_error_result(CSdbError::NotFound, "End of iteration")
-        }
+        Ok(None) => create_none_result(),
         Err(e) => {
             let error_code = slate_error_to_code(&e);
             create_error_result(error_code, &format!("Iterator next failed: {}", e))

@@ -2,7 +2,6 @@ package io.slatedb;
 
 import io.slatedb.SlateDb.SlateDbException;
 import io.slatedb.SlateDbConfig.*;
-import io.slatedb.SlateDbKeyValue;
 
 import java.lang.foreign.Arena;
 import java.lang.foreign.FunctionDescriptor;
@@ -16,7 +15,10 @@ import java.lang.foreign.ValueLayout;
 import java.lang.invoke.MethodHandle;
 import java.lang.invoke.VarHandle;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Objects;
+
 final class Native {
     private static final Linker LINKER = Linker.nativeLinker();
     private static final Object INIT_LOCK = new Object();
@@ -48,6 +50,8 @@ final class Native {
         HANDLE_LAYOUT.varHandle(MemoryLayout.PathElement.groupElement("ptr"));
     private static final VarHandle RESULT_ERROR =
         RESULT_LAYOUT.varHandle(MemoryLayout.PathElement.groupElement("error"));
+    private static final VarHandle RESULT_NONE =
+            RESULT_LAYOUT.varHandle(MemoryLayout.PathElement.groupElement("none"));
     private static final VarHandle RESULT_MESSAGE =
         RESULT_LAYOUT.varHandle(MemoryLayout.PathElement.groupElement("message"));
     private static final VarHandle VALUE_DATA =
@@ -240,18 +244,16 @@ final class Native {
     private static MethodHandle freeCStringHandle;
 
     private static GroupLayout createResultLayout() {
-        long padding = Math.max(0, ValueLayout.ADDRESS.byteAlignment() - ValueLayout.JAVA_INT.byteSize());
-        if (padding == 0) {
-            return MemoryLayout.structLayout(
-                ValueLayout.JAVA_INT.withName("error"),
-                ValueLayout.ADDRESS.withName("message")
-            );
+        final List<MemoryLayout> elements = new ArrayList<>();
+        elements.add(ValueLayout.JAVA_INT.withName("error"));
+        elements.add(ValueLayout.JAVA_BOOLEAN.withName("none"));
+        final long size = ValueLayout.JAVA_INT.byteSize() + ValueLayout.JAVA_BOOLEAN.byteSize();
+        final long padding = Math.max(0, ValueLayout.ADDRESS.byteAlignment() - size);
+        if (padding != 0) {
+            elements.add(MemoryLayout.paddingLayout(padding));
         }
-        return MemoryLayout.structLayout(
-            ValueLayout.JAVA_INT.withName("error"),
-            MemoryLayout.paddingLayout(padding),
-            ValueLayout.ADDRESS.withName("message")
-        );
+        elements.add(ValueLayout.ADDRESS.withName("message"));
+        return MemoryLayout.structLayout(elements.toArray(new MemoryLayout[0]));
     }
 
     private static GroupLayout createPutOptionsLayout() {
@@ -735,15 +737,15 @@ final class Native {
                 valueOut
             );
             int error = (int) getInt(RESULT_ERROR, result);
+            final boolean isNone = getBoolean(RESULT_NONE, result);
             MemorySegment messageSegment = (MemorySegment) getAddress(RESULT_MESSAGE, result);
             String message = readMessage(messageSegment);
-            RuntimeException failure = (error == 0) ? null
-                : (error == 2 ? null : new SlateDbException(error, message));
+            RuntimeException failure = (error == 0) ? null : new SlateDbException(error, message);
             freeResult(result, failure);
             if (failure != null) {
                 throw failure;
             }
-            if (error == 2) {
+            if (isNone) {
                 return null;
             }
             return copyValue(valueOut, null);
@@ -803,15 +805,15 @@ final class Native {
                 valueOut
             );
             int error = (int) getInt(RESULT_ERROR, result);
+            final boolean isNone = getBoolean(RESULT_NONE, result);
             MemorySegment messageSegment = (MemorySegment) getAddress(RESULT_MESSAGE, result);
             String message = readMessage(messageSegment);
-            RuntimeException failure = (error == 0) ? null
-                : (error == 2 ? null : new SlateDbException(error, message));
+            RuntimeException failure = (error == 0) ? null : new SlateDbException(error, message);
             freeResult(result, failure);
             if (failure != null) {
                 throw failure;
             }
-            if (error == 2) {
+            if (isNone) {
                 return null;
             }
             return copyValue(valueOut, null);
@@ -912,15 +914,15 @@ final class Native {
                 kvOut
             );
             int error = (int) getInt(RESULT_ERROR, result);
+            boolean isNone = getBoolean(RESULT_NONE, result);
             MemorySegment messageSegment = (MemorySegment) getAddress(RESULT_MESSAGE, result);
             String message = readMessage(messageSegment);
-            RuntimeException failure = (error == 0) ? null
-                : (error == 2 ? null : new SlateDbException(error, message));
+            RuntimeException failure = (error == 0) ? null : new SlateDbException(error, message);
             freeResult(result, failure);
             if (failure != null) {
                 throw failure;
             }
-            if (error == 2) {
+            if (isNone) {
                 return null;
             }
             return copyKeyValuePair(kvOut);

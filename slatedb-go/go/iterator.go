@@ -47,12 +47,12 @@ func (iter *Iterator) Next() (KeyValue, error) {
 	result := C.slatedb_iterator_next(iter.ptr, &cKeyValue)
 	defer C.slatedb_free_result(result)
 
-	if result.error == C.NotFound {
-		return KeyValue{}, io.EOF // End of iteration
-	}
-
 	if result.error != C.Success {
 		return KeyValue{}, resultToError(result)
+	}
+
+	if result.none {
+		return KeyValue{}, io.EOF // End of iteration
 	}
 
 	// Convert C key-value to Go
