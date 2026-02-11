@@ -105,8 +105,8 @@ export default defineConfig({
 							link: '/docs/design/gc/',
 						},
 						{
-										label: 'Change Data Capture',
-										link: '/docs/design/change-data-capture/',
+							label: 'Change Data Capture',
+							link: '/docs/design/change-data-capture/',
 						}/*,
 						{
 							label: 'Caching',
