@@ -1,7 +1,5 @@
 # SlateDB Streaming and Change Data Capture (CDC)
 
-<!-- Replace "RFC Title" with your RFC's short, descriptive title. -->
-
 Table of Contents:
 
 <!-- TOC start (generated with https://github.com/derlin/bitdowntoc) -->
@@ -137,7 +135,7 @@ SlateDB does not directly support CDC. Users that wish to receive near-realtime 
 
 ## Design
 
-SlateDB's CDC design is based loosely on RocksDB's [`getUpdatesSince`](https://github.com/facebook/rocksdb/blob/main/include/rocksdb/db.h#L1959-L1974) API. In RocksDB, `getUpdatesSince` uses a [`TransactionLogIterator`](https://github.com/facebook/rocksdb/blob/feffb67303b7d8f38fd91acb9a5b6f6f06c068c3/include/rocksdb/transaction_log.h#L92) to read `write_batch`es. In SlateDB, we will use a `WalReader` to return `WalFile`s, which can be read to obtain `RowEntry`s. Unlike RocksDB, no iterator abstraction is provided. Users can poll for new WAL files and read their contents as needed; this allows users to control polling intervals and parallelism without added configuration.
+SlateDB's CDC design is based loosely on RocksDB's [`getUpdatesSince`](https://github.com/facebook/rocksdb/blob/main/include/rocksdb/db.h#L1959-L1974) API. In RocksDB, `getUpdatesSince` uses a [`TransactionLogIterator`](https://github.com/facebook/rocksdb/blob/feffb67303b7d8f38fd91acb9a5b6f6f06c068c3/include/rocksdb/transaction_log.h#L92) to read `write_batch`es. In SlateDB, we will use a `WalReader` to return `WalFile`s, which can be read to obtain `RowEntry`s. Unlike RocksDB, we do not provide a single logical iterator over the WAL; instead, we expose WAL file boundaries (`WalFile`) and a per-file iterator (`WalFileIterator`) so users can control polling intervals and parallelism without added configuration.
 
 ### `WalReader` API
 
@@ -146,86 +144,103 @@ SlateDB's CDC design is based loosely on RocksDB's [`getUpdatesSince`](https://g
 pub struct WalFileIterator;
 
 impl WalFileIterator {
-    /// Returns the next entry in the WAL file.
-    pub async fn next_entry(&mut self) -> Result<Option<RowEntry>, crate::Error>;
+   /// Returns the next entry in the WAL file.
+   pub async fn next_entry(&mut self) -> Result<Option<RowEntry>, crate::Error>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WalFileMetadata {
-    /// The time this WAL file was last written to object storage.
-    pub last_modified_dt: DateTime<Utc>,
+   /// The time this WAL file was last written to object storage.
+   pub last_modified_dt: DateTime<Utc>,
 
-    /// The size of this WAL file in bytes.
-    pub size_bytes: u64,
+   /// The size of this WAL file in bytes.
+   pub size_bytes: u64,
 
-    /// The path of this WAL file in object storage.
-    pub location: Path,
+   /// The path of this WAL file in object storage.
+   pub location: Path,
 }
 
 /// Represents a single WAL file stored in object storage and provides methods
 /// to inspect and read its contents.
 pub struct WalFile {
-    /// The unique identifier for this WAL file. Corresponds to the SST filename without
-    /// the extension. For example, file `000123.sst` would have id `123`.
-    pub id: u64,
+   /// The unique identifier for this WAL file. Corresponds to the SST filename without
+   /// the extension. For example, file `000123.sst` would have id `123`.
+   pub id: u64,
 
-    table_store: Arc<TableStore>,
+   table_store: Arc<TableStore>,
 }
 
 impl WalFile {
-    /// Returns metadata for this WAL file.
-    ///
-    /// Returns `Ok(None)` if the WAL file no longer exists.
-    pub async fn metadata(&self) -> Result<Option<WalFileMetadata>, crate::Error>;
+   /// Returns metadata for this WAL file.
+   ///
+   /// Returns `Ok(None)` if the WAL file does not exist.
+   pub async fn metadata(&self) -> Result<Option<WalFileMetadata>, crate::Error>;
 
-    /// Returns an iterator over `RowEntry`s in this WAL file. Raises an error if the
-    /// WAL file could not be read.
-    ///
-    /// Returns `Ok(None)` if the WAL file no longer exists.
-    pub async fn iterator(&self) -> Result<Option<WalFileIterator>, crate::Error>;
+   /// Returns an iterator over `RowEntry`s in this WAL file. Raises an error if the
+   /// WAL file could not be read.
+   ///
+   /// Returns `Ok(None)` if the WAL file does not exist.
+   pub async fn iterator(&self) -> Result<Option<WalFileIterator>, crate::Error>;
 }
 
 /// Reads WAL files in object storage for a specific database.
 pub struct WalReader;
 
 impl WalReader {
-    /// Creates a new WAL reader for the database at the given path.
-    ///
-    /// If the database was configured with a separate WAL object store, pass that
-    /// object store here.
-    pub fn new<P: Into<Path>>(path: P, object_store: Arc<dyn ObjectStore>) -> Self ;
+   /// Creates a new WAL reader for the database at the given path.
+   ///
+   /// If the database was configured with a separate WAL object store, pass that
+   /// object store here.
+   pub fn new<P: Into<Path>>(path: P, object_store: Arc<dyn ObjectStore>) -> Self ;
 
-    /// Lists WAL files in ascending order by their ID within the specified range.
-    /// If `range` is unbounded, all WAL files are returned.
-    pub async fn list<R: RangeBounds<u64>>(&self, range: R) -> Result<Vec<WalFile>, crate::Error>;
+   /// Lists WAL files in ascending order by their ID within the specified range.
+   /// If `range` is unbounded, all WAL files are returned.
+   pub async fn list<R: RangeBounds<u64>>(&self, range: R) -> Result<Vec<WalFile>, crate::Error>;
 
-    /// Creates a [`WalFile`] handle for a WAL ID.
-    pub fn get(&self, id: u64) -> WalFile;
+   /// Creates a [`WalFile`] handle for a WAL ID.
+   pub fn get(&self, id: u64) -> WalFile;
 }
-
 ```
 
 ### Usage
 
-Users can stream database changes by repeatedly calling `list()` to find new WAL files, then calling `rows()` on each new `WalFile` to read its contents.
+Users can stream database changes by using `list()` to discover an initial set of WAL files, then using `get(last_seen_id + 1)` to poll for the next WAL file without re-listing.
 
 ```rs
-let mut current_id: Bound<u64> = Unbounded;
+// One-time discovery (optional). Consumers can also skip this if they are resuming
+// from a persisted WAL ID.
+let wal_files = wal_reader.list(..).await?;
+let mut next_id = 0;
+for wal_file in wal_files {
+    if let Some(mut iter) = wal_file.iterator().await? {
+        while let Some(row) = iter.next_entry().await? {
+            // Process the row (send it to a message queue, apply it to another DB, etc.)
+        }
+        next_id = wal_file.id + 1;
+    }
+}
+
+// Poll the next WAL ID without calling list() again.
 loop {
-   let wal_files = wal_reader.list(current_id..).await?;
-   for wal_file in wal_files {
-       let rows = wal_file.rows().await?;
-       for row in rows {
-           // Process the row (send it to a message queue, apply it to another DB, etc.)
-       }
-       current_id = Included(wal_file.id + 1);
-   }
-   // Sleep for a short duration before polling again.
-   tokio::time::sleep(Duration::from_secs(1)).await;
+    let wal_file = wal_reader.get(next_id);
+    if let Some(mut iter) = wal_file.iterator().await? {
+        while let Some(row) = iter.next_entry().await? {
+            // Process the row.
+        }
+        next_id = wal_file.id + 1;
+        continue;
+    }
+
+    // The WAL file is not present (either not written yet, or GC'd). Sleep briefly and retry.
+    tokio::time::sleep(Duration::from_secs(1)).await;
 }
 ```
 
 _NOTE: This API uses file ID-based rather than seqnum-based ranges. This allows the reader to directly read WAL files rather than reading metadata and binary-searching for the appropriate file and seqnum offset in a WAL file. If users wish to resume from a specific seqnum, they will need to implement filtering logic themselves._
+
+This polling approach addresses the [operational concern](https://github.com/slatedb/slatedb/pull/634#discussion_r2791629993) that object store listings become expensive as the number of retained WAL files grows. By polling `get(next_id)` and checking `WalFile::iterator()` (or `WalFile::metadata()`), consumers can wait for future WAL files with a single object-store GET/HEAD per-polling interval, rather than repeatedly scanning the full WAL prefix via `list()`.
+
+If a consumer falls behind (or suspects it missed an ID due to GC), it can use `list(next_id..)` to re-synchronize and find the next available WAL file, then resume polling with `get()`.
 
 ### Semantics and Guarantees
 
@@ -323,16 +338,12 @@ SlateDB features and components that this RFC interacts with. Check all that app
 
 ### Performance & Cost
 
-<!-- Describe performance and cost implications of this change. -->
-
 - Latency (reads/writes/compactions): See "WAL and Memtable Synchronization" section.
 - Throughput (reads/writes/compactions): See "WAL and Memtable Synchronization" section.
 - Object-store request (GET/LIST/PUT) and cost profile: Additional LIST requests will be made to poll for new WAL files. Each WAL file read will incur GET requests to read `RowEntry` data.
 - Space, read, and write amplification: Consumers will read additional data from object storage, but there is no change to the data stored.
 
 ### Observability
-
-<!-- Describe any operational changes required to support this change. -->
 
 - Configuration changes: `WalReaderOptions` struct to configure reader behavior.
 - New components/services: `WalReader` component.
@@ -341,15 +352,11 @@ SlateDB features and components that this RFC interacts with. Check all that app
 
 ### Compatibility
 
-<!-- Describe compatibility considerations with existing versions of SlateDB. -->
-
 - Existing data on object storage / on-disk formats: No changes to existing data formats. WAL files will continue to be written as before.
 - Existing public APIs (including bindings): New `WalReader` and `WalFile` API added; existing APIs remain unchanged.
 - Rolling upgrades / mixed-version behavior (if applicable): No special considerations; new API can be used with existing databases.
 
 ## Testing
-
-<!-- Describe the testing plan for this change. -->
 
 - Unit tests: `WalReader` and `WalFile` methods.
 - Integration tests: Add `WalReader` thread to `slatedb/tests/db.rs` test.
