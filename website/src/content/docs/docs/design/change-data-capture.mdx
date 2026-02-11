@@ -43,16 +43,6 @@ Deletes appear as `Tombstone`s. If your database uses merge operators, you will 
 - The configured `flush_interval` elapses.
 - You explicitly call a WAL or MemTable flush.
 
-If you need lower CDC latency, shorten `Settings::flush_interval` or call:
-
-```rust
-use slatedb::config::{FlushOptions, FlushType};
-
-db.flush_with_options(FlushOptions {
-    flush_type: FlushType::Wal,
-}).await?;
-```
-
 Note that a memtable flush also forces any pending WAL data to be flushed first, which guarantees the WAL is durable before L0 data is written.
 
 ## CDC architecture
@@ -81,7 +71,7 @@ If you need a full backfill of data not in the WAL along with the WAL change str
 
 1. Start a WAL tailer and buffer changes.
 2. Clone the database using `Admin::create_clone`.
-3. Range scan (`Db::scan_rows`) over the cloned database to read old data.
+3. Range scan (`Db::scan`) over the cloned database to read old data.
 4. Apply the buffered WAL changes in sequence order.
 5. Continue tailing WALs from the stored cursor.
 
