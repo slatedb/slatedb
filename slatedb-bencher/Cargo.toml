@@ -24,7 +24,7 @@ futures = { workspace = true }
 object_store = { workspace = true }
 rand = { workspace = true }
 rand_xorshift = { workspace = true }
-slatedb = { workspace = true, features = ["aws", "azure", "bencher", "wal_disable", "moka"] }
+slatedb = { workspace = true, features = ["aws", "azure", "bencher", "wal_disable", "foyer"] }
 tokio = { workspace = true }
 tracing = { workspace = true, features = ["log"] }
 tracing-subscriber = { workspace = true, features = ["fmt", "env-filter"] }
