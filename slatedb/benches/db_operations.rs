@@ -32,6 +32,14 @@ fn criterion_benchmark(c: &mut Criterion) {
             .expect("put failed");
         })
     });
+    c.bench_function("open_close", |b| {
+        b.to_async(&runtime).iter(|| async {
+            let db = Db::open("/tmp/test_kv_store", Arc::new(InMemory::new()))
+                .await
+                .expect("open failed");
+            db.close().await.expect("close failed");
+        })
+    });
 }
 
 criterion_group! {

@@ -121,7 +121,6 @@ all = [
     "lz4",
     "zstd",
     "wal_disable",
-    "moka",
     "foyer",
     "test-util",
 ]
