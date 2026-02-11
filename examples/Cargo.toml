@@ -16,6 +16,12 @@ test = false
 bench = false
 
 [[bin]]
+name = "change-data-capture"
+path = "src/change_data_capture.rs"
+test = false
+bench = false
+
+[[bin]]
 name = "create-checkpoint"
 path = "src/create_checkpoint.rs"
 test = false

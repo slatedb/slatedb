@@ -3,6 +3,9 @@ title: Change Data Capture
 description: Implement CDC by streaming WAL SSTs with WalReader
 ---
 
+import { Code } from '@astrojs/starlight/components';
+import cdcExample from '/../examples/src/change_data_capture.rs?raw';
+
 Change data capture (CDC) turns writes in SlateDB into a durable change stream that external systems can consume. SlateDB exposes CDC through the `WalReader`, which reads WAL SST files from object storage and returns the same row entries that were written by the database.
 
 This page explains how to build a CDC pipeline with `WalReader`, including ordering, durability, deletes, and resume semantics.
@@ -68,43 +71,7 @@ flowchart LR
 
 This example tails all WAL files, emits row entries, and records a cursor so the stream can resume after restarts.
 
-```rust
-use slatedb::WalReader;
-use std::sync::Arc;
-use object_store::ObjectStore;
-
-struct CdcCursor {
-    wal_id: u64,
-    last_seq: u64,
-}
-
-async fn tail_wal(object_store: Arc<dyn ObjectStore>, path: &str) -> anyhow::Result<()> {
-    let wal_reader = WalReader::new(path, object_store);
-    let mut cursor = CdcCursor { wal_id: 0, last_seq: 0 };
-
-    loop {
-        let wal_files = wal_reader.list(cursor.wal_id..).await?;
-        for wal_file in wal_files {
-            if let Some(mut iter) = wal_file.iterator().await? {
-                while let Some(row) = iter.next_entry().await? {
-                    if wal_file.id == cursor.wal_id && row.seq <= cursor.last_seq {
-                        continue;
-                    }
-
-                    // Emit the change to your sink here.
-                    // For deletes, check row.value.is_tombstone().
-
-                    cursor.wal_id = wal_file.id;
-                    cursor.last_seq = row.seq;
-                    // Persist cursor to durable storage here.
-                }
-            }
-        }
-
-        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-    }
-}
-```
+<Code code={cdcExample} lang="rust" title="main.rs" />
 
 This pattern is safe and idempotent as long as you persist the cursor after each emitted row and skip any rows with `seq <= last_seq` when resuming.
 
@@ -114,9 +81,9 @@ If you need a full backfill of data not in the WAL along with the WAL change str
 
 1. Start a WAL tailer and buffer changes.
 2. Clone the database using `Admin::create_clone`.
-2. Range scan (`Db::scan_rows`) over the cloned database to read old data.
-3. Apply the buffered WAL changes in sequence order.
-4. Continue tailing WALs from the stored cursor.
+3. Range scan (`Db::scan_rows`) over the cloned database to read old data.
+4. Apply the buffered WAL changes in sequence order.
+5. Continue tailing WALs from the stored cursor.
 
 This avoids gaps between the backfill and the live stream. Your sink should be idempotent if the backfill and WAL stream can overlap.
 
@@ -137,7 +104,7 @@ If you plan to poll frequently:
 
 1. Use `list()` once to get an initial view (or to recover after a long outage).
 2. Track the highest WAL ID you have successfully processed.
-3. From mthen on, poll using `WalReader::get(latest_id + 1)`.
+3. From then on, poll using `WalReader::get(latest_id + 1)`.
 
 ## Deletes, merges, and TTL
 
