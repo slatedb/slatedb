@@ -173,7 +173,7 @@ impl<'de> Deserialize<'de> for CachedEntry {
 
 #[cfg(test)]
 mod tests {
-    use crate::block_iterator::BlockIterator;
+    use crate::block_iterator::BlockIteratorLatest;
     use crate::db_cache::{CachedEntry, CachedItem, CachedKey};
     use crate::db_state::SsTableId;
     use crate::filter::BloomFilterBuilder;
@@ -223,7 +223,7 @@ mod tests {
             RowEntry::new_merge(b"biz", b"baz", 1),
             RowEntry::new_tombstone(b"bla", 2),
         ];
-        let mut builder = BlockBuilder::new_v1(4096);
+        let mut builder = BlockBuilder::new_latest(4096);
         for row in rows.iter() {
             assert!(builder.add(row.clone()).unwrap());
         }
@@ -237,7 +237,7 @@ mod tests {
 
         let decoded_block = decoded.block().unwrap();
         assert!(block.as_ref() == decoded_block.as_ref());
-        let mut iter = BlockIterator::new(decoded_block, IterationOrder::Ascending);
+        let mut iter = BlockIteratorLatest::new(decoded_block, IterationOrder::Ascending);
         assert_iterator(&mut iter, rows).await;
     }
 

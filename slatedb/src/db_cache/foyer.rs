@@ -47,7 +47,7 @@ impl Default for FoyerCacheOptions {
         Self {
             max_capacity: DEFAULT_MAX_CAPACITY,
             shards: {
-                let mut sys = System::new_all();
+                let mut sys = System::new();
                 sys.refresh_cpu_specifics(CpuRefreshKind::nothing());
                 sys.cpus().len()
             },

@@ -678,6 +678,12 @@ pub struct Settings {
     /// during reads and compactions to produce the final result.
     #[serde(skip)]
     pub merge_operator: Option<MergeOperatorType>,
+
+    /// The block format for SST files. This is only available in tests
+    /// to verify backward compatibility between V1 and V2 formats.
+    #[cfg(test)]
+    #[serde(skip)]
+    pub block_format: Option<crate::sst_builder::BlockFormat>,
 }
 
 // Implement Debug manually for DbOptions.
@@ -909,6 +915,8 @@ impl Default for Settings {
             filter_bits_per_key: 10,
             default_ttl: None,
             merge_operator: None,
+            #[cfg(test)]
+            block_format: None,
         }
     }
 }
@@ -970,6 +978,15 @@ impl Default for DbReaderOptions {
 
 #[allow(unreachable_code)]
 pub(crate) fn default_block_cache() -> Option<Arc<dyn DbCache>> {
+    #[cfg(feature = "foyer")]
+    {
+        return Some(Arc::new(crate::db_cache::foyer::FoyerCache::new_with_opts(
+            crate::db_cache::foyer::FoyerCacheOptions {
+                max_capacity: crate::db_cache::DEFAULT_BLOCK_CACHE_CAPACITY,
+                ..Default::default()
+            },
+        )));
+    }
     #[cfg(feature = "moka")]
     {
         return Some(Arc::new(crate::db_cache::moka::MokaCache::new_with_opts(
@@ -977,15 +994,6 @@ pub(crate) fn default_block_cache() -> Option<Arc<dyn DbCache>> {
                 max_capacity: crate::db_cache::DEFAULT_BLOCK_CACHE_CAPACITY,
                 time_to_live: None,
                 time_to_idle: None,
-            },
-        )));
-    }
-    #[cfg(feature = "foyer")]
-    {
-        return Some(Arc::new(crate::db_cache::foyer::FoyerCache::new_with_opts(
-            crate::db_cache::foyer::FoyerCacheOptions {
-                max_capacity: crate::db_cache::DEFAULT_BLOCK_CACHE_CAPACITY,
-                ..Default::default()
             },
         )));
     }
@@ -994,6 +1002,15 @@ pub(crate) fn default_block_cache() -> Option<Arc<dyn DbCache>> {
 
 #[allow(unreachable_code)]
 pub(crate) fn default_meta_cache() -> Option<Arc<dyn DbCache>> {
+    #[cfg(feature = "foyer")]
+    {
+        return Some(Arc::new(crate::db_cache::foyer::FoyerCache::new_with_opts(
+            crate::db_cache::foyer::FoyerCacheOptions {
+                max_capacity: crate::db_cache::DEFAULT_META_CACHE_CAPACITY,
+                ..Default::default()
+            },
+        )));
+    }
     #[cfg(feature = "moka")]
     {
         return Some(Arc::new(crate::db_cache::moka::MokaCache::new_with_opts(
@@ -1001,15 +1018,6 @@ pub(crate) fn default_meta_cache() -> Option<Arc<dyn DbCache>> {
                 max_capacity: crate::db_cache::DEFAULT_META_CACHE_CAPACITY,
                 time_to_live: None,
                 time_to_idle: None,
-            },
-        )));
-    }
-    #[cfg(feature = "foyer")]
-    {
-        return Some(Arc::new(crate::db_cache::foyer::FoyerCache::new_with_opts(
-            crate::db_cache::foyer::FoyerCacheOptions {
-                max_capacity: crate::db_cache::DEFAULT_META_CACHE_CAPACITY,
-                ..Default::default()
             },
         )));
     }
