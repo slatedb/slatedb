@@ -23,6 +23,7 @@ pub enum CSdbError {
 #[repr(C)]
 pub struct CSdbResult {
     pub error: CSdbError,
+    pub null: bool,
     pub message: *mut c_char,
 }
 
@@ -61,6 +62,7 @@ pub(crate) fn create_handle_error_result(error: CSdbError, message: &str) -> CSd
         result: CSdbResult {
             error,
             message: message_to_cstring(message).into_raw(),
+            null: false,
         },
     }
 }
@@ -81,6 +83,7 @@ pub(crate) fn create_reader_handle_error_result(
         result: CSdbResult {
             error,
             message: message_to_cstring(message).into_raw(),
+            null: false,
         },
     }
 }
@@ -99,6 +102,7 @@ pub(crate) fn create_error_result(error: CSdbError, message: &str) -> CSdbResult
     CSdbResult {
         error,
         message: message_to_cstring(message).into_raw(),
+        null: false,
     }
 }
 
@@ -106,6 +110,15 @@ pub(crate) fn create_success_result() -> CSdbResult {
     CSdbResult {
         error: CSdbError::Success,
         message: std::ptr::null_mut(),
+        null: false,
+    }
+}
+
+pub(crate) fn create_null_result() -> CSdbResult {
+    CSdbResult {
+        error: CSdbError::Success,
+        message: std::ptr::null_mut(),
+        null: true,
     }
 }
 

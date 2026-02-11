@@ -10,8 +10,8 @@ use crate::config::{
 };
 use crate::error::{
     create_error_result, create_handle_error_result, create_handle_success_result,
-    create_success_result, message_to_cstring, safe_str_from_ptr, slate_error_to_code,
-    CSdbBuilderResult, CSdbError, CSdbHandleResult, CSdbResult,
+    create_null_result, create_success_result, message_to_cstring, safe_str_from_ptr,
+    slate_error_to_code, CSdbBuilderResult, CSdbError, CSdbHandleResult, CSdbResult,
 };
 use crate::object_store::create_object_store;
 use crate::types::{
@@ -211,7 +211,7 @@ pub unsafe extern "C" fn slatedb_get_with_options(
 
             create_success_result()
         }
-        Ok(None) => create_error_result(CSdbError::NotFound, "Key not found"),
+        Ok(None) => create_null_result(),
         Err(e) => {
             let error_code = slate_error_to_code(&e);
             create_error_result(
@@ -427,6 +427,7 @@ pub extern "C" fn slatedb_builder_new(
                 result: CSdbResult {
                     error: err,
                     message: message_to_cstring("Invalid path").into_raw(),
+                    null: false,
                 },
             }
         }
@@ -443,6 +444,7 @@ pub extern "C" fn slatedb_builder_new(
                     result: CSdbResult {
                         error: err,
                         message: message_to_cstring("Invalid URL").into_raw(),
+                        null: false,
                     },
                 }
             }
@@ -459,6 +461,7 @@ pub extern "C" fn slatedb_builder_new(
                     result: CSdbResult {
                         error: err,
                         message: message_to_cstring("Invalid env file path").into_raw(),
+                        null: false,
                     },
                 }
             }
