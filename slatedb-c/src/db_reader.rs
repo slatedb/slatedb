@@ -11,7 +11,7 @@ use crate::config::{
     convert_range_bounds, convert_read_options, convert_reader_options, convert_scan_options,
 };
 use crate::error::{
-    create_error_result, create_null_result, create_reader_handle_error_result,
+    create_error_result, create_none_result, create_reader_handle_error_result,
     create_reader_handle_success_result, create_success_result, safe_str_from_ptr,
     slate_error_to_code, CSdbError, CSdbReaderHandleResult, CSdbResult,
 };
@@ -203,7 +203,7 @@ pub unsafe extern "C" fn slatedb_reader_get_with_options(
             }
             create_success_result()
         }
-        Ok(None) => create_null_result(),
+        Ok(None) => create_none_result(),
         Err(e) => {
             let error_code = slate_error_to_code(&e);
             create_error_result(

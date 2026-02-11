@@ -10,7 +10,7 @@ use crate::config::{
 };
 use crate::error::{
     create_error_result, create_handle_error_result, create_handle_success_result,
-    create_null_result, create_success_result, message_to_cstring, safe_str_from_ptr,
+    create_none_result, create_success_result, message_to_cstring, safe_str_from_ptr,
     slate_error_to_code, CSdbBuilderResult, CSdbError, CSdbHandleResult, CSdbResult,
 };
 use crate::object_store::create_object_store;
@@ -211,7 +211,7 @@ pub unsafe extern "C" fn slatedb_get_with_options(
 
             create_success_result()
         }
-        Ok(None) => create_null_result(),
+        Ok(None) => create_none_result(),
         Err(e) => {
             let error_code = slate_error_to_code(&e);
             create_error_result(

@@ -114,7 +114,7 @@ pub(crate) fn create_success_result() -> CSdbResult {
     }
 }
 
-pub(crate) fn create_null_result() -> CSdbResult {
+pub(crate) fn create_none_result() -> CSdbResult {
     CSdbResult {
         error: CSdbError::Success,
         none: true,
