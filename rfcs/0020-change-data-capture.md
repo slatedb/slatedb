@@ -142,36 +142,67 @@ SlateDB's CDC design is based loosely on RocksDB's [`getUpdatesSince`](https://g
 ### `WalReader` API
 
 ```rs
-/// Represents a single WAL file stored in object storage. Contains metadata about the
-/// WAL file as well as methods to read its contents.
+/// Iterator over entries in a WAL file.
+pub struct WalFileIterator;
+
+impl WalFileIterator {
+    /// Returns the next entry in the WAL file.
+    pub async fn next_entry(&mut self) -> Result<Option<RowEntry>, crate::Error>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WalFileMetadata {
+    /// The time this WAL file was last written to object storage.
+    pub last_modified_dt: DateTime<Utc>,
+
+    /// The size of this WAL file in bytes.
+    pub size_bytes: u64,
+
+    /// The path of this WAL file in object storage.
+    pub location: Path,
+}
+
+/// Represents a single WAL file stored in object storage and provides methods
+/// to inspect and read its contents.
 pub struct WalFile {
-   /// The unique identifier for this `WalFile`. Corresponds to the SST filename without
-   /// the extension. For example, file `000123.sst` would have id `123`.
-   pub id: u64,
+    /// The unique identifier for this WAL file. Corresponds to the SST filename without
+    /// the extension. For example, file `000123.sst` would have id `123`.
+    pub id: u64,
 
-   /// The time this `WalFile` was written to object storage.
-   pub create_time: DateTime<Utc>,
-
-   /// The size of this `WalFile` in bytes.
-   pub size_bytes: u64,
+    table_store: Arc<TableStore>,
 }
 
 impl WalFile {
-   // TODO: should we expose a metadata() method that returns min/max seqnum, timestamps, etc?
-   // Users can compute this themselves by reading the rows, but it might be more performant
-   // for very large WAL files to expose metadata directly. I was aiming to keep the API surface
-   // minimal for now.
+    /// Returns metadata for this WAL file.
+    ///
+    /// Returns `Ok(None)` if the WAL file no longer exists.
+    pub async fn metadata(&self) -> Result<Option<WalFileMetadata>, crate::Error>;
 
-   /// Reads and returns all `RowEntry`s in this `WalFile`. Raises an error if the
-   /// `WalFile` could not be read.
-   pub async fn rows(&self) -> Result<Vec<RowEntry>, crate::Error>;
+    /// Returns an iterator over `RowEntry`s in this WAL file. Raises an error if the
+    /// WAL file could not be read.
+    ///
+    /// Returns `Ok(None)` if the WAL file no longer exists.
+    pub async fn iterator(&self) -> Result<Option<WalFileIterator>, crate::Error>;
 }
 
-pub struct WalReader {
-   /// Lists WAL files in ascending order by their ID within the specified range.
-   /// If `range` is unbounded, all WAL files are returned.
-   pub async fn list(&self, range: Range<u64>) -> Result<Vec<WalFile>, crate::Error>;
+/// Reads WAL files in object storage for a specific database.
+pub struct WalReader;
+
+impl WalReader {
+    /// Creates a new WAL reader for the database at the given path.
+    ///
+    /// If the database was configured with a separate WAL object store, pass that
+    /// object store here.
+    pub fn new<P: Into<Path>>(path: P, object_store: Arc<dyn ObjectStore>) -> Self ;
+
+    /// Lists WAL files in ascending order by their ID within the specified range.
+    /// If `range` is unbounded, all WAL files are returned.
+    pub async fn list<R: RangeBounds<u64>>(&self, range: R) -> Result<Vec<WalFile>, crate::Error>;
+
+    /// Creates a [`WalFile`] handle for a WAL ID.
+    pub fn get(&self, id: u64) -> WalFile;
 }
+
 ```
 
 ### Usage
