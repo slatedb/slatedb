@@ -95,7 +95,7 @@ An earlier revision of this RFC proposed high-level functions (`estimate_size_wi
 ```rust
 impl Db {
     ...
-    pub fn manifest(&self) -> ManifestCore;
+    pub fn manifest(&self) -> &ManifestCore;
     ...
 }
 ```
