@@ -381,37 +381,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_get_returns_wal_file_when_exists() {
-        let main_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let path = "/test_wal_reader_get_exists";
-        let db = Db::open(path, main_store.clone()).await.unwrap();
-        db.put_with_options(
-            b"k1",
-            b"v1",
-            &PutOptions::default(),
-            &WriteOptions::default(),
-        )
-        .await
-        .unwrap();
-        db.flush_with_options(FlushOptions {
-            flush_type: FlushType::Wal,
-        })
-        .await
-        .unwrap();
-
-        let wal_reader = WalReader::new(path, main_store);
-        let wal_file = wal_reader
-            .list(..)
-            .await
-            .unwrap()
-            .into_iter()
-            .next()
-            .expect("expected at least one WAL file");
-        let fetched = wal_reader.get(wal_file.id);
-        assert_eq!(fetched.id, wal_file.id);
-    }
-
-    #[tokio::test]
     async fn test_get_returns_wal_file_for_id() {
         let main_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = "/test_wal_reader_get_missing";
