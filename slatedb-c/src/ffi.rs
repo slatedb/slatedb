@@ -245,6 +245,7 @@ pub struct slatedb_range_t {
     pub end: slatedb_bound_t,
 }
 
+/// Builds a successful `slatedb_result_t` with no message payload.
 pub(crate) fn success_result() -> slatedb_result_t {
     slatedb_result_t {
         kind: slatedb_error_kind_t::SLATEDB_ERROR_KIND_NONE,
@@ -253,6 +254,10 @@ pub(crate) fn success_result() -> slatedb_result_t {
     }
 }
 
+/// Builds an error result with an explicit close reason and message string.
+///
+/// The message is heap-allocated and must be released by calling
+/// `slatedb_result_free` on the returned result.
 pub(crate) fn error_result_with_close_reason(
     kind: slatedb_error_kind_t,
     close_reason: slatedb_close_reason_t,
@@ -265,6 +270,7 @@ pub(crate) fn error_result_with_close_reason(
     }
 }
 
+/// Builds an error result with no close reason.
 pub(crate) fn error_result(kind: slatedb_error_kind_t, message: &str) -> slatedb_result_t {
     error_result_with_close_reason(
         kind,
@@ -273,10 +279,14 @@ pub(crate) fn error_result(kind: slatedb_error_kind_t, message: &str) -> slatedb
     )
 }
 
+/// Converts an error message to a C string.
+///
+/// If the message contains an interior NUL byte, returns a generic fallback.
 fn message_to_cstring(message: &str) -> CString {
     CString::new(message).unwrap_or_else(|_| CString::new("invalid error message").unwrap())
 }
 
+/// Maps a SlateDB close reason into the C ABI close-reason enum.
 fn map_close_reason(reason: CloseReason) -> slatedb_close_reason_t {
     match reason {
         CloseReason::Clean => slatedb_close_reason_t::SLATEDB_CLOSE_REASON_CLEAN,
@@ -286,6 +296,9 @@ fn map_close_reason(reason: CloseReason) -> slatedb_close_reason_t {
     }
 }
 
+/// Maps a SlateDB error into C ABI error kind and close reason fields.
+///
+/// Unknown future variants are mapped to `SLATEDB_ERROR_KIND_UNKNOWN`.
 pub(crate) fn map_error(err: &slatedb::Error) -> (slatedb_error_kind_t, slatedb_close_reason_t) {
     match err.kind() {
         ErrorKind::Transaction => (
@@ -319,11 +332,16 @@ pub(crate) fn map_error(err: &slatedb::Error) -> (slatedb_error_kind_t, slatedb_
     }
 }
 
+/// Converts a SlateDB error into a fully-populated C result object.
 pub(crate) fn error_from_slate_error(err: &slatedb::Error, message: &str) -> slatedb_result_t {
     let (kind, close_reason) = map_error(err);
     error_result_with_close_reason(kind, close_reason, message)
 }
 
+/// Creates the Tokio runtime used by C ABI operations.
+///
+/// Returns a `slatedb_result_t` on failure so callers can propagate FFI errors
+/// without panicking.
 pub(crate) fn create_runtime() -> Result<Arc<Runtime>, slatedb_result_t> {
     RuntimeBuilder::new_multi_thread()
         .enable_all()
@@ -337,6 +355,10 @@ pub(crate) fn create_runtime() -> Result<Arc<Runtime>, slatedb_result_t> {
         })
 }
 
+/// Converts a C string pointer to a UTF-8 Rust `String`.
+///
+/// ## Safety
+/// - `ptr` must be non-null and point to a valid NUL-terminated C string.
 pub(crate) unsafe fn cstr_to_string(
     ptr: *const c_char,
     field_name: &str,
@@ -357,6 +379,12 @@ pub(crate) unsafe fn cstr_to_string(
     })
 }
 
+/// Converts a raw pointer + length into a byte slice.
+///
+/// A zero length always returns an empty slice and allows a null pointer.
+///
+/// ## Safety
+/// - When `len > 0`, `ptr` must be non-null and valid for reads of `len` bytes.
 pub(crate) unsafe fn bytes_from_ptr<'a>(
     ptr: *const u8,
     len: usize,
@@ -375,6 +403,9 @@ pub(crate) unsafe fn bytes_from_ptr<'a>(
     Ok(std::slice::from_raw_parts(ptr, len))
 }
 
+/// Allocates a Rust-owned byte buffer and returns raw pointer + length for FFI.
+///
+/// The caller must free the returned pointer with `slatedb_bytes_free`.
 pub(crate) fn alloc_bytes(bytes: &[u8]) -> (*mut u8, usize) {
     let boxed = bytes.to_vec().into_boxed_slice();
     let len = boxed.len();
@@ -382,6 +413,7 @@ pub(crate) fn alloc_bytes(bytes: &[u8]) -> (*mut u8, usize) {
     (data, len)
 }
 
+/// Converts a C durability selector to `DurabilityLevel`.
 pub(crate) fn durability_level_from_u8(
     durability_filter: u8,
 ) -> Result<DurabilityLevel, slatedb_result_t> {
@@ -395,6 +427,12 @@ pub(crate) fn durability_level_from_u8(
     }
 }
 
+/// Converts optional C read options into Rust `ReadOptions`.
+///
+/// A null pointer uses defaults.
+///
+/// ## Safety
+/// - If `ptr` is non-null, it must point to a valid `slatedb_read_options_t`.
 pub(crate) unsafe fn read_options_from_ptr(
     ptr: *const slatedb_read_options_t,
 ) -> Result<ReadOptions, slatedb_result_t> {
@@ -410,6 +448,12 @@ pub(crate) unsafe fn read_options_from_ptr(
     })
 }
 
+/// Converts optional C scan options into Rust `ScanOptions`.
+///
+/// A null pointer uses defaults.
+///
+/// ## Safety
+/// - If `ptr` is non-null, it must point to a valid `slatedb_scan_options_t`.
 pub(crate) unsafe fn scan_options_from_ptr(
     ptr: *const slatedb_scan_options_t,
 ) -> Result<ScanOptions, slatedb_result_t> {
@@ -440,6 +484,12 @@ pub(crate) unsafe fn scan_options_from_ptr(
     })
 }
 
+/// Converts optional C write options into Rust `WriteOptions`.
+///
+/// A null pointer uses defaults.
+///
+/// ## Safety
+/// - If `ptr` is non-null, it must point to a valid `slatedb_write_options_t`.
 pub(crate) unsafe fn write_options_from_ptr(ptr: *const slatedb_write_options_t) -> WriteOptions {
     if ptr.is_null() {
         return WriteOptions::default();
@@ -451,6 +501,7 @@ pub(crate) unsafe fn write_options_from_ptr(ptr: *const slatedb_write_options_t)
     }
 }
 
+/// Converts a TTL selector + value into a Rust `Ttl` variant.
 fn ttl_from_parts(ttl_type: u8, ttl_value: u64) -> Result<Ttl, slatedb_result_t> {
     match ttl_type {
         SLATEDB_TTL_TYPE_DEFAULT => Ok(Ttl::Default),
@@ -463,6 +514,12 @@ fn ttl_from_parts(ttl_type: u8, ttl_value: u64) -> Result<Ttl, slatedb_result_t>
     }
 }
 
+/// Converts optional C put options into Rust `PutOptions`.
+///
+/// A null pointer uses defaults.
+///
+/// ## Safety
+/// - If `ptr` is non-null, it must point to a valid `slatedb_put_options_t`.
 pub(crate) unsafe fn put_options_from_ptr(
     ptr: *const slatedb_put_options_t,
 ) -> Result<PutOptions, slatedb_result_t> {
@@ -476,6 +533,12 @@ pub(crate) unsafe fn put_options_from_ptr(
     })
 }
 
+/// Converts optional C merge options into Rust `MergeOptions`.
+///
+/// A null pointer uses defaults.
+///
+/// ## Safety
+/// - If `ptr` is non-null, it must point to a valid `slatedb_merge_options_t`.
 pub(crate) unsafe fn merge_options_from_ptr(
     ptr: *const slatedb_merge_options_t,
 ) -> Result<MergeOptions, slatedb_result_t> {
@@ -489,6 +552,12 @@ pub(crate) unsafe fn merge_options_from_ptr(
     })
 }
 
+/// Converts optional C flush options into Rust `FlushOptions`.
+///
+/// A null pointer uses defaults.
+///
+/// ## Safety
+/// - If `ptr` is non-null, it must point to a valid `slatedb_flush_options_t`.
 pub(crate) unsafe fn flush_options_from_ptr(
     ptr: *const slatedb_flush_options_t,
 ) -> Result<FlushOptions, slatedb_result_t> {
@@ -511,6 +580,7 @@ pub(crate) unsafe fn flush_options_from_ptr(
     Ok(FlushOptions { flush_type })
 }
 
+/// Converts a C block-size selector into `SstBlockSize`.
 pub(crate) fn sst_block_size_from_u8(
     value: slatedb_sst_block_size_t,
 ) -> Result<SstBlockSize, slatedb_result_t> {
@@ -529,6 +599,11 @@ pub(crate) fn sst_block_size_from_u8(
     }
 }
 
+/// Converts a C range struct into Rust `Bound<Bytes>` tuple.
+///
+/// ## Safety
+/// - `range.start`/`range.end` pointers must be valid when their bound kinds
+///   require payload bytes.
 pub(crate) unsafe fn range_from_c(
     range: slatedb_range_t,
 ) -> Result<(Bound<Bytes>, Bound<Bytes>), slatedb_result_t> {
@@ -538,6 +613,11 @@ pub(crate) unsafe fn range_from_c(
     ))
 }
 
+/// Converts one C range bound into a Rust `Bound<Bytes>`.
+///
+/// ## Safety
+/// - If `bound.kind` is included/excluded, `bound.data` must be readable for
+///   `bound.len` bytes.
 unsafe fn bound_from_c(
     bound: slatedb_bound_t,
     name: &str,
@@ -559,6 +639,7 @@ unsafe fn bound_from_c(
     }
 }
 
+/// Validates a write key against SlateDB key constraints.
 pub(crate) fn validate_write_key(key: &[u8]) -> Result<(), slatedb_result_t> {
     if key.is_empty() {
         return Err(error_result(
@@ -575,6 +656,7 @@ pub(crate) fn validate_write_key(key: &[u8]) -> Result<(), slatedb_result_t> {
     Ok(())
 }
 
+/// Validates write key and value sizes against SlateDB constraints.
 pub(crate) fn validate_write_key_value(key: &[u8], value: &[u8]) -> Result<(), slatedb_result_t> {
     validate_write_key(key)?;
     if value.len() > u32::MAX as usize {
