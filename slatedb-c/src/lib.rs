@@ -3,6 +3,7 @@
 //! This module re-exports all C ABI types and functions implemented across
 //! the `slatedb-c` package so they can be discovered and exported by cbindgen.
 
+mod builder;
 mod db;
 mod ffi;
 mod iterator;
@@ -18,15 +19,19 @@ pub use ffi::{
     slatedb_write_options_t,
 };
 
-pub use db::{
+pub use builder::{
     slatedb_db_builder_build, slatedb_db_builder_close, slatedb_db_builder_new,
     slatedb_db_builder_with_seed, slatedb_db_builder_with_sst_block_size,
-    slatedb_db_builder_with_wal_object_store, slatedb_db_close, slatedb_db_delete,
-    slatedb_db_delete_with_options, slatedb_db_flush, slatedb_db_flush_with_options,
-    slatedb_db_get, slatedb_db_get_with_options, slatedb_db_merge, slatedb_db_merge_with_options,
-    slatedb_db_open, slatedb_db_put, slatedb_db_put_with_options, slatedb_db_scan,
-    slatedb_db_scan_prefix, slatedb_db_scan_prefix_with_options, slatedb_db_scan_with_options,
-    slatedb_db_status, slatedb_db_write, slatedb_db_write_with_options,
+    slatedb_db_builder_with_wal_object_store,
+};
+
+pub use db::{
+    slatedb_db_close, slatedb_db_delete, slatedb_db_delete_with_options, slatedb_db_flush,
+    slatedb_db_flush_with_options, slatedb_db_get, slatedb_db_get_with_options, slatedb_db_merge,
+    slatedb_db_merge_with_options, slatedb_db_open, slatedb_db_put, slatedb_db_put_with_options,
+    slatedb_db_scan, slatedb_db_scan_prefix, slatedb_db_scan_prefix_with_options,
+    slatedb_db_scan_with_options, slatedb_db_status, slatedb_db_write,
+    slatedb_db_write_with_options,
 };
 
 pub use iterator::{slatedb_iterator_close, slatedb_iterator_next, slatedb_iterator_seek};

@@ -144,28 +144,6 @@ typedef struct slatedb_flush_options_t {
     uint8_t flush_type;
 } slatedb_flush_options_t;
 
-// Opens a database using a pre-resolved object store handle.
-//
-// ## Arguments
-// - `path`: Database path as a null-terminated UTF-8 string.
-// - `object_store`: Opaque object store handle.
-// - `out_db`: Output pointer populated with a `slatedb_db_t*` on success.
-//
-// ## Returns
-// - `slatedb_result_t` describing success or failure.
-//
-// ## Errors
-// - Returns `SLATEDB_ERROR_KIND_INVALID` for null/invalid pointers.
-// - Returns mapped SlateDB errors for open failures.
-//
-// ## Safety
-// - `path` must be a valid null-terminated C string.
-// - `object_store` must be a valid object store handle.
-// - `out_db` must be a valid non-null writable pointer.
-struct slatedb_result_t slatedb_db_open(const char *path,
-                                        const struct slatedb_object_store_t *object_store,
-                                        struct slatedb_db_t **out_db);
-
 // Creates a new database builder.
 //
 // ## Arguments
@@ -267,6 +245,28 @@ struct slatedb_result_t slatedb_db_builder_build(struct slatedb_db_builder_t *bu
 // ## Errors
 // - Returns `SLATEDB_ERROR_KIND_INVALID` when `builder` is null.
 struct slatedb_result_t slatedb_db_builder_close(struct slatedb_db_builder_t *builder);
+
+// Opens a database using a pre-resolved object store handle.
+//
+// ## Arguments
+// - `path`: Database path as a null-terminated UTF-8 string.
+// - `object_store`: Opaque object store handle.
+// - `out_db`: Output pointer populated with a `slatedb_db_t*` on success.
+//
+// ## Returns
+// - `slatedb_result_t` describing success or failure.
+//
+// ## Errors
+// - Returns `SLATEDB_ERROR_KIND_INVALID` for null/invalid pointers.
+// - Returns mapped SlateDB errors for open failures.
+//
+// ## Safety
+// - `path` must be a valid null-terminated C string.
+// - `object_store` must be a valid object store handle.
+// - `out_db` must be a valid non-null writable pointer.
+struct slatedb_result_t slatedb_db_open(const char *path,
+                                        const struct slatedb_object_store_t *object_store,
+                                        struct slatedb_db_t **out_db);
 
 // Returns current database status without performing I/O.
 //
