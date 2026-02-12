@@ -19,6 +19,7 @@ log = { workspace = true }
 slatedb = { workspace = true, features = ["all"] }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["rt", "rt-multi-thread"] }
+uuid = { workspace = true }
 
 [build-dependencies]
 cbindgen = "0.27"

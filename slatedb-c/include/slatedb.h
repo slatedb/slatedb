@@ -118,6 +118,9 @@ typedef enum slatedb_error_kind_t {
 // Opaque handle backing a database builder.
 typedef struct slatedb_db_builder_t slatedb_db_builder_t;
 
+// Opaque handle backing an open `DbReader` plus runtime owner.
+typedef struct slatedb_db_reader_t slatedb_db_reader_t;
+
 // Opaque handle backing an open `Db` plus runtime owner.
 typedef struct slatedb_db_t slatedb_db_t;
 
@@ -249,6 +252,18 @@ typedef struct slatedb_flush_options_t {
     // Flush type. Use `SLATEDB_FLUSH_TYPE_*` constants.
     uint8_t flush_type;
 } slatedb_flush_options_t;
+
+// Reader options passed to `slatedb_db_reader_open`.
+typedef struct slatedb_db_reader_options_t {
+    // How often to poll manifests/WAL for reader refreshes (milliseconds).
+    uint64_t manifest_poll_interval_ms;
+    // Reader-owned checkpoint lifetime (milliseconds).
+    uint64_t checkpoint_lifetime_ms;
+    // Maximum replay memtable size in bytes.
+    uint64_t max_memtable_bytes;
+    // Whether to skip WAL replay entirely.
+    bool skip_wal_replay;
+} slatedb_db_reader_options_t;
 
 // Log level selector type for logging APIs.
 //
@@ -903,6 +918,197 @@ struct slatedb_result_t slatedb_db_flush_with_options(struct slatedb_db_t *db,
 // ## Safety
 // - `db` must be a valid non-null handle obtained from this library.
 struct slatedb_result_t slatedb_db_close(struct slatedb_db_t *db);
+
+// Opens a read-only database reader using a pre-resolved object store handle.
+//
+// ## Arguments
+// - `path`: Database path as a null-terminated UTF-8 string.
+// - `object_store`: Opaque object store handle.
+// - `checkpoint_id`: Optional checkpoint UUID string. Null means latest state.
+// - `reader_options`: Optional reader options pointer. Null uses defaults.
+// - `out_reader`: Output pointer populated with a `slatedb_db_reader_t*` on success.
+//
+// ## Returns
+// - `slatedb_result_t` describing success or failure.
+//
+// ## Errors
+// - Returns `SLATEDB_ERROR_KIND_INVALID` for null/invalid pointers, UTF-8,
+//   or malformed checkpoint UUID.
+// - Returns mapped SlateDB errors for open failures.
+//
+// ## Safety
+// - `path` must be a valid null-terminated C string.
+// - `object_store` must be a valid object store handle.
+// - `checkpoint_id`, when non-null, must be a valid null-terminated C string.
+// - `reader_options`, when non-null, must point to a valid
+//   `slatedb_db_reader_options_t`.
+// - `out_reader` must be a valid non-null writable pointer.
+struct slatedb_result_t slatedb_db_reader_open(const char *path,
+                                               const struct slatedb_object_store_t *object_store,
+                                               const char *checkpoint_id,
+                                               const struct slatedb_db_reader_options_t *reader_options,
+                                               struct slatedb_db_reader_t **out_reader);
+
+// Reads a single key using default read options.
+//
+// ## Arguments
+// - `reader`: Reader handle.
+// - `key`: Key bytes.
+// - `key_len`: Length of `key`.
+// - `out_present`: Set to `true` when a value is found.
+// - `out_val`: Output pointer to Rust-allocated value bytes.
+// - `out_val_len`: Output length for `out_val`.
+//
+// ## Returns
+// - `slatedb_result_t` indicating success/failure.
+//
+// ## Errors
+// - Returns `SLATEDB_ERROR_KIND_INVALID` for invalid pointers/handles.
+// - Returns mapped SlateDB errors for read failures.
+//
+// ## Safety
+// - Pointer arguments must be valid for reads/writes as required.
+// - `out_val` must be freed with `slatedb_bytes_free` when `*out_present` is true.
+struct slatedb_result_t slatedb_db_reader_get(struct slatedb_db_reader_t *reader,
+                                              const uint8_t *key,
+                                              uintptr_t key_len,
+                                              bool *out_present,
+                                              uint8_t **out_val,
+                                              uintptr_t *out_val_len);
+
+// Reads a single key using explicit read options.
+//
+// ## Arguments
+// - `reader`: Reader handle.
+// - `key`: Key bytes.
+// - `key_len`: Length of `key`.
+// - `read_options`: Optional read options pointer (null uses defaults).
+// - `out_present`: Set to `true` when a value is found.
+// - `out_val`: Output pointer to Rust-allocated value bytes.
+// - `out_val_len`: Output length for `out_val`.
+//
+// ## Returns
+// - `slatedb_result_t` indicating success/failure.
+//
+// ## Errors
+// - Returns `SLATEDB_ERROR_KIND_INVALID` for invalid pointers/handles/options.
+// - Returns mapped SlateDB errors for read failures.
+//
+// ## Safety
+// - Pointer arguments must be valid for reads/writes as required.
+// - `out_val` must be freed with `slatedb_bytes_free` when `*out_present` is true.
+struct slatedb_result_t slatedb_db_reader_get_with_options(struct slatedb_db_reader_t *reader,
+                                                           const uint8_t *key,
+                                                           uintptr_t key_len,
+                                                           const struct slatedb_read_options_t *read_options,
+                                                           bool *out_present,
+                                                           uint8_t **out_val,
+                                                           uintptr_t *out_val_len);
+
+// Scans a key range using default scan options.
+//
+// ## Arguments
+// - `reader`: Reader handle.
+// - `range`: Range bounds to scan.
+// - `out_iterator`: Output pointer populated with `slatedb_iterator_t*`.
+//
+// ## Returns
+// - `slatedb_result_t` indicating success/failure.
+//
+// ## Errors
+// - Returns `SLATEDB_ERROR_KIND_INVALID` for invalid pointers/handles/range.
+// - Returns mapped SlateDB errors for scan failures.
+//
+// ## Safety
+// - `reader` and `out_iterator` must be valid non-null pointers.
+struct slatedb_result_t slatedb_db_reader_scan(struct slatedb_db_reader_t *reader,
+                                               struct slatedb_range_t range,
+                                               struct slatedb_iterator_t **out_iterator);
+
+// Scans a key range with explicit scan options.
+//
+// ## Arguments
+// - `reader`: Reader handle.
+// - `range`: Range bounds to scan.
+// - `scan_options`: Optional scan options pointer.
+// - `out_iterator`: Output pointer populated with `slatedb_iterator_t*`.
+//
+// ## Returns
+// - `slatedb_result_t` indicating success/failure.
+//
+// ## Errors
+// - Returns `SLATEDB_ERROR_KIND_INVALID` for invalid pointers/handles/options/range.
+// - Returns mapped SlateDB errors for scan failures.
+//
+// ## Safety
+// - Pointer arguments must be valid for reads/writes as required.
+struct slatedb_result_t slatedb_db_reader_scan_with_options(struct slatedb_db_reader_t *reader,
+                                                            struct slatedb_range_t range,
+                                                            const struct slatedb_scan_options_t *scan_options,
+                                                            struct slatedb_iterator_t **out_iterator);
+
+// Scans keys matching a prefix using default scan options.
+//
+// ## Arguments
+// - `reader`: Reader handle.
+// - `prefix`: Prefix bytes.
+// - `prefix_len`: Length of `prefix`.
+// - `out_iterator`: Output pointer populated with `slatedb_iterator_t*`.
+//
+// ## Returns
+// - `slatedb_result_t` indicating success/failure.
+//
+// ## Errors
+// - Returns `SLATEDB_ERROR_KIND_INVALID` for invalid pointers/handles/sizes.
+// - Returns mapped SlateDB errors for scan failures.
+//
+// ## Safety
+// - `prefix` must reference at least `prefix_len` readable bytes.
+// - `reader` and `out_iterator` must be valid non-null pointers.
+struct slatedb_result_t slatedb_db_reader_scan_prefix(struct slatedb_db_reader_t *reader,
+                                                      const uint8_t *prefix,
+                                                      uintptr_t prefix_len,
+                                                      struct slatedb_iterator_t **out_iterator);
+
+// Scans keys matching a prefix with explicit scan options.
+//
+// ## Arguments
+// - `reader`: Reader handle.
+// - `prefix`: Prefix bytes.
+// - `prefix_len`: Length of `prefix`.
+// - `scan_options`: Optional scan options pointer.
+// - `out_iterator`: Output pointer populated with `slatedb_iterator_t*`.
+//
+// ## Returns
+// - `slatedb_result_t` indicating success/failure.
+//
+// ## Errors
+// - Returns `SLATEDB_ERROR_KIND_INVALID` for invalid pointers/handles/options/sizes.
+// - Returns mapped SlateDB errors for scan failures.
+//
+// ## Safety
+// - Pointer arguments must be valid for reads/writes as required.
+struct slatedb_result_t slatedb_db_reader_scan_prefix_with_options(struct slatedb_db_reader_t *reader,
+                                                                   const uint8_t *prefix,
+                                                                   uintptr_t prefix_len,
+                                                                   const struct slatedb_scan_options_t *scan_options,
+                                                                   struct slatedb_iterator_t **out_iterator);
+
+// Closes and frees a database reader handle.
+//
+// ## Arguments
+// - `reader`: Reader handle to close.
+//
+// ## Returns
+// - `slatedb_result_t` indicating success/failure.
+//
+// ## Errors
+// - Returns `SLATEDB_ERROR_KIND_INVALID` for invalid handles.
+// - Returns mapped SlateDB errors for close failures.
+//
+// ## Safety
+// - `reader` must be a valid non-null handle obtained from this library.
+struct slatedb_result_t slatedb_db_reader_close(struct slatedb_db_reader_t *reader);
 
 // Retrieves the next key/value pair from an iterator.
 //

@@ -7,16 +7,17 @@
 
 use slatedb::bytes::Bytes;
 use slatedb::config::{
-    DurabilityLevel, FlushOptions, FlushType, MergeOptions, PutOptions, ReadOptions, ScanOptions,
-    SstBlockSize, Ttl, WriteOptions,
+    DbReaderOptions, DurabilityLevel, FlushOptions, FlushType, MergeOptions, PutOptions,
+    ReadOptions, ScanOptions, SstBlockSize, Ttl, WriteOptions,
 };
 use slatedb::object_store::ObjectStore;
-use slatedb::{CloseReason, Db, DbBuilder, DbIterator, ErrorKind, Settings, WriteBatch};
+use slatedb::{CloseReason, Db, DbBuilder, DbIterator, DbReader, ErrorKind, Settings, WriteBatch};
 use std::ffi::{c_void, CStr, CString};
 use std::ops::Bound;
 use std::os::raw::c_char;
 use std::ptr;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::runtime::{Builder as RuntimeBuilder, Runtime};
 
 /// Durability selector for in-memory visibility.
@@ -105,6 +106,15 @@ pub struct slatedb_db_t {
     pub runtime: Arc<Runtime>,
     /// Open database instance.
     pub db: Db,
+}
+
+/// Opaque handle backing an open `DbReader` plus runtime owner.
+#[allow(non_camel_case_types)]
+pub struct slatedb_db_reader_t {
+    /// Runtime used to execute async SlateDB operations.
+    pub runtime: Arc<Runtime>,
+    /// Open database reader instance.
+    pub reader: DbReader,
 }
 
 /// Opaque handle backing a scan iterator plus runtime owner.
@@ -203,6 +213,21 @@ pub struct slatedb_scan_options_t {
     pub cache_blocks: bool,
     /// Max concurrent fetch tasks.
     pub max_fetch_tasks: u64,
+}
+
+/// Reader options passed to `slatedb_db_reader_open`.
+#[repr(C)]
+#[allow(non_camel_case_types)]
+#[derive(Clone, Copy)]
+pub struct slatedb_db_reader_options_t {
+    /// How often to poll manifests/WAL for reader refreshes (milliseconds).
+    pub manifest_poll_interval_ms: u64,
+    /// Reader-owned checkpoint lifetime (milliseconds).
+    pub checkpoint_lifetime_ms: u64,
+    /// Maximum replay memtable size in bytes.
+    pub max_memtable_bytes: u64,
+    /// Whether to skip WAL replay entirely.
+    pub skip_wal_replay: bool,
 }
 
 /// Write options passed to write operations.
@@ -608,6 +633,46 @@ pub(crate) unsafe fn scan_options_from_ptr(
         cache_blocks: options.cache_blocks,
         max_fetch_tasks,
     })
+}
+
+/// Converts optional C reader options into Rust `DbReaderOptions`.
+///
+/// A null pointer uses defaults. Zero-valued numeric fields also use defaults
+/// so callers can override selected fields without fully populating the struct.
+///
+/// ## Safety
+/// - If `ptr` is non-null, it must point to a valid `slatedb_db_reader_options_t`.
+pub(crate) unsafe fn db_reader_options_from_ptr(
+    ptr: *const slatedb_db_reader_options_t,
+) -> DbReaderOptions {
+    let default_options = DbReaderOptions::default();
+    if ptr.is_null() {
+        return default_options;
+    }
+
+    let options = &*ptr;
+    let manifest_poll_interval_ms = if options.manifest_poll_interval_ms == 0 {
+        default_options.manifest_poll_interval.as_millis() as u64
+    } else {
+        options.manifest_poll_interval_ms
+    };
+    let checkpoint_lifetime_ms = if options.checkpoint_lifetime_ms == 0 {
+        default_options.checkpoint_lifetime.as_millis() as u64
+    } else {
+        options.checkpoint_lifetime_ms
+    };
+
+    DbReaderOptions {
+        manifest_poll_interval: Duration::from_millis(manifest_poll_interval_ms),
+        checkpoint_lifetime: Duration::from_millis(checkpoint_lifetime_ms),
+        max_memtable_bytes: if options.max_memtable_bytes == 0 {
+            default_options.max_memtable_bytes
+        } else {
+            options.max_memtable_bytes
+        },
+        skip_wal_replay: options.skip_wal_replay,
+        ..default_options
+    }
 }
 
 /// Converts optional C write options into Rust `WriteOptions`.

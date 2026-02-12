@@ -37,6 +37,7 @@ include = [
     "slatedb_result_t",
     "slatedb_read_options_t",
     "slatedb_scan_options_t",
+    "slatedb_db_reader_options_t",
     "slatedb_write_options_t",
     "slatedb_put_options_t",
     "slatedb_merge_options_t",
@@ -55,6 +56,7 @@ include = [
     "slatedb_settings_t",
     "slatedb_settings_kv_t",
     "slatedb_db_t",
+    "slatedb_db_reader_t",
     "slatedb_iterator_t",
     "slatedb_write_batch_t",
 ]
