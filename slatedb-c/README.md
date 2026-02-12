@@ -20,3 +20,12 @@ Artifacts:
 - Add `slatedb-c/include` to your include path.
 - Link against `libslatedb_c` from `target/release`.
 - Ensure your runtime library path can find `libslatedb_c`.
+
+## Logging
+
+- Initialize process-global logging with `slatedb_logging_init(...)`.
+- Update filtering with `slatedb_logging_set_level(...)`.
+- Register a callback with `slatedb_logging_set_callback(...)` and remove it
+  with `slatedb_logging_clear_callback(...)`.
+- Callback string pointers are borrowed and valid only for the callback
+  duration.

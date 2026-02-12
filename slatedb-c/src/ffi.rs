@@ -33,6 +33,18 @@ pub const SLATEDB_TTL_TYPE_EXPIRE_AFTER: u8 = 2;
 pub const SLATEDB_FLUSH_TYPE_MEMTABLE: u8 = 0;
 /// Flush selector for WAL flushes.
 pub const SLATEDB_FLUSH_TYPE_WAL: u8 = 1;
+/// Logging level selector for disabling logs.
+pub const SLATEDB_LOG_LEVEL_OFF: u8 = 0;
+/// Logging level selector for error logs.
+pub const SLATEDB_LOG_LEVEL_ERROR: u8 = 1;
+/// Logging level selector for warning logs.
+pub const SLATEDB_LOG_LEVEL_WARN: u8 = 2;
+/// Logging level selector for informational logs.
+pub const SLATEDB_LOG_LEVEL_INFO: u8 = 3;
+/// Logging level selector for debug logs.
+pub const SLATEDB_LOG_LEVEL_DEBUG: u8 = 4;
+/// Logging level selector for trace logs.
+pub const SLATEDB_LOG_LEVEL_TRACE: u8 = 5;
 /// Range bound selector for unbounded edges.
 pub const SLATEDB_BOUND_KIND_UNBOUNDED: u8 = 0;
 /// Range bound selector for inclusive edges.
@@ -238,6 +250,37 @@ pub struct slatedb_flush_options_t {
 /// Use `SLATEDB_SST_BLOCK_SIZE_*` constants.
 #[allow(non_camel_case_types)]
 pub type slatedb_sst_block_size_t = u8;
+
+/// Log level selector type for logging APIs.
+///
+/// Use `SLATEDB_LOG_LEVEL_*` constants.
+#[allow(non_camel_case_types)]
+pub type slatedb_log_level_t = u8;
+
+/// Logging callback used by `slatedb_logging_set_callback`.
+///
+/// String arguments are UTF-8 byte slices represented as pointer + length.
+/// Pointers are valid only for the duration of the callback.
+#[allow(non_camel_case_types)]
+pub type slatedb_log_callback_fn = Option<
+    unsafe extern "C" fn(
+        level: slatedb_log_level_t,
+        target: *const c_char,
+        target_len: usize,
+        message: *const c_char,
+        message_len: usize,
+        module_path: *const c_char,
+        module_path_len: usize,
+        file: *const c_char,
+        file_len: usize,
+        line: u32,
+        context: *mut c_void,
+    ),
+>;
+
+/// Optional callback used to free logging context when replaced or cleared.
+#[allow(non_camel_case_types)]
+pub type slatedb_log_context_free_fn = Option<unsafe extern "C" fn(context: *mut c_void)>;
 
 /// Merge operator callback used by `slatedb_db_builder_with_merge_operator`.
 ///

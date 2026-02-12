@@ -33,6 +33,24 @@
 // Flush selector for WAL flushes.
 #define SLATEDB_FLUSH_TYPE_WAL 1
 
+// Logging level selector for disabling logs.
+#define SLATEDB_LOG_LEVEL_OFF 0
+
+// Logging level selector for error logs.
+#define SLATEDB_LOG_LEVEL_ERROR 1
+
+// Logging level selector for warning logs.
+#define SLATEDB_LOG_LEVEL_WARN 2
+
+// Logging level selector for informational logs.
+#define SLATEDB_LOG_LEVEL_INFO 3
+
+// Logging level selector for debug logs.
+#define SLATEDB_LOG_LEVEL_DEBUG 4
+
+// Logging level selector for trace logs.
+#define SLATEDB_LOG_LEVEL_TRACE 5
+
 // Range bound selector for unbounded edges.
 #define SLATEDB_BOUND_KIND_UNBOUNDED 0
 
@@ -231,6 +249,30 @@ typedef struct slatedb_flush_options_t {
     // Flush type. Use `SLATEDB_FLUSH_TYPE_*` constants.
     uint8_t flush_type;
 } slatedb_flush_options_t;
+
+// Log level selector type for logging APIs.
+//
+// Use `SLATEDB_LOG_LEVEL_*` constants.
+typedef uint8_t slatedb_log_level_t;
+
+// Logging callback used by `slatedb_logging_set_callback`.
+//
+// String arguments are UTF-8 byte slices represented as pointer + length.
+// Pointers are valid only for the duration of the callback.
+typedef void (*slatedb_log_callback_fn)(slatedb_log_level_t level,
+                                        const char *target,
+                                        uintptr_t target_len,
+                                        const char *message,
+                                        uintptr_t message_len,
+                                        const char *module_path,
+                                        uintptr_t module_path_len,
+                                        const char *file,
+                                        uintptr_t file_len,
+                                        uint32_t line,
+                                        void *context);
+
+// Optional callback used to free logging context when replaced or cleared.
+typedef void (*slatedb_log_context_free_fn)(void *context);
 
 // Key/value JSON update entry used by `slatedb_settings_apply_kv`.
 typedef struct slatedb_settings_kv_t {
@@ -925,6 +967,62 @@ struct slatedb_result_t slatedb_iterator_seek(struct slatedb_iterator_t *iterato
 // ## Safety
 // - `iterator` must be a valid non-null handle obtained from this library.
 struct slatedb_result_t slatedb_iterator_close(struct slatedb_iterator_t *iterator);
+
+// Initializes `slatedb-c` logging with a process-global logger.
+//
+// Calling this function multiple times is allowed when `slatedb-c` already
+// owns the global logger. If another library has already installed a global
+// logger, this function returns `SLATEDB_ERROR_KIND_INVALID`.
+//
+// ## Arguments
+// - `level`: Logging level selector (`SLATEDB_LOG_LEVEL_*`).
+//
+// ## Returns
+// - `slatedb_result_t` indicating success/failure.
+struct slatedb_result_t slatedb_logging_init(slatedb_log_level_t level);
+
+// Updates the global logging level for `slatedb-c` logger output.
+//
+// ## Arguments
+// - `level`: Logging level selector (`SLATEDB_LOG_LEVEL_*`).
+//
+// ## Returns
+// - `slatedb_result_t` indicating success/failure.
+struct slatedb_result_t slatedb_logging_set_level(slatedb_log_level_t level);
+
+// Sets a callback for receiving SlateDB log messages.
+//
+// Replaces any existing callback. When replaced, the old callback context is
+// released using the previous `free_context` callback after in-flight log
+// callbacks complete.
+//
+// ## Arguments
+// - `callback`: Log callback function pointer (must be non-null).
+// - `context`: Opaque callback context passed to every invocation.
+// - `free_context`: Optional context free callback.
+//
+// ## Returns
+// - `slatedb_result_t` indicating success/failure.
+//
+// ## Errors
+// - Returns `SLATEDB_ERROR_KIND_INVALID` when `callback` is null.
+//
+// ## Safety
+// - `callback` and `context` must remain valid while configured.
+// - Callback must be thread-safe and must not retain borrowed pointer
+//   arguments after it returns.
+struct slatedb_result_t slatedb_logging_set_callback(slatedb_log_callback_fn callback,
+                                                     void *context,
+                                                     slatedb_log_context_free_fn free_context);
+
+// Clears the configured log callback.
+//
+// If a callback is configured with `free_context`, the context is released
+// after in-flight callback invocations complete.
+//
+// ## Returns
+// - `slatedb_result_t` indicating success/failure.
+struct slatedb_result_t slatedb_logging_clear_callback(void);
 
 // Frees heap memory referenced by `slatedb_result_t.message`.
 //
