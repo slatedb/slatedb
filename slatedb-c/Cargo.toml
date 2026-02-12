@@ -10,7 +10,7 @@ homepage.workspace = true
 
 [lib]
 name = "slatedb_c"
-crate-type = ["cdylib", "staticlib"]
+crate-type = ["cdylib", "staticlib", "rlib"]
 doc = false
 bench = false
 

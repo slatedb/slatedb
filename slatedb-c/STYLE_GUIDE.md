@@ -95,6 +95,20 @@ This guide defines coding and API conventions for the `slatedb-c` package.
 - Ensure cbindgen exports new public constants/types through `cbindgen.toml`.
 - Generated header is `slatedb-c/include/slatedb.h`.
 
+## Testing
+
+- Prefer integration tests in `slatedb-c/tests/` that call only public APIs exported by `slatedb_c`.
+- Cover all user-facing functions with at least one happy-path assertion.
+- Add targeted negative tests for:
+  - null required pointers
+  - invalid selector values
+  - consumed-handle behavior (e.g. write batches after `slatedb_db_write*`)
+- Validate ownership contracts in tests:
+- When optional outputs are used, assert all states:
+  - `out_present = true` with valid output buffers
+  - `out_present = false` with null/zero outputs
+- Keep test names explicit (`test_db_*`, `test_builder_*`, etc.) and align files with API areas (`db.rs`, `builder.rs`, etc.) when splitting suites.
+
 ## Quality Gate
 
 For behavior/code changes in `slatedb-c`, run:
