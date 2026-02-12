@@ -253,8 +253,13 @@ pub unsafe extern "C" fn slatedb_db_builder_build(
 ///
 /// ## Errors
 /// - Returns `SLATEDB_ERROR_KIND_INVALID` when `builder` is null.
+///
+/// ## Safety
+/// - `builder` must be a valid non-null handle obtained from this library.
 #[no_mangle]
-pub extern "C" fn slatedb_db_builder_close(builder: *mut slatedb_db_builder_t) -> slatedb_result_t {
+pub unsafe extern "C" fn slatedb_db_builder_close(
+    builder: *mut slatedb_db_builder_t,
+) -> slatedb_result_t {
     if builder.is_null() {
         return error_result(
             slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
@@ -262,9 +267,7 @@ pub extern "C" fn slatedb_db_builder_close(builder: *mut slatedb_db_builder_t) -
         );
     }
 
-    unsafe {
-        let _ = Box::from_raw(builder);
-    }
+    let _ = Box::from_raw(builder);
 
     success_result()
 }

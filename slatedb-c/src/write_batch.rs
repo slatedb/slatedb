@@ -345,8 +345,11 @@ pub unsafe extern "C" fn slatedb_write_batch_delete(
 ///
 /// ## Errors
 /// - Returns `SLATEDB_ERROR_KIND_INVALID` when `write_batch` is null.
+///
+/// ## Safety
+/// - `write_batch` must be a valid non-null handle obtained from this library.
 #[no_mangle]
-pub extern "C" fn slatedb_write_batch_close(
+pub unsafe extern "C" fn slatedb_write_batch_close(
     write_batch: *mut slatedb_write_batch_t,
 ) -> slatedb_result_t {
     if write_batch.is_null() {
@@ -356,9 +359,7 @@ pub extern "C" fn slatedb_write_batch_close(
         );
     }
 
-    unsafe {
-        let _ = Box::from_raw(write_batch);
-    }
+    let _ = Box::from_raw(write_batch);
 
     success_result()
 }

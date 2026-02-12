@@ -572,13 +572,15 @@ pub unsafe extern "C" fn slatedb_db_merge_with_options(
 ///
 /// ## Arguments
 /// - `db`: Database handle.
-/// - `write_batch`: Mutable write batch handle, consumed on success.
+/// - `write_batch`: Mutable write batch handle, consumed by this call regardless
+///   of write outcome.
 ///
 /// ## Returns
 /// - `slatedb_result_t` indicating success/failure.
 ///
 /// ## Errors
-/// - Returns `SLATEDB_ERROR_KIND_INVALID` for invalid handles.
+/// - Returns `SLATEDB_ERROR_KIND_INVALID` for invalid handles or already-consumed
+///   batches.
 /// - Returns mapped SlateDB errors for write failures.
 ///
 /// ## Safety
@@ -591,21 +593,26 @@ pub unsafe extern "C" fn slatedb_db_write(
     slatedb_db_write_with_options(db, write_batch, std::ptr::null())
 }
 
-/// Applies a write batch using default write options.
+/// Applies a write batch with explicit write options.
 ///
 /// ## Arguments
 /// - `db`: Database handle.
-/// - `write_batch`: Mutable write batch handle, consumed on success.
+/// - `write_batch`: Mutable write batch handle, consumed by this call regardless
+///   of write outcome.
+/// - `write_options`: Optional write options pointer (null uses defaults).
 ///
 /// ## Returns
 /// - `slatedb_result_t` indicating success/failure.
 ///
 /// ## Errors
-/// - Returns `SLATEDB_ERROR_KIND_INVALID` for invalid handles.
+/// - Returns `SLATEDB_ERROR_KIND_INVALID` for invalid handles or already-consumed
+///   batches.
 /// - Returns mapped SlateDB errors for write failures.
 ///
 /// ## Safety
 /// - `db` and `write_batch` must be valid non-null handles.
+/// - `write_options`, when non-null, must point to a valid
+///   `slatedb_write_options_t`.
 #[no_mangle]
 pub unsafe extern "C" fn slatedb_db_write_with_options(
     db: *mut slatedb_db_t,

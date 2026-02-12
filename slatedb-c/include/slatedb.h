@@ -297,6 +297,9 @@ struct slatedb_result_t slatedb_db_builder_build(struct slatedb_db_builder_t *bu
 //
 // ## Errors
 // - Returns `SLATEDB_ERROR_KIND_INVALID` when `builder` is null.
+//
+// ## Safety
+// - `builder` must be a valid non-null handle obtained from this library.
 struct slatedb_result_t slatedb_db_builder_close(struct slatedb_db_builder_t *builder);
 
 // Opens a database using a pre-resolved object store handle.
@@ -543,13 +546,15 @@ struct slatedb_result_t slatedb_db_merge_with_options(struct slatedb_db_t *db,
 //
 // ## Arguments
 // - `db`: Database handle.
-// - `write_batch`: Mutable write batch handle, consumed on success.
+// - `write_batch`: Mutable write batch handle, consumed by this call regardless
+//   of write outcome.
 //
 // ## Returns
 // - `slatedb_result_t` indicating success/failure.
 //
 // ## Errors
-// - Returns `SLATEDB_ERROR_KIND_INVALID` for invalid handles.
+// - Returns `SLATEDB_ERROR_KIND_INVALID` for invalid handles or already-consumed
+//   batches.
 // - Returns mapped SlateDB errors for write failures.
 //
 // ## Safety
@@ -557,21 +562,26 @@ struct slatedb_result_t slatedb_db_merge_with_options(struct slatedb_db_t *db,
 struct slatedb_result_t slatedb_db_write(struct slatedb_db_t *db,
                                          struct slatedb_write_batch_t *write_batch);
 
-// Applies a write batch using default write options.
+// Applies a write batch with explicit write options.
 //
 // ## Arguments
 // - `db`: Database handle.
-// - `write_batch`: Mutable write batch handle, consumed on success.
+// - `write_batch`: Mutable write batch handle, consumed by this call regardless
+//   of write outcome.
+// - `write_options`: Optional write options pointer (null uses defaults).
 //
 // ## Returns
 // - `slatedb_result_t` indicating success/failure.
 //
 // ## Errors
-// - Returns `SLATEDB_ERROR_KIND_INVALID` for invalid handles.
+// - Returns `SLATEDB_ERROR_KIND_INVALID` for invalid handles or already-consumed
+//   batches.
 // - Returns mapped SlateDB errors for write failures.
 //
 // ## Safety
 // - `db` and `write_batch` must be valid non-null handles.
+// - `write_options`, when non-null, must point to a valid
+//   `slatedb_write_options_t`.
 struct slatedb_result_t slatedb_db_write_with_options(struct slatedb_db_t *db,
                                                       struct slatedb_write_batch_t *write_batch,
                                                       const struct slatedb_write_options_t *write_options);
@@ -775,6 +785,9 @@ struct slatedb_result_t slatedb_iterator_seek(struct slatedb_iterator_t *iterato
 //
 // ## Errors
 // - Returns `SLATEDB_ERROR_KIND_INVALID` when `iterator` is null.
+//
+// ## Safety
+// - `iterator` must be a valid non-null handle obtained from this library.
 struct slatedb_result_t slatedb_iterator_close(struct slatedb_iterator_t *iterator);
 
 // Frees heap memory referenced by `slatedb_result_t.message`.
@@ -834,6 +847,9 @@ struct slatedb_result_t slatedb_db_resolve_object_store(const char *url,
 //
 // ## Errors
 // - Returns `SLATEDB_ERROR_KIND_INVALID` if `object_store` is null.
+//
+// ## Safety
+// - `object_store` must be a valid non-null handle obtained from this library.
 struct slatedb_result_t slatedb_object_store_close(struct slatedb_object_store_t *object_store);
 
 // Allocates a new empty write batch.
@@ -983,6 +999,9 @@ struct slatedb_result_t slatedb_write_batch_delete(struct slatedb_write_batch_t 
 //
 // ## Errors
 // - Returns `SLATEDB_ERROR_KIND_INVALID` when `write_batch` is null.
+//
+// ## Safety
+// - `write_batch` must be a valid non-null handle obtained from this library.
 struct slatedb_result_t slatedb_write_batch_close(struct slatedb_write_batch_t *write_batch);
 
 #endif  /* SLATEDB_C_H */

@@ -152,8 +152,13 @@ pub unsafe extern "C" fn slatedb_iterator_seek(
 ///
 /// ## Errors
 /// - Returns `SLATEDB_ERROR_KIND_INVALID` when `iterator` is null.
+///
+/// ## Safety
+/// - `iterator` must be a valid non-null handle obtained from this library.
 #[no_mangle]
-pub extern "C" fn slatedb_iterator_close(iterator: *mut slatedb_iterator_t) -> slatedb_result_t {
+pub unsafe extern "C" fn slatedb_iterator_close(
+    iterator: *mut slatedb_iterator_t,
+) -> slatedb_result_t {
     if iterator.is_null() {
         return error_result(
             slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
@@ -161,9 +166,7 @@ pub extern "C" fn slatedb_iterator_close(iterator: *mut slatedb_iterator_t) -> s
         );
     }
 
-    unsafe {
-        let _ = Box::from_raw(iterator);
-    }
+    let _ = Box::from_raw(iterator);
 
     success_result()
 }

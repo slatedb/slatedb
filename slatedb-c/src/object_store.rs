@@ -64,8 +64,11 @@ pub unsafe extern "C" fn slatedb_db_resolve_object_store(
 ///
 /// ## Errors
 /// - Returns `SLATEDB_ERROR_KIND_INVALID` if `object_store` is null.
+///
+/// ## Safety
+/// - `object_store` must be a valid non-null handle obtained from this library.
 #[no_mangle]
-pub extern "C" fn slatedb_object_store_close(
+pub unsafe extern "C" fn slatedb_object_store_close(
     object_store: *mut slatedb_object_store_t,
 ) -> slatedb_result_t {
     if object_store.is_null() {
@@ -75,9 +78,7 @@ pub extern "C" fn slatedb_object_store_close(
         );
     }
 
-    unsafe {
-        let _ = Box::from_raw(object_store);
-    }
+    let _ = Box::from_raw(object_store);
 
     success_result()
 }
