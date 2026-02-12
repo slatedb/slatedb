@@ -1,7 +1,7 @@
 //! This module provides a read-only API for inspecting WAL SST files that were
 //! flushed by SlateDB writers.
 //!
-//! The API has three main types:
+//! The API has the following main types:
 //!
 //! - [`WalReader`]: opens a WAL namespace and lists WAL files.
 //! - [`WalFile`]: one WAL file (`id`) plus accessors for metadata and contents.
