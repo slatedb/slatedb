@@ -296,3 +296,113 @@ pub unsafe extern "C" fn slatedb_write_batch_close(
 
     success_result()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ffi::slatedb_error_kind_t;
+    use std::ffi::CStr;
+
+    fn assert_result_kind(result: slatedb_result_t, expected: slatedb_error_kind_t) {
+        let kind = result.kind;
+        let message = if result.message.is_null() {
+            String::new()
+        } else {
+            unsafe {
+                CStr::from_ptr(result.message)
+                    .to_string_lossy()
+                    .into_owned()
+            }
+        };
+        crate::memory::slatedb_result_free(result);
+        assert_eq!(
+            kind, expected,
+            "unexpected result kind with message: {message}"
+        );
+    }
+
+    fn assert_ok(result: slatedb_result_t) {
+        assert_result_kind(result, slatedb_error_kind_t::SLATEDB_ERROR_KIND_NONE);
+    }
+
+    fn new_batch() -> *mut slatedb_write_batch_t {
+        let mut write_batch: *mut slatedb_write_batch_t = std::ptr::null_mut();
+        assert_ok(unsafe { slatedb_write_batch_new(&mut write_batch) });
+        assert!(!write_batch.is_null());
+        write_batch
+    }
+
+    #[test]
+    fn test_write_batch_new_rejects_null_out_pointer() {
+        assert_result_kind(
+            unsafe { slatedb_write_batch_new(std::ptr::null_mut()) },
+            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
+        );
+    }
+
+    #[test]
+    fn test_write_batch_put_rejects_empty_key() {
+        let write_batch = new_batch();
+        assert_result_kind(
+            unsafe {
+                slatedb_write_batch_put(
+                    write_batch,
+                    std::ptr::null(),
+                    0,
+                    b"value".as_ptr(),
+                    b"value".len(),
+                )
+            },
+            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
+        );
+        assert_ok(unsafe { slatedb_write_batch_close(write_batch) });
+    }
+
+    #[test]
+    fn test_write_batch_put_merge_delete_success() {
+        let write_batch = new_batch();
+        assert_ok(unsafe {
+            slatedb_write_batch_put(
+                write_batch,
+                b"key".as_ptr(),
+                b"key".len(),
+                b"value".as_ptr(),
+                b"value".len(),
+            )
+        });
+        assert_ok(unsafe {
+            slatedb_write_batch_merge(
+                write_batch,
+                b"key".as_ptr(),
+                b"key".len(),
+                b"operand".as_ptr(),
+                b"operand".len(),
+            )
+        });
+        assert_ok(unsafe {
+            slatedb_write_batch_delete(write_batch, b"key".as_ptr(), b"key".len())
+        });
+        assert_ok(unsafe { slatedb_write_batch_close(write_batch) });
+    }
+
+    #[test]
+    fn test_write_batch_mutation_rejects_consumed_batch() {
+        let write_batch = new_batch();
+        unsafe {
+            (*write_batch).batch = None;
+        }
+        assert_result_kind(
+            unsafe { slatedb_write_batch_delete(write_batch, b"key".as_ptr(), b"key".len()) },
+            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
+        );
+        assert_ok(unsafe { slatedb_write_batch_close(write_batch) });
+    }
+
+    #[test]
+    fn test_write_batch_close_rejects_null_handle() {
+        assert_result_kind(
+            unsafe { slatedb_write_batch_close(std::ptr::null_mut()) },
+            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
+        );
+    }
+}

@@ -76,3 +76,61 @@ pub unsafe extern "C" fn slatedb_object_store_close(
 
     success_result()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ffi::slatedb_error_kind_t;
+    use std::ffi::{CStr, CString};
+
+    fn assert_result_kind(result: slatedb_result_t, expected: slatedb_error_kind_t) {
+        let kind = result.kind;
+        let message = if result.message.is_null() {
+            String::new()
+        } else {
+            unsafe {
+                CStr::from_ptr(result.message)
+                    .to_string_lossy()
+                    .into_owned()
+            }
+        };
+        crate::memory::slatedb_result_free(result);
+        assert_eq!(
+            kind, expected,
+            "unexpected result kind with message: {message}"
+        );
+    }
+
+    #[test]
+    fn test_object_store_close_rejects_null_handle() {
+        assert_result_kind(
+            unsafe { slatedb_object_store_close(std::ptr::null_mut()) },
+            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
+        );
+    }
+
+    #[test]
+    fn test_db_resolve_object_store_requires_out_pointer() {
+        let url = CString::new("memory:///").expect("CString failed");
+        assert_result_kind(
+            unsafe { slatedb_db_resolve_object_store(url.as_ptr(), std::ptr::null_mut()) },
+            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
+        );
+    }
+
+    #[test]
+    fn test_db_resolve_object_store_rejects_invalid_utf8_url() {
+        let invalid_utf8 = [0xFF_u8, 0];
+        let mut object_store: *mut slatedb_object_store_t = std::ptr::null_mut();
+        assert_result_kind(
+            unsafe {
+                slatedb_db_resolve_object_store(
+                    invalid_utf8.as_ptr() as *const std::os::raw::c_char,
+                    &mut object_store,
+                )
+            },
+            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
+        );
+        assert!(object_store.is_null());
+    }
+}
