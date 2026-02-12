@@ -109,6 +109,9 @@ typedef struct slatedb_iterator_t slatedb_iterator_t;
 // Opaque handle backing a resolved object store.
 typedef struct slatedb_object_store_t slatedb_object_store_t;
 
+// Opaque handle backing database settings.
+typedef struct slatedb_settings_t slatedb_settings_t;
+
 // Opaque handle backing a mutable write batch.
 typedef struct slatedb_write_batch_t slatedb_write_batch_t;
 
@@ -229,6 +232,14 @@ typedef struct slatedb_flush_options_t {
     uint8_t flush_type;
 } slatedb_flush_options_t;
 
+// Key/value JSON update entry used by `slatedb_settings_apply_kv`.
+typedef struct slatedb_settings_kv_t {
+    // Dotted field path (for example `compactor_options.max_sst_size`).
+    const char *key;
+    // JSON literal to assign at `key` (for example `123`, `true`, `"zstd"`).
+    const char *value_json;
+} slatedb_settings_kv_t;
+
 // Creates a new database builder.
 //
 // ## Arguments
@@ -300,6 +311,23 @@ struct slatedb_result_t slatedb_db_builder_with_seed(struct slatedb_db_builder_t
 // - `builder` must be a valid builder handle.
 struct slatedb_result_t slatedb_db_builder_with_sst_block_size(struct slatedb_db_builder_t *builder,
                                                                slatedb_sst_block_size_t sst_block_size);
+
+// Configures settings for a builder.
+//
+// ## Arguments
+// - `builder`: Builder handle.
+// - `settings`: Settings handle.
+//
+// ## Returns
+// - `slatedb_result_t` indicating success/failure.
+//
+// ## Errors
+// - Returns `SLATEDB_ERROR_KIND_INVALID` for invalid handles or consumed builder.
+//
+// ## Safety
+// - `builder` and `settings` must be valid handles.
+struct slatedb_result_t slatedb_db_builder_with_settings(struct slatedb_db_builder_t *builder,
+                                                         const struct slatedb_settings_t *settings);
 
 // Configures a merge operator callback for a builder.
 //
@@ -912,6 +940,181 @@ struct slatedb_result_t slatedb_db_resolve_object_store(const char *url,
 // ## Safety
 // - `object_store` must be a valid non-null handle obtained from this library.
 struct slatedb_result_t slatedb_object_store_close(struct slatedb_object_store_t *object_store);
+
+// Creates a new settings handle initialized with default values.
+//
+// ## Arguments
+// - `out_settings`: Output pointer populated with a `slatedb_settings_t*`.
+//
+// ## Returns
+// - `slatedb_result_t` indicating success or failure.
+//
+// ## Errors
+// - Returns `SLATEDB_ERROR_KIND_INVALID` for null output pointers.
+//
+// ## Safety
+// - `out_settings` must be a valid non-null writable pointer.
+struct slatedb_result_t slatedb_settings_default(struct slatedb_settings_t **out_settings);
+
+// Loads settings from a configuration file.
+//
+// ## Arguments
+// - `path`: Config file path (`.json`, `.toml`, `.yaml`, `.yml`) as a
+//   null-terminated UTF-8 string.
+// - `out_settings`: Output pointer populated with a `slatedb_settings_t*`.
+//
+// ## Returns
+// - `slatedb_result_t` indicating success or failure.
+//
+// ## Errors
+// - Returns `SLATEDB_ERROR_KIND_INVALID` for null pointers or invalid UTF-8.
+// - Returns mapped SlateDB errors for file/parse failures.
+//
+// ## Safety
+// - `path` must be a valid null-terminated C string.
+// - `out_settings` must be a valid non-null writable pointer.
+struct slatedb_result_t slatedb_settings_from_file(const char *path,
+                                                   struct slatedb_settings_t **out_settings);
+
+// Loads settings from a JSON string.
+//
+// ## Arguments
+// - `json`: JSON payload as a null-terminated UTF-8 string.
+// - `out_settings`: Output pointer populated with a `slatedb_settings_t*`.
+//
+// ## Returns
+// - `slatedb_result_t` indicating success or failure.
+//
+// ## Errors
+// - Returns `SLATEDB_ERROR_KIND_INVALID` for null pointers, invalid UTF-8, or
+//   invalid JSON/settings schema.
+//
+// ## Safety
+// - `json` must be a valid null-terminated C string.
+// - `out_settings` must be a valid non-null writable pointer.
+struct slatedb_result_t slatedb_settings_from_json(const char *json,
+                                                   struct slatedb_settings_t **out_settings);
+
+// Loads settings from environment variables with the given prefix.
+//
+// ## Arguments
+// - `prefix`: Environment variable prefix as a null-terminated UTF-8 string.
+// - `out_settings`: Output pointer populated with a `slatedb_settings_t*`.
+//
+// ## Returns
+// - `slatedb_result_t` indicating success or failure.
+//
+// ## Errors
+// - Returns `SLATEDB_ERROR_KIND_INVALID` for null pointers or invalid UTF-8.
+// - Returns mapped SlateDB errors for parse failures.
+//
+// ## Safety
+// - `prefix` must be a valid null-terminated C string.
+// - `out_settings` must be a valid non-null writable pointer.
+struct slatedb_result_t slatedb_settings_from_env(const char *prefix,
+                                                  struct slatedb_settings_t **out_settings);
+
+// Loads settings from environment variables using a default settings handle.
+//
+// ## Arguments
+// - `prefix`: Environment variable prefix as a null-terminated UTF-8 string.
+// - `default_settings`: Default settings handle to merge environment overrides
+//   into.
+// - `out_settings`: Output pointer populated with a `slatedb_settings_t*`.
+//
+// ## Returns
+// - `slatedb_result_t` indicating success or failure.
+//
+// ## Errors
+// - Returns `SLATEDB_ERROR_KIND_INVALID` for null pointers or invalid UTF-8.
+// - Returns mapped SlateDB errors for parse failures.
+//
+// ## Safety
+// - `prefix` must be a valid null-terminated C string.
+// - `default_settings` and `out_settings` must be valid non-null pointers.
+struct slatedb_result_t slatedb_settings_from_env_with_default(const char *prefix,
+                                                               const struct slatedb_settings_t *default_settings,
+                                                               struct slatedb_settings_t **out_settings);
+
+// Loads settings from default files and `SLATEDB_` environment variables.
+//
+// ## Arguments
+// - `out_settings`: Output pointer populated with a `slatedb_settings_t*`.
+//
+// ## Returns
+// - `slatedb_result_t` indicating success or failure.
+//
+// ## Errors
+// - Returns `SLATEDB_ERROR_KIND_INVALID` for null output pointers.
+// - Returns mapped SlateDB errors for parse failures.
+//
+// ## Safety
+// - `out_settings` must be a valid non-null writable pointer.
+struct slatedb_result_t slatedb_settings_load(struct slatedb_settings_t **out_settings);
+
+// Applies key/value JSON updates to an existing settings handle.
+//
+// Each entry uses a dotted field path in `key` and a JSON literal in
+// `value_json`. Intermediate objects in a dotted path are materialized as
+// needed when absent or null.
+//
+// ## Arguments
+// - `settings`: Settings handle to mutate.
+// - `kvs`: Pointer to `slatedb_settings_kv_t` entries.
+// - `kvs_len`: Number of entries in `kvs`.
+//
+// ## Returns
+// - `slatedb_result_t` indicating success or failure.
+//
+// ## Errors
+// - Returns `SLATEDB_ERROR_KIND_INVALID` for invalid pointers/handles, invalid
+//   keys, invalid JSON literals, or schema-invalid resulting settings.
+// - Returns `SLATEDB_ERROR_KIND_INTERNAL` for unexpected serialization errors.
+//
+// ## Safety
+// - `settings` must be a valid non-null settings handle.
+// - If `kvs_len > 0`, `kvs` must point to `kvs_len` readable entries.
+// - Each `key` and `value_json` must be valid null-terminated UTF-8 strings.
+struct slatedb_result_t slatedb_settings_apply_kv(struct slatedb_settings_t *settings,
+                                                  const struct slatedb_settings_kv_t *kvs,
+                                                  uintptr_t kvs_len);
+
+// Serializes settings to a UTF-8 JSON payload.
+//
+// ## Arguments
+// - `settings`: Settings handle.
+// - `out_json`: Output pointer to Rust-allocated UTF-8 bytes.
+// - `out_json_len`: Output length for `out_json`.
+//
+// ## Returns
+// - `slatedb_result_t` indicating success or failure.
+//
+// ## Errors
+// - Returns `SLATEDB_ERROR_KIND_INVALID` for invalid pointers/handles.
+// - Returns `SLATEDB_ERROR_KIND_INTERNAL` when serialization fails.
+//
+// ## Safety
+// - `settings`, `out_json`, and `out_json_len` must be valid non-null
+//   pointers.
+// - `out_json` must be freed with `slatedb_bytes_free`.
+struct slatedb_result_t slatedb_settings_to_json(const struct slatedb_settings_t *settings,
+                                                 uint8_t **out_json,
+                                                 uintptr_t *out_json_len);
+
+// Closes and frees a settings handle.
+//
+// ## Arguments
+// - `settings`: Settings handle.
+//
+// ## Returns
+// - `slatedb_result_t` indicating success/failure.
+//
+// ## Errors
+// - Returns `SLATEDB_ERROR_KIND_INVALID` when `settings` is null.
+//
+// ## Safety
+// - `settings` must be a valid non-null handle obtained from this library.
+struct slatedb_result_t slatedb_settings_close(struct slatedb_settings_t *settings);
 
 // Allocates a new empty write batch.
 //

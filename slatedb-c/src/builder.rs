@@ -8,7 +8,7 @@ use crate::ffi::{
     require_out_ptr, slatedb_db_builder_t, slatedb_db_t, slatedb_error_kind_t,
     slatedb_merge_operator_context_free_fn, slatedb_merge_operator_fn,
     slatedb_merge_operator_result_free_fn, slatedb_object_store_t, slatedb_result_t,
-    slatedb_sst_block_size_t, sst_block_size_from_u8, success_result,
+    slatedb_settings_t, slatedb_sst_block_size_t, sst_block_size_from_u8, success_result,
 };
 use crate::merge_operator::CMergeOperator;
 use slatedb::Db;
@@ -171,6 +171,45 @@ pub unsafe extern "C" fn slatedb_db_builder_with_sst_block_size(
     };
 
     handle.builder = Some(current.with_sst_block_size(block_size));
+    success_result()
+}
+
+/// Configures settings for a builder.
+///
+/// ## Arguments
+/// - `builder`: Builder handle.
+/// - `settings`: Settings handle.
+///
+/// ## Returns
+/// - `slatedb_result_t` indicating success/failure.
+///
+/// ## Errors
+/// - Returns `SLATEDB_ERROR_KIND_INVALID` for invalid handles or consumed builder.
+///
+/// ## Safety
+/// - `builder` and `settings` must be valid handles.
+#[no_mangle]
+pub unsafe extern "C" fn slatedb_db_builder_with_settings(
+    builder: *mut slatedb_db_builder_t,
+    settings: *const slatedb_settings_t,
+) -> slatedb_result_t {
+    if let Err(err) = require_handle(builder, "builder") {
+        return err;
+    }
+    if let Err(err) = require_handle(settings, "settings") {
+        return err;
+    }
+
+    let handle = &mut *builder;
+    let Some(current) = handle.builder.take() else {
+        return error_result(
+            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
+            "builder has been consumed",
+        );
+    };
+
+    let settings = (&*settings).settings.clone();
+    handle.builder = Some(current.with_settings(settings));
     success_result()
 }
 

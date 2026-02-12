@@ -16,6 +16,7 @@ bench = false
 
 [dependencies]
 slatedb = { workspace = true, features = ["all"] }
+serde_json = { workspace = true }
 tokio = { workspace = true, features = ["rt", "rt-multi-thread"] }
 
 [build-dependencies]

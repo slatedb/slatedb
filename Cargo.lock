@@ -3285,6 +3285,7 @@ name = "slatedb-c"
 version = "0.10.0"
 dependencies = [
  "cbindgen",
+ "serde_json",
  "slatedb",
  "tokio",
 ]

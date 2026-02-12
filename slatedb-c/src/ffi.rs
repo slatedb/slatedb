@@ -11,7 +11,7 @@ use slatedb::config::{
     SstBlockSize, Ttl, WriteOptions,
 };
 use slatedb::object_store::ObjectStore;
-use slatedb::{CloseReason, Db, DbBuilder, DbIterator, ErrorKind, WriteBatch};
+use slatedb::{CloseReason, Db, DbBuilder, DbIterator, ErrorKind, Settings, WriteBatch};
 use std::ffi::{c_void, CStr, CString};
 use std::ops::Bound;
 use std::os::raw::c_char;
@@ -66,6 +66,24 @@ pub struct slatedb_object_store_t {
 pub struct slatedb_db_builder_t {
     /// Builder state. Wrapped in `Option` so it can be consumed by `build`.
     pub builder: Option<DbBuilder<String>>,
+}
+
+/// Opaque handle backing database settings.
+#[allow(non_camel_case_types)]
+pub struct slatedb_settings_t {
+    /// Settings state owned by Rust.
+    pub settings: Settings,
+}
+
+/// Key/value JSON update entry used by `slatedb_settings_apply_kv`.
+#[repr(C)]
+#[allow(non_camel_case_types)]
+#[derive(Clone, Copy)]
+pub struct slatedb_settings_kv_t {
+    /// Dotted field path (for example `compactor_options.max_sst_size`).
+    pub key: *const c_char,
+    /// JSON literal to assign at `key` (for example `123`, `true`, `"zstd"`).
+    pub value_json: *const c_char,
 }
 
 /// Opaque handle backing an open `Db` plus runtime owner.
