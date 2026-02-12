@@ -704,14 +704,7 @@ final class Native {
                 handleStruct,
                 valueOut
             );
-            int error = (int) getInt(RESULT_ERROR, result);
-            MemorySegment messageSegment = (MemorySegment) getAddress(RESULT_MESSAGE, result);
-            String message = readMessage(messageSegment);
-            RuntimeException failure = (error == 0) ? null : new SlateDbException(error, message);
-            freeResult(result, failure);
-            if (failure != null) {
-                throw failure;
-            }
+            checkResult(result);
             byte[] bytes = copyValue(valueOut, null);
             return new String(bytes, StandardCharsets.UTF_8);
         } catch (Throwable t) {
@@ -736,16 +729,8 @@ final class Native {
                 optionsSegment,
                 valueOut
             );
-            int error = (int) getInt(RESULT_ERROR, result);
-            final boolean isNone = getBoolean(RESULT_NONE, result);
-            MemorySegment messageSegment = (MemorySegment) getAddress(RESULT_MESSAGE, result);
-            String message = readMessage(messageSegment);
-            RuntimeException failure = (error == 0) ? null : new SlateDbException(error, message);
-            freeResult(result, failure);
-            if (failure != null) {
-                throw failure;
-            }
-            if (isNone) {
+            checkResult(result);
+            if (getBoolean(RESULT_NONE, result)) {
                 return null;
             }
             return copyValue(valueOut, null);
@@ -804,16 +789,8 @@ final class Native {
                 optionsSegment,
                 valueOut
             );
-            int error = (int) getInt(RESULT_ERROR, result);
-            final boolean isNone = getBoolean(RESULT_NONE, result);
-            MemorySegment messageSegment = (MemorySegment) getAddress(RESULT_MESSAGE, result);
-            String message = readMessage(messageSegment);
-            RuntimeException failure = (error == 0) ? null : new SlateDbException(error, message);
-            freeResult(result, failure);
-            if (failure != null) {
-                throw failure;
-            }
-            if (isNone) {
+            checkResult(result);
+            if (getBoolean(RESULT_NONE, result)) {
                 return null;
             }
             return copyValue(valueOut, null);
@@ -913,16 +890,8 @@ final class Native {
                 iterPtr,
                 kvOut
             );
-            int error = (int) getInt(RESULT_ERROR, result);
-            boolean isNone = getBoolean(RESULT_NONE, result);
-            MemorySegment messageSegment = (MemorySegment) getAddress(RESULT_MESSAGE, result);
-            String message = readMessage(messageSegment);
-            RuntimeException failure = (error == 0) ? null : new SlateDbException(error, message);
-            freeResult(result, failure);
-            if (failure != null) {
-                throw failure;
-            }
-            if (isNone) {
+            checkResult(result);
+            if (getBoolean(RESULT_NONE, result)) {
                 return null;
             }
             return copyKeyValuePair(kvOut);
@@ -1386,11 +1355,16 @@ final class Native {
         return new SlateDbKeyValue(keyBytes, valueBytes);
     }
 
-    private static void checkResult(MemorySegment result) {
-        int error = (int) getInt(RESULT_ERROR, result);
-        MemorySegment messageSegment = (MemorySegment) getAddress(RESULT_MESSAGE, result);
-        String message = readMessage(messageSegment);
-        RuntimeException failure = (error == 0) ? null : new SlateDbException(error, message);
+    /**
+     * Checks whether given `CSdbResult` is successful or not. If result error code is not successful throws
+     * {@link SlateDbException} exception.
+     * @param result a `CSdbResult` result to check.
+     */
+    private static void checkResult(final MemorySegment result) {
+        final var error = getInt(RESULT_ERROR, result);
+        final var messageSegment = getAddress(RESULT_MESSAGE, result);
+        final var message = readMessage(messageSegment);
+        final RuntimeException failure = (error == 0) ? null : new SlateDbException(error, message);
         freeResult(result, failure);
         if (failure != null) {
             throw failure;
@@ -1416,11 +1390,11 @@ final class Native {
         }
     }
 
-    private static void freeResult(MemorySegment result, RuntimeException pending) {
+    private static void freeResult(final MemorySegment result, final RuntimeException pending) {
         try {
             freeResultHandle.invokeExact(result);
-        } catch (Throwable t) {
-            RuntimeException failure = new RuntimeException("Failed to free SlateDB result", t);
+        } catch (final Throwable t) {
+            final var failure = new RuntimeException("Failed to free SlateDB result", t);
             if (pending != null) {
                 pending.addSuppressed(failure);
             } else {
