@@ -12,7 +12,7 @@
 //! order. Iterating each file with [`WalFile::iterator`] yields [`RowEntry`]
 //! values in the order they are stored in that WAL SST.
 //!
-//! `WalFileIterator` intentionally exposes `next_entry` (and seek/init), not
+//! `WalFileIterator` intentionally exposes `next_entry` (and init), not
 //! `next`. This keeps the API at entry level and preserves tombstones and merge
 //! rows exactly as written to the WAL.
 //!
