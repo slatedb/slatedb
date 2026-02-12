@@ -16,11 +16,7 @@ bench = false
 
 [dependencies]
 slatedb = { workspace = true, features = ["all"] }
-tokio = { workspace = true, features = ["fs", "macros", "sync", "rt", "rt-multi-thread", "signal"] }
-log = { workspace = true }
-env_logger = "0.11"
-uuid = { workspace = true }
-serde_json = { workspace = true }
+tokio = { workspace = true, features = ["rt", "rt-multi-thread"] }
 
 [build-dependencies]
 cbindgen = "0.27"

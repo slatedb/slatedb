@@ -1,26 +1,58 @@
-use crate::error::{create_error_result, CSdbError};
-use slatedb::admin::load_object_store_from_env;
-use slatedb::object_store::ObjectStore;
+use crate::ffi::{
+    cstr_to_string, error_result, map_error, slatedb_error_t, slatedb_object_store_t,
+    slatedb_result_t, success_result,
+};
 use slatedb::Db;
-use std::sync::Arc;
 
-// Object store creation helper
-pub(crate) fn create_object_store(
-    url: Option<&str>,
-    env_file: Option<String>,
-) -> Result<Arc<dyn ObjectStore>, crate::error::CSdbResult> {
-    if let Some(url) = url {
-        return Db::resolve_object_store(url).map_err(|e| {
-            create_error_result(
-                CSdbError::InternalError,
-                &format!("Failed to resolve object store: {}", e),
-            )
-        });
+/// Resolve an object store using `Db::resolve_object_store`.
+///
+/// # Safety
+/// - `url` must be a valid, null-terminated C string.
+/// - `out_object_store` must be non-null.
+#[no_mangle]
+pub unsafe extern "C" fn slatedb_db_resolve_object_store(
+    url: *const std::os::raw::c_char,
+    out_object_store: *mut *mut slatedb_object_store_t,
+) -> slatedb_result_t {
+    if out_object_store.is_null() {
+        return error_result(
+            slatedb_error_t::SLATEDB_NULL_POINTER,
+            "out_object_store pointer is null",
+        );
     }
-    load_object_store_from_env(env_file).map_err(|e| {
-        create_error_result(
-            CSdbError::InternalError,
-            &format!("Failed to load object store from environment: {}", e),
-        )
-    })
+
+    let url = match cstr_to_string(url, "url") {
+        Ok(url) => url,
+        Err(err) => return err,
+    };
+
+    match Db::resolve_object_store(&url) {
+        Ok(object_store) => {
+            let handle = Box::new(slatedb_object_store_t { object_store });
+            *out_object_store = Box::into_raw(handle);
+            success_result()
+        }
+        Err(err) => {
+            let code = map_error(&err);
+            error_result(code, &format!("failed to resolve object store: {err}"))
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn slatedb_object_store_close(
+    object_store: *mut slatedb_object_store_t,
+) -> slatedb_result_t {
+    if object_store.is_null() {
+        return error_result(
+            slatedb_error_t::SLATEDB_INVALID_HANDLE,
+            "invalid object store handle",
+        );
+    }
+
+    unsafe {
+        let _ = Box::from_raw(object_store);
+    }
+
+    success_result()
 }
