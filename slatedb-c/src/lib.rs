@@ -8,14 +8,17 @@ mod db;
 mod ffi;
 mod iterator;
 mod memory;
+mod merge_operator;
 mod object_store;
 mod write_batch;
 
 pub use ffi::{
     slatedb_bound_t, slatedb_close_reason_t, slatedb_db_builder_t, slatedb_db_t,
-    slatedb_error_kind_t, slatedb_flush_options_t, slatedb_iterator_t, slatedb_merge_options_t,
-    slatedb_object_store_t, slatedb_put_options_t, slatedb_range_t, slatedb_read_options_t,
-    slatedb_result_t, slatedb_scan_options_t, slatedb_sst_block_size_t, slatedb_write_batch_t,
+    slatedb_error_kind_t, slatedb_flush_options_t, slatedb_iterator_t,
+    slatedb_merge_operator_context_free_fn, slatedb_merge_operator_fn,
+    slatedb_merge_operator_result_free_fn, slatedb_merge_options_t, slatedb_object_store_t,
+    slatedb_put_options_t, slatedb_range_t, slatedb_read_options_t, slatedb_result_t,
+    slatedb_scan_options_t, slatedb_sst_block_size_t, slatedb_write_batch_t,
     slatedb_write_options_t, SLATEDB_BOUND_KIND_EXCLUDED, SLATEDB_BOUND_KIND_INCLUDED,
     SLATEDB_BOUND_KIND_UNBOUNDED, SLATEDB_DURABILITY_FILTER_MEMORY,
     SLATEDB_DURABILITY_FILTER_REMOTE, SLATEDB_FLUSH_TYPE_MEMTABLE, SLATEDB_FLUSH_TYPE_WAL,
@@ -27,8 +30,8 @@ pub use ffi::{
 
 pub use builder::{
     slatedb_db_builder_build, slatedb_db_builder_close, slatedb_db_builder_new,
-    slatedb_db_builder_with_seed, slatedb_db_builder_with_sst_block_size,
-    slatedb_db_builder_with_wal_object_store,
+    slatedb_db_builder_with_merge_operator, slatedb_db_builder_with_seed,
+    slatedb_db_builder_with_sst_block_size, slatedb_db_builder_with_wal_object_store,
 };
 
 pub use db::{

@@ -127,6 +127,38 @@ typedef struct slatedb_result_t {
 // Use `SLATEDB_SST_BLOCK_SIZE_*` constants.
 typedef uint8_t slatedb_sst_block_size_t;
 
+// Merge operator callback used by `slatedb_db_builder_with_merge_operator`.
+//
+// The callback receives key bytes, optional existing value bytes, and the new
+// merge operand bytes. It must set `*out_value`/`*out_value_len` to the merged
+// value bytes and return `true` on success.
+//
+// `existing_value` is null and `existing_value_len` is 0 when
+// `has_existing_value` is false.
+//
+// If this callback allocates `out_value`, provide a corresponding
+// `slatedb_merge_operator_result_free_fn` so Rust can release it after copying.
+typedef bool (*slatedb_merge_operator_fn)(const uint8_t *key,
+                                          uintptr_t key_len,
+                                          const uint8_t *existing_value,
+                                          uintptr_t existing_value_len,
+                                          bool has_existing_value,
+                                          const uint8_t *operand,
+                                          uintptr_t operand_len,
+                                          uint8_t **out_value,
+                                          uintptr_t *out_value_len,
+                                          void *context);
+
+// Optional callback used to free merge output returned by
+// `slatedb_merge_operator_fn`.
+typedef void (*slatedb_merge_operator_result_free_fn)(uint8_t *value,
+                                                      uintptr_t value_len,
+                                                      void *context);
+
+// Optional callback used to free merge operator context when the configured
+// merge operator is dropped.
+typedef void (*slatedb_merge_operator_context_free_fn)(void *context);
+
 // Read options passed to `slatedb_db_get_with_options`.
 typedef struct slatedb_read_options_t {
     // Durability filter. Use `SLATEDB_DURABILITY_FILTER_*` constants.
@@ -268,6 +300,35 @@ struct slatedb_result_t slatedb_db_builder_with_seed(struct slatedb_db_builder_t
 // - `builder` must be a valid builder handle.
 struct slatedb_result_t slatedb_db_builder_with_sst_block_size(struct slatedb_db_builder_t *builder,
                                                                slatedb_sst_block_size_t sst_block_size);
+
+// Configures a merge operator callback for a builder.
+//
+// ## Arguments
+// - `builder`: Builder handle.
+// - `merge_operator`: Merge callback used to resolve merge operands.
+// - `merge_operator_context`: Opaque caller context passed to callbacks.
+// - `free_merge_result`: Optional callback to release merge result buffers
+//   returned by `merge_operator`.
+// - `free_merge_operator_context`: Optional callback to release
+//   `merge_operator_context` when the configured merge operator is dropped.
+//
+// ## Returns
+// - `slatedb_result_t` indicating success/failure.
+//
+// ## Errors
+// - Returns `SLATEDB_ERROR_KIND_INVALID` for invalid handles, null
+//   `merge_operator`, or consumed builder.
+//
+// ## Safety
+// - `builder` must be a valid builder handle.
+// - `merge_operator` must be non-null.
+// - Callback and context pointers must remain valid and thread-safe for as long
+//   as any database built from this builder is alive.
+struct slatedb_result_t slatedb_db_builder_with_merge_operator(struct slatedb_db_builder_t *builder,
+                                                               slatedb_merge_operator_fn merge_operator,
+                                                               void *merge_operator_context,
+                                                               slatedb_merge_operator_result_free_fn free_merge_result,
+                                                               slatedb_merge_operator_context_free_fn free_merge_operator_context);
 
 // Builds a database from a builder and consumes the builder handle.
 //
