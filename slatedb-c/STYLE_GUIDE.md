@@ -108,6 +108,7 @@ This guide defines coding and API conventions for the `slatedb-c` package.
   - `out_present = true` with valid output buffers
   - `out_present = false` with null/zero outputs
 - Keep test names explicit (`test_db_*`, `test_builder_*`, etc.) and align files with API areas (`db.rs`, `builder.rs`, etc.) when splitting suites.
+- Test one logical behavior per test function (for example, `test_db_put` should cover a successful put, while `test_db_put_invalid_key` should cover invalid key handling).
 
 ## Quality Gate
 

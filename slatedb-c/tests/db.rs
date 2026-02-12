@@ -1,9 +1,8 @@
 mod common;
 
 use common::{
-    assert_result_invalid_contains, assert_result_ok, cleanup_temp_dir, close_db_if_not_null,
-    close_object_store_if_not_null, cstring, file_url_for_path, open_db, resolve_object_store,
-    take_bytes, unbounded_range, unique_temp_dir,
+    assert_result_invalid_contains, assert_result_ok, close_db_if_not_null, memory_object_store,
+    take_bytes, unbounded_range, unique_db_path,
 };
 use slatedb_c::{
     slatedb_bound_t, slatedb_db_close, slatedb_db_delete, slatedb_db_delete_with_options,
@@ -12,69 +11,109 @@ use slatedb_c::{
     slatedb_db_put_with_options, slatedb_db_scan, slatedb_db_scan_prefix,
     slatedb_db_scan_prefix_with_options, slatedb_db_scan_with_options, slatedb_db_status,
     slatedb_db_write, slatedb_db_write_with_options, slatedb_flush_options_t,
-    slatedb_iterator_close, slatedb_iterator_next, slatedb_merge_options_t, slatedb_put_options_t,
-    slatedb_range_t, slatedb_read_options_t, slatedb_scan_options_t, slatedb_write_batch_close,
+    slatedb_iterator_close, slatedb_iterator_next, slatedb_merge_options_t,
+    slatedb_object_store_close, slatedb_object_store_t, slatedb_put_options_t, slatedb_range_t,
+    slatedb_read_options_t, slatedb_scan_options_t, slatedb_write_batch_close,
     slatedb_write_batch_new, slatedb_write_batch_put, slatedb_write_options_t,
     SLATEDB_BOUND_KIND_UNBOUNDED, SLATEDB_DURABILITY_FILTER_MEMORY, SLATEDB_FLUSH_TYPE_WAL,
     SLATEDB_TTL_TYPE_DEFAULT, SLATEDB_TTL_TYPE_NO_EXPIRY,
 };
 use std::ptr::{self, NonNull};
 
+unsafe fn open_memory_db(
+    prefix: &str,
+) -> (*mut slatedb_object_store_t, *mut slatedb_c::slatedb_db_t) {
+    let object_store = memory_object_store();
+    let db_path = unique_db_path(prefix);
+    let mut db = ptr::null_mut();
+    assert_result_ok(slatedb_db_open(db_path.as_ptr(), object_store, &mut db));
+    assert!(!db.is_null(), "db handle should not be null");
+    (object_store, db)
+}
+
+unsafe fn close_memory_db(
+    object_store: *mut slatedb_object_store_t,
+    db: *mut slatedb_c::slatedb_db_t,
+) {
+    close_db_if_not_null(db);
+    assert_result_ok(slatedb_object_store_close(object_store));
+}
+
 #[test]
-fn test_db_happy_path_all_entrypoints() {
+fn test_db_open_status_close_happy_path() {
     unsafe {
-        let root_dir = unique_temp_dir("db-happy");
-        let object_store_url = file_url_for_path(&root_dir);
-        let object_store = resolve_object_store(&object_store_url);
-
-        let db_path = cstring("db-happy-path");
-        let db = open_db(&db_path, object_store);
-
+        let object_store = memory_object_store();
+        let db_path = unique_db_path("db-open-status");
+        let mut db = ptr::null_mut();
+        assert_result_ok(slatedb_db_open(db_path.as_ptr(), object_store, &mut db));
+        assert!(!db.is_null(), "db handle should not be null");
         assert_result_ok(slatedb_db_status(db));
+        assert_result_ok(slatedb_db_close(db));
+        assert_result_ok(slatedb_object_store_close(object_store));
+    }
+}
 
-        let key_primary = b"primary-key";
-        let value_primary = b"primary-value";
+#[test]
+fn test_db_put_get_happy_path() {
+    unsafe {
+        let (object_store, db) = open_memory_db("db-put-get");
+        let key = b"primary-key";
+        let value = b"primary-value";
         assert_result_ok(slatedb_db_put(
             db,
-            key_primary.as_ptr(),
-            key_primary.len(),
-            value_primary.as_ptr(),
-            value_primary.len(),
+            key.as_ptr(),
+            key.len(),
+            value.as_ptr(),
+            value.len(),
         ));
 
-        let mut found_primary = false;
-        let mut found_primary_val = ptr::null_mut();
-        let mut found_primary_val_len = 0usize;
+        let mut present = false;
+        let mut out_val = ptr::null_mut();
+        let mut out_val_len = 0usize;
         assert_result_ok(slatedb_db_get(
             db,
-            key_primary.as_ptr(),
-            key_primary.len(),
-            &mut found_primary,
-            &mut found_primary_val,
-            &mut found_primary_val_len,
+            key.as_ptr(),
+            key.len(),
+            &mut present,
+            &mut out_val,
+            &mut out_val_len,
         ));
-        assert!(found_primary);
-        assert_eq!(
-            take_bytes(found_primary_val, found_primary_val_len),
-            value_primary
-        );
+        assert!(present);
+        assert_eq!(take_bytes(out_val, out_val_len), value);
 
+        close_memory_db(object_store, db);
+    }
+}
+
+#[test]
+fn test_db_get_missing_sets_optional_outputs() {
+    unsafe {
+        let (object_store, db) = open_memory_db("db-get-missing");
         let missing_key = b"missing-key";
-        let mut missing_present = true;
-        let mut missing_val = NonNull::<u8>::dangling().as_ptr();
-        let mut missing_val_len = usize::MAX;
+        let mut present = true;
+        let mut out_val = NonNull::<u8>::dangling().as_ptr();
+        let mut out_val_len = usize::MAX;
         assert_result_ok(slatedb_db_get(
             db,
             missing_key.as_ptr(),
             missing_key.len(),
-            &mut missing_present,
-            &mut missing_val,
-            &mut missing_val_len,
+            &mut present,
+            &mut out_val,
+            &mut out_val_len,
         ));
-        assert!(!missing_present);
-        assert!(missing_val.is_null());
-        assert_eq!(missing_val_len, 0);
+        assert!(!present);
+        assert!(out_val.is_null());
+        assert_eq!(out_val_len, 0);
+        close_memory_db(object_store, db);
+    }
+}
 
+#[test]
+fn test_db_put_with_options_get_with_options_happy_path() {
+    unsafe {
+        let (object_store, db) = open_memory_db("db-put-get-options");
+        let key = b"key-with-options";
+        let value = b"value-with-options";
         let put_options = slatedb_put_options_t {
             ttl_type: SLATEDB_TTL_TYPE_NO_EXPIRY,
             ttl_value: 0,
@@ -82,14 +121,12 @@ fn test_db_happy_path_all_entrypoints() {
         let write_options = slatedb_write_options_t {
             await_durable: true,
         };
-        let key_with_options = b"key-with-options";
-        let value_with_options = b"value-with-options";
         assert_result_ok(slatedb_db_put_with_options(
             db,
-            key_with_options.as_ptr(),
-            key_with_options.len(),
-            value_with_options.as_ptr(),
-            value_with_options.len(),
+            key.as_ptr(),
+            key.len(),
+            value.as_ptr(),
+            value.len(),
             &put_options,
             &write_options,
         ));
@@ -99,163 +136,264 @@ fn test_db_happy_path_all_entrypoints() {
             dirty: true,
             cache_blocks: false,
         };
-        let mut found_with_options = false;
-        let mut found_with_options_val = ptr::null_mut();
-        let mut found_with_options_val_len = 0usize;
+        let mut present = false;
+        let mut out_val = ptr::null_mut();
+        let mut out_val_len = 0usize;
         assert_result_ok(slatedb_db_get_with_options(
             db,
-            key_with_options.as_ptr(),
-            key_with_options.len(),
+            key.as_ptr(),
+            key.len(),
             &read_options,
-            &mut found_with_options,
-            &mut found_with_options_val,
-            &mut found_with_options_val_len,
+            &mut present,
+            &mut out_val,
+            &mut out_val_len,
         ));
-        assert!(found_with_options);
-        assert_eq!(
-            take_bytes(found_with_options_val, found_with_options_val_len),
-            value_with_options
-        );
+        assert!(present);
+        assert_eq!(take_bytes(out_val, out_val_len), value);
+        close_memory_db(object_store, db);
+    }
+}
 
-        let key_delete = b"delete-key";
-        let value_delete = b"delete-value";
+#[test]
+fn test_db_delete_happy_path() {
+    unsafe {
+        let (object_store, db) = open_memory_db("db-delete");
+        let key = b"delete-key";
+        let value = b"delete-value";
         assert_result_ok(slatedb_db_put(
             db,
-            key_delete.as_ptr(),
-            key_delete.len(),
-            value_delete.as_ptr(),
-            value_delete.len(),
+            key.as_ptr(),
+            key.len(),
+            value.as_ptr(),
+            value.len(),
         ));
-        assert_result_ok(slatedb_db_delete(db, key_delete.as_ptr(), key_delete.len()));
+        assert_result_ok(slatedb_db_delete(db, key.as_ptr(), key.len()));
 
-        let mut deleted_present = true;
-        let mut deleted_val = NonNull::<u8>::dangling().as_ptr();
-        let mut deleted_val_len = usize::MAX;
+        let mut present = true;
+        let mut out_val = NonNull::<u8>::dangling().as_ptr();
+        let mut out_val_len = usize::MAX;
         assert_result_ok(slatedb_db_get(
             db,
-            key_delete.as_ptr(),
-            key_delete.len(),
-            &mut deleted_present,
-            &mut deleted_val,
-            &mut deleted_val_len,
+            key.as_ptr(),
+            key.len(),
+            &mut present,
+            &mut out_val,
+            &mut out_val_len,
         ));
-        assert!(!deleted_present);
-        assert!(deleted_val.is_null());
-        assert_eq!(deleted_val_len, 0);
+        assert!(!present);
+        assert!(out_val.is_null());
+        assert_eq!(out_val_len, 0);
+        close_memory_db(object_store, db);
+    }
+}
 
-        let key_delete_with_options = b"delete-with-options-key";
-        let value_delete_with_options = b"delete-with-options-value";
+#[test]
+fn test_db_delete_with_options_happy_path() {
+    unsafe {
+        let (object_store, db) = open_memory_db("db-delete-options");
+        let key = b"delete-options-key";
+        let value = b"delete-options-value";
         assert_result_ok(slatedb_db_put(
             db,
-            key_delete_with_options.as_ptr(),
-            key_delete_with_options.len(),
-            value_delete_with_options.as_ptr(),
-            value_delete_with_options.len(),
+            key.as_ptr(),
+            key.len(),
+            value.as_ptr(),
+            value.len(),
         ));
+        let write_options = slatedb_write_options_t {
+            await_durable: true,
+        };
         assert_result_ok(slatedb_db_delete_with_options(
             db,
-            key_delete_with_options.as_ptr(),
-            key_delete_with_options.len(),
+            key.as_ptr(),
+            key.len(),
             &write_options,
         ));
+        let mut present = true;
+        let mut out_val = NonNull::<u8>::dangling().as_ptr();
+        let mut out_val_len = usize::MAX;
+        assert_result_ok(slatedb_db_get(
+            db,
+            key.as_ptr(),
+            key.len(),
+            &mut present,
+            &mut out_val,
+            &mut out_val_len,
+        ));
+        assert!(!present);
+        assert!(out_val.is_null());
+        assert_eq!(out_val_len, 0);
+        close_memory_db(object_store, db);
+    }
+}
 
-        let key_merge = b"merge-key";
-        let value_merge = b"merge-value";
+#[test]
+fn test_db_merge_happy_path() {
+    unsafe {
+        let (object_store, db) = open_memory_db("db-merge");
         assert_result_ok(slatedb_db_merge(
             db,
-            key_merge.as_ptr(),
-            key_merge.len(),
-            value_merge.as_ptr(),
-            value_merge.len(),
+            b"merge-key".as_ptr(),
+            b"merge-key".len(),
+            b"merge-value".as_ptr(),
+            b"merge-value".len(),
         ));
+        close_memory_db(object_store, db);
+    }
+}
 
+#[test]
+fn test_db_merge_with_options_happy_path() {
+    unsafe {
+        let (object_store, db) = open_memory_db("db-merge-options");
         let merge_options = slatedb_merge_options_t {
             ttl_type: SLATEDB_TTL_TYPE_DEFAULT,
             ttl_value: 0,
         };
-        let key_merge_with_options = b"merge-with-options-key";
-        let value_merge_with_options = b"merge-with-options-value";
+        let write_options = slatedb_write_options_t {
+            await_durable: true,
+        };
         assert_result_ok(slatedb_db_merge_with_options(
             db,
-            key_merge_with_options.as_ptr(),
-            key_merge_with_options.len(),
-            value_merge_with_options.as_ptr(),
-            value_merge_with_options.len(),
+            b"merge-options-key".as_ptr(),
+            b"merge-options-key".len(),
+            b"merge-options-value".as_ptr(),
+            b"merge-options-value".len(),
             &merge_options,
             &write_options,
         ));
+        close_memory_db(object_store, db);
+    }
+}
 
+#[test]
+fn test_db_write_happy_path() {
+    unsafe {
+        let (object_store, db) = open_memory_db("db-write");
         let mut write_batch = ptr::null_mut();
         assert_result_ok(slatedb_write_batch_new(&mut write_batch));
-        let key_batch = b"batch-key";
-        let value_batch = b"batch-value";
         assert_result_ok(slatedb_write_batch_put(
             write_batch,
-            key_batch.as_ptr(),
-            key_batch.len(),
-            value_batch.as_ptr(),
-            value_batch.len(),
+            b"batch-key".as_ptr(),
+            b"batch-key".len(),
+            b"batch-value".as_ptr(),
+            b"batch-value".len(),
         ));
         assert_result_ok(slatedb_db_write(db, write_batch));
         assert_result_ok(slatedb_write_batch_close(write_batch));
 
-        let mut write_batch_with_options = ptr::null_mut();
-        assert_result_ok(slatedb_write_batch_new(&mut write_batch_with_options));
-        let key_batch_with_options = b"batch-with-options-key";
-        let value_batch_with_options = b"batch-with-options-value";
-        assert_result_ok(slatedb_write_batch_put(
-            write_batch_with_options,
-            key_batch_with_options.as_ptr(),
-            key_batch_with_options.len(),
-            value_batch_with_options.as_ptr(),
-            value_batch_with_options.len(),
+        let mut present = false;
+        let mut out_val = ptr::null_mut();
+        let mut out_val_len = 0usize;
+        assert_result_ok(slatedb_db_get(
+            db,
+            b"batch-key".as_ptr(),
+            b"batch-key".len(),
+            &mut present,
+            &mut out_val,
+            &mut out_val_len,
         ));
+        assert!(present);
+        assert_eq!(take_bytes(out_val, out_val_len), b"batch-value");
+        close_memory_db(object_store, db);
+    }
+}
+
+#[test]
+fn test_db_write_with_options_happy_path() {
+    unsafe {
+        let (object_store, db) = open_memory_db("db-write-options");
+        let mut write_batch = ptr::null_mut();
+        assert_result_ok(slatedb_write_batch_new(&mut write_batch));
+        assert_result_ok(slatedb_write_batch_put(
+            write_batch,
+            b"batch-options-key".as_ptr(),
+            b"batch-options-key".len(),
+            b"batch-options-value".as_ptr(),
+            b"batch-options-value".len(),
+        ));
+        let write_options = slatedb_write_options_t {
+            await_durable: true,
+        };
         assert_result_ok(slatedb_db_write_with_options(
             db,
-            write_batch_with_options,
+            write_batch,
             &write_options,
         ));
-        assert_result_ok(slatedb_write_batch_close(write_batch_with_options));
+        assert_result_ok(slatedb_write_batch_close(write_batch));
 
-        let key_prefix_1 = b"prefix:one";
-        let key_prefix_2 = b"prefix:two";
+        let mut present = false;
+        let mut out_val = ptr::null_mut();
+        let mut out_val_len = 0usize;
+        assert_result_ok(slatedb_db_get(
+            db,
+            b"batch-options-key".as_ptr(),
+            b"batch-options-key".len(),
+            &mut present,
+            &mut out_val,
+            &mut out_val_len,
+        ));
+        assert!(present);
+        assert_eq!(take_bytes(out_val, out_val_len), b"batch-options-value");
+        close_memory_db(object_store, db);
+    }
+}
+
+#[test]
+fn test_db_scan_happy_path() {
+    unsafe {
+        let (object_store, db) = open_memory_db("db-scan");
         assert_result_ok(slatedb_db_put(
             db,
-            key_prefix_1.as_ptr(),
-            key_prefix_1.len(),
-            b"value-1".as_ptr(),
-            b"value-1".len(),
+            b"a".as_ptr(),
+            b"a".len(),
+            b"1".as_ptr(),
+            b"1".len(),
         ));
         assert_result_ok(slatedb_db_put(
             db,
-            key_prefix_2.as_ptr(),
-            key_prefix_2.len(),
-            b"value-2".as_ptr(),
-            b"value-2".len(),
+            b"b".as_ptr(),
+            b"b".len(),
+            b"2".as_ptr(),
+            b"2".len(),
         ));
 
-        let mut range_iter = ptr::null_mut();
-        assert_result_ok(slatedb_db_scan(db, unbounded_range(), &mut range_iter));
-        assert!(!range_iter.is_null());
+        let mut iter = ptr::null_mut();
+        assert_result_ok(slatedb_db_scan(db, unbounded_range(), &mut iter));
+        assert!(!iter.is_null());
 
-        let mut range_present = false;
-        let mut range_key = ptr::null_mut();
-        let mut range_key_len = 0usize;
-        let mut range_val = ptr::null_mut();
-        let mut range_val_len = 0usize;
+        let mut present = false;
+        let mut key = ptr::null_mut();
+        let mut key_len = 0usize;
+        let mut val = ptr::null_mut();
+        let mut val_len = 0usize;
         assert_result_ok(slatedb_iterator_next(
-            range_iter,
-            &mut range_present,
-            &mut range_key,
-            &mut range_key_len,
-            &mut range_val,
-            &mut range_val_len,
+            iter,
+            &mut present,
+            &mut key,
+            &mut key_len,
+            &mut val,
+            &mut val_len,
         ));
-        assert!(range_present, "scan should return at least one row");
-        assert!(!take_bytes(range_key, range_key_len).is_empty());
-        let _ = take_bytes(range_val, range_val_len);
-        assert_result_ok(slatedb_iterator_close(range_iter));
+        assert!(present);
+        assert!(!take_bytes(key, key_len).is_empty());
+        assert!(!take_bytes(val, val_len).is_empty());
+        assert_result_ok(slatedb_iterator_close(iter));
+        close_memory_db(object_store, db);
+    }
+}
 
+#[test]
+fn test_db_scan_with_options_happy_path() {
+    unsafe {
+        let (object_store, db) = open_memory_db("db-scan-options");
+        assert_result_ok(slatedb_db_put(
+            db,
+            b"scan-opt-key".as_ptr(),
+            b"scan-opt-key".len(),
+            b"scan-opt-val".as_ptr(),
+            b"scan-opt-val".len(),
+        ));
         let scan_options = slatedb_scan_options_t {
             durability_filter: SLATEDB_DURABILITY_FILTER_MEMORY,
             dirty: true,
@@ -263,101 +401,193 @@ fn test_db_happy_path_all_entrypoints() {
             cache_blocks: false,
             max_fetch_tasks: 1,
         };
-        let mut range_iter_with_options = ptr::null_mut();
+        let mut iter = ptr::null_mut();
         assert_result_ok(slatedb_db_scan_with_options(
             db,
             unbounded_range(),
             &scan_options,
-            &mut range_iter_with_options,
+            &mut iter,
         ));
-        assert_result_ok(slatedb_iterator_close(range_iter_with_options));
+        assert!(!iter.is_null());
 
-        let mut prefix_iter = ptr::null_mut();
+        let mut present = false;
+        let mut key = ptr::null_mut();
+        let mut key_len = 0usize;
+        let mut val = ptr::null_mut();
+        let mut val_len = 0usize;
+        assert_result_ok(slatedb_iterator_next(
+            iter,
+            &mut present,
+            &mut key,
+            &mut key_len,
+            &mut val,
+            &mut val_len,
+        ));
+        assert!(present);
+        let _ = take_bytes(key, key_len);
+        let _ = take_bytes(val, val_len);
+        assert_result_ok(slatedb_iterator_close(iter));
+        close_memory_db(object_store, db);
+    }
+}
+
+#[test]
+fn test_db_scan_prefix_happy_path() {
+    unsafe {
+        let (object_store, db) = open_memory_db("db-scan-prefix");
+        assert_result_ok(slatedb_db_put(
+            db,
+            b"prefix:one".as_ptr(),
+            b"prefix:one".len(),
+            b"value-1".as_ptr(),
+            b"value-1".len(),
+        ));
+        assert_result_ok(slatedb_db_put(
+            db,
+            b"prefix:two".as_ptr(),
+            b"prefix:two".len(),
+            b"value-2".as_ptr(),
+            b"value-2".len(),
+        ));
+        assert_result_ok(slatedb_db_put(
+            db,
+            b"other".as_ptr(),
+            b"other".len(),
+            b"value-3".as_ptr(),
+            b"value-3".len(),
+        ));
+
         let prefix = b"prefix:";
+        let mut iter = ptr::null_mut();
         assert_result_ok(slatedb_db_scan_prefix(
             db,
             prefix.as_ptr(),
             prefix.len(),
-            &mut prefix_iter,
+            &mut iter,
         ));
-        assert!(!prefix_iter.is_null());
+        assert!(!iter.is_null());
 
-        let mut prefix_present = false;
-        let mut prefix_key = ptr::null_mut();
-        let mut prefix_key_len = 0usize;
-        let mut prefix_val = ptr::null_mut();
-        let mut prefix_val_len = 0usize;
+        let mut present = false;
+        let mut key = ptr::null_mut();
+        let mut key_len = 0usize;
+        let mut val = ptr::null_mut();
+        let mut val_len = 0usize;
         assert_result_ok(slatedb_iterator_next(
-            prefix_iter,
-            &mut prefix_present,
-            &mut prefix_key,
-            &mut prefix_key_len,
-            &mut prefix_val,
-            &mut prefix_val_len,
+            iter,
+            &mut present,
+            &mut key,
+            &mut key_len,
+            &mut val,
+            &mut val_len,
         ));
-        assert!(prefix_present);
-        let prefix_key_bytes = take_bytes(prefix_key, prefix_key_len);
-        assert!(prefix_key_bytes.starts_with(prefix));
-        let _ = take_bytes(prefix_val, prefix_val_len);
-        assert_result_ok(slatedb_iterator_close(prefix_iter));
+        assert!(present);
+        let key_bytes = take_bytes(key, key_len);
+        assert!(key_bytes.starts_with(prefix));
+        let _ = take_bytes(val, val_len);
+        assert_result_ok(slatedb_iterator_close(iter));
+        close_memory_db(object_store, db);
+    }
+}
 
-        let mut missing_prefix_iter = ptr::null_mut();
+#[test]
+fn test_db_scan_prefix_with_options_missing_prefix_outputs_empty() {
+    unsafe {
+        let (object_store, db) = open_memory_db("db-scan-prefix-options");
+        assert_result_ok(slatedb_db_put(
+            db,
+            b"prefix:one".as_ptr(),
+            b"prefix:one".len(),
+            b"value-1".as_ptr(),
+            b"value-1".len(),
+        ));
+        let scan_options = slatedb_scan_options_t {
+            durability_filter: SLATEDB_DURABILITY_FILTER_MEMORY,
+            dirty: true,
+            read_ahead_bytes: 1,
+            cache_blocks: false,
+            max_fetch_tasks: 1,
+        };
+        let mut iter = ptr::null_mut();
         let missing_prefix = b"prefix:not-present";
         assert_result_ok(slatedb_db_scan_prefix_with_options(
             db,
             missing_prefix.as_ptr(),
             missing_prefix.len(),
             &scan_options,
-            &mut missing_prefix_iter,
+            &mut iter,
         ));
 
-        let mut missing_prefix_present = true;
-        let mut missing_prefix_key = NonNull::<u8>::dangling().as_ptr();
-        let mut missing_prefix_key_len = usize::MAX;
-        let mut missing_prefix_val = NonNull::<u8>::dangling().as_ptr();
-        let mut missing_prefix_val_len = usize::MAX;
+        let mut present = true;
+        let mut key = NonNull::<u8>::dangling().as_ptr();
+        let mut key_len = usize::MAX;
+        let mut val = NonNull::<u8>::dangling().as_ptr();
+        let mut val_len = usize::MAX;
         assert_result_ok(slatedb_iterator_next(
-            missing_prefix_iter,
-            &mut missing_prefix_present,
-            &mut missing_prefix_key,
-            &mut missing_prefix_key_len,
-            &mut missing_prefix_val,
-            &mut missing_prefix_val_len,
+            iter,
+            &mut present,
+            &mut key,
+            &mut key_len,
+            &mut val,
+            &mut val_len,
         ));
-        assert!(!missing_prefix_present);
-        assert!(missing_prefix_key.is_null());
-        assert_eq!(missing_prefix_key_len, 0);
-        assert!(missing_prefix_val.is_null());
-        assert_eq!(missing_prefix_val_len, 0);
-        assert_result_ok(slatedb_iterator_close(missing_prefix_iter));
+        assert!(!present);
+        assert!(key.is_null());
+        assert_eq!(key_len, 0);
+        assert!(val.is_null());
+        assert_eq!(val_len, 0);
+        assert_result_ok(slatedb_iterator_close(iter));
+        close_memory_db(object_store, db);
+    }
+}
 
+#[test]
+fn test_db_flush_happy_path() {
+    unsafe {
+        let (object_store, db) = open_memory_db("db-flush");
+        assert_result_ok(slatedb_db_put(
+            db,
+            b"flush-key".as_ptr(),
+            b"flush-key".len(),
+            b"flush-value".as_ptr(),
+            b"flush-value".len(),
+        ));
         assert_result_ok(slatedb_db_flush(db));
+        close_memory_db(object_store, db);
+    }
+}
+
+#[test]
+fn test_db_flush_with_options_happy_path() {
+    unsafe {
+        let (object_store, db) = open_memory_db("db-flush-options");
+        assert_result_ok(slatedb_db_put(
+            db,
+            b"flush-options-key".as_ptr(),
+            b"flush-options-key".len(),
+            b"flush-options-value".as_ptr(),
+            b"flush-options-value".len(),
+        ));
         let flush_options = slatedb_flush_options_t {
             flush_type: SLATEDB_FLUSH_TYPE_WAL,
         };
         assert_result_ok(slatedb_db_flush_with_options(db, &flush_options));
-
-        assert_result_ok(slatedb_db_close(db));
-
-        close_object_store_if_not_null(object_store);
-        cleanup_temp_dir(&root_dir);
+        close_memory_db(object_store, db);
     }
 }
 
 #[test]
 fn test_db_null_required_pointers_return_invalid() {
     unsafe {
-        let root_dir = unique_temp_dir("db-null-required");
-        let object_store_url = file_url_for_path(&root_dir);
-        let object_store = resolve_object_store(&object_store_url);
-        let db_path = cstring("db-null-required");
+        let object_store = memory_object_store();
+        let db_path = unique_db_path("db-null-required");
 
         assert_result_invalid_contains(
             slatedb_db_open(db_path.as_ptr(), object_store, ptr::null_mut()),
             "out_db pointer is null",
         );
 
-        let db = open_db(&db_path, object_store);
+        let mut db = ptr::null_mut();
+        assert_result_ok(slatedb_db_open(db_path.as_ptr(), object_store, &mut db));
         let key = b"k";
         let mut out_val = ptr::null_mut();
         let mut out_val_len = 0usize;
@@ -378,21 +608,14 @@ fn test_db_null_required_pointers_return_invalid() {
             "out_iterator pointer is null",
         );
 
-        close_db_if_not_null(db);
-        close_object_store_if_not_null(object_store);
-        cleanup_temp_dir(&root_dir);
+        close_memory_db(object_store, db);
     }
 }
 
 #[test]
 fn test_db_invalid_selectors_return_invalid() {
     unsafe {
-        let root_dir = unique_temp_dir("db-invalid-selectors");
-        let object_store_url = file_url_for_path(&root_dir);
-        let object_store = resolve_object_store(&object_store_url);
-        let db_path = cstring("db-invalid-selectors");
-        let db = open_db(&db_path, object_store);
-
+        let (object_store, db) = open_memory_db("db-invalid-selectors");
         let key = b"selector-key";
         let value = b"selector-value";
         assert_result_ok(slatedb_db_put(
@@ -508,21 +731,14 @@ fn test_db_invalid_selectors_return_invalid() {
         );
         assert!(out_iter_invalid_range.is_null());
 
-        close_db_if_not_null(db);
-        close_object_store_if_not_null(object_store);
-        cleanup_temp_dir(&root_dir);
+        close_memory_db(object_store, db);
     }
 }
 
 #[test]
 fn test_db_write_consumes_write_batch_handle() {
     unsafe {
-        let root_dir = unique_temp_dir("db-write-batch-consumed");
-        let object_store_url = file_url_for_path(&root_dir);
-        let object_store = resolve_object_store(&object_store_url);
-        let db_path = cstring("db-write-batch-consumed");
-        let db = open_db(&db_path, object_store);
-
+        let (object_store, db) = open_memory_db("db-write-batch-consumed");
         let mut write_batch = ptr::null_mut();
         assert_result_ok(slatedb_write_batch_new(&mut write_batch));
         assert_result_ok(slatedb_write_batch_put(
@@ -553,8 +769,6 @@ fn test_db_write_consumes_write_batch_handle() {
         );
 
         assert_result_ok(slatedb_write_batch_close(write_batch));
-        close_db_if_not_null(db);
-        close_object_store_if_not_null(object_store);
-        cleanup_temp_dir(&root_dir);
+        close_memory_db(object_store, db);
     }
 }
