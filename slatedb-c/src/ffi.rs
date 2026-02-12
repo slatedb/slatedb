@@ -19,6 +19,41 @@ use std::ptr;
 use std::sync::Arc;
 use tokio::runtime::{Builder as RuntimeBuilder, Runtime};
 
+/// Durability selector for in-memory visibility.
+pub const SLATEDB_DURABILITY_FILTER_MEMORY: u8 = 0;
+/// Durability selector for remote/durable visibility.
+pub const SLATEDB_DURABILITY_FILTER_REMOTE: u8 = 1;
+/// TTL selector for default behavior.
+pub const SLATEDB_TTL_TYPE_DEFAULT: u8 = 0;
+/// TTL selector for values that never expire.
+pub const SLATEDB_TTL_TYPE_NO_EXPIRY: u8 = 1;
+/// TTL selector for values that expire after `ttl_value` milliseconds.
+pub const SLATEDB_TTL_TYPE_EXPIRE_AFTER: u8 = 2;
+/// Flush selector for memtable flushes.
+pub const SLATEDB_FLUSH_TYPE_MEMTABLE: u8 = 0;
+/// Flush selector for WAL flushes.
+pub const SLATEDB_FLUSH_TYPE_WAL: u8 = 1;
+/// Range bound selector for unbounded edges.
+pub const SLATEDB_BOUND_KIND_UNBOUNDED: u8 = 0;
+/// Range bound selector for inclusive edges.
+pub const SLATEDB_BOUND_KIND_INCLUDED: u8 = 1;
+/// Range bound selector for exclusive edges.
+pub const SLATEDB_BOUND_KIND_EXCLUDED: u8 = 2;
+/// SST block size selector for 1 KiB blocks.
+pub const SLATEDB_SST_BLOCK_SIZE_1KIB: u8 = 1;
+/// SST block size selector for 2 KiB blocks.
+pub const SLATEDB_SST_BLOCK_SIZE_2KIB: u8 = 2;
+/// SST block size selector for 4 KiB blocks.
+pub const SLATEDB_SST_BLOCK_SIZE_4KIB: u8 = 3;
+/// SST block size selector for 8 KiB blocks.
+pub const SLATEDB_SST_BLOCK_SIZE_8KIB: u8 = 4;
+/// SST block size selector for 16 KiB blocks.
+pub const SLATEDB_SST_BLOCK_SIZE_16KIB: u8 = 5;
+/// SST block size selector for 32 KiB blocks.
+pub const SLATEDB_SST_BLOCK_SIZE_32KIB: u8 = 6;
+/// SST block size selector for 64 KiB blocks.
+pub const SLATEDB_SST_BLOCK_SIZE_64KIB: u8 = 7;
+
 /// Opaque handle backing a resolved object store.
 #[allow(non_camel_case_types)]
 pub struct slatedb_object_store_t {
@@ -115,7 +150,7 @@ pub struct slatedb_result_t {
 #[allow(non_camel_case_types)]
 #[derive(Clone, Copy)]
 pub struct slatedb_read_options_t {
-    /// Durability filter: `0=Memory`, `1=Remote`.
+    /// Durability filter. Use `SLATEDB_DURABILITY_FILTER_*` constants.
     pub durability_filter: u8,
     /// Include dirty (uncommitted) data.
     pub dirty: bool,
@@ -128,7 +163,7 @@ pub struct slatedb_read_options_t {
 #[allow(non_camel_case_types)]
 #[derive(Clone, Copy)]
 pub struct slatedb_scan_options_t {
-    /// Durability filter: `0=Memory`, `1=Remote`.
+    /// Durability filter. Use `SLATEDB_DURABILITY_FILTER_*` constants.
     pub durability_filter: u8,
     /// Include dirty (uncommitted) data.
     pub dirty: bool,
@@ -154,9 +189,9 @@ pub struct slatedb_write_options_t {
 #[allow(non_camel_case_types)]
 #[derive(Clone, Copy)]
 pub struct slatedb_put_options_t {
-    /// TTL type: `0=Default`, `1=NoExpiry`, `2=ExpireAfter`.
+    /// TTL type. Use `SLATEDB_TTL_TYPE_*` constants.
     pub ttl_type: u8,
-    /// TTL value in milliseconds when `ttl_type=2`.
+    /// TTL value in milliseconds when `ttl_type=SLATEDB_TTL_TYPE_EXPIRE_AFTER`.
     pub ttl_value: u64,
 }
 
@@ -165,9 +200,9 @@ pub struct slatedb_put_options_t {
 #[allow(non_camel_case_types)]
 #[derive(Clone, Copy)]
 pub struct slatedb_merge_options_t {
-    /// TTL type: `0=Default`, `1=NoExpiry`, `2=ExpireAfter`.
+    /// TTL type. Use `SLATEDB_TTL_TYPE_*` constants.
     pub ttl_type: u8,
-    /// TTL value in milliseconds when `ttl_type=2`.
+    /// TTL value in milliseconds when `ttl_type=SLATEDB_TTL_TYPE_EXPIRE_AFTER`.
     pub ttl_value: u64,
 }
 
@@ -176,11 +211,13 @@ pub struct slatedb_merge_options_t {
 #[allow(non_camel_case_types)]
 #[derive(Clone, Copy)]
 pub struct slatedb_flush_options_t {
-    /// Flush type: `0=MemTable`, `1=Wal`.
+    /// Flush type. Use `SLATEDB_FLUSH_TYPE_*` constants.
     pub flush_type: u8,
 }
 
 /// SST block size selector for builder config.
+///
+/// Use `SLATEDB_SST_BLOCK_SIZE_*` constants.
 #[allow(non_camel_case_types)]
 pub type slatedb_sst_block_size_t = u8;
 
@@ -189,7 +226,7 @@ pub type slatedb_sst_block_size_t = u8;
 #[allow(non_camel_case_types)]
 #[derive(Clone, Copy)]
 pub struct slatedb_bound_t {
-    /// Bound kind: `0=Unbounded`, `1=Included`, `2=Excluded`.
+    /// Bound kind. Use `SLATEDB_BOUND_KIND_*` constants.
     pub kind: u8,
     /// Bound bytes for included/excluded bounds.
     pub data: *const u8,
@@ -349,11 +386,11 @@ pub(crate) fn durability_level_from_u8(
     durability_filter: u8,
 ) -> Result<DurabilityLevel, slatedb_result_t> {
     match durability_filter {
-        0 => Ok(DurabilityLevel::Memory),
-        1 => Ok(DurabilityLevel::Remote),
+        SLATEDB_DURABILITY_FILTER_MEMORY => Ok(DurabilityLevel::Memory),
+        SLATEDB_DURABILITY_FILTER_REMOTE => Ok(DurabilityLevel::Remote),
         _ => Err(error_result(
             slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
-            "invalid durability_filter (expected 0=Memory or 1=Remote)",
+            "invalid durability_filter (use SLATEDB_DURABILITY_FILTER_* constants)",
         )),
     }
 }
@@ -416,12 +453,12 @@ pub(crate) unsafe fn write_options_from_ptr(ptr: *const slatedb_write_options_t)
 
 fn ttl_from_parts(ttl_type: u8, ttl_value: u64) -> Result<Ttl, slatedb_result_t> {
     match ttl_type {
-        0 => Ok(Ttl::Default),
-        1 => Ok(Ttl::NoExpiry),
-        2 => Ok(Ttl::ExpireAfter(ttl_value)),
+        SLATEDB_TTL_TYPE_DEFAULT => Ok(Ttl::Default),
+        SLATEDB_TTL_TYPE_NO_EXPIRY => Ok(Ttl::NoExpiry),
+        SLATEDB_TTL_TYPE_EXPIRE_AFTER => Ok(Ttl::ExpireAfter(ttl_value)),
         _ => Err(error_result(
             slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
-            "invalid ttl_type (expected 0=Default, 1=NoExpiry, 2=ExpireAfter)",
+            "invalid ttl_type (use SLATEDB_TTL_TYPE_* constants)",
         )),
     }
 }
@@ -461,12 +498,12 @@ pub(crate) unsafe fn flush_options_from_ptr(
 
     let options = &*ptr;
     let flush_type = match options.flush_type {
-        0 => FlushType::MemTable,
-        1 => FlushType::Wal,
+        SLATEDB_FLUSH_TYPE_MEMTABLE => FlushType::MemTable,
+        SLATEDB_FLUSH_TYPE_WAL => FlushType::Wal,
         _ => {
             return Err(error_result(
                 slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
-                "invalid flush_type (expected 0=MemTable or 1=Wal)",
+                "invalid flush_type (use SLATEDB_FLUSH_TYPE_* constants)",
             ));
         }
     };
@@ -478,16 +515,16 @@ pub(crate) fn sst_block_size_from_u8(
     value: slatedb_sst_block_size_t,
 ) -> Result<SstBlockSize, slatedb_result_t> {
     match value {
-        1 => Ok(SstBlockSize::Block1Kib),
-        2 => Ok(SstBlockSize::Block2Kib),
-        3 => Ok(SstBlockSize::Block4Kib),
-        4 => Ok(SstBlockSize::Block8Kib),
-        5 => Ok(SstBlockSize::Block16Kib),
-        6 => Ok(SstBlockSize::Block32Kib),
-        7 => Ok(SstBlockSize::Block64Kib),
+        SLATEDB_SST_BLOCK_SIZE_1KIB => Ok(SstBlockSize::Block1Kib),
+        SLATEDB_SST_BLOCK_SIZE_2KIB => Ok(SstBlockSize::Block2Kib),
+        SLATEDB_SST_BLOCK_SIZE_4KIB => Ok(SstBlockSize::Block4Kib),
+        SLATEDB_SST_BLOCK_SIZE_8KIB => Ok(SstBlockSize::Block8Kib),
+        SLATEDB_SST_BLOCK_SIZE_16KIB => Ok(SstBlockSize::Block16Kib),
+        SLATEDB_SST_BLOCK_SIZE_32KIB => Ok(SstBlockSize::Block32Kib),
+        SLATEDB_SST_BLOCK_SIZE_64KIB => Ok(SstBlockSize::Block64Kib),
         _ => Err(error_result(
             slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
-            "invalid sst_block_size (expected 1..7)",
+            "invalid sst_block_size (use SLATEDB_SST_BLOCK_SIZE_* constants)",
         )),
     }
 }
@@ -506,18 +543,18 @@ unsafe fn bound_from_c(
     name: &str,
 ) -> Result<Bound<Bytes>, slatedb_result_t> {
     match bound.kind {
-        0 => Ok(Bound::Unbounded),
-        1 => {
+        SLATEDB_BOUND_KIND_UNBOUNDED => Ok(Bound::Unbounded),
+        SLATEDB_BOUND_KIND_INCLUDED => {
             let bytes = bytes_from_ptr(bound.data, bound.len, name)?;
             Ok(Bound::Included(Bytes::copy_from_slice(bytes)))
         }
-        2 => {
+        SLATEDB_BOUND_KIND_EXCLUDED => {
             let bytes = bytes_from_ptr(bound.data, bound.len, name)?;
             Ok(Bound::Excluded(Bytes::copy_from_slice(bytes)))
         }
         _ => Err(error_result(
             slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
-            "invalid bound kind (expected 0=Unbounded, 1=Included, 2=Excluded)",
+            "invalid bound kind (use SLATEDB_BOUND_KIND_* constants)",
         )),
     }
 }

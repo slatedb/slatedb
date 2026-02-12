@@ -12,6 +12,57 @@
 #include <stdint.h>
 #include <stdlib.h>
 
+// Durability selector for in-memory visibility.
+#define SLATEDB_DURABILITY_FILTER_MEMORY 0
+
+// Durability selector for remote/durable visibility.
+#define SLATEDB_DURABILITY_FILTER_REMOTE 1
+
+// TTL selector for default behavior.
+#define SLATEDB_TTL_TYPE_DEFAULT 0
+
+// TTL selector for values that never expire.
+#define SLATEDB_TTL_TYPE_NO_EXPIRY 1
+
+// TTL selector for values that expire after `ttl_value` milliseconds.
+#define SLATEDB_TTL_TYPE_EXPIRE_AFTER 2
+
+// Flush selector for memtable flushes.
+#define SLATEDB_FLUSH_TYPE_MEMTABLE 0
+
+// Flush selector for WAL flushes.
+#define SLATEDB_FLUSH_TYPE_WAL 1
+
+// Range bound selector for unbounded edges.
+#define SLATEDB_BOUND_KIND_UNBOUNDED 0
+
+// Range bound selector for inclusive edges.
+#define SLATEDB_BOUND_KIND_INCLUDED 1
+
+// Range bound selector for exclusive edges.
+#define SLATEDB_BOUND_KIND_EXCLUDED 2
+
+// SST block size selector for 1 KiB blocks.
+#define SLATEDB_SST_BLOCK_SIZE_1KIB 1
+
+// SST block size selector for 2 KiB blocks.
+#define SLATEDB_SST_BLOCK_SIZE_2KIB 2
+
+// SST block size selector for 4 KiB blocks.
+#define SLATEDB_SST_BLOCK_SIZE_4KIB 3
+
+// SST block size selector for 8 KiB blocks.
+#define SLATEDB_SST_BLOCK_SIZE_8KIB 4
+
+// SST block size selector for 16 KiB blocks.
+#define SLATEDB_SST_BLOCK_SIZE_16KIB 5
+
+// SST block size selector for 32 KiB blocks.
+#define SLATEDB_SST_BLOCK_SIZE_32KIB 6
+
+// SST block size selector for 64 KiB blocks.
+#define SLATEDB_SST_BLOCK_SIZE_64KIB 7
+
 // Closed reason mirroring `slatedb::CloseReason`.
 typedef enum slatedb_close_reason_t {
     // Not a closed error.
@@ -72,11 +123,13 @@ typedef struct slatedb_result_t {
 } slatedb_result_t;
 
 // SST block size selector for builder config.
+//
+// Use `SLATEDB_SST_BLOCK_SIZE_*` constants.
 typedef uint8_t slatedb_sst_block_size_t;
 
 // Read options passed to `slatedb_db_get_with_options`.
 typedef struct slatedb_read_options_t {
-    // Durability filter: `0=Memory`, `1=Remote`.
+    // Durability filter. Use `SLATEDB_DURABILITY_FILTER_*` constants.
     uint8_t durability_filter;
     // Include dirty (uncommitted) data.
     bool dirty;
@@ -86,9 +139,9 @@ typedef struct slatedb_read_options_t {
 
 // Put options passed to put operations.
 typedef struct slatedb_put_options_t {
-    // TTL type: `0=Default`, `1=NoExpiry`, `2=ExpireAfter`.
+    // TTL type. Use `SLATEDB_TTL_TYPE_*` constants.
     uint8_t ttl_type;
-    // TTL value in milliseconds when `ttl_type=2`.
+    // TTL value in milliseconds when `ttl_type=SLATEDB_TTL_TYPE_EXPIRE_AFTER`.
     uint64_t ttl_value;
 } slatedb_put_options_t;
 
@@ -100,15 +153,15 @@ typedef struct slatedb_write_options_t {
 
 // Merge options passed to merge operations.
 typedef struct slatedb_merge_options_t {
-    // TTL type: `0=Default`, `1=NoExpiry`, `2=ExpireAfter`.
+    // TTL type. Use `SLATEDB_TTL_TYPE_*` constants.
     uint8_t ttl_type;
-    // TTL value in milliseconds when `ttl_type=2`.
+    // TTL value in milliseconds when `ttl_type=SLATEDB_TTL_TYPE_EXPIRE_AFTER`.
     uint64_t ttl_value;
 } slatedb_merge_options_t;
 
 // C representation of a single range bound.
 typedef struct slatedb_bound_t {
-    // Bound kind: `0=Unbounded`, `1=Included`, `2=Excluded`.
+    // Bound kind. Use `SLATEDB_BOUND_KIND_*` constants.
     uint8_t kind;
     // Bound bytes for included/excluded bounds.
     const uint8_t *data;
@@ -126,7 +179,7 @@ typedef struct slatedb_range_t {
 
 // Scan options passed to `slatedb_db_scan_with_options`.
 typedef struct slatedb_scan_options_t {
-    // Durability filter: `0=Memory`, `1=Remote`.
+    // Durability filter. Use `SLATEDB_DURABILITY_FILTER_*` constants.
     uint8_t durability_filter;
     // Include dirty (uncommitted) data.
     bool dirty;
@@ -140,7 +193,7 @@ typedef struct slatedb_scan_options_t {
 
 // Flush options passed to `slatedb_db_flush_with_options`.
 typedef struct slatedb_flush_options_t {
-    // Flush type: `0=MemTable`, `1=Wal`.
+    // Flush type. Use `SLATEDB_FLUSH_TYPE_*` constants.
     uint8_t flush_type;
 } slatedb_flush_options_t;
 
