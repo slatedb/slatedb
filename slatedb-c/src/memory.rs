@@ -1,4 +1,4 @@
-use crate::ffi::{slatedb_key_value_t, slatedb_result_t, slatedb_value_t};
+use crate::ffi::slatedb_result_t;
 use std::ffi::CString;
 
 #[no_mangle]
@@ -11,16 +11,10 @@ pub extern "C" fn slatedb_result_free(result: slatedb_result_t) {
 }
 
 #[no_mangle]
-pub extern "C" fn slatedb_value_free(value: slatedb_value_t) {
-    if !value.data.is_null() && value.len > 0 {
+pub extern "C" fn slatedb_bytes_free(data: *mut u8, len: usize) {
+    if !data.is_null() && len > 0 {
         unsafe {
-            let _ = Box::from_raw(std::ptr::slice_from_raw_parts_mut(value.data, value.len));
+            let _ = Box::from_raw(std::ptr::slice_from_raw_parts_mut(data, len));
         }
     }
-}
-
-#[no_mangle]
-pub extern "C" fn slatedb_key_value_free(key_value: slatedb_key_value_t) {
-    slatedb_value_free(key_value.key);
-    slatedb_value_free(key_value.value);
 }

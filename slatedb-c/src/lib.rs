@@ -7,10 +7,9 @@ mod write_batch;
 
 pub use ffi::{
     slatedb_bound_t, slatedb_db_builder_t, slatedb_db_t, slatedb_error_t, slatedb_flush_options_t,
-    slatedb_iterator_t, slatedb_key_value_t, slatedb_merge_options_t, slatedb_object_store_t,
-    slatedb_put_options_t, slatedb_range_t, slatedb_read_options_t, slatedb_result_t,
-    slatedb_scan_options_t, slatedb_sst_block_size_t, slatedb_value_t, slatedb_write_batch_t,
-    slatedb_write_options_t,
+    slatedb_iterator_t, slatedb_merge_options_t, slatedb_object_store_t, slatedb_put_options_t,
+    slatedb_range_t, slatedb_read_options_t, slatedb_result_t, slatedb_scan_options_t,
+    slatedb_sst_block_size_t, slatedb_write_batch_t, slatedb_write_options_t,
 };
 
 pub use db::{
@@ -25,7 +24,7 @@ pub use db::{
 };
 
 pub use iterator::{slatedb_iterator_close, slatedb_iterator_next, slatedb_iterator_seek};
-pub use memory::{slatedb_key_value_free, slatedb_result_free, slatedb_value_free};
+pub use memory::{slatedb_bytes_free, slatedb_result_free};
 pub use object_store::{slatedb_db_resolve_object_store, slatedb_object_store_close};
 pub use write_batch::{
     slatedb_write_batch_close, slatedb_write_batch_delete, slatedb_write_batch_merge,

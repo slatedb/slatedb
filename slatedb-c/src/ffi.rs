@@ -59,24 +59,7 @@ pub enum slatedb_error_t {
 #[allow(non_camel_case_types)]
 pub struct slatedb_result_t {
     pub error: slatedb_error_t,
-    pub none: bool,
     pub message: *mut c_char,
-}
-
-#[repr(C)]
-#[allow(non_camel_case_types)]
-#[derive(Clone, Copy)]
-pub struct slatedb_value_t {
-    pub data: *mut u8,
-    pub len: usize,
-}
-
-#[repr(C)]
-#[allow(non_camel_case_types)]
-#[derive(Clone, Copy)]
-pub struct slatedb_key_value_t {
-    pub key: slatedb_value_t,
-    pub value: slatedb_value_t,
 }
 
 #[repr(C)]
@@ -152,15 +135,6 @@ pub struct slatedb_range_t {
 pub(crate) fn success_result() -> slatedb_result_t {
     slatedb_result_t {
         error: slatedb_error_t::SLATEDB_SUCCESS,
-        none: false,
-        message: ptr::null_mut(),
-    }
-}
-
-pub(crate) fn none_result() -> slatedb_result_t {
-    slatedb_result_t {
-        error: slatedb_error_t::SLATEDB_SUCCESS,
-        none: true,
         message: ptr::null_mut(),
     }
 }
@@ -168,7 +142,6 @@ pub(crate) fn none_result() -> slatedb_result_t {
 pub(crate) fn error_result(error: slatedb_error_t, message: &str) -> slatedb_result_t {
     slatedb_result_t {
         error,
-        none: false,
         message: message_to_cstring(message).into_raw(),
     }
 }
@@ -240,11 +213,11 @@ pub(crate) unsafe fn bytes_from_ptr<'a>(
     Ok(std::slice::from_raw_parts(ptr, len))
 }
 
-pub(crate) fn bytes_to_value(bytes: &[u8]) -> slatedb_value_t {
+pub(crate) fn alloc_bytes(bytes: &[u8]) -> (*mut u8, usize) {
     let boxed = bytes.to_vec().into_boxed_slice();
     let len = boxed.len();
     let data = Box::into_raw(boxed) as *mut u8;
-    slatedb_value_t { data, len }
+    (data, len)
 }
 
 pub(crate) fn durability_level_from_u8(

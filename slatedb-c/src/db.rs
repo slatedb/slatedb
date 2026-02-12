@@ -1,12 +1,12 @@
 use crate::ffi::{
-    bytes_from_ptr, bytes_to_value, create_runtime, cstr_to_string, error_result,
-    flush_options_from_ptr, map_error, merge_options_from_ptr, none_result, put_options_from_ptr,
-    range_from_c, read_options_from_ptr, scan_options_from_ptr, slatedb_db_builder_t, slatedb_db_t,
+    alloc_bytes, bytes_from_ptr, create_runtime, cstr_to_string, error_result,
+    flush_options_from_ptr, map_error, merge_options_from_ptr, put_options_from_ptr, range_from_c,
+    read_options_from_ptr, scan_options_from_ptr, slatedb_db_builder_t, slatedb_db_t,
     slatedb_error_t, slatedb_flush_options_t, slatedb_iterator_t, slatedb_merge_options_t,
     slatedb_object_store_t, slatedb_put_options_t, slatedb_range_t, slatedb_read_options_t,
-    slatedb_result_t, slatedb_scan_options_t, slatedb_sst_block_size_t, slatedb_value_t,
-    slatedb_write_batch_t, slatedb_write_options_t, sst_block_size_from_u8, success_result,
-    validate_write_key, validate_write_key_value, write_options_from_ptr,
+    slatedb_result_t, slatedb_scan_options_t, slatedb_sst_block_size_t, slatedb_write_batch_t,
+    slatedb_write_options_t, sst_block_size_from_u8, success_result, validate_write_key,
+    validate_write_key_value, write_options_from_ptr,
 };
 use slatedb::Db;
 
@@ -252,9 +252,19 @@ pub unsafe extern "C" fn slatedb_db_get(
     db: *mut slatedb_db_t,
     key: *const u8,
     key_len: usize,
-    out_value: *mut slatedb_value_t,
+    out_found: *mut bool,
+    out_val: *mut *mut u8,
+    out_val_len: *mut usize,
 ) -> slatedb_result_t {
-    slatedb_db_get_with_options(db, key, key_len, std::ptr::null(), out_value)
+    slatedb_db_get_with_options(
+        db,
+        key,
+        key_len,
+        std::ptr::null(),
+        out_found,
+        out_val,
+        out_val_len,
+    )
 }
 
 #[no_mangle]
@@ -263,17 +273,34 @@ pub unsafe extern "C" fn slatedb_db_get_with_options(
     key: *const u8,
     key_len: usize,
     read_options: *const slatedb_read_options_t,
-    out_value: *mut slatedb_value_t,
+    out_found: *mut bool,
+    out_val: *mut *mut u8,
+    out_val_len: *mut usize,
 ) -> slatedb_result_t {
     if db.is_null() {
         return error_result(slatedb_error_t::SLATEDB_INVALID_HANDLE, "invalid db handle");
     }
-    if out_value.is_null() {
+    if out_val.is_null() {
         return error_result(
             slatedb_error_t::SLATEDB_NULL_POINTER,
-            "out_value pointer is null",
+            "out_val pointer is null",
         );
     }
+    if out_val_len.is_null() {
+        return error_result(
+            slatedb_error_t::SLATEDB_NULL_POINTER,
+            "out_val_len pointer is null",
+        );
+    }
+    if out_found.is_null() {
+        return error_result(
+            slatedb_error_t::SLATEDB_NULL_POINTER,
+            "out_found pointer is null",
+        );
+    }
+    *out_found = false;
+    *out_val = std::ptr::null_mut();
+    *out_val_len = 0;
 
     let key = match bytes_from_ptr(key, key_len, "key") {
         Ok(key) => key,
@@ -291,13 +318,15 @@ pub unsafe extern "C" fn slatedb_db_get_with_options(
         .block_on(handle.db.get_with_options(key, &read_options))
     {
         Ok(Some(value)) => {
-            *out_value = bytes_to_value(value.as_ref());
+            let (val, val_len) = alloc_bytes(value.as_ref());
+            *out_val = val;
+            *out_val_len = val_len;
+            *out_found = true;
             success_result()
         }
         Ok(None) => {
-            (*out_value).data = std::ptr::null_mut();
-            (*out_value).len = 0;
-            none_result()
+            *out_found = false;
+            success_result()
         }
         Err(err) => error_result(map_error(&err), &format!("db get failed: {err}")),
     }

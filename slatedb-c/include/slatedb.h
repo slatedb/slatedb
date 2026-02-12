@@ -37,16 +37,10 @@ typedef struct slatedb_write_batch_t slatedb_write_batch_t;
 
 typedef struct slatedb_result_t {
     enum slatedb_error_t error;
-    bool none;
     char *message;
 } slatedb_result_t;
 
 typedef uint8_t slatedb_sst_block_size_t;
-
-typedef struct slatedb_value_t {
-    uint8_t *data;
-    uintptr_t len;
-} slatedb_value_t;
 
 typedef struct slatedb_read_options_t {
     uint8_t durability_filter;
@@ -91,11 +85,6 @@ typedef struct slatedb_flush_options_t {
     uint8_t flush_type;
 } slatedb_flush_options_t;
 
-typedef struct slatedb_key_value_t {
-    struct slatedb_value_t key;
-    struct slatedb_value_t value;
-} slatedb_key_value_t;
-
 // # Safety
 // - `path` must be a valid C string.
 // - `object_store` must be a valid object store handle.
@@ -132,13 +121,17 @@ struct slatedb_result_t slatedb_db_status(const struct slatedb_db_t *db);
 struct slatedb_result_t slatedb_db_get(struct slatedb_db_t *db,
                                        const uint8_t *key,
                                        uintptr_t key_len,
-                                       struct slatedb_value_t *out_value);
+                                       bool *out_found,
+                                       uint8_t **out_val,
+                                       uintptr_t *out_val_len);
 
 struct slatedb_result_t slatedb_db_get_with_options(struct slatedb_db_t *db,
                                                     const uint8_t *key,
                                                     uintptr_t key_len,
                                                     const struct slatedb_read_options_t *read_options,
-                                                    struct slatedb_value_t *out_value);
+                                                    bool *out_found,
+                                                    uint8_t **out_val,
+                                                    uintptr_t *out_val_len);
 
 struct slatedb_result_t slatedb_db_put(struct slatedb_db_t *db,
                                        const uint8_t *key,
@@ -213,7 +206,11 @@ struct slatedb_result_t slatedb_db_flush_with_options(struct slatedb_db_t *db,
 struct slatedb_result_t slatedb_db_close(struct slatedb_db_t *db);
 
 struct slatedb_result_t slatedb_iterator_next(struct slatedb_iterator_t *iterator,
-                                              struct slatedb_key_value_t *out_key_value);
+                                              bool *out_has_item,
+                                              uint8_t **out_key,
+                                              uintptr_t *out_key_len,
+                                              uint8_t **out_val,
+                                              uintptr_t *out_val_len);
 
 struct slatedb_result_t slatedb_iterator_seek(struct slatedb_iterator_t *iterator,
                                               const uint8_t *key,
@@ -223,9 +220,7 @@ struct slatedb_result_t slatedb_iterator_close(struct slatedb_iterator_t *iterat
 
 void slatedb_result_free(struct slatedb_result_t result);
 
-void slatedb_value_free(struct slatedb_value_t value);
-
-void slatedb_key_value_free(struct slatedb_key_value_t key_value);
+void slatedb_bytes_free(uint8_t *data, uintptr_t len);
 
 // Resolve an object store using `Db::resolve_object_store`.
 //

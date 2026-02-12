@@ -1,12 +1,16 @@
 use crate::ffi::{
-    bytes_from_ptr, bytes_to_value, error_result, map_error, none_result, slatedb_error_t,
-    slatedb_iterator_t, slatedb_key_value_t, slatedb_result_t, success_result,
+    alloc_bytes, bytes_from_ptr, error_result, map_error, slatedb_error_t, slatedb_iterator_t,
+    slatedb_result_t, success_result,
 };
 
 #[no_mangle]
 pub unsafe extern "C" fn slatedb_iterator_next(
     iterator: *mut slatedb_iterator_t,
-    out_key_value: *mut slatedb_key_value_t,
+    out_has_item: *mut bool,
+    out_key: *mut *mut u8,
+    out_key_len: *mut usize,
+    out_val: *mut *mut u8,
+    out_val_len: *mut usize,
 ) -> slatedb_result_t {
     if iterator.is_null() {
         return error_result(
@@ -14,21 +18,59 @@ pub unsafe extern "C" fn slatedb_iterator_next(
             "invalid iterator handle",
         );
     }
-    if out_key_value.is_null() {
+    if out_key.is_null() {
         return error_result(
             slatedb_error_t::SLATEDB_NULL_POINTER,
-            "out_key_value pointer is null",
+            "out_key pointer is null",
         );
     }
+    if out_key_len.is_null() {
+        return error_result(
+            slatedb_error_t::SLATEDB_NULL_POINTER,
+            "out_key_len pointer is null",
+        );
+    }
+    if out_val.is_null() {
+        return error_result(
+            slatedb_error_t::SLATEDB_NULL_POINTER,
+            "out_val pointer is null",
+        );
+    }
+    if out_val_len.is_null() {
+        return error_result(
+            slatedb_error_t::SLATEDB_NULL_POINTER,
+            "out_val_len pointer is null",
+        );
+    }
+    if out_has_item.is_null() {
+        return error_result(
+            slatedb_error_t::SLATEDB_NULL_POINTER,
+            "out_has_item pointer is null",
+        );
+    }
+
+    *out_has_item = false;
+    *out_key = std::ptr::null_mut();
+    *out_key_len = 0;
+    *out_val = std::ptr::null_mut();
+    *out_val_len = 0;
 
     let handle = &mut *iterator;
     match handle.runtime.block_on(handle.iter.next()) {
         Ok(Some(kv)) => {
-            (*out_key_value).key = bytes_to_value(kv.key.as_ref());
-            (*out_key_value).value = bytes_to_value(kv.value.as_ref());
+            let (key, key_len) = alloc_bytes(kv.key.as_ref());
+            let (val, val_len) = alloc_bytes(kv.value.as_ref());
+            *out_key = key;
+            *out_key_len = key_len;
+            *out_val = val;
+            *out_val_len = val_len;
+            *out_has_item = true;
             success_result()
         }
-        Ok(None) => none_result(),
+        Ok(None) => {
+            *out_has_item = false;
+            success_result()
+        }
         Err(err) => error_result(map_error(&err), &format!("iterator next failed: {err}")),
     }
 }
