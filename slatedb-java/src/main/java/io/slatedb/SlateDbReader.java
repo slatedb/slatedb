@@ -4,6 +4,7 @@ import io.slatedb.SlateDbConfig.ReadOptions;
 import io.slatedb.SlateDbConfig.ScanOptions;
 
 import java.lang.foreign.MemorySegment;
+import java.nio.ByteBuffer;
 
 /// Read-only SlateDB handle.
 ///
@@ -20,7 +21,7 @@ public final class SlateDbReader implements SlateDbReadable {
     ///
     /// @param key key to read.
     /// @return The value for the key, or `null` if the key does not exist.
-    public byte[] get(byte[] key) {
+    public ByteBuffer get(final ByteBuffer key) {
         return get(key, null);
     }
 
@@ -29,7 +30,7 @@ public final class SlateDbReader implements SlateDbReadable {
     /// @param key key to read.
     /// @param options read options or `null` for defaults.
     /// @return The value for the key, or `null` if the key does not exist.
-    public byte[] get(byte[] key, ReadOptions options) {
+    public ByteBuffer get(final ByteBuffer key, final ReadOptions options) {
         return Native.readerGet(handle, key, options);
     }
 
@@ -38,7 +39,7 @@ public final class SlateDbReader implements SlateDbReadable {
     /// @param startKey inclusive lower bound, or `null`.
     /// @param endKey exclusive upper bound, or `null`.
     /// @return A [SlateDbScanIterator]. Always close it.
-    public SlateDbScanIterator scan(byte[] startKey, byte[] endKey) {
+    public SlateDbScanIterator scan(final ByteBuffer startKey, final ByteBuffer endKey) {
         return scan(startKey, endKey, null);
     }
 
@@ -48,7 +49,7 @@ public final class SlateDbReader implements SlateDbReadable {
     /// @param endKey exclusive upper bound, or `null`.
     /// @param options scan options or `null` for defaults.
     /// @return A [SlateDbScanIterator]. Always close it.
-    public SlateDbScanIterator scan(byte[] startKey, byte[] endKey, ScanOptions options) {
+    public SlateDbScanIterator scan(final ByteBuffer startKey, final ByteBuffer endKey, final ScanOptions options) {
         return new SlateDbScanIterator(Native.readerScan(handle, startKey, endKey, options));
     }
 
@@ -56,7 +57,7 @@ public final class SlateDbReader implements SlateDbReadable {
     ///
     /// @param prefix key prefix to scan.
     /// @return A [SlateDbScanIterator]. Always close it.
-    public SlateDbScanIterator scanPrefix(byte[] prefix) {
+    public SlateDbScanIterator scanPrefix(final ByteBuffer prefix) {
         return scanPrefix(prefix, null);
     }
 
@@ -65,7 +66,7 @@ public final class SlateDbReader implements SlateDbReadable {
     /// @param prefix key prefix to scan.
     /// @param options scan options or `null` for defaults.
     /// @return A [SlateDbScanIterator]. Always close it.
-    public SlateDbScanIterator scanPrefix(byte[] prefix, ScanOptions options) {
+    public SlateDbScanIterator scanPrefix(final ByteBuffer prefix, final ScanOptions options) {
         return new SlateDbScanIterator(Native.readerScanPrefix(handle, prefix, options));
     }
 

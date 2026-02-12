@@ -3,6 +3,8 @@ package io.slatedb;
 import io.slatedb.SlateDbConfig.ReadOptions;
 import io.slatedb.SlateDbConfig.ScanOptions;
 
+import java.nio.ByteBuffer;
+
 /// Shared read-only interface for SlateDb and SlateDbReader.
 ///
 /// Enables passing either type to read paths without additional wrappers.
@@ -11,21 +13,21 @@ public interface SlateDbReadable extends AutoCloseable {
     ///
     /// @param key key to read.
     /// @return The value for the key, or `null` if the key does not exist.
-    byte[] get(byte[] key);
+    ByteBuffer get(ByteBuffer key);
 
     /// Reads a value with custom read options.
     ///
     /// @param key key to read.
     /// @param options read options or `null` for defaults.
     /// @return The value for the key, or `null` if the key does not exist.
-    byte[] get(byte[] key, ReadOptions options);
+    ByteBuffer get(ByteBuffer key, ReadOptions options);
 
     /// Creates a scan iterator over the range `[startKey, endKey)` using default scan options.
     ///
     /// @param startKey inclusive lower bound, or `null`.
     /// @param endKey exclusive upper bound, or `null`.
     /// @return A [SlateDbScanIterator]. Always close it.
-    SlateDbScanIterator scan(byte[] startKey, byte[] endKey);
+    SlateDbScanIterator scan(ByteBuffer startKey, ByteBuffer endKey);
 
     /// Creates a scan iterator over the range `[startKey, endKey)` using custom scan options.
     ///
@@ -33,20 +35,20 @@ public interface SlateDbReadable extends AutoCloseable {
     /// @param endKey exclusive upper bound, or `null`.
     /// @param options scan options or `null` for defaults.
     /// @return A [SlateDbScanIterator]. Always close it.
-    SlateDbScanIterator scan(byte[] startKey, byte[] endKey, ScanOptions options);
+    SlateDbScanIterator scan(ByteBuffer startKey, ByteBuffer endKey, ScanOptions options);
 
     /// Creates a scan iterator for the provided key prefix using default scan options.
     ///
     /// @param prefix key prefix to scan.
     /// @return A [SlateDbScanIterator]. Always close it.
-    SlateDbScanIterator scanPrefix(byte[] prefix);
+    SlateDbScanIterator scanPrefix(ByteBuffer prefix);
 
     /// Creates a scan iterator for the provided key prefix using custom scan options.
     ///
     /// @param prefix key prefix to scan.
     /// @param options scan options or `null` for defaults.
     /// @return A [SlateDbScanIterator]. Always close it.
-    SlateDbScanIterator scanPrefix(byte[] prefix, ScanOptions options);
+    SlateDbScanIterator scanPrefix(ByteBuffer prefix, ScanOptions options);
 
     /// Closes the underlying handle.
     ///

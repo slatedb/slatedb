@@ -14,6 +14,7 @@ import java.lang.foreign.SymbolLookup;
 import java.lang.foreign.ValueLayout;
 import java.lang.invoke.MethodHandle;
 import java.lang.invoke.VarHandle;
+import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
@@ -594,19 +595,19 @@ final class Native {
         }
     }
 
-    static void delete(MemorySegment handlePtr, byte[] key, WriteOptions options) {
+    static void delete(MemorySegment handlePtr, ByteBuffer key, WriteOptions options) {
         Objects.requireNonNull(key, "key");
         ensureInitialized();
         try (Arena arena = Arena.ofConfined()) {
             MemorySegment handleStruct = arena.allocate(HANDLE_LAYOUT);
             setAddress(HANDLE_PTR, handleStruct, handlePtr);
-            MemorySegment keySegment = toByteArray(arena, key);
+            MemorySegment keySegment = toByteArray(arena, key.array());
             MemorySegment optionsSegment = toWriteOptions(arena, options);
             MemorySegment result = (MemorySegment) deleteHandle.invokeExact(
                 (SegmentAllocator) arena,
                 handleStruct,
                 keySegment,
-                (long) key.length,
+                (long) key.capacity(),
                 optionsSegment
             );
             checkResult(result);
@@ -629,25 +630,25 @@ final class Native {
 
     static MemorySegment scan(
         MemorySegment handlePtr,
-        byte[] startKey,
-        byte[] endKey,
+        ByteBuffer startKey,
+        ByteBuffer endKey,
         ScanOptions options
     ) {
         ensureInitialized();
         try (Arena arena = Arena.ofConfined()) {
             MemorySegment handleStruct = arena.allocate(HANDLE_LAYOUT);
             setAddress(HANDLE_PTR, handleStruct, handlePtr);
-            MemorySegment startKeySegment = startKey == null ? MemorySegment.NULL : toByteArray(arena, startKey);
-            MemorySegment endKeySegment = endKey == null ? MemorySegment.NULL : toByteArray(arena, endKey);
+            MemorySegment startKeySegment = startKey == null ? MemorySegment.NULL : toByteArray(arena, startKey.array());
+            MemorySegment endKeySegment = endKey == null ? MemorySegment.NULL : toByteArray(arena, endKey.array());
             MemorySegment optionsSegment = toScanOptions(arena, options);
             MemorySegment iteratorOut = arena.allocate(ValueLayout.ADDRESS);
             MemorySegment result = (MemorySegment) scanHandle.invokeExact(
                 (SegmentAllocator) arena,
                 handleStruct,
                 startKeySegment,
-                startKey == null ? 0L : (long) startKey.length,
+                startKey == null ? 0L : (long) startKey.capacity(),
                 endKeySegment,
-                endKey == null ? 0L : (long) endKey.length,
+                endKey == null ? 0L : (long) endKey.capacity(),
                 optionsSegment,
                 iteratorOut
             );
@@ -664,21 +665,21 @@ final class Native {
 
     static MemorySegment scanPrefix(
         MemorySegment handlePtr,
-        byte[] prefix,
+        ByteBuffer prefix,
         ScanOptions options
     ) {
         ensureInitialized();
         try (Arena arena = Arena.ofConfined()) {
             MemorySegment handleStruct = arena.allocate(HANDLE_LAYOUT);
             setAddress(HANDLE_PTR, handleStruct, handlePtr);
-            MemorySegment prefixSegment = prefix == null ? MemorySegment.NULL : toByteArray(arena, prefix);
+            MemorySegment prefixSegment = prefix == null ? MemorySegment.NULL : toByteArray(arena, prefix.array());
             MemorySegment optionsSegment = toScanOptions(arena, options);
             MemorySegment iteratorOut = arena.allocate(ValueLayout.ADDRESS);
             MemorySegment result = (MemorySegment) scanPrefixHandle.invokeExact(
                 (SegmentAllocator) arena,
                 handleStruct,
                 prefixSegment,
-                prefix == null ? 0L : (long) prefix.length,
+                prefix == null ? 0L : (long) prefix.capacity(),
                 optionsSegment,
                 iteratorOut
             );
@@ -712,20 +713,20 @@ final class Native {
         }
     }
 
-    static byte[] get(MemorySegment handlePtr, byte[] key, ReadOptions options) {
+    static ByteBuffer get(MemorySegment handlePtr, ByteBuffer key, ReadOptions options) {
         Objects.requireNonNull(key, "key");
         ensureInitialized();
         try (Arena arena = Arena.ofConfined()) {
             MemorySegment handleStruct = arena.allocate(HANDLE_LAYOUT);
             setAddress(HANDLE_PTR, handleStruct, handlePtr);
-            MemorySegment keySegment = toByteArray(arena, key);
+            MemorySegment keySegment = toByteArray(arena, key.array());
             MemorySegment optionsSegment = toReadOptions(arena, options);
             MemorySegment valueOut = arena.allocate(VALUE_LAYOUT);
             MemorySegment result = (MemorySegment) getHandle.invokeExact(
                 (SegmentAllocator) arena,
                 handleStruct,
                 keySegment,
-                (long) key.length,
+                (long) key.capacity(),
                 optionsSegment,
                 valueOut
             );
@@ -741,8 +742,8 @@ final class Native {
 
     static void put(
         MemorySegment handlePtr,
-        byte[] key,
-        byte[] value,
+        ByteBuffer key,
+        ByteBuffer value,
         PutOptions putOptions,
         WriteOptions writeOptions
     ) {
@@ -752,17 +753,17 @@ final class Native {
         try (Arena arena = Arena.ofConfined()) {
             MemorySegment handleStruct = arena.allocate(HANDLE_LAYOUT);
             setAddress(HANDLE_PTR, handleStruct, handlePtr);
-            MemorySegment keySegment = toByteArray(arena, key);
-            MemorySegment valueSegment = toByteArray(arena, value);
+            MemorySegment keySegment = toByteArray(arena, key.array());
+            MemorySegment valueSegment = toByteArray(arena, value.array());
             MemorySegment putOptionsSegment = toPutOptions(arena, putOptions);
             MemorySegment writeOptionsSegment = toWriteOptions(arena, writeOptions);
             MemorySegment result = (MemorySegment) putHandle.invokeExact(
                 (SegmentAllocator) arena,
                 handleStruct,
                 keySegment,
-                (long) key.length,
+                (long) key.capacity(),
                 valueSegment,
-                (long) value.length,
+                (long) value.capacity(),
                 putOptionsSegment,
                 writeOptionsSegment
             );
@@ -772,20 +773,20 @@ final class Native {
         }
     }
 
-    static byte[] readerGet(MemorySegment readerHandle, byte[] key, ReadOptions options) {
+    static ByteBuffer readerGet(MemorySegment readerHandle, final ByteBuffer key, ReadOptions options) {
         Objects.requireNonNull(key, "key");
         ensureInitialized();
         try (Arena arena = Arena.ofConfined()) {
             MemorySegment handleStruct = arena.allocate(READER_HANDLE_LAYOUT);
             setAddress(READER_HANDLE_PTR, handleStruct, readerHandle);
-            MemorySegment keySegment = toByteArray(arena, key);
+            MemorySegment keySegment = toByteArray(arena, key.array());
             MemorySegment optionsSegment = toReadOptions(arena, options);
             MemorySegment valueOut = arena.allocate(VALUE_LAYOUT);
             MemorySegment result = (MemorySegment) readerGetHandle.invokeExact(
                 (SegmentAllocator) arena,
                 handleStruct,
                 keySegment,
-                (long) key.length,
+                (long) key.capacity(),
                 optionsSegment,
                 valueOut
             );
@@ -801,25 +802,25 @@ final class Native {
 
     static MemorySegment readerScan(
         MemorySegment readerHandle,
-        byte[] startKey,
-        byte[] endKey,
+        ByteBuffer startKey,
+        ByteBuffer endKey,
         ScanOptions options
     ) {
         ensureInitialized();
         try (Arena arena = Arena.ofConfined()) {
             MemorySegment handleStruct = arena.allocate(READER_HANDLE_LAYOUT);
             setAddress(READER_HANDLE_PTR, handleStruct, readerHandle);
-            MemorySegment startKeySegment = startKey == null ? MemorySegment.NULL : toByteArray(arena, startKey);
-            MemorySegment endKeySegment = endKey == null ? MemorySegment.NULL : toByteArray(arena, endKey);
+            MemorySegment startKeySegment = startKey == null ? MemorySegment.NULL : toByteArray(arena, startKey.array());
+            MemorySegment endKeySegment = endKey == null ? MemorySegment.NULL : toByteArray(arena, endKey.array());
             MemorySegment optionsSegment = toScanOptions(arena, options);
             MemorySegment iteratorOut = arena.allocate(ValueLayout.ADDRESS);
             MemorySegment result = (MemorySegment) readerScanHandle.invokeExact(
                 (SegmentAllocator) arena,
                 handleStruct,
                 startKeySegment,
-                startKey == null ? 0L : (long) startKey.length,
+                startKey == null ? 0L : (long) startKey.capacity(),
                 endKeySegment,
-                endKey == null ? 0L : (long) endKey.length,
+                endKey == null ? 0L : (long) endKey.capacity(),
                 optionsSegment,
                 iteratorOut
             );
@@ -836,21 +837,21 @@ final class Native {
 
     static MemorySegment readerScanPrefix(
         MemorySegment readerHandle,
-        byte[] prefix,
+        ByteBuffer prefix,
         ScanOptions options
     ) {
         ensureInitialized();
         try (Arena arena = Arena.ofConfined()) {
             MemorySegment handleStruct = arena.allocate(READER_HANDLE_LAYOUT);
             setAddress(READER_HANDLE_PTR, handleStruct, readerHandle);
-            MemorySegment prefixSegment = prefix == null ? MemorySegment.NULL : toByteArray(arena, prefix);
+            MemorySegment prefixSegment = prefix == null ? MemorySegment.NULL : toByteArray(arena, prefix.array());
             MemorySegment optionsSegment = toScanOptions(arena, options);
             MemorySegment iteratorOut = arena.allocate(ValueLayout.ADDRESS);
             MemorySegment result = (MemorySegment) readerScanPrefixHandle.invokeExact(
                 (SegmentAllocator) arena,
                 handleStruct,
                 prefixSegment,
-                prefix == null ? 0L : (long) prefix.length,
+                prefix == null ? 0L : (long) prefix.capacity(),
                 optionsSegment,
                 iteratorOut
             );
@@ -900,16 +901,16 @@ final class Native {
         }
     }
 
-    static void iteratorSeek(MemorySegment iterPtr, byte[] key) {
+    static void iteratorSeek(MemorySegment iterPtr, ByteBuffer key) {
         Objects.requireNonNull(key, "key");
         ensureInitialized();
         try (Arena arena = Arena.ofConfined()) {
-            MemorySegment keySegment = toByteArray(arena, key);
+            MemorySegment keySegment = toByteArray(arena, key.array());
             MemorySegment result = (MemorySegment) iteratorSeekHandle.invokeExact(
                 (SegmentAllocator) arena,
                 iterPtr,
                 keySegment,
-                (long) key.length
+                (long) key.capacity()
             );
             checkResult(result);
         } catch (Throwable t) {
@@ -940,20 +941,20 @@ final class Native {
         }
     }
 
-    static void writeBatchPut(MemorySegment batchPtr, byte[] key, byte[] value) {
+    static void writeBatchPut(MemorySegment batchPtr, ByteBuffer key, ByteBuffer value) {
         Objects.requireNonNull(key, "key");
         Objects.requireNonNull(value, "value");
         ensureInitialized();
         try (Arena arena = Arena.ofConfined()) {
-            MemorySegment keySegment = toByteArray(arena, key);
-            MemorySegment valueSegment = toByteArray(arena, value);
+            MemorySegment keySegment = toByteArray(arena, key.array());
+            MemorySegment valueSegment = toByteArray(arena, value.array());
             MemorySegment result = (MemorySegment) writeBatchPutHandle.invokeExact(
                 (SegmentAllocator) arena,
                 batchPtr,
                 keySegment,
-                (long) key.length,
+                (long) key.capacity(),
                 valueSegment,
-                (long) value.length
+                (long) value.capacity()
             );
             checkResult(result);
         } catch (Throwable t) {
@@ -961,21 +962,21 @@ final class Native {
         }
     }
 
-    static void writeBatchPutWithOptions(MemorySegment batchPtr, byte[] key, byte[] value, PutOptions options) {
+    static void writeBatchPutWithOptions(MemorySegment batchPtr, ByteBuffer key, ByteBuffer value, PutOptions options) {
         Objects.requireNonNull(key, "key");
         Objects.requireNonNull(value, "value");
         ensureInitialized();
         try (Arena arena = Arena.ofConfined()) {
-            MemorySegment keySegment = toByteArray(arena, key);
-            MemorySegment valueSegment = toByteArray(arena, value);
+            MemorySegment keySegment = toByteArray(arena, key.array());
+            MemorySegment valueSegment = toByteArray(arena, value.array());
             MemorySegment optionsSegment = toPutOptions(arena, options);
             MemorySegment result = (MemorySegment) writeBatchPutWithOptionsHandle.invokeExact(
                 (SegmentAllocator) arena,
                 batchPtr,
                 keySegment,
-                (long) key.length,
+                (long) key.capacity(),
                 valueSegment,
-                (long) value.length,
+                (long) value.capacity(),
                 optionsSegment
             );
             checkResult(result);
@@ -984,16 +985,16 @@ final class Native {
         }
     }
 
-    static void writeBatchDelete(MemorySegment batchPtr, byte[] key) {
+    static void writeBatchDelete(MemorySegment batchPtr, ByteBuffer key) {
         Objects.requireNonNull(key, "key");
         ensureInitialized();
         try (Arena arena = Arena.ofConfined()) {
-            MemorySegment keySegment = toByteArray(arena, key);
+            MemorySegment keySegment = toByteArray(arena, key.array());
             MemorySegment result = (MemorySegment) writeBatchDeleteHandle.invokeExact(
                 (SegmentAllocator) arena,
                 batchPtr,
                 keySegment,
-                (long) key.length
+                (long) key.capacity()
             );
             checkResult(result);
         } catch (Throwable t) {
@@ -1035,11 +1036,11 @@ final class Native {
         }
     }
 
-    static void put(MemorySegment handlePtr, byte[] key, byte[] value) {
+    static void put(final MemorySegment handlePtr, final ByteBuffer key, final ByteBuffer value) {
         put(handlePtr, key, value, null, null);
     }
 
-    static byte[] get(MemorySegment handlePtr, byte[] key) {
+    static ByteBuffer get(final MemorySegment handlePtr, final ByteBuffer key) {
         return get(handlePtr, key, null);
     }
 
@@ -1312,37 +1313,37 @@ final class Native {
         return value;
     }
 
-    private static byte[] copyValue(MemorySegment valueOut, RuntimeException pending) {
-        long len = (long) getLong(VALUE_LEN, valueOut);
-        MemorySegment data = (MemorySegment) getAddress(VALUE_DATA, valueOut);
+    private static ByteBuffer copyValue(final MemorySegment valueOut, final RuntimeException pending) {
+        final var len = getLong(VALUE_LEN, valueOut);
+        final var data = getAddress(VALUE_DATA, valueOut);
         if (len < 0 || len > Integer.MAX_VALUE) {
-            RuntimeException sizeError = new IllegalStateException("SlateDB value too large: " + len);
+            final var sizeError = new IllegalStateException("SlateDB value too large: " + len);
             freeValue(valueOut, sizeError);
             throw sizeError;
         }
-        byte[] bytes = new byte[(int) len];
+        final var bytes = new byte[(int) len];
         if (len > 0) {
             MemorySegment dataSegment = data.reinterpret(len);
             MemorySegment.copy(dataSegment, 0, MemorySegment.ofArray(bytes), 0, len);
         }
         freeValue(valueOut, pending);
-        return bytes;
+        return ByteBuffer.wrap(bytes);
     }
 
-    private static SlateDbKeyValue copyKeyValuePair(MemorySegment kvOut) {
-        MemorySegment keySegment = kvOut.asSlice(KEY_VALUE_KEY_OFFSET, VALUE_LAYOUT.byteSize());
-        MemorySegment valueSegment = kvOut.asSlice(KEY_VALUE_VALUE_OFFSET, VALUE_LAYOUT.byteSize());
+    private static SlateDbKeyValue copyKeyValuePair(final MemorySegment kvOut) {
+        final var keySegment = kvOut.asSlice(KEY_VALUE_KEY_OFFSET, VALUE_LAYOUT.byteSize());
+        final var valueSegment = kvOut.asSlice(KEY_VALUE_VALUE_OFFSET, VALUE_LAYOUT.byteSize());
         RuntimeException failure = null;
-        byte[] keyBytes = null;
+        ByteBuffer key = null;
         try {
-            keyBytes = copyValue(keySegment, null);
-        } catch (RuntimeException e) {
+            key = copyValue(keySegment, null);
+        } catch (final RuntimeException e) {
             failure = e;
         }
-        byte[] valueBytes = null;
+        ByteBuffer value;
         try {
-            valueBytes = copyValue(valueSegment, failure);
-        } catch (RuntimeException e) {
+            value = copyValue(valueSegment, failure);
+        } catch (final RuntimeException e) {
             if (failure != null) {
                 failure.addSuppressed(e);
                 throw failure;
@@ -1352,7 +1353,7 @@ final class Native {
         if (failure != null) {
             throw failure;
         }
-        return new SlateDbKeyValue(keyBytes, valueBytes);
+        return new SlateDbKeyValue(key, value);
     }
 
     /**

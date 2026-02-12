@@ -1,6 +1,7 @@
 package io.slatedb;
 
 import java.lang.foreign.MemorySegment;
+import java.nio.ByteBuffer;
 
 /// Iterator over scan results. Always close after use.
 public final class SlateDbScanIterator implements AutoCloseable {
@@ -21,7 +22,7 @@ public final class SlateDbScanIterator implements AutoCloseable {
     /// Seeks to the first entry whose key is greater than or equal to the provided key.
     ///
     /// @param key key to seek to.
-    public void seek(byte[] key) {
+    public void seek(final ByteBuffer key) {
         Native.iteratorSeek(iterPtr, key);
     }
 

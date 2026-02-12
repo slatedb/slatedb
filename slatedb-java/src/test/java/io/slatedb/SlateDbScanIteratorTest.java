@@ -1,9 +1,12 @@
 package io.slatedb;
 
-import org.junit.jupiter.api.Assertions;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import org.junit.jupiter.api.Test;
 
-import java.nio.charset.StandardCharsets;
+import java.nio.ByteBuffer;
+import static java.nio.ByteBuffer.wrap;
+import static java.nio.charset.StandardCharsets.UTF_8;
 
 class SlateDbScanIteratorTest {
     @Test
@@ -11,17 +14,17 @@ class SlateDbScanIteratorTest {
         TestSupport.ensureNativeReady();
         TestSupport.DbContext context = TestSupport.createDbContext();
 
-        byte[] keyA = "scan-a".getBytes(StandardCharsets.UTF_8);
-        byte[] keyB = "scan-b".getBytes(StandardCharsets.UTF_8);
-        byte[] keyC = "scan-c".getBytes(StandardCharsets.UTF_8);
-        byte[] valueA = "value-a".getBytes(StandardCharsets.UTF_8);
-        byte[] valueB = "value-b".getBytes(StandardCharsets.UTF_8);
-        byte[] valueC = "value-c".getBytes(StandardCharsets.UTF_8);
+        byte[] keyA = "scan-a".getBytes(UTF_8);
+        byte[] keyB = "scan-b".getBytes(UTF_8);
+        byte[] keyC = "scan-c".getBytes(UTF_8);
+        byte[] valueA = "value-a".getBytes(UTF_8);
+        byte[] valueB = "value-b".getBytes(UTF_8);
+        byte[] valueC = "value-c".getBytes(UTF_8);
 
         try (SlateDb db = SlateDb.open(context.dbPath().toAbsolutePath().toString(), context.objectStoreUrl(), null)) {
-            db.put(keyA, valueA);
-            db.put(keyB, valueB);
-            db.put(keyC, valueC);
+            db.put(wrap(keyA), wrap(valueA));
+            db.put(wrap(keyB), wrap(valueB));
+            db.put(wrap(keyC), wrap(valueC));
 
             SlateDbConfig.ScanOptions scanOptions = SlateDbConfig.ScanOptions.builder()
                 .durabilityFilter(SlateDbConfig.Durability.MEMORY)
@@ -32,21 +35,21 @@ class SlateDbScanIteratorTest {
 
             try (SlateDbScanIterator iter = db.scan(null, null, scanOptions)) {
                 SlateDbKeyValue first = iter.next();
-                Assertions.assertNotNull(first);
+                assertNotNull(first);
 
-                iter.seek(keyB);
+                iter.seek(wrap(keyB));
                 SlateDbKeyValue afterSeek = iter.next();
-                Assertions.assertNotNull(afterSeek);
-                Assertions.assertArrayEquals(keyB, afterSeek.key());
-                Assertions.assertArrayEquals(valueB, afterSeek.value());
+                assertNotNull(afterSeek);
+                assertEquals(ByteBuffer.wrap(keyB), afterSeek.key());
+                assertEquals(ByteBuffer.wrap(valueB), afterSeek.value());
             }
 
-            try (SlateDbScanIterator iter = db.scanPrefix("scan-".getBytes(StandardCharsets.UTF_8))) {
+            try (SlateDbScanIterator iter = db.scanPrefix(wrap("scan-".getBytes(UTF_8)))) {
                 int count = 0;
                 while (iter.next() != null) {
                     count++;
                 }
-                Assertions.assertEquals(3, count);
+                assertEquals(3, count);
             }
         }
     }

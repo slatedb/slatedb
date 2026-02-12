@@ -3,6 +3,7 @@ package io.slatedb;
 import io.slatedb.SlateDbConfig.*;
 
 import java.lang.foreign.MemorySegment;
+import java.nio.ByteBuffer;
 import java.util.Objects;
 
 /// Java bindings for SlateDB backed by the `slatedb-c` FFI library.
@@ -35,7 +36,8 @@ import java.util.Objects;
 /// import io.slatedb.SlateDb;
 /// import io.slatedb.SlateDbWriteBatch;
 ///
-/// import java.nio.charset.StandardCharsets;
+/// import import java.nio.ByteBuffer;
+/// import static java.nio.charset.StandardCharsets.UTF_8;
 /// import java.nio.file.Files;
 /// import java.nio.file.Path;
 ///
@@ -55,29 +57,24 @@ import java.util.Objects;
 ///         Path objectStoreRoot = Files.createTempDirectory("slatedb-java-store");
 ///         String objectStoreUrl = "file://" + objectStoreRoot.toAbsolutePath();
 ///
-///         byte[] key = "hello-key".getBytes(StandardCharsets.UTF_8);
-///         byte[] value = "hello-value".getBytes(StandardCharsets.UTF_8);
+///         ByteByffer key = ByteBuffer.wrap("hello-key".getBytes(UTF_8));
+///         ByteByffer value = ByteBuffer.wrap("hello-value".getBytes(UTF_8));
 ///
 ///         try (SlateDb db = SlateDb.open(dbPath.toString(), objectStoreUrl, null)) {
 ///             db.put(key, value);
-///             byte[] loaded = db.get(key);
-///             System.out.println(new String(loaded, StandardCharsets.UTF_8));
+///             ByteByffer loaded = db.get(key);
+///             System.out.println(new String(loaded.array(), UTF_8));
 ///
 ///             try (SlateDbWriteBatch batch = SlateDb.newWriteBatch()) {
-///                 batch.put("hello-a".getBytes(StandardCharsets.UTF_8),
-///                     "value-a".getBytes(StandardCharsets.UTF_8));
-///                 batch.put("hello-b".getBytes(StandardCharsets.UTF_8),
-///                     "value-b".getBytes(StandardCharsets.UTF_8));
+///                 batch.put("hello-a".getBytes(UTF_8), "value-a".getBytes(UTF_8));
+///                 batch.put("hello-b".getBytes(UTF_8), "value-b".getBytes(UTF_8));
 ///                 db.write(batch);
 ///             }
 ///
-///             try (SlateDbScanIterator iter = db.scanPrefix("hello-".getBytes(StandardCharsets.UTF_8))) {
+///             try (SlateDbScanIterator iter = db.scanPrefix("hello-".getBytes(UTF_8))) {
 ///                 SlateDbKeyValue kv;
 ///                 while ((kv = iter.next()) != null) {
-///                     System.out.println(
-///                         new String(kv.key(), StandardCharsets.UTF_8) + "=" +
-///                         new String(kv.value(), StandardCharsets.UTF_8)
-///                     );
+///                     System.out.println(new String(kv.key(), UTF_8) + "=" + new String(kv.value(), UTF_8));
 ///                 }
 ///             }
 ///         }
@@ -238,9 +235,9 @@ public final class SlateDb implements SlateDbReadable {
     /// @throws SlateDbException if the write fails.
     /// ### Example
     /// ```java
-    /// db.put("key".getBytes(StandardCharsets.UTF_8), "value".getBytes(StandardCharsets.UTF_8));
+    /// db.put(ByteBuffer.wrap("key".getBytes(StandardCharsets.UTF_8)), ByteBuffer.wrap("value".getBytes(StandardCharsets.UTF_8)));
     /// ```
-    public void put(byte[] key, byte[] value) {
+    public void put(final ByteBuffer key, final ByteBuffer value) {
         Native.put(handle, key, value);
     }
 
@@ -251,7 +248,12 @@ public final class SlateDb implements SlateDbReadable {
     /// @param putOptions put options or `null` for defaults.
     /// @param writeOptions write options or `null` for defaults.
     /// @throws SlateDbException if the write fails.
-    public void put(byte[] key, byte[] value, PutOptions putOptions, WriteOptions writeOptions) {
+    public void put(
+        final ByteBuffer key,
+        final ByteBuffer value,
+        final PutOptions putOptions,
+        final WriteOptions writeOptions
+    ) {
         Native.put(handle, key, value, putOptions, writeOptions);
     }
 
@@ -264,7 +266,7 @@ public final class SlateDb implements SlateDbReadable {
     /// ```java
     /// byte[] value = db.get("key".getBytes(StandardCharsets.UTF_8));
     /// ```
-    public byte[] get(byte[] key) {
+    public ByteBuffer get(final ByteBuffer key) {
         return Native.get(handle, key);
     }
 
@@ -274,7 +276,7 @@ public final class SlateDb implements SlateDbReadable {
     /// @param options read options or `null` for defaults.
     /// @return The value for the key, or `null` if the key does not exist.
     /// @throws SlateDbException if the read fails.
-    public byte[] get(byte[] key, ReadOptions options) {
+    public ByteBuffer get(final ByteBuffer key, ReadOptions options) {
         return Native.get(handle, key, options);
     }
 
@@ -282,7 +284,7 @@ public final class SlateDb implements SlateDbReadable {
     ///
     /// @param key key to delete.
     /// @throws SlateDbException if the delete fails.
-    public void delete(byte[] key) {
+    public void delete(final ByteBuffer key) {
         delete(key, WriteOptions.DEFAULT);
     }
 
@@ -291,7 +293,7 @@ public final class SlateDb implements SlateDbReadable {
     /// @param key key to delete.
     /// @param options write options or `null` for defaults.
     /// @throws SlateDbException if the delete fails.
-    public void delete(byte[] key, WriteOptions options) {
+    public void delete(final ByteBuffer key, final WriteOptions options) {
         Native.delete(handle, key, options);
     }
 
@@ -357,7 +359,7 @@ public final class SlateDb implements SlateDbReadable {
     ///     }
     /// }
     /// ```
-    public SlateDbScanIterator scan(byte[] startKey, byte[] endKey) {
+    public SlateDbScanIterator scan(final ByteBuffer startKey, final ByteBuffer endKey) {
         return scan(startKey, endKey, ScanOptions.DEFAULT);
     }
 
@@ -369,7 +371,7 @@ public final class SlateDb implements SlateDbReadable {
     /// @param options scan options or `null` for defaults.
     /// @return A [SlateDbScanIterator] over the range. Always close it.
     /// @throws SlateDbException if the scan fails.
-    public SlateDbScanIterator scan(byte[] startKey, byte[] endKey, ScanOptions options) {
+    public SlateDbScanIterator scan(final ByteBuffer startKey, final ByteBuffer endKey, final ScanOptions options) {
         return new SlateDbScanIterator(Native.scan(handle, startKey, endKey, options));
     }
 
@@ -378,7 +380,7 @@ public final class SlateDb implements SlateDbReadable {
     /// @param prefix key prefix to scan.
     /// @return A [SlateDbScanIterator] over the prefix. Always close it.
     /// @throws SlateDbException if the scan fails.
-    public SlateDbScanIterator scanPrefix(byte[] prefix) {
+    public SlateDbScanIterator scanPrefix(final ByteBuffer prefix) {
         return scanPrefix(prefix, ScanOptions.DEFAULT);
     }
 
@@ -388,7 +390,7 @@ public final class SlateDb implements SlateDbReadable {
     /// @param options scan options or `null` for defaults.
     /// @return A [SlateDbScanIterator] over the prefix. Always close it.
     /// @throws SlateDbException if the scan fails.
-    public SlateDbScanIterator scanPrefix(byte[] prefix, ScanOptions options) {
+    public SlateDbScanIterator scanPrefix(final ByteBuffer prefix, final ScanOptions options) {
         return new SlateDbScanIterator(Native.scanPrefix(handle, prefix, options));
     }
 

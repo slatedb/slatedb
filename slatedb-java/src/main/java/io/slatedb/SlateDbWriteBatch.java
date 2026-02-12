@@ -3,6 +3,7 @@ package io.slatedb;
 import io.slatedb.SlateDbConfig.PutOptions;
 
 import java.lang.foreign.MemorySegment;
+import java.nio.ByteBuffer;
 
 /// A batch of write operations that can be executed atomically.
 ///
@@ -20,7 +21,7 @@ public final class SlateDbWriteBatch implements AutoCloseable {
     ///
     /// @param key key to write (non-empty).
     /// @param value value to write.
-    public void put(byte[] key, byte[] value) {
+    public void put(final ByteBuffer key, final ByteBuffer value) {
         Native.writeBatchPut(batchPtr, key, value);
     }
 
@@ -29,14 +30,14 @@ public final class SlateDbWriteBatch implements AutoCloseable {
     /// @param key key to write (non-empty).
     /// @param value value to write.
     /// @param options put options or `null` for defaults.
-    public void put(byte[] key, byte[] value, PutOptions options) {
+    public void put(final ByteBuffer key, final ByteBuffer value, PutOptions options) {
         Native.writeBatchPutWithOptions(batchPtr, key, value, options);
     }
 
     /// Adds a delete operation to the batch.
     ///
     /// @param key key to delete.
-    public void delete(byte[] key) {
+    public void delete(final ByteBuffer key) {
         Native.writeBatchDelete(batchPtr, key);
     }
 

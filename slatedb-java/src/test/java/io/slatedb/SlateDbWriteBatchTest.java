@@ -1,9 +1,12 @@
 package io.slatedb;
 
-import org.junit.jupiter.api.Assertions;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import org.junit.jupiter.api.Test;
 
-import java.nio.charset.StandardCharsets;
+import static java.nio.ByteBuffer.wrap;
+import static java.nio.charset.StandardCharsets.UTF_8;
 import java.time.Duration;
 
 class SlateDbWriteBatchTest {
@@ -12,21 +15,21 @@ class SlateDbWriteBatchTest {
         TestSupport.ensureNativeReady();
         TestSupport.DbContext context = TestSupport.createDbContext();
 
-        byte[] key1 = "batch-key-1".getBytes(StandardCharsets.UTF_8);
-        byte[] key2 = "batch-key-2".getBytes(StandardCharsets.UTF_8);
-        byte[] value1 = "batch-value-1".getBytes(StandardCharsets.UTF_8);
-        byte[] value2 = "batch-value-2".getBytes(StandardCharsets.UTF_8);
+        final var key1 = wrap("batch-key-1".getBytes(UTF_8));
+        final var key2 = wrap("batch-key-2".getBytes(UTF_8));
+        final var value1 = wrap("batch-value-1".getBytes(UTF_8));
+        final var value2 = wrap("batch-value-2".getBytes(UTF_8));
 
-        try (SlateDb db = SlateDb.open(context.dbPath().toAbsolutePath().toString(), context.objectStoreUrl(), null);
-             SlateDbWriteBatch batch = SlateDb.newWriteBatch()) {
+        try (final var db = SlateDb.open(context.dbPath().toAbsolutePath().toString(), context.objectStoreUrl(), null);
+             final var batch = SlateDb.newWriteBatch()) {
             batch.put(key1, value1);
             batch.put(key2, value2);
             batch.delete(key1);
 
             db.write(batch);
 
-            Assertions.assertNull(db.get(key1));
-            Assertions.assertArrayEquals(value2, db.get(key2));
+            assertNull(db.get(key1));
+            assertEquals(value2, db.get(key2));
         }
     }
 
@@ -35,18 +38,18 @@ class SlateDbWriteBatchTest {
         TestSupport.ensureNativeReady();
         TestSupport.DbContext context = TestSupport.createDbContext();
 
-        byte[] key = "batch-opts-key".getBytes(StandardCharsets.UTF_8);
-        byte[] value = "batch-opts-value".getBytes(StandardCharsets.UTF_8);
+        final var key = wrap("batch-opts-key".getBytes(UTF_8));
+        final var value = wrap("batch-opts-value".getBytes(UTF_8));
 
         SlateDbConfig.PutOptions putOptions = SlateDbConfig.PutOptions.expireAfter(Duration.ofMinutes(5));
         SlateDbConfig.WriteOptions writeOptions = new SlateDbConfig.WriteOptions(false);
 
-        try (SlateDb db = SlateDb.open(context.dbPath().toAbsolutePath().toString(), context.objectStoreUrl(), null);
-             SlateDbWriteBatch batch = SlateDb.newWriteBatch()) {
+        try (final var db = SlateDb.open(context.dbPath().toAbsolutePath().toString(), context.objectStoreUrl(), null);
+             final var batch = SlateDb.newWriteBatch()) {
             batch.put(key, value, putOptions);
             db.write(batch, writeOptions);
 
-            Assertions.assertArrayEquals(value, db.get(key));
+            assertEquals(value, db.get(key));
         }
     }
 
@@ -55,13 +58,12 @@ class SlateDbWriteBatchTest {
         TestSupport.ensureNativeReady();
         TestSupport.DbContext context = TestSupport.createDbContext();
 
-        try (SlateDb db = SlateDb.open(context.dbPath().toAbsolutePath().toString(), context.objectStoreUrl(), null)) {
-            SlateDbWriteBatch batch = SlateDb.newWriteBatch();
-            batch.put("idempotent-key".getBytes(StandardCharsets.UTF_8),
-                "idempotent-value".getBytes(StandardCharsets.UTF_8));
+        try (final var db = SlateDb.open(context.dbPath().toAbsolutePath().toString(), context.objectStoreUrl(), null)) {
+            final var batch = SlateDb.newWriteBatch();
+            batch.put(wrap("idempotent-key".getBytes(UTF_8)), wrap("idempotent-value".getBytes(UTF_8)));
             db.write(batch);
             batch.close();
-            Assertions.assertDoesNotThrow(batch::close);
+            assertDoesNotThrow(batch::close);
         }
     }
 }

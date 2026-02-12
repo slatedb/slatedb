@@ -5,6 +5,8 @@ import org.junit.jupiter.api.Test;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.junit.jupiter.api.Assertions.*;
 
+import java.nio.ByteBuffer;
+import static java.nio.ByteBuffer.wrap;
 import java.time.Duration;
 
 class SlateDbReaderTest {
@@ -18,8 +20,8 @@ class SlateDbReaderTest {
     private static void createSlateDB(
         final TestSupport.DbContext context,
         final String url,
-        final byte[] key,
-        final byte[] value
+        final ByteBuffer key,
+        final ByteBuffer value
     ) {
         try (SlateDb db = SlateDb.open(context.dbPath().toAbsolutePath().toString(), url, null)) {
             db.put(key, value);
@@ -33,8 +35,8 @@ class SlateDbReaderTest {
         final var context = TestSupport.createDbContext();
         final var readerObjectStoreUrl = "file://" + context.objectStoreRoot().toAbsolutePath();
 
-        final var key = "reader-key".getBytes(UTF_8);
-        final var value = "reader-value".getBytes(UTF_8);
+        final var key = wrap("reader-key".getBytes(UTF_8));
+        final var value = wrap("reader-value".getBytes(UTF_8));
         createSlateDB(context, readerObjectStoreUrl, key, value);
 
         try (final var reader = SlateDb.openReader(
@@ -44,13 +46,13 @@ class SlateDbReaderTest {
             null,
             DEFAULT_READER_OPTIONS
         )) {
-            assertArrayEquals(value, reader.get(key));
+            assertEquals(value, reader.get(key));
 
-            try (SlateDbScanIterator iter = reader.scanPrefix("reader-".getBytes(UTF_8))) {
+            try (SlateDbScanIterator iter = reader.scanPrefix(wrap("reader-".getBytes(UTF_8)))) {
                 final var kv = iter.next();
                 assertNotNull(kv);
-                assertArrayEquals(key, kv.key());
-                assertArrayEquals(value, kv.value());
+                assertEquals(key, kv.key());
+                assertEquals(value, kv.value());
             }
         }
     }
@@ -61,7 +63,7 @@ class SlateDbReaderTest {
         final var context = TestSupport.createDbContext();
         final var readerObjectStoreUrl = "file://" + context.objectStoreRoot().toAbsolutePath();
 
-        createSlateDB(context, readerObjectStoreUrl, "key".getBytes(UTF_8), "value".getBytes(UTF_8));
+        createSlateDB(context, readerObjectStoreUrl, wrap("key".getBytes(UTF_8)), wrap("value".getBytes(UTF_8)));
 
         try (final var reader = SlateDb.openReader(
             context.dbPath().toAbsolutePath().toString(),
@@ -70,7 +72,7 @@ class SlateDbReaderTest {
             null,
             DEFAULT_READER_OPTIONS
         )) {
-            assertNull(reader.get("missing".getBytes(UTF_8)));
+            assertNull(reader.get(wrap("missing".getBytes(UTF_8))));
         }
     }
 
@@ -80,8 +82,8 @@ class SlateDbReaderTest {
         final var context = TestSupport.createDbContext();
         final var readerObjectStoreUrl = "file://" + context.objectStoreRoot().toAbsolutePath();
 
-        final var key = "reader-close-key".getBytes(UTF_8);
-        final var value = "reader-close-value".getBytes(UTF_8);
+        final var key = wrap("reader-close-key".getBytes(UTF_8));
+        final var value = wrap("reader-close-value".getBytes(UTF_8));
         createSlateDB(context, readerObjectStoreUrl, key, value);
 
         final var reader = SlateDb.openReader(
@@ -93,7 +95,7 @@ class SlateDbReaderTest {
         );
 
         try {
-            assertArrayEquals(value, reader.get(key));
+            assertEquals(value, reader.get(key));
             reader.close();
             assertDoesNotThrow(reader::close);
         } finally {
