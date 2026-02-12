@@ -39,9 +39,9 @@ Deletes appear as `Tombstone`s. If your database uses merge operators, you will 
 
 `WalReader` only sees WAL SSTs that have been flushed to object storage. WAL flushes occur when:
 
-- The WAL buffer reaches its size threshold.
-- The configured `flush_interval` elapses.
-- You explicitly call a WAL or MemTable flush.
+- The WAL buffer reaches its size threshold ([`l0_sst_size_bytes`](https://docs.rs/slatedb/latest/slatedb/config/struct.Settings.html#structfield.l0_sst_size_bytes) is used to limit WAL SST file sizes as well).
+- The configured [`flush_interval`](https://docs.rs/slatedb/latest/slatedb/config/struct.Settings.html#structfield.flush_interval) elapses.
+- You explicitly call a WAL or MemTable flush with [`Db::flush_with_options`](https://docs.rs/slatedb/latest/slatedb/struct.Db.html#method.flush_with_options).
 
 Note that a memtable flush also forces any pending WAL data to be flushed first, which guarantees the WAL is durable before L0 data is written.
 
