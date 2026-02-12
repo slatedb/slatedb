@@ -37,13 +37,14 @@ cc -I slatedb-c/include \
 ## API Model
 
 SlateDB C uses opaque handles so callers never depend on Rust internals.
-`slatedb_object_store_t*` represents a resolved object-store backend (for example `memory:///` or `file:///...`) and is reused when opening databases.
-`slatedb_db_t*` represents an open read/write database connection.
-`slatedb_db_reader_t*` represents a read-only database reader with its own refresh/replay behavior.
-`slatedb_iterator_t*` represents an active scan cursor returned by scan APIs.
-`slatedb_write_batch_t*` represents a mutable batch that stages multiple writes before commit.
-`slatedb_settings_t*` represents parsed configuration values loaded from defaults, files, JSON, or environment variables.
-`slatedb_db_builder_t*` represents an in-progress open configuration that is consumed by `slatedb_db_builder_build`.
+
+- `slatedb_object_store_t*` represents a resolved object-store backend (for example `memory:///` or `file:///...`) and is reused when opening databases.
+- `slatedb_db_t*` represents an open read/write database connection.
+- `slatedb_db_reader_t*` represents a read-only database reader with its own refresh/replay behavior.
+- `slatedb_iterator_t*` represents an active scan cursor returned by scan APIs.
+- `slatedb_write_batch_t*` represents a mutable batch that stages multiple writes before commit.
+- `slatedb_settings_t*` represents parsed configuration values loaded from defaults, files, JSON, or environment variables.
+- `slatedb_db_builder_t*` represents an in-progress open configuration that is consumed by `slatedb_db_builder_build`.
 
 Each handle type has a matching `*_close` API and should be closed exactly once when no longer needed.
 
@@ -192,64 +193,18 @@ cleanup:
 }
 ```
 
-## Read-Only Reader Example (`DbReader`)
+## Settings
 
-Use `slatedb_db_reader_open` for read-only access:
+Settings in `slatedb-c` are implemented as an opaque handle (`slatedb_settings_t*`) that wraps
+the Rust settings model. You create a settings handle from one of the supported sources, optionally
+apply targeted key/value patches, and then pass that handle to
+`slatedb_db_builder_with_settings`. The handle owns the resolved configuration snapshot until it is
+released with `slatedb_settings_close`. Settings can be loaded from config files (`.json`, `.toml`,
+`.yaml`, `.yml`), JSON payloads, environment variables (with `SLATEDB_` prefix), or via
+`slatedb_settings_default`. See the Rust [`config.rs`](../slatedb/src/config.rs) file for the full
+list of supported configuration keys and their expected types.
 
-```c
-struct slatedb_db_reader_t* reader = NULL;
-struct slatedb_db_reader_options_t ropts = {
-    .manifest_poll_interval_ms = 5000,
-    .checkpoint_lifetime_ms = 60000,
-    .max_memtable_bytes = 64 * 1024 * 1024,
-    .skip_wal_replay = false,
-};
-
-check_result("reader_open", slatedb_db_reader_open(
-    "demo-db",
-    store,
-    NULL,      // optional checkpoint UUID string
-    &ropts,    // optional reader options
-    &reader));
-
-// reader_get / reader_scan / reader_scan_prefix
-check_result("reader_close", slatedb_db_reader_close(reader));
-```
-
-## Builder and Settings
-
-### Settings Sources
-
-```c
-struct slatedb_settings_t* defaults = NULL;
-check_result("settings_default", slatedb_settings_default(&defaults));
-
-struct slatedb_settings_t* from_file = NULL;
-check_result("settings_from_file",
-             slatedb_settings_from_file("config/SlateDb.toml", &from_file));
-
-struct slatedb_settings_t* from_json = NULL;
-check_result("settings_from_json",
-             slatedb_settings_from_json("{\"object_store_cache_bytes\":1048576}", &from_json));
-
-struct slatedb_settings_t* from_env = NULL;
-check_result("settings_from_env", slatedb_settings_from_env("SLATEDB_", &from_env));
-
-struct slatedb_settings_t* env_overrides = NULL;
-check_result("settings_from_env_with_default",
-             slatedb_settings_from_env_with_default("SLATEDB_", defaults, &env_overrides));
-
-struct slatedb_settings_t* autoload = NULL;
-check_result("settings_load", slatedb_settings_load(&autoload));
-
-struct slatedb_settings_kv_t patch = {
-    .key = "compactor_options.max_sst_size",
-    .value_json = "268435456"
-};
-check_result("settings_apply_kv", slatedb_settings_apply_kv(env_overrides, &patch, 1));
-```
-
-### Builder Flow
+## Builder
 
 The builder API lets you stage database-open options before constructing a `slatedb_db_t*`.
 Create a builder with path + object store, apply optional configuration methods, and then call
