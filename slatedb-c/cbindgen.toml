@@ -9,7 +9,8 @@ documentation_style = "c99"
 
 [export]
 include = [
-    "slatedb_error_t",
+    "slatedb_error_kind_t",
+    "slatedb_close_reason_t",
     "slatedb_result_t",
     "slatedb_read_options_t",
     "slatedb_scan_options_t",

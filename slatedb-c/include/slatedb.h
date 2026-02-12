@@ -12,18 +12,24 @@
 #include <stdint.h>
 #include <stdlib.h>
 
-typedef enum slatedb_error_t {
-    SLATEDB_SUCCESS = 0,
-    SLATEDB_INVALID_ARGUMENT = 1,
-    SLATEDB_NULL_POINTER = 2,
-    SLATEDB_INVALID_HANDLE = 3,
-    SLATEDB_TRANSACTION = 4,
-    SLATEDB_CLOSED = 5,
-    SLATEDB_UNAVAILABLE = 6,
-    SLATEDB_INVALID = 7,
-    SLATEDB_DATA = 8,
-    SLATEDB_INTERNAL = 9,
-} slatedb_error_t;
+typedef enum slatedb_close_reason_t {
+    SLATEDB_CLOSE_REASON_NONE = 0,
+    SLATEDB_CLOSE_REASON_CLEAN = 1,
+    SLATEDB_CLOSE_REASON_FENCED = 2,
+    SLATEDB_CLOSE_REASON_PANIC = 3,
+    SLATEDB_CLOSE_REASON_UNKNOWN = 255,
+} slatedb_close_reason_t;
+
+typedef enum slatedb_error_kind_t {
+    SLATEDB_ERROR_KIND_NONE = 0,
+    SLATEDB_ERROR_KIND_TRANSACTION = 1,
+    SLATEDB_ERROR_KIND_CLOSED = 2,
+    SLATEDB_ERROR_KIND_UNAVAILABLE = 3,
+    SLATEDB_ERROR_KIND_INVALID = 4,
+    SLATEDB_ERROR_KIND_DATA = 5,
+    SLATEDB_ERROR_KIND_INTERNAL = 6,
+    SLATEDB_ERROR_KIND_UNKNOWN = 255,
+} slatedb_error_kind_t;
 
 typedef struct slatedb_db_builder_t slatedb_db_builder_t;
 
@@ -36,7 +42,8 @@ typedef struct slatedb_object_store_t slatedb_object_store_t;
 typedef struct slatedb_write_batch_t slatedb_write_batch_t;
 
 typedef struct slatedb_result_t {
-    enum slatedb_error_t error;
+    enum slatedb_error_kind_t kind;
+    enum slatedb_close_reason_t close_reason;
     char *message;
 } slatedb_result_t;
 

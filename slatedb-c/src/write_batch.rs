@@ -1,7 +1,7 @@
 use crate::ffi::{
-    bytes_from_ptr, error_result, merge_options_from_ptr, put_options_from_ptr, slatedb_error_t,
-    slatedb_merge_options_t, slatedb_put_options_t, slatedb_result_t, slatedb_write_batch_t,
-    success_result, validate_write_key, validate_write_key_value,
+    bytes_from_ptr, error_result, merge_options_from_ptr, put_options_from_ptr,
+    slatedb_error_kind_t, slatedb_merge_options_t, slatedb_put_options_t, slatedb_result_t,
+    slatedb_write_batch_t, success_result, validate_write_key, validate_write_key_value,
 };
 use slatedb::WriteBatch;
 
@@ -11,7 +11,7 @@ pub unsafe extern "C" fn slatedb_write_batch_new(
 ) -> slatedb_result_t {
     if out_write_batch.is_null() {
         return error_result(
-            slatedb_error_t::SLATEDB_NULL_POINTER,
+            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
             "out_write_batch pointer is null",
         );
     }
@@ -33,7 +33,7 @@ pub unsafe extern "C" fn slatedb_write_batch_put(
 ) -> slatedb_result_t {
     if write_batch.is_null() {
         return error_result(
-            slatedb_error_t::SLATEDB_INVALID_HANDLE,
+            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
             "invalid write batch handle",
         );
     }
@@ -54,7 +54,7 @@ pub unsafe extern "C" fn slatedb_write_batch_put(
     let handle = &mut *write_batch;
     let Some(batch) = handle.batch.as_mut() else {
         return error_result(
-            slatedb_error_t::SLATEDB_INVALID_HANDLE,
+            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
             "write batch has been consumed",
         );
     };
@@ -74,7 +74,7 @@ pub unsafe extern "C" fn slatedb_write_batch_put_with_options(
 ) -> slatedb_result_t {
     if write_batch.is_null() {
         return error_result(
-            slatedb_error_t::SLATEDB_INVALID_HANDLE,
+            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
             "invalid write batch handle",
         );
     }
@@ -99,7 +99,7 @@ pub unsafe extern "C" fn slatedb_write_batch_put_with_options(
     let handle = &mut *write_batch;
     let Some(batch) = handle.batch.as_mut() else {
         return error_result(
-            slatedb_error_t::SLATEDB_INVALID_HANDLE,
+            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
             "write batch has been consumed",
         );
     };
@@ -118,7 +118,7 @@ pub unsafe extern "C" fn slatedb_write_batch_merge(
 ) -> slatedb_result_t {
     if write_batch.is_null() {
         return error_result(
-            slatedb_error_t::SLATEDB_INVALID_HANDLE,
+            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
             "invalid write batch handle",
         );
     }
@@ -138,7 +138,7 @@ pub unsafe extern "C" fn slatedb_write_batch_merge(
     let handle = &mut *write_batch;
     let Some(batch) = handle.batch.as_mut() else {
         return error_result(
-            slatedb_error_t::SLATEDB_INVALID_HANDLE,
+            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
             "write batch has been consumed",
         );
     };
@@ -158,7 +158,7 @@ pub unsafe extern "C" fn slatedb_write_batch_merge_with_options(
 ) -> slatedb_result_t {
     if write_batch.is_null() {
         return error_result(
-            slatedb_error_t::SLATEDB_INVALID_HANDLE,
+            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
             "invalid write batch handle",
         );
     }
@@ -183,7 +183,7 @@ pub unsafe extern "C" fn slatedb_write_batch_merge_with_options(
     let handle = &mut *write_batch;
     let Some(batch) = handle.batch.as_mut() else {
         return error_result(
-            slatedb_error_t::SLATEDB_INVALID_HANDLE,
+            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
             "write batch has been consumed",
         );
     };
@@ -200,7 +200,7 @@ pub unsafe extern "C" fn slatedb_write_batch_delete(
 ) -> slatedb_result_t {
     if write_batch.is_null() {
         return error_result(
-            slatedb_error_t::SLATEDB_INVALID_HANDLE,
+            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
             "invalid write batch handle",
         );
     }
@@ -216,7 +216,7 @@ pub unsafe extern "C" fn slatedb_write_batch_delete(
     let handle = &mut *write_batch;
     let Some(batch) = handle.batch.as_mut() else {
         return error_result(
-            slatedb_error_t::SLATEDB_INVALID_HANDLE,
+            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
             "write batch has been consumed",
         );
     };
@@ -231,7 +231,7 @@ pub extern "C" fn slatedb_write_batch_close(
 ) -> slatedb_result_t {
     if write_batch.is_null() {
         return error_result(
-            slatedb_error_t::SLATEDB_INVALID_HANDLE,
+            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
             "invalid write batch handle",
         );
     }

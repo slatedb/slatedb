@@ -4,7 +4,7 @@ use slatedb::config::{
     SstBlockSize, Ttl, WriteOptions,
 };
 use slatedb::object_store::ObjectStore;
-use slatedb::{Db, DbBuilder, DbIterator, ErrorKind, WriteBatch};
+use slatedb::{CloseReason, Db, DbBuilder, DbIterator, ErrorKind, WriteBatch};
 use std::ffi::{CStr, CString};
 use std::ops::Bound;
 use std::os::raw::c_char;
@@ -42,23 +42,33 @@ pub struct slatedb_write_batch_t {
 #[repr(C)]
 #[allow(non_camel_case_types)]
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
-pub enum slatedb_error_t {
-    SLATEDB_SUCCESS = 0,
-    SLATEDB_INVALID_ARGUMENT = 1,
-    SLATEDB_NULL_POINTER = 2,
-    SLATEDB_INVALID_HANDLE = 3,
-    SLATEDB_TRANSACTION = 4,
-    SLATEDB_CLOSED = 5,
-    SLATEDB_UNAVAILABLE = 6,
-    SLATEDB_INVALID = 7,
-    SLATEDB_DATA = 8,
-    SLATEDB_INTERNAL = 9,
+pub enum slatedb_error_kind_t {
+    SLATEDB_ERROR_KIND_NONE = 0,
+    SLATEDB_ERROR_KIND_TRANSACTION = 1,
+    SLATEDB_ERROR_KIND_CLOSED = 2,
+    SLATEDB_ERROR_KIND_UNAVAILABLE = 3,
+    SLATEDB_ERROR_KIND_INVALID = 4,
+    SLATEDB_ERROR_KIND_DATA = 5,
+    SLATEDB_ERROR_KIND_INTERNAL = 6,
+    SLATEDB_ERROR_KIND_UNKNOWN = 255,
+}
+
+#[repr(C)]
+#[allow(non_camel_case_types)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum slatedb_close_reason_t {
+    SLATEDB_CLOSE_REASON_NONE = 0,
+    SLATEDB_CLOSE_REASON_CLEAN = 1,
+    SLATEDB_CLOSE_REASON_FENCED = 2,
+    SLATEDB_CLOSE_REASON_PANIC = 3,
+    SLATEDB_CLOSE_REASON_UNKNOWN = 255,
 }
 
 #[repr(C)]
 #[allow(non_camel_case_types)]
 pub struct slatedb_result_t {
-    pub error: slatedb_error_t,
+    pub kind: slatedb_error_kind_t,
+    pub close_reason: slatedb_close_reason_t,
     pub message: *mut c_char,
 }
 
@@ -134,32 +144,81 @@ pub struct slatedb_range_t {
 
 pub(crate) fn success_result() -> slatedb_result_t {
     slatedb_result_t {
-        error: slatedb_error_t::SLATEDB_SUCCESS,
+        kind: slatedb_error_kind_t::SLATEDB_ERROR_KIND_NONE,
+        close_reason: slatedb_close_reason_t::SLATEDB_CLOSE_REASON_NONE,
         message: ptr::null_mut(),
     }
 }
 
-pub(crate) fn error_result(error: slatedb_error_t, message: &str) -> slatedb_result_t {
+pub(crate) fn error_result_with_close_reason(
+    kind: slatedb_error_kind_t,
+    close_reason: slatedb_close_reason_t,
+    message: &str,
+) -> slatedb_result_t {
     slatedb_result_t {
-        error,
+        kind,
+        close_reason,
         message: message_to_cstring(message).into_raw(),
     }
+}
+
+pub(crate) fn error_result(kind: slatedb_error_kind_t, message: &str) -> slatedb_result_t {
+    error_result_with_close_reason(
+        kind,
+        slatedb_close_reason_t::SLATEDB_CLOSE_REASON_NONE,
+        message,
+    )
 }
 
 fn message_to_cstring(message: &str) -> CString {
     CString::new(message).unwrap_or_else(|_| CString::new("invalid error message").unwrap())
 }
 
-pub(crate) fn map_error(err: &slatedb::Error) -> slatedb_error_t {
-    match err.kind() {
-        ErrorKind::Transaction => slatedb_error_t::SLATEDB_TRANSACTION,
-        ErrorKind::Closed(_) => slatedb_error_t::SLATEDB_CLOSED,
-        ErrorKind::Unavailable => slatedb_error_t::SLATEDB_UNAVAILABLE,
-        ErrorKind::Invalid => slatedb_error_t::SLATEDB_INVALID,
-        ErrorKind::Data => slatedb_error_t::SLATEDB_DATA,
-        ErrorKind::Internal => slatedb_error_t::SLATEDB_INTERNAL,
-        _ => slatedb_error_t::SLATEDB_INTERNAL,
+fn map_close_reason(reason: CloseReason) -> slatedb_close_reason_t {
+    match reason {
+        CloseReason::Clean => slatedb_close_reason_t::SLATEDB_CLOSE_REASON_CLEAN,
+        CloseReason::Fenced => slatedb_close_reason_t::SLATEDB_CLOSE_REASON_FENCED,
+        CloseReason::Panic => slatedb_close_reason_t::SLATEDB_CLOSE_REASON_PANIC,
+        _ => slatedb_close_reason_t::SLATEDB_CLOSE_REASON_UNKNOWN,
     }
+}
+
+pub(crate) fn map_error(err: &slatedb::Error) -> (slatedb_error_kind_t, slatedb_close_reason_t) {
+    match err.kind() {
+        ErrorKind::Transaction => (
+            slatedb_error_kind_t::SLATEDB_ERROR_KIND_TRANSACTION,
+            slatedb_close_reason_t::SLATEDB_CLOSE_REASON_NONE,
+        ),
+        ErrorKind::Closed(reason) => (
+            slatedb_error_kind_t::SLATEDB_ERROR_KIND_CLOSED,
+            map_close_reason(reason),
+        ),
+        ErrorKind::Unavailable => (
+            slatedb_error_kind_t::SLATEDB_ERROR_KIND_UNAVAILABLE,
+            slatedb_close_reason_t::SLATEDB_CLOSE_REASON_NONE,
+        ),
+        ErrorKind::Invalid => (
+            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
+            slatedb_close_reason_t::SLATEDB_CLOSE_REASON_NONE,
+        ),
+        ErrorKind::Data => (
+            slatedb_error_kind_t::SLATEDB_ERROR_KIND_DATA,
+            slatedb_close_reason_t::SLATEDB_CLOSE_REASON_NONE,
+        ),
+        ErrorKind::Internal => (
+            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INTERNAL,
+            slatedb_close_reason_t::SLATEDB_CLOSE_REASON_NONE,
+        ),
+        _ => (
+            slatedb_error_kind_t::SLATEDB_ERROR_KIND_UNKNOWN,
+            slatedb_close_reason_t::SLATEDB_CLOSE_REASON_NONE,
+        ),
+    }
+}
+
+pub(crate) fn error_from_slate_error(err: &slatedb::Error, message: &str) -> slatedb_result_t {
+    let (kind, close_reason) = map_error(err);
+    error_result_with_close_reason(kind, close_reason, message)
 }
 
 pub(crate) fn create_runtime() -> Result<Arc<Runtime>, slatedb_result_t> {
@@ -169,7 +228,7 @@ pub(crate) fn create_runtime() -> Result<Arc<Runtime>, slatedb_result_t> {
         .map(Arc::new)
         .map_err(|e| {
             error_result(
-                slatedb_error_t::SLATEDB_INTERNAL,
+                slatedb_error_kind_t::SLATEDB_ERROR_KIND_INTERNAL,
                 &format!("failed to create runtime: {e}"),
             )
         })
@@ -181,7 +240,7 @@ pub(crate) unsafe fn cstr_to_string(
 ) -> Result<String, slatedb_result_t> {
     if ptr.is_null() {
         return Err(error_result(
-            slatedb_error_t::SLATEDB_NULL_POINTER,
+            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
             &format!("{field_name} pointer is null"),
         ));
     }
@@ -189,7 +248,7 @@ pub(crate) unsafe fn cstr_to_string(
     let cstr = CStr::from_ptr(ptr);
     cstr.to_str().map(|s| s.to_owned()).map_err(|_| {
         error_result(
-            slatedb_error_t::SLATEDB_INVALID_ARGUMENT,
+            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
             &format!("{field_name} is not valid UTF-8"),
         )
     })
@@ -205,7 +264,7 @@ pub(crate) unsafe fn bytes_from_ptr<'a>(
     }
     if ptr.is_null() {
         return Err(error_result(
-            slatedb_error_t::SLATEDB_NULL_POINTER,
+            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
             &format!("{field_name} pointer is null"),
         ));
     }
@@ -227,7 +286,7 @@ pub(crate) fn durability_level_from_u8(
         0 => Ok(DurabilityLevel::Memory),
         1 => Ok(DurabilityLevel::Remote),
         _ => Err(error_result(
-            slatedb_error_t::SLATEDB_INVALID_ARGUMENT,
+            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
             "invalid durability_filter (expected 0=Memory or 1=Remote)",
         )),
     }
@@ -258,13 +317,13 @@ pub(crate) unsafe fn scan_options_from_ptr(
     let options = &*ptr;
     let read_ahead_bytes = usize::try_from(options.read_ahead_bytes).map_err(|_| {
         error_result(
-            slatedb_error_t::SLATEDB_INVALID_ARGUMENT,
+            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
             "read_ahead_bytes does not fit in usize",
         )
     })?;
     let max_fetch_tasks = usize::try_from(options.max_fetch_tasks).map_err(|_| {
         error_result(
-            slatedb_error_t::SLATEDB_INVALID_ARGUMENT,
+            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
             "max_fetch_tasks does not fit in usize",
         )
     })?;
@@ -295,7 +354,7 @@ fn ttl_from_parts(ttl_type: u8, ttl_value: u64) -> Result<Ttl, slatedb_result_t>
         1 => Ok(Ttl::NoExpiry),
         2 => Ok(Ttl::ExpireAfter(ttl_value)),
         _ => Err(error_result(
-            slatedb_error_t::SLATEDB_INVALID_ARGUMENT,
+            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
             "invalid ttl_type (expected 0=Default, 1=NoExpiry, 2=ExpireAfter)",
         )),
     }
@@ -340,7 +399,7 @@ pub(crate) unsafe fn flush_options_from_ptr(
         1 => FlushType::Wal,
         _ => {
             return Err(error_result(
-                slatedb_error_t::SLATEDB_INVALID_ARGUMENT,
+                slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
                 "invalid flush_type (expected 0=MemTable or 1=Wal)",
             ));
         }
@@ -361,7 +420,7 @@ pub(crate) fn sst_block_size_from_u8(
         6 => Ok(SstBlockSize::Block32Kib),
         7 => Ok(SstBlockSize::Block64Kib),
         _ => Err(error_result(
-            slatedb_error_t::SLATEDB_INVALID_ARGUMENT,
+            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
             "invalid sst_block_size (expected 1..7)",
         )),
     }
@@ -391,7 +450,7 @@ unsafe fn bound_from_c(
             Ok(Bound::Excluded(Bytes::copy_from_slice(bytes)))
         }
         _ => Err(error_result(
-            slatedb_error_t::SLATEDB_INVALID_ARGUMENT,
+            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
             "invalid bound kind (expected 0=Unbounded, 1=Included, 2=Excluded)",
         )),
     }
@@ -400,13 +459,13 @@ unsafe fn bound_from_c(
 pub(crate) fn validate_write_key(key: &[u8]) -> Result<(), slatedb_result_t> {
     if key.is_empty() {
         return Err(error_result(
-            slatedb_error_t::SLATEDB_INVALID_ARGUMENT,
+            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
             "key cannot be empty",
         ));
     }
     if key.len() > u16::MAX as usize {
         return Err(error_result(
-            slatedb_error_t::SLATEDB_INVALID_ARGUMENT,
+            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
             "key size must be <= u16::MAX",
         ));
     }
@@ -417,7 +476,7 @@ pub(crate) fn validate_write_key_value(key: &[u8], value: &[u8]) -> Result<(), s
     validate_write_key(key)?;
     if value.len() > u32::MAX as usize {
         return Err(error_result(
-            slatedb_error_t::SLATEDB_INVALID_ARGUMENT,
+            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
             "value size must be <= u32::MAX",
         ));
     }

@@ -6,10 +6,11 @@ mod object_store;
 mod write_batch;
 
 pub use ffi::{
-    slatedb_bound_t, slatedb_db_builder_t, slatedb_db_t, slatedb_error_t, slatedb_flush_options_t,
-    slatedb_iterator_t, slatedb_merge_options_t, slatedb_object_store_t, slatedb_put_options_t,
-    slatedb_range_t, slatedb_read_options_t, slatedb_result_t, slatedb_scan_options_t,
-    slatedb_sst_block_size_t, slatedb_write_batch_t, slatedb_write_options_t,
+    slatedb_bound_t, slatedb_close_reason_t, slatedb_db_builder_t, slatedb_db_t,
+    slatedb_error_kind_t, slatedb_flush_options_t, slatedb_iterator_t, slatedb_merge_options_t,
+    slatedb_object_store_t, slatedb_put_options_t, slatedb_range_t, slatedb_read_options_t,
+    slatedb_result_t, slatedb_scan_options_t, slatedb_sst_block_size_t, slatedb_write_batch_t,
+    slatedb_write_options_t,
 };
 
 pub use db::{

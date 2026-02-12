@@ -1,6 +1,6 @@
 use crate::ffi::{
-    cstr_to_string, error_result, map_error, slatedb_error_t, slatedb_object_store_t,
-    slatedb_result_t, success_result,
+    cstr_to_string, error_from_slate_error, error_result, slatedb_error_kind_t,
+    slatedb_object_store_t, slatedb_result_t, success_result,
 };
 use slatedb::Db;
 
@@ -16,7 +16,7 @@ pub unsafe extern "C" fn slatedb_db_resolve_object_store(
 ) -> slatedb_result_t {
     if out_object_store.is_null() {
         return error_result(
-            slatedb_error_t::SLATEDB_NULL_POINTER,
+            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
             "out_object_store pointer is null",
         );
     }
@@ -32,10 +32,7 @@ pub unsafe extern "C" fn slatedb_db_resolve_object_store(
             *out_object_store = Box::into_raw(handle);
             success_result()
         }
-        Err(err) => {
-            let code = map_error(&err);
-            error_result(code, &format!("failed to resolve object store: {err}"))
-        }
+        Err(err) => error_from_slate_error(&err, &format!("failed to resolve object store: {err}")),
     }
 }
 
@@ -45,7 +42,7 @@ pub extern "C" fn slatedb_object_store_close(
 ) -> slatedb_result_t {
     if object_store.is_null() {
         return error_result(
-            slatedb_error_t::SLATEDB_INVALID_HANDLE,
+            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
             "invalid object store handle",
         );
     }

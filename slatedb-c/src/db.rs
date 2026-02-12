@@ -1,8 +1,8 @@
 use crate::ffi::{
-    alloc_bytes, bytes_from_ptr, create_runtime, cstr_to_string, error_result,
-    flush_options_from_ptr, map_error, merge_options_from_ptr, put_options_from_ptr, range_from_c,
-    read_options_from_ptr, scan_options_from_ptr, slatedb_db_builder_t, slatedb_db_t,
-    slatedb_error_t, slatedb_flush_options_t, slatedb_iterator_t, slatedb_merge_options_t,
+    alloc_bytes, bytes_from_ptr, create_runtime, cstr_to_string, error_from_slate_error,
+    error_result, flush_options_from_ptr, merge_options_from_ptr, put_options_from_ptr,
+    range_from_c, read_options_from_ptr, scan_options_from_ptr, slatedb_db_builder_t, slatedb_db_t,
+    slatedb_error_kind_t, slatedb_flush_options_t, slatedb_iterator_t, slatedb_merge_options_t,
     slatedb_object_store_t, slatedb_put_options_t, slatedb_range_t, slatedb_read_options_t,
     slatedb_result_t, slatedb_scan_options_t, slatedb_sst_block_size_t, slatedb_write_batch_t,
     slatedb_write_options_t, sst_block_size_from_u8, success_result, validate_write_key,
@@ -22,13 +22,13 @@ pub unsafe extern "C" fn slatedb_db_open(
 ) -> slatedb_result_t {
     if out_db.is_null() {
         return error_result(
-            slatedb_error_t::SLATEDB_NULL_POINTER,
+            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
             "out_db pointer is null",
         );
     }
     if object_store.is_null() {
         return error_result(
-            slatedb_error_t::SLATEDB_INVALID_HANDLE,
+            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
             "invalid object_store handle",
         );
     }
@@ -50,7 +50,7 @@ pub unsafe extern "C" fn slatedb_db_open(
             *out_db = Box::into_raw(handle);
             success_result()
         }
-        Err(err) => error_result(map_error(&err), &format!("db open failed: {err}")),
+        Err(err) => error_from_slate_error(&err, &format!("db open failed: {err}")),
     }
 }
 
@@ -66,13 +66,13 @@ pub unsafe extern "C" fn slatedb_db_builder_new(
 ) -> slatedb_result_t {
     if out_builder.is_null() {
         return error_result(
-            slatedb_error_t::SLATEDB_NULL_POINTER,
+            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
             "out_builder pointer is null",
         );
     }
     if object_store.is_null() {
         return error_result(
-            slatedb_error_t::SLATEDB_INVALID_HANDLE,
+            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
             "invalid object_store handle",
         );
     }
@@ -99,13 +99,13 @@ pub unsafe extern "C" fn slatedb_db_builder_with_wal_object_store(
 ) -> slatedb_result_t {
     if builder.is_null() {
         return error_result(
-            slatedb_error_t::SLATEDB_INVALID_HANDLE,
+            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
             "invalid builder handle",
         );
     }
     if wal_object_store.is_null() {
         return error_result(
-            slatedb_error_t::SLATEDB_INVALID_HANDLE,
+            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
             "invalid wal_object_store handle",
         );
     }
@@ -113,7 +113,7 @@ pub unsafe extern "C" fn slatedb_db_builder_with_wal_object_store(
     let handle = &mut *builder;
     let Some(current) = handle.builder.take() else {
         return error_result(
-            slatedb_error_t::SLATEDB_INVALID_HANDLE,
+            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
             "builder has been consumed",
         );
     };
@@ -130,7 +130,7 @@ pub unsafe extern "C" fn slatedb_db_builder_with_seed(
 ) -> slatedb_result_t {
     if builder.is_null() {
         return error_result(
-            slatedb_error_t::SLATEDB_INVALID_HANDLE,
+            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
             "invalid builder handle",
         );
     }
@@ -138,7 +138,7 @@ pub unsafe extern "C" fn slatedb_db_builder_with_seed(
     let handle = &mut *builder;
     let Some(current) = handle.builder.take() else {
         return error_result(
-            slatedb_error_t::SLATEDB_INVALID_HANDLE,
+            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
             "builder has been consumed",
         );
     };
@@ -154,7 +154,7 @@ pub unsafe extern "C" fn slatedb_db_builder_with_sst_block_size(
 ) -> slatedb_result_t {
     if builder.is_null() {
         return error_result(
-            slatedb_error_t::SLATEDB_INVALID_HANDLE,
+            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
             "invalid builder handle",
         );
     }
@@ -167,7 +167,7 @@ pub unsafe extern "C" fn slatedb_db_builder_with_sst_block_size(
     let handle = &mut *builder;
     let Some(current) = handle.builder.take() else {
         return error_result(
-            slatedb_error_t::SLATEDB_INVALID_HANDLE,
+            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
             "builder has been consumed",
         );
     };
@@ -184,13 +184,13 @@ pub unsafe extern "C" fn slatedb_db_builder_build(
 ) -> slatedb_result_t {
     if builder.is_null() {
         return error_result(
-            slatedb_error_t::SLATEDB_INVALID_HANDLE,
+            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
             "invalid builder handle",
         );
     }
     if out_db.is_null() {
         return error_result(
-            slatedb_error_t::SLATEDB_NULL_POINTER,
+            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
             "out_db pointer is null",
         );
     }
@@ -198,7 +198,7 @@ pub unsafe extern "C" fn slatedb_db_builder_build(
     let mut builder_handle = Box::from_raw(builder);
     let Some(builder) = builder_handle.builder.take() else {
         return error_result(
-            slatedb_error_t::SLATEDB_INVALID_HANDLE,
+            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
             "builder has been consumed",
         );
     };
@@ -214,7 +214,7 @@ pub unsafe extern "C" fn slatedb_db_builder_build(
             *out_db = Box::into_raw(db_handle);
             success_result()
         }
-        Err(err) => error_result(map_error(&err), &format!("builder build failed: {err}")),
+        Err(err) => error_from_slate_error(&err, &format!("builder build failed: {err}")),
     }
 }
 
@@ -222,7 +222,7 @@ pub unsafe extern "C" fn slatedb_db_builder_build(
 pub extern "C" fn slatedb_db_builder_close(builder: *mut slatedb_db_builder_t) -> slatedb_result_t {
     if builder.is_null() {
         return error_result(
-            slatedb_error_t::SLATEDB_INVALID_HANDLE,
+            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
             "invalid builder handle",
         );
     }
@@ -237,13 +237,16 @@ pub extern "C" fn slatedb_db_builder_close(builder: *mut slatedb_db_builder_t) -
 #[no_mangle]
 pub unsafe extern "C" fn slatedb_db_status(db: *const slatedb_db_t) -> slatedb_result_t {
     if db.is_null() {
-        return error_result(slatedb_error_t::SLATEDB_INVALID_HANDLE, "invalid db handle");
+        return error_result(
+            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
+            "invalid db handle",
+        );
     }
 
     let handle = &*db;
     match handle.db.status() {
         Ok(()) => success_result(),
-        Err(err) => error_result(map_error(&err), &format!("db status failed: {err}")),
+        Err(err) => error_from_slate_error(&err, &format!("db status failed: {err}")),
     }
 }
 
@@ -278,23 +281,26 @@ pub unsafe extern "C" fn slatedb_db_get_with_options(
     out_val_len: *mut usize,
 ) -> slatedb_result_t {
     if db.is_null() {
-        return error_result(slatedb_error_t::SLATEDB_INVALID_HANDLE, "invalid db handle");
+        return error_result(
+            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
+            "invalid db handle",
+        );
     }
     if out_val.is_null() {
         return error_result(
-            slatedb_error_t::SLATEDB_NULL_POINTER,
+            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
             "out_val pointer is null",
         );
     }
     if out_val_len.is_null() {
         return error_result(
-            slatedb_error_t::SLATEDB_NULL_POINTER,
+            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
             "out_val_len pointer is null",
         );
     }
     if out_found.is_null() {
         return error_result(
-            slatedb_error_t::SLATEDB_NULL_POINTER,
+            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
             "out_found pointer is null",
         );
     }
@@ -328,7 +334,7 @@ pub unsafe extern "C" fn slatedb_db_get_with_options(
             *out_found = false;
             success_result()
         }
-        Err(err) => error_result(map_error(&err), &format!("db get failed: {err}")),
+        Err(err) => error_from_slate_error(&err, &format!("db get failed: {err}")),
     }
 }
 
@@ -341,7 +347,10 @@ pub unsafe extern "C" fn slatedb_db_put(
     value_len: usize,
 ) -> slatedb_result_t {
     if db.is_null() {
-        return error_result(slatedb_error_t::SLATEDB_INVALID_HANDLE, "invalid db handle");
+        return error_result(
+            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
+            "invalid db handle",
+        );
     }
 
     let key = match bytes_from_ptr(key, key_len, "key") {
@@ -360,7 +369,7 @@ pub unsafe extern "C" fn slatedb_db_put(
     let handle = &mut *db;
     match handle.runtime.block_on(handle.db.put(key, value)) {
         Ok(()) => success_result(),
-        Err(err) => error_result(map_error(&err), &format!("db put failed: {err}")),
+        Err(err) => error_from_slate_error(&err, &format!("db put failed: {err}")),
     }
 }
 
@@ -375,7 +384,10 @@ pub unsafe extern "C" fn slatedb_db_put_with_options(
     write_options: *const slatedb_write_options_t,
 ) -> slatedb_result_t {
     if db.is_null() {
-        return error_result(slatedb_error_t::SLATEDB_INVALID_HANDLE, "invalid db handle");
+        return error_result(
+            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
+            "invalid db handle",
+        );
     }
 
     let key = match bytes_from_ptr(key, key_len, "key") {
@@ -405,10 +417,7 @@ pub unsafe extern "C" fn slatedb_db_put_with_options(
         &write_options,
     )) {
         Ok(()) => success_result(),
-        Err(err) => error_result(
-            map_error(&err),
-            &format!("db put_with_options failed: {err}"),
-        ),
+        Err(err) => error_from_slate_error(&err, &format!("db put_with_options failed: {err}")),
     }
 }
 
@@ -419,7 +428,10 @@ pub unsafe extern "C" fn slatedb_db_delete(
     key_len: usize,
 ) -> slatedb_result_t {
     if db.is_null() {
-        return error_result(slatedb_error_t::SLATEDB_INVALID_HANDLE, "invalid db handle");
+        return error_result(
+            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
+            "invalid db handle",
+        );
     }
 
     let key = match bytes_from_ptr(key, key_len, "key") {
@@ -433,7 +445,7 @@ pub unsafe extern "C" fn slatedb_db_delete(
     let handle = &mut *db;
     match handle.runtime.block_on(handle.db.delete(key)) {
         Ok(()) => success_result(),
-        Err(err) => error_result(map_error(&err), &format!("db delete failed: {err}")),
+        Err(err) => error_from_slate_error(&err, &format!("db delete failed: {err}")),
     }
 }
 
@@ -445,7 +457,10 @@ pub unsafe extern "C" fn slatedb_db_delete_with_options(
     write_options: *const slatedb_write_options_t,
 ) -> slatedb_result_t {
     if db.is_null() {
-        return error_result(slatedb_error_t::SLATEDB_INVALID_HANDLE, "invalid db handle");
+        return error_result(
+            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
+            "invalid db handle",
+        );
     }
 
     let key = match bytes_from_ptr(key, key_len, "key") {
@@ -464,10 +479,7 @@ pub unsafe extern "C" fn slatedb_db_delete_with_options(
         .block_on(handle.db.delete_with_options(key, &write_options))
     {
         Ok(()) => success_result(),
-        Err(err) => error_result(
-            map_error(&err),
-            &format!("db delete_with_options failed: {err}"),
-        ),
+        Err(err) => error_from_slate_error(&err, &format!("db delete_with_options failed: {err}")),
     }
 }
 
@@ -480,7 +492,10 @@ pub unsafe extern "C" fn slatedb_db_merge(
     value_len: usize,
 ) -> slatedb_result_t {
     if db.is_null() {
-        return error_result(slatedb_error_t::SLATEDB_INVALID_HANDLE, "invalid db handle");
+        return error_result(
+            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
+            "invalid db handle",
+        );
     }
 
     let key = match bytes_from_ptr(key, key_len, "key") {
@@ -499,7 +514,7 @@ pub unsafe extern "C" fn slatedb_db_merge(
     let handle = &mut *db;
     match handle.runtime.block_on(handle.db.merge(key, value)) {
         Ok(()) => success_result(),
-        Err(err) => error_result(map_error(&err), &format!("db merge failed: {err}")),
+        Err(err) => error_from_slate_error(&err, &format!("db merge failed: {err}")),
     }
 }
 
@@ -514,7 +529,10 @@ pub unsafe extern "C" fn slatedb_db_merge_with_options(
     write_options: *const slatedb_write_options_t,
 ) -> slatedb_result_t {
     if db.is_null() {
-        return error_result(slatedb_error_t::SLATEDB_INVALID_HANDLE, "invalid db handle");
+        return error_result(
+            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
+            "invalid db handle",
+        );
     }
 
     let key = match bytes_from_ptr(key, key_len, "key") {
@@ -544,10 +562,7 @@ pub unsafe extern "C" fn slatedb_db_merge_with_options(
         &write_options,
     )) {
         Ok(()) => success_result(),
-        Err(err) => error_result(
-            map_error(&err),
-            &format!("db merge_with_options failed: {err}"),
-        ),
+        Err(err) => error_from_slate_error(&err, &format!("db merge_with_options failed: {err}")),
     }
 }
 
@@ -566,11 +581,14 @@ pub unsafe extern "C" fn slatedb_db_write_with_options(
     write_options: *const slatedb_write_options_t,
 ) -> slatedb_result_t {
     if db.is_null() {
-        return error_result(slatedb_error_t::SLATEDB_INVALID_HANDLE, "invalid db handle");
+        return error_result(
+            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
+            "invalid db handle",
+        );
     }
     if write_batch.is_null() {
         return error_result(
-            slatedb_error_t::SLATEDB_INVALID_HANDLE,
+            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
             "invalid write_batch handle",
         );
     }
@@ -580,7 +598,7 @@ pub unsafe extern "C" fn slatedb_db_write_with_options(
     let write_batch_handle = &mut *write_batch;
     let Some(batch) = write_batch_handle.batch.take() else {
         return error_result(
-            slatedb_error_t::SLATEDB_INVALID_HANDLE,
+            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
             "write batch has been consumed",
         );
     };
@@ -591,10 +609,7 @@ pub unsafe extern "C" fn slatedb_db_write_with_options(
         .block_on(db_handle.db.write_with_options(batch, &write_options))
     {
         Ok(()) => success_result(),
-        Err(err) => error_result(
-            map_error(&err),
-            &format!("db write_with_options failed: {err}"),
-        ),
+        Err(err) => error_from_slate_error(&err, &format!("db write_with_options failed: {err}")),
     }
 }
 
@@ -615,11 +630,14 @@ pub unsafe extern "C" fn slatedb_db_scan_with_options(
     out_iterator: *mut *mut slatedb_iterator_t,
 ) -> slatedb_result_t {
     if db.is_null() {
-        return error_result(slatedb_error_t::SLATEDB_INVALID_HANDLE, "invalid db handle");
+        return error_result(
+            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
+            "invalid db handle",
+        );
     }
     if out_iterator.is_null() {
         return error_result(
-            slatedb_error_t::SLATEDB_NULL_POINTER,
+            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
             "out_iterator pointer is null",
         );
     }
@@ -646,7 +664,7 @@ pub unsafe extern "C" fn slatedb_db_scan_with_options(
             *out_iterator = Box::into_raw(iterator);
             success_result()
         }
-        Err(err) => error_result(map_error(&err), &format!("db scan failed: {err}")),
+        Err(err) => error_from_slate_error(&err, &format!("db scan failed: {err}")),
     }
 }
 
@@ -669,11 +687,14 @@ pub unsafe extern "C" fn slatedb_db_scan_prefix_with_options(
     out_iterator: *mut *mut slatedb_iterator_t,
 ) -> slatedb_result_t {
     if db.is_null() {
-        return error_result(slatedb_error_t::SLATEDB_INVALID_HANDLE, "invalid db handle");
+        return error_result(
+            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
+            "invalid db handle",
+        );
     }
     if out_iterator.is_null() {
         return error_result(
-            slatedb_error_t::SLATEDB_NULL_POINTER,
+            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
             "out_iterator pointer is null",
         );
     }
@@ -700,20 +721,23 @@ pub unsafe extern "C" fn slatedb_db_scan_prefix_with_options(
             *out_iterator = Box::into_raw(iterator);
             success_result()
         }
-        Err(err) => error_result(map_error(&err), &format!("db scan_prefix failed: {err}")),
+        Err(err) => error_from_slate_error(&err, &format!("db scan_prefix failed: {err}")),
     }
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn slatedb_db_flush(db: *mut slatedb_db_t) -> slatedb_result_t {
     if db.is_null() {
-        return error_result(slatedb_error_t::SLATEDB_INVALID_HANDLE, "invalid db handle");
+        return error_result(
+            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
+            "invalid db handle",
+        );
     }
 
     let handle = &mut *db;
     match handle.runtime.block_on(handle.db.flush()) {
         Ok(()) => success_result(),
-        Err(err) => error_result(map_error(&err), &format!("db flush failed: {err}")),
+        Err(err) => error_from_slate_error(&err, &format!("db flush failed: {err}")),
     }
 }
 
@@ -723,7 +747,10 @@ pub unsafe extern "C" fn slatedb_db_flush_with_options(
     flush_options: *const slatedb_flush_options_t,
 ) -> slatedb_result_t {
     if db.is_null() {
-        return error_result(slatedb_error_t::SLATEDB_INVALID_HANDLE, "invalid db handle");
+        return error_result(
+            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
+            "invalid db handle",
+        );
     }
 
     let flush_options = match flush_options_from_ptr(flush_options) {
@@ -737,10 +764,7 @@ pub unsafe extern "C" fn slatedb_db_flush_with_options(
         .block_on(handle.db.flush_with_options(flush_options))
     {
         Ok(()) => success_result(),
-        Err(err) => error_result(
-            map_error(&err),
-            &format!("db flush_with_options failed: {err}"),
-        ),
+        Err(err) => error_from_slate_error(&err, &format!("db flush_with_options failed: {err}")),
     }
 }
 
@@ -748,12 +772,15 @@ pub unsafe extern "C" fn slatedb_db_flush_with_options(
 #[no_mangle]
 pub unsafe extern "C" fn slatedb_db_close(db: *mut slatedb_db_t) -> slatedb_result_t {
     if db.is_null() {
-        return error_result(slatedb_error_t::SLATEDB_INVALID_HANDLE, "invalid db handle");
+        return error_result(
+            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
+            "invalid db handle",
+        );
     }
 
     let handle = Box::from_raw(db);
     match handle.runtime.block_on(handle.db.close()) {
         Ok(()) => success_result(),
-        Err(err) => error_result(map_error(&err), &format!("db close failed: {err}")),
+        Err(err) => error_from_slate_error(&err, &format!("db close failed: {err}")),
     }
 }

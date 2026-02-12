@@ -1,6 +1,6 @@
 use crate::ffi::{
-    alloc_bytes, bytes_from_ptr, error_result, map_error, slatedb_error_t, slatedb_iterator_t,
-    slatedb_result_t, success_result,
+    alloc_bytes, bytes_from_ptr, error_from_slate_error, error_result, slatedb_error_kind_t,
+    slatedb_iterator_t, slatedb_result_t, success_result,
 };
 
 #[no_mangle]
@@ -14,37 +14,37 @@ pub unsafe extern "C" fn slatedb_iterator_next(
 ) -> slatedb_result_t {
     if iterator.is_null() {
         return error_result(
-            slatedb_error_t::SLATEDB_INVALID_HANDLE,
+            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
             "invalid iterator handle",
         );
     }
     if out_key.is_null() {
         return error_result(
-            slatedb_error_t::SLATEDB_NULL_POINTER,
+            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
             "out_key pointer is null",
         );
     }
     if out_key_len.is_null() {
         return error_result(
-            slatedb_error_t::SLATEDB_NULL_POINTER,
+            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
             "out_key_len pointer is null",
         );
     }
     if out_val.is_null() {
         return error_result(
-            slatedb_error_t::SLATEDB_NULL_POINTER,
+            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
             "out_val pointer is null",
         );
     }
     if out_val_len.is_null() {
         return error_result(
-            slatedb_error_t::SLATEDB_NULL_POINTER,
+            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
             "out_val_len pointer is null",
         );
     }
     if out_has_item.is_null() {
         return error_result(
-            slatedb_error_t::SLATEDB_NULL_POINTER,
+            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
             "out_has_item pointer is null",
         );
     }
@@ -71,7 +71,7 @@ pub unsafe extern "C" fn slatedb_iterator_next(
             *out_has_item = false;
             success_result()
         }
-        Err(err) => error_result(map_error(&err), &format!("iterator next failed: {err}")),
+        Err(err) => error_from_slate_error(&err, &format!("iterator next failed: {err}")),
     }
 }
 
@@ -83,7 +83,7 @@ pub unsafe extern "C" fn slatedb_iterator_seek(
 ) -> slatedb_result_t {
     if iterator.is_null() {
         return error_result(
-            slatedb_error_t::SLATEDB_INVALID_HANDLE,
+            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
             "invalid iterator handle",
         );
     }
@@ -96,7 +96,7 @@ pub unsafe extern "C" fn slatedb_iterator_seek(
     let handle = &mut *iterator;
     match handle.runtime.block_on(handle.iter.seek(key)) {
         Ok(()) => success_result(),
-        Err(err) => error_result(map_error(&err), &format!("iterator seek failed: {err}")),
+        Err(err) => error_from_slate_error(&err, &format!("iterator seek failed: {err}")),
     }
 }
 
@@ -104,7 +104,7 @@ pub unsafe extern "C" fn slatedb_iterator_seek(
 pub extern "C" fn slatedb_iterator_close(iterator: *mut slatedb_iterator_t) -> slatedb_result_t {
     if iterator.is_null() {
         return error_result(
-            slatedb_error_t::SLATEDB_INVALID_HANDLE,
+            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
             "invalid iterator handle",
         );
     }
