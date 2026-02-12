@@ -5,13 +5,15 @@
 
 use crate::ffi::{
     alloc_bytes, bytes_from_ptr, create_runtime, cstr_to_string, error_from_slate_error,
-    flush_options_from_ptr, merge_options_from_ptr, put_options_from_ptr, range_from_c,
-    read_options_from_ptr, require_handle, require_out_ptr, scan_options_from_ptr, slatedb_db_t,
-    slatedb_flush_options_t, slatedb_iterator_t, slatedb_merge_options_t, slatedb_object_store_t,
-    slatedb_put_options_t, slatedb_range_t, slatedb_read_options_t, slatedb_result_t,
-    slatedb_scan_options_t, slatedb_write_batch_t, slatedb_write_options_t, success_result,
-    take_write_batch, validate_write_key, validate_write_key_value, write_options_from_ptr,
+    error_result, flush_options_from_ptr, merge_options_from_ptr, put_options_from_ptr,
+    range_from_c, read_options_from_ptr, require_handle, require_out_ptr, scan_options_from_ptr,
+    slatedb_db_t, slatedb_error_kind_t, slatedb_flush_options_t, slatedb_iterator_t,
+    slatedb_merge_options_t, slatedb_object_store_t, slatedb_put_options_t, slatedb_range_t,
+    slatedb_read_options_t, slatedb_result_t, slatedb_scan_options_t, slatedb_write_batch_t,
+    slatedb_write_options_t, success_result, take_write_batch, validate_write_key,
+    validate_write_key_value, write_options_from_ptr,
 };
+use serde_json::{Map, Value};
 use slatedb::Db;
 
 /// Opens a database using a pre-resolved object store handle.
@@ -91,6 +93,127 @@ pub unsafe extern "C" fn slatedb_db_status(db: *const slatedb_db_t) -> slatedb_r
         Ok(()) => success_result(),
         Err(err) => error_from_slate_error(&err, &format!("db status failed: {err}")),
     }
+}
+
+/// Returns a JSON snapshot of current metrics for the database.
+///
+/// The payload is a UTF-8 JSON object mapping metric name to metric value:
+/// `{ "db/get_requests": 42, ... }`.
+///
+/// ## Arguments
+/// - `db`: Database handle.
+/// - `out_json`: Output pointer to Rust-allocated UTF-8 bytes.
+/// - `out_json_len`: Output length for `out_json`.
+///
+/// ## Returns
+/// - `slatedb_result_t` indicating success/failure.
+///
+/// ## Errors
+/// - Returns `SLATEDB_ERROR_KIND_INVALID` for invalid pointers/handles.
+/// - Returns `SLATEDB_ERROR_KIND_INTERNAL` if JSON serialization fails.
+///
+/// ## Safety
+/// - `db`, `out_json`, and `out_json_len` must be valid non-null pointers.
+/// - `out_json` must be freed with `slatedb_bytes_free`.
+#[no_mangle]
+pub unsafe extern "C" fn slatedb_db_metrics(
+    db: *const slatedb_db_t,
+    out_json: *mut *mut u8,
+    out_json_len: *mut usize,
+) -> slatedb_result_t {
+    if let Err(err) = require_handle(db, "db") {
+        return err;
+    }
+    if let Err(err) = require_out_ptr(out_json, "out_json") {
+        return err;
+    }
+    if let Err(err) = require_out_ptr(out_json_len, "out_json_len") {
+        return err;
+    }
+
+    *out_json = std::ptr::null_mut();
+    *out_json_len = 0;
+
+    let handle = &*db;
+    let registry = handle.db.metrics();
+    let mut snapshot = Map::new();
+
+    for name in registry.names() {
+        if let Some(stat) = registry.lookup(name) {
+            snapshot.insert(name.to_owned(), Value::from(stat.get()));
+        }
+    }
+
+    match serde_json::to_vec(&Value::Object(snapshot)) {
+        Ok(encoded) => {
+            let (json_data, json_len) = alloc_bytes(&encoded);
+            *out_json = json_data;
+            *out_json_len = json_len;
+            success_result()
+        }
+        Err(err) => error_result(
+            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INTERNAL,
+            &format!("db metrics serialization failed: {err}"),
+        ),
+    }
+}
+
+/// Reads a single metric value by name.
+///
+/// ## Arguments
+/// - `db`: Database handle.
+/// - `name`: Null-terminated UTF-8 metric name (for example `db/get_requests`).
+/// - `out_present`: Set to `true` when the metric exists.
+/// - `out_value`: Metric value when `out_present` is true.
+///
+/// ## Returns
+/// - `slatedb_result_t` indicating success/failure.
+///
+/// ## Errors
+/// - Returns `SLATEDB_ERROR_KIND_INVALID` for invalid pointers/handles or
+///   invalid UTF-8 metric names.
+///
+/// ## Safety
+/// - `db`, `name`, `out_present`, and `out_value` must be valid non-null
+///   pointers.
+#[no_mangle]
+pub unsafe extern "C" fn slatedb_db_metric_get(
+    db: *const slatedb_db_t,
+    name: *const std::os::raw::c_char,
+    out_present: *mut bool,
+    out_value: *mut i64,
+) -> slatedb_result_t {
+    if let Err(err) = require_handle(db, "db") {
+        return err;
+    }
+    if let Err(err) = require_out_ptr(out_present, "out_present") {
+        return err;
+    }
+    if let Err(err) = require_out_ptr(out_value, "out_value") {
+        return err;
+    }
+
+    *out_present = false;
+    *out_value = 0;
+
+    let metric_name = match cstr_to_string(name, "name") {
+        Ok(name) => name,
+        Err(err) => return err,
+    };
+
+    let handle = &*db;
+    let registry = handle.db.metrics();
+    for registered_name in registry.names() {
+        if registered_name == metric_name {
+            if let Some(stat) = registry.lookup(registered_name) {
+                *out_present = true;
+                *out_value = stat.get();
+            }
+            break;
+        }
+    }
+
+    success_result()
 }
 
 /// Reads a single key using default read options.
@@ -860,5 +983,184 @@ pub unsafe extern "C" fn slatedb_db_close(db: *mut slatedb_db_t) -> slatedb_resu
     match handle.runtime.block_on(handle.db.close()) {
         Ok(()) => success_result(),
         Err(err) => error_from_slate_error(&err, &format!("db close failed: {err}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ffi::slatedb_error_kind_t;
+    use std::ffi::{CStr, CString};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Arc;
+    use tokio::runtime::{Builder as RuntimeBuilder, Runtime};
+
+    fn next_test_path() -> String {
+        static NEXT_DB_ID: AtomicU64 = AtomicU64::new(0);
+        format!(
+            "slatedb_c_metrics_test_{}",
+            NEXT_DB_ID.fetch_add(1, Ordering::Relaxed)
+        )
+    }
+
+    unsafe fn assert_result_kind(result: slatedb_result_t, expected: slatedb_error_kind_t) {
+        let kind = result.kind;
+        let message = if result.message.is_null() {
+            String::new()
+        } else {
+            CStr::from_ptr(result.message)
+                .to_string_lossy()
+                .into_owned()
+        };
+        crate::memory::slatedb_result_free(result);
+        assert_eq!(
+            kind, expected,
+            "unexpected result kind with message: {message}"
+        );
+    }
+
+    unsafe fn assert_ok(result: slatedb_result_t) {
+        assert_result_kind(result, slatedb_error_kind_t::SLATEDB_ERROR_KIND_NONE);
+    }
+
+    unsafe fn open_test_db() -> *mut slatedb_db_t {
+        let runtime: Arc<Runtime> = Arc::new(
+            RuntimeBuilder::new_multi_thread()
+                .enable_all()
+                .build()
+                .expect("failed to build runtime"),
+        );
+        let object_store: Arc<dyn slatedb::object_store::ObjectStore> =
+            Arc::new(slatedb::object_store::memory::InMemory::new());
+        let path = next_test_path();
+        let db = runtime
+            .block_on(Db::open(path, object_store))
+            .expect("failed to open test db");
+        Box::into_raw(Box::new(slatedb_db_t { runtime, db }))
+    }
+
+    unsafe fn close_test_db(db: *mut slatedb_db_t) {
+        assert_ok(slatedb_db_close(db));
+    }
+
+    #[test]
+    fn test_db_metrics_returns_json_snapshot() {
+        unsafe {
+            let db = open_test_db();
+            let mut json_data: *mut u8 = std::ptr::null_mut();
+            let mut json_len: usize = 0;
+
+            assert_ok(slatedb_db_metrics(
+                db as *const slatedb_db_t,
+                &mut json_data,
+                &mut json_len,
+            ));
+            assert!(!json_data.is_null());
+            assert!(json_len > 0);
+
+            let payload = std::slice::from_raw_parts(json_data as *const u8, json_len);
+            let snapshot: Value = serde_json::from_slice(payload).expect("invalid metrics JSON");
+            let object = snapshot
+                .as_object()
+                .expect("metrics snapshot should be a JSON object");
+            assert!(
+                object.contains_key("db/get_requests"),
+                "expected db/get_requests in metrics snapshot"
+            );
+
+            crate::memory::slatedb_bytes_free(json_data, json_len);
+            close_test_db(db);
+        }
+    }
+
+    #[test]
+    fn test_db_metric_get_for_known_and_unknown_metric_names() {
+        unsafe {
+            let db = open_test_db();
+
+            let known_name = CString::new("db/get_requests").expect("CString failed");
+            let mut present = false;
+            let mut value = 0i64;
+            assert_ok(slatedb_db_metric_get(
+                db as *const slatedb_db_t,
+                known_name.as_ptr(),
+                &mut present,
+                &mut value,
+            ));
+            assert!(present);
+            let before = value;
+
+            let key = b"missing-key";
+            let mut value_present = false;
+            let mut value_data: *mut u8 = std::ptr::null_mut();
+            let mut value_len = 0usize;
+            assert_ok(slatedb_db_get(
+                db,
+                key.as_ptr(),
+                key.len(),
+                &mut value_present,
+                &mut value_data,
+                &mut value_len,
+            ));
+            assert!(!value_present);
+            assert!(value_data.is_null());
+            assert_eq!(value_len, 0);
+
+            let mut after_present = false;
+            let mut after = 0i64;
+            assert_ok(slatedb_db_metric_get(
+                db as *const slatedb_db_t,
+                known_name.as_ptr(),
+                &mut after_present,
+                &mut after,
+            ));
+            assert!(after_present);
+            assert!(after > before);
+
+            let unknown_name = CString::new("db/not_a_metric").expect("CString failed");
+            let mut unknown_present = true;
+            let mut unknown_value = 42i64;
+            assert_ok(slatedb_db_metric_get(
+                db as *const slatedb_db_t,
+                unknown_name.as_ptr(),
+                &mut unknown_present,
+                &mut unknown_value,
+            ));
+            assert!(!unknown_present);
+            assert_eq!(unknown_value, 0);
+
+            close_test_db(db);
+        }
+    }
+
+    #[test]
+    fn test_db_metrics_and_metric_get_validate_required_pointers() {
+        unsafe {
+            let db = open_test_db();
+            let known_name = CString::new("db/get_requests").expect("CString failed");
+
+            let mut json_len = 0usize;
+            assert_result_kind(
+                slatedb_db_metrics(
+                    db as *const slatedb_db_t,
+                    std::ptr::null_mut(),
+                    &mut json_len,
+                ),
+                slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
+            );
+
+            let mut present = false;
+            assert_result_kind(
+                slatedb_db_metric_get(
+                    db as *const slatedb_db_t,
+                    known_name.as_ptr(),
+                    &mut present,
+                    std::ptr::null_mut(),
+                ),
+                slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
+            );
+
+            close_test_db(db);
+        }
     }
 }

@@ -39,10 +39,10 @@ pub use builder::{
 pub use db::{
     slatedb_db_close, slatedb_db_delete, slatedb_db_delete_with_options, slatedb_db_flush,
     slatedb_db_flush_with_options, slatedb_db_get, slatedb_db_get_with_options, slatedb_db_merge,
-    slatedb_db_merge_with_options, slatedb_db_open, slatedb_db_put, slatedb_db_put_with_options,
-    slatedb_db_scan, slatedb_db_scan_prefix, slatedb_db_scan_prefix_with_options,
-    slatedb_db_scan_with_options, slatedb_db_status, slatedb_db_write,
-    slatedb_db_write_with_options,
+    slatedb_db_merge_with_options, slatedb_db_metric_get, slatedb_db_metrics, slatedb_db_open,
+    slatedb_db_put, slatedb_db_put_with_options, slatedb_db_scan, slatedb_db_scan_prefix,
+    slatedb_db_scan_prefix_with_options, slatedb_db_scan_with_options, slatedb_db_status,
+    slatedb_db_write, slatedb_db_write_with_options,
 };
 
 pub use iterator::{slatedb_iterator_close, slatedb_iterator_next, slatedb_iterator_seek};

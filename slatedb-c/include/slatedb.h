@@ -429,6 +429,53 @@ struct slatedb_result_t slatedb_db_open(const char *path,
 // - `db` must be a valid database handle.
 struct slatedb_result_t slatedb_db_status(const struct slatedb_db_t *db);
 
+// Returns a JSON snapshot of current metrics for the database.
+//
+// The payload is a UTF-8 JSON object mapping metric name to metric value:
+// `{ "db/get_requests": 42, ... }`.
+//
+// ## Arguments
+// - `db`: Database handle.
+// - `out_json`: Output pointer to Rust-allocated UTF-8 bytes.
+// - `out_json_len`: Output length for `out_json`.
+//
+// ## Returns
+// - `slatedb_result_t` indicating success/failure.
+//
+// ## Errors
+// - Returns `SLATEDB_ERROR_KIND_INVALID` for invalid pointers/handles.
+// - Returns `SLATEDB_ERROR_KIND_INTERNAL` if JSON serialization fails.
+//
+// ## Safety
+// - `db`, `out_json`, and `out_json_len` must be valid non-null pointers.
+// - `out_json` must be freed with `slatedb_bytes_free`.
+struct slatedb_result_t slatedb_db_metrics(const struct slatedb_db_t *db,
+                                           uint8_t **out_json,
+                                           uintptr_t *out_json_len);
+
+// Reads a single metric value by name.
+//
+// ## Arguments
+// - `db`: Database handle.
+// - `name`: Null-terminated UTF-8 metric name (for example `db/get_requests`).
+// - `out_present`: Set to `true` when the metric exists.
+// - `out_value`: Metric value when `out_present` is true.
+//
+// ## Returns
+// - `slatedb_result_t` indicating success/failure.
+//
+// ## Errors
+// - Returns `SLATEDB_ERROR_KIND_INVALID` for invalid pointers/handles or
+//   invalid UTF-8 metric names.
+//
+// ## Safety
+// - `db`, `name`, `out_present`, and `out_value` must be valid non-null
+//   pointers.
+struct slatedb_result_t slatedb_db_metric_get(const struct slatedb_db_t *db,
+                                              const char *name,
+                                              bool *out_present,
+                                              int64_t *out_value);
+
 // Reads a single key using default read options.
 //
 // ## Arguments
