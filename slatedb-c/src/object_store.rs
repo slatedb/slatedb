@@ -4,7 +4,7 @@
 //! handles used by `slatedb_db_open` and builder APIs.
 
 use crate::ffi::{
-    cstr_to_string, error_from_slate_error, error_result, slatedb_error_kind_t,
+    cstr_to_string, error_from_slate_error, require_handle, require_out_ptr,
     slatedb_object_store_t, slatedb_result_t, success_result,
 };
 use slatedb::Db;
@@ -31,11 +31,8 @@ pub unsafe extern "C" fn slatedb_db_resolve_object_store(
     url: *const std::os::raw::c_char,
     out_object_store: *mut *mut slatedb_object_store_t,
 ) -> slatedb_result_t {
-    if out_object_store.is_null() {
-        return error_result(
-            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
-            "out_object_store pointer is null",
-        );
+    if let Err(err) = require_out_ptr(out_object_store, "out_object_store") {
+        return err;
     }
 
     let url = match cstr_to_string(url, "url") {
@@ -71,11 +68,8 @@ pub unsafe extern "C" fn slatedb_db_resolve_object_store(
 pub unsafe extern "C" fn slatedb_object_store_close(
     object_store: *mut slatedb_object_store_t,
 ) -> slatedb_result_t {
-    if object_store.is_null() {
-        return error_result(
-            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
-            "invalid object store handle",
-        );
+    if let Err(err) = require_handle(object_store, "object store") {
+        return err;
     }
 
     let _ = Box::from_raw(object_store);

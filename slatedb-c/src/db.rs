@@ -5,12 +5,12 @@
 
 use crate::ffi::{
     alloc_bytes, bytes_from_ptr, create_runtime, cstr_to_string, error_from_slate_error,
-    error_result, flush_options_from_ptr, merge_options_from_ptr, put_options_from_ptr,
-    range_from_c, read_options_from_ptr, scan_options_from_ptr, slatedb_db_t, slatedb_error_kind_t,
+    flush_options_from_ptr, merge_options_from_ptr, put_options_from_ptr, range_from_c,
+    read_options_from_ptr, require_handle, require_out_ptr, scan_options_from_ptr, slatedb_db_t,
     slatedb_flush_options_t, slatedb_iterator_t, slatedb_merge_options_t, slatedb_object_store_t,
     slatedb_put_options_t, slatedb_range_t, slatedb_read_options_t, slatedb_result_t,
     slatedb_scan_options_t, slatedb_write_batch_t, slatedb_write_options_t, success_result,
-    validate_write_key, validate_write_key_value, write_options_from_ptr,
+    take_write_batch, validate_write_key, validate_write_key_value, write_options_from_ptr,
 };
 use slatedb::Db;
 
@@ -38,17 +38,11 @@ pub unsafe extern "C" fn slatedb_db_open(
     object_store: *const slatedb_object_store_t,
     out_db: *mut *mut slatedb_db_t,
 ) -> slatedb_result_t {
-    if out_db.is_null() {
-        return error_result(
-            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
-            "out_db pointer is null",
-        );
+    if let Err(err) = require_out_ptr(out_db, "out_db") {
+        return err;
     }
-    if object_store.is_null() {
-        return error_result(
-            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
-            "invalid object_store handle",
-        );
+    if let Err(err) = require_handle(object_store, "object_store") {
+        return err;
     }
 
     let path = match cstr_to_string(path, "path") {
@@ -88,11 +82,8 @@ pub unsafe extern "C" fn slatedb_db_open(
 /// - `db` must be a valid database handle.
 #[no_mangle]
 pub unsafe extern "C" fn slatedb_db_status(db: *const slatedb_db_t) -> slatedb_result_t {
-    if db.is_null() {
-        return error_result(
-            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
-            "invalid db handle",
-        );
+    if let Err(err) = require_handle(db, "db") {
+        return err;
     }
 
     let handle = &*db;
@@ -173,29 +164,17 @@ pub unsafe extern "C" fn slatedb_db_get_with_options(
     out_val: *mut *mut u8,
     out_val_len: *mut usize,
 ) -> slatedb_result_t {
-    if db.is_null() {
-        return error_result(
-            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
-            "invalid db handle",
-        );
+    if let Err(err) = require_handle(db, "db") {
+        return err;
     }
-    if out_val.is_null() {
-        return error_result(
-            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
-            "out_val pointer is null",
-        );
+    if let Err(err) = require_out_ptr(out_val, "out_val") {
+        return err;
     }
-    if out_val_len.is_null() {
-        return error_result(
-            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
-            "out_val_len pointer is null",
-        );
+    if let Err(err) = require_out_ptr(out_val_len, "out_val_len") {
+        return err;
     }
-    if out_found.is_null() {
-        return error_result(
-            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
-            "out_found pointer is null",
-        );
+    if let Err(err) = require_out_ptr(out_found, "out_found") {
+        return err;
     }
     *out_found = false;
     *out_val = std::ptr::null_mut();
@@ -257,11 +236,8 @@ pub unsafe extern "C" fn slatedb_db_put(
     value: *const u8,
     value_len: usize,
 ) -> slatedb_result_t {
-    if db.is_null() {
-        return error_result(
-            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
-            "invalid db handle",
-        );
+    if let Err(err) = require_handle(db, "db") {
+        return err;
     }
 
     let key = match bytes_from_ptr(key, key_len, "key") {
@@ -314,11 +290,8 @@ pub unsafe extern "C" fn slatedb_db_put_with_options(
     put_options: *const slatedb_put_options_t,
     write_options: *const slatedb_write_options_t,
 ) -> slatedb_result_t {
-    if db.is_null() {
-        return error_result(
-            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
-            "invalid db handle",
-        );
+    if let Err(err) = require_handle(db, "db") {
+        return err;
     }
 
     let key = match bytes_from_ptr(key, key_len, "key") {
@@ -374,11 +347,8 @@ pub unsafe extern "C" fn slatedb_db_delete(
     key: *const u8,
     key_len: usize,
 ) -> slatedb_result_t {
-    if db.is_null() {
-        return error_result(
-            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
-            "invalid db handle",
-        );
+    if let Err(err) = require_handle(db, "db") {
+        return err;
     }
 
     let key = match bytes_from_ptr(key, key_len, "key") {
@@ -420,11 +390,8 @@ pub unsafe extern "C" fn slatedb_db_delete_with_options(
     key_len: usize,
     write_options: *const slatedb_write_options_t,
 ) -> slatedb_result_t {
-    if db.is_null() {
-        return error_result(
-            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
-            "invalid db handle",
-        );
+    if let Err(err) = require_handle(db, "db") {
+        return err;
     }
 
     let key = match bytes_from_ptr(key, key_len, "key") {
@@ -473,11 +440,8 @@ pub unsafe extern "C" fn slatedb_db_merge(
     value: *const u8,
     value_len: usize,
 ) -> slatedb_result_t {
-    if db.is_null() {
-        return error_result(
-            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
-            "invalid db handle",
-        );
+    if let Err(err) = require_handle(db, "db") {
+        return err;
     }
 
     let key = match bytes_from_ptr(key, key_len, "key") {
@@ -530,11 +494,8 @@ pub unsafe extern "C" fn slatedb_db_merge_with_options(
     merge_options: *const slatedb_merge_options_t,
     write_options: *const slatedb_write_options_t,
 ) -> slatedb_result_t {
-    if db.is_null() {
-        return error_result(
-            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
-            "invalid db handle",
-        );
+    if let Err(err) = require_handle(db, "db") {
+        return err;
     }
 
     let key = match bytes_from_ptr(key, key_len, "key") {
@@ -619,27 +580,14 @@ pub unsafe extern "C" fn slatedb_db_write_with_options(
     write_batch: *mut slatedb_write_batch_t,
     write_options: *const slatedb_write_options_t,
 ) -> slatedb_result_t {
-    if db.is_null() {
-        return error_result(
-            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
-            "invalid db handle",
-        );
-    }
-    if write_batch.is_null() {
-        return error_result(
-            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
-            "invalid write_batch handle",
-        );
+    if let Err(err) = require_handle(db, "db") {
+        return err;
     }
 
     let write_options = write_options_from_ptr(write_options);
-
-    let write_batch_handle = &mut *write_batch;
-    let Some(batch) = write_batch_handle.batch.take() else {
-        return error_result(
-            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
-            "write batch has been consumed",
-        );
+    let batch = match take_write_batch(write_batch) {
+        Ok(batch) => batch,
+        Err(err) => return err,
     };
 
     let db_handle = &mut *db;
@@ -701,17 +649,11 @@ pub unsafe extern "C" fn slatedb_db_scan_with_options(
     scan_options: *const slatedb_scan_options_t,
     out_iterator: *mut *mut slatedb_iterator_t,
 ) -> slatedb_result_t {
-    if db.is_null() {
-        return error_result(
-            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
-            "invalid db handle",
-        );
+    if let Err(err) = require_handle(db, "db") {
+        return err;
     }
-    if out_iterator.is_null() {
-        return error_result(
-            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
-            "out_iterator pointer is null",
-        );
+    if let Err(err) = require_out_ptr(out_iterator, "out_iterator") {
+        return err;
     }
 
     let range = match range_from_c(range) {
@@ -794,17 +736,11 @@ pub unsafe extern "C" fn slatedb_db_scan_prefix_with_options(
     scan_options: *const slatedb_scan_options_t,
     out_iterator: *mut *mut slatedb_iterator_t,
 ) -> slatedb_result_t {
-    if db.is_null() {
-        return error_result(
-            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
-            "invalid db handle",
-        );
+    if let Err(err) = require_handle(db, "db") {
+        return err;
     }
-    if out_iterator.is_null() {
-        return error_result(
-            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
-            "out_iterator pointer is null",
-        );
+    if let Err(err) = require_out_ptr(out_iterator, "out_iterator") {
+        return err;
     }
 
     let prefix = match bytes_from_ptr(prefix, prefix_len, "prefix") {
@@ -849,11 +785,8 @@ pub unsafe extern "C" fn slatedb_db_scan_prefix_with_options(
 /// - `db` must be a valid non-null handle.
 #[no_mangle]
 pub unsafe extern "C" fn slatedb_db_flush(db: *mut slatedb_db_t) -> slatedb_result_t {
-    if db.is_null() {
-        return error_result(
-            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
-            "invalid db handle",
-        );
+    if let Err(err) = require_handle(db, "db") {
+        return err;
     }
 
     let handle = &mut *db;
@@ -884,11 +817,8 @@ pub unsafe extern "C" fn slatedb_db_flush_with_options(
     db: *mut slatedb_db_t,
     flush_options: *const slatedb_flush_options_t,
 ) -> slatedb_result_t {
-    if db.is_null() {
-        return error_result(
-            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
-            "invalid db handle",
-        );
+    if let Err(err) = require_handle(db, "db") {
+        return err;
     }
 
     let flush_options = match flush_options_from_ptr(flush_options) {
@@ -922,11 +852,8 @@ pub unsafe extern "C" fn slatedb_db_flush_with_options(
 /// - `db` must be a valid non-null handle obtained from this library.
 #[no_mangle]
 pub unsafe extern "C" fn slatedb_db_close(db: *mut slatedb_db_t) -> slatedb_result_t {
-    if db.is_null() {
-        return error_result(
-            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
-            "invalid db handle",
-        );
+    if let Err(err) = require_handle(db, "db") {
+        return err;
     }
 
     let handle = Box::from_raw(db);

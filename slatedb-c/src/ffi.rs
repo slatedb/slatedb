@@ -403,6 +403,32 @@ pub(crate) unsafe fn bytes_from_ptr<'a>(
     Ok(std::slice::from_raw_parts(ptr, len))
 }
 
+/// Validates an output pointer is non-null.
+///
+/// This helper standardizes error messages for required output pointers.
+pub(crate) fn require_out_ptr<T>(ptr: *mut T, field_name: &str) -> Result<(), slatedb_result_t> {
+    if ptr.is_null() {
+        return Err(error_result(
+            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
+            &format!("{field_name} pointer is null"),
+        ));
+    }
+    Ok(())
+}
+
+/// Validates a handle pointer is non-null.
+///
+/// This helper standardizes error messages for required opaque handles.
+pub(crate) fn require_handle<T>(ptr: *const T, handle_name: &str) -> Result<(), slatedb_result_t> {
+    if ptr.is_null() {
+        return Err(error_result(
+            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
+            &format!("invalid {handle_name} handle"),
+        ));
+    }
+    Ok(())
+}
+
 /// Allocates a Rust-owned byte buffer and returns raw pointer + length for FFI.
 ///
 /// The caller must free the returned pointer with `slatedb_bytes_free`.
@@ -499,6 +525,50 @@ pub(crate) unsafe fn write_options_from_ptr(ptr: *const slatedb_write_options_t)
     WriteOptions {
         await_durable: options.await_durable,
     }
+}
+
+/// Executes a closure with a mutable `WriteBatch` from an opaque handle.
+///
+/// Returns an invalid-handle error when `write_batch` is null and a consumed
+/// error when the handle no longer owns a batch.
+///
+/// ## Safety
+/// - `write_batch` must be either null or a valid pointer to a
+///   `slatedb_write_batch_t` created by this crate.
+pub(crate) unsafe fn with_write_batch_mut<R>(
+    write_batch: *mut slatedb_write_batch_t,
+    f: impl FnOnce(&mut WriteBatch) -> R,
+) -> Result<R, slatedb_result_t> {
+    require_handle(write_batch, "write batch")?;
+    let handle = &mut *write_batch;
+    let Some(batch) = handle.batch.as_mut() else {
+        return Err(error_result(
+            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
+            "write batch has been consumed",
+        ));
+    };
+    Ok(f(batch))
+}
+
+/// Takes ownership of a `WriteBatch` from an opaque handle.
+///
+/// Returns an invalid-handle error when `write_batch` is null and a consumed
+/// error when the handle no longer owns a batch.
+///
+/// ## Safety
+/// - `write_batch` must be either null or a valid pointer to a
+///   `slatedb_write_batch_t` created by this crate.
+pub(crate) unsafe fn take_write_batch(
+    write_batch: *mut slatedb_write_batch_t,
+) -> Result<WriteBatch, slatedb_result_t> {
+    require_handle(write_batch, "write batch")?;
+    let handle = &mut *write_batch;
+    handle.batch.take().ok_or_else(|| {
+        error_result(
+            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
+            "write batch has been consumed",
+        )
+    })
 }
 
 /// Converts a TTL selector + value into a Rust `Ttl` variant.

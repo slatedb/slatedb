@@ -4,9 +4,10 @@
 //! `DbBuilder` before opening a database instance.
 
 use crate::ffi::{
-    create_runtime, cstr_to_string, error_from_slate_error, error_result, slatedb_db_builder_t,
-    slatedb_db_t, slatedb_error_kind_t, slatedb_object_store_t, slatedb_result_t,
-    slatedb_sst_block_size_t, sst_block_size_from_u8, success_result,
+    create_runtime, cstr_to_string, error_from_slate_error, error_result, require_handle,
+    require_out_ptr, slatedb_db_builder_t, slatedb_db_t, slatedb_error_kind_t,
+    slatedb_object_store_t, slatedb_result_t, slatedb_sst_block_size_t, sst_block_size_from_u8,
+    success_result,
 };
 use slatedb::Db;
 
@@ -32,17 +33,11 @@ pub unsafe extern "C" fn slatedb_db_builder_new(
     object_store: *const slatedb_object_store_t,
     out_builder: *mut *mut slatedb_db_builder_t,
 ) -> slatedb_result_t {
-    if out_builder.is_null() {
-        return error_result(
-            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
-            "out_builder pointer is null",
-        );
+    if let Err(err) = require_out_ptr(out_builder, "out_builder") {
+        return err;
     }
-    if object_store.is_null() {
-        return error_result(
-            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
-            "invalid object_store handle",
-        );
+    if let Err(err) = require_handle(object_store, "object_store") {
+        return err;
     }
 
     let path = match cstr_to_string(path, "path") {
@@ -79,17 +74,11 @@ pub unsafe extern "C" fn slatedb_db_builder_with_wal_object_store(
     builder: *mut slatedb_db_builder_t,
     wal_object_store: *const slatedb_object_store_t,
 ) -> slatedb_result_t {
-    if builder.is_null() {
-        return error_result(
-            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
-            "invalid builder handle",
-        );
+    if let Err(err) = require_handle(builder, "builder") {
+        return err;
     }
-    if wal_object_store.is_null() {
-        return error_result(
-            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
-            "invalid wal_object_store handle",
-        );
+    if let Err(err) = require_handle(wal_object_store, "wal_object_store") {
+        return err;
     }
 
     let handle = &mut *builder;
@@ -124,11 +113,8 @@ pub unsafe extern "C" fn slatedb_db_builder_with_seed(
     builder: *mut slatedb_db_builder_t,
     seed: u64,
 ) -> slatedb_result_t {
-    if builder.is_null() {
-        return error_result(
-            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
-            "invalid builder handle",
-        );
+    if let Err(err) = require_handle(builder, "builder") {
+        return err;
     }
 
     let handle = &mut *builder;
@@ -163,11 +149,8 @@ pub unsafe extern "C" fn slatedb_db_builder_with_sst_block_size(
     builder: *mut slatedb_db_builder_t,
     sst_block_size: slatedb_sst_block_size_t,
 ) -> slatedb_result_t {
-    if builder.is_null() {
-        return error_result(
-            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
-            "invalid builder handle",
-        );
+    if let Err(err) = require_handle(builder, "builder") {
+        return err;
     }
 
     let block_size = match sst_block_size_from_u8(sst_block_size) {
@@ -207,17 +190,11 @@ pub unsafe extern "C" fn slatedb_db_builder_build(
     builder: *mut slatedb_db_builder_t,
     out_db: *mut *mut slatedb_db_t,
 ) -> slatedb_result_t {
-    if builder.is_null() {
-        return error_result(
-            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
-            "invalid builder handle",
-        );
+    if let Err(err) = require_handle(builder, "builder") {
+        return err;
     }
-    if out_db.is_null() {
-        return error_result(
-            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
-            "out_db pointer is null",
-        );
+    if let Err(err) = require_out_ptr(out_db, "out_db") {
+        return err;
     }
 
     let mut builder_handle = Box::from_raw(builder);
@@ -260,11 +237,8 @@ pub unsafe extern "C" fn slatedb_db_builder_build(
 pub unsafe extern "C" fn slatedb_db_builder_close(
     builder: *mut slatedb_db_builder_t,
 ) -> slatedb_result_t {
-    if builder.is_null() {
-        return error_result(
-            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
-            "invalid builder handle",
-        );
+    if let Err(err) = require_handle(builder, "builder") {
+        return err;
     }
 
     let _ = Box::from_raw(builder);

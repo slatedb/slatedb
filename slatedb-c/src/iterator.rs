@@ -3,7 +3,7 @@
 //! This module exposes C ABI functions for consuming database scan iterators.
 
 use crate::ffi::{
-    alloc_bytes, bytes_from_ptr, error_from_slate_error, error_result, slatedb_error_kind_t,
+    alloc_bytes, bytes_from_ptr, error_from_slate_error, require_handle, require_out_ptr,
     slatedb_iterator_t, slatedb_result_t, success_result,
 };
 
@@ -37,41 +37,23 @@ pub unsafe extern "C" fn slatedb_iterator_next(
     out_val: *mut *mut u8,
     out_val_len: *mut usize,
 ) -> slatedb_result_t {
-    if iterator.is_null() {
-        return error_result(
-            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
-            "invalid iterator handle",
-        );
+    if let Err(err) = require_handle(iterator, "iterator") {
+        return err;
     }
-    if out_key.is_null() {
-        return error_result(
-            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
-            "out_key pointer is null",
-        );
+    if let Err(err) = require_out_ptr(out_key, "out_key") {
+        return err;
     }
-    if out_key_len.is_null() {
-        return error_result(
-            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
-            "out_key_len pointer is null",
-        );
+    if let Err(err) = require_out_ptr(out_key_len, "out_key_len") {
+        return err;
     }
-    if out_val.is_null() {
-        return error_result(
-            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
-            "out_val pointer is null",
-        );
+    if let Err(err) = require_out_ptr(out_val, "out_val") {
+        return err;
     }
-    if out_val_len.is_null() {
-        return error_result(
-            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
-            "out_val_len pointer is null",
-        );
+    if let Err(err) = require_out_ptr(out_val_len, "out_val_len") {
+        return err;
     }
-    if out_has_item.is_null() {
-        return error_result(
-            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
-            "out_has_item pointer is null",
-        );
+    if let Err(err) = require_out_ptr(out_has_item, "out_has_item") {
+        return err;
     }
 
     *out_has_item = false;
@@ -123,11 +105,8 @@ pub unsafe extern "C" fn slatedb_iterator_seek(
     key: *const u8,
     key_len: usize,
 ) -> slatedb_result_t {
-    if iterator.is_null() {
-        return error_result(
-            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
-            "invalid iterator handle",
-        );
+    if let Err(err) = require_handle(iterator, "iterator") {
+        return err;
     }
 
     let key = match bytes_from_ptr(key, key_len, "key") {
@@ -159,11 +138,8 @@ pub unsafe extern "C" fn slatedb_iterator_seek(
 pub unsafe extern "C" fn slatedb_iterator_close(
     iterator: *mut slatedb_iterator_t,
 ) -> slatedb_result_t {
-    if iterator.is_null() {
-        return error_result(
-            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
-            "invalid iterator handle",
-        );
+    if let Err(err) = require_handle(iterator, "iterator") {
+        return err;
     }
 
     let _ = Box::from_raw(iterator);
