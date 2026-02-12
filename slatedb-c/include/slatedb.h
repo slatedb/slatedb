@@ -346,7 +346,7 @@ struct slatedb_result_t slatedb_db_status(const struct slatedb_db_t *db);
 // - `db`: Database handle.
 // - `key`: Key bytes.
 // - `key_len`: Length of `key`.
-// - `out_found`: Set to `true` when a value is found.
+// - `out_present`: Set to `true` when a value is found.
 // - `out_val`: Output pointer to Rust-allocated value bytes.
 // - `out_val_len`: Output length for `out_val`.
 //
@@ -359,11 +359,11 @@ struct slatedb_result_t slatedb_db_status(const struct slatedb_db_t *db);
 //
 // ## Safety
 // - All pointer arguments must be valid for reads/writes as appropriate.
-// - `out_val` must be freed with `slatedb_bytes_free` when `*out_found` is true.
+// - `out_val` must be freed with `slatedb_bytes_free` when `*out_present` is true.
 struct slatedb_result_t slatedb_db_get(struct slatedb_db_t *db,
                                        const uint8_t *key,
                                        uintptr_t key_len,
-                                       bool *out_found,
+                                       bool *out_present,
                                        uint8_t **out_val,
                                        uintptr_t *out_val_len);
 
@@ -374,7 +374,7 @@ struct slatedb_result_t slatedb_db_get(struct slatedb_db_t *db,
 // - `key`: Key bytes.
 // - `key_len`: Length of `key`.
 // - `read_options`: Optional read options pointer (null uses defaults).
-// - `out_found`: Set to `true` when a value is found.
+// - `out_present`: Set to `true` when a value is found.
 // - `out_val`: Output pointer to Rust-allocated value bytes.
 // - `out_val_len`: Output length for `out_val`.
 //
@@ -387,12 +387,12 @@ struct slatedb_result_t slatedb_db_get(struct slatedb_db_t *db,
 //
 // ## Safety
 // - Pointer arguments must be valid for reads/writes as required.
-// - `out_val` must be freed with `slatedb_bytes_free` when `*out_found` is true.
+// - `out_val` must be freed with `slatedb_bytes_free` when `*out_present` is true.
 struct slatedb_result_t slatedb_db_get_with_options(struct slatedb_db_t *db,
                                                     const uint8_t *key,
                                                     uintptr_t key_len,
                                                     const struct slatedb_read_options_t *read_options,
-                                                    bool *out_found,
+                                                    bool *out_present,
                                                     uint8_t **out_val,
                                                     uintptr_t *out_val_len);
 
@@ -730,7 +730,7 @@ struct slatedb_result_t slatedb_db_close(struct slatedb_db_t *db);
 //
 // ## Arguments
 // - `iterator`: Iterator handle created by scan APIs.
-// - `out_has_item`: Set to `true` when a row is returned.
+// - `out_present`: Set to `true` when a row is returned.
 // - `out_key`: Output key buffer pointer (allocated by Rust).
 // - `out_key_len`: Output key length.
 // - `out_val`: Output value buffer pointer (allocated by Rust).
@@ -748,7 +748,7 @@ struct slatedb_result_t slatedb_db_close(struct slatedb_db_t *db);
 // - Buffers returned in `out_key`/`out_val` must be freed with
 //   `slatedb_bytes_free`.
 struct slatedb_result_t slatedb_iterator_next(struct slatedb_iterator_t *iterator,
-                                              bool *out_has_item,
+                                              bool *out_present,
                                               uint8_t **out_key,
                                               uintptr_t *out_key_len,
                                               uint8_t **out_val,

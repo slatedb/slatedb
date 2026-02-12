@@ -99,7 +99,7 @@ pub unsafe extern "C" fn slatedb_db_status(db: *const slatedb_db_t) -> slatedb_r
 /// - `db`: Database handle.
 /// - `key`: Key bytes.
 /// - `key_len`: Length of `key`.
-/// - `out_found`: Set to `true` when a value is found.
+/// - `out_present`: Set to `true` when a value is found.
 /// - `out_val`: Output pointer to Rust-allocated value bytes.
 /// - `out_val_len`: Output length for `out_val`.
 ///
@@ -112,13 +112,13 @@ pub unsafe extern "C" fn slatedb_db_status(db: *const slatedb_db_t) -> slatedb_r
 ///
 /// ## Safety
 /// - All pointer arguments must be valid for reads/writes as appropriate.
-/// - `out_val` must be freed with `slatedb_bytes_free` when `*out_found` is true.
+/// - `out_val` must be freed with `slatedb_bytes_free` when `*out_present` is true.
 #[no_mangle]
 pub unsafe extern "C" fn slatedb_db_get(
     db: *mut slatedb_db_t,
     key: *const u8,
     key_len: usize,
-    out_found: *mut bool,
+    out_present: *mut bool,
     out_val: *mut *mut u8,
     out_val_len: *mut usize,
 ) -> slatedb_result_t {
@@ -127,7 +127,7 @@ pub unsafe extern "C" fn slatedb_db_get(
         key,
         key_len,
         std::ptr::null(),
-        out_found,
+        out_present,
         out_val,
         out_val_len,
     )
@@ -140,7 +140,7 @@ pub unsafe extern "C" fn slatedb_db_get(
 /// - `key`: Key bytes.
 /// - `key_len`: Length of `key`.
 /// - `read_options`: Optional read options pointer (null uses defaults).
-/// - `out_found`: Set to `true` when a value is found.
+/// - `out_present`: Set to `true` when a value is found.
 /// - `out_val`: Output pointer to Rust-allocated value bytes.
 /// - `out_val_len`: Output length for `out_val`.
 ///
@@ -153,14 +153,14 @@ pub unsafe extern "C" fn slatedb_db_get(
 ///
 /// ## Safety
 /// - Pointer arguments must be valid for reads/writes as required.
-/// - `out_val` must be freed with `slatedb_bytes_free` when `*out_found` is true.
+/// - `out_val` must be freed with `slatedb_bytes_free` when `*out_present` is true.
 #[no_mangle]
 pub unsafe extern "C" fn slatedb_db_get_with_options(
     db: *mut slatedb_db_t,
     key: *const u8,
     key_len: usize,
     read_options: *const slatedb_read_options_t,
-    out_found: *mut bool,
+    out_present: *mut bool,
     out_val: *mut *mut u8,
     out_val_len: *mut usize,
 ) -> slatedb_result_t {
@@ -173,10 +173,10 @@ pub unsafe extern "C" fn slatedb_db_get_with_options(
     if let Err(err) = require_out_ptr(out_val_len, "out_val_len") {
         return err;
     }
-    if let Err(err) = require_out_ptr(out_found, "out_found") {
+    if let Err(err) = require_out_ptr(out_present, "out_present") {
         return err;
     }
-    *out_found = false;
+    *out_present = false;
     *out_val = std::ptr::null_mut();
     *out_val_len = 0;
 
@@ -199,11 +199,11 @@ pub unsafe extern "C" fn slatedb_db_get_with_options(
             let (val, val_len) = alloc_bytes(value.as_ref());
             *out_val = val;
             *out_val_len = val_len;
-            *out_found = true;
+            *out_present = true;
             success_result()
         }
         Ok(None) => {
-            *out_found = false;
+            *out_present = false;
             success_result()
         }
         Err(err) => error_from_slate_error(&err, &format!("db get failed: {err}")),

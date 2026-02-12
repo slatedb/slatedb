@@ -11,7 +11,7 @@ use crate::ffi::{
 ///
 /// ## Arguments
 /// - `iterator`: Iterator handle created by scan APIs.
-/// - `out_has_item`: Set to `true` when a row is returned.
+/// - `out_present`: Set to `true` when a row is returned.
 /// - `out_key`: Output key buffer pointer (allocated by Rust).
 /// - `out_key_len`: Output key length.
 /// - `out_val`: Output value buffer pointer (allocated by Rust).
@@ -31,7 +31,7 @@ use crate::ffi::{
 #[no_mangle]
 pub unsafe extern "C" fn slatedb_iterator_next(
     iterator: *mut slatedb_iterator_t,
-    out_has_item: *mut bool,
+    out_present: *mut bool,
     out_key: *mut *mut u8,
     out_key_len: *mut usize,
     out_val: *mut *mut u8,
@@ -52,11 +52,11 @@ pub unsafe extern "C" fn slatedb_iterator_next(
     if let Err(err) = require_out_ptr(out_val_len, "out_val_len") {
         return err;
     }
-    if let Err(err) = require_out_ptr(out_has_item, "out_has_item") {
+    if let Err(err) = require_out_ptr(out_present, "out_present") {
         return err;
     }
 
-    *out_has_item = false;
+    *out_present = false;
     *out_key = std::ptr::null_mut();
     *out_key_len = 0;
     *out_val = std::ptr::null_mut();
@@ -71,11 +71,11 @@ pub unsafe extern "C" fn slatedb_iterator_next(
             *out_key_len = key_len;
             *out_val = val;
             *out_val_len = val_len;
-            *out_has_item = true;
+            *out_present = true;
             success_result()
         }
         Ok(None) => {
-            *out_has_item = false;
+            *out_present = false;
             success_result()
         }
         Err(err) => error_from_slate_error(&err, &format!("iterator next failed: {err}")),
