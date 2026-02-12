@@ -2,7 +2,7 @@ package io.slatedb;
 
 import org.junit.jupiter.api.Assertions;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
-import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import org.junit.jupiter.api.Test;
@@ -27,7 +27,7 @@ class SlateDbTest {
             null
         )) {
             db.put(key, value);
-            byte[] loaded = db.get(key);
+            byte[] loaded = db.get(key).orElseThrow().value();
             Assertions.assertArrayEquals(value, loaded);
         }
     }
@@ -107,7 +107,7 @@ class SlateDbTest {
                 byte[] key = "builder-key".getBytes(StandardCharsets.UTF_8);
                 byte[] value = "builder-value".getBytes(StandardCharsets.UTF_8);
                 db.put(key, value);
-                Assertions.assertArrayEquals(value, db.get(key));
+                Assertions.assertArrayEquals(value, db.get(key).orElseThrow().value());
             }
         }
     }
@@ -193,10 +193,10 @@ class SlateDbTest {
                 .dirty(false)
                 .cacheBlocks(true)
                 .build();
-            assertArrayEquals(value, db.get(key, readOptions));
+            assertArrayEquals(value, db.get(key, readOptions).orElseThrow().value());
 
             db.delete(key, new SlateDbConfig.WriteOptions(false));
-            assertNull(db.get(key));
+            assertTrue(db.get(key).isEmpty());
 
             final var metrics = db.metrics();
             assertNotNull(metrics);

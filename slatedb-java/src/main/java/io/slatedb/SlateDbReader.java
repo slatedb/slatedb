@@ -4,6 +4,7 @@ import io.slatedb.SlateDbConfig.ReadOptions;
 import io.slatedb.SlateDbConfig.ScanOptions;
 
 import java.lang.foreign.MemorySegment;
+import java.util.Optional;
 
 /// Read-only SlateDB handle.
 ///
@@ -19,8 +20,8 @@ public final class SlateDbReader implements SlateDbReadable {
     /// Reads a value using default read options.
     ///
     /// @param key key to read.
-    /// @return The value for the key, or `null` if the key does not exist.
-    public byte[] get(byte[] key) {
+    /// @return The optional for {@link SlateDbKeyValue}.
+    public Optional<SlateDbKeyValue> get(byte[] key) {
         return get(key, null);
     }
 
@@ -28,9 +29,9 @@ public final class SlateDbReader implements SlateDbReadable {
     ///
     /// @param key key to read.
     /// @param options read options or `null` for defaults.
-    /// @return The value for the key, or `null` if the key does not exist.
-    public byte[] get(byte[] key, ReadOptions options) {
-        return Native.readerGet(handle, key, options);
+    /// @return The optional for {@link SlateDbKeyValue}.
+    public Optional<SlateDbKeyValue> get(byte[] key, ReadOptions options) {
+        return Optional.ofNullable(Native.readerGet(handle, key, options)).map(value -> new SlateDbKeyValue(key, value));
     }
 
     /// Creates a scan iterator over the range `[startKey, endKey)` using default scan options.

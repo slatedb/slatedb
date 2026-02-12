@@ -3,6 +3,8 @@ package io.slatedb;
 import io.slatedb.SlateDbConfig.ReadOptions;
 import io.slatedb.SlateDbConfig.ScanOptions;
 
+import java.util.Optional;
+
 /// Shared read-only interface for SlateDb and SlateDbReader.
 ///
 /// Enables passing either type to read paths without additional wrappers.
@@ -10,15 +12,15 @@ public interface SlateDbReadable extends AutoCloseable {
     /// Reads a value using default read options.
     ///
     /// @param key key to read.
-    /// @return The value for the key, or `null` if the key does not exist.
-    byte[] get(byte[] key);
+    /// @return The optional for {@link SlateDbKeyValue}.
+    Optional<SlateDbKeyValue> get(byte[] key);
 
     /// Reads a value with custom read options.
     ///
     /// @param key key to read.
     /// @param options read options or `null` for defaults.
-    /// @return The value for the key, or `null` if the key does not exist.
-    byte[] get(byte[] key, ReadOptions options);
+    /// @return The optional for {@link SlateDbKeyValue}.
+    Optional<SlateDbKeyValue> get(byte[] key, ReadOptions options);
 
     /// Creates a scan iterator over the range `[startKey, endKey)` using default scan options.
     ///

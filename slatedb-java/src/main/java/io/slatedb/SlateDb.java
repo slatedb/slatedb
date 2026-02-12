@@ -4,6 +4,7 @@ import io.slatedb.SlateDbConfig.*;
 
 import java.lang.foreign.MemorySegment;
 import java.util.Objects;
+import java.util.Optional;
 
 /// Java bindings for SlateDB backed by the `slatedb-c` FFI library.
 ///
@@ -258,24 +259,24 @@ public final class SlateDb implements SlateDbReadable {
     /// Reads a value from the database using default read options.
     ///
     /// @param key key to read.
-    /// @return The value for the key, or `null` if the key does not exist.
+    /// @return The optional for {@link SlateDbKeyValue}.
     /// @throws SlateDbException if the read fails.
     /// ### Example
     /// ```java
-    /// byte[] value = db.get("key".getBytes(StandardCharsets.UTF_8));
+    /// Optional<SlateDbKeyValue> kv = db.get("key".getBytes(StandardCharsets.UTF_8));
     /// ```
-    public byte[] get(byte[] key) {
-        return Native.get(handle, key);
+    public Optional<SlateDbKeyValue> get(byte[] key) {
+        return Optional.ofNullable(Native.get(handle, key)).map(value -> new SlateDbKeyValue(key, value));
     }
 
     /// Reads a value from the database with custom read options.
     ///
     /// @param key key to read.
     /// @param options read options or `null` for defaults.
-    /// @return The value for the key, or `null` if the key does not exist.
+    /// @return The optional for {@link SlateDbKeyValue}.
     /// @throws SlateDbException if the read fails.
-    public byte[] get(byte[] key, ReadOptions options) {
-        return Native.get(handle, key, options);
+    public Optional<SlateDbKeyValue> get(byte[] key, ReadOptions options) {
+        return Optional.ofNullable(Native.get(handle, key, options)).map(value -> new SlateDbKeyValue(key, value));
     }
 
     /// Deletes a key using default write options.

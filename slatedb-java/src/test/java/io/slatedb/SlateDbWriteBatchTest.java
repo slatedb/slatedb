@@ -25,8 +25,8 @@ class SlateDbWriteBatchTest {
 
             db.write(batch);
 
-            Assertions.assertNull(db.get(key1));
-            Assertions.assertArrayEquals(value2, db.get(key2));
+            Assertions.assertTrue(db.get(key1).isEmpty());
+            Assertions.assertArrayEquals(value2, db.get(key2).orElseThrow().value());
         }
     }
 
@@ -46,7 +46,7 @@ class SlateDbWriteBatchTest {
             batch.put(key, value, putOptions);
             db.write(batch, writeOptions);
 
-            Assertions.assertArrayEquals(value, db.get(key));
+            Assertions.assertArrayEquals(value, db.get(key).orElseThrow().value());
         }
     }
 

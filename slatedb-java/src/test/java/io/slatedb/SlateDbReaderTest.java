@@ -44,7 +44,7 @@ class SlateDbReaderTest {
             null,
             DEFAULT_READER_OPTIONS
         )) {
-            assertArrayEquals(value, reader.get(key));
+            assertArrayEquals(value, reader.get(key).orElseThrow().value());
 
             try (SlateDbScanIterator iter = reader.scanPrefix("reader-".getBytes(UTF_8))) {
                 final var kv = iter.next();
@@ -70,7 +70,7 @@ class SlateDbReaderTest {
             null,
             DEFAULT_READER_OPTIONS
         )) {
-            assertNull(reader.get("missing".getBytes(UTF_8)));
+            assertTrue(reader.get("missing".getBytes(UTF_8)).isEmpty());
         }
     }
 
@@ -93,7 +93,7 @@ class SlateDbReaderTest {
         );
 
         try {
-            assertArrayEquals(value, reader.get(key));
+            assertArrayEquals(value, reader.get(key).orElseThrow().value());
             reader.close();
             assertDoesNotThrow(reader::close);
         } finally {
