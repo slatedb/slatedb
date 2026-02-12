@@ -250,16 +250,16 @@ mod tests {
         let path = "/test_wal_reader";
         let db = Db::open(path, main_store.clone()).await.unwrap();
         db.put_with_options(
-            b"k1",
-            b"v1",
+            b"k2",
+            b"v2",
             &PutOptions::default(),
             &WriteOptions::default(),
         )
         .await
         .unwrap();
         db.put_with_options(
-            b"k2",
-            b"v2",
+            b"k1",
+            b"v1",
             &PutOptions::default(),
             &WriteOptions::default(),
         )
@@ -286,15 +286,15 @@ mod tests {
             }
         }
         assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0].key.as_ref(), b"k1");
+        assert_eq!(rows[0].key.as_ref(), b"k2");
         assert!(matches!(
             &rows[0].value,
-            ValueDeletable::Value(value) if value.as_ref() == b"v1"
+            ValueDeletable::Value(value) if value.as_ref() == b"v2"
         ));
-        assert_eq!(rows[1].key.as_ref(), b"k2");
+        assert_eq!(rows[1].key.as_ref(), b"k1");
         assert!(matches!(
             &rows[1].value,
-            ValueDeletable::Value(value) if value.as_ref() == b"v2"
+            ValueDeletable::Value(value) if value.as_ref() == b"v1"
         ));
     }
 
