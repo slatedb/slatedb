@@ -11,10 +11,10 @@ use crate::config::{
     convert_range_bounds, convert_read_options, convert_reader_options, convert_scan_options,
 };
 use crate::error::{
-    create_error_result, create_reader_handle_error_result,
+    create_error_result, create_none_result, create_reader_handle_error_result,
     create_reader_handle_error_result_from_slate_error, create_reader_handle_success_result,
     create_success_result, safe_str_from_ptr, slate_error_to_error_result, CSdbError,
-    CSdbReaderHandleResult, CSdbResult, create_none_result
+    CSdbReaderHandleResult, CSdbResult,
 };
 use crate::object_store::create_object_store;
 use crate::types::{CSdbIterator, CSdbReadOptions, CSdbScanOptions, CSdbValue};

@@ -1,6 +1,6 @@
 use crate::error::{
-    create_error_result, create_none_result, create_success_result, slate_error_to_code, CSdbError,
-    CSdbResult, slate_error_to_error_result,
+    create_error_result, create_none_result, create_success_result, slate_error_to_code,
+    slate_error_to_error_result, CSdbError, CSdbResult,
 };
 use crate::types::{CSdbIterator, CSdbKeyValue};
 
