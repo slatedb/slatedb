@@ -1,14 +1,31 @@
+//! Object store handle APIs for `slatedb-c`.
+//!
+//! This module exposes C ABI functions for resolving and freeing object store
+//! handles used by `slatedb_db_open` and builder APIs.
+
 use crate::ffi::{
     cstr_to_string, error_from_slate_error, error_result, slatedb_error_kind_t,
     slatedb_object_store_t, slatedb_result_t, success_result,
 };
 use slatedb::Db;
 
-/// Resolve an object store using `Db::resolve_object_store`.
+/// Resolves an object store from a URL and returns an opaque handle.
 ///
-/// # Safety
-/// - `url` must be a valid, null-terminated C string.
-/// - `out_object_store` must be non-null.
+/// ## Arguments
+/// - `url`: Null-terminated UTF-8 URL string (for example `file:///tmp/db`).
+/// - `out_object_store`: Output pointer populated with a newly allocated
+///   `slatedb_object_store_t*` on success.
+///
+/// ## Returns
+/// - `slatedb_result_t` with `kind == SLATEDB_ERROR_KIND_NONE` on success.
+///
+/// ## Errors
+/// - Returns `SLATEDB_ERROR_KIND_INVALID` for null pointers or invalid UTF-8.
+/// - Returns mapped SlateDB error kinds when URL resolution fails.
+///
+/// ## Safety
+/// - `url` must be a valid null-terminated C string.
+/// - `out_object_store` must be a valid non-null writable pointer.
 #[no_mangle]
 pub unsafe extern "C" fn slatedb_db_resolve_object_store(
     url: *const std::os::raw::c_char,
@@ -36,6 +53,17 @@ pub unsafe extern "C" fn slatedb_db_resolve_object_store(
     }
 }
 
+/// Closes and frees an object store handle previously returned by
+/// `slatedb_db_resolve_object_store`.
+///
+/// ## Arguments
+/// - `object_store`: Opaque object store handle.
+///
+/// ## Returns
+/// - `slatedb_result_t` indicating whether close succeeded.
+///
+/// ## Errors
+/// - Returns `SLATEDB_ERROR_KIND_INVALID` if `object_store` is null.
 #[no_mangle]
 pub extern "C" fn slatedb_object_store_close(
     object_store: *mut slatedb_object_store_t,

@@ -12,119 +12,298 @@
 #include <stdint.h>
 #include <stdlib.h>
 
+// Closed reason mirroring `slatedb::CloseReason`.
 typedef enum slatedb_close_reason_t {
+    // Not a closed error.
     SLATEDB_CLOSE_REASON_NONE = 0,
+    // Closed cleanly.
     SLATEDB_CLOSE_REASON_CLEAN = 1,
+    // Closed due to fencing.
     SLATEDB_CLOSE_REASON_FENCED = 2,
+    // Closed due to background panic.
     SLATEDB_CLOSE_REASON_PANIC = 3,
+    // Unknown close reason (forward compatibility).
     SLATEDB_CLOSE_REASON_UNKNOWN = 255,
 } slatedb_close_reason_t;
 
+// Public error kind mirroring `slatedb::ErrorKind`.
 typedef enum slatedb_error_kind_t {
+    // No error.
     SLATEDB_ERROR_KIND_NONE = 0,
+    // Transaction conflict / transactional error.
     SLATEDB_ERROR_KIND_TRANSACTION = 1,
+    // Database closed.
     SLATEDB_ERROR_KIND_CLOSED = 2,
+    // Backend/storage unavailable.
     SLATEDB_ERROR_KIND_UNAVAILABLE = 3,
+    // Invalid request/argument/state for caller.
     SLATEDB_ERROR_KIND_INVALID = 4,
+    // Persisted data-level error.
     SLATEDB_ERROR_KIND_DATA = 5,
+    // Internal SlateDB error.
     SLATEDB_ERROR_KIND_INTERNAL = 6,
+    // Unknown error kind (forward compatibility).
     SLATEDB_ERROR_KIND_UNKNOWN = 255,
 } slatedb_error_kind_t;
 
+// Opaque handle backing a database builder.
 typedef struct slatedb_db_builder_t slatedb_db_builder_t;
 
+// Opaque handle backing an open `Db` plus runtime owner.
 typedef struct slatedb_db_t slatedb_db_t;
 
+// Opaque handle backing a scan iterator plus runtime owner.
 typedef struct slatedb_iterator_t slatedb_iterator_t;
 
+// Opaque handle backing a resolved object store.
 typedef struct slatedb_object_store_t slatedb_object_store_t;
 
+// Opaque handle backing a mutable write batch.
 typedef struct slatedb_write_batch_t slatedb_write_batch_t;
 
+// Standard result structure returned by all C ABI functions.
 typedef struct slatedb_result_t {
+    // Top-level SlateDB error kind.
     enum slatedb_error_kind_t kind;
+    // Additional closed reason when `kind == SLATEDB_ERROR_KIND_CLOSED`.
     enum slatedb_close_reason_t close_reason;
+    // Optional error message allocated by Rust (free with `slatedb_result_free`).
     char *message;
 } slatedb_result_t;
 
+// SST block size selector for builder config.
 typedef uint8_t slatedb_sst_block_size_t;
 
+// Read options passed to `slatedb_db_get_with_options`.
 typedef struct slatedb_read_options_t {
+    // Durability filter: `0=Memory`, `1=Remote`.
     uint8_t durability_filter;
+    // Include dirty (uncommitted) data.
     bool dirty;
+    // Cache fetched blocks.
     bool cache_blocks;
 } slatedb_read_options_t;
 
+// Put options passed to put operations.
 typedef struct slatedb_put_options_t {
+    // TTL type: `0=Default`, `1=NoExpiry`, `2=ExpireAfter`.
     uint8_t ttl_type;
+    // TTL value in milliseconds when `ttl_type=2`.
     uint64_t ttl_value;
 } slatedb_put_options_t;
 
+// Write options passed to write operations.
 typedef struct slatedb_write_options_t {
+    // Wait for durable commit before returning.
     bool await_durable;
 } slatedb_write_options_t;
 
+// Merge options passed to merge operations.
 typedef struct slatedb_merge_options_t {
+    // TTL type: `0=Default`, `1=NoExpiry`, `2=ExpireAfter`.
     uint8_t ttl_type;
+    // TTL value in milliseconds when `ttl_type=2`.
     uint64_t ttl_value;
 } slatedb_merge_options_t;
 
+// C representation of a single range bound.
 typedef struct slatedb_bound_t {
+    // Bound kind: `0=Unbounded`, `1=Included`, `2=Excluded`.
     uint8_t kind;
+    // Bound bytes for included/excluded bounds.
     const uint8_t *data;
+    // Length of `data`.
     uintptr_t len;
 } slatedb_bound_t;
 
+// C representation of a byte-key range.
 typedef struct slatedb_range_t {
+    // Start bound.
     struct slatedb_bound_t start;
+    // End bound.
     struct slatedb_bound_t end;
 } slatedb_range_t;
 
+// Scan options passed to `slatedb_db_scan_with_options`.
 typedef struct slatedb_scan_options_t {
+    // Durability filter: `0=Memory`, `1=Remote`.
     uint8_t durability_filter;
+    // Include dirty (uncommitted) data.
     bool dirty;
+    // Read-ahead bytes.
     uint64_t read_ahead_bytes;
+    // Cache fetched blocks.
     bool cache_blocks;
+    // Max concurrent fetch tasks.
     uint64_t max_fetch_tasks;
 } slatedb_scan_options_t;
 
+// Flush options passed to `slatedb_db_flush_with_options`.
 typedef struct slatedb_flush_options_t {
+    // Flush type: `0=MemTable`, `1=Wal`.
     uint8_t flush_type;
 } slatedb_flush_options_t;
 
-// # Safety
-// - `path` must be a valid C string.
+// Opens a database using a pre-resolved object store handle.
+//
+// ## Arguments
+// - `path`: Database path as a null-terminated UTF-8 string.
+// - `object_store`: Opaque object store handle.
+// - `out_db`: Output pointer populated with a `slatedb_db_t*` on success.
+//
+// ## Returns
+// - `slatedb_result_t` describing success or failure.
+//
+// ## Errors
+// - Returns `SLATEDB_ERROR_KIND_INVALID` for null/invalid pointers.
+// - Returns mapped SlateDB errors for open failures.
+//
+// ## Safety
+// - `path` must be a valid null-terminated C string.
 // - `object_store` must be a valid object store handle.
-// - `out_db` must be non-null.
+// - `out_db` must be a valid non-null writable pointer.
 struct slatedb_result_t slatedb_db_open(const char *path,
                                         const struct slatedb_object_store_t *object_store,
                                         struct slatedb_db_t **out_db);
 
-// # Safety
-// - `path` must be a valid C string.
-// - `object_store` must be a valid object store handle.
-// - `out_builder` must be non-null.
+// Creates a new database builder.
+//
+// ## Arguments
+// - `path`: Database path as a null-terminated UTF-8 string.
+// - `object_store`: Opaque object store handle.
+// - `out_builder`: Output pointer populated with a `slatedb_db_builder_t*`.
+//
+// ## Returns
+// - `slatedb_result_t` indicating success or failure.
+//
+// ## Errors
+// - Returns `SLATEDB_ERROR_KIND_INVALID` for null/invalid pointers.
+//
+// ## Safety
+// - `path` must be a valid null-terminated C string.
+// - `object_store` and `out_builder` must be valid non-null pointers.
 struct slatedb_result_t slatedb_db_builder_new(const char *path,
                                                const struct slatedb_object_store_t *object_store,
                                                struct slatedb_db_builder_t **out_builder);
 
+// Configures a dedicated WAL object store on an existing builder.
+//
+// ## Arguments
+// - `builder`: Builder handle.
+// - `wal_object_store`: Object store handle for WAL files.
+//
+// ## Returns
+// - `slatedb_result_t` indicating success or failure.
+//
+// ## Errors
+// - Returns `SLATEDB_ERROR_KIND_INVALID` for invalid handles or consumed builder.
+//
+// ## Safety
+// - `builder` and `wal_object_store` must be valid handles.
 struct slatedb_result_t slatedb_db_builder_with_wal_object_store(struct slatedb_db_builder_t *builder,
                                                                  const struct slatedb_object_store_t *wal_object_store);
 
+// Configures RNG seed for a builder.
+//
+// ## Arguments
+// - `builder`: Builder handle.
+// - `seed`: Seed value.
+//
+// ## Returns
+// - `slatedb_result_t` indicating success/failure.
+//
+// ## Errors
+// - Returns `SLATEDB_ERROR_KIND_INVALID` for invalid handles or consumed builder.
+//
+// ## Safety
+// - `builder` must be a valid builder handle.
 struct slatedb_result_t slatedb_db_builder_with_seed(struct slatedb_db_builder_t *builder,
                                                      uint64_t seed);
 
+// Configures SST block size for a builder.
+//
+// ## Arguments
+// - `builder`: Builder handle.
+// - `sst_block_size`: Block-size selector (`1..=7`).
+//
+// ## Returns
+// - `slatedb_result_t` indicating success/failure.
+//
+// ## Errors
+// - Returns `SLATEDB_ERROR_KIND_INVALID` for invalid handles, invalid block
+//   size, or consumed builder.
+//
+// ## Safety
+// - `builder` must be a valid builder handle.
 struct slatedb_result_t slatedb_db_builder_with_sst_block_size(struct slatedb_db_builder_t *builder,
                                                                slatedb_sst_block_size_t sst_block_size);
 
-// Consumes the builder, matching `DbBuilder::build(self)` semantics.
+// Builds a database from a builder and consumes the builder handle.
+//
+// ## Arguments
+// - `builder`: Builder handle to consume.
+// - `out_db`: Output pointer populated with a `slatedb_db_t*` on success.
+//
+// ## Returns
+// - `slatedb_result_t` indicating success/failure.
+//
+// ## Errors
+// - Returns `SLATEDB_ERROR_KIND_INVALID` for invalid pointers/handles.
+// - Returns mapped SlateDB errors if build fails.
+//
+// ## Safety
+// - `builder` and `out_db` must be valid non-null pointers.
 struct slatedb_result_t slatedb_db_builder_build(struct slatedb_db_builder_t *builder,
                                                  struct slatedb_db_t **out_db);
 
+// Closes and frees a builder handle.
+//
+// ## Arguments
+// - `builder`: Builder handle.
+//
+// ## Returns
+// - `slatedb_result_t` indicating success/failure.
+//
+// ## Errors
+// - Returns `SLATEDB_ERROR_KIND_INVALID` when `builder` is null.
 struct slatedb_result_t slatedb_db_builder_close(struct slatedb_db_builder_t *builder);
 
+// Returns current database status without performing I/O.
+//
+// ## Arguments
+// - `db`: Database handle.
+//
+// ## Returns
+// - `slatedb_result_t` indicating open/closed/error state.
+//
+// ## Errors
+// - Returns `SLATEDB_ERROR_KIND_INVALID` for null handle.
+// - Returns mapped SlateDB status errors (including close reason).
+//
+// ## Safety
+// - `db` must be a valid database handle.
 struct slatedb_result_t slatedb_db_status(const struct slatedb_db_t *db);
 
+// Reads a single key using default read options.
+//
+// ## Arguments
+// - `db`: Database handle.
+// - `key`: Key bytes.
+// - `key_len`: Length of `key`.
+// - `out_found`: Set to `true` when a value is found.
+// - `out_val`: Output pointer to Rust-allocated value bytes.
+// - `out_val_len`: Output length for `out_val`.
+//
+// ## Returns
+// - `slatedb_result_t` indicating success/failure.
+//
+// ## Errors
+// - Returns `SLATEDB_ERROR_KIND_INVALID` for invalid pointers/handles.
+// - Returns mapped SlateDB errors for read failures.
+//
+// ## Safety
+// - All pointer arguments must be valid for reads/writes as appropriate.
+// - `out_val` must be freed with `slatedb_bytes_free` when `*out_found` is true.
 struct slatedb_result_t slatedb_db_get(struct slatedb_db_t *db,
                                        const uint8_t *key,
                                        uintptr_t key_len,
@@ -132,6 +311,27 @@ struct slatedb_result_t slatedb_db_get(struct slatedb_db_t *db,
                                        uint8_t **out_val,
                                        uintptr_t *out_val_len);
 
+// Reads a single key using explicit read options.
+//
+// ## Arguments
+// - `db`: Database handle.
+// - `key`: Key bytes.
+// - `key_len`: Length of `key`.
+// - `read_options`: Optional read options pointer (null uses defaults).
+// - `out_found`: Set to `true` when a value is found.
+// - `out_val`: Output pointer to Rust-allocated value bytes.
+// - `out_val_len`: Output length for `out_val`.
+//
+// ## Returns
+// - `slatedb_result_t` indicating success/failure.
+//
+// ## Errors
+// - Returns `SLATEDB_ERROR_KIND_INVALID` for invalid pointers/handles/options.
+// - Returns mapped SlateDB errors for read failures.
+//
+// ## Safety
+// - Pointer arguments must be valid for reads/writes as required.
+// - `out_val` must be freed with `slatedb_bytes_free` when `*out_found` is true.
 struct slatedb_result_t slatedb_db_get_with_options(struct slatedb_db_t *db,
                                                     const uint8_t *key,
                                                     uintptr_t key_len,
@@ -140,12 +340,50 @@ struct slatedb_result_t slatedb_db_get_with_options(struct slatedb_db_t *db,
                                                     uint8_t **out_val,
                                                     uintptr_t *out_val_len);
 
+// Writes a key/value pair using default put/write options.
+//
+// ## Arguments
+// - `db`: Database handle.
+// - `key`: Key bytes.
+// - `key_len`: Length of `key`.
+// - `value`: Value bytes.
+// - `value_len`: Length of `value`.
+//
+// ## Returns
+// - `slatedb_result_t` indicating success/failure.
+//
+// ## Errors
+// - Returns `SLATEDB_ERROR_KIND_INVALID` for invalid handles/pointers/sizes.
+// - Returns mapped SlateDB errors for write failures.
+//
+// ## Safety
+// - `key`/`value` must reference at least `key_len`/`value_len` readable bytes.
 struct slatedb_result_t slatedb_db_put(struct slatedb_db_t *db,
                                        const uint8_t *key,
                                        uintptr_t key_len,
                                        const uint8_t *value,
                                        uintptr_t value_len);
 
+// Writes a key/value pair with explicit put and write options.
+//
+// ## Arguments
+// - `db`: Database handle.
+// - `key`: Key bytes.
+// - `key_len`: Length of `key`.
+// - `value`: Value bytes.
+// - `value_len`: Length of `value`.
+// - `put_options`: Optional put options pointer.
+// - `write_options`: Optional write options pointer.
+//
+// ## Returns
+// - `slatedb_result_t` indicating success/failure.
+//
+// ## Errors
+// - Returns `SLATEDB_ERROR_KIND_INVALID` for invalid handles/pointers/options/sizes.
+// - Returns mapped SlateDB errors for write failures.
+//
+// ## Safety
+// - Pointer arguments must be valid for reads/writes as required.
 struct slatedb_result_t slatedb_db_put_with_options(struct slatedb_db_t *db,
                                                     const uint8_t *key,
                                                     uintptr_t key_len,
@@ -154,21 +392,92 @@ struct slatedb_result_t slatedb_db_put_with_options(struct slatedb_db_t *db,
                                                     const struct slatedb_put_options_t *put_options,
                                                     const struct slatedb_write_options_t *write_options);
 
+// Deletes a key using default write options.
+//
+// ## Arguments
+// - `db`: Database handle.
+// - `key`: Key bytes.
+// - `key_len`: Length of `key`.
+//
+// ## Returns
+// - `slatedb_result_t` indicating success/failure.
+//
+// ## Errors
+// - Returns `SLATEDB_ERROR_KIND_INVALID` for invalid handles/pointers/sizes.
+// - Returns mapped SlateDB errors for delete failures.
+//
+// ## Safety
+// - `key` must reference at least `key_len` readable bytes.
 struct slatedb_result_t slatedb_db_delete(struct slatedb_db_t *db,
                                           const uint8_t *key,
                                           uintptr_t key_len);
 
+// Deletes a key with explicit write options.
+//
+// ## Arguments
+// - `db`: Database handle.
+// - `key`: Key bytes.
+// - `key_len`: Length of `key`.
+// - `write_options`: Optional write options pointer.
+//
+// ## Returns
+// - `slatedb_result_t` indicating success/failure.
+//
+// ## Errors
+// - Returns `SLATEDB_ERROR_KIND_INVALID` for invalid handles/pointers/options.
+// - Returns mapped SlateDB errors for delete failures.
+//
+// ## Safety
+// - `key` must reference at least `key_len` readable bytes.
 struct slatedb_result_t slatedb_db_delete_with_options(struct slatedb_db_t *db,
                                                        const uint8_t *key,
                                                        uintptr_t key_len,
                                                        const struct slatedb_write_options_t *write_options);
 
+// Merges a value into a key using default merge/write options.
+//
+// ## Arguments
+// - `db`: Database handle.
+// - `key`: Key bytes.
+// - `key_len`: Length of `key`.
+// - `value`: Merge operand bytes.
+// - `value_len`: Length of `value`.
+//
+// ## Returns
+// - `slatedb_result_t` indicating success/failure.
+//
+// ## Errors
+// - Returns `SLATEDB_ERROR_KIND_INVALID` for invalid handles/pointers/sizes.
+// - Returns mapped SlateDB errors for merge failures.
+//
+// ## Safety
+// - `key`/`value` must reference readable memory for their lengths.
 struct slatedb_result_t slatedb_db_merge(struct slatedb_db_t *db,
                                          const uint8_t *key,
                                          uintptr_t key_len,
                                          const uint8_t *value,
                                          uintptr_t value_len);
 
+// Merges a value into a key with explicit merge and write options.
+//
+// ## Arguments
+// - `db`: Database handle.
+// - `key`: Key bytes.
+// - `key_len`: Length of `key`.
+// - `value`: Merge operand bytes.
+// - `value_len`: Length of `value`.
+// - `merge_options`: Optional merge options pointer.
+// - `write_options`: Optional write options pointer.
+//
+// ## Returns
+// - `slatedb_result_t` indicating success/failure.
+//
+// ## Errors
+// - Returns `SLATEDB_ERROR_KIND_INVALID` for invalid handles/pointers/options/sizes.
+// - Returns mapped SlateDB errors for merge failures.
+//
+// ## Safety
+// - Pointer arguments must be valid for reads as required.
 struct slatedb_result_t slatedb_db_merge_with_options(struct slatedb_db_t *db,
                                                       const uint8_t *key,
                                                       uintptr_t key_len,
@@ -177,41 +486,204 @@ struct slatedb_result_t slatedb_db_merge_with_options(struct slatedb_db_t *db,
                                                       const struct slatedb_merge_options_t *merge_options,
                                                       const struct slatedb_write_options_t *write_options);
 
+// Applies a write batch with default write options.
+//
+// ## Arguments
+// - `db`: Database handle.
+// - `write_batch`: Mutable write batch handle, consumed on success.
+//
+// ## Returns
+// - `slatedb_result_t` indicating success/failure.
+//
+// ## Errors
+// - Returns `SLATEDB_ERROR_KIND_INVALID` for invalid handles.
+// - Returns mapped SlateDB errors for write failures.
+//
+// ## Safety
+// - `db` and `write_batch` must be valid non-null handles.
 struct slatedb_result_t slatedb_db_write(struct slatedb_db_t *db,
                                          struct slatedb_write_batch_t *write_batch);
 
+// Applies a write batch using default write options.
+//
+// ## Arguments
+// - `db`: Database handle.
+// - `write_batch`: Mutable write batch handle, consumed on success.
+//
+// ## Returns
+// - `slatedb_result_t` indicating success/failure.
+//
+// ## Errors
+// - Returns `SLATEDB_ERROR_KIND_INVALID` for invalid handles.
+// - Returns mapped SlateDB errors for write failures.
+//
+// ## Safety
+// - `db` and `write_batch` must be valid non-null handles.
 struct slatedb_result_t slatedb_db_write_with_options(struct slatedb_db_t *db,
                                                       struct slatedb_write_batch_t *write_batch,
                                                       const struct slatedb_write_options_t *write_options);
 
+// Scans a key range using default scan options.
+//
+// ## Arguments
+// - `db`: Database handle.
+// - `range`: Range bounds to scan.
+// - `out_iterator`: Output pointer populated with `slatedb_iterator_t*`.
+//
+// ## Returns
+// - `slatedb_result_t` indicating success/failure.
+//
+// ## Errors
+// - Returns `SLATEDB_ERROR_KIND_INVALID` for invalid handles/pointers/range.
+// - Returns mapped SlateDB errors for scan failures.
+//
+// ## Safety
+// - `db` and `out_iterator` must be valid non-null pointers.
 struct slatedb_result_t slatedb_db_scan(struct slatedb_db_t *db,
                                         struct slatedb_range_t range,
                                         struct slatedb_iterator_t **out_iterator);
 
+// Scans a key range with explicit scan options.
+//
+// ## Arguments
+// - `db`: Database handle.
+// - `range`: Range bounds to scan.
+// - `scan_options`: Optional scan options pointer.
+// - `out_iterator`: Output pointer populated with `slatedb_iterator_t*`.
+//
+// ## Returns
+// - `slatedb_result_t` indicating success/failure.
+//
+// ## Errors
+// - Returns `SLATEDB_ERROR_KIND_INVALID` for invalid pointers/handles/options/range.
+// - Returns mapped SlateDB errors for scan failures.
+//
+// ## Safety
+// - Pointer arguments must be valid for reads/writes as required.
 struct slatedb_result_t slatedb_db_scan_with_options(struct slatedb_db_t *db,
                                                      struct slatedb_range_t range,
                                                      const struct slatedb_scan_options_t *scan_options,
                                                      struct slatedb_iterator_t **out_iterator);
 
+// Scans keys matching a prefix using default scan options.
+//
+// ## Arguments
+// - `db`: Database handle.
+// - `prefix`: Prefix bytes.
+// - `prefix_len`: Length of `prefix`.
+// - `out_iterator`: Output pointer populated with `slatedb_iterator_t*`.
+//
+// ## Returns
+// - `slatedb_result_t` indicating success/failure.
+//
+// ## Errors
+// - Returns `SLATEDB_ERROR_KIND_INVALID` for invalid pointers/handles/sizes.
+// - Returns mapped SlateDB errors for scan failures.
+//
+// ## Safety
+// - `prefix` must reference at least `prefix_len` readable bytes.
+// - `db` and `out_iterator` must be valid non-null pointers.
 struct slatedb_result_t slatedb_db_scan_prefix(struct slatedb_db_t *db,
                                                const uint8_t *prefix,
                                                uintptr_t prefix_len,
                                                struct slatedb_iterator_t **out_iterator);
 
+// Scans keys matching a prefix with explicit scan options.
+//
+// ## Arguments
+// - `db`: Database handle.
+// - `prefix`: Prefix bytes.
+// - `prefix_len`: Length of `prefix`.
+// - `scan_options`: Optional scan options pointer.
+// - `out_iterator`: Output pointer populated with `slatedb_iterator_t*`.
+//
+// ## Returns
+// - `slatedb_result_t` indicating success/failure.
+//
+// ## Errors
+// - Returns `SLATEDB_ERROR_KIND_INVALID` for invalid pointers/handles/options/sizes.
+// - Returns mapped SlateDB errors for scan failures.
+//
+// ## Safety
+// - Pointer arguments must be valid for reads/writes as required.
 struct slatedb_result_t slatedb_db_scan_prefix_with_options(struct slatedb_db_t *db,
                                                             const uint8_t *prefix,
                                                             uintptr_t prefix_len,
                                                             const struct slatedb_scan_options_t *scan_options,
                                                             struct slatedb_iterator_t **out_iterator);
 
+// Flushes the database using default flush behavior.
+//
+// ## Arguments
+// - `db`: Database handle.
+//
+// ## Returns
+// - `slatedb_result_t` indicating success/failure.
+//
+// ## Errors
+// - Returns `SLATEDB_ERROR_KIND_INVALID` for invalid handles.
+// - Returns mapped SlateDB errors for flush failures.
+//
+// ## Safety
+// - `db` must be a valid non-null handle.
 struct slatedb_result_t slatedb_db_flush(struct slatedb_db_t *db);
 
+// Flushes the database with explicit flush options.
+//
+// ## Arguments
+// - `db`: Database handle.
+// - `flush_options`: Optional flush options pointer.
+//
+// ## Returns
+// - `slatedb_result_t` indicating success/failure.
+//
+// ## Errors
+// - Returns `SLATEDB_ERROR_KIND_INVALID` for invalid handles/options.
+// - Returns mapped SlateDB errors for flush failures.
+//
+// ## Safety
+// - `db` must be a valid non-null handle.
+// - `flush_options`, when non-null, must point to a valid `slatedb_flush_options_t`.
 struct slatedb_result_t slatedb_db_flush_with_options(struct slatedb_db_t *db,
                                                       const struct slatedb_flush_options_t *flush_options);
 
-// Closes and frees the DB handle.
+// Closes and frees a database handle.
+//
+// ## Arguments
+// - `db`: Database handle to close.
+//
+// ## Returns
+// - `slatedb_result_t` indicating success/failure.
+//
+// ## Errors
+// - Returns `SLATEDB_ERROR_KIND_INVALID` for invalid handles.
+// - Returns mapped SlateDB errors for close failures (including close reason).
+//
+// ## Safety
+// - `db` must be a valid non-null handle obtained from this library.
 struct slatedb_result_t slatedb_db_close(struct slatedb_db_t *db);
 
+// Retrieves the next key/value pair from an iterator.
+//
+// ## Arguments
+// - `iterator`: Iterator handle created by scan APIs.
+// - `out_has_item`: Set to `true` when a row is returned.
+// - `out_key`: Output key buffer pointer (allocated by Rust).
+// - `out_key_len`: Output key length.
+// - `out_val`: Output value buffer pointer (allocated by Rust).
+// - `out_val_len`: Output value length.
+//
+// ## Returns
+// - `slatedb_result_t` with `kind == SLATEDB_ERROR_KIND_NONE` on success.
+//
+// ## Errors
+// - Returns `SLATEDB_ERROR_KIND_INVALID` for null pointers or invalid handles.
+// - Returns mapped SlateDB error kinds if iteration fails.
+//
+// ## Safety
+// - All output pointers must be valid, non-null writable pointers.
+// - Buffers returned in `out_key`/`out_val` must be freed with
+//   `slatedb_bytes_free`.
 struct slatedb_result_t slatedb_iterator_next(struct slatedb_iterator_t *iterator,
                                               bool *out_has_item,
                                               uint8_t **out_key,
@@ -219,34 +691,158 @@ struct slatedb_result_t slatedb_iterator_next(struct slatedb_iterator_t *iterato
                                               uint8_t **out_val,
                                               uintptr_t *out_val_len);
 
+// Seeks the iterator to the first key greater than or equal to `key`.
+//
+// ## Arguments
+// - `iterator`: Iterator handle.
+// - `key`: Seek target key bytes.
+// - `key_len`: Length of `key`.
+//
+// ## Returns
+// - `slatedb_result_t` describing success or failure.
+//
+// ## Errors
+// - Returns `SLATEDB_ERROR_KIND_INVALID` for invalid handles/pointers.
+// - Returns mapped SlateDB error kinds for seek failures.
+//
+// ## Safety
+// - `iterator` must be a valid iterator handle.
+// - `key` must reference at least `key_len` readable bytes when `key_len > 0`.
 struct slatedb_result_t slatedb_iterator_seek(struct slatedb_iterator_t *iterator,
                                               const uint8_t *key,
                                               uintptr_t key_len);
 
+// Closes and frees an iterator handle.
+//
+// ## Arguments
+// - `iterator`: Iterator handle previously returned from scan APIs.
+//
+// ## Returns
+// - `slatedb_result_t` indicating success/failure.
+//
+// ## Errors
+// - Returns `SLATEDB_ERROR_KIND_INVALID` when `iterator` is null.
 struct slatedb_result_t slatedb_iterator_close(struct slatedb_iterator_t *iterator);
 
+// Frees heap memory referenced by `slatedb_result_t.message`.
+//
+// ## Arguments
+// - `result`: Result value returned by a SlateDB C API function.
+//
+// ## Returns
+// - No return value.
+//
+// ## Safety
+// - `result.message` must be either null or a pointer returned by this crate.
 void slatedb_result_free(struct slatedb_result_t result);
 
+// Frees a byte buffer allocated by SlateDB C APIs.
+//
+// ## Arguments
+// - `data`: Byte pointer returned by this crate.
+// - `len`: Buffer length associated with `data`.
+//
+// ## Returns
+// - No return value.
+//
+// ## Safety
+// - `data`/`len` must exactly match a buffer allocated by this crate.
+// - Do not call more than once for the same allocation.
 void slatedb_bytes_free(uint8_t *data, uintptr_t len);
 
-// Resolve an object store using `Db::resolve_object_store`.
+// Resolves an object store from a URL and returns an opaque handle.
 //
-// # Safety
-// - `url` must be a valid, null-terminated C string.
-// - `out_object_store` must be non-null.
+// ## Arguments
+// - `url`: Null-terminated UTF-8 URL string (for example `file:///tmp/db`).
+// - `out_object_store`: Output pointer populated with a newly allocated
+//   `slatedb_object_store_t*` on success.
+//
+// ## Returns
+// - `slatedb_result_t` with `kind == SLATEDB_ERROR_KIND_NONE` on success.
+//
+// ## Errors
+// - Returns `SLATEDB_ERROR_KIND_INVALID` for null pointers or invalid UTF-8.
+// - Returns mapped SlateDB error kinds when URL resolution fails.
+//
+// ## Safety
+// - `url` must be a valid null-terminated C string.
+// - `out_object_store` must be a valid non-null writable pointer.
 struct slatedb_result_t slatedb_db_resolve_object_store(const char *url,
                                                         struct slatedb_object_store_t **out_object_store);
 
+// Closes and frees an object store handle previously returned by
+// `slatedb_db_resolve_object_store`.
+//
+// ## Arguments
+// - `object_store`: Opaque object store handle.
+//
+// ## Returns
+// - `slatedb_result_t` indicating whether close succeeded.
+//
+// ## Errors
+// - Returns `SLATEDB_ERROR_KIND_INVALID` if `object_store` is null.
 struct slatedb_result_t slatedb_object_store_close(struct slatedb_object_store_t *object_store);
 
+// Allocates a new empty write batch.
+//
+// ## Arguments
+// - `out_write_batch`: Output pointer that receives the new batch handle.
+//
+// ## Returns
+// - `slatedb_result_t` indicating success/failure.
+//
+// ## Errors
+// - Returns `SLATEDB_ERROR_KIND_INVALID` if `out_write_batch` is null.
+//
+// ## Safety
+// - `out_write_batch` must be a valid non-null writable pointer.
 struct slatedb_result_t slatedb_write_batch_new(struct slatedb_write_batch_t **out_write_batch);
 
+// Appends a `put` operation to a write batch.
+//
+// ## Arguments
+// - `write_batch`: Write batch handle.
+// - `key`: Key bytes.
+// - `key_len`: Length of `key`.
+// - `value`: Value bytes.
+// - `value_len`: Length of `value`.
+//
+// ## Returns
+// - `slatedb_result_t` indicating success/failure.
+//
+// ## Errors
+// - Returns `SLATEDB_ERROR_KIND_INVALID` for invalid handles, consumed batches,
+//   null pointers, or invalid key/value sizes.
+//
+// ## Safety
+// - `write_batch` must be a valid batch handle.
+// - `key`/`value` must reference at least `key_len`/`value_len` readable bytes
+//   when lengths are non-zero.
 struct slatedb_result_t slatedb_write_batch_put(struct slatedb_write_batch_t *write_batch,
                                                 const uint8_t *key,
                                                 uintptr_t key_len,
                                                 const uint8_t *value,
                                                 uintptr_t value_len);
 
+// Appends a `put` operation with explicit put options.
+//
+// ## Arguments
+// - `write_batch`: Write batch handle.
+// - `key`: Key bytes.
+// - `key_len`: Length of `key`.
+// - `value`: Value bytes.
+// - `value_len`: Length of `value`.
+// - `put_options`: Optional put options pointer (null uses defaults).
+//
+// ## Returns
+// - `slatedb_result_t` indicating success/failure.
+//
+// ## Errors
+// - Returns `SLATEDB_ERROR_KIND_INVALID` for invalid handles, consumed batches,
+//   null pointers, invalid options, or invalid key/value sizes.
+//
+// ## Safety
+// - Pointer arguments must be valid for reads/writes as appropriate.
 struct slatedb_result_t slatedb_write_batch_put_with_options(struct slatedb_write_batch_t *write_batch,
                                                              const uint8_t *key,
                                                              uintptr_t key_len,
@@ -254,12 +850,49 @@ struct slatedb_result_t slatedb_write_batch_put_with_options(struct slatedb_writ
                                                              uintptr_t value_len,
                                                              const struct slatedb_put_options_t *put_options);
 
+// Appends a `merge` operation to a write batch.
+//
+// ## Arguments
+// - `write_batch`: Write batch handle.
+// - `key`: Key bytes.
+// - `key_len`: Length of `key`.
+// - `value`: Merge operand bytes.
+// - `value_len`: Length of `value`.
+//
+// ## Returns
+// - `slatedb_result_t` indicating success/failure.
+//
+// ## Errors
+// - Returns `SLATEDB_ERROR_KIND_INVALID` for invalid handles, consumed batches,
+//   null pointers, or invalid key/value sizes.
+//
+// ## Safety
+// - Pointer arguments must be valid for reads as required.
 struct slatedb_result_t slatedb_write_batch_merge(struct slatedb_write_batch_t *write_batch,
                                                   const uint8_t *key,
                                                   uintptr_t key_len,
                                                   const uint8_t *value,
                                                   uintptr_t value_len);
 
+// Appends a `merge` operation with explicit merge options.
+//
+// ## Arguments
+// - `write_batch`: Write batch handle.
+// - `key`: Key bytes.
+// - `key_len`: Length of `key`.
+// - `value`: Merge operand bytes.
+// - `value_len`: Length of `value`.
+// - `merge_options`: Optional merge options pointer (null uses defaults).
+//
+// ## Returns
+// - `slatedb_result_t` indicating success/failure.
+//
+// ## Errors
+// - Returns `SLATEDB_ERROR_KIND_INVALID` for invalid handles, consumed batches,
+//   null pointers, invalid options, or invalid key/value sizes.
+//
+// ## Safety
+// - Pointer arguments must be valid for reads/writes as appropriate.
 struct slatedb_result_t slatedb_write_batch_merge_with_options(struct slatedb_write_batch_t *write_batch,
                                                                const uint8_t *key,
                                                                uintptr_t key_len,
@@ -267,10 +900,36 @@ struct slatedb_result_t slatedb_write_batch_merge_with_options(struct slatedb_wr
                                                                uintptr_t value_len,
                                                                const struct slatedb_merge_options_t *merge_options);
 
+// Appends a `delete` operation to a write batch.
+//
+// ## Arguments
+// - `write_batch`: Write batch handle.
+// - `key`: Key bytes.
+// - `key_len`: Length of `key`.
+//
+// ## Returns
+// - `slatedb_result_t` indicating success/failure.
+//
+// ## Errors
+// - Returns `SLATEDB_ERROR_KIND_INVALID` for invalid handles, consumed batches,
+//   null pointers, or invalid key size.
+//
+// ## Safety
+// - `key` must reference at least `key_len` readable bytes when `key_len > 0`.
 struct slatedb_result_t slatedb_write_batch_delete(struct slatedb_write_batch_t *write_batch,
                                                    const uint8_t *key,
                                                    uintptr_t key_len);
 
+// Closes and frees a write batch handle.
+//
+// ## Arguments
+// - `write_batch`: Batch handle to destroy.
+//
+// ## Returns
+// - `slatedb_result_t` indicating success/failure.
+//
+// ## Errors
+// - Returns `SLATEDB_ERROR_KIND_INVALID` when `write_batch` is null.
 struct slatedb_result_t slatedb_write_batch_close(struct slatedb_write_batch_t *write_batch);
 
 #endif  /* SLATEDB_C_H */

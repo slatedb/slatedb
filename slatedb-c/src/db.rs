@@ -1,3 +1,8 @@
+//! Database and builder APIs for `slatedb-c`.
+//!
+//! This module exposes the primary C ABI surface for opening/configuring
+//! databases and executing read/write operations.
+
 use crate::ffi::{
     alloc_bytes, bytes_from_ptr, create_runtime, cstr_to_string, error_from_slate_error,
     error_result, flush_options_from_ptr, merge_options_from_ptr, put_options_from_ptr,
@@ -10,10 +15,24 @@ use crate::ffi::{
 };
 use slatedb::Db;
 
-/// # Safety
-/// - `path` must be a valid C string.
+/// Opens a database using a pre-resolved object store handle.
+///
+/// ## Arguments
+/// - `path`: Database path as a null-terminated UTF-8 string.
+/// - `object_store`: Opaque object store handle.
+/// - `out_db`: Output pointer populated with a `slatedb_db_t*` on success.
+///
+/// ## Returns
+/// - `slatedb_result_t` describing success or failure.
+///
+/// ## Errors
+/// - Returns `SLATEDB_ERROR_KIND_INVALID` for null/invalid pointers.
+/// - Returns mapped SlateDB errors for open failures.
+///
+/// ## Safety
+/// - `path` must be a valid null-terminated C string.
 /// - `object_store` must be a valid object store handle.
-/// - `out_db` must be non-null.
+/// - `out_db` must be a valid non-null writable pointer.
 #[no_mangle]
 pub unsafe extern "C" fn slatedb_db_open(
     path: *const std::os::raw::c_char,
@@ -54,10 +73,22 @@ pub unsafe extern "C" fn slatedb_db_open(
     }
 }
 
-/// # Safety
-/// - `path` must be a valid C string.
-/// - `object_store` must be a valid object store handle.
-/// - `out_builder` must be non-null.
+/// Creates a new database builder.
+///
+/// ## Arguments
+/// - `path`: Database path as a null-terminated UTF-8 string.
+/// - `object_store`: Opaque object store handle.
+/// - `out_builder`: Output pointer populated with a `slatedb_db_builder_t*`.
+///
+/// ## Returns
+/// - `slatedb_result_t` indicating success or failure.
+///
+/// ## Errors
+/// - Returns `SLATEDB_ERROR_KIND_INVALID` for null/invalid pointers.
+///
+/// ## Safety
+/// - `path` must be a valid null-terminated C string.
+/// - `object_store` and `out_builder` must be valid non-null pointers.
 #[no_mangle]
 pub unsafe extern "C" fn slatedb_db_builder_new(
     path: *const std::os::raw::c_char,
@@ -92,6 +123,20 @@ pub unsafe extern "C" fn slatedb_db_builder_new(
     success_result()
 }
 
+/// Configures a dedicated WAL object store on an existing builder.
+///
+/// ## Arguments
+/// - `builder`: Builder handle.
+/// - `wal_object_store`: Object store handle for WAL files.
+///
+/// ## Returns
+/// - `slatedb_result_t` indicating success or failure.
+///
+/// ## Errors
+/// - Returns `SLATEDB_ERROR_KIND_INVALID` for invalid handles or consumed builder.
+///
+/// ## Safety
+/// - `builder` and `wal_object_store` must be valid handles.
 #[no_mangle]
 pub unsafe extern "C" fn slatedb_db_builder_with_wal_object_store(
     builder: *mut slatedb_db_builder_t,
@@ -123,6 +168,20 @@ pub unsafe extern "C" fn slatedb_db_builder_with_wal_object_store(
     success_result()
 }
 
+/// Configures RNG seed for a builder.
+///
+/// ## Arguments
+/// - `builder`: Builder handle.
+/// - `seed`: Seed value.
+///
+/// ## Returns
+/// - `slatedb_result_t` indicating success/failure.
+///
+/// ## Errors
+/// - Returns `SLATEDB_ERROR_KIND_INVALID` for invalid handles or consumed builder.
+///
+/// ## Safety
+/// - `builder` must be a valid builder handle.
 #[no_mangle]
 pub unsafe extern "C" fn slatedb_db_builder_with_seed(
     builder: *mut slatedb_db_builder_t,
@@ -147,6 +206,21 @@ pub unsafe extern "C" fn slatedb_db_builder_with_seed(
     success_result()
 }
 
+/// Configures SST block size for a builder.
+///
+/// ## Arguments
+/// - `builder`: Builder handle.
+/// - `sst_block_size`: Block-size selector (`1..=7`).
+///
+/// ## Returns
+/// - `slatedb_result_t` indicating success/failure.
+///
+/// ## Errors
+/// - Returns `SLATEDB_ERROR_KIND_INVALID` for invalid handles, invalid block
+///   size, or consumed builder.
+///
+/// ## Safety
+/// - `builder` must be a valid builder handle.
 #[no_mangle]
 pub unsafe extern "C" fn slatedb_db_builder_with_sst_block_size(
     builder: *mut slatedb_db_builder_t,
@@ -176,7 +250,21 @@ pub unsafe extern "C" fn slatedb_db_builder_with_sst_block_size(
     success_result()
 }
 
-/// Consumes the builder, matching `DbBuilder::build(self)` semantics.
+/// Builds a database from a builder and consumes the builder handle.
+///
+/// ## Arguments
+/// - `builder`: Builder handle to consume.
+/// - `out_db`: Output pointer populated with a `slatedb_db_t*` on success.
+///
+/// ## Returns
+/// - `slatedb_result_t` indicating success/failure.
+///
+/// ## Errors
+/// - Returns `SLATEDB_ERROR_KIND_INVALID` for invalid pointers/handles.
+/// - Returns mapped SlateDB errors if build fails.
+///
+/// ## Safety
+/// - `builder` and `out_db` must be valid non-null pointers.
 #[no_mangle]
 pub unsafe extern "C" fn slatedb_db_builder_build(
     builder: *mut slatedb_db_builder_t,
@@ -218,6 +306,16 @@ pub unsafe extern "C" fn slatedb_db_builder_build(
     }
 }
 
+/// Closes and frees a builder handle.
+///
+/// ## Arguments
+/// - `builder`: Builder handle.
+///
+/// ## Returns
+/// - `slatedb_result_t` indicating success/failure.
+///
+/// ## Errors
+/// - Returns `SLATEDB_ERROR_KIND_INVALID` when `builder` is null.
 #[no_mangle]
 pub extern "C" fn slatedb_db_builder_close(builder: *mut slatedb_db_builder_t) -> slatedb_result_t {
     if builder.is_null() {
@@ -234,6 +332,20 @@ pub extern "C" fn slatedb_db_builder_close(builder: *mut slatedb_db_builder_t) -
     success_result()
 }
 
+/// Returns current database status without performing I/O.
+///
+/// ## Arguments
+/// - `db`: Database handle.
+///
+/// ## Returns
+/// - `slatedb_result_t` indicating open/closed/error state.
+///
+/// ## Errors
+/// - Returns `SLATEDB_ERROR_KIND_INVALID` for null handle.
+/// - Returns mapped SlateDB status errors (including close reason).
+///
+/// ## Safety
+/// - `db` must be a valid database handle.
 #[no_mangle]
 pub unsafe extern "C" fn slatedb_db_status(db: *const slatedb_db_t) -> slatedb_result_t {
     if db.is_null() {
@@ -250,6 +362,26 @@ pub unsafe extern "C" fn slatedb_db_status(db: *const slatedb_db_t) -> slatedb_r
     }
 }
 
+/// Reads a single key using default read options.
+///
+/// ## Arguments
+/// - `db`: Database handle.
+/// - `key`: Key bytes.
+/// - `key_len`: Length of `key`.
+/// - `out_found`: Set to `true` when a value is found.
+/// - `out_val`: Output pointer to Rust-allocated value bytes.
+/// - `out_val_len`: Output length for `out_val`.
+///
+/// ## Returns
+/// - `slatedb_result_t` indicating success/failure.
+///
+/// ## Errors
+/// - Returns `SLATEDB_ERROR_KIND_INVALID` for invalid pointers/handles.
+/// - Returns mapped SlateDB errors for read failures.
+///
+/// ## Safety
+/// - All pointer arguments must be valid for reads/writes as appropriate.
+/// - `out_val` must be freed with `slatedb_bytes_free` when `*out_found` is true.
 #[no_mangle]
 pub unsafe extern "C" fn slatedb_db_get(
     db: *mut slatedb_db_t,
@@ -270,6 +402,27 @@ pub unsafe extern "C" fn slatedb_db_get(
     )
 }
 
+/// Reads a single key using explicit read options.
+///
+/// ## Arguments
+/// - `db`: Database handle.
+/// - `key`: Key bytes.
+/// - `key_len`: Length of `key`.
+/// - `read_options`: Optional read options pointer (null uses defaults).
+/// - `out_found`: Set to `true` when a value is found.
+/// - `out_val`: Output pointer to Rust-allocated value bytes.
+/// - `out_val_len`: Output length for `out_val`.
+///
+/// ## Returns
+/// - `slatedb_result_t` indicating success/failure.
+///
+/// ## Errors
+/// - Returns `SLATEDB_ERROR_KIND_INVALID` for invalid pointers/handles/options.
+/// - Returns mapped SlateDB errors for read failures.
+///
+/// ## Safety
+/// - Pointer arguments must be valid for reads/writes as required.
+/// - `out_val` must be freed with `slatedb_bytes_free` when `*out_found` is true.
 #[no_mangle]
 pub unsafe extern "C" fn slatedb_db_get_with_options(
     db: *mut slatedb_db_t,
@@ -338,6 +491,24 @@ pub unsafe extern "C" fn slatedb_db_get_with_options(
     }
 }
 
+/// Writes a key/value pair using default put/write options.
+///
+/// ## Arguments
+/// - `db`: Database handle.
+/// - `key`: Key bytes.
+/// - `key_len`: Length of `key`.
+/// - `value`: Value bytes.
+/// - `value_len`: Length of `value`.
+///
+/// ## Returns
+/// - `slatedb_result_t` indicating success/failure.
+///
+/// ## Errors
+/// - Returns `SLATEDB_ERROR_KIND_INVALID` for invalid handles/pointers/sizes.
+/// - Returns mapped SlateDB errors for write failures.
+///
+/// ## Safety
+/// - `key`/`value` must reference at least `key_len`/`value_len` readable bytes.
 #[no_mangle]
 pub unsafe extern "C" fn slatedb_db_put(
     db: *mut slatedb_db_t,
@@ -373,6 +544,26 @@ pub unsafe extern "C" fn slatedb_db_put(
     }
 }
 
+/// Writes a key/value pair with explicit put and write options.
+///
+/// ## Arguments
+/// - `db`: Database handle.
+/// - `key`: Key bytes.
+/// - `key_len`: Length of `key`.
+/// - `value`: Value bytes.
+/// - `value_len`: Length of `value`.
+/// - `put_options`: Optional put options pointer.
+/// - `write_options`: Optional write options pointer.
+///
+/// ## Returns
+/// - `slatedb_result_t` indicating success/failure.
+///
+/// ## Errors
+/// - Returns `SLATEDB_ERROR_KIND_INVALID` for invalid handles/pointers/options/sizes.
+/// - Returns mapped SlateDB errors for write failures.
+///
+/// ## Safety
+/// - Pointer arguments must be valid for reads/writes as required.
 #[no_mangle]
 pub unsafe extern "C" fn slatedb_db_put_with_options(
     db: *mut slatedb_db_t,
@@ -421,6 +612,22 @@ pub unsafe extern "C" fn slatedb_db_put_with_options(
     }
 }
 
+/// Deletes a key using default write options.
+///
+/// ## Arguments
+/// - `db`: Database handle.
+/// - `key`: Key bytes.
+/// - `key_len`: Length of `key`.
+///
+/// ## Returns
+/// - `slatedb_result_t` indicating success/failure.
+///
+/// ## Errors
+/// - Returns `SLATEDB_ERROR_KIND_INVALID` for invalid handles/pointers/sizes.
+/// - Returns mapped SlateDB errors for delete failures.
+///
+/// ## Safety
+/// - `key` must reference at least `key_len` readable bytes.
 #[no_mangle]
 pub unsafe extern "C" fn slatedb_db_delete(
     db: *mut slatedb_db_t,
@@ -449,6 +656,23 @@ pub unsafe extern "C" fn slatedb_db_delete(
     }
 }
 
+/// Deletes a key with explicit write options.
+///
+/// ## Arguments
+/// - `db`: Database handle.
+/// - `key`: Key bytes.
+/// - `key_len`: Length of `key`.
+/// - `write_options`: Optional write options pointer.
+///
+/// ## Returns
+/// - `slatedb_result_t` indicating success/failure.
+///
+/// ## Errors
+/// - Returns `SLATEDB_ERROR_KIND_INVALID` for invalid handles/pointers/options.
+/// - Returns mapped SlateDB errors for delete failures.
+///
+/// ## Safety
+/// - `key` must reference at least `key_len` readable bytes.
 #[no_mangle]
 pub unsafe extern "C" fn slatedb_db_delete_with_options(
     db: *mut slatedb_db_t,
@@ -483,6 +707,24 @@ pub unsafe extern "C" fn slatedb_db_delete_with_options(
     }
 }
 
+/// Merges a value into a key using default merge/write options.
+///
+/// ## Arguments
+/// - `db`: Database handle.
+/// - `key`: Key bytes.
+/// - `key_len`: Length of `key`.
+/// - `value`: Merge operand bytes.
+/// - `value_len`: Length of `value`.
+///
+/// ## Returns
+/// - `slatedb_result_t` indicating success/failure.
+///
+/// ## Errors
+/// - Returns `SLATEDB_ERROR_KIND_INVALID` for invalid handles/pointers/sizes.
+/// - Returns mapped SlateDB errors for merge failures.
+///
+/// ## Safety
+/// - `key`/`value` must reference readable memory for their lengths.
 #[no_mangle]
 pub unsafe extern "C" fn slatedb_db_merge(
     db: *mut slatedb_db_t,
@@ -518,6 +760,26 @@ pub unsafe extern "C" fn slatedb_db_merge(
     }
 }
 
+/// Merges a value into a key with explicit merge and write options.
+///
+/// ## Arguments
+/// - `db`: Database handle.
+/// - `key`: Key bytes.
+/// - `key_len`: Length of `key`.
+/// - `value`: Merge operand bytes.
+/// - `value_len`: Length of `value`.
+/// - `merge_options`: Optional merge options pointer.
+/// - `write_options`: Optional write options pointer.
+///
+/// ## Returns
+/// - `slatedb_result_t` indicating success/failure.
+///
+/// ## Errors
+/// - Returns `SLATEDB_ERROR_KIND_INVALID` for invalid handles/pointers/options/sizes.
+/// - Returns mapped SlateDB errors for merge failures.
+///
+/// ## Safety
+/// - Pointer arguments must be valid for reads as required.
 #[no_mangle]
 pub unsafe extern "C" fn slatedb_db_merge_with_options(
     db: *mut slatedb_db_t,
@@ -566,6 +828,21 @@ pub unsafe extern "C" fn slatedb_db_merge_with_options(
     }
 }
 
+/// Applies a write batch with default write options.
+///
+/// ## Arguments
+/// - `db`: Database handle.
+/// - `write_batch`: Mutable write batch handle, consumed on success.
+///
+/// ## Returns
+/// - `slatedb_result_t` indicating success/failure.
+///
+/// ## Errors
+/// - Returns `SLATEDB_ERROR_KIND_INVALID` for invalid handles.
+/// - Returns mapped SlateDB errors for write failures.
+///
+/// ## Safety
+/// - `db` and `write_batch` must be valid non-null handles.
 #[no_mangle]
 pub unsafe extern "C" fn slatedb_db_write(
     db: *mut slatedb_db_t,
@@ -574,6 +851,21 @@ pub unsafe extern "C" fn slatedb_db_write(
     slatedb_db_write_with_options(db, write_batch, std::ptr::null())
 }
 
+/// Applies a write batch using default write options.
+///
+/// ## Arguments
+/// - `db`: Database handle.
+/// - `write_batch`: Mutable write batch handle, consumed on success.
+///
+/// ## Returns
+/// - `slatedb_result_t` indicating success/failure.
+///
+/// ## Errors
+/// - Returns `SLATEDB_ERROR_KIND_INVALID` for invalid handles.
+/// - Returns mapped SlateDB errors for write failures.
+///
+/// ## Safety
+/// - `db` and `write_batch` must be valid non-null handles.
 #[no_mangle]
 pub unsafe extern "C" fn slatedb_db_write_with_options(
     db: *mut slatedb_db_t,
@@ -613,6 +905,22 @@ pub unsafe extern "C" fn slatedb_db_write_with_options(
     }
 }
 
+/// Scans a key range using default scan options.
+///
+/// ## Arguments
+/// - `db`: Database handle.
+/// - `range`: Range bounds to scan.
+/// - `out_iterator`: Output pointer populated with `slatedb_iterator_t*`.
+///
+/// ## Returns
+/// - `slatedb_result_t` indicating success/failure.
+///
+/// ## Errors
+/// - Returns `SLATEDB_ERROR_KIND_INVALID` for invalid handles/pointers/range.
+/// - Returns mapped SlateDB errors for scan failures.
+///
+/// ## Safety
+/// - `db` and `out_iterator` must be valid non-null pointers.
 #[no_mangle]
 pub unsafe extern "C" fn slatedb_db_scan(
     db: *mut slatedb_db_t,
@@ -622,6 +930,23 @@ pub unsafe extern "C" fn slatedb_db_scan(
     slatedb_db_scan_with_options(db, range, std::ptr::null(), out_iterator)
 }
 
+/// Scans a key range with explicit scan options.
+///
+/// ## Arguments
+/// - `db`: Database handle.
+/// - `range`: Range bounds to scan.
+/// - `scan_options`: Optional scan options pointer.
+/// - `out_iterator`: Output pointer populated with `slatedb_iterator_t*`.
+///
+/// ## Returns
+/// - `slatedb_result_t` indicating success/failure.
+///
+/// ## Errors
+/// - Returns `SLATEDB_ERROR_KIND_INVALID` for invalid pointers/handles/options/range.
+/// - Returns mapped SlateDB errors for scan failures.
+///
+/// ## Safety
+/// - Pointer arguments must be valid for reads/writes as required.
 #[no_mangle]
 pub unsafe extern "C" fn slatedb_db_scan_with_options(
     db: *mut slatedb_db_t,
@@ -668,6 +993,24 @@ pub unsafe extern "C" fn slatedb_db_scan_with_options(
     }
 }
 
+/// Scans keys matching a prefix using default scan options.
+///
+/// ## Arguments
+/// - `db`: Database handle.
+/// - `prefix`: Prefix bytes.
+/// - `prefix_len`: Length of `prefix`.
+/// - `out_iterator`: Output pointer populated with `slatedb_iterator_t*`.
+///
+/// ## Returns
+/// - `slatedb_result_t` indicating success/failure.
+///
+/// ## Errors
+/// - Returns `SLATEDB_ERROR_KIND_INVALID` for invalid pointers/handles/sizes.
+/// - Returns mapped SlateDB errors for scan failures.
+///
+/// ## Safety
+/// - `prefix` must reference at least `prefix_len` readable bytes.
+/// - `db` and `out_iterator` must be valid non-null pointers.
 #[no_mangle]
 pub unsafe extern "C" fn slatedb_db_scan_prefix(
     db: *mut slatedb_db_t,
@@ -678,6 +1021,24 @@ pub unsafe extern "C" fn slatedb_db_scan_prefix(
     slatedb_db_scan_prefix_with_options(db, prefix, prefix_len, std::ptr::null(), out_iterator)
 }
 
+/// Scans keys matching a prefix with explicit scan options.
+///
+/// ## Arguments
+/// - `db`: Database handle.
+/// - `prefix`: Prefix bytes.
+/// - `prefix_len`: Length of `prefix`.
+/// - `scan_options`: Optional scan options pointer.
+/// - `out_iterator`: Output pointer populated with `slatedb_iterator_t*`.
+///
+/// ## Returns
+/// - `slatedb_result_t` indicating success/failure.
+///
+/// ## Errors
+/// - Returns `SLATEDB_ERROR_KIND_INVALID` for invalid pointers/handles/options/sizes.
+/// - Returns mapped SlateDB errors for scan failures.
+///
+/// ## Safety
+/// - Pointer arguments must be valid for reads/writes as required.
 #[no_mangle]
 pub unsafe extern "C" fn slatedb_db_scan_prefix_with_options(
     db: *mut slatedb_db_t,
@@ -725,6 +1086,20 @@ pub unsafe extern "C" fn slatedb_db_scan_prefix_with_options(
     }
 }
 
+/// Flushes the database using default flush behavior.
+///
+/// ## Arguments
+/// - `db`: Database handle.
+///
+/// ## Returns
+/// - `slatedb_result_t` indicating success/failure.
+///
+/// ## Errors
+/// - Returns `SLATEDB_ERROR_KIND_INVALID` for invalid handles.
+/// - Returns mapped SlateDB errors for flush failures.
+///
+/// ## Safety
+/// - `db` must be a valid non-null handle.
 #[no_mangle]
 pub unsafe extern "C" fn slatedb_db_flush(db: *mut slatedb_db_t) -> slatedb_result_t {
     if db.is_null() {
@@ -741,6 +1116,22 @@ pub unsafe extern "C" fn slatedb_db_flush(db: *mut slatedb_db_t) -> slatedb_resu
     }
 }
 
+/// Flushes the database with explicit flush options.
+///
+/// ## Arguments
+/// - `db`: Database handle.
+/// - `flush_options`: Optional flush options pointer.
+///
+/// ## Returns
+/// - `slatedb_result_t` indicating success/failure.
+///
+/// ## Errors
+/// - Returns `SLATEDB_ERROR_KIND_INVALID` for invalid handles/options.
+/// - Returns mapped SlateDB errors for flush failures.
+///
+/// ## Safety
+/// - `db` must be a valid non-null handle.
+/// - `flush_options`, when non-null, must point to a valid `slatedb_flush_options_t`.
 #[no_mangle]
 pub unsafe extern "C" fn slatedb_db_flush_with_options(
     db: *mut slatedb_db_t,
@@ -768,7 +1159,20 @@ pub unsafe extern "C" fn slatedb_db_flush_with_options(
     }
 }
 
-/// Closes and frees the DB handle.
+/// Closes and frees a database handle.
+///
+/// ## Arguments
+/// - `db`: Database handle to close.
+///
+/// ## Returns
+/// - `slatedb_result_t` indicating success/failure.
+///
+/// ## Errors
+/// - Returns `SLATEDB_ERROR_KIND_INVALID` for invalid handles.
+/// - Returns mapped SlateDB errors for close failures (including close reason).
+///
+/// ## Safety
+/// - `db` must be a valid non-null handle obtained from this library.
 #[no_mangle]
 pub unsafe extern "C" fn slatedb_db_close(db: *mut slatedb_db_t) -> slatedb_result_t {
     if db.is_null() {

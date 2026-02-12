@@ -1,3 +1,8 @@
+//! SlateDB C FFI crate root.
+//!
+//! This module re-exports all C ABI types and functions implemented across
+//! the `slatedb-c` package so they can be discovered and exported by cbindgen.
+
 mod db;
 mod ffi;
 mod iterator;

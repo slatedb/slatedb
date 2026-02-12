@@ -1,3 +1,10 @@
+//! Core FFI types and conversion helpers for `slatedb-c`.
+//!
+//! This module defines all public C ABI data structures and opaque handle
+//! wrappers used by the higher-level function modules (`db`, `write_batch`,
+//! `iterator`, etc.). It also contains internal conversion and validation
+//! helpers shared across those modules.
+
 use slatedb::bytes::Bytes;
 use slatedb::config::{
     DurabilityLevel, FlushOptions, FlushType, MergeOptions, PutOptions, ReadOptions, ScanOptions,
@@ -12,133 +19,192 @@ use std::ptr;
 use std::sync::Arc;
 use tokio::runtime::{Builder as RuntimeBuilder, Runtime};
 
+/// Opaque handle backing a resolved object store.
 #[allow(non_camel_case_types)]
 pub struct slatedb_object_store_t {
+    /// Rust-side object store instance.
     pub object_store: Arc<dyn ObjectStore>,
 }
 
+/// Opaque handle backing a database builder.
 #[allow(non_camel_case_types)]
 pub struct slatedb_db_builder_t {
+    /// Builder state. Wrapped in `Option` so it can be consumed by `build`.
     pub builder: Option<DbBuilder<String>>,
 }
 
+/// Opaque handle backing an open `Db` plus runtime owner.
 #[allow(non_camel_case_types)]
 pub struct slatedb_db_t {
+    /// Runtime used to execute async SlateDB operations.
     pub runtime: Arc<Runtime>,
+    /// Open database instance.
     pub db: Db,
 }
 
+/// Opaque handle backing a scan iterator plus runtime owner.
 #[allow(non_camel_case_types)]
 pub struct slatedb_iterator_t {
+    /// Runtime used to execute async iterator operations.
     pub runtime: Arc<Runtime>,
+    /// Database iterator state.
     pub iter: DbIterator,
 }
 
+/// Opaque handle backing a mutable write batch.
 #[allow(non_camel_case_types)]
 pub struct slatedb_write_batch_t {
+    /// Batch state. Wrapped in `Option` so writes can consume it exactly once.
     pub batch: Option<WriteBatch>,
 }
 
+/// Public error kind mirroring `slatedb::ErrorKind`.
 #[repr(C)]
 #[allow(non_camel_case_types)]
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum slatedb_error_kind_t {
+    /// No error.
     SLATEDB_ERROR_KIND_NONE = 0,
+    /// Transaction conflict / transactional error.
     SLATEDB_ERROR_KIND_TRANSACTION = 1,
+    /// Database closed.
     SLATEDB_ERROR_KIND_CLOSED = 2,
+    /// Backend/storage unavailable.
     SLATEDB_ERROR_KIND_UNAVAILABLE = 3,
+    /// Invalid request/argument/state for caller.
     SLATEDB_ERROR_KIND_INVALID = 4,
+    /// Persisted data-level error.
     SLATEDB_ERROR_KIND_DATA = 5,
+    /// Internal SlateDB error.
     SLATEDB_ERROR_KIND_INTERNAL = 6,
+    /// Unknown error kind (forward compatibility).
     SLATEDB_ERROR_KIND_UNKNOWN = 255,
 }
 
+/// Closed reason mirroring `slatedb::CloseReason`.
 #[repr(C)]
 #[allow(non_camel_case_types)]
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum slatedb_close_reason_t {
+    /// Not a closed error.
     SLATEDB_CLOSE_REASON_NONE = 0,
+    /// Closed cleanly.
     SLATEDB_CLOSE_REASON_CLEAN = 1,
+    /// Closed due to fencing.
     SLATEDB_CLOSE_REASON_FENCED = 2,
+    /// Closed due to background panic.
     SLATEDB_CLOSE_REASON_PANIC = 3,
+    /// Unknown close reason (forward compatibility).
     SLATEDB_CLOSE_REASON_UNKNOWN = 255,
 }
 
+/// Standard result structure returned by all C ABI functions.
 #[repr(C)]
 #[allow(non_camel_case_types)]
 pub struct slatedb_result_t {
+    /// Top-level SlateDB error kind.
     pub kind: slatedb_error_kind_t,
+    /// Additional closed reason when `kind == SLATEDB_ERROR_KIND_CLOSED`.
     pub close_reason: slatedb_close_reason_t,
+    /// Optional error message allocated by Rust (free with `slatedb_result_free`).
     pub message: *mut c_char,
 }
 
+/// Read options passed to `slatedb_db_get_with_options`.
 #[repr(C)]
 #[allow(non_camel_case_types)]
 #[derive(Clone, Copy)]
 pub struct slatedb_read_options_t {
+    /// Durability filter: `0=Memory`, `1=Remote`.
     pub durability_filter: u8,
+    /// Include dirty (uncommitted) data.
     pub dirty: bool,
+    /// Cache fetched blocks.
     pub cache_blocks: bool,
 }
 
+/// Scan options passed to `slatedb_db_scan_with_options`.
 #[repr(C)]
 #[allow(non_camel_case_types)]
 #[derive(Clone, Copy)]
 pub struct slatedb_scan_options_t {
+    /// Durability filter: `0=Memory`, `1=Remote`.
     pub durability_filter: u8,
+    /// Include dirty (uncommitted) data.
     pub dirty: bool,
+    /// Read-ahead bytes.
     pub read_ahead_bytes: u64,
+    /// Cache fetched blocks.
     pub cache_blocks: bool,
+    /// Max concurrent fetch tasks.
     pub max_fetch_tasks: u64,
 }
 
+/// Write options passed to write operations.
 #[repr(C)]
 #[allow(non_camel_case_types)]
 #[derive(Clone, Copy)]
 pub struct slatedb_write_options_t {
+    /// Wait for durable commit before returning.
     pub await_durable: bool,
 }
 
+/// Put options passed to put operations.
 #[repr(C)]
 #[allow(non_camel_case_types)]
 #[derive(Clone, Copy)]
 pub struct slatedb_put_options_t {
+    /// TTL type: `0=Default`, `1=NoExpiry`, `2=ExpireAfter`.
     pub ttl_type: u8,
+    /// TTL value in milliseconds when `ttl_type=2`.
     pub ttl_value: u64,
 }
 
+/// Merge options passed to merge operations.
 #[repr(C)]
 #[allow(non_camel_case_types)]
 #[derive(Clone, Copy)]
 pub struct slatedb_merge_options_t {
+    /// TTL type: `0=Default`, `1=NoExpiry`, `2=ExpireAfter`.
     pub ttl_type: u8,
+    /// TTL value in milliseconds when `ttl_type=2`.
     pub ttl_value: u64,
 }
 
+/// Flush options passed to `slatedb_db_flush_with_options`.
 #[repr(C)]
 #[allow(non_camel_case_types)]
 #[derive(Clone, Copy)]
 pub struct slatedb_flush_options_t {
+    /// Flush type: `0=MemTable`, `1=Wal`.
     pub flush_type: u8,
 }
 
+/// SST block size selector for builder config.
 #[allow(non_camel_case_types)]
 pub type slatedb_sst_block_size_t = u8;
 
+/// C representation of a single range bound.
 #[repr(C)]
 #[allow(non_camel_case_types)]
 #[derive(Clone, Copy)]
 pub struct slatedb_bound_t {
+    /// Bound kind: `0=Unbounded`, `1=Included`, `2=Excluded`.
     pub kind: u8,
+    /// Bound bytes for included/excluded bounds.
     pub data: *const u8,
+    /// Length of `data`.
     pub len: usize,
 }
 
+/// C representation of a byte-key range.
 #[repr(C)]
 #[allow(non_camel_case_types)]
 #[derive(Clone, Copy)]
 pub struct slatedb_range_t {
+    /// Start bound.
     pub start: slatedb_bound_t,
+    /// End bound.
     pub end: slatedb_bound_t,
 }
 
