@@ -28,6 +28,22 @@ repositories {
     mavenCentral()
 }
 
+def slatedbJextractLibrary = jextract.libraries.create('slatedb') {
+    header = layout.projectDirectory.file('../slatedb-c/include/slatedb.h')
+    includes = [layout.projectDirectory.dir('../slatedb-c/include')]
+    targetPackage = 'io.slatedb'
+    headerClassName = 'Native'
+    libraries = ['slatedb_c']
+}
+
+sourceSets {
+    main {
+        jextract {
+            libraries.add(slatedbJextractLibrary)
+        }
+    }
+}
+
 dependencies {
     testImplementation 'org.junit.jupiter:junit-jupiter:5.10.2'
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher:1.10.2'
