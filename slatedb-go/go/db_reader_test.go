@@ -82,7 +82,7 @@ var _ = Describe("DbReader", func() {
 			Expect(err).NotTo(HaveOccurred())
 
 			_, err = slatedb.OpenReader(newTmpDir, slatedb.WithEnvFile[slatedb.DbReaderConfig](envFile))
-			Expect(err).To(MatchError(slatedb.ErrInternalError))
+			Expect(err).To(MatchError(slatedb.ErrData))
 		})
 	})
 

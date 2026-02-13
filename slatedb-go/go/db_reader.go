@@ -85,10 +85,10 @@ func (r *DbReader) Get(key []byte) ([]byte, error) {
 // Returns `ErrNotFound` if the key does not exist.
 func (r *DbReader) GetWithOptions(key []byte, opts *ReadOptions) ([]byte, error) {
 	if r == nil || r.handle == nil {
-		return nil, ErrInvalidHandle
+		return nil, ErrInvalid
 	}
 	if len(key) == 0 {
-		return nil, ErrInvalidArgument
+		return nil, ErrInvalid
 	}
 
 	keyPtr, keyLen := ptrFromBytes(key)
@@ -130,7 +130,7 @@ func (r *DbReader) Scan(start, end []byte) (*Iterator, error) {
 // The iterator must be closed after use and before closing the reader.
 func (r *DbReader) ScanWithOptions(start, end []byte, opts *ScanOptions) (*Iterator, error) {
 	if r == nil || r.handle == nil {
-		return nil, ErrInvalidHandle
+		return nil, ErrInvalid
 	}
 
 	rangeValue := makeScanRange(start, end)
@@ -161,7 +161,7 @@ func (r *DbReader) ScanPrefix(prefix []byte) (*Iterator, error) {
 // The iterator must be closed after use and before closing the reader.
 func (r *DbReader) ScanPrefixWithOptions(prefix []byte, opts *ScanOptions) (*Iterator, error) {
 	if r == nil || r.handle == nil {
-		return nil, ErrInvalidHandle
+		return nil, ErrInvalid
 	}
 
 	prefixPtr, prefixLen := ptrFromBytes(prefix)
@@ -190,7 +190,7 @@ func (r *DbReader) ScanPrefixWithOptions(prefix []byte, opts *ScanOptions) (*Ite
 // The reader must not be used after `Close` returns successfully.
 func (r *DbReader) Close() error {
 	if r == nil || r.handle == nil {
-		return ErrInvalidHandle
+		return ErrInvalid
 	}
 
 	result := C.slatedb_db_reader_close(r.handle)
