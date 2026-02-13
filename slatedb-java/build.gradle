@@ -3,6 +3,42 @@ plugins {
     id 'de.infolektuell.jextract' version '1.2.0'
 }
 
+// ==============================================================================
+// jextract configuration to generate Java bindings for the slatedb C library.
+// ==============================================================================
+//
+// Use jextract to generate Java bindings for the slatedb C library, filtering
+// to include only the relevant functions, constants, structs, and typedefs defined
+// in slatedb.h.
+//
+// See:
+// - https://infolektuell.github.io/gradle-jextract/filtering/
+// - https://github.com/openjdk/jextract/blob/master/doc/GUIDE.md#filtering
+def slatedbHeader = layout.projectDirectory.file('../slatedb-c/include/slatedb.h')
+def slatedbHeaderText = slatedbHeader.asFile.getText('UTF-8')
+def slatedbIncludeFunctions = ((slatedbHeaderText =~ /(?m)^\s*struct\s+slatedb_result_t\s+(slatedb_[A-Za-z0-9_]+)\s*\(/).collect { it[1] } as Set).toList().sort()
+def slatedbIncludeConstants = ((slatedbHeaderText =~ /(?m)^\s*#define\s+(SLATEDB_[A-Z0-9_]+)\b/).collect { it[1] } as Set).toList().sort()
+def slatedbIncludeStructs = ((slatedbHeaderText =~ /(?m)^\s*typedef\s+struct\s+(slatedb_[A-Za-z0-9_]+)\s*\{/).collect { it[1] } as Set).toList().sort()
+def slatedbIncludeTypedefs = ((slatedbHeaderText =~ /(?ms)^\s*typedef\b.*?(?:\(\*\s*)?(slatedb_[A-Za-z0-9_]+)\s*\)?\s*;/).collect { it[1] } as Set).toList().sort()
+
+def slatedbJextractLibrary = jextract.libraries.create('slatedb') {
+    header = slatedbHeader
+    includes = [layout.projectDirectory.dir('../slatedb-c/include')]
+    targetPackage = 'io.slatedb'
+    headerClassName = 'Native'
+    libraries = ['slatedb_c']
+    whitelist {
+        functions = slatedbIncludeFunctions
+        constants = slatedbIncludeConstants
+        structs = slatedbIncludeStructs
+        typedefs = slatedbIncludeTypedefs
+    }
+}
+
+// ==============================================================================
+// Standard Java library configuration below.
+// ==============================================================================
+
 group = 'io.slatedb'
 version = '0.1.0-SNAPSHOT'
 
@@ -26,14 +62,6 @@ tasks.withType(JavaCompile).configureEach {
 
 repositories {
     mavenCentral()
-}
-
-def slatedbJextractLibrary = jextract.libraries.create('slatedb') {
-    header = layout.projectDirectory.file('../slatedb-c/include/slatedb.h')
-    includes = [layout.projectDirectory.dir('../slatedb-c/include')]
-    targetPackage = 'io.slatedb'
-    headerClassName = 'Native'
-    libraries = ['slatedb_c']
 }
 
 sourceSets {
