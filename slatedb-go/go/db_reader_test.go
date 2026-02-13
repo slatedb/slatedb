@@ -68,9 +68,39 @@ var _ = Describe("DbReader", func() {
 			Expect(retrievedValue).To(Equal(value))
 		})
 
-		It("should return ErrNotFound for non-existent key", func() {
-			_, err := dbReader.Get([]byte("non_existent"))
-			Expect(err).To(Equal(slatedb.ErrNotFound))
+		It("should return nil,nil for non-existent key", func() {
+			value, err := dbReader.Get([]byte("non_existent"))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(value).To(BeNil())
+		})
+
+		It("should distinguish empty value from missing key", func() {
+			if dbReader != nil {
+				Expect(dbReader.Close()).NotTo(HaveOccurred())
+				dbReader = nil
+			}
+
+			envFile, err := createEnvFile(tmpDir)
+			Expect(err).NotTo(HaveOccurred())
+
+			db, err = slatedb.Open(tmpDir, slatedb.WithEnvFile[slatedb.DbConfig](envFile))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(db.Put([]byte("empty_value_key"), []byte{})).NotTo(HaveOccurred())
+			Expect(db.Flush()).NotTo(HaveOccurred())
+			Expect(db.Close()).NotTo(HaveOccurred())
+			db = nil
+
+			dbReader, err = slatedb.OpenReader(tmpDir, slatedb.WithEnvFile[slatedb.DbReaderConfig](envFile))
+			Expect(err).NotTo(HaveOccurred())
+
+			value, err := dbReader.Get([]byte("empty_value_key"))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(value).To(Equal([]byte{}))
+			Expect(value).NotTo(BeNil())
+
+			missing, err := dbReader.Get([]byte("non_existent_after_reopen"))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(missing).To(BeNil())
 		})
 
 		It("should return error if database does not exist", func() {
@@ -82,7 +112,7 @@ var _ = Describe("DbReader", func() {
 			Expect(err).NotTo(HaveOccurred())
 
 			_, err = slatedb.OpenReader(newTmpDir, slatedb.WithEnvFile[slatedb.DbReaderConfig](envFile))
-			Expect(err).To(MatchError(slatedb.ErrInternalError))
+			Expect(err).To(MatchError(slatedb.ErrData))
 		})
 	})
 

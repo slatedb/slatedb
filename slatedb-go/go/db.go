@@ -14,19 +14,6 @@ import (
 	"unsafe"
 )
 
-// Error definitions.
-var (
-	ErrInvalidArgument = errors.New("invalid argument")
-	ErrNotFound        = errors.New("key not found")
-	ErrAlreadyExists   = errors.New("key already exists")
-	ErrIOError         = errors.New("I/O error")
-	ErrInternalError   = errors.New("internal error")
-	ErrNullPointer     = errors.New("null pointer")
-	ErrInvalidHandle   = errors.New("invalid handle")
-	ErrInvalidProvider = errors.New("invalid provider")
-	ErrTransaction     = errors.New("transaction error")
-)
-
 // DB represents a SlateDB database connection.
 type DB struct {
 	handle *C.slatedb_db_t
@@ -43,43 +30,6 @@ type ScanResult struct {
 	Items        []KeyValue
 	HasMore      bool
 	NextStartKey []byte
-}
-
-func resultToError(result C.struct_slatedb_result_t) error {
-	if result.kind == C.SLATEDB_ERROR_KIND_NONE {
-		return nil
-	}
-
-	var baseErr error
-	switch result.kind {
-	case C.SLATEDB_ERROR_KIND_INVALID:
-		baseErr = ErrInvalidArgument
-	case C.SLATEDB_ERROR_KIND_TRANSACTION:
-		baseErr = ErrTransaction
-	case C.SLATEDB_ERROR_KIND_CLOSED:
-		baseErr = ErrInvalidHandle
-	case C.SLATEDB_ERROR_KIND_UNAVAILABLE:
-		baseErr = ErrIOError
-	case C.SLATEDB_ERROR_KIND_DATA:
-		baseErr = ErrInternalError
-	case C.SLATEDB_ERROR_KIND_INTERNAL:
-		baseErr = ErrInternalError
-	default:
-		baseErr = ErrInternalError
-	}
-
-	if result.message != nil {
-		return fmt.Errorf("%w: %s", baseErr, C.GoString(result.message))
-	}
-	if result.kind == C.SLATEDB_ERROR_KIND_CLOSED {
-		return fmt.Errorf("%w: close_reason=%d", baseErr, int(result.close_reason))
-	}
-	return baseErr
-}
-
-func resultToErrorAndFree(result C.struct_slatedb_result_t) error {
-	defer C.slatedb_result_free(result)
-	return resultToError(result)
 }
 
 func resolveObjectStoreHandle(url *string, envFile *string) (*C.slatedb_object_store_t, error) {
@@ -241,7 +191,7 @@ func (db *DB) Put(key, value []byte) error {
 
 // Get retrieves a value by key with default read options.
 //
-// Returns `ErrNotFound` if the key does not exist.
+// Returns `nil, nil` if the key does not exist.
 func (db *DB) Get(key []byte) ([]byte, error) {
 	return db.GetWithOptions(key, nil)
 }
@@ -268,10 +218,10 @@ func (db *DB) Delete(key []byte) error {
 //	err := db.PutWithOptions([]byte("session:123"), []byte("data"), putOpts, writeOpts)
 func (db *DB) PutWithOptions(key, value []byte, putOpts *PutOptions, writeOpts *WriteOptions) error {
 	if db == nil || db.handle == nil {
-		return ErrInvalidHandle
+		return ErrInvalid
 	}
 	if len(key) == 0 {
-		return ErrInvalidArgument
+		return ErrInvalid
 	}
 
 	keyPtr, keyLen := ptrFromBytes(key)
@@ -301,10 +251,10 @@ func (db *DB) PutWithOptions(key, value []byte, putOpts *PutOptions, writeOpts *
 //	err := db.DeleteWithOptions([]byte("temp:123"), writeOpts)
 func (db *DB) DeleteWithOptions(key []byte, writeOpts *WriteOptions) error {
 	if db == nil || db.handle == nil {
-		return ErrInvalidHandle
+		return ErrInvalid
 	}
 	if len(key) == 0 {
-		return ErrInvalidArgument
+		return ErrInvalid
 	}
 
 	keyPtr, keyLen := ptrFromBytes(key)
@@ -322,7 +272,7 @@ func (db *DB) DeleteWithOptions(key []byte, writeOpts *WriteOptions) error {
 // GetWithOptions retrieves a value by key with explicit read options.
 //
 // Pass nil options to use defaults.
-// Returns `ErrNotFound` if the key does not exist.
+// Returns `nil, nil` if the key does not exist.
 //
 // Example:
 //
@@ -334,10 +284,10 @@ func (db *DB) DeleteWithOptions(key []byte, writeOpts *WriteOptions) error {
 //	value, err := db.GetWithOptions([]byte("user:123"), readOpts)
 func (db *DB) GetWithOptions(key []byte, readOpts *ReadOptions) ([]byte, error) {
 	if db == nil || db.handle == nil {
-		return nil, ErrInvalidHandle
+		return nil, ErrInvalid
 	}
 	if len(key) == 0 {
-		return nil, ErrInvalidArgument
+		return nil, ErrInvalid
 	}
 
 	keyPtr, keyLen := ptrFromBytes(key)
@@ -360,7 +310,7 @@ func (db *DB) GetWithOptions(key []byte, readOpts *ReadOptions) ([]byte, error) 
 	}
 
 	if present == C.bool(false) {
-		return nil, ErrNotFound
+		return nil, nil
 	}
 	return copyBytesAndFree(value, valueLen), nil
 }
@@ -404,7 +354,7 @@ func (db *DB) Write(batch *WriteBatch) error {
 //	err = db.WriteWithOptions(batch, writeOpts)
 func (db *DB) WriteWithOptions(batch *WriteBatch, opts *WriteOptions) error {
 	if db == nil || db.handle == nil {
-		return ErrInvalidHandle
+		return ErrInvalid
 	}
 	if batch == nil {
 		return errors.New("batch cannot be nil")
@@ -435,7 +385,7 @@ func (db *DB) WriteWithOptions(batch *WriteBatch, opts *WriteOptions) error {
 // written data immediately.
 func (db *DB) Flush() error {
 	if db == nil || db.handle == nil {
-		return ErrInvalidHandle
+		return ErrInvalid
 	}
 	result := C.slatedb_db_flush(db.handle)
 	return resultToErrorAndFree(result)
@@ -446,7 +396,7 @@ func (db *DB) Flush() error {
 // The `DB` must not be used after `Close` returns successfully.
 func (db *DB) Close() error {
 	if db == nil || db.handle == nil {
-		return ErrInvalidHandle
+		return ErrInvalid
 	}
 
 	result := C.slatedb_db_close(db.handle)
@@ -495,7 +445,7 @@ func (db *DB) Scan(start, end []byte) (*Iterator, error) {
 //	iter, err := db.ScanWithOptions([]byte("user:"), []byte("user;"), opts)
 func (db *DB) ScanWithOptions(start, end []byte, opts *ScanOptions) (*Iterator, error) {
 	if db == nil || db.handle == nil {
-		return nil, ErrInvalidHandle
+		return nil, ErrInvalid
 	}
 
 	rangeValue := makeScanRange(start, end)
@@ -526,7 +476,7 @@ func (db *DB) ScanPrefix(prefix []byte) (*Iterator, error) {
 // The iterator must be closed after use.
 func (db *DB) ScanPrefixWithOptions(prefix []byte, opts *ScanOptions) (*Iterator, error) {
 	if db == nil || db.handle == nil {
-		return nil, ErrInvalidHandle
+		return nil, ErrInvalid
 	}
 
 	prefixPtr, prefixLen := ptrFromBytes(prefix)
@@ -556,7 +506,7 @@ func (db *DB) ScanPrefixWithOptions(prefix []byte, opts *ScanOptions) (*Iterator
 // `slatedb_db_metrics`.
 func (db *DB) Metrics() (map[string]int64, error) {
 	if db == nil || db.handle == nil {
-		return nil, ErrInvalidHandle
+		return nil, ErrInvalid
 	}
 
 	var jsonPtr *C.uint8_t
