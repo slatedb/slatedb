@@ -700,9 +700,13 @@ The union process works as follows:
 4. Sorted run IDs are preserved from the source manifests. The compactor does not assume contiguous IDs, so
    gaps left by projection (where empty sorted runs were removed) are acceptable. Preserving original IDs
    maintains tier identity across projection and union. The descending order is preserved to maintain compactor invariant
-5. The resulting manifest has `initialized` set to `false`. The caller must complete setup (e.g., creating
+5. `last_l0_seq` is set to the maximum of `last_l0_seq` across all input manifests. This ensures that the
+   new database's writer assigns sequence numbers higher than any existing data. Without this, new writes
+   could receive sequence numbers that collide with those in the carried-over L0 SSTs, breaking snapshot
+   isolation and MVCC ordering.
+6. The resulting manifest has `initialized` set to `false`. The caller must complete setup (e.g., creating
    final checkpoints in source databases) before setting `initialized` to `true`.
-6. Each source database is added as an `external_dbs` entry in the resulting manifest, with a new
+7. Each source database is added as an `external_dbs` entry in the resulting manifest, with a new
    `final_checkpoint_id` and its owned SST IDs recorded so that the new database can resolve SST paths
    and maintain checkpoints on the source databases to prevent their SSTs from being garbage collected.
    Owned SST IDs are those in the source manifest that are not already tracked by its own `external_dbs`
@@ -715,7 +719,8 @@ There are a few minor differences:
 
 1. **Writer and compactor epochs are 0.** The new database is a fresh instance with no prior writer or
    compactor history, so both epochs start at 0.
-2. **Default manifest core fields.** Fields such as `last_l0_seq`, `next_wal_sst_id`, and similar manifest
-   core metadata are initialized to their default values rather than being copied from any source database.
+2. **Default manifest core fields.** Fields such as `next_wal_sst_id` and similar manifest core metadata
+   are initialized to their default values rather than being copied from any source database. An exception
+   is `last_l0_seq`, which is derived from the maximum across all sources during union (see step 5 above).
 3. **WAL is not carried over from any source database. All source manifests must have their
    WAL fully compacted before the operation. The new database starts with an empty WAL.

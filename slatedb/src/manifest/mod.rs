@@ -182,6 +182,14 @@ impl Manifest {
         // initialized to true.
         core.initialized = false;
 
+        // Set last_l0_seq to the max across all sources so that new writes
+        // receive sequence numbers higher than any existing data.
+        core.last_l0_seq = ranges
+            .iter()
+            .map(|(m, _, _, _)| m.core.last_l0_seq)
+            .max()
+            .unwrap_or(0);
+
         // Deduplicate external_dbs by (path, source_checkpoint_id), merging
         // sst_ids. Without dedup, repeated projection/union cycles cause
         // exponential growth of duplicated entries.
@@ -1354,6 +1362,30 @@ mod tests {
         assert!(
             !result.core.initialized,
             "Union result should have initialized=false"
+        );
+    }
+
+    #[test]
+    fn test_union_computes_last_l0_seq() {
+        let sst1 = SsTableId::Compacted(Ulid::from_parts(1000, 0));
+        let sst2 = SsTableId::Compacted(Ulid::from_parts(2000, 0));
+
+        let mut m1 = manifest_with_one_compacted_sst(sst1, b"a", BytesRange::from_ref("a".."m"));
+        m1.core.last_l0_seq = 42;
+
+        let mut m2 = manifest_with_one_compacted_sst(sst2, b"m", BytesRange::from_ref("m"..));
+        m2.core.last_l0_seq = 100;
+
+        let sources = vec![
+            (m1, "path1".to_string(), Uuid::new_v4()),
+            (m2, "path2".to_string(), Uuid::new_v4()),
+        ];
+
+        let result = Manifest::union(sources, Arc::new(DbRand::default()));
+
+        assert_eq!(
+            result.core.last_l0_seq, 100,
+            "last_l0_seq should be the max across all sources"
         );
     }
 }
