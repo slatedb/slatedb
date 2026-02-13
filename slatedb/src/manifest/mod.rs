@@ -1,5 +1,5 @@
 use std::cmp::{max, min};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Debug;
 use std::ops::Bound;
 use std::sync::Arc;
@@ -183,10 +183,44 @@ impl Manifest {
 
             for (manifest, _) in &ranges {
                 external_dbs.extend_from_slice(&manifest.external_dbs);
+            }
+
+            // Deduplicate L0 SSTs by ID, merging visible_ranges. Projection
+            // includes the same L0 SST in multiple projected manifests with
+            // different visible_ranges, so duplicates must be combined.
+            let mut l0_by_id: HashMap<SsTableId, SsTableHandle> = HashMap::new();
+            for (manifest, _) in &ranges {
                 for sst in &manifest.core.l0 {
-                    core.l0.push_back(sst.clone());
+                    match l0_by_id.get(&sst.id) {
+                        Some(existing) => {
+                            let merged_range = match (&existing.visible_range, &sst.visible_range) {
+                                (Some(a), Some(b)) => Some(a.union(b).unwrap_or_else(|| {
+                                    panic!("L0 SST {:?} has non-contiguous visible_ranges", sst.id)
+                                })),
+                                // If either has no visible_range, the merged result covers everything
+                                _ => None,
+                            };
+                            l0_by_id.insert(
+                                sst.id,
+                                SsTableHandle::new_compacted(
+                                    sst.id,
+                                    sst.info.clone(),
+                                    merged_range,
+                                ),
+                            );
+                        }
+                        None => {
+                            l0_by_id.insert(sst.id, sst.clone());
+                        }
+                    }
                 }
             }
+
+            // Sort L0 SSTs by ULID descending (newest first) to preserve
+            // temporal ordering for correct point-lookup behavior.
+            let mut l0_list: Vec<SsTableHandle> = l0_by_id.into_values().collect();
+            l0_list.sort_by(|a, b| b.id.unwrap_compacted_id().cmp(&a.id.unwrap_compacted_id()));
+            core.l0 = l0_list.into();
 
             // Merge sorted runs by tier: sorted runs with the same ID across
             // input manifests are combined into a single sorted run. We use
@@ -534,7 +568,11 @@ mod tests {
     }
 
     #[rstest]
-    #[case::non_overlapping_l0s(UnionTestCase {
+    #[case::l0_deduplicated_and_sorted(UnionTestCase {
+        // Same L0 SSTs appear in both manifests with adjacent visible_ranges.
+        // After dedup, they're merged into single entries and sorted by ULID
+        // descending. ULIDs are created in order foo < bar < baz, so descending
+        // gives baz, bar, foo.
         manifests: vec![
             SimpleManifest {
                 l0: vec![
@@ -555,48 +593,39 @@ mod tests {
         ],
         expected: SimpleManifest {
             l0: vec![
-                SstEntry::projected("foo", "a", "a".."m"),
-                SstEntry::projected("bar", "f", "a".."m"),
-                SstEntry::projected("baz", "j", "a".."m"),
-                SstEntry::projected("foo", "a", "m"..),
-                SstEntry::projected("bar", "f", "m"..),
-                SstEntry::projected("baz", "j", "m"..)
-                // This is not optimal, but it's a good start from correctness point of view. Eventually we want the manifest to look as follows:
-                //
-                // SstEntry::projected("foo", "a", "a"..),
-                // SstEntry::projected("bar", "f", "a"..),
-                // SstEntry::projected("baz", "j", "a"..),
+                SstEntry::projected("baz", "j", "a"..),
+                SstEntry::projected("bar", "f", "a"..),
+                SstEntry::projected("foo", "a", "a"..),
             ],
             sorted_runs: vec![]
         },
     })]
-    #[case::non_overlapping_l0s_with_gap(UnionTestCase {
+    #[case::l0_unique_per_manifest(UnionTestCase {
+        // L0 SSTs are unique to each manifest (no dedup needed), just sorted
+        // by ULID descending. ULIDs created in order: foo, bar (manifest 1),
+        // then baz, qux (manifest 2). Descending: qux, baz, bar, foo.
         manifests: vec![
             SimpleManifest {
                 l0: vec![
                     SstEntry::projected("foo", "a", "a".."m"),
                     SstEntry::projected("bar", "f", "a".."m"),
-                    SstEntry::projected("baz", "j", "a".."m")
                 ],
                 sorted_runs: vec![]
             },
             SimpleManifest {
                 l0: vec![
-                    SstEntry::projected("foo", "a", "o"..),
-                    SstEntry::projected("bar", "f", "o"..),
-                    SstEntry::projected("baz", "j", "o"..)
+                    SstEntry::projected("baz", "m", "m"..),
+                    SstEntry::projected("qux", "p", "m"..),
                 ],
                 sorted_runs: vec![]
             }
         ],
         expected: SimpleManifest {
             l0: vec![
-                SstEntry::projected("foo", "a", "a".."m"),
+                SstEntry::projected("qux", "p", "m"..),
+                SstEntry::projected("baz", "m", "m"..),
                 SstEntry::projected("bar", "f", "a".."m"),
-                SstEntry::projected("baz", "j", "a".."m"),
-                SstEntry::projected("foo", "a", "o"..),
-                SstEntry::projected("bar", "f", "o"..),
-                SstEntry::projected("baz", "j", "o"..)
+                SstEntry::projected("foo", "a", "a".."m"),
             ],
             sorted_runs: vec![]
         },
@@ -744,8 +773,51 @@ mod tests {
     })]
     fn test_union(#[case] test_case: UnionTestCase) {
         let mut sst_ids: HashMap<String, SsTableId> = HashMap::new();
+        // Use monotonically increasing timestamps for deterministic ULID ordering.
+        // ULIDs created with Ulid::new() within the same millisecond have random
+        // ordering, which makes test assertions on L0 sort order non-deterministic.
+        let mut next_ts: u64 = 1000;
         let manifests: Vec<Manifest> = test_case
             .manifests
+            .iter()
+            .map(|m| {
+                build_manifest(m, |alias| {
+                    if let Some(sst_id) = sst_ids.get(alias) {
+                        *sst_id
+                    } else {
+                        let sst_id = SsTableId::Compacted(Ulid::from_parts(next_ts, 0));
+                        next_ts += 1;
+                        sst_ids.insert(alias.to_string(), sst_id);
+                        sst_id
+                    }
+                })
+            })
+            .collect();
+
+        let expected_manifest =
+            build_manifest(&test_case.expected, |alias| *sst_ids.get(alias).unwrap());
+
+        let union = Manifest::union(manifests);
+
+        assert_manifest_equal(&union, &expected_manifest, &sst_ids);
+    }
+
+    #[test]
+    #[should_panic(expected = "non-contiguous visible_ranges")]
+    fn test_union_fails_on_non_contiguous_l0_ranges() {
+        let mut sst_ids: HashMap<String, SsTableId> = HashMap::new();
+        let manifests = vec![
+            SimpleManifest {
+                l0: vec![SstEntry::projected("foo", "a", "a".."m")],
+                sorted_runs: vec![],
+            },
+            SimpleManifest {
+                // Gap between "m" and "o" -- not contiguous with "a".."m"
+                l0: vec![SstEntry::projected("foo", "a", "o"..)],
+                sorted_runs: vec![],
+            },
+        ];
+        let manifests: Vec<Manifest> = manifests
             .iter()
             .map(|m| {
                 build_manifest(m, |alias| {
@@ -760,12 +832,7 @@ mod tests {
             })
             .collect();
 
-        let expected_manifest =
-            build_manifest(&test_case.expected, |alias| *sst_ids.get(alias).unwrap());
-
-        let union = Manifest::union(manifests);
-
-        assert_manifest_equal(&union, &expected_manifest, &sst_ids);
+        Manifest::union(manifests);
     }
 
     fn build_manifest<F>(manifest: &SimpleManifest, mut sst_id_fn: F) -> Manifest
