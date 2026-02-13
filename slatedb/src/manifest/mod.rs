@@ -151,136 +151,171 @@ impl Manifest {
     }
 
     #[allow(unused)]
-    pub(crate) fn union(manifests: Vec<Manifest>, rand: Arc<DbRand>) -> Manifest {
-        if manifests.len() == 1 {
-            manifests[0].clone()
-        } else {
-            let mut ranges = vec![];
-            for manifest in &manifests {
-                let range = manifest.range();
-                if let Some(range) = range {
-                    ranges.push((manifest, range));
-                } else {
-                    warn!("manifest has no SST files [manifest={:?}]", manifest);
+    pub(crate) fn union(sources: Vec<(Manifest, String, Uuid)>, rand: Arc<DbRand>) -> Manifest {
+        let mut ranges = vec![];
+        for (manifest, path, source_checkpoint_id) in &sources {
+            let range = manifest.range();
+            if let Some(range) = range {
+                ranges.push((manifest, path, source_checkpoint_id, range));
+            } else {
+                warn!("manifest has no SST files [manifest={:?}]", manifest);
+            }
+        }
+        ranges.sort_by_key(|(_, _, _, range)| range.comparable_start_bound().cloned());
+
+        // Ensure manifests are non-overlapping
+        let mut previous_range = None;
+        for (_, _, _, range) in ranges.iter() {
+            if let Some(previous_range) = previous_range {
+                if range.intersect(previous_range).is_some() {
+                    unreachable!("overlapping ranges found");
                 }
             }
-            ranges.sort_by_key(|(_, range)| range.comparable_start_bound().cloned());
+            previous_range = Some(range);
+        }
 
-            // Ensure manifests are non-overlapping
-            let mut previous_range = None;
-            for (_, range) in ranges.iter() {
-                if let Some(previous_range) = previous_range {
-                    if range.intersect(previous_range).is_some() {
-                        unreachable!("overlapping ranges found");
+        // Merge the contents of all input manifests
+        let mut core = ManifestCore::new();
+
+        // Deduplicate external_dbs by (path, source_checkpoint_id), merging
+        // sst_ids. Without dedup, repeated projection/union cycles cause
+        // exponential growth of duplicated entries.
+        let mut external_db_map: HashMap<(String, Uuid), ExternalDb> = HashMap::new();
+
+        for (manifest, _, _, _) in &ranges {
+            for db in &manifest.external_dbs {
+                let key = (db.path.clone(), db.source_checkpoint_id);
+                match external_db_map.get_mut(&key) {
+                    Some(existing) => {
+                        let existing_ids: HashSet<SsTableId> =
+                            existing.sst_ids.iter().copied().collect();
+                        let new_ids: Vec<SsTableId> = db
+                            .sst_ids
+                            .iter()
+                            .filter(|id| !existing_ids.contains(id))
+                            .copied()
+                            .collect();
+                        existing.sst_ids.extend(new_ids);
                     }
-                }
-                previous_range = Some(range);
-            }
-
-            // Merge the contents of all input manifests
-            let mut core = ManifestCore::new();
-
-            // Deduplicate external_dbs by (path, source_checkpoint_id), merging
-            // sst_ids. Without dedup, repeated projection/union cycles cause
-            // exponential growth of duplicated entries.
-            let mut external_db_map: HashMap<(String, Uuid), ExternalDb> = HashMap::new();
-            for (manifest, _) in &ranges {
-                for db in &manifest.external_dbs {
-                    let key = (db.path.clone(), db.source_checkpoint_id);
-                    match external_db_map.get_mut(&key) {
-                        Some(existing) => {
-                            let existing_ids: HashSet<SsTableId> =
-                                existing.sst_ids.iter().copied().collect();
-                            let new_ids: Vec<SsTableId> = db
-                                .sst_ids
-                                .iter()
-                                .filter(|id| !existing_ids.contains(id))
-                                .copied()
-                                .collect();
-                            existing.sst_ids.extend(new_ids);
-                        }
-                        None => {
-                            // Generate new final_checkpoint_ids — the old ones
-                            // belong to the source databases' clone relationships,
-                            // not to the new database.
-                            external_db_map.insert(
-                                key,
-                                ExternalDb {
-                                    path: db.path.clone(),
-                                    source_checkpoint_id: db.source_checkpoint_id,
-                                    final_checkpoint_id: Some(rand.rng().gen_uuid()),
-                                    sst_ids: db.sst_ids.clone(),
-                                },
-                            );
-                        }
+                    None => {
+                        // Generate new final_checkpoint_ids — the old ones
+                        // belong to the source databases' clone relationships,
+                        // not to the new database.
+                        external_db_map.insert(
+                            key,
+                            ExternalDb {
+                                path: db.path.clone(),
+                                source_checkpoint_id: db.source_checkpoint_id,
+                                final_checkpoint_id: Some(rand.rng().gen_uuid()),
+                                sst_ids: db.sst_ids.clone(),
+                            },
+                        );
                     }
                 }
             }
-            let external_dbs: Vec<ExternalDb> = external_db_map.into_values().collect();
+        }
+        // Add each source database as an external_dbs entry. The owned SST IDs
+        // are the SSTs in the source manifest that are not already tracked by its
+        // own external_dbs (i.e., SSTs physically stored under the source's path).
+        for (manifest, path, source_checkpoint_id, _) in &ranges {
+            let ancestor_sst_ids: HashSet<SsTableId> = manifest
+                .external_dbs
+                .iter()
+                .flat_map(|db| db.sst_ids.iter().copied())
+                .collect();
+            let owned_sst_ids: Vec<SsTableId> = manifest
+                .core
+                .compacted
+                .iter()
+                .flat_map(|sr| sr.ssts.iter().map(|s| s.id))
+                .chain(manifest.core.l0.iter().map(|s| s.id))
+                .filter(|id| !ancestor_sst_ids.contains(id))
+                .collect();
+            let key = ((*path).clone(), **source_checkpoint_id);
+            match external_db_map.get_mut(&key) {
+                Some(existing) => {
+                    let existing_ids: HashSet<SsTableId> =
+                        existing.sst_ids.iter().copied().collect();
+                    let new_ids: Vec<SsTableId> = owned_sst_ids
+                        .into_iter()
+                        .filter(|id| !existing_ids.contains(id))
+                        .collect();
+                    existing.sst_ids.extend(new_ids);
+                }
+                None => {
+                    external_db_map.insert(
+                        key,
+                        ExternalDb {
+                            path: (*path).clone(),
+                            source_checkpoint_id: **source_checkpoint_id,
+                            final_checkpoint_id: Some(rand.rng().gen_uuid()),
+                            sst_ids: owned_sst_ids,
+                        },
+                    );
+                }
+            }
+        }
 
-            // Deduplicate L0 SSTs by ID, merging visible_ranges. Projection
-            // includes the same L0 SST in multiple projected manifests with
-            // different visible_ranges, so duplicates must be combined.
-            let mut l0_by_id: HashMap<SsTableId, SsTableHandle> = HashMap::new();
-            for (manifest, _) in &ranges {
-                for sst in &manifest.core.l0 {
-                    match l0_by_id.get(&sst.id) {
-                        Some(existing) => {
-                            let merged_range = match (&existing.visible_range, &sst.visible_range) {
-                                (Some(a), Some(b)) => Some(a.union(b).unwrap_or_else(|| {
-                                    panic!("L0 SST {:?} has non-contiguous visible_ranges", sst.id)
-                                })),
-                                // If either has no visible_range, the merged result covers everything
-                                _ => None,
-                            };
-                            l0_by_id.insert(
-                                sst.id,
-                                SsTableHandle::new_compacted(
-                                    sst.id,
-                                    sst.info.clone(),
-                                    merged_range,
-                                ),
-                            );
-                        }
-                        None => {
-                            l0_by_id.insert(sst.id, sst.clone());
-                        }
+        let external_dbs: Vec<ExternalDb> = external_db_map.into_values().collect();
+
+        // Deduplicate L0 SSTs by ID, merging visible_ranges. Projection
+        // includes the same L0 SST in multiple projected manifests with
+        // different visible_ranges, so duplicates must be combined.
+        let mut l0_by_id: HashMap<SsTableId, SsTableHandle> = HashMap::new();
+        for (manifest, _, _, _) in &ranges {
+            for sst in &manifest.core.l0 {
+                match l0_by_id.get(&sst.id) {
+                    Some(existing) => {
+                        let merged_range = match (&existing.visible_range, &sst.visible_range) {
+                            (Some(a), Some(b)) => Some(a.union(b).unwrap_or_else(|| {
+                                panic!("L0 SST {:?} has non-contiguous visible_ranges", sst.id)
+                            })),
+                            // If either has no visible_range, the merged result covers everything
+                            _ => None,
+                        };
+                        l0_by_id.insert(
+                            sst.id,
+                            SsTableHandle::new_compacted(sst.id, sst.info.clone(), merged_range),
+                        );
+                    }
+                    None => {
+                        l0_by_id.insert(sst.id, sst.clone());
                     }
                 }
             }
+        }
 
-            // Sort L0 SSTs by ULID descending (newest first) to preserve
-            // temporal ordering for correct point-lookup behavior.
-            let mut l0_list: Vec<SsTableHandle> = l0_by_id.into_values().collect();
-            l0_list.sort_by(|a, b| b.id.unwrap_compacted_id().cmp(&a.id.unwrap_compacted_id()));
-            core.l0 = l0_list.into();
+        // Sort L0 SSTs by ULID descending (newest first) to preserve
+        // temporal ordering for correct point-lookup behavior.
+        let mut l0_list: Vec<SsTableHandle> = l0_by_id.into_values().collect();
+        l0_list.sort_by(|a, b| b.id.unwrap_compacted_id().cmp(&a.id.unwrap_compacted_id()));
+        core.l0 = l0_list.into();
 
-            // Merge sorted runs by tier: sorted runs with the same ID across
-            // input manifests are combined into a single sorted run. We use
-            // the SR ID (not position) to match tiers, since projection can
-            // remove sorted runs and shift positions.
-            let mut merged_by_id: BTreeMap<u32, Vec<SsTableHandle>> = BTreeMap::new();
-            for (manifest, _) in &ranges {
-                for sorted_run in &manifest.core.compacted {
-                    merged_by_id
-                        .entry(sorted_run.id)
-                        .or_default()
-                        .extend(sorted_run.ssts.iter().cloned());
-                }
+        // Merge sorted runs by tier: sorted runs with the same ID across
+        // input manifests are combined into a single sorted run. We use
+        // the SR ID (not position) to match tiers, since projection can
+        // remove sorted runs and shift positions.
+        let mut merged_by_id: BTreeMap<u32, Vec<SsTableHandle>> = BTreeMap::new();
+        for (manifest, _, _, _) in &ranges {
+            for sorted_run in &manifest.core.compacted {
+                merged_by_id
+                    .entry(sorted_run.id)
+                    .or_default()
+                    .extend(sorted_run.ssts.iter().cloned());
             }
+        }
 
-            // Collect sorted runs ordered by ID descending (newest first),
-            // preserving the original IDs.
-            for (id, ssts) in merged_by_id.into_iter().rev() {
-                core.compacted.push(SortedRun { id, ssts });
-            }
+        // Collect sorted runs ordered by ID descending (newest first),
+        // preserving the original IDs.
+        for (id, ssts) in merged_by_id.into_iter().rev() {
+            core.compacted.push(SortedRun { id, ssts });
+        }
 
-            Self {
-                external_dbs,
-                core,
-                writer_epoch: 0,
-                compactor_epoch: 0,
-            }
+        Self {
+            external_dbs,
+            core,
+            writer_epoch: 0,
+            compactor_epoch: 0,
         }
     }
 
@@ -810,11 +845,12 @@ mod tests {
         // ULIDs created with Ulid::new() within the same millisecond have random
         // ordering, which makes test assertions on L0 sort order non-deterministic.
         let mut next_ts: u64 = 1000;
-        let manifests: Vec<Manifest> = test_case
+        let manifests: Vec<(Manifest, String, Uuid)> = test_case
             .manifests
             .iter()
-            .map(|m| {
-                build_manifest(m, |alias| {
+            .enumerate()
+            .map(|(i, m)| {
+                let manifest = build_manifest(m, |alias| {
                     if let Some(sst_id) = sst_ids.get(alias) {
                         *sst_id
                     } else {
@@ -823,7 +859,8 @@ mod tests {
                         sst_ids.insert(alias.to_string(), sst_id);
                         sst_id
                     }
-                })
+                });
+                (manifest, format!("source_{}", i), Uuid::new_v4())
             })
             .collect();
 
@@ -850,10 +887,11 @@ mod tests {
                 sorted_runs: vec![],
             },
         ];
-        let manifests: Vec<Manifest> = manifests
+        let manifests: Vec<(Manifest, String, Uuid)> = manifests
             .iter()
-            .map(|m| {
-                build_manifest(m, |alias| {
+            .enumerate()
+            .map(|(i, m)| {
+                let manifest = build_manifest(m, |alias| {
                     if let Some(sst_id) = sst_ids.get(alias) {
                         *sst_id
                     } else {
@@ -861,7 +899,8 @@ mod tests {
                         sst_ids.insert(alias.to_string(), sst_id);
                         sst_id
                     }
-                })
+                });
+                (manifest, format!("source_{}", i), Uuid::new_v4())
             })
             .collect();
 
@@ -1166,7 +1205,10 @@ mod tests {
             sst_ids: vec![sst_b, sst_c],
         });
 
-        let sources = vec![m1, m2];
+        let sources = vec![
+            (m1, "path1".to_string(), Uuid::new_v4()),
+            (m2, "path2".to_string(), Uuid::new_v4()),
+        ];
 
         let result = Manifest::union(sources, Arc::new(DbRand::default()));
 
@@ -1224,7 +1266,10 @@ mod tests {
 
         let m2 = manifest_with_one_compacted_sst(sst_own2, b"m", BytesRange::from_ref("m"..));
 
-        let sources = vec![m1, m2];
+        let sources = vec![
+            (m1, "path1".to_string(), Uuid::new_v4()),
+            (m2, "path2".to_string(), Uuid::new_v4()),
+        ];
 
         let result = Manifest::union(sources, Arc::new(DbRand::default()));
 
@@ -1243,5 +1288,42 @@ mod tests {
             entry.final_checkpoint_id.is_some(),
             "final_checkpoint_id should not be None"
         );
+    }
+
+    #[test]
+    fn test_union_tracks_sources_as_external_dbs() {
+        let sst1 = SsTableId::Compacted(Ulid::from_parts(1000, 0));
+        let sst2 = SsTableId::Compacted(Ulid::from_parts(2000, 0));
+
+        let m1 = manifest_with_one_compacted_sst(sst1, b"a", BytesRange::from_ref("a".."m"));
+        let m2 = manifest_with_one_compacted_sst(sst2, b"m", BytesRange::from_ref("m"..));
+
+        let path1 = "source_db_1".to_string();
+        let path2 = "source_db_2".to_string();
+        let cp1 = Uuid::new_v4();
+        let cp2 = Uuid::new_v4();
+
+        let sources = vec![(m1, path1.clone(), cp1), (m2, path2.clone(), cp2)];
+
+        let result = Manifest::union(sources, Arc::new(DbRand::default()));
+
+        // Should have 2 external_dbs entries (one per source)
+        assert_eq!(result.external_dbs.len(), 2);
+
+        let entry1 = result
+            .external_dbs
+            .iter()
+            .find(|db| db.path == path1 && db.source_checkpoint_id == cp1)
+            .expect("Should have external_dbs entry for source 1");
+        assert_eq!(entry1.sst_ids, vec![sst1]);
+        assert!(entry1.final_checkpoint_id.is_some());
+
+        let entry2 = result
+            .external_dbs
+            .iter()
+            .find(|db| db.path == path2 && db.source_checkpoint_id == cp2)
+            .expect("Should have external_dbs entry for source 2");
+        assert_eq!(entry2.sst_ids, vec![sst2]);
+        assert!(entry2.final_checkpoint_id.is_some());
     }
 }
