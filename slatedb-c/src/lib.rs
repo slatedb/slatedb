@@ -61,7 +61,9 @@ pub use logging::{
     slatedb_logging_set_level,
 };
 pub use memory::{slatedb_bytes_free, slatedb_result_free};
-pub use object_store::{slatedb_db_resolve_object_store, slatedb_object_store_close};
+pub use object_store::{
+    slatedb_object_store_close, slatedb_object_store_from_env, slatedb_object_store_from_url,
+};
 pub use settings::{
     slatedb_settings_apply_kv, slatedb_settings_close, slatedb_settings_default,
     slatedb_settings_from_env, slatedb_settings_from_env_with_default, slatedb_settings_from_file,

@@ -16,7 +16,13 @@ var _ = Describe("DB", func() {
 	})
 
 	It("should return error if CLOUD_PROVIDER is undefined", func() {
-		db, err := slatedb.Open("path/to/db")
+		tmpFile, err := os.CreateTemp("", "slatedb-empty-env-*")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(tmpFile.Close()).To(Succeed())
+		envPath := tmpFile.Name()
+		defer func() { _ = os.Remove(envPath) }()
+
+		db, err := slatedb.Open("path/to/db", slatedb.WithEnvFile[slatedb.DbConfig](envPath))
 		Expect(err).To(HaveOccurred())
 		Expect(err).Should(MatchError(ContainSubstring("undefined environment variable")))
 		Expect(db).To(BeNil())

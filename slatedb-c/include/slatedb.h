@@ -1268,11 +1268,35 @@ void slatedb_bytes_free(uint8_t *data, uintptr_t len);
 // ## Safety
 // - `url` must be a valid null-terminated C string.
 // - `out_object_store` must be a valid non-null writable pointer.
-struct slatedb_result_t slatedb_db_resolve_object_store(const char *url,
-                                                        struct slatedb_object_store_t **out_object_store);
+struct slatedb_result_t slatedb_object_store_from_url(const char *url,
+                                                      struct slatedb_object_store_t **out_object_store);
+
+// Resolves an object store from environment variables and returns an opaque
+// handle.
+//
+// Provider configuration follows `slatedb::admin::load_object_store_from_env`.
+//
+// ## Arguments
+// - `env_file`: Optional null-terminated UTF-8 path to a `.env` file. Pass
+//   null or empty string to use default `.env` loading behavior.
+// - `out_object_store`: Output pointer populated with a newly allocated
+//   `slatedb_object_store_t*` on success.
+//
+// ## Returns
+// - `slatedb_result_t` with `kind == SLATEDB_ERROR_KIND_NONE` on success.
+//
+// ## Errors
+// - Returns `SLATEDB_ERROR_KIND_INVALID` for invalid pointers/UTF-8 and
+//   invalid environment configuration.
+//
+// ## Safety
+// - `env_file` must be null or a valid null-terminated C string.
+// - `out_object_store` must be a valid non-null writable pointer.
+struct slatedb_result_t slatedb_object_store_from_env(const char *env_file,
+                                                      struct slatedb_object_store_t **out_object_store);
 
 // Closes and frees an object store handle previously returned by
-// `slatedb_db_resolve_object_store`.
+// `slatedb_object_store_from_url` or `slatedb_object_store_from_env`.
 //
 // ## Arguments
 // - `object_store`: Opaque object store handle.

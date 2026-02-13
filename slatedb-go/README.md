@@ -55,14 +55,11 @@ export LD_LIBRARY_PATH="$(pwd)/target/debug:$(pwd)/target/release"    # Linux
 
 `Open`, `OpenReader`, and `Builder.Build` all resolve object-store config the same way:
 
-1. If `WithUrl(...)` is provided, use it.
-2. Else look for `SLATEDB_OBJECT_STORE_URL` or `OBJECT_STORE_URL`.
-3. Else use `CLOUD_PROVIDER`:
-   - `local` requires `LOCAL_PATH` (converted to `file:///...`)
-   - `memory` maps to `memory:///`
-   - any value containing `://` is treated as a direct URL
+1. If `WithUrl(...)` is provided, call `slatedb_object_store_from_url`.
+2. Else if `SLATEDB_OBJECT_STORE_URL` or `OBJECT_STORE_URL` is set (process env first, then optional env file), call `slatedb_object_store_from_url`.
+3. Else call `slatedb_object_store_from_env` (provider-driven config via `CLOUD_PROVIDER` and related vars in `slatedb::admin`).
 
-`WithEnvFile(...)` injects variables from a `.env` file into this resolution path.
+`WithEnvFile(...)` is passed through to `slatedb_object_store_from_env` and uses the same dotenv loading semantics as Rust SlateDB.
 
 ## Basic Usage
 
@@ -231,6 +228,18 @@ Example `.env` for local filesystem:
 ```bash
 CLOUD_PROVIDER=local
 LOCAL_PATH=/
+```
+
+Example `.env` for AWS S3:
+
+```bash
+CLOUD_PROVIDER=aws
+AWS_BUCKET=my-slate-bucket
+AWS_REGION=us-west-2
+# Optional depending on your environment/auth setup:
+# AWS_ENDPOINT=https://s3.us-west-2.amazonaws.com
+# AWS_ACCESS_KEY_ID=...
+# AWS_SECRET_ACCESS_KEY=...
 ```
 
 Direct URL override:

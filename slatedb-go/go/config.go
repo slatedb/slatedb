@@ -538,55 +538,40 @@ func convertToCReaderOptions(opts *DbReaderOptions) *C.slatedb_db_reader_options
 // OBJECT STORE URL RESOLUTION
 // ============================================================================
 
-func resolveObjectStoreURL(url *string, envFile *string) (string, error) {
+func resolveObjectStoreURL(url *string, envFile *string) (string, bool, error) {
 	if url != nil && strings.TrimSpace(*url) != "" {
-		return strings.TrimSpace(*url), nil
+		return strings.TrimSpace(*url), true, nil
 	}
 
-	envValues := map[string]string{}
+	if directURL, ok := lookupDirectURL(nil); ok {
+		return directURL, true, nil
+	}
+
 	if envFile != nil && strings.TrimSpace(*envFile) != "" {
-		values, err := loadEnvFile(*envFile)
+		envValues, err := loadEnvFile(*envFile)
 		if err != nil {
-			return "", err
+			return "", false, err
 		}
-		envValues = values
+		if directURL, ok := lookupDirectURL(envValues); ok {
+			return directURL, true, nil
+		}
 	}
 
-	lookup := func(key string) (string, bool) {
-		if value, ok := envValues[key]; ok {
-			return value, true
-		}
-		value, ok := os.LookupEnv(key)
-		return value, ok
-	}
+	return "", false, nil
+}
 
-	if directURL, ok := lookup("SLATEDB_OBJECT_STORE_URL"); ok && strings.TrimSpace(directURL) != "" {
-		return strings.TrimSpace(directURL), nil
-	}
-	if directURL, ok := lookup("OBJECT_STORE_URL"); ok && strings.TrimSpace(directURL) != "" {
-		return strings.TrimSpace(directURL), nil
-	}
-
-	provider, ok := lookup("CLOUD_PROVIDER")
-	if !ok || strings.TrimSpace(provider) == "" {
-		return "", errors.New("undefined environment variable: CLOUD_PROVIDER")
-	}
-
-	switch strings.ToLower(strings.TrimSpace(provider)) {
-	case "local":
-		localPath, ok := lookup("LOCAL_PATH")
-		if !ok || strings.TrimSpace(localPath) == "" {
-			return "", errors.New("undefined environment variable: LOCAL_PATH")
+func lookupDirectURL(envValues map[string]string) (string, bool) {
+	for _, key := range []string{"SLATEDB_OBJECT_STORE_URL", "OBJECT_STORE_URL"} {
+		if value, ok := os.LookupEnv(key); ok && strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value), true
 		}
-		return normalizeLocalObjectStoreURL(strings.TrimSpace(localPath)), nil
-	case "memory":
-		return "memory:///", nil
-	default:
-		if strings.Contains(provider, "://") {
-			return strings.TrimSpace(provider), nil
+		if envValues != nil {
+			if value, ok := envValues[key]; ok && strings.TrimSpace(value) != "" {
+				return strings.TrimSpace(value), true
+			}
 		}
-		return "", fmt.Errorf("unsupported CLOUD_PROVIDER: %s", provider)
 	}
+	return "", false
 }
 
 func loadEnvFile(path string) (map[string]string, error) {
@@ -622,14 +607,4 @@ func loadEnvFile(path string) (map[string]string, error) {
 	}
 
 	return values, nil
-}
-
-func normalizeLocalObjectStoreURL(path string) string {
-	if strings.Contains(path, "://") {
-		return path
-	}
-	if strings.HasPrefix(path, "/") {
-		return "file://" + path
-	}
-	return "file:///" + path
 }

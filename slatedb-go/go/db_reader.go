@@ -23,7 +23,7 @@ type DbReader struct {
 // Parameters:
 //   - `path`: local database path
 //   - `WithUrl`: object-store URL
-//   - `WithEnvFile`: optional `.env` file for provider resolution
+//   - `WithEnvFile`: optional `.env` file for URL/provider resolution
 //   - `WithCheckpointId`: optional checkpoint UUID string
 //   - `WithDbReaderOptions`: optional reader tuning options
 //

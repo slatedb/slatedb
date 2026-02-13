@@ -124,8 +124,8 @@ int main(void) {
     struct slatedb_db_t* db = NULL;
     struct slatedb_iterator_t* it = NULL;
 
-    if (!check_result("resolve_object_store",
-            slatedb_db_resolve_object_store("memory:///", &store))) {
+    if (!check_result("object_store_from_url",
+            slatedb_object_store_from_url("memory:///", &store))) {
         return 1;
     }
 

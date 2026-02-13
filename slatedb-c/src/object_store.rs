@@ -4,10 +4,11 @@
 //! handles used by `slatedb_db_open` and builder APIs.
 
 use crate::ffi::{
-    cstr_to_string, error_from_slate_error, require_handle, require_out_ptr,
-    slatedb_object_store_t, slatedb_result_t, success_result,
+    cstr_to_string, error_from_slate_error, error_result, require_handle, require_out_ptr,
+    slatedb_error_kind_t, slatedb_object_store_t, slatedb_result_t, success_result,
 };
-use slatedb::Db;
+use slatedb::{admin, Db};
+use std::os::raw::c_char;
 
 /// Resolves an object store from a URL and returns an opaque handle.
 ///
@@ -27,7 +28,7 @@ use slatedb::Db;
 /// - `url` must be a valid null-terminated C string.
 /// - `out_object_store` must be a valid non-null writable pointer.
 #[no_mangle]
-pub unsafe extern "C" fn slatedb_db_resolve_object_store(
+pub unsafe extern "C" fn slatedb_object_store_from_url(
     url: *const std::os::raw::c_char,
     out_object_store: *mut *mut slatedb_object_store_t,
 ) -> slatedb_result_t {
@@ -50,8 +51,56 @@ pub unsafe extern "C" fn slatedb_db_resolve_object_store(
     }
 }
 
+/// Resolves an object store from environment variables and returns an opaque
+/// handle.
+///
+/// Provider configuration follows `slatedb::admin::load_object_store_from_env`.
+///
+/// ## Arguments
+/// - `env_file`: Optional null-terminated UTF-8 path to a `.env` file. Pass
+///   null or empty string to use default `.env` loading behavior.
+/// - `out_object_store`: Output pointer populated with a newly allocated
+///   `slatedb_object_store_t*` on success.
+///
+/// ## Returns
+/// - `slatedb_result_t` with `kind == SLATEDB_ERROR_KIND_NONE` on success.
+///
+/// ## Errors
+/// - Returns `SLATEDB_ERROR_KIND_INVALID` for invalid pointers/UTF-8 and
+///   invalid environment configuration.
+///
+/// ## Safety
+/// - `env_file` must be null or a valid null-terminated C string.
+/// - `out_object_store` must be a valid non-null writable pointer.
+#[no_mangle]
+pub unsafe extern "C" fn slatedb_object_store_from_env(
+    env_file: *const c_char,
+    out_object_store: *mut *mut slatedb_object_store_t,
+) -> slatedb_result_t {
+    if let Err(err) = require_out_ptr(out_object_store, "out_object_store") {
+        return err;
+    }
+
+    let env_file = match optional_cstr_to_string(env_file, "env_file") {
+        Ok(env_file) => env_file,
+        Err(err) => return err,
+    };
+
+    match admin::load_object_store_from_env(env_file) {
+        Ok(object_store) => {
+            let handle = Box::new(slatedb_object_store_t { object_store });
+            *out_object_store = Box::into_raw(handle);
+            success_result()
+        }
+        Err(err) => error_result(
+            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
+            &format!("failed to resolve object store from environment: {err}"),
+        ),
+    }
+}
+
 /// Closes and frees an object store handle previously returned by
-/// `slatedb_db_resolve_object_store`.
+/// `slatedb_object_store_from_url` or `slatedb_object_store_from_env`.
 ///
 /// ## Arguments
 /// - `object_store`: Opaque object store handle.
@@ -75,6 +124,23 @@ pub unsafe extern "C" fn slatedb_object_store_close(
     let _ = Box::from_raw(object_store);
 
     success_result()
+}
+
+unsafe fn optional_cstr_to_string(
+    ptr: *const c_char,
+    field_name: &str,
+) -> Result<Option<String>, slatedb_result_t> {
+    if ptr.is_null() {
+        return Ok(None);
+    }
+
+    let value = cstr_to_string(ptr, field_name)?;
+    let value = value.trim();
+    if value.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(value.to_owned()))
+    }
 }
 
 #[cfg(test)]
@@ -110,21 +176,29 @@ mod tests {
     }
 
     #[test]
-    fn test_db_resolve_object_store_requires_out_pointer() {
+    fn test_object_store_from_url_requires_out_pointer() {
         let url = CString::new("memory:///").expect("CString failed");
         assert_result_kind(
-            unsafe { slatedb_db_resolve_object_store(url.as_ptr(), std::ptr::null_mut()) },
+            unsafe { slatedb_object_store_from_url(url.as_ptr(), std::ptr::null_mut()) },
             slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
         );
     }
 
     #[test]
-    fn test_db_resolve_object_store_rejects_invalid_utf8_url() {
+    fn test_object_store_from_env_requires_out_pointer() {
+        assert_result_kind(
+            unsafe { slatedb_object_store_from_env(std::ptr::null(), std::ptr::null_mut()) },
+            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
+        );
+    }
+
+    #[test]
+    fn test_object_store_from_env_rejects_invalid_utf8_env_file() {
         let invalid_utf8 = [0xFF_u8, 0];
         let mut object_store: *mut slatedb_object_store_t = std::ptr::null_mut();
         assert_result_kind(
             unsafe {
-                slatedb_db_resolve_object_store(
+                slatedb_object_store_from_env(
                     invalid_utf8.as_ptr() as *const std::os::raw::c_char,
                     &mut object_store,
                 )

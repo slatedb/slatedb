@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"unsafe"
 )
 
@@ -82,19 +83,33 @@ func resultToErrorAndFree(result C.struct_slatedb_result_t) error {
 }
 
 func resolveObjectStoreHandle(url *string, envFile *string) (*C.slatedb_object_store_t, error) {
-	resolvedURL, err := resolveObjectStoreURL(url, envFile)
+	resolvedURL, hasURL, err := resolveObjectStoreURL(url, envFile)
 	if err != nil {
 		return nil, err
 	}
 
-	cURL := C.CString(resolvedURL)
-	defer C.free(unsafe.Pointer(cURL))
-
 	var objectStore *C.slatedb_object_store_t
-	result := C.slatedb_db_resolve_object_store(cURL, &objectStore)
-	if err := resultToErrorAndFree(result); err != nil {
-		return nil, err
+	if hasURL {
+		cURL := C.CString(resolvedURL)
+		defer C.free(unsafe.Pointer(cURL))
+
+		result := C.slatedb_object_store_from_url(cURL, &objectStore)
+		if err := resultToErrorAndFree(result); err != nil {
+			return nil, err
+		}
+	} else {
+		var cEnvFile *C.char
+		if envFile != nil && strings.TrimSpace(*envFile) != "" {
+			cEnvFile = C.CString(strings.TrimSpace(*envFile))
+			defer C.free(unsafe.Pointer(cEnvFile))
+		}
+
+		result := C.slatedb_object_store_from_env(cEnvFile, &objectStore)
+		if err := resultToErrorAndFree(result); err != nil {
+			return nil, err
+		}
 	}
+
 	if objectStore == nil {
 		return nil, errors.New("failed to resolve object store")
 	}
@@ -187,7 +202,7 @@ func closeBuilderHandle(builder *C.slatedb_db_builder_t) {
 //
 // Object-store configuration is resolved from `opts`:
 //   - `WithUrl`: explicit object-store URL (for example `memory:///`, `file:///tmp/db`)
-//   - `WithEnvFile`: optional `.env` file used to resolve provider settings
+//   - `WithEnvFile`: optional `.env` file used when resolving URL/provider settings
 //
 // For advanced configuration (custom `Settings`, SST block size), use `NewBuilder`.
 func Open(path string, opts ...Option[DbConfig]) (*DB, error) {
