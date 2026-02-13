@@ -673,10 +673,17 @@ The union process works as follows:
 1. Sort the input manifests by the start bound of their key ranges.
 2. Validate that the manifests are non-overlapping. Each manifest's key range is computed from the effective ranges
    of all its L0 and compacted SSTs. If any two manifests have intersecting key ranges, the operation fails.
-3. Concatenate the contents of all input manifests:
+3. Merge the contents of all input manifests:
    - All `external_dbs` entries are merged into a single list.
    - All L0 SSTs from each manifest are appended to the result's L0 list.
-   - All sorted runs from each manifest are appended to the result's compacted list.
+   - Sorted runs are merged by tier: sorted runs with the same ID across input manifests are combined
+     into a single sorted run by concatenating their SSTs. Since the source manifests cover non-overlapping key
+     ranges, the SSTs within each merged run remain non-overlapping. If source manifests have different numbers
+     of sorted runs, tiers that exist in only some manifests contribute their SSTs to the corresponding tier in
+     the result.
+4. Sorted run IDs are preserved from the source manifests. The compactor does not assume contiguous IDs, so
+   gaps left by projection (where empty sorted runs were removed) are acceptable. Preserving original IDs
+   maintains tier identity across projection and union. The descending order is preserved to maintain compactor invariant
 
 Apart from the above union process, cloning from multiple source databases is the same as clone (see [Clones](#clones)),
 including creation of final checkpoints in source databases (and their source databases, recursively).
