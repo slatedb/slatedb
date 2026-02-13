@@ -5,6 +5,7 @@ use std::ops::Bound;
 use std::sync::Arc;
 
 use crate::bytes_range::BytesRange;
+use crate::error::SlateDBError;
 use crate::rand::DbRand;
 use crate::utils::IdGenerator;
 use bytes::Bytes;
@@ -151,7 +152,10 @@ impl Manifest {
     }
 
     #[allow(unused)]
-    pub(crate) fn union(sources: Vec<(Manifest, String, Uuid)>, rand: Arc<DbRand>) -> Manifest {
+    pub(crate) fn union(
+        sources: Vec<(Manifest, String, Uuid)>,
+        rand: Arc<DbRand>,
+    ) -> Result<Manifest, SlateDBError> {
         let mut ranges = vec![];
         for (manifest, path, source_checkpoint_id) in &sources {
             let range = manifest.range();
@@ -168,7 +172,7 @@ impl Manifest {
         for (_, _, _, range) in ranges.iter() {
             if let Some(previous_range) = previous_range {
                 if range.intersect(previous_range).is_some() {
-                    unreachable!("overlapping ranges found");
+                    return Err(SlateDBError::InvalidDBState);
                 }
             }
             previous_range = Some(range);
@@ -280,9 +284,9 @@ impl Manifest {
                 match l0_by_id.get(&sst.id) {
                     Some(existing) => {
                         let merged_range = match (&existing.visible_range, &sst.visible_range) {
-                            (Some(a), Some(b)) => Some(a.union(b).unwrap_or_else(|| {
-                                panic!("L0 SST {:?} has non-contiguous visible_ranges", sst.id)
-                            })),
+                            (Some(a), Some(b)) => {
+                                Some(a.union(b).ok_or(SlateDBError::InvalidDBState)?)
+                            }
                             // If either has no visible_range, the merged result covers everything
                             _ => None,
                         };
@@ -301,6 +305,11 @@ impl Manifest {
         // Sort L0 SSTs by ULID descending (newest first) to preserve
         // temporal ordering for correct point-lookup behavior.
         let mut l0_list: Vec<SsTableHandle> = l0_by_id.into_values().collect();
+        for sst in &l0_list {
+            if matches!(sst.id, SsTableId::Wal(_)) {
+                return Err(SlateDBError::InvalidDBState);
+            }
+        }
         l0_list.sort_by(|a, b| b.id.unwrap_compacted_id().cmp(&a.id.unwrap_compacted_id()));
         core.l0 = l0_list.into();
 
@@ -324,12 +333,12 @@ impl Manifest {
             core.compacted.push(SortedRun { id, ssts });
         }
 
-        Self {
+        Ok(Self {
             external_dbs,
             core,
             writer_epoch: 0,
             compactor_epoch: 0,
-        }
+        })
     }
 
     fn range(&self) -> Option<BytesRange> {
@@ -383,6 +392,7 @@ mod tests {
     use super::Manifest;
     use crate::config::CheckpointOptions;
     use crate::db_state::{ManifestCore, SortedRun, SsTableHandle, SsTableId, SsTableInfo};
+    use crate::error::SlateDBError;
     use crate::rand::DbRand;
     use bytes::Bytes;
     use object_store::memory::InMemory;
@@ -880,13 +890,12 @@ mod tests {
         let expected_manifest =
             build_manifest(&test_case.expected, |alias| *sst_ids.get(alias).unwrap());
 
-        let union = Manifest::union(manifests, Arc::new(DbRand::default()));
+        let union = Manifest::union(manifests, Arc::new(DbRand::default())).unwrap();
 
         assert_manifest_equal(&union, &expected_manifest, &sst_ids);
     }
 
     #[test]
-    #[should_panic(expected = "non-contiguous visible_ranges")]
     fn test_union_fails_on_non_contiguous_l0_ranges() {
         let mut sst_ids: HashMap<String, SsTableId> = HashMap::new();
         let manifests = vec![
@@ -917,7 +926,10 @@ mod tests {
             })
             .collect();
 
-        Manifest::union(manifests, Arc::new(DbRand::default()));
+        assert!(matches!(
+            Manifest::union(manifests, Arc::new(DbRand::default())),
+            Err(SlateDBError::InvalidDBState)
+        ));
     }
 
     fn build_manifest<F>(manifest: &SimpleManifest, mut sst_id_fn: F) -> Manifest
@@ -1223,7 +1235,7 @@ mod tests {
             (m2, "path2".to_string(), Uuid::new_v4()),
         ];
 
-        let result = Manifest::union(sources, Arc::new(DbRand::default()));
+        let result = Manifest::union(sources, Arc::new(DbRand::default())).unwrap();
 
         // Find the entry for the shared ancestor
         let shared_entries: Vec<_> = result
@@ -1284,7 +1296,7 @@ mod tests {
             (m2, "path2".to_string(), Uuid::new_v4()),
         ];
 
-        let result = Manifest::union(sources, Arc::new(DbRand::default()));
+        let result = Manifest::union(sources, Arc::new(DbRand::default())).unwrap();
 
         let entry = result
             .external_dbs
@@ -1318,7 +1330,7 @@ mod tests {
 
         let sources = vec![(m1, path1.clone(), cp1), (m2, path2.clone(), cp2)];
 
-        let result = Manifest::union(sources, Arc::new(DbRand::default()));
+        let result = Manifest::union(sources, Arc::new(DbRand::default())).unwrap();
 
         // Should have 2 external_dbs entries (one per source)
         assert_eq!(result.external_dbs.len(), 2);
@@ -1357,7 +1369,7 @@ mod tests {
             (m2, "path2".to_string(), Uuid::new_v4()),
         ];
 
-        let result = Manifest::union(sources, Arc::new(DbRand::default()));
+        let result = Manifest::union(sources, Arc::new(DbRand::default())).unwrap();
 
         assert!(
             !result.core.initialized,
@@ -1381,7 +1393,7 @@ mod tests {
             (m2, "path2".to_string(), Uuid::new_v4()),
         ];
 
-        let result = Manifest::union(sources, Arc::new(DbRand::default()));
+        let result = Manifest::union(sources, Arc::new(DbRand::default())).unwrap();
 
         assert_eq!(
             result.core.last_l0_seq, 100,
