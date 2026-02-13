@@ -1,5 +1,5 @@
 use std::cmp::{max, min};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::fmt::Debug;
 use std::ops::Bound;
 use std::sync::Arc;
@@ -177,21 +177,35 @@ impl Manifest {
                 previous_range = Some(range);
             }
 
-            // Now we can zip the manifests together
+            // Merge the contents of all input manifests
             let mut external_dbs = vec![];
             let mut core = ManifestCore::new();
 
-            for (manifest, _) in ranges {
-                // First, we need to add all the external dbs
+            for (manifest, _) in &ranges {
                 external_dbs.extend_from_slice(&manifest.external_dbs);
-                // Then, we can add all the l0 ssts
                 for sst in &manifest.core.l0 {
                     core.l0.push_back(sst.clone());
                 }
-                // Finally, we can add all the sorted runs
+            }
+
+            // Merge sorted runs by tier: sorted runs with the same ID across
+            // input manifests are combined into a single sorted run. We use
+            // the SR ID (not position) to match tiers, since projection can
+            // remove sorted runs and shift positions.
+            let mut merged_by_id: BTreeMap<u32, Vec<SsTableHandle>> = BTreeMap::new();
+            for (manifest, _) in &ranges {
                 for sorted_run in &manifest.core.compacted {
-                    core.compacted.push(sorted_run.clone());
+                    merged_by_id
+                        .entry(sorted_run.id)
+                        .or_default()
+                        .extend(sorted_run.ssts.iter().cloned());
                 }
+            }
+
+            // Collect sorted runs ordered by ID descending (newest first),
+            // preserving the original IDs.
+            for (id, ssts) in merged_by_id.into_iter().rev() {
+                core.compacted.push(SortedRun { id, ssts });
             }
 
             Self {
@@ -585,6 +599,147 @@ mod tests {
                 SstEntry::projected("baz", "j", "o"..)
             ],
             sorted_runs: vec![]
+        },
+    })]
+    #[case::sorted_runs_merged_by_tier(UnionTestCase {
+        manifests: vec![
+            SimpleManifest {
+                l0: vec![],
+                sorted_runs: vec![
+                    // Newest tier has highest ID (compactor convention)
+                    SimpleSortedRun::with_id(2, vec![
+                        SstEntry::projected("sr0_a", "a", "a".."m"),
+                        SstEntry::projected("sr0_b", "d", "a".."m"),
+                    ]),
+                    SimpleSortedRun::with_id(1, vec![
+                        SstEntry::projected("sr1_a", "b", "a".."m"),
+                    ]),
+                ],
+            },
+            SimpleManifest {
+                l0: vec![],
+                sorted_runs: vec![
+                    SimpleSortedRun::with_id(2, vec![
+                        SstEntry::projected("sr0_c", "m", "m"..),
+                    ]),
+                    SimpleSortedRun::with_id(1, vec![
+                        SstEntry::projected("sr1_b", "n", "m"..),
+                        SstEntry::projected("sr1_c", "p", "m"..),
+                    ]),
+                ],
+            },
+        ],
+        expected: SimpleManifest {
+            l0: vec![],
+            sorted_runs: vec![
+                // Tier with original ID 2: merged
+                SimpleSortedRun::with_id(2, vec![
+                    SstEntry::projected("sr0_a", "a", "a".."m"),
+                    SstEntry::projected("sr0_b", "d", "a".."m"),
+                    SstEntry::projected("sr0_c", "m", "m"..),
+                ]),
+                // Tier with original ID 1: merged
+                SimpleSortedRun::with_id(1, vec![
+                    SstEntry::projected("sr1_a", "b", "a".."m"),
+                    SstEntry::projected("sr1_b", "n", "m"..),
+                    SstEntry::projected("sr1_c", "p", "m"..),
+                ]),
+            ],
+        },
+    })]
+    #[case::sorted_runs_uneven_tiers(UnionTestCase {
+        manifests: vec![
+            SimpleManifest {
+                l0: vec![],
+                sorted_runs: vec![
+                    SimpleSortedRun::with_id(3, vec![
+                        SstEntry::projected("sr0_a", "a", "a".."m"),
+                    ]),
+                    SimpleSortedRun::with_id(2, vec![
+                        SstEntry::projected("sr1_a", "c", "a".."m"),
+                    ]),
+                    SimpleSortedRun::with_id(1, vec![
+                        SstEntry::projected("sr2_a", "e", "a".."m"),
+                    ]),
+                ],
+            },
+            SimpleManifest {
+                l0: vec![],
+                sorted_runs: vec![
+                    // Only has the newest tier (ID 3)
+                    SimpleSortedRun::with_id(3, vec![
+                        SstEntry::projected("sr0_b", "m", "m"..),
+                    ]),
+                ],
+            },
+        ],
+        expected: SimpleManifest {
+            l0: vec![],
+            sorted_runs: vec![
+                SimpleSortedRun::with_id(3, vec![
+                    SstEntry::projected("sr0_a", "a", "a".."m"),
+                    SstEntry::projected("sr0_b", "m", "m"..),
+                ]),
+                SimpleSortedRun::with_id(2, vec![
+                    SstEntry::projected("sr1_a", "c", "a".."m"),
+                ]),
+                SimpleSortedRun::with_id(1, vec![
+                    SstEntry::projected("sr2_a", "e", "a".."m"),
+                ]),
+            ],
+        },
+    })]
+    #[case::sorted_runs_matched_by_id(UnionTestCase {
+        // Simulates union after projection where some sorted runs were
+        // removed from one manifest but not the other, shifting positions.
+        manifests: vec![
+            SimpleManifest {
+                l0: vec![],
+                sorted_runs: vec![
+                    // Has SR IDs 2, 1, 0 (3 tiers)
+                    SimpleSortedRun::with_id(2, vec![
+                        SstEntry::projected("sr2_a", "a", "a".."m"),
+                    ]),
+                    SimpleSortedRun::with_id(1, vec![
+                        SstEntry::projected("sr1_a", "c", "a".."m"),
+                    ]),
+                    SimpleSortedRun::with_id(0, vec![
+                        SstEntry::projected("sr0_a", "e", "a".."m"),
+                    ]),
+                ],
+            },
+            SimpleManifest {
+                l0: vec![],
+                sorted_runs: vec![
+                    // Has SR IDs 2, 0 only (SR 1 was removed by projection)
+                    // Position 0 here is SR ID 2, position 1 is SR ID 0
+                    SimpleSortedRun::with_id(2, vec![
+                        SstEntry::projected("sr2_b", "m", "m"..),
+                    ]),
+                    SimpleSortedRun::with_id(0, vec![
+                        SstEntry::projected("sr0_b", "o", "m"..),
+                    ]),
+                ],
+            },
+        ],
+        expected: SimpleManifest {
+            l0: vec![],
+            sorted_runs: vec![
+                // SR 2: merged from both, original ID preserved
+                SimpleSortedRun::with_id(2, vec![
+                    SstEntry::projected("sr2_a", "a", "a".."m"),
+                    SstEntry::projected("sr2_b", "m", "m"..),
+                ]),
+                // SR 1: only from first manifest, original ID preserved
+                SimpleSortedRun::with_id(1, vec![
+                    SstEntry::projected("sr1_a", "c", "a".."m"),
+                ]),
+                // SR 0: merged from both, original ID preserved
+                SimpleSortedRun::with_id(0, vec![
+                    SstEntry::projected("sr0_a", "e", "a".."m"),
+                    SstEntry::projected("sr0_b", "o", "m"..),
+                ]),
+            ],
         },
     })]
     fn test_union(#[case] test_case: UnionTestCase) {
