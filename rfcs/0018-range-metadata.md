@@ -55,7 +55,7 @@ Authors:
 
 This RFC proposes:
 1. Adding a stats block to the SST footer containing per-SST statistics (`num_puts`, `num_deletes`, `num_merges`, `raw_key_size`, `raw_val_size`).
-2. Exposing lower-level primitives — `Db::manifest()`, `SstReader`, and `SstFile` — that allow users to walk the manifest, open individual SSTs, and read per-SST stats and index data for size estimation. Memtable stats are exposed via the existing `StatRegistry` (accessible through `Db::metrics()`).
+2. Exposing lower-level primitives — `DbReader::manifest()`, `SstReader`, and `SstFile` — that allow users to walk the manifest, open individual SSTs, and read per-SST stats and index data for size estimation. Memtable stats are exposed via the existing `StatRegistry` (accessible through `Db::metrics()`).
 
 Rather than providing a single high-level `Db::metadata(range)` function, this approach exposes modular building blocks. Users call `db.manifest()` to discover which SSTs exist, then use `SstReader` to open and inspect individual SSTs. This makes SlateDB more composable and avoids coupling the estimation logic to a specific API shape.
 
@@ -137,6 +137,9 @@ pub struct SstFile {
 impl SstFile {
     pub fn id(&self) -> Ulid;
 
+    /// Returns the SST file metadata (requires a `head()` call to the object store).
+    pub async fn metadata(&self) -> Result<SstFileMetadata, SlateDBError>;
+
     /// No additional I/O — stats are loaded during `open()`.
     pub fn stats(&self) -> &SstStats;
 
@@ -146,6 +149,8 @@ impl SstFile {
 ```
 
 `index()` calls `SsTableFormat::read_index()`, which reads `info.index_offset..info.index_offset + info.index_len`, decompresses, and returns an `SsTableIndexOwned`. The method materializes `Vec<(u64, Bytes)>` from the FlatBuffer `BlockMeta` entries (each has `offset()` and `first_key()`). Caching uses `DbCache::get_index` / `insert` keyed by `(sst_id, index_offset)`, matching the existing pattern in `TableStore::read_index()`.
+
+The existing `SstFileMetadata` struct in `tablestore.rs` (currently `pub(crate)`) is made `pub`:
 
 #### `SstStats`
 
@@ -165,7 +170,7 @@ pub struct SstStats {
 
 - **`SortedRun::tables_covering_range()`**: Change from `pub(crate)` to `pub`. Lets users find which SSTs in a sorted run overlap a given key range.
 - **`SsTableHandle::estimate_size()`**: Change from `pub(crate)` to `pub`. Enables quick no-I/O size estimates.
-- **`SsTableHandle::visible_range`**: Consider changing from `pub(crate)` to `pub` so users can inspect the projected key range.
+- **`SsTableHandle::visible_range()`**: Transforming the `visible_range` of `SsTableHandle` from the internal `BytesRange` to a `RangeBounds<Bytes>`.
 
 #### Memtable stats via `StatRegistry`
 
@@ -253,11 +258,13 @@ Add a stats block to the SST footer with the following fields (all `u64`):
 
 These are loaded into `SsTableInfo` at SST open time. This requires care as the storage format changes, i.e. the `.fbs` gets updated. For backwards compatibility, the stats block goes at the end of the footer and is optional. Old SSTs without a stats block get zeros for these fields.
 
+- **`Db::manifest()`**: Returns a clone of the current `ManifestCore`. No I/O.
+
 #### Phase 2 - `SstReader`, `SstFile`, and `Db::manifest()`
 
-- **`Db::manifest()`**: Returns a clone of the current `ManifestCore`. No I/O.
 - **`SstReader`**: New public struct wrapping object store access for SSTs. Internally reuses `SsTableFormat::read_info` and `SsTableFormat::read_index`.
 - **`SstFile`**: New public struct returned by `SstReader::open()`. Provides `stats()` (from Phase 1 stats block) and `index()` (block-level offset/key pairs).
+- **`SstFileMetadata`**: Change existing struct in `tablestore.rs` from `pub(crate)` to `pub`. Returned by `SstFile::metadata()`.
 - **`SstStats`**: New public struct with per-SST statistics from the footer.
 - **`SortedRun::tables_covering_range()`**: Make `pub` (currently `pub(crate)`).
 - **`SsTableHandle::estimate_size()`**: Make `pub` (currently `pub(crate)`).
@@ -410,10 +417,6 @@ The immediately preceding revision proposed a `Db::metadata(range)` API returnin
 Another alternative not explored is sample-based estimation: sample N random blocks and extrapolate key counts or compression ratios. This could complement the current approach but adds complexity.
 
 ## Open Questions
-
-- Should `Db` expose a pre-configured `SstReader` via `db.sst_reader()` instead of requiring manual construction?
-- Should `SstFile::index()` return raw `SsTableIndexOwned` instead of materializing `Vec<(u64, Bytes)>` to avoid the allocation?
-- Is there a need for a `DbReader::files() -> Vec<SstFile>` backed by a checkpoint to protect against GC?
 
 ## References
 
