@@ -15,61 +15,91 @@ import java.lang.foreign.ValueLayout;
 import java.lang.invoke.MethodHandle;
 import java.lang.invoke.VarHandle;
 import java.nio.charset.StandardCharsets;
-import java.util.ArrayList;
-import java.util.List;
 import java.util.Objects;
 
 final class Native {
     private static final Linker LINKER = Linker.nativeLinker();
     private static final Object INIT_LOCK = new Object();
 
-    private static final GroupLayout HANDLE_LAYOUT =
-        MemoryLayout.structLayout(ValueLayout.ADDRESS.withName("ptr"));
-    private static final GroupLayout RESULT_LAYOUT = createResultLayout();
-    private static final GroupLayout HANDLE_RESULT_LAYOUT =
-        MemoryLayout.structLayout(HANDLE_LAYOUT.withName("handle"), RESULT_LAYOUT.withName("result"));
-    private static final GroupLayout BUILDER_RESULT_LAYOUT =
-        MemoryLayout.structLayout(ValueLayout.ADDRESS.withName("builder"), RESULT_LAYOUT.withName("result"));
-    private static final GroupLayout VALUE_LAYOUT =
-        MemoryLayout.structLayout(ValueLayout.ADDRESS.withName("data"), ValueLayout.JAVA_LONG.withName("len"));
-    private static final GroupLayout PUT_OPTIONS_LAYOUT = createPutOptionsLayout();
-    private static final GroupLayout WRITE_OPTIONS_LAYOUT =
-        MemoryLayout.structLayout(ValueLayout.JAVA_BOOLEAN.withName("await_durable"));
-    private static final GroupLayout READ_OPTIONS_LAYOUT = createReadOptionsLayout();
-    private static final GroupLayout SCAN_OPTIONS_LAYOUT = createScanOptionsLayout();
-    private static final GroupLayout READER_OPTIONS_LAYOUT = createReaderOptionsLayout();
-    private static final GroupLayout READER_HANDLE_LAYOUT =
-        MemoryLayout.structLayout(ValueLayout.ADDRESS.withName("ptr"));
-    private static final GroupLayout READER_HANDLE_RESULT_LAYOUT =
-        MemoryLayout.structLayout(READER_HANDLE_LAYOUT.withName("handle"), RESULT_LAYOUT.withName("result"));
-    private static final GroupLayout KEY_VALUE_LAYOUT =
-        MemoryLayout.structLayout(VALUE_LAYOUT.withName("key"), VALUE_LAYOUT.withName("value"));
-    private static final GroupLayout SCAN_RESULT_LAYOUT = createScanResultLayout();
+    private static final GroupLayout RESULT_LAYOUT = MemoryLayout.structLayout(
+        ValueLayout.JAVA_INT.withName("kind"),
+        ValueLayout.JAVA_INT.withName("close_reason"),
+        ValueLayout.ADDRESS.withName("message")
+    );
 
-    private static final VarHandle HANDLE_PTR =
-        HANDLE_LAYOUT.varHandle(MemoryLayout.PathElement.groupElement("ptr"));
-    private static final VarHandle RESULT_ERROR =
-        RESULT_LAYOUT.varHandle(MemoryLayout.PathElement.groupElement("error"));
-    private static final VarHandle RESULT_NONE =
-            RESULT_LAYOUT.varHandle(MemoryLayout.PathElement.groupElement("none"));
+    private static final GroupLayout READ_OPTIONS_LAYOUT = MemoryLayout.structLayout(
+        ValueLayout.JAVA_BYTE.withName("durability_filter"),
+        ValueLayout.JAVA_BOOLEAN.withName("dirty"),
+        ValueLayout.JAVA_BOOLEAN.withName("cache_blocks")
+    );
+
+    private static final GroupLayout PUT_OPTIONS_LAYOUT = MemoryLayout.structLayout(
+        ValueLayout.JAVA_BYTE.withName("ttl_type"),
+        MemoryLayout.paddingLayout(7),
+        ValueLayout.JAVA_LONG.withName("ttl_value")
+    );
+
+    private static final GroupLayout WRITE_OPTIONS_LAYOUT = MemoryLayout.structLayout(
+        ValueLayout.JAVA_BOOLEAN.withName("await_durable")
+    );
+
+    private static final GroupLayout BOUND_LAYOUT = MemoryLayout.structLayout(
+        ValueLayout.JAVA_BYTE.withName("kind"),
+        MemoryLayout.paddingLayout(7),
+        ValueLayout.ADDRESS.withName("data"),
+        ValueLayout.JAVA_LONG.withName("len")
+    );
+
+    private static final GroupLayout RANGE_LAYOUT = MemoryLayout.structLayout(
+        BOUND_LAYOUT.withName("start"),
+        BOUND_LAYOUT.withName("end")
+    );
+
+    private static final GroupLayout SCAN_OPTIONS_LAYOUT = MemoryLayout.structLayout(
+        ValueLayout.JAVA_BYTE.withName("durability_filter"),
+        ValueLayout.JAVA_BOOLEAN.withName("dirty"),
+        MemoryLayout.paddingLayout(6),
+        ValueLayout.JAVA_LONG.withName("read_ahead_bytes"),
+        ValueLayout.JAVA_BOOLEAN.withName("cache_blocks"),
+        MemoryLayout.paddingLayout(7),
+        ValueLayout.JAVA_LONG.withName("max_fetch_tasks")
+    );
+
+    private static final GroupLayout READER_OPTIONS_LAYOUT = MemoryLayout.structLayout(
+        ValueLayout.JAVA_LONG.withName("manifest_poll_interval_ms"),
+        ValueLayout.JAVA_LONG.withName("checkpoint_lifetime_ms"),
+        ValueLayout.JAVA_LONG.withName("max_memtable_bytes"),
+        ValueLayout.JAVA_BOOLEAN.withName("skip_wal_replay"),
+        MemoryLayout.paddingLayout(7)
+    );
+
+    private static final VarHandle RESULT_KIND =
+        RESULT_LAYOUT.varHandle(MemoryLayout.PathElement.groupElement("kind"));
     private static final VarHandle RESULT_MESSAGE =
         RESULT_LAYOUT.varHandle(MemoryLayout.PathElement.groupElement("message"));
-    private static final VarHandle VALUE_DATA =
-        VALUE_LAYOUT.varHandle(MemoryLayout.PathElement.groupElement("data"));
-    private static final VarHandle VALUE_LEN =
-        VALUE_LAYOUT.varHandle(MemoryLayout.PathElement.groupElement("len"));
-    private static final VarHandle PUT_OPTIONS_TTL_TYPE =
-        PUT_OPTIONS_LAYOUT.varHandle(MemoryLayout.PathElement.groupElement("ttl_type"));
-    private static final VarHandle PUT_OPTIONS_TTL_VALUE =
-        PUT_OPTIONS_LAYOUT.varHandle(MemoryLayout.PathElement.groupElement("ttl_value"));
-    private static final VarHandle WRITE_OPTIONS_AWAIT_DURABLE =
-        WRITE_OPTIONS_LAYOUT.varHandle(MemoryLayout.PathElement.groupElement("await_durable"));
+
     private static final VarHandle READ_OPTIONS_DURABILITY =
         READ_OPTIONS_LAYOUT.varHandle(MemoryLayout.PathElement.groupElement("durability_filter"));
     private static final VarHandle READ_OPTIONS_DIRTY =
         READ_OPTIONS_LAYOUT.varHandle(MemoryLayout.PathElement.groupElement("dirty"));
     private static final VarHandle READ_OPTIONS_CACHE_BLOCKS =
         READ_OPTIONS_LAYOUT.varHandle(MemoryLayout.PathElement.groupElement("cache_blocks"));
+
+    private static final VarHandle PUT_OPTIONS_TTL_TYPE =
+        PUT_OPTIONS_LAYOUT.varHandle(MemoryLayout.PathElement.groupElement("ttl_type"));
+    private static final VarHandle PUT_OPTIONS_TTL_VALUE =
+        PUT_OPTIONS_LAYOUT.varHandle(MemoryLayout.PathElement.groupElement("ttl_value"));
+
+    private static final VarHandle WRITE_OPTIONS_AWAIT_DURABLE =
+        WRITE_OPTIONS_LAYOUT.varHandle(MemoryLayout.PathElement.groupElement("await_durable"));
+
+    private static final VarHandle BOUND_KIND =
+        BOUND_LAYOUT.varHandle(MemoryLayout.PathElement.groupElement("kind"));
+    private static final VarHandle BOUND_DATA =
+        BOUND_LAYOUT.varHandle(MemoryLayout.PathElement.groupElement("data"));
+    private static final VarHandle BOUND_LEN =
+        BOUND_LAYOUT.varHandle(MemoryLayout.PathElement.groupElement("len"));
+
     private static final VarHandle SCAN_OPTIONS_DURABILITY =
         SCAN_OPTIONS_LAYOUT.varHandle(MemoryLayout.PathElement.groupElement("durability_filter"));
     private static final VarHandle SCAN_OPTIONS_DIRTY =
@@ -80,6 +110,7 @@ final class Native {
         SCAN_OPTIONS_LAYOUT.varHandle(MemoryLayout.PathElement.groupElement("cache_blocks"));
     private static final VarHandle SCAN_OPTIONS_MAX_FETCH_TASKS =
         SCAN_OPTIONS_LAYOUT.varHandle(MemoryLayout.PathElement.groupElement("max_fetch_tasks"));
+
     private static final VarHandle READER_OPTIONS_MANIFEST_POLL_INTERVAL =
         READER_OPTIONS_LAYOUT.varHandle(MemoryLayout.PathElement.groupElement("manifest_poll_interval_ms"));
     private static final VarHandle READER_OPTIONS_CHECKPOINT_LIFETIME =
@@ -88,62 +119,74 @@ final class Native {
         READER_OPTIONS_LAYOUT.varHandle(MemoryLayout.PathElement.groupElement("max_memtable_bytes"));
     private static final VarHandle READER_OPTIONS_SKIP_WAL_REPLAY =
         READER_OPTIONS_LAYOUT.varHandle(MemoryLayout.PathElement.groupElement("skip_wal_replay"));
-    private static final VarHandle READER_HANDLE_PTR =
-        READER_HANDLE_LAYOUT.varHandle(MemoryLayout.PathElement.groupElement("ptr"));
-    private static final VarHandle KEY_VALUE_KEY_DATA =
-        KEY_VALUE_LAYOUT.varHandle(
-            MemoryLayout.PathElement.groupElement("key"),
-            MemoryLayout.PathElement.groupElement("data"));
-    private static final VarHandle KEY_VALUE_KEY_LEN =
-        KEY_VALUE_LAYOUT.varHandle(
-            MemoryLayout.PathElement.groupElement("key"),
-            MemoryLayout.PathElement.groupElement("len"));
-    private static final VarHandle KEY_VALUE_VALUE_DATA =
-        KEY_VALUE_LAYOUT.varHandle(
-            MemoryLayout.PathElement.groupElement("value"),
-            MemoryLayout.PathElement.groupElement("data"));
-    private static final VarHandle KEY_VALUE_VALUE_LEN =
-        KEY_VALUE_LAYOUT.varHandle(
-            MemoryLayout.PathElement.groupElement("value"),
-            MemoryLayout.PathElement.groupElement("len"));
-    private static final VarHandle HANDLE_RESULT_HANDLE_PTR =
-        HANDLE_RESULT_LAYOUT.varHandle(
-            MemoryLayout.PathElement.groupElement("handle"),
-            MemoryLayout.PathElement.groupElement("ptr"));
-    private static final VarHandle HANDLE_RESULT_ERROR =
-        HANDLE_RESULT_LAYOUT.varHandle(
-            MemoryLayout.PathElement.groupElement("result"),
-            MemoryLayout.PathElement.groupElement("error"));
-    private static final VarHandle HANDLE_RESULT_MESSAGE =
-        HANDLE_RESULT_LAYOUT.varHandle(
-            MemoryLayout.PathElement.groupElement("result"),
-            MemoryLayout.PathElement.groupElement("message"));
-    private static final VarHandle BUILDER_RESULT_BUILDER_PTR =
-        BUILDER_RESULT_LAYOUT.varHandle(MemoryLayout.PathElement.groupElement("builder"));
-    private static final VarHandle BUILDER_RESULT_ERROR =
-        BUILDER_RESULT_LAYOUT.varHandle(
-            MemoryLayout.PathElement.groupElement("result"),
-            MemoryLayout.PathElement.groupElement("error"));
-    private static final VarHandle BUILDER_RESULT_MESSAGE =
-        BUILDER_RESULT_LAYOUT.varHandle(
-            MemoryLayout.PathElement.groupElement("result"),
-            MemoryLayout.PathElement.groupElement("message"));
-    private static final VarHandle READER_HANDLE_RESULT_HANDLE_PTR =
-        READER_HANDLE_RESULT_LAYOUT.varHandle(
-            MemoryLayout.PathElement.groupElement("handle"),
-            MemoryLayout.PathElement.groupElement("ptr"));
-    private static final VarHandle READER_HANDLE_RESULT_ERROR =
-        READER_HANDLE_RESULT_LAYOUT.varHandle(
-            MemoryLayout.PathElement.groupElement("result"),
-            MemoryLayout.PathElement.groupElement("error"));
-    private static final VarHandle READER_HANDLE_RESULT_MESSAGE =
-        READER_HANDLE_RESULT_LAYOUT.varHandle(
-            MemoryLayout.PathElement.groupElement("result"),
-            MemoryLayout.PathElement.groupElement("message"));
 
-    private static final int ERROR_INVALID_ARGUMENT = 1;
+    private static final int ERROR_KIND_NONE = 0;
+    private static final int ERROR_KIND_INVALID = 4;
+
+    private static final byte BOUND_KIND_UNBOUNDED = 0;
+    private static final byte BOUND_KIND_INCLUDED = 1;
+    private static final byte BOUND_KIND_EXCLUDED = 2;
+
+    private static final byte LOG_LEVEL_ERROR = 1;
+    private static final byte LOG_LEVEL_WARN = 2;
+    private static final byte LOG_LEVEL_INFO = 3;
+    private static final byte LOG_LEVEL_DEBUG = 4;
+    private static final byte LOG_LEVEL_TRACE = 5;
+
     private static final boolean VARHANDLE_REQUIRES_OFFSET =
-        RESULT_ERROR.coordinateTypes().size() == 2;
+        RESULT_KIND.coordinateTypes().size() == 2;
+
+    private static volatile boolean initialized;
+
+    private static MethodHandle initLoggingHandle;
+    private static MethodHandle settingsDefaultHandle;
+    private static MethodHandle settingsFromFileHandle;
+    private static MethodHandle settingsFromJsonHandle;
+    private static MethodHandle settingsFromEnvHandle;
+    private static MethodHandle settingsLoadHandle;
+    private static MethodHandle settingsToJsonHandle;
+    private static MethodHandle settingsCloseHandle;
+
+    private static MethodHandle objectStoreFromUrlHandle;
+    private static MethodHandle objectStoreFromEnvHandle;
+    private static MethodHandle objectStoreCloseHandle;
+
+    private static MethodHandle openHandle;
+    private static MethodHandle deleteHandle;
+    private static MethodHandle flushHandle;
+    private static MethodHandle scanHandle;
+    private static MethodHandle scanPrefixHandle;
+    private static MethodHandle metricsHandle;
+
+    private static MethodHandle builderNewHandle;
+    private static MethodHandle builderWithSettingsHandle;
+    private static MethodHandle builderWithSstBlockSizeHandle;
+    private static MethodHandle builderBuildHandle;
+    private static MethodHandle builderFreeHandle;
+
+    private static MethodHandle readerOpenHandle;
+    private static MethodHandle readerGetHandle;
+    private static MethodHandle readerScanHandle;
+    private static MethodHandle readerScanPrefixHandle;
+    private static MethodHandle readerCloseHandle;
+
+    private static MethodHandle iteratorNextHandle;
+    private static MethodHandle iteratorSeekHandle;
+    private static MethodHandle iteratorCloseHandle;
+
+    private static MethodHandle putHandle;
+    private static MethodHandle getHandle;
+    private static MethodHandle closeHandle;
+
+    private static MethodHandle writeBatchNewHandle;
+    private static MethodHandle writeBatchPutHandle;
+    private static MethodHandle writeBatchPutWithOptionsHandle;
+    private static MethodHandle writeBatchDeleteHandle;
+    private static MethodHandle writeBatchWriteHandle;
+    private static MethodHandle writeBatchCloseHandle;
+
+    private static MethodHandle freeResultHandle;
+    private static MethodHandle freeBytesHandle;
 
     private static int getInt(VarHandle handle, MemorySegment segment) {
         return (int) (VARHANDLE_REQUIRES_OFFSET ? handle.get(segment, 0L) : handle.get(segment));
@@ -153,15 +196,11 @@ final class Native {
         return (long) (VARHANDLE_REQUIRES_OFFSET ? handle.get(segment, 0L) : handle.get(segment));
     }
 
-    private static boolean getBoolean(VarHandle handle, MemorySegment segment) {
-        return (boolean) (VARHANDLE_REQUIRES_OFFSET ? handle.get(segment, 0L) : handle.get(segment));
-    }
-
     private static MemorySegment getAddress(VarHandle handle, MemorySegment segment) {
         return (MemorySegment) (VARHANDLE_REQUIRES_OFFSET ? handle.get(segment, 0L) : handle.get(segment));
     }
 
-    private static void setInt(VarHandle handle, MemorySegment segment, int value) {
+    private static void setByte(VarHandle handle, MemorySegment segment, byte value) {
         if (VARHANDLE_REQUIRES_OFFSET) {
             handle.set(segment, 0L, value);
         } else {
@@ -193,137 +232,6 @@ final class Native {
         }
     }
 
-    private static final long HANDLE_RESULT_RESULT_OFFSET =
-        HANDLE_RESULT_LAYOUT.byteOffset(MemoryLayout.PathElement.groupElement("result"));
-    private static final long BUILDER_RESULT_RESULT_OFFSET =
-        BUILDER_RESULT_LAYOUT.byteOffset(MemoryLayout.PathElement.groupElement("result"));
-    private static final long READER_HANDLE_RESULT_OFFSET =
-        READER_HANDLE_RESULT_LAYOUT.byteOffset(MemoryLayout.PathElement.groupElement("result"));
-    private static final long KEY_VALUE_KEY_OFFSET =
-        KEY_VALUE_LAYOUT.byteOffset(MemoryLayout.PathElement.groupElement("key"));
-    private static final long KEY_VALUE_VALUE_OFFSET =
-        KEY_VALUE_LAYOUT.byteOffset(MemoryLayout.PathElement.groupElement("value"));
-
-    private static volatile boolean initialized;
-    private static MethodHandle initLoggingHandle;
-    private static MethodHandle settingsDefaultHandle;
-    private static MethodHandle settingsFromFileHandle;
-    private static MethodHandle settingsFromEnvHandle;
-    private static MethodHandle settingsLoadHandle;
-    private static MethodHandle openHandle;
-    private static MethodHandle deleteHandle;
-    private static MethodHandle flushHandle;
-    private static MethodHandle scanHandle;
-    private static MethodHandle scanPrefixHandle;
-    private static MethodHandle metricsHandle;
-    private static MethodHandle builderNewHandle;
-    private static MethodHandle builderWithSettingsHandle;
-    private static MethodHandle builderWithSstBlockSizeHandle;
-    private static MethodHandle builderBuildHandle;
-    private static MethodHandle builderFreeHandle;
-    private static MethodHandle readerOpenHandle;
-    private static MethodHandle readerGetHandle;
-    private static MethodHandle readerScanHandle;
-    private static MethodHandle readerScanPrefixHandle;
-    private static MethodHandle readerCloseHandle;
-    private static MethodHandle iteratorNextHandle;
-    private static MethodHandle iteratorSeekHandle;
-    private static MethodHandle iteratorCloseHandle;
-    private static MethodHandle putHandle;
-    private static MethodHandle getHandle;
-    private static MethodHandle closeHandle;
-    private static MethodHandle writeBatchNewHandle;
-    private static MethodHandle writeBatchPutHandle;
-    private static MethodHandle writeBatchPutWithOptionsHandle;
-    private static MethodHandle writeBatchDeleteHandle;
-    private static MethodHandle writeBatchWriteHandle;
-    private static MethodHandle writeBatchCloseHandle;
-    private static MethodHandle freeResultHandle;
-    private static MethodHandle freeValueHandle;
-    private static MethodHandle freeScanResultHandle;
-    private static MethodHandle freeCStringHandle;
-
-    private static GroupLayout createResultLayout() {
-        final List<MemoryLayout> elements = new ArrayList<>();
-        elements.add(ValueLayout.JAVA_INT.withName("error"));
-        elements.add(ValueLayout.JAVA_BOOLEAN.withName("none"));
-        final long size = ValueLayout.JAVA_INT.byteSize() + ValueLayout.JAVA_BOOLEAN.byteSize();
-        final long padding = Math.max(0, ValueLayout.ADDRESS.byteAlignment() - size);
-        if (padding != 0) {
-            elements.add(MemoryLayout.paddingLayout(padding));
-        }
-        elements.add(ValueLayout.ADDRESS.withName("message"));
-        return MemoryLayout.structLayout(elements.toArray(new MemoryLayout[0]));
-    }
-
-    private static GroupLayout createPutOptionsLayout() {
-        long offset = ValueLayout.JAVA_INT.byteSize();
-        long alignment = ValueLayout.JAVA_LONG.byteAlignment();
-        long padding = (alignment - (offset % alignment)) % alignment;
-        if (padding == 0) {
-            return MemoryLayout.structLayout(
-                ValueLayout.JAVA_INT.withName("ttl_type"),
-                ValueLayout.JAVA_LONG.withName("ttl_value")
-            );
-        }
-        return MemoryLayout.structLayout(
-            ValueLayout.JAVA_INT.withName("ttl_type"),
-            MemoryLayout.paddingLayout(padding),
-            ValueLayout.JAVA_LONG.withName("ttl_value")
-        );
-    }
-
-    private static GroupLayout createReadOptionsLayout() {
-        long size = ValueLayout.JAVA_INT.byteSize() + 2 * ValueLayout.JAVA_BOOLEAN.byteSize();
-        long alignment = ValueLayout.JAVA_INT.byteAlignment();
-        long padding = (alignment - (size % alignment)) % alignment;
-        if (padding == 0) {
-            return MemoryLayout.structLayout(
-                ValueLayout.JAVA_INT.withName("durability_filter"),
-                ValueLayout.JAVA_BOOLEAN.withName("dirty"),
-                ValueLayout.JAVA_BOOLEAN.withName("cache_blocks")
-            );
-        }
-        return MemoryLayout.structLayout(
-            ValueLayout.JAVA_INT.withName("durability_filter"),
-            ValueLayout.JAVA_BOOLEAN.withName("dirty"),
-            ValueLayout.JAVA_BOOLEAN.withName("cache_blocks"),
-            MemoryLayout.paddingLayout(padding)
-        );
-    }
-
-    private static GroupLayout createScanOptionsLayout() {
-        return MemoryLayout.structLayout(
-            ValueLayout.JAVA_INT.withName("durability_filter"),
-            ValueLayout.JAVA_BOOLEAN.withName("dirty"),
-            MemoryLayout.paddingLayout(3),
-            ValueLayout.JAVA_LONG.withName("read_ahead_bytes"),
-            ValueLayout.JAVA_BOOLEAN.withName("cache_blocks"),
-            MemoryLayout.paddingLayout(7),
-            ValueLayout.JAVA_LONG.withName("max_fetch_tasks")
-        );
-    }
-
-    private static GroupLayout createReaderOptionsLayout() {
-        return MemoryLayout.structLayout(
-            ValueLayout.JAVA_LONG.withName("manifest_poll_interval_ms"),
-            ValueLayout.JAVA_LONG.withName("checkpoint_lifetime_ms"),
-            ValueLayout.JAVA_LONG.withName("max_memtable_bytes"),
-            ValueLayout.JAVA_BOOLEAN.withName("skip_wal_replay"),
-            MemoryLayout.paddingLayout(7)
-        );
-    }
-
-    private static GroupLayout createScanResultLayout() {
-        return MemoryLayout.structLayout(
-            ValueLayout.ADDRESS.withName("items"),
-            ValueLayout.JAVA_LONG.withName("count"),
-            ValueLayout.JAVA_BOOLEAN.withName("has_more"),
-            MemoryLayout.paddingLayout(7),
-            VALUE_LAYOUT.withName("next_key")
-        );
-    }
-
     static void loadLibrary() {
         System.loadLibrary("slatedb_c");
         initHandles();
@@ -338,9 +246,11 @@ final class Native {
     static void initLogging(String level) {
         ensureInitialized();
         try (Arena arena = Arena.ofConfined()) {
-            MemorySegment levelSegment = toCString(arena, level);
+            byte nativeLevel = toNativeLogLevel(level);
             MemorySegment result = (MemorySegment) initLoggingHandle.invokeExact(
-                (SegmentAllocator) arena, levelSegment);
+                (SegmentAllocator) arena,
+                nativeLevel
+            );
             checkResult(result);
         } catch (Throwable t) {
             throw wrap(t);
@@ -349,9 +259,18 @@ final class Native {
 
     static String settingsDefault() {
         ensureInitialized();
-        try {
-            MemorySegment cstr = (MemorySegment) settingsDefaultHandle.invokeExact();
-            return readCStringAndFree(cstr, "Failed to load default settings");
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment settingsOut = arena.allocate(ValueLayout.ADDRESS);
+            MemorySegment result = (MemorySegment) settingsDefaultHandle.invokeExact(
+                (SegmentAllocator) arena,
+                settingsOut
+            );
+            checkResult(result);
+            MemorySegment settings = settingsOut.get(ValueLayout.ADDRESS, 0);
+            if (isNull(settings)) {
+                throw new IllegalStateException("slatedb_settings_default returned a null settings handle");
+            }
+            return settingsToJsonAndClose(settings);
         } catch (Throwable t) {
             throw wrap(t);
         }
@@ -362,8 +281,18 @@ final class Native {
         ensureInitialized();
         try (Arena arena = Arena.ofConfined()) {
             MemorySegment pathSegment = toCString(arena, path);
-            MemorySegment cstr = (MemorySegment) settingsFromFileHandle.invokeExact(pathSegment);
-            return readCStringAndFree(cstr, "Failed to load settings from file: " + path);
+            MemorySegment settingsOut = arena.allocate(ValueLayout.ADDRESS);
+            MemorySegment result = (MemorySegment) settingsFromFileHandle.invokeExact(
+                (SegmentAllocator) arena,
+                pathSegment,
+                settingsOut
+            );
+            checkResult(result);
+            MemorySegment settings = settingsOut.get(ValueLayout.ADDRESS, 0);
+            if (isNull(settings)) {
+                throw new IllegalStateException("slatedb_settings_from_file returned a null settings handle");
+            }
+            return settingsToJsonAndClose(settings);
         } catch (Throwable t) {
             throw wrap(t);
         }
@@ -374,8 +303,18 @@ final class Native {
         ensureInitialized();
         try (Arena arena = Arena.ofConfined()) {
             MemorySegment prefixSegment = toCString(arena, prefix);
-            MemorySegment cstr = (MemorySegment) settingsFromEnvHandle.invokeExact(prefixSegment);
-            return readCStringAndFree(cstr, "Failed to load settings from env with prefix: " + prefix);
+            MemorySegment settingsOut = arena.allocate(ValueLayout.ADDRESS);
+            MemorySegment result = (MemorySegment) settingsFromEnvHandle.invokeExact(
+                (SegmentAllocator) arena,
+                prefixSegment,
+                settingsOut
+            );
+            checkResult(result);
+            MemorySegment settings = settingsOut.get(ValueLayout.ADDRESS, 0);
+            if (isNull(settings)) {
+                throw new IllegalStateException("slatedb_settings_from_env returned a null settings handle");
+            }
+            return settingsToJsonAndClose(settings);
         } catch (Throwable t) {
             throw wrap(t);
         }
@@ -383,87 +322,127 @@ final class Native {
 
     static String settingsLoad() {
         ensureInitialized();
-        try {
-            MemorySegment cstr = (MemorySegment) settingsLoadHandle.invokeExact();
-            return readCStringAndFree(cstr, "Failed to load settings");
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment settingsOut = arena.allocate(ValueLayout.ADDRESS);
+            MemorySegment result = (MemorySegment) settingsLoadHandle.invokeExact(
+                (SegmentAllocator) arena,
+                settingsOut
+            );
+            checkResult(result);
+            MemorySegment settings = settingsOut.get(ValueLayout.ADDRESS, 0);
+            if (isNull(settings)) {
+                throw new IllegalStateException("slatedb_settings_load returned a null settings handle");
+            }
+            return settingsToJsonAndClose(settings);
         } catch (Throwable t) {
             throw wrap(t);
         }
     }
 
     static MemorySegment open(String path, String url, String envFile) {
+        Objects.requireNonNull(path, "path");
         ensureInitialized();
-        try (Arena arena = Arena.ofConfined()) {
-            MemorySegment pathSegment = toCString(arena, path);
-            MemorySegment urlSegment = toCString(arena, url);
-            MemorySegment envSegment = toCString(arena, envFile);
-            MemorySegment handleResult =
-                (MemorySegment) openHandle.invokeExact((SegmentAllocator) arena, pathSegment, urlSegment, envSegment);
-            int error = (int) getInt(HANDLE_RESULT_ERROR, handleResult);
-            MemorySegment messageSegment = (MemorySegment) getAddress(HANDLE_RESULT_MESSAGE, handleResult);
-            String message = readMessage(messageSegment);
-            MemorySegment resultSlice = handleResult.asSlice(HANDLE_RESULT_RESULT_OFFSET, RESULT_LAYOUT.byteSize());
-            RuntimeException failure = (error == 0) ? null : new SlateDbException(error, message);
-            freeResult(resultSlice, failure);
-            if (failure != null) {
-                throw failure;
+
+        MemorySegment objectStore = MemorySegment.NULL;
+        RuntimeException pending = null;
+        try {
+            objectStore = resolveObjectStore(url, envFile);
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment pathSegment = toCString(arena, path);
+                MemorySegment dbOut = arena.allocate(ValueLayout.ADDRESS);
+                MemorySegment result = (MemorySegment) openHandle.invokeExact(
+                    (SegmentAllocator) arena,
+                    pathSegment,
+                    objectStore,
+                    dbOut
+                );
+                checkResult(result);
+                MemorySegment db = dbOut.get(ValueLayout.ADDRESS, 0);
+                if (isNull(db)) {
+                    throw new SlateDbException(-1, "SlateDB returned a null db handle");
+                }
+                return db;
             }
-            MemorySegment handlePtr = (MemorySegment) getAddress(HANDLE_RESULT_HANDLE_PTR, handleResult);
-            if (handlePtr == null || handlePtr.equals(MemorySegment.NULL)) {
-                throw new SlateDbException(-1, "SlateDB returned a null handle");
-            }
-            return handlePtr;
+        } catch (RuntimeException e) {
+            pending = e;
+            throw e;
         } catch (Throwable t) {
-            throw wrap(t);
+            pending = wrap(t);
+            throw pending;
+        } finally {
+            closeObjectStore(objectStore, pending);
         }
     }
 
     static MemorySegment newBuilder(String path, String url, String envFile) {
         Objects.requireNonNull(path, "path");
         ensureInitialized();
-        try (Arena arena = Arena.ofConfined()) {
-            MemorySegment pathSegment = toCString(arena, path);
-            MemorySegment urlSegment = toCString(arena, url);
-            MemorySegment envSegment = toCString(arena, envFile);
-            MemorySegment builderResult = (MemorySegment) builderNewHandle.invokeExact(
-                (SegmentAllocator) arena,
-                pathSegment,
-                urlSegment,
-                envSegment
-            );
-            int error = (int) getInt(BUILDER_RESULT_ERROR, builderResult);
-            MemorySegment messageSegment = (MemorySegment) getAddress(BUILDER_RESULT_MESSAGE, builderResult);
-            String message = readMessage(messageSegment);
-            RuntimeException failure = (error == 0) ? null : new SlateDbException(error, message);
-            MemorySegment resultSlice =
-                builderResult.asSlice(BUILDER_RESULT_RESULT_OFFSET, RESULT_LAYOUT.byteSize());
-            freeResult(resultSlice, failure);
-            if (failure != null) {
-                throw failure;
+
+        MemorySegment objectStore = MemorySegment.NULL;
+        RuntimeException pending = null;
+        try {
+            objectStore = resolveObjectStore(url, envFile);
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment pathSegment = toCString(arena, path);
+                MemorySegment builderOut = arena.allocate(ValueLayout.ADDRESS);
+                MemorySegment result = (MemorySegment) builderNewHandle.invokeExact(
+                    (SegmentAllocator) arena,
+                    pathSegment,
+                    objectStore,
+                    builderOut
+                );
+                checkResult(result);
+                MemorySegment builder = builderOut.get(ValueLayout.ADDRESS, 0);
+                if (isNull(builder)) {
+                    throw new SlateDbException(-1, "SlateDB returned a null builder");
+                }
+                return builder;
             }
-            MemorySegment builderPtr = (MemorySegment) getAddress(BUILDER_RESULT_BUILDER_PTR, builderResult);
-            if (builderPtr == null || builderPtr.equals(MemorySegment.NULL)) {
-                throw new SlateDbException(-1, "SlateDB returned a null builder");
-            }
-            return builderPtr;
+        } catch (RuntimeException e) {
+            pending = e;
+            throw e;
         } catch (Throwable t) {
-            throw wrap(t);
+            pending = wrap(t);
+            throw pending;
+        } finally {
+            closeObjectStore(objectStore, pending);
         }
     }
 
     static void builderWithSettings(MemorySegment builderPtr, String settingsJson) {
         Objects.requireNonNull(settingsJson, "settingsJson");
         ensureInitialized();
+
+        MemorySegment settings = MemorySegment.NULL;
+        RuntimeException pending = null;
         try (Arena arena = Arena.ofConfined()) {
             MemorySegment settingsSegment = toCString(arena, settingsJson);
+            MemorySegment settingsOut = arena.allocate(ValueLayout.ADDRESS);
+            MemorySegment parseResult = (MemorySegment) settingsFromJsonHandle.invokeExact(
+                (SegmentAllocator) arena,
+                settingsSegment,
+                settingsOut
+            );
+            checkResultAllowInvalidArgument(parseResult, "Invalid settings json");
+            settings = settingsOut.get(ValueLayout.ADDRESS, 0);
+            if (isNull(settings)) {
+                throw new IllegalStateException("slatedb_settings_from_json returned a null settings handle");
+            }
+
             MemorySegment result = (MemorySegment) builderWithSettingsHandle.invokeExact(
                 (SegmentAllocator) arena,
                 builderPtr,
-                settingsSegment
+                settings
             );
-            checkResultAllowInvalidArgument(result, "Invalid settings JSON");
+            checkResultAllowInvalidArgument(result, "Invalid settings json");
+        } catch (RuntimeException e) {
+            pending = e;
+            throw e;
         } catch (Throwable t) {
-            throw wrap(t);
+            pending = wrap(t);
+            throw pending;
+        } finally {
+            closeSettings(settings, pending);
         }
     }
 
@@ -485,35 +464,34 @@ final class Native {
     static MemorySegment builderBuild(MemorySegment builderPtr) {
         ensureInitialized();
         try (Arena arena = Arena.ofConfined()) {
-            MemorySegment handleResult =
-                (MemorySegment) builderBuildHandle.invokeExact((SegmentAllocator) arena, builderPtr);
-            int error = (int) getInt(HANDLE_RESULT_ERROR, handleResult);
-            MemorySegment messageSegment = (MemorySegment) getAddress(HANDLE_RESULT_MESSAGE, handleResult);
-            String message = readMessage(messageSegment);
-            MemorySegment resultSlice =
-                handleResult.asSlice(HANDLE_RESULT_RESULT_OFFSET, RESULT_LAYOUT.byteSize());
-            RuntimeException failure = (error == 0) ? null : new SlateDbException(error, message);
-            freeResult(resultSlice, failure);
-            if (failure != null) {
-                throw failure;
+            MemorySegment dbOut = arena.allocate(ValueLayout.ADDRESS);
+            MemorySegment result = (MemorySegment) builderBuildHandle.invokeExact(
+                (SegmentAllocator) arena,
+                builderPtr,
+                dbOut
+            );
+            checkResult(result);
+            MemorySegment db = dbOut.get(ValueLayout.ADDRESS, 0);
+            if (isNull(db)) {
+                throw new SlateDbException(-1, "SlateDB builder returned a null db handle");
             }
-            MemorySegment handlePtr = (MemorySegment) getAddress(HANDLE_RESULT_HANDLE_PTR, handleResult);
-            if (handlePtr == null || handlePtr.equals(MemorySegment.NULL)) {
-                throw new SlateDbException(-1, "SlateDB builder returned a null handle");
-            }
-            return handlePtr;
+            return db;
         } catch (Throwable t) {
             throw wrap(t);
         }
     }
 
     static void builderFree(MemorySegment builderPtr) {
-        if (builderPtr == null || builderPtr.equals(MemorySegment.NULL)) {
+        if (isNull(builderPtr)) {
             return;
         }
         ensureInitialized();
-        try {
-            builderFreeHandle.invokeExact(builderPtr);
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment result = (MemorySegment) builderFreeHandle.invokeExact(
+                (SegmentAllocator) arena,
+                builderPtr
+            );
+            checkResult(result);
         } catch (Throwable t) {
             throw wrap(t);
         }
@@ -528,37 +506,39 @@ final class Native {
     ) {
         Objects.requireNonNull(path, "path");
         ensureInitialized();
-        try (Arena arena = Arena.ofConfined()) {
-            MemorySegment pathSegment = toCString(arena, path);
-            MemorySegment urlSegment = toCString(arena, url);
-            MemorySegment envSegment = toCString(arena, envFile);
-            MemorySegment checkpointSegment = toCString(arena, checkpointId);
-            MemorySegment optionsSegment = toReaderOptions(arena, options);
-            MemorySegment handleResult = (MemorySegment) readerOpenHandle.invokeExact(
-                (SegmentAllocator) arena,
-                pathSegment,
-                urlSegment,
-                envSegment,
-                checkpointSegment,
-                optionsSegment
-            );
-            int error = (int) getInt(READER_HANDLE_RESULT_ERROR, handleResult);
-            MemorySegment messageSegment = (MemorySegment) getAddress(READER_HANDLE_RESULT_MESSAGE, handleResult);
-            String message = readMessage(messageSegment);
-            MemorySegment resultSlice =
-                handleResult.asSlice(READER_HANDLE_RESULT_OFFSET, RESULT_LAYOUT.byteSize());
-            RuntimeException failure = (error == 0) ? null : new SlateDbException(error, message);
-            freeResult(resultSlice, failure);
-            if (failure != null) {
-                throw failure;
+
+        MemorySegment objectStore = MemorySegment.NULL;
+        RuntimeException pending = null;
+        try {
+            objectStore = resolveObjectStore(url, envFile);
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment pathSegment = toCString(arena, path);
+                MemorySegment checkpointSegment = toCString(arena, checkpointId);
+                MemorySegment optionsSegment = toReaderOptions(arena, options);
+                MemorySegment readerOut = arena.allocate(ValueLayout.ADDRESS);
+                MemorySegment result = (MemorySegment) readerOpenHandle.invokeExact(
+                    (SegmentAllocator) arena,
+                    pathSegment,
+                    objectStore,
+                    checkpointSegment,
+                    optionsSegment,
+                    readerOut
+                );
+                checkResult(result);
+                MemorySegment reader = readerOut.get(ValueLayout.ADDRESS, 0);
+                if (isNull(reader)) {
+                    throw new SlateDbException(-1, "SlateDB returned a null reader handle");
+                }
+                return reader;
             }
-            MemorySegment handlePtr = (MemorySegment) getAddress(READER_HANDLE_RESULT_HANDLE_PTR, handleResult);
-            if (handlePtr == null || handlePtr.equals(MemorySegment.NULL)) {
-                throw new SlateDbException(-1, "SlateDB returned a null reader handle");
-            }
-            return handlePtr;
+        } catch (RuntimeException e) {
+            pending = e;
+            throw e;
         } catch (Throwable t) {
-            throw wrap(t);
+            pending = wrap(t);
+            throw pending;
+        } finally {
+            closeObjectStore(objectStore, pending);
         }
     }
 
@@ -566,11 +546,13 @@ final class Native {
         ensureInitialized();
         try (Arena arena = Arena.ofConfined()) {
             MemorySegment batchOut = arena.allocate(ValueLayout.ADDRESS);
-            MemorySegment result =
-                (MemorySegment) writeBatchNewHandle.invokeExact((SegmentAllocator) arena, batchOut);
+            MemorySegment result = (MemorySegment) writeBatchNewHandle.invokeExact(
+                (SegmentAllocator) arena,
+                batchOut
+            );
             checkResult(result);
             MemorySegment batchPtr = batchOut.get(ValueLayout.ADDRESS, 0);
-            if (batchPtr == null || batchPtr.equals(MemorySegment.NULL)) {
+            if (isNull(batchPtr)) {
                 throw new SlateDbException(-1, "SlateDB returned a null SlateDbWriteBatch");
             }
             return batchPtr;
@@ -580,14 +562,12 @@ final class Native {
     }
 
     static void close(MemorySegment handlePtr) {
-        if (handlePtr == null || handlePtr.equals(MemorySegment.NULL)) {
+        if (isNull(handlePtr)) {
             return;
         }
         ensureInitialized();
         try (Arena arena = Arena.ofConfined()) {
-            MemorySegment handleStruct = arena.allocate(HANDLE_LAYOUT);
-            setAddress(HANDLE_PTR, handleStruct, handlePtr);
-            MemorySegment result = (MemorySegment) closeHandle.invokeExact((SegmentAllocator) arena, handleStruct);
+            MemorySegment result = (MemorySegment) closeHandle.invokeExact((SegmentAllocator) arena, handlePtr);
             checkResult(result);
         } catch (Throwable t) {
             throw wrap(t);
@@ -598,13 +578,11 @@ final class Native {
         Objects.requireNonNull(key, "key");
         ensureInitialized();
         try (Arena arena = Arena.ofConfined()) {
-            MemorySegment handleStruct = arena.allocate(HANDLE_LAYOUT);
-            setAddress(HANDLE_PTR, handleStruct, handlePtr);
             MemorySegment keySegment = toByteArray(arena, key);
             MemorySegment optionsSegment = toWriteOptions(arena, options);
             MemorySegment result = (MemorySegment) deleteHandle.invokeExact(
                 (SegmentAllocator) arena,
-                handleStruct,
+                handlePtr,
                 keySegment,
                 (long) key.length,
                 optionsSegment
@@ -618,9 +596,7 @@ final class Native {
     static void flush(MemorySegment handlePtr) {
         ensureInitialized();
         try (Arena arena = Arena.ofConfined()) {
-            MemorySegment handleStruct = arena.allocate(HANDLE_LAYOUT);
-            setAddress(HANDLE_PTR, handleStruct, handlePtr);
-            MemorySegment result = (MemorySegment) flushHandle.invokeExact((SegmentAllocator) arena, handleStruct);
+            MemorySegment result = (MemorySegment) flushHandle.invokeExact((SegmentAllocator) arena, handlePtr);
             checkResult(result);
         } catch (Throwable t) {
             throw wrap(t);
@@ -635,25 +611,19 @@ final class Native {
     ) {
         ensureInitialized();
         try (Arena arena = Arena.ofConfined()) {
-            MemorySegment handleStruct = arena.allocate(HANDLE_LAYOUT);
-            setAddress(HANDLE_PTR, handleStruct, handlePtr);
-            MemorySegment startKeySegment = startKey == null ? MemorySegment.NULL : toByteArray(arena, startKey);
-            MemorySegment endKeySegment = endKey == null ? MemorySegment.NULL : toByteArray(arena, endKey);
+            MemorySegment rangeSegment = toRange(arena, startKey, endKey);
             MemorySegment optionsSegment = toScanOptions(arena, options);
             MemorySegment iteratorOut = arena.allocate(ValueLayout.ADDRESS);
             MemorySegment result = (MemorySegment) scanHandle.invokeExact(
                 (SegmentAllocator) arena,
-                handleStruct,
-                startKeySegment,
-                startKey == null ? 0L : (long) startKey.length,
-                endKeySegment,
-                endKey == null ? 0L : (long) endKey.length,
+                handlePtr,
+                rangeSegment,
                 optionsSegment,
                 iteratorOut
             );
             checkResult(result);
             MemorySegment iterPtr = iteratorOut.get(ValueLayout.ADDRESS, 0);
-            if (iterPtr == null || iterPtr.equals(MemorySegment.NULL)) {
+            if (isNull(iterPtr)) {
                 throw new SlateDbException(-1, "SlateDB returned a null iterator");
             }
             return iterPtr;
@@ -669,14 +639,12 @@ final class Native {
     ) {
         ensureInitialized();
         try (Arena arena = Arena.ofConfined()) {
-            MemorySegment handleStruct = arena.allocate(HANDLE_LAYOUT);
-            setAddress(HANDLE_PTR, handleStruct, handlePtr);
             MemorySegment prefixSegment = prefix == null ? MemorySegment.NULL : toByteArray(arena, prefix);
             MemorySegment optionsSegment = toScanOptions(arena, options);
             MemorySegment iteratorOut = arena.allocate(ValueLayout.ADDRESS);
             MemorySegment result = (MemorySegment) scanPrefixHandle.invokeExact(
                 (SegmentAllocator) arena,
-                handleStruct,
+                handlePtr,
                 prefixSegment,
                 prefix == null ? 0L : (long) prefix.length,
                 optionsSegment,
@@ -684,7 +652,7 @@ final class Native {
             );
             checkResult(result);
             MemorySegment iterPtr = iteratorOut.get(ValueLayout.ADDRESS, 0);
-            if (iterPtr == null || iterPtr.equals(MemorySegment.NULL)) {
+            if (isNull(iterPtr)) {
                 throw new SlateDbException(-1, "SlateDB returned a null iterator");
             }
             return iterPtr;
@@ -696,16 +664,18 @@ final class Native {
     static String metrics(MemorySegment handlePtr) {
         ensureInitialized();
         try (Arena arena = Arena.ofConfined()) {
-            MemorySegment handleStruct = arena.allocate(HANDLE_LAYOUT);
-            setAddress(HANDLE_PTR, handleStruct, handlePtr);
-            MemorySegment valueOut = arena.allocate(VALUE_LAYOUT);
+            MemorySegment valueOut = arena.allocate(ValueLayout.ADDRESS);
+            MemorySegment lenOut = arena.allocate(ValueLayout.JAVA_LONG);
             MemorySegment result = (MemorySegment) metricsHandle.invokeExact(
                 (SegmentAllocator) arena,
-                handleStruct,
-                valueOut
+                handlePtr,
+                valueOut,
+                lenOut
             );
             checkResult(result);
-            byte[] bytes = copyValue(valueOut, null);
+            MemorySegment data = valueOut.get(ValueLayout.ADDRESS, 0);
+            long len = lenOut.get(ValueLayout.JAVA_LONG, 0);
+            byte[] bytes = copyOwnedBytes(data, len, null);
             return new String(bytes, StandardCharsets.UTF_8);
         } catch (Throwable t) {
             throw wrap(t);
@@ -716,24 +686,30 @@ final class Native {
         Objects.requireNonNull(key, "key");
         ensureInitialized();
         try (Arena arena = Arena.ofConfined()) {
-            MemorySegment handleStruct = arena.allocate(HANDLE_LAYOUT);
-            setAddress(HANDLE_PTR, handleStruct, handlePtr);
             MemorySegment keySegment = toByteArray(arena, key);
             MemorySegment optionsSegment = toReadOptions(arena, options);
-            MemorySegment valueOut = arena.allocate(VALUE_LAYOUT);
+            MemorySegment presentOut = arena.allocate(ValueLayout.JAVA_BOOLEAN);
+            MemorySegment valueOut = arena.allocate(ValueLayout.ADDRESS);
+            MemorySegment valueLenOut = arena.allocate(ValueLayout.JAVA_LONG);
             MemorySegment result = (MemorySegment) getHandle.invokeExact(
                 (SegmentAllocator) arena,
-                handleStruct,
+                handlePtr,
                 keySegment,
                 (long) key.length,
                 optionsSegment,
-                valueOut
+                presentOut,
+                valueOut,
+                valueLenOut
             );
             checkResult(result);
-            if (getBoolean(RESULT_NONE, result)) {
+            if (!presentOut.get(ValueLayout.JAVA_BOOLEAN, 0)) {
                 return null;
             }
-            return copyValue(valueOut, null);
+            return copyOwnedBytes(
+                valueOut.get(ValueLayout.ADDRESS, 0),
+                valueLenOut.get(ValueLayout.JAVA_LONG, 0),
+                null
+            );
         } catch (Throwable t) {
             throw wrap(t);
         }
@@ -750,15 +726,13 @@ final class Native {
         Objects.requireNonNull(value, "value");
         ensureInitialized();
         try (Arena arena = Arena.ofConfined()) {
-            MemorySegment handleStruct = arena.allocate(HANDLE_LAYOUT);
-            setAddress(HANDLE_PTR, handleStruct, handlePtr);
             MemorySegment keySegment = toByteArray(arena, key);
             MemorySegment valueSegment = toByteArray(arena, value);
             MemorySegment putOptionsSegment = toPutOptions(arena, putOptions);
             MemorySegment writeOptionsSegment = toWriteOptions(arena, writeOptions);
             MemorySegment result = (MemorySegment) putHandle.invokeExact(
                 (SegmentAllocator) arena,
-                handleStruct,
+                handlePtr,
                 keySegment,
                 (long) key.length,
                 valueSegment,
@@ -776,24 +750,30 @@ final class Native {
         Objects.requireNonNull(key, "key");
         ensureInitialized();
         try (Arena arena = Arena.ofConfined()) {
-            MemorySegment handleStruct = arena.allocate(READER_HANDLE_LAYOUT);
-            setAddress(READER_HANDLE_PTR, handleStruct, readerHandle);
             MemorySegment keySegment = toByteArray(arena, key);
             MemorySegment optionsSegment = toReadOptions(arena, options);
-            MemorySegment valueOut = arena.allocate(VALUE_LAYOUT);
+            MemorySegment presentOut = arena.allocate(ValueLayout.JAVA_BOOLEAN);
+            MemorySegment valueOut = arena.allocate(ValueLayout.ADDRESS);
+            MemorySegment valueLenOut = arena.allocate(ValueLayout.JAVA_LONG);
             MemorySegment result = (MemorySegment) readerGetHandle.invokeExact(
                 (SegmentAllocator) arena,
-                handleStruct,
+                readerHandle,
                 keySegment,
                 (long) key.length,
                 optionsSegment,
-                valueOut
+                presentOut,
+                valueOut,
+                valueLenOut
             );
             checkResult(result);
-            if (getBoolean(RESULT_NONE, result)) {
+            if (!presentOut.get(ValueLayout.JAVA_BOOLEAN, 0)) {
                 return null;
             }
-            return copyValue(valueOut, null);
+            return copyOwnedBytes(
+                valueOut.get(ValueLayout.ADDRESS, 0),
+                valueLenOut.get(ValueLayout.JAVA_LONG, 0),
+                null
+            );
         } catch (Throwable t) {
             throw wrap(t);
         }
@@ -807,25 +787,19 @@ final class Native {
     ) {
         ensureInitialized();
         try (Arena arena = Arena.ofConfined()) {
-            MemorySegment handleStruct = arena.allocate(READER_HANDLE_LAYOUT);
-            setAddress(READER_HANDLE_PTR, handleStruct, readerHandle);
-            MemorySegment startKeySegment = startKey == null ? MemorySegment.NULL : toByteArray(arena, startKey);
-            MemorySegment endKeySegment = endKey == null ? MemorySegment.NULL : toByteArray(arena, endKey);
+            MemorySegment rangeSegment = toRange(arena, startKey, endKey);
             MemorySegment optionsSegment = toScanOptions(arena, options);
             MemorySegment iteratorOut = arena.allocate(ValueLayout.ADDRESS);
             MemorySegment result = (MemorySegment) readerScanHandle.invokeExact(
                 (SegmentAllocator) arena,
-                handleStruct,
-                startKeySegment,
-                startKey == null ? 0L : (long) startKey.length,
-                endKeySegment,
-                endKey == null ? 0L : (long) endKey.length,
+                readerHandle,
+                rangeSegment,
                 optionsSegment,
                 iteratorOut
             );
             checkResult(result);
             MemorySegment iterPtr = iteratorOut.get(ValueLayout.ADDRESS, 0);
-            if (iterPtr == null || iterPtr.equals(MemorySegment.NULL)) {
+            if (isNull(iterPtr)) {
                 throw new SlateDbException(-1, "SlateDB returned a null iterator");
             }
             return iterPtr;
@@ -841,14 +815,12 @@ final class Native {
     ) {
         ensureInitialized();
         try (Arena arena = Arena.ofConfined()) {
-            MemorySegment handleStruct = arena.allocate(READER_HANDLE_LAYOUT);
-            setAddress(READER_HANDLE_PTR, handleStruct, readerHandle);
             MemorySegment prefixSegment = prefix == null ? MemorySegment.NULL : toByteArray(arena, prefix);
             MemorySegment optionsSegment = toScanOptions(arena, options);
             MemorySegment iteratorOut = arena.allocate(ValueLayout.ADDRESS);
             MemorySegment result = (MemorySegment) readerScanPrefixHandle.invokeExact(
                 (SegmentAllocator) arena,
-                handleStruct,
+                readerHandle,
                 prefixSegment,
                 prefix == null ? 0L : (long) prefix.length,
                 optionsSegment,
@@ -856,7 +828,7 @@ final class Native {
             );
             checkResult(result);
             MemorySegment iterPtr = iteratorOut.get(ValueLayout.ADDRESS, 0);
-            if (iterPtr == null || iterPtr.equals(MemorySegment.NULL)) {
+            if (isNull(iterPtr)) {
                 throw new SlateDbException(-1, "SlateDB returned a null iterator");
             }
             return iterPtr;
@@ -866,15 +838,15 @@ final class Native {
     }
 
     static void readerClose(MemorySegment readerHandle) {
-        if (readerHandle == null || readerHandle.equals(MemorySegment.NULL)) {
+        if (isNull(readerHandle)) {
             return;
         }
         ensureInitialized();
         try (Arena arena = Arena.ofConfined()) {
-            MemorySegment handleStruct = arena.allocate(READER_HANDLE_LAYOUT);
-            setAddress(READER_HANDLE_PTR, handleStruct, readerHandle);
-            MemorySegment result =
-                (MemorySegment) readerCloseHandle.invokeExact((SegmentAllocator) arena, handleStruct);
+            MemorySegment result = (MemorySegment) readerCloseHandle.invokeExact(
+                (SegmentAllocator) arena,
+                readerHandle
+            );
             checkResult(result);
         } catch (Throwable t) {
             throw wrap(t);
@@ -884,17 +856,54 @@ final class Native {
     static SlateDbKeyValue iteratorNext(MemorySegment iterPtr) {
         ensureInitialized();
         try (Arena arena = Arena.ofConfined()) {
-            MemorySegment kvOut = arena.allocate(KEY_VALUE_LAYOUT);
+            MemorySegment presentOut = arena.allocate(ValueLayout.JAVA_BOOLEAN);
+            MemorySegment keyOut = arena.allocate(ValueLayout.ADDRESS);
+            MemorySegment keyLenOut = arena.allocate(ValueLayout.JAVA_LONG);
+            MemorySegment valueOut = arena.allocate(ValueLayout.ADDRESS);
+            MemorySegment valueLenOut = arena.allocate(ValueLayout.JAVA_LONG);
             MemorySegment result = (MemorySegment) iteratorNextHandle.invokeExact(
                 (SegmentAllocator) arena,
                 iterPtr,
-                kvOut
+                presentOut,
+                keyOut,
+                keyLenOut,
+                valueOut,
+                valueLenOut
             );
             checkResult(result);
-            if (getBoolean(RESULT_NONE, result)) {
+            if (!presentOut.get(ValueLayout.JAVA_BOOLEAN, 0)) {
                 return null;
             }
-            return copyKeyValuePair(kvOut);
+
+            MemorySegment keyPtr = keyOut.get(ValueLayout.ADDRESS, 0);
+            long keyLen = keyLenOut.get(ValueLayout.JAVA_LONG, 0);
+            MemorySegment valuePtr = valueOut.get(ValueLayout.ADDRESS, 0);
+            long valueLen = valueLenOut.get(ValueLayout.JAVA_LONG, 0);
+
+            RuntimeException failure = null;
+            byte[] key = null;
+            try {
+                key = copyOwnedBytes(keyPtr, keyLen, null);
+            } catch (RuntimeException e) {
+                failure = e;
+            }
+
+            byte[] value = null;
+            try {
+                value = copyOwnedBytes(valuePtr, valueLen, failure);
+            } catch (RuntimeException e) {
+                if (failure != null) {
+                    failure.addSuppressed(e);
+                    throw failure;
+                }
+                throw e;
+            }
+
+            if (failure != null) {
+                throw failure;
+            }
+
+            return new SlateDbKeyValue(key, value);
         } catch (Throwable t) {
             throw wrap(t);
         }
@@ -918,23 +927,16 @@ final class Native {
     }
 
     static void iteratorClose(MemorySegment iterPtr) {
-        if (iterPtr == null || iterPtr.equals(MemorySegment.NULL)) {
+        if (isNull(iterPtr)) {
             return;
         }
         ensureInitialized();
         try (Arena arena = Arena.ofConfined()) {
-            MemorySegment result =
-                (MemorySegment) iteratorCloseHandle.invokeExact((SegmentAllocator) arena, iterPtr);
+            MemorySegment result = (MemorySegment) iteratorCloseHandle.invokeExact(
+                (SegmentAllocator) arena,
+                iterPtr
+            );
             checkResult(result);
-        } catch (Throwable t) {
-            throw wrap(t);
-        }
-    }
-
-    static void freeScanResult(MemorySegment scanResult) {
-        ensureInitialized();
-        try {
-            freeScanResultHandle.invokeExact(scanResult);
         } catch (Throwable t) {
             throw wrap(t);
         }
@@ -1004,12 +1006,10 @@ final class Native {
     static void writeBatchWrite(MemorySegment handlePtr, MemorySegment batchPtr, WriteOptions options) {
         ensureInitialized();
         try (Arena arena = Arena.ofConfined()) {
-            MemorySegment handleStruct = arena.allocate(HANDLE_LAYOUT);
-            setAddress(HANDLE_PTR, handleStruct, handlePtr);
             MemorySegment optionsSegment = toWriteOptions(arena, options);
             MemorySegment result = (MemorySegment) writeBatchWriteHandle.invokeExact(
                 (SegmentAllocator) arena,
-                handleStruct,
+                handlePtr,
                 batchPtr,
                 optionsSegment
             );
@@ -1020,7 +1020,7 @@ final class Native {
     }
 
     static void writeBatchClose(MemorySegment batchPtr) {
-        if (batchPtr == null || batchPtr.equals(MemorySegment.NULL)) {
+        if (isNull(batchPtr)) {
             return;
         }
         ensureInitialized();
@@ -1054,122 +1054,140 @@ final class Native {
             if (initialized) {
                 return;
             }
+
             SymbolLookup lookup = SymbolLookup.loaderLookup().or(LINKER.defaultLookup());
-            initLoggingHandle = downcall(lookup, "slatedb_init_logging",
-                FunctionDescriptor.of(RESULT_LAYOUT, ValueLayout.ADDRESS));
+
+            initLoggingHandle = downcall(lookup, "slatedb_logging_init",
+                FunctionDescriptor.of(RESULT_LAYOUT, ValueLayout.JAVA_BYTE));
+
             settingsDefaultHandle = downcall(lookup, "slatedb_settings_default",
-                FunctionDescriptor.of(ValueLayout.ADDRESS));
+                FunctionDescriptor.of(RESULT_LAYOUT, ValueLayout.ADDRESS));
             settingsFromFileHandle = downcall(lookup, "slatedb_settings_from_file",
-                FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS));
+                FunctionDescriptor.of(RESULT_LAYOUT, ValueLayout.ADDRESS, ValueLayout.ADDRESS));
+            settingsFromJsonHandle = downcall(lookup, "slatedb_settings_from_json",
+                FunctionDescriptor.of(RESULT_LAYOUT, ValueLayout.ADDRESS, ValueLayout.ADDRESS));
             settingsFromEnvHandle = downcall(lookup, "slatedb_settings_from_env",
-                FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS));
+                FunctionDescriptor.of(RESULT_LAYOUT, ValueLayout.ADDRESS, ValueLayout.ADDRESS));
             settingsLoadHandle = downcall(lookup, "slatedb_settings_load",
-                FunctionDescriptor.of(ValueLayout.ADDRESS));
-            openHandle = downcall(lookup, "slatedb_open",
-                FunctionDescriptor.of(HANDLE_RESULT_LAYOUT, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS));
-            deleteHandle = downcall(lookup, "slatedb_delete_with_options",
-                FunctionDescriptor.of(RESULT_LAYOUT,
-                    HANDLE_LAYOUT,
-                    ValueLayout.ADDRESS,
-                    ValueLayout.JAVA_LONG,
-                    ValueLayout.ADDRESS));
-            flushHandle = downcall(lookup, "slatedb_flush",
-                FunctionDescriptor.of(RESULT_LAYOUT, HANDLE_LAYOUT));
-            scanHandle = downcall(lookup, "slatedb_scan_with_options",
-                FunctionDescriptor.of(RESULT_LAYOUT,
-                    HANDLE_LAYOUT,
-                    ValueLayout.ADDRESS,
-                    ValueLayout.JAVA_LONG,
-                    ValueLayout.ADDRESS,
-                    ValueLayout.JAVA_LONG,
-                    ValueLayout.ADDRESS,
-                    ValueLayout.ADDRESS));
-            scanPrefixHandle = downcall(lookup, "slatedb_scan_prefix_with_options",
-                FunctionDescriptor.of(RESULT_LAYOUT,
-                    HANDLE_LAYOUT,
-                    ValueLayout.ADDRESS,
-                    ValueLayout.JAVA_LONG,
-                    ValueLayout.ADDRESS,
-                    ValueLayout.ADDRESS));
-            metricsHandle = downcall(lookup, "slatedb_metrics",
-                FunctionDescriptor.of(RESULT_LAYOUT, HANDLE_LAYOUT, ValueLayout.ADDRESS));
-            builderNewHandle = downcall(lookup, "slatedb_builder_new",
-                FunctionDescriptor.of(BUILDER_RESULT_LAYOUT,
-                    ValueLayout.ADDRESS,
-                    ValueLayout.ADDRESS,
-                    ValueLayout.ADDRESS));
-            builderWithSettingsHandle = downcall(lookup, "slatedb_builder_with_settings",
+                FunctionDescriptor.of(RESULT_LAYOUT, ValueLayout.ADDRESS));
+            settingsToJsonHandle = downcall(lookup, "slatedb_settings_to_json",
+                FunctionDescriptor.of(RESULT_LAYOUT, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS));
+            settingsCloseHandle = downcall(lookup, "slatedb_settings_close",
+                FunctionDescriptor.of(RESULT_LAYOUT, ValueLayout.ADDRESS));
+
+            objectStoreFromUrlHandle = downcall(lookup, "slatedb_object_store_from_url",
                 FunctionDescriptor.of(RESULT_LAYOUT, ValueLayout.ADDRESS, ValueLayout.ADDRESS));
-            builderWithSstBlockSizeHandle = downcall(lookup, "slatedb_builder_with_sst_block_size",
+            objectStoreFromEnvHandle = downcall(lookup, "slatedb_object_store_from_env",
+                FunctionDescriptor.of(RESULT_LAYOUT, ValueLayout.ADDRESS, ValueLayout.ADDRESS));
+            objectStoreCloseHandle = downcall(lookup, "slatedb_object_store_close",
+                FunctionDescriptor.of(RESULT_LAYOUT, ValueLayout.ADDRESS));
+
+            openHandle = downcall(lookup, "slatedb_db_open",
+                FunctionDescriptor.of(RESULT_LAYOUT, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS));
+            deleteHandle = downcall(lookup, "slatedb_db_delete_with_options",
+                FunctionDescriptor.of(RESULT_LAYOUT,
+                    ValueLayout.ADDRESS,
+                    ValueLayout.ADDRESS,
+                    ValueLayout.JAVA_LONG,
+                    ValueLayout.ADDRESS));
+            flushHandle = downcall(lookup, "slatedb_db_flush",
+                FunctionDescriptor.of(RESULT_LAYOUT, ValueLayout.ADDRESS));
+            scanHandle = downcall(lookup, "slatedb_db_scan_with_options",
+                FunctionDescriptor.of(RESULT_LAYOUT,
+                    ValueLayout.ADDRESS,
+                    RANGE_LAYOUT,
+                    ValueLayout.ADDRESS,
+                    ValueLayout.ADDRESS));
+            scanPrefixHandle = downcall(lookup, "slatedb_db_scan_prefix_with_options",
+                FunctionDescriptor.of(RESULT_LAYOUT,
+                    ValueLayout.ADDRESS,
+                    ValueLayout.ADDRESS,
+                    ValueLayout.JAVA_LONG,
+                    ValueLayout.ADDRESS,
+                    ValueLayout.ADDRESS));
+            metricsHandle = downcall(lookup, "slatedb_db_metrics",
+                FunctionDescriptor.of(RESULT_LAYOUT, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS));
+
+            builderNewHandle = downcall(lookup, "slatedb_db_builder_new",
+                FunctionDescriptor.of(RESULT_LAYOUT,
+                    ValueLayout.ADDRESS,
+                    ValueLayout.ADDRESS,
+                    ValueLayout.ADDRESS));
+            builderWithSettingsHandle = downcall(lookup, "slatedb_db_builder_with_settings",
+                FunctionDescriptor.of(RESULT_LAYOUT, ValueLayout.ADDRESS, ValueLayout.ADDRESS));
+            builderWithSstBlockSizeHandle = downcall(lookup, "slatedb_db_builder_with_sst_block_size",
                 FunctionDescriptor.of(RESULT_LAYOUT, ValueLayout.ADDRESS, ValueLayout.JAVA_BYTE));
-            builderBuildHandle = downcall(lookup, "slatedb_builder_build",
-                FunctionDescriptor.of(HANDLE_RESULT_LAYOUT, ValueLayout.ADDRESS));
-            builderFreeHandle = downcall(lookup, "slatedb_builder_free",
-                FunctionDescriptor.ofVoid(ValueLayout.ADDRESS));
-            readerOpenHandle = downcall(lookup, "slatedb_reader_open",
-                FunctionDescriptor.of(READER_HANDLE_RESULT_LAYOUT,
-                    ValueLayout.ADDRESS,
-                    ValueLayout.ADDRESS,
-                    ValueLayout.ADDRESS,
-                    ValueLayout.ADDRESS,
-                    ValueLayout.ADDRESS));
-            readerGetHandle = downcall(lookup, "slatedb_reader_get_with_options",
-                FunctionDescriptor.of(RESULT_LAYOUT,
-                    READER_HANDLE_LAYOUT,
-                    ValueLayout.ADDRESS,
-                    ValueLayout.JAVA_LONG,
-                    ValueLayout.ADDRESS,
-                    ValueLayout.ADDRESS));
-            readerScanHandle = downcall(lookup, "slatedb_reader_scan_with_options",
-                FunctionDescriptor.of(RESULT_LAYOUT,
-                    READER_HANDLE_LAYOUT,
-                    ValueLayout.ADDRESS,
-                    ValueLayout.JAVA_LONG,
-                    ValueLayout.ADDRESS,
-                    ValueLayout.JAVA_LONG,
-                    ValueLayout.ADDRESS,
-                    ValueLayout.ADDRESS));
-            readerScanPrefixHandle = downcall(lookup, "slatedb_reader_scan_prefix_with_options",
-                FunctionDescriptor.of(RESULT_LAYOUT,
-                    READER_HANDLE_LAYOUT,
-                    ValueLayout.ADDRESS,
-                    ValueLayout.JAVA_LONG,
-                    ValueLayout.ADDRESS,
-                    ValueLayout.ADDRESS));
-            readerCloseHandle = downcall(lookup, "slatedb_reader_close",
-                FunctionDescriptor.of(RESULT_LAYOUT, READER_HANDLE_LAYOUT));
-            iteratorNextHandle = downcall(lookup, "slatedb_iterator_next",
+            builderBuildHandle = downcall(lookup, "slatedb_db_builder_build",
                 FunctionDescriptor.of(RESULT_LAYOUT, ValueLayout.ADDRESS, ValueLayout.ADDRESS));
+            builderFreeHandle = downcall(lookup, "slatedb_db_builder_close",
+                FunctionDescriptor.of(RESULT_LAYOUT, ValueLayout.ADDRESS));
+
+            readerOpenHandle = downcall(lookup, "slatedb_db_reader_open",
+                FunctionDescriptor.of(RESULT_LAYOUT,
+                    ValueLayout.ADDRESS,
+                    ValueLayout.ADDRESS,
+                    ValueLayout.ADDRESS,
+                    ValueLayout.ADDRESS,
+                    ValueLayout.ADDRESS));
+            readerGetHandle = downcall(lookup, "slatedb_db_reader_get_with_options",
+                FunctionDescriptor.of(RESULT_LAYOUT,
+                    ValueLayout.ADDRESS,
+                    ValueLayout.ADDRESS,
+                    ValueLayout.JAVA_LONG,
+                    ValueLayout.ADDRESS,
+                    ValueLayout.ADDRESS,
+                    ValueLayout.ADDRESS,
+                    ValueLayout.ADDRESS));
+            readerScanHandle = downcall(lookup, "slatedb_db_reader_scan_with_options",
+                FunctionDescriptor.of(RESULT_LAYOUT,
+                    ValueLayout.ADDRESS,
+                    RANGE_LAYOUT,
+                    ValueLayout.ADDRESS,
+                    ValueLayout.ADDRESS));
+            readerScanPrefixHandle = downcall(lookup, "slatedb_db_reader_scan_prefix_with_options",
+                FunctionDescriptor.of(RESULT_LAYOUT,
+                    ValueLayout.ADDRESS,
+                    ValueLayout.ADDRESS,
+                    ValueLayout.JAVA_LONG,
+                    ValueLayout.ADDRESS,
+                    ValueLayout.ADDRESS));
+            readerCloseHandle = downcall(lookup, "slatedb_db_reader_close",
+                FunctionDescriptor.of(RESULT_LAYOUT, ValueLayout.ADDRESS));
+
+            iteratorNextHandle = downcall(lookup, "slatedb_iterator_next",
+                FunctionDescriptor.of(RESULT_LAYOUT,
+                    ValueLayout.ADDRESS,
+                    ValueLayout.ADDRESS,
+                    ValueLayout.ADDRESS,
+                    ValueLayout.ADDRESS,
+                    ValueLayout.ADDRESS,
+                    ValueLayout.ADDRESS));
             iteratorSeekHandle = downcall(lookup, "slatedb_iterator_seek",
                 FunctionDescriptor.of(RESULT_LAYOUT, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_LONG));
             iteratorCloseHandle = downcall(lookup, "slatedb_iterator_close",
                 FunctionDescriptor.of(RESULT_LAYOUT, ValueLayout.ADDRESS));
-            putHandle = downcall(lookup, "slatedb_put_with_options",
+
+            putHandle = downcall(lookup, "slatedb_db_put_with_options",
                 FunctionDescriptor.of(RESULT_LAYOUT,
-                    HANDLE_LAYOUT,
+                    ValueLayout.ADDRESS,
                     ValueLayout.ADDRESS,
                     ValueLayout.JAVA_LONG,
                     ValueLayout.ADDRESS,
                     ValueLayout.JAVA_LONG,
                     ValueLayout.ADDRESS,
                     ValueLayout.ADDRESS));
-            getHandle = downcall(lookup, "slatedb_get_with_options",
+            getHandle = downcall(lookup, "slatedb_db_get_with_options",
                 FunctionDescriptor.of(RESULT_LAYOUT,
-                    HANDLE_LAYOUT,
+                    ValueLayout.ADDRESS,
                     ValueLayout.ADDRESS,
                     ValueLayout.JAVA_LONG,
                     ValueLayout.ADDRESS,
+                    ValueLayout.ADDRESS,
+                    ValueLayout.ADDRESS,
                     ValueLayout.ADDRESS));
-            closeHandle = downcall(lookup, "slatedb_close",
-                FunctionDescriptor.of(RESULT_LAYOUT, HANDLE_LAYOUT));
-            freeResultHandle = downcall(lookup, "slatedb_free_result",
-                FunctionDescriptor.ofVoid(RESULT_LAYOUT));
-            freeValueHandle = downcall(lookup, "slatedb_free_value",
-                FunctionDescriptor.ofVoid(VALUE_LAYOUT));
-            freeScanResultHandle = downcall(lookup, "slatedb_free_scan_result",
-                FunctionDescriptor.ofVoid(SCAN_RESULT_LAYOUT));
-            freeCStringHandle = downcall(lookup, "free",
-                FunctionDescriptor.ofVoid(ValueLayout.ADDRESS));
+            closeHandle = downcall(lookup, "slatedb_db_close",
+                FunctionDescriptor.of(RESULT_LAYOUT, ValueLayout.ADDRESS));
+
             writeBatchNewHandle = downcall(lookup, "slatedb_write_batch_new",
                 FunctionDescriptor.of(RESULT_LAYOUT, ValueLayout.ADDRESS));
             writeBatchPutHandle = downcall(lookup, "slatedb_write_batch_put",
@@ -1192,13 +1210,19 @@ final class Native {
                     ValueLayout.ADDRESS,
                     ValueLayout.ADDRESS,
                     ValueLayout.JAVA_LONG));
-            writeBatchWriteHandle = downcall(lookup, "slatedb_write_batch_write",
+            writeBatchWriteHandle = downcall(lookup, "slatedb_db_write_with_options",
                 FunctionDescriptor.of(RESULT_LAYOUT,
-                    HANDLE_LAYOUT,
+                    ValueLayout.ADDRESS,
                     ValueLayout.ADDRESS,
                     ValueLayout.ADDRESS));
             writeBatchCloseHandle = downcall(lookup, "slatedb_write_batch_close",
                 FunctionDescriptor.of(RESULT_LAYOUT, ValueLayout.ADDRESS));
+
+            freeResultHandle = downcall(lookup, "slatedb_result_free",
+                FunctionDescriptor.ofVoid(RESULT_LAYOUT));
+            freeBytesHandle = downcall(lookup, "slatedb_bytes_free",
+                FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.JAVA_LONG));
+
             initialized = true;
         }
     }
@@ -1233,7 +1257,7 @@ final class Native {
             return MemorySegment.NULL;
         }
         MemorySegment segment = arena.allocate(PUT_OPTIONS_LAYOUT);
-        setInt(PUT_OPTIONS_TTL_TYPE, segment, options.ttlType().code());
+        setByte(PUT_OPTIONS_TTL_TYPE, segment, (byte) options.ttlType().code());
         setLong(PUT_OPTIONS_TTL_VALUE, segment, options.ttlValueMs());
         return segment;
     }
@@ -1252,7 +1276,7 @@ final class Native {
             return MemorySegment.NULL;
         }
         MemorySegment segment = arena.allocate(READ_OPTIONS_LAYOUT);
-        setInt(READ_OPTIONS_DURABILITY, segment, options.durabilityFilter().code());
+        setByte(READ_OPTIONS_DURABILITY, segment, (byte) options.durabilityFilter().code());
         setBoolean(READ_OPTIONS_DIRTY, segment, options.dirty());
         setBoolean(READ_OPTIONS_CACHE_BLOCKS, segment, options.cacheBlocks());
         return segment;
@@ -1263,7 +1287,7 @@ final class Native {
             return MemorySegment.NULL;
         }
         MemorySegment segment = arena.allocate(SCAN_OPTIONS_LAYOUT);
-        setInt(SCAN_OPTIONS_DURABILITY, segment, options.durabilityFilter().code());
+        setByte(SCAN_OPTIONS_DURABILITY, segment, (byte) options.durabilityFilter().code());
         setBoolean(SCAN_OPTIONS_DIRTY, segment, options.dirty());
         setLong(SCAN_OPTIONS_READ_AHEAD_BYTES, segment, options.readAheadBytes());
         setBoolean(SCAN_OPTIONS_CACHE_BLOCKS, segment, options.cacheBlocks());
@@ -1283,10 +1307,41 @@ final class Native {
         return segment;
     }
 
+    private static MemorySegment toRange(Arena arena, byte[] startKey, byte[] endKey) {
+        MemorySegment range = arena.allocate(RANGE_LAYOUT);
+        MemorySegment startBound = range.asSlice(0, BOUND_LAYOUT.byteSize());
+        MemorySegment endBound = range.asSlice(BOUND_LAYOUT.byteSize(), BOUND_LAYOUT.byteSize());
+
+        if (startKey == null) {
+            setByte(BOUND_KIND, startBound, BOUND_KIND_UNBOUNDED);
+            setAddress(BOUND_DATA, startBound, MemorySegment.NULL);
+            setLong(BOUND_LEN, startBound, 0L);
+        } else {
+            MemorySegment startKeySegment = toByteArray(arena, startKey);
+            setByte(BOUND_KIND, startBound, BOUND_KIND_INCLUDED);
+            setAddress(BOUND_DATA, startBound, startKeySegment);
+            setLong(BOUND_LEN, startBound, startKey.length);
+        }
+
+        if (endKey == null) {
+            setByte(BOUND_KIND, endBound, BOUND_KIND_UNBOUNDED);
+            setAddress(BOUND_DATA, endBound, MemorySegment.NULL);
+            setLong(BOUND_LEN, endBound, 0L);
+        } else {
+            MemorySegment endKeySegment = toByteArray(arena, endKey);
+            setByte(BOUND_KIND, endBound, BOUND_KIND_EXCLUDED);
+            setAddress(BOUND_DATA, endBound, endKeySegment);
+            setLong(BOUND_LEN, endBound, endKey.length);
+        }
+
+        return range;
+    }
+
     private static String readMessage(MemorySegment messageSegment) {
-        if (messageSegment == null || messageSegment.equals(MemorySegment.NULL)) {
+        if (isNull(messageSegment)) {
             return null;
         }
+
         MemorySegment bytesSegment = messageSegment.reinterpret((long) Integer.MAX_VALUE + 1);
         long len = 0;
         while (true) {
@@ -1298,73 +1353,150 @@ final class Native {
             }
             len++;
         }
+
         byte[] bytes = new byte[(int) len];
         MemorySegment.copy(bytesSegment, 0, MemorySegment.ofArray(bytes), 0, len);
         return new String(bytes, StandardCharsets.UTF_8);
     }
 
-    private static String readCStringAndFree(MemorySegment cstr, String errorMessage) {
-        if (cstr == null || cstr.equals(MemorySegment.NULL)) {
-            throw new IllegalStateException(errorMessage);
+    private static MemorySegment resolveObjectStore(String url, String envFile) {
+        ensureInitialized();
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment objectStoreOut = arena.allocate(ValueLayout.ADDRESS);
+            MemorySegment result;
+
+            if (url != null) {
+                MemorySegment urlSegment = toCString(arena, url);
+                result = (MemorySegment) objectStoreFromUrlHandle.invokeExact(
+                    (SegmentAllocator) arena,
+                    urlSegment,
+                    objectStoreOut
+                );
+            } else {
+                MemorySegment envSegment = toCString(arena, envFile);
+                result = (MemorySegment) objectStoreFromEnvHandle.invokeExact(
+                    (SegmentAllocator) arena,
+                    envSegment,
+                    objectStoreOut
+                );
+            }
+
+            checkResult(result);
+            MemorySegment objectStore = objectStoreOut.get(ValueLayout.ADDRESS, 0);
+            if (isNull(objectStore)) {
+                throw new SlateDbException(-1, "SlateDB returned a null object store handle");
+            }
+            return objectStore;
+        } catch (Throwable t) {
+            throw wrap(t);
         }
-        String value = readMessage(cstr);
-        freeCString(cstr, null);
-        return value;
     }
 
-    private static byte[] copyValue(MemorySegment valueOut, RuntimeException pending) {
-        long len = (long) getLong(VALUE_LEN, valueOut);
-        MemorySegment data = (MemorySegment) getAddress(VALUE_DATA, valueOut);
+    private static String settingsToJsonAndClose(MemorySegment settings) {
+        RuntimeException pending = null;
+        try {
+            return settingsToJson(settings);
+        } catch (RuntimeException e) {
+            pending = e;
+            throw e;
+        } finally {
+            closeSettings(settings, pending);
+        }
+    }
+
+    private static String settingsToJson(MemorySegment settings) {
+        ensureInitialized();
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment jsonOut = arena.allocate(ValueLayout.ADDRESS);
+            MemorySegment jsonLenOut = arena.allocate(ValueLayout.JAVA_LONG);
+            MemorySegment result = (MemorySegment) settingsToJsonHandle.invokeExact(
+                (SegmentAllocator) arena,
+                settings,
+                jsonOut,
+                jsonLenOut
+            );
+            checkResult(result);
+            MemorySegment json = jsonOut.get(ValueLayout.ADDRESS, 0);
+            long jsonLen = jsonLenOut.get(ValueLayout.JAVA_LONG, 0);
+            byte[] bytes = copyOwnedBytes(json, jsonLen, null);
+            return new String(bytes, StandardCharsets.UTF_8);
+        } catch (Throwable t) {
+            throw wrap(t);
+        }
+    }
+
+    private static byte[] copyOwnedBytes(MemorySegment data, long len, RuntimeException pending) {
         if (len < 0 || len > Integer.MAX_VALUE) {
             RuntimeException sizeError = new IllegalStateException("SlateDB value too large: " + len);
-            freeValue(valueOut, sizeError);
+            freeBytes(data, len, sizeError);
             throw sizeError;
         }
+
         byte[] bytes = new byte[(int) len];
         if (len > 0) {
+            if (isNull(data)) {
+                RuntimeException nullData =
+                    new IllegalStateException("SlateDB returned null data pointer with len=" + len);
+                freeBytes(data, len, nullData);
+                throw nullData;
+            }
             MemorySegment dataSegment = data.reinterpret(len);
             MemorySegment.copy(dataSegment, 0, MemorySegment.ofArray(bytes), 0, len);
         }
-        freeValue(valueOut, pending);
+
+        freeBytes(data, len, pending);
         return bytes;
     }
 
-    private static SlateDbKeyValue copyKeyValuePair(MemorySegment kvOut) {
-        MemorySegment keySegment = kvOut.asSlice(KEY_VALUE_KEY_OFFSET, VALUE_LAYOUT.byteSize());
-        MemorySegment valueSegment = kvOut.asSlice(KEY_VALUE_VALUE_OFFSET, VALUE_LAYOUT.byteSize());
-        RuntimeException failure = null;
-        byte[] keyBytes = null;
-        try {
-            keyBytes = copyValue(keySegment, null);
-        } catch (RuntimeException e) {
-            failure = e;
+    private static void closeSettings(MemorySegment settings, RuntimeException pending) {
+        if (isNull(settings)) {
+            return;
         }
-        byte[] valueBytes = null;
-        try {
-            valueBytes = copyValue(valueSegment, failure);
-        } catch (RuntimeException e) {
-            if (failure != null) {
-                failure.addSuppressed(e);
+
+        ensureInitialized();
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment result = (MemorySegment) settingsCloseHandle.invokeExact(
+                (SegmentAllocator) arena,
+                settings
+            );
+            checkResult(result);
+        } catch (Throwable t) {
+            RuntimeException failure = new RuntimeException("Failed to close SlateDB settings handle", t);
+            if (pending != null) {
+                pending.addSuppressed(failure);
+            } else {
                 throw failure;
             }
-            throw e;
         }
-        if (failure != null) {
-            throw failure;
-        }
-        return new SlateDbKeyValue(keyBytes, valueBytes);
     }
 
-    /**
-     * Checks whether given `CSdbResult` is successful or not. If result error code is not successful throws
-     * {@link SlateDbException} exception.
-     * @param result a `CSdbResult` result to check.
-     */
+    private static void closeObjectStore(MemorySegment objectStore, RuntimeException pending) {
+        if (isNull(objectStore)) {
+            return;
+        }
+
+        ensureInitialized();
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment result = (MemorySegment) objectStoreCloseHandle.invokeExact(
+                (SegmentAllocator) arena,
+                objectStore
+            );
+            checkResult(result);
+        } catch (Throwable t) {
+            RuntimeException failure = new RuntimeException("Failed to close SlateDB object store handle", t);
+            if (pending != null) {
+                pending.addSuppressed(failure);
+            } else {
+                throw failure;
+            }
+        }
+    }
+
     private static void checkResult(final MemorySegment result) {
-        final var error = getInt(RESULT_ERROR, result);
+        final var error = getInt(RESULT_KIND, result);
         final var messageSegment = getAddress(RESULT_MESSAGE, result);
         final var message = readMessage(messageSegment);
-        final RuntimeException failure = (error == 0) ? null : new SlateDbException(error, message);
+        final RuntimeException failure = (error == ERROR_KIND_NONE) ? null : new SlateDbException(error, message);
         freeResult(result, failure);
         if (failure != null) {
             throw failure;
@@ -1372,18 +1504,20 @@ final class Native {
     }
 
     private static void checkResultAllowInvalidArgument(MemorySegment result, String defaultInvalidMessage) {
-        int error = (int) getInt(RESULT_ERROR, result);
-        MemorySegment messageSegment = (MemorySegment) getAddress(RESULT_MESSAGE, result);
+        int error = getInt(RESULT_KIND, result);
+        MemorySegment messageSegment = getAddress(RESULT_MESSAGE, result);
         String message = readMessage(messageSegment);
+
         RuntimeException failure = null;
-        if (error != 0) {
-            if (error == ERROR_INVALID_ARGUMENT) {
+        if (error != ERROR_KIND_NONE) {
+            if (error == ERROR_KIND_INVALID) {
                 String detail = (message == null || message.isBlank()) ? defaultInvalidMessage : message;
                 failure = new IllegalArgumentException(detail);
             } else {
                 failure = new SlateDbException(error, message);
             }
         }
+
         freeResult(result, failure);
         if (failure != null) {
             throw failure;
@@ -1403,11 +1537,15 @@ final class Native {
         }
     }
 
-    private static void freeValue(MemorySegment value, RuntimeException pending) {
+    private static void freeBytes(MemorySegment data, long len, RuntimeException pending) {
+        if (isNull(data) || len <= 0) {
+            return;
+        }
+
         try {
-            freeValueHandle.invokeExact(value);
+            freeBytesHandle.invokeExact(data, len);
         } catch (Throwable t) {
-            RuntimeException failure = new RuntimeException("Failed to free SlateDB value", t);
+            RuntimeException failure = new RuntimeException("Failed to free SlateDB bytes", t);
             if (pending != null) {
                 pending.addSuppressed(failure);
             } else {
@@ -1416,17 +1554,22 @@ final class Native {
         }
     }
 
-    private static void freeCString(MemorySegment cstr, RuntimeException pending) {
-        try {
-            freeCStringHandle.invokeExact(cstr);
-        } catch (Throwable t) {
-            RuntimeException failure = new RuntimeException("Failed to free SlateDB string", t);
-            if (pending != null) {
-                pending.addSuppressed(failure);
-            } else {
-                throw failure;
-            }
+    private static byte toNativeLogLevel(String level) {
+        if (level == null) {
+            throw new IllegalArgumentException("level must not be null");
         }
+        return switch (level.toLowerCase()) {
+            case "error" -> LOG_LEVEL_ERROR;
+            case "warn" -> LOG_LEVEL_WARN;
+            case "info" -> LOG_LEVEL_INFO;
+            case "debug" -> LOG_LEVEL_DEBUG;
+            case "trace" -> LOG_LEVEL_TRACE;
+            default -> throw new IllegalArgumentException("Unsupported log level: " + level);
+        };
+    }
+
+    private static boolean isNull(MemorySegment segment) {
+        return segment == null || segment.equals(MemorySegment.NULL);
     }
 
     private static RuntimeException wrap(Throwable t) {
