@@ -206,7 +206,12 @@ impl Manifest {
     fn range(&self) -> Option<BytesRange> {
         let mut start_bound = None;
         let mut end_bound = None;
-        for sst in &self.core.l0 {
+        let all_ssts = self
+            .core
+            .l0
+            .iter()
+            .chain(self.core.compacted.iter().flat_map(|sr| sr.ssts.iter()));
+        for sst in all_ssts {
             let range = sst.compacted_effective_range();
             start_bound = start_bound
                 .map(|b| min(b, range.comparable_start_bound()))

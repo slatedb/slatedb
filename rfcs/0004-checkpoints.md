@@ -671,8 +671,8 @@ performing a union.
 The union process works as follows:
 
 1. Sort the input manifests by the start bound of their key ranges.
-2. Validate that the manifests are non-overlapping. If any two manifests have intersecting key ranges, the operation
-   fails.
+2. Validate that the manifests are non-overlapping. Each manifest's key range is computed from the effective ranges
+   of all its L0 and compacted SSTs. If any two manifests have intersecting key ranges, the operation fails.
 3. Concatenate the contents of all input manifests:
    - All `external_dbs` entries are merged into a single list.
    - All L0 SSTs from each manifest are appended to the result's L0 list.
