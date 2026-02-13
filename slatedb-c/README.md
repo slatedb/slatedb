@@ -217,6 +217,11 @@ struct slatedb_db_t* db = NULL;
 struct slatedb_settings_t* settings = NULL;
 
 check_result("settings_default", slatedb_settings_default(&settings));
+struct slatedb_settings_kv_t patch = {
+    .key = "compactor_options.max_sst_size",
+    .value_json = "268435456",
+};
+check_result("settings_apply_kv", slatedb_settings_apply_kv(settings, &patch, 1));
 check_result("builder_new", slatedb_db_builder_new("demo-db", store, &builder));
 check_result("builder_with_settings",
              slatedb_db_builder_with_settings(builder, settings));
