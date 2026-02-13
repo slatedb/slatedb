@@ -177,6 +177,11 @@ impl Manifest {
         // Merge the contents of all input manifests
         let mut core = ManifestCore::new();
 
+        // The resulting manifest is not yet initialized; the caller must
+        // complete setup (e.g. creating final checkpoints) before setting
+        // initialized to true.
+        core.initialized = false;
+
         // Deduplicate external_dbs by (path, source_checkpoint_id), merging
         // sst_ids. Without dedup, repeated projection/union cycles cause
         // exponential growth of duplicated entries.
@@ -1325,5 +1330,30 @@ mod tests {
             .expect("Should have external_dbs entry for source 2");
         assert_eq!(entry2.sst_ids, vec![sst2]);
         assert!(entry2.final_checkpoint_id.is_some());
+    }
+
+    #[test]
+    fn test_union_sets_initialized_false() {
+        let sst1 = SsTableId::Compacted(Ulid::from_parts(1000, 0));
+        let sst2 = SsTableId::Compacted(Ulid::from_parts(2000, 0));
+
+        let m1 = manifest_with_one_compacted_sst(sst1, b"a", BytesRange::from_ref("a".."m"));
+        let m2 = manifest_with_one_compacted_sst(sst2, b"m", BytesRange::from_ref("m"..));
+
+        // Both manifests start with initialized=true (from ManifestCore::new())
+        assert!(m1.core.initialized);
+        assert!(m2.core.initialized);
+
+        let sources = vec![
+            (m1, "path1".to_string(), Uuid::new_v4()),
+            (m2, "path2".to_string(), Uuid::new_v4()),
+        ];
+
+        let result = Manifest::union(sources, Arc::new(DbRand::default()));
+
+        assert!(
+            !result.core.initialized,
+            "Union result should have initialized=false"
+        );
     }
 }

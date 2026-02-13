@@ -700,7 +700,9 @@ The union process works as follows:
 4. Sorted run IDs are preserved from the source manifests. The compactor does not assume contiguous IDs, so
    gaps left by projection (where empty sorted runs were removed) are acceptable. Preserving original IDs
    maintains tier identity across projection and union. The descending order is preserved to maintain compactor invariant
-5. Each source database is added as an `external_dbs` entry in the resulting manifest, with a new
+5. The resulting manifest has `initialized` set to `false`. The caller must complete setup (e.g., creating
+   final checkpoints in source databases) before setting `initialized` to `true`.
+6. Each source database is added as an `external_dbs` entry in the resulting manifest, with a new
    `final_checkpoint_id` and its owned SST IDs recorded so that the new database can resolve SST paths
    and maintain checkpoints on the source databases to prevent their SSTs from being garbage collected.
    Owned SST IDs are those in the source manifest that are not already tracked by its own `external_dbs`
