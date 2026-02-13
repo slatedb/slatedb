@@ -67,7 +67,7 @@ use crate::sst_iter::SstIteratorOptions;
 use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
 use crate::transaction_manager::TransactionManager;
-use crate::utils::{format_bytes_si, MonotonicSeq, SendSafely};
+use crate::utils::{format_bytes_si, MonotonicSeq, SendSafely, WatchableOnceCellReader};
 use crate::wal_buffer::{WalBufferManager, WAL_BUFFER_TASK_NAME};
 use crate::wal_replay::{WalReplayIterator, WalReplayOptions};
 use slatedb_common::clock::SystemClock;
@@ -79,15 +79,24 @@ pub(crate) mod builder;
 
 /// Handle returned from write operations, containing metadata about the write.
 /// This structure is designed to be extensible for future enhancements.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct WriteHandle {
     pub(crate) seq: u64,
     pub(crate) create_ts: Option<i64>,
+    pub(crate) durable_watcher: Option<WatchableOnceCellReader<Result<(), SlateDBError>>>,
 }
 
 impl WriteHandle {
-    pub fn new(seq: u64, create_ts: Option<i64>) -> Self {
-        Self { seq, create_ts }
+    pub(crate) fn new(
+        seq: u64,
+        create_ts: Option<i64>,
+        durable_watcher: Option<WatchableOnceCellReader<Result<(), SlateDBError>>>,
+    ) -> Self {
+        Self {
+            seq,
+            create_ts,
+            durable_watcher,
+        }
     }
 
     /// Returns the sequence number assigned to this write operation.
@@ -98,6 +107,21 @@ impl WriteHandle {
     /// Returns the creation timestamp assigned to this write operation.
     pub fn create_ts(&self) -> Option<i64> {
         self.create_ts
+    }
+
+    /// Await for the durability of this write operation.
+    ///
+    /// This function blocks the current task until one of the following conditions is met:
+    /// - The write operation has been successfully persisted to the storage medium.
+    /// - The write operation failed and returned an error.
+    ///
+    /// If the write operation does not require durability (e.g. empty batch), this function returns `Ok(())` immediately.
+    pub async fn await_durability(&self) -> Result<(), crate::Error> {
+        if let Some(mut watcher) = self.durable_watcher.clone() {
+            watcher.await_value().await.map_err(Into::into)
+        } else {
+            Ok(())
+        }
     }
 }
 
@@ -291,6 +315,7 @@ impl DbInner {
             return Ok(WriteHandle {
                 seq: self.oracle.last_committed_seq(),
                 create_ts: None,
+                durable_watcher: None,
             });
         }
 
@@ -307,10 +332,12 @@ impl DbInner {
 
         // TODO: this can be modified as awaiting the last_durable_seq watermark & fatal error.
 
-        let (write_handle, mut durable_watcher) = rx.await??;
+        let write_handle = rx.await??;
 
         if options.await_durable {
-            durable_watcher.await_value().await?;
+            if let Some(mut watcher) = write_handle.durable_watcher.clone() {
+                watcher.await_value().await?;
+            }
         }
 
         Ok(write_handle)
