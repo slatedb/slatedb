@@ -12,11 +12,31 @@ import (
 )
 
 // DbReader represents a read-only SlateDB connection.
+//
+// A reader can target latest state or a specific checkpoint ID.
 type DbReader struct {
 	handle *C.slatedb_db_reader_t
 }
 
 // OpenReader opens a read-only database reader.
+//
+// Parameters:
+//   - `path`: local database path
+//   - `WithUrl`: object-store URL
+//   - `WithEnvFile`: optional `.env` file for provider resolution
+//   - `WithCheckpointId`: optional checkpoint UUID string
+//   - `WithDbReaderOptions`: optional reader tuning options
+//
+// Example:
+//
+//	reader, err := slatedb.OpenReader(
+//	    "/tmp/mydb",
+//	    slatedb.WithEnvFile[slatedb.DbReaderConfig](".env"),
+//	    slatedb.WithDbReaderOptions(slatedb.DbReaderOptions{
+//	        ManifestPollInterval: 5000,
+//	        CheckpointLifetime:   30000,
+//	    }),
+//	)
 func OpenReader(path string, opts ...Option[DbReaderConfig]) (*DbReader, error) {
 	cfg := &DbReaderConfig{}
 	for _, opt := range opts {
@@ -52,12 +72,17 @@ func OpenReader(path string, opts ...Option[DbReaderConfig]) (*DbReader, error) 
 	return &DbReader{handle: readerHandle}, nil
 }
 
-// Get retrieves a value by key from the database reader with default options.
+// Get retrieves a value by key with default read options.
+//
+// Returns `ErrNotFound` if the key does not exist.
 func (r *DbReader) Get(key []byte) ([]byte, error) {
 	return r.GetWithOptions(key, nil)
 }
 
-// GetWithOptions retrieves a value by key from the database reader with custom read options.
+// GetWithOptions retrieves a value by key with explicit read options.
+//
+// Pass nil options to use defaults.
+// Returns `ErrNotFound` if the key does not exist.
 func (r *DbReader) GetWithOptions(key []byte, opts *ReadOptions) ([]byte, error) {
 	if r == nil || r.handle == nil {
 		return nil, ErrInvalidHandle
@@ -91,12 +116,18 @@ func (r *DbReader) GetWithOptions(key []byte, opts *ReadOptions) ([]byte, error)
 	return copyBytesAndFree(value, valueLen), nil
 }
 
-// Scan creates a streaming iterator for the specified range with default options.
+// Scan creates a streaming iterator for the range `[start, end)` with default options.
+//
+// `start=nil` means unbounded start; `end=nil` means unbounded end.
+// The iterator must be closed after use and before closing the reader.
 func (r *DbReader) Scan(start, end []byte) (*Iterator, error) {
 	return r.ScanWithOptions(start, end, nil)
 }
 
-// ScanWithOptions creates a streaming iterator for the specified range with custom scan options.
+// ScanWithOptions creates a streaming iterator for `[start, end)` with explicit scan options.
+//
+// Pass nil options to use defaults.
+// The iterator must be closed after use and before closing the reader.
 func (r *DbReader) ScanWithOptions(start, end []byte, opts *ScanOptions) (*Iterator, error) {
 	if r == nil || r.handle == nil {
 		return nil, ErrInvalidHandle
@@ -117,12 +148,17 @@ func (r *DbReader) ScanWithOptions(start, end []byte, opts *ScanOptions) (*Itera
 	return &Iterator{ptr: iterPtr}, nil
 }
 
-// ScanPrefix creates a streaming iterator for all keys with the given prefix using default scan options.
+// ScanPrefix creates a streaming iterator for all keys that match `prefix`.
+//
+// The iterator must be closed after use and before closing the reader.
 func (r *DbReader) ScanPrefix(prefix []byte) (*Iterator, error) {
 	return r.ScanPrefixWithOptions(prefix, nil)
 }
 
-// ScanPrefixWithOptions creates a streaming iterator for all keys with the given prefix and custom scan options.
+// ScanPrefixWithOptions creates a streaming iterator for `prefix` with explicit scan options.
+//
+// Pass nil options to use defaults.
+// The iterator must be closed after use and before closing the reader.
 func (r *DbReader) ScanPrefixWithOptions(prefix []byte, opts *ScanOptions) (*Iterator, error) {
 	if r == nil || r.handle == nil {
 		return nil, ErrInvalidHandle
@@ -150,6 +186,8 @@ func (r *DbReader) ScanPrefixWithOptions(prefix []byte, opts *ScanOptions) (*Ite
 }
 
 // Close closes the database reader and releases all resources.
+//
+// The reader must not be used after `Close` returns successfully.
 func (r *DbReader) Close() error {
 	if r == nil || r.handle == nil {
 		return ErrInvalidHandle

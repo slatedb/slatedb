@@ -183,8 +183,13 @@ func closeBuilderHandle(builder *C.slatedb_db_builder_t) {
 	_ = resultToErrorAndFree(C.slatedb_db_builder_close(builder))
 }
 
-// Open opens a SlateDB database with default settings.
-// For more advanced configuration, use NewBuilder() instead.
+// Open opens a writable SlateDB database.
+//
+// Object-store configuration is resolved from `opts`:
+//   - `WithUrl`: explicit object-store URL (for example `memory:///`, `file:///tmp/db`)
+//   - `WithEnvFile`: optional `.env` file used to resolve provider settings
+//
+// For advanced configuration (custom `Settings`, SST block size), use `NewBuilder`.
 func Open(path string, opts ...Option[DbConfig]) (*DB, error) {
 	cfg := &DbConfig{}
 	for _, opt := range opts {
@@ -212,22 +217,40 @@ func Open(path string, opts ...Option[DbConfig]) (*DB, error) {
 	return &DB{handle: dbHandle}, nil
 }
 
-// Put stores a key-value pair in the database.
+// Put stores a key-value pair in the database using default put/write options.
+//
+// The write is durable based on SlateDB defaults.
 func (db *DB) Put(key, value []byte) error {
 	return db.PutWithOptions(key, value, nil, nil)
 }
 
-// Get retrieves a value by key from the database.
+// Get retrieves a value by key with default read options.
+//
+// Returns `ErrNotFound` if the key does not exist.
 func (db *DB) Get(key []byte) ([]byte, error) {
 	return db.GetWithOptions(key, nil)
 }
 
-// Delete removes a key from the database.
+// Delete removes a key using default write options.
+//
+// Returns successfully even if the key does not exist.
 func (db *DB) Delete(key []byte) error {
 	return db.DeleteWithOptions(key, nil)
 }
 
-// PutWithOptions stores a key-value pair in the database with custom put and write options.
+// PutWithOptions stores a key-value pair with explicit put/write options.
+//
+// `putOpts` controls TTL behavior and `writeOpts` controls durability waiting.
+// Pass nil options to use SlateDB defaults.
+//
+// Example:
+//
+//	putOpts := &slatedb.PutOptions{
+//	    TTLType:  slatedb.TTLExpireAfter,
+//	    TTLValue: 3600000, // 1 hour in milliseconds
+//	}
+//	writeOpts := &slatedb.WriteOptions{AwaitDurable: true}
+//	err := db.PutWithOptions([]byte("session:123"), []byte("data"), putOpts, writeOpts)
 func (db *DB) PutWithOptions(key, value []byte, putOpts *PutOptions, writeOpts *WriteOptions) error {
 	if db == nil || db.handle == nil {
 		return ErrInvalidHandle
@@ -253,7 +276,14 @@ func (db *DB) PutWithOptions(key, value []byte, putOpts *PutOptions, writeOpts *
 	return resultToErrorAndFree(result)
 }
 
-// DeleteWithOptions removes a key from the database with custom write options.
+// DeleteWithOptions removes a key with explicit write options.
+//
+// Pass nil options to use defaults.
+//
+// Example:
+//
+//	writeOpts := &slatedb.WriteOptions{AwaitDurable: false}
+//	err := db.DeleteWithOptions([]byte("temp:123"), writeOpts)
 func (db *DB) DeleteWithOptions(key []byte, writeOpts *WriteOptions) error {
 	if db == nil || db.handle == nil {
 		return ErrInvalidHandle
@@ -274,7 +304,19 @@ func (db *DB) DeleteWithOptions(key []byte, writeOpts *WriteOptions) error {
 	return resultToErrorAndFree(result)
 }
 
-// GetWithOptions retrieves a value by key from the database with custom read options.
+// GetWithOptions retrieves a value by key with explicit read options.
+//
+// Pass nil options to use defaults.
+// Returns `ErrNotFound` if the key does not exist.
+//
+// Example:
+//
+//	readOpts := &slatedb.ReadOptions{
+//	    DurabilityFilter: slatedb.DurabilityRemote,
+//	    Dirty:            false,
+//	    CacheBlocks:      true,
+//	}
+//	value, err := db.GetWithOptions([]byte("user:123"), readOpts)
 func (db *DB) GetWithOptions(key []byte, readOpts *ReadOptions) ([]byte, error) {
 	if db == nil || db.handle == nil {
 		return nil, ErrInvalidHandle
@@ -308,12 +350,43 @@ func (db *DB) GetWithOptions(key []byte, readOpts *ReadOptions) ([]byte, error) 
 	return copyBytesAndFree(value, valueLen), nil
 }
 
-// Write executes a WriteBatch atomically with default WriteOptions.
+// Write executes a WriteBatch atomically with default write options.
+//
+// The batch is consumed by this operation and cannot be reused.
+// Always call `batch.Close()` when finished to release resources.
+//
+// Example:
+//
+//	batch, err := slatedb.NewWriteBatch()
+//	if err != nil {
+//	    return err
+//	}
+//	defer batch.Close()
+//
+//	batch.Put([]byte("key1"), []byte("value1"))
+//	batch.Delete([]byte("key2"))
+//
+//	err = db.Write(batch)
 func (db *DB) Write(batch *WriteBatch) error {
 	return db.WriteWithOptions(batch, nil)
 }
 
-// WriteWithOptions executes a WriteBatch atomically with custom WriteOptions.
+// WriteWithOptions executes a WriteBatch atomically with explicit write options.
+//
+// The batch is consumed by this operation and cannot be reused.
+// Always call `batch.Close()` when finished to release resources.
+//
+// Example:
+//
+//	batch, err := slatedb.NewWriteBatch()
+//	if err != nil {
+//	    return err
+//	}
+//	defer batch.Close()
+//
+//	batch.Put([]byte("key1"), []byte("value1"))
+//	writeOpts := &slatedb.WriteOptions{AwaitDurable: false}
+//	err = db.WriteWithOptions(batch, writeOpts)
 func (db *DB) WriteWithOptions(batch *WriteBatch, opts *WriteOptions) error {
 	if db == nil || db.handle == nil {
 		return ErrInvalidHandle
@@ -341,7 +414,10 @@ func (db *DB) WriteWithOptions(batch *WriteBatch, opts *WriteOptions) error {
 	return nil
 }
 
-// Flush flushes in-memory writes to persistent storage.
+// Flush flushes pending writes using SlateDB default flush behavior.
+//
+// Call this before creating `DbReader` instances when you need to read freshly
+// written data immediately.
 func (db *DB) Flush() error {
 	if db == nil || db.handle == nil {
 		return ErrInvalidHandle
@@ -351,6 +427,8 @@ func (db *DB) Flush() error {
 }
 
 // Close closes the database connection and releases all resources.
+//
+// The `DB` must not be used after `Close` returns successfully.
 func (db *DB) Close() error {
 	if db == nil || db.handle == nil {
 		return ErrInvalidHandle
@@ -364,12 +442,42 @@ func (db *DB) Close() error {
 	return nil
 }
 
-// Scan creates a streaming iterator for the specified range with default scan options.
+// Scan creates a streaming iterator for the range `[start, end)` with default options.
+//
+// `start=nil` means unbounded start; `end=nil` means unbounded end.
+// The iterator must be closed after use.
+//
+// Example:
+//
+//	iter, err := db.Scan([]byte("user:"), []byte("user;"))
+//	if err != nil { return err }
+//	defer iter.Close()
+//
+//	for {
+//	    kv, err := iter.Next()
+//	    if err == io.EOF { break }
+//	    if err != nil { return err }
+//	    process(kv.Key, kv.Value)
+//	}
 func (db *DB) Scan(start, end []byte) (*Iterator, error) {
 	return db.ScanWithOptions(start, end, nil)
 }
 
-// ScanWithOptions creates a streaming iterator for the specified range with custom scan options.
+// ScanWithOptions creates a streaming iterator for the range `[start, end)` with explicit scan options.
+//
+// Pass nil options to use defaults.
+// The iterator must be closed after use.
+//
+// Example:
+//
+//	opts := &slatedb.ScanOptions{
+//	    DurabilityFilter: slatedb.DurabilityRemote,
+//	    Dirty:            false,
+//	    ReadAheadBytes:   1024,
+//	    CacheBlocks:      true,
+//	    MaxFetchTasks:    2,
+//	}
+//	iter, err := db.ScanWithOptions([]byte("user:"), []byte("user;"), opts)
 func (db *DB) ScanWithOptions(start, end []byte, opts *ScanOptions) (*Iterator, error) {
 	if db == nil || db.handle == nil {
 		return nil, ErrInvalidHandle
@@ -390,12 +498,17 @@ func (db *DB) ScanWithOptions(start, end []byte, opts *ScanOptions) (*Iterator, 
 	return &Iterator{ptr: iterPtr}, nil
 }
 
-// ScanPrefix creates a streaming iterator for all keys with the given prefix.
+// ScanPrefix creates a streaming iterator for all keys that start with `prefix`.
+//
+// The iterator must be closed after use.
 func (db *DB) ScanPrefix(prefix []byte) (*Iterator, error) {
 	return db.ScanPrefixWithOptions(prefix, nil)
 }
 
-// ScanPrefixWithOptions creates a streaming iterator for all keys with the given prefix and custom scan options.
+// ScanPrefixWithOptions creates a streaming iterator for `prefix` with explicit scan options.
+//
+// Pass nil options to use defaults.
+// The iterator must be closed after use.
 func (db *DB) ScanPrefixWithOptions(prefix []byte, opts *ScanOptions) (*Iterator, error) {
 	if db == nil || db.handle == nil {
 		return nil, ErrInvalidHandle
@@ -422,7 +535,10 @@ func (db *DB) ScanPrefixWithOptions(prefix []byte, opts *ScanOptions) (*Iterator
 	return &Iterator{ptr: iterPtr}, nil
 }
 
-// Metrics returns snapshot of current database metrics.
+// Metrics returns a snapshot of current database metrics.
+//
+// The returned map is decoded from the JSON payload produced by
+// `slatedb_db_metrics`.
 func (db *DB) Metrics() (map[string]int64, error) {
 	if db == nil || db.handle == nil {
 		return nil, ErrInvalidHandle
@@ -447,7 +563,7 @@ func (db *DB) Metrics() (map[string]int64, error) {
 	return metrics, nil
 }
 
-// Builder represents a database builder that mirrors Rust's DbBuilder.
+// Builder mirrors SlateDB's Rust DbBuilder API.
 type Builder struct {
 	path         string
 	url          *string
@@ -456,24 +572,24 @@ type Builder struct {
 	sstBlockSize *SstBlockSize
 }
 
-// NewBuilder creates a new database builder.
+// NewBuilder creates a new database builder for `path`.
 func NewBuilder(path string) (*Builder, error) {
 	return &Builder{path: path}, nil
 }
 
-// WithUrl sets the URL for the database object store.
+// WithUrl sets the object-store URL (for example `memory:///`, `file:///tmp/db`).
 func (b *Builder) WithUrl(url string) *Builder {
 	b.url = &url
 	return b
 }
 
-// WithEnvFile sets the env file used to resolve object store config.
+// WithEnvFile sets the env file used when resolving object-store configuration.
 func (b *Builder) WithEnvFile(envFile string) *Builder {
 	b.envFile = &envFile
 	return b
 }
 
-// WithSettings sets the Settings for the database.
+// WithSettings sets custom SlateDB settings for the builder.
 func (b *Builder) WithSettings(settings *Settings) *Builder {
 	b.settings = settings
 	return b
@@ -485,7 +601,9 @@ func (b *Builder) WithSstBlockSize(size SstBlockSize) *Builder {
 	return b
 }
 
-// Build creates the database using the configured options.
+// Build constructs and opens a DB using the configured builder options.
+//
+// On success, the returned DB owns the open handle.
 func (b *Builder) Build() (*DB, error) {
 	objectStore, err := resolveObjectStoreHandle(b.url, b.envFile)
 	if err != nil {

@@ -19,6 +19,18 @@ type WriteBatch struct {
 }
 
 // NewWriteBatch creates a new WriteBatch for atomic operations.
+//
+// Example:
+//
+//	batch, err := slatedb.NewWriteBatch()
+//	if err != nil {
+//	    return err
+//	}
+//	defer batch.Close()
+//
+//	batch.Put([]byte("key1"), []byte("value1"))
+//	batch.Delete([]byte("key2"))
+//	err = db.Write(batch)
 func NewWriteBatch() (*WriteBatch, error) {
 	var batchPtr *C.slatedb_write_batch_t
 	result := C.slatedb_write_batch_new(&batchPtr)
@@ -49,7 +61,7 @@ func (b *WriteBatch) ensureOpen() error {
 	return nil
 }
 
-// Put adds a key-value pair to the batch with default options.
+// Put adds a key-value pair to the batch with default put options.
 func (b *WriteBatch) Put(key, value []byte) error {
 	if err := b.ensureOpen(); err != nil {
 		return err
@@ -67,7 +79,17 @@ func (b *WriteBatch) Put(key, value []byte) error {
 	return nil
 }
 
-// PutWithOptions adds a key-value pair to the batch with custom put options.
+// PutWithOptions adds a key-value pair to the batch with explicit put options.
+//
+// Pass nil options to use defaults.
+//
+// Example:
+//
+//	putOpts := &slatedb.PutOptions{
+//	    TTLType:  slatedb.TTLExpireAfter,
+//	    TTLValue: 3600000,
+//	}
+//	err := batch.PutWithOptions([]byte("session:123"), []byte("data"), putOpts)
 func (b *WriteBatch) PutWithOptions(key, value []byte, opts *PutOptions) error {
 	if err := b.ensureOpen(); err != nil {
 		return err
@@ -105,6 +127,8 @@ func (b *WriteBatch) Delete(key []byte) error {
 }
 
 // Close releases the resources associated with the WriteBatch.
+//
+// This must be called exactly once for each batch, even after `DB.Write`.
 func (b *WriteBatch) Close() error {
 	if b.closed {
 		return errors.New("batch is already closed")

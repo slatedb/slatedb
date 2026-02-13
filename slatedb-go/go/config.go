@@ -171,6 +171,11 @@ type ObjectStoreCacheOptions struct {
 }
 
 // GarbageCollectorOptions represents garbage collection configuration.
+//
+// Behavior:
+// - nil GarbageCollectorOptions: garbage collection disabled
+// - Empty GarbageCollectorOptions{}: garbage collection enabled with Rust defaults
+// - Specific directory options: configuration applied per directory where set
 type GarbageCollectorOptions struct {
 	Manifest    *GarbageCollectorDirectoryOptions `json:"manifest_options,omitempty"`
 	Wal         *GarbageCollectorDirectoryOptions `json:"wal_options,omitempty"`
@@ -179,6 +184,14 @@ type GarbageCollectorOptions struct {
 }
 
 // GarbageCollectorDirectoryOptions represents per-directory GC configuration.
+//
+// Default values match Rust defaults:
+// - Interval: "300s" (5 minutes)
+// - MinAge: "86400s" (24 hours)
+//
+// Example override:
+//
+//	Manifest: &GarbageCollectorDirectoryOptions{Interval: "60s", MinAge: "1h"}
 type GarbageCollectorDirectoryOptions struct {
 	Interval string `json:"interval"` // Default: "300s" (5 minutes)
 	MinAge   string `json:"min_age"`  // Default: "86400s" (24 hours)
@@ -206,6 +219,8 @@ const (
 )
 
 // ScanOptions contains options for scan operations.
+//
+// Note: pass nil scan options to scan methods to use full Rust defaults.
 type ScanOptions struct {
 	DurabilityFilter DurabilityLevel
 	Dirty            bool   // Include uncommitted writes (default: false)
@@ -258,6 +273,8 @@ func SettingsDefault() (*Settings, error) {
 }
 
 // SettingsFromFile loads Settings from a configuration file.
+//
+// Supported file types: `.json`, `.toml`, `.yaml`, `.yml`.
 func SettingsFromFile(path string) (*Settings, error) {
 	cPath := C.CString(path)
 	defer C.free(unsafe.Pointer(cPath))
@@ -272,6 +289,8 @@ func SettingsFromFile(path string) (*Settings, error) {
 }
 
 // SettingsFromEnv loads Settings from environment variables.
+//
+// `prefix` is the environment variable prefix used by SlateDB settings parsing.
 func SettingsFromEnv(prefix string) (*Settings, error) {
 	cPrefix := C.CString(prefix)
 	defer C.free(unsafe.Pointer(cPrefix))
@@ -285,7 +304,9 @@ func SettingsFromEnv(prefix string) (*Settings, error) {
 	return settingsFromHandle(handle)
 }
 
-// SettingsLoad loads Settings using auto-detection (files, env vars, etc.).
+// SettingsLoad loads Settings using SlateDB's auto-detection logic.
+//
+// This follows the Rust `Settings::load()` behavior.
 func SettingsLoad() (*Settings, error) {
 	var handle *C.slatedb_settings_t
 	result := C.slatedb_settings_load(&handle)

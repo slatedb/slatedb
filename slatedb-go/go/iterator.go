@@ -18,7 +18,21 @@ type Iterator struct {
 }
 
 // Next returns the next key-value pair from the iterator.
-// Returns io.EOF when iteration is complete.
+//
+// Returns `io.EOF` when iteration is complete.
+//
+// Typical usage:
+//
+//	for {
+//	    kv, err := iter.Next()
+//	    if err == io.EOF {
+//	        break
+//	    }
+//	    if err != nil {
+//	        return err
+//	    }
+//	    process(kv.Key, kv.Value)
+//	}
 func (iter *Iterator) Next() (KeyValue, error) {
 	if iter.closed {
 		return KeyValue{}, errors.New("iterator is closed")
@@ -55,7 +69,14 @@ func (iter *Iterator) Next() (KeyValue, error) {
 	}, nil
 }
 
-// Seek moves the iterator to the specified key position.
+// Seek moves the iterator to the first key greater than or equal to `key`.
+//
+// `key` must be non-empty.
+//
+// Example:
+//
+//	err := iter.Seek([]byte("user:500"))
+//	kv, err := iter.Next() // First key >= "user:500"
 func (iter *Iterator) Seek(key []byte) error {
 	if iter.closed {
 		return errors.New("iterator is closed")
@@ -72,7 +93,9 @@ func (iter *Iterator) Seek(key []byte) error {
 	return resultToErrorAndFree(result)
 }
 
-// Close releases the iterator resources.
+// Close releases iterator resources.
+//
+// Close iterators before closing the owning DB/DbReader.
 func (iter *Iterator) Close() error {
 	if iter.closed {
 		return nil
