@@ -151,7 +151,7 @@ impl Manifest {
     }
 
     #[allow(unused)]
-    pub(crate) fn union(manifests: Vec<Manifest>) -> Manifest {
+    pub(crate) fn union(manifests: Vec<Manifest>, rand: Arc<DbRand>) -> Manifest {
         if manifests.len() == 1 {
             manifests[0].clone()
         } else {
@@ -200,7 +200,18 @@ impl Manifest {
                             existing.sst_ids.extend(new_ids);
                         }
                         None => {
-                            external_db_map.insert(key, db.clone());
+                            // Generate new final_checkpoint_ids — the old ones
+                            // belong to the source databases' clone relationships,
+                            // not to the new database.
+                            external_db_map.insert(
+                                key,
+                                ExternalDb {
+                                    path: db.path.clone(),
+                                    source_checkpoint_id: db.source_checkpoint_id,
+                                    final_checkpoint_id: Some(rand.rng().gen_uuid()),
+                                    sst_ids: db.sst_ids.clone(),
+                                },
+                            );
                         }
                     }
                 }
@@ -819,7 +830,7 @@ mod tests {
         let expected_manifest =
             build_manifest(&test_case.expected, |alias| *sst_ids.get(alias).unwrap());
 
-        let union = Manifest::union(manifests);
+        let union = Manifest::union(manifests, Arc::new(DbRand::default()));
 
         assert_manifest_equal(&union, &expected_manifest, &sst_ids);
     }
@@ -854,7 +865,7 @@ mod tests {
             })
             .collect();
 
-        Manifest::union(manifests);
+        Manifest::union(manifests, Arc::new(DbRand::default()));
     }
 
     fn build_manifest<F>(manifest: &SimpleManifest, mut sst_id_fn: F) -> Manifest
@@ -1157,7 +1168,7 @@ mod tests {
 
         let sources = vec![m1, m2];
 
-        let result = Manifest::union(sources);
+        let result = Manifest::union(sources, Arc::new(DbRand::default()));
 
         // Find the entry for the shared ancestor
         let shared_entries: Vec<_> = result
@@ -1175,5 +1186,62 @@ mod tests {
         let merged_ids: HashSet<SsTableId> = shared_entries[0].sst_ids.iter().copied().collect();
         let expected_ids: HashSet<SsTableId> = [sst_a, sst_b, sst_c].iter().copied().collect();
         assert_eq!(merged_ids, expected_ids);
+
+        // The final_checkpoint_id should differ from the original
+        assert_ne!(
+            shared_entries[0].final_checkpoint_id,
+            Some(original_final_cp),
+            "final_checkpoint_id should be regenerated"
+        );
+        assert!(
+            shared_entries[0].final_checkpoint_id.is_some(),
+            "final_checkpoint_id should not be None"
+        );
+    }
+
+    #[test]
+    fn test_union_regenerates_checkpoint_id_for_unique_external_db() {
+        use super::ExternalDb;
+
+        let original_final_cp = Uuid::new_v4();
+        let ancestor_path = "ancestor".to_string();
+        let ancestor_source_cp = Uuid::new_v4();
+
+        let sst_own1 = SsTableId::Compacted(Ulid::from_parts(1000, 0));
+        let sst_own2 = SsTableId::Compacted(Ulid::from_parts(2000, 0));
+        let sst_ext = SsTableId::Compacted(Ulid::from_parts(3000, 0));
+
+        // Only m1 has the external_db entry — it won't be deduplicated,
+        // but union should still regenerate its final_checkpoint_id.
+        let mut m1 =
+            manifest_with_one_compacted_sst(sst_own1, b"a", BytesRange::from_ref("a".."m"));
+        m1.external_dbs.push(ExternalDb {
+            path: ancestor_path.clone(),
+            source_checkpoint_id: ancestor_source_cp,
+            final_checkpoint_id: Some(original_final_cp),
+            sst_ids: vec![sst_ext],
+        });
+
+        let m2 = manifest_with_one_compacted_sst(sst_own2, b"m", BytesRange::from_ref("m"..));
+
+        let sources = vec![m1, m2];
+
+        let result = Manifest::union(sources, Arc::new(DbRand::default()));
+
+        let entry = result
+            .external_dbs
+            .iter()
+            .find(|db| db.path == ancestor_path && db.source_checkpoint_id == ancestor_source_cp)
+            .expect("External db entry should be present");
+
+        assert_ne!(
+            entry.final_checkpoint_id,
+            Some(original_final_cp),
+            "final_checkpoint_id should be regenerated even for non-deduplicated entries"
+        );
+        assert!(
+            entry.final_checkpoint_id.is_some(),
+            "final_checkpoint_id should not be None"
+        );
     }
 }
