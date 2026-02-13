@@ -289,14 +289,6 @@ typedef void (*slatedb_log_callback_fn)(slatedb_log_level_t level,
 // Optional callback used to free logging context when replaced or cleared.
 typedef void (*slatedb_log_context_free_fn)(void *context);
 
-// Key/value JSON update entry used by `slatedb_settings_apply_kv`.
-typedef struct slatedb_settings_kv_t {
-    // Dotted field path (for example `compactor_options.max_sst_size`).
-    const char *key;
-    // JSON literal to assign at `key` (for example `123`, `true`, `"zstd"`).
-    const char *value_json;
-} slatedb_settings_kv_t;
-
 // Creates a new database builder.
 //
 // ## Arguments
@@ -1405,14 +1397,16 @@ struct slatedb_result_t slatedb_settings_load(struct slatedb_settings_t **out_se
 
 // Applies key/value JSON updates to an existing settings handle.
 //
-// Each entry uses a dotted field path in `key` and a JSON literal in
+// Uses a dotted field path in `key` and a JSON literal payload in
 // `value_json`. Intermediate objects in a dotted path are materialized as
 // needed when absent or null.
 //
 // ## Arguments
 // - `settings`: Settings handle to mutate.
-// - `kvs`: Pointer to `slatedb_settings_kv_t` entries.
-// - `kvs_len`: Number of entries in `kvs`.
+// - `key`: UTF-8 dotted field path bytes.
+// - `key_len`: Number of bytes in `key`.
+// - `value_json`: UTF-8 JSON literal bytes assigned at `key`.
+// - `value_json_len`: Number of bytes in `value_json`.
 //
 // ## Returns
 // - `slatedb_result_t` indicating success or failure.
@@ -1424,11 +1418,14 @@ struct slatedb_result_t slatedb_settings_load(struct slatedb_settings_t **out_se
 //
 // ## Safety
 // - `settings` must be a valid non-null settings handle.
-// - If `kvs_len > 0`, `kvs` must point to `kvs_len` readable entries.
-// - Each `key` and `value_json` must be valid null-terminated UTF-8 strings.
+// - If `key_len > 0`, `key` must point to at least `key_len` readable bytes.
+// - If `value_json_len > 0`, `value_json` must point to at least
+//   `value_json_len` readable bytes.
 struct slatedb_result_t slatedb_settings_apply_kv(struct slatedb_settings_t *settings,
-                                                  const struct slatedb_settings_kv_t *kvs,
-                                                  uintptr_t kvs_len);
+                                                  const char *key,
+                                                  uintptr_t key_len,
+                                                  const char *value_json,
+                                                  uintptr_t value_json_len);
 
 // Serializes settings to a UTF-8 JSON payload.
 //

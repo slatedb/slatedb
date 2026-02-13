@@ -88,17 +88,6 @@ pub struct slatedb_settings_t {
     pub settings: Settings,
 }
 
-/// Key/value JSON update entry used by `slatedb_settings_apply_kv`.
-#[repr(C)]
-#[allow(non_camel_case_types)]
-#[derive(Clone, Copy)]
-pub struct slatedb_settings_kv_t {
-    /// Dotted field path (for example `compactor_options.max_sst_size`).
-    pub key: *const c_char,
-    /// JSON literal to assign at `key` (for example `123`, `true`, `"zstd"`).
-    pub value_json: *const c_char,
-}
-
 /// Opaque handle backing an open `Db` plus runtime owner.
 #[allow(non_camel_case_types)]
 pub struct slatedb_db_t {

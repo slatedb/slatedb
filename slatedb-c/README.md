@@ -197,12 +197,14 @@ cleanup:
 
 Settings in `slatedb-c` are implemented as an opaque handle (`slatedb_settings_t*`) that wraps
 the Rust settings model. You create a settings handle from one of the supported sources, optionally
-apply targeted key/value patches, and then pass that handle to
-`slatedb_db_builder_with_settings`. The handle owns the resolved configuration snapshot until it is
-released with `slatedb_settings_close`. Settings can be loaded from config files (`.json`, `.toml`,
-`.yaml`, `.yml`), JSON payloads, environment variables (with `SLATEDB_` prefix), or via
-`slatedb_settings_default`. See the Rust [`config.rs`](../slatedb/src/config.rs) file for the full
-list of supported configuration keys and their expected types.
+apply targeted key/value patches, and then pass that handle to `slatedb_db_builder_with_settings`.
+The handle owns the resolved configuration snapshot until it is released with
+`slatedb_settings_close`. Settings can be loaded from config files (`.json`, `.toml`, `.yaml`,
+`.yml`), JSON payloads, environment variables (with `SLATEDB_` prefix), or via
+`slatedb_settings_default`. Settings can be modified programmatically by passing JSON back and for
+with `slatedb_settings_to_json` and `slatedb_settings_from_json`. Single key/value pairs can be set
+using `slatedb_settings_apply_kv`. See the Rust [`config.rs`](../slatedb/src/config.rs) file for the
+full list of supported configuration keys and their expected types.
 
 ## Builder
 
@@ -217,11 +219,14 @@ struct slatedb_db_t* db = NULL;
 struct slatedb_settings_t* settings = NULL;
 
 check_result("settings_default", slatedb_settings_default(&settings));
-struct slatedb_settings_kv_t patch = {
-    .key = "compactor_options.max_sst_size",
-    .value_json = "268435456",
-};
-check_result("settings_apply_kv", slatedb_settings_apply_kv(settings, &patch, 1));
+check_result(
+    "settings_apply_kv",
+    slatedb_settings_apply_kv(
+        settings,
+        "compactor_options.max_sst_size",
+        sizeof("compactor_options.max_sst_size") - 1,
+        "268435456",
+        sizeof("268435456") - 1));
 check_result("builder_new", slatedb_db_builder_new("demo-db", store, &builder));
 check_result("builder_with_settings",
              slatedb_db_builder_with_settings(builder, settings));

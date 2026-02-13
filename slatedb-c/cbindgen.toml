@@ -54,7 +54,6 @@ include = [
     "slatedb_object_store_t",
     "slatedb_db_builder_t",
     "slatedb_settings_t",
-    "slatedb_settings_kv_t",
     "slatedb_db_t",
     "slatedb_db_reader_t",
     "slatedb_iterator_t",

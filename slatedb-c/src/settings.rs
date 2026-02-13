@@ -4,9 +4,9 @@
 //! SlateDB `Settings` handles.
 
 use crate::ffi::{
-    alloc_bytes, cstr_to_string, error_from_slate_error, error_result, require_handle,
-    require_out_ptr, slatedb_error_kind_t, slatedb_result_t, slatedb_settings_kv_t,
-    slatedb_settings_t, success_result,
+    alloc_bytes, bytes_from_ptr, cstr_to_string, error_from_slate_error, error_result,
+    require_handle, require_out_ptr, slatedb_error_kind_t, slatedb_result_t, slatedb_settings_t,
+    success_result,
 };
 use serde_json::{Map, Value};
 use slatedb::Settings;
@@ -248,14 +248,16 @@ pub unsafe extern "C" fn slatedb_settings_load(
 
 /// Applies key/value JSON updates to an existing settings handle.
 ///
-/// Each entry uses a dotted field path in `key` and a JSON literal in
+/// Uses a dotted field path in `key` and a JSON literal payload in
 /// `value_json`. Intermediate objects in a dotted path are materialized as
 /// needed when absent or null.
 ///
 /// ## Arguments
 /// - `settings`: Settings handle to mutate.
-/// - `kvs`: Pointer to `slatedb_settings_kv_t` entries.
-/// - `kvs_len`: Number of entries in `kvs`.
+/// - `key`: UTF-8 dotted field path bytes.
+/// - `key_len`: Number of bytes in `key`.
+/// - `value_json`: UTF-8 JSON literal bytes assigned at `key`.
+/// - `value_json_len`: Number of bytes in `value_json`.
 ///
 /// ## Returns
 /// - `slatedb_result_t` indicating success or failure.
@@ -267,26 +269,19 @@ pub unsafe extern "C" fn slatedb_settings_load(
 ///
 /// ## Safety
 /// - `settings` must be a valid non-null settings handle.
-/// - If `kvs_len > 0`, `kvs` must point to `kvs_len` readable entries.
-/// - Each `key` and `value_json` must be valid null-terminated UTF-8 strings.
+/// - If `key_len > 0`, `key` must point to at least `key_len` readable bytes.
+/// - If `value_json_len > 0`, `value_json` must point to at least
+///   `value_json_len` readable bytes.
 #[no_mangle]
 pub unsafe extern "C" fn slatedb_settings_apply_kv(
     settings: *mut slatedb_settings_t,
-    kvs: *const slatedb_settings_kv_t,
-    kvs_len: usize,
+    key: *const c_char,
+    key_len: usize,
+    value_json: *const c_char,
+    value_json_len: usize,
 ) -> slatedb_result_t {
     if let Err(err) = require_handle(settings, "settings") {
         return err;
-    }
-    if kvs_len > 0 && kvs.is_null() {
-        return error_result(
-            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
-            "kvs pointer is null",
-        );
-    }
-
-    if kvs_len == 0 {
-        return success_result();
     }
 
     let handle = &mut *settings;
@@ -307,33 +302,40 @@ pub unsafe extern "C" fn slatedb_settings_apply_kv(
         );
     }
 
-    for i in 0..kvs_len {
-        let kv = &*kvs.add(i);
-        let key = match cstr_to_string(kv.key, &format!("kvs[{i}].key")) {
-            Ok(key) => key,
-            Err(err) => return err,
-        };
-        let value_json = match cstr_to_string(kv.value_json, &format!("kvs[{i}].value_json")) {
-            Ok(value_json) => value_json,
-            Err(err) => return err,
-        };
-
-        let value = match serde_json::from_str::<Value>(&value_json) {
-            Ok(value) => value,
-            Err(err) => {
-                return error_result(
-                    slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
-                    &format!("kvs[{i}].value_json is not valid JSON: {err}"),
-                );
-            }
-        };
-
-        if let Err(message) = apply_dotted_json_path(&mut settings_json, &key, value) {
+    let key_bytes = match bytes_from_ptr(key as *const u8, key_len, "key") {
+        Ok(key_bytes) => key_bytes,
+        Err(err) => return err,
+    };
+    let key = match std::str::from_utf8(key_bytes) {
+        Ok(key) => key,
+        Err(_) => {
             return error_result(
                 slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
-                &format!("kvs[{i}].key invalid: {message}"),
+                "key is not valid UTF-8",
             );
         }
+    };
+
+    let value_json_bytes =
+        match bytes_from_ptr(value_json as *const u8, value_json_len, "value_json") {
+            Ok(value_json_bytes) => value_json_bytes,
+            Err(err) => return err,
+        };
+    let value = match serde_json::from_slice::<Value>(value_json_bytes) {
+        Ok(value) => value,
+        Err(err) => {
+            return error_result(
+                slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
+                &format!("value_json is not valid JSON: {err}"),
+            );
+        }
+    };
+
+    if let Err(message) = apply_dotted_json_path(&mut settings_json, key, value) {
+        return error_result(
+            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
+            &format!("key invalid: {message}"),
+        );
     }
 
     match serde_json::from_value::<Settings>(settings_json) {
