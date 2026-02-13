@@ -43,7 +43,13 @@ use slatedb_common::clock::SystemClock;
 
 pub(crate) const WRITE_BATCH_TASK_NAME: &str = "writer";
 
-pub(crate) type WriteBatchResult = Result<WriteHandle, SlateDBError>;
+pub(crate) type WriteBatchResult = Result<
+    (
+        WriteHandle,
+        Option<WatchableOnceCellReader<Result<(), SlateDBError>>>,
+    ),
+    SlateDBError,
+>;
 
 pub(crate) struct WriteBatchMessage {
     pub(crate) batch: WriteBatch,
@@ -88,14 +94,12 @@ impl MessageHandler<WriteBatchMessage> for WriteBatchEventHandler {
         // their memtables in a timely manner.
         if self.is_first_write && !self.db_inner.wal_enabled && options.await_durable {
             self.is_first_write = false;
-            if let Ok(handle) = &result {
-                if let Some(this_watcher) = &handle.durable_watcher {
-                    let this_watcher = this_watcher.clone();
-                    let this_clock = self.db_inner.system_clock.clone();
-                    tokio::spawn(async move {
-                        monitor_first_write(this_watcher, this_clock).await;
-                    });
-                }
+            if let Ok((_, Some(this_watcher))) = &result {
+                let this_watcher = this_watcher.clone();
+                let this_clock = self.db_inner.system_clock.clone();
+                tokio::spawn(async move {
+                    monitor_first_write(this_watcher, this_clock).await;
+                });
             }
         }
         _ = done.send(result);
@@ -195,9 +199,9 @@ impl DbInner {
             self.maybe_freeze_memtable(&mut guard, last_flushed_wal_id)?;
         }
 
-        let write_handle = WriteHandle::new(commit_seq, Some(now), Some(durable_watcher));
+        let write_handle = WriteHandle::new(commit_seq, Some(now));
 
-        Ok(write_handle)
+        Ok((write_handle, Some(durable_watcher)))
     }
 
     /// Write entries to the currently active memtable. Returns a durable watcher for the memtable.

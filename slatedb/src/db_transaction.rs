@@ -473,7 +473,6 @@ impl DbTransaction {
             return Ok(WriteHandle {
                 seq: self.db_inner.oracle.last_committed_seq(),
                 create_ts: None,
-                durable_watcher: None,
             });
         }
 
