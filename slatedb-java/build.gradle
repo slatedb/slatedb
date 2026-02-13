@@ -1,5 +1,6 @@
 plugins {
     id 'java-library'
+    id 'de.infolektuell.jextract' version '1.2.0'
 }
 
 group = 'io.slatedb'
