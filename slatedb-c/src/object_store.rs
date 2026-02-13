@@ -47,7 +47,7 @@ pub unsafe extern "C" fn slatedb_object_store_from_url(
             *out_object_store = Box::into_raw(handle);
             success_result()
         }
-        Err(err) => error_from_slate_error(&err, &format!("failed to resolve object store: {err}")),
+        Err(err) => error_from_slate_error(&err),
     }
 }
 

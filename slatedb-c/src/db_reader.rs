@@ -98,7 +98,7 @@ pub unsafe extern "C" fn slatedb_db_reader_open(
             *out_reader = Box::into_raw(handle);
             success_result()
         }
-        Err(err) => error_from_slate_error(&err, &format!("db reader open failed: {err}")),
+        Err(err) => error_from_slate_error(&err),
     }
 }
 
@@ -215,7 +215,7 @@ pub unsafe extern "C" fn slatedb_db_reader_get_with_options(
             *out_present = false;
             success_result()
         }
-        Err(err) => error_from_slate_error(&err, &format!("db reader get failed: {err}")),
+        Err(err) => error_from_slate_error(&err),
     }
 }
 
@@ -298,7 +298,7 @@ pub unsafe extern "C" fn slatedb_db_reader_scan_with_options(
             *out_iterator = Box::into_raw(iterator);
             success_result()
         }
-        Err(err) => error_from_slate_error(&err, &format!("db reader scan failed: {err}")),
+        Err(err) => error_from_slate_error(&err),
     }
 }
 
@@ -393,7 +393,7 @@ pub unsafe extern "C" fn slatedb_db_reader_scan_prefix_with_options(
             *out_iterator = Box::into_raw(iterator);
             success_result()
         }
-        Err(err) => error_from_slate_error(&err, &format!("db reader scan_prefix failed: {err}")),
+        Err(err) => error_from_slate_error(&err),
     }
 }
 
@@ -422,7 +422,7 @@ pub unsafe extern "C" fn slatedb_db_reader_close(
     let handle = Box::from_raw(reader);
     match handle.runtime.block_on(handle.reader.close()) {
         Ok(()) => success_result(),
-        Err(err) => error_from_slate_error(&err, &format!("db reader close failed: {err}")),
+        Err(err) => error_from_slate_error(&err),
     }
 }
 

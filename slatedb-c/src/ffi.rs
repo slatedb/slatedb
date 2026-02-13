@@ -448,9 +448,9 @@ pub(crate) fn map_error(err: &slatedb::Error) -> (slatedb_error_kind_t, slatedb_
 }
 
 /// Converts a SlateDB error into a fully-populated C result object.
-pub(crate) fn error_from_slate_error(err: &slatedb::Error, message: &str) -> slatedb_result_t {
+pub(crate) fn error_from_slate_error(err: &slatedb::Error) -> slatedb_result_t {
     let (kind, close_reason) = map_error(err);
-    error_result_with_close_reason(kind, close_reason, message)
+    error_result_with_close_reason(kind, close_reason, &err.to_string())
 }
 
 /// Creates the Tokio runtime used by C ABI operations.

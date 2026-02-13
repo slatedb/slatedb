@@ -64,7 +64,7 @@ pub unsafe extern "C" fn slatedb_db_open(
             *out_db = Box::into_raw(handle);
             success_result()
         }
-        Err(err) => error_from_slate_error(&err, &format!("db open failed: {err}")),
+        Err(err) => error_from_slate_error(&err),
     }
 }
 
@@ -91,7 +91,7 @@ pub unsafe extern "C" fn slatedb_db_status(db: *const slatedb_db_t) -> slatedb_r
     let handle = &*db;
     match handle.db.status() {
         Ok(()) => success_result(),
-        Err(err) => error_from_slate_error(&err, &format!("db status failed: {err}")),
+        Err(err) => error_from_slate_error(&err),
     }
 }
 
@@ -329,7 +329,7 @@ pub unsafe extern "C" fn slatedb_db_get_with_options(
             *out_present = false;
             success_result()
         }
-        Err(err) => error_from_slate_error(&err, &format!("db get failed: {err}")),
+        Err(err) => error_from_slate_error(&err),
     }
 }
 
@@ -379,7 +379,7 @@ pub unsafe extern "C" fn slatedb_db_put(
     let handle = &mut *db;
     match handle.runtime.block_on(handle.db.put(key, value)) {
         Ok(()) => success_result(),
-        Err(err) => error_from_slate_error(&err, &format!("db put failed: {err}")),
+        Err(err) => error_from_slate_error(&err),
     }
 }
 
@@ -444,7 +444,7 @@ pub unsafe extern "C" fn slatedb_db_put_with_options(
         &write_options,
     )) {
         Ok(()) => success_result(),
-        Err(err) => error_from_slate_error(&err, &format!("db put_with_options failed: {err}")),
+        Err(err) => error_from_slate_error(&err),
     }
 }
 
@@ -485,7 +485,7 @@ pub unsafe extern "C" fn slatedb_db_delete(
     let handle = &mut *db;
     match handle.runtime.block_on(handle.db.delete(key)) {
         Ok(()) => success_result(),
-        Err(err) => error_from_slate_error(&err, &format!("db delete failed: {err}")),
+        Err(err) => error_from_slate_error(&err),
     }
 }
 
@@ -533,7 +533,7 @@ pub unsafe extern "C" fn slatedb_db_delete_with_options(
         .block_on(handle.db.delete_with_options(key, &write_options))
     {
         Ok(()) => success_result(),
-        Err(err) => error_from_slate_error(&err, &format!("db delete_with_options failed: {err}")),
+        Err(err) => error_from_slate_error(&err),
     }
 }
 
@@ -583,7 +583,7 @@ pub unsafe extern "C" fn slatedb_db_merge(
     let handle = &mut *db;
     match handle.runtime.block_on(handle.db.merge(key, value)) {
         Ok(()) => success_result(),
-        Err(err) => error_from_slate_error(&err, &format!("db merge failed: {err}")),
+        Err(err) => error_from_slate_error(&err),
     }
 }
 
@@ -648,7 +648,7 @@ pub unsafe extern "C" fn slatedb_db_merge_with_options(
         &write_options,
     )) {
         Ok(()) => success_result(),
-        Err(err) => error_from_slate_error(&err, &format!("db merge_with_options failed: {err}")),
+        Err(err) => error_from_slate_error(&err),
     }
 }
 
@@ -719,7 +719,7 @@ pub unsafe extern "C" fn slatedb_db_write_with_options(
         .block_on(db_handle.db.write_with_options(batch, &write_options))
     {
         Ok(()) => success_result(),
-        Err(err) => error_from_slate_error(&err, &format!("db write_with_options failed: {err}")),
+        Err(err) => error_from_slate_error(&err),
     }
 }
 
@@ -801,7 +801,7 @@ pub unsafe extern "C" fn slatedb_db_scan_with_options(
             *out_iterator = Box::into_raw(iterator);
             success_result()
         }
-        Err(err) => error_from_slate_error(&err, &format!("db scan failed: {err}")),
+        Err(err) => error_from_slate_error(&err),
     }
 }
 
@@ -888,7 +888,7 @@ pub unsafe extern "C" fn slatedb_db_scan_prefix_with_options(
             *out_iterator = Box::into_raw(iterator);
             success_result()
         }
-        Err(err) => error_from_slate_error(&err, &format!("db scan_prefix failed: {err}")),
+        Err(err) => error_from_slate_error(&err),
     }
 }
 
@@ -915,7 +915,7 @@ pub unsafe extern "C" fn slatedb_db_flush(db: *mut slatedb_db_t) -> slatedb_resu
     let handle = &mut *db;
     match handle.runtime.block_on(handle.db.flush()) {
         Ok(()) => success_result(),
-        Err(err) => error_from_slate_error(&err, &format!("db flush failed: {err}")),
+        Err(err) => error_from_slate_error(&err),
     }
 }
 
@@ -955,7 +955,7 @@ pub unsafe extern "C" fn slatedb_db_flush_with_options(
         .block_on(handle.db.flush_with_options(flush_options))
     {
         Ok(()) => success_result(),
-        Err(err) => error_from_slate_error(&err, &format!("db flush_with_options failed: {err}")),
+        Err(err) => error_from_slate_error(&err),
     }
 }
 
@@ -982,7 +982,7 @@ pub unsafe extern "C" fn slatedb_db_close(db: *mut slatedb_db_t) -> slatedb_resu
     let handle = Box::from_raw(db);
     match handle.runtime.block_on(handle.db.close()) {
         Ok(()) => success_result(),
-        Err(err) => error_from_slate_error(&err, &format!("db close failed: {err}")),
+        Err(err) => error_from_slate_error(&err),
     }
 }
 

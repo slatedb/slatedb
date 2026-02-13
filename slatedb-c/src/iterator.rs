@@ -78,7 +78,7 @@ pub unsafe extern "C" fn slatedb_iterator_next(
             *out_present = false;
             success_result()
         }
-        Err(err) => error_from_slate_error(&err, &format!("iterator next failed: {err}")),
+        Err(err) => error_from_slate_error(&err),
     }
 }
 
@@ -117,7 +117,7 @@ pub unsafe extern "C" fn slatedb_iterator_seek(
     let handle = &mut *iterator;
     match handle.runtime.block_on(handle.iter.seek(key)) {
         Ok(()) => success_result(),
-        Err(err) => error_from_slate_error(&err, &format!("iterator seek failed: {err}")),
+        Err(err) => error_from_slate_error(&err),
     }
 }
 

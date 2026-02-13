@@ -77,7 +77,7 @@ pub unsafe extern "C" fn slatedb_settings_from_file(
             *out_settings = Box::into_raw(handle);
             success_result()
         }
-        Err(err) => error_from_slate_error(&err, &format!("settings from_file failed: {err}")),
+        Err(err) => error_from_slate_error(&err),
     }
 }
 
@@ -160,7 +160,7 @@ pub unsafe extern "C" fn slatedb_settings_from_env(
             *out_settings = Box::into_raw(handle);
             success_result()
         }
-        Err(err) => error_from_slate_error(&err, &format!("settings from_env failed: {err}")),
+        Err(err) => error_from_slate_error(&err),
     }
 }
 
@@ -207,10 +207,7 @@ pub unsafe extern "C" fn slatedb_settings_from_env_with_default(
             *out_settings = Box::into_raw(handle);
             success_result()
         }
-        Err(err) => error_from_slate_error(
-            &err,
-            &format!("settings from_env_with_default failed: {err}"),
-        ),
+        Err(err) => error_from_slate_error(&err),
     }
 }
 
@@ -242,7 +239,7 @@ pub unsafe extern "C" fn slatedb_settings_load(
             *out_settings = Box::into_raw(handle);
             success_result()
         }
-        Err(err) => error_from_slate_error(&err, &format!("settings load failed: {err}")),
+        Err(err) => error_from_slate_error(&err),
     }
 }
 

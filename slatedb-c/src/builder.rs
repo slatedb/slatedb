@@ -324,7 +324,7 @@ pub unsafe extern "C" fn slatedb_db_builder_build(
             *out_db = Box::into_raw(db_handle);
             success_result()
         }
-        Err(err) => error_from_slate_error(&err, &format!("builder build failed: {err}")),
+        Err(err) => error_from_slate_error(&err),
     }
 }
 
