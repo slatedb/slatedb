@@ -93,8 +93,9 @@ impl Manifest {
                 ssts: Self::filter_sst_handles(&sorter_run.ssts, false, &range),
             });
         }
-        projected.core.l0 = Self::filter_sst_handles(&projected.core.l0, true, &range).into();
+        sorter_runs_filtered.retain(|sr| !sr.ssts.is_empty());
         projected.core.compacted = sorter_runs_filtered;
+        projected.core.l0 = Self::filter_sst_handles(&projected.core.l0, true, &range).into();
         projected
     }
 
@@ -348,9 +349,24 @@ mod tests {
         }
     }
 
+    struct SimpleSortedRun {
+        id: Option<u32>,
+        ssts: Vec<SstEntry>,
+    }
+
+    impl SimpleSortedRun {
+        fn new(ssts: Vec<SstEntry>) -> Self {
+            Self { id: None, ssts }
+        }
+
+        fn with_id(id: u32, ssts: Vec<SstEntry>) -> Self {
+            Self { id: Some(id), ssts }
+        }
+    }
+
     struct SimpleManifest {
         l0: Vec<SstEntry>,
-        sorted_runs: Vec<Vec<SstEntry>>,
+        sorted_runs: Vec<SimpleSortedRun>,
     }
 
     struct ProjectionTestCase {
@@ -369,14 +385,14 @@ mod tests {
                 SstEntry::regular("third", "m"),
             ],
             sorted_runs: vec![
-                vec![
+                SimpleSortedRun::new(vec![
                     SstEntry::regular("sr0_first", "a"),
-                ],
-                vec![
+                ]),
+                SimpleSortedRun::new(vec![
                     SstEntry::regular("sr1_first", "a"),
                     SstEntry::regular("sr1_second", "f"),
                     SstEntry::regular("sr1_third", "m"),
-                ],
+                ]),
             ],
         },
         expected_manifest: SimpleManifest {
@@ -386,15 +402,15 @@ mod tests {
                 SstEntry::projected("third", "m", "m".."o"),
             ],
             sorted_runs: vec![
-                vec![
+                SimpleSortedRun::new(vec![
                     // We can't filter this one out, because we don't know the
                     // end key, so it might still fall within the range
                     SstEntry::projected("sr0_first", "a", "h".."o"),
-                ],
-                vec![
+                ]),
+                SimpleSortedRun::new(vec![
                     SstEntry::projected("sr1_second", "f", "h".."m"),
                     SstEntry::projected("sr1_third", "m", "m".."o"),
-                ],
+                ]),
             ],
         },
     })]
@@ -414,6 +430,35 @@ mod tests {
                 SstEntry::projected("bar", "k", "n".."p"),
             ],
             sorted_runs: vec![],
+        },
+    })]
+    #[case::empty_sorted_run_removed(ProjectionTestCase {
+        visible_range: "m".."z",
+        existing_manifest: SimpleManifest {
+            l0: vec![],
+            sorted_runs: vec![
+                // This sorted run has keys entirely before the projection range
+                SimpleSortedRun::new(vec![
+                    SstEntry::projected("sr0_first", "a", "a".."d"),
+                    SstEntry::projected("sr0_second", "d", "d".."g"),
+                    SstEntry::projected("sr0_third", "g", "g".."k"),
+                ]),
+                // This sorted run spans the projection range
+                SimpleSortedRun::new(vec![
+                    SstEntry::regular("sr1_first", "a"),
+                    SstEntry::regular("sr1_second", "m"),
+                ]),
+            ],
+        },
+        expected_manifest: SimpleManifest {
+            l0: vec![],
+            sorted_runs: vec![
+                // sr0 is removed entirely because all SSTs end before "m"
+                // sr1 retains sr1_second (preserves original ID 1)
+                SimpleSortedRun::with_id(1, vec![
+                    SstEntry::projected("sr1_second", "m", "m".."z"),
+                ]),
+            ],
         },
     })]
     fn test_projected(#[case] test_case: ProjectionTestCase) {
@@ -554,8 +599,9 @@ mod tests {
         }
         for (idx, sorted_run) in manifest.sorted_runs.iter().enumerate() {
             core.compacted.push(SortedRun {
-                id: idx as u32,
+                id: sorted_run.id.unwrap_or(idx as u32),
                 ssts: sorted_run
+                    .ssts
                     .iter()
                     .map(|entry| {
                         SsTableHandle::new_compacted(

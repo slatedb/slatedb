@@ -642,6 +642,11 @@ The projection process works as follows:
    effective range.
 4. For each SST that has a non-empty intersection with the projection range, create a new handle with the
    `visible_range` set to the intersection. SSTs with an empty intersection are excluded from the result.
+5. Sorted runs whose SSTs were all excluded are removed entirely. Note that removing sorted runs may leave
+   gaps in sorted run IDs (e.g., `[5, 3, 1]` if SR 4 and 2 were removed). This is acceptable because the
+   compactor does not assume contiguous IDs — it matches sorted runs by ID, not by position. Preserving
+   original IDs is important so that union can correctly match the same logical tier across projected
+   manifests.
 
 The `visible_range` on an `SsTableHandle` constrains the keys that are visible when reading the SST. The
 `effective_range` is the intersection of the SST's physical range (derived from its first key) and its
