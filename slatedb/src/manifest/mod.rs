@@ -178,12 +178,34 @@ impl Manifest {
             }
 
             // Merge the contents of all input manifests
-            let mut external_dbs = vec![];
             let mut core = ManifestCore::new();
 
+            // Deduplicate external_dbs by (path, source_checkpoint_id), merging
+            // sst_ids. Without dedup, repeated projection/union cycles cause
+            // exponential growth of duplicated entries.
+            let mut external_db_map: HashMap<(String, Uuid), ExternalDb> = HashMap::new();
             for (manifest, _) in &ranges {
-                external_dbs.extend_from_slice(&manifest.external_dbs);
+                for db in &manifest.external_dbs {
+                    let key = (db.path.clone(), db.source_checkpoint_id);
+                    match external_db_map.get_mut(&key) {
+                        Some(existing) => {
+                            let existing_ids: HashSet<SsTableId> =
+                                existing.sst_ids.iter().copied().collect();
+                            let new_ids: Vec<SsTableId> = db
+                                .sst_ids
+                                .iter()
+                                .filter(|id| !existing_ids.contains(id))
+                                .copied()
+                                .collect();
+                            existing.sst_ids.extend(new_ids);
+                        }
+                        None => {
+                            external_db_map.insert(key, db.clone());
+                        }
+                    }
+                }
             }
+            let external_dbs: Vec<ExternalDb> = external_db_map.into_values().collect();
 
             // Deduplicate L0 SSTs by ID, merging visible_ranges. Projection
             // includes the same L0 SST in multiple projected manifests with
@@ -1073,5 +1095,85 @@ mod tests {
             .find(|db| db.path == "db_mixed")
             .expect("ExternalDb with some in-range SSTs should be present");
         assert_eq!(mixed_entry.sst_ids, vec![sst_mixed_in]);
+    }
+
+    /// Helper to create a manifest with a single compacted sorted run containing
+    /// a single SST with a given first_entry key. The visible_range pins the SST
+    /// to a specific key range so that multiple manifests can be non-overlapping
+    /// (required by `union`).
+    fn manifest_with_one_compacted_sst(
+        sst_id: SsTableId,
+        first_entry: &'static [u8],
+        visible_range: BytesRange,
+    ) -> Manifest {
+        let mut core = ManifestCore::new();
+        core.compacted.push(SortedRun {
+            id: 0,
+            ssts: vec![SsTableHandle::new_compacted(
+                sst_id,
+                SsTableInfo {
+                    first_entry: Some(Bytes::from_static(first_entry)),
+                    ..SsTableInfo::default()
+                },
+                Some(visible_range),
+            )],
+        });
+        Manifest::initial(core)
+    }
+
+    #[test]
+    fn test_union_deduplicates_external_dbs() {
+        use super::ExternalDb;
+        use std::collections::HashSet;
+
+        let shared_path = "shared_ancestor".to_string();
+        let shared_source_cp = Uuid::new_v4();
+        let original_final_cp = Uuid::new_v4();
+
+        let sst_a = SsTableId::Compacted(Ulid::from_parts(1000, 0));
+        let sst_b = SsTableId::Compacted(Ulid::from_parts(1001, 0));
+        let sst_c = SsTableId::Compacted(Ulid::from_parts(1002, 0));
+
+        // Manifest 1: has sst_a, sst_b from the shared ancestor, owns sst_own1
+        let sst_own1 = SsTableId::Compacted(Ulid::from_parts(2000, 0));
+        let mut m1 =
+            manifest_with_one_compacted_sst(sst_own1, b"a", BytesRange::from_ref("a".."m"));
+        m1.external_dbs.push(ExternalDb {
+            path: shared_path.clone(),
+            source_checkpoint_id: shared_source_cp,
+            final_checkpoint_id: Some(original_final_cp),
+            sst_ids: vec![sst_a, sst_b],
+        });
+
+        // Manifest 2: has sst_b, sst_c from same shared ancestor, owns sst_own2
+        let sst_own2 = SsTableId::Compacted(Ulid::from_parts(3000, 0));
+        let mut m2 = manifest_with_one_compacted_sst(sst_own2, b"m", BytesRange::from_ref("m"..));
+        m2.external_dbs.push(ExternalDb {
+            path: shared_path.clone(),
+            source_checkpoint_id: shared_source_cp,
+            final_checkpoint_id: Some(original_final_cp),
+            sst_ids: vec![sst_b, sst_c],
+        });
+
+        let sources = vec![m1, m2];
+
+        let result = Manifest::union(sources);
+
+        // Find the entry for the shared ancestor
+        let shared_entries: Vec<_> = result
+            .external_dbs
+            .iter()
+            .filter(|db| db.path == shared_path && db.source_checkpoint_id == shared_source_cp)
+            .collect();
+        assert_eq!(
+            shared_entries.len(),
+            1,
+            "Should have exactly one entry for the shared (path, source_checkpoint_id)"
+        );
+
+        // The merged sst_ids should be the union of {sst_a, sst_b} and {sst_b, sst_c}
+        let merged_ids: HashSet<SsTableId> = shared_entries[0].sst_ids.iter().copied().collect();
+        let expected_ids: HashSet<SsTableId> = [sst_a, sst_b, sst_c].iter().copied().collect();
+        assert_eq!(merged_ids, expected_ids);
     }
 }

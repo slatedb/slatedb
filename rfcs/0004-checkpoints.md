@@ -674,7 +674,12 @@ The union process works as follows:
 2. Validate that the manifests are non-overlapping. Each manifest's key range is computed from the effective ranges
    of all its L0 and compacted SSTs. If any two manifests have intersecting key ranges, the operation fails.
 3. Merge the contents of all input manifests:
-   - All `external_dbs` entries are merged into a single list.
+   - `external_dbs` entries from all input manifests are merged and deduplicated by
+     `(path, source_checkpoint_id)`. Entries with matching keys originated from the same external_db entry
+     via projection, so their `sst_ids` lists are merged (unioned). Entries with different keys for the same
+     path represent distinct checkpoints and must be kept separate. Without this deduplication, repeated
+     cycles of projection and union cause exponential growth of duplicated entries: projecting into N parts
+     and unioning back multiplies the entry count by N each cycle.
    - L0 SSTs are merged and deduplicated by SST ID. Because L0 SSTs span the full key space and overlap
      with each other, projection typically includes the same L0 SST in multiple projected manifests — each
      with a `visible_range` restricting it to that projection's key range. When these projected manifests are
