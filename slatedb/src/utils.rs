@@ -278,16 +278,12 @@ impl MonotonicSeq {
         self.val.fetch_add(1, SeqCst) + 1
     }
 
-    pub(crate) fn store(&self, value: u64) {
-        self.val.store(value, SeqCst);
-    }
-
     pub(crate) fn load(&self) -> u64 {
         self.val.load(SeqCst)
     }
 
-    pub(crate) fn store_if_greater(&self, value: u64) {
-        self.val.fetch_max(value, SeqCst);
+    pub(crate) fn fetch_max(&self, value: u64) -> u64 {
+        self.val.fetch_max(value, SeqCst)
     }
 }
 

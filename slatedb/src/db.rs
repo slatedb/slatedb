@@ -515,7 +515,7 @@ impl DbInner {
         );
         self.oracle
             .last_remote_persisted_seq
-            .store(self.oracle.last_committed_seq());
+            .fetch_max(self.oracle.last_committed_seq());
         Ok(())
     }
 
