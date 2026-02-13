@@ -69,9 +69,26 @@ var _ = Describe("DB", func() {
 				Expect(retrievedValue).To(Equal(value))
 			})
 
-			It("should return ErrNotFound for non-existent key", func() {
-				_, err := db.Get([]byte("non_existent"))
-				Expect(err).To(Equal(slatedb.ErrNotFound))
+			It("should return nil,nil for non-existent key", func() {
+				value, err := db.Get([]byte("non_existent"))
+				Expect(err).NotTo(HaveOccurred())
+				Expect(value).To(BeNil())
+			})
+
+			It("should distinguish empty value from missing key", func() {
+				key := []byte("empty_value_key")
+
+				err := db.Put(key, []byte{})
+				Expect(err).NotTo(HaveOccurred())
+
+				value, err := db.Get(key)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(value).To(Equal([]byte{}))
+				Expect(value).NotTo(BeNil())
+
+				missing, err := db.Get([]byte("non_existent"))
+				Expect(err).NotTo(HaveOccurred())
+				Expect(missing).To(BeNil())
 			})
 
 			It("should delete a key successfully", func() {
@@ -84,8 +101,9 @@ var _ = Describe("DB", func() {
 				err = db.Delete(key)
 				Expect(err).NotTo(HaveOccurred())
 
-				_, err = db.Get(key)
-				Expect(err).To(Equal(slatedb.ErrNotFound))
+				value, err = db.Get(key)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(value).To(BeNil())
 			})
 		})
 
@@ -133,8 +151,9 @@ var _ = Describe("DB", func() {
 				err = db.DeleteWithOptions(key, writeOpts)
 				Expect(err).NotTo(HaveOccurred())
 
-				_, err = db.Get(key)
-				Expect(err).To(Equal(slatedb.ErrNotFound))
+				retrievedValue, err := db.Get(key)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(retrievedValue).To(BeNil())
 			})
 		})
 

@@ -191,7 +191,7 @@ func (db *DB) Put(key, value []byte) error {
 
 // Get retrieves a value by key with default read options.
 //
-// Returns `ErrNotFound` if the key does not exist.
+// Returns `nil, nil` if the key does not exist.
 func (db *DB) Get(key []byte) ([]byte, error) {
 	return db.GetWithOptions(key, nil)
 }
@@ -272,7 +272,7 @@ func (db *DB) DeleteWithOptions(key []byte, writeOpts *WriteOptions) error {
 // GetWithOptions retrieves a value by key with explicit read options.
 //
 // Pass nil options to use defaults.
-// Returns `ErrNotFound` if the key does not exist.
+// Returns `nil, nil` if the key does not exist.
 //
 // Example:
 //
@@ -310,7 +310,7 @@ func (db *DB) GetWithOptions(key []byte, readOpts *ReadOptions) ([]byte, error) 
 	}
 
 	if present == C.bool(false) {
-		return nil, ErrNotFound
+		return nil, nil
 	}
 	return copyBytesAndFree(value, valueLen), nil
 }

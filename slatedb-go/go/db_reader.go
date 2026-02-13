@@ -74,7 +74,7 @@ func OpenReader(path string, opts ...Option[DbReaderConfig]) (*DbReader, error) 
 
 // Get retrieves a value by key with default read options.
 //
-// Returns `ErrNotFound` if the key does not exist.
+// Returns `nil, nil` if the key does not exist.
 func (r *DbReader) Get(key []byte) ([]byte, error) {
 	return r.GetWithOptions(key, nil)
 }
@@ -82,7 +82,7 @@ func (r *DbReader) Get(key []byte) ([]byte, error) {
 // GetWithOptions retrieves a value by key with explicit read options.
 //
 // Pass nil options to use defaults.
-// Returns `ErrNotFound` if the key does not exist.
+// Returns `nil, nil` if the key does not exist.
 func (r *DbReader) GetWithOptions(key []byte, opts *ReadOptions) ([]byte, error) {
 	if r == nil || r.handle == nil {
 		return nil, ErrInvalid
@@ -111,7 +111,7 @@ func (r *DbReader) GetWithOptions(key []byte, opts *ReadOptions) ([]byte, error)
 	}
 
 	if present == C.bool(false) {
-		return nil, ErrNotFound
+		return nil, nil
 	}
 	return copyBytesAndFree(value, valueLen), nil
 }

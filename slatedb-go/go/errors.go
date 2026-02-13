@@ -11,7 +11,6 @@ import (
 
 // Error definitions.
 var (
-	ErrNotFound    = errors.New("key not found")
 	ErrTransaction = errors.New("transaction error")
 	ErrClosed      = errors.New("closed")
 	ErrUnavailable = errors.New("unavailable")
