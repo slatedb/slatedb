@@ -216,6 +216,16 @@ typedef struct slatedb_merge_options_t {
     uint64_t ttl_value;
 } slatedb_merge_options_t;
 
+// Handle returned from write operations, containing metadata.
+typedef struct slatedb_write_handle_t {
+    // Sequence number assigned to this write.
+    uint64_t seq;
+    // Creation timestamp (if present).
+    int64_t create_ts;
+    // Whether `create_ts` is present.
+    bool create_ts_present;
+} slatedb_write_handle_t;
+
 // C representation of a single range bound.
 typedef struct slatedb_bound_t {
     // Bound kind. Use `SLATEDB_BOUND_KIND_*` constants.
@@ -736,6 +746,7 @@ struct slatedb_result_t slatedb_db_merge_with_options(struct slatedb_db_t *db,
 // - `db`: Database handle.
 // - `write_batch`: Mutable write batch handle, consumed by this call regardless
 //   of write outcome.
+// - `out_handle`: Optional output pointer for write metadata (can be null).
 //
 // ## Returns
 // - `slatedb_result_t` indicating success/failure.
@@ -748,7 +759,8 @@ struct slatedb_result_t slatedb_db_merge_with_options(struct slatedb_db_t *db,
 // ## Safety
 // - `db` and `write_batch` must be valid non-null handles.
 struct slatedb_result_t slatedb_db_write(struct slatedb_db_t *db,
-                                         struct slatedb_write_batch_t *write_batch);
+                                         struct slatedb_write_batch_t *write_batch,
+                                         struct slatedb_write_handle_t *out_handle);
 
 // Applies a write batch with explicit write options.
 //
@@ -757,6 +769,7 @@ struct slatedb_result_t slatedb_db_write(struct slatedb_db_t *db,
 // - `write_batch`: Mutable write batch handle, consumed by this call regardless
 //   of write outcome.
 // - `write_options`: Optional write options pointer (null uses defaults).
+// - `out_handle`: Optional output pointer for write metadata (can be null).
 //
 // ## Returns
 // - `slatedb_result_t` indicating success/failure.
@@ -772,7 +785,8 @@ struct slatedb_result_t slatedb_db_write(struct slatedb_db_t *db,
 //   `slatedb_write_options_t`.
 struct slatedb_result_t slatedb_db_write_with_options(struct slatedb_db_t *db,
                                                       struct slatedb_write_batch_t *write_batch,
-                                                      const struct slatedb_write_options_t *write_options);
+                                                      const struct slatedb_write_options_t *write_options,
+                                                      struct slatedb_write_handle_t *out_handle);
 
 // Scans a key range using default scan options.
 //

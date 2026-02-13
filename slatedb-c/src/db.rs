@@ -10,8 +10,8 @@ use crate::ffi::{
     slatedb_db_t, slatedb_error_kind_t, slatedb_flush_options_t, slatedb_iterator_t,
     slatedb_merge_options_t, slatedb_object_store_t, slatedb_put_options_t, slatedb_range_t,
     slatedb_read_options_t, slatedb_result_t, slatedb_scan_options_t, slatedb_write_batch_t,
-    slatedb_write_options_t, success_result, take_write_batch, validate_write_key,
-    validate_write_key_value, write_options_from_ptr,
+    slatedb_write_handle_t, slatedb_write_options_t, success_result, take_write_batch,
+    validate_write_key, validate_write_key_value, write_options_from_ptr,
 };
 use serde_json::{Map, Value};
 use slatedb::Db;
@@ -378,7 +378,7 @@ pub unsafe extern "C" fn slatedb_db_put(
 
     let handle = &mut *db;
     match handle.runtime.block_on(handle.db.put(key, value)) {
-        Ok(()) => success_result(),
+        Ok(_) => success_result(),
         Err(err) => error_from_slate_error(&err),
     }
 }
@@ -443,7 +443,7 @@ pub unsafe extern "C" fn slatedb_db_put_with_options(
         &put_options,
         &write_options,
     )) {
-        Ok(()) => success_result(),
+        Ok(_) => success_result(),
         Err(err) => error_from_slate_error(&err),
     }
 }
@@ -484,7 +484,7 @@ pub unsafe extern "C" fn slatedb_db_delete(
 
     let handle = &mut *db;
     match handle.runtime.block_on(handle.db.delete(key)) {
-        Ok(()) => success_result(),
+        Ok(_) => success_result(),
         Err(err) => error_from_slate_error(&err),
     }
 }
@@ -532,7 +532,7 @@ pub unsafe extern "C" fn slatedb_db_delete_with_options(
         .runtime
         .block_on(handle.db.delete_with_options(key, &write_options))
     {
-        Ok(()) => success_result(),
+        Ok(_) => success_result(),
         Err(err) => error_from_slate_error(&err),
     }
 }
@@ -582,7 +582,7 @@ pub unsafe extern "C" fn slatedb_db_merge(
 
     let handle = &mut *db;
     match handle.runtime.block_on(handle.db.merge(key, value)) {
-        Ok(()) => success_result(),
+        Ok(_) => success_result(),
         Err(err) => error_from_slate_error(&err),
     }
 }
@@ -647,7 +647,7 @@ pub unsafe extern "C" fn slatedb_db_merge_with_options(
         &merge_options,
         &write_options,
     )) {
-        Ok(()) => success_result(),
+        Ok(_) => success_result(),
         Err(err) => error_from_slate_error(&err),
     }
 }
@@ -658,6 +658,7 @@ pub unsafe extern "C" fn slatedb_db_merge_with_options(
 /// - `db`: Database handle.
 /// - `write_batch`: Mutable write batch handle, consumed by this call regardless
 ///   of write outcome.
+/// - `out_handle`: Optional output pointer for write metadata (can be null).
 ///
 /// ## Returns
 /// - `slatedb_result_t` indicating success/failure.
@@ -673,8 +674,9 @@ pub unsafe extern "C" fn slatedb_db_merge_with_options(
 pub unsafe extern "C" fn slatedb_db_write(
     db: *mut slatedb_db_t,
     write_batch: *mut slatedb_write_batch_t,
+    out_handle: *mut slatedb_write_handle_t,
 ) -> slatedb_result_t {
-    slatedb_db_write_with_options(db, write_batch, std::ptr::null())
+    slatedb_db_write_with_options(db, write_batch, std::ptr::null(), out_handle)
 }
 
 /// Applies a write batch with explicit write options.
@@ -684,6 +686,7 @@ pub unsafe extern "C" fn slatedb_db_write(
 /// - `write_batch`: Mutable write batch handle, consumed by this call regardless
 ///   of write outcome.
 /// - `write_options`: Optional write options pointer (null uses defaults).
+/// - `out_handle`: Optional output pointer for write metadata (can be null).
 ///
 /// ## Returns
 /// - `slatedb_result_t` indicating success/failure.
@@ -702,6 +705,7 @@ pub unsafe extern "C" fn slatedb_db_write_with_options(
     db: *mut slatedb_db_t,
     write_batch: *mut slatedb_write_batch_t,
     write_options: *const slatedb_write_options_t,
+    out_handle: *mut slatedb_write_handle_t,
 ) -> slatedb_result_t {
     if let Err(err) = require_handle(db, "db") {
         return err;
@@ -713,12 +717,29 @@ pub unsafe extern "C" fn slatedb_db_write_with_options(
         Err(err) => return err,
     };
 
+    if !out_handle.is_null() {
+        *out_handle = slatedb_write_handle_t {
+            seq: 0,
+            create_ts: 0,
+            create_ts_present: false,
+        };
+    }
+
     let db_handle = &mut *db;
     match db_handle
         .runtime
         .block_on(db_handle.db.write_with_options(batch, &write_options))
     {
-        Ok(()) => success_result(),
+        Ok(write_handle) => {
+            if !out_handle.is_null() {
+                *out_handle = slatedb_write_handle_t {
+                    seq: write_handle.seqnum(),
+                    create_ts: write_handle.create_ts().unwrap_or(0),
+                    create_ts_present: write_handle.create_ts().is_some(),
+                };
+            }
+            success_result()
+        }
         Err(err) => error_from_slate_error(&err),
     }
 }
