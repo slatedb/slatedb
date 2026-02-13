@@ -11,312 +11,193 @@ import (
 	"unsafe"
 )
 
-// DbReader represents a read-only SlateDB connection
-// This can read from the latest state or from a specific checkpoint
+// DbReader represents a read-only SlateDB connection.
+//
+// A reader can target latest state or a specific checkpoint ID.
 type DbReader struct {
-	handle C.CSdbReaderHandle
+	handle *C.slatedb_db_reader_t
 }
 
-// OpenReader opens a read-only database reader
+// OpenReader opens a read-only database reader.
 //
 // Parameters:
-//   - path: Local path for database metadata and WAL files
-//   - storeConfig: Object storage provider configuration
-//   - checkpointId: Optional checkpoint ID to read from. Use nil for latest state.
-//   - opts: Optional reader configuration. Use nil for defaults.
+//   - `path`: local database path
+//   - `WithUrl`: object-store URL
+//   - `WithEnvFile`: optional `.env` file for URL/provider resolution
+//   - `WithCheckpointId`: optional checkpoint UUID string
+//   - `WithDbReaderOptions`: optional reader tuning options
 //
-// Example for reading latest state:
+// Example:
 //
-//	// Read from latest state with auto-refreshing checkpoint
-//	reader, err := slatedb.OpenReader("/tmp/mydb", WithDbReaderOptions(slatedb.DbReaderOptions{
-//	    ManifestPollInterval: 5000,  // Poll every 5 seconds
-//	    CheckpointLifetime:   30000, // 30 second checkpoint lifetime
-//	    MaxMemtableBytes:     1024 * 1024, // 1MB memtable buffer
-//	}))
-//
-// Example using all defaults:
-//
-//	reader, err := slatedb.OpenReader("/tmp/mydb")
+//	reader, err := slatedb.OpenReader(
+//	    "/tmp/mydb",
+//	    slatedb.WithEnvFile[slatedb.DbReaderConfig](".env"),
+//	    slatedb.WithDbReaderOptions(slatedb.DbReaderOptions{
+//	        ManifestPollInterval: 5000,
+//	        CheckpointLifetime:   30000,
+//	    }),
+//	)
 func OpenReader(path string, opts ...Option[DbReaderConfig]) (*DbReader, error) {
-	cPath := C.CString(path)
-	defer C.free(unsafe.Pointer(cPath))
-
 	cfg := &DbReaderConfig{}
 	for _, opt := range opts {
 		opt(cfg)
 	}
-	var (
-		cURL, cEnvFile, cCheckpointId *C.char
-		cOpts                         *C.CSdbReaderOptions
-	)
-	if cfg.url != nil {
-		cURL = C.CString(*cfg.url)
-		defer C.free(unsafe.Pointer(cURL))
+
+	objectStore, err := resolveObjectStoreHandle(cfg.url, cfg.envFile)
+	if err != nil {
+		return nil, err
 	}
-	if cfg.envFile != nil {
-		cEnvFile = C.CString(*cfg.envFile)
-		defer C.free(unsafe.Pointer(cEnvFile))
-	}
+	defer closeObjectStoreHandle(objectStore)
+
+	cPath := C.CString(path)
+	defer C.free(unsafe.Pointer(cPath))
+
+	var cCheckpointID *C.char
 	if cfg.checkpointId != nil {
-		cCheckpointId = C.CString(*cfg.checkpointId)
-		defer C.free(unsafe.Pointer(cCheckpointId))
-	}
-	if cfg.opts != nil {
-		cOpts = convertToCReaderOptions(cfg.opts)
+		cCheckpointID = C.CString(*cfg.checkpointId)
+		defer C.free(unsafe.Pointer(cCheckpointID))
 	}
 
-	result := C.slatedb_reader_open(cPath, cURL, cEnvFile, cCheckpointId, cOpts)
-	defer C.slatedb_free_result(result.result)
+	cOpts := convertToCReaderOptions(cfg.opts)
 
-	if result.result.error != C.Success {
-		return nil, resultToError(result.result)
+	var readerHandle *C.slatedb_db_reader_t
+	result := C.slatedb_db_reader_open(cPath, objectStore, cCheckpointID, cOpts, &readerHandle)
+	if err := resultToErrorAndFree(result); err != nil {
+		return nil, err
 	}
-
-	// Check if handle is null (indicates error)
-	if unsafe.Pointer(result.handle._0) == unsafe.Pointer(uintptr(0)) {
+	if readerHandle == nil {
 		return nil, errors.New("failed to open database reader")
 	}
 
-	return &DbReader{handle: result.handle}, nil
+	return &DbReader{handle: readerHandle}, nil
 }
 
-// Get retrieves a value by key from the database reader with default options
-// Returns ErrNotFound if the key doesn't exist
+// Get retrieves a value by key with default read options.
+//
+// Returns `ErrNotFound` if the key does not exist.
 func (r *DbReader) Get(key []byte) ([]byte, error) {
-	return r.GetWithOptions(key, &ReadOptions{})
+	return r.GetWithOptions(key, nil)
 }
 
-// GetWithOptions retrieves a value by key from the database reader with custom read options
-// Returns ErrNotFound if the key doesn't exist
+// GetWithOptions retrieves a value by key with explicit read options.
 //
-// Example:
-//
-//	readOpts := &slatedb.ReadOptions{
-//	    DurabilityFilter: slatedb.DurabilityMemory, // Default
-//	    Dirty:           false,
-//	}
-//	value, err := reader.GetWithOptions([]byte("user:123"), readOpts)
+// Pass nil options to use defaults.
+// Returns `ErrNotFound` if the key does not exist.
 func (r *DbReader) GetWithOptions(key []byte, opts *ReadOptions) ([]byte, error) {
+	if r == nil || r.handle == nil {
+		return nil, ErrInvalidHandle
+	}
 	if len(key) == 0 {
 		return nil, ErrInvalidArgument
 	}
 
-	keyPtr := (*C.uint8_t)(unsafe.Pointer(&key[0]))
-	var value C.CSdbValue
+	keyPtr, keyLen := ptrFromBytes(key)
 	cOpts := convertToCReadOptions(opts)
 
-	result := C.slatedb_reader_get_with_options(
+	var present C.bool
+	var value *C.uint8_t
+	var valueLen C.uintptr_t
+	result := C.slatedb_db_reader_get_with_options(
 		r.handle,
 		keyPtr,
-		C.uintptr_t(len(key)),
+		keyLen,
 		cOpts,
+		&present,
 		&value,
+		&valueLen,
 	)
-	defer C.slatedb_free_result(result)
-
-	if result.error != C.Success {
-		return nil, resultToError(result)
+	if err := resultToErrorAndFree(result); err != nil {
+		return nil, err
 	}
 
-	if result.none {
+	if present == C.bool(false) {
 		return nil, ErrNotFound
 	}
-
-	if value.data == nil || value.len == 0 {
-		return []byte{}, nil
-	}
-
-	// Copy the data to Go memory
-	goValue := C.GoBytes(unsafe.Pointer(value.data), C.int(value.len))
-
-	// Free the C memory
-	C.slatedb_free_value(value)
-
-	return goValue, nil
+	return copyBytesAndFree(value, valueLen), nil
 }
 
-// Scan creates a streaming iterator for the specified range with default options
-// This provides full parity with Rust's range syntax:
+// Scan creates a streaming iterator for the range `[start, end)` with default options.
 //
-//	start=nil, end=nil     -> full scan (..)
-//	start=key, end=nil     -> from key forward (key..)
-//	start=nil, end=key     -> up to key (..key)
-//	start=key1, end=key2   -> between keys (key1..key2)
-//
-// SAFETY CONTRACT: Iterator MUST be closed before DbReader is closed.
-//
-// Example usage:
-//
-//	iter, err := reader.Scan([]byte("user:"), []byte("user:\xFF"))
-//	if err != nil { return err }
-//	defer iter.Close()  // Essential!
-//
-//	for {
-//	    kv, err := iter.Next()
-//	    if err == io.EOF {
-//	        break // End of iteration
-//	    }
-//	    if err != nil {
-//	        return err
-//	    }
-//	    process(kv.Key, kv.Value)
-//	}
+// `start=nil` means unbounded start; `end=nil` means unbounded end.
+// The iterator must be closed after use and before closing the reader.
 func (r *DbReader) Scan(start, end []byte) (*Iterator, error) {
 	return r.ScanWithOptions(start, end, nil)
 }
 
-// ScanWithOptions creates a streaming iterator for the specified range with custom scan options
+// ScanWithOptions creates a streaming iterator for `[start, end)` with explicit scan options.
 //
-// Example:
-//
-//	opts := &ScanOptions{DurabilityFilter: DurabilityMemory, Dirty: false}
-//	iter, err := reader.ScanWithOptions([]byte("user:"), nil, opts)
-//	if err != nil { return err }
-//	defer iter.Close()  // Essential!
-//
-//	for {
-//	    kv, err := iter.Next()
-//	    if err == io.EOF {
-//	        break
-//	    }
-//	    if err != nil {
-//	        return err
-//	    }
-//	    process(kv.Key, kv.Value)
-//	}
+// Pass nil options to use defaults.
+// The iterator must be closed after use and before closing the reader.
 func (r *DbReader) ScanWithOptions(start, end []byte, opts *ScanOptions) (*Iterator, error) {
-	var startPtr *C.uint8_t
-	var startLen C.uintptr_t
-	if len(start) > 0 {
-		startPtr = (*C.uint8_t)(unsafe.Pointer(&start[0]))
-		startLen = C.uintptr_t(len(start))
+	if r == nil || r.handle == nil {
+		return nil, ErrInvalidHandle
 	}
 
-	var endPtr *C.uint8_t
-	var endLen C.uintptr_t
-	if len(end) > 0 {
-		endPtr = (*C.uint8_t)(unsafe.Pointer(&end[0]))
-		endLen = C.uintptr_t(len(end))
-	}
-
+	rangeValue := makeScanRange(start, end)
 	cOpts := convertToCScanOptions(opts)
 
-	var iterPtr *C.CSdbIterator
-	result := C.slatedb_reader_scan_with_options(
-		r.handle,
-		startPtr,
-		startLen,
-		endPtr,
-		endLen,
-		cOpts,
-		&iterPtr,
-	)
-	defer C.slatedb_free_result(result)
-
-	if result.error != C.Success {
-		return nil, resultToError(result)
+	var iterPtr *C.slatedb_iterator_t
+	result := C.slatedb_db_reader_scan_with_options(r.handle, rangeValue, cOpts, &iterPtr)
+	if err := resultToErrorAndFree(result); err != nil {
+		return nil, err
+	}
+	if iterPtr == nil {
+		return nil, errors.New("failed to create iterator")
 	}
 
-	return &Iterator{
-		ptr:    iterPtr,
-		closed: false,
-	}, nil
+	return &Iterator{ptr: iterPtr}, nil
 }
 
-// ScanPrefix creates a streaming iterator for all keys with the given prefix using default scan options.
+// ScanPrefix creates a streaming iterator for all keys that match `prefix`.
 //
-// Returns an iterator that yields key-value pairs whose keys start with `prefix`.
-// The iterator MUST be closed after use to prevent resource leaks.
-//
-// ## Arguments
-// - `prefix`: key prefix to match (empty or nil scans all keys)
-//
-// ## Returns
-// - `*Iterator`: streaming iterator over matching keys
-// - `error`: if there was an error creating the iterator
-//
-// ## Examples
-//
-//	iter, err := reader.ScanPrefix([]byte("user:"))
-//	if err != nil { return err }
-//	defer iter.Close()  // Essential!
-//
-//	for {
-//	    kv, err := iter.Next()
-//	    if err == io.EOF { break }
-//	    if err != nil { return err }
-//	    // process kv
-//	}
+// The iterator must be closed after use and before closing the reader.
 func (r *DbReader) ScanPrefix(prefix []byte) (*Iterator, error) {
 	return r.ScanPrefixWithOptions(prefix, nil)
 }
 
-// ScanPrefixWithOptions creates a streaming iterator for all keys with the given prefix and custom scan options.
+// ScanPrefixWithOptions creates a streaming iterator for `prefix` with explicit scan options.
 //
-// Returns an iterator that yields key-value pairs whose keys start with `prefix`.
-// The iterator MUST be closed after use to prevent resource leaks.
-//
-// ## Arguments
-// - `prefix`: key prefix to match (empty or nil scans all keys)
-// - `opts`: scan options for durability, caching, read-ahead behavior
-//
-// ## Returns
-// - `*Iterator`: streaming iterator over matching keys
-// - `error`: if there was an error creating the iterator
-//
-// ## Examples
-//
-//	opts := &ScanOptions{DurabilityFilter: DurabilityRemote, Dirty: false}
-//	iter, err := reader.ScanPrefixWithOptions([]byte("user:"), opts)
-//	if err != nil { return err }
-//	defer iter.Close()  // Essential!
-//
-//	for {
-//	    kv, err := iter.Next()
-//	    if err == io.EOF { break }
-//	    if err != nil { return err }
-//	    // process kv
-//	}
+// Pass nil options to use defaults.
+// The iterator must be closed after use and before closing the reader.
 func (r *DbReader) ScanPrefixWithOptions(prefix []byte, opts *ScanOptions) (*Iterator, error) {
-	var prefixPtr *C.uint8_t
-	if len(prefix) > 0 {
-		prefixPtr = (*C.uint8_t)(unsafe.Pointer(&prefix[0]))
+	if r == nil || r.handle == nil {
+		return nil, ErrInvalidHandle
 	}
 
+	prefixPtr, prefixLen := ptrFromBytes(prefix)
 	cOpts := convertToCScanOptions(opts)
 
-	var iterPtr *C.CSdbIterator
-	result := C.slatedb_reader_scan_prefix_with_options(
+	var iterPtr *C.slatedb_iterator_t
+	result := C.slatedb_db_reader_scan_prefix_with_options(
 		r.handle,
 		prefixPtr,
-		C.uintptr_t(len(prefix)),
+		prefixLen,
 		cOpts,
 		&iterPtr,
 	)
-	defer C.slatedb_free_result(result)
-
-	if result.error != C.Success {
-		return nil, resultToError(result)
+	if err := resultToErrorAndFree(result); err != nil {
+		return nil, err
+	}
+	if iterPtr == nil {
+		return nil, errors.New("failed to create iterator")
 	}
 
-	return &Iterator{
-		ptr:    iterPtr,
-		closed: false,
-	}, nil
+	return &Iterator{ptr: iterPtr}, nil
 }
 
-// Close closes the database reader and releases all resources
-// After calling Close, the DbReader instance should not be used
+// Close closes the database reader and releases all resources.
+//
+// The reader must not be used after `Close` returns successfully.
 func (r *DbReader) Close() error {
-	result := C.slatedb_reader_close(r.handle)
-	defer C.slatedb_free_result(result)
-
-	if result.error != C.Success {
-		return resultToError(result)
+	if r == nil || r.handle == nil {
+		return ErrInvalidHandle
 	}
 
-	// Mark this DbReader as invalid to prevent further use
-	r.handle._0 = nil
+	result := C.slatedb_db_reader_close(r.handle)
+	if err := resultToErrorAndFree(result); err != nil {
+		return err
+	}
 
+	r.handle = nil
 	return nil
 }

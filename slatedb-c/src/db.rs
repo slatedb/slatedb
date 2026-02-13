@@ -1,608 +1,1157 @@
-use serde_json;
+//! Database APIs for `slatedb-c`.
+//!
+//! This module exposes the primary C ABI surface for opening databases and
+//! executing read/write operations.
+
+use crate::ffi::{
+    alloc_bytes, bytes_from_ptr, create_runtime, cstr_to_string, error_from_slate_error,
+    error_result, flush_options_from_ptr, merge_options_from_ptr, put_options_from_ptr,
+    range_from_c, read_options_from_ptr, require_handle, require_out_ptr, scan_options_from_ptr,
+    slatedb_db_t, slatedb_error_kind_t, slatedb_flush_options_t, slatedb_iterator_t,
+    slatedb_merge_options_t, slatedb_object_store_t, slatedb_put_options_t, slatedb_range_t,
+    slatedb_read_options_t, slatedb_result_t, slatedb_scan_options_t, slatedb_write_batch_t,
+    slatedb_write_options_t, success_result, take_write_batch, validate_write_key,
+    validate_write_key_value, write_options_from_ptr,
+};
+use serde_json::{Map, Value};
 use slatedb::Db;
-use std::collections::HashMap;
-use std::os::raw::c_char;
-use tokio::runtime::Builder;
 
-use crate::config::{
-    convert_put_options, convert_range_bounds, convert_read_options, convert_scan_options,
-    convert_write_options,
-};
-use crate::error::{
-    create_error_result, create_handle_error_result, create_handle_success_result,
-    create_none_result, create_success_result, message_to_cstring, safe_str_from_ptr,
-    slate_error_to_code, CSdbBuilderResult, CSdbError, CSdbHandleResult, CSdbResult,
-};
-use crate::object_store::create_object_store;
-use crate::types::{
-    CSdbHandle, CSdbIterator, CSdbPutOptions, CSdbReadOptions, CSdbScanOptions, CSdbValue,
-    CSdbWriteOptions, SlateDbFFI,
-};
-use slatedb::config::{Settings, SstBlockSize};
-
-// ============================================================================
-// Database Functions
-// ============================================================================
-
+/// Opens a database using a pre-resolved object store handle.
+///
+/// ## Arguments
+/// - `path`: Database path as a null-terminated UTF-8 string.
+/// - `object_store`: Opaque object store handle.
+/// - `out_db`: Output pointer populated with a `slatedb_db_t*` on success.
+///
+/// ## Returns
+/// - `slatedb_result_t` describing success or failure.
+///
+/// ## Errors
+/// - Returns `SLATEDB_ERROR_KIND_INVALID` for null/invalid pointers.
+/// - Returns mapped SlateDB errors for open failures.
+///
+/// ## Safety
+/// - `path` must be a valid null-terminated C string.
+/// - `object_store` must be a valid object store handle.
+/// - `out_db` must be a valid non-null writable pointer.
 #[no_mangle]
-pub extern "C" fn slatedb_open(
-    path: *const c_char,
-    url: *const c_char,
-    env_file: *const c_char,
-) -> CSdbHandleResult {
-    let path_str = match safe_str_from_ptr(path) {
-        Ok(s) => s,
-        Err(err) => return create_handle_error_result(err, "Invalid path"),
+pub unsafe extern "C" fn slatedb_db_open(
+    path: *const std::os::raw::c_char,
+    object_store: *const slatedb_object_store_t,
+    out_db: *mut *mut slatedb_db_t,
+) -> slatedb_result_t {
+    if let Err(err) = require_out_ptr(out_db, "out_db") {
+        return err;
+    }
+    if let Err(err) = require_handle(object_store, "object_store") {
+        return err;
+    }
+
+    let path = match cstr_to_string(path, "path") {
+        Ok(path) => path,
+        Err(err) => return err,
     };
 
-    // Create a dedicated runtime for this DB instance
-    let rt = match Builder::new_multi_thread().enable_all().build() {
-        Ok(rt) => rt,
-        Err(err) => return create_handle_error_result(CSdbError::InternalError, &err.to_string()),
+    let runtime = match create_runtime() {
+        Ok(runtime) => runtime,
+        Err(err) => return err,
     };
 
-    let url_str: Option<&str> = if url.is_null() {
-        None
-    } else {
-        match safe_str_from_ptr(url) {
-            Ok(s) => Some(s),
-            Err(err) => return create_handle_error_result(err, "Invalid pointer for url"),
-        }
-    };
-    let env_file_str = if env_file.is_null() {
-        None
-    } else {
-        match safe_str_from_ptr(env_file) {
-            Ok(s) => Some(s.to_string()),
-            Err(err) => return create_handle_error_result(err, "Invalid pointer for env file"),
-        }
-    };
-    let object_store = match create_object_store(url_str, env_file_str) {
-        Ok(store) => store,
-        Err(err) => {
-            return CSdbHandleResult {
-                handle: CSdbHandle::null(),
-                result: err,
-            }
-        }
-    };
-
-    match rt.block_on(async {
-        // Use all defaults - custom configuration should use the Builder API
-        Db::builder(path_str, object_store).build().await
-    }) {
+    let object_store = (&*object_store).object_store.clone();
+    match runtime.block_on(Db::open(path, object_store)) {
         Ok(db) => {
-            let ffi = Box::new(SlateDbFFI { rt, db });
-            create_handle_success_result(CSdbHandle(Box::into_raw(ffi)))
+            let handle = Box::new(slatedb_db_t { runtime, db });
+            *out_db = Box::into_raw(handle);
+            success_result()
         }
-        Err(err) => create_handle_error_result(CSdbError::InternalError, &err.to_string()),
+        Err(err) => error_from_slate_error(&err),
     }
 }
 
-/// # Safety
+/// Returns current database status without performing I/O.
 ///
-/// - `handle` must contain a valid database handle pointer
-/// - `key` must point to valid memory of at least `key_len` bytes
-/// - `value` must point to valid memory of at least `value_len` bytes
-/// - `put_options` must be a valid pointer to CSdbPutOptions or null
-/// - `write_options` must be a valid pointer to CSdbWriteOptions or null
-#[no_mangle]
-pub unsafe extern "C" fn slatedb_put_with_options(
-    mut handle: CSdbHandle,
-    key: *const u8,
-    key_len: usize,
-    value: *const u8,
-    value_len: usize,
-    put_options: *const CSdbPutOptions,
-    write_options: *const CSdbWriteOptions,
-) -> CSdbResult {
-    if handle.is_null() {
-        return create_error_result(CSdbError::InvalidHandle, "Invalid database handle");
-    }
-
-    if key.is_null() || value.is_null() {
-        return create_error_result(CSdbError::NullPointer, "Key or value is null");
-    }
-
-    let key_slice = unsafe { std::slice::from_raw_parts(key, key_len) };
-    let value_slice = unsafe { std::slice::from_raw_parts(value, value_len) };
-
-    // Convert C options to Rust options using centralized functions
-    let rust_put_opts = convert_put_options(put_options);
-    let rust_write_opts = convert_write_options(write_options);
-
-    let inner = handle.as_inner();
-    match inner.block_on(inner.db.put_with_options(
-        key_slice,
-        value_slice,
-        &rust_put_opts,
-        &rust_write_opts,
-    )) {
-        Ok(_) => create_success_result(),
-        Err(e) => {
-            let error_code = slate_error_to_code(&e);
-            create_error_result(
-                error_code,
-                &format!("Put with options operation failed: {}", e),
-            )
-        }
-    }
-}
-
-/// # Safety
+/// ## Arguments
+/// - `db`: Database handle.
 ///
-/// - `handle` must contain a valid database handle pointer
-/// - `key` must point to valid memory of at least `key_len` bytes
-/// - `write_options` must be a valid pointer to CSdbWriteOptions or null
-#[no_mangle]
-pub unsafe extern "C" fn slatedb_delete_with_options(
-    mut handle: CSdbHandle,
-    key: *const u8,
-    key_len: usize,
-    write_options: *const CSdbWriteOptions,
-) -> CSdbResult {
-    if handle.is_null() {
-        return create_error_result(CSdbError::InvalidHandle, "Invalid database handle");
-    }
-
-    if key.is_null() {
-        return create_error_result(CSdbError::NullPointer, "Key is null");
-    }
-
-    let key_slice = unsafe { std::slice::from_raw_parts(key, key_len) };
-
-    // Convert C write options to Rust WriteOptions
-    let rust_write_opts = convert_write_options(write_options);
-
-    let inner = handle.as_inner();
-    match inner.block_on(inner.db.delete_with_options(key_slice, &rust_write_opts)) {
-        Ok(_) => create_success_result(),
-        Err(e) => {
-            let error_code = slate_error_to_code(&e);
-            create_error_result(
-                error_code,
-                &format!("Delete with options operation failed: {}", e),
-            )
-        }
-    }
-}
-
-/// # Safety
+/// ## Returns
+/// - `slatedb_result_t` indicating open/closed/error state.
 ///
-/// - `handle` must contain a valid database handle pointer
-/// - `key` must point to valid memory of at least `key_len` bytes
-/// - `read_options` must be a valid pointer to CSdbReadOptions or null
-/// - `value_out` must be a valid pointer to a location where a value can be stored
-#[no_mangle]
-pub unsafe extern "C" fn slatedb_get_with_options(
-    mut handle: CSdbHandle,
-    key: *const u8,
-    key_len: usize,
-    read_options: *const CSdbReadOptions,
-    value_out: *mut CSdbValue,
-) -> CSdbResult {
-    if handle.is_null() {
-        return create_error_result(CSdbError::InvalidHandle, "Invalid database handle");
-    }
-
-    if key.is_null() || value_out.is_null() {
-        return create_error_result(CSdbError::NullPointer, "Key or value_out is null");
-    }
-
-    let key_slice = unsafe { std::slice::from_raw_parts(key, key_len) };
-
-    // Convert C read options to Rust ReadOptions
-    let rust_read_opts = convert_read_options(read_options);
-
-    let inner = handle.as_inner();
-    match inner.block_on(inner.db.get_with_options(key_slice, &rust_read_opts)) {
-        Ok(Some(value)) => {
-            let value_vec = value.to_vec();
-            let len = value_vec.len();
-
-            // Convert to boxed slice first, then get pointer
-            let boxed_slice = value_vec.into_boxed_slice();
-            let ptr = Box::into_raw(boxed_slice) as *mut u8;
-
-            unsafe {
-                (*value_out).data = ptr;
-                (*value_out).len = len;
-            }
-
-            create_success_result()
-        }
-        Ok(None) => create_none_result(),
-        Err(e) => {
-            let error_code = slate_error_to_code(&e);
-            create_error_result(
-                error_code,
-                &format!("Get with options operation failed: {}", e),
-            )
-        }
-    }
-}
-
-#[no_mangle]
-pub extern "C" fn slatedb_flush(mut handle: CSdbHandle) -> CSdbResult {
-    if handle.is_null() {
-        return create_error_result(CSdbError::InvalidHandle, "Invalid database handle");
-    }
-
-    let inner = unsafe { handle.as_inner() };
-    match inner.block_on(inner.db.flush()) {
-        Ok(_) => create_success_result(),
-        Err(e) => {
-            let error_code = slate_error_to_code(&e);
-            create_error_result(error_code, &format!("Flush operation failed: {}", e))
-        }
-    }
-}
-
-#[no_mangle]
-pub extern "C" fn slatedb_close(handle: CSdbHandle) -> CSdbResult {
-    if handle.is_null() {
-        return create_error_result(CSdbError::InvalidHandle, "Invalid database handle");
-    }
-
-    unsafe {
-        let inner = Box::from_raw(handle.0);
-        match inner.block_on(inner.db.close()) {
-            Ok(_) => create_success_result(),
-            Err(e) => {
-                let error_code = slate_error_to_code(&e);
-                create_error_result(error_code, &format!("Close operation failed: {}", e))
-            }
-        }
-        // inner (SlateDbFFI) is automatically dropped here along with its runtime and DB
-    }
-}
-
-/// # Safety
+/// ## Errors
+/// - Returns `SLATEDB_ERROR_KIND_INVALID` for null handle.
+/// - Returns mapped SlateDB status errors (including close reason).
 ///
-/// - `handle` must contain a valid database handle pointer
-/// - `start_key` must point to valid memory of at least `start_key_len` bytes (if not null)
-/// - `end_key` must point to valid memory of at least `end_key_len` bytes (if not null)
-/// - `scan_options` must be a valid pointer to CSdbScanOptions or null
-/// - `iterator_ptr` must be a valid pointer to a location where an iterator pointer can be stored
+/// ## Safety
+/// - `db` must be a valid database handle.
 #[no_mangle]
-pub unsafe extern "C" fn slatedb_scan_with_options(
-    mut handle: CSdbHandle,
-    start_key: *const u8,
-    start_key_len: usize,
-    end_key: *const u8,
-    end_key_len: usize,
-    scan_options: *const CSdbScanOptions,
-    iterator_ptr: *mut *mut CSdbIterator,
-) -> CSdbResult {
-    if handle.is_null() {
-        return create_error_result(CSdbError::NullPointer, "Database handle is null");
+pub unsafe extern "C" fn slatedb_db_status(db: *const slatedb_db_t) -> slatedb_result_t {
+    if let Err(err) = require_handle(db, "db") {
+        return err;
     }
 
-    if iterator_ptr.is_null() {
-        return create_error_result(CSdbError::NullPointer, "Iterator output pointer is null");
-    }
-
-    // Extract raw pointer before borrowing handle
-    let handle_ptr = handle.0;
-    let db_ffi = handle.as_inner();
-
-    // Convert range bounds
-    let (start_bound, end_bound) =
-        convert_range_bounds(start_key, start_key_len, end_key, end_key_len);
-
-    // Convert scan options
-    let scan_opts = convert_scan_options(scan_options);
-
-    // Create the iterator using the bounds
-    match db_ffi.block_on(
-        db_ffi
-            .db
-            .scan_with_options((start_bound, end_bound), &scan_opts),
-    ) {
-        Ok(iter) => {
-            // Create FFI wrapper
-            let iter_ffi = CSdbIterator::new_db(handle_ptr, iter);
-            unsafe {
-                *iterator_ptr = Box::into_raw(iter_ffi);
-            }
-            create_success_result()
-        }
-        Err(e) => {
-            let error_code = slate_error_to_code(&e);
-            create_error_result(error_code, &format!("Scan operation failed: {}", e))
-        }
+    let handle = &*db;
+    match handle.db.status() {
+        Ok(()) => success_result(),
+        Err(err) => error_from_slate_error(&err),
     }
 }
 
-/// # Safety
+/// Returns a JSON snapshot of current metrics for the database.
 ///
-/// - `handle` must contain a valid database handle pointer
-/// - `prefix` must point to valid memory of at least `prefix_len` bytes (unless prefix_len is 0)
-/// - `scan_options` must be a valid pointer to CSdbScanOptions or null
-/// - `iterator_ptr` must be a valid pointer to a location where an iterator pointer can be stored
-#[no_mangle]
-pub unsafe extern "C" fn slatedb_scan_prefix_with_options(
-    mut handle: CSdbHandle,
-    prefix: *const u8,
-    prefix_len: usize,
-    scan_options: *const CSdbScanOptions,
-    iterator_ptr: *mut *mut CSdbIterator,
-) -> CSdbResult {
-    if handle.is_null() {
-        return create_error_result(CSdbError::NullPointer, "Database handle is null");
-    }
-
-    if iterator_ptr.is_null() {
-        return create_error_result(CSdbError::NullPointer, "Iterator output pointer is null");
-    }
-
-    if prefix.is_null() && prefix_len > 0 {
-        return create_error_result(CSdbError::NullPointer, "Prefix pointer is null");
-    }
-
-    let prefix_slice = if prefix_len == 0 {
-        &[]
-    } else {
-        unsafe { std::slice::from_raw_parts(prefix, prefix_len) }
-    };
-
-    // Extract raw pointer before borrowing handle
-    let handle_ptr = handle.0;
-    let db_ffi = handle.as_inner();
-
-    let scan_opts = convert_scan_options(scan_options);
-
-    match db_ffi.block_on(db_ffi.db.scan_prefix_with_options(prefix_slice, &scan_opts)) {
-        Ok(iter) => {
-            let iter_ffi = CSdbIterator::new_db(handle_ptr, iter);
-            unsafe {
-                *iterator_ptr = Box::into_raw(iter_ffi);
-            }
-            create_success_result()
-        }
-        Err(e) => {
-            let error_code = slate_error_to_code(&e);
-            create_error_result(error_code, &format!("Scan prefix operation failed: {}", e))
-        }
-    }
-}
-
-/// # Safety
+/// The payload is a UTF-8 JSON object mapping metric name to metric value:
+/// `{ "db/get_requests": 42, ... }`.
 ///
-/// - `handle` must contain a valid database handle pointer
-/// - `value_out` must be a valid pointer to a location where a value can be stored
+/// ## Arguments
+/// - `db`: Database handle.
+/// - `out_json`: Output pointer to Rust-allocated UTF-8 bytes.
+/// - `out_json_len`: Output length for `out_json`.
+///
+/// ## Returns
+/// - `slatedb_result_t` indicating success/failure.
+///
+/// ## Errors
+/// - Returns `SLATEDB_ERROR_KIND_INVALID` for invalid pointers/handles.
+/// - Returns `SLATEDB_ERROR_KIND_INTERNAL` if JSON serialization fails.
+///
+/// ## Safety
+/// - `db`, `out_json`, and `out_json_len` must be valid non-null pointers.
+/// - `out_json` must be freed with `slatedb_bytes_free`.
 #[no_mangle]
-pub unsafe extern "C" fn slatedb_metrics(
-    mut handle: CSdbHandle,
-    value_out: *mut CSdbValue,
-) -> CSdbResult {
-    if handle.is_null() {
-        return create_error_result(CSdbError::InvalidHandle, "Invalid database handle");
+pub unsafe extern "C" fn slatedb_db_metrics(
+    db: *const slatedb_db_t,
+    out_json: *mut *mut u8,
+    out_json_len: *mut usize,
+) -> slatedb_result_t {
+    if let Err(err) = require_handle(db, "db") {
+        return err;
     }
-    if value_out.is_null() {
-        return create_error_result(CSdbError::NullPointer, "value_out is null");
+    if let Err(err) = require_out_ptr(out_json, "out_json") {
+        return err;
     }
-    let inner = handle.as_inner();
-    let metrics = inner.db.metrics();
-    let mut metrics_map: HashMap<String, i64> = HashMap::new();
-    for name in metrics.names() {
-        if let Some(value) = metrics.lookup(name) {
-            metrics_map.insert(name.to_string(), value.get());
+    if let Err(err) = require_out_ptr(out_json_len, "out_json_len") {
+        return err;
+    }
+
+    *out_json = std::ptr::null_mut();
+    *out_json_len = 0;
+
+    let handle = &*db;
+    let registry = handle.db.metrics();
+    let mut snapshot = Map::new();
+
+    for name in registry.names() {
+        if let Some(stat) = registry.lookup(name) {
+            snapshot.insert(name.to_owned(), Value::from(stat.get()));
         }
     }
-    match serde_json::to_vec(&metrics_map) {
-        Ok(json_vec) => {
-            let len = json_vec.len();
-            let boxed_slice = json_vec.into_boxed_slice();
-            let ptr = Box::into_raw(boxed_slice) as *mut u8;
-            unsafe {
-                (*value_out).data = ptr;
-                (*value_out).len = len;
-            }
-            create_success_result()
+
+    match serde_json::to_vec(&Value::Object(snapshot)) {
+        Ok(encoded) => {
+            let (json_data, json_len) = alloc_bytes(&encoded);
+            *out_json = json_data;
+            *out_json_len = json_len;
+            success_result()
         }
-        Err(e) => create_error_result(
-            CSdbError::InternalError,
-            &format!("Metrics serialization failed: {}", e),
+        Err(err) => error_result(
+            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INTERNAL,
+            &format!("db metrics serialization failed: {err}"),
         ),
     }
 }
 
-// ============================================================================
-// Database Builder Functions
-// ============================================================================
-
-/// Create a new DbBuilder
+/// Reads a single metric value by name.
+///
+/// ## Arguments
+/// - `db`: Database handle.
+/// - `name`: Null-terminated UTF-8 metric name (for example `db/get_requests`).
+/// - `out_present`: Set to `true` when the metric exists.
+/// - `out_value`: Metric value when `out_present` is true.
+///
+/// ## Returns
+/// - `slatedb_result_t` indicating success/failure.
+///
+/// ## Errors
+/// - Returns `SLATEDB_ERROR_KIND_INVALID` for invalid pointers/handles or
+///   invalid UTF-8 metric names.
+///
+/// ## Safety
+/// - `db`, `name`, `out_present`, and `out_value` must be valid non-null
+///   pointers.
 #[no_mangle]
-pub extern "C" fn slatedb_builder_new(
-    path: *const c_char,
-    url: *const c_char,
-    env_file: *const c_char,
-) -> CSdbBuilderResult {
-    let path_str = match safe_str_from_ptr(path) {
-        Ok(s) => s.to_string(),
-        Err(err) => {
-            return CSdbBuilderResult {
-                builder: std::ptr::null_mut(),
-                result: CSdbResult {
-                    error: err,
-                    none: false,
-                    message: message_to_cstring("Invalid path").into_raw(),
-                },
-            }
-        }
+pub unsafe extern "C" fn slatedb_db_metric_get(
+    db: *const slatedb_db_t,
+    name: *const std::os::raw::c_char,
+    out_present: *mut bool,
+    out_value: *mut i64,
+) -> slatedb_result_t {
+    if let Err(err) = require_handle(db, "db") {
+        return err;
+    }
+    if let Err(err) = require_out_ptr(out_present, "out_present") {
+        return err;
+    }
+    if let Err(err) = require_out_ptr(out_value, "out_value") {
+        return err;
+    }
+
+    *out_present = false;
+    *out_value = 0;
+
+    let metric_name = match cstr_to_string(name, "name") {
+        Ok(name) => name,
+        Err(err) => return err,
     };
 
-    let url_str: Option<&str> = if url.is_null() {
-        None
-    } else {
-        match safe_str_from_ptr(url) {
-            Ok(s) => Some(s),
-            Err(err) => {
-                return CSdbBuilderResult {
-                    builder: std::ptr::null_mut(),
-                    result: CSdbResult {
-                        error: err,
-                        none: false,
-                        message: message_to_cstring("Invalid URL").into_raw(),
-                    },
-                }
+    let handle = &*db;
+    let registry = handle.db.metrics();
+    for registered_name in registry.names() {
+        if registered_name == metric_name {
+            if let Some(stat) = registry.lookup(registered_name) {
+                *out_present = true;
+                *out_value = stat.get();
             }
+            break;
         }
-    };
-    let env_file_str = if env_file.is_null() {
-        None
-    } else {
-        match safe_str_from_ptr(env_file) {
-            Ok(s) => Some(s.to_string()),
-            Err(err) => {
-                return CSdbBuilderResult {
-                    builder: std::ptr::null_mut(),
-                    result: CSdbResult {
-                        error: err,
-                        none: false,
-                        message: message_to_cstring("Invalid env file path").into_raw(),
-                    },
-                }
-            }
-        }
-    };
-    let object_store = match create_object_store(url_str, env_file_str) {
-        Ok(store) => store,
-        Err(err) => {
-            return CSdbBuilderResult {
-                builder: std::ptr::null_mut(),
-                result: err,
-            }
-        }
+    }
+
+    success_result()
+}
+
+/// Reads a single key using default read options.
+///
+/// ## Arguments
+/// - `db`: Database handle.
+/// - `key`: Key bytes.
+/// - `key_len`: Length of `key`.
+/// - `out_present`: Set to `true` when a value is found.
+/// - `out_val`: Output pointer to Rust-allocated value bytes.
+/// - `out_val_len`: Output length for `out_val`.
+///
+/// ## Returns
+/// - `slatedb_result_t` indicating success/failure.
+///
+/// ## Errors
+/// - Returns `SLATEDB_ERROR_KIND_INVALID` for invalid pointers/handles.
+/// - Returns mapped SlateDB errors for read failures.
+///
+/// ## Safety
+/// - All pointer arguments must be valid for reads/writes as appropriate.
+/// - `out_val` must be freed with `slatedb_bytes_free` when `*out_present` is true.
+#[no_mangle]
+pub unsafe extern "C" fn slatedb_db_get(
+    db: *mut slatedb_db_t,
+    key: *const u8,
+    key_len: usize,
+    out_present: *mut bool,
+    out_val: *mut *mut u8,
+    out_val_len: *mut usize,
+) -> slatedb_result_t {
+    slatedb_db_get_with_options(
+        db,
+        key,
+        key_len,
+        std::ptr::null(),
+        out_present,
+        out_val,
+        out_val_len,
+    )
+}
+
+/// Reads a single key using explicit read options.
+///
+/// ## Arguments
+/// - `db`: Database handle.
+/// - `key`: Key bytes.
+/// - `key_len`: Length of `key`.
+/// - `read_options`: Optional read options pointer (null uses defaults).
+/// - `out_present`: Set to `true` when a value is found.
+/// - `out_val`: Output pointer to Rust-allocated value bytes.
+/// - `out_val_len`: Output length for `out_val`.
+///
+/// ## Returns
+/// - `slatedb_result_t` indicating success/failure.
+///
+/// ## Errors
+/// - Returns `SLATEDB_ERROR_KIND_INVALID` for invalid pointers/handles/options.
+/// - Returns mapped SlateDB errors for read failures.
+///
+/// ## Safety
+/// - Pointer arguments must be valid for reads/writes as required.
+/// - `out_val` must be freed with `slatedb_bytes_free` when `*out_present` is true.
+#[no_mangle]
+pub unsafe extern "C" fn slatedb_db_get_with_options(
+    db: *mut slatedb_db_t,
+    key: *const u8,
+    key_len: usize,
+    read_options: *const slatedb_read_options_t,
+    out_present: *mut bool,
+    out_val: *mut *mut u8,
+    out_val_len: *mut usize,
+) -> slatedb_result_t {
+    if let Err(err) = require_handle(db, "db") {
+        return err;
+    }
+    if let Err(err) = require_out_ptr(out_val, "out_val") {
+        return err;
+    }
+    if let Err(err) = require_out_ptr(out_val_len, "out_val_len") {
+        return err;
+    }
+    if let Err(err) = require_out_ptr(out_present, "out_present") {
+        return err;
+    }
+    *out_present = false;
+    *out_val = std::ptr::null_mut();
+    *out_val_len = 0;
+
+    let key = match bytes_from_ptr(key, key_len, "key") {
+        Ok(key) => key,
+        Err(err) => return err,
     };
 
-    let builder = Db::builder(path_str, object_store);
-    CSdbBuilderResult {
-        builder: Box::into_raw(Box::new(builder)),
-        result: create_success_result(),
+    let read_options = match read_options_from_ptr(read_options) {
+        Ok(options) => options,
+        Err(err) => return err,
+    };
+
+    let handle = &mut *db;
+    match handle
+        .runtime
+        .block_on(handle.db.get_with_options(key, &read_options))
+    {
+        Ok(Some(value)) => {
+            let (val, val_len) = alloc_bytes(value.as_ref());
+            *out_val = val;
+            *out_val_len = val_len;
+            *out_present = true;
+            success_result()
+        }
+        Ok(None) => {
+            *out_present = false;
+            success_result()
+        }
+        Err(err) => error_from_slate_error(&err),
     }
 }
 
-/// Set settings on DbBuilder from JSON
+/// Writes a key/value pair using default put/write options.
 ///
-/// # Safety
+/// ## Arguments
+/// - `db`: Database handle.
+/// - `key`: Key bytes.
+/// - `key_len`: Length of `key`.
+/// - `value`: Value bytes.
+/// - `value_len`: Length of `value`.
 ///
-/// - `builder` must be a valid pointer to a DbBuilder
-/// - `settings_json` must be a valid C string pointer
+/// ## Returns
+/// - `slatedb_result_t` indicating success/failure.
+///
+/// ## Errors
+/// - Returns `SLATEDB_ERROR_KIND_INVALID` for invalid handles/pointers/sizes.
+/// - Returns mapped SlateDB errors for write failures.
+///
+/// ## Safety
+/// - `key`/`value` must reference at least `key_len`/`value_len` readable bytes.
 #[no_mangle]
-pub unsafe extern "C" fn slatedb_builder_with_settings(
-    builder: *mut slatedb::DbBuilder<String>,
-    settings_json: *const c_char,
-) -> CSdbResult {
-    if builder.is_null() {
-        return create_error_result(CSdbError::InvalidHandle, "Invalid pointer to builder");
-    }
-    if settings_json.is_null() {
-        return create_error_result(CSdbError::InvalidHandle, "Invalid pointer to settings json");
+pub unsafe extern "C" fn slatedb_db_put(
+    db: *mut slatedb_db_t,
+    key: *const u8,
+    key_len: usize,
+    value: *const u8,
+    value_len: usize,
+) -> slatedb_result_t {
+    if let Err(err) = require_handle(db, "db") {
+        return err;
     }
 
-    let settings_str = match safe_str_from_ptr(settings_json) {
-        Ok(s) => s,
-        Err(err) => return create_error_result(err, "Invalid settings json"),
+    let key = match bytes_from_ptr(key, key_len, "key") {
+        Ok(key) => key,
+        Err(err) => return err,
+    };
+    let value = match bytes_from_ptr(value, value_len, "value") {
+        Ok(value) => value,
+        Err(err) => return err,
     };
 
-    let settings: Settings = match serde_json::from_str(settings_str) {
-        Ok(s) => s,
-        Err(err) => {
-            return create_error_result(
-                CSdbError::InvalidArgument,
-                &format!("Invalid settings json: {}", err),
+    if let Err(err) = validate_write_key_value(key, value) {
+        return err;
+    }
+
+    let handle = &mut *db;
+    match handle.runtime.block_on(handle.db.put(key, value)) {
+        Ok(()) => success_result(),
+        Err(err) => error_from_slate_error(&err),
+    }
+}
+
+/// Writes a key/value pair with explicit put and write options.
+///
+/// ## Arguments
+/// - `db`: Database handle.
+/// - `key`: Key bytes.
+/// - `key_len`: Length of `key`.
+/// - `value`: Value bytes.
+/// - `value_len`: Length of `value`.
+/// - `put_options`: Optional put options pointer.
+/// - `write_options`: Optional write options pointer.
+///
+/// ## Returns
+/// - `slatedb_result_t` indicating success/failure.
+///
+/// ## Errors
+/// - Returns `SLATEDB_ERROR_KIND_INVALID` for invalid handles/pointers/options/sizes.
+/// - Returns mapped SlateDB errors for write failures.
+///
+/// ## Safety
+/// - Pointer arguments must be valid for reads/writes as required.
+#[no_mangle]
+pub unsafe extern "C" fn slatedb_db_put_with_options(
+    db: *mut slatedb_db_t,
+    key: *const u8,
+    key_len: usize,
+    value: *const u8,
+    value_len: usize,
+    put_options: *const slatedb_put_options_t,
+    write_options: *const slatedb_write_options_t,
+) -> slatedb_result_t {
+    if let Err(err) = require_handle(db, "db") {
+        return err;
+    }
+
+    let key = match bytes_from_ptr(key, key_len, "key") {
+        Ok(key) => key,
+        Err(err) => return err,
+    };
+    let value = match bytes_from_ptr(value, value_len, "value") {
+        Ok(value) => value,
+        Err(err) => return err,
+    };
+
+    if let Err(err) = validate_write_key_value(key, value) {
+        return err;
+    }
+
+    let put_options = match put_options_from_ptr(put_options) {
+        Ok(options) => options,
+        Err(err) => return err,
+    };
+    let write_options = write_options_from_ptr(write_options);
+
+    let handle = &mut *db;
+    match handle.runtime.block_on(handle.db.put_with_options(
+        key,
+        value,
+        &put_options,
+        &write_options,
+    )) {
+        Ok(()) => success_result(),
+        Err(err) => error_from_slate_error(&err),
+    }
+}
+
+/// Deletes a key using default write options.
+///
+/// ## Arguments
+/// - `db`: Database handle.
+/// - `key`: Key bytes.
+/// - `key_len`: Length of `key`.
+///
+/// ## Returns
+/// - `slatedb_result_t` indicating success/failure.
+///
+/// ## Errors
+/// - Returns `SLATEDB_ERROR_KIND_INVALID` for invalid handles/pointers/sizes.
+/// - Returns mapped SlateDB errors for delete failures.
+///
+/// ## Safety
+/// - `key` must reference at least `key_len` readable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn slatedb_db_delete(
+    db: *mut slatedb_db_t,
+    key: *const u8,
+    key_len: usize,
+) -> slatedb_result_t {
+    if let Err(err) = require_handle(db, "db") {
+        return err;
+    }
+
+    let key = match bytes_from_ptr(key, key_len, "key") {
+        Ok(key) => key,
+        Err(err) => return err,
+    };
+    if let Err(err) = validate_write_key(key) {
+        return err;
+    }
+
+    let handle = &mut *db;
+    match handle.runtime.block_on(handle.db.delete(key)) {
+        Ok(()) => success_result(),
+        Err(err) => error_from_slate_error(&err),
+    }
+}
+
+/// Deletes a key with explicit write options.
+///
+/// ## Arguments
+/// - `db`: Database handle.
+/// - `key`: Key bytes.
+/// - `key_len`: Length of `key`.
+/// - `write_options`: Optional write options pointer.
+///
+/// ## Returns
+/// - `slatedb_result_t` indicating success/failure.
+///
+/// ## Errors
+/// - Returns `SLATEDB_ERROR_KIND_INVALID` for invalid handles/pointers/options.
+/// - Returns mapped SlateDB errors for delete failures.
+///
+/// ## Safety
+/// - `key` must reference at least `key_len` readable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn slatedb_db_delete_with_options(
+    db: *mut slatedb_db_t,
+    key: *const u8,
+    key_len: usize,
+    write_options: *const slatedb_write_options_t,
+) -> slatedb_result_t {
+    if let Err(err) = require_handle(db, "db") {
+        return err;
+    }
+
+    let key = match bytes_from_ptr(key, key_len, "key") {
+        Ok(key) => key,
+        Err(err) => return err,
+    };
+    if let Err(err) = validate_write_key(key) {
+        return err;
+    }
+
+    let write_options = write_options_from_ptr(write_options);
+
+    let handle = &mut *db;
+    match handle
+        .runtime
+        .block_on(handle.db.delete_with_options(key, &write_options))
+    {
+        Ok(()) => success_result(),
+        Err(err) => error_from_slate_error(&err),
+    }
+}
+
+/// Merges a value into a key using default merge/write options.
+///
+/// ## Arguments
+/// - `db`: Database handle.
+/// - `key`: Key bytes.
+/// - `key_len`: Length of `key`.
+/// - `value`: Merge operand bytes.
+/// - `value_len`: Length of `value`.
+///
+/// ## Returns
+/// - `slatedb_result_t` indicating success/failure.
+///
+/// ## Errors
+/// - Returns `SLATEDB_ERROR_KIND_INVALID` for invalid handles/pointers/sizes.
+/// - Returns mapped SlateDB errors for merge failures.
+///
+/// ## Safety
+/// - `key`/`value` must reference readable memory for their lengths.
+#[no_mangle]
+pub unsafe extern "C" fn slatedb_db_merge(
+    db: *mut slatedb_db_t,
+    key: *const u8,
+    key_len: usize,
+    value: *const u8,
+    value_len: usize,
+) -> slatedb_result_t {
+    if let Err(err) = require_handle(db, "db") {
+        return err;
+    }
+
+    let key = match bytes_from_ptr(key, key_len, "key") {
+        Ok(key) => key,
+        Err(err) => return err,
+    };
+    let value = match bytes_from_ptr(value, value_len, "value") {
+        Ok(value) => value,
+        Err(err) => return err,
+    };
+
+    if let Err(err) = validate_write_key_value(key, value) {
+        return err;
+    }
+
+    let handle = &mut *db;
+    match handle.runtime.block_on(handle.db.merge(key, value)) {
+        Ok(()) => success_result(),
+        Err(err) => error_from_slate_error(&err),
+    }
+}
+
+/// Merges a value into a key with explicit merge and write options.
+///
+/// ## Arguments
+/// - `db`: Database handle.
+/// - `key`: Key bytes.
+/// - `key_len`: Length of `key`.
+/// - `value`: Merge operand bytes.
+/// - `value_len`: Length of `value`.
+/// - `merge_options`: Optional merge options pointer.
+/// - `write_options`: Optional write options pointer.
+///
+/// ## Returns
+/// - `slatedb_result_t` indicating success/failure.
+///
+/// ## Errors
+/// - Returns `SLATEDB_ERROR_KIND_INVALID` for invalid handles/pointers/options/sizes.
+/// - Returns mapped SlateDB errors for merge failures.
+///
+/// ## Safety
+/// - Pointer arguments must be valid for reads as required.
+#[no_mangle]
+pub unsafe extern "C" fn slatedb_db_merge_with_options(
+    db: *mut slatedb_db_t,
+    key: *const u8,
+    key_len: usize,
+    value: *const u8,
+    value_len: usize,
+    merge_options: *const slatedb_merge_options_t,
+    write_options: *const slatedb_write_options_t,
+) -> slatedb_result_t {
+    if let Err(err) = require_handle(db, "db") {
+        return err;
+    }
+
+    let key = match bytes_from_ptr(key, key_len, "key") {
+        Ok(key) => key,
+        Err(err) => return err,
+    };
+    let value = match bytes_from_ptr(value, value_len, "value") {
+        Ok(value) => value,
+        Err(err) => return err,
+    };
+
+    if let Err(err) = validate_write_key_value(key, value) {
+        return err;
+    }
+
+    let merge_options = match merge_options_from_ptr(merge_options) {
+        Ok(options) => options,
+        Err(err) => return err,
+    };
+    let write_options = write_options_from_ptr(write_options);
+
+    let handle = &mut *db;
+    match handle.runtime.block_on(handle.db.merge_with_options(
+        key,
+        value,
+        &merge_options,
+        &write_options,
+    )) {
+        Ok(()) => success_result(),
+        Err(err) => error_from_slate_error(&err),
+    }
+}
+
+/// Applies a write batch with default write options.
+///
+/// ## Arguments
+/// - `db`: Database handle.
+/// - `write_batch`: Mutable write batch handle, consumed by this call regardless
+///   of write outcome.
+///
+/// ## Returns
+/// - `slatedb_result_t` indicating success/failure.
+///
+/// ## Errors
+/// - Returns `SLATEDB_ERROR_KIND_INVALID` for invalid handles or already-consumed
+///   batches.
+/// - Returns mapped SlateDB errors for write failures.
+///
+/// ## Safety
+/// - `db` and `write_batch` must be valid non-null handles.
+#[no_mangle]
+pub unsafe extern "C" fn slatedb_db_write(
+    db: *mut slatedb_db_t,
+    write_batch: *mut slatedb_write_batch_t,
+) -> slatedb_result_t {
+    slatedb_db_write_with_options(db, write_batch, std::ptr::null())
+}
+
+/// Applies a write batch with explicit write options.
+///
+/// ## Arguments
+/// - `db`: Database handle.
+/// - `write_batch`: Mutable write batch handle, consumed by this call regardless
+///   of write outcome.
+/// - `write_options`: Optional write options pointer (null uses defaults).
+///
+/// ## Returns
+/// - `slatedb_result_t` indicating success/failure.
+///
+/// ## Errors
+/// - Returns `SLATEDB_ERROR_KIND_INVALID` for invalid handles or already-consumed
+///   batches.
+/// - Returns mapped SlateDB errors for write failures.
+///
+/// ## Safety
+/// - `db` and `write_batch` must be valid non-null handles.
+/// - `write_options`, when non-null, must point to a valid
+///   `slatedb_write_options_t`.
+#[no_mangle]
+pub unsafe extern "C" fn slatedb_db_write_with_options(
+    db: *mut slatedb_db_t,
+    write_batch: *mut slatedb_write_batch_t,
+    write_options: *const slatedb_write_options_t,
+) -> slatedb_result_t {
+    if let Err(err) = require_handle(db, "db") {
+        return err;
+    }
+
+    let write_options = write_options_from_ptr(write_options);
+    let batch = match take_write_batch(write_batch) {
+        Ok(batch) => batch,
+        Err(err) => return err,
+    };
+
+    let db_handle = &mut *db;
+    match db_handle
+        .runtime
+        .block_on(db_handle.db.write_with_options(batch, &write_options))
+    {
+        Ok(()) => success_result(),
+        Err(err) => error_from_slate_error(&err),
+    }
+}
+
+/// Scans a key range using default scan options.
+///
+/// ## Arguments
+/// - `db`: Database handle.
+/// - `range`: Range bounds to scan.
+/// - `out_iterator`: Output pointer populated with `slatedb_iterator_t*`.
+///
+/// ## Returns
+/// - `slatedb_result_t` indicating success/failure.
+///
+/// ## Errors
+/// - Returns `SLATEDB_ERROR_KIND_INVALID` for invalid handles/pointers/range.
+/// - Returns mapped SlateDB errors for scan failures.
+///
+/// ## Safety
+/// - `db` and `out_iterator` must be valid non-null pointers.
+#[no_mangle]
+pub unsafe extern "C" fn slatedb_db_scan(
+    db: *mut slatedb_db_t,
+    range: slatedb_range_t,
+    out_iterator: *mut *mut slatedb_iterator_t,
+) -> slatedb_result_t {
+    slatedb_db_scan_with_options(db, range, std::ptr::null(), out_iterator)
+}
+
+/// Scans a key range with explicit scan options.
+///
+/// ## Arguments
+/// - `db`: Database handle.
+/// - `range`: Range bounds to scan.
+/// - `scan_options`: Optional scan options pointer.
+/// - `out_iterator`: Output pointer populated with `slatedb_iterator_t*`.
+///
+/// ## Returns
+/// - `slatedb_result_t` indicating success/failure.
+///
+/// ## Errors
+/// - Returns `SLATEDB_ERROR_KIND_INVALID` for invalid pointers/handles/options/range.
+/// - Returns mapped SlateDB errors for scan failures.
+///
+/// ## Safety
+/// - Pointer arguments must be valid for reads/writes as required.
+#[no_mangle]
+pub unsafe extern "C" fn slatedb_db_scan_with_options(
+    db: *mut slatedb_db_t,
+    range: slatedb_range_t,
+    scan_options: *const slatedb_scan_options_t,
+    out_iterator: *mut *mut slatedb_iterator_t,
+) -> slatedb_result_t {
+    if let Err(err) = require_handle(db, "db") {
+        return err;
+    }
+    if let Err(err) = require_out_ptr(out_iterator, "out_iterator") {
+        return err;
+    }
+
+    let range = match range_from_c(range) {
+        Ok(range) => range,
+        Err(err) => return err,
+    };
+    let scan_options = match scan_options_from_ptr(scan_options) {
+        Ok(options) => options,
+        Err(err) => return err,
+    };
+
+    let db_handle = &mut *db;
+    match db_handle
+        .runtime
+        .block_on(db_handle.db.scan_with_options(range, &scan_options))
+    {
+        Ok(iter) => {
+            let iterator = Box::new(slatedb_iterator_t {
+                runtime: db_handle.runtime.clone(),
+                iter,
+            });
+            *out_iterator = Box::into_raw(iterator);
+            success_result()
+        }
+        Err(err) => error_from_slate_error(&err),
+    }
+}
+
+/// Scans keys matching a prefix using default scan options.
+///
+/// ## Arguments
+/// - `db`: Database handle.
+/// - `prefix`: Prefix bytes.
+/// - `prefix_len`: Length of `prefix`.
+/// - `out_iterator`: Output pointer populated with `slatedb_iterator_t*`.
+///
+/// ## Returns
+/// - `slatedb_result_t` indicating success/failure.
+///
+/// ## Errors
+/// - Returns `SLATEDB_ERROR_KIND_INVALID` for invalid pointers/handles/sizes.
+/// - Returns mapped SlateDB errors for scan failures.
+///
+/// ## Safety
+/// - `prefix` must reference at least `prefix_len` readable bytes.
+/// - `db` and `out_iterator` must be valid non-null pointers.
+#[no_mangle]
+pub unsafe extern "C" fn slatedb_db_scan_prefix(
+    db: *mut slatedb_db_t,
+    prefix: *const u8,
+    prefix_len: usize,
+    out_iterator: *mut *mut slatedb_iterator_t,
+) -> slatedb_result_t {
+    slatedb_db_scan_prefix_with_options(db, prefix, prefix_len, std::ptr::null(), out_iterator)
+}
+
+/// Scans keys matching a prefix with explicit scan options.
+///
+/// ## Arguments
+/// - `db`: Database handle.
+/// - `prefix`: Prefix bytes.
+/// - `prefix_len`: Length of `prefix`.
+/// - `scan_options`: Optional scan options pointer.
+/// - `out_iterator`: Output pointer populated with `slatedb_iterator_t*`.
+///
+/// ## Returns
+/// - `slatedb_result_t` indicating success/failure.
+///
+/// ## Errors
+/// - Returns `SLATEDB_ERROR_KIND_INVALID` for invalid pointers/handles/options/sizes.
+/// - Returns mapped SlateDB errors for scan failures.
+///
+/// ## Safety
+/// - Pointer arguments must be valid for reads/writes as required.
+#[no_mangle]
+pub unsafe extern "C" fn slatedb_db_scan_prefix_with_options(
+    db: *mut slatedb_db_t,
+    prefix: *const u8,
+    prefix_len: usize,
+    scan_options: *const slatedb_scan_options_t,
+    out_iterator: *mut *mut slatedb_iterator_t,
+) -> slatedb_result_t {
+    if let Err(err) = require_handle(db, "db") {
+        return err;
+    }
+    if let Err(err) = require_out_ptr(out_iterator, "out_iterator") {
+        return err;
+    }
+
+    let prefix = match bytes_from_ptr(prefix, prefix_len, "prefix") {
+        Ok(prefix) => prefix,
+        Err(err) => return err,
+    };
+    let scan_options = match scan_options_from_ptr(scan_options) {
+        Ok(options) => options,
+        Err(err) => return err,
+    };
+
+    let db_handle = &mut *db;
+    match db_handle
+        .runtime
+        .block_on(db_handle.db.scan_prefix_with_options(prefix, &scan_options))
+    {
+        Ok(iter) => {
+            let iterator = Box::new(slatedb_iterator_t {
+                runtime: db_handle.runtime.clone(),
+                iter,
+            });
+            *out_iterator = Box::into_raw(iterator);
+            success_result()
+        }
+        Err(err) => error_from_slate_error(&err),
+    }
+}
+
+/// Flushes the database using default flush behavior.
+///
+/// ## Arguments
+/// - `db`: Database handle.
+///
+/// ## Returns
+/// - `slatedb_result_t` indicating success/failure.
+///
+/// ## Errors
+/// - Returns `SLATEDB_ERROR_KIND_INVALID` for invalid handles.
+/// - Returns mapped SlateDB errors for flush failures.
+///
+/// ## Safety
+/// - `db` must be a valid non-null handle.
+#[no_mangle]
+pub unsafe extern "C" fn slatedb_db_flush(db: *mut slatedb_db_t) -> slatedb_result_t {
+    if let Err(err) = require_handle(db, "db") {
+        return err;
+    }
+
+    let handle = &mut *db;
+    match handle.runtime.block_on(handle.db.flush()) {
+        Ok(()) => success_result(),
+        Err(err) => error_from_slate_error(&err),
+    }
+}
+
+/// Flushes the database with explicit flush options.
+///
+/// ## Arguments
+/// - `db`: Database handle.
+/// - `flush_options`: Optional flush options pointer.
+///
+/// ## Returns
+/// - `slatedb_result_t` indicating success/failure.
+///
+/// ## Errors
+/// - Returns `SLATEDB_ERROR_KIND_INVALID` for invalid handles/options.
+/// - Returns mapped SlateDB errors for flush failures.
+///
+/// ## Safety
+/// - `db` must be a valid non-null handle.
+/// - `flush_options`, when non-null, must point to a valid `slatedb_flush_options_t`.
+#[no_mangle]
+pub unsafe extern "C" fn slatedb_db_flush_with_options(
+    db: *mut slatedb_db_t,
+    flush_options: *const slatedb_flush_options_t,
+) -> slatedb_result_t {
+    if let Err(err) = require_handle(db, "db") {
+        return err;
+    }
+
+    let flush_options = match flush_options_from_ptr(flush_options) {
+        Ok(options) => options,
+        Err(err) => return err,
+    };
+
+    let handle = &mut *db;
+    match handle
+        .runtime
+        .block_on(handle.db.flush_with_options(flush_options))
+    {
+        Ok(()) => success_result(),
+        Err(err) => error_from_slate_error(&err),
+    }
+}
+
+/// Closes and frees a database handle.
+///
+/// ## Arguments
+/// - `db`: Database handle to close.
+///
+/// ## Returns
+/// - `slatedb_result_t` indicating success/failure.
+///
+/// ## Errors
+/// - Returns `SLATEDB_ERROR_KIND_INVALID` for invalid handles.
+/// - Returns mapped SlateDB errors for close failures (including close reason).
+///
+/// ## Safety
+/// - `db` must be a valid non-null handle obtained from this library.
+#[no_mangle]
+pub unsafe extern "C" fn slatedb_db_close(db: *mut slatedb_db_t) -> slatedb_result_t {
+    if let Err(err) = require_handle(db, "db") {
+        return err;
+    }
+
+    let handle = Box::from_raw(db);
+    match handle.runtime.block_on(handle.db.close()) {
+        Ok(()) => success_result(),
+        Err(err) => error_from_slate_error(&err),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ffi::slatedb_error_kind_t;
+    use serde_json::Value;
+    use std::ffi::{CStr, CString};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Arc;
+    use tokio::runtime::{Builder as RuntimeBuilder, Runtime};
+
+    fn next_test_path() -> String {
+        static NEXT_DB_ID: AtomicU64 = AtomicU64::new(0);
+        format!(
+            "slatedb_c_metrics_test_{}",
+            NEXT_DB_ID.fetch_add(1, Ordering::Relaxed)
+        )
+    }
+
+    fn assert_result_kind(result: slatedb_result_t, expected: slatedb_error_kind_t) {
+        let kind = result.kind;
+        let message = if result.message.is_null() {
+            String::new()
+        } else {
+            unsafe {
+                CStr::from_ptr(result.message)
+                    .to_string_lossy()
+                    .into_owned()
+            }
+        };
+        crate::memory::slatedb_result_free(result);
+        assert_eq!(
+            kind, expected,
+            "unexpected result kind with message: {message}"
+        );
+    }
+
+    fn assert_ok(result: slatedb_result_t) {
+        assert_result_kind(result, slatedb_error_kind_t::SLATEDB_ERROR_KIND_NONE);
+    }
+
+    fn open_test_db() -> *mut slatedb_db_t {
+        let runtime: Arc<Runtime> = Arc::new(
+            RuntimeBuilder::new_multi_thread()
+                .enable_all()
+                .build()
+                .expect("failed to build runtime"),
+        );
+        let object_store: Arc<dyn slatedb::object_store::ObjectStore> =
+            Arc::new(slatedb::object_store::memory::InMemory::new());
+        let path = next_test_path();
+        let db = runtime
+            .block_on(Db::open(path, object_store))
+            .expect("failed to open test db");
+        Box::into_raw(Box::new(slatedb_db_t { runtime, db }))
+    }
+
+    fn close_test_db(db: *mut slatedb_db_t) {
+        assert_ok(unsafe { slatedb_db_close(db) });
+    }
+
+    fn fetch_metrics_snapshot(db: *const slatedb_db_t) -> Value {
+        let mut json_data: *mut u8 = std::ptr::null_mut();
+        let mut json_len: usize = 0;
+        assert_ok(unsafe { slatedb_db_metrics(db, &mut json_data, &mut json_len) });
+        assert!(!json_data.is_null());
+        assert!(json_len > 0);
+
+        let payload = unsafe { std::slice::from_raw_parts(json_data as *const u8, json_len) };
+        let snapshot: Value = serde_json::from_slice(payload).expect("invalid metrics JSON");
+        crate::memory::slatedb_bytes_free(json_data, json_len);
+        snapshot
+    }
+
+    fn get_metric(db: *const slatedb_db_t, name: &CStr) -> (bool, i64) {
+        let mut present = false;
+        let mut value = 0i64;
+        assert_ok(unsafe { slatedb_db_metric_get(db, name.as_ptr(), &mut present, &mut value) });
+        (present, value)
+    }
+
+    fn perform_get(db: *mut slatedb_db_t, key: &[u8]) {
+        let mut value_present = false;
+        let mut value_data: *mut u8 = std::ptr::null_mut();
+        let mut value_len = 0usize;
+        assert_ok(unsafe {
+            slatedb_db_get(
+                db,
+                key.as_ptr(),
+                key.len(),
+                &mut value_present,
+                &mut value_data,
+                &mut value_len,
             )
-        }
-    };
-
-    let builder_ref = &mut *builder;
-    // We need to replace the builder since DbBuilder consumes self
-    let old_builder = std::ptr::read(builder_ref);
-    let new_builder = old_builder.with_settings(settings);
-    std::ptr::write(builder_ref, new_builder);
-
-    create_success_result()
-}
-
-/// Set SST block size on DbBuilder
-///
-/// # Safety
-///
-/// - `builder` must be a valid pointer to a DbBuilder
-#[no_mangle]
-pub unsafe extern "C" fn slatedb_builder_with_sst_block_size(
-    builder: *mut slatedb::DbBuilder<String>,
-    size: u8,
-) -> CSdbResult {
-    if builder.is_null() {
-        return create_error_result(CSdbError::InvalidHandle, "Invalid pointer to builder");
+        });
+        assert!(!value_present);
+        assert!(value_data.is_null());
+        assert_eq!(value_len, 0);
     }
 
-    let block_size = match size {
-        1 => SstBlockSize::Block1Kib,
-        2 => SstBlockSize::Block2Kib,
-        3 => SstBlockSize::Block4Kib,
-        4 => SstBlockSize::Block8Kib,
-        5 => SstBlockSize::Block16Kib,
-        6 => SstBlockSize::Block32Kib,
-        7 => SstBlockSize::Block64Kib,
-        _ => {
-            return create_error_result(
-                CSdbError::InvalidArgument,
-                &format!("Invalid block size: {}", size),
-            )
-        }
-    };
-
-    let builder_ref = &mut *builder;
-    // We need to replace the builder since DbBuilder consumes self
-    let old_builder = std::ptr::read(builder_ref);
-    let new_builder = old_builder.with_sst_block_size(block_size);
-    std::ptr::write(builder_ref, new_builder);
-
-    create_success_result()
-}
-
-/// Build the database from DbBuilder
-///
-/// # Safety
-///
-/// - `builder` must be a valid pointer to a DbBuilder that was previously allocated
-#[no_mangle]
-pub unsafe extern "C" fn slatedb_builder_build(
-    builder: *mut slatedb::DbBuilder<String>,
-) -> CSdbHandleResult {
-    if builder.is_null() {
-        return create_handle_error_result(CSdbError::InvalidHandle, "Invalid builder handle");
+    #[test]
+    fn test_db_metrics_returns_json_snapshot() {
+        let db = open_test_db();
+        let snapshot = fetch_metrics_snapshot(db as *const slatedb_db_t);
+        let object = snapshot
+            .as_object()
+            .expect("metrics snapshot should be a JSON object");
+        assert!(
+            object.contains_key("db/get_requests"),
+            "expected db/get_requests in metrics snapshot"
+        );
+        close_test_db(db);
     }
 
-    let builder_owned = Box::from_raw(builder);
+    #[test]
+    fn test_db_metric_get_for_known_and_unknown_metric_names() {
+        let db = open_test_db();
 
-    // Create a dedicated runtime for this DB instance
-    let rt = match Builder::new_multi_thread().enable_all().build() {
-        Ok(rt) => rt,
-        Err(err) => return create_handle_error_result(CSdbError::InternalError, &err.to_string()),
-    };
+        let known_name = CString::new("db/get_requests").expect("CString failed");
+        let (present, before) = get_metric(db as *const slatedb_db_t, known_name.as_c_str());
+        assert!(present);
 
-    match rt.block_on(builder_owned.build()) {
-        Ok(db) => {
-            let ffi = Box::new(SlateDbFFI { rt, db });
-            create_handle_success_result(CSdbHandle(Box::into_raw(ffi)))
-        }
-        Err(err) => create_handle_error_result(CSdbError::InternalError, &err.to_string()),
+        perform_get(db, b"missing-key");
+
+        let (after_present, after) = get_metric(db as *const slatedb_db_t, known_name.as_c_str());
+        assert!(after_present);
+        assert!(after > before);
+
+        let unknown_name = CString::new("db/not_a_metric").expect("CString failed");
+        let (unknown_present, unknown_value) =
+            get_metric(db as *const slatedb_db_t, unknown_name.as_c_str());
+        assert!(!unknown_present);
+        assert_eq!(unknown_value, 0);
+
+        close_test_db(db);
     }
-}
 
-/// Free DbBuilder
-///
-/// # Safety
-///
-/// - `builder` must be a valid pointer to a DbBuilder that was previously allocated
-#[no_mangle]
-pub unsafe extern "C" fn slatedb_builder_free(builder: *mut slatedb::DbBuilder<String>) {
-    if !builder.is_null() {
-        let _ = Box::from_raw(builder);
+    #[test]
+    fn test_db_metrics_and_metric_get_validate_required_pointers() {
+        let db = open_test_db();
+        let known_name = CString::new("db/get_requests").expect("CString failed");
+
+        let mut json_len = 0usize;
+        assert_result_kind(
+            unsafe {
+                slatedb_db_metrics(
+                    db as *const slatedb_db_t,
+                    std::ptr::null_mut(),
+                    &mut json_len,
+                )
+            },
+            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
+        );
+
+        let mut present = false;
+        assert_result_kind(
+            unsafe {
+                slatedb_db_metric_get(
+                    db as *const slatedb_db_t,
+                    known_name.as_ptr(),
+                    &mut present,
+                    std::ptr::null_mut(),
+                )
+            },
+            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
+        );
+
+        close_test_db(db);
     }
 }
