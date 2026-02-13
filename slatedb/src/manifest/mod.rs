@@ -96,6 +96,32 @@ impl Manifest {
         sorter_runs_filtered.retain(|sr| !sr.ssts.is_empty());
         projected.core.compacted = sorter_runs_filtered;
         projected.core.l0 = Self::filter_sst_handles(&projected.core.l0, true, &range).into();
+
+        // Collect all SST IDs that remain after projection
+        let remaining_sst_ids: HashSet<SsTableId> = projected
+            .core
+            .l0
+            .iter()
+            .chain(
+                projected
+                    .core
+                    .compacted
+                    .iter()
+                    .flat_map(|sr| sr.ssts.iter()),
+            )
+            .map(|h| h.id)
+            .collect();
+
+        // Filter external_dbs entries to only include SST IDs still referenced,
+        // and remove entries with no remaining SSTs so their checkpoints can be
+        // released and the external database's SSTs garbage collected.
+        for external_db in &mut projected.external_dbs {
+            external_db
+                .sst_ids
+                .retain(|id| remaining_sst_ids.contains(id));
+        }
+        projected.external_dbs.retain(|db| !db.sst_ids.is_empty());
+
         projected
     }
 
@@ -220,6 +246,7 @@ mod tests {
     use crate::manifest::store::{ManifestStore, StoredManifest};
     use slatedb_common::clock::{DefaultSystemClock, SystemClock};
 
+    use super::Manifest;
     use crate::config::CheckpointOptions;
     use crate::db_state::{ManifestCore, SortedRun, SsTableHandle, SsTableId, SsTableInfo};
     use crate::rand::DbRand;
@@ -232,8 +259,7 @@ mod tests {
     use std::ops::{Bound, Range, RangeBounds};
     use std::sync::Arc;
     use ulid::Ulid;
-
-    use super::Manifest;
+    use uuid::Uuid;
 
     #[tokio::test]
     async fn test_init_clone_manifest() {
@@ -715,5 +741,110 @@ mod tests {
             Bound::Unbounded => "".to_string(),
         };
         format!("{}..{}", start, end)
+    }
+
+    #[test]
+    fn test_projected_filters_external_dbs() {
+        use super::ExternalDb;
+
+        // Build a manifest with 3 SSTs in a sorted run spanning a..z
+        let sst_in_range = SsTableId::Compacted(Ulid::from_parts(1000, 0));
+        let sst_out_of_range = SsTableId::Compacted(Ulid::from_parts(1001, 0));
+        let sst_mixed_in = SsTableId::Compacted(Ulid::from_parts(1002, 0));
+        let sst_mixed_out = SsTableId::Compacted(Ulid::from_parts(1003, 0));
+
+        let mut core = ManifestCore::new();
+        core.compacted.push(SortedRun {
+            id: 0,
+            ssts: vec![
+                SsTableHandle::new_compacted(
+                    sst_in_range,
+                    SsTableInfo {
+                        first_entry: Some(Bytes::from_static(b"d")),
+                        ..SsTableInfo::default()
+                    },
+                    None,
+                ),
+                SsTableHandle::new_compacted(
+                    sst_mixed_in,
+                    SsTableInfo {
+                        first_entry: Some(Bytes::from_static(b"h")),
+                        ..SsTableInfo::default()
+                    },
+                    None,
+                ),
+                SsTableHandle::new_compacted(
+                    sst_mixed_out,
+                    SsTableInfo {
+                        first_entry: Some(Bytes::from_static(b"p")),
+                        ..SsTableInfo::default()
+                    },
+                    None,
+                ),
+                SsTableHandle::new_compacted(
+                    sst_out_of_range,
+                    SsTableInfo {
+                        first_entry: Some(Bytes::from_static(b"u")),
+                        ..SsTableInfo::default()
+                    },
+                    None,
+                ),
+            ],
+        });
+
+        let mut manifest = Manifest::initial(core);
+
+        // ExternalDb fully in range
+        let ext_in_range = ExternalDb {
+            path: "db_in".to_string(),
+            source_checkpoint_id: Uuid::new_v4(),
+            final_checkpoint_id: Some(Uuid::new_v4()),
+            sst_ids: vec![sst_in_range],
+        };
+        // ExternalDb fully out of range
+        let ext_out_of_range = ExternalDb {
+            path: "db_out".to_string(),
+            source_checkpoint_id: Uuid::new_v4(),
+            final_checkpoint_id: Some(Uuid::new_v4()),
+            sst_ids: vec![sst_out_of_range],
+        };
+        // ExternalDb with mixed SSTs (one in range, one out)
+        let ext_mixed = ExternalDb {
+            path: "db_mixed".to_string(),
+            source_checkpoint_id: Uuid::new_v4(),
+            final_checkpoint_id: Some(Uuid::new_v4()),
+            sst_ids: vec![sst_mixed_in, sst_mixed_out],
+        };
+
+        manifest.external_dbs = vec![
+            ext_in_range.clone(),
+            ext_out_of_range.clone(),
+            ext_mixed.clone(),
+        ];
+
+        // Project to range d..p (keeps sst_in_range and sst_mixed_in)
+        let projected = Manifest::projected(&manifest, BytesRange::from_ref("d".."p"));
+
+        // The fully-out-of-range entry should be gone
+        assert!(
+            !projected.external_dbs.iter().any(|db| db.path == "db_out"),
+            "ExternalDb with all SSTs out of range should be removed"
+        );
+
+        // The fully-in-range entry should be unchanged
+        let in_range_entry = projected
+            .external_dbs
+            .iter()
+            .find(|db| db.path == "db_in")
+            .expect("ExternalDb fully in range should be present");
+        assert_eq!(in_range_entry.sst_ids, vec![sst_in_range]);
+
+        // The mixed entry should only retain the in-range SST
+        let mixed_entry = projected
+            .external_dbs
+            .iter()
+            .find(|db| db.path == "db_mixed")
+            .expect("ExternalDb with some in-range SSTs should be present");
+        assert_eq!(mixed_entry.sst_ids, vec![sst_mixed_in]);
     }
 }
