@@ -77,6 +77,30 @@ pub use builder::DbBuilder;
 
 pub(crate) mod builder;
 
+/// Handle returned from write operations, containing metadata about the write.
+/// This structure is designed to be extensible for future enhancements.
+#[derive(Debug, Clone, Copy)]
+pub struct WriteHandle {
+    pub(crate) seq: u64,
+    pub(crate) create_ts: Option<i64>,
+}
+
+impl WriteHandle {
+    pub fn new(seq: u64, create_ts: Option<i64>) -> Self {
+        Self { seq, create_ts }
+    }
+
+    /// Returns the sequence number assigned to this write operation.
+    pub fn seqnum(&self) -> u64 {
+        self.seq
+    }
+
+    /// Returns the creation timestamp assigned to this write operation.
+    pub fn create_ts(&self) -> Option<i64> {
+        self.create_ts
+    }
+}
+
 pub(crate) struct DbInner {
     pub(crate) state: Arc<RwLock<DbState>>,
     pub(crate) settings: Settings,
@@ -257,12 +281,17 @@ impl DbInner {
         &self,
         batch: WriteBatch,
         options: &WriteOptions,
-    ) -> Result<(), SlateDBError> {
+    ) -> Result<WriteHandle, SlateDBError> {
         self.db_stats.write_batch_count.inc();
         self.db_stats.write_ops.add(batch.ops.len() as u64);
         self.status()?;
         if batch.ops.is_empty() {
-            return Ok(());
+            // Return a dummy WriteHandle for empty batch.
+            // Sequence number is not incremented.
+            return Ok(WriteHandle {
+                seq: self.oracle.last_committed_seq(),
+                create_ts: None,
+            });
         }
 
         let (tx, rx) = tokio::sync::oneshot::channel();
@@ -278,13 +307,13 @@ impl DbInner {
 
         // TODO: this can be modified as awaiting the last_durable_seq watermark & fatal error.
 
-        let mut durable_watcher = rx.await??;
+        let (write_handle, mut durable_watcher) = rx.await??;
 
         if options.await_durable {
             durable_watcher.await_value().await?;
         }
 
-        Ok(())
+        Ok(write_handle)
     }
 
     #[inline]
@@ -1108,11 +1137,11 @@ impl Db {
     /// async fn main() -> Result<(), Error> {
     ///     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
     ///     let db = Db::open("test_db", object_store).await?;
-    ///     db.put(b"key", b"value").await?;
+    ///     let handle = db.put(b"key", b"value").await?;
     ///     Ok(())
     /// }
     /// ```
-    pub async fn put<K, V>(&self, key: K, value: V) -> Result<(), crate::Error>
+    pub async fn put<K, V>(&self, key: K, value: V) -> Result<WriteHandle, crate::Error>
     where
         K: AsRef<[u8]>,
         V: AsRef<[u8]>,
@@ -1144,7 +1173,7 @@ impl Db {
     /// async fn main() -> Result<(), Error> {
     ///     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
     ///     let db = Db::open("test_db", object_store).await?;
-    ///     db.put_with_options(b"key", b"value", &PutOptions::default(), &WriteOptions::default()).await?;
+    ///     let handle = db.put_with_options(b"key", b"value", &PutOptions::default(), &WriteOptions::default()).await?;
     ///     Ok(())
     /// }
     /// ```
@@ -1154,7 +1183,7 @@ impl Db {
         value: V,
         put_opts: &PutOptions,
         write_opts: &WriteOptions,
-    ) -> Result<(), crate::Error>
+    ) -> Result<WriteHandle, crate::Error>
     where
         K: AsRef<[u8]>,
         V: AsRef<[u8]>,
@@ -1183,11 +1212,11 @@ impl Db {
     /// async fn main() -> Result<(), Error> {
     ///     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
     ///     let db = Db::open("test_db", object_store).await?;
-    ///     db.delete(b"key").await?;
+    ///     let handle = db.delete(b"key").await?;
     ///     Ok(())
     /// }
     /// ```
-    pub async fn delete<K: AsRef<[u8]>>(&self, key: K) -> Result<(), crate::Error> {
+    pub async fn delete<K: AsRef<[u8]>>(&self, key: K) -> Result<WriteHandle, crate::Error> {
         let mut batch = WriteBatch::new();
         batch.delete(key.as_ref());
         self.write(batch).await
@@ -1213,7 +1242,7 @@ impl Db {
     /// async fn main() -> Result<(), Error> {
     ///     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
     ///     let db = Db::open("test_db", object_store).await?;
-    ///     db.delete_with_options(b"key", &WriteOptions::default()).await?;
+    ///     let handle = db.delete_with_options(b"key", &WriteOptions::default()).await?;
     ///     Ok(())
     /// }
     /// ```
@@ -1221,7 +1250,7 @@ impl Db {
         &self,
         key: K,
         options: &WriteOptions,
-    ) -> Result<(), crate::Error> {
+    ) -> Result<WriteHandle, crate::Error> {
         let mut batch = WriteBatch::new();
         batch.delete(key);
         self.write_with_options(batch, options).await
@@ -1265,11 +1294,11 @@ impl Db {
     ///         .with_merge_operator(Arc::new(StringConcatMergeOperator))
     ///         .build()
     ///         .await?;
-    ///     db.merge(b"key", b"value").await?;
+    ///     let handle = db.merge(b"key", b"value").await?;
     ///     Ok(())
     /// }
     /// ```
-    pub async fn merge<K, V>(&self, key: K, value: V) -> Result<(), crate::Error>
+    pub async fn merge<K, V>(&self, key: K, value: V) -> Result<WriteHandle, crate::Error>
     where
         K: AsRef<[u8]>,
         V: AsRef<[u8]>,
@@ -1319,7 +1348,7 @@ impl Db {
     ///         .with_merge_operator(Arc::new(StringConcatMergeOperator))
     ///         .build()
     ///         .await?;
-    ///     db.merge_with_options(
+    ///     let handle = db.merge_with_options(
     ///         b"key",
     ///         b"value",
     ///         &MergeOptions::default(),
@@ -1334,7 +1363,7 @@ impl Db {
         value: V,
         merge_opts: &MergeOptions,
         write_opts: &WriteOptions,
-    ) -> Result<(), crate::Error>
+    ) -> Result<WriteHandle, crate::Error>
     where
         K: AsRef<[u8]>,
         V: AsRef<[u8]>,
@@ -1370,12 +1399,12 @@ impl Db {
     ///     batch.put(b"key1", b"value1");
     ///     batch.put(b"key2", b"value2");
     ///     batch.delete(b"key1");
-    ///     db.write(batch).await?;
+    ///     let handle = db.write(batch).await?;
     ///
     ///     Ok(())
     /// }
     /// ```
-    pub async fn write(&self, batch: WriteBatch) -> Result<(), crate::Error> {
+    pub async fn write(&self, batch: WriteBatch) -> Result<WriteHandle, crate::Error> {
         self.write_with_options(batch, &WriteOptions::default())
             .await
     }
@@ -1407,7 +1436,7 @@ impl Db {
     ///     batch.put(b"key1", b"value1");
     ///     batch.put(b"key2", b"value2");
     ///     batch.delete(b"key1");
-    ///     db.write_with_options(batch, &WriteOptions::default()).await?;
+    ///     let handle = db.write_with_options(batch, &WriteOptions::default()).await?;
     ///
     ///     Ok(())
     /// }
@@ -1416,7 +1445,7 @@ impl Db {
         &self,
         batch: WriteBatch,
         options: &WriteOptions,
-    ) -> Result<(), crate::Error> {
+    ) -> Result<WriteHandle, crate::Error> {
         self.inner
             .write_with_options(batch, options)
             .await
@@ -5144,7 +5173,7 @@ mod tests {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = "/tmp/test_kv_store";
 
-        async fn do_put(db: &Db, key: &[u8], val: &[u8]) -> Result<(), crate::Error> {
+        async fn do_put(db: &Db, key: &[u8], val: &[u8]) -> Result<WriteHandle, crate::Error> {
             db.put_with_options(
                 key,
                 val,
@@ -6341,5 +6370,149 @@ mod tests {
         );
 
         db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_write_handle() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = "/tmp/test_write_handle_db";
+        let clock = Arc::new(MockSystemClock::new());
+        let db = Db::builder(path, object_store)
+            .with_settings(test_db_options(0, 1024, None))
+            .with_system_clock(clock.clone())
+            .build()
+            .await
+            .unwrap();
+
+        // Put
+        let key = b"key1";
+        let value = b"value1";
+        clock.set(100);
+        let handle = db
+            .put_with_options(
+                key,
+                value,
+                &PutOptions::default(),
+                &WriteOptions {
+                    await_durable: false,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(handle.seqnum(), 1);
+        assert_eq!(handle.create_ts(), Some(100));
+
+        // Put with options (TTL)
+        clock.set(200);
+        let put_opts = PutOptions {
+            ttl: Ttl::ExpireAfter(1000),
+        };
+        let handle = db
+            .put_with_options(
+                b"key2",
+                b"value2",
+                &put_opts,
+                &WriteOptions {
+                    await_durable: false,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(handle.seqnum(), 2);
+        assert_eq!(handle.create_ts(), Some(200));
+
+        // Delete
+        clock.set(300);
+        let handle = db
+            .delete_with_options(
+                b"key1",
+                &WriteOptions {
+                    await_durable: false,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(handle.seqnum(), 3);
+        assert_eq!(handle.create_ts(), Some(300));
+
+        // Write Batch
+        clock.set(400);
+        let mut batch = WriteBatch::new();
+        batch.put(b"key3", b"value3");
+        batch.delete(b"key2");
+        let handle = db
+            .write_with_options(
+                batch,
+                &WriteOptions {
+                    await_durable: false,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(handle.seqnum(), 4);
+        assert_eq!(handle.create_ts(), Some(400));
+    }
+
+    #[tokio::test]
+    async fn test_write_handle_with_batch() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = "/tmp/test_write_batch_handle";
+        let clock = Arc::new(MockSystemClock::new());
+        let db = Db::builder(path, object_store)
+            .with_settings(test_db_options(0, 1024, None))
+            .with_system_clock(clock.clone())
+            .build()
+            .await
+            .unwrap();
+
+        // Write Batch 1
+        clock.set(100);
+        let mut batch = WriteBatch::new();
+        batch.put(b"key1", b"value1");
+        batch.delete(b"key2");
+        let handle = db
+            .write_with_options(
+                batch,
+                &WriteOptions {
+                    await_durable: false,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(handle.seqnum(), 1);
+        assert_eq!(handle.create_ts(), Some(100));
+
+        // Write Batch 2
+        clock.set(200);
+        let mut batch = WriteBatch::new();
+        batch.put(b"key3", b"value3");
+        batch.put(b"key4", b"value4");
+        let handle = db
+            .write_with_options(
+                batch,
+                &WriteOptions {
+                    await_durable: false,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(handle.seqnum(), 2);
+        assert_eq!(handle.create_ts(), Some(200));
+
+        // Write Batch 3
+        clock.set(300);
+        let mut batch = WriteBatch::new();
+        batch.delete(b"key1");
+        let handle = db
+            .write_with_options(
+                batch,
+                &WriteOptions {
+                    await_durable: false,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(handle.seqnum(), 3);
+        assert_eq!(handle.create_ts(), Some(300));
     }
 }

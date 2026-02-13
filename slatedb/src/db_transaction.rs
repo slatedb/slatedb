@@ -9,7 +9,9 @@ use crate::batch::WriteBatch;
 use crate::bytes_range::BytesRange;
 use crate::config::{MergeOptions, PutOptions, ReadOptions, ScanOptions, WriteOptions};
 use crate::db::DbInner;
+use crate::db::WriteHandle;
 use crate::db_iter::{DbIterator, DbIteratorRangeTracker};
+use crate::oracle::Oracle;
 use crate::transaction_manager::{IsolationLevel, TransactionManager};
 use crate::DbRead;
 
@@ -445,7 +447,7 @@ impl DbTransaction {
     /// - Returns `Error` if the commit operation fails, which could be due to:
     ///   - Database I/O errors
     ///   - Concurrency conflicts detected during WriteBatch processing
-    pub async fn commit(self) -> Result<(), crate::Error> {
+    pub async fn commit(self) -> Result<WriteHandle, crate::Error> {
         self.commit_with_options(&WriteOptions::default()).await
     }
 
@@ -461,11 +463,17 @@ impl DbTransaction {
     /// - Returns `Error` if the commit operation fails, which could be due to:
     ///   - Database I/O errors
     ///   - Concurrency conflicts detected during WriteBatch processing
-    pub async fn commit_with_options(self, options: &WriteOptions) -> Result<(), crate::Error> {
+    pub async fn commit_with_options(
+        self,
+        options: &WriteOptions,
+    ) -> Result<WriteHandle, crate::Error> {
         // If the WriteBatch is empty, it's a no-op. it's impossible to have read-write
         // conflict, neither write-write conflict.
         if self.write_batch.read().is_empty() {
-            return Ok(());
+            return Ok(WriteHandle {
+                seq: self.db_inner.oracle.last_committed_seq(),
+                create_ts: None,
+            });
         }
 
         // Extract actual scanned ranges from trackers for SSI conflict detection
