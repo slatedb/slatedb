@@ -647,6 +647,9 @@ The projection process works as follows:
    compactor does not assume contiguous IDs — it matches sorted runs by ID, not by position. Preserving
    original IDs is important so that union can correctly match the same logical tier across projected
    manifests.
+6. Remove excluded SST IDs from `external_dbs` entries so that the external database's checkpoint can be released
+   and the SSTs garbage collected once no other manifest references them. Entries whose `sst_ids` list becomes
+   empty are removed entirely, allowing their checkpoint on the external database to be released.
 
 The `visible_range` on an `SsTableHandle` constrains the keys that are visible when reading the SST. The
 `effective_range` is the intersection of the SST's physical range (derived from its first key) and its
