@@ -234,6 +234,8 @@ pub unsafe extern "C" fn slatedb_db_builder_with_settings(
 /// ## Safety
 /// - `builder` must be a valid builder handle.
 /// - `merge_operator` must be non-null.
+/// - If `merge_operator` allocates `out_value`, supply `free_merge_result` to
+///   free that allocation (do not rely on `slatedb_bytes_free`).
 /// - Callback and context pointers must remain valid and thread-safe for as long
 ///   as any database built from this builder is alive.
 #[no_mangle]

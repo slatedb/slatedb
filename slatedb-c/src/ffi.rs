@@ -307,6 +307,7 @@ pub type slatedb_log_context_free_fn = Option<unsafe extern "C" fn(context: *mut
 ///
 /// If this callback allocates `out_value`, provide a corresponding
 /// `slatedb_merge_operator_result_free_fn` so Rust can release it after copying.
+/// Do not require Rust to call `slatedb_bytes_free` for `out_value`.
 #[allow(non_camel_case_types)]
 pub type slatedb_merge_operator_fn = Option<
     unsafe extern "C" fn(

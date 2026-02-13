@@ -162,6 +162,7 @@ typedef uint8_t slatedb_sst_block_size_t;
 //
 // If this callback allocates `out_value`, provide a corresponding
 // `slatedb_merge_operator_result_free_fn` so Rust can release it after copying.
+// Do not require Rust to call `slatedb_bytes_free` for `out_value`.
 typedef bool (*slatedb_merge_operator_fn)(const uint8_t *key,
                                           uintptr_t key_len,
                                           const uint8_t *existing_value,
@@ -399,6 +400,8 @@ struct slatedb_result_t slatedb_db_builder_with_settings(struct slatedb_db_build
 // ## Safety
 // - `builder` must be a valid builder handle.
 // - `merge_operator` must be non-null.
+// - If `merge_operator` allocates `out_value`, supply `free_merge_result` to
+//   free that allocation (do not rely on `slatedb_bytes_free`).
 // - Callback and context pointers must remain valid and thread-safe for as long
 //   as any database built from this builder is alive.
 struct slatedb_result_t slatedb_db_builder_with_merge_operator(struct slatedb_db_builder_t *builder,
