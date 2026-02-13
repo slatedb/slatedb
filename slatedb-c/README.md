@@ -38,13 +38,19 @@ cc -I slatedb-c/include \
 
 SlateDB C uses opaque handles so callers never depend on Rust internals.
 
-- `slatedb_object_store_t*` represents a resolved object-store backend (for example `memory:///` or `file:///...`) and is reused when opening databases.
-- `slatedb_db_t*` represents an open read/write database connection.
-- `slatedb_db_reader_t*` represents a read-only database reader with its own refresh/replay behavior.
-- `slatedb_iterator_t*` represents an active scan cursor returned by scan APIs.
+- `slatedb_object_store_t*` represents a resolved object-store backend (for example `memory:///` or
+  `file:///...`). This is a handle that can be shared across multiple databases that use the same
+  backend. See the [`parse_url_opts`](https://docs.rs/object_store/0.13.1/object_store/fn.parse_url_opts.html)
+  in Rust's `object_store` crate for supported URL schemes and options.
+- `slatedb_db_t*` represents a Rust `Db` instances opened with `slatedb_db_open` or
+  `slatedb_db_builder_build`.
+- `slatedb_db_reader_t*` represents a Rust `DbReader` instances opened with `slatedb_db_reader_open`.
+- `slatedb_iterator_t*` represents an active scan cursor returned by Rust's `Db`/`DbReader` scan APIs.
 - `slatedb_write_batch_t*` represents a mutable batch that stages multiple writes before commit.
-- `slatedb_settings_t*` represents parsed configuration values loaded from defaults, files, JSON, or environment variables.
-- `slatedb_db_builder_t*` represents an in-progress open configuration that is consumed by `slatedb_db_builder_build`.
+- `slatedb_settings_t*` represents parsed configuration values loaded from defaults, files, JSON, or
+  environment variables.
+- `slatedb_db_builder_t*` represents an in-progress open database builder that is consumed by
+  `slatedb_db_builder_build`.
 
 Each handle type has a matching `*_close` API and should be closed exactly once when no longer needed.
 
@@ -91,7 +97,7 @@ slatedb_bytes_free(ptr, len);
 
 Opaque handles must be released with their corresponding `*_close` function.
 
-## End-To-End Example (Open DB, Put/Get, Scan)
+## Example
 
 ```c
 #include "slatedb.h"
