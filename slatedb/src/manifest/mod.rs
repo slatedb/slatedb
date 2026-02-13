@@ -898,7 +898,7 @@ mod tests {
     #[test]
     fn test_union_fails_on_non_contiguous_l0_ranges() {
         let mut sst_ids: HashMap<String, SsTableId> = HashMap::new();
-        let manifests = vec![
+        let manifests = [
             SimpleManifest {
                 l0: vec![SstEntry::projected("foo", "a", "a".."m")],
                 sorted_runs: vec![],
