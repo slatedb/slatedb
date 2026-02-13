@@ -679,7 +679,9 @@ The union process works as follows:
      via projection, so their `sst_ids` lists are merged (unioned). Entries with different keys for the same
      path represent distinct checkpoints and must be kept separate. Without this deduplication, repeated
      cycles of projection and union cause exponential growth of duplicated entries: projecting into N parts
-     and unioning back multiplies the entry count by N each cycle.
+     and unioning back multiplies the entry count by N each cycle. New `final_checkpoint_id` values are
+     generated for all entries — the old ones belong to the source databases' clone relationships and are
+     not valid for the new database.
    - L0 SSTs are merged and deduplicated by SST ID. Because L0 SSTs span the full key space and overlap
      with each other, projection typically includes the same L0 SST in multiple projected manifests — each
      with a `visible_range` restricting it to that projection's key range. When these projected manifests are
