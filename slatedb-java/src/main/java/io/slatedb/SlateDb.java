@@ -425,19 +425,189 @@ public final class SlateDb implements SlateDbReadable {
         closed = true;
     }
 
-    /// Runtime exception thrown when SlateDB returns an error code.
-    public static final class SlateDbException extends RuntimeException {
+    /// Public error kind returned by SlateDB.
+    ///
+    /// Values mirror `slatedb::ErrorKind` plus FFI sentinel values used by
+    /// `slatedb_result_t`.
+    public enum ErrorKind {
+        NONE(0),
+        TRANSACTION(1),
+        CLOSED(2),
+        UNAVAILABLE(3),
+        INVALID(4),
+        DATA(5),
+        INTERNAL(6),
+        UNKNOWN(255);
+
+        private final int code;
+
+        ErrorKind(int code) {
+            this.code = code;
+        }
+
+        /// Native code carried in `slatedb_result_t.kind`.
+        public int code() {
+            return code;
+        }
+
+        static ErrorKind fromCode(int code) {
+            return switch (code) {
+                case 0 -> NONE;
+                case 1 -> TRANSACTION;
+                case 2 -> CLOSED;
+                case 3 -> UNAVAILABLE;
+                case 4 -> INVALID;
+                case 5 -> DATA;
+                case 6 -> INTERNAL;
+                case 255 -> UNKNOWN;
+                default -> UNKNOWN;
+            };
+        }
+    }
+
+    /// Reason returned for closed database errors.
+    ///
+    /// Values mirror `slatedb::CloseReason` plus FFI sentinel values used by
+    /// `slatedb_result_t`.
+    public enum CloseReason {
+        NONE(0),
+        CLEAN(1),
+        FENCED(2),
+        PANIC(3),
+        UNKNOWN(255);
+
+        private final int code;
+
+        CloseReason(int code) {
+            this.code = code;
+        }
+
+        /// Native code carried in `slatedb_result_t.close_reason`.
+        public int code() {
+            return code;
+        }
+
+        static CloseReason fromCode(int code) {
+            return switch (code) {
+                case 0 -> NONE;
+                case 1 -> CLEAN;
+                case 2 -> FENCED;
+                case 3 -> PANIC;
+                case 255 -> UNKNOWN;
+                default -> UNKNOWN;
+            };
+        }
+    }
+
+    /// Base runtime exception thrown when SlateDB returns an error.
+    public static class SlateDbException extends RuntimeException {
+        private final ErrorKind errorKind;
         private final int errorCode;
 
-        /// Creates a new exception with the SlateDB error code and message.
+        /// Creates a generic exception from a native error code.
+        ///
+        /// Prefer catching [SlateDbException] and inspecting [#getErrorKind()], or
+        /// handling specific subclasses.
         public SlateDbException(int errorCode, String message) {
+            this(ErrorKind.fromCode(errorCode), errorCode, message);
+        }
+
+        protected SlateDbException(ErrorKind errorKind, int errorCode, String message) {
             super(message == null ? ("SlateDB error " + errorCode) : message);
+            this.errorKind = Objects.requireNonNull(errorKind, "errorKind");
             this.errorCode = errorCode;
+        }
+
+        static SlateDbException fromNative(int errorCode, int closeReasonCode, String message) {
+            ErrorKind kind = ErrorKind.fromCode(errorCode);
+            return switch (kind) {
+                case TRANSACTION -> new TransactionException(errorCode, message);
+                case CLOSED -> new ClosedException(
+                    errorCode,
+                    CloseReason.fromCode(closeReasonCode),
+                    closeReasonCode,
+                    message
+                );
+                case UNAVAILABLE -> new UnavailableException(errorCode, message);
+                case INVALID -> new InvalidException(errorCode, message);
+                case DATA -> new DataException(errorCode, message);
+                case INTERNAL -> new InternalException(errorCode, message);
+                case NONE, UNKNOWN -> new UnknownException(errorCode, message);
+            };
+        }
+
+        /// Returns the structured SlateDB error kind.
+        public ErrorKind getErrorKind() {
+            return errorKind;
         }
 
         /// Returns the native error code.
         public int getErrorCode() {
             return errorCode;
+        }
+    }
+
+    /// Transaction conflict or transactional error.
+    public static final class TransactionException extends SlateDbException {
+        TransactionException(int errorCode, String message) {
+            super(ErrorKind.TRANSACTION, errorCode, message);
+        }
+    }
+
+    /// Database is closed and no longer usable.
+    public static final class ClosedException extends SlateDbException {
+        private final CloseReason closeReason;
+        private final int closeReasonCode;
+
+        ClosedException(int errorCode, CloseReason closeReason, int closeReasonCode, String message) {
+            super(ErrorKind.CLOSED, errorCode, message);
+            this.closeReason = Objects.requireNonNull(closeReason, "closeReason");
+            this.closeReasonCode = closeReasonCode;
+        }
+
+        /// Returns the close reason for this closed error.
+        public CloseReason getCloseReason() {
+            return closeReason;
+        }
+
+        /// Returns the native close-reason code.
+        public int getCloseReasonCode() {
+            return closeReasonCode;
+        }
+    }
+
+    /// Backend or storage service unavailable.
+    public static final class UnavailableException extends SlateDbException {
+        UnavailableException(int errorCode, String message) {
+            super(ErrorKind.UNAVAILABLE, errorCode, message);
+        }
+    }
+
+    /// Invalid input or invalid operation requested by caller.
+    public static final class InvalidException extends SlateDbException {
+        InvalidException(int errorCode, String message) {
+            super(ErrorKind.INVALID, errorCode, message);
+        }
+    }
+
+    /// Data corruption or incompatible persisted data state.
+    public static final class DataException extends SlateDbException {
+        DataException(int errorCode, String message) {
+            super(ErrorKind.DATA, errorCode, message);
+        }
+    }
+
+    /// Internal SlateDB error.
+    public static final class InternalException extends SlateDbException {
+        InternalException(int errorCode, String message) {
+            super(ErrorKind.INTERNAL, errorCode, message);
+        }
+    }
+
+    /// Forward-compatible fallback for unknown native error kinds.
+    public static final class UnknownException extends SlateDbException {
+        UnknownException(int errorCode, String message) {
+            super(ErrorKind.UNKNOWN, errorCode, message);
         }
     }
 

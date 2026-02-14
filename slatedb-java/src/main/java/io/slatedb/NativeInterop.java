@@ -22,14 +22,6 @@ import java.util.concurrent.atomic.AtomicBoolean;
 /// - Standard Java types
 /// - Rust-owned buffer cleanup (`slatedb_result_free`, `slatedb_bytes_free`)
 final class NativeInterop {
-    private static final int SLATEDB_ERROR_KIND_NONE = 0;
-    private static final int SLATEDB_ERROR_KIND_CLOSED = 2;
-
-    private static final int SLATEDB_CLOSE_REASON_NONE = 0;
-    private static final int SLATEDB_CLOSE_REASON_CLEAN = 1;
-    private static final int SLATEDB_CLOSE_REASON_FENCED = 2;
-    private static final int SLATEDB_CLOSE_REASON_PANIC = 3;
-
     private NativeInterop() {
     }
 
@@ -1085,10 +1077,12 @@ final class NativeInterop {
     }
 
     private static void checkResult(MemorySegment result) {
-        int kind = slatedb_result_t.kind(result);
-        int closeReason = slatedb_result_t.close_reason(result);
+        int kindCode = slatedb_result_t.kind(result);
+        int closeReasonCode = slatedb_result_t.close_reason(result);
+        SlateDb.ErrorKind kind = SlateDb.ErrorKind.fromCode(kindCode);
+        SlateDb.CloseReason closeReason = SlateDb.CloseReason.fromCode(closeReasonCode);
 
-        if (kind == SLATEDB_ERROR_KIND_NONE) {
+        if (kind == SlateDb.ErrorKind.NONE) {
             Native.slatedb_result_free(result);
             return;
         }
@@ -1100,8 +1094,8 @@ final class NativeInterop {
             Native.slatedb_result_free(result);
         }
 
-        if (kind == SLATEDB_ERROR_KIND_CLOSED) {
-            String closeReasonLabel = closeReasonLabel(closeReason);
+        if (kind == SlateDb.ErrorKind.CLOSED) {
+            String closeReasonLabel = closeReasonLabel(closeReason, closeReasonCode);
             if (message == null || message.isBlank()) {
                 message = "SlateDB is closed (" + closeReasonLabel + ")";
             } else {
@@ -1109,7 +1103,7 @@ final class NativeInterop {
             }
         }
 
-        throw new SlateDb.SlateDbException(kind, message);
+        throw SlateDb.SlateDbException.fromNative(kindCode, closeReasonCode, message);
     }
 
     private static byte[] copyAndFreeBytes(MemorySegment dataPtr, long len) {
@@ -1302,13 +1296,13 @@ final class NativeInterop {
         return cStringPtr.getString(0);
     }
 
-    private static String closeReasonLabel(int closeReason) {
+    private static String closeReasonLabel(SlateDb.CloseReason closeReason, int closeReasonCode) {
         return switch (closeReason) {
-            case SLATEDB_CLOSE_REASON_NONE -> "none";
-            case SLATEDB_CLOSE_REASON_CLEAN -> "clean";
-            case SLATEDB_CLOSE_REASON_FENCED -> "fenced";
-            case SLATEDB_CLOSE_REASON_PANIC -> "panic";
-            default -> "unknown(" + closeReason + ")";
+            case NONE -> "none";
+            case CLEAN -> "clean";
+            case FENCED -> "fenced";
+            case PANIC -> "panic";
+            case UNKNOWN -> "unknown(" + closeReasonCode + ")";
         };
     }
 
