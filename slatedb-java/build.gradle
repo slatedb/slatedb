@@ -16,7 +16,9 @@ plugins {
 // - https://github.com/openjdk/jextract/blob/master/doc/GUIDE.md#filtering
 def slatedbHeader = layout.projectDirectory.file('../slatedb-c/include/slatedb.h')
 def slatedbHeaderText = slatedbHeader.asFile.getText('UTF-8')
-def slatedbIncludeFunctions = ((slatedbHeaderText =~ /(?m)^\s*struct\s+slatedb_result_t\s+(slatedb_[A-Za-z0-9_]+)\s*\(/).collect { it[1] } as Set).toList().sort()
+def slatedbResultFunctions = (slatedbHeaderText =~ /(?m)^\s*struct\s+slatedb_result_t\s+(slatedb_[A-Za-z0-9_]+)\s*\(/).collect { it[1] } as Set
+def slatedbMemoryFunctions = (slatedbHeaderText =~ /(?m)^\s*void\s+(slatedb_[A-Za-z0-9_]+)\s*\(/).collect { it[1] } as Set
+def slatedbIncludeFunctions = (slatedbResultFunctions + slatedbMemoryFunctions).toList().sort()
 def slatedbIncludeConstants = ((slatedbHeaderText =~ /(?m)^\s*#define\s+(SLATEDB_[A-Z0-9_]+)\b/).collect { it[1] } as Set).toList().sort()
 def slatedbIncludeStructs = ((slatedbHeaderText =~ /(?m)^\s*typedef\s+struct\s+(slatedb_[A-Za-z0-9_]+)\s*\{/).collect { it[1] } as Set).toList().sort()
 def slatedbIncludeTypedefs = ((slatedbHeaderText =~ /(?ms)^\s*typedef\b.*?(?:\(\*\s*)?(slatedb_[A-Za-z0-9_]+)\s*\)?\s*;/).collect { it[1] } as Set).toList().sort()
