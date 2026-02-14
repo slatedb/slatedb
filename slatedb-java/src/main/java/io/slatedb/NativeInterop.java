@@ -6,11 +6,14 @@ import io.slatedb.ffi.*;
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
+import java.io.File;
 import java.nio.file.Files;
+import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
 import java.nio.charset.StandardCharsets;
 import java.util.Objects;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.regex.Pattern;
 
 /// Java-typed wrappers around generated jextract bindings.
 ///
@@ -22,6 +25,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
 /// - Standard Java types
 /// - Rust-owned buffer cleanup (`slatedb_result_free`, `slatedb_bytes_free`)
 final class NativeInterop {
+    private static final String SLATEDB_C_LIBRARY = "slatedb_c";
+
     private NativeInterop() {
     }
 
@@ -156,7 +161,12 @@ final class NativeInterop {
     }
 
     static void loadLibrary() {
-        System.loadLibrary("slatedb_c");
+        Path nativeLibrary = resolveLibraryFromJavaLibraryPath();
+        if (nativeLibrary != null) {
+            loadLibrary(nativeLibrary.toString());
+            return;
+        }
+        System.loadLibrary(SLATEDB_C_LIBRARY);
     }
 
     static void loadLibrary(String absolutePath) {
@@ -1338,7 +1348,7 @@ final class NativeInterop {
     /// directory. We create a best-effort alias with that mapped filename pointing to
     /// the provided library so both load styles resolve the same binary.
     private static void ensureLibraryLookupAlias(Path nativeLibrary) {
-        String mappedName = System.mapLibraryName("slatedb_c");
+        String mappedName = System.mapLibraryName(SLATEDB_C_LIBRARY);
         // Keep the alias local to the process working directory.
         Path alias = Path.of("").toAbsolutePath().resolve(mappedName);
 
@@ -1366,6 +1376,42 @@ final class NativeInterop {
             alias.toFile().deleteOnExit();
         } catch (java.io.IOException ignored) {
             // Best-effort only. If alias creation fails, direct load may still work.
+        }
+    }
+
+    private static Path resolveLibraryFromJavaLibraryPath() {
+        String javaLibraryPath = System.getProperty("java.library.path");
+        if (javaLibraryPath == null || javaLibraryPath.isBlank()) {
+            return null;
+        }
+
+        String mappedName = System.mapLibraryName(SLATEDB_C_LIBRARY);
+        String[] entries = javaLibraryPath.split(Pattern.quote(File.pathSeparator));
+        for (String entry : entries) {
+            Path directory = parseLibraryPathEntry(entry);
+            if (directory == null) {
+                continue;
+            }
+
+            Path candidate = directory.resolve(mappedName);
+            if (Files.isRegularFile(candidate)) {
+                return candidate.normalize();
+            }
+        }
+
+        return null;
+    }
+
+    private static Path parseLibraryPathEntry(String entry) {
+        String normalized = entry == null ? "" : entry.trim();
+        if (normalized.isEmpty()) {
+            return Path.of("").toAbsolutePath();
+        }
+
+        try {
+            return Path.of(normalized).toAbsolutePath();
+        } catch (InvalidPathException ignored) {
+            return null;
         }
     }
 

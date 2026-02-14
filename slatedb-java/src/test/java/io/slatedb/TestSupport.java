@@ -38,6 +38,10 @@ final class TestSupport {
         }
     }
 
+    static Path nativeLibraryPath() {
+        return findNativeLibrary();
+    }
+
     /// Creates a temporary database directory and an in-memory object store URL.
     static DbContext createDbContext() throws Exception {
         Path dbPath = Files.createTempDirectory("slatedb-java-db");

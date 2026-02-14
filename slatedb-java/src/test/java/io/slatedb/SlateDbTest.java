@@ -12,6 +12,7 @@ import org.junit.jupiter.api.Test;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.concurrent.TimeUnit;
 
 class SlateDbTest {
     @Test
@@ -88,6 +89,52 @@ class SlateDbTest {
             } else if (original != null) {
                 Files.write(loadConfig, original);
             }
+        }
+    }
+
+    @Test
+    void loadLibraryNoArgWorksWithJavaLibraryPathOnly() throws Exception {
+        Path nativeLib = TestSupport.nativeLibraryPath();
+        Assertions.assertTrue(
+            nativeLib != null && Files.exists(nativeLib),
+            "Missing slatedb_c native library for no-arg loadLibrary smoke test"
+        );
+
+        Path javaBin = Path.of(
+            System.getProperty("java.home"),
+            "bin",
+            isWindows() ? "java.exe" : "java"
+        );
+        Path tempWorkingDir = Files.createTempDirectory("slatedb-java-noarg-load");
+
+        try {
+            ProcessBuilder processBuilder = new ProcessBuilder(
+                javaBin.toString(),
+                "--enable-native-access=ALL-UNNAMED",
+                "-Djava.library.path=" + nativeLib.toAbsolutePath().getParent(),
+                "-cp",
+                System.getProperty("java.class.path"),
+                "io.slatedb.LoadLibraryNoArgSmokeMain"
+            );
+            processBuilder.directory(tempWorkingDir.toFile());
+            processBuilder.redirectErrorStream(true);
+
+            Process process = processBuilder.start();
+            boolean exited = process.waitFor(60, TimeUnit.SECONDS);
+            if (!exited) {
+                process.destroyForcibly();
+                Assertions.fail("No-arg loadLibrary smoke process timed out");
+            }
+
+            String output = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+            Assertions.assertEquals(
+                0,
+                process.exitValue(),
+                "No-arg loadLibrary smoke process failed:\n" + output
+            );
+        } finally {
+            Files.deleteIfExists(tempWorkingDir.resolve(System.mapLibraryName("slatedb_c")));
+            Files.deleteIfExists(tempWorkingDir);
         }
     }
 
@@ -210,5 +257,9 @@ class SlateDbTest {
             assertNotNull(metrics);
             assertTrue(metrics.startsWith("{"));
         }
+    }
+
+    private static boolean isWindows() {
+        return System.getProperty("os.name", "").toLowerCase().contains("win");
     }
 }
