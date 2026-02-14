@@ -12,9 +12,9 @@
 //! order. Iterating each file with [`WalFile::iterator`] yields [`RowEntry`]
 //! values in the order they are stored in that WAL SST.
 //!
-//! `WalFileIterator` intentionally exposes `next_entry` (and init), not
-//! `next`. This keeps the API at entry level and preserves tombstones and merge
-//! rows exactly as written to the WAL.
+//! `WalFileIterator` intentionally exposes `next_entry`, not `next`. This keeps
+//! the API at [`RowEntry`] level and preserves tombstones and merge rows exactly
+//! as written to the WAL.
 //!
 //! # Listing costs and polling strategy
 //!
@@ -88,13 +88,10 @@ pub struct WalFileIterator {
 }
 
 impl WalFileIterator {
+    /// Creates a new WAL file iterator from a boxed `KeyValueIterator`. The iterator
+    /// must be initialized before being passed in.
     fn new(iter: Box<dyn KeyValueIterator + 'static>) -> Self {
         Self { iter }
-    }
-
-    /// Initializes the iterator.
-    pub async fn init(&mut self) -> Result<(), crate::Error> {
-        self.iter.init().await.map_err(Into::into)
     }
 
     /// Returns the next entry in the WAL file.
