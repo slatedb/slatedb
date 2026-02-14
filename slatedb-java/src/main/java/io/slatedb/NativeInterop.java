@@ -7,6 +7,7 @@ import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
 import java.nio.charset.StandardCharsets;
 import java.util.Objects;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /// Java-typed wrappers around generated jextract bindings in [Native].
 ///
@@ -27,6 +28,136 @@ final class NativeInterop {
     private NativeInterop() {
     }
 
+    static abstract class NativeHandle implements AutoCloseable {
+        private final String handleType;
+        private final AtomicBoolean closed = new AtomicBoolean(false);
+        private volatile MemorySegment segment;
+
+        NativeHandle(String handleType, MemorySegment segment) {
+            this.handleType = Objects.requireNonNull(handleType, "handleType");
+            this.segment = requireNativeHandle(segment, handleType);
+        }
+
+        final MemorySegment segment() {
+            MemorySegment current = segment;
+            if (closed.get() || current.equals(MemorySegment.NULL)) {
+                throw new IllegalStateException(handleType + " is closed");
+            }
+            return current;
+        }
+
+        final boolean isClosed() {
+            return closed.get();
+        }
+
+        @Override
+        public final void close() {
+            if (!closed.compareAndSet(false, true)) {
+                return;
+            }
+
+            MemorySegment current = segment;
+            try {
+                closeNative(current);
+            } finally {
+                segment = MemorySegment.NULL;
+            }
+        }
+
+        protected abstract void closeNative(MemorySegment segment);
+    }
+
+    static final class ObjectStoreHandle extends NativeHandle {
+        private ObjectStoreHandle(MemorySegment segment) {
+            super("ObjectStoreHandle", segment);
+        }
+
+        @Override
+        protected void closeNative(MemorySegment segment) {
+            try (Arena arena = Arena.ofConfined()) {
+                checkResult(Native.slatedb_object_store_close(arena, segment));
+            }
+        }
+    }
+
+    static final class SettingsHandle extends NativeHandle {
+        private SettingsHandle(MemorySegment segment) {
+            super("SettingsHandle", segment);
+        }
+
+        @Override
+        protected void closeNative(MemorySegment segment) {
+            try (Arena arena = Arena.ofConfined()) {
+                checkResult(Native.slatedb_settings_close(arena, segment));
+            }
+        }
+    }
+
+    static final class DbBuilderHandle extends NativeHandle {
+        private DbBuilderHandle(MemorySegment segment) {
+            super("DbBuilderHandle", segment);
+        }
+
+        @Override
+        protected void closeNative(MemorySegment segment) {
+            try (Arena arena = Arena.ofConfined()) {
+                checkResult(Native.slatedb_db_builder_close(arena, segment));
+            }
+        }
+    }
+
+    static final class DbHandle extends NativeHandle {
+        private DbHandle(MemorySegment segment) {
+            super("DbHandle", segment);
+        }
+
+        @Override
+        protected void closeNative(MemorySegment segment) {
+            try (Arena arena = Arena.ofConfined()) {
+                checkResult(Native.slatedb_db_close(arena, segment));
+            }
+        }
+    }
+
+    static final class ReaderHandle extends NativeHandle {
+        private ReaderHandle(MemorySegment segment) {
+            super("ReaderHandle", segment);
+        }
+
+        @Override
+        protected void closeNative(MemorySegment segment) {
+            try (Arena arena = Arena.ofConfined()) {
+                checkResult(Native.slatedb_db_reader_close(arena, segment));
+            }
+        }
+    }
+
+    static final class IteratorHandle extends NativeHandle {
+        private IteratorHandle(MemorySegment segment) {
+            super("IteratorHandle", segment);
+        }
+
+        @Override
+        protected void closeNative(MemorySegment segment) {
+            try (Arena arena = Arena.ofConfined()) {
+                checkResult(Native.slatedb_iterator_close(arena, segment));
+            }
+        }
+    }
+
+    static final class WriteBatchHandle extends NativeHandle {
+        private WriteBatchHandle(MemorySegment segment) {
+            super("WriteBatchHandle", segment);
+        }
+
+        @Override
+        protected void closeNative(MemorySegment segment) {
+            try (Arena arena = Arena.ofConfined()) {
+                checkResult(Native.slatedb_write_batch_close(arena, segment));
+            }
+        }
+    }
+
     static void loadLibrary() {
         System.loadLibrary("slatedb_c");
     }
@@ -36,7 +167,7 @@ final class NativeInterop {
         System.load(absolutePath);
     }
 
-    static MemorySegment resolveObjectStore(String url, String envFile) {
+    static ObjectStoreHandle resolveObjectStore(String url, String envFile) {
         if (url != null) {
             return slatedb_object_store_from_url(url);
         }
@@ -49,10 +180,20 @@ final class NativeInterop {
         }
     }
 
+    static void slatedb_logging_init(LogLevel level) {
+        Objects.requireNonNull(level, "level");
+        slatedb_logging_init(toNativeLogLevel(level));
+    }
+
     static void slatedb_logging_set_level(byte level) {
         try (Arena arena = Arena.ofConfined()) {
             checkResult(Native.slatedb_logging_set_level(arena, level));
         }
+    }
+
+    static void slatedb_logging_set_level(LogLevel level) {
+        Objects.requireNonNull(level, "level");
+        slatedb_logging_set_level(toNativeLogLevel(level));
     }
 
     static void slatedb_logging_set_callback(MemorySegment callback, MemorySegment context, MemorySegment freeContext) {
@@ -68,16 +209,16 @@ final class NativeInterop {
         }
     }
 
-    static MemorySegment slatedb_object_store_from_url(String url) {
+    static ObjectStoreHandle slatedb_object_store_from_url(String url) {
         Objects.requireNonNull(url, "url");
         try (Arena arena = Arena.ofConfined()) {
             MemorySegment outObjectStore = arena.allocate(Native.C_POINTER);
             checkResult(Native.slatedb_object_store_from_url(arena, marshalCString(arena, url), outObjectStore));
-            return outObjectStore.get(Native.C_POINTER, 0);
+            return new ObjectStoreHandle(outObjectStore.get(Native.C_POINTER, 0));
         }
     }
 
-    static MemorySegment slatedb_object_store_from_env(String envFile) {
+    static ObjectStoreHandle slatedb_object_store_from_env(String envFile) {
         try (Arena arena = Arena.ofConfined()) {
             MemorySegment outObjectStore = arena.allocate(Native.C_POINTER);
             checkResult(
@@ -87,53 +228,51 @@ final class NativeInterop {
                     outObjectStore
                 )
             );
-            return outObjectStore.get(Native.C_POINTER, 0);
+            return new ObjectStoreHandle(outObjectStore.get(Native.C_POINTER, 0));
         }
     }
 
-    static void slatedb_object_store_close(MemorySegment objectStore) {
+    static void slatedb_object_store_close(ObjectStoreHandle objectStore) {
         Objects.requireNonNull(objectStore, "objectStore");
-        try (Arena arena = Arena.ofConfined()) {
-            checkResult(Native.slatedb_object_store_close(arena, objectStore));
-        }
+        objectStore.close();
     }
 
-    static MemorySegment slatedb_settings_default() {
+    static SettingsHandle slatedb_settings_default() {
         try (Arena arena = Arena.ofConfined()) {
             MemorySegment outSettings = arena.allocate(Native.C_POINTER);
             checkResult(Native.slatedb_settings_default(arena, outSettings));
-            return outSettings.get(Native.C_POINTER, 0);
+            return new SettingsHandle(outSettings.get(Native.C_POINTER, 0));
         }
     }
 
-    static MemorySegment slatedb_settings_from_file(String path) {
+    static SettingsHandle slatedb_settings_from_file(String path) {
         Objects.requireNonNull(path, "path");
         try (Arena arena = Arena.ofConfined()) {
             MemorySegment outSettings = arena.allocate(Native.C_POINTER);
             checkResult(Native.slatedb_settings_from_file(arena, marshalCString(arena, path), outSettings));
-            return outSettings.get(Native.C_POINTER, 0);
+            return new SettingsHandle(outSettings.get(Native.C_POINTER, 0));
         }
     }
 
-    static MemorySegment slatedb_settings_from_json(String json) {
+    static SettingsHandle slatedb_settings_from_json(String json) {
         Objects.requireNonNull(json, "json");
         try (Arena arena = Arena.ofConfined()) {
             MemorySegment outSettings = arena.allocate(Native.C_POINTER);
             checkResult(Native.slatedb_settings_from_json(arena, marshalCString(arena, json), outSettings));
-            return outSettings.get(Native.C_POINTER, 0);
+            return new SettingsHandle(outSettings.get(Native.C_POINTER, 0));
         }
     }
 
-    static MemorySegment slatedb_settings_from_env(String prefix) {
+    static SettingsHandle slatedb_settings_from_env(String prefix) {
         Objects.requireNonNull(prefix, "prefix");
         try (Arena arena = Arena.ofConfined()) {
             MemorySegment outSettings = arena.allocate(Native.C_POINTER);
             checkResult(Native.slatedb_settings_from_env(arena, marshalCString(arena, prefix), outSettings));
-            return outSettings.get(Native.C_POINTER, 0);
+            return new SettingsHandle(outSettings.get(Native.C_POINTER, 0));
         }
     }
 
-    static MemorySegment slatedb_settings_from_env_with_default(String prefix, MemorySegment defaultSettings) {
+    static SettingsHandle slatedb_settings_from_env_with_default(String prefix, SettingsHandle defaultSettings) {
         Objects.requireNonNull(prefix, "prefix");
         Objects.requireNonNull(defaultSettings, "defaultSettings");
         try (Arena arena = Arena.ofConfined()) {
@@ -142,23 +281,23 @@ final class NativeInterop {
                 Native.slatedb_settings_from_env_with_default(
                     arena,
                     marshalCString(arena, prefix),
-                    defaultSettings,
+                    defaultSettings.segment(),
                     outSettings
                 )
             );
-            return outSettings.get(Native.C_POINTER, 0);
+            return new SettingsHandle(outSettings.get(Native.C_POINTER, 0));
         }
     }
 
-    static MemorySegment slatedb_settings_load() {
+    static SettingsHandle slatedb_settings_load() {
         try (Arena arena = Arena.ofConfined()) {
             MemorySegment outSettings = arena.allocate(Native.C_POINTER);
             checkResult(Native.slatedb_settings_load(arena, outSettings));
-            return outSettings.get(Native.C_POINTER, 0);
+            return new SettingsHandle(outSettings.get(Native.C_POINTER, 0));
         }
     }
 
-    static void slatedb_settings_apply_kv(MemorySegment settings, byte[] key, byte[] valueJson) {
+    static void slatedb_settings_apply_kv(SettingsHandle settings, byte[] key, byte[] valueJson) {
         Objects.requireNonNull(settings, "settings");
         Objects.requireNonNull(key, "key");
         Objects.requireNonNull(valueJson, "valueJson");
@@ -167,7 +306,7 @@ final class NativeInterop {
             checkResult(
                 Native.slatedb_settings_apply_kv(
                     arena,
-                    settings,
+                    settings.segment(),
                     marshalBytes(arena, key),
                     key.length,
                     marshalBytes(arena, valueJson),
@@ -177,28 +316,27 @@ final class NativeInterop {
         }
     }
 
-    static byte[] slatedb_settings_to_json(MemorySegment settings) {
+    static byte[] slatedb_settings_to_json(SettingsHandle settings) {
         Objects.requireNonNull(settings, "settings");
         try (Arena arena = Arena.ofConfined()) {
             MemorySegment outJson = arena.allocate(Native.C_POINTER);
             MemorySegment outJsonLen = arena.allocate(Native.C_LONG);
-            checkResult(Native.slatedb_settings_to_json(arena, settings, outJson, outJsonLen));
+            checkResult(Native.slatedb_settings_to_json(arena, settings.segment(), outJson, outJsonLen));
             return takeOwnedBytes(outJson, outJsonLen);
         }
     }
 
-    static String slatedb_settings_to_json_string(MemorySegment settings) {
+    static String slatedb_settings_to_json_string(SettingsHandle settings) {
+        Objects.requireNonNull(settings, "settings");
         return new String(slatedb_settings_to_json(settings), StandardCharsets.UTF_8);
     }
 
-    static void slatedb_settings_close(MemorySegment settings) {
+    static void slatedb_settings_close(SettingsHandle settings) {
         Objects.requireNonNull(settings, "settings");
-        try (Arena arena = Arena.ofConfined()) {
-            checkResult(Native.slatedb_settings_close(arena, settings));
-        }
+        settings.close();
     }
 
-    static MemorySegment slatedb_db_builder_new(String path, MemorySegment objectStore) {
+    static DbBuilderHandle slatedb_db_builder_new(String path, ObjectStoreHandle objectStore) {
         Objects.requireNonNull(path, "path");
         Objects.requireNonNull(objectStore, "objectStore");
 
@@ -208,46 +346,45 @@ final class NativeInterop {
                 Native.slatedb_db_builder_new(
                     arena,
                     marshalCString(arena, path),
-                    objectStore,
+                    objectStore.segment(),
                     outBuilder
                 )
             );
-            return outBuilder.get(Native.C_POINTER, 0);
+            return new DbBuilderHandle(outBuilder.get(Native.C_POINTER, 0));
         }
     }
 
-    static void slatedb_db_builder_with_wal_object_store(MemorySegment builder, MemorySegment walObjectStore) {
+    static void slatedb_db_builder_with_wal_object_store(DbBuilderHandle builder, ObjectStoreHandle walObjectStore) {
         Objects.requireNonNull(builder, "builder");
         Objects.requireNonNull(walObjectStore, "walObjectStore");
         try (Arena arena = Arena.ofConfined()) {
-            checkResult(Native.slatedb_db_builder_with_wal_object_store(arena, builder, walObjectStore));
+            checkResult(Native.slatedb_db_builder_with_wal_object_store(arena, builder.segment(), walObjectStore.segment()));
         }
     }
 
-    static void slatedb_db_builder_with_seed(MemorySegment builder, long seed) {
+    static void slatedb_db_builder_with_seed(DbBuilderHandle builder, long seed) {
         Objects.requireNonNull(builder, "builder");
         try (Arena arena = Arena.ofConfined()) {
-            checkResult(Native.slatedb_db_builder_with_seed(arena, builder, seed));
+            checkResult(Native.slatedb_db_builder_with_seed(arena, builder.segment(), seed));
         }
     }
 
-    static void slatedb_db_builder_with_sst_block_size(MemorySegment builder, byte sstBlockSize) {
+    static void slatedb_db_builder_with_sst_block_size(DbBuilderHandle builder, SstBlockSize sstBlockSize) {
         Objects.requireNonNull(builder, "builder");
-        try (Arena arena = Arena.ofConfined()) {
-            checkResult(Native.slatedb_db_builder_with_sst_block_size(arena, builder, sstBlockSize));
-        }
+        Objects.requireNonNull(sstBlockSize, "sstBlockSize");
+        slatedb_db_builder_with_sst_block_size(builder, toNativeSstBlockSize(sstBlockSize));
     }
 
-    static void slatedb_db_builder_with_settings(MemorySegment builder, MemorySegment settings) {
+    static void slatedb_db_builder_with_settings(DbBuilderHandle builder, SettingsHandle settings) {
         Objects.requireNonNull(builder, "builder");
         Objects.requireNonNull(settings, "settings");
         try (Arena arena = Arena.ofConfined()) {
-            checkResult(Native.slatedb_db_builder_with_settings(arena, builder, settings));
+            checkResult(Native.slatedb_db_builder_with_settings(arena, builder.segment(), settings.segment()));
         }
     }
 
     static void slatedb_db_builder_with_merge_operator(
-        MemorySegment builder,
+        DbBuilderHandle builder,
         MemorySegment mergeOperator,
         MemorySegment mergeOperatorContext,
         MemorySegment freeMergeResult,
@@ -260,7 +397,7 @@ final class NativeInterop {
             checkResult(
                 Native.slatedb_db_builder_with_merge_operator(
                     arena,
-                    builder,
+                    builder.segment(),
                     mergeOperator,
                     nullToNullSegment(mergeOperatorContext),
                     nullToNullSegment(freeMergeResult),
@@ -270,23 +407,21 @@ final class NativeInterop {
         }
     }
 
-    static MemorySegment slatedb_db_builder_build(MemorySegment builder) {
+    static DbHandle slatedb_db_builder_build(DbBuilderHandle builder) {
         Objects.requireNonNull(builder, "builder");
         try (Arena arena = Arena.ofConfined()) {
             MemorySegment outDb = arena.allocate(Native.C_POINTER);
-            checkResult(Native.slatedb_db_builder_build(arena, builder, outDb));
-            return outDb.get(Native.C_POINTER, 0);
+            checkResult(Native.slatedb_db_builder_build(arena, builder.segment(), outDb));
+            return new DbHandle(outDb.get(Native.C_POINTER, 0));
         }
     }
 
-    static void slatedb_db_builder_close(MemorySegment builder) {
+    static void slatedb_db_builder_close(DbBuilderHandle builder) {
         Objects.requireNonNull(builder, "builder");
-        try (Arena arena = Arena.ofConfined()) {
-            checkResult(Native.slatedb_db_builder_close(arena, builder));
-        }
+        builder.close();
     }
 
-    static MemorySegment slatedb_db_open(String path, MemorySegment objectStore) {
+    static DbHandle slatedb_db_open(String path, ObjectStoreHandle objectStore) {
         Objects.requireNonNull(path, "path");
         Objects.requireNonNull(objectStore, "objectStore");
 
@@ -296,36 +431,37 @@ final class NativeInterop {
                 Native.slatedb_db_open(
                     arena,
                     marshalCString(arena, path),
-                    objectStore,
+                    objectStore.segment(),
                     outDb
                 )
             );
-            return outDb.get(Native.C_POINTER, 0);
+            return new DbHandle(outDb.get(Native.C_POINTER, 0));
         }
     }
 
-    static void slatedb_db_status(MemorySegment db) {
+    static void slatedb_db_status(DbHandle db) {
         Objects.requireNonNull(db, "db");
         try (Arena arena = Arena.ofConfined()) {
-            checkResult(Native.slatedb_db_status(arena, db));
+            checkResult(Native.slatedb_db_status(arena, db.segment()));
         }
     }
 
-    static byte[] slatedb_db_metrics(MemorySegment db) {
+    static byte[] slatedb_db_metrics(DbHandle db) {
         Objects.requireNonNull(db, "db");
         try (Arena arena = Arena.ofConfined()) {
             MemorySegment outJson = arena.allocate(Native.C_POINTER);
             MemorySegment outJsonLen = arena.allocate(Native.C_LONG);
-            checkResult(Native.slatedb_db_metrics(arena, db, outJson, outJsonLen));
+            checkResult(Native.slatedb_db_metrics(arena, db.segment(), outJson, outJsonLen));
             return takeOwnedBytes(outJson, outJsonLen);
         }
     }
 
-    static String slatedb_db_metrics_string(MemorySegment db) {
+    static String slatedb_db_metrics_string(DbHandle db) {
+        Objects.requireNonNull(db, "db");
         return new String(slatedb_db_metrics(db), StandardCharsets.UTF_8);
     }
 
-    static MetricGetResult slatedb_db_metric_get(MemorySegment db, String name) {
+    static MetricGetResult slatedb_db_metric_get(DbHandle db, String name) {
         Objects.requireNonNull(db, "db");
         Objects.requireNonNull(name, "name");
 
@@ -335,7 +471,7 @@ final class NativeInterop {
             checkResult(
                 Native.slatedb_db_metric_get(
                     arena,
-                    db,
+                    db.segment(),
                     marshalCString(arena, name),
                     outPresent,
                     outValue
@@ -348,11 +484,12 @@ final class NativeInterop {
         }
     }
 
-    static byte[] slatedb_db_get(MemorySegment db, byte[] key) {
+    static byte[] slatedb_db_get(DbHandle db, byte[] key) {
+        Objects.requireNonNull(db, "db");
         return slatedb_db_get_with_options(db, key, null);
     }
 
-    static byte[] slatedb_db_get_with_options(MemorySegment db, byte[] key, ReadOptions readOptions) {
+    static byte[] slatedb_db_get_with_options(DbHandle db, byte[] key, ReadOptions readOptions) {
         Objects.requireNonNull(db, "db");
         Objects.requireNonNull(key, "key");
 
@@ -364,7 +501,7 @@ final class NativeInterop {
             checkResult(
                 Native.slatedb_db_get_with_options(
                     arena,
-                    db,
+                    db.segment(),
                     marshalBytes(arena, key),
                     key.length,
                     marshalReadOptions(arena, readOptions),
@@ -379,7 +516,7 @@ final class NativeInterop {
         }
     }
 
-    static void slatedb_db_put(MemorySegment db, byte[] key, byte[] value) {
+    static void slatedb_db_put(DbHandle db, byte[] key, byte[] value) {
         Objects.requireNonNull(db, "db");
         Objects.requireNonNull(key, "key");
         Objects.requireNonNull(value, "value");
@@ -388,7 +525,7 @@ final class NativeInterop {
             checkResult(
                 Native.slatedb_db_put(
                     arena,
-                    db,
+                    db.segment(),
                     marshalBytes(arena, key),
                     key.length,
                     marshalBytes(arena, value),
@@ -399,7 +536,7 @@ final class NativeInterop {
     }
 
     static void slatedb_db_put_with_options(
-        MemorySegment db,
+        DbHandle db,
         byte[] key,
         byte[] value,
         PutOptions putOptions,
@@ -413,7 +550,7 @@ final class NativeInterop {
             checkResult(
                 Native.slatedb_db_put_with_options(
                     arena,
-                    db,
+                    db.segment(),
                     marshalBytes(arena, key),
                     key.length,
                     marshalBytes(arena, value),
@@ -425,16 +562,16 @@ final class NativeInterop {
         }
     }
 
-    static void slatedb_db_delete(MemorySegment db, byte[] key) {
+    static void slatedb_db_delete(DbHandle db, byte[] key) {
         Objects.requireNonNull(db, "db");
         Objects.requireNonNull(key, "key");
 
         try (Arena arena = Arena.ofConfined()) {
-            checkResult(Native.slatedb_db_delete(arena, db, marshalBytes(arena, key), key.length));
+            checkResult(Native.slatedb_db_delete(arena, db.segment(), marshalBytes(arena, key), key.length));
         }
     }
 
-    static void slatedb_db_delete_with_options(MemorySegment db, byte[] key, WriteOptions writeOptions) {
+    static void slatedb_db_delete_with_options(DbHandle db, byte[] key, WriteOptions writeOptions) {
         Objects.requireNonNull(db, "db");
         Objects.requireNonNull(key, "key");
 
@@ -442,7 +579,7 @@ final class NativeInterop {
             checkResult(
                 Native.slatedb_db_delete_with_options(
                     arena,
-                    db,
+                    db.segment(),
                     marshalBytes(arena, key),
                     key.length,
                     marshalWriteOptions(arena, writeOptions)
@@ -451,7 +588,7 @@ final class NativeInterop {
         }
     }
 
-    static void slatedb_db_merge(MemorySegment db, byte[] key, byte[] value) {
+    static void slatedb_db_merge(DbHandle db, byte[] key, byte[] value) {
         Objects.requireNonNull(db, "db");
         Objects.requireNonNull(key, "key");
         Objects.requireNonNull(value, "value");
@@ -460,7 +597,7 @@ final class NativeInterop {
             checkResult(
                 Native.slatedb_db_merge(
                     arena,
-                    db,
+                    db.segment(),
                     marshalBytes(arena, key),
                     key.length,
                     marshalBytes(arena, value),
@@ -471,7 +608,7 @@ final class NativeInterop {
     }
 
     static void slatedb_db_merge_with_options(
-        MemorySegment db,
+        DbHandle db,
         byte[] key,
         byte[] value,
         PutOptions mergeOptions,
@@ -485,7 +622,7 @@ final class NativeInterop {
             checkResult(
                 Native.slatedb_db_merge_with_options(
                     arena,
-                    db,
+                    db.segment(),
                     marshalBytes(arena, key),
                     key.length,
                     marshalBytes(arena, value),
@@ -497,16 +634,16 @@ final class NativeInterop {
         }
     }
 
-    static void slatedb_db_write(MemorySegment db, MemorySegment writeBatch) {
+    static void slatedb_db_write(DbHandle db, WriteBatchHandle writeBatch) {
         Objects.requireNonNull(db, "db");
         Objects.requireNonNull(writeBatch, "writeBatch");
 
         try (Arena arena = Arena.ofConfined()) {
-            checkResult(Native.slatedb_db_write(arena, db, writeBatch));
+            checkResult(Native.slatedb_db_write(arena, db.segment(), writeBatch.segment()));
         }
     }
 
-    static void slatedb_db_write_with_options(MemorySegment db, MemorySegment writeBatch, WriteOptions writeOptions) {
+    static void slatedb_db_write_with_options(DbHandle db, WriteBatchHandle writeBatch, WriteOptions writeOptions) {
         Objects.requireNonNull(db, "db");
         Objects.requireNonNull(writeBatch, "writeBatch");
 
@@ -514,20 +651,21 @@ final class NativeInterop {
             checkResult(
                 Native.slatedb_db_write_with_options(
                     arena,
-                    db,
-                    writeBatch,
+                    db.segment(),
+                    writeBatch.segment(),
                     marshalWriteOptions(arena, writeOptions)
                 )
             );
         }
     }
 
-    static MemorySegment slatedb_db_scan(MemorySegment db, byte[] startKey, byte[] endKey) {
+    static IteratorHandle slatedb_db_scan(DbHandle db, byte[] startKey, byte[] endKey) {
+        Objects.requireNonNull(db, "db");
         return slatedb_db_scan_with_options(db, startKey, endKey, null);
     }
 
-    static MemorySegment slatedb_db_scan_with_options(
-        MemorySegment db,
+    static IteratorHandle slatedb_db_scan_with_options(
+        DbHandle db,
         byte[] startKey,
         byte[] endKey,
         ScanOptions scanOptions
@@ -539,21 +677,22 @@ final class NativeInterop {
             checkResult(
                 Native.slatedb_db_scan_with_options(
                     arena,
-                    db,
+                    db.segment(),
                     marshalRange(arena, startKey, endKey),
                     marshalScanOptions(arena, scanOptions),
                     outIterator
                 )
             );
-            return outIterator.get(Native.C_POINTER, 0);
+            return new IteratorHandle(outIterator.get(Native.C_POINTER, 0));
         }
     }
 
-    static MemorySegment slatedb_db_scan_prefix(MemorySegment db, byte[] prefix) {
+    static IteratorHandle slatedb_db_scan_prefix(DbHandle db, byte[] prefix) {
+        Objects.requireNonNull(db, "db");
         return slatedb_db_scan_prefix_with_options(db, prefix, null);
     }
 
-    static MemorySegment slatedb_db_scan_prefix_with_options(MemorySegment db, byte[] prefix, ScanOptions scanOptions) {
+    static IteratorHandle slatedb_db_scan_prefix_with_options(DbHandle db, byte[] prefix, ScanOptions scanOptions) {
         Objects.requireNonNull(db, "db");
         Objects.requireNonNull(prefix, "prefix");
 
@@ -562,41 +701,39 @@ final class NativeInterop {
             checkResult(
                 Native.slatedb_db_scan_prefix_with_options(
                     arena,
-                    db,
+                    db.segment(),
                     marshalBytes(arena, prefix),
                     prefix.length,
                     marshalScanOptions(arena, scanOptions),
                     outIterator
                 )
             );
-            return outIterator.get(Native.C_POINTER, 0);
+            return new IteratorHandle(outIterator.get(Native.C_POINTER, 0));
         }
     }
 
-    static void slatedb_db_flush(MemorySegment db) {
+    static void slatedb_db_flush(DbHandle db) {
         Objects.requireNonNull(db, "db");
         try (Arena arena = Arena.ofConfined()) {
-            checkResult(Native.slatedb_db_flush(arena, db));
+            checkResult(Native.slatedb_db_flush(arena, db.segment()));
         }
     }
 
-    static void slatedb_db_flush_with_options(MemorySegment db, byte flushType) {
+    static void slatedb_db_flush_with_options(DbHandle db, byte flushType) {
         Objects.requireNonNull(db, "db");
         try (Arena arena = Arena.ofConfined()) {
-            checkResult(Native.slatedb_db_flush_with_options(arena, db, marshalFlushOptions(arena, flushType)));
+            checkResult(Native.slatedb_db_flush_with_options(arena, db.segment(), marshalFlushOptions(arena, flushType)));
         }
     }
 
-    static void slatedb_db_close(MemorySegment db) {
+    static void slatedb_db_close(DbHandle db) {
         Objects.requireNonNull(db, "db");
-        try (Arena arena = Arena.ofConfined()) {
-            checkResult(Native.slatedb_db_close(arena, db));
-        }
+        db.close();
     }
 
-    static MemorySegment slatedb_db_reader_open(
+    static ReaderHandle slatedb_db_reader_open(
         String path,
-        MemorySegment objectStore,
+        ObjectStoreHandle objectStore,
         String checkpointId,
         ReaderOptions readerOptions
     ) {
@@ -609,21 +746,22 @@ final class NativeInterop {
                 Native.slatedb_db_reader_open(
                     arena,
                     marshalCString(arena, path),
-                    objectStore,
+                    objectStore.segment(),
                     marshalNullableCString(arena, checkpointId),
                     marshalReaderOptions(arena, readerOptions),
                     outReader
                 )
             );
-            return outReader.get(Native.C_POINTER, 0);
+            return new ReaderHandle(outReader.get(Native.C_POINTER, 0));
         }
     }
 
-    static byte[] slatedb_db_reader_get(MemorySegment reader, byte[] key) {
+    static byte[] slatedb_db_reader_get(ReaderHandle reader, byte[] key) {
+        Objects.requireNonNull(reader, "reader");
         return slatedb_db_reader_get_with_options(reader, key, null);
     }
 
-    static byte[] slatedb_db_reader_get_with_options(MemorySegment reader, byte[] key, ReadOptions readOptions) {
+    static byte[] slatedb_db_reader_get_with_options(ReaderHandle reader, byte[] key, ReadOptions readOptions) {
         Objects.requireNonNull(reader, "reader");
         Objects.requireNonNull(key, "key");
 
@@ -635,7 +773,7 @@ final class NativeInterop {
             checkResult(
                 Native.slatedb_db_reader_get_with_options(
                     arena,
-                    reader,
+                    reader.segment(),
                     marshalBytes(arena, key),
                     key.length,
                     marshalReadOptions(arena, readOptions),
@@ -650,12 +788,13 @@ final class NativeInterop {
         }
     }
 
-    static MemorySegment slatedb_db_reader_scan(MemorySegment reader, byte[] startKey, byte[] endKey) {
+    static IteratorHandle slatedb_db_reader_scan(ReaderHandle reader, byte[] startKey, byte[] endKey) {
+        Objects.requireNonNull(reader, "reader");
         return slatedb_db_reader_scan_with_options(reader, startKey, endKey, null);
     }
 
-    static MemorySegment slatedb_db_reader_scan_with_options(
-        MemorySegment reader,
+    static IteratorHandle slatedb_db_reader_scan_with_options(
+        ReaderHandle reader,
         byte[] startKey,
         byte[] endKey,
         ScanOptions scanOptions
@@ -667,22 +806,23 @@ final class NativeInterop {
             checkResult(
                 Native.slatedb_db_reader_scan_with_options(
                     arena,
-                    reader,
+                    reader.segment(),
                     marshalRange(arena, startKey, endKey),
                     marshalScanOptions(arena, scanOptions),
                     outIterator
                 )
             );
-            return outIterator.get(Native.C_POINTER, 0);
+            return new IteratorHandle(outIterator.get(Native.C_POINTER, 0));
         }
     }
 
-    static MemorySegment slatedb_db_reader_scan_prefix(MemorySegment reader, byte[] prefix) {
+    static IteratorHandle slatedb_db_reader_scan_prefix(ReaderHandle reader, byte[] prefix) {
+        Objects.requireNonNull(reader, "reader");
         return slatedb_db_reader_scan_prefix_with_options(reader, prefix, null);
     }
 
-    static MemorySegment slatedb_db_reader_scan_prefix_with_options(
-        MemorySegment reader,
+    static IteratorHandle slatedb_db_reader_scan_prefix_with_options(
+        ReaderHandle reader,
         byte[] prefix,
         ScanOptions scanOptions
     ) {
@@ -694,25 +834,23 @@ final class NativeInterop {
             checkResult(
                 Native.slatedb_db_reader_scan_prefix_with_options(
                     arena,
-                    reader,
+                    reader.segment(),
                     marshalBytes(arena, prefix),
                     prefix.length,
                     marshalScanOptions(arena, scanOptions),
                     outIterator
                 )
             );
-            return outIterator.get(Native.C_POINTER, 0);
+            return new IteratorHandle(outIterator.get(Native.C_POINTER, 0));
         }
     }
 
-    static void slatedb_db_reader_close(MemorySegment reader) {
+    static void slatedb_db_reader_close(ReaderHandle reader) {
         Objects.requireNonNull(reader, "reader");
-        try (Arena arena = Arena.ofConfined()) {
-            checkResult(Native.slatedb_db_reader_close(arena, reader));
-        }
+        reader.close();
     }
 
-    static IteratorNextResult slatedb_iterator_next(MemorySegment iterator) {
+    static IteratorNextResult slatedb_iterator_next(IteratorHandle iterator) {
         Objects.requireNonNull(iterator, "iterator");
 
         try (Arena arena = Arena.ofConfined()) {
@@ -725,7 +863,7 @@ final class NativeInterop {
             checkResult(
                 Native.slatedb_iterator_next(
                     arena,
-                    iterator,
+                    iterator.segment(),
                     outPresent,
                     outKey,
                     outKeyLen,
@@ -745,31 +883,29 @@ final class NativeInterop {
         }
     }
 
-    static void slatedb_iterator_seek(MemorySegment iterator, byte[] key) {
+    static void slatedb_iterator_seek(IteratorHandle iterator, byte[] key) {
         Objects.requireNonNull(iterator, "iterator");
         Objects.requireNonNull(key, "key");
 
         try (Arena arena = Arena.ofConfined()) {
-            checkResult(Native.slatedb_iterator_seek(arena, iterator, marshalBytes(arena, key), key.length));
+            checkResult(Native.slatedb_iterator_seek(arena, iterator.segment(), marshalBytes(arena, key), key.length));
         }
     }
 
-    static void slatedb_iterator_close(MemorySegment iterator) {
+    static void slatedb_iterator_close(IteratorHandle iterator) {
         Objects.requireNonNull(iterator, "iterator");
-        try (Arena arena = Arena.ofConfined()) {
-            checkResult(Native.slatedb_iterator_close(arena, iterator));
-        }
+        iterator.close();
     }
 
-    static MemorySegment slatedb_write_batch_new() {
+    static WriteBatchHandle slatedb_write_batch_new() {
         try (Arena arena = Arena.ofConfined()) {
             MemorySegment outWriteBatch = arena.allocate(Native.C_POINTER);
             checkResult(Native.slatedb_write_batch_new(arena, outWriteBatch));
-            return outWriteBatch.get(Native.C_POINTER, 0);
+            return new WriteBatchHandle(outWriteBatch.get(Native.C_POINTER, 0));
         }
     }
 
-    static void slatedb_write_batch_put(MemorySegment writeBatch, byte[] key, byte[] value) {
+    static void slatedb_write_batch_put(WriteBatchHandle writeBatch, byte[] key, byte[] value) {
         Objects.requireNonNull(writeBatch, "writeBatch");
         Objects.requireNonNull(key, "key");
         Objects.requireNonNull(value, "value");
@@ -778,7 +914,7 @@ final class NativeInterop {
             checkResult(
                 Native.slatedb_write_batch_put(
                     arena,
-                    writeBatch,
+                    writeBatch.segment(),
                     marshalBytes(arena, key),
                     key.length,
                     marshalBytes(arena, value),
@@ -788,7 +924,12 @@ final class NativeInterop {
         }
     }
 
-    static void slatedb_write_batch_put_with_options(MemorySegment writeBatch, byte[] key, byte[] value, PutOptions putOptions) {
+    static void slatedb_write_batch_put_with_options(
+        WriteBatchHandle writeBatch,
+        byte[] key,
+        byte[] value,
+        PutOptions putOptions
+    ) {
         Objects.requireNonNull(writeBatch, "writeBatch");
         Objects.requireNonNull(key, "key");
         Objects.requireNonNull(value, "value");
@@ -797,7 +938,7 @@ final class NativeInterop {
             checkResult(
                 Native.slatedb_write_batch_put_with_options(
                     arena,
-                    writeBatch,
+                    writeBatch.segment(),
                     marshalBytes(arena, key),
                     key.length,
                     marshalBytes(arena, value),
@@ -808,7 +949,7 @@ final class NativeInterop {
         }
     }
 
-    static void slatedb_write_batch_merge(MemorySegment writeBatch, byte[] key, byte[] value) {
+    static void slatedb_write_batch_merge(WriteBatchHandle writeBatch, byte[] key, byte[] value) {
         Objects.requireNonNull(writeBatch, "writeBatch");
         Objects.requireNonNull(key, "key");
         Objects.requireNonNull(value, "value");
@@ -817,7 +958,7 @@ final class NativeInterop {
             checkResult(
                 Native.slatedb_write_batch_merge(
                     arena,
-                    writeBatch,
+                    writeBatch.segment(),
                     marshalBytes(arena, key),
                     key.length,
                     marshalBytes(arena, value),
@@ -828,7 +969,7 @@ final class NativeInterop {
     }
 
     static void slatedb_write_batch_merge_with_options(
-        MemorySegment writeBatch,
+        WriteBatchHandle writeBatch,
         byte[] key,
         byte[] value,
         PutOptions mergeOptions
@@ -841,7 +982,7 @@ final class NativeInterop {
             checkResult(
                 Native.slatedb_write_batch_merge_with_options(
                     arena,
-                    writeBatch,
+                    writeBatch.segment(),
                     marshalBytes(arena, key),
                     key.length,
                     marshalBytes(arena, value),
@@ -852,7 +993,7 @@ final class NativeInterop {
         }
     }
 
-    static void slatedb_write_batch_delete(MemorySegment writeBatch, byte[] key) {
+    static void slatedb_write_batch_delete(WriteBatchHandle writeBatch, byte[] key) {
         Objects.requireNonNull(writeBatch, "writeBatch");
         Objects.requireNonNull(key, "key");
 
@@ -860,7 +1001,7 @@ final class NativeInterop {
             checkResult(
                 Native.slatedb_write_batch_delete(
                     arena,
-                    writeBatch,
+                    writeBatch.segment(),
                     marshalBytes(arena, key),
                     key.length
                 )
@@ -868,11 +1009,9 @@ final class NativeInterop {
         }
     }
 
-    static void slatedb_write_batch_close(MemorySegment writeBatch) {
+    static void slatedb_write_batch_close(WriteBatchHandle writeBatch) {
         Objects.requireNonNull(writeBatch, "writeBatch");
-        try (Arena arena = Arena.ofConfined()) {
-            checkResult(Native.slatedb_write_batch_close(arena, writeBatch));
-        }
+        writeBatch.close();
     }
 
     static void slatedb_result_free(MemorySegment result) {
@@ -925,6 +1064,14 @@ final class NativeInterop {
         byte[] value() {
             return value;
         }
+    }
+
+    private static MemorySegment requireNativeHandle(MemorySegment segment, String handleType) {
+        Objects.requireNonNull(segment, handleType + " segment");
+        if (segment.equals(MemorySegment.NULL)) {
+            throw new IllegalArgumentException(handleType + " segment must not be NULL");
+        }
+        return segment;
     }
 
     private static void checkResult(MemorySegment result) {
@@ -1142,6 +1289,28 @@ final class NativeInterop {
         return switch (durability) {
             case MEMORY -> (byte) Native.SLATEDB_DURABILITY_FILTER_MEMORY();
             case REMOTE -> (byte) Native.SLATEDB_DURABILITY_FILTER_REMOTE();
+        };
+    }
+
+    private static byte toNativeLogLevel(LogLevel level) {
+        return switch (level) {
+            case TRACE -> (byte) Native.SLATEDB_LOG_LEVEL_TRACE();
+            case DEBUG -> (byte) Native.SLATEDB_LOG_LEVEL_DEBUG();
+            case INFO -> (byte) Native.SLATEDB_LOG_LEVEL_INFO();
+            case WARN -> (byte) Native.SLATEDB_LOG_LEVEL_WARN();
+            case ERROR -> (byte) Native.SLATEDB_LOG_LEVEL_ERROR();
+        };
+    }
+
+    private static byte toNativeSstBlockSize(SstBlockSize sstBlockSize) {
+        return switch (sstBlockSize) {
+            case KIB_1 -> (byte) Native.SLATEDB_SST_BLOCK_SIZE_1KIB();
+            case KIB_2 -> (byte) Native.SLATEDB_SST_BLOCK_SIZE_2KIB();
+            case KIB_4 -> (byte) Native.SLATEDB_SST_BLOCK_SIZE_4KIB();
+            case KIB_8 -> (byte) Native.SLATEDB_SST_BLOCK_SIZE_8KIB();
+            case KIB_16 -> (byte) Native.SLATEDB_SST_BLOCK_SIZE_16KIB();
+            case KIB_32 -> (byte) Native.SLATEDB_SST_BLOCK_SIZE_32KIB();
+            case KIB_64 -> (byte) Native.SLATEDB_SST_BLOCK_SIZE_64KIB();
         };
     }
 
