@@ -41,6 +41,22 @@ public final class SlateDbConfig {
         }
     }
 
+    /// Flush targets supported by explicit flush operations.
+    public enum FlushType {
+        MEMTABLE((byte) 0),
+        WAL((byte) 1);
+
+        private final byte code;
+
+        FlushType(byte code) {
+            this.code = code;
+        }
+
+        byte code() {
+            return code;
+        }
+    }
+
     /// Supported SST block sizes for the builder.
     public enum SstBlockSize {
         KIB_1((byte) 1, 1024),

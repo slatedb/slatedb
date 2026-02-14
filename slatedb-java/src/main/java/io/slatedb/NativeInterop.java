@@ -372,7 +372,9 @@ final class NativeInterop {
     static void slatedb_db_builder_with_sst_block_size(DbBuilderHandle builder, SstBlockSize sstBlockSize) {
         Objects.requireNonNull(builder, "builder");
         Objects.requireNonNull(sstBlockSize, "sstBlockSize");
-        slatedb_db_builder_with_sst_block_size(builder, toNativeSstBlockSize(sstBlockSize));
+        try (Arena arena = Arena.ofConfined()) {
+            checkResult(Native.slatedb_db_builder_with_sst_block_size(arena, builder.segment(), toNativeSstBlockSize(sstBlockSize)));
+        }
     }
 
     static void slatedb_db_builder_with_settings(DbBuilderHandle builder, SettingsHandle settings) {
@@ -719,8 +721,9 @@ final class NativeInterop {
         }
     }
 
-    static void slatedb_db_flush_with_options(DbHandle db, byte flushType) {
+    static void slatedb_db_flush_with_options(DbHandle db, FlushType flushType) {
         Objects.requireNonNull(db, "db");
+        Objects.requireNonNull(flushType, "flushType");
         try (Arena arena = Arena.ofConfined()) {
             checkResult(Native.slatedb_db_flush_with_options(arena, db.segment(), marshalFlushOptions(arena, flushType)));
         }
@@ -1203,9 +1206,9 @@ final class NativeInterop {
         return nativeOptions;
     }
 
-    private static MemorySegment marshalFlushOptions(Arena arena, byte flushType) {
+    private static MemorySegment marshalFlushOptions(Arena arena, FlushType flushType) {
         MemorySegment nativeOptions = slatedb_flush_options_t.allocate(arena);
-        slatedb_flush_options_t.flush_type(nativeOptions, flushType);
+        slatedb_flush_options_t.flush_type(nativeOptions, toNativeFlushType(flushType));
         return nativeOptions;
     }
 
@@ -1299,6 +1302,13 @@ final class NativeInterop {
             case INFO -> (byte) Native.SLATEDB_LOG_LEVEL_INFO();
             case WARN -> (byte) Native.SLATEDB_LOG_LEVEL_WARN();
             case ERROR -> (byte) Native.SLATEDB_LOG_LEVEL_ERROR();
+        };
+    }
+
+    private static byte toNativeFlushType(FlushType flushType) {
+        return switch (flushType) {
+            case MEMTABLE -> (byte) Native.SLATEDB_FLUSH_TYPE_MEMTABLE();
+            case WAL -> (byte) Native.SLATEDB_FLUSH_TYPE_WAL();
         };
     }
 
