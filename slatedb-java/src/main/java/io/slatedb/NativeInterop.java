@@ -1310,8 +1310,16 @@ final class NativeInterop {
         };
     }
 
+    /// Ensures the jextract-generated bindings can resolve symbols from `slatedb_c`.
+    ///
+    /// jextract's generated `Native` class uses `System.mapLibraryName("slatedb_c")`
+    /// when creating its `SymbolLookup`. If callers load the library via absolute path
+    /// (`System.load`), the mapped filename may not exist in the JVM's current working
+    /// directory. We create a best-effort alias with that mapped filename pointing to
+    /// the provided library so both load styles resolve the same binary.
     private static void ensureLibraryLookupAlias(Path nativeLibrary) {
         String mappedName = System.mapLibraryName("slatedb_c");
+        // Keep the alias local to the process working directory.
         Path alias = Path.of("").toAbsolutePath().resolve(mappedName);
 
         if (alias.equals(nativeLibrary)) {
@@ -1320,15 +1328,19 @@ final class NativeInterop {
 
         try {
             if (Files.exists(alias)) {
+                // If an equivalent alias already exists, we're done.
                 if (Files.isSameFile(alias, nativeLibrary)) {
                     return;
                 }
+                // Avoid overwriting unrelated existing files.
                 return;
             }
 
             try {
+                // Prefer symlink so updates to the real library are reflected automatically.
                 Files.createSymbolicLink(alias, nativeLibrary);
             } catch (UnsupportedOperationException | SecurityException | java.io.IOException symlinkFailure) {
+                // Fall back to copy when symlinks are unavailable or denied.
                 Files.copy(nativeLibrary, alias);
             }
             alias.toFile().deleteOnExit();
