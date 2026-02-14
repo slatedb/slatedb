@@ -219,8 +219,6 @@ jobs:
 
       - name: Run Java tests (slatedb-java)
         working-directory: ./slatedb-java
-        env:
-          SLATEDB_C_LIB: "${{ github.workspace }}/target/release/libslatedb_c.so"
         run: ./gradlew check
 
   microbenchmarks:

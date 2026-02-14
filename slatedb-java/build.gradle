@@ -1,6 +1,48 @@
 plugins {
     id 'java-library'
+    id 'de.infolektuell.jextract' version '1.2.0'
 }
+
+// ==============================================================================
+// jextract configuration to generate Java bindings for the slatedb C library.
+// ==============================================================================
+//
+// Use jextract to generate Java bindings for the slatedb C library, filtering
+// to include only the relevant functions, constants, structs, and typedefs defined
+// in slatedb.h.
+//
+// See:
+// - https://infolektuell.github.io/gradle-jextract/filtering/
+// - https://github.com/openjdk/jextract/blob/master/doc/GUIDE.md#filtering
+def slatedbHeader = layout.projectDirectory.file('../slatedb-c/include/slatedb.h')
+def slatedbHeaderText = slatedbHeader.asFile.getText('UTF-8')
+// Captures top-level `slatedb_*` function names (excluding typedefs/comments), regardless of return type.
+def slatedbIncludeFunctions = ((slatedbHeaderText =~ /(?m)^(?!\s*(?:\/\/|\/\*|\*))\s*(?!typedef\b).*?\b(slatedb_[A-Za-z0-9_]+)\s*\(/).collect { it[1] } as Set).toList().sort()
+// Captures public `SLATEDB_*` preprocessor constants.
+def slatedbIncludeConstants = ((slatedbHeaderText =~ /(?m)^\s*#define\s+(SLATEDB_[A-Z0-9_]+)\b/).collect { it[1] } as Set).toList().sort()
+// Captures named struct types declared as `typedef struct slatedb_* { ... }`.
+def slatedbIncludeStructs = ((slatedbHeaderText =~ /(?m)^\s*typedef\s+struct\s+(slatedb_[A-Za-z0-9_]+)\s*\{/).collect { it[1] } as Set).toList().sort()
+// Captures `slatedb_*` typedef names, including function-pointer typedef aliases.
+def slatedbIncludeTypedefs = ((slatedbHeaderText =~ /(?ms)^\s*typedef\b.*?(?:\(\*\s*)?(slatedb_[A-Za-z0-9_]+)\s*\)?\s*;/).collect { it[1] } as Set).toList().sort()
+
+def slatedbJextractLibrary = jextract.libraries.create('slatedb') {
+    header = slatedbHeader
+    includes = [layout.projectDirectory.dir('../slatedb-c/include')]
+    targetPackage = 'io.slatedb.ffi'
+    headerClassName = 'Native'
+    libraries = ['slatedb_c']
+    useSystemLoadLibrary = true
+    whitelist {
+        functions = slatedbIncludeFunctions
+        constants = slatedbIncludeConstants
+        structs = slatedbIncludeStructs
+        typedefs = slatedbIncludeTypedefs
+    }
+}
+
+// ==============================================================================
+// Standard Java library configuration below.
+// ==============================================================================
 
 group = 'io.slatedb'
 version = '0.1.0-SNAPSHOT'
@@ -27,6 +69,14 @@ repositories {
     mavenCentral()
 }
 
+sourceSets {
+    main {
+        jextract {
+            libraries.add(slatedbJextractLibrary)
+        }
+    }
+}
+
 dependencies {
     testImplementation 'org.junit.jupiter:junit-jupiter:5.10.2'
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher:1.10.2'
@@ -35,4 +85,18 @@ dependencies {
 test {
     useJUnitPlatform()
     jvmArgs '--enable-native-access=ALL-UNNAMED'
+
+    // jextract's system-load mode requires java.library.path to be set before JVM startup.
+    // Set java.library.path to include the output directories of the slatedb C library's
+    // debug and release directories, as well as any existing java.library.path entries.
+    def repoRoot = layout.projectDirectory.dir('..').asFile.absoluteFile
+    def libraryPathEntries = [
+        new File(repoRoot, 'target/release').absolutePath,
+        new File(repoRoot, 'target/debug').absolutePath
+    ]
+    def existingLibraryPath = System.getProperty('java.library.path')
+    if (existingLibraryPath != null && !existingLibraryPath.isBlank()) {
+        libraryPathEntries.add(existingLibraryPath)
+    }
+    jvmArgs "-Djava.library.path=${libraryPathEntries.join(File.pathSeparator)}"
 }

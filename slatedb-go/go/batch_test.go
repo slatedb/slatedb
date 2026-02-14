@@ -86,8 +86,9 @@ var _ = Describe("WriteBatch", func() {
 			Expect(value).To(Equal([]byte("new_value")))
 
 			// Verify existing key is deleted
-			_, err = db.Get([]byte("existing_key"))
-			Expect(err).To(Equal(slatedb.ErrNotFound))
+			value, err = db.Get([]byte("existing_key"))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(value).To(BeNil())
 		})
 
 		It("should support PutWithOptions", func() {

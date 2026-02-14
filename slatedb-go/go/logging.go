@@ -5,9 +5,12 @@ package slatedb
 #include <stdlib.h>
 */
 import "C"
-import "unsafe"
+import (
+	"fmt"
+	"strings"
+)
 
-// LogLevel represents the available logging levels
+// LogLevel represents the available logging levels.
 type LogLevel string
 
 const (
@@ -18,43 +21,53 @@ const (
 	LogLevelError LogLevel = "error"
 )
 
-// InitLogging initializes the Rust-side logging for SlateDB
-// This should be called once before using any other SlateDB functions
-// to enable detailed error logging that will help diagnose issues.
-//
-// Parameters:
-//   - level: The minimum log level to display (trace, debug, info, warn, error)
-//     Use LogLevelInfo for normal operation, LogLevelDebug or LogLevelTrace for debugging
-//
-// Example:
-//
-//	// Enable info-level logging (recommended for production)
-//	err := slatedb.InitLogging(slatedb.LogLevelInfo)
-//	if err != nil {
-//	    log.Fatal("Failed to initialize logging:", err)
-//	}
-//
-//	// Enable debug-level logging (for troubleshooting)
-//	err := slatedb.InitLogging(slatedb.LogLevelDebug)
-//	if err != nil {
-//	    log.Fatal("Failed to initialize logging:", err)
-//	}
-func InitLogging(level LogLevel) error {
-	cLevel := C.CString(string(level))
-	defer C.free(unsafe.Pointer(cLevel))
-
-	result := C.slatedb_init_logging(cLevel)
-	defer C.slatedb_free_result(result)
-
-	if result.error != C.Success {
-		return resultToError(result)
+func logLevelToC(level LogLevel) (C.slatedb_log_level_t, error) {
+	switch strings.ToLower(string(level)) {
+	case "off":
+		return C.slatedb_log_level_t(C.SLATEDB_LOG_LEVEL_OFF), nil
+	case "error":
+		return C.slatedb_log_level_t(C.SLATEDB_LOG_LEVEL_ERROR), nil
+	case "warn", "warning":
+		return C.slatedb_log_level_t(C.SLATEDB_LOG_LEVEL_WARN), nil
+	case "info", "":
+		return C.slatedb_log_level_t(C.SLATEDB_LOG_LEVEL_INFO), nil
+	case "debug":
+		return C.slatedb_log_level_t(C.SLATEDB_LOG_LEVEL_DEBUG), nil
+	case "trace":
+		return C.slatedb_log_level_t(C.SLATEDB_LOG_LEVEL_TRACE), nil
+	default:
+		return 0, fmt.Errorf("invalid log level: %s", level)
 	}
-
-	return nil
 }
 
-// InitDefaultLogging initializes logging with the default info level
-// This is a convenience function equivalent to InitLogging(LogLevelInfo)
+// InitLogging initializes process-global logging for SlateDB.
+//
+// This should be called once before database operations when you want SlateDB
+// logs emitted through the C bindings.
+//
+// Supported levels: `trace`, `debug`, `info`, `warn`, `error` (and `off`).
+func InitLogging(level LogLevel) error {
+	cLevel, err := logLevelToC(level)
+	if err != nil {
+		return err
+	}
+
+	result := C.slatedb_logging_init(cLevel)
+	return resultToErrorAndFree(result)
+}
+
+// SetLoggingLevel updates the global SlateDB logging level after initialization.
+func SetLoggingLevel(level LogLevel) error {
+	cLevel, err := logLevelToC(level)
+	if err != nil {
+		return err
+	}
+
+	result := C.slatedb_logging_set_level(cLevel)
+	return resultToErrorAndFree(result)
+}
+
+// InitDefaultLogging initializes logging at `info` level.
 func InitDefaultLogging() error {
 	return InitLogging(LogLevelInfo)
 }

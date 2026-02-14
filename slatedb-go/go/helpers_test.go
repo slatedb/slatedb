@@ -21,7 +21,12 @@ func createEnvFile(dirPath string) (string, error) {
 }
 
 func cleanupEnvVariables() error {
-	for _, name := range []string{"CLOUD_PROVIDER", "LOCAL_PATH"} {
+	for _, name := range []string{
+		"CLOUD_PROVIDER",
+		"LOCAL_PATH",
+		"SLATEDB_OBJECT_STORE_URL",
+		"OBJECT_STORE_URL",
+	} {
 		if err := os.Unsetenv(name); err != nil {
 			return err
 		}

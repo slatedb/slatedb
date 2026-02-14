@@ -7,9 +7,12 @@ package slatedb
 */
 import "C"
 import (
+	"bufio"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"strings"
 	"unsafe"
 )
 
@@ -69,7 +72,7 @@ func WithDbReaderOptions(opts DbReaderOptions) Option[DbReaderConfig] {
 // TYPE DEFINITIONS
 // ============================================================================
 
-// DurabilityLevel represents the durability filter for scans
+// DurabilityLevel represents the durability filter for reads/scans.
 type DurabilityLevel int
 
 const (
@@ -77,7 +80,7 @@ const (
 	DurabilityRemote DurabilityLevel = 1 // Only data persisted to object storage
 )
 
-// PreloadLevel represents different levels of cache preloading on startup
+// PreloadLevel represents different levels of cache preloading on startup.
 type PreloadLevel string
 
 const (
@@ -86,12 +89,12 @@ const (
 	AllSst    PreloadLevel = "AllSst" // Preload all SSTs (both L0 and compacted levels)
 )
 
-// WriteOptions controls write operation behavior
+// WriteOptions controls write operation behavior.
 type WriteOptions struct {
 	AwaitDurable bool // Default: true
 }
 
-// TTLType represents the type of TTL configuration
+// TTLType represents the type of TTL configuration.
 type TTLType int
 
 const (
@@ -100,19 +103,26 @@ const (
 	TTLExpireAfter                // Expire after specified duration
 )
 
-// PutOptions controls put operation behavior
+// PutOptions controls put operation behavior.
 type PutOptions struct {
 	TTLType  TTLType // Type of TTL configuration
 	TTLValue uint64  // TTL value in milliseconds (only used with TTLExpireAfter)
 }
 
-// ReadOptions controls read operation behavior
+// MergeOptions controls merge operation behavior.
+type MergeOptions struct {
+	TTLType  TTLType // Type of TTL configuration
+	TTLValue uint64  // TTL value in milliseconds (only used with TTLExpireAfter)
+}
+
+// ReadOptions controls read operation behavior.
 type ReadOptions struct {
 	DurabilityFilter DurabilityLevel // Minimum durability level for returned data
 	Dirty            bool            // Whether to include uncommitted data
+	CacheBlocks      bool            // Whether to cache fetched blocks
 }
 
-// DbReaderOptions controls DbReader behavior
+// DbReaderOptions controls DbReader behavior.
 type DbReaderOptions struct {
 	ManifestPollInterval uint64 // How often to poll for updates (in milliseconds). Default: 10000 (10s) if 0
 	CheckpointLifetime   uint64 // How long checkpoints should live (in milliseconds). Default: 600000 (10m) if 0
@@ -120,8 +130,8 @@ type DbReaderOptions struct {
 	SkipWalReplay        bool   // When true, skip WAL replay entirely (only see compacted data). Default: false
 }
 
-// Settings represents SlateDB configuration that mirrors Rust's Settings struct exactly
-// Duration fields use strings to match Rust's JSON serialization format
+// Settings represents SlateDB configuration that mirrors Rust's Settings struct exactly.
+// Duration fields use strings to match Rust's JSON serialization format.
 type Settings struct {
 	FlushInterval         string `json:"flush_interval,omitempty"`
 	ManifestPollInterval  string `json:"manifest_poll_interval,omitempty"`
@@ -142,7 +152,7 @@ type Settings struct {
 	GarbageCollectorOptions *GarbageCollectorOptions `json:"garbage_collector_options,omitempty"`
 }
 
-// CompactorOptions represents compaction configuration
+// CompactorOptions represents compaction configuration.
 type CompactorOptions struct {
 	PollInterval             string `json:"poll_interval"`
 	ManifestUpdateTimeout    string `json:"manifest_update_timeout"`
@@ -150,7 +160,7 @@ type CompactorOptions struct {
 	MaxConcurrentCompactions uint32 `json:"max_concurrent_compactions"`
 }
 
-// ObjectStoreCacheOptions represents object store caching configuration
+// ObjectStoreCacheOptions represents object store caching configuration.
 type ObjectStoreCacheOptions struct {
 	RootFolder                string       `json:"root_folder,omitempty"`
 	ScanInterval              string       `json:"scan_interval,omitempty"`
@@ -160,12 +170,12 @@ type ObjectStoreCacheOptions struct {
 	PreloadDiskCacheOnStartup PreloadLevel `json:"preload_disk_cache_on_startup,omitempty"`
 }
 
-// GarbageCollectorOptions represents garbage collection configuration
+// GarbageCollectorOptions represents garbage collection configuration.
 //
 // Behavior:
-// - nil GarbageCollectorOptions: Garbage collection disabled
-// - Empty GarbageCollectorOptions{}: Garbage collection enabled with Rust defaults
-// - Specific directory options: Garbage collection enabled for all directories, options applied to specific directories
+// - nil GarbageCollectorOptions: garbage collection disabled
+// - Empty GarbageCollectorOptions{}: garbage collection enabled with Rust defaults
+// - Specific directory options: configuration applied per directory where set
 type GarbageCollectorOptions struct {
 	Manifest    *GarbageCollectorDirectoryOptions `json:"manifest_options,omitempty"`
 	Wal         *GarbageCollectorDirectoryOptions `json:"wal_options,omitempty"`
@@ -173,13 +183,13 @@ type GarbageCollectorOptions struct {
 	Compactions *GarbageCollectorDirectoryOptions `json:"compactions_options,omitempty"`
 }
 
-// GarbageCollectorDirectoryOptions represents per-directory GC configuration
+// GarbageCollectorDirectoryOptions represents per-directory GC configuration.
 //
 // Default values match Rust defaults:
 // - Interval: "300s" (5 minutes)
 // - MinAge: "86400s" (24 hours)
 //
-// Override as needed:
+// Example override:
 //
 //	Manifest: &GarbageCollectorDirectoryOptions{Interval: "60s", MinAge: "1h"}
 type GarbageCollectorDirectoryOptions struct {
@@ -187,7 +197,7 @@ type GarbageCollectorDirectoryOptions struct {
 	MinAge   string `json:"min_age"`  // Default: "86400s" (24 hours)
 }
 
-// DefaultGarbageCollectorDirectoryOptions returns Rust default values
+// DefaultGarbageCollectorDirectoryOptions returns Rust default values.
 func DefaultGarbageCollectorDirectoryOptions() *GarbageCollectorDirectoryOptions {
 	return &GarbageCollectorDirectoryOptions{
 		Interval: "300s",   // 5 minutes
@@ -195,7 +205,7 @@ func DefaultGarbageCollectorDirectoryOptions() *GarbageCollectorDirectoryOptions
 	}
 }
 
-// SstBlockSize represents SST block size options
+// SstBlockSize represents SST block size options.
 type SstBlockSize uint8
 
 const (
@@ -208,85 +218,120 @@ const (
 	SstBlockSize64Kib
 )
 
+// ScanOptions contains options for scan operations.
+//
+// Note: pass nil scan options to scan methods to use full Rust defaults.
+type ScanOptions struct {
+	DurabilityFilter DurabilityLevel
+	Dirty            bool   // Include uncommitted writes (default: false)
+	ReadAheadBytes   uint64 // Buffer size for read-ahead (default from Rust)
+	CacheBlocks      bool   // Whether to cache fetched blocks (default from Rust)
+	MaxFetchTasks    uint64 // Maximum concurrent fetch tasks (default from Rust)
+}
+
 // ============================================================================
 // SETTINGS CONSTRUCTORS
 // ============================================================================
 
-// settingsFromJSON converts JSON from Rust FFI into a Settings struct
-// This handles Rust's string durations ("100ms", "1s") transparently
-func settingsFromJSON(jsonStr string) (*Settings, error) {
+func settingsFromJSON(jsonBytes []byte) (*Settings, error) {
 	var settings Settings
-	if err := json.Unmarshal([]byte(jsonStr), &settings); err != nil {
+	if err := json.Unmarshal(jsonBytes, &settings); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal settings JSON: %w", err)
 	}
 	return &settings, nil
 }
 
-// SettingsDefault creates default Settings
-func SettingsDefault() (*Settings, error) {
-	cJson := C.slatedb_settings_default()
-	if cJson == nil {
-		return nil, errors.New("failed to create default settings")
+func settingsFromHandle(handle *C.slatedb_settings_t) (*Settings, error) {
+	if handle == nil {
+		return nil, errors.New("settings handle is nil")
 	}
-	defer C.free(unsafe.Pointer(cJson))
 
-	jsonStr := C.GoString(cJson)
-	return settingsFromJSON(jsonStr)
+	var jsonPtr *C.uint8_t
+	var jsonLen C.uintptr_t
+	result := C.slatedb_settings_to_json(handle, &jsonPtr, &jsonLen)
+	if err := resultToErrorAndFree(result); err != nil {
+		return nil, err
+	}
+	defer C.slatedb_bytes_free(jsonPtr, jsonLen)
+
+	settings, err := settingsFromJSON(C.GoBytes(unsafe.Pointer(jsonPtr), C.int(jsonLen)))
+	if err != nil {
+		return nil, err
+	}
+	return settings, nil
 }
 
-// SettingsFromFile loads Settings from a configuration file
-// The result is always merged with defaults, so partial configurations work correctly
+// SettingsDefault creates default Settings.
+func SettingsDefault() (*Settings, error) {
+	var handle *C.slatedb_settings_t
+	result := C.slatedb_settings_default(&handle)
+	if err := resultToErrorAndFree(result); err != nil {
+		return nil, err
+	}
+	defer closeSettingsHandle(handle)
+	return settingsFromHandle(handle)
+}
+
+// SettingsFromFile loads Settings from a configuration file.
+//
+// Supported file types: `.json`, `.toml`, `.yaml`, `.yml`.
 func SettingsFromFile(path string) (*Settings, error) {
 	cPath := C.CString(path)
 	defer C.free(unsafe.Pointer(cPath))
 
-	cJson := C.slatedb_settings_from_file(cPath)
-	if cJson == nil {
-		return nil, fmt.Errorf("failed to load settings from file: %s", path)
+	var handle *C.slatedb_settings_t
+	result := C.slatedb_settings_from_file(cPath, &handle)
+	if err := resultToErrorAndFree(result); err != nil {
+		return nil, err
 	}
-	defer C.free(unsafe.Pointer(cJson))
-
-	jsonStr := C.GoString(cJson)
-	return settingsFromJSON(jsonStr)
+	defer closeSettingsHandle(handle)
+	return settingsFromHandle(handle)
 }
 
-// SettingsFromEnv loads Settings from environment variables
-// The result is always merged with defaults, so partial configurations work correctly
+// SettingsFromEnv loads Settings from environment variables.
+//
+// `prefix` is the environment variable prefix used by SlateDB settings parsing.
 func SettingsFromEnv(prefix string) (*Settings, error) {
 	cPrefix := C.CString(prefix)
 	defer C.free(unsafe.Pointer(cPrefix))
 
-	cJson := C.slatedb_settings_from_env(cPrefix)
-	if cJson == nil {
-		return nil, fmt.Errorf("failed to load settings from environment with prefix: %s", prefix)
+	var handle *C.slatedb_settings_t
+	result := C.slatedb_settings_from_env(cPrefix, &handle)
+	if err := resultToErrorAndFree(result); err != nil {
+		return nil, err
 	}
-	defer C.free(unsafe.Pointer(cJson))
-
-	jsonStr := C.GoString(cJson)
-	return settingsFromJSON(jsonStr)
+	defer closeSettingsHandle(handle)
+	return settingsFromHandle(handle)
 }
 
-// SettingsLoad loads Settings using auto-detection (files, env vars, etc.)
-// The result is always merged with defaults, so partial configurations work correctly
+// SettingsLoad loads Settings using SlateDB's auto-detection logic.
+//
+// This follows the Rust `Settings::load()` behavior.
 func SettingsLoad() (*Settings, error) {
-	cJson := C.slatedb_settings_load()
-	if cJson == nil {
-		return nil, errors.New("failed to load settings using auto-detection")
+	var handle *C.slatedb_settings_t
+	result := C.slatedb_settings_load(&handle)
+	if err := resultToErrorAndFree(result); err != nil {
+		return nil, err
 	}
-	defer C.free(unsafe.Pointer(cJson))
+	defer closeSettingsHandle(handle)
+	return settingsFromHandle(handle)
+}
 
-	jsonStr := C.GoString(cJson)
-	return settingsFromJSON(jsonStr)
+func closeSettingsHandle(handle *C.slatedb_settings_t) {
+	if handle == nil {
+		return
+	}
+	_ = resultToErrorAndFree(C.slatedb_settings_close(handle))
 }
 
 // ============================================================================
 // MERGE FUNCTIONS
 // ============================================================================
 
-// MergeSettings merges two Settings structs, with override taking precedence over base
+// MergeSettings merges two Settings structs, with override taking precedence over base.
 func MergeSettings(base, override *Settings) *Settings {
 	if base == nil && override == nil {
-		return &Settings{} // Return empty settings instead of nil
+		return &Settings{}
 	}
 	if base == nil {
 		return override
@@ -295,7 +340,7 @@ func MergeSettings(base, override *Settings) *Settings {
 		return base
 	}
 
-	result := *base // Copy base
+	result := *base
 
 	if override.FlushInterval != "" {
 		result.FlushInterval = override.FlushInterval
@@ -336,7 +381,6 @@ func MergeSettings(base, override *Settings) *Settings {
 		if result.CompactorOptions == nil {
 			result.CompactorOptions = override.CompactorOptions
 		} else {
-			// Merge CompactorOptions fields individually
 			merged := *result.CompactorOptions
 			if override.CompactorOptions.PollInterval != "" {
 				merged.PollInterval = override.CompactorOptions.PollInterval
@@ -357,7 +401,6 @@ func MergeSettings(base, override *Settings) *Settings {
 		if result.ObjectStoreCacheOptions == nil {
 			result.ObjectStoreCacheOptions = override.ObjectStoreCacheOptions
 		} else {
-			// Merge ObjectStoreCacheOptions fields individually
 			merged := *result.ObjectStoreCacheOptions
 			if override.ObjectStoreCacheOptions.RootFolder != "" {
 				merged.RootFolder = override.ObjectStoreCacheOptions.RootFolder
@@ -384,7 +427,6 @@ func MergeSettings(base, override *Settings) *Settings {
 		if result.GarbageCollectorOptions == nil {
 			result.GarbageCollectorOptions = override.GarbageCollectorOptions
 		} else {
-			// Merge GarbageCollectorOptions fields individually
 			merged := *result.GarbageCollectorOptions
 			if override.GarbageCollectorOptions.Manifest != nil {
 				merged.Manifest = mergeGarbageCollectorDirectoryOptions(merged.Manifest, override.GarbageCollectorOptions.Manifest)
@@ -395,6 +437,9 @@ func MergeSettings(base, override *Settings) *Settings {
 			if override.GarbageCollectorOptions.Compacted != nil {
 				merged.Compacted = mergeGarbageCollectorDirectoryOptions(merged.Compacted, override.GarbageCollectorOptions.Compacted)
 			}
+			if override.GarbageCollectorOptions.Compactions != nil {
+				merged.Compactions = mergeGarbageCollectorDirectoryOptions(merged.Compactions, override.GarbageCollectorOptions.Compactions)
+			}
 			result.GarbageCollectorOptions = &merged
 		}
 	}
@@ -402,9 +447,6 @@ func MergeSettings(base, override *Settings) *Settings {
 	return &result
 }
 
-// Helper functions for nested struct merging
-
-// mergeGarbageCollectorDirectoryOptions merges two GarbageCollectorDirectoryOptions
 func mergeGarbageCollectorDirectoryOptions(base, override *GarbageCollectorDirectoryOptions) *GarbageCollectorDirectoryOptions {
 	if base == nil {
 		return override
@@ -423,27 +465,17 @@ func mergeGarbageCollectorDirectoryOptions(base, override *GarbageCollectorDirec
 	return &merged
 }
 
-// ScanOptions contains options for scan operations
-type ScanOptions struct {
-	DurabilityFilter DurabilityLevel
-	Dirty            bool   // Include uncommitted writes (default: false)
-	ReadAheadBytes   uint64 // Buffer size for read-ahead (default: 1)
-	CacheBlocks      bool   // Whether to cache fetched blocks (default: false)
-	MaxFetchTasks    uint64 // Maximum concurrent fetch tasks (default: 1)
-}
-
 // ============================================================================
 // FFI CONVERTER FUNCTIONS
 // ============================================================================
 
-// convertToCScanOptions converts Go ScanOptions to C ScanOptions
-func convertToCScanOptions(opts *ScanOptions) *C.CSdbScanOptions {
+func convertToCScanOptions(opts *ScanOptions) *C.slatedb_scan_options_t {
 	if opts == nil {
-		return nil // Use default options
+		return nil
 	}
 
-	return &C.CSdbScanOptions{
-		durability_filter: C.int(int32(opts.DurabilityFilter)),
+	return &C.slatedb_scan_options_t{
+		durability_filter: C.uint8_t(opts.DurabilityFilter),
 		dirty:             C.bool(opts.Dirty),
 		read_ahead_bytes:  C.uint64_t(opts.ReadAheadBytes),
 		cache_blocks:      C.bool(opts.CacheBlocks),
@@ -451,50 +483,128 @@ func convertToCScanOptions(opts *ScanOptions) *C.CSdbScanOptions {
 	}
 }
 
-// Helper functions to convert Go options to C options
-
-// convertToCWriteOptions converts Go WriteOptions to C WriteOptions
-func convertToCWriteOptions(opts *WriteOptions) *C.CSdbWriteOptions {
+func convertToCWriteOptions(opts *WriteOptions) *C.slatedb_write_options_t {
 	if opts == nil {
 		opts = &WriteOptions{AwaitDurable: true}
 	}
-	return &C.CSdbWriteOptions{
-		await_durable: C.bool(opts.AwaitDurable),
-	}
+	return &C.slatedb_write_options_t{await_durable: C.bool(opts.AwaitDurable)}
 }
 
-// convertToCPutOptions converts Go PutOptions to C PutOptions
-func convertToCPutOptions(opts *PutOptions) *C.CSdbPutOptions {
+func convertToCPutOptions(opts *PutOptions) *C.slatedb_put_options_t {
 	if opts == nil {
-		opts = &PutOptions{TTLType: TTLDefault}
+		return nil
 	}
-	return &C.CSdbPutOptions{
-		ttl_type:  C.uint32_t(opts.TTLType),
+	return &C.slatedb_put_options_t{
+		ttl_type:  C.uint8_t(opts.TTLType),
 		ttl_value: C.uint64_t(opts.TTLValue),
 	}
 }
 
-// convertToCReadOptions converts Go ReadOptions to C ReadOptions
-func convertToCReadOptions(opts *ReadOptions) *C.CSdbReadOptions {
+func convertToCMergeOptions(opts *MergeOptions) *C.slatedb_merge_options_t {
 	if opts == nil {
-		opts = &ReadOptions{DurabilityFilter: DurabilityMemory, Dirty: false}
+		return nil
 	}
-	return &C.CSdbReadOptions{
-		durability_filter: C.uint32_t(opts.DurabilityFilter),
-		dirty:             C.bool(opts.Dirty),
+	return &C.slatedb_merge_options_t{
+		ttl_type:  C.uint8_t(opts.TTLType),
+		ttl_value: C.uint64_t(opts.TTLValue),
 	}
 }
 
-// convertToCReaderOptions converts Go DbReaderOptions to C CSdbReaderOptions
-func convertToCReaderOptions(opts *DbReaderOptions) *C.CSdbReaderOptions {
+func convertToCReadOptions(opts *ReadOptions) *C.slatedb_read_options_t {
+	if opts == nil {
+		return nil
+	}
+	return &C.slatedb_read_options_t{
+		durability_filter: C.uint8_t(opts.DurabilityFilter),
+		dirty:             C.bool(opts.Dirty),
+		cache_blocks:      C.bool(opts.CacheBlocks),
+	}
+}
+
+func convertToCReaderOptions(opts *DbReaderOptions) *C.slatedb_db_reader_options_t {
 	if opts == nil {
 		return nil
 	}
 
-	return &C.CSdbReaderOptions{
+	return &C.slatedb_db_reader_options_t{
 		manifest_poll_interval_ms: C.uint64_t(opts.ManifestPollInterval),
 		checkpoint_lifetime_ms:    C.uint64_t(opts.CheckpointLifetime),
 		max_memtable_bytes:        C.uint64_t(opts.MaxMemtableBytes),
 		skip_wal_replay:           C.bool(opts.SkipWalReplay),
 	}
+}
+
+// ============================================================================
+// OBJECT STORE URL RESOLUTION
+// ============================================================================
+
+func resolveObjectStoreURL(url *string, envFile *string) (string, bool, error) {
+	if url != nil && strings.TrimSpace(*url) != "" {
+		return strings.TrimSpace(*url), true, nil
+	}
+
+	if directURL, ok := lookupDirectURL(nil); ok {
+		return directURL, true, nil
+	}
+
+	if envFile != nil && strings.TrimSpace(*envFile) != "" {
+		envValues, err := loadEnvFile(*envFile)
+		if err != nil {
+			return "", false, err
+		}
+		if directURL, ok := lookupDirectURL(envValues); ok {
+			return directURL, true, nil
+		}
+	}
+
+	return "", false, nil
+}
+
+func lookupDirectURL(envValues map[string]string) (string, bool) {
+	for _, key := range []string{"SLATEDB_OBJECT_STORE_URL", "OBJECT_STORE_URL"} {
+		if value, ok := os.LookupEnv(key); ok && strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value), true
+		}
+		if envValues != nil {
+			if value, ok := envValues[key]; ok && strings.TrimSpace(value) != "" {
+				return strings.TrimSpace(value), true
+			}
+		}
+	}
+	return "", false
+}
+
+func loadEnvFile(path string) (map[string]string, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open env file: %w", err)
+	}
+	defer file.Close()
+
+	values := map[string]string{}
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+
+		line = strings.TrimSpace(strings.TrimPrefix(line, "export "))
+		key, value, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+
+		key = strings.TrimSpace(key)
+		value = strings.TrimSpace(value)
+		value = strings.Trim(value, `"'`)
+		if key != "" {
+			values[key] = value
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("failed to read env file: %w", err)
+	}
+
+	return values, nil
 }

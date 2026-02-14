@@ -109,9 +109,14 @@ impl FsCacheEntry {
 
         // try triggering evict before writing
         if let Some(evictor) = &self.evictor {
-            evictor
+            // If the evictor is backpressured, skip this cache write to avoid
+            // stalling foreground PUTs. Cache writes are best-effort.
+            if !evictor
                 .track_entry_accessed(path.to_path_buf(), buf.len(), true)
-                .await;
+                .await
+            {
+                return Ok(());
+            }
         }
 
         let mut file = OpenOptions::new()
@@ -439,12 +444,24 @@ impl FsCacheEvictor {
     // sender and receiver. It doesn't close the channel, and both sender and receiver are dropped
     // when the evictor is dropped.
     #[allow(clippy::disallowed_methods)]
-    async fn track_entry_accessed(&self, path: std::path::PathBuf, bytes: usize, evict: bool) {
+    async fn track_entry_accessed(
+        &self,
+        path: std::path::PathBuf,
+        bytes: usize,
+        evict: bool,
+    ) -> bool {
         if !self.started() {
-            return;
+            return true;
         }
 
-        self.tx.send((path, bytes, evict)).await.ok();
+        match self.tx.try_send((path, bytes, evict)) {
+            Ok(()) => true,
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                warn!("evictor queue is full, skipping cache write/access event");
+                false
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => false,
+        }
     }
 }
 
@@ -859,6 +876,39 @@ mod tests {
             .map(|entry| entry.unwrap().file_name().to_string_lossy().to_string())
             .collect::<Vec<_>>();
         assert_eq!(file_paths.len(), 2); // the folder file "." is also counted
+    }
+
+    #[tokio::test]
+    async fn test_evictor_track_entry_accessed_backpressure() {
+        let temp_dir = tempfile::Builder::new()
+            .prefix("objstore_cache_test_evictor_backpressure_")
+            .tempdir()
+            .unwrap();
+        let registry = StatRegistry::new();
+
+        let evictor = FsCacheEvictor::new(
+            temp_dir.path().to_path_buf(),
+            1024,
+            None,
+            Arc::new(CachedObjectStoreStats::new(&registry)),
+            Arc::new(DefaultSystemClock::new()),
+            Arc::new(DbRand::default()),
+        );
+
+        // Simulate started state without a running receiver so the channel can fill.
+        evictor.started.store(true, Ordering::Release);
+
+        for idx in 0..100 {
+            let accepted = evictor
+                .track_entry_accessed(std::path::PathBuf::from(format!("file{idx}")), 1, true)
+                .await;
+            assert!(accepted);
+        }
+
+        let accepted = evictor
+            .track_entry_accessed(std::path::PathBuf::from("overflow"), 1, true)
+            .await;
+        assert!(!accepted);
     }
 
     #[tokio::test]
