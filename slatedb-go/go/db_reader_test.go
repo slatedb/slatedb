@@ -37,7 +37,8 @@ var _ = Describe("DbReader", func() {
 		}
 
 		for _, item := range testData {
-			Expect(db.Put(item.Key, item.Value)).NotTo(HaveOccurred())
+			_, err := db.Put(item.Key, item.Value)
+			Expect(err).NotTo(HaveOccurred())
 		}
 		Expect(db.Flush()).NotTo(HaveOccurred())
 		Expect(db.Close()).NotTo(HaveOccurred())

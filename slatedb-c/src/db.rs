@@ -359,28 +359,16 @@ pub unsafe extern "C" fn slatedb_db_put(
     value: *const u8,
     value_len: usize,
 ) -> slatedb_result_t {
-    if let Err(err) = require_handle(db, "db") {
-        return err;
-    }
-
-    let key = match bytes_from_ptr(key, key_len, "key") {
-        Ok(key) => key,
-        Err(err) => return err,
-    };
-    let value = match bytes_from_ptr(value, value_len, "value") {
-        Ok(value) => value,
-        Err(err) => return err,
-    };
-
-    if let Err(err) = validate_write_key_value(key, value) {
-        return err;
-    }
-
-    let handle = &mut *db;
-    match handle.runtime.block_on(handle.db.put(key, value)) {
-        Ok(_) => success_result(),
-        Err(err) => error_from_slate_error(&err),
-    }
+    slatedb_db_put_with_options(
+        db,
+        key,
+        key_len,
+        value,
+        value_len,
+        std::ptr::null(),
+        std::ptr::null(),
+        std::ptr::null_mut(),
+    )
 }
 
 /// Writes a key/value pair with explicit put and write options.
@@ -412,6 +400,7 @@ pub unsafe extern "C" fn slatedb_db_put_with_options(
     value_len: usize,
     put_options: *const slatedb_put_options_t,
     write_options: *const slatedb_write_options_t,
+    out_handle: *mut slatedb_write_handle_t,
 ) -> slatedb_result_t {
     if let Err(err) = require_handle(db, "db") {
         return err;
@@ -436,6 +425,14 @@ pub unsafe extern "C" fn slatedb_db_put_with_options(
     };
     let write_options = write_options_from_ptr(write_options);
 
+    if !out_handle.is_null() {
+        *out_handle = slatedb_write_handle_t {
+            seq: 0,
+            create_ts: 0,
+            create_ts_present: false,
+        };
+    }
+
     let handle = &mut *db;
     match handle.runtime.block_on(handle.db.put_with_options(
         key,
@@ -443,7 +440,16 @@ pub unsafe extern "C" fn slatedb_db_put_with_options(
         &put_options,
         &write_options,
     )) {
-        Ok(_) => success_result(),
+        Ok(write_handle) => {
+            if !out_handle.is_null() {
+                *out_handle = slatedb_write_handle_t {
+                    seq: write_handle.seqnum(),
+                    create_ts: write_handle.create_ts().unwrap_or(0),
+                    create_ts_present: write_handle.create_ts().is_some(),
+                };
+            }
+            success_result()
+        }
         Err(err) => error_from_slate_error(&err),
     }
 }
@@ -470,23 +476,7 @@ pub unsafe extern "C" fn slatedb_db_delete(
     key: *const u8,
     key_len: usize,
 ) -> slatedb_result_t {
-    if let Err(err) = require_handle(db, "db") {
-        return err;
-    }
-
-    let key = match bytes_from_ptr(key, key_len, "key") {
-        Ok(key) => key,
-        Err(err) => return err,
-    };
-    if let Err(err) = validate_write_key(key) {
-        return err;
-    }
-
-    let handle = &mut *db;
-    match handle.runtime.block_on(handle.db.delete(key)) {
-        Ok(_) => success_result(),
-        Err(err) => error_from_slate_error(&err),
-    }
+    slatedb_db_delete_with_options(db, key, key_len, std::ptr::null(), std::ptr::null_mut())
 }
 
 /// Deletes a key with explicit write options.
@@ -512,6 +502,7 @@ pub unsafe extern "C" fn slatedb_db_delete_with_options(
     key: *const u8,
     key_len: usize,
     write_options: *const slatedb_write_options_t,
+    out_handle: *mut slatedb_write_handle_t,
 ) -> slatedb_result_t {
     if let Err(err) = require_handle(db, "db") {
         return err;
@@ -527,12 +518,29 @@ pub unsafe extern "C" fn slatedb_db_delete_with_options(
 
     let write_options = write_options_from_ptr(write_options);
 
+    if !out_handle.is_null() {
+        *out_handle = slatedb_write_handle_t {
+            seq: 0,
+            create_ts: 0,
+            create_ts_present: false,
+        };
+    }
+
     let handle = &mut *db;
     match handle
         .runtime
         .block_on(handle.db.delete_with_options(key, &write_options))
     {
-        Ok(_) => success_result(),
+        Ok(write_handle) => {
+            if !out_handle.is_null() {
+                *out_handle = slatedb_write_handle_t {
+                    seq: write_handle.seqnum(),
+                    create_ts: write_handle.create_ts().unwrap_or(0),
+                    create_ts_present: write_handle.create_ts().is_some(),
+                };
+            }
+            success_result()
+        }
         Err(err) => error_from_slate_error(&err),
     }
 }
@@ -563,28 +571,16 @@ pub unsafe extern "C" fn slatedb_db_merge(
     value: *const u8,
     value_len: usize,
 ) -> slatedb_result_t {
-    if let Err(err) = require_handle(db, "db") {
-        return err;
-    }
-
-    let key = match bytes_from_ptr(key, key_len, "key") {
-        Ok(key) => key,
-        Err(err) => return err,
-    };
-    let value = match bytes_from_ptr(value, value_len, "value") {
-        Ok(value) => value,
-        Err(err) => return err,
-    };
-
-    if let Err(err) = validate_write_key_value(key, value) {
-        return err;
-    }
-
-    let handle = &mut *db;
-    match handle.runtime.block_on(handle.db.merge(key, value)) {
-        Ok(_) => success_result(),
-        Err(err) => error_from_slate_error(&err),
-    }
+    slatedb_db_merge_with_options(
+        db,
+        key,
+        key_len,
+        value,
+        value_len,
+        std::ptr::null(),
+        std::ptr::null(),
+        std::ptr::null_mut(),
+    )
 }
 
 /// Merges a value into a key with explicit merge and write options.
@@ -616,6 +612,7 @@ pub unsafe extern "C" fn slatedb_db_merge_with_options(
     value_len: usize,
     merge_options: *const slatedb_merge_options_t,
     write_options: *const slatedb_write_options_t,
+    out_handle: *mut slatedb_write_handle_t,
 ) -> slatedb_result_t {
     if let Err(err) = require_handle(db, "db") {
         return err;
@@ -640,6 +637,14 @@ pub unsafe extern "C" fn slatedb_db_merge_with_options(
     };
     let write_options = write_options_from_ptr(write_options);
 
+    if !out_handle.is_null() {
+        *out_handle = slatedb_write_handle_t {
+            seq: 0,
+            create_ts: 0,
+            create_ts_present: false,
+        };
+    }
+
     let handle = &mut *db;
     match handle.runtime.block_on(handle.db.merge_with_options(
         key,
@@ -647,7 +652,16 @@ pub unsafe extern "C" fn slatedb_db_merge_with_options(
         &merge_options,
         &write_options,
     )) {
-        Ok(_) => success_result(),
+        Ok(write_handle) => {
+            if !out_handle.is_null() {
+                *out_handle = slatedb_write_handle_t {
+                    seq: write_handle.seqnum(),
+                    create_ts: write_handle.create_ts().unwrap_or(0),
+                    create_ts_present: write_handle.create_ts().is_some(),
+                };
+            }
+            success_result()
+        }
         Err(err) => error_from_slate_error(&err),
     }
 }

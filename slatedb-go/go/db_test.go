@@ -61,7 +61,7 @@ var _ = Describe("DB", func() {
 				key := []byte("test_key")
 				value := []byte("test_value")
 
-				err := db.Put(key, value)
+				_, err := db.Put(key, value)
 				Expect(err).NotTo(HaveOccurred())
 
 				retrievedValue, err := db.Get(key)
@@ -95,10 +95,10 @@ var _ = Describe("DB", func() {
 				key := []byte("delete_test")
 				value := []byte("delete_value")
 
-				err := db.Put(key, value)
+				_, err := db.Put(key, value)
 				Expect(err).NotTo(HaveOccurred())
 
-				err = db.Delete(key)
+				_, err = db.Delete(key)
 				Expect(err).NotTo(HaveOccurred())
 
 				value, err = db.Get(key)
@@ -115,7 +115,7 @@ var _ = Describe("DB", func() {
 				putOpts := &slatedb.PutOptions{TTLType: slatedb.TTLDefault}
 				writeOpts := &slatedb.WriteOptions{AwaitDurable: true}
 
-				err := db.PutWithOptions(key, value, putOpts, writeOpts)
+				_, err := db.PutWithOptions(key, value, putOpts, writeOpts)
 				Expect(err).NotTo(HaveOccurred())
 
 				retrievedValue, err := db.Get(key)
@@ -127,7 +127,7 @@ var _ = Describe("DB", func() {
 				key := []byte("read_options_test")
 				value := []byte("read_options_value")
 
-				err := db.Put(key, value)
+				_, err := db.Put(key, value)
 				Expect(err).NotTo(HaveOccurred())
 
 				readOpts := &slatedb.ReadOptions{
@@ -144,11 +144,11 @@ var _ = Describe("DB", func() {
 				key := []byte("delete_options_test")
 				value := []byte("delete_options_value")
 
-				err := db.Put(key, value)
+				_, err := db.Put(key, value)
 				Expect(err).NotTo(HaveOccurred())
 
 				writeOpts := &slatedb.WriteOptions{AwaitDurable: false}
-				err = db.DeleteWithOptions(key, writeOpts)
+				_, err = db.DeleteWithOptions(key, writeOpts)
 				Expect(err).NotTo(HaveOccurred())
 
 				retrievedValue, err := db.Get(key)
@@ -168,7 +168,7 @@ var _ = Describe("DB", func() {
 
 				// Use individual Put calls to populate test data
 				for _, item := range testData {
-					err := db.Put(item.Key, item.Value)
+					_, err := db.Put(item.Key, item.Value)
 					Expect(err).NotTo(HaveOccurred())
 				}
 			})
@@ -288,7 +288,7 @@ var _ = Describe("DB", func() {
 
 		Describe("Database Management", func() {
 			It("should open and close database successfully", func() {
-				err := db.Put([]byte("lifecycle_test"), []byte("test"))
+				_, err := db.Put([]byte("lifecycle_test"), []byte("test"))
 				Expect(err).NotTo(HaveOccurred())
 
 				err = db.Close()
@@ -298,15 +298,113 @@ var _ = Describe("DB", func() {
 			})
 
 			It("should allow only one writer", func() {
-				Expect(db.Put([]byte("key"), []byte("value"))).NotTo(HaveOccurred())
+				Expect(db.Put([]byte("key"), []byte("value"))).Error().ShouldNot(HaveOccurred())
 
 				anotherDB, err := slatedb.Open(tmpDir, slatedb.WithEnvFile[slatedb.DbConfig](envFile))
 				Expect(err).NotTo(HaveOccurred())
 				defer func() { Expect(anotherDB.Close()).NotTo(HaveOccurred()) }()
 
-				Expect(anotherDB.Put([]byte("key1"), []byte("value1"))).NotTo(HaveOccurred())
-				Expect(db.Put([]byte("key2"), []byte("value2"))).To(HaveOccurred())
+				_, err = anotherDB.Put([]byte("key1"), []byte("value1"))
+				Expect(err).NotTo(HaveOccurred())
+				_, err = db.Put([]byte("key2"), []byte("value2"))
+				Expect(err).To(HaveOccurred())
 			})
+
+			Describe("WriteHandle", func() {
+				var (
+					db     *slatedb.DB
+					tmpDir string
+				)
+
+				BeforeEach(func() {
+					var err error
+					tmpDir, err = os.MkdirTemp("", "slatedb_writehandle_test_*")
+					Expect(err).NotTo(HaveOccurred())
+
+					db, err = slatedb.Open(tmpDir)
+					Expect(err).NotTo(HaveOccurred())
+					Expect(db).NotTo(BeNil())
+				})
+
+				AfterEach(func() {
+					if db != nil {
+						err := db.Close()
+						Expect(err).NotTo(HaveOccurred())
+					}
+					Expect(os.RemoveAll(tmpDir)).NotTo(HaveOccurred())
+				})
+
+				It("should return valid WriteHandle for Put", func() {
+					wh, err := db.Put([]byte("key1"), []byte("value1"))
+					Expect(err).NotTo(HaveOccurred())
+					Expect(wh).NotTo(BeNil())
+					Expect(wh.Seq).To(Equal(uint64(1)))
+					Expect(wh.CreateTs).NotTo(BeNil())
+					Expect(*wh.CreateTs).To(BeNumerically(">", 0))
+
+					wh2, err := db.Put([]byte("key2"), []byte("value2"))
+					Expect(err).NotTo(HaveOccurred())
+					Expect(wh2.Seq).To(Equal(uint64(2)))
+					Expect(wh2.CreateTs).NotTo(BeNil())
+					Expect(*wh2.CreateTs).To(BeNumerically(">", 0))
+				})
+
+				It("should return valid WriteHandle for Delete", func() {
+					whPut, err := db.Put([]byte("key"), []byte("value"))
+					Expect(err).NotTo(HaveOccurred())
+					Expect(whPut.Seq).To(Equal(uint64(1)))
+
+					whDel, err := db.Delete([]byte("key"))
+					Expect(err).NotTo(HaveOccurred())
+					Expect(whDel).NotTo(BeNil())
+					Expect(whDel.Seq).To(Equal(uint64(2)))
+					Expect(whDel.CreateTs).NotTo(BeNil())
+					Expect(*whDel.CreateTs).To(BeNumerically(">", 0))
+				})
+
+				It("should return valid WriteHandle for PutWithOptions", func() {
+					wh, err := db.PutWithOptions(
+						[]byte("key"),
+						[]byte("value"),
+						&slatedb.PutOptions{TTLType: slatedb.TTLDefault},
+						&slatedb.WriteOptions{AwaitDurable: true},
+					)
+					Expect(err).NotTo(HaveOccurred())
+					Expect(wh).NotTo(BeNil())
+					Expect(wh.Seq).To(Equal(uint64(1)))
+					Expect(wh.CreateTs).NotTo(BeNil())
+					Expect(*wh.CreateTs).To(BeNumerically(">", 0))
+				})
+
+				It("should return valid WriteHandle for DeleteWithOptions", func() {
+					wh, err := db.DeleteWithOptions(
+						[]byte("key"),
+						&slatedb.WriteOptions{AwaitDurable: true},
+					)
+					Expect(err).NotTo(HaveOccurred())
+					Expect(wh).NotTo(BeNil())
+					Expect(wh.Seq).To(Equal(uint64(1)))
+					Expect(wh.CreateTs).NotTo(BeNil())
+					Expect(*wh.CreateTs).To(BeNumerically(">", 0))
+				})
+
+				It("should return valid WriteHandle for Write (batch)", func() {
+					batch, err := slatedb.NewWriteBatch()
+					Expect(err).NotTo(HaveOccurred())
+					defer batch.Close()
+
+					batch.Put([]byte("batch_key"), []byte("value"))
+					batch.Delete([]byte("other_key"))
+
+					wh, err := db.Write(batch)
+					Expect(err).NotTo(HaveOccurred())
+					Expect(wh).NotTo(BeNil())
+					Expect(wh.Seq).To(Equal(uint64(1)))
+					Expect(wh.CreateTs).NotTo(BeNil())
+					Expect(*wh.CreateTs).To(BeNumerically(">", 0))
+				})
+			})
+
 		})
 	})
 })
@@ -351,7 +449,7 @@ var _ = Describe("DB Builder", func() {
 			Expect(err).NotTo(HaveOccurred())
 			Expect(db).NotTo(BeNil())
 
-			err = db.Put([]byte("test"), []byte("value"))
+			_, err = db.Put([]byte("test"), []byte("value"))
 			Expect(err).NotTo(HaveOccurred())
 
 			value, err := db.Get([]byte("test"))
@@ -393,7 +491,7 @@ var _ = Describe("DB Builder", func() {
 			Expect(db).NotTo(BeNil())
 
 			// Test that the database works with custom settings
-			err = db.Put([]byte("custom_test"), []byte("custom_value"))
+			_, err = db.Put([]byte("custom_test"), []byte("custom_value"))
 			Expect(err).NotTo(HaveOccurred())
 
 			value, err := db.Get([]byte("custom_test"))
@@ -422,7 +520,7 @@ var _ = Describe("DB Builder", func() {
 			Expect(err).NotTo(HaveOccurred())
 			Expect(db).NotTo(BeNil())
 
-			err = db.Put([]byte("sst_test"), []byte("sst_value"))
+			_, err = db.Put([]byte("sst_test"), []byte("sst_value"))
 			Expect(err).NotTo(HaveOccurred())
 
 			err = db.Close()
@@ -443,7 +541,7 @@ var _ = Describe("DB Builder", func() {
 			Expect(err).NotTo(HaveOccurred())
 			Expect(db).NotTo(BeNil())
 
-			err = db.Put([]byte("chain_test"), []byte("chain_value"))
+			_, err = db.Put([]byte("chain_test"), []byte("chain_value"))
 			Expect(err).NotTo(HaveOccurred())
 
 			err = db.Close()
@@ -471,7 +569,7 @@ var _ = Describe("DB Builder", func() {
 			Expect(db).NotTo(BeNil())
 
 			// Test functionality with both custom settings and SST block size
-			err = db.Put([]byte("combined_test"), []byte("combined_value"))
+			_, err = db.Put([]byte("combined_test"), []byte("combined_value"))
 			Expect(err).NotTo(HaveOccurred())
 
 			value, err := db.Get([]byte("combined_test"))

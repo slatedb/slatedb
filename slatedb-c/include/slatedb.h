@@ -208,14 +208,6 @@ typedef struct slatedb_write_options_t {
     bool await_durable;
 } slatedb_write_options_t;
 
-// Merge options passed to merge operations.
-typedef struct slatedb_merge_options_t {
-    // TTL type. Use `SLATEDB_TTL_TYPE_*` constants.
-    uint8_t ttl_type;
-    // TTL value in milliseconds when `ttl_type=SLATEDB_TTL_TYPE_EXPIRE_AFTER`.
-    uint64_t ttl_value;
-} slatedb_merge_options_t;
-
 // Handle returned from write operations, containing metadata.
 typedef struct slatedb_write_handle_t {
     // Sequence number assigned to this write.
@@ -225,6 +217,14 @@ typedef struct slatedb_write_handle_t {
     // Whether `create_ts` is present.
     bool create_ts_present;
 } slatedb_write_handle_t;
+
+// Merge options passed to merge operations.
+typedef struct slatedb_merge_options_t {
+    // TTL type. Use `SLATEDB_TTL_TYPE_*` constants.
+    uint8_t ttl_type;
+    // TTL value in milliseconds when `ttl_type=SLATEDB_TTL_TYPE_EXPIRE_AFTER`.
+    uint64_t ttl_value;
+} slatedb_merge_options_t;
 
 // C representation of a single range bound.
 typedef struct slatedb_bound_t {
@@ -644,7 +644,8 @@ struct slatedb_result_t slatedb_db_put_with_options(struct slatedb_db_t *db,
                                                     const uint8_t *value,
                                                     uintptr_t value_len,
                                                     const struct slatedb_put_options_t *put_options,
-                                                    const struct slatedb_write_options_t *write_options);
+                                                    const struct slatedb_write_options_t *write_options,
+                                                    struct slatedb_write_handle_t *out_handle);
 
 // Deletes a key using default write options.
 //
@@ -686,7 +687,8 @@ struct slatedb_result_t slatedb_db_delete(struct slatedb_db_t *db,
 struct slatedb_result_t slatedb_db_delete_with_options(struct slatedb_db_t *db,
                                                        const uint8_t *key,
                                                        uintptr_t key_len,
-                                                       const struct slatedb_write_options_t *write_options);
+                                                       const struct slatedb_write_options_t *write_options,
+                                                       struct slatedb_write_handle_t *out_handle);
 
 // Merges a value into a key using default merge/write options.
 //
@@ -738,7 +740,8 @@ struct slatedb_result_t slatedb_db_merge_with_options(struct slatedb_db_t *db,
                                                       const uint8_t *value,
                                                       uintptr_t value_len,
                                                       const struct slatedb_merge_options_t *merge_options,
-                                                      const struct slatedb_write_options_t *write_options);
+                                                      const struct slatedb_write_options_t *write_options,
+                                                      struct slatedb_write_handle_t *out_handle);
 
 // Applies a write batch with default write options.
 //
