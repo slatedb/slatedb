@@ -219,9 +219,7 @@ public final class SlateDb implements SlateDbReadable {
         ReaderOptions options
     ) {
         try (NativeInterop.ObjectStoreHandle objectStore = NativeInterop.resolveObjectStore(url, envFile)) {
-            return new SlateDbReader(
-                NativeInterop.slatedb_db_reader_open(path, objectStore, checkpointId, options).segment()
-            );
+            return new SlateDbReader(NativeInterop.slatedb_db_reader_open(path, objectStore, checkpointId, options));
         }
     }
 
@@ -243,7 +241,7 @@ public final class SlateDb implements SlateDbReadable {
     ///
     /// @return A new [SlateDbWriteBatch] instance. Always close it.
     public static SlateDbWriteBatch newWriteBatch() {
-        return new SlateDbWriteBatch(NativeInterop.slatedb_write_batch_new().segment());
+        return new SlateDbWriteBatch(NativeInterop.slatedb_write_batch_new());
     }
 
     /// Writes a value into the database with default options.
@@ -385,7 +383,7 @@ public final class SlateDb implements SlateDbReadable {
     /// @return A [SlateDbScanIterator] over the range. Always close it.
     /// @throws SlateDbException if the scan fails.
     public SlateDbScanIterator scan(byte[] startKey, byte[] endKey, ScanOptions options) {
-        return new SlateDbScanIterator(NativeInterop.slatedb_db_scan_with_options(handle, startKey, endKey, options).segment());
+        return new SlateDbScanIterator(NativeInterop.slatedb_db_scan_with_options(handle, startKey, endKey, options));
     }
 
     /// Creates a scan iterator for the provided key prefix using default scan options.
@@ -404,7 +402,7 @@ public final class SlateDb implements SlateDbReadable {
     /// @return A [SlateDbScanIterator] over the prefix. Always close it.
     /// @throws SlateDbException if the scan fails.
     public SlateDbScanIterator scanPrefix(byte[] prefix, ScanOptions options) {
-        return new SlateDbScanIterator(NativeInterop.slatedb_db_scan_prefix_with_options(handle, prefix, options).segment());
+        return new SlateDbScanIterator(NativeInterop.slatedb_db_scan_prefix_with_options(handle, prefix, options));
     }
 
     /// Returns a JSON string containing SlateDB metrics.
@@ -460,8 +458,12 @@ public final class SlateDb implements SlateDbReadable {
         /// @param settingsJson JSON string describing SlateDB settings.
         /// @throws IllegalArgumentException if the JSON is invalid.
         public Builder withSettingsJson(String settingsJson) {
-            try (NativeInterop.SettingsHandle settings = NativeInterop.slatedb_settings_from_json(settingsJson)) {
-                NativeInterop.slatedb_db_builder_with_settings(builderPtr, settings);
+            try {
+                try (NativeInterop.SettingsHandle settings = NativeInterop.slatedb_settings_from_json(settingsJson)) {
+                    NativeInterop.slatedb_db_builder_with_settings(builderPtr, settings);
+                }
+            } catch (SlateDbException error) {
+                throw new IllegalArgumentException(error.getMessage(), error);
             }
             return this;
         }

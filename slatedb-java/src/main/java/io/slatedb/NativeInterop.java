@@ -5,6 +5,8 @@ import io.slatedb.SlateDbConfig.*;
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.nio.charset.StandardCharsets;
 import java.util.Objects;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -164,7 +166,9 @@ final class NativeInterop {
 
     static void loadLibrary(String absolutePath) {
         Objects.requireNonNull(absolutePath, "absolutePath");
-        System.load(absolutePath);
+        Path nativeLibrary = Path.of(absolutePath).toAbsolutePath().normalize();
+        ensureLibraryLookupAlias(nativeLibrary);
+        System.load(nativeLibrary.toString());
     }
 
     static ObjectStoreHandle resolveObjectStore(String url, String envFile) {
@@ -655,22 +659,6 @@ final class NativeInterop {
                     arena,
                     db.segment(),
                     writeBatch.segment(),
-                    marshalWriteOptions(arena, writeOptions)
-                )
-            );
-        }
-    }
-
-    static void slatedb_db_write_with_options(DbHandle db, MemorySegment writeBatch, WriteOptions writeOptions) {
-        Objects.requireNonNull(db, "db");
-        Objects.requireNonNull(writeBatch, "writeBatch");
-
-        try (Arena arena = Arena.ofConfined()) {
-            checkResult(
-                Native.slatedb_db_write_with_options(
-                    arena,
-                    db.segment(),
-                    writeBatch,
                     marshalWriteOptions(arena, writeOptions)
                 )
             );
@@ -1363,5 +1351,32 @@ final class NativeInterop {
             case SLATEDB_CLOSE_REASON_PANIC -> "panic";
             default -> "unknown(" + closeReason + ")";
         };
+    }
+
+    private static void ensureLibraryLookupAlias(Path nativeLibrary) {
+        String mappedName = System.mapLibraryName("slatedb_c");
+        Path alias = Path.of("").toAbsolutePath().resolve(mappedName);
+
+        if (alias.equals(nativeLibrary)) {
+            return;
+        }
+
+        try {
+            if (Files.exists(alias)) {
+                if (Files.isSameFile(alias, nativeLibrary)) {
+                    return;
+                }
+                return;
+            }
+
+            try {
+                Files.createSymbolicLink(alias, nativeLibrary);
+            } catch (UnsupportedOperationException | SecurityException | java.io.IOException symlinkFailure) {
+                Files.copy(nativeLibrary, alias);
+            }
+            alias.toFile().deleteOnExit();
+        } catch (java.io.IOException ignored) {
+            // Best-effort only. If alias creation fails, direct load may still work.
+        }
     }
 }

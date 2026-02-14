@@ -2,17 +2,15 @@ package io.slatedb;
 
 import io.slatedb.SlateDbConfig.PutOptions;
 
-import java.lang.foreign.MemorySegment;
-
 /// A batch of write operations that can be executed atomically.
 ///
 /// Batches are consumed by [SlateDb#write(SlateDbWriteBatch)] and cannot be reused.
 public final class SlateDbWriteBatch implements AutoCloseable {
-    private MemorySegment batchPtr;
+    private NativeInterop.WriteBatchHandle batchPtr;
     private boolean closed;
     private boolean consumed;
 
-    SlateDbWriteBatch(MemorySegment batchPtr) {
+    SlateDbWriteBatch(NativeInterop.WriteBatchHandle batchPtr) {
         this.batchPtr = batchPtr;
     }
 
@@ -21,7 +19,7 @@ public final class SlateDbWriteBatch implements AutoCloseable {
     /// @param key key to write (non-empty).
     /// @param value value to write.
     public void put(byte[] key, byte[] value) {
-        Native.writeBatchPut(batchPtr, key, value);
+        NativeInterop.slatedb_write_batch_put(batchPtr, key, value);
     }
 
     /// Adds a key/value pair to the batch using custom put options.
@@ -30,14 +28,14 @@ public final class SlateDbWriteBatch implements AutoCloseable {
     /// @param value value to write.
     /// @param options put options or `null` for defaults.
     public void put(byte[] key, byte[] value, PutOptions options) {
-        Native.writeBatchPutWithOptions(batchPtr, key, value, options);
+        NativeInterop.slatedb_write_batch_put_with_options(batchPtr, key, value, options);
     }
 
     /// Adds a delete operation to the batch.
     ///
     /// @param key key to delete.
     public void delete(byte[] key) {
-        Native.writeBatchDelete(batchPtr, key);
+        NativeInterop.slatedb_write_batch_delete(batchPtr, key);
     }
 
     /// Closes the batch and releases native resources.
@@ -48,12 +46,12 @@ public final class SlateDbWriteBatch implements AutoCloseable {
         if (closed) {
             return;
         }
-        Native.writeBatchClose(batchPtr);
+        NativeInterop.slatedb_write_batch_close(batchPtr);
         closed = true;
-        batchPtr = MemorySegment.NULL;
+        batchPtr = null;
     }
 
-    MemorySegment handle() {
+    NativeInterop.WriteBatchHandle handle() {
         return batchPtr;
     }
 
