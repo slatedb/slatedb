@@ -31,6 +31,7 @@ def slatedbJextractLibrary = jextract.libraries.create('slatedb') {
     targetPackage = 'io.slatedb.ffi'
     headerClassName = 'Native'
     libraries = ['slatedb_c']
+    useSystemLoadLibrary = true
     whitelist {
         functions = slatedbIncludeFunctions
         constants = slatedbIncludeConstants
@@ -84,4 +85,11 @@ dependencies {
 test {
     useJUnitPlatform()
     jvmArgs '--enable-native-access=ALL-UNNAMED'
+
+    // jextract's system-load mode requires java.library.path to be set before JVM startup.
+    def nativeLibPath = System.getenv('SLATEDB_C_LIB') ?: System.getProperty('slatedb.c.lib')
+    if (nativeLibPath != null && !nativeLibPath.isBlank()) {
+        def nativeLibDir = file(nativeLibPath).absoluteFile.parent
+        jvmArgs "-Djava.library.path=${nativeLibDir}"
+    }
 }
