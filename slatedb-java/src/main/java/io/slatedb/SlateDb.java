@@ -13,7 +13,7 @@ import java.util.Objects;
 ///
 /// ### Lifecycle
 ///
-/// - Load the native library once per JVM with [#loadLibrary()].
+/// - Ensure `java.library.path` includes the directory containing `slatedb_c`.
 /// - Open a database with [#open(String,String,String)] or configure a builder via
 ///   [#builder(String,String,String)].
 /// - Always close resources ([SlateDb], [SlateDbReader], [SlateDbWriteBatch],
@@ -40,8 +40,7 @@ import java.util.Objects;
 ///
 /// public final class HelloSlateDb {
 ///     public static void main(String[] args) throws Exception {
-///         // Load native library and init logging
-///         SlateDb.loadLibrary();
+///         // Initialize logging
 ///         SlateDb.initLogging(SlateDbConfig.LogLevel.INFO);
 ///
 ///         // Local database path and local object store
@@ -90,25 +89,6 @@ public final class SlateDb implements SlateDbReadable {
 
     private SlateDb(NativeInterop.DbHandle handle) {
         this.handle = handle;
-    }
-
-    /// Loads the SlateDB native library using `java.library.path`.
-    ///
-    /// This is required before any FFI calls can be made. If you do not call
-    /// this explicitly, the first SlateDB call will attempt to load the library
-    /// automatically using `java.library.path`.
-    ///
-    /// @throws UnsatisfiedLinkError if the library cannot be found.
-    public static void loadLibrary() {
-        NativeInterop.loadLibrary();
-    }
-
-    /// Loads the SlateDB native library from an absolute path.
-    ///
-    /// @param absolutePath full path to the native library (for example, `/path/to/libslatedb_c.dylib`).
-    /// @throws UnsatisfiedLinkError if the library cannot be loaded.
-    public static void loadLibrary(String absolutePath) {
-        NativeInterop.loadLibrary(absolutePath);
     }
 
     /// Initializes SlateDB logging using a log level (for example, `"info"` or `"debug"`).

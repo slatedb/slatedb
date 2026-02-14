@@ -33,14 +33,9 @@ final class TestSupport {
             if (initialized) {
                 return;
             }
-            SlateDb.loadLibrary();
             SlateDb.initLogging(SlateDbConfig.LogLevel.INFO);
             initialized = true;
         }
-    }
-
-    static Path nativeLibraryPath() {
-        return findNativeLibrary();
     }
 
     /// Creates a temporary database directory and an in-memory object store URL.

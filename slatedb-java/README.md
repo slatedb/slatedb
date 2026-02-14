@@ -66,8 +66,7 @@ import java.nio.file.Path;
 
 public final class HelloSlateDb {
     public static void main(String[] args) throws Exception {
-        // Load the native library and initialize logging
-        SlateDb.loadLibrary();
+        // Initialize logging (native library resolves via java.library.path)
         SlateDb.initLogging(SlateDbConfig.LogLevel.INFO);
 
         // Local database path and local object store
@@ -182,7 +181,7 @@ Then run:
 ## Troubleshooting
 
 Common issues:
-- `UnsatisfiedLinkError`: The JVM cannot find `slatedb_c`. Verify `java.library.path` and call `SlateDb.loadLibrary()`.
+- `UnsatisfiedLinkError`: The JVM cannot find `slatedb_c`. Verify `java.library.path` includes the native library directory.
 - Native access warnings: Use `--enable-native-access=ALL-UNNAMED` when running or testing.
 
 ## License

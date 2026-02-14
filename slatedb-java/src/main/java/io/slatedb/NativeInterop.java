@@ -6,7 +6,6 @@ import io.slatedb.ffi.*;
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
-import java.nio.file.Path;
 import java.nio.charset.StandardCharsets;
 import java.util.Objects;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -21,8 +20,6 @@ import java.util.concurrent.atomic.AtomicBoolean;
 /// - Standard Java types
 /// - Rust-owned buffer cleanup (`slatedb_result_free`, `slatedb_bytes_free`)
 final class NativeInterop {
-    private static final String SLATEDB_C_LIBRARY = "slatedb_c";
-
     private NativeInterop() {
     }
 
@@ -154,15 +151,6 @@ final class NativeInterop {
                 checkResult(Native.slatedb_write_batch_close(arena, segment));
             }
         }
-    }
-
-    static void loadLibrary() {
-        System.loadLibrary(SLATEDB_C_LIBRARY);
-    }
-
-    static void loadLibrary(String absolutePath) {
-        Objects.requireNonNull(absolutePath, "absolutePath");
-        System.load(Path.of(absolutePath).toAbsolutePath().normalize().toString());
     }
 
     static ObjectStoreHandle resolveObjectStore(String url, String envFile) {
