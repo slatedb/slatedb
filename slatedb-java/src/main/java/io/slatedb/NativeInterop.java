@@ -1,6 +1,7 @@
 package io.slatedb;
 
 import io.slatedb.SlateDbConfig.*;
+import io.slatedb.ffi.*;
 
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;

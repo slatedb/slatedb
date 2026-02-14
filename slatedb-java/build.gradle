@@ -28,7 +28,7 @@ def slatedbIncludeTypedefs = ((slatedbHeaderText =~ /(?ms)^\s*typedef\b.*?(?:\(\
 def slatedbJextractLibrary = jextract.libraries.create('slatedb') {
     header = slatedbHeader
     includes = [layout.projectDirectory.dir('../slatedb-c/include')]
-    targetPackage = 'io.slatedb'
+    targetPackage = 'io.slatedb.ffi'
     headerClassName = 'Native'
     libraries = ['slatedb_c']
     whitelist {
