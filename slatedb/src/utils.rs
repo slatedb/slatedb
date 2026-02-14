@@ -287,6 +287,15 @@ impl MonotonicSeq {
         self.val.load(SeqCst)
     }
 
+    #[cfg(test)]
+    pub(crate) fn set_unsafe(&self, value: u64) {
+        self.val.store(value, SeqCst);
+        self.tx.send_if_modified(|current| {
+            *current = value;
+            true
+        });
+    }
+
     pub(crate) fn fetch_max(&self, value: u64) -> u64 {
         let old = self.val.fetch_max(value, SeqCst);
         self.send_monotonic(value);
