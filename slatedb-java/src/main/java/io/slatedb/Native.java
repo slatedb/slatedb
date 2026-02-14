@@ -188,6 +188,20 @@ final class Native {
     private static MethodHandle freeResultHandle;
     private static MethodHandle freeBytesHandle;
 
+    private static final GroupLayout WRITE_HANDLE_LAYOUT = MemoryLayout.structLayout(
+        ValueLayout.JAVA_LONG.withName("seq"),
+        ValueLayout.JAVA_LONG.withName("create_ts"),
+        ValueLayout.JAVA_BOOLEAN.withName("create_ts_present"),
+        MemoryLayout.paddingLayout(7)
+    ).withName("slatedb_write_handle_t");
+
+    private static final VarHandle WRITE_HANDLE_SEQ =
+        WRITE_HANDLE_LAYOUT.varHandle(MemoryLayout.PathElement.groupElement("seq"));
+    private static final VarHandle WRITE_HANDLE_CREATE_TS =
+        WRITE_HANDLE_LAYOUT.varHandle(MemoryLayout.PathElement.groupElement("create_ts"));
+    private static final VarHandle WRITE_HANDLE_CREATE_TS_PRESENT =
+        WRITE_HANDLE_LAYOUT.varHandle(MemoryLayout.PathElement.groupElement("create_ts_present"));
+
     private static int getInt(VarHandle handle, MemorySegment segment) {
         return (int) (VARHANDLE_REQUIRES_OFFSET ? handle.get(segment, 0L) : handle.get(segment));
     }
@@ -574,20 +588,24 @@ final class Native {
         }
     }
 
-    static void delete(MemorySegment handlePtr, byte[] key, WriteOptions options) {
+    static SlateDbWriteHandle delete(MemorySegment handlePtr, byte[] key, WriteOptions options) {
         Objects.requireNonNull(key, "key");
         ensureInitialized();
         try (Arena arena = Arena.ofConfined()) {
             MemorySegment keySegment = toByteArray(arena, key);
             MemorySegment optionsSegment = toWriteOptions(arena, options);
+            MemorySegment outHandle = arena.allocate(WRITE_HANDLE_LAYOUT);
+
             MemorySegment result = (MemorySegment) deleteHandle.invokeExact(
                 (SegmentAllocator) arena,
                 handlePtr,
                 keySegment,
                 (long) key.length,
-                optionsSegment
+                optionsSegment,
+                outHandle
             );
             checkResult(result);
+            return readWriteHandle(outHandle);
         } catch (Throwable t) {
             throw wrap(t);
         }
@@ -715,7 +733,7 @@ final class Native {
         }
     }
 
-    static void put(
+    static SlateDbWriteHandle put(
         MemorySegment handlePtr,
         byte[] key,
         byte[] value,
@@ -730,6 +748,8 @@ final class Native {
             MemorySegment valueSegment = toByteArray(arena, value);
             MemorySegment putOptionsSegment = toPutOptions(arena, putOptions);
             MemorySegment writeOptionsSegment = toWriteOptions(arena, writeOptions);
+            MemorySegment outHandle = arena.allocate(WRITE_HANDLE_LAYOUT);
+
             MemorySegment result = (MemorySegment) putHandle.invokeExact(
                 (SegmentAllocator) arena,
                 handlePtr,
@@ -738,9 +758,11 @@ final class Native {
                 valueSegment,
                 (long) value.length,
                 putOptionsSegment,
-                writeOptionsSegment
+                writeOptionsSegment,
+                outHandle
             );
             checkResult(result);
+            return readWriteHandle(outHandle);
         } catch (Throwable t) {
             throw wrap(t);
         }
@@ -1003,17 +1025,21 @@ final class Native {
         }
     }
 
-    static void writeBatchWrite(MemorySegment handlePtr, MemorySegment batchPtr, WriteOptions options) {
+    static SlateDbWriteHandle writeBatchWrite(MemorySegment handlePtr, MemorySegment batchPtr, WriteOptions options) {
         ensureInitialized();
         try (Arena arena = Arena.ofConfined()) {
             MemorySegment optionsSegment = toWriteOptions(arena, options);
+            MemorySegment outHandle = arena.allocate(WRITE_HANDLE_LAYOUT);
+
             MemorySegment result = (MemorySegment) writeBatchWriteHandle.invokeExact(
                 (SegmentAllocator) arena,
                 handlePtr,
                 batchPtr,
-                optionsSegment
+                optionsSegment,
+                outHandle
             );
             checkResult(result);
+            return readWriteHandle(outHandle);
         } catch (Throwable t) {
             throw wrap(t);
         }
@@ -1035,8 +1061,8 @@ final class Native {
         }
     }
 
-    static void put(MemorySegment handlePtr, byte[] key, byte[] value) {
-        put(handlePtr, key, value, null, null);
+    static SlateDbWriteHandle put(MemorySegment handlePtr, byte[] key, byte[] value) {
+        return put(handlePtr, key, value, null, null);
     }
 
     static byte[] get(MemorySegment handlePtr, byte[] key) {
@@ -1089,6 +1115,7 @@ final class Native {
                     ValueLayout.ADDRESS,
                     ValueLayout.ADDRESS,
                     ValueLayout.JAVA_LONG,
+                    ValueLayout.ADDRESS,
                     ValueLayout.ADDRESS));
             flushHandle = downcall(lookup, "slatedb_db_flush",
                 FunctionDescriptor.of(RESULT_LAYOUT, ValueLayout.ADDRESS));
@@ -1175,6 +1202,7 @@ final class Native {
                     ValueLayout.ADDRESS,
                     ValueLayout.JAVA_LONG,
                     ValueLayout.ADDRESS,
+                    ValueLayout.ADDRESS,
                     ValueLayout.ADDRESS));
             getHandle = downcall(lookup, "slatedb_db_get_with_options",
                 FunctionDescriptor.of(RESULT_LAYOUT,
@@ -1212,6 +1240,7 @@ final class Native {
                     ValueLayout.JAVA_LONG));
             writeBatchWriteHandle = downcall(lookup, "slatedb_db_write_with_options",
                 FunctionDescriptor.of(RESULT_LAYOUT,
+                    ValueLayout.ADDRESS,
                     ValueLayout.ADDRESS,
                     ValueLayout.ADDRESS,
                     ValueLayout.ADDRESS));
@@ -1335,6 +1364,18 @@ final class Native {
         }
 
         return range;
+    }
+
+
+
+    private static SlateDbWriteHandle readWriteHandle(MemorySegment segment) {
+        long seq = (long) WRITE_HANDLE_SEQ.get(segment, 0L);
+        boolean createTsPresent = (boolean) WRITE_HANDLE_CREATE_TS_PRESENT.get(segment, 0L);
+        Long createTs = null;
+        if (createTsPresent) {
+            createTs = (long) WRITE_HANDLE_CREATE_TS.get(segment, 0L);
+        }
+        return new SlateDbWriteHandle(seq, createTs);
     }
 
     private static String readMessage(MemorySegment messageSegment) {
