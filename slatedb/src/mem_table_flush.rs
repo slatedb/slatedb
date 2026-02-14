@@ -123,6 +123,10 @@ impl MemtableFlusher {
                 let last_seq = imm_memtable.table().last_seq().unwrap_or(0);
                 if self.db_inner.oracle.last_remote_persisted_seq.load() < last_seq {
                     self.db_inner.flush_wals().await?;
+                    assert!(
+                        self.db_inner.oracle.last_remote_persisted_seq.load() >= last_seq,
+                        "flush_wals did not flush up to the last seq in the imm memtable"
+                    );
                 }
             }
             let id = SsTableId::Compacted(
