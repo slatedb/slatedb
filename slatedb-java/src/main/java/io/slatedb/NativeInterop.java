@@ -661,6 +661,22 @@ final class NativeInterop {
         }
     }
 
+    static void slatedb_db_write_with_options(DbHandle db, MemorySegment writeBatch, WriteOptions writeOptions) {
+        Objects.requireNonNull(db, "db");
+        Objects.requireNonNull(writeBatch, "writeBatch");
+
+        try (Arena arena = Arena.ofConfined()) {
+            checkResult(
+                Native.slatedb_db_write_with_options(
+                    arena,
+                    db.segment(),
+                    writeBatch,
+                    marshalWriteOptions(arena, writeOptions)
+                )
+            );
+        }
+    }
+
     static IteratorHandle slatedb_db_scan(DbHandle db, byte[] startKey, byte[] endKey) {
         Objects.requireNonNull(db, "db");
         return slatedb_db_scan_with_options(db, startKey, endKey, null);

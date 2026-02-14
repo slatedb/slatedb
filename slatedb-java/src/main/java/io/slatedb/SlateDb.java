@@ -2,7 +2,6 @@ package io.slatedb;
 
 import io.slatedb.SlateDbConfig.*;
 
-import java.lang.foreign.MemorySegment;
 import java.util.Objects;
 
 /// Java bindings for SlateDB backed by the `slatedb-c` FFI library.
@@ -91,10 +90,10 @@ import java.util.Objects;
 /// for details.
 /// ```
 public final class SlateDb implements SlateDbReadable {
-    private MemorySegment handle;
+    private NativeInterop.DbHandle handle;
     private boolean closed;
 
-    private SlateDb(MemorySegment handle) {
+    private SlateDb(NativeInterop.DbHandle handle) {
         this.handle = handle;
     }
 
@@ -106,7 +105,7 @@ public final class SlateDb implements SlateDbReadable {
     ///
     /// @throws UnsatisfiedLinkError if the library cannot be found.
     public static void loadLibrary() {
-        Native.loadLibrary();
+        NativeInterop.loadLibrary();
     }
 
     /// Loads the SlateDB native library from an absolute path.
@@ -114,7 +113,7 @@ public final class SlateDb implements SlateDbReadable {
     /// @param absolutePath full path to the native library (for example, `/path/to/libslatedb_c.dylib`).
     /// @throws UnsatisfiedLinkError if the library cannot be loaded.
     public static void loadLibrary(String absolutePath) {
-        Native.loadLibrary(absolutePath);
+        NativeInterop.loadLibrary(absolutePath);
     }
 
     /// Initializes SlateDB logging using a log level (for example, `"info"` or `"debug"`).
@@ -122,14 +121,16 @@ public final class SlateDb implements SlateDbReadable {
     /// @param level the log level enum value understood by SlateDB.
     public static void initLogging(LogLevel level) {
         Objects.requireNonNull(level, "level");
-        Native.initLogging(level.value());
+        NativeInterop.slatedb_logging_init(level);
     }
 
     /// Returns the default SlateDB settings as a JSON string.
     ///
     /// @return JSON string containing the default settings.
     public static String settingsDefault() {
-        return Native.settingsDefault();
+        try (NativeInterop.SettingsHandle settings = NativeInterop.slatedb_settings_default()) {
+            return NativeInterop.slatedb_settings_to_json_string(settings);
+        }
     }
 
     /// Loads settings from a configuration file and returns them as JSON.
@@ -141,7 +142,9 @@ public final class SlateDb implements SlateDbReadable {
     /// @return JSON string containing the loaded settings.
     /// @throws IllegalStateException if the file cannot be read or parsed.
     public static String settingsFromFile(String path) {
-        return Native.settingsFromFile(path);
+        try (NativeInterop.SettingsHandle settings = NativeInterop.slatedb_settings_from_file(path)) {
+            return NativeInterop.slatedb_settings_to_json_string(settings);
+        }
     }
 
     /// Loads settings from environment variables using the provided prefix and returns them as JSON.
@@ -149,14 +152,18 @@ public final class SlateDb implements SlateDbReadable {
     /// @param prefix environment variable prefix to search for.
     /// @return JSON string containing the loaded settings.
     public static String settingsFromEnv(String prefix) {
-        return Native.settingsFromEnv(prefix);
+        try (NativeInterop.SettingsHandle settings = NativeInterop.slatedb_settings_from_env(prefix)) {
+            return NativeInterop.slatedb_settings_to_json_string(settings);
+        }
     }
 
     /// Loads settings using auto-detection (well-known files and environment variables) and returns them as JSON.
     ///
     /// @return JSON string containing the loaded settings.
     public static String settingsLoad() {
-        return Native.settingsLoad();
+        try (NativeInterop.SettingsHandle settings = NativeInterop.slatedb_settings_load()) {
+            return NativeInterop.slatedb_settings_to_json_string(settings);
+        }
     }
 
     /// Opens a SlateDB handle with default settings.
@@ -173,7 +180,9 @@ public final class SlateDb implements SlateDbReadable {
     /// }
     /// ```
     public static SlateDb open(String path, String url, String envFile) {
-        return new SlateDb(Native.open(path, url, envFile));
+        try (NativeInterop.ObjectStoreHandle objectStore = NativeInterop.resolveObjectStore(url, envFile)) {
+            return new SlateDb(NativeInterop.slatedb_db_open(path, objectStore));
+        }
     }
 
     /// Opens a read-only SlateDB reader.
@@ -209,7 +218,11 @@ public final class SlateDb implements SlateDbReadable {
         String checkpointId,
         ReaderOptions options
     ) {
-        return new SlateDbReader(Native.readerOpen(path, url, envFile, checkpointId, options));
+        try (NativeInterop.ObjectStoreHandle objectStore = NativeInterop.resolveObjectStore(url, envFile)) {
+            return new SlateDbReader(
+                NativeInterop.slatedb_db_reader_open(path, objectStore, checkpointId, options).segment()
+            );
+        }
     }
 
     /// Creates a new [Builder] for configuring and opening a SlateDB instance.
@@ -219,7 +232,9 @@ public final class SlateDb implements SlateDbReadable {
     /// @param envFile optional env file for object store configuration. May be `null`.
     /// @return A builder that must be closed if not used.
     public static Builder builder(String path, String url, String envFile) {
-        return new Builder(Native.newBuilder(path, url, envFile));
+        try (NativeInterop.ObjectStoreHandle objectStore = NativeInterop.resolveObjectStore(url, envFile)) {
+            return new Builder(NativeInterop.slatedb_db_builder_new(path, objectStore));
+        }
     }
 
     /// Creates a new write batch for atomic operations.
@@ -228,7 +243,7 @@ public final class SlateDb implements SlateDbReadable {
     ///
     /// @return A new [SlateDbWriteBatch] instance. Always close it.
     public static SlateDbWriteBatch newWriteBatch() {
-        return new SlateDbWriteBatch(Native.newWriteBatch());
+        return new SlateDbWriteBatch(NativeInterop.slatedb_write_batch_new().segment());
     }
 
     /// Writes a value into the database with default options.
@@ -241,7 +256,7 @@ public final class SlateDb implements SlateDbReadable {
     /// db.put("key".getBytes(StandardCharsets.UTF_8), "value".getBytes(StandardCharsets.UTF_8));
     /// ```
     public void put(byte[] key, byte[] value) {
-        Native.put(handle, key, value);
+        NativeInterop.slatedb_db_put(handle, key, value);
     }
 
     /// Writes a value into the database with custom put and write options.
@@ -252,7 +267,7 @@ public final class SlateDb implements SlateDbReadable {
     /// @param writeOptions write options or `null` for defaults.
     /// @throws SlateDbException if the write fails.
     public void put(byte[] key, byte[] value, PutOptions putOptions, WriteOptions writeOptions) {
-        Native.put(handle, key, value, putOptions, writeOptions);
+        NativeInterop.slatedb_db_put_with_options(handle, key, value, putOptions, writeOptions);
     }
 
     /// Reads a value from the database using default read options.
@@ -265,7 +280,7 @@ public final class SlateDb implements SlateDbReadable {
     /// byte[] value = db.get("key".getBytes(StandardCharsets.UTF_8));
     /// ```
     public byte[] get(byte[] key) {
-        return Native.get(handle, key);
+        return NativeInterop.slatedb_db_get(handle, key);
     }
 
     /// Reads a value from the database with custom read options.
@@ -275,7 +290,7 @@ public final class SlateDb implements SlateDbReadable {
     /// @return The value for the key, or `null` if the key does not exist.
     /// @throws SlateDbException if the read fails.
     public byte[] get(byte[] key, ReadOptions options) {
-        return Native.get(handle, key, options);
+        return NativeInterop.slatedb_db_get_with_options(handle, key, options);
     }
 
     /// Deletes a key using default write options.
@@ -292,7 +307,7 @@ public final class SlateDb implements SlateDbReadable {
     /// @param options write options or `null` for defaults.
     /// @throws SlateDbException if the delete fails.
     public void delete(byte[] key, WriteOptions options) {
-        Native.delete(handle, key, options);
+        NativeInterop.slatedb_db_delete_with_options(handle, key, options);
     }
 
     /// Writes a batch atomically using default write options.
@@ -323,7 +338,7 @@ public final class SlateDb implements SlateDbReadable {
     public void write(SlateDbWriteBatch batch, WriteOptions options) {
         Objects.requireNonNull(batch, "batch");
         try {
-            Native.writeBatchWrite(handle, batch.handle(), options == null ? WriteOptions.DEFAULT : options);
+            NativeInterop.slatedb_db_write_with_options(handle, batch.handle(), options == null ? WriteOptions.DEFAULT : options);
         } finally {
             batch.markConsumed();
         }
@@ -335,7 +350,7 @@ public final class SlateDb implements SlateDbReadable {
     ///
     /// @throws SlateDbException if the flush fails.
     public void flush() {
-        Native.flush(handle);
+        NativeInterop.slatedb_db_flush(handle);
     }
 
     /// Creates a scan iterator over the range `[startKey, endKey)` using default scan options.
@@ -370,7 +385,7 @@ public final class SlateDb implements SlateDbReadable {
     /// @return A [SlateDbScanIterator] over the range. Always close it.
     /// @throws SlateDbException if the scan fails.
     public SlateDbScanIterator scan(byte[] startKey, byte[] endKey, ScanOptions options) {
-        return new SlateDbScanIterator(Native.scan(handle, startKey, endKey, options));
+        return new SlateDbScanIterator(NativeInterop.slatedb_db_scan_with_options(handle, startKey, endKey, options).segment());
     }
 
     /// Creates a scan iterator for the provided key prefix using default scan options.
@@ -389,14 +404,14 @@ public final class SlateDb implements SlateDbReadable {
     /// @return A [SlateDbScanIterator] over the prefix. Always close it.
     /// @throws SlateDbException if the scan fails.
     public SlateDbScanIterator scanPrefix(byte[] prefix, ScanOptions options) {
-        return new SlateDbScanIterator(Native.scanPrefix(handle, prefix, options));
+        return new SlateDbScanIterator(NativeInterop.slatedb_db_scan_prefix_with_options(handle, prefix, options).segment());
     }
 
     /// Returns a JSON string containing SlateDB metrics.
     ///
     /// @return JSON string with runtime and storage metrics.
     public String metrics() {
-        return Native.metrics(handle);
+        return NativeInterop.slatedb_db_metrics_string(handle);
     }
 
     /// Closes the database handle.
@@ -407,8 +422,8 @@ public final class SlateDb implements SlateDbReadable {
         if (closed) {
             return;
         }
-        Native.close(handle);
-        handle = MemorySegment.NULL;
+        NativeInterop.slatedb_db_close(handle);
+        handle = null;
         closed = true;
     }
 
@@ -433,10 +448,10 @@ public final class SlateDb implements SlateDbReadable {
     ///
     /// The builder is consumed on [#build()] and must be closed if not used.
     public static final class Builder implements AutoCloseable {
-        private MemorySegment builderPtr;
+        private NativeInterop.DbBuilderHandle builderPtr;
         private boolean closed;
 
-        private Builder(MemorySegment builderPtr) {
+        private Builder(NativeInterop.DbBuilderHandle builderPtr) {
             this.builderPtr = builderPtr;
         }
 
@@ -445,7 +460,9 @@ public final class SlateDb implements SlateDbReadable {
         /// @param settingsJson JSON string describing SlateDB settings.
         /// @throws IllegalArgumentException if the JSON is invalid.
         public Builder withSettingsJson(String settingsJson) {
-            Native.builderWithSettings(builderPtr, settingsJson);
+            try (NativeInterop.SettingsHandle settings = NativeInterop.slatedb_settings_from_json(settingsJson)) {
+                NativeInterop.slatedb_db_builder_with_settings(builderPtr, settings);
+            }
             return this;
         }
 
@@ -454,7 +471,7 @@ public final class SlateDb implements SlateDbReadable {
         /// @param blockSize block size enum value.
         /// @throws IllegalArgumentException if the block size is invalid.
         public Builder withSstBlockSize(SstBlockSize blockSize) {
-            Native.builderWithSstBlockSize(builderPtr, blockSize);
+            NativeInterop.slatedb_db_builder_with_sst_block_size(builderPtr, blockSize);
             return this;
         }
 
@@ -475,10 +492,9 @@ public final class SlateDb implements SlateDbReadable {
         /// ```
         public SlateDb build() {
             try {
-                MemorySegment handlePtr = Native.builderBuild(builderPtr);
-                return new SlateDb(handlePtr);
+                return new SlateDb(NativeInterop.slatedb_db_builder_build(builderPtr));
             } finally {
-                builderPtr = MemorySegment.NULL;
+                builderPtr = null;
                 closed = true;
             }
         }
@@ -491,8 +507,8 @@ public final class SlateDb implements SlateDbReadable {
             if (closed) {
                 return;
             }
-            Native.builderFree(builderPtr);
-            builderPtr = MemorySegment.NULL;
+            NativeInterop.slatedb_db_builder_close(builderPtr);
+            builderPtr = null;
             closed = true;
         }
 
