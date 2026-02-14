@@ -6,14 +6,10 @@ import io.slatedb.ffi.*;
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
-import java.io.File;
-import java.nio.file.Files;
-import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
 import java.nio.charset.StandardCharsets;
 import java.util.Objects;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.regex.Pattern;
 
 /// Java-typed wrappers around generated jextract bindings.
 ///
@@ -161,19 +157,12 @@ final class NativeInterop {
     }
 
     static void loadLibrary() {
-        Path nativeLibrary = resolveLibraryFromJavaLibraryPath();
-        if (nativeLibrary != null) {
-            loadLibrary(nativeLibrary.toString());
-            return;
-        }
         System.loadLibrary(SLATEDB_C_LIBRARY);
     }
 
     static void loadLibrary(String absolutePath) {
         Objects.requireNonNull(absolutePath, "absolutePath");
-        Path nativeLibrary = Path.of(absolutePath).toAbsolutePath().normalize();
-        ensureLibraryLookupAlias(nativeLibrary);
-        System.load(nativeLibrary.toString());
+        System.load(Path.of(absolutePath).toAbsolutePath().normalize().toString());
     }
 
     static ObjectStoreHandle resolveObjectStore(String url, String envFile) {
@@ -1338,81 +1327,6 @@ final class NativeInterop {
             case PANIC -> "panic";
             case UNKNOWN -> "unknown(" + closeReasonCode + ")";
         };
-    }
-
-    /// Ensures the jextract-generated bindings can resolve symbols from `slatedb_c`.
-    ///
-    /// jextract's generated `Native` class uses `System.mapLibraryName("slatedb_c")`
-    /// when creating its `SymbolLookup`. If callers load the library via absolute path
-    /// (`System.load`), the mapped filename may not exist in the JVM's current working
-    /// directory. We create a best-effort alias with that mapped filename pointing to
-    /// the provided library so both load styles resolve the same binary.
-    private static void ensureLibraryLookupAlias(Path nativeLibrary) {
-        String mappedName = System.mapLibraryName(SLATEDB_C_LIBRARY);
-        // Keep the alias local to the process working directory.
-        Path alias = Path.of("").toAbsolutePath().resolve(mappedName);
-
-        if (alias.equals(nativeLibrary)) {
-            return;
-        }
-
-        try {
-            if (Files.exists(alias)) {
-                // If an equivalent alias already exists, we're done.
-                if (Files.isSameFile(alias, nativeLibrary)) {
-                    return;
-                }
-                // Avoid overwriting unrelated existing files.
-                return;
-            }
-
-            try {
-                // Prefer symlink so updates to the real library are reflected automatically.
-                Files.createSymbolicLink(alias, nativeLibrary);
-            } catch (UnsupportedOperationException | SecurityException | java.io.IOException symlinkFailure) {
-                // Fall back to copy when symlinks are unavailable or denied.
-                Files.copy(nativeLibrary, alias);
-            }
-            alias.toFile().deleteOnExit();
-        } catch (java.io.IOException ignored) {
-            // Best-effort only. If alias creation fails, direct load may still work.
-        }
-    }
-
-    private static Path resolveLibraryFromJavaLibraryPath() {
-        String javaLibraryPath = System.getProperty("java.library.path");
-        if (javaLibraryPath == null || javaLibraryPath.isBlank()) {
-            return null;
-        }
-
-        String mappedName = System.mapLibraryName(SLATEDB_C_LIBRARY);
-        String[] entries = javaLibraryPath.split(Pattern.quote(File.pathSeparator));
-        for (String entry : entries) {
-            Path directory = parseLibraryPathEntry(entry);
-            if (directory == null) {
-                continue;
-            }
-
-            Path candidate = directory.resolve(mappedName);
-            if (Files.isRegularFile(candidate)) {
-                return candidate.normalize();
-            }
-        }
-
-        return null;
-    }
-
-    private static Path parseLibraryPathEntry(String entry) {
-        String normalized = entry == null ? "" : entry.trim();
-        if (normalized.isEmpty()) {
-            return Path.of("").toAbsolutePath();
-        }
-
-        try {
-            return Path.of(normalized).toAbsolutePath();
-        } catch (InvalidPathException ignored) {
-            return null;
-        }
     }
 
     private enum ErrorKind {
