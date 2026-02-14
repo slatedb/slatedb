@@ -13,8 +13,7 @@ import java.util.Objects;
 ///
 /// ### Lifecycle
 ///
-/// - Load the native library once per JVM with [#loadLibrary()] or
-///   [#loadLibrary(String)].
+/// - Load the native library once per JVM with [#loadLibrary()].
 /// - Open a database with [#open(String,String,String)] or configure a builder via
 ///   [#builder(String,String,String)].
 /// - Always close resources ([SlateDb], [SlateDbReader], [SlateDbWriteBatch],
@@ -33,6 +32,7 @@ import java.util.Objects;
 /// import io.slatedb.SlateDbScanIterator;
 /// import io.slatedb.SlateDb;
 /// import io.slatedb.SlateDbWriteBatch;
+/// import io.slatedb.SlateDbConfig;
 ///
 /// import java.nio.charset.StandardCharsets;
 /// import java.nio.file.Files;
@@ -40,13 +40,8 @@ import java.util.Objects;
 ///
 /// public final class HelloSlateDb {
 ///     public static void main(String[] args) throws Exception {
-///         if (args.length != 1) {
-///             System.err.println("Usage: HelloSlateDb <absolute path to slatedb_c native library>");
-///             System.exit(2);
-///         }
-///
 ///         // Load native library and init logging
-///         SlateDb.loadLibrary(args[0]);
+///         SlateDb.loadLibrary();
 ///         SlateDb.initLogging(SlateDbConfig.LogLevel.INFO);
 ///
 ///         // Local database path and local object store

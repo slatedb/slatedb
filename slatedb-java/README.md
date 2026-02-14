@@ -58,6 +58,7 @@ import io.slatedb.SlateDbKeyValue;
 import io.slatedb.SlateDbScanIterator;
 import io.slatedb.SlateDb;
 import io.slatedb.SlateDbWriteBatch;
+import io.slatedb.SlateDbConfig;
 
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -65,13 +66,8 @@ import java.nio.file.Path;
 
 public final class HelloSlateDb {
     public static void main(String[] args) throws Exception {
-        if (args.length != 1) {
-            System.err.println("Usage: HelloSlateDb <absolute path to slatedb_c native library>");
-            System.exit(2);
-        }
-
         // Load the native library and initialize logging
-        SlateDb.loadLibrary(args[0]);
+        SlateDb.loadLibrary();
         SlateDb.initLogging(SlateDbConfig.LogLevel.INFO);
 
         // Local database path and local object store
@@ -119,15 +115,7 @@ public final class HelloSlateDb {
 javac -cp slatedb-java/build/libs/slatedb-<version>.jar HelloSlateDb.java
 ```
 
-3. Run (use the path to your `slatedb_c` native library):
-
-```bash
-java --enable-native-access=ALL-UNNAMED \
-  -cp slatedb-java/build/libs/slatedb-<version>.jar:. \
-  HelloSlateDb /absolute/path/to/libslatedb_c.dylib
-```
-
-If you prefer `java.library.path` instead of `SlateDb.loadLibrary(path)`, set the directory containing the native library and call `SlateDb.loadLibrary()` with no arguments.
+3. Run (set `java.library.path` to the directory containing your `slatedb_c` native library):
 
 ```bash
 java --enable-native-access=ALL-UNNAMED \
@@ -158,7 +146,7 @@ You can configure SlateDB with JSON settings or a builder:
 ```java
 String settings = SlateDb.settingsDefault();
 
-try (SlateDb.Builder builder = SlateDb.builder(dbPath, objectStoreUrl, null)) {
+try (SlateDb.Builder builder = SlateDb.builder(dbPath.toString(), objectStoreUrl, null)) {
     builder.withSettingsJson(settings)
            .withSstBlockSize(SlateDbConfig.SstBlockSize.KIB_4);
     try (SlateDb db = builder.build()) {
@@ -191,7 +179,7 @@ Then run:
 ## Troubleshooting
 
 Common issues:
-- `UnsatisfiedLinkError`: The JVM cannot find `slatedb_c`. Verify `java.library.path` or call `SlateDb.loadLibrary(<absolute path>)`.
+- `UnsatisfiedLinkError`: The JVM cannot find `slatedb_c`. Verify `java.library.path` and call `SlateDb.loadLibrary()`.
 - Native access warnings: Use `--enable-native-access=ALL-UNNAMED` when running or testing.
 
 ## License
