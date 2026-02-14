@@ -69,11 +69,12 @@ This pattern is safe and idempotent as long as you persist the cursor after each
 
 If you need a full backfill of data not in the WAL along with the WAL change stream:
 
-1. Start a WAL tailer and buffer changes.
-2. Clone the database using `Admin::create_clone`.
+1. Tail the WAL, buffering changes.
+2. Checkpoint the database using `Admin::create_detached_checkpoint`.
 3. Range scan (`Db::scan`) over the cloned database to read old data.
-4. Apply the buffered WAL changes in sequence order.
-5. Continue tailing WALs from the stored cursor.
+4. Apply the buffered WAL changes in sequence order, filtering rows whose sequence number was in the range scan in (3).
+5. Delete the checkpoint using `Admin::delete_checkpoint`.
+6. Continue tailing WALs from the stored cursor.
 
 This avoids gaps between the backfill and the live stream. Your sink should be idempotent if the backfill and WAL stream can overlap.
 
