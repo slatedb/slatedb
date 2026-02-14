@@ -40,42 +40,6 @@ type WriteHandle struct {
 	CreateTs *int64
 }
 
-func resultToError(result C.struct_slatedb_result_t) error {
-	if result.kind == C.SLATEDB_ERROR_KIND_NONE {
-		return nil
-	}
-
-	var baseErr error
-	switch result.kind {
-	case C.SLATEDB_ERROR_KIND_INVALID:
-		baseErr = ErrInvalidArgument
-	case C.SLATEDB_ERROR_KIND_TRANSACTION:
-		baseErr = ErrTransaction
-	case C.SLATEDB_ERROR_KIND_CLOSED:
-		baseErr = ErrInvalidHandle
-	case C.SLATEDB_ERROR_KIND_UNAVAILABLE:
-		baseErr = ErrIOError
-	case C.SLATEDB_ERROR_KIND_DATA:
-		baseErr = ErrInternalError
-	case C.SLATEDB_ERROR_KIND_INTERNAL:
-		baseErr = ErrInternalError
-	default:
-		baseErr = ErrInternalError
-	}
-
-	if result.message != nil {
-		return fmt.Errorf("%w: %s", baseErr, C.GoString(result.message))
-	}
-	if result.kind == C.SLATEDB_ERROR_KIND_CLOSED {
-		return fmt.Errorf("%w: close_reason=%d", baseErr, int(result.close_reason))
-	}
-	return baseErr
-}
-
-func resultToErrorAndFree(result C.struct_slatedb_result_t) error {
-	defer C.slatedb_result_free(result)
-	return resultToError(result)
-}
 func resolveObjectStoreHandle(url *string, envFile *string) (*C.slatedb_object_store_t, error) {
 	resolvedURL, hasURL, err := resolveObjectStoreURL(url, envFile)
 	if err != nil {
@@ -262,10 +226,10 @@ func (db *DB) Delete(key []byte) (*WriteHandle, error) {
 //	err := db.PutWithOptions([]byte("session:123"), []byte("data"), putOpts, writeOpts)
 func (db *DB) PutWithOptions(key, value []byte, putOpts *PutOptions, writeOpts *WriteOptions) (*WriteHandle, error) {
 	if db == nil || db.handle == nil {
-		return nil, ErrInvalidHandle
+		return nil, ErrInvalid
 	}
 	if len(key) == 0 {
-		return nil, ErrInvalidArgument
+		return nil, ErrInvalid
 	}
 
 	keyPtr, keyLen := ptrFromBytes(key)
@@ -306,10 +270,10 @@ func (db *DB) PutWithOptions(key, value []byte, putOpts *PutOptions, writeOpts *
 //	err := db.DeleteWithOptions([]byte("temp:123"), writeOpts)
 func (db *DB) DeleteWithOptions(key []byte, writeOpts *WriteOptions) (*WriteHandle, error) {
 	if db == nil || db.handle == nil {
-		return nil, ErrInvalidHandle
+		return nil, ErrInvalid
 	}
 	if len(key) == 0 {
-		return nil, ErrInvalidArgument
+		return nil, ErrInvalid
 	}
 
 	keyPtr, keyLen := ptrFromBytes(key)
@@ -420,7 +384,7 @@ func (db *DB) Write(batch *WriteBatch) (*WriteHandle, error) {
 //	wh, err := db.WriteWithOptions(batch, writeOpts)
 func (db *DB) WriteWithOptions(batch *WriteBatch, opts *WriteOptions) (*WriteHandle, error) {
 	if db == nil || db.handle == nil {
-		return nil, ErrInvalidHandle
+		return nil, ErrInvalid
 	}
 	if batch == nil {
 		return nil, errors.New("batch cannot be nil")

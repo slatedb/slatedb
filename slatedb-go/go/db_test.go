@@ -78,7 +78,7 @@ var _ = Describe("DB", func() {
 			It("should distinguish empty value from missing key", func() {
 				key := []byte("empty_value_key")
 
-				err := db.Put(key, []byte{})
+				_, err := db.Put(key, []byte{})
 				Expect(err).NotTo(HaveOccurred())
 
 				value, err := db.Get(key)

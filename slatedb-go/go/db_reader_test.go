@@ -86,7 +86,8 @@ var _ = Describe("DbReader", func() {
 
 			db, err = slatedb.Open(tmpDir, slatedb.WithEnvFile[slatedb.DbConfig](envFile))
 			Expect(err).NotTo(HaveOccurred())
-			Expect(db.Put([]byte("empty_value_key"), []byte{})).NotTo(HaveOccurred())
+			_, err = db.Put([]byte("empty_value_key"), []byte{})
+			Expect(err).NotTo(HaveOccurred())
 			Expect(db.Flush()).NotTo(HaveOccurred())
 			Expect(db.Close()).NotTo(HaveOccurred())
 			db = nil
