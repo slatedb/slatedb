@@ -12,12 +12,14 @@ import java.nio.charset.StandardCharsets;
 import java.util.Objects;
 import java.util.concurrent.atomic.AtomicBoolean;
 
-/// Java-typed wrappers around generated jextract bindings in [Native].
+/// Java-typed wrappers around generated jextract bindings.
 ///
 /// Each method mirrors a `slatedb_*` C function as closely as possible while
 /// handling:
 /// - `Arena` lifetime
 /// - `slatedb_result_t` checking and error mapping
+/// - Java handle lifecycle management to close native resources using AutoCloseable
+/// - Standard Java types
 /// - Rust-owned buffer cleanup (`slatedb_result_free`, `slatedb_bytes_free`)
 final class NativeInterop {
     private static final int SLATEDB_ERROR_KIND_NONE = 0;
