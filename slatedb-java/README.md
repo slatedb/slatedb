@@ -163,12 +163,15 @@ The settings helpers:
 
 ## Testing
 
-JUnit tests require access to the native library. Set one of these before running tests:
+JUnit tests require access to the native library.
 
-- `SLATEDB_C_LIB=/absolute/path/to/libslatedb_c.dylib`
-- `-Dslatedb.c.lib=/absolute/path/to/libslatedb_c.dylib`
+Build the native library first:
 
-If unset, tests will try to load `libslatedb_c.<os extension>` from `target/debug` or `target/release`.
+```bash
+cargo build -p slatedb-c
+```
+
+The Gradle test task configures `java.library.path` to include `target/release` and `target/debug`.
 
 Then run:
 

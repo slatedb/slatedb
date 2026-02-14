@@ -87,9 +87,16 @@ test {
     jvmArgs '--enable-native-access=ALL-UNNAMED'
 
     // jextract's system-load mode requires java.library.path to be set before JVM startup.
-    def nativeLibPath = System.getenv('SLATEDB_C_LIB') ?: System.getProperty('slatedb.c.lib')
-    if (nativeLibPath != null && !nativeLibPath.isBlank()) {
-        def nativeLibDir = file(nativeLibPath).absoluteFile.parent
-        jvmArgs "-Djava.library.path=${nativeLibDir}"
+    // Set java.library.path to include the output directories of the slatedb C library's
+    // debug and release directories, as well as any existing java.library.path entries.
+    def repoRoot = layout.projectDirectory.dir('..').asFile.absoluteFile
+    def libraryPathEntries = [
+        new File(repoRoot, 'target/release').absolutePath,
+        new File(repoRoot, 'target/debug').absolutePath
+    ]
+    def existingLibraryPath = System.getProperty('java.library.path')
+    if (existingLibraryPath != null && !existingLibraryPath.isBlank()) {
+        libraryPathEntries.add(existingLibraryPath)
     }
+    jvmArgs "-Djava.library.path=${libraryPathEntries.join(File.pathSeparator)}"
 }
