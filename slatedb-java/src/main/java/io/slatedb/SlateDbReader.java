@@ -3,16 +3,14 @@ package io.slatedb;
 import io.slatedb.SlateDbConfig.ReadOptions;
 import io.slatedb.SlateDbConfig.ScanOptions;
 
-import java.lang.foreign.MemorySegment;
-
 /// Read-only SlateDB handle.
 ///
 /// Readers provide a stable, read-only view of the database and should be closed when done.
 public final class SlateDbReader implements SlateDbReadable {
-    private MemorySegment handle;
+    private NativeInterop.ReaderHandle handle;
     private boolean closed;
 
-    SlateDbReader(MemorySegment handle) {
+    SlateDbReader(NativeInterop.ReaderHandle handle) {
         this.handle = handle;
     }
 
@@ -30,7 +28,7 @@ public final class SlateDbReader implements SlateDbReadable {
     /// @param options read options or `null` for defaults.
     /// @return The value for the key, or `null` if the key does not exist.
     public byte[] get(byte[] key, ReadOptions options) {
-        return Native.readerGet(handle, key, options);
+        return NativeInterop.slatedb_db_reader_get_with_options(handle, key, options);
     }
 
     /// Creates a scan iterator over the range `[startKey, endKey)` using default scan options.
@@ -49,7 +47,7 @@ public final class SlateDbReader implements SlateDbReadable {
     /// @param options scan options or `null` for defaults.
     /// @return A [SlateDbScanIterator]. Always close it.
     public SlateDbScanIterator scan(byte[] startKey, byte[] endKey, ScanOptions options) {
-        return new SlateDbScanIterator(Native.readerScan(handle, startKey, endKey, options));
+        return new SlateDbScanIterator(NativeInterop.slatedb_db_reader_scan_with_options(handle, startKey, endKey, options));
     }
 
     /// Creates a scan iterator for the provided key prefix using default scan options.
@@ -66,7 +64,7 @@ public final class SlateDbReader implements SlateDbReadable {
     /// @param options scan options or `null` for defaults.
     /// @return A [SlateDbScanIterator]. Always close it.
     public SlateDbScanIterator scanPrefix(byte[] prefix, ScanOptions options) {
-        return new SlateDbScanIterator(Native.readerScanPrefix(handle, prefix, options));
+        return new SlateDbScanIterator(NativeInterop.slatedb_db_reader_scan_prefix_with_options(handle, prefix, options));
     }
 
     /// Closes the reader handle.
@@ -77,8 +75,8 @@ public final class SlateDbReader implements SlateDbReadable {
         if (closed) {
             return;
         }
-        Native.readerClose(handle);
-        handle = MemorySegment.NULL;
+        NativeInterop.slatedb_db_reader_close(handle);
+        handle = null;
         closed = true;
     }
 

@@ -1,13 +1,11 @@
 package io.slatedb;
 
-import java.lang.foreign.MemorySegment;
-
 /// Iterator over scan results. Always close after use.
 public final class SlateDbScanIterator implements AutoCloseable {
-    private MemorySegment iterPtr;
+    private NativeInterop.IteratorHandle iterPtr;
     private boolean closed;
 
-    SlateDbScanIterator(MemorySegment iterPtr) {
+    SlateDbScanIterator(NativeInterop.IteratorHandle iterPtr) {
         this.iterPtr = iterPtr;
     }
 
@@ -15,14 +13,18 @@ public final class SlateDbScanIterator implements AutoCloseable {
     ///
     /// @return Next [SlateDbKeyValue], or `null` if the scan is complete.
     public SlateDbKeyValue next() {
-        return Native.iteratorNext(iterPtr);
+        NativeInterop.IteratorNextResult next = NativeInterop.slatedb_iterator_next(iterPtr);
+        if (!next.present()) {
+            return null;
+        }
+        return new SlateDbKeyValue(next.key(), next.value());
     }
 
     /// Seeks to the first entry whose key is greater than or equal to the provided key.
     ///
     /// @param key key to seek to.
     public void seek(byte[] key) {
-        Native.iteratorSeek(iterPtr, key);
+        NativeInterop.slatedb_iterator_seek(iterPtr, key);
     }
 
     /// Closes the iterator and releases native resources.
@@ -33,8 +35,8 @@ public final class SlateDbScanIterator implements AutoCloseable {
         if (closed) {
             return;
         }
-        Native.iteratorClose(iterPtr);
-        iterPtr = MemorySegment.NULL;
+        NativeInterop.slatedb_iterator_close(iterPtr);
+        iterPtr = null;
         closed = true;
     }
 }
