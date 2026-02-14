@@ -1079,10 +1079,10 @@ final class NativeInterop {
     private static void checkResult(MemorySegment result) {
         int kindCode = slatedb_result_t.kind(result);
         int closeReasonCode = slatedb_result_t.close_reason(result);
-        SlateDb.ErrorKind kind = SlateDb.ErrorKind.fromCode(kindCode);
-        SlateDb.CloseReason closeReason = SlateDb.CloseReason.fromCode(closeReasonCode);
+        ErrorKind kind = ErrorKind.fromCode(kindCode);
+        CloseReason closeReason = CloseReason.fromCode(closeReasonCode);
 
-        if (kind == SlateDb.ErrorKind.NONE) {
+        if (kind == ErrorKind.NONE) {
             Native.slatedb_result_free(result);
             return;
         }
@@ -1094,7 +1094,7 @@ final class NativeInterop {
             Native.slatedb_result_free(result);
         }
 
-        if (kind == SlateDb.ErrorKind.CLOSED) {
+        if (kind == ErrorKind.CLOSED) {
             String closeReasonLabel = closeReasonLabel(closeReason, closeReasonCode);
             if (message == null || message.isBlank()) {
                 message = "SlateDB is closed (" + closeReasonLabel + ")";
@@ -1103,7 +1103,28 @@ final class NativeInterop {
             }
         }
 
-        throw SlateDb.SlateDbException.fromNative(kindCode, closeReasonCode, message);
+        throw toException(kind, closeReason, closeReasonCode, message);
+    }
+
+    private static SlateDbException toException(
+        ErrorKind kind,
+        CloseReason closeReason,
+        int closeReasonCode,
+        String message
+    ) {
+        return switch (kind) {
+            case TRANSACTION -> new SlateDbException.TransactionException(message);
+            case CLOSED -> new SlateDbException.ClosedException(
+                closeReasonLabel(closeReason, closeReasonCode),
+                closeReasonCode,
+                message
+            );
+            case UNAVAILABLE -> new SlateDbException.UnavailableException(message);
+            case INVALID -> new SlateDbException.InvalidException(message);
+            case DATA -> new SlateDbException.DataException(message);
+            case INTERNAL -> new SlateDbException.InternalException(message);
+            case NONE, UNKNOWN -> new SlateDbException.UnknownException(message);
+        };
     }
 
     private static byte[] copyAndFreeBytes(MemorySegment dataPtr, long len) {
@@ -1296,7 +1317,10 @@ final class NativeInterop {
         return cStringPtr.getString(0);
     }
 
-    private static String closeReasonLabel(SlateDb.CloseReason closeReason, int closeReasonCode) {
+    private static String closeReasonLabel(
+        CloseReason closeReason,
+        int closeReasonCode
+    ) {
         return switch (closeReason) {
             case NONE -> "none";
             case CLEAN -> "clean";
@@ -1342,6 +1366,55 @@ final class NativeInterop {
             alias.toFile().deleteOnExit();
         } catch (java.io.IOException ignored) {
             // Best-effort only. If alias creation fails, direct load may still work.
+        }
+    }
+
+    private enum ErrorKind {
+        NONE(0),
+        TRANSACTION(1),
+        CLOSED(2),
+        UNAVAILABLE(3),
+        INVALID(4),
+        DATA(5),
+        INTERNAL(6),
+        UNKNOWN(255);
+
+        private final int code;
+
+        ErrorKind(int code) {
+            this.code = code;
+        }
+
+        static ErrorKind fromCode(int code) {
+            for (ErrorKind value : values()) {
+                if (value.code == code) {
+                    return value;
+                }
+            }
+            return UNKNOWN;
+        }
+    }
+
+    private enum CloseReason {
+        NONE(0),
+        CLEAN(1),
+        FENCED(2),
+        PANIC(3),
+        UNKNOWN(255);
+
+        private final int code;
+
+        CloseReason(int code) {
+            this.code = code;
+        }
+
+        static CloseReason fromCode(int code) {
+            for (CloseReason value : values()) {
+                if (value.code == code) {
+                    return value;
+                }
+            }
+            return UNKNOWN;
         }
     }
 }

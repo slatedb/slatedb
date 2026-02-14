@@ -118,35 +118,21 @@ class SlateDbTest {
         TestSupport.ensureNativeReady();
         TestSupport.DbContext context = TestSupport.createDbContext();
 
-        SlateDb.SlateDbException failure = Assertions.assertThrows(
-            SlateDb.SlateDbException.class,
+        SlateDbException failure = Assertions.assertThrows(
+            SlateDbException.class,
             () -> SlateDb.builder(context.dbPath().toAbsolutePath().toString(), "bogus://", null)
         );
-        Assertions.assertNotEquals(0, failure.getErrorCode());
-        Assertions.assertNotEquals(SlateDb.ErrorKind.NONE, failure.getErrorKind());
-        Assertions.assertFalse(failure instanceof SlateDb.ClosedException);
+        Assertions.assertFalse(failure instanceof SlateDbException.ClosedException);
         Assertions.assertNotNull(failure.getMessage());
         Assertions.assertFalse(failure.getMessage().isBlank());
     }
 
     @Test
-    void nativeErrorCodesMapToTypedExceptions() {
-        SlateDb.SlateDbException closed = SlateDb.SlateDbException.fromNative(
-            SlateDb.ErrorKind.CLOSED.code(),
-            SlateDb.CloseReason.FENCED.code(),
-            "closed"
-        );
-        SlateDb.ClosedException closedError = assertInstanceOf(SlateDb.ClosedException.class, closed);
-        assertEquals(SlateDb.ErrorKind.CLOSED, closedError.getErrorKind());
-        assertEquals(SlateDb.CloseReason.FENCED, closedError.getCloseReason());
-        assertEquals(SlateDb.CloseReason.FENCED.code(), closedError.getCloseReasonCode());
-
-        SlateDb.SlateDbException unavailable = SlateDb.SlateDbException.fromNative(
-            SlateDb.ErrorKind.UNAVAILABLE.code(),
-            SlateDb.CloseReason.NONE.code(),
-            "unavailable"
-        );
-        assertInstanceOf(SlateDb.UnavailableException.class, unavailable);
+    void closedExceptionCarriesCloseReasonDetails() {
+        SlateDbException closed = new SlateDbException.ClosedException("fenced", 2, "closed");
+        SlateDbException.ClosedException closedError = assertInstanceOf(SlateDbException.ClosedException.class, closed);
+        assertEquals("fenced", closedError.getCloseReason());
+        assertEquals(2, closedError.getCloseReasonCode());
     }
 
     @Test
