@@ -1,12 +1,12 @@
 ---
 title: Change Data Capture
-description: Implement CDC by streaming WAL SSTs with WalReader
+description: Implement CDC by streaming write-ahead log (WAL) SSTs with WalReader
 ---
 
 import { Code } from '@astrojs/starlight/components';
 import cdcExample from '/../examples/src/change_data_capture.rs?raw';
 
-Change data capture (CDC) turns writes in SlateDB into a durable change stream that external systems can consume. SlateDB exposes CDC through the `WalReader`, which reads WAL SST files from object storage and returns the same row entries that were written by the database.
+Change data capture (CDC) turns writes in SlateDB into a durable change stream that external systems can consume. SlateDB exposes CDC through the `WalReader`, which reads write-ahead log (WAL) SST files from object storage and returns the same row entries that were written by the database.
 
 This page explains how to build a CDC pipeline with `WalReader`, including ordering, durability, deletes, and resume semantics.
 
@@ -34,6 +34,12 @@ Each row returned by the iterator is a `RowEntry` with:
 - `create_ts` and `expire_ts`: optional timestamps
 
 Deletes appear as `Tombstone`s. If your database uses merge operators, you will see `Merge` values and must apply the merge logic yourself if your sink requires materialized values.
+
+:::note
+
+The database must have a write-ahead log in order to use WAL-based CDC. The write-ahead log is controlled with `Settings::wal_enabled`. `wal_enabled` defaults to `true`, and is feature-gated behind a `wal_disable` feature in Rust. Databases have a WAL unless you have deliberaly disabled it.
+
+:::
 
 ## Visibility and durability
 
