@@ -186,7 +186,7 @@ final class NativeInterop {
 
     static void slatedb_logging_init(LogLevel level) {
         Objects.requireNonNull(level, "level");
-        slatedb_logging_init(toNativeLogLevel(level));
+        slatedb_logging_init(level.code());
     }
 
     static void slatedb_logging_set_level(byte level) {
@@ -197,7 +197,7 @@ final class NativeInterop {
 
     static void slatedb_logging_set_level(LogLevel level) {
         Objects.requireNonNull(level, "level");
-        slatedb_logging_set_level(toNativeLogLevel(level));
+        slatedb_logging_set_level(level.code());
     }
 
     static void slatedb_logging_set_callback(MemorySegment callback, MemorySegment context, MemorySegment freeContext) {
@@ -377,7 +377,7 @@ final class NativeInterop {
         Objects.requireNonNull(builder, "builder");
         Objects.requireNonNull(sstBlockSize, "sstBlockSize");
         try (Arena arena = Arena.ofConfined()) {
-            checkResult(Native.slatedb_db_builder_with_sst_block_size(arena, builder.segment(), toNativeSstBlockSize(sstBlockSize)));
+            checkResult(Native.slatedb_db_builder_with_sst_block_size(arena, builder.segment(), sstBlockSize.code()));
         }
     }
 
@@ -1162,7 +1162,7 @@ final class NativeInterop {
             return MemorySegment.NULL;
         }
         MemorySegment nativeOptions = slatedb_read_options_t.allocate(arena);
-        slatedb_read_options_t.durability_filter(nativeOptions, toNativeDurability(options.durabilityFilter()));
+        slatedb_read_options_t.durability_filter(nativeOptions, options.durabilityFilter().code());
         slatedb_read_options_t.dirty(nativeOptions, options.dirty());
         slatedb_read_options_t.cache_blocks(nativeOptions, options.cacheBlocks());
         return nativeOptions;
@@ -1173,7 +1173,7 @@ final class NativeInterop {
             return MemorySegment.NULL;
         }
         MemorySegment nativeOptions = slatedb_scan_options_t.allocate(arena);
-        slatedb_scan_options_t.durability_filter(nativeOptions, toNativeDurability(options.durabilityFilter()));
+        slatedb_scan_options_t.durability_filter(nativeOptions, options.durabilityFilter().code());
         slatedb_scan_options_t.dirty(nativeOptions, options.dirty());
         slatedb_scan_options_t.read_ahead_bytes(nativeOptions, options.readAheadBytes());
         slatedb_scan_options_t.cache_blocks(nativeOptions, options.cacheBlocks());
@@ -1195,7 +1195,7 @@ final class NativeInterop {
             return MemorySegment.NULL;
         }
         MemorySegment nativeOptions = slatedb_put_options_t.allocate(arena);
-        slatedb_put_options_t.ttl_type(nativeOptions, toNativeTtl(options.ttlType()));
+        slatedb_put_options_t.ttl_type(nativeOptions, options.ttlType().code());
         slatedb_put_options_t.ttl_value(nativeOptions, options.ttlValueMs());
         return nativeOptions;
     }
@@ -1205,14 +1205,14 @@ final class NativeInterop {
             return MemorySegment.NULL;
         }
         MemorySegment nativeOptions = slatedb_merge_options_t.allocate(arena);
-        slatedb_merge_options_t.ttl_type(nativeOptions, toNativeTtl(options.ttlType()));
+        slatedb_merge_options_t.ttl_type(nativeOptions, options.ttlType().code());
         slatedb_merge_options_t.ttl_value(nativeOptions, options.ttlValueMs());
         return nativeOptions;
     }
 
     private static MemorySegment marshalFlushOptions(Arena arena, FlushType flushType) {
         MemorySegment nativeOptions = slatedb_flush_options_t.allocate(arena);
-        slatedb_flush_options_t.flush_type(nativeOptions, toNativeFlushType(flushType));
+        slatedb_flush_options_t.flush_type(nativeOptions, flushType.code());
         return nativeOptions;
     }
 
@@ -1290,50 +1290,6 @@ final class NativeInterop {
         MemorySegment bytes = marshalBytes(arena, value);
         slatedb_bound_t.data(bound, bytes);
         slatedb_bound_t.len(bound, value.length);
-    }
-
-    private static byte toNativeDurability(Durability durability) {
-        return switch (durability) {
-            case MEMORY -> (byte) Native.SLATEDB_DURABILITY_FILTER_MEMORY();
-            case REMOTE -> (byte) Native.SLATEDB_DURABILITY_FILTER_REMOTE();
-        };
-    }
-
-    private static byte toNativeLogLevel(LogLevel level) {
-        return switch (level) {
-            case TRACE -> (byte) Native.SLATEDB_LOG_LEVEL_TRACE();
-            case DEBUG -> (byte) Native.SLATEDB_LOG_LEVEL_DEBUG();
-            case INFO -> (byte) Native.SLATEDB_LOG_LEVEL_INFO();
-            case WARN -> (byte) Native.SLATEDB_LOG_LEVEL_WARN();
-            case ERROR -> (byte) Native.SLATEDB_LOG_LEVEL_ERROR();
-        };
-    }
-
-    private static byte toNativeFlushType(FlushType flushType) {
-        return switch (flushType) {
-            case MEMTABLE -> (byte) Native.SLATEDB_FLUSH_TYPE_MEMTABLE();
-            case WAL -> (byte) Native.SLATEDB_FLUSH_TYPE_WAL();
-        };
-    }
-
-    private static byte toNativeSstBlockSize(SstBlockSize sstBlockSize) {
-        return switch (sstBlockSize) {
-            case KIB_1 -> (byte) Native.SLATEDB_SST_BLOCK_SIZE_1KIB();
-            case KIB_2 -> (byte) Native.SLATEDB_SST_BLOCK_SIZE_2KIB();
-            case KIB_4 -> (byte) Native.SLATEDB_SST_BLOCK_SIZE_4KIB();
-            case KIB_8 -> (byte) Native.SLATEDB_SST_BLOCK_SIZE_8KIB();
-            case KIB_16 -> (byte) Native.SLATEDB_SST_BLOCK_SIZE_16KIB();
-            case KIB_32 -> (byte) Native.SLATEDB_SST_BLOCK_SIZE_32KIB();
-            case KIB_64 -> (byte) Native.SLATEDB_SST_BLOCK_SIZE_64KIB();
-        };
-    }
-
-    private static byte toNativeTtl(TtlType ttlType) {
-        return switch (ttlType) {
-            case DEFAULT -> (byte) Native.SLATEDB_TTL_TYPE_DEFAULT();
-            case NO_EXPIRY -> (byte) Native.SLATEDB_TTL_TYPE_NO_EXPIRY();
-            case EXPIRE_AFTER -> (byte) Native.SLATEDB_TTL_TYPE_EXPIRE_AFTER();
-        };
     }
 
     private static String readOptionalCString(MemorySegment cStringPtr) {
