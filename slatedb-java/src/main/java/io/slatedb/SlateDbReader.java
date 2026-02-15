@@ -2,6 +2,7 @@ package io.slatedb;
 
 import io.slatedb.SlateDbConfig.ReadOptions;
 import io.slatedb.SlateDbConfig.ScanOptions;
+import org.jspecify.annotations.Nullable;
 
 /// Read-only SlateDB handle.
 ///
@@ -27,7 +28,7 @@ public final class SlateDbReader implements SlateDbReadable {
     /// @param key key to read.
     /// @param options read options or `null` for defaults.
     /// @return The value for the key, or `null` if the key does not exist.
-    public byte[] get(byte[] key, ReadOptions options) {
+    public byte[] get(byte[] key, @Nullable ReadOptions options) {
         return NativeInterop.slatedb_db_reader_get_with_options(handle, key, options);
     }
 
@@ -46,7 +47,7 @@ public final class SlateDbReader implements SlateDbReadable {
     /// @param endKey exclusive upper bound, or `null`.
     /// @param options scan options or `null` for defaults.
     /// @return A [SlateDbScanIterator]. Always close it.
-    public SlateDbScanIterator scan(byte[] startKey, byte[] endKey, ScanOptions options) {
+    public SlateDbScanIterator scan(byte[] startKey, byte[] endKey, @Nullable ScanOptions options) {
         return new SlateDbScanIterator(NativeInterop.slatedb_db_reader_scan_with_options(handle, startKey, endKey, options));
     }
 
@@ -63,7 +64,7 @@ public final class SlateDbReader implements SlateDbReadable {
     /// @param prefix key prefix to scan.
     /// @param options scan options or `null` for defaults.
     /// @return A [SlateDbScanIterator]. Always close it.
-    public SlateDbScanIterator scanPrefix(byte[] prefix, ScanOptions options) {
+    public SlateDbScanIterator scanPrefix(byte[] prefix, @Nullable ScanOptions options) {
         return new SlateDbScanIterator(NativeInterop.slatedb_db_reader_scan_prefix_with_options(handle, prefix, options));
     }
 
