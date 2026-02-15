@@ -197,7 +197,7 @@ impl DbInner {
             self.maybe_freeze_memtable(&mut guard, last_flushed_wal_id)?;
         }
 
-        let write_handle = WriteHandle::new(commit_seq, Some(now));
+        let write_handle = WriteHandle::new(commit_seq, now);
 
         Ok((write_handle, durable_watcher))
     }

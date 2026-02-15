@@ -33,6 +33,9 @@ pub(crate) enum SlateDBError {
     #[error("empty RowEntry key")]
     EmptyKey,
 
+    #[error("empty write batch not allowed")]
+    EmptyBatch,
+
     #[error("empty manifest")]
     EmptyManifest,
 
@@ -501,6 +504,7 @@ impl From<SlateDBError> for Error {
             SlateDBError::InvalidSequenceOrder { .. } => Error::data(msg),
             SlateDBError::UndefinedEnvironmentVariable { .. } => Error::invalid(msg),
             SlateDBError::InvalidEnvironmentVariable { .. } => Error::invalid(msg),
+            SlateDBError::EmptyBatch => Error::invalid(msg),
 
             // Data errors
             SlateDBError::InvalidFlatbuffer(err) => Error::data(msg).with_source(Box::new(err)),

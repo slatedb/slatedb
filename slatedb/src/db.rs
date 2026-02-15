@@ -262,12 +262,7 @@ impl DbInner {
         self.db_stats.write_ops.add(batch.ops.len() as u64);
         self.status()?;
         if batch.ops.is_empty() {
-            // Return a dummy WriteHandle for empty batch.
-            // Sequence number is not incremented.
-            return Ok(WriteHandle {
-                seq: self.oracle.last_committed_seq(),
-                create_ts: None,
-            });
+            return Err(SlateDBError::EmptyBatch);
         }
 
         let (tx, rx) = tokio::sync::oneshot::channel();
@@ -1618,11 +1613,11 @@ impl DbRead for Db {
 #[derive(Debug, Clone)]
 pub struct WriteHandle {
     pub(crate) seq: u64,
-    pub(crate) create_ts: Option<i64>,
+    pub(crate) create_ts: i64,
 }
 
 impl WriteHandle {
-    pub(crate) fn new(seq: u64, create_ts: Option<i64>) -> Self {
+    pub(crate) fn new(seq: u64, create_ts: i64) -> Self {
         Self { seq, create_ts }
     }
 
@@ -1632,7 +1627,7 @@ impl WriteHandle {
     }
 
     /// Returns the creation timestamp assigned to this write operation.
-    pub fn create_ts(&self) -> Option<i64> {
+    pub fn create_ts(&self) -> i64 {
         self.create_ts
     }
 }
@@ -6334,7 +6329,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(handle.seqnum(), 1);
-        assert_eq!(handle.create_ts(), Some(100));
+        assert_eq!(handle.create_ts(), 100);
 
         // Put with options (TTL)
         clock.set(200);
@@ -6353,7 +6348,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(handle.seqnum(), 2);
-        assert_eq!(handle.create_ts(), Some(200));
+        assert_eq!(handle.create_ts(), 200);
 
         // Delete
         clock.set(300);
@@ -6367,7 +6362,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(handle.seqnum(), 3);
-        assert_eq!(handle.create_ts(), Some(300));
+        assert_eq!(handle.create_ts(), 300);
 
         // Write Batch
         clock.set(400);
@@ -6384,7 +6379,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(handle.seqnum(), 4);
-        assert_eq!(handle.create_ts(), Some(400));
+        assert_eq!(handle.create_ts(), 400);
     }
 
     #[tokio::test]
@@ -6414,7 +6409,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(handle.seqnum(), 1);
-        assert_eq!(handle.create_ts(), Some(100));
+        assert_eq!(handle.create_ts(), 100);
 
         // Write Batch 2
         clock.set(200);
@@ -6431,7 +6426,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(handle.seqnum(), 2);
-        assert_eq!(handle.create_ts(), Some(200));
+        assert_eq!(handle.create_ts(), 200);
 
         // Write Batch 3
         clock.set(300);
@@ -6447,6 +6442,6 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(handle.seqnum(), 3);
-        assert_eq!(handle.create_ts(), Some(300));
+        assert_eq!(handle.create_ts(), 300);
     }
 }

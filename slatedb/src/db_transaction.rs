@@ -11,7 +11,6 @@ use crate::config::{MergeOptions, PutOptions, ReadOptions, ScanOptions, WriteOpt
 use crate::db::DbInner;
 use crate::db::WriteHandle;
 use crate::db_iter::{DbIterator, DbIteratorRangeTracker};
-use crate::oracle::Oracle;
 use crate::transaction_manager::{IsolationLevel, TransactionManager};
 use crate::DbRead;
 
@@ -443,11 +442,15 @@ impl DbTransaction {
     /// immediately without any database interaction. Since it's impossible to have read-write
     /// conflict, neither write-write conflict for an empty write batch.
     ///
+    /// ## Returns
+    /// - `Ok(Some(WriteHandle))` if the commit is successful and there are writes in the batch.
+    /// - `Ok(None)` if the commit is successful but the write batch is empty (no-op).
+    ///
     /// ## Errors
     /// - Returns `Error` if the commit operation fails, which could be due to:
     ///   - Database I/O errors
     ///   - Concurrency conflicts detected during WriteBatch processing
-    pub async fn commit(self) -> Result<WriteHandle, crate::Error> {
+    pub async fn commit(self) -> Result<Option<WriteHandle>, crate::Error> {
         self.commit_with_options(&WriteOptions::default()).await
     }
 
@@ -459,6 +462,10 @@ impl DbTransaction {
     /// ## Arguments
     /// - `options`: the write options to use for the commit
     ///
+    /// ## Returns
+    /// - `Ok(Some(WriteHandle))` if the commit is successful and there are writes in the batch.
+    /// - `Ok(None)` if the commit is successful but the write batch is empty (no-op).
+    ///
     /// ## Errors
     /// - Returns `Error` if the commit operation fails, which could be due to:
     ///   - Database I/O errors
@@ -466,14 +473,11 @@ impl DbTransaction {
     pub async fn commit_with_options(
         self,
         options: &WriteOptions,
-    ) -> Result<WriteHandle, crate::Error> {
+    ) -> Result<Option<WriteHandle>, crate::Error> {
         // If the WriteBatch is empty, it's a no-op. it's impossible to have read-write
         // conflict, neither write-write conflict.
         if self.write_batch.read().is_empty() {
-            return Ok(WriteHandle {
-                seq: self.db_inner.oracle.last_committed_seq(),
-                create_ts: None,
-            });
+            return Ok(None);
         }
 
         // Extract actual scanned ranges from trackers for SSI conflict detection
@@ -509,6 +513,7 @@ impl DbTransaction {
         self.db_inner
             .write_with_options(write_batch, options)
             .await
+            .map(Some)
             .map_err(Into::into)
     }
 
@@ -1622,9 +1627,10 @@ mod tests {
                 await_durable: false,
             })
             .await
+            .unwrap()
             .unwrap();
         assert_eq!(handle.seqnum(), 1);
-        assert_eq!(handle.create_ts(), Some(100));
+        assert_eq!(handle.create_ts(), 100);
 
         // Put with options (TTL)
         clock.set(200);
@@ -1638,9 +1644,10 @@ mod tests {
                 await_durable: false,
             })
             .await
+            .unwrap()
             .unwrap();
         assert_eq!(handle.seqnum(), 2);
-        assert_eq!(handle.create_ts(), Some(200));
+        assert_eq!(handle.create_ts(), 200);
 
         // Delete
         clock.set(300);
@@ -1651,8 +1658,9 @@ mod tests {
                 await_durable: false,
             })
             .await
+            .unwrap()
             .unwrap();
         assert_eq!(handle.seqnum(), 3);
-        assert_eq!(handle.create_ts(), Some(300));
+        assert_eq!(handle.create_ts(), 300);
     }
 }
