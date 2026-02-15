@@ -77,30 +77,6 @@ pub use builder::DbBuilder;
 
 pub(crate) mod builder;
 
-/// Handle returned from write operations, containing metadata about the write.
-/// This structure is designed to be extensible for future enhancements.
-#[derive(Debug, Clone)]
-pub struct WriteHandle {
-    pub(crate) seq: u64,
-    pub(crate) create_ts: Option<i64>,
-}
-
-impl WriteHandle {
-    pub(crate) fn new(seq: u64, create_ts: Option<i64>) -> Self {
-        Self { seq, create_ts }
-    }
-
-    /// Returns the sequence number assigned to this write operation.
-    pub fn seqnum(&self) -> u64 {
-        self.seq
-    }
-
-    /// Returns the creation timestamp assigned to this write operation.
-    pub fn create_ts(&self) -> Option<i64> {
-        self.create_ts
-    }
-}
-
 pub(crate) struct DbInner {
     pub(crate) state: Arc<RwLock<DbState>>,
     pub(crate) settings: Settings,
@@ -1636,6 +1612,30 @@ impl DbRead for Db {
         T: RangeBounds<K> + Send,
     {
         self.scan_with_options(range, options).await
+    }
+}
+
+/// Handle returned from write operations, containing metadata about the write.
+/// This structure is designed to be extensible for future enhancements.
+#[derive(Debug, Clone)]
+pub struct WriteHandle {
+    pub(crate) seq: u64,
+    pub(crate) create_ts: Option<i64>,
+}
+
+impl WriteHandle {
+    pub(crate) fn new(seq: u64, create_ts: Option<i64>) -> Self {
+        Self { seq, create_ts }
+    }
+
+    /// Returns the sequence number assigned to this write operation.
+    pub fn seqnum(&self) -> u64 {
+        self.seq
+    }
+
+    /// Returns the creation timestamp assigned to this write operation.
+    pub fn create_ts(&self) -> Option<i64> {
+        self.create_ts
     }
 }
 
