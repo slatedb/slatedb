@@ -279,6 +279,11 @@ pub(crate) struct InternalSstIterator<'a> {
     /// This is `None` until `ensure_metadata_loaded` is called, since the version
     /// is read from the SST footer which is lazily loaded.
     sst_version: Option<u16>,
+    /// Buffer for descending iteration to maintain correct sequence order within keys.
+    descending_buffer: Option<VecDeque<RowEntry>>,
+    /// Pending entry that was read ahead but belongs to the next key group.
+    /// Only used in descending mode.
+    pending_entry: Option<RowEntry>,
 }
 
 impl<'a> InternalSstIterator<'a> {
@@ -290,6 +295,11 @@ impl<'a> InternalSstIterator<'a> {
         assert!(options.max_fetch_tasks > 0);
         assert!(options.blocks_to_fetch > 0);
 
+        let descending_buffer = match options.order {
+            IterationOrder::Descending => Some(VecDeque::new()),
+            IterationOrder::Ascending => None,
+        };
+
         Ok(Self {
             view,
             index: None,
@@ -300,6 +310,8 @@ impl<'a> InternalSstIterator<'a> {
             table_store,
             options,
             sst_version: None,
+            descending_buffer,
+            pending_entry: None,
         })
     }
 
@@ -632,6 +644,60 @@ impl<'a> InternalSstIterator<'a> {
         }
         Ok(())
     }
+
+    async fn fill_descending_buffer(&mut self) -> Result<(), SlateDBError> {
+        let mut temp_buffer = Vec::new();
+        let mut target_key: Option<Bytes> = None;
+
+        if let Some(pending) = self.pending_entry.take() {
+            target_key = Some(pending.key.clone());
+            temp_buffer.push(pending);
+        }
+
+        loop {
+            let next_entry = if let Some(iter) = self.state.current_iter.as_mut() {
+                iter.next_entry().await?
+            } else {
+                None
+            };
+
+            match next_entry {
+                Some(kv) => {
+                    if !self.view.contains(&kv.key) {
+                        if self.view.key_precedes(&kv.key) {
+                            self.stop();
+                            break;
+                        }
+                        continue;
+                    }
+
+                    if target_key.is_none() {
+                        target_key = Some(kv.key.clone());
+                        temp_buffer.push(kv);
+                    } else if Some(&kv.key) == target_key.as_ref() {
+                        temp_buffer.push(kv);
+                    } else {
+                        self.pending_entry = Some(kv);
+                        break;
+                    }
+                }
+                None => {
+                    self.advance_block().await?;
+                    if self.state.is_finished() {
+                        break;
+                    }
+                }
+            }
+        }
+
+        temp_buffer.reverse();
+        self.descending_buffer
+            .as_mut()
+            .expect("descending_buffer must exist in descending mode")
+            .extend(temp_buffer);
+
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -647,6 +713,26 @@ impl KeyValueIterator for InternalSstIterator<'_> {
         if !self.state.is_initialized() {
             return Err(SlateDBError::IteratorNotInitialized);
         }
+
+        match self.options.order {
+            IterationOrder::Descending => {
+                if let Some(buffer) = &mut self.descending_buffer {
+                    if let Some(entry) = buffer.pop_front() {
+                        return Ok(Some(entry));
+                    }
+                }
+
+                self.fill_descending_buffer().await?;
+
+                return Ok(self
+                    .descending_buffer
+                    .as_mut()
+                    .expect("descending_buffer must exist in descending mode")
+                    .pop_front());
+            }
+            IterationOrder::Ascending => {}
+        }
+
         while !self.state.is_finished() {
             let next_entry = if let Some(iter) = self.state.current_iter.as_mut() {
                 iter.next_entry().await?
@@ -659,13 +745,7 @@ impl KeyValueIterator for InternalSstIterator<'_> {
                     if self.view.contains(&kv.key) {
                         return Ok(Some(kv));
                     } else {
-                        // For ascending order, stop if key exceeds the range
-                        // For descending order, stop if key precedes the range
-                        let should_stop = match self.options.order {
-                            IterationOrder::Ascending => self.view.key_exceeds(&kv.key),
-                            IterationOrder::Descending => self.view.key_precedes(&kv.key),
-                        };
-                        if should_stop {
+                        if self.view.key_exceeds(&kv.key) {
                             self.stop()
                         }
                     }
@@ -1557,10 +1637,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_descending_seek_beyond_last_key() {
-        // Test both V1 (production format) and V2 handle descending seek correctly.
-        // V1 would fail before the bug fix in BlockIterator::seek().
         test_descending_seek_beyond_last_key_with_format(BlockFormat::V1).await;
         test_descending_seek_beyond_last_key_with_format(BlockFormat::V2).await;
+        test_descending_seek_beyond_last_key_with_format(BlockFormat::Latest).await;
     }
 
     async fn test_descending_seek_beyond_last_key_with_format(block_format: BlockFormat) {
@@ -1583,6 +1662,7 @@ mod tests {
         let mut builder = match block_format {
             BlockFormat::V1 => builder,
             BlockFormat::V2 => builder.with_block_format(BlockFormat::V2),
+            BlockFormat::Latest => builder.with_block_format(BlockFormat::Latest),
         };
 
         for i in 0..100 {
@@ -2381,5 +2461,83 @@ mod tests {
         }
 
         assert!(iter.next().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_duplicate_keys_iteration() {
+        test_duplicate_keys_iteration_with_order(IterationOrder::Ascending).await;
+        test_duplicate_keys_iteration_with_order(IterationOrder::Descending).await;
+    }
+
+    async fn test_duplicate_keys_iteration_with_order(order: IterationOrder) {
+        let root_path = Path::from("");
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let format = SsTableFormat::default();
+        let table_store = Arc::new(TableStore::new(
+            ObjectStores::new(object_store, None),
+            format,
+            root_path.clone(),
+            None,
+        ));
+
+        let mut writer = table_store.table_writer(SsTableId::Wal(0));
+        writer.add(RowEntry::new_value(b"key_a", b"value_100", 100)).await.unwrap();
+        writer.add(RowEntry::new_value(b"key_a", b"value_95", 95)).await.unwrap();
+        writer.add(RowEntry::new_value(b"key_a", b"value_90", 90)).await.unwrap();
+        writer.add(RowEntry::new_value(b"key_b", b"value_80", 80)).await.unwrap();
+        writer.add(RowEntry::new_value(b"key_b", b"value_70", 70)).await.unwrap();
+        writer.add(RowEntry::new_value(b"key_c", b"value_50", 50)).await.unwrap();
+        let handle = writer.close().await.unwrap();
+
+        let mut iter = SstIterator::new_owned_initialized(
+            ..,
+            handle,
+            table_store.clone(),
+            SstIteratorOptions {
+                order,
+                ..SstIteratorOptions::default()
+            },
+        )
+        .await
+        .unwrap()
+        .expect("Expected Some(iter) but got None");
+
+        let expected = match order {
+            IterationOrder::Ascending => vec![
+                (b"key_a".as_slice(), b"value_100".as_slice(), 100),
+                (b"key_a".as_slice(), b"value_95".as_slice(), 95),
+                (b"key_a".as_slice(), b"value_90".as_slice(), 90),
+                (b"key_b".as_slice(), b"value_80".as_slice(), 80),
+                (b"key_b".as_slice(), b"value_70".as_slice(), 70),
+                (b"key_c".as_slice(), b"value_50".as_slice(), 50),
+            ],
+            IterationOrder::Descending => vec![
+                (b"key_c".as_slice(), b"value_50".as_slice(), 50),
+                (b"key_b".as_slice(), b"value_80".as_slice(), 80),
+                (b"key_b".as_slice(), b"value_70".as_slice(), 70),
+                (b"key_a".as_slice(), b"value_100".as_slice(), 100),
+                (b"key_a".as_slice(), b"value_95".as_slice(), 95),
+                (b"key_a".as_slice(), b"value_90".as_slice(), 90),
+            ],
+        };
+
+        for (expected_key, expected_value, expected_seq) in expected {
+            let entry = iter
+                .next_entry()
+                .await
+                .expect("iteration should succeed")
+                .expect("expected entry");
+            assert_eq!(entry.key.as_ref(), expected_key, "key mismatch");
+            assert_eq!(entry.seq, expected_seq, "sequence number mismatch");
+            match entry.value {
+                ValueDeletable::Value(value) => {
+                    assert_eq!(value.as_ref(), expected_value, "value mismatch")
+                }
+                other => panic!("expected value, found {other:?}"),
+            }
+        }
+
+        let entry = iter.next_entry().await.expect("iteration should succeed");
+        assert!(entry.is_none(), "expected end of iteration");
     }
 }
