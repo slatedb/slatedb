@@ -208,6 +208,16 @@ typedef struct slatedb_write_options_t {
     bool await_durable;
 } slatedb_write_options_t;
 
+// Handle returned from write operations, containing metadata.
+typedef struct slatedb_write_handle_t {
+    // Sequence number assigned to this write.
+    uint64_t seq;
+    // Creation timestamp (if present).
+    int64_t create_ts;
+    // Whether `create_ts` is present.
+    bool create_ts_present;
+} slatedb_write_handle_t;
+
 // Merge options passed to merge operations.
 typedef struct slatedb_merge_options_t {
     // TTL type. Use `SLATEDB_TTL_TYPE_*` constants.
@@ -634,7 +644,8 @@ struct slatedb_result_t slatedb_db_put_with_options(struct slatedb_db_t *db,
                                                     const uint8_t *value,
                                                     uintptr_t value_len,
                                                     const struct slatedb_put_options_t *put_options,
-                                                    const struct slatedb_write_options_t *write_options);
+                                                    const struct slatedb_write_options_t *write_options,
+                                                    struct slatedb_write_handle_t *out_handle);
 
 // Deletes a key using default write options.
 //
@@ -676,7 +687,8 @@ struct slatedb_result_t slatedb_db_delete(struct slatedb_db_t *db,
 struct slatedb_result_t slatedb_db_delete_with_options(struct slatedb_db_t *db,
                                                        const uint8_t *key,
                                                        uintptr_t key_len,
-                                                       const struct slatedb_write_options_t *write_options);
+                                                       const struct slatedb_write_options_t *write_options,
+                                                       struct slatedb_write_handle_t *out_handle);
 
 // Merges a value into a key using default merge/write options.
 //
@@ -728,7 +740,8 @@ struct slatedb_result_t slatedb_db_merge_with_options(struct slatedb_db_t *db,
                                                       const uint8_t *value,
                                                       uintptr_t value_len,
                                                       const struct slatedb_merge_options_t *merge_options,
-                                                      const struct slatedb_write_options_t *write_options);
+                                                      const struct slatedb_write_options_t *write_options,
+                                                      struct slatedb_write_handle_t *out_handle);
 
 // Applies a write batch with default write options.
 //
@@ -736,6 +749,7 @@ struct slatedb_result_t slatedb_db_merge_with_options(struct slatedb_db_t *db,
 // - `db`: Database handle.
 // - `write_batch`: Mutable write batch handle, consumed by this call regardless
 //   of write outcome.
+// - `out_handle`: Optional output pointer for write metadata (can be null).
 //
 // ## Returns
 // - `slatedb_result_t` indicating success/failure.
@@ -748,7 +762,8 @@ struct slatedb_result_t slatedb_db_merge_with_options(struct slatedb_db_t *db,
 // ## Safety
 // - `db` and `write_batch` must be valid non-null handles.
 struct slatedb_result_t slatedb_db_write(struct slatedb_db_t *db,
-                                         struct slatedb_write_batch_t *write_batch);
+                                         struct slatedb_write_batch_t *write_batch,
+                                         struct slatedb_write_handle_t *out_handle);
 
 // Applies a write batch with explicit write options.
 //
@@ -757,6 +772,7 @@ struct slatedb_result_t slatedb_db_write(struct slatedb_db_t *db,
 // - `write_batch`: Mutable write batch handle, consumed by this call regardless
 //   of write outcome.
 // - `write_options`: Optional write options pointer (null uses defaults).
+// - `out_handle`: Optional output pointer for write metadata (can be null).
 //
 // ## Returns
 // - `slatedb_result_t` indicating success/failure.
@@ -772,7 +788,8 @@ struct slatedb_result_t slatedb_db_write(struct slatedb_db_t *db,
 //   `slatedb_write_options_t`.
 struct slatedb_result_t slatedb_db_write_with_options(struct slatedb_db_t *db,
                                                       struct slatedb_write_batch_t *write_batch,
-                                                      const struct slatedb_write_options_t *write_options);
+                                                      const struct slatedb_write_options_t *write_options,
+                                                      struct slatedb_write_handle_t *out_handle);
 
 // Scans a key range using default scan options.
 //

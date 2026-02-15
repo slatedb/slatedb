@@ -228,8 +228,8 @@ public final class SlateDb implements SlateDbReadable {
     /// ```java
     /// db.put("key".getBytes(StandardCharsets.UTF_8), "value".getBytes(StandardCharsets.UTF_8));
     /// ```
-    public void put(byte[] key, byte[] value) {
-        NativeInterop.slatedb_db_put(handle, key, value);
+    public SlateDbWriteHandle put(byte[] key, byte[] value) {
+        return NativeInterop.slatedb_db_put(handle, key, value);
     }
 
     /// Writes a value into the database with custom put and write options.
@@ -239,8 +239,8 @@ public final class SlateDb implements SlateDbReadable {
     /// @param putOptions put options or `null` for defaults.
     /// @param writeOptions write options or `null` for defaults.
     /// @throws SlateDbException if the write fails.
-    public void put(byte[] key, byte[] value, PutOptions putOptions, WriteOptions writeOptions) {
-        NativeInterop.slatedb_db_put_with_options(handle, key, value, putOptions, writeOptions);
+    public SlateDbWriteHandle put(byte[] key, byte[] value, PutOptions putOptions, WriteOptions writeOptions) {
+        return NativeInterop.slatedb_db_put_with_options(handle, key, value, putOptions, writeOptions);
     }
 
     /// Reads a value from the database using default read options.
@@ -270,8 +270,8 @@ public final class SlateDb implements SlateDbReadable {
     ///
     /// @param key key to delete.
     /// @throws SlateDbException if the delete fails.
-    public void delete(byte[] key) {
-        delete(key, WriteOptions.DEFAULT);
+    public SlateDbWriteHandle delete(byte[] key) {
+        return delete(key, WriteOptions.DEFAULT);
     }
 
     /// Deletes a key using custom write options.
@@ -279,8 +279,8 @@ public final class SlateDb implements SlateDbReadable {
     /// @param key key to delete.
     /// @param options write options or `null` for defaults.
     /// @throws SlateDbException if the delete fails.
-    public void delete(byte[] key, WriteOptions options) {
-        NativeInterop.slatedb_db_delete_with_options(handle, key, options);
+    public SlateDbWriteHandle delete(byte[] key, WriteOptions options) {
+        return NativeInterop.slatedb_db_delete_with_options(handle, key, options);
     }
 
     /// Writes a batch atomically using default write options.
@@ -289,8 +289,8 @@ public final class SlateDb implements SlateDbReadable {
     ///
     /// @param batch batch to write (must be open and unconsumed).
     /// @throws SlateDbException if the write fails.
-    public void write(SlateDbWriteBatch batch) {
-        write(batch, WriteOptions.DEFAULT);
+    public SlateDbWriteHandle write(SlateDbWriteBatch batch) {
+        return write(batch, WriteOptions.DEFAULT);
     }
 
     /// Writes a batch atomically using custom write options.
@@ -308,10 +308,10 @@ public final class SlateDb implements SlateDbReadable {
     ///     db.write(batch);
     /// }
     /// ```
-    public void write(SlateDbWriteBatch batch, WriteOptions options) {
+    public SlateDbWriteHandle write(SlateDbWriteBatch batch, WriteOptions options) {
         Objects.requireNonNull(batch, "batch");
         try {
-            NativeInterop.slatedb_db_write_with_options(handle, batch.handle(), options == null ? WriteOptions.DEFAULT : options);
+            return NativeInterop.slatedb_db_write_with_options(handle, batch.handle(), options == null ? WriteOptions.DEFAULT : options);
         } finally {
             batch.markConsumed();
         }
