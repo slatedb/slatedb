@@ -108,6 +108,7 @@ impl<B: BlockLike> KeyValueIterator for BlockIterator<B> {
             Descending => {
                 // Binary search to find the last key <= next_key
                 // Strategy: find first physical index where key > next_key, then go back one
+                // Search entire block (bidirectional seeking)
                 let mut low = 0;
                 let mut high = num_entries;
 
@@ -676,6 +677,49 @@ mod tests {
         test_utils::assert_kv(&kv, b"banana", b"2");
         let kv = iter.next().await.unwrap().unwrap();
         test_utils::assert_kv(&kv, b"apple", b"1");
+        assert!(iter.next().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn should_seek_descending_bidirectionally() {
+        // given: a block with multiple entries
+        let mut block_builder = BlockBuilder::new_v1(1024);
+        assert!(block_builder.add_value(b"a", b"v1", gen_attrs(1)));
+        assert!(block_builder.add_value(b"b", b"v2", gen_attrs(2)));
+        assert!(block_builder.add_value(b"c", b"v3", gen_attrs(3)));
+        assert!(block_builder.add_value(b"d", b"v4", gen_attrs(4)));
+        assert!(block_builder.add_value(b"e", b"v5", gen_attrs(5)));
+        let block = block_builder.build().unwrap();
+
+        // when: iterating in descending
+        let mut iter = BlockIterator::new(block, Descending);
+
+        // First, advance past some entries
+        let kv = iter.next().await.unwrap().unwrap();
+        test_utils::assert_kv(&kv, b"e", b"v5");
+
+        let kv = iter.next().await.unwrap().unwrap();
+        test_utils::assert_kv(&kv, b"d", b"v4");
+
+        // Seek forward to "b"
+        iter.seek(b"b").await.unwrap();
+        let kv = iter.next().await.unwrap().unwrap();
+        test_utils::assert_kv(&kv, b"b", b"v2");
+
+        // Seek backward to "d" (bidirectional)
+        iter.seek(b"d").await.unwrap();
+        let kv = iter.next().await.unwrap().unwrap();
+        test_utils::assert_kv(&kv, b"d", b"v4");
+
+        let kv = iter.next().await.unwrap().unwrap();
+        test_utils::assert_kv(&kv, b"c", b"v3");
+
+        let kv = iter.next().await.unwrap().unwrap();
+        test_utils::assert_kv(&kv, b"b", b"v2");
+
+        let kv = iter.next().await.unwrap().unwrap();
+        test_utils::assert_kv(&kv, b"a", b"v1");
+
         assert!(iter.next().await.unwrap().is_none());
     }
 }
