@@ -38,7 +38,7 @@ var _ = Describe("Iterator", func() {
 		}
 
 		for _, item := range testData {
-			err := db.Put(item.Key, item.Value)
+			_, err := db.Put(item.Key, item.Value)
 			Expect(err).NotTo(HaveOccurred())
 		}
 

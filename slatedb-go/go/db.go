@@ -32,6 +32,14 @@ type ScanResult struct {
 	NextStartKey []byte
 }
 
+// WriteHandle contains metadata returned from a write operation.
+type WriteHandle struct {
+	// Seq is the sequence number assigned to this write.
+	Seq uint64
+	// CreateTs is the creation timestamp in milliseconds, if present.
+	CreateTs *int64
+}
+
 func resolveObjectStoreHandle(url *string, envFile *string) (*C.slatedb_object_store_t, error) {
 	resolvedURL, hasURL, err := resolveObjectStoreURL(url, envFile)
 	if err != nil {
@@ -185,7 +193,7 @@ func Open(path string, opts ...Option[DbConfig]) (*DB, error) {
 // Put stores a key-value pair in the database using default put/write options.
 //
 // The write is durable based on SlateDB defaults.
-func (db *DB) Put(key, value []byte) error {
+func (db *DB) Put(key, value []byte) (*WriteHandle, error) {
 	return db.PutWithOptions(key, value, nil, nil)
 }
 
@@ -199,7 +207,7 @@ func (db *DB) Get(key []byte) ([]byte, error) {
 // Delete removes a key using default write options.
 //
 // Returns successfully even if the key does not exist.
-func (db *DB) Delete(key []byte) error {
+func (db *DB) Delete(key []byte) (*WriteHandle, error) {
 	return db.DeleteWithOptions(key, nil)
 }
 
@@ -216,12 +224,12 @@ func (db *DB) Delete(key []byte) error {
 //	}
 //	writeOpts := &slatedb.WriteOptions{AwaitDurable: true}
 //	err := db.PutWithOptions([]byte("session:123"), []byte("data"), putOpts, writeOpts)
-func (db *DB) PutWithOptions(key, value []byte, putOpts *PutOptions, writeOpts *WriteOptions) error {
+func (db *DB) PutWithOptions(key, value []byte, putOpts *PutOptions, writeOpts *WriteOptions) (*WriteHandle, error) {
 	if db == nil || db.handle == nil {
-		return ErrInvalid
+		return nil, ErrInvalid
 	}
 	if len(key) == 0 {
-		return ErrInvalid
+		return nil, ErrInvalid
 	}
 
 	keyPtr, keyLen := ptrFromBytes(key)
@@ -229,6 +237,7 @@ func (db *DB) PutWithOptions(key, value []byte, putOpts *PutOptions, writeOpts *
 	cPutOpts := convertToCPutOptions(putOpts)
 	cWriteOpts := convertToCWriteOptions(writeOpts)
 
+	var cHandle C.struct_slatedb_write_handle_t
 	result := C.slatedb_db_put_with_options(
 		db.handle,
 		keyPtr,
@@ -237,8 +246,18 @@ func (db *DB) PutWithOptions(key, value []byte, putOpts *PutOptions, writeOpts *
 		valueLen,
 		cPutOpts,
 		cWriteOpts,
+		&cHandle,
 	)
-	return resultToErrorAndFree(result)
+	if err := resultToErrorAndFree(result); err != nil {
+		return nil, err
+	}
+
+	wh := &WriteHandle{Seq: uint64(cHandle.seq)}
+	if bool(cHandle.create_ts_present) {
+		ts := int64(cHandle.create_ts)
+		wh.CreateTs = &ts
+	}
+	return wh, nil
 }
 
 // DeleteWithOptions removes a key with explicit write options.
@@ -249,24 +268,35 @@ func (db *DB) PutWithOptions(key, value []byte, putOpts *PutOptions, writeOpts *
 //
 //	writeOpts := &slatedb.WriteOptions{AwaitDurable: false}
 //	err := db.DeleteWithOptions([]byte("temp:123"), writeOpts)
-func (db *DB) DeleteWithOptions(key []byte, writeOpts *WriteOptions) error {
+func (db *DB) DeleteWithOptions(key []byte, writeOpts *WriteOptions) (*WriteHandle, error) {
 	if db == nil || db.handle == nil {
-		return ErrInvalid
+		return nil, ErrInvalid
 	}
 	if len(key) == 0 {
-		return ErrInvalid
+		return nil, ErrInvalid
 	}
 
 	keyPtr, keyLen := ptrFromBytes(key)
 	cWriteOpts := convertToCWriteOptions(writeOpts)
 
+	var cHandle C.struct_slatedb_write_handle_t
 	result := C.slatedb_db_delete_with_options(
 		db.handle,
 		keyPtr,
 		keyLen,
 		cWriteOpts,
+		&cHandle,
 	)
-	return resultToErrorAndFree(result)
+	if err := resultToErrorAndFree(result); err != nil {
+		return nil, err
+	}
+
+	wh := &WriteHandle{Seq: uint64(cHandle.seq)}
+	if bool(cHandle.create_ts_present) {
+		ts := int64(cHandle.create_ts)
+		wh.CreateTs = &ts
+	}
+	return wh, nil
 }
 
 // GetWithOptions retrieves a value by key with explicit read options.
@@ -331,8 +361,8 @@ func (db *DB) GetWithOptions(key []byte, readOpts *ReadOptions) ([]byte, error) 
 //	batch.Put([]byte("key1"), []byte("value1"))
 //	batch.Delete([]byte("key2"))
 //
-//	err = db.Write(batch)
-func (db *DB) Write(batch *WriteBatch) error {
+//	wh, err := db.Write(batch)
+func (db *DB) Write(batch *WriteBatch) (*WriteHandle, error) {
 	return db.WriteWithOptions(batch, nil)
 }
 
@@ -351,32 +381,38 @@ func (db *DB) Write(batch *WriteBatch) error {
 //
 //	batch.Put([]byte("key1"), []byte("value1"))
 //	writeOpts := &slatedb.WriteOptions{AwaitDurable: false}
-//	err = db.WriteWithOptions(batch, writeOpts)
-func (db *DB) WriteWithOptions(batch *WriteBatch, opts *WriteOptions) error {
+//	wh, err := db.WriteWithOptions(batch, writeOpts)
+func (db *DB) WriteWithOptions(batch *WriteBatch, opts *WriteOptions) (*WriteHandle, error) {
 	if db == nil || db.handle == nil {
-		return ErrInvalid
+		return nil, ErrInvalid
 	}
 	if batch == nil {
-		return errors.New("batch cannot be nil")
+		return nil, errors.New("batch cannot be nil")
 	}
 	if batch.closed {
-		return errors.New("batch is closed")
+		return nil, errors.New("batch is closed")
 	}
 	if batch.consumed {
-		return errors.New("batch already consumed")
+		return nil, errors.New("batch already consumed")
 	}
 	if batch.ptr == nil {
-		return errors.New("invalid batch")
+		return nil, errors.New("invalid batch")
 	}
 
 	cOpts := convertToCWriteOptions(opts)
-	result := C.slatedb_db_write_with_options(db.handle, batch.ptr, cOpts)
+	var cHandle C.struct_slatedb_write_handle_t
+	result := C.slatedb_db_write_with_options(db.handle, batch.ptr, cOpts, &cHandle)
 	batch.consumed = true
 	if err := resultToErrorAndFree(result); err != nil {
-		return fmt.Errorf("failed to write batch: %w", err)
+		return nil, fmt.Errorf("failed to write batch: %w", err)
 	}
 
-	return nil
+	wh := &WriteHandle{Seq: uint64(cHandle.seq)}
+	if bool(cHandle.create_ts_present) {
+		ts := int64(cHandle.create_ts)
+		wh.CreateTs = &ts
+	}
+	return wh, nil
 }
 
 // Flush flushes pending writes using SlateDB default flush behavior.

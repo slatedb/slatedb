@@ -9,7 +9,9 @@ use crate::batch::WriteBatch;
 use crate::bytes_range::BytesRange;
 use crate::config::{MergeOptions, PutOptions, ReadOptions, ScanOptions, WriteOptions};
 use crate::db::DbInner;
+use crate::db::WriteHandle;
 use crate::db_iter::{DbIterator, DbIteratorRangeTracker};
+use crate::oracle::Oracle;
 use crate::transaction_manager::{IsolationLevel, TransactionManager};
 use crate::DbRead;
 
@@ -445,7 +447,7 @@ impl DbTransaction {
     /// - Returns `Error` if the commit operation fails, which could be due to:
     ///   - Database I/O errors
     ///   - Concurrency conflicts detected during WriteBatch processing
-    pub async fn commit(self) -> Result<(), crate::Error> {
+    pub async fn commit(self) -> Result<WriteHandle, crate::Error> {
         self.commit_with_options(&WriteOptions::default()).await
     }
 
@@ -461,11 +463,17 @@ impl DbTransaction {
     /// - Returns `Error` if the commit operation fails, which could be due to:
     ///   - Database I/O errors
     ///   - Concurrency conflicts detected during WriteBatch processing
-    pub async fn commit_with_options(self, options: &WriteOptions) -> Result<(), crate::Error> {
+    pub async fn commit_with_options(
+        self,
+        options: &WriteOptions,
+    ) -> Result<WriteHandle, crate::Error> {
         // If the WriteBatch is empty, it's a no-op. it's impossible to have read-write
         // conflict, neither write-write conflict.
         if self.write_batch.read().is_empty() {
-            return Ok(());
+            return Ok(WriteHandle {
+                seq: self.db_inner.oracle.last_committed_seq(),
+                create_ts: None,
+            });
         }
 
         // Extract actual scanned ranges from trackers for SSI conflict detection
@@ -1563,5 +1571,88 @@ mod tests {
         let value = db.get(b"counter").await.unwrap().unwrap();
         let total = u64::from_le_bytes(value.as_ref().try_into().unwrap());
         assert_eq!(total, EXPECTED);
+    }
+
+    fn test_db_options(
+        min_filter_keys: u32,
+        l0_sst_size_bytes: usize,
+        compactor_options: Option<crate::config::CompactorOptions>,
+    ) -> crate::config::Settings {
+        crate::config::Settings {
+            flush_interval: None,
+            #[cfg(feature = "wal_disable")]
+            wal_enabled: true,
+            manifest_poll_interval: std::time::Duration::from_secs(3600),
+            manifest_update_timeout: std::time::Duration::from_secs(300),
+            max_unflushed_bytes: 134_217_728,
+            l0_max_ssts: 8,
+            min_filter_keys,
+            filter_bits_per_key: 10,
+            l0_sst_size_bytes,
+            compactor_options,
+            compression_codec: None,
+            merge_operator: None,
+            object_store_cache_options: crate::config::ObjectStoreCacheOptions::default(),
+            garbage_collector_options: None,
+            default_ttl: None,
+            block_format: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_txn_commit_returns_write_handle() {
+        use slatedb_common::clock::MockSystemClock;
+
+        let object_store: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
+        let path = "/tmp/test_txn_commit_returns_write_handle";
+        let clock = Arc::new(MockSystemClock::new());
+        let db = crate::Db::builder(path, object_store)
+            .with_settings(test_db_options(0, 1024, None))
+            .with_system_clock(clock.clone())
+            .build()
+            .await
+            .unwrap();
+
+        // Basic put
+        clock.set(100);
+        let txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
+        txn.put(b"key1", b"value1").unwrap();
+        let handle = txn
+            .commit_with_options(&WriteOptions {
+                await_durable: false,
+            })
+            .await
+            .unwrap();
+        assert_eq!(handle.seqnum(), 1);
+        assert_eq!(handle.create_ts(), Some(100));
+
+        // Put with options (TTL)
+        clock.set(200);
+        let txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
+        let put_opts = PutOptions {
+            ttl: crate::config::Ttl::ExpireAfter(1000),
+        };
+        txn.put_with_options(b"key2", b"value2", &put_opts).unwrap();
+        let handle = txn
+            .commit_with_options(&WriteOptions {
+                await_durable: false,
+            })
+            .await
+            .unwrap();
+        assert_eq!(handle.seqnum(), 2);
+        assert_eq!(handle.create_ts(), Some(200));
+
+        // Delete
+        clock.set(300);
+        let txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
+        txn.delete(b"key1").unwrap();
+        let handle = txn
+            .commit_with_options(&WriteOptions {
+                await_durable: false,
+            })
+            .await
+            .unwrap();
+        assert_eq!(handle.seqnum(), 3);
+        assert_eq!(handle.create_ts(), Some(300));
     }
 }

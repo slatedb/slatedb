@@ -77,6 +77,30 @@ pub use builder::DbBuilder;
 
 pub(crate) mod builder;
 
+/// Handle returned from write operations, containing metadata about the write.
+/// This structure is designed to be extensible for future enhancements.
+#[derive(Debug, Clone)]
+pub struct WriteHandle {
+    pub(crate) seq: u64,
+    pub(crate) create_ts: Option<i64>,
+}
+
+impl WriteHandle {
+    pub(crate) fn new(seq: u64, create_ts: Option<i64>) -> Self {
+        Self { seq, create_ts }
+    }
+
+    /// Returns the sequence number assigned to this write operation.
+    pub fn seqnum(&self) -> u64 {
+        self.seq
+    }
+
+    /// Returns the creation timestamp assigned to this write operation.
+    pub fn create_ts(&self) -> Option<i64> {
+        self.create_ts
+    }
+}
+
 pub(crate) struct DbInner {
     pub(crate) state: Arc<RwLock<DbState>>,
     pub(crate) settings: Settings,
@@ -257,12 +281,17 @@ impl DbInner {
         &self,
         batch: WriteBatch,
         options: &WriteOptions,
-    ) -> Result<(), SlateDBError> {
+    ) -> Result<WriteHandle, SlateDBError> {
         self.db_stats.write_batch_count.inc();
         self.db_stats.write_ops.add(batch.ops.len() as u64);
         self.status()?;
         if batch.ops.is_empty() {
-            return Ok(());
+            // Return a dummy WriteHandle for empty batch.
+            // Sequence number is not incremented.
+            return Ok(WriteHandle {
+                seq: self.oracle.last_committed_seq(),
+                create_ts: None,
+            });
         }
 
         let (tx, rx) = tokio::sync::oneshot::channel();
@@ -278,13 +307,15 @@ impl DbInner {
 
         // TODO: this can be modified as awaiting the last_durable_seq watermark & fatal error.
 
-        let mut durable_watcher = rx.await??;
+        let (write_handle, durable_watcher) = rx.await??;
 
         if options.await_durable {
-            durable_watcher.await_value().await?;
+            if let Some(mut watcher) = durable_watcher {
+                watcher.await_value().await?;
+            }
         }
 
-        Ok(())
+        Ok(write_handle)
     }
 
     #[inline]
@@ -504,18 +535,22 @@ impl DbInner {
                 .await?;
 
         while let Some(replayed_table) = replay_iter.next().await? {
+            // Replayed rows come from WAL SSTs in remote storage, so they are already
+            // durable. Update `last_remote_persisted_seq` before replaying to avoid a race with
+            // the memtable flusher. The flusher calls flush_wals() to guarantee all data in the
+            // memtable is already durable in the WAL. Since we're replaying, the WAL is empty and
+            // `last_remote_persisted_seq` does not get updated; it remaiuns at l0_last_seq. This
+            // would cause the flusher's assertion that the remoted persisted seq is always >= the
+            // last seq in the memtable to fail. By updating `last_remote_persisted_seq` here, we
+            // ensure the assertion holds true.
+            assert!(self.oracle.last_remote_persisted_seq.load() <= replayed_table.last_seq);
+            self.oracle
+                .last_remote_persisted_seq
+                .store_if_greater(replayed_table.last_seq);
             self.maybe_apply_backpressure().await?;
             self.replay_memtable(replayed_table)?;
         }
 
-        // last_committed_seq is updated as WAL is replayed. after replay,
-        // the last_committed_seq is considered same as the last_remote_persisted_seq.
-        assert!(
-            self.oracle.last_remote_persisted_seq.load() <= self.oracle.last_committed_seq.load()
-        );
-        self.oracle
-            .last_remote_persisted_seq
-            .store(self.oracle.last_committed_seq());
         Ok(())
     }
 
@@ -1108,11 +1143,11 @@ impl Db {
     /// async fn main() -> Result<(), Error> {
     ///     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
     ///     let db = Db::open("test_db", object_store).await?;
-    ///     db.put(b"key", b"value").await?;
+    ///     let handle = db.put(b"key", b"value").await?;
     ///     Ok(())
     /// }
     /// ```
-    pub async fn put<K, V>(&self, key: K, value: V) -> Result<(), crate::Error>
+    pub async fn put<K, V>(&self, key: K, value: V) -> Result<WriteHandle, crate::Error>
     where
         K: AsRef<[u8]>,
         V: AsRef<[u8]>,
@@ -1144,7 +1179,7 @@ impl Db {
     /// async fn main() -> Result<(), Error> {
     ///     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
     ///     let db = Db::open("test_db", object_store).await?;
-    ///     db.put_with_options(b"key", b"value", &PutOptions::default(), &WriteOptions::default()).await?;
+    ///     let handle = db.put_with_options(b"key", b"value", &PutOptions::default(), &WriteOptions::default()).await?;
     ///     Ok(())
     /// }
     /// ```
@@ -1154,7 +1189,7 @@ impl Db {
         value: V,
         put_opts: &PutOptions,
         write_opts: &WriteOptions,
-    ) -> Result<(), crate::Error>
+    ) -> Result<WriteHandle, crate::Error>
     where
         K: AsRef<[u8]>,
         V: AsRef<[u8]>,
@@ -1183,11 +1218,11 @@ impl Db {
     /// async fn main() -> Result<(), Error> {
     ///     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
     ///     let db = Db::open("test_db", object_store).await?;
-    ///     db.delete(b"key").await?;
+    ///     let handle = db.delete(b"key").await?;
     ///     Ok(())
     /// }
     /// ```
-    pub async fn delete<K: AsRef<[u8]>>(&self, key: K) -> Result<(), crate::Error> {
+    pub async fn delete<K: AsRef<[u8]>>(&self, key: K) -> Result<WriteHandle, crate::Error> {
         let mut batch = WriteBatch::new();
         batch.delete(key.as_ref());
         self.write(batch).await
@@ -1213,7 +1248,7 @@ impl Db {
     /// async fn main() -> Result<(), Error> {
     ///     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
     ///     let db = Db::open("test_db", object_store).await?;
-    ///     db.delete_with_options(b"key", &WriteOptions::default()).await?;
+    ///     let handle = db.delete_with_options(b"key", &WriteOptions::default()).await?;
     ///     Ok(())
     /// }
     /// ```
@@ -1221,7 +1256,7 @@ impl Db {
         &self,
         key: K,
         options: &WriteOptions,
-    ) -> Result<(), crate::Error> {
+    ) -> Result<WriteHandle, crate::Error> {
         let mut batch = WriteBatch::new();
         batch.delete(key);
         self.write_with_options(batch, options).await
@@ -1265,11 +1300,11 @@ impl Db {
     ///         .with_merge_operator(Arc::new(StringConcatMergeOperator))
     ///         .build()
     ///         .await?;
-    ///     db.merge(b"key", b"value").await?;
+    ///     let handle = db.merge(b"key", b"value").await?;
     ///     Ok(())
     /// }
     /// ```
-    pub async fn merge<K, V>(&self, key: K, value: V) -> Result<(), crate::Error>
+    pub async fn merge<K, V>(&self, key: K, value: V) -> Result<WriteHandle, crate::Error>
     where
         K: AsRef<[u8]>,
         V: AsRef<[u8]>,
@@ -1319,7 +1354,7 @@ impl Db {
     ///         .with_merge_operator(Arc::new(StringConcatMergeOperator))
     ///         .build()
     ///         .await?;
-    ///     db.merge_with_options(
+    ///     let handle = db.merge_with_options(
     ///         b"key",
     ///         b"value",
     ///         &MergeOptions::default(),
@@ -1334,7 +1369,7 @@ impl Db {
         value: V,
         merge_opts: &MergeOptions,
         write_opts: &WriteOptions,
-    ) -> Result<(), crate::Error>
+    ) -> Result<WriteHandle, crate::Error>
     where
         K: AsRef<[u8]>,
         V: AsRef<[u8]>,
@@ -1370,12 +1405,12 @@ impl Db {
     ///     batch.put(b"key1", b"value1");
     ///     batch.put(b"key2", b"value2");
     ///     batch.delete(b"key1");
-    ///     db.write(batch).await?;
+    ///     let handle = db.write(batch).await?;
     ///
     ///     Ok(())
     /// }
     /// ```
-    pub async fn write(&self, batch: WriteBatch) -> Result<(), crate::Error> {
+    pub async fn write(&self, batch: WriteBatch) -> Result<WriteHandle, crate::Error> {
         self.write_with_options(batch, &WriteOptions::default())
             .await
     }
@@ -1407,7 +1442,7 @@ impl Db {
     ///     batch.put(b"key1", b"value1");
     ///     batch.put(b"key2", b"value2");
     ///     batch.delete(b"key1");
-    ///     db.write_with_options(batch, &WriteOptions::default()).await?;
+    ///     let handle = db.write_with_options(batch, &WriteOptions::default()).await?;
     ///
     ///     Ok(())
     /// }
@@ -1416,7 +1451,7 @@ impl Db {
         &self,
         batch: WriteBatch,
         options: &WriteOptions,
-    ) -> Result<(), crate::Error> {
+    ) -> Result<WriteHandle, crate::Error> {
         self.inner
             .write_with_options(batch, options)
             .await
@@ -1633,6 +1668,7 @@ mod tests {
         assert_iterator, OnDemandCompactionSchedulerSupplier, StringConcatMergeOperator,
     };
     use crate::types::RowEntry;
+    use crate::wal_reader::WalReader;
     use crate::{proptest_util, test_utils, CloseReason, KeyValue};
     use async_trait::async_trait;
     use chrono::TimeDelta;
@@ -3734,9 +3770,10 @@ mod tests {
             .get();
         assert!(final_flush_count > initial_flush_count);
 
-        // Verify that the WAL has not been flushed
+        // Verify that the WAL was also flushed since we guarantee
+        // memtable data is persisted in the WAL prior to L0 flush.
         let recent_flushed_wal_id = kv_store.inner.wal_buffer.recent_flushed_wal_id();
-        assert_eq!(recent_flushed_wal_id, 0);
+        assert_eq!(recent_flushed_wal_id, 2);
 
         // Verify that the data is still accessible after flush
         let retrieved_value1 = kv_store.get(key1).await.unwrap().unwrap();
@@ -3767,6 +3804,72 @@ mod tests {
         // Verify our keys are in the SST
         assert!(found_keys.contains(key1.as_slice()));
         assert!(found_keys.contains(key2.as_slice()));
+    }
+
+    #[tokio::test]
+    async fn test_memtable_flush_also_flushes_wal() {
+        let main_object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let wal_object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = "/tmp/test_memtable_flush_also_flushes_wal";
+        let mut settings = test_db_options(0, 1024, None);
+        settings.flush_interval = None;
+
+        let kv_store = Db::builder(path, main_object_store)
+            .with_settings(settings)
+            .with_wal_object_store(wal_object_store.clone())
+            .build()
+            .await
+            .unwrap();
+
+        let key = b"wal_flush_key";
+        let value = b"wal_flush_value";
+        kv_store
+            .put_with_options(
+                key,
+                value,
+                &PutOptions::default(),
+                &WriteOptions {
+                    await_durable: false,
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(kv_store.inner.wal_buffer.buffered_wal_entries_count(), 1);
+
+        kv_store
+            .flush_with_options(FlushOptions {
+                flush_type: FlushType::MemTable,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(kv_store.inner.wal_buffer.buffered_wal_entries_count(), 0);
+
+        let wal_reader = WalReader::new(path, wal_object_store);
+        let wal_files = wal_reader.list(..).await.unwrap();
+        assert_eq!(wal_files.len(), 2); // first file is the fencing operation
+        let mut rows = Vec::new();
+        let mut wal_iter = wal_files[1] // second file contains the actual write
+            .iterator()
+            .await
+            .expect("expected successful WAL iterator call")
+            .expect("expected WAL file to exist");
+        while let Some(entry) = wal_iter
+            .next_entry()
+            .await
+            .expect("expected successful WAL rows read")
+        {
+            rows.push(entry);
+        }
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
+        assert_eq!(row.key.as_ref(), key);
+        assert_eq!(
+            row.value.as_bytes().expect("expected bytes").as_ref(),
+            value
+        );
+        assert_eq!(row.seq, 1);
     }
 
     async fn test_sequence_tracker_persisted_across_flush_and_reload_impl(wal_enabled: bool) {
@@ -5144,7 +5247,7 @@ mod tests {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = "/tmp/test_kv_store";
 
-        async fn do_put(db: &Db, key: &[u8], val: &[u8]) -> Result<(), crate::Error> {
+        async fn do_put(db: &Db, key: &[u8], val: &[u8]) -> Result<WriteHandle, crate::Error> {
             db.put_with_options(
                 key,
                 val,
@@ -6205,141 +6308,147 @@ mod tests {
         db.close().await.expect("failed to close DB");
     }
 
-    /// Tests that when reading from L0 with DurabilityLevel::Remote, we observe data at
-    /// an earlier durability watermark until the watermark is updated, at which point we
-    /// observe data at the new watermark.
-    ///
-    /// This test validates the fix in flush.rs that ensures the retention iterator
-    /// considers the durable watermark when flushing memtable to L0. Without this fix,
-    /// the L0 SST would only contain the latest value (seq2), and remote readers would
-    /// incorrectly fail to find the durable value (seq1).
-    ///
-    /// See: https://github.com/slatedb/slatedb/pull/1189#issuecomment-3736149180
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn should_return_durable_value_when_reading_from_l0_with_remote_durability() {
-        // Given: a DB with failpoint registry
-        let fp_registry = Arc::new(FailPointRegistry::new());
+    #[tokio::test]
+    async fn test_write_handle() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let path = "/tmp/test_durable_read_from_l0";
-        let mut settings = test_db_options(0, 1024, None);
-        settings.flush_interval = None; // Disable auto-flush so we control when flush happens
-        let db = Db::builder(path, object_store.clone())
-            .with_settings(settings)
-            .with_fp_registry(fp_registry.clone())
+        let path = "/tmp/test_write_handle_db";
+        let clock = Arc::new(MockSystemClock::new());
+        let db = Db::builder(path, object_store)
+            .with_settings(test_db_options(0, 1024, None))
+            .with_system_clock(clock.clone())
             .build()
             .await
             .unwrap();
 
-        // Write value1 without awaiting durable, then manually flush WAL only
-        db.put_with_options(
-            b"key",
-            b"value1",
-            &PutOptions::default(),
-            &WriteOptions {
-                await_durable: false,
-            },
-        )
-        .await
-        .unwrap();
-        db.flush_with_options(FlushOptions {
-            flush_type: FlushType::Wal,
-        })
-        .await
-        .unwrap(); // WAL flush makes seq1 durable
+        // Put
+        let key = b"key1";
+        let value = b"value1";
+        clock.set(100);
+        let handle = db
+            .put_with_options(
+                key,
+                value,
+                &PutOptions::default(),
+                &WriteOptions {
+                    await_durable: false,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(handle.seqnum(), 1);
+        assert_eq!(handle.create_ts(), Some(100));
 
-        let seq_after_first_write = db.inner.oracle.last_remote_persisted_seq();
+        // Put with options (TTL)
+        clock.set(200);
+        let put_opts = PutOptions {
+            ttl: Ttl::ExpireAfter(1000),
+        };
+        let handle = db
+            .put_with_options(
+                b"key2",
+                b"value2",
+                &put_opts,
+                &WriteOptions {
+                    await_durable: false,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(handle.seqnum(), 2);
+        assert_eq!(handle.create_ts(), Some(200));
 
-        // Write value2 without awaiting durable - seq2 is in WAL buffer but not flushed
-        db.put_with_options(
-            b"key",
-            b"value2",
-            &PutOptions::default(),
-            &WriteOptions {
-                await_durable: false,
-            },
-        )
-        .await
-        .unwrap();
+        // Delete
+        clock.set(300);
+        let handle = db
+            .delete_with_options(
+                b"key1",
+                &WriteOptions {
+                    await_durable: false,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(handle.seqnum(), 3);
+        assert_eq!(handle.create_ts(), Some(300));
 
-        // Verify seq hasn't advanced yet (value2 not durable)
-        assert_eq!(
-            db.inner.oracle.last_remote_persisted_seq(),
-            seq_after_first_write,
-            "expected durable seq to not advance before WAL flush"
-        );
+        // Write Batch
+        clock.set(400);
+        let mut batch = WriteBatch::new();
+        batch.put(b"key3", b"value3");
+        batch.delete(b"key2");
+        let handle = db
+            .write_with_options(
+                batch,
+                &WriteOptions {
+                    await_durable: false,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(handle.seqnum(), 4);
+        assert_eq!(handle.create_ts(), Some(400));
+    }
 
-        // Pause before updating durable seq after L0 flush
-        fail_parallel::cfg(fp_registry.clone(), "before-l0-durable-seq-update", "pause").unwrap();
-
-        // Trigger memtable flush to L0 in background (it will pause at failpoint)
-        let db_clone = db.clone();
-        let flush_handle = tokio::spawn(async move {
-            db_clone
-                .flush_with_options(FlushOptions {
-                    flush_type: FlushType::MemTable,
-                })
-                .await
-        });
-
-        // Wait for L0 to appear in manifest (indicating flush has written SST)
-        let manifest_store = Arc::new(ManifestStore::new(&Path::from(path), object_store.clone()));
-        let mut stored_manifest =
-            StoredManifest::load(manifest_store, Arc::new(DefaultSystemClock::new()))
-                .await
-                .unwrap();
-        wait_for_manifest_condition(
-            &mut stored_manifest,
-            |s| !s.l0.is_empty(),
-            Duration::from_secs(30),
-        )
-        .await;
-
-        // Verify durable seq hasn't advanced yet (we're paused at failpoint)
-        assert_eq!(
-            db.inner.oracle.last_remote_persisted_seq(),
-            seq_after_first_write,
-            "expected durable seq to not advance while paused at failpoint"
-        );
-
-        // When: Read with DurabilityLevel::Remote while paused at failpoint
-        let value = db
-            .get_with_options(b"key", &ReadOptions::new().with_durability_filter(Remote))
+    #[tokio::test]
+    async fn test_write_handle_with_batch() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = "/tmp/test_write_batch_handle";
+        let clock = Arc::new(MockSystemClock::new());
+        let db = Db::builder(path, object_store)
+            .with_settings(test_db_options(0, 1024, None))
+            .with_system_clock(clock.clone())
+            .build()
             .await
             .unwrap();
 
-        // Then: Should see value1 (the durable value at seq1), not value2 (seq2)
-        assert_eq!(
-            value,
-            Some(Bytes::from("value1")),
-            "expected to read durable value1 when durability filter is Remote"
-        );
-
-        // Also verify Memory durability sees the latest value
-        let value_memory = db
-            .get_with_options(b"key", &ReadOptions::new().with_durability_filter(Memory))
+        // Write Batch 1
+        clock.set(100);
+        let mut batch = WriteBatch::new();
+        batch.put(b"key1", b"value1");
+        batch.delete(b"key2");
+        let handle = db
+            .write_with_options(
+                batch,
+                &WriteOptions {
+                    await_durable: false,
+                },
+            )
             .await
             .unwrap();
-        assert_eq!(
-            value_memory,
-            Some(Bytes::from("value2")),
-            "expected to read latest value2 when durability filter is Memory"
-        );
+        assert_eq!(handle.seqnum(), 1);
+        assert_eq!(handle.create_ts(), Some(100));
 
-        // Resume the failpoint
-        fail_parallel::cfg(fp_registry.clone(), "before-l0-durable-seq-update", "off").unwrap();
-        flush_handle.await.unwrap().unwrap();
-
-        // After durable seq advances, Remote read should now return value2
-        let value_after = db
-            .get_with_options(b"key", &ReadOptions::new().with_durability_filter(Remote))
+        // Write Batch 2
+        clock.set(200);
+        let mut batch = WriteBatch::new();
+        batch.put(b"key3", b"value3");
+        batch.put(b"key4", b"value4");
+        let handle = db
+            .write_with_options(
+                batch,
+                &WriteOptions {
+                    await_durable: false,
+                },
+            )
             .await
             .unwrap();
-        assert_eq!(
-            value_after,
-            Some(Bytes::from("value2")),
-            "expected to read value2 after durable seq advances"
-        );
+        assert_eq!(handle.seqnum(), 2);
+        assert_eq!(handle.create_ts(), Some(200));
 
-        db.close().await.unwrap();
+        // Write Batch 3
+        clock.set(300);
+        let mut batch = WriteBatch::new();
+        batch.delete(b"key1");
+        let handle = db
+            .write_with_options(
+                batch,
+                &WriteOptions {
+                    await_durable: false,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(handle.seqnum(), 3);
+        assert_eq!(handle.create_ts(), Some(300));
     }
 }

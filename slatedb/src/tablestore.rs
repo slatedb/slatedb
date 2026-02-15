@@ -66,7 +66,6 @@ pub(crate) struct SstFileMetadata {
     #[allow(dead_code)]
     pub(crate) location: Path,
     pub(crate) last_modified: chrono::DateTime<Utc>,
-    #[allow(dead_code)]
     pub(crate) size: u64,
 }
 
@@ -246,6 +245,31 @@ impl TableStore {
         let path = self.path(id);
         debug!("deleting SST [path={}]", path);
         object_store.delete(&path).await.map_err(SlateDBError::from)
+    }
+
+    /// Reads metadata for a specific SST object (WAL or compacted).
+    ///
+    /// ## Arguments
+    /// - `id`: The SST identifier to fetch metadata for.
+    ///
+    /// ## Returns
+    /// - `Ok(SstFileMetadata)` containing the table id, path, creation time,
+    ///   last-modified time, and size in bytes.
+    ///
+    /// ## Errors
+    /// - Returns [`SlateDBError`] if the underlying object store `head` request
+    ///   fails (for example, if the object does not exist or storage access
+    ///   fails).
+    pub(crate) async fn metadata(&self, id: &SsTableId) -> Result<SstFileMetadata, SlateDBError> {
+        let object_store = self.object_stores.store_for(id);
+        let path = self.path(id);
+        let metadata = object_store.head(&path).await?;
+        Ok(SstFileMetadata {
+            id: *id,
+            location: path,
+            last_modified: metadata.last_modified,
+            size: metadata.size,
+        })
     }
 
     /// List all SSTables in the compacted directory.
@@ -1513,6 +1537,58 @@ mod tests {
         } else {
             assert_eq!(count_ssts_in(&main_store).await, 1);
         }
+    }
+
+    #[rstest]
+    #[case::main_only(make_store(), None)]
+    #[case::main_and_wal(make_store(), Some(make_store()))]
+    #[tokio::test]
+    async fn test_metadata_for_compacted_sst(
+        #[case] main_store: Arc<dyn ObjectStore>,
+        #[case] wal_store: Option<Arc<dyn ObjectStore>>,
+    ) {
+        let ts = Arc::new(TableStore::new(
+            ObjectStores::new(main_store.clone(), wal_store),
+            SsTableFormat::default(),
+            Path::from(ROOT),
+            None,
+        ));
+        let id = SsTableId::Compacted(ulid::Ulid::new());
+        let path = ts.path(&id);
+        let bytes = Bytes::from_static(b"compacted");
+        main_store.put(&path, bytes.clone().into()).await.unwrap();
+
+        let metadata = ts.metadata(&id).await.unwrap();
+        assert_eq!(metadata.size, bytes.len() as u64);
+        assert_eq!(metadata.location, path);
+    }
+
+    #[rstest]
+    #[case::main_only(make_store(), None)]
+    #[case::main_and_wal(make_store(), Some(make_store()))]
+    #[tokio::test]
+    async fn test_metadata_for_wal_sst(
+        #[case] main_store: Arc<dyn ObjectStore>,
+        #[case] wal_store: Option<Arc<dyn ObjectStore>>,
+    ) {
+        let ts = Arc::new(TableStore::new(
+            ObjectStores::new(main_store.clone(), wal_store.clone()),
+            SsTableFormat::default(),
+            Path::from(ROOT),
+            None,
+        ));
+        let id = SsTableId::Wal(42);
+        let path = ts.path(&id);
+        let bytes = Bytes::from_static(b"wal");
+        wal_store
+            .unwrap_or(main_store)
+            .put(&path, bytes.clone().into())
+            .await
+            .unwrap();
+
+        let metadata = ts.metadata(&id).await.unwrap();
+        assert_eq!(metadata.size, bytes.len() as u64);
+        assert_eq!(metadata.location, path);
     }
 
     proptest! {

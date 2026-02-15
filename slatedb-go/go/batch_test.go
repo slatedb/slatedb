@@ -49,7 +49,7 @@ var _ = Describe("WriteBatch", func() {
 			err = batch.Put([]byte("batch_key2"), []byte("batch_value2"))
 			Expect(err).NotTo(HaveOccurred())
 
-			err = db.Write(batch)
+			_, err = db.Write(batch)
 			Expect(err).NotTo(HaveOccurred())
 
 			// Verify the writes
@@ -64,7 +64,7 @@ var _ = Describe("WriteBatch", func() {
 
 		It("should handle mixed put and delete operations", func() {
 			// Pre-populate some data
-			err := db.Put([]byte("existing_key"), []byte("existing_value"))
+			_, err := db.Put([]byte("existing_key"), []byte("existing_value"))
 			Expect(err).NotTo(HaveOccurred())
 
 			batch, err := slatedb.NewWriteBatch()
@@ -77,7 +77,7 @@ var _ = Describe("WriteBatch", func() {
 			err = batch.Delete([]byte("existing_key"))
 			Expect(err).NotTo(HaveOccurred())
 
-			err = db.Write(batch)
+			_, err = db.Write(batch)
 			Expect(err).NotTo(HaveOccurred())
 
 			// Verify new key exists
@@ -100,7 +100,7 @@ var _ = Describe("WriteBatch", func() {
 			err = batch.PutWithOptions([]byte("ttl_key"), []byte("ttl_value"), putOpts)
 			Expect(err).NotTo(HaveOccurred())
 
-			err = db.Write(batch)
+			_, err = db.Write(batch)
 			Expect(err).NotTo(HaveOccurred())
 
 			// Verify the write
@@ -117,7 +117,7 @@ var _ = Describe("WriteBatch", func() {
 			err = batch.Put([]byte("key1"), []byte("value1"))
 			Expect(err).NotTo(HaveOccurred())
 
-			err = db.Write(batch)
+			_, err = db.Write(batch)
 			Expect(err).NotTo(HaveOccurred())
 
 			// Trying to use batch after write should fail
@@ -126,7 +126,7 @@ var _ = Describe("WriteBatch", func() {
 			Expect(err.Error()).To(ContainSubstring("already consumed"))
 
 			// Trying to write again should fail
-			err = db.Write(batch)
+			_, err = db.Write(batch)
 			Expect(err).To(HaveOccurred())
 			Expect(err.Error()).To(ContainSubstring("already consumed"))
 		})
@@ -150,7 +150,7 @@ var _ = Describe("WriteBatch", func() {
 			Expect(err).To(HaveOccurred())
 			Expect(err.Error()).To(ContainSubstring("batch is closed"))
 
-			err = db.Write(batch)
+			_, err = db.Write(batch)
 			Expect(err).To(HaveOccurred())
 			Expect(err.Error()).To(ContainSubstring("batch is closed"))
 		})
@@ -164,7 +164,7 @@ var _ = Describe("WriteBatch", func() {
 			Expect(err).NotTo(HaveOccurred())
 
 			writeOpts := &slatedb.WriteOptions{AwaitDurable: false}
-			err = db.WriteWithOptions(batch, writeOpts)
+			_, err = db.WriteWithOptions(batch, writeOpts)
 			Expect(err).NotTo(HaveOccurred())
 
 			// Verify the write
@@ -207,7 +207,7 @@ var _ = Describe("WriteBatch", func() {
 			err = batch.Put([]byte("dup_key"), []byte("final_value"))
 			Expect(err).NotTo(HaveOccurred())
 
-			err = db.Write(batch)
+			_, err = db.Write(batch)
 			Expect(err).NotTo(HaveOccurred())
 
 			// Should see the final put operation
@@ -216,4 +216,72 @@ var _ = Describe("WriteBatch", func() {
 			Expect(value).To(Equal([]byte("final_value")))
 		})
 	})
+
+	Describe("WriteHandle", func() {
+		It("should return valid WriteHandle for Write", func() {
+			batch, err := slatedb.NewWriteBatch()
+			Expect(err).NotTo(HaveOccurred())
+			defer batch.Close()
+
+			err = batch.Put([]byte("key"), []byte("value"))
+			Expect(err).NotTo(HaveOccurred())
+
+			wh, err := db.Write(batch)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(wh).NotTo(BeNil())
+			Expect(wh.Seq).To(Equal(uint64(1)))
+			Expect(wh.CreateTs).NotTo(BeNil())
+			Expect(*wh.CreateTs).To(BeNumerically(">", 0))
+		})
+
+		It("should return valid WriteHandle for WriteWithOptions", func() {
+			batch, err := slatedb.NewWriteBatch()
+			Expect(err).NotTo(HaveOccurred())
+			defer batch.Close()
+
+			err = batch.Put([]byte("key"), []byte("value"))
+			Expect(err).NotTo(HaveOccurred())
+
+			writeOpts := &slatedb.WriteOptions{AwaitDurable: true}
+			wh, err := db.WriteWithOptions(batch, writeOpts)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(wh).NotTo(BeNil())
+			Expect(wh.Seq).To(Equal(uint64(1)))
+			Expect(wh.CreateTs).NotTo(BeNil())
+			Expect(*wh.CreateTs).To(BeNumerically(">", 0))
+		})
+
+		It("should return increasing Seq for subsequent writes", func() {
+			// First write
+			batch1, err := slatedb.NewWriteBatch()
+			Expect(err).NotTo(HaveOccurred())
+			defer batch1.Close()
+
+			err = batch1.Put([]byte("key1"), []byte("value1"))
+			Expect(err).NotTo(HaveOccurred())
+
+			wh1, err := db.Write(batch1)
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(wh1.Seq).To(Equal(uint64(1)))
+			Expect(wh1.CreateTs).NotTo(BeNil())
+			Expect(*wh1.CreateTs).To(BeNumerically(">", 0))
+
+			// Second write
+			batch2, err := slatedb.NewWriteBatch()
+			Expect(err).NotTo(HaveOccurred())
+			defer batch2.Close()
+
+			err = batch2.Put([]byte("key2"), []byte("value2"))
+			Expect(err).NotTo(HaveOccurred())
+
+			wh2, err := db.Write(batch2)
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(wh2.Seq).To(Equal(uint64(2)))
+			Expect(wh2.CreateTs).NotTo(BeNil())
+			Expect(*wh2.CreateTs).To(BeNumerically(">", 0))
+		})
+	})
+
 })
