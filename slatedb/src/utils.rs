@@ -265,29 +265,56 @@ fn compute_lower_bound(prev_block_last_key: &Bytes, this_block_first_key: &Bytes
 #[derive(Debug)]
 pub(crate) struct MonotonicSeq {
     val: AtomicU64,
+    tx: tokio::sync::watch::Sender<u64>,
 }
 
 impl MonotonicSeq {
     pub(crate) fn new(initial_value: u64) -> Self {
+        let (tx, _) = tokio::sync::watch::channel(initial_value);
         Self {
             val: AtomicU64::new(initial_value),
+            tx,
         }
     }
 
     pub(crate) fn next(&self) -> u64 {
-        self.val.fetch_add(1, SeqCst) + 1
-    }
-
-    pub(crate) fn store(&self, value: u64) {
-        self.val.store(value, SeqCst);
+        let new_val = self.val.fetch_add(1, SeqCst) + 1;
+        self.send_monotonic(new_val);
+        new_val
     }
 
     pub(crate) fn load(&self) -> u64 {
         self.val.load(SeqCst)
     }
 
-    pub(crate) fn store_if_greater(&self, value: u64) {
-        self.val.fetch_max(value, SeqCst);
+    #[cfg(test)]
+    pub(crate) fn set_unsafe(&self, value: u64) {
+        self.val.store(value, SeqCst);
+        self.tx.send_if_modified(|current| {
+            *current = value;
+            true
+        });
+    }
+
+    pub(crate) fn fetch_max(&self, value: u64) -> u64 {
+        let old = self.val.fetch_max(value, SeqCst);
+        self.send_monotonic(value);
+        old
+    }
+
+    pub(crate) fn watch(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.tx.subscribe()
+    }
+
+    fn send_monotonic(&self, value: u64) {
+        self.tx.send_if_modified(|current| {
+            if value > *current {
+                *current = value;
+                true
+            } else {
+                false
+            }
+        });
     }
 }
 
@@ -768,7 +795,7 @@ mod tests {
     use crate::utils::{
         build_concurrent, bytes_into_minimal_vec, clamp_allocated_size_bytes, compute_index_key,
         compute_max_parallel, estimate_bytes_before_key, format_bytes_si, last_written_key_and_seq,
-        panic_string, spawn_bg_task, BitReader, BitWriter, WatchableOnceCell,
+        panic_string, spawn_bg_task, BitReader, BitWriter, MonotonicSeq, WatchableOnceCell,
     };
     use crate::Db;
     use bytes::{BufMut, Bytes, BytesMut};
@@ -936,6 +963,28 @@ mod tests {
         });
         register.write(123);
         h.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn should_watch_monotonic_seq_with_current_value() {
+        // Given: a MonotonicSeq updated several times with no watchers
+        let seq = MonotonicSeq::new(0);
+        seq.fetch_max(5);
+        seq.fetch_max(10);
+        seq.next();
+
+        // When: subscribing a watcher after mutations
+        let mut rx = seq.watch();
+
+        // Then: the watcher should see the current value
+        assert_eq!(*rx.borrow_and_update(), 11);
+
+        // When: updating the value after subscribing
+        seq.fetch_max(20);
+
+        // Then: the watcher should be notified with the new value
+        rx.changed().await.unwrap();
+        assert_eq!(*rx.borrow_and_update(), 20);
     }
 
     #[tokio::test]

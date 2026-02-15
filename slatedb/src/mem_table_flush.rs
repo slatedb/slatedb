@@ -201,7 +201,7 @@ impl MemtableFlusher {
                     self.db_inner
                         .oracle
                         .last_remote_persisted_seq
-                        .store_if_greater(last_seq);
+                        .fetch_max(last_seq);
                 }
                 Err(err) => {
                     if matches!(err, SlateDBError::Fenced) {

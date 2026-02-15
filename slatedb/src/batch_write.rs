@@ -185,7 +185,7 @@ impl DbInner {
         }
 
         // update the last_committed_seq, so the writes will be visible to the readers.
-        self.oracle.last_committed_seq.store(commit_seq);
+        self.oracle.last_committed_seq.fetch_max(commit_seq);
         self.record_memtable_sequence(commit_seq);
 
         // maybe freeze the memtable.

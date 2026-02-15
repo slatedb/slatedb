@@ -342,7 +342,7 @@ impl WalBufferManager {
                 let mut inner = self.inner.write();
                 inner.recent_flushed_wal_id = *wal_id;
                 if let Some(seq) = wal.last_seq() {
-                    inner.oracle.last_remote_persisted_seq.store_if_greater(seq);
+                    inner.oracle.last_remote_persisted_seq.fetch_max(seq);
                 }
             }
 
@@ -944,7 +944,7 @@ mod tests {
         // set flush seq to 80, and track last applied seq to 90, it should release 20 wals
         {
             let inner = wal_buffer.inner.write();
-            inner.oracle.last_remote_persisted_seq.store(80);
+            inner.oracle.last_remote_persisted_seq.set_unsafe(80);
         }
         wal_buffer.track_last_applied_seq(90);
         assert_eq!(wal_buffer.inner.read().immutable_wals.len(), 20);

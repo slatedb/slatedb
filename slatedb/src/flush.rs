@@ -322,7 +322,10 @@ mod tests {
         let db = setup_test_db_with_merge_operator().await;
         db.inner.txn_manager.new_txn(test_case.min_active_seq, true);
         // Set durable watermark high so it doesn't interfere with transaction-based retention tests
-        db.inner.oracle.last_remote_persisted_seq.store(u64::MAX);
+        db.inner
+            .oracle
+            .last_remote_persisted_seq
+            .fetch_max(u64::MAX);
         let table = WritableKVTable::new();
         let row_entries_length = test_case.row_entries.len();
         for row_entry in test_case.row_entries {
@@ -391,7 +394,7 @@ mod tests {
         // This can happen when the WAL has flushed up to seq=2, but newer writes
         // (seq=3) are still in the memtable and not yet durable.
         let db = setup_test_db_with_merge_operator().await;
-        db.inner.oracle.last_remote_persisted_seq.store(2);
+        db.inner.oracle.last_remote_persisted_seq.fetch_max(2);
         // No active transaction created - min_active_seq() will return None
 
         let table = WritableKVTable::new();
@@ -435,7 +438,7 @@ mod tests {
     async fn should_use_min_of_active_seq_and_durable_boundary() {
         // Given: DB with active transaction at seq=3, durable watermark at seq=1
         let db = setup_test_db_with_merge_operator().await;
-        db.inner.oracle.last_remote_persisted_seq.store(1);
+        db.inner.oracle.last_remote_persisted_seq.fetch_max(1);
         db.inner.txn_manager.new_txn(3, true); // Active txn at seq=3
 
         let table = WritableKVTable::new();

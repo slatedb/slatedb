@@ -1295,7 +1295,9 @@ mod tests {
         let oracle = Arc::new(DbReaderOracle::new(crate::utils::MonotonicSeq::new(0)));
         let last_committed_seq = test_case.last_committed_seq.unwrap_or(u64::MAX);
         // reader oracle uses last_remote_persisted_seq for all seq nums
-        oracle.last_remote_persisted_seq.store(last_committed_seq);
+        oracle
+            .last_remote_persisted_seq
+            .fetch_max(last_committed_seq);
 
         // Enable merge operator if the test description contains "[MERGE]"
         let merge_operator = if test_case.description.contains("[MERGE]") {
@@ -1765,7 +1767,9 @@ mod tests {
         let oracle = Arc::new(DbReaderOracle::new(crate::utils::MonotonicSeq::new(0)));
         let last_committed_seq = test_case.last_committed_seq.unwrap_or(u64::MAX);
         // reader oracle uses last_remote_persisted_seq for all seq nums
-        oracle.last_remote_persisted_seq.store(last_committed_seq);
+        oracle
+            .last_remote_persisted_seq
+            .fetch_max(last_committed_seq);
 
         // Enable merge operator if the test description contains "[MERGE"
         let merge_operator = if test_case.description.contains("[MERGE") {

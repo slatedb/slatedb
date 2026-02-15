@@ -515,7 +515,7 @@ impl DbInner {
         );
         self.oracle
             .last_remote_persisted_seq
-            .store(self.oracle.last_committed_seq());
+            .fetch_max(self.oracle.last_committed_seq());
         Ok(())
     }
 
@@ -632,6 +632,21 @@ impl DbInner {
         }
         Ok(())
     }
+}
+
+/// Watches for database state changes.
+///
+/// Obtained via [`Db::watch`]. Provides receivers that are notified when
+/// various database events occur, such as writes becoming durable.
+#[derive(Clone)]
+pub struct DbWatcher {
+    /// Notified when writes are durably persisted to object storage and will
+    /// survive process restarts. The sequence advances on WAL flush when WAL
+    /// is enabled (default), or on memtable-to-L0 flush when WAL is disabled.
+    ///
+    /// Use [`wait_for`](tokio::sync::watch::Receiver::wait_for) to block
+    /// until a specific sequence number is durable.
+    pub durable_seq: tokio::sync::watch::Receiver<u64>,
 }
 
 #[derive(Clone)]
@@ -1499,6 +1514,24 @@ impl Db {
     /// Get the metrics registry for the database.
     pub fn metrics(&self) -> Arc<StatRegistry> {
         self.inner.stat_registry.clone()
+    }
+
+    /// Subscribe to database state changes.
+    ///
+    /// Returns a [`DbWatcher`] that can be used to wait for writes to
+    /// become durable. For example, after a `put()` returns a sequence
+    /// number, you can wait until that sequence is durable before
+    /// acknowledging the write to a client:
+    ///
+    /// ```ignore
+    /// let seq = 42; // sequence number from a write operation
+    /// let mut watcher = db.watch();
+    /// watcher.durable_seq.wait_for(|s| *s >= seq).await;
+    /// ```
+    pub fn watch(&self) -> DbWatcher {
+        DbWatcher {
+            durable_seq: self.inner.oracle.last_remote_persisted_seq.watch(),
+        }
     }
 
     /// Begin a new transaction with the specified isolation level.
@@ -6339,6 +6372,79 @@ mod tests {
             Some(Bytes::from("value2")),
             "expected to read value2 after durable seq advances"
         );
+
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn should_notify_seq_watcher_on_wal_flush() {
+        // Given: a DB with WAL enabled and a seq watcher
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let db = Db::builder("/tmp/test_watch_wal", object_store)
+            .build()
+            .await
+            .unwrap();
+        let mut watcher = db.watch();
+
+        // When: writing data and flushing the WAL
+        db.put(b"key1", b"value1").await.unwrap();
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::Wal,
+        })
+        .await
+        .unwrap();
+
+        // Then: the watcher should receive an updated persisted seq
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            watcher.durable_seq.wait_for(|seq| *seq >= 1),
+        )
+        .await
+        .expect("timed out waiting for seq update")
+        .expect("watch channel closed");
+
+        db.close().await.unwrap();
+    }
+
+    #[cfg(feature = "wal_disable")]
+    #[tokio::test]
+    async fn should_notify_seq_watcher_on_l0_flush_when_wal_disabled() {
+        // Given: a DB with WAL disabled and a seq watcher
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let mut options = test_db_options(0, 256, None);
+        options.wal_enabled = false;
+        let db = Db::builder("/tmp/test_watch_l0", object_store)
+            .with_settings(options)
+            .build()
+            .await
+            .unwrap();
+        let mut watcher = db.watch();
+
+        // When: writing data and flushing the memtable to L0
+        db.put_with_options(
+            b"key1",
+            b"value1",
+            &PutOptions::default(),
+            &WriteOptions {
+                await_durable: false,
+            },
+        )
+        .await
+        .unwrap();
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::MemTable,
+        })
+        .await
+        .unwrap();
+
+        // Then: the watcher should receive an updated persisted seq
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            watcher.durable_seq.wait_for(|seq| *seq >= 1),
+        )
+        .await
+        .expect("timed out waiting for seq update")
+        .expect("watch channel closed");
 
         db.close().await.unwrap();
     }
