@@ -1,19 +1,116 @@
+pub(crate) use crate::admin::SourceDatabase;
 use crate::checkpoint::Checkpoint;
 use crate::config::CheckpointOptions;
 use crate::db_state::{ManifestCore, SsTableId};
 use crate::error::SlateDBError;
 use crate::error::SlateDBError::CheckpointMissing;
 use crate::manifest::store::{ManifestStore, StoredManifest};
+use crate::manifest::Manifest;
 use crate::paths::PathResolver;
 use crate::rand::DbRand;
 use crate::utils::IdGenerator;
 use fail_parallel::{fail_point, FailPointRegistry};
 use object_store::path::Path;
 use object_store::ObjectStore;
-use slatedb_common::clock::SystemClock;
+use slatedb_common::{DefaultSystemClock, SystemClock};
 use std::sync::Arc;
 use std::time::Duration;
 use uuid::Uuid;
+
+fn validate_sources_are_non_overlapping(sources: &[SourceDatabase]) -> Result<(), SlateDBError> {
+    let mut sorted = vec![];
+    for (idx, item) in sources.iter().enumerate() {
+        sorted.push((idx, item.visible_range.clone()));
+    }
+    sorted.sort_by_key(|entry| entry.1.clone());
+    for idx in 1..sorted.len() {
+        let (previous_idx, previous_range) = &sorted[idx - 1];
+        let (current_idx, current_range) = &sorted[idx];
+        if previous_range.intersect(current_range).is_some() {
+            let previous_path = &sources[*previous_idx].path;
+            let current_path = &sources[*current_idx].path;
+            return Err(SlateDBError::InvalidArgument {
+                msg: format!(
+                    "Ranges [{:?}] and [{:?}] for databases at [{}] and [{}] are overlapping",
+                    previous_range, current_range, previous_path, current_path
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
+#[allow(dead_code)]
+pub(crate) async fn create_multi_clone<P: Into<Path>>(
+    clone_path: P,
+    sources: Vec<SourceDatabase>,
+    object_store: Arc<dyn ObjectStore>,
+) -> Result<(), SlateDBError> {
+    let sources: Vec<SourceDatabase> = sources.into_iter().map(|s| s.into_path()).collect();
+    validate_sources_are_non_overlapping(&sources)?;
+
+    let clone_path = clone_path.into();
+    let mut projected_manifests = vec![];
+
+    for source in sources {
+        if clone_path == source.path {
+            return Err(SlateDBError::InvalidArgument {
+                msg: format!(
+                    "Source path '{}' must be different from the clone's path '{}'",
+                    source.path, clone_path
+                ),
+            });
+        }
+
+        let source_manifest_store =
+            Arc::new(ManifestStore::new(&source.path, object_store.clone()));
+        let (source_latest_manifest_id, source_latest_manifest) =
+            source_manifest_store.read_latest_manifest().await?;
+        let Some(source_checkpoint) = source_latest_manifest
+            .core
+            .find_checkpoint(source.checkpoint)
+        else {
+            return Err(CheckpointMissing(source.checkpoint));
+        };
+        let source_manifest_at_checkpoint =
+            if source_checkpoint.manifest_id == source_latest_manifest_id {
+                &source_latest_manifest
+            } else {
+                &source_manifest_store
+                    .read_manifest(source_checkpoint.manifest_id)
+                    .await?
+            };
+
+        if source_manifest_at_checkpoint.core.next_wal_sst_id - 1
+            > source_manifest_at_checkpoint.core.replay_after_wal_id
+        {
+            return Err(SlateDBError::InvalidArgument {
+                msg: format!("Source database at '{}' must have no WAL", source.path),
+            });
+        }
+
+        let manifest = Manifest::cloned(
+            source_manifest_at_checkpoint,
+            source.path.to_string(),
+            source_checkpoint.id,
+            Arc::new(DbRand::default()), // todo: seed?
+        );
+
+        projected_manifests.push(Manifest::projected(&manifest, source.visible_range));
+    }
+
+    let merged_manifest = Manifest::union(projected_manifests);
+    let clone_manifest_store = Arc::new(ManifestStore::new(&clone_path, object_store.clone()));
+    StoredManifest::create_new_db(
+        clone_manifest_store,
+        // todo: preserve the whole manifest?
+        merged_manifest.core,
+        Arc::new(DefaultSystemClock::new()),
+    )
+    .await?;
+
+    Ok(())
+}
 
 pub(crate) async fn create_clone<P: Into<Path>>(
     clone_path: P,
@@ -312,6 +409,8 @@ async fn copy_wal_ssts(
 
 #[cfg(test)]
 mod tests {
+    use super::{validate_sources_are_non_overlapping, SourceDatabase};
+    use crate::bytes_range::BytesRange;
     use crate::clone::create_clone;
     use crate::config::{CheckpointOptions, CheckpointScope, Settings};
     use crate::db::Db;
@@ -326,9 +425,13 @@ mod tests {
     use fail_parallel::FailPointRegistry;
     use object_store::memory::InMemory;
     use object_store::path::Path;
-    use slatedb_common::clock::DefaultSystemClock;
+    use rand::rng;
+    use rand::seq::SliceRandom;
+    use rstest::rstest;
+    use slatedb_common::DefaultSystemClock;
     use std::ops::RangeFull;
     use std::sync::Arc;
+    use uuid::Uuid;
 
     #[tokio::test]
     async fn should_clone_latest_state_if_no_checkpoint_provided() {
@@ -790,5 +893,60 @@ mod tests {
             result,
             Err(SlateDBError::WalStoreReconfigurationError)
         ));
+    }
+
+    struct RangeValidationTestCase {
+        ranges: Vec<BytesRange>,
+        is_ok: bool,
+    }
+
+    #[rstest]
+    #[case(RangeValidationTestCase {
+        ranges: vec![
+            BytesRange::from_ref("a".."b"),
+            BytesRange::from_ref("b".."c"),
+            BytesRange::from_ref("c".."d"),
+        ],
+        is_ok: true,
+        })]
+    #[case(RangeValidationTestCase {
+        ranges: vec![
+            BytesRange::from_ref("a"..),
+            BytesRange::from_ref("b".."c"),
+            BytesRange::from_ref("c".."d"),
+        ],
+        is_ok: false,
+        })]
+    #[case(RangeValidationTestCase {
+        ranges: vec![
+            BytesRange::from_ref(.."z"),
+            BytesRange::from_ref("a".."b"),
+            BytesRange::from_ref("c".."d"),
+        ],
+        is_ok: false,
+        })]
+    #[case(RangeValidationTestCase {
+        ranges: vec![
+            BytesRange::from_ref(.."d"),
+            BytesRange::from_ref("d".."z"),
+        ],
+        is_ok: true,
+        })]
+
+    fn test_validate_sources_are_non_overlapping(#[case] test_case: RangeValidationTestCase) {
+        let mut shuffled = test_case.ranges.clone();
+        shuffled.shuffle(&mut rng());
+        let mut sources = vec![];
+        for idx in 0..test_case.ranges.len() {
+            sources.push(SourceDatabase {
+                path: Path::from(format!("/tmp/{}", idx)),
+                visible_range: test_case.ranges[idx].clone(),
+                checkpoint: Uuid::new_v4(),
+            });
+        }
+        assert_eq!(
+            validate_sources_are_non_overlapping(&sources).is_ok(),
+            test_case.is_ok
+        );
     }
 }
