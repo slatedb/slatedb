@@ -86,7 +86,8 @@ impl<B: BlockLike> KeyValueIterator for BlockIterator<B> {
         match self.ordering {
             Ascending => {
                 // Binary search to find the first key >= next_key
-                let mut low = self.off_off;
+                // Search entire block (bidirectional seeking)
+                let mut low = 0;
                 let mut high = num_entries;
 
                 while low < high {
@@ -501,7 +502,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn should_seek_forward_only_from_current_position() {
+    async fn should_seek_bidirectionally_ascending() {
         // given: a block with entries and an iterator advanced past the first entry
         let mut block_builder = BlockBuilder::new_v1(1024);
         assert!(block_builder.add_value(b"a", b"1", gen_empty_attrs()));
@@ -515,12 +516,21 @@ mod tests {
         iter.next().await.unwrap();
         iter.next().await.unwrap();
 
-        // when: seeking to a key before current position
+        // when: seeking to a key before current position (backward seek)
         iter.seek(b"a").await.unwrap();
 
-        // then: seek does not go backwards, returns current position ("c")
+        // then: seek goes backwards, returns "a"
         let kv = iter.next().await.unwrap().unwrap();
-        test_utils::assert_kv(&kv, b"c", b"3");
+        test_utils::assert_kv(&kv, b"a", b"1");
+
+        // Verify we can continue forward
+        let kv = iter.next().await.unwrap().unwrap();
+        test_utils::assert_kv(&kv, b"b", b"2");
+
+        // Seek forward
+        iter.seek(b"d").await.unwrap();
+        let kv = iter.next().await.unwrap().unwrap();
+        test_utils::assert_kv(&kv, b"d", b"4");
     }
 
     #[tokio::test]
