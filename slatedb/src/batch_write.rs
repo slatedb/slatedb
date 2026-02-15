@@ -46,7 +46,7 @@ pub(crate) const WRITE_BATCH_TASK_NAME: &str = "writer";
 pub(crate) type WriteBatchResult = Result<
     (
         WriteHandle,
-        Option<WatchableOnceCellReader<Result<(), SlateDBError>>>,
+        WatchableOnceCellReader<Result<(), SlateDBError>>,
     ),
     SlateDBError,
 >;
@@ -94,13 +94,11 @@ impl MessageHandler<WriteBatchMessage> for WriteBatchEventHandler {
         // their memtables in a timely manner.
         if self.is_first_write && !self.db_inner.wal_enabled && options.await_durable {
             self.is_first_write = false;
-            let (_, maybe_watcher) = result.clone()?;
-            if let Some(watcher) = maybe_watcher {
-                let this_clock = self.db_inner.system_clock.clone();
-                tokio::spawn(async move {
-                    monitor_first_write(watcher, this_clock).await;
-                });
-            }
+            let (_, watcher) = result.clone()?;
+            let this_clock = self.db_inner.system_clock.clone();
+            tokio::spawn(async move {
+                monitor_first_write(watcher, this_clock).await;
+            });
         }
         _ = done.send(result);
         Ok(())
@@ -201,7 +199,7 @@ impl DbInner {
 
         let write_handle = WriteHandle::new(commit_seq, Some(now));
 
-        Ok((write_handle, Some(durable_watcher)))
+        Ok((write_handle, durable_watcher))
     }
 
     /// Write entries to the currently active memtable. Returns a durable watcher for the memtable.

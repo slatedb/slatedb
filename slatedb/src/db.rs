@@ -283,12 +283,10 @@ impl DbInner {
 
         // TODO: this can be modified as awaiting the last_durable_seq watermark & fatal error.
 
-        let (write_handle, durable_watcher) = rx.await??;
+        let (write_handle, mut durable_watcher) = rx.await??;
 
         if options.await_durable {
-            if let Some(mut watcher) = durable_watcher {
-                watcher.await_value().await?;
-            }
+            durable_watcher.await_value().await?;
         }
 
         Ok(write_handle)
