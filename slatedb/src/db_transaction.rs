@@ -1663,4 +1663,22 @@ mod tests {
         assert_eq!(handle.seqnum(), 3);
         assert_eq!(handle.create_ts(), 300);
     }
+
+    #[tokio::test]
+    async fn test_txn_commit_with_options_empty_batch_returns_none() {
+        let object_store: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
+        let db = crate::Db::open("test_txn_commit_with_options_empty_batch", object_store)
+            .await
+            .unwrap();
+
+        let txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
+        let result = txn
+            .commit_with_options(&WriteOptions {
+                await_durable: false,
+            })
+            .await
+            .unwrap();
+
+        assert!(result.is_none());
+    }
 }

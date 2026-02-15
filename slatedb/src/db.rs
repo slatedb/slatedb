@@ -6444,4 +6444,26 @@ mod tests {
         assert_eq!(handle.seqnum(), 3);
         assert_eq!(handle.create_ts(), 300);
     }
+
+    #[tokio::test]
+    async fn test_write_with_options_empty_batch_returns_empty_batch_error() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let db = Db::builder("/tmp/test_write_with_options_empty_batch", object_store)
+            .with_settings(test_db_options(0, 1024, None))
+            .build()
+            .await
+            .unwrap();
+
+        let err = db
+            .inner
+            .write_with_options(
+                WriteBatch::new(),
+                &WriteOptions {
+                    await_durable: false,
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, SlateDBError::EmptyBatch));
+    }
 }
