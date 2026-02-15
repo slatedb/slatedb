@@ -1,6 +1,7 @@
 package io.slatedb;
 
 import io.slatedb.SlateDbConfig.*;
+import org.jspecify.annotations.Nullable;
 
 import java.util.Objects;
 
@@ -154,7 +155,7 @@ public final class SlateDb implements SlateDbReadable {
     ///     db.put("key".getBytes(StandardCharsets.UTF_8), "value".getBytes(StandardCharsets.UTF_8));
     /// }
     /// ```
-    public static SlateDb open(String path, String url, String envFile) {
+    public static SlateDb open(String path, @Nullable String url, @Nullable String envFile) {
         try (NativeInterop.ObjectStoreHandle objectStore = NativeInterop.resolveObjectStore(url, envFile)) {
             return new SlateDb(NativeInterop.slatedb_db_open(path, objectStore));
         }
@@ -188,10 +189,10 @@ public final class SlateDb implements SlateDbReadable {
     /// ```
     public static SlateDbReader openReader(
         String path,
-        String url,
-        String envFile,
-        String checkpointId,
-        ReaderOptions options
+        @Nullable String url,
+        @Nullable String envFile,
+        @Nullable String checkpointId,
+        @Nullable ReaderOptions options
     ) {
         try (NativeInterop.ObjectStoreHandle objectStore = NativeInterop.resolveObjectStore(url, envFile)) {
             return new SlateDbReader(NativeInterop.slatedb_db_reader_open(path, objectStore, checkpointId, options));
@@ -204,7 +205,7 @@ public final class SlateDb implements SlateDbReadable {
     /// @param url object store URL in `object_store` URL format (`memory://`, `file:///...`). If `null`, the object store is resolved from environment variables. See [ObjectStore::parse_url_opts](https://docs.rs/object_store/latest/object_store/fn.parse_url_opts.html) for details.
     /// @param envFile optional env file for object store configuration. May be `null`.
     /// @return A builder that must be closed if not used.
-    public static Builder builder(String path, String url, String envFile) {
+    public static Builder builder(String path, @Nullable String url, @Nullable String envFile) {
         try (NativeInterop.ObjectStoreHandle objectStore = NativeInterop.resolveObjectStore(url, envFile)) {
             return new Builder(NativeInterop.slatedb_db_builder_new(path, objectStore));
         }
@@ -239,7 +240,7 @@ public final class SlateDb implements SlateDbReadable {
     /// @param putOptions put options or `null` for defaults.
     /// @param writeOptions write options or `null` for defaults.
     /// @throws SlateDbException if the write fails.
-    public SlateDbWriteHandle put(byte[] key, byte[] value, PutOptions putOptions, WriteOptions writeOptions) {
+    public SlateDbWriteHandle put(byte[] key, byte[] value, @Nullable PutOptions putOptions, @Nullable WriteOptions writeOptions) {
         return NativeInterop.slatedb_db_put_with_options(handle, key, value, putOptions, writeOptions);
     }
 
@@ -262,7 +263,7 @@ public final class SlateDb implements SlateDbReadable {
     /// @param options read options or `null` for defaults.
     /// @return The value for the key, or `null` if the key does not exist.
     /// @throws SlateDbException if the read fails.
-    public byte[] get(byte[] key, ReadOptions options) {
+    public byte[] get(byte[] key, @Nullable ReadOptions options) {
         return NativeInterop.slatedb_db_get_with_options(handle, key, options);
     }
 
@@ -279,7 +280,7 @@ public final class SlateDb implements SlateDbReadable {
     /// @param key key to delete.
     /// @param options write options or `null` for defaults.
     /// @throws SlateDbException if the delete fails.
-    public SlateDbWriteHandle delete(byte[] key, WriteOptions options) {
+    public SlateDbWriteHandle delete(byte[] key, @Nullable WriteOptions options) {
         return NativeInterop.slatedb_db_delete_with_options(handle, key, options);
     }
 
@@ -308,7 +309,7 @@ public final class SlateDb implements SlateDbReadable {
     ///     db.write(batch);
     /// }
     /// ```
-    public SlateDbWriteHandle write(SlateDbWriteBatch batch, WriteOptions options) {
+    public SlateDbWriteHandle write(SlateDbWriteBatch batch, @Nullable WriteOptions options) {
         Objects.requireNonNull(batch, "batch");
         try {
             return NativeInterop.slatedb_db_write_with_options(handle, batch.handle(), options == null ? WriteOptions.DEFAULT : options);
@@ -357,7 +358,7 @@ public final class SlateDb implements SlateDbReadable {
     /// @param options scan options or `null` for defaults.
     /// @return A [SlateDbScanIterator] over the range. Always close it.
     /// @throws SlateDbException if the scan fails.
-    public SlateDbScanIterator scan(byte[] startKey, byte[] endKey, ScanOptions options) {
+    public SlateDbScanIterator scan(byte[] startKey, byte[] endKey, @Nullable ScanOptions options) {
         return new SlateDbScanIterator(NativeInterop.slatedb_db_scan_with_options(handle, startKey, endKey, options));
     }
 
@@ -376,7 +377,7 @@ public final class SlateDb implements SlateDbReadable {
     /// @param options scan options or `null` for defaults.
     /// @return A [SlateDbScanIterator] over the prefix. Always close it.
     /// @throws SlateDbException if the scan fails.
-    public SlateDbScanIterator scanPrefix(byte[] prefix, ScanOptions options) {
+    public SlateDbScanIterator scanPrefix(byte[] prefix, @Nullable ScanOptions options) {
         return new SlateDbScanIterator(NativeInterop.slatedb_db_scan_prefix_with_options(handle, prefix, options));
     }
 
