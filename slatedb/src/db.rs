@@ -504,18 +504,22 @@ impl DbInner {
                 .await?;
 
         while let Some(replayed_table) = replay_iter.next().await? {
+            // Replayed rows come from WAL SSTs in remote storage, so they are already
+            // durable. Update `last_remote_persisted_seq` before replaying to avoid a race with
+            // the memtable flusher. The flusher calls flush_wals() to guarantee all data in the
+            // memtable is already durable in the WAL. Since we're replaying, the WAL is empty and
+            // `last_remote_persisted_seq` does not get updated; it remaiuns at l0_last_seq. This
+            // would cause the flusher's assertion that the remoted persisted seq is always >= the
+            // last seq in the memtable to fail. By updating `last_remote_persisted_seq` here, we
+            // ensure the assertion holds true.
+            assert!(self.oracle.last_remote_persisted_seq.load() <= replayed_table.last_seq);
+            self.oracle
+                .last_remote_persisted_seq
+                .store_if_greater(replayed_table.last_seq);
             self.maybe_apply_backpressure().await?;
             self.replay_memtable(replayed_table)?;
         }
 
-        // last_committed_seq is updated as WAL is replayed. after replay,
-        // the last_committed_seq is considered same as the last_remote_persisted_seq.
-        assert!(
-            self.oracle.last_remote_persisted_seq.load() <= self.oracle.last_committed_seq.load()
-        );
-        self.oracle
-            .last_remote_persisted_seq
-            .store(self.oracle.last_committed_seq());
         Ok(())
     }
 
