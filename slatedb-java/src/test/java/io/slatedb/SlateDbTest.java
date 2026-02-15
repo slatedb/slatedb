@@ -2,6 +2,8 @@ package io.slatedb;
 
 import org.junit.jupiter.api.Assertions;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -116,13 +118,21 @@ class SlateDbTest {
         TestSupport.ensureNativeReady();
         TestSupport.DbContext context = TestSupport.createDbContext();
 
-        SlateDb.SlateDbException failure = Assertions.assertThrows(
-            SlateDb.SlateDbException.class,
+        SlateDbException failure = Assertions.assertThrows(
+            SlateDbException.class,
             () -> SlateDb.builder(context.dbPath().toAbsolutePath().toString(), "bogus://", null)
         );
-        Assertions.assertNotEquals(0, failure.getErrorCode());
+        Assertions.assertFalse(failure instanceof SlateDbException.ClosedException);
         Assertions.assertNotNull(failure.getMessage());
         Assertions.assertFalse(failure.getMessage().isBlank());
+    }
+
+    @Test
+    void closedExceptionCarriesCloseReasonDetails() {
+        SlateDbException closed = new SlateDbException.ClosedException("fenced", 2, "closed");
+        SlateDbException.ClosedException closedError = assertInstanceOf(SlateDbException.ClosedException.class, closed);
+        assertEquals("fenced", closedError.getCloseReason());
+        assertEquals(2, closedError.getCloseReasonCode());
     }
 
     @Test

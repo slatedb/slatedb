@@ -2,10 +2,11 @@ package io.slatedb;
 
 import org.junit.jupiter.api.Assertions;
 
+import java.io.File;
 import java.nio.file.Files;
+import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
-import java.util.ArrayList;
-import java.util.List;
+import java.util.regex.Pattern;
 
 /// Test helpers for SlateDB JUnit tests.
 ///
@@ -19,20 +20,19 @@ final class TestSupport {
 
     /// Loads the native SlateDB library once for the test JVM.
     ///
-    /// Tests fail if the library path is not provided via `SLATEDB_C_LIB` or
-    /// `-Dslatedb.c.lib` and a default build artifact cannot be found.
+    /// Tests fail if `java.library.path` does not contain the library.
     static void ensureNativeReady() throws Exception {
         Path nativeLib = findNativeLibrary();
         Assertions.assertTrue(
             nativeLib != null && Files.exists(nativeLib),
-            "Set SLATEDB_C_LIB or -Dslatedb.c.lib to the slatedb_c native library " +
-                "(expected filename: " + expectedLibraryFileName() + ")"
+            "Unable to locate SlateDB native library (expected filename: " + expectedLibraryFileName() +
+                "). Verify java.library.path includes the native library directory. " +
+                "Current java.library.path: " + System.getProperty("java.library.path", "")
         );
         synchronized (INIT_LOCK) {
             if (initialized) {
                 return;
             }
-            SlateDb.loadLibrary(nativeLib.toAbsolutePath().toString());
             SlateDb.initLogging(SlateDbConfig.LogLevel.INFO);
             initialized = true;
         }
@@ -46,31 +46,30 @@ final class TestSupport {
         return new DbContext(dbPath, objectStoreRoot, objectStoreUrl);
     }
 
-    /// Resolves the native library path from `SLATEDB_C_LIB`, `-Dslatedb.c.lib`,
-    /// or the default build output paths under `target/`.
+    /// Resolves the native library path from `java.library.path`.
     private static Path findNativeLibrary() {
-        String env = System.getenv("SLATEDB_C_LIB");
-        if (env != null && !env.isBlank()) {
-            return Path.of(env);
-        }
-        String prop = System.getProperty("slatedb.c.lib");
-        if (prop != null && !prop.isBlank()) {
-            return Path.of(prop);
-        }
-        String libName = expectedLibraryFileName();
-        Path cwd = Path.of("").toAbsolutePath();
-        Path repoRoot = cwd.getParent();
+        return findInJavaLibraryPath(expectedLibraryFileName());
+    }
 
-        List<Path> candidates = new ArrayList<>();
-        candidates.add(cwd.resolve("target").resolve("debug").resolve(libName));
-        candidates.add(cwd.resolve("target").resolve("release").resolve(libName));
-        if (repoRoot != null && !repoRoot.equals(cwd)) {
-            candidates.add(repoRoot.resolve("target").resolve("debug").resolve(libName));
-            candidates.add(repoRoot.resolve("target").resolve("release").resolve(libName));
+    private static Path findInJavaLibraryPath(String libName) {
+        String javaLibraryPath = System.getProperty("java.library.path");
+        if (javaLibraryPath == null || javaLibraryPath.isBlank()) {
+            return null;
         }
 
-        for (Path candidate : candidates) {
-            if (Files.exists(candidate)) {
+        String[] entries = javaLibraryPath.split(Pattern.quote(File.pathSeparator));
+        for (String entry : entries) {
+            Path directory;
+            try {
+                directory = (entry == null || entry.isBlank())
+                    ? Path.of("").toAbsolutePath()
+                    : Path.of(entry).toAbsolutePath();
+            } catch (InvalidPathException ignored) {
+                continue;
+            }
+
+            Path candidate = directory.resolve(libName);
+            if (Files.isRegularFile(candidate)) {
                 return candidate;
             }
         }
