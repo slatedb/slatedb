@@ -240,7 +240,7 @@ public final class SlateDb implements SlateDbReadable {
     /// @param putOptions put options or `null` for defaults.
     /// @param writeOptions write options or `null` for defaults.
     /// @throws SlateDbException if the write fails.
-    public SlateDbWriteHandle put(byte[] key, byte[] value, @Nullable PutOptions putOptions,@Nullable  writeOptions) {
+    public SlateDbWriteHandle put(byte[] key, byte[] value, @Nullable PutOptions putOptions, @Nullable WriteOptions writeOptions) {
         return NativeInterop.slatedb_db_put_with_options(handle, key, value, putOptions, writeOptions);
     }
 
