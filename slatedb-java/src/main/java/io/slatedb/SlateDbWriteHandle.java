@@ -1,13 +1,15 @@
 package io.slatedb;
 
+import java.util.OptionalLong;
+
 /**
  * Handle returned by SlateDB write operations.
  */
 public class SlateDbWriteHandle {
     private final long seq;
-    private final Long createTs;
+    private final OptionalLong createTs;
 
-    public SlateDbWriteHandle(long seq, Long createTs) {
+    public SlateDbWriteHandle(long seq, OptionalLong createTs) {
         this.seq = seq;
         this.createTs = createTs;
     }
@@ -20,9 +22,9 @@ public class SlateDbWriteHandle {
     }
 
     /**
-     * @return The creation timestamp of the write operation, or null if not available.
+     * @return The creation timestamp of the write operation, or empty if not available.
      */
-    public Long createTs() {
+    public OptionalLong createTs() {
         return createTs;
     }
 }

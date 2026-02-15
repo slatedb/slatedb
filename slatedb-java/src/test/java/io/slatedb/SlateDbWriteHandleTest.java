@@ -21,8 +21,8 @@ class SlateDbWriteHandleTest {
 
             assertNotNull(wh);
             assertEquals(1L, wh.seq());
-            assertNotNull(wh.createTs());
-            assertTrue(wh.createTs() > 0);
+            assertTrue(wh.createTs().isPresent());
+            assertTrue(wh.createTs().getAsLong() > 0);
         }
     }
 
@@ -43,8 +43,8 @@ class SlateDbWriteHandleTest {
 
             assertNotNull(wh);
             assertEquals(2L, wh.seq());
-            assertNotNull(wh.createTs());
-            assertTrue(wh.createTs() > 0);
+            assertTrue(wh.createTs().isPresent());
+            assertTrue(wh.createTs().getAsLong() > 0);
         }
     }
 
@@ -62,8 +62,8 @@ class SlateDbWriteHandleTest {
 
                 assertNotNull(wh);
                 assertEquals(1L, wh.seq());
-                assertNotNull(wh.createTs());
-                assertTrue(wh.createTs() > 0);
+                assertTrue(wh.createTs().isPresent());
+                assertTrue(wh.createTs().getAsLong() > 0);
             }
         }
     }
@@ -106,8 +106,8 @@ class SlateDbWriteHandleTest {
 
             assertNotNull(wh);
             assertEquals(1L, wh.seq());
-            assertNotNull(wh.createTs());
-            assertTrue(wh.createTs() > 0);
+            assertTrue(wh.createTs().isPresent());
+            assertTrue(wh.createTs().getAsLong() > 0);
         }
     }
 }

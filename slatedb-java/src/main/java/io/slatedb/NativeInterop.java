@@ -12,6 +12,7 @@ import java.lang.foreign.ValueLayout;
 import java.lang.invoke.VarHandle;
 import java.nio.charset.StandardCharsets;
 import java.util.Objects;
+import java.util.OptionalLong;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /// Java-typed wrappers around generated jextract bindings.
@@ -693,7 +694,7 @@ final class NativeInterop {
     private static SlateDbWriteHandle readWriteHandle(MemorySegment segment) {
         long seq = (long) WRITE_HANDLE_SEQ.get(segment, 0L);
         boolean present = (boolean) WRITE_HANDLE_CREATE_TS_PRESENT.get(segment, 0L);
-        Long createTs = present ? (long) WRITE_HANDLE_CREATE_TS.get(segment, 0L) : null;
+        OptionalLong createTs = present ? OptionalLong.of((long) WRITE_HANDLE_CREATE_TS.get(segment, 0L)) : OptionalLong.empty();
         return new SlateDbWriteHandle(seq, createTs);
     }
 
