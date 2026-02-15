@@ -22,6 +22,9 @@ Table of Contents:
       + [Establishing the Checkpoint](#establishing-the-checkpoint)
          - [Checkpoint Maintenance](#checkpoint-maintenance)
       + [Garbage Collector](#garbage-collector)
+   * [Manifest Projection and Union](#manifest-projection-and-union)
+      + [Projection](#projection)
+      + [Union](#union)
 
 <!-- TOC end -->
 
@@ -614,3 +617,110 @@ Observe that users can now configure a single GC process that can manage GC for 
 deletes. Whenever a new database is created, the user needs to spawn a new GC task for that database. When the GC
 task completes deleting a database, then the task exits. For now, it's left up to the user to spawn GC tasks for
 databases that they have created.
+
+### Manifest Projection and Union
+
+Clones create new databases that reference SSTs from a parent. In some cases, it is useful to create views over a
+subset of a manifest's key range, or to combine multiple non-overlapping manifest views into a single manifest. We
+introduce two operations on manifests to support this: **projection** and **union**.
+
+#### Projection
+
+Projection creates a filtered view of a manifest restricted to a specific key range. Given a source manifest and a
+target range, projection returns a new manifest containing only the SSTs whose key ranges overlap with the target
+range. SSTs that fall entirely outside the target range are excluded, and SSTs that partially overlap are annotated
+with a `visible_range` that constrains which keys are accessible.
+
+The projection process works as follows:
+
+1. Clone the source manifest.
+2. For each L0 SST, compute the intersection of the SST's effective range with the projection range. L0 SSTs may
+   overlap with each other, so each SST is evaluated independently against the projection range.
+3. For each sorted run, compute the intersection of each SST's range with the projection range. Since SSTs within
+   a sorted run are non-overlapping and ordered, the range of each SST is bounded by the start key of the next SST
+   in the run (i.e., the range is `[current_start, next_start)`). The last SST in a run extends to the end of its
+   effective range.
+4. For each SST that has a non-empty intersection with the projection range, create a new handle with the
+   `visible_range` set to the intersection. SSTs with an empty intersection are excluded from the result.
+5. Sorted runs whose SSTs were all excluded are removed entirely. Note that removing sorted runs may leave
+   gaps in sorted run IDs (e.g., `[5, 3, 1]` if SR 4 and 2 were removed). This is acceptable because the
+   compactor does not assume contiguous IDs — it matches sorted runs by ID, not by position. Preserving
+   original IDs is important so that union can correctly match the same logical tier across projected
+   manifests.
+6. Remove excluded SST IDs from `external_dbs` entries so that the external database's checkpoint can be released
+   and the SSTs garbage collected once no other manifest references them. Entries whose `sst_ids` list becomes
+   empty are removed entirely, allowing their checkpoint on the external database to be released.
+
+The `visible_range` on an `SsTableHandle` constrains the keys that are visible when reading the SST. The
+`effective_range` is the intersection of the SST's physical range (derived from its first key) and its
+`visible_range`. Scans and lookups against a projected SST only return keys within the effective range.
+
+Projection is logically equivalent to deleting all entries outside the projected range. Once an SST has been
+projected, its `visible_range` can only be narrowed further, never extended — the entries outside the original
+projection are treated as if they no longer exist.
+
+#### Union
+
+Union combines multiple non-overlapping manifests into a single manifest. This is the inverse of projection: given
+a set of manifests that each cover a distinct portion of the key space, union produces a manifest that covers the
+combined key space.
+
+Union does not support merging WAL state at the moment. Input manifests must have their WAL fully compacted before
+performing a union.
+
+The union process works as follows:
+
+1. Sort the input manifests by the start bound of their key ranges.
+2. Validate that the manifests are non-overlapping. Each manifest's key range is computed from the effective ranges
+   of all its L0 and compacted SSTs. If any two manifests have intersecting key ranges, the operation fails.
+3. Merge the contents of all input manifests:
+   - `external_dbs` entries from all input manifests are merged and deduplicated by
+     `(path, source_checkpoint_id)`. Entries with matching keys originated from the same external_db entry
+     via projection, so their `sst_ids` lists are merged (unioned). Entries with different keys for the same
+     path represent distinct checkpoints and must be kept separate. Without this deduplication, repeated
+     cycles of projection and union cause exponential growth of duplicated entries: projecting into N parts
+     and unioning back multiplies the entry count by N each cycle. New `final_checkpoint_id` values are
+     generated for all entries — the old ones belong to the source databases' clone relationships and are
+     not valid for the new database.
+   - L0 SSTs are merged and deduplicated by SST ID. Because L0 SSTs span the full key space and overlap
+     with each other, projection typically includes the same L0 SST in multiple projected manifests — each
+     with a `visible_range` restricting it to that projection's key range. When these projected manifests are
+     unioned, the duplicate entries must be combined back into a single L0 entry per SST ID. For each unique
+     SST ID, the `visible_range`s from all input manifests are merged into a single contiguous range. If the
+     ranges for a given SST ID are not contiguous (i.e., there is a gap between them), the union operation
+     fails. After deduplication, the L0 list must be sorted by ULID descending (newest first) to preserve
+     temporal ordering. Without this sort, newer L0 SSTs from one input manifest could appear after older
+     L0 SSTs from another, causing point lookups to return stale values — since the read path stops at the
+     first matching L0 entry.
+   - Sorted runs are merged by tier: sorted runs with the same ID across input manifests are combined
+     into a single sorted run by concatenating their SSTs. Since the source manifests cover non-overlapping key
+     ranges, the SSTs within each merged run remain non-overlapping. If source manifests have different numbers
+     of sorted runs, tiers that exist in only some manifests contribute their SSTs to the corresponding tier in
+     the result.
+4. Sorted run IDs are preserved from the source manifests. The compactor does not assume contiguous IDs, so
+   gaps left by projection (where empty sorted runs were removed) are acceptable. Preserving original IDs
+   maintains tier identity across projection and union. The descending order is preserved to maintain compactor invariant
+5. `last_l0_seq` is set to the maximum of `last_l0_seq` across all input manifests. This ensures that the
+   new database's writer assigns sequence numbers higher than any existing data. Without this, new writes
+   could receive sequence numbers that collide with those in the carried-over L0 SSTs, breaking snapshot
+   isolation and MVCC ordering.
+6. The resulting manifest has `initialized` set to `false`. The caller must complete setup (e.g., creating
+   final checkpoints in source databases) before setting `initialized` to `true`.
+7. Each source database is added as an `external_dbs` entry in the resulting manifest, with a new
+   `final_checkpoint_id` and its owned SST IDs recorded so that the new database can resolve SST paths
+   and maintain checkpoints on the source databases to prevent their SSTs from being garbage collected.
+   Owned SST IDs are those in the source manifest that are not already tracked by its own `external_dbs`
+   (i.e., SSTs physically stored under the source's path).
+
+Apart from the above union process, cloning from multiple source databases is the same as clone (see [Clones](#clones)),
+including creation of final checkpoints in source databases (and their source databases, recursively).
+
+There are a few minor differences:
+
+1. **Writer and compactor epochs are 0.** The new database is a fresh instance with no prior writer or
+   compactor history, so both epochs start at 0.
+2. **Default manifest core fields.** Fields such as `next_wal_sst_id` and similar manifest core metadata
+   are initialized to their default values rather than being copied from any source database. An exception
+   is `last_l0_seq`, which is derived from the maximum across all sources during union (see step 5 above).
+3. **WAL is not carried over from any source database. All source manifests must have their
+   WAL fully compacted before the operation. The new database starts with an empty WAL.
