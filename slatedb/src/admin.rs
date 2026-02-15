@@ -48,6 +48,9 @@ pub struct Admin {
     pub(crate) system_clock: Arc<dyn SystemClock>,
     /// The random number generator to use for randomness.
     pub(crate) rand: Arc<DbRand>,
+    #[cfg(feature = "compaction_filters")]
+    pub(crate) compaction_filter_supplier:
+        Option<Arc<dyn crate::compaction_filter::CompactionFilterSupplier>>,
 }
 
 impl Admin {
@@ -298,17 +301,27 @@ impl Admin {
     ///
     /// This method blocks until `cancellation_token` is cancelled, at which point it requests a
     /// graceful shutdown and waits for the compactor to stop.
+    ///
+    /// To use compaction filters with the standalone compactor, configure the `AdminBuilder`
+    /// with [`AdminBuilder::with_compaction_filter_supplier`] before building.
     pub async fn run_compactor(
         &self,
         cancellation_token: CancellationToken,
     ) -> Result<(), crate::Error> {
-        let compactor = crate::CompactorBuilder::new(
+        #[allow(unused_mut)]
+        let mut builder = crate::CompactorBuilder::new(
             self.path.clone(),
             self.object_stores.store_of(ObjectStoreType::Main).clone(),
         )
         .with_system_clock(self.system_clock.clone())
-        .with_seed(self.rand.seed())
-        .build();
+        .with_seed(self.rand.seed());
+
+        #[cfg(feature = "compaction_filters")]
+        if let Some(supplier) = &self.compaction_filter_supplier {
+            builder = builder.with_compaction_filter_supplier(supplier.clone());
+        }
+
+        let compactor = builder.build();
 
         let mut run_task = tokio::spawn({
             let compactor = compactor.clone();
@@ -906,5 +919,49 @@ mod tests {
         assert_eq!(compaction.spec().destination(), 3);
         assert_eq!(compaction.spec().sources(), &vec![SourceId::SortedRun(3)]);
         assert_eq!(compaction.status(), CompactionStatus::Submitted);
+    }
+
+    #[cfg(feature = "compaction_filters")]
+    #[test]
+    fn test_admin_builder_with_compaction_filter_supplier() {
+        use crate::compaction_filter::{
+            CompactionFilter, CompactionFilterDecision, CompactionFilterError,
+            CompactionFilterSupplier, CompactionJobContext,
+        };
+        use crate::types::RowEntry;
+
+        struct NoopFilter;
+
+        #[async_trait::async_trait]
+        impl CompactionFilter for NoopFilter {
+            async fn filter(
+                &mut self,
+                _entry: &RowEntry,
+            ) -> Result<CompactionFilterDecision, CompactionFilterError> {
+                Ok(CompactionFilterDecision::Keep)
+            }
+            async fn on_compaction_end(&mut self) -> Result<(), CompactionFilterError> {
+                Ok(())
+            }
+        }
+
+        struct NoopFilterSupplier;
+
+        #[async_trait::async_trait]
+        impl CompactionFilterSupplier for NoopFilterSupplier {
+            async fn create_compaction_filter(
+                &self,
+                _context: &CompactionJobContext,
+            ) -> Result<Box<dyn CompactionFilter>, CompactionFilterError> {
+                Ok(Box::new(NoopFilter))
+            }
+        }
+
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let admin = AdminBuilder::new("/tmp/test_filter_supplier", object_store)
+            .with_compaction_filter_supplier(Arc::new(NoopFilterSupplier))
+            .build();
+
+        assert!(admin.compaction_filter_supplier.is_some());
     }
 }

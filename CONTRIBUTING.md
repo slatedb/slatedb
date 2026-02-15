@@ -23,6 +23,8 @@ When you submit a pull request, a CLA bot will automatically determine whether y
 a CLA and decorate the PR appropriately (e.g., status check, comment). Simply follow the instructions
 provided by the bot. You will only need to do this once across all repos using our CLA.
 
+The CLA text is also available [here](https://gist.github.com/criccomini/5ea2c60fe2ec791d91aa05d165060b9c).
+
 ## AI Generated Pull Requests
 
 AI-generated (or largerly generated) pull requests are welcome, provided that you:

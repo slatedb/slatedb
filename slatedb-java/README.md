@@ -58,6 +58,7 @@ import io.slatedb.SlateDbKeyValue;
 import io.slatedb.SlateDbScanIterator;
 import io.slatedb.SlateDb;
 import io.slatedb.SlateDbWriteBatch;
+import io.slatedb.SlateDbConfig;
 
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -65,13 +66,7 @@ import java.nio.file.Path;
 
 public final class HelloSlateDb {
     public static void main(String[] args) throws Exception {
-        if (args.length != 1) {
-            System.err.println("Usage: HelloSlateDb <absolute path to slatedb_c native library>");
-            System.exit(2);
-        }
-
-        // Load the native library and initialize logging
-        SlateDb.loadLibrary(args[0]);
+        // Initialize logging (native library resolves via java.library.path)
         SlateDb.initLogging(SlateDbConfig.LogLevel.INFO);
 
         // Local database path and local object store
@@ -119,15 +114,7 @@ public final class HelloSlateDb {
 javac -cp slatedb-java/build/libs/slatedb-<version>.jar HelloSlateDb.java
 ```
 
-3. Run (use the path to your `slatedb_c` native library):
-
-```bash
-java --enable-native-access=ALL-UNNAMED \
-  -cp slatedb-java/build/libs/slatedb-<version>.jar:. \
-  HelloSlateDb /absolute/path/to/libslatedb_c.dylib
-```
-
-If you prefer `java.library.path` instead of `SlateDb.loadLibrary(path)`, set the directory containing the native library and call `SlateDb.loadLibrary()` with no arguments.
+3. Run (set `java.library.path` to the directory containing your `slatedb_c` native library):
 
 ```bash
 java --enable-native-access=ALL-UNNAMED \
@@ -158,7 +145,7 @@ You can configure SlateDB with JSON settings or a builder:
 ```java
 String settings = SlateDb.settingsDefault();
 
-try (SlateDb.Builder builder = SlateDb.builder(dbPath, objectStoreUrl, null)) {
+try (SlateDb.Builder builder = SlateDb.builder(dbPath.toString(), objectStoreUrl, null)) {
     builder.withSettingsJson(settings)
            .withSstBlockSize(SlateDbConfig.SstBlockSize.KIB_4);
     try (SlateDb db = builder.build()) {
@@ -175,12 +162,15 @@ The settings helpers:
 
 ## Testing
 
-JUnit tests require access to the native library. Set one of these before running tests:
+JUnit tests require access to the native library.
 
-- `SLATEDB_C_LIB=/absolute/path/to/libslatedb_c.dylib`
-- `-Dslatedb.c.lib=/absolute/path/to/libslatedb_c.dylib`
+Build the native library first:
 
-If unset, tests will try to load `libslatedb_c.<os extension>` from `target/debug` or `target/release`.
+```bash
+cargo build -p slatedb-c
+```
+
+The Gradle test task configures `java.library.path` to include `target/release` and `target/debug`.
 
 Then run:
 
@@ -191,7 +181,7 @@ Then run:
 ## Troubleshooting
 
 Common issues:
-- `UnsatisfiedLinkError`: The JVM cannot find `slatedb_c`. Verify `java.library.path` or call `SlateDb.loadLibrary(<absolute path>)`.
+- `UnsatisfiedLinkError`: The JVM cannot find `slatedb_c`. Verify `java.library.path` includes the native library directory.
 - Native access warnings: Use `--enable-native-access=ALL-UNNAMED` when running or testing.
 
 ## License

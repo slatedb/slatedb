@@ -26,6 +26,7 @@ const NUM_FOOTER_BYTES_LONG: u64 = NUM_FOOTER_BYTES as u64;
 const SEQNUM_SIZE: usize = size_of::<u64>();
 pub(crate) const SST_FORMAT_VERSION: u16 = 1;
 pub(crate) const SST_FORMAT_VERSION_V2: u16 = 2;
+pub(crate) const SST_FORMAT_VERSION_LATEST: u16 = SST_FORMAT_VERSION_V2;
 
 fn is_supported_version(version: u16) -> bool {
     matches!(version, SST_FORMAT_VERSION | SST_FORMAT_VERSION_V2)
@@ -44,6 +45,10 @@ impl BlockBuilder {
 
     pub(crate) fn new_v2(block_size: usize) -> Self {
         Self::V2(BlockBuilderV2::new(block_size))
+    }
+
+    pub(crate) fn new_latest(block_size: usize) -> Self {
+        Self::new_v2(block_size)
     }
 
     #[cfg(test)]
@@ -478,6 +483,8 @@ pub(crate) async fn transform(
     Ok(transformed)
 }
 
+pub(crate) type OffsetAndVersion = (u64, u16);
+
 #[derive(Clone)]
 pub(crate) struct SsTableFormat {
     pub(crate) block_size: usize,
@@ -486,6 +493,7 @@ pub(crate) struct SsTableFormat {
     pub(crate) filter_bits_per_key: u32,
     pub(crate) compression_codec: Option<CompressionCodec>,
     pub(crate) block_transformer: Option<Arc<dyn BlockTransformer>>,
+    pub(crate) block_format: Option<crate::sst_builder::BlockFormat>,
 }
 
 impl Default for SsTableFormat {
@@ -497,15 +505,16 @@ impl Default for SsTableFormat {
             filter_bits_per_key: 10,
             compression_codec: None,
             block_transformer: None,
+            block_format: None,
         }
     }
 }
 
 impl SsTableFormat {
-    async fn read_footer_header(
+    async fn read_metadata_offset_and_version(
         &self,
         obj: &impl ReadOnlyBlob,
-    ) -> Result<(u64, u16), SlateDBError> {
+    ) -> Result<OffsetAndVersion, SlateDBError> {
         let obj_len = obj.len().await?;
         if obj_len <= NUM_FOOTER_BYTES_LONG {
             return Err(SlateDBError::EmptySSTable);
@@ -513,7 +522,7 @@ impl SsTableFormat {
         let header = obj
             .read_range((obj_len - NUM_FOOTER_BYTES_LONG)..obj_len)
             .await?;
-        assert!(header.len() == NUM_FOOTER_BYTES);
+        assert_eq!(header.len(), NUM_FOOTER_BYTES);
 
         let version = header.slice(8..NUM_FOOTER_BYTES).get_u16();
         let sst_metadata_offset = header.slice(0..8).get_u64();
@@ -532,7 +541,7 @@ impl SsTableFormat {
     }
 
     pub(crate) async fn read_version(&self, obj: &impl ReadOnlyBlob) -> Result<u16, SlateDBError> {
-        let (_, version) = self.read_footer_header(obj).await?;
+        let (_, version) = self.read_metadata_offset_and_version(obj).await?;
         self.validate_version(version)?;
         Ok(version)
     }
@@ -541,7 +550,7 @@ impl SsTableFormat {
         &self,
         obj: &impl ReadOnlyBlob,
     ) -> Result<SsTableInfo, SlateDBError> {
-        let (sst_metadata_offset, version) = self.read_footer_header(obj).await?;
+        let (sst_metadata_offset, version) = self.read_metadata_offset_and_version(obj).await?;
         self.validate_version(version)?;
         let obj_len = obj.len().await?;
         let sst_metadata_bytes = obj

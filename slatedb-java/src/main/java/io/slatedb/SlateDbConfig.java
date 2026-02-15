@@ -10,33 +10,49 @@ public final class SlateDbConfig {
 
     /// Durability level used for reads and scans.
     public enum Durability {
-        MEMORY(0),
-        REMOTE(1);
+        MEMORY((byte) 0),
+        REMOTE((byte) 1);
 
-        private final int code;
+        private final byte code;
 
-        Durability(int code) {
+        Durability(byte code) {
             this.code = code;
         }
 
-        int code() {
+        byte code() {
             return code;
         }
     }
 
     /// TTL behavior for put operations.
     public enum TtlType {
-        DEFAULT(0),
-        NO_EXPIRY(1),
-        EXPIRE_AFTER(2);
+        DEFAULT((byte) 0),
+        NO_EXPIRY((byte) 1),
+        EXPIRE_AFTER((byte) 2);
 
-        private final int code;
+        private final byte code;
 
-        TtlType(int code) {
+        TtlType(byte code) {
             this.code = code;
         }
 
-        int code() {
+        byte code() {
+            return code;
+        }
+    }
+
+    /// Flush targets supported by explicit flush operations.
+    public enum FlushType {
+        MEMTABLE((byte) 0),
+        WAL((byte) 1);
+
+        private final byte code;
+
+        FlushType(byte code) {
+            this.code = code;
+        }
+
+        byte code() {
             return code;
         }
     }
@@ -71,16 +87,23 @@ public final class SlateDbConfig {
 
     /// Log levels supported by SlateDB logging.
     public enum LogLevel {
-        TRACE("trace"),
-        DEBUG("debug"),
-        INFO("info"),
-        WARN("warn"),
-        ERROR("error");
+        OFF((byte) 0, "off"),
+        ERROR((byte) 1, "error"),
+        WARN((byte) 2, "warn"),
+        INFO((byte) 3, "info"),
+        DEBUG((byte) 4, "debug"),
+        TRACE((byte) 5, "trace");
 
+        private final byte code;
         private final String value;
 
-        LogLevel(String value) {
+        LogLevel(byte code, String value) {
+            this.code = code;
             this.value = value;
+        }
+
+        byte code() {
+            return code;
         }
 
         public String value() {

@@ -62,8 +62,15 @@ use atomic::{Atomic, Ordering};
 use bytemuck::NoUninit;
 use log::warn;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MetricType {
+    Counter,
+    Gauge,
+}
+
 pub trait ReadableStat: Send + Sync + std::fmt::Debug {
     fn get(&self) -> i64;
+    fn metric_type(&self) -> MetricType;
 }
 
 pub struct StatRegistry {
@@ -119,6 +126,10 @@ impl ReadableStat for Counter {
     fn get(&self) -> i64 {
         self.value.load(Ordering::Relaxed) as i64
     }
+
+    fn metric_type(&self) -> MetricType {
+        MetricType::Counter
+    }
 }
 
 impl Counter {
@@ -154,11 +165,19 @@ impl ReadableStat for Gauge<i32> {
     fn get(&self) -> i64 {
         self.value() as i64
     }
+
+    fn metric_type(&self) -> MetricType {
+        MetricType::Gauge
+    }
 }
 
 impl ReadableStat for Gauge<i64> {
     fn get(&self) -> i64 {
         self.value()
+    }
+
+    fn metric_type(&self) -> MetricType {
+        MetricType::Gauge
     }
 }
 
@@ -166,11 +185,19 @@ impl ReadableStat for Gauge<u64> {
     fn get(&self) -> i64 {
         self.value() as i64
     }
+
+    fn metric_type(&self) -> MetricType {
+        MetricType::Gauge
+    }
 }
 
 impl ReadableStat for Gauge<bool> {
     fn get(&self) -> i64 {
         self.value() as i64
+    }
+
+    fn metric_type(&self) -> MetricType {
+        MetricType::Gauge
     }
 }
 
@@ -287,6 +314,26 @@ mod tests {
         assert_eq!(gauge.get(), true as i64);
         gauge.set(false);
         assert_eq!(gauge.get(), false as i64);
+    }
+
+    #[test]
+    fn test_should_expose_metric_type_via_registry() {
+        // given
+        let registry = StatRegistry::new();
+        let counter = Arc::new(Counter::default());
+        registry.register("counter", counter);
+        let gauge = Arc::new(Gauge::<i64>::default());
+        registry.register("gauge", gauge);
+
+        // when/then
+        assert_eq!(
+            registry.lookup("counter").unwrap().metric_type(),
+            MetricType::Counter
+        );
+        assert_eq!(
+            registry.lookup("gauge").unwrap().metric_type(),
+            MetricType::Gauge
+        );
     }
 
     #[test]

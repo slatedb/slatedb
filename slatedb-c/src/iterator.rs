@@ -1,123 +1,148 @@
-use crate::error::{
-    create_error_result, create_success_result, slate_error_to_code, CSdbError, CSdbResult,
+//! Iterator APIs for `slatedb-c`.
+//!
+//! This module exposes C ABI functions for consuming database scan iterators.
+
+use crate::ffi::{
+    alloc_bytes, bytes_from_ptr, error_from_slate_error, require_handle, require_out_ptr,
+    slatedb_iterator_t, slatedb_result_t, success_result,
 };
-use crate::types::{CSdbIterator, CSdbKeyValue};
 
-// ============================================================================
-// Iterator Functions
-// ============================================================================
-
-/// # Safety
+/// Retrieves the next key/value pair from an iterator.
 ///
-/// - `iter` must be a valid pointer to a CSdbIterator
-/// - `kv_out` must be a valid pointer to a location where a key-value pair can be stored
+/// ## Arguments
+/// - `iterator`: Iterator handle created by scan APIs.
+/// - `out_present`: Set to `true` when a row is returned.
+/// - `out_key`: Output key buffer pointer (allocated by Rust).
+/// - `out_key_len`: Output key length.
+/// - `out_val`: Output value buffer pointer (allocated by Rust).
+/// - `out_val_len`: Output value length.
+///
+/// ## Returns
+/// - `slatedb_result_t` with `kind == SLATEDB_ERROR_KIND_NONE` on success.
+///
+/// ## Errors
+/// - Returns `SLATEDB_ERROR_KIND_INVALID` for null pointers or invalid handles.
+/// - Returns mapped SlateDB error kinds if iteration fails.
+///
+/// ## Safety
+/// - All output pointers must be valid, non-null writable pointers.
+/// - Buffers returned in `out_key`/`out_val` must be freed with
+///   `slatedb_bytes_free`.
 #[no_mangle]
 pub unsafe extern "C" fn slatedb_iterator_next(
-    iter: *mut CSdbIterator,
-    kv_out: *mut CSdbKeyValue,
-) -> CSdbResult {
-    if iter.is_null() {
-        return create_error_result(CSdbError::NullPointer, "Iterator pointer is null");
+    iterator: *mut slatedb_iterator_t,
+    out_present: *mut bool,
+    out_key: *mut *mut u8,
+    out_key_len: *mut usize,
+    out_val: *mut *mut u8,
+    out_val_len: *mut usize,
+) -> slatedb_result_t {
+    if let Err(err) = require_handle(iterator, "iterator") {
+        return err;
+    }
+    if let Err(err) = require_out_ptr(out_key, "out_key") {
+        return err;
+    }
+    if let Err(err) = require_out_ptr(out_key_len, "out_key_len") {
+        return err;
+    }
+    if let Err(err) = require_out_ptr(out_val, "out_val") {
+        return err;
+    }
+    if let Err(err) = require_out_ptr(out_val_len, "out_val_len") {
+        return err;
+    }
+    if let Err(err) = require_out_ptr(out_present, "out_present") {
+        return err;
     }
 
-    if kv_out.is_null() {
-        return create_error_result(CSdbError::NullPointer, "Output pointer is null");
-    }
+    *out_present = false;
+    *out_key = std::ptr::null_mut();
+    *out_key_len = 0;
+    *out_val = std::ptr::null_mut();
+    *out_val_len = 0;
 
-    let iter_ffi = unsafe { &mut *iter };
-    let owner = iter_ffi.owner();
-
-    // Validate owner pointer is still alive (basic check)
-    if !iter_ffi.is_owner_valid() {
-        return create_error_result(CSdbError::InvalidHandle, "Invalid database handle");
-    }
-
-    match CSdbIterator::block_on_with_owner(owner, iter_ffi.iter.next()) {
+    let handle = &mut *iterator;
+    match handle.runtime.block_on(handle.iter.next()) {
         Ok(Some(kv)) => {
-            // Allocate memory for key and value using Box
-            let key_len = kv.key.len();
-            let value_len = kv.value.len();
-
-            // Create boxed byte arrays and leak them to get raw pointers
-            let key_bytes = kv.key.to_vec().into_boxed_slice();
-            let key_ptr = Box::into_raw(key_bytes) as *mut u8;
-
-            let value_bytes = kv.value.to_vec().into_boxed_slice();
-            let value_ptr = Box::into_raw(value_bytes) as *mut u8;
-
-            unsafe {
-                (*kv_out).key.data = key_ptr;
-                (*kv_out).key.len = key_len;
-                (*kv_out).value.data = value_ptr;
-                (*kv_out).value.len = value_len;
-            }
-
-            create_success_result()
+            let (key, key_len) = alloc_bytes(kv.key.as_ref());
+            let (val, val_len) = alloc_bytes(kv.value.as_ref());
+            *out_key = key;
+            *out_key_len = key_len;
+            *out_val = val;
+            *out_val_len = val_len;
+            *out_present = true;
+            success_result()
         }
         Ok(None) => {
-            // End of iteration - return NotFound to indicate end
-            create_error_result(CSdbError::NotFound, "End of iteration")
+            *out_present = false;
+            success_result()
         }
-        Err(e) => {
-            let error_code = slate_error_to_code(&e);
-            create_error_result(error_code, &format!("Iterator next failed: {}", e))
-        }
+        Err(err) => error_from_slate_error(&err),
     }
 }
 
-/// # Safety
+/// Seeks the iterator to the first key greater than or equal to `key`.
 ///
-/// - `iter` must be a valid pointer to a CSdbIterator
-/// - `key` must point to valid memory of at least `key_len` bytes
+/// ## Arguments
+/// - `iterator`: Iterator handle.
+/// - `key`: Seek target key bytes.
+/// - `key_len`: Length of `key`.
+///
+/// ## Returns
+/// - `slatedb_result_t` describing success or failure.
+///
+/// ## Errors
+/// - Returns `SLATEDB_ERROR_KIND_INVALID` for invalid handles/pointers.
+/// - Returns mapped SlateDB error kinds for seek failures.
+///
+/// ## Safety
+/// - `iterator` must be a valid iterator handle.
+/// - `key` must reference at least `key_len` readable bytes when `key_len > 0`.
 #[no_mangle]
 pub unsafe extern "C" fn slatedb_iterator_seek(
-    iter: *mut CSdbIterator,
+    iterator: *mut slatedb_iterator_t,
     key: *const u8,
     key_len: usize,
-) -> CSdbResult {
-    if iter.is_null() {
-        return create_error_result(CSdbError::NullPointer, "Iterator pointer is null");
+) -> slatedb_result_t {
+    if let Err(err) = require_handle(iterator, "iterator") {
+        return err;
     }
 
-    if key.is_null() || key_len == 0 {
-        return create_error_result(
-            CSdbError::InvalidArgument,
-            "Seek key cannot be null or empty",
-        );
-    }
+    let key = match bytes_from_ptr(key, key_len, "key") {
+        Ok(key) => key,
+        Err(err) => return err,
+    };
 
-    let iter_ffi = unsafe { &mut *iter };
-    let owner = iter_ffi.owner();
-
-    // Validate owner pointer is still alive (basic check)
-    if !iter_ffi.is_owner_valid() {
-        return create_error_result(CSdbError::InvalidHandle, "Invalid database handle");
-    }
-
-    let key_slice = unsafe { std::slice::from_raw_parts(key, key_len) };
-
-    match CSdbIterator::block_on_with_owner(owner, iter_ffi.iter.seek(key_slice)) {
-        Ok(_) => create_success_result(),
-        Err(e) => {
-            let error_code = slate_error_to_code(&e);
-            create_error_result(error_code, &format!("Iterator seek failed: {}", e))
-        }
+    let handle = &mut *iterator;
+    match handle.runtime.block_on(handle.iter.seek(key)) {
+        Ok(()) => success_result(),
+        Err(err) => error_from_slate_error(&err),
     }
 }
 
-/// # Safety
+/// Closes and frees an iterator handle.
 ///
-/// - `iter` must be a valid pointer to a CSdbIterator that was previously allocated
+/// ## Arguments
+/// - `iterator`: Iterator handle previously returned from scan APIs.
+///
+/// ## Returns
+/// - `slatedb_result_t` indicating success/failure.
+///
+/// ## Errors
+/// - Returns `SLATEDB_ERROR_KIND_INVALID` when `iterator` is null.
+///
+/// ## Safety
+/// - `iterator` must be a valid non-null handle obtained from this library.
 #[no_mangle]
-pub unsafe extern "C" fn slatedb_iterator_close(iter: *mut CSdbIterator) -> CSdbResult {
-    if iter.is_null() {
-        return create_error_result(CSdbError::NullPointer, "Iterator pointer is null");
+pub unsafe extern "C" fn slatedb_iterator_close(
+    iterator: *mut slatedb_iterator_t,
+) -> slatedb_result_t {
+    if let Err(err) = require_handle(iterator, "iterator") {
+        return err;
     }
 
-    // Simply drop the iterator - this frees all resources
-    unsafe {
-        let _ = Box::from_raw(iter); // Explicitly drop the Box
-    }
+    let _ = Box::from_raw(iterator);
 
-    create_success_result()
+    success_result()
 }

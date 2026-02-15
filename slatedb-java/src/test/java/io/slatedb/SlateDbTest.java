@@ -1,6 +1,12 @@
 package io.slatedb;
 
 import org.junit.jupiter.api.Assertions;
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import org.junit.jupiter.api.Test;
 
 import java.nio.charset.StandardCharsets;
@@ -8,7 +14,6 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 
 class SlateDbTest {
-    private static final int ERROR_INTERNAL = 5;
     @Test
     void openPutGetClose() throws Exception {
         TestSupport.ensureNativeReady();
@@ -113,12 +118,21 @@ class SlateDbTest {
         TestSupport.ensureNativeReady();
         TestSupport.DbContext context = TestSupport.createDbContext();
 
-        SlateDb.SlateDbException failure = Assertions.assertThrows(
-            SlateDb.SlateDbException.class,
+        SlateDbException failure = Assertions.assertThrows(
+            SlateDbException.class,
             () -> SlateDb.builder(context.dbPath().toAbsolutePath().toString(), "bogus://", null)
         );
-        Assertions.assertEquals(ERROR_INTERNAL, failure.getErrorCode());
+        Assertions.assertFalse(failure instanceof SlateDbException.ClosedException);
         Assertions.assertNotNull(failure.getMessage());
+        Assertions.assertFalse(failure.getMessage().isBlank());
+    }
+
+    @Test
+    void closedExceptionCarriesCloseReasonDetails() {
+        SlateDbException closed = new SlateDbException.ClosedException("fenced", 2, "closed");
+        SlateDbException.ClosedException closedError = assertInstanceOf(SlateDbException.ClosedException.class, closed);
+        assertEquals("fenced", closedError.getCloseReason());
+        assertEquals(2, closedError.getCloseReasonCode());
     }
 
     @Test
@@ -135,10 +149,8 @@ class SlateDbTest {
                 IllegalArgumentException.class,
                 () -> builder.withSettingsJson("{\"broken\":")
             );
-            Assertions.assertTrue(
-                failure.getMessage() != null && failure.getMessage().contains("Invalid settings json"),
-                "Expected native error message to mention invalid settings json"
-            );
+            Assertions.assertNotNull(failure.getMessage());
+            Assertions.assertFalse(failure.getMessage().isBlank());
         }
     }
 
@@ -177,26 +189,26 @@ class SlateDbTest {
     @Test
     void putGetDeleteWithOptionsAndMetrics() throws Exception {
         TestSupport.ensureNativeReady();
-        TestSupport.DbContext context = TestSupport.createDbContext();
+        final var context = TestSupport.createDbContext();
 
-        byte[] key = "opts-key".getBytes(StandardCharsets.UTF_8);
-        byte[] value = "opts-value".getBytes(StandardCharsets.UTF_8);
+        final var key = "opts-key".getBytes(StandardCharsets.UTF_8);
+        final var value = "opts-value".getBytes(StandardCharsets.UTF_8);
 
-        try (SlateDb db = SlateDb.open(context.dbPath().toAbsolutePath().toString(), context.objectStoreUrl(), null)) {
+        try (final SlateDb db = SlateDb.open(context.dbPath().toAbsolutePath().toString(), context.objectStoreUrl(), null)) {
             db.put(key, value, SlateDbConfig.PutOptions.noExpiry(), new SlateDbConfig.WriteOptions(false));
-            SlateDbConfig.ReadOptions readOptions = SlateDbConfig.ReadOptions.builder()
+            final var readOptions = SlateDbConfig.ReadOptions.builder()
                 .durabilityFilter(SlateDbConfig.Durability.MEMORY)
                 .dirty(false)
                 .cacheBlocks(true)
                 .build();
-            Assertions.assertArrayEquals(value, db.get(key, readOptions));
+            assertArrayEquals(value, db.get(key, readOptions));
 
             db.delete(key, new SlateDbConfig.WriteOptions(false));
-            Assertions.assertNull(db.get(key));
+            assertNull(db.get(key));
 
-            String metrics = db.metrics();
-            Assertions.assertNotNull(metrics);
-            Assertions.assertTrue(metrics.startsWith("{"));
+            final var metrics = db.metrics();
+            assertNotNull(metrics);
+            assertTrue(metrics.startsWith("{"));
         }
     }
 }

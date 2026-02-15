@@ -136,6 +136,12 @@ jobs:
 
   transaction-benchmarks:
     runs-on: warp-ubuntu-latest-x64-16x
+    # Must run after `benchmarks` because both jobs clear the same bucket prefix;
+    # running concurrently can delete each other's manifest/object files mid-run.
+    # This also reduces noise between the two tests since the bucket's resources
+    # (network, disk, etc) should be used by only one test at a time, giving more
+    # stable results.
+    needs: benchmarks
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4

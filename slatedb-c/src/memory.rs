@@ -1,11 +1,22 @@
+//! Memory-management helper APIs for `slatedb-c`.
+//!
+//! These functions free Rust-allocated buffers returned by FFI calls.
+
+use crate::ffi::slatedb_result_t;
 use std::ffi::CString;
 
-use crate::error::CSdbResult;
-use crate::types::{CSdbScanResult, CSdbValue};
-
-// Memory management functions
+/// Frees heap memory referenced by `slatedb_result_t.message`.
+///
+/// ## Arguments
+/// - `result`: Result value returned by a SlateDB C API function.
+///
+/// ## Returns
+/// - No return value.
+///
+/// ## Safety
+/// - `result.message` must be either null or a pointer returned by this crate.
 #[no_mangle]
-pub extern "C" fn slatedb_free_result(result: CSdbResult) {
+pub extern "C" fn slatedb_result_free(result: slatedb_result_t) {
     if !result.message.is_null() {
         unsafe {
             let _ = CString::from_raw(result.message);
@@ -13,36 +24,23 @@ pub extern "C" fn slatedb_free_result(result: CSdbResult) {
     }
 }
 
+/// Frees a byte buffer allocated by SlateDB C APIs.
+///
+/// ## Arguments
+/// - `data`: Byte pointer returned by this crate.
+/// - `len`: Buffer length associated with `data`.
+///
+/// ## Returns
+/// - No return value.
+///
+/// ## Safety
+/// - `data`/`len` must exactly match a buffer allocated by this crate.
+/// - Do not call more than once for the same allocation.
 #[no_mangle]
-pub extern "C" fn slatedb_free_value(value: CSdbValue) {
-    if !value.data.is_null() && value.len > 0 {
+pub extern "C" fn slatedb_bytes_free(data: *mut u8, len: usize) {
+    if !data.is_null() && len > 0 {
         unsafe {
-            let _ = Box::from_raw(std::ptr::slice_from_raw_parts_mut(value.data, value.len));
+            let _ = Box::from_raw(std::ptr::slice_from_raw_parts_mut(data, len));
         }
-    }
-}
-
-#[no_mangle]
-pub extern "C" fn slatedb_free_scan_result(result: CSdbScanResult) {
-    if !result.items.is_null() && result.count > 0 {
-        unsafe {
-            // Convert back to Box to free properly
-            let items_boxed = Box::from_raw(std::ptr::slice_from_raw_parts_mut(
-                result.items,
-                result.count,
-            ));
-
-            // Free each individual key/value
-            for item in items_boxed.iter() {
-                slatedb_free_value(item.key);
-                slatedb_free_value(item.value);
-            }
-            // items_boxed is automatically dropped here
-        }
-    }
-
-    // Free the next_key if it's set
-    if !result.next_key.data.is_null() && result.next_key.len > 0 {
-        slatedb_free_value(result.next_key);
     }
 }
