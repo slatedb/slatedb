@@ -94,11 +94,11 @@ impl MessageHandler<WriteBatchMessage> for WriteBatchEventHandler {
         // their memtables in a timely manner.
         if self.is_first_write && !self.db_inner.wal_enabled && options.await_durable {
             self.is_first_write = false;
-            if let Ok((_, Some(this_watcher))) = &result {
-                let this_watcher = this_watcher.clone();
+            let (_, maybe_watcher) = result.clone()?;
+            if let Some(watcher) = maybe_watcher {
                 let this_clock = self.db_inner.system_clock.clone();
                 tokio::spawn(async move {
-                    monitor_first_write(this_watcher, this_clock).await;
+                    monitor_first_write(watcher, this_clock).await;
                 });
             }
         }
