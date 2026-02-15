@@ -67,6 +67,7 @@ use crate::sst_iter::SstIteratorOptions;
 use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
 use crate::transaction_manager::TransactionManager;
+use crate::types::RowEntry;
 use crate::utils::{format_bytes_si, MonotonicSeq, SendSafely};
 use crate::wal_buffer::{WalBufferManager, WAL_BUFFER_TASK_NAME};
 use crate::wal_replay::{WalReplayIterator, WalReplayOptions};
@@ -217,6 +218,32 @@ impl DbInner {
         self.reader
             .get_with_options(key, options, &db_state, None, None)
             .await
+    }
+
+    /// Get the full row entry for a given key.
+    pub(crate) async fn get_row_with_options<K: AsRef<[u8]>>(
+        &self,
+        key: K,
+        options: &ReadOptions,
+    ) -> Result<Option<RowEntry>, SlateDBError> {
+        self.db_stats.get_requests.inc();
+        self.status()?;
+        let range = BytesRange::from(
+            Bytes::copy_from_slice(key.as_ref())..=Bytes::copy_from_slice(key.as_ref()),
+        );
+        let scan_options = ScanOptions {
+            durability_filter: options.durability_filter,
+            dirty: options.dirty,
+            cache_blocks: options.cache_blocks,
+            ..Default::default()
+        };
+        let mut iter = self.scan_with_options(range, &scan_options).await?;
+        iter.next_row().await.map_err(|e| {
+            SlateDBError::IoError(Arc::new(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                e.to_string(),
+            )))
+        })
     }
 
     pub(crate) async fn scan_with_options(
@@ -702,6 +729,23 @@ impl Db {
     ///     Ok(())
     /// }
     /// ```
+    pub async fn get_row<K: AsRef<[u8]>>(&self, key: K) -> Result<Option<RowEntry>, crate::Error> {
+        self.get_row_with_options(key, &ReadOptions::default())
+            .await
+            .map_err(Into::into)
+    }
+
+    pub async fn get_row_with_options<K: AsRef<[u8]>>(
+        &self,
+        key: K,
+        options: &ReadOptions,
+    ) -> Result<Option<RowEntry>, crate::Error> {
+        self.inner
+            .get_row_with_options(key, options)
+            .await
+            .map_err(Into::into)
+    }
+
     pub async fn open<P: Into<Path>>(
         path: P,
         object_store: Arc<dyn ObjectStore>,
@@ -6450,5 +6494,25 @@ mod tests {
             .unwrap();
         assert_eq!(handle.seqnum(), 3);
         assert_eq!(handle.create_ts(), Some(300));
+    }
+    #[tokio::test]
+    async fn test_get_row() {
+        use crate::types::ValueDeletable;
+        use object_store::memory::InMemory;
+
+        let object_store = Arc::new(InMemory::new());
+        let db = Db::open(Path::from("/tmp/test_get_row"), object_store)
+            .await
+            .unwrap();
+
+        let key = b"key1";
+        let value = b"value1";
+        db.put(key, value).await.unwrap();
+
+        let row = db.get_row(key).await.unwrap().unwrap();
+        assert_eq!(row.key, Bytes::from_static(key));
+        assert_eq!(row.value, ValueDeletable::Value(Bytes::from_static(value)));
+        // Sequence number should be consistent, but exact value depends on impl details
+        assert!(row.seq > 0);
     }
 }

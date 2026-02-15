@@ -292,23 +292,34 @@ impl DbIterator {
     ///
     /// Returns [`Error`] if the iterator has been invalidated due to an underlying error.
     pub async fn next(&mut self) -> Result<Option<KeyValue>, crate::Error> {
-        self.next_key_value().await.map_err(Into::into)
+        let entry = self.next_row().await?;
+        if let Some(entry) = entry {
+            Ok(Some(KeyValue {
+                key: entry.key,
+                value: entry
+                    .value
+                    .as_bytes()
+                    .expect("Tombstones should be filtered out"),
+            }))
+        } else {
+            Ok(None)
+        }
     }
 
-    pub(crate) async fn next_key_value(&mut self) -> Result<Option<KeyValue>, SlateDBError> {
+    pub async fn next_row(&mut self) -> Result<Option<RowEntry>, crate::Error> {
         if let Some(error) = self.invalidated_error.clone() {
-            Err(error)
+            Err(error.into())
         } else {
-            let result = self.iter.next().await;
+            let result = self.iter.next_entry().await;
             let result = self.maybe_invalidate(result);
-            if let Ok(Some(ref kv)) = result {
-                self.last_key = Some(kv.key.clone());
+            if let Ok(Some(ref entry)) = result {
+                self.last_key = Some(entry.key.clone());
                 // Track the key in range tracker if present
                 if let Some(tracker) = &self.range_tracker {
-                    tracker.track_key(&kv.key);
+                    tracker.track_key(&entry.key);
                 }
             }
-            result
+            result.map_err(Into::into)
         }
     }
 
@@ -750,5 +761,42 @@ mod tests {
         // Should return None because the newer expired value becomes a tombstone
         // which hides the older non-expired value
         assert!(iter.next().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_next_row() {
+        use crate::types::ValueDeletable;
+        let entry = RowEntry::new(
+            Bytes::from_static(b"key1"),
+            ValueDeletable::Value(Bytes::from_static(b"value1")),
+            100,
+            Some(1000),
+            Some(2000),
+        );
+        let mem_iter = TestIterator::new().with_row_entry(entry);
+
+        let mut iter = DbIterator::new(
+            BytesRange::from(..),
+            None,
+            vec![Box::new(mem_iter) as Box<dyn KeyValueIterator + 'static>],
+            VecDeque::new(),
+            VecDeque::new(),
+            None,
+            None,
+            0,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let row = iter.next_row().await.unwrap().unwrap();
+        assert_eq!(row.key, Bytes::from_static(b"key1"));
+        assert_eq!(
+            row.value,
+            ValueDeletable::Value(Bytes::from_static(b"value1"))
+        );
+        assert_eq!(row.seq, 100);
+        assert_eq!(row.create_ts, Some(1000));
+        assert_eq!(row.expire_ts, Some(2000));
     }
 }
