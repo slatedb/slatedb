@@ -1,5 +1,6 @@
 use std::collections::VecDeque;
 use std::ops::{Range, RangeBounds};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -24,8 +25,96 @@ use crate::format::sst::{EncodedSsTable, SsTableFormat};
 use crate::object_stores::{ObjectStoreType, ObjectStores};
 use crate::paths::PathResolver;
 use crate::sst_builder::EncodedSsTableBuilder;
+use crate::stats::ReadableStat;
 use crate::types::RowEntry;
 use crate::wal::wal_sst_builder::EncodedWalSsTableBuilder;
+
+/// Stats tracked by ReadOnlyObject for each read operation
+#[derive(Default)]
+struct BlobReadStats {
+    read_count: AtomicU64,
+    bytes_read: AtomicU64,
+}
+
+impl BlobReadStats {
+    fn inc_reads(&self) {
+        self.read_count.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn add_bytes(&self, bytes: u64) {
+        self.bytes_read.fetch_add(bytes, Ordering::Relaxed);
+    }
+
+    fn read_count(&self) -> u64 {
+        self.read_count.load(Ordering::Relaxed)
+    }
+
+    fn bytes_read(&self) -> u64 {
+        self.bytes_read.load(Ordering::Relaxed)
+    }
+}
+
+/// Accumulated stats for TableStore operations
+#[derive(Default, Debug)]
+pub(crate) struct TableStoreStats {
+    reads_to_object_store: AtomicU64,
+    bytes_read_from_object_store: AtomicU64,
+}
+
+impl TableStoreStats {
+    fn accumulate(&self, blob_stats: &BlobReadStats) {
+        self.reads_to_object_store
+            .fetch_add(blob_stats.read_count(), Ordering::Relaxed);
+        self.bytes_read_from_object_store
+            .fetch_add(blob_stats.bytes_read(), Ordering::Relaxed);
+    }
+
+    pub(crate) fn reads_to_object_store(&self) -> u64 {
+        self.reads_to_object_store.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn bytes_read_from_object_store(&self) -> u64 {
+        self.bytes_read_from_object_store.load(Ordering::Relaxed)
+    }
+
+    /// Returns a ReadableStat for reads_to_object_store
+    pub(crate) fn reads_stat(self: &Arc<Self>) -> Arc<dyn ReadableStat> {
+        Arc::new(ReadsToObjectStoreStat {
+            stats: Arc::clone(self),
+        })
+    }
+
+    /// Returns a ReadableStat for bytes_read_from_object_store
+    pub(crate) fn bytes_stat(self: &Arc<Self>) -> Arc<dyn ReadableStat> {
+        Arc::new(BytesReadFromObjectStoreStat {
+            stats: Arc::clone(self),
+        })
+    }
+}
+
+/// ReadableStat wrapper for reads_to_object_store
+#[derive(Debug)]
+struct ReadsToObjectStoreStat {
+    stats: Arc<TableStoreStats>,
+}
+
+impl ReadableStat for ReadsToObjectStoreStat {
+    fn get(&self) -> i64 {
+        self.stats.reads_to_object_store() as i64
+    }
+}
+
+/// ReadableStat wrapper for bytes_read_from_object_store
+#[derive(Debug)]
+struct BytesReadFromObjectStoreStat {
+    stats: Arc<TableStoreStats>,
+}
+
+impl ReadableStat for BytesReadFromObjectStoreStat {
+    fn get(&self) -> i64 {
+        self.stats.bytes_read_from_object_store() as i64
+    }
+}
 
 pub(crate) struct TableStore {
     object_stores: ObjectStores,
@@ -35,27 +124,36 @@ pub(crate) struct TableStore {
     fp_registry: Arc<FailPointRegistry>,
     /// In-memory cache for data blocks, indices, and filters
     cache: Option<Arc<dyn DbCache>>,
+    /// Stats for tracking object store reads
+    stats: Arc<TableStoreStats>,
 }
 
-struct ReadOnlyObject {
+struct ReadOnlyObject<'a> {
     object_store: Arc<dyn ObjectStore>,
     path: Path,
+    stats: &'a BlobReadStats,
 }
 
-impl ReadOnlyBlob for ReadOnlyObject {
+impl ReadOnlyBlob for ReadOnlyObject<'_> {
     async fn len(&self) -> Result<u64, SlateDBError> {
+        // HEAD request counts as a read but transfers minimal bytes
+        self.stats.inc_reads();
         let object_metadata = self.object_store.head(&self.path).await?;
         Ok(object_metadata.size)
     }
 
     async fn read_range(&self, range: Range<u64>) -> Result<Bytes, SlateDBError> {
+        self.stats.inc_reads();
         let bytes = self.object_store.get_range(&self.path, range).await?;
+        self.stats.add_bytes(bytes.len() as u64);
         Ok(bytes)
     }
 
     async fn read(&self) -> Result<Bytes, SlateDBError> {
+        self.stats.inc_reads();
         let file = self.object_store.get(&self.path).await?;
         let bytes = file.bytes().await?;
+        self.stats.add_bytes(bytes.len() as u64);
         Ok(bytes)
     }
 }
@@ -99,7 +197,13 @@ impl TableStore {
             path_resolver,
             fp_registry,
             cache,
+            stats: Arc::new(TableStoreStats::default()),
         }
+    }
+
+    /// Get the accumulated stats for this TableStore
+    pub(crate) fn stats(&self) -> &Arc<TableStoreStats> {
+        &self.stats
     }
 
     /// Get the number of blocks for a size specified in bytes.
@@ -300,8 +404,15 @@ impl TableStore {
     pub(crate) async fn open_sst(&self, id: &SsTableId) -> Result<SsTableHandle, SlateDBError> {
         let object_store = self.object_stores.store_for(id);
         let path = self.path(id);
-        let obj = ReadOnlyObject { object_store, path };
-        let info = self.sst_format.read_info(&obj).await?;
+        let blob_stats = BlobReadStats::default();
+        let obj = ReadOnlyObject {
+            object_store,
+            path,
+            stats: &blob_stats,
+        };
+        let result = self.sst_format.read_info(&obj).await;
+        self.stats.accumulate(&blob_stats);
+        let info = result?;
         Ok(SsTableHandle::new(*id, info))
     }
 
@@ -311,7 +422,12 @@ impl TableStore {
     ) -> Result<u16, SlateDBError> {
         let object_store = self.object_stores.store_for(&handle.id);
         let path = self.path(&handle.id);
-        let obj = ReadOnlyObject { object_store, path };
+        let blob_stats = BlobReadStats::default();
+        let obj = ReadOnlyObject {
+            object_store,
+            path,
+            stats: &blob_stats,
+        };
         self.sst_format.read_version(&obj).await
     }
 
@@ -337,8 +453,15 @@ impl TableStore {
         }
         let object_store = self.object_stores.store_for(&handle.id);
         let path = self.path(&handle.id);
-        let obj = ReadOnlyObject { object_store, path };
-        let filter = self.sst_format.read_filter(&handle.info, &obj).await?;
+        let blob_stats = BlobReadStats::default();
+        let obj = ReadOnlyObject {
+            object_store,
+            path,
+            stats: &blob_stats,
+        };
+        let result = self.sst_format.read_filter(&handle.info, &obj).await;
+        self.stats.accumulate(&blob_stats);
+        let filter = result?;
         if cache_blocks {
             if let Some(ref cache) = self.cache {
                 if let Some(filter) = filter.as_ref() {
@@ -376,8 +499,15 @@ impl TableStore {
         }
         let object_store = self.object_stores.store_for(&handle.id);
         let path = self.path(&handle.id);
-        let obj = ReadOnlyObject { object_store, path };
-        let index = Arc::new(self.sst_format.read_index(&handle.info, &obj).await?);
+        let blob_stats = BlobReadStats::default();
+        let obj = ReadOnlyObject {
+            object_store,
+            path,
+            stats: &blob_stats,
+        };
+        let result = self.sst_format.read_index(&handle.info, &obj).await;
+        self.stats.accumulate(&blob_stats);
+        let index = Arc::new(result?);
         if cache_blocks {
             if let Some(ref cache) = self.cache {
                 cache
@@ -399,11 +529,25 @@ impl TableStore {
     ) -> Result<VecDeque<Block>, SlateDBError> {
         let object_store = self.object_stores.store_for(&handle.id);
         let path = self.path(&handle.id);
-        let obj = ReadOnlyObject { object_store, path };
-        let index = self.sst_format.read_index(&handle.info, &obj).await?;
-        self.sst_format
+        let blob_stats = BlobReadStats::default();
+        let obj = ReadOnlyObject {
+            object_store,
+            path,
+            stats: &blob_stats,
+        };
+        let index = match self.sst_format.read_index(&handle.info, &obj).await {
+            Ok(idx) => idx,
+            Err(e) => {
+                self.stats.accumulate(&blob_stats);
+                return Err(e);
+            }
+        };
+        let result = self
+            .sst_format
             .read_blocks(&handle.info, &index, blocks, &obj)
-            .await
+            .await;
+        self.stats.accumulate(&blob_stats);
+        result
     }
 
     /// Reads specified blocks from an SSTable using the provided index.
@@ -422,7 +566,12 @@ impl TableStore {
         // Create a ReadOnlyObject for accessing the SSTable file
         let object_store = self.object_stores.store_for(&handle.id);
         let path = self.path(&handle.id);
-        let obj = ReadOnlyObject { object_store, path };
+        let blob_stats = BlobReadStats::default();
+        let obj = ReadOnlyObject {
+            object_store,
+            path,
+            stats: &blob_stats,
+        };
         // Initialize the result vector and a vector to track uncached ranges
         let mut blocks_read = VecDeque::with_capacity(blocks.end - blocks.start);
         let mut uncached_ranges = Vec::new();
@@ -482,17 +631,34 @@ impl TableStore {
 
         // Merge uncached blocks with blocks_read and prepare blocks for caching
         let mut blocks_to_cache = vec![];
+        let mut read_error: Option<SlateDBError> = None;
         for (range, range_blocks) in uncached_ranges.into_iter().zip(uncached_blocks) {
-            let index_borrow = index.borrow();
-            for (block_num, block_read) in range.zip(range_blocks?) {
-                let block = Arc::new(block_read);
-                if cache_blocks {
-                    let block_meta = index_borrow.block_meta().get(block_num);
-                    let offset = block_meta.offset();
-                    blocks_to_cache.push((handle.id, offset, block.clone()));
+            match range_blocks {
+                Ok(range_blocks) => {
+                    let index_borrow = index.borrow();
+                    for (block_num, block_read) in range.zip(range_blocks) {
+                        let block = Arc::new(block_read);
+                        if cache_blocks {
+                            let block_meta = index_borrow.block_meta().get(block_num);
+                            let offset = block_meta.offset();
+                            blocks_to_cache.push((handle.id, offset, block.clone()));
+                        }
+                        blocks_read.insert(block_num - blocks.start, block);
+                    }
                 }
-                blocks_read.insert(block_num - blocks.start, block);
+                Err(e) => {
+                    read_error = Some(e);
+                    break;
+                }
             }
+        }
+
+        // Always accumulate stats, even on error
+        self.stats.accumulate(&blob_stats);
+
+        // Return error if any read failed
+        if let Some(e) = read_error {
+            return Err(e);
         }
 
         // Cache the newly read blocks if caching is enabled
@@ -516,11 +682,25 @@ impl TableStore {
     ) -> Result<Block, SlateDBError> {
         let object_store = self.object_stores.store_for(&handle.id);
         let path = self.path(&handle.id);
-        let obj = ReadOnlyObject { object_store, path };
-        let index = self.sst_format.read_index(&handle.info, &obj).await?;
-        self.sst_format
+        let blob_stats = BlobReadStats::default();
+        let obj = ReadOnlyObject {
+            object_store,
+            path,
+            stats: &blob_stats,
+        };
+        let index = match self.sst_format.read_index(&handle.info, &obj).await {
+            Ok(idx) => idx,
+            Err(e) => {
+                self.stats.accumulate(&blob_stats);
+                return Err(e);
+            }
+        };
+        let result = self
+            .sst_format
             .read_block(&handle.info, &index, block, &obj)
-            .await
+            .await;
+        self.stats.accumulate(&blob_stats);
+        result
     }
 
     fn path(&self, id: &SsTableId) -> Path {

@@ -136,6 +136,7 @@ use crate::db::DbInner;
 use crate::db_cache::SplitCache;
 use crate::db_cache::{DbCache, DbCacheWrapper};
 use crate::db_state::ManifestCore;
+use crate::db_stats::DbStats;
 use crate::dispatcher::MessageHandlerExecutor;
 use crate::error::SlateDBError;
 use crate::format::sst::{BlockTransformer, SsTableFormat};
@@ -491,8 +492,9 @@ impl<P: Into<Path>> DbBuilder<P> {
             None => HashMap::new(),
         };
 
-        // Create path resolver and table store
+        // Create path resolver, db stats, and table store
         let path_resolver = PathResolver::new_with_external_ssts(path.clone(), external_ssts);
+        let db_stats = DbStats::new(stat_registry.as_ref());
         let table_store = Arc::new(TableStore::new_with_fp_registry(
             ObjectStores::new(
                 maybe_cached_main_object_store.clone(),
@@ -550,6 +552,7 @@ impl<P: Into<Path>> DbBuilder<P> {
                 memtable_flush_tx,
                 write_tx,
                 stat_registry,
+                db_stats,
                 self.fp_registry.clone(),
                 merge_operator.clone(),
             )

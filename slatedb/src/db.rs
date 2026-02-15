@@ -53,7 +53,7 @@ use crate::db_iter::DbIterator;
 use crate::db_read::DbRead;
 use crate::db_snapshot::DbSnapshot;
 use crate::db_state::{DbState, SsTableId};
-use crate::db_stats::DbStats;
+use crate::db_stats::{DbStats, BYTES_READ_FROM_OBJECT_STORE, READS_TO_OBJECT_STORE};
 use crate::error::SlateDBError;
 use crate::manifest::store::FenceableManifest;
 use crate::manifest::Manifest;
@@ -112,6 +112,7 @@ impl DbInner {
         memtable_flush_notifier: UnboundedSender<MemtableFlushMsg>,
         write_notifier: UnboundedSender<WriteBatchMessage>,
         stat_registry: Arc<StatRegistry>,
+        db_stats: DbStats,
         fp_registry: Arc<FailPointRegistry>,
         merge_operator: Option<crate::merge_operator::MergeOperatorType>,
     ) -> Result<Self, SlateDBError> {
@@ -134,7 +135,6 @@ impl DbInner {
         // state are mostly manifest, including IMM, L0, etc.
         let state = Arc::new(RwLock::new(DbState::new(manifest)));
 
-        let db_stats = DbStats::new(stat_registry.as_ref());
         let wal_enabled = DbInner::wal_enabled_in_options(&settings);
 
         let reader = Reader {
@@ -159,6 +159,11 @@ impl DbInner {
         ));
 
         let txn_manager = Arc::new(TransactionManager::new(rand.clone()));
+
+        // Register table store stats with the registry
+        let table_store_stats = table_store.stats();
+        stat_registry.register(READS_TO_OBJECT_STORE, table_store_stats.reads_stat());
+        stat_registry.register(BYTES_READ_FROM_OBJECT_STORE, table_store_stats.bytes_stat());
 
         let db_inner = Self {
             state,
@@ -6341,5 +6346,117 @@ mod tests {
         );
 
         db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_object_store_read_stats_are_registered_and_incremented() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let db = Db::builder("/tmp/test_object_store_read_stats", object_store.clone())
+            .with_settings(test_db_options(0, 1024, None))
+            .build()
+            .await
+            .unwrap();
+
+        // Verify stats are registered
+        let reads_stat = db.metrics().lookup(crate::db_stats::READS_TO_OBJECT_STORE);
+        assert!(
+            reads_stat.is_some(),
+            "READS_TO_OBJECT_STORE should be registered"
+        );
+
+        let bytes_stat = db
+            .metrics()
+            .lookup(crate::db_stats::BYTES_READ_FROM_OBJECT_STORE);
+        assert!(
+            bytes_stat.is_some(),
+            "BYTES_READ_FROM_OBJECT_STORE should be registered"
+        );
+
+        // Initial values should be 0 or very low (some reads may happen during db open)
+        let _initial_reads = reads_stat.as_ref().unwrap().get();
+        let _initial_bytes = bytes_stat.as_ref().unwrap().get();
+
+        // Write some data and flush to SST
+        for i in 0..10 {
+            db.put(
+                format!("key{}", i).as_bytes(),
+                format!("value{}", i).as_bytes(),
+            )
+            .await
+            .unwrap();
+        }
+        db.flush().await.unwrap();
+
+        // Force data to be flushed to L0 by triggering memtable flush
+        db.inner.flush_memtables().await.unwrap();
+
+        // Close the database to clear any in-memory caches
+        db.close().await.unwrap();
+
+        // Reopen the database - this will read from object store
+        let db2 = Db::builder("/tmp/test_object_store_read_stats", object_store)
+            .with_settings(test_db_options(0, 1024, None))
+            .build()
+            .await
+            .unwrap();
+
+        // Check that stats have increased after reopen (reading manifest, SST info, etc.)
+        let final_reads = db2
+            .metrics()
+            .lookup(crate::db_stats::READS_TO_OBJECT_STORE)
+            .unwrap()
+            .get();
+        let final_bytes = db2
+            .metrics()
+            .lookup(crate::db_stats::BYTES_READ_FROM_OBJECT_STORE)
+            .unwrap()
+            .get();
+
+        // The reopened db should have performed some reads to open SSTs
+        assert!(
+            final_reads > 0,
+            "READS_TO_OBJECT_STORE should be greater than 0 after reopen: final={}",
+            final_reads
+        );
+        assert!(
+            final_bytes > 0,
+            "BYTES_READ_FROM_OBJECT_STORE should be greater than 0 after reopen: final={}",
+            final_bytes
+        );
+
+        // Read data without caching to force object store reads
+        let read_opts = ReadOptions {
+            durability_filter: Remote,
+            dirty: false,
+            cache_blocks: false,
+        };
+        let reads_before_get = db2
+            .metrics()
+            .lookup(crate::db_stats::READS_TO_OBJECT_STORE)
+            .unwrap()
+            .get();
+
+        for i in 0..10 {
+            let _ = db2
+                .get_with_options(format!("key{}", i).as_bytes(), &read_opts)
+                .await
+                .unwrap();
+        }
+
+        let reads_after_get = db2
+            .metrics()
+            .lookup(crate::db_stats::READS_TO_OBJECT_STORE)
+            .unwrap()
+            .get();
+
+        // Reading from SST should increment the counter
+        assert!(
+            reads_after_get > reads_before_get,
+            "READS_TO_OBJECT_STORE should increase after get: before={}, after={}",
+            reads_before_get,
+            reads_after_get
+        );
+
+        db2.close().await.unwrap();
     }
 }

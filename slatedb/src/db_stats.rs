@@ -21,6 +21,8 @@ pub const WRITE_BATCH_COUNT: &str = db_stat_name!("write_batch_count");
 pub const WRITE_OPS: &str = db_stat_name!("write_ops");
 pub const TOTAL_MEM_SIZE_BYTES: &str = db_stat_name!("total_mem_size_bytes");
 pub const L0_SST_COUNT: &str = db_stat_name!("l0_sst_count");
+pub const READS_TO_OBJECT_STORE: &str = db_stat_name!("reads_to_object_store");
+pub const BYTES_READ_FROM_OBJECT_STORE: &str = db_stat_name!("bytes_read_from_object_store");
 
 #[non_exhaustive]
 #[derive(Clone, Debug)]

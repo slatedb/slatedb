@@ -4,8 +4,8 @@
 //! writes were performed directly in DbInner's `put_with_options` and
 //! `delete_with_options` methods. For each operation, a lock was acquired on the
 //! db_state to mutate the WAL or memtable. This worked fine for single writes,
-//! but for batch writes, which take longer, it could create contention on the lock
-//! because. This is dangerous in an async runtime because it can block the
+//! but for batch writes, which take longer, it could create contention on the lock.
+//! This is dangerous in an async runtime because it can block the
 //! threads, leading to starvation.
 //!
 //! This module spawns a separate task to handle batch writes. The task receives
