@@ -18,7 +18,7 @@ use crate::compactor::CompactorMessage::CompactionJobFinished;
 use crate::config::CompactorOptions;
 use crate::db_state::{SortedRun, SsTableHandle, SsTableId};
 use crate::error::SlateDBError;
-use crate::iter::{KeyValueIterator, TrackedKeyValueIterator};
+use crate::iter::{IterationOrder, KeyValueIterator, TrackedKeyValueIterator};
 use crate::manifest::store::{ManifestStore, StoredManifest};
 use crate::merge_iterator::MergeIterator;
 use crate::merge_operator::{
@@ -272,6 +272,7 @@ impl TokioCompactionExecutorInner {
             blocks_to_fetch: 256,
             cache_blocks: false, // don't clobber the cache
             eager_spawn: true,
+            order: IterationOrder::Ascending,
         };
 
         let max_parallel = compute_max_parallel(job_args.ssts.len(), &job_args.sorted_runs, 4);

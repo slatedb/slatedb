@@ -374,6 +374,7 @@ impl Reader {
             blocks_to_fetch: read_ahead_blocks,
             cache_blocks: options.cache_blocks,
             eager_spawn: true,
+            order: IterationOrder::Ascending,
         };
 
         let IteratorSources {

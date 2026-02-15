@@ -55,6 +55,7 @@ use crate::db_snapshot::DbSnapshot;
 use crate::db_state::{DbState, SsTableId};
 use crate::db_stats::DbStats;
 use crate::error::SlateDBError;
+use crate::iter::IterationOrder;
 use crate::manifest::store::FenceableManifest;
 use crate::manifest::Manifest;
 use crate::mem_table::WritableKVTable;
@@ -520,6 +521,7 @@ impl DbInner {
             blocks_to_fetch: 256,
             cache_blocks: false,
             eager_spawn: true,
+            order: IterationOrder::Ascending,
         };
 
         let replay_options = WalReplayOptions {

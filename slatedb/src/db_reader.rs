@@ -6,6 +6,7 @@ use crate::db_state::ManifestCore;
 use crate::db_stats::DbStats;
 use crate::dispatcher::{MessageFactory, MessageHandler, MessageHandlerExecutor};
 use crate::error::SlateDBError;
+use crate::iter::IterationOrder;
 use crate::manifest::store::{ManifestStore, StoredManifest};
 use crate::manifest::Manifest;
 use crate::mem_table::{ImmutableMemtable, KVTable};
@@ -401,6 +402,7 @@ impl DbReaderInner {
             blocks_to_fetch: 256,
             cache_blocks: true,
             eager_spawn: true,
+            order: IterationOrder::Ascending,
         };
 
         let replay_options = WalReplayOptions {
