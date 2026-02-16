@@ -1618,6 +1618,7 @@ mod tests {
         ObjectStoreCacheOptions, PutOptions, Settings, Ttl, WriteOptions,
     };
     use crate::db::builder::GarbageCollectorBuilder;
+    use crate::db_common::L0_MAX_MEMTABLE_ENTRIES;
     use crate::db_state::ManifestCore;
     use crate::db_stats::IMMUTABLE_MEMTABLE_FLUSHES;
     use crate::format::sst::SsTableFormat;
@@ -3638,6 +3639,50 @@ mod tests {
                 .get()
                 > 0
         );
+    }
+
+    #[tokio::test]
+    async fn test_put_flushes_memtable_after_max_entries() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = "/tmp/test_flush_memtable_max_entries";
+
+        let kv_store = Db::builder(path, object_store.clone())
+            // Set l0_sst_size_bytes high to avoid triggering a flush with that
+            .with_settings(test_db_options(0, usize::MAX, None))
+            .build()
+            .await
+            .unwrap();
+
+        let manifest_store = Arc::new(ManifestStore::new(&Path::from(path), object_store.clone()));
+        let mut stored_manifest =
+            StoredManifest::load(manifest_store.clone(), Arc::new(DefaultSystemClock::new()))
+                .await
+                .unwrap();
+
+        let mut batch = WriteBatch::new();
+        for i in 0..L0_MAX_MEMTABLE_ENTRIES {
+            let key = format!("key{:08}", i);
+            batch.put(key.as_bytes(), b"v");
+        }
+
+        let write_options = WriteOptions {
+            await_durable: false,
+        };
+
+        kv_store
+            .write_with_options(batch, &write_options)
+            .await
+            .unwrap();
+
+        let db_state = wait_for_manifest_condition(
+            &mut stored_manifest,
+            |s| !s.l0.is_empty(),
+            Duration::from_secs(30),
+        )
+        .await;
+        assert!(!db_state.l0.is_empty());
+
+        kv_store.close().await.unwrap();
     }
 
     #[tokio::test]
