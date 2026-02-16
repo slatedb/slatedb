@@ -11,6 +11,7 @@ use crate::config::{MergeOptions, PutOptions, ReadOptions, ScanOptions, WriteOpt
 use crate::db::DbInner;
 use crate::db::WriteHandle;
 use crate::db_iter::{DbIterator, DbIteratorRangeTracker};
+use crate::error::SlateDBError;
 use crate::transaction_manager::{IsolationLevel, TransactionManager};
 use crate::DbRead;
 
@@ -474,9 +475,17 @@ impl DbTransaction {
         self,
         options: &WriteOptions,
     ) -> Result<Option<WriteHandle>, crate::Error> {
-        // If the WriteBatch is empty, it's a no-op. it's impossible to have read-write
-        // conflict, neither write-write conflict.
-        if self.write_batch.read().is_empty() {
+        // Take the write_batch for submission to the database.
+        let write_batch = self.write_batch.read().clone();
+
+        // If the WriteBatch is empty, it's a no-op or read-only batch.
+        if write_batch.is_empty() {
+            // Check for read conflicts before returning Ok(None).
+            if let Some(txn_id) = write_batch.txn_id.as_ref() {
+                if self.txn_manager.check_has_conflict(txn_id) {
+                    return Err(SlateDBError::TransactionConflict.into());
+                }
+            }
             return Ok(None);
         }
 
@@ -490,9 +499,6 @@ impl DbTransaction {
                 }
             }
         }
-
-        // Take the write_batch for submission to the database.
-        let write_batch = self.write_batch.read().clone();
 
         // Track only write keys that were not explicitly unmarked.
         let tracked_write_keys = {
