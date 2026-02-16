@@ -238,12 +238,9 @@ impl DbInner {
             ..Default::default()
         };
         let mut iter = self.scan_with_options(range, &scan_options).await?;
-        iter.next_row().await.map_err(|e| {
-            SlateDBError::IoError(Arc::new(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                e.to_string(),
-            )))
-        })
+        iter.next_row()
+            .await
+            .map_err(|e| SlateDBError::IoError(Arc::new(std::io::Error::other(e.to_string()))))
     }
 
     pub(crate) async fn scan_with_options(
@@ -732,7 +729,6 @@ impl Db {
     pub async fn get_row<K: AsRef<[u8]>>(&self, key: K) -> Result<Option<RowEntry>, crate::Error> {
         self.get_row_with_options(key, &ReadOptions::default())
             .await
-            .map_err(Into::into)
     }
 
     pub async fn get_row_with_options<K: AsRef<[u8]>>(

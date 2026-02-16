@@ -324,12 +324,11 @@ impl Reader {
         )
         .await?;
 
-        if let Some(entry) = iterator.next_row().await.map_err(|e| {
-            SlateDBError::IoError(Arc::new(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                e.to_string(),
-            )))
-        })? {
+        if let Some(entry) = iterator
+            .next_row()
+            .await
+            .map_err(|e| SlateDBError::IoError(Arc::new(std::io::Error::other(e.to_string()))))?
+        {
             if entry.key == target_key {
                 return Ok(entry.value.as_bytes());
             }

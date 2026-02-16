@@ -286,26 +286,40 @@ impl DbIterator {
         })
     }
 
-    /// Get the next record in the scan.
+    /// Get the next key-value pair.
+    ///
+    /// This method filters out tombstones and returns the user-facing [`KeyValue`] struct,
+    /// which contains only the key and value.
     ///
     /// # Errors
     ///
     /// Returns [`Error`] if the iterator has been invalidated due to an underlying error.
     pub async fn next(&mut self) -> Result<Option<KeyValue>, crate::Error> {
-        let entry = self.next_row().await?;
-        if let Some(entry) = entry {
-            Ok(Some(KeyValue {
-                key: entry.key,
-                value: entry
-                    .value
-                    .as_bytes()
-                    .expect("Tombstones should be filtered out"),
-            }))
+        if let Some(error) = self.invalidated_error.clone() {
+            Err(error.into())
         } else {
-            Ok(None)
+            let result = self.iter.next().await;
+            let result = self.maybe_invalidate(result);
+            if let Ok(Some(ref kv)) = result {
+                self.last_key = Some(kv.key.clone());
+                // Track the key in range tracker if present
+                if let Some(tracker) = &self.range_tracker {
+                    tracker.track_key(&kv.key);
+                }
+            }
+            result.map_err(Into::into)
         }
     }
 
+    /// Get the next raw entry.
+    ///
+    /// Unlike [`Self::next`], this method returns the full [`RowEntry`] struct, which includes
+    /// metadata such as the sequence number, creation timestamp, and expiration timestamp.
+    /// It does not automatically filter out tombstones.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error`] if the iterator has been invalidated due to an underlying error.
     pub async fn next_row(&mut self) -> Result<Option<RowEntry>, crate::Error> {
         if let Some(error) = self.invalidated_error.clone() {
             Err(error.into())
