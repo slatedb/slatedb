@@ -120,7 +120,7 @@ impl SstReader {
 
     /// Reads the SST footer from object storage (one `head()` + one
     /// `get_range()` call). Errors if the file was GC'd.
-    pub async fn open(&self, id: Ulid) -> Result<SstFile, SlateDBError>;
+    pub async fn open(&self, id: Ulid) -> Result<SstFile, crate::Error>;
 }
 ```
 
