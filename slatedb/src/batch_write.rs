@@ -93,12 +93,13 @@ impl MessageHandler<WriteBatchMessage> for WriteBatchEventHandler {
         // if this is the first write and the WAL is disabled, make sure users are flushing
         // their memtables in a timely manner.
         if self.is_first_write && !self.db_inner.wal_enabled && options.await_durable {
-            self.is_first_write = false;
-            let (_, watcher) = result.clone()?;
-            let this_clock = self.db_inner.system_clock.clone();
-            tokio::spawn(async move {
-                monitor_first_write(watcher, this_clock).await;
-            });
+            if let Ok((_, this_watcher)) = &result {
+                let this_watcher = this_watcher.clone();
+                let this_clock = self.db_inner.system_clock.clone();
+                tokio::spawn(async move {
+                    monitor_first_write(this_watcher, this_clock).await;
+                });
+            }
         }
         _ = done.send(result);
         Ok(())
