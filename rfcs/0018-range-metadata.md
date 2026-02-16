@@ -116,6 +116,7 @@ impl SstReader {
         root_path: impl Into<Path>,
         object_store: Arc<dyn ObjectStore>,
         cache: Option<Arc<dyn DbCache>>,
+        object_store_cache_options: Option<ObjectStoreCacheOptions>,
     ) -> Self;
 
     /// Reads the SST footer from object storage (one `head()` + one
@@ -124,7 +125,7 @@ impl SstReader {
 }
 ```
 
-`SstReader` wraps the read-only functionality currently internal to `TableStore`. SST paths are resolved as `{root}/compacted/{ulid}.sst`. Internally, `open()` needs to decode the SST footer and index block, which requires handling the SST codec and compression. The implementation will need to take care of constructing the appropriate decoding machinery (currently `SsTableFormat`) from the provided configuration.
+`SstReader` wraps the read-only functionality currently internal to `TableStore`. SST paths are resolved as `{root}/compacted/{ulid}.sst`. Internally, `open()` needs to decode the SST footer and index block, which requires handling the SST codec and compression. The implementation will need to take care of constructing the appropriate decoding machinery (currently `SsTableFormat`) from the provided configuration. If `object_store_cache_options` is provided, the passed-in `object_store` is wrapped in a `CachedObjectStore` (mirroring the behavior of `DbBuilder`). This allows the `SstReader` to share the on-disk object store cache that `DbBuilder` sets up internally. Note that this cache path can be shared between processes.
 
 ```rust
 pub struct SstFile {
@@ -247,16 +248,16 @@ Add memtable stats from `db.metrics()` (`memtable_num_puts`, `memtable_raw_key_b
 
 ### Implementation Phases
 
-#### Phase 1 - SST Stats Block
+#### Phase 1 - SST Stats in `SsTableInfo`
 
-Add a stats block to the SST footer with the following fields (all `u64`):
+Add the following fields to the `SsTableInfo` table in `sst.fbs` (all `ulong`):
 - `num_puts`
 - `num_deletes`
 - `num_merges`
 - `raw_key_size`
 - `raw_val_size`
 
-These are loaded into `SsTableInfo` at SST open time. This requires care as the storage format changes, i.e. the `.fbs` gets updated. For backwards compatibility, the stats block goes at the end of the footer and is optional. Old SSTs without a stats block get zeros for these fields.
+Since `SsTableInfo` is a FlatBuffers table, new fields can be appended without breaking existing readers — missing fields return their default value (`0` for `ulong`). The `flatc --conform` CI check enforces that schema changes are purely additive. Because `SsTableInfo` is embedded both in the SST file footer (metadata block) and in the manifest (`CompactedSsTable.info`), the stats are automatically available from `Db::manifest()` with no extra I/O for SSTs written with the new schema. Old SSTs (and old manifests) simply report `0` for these fields.
 
 - **`Db::manifest()`**: Returns a clone of the current `ManifestCore`. No I/O.
 
