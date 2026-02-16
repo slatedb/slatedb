@@ -11,6 +11,10 @@ command = "../scripts/backtrace-on-timeout.sh"
 filter = "all()"
 run-wrapper = "backtrace-on-timeout"
 
+# Cross-platform PR profile (no wrapper script so it works on Windows/macOS).
+[profile.ci-cross]
+slow-timeout = { period = "30s", terminate-after = 4 }
+
 # PR DST profile
 [profile.dst]
 slow-timeout = { period = "30m", terminate-after = 1 }
