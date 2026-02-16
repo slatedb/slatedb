@@ -478,17 +478,6 @@ impl DbTransaction {
         // Take the write_batch for submission to the database.
         let write_batch = self.write_batch.read().clone();
 
-        // If the WriteBatch is empty, it's a no-op or read-only batch.
-        if write_batch.is_empty() {
-            // Check for read conflicts before returning Ok(None).
-            if let Some(txn_id) = write_batch.txn_id.as_ref() {
-                if self.txn_manager.check_has_conflict(txn_id) {
-                    return Err(SlateDBError::TransactionConflict.into());
-                }
-            }
-            return Ok(None);
-        }
-
         // Extract actual scanned ranges from trackers for SSI conflict detection
         if self.isolation_level == IsolationLevel::SerializableSnapshot {
             for tracker in self.range_trackers.lock().iter() {
@@ -498,6 +487,17 @@ impl DbTransaction {
                     }
                 }
             }
+        }
+
+        // If the WriteBatch is empty, it's a no-op or read-only batch.
+        if write_batch.is_empty() {
+            // Check for read conflicts before returning Ok(None).
+            if let Some(txn_id) = write_batch.txn_id.as_ref() {
+                if self.txn_manager.check_has_conflict(txn_id) {
+                    return Err(SlateDBError::TransactionConflict.into());
+                }
+            }
+            return Ok(None);
         }
 
         // Track only write keys that were not explicitly unmarked.
@@ -1005,8 +1005,8 @@ mod tests {
     )]
     #[case::si_concurrent_read_snapshot(
         TransactionTestCase {
-            name: "ssi_concurrent_read_snapshot",
-            isolation_level: IsolationLevel::SerializableSnapshot,
+            name: "si_concurrent_read_snapshot",
+            isolation_level: IsolationLevel::Snapshot,
             initial_data: vec![(Bytes::from("k1"), Bytes::from("v1"))],
             operations: vec![
                 TransactionTestOp::DbPut(Bytes::from("k1"), Bytes::from("v2")),
@@ -1225,6 +1225,65 @@ mod tests {
             ]
         }
     )]
+    #[case::ssi_mark_read_conflict_without_write(
+        TransactionTestCase {
+            name: "ssi_mark_read_conflict_without_write",
+            isolation_level: IsolationLevel::SerializableSnapshot,
+            initial_data: vec![(Bytes::from("k1"), Bytes::from("v1"))],
+            operations: vec![
+                TransactionTestOp::TxnMarkRead(Bytes::from("k1")),
+                TransactionTestOp::DbPut(Bytes::from("k1"), Bytes::from("v2")),
+                TransactionTestOp::TxnCommit,
+            ],
+            expected_results: vec![
+                TransactionTestOpResult::Empty,
+                TransactionTestOpResult::Empty,
+                TransactionTestOpResult::Conflicted,
+            ]
+        }
+    )]
+    #[case::ssi_get_conflict_without_write(
+        TransactionTestCase {
+            name: "ssi_get_conflict_without_write",
+            isolation_level: IsolationLevel::SerializableSnapshot,
+            initial_data: vec![(Bytes::from("k1"), Bytes::from("v1"))],
+            operations: vec![
+                TransactionTestOp::TxnGet(Bytes::from("k1")),
+                TransactionTestOp::DbPut(Bytes::from("k1"), Bytes::from("v2")),
+                TransactionTestOp::TxnCommit,
+            ],
+            expected_results: vec![
+                TransactionTestOpResult::Got(Some(Bytes::from("v1"))),
+                TransactionTestOpResult::Empty,
+                TransactionTestOpResult::Conflicted,
+            ]
+        }
+    )]
+    #[case::ssi_scan_conflict_without_write(
+        TransactionTestCase {
+            name: "ssi_scan_conflict_without_write",
+            isolation_level: IsolationLevel::SerializableSnapshot,
+            initial_data: vec![
+                (Bytes::from("k1"), Bytes::from("v1")),
+                (Bytes::from("k2"), Bytes::from("v2")),
+                (Bytes::from("k3"), Bytes::from("v3")),
+            ],
+            operations: vec![
+                TransactionTestOp::TxnScan(Bytes::from("k1"), Bytes::from("k3")),
+                TransactionTestOp::DbPut(Bytes::from("k2"), Bytes::from("v2_new")),
+                TransactionTestOp::TxnCommit,
+            ],
+            expected_results: vec![
+                TransactionTestOpResult::Scanned(vec![
+                    Bytes::from("k1"),
+                    Bytes::from("k2"),
+                    Bytes::from("k3"),
+                ]),
+                TransactionTestOpResult::Empty,
+                TransactionTestOpResult::Conflicted,
+            ]
+        }
+    )]
     #[case::si_mark_read_conflict(
         TransactionTestCase {
             name: "si_mark_read_conflict",
@@ -1402,33 +1461,6 @@ mod tests {
         assert!(result2.is_err(), "Transaction with get() should conflict");
 
         // Both should have the same behavior: conflict detection
-    }
-
-    #[tokio::test]
-    async fn test_mark_read_no_conflict_without_write_in_ssi() {
-        // This test verifies that mark_read() doesn't cause conflict if the transaction is read-only (no writes).
-        let object_store: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
-        let db = crate::Db::open("test_mark_read_no_write", object_store)
-            .await
-            .unwrap();
-
-        db.put(b"k1", b"v1").await.unwrap();
-
-        let txn = db
-            .begin(IsolationLevel::SerializableSnapshot)
-            .await
-            .unwrap();
-        txn.mark_read([b"k1"]).unwrap();
-
-        // Another transaction modifies k1
-        db.put(b"k1", b"v2").await.unwrap();
-
-        // Transaction commits without any writes - should succeed
-        let result = txn.commit().await;
-        assert!(
-            result.is_ok(),
-            "Read-only transaction should not conflict even if read key was modified"
-        );
     }
 
     #[tokio::test]
