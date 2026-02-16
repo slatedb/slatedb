@@ -152,7 +152,7 @@ pub enum slatedb_error_kind_t {
 pub struct slatedb_write_handle_t {
     /// Sequence number assigned to this write.
     pub seq: u64,
-    /// Creation timestamp assigned to this writ.
+    /// Creation timestamp assigned to this write.
     pub create_ts: i64,
 }
 

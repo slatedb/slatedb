@@ -212,7 +212,7 @@ typedef struct slatedb_write_options_t {
 typedef struct slatedb_write_handle_t {
     // Sequence number assigned to this write.
     uint64_t seq;
-    // Creation timestamp assigned to this writ.
+    // Creation timestamp assigned to this write.
     int64_t create_ts;
 } slatedb_write_handle_t;
 
