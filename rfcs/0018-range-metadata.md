@@ -100,7 +100,7 @@ impl Db {
 }
 ```
 
-Returns a clone of the current in-memory `ManifestCore`. No I/O. `ManifestCore` is already public (re-exported via `slatedb::manifest`) .
+Returns a reference to the current in-memory `ManifestCore`. No I/O. `ManifestCore` is already public (re-exported via `slatedb::manifest`) .
 
 #### `SstReader` and `SstFile`
 
