@@ -118,13 +118,12 @@ impl SstReader {
         object_store_cache_options: Option<ObjectStoreCacheOptions>,
     ) -> Self;
 
-    /// Reads the SST footer from object storage (one `head()` + one
-    /// `get_range()` call). Errors if the file was GC'd.
+    /// Errors if the file was GC'd.
     pub async fn open(&self, id: Ulid) -> Result<SstFile, crate::Error>;
 }
 ```
 
-`SstReader` wraps the read-only functionality currently internal to `TableStore`. SST paths are resolved as `{root}/compacted/{ulid}.sst`. Internally, `open()` needs to decode the SST footer and index block, which requires handling the SST codec and compression. The implementation will need to take care of constructing the appropriate decoding machinery (currently `SsTableFormat`) from the provided configuration. If `object_store_cache_options` is provided, the passed-in `object_store` is wrapped in a `CachedObjectStore` (mirroring the behavior of `DbBuilder`). This allows the `SstReader` to share the on-disk object store cache that `DbBuilder` sets up internally. Note that this cache path can be shared between processes.
+`SstReader` wraps the read-only functionality currently internal to `TableStore`. SST paths are resolved as `{root}/compacted/{ulid}.sst`. Internally, `open()` needs to only decode the metadata info, which requires handling the SST codec and compression. The implementation will need to take care of constructing the appropriate decoding machinery (currently `SsTableFormat`) from the provided configuration. If `object_store_cache_options` is provided, the passed-in `object_store` is wrapped in a `CachedObjectStore` (mirroring the behavior of `DbBuilder`). This allows the `SstReader` to share the on-disk object store cache that `DbBuilder` sets up internally. Note that this cache path can be shared between processes.
 
 ```rust
 pub struct SstFile {
@@ -137,7 +136,7 @@ impl SstFile {
     /// Returns the SST's ULID identifier.
     pub fn id(&self) -> Ulid;
 
-    /// Returns the SST file metadata (requires a `head()` call to the object store).
+    /// Returns the SST file metadata
     pub async fn metadata(&self) -> Result<SstFileMetadata, crate::Error>;
 
     /// Returns SsTableInfo from the metadata block.
@@ -249,6 +248,17 @@ Add the following fields to the `SsTableInfo` table in `sst.fbs` (all `ulong`):
 - `raw_key_size`
 - `raw_val_size`
 
+```rust
+pub struct SsTableInfo {
+    // ... existing fields ...
+    pub num_puts: u64,
+    pub num_deletes: u64,
+    pub num_merges: u64,
+    pub raw_key_size: u64,
+    pub raw_val_size: u64,
+}
+```
+
 Since `SsTableInfo` is a FlatBuffers table, new fields can be appended without breaking existing readers — missing fields return their default value (`0` for `ulong`). The `flatc --conform` CI check enforces that schema changes are purely additive. Because `SsTableInfo` is embedded both in the SST file footer (metadata block) and in the manifest (`CompactedSsTable.info`), the stats are automatically available from `Db::manifest()` with no extra I/O for SSTs written with the new schema. Old SSTs (and old manifests) simply report `0` for these fields.
 
 - **`Db::manifest()`**: Returns a clone of the current `ManifestCore`. No I/O.
@@ -329,10 +339,10 @@ SST stats fields in `SsTableInfo`:
 - Clones in-memory state. No I/O. Cost proportional to number of SST handles in the manifest.
 
 `SstReader::open()`:
-- One object store read per SST to load the footer (~100-500 bytes). Stats are included in `SsTableInfo` from Phase 1.
+- One object store read per SST to load the metadata.  Stats are included in `SsTableInfo` from Phase 1.
 
 `SstFile::stats()`:
-- No additional I/O beyond `open()`. Stats are loaded from the footer.
+- No additional I/O beyond `open()`.
 
 `SstFile::index()`:
 - One index block read per SST (~300-500KB for a 256MB SST), cacheable via the block cache.
