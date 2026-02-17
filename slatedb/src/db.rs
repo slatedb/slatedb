@@ -1618,7 +1618,7 @@ mod tests {
         ObjectStoreCacheOptions, PutOptions, Settings, Ttl, WriteOptions,
     };
     use crate::db::builder::GarbageCollectorBuilder;
-    use crate::db_common::L0_MAX_MEMTABLE_ENTRIES;
+    use crate::db_common::L0_MAX_WAL_FLUSHES;
     use crate::db_state::ManifestCore;
     use crate::db_stats::IMMUTABLE_MEMTABLE_FLUSHES;
     use crate::format::sst::SsTableFormat;
@@ -3642,13 +3642,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_put_flushes_memtable_after_max_entries() {
+    async fn test_put_flushes_memtable_after_max_wal_flushes() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let path = "/tmp/test_flush_memtable_max_entries";
+        let path = "/tmp/test_flush_memtable_max_wal_flushes";
 
         let kv_store = Db::builder(path, object_store.clone())
-            // Set l0_sst_size_bytes high to avoid triggering a flush with that
-            .with_settings(test_db_options(0, usize::MAX, None))
+            .with_settings(test_db_options(0, 64 * 1024 * 1024, None))
             .build()
             .await
             .unwrap();
@@ -3659,28 +3658,29 @@ mod tests {
                 .await
                 .unwrap();
 
-        let mut batch = WriteBatch::new();
-        for i in 0..L0_MAX_MEMTABLE_ENTRIES {
-            let key = format!("key{:08}", i);
-            batch.put(key.as_bytes(), b"v");
-        }
-
-        let write_options = WriteOptions {
+        let write_options: WriteOptions = WriteOptions {
             await_durable: false,
         };
+        let put_options = PutOptions::default();
+        for i in 0..L0_MAX_WAL_FLUSHES + 10 {
+            let key = format!("key{:08}", i);
+            kv_store
+                .put_with_options(key.as_bytes(), b"v", &put_options, &write_options)
+                .await
+                .unwrap();
+            kv_store.flush().await.unwrap();
+        }
 
-        kv_store
-            .write_with_options(batch, &write_options)
-            .await
-            .unwrap();
-
+        // Verify that the WAL count threshold triggered a memtable freeze and L0 flush.
+        // replay_after_wal_id should have advanced past the threshold, and there should
+        // be exactly one L0 SST.
         let db_state = wait_for_manifest_condition(
             &mut stored_manifest,
-            |s| !s.l0.is_empty(),
+            |s| s.replay_after_wal_id >= L0_MAX_WAL_FLUSHES,
             Duration::from_secs(30),
         )
         .await;
-        assert!(!db_state.l0.is_empty());
+        assert_eq!(db_state.l0.len(), 1);
 
         kv_store.close().await.unwrap();
     }

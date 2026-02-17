@@ -7,7 +7,7 @@ use crate::mem_table_flush::MemtableFlushMsg;
 use crate::utils::SendSafely;
 use crate::wal_replay::ReplayedMemtable;
 
-pub(crate) const L0_MAX_MEMTABLE_ENTRIES: usize = 4096;
+pub(crate) const L0_MAX_WAL_FLUSHES: u64 = 4096;
 
 impl DbInner {
     pub(crate) fn maybe_freeze_memtable(
@@ -16,12 +16,13 @@ impl DbInner {
         wal_id: u64,
     ) -> Result<(), SlateDBError> {
         let meta = guard.memtable().metadata();
+        let wals_since_last_freeze = wal_id - guard.last_freeze_wal_id();
+        let l0_sst_size_est = self
+            .table_store
+            .estimate_encoded_size_compacted(meta.entry_num, meta.entries_size_in_bytes);
 
-        if meta.entry_num < L0_MAX_MEMTABLE_ENTRIES
-            && self
-                .table_store
-                .estimate_encoded_size_compacted(meta.entry_num, meta.entries_size_in_bytes)
-                < self.settings.l0_sst_size_bytes
+        if wals_since_last_freeze < L0_MAX_WAL_FLUSHES
+            && l0_sst_size_est < self.settings.l0_sst_size_bytes
         {
             Ok(())
         } else {
