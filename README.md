@@ -137,7 +137,7 @@ Visit [slatedb.io](https://slatedb.io) to learn more.
 - [x] Merge operator ([#328](https://github.com/slatedb/slatedb/issues/328))
 - [x] Clones ([#49](https://github.com/slatedb/slatedb/issues/49))
 - [ ] Range deletions ([#577](https://github.com/slatedb/slatedb/issues/577))
-- [ ] Change data capture (CDC) ([#249](https://github.com/slatedb/slatedb/issues/249))
+- [x] Change data capture (CDC) ([#249](https://github.com/slatedb/slatedb/issues/249))
 - [ ] Database splitting
 - [ ] Database merging
 
@@ -171,6 +171,13 @@ See who's using SlateDB.
 - [Database Internals - SlateDB](https://www.youtube.com/watch?v=wEAcNoJOBFI) (Chris Riccomini, 2024)
 - [Building a Cloud Native LSM on Object Storage](https://www.p99conf.io/session/building-a-cloud-native-lsm-on-object-storage/) (Rohan Desai/Chris Riccomini, 2024)
 
+## Infrastructure Sponsors
+
+Thanks to the following companies for donating services and infrastructure to the SlateDB project.
+
+- **[Pulumi](https://www.pulumi.com/)** - Open source platform for automating, securing, and managing cloud resources, configuration, and secrets.
+- **[Tigris](https://www.tigrisdata.com/)** – Globally distributed S3-compatible object storage service.
+
 ## License
 
 SlateDB is licensed under the Apache License, Version 2.0.
@@ -183,10 +190,3 @@ SlateDB is a member of the [Commonhaus Foundation](https://www.commonhaus.org/).
   <source media="(prefers-color-scheme: dark)" srcset="https://github.com/commonhaus/artwork/blob/main/foundation/brand/png/CF_logo_horizontal_single_reverse_200px.png?raw=true">
   <img src="https://github.com/commonhaus/artwork/blob/main/foundation/brand/png/CF_logo_horizontal_single_default_200px.png?raw=true">
 </picture>
-
-## Infrastructure Sponsors
-
-Thanks to the following companies for donating services and infrastructure to the SlateDB project.
-
-- **[Pulumi](https://www.pulumi.com/)** - Open source platform for automating, securing, and managing cloud resources, configuration, and secrets.
-- **[Tigris](https://www.tigrisdata.com/)** – Globally distributed S3-compatible object storage service.
