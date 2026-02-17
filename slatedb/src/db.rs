@@ -3853,8 +3853,7 @@ mod tests {
         let mut wal_iter = wal_files[1] // second file contains the actual write
             .iterator()
             .await
-            .expect("expected successful WAL iterator call")
-            .expect("expected WAL file to exist");
+            .expect("expected successful WAL iterator call");
         while let Some(entry) = wal_iter
             .next_entry()
             .await
