@@ -152,6 +152,8 @@ This has a few benefits:
 1. No separate `SstStats` struct is needed — the stats fields live directly in `SsTableInfo`.
 2. Caching the `SsTableHandle` means we can reuse `tablestore.read_index`, which requires an `SsTableHandle`.
 
+The `SstFile::info()` call is primarily for users that don't have access to a `ManifestCore` (e.g. if they listed files in object storage outside of SlateDB and wanted to inspect them). Users with a `ManifestCore` already have `SsTableInfo` available via `SsTableHandle`.
+
 The downside is that `open()` requires a read to obtain the `SsTableHandle` even if the caller only wants to call `metadata()`, which doesn't need it. This is a fine tradeoff.
 
 `index()` calls `SsTableFormat::read_index()`, which reads `info.index_offset..info.index_offset + info.index_len`, decompresses, and returns an `SsTableIndexOwned`. The method materializes `Vec<(u64, Bytes)>` from the FlatBuffer `BlockMeta` entries (each has `offset()` and `first_key()`). Caching uses `DbCache::get_index` / `insert` keyed by `(sst_id, index_offset)`, matching the existing pattern in `TableStore::read_index()`.
