@@ -56,10 +56,9 @@
 //!
 //!     let reader = WalReader::new(path, object_store);
 //!     for wal_file in reader.list(..).await? {
-//!         if let Some(mut iter) = wal_file.iterator().await? {
-//!             while let Some(entry) = iter.next_entry().await? {
-//!                 let _ = entry;
-//!             }
+//!         let mut iter = wal_file.iterator().await?;
+//!         while let Some(entry) = iter.next_entry().await? {
+//!             let _ = entry;
 //!         }
 //!     }
 //!     Ok(())
