@@ -1,4 +1,5 @@
 use crate::bytes_range::BytesRange;
+use crate::cached_object_store::CachedObjectStore;
 use crate::clock::MonotonicClock;
 use crate::config::{CheckpointOptions, DbReaderOptions, ReadOptions, ScanOptions};
 use crate::db_read::DbRead;
@@ -553,6 +554,23 @@ impl DbReader {
     ) -> Result<Self, crate::Error> {
         let path = path.into();
         let clock = Arc::new(DefaultSystemClock::default());
+        let rand = Arc::new(DbRand::default());
+        let stat_registry = StatRegistry::new();
+
+        // Setup object store with optional caching
+        let object_store: Arc<dyn ObjectStore> = match CachedObjectStore::from_config(
+            object_store.clone(),
+            &options.object_store_cache_options,
+            &stat_registry,
+            clock.clone(),
+            rand.clone(),
+        )
+        .await?
+        {
+            Some(cached) => cached,
+            None => object_store,
+        };
+
         let store_provider = DefaultStoreProvider {
             path,
             object_store,
@@ -560,15 +578,9 @@ impl DbReader {
             block_transformer: options.block_transformer.clone(),
         };
 
-        Self::open_internal(
-            &store_provider,
-            checkpoint_id,
-            options,
-            clock,
-            Arc::new(DbRand::default()),
-        )
-        .await
-        .map_err(Into::into)
+        Self::open_internal(&store_provider, checkpoint_id, options, clock, rand)
+            .await
+            .map_err(Into::into)
     }
 
     async fn open_internal(
@@ -1384,6 +1396,48 @@ mod tests {
             )
             .await
         }
+    }
+
+    #[tokio::test]
+    async fn should_populate_disk_cache_on_read() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_db_reader_disk_cache");
+
+        // Write data via Db
+        let db = Db::builder(path.clone(), Arc::clone(&object_store))
+            .with_settings(Settings::default())
+            .build()
+            .await
+            .unwrap();
+        db.put(b"key1", b"value1").await.unwrap();
+        db.flush().await.unwrap();
+        db.close().await.unwrap();
+
+        // Open a DbReader with disk caching enabled
+        let cache_dir = tempfile::Builder::new()
+            .prefix("dbreader_cache_test_")
+            .tempdir()
+            .unwrap();
+        let cache_path = cache_dir.keep();
+
+        let mut reader_opts = DbReaderOptions::default();
+        reader_opts.object_store_cache_options.root_folder = Some(cache_path.clone());
+        reader_opts.object_store_cache_options.part_size_bytes = 1024;
+
+        let reader = DbReader::open(path.clone(), Arc::clone(&object_store), None, reader_opts)
+            .await
+            .unwrap();
+
+        // Read data to populate the cache
+        let val = reader.get(b"key1").await.unwrap();
+        assert_eq!(val, Some(Bytes::from_static(b"value1")));
+
+        // Verify the cache directory has been populated
+        let entries: Vec<_> = std::fs::read_dir(&cache_path).unwrap().collect();
+        assert!(
+            !entries.is_empty(),
+            "Expected disk cache directory to be populated after read"
+        );
     }
 
     impl StoreProvider for TestProvider {
