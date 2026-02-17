@@ -129,8 +129,8 @@ impl WalFile {
     /// Raises an error if the metadata could not be read from object storage. This can
     /// happen if the file was deleted after listing or if there was an issue with the
     /// object store. If the file is missing, a [`crate::Error`] with
-    /// [`crate::ErrorKind::Unavailable`] is returned containing a
-    /// [`object_store::Error::NotFound`] source error.
+    /// [`crate::ErrorKind::Unavailable`] is returned, and its source contains an
+    /// `object_store::Error::NotFound`.
     pub async fn metadata(&self) -> Result<WalFileMetadata, crate::Error> {
         let metadata = self.table_store.metadata(&SsTableId::Wal(self.id)).await?;
         Ok(WalFileMetadata {
@@ -148,8 +148,8 @@ impl WalFile {
     /// Raises an error if the data could not be read from object storage. This can
     /// happen if the file was deleted after listing or if there was an issue with the
     /// object store. If the file is missing, a [`crate::Error`] with
-    /// [`crate::ErrorKind::Unavailable`] is returned containing a
-    /// [`object_store::Error::NotFound`] source error.
+    /// [`crate::ErrorKind::Unavailable`] is returned, and its source contains an
+    /// `object_store::Error::NotFound`.
     pub async fn iterator(&self) -> Result<WalFileIterator, crate::Error> {
         let sst = self.table_store.open_sst(&SsTableId::Wal(self.id)).await?;
         let iter = match SstIterator::new_owned_initialized(
@@ -236,6 +236,18 @@ mod tests {
     use crate::types::ValueDeletable;
     use crate::Db;
     use object_store::memory::InMemory;
+
+    fn has_not_found_object_store_source(err: &crate::Error) -> bool {
+        err.source()
+            .and_then(|source| source.downcast_ref::<object_store::Error>())
+            .is_some_and(|source| matches!(source, object_store::Error::NotFound { .. }))
+            || err
+                .source()
+                .and_then(|source| source.downcast_ref::<Arc<object_store::Error>>())
+                .is_some_and(|source| {
+                    matches!(source.as_ref(), object_store::Error::NotFound { .. })
+                })
+    }
 
     #[tokio::test]
     async fn test_list_and_iterator() {
@@ -414,17 +426,12 @@ mod tests {
         let wal_metadata = wal_file.metadata().await.unwrap();
 
         main_store.delete(&wal_metadata.location).await.unwrap();
-        let metadata_result = wal_file.metadata().await;
-        assert!(matches!(
-            metadata_result,
-            Err(e)
-                if e.kind() == crate::ErrorKind::Unavailable
-                && matches!(
-                    e.source()
-                        .and_then(|s| s.downcast_ref::<object_store::Error>()),
-                    Some(object_store::Error::NotFound { .. })
-                )
-        ));
+        let err = wal_file
+            .metadata()
+            .await
+            .expect_err("expected metadata() to fail after deleting WAL file");
+        assert_eq!(err.kind(), crate::ErrorKind::Unavailable);
+        assert!(has_not_found_object_store_source(&err));
     }
 
     #[tokio::test]
@@ -457,17 +464,12 @@ mod tests {
         let wal_metadata = wal_file.metadata().await.unwrap();
 
         main_store.delete(&wal_metadata.location).await.unwrap();
-        let iter_result = wal_file.iterator().await;
-        assert!(matches!(
-            iter_result,
-            Err(e)
-                if e.kind() == crate::ErrorKind::Unavailable
-                && matches!(
-                    e.source()
-                        .and_then(|s| s.downcast_ref::<object_store::Error>()),
-                    Some(object_store::Error::NotFound { .. })
-                )
-        ));
+        let err = match wal_file.iterator().await {
+            Ok(_) => panic!("expected iterator() to fail after deleting WAL file"),
+            Err(err) => err,
+        };
+        assert_eq!(err.kind(), crate::ErrorKind::Unavailable);
+        assert!(has_not_found_object_store_source(&err));
     }
 
     #[tokio::test]
