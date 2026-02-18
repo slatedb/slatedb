@@ -16,12 +16,19 @@ impl DbInner {
         wal_id: u64,
     ) -> Result<(), SlateDBError> {
         let meta = guard.memtable().metadata();
-        let wals_since_last_freeze = wal_id - guard.last_freeze_wal_id();
+
+        let last_freeze_wal_id = guard
+            .state()
+            .imm_memtable
+            .front()
+            .map(|imm| imm.recent_flushed_wal_id())
+            .unwrap_or(guard.state().core().replay_after_wal_id);
+
         let l0_sst_size_est = self
             .table_store
             .estimate_encoded_size_compacted(meta.entry_num, meta.entries_size_in_bytes);
 
-        if wals_since_last_freeze < L0_MAX_WAL_FLUSHES
+        if (wal_id - last_freeze_wal_id) < L0_MAX_WAL_FLUSHES
             && l0_sst_size_est < self.settings.l0_sst_size_bytes
         {
             Ok(())

@@ -340,11 +340,6 @@ pub(crate) struct DbState {
     memtable: WritableKVTable,
     state: Arc<COWDbState>,
 
-    /// WAL ID at the time of the last memtable freeze. Used to track
-    /// how many WAL flushed there were since the last memtable freeze.
-    /// This is initialized with `replay_after_wal_id` (from the manifest) on creation.
-    last_freeze_wal_id: u64,
-
     /// If the database is closed, this will contain the result of the close operation.
     /// Otherwise, it will be None.
     ///
@@ -494,15 +489,12 @@ impl DbStateReader for DbStateView {
 
 impl DbState {
     pub(crate) fn new(manifest: DirtyObject<Manifest>) -> Self {
-        let last_freeze_wal_id = manifest.value.core.replay_after_wal_id;
-
         Self {
             memtable: WritableKVTable::new(),
             state: Arc::new(COWDbState {
                 imm_memtable: VecDeque::new(),
                 manifest,
             }),
-            last_freeze_wal_id,
             closed_result: WatchableOnceCell::new(),
         }
     }
@@ -530,10 +522,6 @@ impl DbState {
         &self.memtable
     }
 
-    pub(crate) fn last_freeze_wal_id(&self) -> u64 {
-        self.last_freeze_wal_id
-    }
-
     pub(crate) fn freeze_memtable(
         &mut self,
         recent_flushed_wal_id: u64,
@@ -545,7 +533,6 @@ impl DbState {
             };
         }
         let old_memtable = std::mem::replace(&mut self.memtable, WritableKVTable::new());
-        self.last_freeze_wal_id = recent_flushed_wal_id;
         self.modify(|modifier| {
             modifier
                 .state
