@@ -128,7 +128,7 @@ impl WalFile {
     /// Raises an error if the metadata could not be read from object storage. This can
     /// happen if the file was deleted after listing or if there was an issue with the
     /// object store. If the file is missing, a [`crate::Error`] with
-    /// [`crate::ErrorKind::Unavailable`] is returned, and its source contains an
+    /// [`crate::ErrorKind::Data`] is returned, and its source contains an
     /// `object_store::Error::NotFound`.
     pub async fn metadata(&self) -> Result<WalFileMetadata, crate::Error> {
         let metadata = self.table_store.metadata(&SsTableId::Wal(self.id)).await?;
@@ -147,7 +147,7 @@ impl WalFile {
     /// Raises an error if the data could not be read from object storage. This can
     /// happen if the file was deleted after listing or if there was an issue with the
     /// object store. If the file is missing, a [`crate::Error`] with
-    /// [`crate::ErrorKind::Unavailable`] is returned, and its source contains an
+    /// [`crate::ErrorKind::Data`] is returned, and its source contains an
     /// `object_store::Error::NotFound`.
     pub async fn iterator(&self) -> Result<WalFileIterator, crate::Error> {
         let sst = self.table_store.open_sst(&SsTableId::Wal(self.id)).await?;
@@ -429,7 +429,7 @@ mod tests {
             .metadata()
             .await
             .expect_err("expected metadata() to fail after deleting WAL file");
-        assert_eq!(err.kind(), crate::ErrorKind::Unavailable);
+        assert_eq!(err.kind(), crate::ErrorKind::Data);
         assert!(has_not_found_object_store_source(&err));
     }
 
@@ -467,7 +467,7 @@ mod tests {
             Ok(_) => panic!("expected iterator() to fail after deleting WAL file"),
             Err(err) => err,
         };
-        assert_eq!(err.kind(), crate::ErrorKind::Unavailable);
+        assert_eq!(err.kind(), crate::ErrorKind::Data);
         assert!(has_not_found_object_store_source(&err));
     }
 
