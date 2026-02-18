@@ -3647,7 +3647,7 @@ mod tests {
         let path = "/tmp/test_flush_memtable_max_wal_flushes";
 
         let kv_store = Db::builder(path, object_store.clone())
-            .with_settings(test_db_options(0, 64 * 1024 * 1024, None))
+            .with_settings(test_db_options(0, usize::MAX, None))
             .build()
             .await
             .unwrap();
@@ -3662,7 +3662,11 @@ mod tests {
             await_durable: false,
         };
         let put_options = PutOptions::default();
-        for i in 0..MAX_WAL_FLUSHES_BEFORE_L0_FLUSH + 10 {
+
+        // Verify that we have 0 L0 SSTs.
+        assert_eq!(stored_manifest.db_state().l0.len(), 0);
+
+        for i in 0..MAX_WAL_FLUSHES_BEFORE_L0_FLUSH {
             let key = format!("key{:08}", i);
             kv_store
                 .put_with_options(key.as_bytes(), b"v", &put_options, &write_options)
