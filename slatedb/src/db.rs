@@ -1618,7 +1618,7 @@ mod tests {
         ObjectStoreCacheOptions, PutOptions, Settings, Ttl, WriteOptions,
     };
     use crate::db::builder::GarbageCollectorBuilder;
-    use crate::db_common::L0_MAX_WAL_FLUSHES;
+    use crate::db_common::MAX_WAL_FLUSHES_BEFORE_L0_FLUSH;
     use crate::db_state::ManifestCore;
     use crate::db_stats::IMMUTABLE_MEMTABLE_FLUSHES;
     use crate::format::sst::SsTableFormat;
@@ -3662,7 +3662,7 @@ mod tests {
             await_durable: false,
         };
         let put_options = PutOptions::default();
-        for i in 0..L0_MAX_WAL_FLUSHES + 10 {
+        for i in 0..MAX_WAL_FLUSHES_BEFORE_L0_FLUSH + 10 {
             let key = format!("key{:08}", i);
             kv_store
                 .put_with_options(key.as_bytes(), b"v", &put_options, &write_options)
@@ -3676,7 +3676,7 @@ mod tests {
         // be exactly one L0 SST.
         let db_state = wait_for_manifest_condition(
             &mut stored_manifest,
-            |s| s.replay_after_wal_id >= L0_MAX_WAL_FLUSHES,
+            |s| s.replay_after_wal_id >= MAX_WAL_FLUSHES_BEFORE_L0_FLUSH,
             Duration::from_secs(30),
         )
         .await;
