@@ -120,6 +120,9 @@ impl SstReader {
 
     /// Errors if the file was GC'd.
     pub async fn open(&self, id: Ulid) -> Result<SstFile, crate::Error>;
+
+    /// Creates an `SstFile` from an existing `SsTableHandle` (no I/O needed).
+    pub fn open_with_handle(&self, handle: SsTableHandle) -> SstFile;
 }
 ```
 
