@@ -331,6 +331,11 @@ pub struct ScanOptions {
     /// The maximum number of concurrent tasks for fetching blocks during scans.
     /// Higher values can improve throughput but use more resources. The default is 1.
     pub max_fetch_tasks: usize,
+    /// Controls how many SST iterators are initialized concurrently during scan setup.
+    /// Higher values can reduce scan initialization latency for large datasets,
+    /// especially with object stores that handle many concurrent requests.
+    /// The default is 64.
+    pub max_scan_parallelism: usize,
     #[cfg(dst)]
     /// Force the current timestamp for DST operations. See #719 for details.
     pub now: i64,
@@ -345,6 +350,7 @@ impl Default for ScanOptions {
             read_ahead_bytes: 1,
             cache_blocks: false,
             max_fetch_tasks: 1,
+            max_scan_parallelism: 64,
             #[cfg(dst)]
             now: 0,
         }
@@ -384,6 +390,13 @@ impl ScanOptions {
     pub fn with_max_fetch_tasks(self, max_fetch_tasks: usize) -> Self {
         Self {
             max_fetch_tasks,
+            ..self
+        }
+    }
+
+    pub fn with_max_scan_parallelism(self, max_scan_parallelism: usize) -> Self {
+        Self {
+            max_scan_parallelism,
             ..self
         }
     }
@@ -1522,6 +1535,7 @@ object_store_cache_options:
         assert_eq!(options.read_ahead_bytes, 1);
         assert!(!options.cache_blocks);
         assert_eq!(options.max_fetch_tasks, 1);
+        assert_eq!(options.max_scan_parallelism, 64);
     }
 
     #[test]

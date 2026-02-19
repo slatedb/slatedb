@@ -237,6 +237,7 @@ public final class SlateDbConfig {
         private final long readAheadBytes;
         private final boolean cacheBlocks;
         private final long maxFetchTasks;
+        private final long maxScanParallelism;
 
         private ScanOptions(Builder builder) {
             this.durabilityFilter = builder.durabilityFilter;
@@ -244,6 +245,7 @@ public final class SlateDbConfig {
             this.readAheadBytes = builder.readAheadBytes;
             this.cacheBlocks = builder.cacheBlocks;
             this.maxFetchTasks = builder.maxFetchTasks;
+            this.maxScanParallelism = builder.maxScanParallelism;
         }
 
         public Durability durabilityFilter() {
@@ -266,6 +268,10 @@ public final class SlateDbConfig {
             return maxFetchTasks;
         }
 
+        public long maxScanParallelism() {
+            return maxScanParallelism;
+        }
+
         public static Builder builder() {
             return new Builder();
         }
@@ -276,6 +282,7 @@ public final class SlateDbConfig {
             private long readAheadBytes = 1;
             private boolean cacheBlocks;
             private long maxFetchTasks = 1;
+            private long maxScanParallelism = 64;
 
             public Builder durabilityFilter(Durability durabilityFilter) {
                 this.durabilityFilter = Objects.requireNonNull(durabilityFilter, "durabilityFilter");
@@ -305,6 +312,14 @@ public final class SlateDbConfig {
                     throw new IllegalArgumentException("maxFetchTasks must be >= 0");
                 }
                 this.maxFetchTasks = maxFetchTasks;
+                return this;
+            }
+
+            public Builder maxScanParallelism(long maxScanParallelism) {
+                if (maxScanParallelism < 0) {
+                    throw new IllegalArgumentException("maxScanParallelism must be >= 0");
+                }
+                this.maxScanParallelism = maxScanParallelism;
                 return this;
             }
 

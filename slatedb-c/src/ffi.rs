@@ -215,6 +215,8 @@ pub struct slatedb_scan_options_t {
     pub cache_blocks: bool,
     /// Max concurrent fetch tasks.
     pub max_fetch_tasks: u64,
+    /// Max concurrent SST iterator initializations during scan setup.
+    pub max_scan_parallelism: u64,
 }
 
 /// Reader options passed to `slatedb_db_reader_open`.
@@ -628,6 +630,12 @@ pub(crate) unsafe fn scan_options_from_ptr(
             "max_fetch_tasks does not fit in usize",
         )
     })?;
+    let max_scan_parallelism = usize::try_from(options.max_scan_parallelism).map_err(|_| {
+        error_result(
+            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
+            "max_scan_parallelism does not fit in usize",
+        )
+    })?;
 
     Ok(ScanOptions {
         durability_filter: durability_level_from_u8(options.durability_filter)?,
@@ -635,6 +643,7 @@ pub(crate) unsafe fn scan_options_from_ptr(
         read_ahead_bytes,
         cache_blocks: options.cache_blocks,
         max_fetch_tasks,
+        max_scan_parallelism,
     })
 }
 

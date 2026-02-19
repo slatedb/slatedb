@@ -1181,6 +1181,7 @@ final class NativeInterop {
         slatedb_scan_options_t.read_ahead_bytes(nativeOptions, options.readAheadBytes());
         slatedb_scan_options_t.cache_blocks(nativeOptions, options.cacheBlocks());
         slatedb_scan_options_t.max_fetch_tasks(nativeOptions, options.maxFetchTasks());
+        slatedb_scan_options_t.max_scan_parallelism(nativeOptions, options.maxScanParallelism());
         return nativeOptions;
     }
 

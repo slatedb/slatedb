@@ -256,6 +256,8 @@ typedef struct slatedb_scan_options_t {
     bool cache_blocks;
     // Max concurrent fetch tasks.
     uint64_t max_fetch_tasks;
+    // Max concurrent SST iterator initializations during scan setup.
+    uint64_t max_scan_parallelism;
 } slatedb_scan_options_t;
 
 // Flush options passed to `slatedb_db_flush_with_options`.

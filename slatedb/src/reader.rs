@@ -90,6 +90,7 @@ impl Reader {
         write_batch: Option<WriteBatch>,
         sst_iter_options: SstIteratorOptions,
         point_lookup_stats: Option<DbStats>,
+        max_scan_parallelism: usize,
     ) -> Result<IteratorSources, SlateDBError> {
         let write_batch_iter = write_batch
             .map(|batch| WriteBatchIterator::new(batch, range.clone(), IterationOrder::Ascending));
@@ -107,8 +108,11 @@ impl Reader {
             })
             .collect::<Vec<_>>();
 
-        let max_parallel =
-            compute_max_parallel(db_state.core().l0.len(), &db_state.core().compacted, 4);
+        let max_parallel = compute_max_parallel(
+            db_state.core().l0.len(),
+            &db_state.core().compacted,
+            max_scan_parallelism,
+        );
 
         let (l0_iters, sr_iters) = if let Some(point_key) = range.as_point().cloned() {
             let l0 = self.build_point_l0_iters(
@@ -308,6 +312,7 @@ impl Reader {
                 write_batch,
                 sst_iter_options,
                 Some(self.db_stats.clone()),
+                ScanOptions::default().max_scan_parallelism,
             )
             .await?;
 
@@ -382,7 +387,14 @@ impl Reader {
             l0_iters,
             sr_iters,
         } = self
-            .build_iterator_sources(&range, db_state, write_batch, sst_iter_options, None)
+            .build_iterator_sources(
+                &range,
+                db_state,
+                write_batch,
+                sst_iter_options,
+                None,
+                options.max_scan_parallelism,
+            )
             .await?;
 
         DbIterator::new(

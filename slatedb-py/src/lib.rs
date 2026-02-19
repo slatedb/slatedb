@@ -296,6 +296,7 @@ fn build_scan_options(
     read_ahead_bytes: Option<usize>,
     cache_blocks: Option<bool>,
     max_fetch_tasks: Option<usize>,
+    max_scan_parallelism: Option<usize>,
 ) -> PyResult<ScanOptions> {
     let mut opts = ScanOptions::default();
     if let Some(df) = durability_filter {
@@ -320,6 +321,9 @@ fn build_scan_options(
     }
     if let Some(mft) = max_fetch_tasks {
         opts.max_fetch_tasks = mft;
+    }
+    if let Some(msp) = max_scan_parallelism {
+        opts.max_scan_parallelism = msp;
     }
     Ok(opts)
 }
@@ -675,7 +679,7 @@ impl PySlateDB {
         })
     }
 
-    #[pyo3(signature = (start, end = None, *, durability_filter = None, dirty = None, read_ahead_bytes = None, cache_blocks = None, max_fetch_tasks = None))]
+    #[pyo3(signature = (start, end = None, *, durability_filter = None, dirty = None, read_ahead_bytes = None, cache_blocks = None, max_fetch_tasks = None, max_scan_parallelism = None))]
     fn scan_with_options(
         &self,
         start: Vec<u8>,
@@ -685,6 +689,7 @@ impl PySlateDB {
         read_ahead_bytes: Option<usize>,
         cache_blocks: Option<bool>,
         max_fetch_tasks: Option<usize>,
+        max_scan_parallelism: Option<usize>,
     ) -> PyResult<PyDbIterator> {
         if start.is_empty() {
             return Err(InvalidError::new_err("start cannot be empty"));
@@ -700,6 +705,7 @@ impl PySlateDB {
             read_ahead_bytes,
             cache_blocks,
             max_fetch_tasks,
+            max_scan_parallelism,
         )?;
         let db = self.inner.clone();
         let rt = get_runtime();
@@ -711,7 +717,7 @@ impl PySlateDB {
         Ok(PyDbIterator::from_iter(iter))
     }
 
-    #[pyo3(signature = (start, end = None, *, durability_filter = None, dirty = None, read_ahead_bytes = None, cache_blocks = None, max_fetch_tasks = None))]
+    #[pyo3(signature = (start, end = None, *, durability_filter = None, dirty = None, read_ahead_bytes = None, cache_blocks = None, max_fetch_tasks = None, max_scan_parallelism = None))]
     fn scan_with_options_async<'py>(
         &self,
         py: Python<'py>,
@@ -722,6 +728,7 @@ impl PySlateDB {
         read_ahead_bytes: Option<usize>,
         cache_blocks: Option<bool>,
         max_fetch_tasks: Option<usize>,
+        max_scan_parallelism: Option<usize>,
     ) -> PyResult<Bound<'py, PyAny>> {
         if start.is_empty() {
             return Err(InvalidError::new_err("start cannot be empty"));
@@ -737,6 +744,7 @@ impl PySlateDB {
             read_ahead_bytes,
             cache_blocks,
             max_fetch_tasks,
+            max_scan_parallelism,
         )?;
         let db = self.inner.clone();
         future_into_py(py, async move {
@@ -748,7 +756,7 @@ impl PySlateDB {
         })
     }
 
-    #[pyo3(signature = (prefix, *, durability_filter = None, dirty = None, read_ahead_bytes = None, cache_blocks = None, max_fetch_tasks = None))]
+    #[pyo3(signature = (prefix, *, durability_filter = None, dirty = None, read_ahead_bytes = None, cache_blocks = None, max_fetch_tasks = None, max_scan_parallelism = None))]
     fn scan_prefix_with_options(
         &self,
         prefix: Vec<u8>,
@@ -757,6 +765,7 @@ impl PySlateDB {
         read_ahead_bytes: Option<usize>,
         cache_blocks: Option<bool>,
         max_fetch_tasks: Option<usize>,
+        max_scan_parallelism: Option<usize>,
     ) -> PyResult<PyDbIterator> {
         let opts = build_scan_options(
             durability_filter,
@@ -764,6 +773,7 @@ impl PySlateDB {
             read_ahead_bytes,
             cache_blocks,
             max_fetch_tasks,
+            max_scan_parallelism,
         )?;
         let db = self.inner.clone();
         let rt = get_runtime();
@@ -775,7 +785,7 @@ impl PySlateDB {
         Ok(PyDbIterator::from_iter(iter))
     }
 
-    #[pyo3(signature = (prefix, *, durability_filter = None, dirty = None, read_ahead_bytes = None, cache_blocks = None, max_fetch_tasks = None))]
+    #[pyo3(signature = (prefix, *, durability_filter = None, dirty = None, read_ahead_bytes = None, cache_blocks = None, max_fetch_tasks = None, max_scan_parallelism = None))]
     fn scan_prefix_with_options_async<'py>(
         &self,
         py: Python<'py>,
@@ -785,6 +795,7 @@ impl PySlateDB {
         read_ahead_bytes: Option<usize>,
         cache_blocks: Option<bool>,
         max_fetch_tasks: Option<usize>,
+        max_scan_parallelism: Option<usize>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let opts = build_scan_options(
             durability_filter,
@@ -792,6 +803,7 @@ impl PySlateDB {
             read_ahead_bytes,
             cache_blocks,
             max_fetch_tasks,
+            max_scan_parallelism,
         )?;
         let db = self.inner.clone();
         future_into_py(py, async move {
@@ -1389,7 +1401,7 @@ impl PySlateDBSnapshot {
         })
     }
 
-    #[pyo3(signature = (start, end = None, *, durability_filter = None, dirty = None, read_ahead_bytes = None, cache_blocks = None, max_fetch_tasks = None))]
+    #[pyo3(signature = (start, end = None, *, durability_filter = None, dirty = None, read_ahead_bytes = None, cache_blocks = None, max_fetch_tasks = None, max_scan_parallelism = None))]
     fn scan_with_options(
         &self,
         start: Vec<u8>,
@@ -1399,6 +1411,7 @@ impl PySlateDBSnapshot {
         read_ahead_bytes: Option<usize>,
         cache_blocks: Option<bool>,
         max_fetch_tasks: Option<usize>,
+        max_scan_parallelism: Option<usize>,
     ) -> PyResult<PyDbIterator> {
         if start.is_empty() {
             return Err(InvalidError::new_err("start cannot be empty"));
@@ -1414,6 +1427,7 @@ impl PySlateDBSnapshot {
             read_ahead_bytes,
             cache_blocks,
             max_fetch_tasks,
+            max_scan_parallelism,
         )?;
         let snapshot = self.inner_ref()?;
         let rt = get_runtime();
@@ -1426,7 +1440,7 @@ impl PySlateDBSnapshot {
         Ok(PyDbIterator::from_iter(iter))
     }
 
-    #[pyo3(signature = (start, end = None, *, durability_filter = None, dirty = None, read_ahead_bytes = None, cache_blocks = None, max_fetch_tasks = None))]
+    #[pyo3(signature = (start, end = None, *, durability_filter = None, dirty = None, read_ahead_bytes = None, cache_blocks = None, max_fetch_tasks = None, max_scan_parallelism = None))]
     fn scan_with_options_async<'py>(
         &self,
         py: Python<'py>,
@@ -1437,6 +1451,7 @@ impl PySlateDBSnapshot {
         read_ahead_bytes: Option<usize>,
         cache_blocks: Option<bool>,
         max_fetch_tasks: Option<usize>,
+        max_scan_parallelism: Option<usize>,
     ) -> PyResult<Bound<'py, PyAny>> {
         if start.is_empty() {
             return Err(InvalidError::new_err("start cannot be empty"));
@@ -1452,6 +1467,7 @@ impl PySlateDBSnapshot {
             read_ahead_bytes,
             cache_blocks,
             max_fetch_tasks,
+            max_scan_parallelism,
         )?;
         let snapshot = self.inner_ref()?;
         future_into_py(py, async move {
@@ -1463,7 +1479,7 @@ impl PySlateDBSnapshot {
         })
     }
 
-    #[pyo3(signature = (prefix, *, durability_filter = None, dirty = None, read_ahead_bytes = None, cache_blocks = None, max_fetch_tasks = None))]
+    #[pyo3(signature = (prefix, *, durability_filter = None, dirty = None, read_ahead_bytes = None, cache_blocks = None, max_fetch_tasks = None, max_scan_parallelism = None))]
     fn scan_prefix_with_options(
         &self,
         prefix: Vec<u8>,
@@ -1472,6 +1488,7 @@ impl PySlateDBSnapshot {
         read_ahead_bytes: Option<usize>,
         cache_blocks: Option<bool>,
         max_fetch_tasks: Option<usize>,
+        max_scan_parallelism: Option<usize>,
     ) -> PyResult<PyDbIterator> {
         let opts = build_scan_options(
             durability_filter,
@@ -1479,6 +1496,7 @@ impl PySlateDBSnapshot {
             read_ahead_bytes,
             cache_blocks,
             max_fetch_tasks,
+            max_scan_parallelism,
         )?;
         let snapshot = self.inner_ref()?;
         let rt = get_runtime();
@@ -1491,7 +1509,7 @@ impl PySlateDBSnapshot {
         Ok(PyDbIterator::from_iter(iter))
     }
 
-    #[pyo3(signature = (prefix, *, durability_filter = None, dirty = None, read_ahead_bytes = None, cache_blocks = None, max_fetch_tasks = None))]
+    #[pyo3(signature = (prefix, *, durability_filter = None, dirty = None, read_ahead_bytes = None, cache_blocks = None, max_fetch_tasks = None, max_scan_parallelism = None))]
     fn scan_prefix_with_options_async<'py>(
         &self,
         py: Python<'py>,
@@ -1501,6 +1519,7 @@ impl PySlateDBSnapshot {
         read_ahead_bytes: Option<usize>,
         cache_blocks: Option<bool>,
         max_fetch_tasks: Option<usize>,
+        max_scan_parallelism: Option<usize>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let opts = build_scan_options(
             durability_filter,
@@ -1508,6 +1527,7 @@ impl PySlateDBSnapshot {
             read_ahead_bytes,
             cache_blocks,
             max_fetch_tasks,
+            max_scan_parallelism,
         )?;
         let snapshot = self.inner_ref()?;
         future_into_py(py, async move {
@@ -1766,7 +1786,7 @@ impl PySlateDBTransaction {
         future_into_py(py, async move { Ok(PyDbIterator::from_iter(iter)) })
     }
 
-    #[pyo3(signature = (start, end = None, *, durability_filter = None, dirty = None, read_ahead_bytes = None, cache_blocks = None, max_fetch_tasks = None))]
+    #[pyo3(signature = (start, end = None, *, durability_filter = None, dirty = None, read_ahead_bytes = None, cache_blocks = None, max_fetch_tasks = None, max_scan_parallelism = None))]
     fn scan_with_options(
         &self,
         start: Vec<u8>,
@@ -1776,6 +1796,7 @@ impl PySlateDBTransaction {
         read_ahead_bytes: Option<usize>,
         cache_blocks: Option<bool>,
         max_fetch_tasks: Option<usize>,
+        max_scan_parallelism: Option<usize>,
     ) -> PyResult<PyDbIterator> {
         if start.is_empty() {
             return Err(InvalidError::new_err("start cannot be empty"));
@@ -1791,6 +1812,7 @@ impl PySlateDBTransaction {
             read_ahead_bytes,
             cache_blocks,
             max_fetch_tasks,
+            max_scan_parallelism,
         )?;
         let txn = self.inner_ref()?;
         let rt = get_runtime();
@@ -1802,7 +1824,7 @@ impl PySlateDBTransaction {
         Ok(PyDbIterator::from_iter(iter))
     }
 
-    #[pyo3(signature = (start, end = None, *, durability_filter = None, dirty = None, read_ahead_bytes = None, cache_blocks = None, max_fetch_tasks = None))]
+    #[pyo3(signature = (start, end = None, *, durability_filter = None, dirty = None, read_ahead_bytes = None, cache_blocks = None, max_fetch_tasks = None, max_scan_parallelism = None))]
     fn scan_with_options_async<'py>(
         &self,
         py: Python<'py>,
@@ -1813,6 +1835,7 @@ impl PySlateDBTransaction {
         read_ahead_bytes: Option<usize>,
         cache_blocks: Option<bool>,
         max_fetch_tasks: Option<usize>,
+        max_scan_parallelism: Option<usize>,
     ) -> PyResult<Bound<'py, PyAny>> {
         if start.is_empty() {
             return Err(InvalidError::new_err("start cannot be empty"));
@@ -1828,6 +1851,7 @@ impl PySlateDBTransaction {
             read_ahead_bytes,
             cache_blocks,
             max_fetch_tasks,
+            max_scan_parallelism,
         )?;
         let txn = self.inner_ref()?;
         let rt = get_runtime();
@@ -1841,7 +1865,7 @@ impl PySlateDBTransaction {
         future_into_py(py, async move { Ok(PyDbIterator::from_iter(iter)) })
     }
 
-    #[pyo3(signature = (prefix, *, durability_filter = None, dirty = None, read_ahead_bytes = None, cache_blocks = None, max_fetch_tasks = None))]
+    #[pyo3(signature = (prefix, *, durability_filter = None, dirty = None, read_ahead_bytes = None, cache_blocks = None, max_fetch_tasks = None, max_scan_parallelism = None))]
     fn scan_prefix_with_options(
         &self,
         prefix: Vec<u8>,
@@ -1850,6 +1874,7 @@ impl PySlateDBTransaction {
         read_ahead_bytes: Option<usize>,
         cache_blocks: Option<bool>,
         max_fetch_tasks: Option<usize>,
+        max_scan_parallelism: Option<usize>,
     ) -> PyResult<PyDbIterator> {
         let opts = build_scan_options(
             durability_filter,
@@ -1857,6 +1882,7 @@ impl PySlateDBTransaction {
             read_ahead_bytes,
             cache_blocks,
             max_fetch_tasks,
+            max_scan_parallelism,
         )?;
         let txn = self.inner_ref()?;
         let rt = get_runtime();
@@ -1868,7 +1894,7 @@ impl PySlateDBTransaction {
         Ok(PyDbIterator::from_iter(iter))
     }
 
-    #[pyo3(signature = (prefix, *, durability_filter = None, dirty = None, read_ahead_bytes = None, cache_blocks = None, max_fetch_tasks = None))]
+    #[pyo3(signature = (prefix, *, durability_filter = None, dirty = None, read_ahead_bytes = None, cache_blocks = None, max_fetch_tasks = None, max_scan_parallelism = None))]
     fn scan_prefix_with_options_async<'py>(
         &self,
         py: Python<'py>,
@@ -1878,6 +1904,7 @@ impl PySlateDBTransaction {
         read_ahead_bytes: Option<usize>,
         cache_blocks: Option<bool>,
         max_fetch_tasks: Option<usize>,
+        max_scan_parallelism: Option<usize>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let opts = build_scan_options(
             durability_filter,
@@ -1885,6 +1912,7 @@ impl PySlateDBTransaction {
             read_ahead_bytes,
             cache_blocks,
             max_fetch_tasks,
+            max_scan_parallelism,
         )?;
         let txn = self.inner_ref()?;
         let rt = get_runtime();
@@ -2228,7 +2256,7 @@ impl PySlateDBReader {
         })
     }
 
-    #[pyo3(signature = (start, end = None, *, durability_filter = None, dirty = None, read_ahead_bytes = None, cache_blocks = None, max_fetch_tasks = None))]
+    #[pyo3(signature = (start, end = None, *, durability_filter = None, dirty = None, read_ahead_bytes = None, cache_blocks = None, max_fetch_tasks = None, max_scan_parallelism = None))]
     fn scan_with_options(
         &self,
         start: Vec<u8>,
@@ -2238,6 +2266,7 @@ impl PySlateDBReader {
         read_ahead_bytes: Option<usize>,
         cache_blocks: Option<bool>,
         max_fetch_tasks: Option<usize>,
+        max_scan_parallelism: Option<usize>,
     ) -> PyResult<PyDbIterator> {
         if start.is_empty() {
             return Err(InvalidError::new_err("start cannot be empty"));
@@ -2253,6 +2282,7 @@ impl PySlateDBReader {
             read_ahead_bytes,
             cache_blocks,
             max_fetch_tasks,
+            max_scan_parallelism,
         )?;
         let reader = self.inner.clone();
         let rt = get_runtime();
@@ -2265,7 +2295,7 @@ impl PySlateDBReader {
         Ok(PyDbIterator::from_iter(iter))
     }
 
-    #[pyo3(signature = (start, end = None, *, durability_filter = None, dirty = None, read_ahead_bytes = None, cache_blocks = None, max_fetch_tasks = None))]
+    #[pyo3(signature = (start, end = None, *, durability_filter = None, dirty = None, read_ahead_bytes = None, cache_blocks = None, max_fetch_tasks = None, max_scan_parallelism = None))]
     fn scan_with_options_async<'py>(
         &self,
         py: Python<'py>,
@@ -2276,6 +2306,7 @@ impl PySlateDBReader {
         read_ahead_bytes: Option<usize>,
         cache_blocks: Option<bool>,
         max_fetch_tasks: Option<usize>,
+        max_scan_parallelism: Option<usize>,
     ) -> PyResult<Bound<'py, PyAny>> {
         if start.is_empty() {
             return Err(InvalidError::new_err("start cannot be empty"));
@@ -2291,6 +2322,7 @@ impl PySlateDBReader {
             read_ahead_bytes,
             cache_blocks,
             max_fetch_tasks,
+            max_scan_parallelism,
         )?;
         let reader = self.inner.clone();
         future_into_py(py, async move {
@@ -2302,7 +2334,7 @@ impl PySlateDBReader {
         })
     }
 
-    #[pyo3(signature = (prefix, *, durability_filter = None, dirty = None, read_ahead_bytes = None, cache_blocks = None, max_fetch_tasks = None))]
+    #[pyo3(signature = (prefix, *, durability_filter = None, dirty = None, read_ahead_bytes = None, cache_blocks = None, max_fetch_tasks = None, max_scan_parallelism = None))]
     fn scan_prefix_with_options(
         &self,
         prefix: Vec<u8>,
@@ -2311,6 +2343,7 @@ impl PySlateDBReader {
         read_ahead_bytes: Option<usize>,
         cache_blocks: Option<bool>,
         max_fetch_tasks: Option<usize>,
+        max_scan_parallelism: Option<usize>,
     ) -> PyResult<PyDbIterator> {
         let opts = build_scan_options(
             durability_filter,
@@ -2318,6 +2351,7 @@ impl PySlateDBReader {
             read_ahead_bytes,
             cache_blocks,
             max_fetch_tasks,
+            max_scan_parallelism,
         )?;
         let reader = self.inner.clone();
         let rt = get_runtime();
@@ -2330,7 +2364,7 @@ impl PySlateDBReader {
         Ok(PyDbIterator::from_iter(iter))
     }
 
-    #[pyo3(signature = (prefix, *, durability_filter = None, dirty = None, read_ahead_bytes = None, cache_blocks = None, max_fetch_tasks = None))]
+    #[pyo3(signature = (prefix, *, durability_filter = None, dirty = None, read_ahead_bytes = None, cache_blocks = None, max_fetch_tasks = None, max_scan_parallelism = None))]
     fn scan_prefix_with_options_async<'py>(
         &self,
         py: Python<'py>,
@@ -2340,6 +2374,7 @@ impl PySlateDBReader {
         read_ahead_bytes: Option<usize>,
         cache_blocks: Option<bool>,
         max_fetch_tasks: Option<usize>,
+        max_scan_parallelism: Option<usize>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let opts = build_scan_options(
             durability_filter,
@@ -2347,6 +2382,7 @@ impl PySlateDBReader {
             read_ahead_bytes,
             cache_blocks,
             max_fetch_tasks,
+            max_scan_parallelism,
         )?;
         let reader = self.inner.clone();
         future_into_py(py, async move {
