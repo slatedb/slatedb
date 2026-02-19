@@ -3692,7 +3692,6 @@ mod tests {
             .put_with_options(key.as_bytes(), b"v", &put_options, &write_options)
             .await
             .unwrap();
-        kv_store.flush().await.unwrap();
 
         // Verify that the WAL count threshold triggered a memtable freeze and L0 flush.
         // replay_after_wal_id should have advanced to the threshold, and there should
