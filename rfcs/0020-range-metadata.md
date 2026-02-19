@@ -44,7 +44,7 @@ Table of Contents:
 
 <!-- TOC end -->
 
-Status: Draft
+Status: Accepted
 
 Authors:
 
