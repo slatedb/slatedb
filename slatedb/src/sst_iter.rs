@@ -2481,12 +2481,30 @@ mod tests {
         ));
 
         let mut writer = table_store.table_writer(SsTableId::Wal(0));
-        writer.add(RowEntry::new_value(b"key_a", b"value_100", 100)).await.unwrap();
-        writer.add(RowEntry::new_value(b"key_a", b"value_95", 95)).await.unwrap();
-        writer.add(RowEntry::new_value(b"key_a", b"value_90", 90)).await.unwrap();
-        writer.add(RowEntry::new_value(b"key_b", b"value_80", 80)).await.unwrap();
-        writer.add(RowEntry::new_value(b"key_b", b"value_70", 70)).await.unwrap();
-        writer.add(RowEntry::new_value(b"key_c", b"value_50", 50)).await.unwrap();
+        writer
+            .add(RowEntry::new_value(b"key_a", b"value_100", 100))
+            .await
+            .unwrap();
+        writer
+            .add(RowEntry::new_value(b"key_a", b"value_95", 95))
+            .await
+            .unwrap();
+        writer
+            .add(RowEntry::new_value(b"key_a", b"value_90", 90))
+            .await
+            .unwrap();
+        writer
+            .add(RowEntry::new_value(b"key_b", b"value_80", 80))
+            .await
+            .unwrap();
+        writer
+            .add(RowEntry::new_value(b"key_b", b"value_70", 70))
+            .await
+            .unwrap();
+        writer
+            .add(RowEntry::new_value(b"key_c", b"value_50", 50))
+            .await
+            .unwrap();
         let handle = writer.close().await.unwrap();
 
         let mut iter = SstIterator::new_owned_initialized(
