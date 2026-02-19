@@ -3686,7 +3686,7 @@ mod tests {
             assert_eq!(guard.state().core().l0.len(), 0);
         }
 
-        // This put() + flush() triggers a freeze.
+        // This put() triggers a freeze.
         let key = format!("key{:08}", MAX_WAL_FLUSHES_BEFORE_L0_FLUSH - 1);
         kv_store
             .put_with_options(key.as_bytes(), b"v", &put_options, &write_options)
