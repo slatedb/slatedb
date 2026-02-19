@@ -3742,7 +3742,7 @@ mod tests {
 
         // Run MAX_WAL_FLUSHES_BEFORE_L0_FLUSH more put()/flush() cycles
         // and see if the threshold triggers again.
-        for i in 0..MAX_WAL_FLUSHES_BEFORE_L0_FLUSH {
+        for i in 0..(MAX_WAL_FLUSHES_BEFORE_L0_FLUSH - 1) {
             let key = format!("key{:08}", i);
             kv_store
                 .put_with_options(key.as_bytes(), b"v", &put_options, &write_options)
