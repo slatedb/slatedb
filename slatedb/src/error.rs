@@ -227,6 +227,9 @@ pub(crate) enum SlateDBError {
 
     #[error("invalid environment variable {key} value `{value}`")]
     InvalidEnvironmentVariable { key: String, value: String },
+
+    #[error("invalid argument: {msg}")]
+    InvalidArgument { msg: String },
 }
 
 impl From<TransactionalObjectError> for SlateDBError {
@@ -501,6 +504,7 @@ impl From<SlateDBError> for Error {
             SlateDBError::InvalidSequenceOrder { .. } => Error::data(msg),
             SlateDBError::UndefinedEnvironmentVariable { .. } => Error::invalid(msg),
             SlateDBError::InvalidEnvironmentVariable { .. } => Error::invalid(msg),
+            SlateDBError::InvalidArgument { .. } => Error::invalid(msg),
 
             // Data errors
             SlateDBError::InvalidFlatbuffer(err) => Error::data(msg).with_source(Box::new(err)),
