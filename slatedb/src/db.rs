@@ -6491,24 +6491,104 @@ mod tests {
         assert_eq!(handle.seqnum(), 3);
         assert_eq!(handle.create_ts(), Some(300));
     }
+
     #[tokio::test]
     async fn test_get_row() {
         use crate::types::ValueDeletable;
-        use object_store::memory::InMemory;
 
-        let object_store = Arc::new(InMemory::new());
-        let db = Db::open(Path::from("/tmp/test_get_row"), object_store)
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = "/tmp/test_get_row";
+        let clock = Arc::new(MockSystemClock::new());
+        let db = Db::builder(path, object_store)
+            .with_settings(test_db_options(0, 1024, None))
+            .with_system_clock(clock.clone())
+            .build()
             .await
             .unwrap();
 
+        clock.set(100);
         let key = b"key1";
         let value = b"value1";
-        db.put(key, value).await.unwrap();
+        db.put_with_options(
+            key,
+            value,
+            &PutOptions {
+                ttl: Ttl::ExpireAfter(50),
+            },
+            &WriteOptions {
+                await_durable: false,
+            },
+        )
+        .await
+        .unwrap();
 
         let row = db.get_row(key).await.unwrap().unwrap();
         assert_eq!(row.key, Bytes::from_static(key));
         assert_eq!(row.value, ValueDeletable::Value(Bytes::from_static(value)));
-        // Sequence number should be consistent, but exact value depends on impl details
-        assert!(row.seq > 0);
+        assert_eq!(row.seq, 1);
+        assert_eq!(row.create_ts, Some(100));
+        assert_eq!(row.expire_ts, Some(150));
+    }
+
+    #[tokio::test]
+    async fn test_scan_row() {
+        use crate::types::ValueDeletable;
+
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = "/tmp/test_scan_row";
+        let clock = Arc::new(MockSystemClock::new());
+        let db = Db::builder(path, object_store)
+            .with_settings(test_db_options(0, 1024, None))
+            .with_system_clock(clock.clone())
+            .build()
+            .await
+            .unwrap();
+
+        let put_opts = PutOptions {
+            ttl: Ttl::ExpireAfter(50),
+        };
+        let write_opts = WriteOptions{
+            await_durable: false,
+        };
+
+        clock.set(100);
+        db.put_with_options(b"key1", b"value1", &put_opts, &write_opts)
+            .await
+            .unwrap();
+
+        clock.set(110);
+        db.put_with_options(b"key2", b"value2", &put_opts, &write_opts)
+            .await
+            .unwrap();
+        
+        clock.set(120);
+        db.put_with_options(b"key3", b"value3", &put_opts, &write_opts)
+            .await
+            .unwrap();
+
+        let mut iter = db.scan::<Bytes, _>(..).await.unwrap();
+
+        let row1 = iter.next_row().await.unwrap().unwrap();
+        assert_eq!(row1.key, Bytes::from_static(b"key1"));
+        assert_eq!(row1.value, ValueDeletable::Value(Bytes::from_static(b"value1")));
+        assert_eq!(row1.seq, 1);
+        assert_eq!(row1.create_ts, Some(100));
+        assert_eq!(row1.expire_ts, Some(150));
+
+        let row2 = iter.next_row().await.unwrap().unwrap();
+        assert_eq!(row2.key, Bytes::from_static(b"key2"));
+        assert_eq!(row2.value, ValueDeletable::Value(Bytes::from_static(b"value2")));
+        assert_eq!(row2.seq, 2);
+        assert_eq!(row2.create_ts, Some(110));
+        assert_eq!(row2.expire_ts, Some(160));
+
+        let row3 = iter.next_row().await.unwrap().unwrap();
+        assert_eq!(row3.key, Bytes::from_static(b"key3"));
+        assert_eq!(row3.value, ValueDeletable::Value(Bytes::from_static(b"value3")));
+        assert_eq!(row3.seq, 3);
+        assert_eq!(row3.create_ts, Some(120));
+        assert_eq!(row3.expire_ts, Some(170));
+
+        assert!(iter.next_row().await.unwrap().is_none());
     }
 }
