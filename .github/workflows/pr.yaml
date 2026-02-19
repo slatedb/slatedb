@@ -131,7 +131,7 @@ jobs:
         with:
           tool: nextest@0.9.98
       - name: Run Tests
-        run: cargo nextest run --workspace --all-features
+        run: cargo nextest run --workspace --all-features --profile ci-cross
       - name: Run Doc Tests
         run: cargo test --doc --all-features
 

@@ -38,17 +38,23 @@ use crate::config::WriteOptions;
 use crate::dispatcher::MessageHandler;
 use crate::types::RowEntry;
 use crate::utils::WatchableOnceCellReader;
-use crate::{batch::WriteBatch, db::DbInner, error::SlateDBError};
+use crate::{batch::WriteBatch, db::DbInner, db::WriteHandle, error::SlateDBError};
 use slatedb_common::clock::SystemClock;
 
 pub(crate) const WRITE_BATCH_TASK_NAME: &str = "writer";
 
+pub(crate) type WriteBatchResult = Result<
+    (
+        WriteHandle,
+        Option<WatchableOnceCellReader<Result<(), SlateDBError>>>,
+    ),
+    SlateDBError,
+>;
+
 pub(crate) struct WriteBatchMessage {
     pub(crate) batch: WriteBatch,
     pub(crate) options: WriteOptions,
-    pub(crate) done: tokio::sync::oneshot::Sender<
-        Result<WatchableOnceCellReader<Result<(), SlateDBError>>, SlateDBError>,
-    >,
+    pub(crate) done: tokio::sync::oneshot::Sender<WriteBatchResult>,
 }
 
 impl std::fmt::Debug for WriteBatchMessage {
@@ -88,11 +94,13 @@ impl MessageHandler<WriteBatchMessage> for WriteBatchEventHandler {
         // their memtables in a timely manner.
         if self.is_first_write && !self.db_inner.wal_enabled && options.await_durable {
             self.is_first_write = false;
-            let this_watcher = result.clone()?;
-            let this_clock = self.db_inner.system_clock.clone();
-            tokio::spawn(async move {
-                monitor_first_write(this_watcher, this_clock).await;
-            });
+            if let Ok((_, Some(this_watcher))) = &result {
+                let this_watcher = this_watcher.clone();
+                let this_clock = self.db_inner.system_clock.clone();
+                tokio::spawn(async move {
+                    monitor_first_write(this_watcher, this_clock).await;
+                });
+            }
         }
         _ = done.send(result);
         Ok(())
@@ -114,11 +122,7 @@ impl MessageHandler<WriteBatchMessage> for WriteBatchEventHandler {
 impl DbInner {
     #[allow(clippy::panic)]
     #[instrument(level = "trace", skip_all, fields(batch_size = batch.ops.len()))]
-    async fn write_batch(
-        &self,
-        batch: WriteBatch,
-        options: &WriteOptions,
-    ) -> Result<WatchableOnceCellReader<Result<(), SlateDBError>>, SlateDBError> {
+    async fn write_batch(&self, batch: WriteBatch, options: &WriteOptions) -> WriteBatchResult {
         let _options = options;
         #[cfg(not(dst))]
         let now = self.mono_clock.now().await?;
@@ -195,7 +199,9 @@ impl DbInner {
             self.maybe_freeze_memtable(&mut guard, last_flushed_wal_id)?;
         }
 
-        Ok(durable_watcher)
+        let write_handle = WriteHandle::new(commit_seq, Some(now));
+
+        Ok((write_handle, Some(durable_watcher)))
     }
 
     /// Write entries to the currently active memtable. Returns a durable watcher for the memtable.

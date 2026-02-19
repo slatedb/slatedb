@@ -256,8 +256,6 @@ pub struct WriteHandle {
     seq: u64,
     /// The creation timestamp (if set).
     create_ts: Option<i64>,
-    /// The expiration timestamp (if set).
-    expire_ts: Option<i64>,
 }
 
 impl WriteHandle {
@@ -271,14 +269,12 @@ impl WriteHandle {
         self.create_ts
     }
     
-    /// Returns the expiration timestamp assigned to this write operation.
-    pub fn expire_ts(&self) -> Option<i64> {
-        self.expire_ts
-    }
-    
     // Future extensions can be added here, for example:
     // pub async fn await_durability(&self) -> Result<(), Error> { ... }
 }
+
+> [!NOTE]
+> `WriteHandle` does not return `expire_ts` because each operation in a batch can have a different expiration time (or no expiration). Returning a single `expire_ts` for a batch write would be ambiguous or incorrect. Users who need `expire_ts` should query the row using `get_row()` or `next_row()`.
 ```
 
 **Single Key Operations**:
@@ -324,7 +320,6 @@ pub async fn commit_with_options(self, options: &WriteOptions) -> Result<WriteHa
 let handle = db.put(b"key", b"value").await?;
 println!("Seq: {}", handle.seqnum());
 println!("Created at: {:?}", handle.create_ts());
-println!("Expires at: {:?}", handle.expire_ts());
 
 // Batch operation
 let mut batch = WriteBatch::new();
@@ -341,7 +336,6 @@ let row = db.get_row(b"key").await?;
 if let Some(entry) = row {
     assert_eq!(entry.seq(), handle.seqnum());
     assert_eq!(entry.create_ts(), handle.create_ts());
-    assert_eq!(entry.expire_ts(), handle.expire_ts());
 }
 
 // Option 2: Ignore return values (if you don't need the metadata)
@@ -354,11 +348,11 @@ let _ = db.write(batch2).await?;
 
 **Implementation Details**:
 
-- Modify `DbInner::write_with_options` to return `WriteHandle` (containing the assigned `commit_seq`, `create_ts`, and `expire_ts`).
+- Modify `DbInner::write_with_options` to return `WriteHandle` (containing the assigned `commit_seq` and `create_ts`).
 - `put()`, `delete()`, and `merge()` return the `WriteHandle` received from `DbInner`.
 - Both `put`, `delete`, and `merge` operations share the same underlying write pipeline.
-- `WriteHandle` contains the sequence number, creation timestamp, and expiration timestamp assigned to the write operation.
-- The `create_ts` and `expire_ts` are assigned at the same time as the `commit_seq` during write batch processing.
+- `WriteHandle` contains the sequence number and creation timestamp assigned to the write operation.
+- The `create_ts` is assigned at the same time as the `commit_seq` during write batch processing.
 - **Note on Transactions**: Within a transaction, the individual write operations (`put`, `delete`, `merge`) do not return `WriteHandle` because sequence numbers are not known during transaction execution. However, `DbTransaction::commit()` and `commit_with_options()` **do** return `WriteHandle`, allowing users to access the commit sequence number and timestamps assigned when the transaction is successfully committed.
 
 <!-- TOC --><a name="3-support-query-by-version"></a>

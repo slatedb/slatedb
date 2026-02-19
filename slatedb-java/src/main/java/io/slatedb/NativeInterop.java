@@ -2,12 +2,17 @@ package io.slatedb;
 
 import io.slatedb.SlateDbConfig.*;
 import io.slatedb.ffi.*;
+import io.slatedb.ffi.Native;
 
 import java.lang.foreign.Arena;
+import java.lang.foreign.GroupLayout;
+import java.lang.foreign.MemoryLayout;
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
+import java.lang.invoke.VarHandle;
 import java.nio.charset.StandardCharsets;
 import java.util.Objects;
+import java.util.OptionalLong;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /// Java-typed wrappers around generated jextract bindings.
@@ -504,26 +509,11 @@ final class NativeInterop {
         }
     }
 
-    static void slatedb_db_put(DbHandle db, byte[] key, byte[] value) {
-        Objects.requireNonNull(db, "db");
-        Objects.requireNonNull(key, "key");
-        Objects.requireNonNull(value, "value");
-
-        try (Arena arena = Arena.ofConfined()) {
-            checkResult(
-                Native.slatedb_db_put(
-                    arena,
-                    db.segment(),
-                    marshalBytes(arena, key),
-                    key.length,
-                    marshalBytes(arena, value),
-                    value.length
-                )
-            );
-        }
+    static SlateDbWriteHandle slatedb_db_put(DbHandle db, byte[] key, byte[] value) {
+        return slatedb_db_put_with_options(db, key, value, null, null);
     }
 
-    static void slatedb_db_put_with_options(
+    static SlateDbWriteHandle slatedb_db_put_with_options(
         DbHandle db,
         byte[] key,
         byte[] value,
@@ -535,6 +525,7 @@ final class NativeInterop {
         Objects.requireNonNull(value, "value");
 
         try (Arena arena = Arena.ofConfined()) {
+            MemorySegment outHandle = arena.allocate(WRITE_HANDLE_LAYOUT);
             checkResult(
                 Native.slatedb_db_put_with_options(
                     arena,
@@ -544,58 +535,43 @@ final class NativeInterop {
                     marshalBytes(arena, value),
                     value.length,
                     marshalPutOptions(arena, putOptions),
-                    marshalWriteOptions(arena, writeOptions)
+                    marshalWriteOptions(arena, writeOptions),
+                    outHandle
                 )
             );
+            return readWriteHandle(outHandle);
         }
     }
 
-    static void slatedb_db_delete(DbHandle db, byte[] key) {
+    static SlateDbWriteHandle slatedb_db_delete(DbHandle db, byte[] key) {
+        return slatedb_db_delete_with_options(db, key, null);
+    }
+
+    static SlateDbWriteHandle slatedb_db_delete_with_options(DbHandle db, byte[] key, WriteOptions writeOptions) {
         Objects.requireNonNull(db, "db");
         Objects.requireNonNull(key, "key");
 
         try (Arena arena = Arena.ofConfined()) {
-            checkResult(Native.slatedb_db_delete(arena, db.segment(), marshalBytes(arena, key), key.length));
-        }
-    }
-
-    static void slatedb_db_delete_with_options(DbHandle db, byte[] key, WriteOptions writeOptions) {
-        Objects.requireNonNull(db, "db");
-        Objects.requireNonNull(key, "key");
-
-        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment outHandle = arena.allocate(WRITE_HANDLE_LAYOUT);
             checkResult(
                 Native.slatedb_db_delete_with_options(
                     arena,
                     db.segment(),
                     marshalBytes(arena, key),
                     key.length,
-                    marshalWriteOptions(arena, writeOptions)
+                    marshalWriteOptions(arena, writeOptions),
+                    outHandle
                 )
             );
+            return readWriteHandle(outHandle);
         }
     }
 
-    static void slatedb_db_merge(DbHandle db, byte[] key, byte[] value) {
-        Objects.requireNonNull(db, "db");
-        Objects.requireNonNull(key, "key");
-        Objects.requireNonNull(value, "value");
-
-        try (Arena arena = Arena.ofConfined()) {
-            checkResult(
-                Native.slatedb_db_merge(
-                    arena,
-                    db.segment(),
-                    marshalBytes(arena, key),
-                    key.length,
-                    marshalBytes(arena, value),
-                    value.length
-                )
-            );
-        }
+    static SlateDbWriteHandle slatedb_db_merge(DbHandle db, byte[] key, byte[] value) {
+        return slatedb_db_merge_with_options(db, key, value, null, null);
     }
 
-    static void slatedb_db_merge_with_options(
+    static SlateDbWriteHandle slatedb_db_merge_with_options(
         DbHandle db,
         byte[] key,
         byte[] value,
@@ -607,6 +583,7 @@ final class NativeInterop {
         Objects.requireNonNull(value, "value");
 
         try (Arena arena = Arena.ofConfined()) {
+            MemorySegment outHandle = arena.allocate(WRITE_HANDLE_LAYOUT);
             checkResult(
                 Native.slatedb_db_merge_with_options(
                     arena,
@@ -616,34 +593,34 @@ final class NativeInterop {
                     marshalBytes(arena, value),
                     value.length,
                     marshalMergeOptions(arena, mergeOptions),
-                    marshalWriteOptions(arena, writeOptions)
+                    marshalWriteOptions(arena, writeOptions),
+                    outHandle
                 )
             );
+            return readWriteHandle(outHandle);
         }
     }
 
-    static void slatedb_db_write(DbHandle db, WriteBatchHandle writeBatch) {
+    static SlateDbWriteHandle slatedb_db_write(DbHandle db, WriteBatchHandle writeBatch) {
+        return slatedb_db_write_with_options(db, writeBatch, null);
+    }
+
+    static SlateDbWriteHandle slatedb_db_write_with_options(DbHandle db, WriteBatchHandle writeBatch, WriteOptions writeOptions) {
         Objects.requireNonNull(db, "db");
         Objects.requireNonNull(writeBatch, "writeBatch");
 
         try (Arena arena = Arena.ofConfined()) {
-            checkResult(Native.slatedb_db_write(arena, db.segment(), writeBatch.segment()));
-        }
-    }
-
-    static void slatedb_db_write_with_options(DbHandle db, WriteBatchHandle writeBatch, WriteOptions writeOptions) {
-        Objects.requireNonNull(db, "db");
-        Objects.requireNonNull(writeBatch, "writeBatch");
-
-        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment outHandle = arena.allocate(WRITE_HANDLE_LAYOUT);
             checkResult(
                 Native.slatedb_db_write_with_options(
                     arena,
                     db.segment(),
                     writeBatch.segment(),
-                    marshalWriteOptions(arena, writeOptions)
+                    marshalWriteOptions(arena, writeOptions),
+                    outHandle
                 )
             );
+            return readWriteHandle(outHandle);
         }
     }
 
@@ -698,6 +675,27 @@ final class NativeInterop {
             );
             return new IteratorHandle(outIterator.get(Native.C_POINTER, 0));
         }
+    }
+
+    private static final GroupLayout WRITE_HANDLE_LAYOUT = MemoryLayout.structLayout(
+        ValueLayout.JAVA_LONG.withName("seq"),
+        ValueLayout.JAVA_LONG.withName("create_ts"),
+        ValueLayout.JAVA_BOOLEAN.withName("create_ts_present"),
+        MemoryLayout.paddingLayout(7)
+    ).withName("slatedb_write_handle_t");
+
+    private static final VarHandle WRITE_HANDLE_SEQ =
+        WRITE_HANDLE_LAYOUT.varHandle(MemoryLayout.PathElement.groupElement("seq"));
+    private static final VarHandle WRITE_HANDLE_CREATE_TS =
+        WRITE_HANDLE_LAYOUT.varHandle(MemoryLayout.PathElement.groupElement("create_ts"));
+    private static final VarHandle WRITE_HANDLE_CREATE_TS_PRESENT =
+        WRITE_HANDLE_LAYOUT.varHandle(MemoryLayout.PathElement.groupElement("create_ts_present"));
+
+    private static SlateDbWriteHandle readWriteHandle(MemorySegment segment) {
+        long seq = (long) WRITE_HANDLE_SEQ.get(segment, 0L);
+        boolean present = (boolean) WRITE_HANDLE_CREATE_TS_PRESENT.get(segment, 0L);
+        OptionalLong createTs = present ? OptionalLong.of((long) WRITE_HANDLE_CREATE_TS.get(segment, 0L)) : OptionalLong.empty();
+        return new SlateDbWriteHandle(seq, createTs);
     }
 
     static void slatedb_db_flush(DbHandle db) {

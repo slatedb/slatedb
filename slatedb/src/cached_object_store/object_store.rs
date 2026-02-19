@@ -1,10 +1,15 @@
 use crate::cached_object_store::stats::CachedObjectStoreStats;
+use crate::cached_object_store::storage_fs::FsCacheStorage;
 use crate::cached_object_store::LocalCacheEntry;
+use crate::config::ObjectStoreCacheOptions;
+use crate::rand::DbRand;
+use crate::stats::StatRegistry;
 use bytes::{Bytes, BytesMut};
 use futures::{future::BoxFuture, stream, stream::BoxStream, StreamExt};
 use object_store::{path::Path, GetOptions, GetResult, ObjectMeta, ObjectStore};
 use object_store::{Attributes, GetRange, GetResultPayload, PutMultipartOptions, PutResult};
 use object_store::{ListResult, MultipartUpload, PutOptions, PutPayload};
+use slatedb_common::clock::SystemClock;
 use std::{ops::Range, sync::Arc};
 
 use crate::cached_object_store::admission::AdmissionPicker;
@@ -48,6 +53,40 @@ impl CachedObjectStore {
 
     pub(crate) async fn start_evictor(&self) {
         self.cache_storage.start_evictor().await;
+    }
+
+    /// Build a `CachedObjectStore` from `ObjectStoreCacheOptions`, returning `None`
+    /// if caching is not configured (i.e. `root_folder` is `None`). When `Some` is
+    /// returned the evictor has already been started.
+    pub(crate) async fn from_config(
+        object_store: Arc<dyn ObjectStore>,
+        options: &ObjectStoreCacheOptions,
+        stat_registry: &StatRegistry,
+        clock: Arc<dyn SystemClock>,
+        rand: Arc<DbRand>,
+    ) -> Result<Option<Arc<Self>>, SlateDBError> {
+        let cache_root_folder = match &options.root_folder {
+            None => return Ok(None),
+            Some(f) => f,
+        };
+        let stats = Arc::new(CachedObjectStoreStats::new(stat_registry));
+        let cache_storage = Arc::new(FsCacheStorage::new(
+            cache_root_folder.clone(),
+            options.max_cache_size_bytes,
+            options.scan_interval,
+            stats.clone(),
+            clock,
+            rand,
+        ));
+        let cached = Self::new(
+            object_store,
+            cache_storage,
+            options.part_size_bytes,
+            options.cache_puts,
+            stats,
+        )?;
+        cached.start_evictor().await;
+        Ok(Some(cached))
     }
 
     /// Load files into cache up to a maximum number of bytes.

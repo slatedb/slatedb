@@ -950,6 +950,11 @@ pub struct DbReaderOptions {
     #[serde(skip)]
     pub block_transformer: Option<Arc<dyn BlockTransformer>>,
 
+    /// Options for the local disk cache. If `root_folder` is set, the reader
+    /// will wrap its object store in a `CachedObjectStore` backed by the
+    /// local filesystem, mirroring the behaviour of `Db`.
+    pub object_store_cache_options: ObjectStoreCacheOptions,
+
     /// When true, skip WAL replay entirely. The reader will only see data that has been
     /// compacted into L0 or lower levels. This is useful for read-heavy workloads that
     /// don't need to see the most recent uncommitted writes and want to minimize the
@@ -971,6 +976,7 @@ impl Default for DbReaderOptions {
             block_cache: default_block_cache(),
             merge_operator: None,
             block_transformer: None,
+            object_store_cache_options: ObjectStoreCacheOptions::default(),
             skip_wal_replay: false,
         }
     }

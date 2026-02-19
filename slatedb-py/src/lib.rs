@@ -181,6 +181,24 @@ async fn load_db_from_env(
     builder.build().await.map_err(map_error)
 }
 
+#[pyclass(name = "WriteHandle")]
+#[derive(Clone)]
+struct PyWriteHandle {
+    #[pyo3(get)]
+    seq: u64,
+    #[pyo3(get)]
+    create_ts: Option<i64>,
+}
+
+impl From<::slatedb::WriteHandle> for PyWriteHandle {
+    fn from(h: ::slatedb::WriteHandle) -> Self {
+        PyWriteHandle {
+            seq: h.seqnum(),
+            create_ts: h.create_ts(),
+        }
+    }
+}
+
 /// A Python module implemented in Rust.
 #[pymodule]
 fn slatedb(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -192,7 +210,10 @@ fn slatedb(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyCompactionRequest>()?;
     m.add_class::<PySlateDBAdmin>()?;
     m.add_class::<PyWriteBatch>()?;
+    m.add_class::<PySlateDBAdmin>()?;
+    m.add_class::<PyWriteBatch>()?;
     m.add_class::<PyDbIterator>()?;
+    m.add_class::<PyWriteHandle>()?;
     // Export exception types
     m.add("TransactionError", py.get_type::<TransactionError>())?;
     m.add("ClosedError", py.get_type::<ClosedError>())?;
@@ -514,13 +535,20 @@ impl PySlateDB {
     }
 
     #[pyo3(signature = (key, value))]
-    fn put(&self, py: Python<'_>, key: Vec<u8>, value: Vec<u8>) -> PyResult<()> {
+    fn put(&self, py: Python<'_>, key: Vec<u8>, value: Vec<u8>) -> PyResult<PyWriteHandle> {
         if key.is_empty() {
             return Err(InvalidError::new_err("key cannot be empty"));
         }
         let db = self.inner.clone();
         let rt = get_runtime();
-        py.allow_threads(|| rt.block_on(async { db.put(&key, &value).await.map_err(map_error) }))
+        py.allow_threads(|| {
+            rt.block_on(async {
+                db.put(&key, &value)
+                    .await
+                    .map(PyWriteHandle::from)
+                    .map_err(map_error)
+            })
+        })
     }
 
     #[pyo3(signature = (key))]
@@ -630,14 +658,21 @@ impl PySlateDB {
     }
 
     #[pyo3(signature = (key))]
-    fn delete(&self, py: Python<'_>, key: Vec<u8>) -> PyResult<()> {
+    fn delete(&self, py: Python<'_>, key: Vec<u8>) -> PyResult<PyWriteHandle> {
         if key.is_empty() {
             return Err(InvalidError::new_err("key cannot be empty"));
         }
         let db = self.inner.clone();
         let rt = get_runtime();
         // Release the GIL while awaiting Rust I/O
-        py.allow_threads(|| rt.block_on(async { db.delete(&key).await.map_err(map_error) }))
+        py.allow_threads(|| {
+            rt.block_on(async {
+                db.delete(&key)
+                    .await
+                    .map(PyWriteHandle::from)
+                    .map_err(map_error)
+            })
+        })
     }
 
     #[pyo3(signature = (start, end = None, *, durability_filter = None, dirty = None, read_ahead_bytes = None, cache_blocks = None, max_fetch_tasks = None))]
@@ -781,14 +816,21 @@ impl PySlateDB {
 
     /// Merge a value into the database using the configured merge operator.
     #[pyo3(signature = (key, value))]
-    fn merge(&self, py: Python<'_>, key: Vec<u8>, value: Vec<u8>) -> PyResult<()> {
+    fn merge(&self, py: Python<'_>, key: Vec<u8>, value: Vec<u8>) -> PyResult<PyWriteHandle> {
         if key.is_empty() {
             return Err(InvalidError::new_err("key cannot be empty"));
         }
         let db = self.inner.clone();
         let rt = get_runtime();
         // Release the GIL while DB.merge may invoke Python merge operator
-        py.allow_threads(|| rt.block_on(async { db.merge(&key, &value).await.map_err(map_error) }))
+        py.allow_threads(|| {
+            rt.block_on(async {
+                db.merge(&key, &value)
+                    .await
+                    .map(PyWriteHandle::from)
+                    .map_err(map_error)
+            })
+        })
     }
 
     #[pyo3(signature = (key, value, *, ttl = None, await_durable = None))]
@@ -799,7 +841,7 @@ impl PySlateDB {
         value: Vec<u8>,
         ttl: Option<u64>,
         await_durable: Option<bool>,
-    ) -> PyResult<()> {
+    ) -> PyResult<PyWriteHandle> {
         if key.is_empty() {
             return Err(InvalidError::new_err("key cannot be empty"));
         }
@@ -811,6 +853,7 @@ impl PySlateDB {
             rt.block_on(async move {
                 db.merge_with_options(&key, &value, &merge_opts, &write_opts)
                     .await
+                    .map(PyWriteHandle::from)
                     .map_err(map_error)
             })
         })
@@ -834,6 +877,7 @@ impl PySlateDB {
         future_into_py(py, async move {
             db.merge_with_options(&key, &value, &merge_opts, &write_opts)
                 .await
+                .map(PyWriteHandle::from)
                 .map_err(map_error)
         })
     }
@@ -850,7 +894,10 @@ impl PySlateDB {
         }
         let db = self.inner.clone();
         future_into_py(py, async move {
-            db.merge(&key, &value).await.map_err(map_error)
+            db.merge(&key, &value)
+                .await
+                .map(PyWriteHandle::from)
+                .map_err(map_error)
         })
     }
 
@@ -865,10 +912,12 @@ impl PySlateDB {
             return Err(InvalidError::new_err("key cannot be empty"));
         }
         let db = self.inner.clone();
-        future_into_py(
-            py,
-            async move { db.put(&key, &value).await.map_err(map_error) },
-        )
+        future_into_py(py, async move {
+            db.put(&key, &value)
+                .await
+                .map(PyWriteHandle::from)
+                .map_err(map_error)
+        })
     }
 
     #[pyo3(signature = (key))]
@@ -915,7 +964,12 @@ impl PySlateDB {
             return Err(InvalidError::new_err("key cannot be empty"));
         }
         let db = self.inner.clone();
-        future_into_py(py, async move { db.delete(&key).await.map_err(map_error) })
+        future_into_py(py, async move {
+            db.delete(&key)
+                .await
+                .map(PyWriteHandle::from)
+                .map_err(map_error)
+        })
     }
 
     #[pyo3(signature = (key, value, *, ttl = None, await_durable = None))]
@@ -926,7 +980,7 @@ impl PySlateDB {
         value: Vec<u8>,
         ttl: Option<u64>,
         await_durable: Option<bool>,
-    ) -> PyResult<()> {
+    ) -> PyResult<PyWriteHandle> {
         if key.is_empty() {
             return Err(InvalidError::new_err("key cannot be empty"));
         }
@@ -938,6 +992,7 @@ impl PySlateDB {
             rt.block_on(async move {
                 db.put_with_options(&key, &value, &put_opts, &write_opts)
                     .await
+                    .map(PyWriteHandle::from)
                     .map_err(map_error)
             })
         })
@@ -961,6 +1016,7 @@ impl PySlateDB {
         future_into_py(py, async move {
             db.put_with_options(&key, &value, &put_opts, &write_opts)
                 .await
+                .map(PyWriteHandle::from)
                 .map_err(map_error)
         })
     }
@@ -971,7 +1027,7 @@ impl PySlateDB {
         py: Python<'_>,
         key: Vec<u8>,
         await_durable: Option<bool>,
-    ) -> PyResult<()> {
+    ) -> PyResult<PyWriteHandle> {
         if key.is_empty() {
             return Err(InvalidError::new_err("key cannot be empty"));
         }
@@ -982,16 +1038,24 @@ impl PySlateDB {
             rt.block_on(async move {
                 db.delete_with_options(&key, &write_opts)
                     .await
+                    .map(PyWriteHandle::from)
                     .map_err(map_error)
             })
         })
     }
 
-    fn write(&self, py: Python<'_>, batch: &PyWriteBatch) -> PyResult<()> {
+    fn write(&self, py: Python<'_>, batch: &PyWriteBatch) -> PyResult<PyWriteHandle> {
         let db = self.inner.clone();
         let rt = get_runtime();
         let b = batch.inner.clone();
-        py.allow_threads(|| rt.block_on(async move { db.write(b).await.map_err(map_error) }))
+        py.allow_threads(|| {
+            rt.block_on(async move {
+                db.write(b)
+                    .await
+                    .map(PyWriteHandle::from)
+                    .map_err(map_error)
+            })
+        })
     }
 
     #[pyo3(signature = (batch, *, await_durable = None))]
@@ -1000,13 +1064,18 @@ impl PySlateDB {
         py: Python<'_>,
         batch: &PyWriteBatch,
         await_durable: Option<bool>,
-    ) -> PyResult<()> {
+    ) -> PyResult<PyWriteHandle> {
         let db = self.inner.clone();
         let rt = get_runtime();
         let b = batch.inner.clone();
         let opts = build_write_options(await_durable);
         py.allow_threads(|| {
-            rt.block_on(async move { db.write_with_options(b, &opts).await.map_err(map_error) })
+            rt.block_on(async move {
+                db.write_with_options(b, &opts)
+                    .await
+                    .map(PyWriteHandle::from)
+                    .map_err(map_error)
+            })
         })
     }
 
@@ -1017,7 +1086,12 @@ impl PySlateDB {
     ) -> PyResult<Bound<'py, PyAny>> {
         let db = self.inner.clone();
         let b = batch.inner.clone();
-        future_into_py(py, async move { db.write(b).await.map_err(map_error) })
+        future_into_py(py, async move {
+            db.write(b)
+                .await
+                .map(PyWriteHandle::from)
+                .map_err(map_error)
+        })
     }
 
     #[pyo3(signature = (batch, *, await_durable = None))]
@@ -1031,7 +1105,10 @@ impl PySlateDB {
         let b = batch.inner.clone();
         let opts = build_write_options(await_durable);
         future_into_py(py, async move {
-            db.write_with_options(b, &opts).await.map_err(map_error)
+            db.write_with_options(b, &opts)
+                .await
+                .map(PyWriteHandle::from)
+                .map_err(map_error)
         })
     }
 
@@ -1050,6 +1127,7 @@ impl PySlateDB {
         future_into_py(py, async move {
             db.delete_with_options(&key, &write_opts)
                 .await
+                .map(PyWriteHandle::from)
                 .map_err(map_error)
         })
     }
@@ -1869,13 +1947,20 @@ impl PySlateDBTransaction {
             .map_err(map_error)
     }
 
-    fn commit(&mut self, py: Python<'_>) -> PyResult<()> {
+    fn commit(&mut self, py: Python<'_>) -> PyResult<PyWriteHandle> {
         let txn = self
             .inner
             .take()
             .ok_or_else(|| ClosedError::new_err("transaction is closed"))?;
         let rt = get_runtime();
-        py.allow_threads(|| rt.block_on(async { txn.commit().await.map_err(map_error) }))
+        py.allow_threads(|| {
+            rt.block_on(async {
+                txn.commit()
+                    .await
+                    .map(PyWriteHandle::from)
+                    .map_err(map_error)
+            })
+        })
     }
 
     fn commit_async<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
@@ -1883,7 +1968,12 @@ impl PySlateDBTransaction {
             .inner
             .take()
             .ok_or_else(|| ClosedError::new_err("transaction is closed"))?;
-        future_into_py(py, async move { txn.commit().await.map_err(map_error) })
+        future_into_py(py, async move {
+            txn.commit()
+                .await
+                .map(PyWriteHandle::from)
+                .map_err(map_error)
+        })
     }
 
     fn rollback(&mut self) -> PyResult<()> {

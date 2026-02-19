@@ -2,6 +2,7 @@ package io.slatedb;
 
 import io.slatedb.SlateDbConfig.ReadOptions;
 import io.slatedb.SlateDbConfig.ScanOptions;
+import org.jspecify.annotations.Nullable;
 
 /// Shared read-only interface for SlateDb and SlateDbReader.
 ///
@@ -18,7 +19,7 @@ public interface SlateDbReadable extends AutoCloseable {
     /// @param key key to read.
     /// @param options read options or `null` for defaults.
     /// @return The value for the key, or `null` if the key does not exist.
-    byte[] get(byte[] key, ReadOptions options);
+    byte[] get(byte[] key, @Nullable ReadOptions options);
 
     /// Creates a scan iterator over the range `[startKey, endKey)` using default scan options.
     ///
@@ -33,7 +34,7 @@ public interface SlateDbReadable extends AutoCloseable {
     /// @param endKey exclusive upper bound, or `null`.
     /// @param options scan options or `null` for defaults.
     /// @return A [SlateDbScanIterator]. Always close it.
-    SlateDbScanIterator scan(byte[] startKey, byte[] endKey, ScanOptions options);
+    SlateDbScanIterator scan(byte[] startKey, byte[] endKey, @Nullable ScanOptions options);
 
     /// Creates a scan iterator for the provided key prefix using default scan options.
     ///
@@ -46,7 +47,7 @@ public interface SlateDbReadable extends AutoCloseable {
     /// @param prefix key prefix to scan.
     /// @param options scan options or `null` for defaults.
     /// @return A [SlateDbScanIterator]. Always close it.
-    SlateDbScanIterator scanPrefix(byte[] prefix, ScanOptions options);
+    SlateDbScanIterator scanPrefix(byte[] prefix, @Nullable ScanOptions options);
 
     /// Closes the underlying handle.
     ///
