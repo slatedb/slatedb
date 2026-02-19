@@ -3698,15 +3698,44 @@ mod tests {
         // be exactly one L0 SST.
         let db_state = wait_for_manifest_condition(
             &mut stored_manifest,
-            |s| s.replay_after_wal_id >= MAX_WAL_FLUSHES_BEFORE_L0_FLUSH,
+            |s| s.replay_after_wal_id == MAX_WAL_FLUSHES_BEFORE_L0_FLUSH,
             Duration::from_secs(30),
         )
         .await;
-        assert_eq!(
-            db_state.replay_after_wal_id,
-            MAX_WAL_FLUSHES_BEFORE_L0_FLUSH
-        );
         assert_eq!(db_state.l0.len(), 1);
+
+        // Run MAX_WAL_FLUSHES_BEFORE_L0_FLUSH more put()/flush() cycles
+        // and see if the threshold triggers again.
+        for i in 0..MAX_WAL_FLUSHES_BEFORE_L0_FLUSH {
+            let key = format!("key{:08}", i);
+            kv_store
+                .put_with_options(key.as_bytes(), b"v", &put_options, &write_options)
+                .await
+                .unwrap();
+            kv_store.flush().await.unwrap();
+        }
+
+        // Verify no more memtables were frozen or L0 flush happened.
+        {
+            let guard = kv_store.inner.state.read();
+            assert_eq!(guard.state().core().l0.len(), 1);
+        }
+
+        // This put() triggers a freeze.
+        let key = format!("key{:08}", MAX_WAL_FLUSHES_BEFORE_L0_FLUSH);
+        kv_store
+            .put_with_options(key.as_bytes(), b"v", &put_options, &write_options)
+            .await
+            .unwrap();
+
+        // Wait for the flush to happen.
+        let db_state = wait_for_manifest_condition(
+            &mut stored_manifest,
+            |s| s.replay_after_wal_id == MAX_WAL_FLUSHES_BEFORE_L0_FLUSH * 2,
+            Duration::from_secs(30),
+        )
+        .await;
+        assert_eq!(db_state.l0.len(), 2); // We should have two L0 flushes.
 
         kv_store.close().await.unwrap();
     }
