@@ -6547,7 +6547,7 @@ mod tests {
         let put_opts = PutOptions {
             ttl: Ttl::ExpireAfter(50),
         };
-        let write_opts = WriteOptions{
+        let write_opts = WriteOptions {
             await_durable: false,
         };
 
@@ -6560,7 +6560,7 @@ mod tests {
         db.put_with_options(b"key2", b"value2", &put_opts, &write_opts)
             .await
             .unwrap();
-        
+
         clock.set(120);
         db.put_with_options(b"key3", b"value3", &put_opts, &write_opts)
             .await
@@ -6570,21 +6570,30 @@ mod tests {
 
         let row1 = iter.next_row().await.unwrap().unwrap();
         assert_eq!(row1.key, Bytes::from_static(b"key1"));
-        assert_eq!(row1.value, ValueDeletable::Value(Bytes::from_static(b"value1")));
+        assert_eq!(
+            row1.value,
+            ValueDeletable::Value(Bytes::from_static(b"value1"))
+        );
         assert_eq!(row1.seq, 1);
         assert_eq!(row1.create_ts, Some(100));
         assert_eq!(row1.expire_ts, Some(150));
 
         let row2 = iter.next_row().await.unwrap().unwrap();
         assert_eq!(row2.key, Bytes::from_static(b"key2"));
-        assert_eq!(row2.value, ValueDeletable::Value(Bytes::from_static(b"value2")));
+        assert_eq!(
+            row2.value,
+            ValueDeletable::Value(Bytes::from_static(b"value2"))
+        );
         assert_eq!(row2.seq, 2);
         assert_eq!(row2.create_ts, Some(110));
         assert_eq!(row2.expire_ts, Some(160));
 
         let row3 = iter.next_row().await.unwrap().unwrap();
         assert_eq!(row3.key, Bytes::from_static(b"key3"));
-        assert_eq!(row3.value, ValueDeletable::Value(Bytes::from_static(b"value3")));
+        assert_eq!(
+            row3.value,
+            ValueDeletable::Value(Bytes::from_static(b"value3"))
+        );
         assert_eq!(row3.seq, 3);
         assert_eq!(row3.create_ts, Some(120));
         assert_eq!(row3.expire_ts, Some(170));

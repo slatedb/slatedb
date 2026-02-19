@@ -50,4 +50,36 @@ class SlateDbScanIteratorTest {
             }
         }
     }
+
+    @Test
+    void scanNextRow() throws Exception {
+        TestSupport.ensureNativeReady();
+        TestSupport.DbContext context = TestSupport.createDbContext();
+
+        byte[] keyA = "row-a".getBytes(StandardCharsets.UTF_8);
+        byte[] keyB = "row-b".getBytes(StandardCharsets.UTF_8);
+        byte[] valueA = "val-a".getBytes(StandardCharsets.UTF_8);
+        byte[] valueB = "val-b".getBytes(StandardCharsets.UTF_8);
+
+        try (SlateDb db = SlateDb.open(context.dbPath().toAbsolutePath().toString(), context.objectStoreUrl(), null)) {
+            long seqA = db.put(keyA, valueA).seq();
+            long seqB = db.put(keyB, valueB).seq();
+
+            try (SlateDbScanIterator iter = db.scanPrefix("row-".getBytes(StandardCharsets.UTF_8))) {
+                RowEntry rowA = iter.nextRow();
+                Assertions.assertNotNull(rowA);
+                Assertions.assertArrayEquals(keyA, rowA.key());
+                Assertions.assertArrayEquals(valueA, rowA.value());
+                Assertions.assertEquals(seqA, rowA.seq());
+
+                RowEntry rowB = iter.nextRow();
+                Assertions.assertNotNull(rowB);
+                Assertions.assertArrayEquals(keyB, rowB.key());
+                Assertions.assertArrayEquals(valueB, rowB.value());
+                Assertions.assertEquals(seqB, rowB.seq());
+
+                Assertions.assertNull(iter.nextRow());
+            }
+        }
+    }
 }

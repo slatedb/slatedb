@@ -677,6 +677,36 @@ final class NativeInterop {
         }
     }
 
+    static RowEntry slatedb_iterator_next_row(IteratorHandle iterator) {
+        Objects.requireNonNull(iterator, "iterator");
+
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment outPresent = arena.allocate(Native.C_BOOL);
+            MemorySegment outRow = arena.allocate(Native.C_POINTER);
+
+            checkResult(
+                    Native.slatedb_iterator_next_row(
+                            arena,
+                            iterator.segment(),
+                            outPresent,
+                            outRow
+                    )
+            );
+
+            boolean present = outPresent.get(Native.C_BOOL, 0);
+            if (!present) {
+                return null;
+            }
+
+            MemorySegment rowPtr = outRow.get(Native.C_POINTER, 0);
+            try {
+                return readRowEntry(rowPtr);
+            } finally {
+                Native.slatedb_row_free(rowPtr);
+            }
+        }
+    }
+
     private static final GroupLayout WRITE_HANDLE_LAYOUT = MemoryLayout.structLayout(
         ValueLayout.JAVA_LONG.withName("seq"),
         ValueLayout.JAVA_LONG.withName("create_ts"),
@@ -696,6 +726,88 @@ final class NativeInterop {
         boolean present = (boolean) WRITE_HANDLE_CREATE_TS_PRESENT.get(segment, 0L);
         OptionalLong createTs = present ? OptionalLong.of((long) WRITE_HANDLE_CREATE_TS.get(segment, 0L)) : OptionalLong.empty();
         return new SlateDbWriteHandle(seq, createTs);
+    }
+
+    private static final GroupLayout ROW_LAYOUT = MemoryLayout.structLayout(
+            Native.C_POINTER.withName("key"),
+            Native.C_LONG.withName("key_len"),
+            Native.C_POINTER.withName("value"),
+            Native.C_LONG.withName("value_len"),
+            Native.C_LONG_LONG.withName("seq"),
+            Native.C_LONG_LONG.withName("create_ts"),
+            Native.C_BOOL.withName("create_ts_present"),
+            MemoryLayout.paddingLayout(7), // Alignment padding before expire_ts (int64)
+            Native.C_LONG_LONG.withName("expire_ts"),
+            Native.C_BOOL.withName("expire_ts_present"),
+            MemoryLayout.paddingLayout(7)
+    ).withName("slatedb_row_entry_t");
+
+    private static final VarHandle ROW_KEY = ROW_LAYOUT.varHandle(MemoryLayout.PathElement.groupElement("key"));
+    private static final VarHandle ROW_KEY_LEN = ROW_LAYOUT.varHandle(MemoryLayout.PathElement.groupElement("key_len"));
+    private static final VarHandle ROW_VALUE = ROW_LAYOUT.varHandle(MemoryLayout.PathElement.groupElement("value"));
+    private static final VarHandle ROW_VALUE_LEN = ROW_LAYOUT.varHandle(MemoryLayout.PathElement.groupElement("value_len"));
+    private static final VarHandle ROW_SEQ = ROW_LAYOUT.varHandle(MemoryLayout.PathElement.groupElement("seq"));
+    private static final VarHandle ROW_CREATE_TS = ROW_LAYOUT.varHandle(MemoryLayout.PathElement.groupElement("create_ts"));
+    private static final VarHandle ROW_CREATE_TS_PRESENT = ROW_LAYOUT.varHandle(MemoryLayout.PathElement.groupElement("create_ts_present"));
+    private static final VarHandle ROW_EXPIRE_TS = ROW_LAYOUT.varHandle(MemoryLayout.PathElement.groupElement("expire_ts"));
+    private static final VarHandle ROW_EXPIRE_TS_PRESENT = ROW_LAYOUT.varHandle(MemoryLayout.PathElement.groupElement("expire_ts_present"));
+
+    private static RowEntry readRowEntry(MemorySegment rowPtr) {
+        MemorySegment row = rowPtr.reinterpret(ROW_LAYOUT.byteSize());
+        MemorySegment keyPtr = (MemorySegment) ROW_KEY.get(row, 0L);
+        long keyLen = (long) ROW_KEY_LEN.get(row, 0L);
+        MemorySegment valuePtr = (MemorySegment) ROW_VALUE.get(row, 0L);
+        long valueLen = (long) ROW_VALUE_LEN.get(row, 0L);
+        long seq = (long) ROW_SEQ.get(row, 0L);
+        boolean createTsPresent = (boolean) ROW_CREATE_TS_PRESENT.get(row, 0L);
+        Long createTs = createTsPresent ? (long) ROW_CREATE_TS.get(row, 0L) : null;
+        boolean expireTsPresent = (boolean) ROW_EXPIRE_TS_PRESENT.get(row, 0L);
+        Long expireTs = expireTsPresent ? (long) ROW_EXPIRE_TS.get(row, 0L) : null;
+
+        byte[] key = new byte[(int) keyLen];
+        MemorySegment.copy(keyPtr, 0, MemorySegment.ofArray(key), 0, keyLen);
+        byte[] value = new byte[(int) valueLen];
+        MemorySegment.copy(valuePtr, 0, MemorySegment.ofArray(value), 0, valueLen);
+
+        return new RowEntry(key, value, seq, createTs, expireTs);
+    }
+
+    static RowEntry slatedb_db_get_row(DbHandle db, byte[] key) {
+        return slatedb_db_get_row_with_options(db, key, null);
+    }
+
+    static RowEntry slatedb_db_get_row_with_options(DbHandle db, byte[] key, ReadOptions readOptions) {
+        Objects.requireNonNull(db, "db");
+        Objects.requireNonNull(key, "key");
+
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment outPresent = arena.allocate(Native.C_BOOL);
+            MemorySegment outRow = arena.allocate(Native.C_POINTER);
+
+            checkResult(
+                    Native.slatedb_db_get_row_with_options(
+                            arena,
+                            db.segment(),
+                            marshalBytes(arena, key),
+                            key.length,
+                            marshalReadOptions(arena, readOptions),
+                            outPresent,
+                            outRow
+                    )
+            );
+
+            boolean present = outPresent.get(Native.C_BOOL, 0);
+            if (!present) {
+                return null;
+            }
+
+            MemorySegment rowPtr = outRow.get(Native.C_POINTER, 0);
+            try {
+                return readRowEntry(rowPtr);
+            } finally {
+                Native.slatedb_row_free(rowPtr);
+            }
+        }
     }
 
     static void slatedb_db_flush(DbHandle db) {

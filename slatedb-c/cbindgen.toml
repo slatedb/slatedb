@@ -58,6 +58,7 @@ include = [
     "slatedb_db_reader_t",
     "slatedb_iterator_t",
     "slatedb_write_batch_t",
+    "slatedb_row_entry_t",
 ]
 
 [parse]

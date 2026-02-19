@@ -5,6 +5,7 @@
 //! `iterator`, etc.). It also contains internal conversion and validation
 //! helpers shared across those modules.
 
+use crate::memory::slatedb_bytes_free;
 use slatedb::bytes::Bytes;
 use slatedb::config::{
     DbReaderOptions, DurabilityLevel, FlushOptions, FlushType, MergeOptions, PutOptions,
@@ -277,6 +278,32 @@ pub struct slatedb_flush_options_t {
 /// Use `SLATEDB_SST_BLOCK_SIZE_*` constants.
 #[allow(non_camel_case_types)]
 pub type slatedb_sst_block_size_t = u8;
+
+#[repr(C)]
+#[allow(non_camel_case_types)]
+pub struct slatedb_row_entry_t {
+    pub key: *mut u8,
+    pub key_len: usize,
+    pub value: *mut u8,
+    pub value_len: usize,
+    pub seq: u64,
+    pub create_ts: i64,
+    pub create_ts_present: bool,
+    pub expire_ts: i64,
+    pub expire_ts_present: bool,
+}
+
+/// ## Safety
+/// - `row` must be a valid pointer to a `slatedb_row_entry_t` allocated by this library, or NULL.
+#[no_mangle]
+pub unsafe extern "C" fn slatedb_row_entry_free(row: *mut slatedb_row_entry_t) {
+    if row.is_null() {
+        return;
+    }
+    let row = Box::from_raw(row);
+    slatedb_bytes_free(row.key, row.key_len);
+    slatedb_bytes_free(row.value, row.value_len);
+}
 
 /// Log level selector type for logging APIs.
 ///

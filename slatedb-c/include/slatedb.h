@@ -194,6 +194,18 @@ typedef struct slatedb_read_options_t {
     bool cache_blocks;
 } slatedb_read_options_t;
 
+typedef struct slatedb_row_entry_t {
+    uint8_t *key;
+    uintptr_t key_len;
+    uint8_t *value;
+    uintptr_t value_len;
+    uint64_t seq;
+    int64_t create_ts;
+    bool create_ts_present;
+    int64_t expire_ts;
+    bool expire_ts_present;
+} slatedb_row_entry_t;
+
 // Put options passed to put operations.
 typedef struct slatedb_put_options_t {
     // TTL type. Use `SLATEDB_TTL_TYPE_*` constants.
@@ -593,6 +605,19 @@ struct slatedb_result_t slatedb_db_get_with_options(struct slatedb_db_t *db,
                                                     bool *out_present,
                                                     uint8_t **out_val,
                                                     uintptr_t *out_val_len);
+
+// ## Safety
+// - `db` must be a valid database handle.
+// - `key` must point to at least `key_len` bytes of valid memory.
+// - `read_options` must be a valid pointer to `slatedb_read_options_t` or NULL.
+// - `out_present` must be a valid pointer to a `bool`.
+// - `out_row` must be a valid pointer to a `*mut slatedb_row_entry_t`.
+struct slatedb_result_t slatedb_db_get_row_with_options(struct slatedb_db_t *db,
+                                                        const uint8_t *key,
+                                                        uintptr_t key_len,
+                                                        const struct slatedb_read_options_t *read_options,
+                                                        bool *out_present,
+                                                        struct slatedb_row_entry_t **out_row);
 
 // Writes a key/value pair using default put/write options.
 //
@@ -1122,6 +1147,10 @@ struct slatedb_result_t slatedb_db_reader_scan_prefix_with_options(struct slated
 // - `reader` must be a valid non-null handle obtained from this library.
 struct slatedb_result_t slatedb_db_reader_close(struct slatedb_db_reader_t *reader);
 
+// ## Safety
+// - `row` must be a valid pointer to a `slatedb_row_entry_t` allocated by this library, or NULL.
+void slatedb_row_entry_free(struct slatedb_row_entry_t *row);
+
 // Retrieves the next key/value pair from an iterator.
 //
 // ## Arguments
@@ -1149,6 +1178,14 @@ struct slatedb_result_t slatedb_iterator_next(struct slatedb_iterator_t *iterato
                                               uintptr_t *out_key_len,
                                               uint8_t **out_val,
                                               uintptr_t *out_val_len);
+
+// ## Safety
+// - `iterator` must be a valid iterator handle.
+// - `out_present` must be a valid pointer to a `bool`.
+// - `out_row` must be a valid pointer to a `*mut slatedb_row_entry_t`.
+struct slatedb_result_t slatedb_iterator_next_row(struct slatedb_iterator_t *iterator,
+                                                  bool *out_present,
+                                                  struct slatedb_row_entry_t **out_row);
 
 // Seeks the iterator to the first key greater than or equal to `key`.
 //

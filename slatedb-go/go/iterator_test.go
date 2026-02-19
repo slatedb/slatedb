@@ -84,6 +84,38 @@ var _ = Describe("Iterator", func() {
 			Expect(count).To(Equal(4))
 		})
 
+		It("should iterate through all items with NextRow()", func() {
+			count := 0
+			var lastKey []byte
+
+			for {
+				row, err := iter.NextRow()
+				if err == io.EOF {
+					break
+				}
+				Expect(err).NotTo(HaveOccurred())
+				Expect(row).NotTo(BeNil())
+				Expect(len(row.Key)).To(BeNumerically(">", 0))
+				Expect(len(row.Value)).To(BeNumerically(">", 0))
+				Expect(row.Seq).To(BeNumerically(">", 0))
+				if row.CreateTs != nil {
+					Expect(*row.CreateTs).To(BeNumerically(">", 0))
+				}
+				if row.ExpireTs != nil {
+					Expect(*row.ExpireTs).To(BeNumerically(">", 0))
+				}
+
+				// Keys should be in order
+				if lastKey != nil {
+					Expect(string(row.Key) >= string(lastKey)).To(BeTrue(),
+						"Keys should be in lexicographical order: %s >= %s", string(row.Key), string(lastKey))
+				}
+				lastKey = row.Key
+				count++
+			}
+			Expect(count).To(Equal(4))
+		})
+
 		It("should seek to a specific key position", func() {
 			err := iter.Seek([]byte("item:02"))
 			Expect(err).NotTo(HaveOccurred())

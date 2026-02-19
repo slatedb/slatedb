@@ -40,6 +40,15 @@ type WriteHandle struct {
 	CreateTs *int64
 }
 
+// RowEntry represents a key-value pair with metadata.
+type RowEntry struct {
+	Key      []byte
+	Value    []byte
+	Seq      uint64
+	CreateTs *int64
+	ExpireTs *int64
+}
+
 func resolveObjectStoreHandle(url *string, envFile *string) (*C.slatedb_object_store_t, error) {
 	resolvedURL, hasURL, err := resolveObjectStoreURL(url, envFile)
 	if err != nil {
@@ -343,6 +352,66 @@ func (db *DB) GetWithOptions(key []byte, readOpts *ReadOptions) ([]byte, error) 
 		return nil, nil
 	}
 	return copyBytesAndFree(value, valueLen), nil
+}
+
+// GetRow retrieves a value and metadata by key with default read options.
+//
+// Returns `nil, nil` if the key does not exist.
+func (db *DB) GetRow(key []byte) (*RowEntry, error) {
+	return db.GetRowWithOptions(key, nil)
+}
+
+// GetRowWithOptions retrieves a value and metadata by key with explicit read options.
+//
+// Pass nil options to use defaults.
+// Returns `nil, nil` if the key does not exist.
+func (db *DB) GetRowWithOptions(key []byte, readOpts *ReadOptions) (*RowEntry, error) {
+	if db == nil || db.handle == nil {
+		return nil, ErrInvalid
+	}
+	if len(key) == 0 {
+		return nil, ErrInvalid
+	}
+
+	keyPtr, keyLen := ptrFromBytes(key)
+	cReadOpts := convertToCReadOptions(readOpts)
+
+	var present C.bool
+	var rowPtr *C.slatedb_row_entry_t
+
+	result := C.slatedb_db_get_row_with_options(
+		db.handle,
+		keyPtr,
+		keyLen,
+		cReadOpts,
+		&present,
+		&rowPtr,
+	)
+	if err := resultToErrorAndFree(result); err != nil {
+		return nil, err
+	}
+
+	if present == C.bool(false) {
+		return nil, nil
+	}
+	defer C.slatedb_row_free(rowPtr)
+
+	row := &RowEntry{
+		Key:   C.GoBytes(unsafe.Pointer(rowPtr.key), C.int(rowPtr.key_len)),
+		Value: C.GoBytes(unsafe.Pointer(rowPtr.value), C.int(rowPtr.value_len)),
+		Seq:   uint64(rowPtr.seq),
+	}
+
+	if bool(rowPtr.create_ts_present) {
+		ts := int64(rowPtr.create_ts)
+		row.CreateTs = &ts
+	}
+	if bool(rowPtr.expire_ts_present) {
+		ts := int64(rowPtr.expire_ts)
+		row.ExpireTs = &ts
+	}
+
+	return row, nil
 }
 
 // Write executes a WriteBatch atomically with default write options.

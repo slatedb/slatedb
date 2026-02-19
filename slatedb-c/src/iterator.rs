@@ -3,8 +3,9 @@
 //! This module exposes C ABI functions for consuming database scan iterators.
 
 use crate::ffi::{
-    alloc_bytes, bytes_from_ptr, error_from_slate_error, require_handle, require_out_ptr,
-    slatedb_iterator_t, slatedb_result_t, success_result,
+    alloc_bytes, bytes_from_ptr, error_from_slate_error, error_result, require_handle,
+    require_out_ptr, slatedb_error_kind_t, slatedb_iterator_t, slatedb_result_t,
+    slatedb_row_entry_t, success_result,
 };
 
 /// Retrieves the next key/value pair from an iterator.
@@ -71,6 +72,65 @@ pub unsafe extern "C" fn slatedb_iterator_next(
             *out_key_len = key_len;
             *out_val = val;
             *out_val_len = val_len;
+            *out_present = true;
+            success_result()
+        }
+        Ok(None) => {
+            *out_present = false;
+            success_result()
+        }
+        Err(err) => error_from_slate_error(&err),
+    }
+}
+
+/// ## Safety
+/// - `iterator` must be a valid iterator handle.
+/// - `out_present` must be a valid pointer to a `bool`.
+/// - `out_row` must be a valid pointer to a `*mut slatedb_row_entry_t`.
+#[no_mangle]
+pub unsafe extern "C" fn slatedb_iterator_next_row(
+    iterator: *mut slatedb_iterator_t,
+    out_present: *mut bool,
+    out_row: *mut *mut slatedb_row_entry_t,
+) -> slatedb_result_t {
+    if iterator.is_null() {
+        return error_result(slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID, "iterator");
+    }
+    // out_present and out_row are checked by the C compiler/runtime if strict,
+    // but good to check null here too if we want robustness.
+    if out_present.is_null() {
+        return error_result(
+            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
+            "out_present",
+        );
+    }
+    if out_row.is_null() {
+        return error_result(slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID, "out_row");
+    }
+
+    let handle = &mut *iterator;
+    match handle.runtime.block_on(handle.iter.next_row()) {
+        Ok(Some(row)) => {
+            let (key, key_len) = alloc_bytes(row.key.as_ref());
+            let (value, value_len) = match row.value {
+                slatedb::ValueDeletable::Value(v) => alloc_bytes(v.as_ref()),
+                slatedb::ValueDeletable::Merge(v) => alloc_bytes(v.as_ref()),
+                slatedb::ValueDeletable::Tombstone => (std::ptr::null_mut(), 0),
+            };
+
+            let c_row = Box::new(slatedb_row_entry_t {
+                key,
+                key_len,
+                value,
+                value_len,
+                seq: row.seq,
+                create_ts: row.create_ts.unwrap_or(0),
+                create_ts_present: row.create_ts.is_some(),
+                expire_ts: row.expire_ts.unwrap_or(0),
+                expire_ts_present: row.expire_ts.is_some(),
+            });
+
+            *out_row = Box::into_raw(c_row);
             *out_present = true;
             success_result()
         }

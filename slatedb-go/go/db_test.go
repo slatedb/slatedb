@@ -69,6 +69,25 @@ var _ = Describe("DB", func() {
 				Expect(retrievedValue).To(Equal(value))
 			})
 
+			It("should get row with metadata", func() {
+				key := []byte("row_test_key")
+				value := []byte("row_test_value")
+
+				wh, err := db.Put(key, value)
+				Expect(err).NotTo(HaveOccurred())
+
+				row, err := db.GetRow(key)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(row).NotTo(BeNil())
+				Expect(row.Key).To(Equal(key))
+				Expect(row.Value).To(Equal(value))
+				Expect(row.Seq).To(Equal(wh.Seq))
+				if wh.CreateTs != nil {
+					Expect(row.CreateTs).NotTo(BeNil())
+					Expect(*row.CreateTs).To(Equal(*wh.CreateTs))
+				}
+			})
+
 			It("should return nil,nil for non-existent key", func() {
 				value, err := db.Get([]byte("non_existent"))
 				Expect(err).NotTo(HaveOccurred())

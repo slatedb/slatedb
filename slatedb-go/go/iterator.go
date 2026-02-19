@@ -9,6 +9,7 @@ import "C"
 import (
 	"errors"
 	"io"
+	"unsafe"
 )
 
 // Iterator represents a streaming iterator over key-value pairs.
@@ -67,6 +68,52 @@ func (iter *Iterator) Next() (KeyValue, error) {
 		Key:   copyBytesAndFree(keyPtr, keyLen),
 		Value: copyBytesAndFree(valuePtr, valueLen),
 	}, nil
+}
+
+// NextRow returns the next key-value pair with metadata from the iterator.
+//
+// Returns `io.EOF` when iteration is complete.
+func (iter *Iterator) NextRow() (*RowEntry, error) {
+	if iter.closed {
+		return nil, errors.New("iterator is closed")
+	}
+	if iter.ptr == nil {
+		return nil, errors.New("invalid iterator")
+	}
+
+	var present C.bool
+	var rowPtr *C.slatedb_row_entry_t
+
+	result := C.slatedb_iterator_next_row(
+		iter.ptr,
+		&present,
+		&rowPtr,
+	)
+	if err := resultToErrorAndFree(result); err != nil {
+		return nil, err
+	}
+
+	if present == C.bool(false) {
+		return nil, io.EOF
+	}
+	defer C.slatedb_row_free(rowPtr)
+
+	row := &RowEntry{
+		Key:   C.GoBytes(unsafe.Pointer(rowPtr.key), C.int(rowPtr.key_len)),
+		Value: C.GoBytes(unsafe.Pointer(rowPtr.value), C.int(rowPtr.value_len)),
+		Seq:   uint64(rowPtr.seq),
+	}
+
+	if bool(rowPtr.create_ts_present) {
+		ts := int64(rowPtr.create_ts)
+		row.CreateTs = &ts
+	}
+	if bool(rowPtr.expire_ts_present) {
+		ts := int64(rowPtr.expire_ts)
+		row.ExpireTs = &ts
+	}
+
+	return row, nil
 }
 
 // Seek moves the iterator to the first key greater than or equal to `key`.

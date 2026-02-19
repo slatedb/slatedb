@@ -20,6 +20,13 @@ public final class SlateDbScanIterator implements AutoCloseable {
         return new SlateDbKeyValue(next.key(), next.value());
     }
 
+    /// Returns the next row (value + metadata), or `null` when the iterator is exhausted.
+    ///
+    /// @return Next [RowEntry], or `null` if the scan is complete.
+    public RowEntry nextRow() {
+        return NativeInterop.slatedb_iterator_next_row(iterPtr);
+    }
+
     /// Seeks to the first entry whose key is greater than or equal to the provided key.
     ///
     /// @param key key to seek to.

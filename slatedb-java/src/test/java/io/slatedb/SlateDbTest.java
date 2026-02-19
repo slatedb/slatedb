@@ -211,4 +211,30 @@ class SlateDbTest {
             assertTrue(metrics.startsWith("{"));
         }
     }
+
+    @Test
+    void getRowReturnsMetadata() throws Exception {
+        TestSupport.ensureNativeReady();
+        final var context = TestSupport.createDbContext();
+
+        final var key = "row-key".getBytes(StandardCharsets.UTF_8);
+        final var value = "row-value".getBytes(StandardCharsets.UTF_8);
+
+        try (final SlateDb db = SlateDb.open(context.dbPath().toAbsolutePath().toString(), context.objectStoreUrl(), null)) {
+            SlateDbWriteHandle wh = db.put(key, value);
+            
+            RowEntry row = db.getRow(key);
+            assertNotNull(row);
+            assertArrayEquals(key, row.key());
+            assertArrayEquals(value, row.value());
+            assertEquals(wh.seq(), row.seq());
+            if (wh.createTs().isPresent()) {
+                assertTrue(row.createTs().isPresent());
+                assertEquals(wh.createTs().getAsLong(), row.createTs().get().toEpochMilli());
+            }
+
+            // Test non-existent key
+            assertNull(db.getRow("non-existent".getBytes(StandardCharsets.UTF_8)));
+        }
+    }
 }

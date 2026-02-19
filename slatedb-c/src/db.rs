@@ -9,9 +9,9 @@ use crate::ffi::{
     range_from_c, read_options_from_ptr, require_handle, require_out_ptr, scan_options_from_ptr,
     slatedb_db_t, slatedb_error_kind_t, slatedb_flush_options_t, slatedb_iterator_t,
     slatedb_merge_options_t, slatedb_object_store_t, slatedb_put_options_t, slatedb_range_t,
-    slatedb_read_options_t, slatedb_result_t, slatedb_scan_options_t, slatedb_write_batch_t,
-    slatedb_write_handle_t, slatedb_write_options_t, success_result, take_write_batch,
-    validate_write_key, validate_write_key_value, write_options_from_ptr,
+    slatedb_read_options_t, slatedb_result_t, slatedb_row_entry_t, slatedb_scan_options_t,
+    slatedb_write_batch_t, slatedb_write_handle_t, slatedb_write_options_t, success_result,
+    take_write_batch, validate_write_key, validate_write_key_value, write_options_from_ptr,
 };
 use serde_json::{Map, Value};
 use slatedb::Db;
@@ -322,6 +322,75 @@ pub unsafe extern "C" fn slatedb_db_get_with_options(
             let (val, val_len) = alloc_bytes(value.as_ref());
             *out_val = val;
             *out_val_len = val_len;
+            *out_present = true;
+            success_result()
+        }
+        Ok(None) => {
+            *out_present = false;
+            success_result()
+        }
+        Err(err) => error_from_slate_error(&err),
+    }
+}
+
+/// ## Safety
+/// - `db` must be a valid database handle.
+/// - `key` must point to at least `key_len` bytes of valid memory.
+/// - `read_options` must be a valid pointer to `slatedb_read_options_t` or NULL.
+/// - `out_present` must be a valid pointer to a `bool`.
+/// - `out_row` must be a valid pointer to a `*mut slatedb_row_entry_t`.
+#[no_mangle]
+pub unsafe extern "C" fn slatedb_db_get_row_with_options(
+    db: *mut slatedb_db_t,
+    key: *const u8,
+    key_len: usize,
+    read_options: *const slatedb_read_options_t,
+    out_present: *mut bool,
+    out_row: *mut *mut slatedb_row_entry_t,
+) -> slatedb_result_t {
+    if db.is_null() {
+        return error_result(slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID, "db");
+    }
+    if key.is_null() {
+        return error_result(slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID, "key");
+    }
+
+    let key = match bytes_from_ptr(key, key_len, "key") {
+        Ok(key) => key,
+        Err(err) => return err,
+    };
+
+    let read_options = match read_options_from_ptr(read_options) {
+        Ok(options) => options,
+        Err(err) => return err,
+    };
+
+    let handle = &mut *db;
+    match handle
+        .runtime
+        .block_on(handle.db.get_row_with_options(key, &read_options))
+    {
+        Ok(Some(row)) => {
+            let (key, key_len) = alloc_bytes(row.key.as_ref());
+            let (value, value_len) = match row.value {
+                slatedb::ValueDeletable::Value(v) => alloc_bytes(v.as_ref()),
+                slatedb::ValueDeletable::Merge(v) => alloc_bytes(v.as_ref()),
+                slatedb::ValueDeletable::Tombstone => (std::ptr::null_mut(), 0),
+            };
+
+            let c_row = Box::new(slatedb_row_entry_t {
+                key,
+                key_len,
+                value,
+                value_len,
+                seq: row.seq,
+                create_ts: row.create_ts.unwrap_or(0),
+                create_ts_present: row.create_ts.is_some(),
+                expire_ts: row.expire_ts.unwrap_or(0),
+                expire_ts_present: row.expire_ts.is_some(),
+            });
+
+            *out_row = Box::into_raw(c_row);
             *out_present = true;
             success_result()
         }
