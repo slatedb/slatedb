@@ -55,7 +55,8 @@ impl<B: BlockLike> BlockIteratorV2<B> {
             },
         }
     }
-
+    
+    #[allow(dead_code)] // Used in tests
     pub(crate) fn new_ascending(block: B) -> Self {
         Self::new(block, IterationOrder::Ascending)
     }

@@ -744,10 +744,8 @@ impl KeyValueIterator for InternalSstIterator<'_> {
                 Some(kv) => {
                     if self.view.contains(&kv.key) {
                         return Ok(Some(kv));
-                    } else {
-                        if self.view.key_exceeds(&kv.key) {
-                            self.stop()
-                        }
+                    } else if self.view.key_exceeds(&kv.key) {
+                        self.stop();
                     }
                 }
                 None => self.advance_block().await?,
