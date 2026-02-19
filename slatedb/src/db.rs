@@ -3646,8 +3646,11 @@ mod tests {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = "/tmp/test_flush_memtable_max_wal_flushes";
 
+        let mut settings = test_db_options(0, usize::MAX, None);
+        settings.flush_interval = None; // Disable flushing
+
         let kv_store = Db::builder(path, object_store.clone())
-            .with_settings(test_db_options(0, usize::MAX, None))
+            .with_settings(settings)
             .build()
             .await
             .unwrap();
@@ -3663,10 +3666,7 @@ mod tests {
         };
         let put_options = PutOptions::default();
 
-        // Verify that we have 0 L0 SSTs.
-        assert_eq!(stored_manifest.db_state().l0.len(), 0);
-
-        for i in 0..MAX_WAL_FLUSHES_BEFORE_L0_FLUSH {
+        for i in 0..(MAX_WAL_FLUSHES_BEFORE_L0_FLUSH - 1) {
             let key = format!("key{:08}", i);
             kv_store
                 .put_with_options(key.as_bytes(), b"v", &put_options, &write_options)
@@ -3675,8 +3675,27 @@ mod tests {
             kv_store.flush().await.unwrap();
         }
 
+        // Verify WALs flushes.
+        let wal_id = kv_store.inner.wal_buffer.recent_flushed_wal_id();
+        assert_eq!(wal_id, MAX_WAL_FLUSHES_BEFORE_L0_FLUSH); // account for the empty WAL written for fencing
+
+        // Verify no memtable was frozen or L0 flush happened.
+        {
+            let guard = kv_store.inner.state.read();
+            assert!(guard.state().imm_memtable.is_empty());
+            assert_eq!(guard.state().core().l0.len(), 0);
+        }
+
+        // This put() + flush() triggers a freeze.
+        let key = format!("key{:08}", MAX_WAL_FLUSHES_BEFORE_L0_FLUSH - 1);
+        kv_store
+            .put_with_options(key.as_bytes(), b"v", &put_options, &write_options)
+            .await
+            .unwrap();
+        kv_store.flush().await.unwrap();
+
         // Verify that the WAL count threshold triggered a memtable freeze and L0 flush.
-        // replay_after_wal_id should have advanced past the threshold, and there should
+        // replay_after_wal_id should have advanced to the threshold, and there should
         // be exactly one L0 SST.
         let db_state = wait_for_manifest_condition(
             &mut stored_manifest,
@@ -3684,6 +3703,10 @@ mod tests {
             Duration::from_secs(30),
         )
         .await;
+        assert_eq!(
+            db_state.replay_after_wal_id,
+            MAX_WAL_FLUSHES_BEFORE_L0_FLUSH
+        );
         assert_eq!(db_state.l0.len(), 1);
 
         kv_store.close().await.unwrap();
