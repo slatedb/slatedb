@@ -145,6 +145,19 @@ pub enum slatedb_error_kind_t {
     SLATEDB_ERROR_KIND_UNKNOWN = 255,
 }
 
+/// Handle returned from write operations, containing metadata.
+#[repr(C)]
+#[allow(non_camel_case_types)]
+#[derive(Clone, Copy, Debug)]
+pub struct slatedb_write_handle_t {
+    /// Sequence number assigned to this write.
+    pub seq: u64,
+    /// Creation timestamp (if present).
+    pub create_ts: i64,
+    /// Whether `create_ts` is present.
+    pub create_ts_present: bool,
+}
+
 /// Closed reason mirroring `slatedb::CloseReason`.
 #[repr(C)]
 #[allow(non_camel_case_types)]

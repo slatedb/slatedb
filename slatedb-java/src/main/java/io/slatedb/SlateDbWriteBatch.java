@@ -1,6 +1,7 @@
 package io.slatedb;
 
 import io.slatedb.SlateDbConfig.PutOptions;
+import org.jspecify.annotations.Nullable;
 
 /// A batch of write operations that can be executed atomically.
 ///
@@ -27,7 +28,7 @@ public final class SlateDbWriteBatch implements AutoCloseable {
     /// @param key key to write (non-empty).
     /// @param value value to write.
     /// @param options put options or `null` for defaults.
-    public void put(byte[] key, byte[] value, PutOptions options) {
+    public void put(byte[] key, byte[] value, @Nullable PutOptions options) {
         NativeInterop.slatedb_write_batch_put_with_options(batchPtr, key, value, options);
     }
 

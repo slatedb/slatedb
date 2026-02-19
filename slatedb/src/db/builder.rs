@@ -114,9 +114,7 @@ use tokio::sync::mpsc;
 use crate::admin::Admin;
 use crate::batch_write::WriteBatchEventHandler;
 use crate::batch_write::WRITE_BATCH_TASK_NAME;
-use crate::cached_object_store::stats::CachedObjectStoreStats;
 use crate::cached_object_store::CachedObjectStore;
-use crate::cached_object_store::FsCacheStorage;
 #[cfg(feature = "compaction_filters")]
 use crate::compaction_filter::CompactionFilterSupplier;
 use crate::compactions_store::CompactionsStore;
@@ -426,32 +424,14 @@ impl<P: Into<Path>> DbBuilder<P> {
         };
 
         // Setup object store with optional caching
-        let cached_object_store = match &self.settings.object_store_cache_options.root_folder {
-            None => None,
-            Some(cache_root_folder) => {
-                let stats = Arc::new(CachedObjectStoreStats::new(stat_registry.as_ref()));
-                let cache_storage = Arc::new(FsCacheStorage::new(
-                    cache_root_folder.clone(),
-                    self.settings
-                        .object_store_cache_options
-                        .max_cache_size_bytes,
-                    self.settings.object_store_cache_options.scan_interval,
-                    stats.clone(),
-                    system_clock.clone(),
-                    rand.clone(),
-                ));
-
-                let cached_object_store = CachedObjectStore::new(
-                    retrying_main_object_store.clone(),
-                    cache_storage,
-                    self.settings.object_store_cache_options.part_size_bytes,
-                    self.settings.object_store_cache_options.cache_puts,
-                    stats.clone(),
-                )?;
-                cached_object_store.start_evictor().await;
-                Some(cached_object_store)
-            }
-        };
+        let cached_object_store = CachedObjectStore::from_config(
+            retrying_main_object_store.clone(),
+            &self.settings.object_store_cache_options,
+            stat_registry.as_ref(),
+            system_clock.clone(),
+            rand.clone(),
+        )
+        .await?;
 
         let maybe_cached_main_object_store: Arc<dyn ObjectStore> = match &cached_object_store {
             Some(cached_store) => cached_store.clone(),
