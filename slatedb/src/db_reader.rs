@@ -583,7 +583,45 @@ impl DbReader {
             .map_err(Into::into)
     }
 
-    async fn open_internal(
+    /// Creates a new builder for a database reader at the given path.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - The path to the database.
+    /// * `object_store` - The object store to use.
+    ///
+    /// # Returns
+    ///
+    /// A `DbReaderBuilder` that can be used to configure and build a `DbReader`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use slatedb::{Db, DbReader, Error};
+    /// use slatedb::object_store::{ObjectStore, memory::InMemory};
+    /// use std::sync::Arc;
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> Result<(), Error> {
+    ///     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    ///     // First create a database
+    ///     let db = Db::open("test_db", Arc::clone(&object_store)).await?;
+    ///     db.close().await?;
+    ///     // Then open a reader
+    ///     let reader = DbReader::builder("test_db", object_store)
+    ///         .build()
+    ///         .await?;
+    ///     Ok(())
+    /// }
+    /// ```
+    pub fn builder<P: Into<Path>>(
+        path: P,
+        object_store: Arc<dyn ObjectStore>,
+    ) -> crate::db::builder::DbReaderBuilder<P> {
+        crate::db::builder::DbReaderBuilder::new(path, object_store)
+    }
+
+    pub(crate) async fn open_internal(
         store_provider: &dyn StoreProvider,
         checkpoint_id: Option<Uuid>,
         options: DbReaderOptions,

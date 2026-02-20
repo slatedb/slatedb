@@ -74,6 +74,7 @@ use slatedb_common::clock::SystemClock;
 use slatedb_txn_obj::DirtyObject;
 
 pub use builder::DbBuilder;
+pub use builder::DbReaderBuilder;
 
 pub(crate) mod builder;
 
