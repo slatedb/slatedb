@@ -169,7 +169,7 @@ impl CachedObjectStore {
                     )
                     .await?;
                 let meta = result.meta.clone();
-                self.save_get_result(result).await.ok();
+                self.save_get_result(location, result).await.ok();
                 Ok(meta)
             }
         }
@@ -279,14 +279,18 @@ impl CachedObjectStore {
         // swallow the error on saving to disk here (the disk might be already full), just fallback
         // to the object store.
         // TODO: add a warning log here.
-        self.save_get_result(get_result).await.ok();
+        self.save_get_result(location, get_result).await.ok();
         Ok((result_meta, result_attrs))
     }
 
     /// save the GetResult to the disk cache, a GetResult may be transformed into multiple part
     /// files and a meta file. please note that the `range` in the GetResult is expected to be
     /// aligned with the part size.
-    async fn save_get_result(&self, result: GetResult) -> object_store::Result<u64> {
+    async fn save_get_result(
+        &self,
+        location: &Path,
+        result: GetResult,
+    ) -> object_store::Result<u64> {
         let part_size_bytes_u64 = self.part_size_bytes as u64;
         assert!(result.range.start.is_multiple_of(part_size_bytes_u64));
         assert!(
@@ -294,9 +298,7 @@ impl CachedObjectStore {
                 || result.range.end == result.meta.size
         );
 
-        let entry = self
-            .cache_storage
-            .entry(&result.meta.location, self.part_size_bytes);
+        let entry = self.cache_storage.entry(location, self.part_size_bytes);
         let object_size = result.meta.size;
 
         if self.admission_picker.pick(entry.as_ref()).admitted() {
@@ -665,7 +667,7 @@ mod tests {
                 .unwrap();
         let entry = cached_store.cache_storage.entry(&location, 1024);
 
-        let object_size_hint = cached_store.save_get_result(get_result).await?;
+        let object_size_hint = cached_store.save_get_result(&location, get_result).await?;
         assert_eq!(object_size_hint, 1024 * 3 + 32);
 
         // assert the cached meta
@@ -740,7 +742,7 @@ mod tests {
         let cached_store =
             CachedObjectStore::new(object_store, cache_storage, part_size, false, stats).unwrap();
         let entry = cached_store.cache_storage.entry(&location, part_size);
-        let object_size_hint = cached_store.save_get_result(get_result).await?;
+        let object_size_hint = cached_store.save_get_result(&location, get_result).await?;
         assert_eq!(object_size_hint, 1024 * 3);
         let cached_parts = entry.cached_parts().await?;
         assert_eq!(cached_parts.len(), 3);
@@ -1041,6 +1043,82 @@ mod tests {
             let cached_parts = entry.cached_parts().await.unwrap();
             assert_eq!(cached_parts.len(), 2); // 2KB = 2 parts of 1024 bytes
         }
+    }
+
+    #[tokio::test]
+    async fn test_cached_object_store_with_prefix_no_double_cache() -> object_store::Result<()> {
+        // Regression test: when CachedObjectStore wraps a PrefixStore, the cache key used
+        // by save_get_result (called from maybe_prefetch_range) must match the key used by
+        // read_part. Previously, save_get_result used result.meta.location (which includes the
+        // prefix), while read_part used the caller-supplied location (without prefix), causing
+        // two separate cache entries and 2x disk usage.
+        use crate::stats::ReadableStat;
+        use object_store::prefix::PrefixStore;
+
+        let prefix = "myprefix";
+        let inner_store = object_store::memory::InMemory::new();
+        let prefix_store = Arc::new(PrefixStore::new(inner_store, prefix));
+
+        // Put the object via the prefix store so the relative path is "testfile.sst"
+        let relative_path = Path::from("testfile.sst");
+        let payload = gen_rand_bytes(2048);
+        prefix_store
+            .put(&relative_path, PutPayload::from_bytes(payload.clone()))
+            .await?;
+
+        let test_cache_folder = new_test_cache_folder();
+        let stats_registry = StatRegistry::new();
+        let stats = Arc::new(CachedObjectStoreStats::new(&stats_registry));
+        let cache_storage = Arc::new(FsCacheStorage::new(
+            test_cache_folder.clone(),
+            None,
+            None,
+            stats.clone(),
+            Arc::new(DefaultSystemClock::new()),
+            Arc::new(DbRand::default()),
+        ));
+
+        let part_size = 1024usize;
+        let cached_store = CachedObjectStore::new(
+            prefix_store.clone(),
+            cache_storage,
+            part_size,
+            false,
+            stats.clone(),
+        )
+        .unwrap();
+
+        // First call: triggers maybe_prefetch_range → save_get_result with relative_path as key
+        let result = cached_store
+            .cached_get_opts(&relative_path, GetOptions::default())
+            .await?;
+        // Consuming the stream triggers read_part, which should hit the cache
+        let _ = result.bytes().await?;
+
+        // Verify: the cache entry exists under the relative path (no prefix)
+        let entry = cached_store.cache_storage.entry(&relative_path, part_size);
+        let cached_parts = entry.cached_parts().await?;
+        assert_eq!(
+            cached_parts.len(),
+            2,
+            "expected 2 parts (2048 bytes / 1024)"
+        );
+
+        // Verify: read_part found the data in cache (hits > 0) instead of going back to S3
+        let hits = stats.object_store_cache_part_hits.get();
+        assert!(hits > 0, "expected cache hits but got {hits}");
+
+        // Verify: no entry exists under the prefixed path
+        let prefixed_path = Path::from(format!("{prefix}/testfile.sst"));
+        let prefixed_entry = cached_store.cache_storage.entry(&prefixed_path, part_size);
+        let prefixed_parts = prefixed_entry.cached_parts().await?;
+        assert_eq!(
+            prefixed_parts.len(),
+            0,
+            "expected no parts cached under prefixed path"
+        );
+
+        Ok(())
     }
 
     #[tokio::test]
