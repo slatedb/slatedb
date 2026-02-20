@@ -187,7 +187,7 @@ struct PyWriteHandle {
     #[pyo3(get)]
     seq: u64,
     #[pyo3(get)]
-    create_ts: Option<i64>,
+    create_ts: i64,
 }
 
 impl From<::slatedb::WriteHandle> for PyWriteHandle {
@@ -1947,7 +1947,7 @@ impl PySlateDBTransaction {
             .map_err(map_error)
     }
 
-    fn commit(&mut self, py: Python<'_>) -> PyResult<PyWriteHandle> {
+    fn commit(&mut self, py: Python<'_>) -> PyResult<Option<PyWriteHandle>> {
         let txn = self
             .inner
             .take()
@@ -1957,7 +1957,7 @@ impl PySlateDBTransaction {
             rt.block_on(async {
                 txn.commit()
                     .await
-                    .map(PyWriteHandle::from)
+                    .map(|handle| handle.map(PyWriteHandle::from))
                     .map_err(map_error)
             })
         })
@@ -1971,7 +1971,7 @@ impl PySlateDBTransaction {
         future_into_py(py, async move {
             txn.commit()
                 .await
-                .map(PyWriteHandle::from)
+                .map(|handle| handle.map(PyWriteHandle::from))
                 .map_err(map_error)
         })
     }

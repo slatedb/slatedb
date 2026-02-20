@@ -339,14 +339,12 @@ var _ = Describe("DB", func() {
 					Expect(err).NotTo(HaveOccurred())
 					Expect(wh).NotTo(BeNil())
 					Expect(wh.Seq).To(Equal(uint64(1)))
-					Expect(wh.CreateTs).NotTo(BeNil())
-					Expect(*wh.CreateTs).To(BeNumerically(">", 0))
+					Expect(wh.CreateTs).To(BeNumerically(">", 0))
 
 					wh2, err := db.Put([]byte("key2"), []byte("value2"))
 					Expect(err).NotTo(HaveOccurred())
 					Expect(wh2.Seq).To(Equal(uint64(2)))
-					Expect(wh2.CreateTs).NotTo(BeNil())
-					Expect(*wh2.CreateTs).To(BeNumerically(">", 0))
+					Expect(wh2.CreateTs).To(BeNumerically(">", 0))
 				})
 
 				It("should return valid WriteHandle for Delete", func() {
@@ -358,8 +356,7 @@ var _ = Describe("DB", func() {
 					Expect(err).NotTo(HaveOccurred())
 					Expect(whDel).NotTo(BeNil())
 					Expect(whDel.Seq).To(Equal(uint64(2)))
-					Expect(whDel.CreateTs).NotTo(BeNil())
-					Expect(*whDel.CreateTs).To(BeNumerically(">", 0))
+					Expect(whDel.CreateTs).To(BeNumerically(">", 0))
 				})
 
 				It("should return valid WriteHandle for PutWithOptions", func() {
@@ -372,8 +369,7 @@ var _ = Describe("DB", func() {
 					Expect(err).NotTo(HaveOccurred())
 					Expect(wh).NotTo(BeNil())
 					Expect(wh.Seq).To(Equal(uint64(1)))
-					Expect(wh.CreateTs).NotTo(BeNil())
-					Expect(*wh.CreateTs).To(BeNumerically(">", 0))
+					Expect(wh.CreateTs).To(BeNumerically(">", 0))
 				})
 
 				It("should return valid WriteHandle for DeleteWithOptions", func() {
@@ -384,8 +380,7 @@ var _ = Describe("DB", func() {
 					Expect(err).NotTo(HaveOccurred())
 					Expect(wh).NotTo(BeNil())
 					Expect(wh.Seq).To(Equal(uint64(1)))
-					Expect(wh.CreateTs).NotTo(BeNil())
-					Expect(*wh.CreateTs).To(BeNumerically(">", 0))
+					Expect(wh.CreateTs).To(BeNumerically(">", 0))
 				})
 
 				It("should return valid WriteHandle for Write (batch)", func() {
@@ -400,8 +395,7 @@ var _ = Describe("DB", func() {
 					Expect(err).NotTo(HaveOccurred())
 					Expect(wh).NotTo(BeNil())
 					Expect(wh.Seq).To(Equal(uint64(1)))
-					Expect(wh.CreateTs).NotTo(BeNil())
-					Expect(*wh.CreateTs).To(BeNumerically(">", 0))
+					Expect(wh.CreateTs).To(BeNumerically(">", 0))
 				})
 			})
 

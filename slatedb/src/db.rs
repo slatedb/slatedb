@@ -78,30 +78,6 @@ pub use builder::DbBuilder;
 
 pub(crate) mod builder;
 
-/// Handle returned from write operations, containing metadata about the write.
-/// This structure is designed to be extensible for future enhancements.
-#[derive(Debug, Clone)]
-pub struct WriteHandle {
-    pub(crate) seq: u64,
-    pub(crate) create_ts: Option<i64>,
-}
-
-impl WriteHandle {
-    pub(crate) fn new(seq: u64, create_ts: Option<i64>) -> Self {
-        Self { seq, create_ts }
-    }
-
-    /// Returns the sequence number assigned to this write operation.
-    pub fn seqnum(&self) -> u64 {
-        self.seq
-    }
-
-    /// Returns the creation timestamp assigned to this write operation.
-    pub fn create_ts(&self) -> Option<i64> {
-        self.create_ts
-    }
-}
-
 pub(crate) struct DbInner {
     pub(crate) state: Arc<RwLock<DbState>>,
     pub(crate) settings: Settings,
@@ -287,12 +263,7 @@ impl DbInner {
         self.db_stats.write_ops.add(batch.ops.len() as u64);
         self.status()?;
         if batch.ops.is_empty() {
-            // Return a dummy WriteHandle for empty batch.
-            // Sequence number is not incremented.
-            return Ok(WriteHandle {
-                seq: self.oracle.last_committed_seq(),
-                create_ts: None,
-            });
+            return Err(SlateDBError::EmptyBatch);
         }
 
         let (tx, rx) = tokio::sync::oneshot::channel();
@@ -308,12 +279,10 @@ impl DbInner {
 
         // TODO: this can be modified as awaiting the last_durable_seq watermark & fatal error.
 
-        let (write_handle, durable_watcher) = rx.await??;
+        let (write_handle, mut durable_watcher) = rx.await??;
 
         if options.await_durable {
-            if let Some(mut watcher) = durable_watcher {
-                watcher.await_value().await?;
-            }
+            durable_watcher.await_value().await?;
         }
 
         Ok(write_handle)
@@ -1638,6 +1607,30 @@ impl DbRead for Db {
         T: RangeBounds<K> + Send,
     {
         self.scan_with_options(range, options).await
+    }
+}
+
+/// Handle returned from write operations, containing metadata about the write.
+/// This structure is designed to be extensible for future enhancements.
+#[derive(Debug, Clone)]
+pub struct WriteHandle {
+    pub(crate) seq: u64,
+    pub(crate) create_ts: i64,
+}
+
+impl WriteHandle {
+    pub(crate) fn new(seq: u64, create_ts: i64) -> Self {
+        Self { seq, create_ts }
+    }
+
+    /// Returns the sequence number assigned to this write operation.
+    pub fn seqnum(&self) -> u64 {
+        self.seq
+    }
+
+    /// Returns the creation timestamp assigned to this write operation.
+    pub fn create_ts(&self) -> i64 {
+        self.create_ts
     }
 }
 
@@ -3855,8 +3848,7 @@ mod tests {
         let mut wal_iter = wal_files[1] // second file contains the actual write
             .iterator()
             .await
-            .expect("expected successful WAL iterator call")
-            .expect("expected WAL file to exist");
+            .expect("expected successful WAL iterator call");
         while let Some(entry) = wal_iter
             .next_entry()
             .await
@@ -6338,7 +6330,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(handle.seqnum(), 1);
-        assert_eq!(handle.create_ts(), Some(100));
+        assert_eq!(handle.create_ts(), 100);
 
         // Put with options (TTL)
         clock.set(200);
@@ -6357,7 +6349,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(handle.seqnum(), 2);
-        assert_eq!(handle.create_ts(), Some(200));
+        assert_eq!(handle.create_ts(), 200);
 
         // Delete
         clock.set(300);
@@ -6371,7 +6363,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(handle.seqnum(), 3);
-        assert_eq!(handle.create_ts(), Some(300));
+        assert_eq!(handle.create_ts(), 300);
 
         // Write Batch
         clock.set(400);
@@ -6388,7 +6380,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(handle.seqnum(), 4);
-        assert_eq!(handle.create_ts(), Some(400));
+        assert_eq!(handle.create_ts(), 400);
     }
 
     #[tokio::test]
@@ -6418,7 +6410,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(handle.seqnum(), 1);
-        assert_eq!(handle.create_ts(), Some(100));
+        assert_eq!(handle.create_ts(), 100);
 
         // Write Batch 2
         clock.set(200);
@@ -6435,7 +6427,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(handle.seqnum(), 2);
-        assert_eq!(handle.create_ts(), Some(200));
+        assert_eq!(handle.create_ts(), 200);
 
         // Write Batch 3
         clock.set(300);
@@ -6451,6 +6443,28 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(handle.seqnum(), 3);
-        assert_eq!(handle.create_ts(), Some(300));
+        assert_eq!(handle.create_ts(), 300);
+    }
+
+    #[tokio::test]
+    async fn test_write_with_options_empty_batch_returns_empty_batch_error() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let db = Db::builder("/tmp/test_write_with_options_empty_batch", object_store)
+            .with_settings(test_db_options(0, 1024, None))
+            .build()
+            .await
+            .unwrap();
+
+        let err = db
+            .inner
+            .write_with_options(
+                WriteBatch::new(),
+                &WriteOptions {
+                    await_durable: false,
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, SlateDBError::EmptyBatch));
     }
 }

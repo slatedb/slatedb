@@ -41,16 +41,15 @@ async fn main() -> anyhow::Result<()> {
 }
 
 async fn emit_wal_file(wal_file: &WalFile, cursor: &mut CdcCursor) -> anyhow::Result<()> {
-    if let Some(mut iter) = wal_file.iterator().await? {
-        while let Some(row) = iter.next_entry().await? {
-            if wal_file.id == cursor.wal_id && row.seq <= cursor.last_seq {
-                continue;
-            }
-
-            emit_row(wal_file.id, &row);
-            cursor.wal_id = wal_file.id;
-            cursor.last_seq = row.seq;
+    let mut iter = wal_file.iterator().await?;
+    while let Some(row) = iter.next_entry().await? {
+        if wal_file.id == cursor.wal_id && row.seq <= cursor.last_seq {
+            continue;
         }
+
+        emit_row(wal_file.id, &row);
+        cursor.wal_id = wal_file.id;
+        cursor.last_seq = row.seq;
     }
 
     Ok(())

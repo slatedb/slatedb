@@ -46,7 +46,7 @@ pub(crate) const WRITE_BATCH_TASK_NAME: &str = "writer";
 pub(crate) type WriteBatchResult = Result<
     (
         WriteHandle,
-        Option<WatchableOnceCellReader<Result<(), SlateDBError>>>,
+        WatchableOnceCellReader<Result<(), SlateDBError>>,
     ),
     SlateDBError,
 >;
@@ -93,8 +93,7 @@ impl MessageHandler<WriteBatchMessage> for WriteBatchEventHandler {
         // if this is the first write and the WAL is disabled, make sure users are flushing
         // their memtables in a timely manner.
         if self.is_first_write && !self.db_inner.wal_enabled && options.await_durable {
-            self.is_first_write = false;
-            if let Ok((_, Some(this_watcher))) = &result {
+            if let Ok((_, this_watcher)) = &result {
                 let this_watcher = this_watcher.clone();
                 let this_clock = self.db_inner.system_clock.clone();
                 tokio::spawn(async move {
@@ -199,9 +198,9 @@ impl DbInner {
             self.maybe_freeze_memtable(&mut guard, last_flushed_wal_id)?;
         }
 
-        let write_handle = WriteHandle::new(commit_seq, Some(now));
+        let write_handle = WriteHandle::new(commit_seq, now);
 
-        Ok((write_handle, Some(durable_watcher)))
+        Ok((write_handle, durable_watcher))
     }
 
     /// Write entries to the currently active memtable. Returns a durable watcher for the memtable.
