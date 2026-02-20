@@ -1,0 +1,292 @@
+---
+options:
+    max_actions: 5
+---
+
+NOT_FOUND = "notfound"
+
+# Small integer key space for tractable state exploration.
+VALUES = ["v0", "v1", NOT_FOUND]
+
+MIN_KEY = 0 # inclusive
+MAX_KEY = 3 # inclusive
+
+MIN_PARALLELISM = 1 # inclusive
+MAX_PARALLELISM = 3 # inclusive
+
+KEY_SPACE = range(MIN_KEY, MAX_KEY + 1) # [inclusive, exclusive)
+
+# --- Range helpers (def for global visibility) ---
+
+def key_in_ranges(k, visible_ranges):
+    if visible_ranges == None:
+        return True
+    elif visible_ranges == []:
+        return False
+    else:
+        for vr in visible_ranges:
+            if vr[0] <= k and k < vr[1]:
+                return True
+    return False
+
+def intersect_ranges(ranges, r):
+    if ranges == None or len(ranges) == 0:
+        return [r]
+    if r == None:
+        return ranges
+    intersection = []
+    for a in ranges:
+        lo = max(a[0], r[0])
+        hi = min(a[1], r[1])
+        if lo < hi:
+            intersection.append((lo, hi))
+    return intersection
+
+def union_ranges(a, b):
+    if a == None or b == None:
+        return None
+    union = a + b
+    # union.sort()
+    # todo: merge ranges
+    return union
+    # elif a[1] == b[0] or b[1] == a[0]:
+        # return (min(a[0], b[0]), max(a[1], b[1]))
+    # else:
+        # print("failure: gap in ranges")
+        # return None
+
+def do_project_l0(l0, proj_range):
+    new_l0 = []
+    for handle in l0:
+        vrs = intersect_ranges(handle.get("visible_ranges"), proj_range)
+        if vrs != None:
+            new_l0.append({"id": handle["id"], "visible_ranges": vrs})
+    return new_l0
+
+def do_project_compacted(compacted, proj_range):
+    new_compacted = []
+    for sr in compacted:
+        new_ssts = []
+        for handle in sr["ssts"]:
+            vrs = intersect_ranges(handle.get("visible_ranges"), proj_range)
+            if vrs != None:
+                new_ssts.append({"id": handle["id"], "visible_ranges": vrs})
+        if len(new_ssts) > 0:
+            new_compacted.append({"id": sr["id"], "ssts": new_ssts})
+    return new_compacted
+
+def do_union_l0(manifests):
+    l0_by_id = {}
+    for m in manifests:
+        for handle in m["l0"]:
+            sid = handle["id"]
+            if sid in l0_by_id:
+                merged_vrs = union_ranges(
+                    l0_by_id[sid].get("visible_ranges"), 
+                    handle.get("visible_ranges"),
+                )
+                l0_by_id[sid] = {"id": sid, "visible_ranges": merged_vrs}
+            else:
+                l0_by_id[sid] = dict(handle)
+    # todo: sort l0 correctly
+    return [l0_by_id[i] for i in sorted(l0_by_id.keys(), reverse=True)]
+
+def do_union_compacted(manifests):
+    sr_by_id = {}
+    for m in manifests:
+        for sr in m["compacted"]:
+            sr_id = sr["id"] 
+            ssts = sr["ssts"]
+            if sr_id in sr_by_id:
+                sr_by_id[sr_id]["ssts"].extend(ssts)
+            else:
+                sr_by_id[sr_id] = {"id": sr_id, "ssts": list(ssts)}
+    return [sr_by_id[i] for i in sorted(sr_by_id.keys(), reverse=True)]
+
+def do_union_last_l0_seq(manifests):
+    return max([m["last_l0_seq"] for m in manifests])
+
+def do_union_last_sr_id(manifests):
+    max_id = -1
+    for m in manifests:
+        for sr in m["compacted"]:
+            max_id = max(sr["id"], max_id)
+    return max_id
+
+def do_compact_l0s(l0_handles, store_objects):
+    merged = {}
+    for handle in reversed(l0_handles):
+        content = store_objects.get(handle["id"])
+        for k in content:
+            if key_in_ranges(k, handle.get("visible_ranges")):
+                merged[k] = content[k]
+    return merged
+
+# evenly distribute the given key space across the given number of partitions
+def do_compute_ranges(parallelism, start_key, end_key):
+    ranges = []
+    range_size = int(math.round((end_key - start_key) / parallelism))
+    prev_end = 0
+    for p in range(parallelism):
+        if p == parallelism - 1:
+            range_end = end_key
+        else:
+            range_end = prev_end + range_size
+        ranges.append([prev_end, range_end])
+        prev_end = range_end
+    return ranges
+    
+
+# --- Object Store ---
+
+role ObjectStore:
+    action Init:
+        self.objects = {}
+
+    atomic func Write(name, content):
+        self.objects[name] = content
+
+    atomic func Read(name):
+        return self.objects.get(name)
+
+
+# --- Database ---
+
+Status = enum('INIT', 'GC')
+
+role Db:
+    action Init:
+        # L0 SST handles (newest first).
+        # Each handle: {"id": int, "visible_ranges": tuple or None}
+        self.l0 = []
+        # Sorted runs (newest first).
+        # Each: {"id": int, "ssts": [handle]}
+        self.compacted = []
+        self.last_l0_seq = -1
+        self.last_sst_id = -1
+        self.last_sr_id = -1
+        self.visible_ranges = [[MIN_KEY, MAX_KEY + 1]]
+        self.status = Status.INIT
+
+    atomic action Put: # todo: customize number of entries per sst
+        require self.status == Status.INIT
+        k1 = any KEY_SPACE : key_in_ranges(k1, self.visible_ranges)
+        # k2 = any KEY_SPACE : k1 != k2 and k1 >= self.visible_ranges[0] and k1 < self.visible_ranges[1]
+        v1 = any VALUES
+        # v2 = any VALUES : v1 != v2
+        self.last_l0_seq += 1
+        # sst_id = self.with_db_id_prepended(self.last_l0_seq)
+        sst_id = str(self.ID) + ":" + str(self.last_l0_seq)
+        store.Write(sst_id, {k1: v1})
+        # store.Write(sst_id, {k1: v1, k2: v2})
+        self.l0.insert(0, {"id": sst_id, "visible_ranges": None})
+        _written[k1] = v1
+        # _written[k2] = v2
+
+    fair action Compact:
+        require self.status == Status.INIT
+        require len(self.l0) >= 1
+        atomic:
+            # Merge all L0 SSTs into one sorted run, respecting visible_ranges.
+            # Iterate oldest-first so newer values overwrite older ones.
+            merged = do_compact_l0s(self.l0, store.objects)
+            self.last_sst_id += 1
+            sst_id = self.with_db_id_prepended(self.last_sst_id)
+            store.Write(sst_id, merged)
+            self.last_sr_id += 1
+            sr_id = self.last_sr_id
+            self.compacted.insert(0, {
+                "id": sr_id,
+                "ssts": [{"id": sst_id, "visible_ranges": self.visible_ranges}],
+            })
+            self.l0 = []
+
+    atomic func get(k):
+        # require self.status == Status.INIT
+        # Search L0 (newest first)
+        for handle in self.l0:
+            if key_in_ranges(k, handle.get("visible_ranges")):
+                content = store.Read(handle["id"])
+                if content.get(k) != None:
+                    return content[k]
+        # Search sorted runs (newest first)
+        for sr in self.compacted:
+            for handle in sr["ssts"]:
+                if key_in_ranges(k, handle.get("visible_ranges")):
+                    content = store.Read(handle["id"])
+                    if content.get(k) != None:
+                        return content[k]
+        return NOT_FOUND
+
+    atomic func with_db_id_prepended(name):
+        return str(self.ID) + ":" + str(name)
+
+    atomic func destroy():
+        self.status = Status.GC
+
+# --- Top-level ---
+
+action Init:
+    store = ObjectStore()
+    _written = {} # for read assertions
+    _databases = []
+    _last_db_created = 0
+    _databases.append(Db(ID=_last_db_created))
+
+atomic action Rescale:
+    parallelism = any range(MIN_PARALLELISM, MAX_PARALLELISM + 1) : parallelism != len(_databases)
+    key_ranges = do_compute_ranges(parallelism, MIN_KEY, MAX_KEY + 1)
+    new_manifests = []
+    for key_range in key_ranges:
+        manifests = []
+        for db in _databases:
+            manifests.append({
+                "l0": do_project_l0(db.l0, key_range),
+                "compacted": do_project_compacted(db.compacted, key_range),
+                "last_l0_seq": db.last_l0_seq,
+            })
+        _last_db_created = _last_db_created + 1
+        # WARN: don't move this to def; otherwise actions aren't scheduled for the dynamic role
+        new_db = Db(ID = _last_db_created) 
+        new_db.l0 = do_union_l0(manifests)
+        new_db.compacted = do_union_compacted(manifests)
+        new_db.last_l0_seq = do_union_last_l0_seq(manifests)
+        new_db.last_sr_id = do_union_last_sr_id(manifests)
+        new_db.visible_ranges = [key_range]
+        new_manifests.append(new_db)
+
+    for db in _databases:
+        db.destroy()
+
+    _databases = new_manifests
+
+# --- Assertions ---
+
+always assertion ReadConsistency:
+    for k in KEY_SPACE:
+        expected = _written.get(k, NOT_FOUND)
+        actual = NOT_FOUND
+        for db in _databases:
+            candidate = db.get(k)
+            if candidate != NOT_FOUND:
+                if actual == NOT_FOUND:
+                    actual = candidate
+                else:
+                    return False
+        if actual != expected:
+            return False
+    return True
+
+always assertion L0Ordered:
+    for db in _databases:
+        for i in range(len(db.l0) - 1):
+            if db.l0[i]["id"] <= db.l0[i + 1]["id"]:
+                return False
+        return True
+
+always assertion CompactedOrdered:
+    for db in _databases:
+        for i in range(len(db.compacted) - 1):
+            if db.compacted[i]["id"] <= db.compacted[i + 1]["id"]:
+                return False
+        return True
