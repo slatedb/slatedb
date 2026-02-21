@@ -429,7 +429,6 @@ pub unsafe extern "C" fn slatedb_db_put_with_options(
         *out_handle = slatedb_write_handle_t {
             seq: 0,
             create_ts: 0,
-            create_ts_present: false,
         };
     }
 
@@ -444,8 +443,7 @@ pub unsafe extern "C" fn slatedb_db_put_with_options(
             if !out_handle.is_null() {
                 *out_handle = slatedb_write_handle_t {
                     seq: write_handle.seqnum(),
-                    create_ts: write_handle.create_ts().unwrap_or(0),
-                    create_ts_present: write_handle.create_ts().is_some(),
+                    create_ts: write_handle.create_ts(),
                 };
             }
             success_result()
@@ -522,7 +520,6 @@ pub unsafe extern "C" fn slatedb_db_delete_with_options(
         *out_handle = slatedb_write_handle_t {
             seq: 0,
             create_ts: 0,
-            create_ts_present: false,
         };
     }
 
@@ -535,8 +532,7 @@ pub unsafe extern "C" fn slatedb_db_delete_with_options(
             if !out_handle.is_null() {
                 *out_handle = slatedb_write_handle_t {
                     seq: write_handle.seqnum(),
-                    create_ts: write_handle.create_ts().unwrap_or(0),
-                    create_ts_present: write_handle.create_ts().is_some(),
+                    create_ts: write_handle.create_ts(),
                 };
             }
             success_result()
@@ -641,7 +637,6 @@ pub unsafe extern "C" fn slatedb_db_merge_with_options(
         *out_handle = slatedb_write_handle_t {
             seq: 0,
             create_ts: 0,
-            create_ts_present: false,
         };
     }
 
@@ -656,8 +651,7 @@ pub unsafe extern "C" fn slatedb_db_merge_with_options(
             if !out_handle.is_null() {
                 *out_handle = slatedb_write_handle_t {
                     seq: write_handle.seqnum(),
-                    create_ts: write_handle.create_ts().unwrap_or(0),
-                    create_ts_present: write_handle.create_ts().is_some(),
+                    create_ts: write_handle.create_ts(),
                 };
             }
             success_result()
@@ -735,7 +729,6 @@ pub unsafe extern "C" fn slatedb_db_write_with_options(
         *out_handle = slatedb_write_handle_t {
             seq: 0,
             create_ts: 0,
-            create_ts_present: false,
         };
     }
 
@@ -748,8 +741,7 @@ pub unsafe extern "C" fn slatedb_db_write_with_options(
             if !out_handle.is_null() {
                 *out_handle = slatedb_write_handle_t {
                     seq: write_handle.seqnum(),
-                    create_ts: write_handle.create_ts().unwrap_or(0),
-                    create_ts_present: write_handle.create_ts().is_some(),
+                    create_ts: write_handle.create_ts(),
                 };
             }
             success_result()

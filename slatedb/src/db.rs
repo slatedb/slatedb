@@ -77,30 +77,6 @@ pub use builder::DbBuilder;
 
 pub(crate) mod builder;
 
-/// Handle returned from write operations, containing metadata about the write.
-/// This structure is designed to be extensible for future enhancements.
-#[derive(Debug, Clone)]
-pub struct WriteHandle {
-    pub(crate) seq: u64,
-    pub(crate) create_ts: Option<i64>,
-}
-
-impl WriteHandle {
-    pub(crate) fn new(seq: u64, create_ts: Option<i64>) -> Self {
-        Self { seq, create_ts }
-    }
-
-    /// Returns the sequence number assigned to this write operation.
-    pub fn seqnum(&self) -> u64 {
-        self.seq
-    }
-
-    /// Returns the creation timestamp assigned to this write operation.
-    pub fn create_ts(&self) -> Option<i64> {
-        self.create_ts
-    }
-}
-
 pub(crate) struct DbInner {
     pub(crate) state: Arc<RwLock<DbState>>,
     pub(crate) settings: Settings,
@@ -286,12 +262,7 @@ impl DbInner {
         self.db_stats.write_ops.add(batch.ops.len() as u64);
         self.status()?;
         if batch.ops.is_empty() {
-            // Return a dummy WriteHandle for empty batch.
-            // Sequence number is not incremented.
-            return Ok(WriteHandle {
-                seq: self.oracle.last_committed_seq(),
-                create_ts: None,
-            });
+            return Err(SlateDBError::EmptyBatch);
         }
 
         let (tx, rx) = tokio::sync::oneshot::channel();
@@ -307,12 +278,10 @@ impl DbInner {
 
         // TODO: this can be modified as awaiting the last_durable_seq watermark & fatal error.
 
-        let (write_handle, durable_watcher) = rx.await??;
+        let (write_handle, mut durable_watcher) = rx.await??;
 
         if options.await_durable {
-            if let Some(mut watcher) = durable_watcher {
-                watcher.await_value().await?;
-            }
+            durable_watcher.await_value().await?;
         }
 
         Ok(write_handle)
@@ -1639,6 +1608,30 @@ impl DbRead for Db {
     }
 }
 
+/// Handle returned from write operations, containing metadata about the write.
+/// This structure is designed to be extensible for future enhancements.
+#[derive(Debug, Clone)]
+pub struct WriteHandle {
+    pub(crate) seq: u64,
+    pub(crate) create_ts: i64,
+}
+
+impl WriteHandle {
+    pub(crate) fn new(seq: u64, create_ts: i64) -> Self {
+        Self { seq, create_ts }
+    }
+
+    /// Returns the sequence number assigned to this write operation.
+    pub fn seqnum(&self) -> u64 {
+        self.seq
+    }
+
+    /// Returns the creation timestamp assigned to this write operation.
+    pub fn create_ts(&self) -> i64 {
+        self.create_ts
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1653,6 +1646,7 @@ mod tests {
         ObjectStoreCacheOptions, PutOptions, Settings, Ttl, WriteOptions,
     };
     use crate::db::builder::GarbageCollectorBuilder;
+    use crate::db_common::MAX_WAL_FLUSHES_BEFORE_L0_FLUSH;
     use crate::db_state::ManifestCore;
     use crate::db_stats::IMMUTABLE_MEMTABLE_FLUSHES;
     use crate::format::sst::SsTableFormat;
@@ -3677,6 +3671,105 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_put_flushes_memtable_after_max_wal_flushes() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = "/tmp/test_flush_memtable_max_wal_flushes";
+
+        let mut settings = test_db_options(0, usize::MAX, None);
+        settings.flush_interval = None; // Disable flushing
+
+        let kv_store = Db::builder(path, object_store.clone())
+            .with_settings(settings)
+            .build()
+            .await
+            .unwrap();
+
+        let manifest_store = Arc::new(ManifestStore::new(&Path::from(path), object_store.clone()));
+        let mut stored_manifest =
+            StoredManifest::load(manifest_store.clone(), Arc::new(DefaultSystemClock::new()))
+                .await
+                .unwrap();
+
+        let write_options: WriteOptions = WriteOptions {
+            await_durable: false,
+        };
+        let put_options = PutOptions::default();
+
+        for i in 0..(MAX_WAL_FLUSHES_BEFORE_L0_FLUSH - 1) {
+            let key = format!("key{:08}", i);
+            kv_store
+                .put_with_options(key.as_bytes(), b"v", &put_options, &write_options)
+                .await
+                .unwrap();
+            kv_store.flush().await.unwrap();
+        }
+
+        // Verify WALs flushes.
+        let wal_id = kv_store.inner.wal_buffer.recent_flushed_wal_id();
+        assert_eq!(wal_id, MAX_WAL_FLUSHES_BEFORE_L0_FLUSH); // account for the empty WAL written for fencing
+
+        // Verify no memtable was frozen or L0 flush happened.
+        {
+            let guard = kv_store.inner.state.read();
+            assert!(guard.state().imm_memtable.is_empty());
+            assert_eq!(guard.state().core().l0.len(), 0);
+        }
+
+        // This put() triggers a freeze.
+        let key = format!("key{:08}", MAX_WAL_FLUSHES_BEFORE_L0_FLUSH - 1);
+        kv_store
+            .put_with_options(key.as_bytes(), b"v", &put_options, &write_options)
+            .await
+            .unwrap();
+
+        // Verify that the WAL count threshold triggered a memtable freeze and L0 flush.
+        // replay_after_wal_id should have advanced to the threshold, and there should
+        // be exactly one L0 SST.
+        let db_state = wait_for_manifest_condition(
+            &mut stored_manifest,
+            |s| s.replay_after_wal_id == MAX_WAL_FLUSHES_BEFORE_L0_FLUSH,
+            Duration::from_secs(30),
+        )
+        .await;
+        assert_eq!(db_state.l0.len(), 1);
+
+        // Run MAX_WAL_FLUSHES_BEFORE_L0_FLUSH more put()/flush() cycles
+        // and see if the threshold triggers again.
+        for i in 0..(MAX_WAL_FLUSHES_BEFORE_L0_FLUSH - 1) {
+            let key = format!("key{:08}", i);
+            kv_store
+                .put_with_options(key.as_bytes(), b"v", &put_options, &write_options)
+                .await
+                .unwrap();
+            kv_store.flush().await.unwrap();
+        }
+
+        // Verify no more memtables were frozen or L0 flush happened.
+        {
+            let guard = kv_store.inner.state.read();
+            assert_eq!(guard.state().core().l0.len(), 1);
+        }
+
+        // This put() triggers a freeze.
+        let key = format!("key{:08}", MAX_WAL_FLUSHES_BEFORE_L0_FLUSH);
+        kv_store
+            .put_with_options(key.as_bytes(), b"v", &put_options, &write_options)
+            .await
+            .unwrap();
+
+        // Wait for the flush to happen.
+        let db_state = wait_for_manifest_condition(
+            &mut stored_manifest,
+            |s| s.replay_after_wal_id == MAX_WAL_FLUSHES_BEFORE_L0_FLUSH * 2,
+            Duration::from_secs(30),
+        )
+        .await;
+        assert_eq!(db_state.l0.len(), 2); // We should have two L0 flushes.
+
+        kv_store.close().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn test_flush_memtable_with_wal_enabled() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = "/tmp/test_flush_with_options";
@@ -3853,8 +3946,7 @@ mod tests {
         let mut wal_iter = wal_files[1] // second file contains the actual write
             .iterator()
             .await
-            .expect("expected successful WAL iterator call")
-            .expect("expected WAL file to exist");
+            .expect("expected successful WAL iterator call");
         while let Some(entry) = wal_iter
             .next_entry()
             .await
@@ -6336,7 +6428,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(handle.seqnum(), 1);
-        assert_eq!(handle.create_ts(), Some(100));
+        assert_eq!(handle.create_ts(), 100);
 
         // Put with options (TTL)
         clock.set(200);
@@ -6355,7 +6447,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(handle.seqnum(), 2);
-        assert_eq!(handle.create_ts(), Some(200));
+        assert_eq!(handle.create_ts(), 200);
 
         // Delete
         clock.set(300);
@@ -6369,7 +6461,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(handle.seqnum(), 3);
-        assert_eq!(handle.create_ts(), Some(300));
+        assert_eq!(handle.create_ts(), 300);
 
         // Write Batch
         clock.set(400);
@@ -6386,7 +6478,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(handle.seqnum(), 4);
-        assert_eq!(handle.create_ts(), Some(400));
+        assert_eq!(handle.create_ts(), 400);
     }
 
     #[tokio::test]
@@ -6416,7 +6508,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(handle.seqnum(), 1);
-        assert_eq!(handle.create_ts(), Some(100));
+        assert_eq!(handle.create_ts(), 100);
 
         // Write Batch 2
         clock.set(200);
@@ -6433,7 +6525,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(handle.seqnum(), 2);
-        assert_eq!(handle.create_ts(), Some(200));
+        assert_eq!(handle.create_ts(), 200);
 
         // Write Batch 3
         clock.set(300);
@@ -6449,6 +6541,28 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(handle.seqnum(), 3);
-        assert_eq!(handle.create_ts(), Some(300));
+        assert_eq!(handle.create_ts(), 300);
+    }
+
+    #[tokio::test]
+    async fn test_write_with_options_empty_batch_returns_empty_batch_error() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let db = Db::builder("/tmp/test_write_with_options_empty_batch", object_store)
+            .with_settings(test_db_options(0, 1024, None))
+            .build()
+            .await
+            .unwrap();
+
+        let err = db
+            .inner
+            .write_with_options(
+                WriteBatch::new(),
+                &WriteOptions {
+                    await_durable: false,
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, SlateDBError::EmptyBatch));
     }
 }
