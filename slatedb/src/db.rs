@@ -1648,6 +1648,7 @@ mod tests {
         ObjectStoreCacheOptions, PutOptions, Settings, Ttl, WriteOptions,
     };
     use crate::db::builder::GarbageCollectorBuilder;
+    use crate::db_common::MAX_WAL_FLUSHES_BEFORE_L0_FLUSH;
     use crate::db_state::ManifestCore;
     use crate::db_stats::IMMUTABLE_MEMTABLE_FLUSHES;
     use crate::format::sst::SsTableFormat;
@@ -3669,6 +3670,105 @@ mod tests {
                 .get()
                 > 0
         );
+    }
+
+    #[tokio::test]
+    async fn test_put_flushes_memtable_after_max_wal_flushes() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = "/tmp/test_flush_memtable_max_wal_flushes";
+
+        let mut settings = test_db_options(0, usize::MAX, None);
+        settings.flush_interval = None; // Disable flushing
+
+        let kv_store = Db::builder(path, object_store.clone())
+            .with_settings(settings)
+            .build()
+            .await
+            .unwrap();
+
+        let manifest_store = Arc::new(ManifestStore::new(&Path::from(path), object_store.clone()));
+        let mut stored_manifest =
+            StoredManifest::load(manifest_store.clone(), Arc::new(DefaultSystemClock::new()))
+                .await
+                .unwrap();
+
+        let write_options: WriteOptions = WriteOptions {
+            await_durable: false,
+        };
+        let put_options = PutOptions::default();
+
+        for i in 0..(MAX_WAL_FLUSHES_BEFORE_L0_FLUSH - 1) {
+            let key = format!("key{:08}", i);
+            kv_store
+                .put_with_options(key.as_bytes(), b"v", &put_options, &write_options)
+                .await
+                .unwrap();
+            kv_store.flush().await.unwrap();
+        }
+
+        // Verify WALs flushes.
+        let wal_id = kv_store.inner.wal_buffer.recent_flushed_wal_id();
+        assert_eq!(wal_id, MAX_WAL_FLUSHES_BEFORE_L0_FLUSH); // account for the empty WAL written for fencing
+
+        // Verify no memtable was frozen or L0 flush happened.
+        {
+            let guard = kv_store.inner.state.read();
+            assert!(guard.state().imm_memtable.is_empty());
+            assert_eq!(guard.state().core().l0.len(), 0);
+        }
+
+        // This put() triggers a freeze.
+        let key = format!("key{:08}", MAX_WAL_FLUSHES_BEFORE_L0_FLUSH - 1);
+        kv_store
+            .put_with_options(key.as_bytes(), b"v", &put_options, &write_options)
+            .await
+            .unwrap();
+
+        // Verify that the WAL count threshold triggered a memtable freeze and L0 flush.
+        // replay_after_wal_id should have advanced to the threshold, and there should
+        // be exactly one L0 SST.
+        let db_state = wait_for_manifest_condition(
+            &mut stored_manifest,
+            |s| s.replay_after_wal_id == MAX_WAL_FLUSHES_BEFORE_L0_FLUSH,
+            Duration::from_secs(30),
+        )
+        .await;
+        assert_eq!(db_state.l0.len(), 1);
+
+        // Run MAX_WAL_FLUSHES_BEFORE_L0_FLUSH more put()/flush() cycles
+        // and see if the threshold triggers again.
+        for i in 0..(MAX_WAL_FLUSHES_BEFORE_L0_FLUSH - 1) {
+            let key = format!("key{:08}", i);
+            kv_store
+                .put_with_options(key.as_bytes(), b"v", &put_options, &write_options)
+                .await
+                .unwrap();
+            kv_store.flush().await.unwrap();
+        }
+
+        // Verify no more memtables were frozen or L0 flush happened.
+        {
+            let guard = kv_store.inner.state.read();
+            assert_eq!(guard.state().core().l0.len(), 1);
+        }
+
+        // This put() triggers a freeze.
+        let key = format!("key{:08}", MAX_WAL_FLUSHES_BEFORE_L0_FLUSH);
+        kv_store
+            .put_with_options(key.as_bytes(), b"v", &put_options, &write_options)
+            .await
+            .unwrap();
+
+        // Wait for the flush to happen.
+        let db_state = wait_for_manifest_condition(
+            &mut stored_manifest,
+            |s| s.replay_after_wal_id == MAX_WAL_FLUSHES_BEFORE_L0_FLUSH * 2,
+            Duration::from_secs(30),
+        )
+        .await;
+        assert_eq!(db_state.l0.len(), 2); // We should have two L0 flushes.
+
+        kv_store.close().await.unwrap();
     }
 
     #[tokio::test]
