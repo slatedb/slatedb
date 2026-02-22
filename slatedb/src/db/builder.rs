@@ -120,7 +120,6 @@ use crate::compaction_filter::CompactionFilterSupplier;
 use crate::compactions_store::CompactionsStore;
 use crate::compactor::stats::CompactionStats;
 use crate::compactor::CompactorEventHandler;
-use crate::compactor::CompactorMessage;
 use crate::compactor::SizeTieredCompactionSchedulerSupplier;
 use crate::compactor::COMPACTOR_TASK_NAME;
 use crate::compactor::{CompactionSchedulerSupplier, Compactor};
@@ -181,8 +180,6 @@ pub struct DbBuilder<P: Into<Path>> {
     sst_block_size: Option<SstBlockSize>,
     merge_operator: Option<MergeOperatorType>,
     block_transformer: Option<Arc<dyn BlockTransformer>>,
-    #[cfg(feature = "compaction_filters")]
-    compaction_filter_supplier: Option<Arc<dyn CompactionFilterSupplier>>,
 }
 
 impl<P: Into<Path>> DbBuilder<P> {
@@ -202,8 +199,6 @@ impl<P: Into<Path>> DbBuilder<P> {
             sst_block_size: None,
             merge_operator: None,
             block_transformer: None,
-            #[cfg(feature = "compaction_filters")]
-            compaction_filter_supplier: None,
         }
     }
 
@@ -359,11 +354,14 @@ impl<P: Into<Path>> DbBuilder<P> {
     ///
     /// The builder instance for chaining.
     #[cfg(feature = "compaction_filters")]
+    #[deprecated(note = "Use with_compactor(CompactorConfig) instead")]
     pub fn with_compaction_filter_supplier(
         mut self,
         supplier: Arc<dyn CompactionFilterSupplier>,
     ) -> Self {
-        self.compaction_filter_supplier = Some(supplier);
+        self.compactor
+            .get_or_insert_with(CompactorConfig::default)
+            .filter_supplier = Some(supplier);
         self
     }
 
@@ -417,8 +415,6 @@ impl<P: Into<Path>> DbBuilder<P> {
         });
 
         let merge_operator = self.merge_operator.or(self.settings.merge_operator.clone());
-        #[cfg(feature = "compaction_filters")]
-        let compaction_filter_supplier = self.compaction_filter_supplier.clone();
 
         // Setup the components
         let stat_registry = Arc::new(StatRegistry::new());
@@ -594,9 +590,19 @@ impl<P: Into<Path>> DbBuilder<P> {
             None,
         ));
 
-        // To keep backwards compatibility, check if the compaction_scheduler_supplier or compactor_options are set.
-        // If either are set, we need to initialize the compactor.
-        if let Some(compactor_config) = self.compactor {
+        let compactor_config = self.compactor.or_else(|| {
+            self.settings
+                .compactor_options
+                .as_ref()
+                .map(|opts| CompactorConfig {
+                    options: opts.clone(),
+                    ..Default::default()
+                })
+        });
+
+        // If a CompactorConfig was provided or compactor_options are set in settings,
+        // initialize the compactor.
+        if let Some(compactor_config) = compactor_config {
             let compactor_options = Arc::new(compactor_config.options);
             let compaction_handle = compactor_config
                 .runtime
@@ -619,7 +625,7 @@ impl<P: Into<Path>> DbBuilder<P> {
                     manifest_store: manifest_store.clone(),
                     merge_operator: merge_operator.clone(),
                     #[cfg(feature = "compaction_filters")]
-                    compaction_filter_supplier: compaction_filter_supplier.clone(),
+                    compaction_filter_supplier: compactor_config.filter_supplier,
                 },
             ));
             let handler = CompactorEventHandler::new(

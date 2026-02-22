@@ -1645,7 +1645,7 @@ mod tests {
         CompactorOptions, GarbageCollectorDirectoryOptions, GarbageCollectorOptions,
         ObjectStoreCacheOptions, PutOptions, Settings, Ttl, WriteOptions,
     };
-    use crate::db::builder::GarbageCollectorBuilder;
+    use crate::db::builder::{CompactorConfig, GarbageCollectorBuilder};
     use crate::db_state::ManifestCore;
     use crate::db_stats::IMMUTABLE_MEMTABLE_FLUSHES;
     use crate::format::sst::SsTableFormat;
@@ -5092,9 +5092,20 @@ mod tests {
             move |_state| this_should_compact_l0.swap(false, Ordering::SeqCst),
         )));
 
+        let compactor_options = CompactorOptions {
+            poll_interval: Duration::from_secs(5),
+            ..Default::default()
+        };
+
+        let compactor = CompactorConfig {
+            options: compactor_options,
+            scheduler_supplier: Some(compaction_scheduler.clone()),
+            ..Default::default()
+        };
+
         let db = Db::builder(path, object_store.clone())
             .with_settings(options)
-            .with_compaction_scheduler_supplier(compaction_scheduler.clone())
+            .with_compaction(compactor)
             .build()
             .await
             .unwrap();
