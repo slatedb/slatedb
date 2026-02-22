@@ -101,6 +101,7 @@ impl MessageHandler<WriteBatchMessage> for WriteBatchEventHandler {
                 });
             }
         }
+        self.is_first_write = false;
         _ = done.send(result);
         Ok(())
     }
@@ -241,5 +242,43 @@ async fn monitor_first_write(
             is reached. If writer is single threaded or has low throughput, the \
             applications must call `flush` to ensure durability in a timely manner.");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::object_store::memory::InMemory;
+    use crate::Db;
+
+    #[tokio::test]
+    async fn test_is_first_write_set_false_after_first_write() {
+        let object_store = Arc::new(InMemory::new());
+        let db = Db::open(
+            "/tmp/test_is_first_write_set_false_after_first_write",
+            object_store,
+        )
+        .await
+        .unwrap();
+
+        let mut handler = WriteBatchEventHandler::new(db.inner.clone());
+        assert!(handler.is_first_write);
+
+        let mut batch = WriteBatch::new();
+        batch.put(b"key", b"value");
+
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+        handler
+            .handle(WriteBatchMessage {
+                batch,
+                options: WriteOptions::default(),
+                done: done_tx,
+            })
+            .await
+            .unwrap();
+
+        let result = done_rx.await.unwrap();
+        assert!(result.is_ok());
+        assert!(!handler.is_first_write);
     }
 }
