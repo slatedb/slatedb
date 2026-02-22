@@ -5095,13 +5095,7 @@ mod tests {
             move |_state| this_should_compact_l0.swap(false, Ordering::SeqCst),
         )));
 
-        let compactor_options = CompactorOptions {
-            poll_interval: Duration::from_secs(5),
-            ..Default::default()
-        };
-
         let compactor = CompactorConfig {
-            options: compactor_options,
             scheduler_supplier: Some(compaction_scheduler.clone()),
             ..Default::default()
         };
