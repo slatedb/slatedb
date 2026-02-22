@@ -120,6 +120,7 @@ use crate::compaction_filter::CompactionFilterSupplier;
 use crate::compactions_store::CompactionsStore;
 use crate::compactor::stats::CompactionStats;
 use crate::compactor::CompactorEventHandler;
+use crate::compactor::CompactorMessage;
 use crate::compactor::SizeTieredCompactionSchedulerSupplier;
 use crate::compactor::COMPACTOR_TASK_NAME;
 use crate::compactor::{CompactionSchedulerSupplier, Compactor};
@@ -153,6 +154,15 @@ use crate::utils::WatchableOnceCell;
 use slatedb_common::clock::DefaultSystemClock;
 use slatedb_common::clock::SystemClock;
 
+#[derive(Default)]
+pub struct CompactorConfig {
+    pub options: CompactorOptions,
+    pub runtime: Option<Handle>,
+    pub scheduler_supplier: Option<Arc<dyn CompactionSchedulerSupplier>>,
+    #[cfg(feature = "compaction_filters")]
+    pub filter_supplier: Option<Arc<dyn CompactionFilterSupplier>>,
+}
+
 /// A builder for creating a new Db instance.
 ///
 /// This builder provides a fluent API for configuring and opening a SlateDB database.
@@ -165,8 +175,7 @@ pub struct DbBuilder<P: Into<Path>> {
     memory_cache: Option<Arc<dyn DbCache>>,
     system_clock: Option<Arc<dyn SystemClock>>,
     gc_runtime: Option<Handle>,
-    compaction_runtime: Option<Handle>,
-    compaction_scheduler_supplier: Option<Arc<dyn CompactionSchedulerSupplier>>,
+    compactor: Option<CompactorConfig>,
     fp_registry: Arc<FailPointRegistry>,
     seed: Option<u64>,
     sst_block_size: Option<SstBlockSize>,
@@ -187,8 +196,7 @@ impl<P: Into<Path>> DbBuilder<P> {
             memory_cache: None,
             system_clock: None,
             gc_runtime: None,
-            compaction_runtime: None,
-            compaction_scheduler_supplier: None,
+            compactor: None,
             fp_registry: Arc::new(FailPointRegistry::new()),
             seed: None,
             sst_block_size: None,
@@ -238,16 +246,27 @@ impl<P: Into<Path>> DbBuilder<P> {
     }
 
     /// Sets the compaction runtime to use for the database.
+    #[deprecated(note = "Use with_compactor(CompactorConfig) instead")]
     pub fn with_compaction_runtime(mut self, compaction_runtime: Handle) -> Self {
-        self.compaction_runtime = Some(compaction_runtime);
+        self.compactor
+            .get_or_insert_with(CompactorConfig::default)
+            .runtime = Some(compaction_runtime);
         self
     }
 
+    #[deprecated(note = "Use with_compactor(CompactorConfig) instead")]
     pub fn with_compaction_scheduler_supplier(
         mut self,
         compaction_scheduler_supplier: Arc<dyn CompactionSchedulerSupplier>,
     ) -> Self {
-        self.compaction_scheduler_supplier = Some(compaction_scheduler_supplier);
+        self.compactor
+            .get_or_insert_with(CompactorConfig::default)
+            .scheduler_supplier = Some(compaction_scheduler_supplier);
+        self
+    }
+
+    pub fn with_compaction(mut self, compactor: CompactorConfig) -> Self {
+        self.compactor = Some(compactor);
         self
     }
 
@@ -577,14 +596,13 @@ impl<P: Into<Path>> DbBuilder<P> {
 
         // To keep backwards compatibility, check if the compaction_scheduler_supplier or compactor_options are set.
         // If either are set, we need to initialize the compactor.
-        if self.compaction_scheduler_supplier.is_some() || self.settings.compactor_options.is_some()
-        {
-            let compactor_options = Arc::new(self.settings.compactor_options.unwrap_or_default());
-            let compaction_handle = self
-                .compaction_runtime
+        if let Some(compactor_config) = self.compactor {
+            let compactor_options = Arc::new(compactor_config.options);
+            let compaction_handle = compactor_config
+                .runtime
                 .unwrap_or_else(|| tokio_handle.clone());
-            let scheduler_supplier = self
-                .compaction_scheduler_supplier
+            let scheduler_supplier = compactor_config
+                .scheduler_supplier
                 .unwrap_or(Arc::new(SizeTieredCompactionSchedulerSupplier));
             let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
             let scheduler = Arc::from(scheduler_supplier.compaction_scheduler(&compactor_options));
