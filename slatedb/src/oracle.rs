@@ -34,6 +34,10 @@ impl DbOracle {
             last_remote_persisted_seq,
         }
     }
+
+    pub(crate) fn advance_committed_seq(&self, seq: u64) {
+        self.last_committed_seq.store_if_greater(seq);
+    }
 }
 
 impl Oracle for DbOracle {

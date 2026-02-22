@@ -354,9 +354,9 @@ pub type slatedb_merge_operator_context_free_fn =
 pub struct slatedb_bound_t {
     /// Bound kind. Use `SLATEDB_BOUND_KIND_*` constants.
     pub kind: u8,
-    /// Bound bytes for included/excluded bounds.
-    pub data: *const u8,
-    /// Length of `data`.
+    /// Bound value for included/excluded bounds.
+    pub data: *const c_void,
+    /// Length of `data` if data is an array.
     pub len: usize,
 }
 
@@ -527,6 +527,15 @@ pub(crate) unsafe fn bytes_from_ptr<'a>(
     }
 
     Ok(std::slice::from_raw_parts(ptr, len))
+}
+
+unsafe fn bytes_from_c_void<'a>(
+    ptr: *const c_void,
+    len: usize,
+    field_name: &str,
+) -> Result<&'a [u8], slatedb_result_t> {
+    let raw_ptr = ptr as *const u8;
+    bytes_from_ptr(raw_ptr, len, field_name)
 }
 
 /// Validates an output pointer is non-null.
@@ -840,12 +849,12 @@ pub(crate) fn sst_block_size_from_u8(
 /// ## Safety
 /// - `range.start`/`range.end` pointers must be valid when their bound kinds
 ///   require payload bytes.
-pub(crate) unsafe fn range_from_c(
+pub(crate) unsafe fn bytes_range_from_c(
     range: slatedb_range_t,
 ) -> Result<(Bound<Bytes>, Bound<Bytes>), slatedb_result_t> {
     Ok((
-        bound_from_c(range.start, "start")?,
-        bound_from_c(range.end, "end")?,
+        bytes_bound_from_c(range.start, "start")?,
+        bytes_bound_from_c(range.end, "end")?,
     ))
 }
 
@@ -854,18 +863,18 @@ pub(crate) unsafe fn range_from_c(
 /// ## Safety
 /// - If `bound.kind` is included/excluded, `bound.data` must be readable for
 ///   `bound.len` bytes.
-unsafe fn bound_from_c(
+unsafe fn bytes_bound_from_c(
     bound: slatedb_bound_t,
     name: &str,
 ) -> Result<Bound<Bytes>, slatedb_result_t> {
     match bound.kind {
         SLATEDB_BOUND_KIND_UNBOUNDED => Ok(Bound::Unbounded),
         SLATEDB_BOUND_KIND_INCLUDED => {
-            let bytes = bytes_from_ptr(bound.data, bound.len, name)?;
+            let bytes = bytes_from_c_void(bound.data, bound.len, name)?;
             Ok(Bound::Included(Bytes::copy_from_slice(bytes)))
         }
         SLATEDB_BOUND_KIND_EXCLUDED => {
-            let bytes = bytes_from_ptr(bound.data, bound.len, name)?;
+            let bytes = bytes_from_c_void(bound.data, bound.len, name)?;
             Ok(Bound::Excluded(Bytes::copy_from_slice(bytes)))
         }
         _ => Err(error_result(

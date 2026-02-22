@@ -75,10 +75,9 @@ impl DbTransaction {
     pub(crate) fn new(
         db_inner: Arc<DbInner>,
         txn_manager: Arc<TransactionManager>,
-        seq: u64,
         isolation_level: IsolationLevel,
     ) -> Self {
-        let txn_id = txn_manager.new_txn(seq, false); // false = not read-only
+        let (txn_id, seq) = txn_manager.new_transaction();
 
         Self {
             txn_id,
@@ -527,6 +526,19 @@ impl DbTransaction {
     /// This is automatically called when the transaction is dropped.
     pub fn rollback(self) {
         // do nothing, trigger the Drop of the transaction
+    }
+
+    /// Get the sequence number this transaction was started at. This is equivalent to
+    /// the snapshot sequence number for this transaction, which determines data visibility
+    /// for reads in this transaction.
+    pub fn seqnum(&self) -> u64 {
+        self.started_seq
+    }
+
+    /// Get the transaction ID. This is a unique identifier for this transaction, generated
+    /// by the transaction manager.
+    pub fn id(&self) -> Uuid {
+        self.txn_id
     }
 }
 

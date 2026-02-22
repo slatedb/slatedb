@@ -1,6 +1,9 @@
 use std::borrow::Cow;
+use std::ops::Range;
 use std::sync::Arc;
 use std::time::Duration;
+
+use bytes::Bytes;
 
 use async_trait::async_trait;
 use backon::{ExponentialBuilder, Retryable};
@@ -194,6 +197,26 @@ impl ObjectStore for RetryingObjectStore {
         .notify(Self::notify)
         .when(Self::should_retry)
         .await
+    }
+
+    async fn get_range(&self, location: &Path, range: Range<u64>) -> object_store::Result<Bytes> {
+        (|| async { self.inner.get_range(location, range.clone()).await })
+            .retry(Self::retry_builder())
+            .notify(Self::notify)
+            .when(Self::should_retry)
+            .await
+    }
+
+    async fn get_ranges(
+        &self,
+        location: &Path,
+        ranges: &[Range<u64>],
+    ) -> object_store::Result<Vec<Bytes>> {
+        (|| async { self.inner.get_ranges(location, ranges).await })
+            .retry(Self::retry_builder())
+            .notify(Self::notify)
+            .when(Self::should_retry)
+            .await
     }
 
     async fn head(&self, location: &Path) -> object_store::Result<ObjectMeta> {
@@ -697,6 +720,56 @@ mod tests {
             got.bytes().await.unwrap(),
             Bytes::from_static(b"other client data")
         );
+    }
+
+    #[tokio::test]
+    async fn test_get_range_retries_transient_until_success() {
+        let inner: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/data/obj");
+        inner
+            .put(
+                &path,
+                PutPayload::from_bytes(Bytes::from_static(b"hello world")),
+            )
+            .await
+            .unwrap();
+
+        let flaky = Arc::new(FlakyObjectStore::new(inner, 0).with_get_range_failures(2));
+        let retrying = RetryingObjectStore::new(flaky.clone(), test_rand(), test_clock());
+
+        let result = retrying
+            .get_range(&path, 0..5)
+            .await
+            .expect("should succeed after retries");
+        assert_eq!(result, Bytes::from_static(b"hello"));
+        // 2 failures + 1 success
+        assert_eq!(flaky.get_range_attempts(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_get_ranges_retries_transient_until_success() {
+        let inner: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/data/obj");
+        inner
+            .put(
+                &path,
+                PutPayload::from_bytes(Bytes::from_static(b"hello world")),
+            )
+            .await
+            .unwrap();
+
+        // get_ranges calls get_range internally, so flaky get_range failures will trigger retries
+        let flaky = Arc::new(FlakyObjectStore::new(inner, 0).with_get_range_failures(2));
+        let retrying = RetryingObjectStore::new(flaky.clone(), test_rand(), test_clock());
+
+        let ranges = vec![0..5, 6..11];
+        let result = retrying
+            .get_ranges(&path, &ranges)
+            .await
+            .expect("should succeed after retries");
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0], Bytes::from_static(b"hello"));
+        assert_eq!(result[1], Bytes::from_static(b"world"));
     }
 
     #[tokio::test]
