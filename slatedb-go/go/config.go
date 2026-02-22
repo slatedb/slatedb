@@ -17,7 +17,7 @@ import (
 )
 
 type config interface {
-	DbConfig | DbReaderConfig
+	DbConfig | DbReaderConfig | WalReaderConfig
 }
 
 type DbConfig struct {
@@ -32,6 +32,11 @@ type DbReaderConfig struct {
 	opts         *DbReaderOptions
 }
 
+type WalReaderConfig struct {
+	url     *string
+	envFile *string
+}
+
 type Option[T config] func(*T)
 
 func WithUrl[T config](url string) Option[T] {
@@ -40,6 +45,8 @@ func WithUrl[T config](url string) Option[T] {
 		case *DbConfig:
 			c.url = &url
 		case *DbReaderConfig:
+			c.url = &url
+		case *WalReaderConfig:
 			c.url = &url
 		}
 	}
@@ -51,6 +58,8 @@ func WithEnvFile[T config](envFile string) Option[T] {
 		case *DbConfig:
 			c.envFile = &envFile
 		case *DbReaderConfig:
+			c.envFile = &envFile
+		case *WalReaderConfig:
 			c.envFile = &envFile
 		}
 	}

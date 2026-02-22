@@ -111,6 +111,32 @@ public final class SlateDbConfig {
         }
     }
 
+    /// Kind of a WAL entry.
+    public enum WalEntryKind {
+        VALUE((byte) 0),
+        TOMBSTONE((byte) 1),
+        MERGE((byte) 2);
+
+        private final byte code;
+
+        WalEntryKind(byte code) {
+            this.code = code;
+        }
+
+        byte code() {
+            return code;
+        }
+
+        static WalEntryKind fromCode(byte code) {
+            for (WalEntryKind value : values()) {
+                if (value.code == code) {
+                    return value;
+                }
+            }
+            throw new IllegalArgumentException("Unknown WAL entry kind code: " + code);
+        }
+    }
+
     /// Options for put operations.
     public static final class PutOptions {
         private final TtlType ttlType;

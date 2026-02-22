@@ -81,6 +81,15 @@
 // SST block size selector for 64 KiB blocks.
 #define SLATEDB_SST_BLOCK_SIZE_64KIB 7
 
+// WAL entry kind: regular value.
+#define SLATEDB_WAL_ENTRY_KIND_VALUE 0
+
+// WAL entry kind: tombstone (deletion marker).
+#define SLATEDB_WAL_ENTRY_KIND_TOMBSTONE 1
+
+// WAL entry kind: merge operand.
+#define SLATEDB_WAL_ENTRY_KIND_MERGE 2
+
 // Closed reason mirroring `slatedb::CloseReason`.
 typedef enum slatedb_close_reason_t {
     // Not a closed error.
@@ -132,6 +141,15 @@ typedef struct slatedb_object_store_t slatedb_object_store_t;
 
 // Opaque handle backing database settings.
 typedef struct slatedb_settings_t slatedb_settings_t;
+
+// Opaque handle backing a `WalFileIterator` plus runtime owner.
+typedef struct slatedb_wal_file_iterator_t slatedb_wal_file_iterator_t;
+
+// Opaque handle backing a `WalFile` plus runtime owner.
+typedef struct slatedb_wal_file_t slatedb_wal_file_t;
+
+// Opaque handle backing a `WalReader` plus runtime owner.
+typedef struct slatedb_wal_reader_t slatedb_wal_reader_t;
 
 // Opaque handle backing a mutable write batch.
 typedef struct slatedb_write_batch_t slatedb_write_batch_t;
@@ -297,6 +315,51 @@ typedef void (*slatedb_log_callback_fn)(slatedb_log_level_t level,
 
 // Optional callback used to free logging context when replaced or cleared.
 typedef void (*slatedb_log_context_free_fn)(void *context);
+
+// C representation of WAL file metadata.
+//
+// `location` and `location_len` reference a Rust-allocated buffer that must
+// be freed by calling `slatedb_wal_file_metadata_free`.
+typedef struct slatedb_wal_file_metadata_t {
+    // Seconds since the Unix epoch for the last-modified time.
+    int64_t last_modified_secs;
+    // Sub-second nanoseconds component for the last-modified time.
+    uint32_t last_modified_nanos;
+    // File size in bytes.
+    uint64_t size_bytes;
+    // Object storage path as UTF-8 bytes (not null-terminated).
+    uint8_t *location;
+    // Length of `location` in bytes.
+    uintptr_t location_len;
+} slatedb_wal_file_metadata_t;
+
+// C representation of a single WAL entry returned by the iterator.
+//
+// `key` and `value` reference Rust-allocated buffers that must be freed by
+// calling `slatedb_wal_entry_free`. `value` is null when `kind` is
+// `SLATEDB_WAL_ENTRY_KIND_TOMBSTONE`.
+typedef struct slatedb_wal_entry_t {
+    // Entry kind. Use `SLATEDB_WAL_ENTRY_KIND_*` constants.
+    uint8_t kind;
+    // Key bytes.
+    uint8_t *key;
+    // Length of `key` in bytes.
+    uintptr_t key_len;
+    // Value bytes. Null for tombstones.
+    uint8_t *value;
+    // Length of `value` in bytes. Zero for tombstones.
+    uintptr_t value_len;
+    // Sequence number assigned to this entry.
+    uint64_t seq;
+    // Whether `create_ts` is populated.
+    bool has_create_ts;
+    // Creation timestamp (valid when `has_create_ts` is true).
+    int64_t create_ts;
+    // Whether `expire_ts` is populated.
+    bool has_expire_ts;
+    // Expiration timestamp (valid when `has_expire_ts` is true).
+    int64_t expire_ts;
+} slatedb_wal_entry_t;
 
 // Creates a new database builder.
 //
@@ -1505,6 +1568,163 @@ struct slatedb_result_t slatedb_settings_to_json(const struct slatedb_settings_t
 // ## Safety
 // - `settings` must be a valid non-null handle obtained from this library.
 struct slatedb_result_t slatedb_settings_close(struct slatedb_settings_t *settings);
+
+// Creates a new WAL reader for the database at the given path.
+//
+// ## Arguments
+// - `path`: Database path as a null-terminated UTF-8 string. If the database
+//   was configured with a separate WAL object store, pass that store in
+//   `object_store`.
+// - `object_store`: Opaque object store handle.
+// - `out_reader`: Output pointer populated with a `slatedb_wal_reader_t*` on success.
+//
+// ## Returns
+// `slatedb_result_t` describing success or failure.
+//
+// ## Errors
+// - `SLATEDB_ERROR_KIND_INVALID` for null/invalid pointers or UTF-8 errors.
+// - `SLATEDB_ERROR_KIND_INTERNAL` if the Tokio runtime cannot be created.
+//
+// ## Safety
+// - `path` must be a valid null-terminated C string.
+// - `object_store` must be a valid object store handle.
+// - `out_reader` must be a valid non-null writable pointer.
+// - The returned handle must be freed with `slatedb_wal_reader_close`.
+struct slatedb_result_t slatedb_wal_reader_new(const char *path,
+                                               const struct slatedb_object_store_t *object_store,
+                                               struct slatedb_wal_reader_t **out_reader);
+
+// Lists WAL files in ascending order by ID within the specified range.
+//
+// ## Arguments
+// - `reader`: WAL reader handle.
+// - `range`: Range bounds to scan.
+// - `out_files`: On success, set to an array of `slatedb_wal_file_t*` (null when
+//   no files exist). Free each element with `slatedb_wal_file_close`, then free
+//   the outer array with `slatedb_wal_files_free`.
+// - `out_count`: Set to the number of elements in `out_files`.
+//
+// ## Safety
+// - `reader`, `out_files`, and `out_count` must be valid non-null pointers.
+struct slatedb_result_t slatedb_wal_reader_list(struct slatedb_wal_reader_t *reader,
+                                                struct slatedb_range_t range,
+                                                struct slatedb_wal_file_t ***out_files,
+                                                uintptr_t *out_count);
+
+// Frees the outer array returned by `slatedb_wal_reader_list`.
+//
+// Does **not** free the individual `slatedb_wal_file_t*` elements — those must
+// be freed with `slatedb_wal_file_close` before calling this function.
+//
+// ## Safety
+// - `files`/`count` must exactly match what `slatedb_wal_reader_list` wrote.
+// - All elements must have already been freed with `slatedb_wal_file_close`.
+// - Do not call more than once per array.
+void slatedb_wal_files_free(struct slatedb_wal_file_t **files, uintptr_t count);
+
+// Returns a `slatedb_wal_file_t` handle for a specific WAL ID without checking
+// whether that file exists in object storage.
+//
+// ## Safety
+// - `reader` and `out_file` must be valid non-null pointers.
+// - The returned handle must be freed with `slatedb_wal_file_close`.
+struct slatedb_result_t slatedb_wal_reader_get(struct slatedb_wal_reader_t *reader,
+                                               uint64_t id,
+                                               struct slatedb_wal_file_t **out_file);
+
+// Closes and frees a WAL reader handle.
+//
+// ## Safety
+// - `reader` must be a valid non-null handle. Do not use it after this call.
+struct slatedb_result_t slatedb_wal_reader_close(struct slatedb_wal_reader_t *reader);
+
+// Returns the ID of this WAL file.
+//
+// ## Safety
+// - `file` and `out_id` must be valid non-null pointers.
+struct slatedb_result_t slatedb_wal_file_id(const struct slatedb_wal_file_t *file,
+                                            uint64_t *out_id);
+
+// Returns the WAL ID immediately following this file's ID (`id + 1`).
+//
+// ## Safety
+// - `file` and `out_id` must be valid non-null pointers.
+struct slatedb_result_t slatedb_wal_file_next_id(const struct slatedb_wal_file_t *file,
+                                                 uint64_t *out_id);
+
+// Returns a handle for the WAL file immediately following this one without
+// checking whether it exists in object storage.
+//
+// ## Safety
+// - `file` and `out_next_file` must be valid non-null pointers.
+// - The returned handle must be freed with `slatedb_wal_file_close`.
+struct slatedb_result_t slatedb_wal_file_next_file(const struct slatedb_wal_file_t *file,
+                                                   struct slatedb_wal_file_t **out_next_file);
+
+// Returns metadata for this WAL file.
+//
+// Populates `out_metadata.location` with a Rust-allocated UTF-8 byte buffer.
+// Call `slatedb_wal_file_metadata_free` to release it.
+//
+// ## Errors
+// - `SLATEDB_ERROR_KIND_DATA` if the file is missing from object storage.
+//
+// ## Safety
+// - `file` and `out_metadata` must be valid non-null pointers.
+struct slatedb_result_t slatedb_wal_file_metadata(const struct slatedb_wal_file_t *file,
+                                                  struct slatedb_wal_file_metadata_t *out_metadata);
+
+// Frees the `location` buffer in a `slatedb_wal_file_metadata_t`.
+//
+// ## Safety
+// - `metadata.location`/`metadata.location_len` must match values from
+//   `slatedb_wal_file_metadata`. Do not call more than once.
+void slatedb_wal_file_metadata_free(struct slatedb_wal_file_metadata_t *metadata);
+
+// Returns an iterator over entries in this WAL file, preserving tombstones and
+// merge operands exactly as written.
+//
+// ## Errors
+// - `SLATEDB_ERROR_KIND_DATA` if the file is missing from object storage.
+//
+// ## Safety
+// - `file` and `out_iter` must be valid non-null pointers.
+// - The returned handle must be freed with `slatedb_wal_file_iterator_close`.
+struct slatedb_result_t slatedb_wal_file_iterator(const struct slatedb_wal_file_t *file,
+                                                  struct slatedb_wal_file_iterator_t **out_iter);
+
+// Closes and frees a WAL file handle.
+//
+// ## Safety
+// - `file` must be a valid non-null handle. Do not use it after this call.
+struct slatedb_result_t slatedb_wal_file_close(struct slatedb_wal_file_t *file);
+
+// Retrieves the next entry from a WAL file iterator.
+//
+// Sets `*out_present` to `true` and populates `*out_entry` when an entry is
+// available; sets `*out_present` to `false` at end of file.
+//
+// Call `slatedb_wal_entry_free` to release `out_entry.key` / `out_entry.value`
+// when `*out_present` is true.
+//
+// ## Safety
+// - `iter`, `out_present`, and `out_entry` must be valid non-null pointers.
+struct slatedb_result_t slatedb_wal_file_iterator_next(struct slatedb_wal_file_iterator_t *iter,
+                                                       bool *out_present,
+                                                       struct slatedb_wal_entry_t *out_entry);
+
+// Frees the `key` and `value` buffers in a `slatedb_wal_entry_t`.
+//
+// ## Safety
+// - Buffers must match those written by `slatedb_wal_file_iterator_next`.
+// - Do not call more than once per entry.
+void slatedb_wal_entry_free(struct slatedb_wal_entry_t *entry);
+
+// Closes and frees a WAL file iterator handle.
+//
+// ## Safety
+// - `iter` must be a valid non-null handle. Do not use it after this call.
+struct slatedb_result_t slatedb_wal_file_iterator_close(struct slatedb_wal_file_iterator_t *iter);
 
 // Allocates a new empty write batch.
 //

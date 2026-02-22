@@ -11,7 +11,10 @@ use slatedb::config::{
     ReadOptions, ScanOptions, SstBlockSize, Ttl, WriteOptions,
 };
 use slatedb::object_store::ObjectStore;
-use slatedb::{CloseReason, Db, DbBuilder, DbIterator, DbReader, ErrorKind, Settings, WriteBatch};
+use slatedb::{
+    CloseReason, Db, DbBuilder, DbIterator, DbReader, ErrorKind, Settings, WalFile,
+    WalFileIterator, WalReader, WriteBatch,
+};
 use std::ffi::{c_void, CStr, CString};
 use std::ops::Bound;
 use std::os::raw::c_char;
@@ -66,6 +69,12 @@ pub const SLATEDB_SST_BLOCK_SIZE_16KIB: u8 = 5;
 pub const SLATEDB_SST_BLOCK_SIZE_32KIB: u8 = 6;
 /// SST block size selector for 64 KiB blocks.
 pub const SLATEDB_SST_BLOCK_SIZE_64KIB: u8 = 7;
+/// WAL entry kind: regular value.
+pub const SLATEDB_WAL_ENTRY_KIND_VALUE: u8 = 0;
+/// WAL entry kind: tombstone (deletion marker).
+pub const SLATEDB_WAL_ENTRY_KIND_TOMBSTONE: u8 = 1;
+/// WAL entry kind: merge operand.
+pub const SLATEDB_WAL_ENTRY_KIND_MERGE: u8 = 2;
 
 /// Opaque handle backing a resolved object store.
 #[allow(non_camel_case_types)]
@@ -120,6 +129,82 @@ pub struct slatedb_iterator_t {
 pub struct slatedb_write_batch_t {
     /// Batch state. Wrapped in `Option` so writes can consume it exactly once.
     pub batch: Option<WriteBatch>,
+}
+
+/// Opaque handle backing a `WalReader` plus runtime owner.
+#[allow(non_camel_case_types)]
+pub struct slatedb_wal_reader_t {
+    /// Runtime used to execute async SlateDB operations.
+    pub runtime: Arc<Runtime>,
+    /// WAL reader instance.
+    pub reader: WalReader,
+}
+
+/// Opaque handle backing a `WalFile` plus runtime owner.
+#[allow(non_camel_case_types)]
+pub struct slatedb_wal_file_t {
+    /// Runtime used to execute async SlateDB operations.
+    pub runtime: Arc<Runtime>,
+    /// WAL file handle.
+    pub file: WalFile,
+}
+
+/// Opaque handle backing a `WalFileIterator` plus runtime owner.
+#[allow(non_camel_case_types)]
+pub struct slatedb_wal_file_iterator_t {
+    /// Runtime used to execute async iterator operations.
+    pub runtime: Arc<Runtime>,
+    /// WAL file iterator state.
+    pub iter: WalFileIterator,
+}
+
+/// C representation of WAL file metadata.
+///
+/// `location` and `location_len` reference a Rust-allocated buffer that must
+/// be freed by calling `slatedb_wal_file_metadata_free`.
+#[repr(C)]
+#[allow(non_camel_case_types)]
+pub struct slatedb_wal_file_metadata_t {
+    /// Seconds since the Unix epoch for the last-modified time.
+    pub last_modified_secs: i64,
+    /// Sub-second nanoseconds component for the last-modified time.
+    pub last_modified_nanos: u32,
+    /// File size in bytes.
+    pub size_bytes: u64,
+    /// Object storage path as UTF-8 bytes (not null-terminated).
+    pub location: *mut u8,
+    /// Length of `location` in bytes.
+    pub location_len: usize,
+}
+
+/// C representation of a single WAL entry returned by the iterator.
+///
+/// `key` and `value` reference Rust-allocated buffers that must be freed by
+/// calling `slatedb_wal_entry_free`. `value` is null when `kind` is
+/// `SLATEDB_WAL_ENTRY_KIND_TOMBSTONE`.
+#[repr(C)]
+#[allow(non_camel_case_types)]
+pub struct slatedb_wal_entry_t {
+    /// Entry kind. Use `SLATEDB_WAL_ENTRY_KIND_*` constants.
+    pub kind: u8,
+    /// Key bytes.
+    pub key: *mut u8,
+    /// Length of `key` in bytes.
+    pub key_len: usize,
+    /// Value bytes. Null for tombstones.
+    pub value: *mut u8,
+    /// Length of `value` in bytes. Zero for tombstones.
+    pub value_len: usize,
+    /// Sequence number assigned to this entry.
+    pub seq: u64,
+    /// Whether `create_ts` is populated.
+    pub has_create_ts: bool,
+    /// Creation timestamp (valid when `has_create_ts` is true).
+    pub create_ts: i64,
+    /// Whether `expire_ts` is populated.
+    pub has_expire_ts: bool,
+    /// Expiration timestamp (valid when `has_expire_ts` is true).
+    pub expire_ts: i64,
 }
 
 /// Public error kind mirroring `slatedb::ErrorKind`.
@@ -538,6 +623,17 @@ unsafe fn bytes_from_c_void<'a>(
     bytes_from_ptr(raw_ptr, len, field_name)
 }
 
+unsafe fn u64_from_c_void(ptr: *const c_void, field_name: &str) -> Result<u64, slatedb_result_t> {
+    let raw_ptr = ptr as *const u64;
+    if raw_ptr.is_null() {
+        return Err(error_result(
+            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
+            &format!("{field_name} pointer is null"),
+        ));
+    }
+    Ok(*raw_ptr)
+}
+
 /// Validates an output pointer is non-null.
 ///
 /// This helper standardizes error messages for required output pointers.
@@ -882,6 +978,38 @@ unsafe fn bytes_bound_from_c(
             "invalid bound kind (use SLATEDB_BOUND_KIND_* constants)",
         )),
     }
+}
+
+/// Converts one C range bound into a Rust `Bound<u64>`.
+///
+/// ## Safety
+/// - If `bound.kind` is included/excluded, `bound.data` must be a pointer to u64 value.
+unsafe fn u64_bound_from_c(
+    bound: slatedb_bound_t,
+    name: &str,
+) -> Result<Bound<u64>, slatedb_result_t> {
+    match bound.kind {
+        SLATEDB_BOUND_KIND_UNBOUNDED => Ok(Bound::Unbounded),
+        SLATEDB_BOUND_KIND_INCLUDED => Ok(Bound::Included(u64_from_c_void(bound.data, name)?)),
+        SLATEDB_BOUND_KIND_EXCLUDED => Ok(Bound::Excluded(u64_from_c_void(bound.data, name)?)),
+        _ => Err(error_result(
+            slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID,
+            "invalid bound kind (use SLATEDB_BOUND_KIND_* constants)",
+        )),
+    }
+}
+
+/// Converts a C range struct into a Rust `Bound<u64>` tuple.
+///
+/// ## Safety
+/// - `range.start`/`range.end` pointers must be valid when their bound kinds require data.
+pub(crate) unsafe fn u64_range_from_c(
+    range: slatedb_range_t,
+) -> Result<(Bound<u64>, Bound<u64>), slatedb_result_t> {
+    Ok((
+        u64_bound_from_c(range.start, "start")?,
+        u64_bound_from_c(range.end, "end")?,
+    ))
 }
 
 /// Validates a write key against SlateDB key constraints.

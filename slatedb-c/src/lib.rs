@@ -13,6 +13,7 @@ mod memory;
 mod merge_operator;
 mod object_store;
 mod settings;
+mod wal_reader;
 mod write_batch;
 
 pub use ffi::{
@@ -22,16 +23,18 @@ pub use ffi::{
     slatedb_merge_operator_context_free_fn, slatedb_merge_operator_fn,
     slatedb_merge_operator_result_free_fn, slatedb_merge_options_t, slatedb_object_store_t,
     slatedb_put_options_t, slatedb_range_t, slatedb_read_options_t, slatedb_result_t,
-    slatedb_scan_options_t, slatedb_settings_t, slatedb_sst_block_size_t, slatedb_write_batch_t,
-    slatedb_write_options_t, SLATEDB_BOUND_KIND_EXCLUDED, SLATEDB_BOUND_KIND_INCLUDED,
-    SLATEDB_BOUND_KIND_UNBOUNDED, SLATEDB_DURABILITY_FILTER_MEMORY,
-    SLATEDB_DURABILITY_FILTER_REMOTE, SLATEDB_FLUSH_TYPE_MEMTABLE, SLATEDB_FLUSH_TYPE_WAL,
-    SLATEDB_LOG_LEVEL_DEBUG, SLATEDB_LOG_LEVEL_ERROR, SLATEDB_LOG_LEVEL_INFO,
-    SLATEDB_LOG_LEVEL_OFF, SLATEDB_LOG_LEVEL_TRACE, SLATEDB_LOG_LEVEL_WARN,
-    SLATEDB_SST_BLOCK_SIZE_16KIB, SLATEDB_SST_BLOCK_SIZE_1KIB, SLATEDB_SST_BLOCK_SIZE_2KIB,
-    SLATEDB_SST_BLOCK_SIZE_32KIB, SLATEDB_SST_BLOCK_SIZE_4KIB, SLATEDB_SST_BLOCK_SIZE_64KIB,
-    SLATEDB_SST_BLOCK_SIZE_8KIB, SLATEDB_TTL_TYPE_DEFAULT, SLATEDB_TTL_TYPE_EXPIRE_AFTER,
-    SLATEDB_TTL_TYPE_NO_EXPIRY,
+    slatedb_scan_options_t, slatedb_settings_t, slatedb_sst_block_size_t, slatedb_wal_entry_t,
+    slatedb_wal_file_iterator_t, slatedb_wal_file_metadata_t, slatedb_wal_file_t,
+    slatedb_wal_reader_t, slatedb_write_batch_t, slatedb_write_options_t,
+    SLATEDB_BOUND_KIND_EXCLUDED, SLATEDB_BOUND_KIND_INCLUDED, SLATEDB_BOUND_KIND_UNBOUNDED,
+    SLATEDB_DURABILITY_FILTER_MEMORY, SLATEDB_DURABILITY_FILTER_REMOTE,
+    SLATEDB_FLUSH_TYPE_MEMTABLE, SLATEDB_FLUSH_TYPE_WAL, SLATEDB_LOG_LEVEL_DEBUG,
+    SLATEDB_LOG_LEVEL_ERROR, SLATEDB_LOG_LEVEL_INFO, SLATEDB_LOG_LEVEL_OFF,
+    SLATEDB_LOG_LEVEL_TRACE, SLATEDB_LOG_LEVEL_WARN, SLATEDB_SST_BLOCK_SIZE_16KIB,
+    SLATEDB_SST_BLOCK_SIZE_1KIB, SLATEDB_SST_BLOCK_SIZE_2KIB, SLATEDB_SST_BLOCK_SIZE_32KIB,
+    SLATEDB_SST_BLOCK_SIZE_4KIB, SLATEDB_SST_BLOCK_SIZE_64KIB, SLATEDB_SST_BLOCK_SIZE_8KIB,
+    SLATEDB_TTL_TYPE_DEFAULT, SLATEDB_TTL_TYPE_EXPIRE_AFTER, SLATEDB_TTL_TYPE_NO_EXPIRY,
+    SLATEDB_WAL_ENTRY_KIND_MERGE, SLATEDB_WAL_ENTRY_KIND_TOMBSTONE, SLATEDB_WAL_ENTRY_KIND_VALUE,
 };
 
 pub use builder::{
@@ -68,6 +71,13 @@ pub use settings::{
     slatedb_settings_apply_kv, slatedb_settings_close, slatedb_settings_default,
     slatedb_settings_from_env, slatedb_settings_from_env_with_default, slatedb_settings_from_file,
     slatedb_settings_from_json, slatedb_settings_load, slatedb_settings_to_json,
+};
+pub use wal_reader::{
+    slatedb_wal_entry_free, slatedb_wal_file_close, slatedb_wal_file_id, slatedb_wal_file_iterator,
+    slatedb_wal_file_iterator_close, slatedb_wal_file_iterator_next, slatedb_wal_file_metadata,
+    slatedb_wal_file_metadata_free, slatedb_wal_file_next_file, slatedb_wal_file_next_id,
+    slatedb_wal_files_free, slatedb_wal_reader_close, slatedb_wal_reader_get,
+    slatedb_wal_reader_list, slatedb_wal_reader_new,
 };
 pub use write_batch::{
     slatedb_write_batch_close, slatedb_write_batch_delete, slatedb_write_batch_merge,
