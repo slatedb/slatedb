@@ -60,8 +60,6 @@ use crate::manifest::Manifest;
 use crate::mem_table::WritableKVTable;
 use crate::mem_table_flush::{MemtableFlushMsg, MEMTABLE_FLUSHER_TASK_NAME};
 use crate::oracle::DbOracle;
-#[allow(unused_imports)] // Clippy seems to be ignoring the `as _`
-use crate::oracle::Oracle as _;
 use crate::paths::PathResolver;
 use crate::rand::DbRand;
 use crate::reader::Reader;
@@ -5962,6 +5960,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_recent_snapshot_min_seq_monotonic() {
+        use crate::oracle::Oracle;
+
         let path = "/tmp/test_recent_snapshot_min_seq_monotonic";
         let object_store = Arc::new(InMemory::new());
         let settings = Settings {
