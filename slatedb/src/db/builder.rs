@@ -1065,9 +1065,9 @@ pub struct DbReaderBuilder<P: Into<Path>> {
     object_store: Arc<dyn ObjectStore>,
     checkpoint_id: Option<uuid::Uuid>,
     options: DbReaderOptions,
-    system_clock: Option<Arc<dyn SystemClock>>,
-    rand: Option<Arc<DbRand>>,
-    stat_registry: Option<Arc<StatRegistry>>,
+    system_clock: Arc<dyn SystemClock>,
+    rand: Arc<DbRand>,
+    stat_registry: Arc<StatRegistry>,
 }
 
 impl<P: Into<Path>> DbReaderBuilder<P> {
@@ -1078,9 +1078,9 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
             object_store,
             checkpoint_id: None,
             options: DbReaderOptions::default(),
-            system_clock: None,
-            rand: None,
-            stat_registry: None,
+            system_clock: Arc::new(DefaultSystemClock::default()),
+            rand: Arc::new(DbRand::default()),
+            stat_registry: Arc::new(StatRegistry::new()),
         }
     }
 
@@ -1099,7 +1099,7 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
 
     /// Sets the system clock to use for the reader.
     pub fn with_system_clock(mut self, system_clock: Arc<dyn SystemClock>) -> Self {
-        self.system_clock = Some(system_clock);
+        self.system_clock = system_clock;
         self
     }
 
@@ -1109,39 +1109,37 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
     ///
     /// If not set, SlateDB uses the OS's random number generator to generate a seed.
     pub fn with_seed(mut self, seed: u64) -> Self {
-        self.rand = Some(Arc::new(DbRand::new(seed)));
+        self.rand = Arc::new(DbRand::new(seed));
         self
     }
 
     /// Sets the stats registry to use for the reader.
     pub fn with_stat_registry(mut self, stat_registry: Arc<StatRegistry>) -> Self {
-        self.stat_registry = Some(stat_registry);
+        self.stat_registry = stat_registry;
         self
     }
 
     /// Builds and returns a DbReader instance.
     pub async fn build(self) -> Result<DbReader, crate::Error> {
         let path = self.path.into();
-        let system_clock = self
-            .system_clock
-            .unwrap_or_else(|| Arc::new(DefaultSystemClock::default()));
-        let rand = self.rand.unwrap_or_else(|| Arc::new(DbRand::default()));
-        let stat_registry = self
-            .stat_registry
-            .unwrap_or_else(|| Arc::new(StatRegistry::new()));
+        let retrying_object_store = Arc::new(RetryingObjectStore::new(
+            self.object_store,
+            self.rand.clone(),
+            self.system_clock.clone(),
+        ));
 
         // Setup object store with optional caching
         let object_store: Arc<dyn ObjectStore> = match CachedObjectStore::from_config(
-            self.object_store.clone(),
+            retrying_object_store.clone(),
             &self.options.object_store_cache_options,
-            stat_registry.as_ref(),
-            system_clock.clone(),
-            rand.clone(),
+            self.stat_registry.as_ref(),
+            self.system_clock.clone(),
+            self.rand.clone(),
         )
         .await?
         {
             Some(cached) => cached,
-            None => self.object_store,
+            None => retrying_object_store,
         };
 
         let store_provider = DefaultStoreProvider {
@@ -1155,8 +1153,8 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
             &store_provider,
             self.checkpoint_id,
             self.options,
-            system_clock,
-            rand,
+            self.system_clock,
+            self.rand,
         )
         .await
         .map_err(Into::into)
