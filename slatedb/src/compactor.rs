@@ -1050,6 +1050,7 @@ mod tests {
     use crate::config::{
         MergeOptions, PutOptions, Settings, SizeTieredCompactionSchedulerOptions, Ttl, WriteOptions,
     };
+    use crate::db::builder::CompactorConfig;
     use crate::db::Db;
     use crate::db_state::{ManifestCore, SortedRun, SsTableHandle, SsTableId, SsTableInfo};
     use crate::error::SlateDBError;
@@ -1180,7 +1181,7 @@ mod tests {
         let db = Db::builder(PATH, os.clone())
             .with_settings(options)
             .with_system_clock(system_clock.clone())
-            .with_compaction_scheduler_supplier(scheduler.clone())
+            .with_compaction(compactor_config(scheduler.clone()))
             .build()
             .await
             .unwrap();
@@ -1284,7 +1285,7 @@ mod tests {
         let db = Db::builder(PATH, os.clone())
             .with_settings(options)
             .with_system_clock(system_clock.clone())
-            .with_compaction_scheduler_supplier(scheduler.clone())
+            .with_compaction(compactor_config(scheduler.clone()))
             .build()
             .await
             .unwrap();
@@ -1381,7 +1382,7 @@ mod tests {
         let db = Db::builder(PATH, os.clone())
             .with_settings(options)
             .with_system_clock(system_clock.clone())
-            .with_compaction_scheduler_supplier(compaction_scheduler)
+            .with_compaction(compactor_config(compaction_scheduler.clone()))
             .with_merge_operator(Arc::new(StringConcatMergeOperator))
             .build()
             .await
@@ -1507,7 +1508,7 @@ mod tests {
         let db = Db::builder(PATH, os.clone())
             .with_settings(options)
             .with_system_clock(system_clock.clone())
-            .with_compaction_scheduler_supplier(compaction_scheduler)
+            .with_compaction(compactor_config(compaction_scheduler.clone()))
             .with_merge_operator(Arc::new(StringConcatMergeOperator))
             .build()
             .await
@@ -1638,7 +1639,7 @@ mod tests {
         let db = Db::builder(PATH, os.clone())
             .with_settings(options)
             .with_system_clock(system_clock.clone())
-            .with_compaction_scheduler_supplier(compaction_scheduler)
+            .with_compaction(compactor_config(compaction_scheduler.clone()))
             .with_merge_operator(Arc::new(StringConcatMergeOperator))
             .build()
             .await
@@ -1751,7 +1752,7 @@ mod tests {
         let db = Db::builder(PATH, os.clone())
             .with_settings(options)
             .with_system_clock(system_clock.clone())
-            .with_compaction_scheduler_supplier(compaction_scheduler)
+            .with_compaction(compactor_config(compaction_scheduler.clone()))
             .with_merge_operator(Arc::new(StringConcatMergeOperator))
             .build()
             .await
@@ -1883,7 +1884,7 @@ mod tests {
         let db = Db::builder(PATH, os.clone())
             .with_settings(options)
             .with_system_clock(insert_clock.clone())
-            .with_compaction_scheduler_supplier(scheduler)
+            .with_compaction(compactor_config(scheduler.clone()))
             .with_merge_operator(Arc::new(StringConcatMergeOperator))
             .build()
             .await
@@ -1963,7 +1964,7 @@ mod tests {
         let db = Db::builder(PATH, os.clone())
             .with_settings(options)
             .with_system_clock(system_clock.clone())
-            .with_compaction_scheduler_supplier(compaction_scheduler)
+            .with_compaction(compactor_config(compaction_scheduler.clone()))
             .with_merge_operator(Arc::new(StringConcatMergeOperator))
             .build()
             .await
@@ -2061,7 +2062,7 @@ mod tests {
         let db = Db::builder(PATH, os.clone())
             .with_settings(options)
             .with_system_clock(system_clock.clone())
-            .with_compaction_scheduler_supplier(compaction_scheduler)
+            .with_compaction(compactor_config(compaction_scheduler.clone()))
             .with_merge_operator(Arc::new(StringConcatMergeOperator))
             .build()
             .await
@@ -3694,6 +3695,16 @@ mod tests {
             max_concurrent_compactions: 1,
             scheduler_options: Default::default(),
             ..CompactorOptions::default()
+        }
+    }
+
+    fn compactor_config(
+        scheduler_supplier: Arc<dyn CompactionSchedulerSupplier>,
+    ) -> CompactorConfig {
+        CompactorConfig {
+            options: compactor_options(),
+            scheduler_supplier: Some(scheduler_supplier),
+            ..Default::default()
         }
     }
 

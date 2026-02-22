@@ -153,7 +153,7 @@ use crate::utils::WatchableOnceCell;
 use slatedb_common::clock::DefaultSystemClock;
 use slatedb_common::clock::SystemClock;
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct CompactorConfig {
     pub options: CompactorOptions,
     pub runtime: Option<Handle>,

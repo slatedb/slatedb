@@ -4548,7 +4548,10 @@ mod tests {
         let db = Db::builder(path, object_store.clone())
             .with_settings(test_db_options(0, 1024 * 1024, None))
             .with_merge_operator(Arc::new(StringConcatMergeOperator {}))
-            .with_compaction_scheduler_supplier(compaction_scheduler)
+            .with_compaction(CompactorConfig {
+                scheduler_supplier: Some(compaction_scheduler),
+                ..Default::default()
+            })
             .build()
             .await
             .unwrap();
