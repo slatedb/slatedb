@@ -81,8 +81,6 @@ pub(crate) struct TransactionManager {
     inner: Arc<RwLock<TransactionManagerInner>>,
     /// Random number generator for generating transaction IDs
     db_rand: Arc<DbRand>,
-    /// The oracle for tracking the last committed sequence number.
-    oracle: Arc<DbOracle>,
 }
 
 struct TransactionManagerInner {
@@ -100,6 +98,8 @@ struct TransactionManagerInner {
     ///   committed_seq` and follow the same GC rule.
     /// - If there are no active non-readonly transactions, this deque can be fully drained.
     recent_committed_txns: VecDeque<TransactionState>,
+    /// The oracle for tracking the last committed sequence number.
+    oracle: Arc<DbOracle>,
 }
 
 impl TransactionManager {
@@ -108,8 +108,8 @@ impl TransactionManager {
             inner: Arc::new(RwLock::new(TransactionManagerInner {
                 active_txns: HashMap::new(),
                 recent_committed_txns: VecDeque::new(),
+                oracle,
             })),
-            oracle,
             db_rand,
         }
     }
@@ -122,7 +122,7 @@ impl TransactionManager {
     pub(crate) fn new_transaction(&self) -> (Uuid, u64) {
         let txn_id = self.db_rand.rng().gen_uuid();
         let mut inner = self.inner.write();
-        let seq = self.oracle.last_committed_seq();
+        let seq = inner.oracle.last_committed_seq();
         inner.active_txns.insert(
             txn_id,
             TransactionState {
@@ -144,7 +144,7 @@ impl TransactionManager {
     pub(crate) fn new_snapshot(&self, seq: Option<u64>) -> (Uuid, u64) {
         let txn_id = self.db_rand.rng().gen_uuid();
         let mut inner = self.inner.write();
-        let seq = seq.unwrap_or_else(|| self.oracle.last_committed_seq());
+        let seq = seq.unwrap_or_else(|| inner.oracle.last_committed_seq());
         inner.active_txns.insert(
             txn_id,
             TransactionState {
@@ -268,7 +268,7 @@ impl TransactionManager {
         }
 
         // update the last_committed_seq, so the writes will be visible to the readers.
-        self.oracle.advance_committed_seq(committed_seq);
+        inner.oracle.advance_committed_seq(committed_seq);
     }
 
     /// Track a write batch for conflict detection. This is used for regular write operations
@@ -292,7 +292,7 @@ impl TransactionManager {
         });
 
         // update the last_committed_seq, so the writes will be visible to the readers.
-        self.oracle.advance_committed_seq(committed_seq);
+        inner.oracle.advance_committed_seq(committed_seq);
     }
 
     /// The min started_seq of all active transactions, including snapshots. This value
