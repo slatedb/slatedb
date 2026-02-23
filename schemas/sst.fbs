@@ -39,6 +39,10 @@ table SsTableInfo {
 
     // Type of SST. Defaults to Compacted for backwards compatibility.
     sst_type: SstType;
+
+    // Last entry in the SST file.
+    // The last entry is a key in an SST for compacted data.
+    last_entry: [ubyte];
 }
 
 table BlockMeta {

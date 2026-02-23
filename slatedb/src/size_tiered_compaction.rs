@@ -845,6 +845,7 @@ mod tests {
     fn create_sst(size: u64) -> SsTableHandle {
         let info = SsTableInfo {
             first_entry: None,
+            last_entry: None,
             index_offset: size,
             index_len: 0,
             filter_offset: 0,

@@ -122,9 +122,13 @@ impl FlatBufferSsTableInfoCodec {
         let first_entry: Option<Bytes> = info
             .first_entry()
             .map(|entry| Bytes::copy_from_slice(entry.bytes()));
+        let last_entry: Option<Bytes> = info
+            .last_entry()
+            .map(|entry| Bytes::copy_from_slice(entry.bytes()));
 
         SsTableInfo {
             first_entry,
+            last_entry,
             index_offset: info.index_offset(),
             index_len: info.index_len(),
             filter_offset: info.filter_offset(),
@@ -413,11 +417,16 @@ impl<'b> DbFlatBufferBuilder<'b> {
             None => None,
             Some(first_entry_vector) => Some(self.builder.create_vector(first_entry_vector)),
         };
+        let last_entry = match info.last_entry.as_ref() {
+            None => None,
+            Some(last_entry_vector) => Some(self.builder.create_vector(last_entry_vector)),
+        };
 
         FbSsTableInfo::create(
             &mut self.builder,
             &SsTableInfoArgs {
                 first_entry,
+                last_entry,
                 index_offset: info.index_offset,
                 index_len: info.index_len,
                 filter_offset: info.filter_offset,

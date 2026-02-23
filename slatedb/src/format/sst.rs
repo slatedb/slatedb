@@ -261,6 +261,8 @@ pub(crate) struct EncodedSsTableFooterBuilder<'a, 'b> {
     blocks_size: u64,
     /// first entry in the SST, key for compacted data, sequence number for WAL
     first_entry: Option<Bytes>,
+    /// last entry (key) in the SST for compacted data, None for WAL SSTs
+    last_entry: Option<Bytes>,
     /// codec for compressing data blocks, index blocks, and filter blocks
     compression_codec: Option<CompressionCodec>,
     /// transformer for transforming data blocks, index blocks, and filter blocks
@@ -283,6 +285,7 @@ impl<'a, 'b> EncodedSsTableFooterBuilder<'a, 'b> {
     pub(crate) fn new(
         blocks_len: u64,
         sst_first_entry: Option<Bytes>,
+        sst_last_entry: Option<Bytes>,
         sst_codec: &'a dyn SsTableInfoCodec,
         index_builder: flatbuffers::FlatBufferBuilder<'b, DefaultAllocator>,
         block_meta: Vec<flatbuffers::WIPOffset<BlockMeta<'b>>>,
@@ -292,6 +295,7 @@ impl<'a, 'b> EncodedSsTableFooterBuilder<'a, 'b> {
         Self {
             blocks_size: blocks_len,
             first_entry: sst_first_entry,
+            last_entry: sst_last_entry,
             compression_codec: None,
             block_transformer: None,
             sst_info_codec: sst_codec,
@@ -363,6 +367,7 @@ impl<'a, 'b> EncodedSsTableFooterBuilder<'a, 'b> {
         let meta_offset = self.blocks_size + buf.len() as u64;
         let info = SsTableInfo {
             first_entry: self.first_entry,
+            last_entry: self.last_entry,
             index_offset,
             index_len,
             filter_offset,

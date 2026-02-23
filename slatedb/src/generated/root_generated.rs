@@ -1036,6 +1036,7 @@ impl<'a> SsTableInfo<'a> {
   pub const VT_FILTER_LEN: flatbuffers::VOffsetT = 12;
   pub const VT_COMPRESSION_FORMAT: flatbuffers::VOffsetT = 14;
   pub const VT_SST_TYPE: flatbuffers::VOffsetT = 16;
+  pub const VT_LAST_ENTRY: flatbuffers::VOffsetT = 18;
 
   #[inline]
   pub unsafe fn init_from_table(table: flatbuffers::Table<'a>) -> Self {
@@ -1051,6 +1052,7 @@ impl<'a> SsTableInfo<'a> {
     builder.add_filter_offset(args.filter_offset);
     builder.add_index_len(args.index_len);
     builder.add_index_offset(args.index_offset);
+    if let Some(x) = args.last_entry { builder.add_last_entry(x); }
     if let Some(x) = args.first_entry { builder.add_first_entry(x); }
     builder.add_sst_type(args.sst_type);
     builder.add_compression_format(args.compression_format);
@@ -1107,6 +1109,13 @@ impl<'a> SsTableInfo<'a> {
     // which contains a valid value in this slot
     unsafe { self._tab.get::<SstType>(SsTableInfo::VT_SST_TYPE, Some(SstType::Compacted)).unwrap()}
   }
+  #[inline]
+  pub fn last_entry(&self) -> Option<flatbuffers::Vector<'a, u8>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'a, u8>>>(SsTableInfo::VT_LAST_ENTRY, None)}
+  }
 }
 
 impl flatbuffers::Verifiable for SsTableInfo<'_> {
@@ -1123,6 +1132,7 @@ impl flatbuffers::Verifiable for SsTableInfo<'_> {
      .visit_field::<u64>("filter_len", Self::VT_FILTER_LEN, false)?
      .visit_field::<CompressionFormat>("compression_format", Self::VT_COMPRESSION_FORMAT, false)?
      .visit_field::<SstType>("sst_type", Self::VT_SST_TYPE, false)?
+     .visit_field::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'_, u8>>>("last_entry", Self::VT_LAST_ENTRY, false)?
      .finish();
     Ok(())
   }
@@ -1135,6 +1145,7 @@ pub struct SsTableInfoArgs<'a> {
     pub filter_len: u64,
     pub compression_format: CompressionFormat,
     pub sst_type: SstType,
+    pub last_entry: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, u8>>>,
 }
 impl<'a> Default for SsTableInfoArgs<'a> {
   #[inline]
@@ -1147,6 +1158,7 @@ impl<'a> Default for SsTableInfoArgs<'a> {
       filter_len: 0,
       compression_format: CompressionFormat::None,
       sst_type: SstType::Compacted,
+      last_entry: None,
     }
   }
 }
@@ -1185,6 +1197,10 @@ impl<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> SsTableInfoBuilder<'a, 'b, A> {
     self.fbb_.push_slot::<SstType>(SsTableInfo::VT_SST_TYPE, sst_type, SstType::Compacted);
   }
   #[inline]
+  pub fn add_last_entry(&mut self, last_entry: flatbuffers::WIPOffset<flatbuffers::Vector<'b , u8>>) {
+    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(SsTableInfo::VT_LAST_ENTRY, last_entry);
+  }
+  #[inline]
   pub fn new(_fbb: &'b mut flatbuffers::FlatBufferBuilder<'a, A>) -> SsTableInfoBuilder<'a, 'b, A> {
     let start = _fbb.start_table();
     SsTableInfoBuilder {
@@ -1209,6 +1225,7 @@ impl core::fmt::Debug for SsTableInfo<'_> {
       ds.field("filter_len", &self.filter_len());
       ds.field("compression_format", &self.compression_format());
       ds.field("sst_type", &self.sst_type());
+      ds.field("last_entry", &self.last_entry());
       ds.finish()
   }
 }

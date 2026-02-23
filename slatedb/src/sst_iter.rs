@@ -759,11 +759,27 @@ impl KeyValueIterator for InternalSstIterator<'_> {
             return Err(SlateDBError::IteratorNotInitialized);
         }
         if !self.view.contains(next_key) {
-            return Err(SlateDBError::SeekKeyOutOfKeyRange {
-                key: next_key.to_vec(),
-                start_key: self.view.start_key().map(|b| b.to_vec()),
-                end_key: self.view.end_key().map(|b| b.to_vec()),
-            });
+            if self.view.key_exceeds(next_key) {
+                match self.options.order {
+                    IterationOrder::Ascending => {
+                        // Seeking beyond the end of the view range in ascending order
+                        // means there are no more results.
+                        self.stop();
+                        return Ok(());
+                    }
+                    IterationOrder::Descending => {
+                        // Seeking beyond the end in descending order means "start
+                        // from the last key and go backwards" — fall through to
+                        // the normal seek logic.
+                    }
+                }
+            } else {
+                return Err(SlateDBError::SeekKeyOutOfKeyRange {
+                    key: next_key.to_vec(),
+                    start_key: self.view.start_key().map(|b| b.to_vec()),
+                    end_key: self.view.end_key().map(|b| b.to_vec()),
+                });
+            }
         }
         if !self.state.is_finished() {
             if let Some(iter) = self.state.current_iter.as_mut() {
@@ -1264,8 +1280,9 @@ mod tests {
         let registry = StatRegistry::new();
         let db_stats = DbStats::new(&registry);
         let table_store = bloom_filter_enabled_table_store(2);
-        // these two keys share the same bucket in the bloom filter (hard coded)
-        // after testing with the SIP13 algorithm
+        // these keys share the same bucket in the bloom filter (hard coded)
+        // after testing with the SIP13 algorithm. The collision key must be
+        // within the SST's key range [k1, k3] for range pruning.
         let existing_keys = [b"k1".as_slice(), b"k3".as_slice()];
         let sst_handle = build_single_block_sst(&table_store, &existing_keys).await;
 
@@ -1275,7 +1292,7 @@ mod tests {
             .expect("filter read should succeed")
             .expect("filter should exist");
 
-        let collision_key = b"k6";
+        let collision_key = b"k12";
         let hash = filter::filter_hash(collision_key);
         assert!(
             filter.might_contain(hash),
@@ -1620,17 +1637,18 @@ mod tests {
         let val_gen = OrderedBytesGenerator::new_with_byte_range(&first_val, 1u8, 26u8);
         let (sst, _) = build_sst_with_n_blocks(2, table_store.clone(), key_gen, val_gen).await;
 
-        let mut iter = SstIterator::new_borrowed_initialized(
+        let iter = SstIterator::new_borrowed_initialized(
             BytesRange::from_slice([b'z'; 16].as_ref()..),
             &sst,
             table_store.clone(),
             SstIteratorOptions::default(),
         )
         .await
-        .unwrap()
-        .expect("Expected Some(iter) but got None");
+        .unwrap();
 
-        assert!(iter.next().await.unwrap().is_none());
+        // The SST's key range doesn't overlap with the query range starting at 'z',
+        // so the iterator should be pruned (None).
+        assert!(iter.is_none());
     }
 
     #[tokio::test]
@@ -2245,18 +2263,17 @@ mod tests {
         let sst_handle = table_store.write_sst(&id, encoded, false).await.unwrap();
 
         // when: seeking past the last key
-        let mut iter = SstIterator::new_borrowed_initialized(
+        let iter = SstIterator::new_borrowed_initialized(
             BytesRange::from_slice(b"zzz".as_ref()..),
             &sst_handle,
             table_store.clone(),
             SstIteratorOptions::default(),
         )
         .await
-        .unwrap()
-        .expect("Expected Some(iter) but got None");
+        .unwrap();
 
-        // then: should return None immediately
-        assert!(iter.next().await.unwrap().is_none());
+        // then: the SST should be pruned entirely since "zzz" is beyond the last key
+        assert!(iter.is_none());
     }
 
     /// Test: iteration with both start and end bounds where the keys are in the middle of blocks

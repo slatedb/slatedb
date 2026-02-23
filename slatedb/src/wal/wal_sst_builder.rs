@@ -247,6 +247,7 @@ impl EncodedWalSsTableBuilder {
         let mut footer_builder = EncodedSsTableFooterBuilder::new(
             self.data_size,
             self.sst_first_seq,
+            None, // WAL SSTs don't have sorted keys, so no last_entry
             &*self.sst_codec,
             self.index_builder,
             self.block_meta,

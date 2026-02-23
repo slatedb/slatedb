@@ -125,6 +125,7 @@ pub(crate) struct EncodedSsTableBuilder<'a> {
     index_builder: flatbuffers::FlatBufferBuilder<'a, DefaultAllocator>,
     first_key: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, u8>>>,
     sst_first_key: Option<Bytes>,
+    sst_last_key: Option<Bytes>,
     current_block_max_key: Option<Bytes>,
     block_meta: Vec<flatbuffers::WIPOffset<BlockMeta<'a>>>,
     current_len: u64,
@@ -154,6 +155,7 @@ impl EncodedSsTableBuilder<'_> {
             block_meta: Vec::new(),
             first_key: None,
             sst_first_key: None,
+            sst_last_key: None,
             current_block_max_key: None,
             block_size,
             block_format: BlockFormat::Latest,
@@ -227,6 +229,7 @@ impl EncodedSsTableBuilder<'_> {
         if is_sst_first_key {
             self.sst_first_key = Some(entry.key.clone());
         }
+        self.sst_last_key = Some(entry.key.clone());
         self.current_block_max_key = Some(entry.key.clone());
 
         self.builder.add(entry)?;
@@ -331,6 +334,7 @@ impl EncodedSsTableBuilder<'_> {
         let mut footer_builder = EncodedSsTableFooterBuilder::new(
             self.current_len,
             self.sst_first_key,
+            self.sst_last_key,
             &*self.sst_codec,
             self.index_builder,
             self.block_meta,

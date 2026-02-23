@@ -53,7 +53,11 @@ impl SsTableHandle {
     pub(crate) fn new(id: SsTableId, info: SsTableInfo) -> Self {
         let effective_range = match info.first_entry.clone() {
             Some(physical_first_entry) => {
-                BytesRange::new(Included(physical_first_entry), Unbounded)
+                let end_bound = match info.last_entry.clone() {
+                    Some(physical_last_entry) => Included(physical_last_entry),
+                    None => Unbounded,
+                };
+                BytesRange::new(Included(physical_first_entry), end_bound)
             }
             None => BytesRange::new_empty(),
         };
@@ -73,7 +77,11 @@ impl SsTableHandle {
     ) -> Self {
         let mut effective_range = match info.first_entry.clone() {
             Some(physical_first_entry) => {
-                BytesRange::new(Included(physical_first_entry), Unbounded)
+                let end_bound = match info.last_entry.clone() {
+                    Some(physical_last_entry) => Included(physical_last_entry),
+                    None => Unbounded,
+                };
+                BytesRange::new(Included(physical_first_entry), end_bound)
             }
             None => {
                 unreachable!("SST always has a first entry.")
@@ -169,6 +177,9 @@ impl SsTableHandle {
         if let Some(visible_range) = &self.visible_range {
             return range.intersect(visible_range);
         }
+        if self.info.last_entry.is_some() {
+            return range.intersect(&self.effective_range);
+        }
         Some(range)
     }
 
@@ -242,6 +253,10 @@ pub struct SsTableInfo {
     /// The first entry is a key in an SST for compacted data
     /// and it is a sequence number in a WAL SST.
     pub first_entry: Option<Bytes>,
+    /// The last entry in the SSTable, if any.
+    /// The last entry is a key in an SST for compacted data.
+    /// Not set for WAL SSTs (keys are not sorted).
+    pub last_entry: Option<Bytes>,
     /// The offset of the index block within the SSTable file.
     pub index_offset: u64,
     /// The length of the index block within the SSTable file.
@@ -817,6 +832,7 @@ mod tests {
     fn create_sst_info(first_entry: Option<Bytes>) -> SsTableInfo {
         SsTableInfo {
             first_entry,
+            last_entry: None,
             index_offset: 0,
             index_len: 0,
             filter_offset: 0,
