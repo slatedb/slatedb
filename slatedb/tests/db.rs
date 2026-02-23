@@ -112,6 +112,7 @@ async fn test_concurrent_writers_and_readers() {
             min_filter_keys: 0,
             // Allow up to four 4096-byte blocks per-SST
             l0_sst_size_bytes: 4 * 4096,
+            compactor_options: None,
             ..Default::default()
         },
     )
