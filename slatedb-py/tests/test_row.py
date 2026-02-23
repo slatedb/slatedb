@@ -1,5 +1,5 @@
-import pytest
 from slatedb import SlateDB
+
 
 def test_get_row(db: SlateDB):
     key = b"key1"
