@@ -228,9 +228,9 @@ typedef struct slatedb_merge_options_t {
 typedef struct slatedb_bound_t {
     // Bound kind. Use `SLATEDB_BOUND_KIND_*` constants.
     uint8_t kind;
-    // Bound bytes for included/excluded bounds.
-    const uint8_t *data;
-    // Length of `data`.
+    // Bound value for included/excluded bounds.
+    const void *data;
+    // Length of `data` if data is an array.
     uintptr_t len;
 } slatedb_bound_t;
 

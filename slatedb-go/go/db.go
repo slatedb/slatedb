@@ -105,13 +105,13 @@ func makeScanRange(start, end []byte) C.slatedb_range_t {
 
 	if len(start) > 0 {
 		rangeValue.start.kind = C.uint8_t(C.SLATEDB_BOUND_KIND_INCLUDED)
-		rangeValue.start.data = (*C.uint8_t)(unsafe.Pointer(&start[0]))
+		rangeValue.start.data = unsafe.Pointer(&start[0])
 		rangeValue.start.len = C.uintptr_t(len(start))
 	}
 
 	if len(end) > 0 {
 		rangeValue.end.kind = C.uint8_t(C.SLATEDB_BOUND_KIND_EXCLUDED)
-		rangeValue.end.data = (*C.uint8_t)(unsafe.Pointer(&end[0]))
+		rangeValue.end.data = unsafe.Pointer(&end[0])
 		rangeValue.end.len = C.uintptr_t(len(end))
 	}
 
