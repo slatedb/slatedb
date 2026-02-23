@@ -23,18 +23,18 @@ pub use ffi::{
     slatedb_merge_operator_context_free_fn, slatedb_merge_operator_fn,
     slatedb_merge_operator_result_free_fn, slatedb_merge_options_t, slatedb_object_store_t,
     slatedb_put_options_t, slatedb_range_t, slatedb_read_options_t, slatedb_result_t,
-    slatedb_scan_options_t, slatedb_settings_t, slatedb_sst_block_size_t, slatedb_row_entry_t,
+    slatedb_row_entry_t, slatedb_scan_options_t, slatedb_settings_t, slatedb_sst_block_size_t,
     slatedb_wal_file_iterator_t, slatedb_wal_file_metadata_t, slatedb_wal_file_t,
     slatedb_wal_reader_t, slatedb_write_batch_t, slatedb_write_options_t,
     SLATEDB_BOUND_KIND_EXCLUDED, SLATEDB_BOUND_KIND_INCLUDED, SLATEDB_BOUND_KIND_UNBOUNDED,
     SLATEDB_DURABILITY_FILTER_MEMORY, SLATEDB_DURABILITY_FILTER_REMOTE,
     SLATEDB_FLUSH_TYPE_MEMTABLE, SLATEDB_FLUSH_TYPE_WAL, SLATEDB_LOG_LEVEL_DEBUG,
     SLATEDB_LOG_LEVEL_ERROR, SLATEDB_LOG_LEVEL_INFO, SLATEDB_LOG_LEVEL_OFF,
-    SLATEDB_LOG_LEVEL_TRACE, SLATEDB_LOG_LEVEL_WARN, SLATEDB_SST_BLOCK_SIZE_16KIB,
+    SLATEDB_LOG_LEVEL_TRACE, SLATEDB_LOG_LEVEL_WARN, SLATEDB_ROW_ENTRY_KIND_MERGE,
+    SLATEDB_ROW_ENTRY_KIND_TOMBSTONE, SLATEDB_ROW_ENTRY_KIND_VALUE, SLATEDB_SST_BLOCK_SIZE_16KIB,
     SLATEDB_SST_BLOCK_SIZE_1KIB, SLATEDB_SST_BLOCK_SIZE_2KIB, SLATEDB_SST_BLOCK_SIZE_32KIB,
     SLATEDB_SST_BLOCK_SIZE_4KIB, SLATEDB_SST_BLOCK_SIZE_64KIB, SLATEDB_SST_BLOCK_SIZE_8KIB,
     SLATEDB_TTL_TYPE_DEFAULT, SLATEDB_TTL_TYPE_EXPIRE_AFTER, SLATEDB_TTL_TYPE_NO_EXPIRY,
-    SLATEDB_ROW_ENTRY_KIND_MERGE, SLATEDB_ROW_ENTRY_KIND_TOMBSTONE, SLATEDB_ROW_ENTRY_KIND_VALUE,
 };
 
 pub use builder::{
