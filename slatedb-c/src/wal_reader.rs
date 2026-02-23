@@ -77,6 +77,13 @@ pub unsafe extern "C" fn slatedb_wal_reader_new(
 ///   the outer array with `slatedb_wal_files_free`.
 /// - `out_count`: Set to the number of elements in `out_files`.
 ///
+/// ## Returns
+/// `slatedb_result_t` describing success or failure.
+///
+/// ## Errors
+/// - `SLATEDB_ERROR_KIND_INVALID` for null/invalid pointers or malformed range bounds.
+/// - Mapped SlateDB errors for object-storage failures.
+///
 /// ## Safety
 /// - `reader`, `out_files`, and `out_count` must be valid non-null pointers.
 #[no_mangle]
@@ -135,6 +142,10 @@ pub unsafe extern "C" fn slatedb_wal_reader_list(
 /// Does **not** free the individual `slatedb_wal_file_t*` elements — those must
 /// be freed with `slatedb_wal_file_close` before calling this function.
 ///
+/// ## Arguments
+/// - `files`: Array pointer written by `slatedb_wal_reader_list`. No-op if null.
+/// - `count`: Element count written by `slatedb_wal_reader_list`.
+///
 /// ## Safety
 /// - `files`/`count` must exactly match what `slatedb_wal_reader_list` wrote.
 /// - All elements must have already been freed with `slatedb_wal_file_close`.
@@ -148,6 +159,17 @@ pub unsafe extern "C" fn slatedb_wal_files_free(files: *mut *mut slatedb_wal_fil
 
 /// Returns a `slatedb_wal_file_t` handle for a specific WAL ID without checking
 /// whether that file exists in object storage.
+///
+/// ## Arguments
+/// - `reader`: WAL reader handle.
+/// - `id`: WAL file ID to retrieve.
+/// - `out_file`: Output pointer populated with a `slatedb_wal_file_t*` on success.
+///
+/// ## Returns
+/// `slatedb_result_t` describing success or failure.
+///
+/// ## Errors
+/// - `SLATEDB_ERROR_KIND_INVALID` for null/invalid pointers.
 ///
 /// ## Safety
 /// - `reader` and `out_file` must be valid non-null pointers.
@@ -177,6 +199,15 @@ pub unsafe extern "C" fn slatedb_wal_reader_get(
 
 /// Closes and frees a WAL reader handle.
 ///
+/// ## Arguments
+/// - `reader`: WAL reader handle to close.
+///
+/// ## Returns
+/// `slatedb_result_t` describing success or failure.
+///
+/// ## Errors
+/// - `SLATEDB_ERROR_KIND_INVALID` if `reader` is null.
+///
 /// ## Safety
 /// - `reader` must be a valid non-null handle. Do not use it after this call.
 #[no_mangle]
@@ -191,6 +222,16 @@ pub unsafe extern "C" fn slatedb_wal_reader_close(
 }
 
 /// Returns the ID of this WAL file.
+///
+/// ## Arguments
+/// - `file`: WAL file handle.
+/// - `out_id`: Output pointer populated with the file ID on success.
+///
+/// ## Returns
+/// `slatedb_result_t` describing success or failure.
+///
+/// ## Errors
+/// - `SLATEDB_ERROR_KIND_INVALID` for null/invalid pointers.
 ///
 /// ## Safety
 /// - `file` and `out_id` must be valid non-null pointers.
@@ -211,6 +252,16 @@ pub unsafe extern "C" fn slatedb_wal_file_id(
 
 /// Returns the WAL ID immediately following this file's ID (`id + 1`).
 ///
+/// ## Arguments
+/// - `file`: WAL file handle.
+/// - `out_id`: Output pointer populated with the next file ID on success.
+///
+/// ## Returns
+/// `slatedb_result_t` describing success or failure.
+///
+/// ## Errors
+/// - `SLATEDB_ERROR_KIND_INVALID` for null/invalid pointers.
+///
 /// ## Safety
 /// - `file` and `out_id` must be valid non-null pointers.
 #[no_mangle]
@@ -230,6 +281,16 @@ pub unsafe extern "C" fn slatedb_wal_file_next_id(
 
 /// Returns a handle for the WAL file immediately following this one without
 /// checking whether it exists in object storage.
+///
+/// ## Arguments
+/// - `file`: WAL file handle.
+/// - `out_next_file`: Output pointer populated with a `slatedb_wal_file_t*` on success.
+///
+/// ## Returns
+/// `slatedb_result_t` describing success or failure.
+///
+/// ## Errors
+/// - `SLATEDB_ERROR_KIND_INVALID` for null/invalid pointers.
 ///
 /// ## Safety
 /// - `file` and `out_next_file` must be valid non-null pointers.
@@ -259,7 +320,15 @@ pub unsafe extern "C" fn slatedb_wal_file_next_file(
 /// Populates `out_metadata.location` with a Rust-allocated UTF-8 byte buffer.
 /// Call `slatedb_wal_file_metadata_free` to release it.
 ///
+/// ## Arguments
+/// - `file`: WAL file handle.
+/// - `out_metadata`: Output struct populated with metadata on success.
+///
+/// ## Returns
+/// `slatedb_result_t` describing success or failure.
+///
 /// ## Errors
+/// - `SLATEDB_ERROR_KIND_INVALID` for null/invalid pointers.
 /// - `SLATEDB_ERROR_KIND_DATA` if the file is missing from object storage.
 ///
 /// ## Safety
@@ -294,6 +363,10 @@ pub unsafe extern "C" fn slatedb_wal_file_metadata(
 
 /// Frees the `location` buffer in a `slatedb_wal_file_metadata_t`.
 ///
+/// ## Arguments
+/// - `metadata`: Pointer to the struct whose `location` buffer should be freed.
+///   No-op if null.
+///
 /// ## Safety
 /// - `metadata.location`/`metadata.location_len` must match values from
 ///   `slatedb_wal_file_metadata`. Do not call more than once.
@@ -313,7 +386,15 @@ pub unsafe extern "C" fn slatedb_wal_file_metadata_free(
 /// Returns an iterator over entries in this WAL file, preserving tombstones and
 /// merge operands exactly as written.
 ///
+/// ## Arguments
+/// - `file`: WAL file handle.
+/// - `out_iter`: Output pointer populated with a `slatedb_wal_file_iterator_t*` on success.
+///
+/// ## Returns
+/// `slatedb_result_t` describing success or failure.
+///
 /// ## Errors
+/// - `SLATEDB_ERROR_KIND_INVALID` for null/invalid pointers.
 /// - `SLATEDB_ERROR_KIND_DATA` if the file is missing from object storage.
 ///
 /// ## Safety
@@ -345,6 +426,15 @@ pub unsafe extern "C" fn slatedb_wal_file_iterator(
 
 /// Closes and frees a WAL file handle.
 ///
+/// ## Arguments
+/// - `file`: WAL file handle to close.
+///
+/// ## Returns
+/// `slatedb_result_t` describing success or failure.
+///
+/// ## Errors
+/// - `SLATEDB_ERROR_KIND_INVALID` if `file` is null.
+///
 /// ## Safety
 /// - `file` must be a valid non-null handle. Do not use it after this call.
 #[no_mangle]
@@ -363,6 +453,18 @@ pub unsafe extern "C" fn slatedb_wal_file_close(file: *mut slatedb_wal_file_t) -
 ///
 /// Call `slatedb_row_entry_free` to release `out_entry.key` / `out_entry.value`
 /// when `*out_present` is true.
+///
+/// ## Arguments
+/// - `iter`: WAL file iterator handle.
+/// - `out_present`: Set to `true` if an entry was read, `false` at end of file.
+/// - `out_entry`: Output struct populated with the entry when `*out_present` is true.
+///
+/// ## Returns
+/// `slatedb_result_t` describing success or failure.
+///
+/// ## Errors
+/// - `SLATEDB_ERROR_KIND_INVALID` for null/invalid pointers.
+/// - Mapped SlateDB errors for decode or object-storage failures.
 ///
 /// ## Safety
 /// - `iter`, `out_present`, and `out_entry` must be valid non-null pointers.
@@ -422,6 +524,10 @@ pub unsafe extern "C" fn slatedb_wal_file_iterator_next(
 
 /// Frees the `key` and `value` buffers in a `slatedb_row_entry_t`.
 ///
+/// ## Arguments
+/// - `entry`: Pointer to the entry whose `key`/`value` buffers should be freed.
+///   No-op if null.
+///
 /// ## Safety
 /// - Buffers must match those written by `slatedb_wal_file_iterator_next`.
 /// - Do not call more than once per entry.
@@ -442,6 +548,15 @@ pub unsafe extern "C" fn slatedb_row_entry_free(entry: *mut slatedb_row_entry_t)
 }
 
 /// Closes and frees a WAL file iterator handle.
+///
+/// ## Arguments
+/// - `iter`: WAL file iterator handle to close.
+///
+/// ## Returns
+/// `slatedb_result_t` describing success or failure.
+///
+/// ## Errors
+/// - `SLATEDB_ERROR_KIND_INVALID` if `iter` is null.
 ///
 /// ## Safety
 /// - `iter` must be a valid non-null handle. Do not use it after this call.
