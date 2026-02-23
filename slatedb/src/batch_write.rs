@@ -46,7 +46,7 @@ pub(crate) const WRITE_BATCH_TASK_NAME: &str = "writer";
 pub(crate) type WriteBatchResult = Result<
     (
         WriteHandle,
-        Option<WatchableOnceCellReader<Result<(), SlateDBError>>>,
+        WatchableOnceCellReader<Result<(), SlateDBError>>,
     ),
     SlateDBError,
 >;
@@ -93,8 +93,7 @@ impl MessageHandler<WriteBatchMessage> for WriteBatchEventHandler {
         // if this is the first write and the WAL is disabled, make sure users are flushing
         // their memtables in a timely manner.
         if self.is_first_write && !self.db_inner.wal_enabled && options.await_durable {
-            self.is_first_write = false;
-            if let Ok((_, Some(this_watcher))) = &result {
+            if let Ok((_, this_watcher)) = &result {
                 let this_watcher = this_watcher.clone();
                 let this_clock = self.db_inner.system_clock.clone();
                 tokio::spawn(async move {
@@ -169,7 +168,7 @@ impl DbInner {
         // and flushed to the remote storage, WAL buffer manager will recycle these WAL entries.
         self.wal_buffer.track_last_applied_seq(commit_seq);
 
-        // insert a fail point for easier to test the case where the last_committed_seq is not updated.
+        // insert a fail point to make it easier to test the case where the last_committed_seq is not updated.
         // this is useful for testing the case where the reader is not able to see the writes.
         fail_point!(
             Arc::clone(&self.fp_registry),
@@ -188,8 +187,16 @@ impl DbInner {
                 .track_recent_committed_write_batch(&write_keys, commit_seq);
         }
 
-        // update the last_committed_seq, so the writes will be visible to the readers.
-        self.oracle.last_committed_seq.store(commit_seq);
+        // insert a fail point to make it easier to test the case where the transaction is committed but
+        // but remaining work hasn't been done. this is useful for testing that transaction commits and
+        // commited seqnums get updated in lock-step. See #1301 for details.
+        fail_point!(
+            Arc::clone(&self.fp_registry),
+            "write-batch-post-commit",
+            |_| { Err(SlateDBError::from(std::io::Error::other("oops"))) }
+        );
+
+        // record the memtable sequence in the memtable's sequence tracker.
         self.record_memtable_sequence(commit_seq);
 
         // maybe freeze the memtable.
@@ -199,9 +206,9 @@ impl DbInner {
             self.maybe_freeze_memtable(&mut guard, last_flushed_wal_id)?;
         }
 
-        let write_handle = WriteHandle::new(commit_seq, Some(now));
+        let write_handle = WriteHandle::new(commit_seq, now);
 
-        Ok((write_handle, Some(durable_watcher)))
+        Ok((write_handle, durable_watcher))
     }
 
     /// Write entries to the currently active memtable. Returns a durable watcher for the memtable.

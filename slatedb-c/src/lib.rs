@@ -22,7 +22,7 @@ pub use ffi::{
     slatedb_merge_operator_context_free_fn, slatedb_merge_operator_fn,
     slatedb_merge_operator_result_free_fn, slatedb_merge_options_t, slatedb_object_store_t,
     slatedb_put_options_t, slatedb_range_t, slatedb_read_options_t, slatedb_result_t,
-    slatedb_row_entry_t, slatedb_row_entry_free, slatedb_scan_options_t, slatedb_settings_t,
+    slatedb_row_entry_free, slatedb_row_entry_t, slatedb_scan_options_t, slatedb_settings_t,
     slatedb_sst_block_size_t, slatedb_write_batch_t, slatedb_write_options_t,
     SLATEDB_BOUND_KIND_EXCLUDED, SLATEDB_BOUND_KIND_INCLUDED, SLATEDB_BOUND_KIND_UNBOUNDED,
     SLATEDB_DURABILITY_FILTER_MEMORY, SLATEDB_DURABILITY_FILTER_REMOTE,

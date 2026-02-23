@@ -96,7 +96,7 @@ func (iter *Iterator) NextRow() (*RowEntry, error) {
 	if present == C.bool(false) {
 		return nil, io.EOF
 	}
-	defer C.slatedb_row_free(rowPtr)
+	defer C.slatedb_row_entry_free(rowPtr)
 
 	row := &RowEntry{
 		Key:   C.GoBytes(unsafe.Pointer(rowPtr.key), C.int(rowPtr.key_len)),

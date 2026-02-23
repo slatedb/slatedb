@@ -33,6 +33,9 @@ pub(crate) enum SlateDBError {
     #[error("empty RowEntry key")]
     EmptyKey,
 
+    #[error("empty write batch not allowed")]
+    EmptyBatch,
+
     #[error("empty manifest")]
     EmptyManifest,
 
@@ -467,7 +470,12 @@ impl From<SlateDBError> for Error {
             // Unavailable errors
             SlateDBError::IoError(err) => Error::unavailable(msg).with_source(Box::new(err)),
             SlateDBError::ObjectStoreError(err) => {
-                Error::unavailable(msg).with_source(Box::new(err))
+                let error = if matches!(err.as_ref(), object_store::Error::NotFound { .. }) {
+                    Error::data(msg)
+                } else {
+                    Error::unavailable(msg)
+                };
+                error.with_source(Box::new(err))
             }
             #[cfg(feature = "foyer")]
             SlateDBError::FoyerError(err) => Error::unavailable(msg).with_source(Box::new(err)),
@@ -501,6 +509,7 @@ impl From<SlateDBError> for Error {
             SlateDBError::InvalidSequenceOrder { .. } => Error::data(msg),
             SlateDBError::UndefinedEnvironmentVariable { .. } => Error::invalid(msg),
             SlateDBError::InvalidEnvironmentVariable { .. } => Error::invalid(msg),
+            SlateDBError::EmptyBatch => Error::invalid(msg),
 
             // Data errors
             SlateDBError::InvalidFlatbuffer(err) => Error::data(msg).with_source(Box::new(err)),
@@ -545,5 +554,29 @@ impl From<SlateDBError> for Error {
                 Error::internal(msg).with_source(Box::new(err))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn object_store_error_not_found_maps_to_data() {
+        let err = SlateDBError::from(object_store::Error::NotFound {
+            path: "test/path".to_string(),
+            source: Box::new(std::io::Error::other("not found")),
+        });
+        let public_err = Error::from(err);
+
+        assert_eq!(public_err.kind(), ErrorKind::Data);
+    }
+
+    #[test]
+    fn object_store_error_non_not_found_maps_to_unavailable() {
+        let err = SlateDBError::from(object_store::Error::NotImplemented);
+        let public_err = Error::from(err);
+
+        assert_eq!(public_err.kind(), ErrorKind::Unavailable);
     }
 }

@@ -26,9 +26,9 @@ impl DbSnapshot {
     pub(crate) fn new(
         db_inner: Arc<DbInner>,
         txn_manager: Arc<TransactionManager>,
-        seq: u64,
+        seq: Option<u64>,
     ) -> Arc<Self> {
-        let txn_id = txn_manager.new_txn(seq, true);
+        let (txn_id, seq) = txn_manager.new_snapshot(seq);
 
         Arc::new(Self {
             txn_id,

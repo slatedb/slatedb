@@ -224,10 +224,8 @@ typedef struct slatedb_write_options_t {
 typedef struct slatedb_write_handle_t {
     // Sequence number assigned to this write.
     uint64_t seq;
-    // Creation timestamp (if present).
+    // Creation timestamp assigned to this write.
     int64_t create_ts;
-    // Whether `create_ts` is present.
-    bool create_ts_present;
 } slatedb_write_handle_t;
 
 // Merge options passed to merge operations.
@@ -242,9 +240,9 @@ typedef struct slatedb_merge_options_t {
 typedef struct slatedb_bound_t {
     // Bound kind. Use `SLATEDB_BOUND_KIND_*` constants.
     uint8_t kind;
-    // Bound bytes for included/excluded bounds.
-    const uint8_t *data;
-    // Length of `data`.
+    // Bound value for included/excluded bounds.
+    const void *data;
+    // Length of `data` if data is an array.
     uintptr_t len;
 } slatedb_bound_t;
 

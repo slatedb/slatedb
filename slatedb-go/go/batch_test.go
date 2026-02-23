@@ -230,8 +230,7 @@ var _ = Describe("WriteBatch", func() {
 			Expect(err).NotTo(HaveOccurred())
 			Expect(wh).NotTo(BeNil())
 			Expect(wh.Seq).To(Equal(uint64(1)))
-			Expect(wh.CreateTs).NotTo(BeNil())
-			Expect(*wh.CreateTs).To(BeNumerically(">", 0))
+			Expect(wh.CreateTs).To(BeNumerically(">", 0))
 		})
 
 		It("should return valid WriteHandle for WriteWithOptions", func() {
@@ -247,8 +246,7 @@ var _ = Describe("WriteBatch", func() {
 			Expect(err).NotTo(HaveOccurred())
 			Expect(wh).NotTo(BeNil())
 			Expect(wh.Seq).To(Equal(uint64(1)))
-			Expect(wh.CreateTs).NotTo(BeNil())
-			Expect(*wh.CreateTs).To(BeNumerically(">", 0))
+			Expect(wh.CreateTs).To(BeNumerically(">", 0))
 		})
 
 		It("should return increasing Seq for subsequent writes", func() {
@@ -264,8 +262,7 @@ var _ = Describe("WriteBatch", func() {
 			Expect(err).NotTo(HaveOccurred())
 
 			Expect(wh1.Seq).To(Equal(uint64(1)))
-			Expect(wh1.CreateTs).NotTo(BeNil())
-			Expect(*wh1.CreateTs).To(BeNumerically(">", 0))
+			Expect(wh1.CreateTs).To(BeNumerically(">", 0))
 
 			// Second write
 			batch2, err := slatedb.NewWriteBatch()
@@ -279,8 +276,7 @@ var _ = Describe("WriteBatch", func() {
 			Expect(err).NotTo(HaveOccurred())
 
 			Expect(wh2.Seq).To(Equal(uint64(2)))
-			Expect(wh2.CreateTs).NotTo(BeNil())
-			Expect(*wh2.CreateTs).To(BeNumerically(">", 0))
+			Expect(wh2.CreateTs).To(BeNumerically(">", 0))
 		})
 	})
 

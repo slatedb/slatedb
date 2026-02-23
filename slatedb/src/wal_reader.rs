@@ -56,10 +56,9 @@
 //!
 //!     let reader = WalReader::new(path, object_store);
 //!     for wal_file in reader.list(..).await? {
-//!         if let Some(mut iter) = wal_file.iterator().await? {
-//!             while let Some(entry) = iter.next_entry().await? {
-//!                 let _ = entry;
-//!             }
+//!         let mut iter = wal_file.iterator().await?;
+//!         while let Some(entry) = iter.next_entry().await? {
+//!             let _ = entry;
 //!         }
 //!     }
 //!     Ok(())
@@ -74,7 +73,6 @@ use object_store::path::Path;
 use object_store::ObjectStore;
 
 use crate::db_state::SsTableId;
-use crate::error::SlateDBError;
 use crate::format::sst::SsTableFormat;
 use crate::iter::{EmptyIterator, KeyValueIterator};
 use crate::object_stores::ObjectStores;
@@ -125,30 +123,34 @@ pub struct WalFile {
 impl WalFile {
     /// Returns metadata for this WAL file.
     ///
-    /// Returns `Ok(None)` if the WAL file no longer exists.
-    pub async fn metadata(&self) -> Result<Option<WalFileMetadata>, crate::Error> {
-        let metadata = match self.table_store.metadata(&SsTableId::Wal(self.id)).await {
-            Ok(metadata) => metadata,
-            Err(err) if is_object_not_found(&err) => return Ok(None),
-            Err(err) => return Err(err.into()),
-        };
-        Ok(Some(WalFileMetadata {
+    /// ## Errors
+    ///
+    /// Raises an error if the metadata could not be read from object storage. This can
+    /// happen if the file was deleted after listing or if there was an issue with the
+    /// object store. If the file is missing, a [`crate::Error`] with
+    /// [`crate::ErrorKind::Data`] is returned, and its source contains an
+    /// `object_store::Error::NotFound`.
+    pub async fn metadata(&self) -> Result<WalFileMetadata, crate::Error> {
+        let metadata = self.table_store.metadata(&SsTableId::Wal(self.id)).await?;
+        Ok(WalFileMetadata {
             last_modified_dt: metadata.last_modified,
             size_bytes: metadata.size,
             location: metadata.location,
-        }))
+        })
     }
 
     /// Returns an iterator over `RowEntry`s in this WAL file. Raises an error if the
     /// WAL file could not be read.
     ///
-    /// Returns `Ok(None)` if the WAL file no longer exists.
-    pub async fn iterator(&self) -> Result<Option<WalFileIterator>, crate::Error> {
-        let sst = match self.table_store.open_sst(&SsTableId::Wal(self.id)).await {
-            Ok(sst) => sst,
-            Err(err) if is_object_not_found(&err) => return Ok(None),
-            Err(err) => return Err(err.into()),
-        };
+    /// ## Errors
+    ///
+    /// Raises an error if the data could not be read from object storage. This can
+    /// happen if the file was deleted after listing or if there was an issue with the
+    /// object store. If the file is missing, a [`crate::Error`] with
+    /// [`crate::ErrorKind::Data`] is returned, and its source contains an
+    /// `object_store::Error::NotFound`.
+    pub async fn iterator(&self) -> Result<WalFileIterator, crate::Error> {
+        let sst = self.table_store.open_sst(&SsTableId::Wal(self.id)).await?;
         let iter = match SstIterator::new_owned_initialized(
             ..,
             sst,
@@ -159,10 +161,9 @@ impl WalFile {
         {
             Ok(Some(iter)) => Box::new(iter) as Box<dyn KeyValueIterator + 'static>,
             Ok(None) => Box::new(EmptyIterator::new()) as Box<dyn KeyValueIterator + 'static>,
-            Err(err) if is_object_not_found(&err) => return Ok(None),
             Err(err) => return Err(err.into()),
         };
-        Ok(Some(WalFileIterator::new(iter)))
+        Ok(WalFileIterator::new(iter))
     }
 
     /// Returns the WAL ID immediately following this file's ID.
@@ -179,14 +180,6 @@ impl WalFile {
             table_store: Arc::clone(&self.table_store),
         }
     }
-}
-
-fn is_object_not_found(err: &SlateDBError) -> bool {
-    matches!(
-        err,
-        SlateDBError::ObjectStoreError(source)
-            if matches!(source.as_ref(), object_store::Error::NotFound { .. })
-    )
 }
 
 /// Reads WAL files in object storage for a specific database.
@@ -234,12 +227,26 @@ impl WalReader {
 
 #[cfg(test)]
 mod tests {
+    use std::error::Error;
+
     use super::*;
     use crate::config::{FlushOptions, FlushType, PutOptions, WriteOptions};
     use crate::test_utils::StringConcatMergeOperator;
     use crate::types::ValueDeletable;
     use crate::Db;
     use object_store::memory::InMemory;
+
+    fn has_not_found_object_store_source(err: &crate::Error) -> bool {
+        err.source()
+            .and_then(|source| source.downcast_ref::<object_store::Error>())
+            .is_some_and(|source| matches!(source, object_store::Error::NotFound { .. }))
+            || err
+                .source()
+                .and_then(|source| source.downcast_ref::<Arc<object_store::Error>>())
+                .is_some_and(|source| {
+                    matches!(source.as_ref(), object_store::Error::NotFound { .. })
+                })
+    }
 
     #[tokio::test]
     async fn test_list_and_iterator() {
@@ -273,11 +280,7 @@ mod tests {
         assert!(!wal_files.is_empty());
         let mut rows = Vec::new();
         for wal_file in wal_files {
-            let mut iter = wal_file
-                .iterator()
-                .await
-                .unwrap()
-                .expect("WAL file listed by WalReader should be readable");
+            let mut iter = wal_file.iterator().await.unwrap();
             while let Some(entry) = iter.next_entry().await.unwrap() {
                 rows.push(entry);
             }
@@ -324,11 +327,7 @@ mod tests {
         assert!(!wal_files.is_empty());
         let mut rows = Vec::new();
         for wal_file in wal_files {
-            let mut iter = wal_file
-                .iterator()
-                .await
-                .unwrap()
-                .expect("WAL file listed by WalReader should be readable");
+            let mut iter = wal_file.iterator().await.unwrap();
             while let Some(entry) = iter.next_entry().await.unwrap() {
                 rows.push(entry);
             }
@@ -365,11 +364,7 @@ mod tests {
         assert!(!wal_files.is_empty());
 
         for wal_file in wal_files {
-            let wal_metadata = wal_file
-                .metadata()
-                .await
-                .unwrap()
-                .expect("WAL file listed by WalReader should have metadata");
+            let wal_metadata = wal_file.metadata().await.unwrap();
             let object_metadata = main_store.head(&wal_metadata.location).await.unwrap();
             assert_eq!(wal_metadata.last_modified_dt, object_metadata.last_modified);
             assert_eq!(wal_metadata.size_bytes, object_metadata.size);
@@ -401,7 +396,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_metadata_returns_none_when_file_deleted() {
+    async fn test_metadata_returns_error_when_file_deleted() {
         let main_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = "/test_wal_reader_missing_metadata";
         let db = Db::open(path, main_store.clone()).await.unwrap();
@@ -427,18 +422,19 @@ mod tests {
             .into_iter()
             .next()
             .expect("expected at least one WAL file");
-        let wal_metadata = wal_file
-            .metadata()
-            .await
-            .unwrap()
-            .expect("expected WAL metadata before delete");
+        let wal_metadata = wal_file.metadata().await.unwrap();
 
         main_store.delete(&wal_metadata.location).await.unwrap();
-        assert!(wal_file.metadata().await.unwrap().is_none());
+        let err = wal_file
+            .metadata()
+            .await
+            .expect_err("expected metadata() to fail after deleting WAL file");
+        assert_eq!(err.kind(), crate::ErrorKind::Data);
+        assert!(has_not_found_object_store_source(&err));
     }
 
     #[tokio::test]
-    async fn test_iterator_returns_none_when_file_deleted() {
+    async fn test_iterator_returns_error_when_file_deleted() {
         let main_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = "/test_wal_reader_missing_iterator";
         let db = Db::open(path, main_store.clone()).await.unwrap();
@@ -464,14 +460,15 @@ mod tests {
             .into_iter()
             .next()
             .expect("expected at least one WAL file");
-        let wal_metadata = wal_file
-            .metadata()
-            .await
-            .unwrap()
-            .expect("expected WAL metadata before delete");
+        let wal_metadata = wal_file.metadata().await.unwrap();
 
         main_store.delete(&wal_metadata.location).await.unwrap();
-        assert!(wal_file.iterator().await.unwrap().is_none());
+        let err = match wal_file.iterator().await {
+            Ok(_) => panic!("expected iterator() to fail after deleting WAL file"),
+            Err(err) => err,
+        };
+        assert_eq!(err.kind(), crate::ErrorKind::Data);
+        assert!(has_not_found_object_store_source(&err));
     }
 
     #[tokio::test]
@@ -493,11 +490,7 @@ mod tests {
 
         let mut rows = Vec::new();
         for wal_file in wal_files {
-            let mut iter = wal_file
-                .iterator()
-                .await
-                .unwrap()
-                .expect("WAL file listed by WalReader should be readable");
+            let mut iter = wal_file.iterator().await.unwrap();
             while let Some(entry) = iter.next_entry().await.unwrap() {
                 rows.push(entry);
             }
@@ -533,11 +526,7 @@ mod tests {
 
         let mut rows = Vec::new();
         for wal_file in wal_files {
-            let mut iter = wal_file
-                .iterator()
-                .await
-                .unwrap()
-                .expect("WAL file listed by WalReader should be readable");
+            let mut iter = wal_file.iterator().await.unwrap();
             while let Some(entry) = iter.next_entry().await.unwrap() {
                 rows.push(entry);
             }

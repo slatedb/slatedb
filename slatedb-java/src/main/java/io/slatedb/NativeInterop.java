@@ -8,11 +8,11 @@ import java.lang.foreign.Arena;
 import java.lang.foreign.GroupLayout;
 import java.lang.foreign.MemoryLayout;
 import java.lang.foreign.MemorySegment;
+import java.lang.foreign.SegmentAllocator;
 import java.lang.foreign.ValueLayout;
 import java.lang.invoke.VarHandle;
 import java.nio.charset.StandardCharsets;
 import java.util.Objects;
-import java.util.OptionalLong;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /// Java-typed wrappers around generated jextract bindings.
@@ -155,6 +155,24 @@ final class NativeInterop {
             try (Arena arena = Arena.ofConfined()) {
                 checkResult(Native.slatedb_write_batch_close(arena, segment));
             }
+        }
+    }
+
+    static final class WriteHandleHandle {
+        private final long seq;
+        private final long createTs;
+
+        private WriteHandleHandle(long seq, long createTs) {
+            this.seq = seq;
+            this.createTs = createTs;
+        }
+
+        long seq() {
+            return seq;
+        }
+
+        long createTs() {
+            return createTs;
         }
     }
 
@@ -525,7 +543,7 @@ final class NativeInterop {
         Objects.requireNonNull(value, "value");
 
         try (Arena arena = Arena.ofConfined()) {
-            MemorySegment outHandle = arena.allocate(WRITE_HANDLE_LAYOUT);
+            MemorySegment outHandle = slatedb_write_handle_t.allocate(arena);
             checkResult(
                 Native.slatedb_db_put_with_options(
                     arena,
@@ -552,7 +570,7 @@ final class NativeInterop {
         Objects.requireNonNull(key, "key");
 
         try (Arena arena = Arena.ofConfined()) {
-            MemorySegment outHandle = arena.allocate(WRITE_HANDLE_LAYOUT);
+            MemorySegment outHandle = slatedb_write_handle_t.allocate(arena);
             checkResult(
                 Native.slatedb_db_delete_with_options(
                     arena,
@@ -583,7 +601,7 @@ final class NativeInterop {
         Objects.requireNonNull(value, "value");
 
         try (Arena arena = Arena.ofConfined()) {
-            MemorySegment outHandle = arena.allocate(WRITE_HANDLE_LAYOUT);
+            MemorySegment outHandle = slatedb_write_handle_t.allocate(arena);
             checkResult(
                 Native.slatedb_db_merge_with_options(
                     arena,
@@ -610,7 +628,7 @@ final class NativeInterop {
         Objects.requireNonNull(writeBatch, "writeBatch");
 
         try (Arena arena = Arena.ofConfined()) {
-            MemorySegment outHandle = arena.allocate(WRITE_HANDLE_LAYOUT);
+            MemorySegment outHandle = slatedb_write_handle_t.allocate(arena);
             checkResult(
                 Native.slatedb_db_write_with_options(
                     arena,
@@ -677,55 +695,10 @@ final class NativeInterop {
         }
     }
 
-    static RowEntry slatedb_iterator_next_row(IteratorHandle iterator) {
-        Objects.requireNonNull(iterator, "iterator");
-
-        try (Arena arena = Arena.ofConfined()) {
-            MemorySegment outPresent = arena.allocate(Native.C_BOOL);
-            MemorySegment outRow = arena.allocate(Native.C_POINTER);
-
-            checkResult(
-                    Native.slatedb_iterator_next_row(
-                            arena,
-                            iterator.segment(),
-                            outPresent,
-                            outRow
-                    )
-            );
-
-            boolean present = outPresent.get(Native.C_BOOL, 0);
-            if (!present) {
-                return null;
-            }
-
-            MemorySegment rowPtr = outRow.get(Native.C_POINTER, 0);
-            try {
-                return readRowEntry(rowPtr);
-            } finally {
-                Native.slatedb_row_free(rowPtr);
-            }
-        }
-    }
-
-    private static final GroupLayout WRITE_HANDLE_LAYOUT = MemoryLayout.structLayout(
-        ValueLayout.JAVA_LONG.withName("seq"),
-        ValueLayout.JAVA_LONG.withName("create_ts"),
-        ValueLayout.JAVA_BOOLEAN.withName("create_ts_present"),
-        MemoryLayout.paddingLayout(7)
-    ).withName("slatedb_write_handle_t");
-
-    private static final VarHandle WRITE_HANDLE_SEQ =
-        WRITE_HANDLE_LAYOUT.varHandle(MemoryLayout.PathElement.groupElement("seq"));
-    private static final VarHandle WRITE_HANDLE_CREATE_TS =
-        WRITE_HANDLE_LAYOUT.varHandle(MemoryLayout.PathElement.groupElement("create_ts"));
-    private static final VarHandle WRITE_HANDLE_CREATE_TS_PRESENT =
-        WRITE_HANDLE_LAYOUT.varHandle(MemoryLayout.PathElement.groupElement("create_ts_present"));
-
     private static SlateDbWriteHandle readWriteHandle(MemorySegment segment) {
-        long seq = (long) WRITE_HANDLE_SEQ.get(segment, 0L);
-        boolean present = (boolean) WRITE_HANDLE_CREATE_TS_PRESENT.get(segment, 0L);
-        OptionalLong createTs = present ? OptionalLong.of((long) WRITE_HANDLE_CREATE_TS.get(segment, 0L)) : OptionalLong.empty();
-        return new SlateDbWriteHandle(seq, createTs);
+        long seq = slatedb_write_handle_t.seq(segment);
+        long createTs = slatedb_write_handle_t.create_ts(segment);
+        return new SlateDbWriteHandle(new WriteHandleHandle(seq, createTs));
     }
 
     private static final GroupLayout ROW_LAYOUT = MemoryLayout.structLayout(
@@ -805,7 +778,37 @@ final class NativeInterop {
             try {
                 return readRowEntry(rowPtr);
             } finally {
-                Native.slatedb_row_free(rowPtr);
+                Native.slatedb_row_entry_free(rowPtr);
+            }
+        }
+    }
+
+    static RowEntry slatedb_iterator_next_row(IteratorHandle iter) {
+        Objects.requireNonNull(iter, "iter");
+
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment outPresent = arena.allocate(Native.C_BOOL);
+            MemorySegment outRow = arena.allocate(Native.C_POINTER);
+
+            checkResult(
+                    Native.slatedb_iterator_next_row(
+                            arena,
+                            iter.segment(),
+                            outPresent,
+                            outRow
+                    )
+            );
+
+            boolean present = outPresent.get(Native.C_BOOL, 0);
+            if (!present) {
+                return null;
+            }
+
+            MemorySegment rowPtr = outRow.get(Native.C_POINTER, 0);
+            try {
+                return readRowEntry(rowPtr);
+            } finally {
+                Native.slatedb_row_entry_free(rowPtr);
             }
         }
     }

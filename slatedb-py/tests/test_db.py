@@ -115,6 +115,52 @@ async def test_mixed_sync_async_operations(db):
     assert result is None
 
 
+def test_put_returns_write_handle_with_timestamp(db_path, env_file):
+    db = SlateDB(db_path, env_file=env_file)
+    try:
+        handle = db.put(b"wh-key", b"wh-value")
+        assert isinstance(handle.seq, int)
+        assert isinstance(handle.create_ts, int)
+        assert handle.seq >= 1
+        assert handle.create_ts >= 0
+    finally:
+        db.close()
+
+
+def test_txn_commit_returns_none_when_no_writes(db_path, env_file):
+    db = SlateDB(db_path, env_file=env_file)
+    try:
+        txn = db.begin("si")
+        assert txn.commit() is None
+    finally:
+        db.close()
+
+
+def test_txn_commit_returns_write_handle_when_writes_exist(db_path, env_file):
+    db = SlateDB(db_path, env_file=env_file)
+    try:
+        txn = db.begin("si")
+        txn.put(b"txn-wh-key", b"txn-wh-value")
+        handle = txn.commit()
+        assert handle is not None
+        assert isinstance(handle.seq, int)
+        assert isinstance(handle.create_ts, int)
+        assert handle.seq >= 1
+        assert handle.create_ts >= 0
+    finally:
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_txn_commit_async_returns_none_when_no_writes(db_path, env_file):
+    db = SlateDB(db_path, env_file=env_file)
+    try:
+        txn = await db.begin_async("si")
+        assert await txn.commit_async() is None
+    finally:
+        db.close()
+
+
 def test_merge_operator_callable_concat(db_path):
     """DB merge using a Python callable merge operator (concat)."""
     def concat(key, existing, value):

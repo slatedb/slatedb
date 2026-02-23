@@ -4,14 +4,15 @@
 //! executing read/write operations.
 
 use crate::ffi::{
-    alloc_bytes, bytes_from_ptr, create_runtime, cstr_to_string, error_from_slate_error,
-    error_result, flush_options_from_ptr, merge_options_from_ptr, put_options_from_ptr,
-    range_from_c, read_options_from_ptr, require_handle, require_out_ptr, scan_options_from_ptr,
-    slatedb_db_t, slatedb_error_kind_t, slatedb_flush_options_t, slatedb_iterator_t,
-    slatedb_merge_options_t, slatedb_object_store_t, slatedb_put_options_t, slatedb_range_t,
-    slatedb_read_options_t, slatedb_result_t, slatedb_row_entry_t, slatedb_scan_options_t,
-    slatedb_write_batch_t, slatedb_write_handle_t, slatedb_write_options_t, success_result,
-    take_write_batch, validate_write_key, validate_write_key_value, write_options_from_ptr,
+    alloc_bytes, bytes_from_ptr, bytes_range_from_c, create_runtime, cstr_to_string,
+    error_from_slate_error, error_result, flush_options_from_ptr, merge_options_from_ptr,
+    put_options_from_ptr, read_options_from_ptr, require_handle, require_out_ptr,
+    scan_options_from_ptr, slatedb_db_t, slatedb_error_kind_t, slatedb_flush_options_t,
+    slatedb_iterator_t, slatedb_merge_options_t, slatedb_object_store_t, slatedb_put_options_t,
+    slatedb_range_t, slatedb_read_options_t, slatedb_result_t, slatedb_row_entry_t,
+    slatedb_scan_options_t, slatedb_write_batch_t, slatedb_write_handle_t, slatedb_write_options_t,
+    success_result, take_write_batch, validate_write_key, validate_write_key_value,
+    write_options_from_ptr,
 };
 use serde_json::{Map, Value};
 use slatedb::Db;
@@ -498,7 +499,6 @@ pub unsafe extern "C" fn slatedb_db_put_with_options(
         *out_handle = slatedb_write_handle_t {
             seq: 0,
             create_ts: 0,
-            create_ts_present: false,
         };
     }
 
@@ -513,8 +513,7 @@ pub unsafe extern "C" fn slatedb_db_put_with_options(
             if !out_handle.is_null() {
                 *out_handle = slatedb_write_handle_t {
                     seq: write_handle.seqnum(),
-                    create_ts: write_handle.create_ts().unwrap_or(0),
-                    create_ts_present: write_handle.create_ts().is_some(),
+                    create_ts: write_handle.create_ts(),
                 };
             }
             success_result()
@@ -591,7 +590,6 @@ pub unsafe extern "C" fn slatedb_db_delete_with_options(
         *out_handle = slatedb_write_handle_t {
             seq: 0,
             create_ts: 0,
-            create_ts_present: false,
         };
     }
 
@@ -604,8 +602,7 @@ pub unsafe extern "C" fn slatedb_db_delete_with_options(
             if !out_handle.is_null() {
                 *out_handle = slatedb_write_handle_t {
                     seq: write_handle.seqnum(),
-                    create_ts: write_handle.create_ts().unwrap_or(0),
-                    create_ts_present: write_handle.create_ts().is_some(),
+                    create_ts: write_handle.create_ts(),
                 };
             }
             success_result()
@@ -710,7 +707,6 @@ pub unsafe extern "C" fn slatedb_db_merge_with_options(
         *out_handle = slatedb_write_handle_t {
             seq: 0,
             create_ts: 0,
-            create_ts_present: false,
         };
     }
 
@@ -725,8 +721,7 @@ pub unsafe extern "C" fn slatedb_db_merge_with_options(
             if !out_handle.is_null() {
                 *out_handle = slatedb_write_handle_t {
                     seq: write_handle.seqnum(),
-                    create_ts: write_handle.create_ts().unwrap_or(0),
-                    create_ts_present: write_handle.create_ts().is_some(),
+                    create_ts: write_handle.create_ts(),
                 };
             }
             success_result()
@@ -804,7 +799,6 @@ pub unsafe extern "C" fn slatedb_db_write_with_options(
         *out_handle = slatedb_write_handle_t {
             seq: 0,
             create_ts: 0,
-            create_ts_present: false,
         };
     }
 
@@ -817,8 +811,7 @@ pub unsafe extern "C" fn slatedb_db_write_with_options(
             if !out_handle.is_null() {
                 *out_handle = slatedb_write_handle_t {
                     seq: write_handle.seqnum(),
-                    create_ts: write_handle.create_ts().unwrap_or(0),
-                    create_ts_present: write_handle.create_ts().is_some(),
+                    create_ts: write_handle.create_ts(),
                 };
             }
             success_result()
@@ -883,7 +876,7 @@ pub unsafe extern "C" fn slatedb_db_scan_with_options(
         return err;
     }
 
-    let range = match range_from_c(range) {
+    let range = match bytes_range_from_c(range) {
         Ok(range) => range,
         Err(err) => return err,
     };

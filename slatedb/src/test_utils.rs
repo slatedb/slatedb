@@ -443,6 +443,9 @@ pub(crate) struct FlakyObjectStore {
     list_with_offset_fail_after: AtomicUsize,
     // List with offset: total number of `list_with_offset` invocations
     list_with_offset_attempts: AtomicUsize,
+    // get_range: transient failures on first N attempts
+    fail_first_get_range: AtomicUsize,
+    get_range_attempts: AtomicUsize,
 }
 
 impl FlakyObjectStore {
@@ -461,6 +464,8 @@ impl FlakyObjectStore {
             fail_first_list_with_offset: AtomicUsize::new(0),
             list_with_offset_fail_after: AtomicUsize::new(0),
             list_with_offset_attempts: AtomicUsize::new(0),
+            fail_first_get_range: AtomicUsize::new(0),
+            get_range_attempts: AtomicUsize::new(0),
         }
     }
 
@@ -516,6 +521,15 @@ impl FlakyObjectStore {
         self.list_with_offset_attempts.load(Ordering::SeqCst)
     }
 
+    pub(crate) fn with_get_range_failures(self, n: usize) -> Self {
+        self.fail_first_get_range.store(n, Ordering::SeqCst);
+        self
+    }
+
+    pub(crate) fn get_range_attempts(&self) -> usize {
+        self.get_range_attempts.load(Ordering::SeqCst)
+    }
+
     /// Inject a failure after `fail_after` successful items in the stream.
     ///
     /// ## Args
@@ -555,6 +569,34 @@ impl ObjectStore for FlakyObjectStore {
         options: GetOptions,
     ) -> object_store::Result<object_store::GetResult> {
         self.inner.get_opts(location, options).await
+    }
+
+    async fn get_range(
+        &self,
+        location: &Path,
+        range: std::ops::Range<u64>,
+    ) -> object_store::Result<Bytes> {
+        self.get_range_attempts.fetch_add(1, Ordering::SeqCst);
+        if self
+            .fail_first_get_range
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| {
+                if v > 0 {
+                    Some(v - 1)
+                } else {
+                    None
+                }
+            })
+            .is_ok()
+        {
+            return Err(object_store::Error::Generic {
+                store: "flaky_get_range",
+                source: Box::new(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "injected get_range timeout",
+                )),
+            });
+        }
+        self.inner.get_range(location, range).await
     }
 
     async fn head(&self, location: &Path) -> object_store::Result<ObjectMeta> {

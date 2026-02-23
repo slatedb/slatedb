@@ -3,11 +3,12 @@
 //! This module exposes C ABI functions backed by `slatedb::DbReader`.
 
 use crate::ffi::{
-    alloc_bytes, bytes_from_ptr, create_runtime, cstr_to_string, db_reader_options_from_ptr,
-    error_from_slate_error, error_result, range_from_c, read_options_from_ptr, require_handle,
-    require_out_ptr, scan_options_from_ptr, slatedb_db_reader_options_t, slatedb_db_reader_t,
-    slatedb_error_kind_t, slatedb_iterator_t, slatedb_object_store_t, slatedb_range_t,
-    slatedb_read_options_t, slatedb_result_t, slatedb_scan_options_t, success_result,
+    alloc_bytes, bytes_from_ptr, bytes_range_from_c, create_runtime, cstr_to_string,
+    db_reader_options_from_ptr, error_from_slate_error, error_result, read_options_from_ptr,
+    require_handle, require_out_ptr, scan_options_from_ptr, slatedb_db_reader_options_t,
+    slatedb_db_reader_t, slatedb_error_kind_t, slatedb_iterator_t, slatedb_object_store_t,
+    slatedb_range_t, slatedb_read_options_t, slatedb_result_t, slatedb_scan_options_t,
+    success_result,
 };
 use slatedb::DbReader;
 use uuid::Uuid;
@@ -276,7 +277,7 @@ pub unsafe extern "C" fn slatedb_db_reader_scan_with_options(
     }
     *out_iterator = std::ptr::null_mut();
 
-    let range = match range_from_c(range) {
+    let range = match bytes_range_from_c(range) {
         Ok(range) => range,
         Err(err) => return err,
     };
@@ -433,7 +434,7 @@ mod tests {
         slatedb_bound_t, slatedb_error_kind_t, SLATEDB_BOUND_KIND_EXCLUDED,
         SLATEDB_BOUND_KIND_INCLUDED,
     };
-    use std::ffi::{CStr, CString};
+    use std::ffi::{c_void, CStr, CString};
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
     use tokio::runtime::{Builder as RuntimeBuilder, Runtime};
@@ -561,12 +562,12 @@ mod tests {
         let range = slatedb_range_t {
             start: slatedb_bound_t {
                 kind: SLATEDB_BOUND_KIND_INCLUDED,
-                data: start.as_ptr(),
+                data: start.as_ptr() as *const c_void,
                 len: start.len(),
             },
             end: slatedb_bound_t {
                 kind: SLATEDB_BOUND_KIND_EXCLUDED,
-                data: end.as_ptr(),
+                data: end.as_ptr() as *const c_void,
                 len: end.len(),
             },
         };

@@ -127,12 +127,14 @@ use crate::compactor_executor::{TokioCompactionExecutor, TokioCompactionExecutor
 use crate::config::default_block_cache;
 use crate::config::default_meta_cache;
 use crate::config::CompactorOptions;
+use crate::config::DbReaderOptions;
 use crate::config::GarbageCollectorOptions;
 use crate::config::{Settings, SstBlockSize};
 use crate::db::Db;
 use crate::db::DbInner;
 use crate::db_cache::SplitCache;
 use crate::db_cache::{DbCache, DbCacheWrapper};
+use crate::db_reader::DbReader;
 use crate::db_state::ManifestCore;
 use crate::dispatcher::MessageHandlerExecutor;
 use crate::error::SlateDBError;
@@ -148,6 +150,7 @@ use crate::paths::PathResolver;
 use crate::rand::DbRand;
 use crate::retrying_object_store::RetryingObjectStore;
 use crate::stats::StatRegistry;
+use crate::store_provider::DefaultStoreProvider;
 use crate::tablestore::TableStore;
 use crate::utils::WatchableOnceCell;
 use slatedb_common::clock::DefaultSystemClock;
@@ -1002,5 +1005,158 @@ impl<P: Into<Path>> CompactorBuilder<P> {
             #[cfg(feature = "compaction_filters")]
             self.compaction_filter_supplier,
         )
+    }
+}
+
+/// Builder for creating new DbReader instances.
+///
+/// This provides a fluent API for configuring a DbReader object.
+/// It separates the concerns of configuration options (DbReaderOptions) and components.
+///
+/// # Examples
+///
+/// Basic usage:
+///
+/// ```
+/// use slatedb::{Db, DbReader, Error};
+/// use slatedb::object_store::{ObjectStore, memory::InMemory};
+/// use std::sync::Arc;
+///
+/// #[tokio::main]
+/// async fn main() -> Result<(), Error> {
+///     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+///     // First create a database
+///     let db = Db::open("test_db", Arc::clone(&object_store)).await?;
+///     db.close().await?;
+///     // Then open a reader
+///     let reader = DbReader::builder("test_db", object_store)
+///         .build()
+///         .await?;
+///     Ok(())
+/// }
+/// ```
+///
+/// With custom options:
+///
+/// ```
+/// use slatedb::{Db, DbReader, config::DbReaderOptions, Error};
+/// use slatedb::object_store::{ObjectStore, memory::InMemory};
+/// use std::sync::Arc;
+///
+/// #[tokio::main]
+/// async fn main() -> Result<(), Error> {
+///     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+///     // First create a database
+///     let db = Db::open("test_db", Arc::clone(&object_store)).await?;
+///     db.close().await?;
+///     // Then open a reader with custom options
+///     let reader = DbReader::builder("test_db", object_store)
+///         .with_options(DbReaderOptions {
+///             manifest_poll_interval: std::time::Duration::from_secs(5),
+///             ..Default::default()
+///         })
+///         .build()
+///         .await?;
+///     Ok(())
+/// }
+/// ```
+pub struct DbReaderBuilder<P: Into<Path>> {
+    path: P,
+    object_store: Arc<dyn ObjectStore>,
+    checkpoint_id: Option<uuid::Uuid>,
+    options: DbReaderOptions,
+    system_clock: Arc<dyn SystemClock>,
+    rand: Arc<DbRand>,
+    stat_registry: Arc<StatRegistry>,
+}
+
+impl<P: Into<Path>> DbReaderBuilder<P> {
+    /// Creates a new DbReaderBuilder with the given path and object store.
+    pub fn new(path: P, object_store: Arc<dyn ObjectStore>) -> Self {
+        Self {
+            path,
+            object_store,
+            checkpoint_id: None,
+            options: DbReaderOptions::default(),
+            system_clock: Arc::new(DefaultSystemClock::default()),
+            rand: Arc::new(DbRand::default()),
+            stat_registry: Arc::new(StatRegistry::new()),
+        }
+    }
+
+    /// Sets the checkpoint ID to use for the reader.
+    /// If not set, the reader will create and manage its own checkpoint.
+    pub fn with_checkpoint_id(mut self, checkpoint_id: uuid::Uuid) -> Self {
+        self.checkpoint_id = Some(checkpoint_id);
+        self
+    }
+
+    /// Sets the options to use for the reader.
+    pub fn with_options(mut self, options: DbReaderOptions) -> Self {
+        self.options = options;
+        self
+    }
+
+    /// Sets the system clock to use for the reader.
+    pub fn with_system_clock(mut self, system_clock: Arc<dyn SystemClock>) -> Self {
+        self.system_clock = system_clock;
+        self
+    }
+
+    /// Sets the seed to use for the reader's random number generator.
+    /// All random behavior in SlateDB will use random number generators
+    /// based off of this seed.
+    ///
+    /// If not set, SlateDB uses the OS's random number generator to generate a seed.
+    pub fn with_seed(mut self, seed: u64) -> Self {
+        self.rand = Arc::new(DbRand::new(seed));
+        self
+    }
+
+    /// Sets the stats registry to use for the reader.
+    pub fn with_stat_registry(mut self, stat_registry: Arc<StatRegistry>) -> Self {
+        self.stat_registry = stat_registry;
+        self
+    }
+
+    /// Builds and returns a DbReader instance.
+    pub async fn build(self) -> Result<DbReader, crate::Error> {
+        let path = self.path.into();
+        let retrying_object_store = Arc::new(RetryingObjectStore::new(
+            self.object_store,
+            self.rand.clone(),
+            self.system_clock.clone(),
+        ));
+
+        // Setup object store with optional caching
+        let object_store: Arc<dyn ObjectStore> = match CachedObjectStore::from_config(
+            retrying_object_store.clone(),
+            &self.options.object_store_cache_options,
+            self.stat_registry.as_ref(),
+            self.system_clock.clone(),
+            self.rand.clone(),
+        )
+        .await?
+        {
+            Some(cached) => cached,
+            None => retrying_object_store,
+        };
+
+        let store_provider = DefaultStoreProvider {
+            path,
+            object_store,
+            block_cache: self.options.block_cache.clone(),
+            block_transformer: self.options.block_transformer.clone(),
+        };
+
+        DbReader::open_internal(
+            &store_provider,
+            self.checkpoint_id,
+            self.options,
+            self.system_clock,
+            self.rand,
+        )
+        .await
+        .map_err(Into::into)
     }
 }

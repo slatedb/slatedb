@@ -228,9 +228,9 @@ class SlateDbTest {
             assertArrayEquals(key, row.key());
             assertArrayEquals(value, row.value());
             assertEquals(wh.seq(), row.seq());
-            if (wh.createTs().isPresent()) {
+            if (wh.createTs() > 0) {
                 assertTrue(row.createTs().isPresent());
-                assertEquals(wh.createTs().getAsLong(), row.createTs().get().toEpochMilli());
+                assertEquals(wh.createTs(), row.createTs().get().toEpochMilli());
             }
 
             // Test non-existent key
