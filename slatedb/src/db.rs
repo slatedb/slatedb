@@ -56,7 +56,7 @@ use crate::db_state::{DbState, SsTableId};
 use crate::db_stats::DbStats;
 use crate::error::SlateDBError;
 use crate::manifest::store::FenceableManifest;
-use crate::manifest::Manifest;
+use crate::manifest::{Manifest, ManifestCore};
 use crate::mem_table::WritableKVTable;
 use crate::mem_table_flush::{MemtableFlushMsg, MEMTABLE_FLUSHER_TASK_NAME};
 use crate::oracle::DbOracle;
@@ -1504,6 +1504,13 @@ impl Db {
         self.inner.stat_registry.clone()
     }
 
+    /// Get the current manifest state.
+    ///
+    /// This returns the in-memory manifest snapshot currently held by the `Db`.
+    pub fn manifest(&self) -> ManifestCore {
+        self.inner.state.read().state().core().clone()
+    }
+
     /// Begin a new transaction with the specified isolation level.
     ///
     /// ## Arguments
@@ -1699,6 +1706,24 @@ mod tests {
         kv_store.delete(key).await.unwrap();
         assert_eq!(None, kv_store.get(key).await.unwrap());
         kv_store.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_manifest_returns_current_manifest_core() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let db = Db::builder("/tmp/test_manifest_accessor", object_store)
+            .with_settings(test_db_options(0, 1024, None))
+            .build()
+            .await
+            .unwrap();
+
+        db.put(b"test_key", b"test_value").await.unwrap();
+
+        let manifest = db.manifest();
+        let expected = db.inner.state.read().state().core().clone();
+        assert_eq!(manifest, expected);
+
+        db.close().await.unwrap();
     }
 
     #[tokio::test]
