@@ -156,6 +156,45 @@ final class NativeInterop {
         }
     }
 
+    static final class WalReaderHandle extends NativeHandle {
+        private WalReaderHandle(MemorySegment segment) {
+            super("WalReaderHandle", segment);
+        }
+
+        @Override
+        protected void closeNative(MemorySegment segment) {
+            try (Arena arena = Arena.ofConfined()) {
+                checkResult(Native.slatedb_wal_reader_close(arena, segment));
+            }
+        }
+    }
+
+    static final class WalFileHandle extends NativeHandle {
+        private WalFileHandle(MemorySegment segment) {
+            super("WalFileHandle", segment);
+        }
+
+        @Override
+        protected void closeNative(MemorySegment segment) {
+            try (Arena arena = Arena.ofConfined()) {
+                checkResult(Native.slatedb_wal_file_close(arena, segment));
+            }
+        }
+    }
+
+    static final class WalFileIteratorHandle extends NativeHandle {
+        private WalFileIteratorHandle(MemorySegment segment) {
+            super("WalFileIteratorHandle", segment);
+        }
+
+        @Override
+        protected void closeNative(MemorySegment segment) {
+            try (Arena arena = Arena.ofConfined()) {
+                checkResult(Native.slatedb_wal_file_iterator_close(arena, segment));
+            }
+        }
+    }
+
     static final class WriteHandleHandle {
         private final long seq;
         private final long createTs;
@@ -1012,53 +1051,6 @@ final class NativeInterop {
         Native.slatedb_bytes_free(data, len);
     }
 
-    // =========================================================================
-    // WAL reader handles
-    // =========================================================================
-
-    static final class WalReaderHandle extends NativeHandle {
-        private WalReaderHandle(MemorySegment segment) {
-            super("WalReaderHandle", segment);
-        }
-
-        @Override
-        protected void closeNative(MemorySegment segment) {
-            try (Arena arena = Arena.ofConfined()) {
-                checkResult(Native.slatedb_wal_reader_close(arena, segment));
-            }
-        }
-    }
-
-    static final class WalFileHandle extends NativeHandle {
-        private WalFileHandle(MemorySegment segment) {
-            super("WalFileHandle", segment);
-        }
-
-        @Override
-        protected void closeNative(MemorySegment segment) {
-            try (Arena arena = Arena.ofConfined()) {
-                checkResult(Native.slatedb_wal_file_close(arena, segment));
-            }
-        }
-    }
-
-    static final class WalFileIteratorHandle extends NativeHandle {
-        private WalFileIteratorHandle(MemorySegment segment) {
-            super("WalFileIteratorHandle", segment);
-        }
-
-        @Override
-        protected void closeNative(MemorySegment segment) {
-            try (Arena arena = Arena.ofConfined()) {
-                checkResult(Native.slatedb_wal_file_iterator_close(arena, segment));
-            }
-        }
-    }
-
-    // =========================================================================
-    // WAL reader methods
-    // =========================================================================
-
     static WalReaderHandle slatedb_wal_reader_new(String path, ObjectStoreHandle objectStore) {
         Objects.requireNonNull(path, "path");
         Objects.requireNonNull(objectStore, "objectStore");
@@ -1255,40 +1247,15 @@ final class NativeInterop {
         iter.close();
     }
 
-    static final class WalIteratorNextResult {
-        private final boolean present;
-        private final byte kind;
-        private final byte[] key;
-        private final byte[] value;
-        private final long seq;
-        private final Long createTs;
-        private final Long expireTs;
-
-        WalIteratorNextResult(
-            boolean present,
-            byte kind,
-            byte[] key,
-            byte[] value,
-            long seq,
-            Long createTs,
-            Long expireTs
-        ) {
-            this.present = present;
-            this.kind = kind;
-            this.key = key;
-            this.value = value;
-            this.seq = seq;
-            this.createTs = createTs;
-            this.expireTs = expireTs;
-        }
-
-        boolean present() { return present; }
-        byte kind() { return kind; }
-        byte[] key() { return key; }
-        byte[] value() { return value; }
-        long seq() { return seq; }
-        Long createTs() { return createTs; }
-        Long expireTs() { return expireTs; }
+    record WalIteratorNextResult(
+        boolean present,
+        byte kind,
+        byte[] key,
+        byte[] value,
+        long seq,
+        Long createTs,
+        Long expireTs
+    ) {
     }
 
     private static MemorySegment marshalU64Range(Arena arena, Long startId, Long endId) {
