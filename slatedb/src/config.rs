@@ -560,6 +560,9 @@ pub struct CheckpointOptions {
 /// This is separate from components (like block_cache, clock, etc.) which are responsible
 /// for performing the work in the database.
 ///
+/// Note: `compactor_options` is mutually exclusive with `DbBuilder::with_compactor_builder`.
+/// Setting both will result in an error.
+///
 /// For backward compatibility, DBOptions is a type alias for Settings.
 #[derive(Clone, Deserialize, Serialize)]
 pub struct Settings {

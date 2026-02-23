@@ -1173,7 +1173,7 @@ mod tests {
             },
         )));
 
-        let mut options = db_options(Some(compactor_options()));
+        let mut options = db_options(None);
         options.wal_enabled = false;
         options.l0_sst_size_bytes = 128;
 
@@ -1280,7 +1280,7 @@ mod tests {
             },
         )));
 
-        let mut options = db_options(Some(compactor_options()));
+        let mut options = db_options(None);
         options.wal_enabled = false;
         options.l0_sst_size_bytes = 128;
 
@@ -1382,7 +1382,7 @@ mod tests {
         let compaction_scheduler = Arc::new(OnDemandCompactionSchedulerSupplier::new(Arc::new(
             |state| state.manifest().l0.len() >= 2,
         )));
-        let options = db_options(Some(compactor_options()));
+        let options = db_options(None);
 
         let db = Db::builder(PATH, os.clone())
             .with_settings(options)
@@ -1511,7 +1511,7 @@ mod tests {
         let compaction_scheduler = Arc::new(OnDemandCompactionSchedulerSupplier::new(Arc::new(
             |state| !state.manifest().l0.is_empty(),
         )));
-        let options = db_options(Some(compactor_options()));
+        let options = db_options(None);
 
         let db = Db::builder(PATH, os.clone())
             .with_settings(options)
@@ -1645,7 +1645,7 @@ mod tests {
         let compaction_scheduler = Arc::new(OnDemandCompactionSchedulerSupplier::new(Arc::new(
             |state| state.manifest().l0.len() >= 2,
         )));
-        let options = db_options(Some(compactor_options()));
+        let options = db_options(None);
 
         let db = Db::builder(PATH, os.clone())
             .with_settings(options)
@@ -1761,7 +1761,7 @@ mod tests {
         let compaction_scheduler = Arc::new(OnDemandCompactionSchedulerSupplier::new(Arc::new(
             |state| state.manifest().l0.len() >= 3,
         )));
-        let options = db_options(Some(compactor_options()));
+        let options = db_options(None);
 
         let db = Db::builder(PATH, os.clone())
             .with_settings(options)
@@ -1894,7 +1894,7 @@ mod tests {
             |state| state.manifest().l0.len() >= 2,
         )));
 
-        let mut options = db_options(Some(compactor_options()));
+        let mut options = db_options(None);
         options.wal_enabled = false;
         options.l0_sst_size_bytes = 128;
 
@@ -1979,7 +1979,7 @@ mod tests {
         let compaction_scheduler = Arc::new(OnDemandCompactionSchedulerSupplier::new(Arc::new(
             |state| state.manifest().l0.len() >= 2,
         )));
-        let options = db_options(Some(compactor_options()));
+        let options = db_options(None);
 
         let db = Db::builder(PATH, os.clone())
             .with_settings(options)
@@ -2080,7 +2080,7 @@ mod tests {
         let compaction_scheduler = Arc::new(OnDemandCompactionSchedulerSupplier::new(Arc::new(
             |state| state.manifest().l0.len() >= 2,
         )));
-        let options = db_options(Some(compactor_options()));
+        let options = db_options(None);
 
         let db = Db::builder(PATH, os.clone())
             .with_settings(options)

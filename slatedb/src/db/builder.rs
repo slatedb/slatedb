@@ -235,6 +235,10 @@ impl<P: Into<Path>> DbBuilder<P> {
         self
     }
 
+    /// Sets a custom CompactorBuilder for compaction orchestration.
+    ///
+    /// Mutually exclusive with `Settings::compactor_options`. Setting both
+    /// will result in an error.
     pub fn with_compactor_builder(mut self, compactor: CompactorBuilder<P>) -> Self {
         self.compactor = Some(compactor.into_path_builder());
         self
@@ -536,6 +540,13 @@ impl<P: Into<Path>> DbBuilder<P> {
             None,
         ));
 
+        if self.compactor.is_some() && self.settings.compactor_options.is_some() {
+            return Err(SlateDBError::InvalidCompactorOptions(
+                "cannot set both compactor_builder and compactor_options".into(),
+            )
+            .into());
+        }
+
         let compactor_builder = self.compactor.or_else(|| {
             self.settings.compactor_options.as_ref().map(|opts| {
                 CompactorBuilder::new(path.clone(), retrying_main_object_store.clone())
@@ -544,15 +555,20 @@ impl<P: Into<Path>> DbBuilder<P> {
         });
 
         if let Some(compactor_builder) = compactor_builder {
-            let (handler, rx) = compactor_builder
-                .build_embedded(
+            let mut builder = compactor_builder
+                .with_system_clock(system_clock.clone())
+                .with_stat_registry(inner.stat_registry.clone())
+                .with_rand(rand.clone());
+
+            if let Some(operator) = merge_operator {
+                builder = builder.with_merge_operator(operator);
+            }
+
+            let (handler, rx) = builder
+                .build_handler(
                     uncached_table_store.clone(),
                     manifest_store.clone(),
                     compactions_store.clone(),
-                    inner.stat_registry.clone(),
-                    system_clock.clone(),
-                    rand.clone(),
-                    merge_operator.clone(),
                 )
                 .await?;
             task_executor.add_handler(
@@ -861,9 +877,15 @@ impl<P: Into<Path>> CompactorBuilder<P> {
         self
     }
 
-    /// Sets the random number generator to use for the compactor.
+    /// Creates the random number generator to use for the compactor with given seed.
     pub fn with_seed(mut self, seed: u64) -> Self {
         self.rand = Arc::new(DbRand::new(seed));
+        self
+    }
+
+    /// Sets the random number generator to use for the compactor.
+    pub fn with_rand(mut self, rand: Arc<DbRand>) -> Self {
+        self.rand = rand;
         self
     }
 
@@ -962,15 +984,16 @@ impl<P: Into<Path>> CompactorBuilder<P> {
         )
     }
 
-    pub(crate) async fn build_embedded(
+    /// Build a CompactorEventHandler from this builder's configuration.
+    ///
+    /// Constructs the compaction scheduler, executor, and stats, then
+    /// returns the handler and its message receiver, which are needed
+    /// to register the compactor with the task executor in DbBuilder::build
+    pub(crate) async fn build_handler(
         self,
         table_store: Arc<TableStore>,
         manifest_store: Arc<ManifestStore>,
         compactions_store: Arc<CompactionsStore>,
-        stat_registry: Arc<StatRegistry>,
-        system_clock: Arc<dyn SystemClock>,
-        rand: Arc<DbRand>,
-        merge_operator: Option<MergeOperatorType>,
     ) -> Result<
         (
             CompactorEventHandler,
@@ -985,18 +1008,18 @@ impl<P: Into<Path>> CompactorBuilder<P> {
             .unwrap_or(Arc::new(SizeTieredCompactionSchedulerSupplier));
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let scheduler = Arc::from(scheduler_supplier.compaction_scheduler(&options));
-        let stats = Arc::new(CompactionStats::new(stat_registry));
+        let stats = Arc::new(CompactionStats::new(self.stat_registry));
         let executor = Arc::new(TokioCompactionExecutor::new(
             TokioCompactionExecutorOptions {
                 handle,
                 options: options.clone(),
                 worker_tx: tx,
                 table_store,
-                rand: rand.clone(),
+                rand: self.rand.clone(),
                 stats: stats.clone(),
-                clock: system_clock.clone(),
+                clock: self.system_clock.clone(),
                 manifest_store: manifest_store.clone(),
-                merge_operator,
+                merge_operator: self.merge_operator,
                 #[cfg(feature = "compaction_filters")]
                 compaction_filter_supplier: self.compaction_filter_supplier,
             },
@@ -1007,9 +1030,9 @@ impl<P: Into<Path>> CompactorBuilder<P> {
             options,
             scheduler,
             executor,
-            rand,
+            self.rand,
             stats,
-            system_clock,
+            self.system_clock,
         )
         .await?;
         Ok((handler, rx))

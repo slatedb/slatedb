@@ -5287,34 +5287,12 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_should_read_from_compacted_db() {
-        do_test_should_read_compacted_db(test_db_options(
-            0,
-            127,
-            Some(CompactorOptions {
-                poll_interval: Duration::from_millis(100),
-                max_sst_size: 256,
-                max_concurrent_compactions: 1,
-                manifest_update_timeout: Duration::from_secs(300),
-                ..Default::default()
-            }),
-        ))
-        .await;
+        do_test_should_read_compacted_db(test_db_options(0, 127, None)).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_should_read_from_compacted_db_no_filters() {
-        do_test_should_read_compacted_db(test_db_options(
-            u32::MAX,
-            127,
-            Some(CompactorOptions {
-                poll_interval: Duration::from_millis(100),
-                manifest_update_timeout: Duration::from_secs(300),
-                max_sst_size: 256,
-                max_concurrent_compactions: 1,
-                ..Default::default()
-            }),
-        ))
-        .await
+        do_test_should_read_compacted_db(test_db_options(u32::MAX, 127, None)).await
     }
 
     #[tokio::test]
