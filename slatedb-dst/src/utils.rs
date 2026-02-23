@@ -77,11 +77,14 @@ pub async fn build_db(
     let object_store = Arc::new(ClockedObjectStore::new(object_store, system_clock.clone()));
     let settings = build_settings(rand).await;
     let compaction_scheduler_supplier = Arc::new(SizeTieredCompactionSchedulerSupplier::new());
-    let mut builder = DbBuilder::new("test_db", object_store);
+    let mut builder = DbBuilder::new("test_db", object_store.clone());
     builder = builder.with_settings(settings);
     builder = builder.with_seed(rand.rng().random_range(0..u64::MAX));
     builder = builder.with_system_clock(system_clock.clone());
-    builder = builder.with_compaction_scheduler_supplier(compaction_scheduler_supplier);
+    builder = builder.with_compactor_builder(
+        CompactorBuilder::new("test_db", object_store)
+            .with_scheduler_supplier(compaction_scheduler_supplier),
+    );
     builder.build().await.unwrap()
 }
 
