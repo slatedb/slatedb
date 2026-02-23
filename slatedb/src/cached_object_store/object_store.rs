@@ -127,7 +127,7 @@ impl CachedObjectStore {
         }
 
         // Second pass: load the selected files in bouded parallelism and cache them.
-        let degree_of_parallelism = 5;
+        let degree_of_parallelism = 32;
         let _result = build_concurrent(files_to_load.into_iter(), degree_of_parallelism, |path| {
             let this = self.clone();
             async move {

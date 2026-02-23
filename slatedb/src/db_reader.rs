@@ -11,11 +11,12 @@ use crate::manifest::store::{ManifestStore, StoredManifest};
 use crate::manifest::Manifest;
 use crate::mem_table::{ImmutableMemtable, KVTable};
 use crate::oracle::DbReaderOracle;
+use crate::paths::PathResolver;
 use crate::rand::DbRand;
 use crate::reader::{DbStateReader, Reader};
 use crate::sst_iter::SstIteratorOptions;
 use crate::stats::StatRegistry;
-use crate::store_provider::{DefaultStoreProvider, StoreProvider};
+use crate::store_provider::StoreProvider;
 use crate::tablestore::TableStore;
 use crate::utils::{IdGenerator, MonotonicSeq, WatchableOnceCell};
 use crate::wal_replay::{WalReplayIterator, WalReplayOptions};
@@ -28,7 +29,7 @@ use object_store::path::Path;
 use object_store::ObjectStore;
 use once_cell::sync::Lazy;
 use parking_lot::RwLock;
-use slatedb_common::clock::{DefaultSystemClock, SystemClock};
+use slatedb_common::clock::SystemClock;
 use std::collections::VecDeque;
 use std::ops::{RangeBounds, Sub};
 use std::sync::Arc;
@@ -540,6 +541,26 @@ impl DbReader {
         Ok(())
     }
 
+    /// Preload the disk cache from the current manifest state.
+    pub(crate) async fn preload_cache(
+        &self,
+        cached_obj_store: &CachedObjectStore,
+        path: object_store::path::Path,
+    ) -> Result<(), SlateDBError> {
+        let state = Arc::clone(&self.inner.state.read());
+        let external_ssts = state.manifest.external_ssts();
+        let path_resolver = PathResolver::new_with_external_ssts(path, external_ssts);
+        let cache_opts = &self.inner.options.object_store_cache_options;
+        crate::utils::preload_cache_from_manifest(
+            &state.manifest.core,
+            cached_obj_store,
+            &path_resolver,
+            cache_opts.preload_disk_cache_on_startup,
+            cache_opts.max_cache_size_bytes.unwrap_or(usize::MAX),
+        )
+        .await
+    }
+
     /// Creates a database reader that can read the contents of a database (but cannot write any
     /// data). The caller can provide an optional checkpoint. If the checkpoint is provided, the
     /// reader will read using the specified checkpoint and will not periodically refresh the
@@ -552,38 +573,53 @@ impl DbReader {
         checkpoint_id: Option<Uuid>,
         options: DbReaderOptions,
     ) -> Result<Self, crate::Error> {
-        let path = path.into();
-        let clock = Arc::new(DefaultSystemClock::default());
-        let rand = Arc::new(DbRand::default());
-        let stat_registry = StatRegistry::new();
-
-        // Setup object store with optional caching
-        let object_store: Arc<dyn ObjectStore> = match CachedObjectStore::from_config(
-            object_store.clone(),
-            &options.object_store_cache_options,
-            &stat_registry,
-            clock.clone(),
-            rand.clone(),
-        )
-        .await?
-        {
-            Some(cached) => cached,
-            None => object_store,
-        };
-
-        let store_provider = DefaultStoreProvider {
-            path,
-            object_store,
-            block_cache: options.block_cache.clone(),
-            block_transformer: options.block_transformer.clone(),
-        };
-
-        Self::open_internal(&store_provider, checkpoint_id, options, clock, rand)
-            .await
-            .map_err(Into::into)
+        // Use the builder API internally
+        let mut builder = Self::builder(path, object_store).with_options(options);
+        if let Some(id) = checkpoint_id {
+            builder = builder.with_checkpoint_id(id);
+        }
+        builder.build().await
     }
 
-    async fn open_internal(
+    /// Creates a new builder for a database reader at the given path.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - The path to the database.
+    /// * `object_store` - The object store to use.
+    ///
+    /// # Returns
+    ///
+    /// A `DbReaderBuilder` that can be used to configure and build a `DbReader`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use slatedb::{Db, DbReader, Error};
+    /// use slatedb::object_store::{ObjectStore, memory::InMemory};
+    /// use std::sync::Arc;
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> Result<(), Error> {
+    ///     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    ///     // First create a database
+    ///     let db = Db::open("test_db", Arc::clone(&object_store)).await?;
+    ///     db.close().await?;
+    ///     // Then open a reader
+    ///     let reader = DbReader::builder("test_db", object_store)
+    ///         .build()
+    ///         .await?;
+    ///     Ok(())
+    /// }
+    /// ```
+    pub fn builder<P: Into<Path>>(
+        path: P,
+        object_store: Arc<dyn ObjectStore>,
+    ) -> crate::db::builder::DbReaderBuilder<P> {
+        crate::db::builder::DbReaderBuilder::new(path, object_store)
+    }
+
+    pub(crate) async fn open_internal(
         store_provider: &dyn StoreProvider,
         checkpoint_id: Option<Uuid>,
         options: DbReaderOptions,
