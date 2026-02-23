@@ -462,9 +462,7 @@ impl<P: Into<Path>> DbBuilder<P> {
 
         // Extract external SSTs from manifest if available
         let external_ssts = match &latest_manifest {
-            Some(latest_stored_manifest) => {
-                latest_stored_manifest.manifest().external_ssts()
-            }
+            Some(latest_stored_manifest) => latest_stored_manifest.manifest().external_ssts(),
             None => HashMap::new(),
         };
 
