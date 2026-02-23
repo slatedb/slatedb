@@ -42,7 +42,6 @@ pub use compaction_filter::{
 };
 pub use compactor::CompactorBuilder;
 pub use config::{Settings, SstBlockSize};
-pub use db::builder::CompactorConfig;
 pub use db::{Db, DbBuilder, WriteHandle};
 pub use db_cache::stats as db_cache_stats;
 pub use db_iter::DbIterator;

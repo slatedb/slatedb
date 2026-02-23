@@ -1645,7 +1645,7 @@ mod tests {
         CompactorOptions, GarbageCollectorDirectoryOptions, GarbageCollectorOptions,
         ObjectStoreCacheOptions, PutOptions, Settings, Ttl, WriteOptions,
     };
-    use crate::db::builder::{CompactorConfig, GarbageCollectorBuilder};
+    use crate::db::builder::GarbageCollectorBuilder;
     use crate::db_state::ManifestCore;
     use crate::db_stats::IMMUTABLE_MEMTABLE_FLUSHES;
     use crate::format::sst::SsTableFormat;
@@ -1662,7 +1662,7 @@ mod tests {
     };
     use crate::types::RowEntry;
     use crate::wal_reader::WalReader;
-    use crate::{proptest_util, test_utils, CloseReason, KeyValue};
+    use crate::{proptest_util, test_utils, CloseReason, CompactorBuilder, KeyValue};
     use async_trait::async_trait;
     use chrono::TimeDelta;
     use chrono::{TimeZone, Utc};
@@ -4548,10 +4548,10 @@ mod tests {
         let db = Db::builder(path, object_store.clone())
             .with_settings(test_db_options(0, 1024 * 1024, None))
             .with_merge_operator(Arc::new(StringConcatMergeOperator {}))
-            .with_compaction(CompactorConfig {
-                scheduler_supplier: Some(compaction_scheduler),
-                ..Default::default()
-            })
+            .with_compactor_builder(
+                CompactorBuilder::new(path, object_store.clone())
+                    .with_scheduler_supplier(compaction_scheduler.clone()),
+            )
             .build()
             .await
             .unwrap();
@@ -5095,14 +5095,12 @@ mod tests {
             move |_state| this_should_compact_l0.swap(false, Ordering::SeqCst),
         )));
 
-        let compactor = CompactorConfig {
-            scheduler_supplier: Some(compaction_scheduler.clone()),
-            ..Default::default()
-        };
-
         let db = Db::builder(path, object_store.clone())
             .with_settings(options)
-            .with_compaction(compactor)
+            .with_compactor_builder(
+                CompactorBuilder::new(path, object_store.clone())
+                    .with_scheduler_supplier(compaction_scheduler.clone()),
+            )
             .build()
             .await
             .unwrap();

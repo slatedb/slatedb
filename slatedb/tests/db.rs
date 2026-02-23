@@ -4,6 +4,7 @@ use backon::{ExponentialBuilder, Retryable};
 use log::warn;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
+use slatedb::admin;
 use slatedb::config::{
     CompactorOptions, DurabilityLevel, PutOptions, ReadOptions, Settings,
     SizeTieredCompactionSchedulerOptions, WriteOptions,
@@ -11,8 +12,7 @@ use slatedb::config::{
 use slatedb::object_store::memory::InMemory;
 use slatedb::object_store::ObjectStore;
 use slatedb::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier;
-use slatedb::Db;
-use slatedb::{admin, CompactorConfig};
+use slatedb::{CompactorBuilder, Db};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -100,11 +100,6 @@ async fn test_concurrent_writers_and_readers() {
     };
 
     let supplier = Arc::new(SizeTieredCompactionSchedulerSupplier::new());
-    let compactor = CompactorConfig {
-        options: compactor_options,
-        scheduler_supplier: Some(supplier),
-        ..Default::default()
-    };
 
     let config = Settings::from_env_with_default(
         "SLATEDB_TEST_",
@@ -129,16 +124,20 @@ async fn test_concurrent_writers_and_readers() {
         .with_max_delay(Duration::from_millis(1));
     // Always use a unique DB path per test run to avoid cross-run residue
     // in remote object stores (important for chaos scenarios).
-    let db = Arc::new(
+    let db: Arc<Db> = Arc::new(
         (|| async {
             let ts = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_nanos();
             let db_path = format!("/tmp/test_concurrent_writers_readers_{}", ts);
-            Db::builder(db_path, object_store.clone())
+            Db::builder(db_path.clone(), object_store.clone())
                 .with_settings(config.clone())
-                .with_compaction(compactor.clone())
+                .with_compactor_builder(
+                    CompactorBuilder::new(db_path, object_store.clone())
+                        .with_options(compactor_options.clone())
+                        .with_scheduler_supplier(supplier.clone()),
+                )
                 .build()
                 .await
         })
