@@ -281,6 +281,10 @@ pub struct SsTableInfo {
     pub compression_codec: Option<CompressionCodec>,
     /// The type of this SSTable.
     pub sst_type: SstType,
+    /// The offset of the stats block within the SSTable file.
+    pub stats_offset: u64,
+    /// The length of the stats block within the SSTable file.
+    pub stats_len: u64,
 }
 
 pub(crate) trait SsTableInfoCodec: Send + Sync {
@@ -859,6 +863,8 @@ mod tests {
             filter_len: 0,
             compression_codec: None,
             sst_type: SstType::default(),
+            stats_offset: 0,
+            stats_len: 0,
         }
     }
 }

@@ -1,6 +1,7 @@
 use crate::blob::ReadOnlyBlob;
 use crate::config::CompressionCodec;
 use crate::db_state::{SsTableInfo, SsTableInfoCodec, SstType};
+use crate::sst_stats::SstStats;
 use crate::error::SlateDBError;
 use crate::filter::BloomFilter;
 use crate::flatbuffer_types::{
@@ -275,6 +276,8 @@ pub(crate) struct EncodedSsTableFooterBuilder<'a, 'b> {
     block_meta: Vec<flatbuffers::WIPOffset<BlockMeta<'b>>>,
     /// filter block
     filter: Option<(Arc<BloomFilter>, Bytes)>,
+    /// stats block
+    stats: Option<SstStats>,
     /// SST format version
     sst_format_version: u16,
     /// type of SST (Compacted or Wal)
@@ -302,6 +305,7 @@ impl<'a, 'b> EncodedSsTableFooterBuilder<'a, 'b> {
             index_builder,
             block_meta,
             filter: None,
+            stats: None,
             sst_format_version,
             sst_type,
         }
@@ -316,6 +320,12 @@ impl<'a, 'b> EncodedSsTableFooterBuilder<'a, 'b> {
     /// Sets an optional block transformer to the footer.
     pub(crate) fn with_block_transformer(mut self, transformer: Arc<dyn BlockTransformer>) -> Self {
         self.block_transformer = Some(transformer);
+        self
+    }
+
+    /// Adds stats to the footer.
+    pub(crate) fn with_stats(mut self, stats: SstStats) -> Self {
+        self.stats = Some(stats);
         self
     }
 
@@ -364,6 +374,22 @@ impl<'a, 'b> EncodedSsTableFooterBuilder<'a, 'b> {
         )
         .await? as u64;
 
+        // Write stats block if present
+        let (stats_offset, stats_len) = match self.stats.take() {
+            Some(stats) => {
+                let offset = self.blocks_size + buf.len() as u64;
+                let len = compress_and_transform(
+                    &mut buf,
+                    stats.encode(),
+                    self.compression_codec,
+                    self.block_transformer.as_ref(),
+                )
+                .await? as u64;
+                (offset, len)
+            }
+            None => (0u64, 0u64),
+        };
+
         let meta_offset = self.blocks_size + buf.len() as u64;
         let info = SsTableInfo {
             first_entry: self.first_entry,
@@ -374,6 +400,8 @@ impl<'a, 'b> EncodedSsTableFooterBuilder<'a, 'b> {
             filter_len,
             compression_codec: self.compression_codec,
             sst_type: self.sst_type,
+            stats_offset,
+            stats_len,
         };
         SsTableInfo::encode(&info, &mut buf, self.sst_info_codec);
 
@@ -675,6 +703,40 @@ impl SsTableFormat {
         Ok(SsTableIndexOwned::new(decompressed_bytes)?)
     }
 
+    pub(crate) async fn read_stats(
+        &self,
+        info: &SsTableInfo,
+        obj: &impl ReadOnlyBlob,
+    ) -> Result<SstStats, SlateDBError> {
+        if info.stats_len == 0 {
+            return Ok(SstStats::default());
+        }
+        let stats_end = info.stats_offset + info.stats_len;
+        let stats_bytes = obj.read_range(info.stats_offset..stats_end).await?;
+        let compression_codec = info.compression_codec;
+        self.decode_stats(stats_bytes, compression_codec).await
+    }
+
+    async fn decode_stats(
+        &self,
+        bytes: Bytes,
+        compression_codec: Option<CompressionCodec>,
+    ) -> Result<SstStats, SlateDBError> {
+        let stats_bytes = self.validate_checksum(bytes)?;
+        let untransformed_bytes = match &self.block_transformer {
+            Some(t) => t
+                .decode(stats_bytes)
+                .await
+                .map_err(|_| SlateDBError::BlockTransformError)?,
+            None => stats_bytes,
+        };
+        let decompressed_bytes = match compression_codec {
+            Some(c) => Self::decompress(untransformed_bytes, c)?,
+            None => untransformed_bytes,
+        };
+        Ok(SstStats::decode(decompressed_bytes))
+    }
+
     /// Decompresses the compressed data using the specified compression codec.
     fn decompress(
         #[allow(unused_variables)] compressed_data: Bytes,
@@ -878,6 +940,9 @@ impl SsTableFormat {
         let guess_at_average_first_key_size_bytes = average_first_key_size;
         ans += (number_of_blocks * guess_at_average_first_key_size_bytes + OFFSET_SIZE)
             + CHECKSUM_SIZE;
+
+        // estimate sum of Stats (FlatBuffer: 5 x u64 + vtable/header overhead + checksum)
+        ans += 5 * SIZEOF_U64 + 24 + CHECKSUM_SIZE;
 
         // estimate sum of Metadata
         ans += guess_at_average_first_key_size_bytes + 4 * SIZEOF_U64 + SIZEOF_U16;

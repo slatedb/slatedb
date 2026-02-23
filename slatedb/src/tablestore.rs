@@ -16,6 +16,7 @@ use ulid::Ulid;
 use crate::blob::ReadOnlyBlob;
 use crate::db_cache::{CachedEntry, DbCache};
 use crate::db_state::{SsTableHandle, SsTableId};
+use crate::sst_stats::SstStats;
 use crate::error::SlateDBError;
 use crate::filter::BloomFilter;
 use crate::flatbuffer_types::SsTableIndexOwned;
@@ -378,6 +379,17 @@ impl TableStore {
             }
         }
         Ok(filter)
+    }
+
+    /// Reads the stats block of an SSTable.
+    pub(crate) async fn read_stats(
+        &self,
+        handle: &SsTableHandle,
+    ) -> Result<SstStats, SlateDBError> {
+        let object_store = self.object_stores.store_for(&handle.id);
+        let path = self.path(&handle.id);
+        let obj = ReadOnlyObject { object_store, path };
+        self.sst_format.read_stats(&handle.info, &obj).await
     }
 
     /// Reads the index of an SSTable.

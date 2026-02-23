@@ -133,6 +133,7 @@ mod retrying_object_store;
 mod sorted_run_iterator;
 mod sst_builder;
 mod sst_iter;
+mod sst_stats;
 mod store_provider;
 mod tablestore;
 #[cfg(test)]

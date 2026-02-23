@@ -43,6 +43,26 @@ table SsTableInfo {
     // Last entry in the SST file.
     // The last entry is a key in an SST for compacted data.
     last_entry: [ubyte];
+
+    // Offset of the stats block.
+    stats_offset: ulong;
+
+    // Length of the stats block. Length will be zero if stats are not present.
+    stats_len: ulong;
+}
+
+// Per-SST statistics collected during SST building.
+table SstStats {
+    // Number of put entries in the SST.
+    num_puts: ulong;
+    // Number of delete entries in the SST.
+    num_deletes: ulong;
+    // Number of merge entries in the SST.
+    num_merges: ulong;
+    // Total uncompressed size of all keys in bytes.
+    raw_key_size: ulong;
+    // Total uncompressed size of all values in bytes.
+    raw_val_size: ulong;
 }
 
 table BlockMeta {
