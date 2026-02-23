@@ -9,6 +9,7 @@ use slatedb::config::GarbageCollectorOptions;
 use slatedb::config::SizeTieredCompactionSchedulerOptions;
 use slatedb::object_store::ObjectStore;
 use slatedb::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier;
+use slatedb::CompactorBuilder;
 use slatedb::Db;
 use slatedb::DbBuilder;
 use slatedb::DbRand;
