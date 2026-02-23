@@ -11,6 +11,7 @@ import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
 import java.nio.charset.StandardCharsets;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /// Java-typed wrappers around generated jextract bindings.
@@ -1236,8 +1237,8 @@ final class NativeInterop {
                 key,
                 value,
                 seq,
-                hasCreateTs ? createTsRaw : null,
-                hasExpireTs ? expireTsRaw : null
+                hasCreateTs ? Optional.of(createTsRaw) : Optional.empty(),
+                hasExpireTs ? Optional.of(expireTsRaw) : Optional.empty()
             );
         }
     }
@@ -1253,8 +1254,8 @@ final class NativeInterop {
         byte[] key,
         byte[] value,
         long seq,
-        Long createTs,
-        Long expireTs
+        Optional<Long> createTs,
+        Optional<Long> expireTs
     ) {
     }
 
