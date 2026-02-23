@@ -23,7 +23,7 @@ pub use ffi::{
     slatedb_merge_operator_context_free_fn, slatedb_merge_operator_fn,
     slatedb_merge_operator_result_free_fn, slatedb_merge_options_t, slatedb_object_store_t,
     slatedb_put_options_t, slatedb_range_t, slatedb_read_options_t, slatedb_result_t,
-    slatedb_scan_options_t, slatedb_settings_t, slatedb_sst_block_size_t, slatedb_wal_entry_t,
+    slatedb_scan_options_t, slatedb_settings_t, slatedb_sst_block_size_t, slatedb_row_entry_t,
     slatedb_wal_file_iterator_t, slatedb_wal_file_metadata_t, slatedb_wal_file_t,
     slatedb_wal_reader_t, slatedb_write_batch_t, slatedb_write_options_t,
     SLATEDB_BOUND_KIND_EXCLUDED, SLATEDB_BOUND_KIND_INCLUDED, SLATEDB_BOUND_KIND_UNBOUNDED,
@@ -34,7 +34,7 @@ pub use ffi::{
     SLATEDB_SST_BLOCK_SIZE_1KIB, SLATEDB_SST_BLOCK_SIZE_2KIB, SLATEDB_SST_BLOCK_SIZE_32KIB,
     SLATEDB_SST_BLOCK_SIZE_4KIB, SLATEDB_SST_BLOCK_SIZE_64KIB, SLATEDB_SST_BLOCK_SIZE_8KIB,
     SLATEDB_TTL_TYPE_DEFAULT, SLATEDB_TTL_TYPE_EXPIRE_AFTER, SLATEDB_TTL_TYPE_NO_EXPIRY,
-    SLATEDB_WAL_ENTRY_KIND_MERGE, SLATEDB_WAL_ENTRY_KIND_TOMBSTONE, SLATEDB_WAL_ENTRY_KIND_VALUE,
+    SLATEDB_ROW_ENTRY_KIND_MERGE, SLATEDB_ROW_ENTRY_KIND_TOMBSTONE, SLATEDB_ROW_ENTRY_KIND_VALUE,
 };
 
 pub use builder::{
@@ -73,7 +73,7 @@ pub use settings::{
     slatedb_settings_from_json, slatedb_settings_load, slatedb_settings_to_json,
 };
 pub use wal_reader::{
-    slatedb_wal_entry_free, slatedb_wal_file_close, slatedb_wal_file_id, slatedb_wal_file_iterator,
+    slatedb_row_entry_free, slatedb_wal_file_close, slatedb_wal_file_id, slatedb_wal_file_iterator,
     slatedb_wal_file_iterator_close, slatedb_wal_file_iterator_next, slatedb_wal_file_metadata,
     slatedb_wal_file_metadata_free, slatedb_wal_file_next_file, slatedb_wal_file_next_id,
     slatedb_wal_files_free, slatedb_wal_reader_close, slatedb_wal_reader_get,

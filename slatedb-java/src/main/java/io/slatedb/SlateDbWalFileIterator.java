@@ -9,16 +9,16 @@ public final class SlateDbWalFileIterator implements AutoCloseable {
         this.handle = handle;
     }
 
-    /// Returns the next WAL entry, or {@code null} when the iterator is exhausted.
+    /// Returns the next row entry, or {@code null} when the iterator is exhausted.
     ///
-    /// @return Next [SlateDbWalEntry], or {@code null} if the iterator is done.
-    public SlateDbWalEntry next() {
+    /// @return Next [SlateDbRowEntry], or {@code null} if the iterator is done.
+    public SlateDbRowEntry next() {
         NativeInterop.WalIteratorNextResult result = NativeInterop.slatedb_wal_file_iterator_next(handle);
         if (!result.present()) {
             return null;
         }
-        SlateDbConfig.WalEntryKind kind = SlateDbConfig.WalEntryKind.fromCode(result.kind());
-        return new SlateDbWalEntry(kind, result.key(), result.value(), result.seq(), result.createTs(), result.expireTs());
+        SlateDbConfig.RowEntryKind kind = SlateDbConfig.RowEntryKind.fromCode(result.kind());
+        return new SlateDbRowEntry(kind, result.key(), result.value(), result.seq(), result.createTs(), result.expireTs());
     }
 
     /// Closes the iterator and releases native resources.

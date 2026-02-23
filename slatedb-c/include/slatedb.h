@@ -81,14 +81,14 @@
 // SST block size selector for 64 KiB blocks.
 #define SLATEDB_SST_BLOCK_SIZE_64KIB 7
 
-// WAL entry kind: regular value.
-#define SLATEDB_WAL_ENTRY_KIND_VALUE 0
+// Row entry kind: regular value.
+#define SLATEDB_ROW_ENTRY_KIND_VALUE 0
 
-// WAL entry kind: tombstone (deletion marker).
-#define SLATEDB_WAL_ENTRY_KIND_TOMBSTONE 1
+// Row entry kind: tombstone (deletion marker).
+#define SLATEDB_ROW_ENTRY_KIND_TOMBSTONE 1
 
-// WAL entry kind: merge operand.
-#define SLATEDB_WAL_ENTRY_KIND_MERGE 2
+// Row entry kind: merge operand.
+#define SLATEDB_ROW_ENTRY_KIND_MERGE 2
 
 // Closed reason mirroring `slatedb::CloseReason`.
 typedef enum slatedb_close_reason_t {
@@ -333,13 +333,13 @@ typedef struct slatedb_wal_file_metadata_t {
     uintptr_t location_len;
 } slatedb_wal_file_metadata_t;
 
-// C representation of a single WAL entry returned by the iterator.
+// C representation of a single row entry returned by the iterator.
 //
 // `key` and `value` reference Rust-allocated buffers that must be freed by
-// calling `slatedb_wal_entry_free`. `value` is null when `kind` is
-// `SLATEDB_WAL_ENTRY_KIND_TOMBSTONE`.
-typedef struct slatedb_wal_entry_t {
-    // Entry kind. Use `SLATEDB_WAL_ENTRY_KIND_*` constants.
+// calling `slatedb_row_entry_free`. `value` is null when `kind` is
+// `SLATEDB_ROW_ENTRY_KIND_TOMBSTONE`.
+typedef struct slatedb_row_entry_t {
+    // Entry kind. Use `SLATEDB_ROW_ENTRY_KIND_*` constants.
     uint8_t kind;
     // Key bytes.
     uint8_t *key;
@@ -359,7 +359,7 @@ typedef struct slatedb_wal_entry_t {
     bool has_expire_ts;
     // Expiration timestamp (valid when `has_expire_ts` is true).
     int64_t expire_ts;
-} slatedb_wal_entry_t;
+} slatedb_row_entry_t;
 
 // Creates a new database builder.
 //
@@ -1704,21 +1704,21 @@ struct slatedb_result_t slatedb_wal_file_close(struct slatedb_wal_file_t *file);
 // Sets `*out_present` to `true` and populates `*out_entry` when an entry is
 // available; sets `*out_present` to `false` at end of file.
 //
-// Call `slatedb_wal_entry_free` to release `out_entry.key` / `out_entry.value`
+// Call `slatedb_row_entry_free` to release `out_entry.key` / `out_entry.value`
 // when `*out_present` is true.
 //
 // ## Safety
 // - `iter`, `out_present`, and `out_entry` must be valid non-null pointers.
 struct slatedb_result_t slatedb_wal_file_iterator_next(struct slatedb_wal_file_iterator_t *iter,
                                                        bool *out_present,
-                                                       struct slatedb_wal_entry_t *out_entry);
+                                                       struct slatedb_row_entry_t *out_entry);
 
-// Frees the `key` and `value` buffers in a `slatedb_wal_entry_t`.
+// Frees the `key` and `value` buffers in a `slatedb_row_entry_t`.
 //
 // ## Safety
 // - Buffers must match those written by `slatedb_wal_file_iterator_next`.
 // - Do not call more than once per entry.
-void slatedb_wal_entry_free(struct slatedb_wal_entry_t *entry);
+void slatedb_row_entry_free(struct slatedb_row_entry_t *entry);
 
 // Closes and frees a WAL file iterator handle.
 //

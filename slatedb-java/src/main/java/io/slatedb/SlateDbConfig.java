@@ -111,15 +111,15 @@ public final class SlateDbConfig {
         }
     }
 
-    /// Kind of a WAL entry.
-    public enum WalEntryKind {
+    /// Kind of a row entry.
+    public enum RowEntryKind {
         VALUE((byte) 0),
         TOMBSTONE((byte) 1),
         MERGE((byte) 2);
 
         private final byte code;
 
-        WalEntryKind(byte code) {
+        RowEntryKind(byte code) {
             this.code = code;
         }
 
@@ -127,13 +127,13 @@ public final class SlateDbConfig {
             return code;
         }
 
-        static WalEntryKind fromCode(byte code) {
-            for (WalEntryKind value : values()) {
+        static RowEntryKind fromCode(byte code) {
+            for (RowEntryKind value : values()) {
                 if (value.code == code) {
                     return value;
                 }
             }
-            throw new IllegalArgumentException("Unknown WAL entry kind code: " + code);
+            throw new IllegalArgumentException("Unknown row entry kind code: " + code);
         }
     }
 

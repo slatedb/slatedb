@@ -17,18 +17,18 @@ import (
 	"unsafe"
 )
 
-// WalEntryKind describes the type of a WAL entry.
-type WalEntryKind uint8
+// RowEntryKind describes the type of a row entry.
+type RowEntryKind uint8
 
 const (
-	WalEntryKindValue     WalEntryKind = 0
-	WalEntryKindTombstone WalEntryKind = 1
-	WalEntryKindMerge     WalEntryKind = 2
+	RowEntryKindValue     RowEntryKind = 0
+	RowEntryKindTombstone RowEntryKind = 1
+	RowEntryKindMerge     RowEntryKind = 2
 )
 
-// WalEntry represents a single entry in a WAL file.
-type WalEntry struct {
-	Kind     WalEntryKind
+// RowEntry represents a single row entry in a WAL file.
+type RowEntry struct {
+	Kind     RowEntryKind
 	Key      []byte
 	Value    []byte // nil for tombstones
 	Seq      uint64
@@ -49,7 +49,7 @@ type WalFileIterator struct {
 	closed bool
 }
 
-// Next returns the next WAL entry from the iterator.
+// Next returns the next row entry from the iterator.
 //
 // Returns io.EOF when all entries have been read.
 //
@@ -65,7 +65,7 @@ type WalFileIterator struct {
 //	    }
 //	    process(entry)
 //	}
-func (it *WalFileIterator) Next() (*WalEntry, error) {
+func (it *WalFileIterator) Next() (*RowEntry, error) {
 	if it.closed {
 		return nil, errors.New("wal file iterator is closed")
 	}
@@ -74,7 +74,7 @@ func (it *WalFileIterator) Next() (*WalEntry, error) {
 	}
 
 	var present C.bool
-	var cEntry C.slatedb_wal_entry_t
+	var cEntry C.slatedb_row_entry_t
 
 	result := C.slatedb_wal_file_iterator_next(it.ptr, &present, &cEntry)
 	if err := resultToErrorAndFree(result); err != nil {
@@ -84,10 +84,10 @@ func (it *WalFileIterator) Next() (*WalEntry, error) {
 	if present == C.bool(false) {
 		return nil, io.EOF
 	}
-	defer C.slatedb_wal_entry_free(&cEntry)
+	defer C.slatedb_row_entry_free(&cEntry)
 
-	entry := &WalEntry{
-		Kind: WalEntryKind(cEntry.kind),
+	entry := &RowEntry{
+		Kind: RowEntryKind(cEntry.kind),
 		Key:  C.GoBytes(unsafe.Pointer(cEntry.key), C.int(cEntry.key_len)),
 		Seq:  uint64(cEntry.seq),
 	}

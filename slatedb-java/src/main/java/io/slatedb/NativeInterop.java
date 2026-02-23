@@ -3,7 +3,7 @@ package io.slatedb;
 import io.slatedb.SlateDbConfig.*;
 import io.slatedb.ffi.*;
 import io.slatedb.ffi.Native;
-import io.slatedb.ffi.slatedb_wal_entry_t;
+import io.slatedb.ffi.slatedb_row_entry_t;
 import io.slatedb.ffi.slatedb_wal_file_metadata_t;
 
 import java.lang.foreign.Arena;
@@ -1209,7 +1209,7 @@ final class NativeInterop {
 
         try (Arena arena = Arena.ofConfined()) {
             MemorySegment outPresent = arena.allocate(Native.C_BOOL);
-            MemorySegment outEntry = slatedb_wal_entry_t.allocate(arena);
+            MemorySegment outEntry = slatedb_row_entry_t.allocate(arena);
 
             checkResult(
                 Native.slatedb_wal_file_iterator_next(arena, iter.segment(), outPresent, outEntry)
@@ -1220,23 +1220,23 @@ final class NativeInterop {
                 return new WalIteratorNextResult(false, (byte) 0, null, null, 0, null, null);
             }
 
-            byte kind = slatedb_wal_entry_t.kind(outEntry);
-            MemorySegment keyPtr = slatedb_wal_entry_t.key(outEntry);
-            long keyLen = slatedb_wal_entry_t.key_len(outEntry);
-            MemorySegment valuePtr = slatedb_wal_entry_t.value(outEntry);
-            long valueLen = slatedb_wal_entry_t.value_len(outEntry);
-            long seq = slatedb_wal_entry_t.seq(outEntry);
-            boolean hasCreateTs = slatedb_wal_entry_t.has_create_ts(outEntry);
-            long createTsRaw = slatedb_wal_entry_t.create_ts(outEntry);
-            boolean hasExpireTs = slatedb_wal_entry_t.has_expire_ts(outEntry);
-            long expireTsRaw = slatedb_wal_entry_t.expire_ts(outEntry);
+            byte kind = slatedb_row_entry_t.kind(outEntry);
+            MemorySegment keyPtr = slatedb_row_entry_t.key(outEntry);
+            long keyLen = slatedb_row_entry_t.key_len(outEntry);
+            MemorySegment valuePtr = slatedb_row_entry_t.value(outEntry);
+            long valueLen = slatedb_row_entry_t.value_len(outEntry);
+            long seq = slatedb_row_entry_t.seq(outEntry);
+            boolean hasCreateTs = slatedb_row_entry_t.has_create_ts(outEntry);
+            long createTsRaw = slatedb_row_entry_t.create_ts(outEntry);
+            boolean hasExpireTs = slatedb_row_entry_t.has_expire_ts(outEntry);
+            long expireTsRaw = slatedb_row_entry_t.expire_ts(outEntry);
 
             byte[] key = keyPtr.reinterpret(keyLen).toArray(ValueLayout.JAVA_BYTE);
             byte[] value = valuePtr.equals(MemorySegment.NULL)
                 ? null
                 : valuePtr.reinterpret(valueLen).toArray(ValueLayout.JAVA_BYTE);
 
-            Native.slatedb_wal_entry_free(outEntry);
+            Native.slatedb_row_entry_free(outEntry);
 
             return new WalIteratorNextResult(
                 true,

@@ -162,7 +162,7 @@ var _ = Describe("WalReader", func() {
 
 			type record struct {
 				Key  []byte
-				Kind slatedb.WalEntryKind
+				Kind slatedb.RowEntryKind
 				Val  []byte
 			}
 			var entries []record
@@ -194,12 +194,12 @@ var _ = Describe("WalReader", func() {
 
 			valEntry, ok := findEntry([]byte("k_val"))
 			Expect(ok).To(BeTrue())
-			Expect(valEntry.Kind).To(Equal(slatedb.WalEntryKindValue))
+			Expect(valEntry.Kind).To(Equal(slatedb.RowEntryKindValue))
 			Expect(valEntry.Val).To(Equal([]byte("hello")))
 
 			tombEntry, ok := findEntry([]byte("k_tomb"))
 			Expect(ok).To(BeTrue())
-			Expect(tombEntry.Kind).To(Equal(slatedb.WalEntryKindTombstone))
+			Expect(tombEntry.Kind).To(Equal(slatedb.RowEntryKindTombstone))
 			Expect(tombEntry.Val).To(BeNil())
 		})
 	})

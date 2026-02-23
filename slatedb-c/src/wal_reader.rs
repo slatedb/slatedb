@@ -8,10 +8,10 @@ use std::sync::Arc;
 
 use crate::ffi::{
     alloc_bytes, create_runtime, cstr_to_string, error_from_slate_error, require_handle,
-    require_out_ptr, slatedb_object_store_t, slatedb_result_t, slatedb_wal_entry_t,
+    require_out_ptr, slatedb_object_store_t, slatedb_result_t, slatedb_row_entry_t,
     slatedb_wal_file_iterator_t, slatedb_wal_file_metadata_t, slatedb_wal_file_t,
-    slatedb_wal_reader_t, success_result, u64_range_from_c, SLATEDB_WAL_ENTRY_KIND_MERGE,
-    SLATEDB_WAL_ENTRY_KIND_TOMBSTONE, SLATEDB_WAL_ENTRY_KIND_VALUE,
+    slatedb_wal_reader_t, success_result, u64_range_from_c, SLATEDB_ROW_ENTRY_KIND_MERGE,
+    SLATEDB_ROW_ENTRY_KIND_TOMBSTONE, SLATEDB_ROW_ENTRY_KIND_VALUE,
 };
 use crate::slatedb_range_t;
 use slatedb::{ValueDeletable, WalReader};
@@ -361,7 +361,7 @@ pub unsafe extern "C" fn slatedb_wal_file_close(file: *mut slatedb_wal_file_t) -
 /// Sets `*out_present` to `true` and populates `*out_entry` when an entry is
 /// available; sets `*out_present` to `false` at end of file.
 ///
-/// Call `slatedb_wal_entry_free` to release `out_entry.key` / `out_entry.value`
+/// Call `slatedb_row_entry_free` to release `out_entry.key` / `out_entry.value`
 /// when `*out_present` is true.
 ///
 /// ## Safety
@@ -370,7 +370,7 @@ pub unsafe extern "C" fn slatedb_wal_file_close(file: *mut slatedb_wal_file_t) -
 pub unsafe extern "C" fn slatedb_wal_file_iterator_next(
     iter: *mut slatedb_wal_file_iterator_t,
     out_present: *mut bool,
-    out_entry: *mut slatedb_wal_entry_t,
+    out_entry: *mut slatedb_row_entry_t,
 ) -> slatedb_result_t {
     if let Err(err) = require_handle(iter, "wal_file_iterator") {
         return err;
@@ -390,18 +390,18 @@ pub unsafe extern "C" fn slatedb_wal_file_iterator_next(
             let (kind, value, value_len) = match &entry.value {
                 ValueDeletable::Value(v) => {
                     let (val, val_len) = alloc_bytes(v.as_ref());
-                    (SLATEDB_WAL_ENTRY_KIND_VALUE, val, val_len)
+                    (SLATEDB_ROW_ENTRY_KIND_VALUE, val, val_len)
                 }
                 ValueDeletable::Merge(v) => {
                     let (val, val_len) = alloc_bytes(v.as_ref());
-                    (SLATEDB_WAL_ENTRY_KIND_MERGE, val, val_len)
+                    (SLATEDB_ROW_ENTRY_KIND_MERGE, val, val_len)
                 }
                 ValueDeletable::Tombstone => {
-                    (SLATEDB_WAL_ENTRY_KIND_TOMBSTONE, std::ptr::null_mut(), 0)
+                    (SLATEDB_ROW_ENTRY_KIND_TOMBSTONE, std::ptr::null_mut(), 0)
                 }
             };
             *out_present = true;
-            *out_entry = slatedb_wal_entry_t {
+            *out_entry = slatedb_row_entry_t {
                 kind,
                 key,
                 key_len,
@@ -420,13 +420,13 @@ pub unsafe extern "C" fn slatedb_wal_file_iterator_next(
     }
 }
 
-/// Frees the `key` and `value` buffers in a `slatedb_wal_entry_t`.
+/// Frees the `key` and `value` buffers in a `slatedb_row_entry_t`.
 ///
 /// ## Safety
 /// - Buffers must match those written by `slatedb_wal_file_iterator_next`.
 /// - Do not call more than once per entry.
 #[no_mangle]
-pub unsafe extern "C" fn slatedb_wal_entry_free(entry: *mut slatedb_wal_entry_t) {
+pub unsafe extern "C" fn slatedb_row_entry_free(entry: *mut slatedb_row_entry_t) {
     if entry.is_null() {
         return;
     }
@@ -570,7 +570,7 @@ mod tests {
 
             loop {
                 let mut present = false;
-                let mut entry = std::mem::MaybeUninit::<slatedb_wal_entry_t>::uninit();
+                let mut entry = std::mem::MaybeUninit::<slatedb_row_entry_t>::uninit();
                 assert_ok(unsafe {
                     slatedb_wal_file_iterator_next(iter, &mut present, entry.as_mut_ptr())
                 });
@@ -742,7 +742,7 @@ mod tests {
 
             loop {
                 let mut present = false;
-                let mut entry = std::mem::MaybeUninit::<slatedb_wal_entry_t>::uninit();
+                let mut entry = std::mem::MaybeUninit::<slatedb_row_entry_t>::uninit();
                 assert_ok(unsafe {
                     slatedb_wal_file_iterator_next(iter, &mut present, entry.as_mut_ptr())
                 });
@@ -771,15 +771,15 @@ mod tests {
         let find = |key: &[u8]| entries.iter().find(|(k, _, _)| k == key).cloned();
 
         let (_, kind, val) = find(b"k_val").expect("k_val missing");
-        assert_eq!(kind, SLATEDB_WAL_ENTRY_KIND_VALUE);
+        assert_eq!(kind, SLATEDB_ROW_ENTRY_KIND_VALUE);
         assert_eq!(val, b"hello");
 
         let (_, kind, val) = find(b"k_tomb").expect("k_tomb missing");
-        assert_eq!(kind, SLATEDB_WAL_ENTRY_KIND_TOMBSTONE);
+        assert_eq!(kind, SLATEDB_ROW_ENTRY_KIND_TOMBSTONE);
         assert!(val.is_empty());
 
         let (_, kind, val) = find(b"k_merge").expect("k_merge missing");
-        assert_eq!(kind, SLATEDB_WAL_ENTRY_KIND_MERGE);
+        assert_eq!(kind, SLATEDB_ROW_ENTRY_KIND_MERGE);
         assert_eq!(val, b"operand");
 
         assert_ok(unsafe { slatedb_wal_reader_close(reader) });

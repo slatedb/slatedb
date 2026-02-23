@@ -69,12 +69,12 @@ pub const SLATEDB_SST_BLOCK_SIZE_16KIB: u8 = 5;
 pub const SLATEDB_SST_BLOCK_SIZE_32KIB: u8 = 6;
 /// SST block size selector for 64 KiB blocks.
 pub const SLATEDB_SST_BLOCK_SIZE_64KIB: u8 = 7;
-/// WAL entry kind: regular value.
-pub const SLATEDB_WAL_ENTRY_KIND_VALUE: u8 = 0;
-/// WAL entry kind: tombstone (deletion marker).
-pub const SLATEDB_WAL_ENTRY_KIND_TOMBSTONE: u8 = 1;
-/// WAL entry kind: merge operand.
-pub const SLATEDB_WAL_ENTRY_KIND_MERGE: u8 = 2;
+/// Row entry kind: regular value.
+pub const SLATEDB_ROW_ENTRY_KIND_VALUE: u8 = 0;
+/// Row entry kind: tombstone (deletion marker).
+pub const SLATEDB_ROW_ENTRY_KIND_TOMBSTONE: u8 = 1;
+/// Row entry kind: merge operand.
+pub const SLATEDB_ROW_ENTRY_KIND_MERGE: u8 = 2;
 
 /// Opaque handle backing a resolved object store.
 #[allow(non_camel_case_types)]
@@ -177,15 +177,15 @@ pub struct slatedb_wal_file_metadata_t {
     pub location_len: usize,
 }
 
-/// C representation of a single WAL entry returned by the iterator.
+/// C representation of a single row entry returned by the iterator.
 ///
 /// `key` and `value` reference Rust-allocated buffers that must be freed by
-/// calling `slatedb_wal_entry_free`. `value` is null when `kind` is
-/// `SLATEDB_WAL_ENTRY_KIND_TOMBSTONE`.
+/// calling `slatedb_row_entry_free`. `value` is null when `kind` is
+/// `SLATEDB_ROW_ENTRY_KIND_TOMBSTONE`.
 #[repr(C)]
 #[allow(non_camel_case_types)]
-pub struct slatedb_wal_entry_t {
-    /// Entry kind. Use `SLATEDB_WAL_ENTRY_KIND_*` constants.
+pub struct slatedb_row_entry_t {
+    /// Entry kind. Use `SLATEDB_ROW_ENTRY_KIND_*` constants.
     pub kind: u8,
     /// Key bytes.
     pub key: *mut u8,

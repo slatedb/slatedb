@@ -1,8 +1,8 @@
 package io.slatedb;
 
 /// A single WAL log entry.
-public record SlateDbWalEntry(
-    SlateDbConfig.WalEntryKind kind,
+public record SlateDbRowEntry(
+    SlateDbConfig.RowEntryKind kind,
     byte[] key,
     byte[] value,
     long seq,

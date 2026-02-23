@@ -34,7 +34,7 @@ class SlateDbWalReaderTest {
             int entryCount = 0;
             for (SlateDbWalFile file : files) {
                 try (file; SlateDbWalFileIterator iter = file.iterator()) {
-                    SlateDbWalEntry entry;
+                    SlateDbRowEntry entry;
                     while ((entry = iter.next()) != null) {
                         assertNotNull(entry.kind());
                         assertNotNull(entry.key());
@@ -43,7 +43,7 @@ class SlateDbWalReaderTest {
                     }
                 }
             }
-            assertTrue(entryCount > 0, "Expected at least one WAL entry");
+            assertTrue(entryCount > 0, "Expected at least one row entry");
         }
     }
 
@@ -119,12 +119,12 @@ class SlateDbWalReaderTest {
 
             for (SlateDbWalFile file : files) {
                 try (file; SlateDbWalFileIterator iter = file.iterator()) {
-                    SlateDbWalEntry entry;
+                    SlateDbRowEntry entry;
                     while ((entry = iter.next()) != null) {
-                        if (entry.kind() == SlateDbConfig.WalEntryKind.VALUE) {
+                        if (entry.kind() == SlateDbConfig.RowEntryKind.VALUE) {
                             sawValue = true;
                             assertNotNull(entry.value());
-                        } else if (entry.kind() == SlateDbConfig.WalEntryKind.TOMBSTONE) {
+                        } else if (entry.kind() == SlateDbConfig.RowEntryKind.TOMBSTONE) {
                             sawTombstone = true;
                         }
                     }
