@@ -468,6 +468,7 @@ impl<P: Into<Path>> DbBuilder<P> {
         // Setup communication channels
         let (memtable_flush_tx, memtable_flush_rx) = tokio::sync::mpsc::unbounded_channel();
         let (write_tx, write_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (watcher_tx, _) = tokio::sync::broadcast::channel(crate::db::DB_MESSAGE_CHANNEL_CAP);
 
         // Create the database inner state
         let mut settings = self.settings.clone();
@@ -484,6 +485,7 @@ impl<P: Into<Path>> DbBuilder<P> {
                 stat_registry,
                 self.fp_registry.clone(),
                 merge_operator.clone(),
+                watcher_tx.clone(),
             )
             .await?,
         );
@@ -600,6 +602,7 @@ impl<P: Into<Path>> DbBuilder<P> {
         Ok(Db {
             inner,
             task_executor,
+            watcher_tx,
         })
     }
 }

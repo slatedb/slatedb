@@ -351,6 +351,15 @@ pub enum ErrorKind {
     Internal,
 }
 
+impl From<ErrorKind> for CloseReason {
+    fn from(kind: ErrorKind) -> Self {
+        match kind {
+            ErrorKind::Closed(reason) => reason,
+            _ => CloseReason::Panic,
+        }
+    }
+}
+
 impl std::fmt::Display for ErrorKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {

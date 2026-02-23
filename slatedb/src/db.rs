@@ -60,7 +60,7 @@ use crate::manifest::store::FenceableManifest;
 use crate::manifest::{Manifest, ManifestCore};
 use crate::mem_table::WritableKVTable;
 use crate::mem_table_flush::{MemtableFlushMsg, MEMTABLE_FLUSHER_TASK_NAME};
-use crate::oracle::DbOracle;
+use crate::oracle::{DbOracle, Oracle};
 use crate::paths::PathResolver;
 use crate::rand::DbRand;
 use crate::reader::Reader;
@@ -68,7 +68,7 @@ use crate::sst_iter::SstIteratorOptions;
 use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
 use crate::transaction_manager::TransactionManager;
-use crate::utils::{format_bytes_si, MonotonicSeq, SendSafely};
+use crate::utils::{format_bytes_si, SendSafely};
 use crate::wal_buffer::{WalBufferManager, WAL_BUFFER_TASK_NAME};
 use crate::wal_replay::{WalReplayIterator, WalReplayOptions};
 use slatedb_common::clock::SystemClock;
@@ -78,6 +78,9 @@ pub use builder::DbBuilder;
 pub use builder::DbReaderBuilder;
 
 pub(crate) mod builder;
+
+/// The capacity of the broadcast channel for [`DbMessage`] events.
+pub(crate) const DB_MESSAGE_CHANNEL_CAP: usize = 256;
 
 pub(crate) struct DbInner {
     pub(crate) state: Arc<RwLock<DbState>>,
@@ -116,16 +119,15 @@ impl DbInner {
         stat_registry: Arc<StatRegistry>,
         fp_registry: Arc<FailPointRegistry>,
         merge_operator: Option<crate::merge_operator::MergeOperatorType>,
+        watcher_tx: tokio::sync::broadcast::Sender<DbMessage>,
     ) -> Result<Self, SlateDBError> {
         // both last_seq and last_committed_seq will be updated after WAL replay.
         let last_l0_seq = manifest.value.core.last_l0_seq;
-        let last_seq = MonotonicSeq::new(last_l0_seq);
-        let last_committed_seq = MonotonicSeq::new(last_l0_seq);
-        let last_remote_persisted_seq = MonotonicSeq::new(last_l0_seq);
         let oracle = Arc::new(DbOracle::new(
-            last_seq,
-            last_committed_seq,
-            last_remote_persisted_seq,
+            last_l0_seq,
+            last_l0_seq,
+            last_l0_seq,
+            watcher_tx,
         ));
 
         let mono_clock = Arc::new(MonotonicClock::new(
@@ -511,14 +513,12 @@ impl DbInner {
             // durable. Update `last_remote_persisted_seq` before replaying to avoid a race with
             // the memtable flusher. The flusher calls flush_wals() to guarantee all data in the
             // memtable is already durable in the WAL. Since we're replaying, the WAL is empty and
-            // `last_remote_persisted_seq` does not get updated; it remaiuns at l0_last_seq. This
-            // would cause the flusher's assertion that the remoted persisted seq is always >= the
+            // `last_remote_persisted_seq` does not get updated; it remains at l0_last_seq. This
+            // would cause the flusher's assertion that the remote persisted seq is always >= the
             // last seq in the memtable to fail. By updating `last_remote_persisted_seq` here, we
             // ensure the assertion holds true.
-            assert!(self.oracle.last_remote_persisted_seq.load() <= replayed_table.last_seq);
-            self.oracle
-                .last_remote_persisted_seq
-                .store_if_greater(replayed_table.last_seq);
+            assert!(self.oracle.last_remote_persisted_seq() <= replayed_table.last_seq);
+            self.oracle.advance_durable_seq(replayed_table.last_seq);
             self.maybe_apply_backpressure().await?;
             self.replay_memtable(replayed_table)?;
         }
@@ -566,10 +566,29 @@ impl DbInner {
     }
 }
 
+/// Messages broadcast to notify subscribers of database state changes.
+///
+/// Subscribe via [`Db::subscribe`] to receive a
+/// [`broadcast::Receiver<DbMessage>`](tokio::sync::broadcast::Receiver).
+/// When the database is closed or dropped, the sender is dropped and
+/// [`recv`](tokio::sync::broadcast::Receiver::recv) will return
+/// [`RecvError::Closed`](tokio::sync::broadcast::error::RecvError::Closed).
+#[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
+pub enum DbMessage {
+    /// The durable sequence number has advanced. All writes with a sequence
+    /// number less than or equal to the contained value are now durably
+    /// persisted to object storage and will survive process restarts.
+    DurableSeqChanged(u64),
+    /// The database has been closed.
+    Closed(CloseReason),
+}
+
 #[derive(Clone)]
 pub struct Db {
     pub(crate) inner: Arc<DbInner>,
     task_executor: Arc<MessageHandlerExecutor>,
+    watcher_tx: tokio::sync::broadcast::Sender<DbMessage>,
 }
 
 impl Db {
@@ -657,7 +676,7 @@ impl Db {
     /// }
     /// ```
     pub async fn close(&self) -> Result<(), crate::Error> {
-        let should_flush = match self.status() {
+        let (should_flush, close_reason) = match self.status() {
             // If already closed, don't close again.
             Err(e) if matches!(e.kind(), crate::ErrorKind::Closed(CloseReason::Clean)) => {
                 return Err(e);
@@ -666,9 +685,9 @@ impl Db {
             // might be in a bad state. Note that multiple close() calls will always
             // run when in a failed state (vs. a clean closure, which will return
             // Error::Closed(CloseReason::Clean) on subsequent calls).
-            Err(_) => false,
+            Err(e) => (false, CloseReason::from(e.kind())),
             // Flush outstanding writes if the database is still open.
-            Ok(_) => true,
+            Ok(_) => (true, CloseReason::Clean),
         };
 
         // Mark the database as closed before flushing.
@@ -708,6 +727,7 @@ impl Db {
             warn!("failed to shutdown memtable writer task [error={:?}]", e);
         }
 
+        let _ = self.watcher_tx.send(DbMessage::Closed(close_reason));
         info!("db closed");
         Ok(())
     }
@@ -6621,6 +6641,137 @@ mod tests {
             db.get(b"k1").await.unwrap(),
             Some(Bytes::from_static(b"v2"))
         );
+
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn should_notify_seq_watcher_on_wal_flush() {
+        // Given: a DB with WAL enabled and a seq watcher
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let db = Db::builder("/tmp/test_watch_wal", object_store)
+            .build()
+            .await
+            .unwrap();
+        let mut watcher = db.subscribe();
+
+        // When: writing multiple keys and flushing the WAL
+        db.put(b"key1", b"value1").await.unwrap();
+        db.put(b"key2", b"value2").await.unwrap();
+        db.put(b"key3", b"value3").await.unwrap();
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::Wal,
+        })
+        .await
+        .unwrap();
+
+        // Then: the watcher should receive a DurableSeqChanged with seq >= 3
+        let msg = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                match watcher.recv().await {
+                    Ok(DbMessage::DurableSeqChanged(seq)) if seq >= 3 => return seq,
+                    Ok(_) => continue,
+                    Err(e) => panic!("watch channel error: {:?}", e),
+                }
+            }
+        })
+        .await
+        .expect("timed out waiting for seq update");
+        assert!(msg >= 3, "expected durable seq >= 3, got {}", msg);
+
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn should_close_watcher_on_db_drop() {
+        // Given: a DB with a watcher
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let db = Db::builder("/tmp/test_watch_drop", object_store)
+            .build()
+            .await
+            .unwrap();
+        let mut watcher = db.subscribe();
+
+        // When: the DB is closed
+        db.close().await.unwrap();
+
+        // Then: the watcher should receive a Closed message
+        let result = watcher.recv().await;
+        assert!(
+            matches!(result, Ok(DbMessage::Closed(CloseReason::Clean))),
+            "expected Closed message after db close, got {:?}",
+            result
+        );
+
+        // When: the DB is dropped (drops the broadcast senders)
+        drop(db);
+
+        // Then: the watcher should receive a RecvError::Closed
+        let result = watcher.recv().await;
+        assert!(
+            matches!(
+                result,
+                Err(tokio::sync::broadcast::error::RecvError::Closed)
+            ),
+            "expected RecvError::Closed after db drop, got {:?}",
+            result
+        );
+    }
+
+    #[cfg(feature = "wal_disable")]
+    #[tokio::test]
+    async fn should_notify_seq_watcher_on_l0_flush_when_wal_disabled() {
+        // Given: a DB with WAL disabled and a seq watcher
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let mut options = test_db_options(0, 256, None);
+        options.wal_enabled = false;
+        let db = Db::builder("/tmp/test_watch_l0", object_store)
+            .with_settings(options)
+            .build()
+            .await
+            .unwrap();
+        let mut watcher = db.subscribe();
+
+        // When: writing multiple keys and flushing the memtable to L0
+        db.put_with_options(
+            b"key1",
+            b"value1",
+            &PutOptions::default(),
+            &WriteOptions {
+                await_durable: false,
+            },
+        )
+        .await
+        .unwrap();
+        db.put_with_options(
+            b"key2",
+            b"value2",
+            &PutOptions::default(),
+            &WriteOptions {
+                await_durable: false,
+            },
+        )
+        .await
+        .unwrap();
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::MemTable,
+        })
+        .await
+        .unwrap();
+
+        // Then: the watcher should receive a DurableSeqChanged with seq >= 2
+        let msg = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                match watcher.recv().await {
+                    Ok(DbMessage::DurableSeqChanged(seq)) if seq >= 2 => return seq,
+                    Ok(_) => continue,
+                    Err(e) => panic!("watch channel error: {:?}", e),
+                }
+            }
+        })
+        .await
+        .expect("timed out waiting for seq update");
+        assert!(msg >= 2, "expected durable seq >= 2, got {}", msg);
 
         db.close().await.unwrap();
     }

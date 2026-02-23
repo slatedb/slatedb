@@ -19,7 +19,7 @@ use crate::sst_iter::SstIteratorOptions;
 use crate::stats::StatRegistry;
 use crate::store_provider::StoreProvider;
 use crate::tablestore::TableStore;
-use crate::utils::{IdGenerator, MonotonicSeq, WatchableOnceCell};
+use crate::utils::{IdGenerator, WatchableOnceCell};
 use crate::wal_replay::{WalReplayIterator, WalReplayOptions};
 use crate::{Checkpoint, DbIterator};
 use async_trait::async_trait;
@@ -130,9 +130,10 @@ impl DbReaderInner {
 
         // initial_state contains the last_committed_seq after WAL replay. in no-wal mode, we can simply fallback
         // to last_l0_seq.
-        let last_remote_persisted_seq = MonotonicSeq::new(initial_state.core().last_l0_seq);
-        last_remote_persisted_seq.store_if_greater(initial_state.last_remote_persisted_seq);
-        let oracle = Arc::new(DbReaderOracle::new(last_remote_persisted_seq));
+        let initial_durable_seq = initial_state
+            .last_remote_persisted_seq
+            .max(initial_state.core().last_l0_seq);
+        let oracle = Arc::new(DbReaderOracle::new(initial_durable_seq));
 
         let stat_registry = Arc::new(StatRegistry::new());
         let db_stats = DbStats::new(stat_registry.as_ref());
@@ -233,8 +234,7 @@ impl DbReaderInner {
     async fn reestablish_checkpoint(&self, checkpoint: Checkpoint) -> Result<(), SlateDBError> {
         let new_checkpoint_state = self.rebuild_checkpoint_state(checkpoint).await?;
         self.oracle
-            .last_remote_persisted_seq
-            .store_if_greater(new_checkpoint_state.last_remote_persisted_seq);
+            .advance_durable_seq(new_checkpoint_state.last_remote_persisted_seq);
         let mut write_guard = self.state.write();
         *write_guard = Arc::new(new_checkpoint_state);
         Ok(())
@@ -259,9 +259,7 @@ impl DbReaderInner {
             )
             .await?;
 
-            self.oracle
-                .last_remote_persisted_seq
-                .store(last_committed_seq);
+            self.oracle.advance_durable_seq(last_committed_seq);
             let mut write_guard = self.state.write();
             *write_guard = Arc::new(CheckpointState {
                 checkpoint: current_checkpoint.checkpoint.clone(),

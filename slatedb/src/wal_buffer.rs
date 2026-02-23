@@ -342,7 +342,7 @@ impl WalBufferManager {
                 let mut inner = self.inner.write();
                 inner.recent_flushed_wal_id = *wal_id;
                 if let Some(seq) = wal.last_seq() {
-                    inner.oracle.last_remote_persisted_seq.store_if_greater(seq);
+                    inner.oracle.advance_durable_seq(seq);
                 }
             }
 
@@ -608,7 +608,6 @@ mod tests {
     use crate::stats::StatRegistry;
     use crate::tablestore::TableStore;
     use crate::types::{RowEntry, ValueDeletable};
-    use crate::utils::MonotonicSeq;
     use bytes::Bytes;
     use object_store::{memory::InMemory, path::Path, ObjectStore};
     use slatedb_common::clock::DefaultSystemClock;
@@ -821,11 +820,8 @@ mod tests {
         let test_clock = Arc::new(MockSystemClock::new());
         let mono_clock = Arc::new(MonotonicClock::new(test_clock.clone(), 0));
         let system_clock = Arc::new(DefaultSystemClock::new());
-        let oracle = Arc::new(DbOracle::new(
-            MonotonicSeq::new(0),
-            MonotonicSeq::new(0),
-            MonotonicSeq::new(0),
-        ));
+        let (watcher_tx, _) = tokio::sync::broadcast::channel(crate::db::DB_MESSAGE_CHANNEL_CAP);
+        let oracle = Arc::new(DbOracle::new(0, 0, 0, watcher_tx));
         let db_state = Arc::new(RwLock::new(DbState::new(new_dirty_manifest())));
         let wal_buffer = Arc::new(WalBufferManager::new(
             wal_id_store,
@@ -944,7 +940,7 @@ mod tests {
         // set flush seq to 80, and track last applied seq to 90, it should release 20 wals
         {
             let inner = wal_buffer.inner.write();
-            inner.oracle.last_remote_persisted_seq.store(80);
+            inner.oracle.set_durable_seq_unsafe(80);
         }
         wal_buffer.track_last_applied_seq(90);
         assert_eq!(wal_buffer.inner.read().immutable_wals.len(), 20);

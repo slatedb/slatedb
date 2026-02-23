@@ -434,12 +434,13 @@ impl TransactionManagerInner {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::DbMessage;
     use crate::rand::DbRand;
-    use crate::utils::MonotonicSeq;
     use bytes::Bytes;
     use parking_lot::Mutex;
     use rstest::rstest;
     use std::collections::HashSet;
+    use tokio::sync::broadcast;
 
     struct CheckConflictTestCase {
         name: &'static str,
@@ -451,22 +452,16 @@ mod tests {
 
     fn create_transaction_manager() -> TransactionManager {
         let db_rand = Arc::new(DbRand::new(0));
-        let oracle = Arc::new(DbOracle::new(
-            MonotonicSeq::new(0),
-            MonotonicSeq::new(0),
-            MonotonicSeq::new(0),
-        ));
+        let (watcher_tx, _) = broadcast::channel::<DbMessage>(16);
+        let oracle = Arc::new(DbOracle::new(0, 0, 0, watcher_tx));
         TransactionManager::new(oracle, db_rand)
     }
 
     #[test]
     fn test_new_transaction_uses_oracle_seq() {
         let db_rand = Arc::new(DbRand::new(0));
-        let oracle = Arc::new(DbOracle::new(
-            MonotonicSeq::new(123),
-            MonotonicSeq::new(123),
-            MonotonicSeq::new(123),
-        ));
+        let (watcher_tx, _) = broadcast::channel::<DbMessage>(16);
+        let oracle = Arc::new(DbOracle::new(123, 123, 123, watcher_tx));
         let txn_manager = TransactionManager::new(oracle, db_rand);
 
         let (txn_id, seq) = txn_manager.new_transaction();
@@ -481,11 +476,8 @@ mod tests {
     #[test]
     fn test_new_snapshot_uses_optional_seq() {
         let db_rand = Arc::new(DbRand::new(0));
-        let oracle = Arc::new(DbOracle::new(
-            MonotonicSeq::new(77),
-            MonotonicSeq::new(77),
-            MonotonicSeq::new(77),
-        ));
+        let (watcher_tx, _) = broadcast::channel::<DbMessage>(16);
+        let oracle = Arc::new(DbOracle::new(77, 77, 77, watcher_tx));
         let txn_manager = TransactionManager::new(oracle, db_rand);
 
         let (snapshot_id_from_oracle, seq_from_oracle) = txn_manager.new_snapshot(None);
