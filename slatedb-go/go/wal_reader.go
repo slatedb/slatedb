@@ -101,7 +101,7 @@ func (it *WalFileIterator) Next() (*RowEntry, error) {
 		entry.CreateTs = &ts
 	}
 
-	if cEntry.has_expire_ts != C.bool(false) {
+	if cEntry.expire_ts_present != C.bool(false) {
 		ts := int64(cEntry.expire_ts)
 		entry.ExpireTs = &ts
 	}

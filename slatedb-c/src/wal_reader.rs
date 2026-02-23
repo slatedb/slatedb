@@ -512,7 +512,7 @@ pub unsafe extern "C" fn slatedb_wal_file_iterator_next(
                 seq: entry.seq,
                 create_ts_present: entry.create_ts.is_some(),
                 create_ts: entry.create_ts.unwrap_or(0),
-                has_expire_ts: entry.expire_ts.is_some(),
+                expire_ts_present: entry.expire_ts.is_some(),
                 expire_ts: entry.expire_ts.unwrap_or(0),
             };
             success_result()

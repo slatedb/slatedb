@@ -202,8 +202,8 @@ pub struct slatedb_row_entry_t {
     /// Creation timestamp (valid when `create_ts_present` is true).
     pub create_ts: i64,
     /// Whether `expire_ts` is populated.
-    pub has_expire_ts: bool,
-    /// Expiration timestamp (valid when `has_expire_ts` is true).
+    pub expire_ts_present: bool,
+    /// Expiration timestamp (valid when `expire_ts_present` is true).
     pub expire_ts: i64,
 }
 

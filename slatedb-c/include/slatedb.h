@@ -356,8 +356,8 @@ typedef struct slatedb_row_entry_t {
     // Creation timestamp (valid when `create_ts_present` is true).
     int64_t create_ts;
     // Whether `expire_ts` is populated.
-    bool has_expire_ts;
-    // Expiration timestamp (valid when `has_expire_ts` is true).
+    bool expire_ts_present;
+    // Expiration timestamp (valid when `expire_ts_present` is true).
     int64_t expire_ts;
 } slatedb_row_entry_t;
 

@@ -1220,7 +1220,7 @@ final class NativeInterop {
             long seq = slatedb_row_entry_t.seq(outEntry);
             boolean hasCreateTs = slatedb_row_entry_t.create_ts_present(outEntry);
             long createTsRaw = slatedb_row_entry_t.create_ts(outEntry);
-            boolean hasExpireTs = slatedb_row_entry_t.has_expire_ts(outEntry);
+            boolean hasExpireTs = slatedb_row_entry_t.expire_ts_present(outEntry);
             long expireTsRaw = slatedb_row_entry_t.expire_ts(outEntry);
 
             byte[] key = keyPtr.reinterpret(keyLen).toArray(ValueLayout.JAVA_BYTE);
