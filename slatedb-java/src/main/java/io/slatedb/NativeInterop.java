@@ -1218,7 +1218,7 @@ final class NativeInterop {
             MemorySegment valuePtr = slatedb_row_entry_t.value(outEntry);
             long valueLen = slatedb_row_entry_t.value_len(outEntry);
             long seq = slatedb_row_entry_t.seq(outEntry);
-            boolean hasCreateTs = slatedb_row_entry_t.has_create_ts(outEntry);
+            boolean hasCreateTs = slatedb_row_entry_t.create_ts_present(outEntry);
             long createTsRaw = slatedb_row_entry_t.create_ts(outEntry);
             boolean hasExpireTs = slatedb_row_entry_t.has_expire_ts(outEntry);
             long expireTsRaw = slatedb_row_entry_t.expire_ts(outEntry);

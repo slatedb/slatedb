@@ -198,8 +198,8 @@ pub struct slatedb_row_entry_t {
     /// Sequence number assigned to this entry.
     pub seq: u64,
     /// Whether `create_ts` is populated.
-    pub has_create_ts: bool,
-    /// Creation timestamp (valid when `has_create_ts` is true).
+    pub create_ts_present: bool,
+    /// Creation timestamp (valid when `create_ts_present` is true).
     pub create_ts: i64,
     /// Whether `expire_ts` is populated.
     pub has_expire_ts: bool,

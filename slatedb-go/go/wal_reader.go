@@ -96,7 +96,7 @@ func (it *WalFileIterator) Next() (*RowEntry, error) {
 		entry.Value = C.GoBytes(unsafe.Pointer(cEntry.value), C.int(cEntry.value_len))
 	}
 
-	if cEntry.has_create_ts != C.bool(false) {
+	if cEntry.create_ts_present != C.bool(false) {
 		ts := int64(cEntry.create_ts)
 		entry.CreateTs = &ts
 	}
