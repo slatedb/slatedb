@@ -169,7 +169,7 @@ pub struct DbBuilder<P: Into<Path>> {
     memory_cache: Option<Arc<dyn DbCache>>,
     system_clock: Option<Arc<dyn SystemClock>>,
     gc_runtime: Option<Handle>,
-    compactor: Option<CompactorBuilder<Path>>,
+    compactor_builder: Option<CompactorBuilder<Path>>,
     fp_registry: Arc<FailPointRegistry>,
     seed: Option<u64>,
     sst_block_size: Option<SstBlockSize>,
@@ -188,7 +188,7 @@ impl<P: Into<Path>> DbBuilder<P> {
             memory_cache: None,
             system_clock: None,
             gc_runtime: None,
-            compactor: None,
+            compactor_builder: None,
             fp_registry: Arc::new(FailPointRegistry::new()),
             seed: None,
             sst_block_size: None,
@@ -239,8 +239,8 @@ impl<P: Into<Path>> DbBuilder<P> {
     ///
     /// Mutually exclusive with `Settings::compactor_options`. Setting both
     /// will result in an error.
-    pub fn with_compactor_builder(mut self, compactor: CompactorBuilder<P>) -> Self {
-        self.compactor = Some(compactor.into_path_builder());
+    pub fn with_compactor_builder(mut self, compactor_builder: CompactorBuilder<P>) -> Self {
+        self.compactor_builder = Some(compactor_builder.into_path_builder());
         self
     }
 
@@ -540,14 +540,14 @@ impl<P: Into<Path>> DbBuilder<P> {
             None,
         ));
 
-        if self.compactor.is_some() && self.settings.compactor_options.is_some() {
+        if self.compactor_builder.is_some() && self.settings.compactor_options.is_some() {
             return Err(SlateDBError::InvalidCompactorOptions(
                 "cannot set both compactor_builder and compactor_options".into(),
             )
             .into());
         }
 
-        let compactor_builder = self.compactor.or_else(|| {
+        let compactor_builder = self.compactor_builder.or_else(|| {
             self.settings.compactor_options.as_ref().map(|opts| {
                 CompactorBuilder::new(path.clone(), retrying_main_object_store.clone())
                     .with_options(opts.clone())
