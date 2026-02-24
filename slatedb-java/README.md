@@ -16,7 +16,7 @@ SlateDB Java is a Java 24 binding for SlateDB built on the `slatedb-c` FFI libra
 - Rust toolchain (to build `slatedb-c`)
 - A supported object store (for local development, use `memory://` or `file://` URLs)
 
-## Build Native Libraries + JAR
+## Build Native Libraries
 
 `slatedb-java` embeds native `slatedb-c` binaries into the JAR and loads them from classpath resources at runtime. You do not need to set `java.library.path`.
 
@@ -51,6 +51,18 @@ The JAR is written to:
 ```
 slatedb-java/build/libs/slatedb-<version>.jar
 ```
+
+To crossbuild on mac, you must:
+
+1. Make sure `rustup target add` is used to add all platform IDs you want to build.
+2. Run the following to build Linux targets on Mac:
+   ```bash
+   xcode-select --install
+   brew tap messense/macos-cross-toolchains
+   brew install aarch64-unknown-linux-gnu
+   rustup target add aarch64-unknown-linux-gnu
+   ```
+3. Windows targets can't easily be built on Mac. `x86_64-pc-windows-gnu` can be used as a workaround for `windows-x86_64` but requires the MinGW toolchain to be installed and in your `PATH`.
 
 ## Hello World
 
