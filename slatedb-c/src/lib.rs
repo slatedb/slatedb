@@ -55,7 +55,10 @@ pub use db_reader::{
     slatedb_db_reader_scan_prefix_with_options, slatedb_db_reader_scan_with_options,
 };
 
-pub use iterator::{slatedb_iterator_close, slatedb_iterator_next, slatedb_iterator_seek};
+pub use iterator::{
+    slatedb_iterator_close, slatedb_iterator_next, slatedb_iterator_next_batch,
+    slatedb_iterator_seek,
+};
 pub use logging::{
     slatedb_logging_clear_callback, slatedb_logging_init, slatedb_logging_set_callback,
     slatedb_logging_set_level,
