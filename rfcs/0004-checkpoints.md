@@ -686,9 +686,10 @@ The union process works as follows:
      with each other, projection typically includes the same L0 SST in multiple projected manifests — each
      with a `visible_range` restricting it to that projection's key range. When these projected manifests are
      unioned, the duplicate entries must be combined back into a single L0 entry per SST ID. For each unique
-     SST ID, the `visible_range`s from all input manifests are merged into a single contiguous range. If the
-     ranges for a given SST ID are not contiguous (i.e., there is a gap between them), the union operation
-     fails. After deduplication, the L0 list must be sorted by ULID descending (newest first) to preserve
+     SST ID, the `visible_range`s from all input manifests are combined. The ranges for a given SST ID are not 
+     necessarily contiguous (i.e., there might be a gap between them) due to compaction; it's important to preserve
+     these gap so that the old values don't override new ones or deletions.
+     After deduplication, the L0 list must be sorted by ULID descending (newest first) to preserve
      temporal ordering. Without this sort, newer L0 SSTs from one input manifest could appear after older
      L0 SSTs from another, causing point lookups to return stale values — since the read path stops at the
      first matching L0 entry.
