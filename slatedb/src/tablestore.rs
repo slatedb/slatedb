@@ -17,7 +17,6 @@ use crate::blob::ReadOnlyBlob;
 use crate::db_cache::{CachedEntry, DbCache};
 use crate::db_state::{SsTableHandle, SsTableId};
 use crate::error::SlateDBError;
-use crate::sst_stats::SstStats;
 use crate::filter::BloomFilter;
 use crate::flatbuffer_types::SsTableIndexOwned;
 use crate::format::block::Block;
@@ -25,6 +24,7 @@ use crate::format::sst::{EncodedSsTable, SsTableFormat};
 use crate::object_stores::{ObjectStoreType, ObjectStores};
 use crate::paths::PathResolver;
 use crate::sst_builder::EncodedSsTableBuilder;
+use crate::sst_stats::SstStats;
 use crate::types::RowEntry;
 use crate::wal::wal_sst_builder::EncodedWalSsTableBuilder;
 
