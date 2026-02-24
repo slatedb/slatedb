@@ -1,8 +1,8 @@
 use crate::blob::ReadOnlyBlob;
 use crate::config::CompressionCodec;
 use crate::db_state::{SsTableInfo, SsTableInfoCodec, SstType};
-use crate::sst_stats::SstStats;
 use crate::error::SlateDBError;
+use crate::sst_stats::SstStats;
 use crate::filter::BloomFilter;
 use crate::flatbuffer_types::{
     BlockMeta, FlatBufferSsTableInfoCodec, SsTableIndex, SsTableIndexArgs, SsTableIndexOwned,
