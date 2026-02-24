@@ -1,6 +1,7 @@
 use bytes::Bytes;
 use flatbuffers::FlatBufferBuilder;
 
+use crate::error::SlateDBError;
 use crate::flatbuffer_types::{FbSstStats, FbSstStatsArgs};
 
 /// Per-SST statistics collected during SST building.
@@ -32,16 +33,15 @@ impl SstStats {
     }
 
     /// Decode stats from FlatBuffer bytes.
-    pub(crate) fn decode(data: Bytes) -> Self {
-        let fb_stats = flatbuffers::root::<FbSstStats>(&data)
-            .expect("valid FlatBuffer SstStats");
-        SstStats {
+    pub(crate) fn decode(data: Bytes) -> Result<Self, SlateDBError> {
+        let fb_stats = flatbuffers::root::<FbSstStats>(&data)?;
+        Ok(SstStats {
             num_puts: fb_stats.num_puts(),
             num_deletes: fb_stats.num_deletes(),
             num_merges: fb_stats.num_merges(),
             raw_key_size: fb_stats.raw_key_size(),
             raw_val_size: fb_stats.raw_val_size(),
-        }
+        })
     }
 }
 
@@ -59,7 +59,7 @@ mod tests {
             raw_val_size: 8192,
         };
         let encoded = stats.encode();
-        let decoded = SstStats::decode(encoded);
+        let decoded = SstStats::decode(encoded).unwrap();
         assert_eq!(stats, decoded);
     }
 
@@ -73,7 +73,7 @@ mod tests {
         assert_eq!(stats.raw_val_size, 0);
 
         let encoded = stats.encode();
-        let decoded = SstStats::decode(encoded);
+        let decoded = SstStats::decode(encoded).unwrap();
         assert_eq!(stats, decoded);
     }
 }

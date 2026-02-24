@@ -734,7 +734,7 @@ impl SsTableFormat {
             Some(c) => Self::decompress(untransformed_bytes, c)?,
             None => untransformed_bytes,
         };
-        Ok(SstStats::decode(decompressed_bytes))
+        SstStats::decode(decompressed_bytes)
     }
 
     /// Decompresses the compressed data using the specified compression codec.
