@@ -5,12 +5,8 @@ import io.slatedb.ffi.*;
 import io.slatedb.ffi.Native;
 
 import java.lang.foreign.Arena;
-import java.lang.foreign.GroupLayout;
-import java.lang.foreign.MemoryLayout;
 import java.lang.foreign.MemorySegment;
-import java.lang.foreign.SegmentAllocator;
 import java.lang.foreign.ValueLayout;
-import java.lang.invoke.VarHandle;
 import java.nio.charset.StandardCharsets;
 import java.util.Objects;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -701,41 +697,17 @@ final class NativeInterop {
         return new SlateDbWriteHandle(new WriteHandleHandle(seq, createTs));
     }
 
-    private static final GroupLayout ROW_LAYOUT = MemoryLayout.structLayout(
-            Native.C_POINTER.withName("key"),
-            Native.C_LONG.withName("key_len"),
-            Native.C_POINTER.withName("value"),
-            Native.C_LONG.withName("value_len"),
-            Native.C_LONG_LONG.withName("seq"),
-            Native.C_LONG_LONG.withName("create_ts"),
-            Native.C_BOOL.withName("create_ts_present"),
-            MemoryLayout.paddingLayout(7), // Alignment padding before expire_ts (int64)
-            Native.C_LONG_LONG.withName("expire_ts"),
-            Native.C_BOOL.withName("expire_ts_present"),
-            MemoryLayout.paddingLayout(7)
-    ).withName("slatedb_row_entry_t");
-
-    private static final VarHandle ROW_KEY = ROW_LAYOUT.varHandle(MemoryLayout.PathElement.groupElement("key"));
-    private static final VarHandle ROW_KEY_LEN = ROW_LAYOUT.varHandle(MemoryLayout.PathElement.groupElement("key_len"));
-    private static final VarHandle ROW_VALUE = ROW_LAYOUT.varHandle(MemoryLayout.PathElement.groupElement("value"));
-    private static final VarHandle ROW_VALUE_LEN = ROW_LAYOUT.varHandle(MemoryLayout.PathElement.groupElement("value_len"));
-    private static final VarHandle ROW_SEQ = ROW_LAYOUT.varHandle(MemoryLayout.PathElement.groupElement("seq"));
-    private static final VarHandle ROW_CREATE_TS = ROW_LAYOUT.varHandle(MemoryLayout.PathElement.groupElement("create_ts"));
-    private static final VarHandle ROW_CREATE_TS_PRESENT = ROW_LAYOUT.varHandle(MemoryLayout.PathElement.groupElement("create_ts_present"));
-    private static final VarHandle ROW_EXPIRE_TS = ROW_LAYOUT.varHandle(MemoryLayout.PathElement.groupElement("expire_ts"));
-    private static final VarHandle ROW_EXPIRE_TS_PRESENT = ROW_LAYOUT.varHandle(MemoryLayout.PathElement.groupElement("expire_ts_present"));
-
     private static RowEntry readRowEntry(MemorySegment rowPtr) {
-        MemorySegment row = rowPtr.reinterpret(ROW_LAYOUT.byteSize());
-        MemorySegment keyPtr = (MemorySegment) ROW_KEY.get(row, 0L);
-        long keyLen = (long) ROW_KEY_LEN.get(row, 0L);
-        MemorySegment valuePtr = (MemorySegment) ROW_VALUE.get(row, 0L);
-        long valueLen = (long) ROW_VALUE_LEN.get(row, 0L);
-        long seq = (long) ROW_SEQ.get(row, 0L);
-        boolean createTsPresent = (boolean) ROW_CREATE_TS_PRESENT.get(row, 0L);
-        Long createTs = createTsPresent ? (long) ROW_CREATE_TS.get(row, 0L) : null;
-        boolean expireTsPresent = (boolean) ROW_EXPIRE_TS_PRESENT.get(row, 0L);
-        Long expireTs = expireTsPresent ? (long) ROW_EXPIRE_TS.get(row, 0L) : null;
+        MemorySegment row = rowPtr.reinterpret(slatedb_row_entry_t.layout().byteSize());
+        MemorySegment keyPtr = slatedb_row_entry_t.key(row);
+        long keyLen = slatedb_row_entry_t.key_len(row);
+        MemorySegment valuePtr = slatedb_row_entry_t.value(row);
+        long valueLen = slatedb_row_entry_t.value_len(row);
+        long seq = slatedb_row_entry_t.seq(row);
+        boolean createTsPresent = slatedb_row_entry_t.create_ts_present(row);
+        Long createTs = createTsPresent ? slatedb_row_entry_t.create_ts(row) : null;
+        boolean expireTsPresent = slatedb_row_entry_t.expire_ts_present(row);
+        Long expireTs = expireTsPresent ? slatedb_row_entry_t.expire_ts(row) : null;
 
         byte[] key = new byte[(int) keyLen];
         MemorySegment.copy(keyPtr, 0, MemorySegment.ofArray(key), 0, keyLen);
