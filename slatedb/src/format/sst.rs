@@ -2,7 +2,6 @@ use crate::blob::ReadOnlyBlob;
 use crate::config::CompressionCodec;
 use crate::db_state::{SsTableInfo, SsTableInfoCodec, SstType};
 use crate::error::SlateDBError;
-use crate::sst_stats::SstStats;
 use crate::filter::BloomFilter;
 use crate::flatbuffer_types::{
     BlockMeta, FlatBufferSsTableInfoCodec, SsTableIndex, SsTableIndexArgs, SsTableIndexOwned,
@@ -10,6 +9,7 @@ use crate::flatbuffer_types::{
 use crate::format::block::{Block, BlockBuilderV1};
 use crate::format::block_v2::BlockBuilderV2;
 use crate::format::row;
+use crate::sst_stats::SstStats;
 use async_trait::async_trait;
 use bytes::{Buf, BufMut, Bytes};
 use flatbuffers::DefaultAllocator;
@@ -248,7 +248,7 @@ impl EncodedSsTableBlockBuilder {
     }
 }
 
-/// The encoded footer of an SSTable, containing filter, index, info, and metadata.
+/// The encoded footer of an SSTable, containing filter, index, stats, info, and metadata.
 pub(crate) struct EncodedSsTableFooter {
     pub(crate) info: SsTableInfo,
     pub(crate) index: SsTableIndexOwned,
@@ -335,7 +335,7 @@ impl<'a, 'b> EncodedSsTableFooterBuilder<'a, 'b> {
         self
     }
 
-    /// Builds the footer with the index and optional filter.
+    /// Builds the footer with the index, optional filter and optional stats.
     pub(crate) async fn build(mut self) -> Result<EncodedSsTableFooter, SlateDBError> {
         let mut buf = Vec::new();
 
