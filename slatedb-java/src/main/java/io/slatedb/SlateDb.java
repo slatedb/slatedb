@@ -14,7 +14,7 @@ import java.util.Objects;
 ///
 /// ### Lifecycle
 ///
-/// - Ensure `java.library.path` includes the directory containing `slatedb_c`.
+/// - Native libraries are loaded automatically from bundled classpath resources.
 /// - Open a database with [#open(String,String,String)] or configure a builder via
 ///   [#builder(String,String,String)].
 /// - Always close resources ([SlateDb], [SlateDbReader], [SlateDbWriteBatch],

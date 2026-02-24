@@ -16,34 +16,37 @@ SlateDB Java is a Java 24 binding for SlateDB built on the `slatedb-c` FFI libra
 - Rust toolchain (to build `slatedb-c`)
 - A supported object store (for local development, use `memory://` or `file://` URLs)
 
-## Build the Native Library
+## Build Native Libraries + JAR
 
-From the repository root:
+`slatedb-java` embeds native `slatedb-c` binaries into the JAR and loads them from classpath resources at runtime. You do not need to set `java.library.path`.
 
-```bash
-cargo build -p slatedb-c
-```
-
-Native library locations:
-- macOS: `target/debug/libslatedb_c.dylib`
-- Linux: `target/debug/libslatedb_c.so`
-- Windows: `target/debug/slatedb_c.dll`
-
-Optional release build:
-
-```bash
-cargo build -p slatedb-c --release
-```
-
-## Build the JAR
-
-From `slatedb-java`:
+By default, Gradle builds the host platform native library and packages it:
 
 ```bash
 ./gradlew jar
 ```
 
-The JAR will be written to:
+To build and package all supported OS/architecture targets:
+
+```bash
+./gradlew jar -Pslatedb.native.targets=all
+```
+
+Supported platform IDs:
+- `linux-x86_64`
+- `linux-aarch64`
+- `macos-x86_64`
+- `macos-aarch64`
+- `windows-x86_64`
+- `windows-aarch64`
+
+You can also pass a custom subset:
+
+```bash
+./gradlew jar -Pslatedb.native.targets=linux-x86_64,macos-aarch64
+```
+
+The JAR is written to:
 
 ```
 slatedb-java/build/libs/slatedb-<version>.jar
@@ -66,7 +69,7 @@ import java.nio.file.Path;
 
 public final class HelloSlateDb {
     public static void main(String[] args) throws Exception {
-        // Initialize logging (native library resolves via java.library.path)
+        // Initialize logging (native library loads from bundled resources)
         SlateDb.initLogging(SlateDbConfig.LogLevel.INFO);
 
         // Local database path and local object store
@@ -114,11 +117,10 @@ public final class HelloSlateDb {
 javac -cp slatedb-java/build/libs/slatedb-<version>.jar HelloSlateDb.java
 ```
 
-3. Run (set `java.library.path` to the directory containing your `slatedb_c` native library):
+3. Run:
 
 ```bash
 java --enable-native-access=ALL-UNNAMED \
-  -Djava.library.path=/absolute/path/to/native/lib/dir \
   -cp slatedb-java/build/libs/slatedb-<version>.jar:. \
   HelloSlateDb
 ```
@@ -162,15 +164,7 @@ The settings helpers:
 
 ## Testing
 
-JUnit tests require access to the native library.
-
-Build the native library first:
-
-```bash
-cargo build -p slatedb-c
-```
-
-The Gradle test task configures `java.library.path` to include `target/release` and `target/debug`.
+`./gradlew test` automatically builds and stages the host platform native library for tests.
 
 Then run:
 
@@ -181,7 +175,7 @@ Then run:
 ## Troubleshooting
 
 Common issues:
-- `UnsatisfiedLinkError`: The JVM cannot find `slatedb_c`. Verify `java.library.path` includes the native library directory.
+- `UnsatisfiedLinkError`: The JAR does not contain a native binary for your platform. Build with `-Pslatedb.native.targets=all` (or include your platform ID in a custom list).
 - Native access warnings: Use `--enable-native-access=ALL-UNNAMED` when running or testing.
 
 ## License
