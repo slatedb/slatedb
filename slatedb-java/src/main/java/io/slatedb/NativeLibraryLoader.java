@@ -30,7 +30,13 @@ public final class NativeLibraryLoader {
     }
 
     /// Loads the current platform's native SlateDB library from the classpath once.
+    ///
+    /// This is called from generated jextract code. During the build,
+    /// `patchJextractNativeLoader` rewrites the generated file in `Native.java` so
+    /// its static initializer calls this method instead of
+    /// `System.loadLibrary("slatedb_c")`.
     public static void loadFromClasspath() {
+        // Fast path check to avoid synchronization after the library is loaded.
         if (loaded) {
             return;
         }
