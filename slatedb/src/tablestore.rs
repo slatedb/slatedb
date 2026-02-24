@@ -382,6 +382,9 @@ impl TableStore {
     }
 
     /// Reads the stats block of an SSTable.
+    ///
+    /// ## Arguments
+    /// - `handle`: The handle of the SSTable to read the stats from.
     pub(crate) async fn read_stats(
         &self,
         handle: &SsTableHandle,
