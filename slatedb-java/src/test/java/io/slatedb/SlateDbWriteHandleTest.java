@@ -10,7 +10,7 @@ class SlateDbWriteHandleTest {
 
     @Test
     void testPutReturnsWriteHandle() throws Exception {
-        TestSupport.ensureNativeReady();
+        TestSupport.ensureLoggingInitialized();
         TestSupport.DbContext context = TestSupport.createDbContext();
 
         try (SlateDb db = SlateDb.open(context.dbPath().toAbsolutePath().toString(), context.objectStoreUrl(), null)) {
@@ -27,7 +27,7 @@ class SlateDbWriteHandleTest {
 
     @Test
     void testDeleteReturnsWriteHandle() throws Exception {
-        TestSupport.ensureNativeReady();
+        TestSupport.ensureLoggingInitialized();
         TestSupport.DbContext context = TestSupport.createDbContext();
 
         try (SlateDb db = SlateDb.open(context.dbPath().toAbsolutePath().toString(), context.objectStoreUrl(), null)) {
@@ -48,7 +48,7 @@ class SlateDbWriteHandleTest {
 
     @Test
     void testWriteBatchReturnsWriteHandle() throws Exception {
-        TestSupport.ensureNativeReady();
+        TestSupport.ensureLoggingInitialized();
         TestSupport.DbContext context = TestSupport.createDbContext();
 
         try (SlateDb db = SlateDb.open(context.dbPath().toAbsolutePath().toString(), context.objectStoreUrl(), null)) {
@@ -67,7 +67,7 @@ class SlateDbWriteHandleTest {
 
     @Test
     void testIncrementingSequenceNumbers() throws Exception {
-        TestSupport.ensureNativeReady();
+        TestSupport.ensureLoggingInitialized();
         TestSupport.DbContext context = TestSupport.createDbContext();
 
         try (SlateDb db = SlateDb.open(context.dbPath().toAbsolutePath().toString(), context.objectStoreUrl(), null)) {
@@ -87,7 +87,7 @@ class SlateDbWriteHandleTest {
 
     @Test
     void testPutWithOptionsReturnsWriteHandle() throws Exception {
-        TestSupport.ensureNativeReady();
+        TestSupport.ensureLoggingInitialized();
         TestSupport.DbContext context = TestSupport.createDbContext();
 
         try (SlateDb db = SlateDb.open(context.dbPath().toAbsolutePath().toString(), context.objectStoreUrl(), null)) {

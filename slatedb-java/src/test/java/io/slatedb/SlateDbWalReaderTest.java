@@ -19,7 +19,7 @@ class SlateDbWalReaderTest {
 
     @Test
     void walReaderListAndIterate() throws Exception {
-        TestSupport.ensureNativeReady();
+        TestSupport.ensureLoggingInitialized();
         final var context = TestSupport.createDbContext();
         final var url = "file://" + context.objectStoreRoot().toAbsolutePath();
 
@@ -49,7 +49,7 @@ class SlateDbWalReaderTest {
 
     @Test
     void walReaderGetById() throws Exception {
-        TestSupport.ensureNativeReady();
+        TestSupport.ensureLoggingInitialized();
         final var context = TestSupport.createDbContext();
         final var url = "file://" + context.objectStoreRoot().toAbsolutePath();
 
@@ -74,7 +74,7 @@ class SlateDbWalReaderTest {
 
     @Test
     void walFileMetadata() throws Exception {
-        TestSupport.ensureNativeReady();
+        TestSupport.ensureLoggingInitialized();
         final var context = TestSupport.createDbContext();
         final var url = "file://" + context.objectStoreRoot().toAbsolutePath();
 
@@ -102,7 +102,7 @@ class SlateDbWalReaderTest {
 
     @Test
     void walEntryKinds() throws Exception {
-        TestSupport.ensureNativeReady();
+        TestSupport.ensureLoggingInitialized();
         final var context = TestSupport.createDbContext();
         final var url = "file://" + context.objectStoreRoot().toAbsolutePath();
 
@@ -138,7 +138,7 @@ class SlateDbWalReaderTest {
 
     @Test
     void walReaderCloseIsIdempotent() throws Exception {
-        TestSupport.ensureNativeReady();
+        TestSupport.ensureLoggingInitialized();
         final var context = TestSupport.createDbContext();
         final var url = "file://" + context.objectStoreRoot().toAbsolutePath();
 
@@ -153,7 +153,7 @@ class SlateDbWalReaderTest {
 
     @Test
     void walReaderListWithIdRange() throws Exception {
-        TestSupport.ensureNativeReady();
+        TestSupport.ensureLoggingInitialized();
         final var context = TestSupport.createDbContext();
         final var url = "file://" + context.objectStoreRoot().toAbsolutePath();
 

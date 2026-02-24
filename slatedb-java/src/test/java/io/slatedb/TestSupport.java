@@ -7,7 +7,7 @@ import java.nio.file.Path;
 
 /// Test helpers for SlateDB JUnit tests.
 ///
-/// Provides native library initialization and temporary database/object store paths.
+/// Provides SlateDB initialization and temporary database/object store paths.
 final class TestSupport {
     private static final Object INIT_LOCK = new Object();
     private static volatile boolean initialized;
@@ -15,15 +15,21 @@ final class TestSupport {
     private TestSupport() {
     }
 
-    /// Loads the native SlateDB library once for the test JVM.
-    static void ensureNativeReady() throws Exception {
+    /// Ensures SlateDB logging is initialized once per JVM.
+    ///
+    /// This also triggers native library loading via generated bindings.
+    static void ensureLoggingInitialized() {
+        if (initialized) {
+            return;
+        }
+
         synchronized (INIT_LOCK) {
             if (initialized) {
                 return;
             }
             Assertions.assertDoesNotThrow(
                 () -> SlateDb.initLogging(SlateDbConfig.LogLevel.INFO),
-                "Unable to initialize SlateDB native library from classpath resources"
+                "Unable to initialize SlateDB logging"
             );
             initialized = true;
         }

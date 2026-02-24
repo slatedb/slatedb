@@ -9,7 +9,7 @@ import java.time.Duration;
 class SlateDbWriteBatchTest {
     @Test
     void writeBatchPutAndDelete() throws Exception {
-        TestSupport.ensureNativeReady();
+        TestSupport.ensureLoggingInitialized();
         TestSupport.DbContext context = TestSupport.createDbContext();
 
         byte[] key1 = "batch-key-1".getBytes(StandardCharsets.UTF_8);
@@ -32,7 +32,7 @@ class SlateDbWriteBatchTest {
 
     @Test
     void writeBatchPutWithOptionsAndWriteOptions() throws Exception {
-        TestSupport.ensureNativeReady();
+        TestSupport.ensureLoggingInitialized();
         TestSupport.DbContext context = TestSupport.createDbContext();
 
         byte[] key = "batch-opts-key".getBytes(StandardCharsets.UTF_8);
@@ -52,7 +52,7 @@ class SlateDbWriteBatchTest {
 
     @Test
     void writeBatchCloseIsIdempotent() throws Exception {
-        TestSupport.ensureNativeReady();
+        TestSupport.ensureLoggingInitialized();
         TestSupport.DbContext context = TestSupport.createDbContext();
 
         try (SlateDb db = SlateDb.open(context.dbPath().toAbsolutePath().toString(), context.objectStoreUrl(), null)) {
