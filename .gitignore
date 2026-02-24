@@ -2,7 +2,6 @@
 .DS_Store
 .idea
 .env
-bin/
 proptest-regressions/
 tmp
 .vscode
