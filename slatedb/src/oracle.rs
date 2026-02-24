@@ -1,9 +1,8 @@
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering::SeqCst;
-use std::sync::RwLock;
-use tokio::sync::broadcast;
+use tokio::sync::watch;
 
-use crate::db::DbMessage;
+use crate::db::DbStatus;
 
 /// Oracle is a trait that centralizes the generation & maintenance of various
 /// sequence numbers. These sequence numbers are mostly related to the lifecycle
@@ -21,29 +20,26 @@ pub(crate) trait Oracle: Send + Sync + 'static {
 
 pub(crate) struct DbOracle {
     // Fields are intentionally private so that all mutations go through methods
-    // on this struct. This ensures that updates to watched values (e.g.
-    // last_remote_persisted_seq) always broadcast through the watcher_tx.
+    // on this struct.
     last_seq: AtomicU64,
     last_committed_seq: AtomicU64,
-    // An RwLock is used instead of AtomicU64 so that advancing the sequence
-    // and broadcasting the change to the watcher happen atomically. This
-    // guarantees that DurableSeqChanged messages are always monotonic.
-    last_remote_persisted_seq: RwLock<u64>,
-    watcher_tx: broadcast::Sender<DbMessage>,
+    // The durable sequence is stored inside the watch channel's `DbStatus`
+    // value. Using `send_if_modified` ensures that advancing the sequence and
+    // notifying subscribers happen atomically under the watch's internal lock,
+    // guaranteeing monotonic updates without a separate RwLock.
+    status_tx: watch::Sender<DbStatus>,
 }
 
 impl DbOracle {
     pub(crate) fn new(
         last_seq: u64,
         last_committed_seq: u64,
-        last_remote_persisted_seq: u64,
-        watcher_tx: broadcast::Sender<DbMessage>,
+        status_tx: watch::Sender<DbStatus>,
     ) -> Self {
         Self {
             last_seq: AtomicU64::new(last_seq),
             last_committed_seq: AtomicU64::new(last_committed_seq),
-            last_remote_persisted_seq: RwLock::new(last_remote_persisted_seq),
-            watcher_tx,
+            status_tx,
         }
     }
 
@@ -64,24 +60,19 @@ impl DbOracle {
     }
 
     pub(crate) fn advance_durable_seq(&self, seq: u64) {
-        let mut current = self
-            .last_remote_persisted_seq
-            .write()
-            .expect("lock poisoned: advance_durable_seq");
-        if seq > *current {
-            *current = seq;
-            let _ = self.watcher_tx.send(DbMessage::DurableSeqChanged(seq));
-        }
+        self.status_tx.send_if_modified(|s| {
+            if seq > s.durable_seq {
+                s.durable_seq = seq;
+                true
+            } else {
+                false
+            }
+        });
     }
 
     #[cfg(test)]
     pub(crate) fn set_durable_seq_unsafe(&self, value: u64) {
-        let mut current = self
-            .last_remote_persisted_seq
-            .write()
-            .expect("lock poisoned: set_durable_seq_unsafe");
-        *current = value;
-        let _ = self.watcher_tx.send(DbMessage::DurableSeqChanged(value));
+        self.status_tx.send_modify(|s| s.durable_seq = value);
     }
 }
 
@@ -91,10 +82,7 @@ impl Oracle for DbOracle {
     }
 
     fn last_remote_persisted_seq(&self) -> u64 {
-        *self
-            .last_remote_persisted_seq
-            .read()
-            .expect("lock poisoned: last_remote_persisted_seq")
+        self.status_tx.borrow().durable_seq
     }
 }
 

@@ -820,8 +820,8 @@ mod tests {
         let test_clock = Arc::new(MockSystemClock::new());
         let mono_clock = Arc::new(MonotonicClock::new(test_clock.clone(), 0));
         let system_clock = Arc::new(DefaultSystemClock::new());
-        let (watcher_tx, _) = tokio::sync::broadcast::channel(crate::db::DB_MESSAGE_CHANNEL_CAP);
-        let oracle = Arc::new(DbOracle::new(0, 0, 0, watcher_tx));
+        let (status_tx, _) = tokio::sync::watch::channel(crate::db::DbStatus::default());
+        let oracle = Arc::new(DbOracle::new(0, 0, status_tx));
         let db_state = Arc::new(RwLock::new(DbState::new(new_dirty_manifest())));
         let wal_buffer = Arc::new(WalBufferManager::new(
             wal_id_store,

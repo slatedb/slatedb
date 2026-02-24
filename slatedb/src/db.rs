@@ -79,9 +79,6 @@ pub use builder::DbReaderBuilder;
 
 pub(crate) mod builder;
 
-/// The capacity of the broadcast channel for [`DbMessage`] events.
-pub(crate) const DB_MESSAGE_CHANNEL_CAP: usize = 256;
-
 pub(crate) struct DbInner {
     pub(crate) state: Arc<RwLock<DbState>>,
     pub(crate) settings: Settings,
@@ -105,6 +102,7 @@ pub(crate) struct DbInner {
     pub(crate) wal_enabled: bool,
     /// [`txn_manager`] tracks all the live transactions and related metadata.
     pub(crate) txn_manager: Arc<TransactionManager>,
+    pub(crate) status_tx: tokio::sync::watch::Sender<DbStatus>,
 }
 
 impl DbInner {
@@ -119,16 +117,14 @@ impl DbInner {
         stat_registry: Arc<StatRegistry>,
         fp_registry: Arc<FailPointRegistry>,
         merge_operator: Option<crate::merge_operator::MergeOperatorType>,
-        watcher_tx: tokio::sync::broadcast::Sender<DbMessage>,
     ) -> Result<Self, SlateDBError> {
         // both last_seq and last_committed_seq will be updated after WAL replay.
         let last_l0_seq = manifest.value.core.last_l0_seq;
-        let oracle = Arc::new(DbOracle::new(
-            last_l0_seq,
-            last_l0_seq,
-            last_l0_seq,
-            watcher_tx,
-        ));
+        let (status_tx, _) = tokio::sync::watch::channel(DbStatus {
+            durable_seq: last_l0_seq,
+            close_reason: None,
+        });
+        let oracle = Arc::new(DbOracle::new(last_l0_seq, last_l0_seq, status_tx.clone()));
 
         let mono_clock = Arc::new(MonotonicClock::new(
             system_clock.clone(),
@@ -181,6 +177,7 @@ impl DbInner {
             fp_registry,
             reader,
             txn_manager,
+            status_tx,
         };
         Ok(db_inner)
     }
@@ -566,29 +563,26 @@ impl DbInner {
     }
 }
 
-/// Messages broadcast to notify subscribers of database state changes.
+/// Current status of the database, exposed via [`Db::subscribe`].
 ///
-/// Subscribe via [`Db::subscribe`] to receive a
-/// [`broadcast::Receiver<DbMessage>`](tokio::sync::broadcast::Receiver).
-/// When the database is closed or dropped, the sender is dropped and
-/// [`recv`](tokio::sync::broadcast::Receiver::recv) will return
-/// [`RecvError::Closed`](tokio::sync::broadcast::error::RecvError::Closed).
-#[derive(Clone, Debug, PartialEq)]
-#[non_exhaustive]
-pub enum DbMessage {
-    /// The durable sequence number has advanced. All writes with a sequence
-    /// number less than or equal to the contained value are now durably
-    /// persisted to object storage and will survive process restarts.
-    DurableSeqChanged(u64),
-    /// The database has been closed.
-    Closed(CloseReason),
+/// Subscribers receive a [`tokio::sync::watch::Receiver<DbStatus>`] which
+/// always reflects the latest state. When the database is dropped the watch
+/// channel closes and [`changed()`](tokio::sync::watch::Receiver::changed)
+/// returns an error.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct DbStatus {
+    /// The durable sequence number. All writes with a sequence number less
+    /// than or equal to this value are durably persisted to object storage
+    /// and will survive process restarts.
+    pub durable_seq: u64,
+    /// Set once the database has been closed, indicating the reason.
+    pub close_reason: Option<CloseReason>,
 }
 
 #[derive(Clone)]
 pub struct Db {
     pub(crate) inner: Arc<DbInner>,
     task_executor: Arc<MessageHandlerExecutor>,
-    watcher_tx: tokio::sync::broadcast::Sender<DbMessage>,
 }
 
 impl Db {
@@ -727,7 +721,9 @@ impl Db {
             warn!("failed to shutdown memtable writer task [error={:?}]", e);
         }
 
-        let _ = self.watcher_tx.send(DbMessage::Closed(close_reason));
+        self.inner
+            .status_tx
+            .send_modify(|s| s.close_reason = Some(close_reason));
         info!("db closed");
         Ok(())
     }
@@ -1457,6 +1453,46 @@ impl Db {
     /// This returns the in-memory manifest snapshot currently held by the `Db`.
     pub fn manifest(&self) -> ManifestCore {
         self.inner.state.read().state().core().clone()
+    }
+
+    /// Subscribe to database state changes.
+    ///
+    /// Returns a [`tokio::sync::watch::Receiver<DbStatus>`] that always
+    /// reflects the latest database status. For example, you can wait for a
+    /// specific sequence number to become durable:
+    ///
+    /// ```ignore
+    /// let seq = 42; // sequence number from a write operation
+    /// let mut rx = db.subscribe();
+    /// rx.wait_for(|s| s.durable_seq >= seq).await.expect("db dropped");
+    /// ```
+    ///
+    /// # Deadlock risk
+    ///
+    /// The returned receiver holds a read lock on the current value while
+    /// borrowed (via [`borrow`](tokio::sync::watch::Receiver::borrow),
+    /// [`borrow_and_update`](tokio::sync::watch::Receiver::borrow_and_update),
+    /// or the guard returned by [`wait_for`](tokio::sync::watch::Receiver::wait_for)).
+    /// The database must acquire a write lock to publish new status updates.
+    /// Holding the read guard for an extended period will block all database
+    /// status updates and may cause a deadlock. Always clone or copy the data
+    /// you need:
+    ///
+    /// ```ignore
+    /// // Good: clone the status and release the lock immediately.
+    /// let status = rx.borrow().clone();
+    /// some_async_fn(status.durable_seq).await;
+    ///
+    /// // Good: copy the durable seq and releate the lock immediately.
+    /// let durable_seq = rx.borrow().durable_seq; // uses Copy trait
+    /// some_async_fn(durable_seq).await;
+    ///
+    /// // Bad: holding the status across an await blocks all senders.
+    /// let status = rx.borrow();
+    /// some_async_fn(status.durable_seq).await; // deadlock!
+    /// ```
+    pub fn subscribe(&self) -> tokio::sync::watch::Receiver<DbStatus> {
+        self.inner.status_tx.subscribe()
     }
 
     /// Begin a new transaction with the specified isolation level.
@@ -6665,19 +6701,20 @@ mod tests {
         .await
         .unwrap();
 
-        // Then: the watcher should receive a DurableSeqChanged with seq >= 3
-        let msg = tokio::time::timeout(Duration::from_secs(10), async {
-            loop {
-                match watcher.recv().await {
-                    Ok(DbMessage::DurableSeqChanged(seq)) if seq >= 3 => return seq,
-                    Ok(_) => continue,
-                    Err(e) => panic!("watch channel error: {:?}", e),
-                }
-            }
-        })
+        // Then: the watcher should report durable_seq >= 3
+        let status = tokio::time::timeout(
+            Duration::from_secs(10),
+            watcher.wait_for(|s| s.durable_seq >= 3),
+        )
         .await
-        .expect("timed out waiting for seq update");
-        assert!(msg >= 3, "expected durable seq >= 3, got {}", msg);
+        .expect("timed out waiting for seq update")
+        .expect("watch channel closed")
+        .clone();
+        assert!(
+            status.durable_seq >= 3,
+            "expected durable seq >= 3, got {}",
+            status.durable_seq
+        );
 
         db.close().await.unwrap();
     }
@@ -6695,26 +6732,26 @@ mod tests {
         // When: the DB is closed
         db.close().await.unwrap();
 
-        // Then: the watcher should receive a Closed message
-        let result = watcher.recv().await;
-        assert!(
-            matches!(result, Ok(DbMessage::Closed(CloseReason::Clean))),
-            "expected Closed message after db close, got {:?}",
-            result
+        // Then: the watcher should report close_reason = Clean
+        let status = watcher
+            .wait_for(|s| s.close_reason.is_some())
+            .await
+            .expect("watch channel closed")
+            .clone();
+        assert_eq!(
+            status.close_reason,
+            Some(CloseReason::Clean),
+            "expected close_reason = Clean after db close",
         );
 
-        // When: the DB is dropped (drops the broadcast senders)
+        // When: the DB is dropped (drops the watch sender)
         drop(db);
 
-        // Then: the watcher should receive a RecvError::Closed
-        let result = watcher.recv().await;
+        // Then: the watcher's changed() should return Err (channel closed)
+        let result = watcher.changed().await;
         assert!(
-            matches!(
-                result,
-                Err(tokio::sync::broadcast::error::RecvError::Closed)
-            ),
-            "expected RecvError::Closed after db drop, got {:?}",
-            result
+            result.is_err(),
+            "expected watch channel closed after db drop, got Ok",
         );
     }
 
@@ -6759,19 +6796,20 @@ mod tests {
         .await
         .unwrap();
 
-        // Then: the watcher should receive a DurableSeqChanged with seq >= 2
-        let msg = tokio::time::timeout(Duration::from_secs(10), async {
-            loop {
-                match watcher.recv().await {
-                    Ok(DbMessage::DurableSeqChanged(seq)) if seq >= 2 => return seq,
-                    Ok(_) => continue,
-                    Err(e) => panic!("watch channel error: {:?}", e),
-                }
-            }
-        })
+        // Then: the watcher should report durable_seq >= 2
+        let status = tokio::time::timeout(
+            Duration::from_secs(10),
+            watcher.wait_for(|s| s.durable_seq >= 2),
+        )
         .await
-        .expect("timed out waiting for seq update");
-        assert!(msg >= 2, "expected durable seq >= 2, got {}", msg);
+        .expect("timed out waiting for seq update")
+        .expect("watch channel closed")
+        .clone();
+        assert!(
+            status.durable_seq >= 2,
+            "expected durable seq >= 2, got {}",
+            status.durable_seq
+        );
 
         db.close().await.unwrap();
     }
