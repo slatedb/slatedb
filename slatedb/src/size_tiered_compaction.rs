@@ -850,6 +850,7 @@ mod tests {
             filter_offset: 0,
             filter_len: 0,
             compression_codec: None,
+            ..Default::default()
         };
         SsTableHandle::new(SsTableId::Compacted(ulid::Ulid::new()), info)
     }

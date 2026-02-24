@@ -53,7 +53,7 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 
 use crate::config::CompressionCodec;
-use crate::db_state::SsTableInfoCodec;
+use crate::db_state::{SsTableInfoCodec, SstType};
 use crate::error::SlateDBError;
 use crate::flatbuffer_types::{BlockMeta, BlockMetaArgs};
 use crate::format::sst::{
@@ -251,7 +251,8 @@ impl EncodedWalSsTableBuilder {
             self.index_builder,
             self.block_meta,
             SST_FORMAT_VERSION_LATEST,
-        );
+        )
+        .with_sst_type(SstType::Wal);
         if let Some(codec) = self.compression_codec {
             footer_builder = footer_builder.with_compression_codec(codec);
         }
@@ -841,6 +842,23 @@ mod tests {
             RowEntry::new_value(b"key2", b"value2", 2).with_create_ts(200),
         ];
         assert_iterator(&mut iter, expected).await;
+    }
+
+    #[tokio::test]
+    async fn should_set_sst_type_to_wal() {
+        // given:
+        let mut builder =
+            EncodedWalSsTableBuilder::new(1024, Box::new(FlatBufferSsTableInfoCodec {}));
+        builder
+            .add_value(b"key1", b"value1", 1, None, None)
+            .await
+            .unwrap();
+
+        // when:
+        let encoded = builder.build().await.unwrap();
+
+        // then:
+        assert_eq!(encoded.info.sst_type, crate::db_state::SstType::Wal,);
     }
 
     mod block_transformer_tests {

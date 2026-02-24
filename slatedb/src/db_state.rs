@@ -224,6 +224,16 @@ impl Debug for SsTableId {
     }
 }
 
+/// The type of an SSTable, distinguishing between compacted and WAL SSTs.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize)]
+pub enum SstType {
+    /// A compacted SST (L0 or sorted run). This is the default for backwards compatibility.
+    #[default]
+    Compacted,
+    /// A WAL (Write-Ahead Log) SST.
+    Wal,
+}
+
 /// Metadata information about an SSTable. See [`crate::sst_builder::EncodedSsTableBuilder`] for
 /// more information on the format of the SSTable and its metadata.
 #[derive(Clone, Debug, PartialEq, Serialize, Default)]
@@ -242,6 +252,8 @@ pub struct SsTableInfo {
     pub filter_len: u64,
     /// The compression codec used for the SSTable, if any.
     pub compression_codec: Option<CompressionCodec>,
+    /// The type of this SSTable.
+    pub sst_type: SstType,
 }
 
 pub(crate) trait SsTableInfoCodec: Send + Sync {
@@ -647,7 +659,7 @@ impl WalIdStore for parking_lot::RwLock<DbState> {
 #[cfg(test)]
 mod tests {
     use crate::checkpoint::Checkpoint;
-    use crate::db_state::{DbState, SortedRun, SsTableHandle, SsTableId, SsTableInfo};
+    use crate::db_state::{DbState, SortedRun, SsTableHandle, SsTableId, SsTableInfo, SstType};
     use crate::manifest::store::test_utils::new_dirty_manifest;
     use crate::proptest_util::arbitrary;
     use crate::test_utils;
@@ -810,6 +822,7 @@ mod tests {
             filter_offset: 0,
             filter_len: 0,
             compression_codec: None,
+            sst_type: SstType::default(),
         }
     }
 }

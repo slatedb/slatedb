@@ -1,6 +1,6 @@
 use crate::blob::ReadOnlyBlob;
 use crate::config::CompressionCodec;
-use crate::db_state::{SsTableInfo, SsTableInfoCodec};
+use crate::db_state::{SsTableInfo, SsTableInfoCodec, SstType};
 use crate::error::SlateDBError;
 use crate::filter::BloomFilter;
 use crate::flatbuffer_types::{
@@ -275,6 +275,8 @@ pub(crate) struct EncodedSsTableFooterBuilder<'a, 'b> {
     filter: Option<(Arc<BloomFilter>, Bytes)>,
     /// SST format version
     sst_format_version: u16,
+    /// type of SST (Compacted or Wal)
+    sst_type: SstType,
 }
 
 impl<'a, 'b> EncodedSsTableFooterBuilder<'a, 'b> {
@@ -296,6 +298,7 @@ impl<'a, 'b> EncodedSsTableFooterBuilder<'a, 'b> {
             block_meta,
             filter: None,
             sst_format_version,
+            sst_type: SstType::Compacted,
         }
     }
 
@@ -308,6 +311,12 @@ impl<'a, 'b> EncodedSsTableFooterBuilder<'a, 'b> {
     /// Sets an optional block transformer to the footer.
     pub(crate) fn with_block_transformer(mut self, transformer: Arc<dyn BlockTransformer>) -> Self {
         self.block_transformer = Some(transformer);
+        self
+    }
+
+    /// Sets the SST type for the footer.
+    pub(crate) fn with_sst_type(mut self, sst_type: SstType) -> Self {
+        self.sst_type = sst_type;
         self
     }
 
@@ -364,6 +373,7 @@ impl<'a, 'b> EncodedSsTableFooterBuilder<'a, 'b> {
             filter_offset,
             filter_len,
             compression_codec: self.compression_codec,
+            sst_type: self.sst_type,
         };
         SsTableInfo::encode(&info, &mut buf, self.sst_info_codec);
 

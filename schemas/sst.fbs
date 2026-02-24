@@ -8,6 +8,13 @@ enum CompressionFormat: byte {
     Zstd
 }
 
+// Type of SST. The default value (Compacted = 0) is not serialized by
+// FlatBuffers, so existing SSTs without this field are treated as Compacted.
+enum SstType: byte {
+    Compacted,
+    Wal
+}
+
 // Has metadata about a SST file.
 table SsTableInfo {
     // First entry in the SST file.
@@ -29,6 +36,9 @@ table SsTableInfo {
 
     // Type of compression algorithm used.
     compression_format: CompressionFormat;
+
+    // Type of SST. Defaults to Compacted for backwards compatibility.
+    sst_type: SstType;
 }
 
 table BlockMeta {

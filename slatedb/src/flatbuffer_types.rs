@@ -14,7 +14,7 @@ use crate::compactor_state::{
     Compaction as CompactorCompaction, CompactionSpec as CompactorCompactionSpec, CompactionStatus,
     Compactions as CompactorCompactions, SourceId,
 };
-use crate::db_state::{self, SsTableInfo, SsTableInfoCodec};
+use crate::db_state::{self, SsTableInfo, SsTableInfoCodec, SstType};
 use crate::db_state::{ManifestCore, SsTableHandle};
 
 #[path = "./generated/root_generated.rs"]
@@ -34,8 +34,9 @@ use crate::flatbuffer_types::root_generated::{
     BoundType, Checkpoint, CheckpointArgs, CheckpointMetadata, CompactedSsTable,
     CompactedSsTableArgs, Compaction as FbCompaction, CompactionArgs as FbCompactionArgs,
     CompactionSpec as FbCompactionSpec, CompactionStatus as FbCompactionStatus, CompactionsV1,
-    CompactionsV1Args, CompressionFormat, SortedRun, SortedRunArgs, TieredCompactionSpec,
-    TieredCompactionSpecArgs, Ulid as FbUlid, UlidArgs as FbUlidArgs, Uuid, UuidArgs,
+    CompactionsV1Args, CompressionFormat, SortedRun, SortedRunArgs, SstType as FbSstType,
+    TieredCompactionSpec, TieredCompactionSpecArgs, Ulid as FbUlid, UlidArgs as FbUlidArgs, Uuid,
+    UuidArgs,
 };
 use crate::manifest::{ExternalDb, Manifest};
 use crate::partitioned_keyspace::RangePartitionedKeySpace;
@@ -129,6 +130,7 @@ impl FlatBufferSsTableInfoCodec {
             filter_offset: info.filter_offset(),
             filter_len: info.filter_len(),
             compression_codec: info.compression_format().into(),
+            sst_type: info.sst_type().into(),
         }
     }
 
@@ -421,6 +423,7 @@ impl<'b> DbFlatBufferBuilder<'b> {
                 filter_offset: info.filter_offset,
                 filter_len: info.filter_len,
                 compression_format: info.compression_codec.into(),
+                sst_type: info.sst_type.into(),
             },
         )
     }
@@ -740,6 +743,25 @@ impl From<Option<CompressionCodec>> for CompressionFormat {
     }
 }
 
+impl From<SstType> for FbSstType {
+    fn from(value: SstType) -> Self {
+        match value {
+            SstType::Compacted => FbSstType::Compacted,
+            SstType::Wal => FbSstType::Wal,
+        }
+    }
+}
+
+impl From<FbSstType> for SstType {
+    fn from(value: FbSstType) -> Self {
+        match value {
+            FbSstType::Compacted => SstType::Compacted,
+            FbSstType::Wal => SstType::Wal,
+            _ => unreachable!("unknown SstType value: {:?}", value),
+        }
+    }
+}
+
 impl From<CompressionFormat> for Option<CompressionCodec> {
     fn from(value: CompressionFormat) -> Self {
         match value {
@@ -795,7 +817,9 @@ mod tests {
     use crate::compactor_state::{
         Compaction, CompactionSpec, CompactionStatus, Compactions, SourceId,
     };
-    use crate::db_state::{ManifestCore, SortedRun, SsTableHandle, SsTableId, SsTableInfo};
+    use crate::db_state::{
+        ManifestCore, SortedRun, SsTableHandle, SsTableId, SsTableInfo, SstType,
+    };
     use crate::flatbuffer_types::{
         FlatBufferCompactionsCodec, FlatBufferManifestCodec, SsTableIndexOwned,
     };
@@ -921,6 +945,16 @@ mod tests {
 
         // then:
         assert_eq!(manifest, decoded);
+    }
+
+    #[tokio::test]
+    async fn test_should_set_compacted_sst_type_for_regular_builder() {
+        // given/when:
+        let format = SsTableFormat::default();
+        let sst = build_test_sst(&format, 1).await;
+
+        // then:
+        assert_eq!(sst.info.sst_type, SstType::Compacted);
     }
 
     #[tokio::test]
@@ -1139,5 +1173,69 @@ mod tests {
             }
             _ => panic!("Should fail with version mismatch"),
         }
+    }
+
+    #[test]
+    fn test_should_round_trip_sst_type_wal() {
+        // given:
+        use crate::db_state::SsTableInfoCodec;
+        let codec = super::FlatBufferSsTableInfoCodec {};
+        let info = SsTableInfo {
+            first_entry: Some(Bytes::from_static(b"key1")),
+            sst_type: SstType::Wal,
+            ..Default::default()
+        };
+
+        // when:
+        let bytes = codec.encode(&info);
+        let decoded = codec.decode(&bytes).unwrap();
+
+        // then:
+        assert_eq!(decoded.sst_type, SstType::Wal);
+        assert_eq!(decoded, info);
+    }
+
+    #[test]
+    fn test_should_round_trip_sst_type_compacted() {
+        // given:
+        use crate::db_state::SsTableInfoCodec;
+        let codec = super::FlatBufferSsTableInfoCodec {};
+        let info = SsTableInfo {
+            first_entry: Some(Bytes::from_static(b"key1")),
+            sst_type: SstType::Compacted,
+            ..Default::default()
+        };
+
+        // when:
+        let bytes = codec.encode(&info);
+        let decoded = codec.decode(&bytes).unwrap();
+
+        // then:
+        assert_eq!(decoded.sst_type, SstType::Compacted);
+        assert_eq!(decoded, info);
+    }
+
+    #[test]
+    fn test_should_default_sst_type_to_compacted_for_missing_field() {
+        // given: manually build an SsTableInfo FlatBuffer without calling add_sst_type,
+        // simulating a legacy SST that was written before the sst_type field existed
+        use super::root_generated::SsTableInfoBuilder;
+        use crate::db_state::SsTableInfoCodec;
+
+        let mut fbb = flatbuffers::FlatBufferBuilder::new();
+        let first_entry = fbb.create_vector(b"key1");
+        let mut builder = SsTableInfoBuilder::new(&mut fbb);
+        builder.add_first_entry(first_entry);
+        // deliberately not calling builder.add_sst_type(...)
+        let info = builder.finish();
+        fbb.finish(info, None);
+        let bytes = Bytes::copy_from_slice(fbb.finished_data());
+
+        // when:
+        let codec = super::FlatBufferSsTableInfoCodec {};
+        let decoded = codec.decode(&bytes).unwrap();
+
+        // then:
+        assert_eq!(decoded.sst_type, SstType::Compacted);
     }
 }
