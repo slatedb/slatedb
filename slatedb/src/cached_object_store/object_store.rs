@@ -10,6 +10,7 @@ use object_store::{path::Path, GetOptions, GetResult, ObjectMeta, ObjectStore};
 use object_store::{Attributes, GetRange, GetResultPayload, PutMultipartOptions, PutResult};
 use object_store::{ListResult, MultipartUpload, PutOptions, PutPayload};
 use slatedb_common::clock::SystemClock;
+use std::sync::OnceLock;
 use std::{ops::Range, sync::Arc};
 
 use crate::cached_object_store::admission::AdmissionPicker;
@@ -27,6 +28,7 @@ pub(crate) struct CachedObjectStore {
     pub(crate) admission_picker: AdmissionPicker,
     pub(crate) cache_puts: bool,
     stats: Arc<CachedObjectStoreStats>,
+    root_prefix: Arc<OnceLock<Path>>,
 }
 
 impl CachedObjectStore {
@@ -48,11 +50,52 @@ impl CachedObjectStore {
             stats,
             admission_picker: AdmissionPicker::default(),
             cache_puts,
+            root_prefix: Arc::new(OnceLock::new()),
         }))
     }
 
     pub(crate) async fn start_evictor(&self) {
         self.cache_storage.start_evictor().await;
+    }
+
+    /// Returns the cache key for a given location, prepending the resolved root prefix.
+    /// Returns `None` if the prefix has not yet been resolved (i.e., no object store
+    /// response has been seen yet).
+    fn cache_path(&self, location: &Path) -> Option<Path> {
+        let prefix = self.root_prefix.get()?;
+        if prefix.as_ref().is_empty() {
+            Some(location.clone())
+        } else {
+            Some(Path::from(format!(
+                "{}/{}",
+                prefix.as_ref(),
+                location.as_ref()
+            )))
+        }
+    }
+
+    /// Discovers the prefix that the underlying object store adds (e.g. from a
+    /// `PrefixStore`) and returns the full cache key for `location`.
+    ///
+    /// * `location` – the caller-supplied *relative* path (without any store prefix).
+    /// * `meta_location` – the `result.meta.location` path returned by the object
+    ///   store, which includes any prefix the store prepends.
+    ///
+    /// On the first call the prefix is extracted by stripping `location` from the
+    /// end of `meta_location`. Subsequent calls reuse the cached prefix.
+    fn resolve_root(&self, location: &Path, meta_location: &Path) -> Path {
+        self.root_prefix.get_or_init(|| {
+            let meta_str = meta_location.as_ref();
+            let loc_str = location.as_ref();
+            match meta_str.strip_suffix(loc_str) {
+                Some(prefix) => Path::from(prefix.trim_end_matches('/')),
+                None => Path::from(""),
+            }
+        });
+        // Safety: get_or_init above guarantees the prefix is set, so cache_path
+        // always returns Some here.
+        self.cache_path(location)
+            .expect("root_prefix was just initialized")
     }
 
     /// Build a `CachedObjectStore` from `ObjectStoreCacheOptions`, returning `None`
@@ -153,26 +196,30 @@ impl CachedObjectStore {
     }
 
     pub(crate) async fn cached_head(&self, location: &Path) -> object_store::Result<ObjectMeta> {
-        let entry = self.cache_storage.entry(location, self.part_size_bytes);
-        match entry.read_head().await {
-            Ok(Some((meta, _))) => Ok(meta),
-            _ => {
-                let result = self
-                    .object_store
-                    .get_opts(
-                        location,
-                        GetOptions {
-                            range: None,
-                            head: true,
-                            ..Default::default()
-                        },
-                    )
-                    .await?;
-                let meta = result.meta.clone();
-                self.save_get_result(result).await.ok();
-                Ok(meta)
+        // Skip cache check if root prefix not yet resolved
+        if let Some(cache_path) = self.cache_path(location) {
+            let entry = self.cache_storage.entry(&cache_path, self.part_size_bytes);
+            match entry.read_head().await {
+                Ok(Some((meta, _))) => return Ok(meta),
+                Ok(None) => {}
+                Err(_) => {}
             }
         }
+
+        let result = self
+            .object_store
+            .get_opts(
+                location,
+                GetOptions {
+                    range: None,
+                    head: true,
+                    ..Default::default()
+                },
+            )
+            .await?;
+        let meta = result.meta.clone();
+        self.save_get_result(location, result).await.ok();
+        Ok(meta)
     }
 
     pub(crate) async fn cached_get_opts(
@@ -222,10 +269,13 @@ impl CachedObjectStore {
         // Then, save to local cache if admission policy allows it
         // Get metadata and attributes using our cached head method (this also saves the head to cache)
         match self.cached_head(location).await {
-            Ok(meta) => {
-                let entry = self
-                    .cache_storage
-                    .entry(&meta.location, self.part_size_bytes);
+            Ok(_meta) => {
+                // cached_head resolves the prefix, so cache_path should always be Some here.
+                // If somehow unresolved, skip caching rather than panicking.
+                let Some(cache_path) = self.cache_path(location) else {
+                    return Ok(result);
+                };
+                let entry = self.cache_storage.entry(&cache_path, self.part_size_bytes);
                 if self.admission_picker.pick(entry.as_ref()).admitted() {
                     // Convert PutPayload to stream and save parts to cache.
                     // Note: cached_head() already saved the head, so we only need to save parts
@@ -259,14 +309,18 @@ impl CachedObjectStore {
         location: &Path,
         mut opts: GetOptions,
     ) -> object_store::Result<(ObjectMeta, Attributes)> {
-        let entry = self.cache_storage.entry(location, self.part_size_bytes);
-        match entry.read_head().await {
-            Ok(Some((meta, attrs))) => return Ok((meta, attrs)),
-            Ok(None) => {}
-            Err(_) => {
-                // TODO: add a warning log
+        // Fast path: check cache before fetching from object store.
+        // Skip cache check if root prefix not yet resolved.
+        if let Some(cache_path) = self.cache_path(location) {
+            let entry = self.cache_storage.entry(&cache_path, self.part_size_bytes);
+            match entry.read_head().await {
+                Ok(Some((meta, attrs))) => return Ok((meta, attrs)),
+                Ok(None) => {}
+                Err(_) => {
+                    // TODO: add a warning log
+                }
             }
-        };
+        }
 
         // it's strange that GetOptions did not derive Clone. maybe we could add a derive(Clone) to object_store.
         if let Some(range) = &opts.range {
@@ -279,14 +333,18 @@ impl CachedObjectStore {
         // swallow the error on saving to disk here (the disk might be already full), just fallback
         // to the object store.
         // TODO: add a warning log here.
-        self.save_get_result(get_result).await.ok();
+        self.save_get_result(location, get_result).await.ok();
         Ok((result_meta, result_attrs))
     }
 
     /// save the GetResult to the disk cache, a GetResult may be transformed into multiple part
     /// files and a meta file. please note that the `range` in the GetResult is expected to be
     /// aligned with the part size.
-    async fn save_get_result(&self, result: GetResult) -> object_store::Result<u64> {
+    async fn save_get_result(
+        &self,
+        location: &Path,
+        result: GetResult,
+    ) -> object_store::Result<u64> {
         let part_size_bytes_u64 = self.part_size_bytes as u64;
         assert!(result.range.start.is_multiple_of(part_size_bytes_u64));
         assert!(
@@ -294,9 +352,8 @@ impl CachedObjectStore {
                 || result.range.end == result.meta.size
         );
 
-        let entry = self
-            .cache_storage
-            .entry(&result.meta.location, self.part_size_bytes);
+        let cache_path = self.resolve_root(location, &result.meta.location);
+        let entry = self.cache_storage.entry(&cache_path, self.part_size_bytes);
         let object_size = result.meta.size;
 
         if self.admission_picker.pick(entry.as_ref()).admitted() {
@@ -395,7 +452,15 @@ impl CachedObjectStore {
         let part_size = self.part_size_bytes;
         let object_store = self.object_store.clone();
         let location = location.clone();
-        let entry = self.cache_storage.entry(&location, self.part_size_bytes);
+        // cache_path is guaranteed to be resolved by the time read_part is called
+        // (maybe_prefetch_range always runs first via cached_get_opts)
+        let cache_location = self
+            .cache_path(&location)
+            .unwrap_or_else(|| location.clone());
+        let entry = self
+            .cache_storage
+            .entry(&cache_location, self.part_size_bytes);
+        let cache_storage = self.cache_storage.clone();
         let db_stats = self.stats.clone();
         Box::pin(async move {
             db_stats.object_store_cache_part_access.inc();
@@ -406,8 +471,9 @@ impl CachedObjectStore {
             }
 
             // if the part is not cached, fallback to the object store to get the missing part.
-            // the object stores is expected to return the result whenever the `start` of the range
+            // the object store is expected to return the result whenever the `start` of the range
             // is not out of the object size.
+            let entry = cache_storage.entry(&cache_location, part_size);
             let range = Range {
                 start: (part_id * part_size) as u64,
                 end: ((part_id + 1) * part_size) as u64,
@@ -665,7 +731,7 @@ mod tests {
                 .unwrap();
         let entry = cached_store.cache_storage.entry(&location, 1024);
 
-        let object_size_hint = cached_store.save_get_result(get_result).await?;
+        let object_size_hint = cached_store.save_get_result(&location, get_result).await?;
         assert_eq!(object_size_hint, 1024 * 3 + 32);
 
         // assert the cached meta
@@ -740,7 +806,7 @@ mod tests {
         let cached_store =
             CachedObjectStore::new(object_store, cache_storage, part_size, false, stats).unwrap();
         let entry = cached_store.cache_storage.entry(&location, part_size);
-        let object_size_hint = cached_store.save_get_result(get_result).await?;
+        let object_size_hint = cached_store.save_get_result(&location, get_result).await?;
         assert_eq!(object_size_hint, 1024 * 3);
         let cached_parts = entry.cached_parts().await?;
         assert_eq!(cached_parts.len(), 3);
@@ -1087,5 +1153,286 @@ mod tests {
             let cached_parts = entry.cached_parts().await.unwrap();
             assert_eq!(cached_parts.len(), 0); // No parts should be cached
         }
+    }
+
+    #[test]
+    fn test_resolve_root_and_cache_path() {
+        let object_store = Arc::new(object_store::memory::InMemory::new());
+        let test_cache_folder = new_test_cache_folder();
+        let stats_registry = StatRegistry::new();
+        let stats = Arc::new(CachedObjectStoreStats::new(&stats_registry));
+        let cache_storage = Arc::new(FsCacheStorage::new(
+            test_cache_folder,
+            None,
+            None,
+            stats.clone(),
+            Arc::new(DefaultSystemClock::new()),
+            Arc::new(DbRand::default()),
+        ));
+        let cached_store =
+            CachedObjectStore::new(object_store, cache_storage, 1024, false, stats).unwrap();
+
+        // Before resolve_root, cache_path returns None
+        assert_eq!(cached_store.cache_path(&Path::from("file.sst")), None);
+
+        // With a prefix: meta_location = "myprefix/file.sst", location = "file.sst"
+        let resolved =
+            cached_store.resolve_root(&Path::from("file.sst"), &Path::from("myprefix/file.sst"));
+        assert_eq!(resolved, Path::from("myprefix/file.sst"));
+
+        // Subsequent cache_path calls use the resolved prefix
+        assert_eq!(
+            cached_store.cache_path(&Path::from("other.sst")),
+            Some(Path::from("myprefix/other.sst"))
+        );
+        assert_eq!(
+            cached_store.cache_path(&Path::from("subdir/nested.sst")),
+            Some(Path::from("myprefix/subdir/nested.sst"))
+        );
+
+        // Second resolve_root call is a no-op (prefix already set)
+        let resolved = cached_store.resolve_root(
+            &Path::from("file.sst"),
+            &Path::from("other_prefix/file.sst"),
+        );
+        assert_eq!(
+            resolved,
+            Path::from("myprefix/file.sst"),
+            "prefix should not change after first resolution"
+        );
+    }
+
+    #[test]
+    fn test_resolve_root_no_prefix() {
+        let object_store = Arc::new(object_store::memory::InMemory::new());
+        let test_cache_folder = new_test_cache_folder();
+        let stats_registry = StatRegistry::new();
+        let stats = Arc::new(CachedObjectStoreStats::new(&stats_registry));
+        let cache_storage = Arc::new(FsCacheStorage::new(
+            test_cache_folder,
+            None,
+            None,
+            stats.clone(),
+            Arc::new(DefaultSystemClock::new()),
+            Arc::new(DbRand::default()),
+        ));
+        let cached_store =
+            CachedObjectStore::new(object_store, cache_storage, 1024, false, stats).unwrap();
+
+        // No prefix: meta_location == location
+        let resolved = cached_store.resolve_root(&Path::from("file.sst"), &Path::from("file.sst"));
+        assert_eq!(resolved, Path::from("file.sst"));
+
+        // cache_path returns the location unchanged
+        assert_eq!(
+            cached_store.cache_path(&Path::from("other.sst")),
+            Some(Path::from("other.sst"))
+        );
+    }
+
+    #[test]
+    fn test_resolve_root_multi_segment_prefix() {
+        let object_store = Arc::new(object_store::memory::InMemory::new());
+        let test_cache_folder = new_test_cache_folder();
+        let stats_registry = StatRegistry::new();
+        let stats = Arc::new(CachedObjectStoreStats::new(&stats_registry));
+        let cache_storage = Arc::new(FsCacheStorage::new(
+            test_cache_folder,
+            None,
+            None,
+            stats.clone(),
+            Arc::new(DefaultSystemClock::new()),
+            Arc::new(DbRand::default()),
+        ));
+        let cached_store =
+            CachedObjectStore::new(object_store, cache_storage, 1024, false, stats).unwrap();
+
+        // Multi-segment prefix: "tenant/db1/file.sst" with location "file.sst"
+        let resolved =
+            cached_store.resolve_root(&Path::from("file.sst"), &Path::from("tenant/db1/file.sst"));
+        assert_eq!(resolved, Path::from("tenant/db1/file.sst"));
+
+        assert_eq!(
+            cached_store.cache_path(&Path::from("manifest")),
+            Some(Path::from("tenant/db1/manifest"))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_cached_object_store_with_prefix_no_double_cache() -> object_store::Result<()> {
+        // Regression test: when CachedObjectStore wraps a PrefixStore, cache entries
+        // should be stored under the prefixed path (e.g., "myprefix/testfile.sst") so
+        // that different prefixed DBs sharing the same cache don't collide.
+        use crate::stats::ReadableStat;
+        use object_store::prefix::PrefixStore;
+
+        let prefix = "myprefix";
+        let inner_store = object_store::memory::InMemory::new();
+        let prefix_store = Arc::new(PrefixStore::new(inner_store, prefix));
+
+        // Put the object via the prefix store so the relative path is "testfile.sst"
+        let relative_path = Path::from("testfile.sst");
+        let payload = gen_rand_bytes(2048);
+        prefix_store
+            .put(&relative_path, PutPayload::from_bytes(payload.clone()))
+            .await?;
+
+        let test_cache_folder = new_test_cache_folder();
+        let stats_registry = StatRegistry::new();
+        let stats = Arc::new(CachedObjectStoreStats::new(&stats_registry));
+        let cache_storage = Arc::new(FsCacheStorage::new(
+            test_cache_folder.clone(),
+            None,
+            None,
+            stats.clone(),
+            Arc::new(DefaultSystemClock::new()),
+            Arc::new(DbRand::default()),
+        ));
+
+        let part_size = 1024usize;
+        let cached_store = CachedObjectStore::new(
+            prefix_store.clone(),
+            cache_storage,
+            part_size,
+            false,
+            stats.clone(),
+        )
+        .unwrap();
+
+        // First call: triggers maybe_prefetch_range -> save_get_result which resolves the prefix
+        let result = cached_store
+            .cached_get_opts(&relative_path, GetOptions::default())
+            .await?;
+        // Consuming the stream triggers read_part, which should hit the cache
+        let _ = result.bytes().await?;
+
+        // Verify: the cache entry exists under the prefixed path
+        let prefixed_path = Path::from(format!("{prefix}/testfile.sst"));
+        let prefixed_entry = cached_store.cache_storage.entry(&prefixed_path, part_size);
+        let prefixed_parts = prefixed_entry.cached_parts().await?;
+        assert_eq!(
+            prefixed_parts.len(),
+            2,
+            "expected 2 parts cached under prefixed path (2048 bytes / 1024)"
+        );
+
+        // Verify: read_part found the data in cache (hits > 0) instead of going back to S3
+        let hits = stats.object_store_cache_part_hits.get();
+        assert!(hits > 0, "expected cache hits but got {hits}");
+
+        // Verify: no entry exists under the bare relative path (without prefix)
+        let bare_entry = cached_store.cache_storage.entry(&relative_path, part_size);
+        let bare_parts = bare_entry.cached_parts().await?;
+        assert_eq!(
+            bare_parts.len(),
+            0,
+            "expected no parts cached under bare relative path"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_two_prefixed_stores_no_cache_collision() -> object_store::Result<()> {
+        // Two CachedObjectStores with different prefixes sharing the same cache storage
+        // should not collide on relative paths (e.g., both have a "data.sst" file).
+        use crate::cached_object_store::storage::LocalCacheStorage;
+        use object_store::prefix::PrefixStore;
+
+        let inner_store = object_store::memory::InMemory::new();
+
+        let prefix_a = "db_a";
+        let prefix_b = "db_b";
+
+        // Put data directly into the inner store under each prefix.
+        let inner_arc: Arc<dyn ObjectStore> = Arc::new(inner_store);
+        inner_arc
+            .put(
+                &Path::from("db_a/data.sst"),
+                PutPayload::from_bytes(gen_rand_bytes(2048)),
+            )
+            .await?;
+        inner_arc
+            .put(
+                &Path::from("db_b/data.sst"),
+                PutPayload::from_bytes(gen_rand_bytes(2048)),
+            )
+            .await?;
+
+        // Read out what each prefix store will see so we can compare later
+        let payload_a = inner_arc
+            .get(&Path::from("db_a/data.sst"))
+            .await?
+            .bytes()
+            .await?;
+        let payload_b = inner_arc
+            .get(&Path::from("db_b/data.sst"))
+            .await?
+            .bytes()
+            .await?;
+
+        let prefix_store_a: Arc<dyn ObjectStore> =
+            Arc::new(PrefixStore::new(inner_arc.clone(), prefix_a));
+        let prefix_store_b: Arc<dyn ObjectStore> =
+            Arc::new(PrefixStore::new(inner_arc.clone(), prefix_b));
+
+        let relative_path = Path::from("data.sst");
+
+        let test_cache_folder = new_test_cache_folder();
+        let stats_registry = StatRegistry::new();
+        let stats = Arc::new(CachedObjectStoreStats::new(&stats_registry));
+        let cache_storage: Arc<dyn LocalCacheStorage> = Arc::new(FsCacheStorage::new(
+            test_cache_folder.clone(),
+            None,
+            None,
+            stats.clone(),
+            Arc::new(DefaultSystemClock::new()),
+            Arc::new(DbRand::default()),
+        ));
+
+        let part_size = 1024usize;
+
+        let cached_store_a = CachedObjectStore::new(
+            prefix_store_a,
+            cache_storage.clone(),
+            part_size,
+            false,
+            stats.clone(),
+        )
+        .unwrap();
+
+        let cached_store_b = CachedObjectStore::new(
+            prefix_store_b,
+            cache_storage.clone(),
+            part_size,
+            false,
+            stats.clone(),
+        )
+        .unwrap();
+
+        // Fetch from both stores
+        let result_a = cached_store_a
+            .cached_get_opts(&relative_path, GetOptions::default())
+            .await?;
+        let bytes_a = result_a.bytes().await?;
+
+        let result_b = cached_store_b
+            .cached_get_opts(&relative_path, GetOptions::default())
+            .await?;
+        let bytes_b = result_b.bytes().await?;
+
+        // Verify data integrity - each store returns its own data
+        assert_eq!(bytes_a, payload_a, "store A returned wrong data");
+        assert_eq!(bytes_b, payload_b, "store B returned wrong data");
+
+        // Verify cache entries are stored under different prefixed paths
+        let entry_a = cache_storage.entry(&Path::from("db_a/data.sst"), part_size);
+        let entry_b = cache_storage.entry(&Path::from("db_b/data.sst"), part_size);
+        let parts_a = entry_a.cached_parts().await?;
+        let parts_b = entry_b.cached_parts().await?;
+        assert_eq!(parts_a.len(), 2, "expected 2 parts for db_a");
+        assert_eq!(parts_b.len(), 2, "expected 2 parts for db_b");
+
+        Ok(())
     }
 }
