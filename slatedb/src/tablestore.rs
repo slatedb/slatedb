@@ -385,6 +385,8 @@ impl TableStore {
     ///
     /// ## Arguments
     /// - `handle`: The handle of the SSTable to read the stats from.
+    // Used by SstFile::stats (RFC 0020 Phase 2)
+    #[allow(dead_code)]
     pub(crate) async fn read_stats(
         &self,
         handle: &SsTableHandle,

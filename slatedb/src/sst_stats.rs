@@ -32,7 +32,8 @@ impl SstStats {
         Bytes::from(builder.finished_data().to_vec())
     }
 
-    /// Decode stats from FlatBuffer bytes.
+    // Used by SsTableFormat::decode_stats (RFC 0020 Phase 2)
+    #[allow(dead_code)]
     pub(crate) fn decode(data: Bytes) -> Result<Self, SlateDBError> {
         let fb_stats = flatbuffers::root::<FbSstStats>(&data)?;
         Ok(SstStats {

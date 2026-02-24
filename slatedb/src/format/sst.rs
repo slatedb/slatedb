@@ -703,6 +703,8 @@ impl SsTableFormat {
         Ok(SsTableIndexOwned::new(decompressed_bytes)?)
     }
 
+    // Used by TableStore::read_stats (RFC 0020 Phase 2)
+    #[allow(dead_code)]
     pub(crate) async fn read_stats(
         &self,
         info: &SsTableInfo,
@@ -717,6 +719,7 @@ impl SsTableFormat {
         self.decode_stats(stats_bytes, compression_codec).await
     }
 
+    #[allow(dead_code)]
     async fn decode_stats(
         &self,
         bytes: Bytes,
