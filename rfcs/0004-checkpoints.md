@@ -626,10 +626,10 @@ introduce two operations on manifests to support this: **projection** and **unio
 
 #### Projection
 
-Projection creates a filtered view of a manifest restricted to a specific key range. Given a source manifest and a
-target range, projection returns a new manifest containing only the SSTs whose key ranges overlap with the target
-range. SSTs that fall entirely outside the target range are excluded, and SSTs that partially overlap are annotated
-with a `visible_range` that constrains which keys are accessible.
+Projection creates a filtered view of a manifest restricted to a specific key range specified by the client. Given a 
+source manifest and a target range, projection returns a new manifest containing only the SSTs whose key ranges overlap 
+with the target range. SSTs that fall entirely outside the target range are excluded, and SSTs that partially overlap 
+are annotated with a `visible_range` that constrains which keys are accessible.
 
 The projection process works as follows:
 
