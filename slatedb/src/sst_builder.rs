@@ -1412,54 +1412,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_stats_block_with_puts_only() {
-        let root_path = Path::from("");
-        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let format = SsTableFormat::default();
-        let table_store = TableStore::new(
-            ObjectStores::new(object_store, None),
-            format,
-            root_path,
-            None,
-        );
-        let mut builder = table_store.table_builder();
-        builder
-            .add_value(b"key1", b"value1", gen_attrs(1))
-            .await
-            .unwrap();
-        builder
-            .add_value(b"key2", b"value2", gen_attrs(2))
-            .await
-            .unwrap();
-        builder
-            .add_value(b"key3", b"value3", gen_attrs(3))
-            .await
-            .unwrap();
-        let encoded = builder.build().await.unwrap();
-
-        assert!(encoded.info.stats_offset > 0);
-        assert!(encoded.info.stats_len > 0);
-
-        let sst_handle = table_store
-            .write_sst(&SsTableId::Wal(0), encoded, false)
-            .await
-            .unwrap();
-        let stats = table_store.read_stats(&sst_handle).await.unwrap();
-
-        assert_eq!(stats.num_puts, 3);
-        assert_eq!(stats.num_deletes, 0);
-        assert_eq!(stats.num_merges, 0);
-        assert_eq!(
-            stats.raw_key_size,
-            (b"key1".len() + b"key2".len() + b"key3".len()) as u64
-        );
-        assert_eq!(
-            stats.raw_val_size,
-            (b"value1".len() + b"value2".len() + b"value3".len()) as u64
-        );
-    }
-
-    #[tokio::test]
     async fn test_stats_block_with_mixed_entry_types() {
         use crate::types::ValueDeletable;
 
