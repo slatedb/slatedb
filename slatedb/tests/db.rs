@@ -99,8 +99,6 @@ async fn test_concurrent_writers_and_readers() {
         ..Default::default()
     };
 
-    let supplier = Arc::new(SizeTieredCompactionSchedulerSupplier::new());
-
     let config = Settings::from_env_with_default(
         "SLATEDB_TEST_",
         Settings {
@@ -117,6 +115,7 @@ async fn test_concurrent_writers_and_readers() {
         },
     )
     .expect("failed to load db settings from environment");
+    let supplier = Arc::new(SizeTieredCompactionSchedulerSupplier::new());
     // Build the DB with exponential backoff to tolerate transient object store errors.
     let retry_builder = ExponentialBuilder::default()
         .without_max_times()
@@ -125,7 +124,7 @@ async fn test_concurrent_writers_and_readers() {
         .with_max_delay(Duration::from_millis(1));
     // Always use a unique DB path per test run to avoid cross-run residue
     // in remote object stores (important for chaos scenarios).
-    let db: Arc<Db> = Arc::new(
+    let db = Arc::new(
         (|| async {
             let ts = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)

@@ -77,12 +77,9 @@ pub async fn build_db(
 ) -> Db {
     let object_store = Arc::new(ClockedObjectStore::new(object_store, system_clock.clone()));
     let settings = build_settings(rand).await;
-    let mut rng = rand.rng();
     // Prevent scheduler from having a higher min compaction sources than L0 max SSTS.
     // Otherwise, the compactor never runs and writers get blocked permanently.
-    let min_compaction_sources = rng.random_range(4..10).min(settings.l0_max_ssts);
-    let seed = rng.random_range(0..u64::MAX);
-    drop(rng);
+    let min_compaction_sources = rand.rng().random_range(4..10).min(settings.l0_max_ssts);
     // Prevent scheduler from having a higher min compaction sources than max compaction sources.
     let max_compaction_sources = 8.max(min_compaction_sources);
     let scheduler_options = SizeTieredCompactionSchedulerOptions {
@@ -98,7 +95,7 @@ pub async fn build_db(
     let compaction_scheduler_supplier = Arc::new(SizeTieredCompactionSchedulerSupplier::new());
     let mut builder = DbBuilder::new("test_db", object_store.clone());
     builder = builder.with_settings(settings);
-    builder = builder.with_seed(seed);
+    builder = builder.with_seed(rand.rng().random_range(0..u64::MAX));
     builder = builder.with_system_clock(system_clock.clone());
     builder = builder.with_compactor_builder(
         CompactorBuilder::new("test_db", object_store)

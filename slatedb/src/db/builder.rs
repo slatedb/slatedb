@@ -558,7 +558,7 @@ impl<P: Into<Path>> DbBuilder<P> {
             let mut builder = compactor_builder
                 .with_system_clock(system_clock.clone())
                 .with_stat_registry(inner.stat_registry.clone())
-                .with_rand(rand.clone());
+                .with_seed(rand.seed());
 
             if let Some(operator) = merge_operator {
                 builder = builder.with_merge_operator(operator);
@@ -880,12 +880,6 @@ impl<P: Into<Path>> CompactorBuilder<P> {
     /// Creates the random number generator to use for the compactor with given seed.
     pub fn with_seed(mut self, seed: u64) -> Self {
         self.rand = Arc::new(DbRand::new(seed));
-        self
-    }
-
-    /// Sets the random number generator to use for the compactor.
-    pub fn with_rand(mut self, rand: Arc<DbRand>) -> Self {
-        self.rand = rand;
         self
     }
 
