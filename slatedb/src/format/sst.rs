@@ -941,8 +941,8 @@ impl SsTableFormat {
         ans += (number_of_blocks * guess_at_average_first_key_size_bytes + OFFSET_SIZE)
             + CHECKSUM_SIZE;
 
-        // estimate sum of Stats (FlatBuffer: 5 x u64 + vtable/header overhead + checksum)
-        ans += 5 * SIZEOF_U64 + 24 + CHECKSUM_SIZE;
+        // estimate sum of Stats
+        ans += 5 * SIZEOF_U64 + CHECKSUM_SIZE;
 
         // estimate sum of Metadata
         ans += guess_at_average_first_key_size_bytes + 4 * SIZEOF_U64 + SIZEOF_U16;
