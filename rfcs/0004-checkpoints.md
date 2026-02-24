@@ -667,6 +667,9 @@ combined key space.
 
 Union does not support merging WAL state at the moment. Input manifests must have their WAL fully compacted before
 performing a union.
+This can be achieved for example by calling `db.flush_with_options(... FlushOptions { flush_type: FlushType::MemTable });` 
+to force a flush to L0 (all writes prior to that flush will be guaranteed to be in L0+ and in the manifest); or setting 
+`wal_enabled: false` from the beginning.
 
 The union process works as follows:
 
