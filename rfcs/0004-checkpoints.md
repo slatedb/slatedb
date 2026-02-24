@@ -631,6 +631,9 @@ source manifest and a target range, projection returns a new manifest containing
 with the target range. SSTs that fall entirely outside the target range are excluded, and SSTs that partially overlap 
 are annotated with a `visible_range` that constrains which keys are accessible.
 
+Write requests fully or partially outside the `visible_range` must fail, as well as read requests completely outside the
+`visible_range`.
+
 The projection process works as follows:
 
 1. Clone the source manifest.
