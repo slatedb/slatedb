@@ -689,10 +689,22 @@ The union process works as follows:
      SST ID, the `visible_range`s from all input manifests are combined. The ranges for a given SST ID are not 
      necessarily contiguous (i.e., there might be a gap between them) due to compaction; it's important to preserve
      these gap so that the old values don't override new ones or deletions.
-     After deduplication, the L0 list must be sorted by ULID descending (newest first) to preserve
-     temporal ordering. Without this sort, newer L0 SSTs from one input manifest could appear after older
+   - After deduplication, the L0 list must be sorted to satisfy the following requirements:
+       1. SSTs from parent databases must precede SSTs from child databases (if there's key space overlap)
+       2. SSTs created within the same database should preserve their relative order
+       3. SSTs created within different databases must have no overlap and don't need to be ordered
+       4. In particular, physically overlapping L0 SSTs that have non-overlapping visible ranges don't require ordering. 
+        For example, if a projected database completely drops inherited L0 after compaction and then creates a new L0 
+        with newer values; the order between this new L0 and the dropped one is not important (the old L0 might still be
+        used by its sibling databases and therefore included in union)
+
+     Without this sort, newer L0 SSTs from one input manifest could appear after older
      L0 SSTs from another, causing point lookups to return stale values — since the read path stops at the
      first matching L0 entry.
+     
+     Due to potential wall clock difference between different database hosts, ULID is not sufficient to satisfy (1). 
+     Instead, SSTs are sorted in topological order and then by ULID; with topological dependencies defined by the 
+     order of SSTs in the input manifests.
    - Sorted runs are merged by tier: sorted runs with the same ID across input manifests are combined
      into a single sorted run by concatenating their SSTs. Since the source manifests cover non-overlapping key
      ranges, the SSTs within each merged run remain non-overlapping. If source manifests have different numbers
