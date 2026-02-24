@@ -1,18 +1,22 @@
 use crate::block_iterator::BlockIterator;
 use crate::block_iterator_v2::BlockIteratorV2;
+use crate::cached_object_store::CachedObjectStore;
 use crate::clock::MonotonicClock;
 use crate::config::DurabilityLevel;
 use crate::config::DurabilityLevel::{Memory, Remote};
+use crate::config::PreloadLevel;
+use crate::db_state::ManifestCore;
 use crate::db_state::SortedRun;
 use crate::db_state::SsTableHandle;
 use crate::error::SlateDBError;
 use crate::format::sst::{SST_FORMAT_VERSION, SST_FORMAT_VERSION_V2};
 use crate::iter::{IterationOrder, KeyValueIterator};
+use crate::paths::PathResolver;
 use crate::tablestore::TableStore;
 use crate::types::RowEntry;
 use bytes::{BufMut, Bytes};
 use futures::FutureExt;
-use log::error;
+use log::{error, warn};
 use rand::{Rng, RngCore};
 use slatedb_common::clock::SystemClock;
 use std::any::Any;
@@ -753,6 +757,57 @@ pub(crate) fn varint_len(mut value: u32) -> usize {
         len += 1;
     }
     len
+}
+
+/// Preload SST files into the disk cache based on the configured [`PreloadLevel`].
+pub(crate) async fn preload_cache_from_manifest(
+    core: &ManifestCore,
+    cached_obj_store: &CachedObjectStore,
+    path_resolver: &PathResolver,
+    preload_level: Option<PreloadLevel>,
+    max_cache_size: usize,
+) -> Result<(), SlateDBError> {
+    match preload_level {
+        Some(PreloadLevel::AllSst) => {
+            let mut all_sst_paths: Vec<object_store::path::Path> = Vec::with_capacity(
+                core.l0.len() + core.compacted.iter().map(|sr| sr.ssts.len()).sum::<usize>(),
+            );
+            all_sst_paths.extend(core.l0.iter().map(|sst| path_resolver.table_path(&sst.id)));
+            all_sst_paths.extend(
+                core.compacted
+                    .iter()
+                    .flat_map(|sr| &sr.ssts)
+                    .map(|sst| path_resolver.table_path(&sst.id)),
+            );
+            if !all_sst_paths.is_empty() {
+                if let Err(e) = cached_obj_store
+                    .load_files_to_cache(all_sst_paths, max_cache_size)
+                    .await
+                {
+                    warn!("Failed to preload all SSTs to cache: {:?}", e);
+                }
+            }
+        }
+        Some(PreloadLevel::L0Sst) => {
+            let l0_sst_paths: Vec<object_store::path::Path> = core
+                .l0
+                .iter()
+                .map(|sst| path_resolver.table_path(&sst.id))
+                .collect();
+            if !l0_sst_paths.is_empty() {
+                if let Err(e) = cached_obj_store
+                    .load_files_to_cache(l0_sst_paths, max_cache_size)
+                    .await
+                {
+                    warn!("Failed to preload L0 SSTs to cache: {:?}", e);
+                }
+            }
+        }
+        None => {
+            // No preloading
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

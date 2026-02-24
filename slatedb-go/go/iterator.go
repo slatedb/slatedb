@@ -99,9 +99,13 @@ func (iter *Iterator) NextRow() (*RowEntry, error) {
 	defer C.slatedb_row_entry_free(rowPtr)
 
 	row := &RowEntry{
-		Key:   C.GoBytes(unsafe.Pointer(rowPtr.key), C.int(rowPtr.key_len)),
-		Value: C.GoBytes(unsafe.Pointer(rowPtr.value), C.int(rowPtr.value_len)),
-		Seq:   uint64(rowPtr.seq),
+		Kind: RowEntryKind(rowPtr.kind),
+		Key:  C.GoBytes(unsafe.Pointer(rowPtr.key), C.int(rowPtr.key_len)),
+		Seq:  uint64(rowPtr.seq),
+	}
+
+	if rowPtr.value != nil {
+		row.Value = C.GoBytes(unsafe.Pointer(rowPtr.value), C.int(rowPtr.value_len))
 	}
 
 	if bool(rowPtr.create_ts_present) {

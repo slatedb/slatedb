@@ -40,15 +40,6 @@ type WriteHandle struct {
 	CreateTs int64
 }
 
-// RowEntry represents a key-value pair with metadata.
-type RowEntry struct {
-	Key      []byte
-	Value    []byte
-	Seq      uint64
-	CreateTs *int64
-	ExpireTs *int64
-}
-
 func resolveObjectStoreHandle(url *string, envFile *string) (*C.slatedb_object_store_t, error) {
 	resolvedURL, hasURL, err := resolveObjectStoreURL(url, envFile)
 	if err != nil {
@@ -395,9 +386,13 @@ func (db *DB) GetRowWithOptions(key []byte, readOpts *ReadOptions) (*RowEntry, e
 	defer C.slatedb_row_entry_free(rowPtr)
 
 	row := &RowEntry{
-		Key:   C.GoBytes(unsafe.Pointer(rowPtr.key), C.int(rowPtr.key_len)),
-		Value: C.GoBytes(unsafe.Pointer(rowPtr.value), C.int(rowPtr.value_len)),
-		Seq:   uint64(rowPtr.seq),
+		Kind: RowEntryKind(rowPtr.kind),
+		Key:  C.GoBytes(unsafe.Pointer(rowPtr.key), C.int(rowPtr.key_len)),
+		Seq:  uint64(rowPtr.seq),
+	}
+
+	if rowPtr.value != nil {
+		row.Value = C.GoBytes(unsafe.Pointer(rowPtr.value), C.int(rowPtr.value_len))
 	}
 
 	if bool(rowPtr.create_ts_present) {

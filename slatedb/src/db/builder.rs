@@ -462,15 +462,7 @@ impl<P: Into<Path>> DbBuilder<P> {
 
         // Extract external SSTs from manifest if available
         let external_ssts = match &latest_manifest {
-            Some(latest_stored_manifest) => {
-                let mut external_ssts = HashMap::new();
-                for external_db in &latest_stored_manifest.manifest().external_dbs {
-                    for id in &external_db.sst_ids {
-                        external_ssts.insert(*id, external_db.path.clone().into());
-                    }
-                }
-                external_ssts
-            }
+            Some(latest_stored_manifest) => latest_stored_manifest.manifest().external_ssts(),
             None => HashMap::new(),
         };
 
@@ -1129,27 +1121,28 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
         ));
 
         // Setup object store with optional caching
-        let object_store: Arc<dyn ObjectStore> = match CachedObjectStore::from_config(
+        let maybe_cached = CachedObjectStore::from_config(
             retrying_object_store.clone(),
             &self.options.object_store_cache_options,
             self.stat_registry.as_ref(),
             self.system_clock.clone(),
             self.rand.clone(),
         )
-        .await?
-        {
-            Some(cached) => cached,
+        .await?;
+
+        let object_store: Arc<dyn ObjectStore> = match &maybe_cached {
+            Some(cached) => Arc::clone(cached) as Arc<dyn ObjectStore>,
             None => retrying_object_store,
         };
 
         let store_provider = DefaultStoreProvider {
-            path,
+            path: path.clone(),
             object_store,
             block_cache: self.options.block_cache.clone(),
             block_transformer: self.options.block_transformer.clone(),
         };
 
-        DbReader::open_internal(
+        let reader = DbReader::open_internal(
             &store_provider,
             self.checkpoint_id,
             self.options,
@@ -1157,6 +1150,12 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
             self.rand,
         )
         .await
-        .map_err(Into::into)
+        .map_err(crate::Error::from)?;
+
+        if let Some(cached) = &maybe_cached {
+            reader.preload_cache(cached, path).await?;
+        }
+
+        Ok(reader)
     }
 }

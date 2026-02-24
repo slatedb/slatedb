@@ -1,5 +1,5 @@
 use std::cmp::{max, min};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
 use std::ops::Bound;
 use std::sync::Arc;
@@ -208,6 +208,17 @@ pub(crate) struct ExternalDb {
 }
 
 impl Manifest {
+    /// Returns a map from SST ID to the external DB path for all external SSTs.
+    pub(crate) fn external_ssts(&self) -> HashMap<SsTableId, object_store::path::Path> {
+        let mut external_ssts = HashMap::new();
+        for external_db in &self.external_dbs {
+            for id in &external_db.sst_ids {
+                external_ssts.insert(*id, external_db.path.clone().into());
+            }
+        }
+        external_ssts
+    }
+
     pub(crate) fn has_wal_sst_reference(&self, wal_sst_id: u64) -> bool {
         wal_sst_id > self.core.replay_after_wal_id && wal_sst_id < self.core.next_wal_sst_id
     }

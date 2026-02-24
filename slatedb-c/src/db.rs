@@ -12,7 +12,8 @@ use crate::ffi::{
     slatedb_range_t, slatedb_read_options_t, slatedb_result_t, slatedb_row_entry_t,
     slatedb_scan_options_t, slatedb_write_batch_t, slatedb_write_handle_t, slatedb_write_options_t,
     success_result, take_write_batch, validate_write_key, validate_write_key_value,
-    write_options_from_ptr,
+    write_options_from_ptr, SLATEDB_ROW_ENTRY_KIND_MERGE, SLATEDB_ROW_ENTRY_KIND_TOMBSTONE,
+    SLATEDB_ROW_ENTRY_KIND_VALUE,
 };
 use serde_json::{Map, Value};
 use slatedb::Db;
@@ -373,13 +374,22 @@ pub unsafe extern "C" fn slatedb_db_get_row_with_options(
     {
         Ok(Some(row)) => {
             let (key, key_len) = alloc_bytes(row.key.as_ref());
-            let (value, value_len) = match row.value {
-                slatedb::ValueDeletable::Value(v) => alloc_bytes(v.as_ref()),
-                slatedb::ValueDeletable::Merge(v) => alloc_bytes(v.as_ref()),
-                slatedb::ValueDeletable::Tombstone => (std::ptr::null_mut(), 0),
+            let (kind, value, value_len) = match &row.value {
+                slatedb::ValueDeletable::Value(v) => {
+                    let (val, val_len) = alloc_bytes(v.as_ref());
+                    (SLATEDB_ROW_ENTRY_KIND_VALUE, val, val_len)
+                }
+                slatedb::ValueDeletable::Merge(v) => {
+                    let (val, val_len) = alloc_bytes(v.as_ref());
+                    (SLATEDB_ROW_ENTRY_KIND_MERGE, val, val_len)
+                }
+                slatedb::ValueDeletable::Tombstone => {
+                    (SLATEDB_ROW_ENTRY_KIND_TOMBSTONE, std::ptr::null_mut(), 0)
+                }
             };
 
             let c_row = Box::new(slatedb_row_entry_t {
+                kind,
                 key,
                 key_len,
                 value,
