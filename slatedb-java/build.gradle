@@ -1,3 +1,24 @@
+// This build creates a Java library that contains generated FFI bindings and bundled
+// native SlateDB binaries. jextract reads ../slatedb-c/include/slatedb.h and generates
+// Java sources for the C API, using an automatically derived whitelist so generated
+// bindings stay aligned with the header.
+//
+// After generation, `patchJextractNativeLoader` rewrites the generated loader call
+// to use io.slatedb.NativeLibraryLoader.loadFromClasspath() instead of directly
+// calling System.loadLibrary(...).
+//
+// Native binaries are built from the Rust crate `slatedb-c`. The build can target the
+// host platform, all platforms, or a comma-separated platform list via
+// -Pslatedb.native.targets. It registers one native build task per selected platform,
+// then `prepareNativeLibraries` validates and stages the built artifacts under
+// build/generated/resources/slatedb-native/native/<platform-id>/. These build
+// artifacts are then included in the final JAR.
+//
+// The main source set includes both the jextract output and these staged native files.
+// Task wiring ensures compileJava depends on patchJextractNativeLoader and
+// processResources depends on prepareNativeLibraries, so `build` and `test` always run
+// with patched bindings and packaged native libraries available from the classpath.
+
 plugins {
     id 'java-library'
     id 'de.infolektuell.jextract' version '1.2.0'
