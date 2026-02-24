@@ -69,6 +69,10 @@ repositories {
     mavenCentral()
 }
 
+// ==============================================================================
+// Bundle native libraries from slatedb-c as resources in the JAR
+// ==============================================================================
+
 def repoRoot = layout.projectDirectory.dir('..').asFile.absoluteFile
 def nativePlatforms = [
     [id: 'linux-x86_64', rustTarget: 'x86_64-unknown-linux-gnu', libraryFile: 'libslatedb_c.so'],
@@ -80,6 +84,7 @@ def nativePlatforms = [
 ]
 def nativePlatformsById = nativePlatforms.collectEntries { platform -> [(platform.id): platform] }
 
+// Helper functions to normalize OS and architecture names for host platform detection.
 def normalizeOs = { String osName ->
     String normalized = osName.toLowerCase(Locale.ROOT)
     if (normalized.contains('win')) {
@@ -106,6 +111,11 @@ def normalizeArch = { String archName ->
 }
 
 def hostPlatformId = "${normalizeOs(System.getProperty('os.name', ''))}-${normalizeArch(System.getProperty('os.arch', ''))}"
+
+// Determine which native platforms to build based on the 'slatedb.native.targets' property. Supported values:
+// - 'host' (default): Build only for the current host platform.
+// - 'all': Build for all supported platforms.
+// - Comma-separated list of platform IDs (e.g. 'linux-x86_64,windows-x86_64').
 def nativeTargetSelection = (findProperty('slatedb.native.targets') ?: 'host').toString().trim()
 def selectedNativePlatforms
 if (nativeTargetSelection.equalsIgnoreCase('all')) {
@@ -141,6 +151,8 @@ if (nativeTargetSelection.equalsIgnoreCase('all')) {
     selectedNativePlatforms = selectedIds.collect { nativePlatformsById[it] }
 }
 
+// Define tasks to build the native libraries for the selected platforms using Cargo. Each task is
+// named like 'buildNativeLibLinuxX86_64' based on the platform ID.
 def toTaskSuffix = { String value ->
     value.split(/[-_]/).collect { it.capitalize() }.join('')
 }
@@ -155,6 +167,9 @@ def selectedNativeBuildTasks = selectedNativePlatforms.collect { platform ->
     }
 }
 
+// Task to prepare native libraries by copying the built artifacts from the Cargo target directory
+// into the resources staging directory. This task depends on the individual platform build tasks
+// constructed in selectedNativeBuildTasks.
 tasks.register('prepareNativeLibraries') {
     group = 'build'
     description = "Build and stage SlateDB native libraries for ${selectedNativePlatforms*.id.join(', ')}."
@@ -179,23 +194,11 @@ tasks.register('prepareNativeLibraries') {
     }
 }
 
-sourceSets {
-    main {
-        jextract {
-            libraries.add(slatedbJextractLibrary)
-        }
-        resources {
-            srcDir(nativeResourceStagingDir)
-        }
-    }
-}
-
-dependencies {
-    implementation 'org.jspecify:jspecify:1.0.0'
-    testImplementation 'org.junit.jupiter:junit-jupiter:5.10.2'
-    testRuntimeOnly 'org.junit.platform:junit-platform-launcher:1.10.2'
-}
-
+// Patch the generated jextract Native.java to replace the System.loadLibrary call with loading from the classpath.
+// This is necessary because the generated jextract bindings will attempt to load the native library using
+// System.loadLibrary, which won't work with our approach of bundling the native libraries as resources in the
+// JAR. See the discussion in https://github.com/openjdk/jextract/pull/295 for more context on why jextract doesn't
+// currently support customizing the native loading logic.
 def generatedJextractNative = layout.buildDirectory.file('generated/sources/jextract/slatedb/io/slatedb/ffi/Native.java')
 tasks.register('patchJextractNativeLoader') {
     dependsOn tasks.named('slatedbJextractGenerateBindings')
@@ -219,6 +222,27 @@ tasks.register('patchJextractNativeLoader') {
 
         generatedNativeJava.setText(sourceText.replace(originalLoaderCall, patchedLoaderCall), 'UTF-8')
     }
+}
+
+// ==============================================================================
+// Define basic library and task dependencies.
+// ==============================================================================
+
+sourceSets {
+    main {
+        jextract {
+            libraries.add(slatedbJextractLibrary)
+        }
+        resources {
+            srcDir(nativeResourceStagingDir)
+        }
+    }
+}
+
+dependencies {
+    implementation 'org.jspecify:jspecify:1.0.0'
+    testImplementation 'org.junit.jupiter:junit-jupiter:5.10.2'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher:1.10.2'
 }
 
 tasks.named('compileJava') {
