@@ -663,7 +663,7 @@ projection are treated as if they no longer exist.
 
 Union combines multiple non-overlapping manifests into a single manifest. This is the inverse of projection: given
 a set of manifests that each cover a distinct portion of the key space, union produces a manifest that covers the
-combined key space.
+combined key space. The source databases don't have to share the root database (e.g. they can be independent shards).
 
 Union does not support merging WAL state at the moment. Input manifests must have their WAL fully compacted before
 performing a union.
@@ -685,6 +685,9 @@ The union process works as follows:
      and unioning back multiplies the entry count by N each cycle. New `final_checkpoint_id` values are
      generated for all entries — the old ones belong to the source databases' clone relationships and are
      not valid for the new database.
+   - L0 SSTs with the same ID but __originating__ from different source databases are deduplicated by assigning a new ID
+     (this might happen because ULID is not guaranteed to be globally unique). To preserve the order of L0 ULIDs
+     within the same database, subsequent SSTs might require new IDs as well.
    - L0 SSTs are merged and deduplicated by SST ID. Because L0 SSTs span the full key space and overlap
      with each other, projection typically includes the same L0 SST in multiple projected manifests — each
      with a `visible_range` restricting it to that projection's key range. When these projected manifests are
