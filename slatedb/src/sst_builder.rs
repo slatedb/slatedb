@@ -335,8 +335,8 @@ impl EncodedSsTableBuilder<'_> {
             self.index_builder,
             self.block_meta,
             self.sst_format_version,
-        )
-        .with_sst_type(SstType::Compacted);
+            SstType::Compacted,
+        );
         if let Some(codec) = self.compression_codec {
             footer_builder = footer_builder.with_compression_codec(codec);
         }

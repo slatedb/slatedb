@@ -287,6 +287,7 @@ impl<'a, 'b> EncodedSsTableFooterBuilder<'a, 'b> {
         index_builder: flatbuffers::FlatBufferBuilder<'b, DefaultAllocator>,
         block_meta: Vec<flatbuffers::WIPOffset<BlockMeta<'b>>>,
         sst_format_version: u16,
+        sst_type: SstType,
     ) -> Self {
         Self {
             blocks_size: blocks_len,
@@ -298,7 +299,7 @@ impl<'a, 'b> EncodedSsTableFooterBuilder<'a, 'b> {
             block_meta,
             filter: None,
             sst_format_version,
-            sst_type: SstType::Compacted,
+            sst_type,
         }
     }
 
@@ -311,12 +312,6 @@ impl<'a, 'b> EncodedSsTableFooterBuilder<'a, 'b> {
     /// Sets an optional block transformer to the footer.
     pub(crate) fn with_block_transformer(mut self, transformer: Arc<dyn BlockTransformer>) -> Self {
         self.block_transformer = Some(transformer);
-        self
-    }
-
-    /// Sets the SST type for the footer.
-    pub(crate) fn with_sst_type(mut self, sst_type: SstType) -> Self {
-        self.sst_type = sst_type;
         self
     }
 

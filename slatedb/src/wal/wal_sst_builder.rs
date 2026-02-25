@@ -251,8 +251,8 @@ impl EncodedWalSsTableBuilder {
             self.index_builder,
             self.block_meta,
             SST_FORMAT_VERSION_LATEST,
-        )
-        .with_sst_type(SstType::Wal);
+            SstType::Wal,
+        );
         if let Some(codec) = self.compression_codec {
             footer_builder = footer_builder.with_compression_codec(codec);
         }
