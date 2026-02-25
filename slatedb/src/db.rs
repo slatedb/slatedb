@@ -1475,8 +1475,9 @@ impl Db {
     /// or the guard returned by [`wait_for`](tokio::sync::watch::Receiver::wait_for)).
     /// The database must acquire a write lock to publish new status updates.
     /// Holding the read guard for an extended period will block all database
-    /// status updates and may cause a deadlock. Always clone or copy the data
-    /// you need:
+    /// status updates and may cause a deadlock. See the [deadlock warning in
+    /// `Receiver::borrow`](https://docs.rs/tokio/latest/tokio/sync/watch/struct.Receiver.html#method.borrow)
+    /// for details. Always clone or copy the data you need:
     ///
     /// ```ignore
     /// // Good: clone the status and release the lock immediately.
