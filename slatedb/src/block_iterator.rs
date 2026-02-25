@@ -238,13 +238,13 @@ mod tests {
         assert!(block_builder.add_value(b"super", b"mario", gen_attrs(3)));
         let block = block_builder.build().unwrap();
         let mut iter = BlockIterator::new_ascending(&block);
-        let kv = iter.next().await.unwrap().unwrap();
+        let kv = iter.next_entry().await.unwrap().unwrap().into_key_value();
         test_utils::assert_kv(&kv, b"donkey", b"kong");
-        let kv = iter.next().await.unwrap().unwrap();
+        let kv = iter.next_entry().await.unwrap().unwrap().into_key_value();
         test_utils::assert_kv(&kv, b"kratos", b"atreus");
-        let kv = iter.next().await.unwrap().unwrap();
+        let kv = iter.next_entry().await.unwrap().unwrap().into_key_value();
         test_utils::assert_kv(&kv, b"super", b"mario");
-        assert!(iter.next().await.unwrap().is_none());
+        assert!(iter.next_entry().await.unwrap().is_none());
     }
 
     #[tokio::test]
@@ -256,11 +256,11 @@ mod tests {
         let block = block_builder.build().unwrap();
         let mut iter = BlockIterator::new_ascending(&block);
         iter.seek(b"kratos").await.unwrap();
-        let kv = iter.next().await.unwrap().unwrap();
+        let kv = iter.next_entry().await.unwrap().unwrap().into_key_value();
         test_utils::assert_kv(&kv, b"kratos", b"atreus");
-        let kv = iter.next().await.unwrap().unwrap();
+        let kv = iter.next_entry().await.unwrap().unwrap().into_key_value();
         test_utils::assert_kv(&kv, b"super", b"mario");
-        assert!(iter.next().await.unwrap().is_none());
+        assert!(iter.next_entry().await.unwrap().is_none());
     }
 
     #[tokio::test]
@@ -272,11 +272,11 @@ mod tests {
         let block = block_builder.build().unwrap();
         let mut iter = BlockIterator::new_ascending(&block);
         iter.seek(b"ka").await.unwrap();
-        let kv = iter.next().await.unwrap().unwrap();
+        let kv = iter.next_entry().await.unwrap().unwrap().into_key_value();
         test_utils::assert_kv(&kv, b"kratos", b"atreus");
-        let kv = iter.next().await.unwrap().unwrap();
+        let kv = iter.next_entry().await.unwrap().unwrap().into_key_value();
         test_utils::assert_kv(&kv, b"super", b"mario");
-        assert!(iter.next().await.unwrap().is_none());
+        assert!(iter.next_entry().await.unwrap().is_none());
     }
 
     #[tokio::test]
@@ -288,7 +288,7 @@ mod tests {
         let block = block_builder.build().unwrap();
         let mut iter = BlockIterator::new_ascending(&block);
         iter.seek(b"zzz").await.unwrap();
-        assert!(iter.next().await.unwrap().is_none());
+        assert!(iter.next_entry().await.unwrap().is_none());
     }
 
     #[tokio::test]
@@ -379,17 +379,17 @@ mod tests {
         // then: the correct entries are returned
         let mut iter = BlockIterator::new_ascending(&block);
         iter.seek(b"key_00050").await.unwrap();
-        let kv = iter.next().await.unwrap().unwrap();
+        let kv = iter.next_entry().await.unwrap().unwrap().into_key_value();
         test_utils::assert_kv(&kv, b"key_00050", b"value_50");
 
         let mut iter = BlockIterator::new_ascending(&block);
         iter.seek(b"key_00099").await.unwrap();
-        let kv = iter.next().await.unwrap().unwrap();
+        let kv = iter.next_entry().await.unwrap().unwrap().into_key_value();
         test_utils::assert_kv(&kv, b"key_00099", b"value_99");
 
         let mut iter = BlockIterator::new_ascending(&block);
         iter.seek(b"key_00000").await.unwrap();
-        let kv = iter.next().await.unwrap().unwrap();
+        let kv = iter.next_entry().await.unwrap().unwrap().into_key_value();
         test_utils::assert_kv(&kv, b"key_00000", b"value_0");
     }
 
@@ -407,7 +407,7 @@ mod tests {
         iter.seek(b"apple").await.unwrap();
 
         // then: the first entry is returned
-        let kv = iter.next().await.unwrap().unwrap();
+        let kv = iter.next_entry().await.unwrap().unwrap().into_key_value();
         test_utils::assert_kv(&kv, b"apple", b"1");
     }
 
@@ -425,9 +425,9 @@ mod tests {
         iter.seek(b"cherry").await.unwrap();
 
         // then: the last entry is returned and iteration ends
-        let kv = iter.next().await.unwrap().unwrap();
+        let kv = iter.next_entry().await.unwrap().unwrap().into_key_value();
         test_utils::assert_kv(&kv, b"cherry", b"3");
-        assert!(iter.next().await.unwrap().is_none());
+        assert!(iter.next_entry().await.unwrap().is_none());
     }
 
     #[tokio::test]
@@ -443,7 +443,7 @@ mod tests {
         iter.seek(b"apple").await.unwrap();
 
         // then: the first entry is returned
-        let kv = iter.next().await.unwrap().unwrap();
+        let kv = iter.next_entry().await.unwrap().unwrap().into_key_value();
         test_utils::assert_kv(&kv, b"banana", b"2");
     }
 
@@ -463,7 +463,7 @@ mod tests {
         iter.seek(b"user:1001").await.unwrap();
 
         // then: correct entry is found
-        let kv = iter.next().await.unwrap().unwrap();
+        let kv = iter.next_entry().await.unwrap().unwrap().into_key_value();
         test_utils::assert_kv(&kv, b"user:1001", b"bob");
 
         // when: seeking to a key between entries
@@ -471,7 +471,7 @@ mod tests {
         iter.seek(b"user:1005").await.unwrap();
 
         // then: the next entry is returned
-        let kv = iter.next().await.unwrap().unwrap();
+        let kv = iter.next_entry().await.unwrap().unwrap().into_key_value();
         test_utils::assert_kv(&kv, b"user:1010", b"dave");
     }
 
@@ -489,15 +489,15 @@ mod tests {
 
         // when/then: multiple sequential seeks work correctly
         iter.seek(b"b").await.unwrap();
-        let kv = iter.next().await.unwrap().unwrap();
+        let kv = iter.next_entry().await.unwrap().unwrap().into_key_value();
         test_utils::assert_kv(&kv, b"b", b"2");
 
         iter.seek(b"d").await.unwrap();
-        let kv = iter.next().await.unwrap().unwrap();
+        let kv = iter.next_entry().await.unwrap().unwrap().into_key_value();
         test_utils::assert_kv(&kv, b"d", b"4");
 
         iter.seek(b"e").await.unwrap();
-        let kv = iter.next().await.unwrap().unwrap();
+        let kv = iter.next_entry().await.unwrap().unwrap().into_key_value();
         test_utils::assert_kv(&kv, b"e", b"5");
     }
 
@@ -513,23 +513,23 @@ mod tests {
         let mut iter = BlockIterator::new_ascending(block);
 
         // advance past "a" and "b"
-        iter.next().await.unwrap();
-        iter.next().await.unwrap();
+        iter.next_entry().await.unwrap();
+        iter.next_entry().await.unwrap();
 
         // when: seeking to a key before current position (backward seek)
         iter.seek(b"a").await.unwrap();
 
         // then: seek goes backwards, returns "a"
-        let kv = iter.next().await.unwrap().unwrap();
+        let kv = iter.next_entry().await.unwrap().unwrap().into_key_value();
         test_utils::assert_kv(&kv, b"a", b"1");
 
         // Verify we can continue forward
-        let kv = iter.next().await.unwrap().unwrap();
+        let kv = iter.next_entry().await.unwrap().unwrap().into_key_value();
         test_utils::assert_kv(&kv, b"b", b"2");
 
         // Seek forward
         iter.seek(b"d").await.unwrap();
-        let kv = iter.next().await.unwrap().unwrap();
+        let kv = iter.next_entry().await.unwrap().unwrap().into_key_value();
         test_utils::assert_kv(&kv, b"d", b"4");
     }
 
@@ -545,7 +545,7 @@ mod tests {
         iter.seek(b"only").await.unwrap();
 
         // then: the entry is returned
-        let kv = iter.next().await.unwrap().unwrap();
+        let kv = iter.next_entry().await.unwrap().unwrap().into_key_value();
         test_utils::assert_kv(&kv, b"only", b"one");
 
         // when: seeking to a key before it
@@ -553,7 +553,7 @@ mod tests {
         iter.seek(b"aaa").await.unwrap();
 
         // then: the entry is returned
-        let kv = iter.next().await.unwrap().unwrap();
+        let kv = iter.next_entry().await.unwrap().unwrap().into_key_value();
         test_utils::assert_kv(&kv, b"only", b"one");
 
         // when: seeking to a key after it
@@ -561,7 +561,7 @@ mod tests {
         iter.seek(b"zzz").await.unwrap();
 
         // then: no entries remain
-        assert!(iter.next().await.unwrap().is_none());
+        assert!(iter.next_entry().await.unwrap().is_none());
     }
 
     #[tokio::test]
@@ -602,11 +602,11 @@ mod tests {
         iter.seek(b"banana").await.unwrap();
 
         // then: should iterate backwards from banana
-        let kv = iter.next().await.unwrap().unwrap();
+        let kv = iter.next_entry().await.unwrap().unwrap().into_key_value();
         test_utils::assert_kv(&kv, b"banana", b"2");
-        let kv = iter.next().await.unwrap().unwrap();
+        let kv = iter.next_entry().await.unwrap().unwrap().into_key_value();
         test_utils::assert_kv(&kv, b"apple", b"1");
-        assert!(iter.next().await.unwrap().is_none());
+        assert!(iter.next_entry().await.unwrap().is_none());
     }
 
     #[tokio::test]
@@ -623,13 +623,13 @@ mod tests {
         iter.seek(b"zzz").await.unwrap();
 
         // then: should start from the last key and iterate backwards
-        let kv = iter.next().await.unwrap().unwrap();
+        let kv = iter.next_entry().await.unwrap().unwrap().into_key_value();
         test_utils::assert_kv(&kv, b"cherry", b"3");
-        let kv = iter.next().await.unwrap().unwrap();
+        let kv = iter.next_entry().await.unwrap().unwrap().into_key_value();
         test_utils::assert_kv(&kv, b"banana", b"2");
-        let kv = iter.next().await.unwrap().unwrap();
+        let kv = iter.next_entry().await.unwrap().unwrap().into_key_value();
         test_utils::assert_kv(&kv, b"apple", b"1");
-        assert!(iter.next().await.unwrap().is_none());
+        assert!(iter.next_entry().await.unwrap().is_none());
     }
 
     #[tokio::test]
@@ -646,7 +646,7 @@ mod tests {
         iter.seek(b"apple").await.unwrap();
 
         // then: should be empty (no keys <= apple)
-        assert!(iter.next().await.unwrap().is_none());
+        assert!(iter.next_entry().await.unwrap().is_none());
     }
 
     #[tokio::test]
@@ -663,9 +663,9 @@ mod tests {
         iter.seek(b"banana").await.unwrap();
 
         // then: should position at last key <= banana, which is apple
-        let kv = iter.next().await.unwrap().unwrap();
+        let kv = iter.next_entry().await.unwrap().unwrap().into_key_value();
         test_utils::assert_kv(&kv, b"apple", b"1");
-        assert!(iter.next().await.unwrap().is_none());
+        assert!(iter.next_entry().await.unwrap().is_none());
     }
 
     #[tokio::test]
@@ -681,13 +681,13 @@ mod tests {
         let mut iter = BlockIterator::new(block, Descending);
 
         // then: should iterate from last to first
-        let kv = iter.next().await.unwrap().unwrap();
+        let kv = iter.next_entry().await.unwrap().unwrap().into_key_value();
         test_utils::assert_kv(&kv, b"cherry", b"3");
-        let kv = iter.next().await.unwrap().unwrap();
+        let kv = iter.next_entry().await.unwrap().unwrap().into_key_value();
         test_utils::assert_kv(&kv, b"banana", b"2");
-        let kv = iter.next().await.unwrap().unwrap();
+        let kv = iter.next_entry().await.unwrap().unwrap().into_key_value();
         test_utils::assert_kv(&kv, b"apple", b"1");
-        assert!(iter.next().await.unwrap().is_none());
+        assert!(iter.next_entry().await.unwrap().is_none());
     }
 
     #[tokio::test]
@@ -705,31 +705,31 @@ mod tests {
         let mut iter = BlockIterator::new(block, Descending);
 
         // First, advance past some entries
-        let kv = iter.next().await.unwrap().unwrap();
+        let kv = iter.next_entry().await.unwrap().unwrap().into_key_value();
         test_utils::assert_kv(&kv, b"e", b"v5");
 
-        let kv = iter.next().await.unwrap().unwrap();
+        let kv = iter.next_entry().await.unwrap().unwrap().into_key_value();
         test_utils::assert_kv(&kv, b"d", b"v4");
 
         // Seek forward to "b"
         iter.seek(b"b").await.unwrap();
-        let kv = iter.next().await.unwrap().unwrap();
+        let kv = iter.next_entry().await.unwrap().unwrap().into_key_value();
         test_utils::assert_kv(&kv, b"b", b"v2");
 
         // Seek backward to "d" (bidirectional)
         iter.seek(b"d").await.unwrap();
-        let kv = iter.next().await.unwrap().unwrap();
+        let kv = iter.next_entry().await.unwrap().unwrap().into_key_value();
         test_utils::assert_kv(&kv, b"d", b"v4");
 
-        let kv = iter.next().await.unwrap().unwrap();
+        let kv = iter.next_entry().await.unwrap().unwrap().into_key_value();
         test_utils::assert_kv(&kv, b"c", b"v3");
 
-        let kv = iter.next().await.unwrap().unwrap();
+        let kv = iter.next_entry().await.unwrap().unwrap().into_key_value();
         test_utils::assert_kv(&kv, b"b", b"v2");
 
-        let kv = iter.next().await.unwrap().unwrap();
+        let kv = iter.next_entry().await.unwrap().unwrap().into_key_value();
         test_utils::assert_kv(&kv, b"a", b"v1");
 
-        assert!(iter.next().await.unwrap().is_none());
+        assert!(iter.next_entry().await.unwrap().is_none());
     }
 }

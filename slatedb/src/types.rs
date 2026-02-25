@@ -145,6 +145,14 @@ impl RowEntry {
             expire_ts: Some(expire_ts),
         }
     }
+
+    #[cfg(test)]
+    pub(crate) fn into_key_value(self) -> KeyValue {
+        KeyValue {
+            key: self.key,
+            value: self.value.as_bytes().unwrap(),
+        }
+    }
 }
 
 /// The metadata associated with a `KeyValueDeletable`

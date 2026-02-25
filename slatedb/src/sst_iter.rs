@@ -1190,11 +1190,11 @@ mod tests {
         };
 
         for (expected_key, expected_value) in expected_keys.iter().zip(expected_values.iter()) {
-            let kv = iter.next().await.unwrap().unwrap();
+            let kv = iter.next_entry().await.unwrap().unwrap().into_key_value();
             assert_eq!(kv.key, expected_key.as_slice());
             assert_eq!(kv.value, expected_value.as_slice());
         }
-        let kv = iter.next().await.unwrap();
+        let kv = iter.next_entry().await.unwrap().map(|e| e.into_key_value());
         assert!(kv.is_none());
     }
 
@@ -1487,21 +1487,21 @@ mod tests {
         match order {
             IterationOrder::Ascending => {
                 for i in 0..1000 {
-                    let kv = iter.next().await.unwrap().unwrap();
+                    let kv = iter.next_entry().await.unwrap().unwrap().into_key_value();
                     assert_eq!(kv.key, format!("key{}", i));
                     assert_eq!(kv.value, format!("value{}", i));
                 }
             }
             IterationOrder::Descending => {
                 for i in (0..1000).rev() {
-                    let kv = iter.next().await.unwrap().unwrap();
+                    let kv = iter.next_entry().await.unwrap().unwrap().into_key_value();
                     assert_eq!(kv.key, format!("key{}", i));
                     assert_eq!(kv.value, format!("value{}", i));
                 }
             }
         }
 
-        let next = iter.next().await.unwrap();
+        let next = iter.next_entry().await.unwrap().map(|e| e.into_key_value());
         assert!(next.is_none());
     }
 
@@ -1544,14 +1544,14 @@ mod tests {
             .unwrap()
             .expect("Expected Some(iter) but got None");
             for _ in 0..nkeys - i {
-                let e = iter.next().await.unwrap().unwrap();
+                let e = iter.next_entry().await.unwrap().unwrap().into_key_value();
                 assert_kv(
                     &e,
                     expected_key_gen.next().as_ref(),
                     expected_val_gen.next().as_ref(),
                 );
             }
-            assert!(iter.next().await.unwrap().is_none());
+            assert!(iter.next_entry().await.unwrap().is_none());
         }
     }
 
@@ -1589,14 +1589,14 @@ mod tests {
         .expect("Expected Some(iter) but got None");
 
         for _ in 0..nkeys {
-            let e = iter.next().await.unwrap().unwrap();
+            let e = iter.next_entry().await.unwrap().unwrap().into_key_value();
             assert_kv(
                 &e,
                 expected_key_gen.next().as_ref(),
                 expected_val_gen.next().as_ref(),
             );
         }
-        assert!(iter.next().await.unwrap().is_none());
+        assert!(iter.next_entry().await.unwrap().is_none());
     }
 
     #[tokio::test]
@@ -1630,7 +1630,7 @@ mod tests {
         .unwrap()
         .expect("Expected Some(iter) but got None");
 
-        assert!(iter.next().await.unwrap().is_none());
+        assert!(iter.next_entry().await.unwrap().is_none());
     }
 
     #[tokio::test]
@@ -1697,14 +1697,16 @@ mod tests {
 
         // Should iterate backwards from key099
         let kv1 = iter
-            .next()
+            .next_entry()
             .await
             .unwrap()
+            .map(|e| e.into_key_value())
             .expect("Expected first key but got None");
         let kv2 = iter
-            .next()
+            .next_entry()
             .await
             .unwrap()
+            .map(|e| e.into_key_value())
             .expect("Expected second key but got None");
 
         assert_eq!(kv1.key.as_ref(), b"key099");
@@ -1774,10 +1776,20 @@ mod tests {
 
         for i in (0..nkeys).step_by(100) {
             iter_large_fetch.seek(&key_values[i].0).await.unwrap();
-            let kv_large_fetch = iter_large_fetch.next().await.unwrap().unwrap();
+            let kv_large_fetch = iter_large_fetch
+                .next_entry()
+                .await
+                .unwrap()
+                .unwrap()
+                .into_key_value();
 
             iter_small_fetch.seek(&key_values[i].0).await.unwrap();
-            let kv_small_fetch = iter_small_fetch.next().await.unwrap().unwrap();
+            let kv_small_fetch = iter_small_fetch
+                .next_entry()
+                .await
+                .unwrap()
+                .unwrap()
+                .into_key_value();
 
             assert_eq!(kv_large_fetch.key, key_values[i].0);
             assert_eq!(kv_large_fetch.value, key_values[i].1);
@@ -1868,12 +1880,12 @@ mod tests {
         .expect("Expected Some(iter) but got None");
 
         for i in 1..=4 {
-            let kv = iter.next().await.unwrap().unwrap();
+            let kv = iter.next_entry().await.unwrap().unwrap().into_key_value();
             assert_eq!(kv.key, format!("key{}", i).as_bytes());
             assert_eq!(kv.value, format!("value{}", i).as_bytes());
         }
 
-        let kv = iter.next().await.unwrap();
+        let kv = iter.next_entry().await.unwrap().map(|e| e.into_key_value());
         assert!(kv.is_none());
 
         // verify that block was cached
@@ -1901,12 +1913,12 @@ mod tests {
         .expect("Expected Some(iter) but got None");
 
         for i in 1..=4 {
-            let kv = iter.next().await.unwrap().unwrap();
+            let kv = iter.next_entry().await.unwrap().unwrap().into_key_value();
             assert_eq!(kv.key, format!("key{}", i).as_bytes());
             assert_eq!(kv.value, format!("value{}", i).as_bytes());
         }
 
-        let kv = iter.next().await.unwrap();
+        let kv = iter.next_entry().await.unwrap().map(|e| e.into_key_value());
         assert!(kv.is_none());
 
         // verify that block is not cached
@@ -1973,11 +1985,11 @@ mod tests {
 
         // then: all keys should be returned in order
         for (expected_key, expected_value) in &keys_and_values {
-            let kv = iter.next().await.unwrap().unwrap();
+            let kv = iter.next_entry().await.unwrap().unwrap().into_key_value();
             assert_eq!(kv.key, *expected_key);
             assert_eq!(kv.value, *expected_value);
         }
-        assert!(iter.next().await.unwrap().is_none());
+        assert!(iter.next_entry().await.unwrap().is_none());
     }
 
     #[tokio::test]
@@ -2082,13 +2094,13 @@ mod tests {
 
         // then: all keys should be returned in order
         for i in 0..num_keys {
-            let kv = iter.next().await.unwrap().unwrap();
+            let kv = iter.next_entry().await.unwrap().unwrap().into_key_value();
             let expected_key = format!("prefix_{:04}", i);
             let expected_value = format!("value_{:04}", i);
             assert_eq!(kv.key, expected_key.as_bytes());
             assert_eq!(kv.value, expected_value.as_bytes());
         }
-        assert!(iter.next().await.unwrap().is_none());
+        assert!(iter.next_entry().await.unwrap().is_none());
     }
 
     #[tokio::test]
@@ -2149,13 +2161,13 @@ mod tests {
 
         // then: should iterate from key_0030 onwards
         for i in 30..num_keys {
-            let kv = iter.next().await.unwrap().unwrap();
+            let kv = iter.next_entry().await.unwrap().unwrap().into_key_value();
             let expected_key = format!("key_{:04}", i);
             let expected_value = format!("value_{:04}", i);
             assert_eq!(kv.key, expected_key.as_bytes());
             assert_eq!(kv.value, expected_value.as_bytes());
         }
-        assert!(iter.next().await.unwrap().is_none());
+        assert!(iter.next_entry().await.unwrap().is_none());
     }
 
     #[tokio::test]
@@ -2256,7 +2268,7 @@ mod tests {
         .expect("Expected Some(iter) but got None");
 
         // then: should return None immediately
-        assert!(iter.next().await.unwrap().is_none());
+        assert!(iter.next_entry().await.unwrap().is_none());
     }
 
     /// Test: iteration with both start and end bounds where the keys are in the middle of blocks
@@ -2346,12 +2358,17 @@ mod tests {
         match order {
             IterationOrder::Ascending => {
                 for i in start_idx..=end_idx {
-                    let kv = iter.next().await.unwrap().unwrap_or_else(|| {
-                        panic!(
+                    let kv = iter
+                        .next_entry()
+                        .await
+                        .unwrap()
+                        .map(|e| e.into_key_value())
+                        .unwrap_or_else(|| {
+                            panic!(
                             "Expected key{:03} in ascending order, but got None. Count so far: {}",
                             i, count
                         )
-                    });
+                        });
                     assert_eq!(
                         kv.key,
                         format!("key{:03}", i).as_bytes(),
@@ -2364,12 +2381,17 @@ mod tests {
             }
             IterationOrder::Descending => {
                 for i in (start_idx..=end_idx).rev() {
-                    let kv = iter.next().await.unwrap().unwrap_or_else(|| {
-                        panic!(
+                    let kv = iter
+                        .next_entry()
+                        .await
+                        .unwrap()
+                        .map(|e| e.into_key_value())
+                        .unwrap_or_else(|| {
+                            panic!(
                             "Expected key{:03} in descending order, but got None. Count so far: {}",
                             i, count
                         )
-                    });
+                        });
                     assert_eq!(
                         kv.key,
                         format!("key{:03}", i).as_bytes(),
@@ -2389,7 +2411,7 @@ mod tests {
             expected_count
         );
         assert!(
-            iter.next().await.unwrap().is_none(),
+            iter.next_entry().await.unwrap().is_none(),
             "Should have no more keys"
         );
     }
@@ -2453,12 +2475,12 @@ mod tests {
 
         // Should iterate backwards from key029 to key000
         for i in (0..30).rev() {
-            let kv = iter.next().await.unwrap().unwrap();
+            let kv = iter.next_entry().await.unwrap().unwrap().into_key_value();
             assert_eq!(kv.key, format!("key{:03}", i).as_bytes());
             assert_eq!(kv.value, format!("value{:03}", i).as_bytes());
         }
 
-        assert!(iter.next().await.unwrap().is_none());
+        assert!(iter.next_entry().await.unwrap().is_none());
     }
 
     #[tokio::test]

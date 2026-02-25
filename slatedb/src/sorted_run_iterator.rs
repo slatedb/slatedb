@@ -251,16 +251,16 @@ mod tests {
         .await
         .unwrap();
 
-        let kv = iter.next().await.unwrap().unwrap();
+        let kv = iter.next_entry().await.unwrap().unwrap().into_key_value();
         assert_eq!(kv.key, b"key1".as_slice());
         assert_eq!(kv.value, b"value1".as_slice());
-        let kv = iter.next().await.unwrap().unwrap();
+        let kv = iter.next_entry().await.unwrap().unwrap().into_key_value();
         assert_eq!(kv.key, b"key2".as_slice());
         assert_eq!(kv.value, b"value2".as_slice());
-        let kv = iter.next().await.unwrap().unwrap();
+        let kv = iter.next_entry().await.unwrap().unwrap().into_key_value();
         assert_eq!(kv.key, b"key3".as_slice());
         assert_eq!(kv.value, b"value3".as_slice());
-        let kv = iter.next().await.unwrap();
+        let kv = iter.next_entry().await.unwrap().map(|e| e.into_key_value());
         assert!(kv.is_none());
     }
 
@@ -312,16 +312,16 @@ mod tests {
         .await
         .unwrap();
 
-        let kv = iter.next().await.unwrap().unwrap();
+        let kv = iter.next_entry().await.unwrap().unwrap().into_key_value();
         assert_eq!(kv.key, b"key1".as_slice());
         assert_eq!(kv.value, b"value1".as_slice());
-        let kv = iter.next().await.unwrap().unwrap();
+        let kv = iter.next_entry().await.unwrap().unwrap().into_key_value();
         assert_eq!(kv.key, b"key2".as_slice());
         assert_eq!(kv.value, b"value2".as_slice());
-        let kv = iter.next().await.unwrap().unwrap();
+        let kv = iter.next_entry().await.unwrap().unwrap().into_key_value();
         assert_eq!(kv.key, b"key3".as_slice());
         assert_eq!(kv.value, b"value3".as_slice());
-        let kv = iter.next().await.unwrap();
+        let kv = iter.next_entry().await.unwrap().map(|e| e.into_key_value());
         assert!(kv.is_none());
     }
 
@@ -360,12 +360,12 @@ mod tests {
             .unwrap();
             for _ in 0..30 - i {
                 assert_kv(
-                    &iter.next().await.unwrap().unwrap(),
+                    &iter.next_entry().await.unwrap().unwrap().into_key_value(),
                     expected_key_gen.next().as_ref(),
                     expected_val_gen.next().as_ref(),
                 );
             }
-            assert!(iter.next().await.unwrap().is_none());
+            assert!(iter.next_entry().await.unwrap().is_none());
         }
     }
 
@@ -399,12 +399,12 @@ mod tests {
 
         for _ in 0..30 {
             assert_kv(
-                &iter.next().await.unwrap().unwrap(),
+                &iter.next_entry().await.unwrap().unwrap().into_key_value(),
                 expected_key_gen.next().as_ref(),
                 expected_val_gen.next().as_ref(),
             );
         }
-        assert!(iter.next().await.unwrap().is_none());
+        assert!(iter.next_entry().await.unwrap().is_none());
     }
 
     #[tokio::test]
@@ -434,7 +434,7 @@ mod tests {
         .await
         .unwrap();
 
-        assert!(iter.next().await.unwrap().is_none());
+        assert!(iter.next_entry().await.unwrap().is_none());
     }
 
     #[tokio::test]
@@ -475,7 +475,12 @@ mod tests {
             sr_iter.seek(&seek_key).await.unwrap();
 
             for (key, value) in table_iter.by_ref().take(run as usize) {
-                let kv = sr_iter.next().await.unwrap().unwrap();
+                let kv = sr_iter
+                    .next_entry()
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .into_key_value();
                 assert_eq!(*key, kv.key);
                 assert_eq!(*value, kv.value);
             }
@@ -627,14 +632,14 @@ mod tests {
 
             // then: all keys should be returned in order across both v1 and v2 SSTs
             for i in 1..=8 {
-                let kv = iter.next().await.unwrap().unwrap();
+                let kv = iter.next_entry().await.unwrap().unwrap().into_key_value();
                 let expected_key = format!("key{:02}", i);
                 let expected_value = format!("value{:02}", i);
                 assert_eq!(kv.key.as_ref(), expected_key.as_bytes());
                 assert_eq!(kv.value.as_ref(), expected_value.as_bytes());
             }
 
-            let kv = iter.next().await.unwrap();
+            let kv = iter.next_entry().await.unwrap().map(|e| e.into_key_value());
             assert!(kv.is_none());
         }
 
@@ -694,18 +699,18 @@ mod tests {
             iter.seek(b"key05").await.unwrap();
 
             // then: we should get key05 and subsequent keys
-            let kv = iter.next().await.unwrap().unwrap();
+            let kv = iter.next_entry().await.unwrap().unwrap().into_key_value();
             assert_eq!(kv.key.as_ref(), b"key05");
             assert_eq!(kv.value.as_ref(), b"value05");
 
-            let kv = iter.next().await.unwrap().unwrap();
+            let kv = iter.next_entry().await.unwrap().unwrap().into_key_value();
             assert_eq!(kv.key.as_ref(), b"key06");
             assert_eq!(kv.value.as_ref(), b"value06");
 
             // Seek again to a v2 SST
             iter.seek(b"key07").await.unwrap();
 
-            let kv = iter.next().await.unwrap().unwrap();
+            let kv = iter.next_entry().await.unwrap().unwrap().into_key_value();
             assert_eq!(kv.key.as_ref(), b"key07");
             assert_eq!(kv.value.as_ref(), b"value07");
         }

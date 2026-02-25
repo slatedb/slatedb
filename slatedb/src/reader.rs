@@ -324,9 +324,14 @@ impl Reader {
         )
         .await?;
 
-        if let Some(entry) = iterator.next_key_value().await? {
+        if let Some(entry) = iterator.next_row_internal().await? {
             if entry.key == target_key {
-                return Ok(Some(entry.value));
+                return Ok(Some(
+                    entry
+                        .value
+                        .as_bytes()
+                        .expect("Values and merges have bytes; tombstones are filtered"),
+                ));
             }
         }
 

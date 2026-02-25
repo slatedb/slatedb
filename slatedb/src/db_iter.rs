@@ -292,20 +292,44 @@ impl DbIterator {
     ///
     /// Returns [`Error`] if the iterator has been invalidated due to an underlying error.
     pub async fn next(&mut self) -> Result<Option<KeyValue>, crate::Error> {
-        self.next_key_value().await.map_err(Into::into)
+        let entry_opt = self.next_row().await?;
+        Ok(entry_opt.map(|entry| {
+            let value = match entry.value {
+                ValueDeletable::Value(v) => v,
+                ValueDeletable::Merge(m) => m,
+                ValueDeletable::Tombstone => unreachable!("Tombstones are filtered out"),
+            };
+            KeyValue {
+                key: entry.key,
+                value,
+            }
+        }))
     }
 
-    pub(crate) async fn next_key_value(&mut self) -> Result<Option<KeyValue>, SlateDBError> {
+    pub async fn next_row(&mut self) -> Result<Option<RowEntry>, crate::Error> {
+        self.next_row_internal().await.map_err(Into::into)
+    }
+
+    pub(crate) async fn next_row_internal(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
         if let Some(error) = self.invalidated_error.clone() {
             Err(error)
         } else {
-            let result = self.iter.next().await;
+            let result = loop {
+                match self.iter.next_entry().await {
+                    Ok(Some(entry)) => match entry.value {
+                        ValueDeletable::Tombstone => continue,
+                        _ => break Ok(Some(entry)),
+                    },
+                    Ok(None) => break Ok(None),
+                    Err(e) => break Err(e),
+                }
+            };
             let result = self.maybe_invalidate(result);
-            if let Ok(Some(ref kv)) = result {
-                self.last_key = Some(kv.key.clone());
+            if let Ok(Some(ref entry)) = result {
+                self.last_key = Some(entry.key.clone());
                 // Track the key in range tracker if present
                 if let Some(tracker) = &self.range_tracker {
-                    tracker.track_key(&kv.key);
+                    tracker.track_key(&entry.key);
                 }
             }
             result

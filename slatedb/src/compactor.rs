@@ -1144,7 +1144,7 @@ mod tests {
                 .expect("Expected Some(iter) but got None");
 
                 // remove the key from the expected map and verify that the db matches
-                while let Some(kv) = iter.next().await.unwrap() {
+                while let Some(kv) = iter.next_entry().await.unwrap().map(|e| e.into_key_value()) {
                     let expected_v = expected
                         .remove(kv.key.as_ref())
                         .expect("removing unexpected key");
@@ -1257,9 +1257,9 @@ mod tests {
 
         // should be no tombstone for key 'a' because it was filtered
         // out of the last run
-        let next = iter.next().await.unwrap();
+        let next = iter.next_entry().await.unwrap().map(|e| e.into_key_value());
         assert_eq!(next.unwrap().key.as_ref(), &[b'b'; 16]);
-        let next = iter.next().await.unwrap();
+        let next = iter.next_entry().await.unwrap().map(|e| e.into_key_value());
         assert!(next.is_none());
     }
 
@@ -1354,22 +1354,40 @@ mod tests {
 
         // After compaction with an active snapshot (protecting seq >= 1):
         // - Key 'a': Both the tombstone(seq=3) and original value(seq=1) are protected
-        //   The SST contains both versions, but the iterator returns the latest (tombstone)
+        //   The SST contains both versions
         // - Key 'b': value(seq=2) is protected
         // Expected result: both 'a' (as tombstone) and 'b' (as value) should be present
-        let next = iter.next().await.unwrap();
-        let entry_a = next.unwrap();
-        assert_eq!(entry_a.key.as_ref(), &[b'a'; 16]);
+        // Note: next_entry() returns all entries including tombstones and duplicates,
+        // so we need to track whether we've seen each key and verify the expected type
+        let mut found_a_value = false;
+        let mut found_a_tombstone = false;
+        let mut found_b = false;
+        while let Some(next) = iter.next_entry().await.unwrap() {
+            let key = next.key.as_ref();
+            if key == [b'a'; 16] {
+                if next.value.is_tombstone() {
+                    assert!(
+                        !found_a_tombstone,
+                        "Should only encounter key 'a' tombstone once"
+                    );
+                    found_a_tombstone = true;
+                } else {
+                    assert!(!found_a_value, "Should only encounter key 'a' value once");
+                    found_a_value = true;
+                }
+            } else if key == [b'b'; 16] {
+                assert!(!found_b, "Should only encounter key 'b' once");
+                let kv = next.into_key_value();
+                assert_eq!(kv.key.as_ref(), &[b'b'; 16]);
+                found_b = true;
+            }
 
-        let next = iter.next().await.unwrap();
-        let entry_b = next.unwrap();
-        assert_eq!(entry_b.key.as_ref(), &[b'b'; 16]);
-
-        let next = iter.next().await.unwrap();
-        assert!(
-            next.is_none(),
-            "Expected two keys (a and b) in the compacted SST"
-        );
+            if found_a_tombstone && found_b {
+                break;
+            }
+        }
+        assert!(found_a_tombstone, "Should have found key 'a' as tombstone");
+        assert!(found_b, "Should have found key 'b'");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

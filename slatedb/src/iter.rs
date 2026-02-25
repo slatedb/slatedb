@@ -2,7 +2,6 @@ use async_trait::async_trait;
 
 use crate::error::SlateDBError;
 use crate::types::RowEntry;
-use crate::types::{KeyValue, ValueDeletable};
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum IterationOrder {
@@ -22,33 +21,6 @@ pub(crate) trait KeyValueIterator: Send + Sync {
     /// This method should be idempotent and can be called multiple times, only
     /// the first initialization should perform expensive operations.
     async fn init(&mut self) -> Result<(), SlateDBError>;
-
-    /// Returns the next non-deleted key-value pair in the iterator.
-    async fn next(&mut self) -> Result<Option<KeyValue>, SlateDBError> {
-        loop {
-            let entry = self.next_entry().await?;
-            if let Some(kv) = entry {
-                match kv.value {
-                    ValueDeletable::Value(v) => {
-                        return Ok(Some(KeyValue {
-                            key: kv.key,
-                            value: v,
-                        }))
-                    }
-                    // next() should only be called at the top level and therefore
-                    // if a merge is returned it's because there was no base value.
-                    // Since the merge is fully resolved at this point we can just
-                    // return it as is
-                    ValueDeletable::Merge(value) => {
-                        return Ok(Some(KeyValue { key: kv.key, value }))
-                    }
-                    ValueDeletable::Tombstone => continue,
-                }
-            } else {
-                return Ok(None);
-            }
-        }
-    }
 
     /// Returns the next entry in the iterator, which may be a key-value pair or
     /// a tombstone of a deleted key-value pair.
@@ -104,10 +76,6 @@ impl<'a> KeyValueIterator for Box<dyn KeyValueIterator + 'a> {
         self.as_mut().init().await
     }
 
-    async fn next(&mut self) -> Result<Option<KeyValue>, SlateDBError> {
-        self.as_mut().next().await
-    }
-
     async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
         self.as_mut().next_entry().await
     }
@@ -121,10 +89,6 @@ impl<'a> KeyValueIterator for Box<dyn KeyValueIterator + 'a> {
 impl<'a> KeyValueIterator for Box<dyn TrackedKeyValueIterator + 'a> {
     async fn init(&mut self) -> Result<(), SlateDBError> {
         self.as_mut().init().await
-    }
-
-    async fn next(&mut self) -> Result<Option<KeyValue>, SlateDBError> {
-        self.as_mut().next().await
     }
 
     async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
