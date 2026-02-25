@@ -907,6 +907,8 @@ impl SsTableFormat {
             guess_at_average_first_key_size_bytes,
         );
         ans += self.estimate_encoded_size_filter(entry_num);
+        // estimate sum of Stats (only compacted SSTs include stats)
+        ans += 5 * SIZEOF_U64 + CHECKSUM_SIZE;
         ans
     }
 
@@ -943,9 +945,6 @@ impl SsTableFormat {
         let guess_at_average_first_key_size_bytes = average_first_key_size;
         ans += (number_of_blocks * guess_at_average_first_key_size_bytes + OFFSET_SIZE)
             + CHECKSUM_SIZE;
-
-        // estimate sum of Stats
-        ans += 5 * SIZEOF_U64 + CHECKSUM_SIZE;
 
         // estimate sum of Metadata
         ans += guess_at_average_first_key_size_bytes + 4 * SIZEOF_U64 + SIZEOF_U16;
