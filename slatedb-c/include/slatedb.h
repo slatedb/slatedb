@@ -179,7 +179,7 @@ typedef uint8_t slatedb_sst_block_size_t;
 // `has_existing_value` is false.
 //
 // If this callback allocates `out_value`, provide a corresponding
-// `slatedb_merge_operator_result_free_fn` so Rust can release it after copying.
+// `slatedb_merge_operator_out_free_fn` so Rust can release it after copying.
 // Do not require Rust to call `slatedb_bytes_free` for `out_value`.
 typedef bool (*slatedb_merge_operator_fn)(const uint8_t *key,
                                           uintptr_t key_len,
@@ -193,7 +193,7 @@ typedef bool (*slatedb_merge_operator_fn)(const uint8_t *key,
 
 // Optional callback used to free merge output returned by
 // `slatedb_merge_operator_fn`.
-typedef void (*slatedb_merge_operator_result_free_fn)(uint8_t *value, uintptr_t value_len);
+typedef void (*slatedb_merge_operator_out_free_fn)(uint8_t *value, uintptr_t value_len);
 
 // Read options passed to `slatedb_db_get_with_options`.
 typedef struct slatedb_read_options_t {
@@ -467,7 +467,7 @@ struct slatedb_result_t slatedb_db_builder_with_settings(struct slatedb_db_build
 //   as any database built from this builder is alive.
 struct slatedb_result_t slatedb_db_builder_with_merge_operator(struct slatedb_db_builder_t *builder,
                                                                slatedb_merge_operator_fn merge_operator,
-                                                               slatedb_merge_operator_result_free_fn free_merge_result);
+                                                               slatedb_merge_operator_out_free_fn free_merge_result);
 
 // Builds a database from a builder and consumes the builder handle.
 //

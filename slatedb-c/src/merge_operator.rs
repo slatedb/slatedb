@@ -3,7 +3,7 @@
 //! This module adapts C callbacks into SlateDB's Rust `MergeOperator` trait so
 //! builder APIs can register merge operators from C callers.
 
-use crate::ffi::slatedb_merge_operator_result_free_fn;
+use crate::ffi::slatedb_merge_operator_out_free_fn;
 use slatedb::bytes::Bytes;
 use slatedb::{MergeOperator, MergeOperatorError};
 use std::ptr;
@@ -21,7 +21,7 @@ pub(crate) struct CMergeOperator {
         out_value: *mut *mut u8,
         out_value_len: *mut usize,
     ) -> bool,
-    free_result_fn: slatedb_merge_operator_result_free_fn,
+    free_result_fn: slatedb_merge_operator_out_free_fn,
 }
 
 impl CMergeOperator {
@@ -38,7 +38,7 @@ impl CMergeOperator {
             out_value: *mut *mut u8,
             out_value_len: *mut usize,
         ) -> bool,
-        free_result_fn: slatedb_merge_operator_result_free_fn,
+        free_result_fn: slatedb_merge_operator_out_free_fn,
     ) -> Self {
         Self {
             merge_fn,

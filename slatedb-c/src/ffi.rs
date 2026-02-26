@@ -402,7 +402,7 @@ pub type slatedb_log_context_free_fn = Option<unsafe extern "C" fn(context: *mut
 /// `has_existing_value` is false.
 ///
 /// If this callback allocates `out_value`, provide a corresponding
-/// `slatedb_merge_operator_result_free_fn` so Rust can release it after copying.
+/// `slatedb_merge_operator_out_free_fn` so Rust can release it after copying.
 /// Do not require Rust to call `slatedb_bytes_free` for `out_value`.
 #[allow(non_camel_case_types)]
 pub type slatedb_merge_operator_fn = Option<
@@ -422,7 +422,7 @@ pub type slatedb_merge_operator_fn = Option<
 /// Optional callback used to free merge output returned by
 /// `slatedb_merge_operator_fn`.
 #[allow(non_camel_case_types)]
-pub type slatedb_merge_operator_result_free_fn =
+pub type slatedb_merge_operator_out_free_fn =
     Option<unsafe extern "C" fn(value: *mut u8, value_len: usize)>;
 
 /// C representation of a single range bound.

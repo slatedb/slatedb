@@ -6,7 +6,7 @@
 use crate::ffi::{
     create_runtime, cstr_to_string, error_from_slate_error, error_result, require_handle,
     require_out_ptr, slatedb_db_builder_t, slatedb_db_t, slatedb_error_kind_t,
-    slatedb_merge_operator_fn, slatedb_merge_operator_result_free_fn, slatedb_object_store_t,
+    slatedb_merge_operator_fn, slatedb_merge_operator_out_free_fn, slatedb_object_store_t,
     slatedb_result_t, slatedb_settings_t, slatedb_sst_block_size_t, sst_block_size_from_u8,
     success_result,
 };
@@ -238,7 +238,7 @@ pub unsafe extern "C" fn slatedb_db_builder_with_settings(
 pub unsafe extern "C" fn slatedb_db_builder_with_merge_operator(
     builder: *mut slatedb_db_builder_t,
     merge_operator: slatedb_merge_operator_fn,
-    free_merge_result: slatedb_merge_operator_result_free_fn,
+    free_merge_result: slatedb_merge_operator_out_free_fn,
 ) -> slatedb_result_t {
     if let Err(err) = require_handle(builder, "builder") {
         return err;
