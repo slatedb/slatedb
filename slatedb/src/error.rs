@@ -233,6 +233,9 @@ pub(crate) enum SlateDBError {
 
     #[error("invalid environment variable {key} value `{value}`")]
     InvalidEnvironmentVariable { key: String, value: String },
+
+    #[error("unexpected tombstone encountered where a value was expected")]
+    UnexpectedTombstone,
 }
 
 impl From<TransactionalObjectError> for SlateDBError {
@@ -554,6 +557,7 @@ impl From<SlateDBError> for Error {
             SlateDBError::BackgroundTaskExists(_) => Error::internal(msg),
             SlateDBError::BackgroundTaskCancelled(_) => Error::internal(msg),
             SlateDBError::BackgroundTaskExecutorStarted => Error::internal(msg),
+            SlateDBError::UnexpectedTombstone => Error::internal(msg),
             SlateDBError::TransactionalObjectError(err) => {
                 Error::internal(msg).with_source(Box::new(err))
             }

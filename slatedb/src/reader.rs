@@ -330,7 +330,7 @@ impl Reader {
                     entry
                         .value
                         .as_bytes()
-                        .expect("Values and merges have bytes; tombstones are filtered"),
+                        .ok_or(SlateDBError::UnexpectedTombstone)?,
                 ));
             }
         }
