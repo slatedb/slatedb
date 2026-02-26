@@ -148,8 +148,9 @@ impl SstFile {
     /// Returns SsTableInfo from the metadata block.
     pub fn info(&self) -> &SsTableInfo;
 
-    /// Reads the stats block from object storage.
-    pub async fn stats(&self) -> Result<SstStats, crate::Error>;
+    /// Reads the stats block from object storage. Returns `None` for old
+    /// SSTs that were written before the stats block was added.
+    pub async fn stats(&self) -> Result<Option<SstStats>, crate::Error>;
 
     /// Returns `(block_offset, first_key)` pairs from the SST index block.
     pub async fn index(&self) -> Result<Vec<(u64, Bytes)>, crate::Error>;
@@ -297,7 +298,7 @@ The `block_stats` vector is parallel to the SST index — `block_stats[i]` corre
 
 The total record count for an SST is `num_puts + num_deletes + num_merges`, derivable from the aggregate fields. The same breakdown at the block level enables finer-grained record counting for boundary SSTs (see "Record counting" in the estimation section).
 
-Since `SsTableInfo` is a FlatBuffers table, the new `stats_offset`/`stats_len` fields can be appended without breaking existing readers — missing fields return their default value (`0` for `ulong`). The `flatc --conform` CI check enforces that schema changes are purely additive. Old SSTs without a stats block will have `stats_offset = 0` and `stats_len = 0`, and `SstFile::stats()` returns zeros for these.
+Since `SsTableInfo` is a FlatBuffers table, the new `stats_offset`/`stats_len` fields can be appended without breaking existing readers — missing fields return their default value (`0` for `ulong`). The `flatc --conform` CI check enforces that schema changes are purely additive. Old SSTs without a stats block will have `stats_offset = 0` and `stats_len = 0`, and `SstFile::stats()` returns `None` for these.
 
 This approach keeps `SsTableInfo` (and therefore the manifest) lean — only 16 bytes per SST are added rather than the full 40 bytes of stats. This matters for large DBs where manifest size is dominated by SST infos. The stats are read from the SST file on demand via `SstFile::stats()`.
 
@@ -411,7 +412,7 @@ Memtable stats (`num_puts`, `num_deletes`, `num_merges`, `raw_key_bytes`, `raw_v
 
 ### Compatibility
 
-- `SsTableInfo` gets new `stats_offset`/`stats_len` fields in Phase 1. Old SSTs without a stats block will have these fields default to `0` (FlatBuffers default), and `SstFile::stats()` returns zeros with an empty `block_stats` vector.
+- `SsTableInfo` gets new `stats_offset`/`stats_len` fields in Phase 1. Old SSTs without a stats block will have these fields default to `0` (FlatBuffers default), and `SstFile::stats()` returns `None`.
 - New APIs are additive only
 - No breaking changes to existing APIs
 - Language bindings will need to expose new types and methods
@@ -419,14 +420,14 @@ Memtable stats (`num_puts`, `num_deletes`, `num_merges`, `raw_key_bytes`, `raw_v
 ## Testing
 
 Unit tests:
-- SST stats block encoding/decoding and backwards compatibility with old SSTs (missing stats block returns zeros)
+- SST stats block encoding/decoding and backwards compatibility with old SSTs (missing stats block returns `None`)
 - `stats_offset`/`stats_len` fields in `SsTableInfo` encoding/decoding
 - `SstReader::open()`: loading SST footer and constructing `SstFile`
 - `SstReader::open_with_handle()`: constructing `SstFile` from an existing `SsTableHandle`
 - `SstFile::stats()`: correct reading and population of `SstStats` from the stats block
 - `SstFile::index()`: returns correct `(offset, first_key)` pairs matching the SST's block index
 - `block_stats` vector: parallel to index, builder correctly tracks per-block put/delete/merge counts
-- Backward compatibility: old SSTs without stats return zeros and empty `block_stats`
+- Backward compatibility: old SSTs without stats return `None`
 - `Db::manifest()`: returns current manifest state with L0 and sorted runs
 - `SortedRun::tables_covering_range()`: full and partial range overlap detection
 - Memtable metrics: correct registration, increment on write, decrement on flush
