@@ -147,7 +147,6 @@ impl RowEntry {
     }
 }
 
-#[cfg(test)]
 impl From<RowEntry> for KeyValue {
     fn from(entry: RowEntry) -> Self {
         KeyValue {

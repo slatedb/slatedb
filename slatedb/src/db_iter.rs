@@ -293,17 +293,7 @@ impl DbIterator {
     /// Returns [`Error`] if the iterator has been invalidated due to an underlying error.
     pub async fn next(&mut self) -> Result<Option<KeyValue>, crate::Error> {
         let entry_opt = self.next_row().await?;
-        Ok(entry_opt.map(|entry| {
-            let value = match entry.value {
-                ValueDeletable::Value(v) => v,
-                ValueDeletable::Merge(m) => m,
-                ValueDeletable::Tombstone => unreachable!("Tombstones are filtered out"),
-            };
-            KeyValue {
-                key: entry.key,
-                value,
-            }
-        }))
+        Ok(entry_opt.map(Into::into))
     }
 
     pub async fn next_row(&mut self) -> Result<Option<RowEntry>, crate::Error> {
