@@ -11,6 +11,7 @@ use crate::manifest::store::{ManifestStore, StoredManifest};
 use slatedb_common::clock::SystemClock;
 
 use crate::clone;
+use crate::db_status::ClosedResultWriter;
 use crate::object_stores::{ObjectStoreType, ObjectStores};
 use crate::rand::DbRand;
 use crate::seq_tracker::FindOption;
@@ -279,7 +280,7 @@ impl Admin {
         .build();
 
         let (_, rx) = mpsc::unbounded_channel();
-        let closed_result = WatchableOnceCell::new();
+        let closed_result = ClosedResultWriter::new(WatchableOnceCell::new());
         let task_executor = MessageHandlerExecutor::new(closed_result, self.system_clock.clone());
 
         task_executor

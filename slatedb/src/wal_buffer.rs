@@ -600,6 +600,7 @@ impl MessageHandler<WalFlushWork> for WalFlushHandler {
 mod tests {
     use super::*;
     use crate::clock::MonotonicClock;
+    use crate::db_status::DbStatusReporter;
     use crate::format::sst::SsTableFormat;
     use crate::iter::KeyValueIterator;
     use crate::manifest::store::test_utils::new_dirty_manifest;
@@ -820,9 +821,12 @@ mod tests {
         let test_clock = Arc::new(MockSystemClock::new());
         let mono_clock = Arc::new(MonotonicClock::new(test_clock.clone(), 0));
         let system_clock = Arc::new(DefaultSystemClock::new());
-        let (status_tx, _) = tokio::sync::watch::channel(crate::db::DbStatus::default());
-        let oracle = Arc::new(DbOracle::new(0, 0, status_tx));
-        let db_state = Arc::new(RwLock::new(DbState::new(new_dirty_manifest())));
+        let status_reporter = crate::db_status::DbStatusReporter::new(0);
+        let oracle = Arc::new(DbOracle::new(0, 0, 0, status_reporter));
+        let db_state = Arc::new(RwLock::new(DbState::new(
+            new_dirty_manifest(),
+            DbStatusReporter::new(0),
+        )));
         let wal_buffer = Arc::new(WalBufferManager::new(
             wal_id_store,
             db_state.clone(),

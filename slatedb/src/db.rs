@@ -20,6 +20,8 @@
 //! }
 //! ```
 
+pub use crate::db_status::DbStatus;
+
 use std::ops::RangeBounds;
 use std::sync::Arc;
 
@@ -74,6 +76,7 @@ use crate::wal_replay::{WalReplayIterator, WalReplayOptions};
 use slatedb_common::clock::SystemClock;
 use slatedb_txn_obj::DirtyObject;
 
+use crate::db_status::DbStatusReporter;
 pub use builder::DbBuilder;
 pub use builder::DbReaderBuilder;
 
@@ -102,7 +105,7 @@ pub(crate) struct DbInner {
     pub(crate) wal_enabled: bool,
     /// [`txn_manager`] tracks all the live transactions and related metadata.
     pub(crate) txn_manager: Arc<TransactionManager>,
-    pub(crate) status_tx: tokio::sync::watch::Sender<DbStatus>,
+    pub(crate) status_reporter: DbStatusReporter,
 }
 
 impl DbInner {
@@ -120,11 +123,13 @@ impl DbInner {
     ) -> Result<Self, SlateDBError> {
         // both last_seq and last_committed_seq will be updated after WAL replay.
         let last_l0_seq = manifest.value.core.last_l0_seq;
-        let (status_tx, _) = tokio::sync::watch::channel(DbStatus {
-            durable_seq: last_l0_seq,
-            close_reason: None,
-        });
-        let oracle = Arc::new(DbOracle::new(last_l0_seq, last_l0_seq, status_tx.clone()));
+        let status_reporter = DbStatusReporter::new(last_l0_seq);
+        let oracle = Arc::new(DbOracle::new(
+            last_l0_seq,
+            last_l0_seq,
+            last_l0_seq,
+            status_reporter.clone(),
+        ));
 
         let mono_clock = Arc::new(MonotonicClock::new(
             system_clock.clone(),
@@ -132,7 +137,8 @@ impl DbInner {
         ));
 
         // state are mostly manifest, including IMM, L0, etc.
-        let state = Arc::new(RwLock::new(DbState::new(manifest)));
+        let db_state = DbState::new(manifest, status_reporter.clone());
+        let state = Arc::new(RwLock::new(db_state));
 
         let db_stats = DbStats::new(stat_registry.as_ref());
         let wal_enabled = DbInner::wal_enabled_in_options(&settings);
@@ -177,7 +183,7 @@ impl DbInner {
             fp_registry,
             reader,
             txn_manager,
-            status_tx,
+            status_reporter,
         };
         Ok(db_inner)
     }
@@ -563,22 +569,6 @@ impl DbInner {
     }
 }
 
-/// Current status of the database, exposed via [`Db::subscribe`].
-///
-/// Subscribers receive a [`tokio::sync::watch::Receiver<DbStatus>`] which
-/// always reflects the latest state. When the database is dropped the watch
-/// channel closes and [`changed()`](tokio::sync::watch::Receiver::changed)
-/// returns an error.
-#[derive(Clone, Debug, PartialEq, Default)]
-pub struct DbStatus {
-    /// The durable sequence number. All writes with a sequence number less
-    /// than or equal to this value are durably persisted to object storage
-    /// and will survive process restarts.
-    pub durable_seq: u64,
-    /// Set once the database has been closed, indicating the reason.
-    pub close_reason: Option<CloseReason>,
-}
-
 #[derive(Clone)]
 pub struct Db {
     pub(crate) inner: Arc<DbInner>,
@@ -670,7 +660,7 @@ impl Db {
     /// }
     /// ```
     pub async fn close(&self) -> Result<(), crate::Error> {
-        let (should_flush, close_reason) = match self.status() {
+        let should_flush = match self.status() {
             // If already closed, don't close again.
             Err(e) if matches!(e.kind(), crate::ErrorKind::Closed(CloseReason::Clean)) => {
                 return Err(e);
@@ -679,9 +669,9 @@ impl Db {
             // might be in a bad state. Note that multiple close() calls will always
             // run when in a failed state (vs. a clean closure, which will return
             // Error::Closed(CloseReason::Clean) on subsequent calls).
-            Err(e) => (false, CloseReason::from(e.kind())),
+            Err(_) => false,
             // Flush outstanding writes if the database is still open.
-            Ok(_) => (true, CloseReason::Clean),
+            Ok(_) => true,
         };
 
         // Mark the database as closed before flushing.
@@ -721,9 +711,6 @@ impl Db {
             warn!("failed to shutdown memtable writer task [error={:?}]", e);
         }
 
-        self.inner
-            .status_tx
-            .send_modify(|s| s.close_reason = Some(close_reason));
         info!("db closed");
         Ok(())
     }
@@ -1493,7 +1480,7 @@ impl Db {
     /// some_async_fn(status.durable_seq).await; // deadlock!
     /// ```
     pub fn subscribe(&self) -> tokio::sync::watch::Receiver<DbStatus> {
-        self.inner.status_tx.subscribe()
+        self.inner.status_reporter.subscribe()
     }
 
     /// Begin a new transaction with the specified isolation level.
@@ -6754,6 +6741,87 @@ mod tests {
             result.is_err(),
             "expected watch channel closed after db drop, got Ok",
         );
+    }
+
+    #[tokio::test]
+    async fn should_report_close_reason_clean_on_db_close() {
+        // Given: a DB with a watcher
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let db = Db::builder("/tmp/test_close_reason_clean", object_store)
+            .build()
+            .await
+            .unwrap();
+        let mut watcher = db.subscribe();
+
+        // When: the DB is closed cleanly
+        db.close().await.unwrap();
+
+        // Then: the watcher should report close_reason = Clean
+        let status = watcher
+            .wait_for(|s| s.close_reason.is_some())
+            .await
+            .expect("watch channel closed")
+            .clone();
+        assert_eq!(status.close_reason, Some(CloseReason::Clean));
+    }
+
+    #[tokio::test]
+    async fn should_report_close_reason_panic_on_background_task_failure() {
+        // Given: a DB with a failpoint on WAL flush and a watcher
+        let fp_registry = Arc::new(FailPointRegistry::new());
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let db = Db::builder("/tmp/test_close_reason_panic", object_store)
+            .with_settings(test_db_options(0, 128, None))
+            .with_fp_registry(fp_registry.clone())
+            .build()
+            .await
+            .unwrap();
+        let mut watcher = db.subscribe();
+
+        // When: a background task panics
+        fail_parallel::cfg(fp_registry.clone(), "write-wal-sst-io-error", "panic").unwrap();
+        let _ = db.put(b"foo", b"bar").await;
+
+        // Then: the watcher should report close_reason = Panic
+        let status = tokio::time::timeout(
+            Duration::from_secs(10),
+            watcher.wait_for(|s| s.close_reason.is_some()),
+        )
+        .await
+        .expect("timed out waiting for close reason")
+        .expect("watch channel closed")
+        .clone();
+        assert_eq!(status.close_reason, Some(CloseReason::Panic));
+    }
+
+    #[tokio::test]
+    async fn should_report_close_reason_fenced_on_fenced_error() {
+        // Given: a DB with a watcher
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let db = Db::builder("/tmp/test_close_reason_fenced", object_store)
+            .with_settings(test_db_options(0, 1024, None))
+            .build()
+            .await
+            .unwrap();
+        let mut watcher = db.subscribe();
+
+        // When: the DB is fenced (simulated via closed_result)
+        db.inner
+            .state
+            .write()
+            .closed_result()
+            .write(Err(crate::error::SlateDBError::Fenced));
+
+        // Then: the watcher should report close_reason = Fenced
+        let status = tokio::time::timeout(
+            Duration::from_secs(10),
+            watcher.wait_for(|s| s.close_reason.is_some()),
+        )
+        .await
+        .expect("timed out waiting for close reason")
+        .expect("watch channel closed")
+        .clone();
+        assert_eq!(status.close_reason, Some(CloseReason::Fenced));
     }
 
     #[cfg(feature = "wal_disable")]

@@ -76,6 +76,7 @@ use crate::compactor_executor::{
 use crate::compactor_state_protocols::CompactorStateWriter;
 use crate::config::CompactorOptions;
 use crate::db_state::SortedRun;
+use crate::db_status::ClosedResultWriter;
 use crate::dispatcher::{MessageFactory, MessageHandler, MessageHandlerExecutor};
 use crate::error::{Error, SlateDBError};
 use crate::manifest::store::ManifestStore;
@@ -84,7 +85,7 @@ use crate::merge_operator::MergeOperatorType;
 use crate::rand::DbRand;
 use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
-use crate::utils::{format_bytes_si, IdGenerator, WatchableOnceCell};
+use crate::utils::{format_bytes_si, IdGenerator};
 use slatedb_common::clock::SystemClock;
 
 pub use crate::compactor_state::{
@@ -280,7 +281,7 @@ impl Compactor {
         rand: Arc<DbRand>,
         stat_registry: Arc<StatRegistry>,
         system_clock: Arc<dyn SystemClock>,
-        closed_result: WatchableOnceCell<Result<(), SlateDBError>>,
+        closed_result: ClosedResultWriter,
         merge_operator: Option<MergeOperatorType>,
         #[cfg(feature = "compaction_filters")] compaction_filter_supplier: Option<
             Arc<dyn CompactionFilterSupplier>,

@@ -434,13 +434,12 @@ impl TransactionManagerInner {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::DbStatus;
+    use crate::db_status::DbStatusReporter;
     use crate::rand::DbRand;
     use bytes::Bytes;
     use parking_lot::Mutex;
     use rstest::rstest;
     use std::collections::HashSet;
-    use tokio::sync::watch;
 
     struct CheckConflictTestCase {
         name: &'static str,
@@ -452,19 +451,16 @@ mod tests {
 
     fn create_transaction_manager() -> TransactionManager {
         let db_rand = Arc::new(DbRand::new(0));
-        let (status_tx, _) = watch::channel(DbStatus::default());
-        let oracle = Arc::new(DbOracle::new(0, 0, status_tx));
+        let status_reporter = DbStatusReporter::new(0);
+        let oracle = Arc::new(DbOracle::new(0, 0, 0, status_reporter));
         TransactionManager::new(oracle, db_rand)
     }
 
     #[test]
     fn test_new_transaction_uses_oracle_seq() {
         let db_rand = Arc::new(DbRand::new(0));
-        let (status_tx, _) = watch::channel(DbStatus {
-            durable_seq: 123,
-            ..DbStatus::default()
-        });
-        let oracle = Arc::new(DbOracle::new(123, 123, status_tx));
+        let status_reporter = DbStatusReporter::new(123);
+        let oracle = Arc::new(DbOracle::new(123, 123, 123, status_reporter));
         let txn_manager = TransactionManager::new(oracle, db_rand);
 
         let (txn_id, seq) = txn_manager.new_transaction();
@@ -479,11 +475,8 @@ mod tests {
     #[test]
     fn test_new_snapshot_uses_optional_seq() {
         let db_rand = Arc::new(DbRand::new(0));
-        let (status_tx, _) = watch::channel(DbStatus {
-            durable_seq: 77,
-            ..DbStatus::default()
-        });
-        let oracle = Arc::new(DbOracle::new(77, 77, status_tx));
+        let status_reporter = DbStatusReporter::new(77);
+        let oracle = Arc::new(DbOracle::new(77, 77, 77, status_reporter));
         let txn_manager = TransactionManager::new(oracle, db_rand);
 
         let (snapshot_id_from_oracle, seq_from_oracle) = txn_manager.new_snapshot(None);

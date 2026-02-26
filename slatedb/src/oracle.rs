@@ -1,8 +1,7 @@
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering::SeqCst;
-use tokio::sync::watch;
 
-use crate::db::DbStatus;
+use crate::db_status::DbStatusReporter;
 
 /// Oracle is a trait that centralizes the generation & maintenance of various
 /// sequence numbers. These sequence numbers are mostly related to the lifecycle
@@ -23,23 +22,22 @@ pub(crate) struct DbOracle {
     // on this struct.
     last_seq: AtomicU64,
     last_committed_seq: AtomicU64,
-    // The durable sequence is stored inside the watch channel's `DbStatus`
-    // value. Using `send_if_modified` ensures that advancing the sequence and
-    // notifying subscribers happen atomically under the watch's internal lock,
-    // guaranteeing monotonic updates without a separate RwLock.
-    status_tx: watch::Sender<DbStatus>,
+    last_durable_seq: AtomicU64,
+    status_reporter: DbStatusReporter,
 }
 
 impl DbOracle {
     pub(crate) fn new(
         last_seq: u64,
         last_committed_seq: u64,
-        status_tx: watch::Sender<DbStatus>,
+        last_durable_seq: u64,
+        status_reporter: DbStatusReporter,
     ) -> Self {
         Self {
             last_seq: AtomicU64::new(last_seq),
             last_committed_seq: AtomicU64::new(last_committed_seq),
-            status_tx,
+            last_durable_seq: AtomicU64::new(last_durable_seq),
+            status_reporter,
         }
     }
 
@@ -60,19 +58,14 @@ impl DbOracle {
     }
 
     pub(crate) fn advance_durable_seq(&self, seq: u64) {
-        self.status_tx.send_if_modified(|s| {
-            if seq > s.durable_seq {
-                s.durable_seq = seq;
-                true
-            } else {
-                false
-            }
-        });
+        self.last_durable_seq.fetch_max(seq, SeqCst);
+        self.status_reporter.report_durable_seq(seq);
     }
 
     #[cfg(test)]
     pub(crate) fn set_durable_seq_unsafe(&self, value: u64) {
-        self.status_tx.send_modify(|s| s.durable_seq = value);
+        self.last_durable_seq.store(value, SeqCst);
+        self.status_reporter.report_durable_seq(value);
     }
 }
 
@@ -82,7 +75,7 @@ impl Oracle for DbOracle {
     }
 
     fn last_remote_persisted_seq(&self) -> u64 {
-        self.status_tx.borrow().durable_seq
+        self.last_durable_seq.load(SeqCst)
     }
 }
 

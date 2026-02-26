@@ -5,6 +5,7 @@ use crate::config::{CheckpointOptions, DbReaderOptions, ReadOptions, ScanOptions
 use crate::db_read::DbRead;
 use crate::db_state::ManifestCore;
 use crate::db_stats::DbStats;
+use crate::db_status::ClosedResultWriter;
 use crate::dispatcher::{MessageFactory, MessageHandler, MessageHandlerExecutor};
 use crate::error::SlateDBError;
 use crate::iter::IterationOrder;
@@ -57,7 +58,7 @@ struct DbReaderInner {
     user_checkpoint_id: Option<Uuid>,
     oracle: Arc<DbReaderOracle>,
     reader: Reader,
-    closed_result_watcher: WatchableOnceCell<Result<(), SlateDBError>>,
+    closed_result_watcher: ClosedResultWriter,
     rand: Arc<DbRand>,
 }
 
@@ -97,7 +98,7 @@ impl DbReaderInner {
         table_store: Arc<TableStore>,
         options: DbReaderOptions,
         checkpoint_id: Option<Uuid>,
-        closed_result_watcher: WatchableOnceCell<Result<(), SlateDBError>>,
+        closed_result_watcher: ClosedResultWriter,
         system_clock: Arc<dyn SystemClock>,
         rand: Arc<DbRand>,
     ) -> Result<Self, SlateDBError> {
@@ -628,7 +629,7 @@ impl DbReader {
     ) -> Result<Self, SlateDBError> {
         Self::validate_options(&options)?;
 
-        let closed_result_watcher = WatchableOnceCell::new();
+        let closed_result_watcher = ClosedResultWriter::new(WatchableOnceCell::new());
         let task_executor =
             MessageHandlerExecutor::new(closed_result_watcher.clone(), system_clock.clone());
         let manifest_store = store_provider.manifest_store();

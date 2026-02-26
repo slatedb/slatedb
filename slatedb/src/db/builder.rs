@@ -137,6 +137,7 @@ use crate::db_cache::SplitCache;
 use crate::db_cache::{DbCache, DbCacheWrapper};
 use crate::db_reader::DbReader;
 use crate::db_state::ManifestCore;
+use crate::db_status::ClosedResultWriter;
 use crate::dispatcher::MessageHandlerExecutor;
 use crate::error::SlateDBError;
 use crate::format::sst::{BlockTransformer, SsTableFormat};
@@ -794,7 +795,7 @@ pub struct CompactorBuilder<P: Into<Path>> {
     rand: Arc<DbRand>,
     stat_registry: Arc<StatRegistry>,
     system_clock: Arc<dyn SystemClock>,
-    closed_result: WatchableOnceCell<Result<(), SlateDBError>>,
+    closed_result: ClosedResultWriter,
     merge_operator: Option<MergeOperatorType>,
     block_transformer: Option<Arc<dyn BlockTransformer>>,
     #[cfg(feature = "compaction_filters")]
@@ -813,7 +814,7 @@ impl<P: Into<Path>> CompactorBuilder<P> {
             rand: Arc::new(DbRand::default()),
             stat_registry: Arc::new(StatRegistry::new()),
             system_clock: Arc::new(DefaultSystemClock::default()),
-            closed_result: WatchableOnceCell::new(),
+            closed_result: ClosedResultWriter::new(WatchableOnceCell::new()),
             merge_operator: None,
             block_transformer: None,
             #[cfg(feature = "compaction_filters")]

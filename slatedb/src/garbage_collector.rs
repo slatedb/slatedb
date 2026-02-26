@@ -299,6 +299,7 @@ mod tests {
     use crate::types::RowEntry;
     use slatedb_common::clock::DefaultSystemClock;
 
+    use crate::db_status::ClosedResultWriter;
     use crate::format::sst::SsTableFormat;
     use crate::utils::WatchableOnceCell;
     use crate::{
@@ -1452,7 +1453,8 @@ mod tests {
         );
         let (_, rx) = mpsc::unbounded_channel();
         let clock = Arc::new(DefaultSystemClock::default());
-        let executor = MessageHandlerExecutor::new(WatchableOnceCell::new(), clock);
+        let executor =
+            MessageHandlerExecutor::new(ClosedResultWriter::new(WatchableOnceCell::new()), clock);
         executor
             .add_handler(
                 "garbage_collector".to_string(),
