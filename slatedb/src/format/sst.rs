@@ -390,6 +390,7 @@ impl<'a, 'b> EncodedSsTableFooterBuilder<'a, 'b> {
 }
 
 pub(crate) struct EncodedSsTable {
+    pub(crate) format_version: u16,
     pub(crate) info: SsTableInfo,
     pub(crate) index: SsTableIndexOwned,
     pub(crate) filter: Option<Arc<BloomFilter>>,

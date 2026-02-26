@@ -225,7 +225,11 @@ impl TableStore {
         }
         self.cache_filter(*id, encoded_sst.info.filter_offset, encoded_sst.filter)
             .await;
-        Ok(SsTableHandle::new(*id, encoded_sst.info))
+        Ok(SsTableHandle::new(
+            *id,
+            encoded_sst.format_version,
+            encoded_sst.info,
+        ))
     }
 
     async fn cache_filter(&self, sst: SsTableId, id: u64, filter: Option<Arc<BloomFilter>>) {
@@ -326,15 +330,23 @@ impl TableStore {
         let path = self.path(id);
         let obj = ReadOnlyObject { object_store, path };
         let info = self.sst_format.read_info(&obj).await?;
-        Ok(SsTableHandle::new(*id, info))
+        let version = self.read_sst_version_for_id(id).await?;
+        Ok(SsTableHandle::new(*id, version, info))
     }
 
     pub(crate) async fn read_sst_version(
         &self,
         handle: &SsTableHandle,
     ) -> Result<u16, SlateDBError> {
-        let object_store = self.object_stores.store_for(&handle.id);
-        let path = self.path(&handle.id);
+        self.read_sst_version_for_id(&handle.id).await
+    }
+
+    pub(crate) async fn read_sst_version_for_id(
+        &self,
+        id: &SsTableId,
+    ) -> Result<u16, SlateDBError> {
+        let object_store = self.object_stores.store_for(id);
+        let path = self.path(id);
         let obj = ReadOnlyObject { object_store, path };
         self.sst_format.read_version(&obj).await
     }
@@ -622,7 +634,11 @@ impl EncodedSsTableWriter<'_> {
         self.table_store
             .cache_filter(self.id, encoded_sst.info.filter_offset, encoded_sst.filter)
             .await;
-        Ok(SsTableHandle::new(self.id, encoded_sst.info))
+        Ok(SsTableHandle::new(
+            self.id,
+            encoded_sst.format_version,
+            encoded_sst.info,
+        ))
     }
 
     async fn drain_blocks(&mut self) -> Result<(), SlateDBError> {

@@ -1461,6 +1461,7 @@ impl<'a> CompactedSsTable<'a> {
   pub const VT_ID: flatbuffers::VOffsetT = 4;
   pub const VT_INFO: flatbuffers::VOffsetT = 6;
   pub const VT_VISIBLE_RANGE: flatbuffers::VOffsetT = 8;
+  pub const VT_FORMAT_VERSION: flatbuffers::VOffsetT = 10;
 
   #[inline]
   pub unsafe fn init_from_table(table: flatbuffers::Table<'a>) -> Self {
@@ -1475,6 +1476,7 @@ impl<'a> CompactedSsTable<'a> {
     if let Some(x) = args.visible_range { builder.add_visible_range(x); }
     if let Some(x) = args.info { builder.add_info(x); }
     if let Some(x) = args.id { builder.add_id(x); }
+    if let Some(x) = args.format_version { builder.add_format_version(x); }
     builder.finish()
   }
 
@@ -1500,6 +1502,13 @@ impl<'a> CompactedSsTable<'a> {
     // which contains a valid value in this slot
     unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<BytesRange>>(CompactedSsTable::VT_VISIBLE_RANGE, None)}
   }
+  #[inline]
+  pub fn format_version(&self) -> Option<u16> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u16>(CompactedSsTable::VT_FORMAT_VERSION, None)}
+  }
 }
 
 impl flatbuffers::Verifiable for CompactedSsTable<'_> {
@@ -1512,6 +1521,7 @@ impl flatbuffers::Verifiable for CompactedSsTable<'_> {
      .visit_field::<flatbuffers::ForwardsUOffset<Ulid>>("id", Self::VT_ID, true)?
      .visit_field::<flatbuffers::ForwardsUOffset<SsTableInfo>>("info", Self::VT_INFO, true)?
      .visit_field::<flatbuffers::ForwardsUOffset<BytesRange>>("visible_range", Self::VT_VISIBLE_RANGE, false)?
+     .visit_field::<u16>("format_version", Self::VT_FORMAT_VERSION, false)?
      .finish();
     Ok(())
   }
@@ -1520,6 +1530,7 @@ pub struct CompactedSsTableArgs<'a> {
     pub id: Option<flatbuffers::WIPOffset<Ulid<'a>>>,
     pub info: Option<flatbuffers::WIPOffset<SsTableInfo<'a>>>,
     pub visible_range: Option<flatbuffers::WIPOffset<BytesRange<'a>>>,
+    pub format_version: Option<u16>,
 }
 impl<'a> Default for CompactedSsTableArgs<'a> {
   #[inline]
@@ -1528,6 +1539,7 @@ impl<'a> Default for CompactedSsTableArgs<'a> {
       id: None, // required field
       info: None, // required field
       visible_range: None,
+      format_version: None,
     }
   }
 }
@@ -1548,6 +1560,10 @@ impl<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> CompactedSsTableBuilder<'a, 'b,
   #[inline]
   pub fn add_visible_range(&mut self, visible_range: flatbuffers::WIPOffset<BytesRange<'b >>) {
     self.fbb_.push_slot_always::<flatbuffers::WIPOffset<BytesRange>>(CompactedSsTable::VT_VISIBLE_RANGE, visible_range);
+  }
+  #[inline]
+  pub fn add_format_version(&mut self, format_version: u16) {
+    self.fbb_.push_slot_always::<u16>(CompactedSsTable::VT_FORMAT_VERSION, format_version);
   }
   #[inline]
   pub fn new(_fbb: &'b mut flatbuffers::FlatBufferBuilder<'a, A>) -> CompactedSsTableBuilder<'a, 'b, A> {
@@ -1572,6 +1588,7 @@ impl core::fmt::Debug for CompactedSsTable<'_> {
       ds.field("id", &self.id());
       ds.field("info", &self.info());
       ds.field("visible_range", &self.visible_range());
+      ds.field("format_version", &self.format_version());
       ds.finish()
   }
 }

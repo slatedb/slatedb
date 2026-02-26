@@ -818,6 +818,7 @@ mod tests {
     use crate::clock::MonotonicClock;
     use crate::db_state::{SortedRun, SsTableHandle, SsTableId, SsTableInfo};
     use crate::error::SlateDBError;
+    use crate::format::sst::SST_FORMAT_VERSION_LATEST;
     use crate::sst_builder::BlockFormat;
     use crate::types::RowEntry;
     use crate::utils::{
@@ -865,7 +866,12 @@ mod tests {
             index_len: 1,
             ..Default::default()
         };
-        SsTableHandle::new_compacted(SsTableId::Compacted(Ulid::new()), info, None)
+        SsTableHandle::new_compacted(
+            SsTableId::Compacted(Ulid::new()),
+            SST_FORMAT_VERSION_LATEST,
+            info,
+            None,
+        )
     }
 
     #[test]

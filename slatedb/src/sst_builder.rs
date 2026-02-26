@@ -358,6 +358,7 @@ impl EncodedSsTableBuilder<'_> {
         let footer = footer_builder.build().await?;
 
         Ok(EncodedSsTable {
+            format_version: self.sst_format_version,
             info: footer.info,
             index: footer.index,
             filter: footer.filter,

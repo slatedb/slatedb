@@ -27,6 +27,9 @@ pub struct SsTableHandle {
     /// The unique identifier for this SSTable. The table can be either a WAL SST or a compacted SST.
     pub id: SsTableId,
 
+    /// The format version that this SSTable was serialized with.
+    pub(crate) format_version: u16,
+
     /// Metadata information about this SSTable.
     pub info: SsTableInfo,
 
@@ -50,7 +53,7 @@ impl Debug for SsTableHandle {
 }
 
 impl SsTableHandle {
-    pub(crate) fn new(id: SsTableId, info: SsTableInfo) -> Self {
+    pub(crate) fn new(id: SsTableId, format_version: u16, info: SsTableInfo) -> Self {
         let effective_range = match info.first_entry.clone() {
             Some(physical_first_entry) => {
                 let end_bound = match info.last_entry.clone() {
@@ -64,6 +67,7 @@ impl SsTableHandle {
 
         SsTableHandle {
             id,
+            format_version,
             info,
             visible_range: None,
             effective_range,
@@ -72,6 +76,7 @@ impl SsTableHandle {
 
     pub(crate) fn new_compacted(
         id: SsTableId,
+        format_version: u16,
         info: SsTableInfo,
         visible_range: Option<BytesRange>,
     ) -> Self {
@@ -98,6 +103,7 @@ impl SsTableHandle {
         }
         SsTableHandle {
             id,
+            format_version,
             info,
             visible_range,
             effective_range,
@@ -105,7 +111,12 @@ impl SsTableHandle {
     }
 
     pub(crate) fn with_visible_range(&self, visible_range: BytesRange) -> Self {
-        Self::new_compacted(self.id, self.info.clone(), Some(visible_range))
+        Self::new_compacted(
+            self.id,
+            self.format_version,
+            self.info.clone(),
+            Some(visible_range),
+        )
     }
 
     /// The range of keys that are visible to the user.
@@ -675,6 +686,7 @@ impl WalIdStore for parking_lot::RwLock<DbState> {
 mod tests {
     use crate::checkpoint::Checkpoint;
     use crate::db_state::{DbState, SortedRun, SsTableHandle, SsTableId, SsTableInfo, SstType};
+    use crate::format::sst::SST_FORMAT_VERSION_LATEST;
     use crate::manifest::store::test_utils::new_dirty_manifest;
     use crate::proptest_util::arbitrary;
     use crate::test_utils;
@@ -763,8 +775,11 @@ mod tests {
                 .freeze_memtable(i as u64)
                 .expect("db in error state");
             let imm = db_state.state.imm_memtable.back().unwrap().clone();
-            let handle =
-                SsTableHandle::new(SsTableId::Compacted(ulid::Ulid::new()), dummy_info.clone());
+            let handle = SsTableHandle::new(
+                SsTableId::Compacted(ulid::Ulid::new()),
+                SST_FORMAT_VERSION_LATEST,
+                dummy_info.clone(),
+            );
             db_state.modify(|modifier| {
                 modifier.state.manifest.value.core.l0.push_front(handle);
                 modifier.state.manifest.value.core.replay_after_wal_id =
@@ -826,7 +841,7 @@ mod tests {
     fn create_compacted_sst_handle(first_entry: Option<Bytes>) -> SsTableHandle {
         let sst_info = create_sst_info(first_entry);
         let sst_id = SsTableId::Compacted(ulid::Ulid::new());
-        SsTableHandle::new(sst_id, sst_info)
+        SsTableHandle::new(sst_id, SST_FORMAT_VERSION_LATEST, sst_info)
     }
 
     fn create_sst_info(first_entry: Option<Bytes>) -> SsTableInfo {

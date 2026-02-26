@@ -61,6 +61,7 @@ table CompactedSsTable {
     id: Ulid (required);
     info: SsTableInfo (required);
     visible_range: BytesRange;
+    format_version: uint16 = null;
 }
 
 table SortedRun {

@@ -1053,7 +1053,7 @@ mod tests {
     use crate::db::Db;
     use crate::db_state::{ManifestCore, SortedRun, SsTableHandle, SsTableId, SsTableInfo};
     use crate::error::SlateDBError;
-    use crate::format::sst::SsTableFormat;
+    use crate::format::sst::{SsTableFormat, SST_FORMAT_VERSION_LATEST};
     use crate::iter::KeyValueIterator;
     use crate::manifest::store::{ManifestStore, StoredManifest};
     use crate::manifest::Manifest;
@@ -2510,14 +2510,23 @@ mod tests {
             ..SsTableInfo::default()
         };
         dirty.value.core.l0 = VecDeque::from(vec![
-            SsTableHandle::new(SsTableId::Compacted(l0_newest), l0_info.clone()),
-            SsTableHandle::new(SsTableId::Compacted(l0_oldest), l0_info.clone()),
+            SsTableHandle::new(
+                SsTableId::Compacted(l0_newest),
+                SST_FORMAT_VERSION_LATEST,
+                l0_info.clone(),
+            ),
+            SsTableHandle::new(
+                SsTableId::Compacted(l0_oldest),
+                SST_FORMAT_VERSION_LATEST,
+                l0_info.clone(),
+            ),
         ]);
         dirty.value.core.compacted = vec![
             SortedRun {
                 id: 2,
                 ssts: vec![SsTableHandle::new(
                     SsTableId::Compacted(Ulid::new()),
+                    SST_FORMAT_VERSION_LATEST,
                     sr_info.clone(),
                 )],
             },
@@ -2525,6 +2534,7 @@ mod tests {
                 id: 1,
                 ssts: vec![SsTableHandle::new(
                     SsTableId::Compacted(Ulid::new()),
+                    SST_FORMAT_VERSION_LATEST,
                     sr_info.clone(),
                 )],
             },
@@ -2605,14 +2615,23 @@ mod tests {
             ..SsTableInfo::default()
         };
         core.l0 = VecDeque::from(vec![
-            SsTableHandle::new(SsTableId::Compacted(l0_first), l0_info.clone()),
-            SsTableHandle::new(SsTableId::Compacted(l0_second), l0_info),
+            SsTableHandle::new(
+                SsTableId::Compacted(l0_first),
+                SST_FORMAT_VERSION_LATEST,
+                l0_info.clone(),
+            ),
+            SsTableHandle::new(
+                SsTableId::Compacted(l0_second),
+                SST_FORMAT_VERSION_LATEST,
+                l0_info,
+            ),
         ]);
         core.compacted = vec![
             SortedRun {
                 id: 5,
                 ssts: vec![SsTableHandle::new(
                     SsTableId::Compacted(Ulid::from_parts(10, 0)),
+                    SST_FORMAT_VERSION_LATEST,
                     sr_info.clone(),
                 )],
             },
@@ -2620,6 +2639,7 @@ mod tests {
                 id: 2,
                 ssts: vec![SsTableHandle::new(
                     SsTableId::Compacted(Ulid::from_parts(11, 0)),
+                    SST_FORMAT_VERSION_LATEST,
                     sr_info,
                 )],
             },
@@ -2988,7 +3008,11 @@ mod tests {
             first_entry: Some(Bytes::from_static(b"a")),
             ..SsTableInfo::default()
         };
-        let output_sst = SsTableHandle::new(SsTableId::Compacted(Ulid::new()), sst_info);
+        let output_sst = SsTableHandle::new(
+            SsTableId::Compacted(Ulid::new()),
+            SST_FORMAT_VERSION_LATEST,
+            sst_info,
+        );
         let output_ssts = vec![output_sst.clone()];
 
         fixture
