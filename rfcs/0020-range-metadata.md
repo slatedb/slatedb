@@ -167,7 +167,9 @@ pub struct SstStats {
 }
 
 pub struct BlockStats {
-    pub num_rows: u16,
+    pub num_puts: u16,
+    pub num_deletes: u16,
+    pub num_merges: u16,
 }
 ```
 
@@ -250,7 +252,7 @@ There is existing related work in `estimate_bytes_before_key` (in `utils.rs`) th
 
 #### Record counting — via per-block stats
 
-For each overlapping SST, call `sst_file.stats()` to get `SstStats` with its `block_stats` vector. Use `sst_file.index()` to binary search for the range start and end block indices. Interior blocks are counted by summing their `num_rows` values from `block_stats`. For exact counts, read the two boundary blocks and count matching entries — at most 2 data block reads per SST. For approximate counts, include boundary blocks in full without reading them, overcounting by at most 2 blocks' worth of records per SST.
+For each overlapping SST, call `sst_file.stats()` to get `SstStats` with its `block_stats` vector. Use `sst_file.index()` to binary search for the range start and end block indices. Interior blocks are counted by summing `num_puts + num_deletes + num_merges` per block from `block_stats`. For exact counts, read the two boundary blocks and count matching entries — at most 2 data block reads per SST. For approximate counts, include boundary blocks in full without reading them, overcounting by at most 2 blocks' worth of records per SST.
 
 Summing across SSTs may count duplicate keys across levels. This is exact for append-only workloads where keys are never overwritten. For general key-value workloads, it is an overestimate — a deduplicated count requires merge iteration.
 
@@ -285,13 +287,15 @@ table SstStats {
 }
 
 table BlockStats {
-    num_rows: ushort;
+    num_puts: ushort;
+    num_deletes: ushort;
+    num_merges: ushort;
 }
 ```
 
-The `block_stats` vector is parallel to the SST index — `block_stats[i]` corresponds to the `i`th `BlockMeta` entry. The builder tracks a per-block row counter and records the final count when finishing each block. `BlockStats` is a FlatBuffers `table` (not `struct`) to allow adding fields in future without breaking compatibility.
+The `block_stats` vector is parallel to the SST index — `block_stats[i]` corresponds to the `i`th `BlockMeta` entry. The builder tracks per-block counters for each record type and records the final counts when finishing each block. `BlockStats` is a FlatBuffers `table` (not `struct`) to allow adding fields in future without breaking compatibility.
 
-The total record count for an SST is `num_puts + num_deletes + num_merges`, derivable from the aggregate fields. Per-block counts enable finer-grained record counting for boundary SSTs (see "Record counting" in the estimation section).
+The total record count for an SST is `num_puts + num_deletes + num_merges`, derivable from the aggregate fields. The same breakdown at the block level enables finer-grained record counting for boundary SSTs (see "Record counting" in the estimation section).
 
 Since `SsTableInfo` is a FlatBuffers table, the new `stats_offset`/`stats_len` fields can be appended without breaking existing readers — missing fields return their default value (`0` for `ulong`). The `flatc --conform` CI check enforces that schema changes are purely additive. Old SSTs without a stats block will have `stats_offset = 0` and `stats_len = 0`, and `SstFile::stats()` returns zeros for these.
 
@@ -370,7 +374,7 @@ SlateDB features and components that this RFC interacts with. Check all that app
 
 SST stats block:
 - 16 bytes per SST added to `SsTableInfo` (`stats_offset` + `stats_len`). Stats block itself is stored in the SST file, not the manifest.
-- Stats block size scales with block count: ~40 bytes for aggregate fields plus ~10 bytes per block for `BlockStats` (FlatBuffers table overhead + `ushort`). For a 256 MB SST with 4 KB blocks (~65K blocks), the stats block is ~700 KB.
+- Stats block size scales with block count: ~40 bytes for aggregate fields plus ~14 bytes per block for `BlockStats` (FlatBuffers table overhead + 3 × `ushort`). For a 256 MB SST with 4 KB blocks (~65K blocks), the stats block is ~950 KB.
 
 `Db::manifest()`:
 - Clones in-memory state. No I/O. Cost proportional to number of SST handles in the manifest.
@@ -421,7 +425,7 @@ Unit tests:
 - `SstReader::open_with_handle()`: constructing `SstFile` from an existing `SsTableHandle`
 - `SstFile::stats()`: correct reading and population of `SstStats` from the stats block
 - `SstFile::index()`: returns correct `(offset, first_key)` pairs matching the SST's block index
-- `block_stats` vector: parallel to index, builder correctly tracks per-block row counts
+- `block_stats` vector: parallel to index, builder correctly tracks per-block put/delete/merge counts
 - Backward compatibility: old SSTs without stats return zeros and empty `block_stats`
 - `Db::manifest()`: returns current manifest state with L0 and sorted runs
 - `SortedRun::tables_covering_range()`: full and partial range overlap detection
@@ -459,7 +463,7 @@ The immediately preceding revision proposed a `Db::metadata(range)` API returnin
 
 Another alternative not explored is sample-based estimation: sample N random blocks and extrapolate key counts or compression ratios. This could complement the current approach but adds complexity.
 
-**Per-block record counts in `BlockMeta` (SST index) instead of `SstStats`.** An earlier revision stored per-block counts directly in the SST index (`BlockMeta`). This avoids needing a separate stats read for record counting, but inflates the index — which is on the hot path for every scan and get — by ~12% for `ushort` counts or ~25% for cumulative `u32` counts. Moving per-block counts to the stats block keeps the index lean and isolates the overhead to estimation use cases.
+**Per-block record counts in `BlockMeta` (SST index) instead of `SstStats`.** An earlier revision stored per-block counts directly in the SST index (`BlockMeta`). This avoids needing a separate stats read for record counting, but inflates the index — which is on the hot path for every scan and get. Moving per-block counts to the stats block keeps the index lean and isolates the overhead to estimation use cases.
 
 ## Open Questions
 
@@ -486,4 +490,4 @@ Another alternative not explored is sample-based estimation: sample N random blo
 - **2026-02-11**: Major revision — replaced `Db::metadata(range)` / `RangeMetadata` / `SizeEstimate` trait approach with lower-level primitives: `Db::manifest()`, `SstReader`, `SstFile` with `stats()` and `index()` methods. Removed `RangeMetadata`, `SstMetadata`, `MemtableMetadata`, `Coverage` enum, and `SizeEstimate` trait. Memtable stats now exposed via `StatRegistry` metrics instead of `MemtableMetadata` structs. Added "Size and Cardinality Estimation" section describing estimation algorithms at three levels of accuracy. (PR #1220 review feedback from @criccomini, Feb 9).
 - **2026-02-16**: Stats fields moved into `SsTableInfo` (in `sst.fbs`) instead of a separate footer block. Removed `SstStats` struct — `SstFile::info()` returns `SsTableInfo` directly. `SstFile` now holds `SsTableHandle` + `Arc<TableStore>`. Added `object_store_cache_options` parameter to `SstReader::new()`. (PR #1220 review feedback from @criccomini).
 - **2026-02-19**: Reverted to separate stats block approach. Stats fields moved back out of `SsTableInfo` into a dedicated stats block within the SST file, referenced by `stats_offset`/`stats_len` in `SsTableInfo`. Reintroduced `SstStats` struct and `SstFile::stats()` method. This keeps `SsTableInfo` (and the manifest) lean — 16 bytes per SST vs 40 bytes — which matters for large DBs. Added `SstReader::open_with_handle()` for zero-I/O construction from an existing `SsTableHandle`. (PR #1220 review feedback from @rodesai and @criccomini).
-- **2026-02-25**: Added per-block record counts as `block_stats: [BlockStats]` in `SstStats` (stats block) rather than in `BlockMeta` (SST index). This keeps the index lean and isolates counting overhead to the stats block. `BlockStats` uses a FlatBuffers `table` for future extensibility. Removed `record_count` from `SsTableInfo` — total count is derivable from `SstStats` aggregate fields. Added "Record counting" estimation algorithm.
+- **2026-02-25**: Added per-block record counts as `block_stats: [BlockStats]` in `SstStats` (stats block). `BlockStats` contains `num_puts`/`num_deletes`/`num_merges`, mirroring the SST-level aggregate fields. `BlockStats` uses a FlatBuffers `table` for future extensibility.
