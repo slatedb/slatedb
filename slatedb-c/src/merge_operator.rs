@@ -13,9 +13,9 @@ pub(crate) struct CMergeOperator {
     merge_fn: unsafe extern "C" fn(
         key: *const u8,
         key_len: usize,
+        existing_value_present: bool,
         existing_value: *const u8,
         existing_value_len: usize,
-        has_existing_value: bool,
         operand: *const u8,
         operand_len: usize,
         out_value: *mut *mut u8,
@@ -30,9 +30,9 @@ impl CMergeOperator {
         merge_fn: unsafe extern "C" fn(
             key: *const u8,
             key_len: usize,
+            existing_value_present: bool,
             existing_value: *const u8,
             existing_value_len: usize,
-            has_existing_value: bool,
             operand: *const u8,
             operand_len: usize,
             out_value: *mut *mut u8,
@@ -67,9 +67,9 @@ impl MergeOperator for CMergeOperator {
     ) -> Result<Bytes, MergeOperatorError> {
         let mut out_value = ptr::null_mut();
         let mut out_value_len = 0usize;
-        let (existing_ptr, existing_len, has_existing_value) = match existing_value.as_ref() {
-            Some(existing_value) => (existing_value.as_ptr(), existing_value.len(), true),
-            None => (ptr::null(), 0, false),
+        let (existing_value_present, existing_ptr, existing_len) = match existing_value.as_ref() {
+            Some(existing_value) => (true, existing_value.as_ptr(), existing_value.len()),
+            None => (false, ptr::null(), 0),
         };
 
         // SAFETY: The callback pointer comes from validated FFI input and all
@@ -78,9 +78,9 @@ impl MergeOperator for CMergeOperator {
             (self.merge_fn)(
                 key.as_ptr(),
                 key.len(),
+                existing_value_present,
                 existing_ptr,
                 existing_len,
-                has_existing_value,
                 operand.as_ptr(),
                 operand.len(),
                 &mut out_value,
@@ -138,7 +138,7 @@ mod tests {
         last_key: Vec<u8>,
         last_existing: Option<Vec<u8>>,
         last_operand: Vec<u8>,
-        last_has_existing_value: bool,
+        last_existing_value_present: bool,
         free_result_calls: usize,
         last_free_result_len: usize,
         last_free_result_non_null: bool,
@@ -164,9 +164,9 @@ mod tests {
     unsafe extern "C" fn test_merge_fn(
         key: *const u8,
         key_len: usize,
+        existing_value_present: bool,
         existing_value: *const u8,
         existing_value_len: usize,
-        has_existing_value: bool,
         operand: *const u8,
         operand_len: usize,
         out_value: *mut *mut u8,
@@ -176,8 +176,8 @@ mod tests {
             let mut state = state.borrow_mut();
             state.last_key = std::slice::from_raw_parts(key, key_len).to_vec();
             state.last_operand = std::slice::from_raw_parts(operand, operand_len).to_vec();
-            state.last_has_existing_value = has_existing_value;
-            state.last_existing = if has_existing_value {
+            state.last_existing_value_present = existing_value_present;
+            state.last_existing = if existing_value_present {
                 Some(std::slice::from_raw_parts(existing_value, existing_value_len).to_vec())
             } else {
                 None
@@ -247,14 +247,14 @@ mod tests {
         assert_eq!(state.last_key, b"key");
         assert_eq!(state.last_existing, Some(b"existing".to_vec()));
         assert_eq!(state.last_operand, b"operand");
-        assert!(state.last_has_existing_value);
+        assert!(state.last_existing_value_present);
         assert_eq!(state.free_result_calls, 1);
         assert!(state.last_free_result_non_null);
         assert_eq!(state.last_free_result_len, MERGED_BYTES.len());
     }
 
     #[test]
-    fn test_merge_with_none_existing_sets_has_existing_false() {
+    fn test_merge_with_none_existing_sets_existing_value_present_false() {
         let operator = new_operator(CallbackMode::SuccessBytes, false);
 
         let merged = operator
@@ -268,7 +268,7 @@ mod tests {
         assert_eq!(merged, Bytes::from_static(MERGED_BYTES));
 
         let state = state_snapshot();
-        assert!(!state.last_has_existing_value);
+        assert!(!state.last_existing_value_present);
         assert_eq!(state.last_existing, None);
         assert_eq!(state.free_result_calls, 0);
     }

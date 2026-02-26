@@ -176,16 +176,16 @@ typedef uint8_t slatedb_sst_block_size_t;
 // value bytes and return `true` on success.
 //
 // `existing_value` is null and `existing_value_len` is 0 when
-// `has_existing_value` is false.
+// `existing_value_present` is false.
 //
 // If this callback allocates `out_value`, provide a corresponding
 // `slatedb_merge_operator_out_free_fn` so Rust can release it after copying.
 // Do not require Rust to call `slatedb_bytes_free` for `out_value`.
 typedef bool (*slatedb_merge_operator_fn)(const uint8_t *key,
                                           uintptr_t key_len,
+                                          bool existing_value_present,
                                           const uint8_t *existing_value,
                                           uintptr_t existing_value_len,
-                                          bool has_existing_value,
                                           const uint8_t *operand,
                                           uintptr_t operand_len,
                                           uint8_t **out_value,
