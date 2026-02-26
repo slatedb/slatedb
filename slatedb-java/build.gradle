@@ -7,12 +7,11 @@
 // to use io.slatedb.NativeLibraryLoader.loadFromClasspath() instead of directly
 // calling System.loadLibrary(...).
 //
-// Native binaries can be built from the Rust crate `slatedb-c`, or loaded from a
-// prebuilt directory when -Pslatedb.native.prebuiltDir is provided. The build can
-// target the host platform, all platforms, or a comma-separated platform list via
-// -Pslatedb.native.targets. It registers one native build task per selected platform
-// when prebuilt binaries are not supplied, then `prepareNativeLibraries` validates and
-// stages the artifacts under build/generated/resources/slatedb-native/native/<platform-id>/.
+// Native binaries are built from the Rust crate `slatedb-c` for the host platform.
+// When -Pslatedb.native.prebuiltDir is provided, the build stages prebuilt binaries
+// instead; in that mode, all supported platform IDs are expected from the prebuilt
+// directory. `prepareNativeLibraries` validates and stages artifacts under
+// build/generated/resources/slatedb-native/native/<platform-id>/.
 // These staged artifacts are then included in the final JAR.
 //
 // The main source set includes both the jextract output and these staged native files.
@@ -148,49 +147,18 @@ def normalizeArch = { String archName ->
 }
 
 def hostPlatformId = "${normalizeOs(System.getProperty('os.name', ''))}-${normalizeArch(System.getProperty('os.arch', ''))}"
-
-// Determine which native platforms to build based on the 'slatedb.native.targets' property. Supported values:
-// - 'host' (default): Build only for the current host platform.
-// - 'all': Build for all supported platforms.
-// - Comma-separated list of platform IDs (e.g. 'linux-x86_64,windows-x86_64').
-def nativeTargetSelection = (findProperty('slatedb.native.targets') ?: 'host').toString().trim()
 def nativePrebuiltDirProperty = (findProperty('slatedb.native.prebuiltDir') ?: '').toString().trim()
 def usePrebuiltNativeLibraries = !nativePrebuiltDirProperty.isEmpty()
 def nativePrebuiltDir = usePrebuiltNativeLibraries ? new File(nativePrebuiltDirProperty).absoluteFile : null
 
-def selectedNativePlatforms
-if (nativeTargetSelection.equalsIgnoreCase('all')) {
-    selectedNativePlatforms = nativePlatforms
-} else if (nativeTargetSelection.equalsIgnoreCase('host')) {
-    def hostPlatform = nativePlatformsById[hostPlatformId]
-    if (hostPlatform == null) {
-        throw new GradleException(
-            "Unsupported host platform '${hostPlatformId}'. " +
-                "Set -Pslatedb.native.targets=<comma-separated platform IDs>. " +
-                "Supported IDs: ${nativePlatforms*.id.join(', ')}"
-        )
-    }
-    selectedNativePlatforms = [hostPlatform]
-} else {
-    def selectedIds = nativeTargetSelection
-        .split(',')
-        .collect { it.trim() }
-        .findAll { !it.isEmpty() }
-    if (selectedIds.isEmpty()) {
-        throw new GradleException(
-            "Invalid -Pslatedb.native.targets value '${nativeTargetSelection}'. " +
-                "Use 'host', 'all', or a comma-separated list of platform IDs."
-        )
-    }
-    def unknownIds = selectedIds.findAll { !nativePlatformsById.containsKey(it) }
-    if (!unknownIds.isEmpty()) {
-        throw new GradleException(
-            "Unknown native platform IDs: ${unknownIds.join(', ')}. " +
-                "Supported IDs: ${nativePlatforms*.id.join(', ')}"
-        )
-    }
-    selectedNativePlatforms = selectedIds.collect { nativePlatformsById[it] }
+def hostPlatform = nativePlatformsById[hostPlatformId]
+if (hostPlatform == null) {
+    throw new GradleException(
+        "Unsupported host platform '${hostPlatformId}'. " +
+            "Supported IDs: ${nativePlatforms*.id.join(', ')}"
+    )
 }
+def selectedNativePlatforms = usePrebuiltNativeLibraries ? nativePlatforms : [hostPlatform]
 
 // Define tasks to build the native libraries for the selected platforms using Cargo. Each task is
 // named like 'buildNativeLibLinuxX86_64' based on the platform ID.
@@ -199,6 +167,12 @@ def toTaskSuffix = { String value ->
 }
 
 def nativeResourceStagingDir = layout.buildDirectory.dir('generated/resources/slatedb-native')
+def nativeSourceFileForPlatform = { platform ->
+    usePrebuiltNativeLibraries
+        ? new File(nativePrebuiltDir, "native/${platform.id}/${platform.libraryFile}")
+        : new File(repoRoot, "target/${platform.rustTarget}/release/${platform.libraryFile}")
+}
+
 def selectedNativeBuildTasks = usePrebuiltNativeLibraries
     ? []
     : selectedNativePlatforms.collect { platform ->
@@ -218,14 +192,18 @@ tasks.register('prepareNativeLibraries') {
     group = 'build'
     description = "Stage SlateDB native libraries for ${selectedNativePlatforms*.id.join(', ')}."
     dependsOn selectedNativeBuildTasks
+    inputs.property('nativeMode', usePrebuiltNativeLibraries ? 'prebuilt' : 'local')
+    inputs.property('nativeTargets', selectedNativePlatforms*.id.join(','))
+    if (usePrebuiltNativeLibraries) {
+        inputs.property('nativePrebuiltDir', nativePrebuiltDir.absolutePath)
+    }
+    inputs.files(selectedNativePlatforms.collect { platform -> nativeSourceFileForPlatform(platform) })
     outputs.dir(nativeResourceStagingDir)
     doLast {
         File outputDir = nativeResourceStagingDir.get().asFile
         project.delete(outputDir)
         selectedNativePlatforms.each { platform ->
-            File sourceFile = usePrebuiltNativeLibraries
-                ? new File(nativePrebuiltDir, "native/${platform.id}/${platform.libraryFile}")
-                : new File(repoRoot, "target/${platform.rustTarget}/release/${platform.libraryFile}")
+            File sourceFile = nativeSourceFileForPlatform(platform)
             if (!sourceFile.isFile()) {
                 if (usePrebuiltNativeLibraries) {
                     throw new GradleException(
@@ -309,6 +287,10 @@ test {
     useJUnitPlatform()
     jvmArgs '--enable-native-access=ALL-UNNAMED'
 }
+
+// ==============================================================================
+// Maven central publication.
+// ==============================================================================
 
 mavenPublishing {
     publishToMavenCentral()

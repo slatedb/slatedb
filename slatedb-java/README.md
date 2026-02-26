@@ -16,9 +16,35 @@ SlateDB Java is a Java 24 binding for SlateDB built on the `slatedb-c` FFI libra
 - Rust toolchain (to build `slatedb-c`)
 - A supported object store (for local development, use `memory://` or `file://` URLs)
 
+## Building
+
+`slatedb-java` embeds native `slatedb-c` binaries into the JAR and loads them from classpath resources at runtime. You do not need to set `java.library.path`.
+
+Gradle builds and packages the host platform native library (e.g. `libslatedb_c.so` on Linux) by default:
+
+```bash
+./gradlew jar
+```
+
+The JAR is written to:
+
+```
+slatedb-java/build/libs/slatedb-<version>.jar
+```
+
+If native libraries are built elsewhere (for example in CI), you can package one or more prebuilt
+`libslatedb_c` binaries by passing `-Pslatedb.native.prebuiltDir=<dir>` and keeping this layout:
+
+```text
+<dir>/native/<platform-id>/<library-file>
+```
+
+Valid platform IDs include those in the Maven Central section below.
+
 ## Maven Central
 
 Published releases are available as `io.slatedb:slatedb` and include native libraries for:
+
 - `linux-x86_64`
 - `linux-aarch64`
 - `macos-x86_64`
@@ -41,61 +67,6 @@ Gradle:
 ```groovy
 implementation "io.slatedb:slatedb:${slatedbVersion}"
 ```
-
-## Build Native Libraries
-
-`slatedb-java` embeds native `slatedb-c` binaries into the JAR and loads them from classpath resources at runtime. You do not need to set `java.library.path`.
-
-By default, Gradle builds the host platform native library and packages it:
-
-```bash
-./gradlew jar
-```
-
-To build and package all supported OS/architecture targets:
-
-```bash
-./gradlew jar -Pslatedb.native.targets=all
-```
-
-Supported platform IDs:
-- `linux-x86_64`
-- `linux-aarch64`
-- `macos-x86_64`
-- `macos-aarch64`
-- `windows-x86_64`
-- `windows-aarch64`
-
-You can also pass a custom subset:
-
-```bash
-./gradlew jar -Pslatedb.native.targets=linux-x86_64,macos-aarch64
-```
-
-If native libraries are built elsewhere (for example in CI), you can package prebuilt
-artifacts by passing `-Pslatedb.native.prebuiltDir=<dir>` and keeping this layout:
-
-```text
-<dir>/native/<platform-id>/<library-file>
-```
-
-The JAR is written to:
-
-```
-slatedb-java/build/libs/slatedb-<version>.jar
-```
-
-To crossbuild on mac, you must:
-
-1. Make sure `rustup target add` is used to add all platform IDs you want to build.
-2. Run the following to build Linux targets on Mac:
-   ```bash
-   xcode-select --install
-   brew tap messense/macos-cross-toolchains
-   brew install aarch64-unknown-linux-gnu
-   rustup target add aarch64-unknown-linux-gnu
-   ```
-3. Windows targets can't easily be built on Mac. `x86_64-pc-windows-gnu` can be used as a workaround for `windows-x86_64` but requires the MinGW toolchain to be installed and in your `PATH`.
 
 ## Hello World
 
@@ -221,7 +192,7 @@ Then run:
 ## Troubleshooting
 
 Common issues:
-- `UnsatisfiedLinkError`: The JAR does not contain a native binary for your platform. Build with `-Pslatedb.native.targets=all` (or include your platform ID in a custom list).
+- `UnsatisfiedLinkError`: The JAR does not contain a native binary for your platform. A local build only includes the host platform. Use a Maven Central release artifact, or package prebuilt multi-platform natives with `-Pslatedb.native.prebuiltDir`.
 - Native access warnings: Use `--enable-native-access=ALL-UNNAMED` when running or testing.
 
 ## License

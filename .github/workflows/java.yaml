@@ -197,5 +197,4 @@ jobs:
         run: |
           ./slatedb-java/gradlew -p slatedb-java check publishAndReleaseToMavenCentral \
             -Pslatedb.version=${{ github.event.inputs.version }} \
-            -Pslatedb.native.targets=all \
             -Pslatedb.native.prebuiltDir="${{ github.workspace }}/native-libs/merged"
