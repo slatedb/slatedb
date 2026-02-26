@@ -1190,11 +1190,11 @@ mod tests {
         };
 
         for (expected_key, expected_value) in expected_keys.iter().zip(expected_values.iter()) {
-            let kv = iter.next().await.unwrap().unwrap().into_key_value();
+            let kv: crate::types::KeyValue = iter.next().await.unwrap().unwrap().into();
             assert_eq!(kv.key, expected_key.as_slice());
             assert_eq!(kv.value, expected_value.as_slice());
         }
-        let kv = iter.next().await.unwrap().map(|e| e.into_key_value());
+        let kv = iter.next().await.unwrap().map(crate::types::KeyValue::from);
         assert!(kv.is_none());
     }
 
@@ -1487,21 +1487,21 @@ mod tests {
         match order {
             IterationOrder::Ascending => {
                 for i in 0..1000 {
-                    let kv = iter.next().await.unwrap().unwrap().into_key_value();
+                    let kv: crate::types::KeyValue = iter.next().await.unwrap().unwrap().into();
                     assert_eq!(kv.key, format!("key{}", i));
                     assert_eq!(kv.value, format!("value{}", i));
                 }
             }
             IterationOrder::Descending => {
                 for i in (0..1000).rev() {
-                    let kv = iter.next().await.unwrap().unwrap().into_key_value();
+                    let kv: crate::types::KeyValue = iter.next().await.unwrap().unwrap().into();
                     assert_eq!(kv.key, format!("key{}", i));
                     assert_eq!(kv.value, format!("value{}", i));
                 }
             }
         }
 
-        let next = iter.next().await.unwrap().map(|e| e.into_key_value());
+        let next = iter.next().await.unwrap().map(crate::types::KeyValue::from);
         assert!(next.is_none());
     }
 
@@ -1544,7 +1544,7 @@ mod tests {
             .unwrap()
             .expect("Expected Some(iter) but got None");
             for _ in 0..nkeys - i {
-                let e = iter.next().await.unwrap().unwrap().into_key_value();
+                let e = iter.next().await.unwrap().unwrap().into();
                 assert_kv(
                     &e,
                     expected_key_gen.next().as_ref(),
@@ -1589,7 +1589,7 @@ mod tests {
         .expect("Expected Some(iter) but got None");
 
         for _ in 0..nkeys {
-            let e = iter.next().await.unwrap().unwrap().into_key_value();
+            let e = iter.next().await.unwrap().unwrap().into();
             assert_kv(
                 &e,
                 expected_key_gen.next().as_ref(),
@@ -1700,13 +1700,13 @@ mod tests {
             .next()
             .await
             .unwrap()
-            .map(|e| e.into_key_value())
+            .map(crate::types::KeyValue::from)
             .expect("Expected first key but got None");
         let kv2 = iter
             .next()
             .await
             .unwrap()
-            .map(|e| e.into_key_value())
+            .map(crate::types::KeyValue::from)
             .expect("Expected second key but got None");
 
         assert_eq!(kv1.key.as_ref(), b"key099");
@@ -1776,20 +1776,12 @@ mod tests {
 
         for i in (0..nkeys).step_by(100) {
             iter_large_fetch.seek(&key_values[i].0).await.unwrap();
-            let kv_large_fetch = iter_large_fetch
-                .next()
-                .await
-                .unwrap()
-                .unwrap()
-                .into_key_value();
+            let kv_large_fetch: crate::types::KeyValue =
+                iter_large_fetch.next().await.unwrap().unwrap().into();
 
             iter_small_fetch.seek(&key_values[i].0).await.unwrap();
-            let kv_small_fetch = iter_small_fetch
-                .next()
-                .await
-                .unwrap()
-                .unwrap()
-                .into_key_value();
+            let kv_small_fetch: crate::types::KeyValue =
+                iter_small_fetch.next().await.unwrap().unwrap().into();
 
             assert_eq!(kv_large_fetch.key, key_values[i].0);
             assert_eq!(kv_large_fetch.value, key_values[i].1);
@@ -1880,12 +1872,12 @@ mod tests {
         .expect("Expected Some(iter) but got None");
 
         for i in 1..=4 {
-            let kv = iter.next().await.unwrap().unwrap().into_key_value();
+            let kv: crate::types::KeyValue = iter.next().await.unwrap().unwrap().into();
             assert_eq!(kv.key, format!("key{}", i).as_bytes());
             assert_eq!(kv.value, format!("value{}", i).as_bytes());
         }
 
-        let kv = iter.next().await.unwrap().map(|e| e.into_key_value());
+        let kv = iter.next().await.unwrap().map(crate::types::KeyValue::from);
         assert!(kv.is_none());
 
         // verify that block was cached
@@ -1913,12 +1905,12 @@ mod tests {
         .expect("Expected Some(iter) but got None");
 
         for i in 1..=4 {
-            let kv = iter.next().await.unwrap().unwrap().into_key_value();
+            let kv: crate::types::KeyValue = iter.next().await.unwrap().unwrap().into();
             assert_eq!(kv.key, format!("key{}", i).as_bytes());
             assert_eq!(kv.value, format!("value{}", i).as_bytes());
         }
 
-        let kv = iter.next().await.unwrap().map(|e| e.into_key_value());
+        let kv = iter.next().await.unwrap().map(crate::types::KeyValue::from);
         assert!(kv.is_none());
 
         // verify that block is not cached
@@ -1985,7 +1977,7 @@ mod tests {
 
         // then: all keys should be returned in order
         for (expected_key, expected_value) in &keys_and_values {
-            let kv = iter.next().await.unwrap().unwrap().into_key_value();
+            let kv: crate::types::KeyValue = iter.next().await.unwrap().unwrap().into();
             assert_eq!(kv.key, *expected_key);
             assert_eq!(kv.value, *expected_value);
         }
@@ -2094,7 +2086,7 @@ mod tests {
 
         // then: all keys should be returned in order
         for i in 0..num_keys {
-            let kv = iter.next().await.unwrap().unwrap().into_key_value();
+            let kv: crate::types::KeyValue = iter.next().await.unwrap().unwrap().into();
             let expected_key = format!("prefix_{:04}", i);
             let expected_value = format!("value_{:04}", i);
             assert_eq!(kv.key, expected_key.as_bytes());
@@ -2161,7 +2153,7 @@ mod tests {
 
         // then: should iterate from key_0030 onwards
         for i in 30..num_keys {
-            let kv = iter.next().await.unwrap().unwrap().into_key_value();
+            let kv: crate::types::KeyValue = iter.next().await.unwrap().unwrap().into();
             let expected_key = format!("key_{:04}", i);
             let expected_value = format!("value_{:04}", i);
             assert_eq!(kv.key, expected_key.as_bytes());
@@ -2362,7 +2354,7 @@ mod tests {
                         .next()
                         .await
                         .unwrap()
-                        .map(|e| e.into_key_value())
+                        .map(crate::types::KeyValue::from)
                         .unwrap_or_else(|| {
                             panic!(
                             "Expected key{:03} in ascending order, but got None. Count so far: {}",
@@ -2385,7 +2377,7 @@ mod tests {
                         .next()
                         .await
                         .unwrap()
-                        .map(|e| e.into_key_value())
+                        .map(crate::types::KeyValue::from)
                         .unwrap_or_else(|| {
                             panic!(
                             "Expected key{:03} in descending order, but got None. Count so far: {}",
@@ -2475,7 +2467,7 @@ mod tests {
 
         // Should iterate backwards from key029 to key000
         for i in (0..30).rev() {
-            let kv = iter.next().await.unwrap().unwrap().into_key_value();
+            let kv: crate::types::KeyValue = iter.next().await.unwrap().unwrap().into();
             assert_eq!(kv.key, format!("key{:03}", i).as_bytes());
             assert_eq!(kv.value, format!("value{:03}", i).as_bytes());
         }

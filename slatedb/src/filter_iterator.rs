@@ -100,7 +100,7 @@ mod tests {
                 .next()
                 .await
                 .unwrap()
-                .map(|e| e.into_key_value()),
+                .map(crate::types::KeyValue::from),
             None
         );
     }

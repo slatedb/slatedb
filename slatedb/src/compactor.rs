@@ -1144,7 +1144,7 @@ mod tests {
                 .expect("Expected Some(iter) but got None");
 
                 // remove the key from the expected map and verify that the db matches
-                while let Some(kv) = iter.next().await.unwrap().map(|e| e.into_key_value()) {
+                while let Some(kv) = iter.next().await.unwrap().map(crate::types::KeyValue::from) {
                     let expected_v = expected
                         .remove(kv.key.as_ref())
                         .expect("removing unexpected key");
@@ -1257,9 +1257,9 @@ mod tests {
 
         // should be no tombstone for key 'a' because it was filtered
         // out of the last run
-        let next = iter.next().await.unwrap().map(|e| e.into_key_value());
+        let next = iter.next().await.unwrap().map(crate::types::KeyValue::from);
         assert_eq!(next.unwrap().key.as_ref(), &[b'b'; 16]);
-        let next = iter.next().await.unwrap().map(|e| e.into_key_value());
+        let next = iter.next().await.unwrap().map(crate::types::KeyValue::from);
         assert!(next.is_none());
     }
 
@@ -1377,7 +1377,7 @@ mod tests {
                 }
             } else if key == [b'b'; 16] {
                 assert!(!found_b, "Should only encounter key 'b' once");
-                let kv = next.into_key_value();
+                let kv: crate::types::KeyValue = next.into();
                 assert_eq!(kv.key.as_ref(), &[b'b'; 16]);
                 found_b = true;
             }

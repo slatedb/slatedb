@@ -145,12 +145,14 @@ impl RowEntry {
             expire_ts: Some(expire_ts),
         }
     }
+}
 
-    #[cfg(test)]
-    pub(crate) fn into_key_value(self) -> KeyValue {
+#[cfg(test)]
+impl From<RowEntry> for KeyValue {
+    fn from(entry: RowEntry) -> Self {
         KeyValue {
-            key: self.key,
-            value: self.value.as_bytes().unwrap(),
+            key: entry.key,
+            value: entry.value.as_bytes().unwrap(),
         }
     }
 }
