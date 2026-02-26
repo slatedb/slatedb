@@ -16,6 +16,32 @@ SlateDB Java is a Java 24 binding for SlateDB built on the `slatedb-c` FFI libra
 - Rust toolchain (to build `slatedb-c`)
 - A supported object store (for local development, use `memory://` or `file://` URLs)
 
+## Maven Central
+
+Published releases are available as `io.slatedb:slatedb` and include native libraries for:
+- `linux-x86_64`
+- `linux-aarch64`
+- `macos-x86_64`
+- `macos-aarch64`
+- `windows-x86_64`
+- `windows-aarch64`
+
+Maven:
+
+```xml
+<dependency>
+  <groupId>io.slatedb</groupId>
+  <artifactId>slatedb</artifactId>
+  <version>${slatedb.version}</version>
+</dependency>
+```
+
+Gradle:
+
+```groovy
+implementation "io.slatedb:slatedb:${slatedbVersion}"
+```
+
 ## Build Native Libraries
 
 `slatedb-java` embeds native `slatedb-c` binaries into the JAR and loads them from classpath resources at runtime. You do not need to set `java.library.path`.
@@ -44,6 +70,13 @@ You can also pass a custom subset:
 
 ```bash
 ./gradlew jar -Pslatedb.native.targets=linux-x86_64,macos-aarch64
+```
+
+If native libraries are built elsewhere (for example in CI), you can package prebuilt
+artifacts by passing `-Pslatedb.native.prebuiltDir=<dir>` and keeping this layout:
+
+```text
+<dir>/native/<platform-id>/<library-file>
 ```
 
 The JAR is written to:

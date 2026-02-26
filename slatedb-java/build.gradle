@@ -7,12 +7,13 @@
 // to use io.slatedb.NativeLibraryLoader.loadFromClasspath() instead of directly
 // calling System.loadLibrary(...).
 //
-// Native binaries are built from the Rust crate `slatedb-c`. The build can target the
-// host platform, all platforms, or a comma-separated platform list via
-// -Pslatedb.native.targets. It registers one native build task per selected platform,
-// then `prepareNativeLibraries` validates and stages the built artifacts under
-// build/generated/resources/slatedb-native/native/<platform-id>/. These build
-// artifacts are then included in the final JAR.
+// Native binaries can be built from the Rust crate `slatedb-c`, or loaded from a
+// prebuilt directory when -Pslatedb.native.prebuiltDir is provided. The build can
+// target the host platform, all platforms, or a comma-separated platform list via
+// -Pslatedb.native.targets. It registers one native build task per selected platform
+// when prebuilt binaries are not supplied, then `prepareNativeLibraries` validates and
+// stages the artifacts under build/generated/resources/slatedb-native/native/<platform-id>/.
+// These staged artifacts are then included in the final JAR.
 //
 // The main source set includes both the jextract output and these staged native files.
 // Task wiring ensures compileJava depends on patchJextractNativeLoader and
@@ -22,6 +23,7 @@
 plugins {
     id 'java-library'
     id 'de.infolektuell.jextract' version '1.2.0'
+    id 'com.vanniktech.maven.publish' version '0.34.0'
 }
 
 // ==============================================================================
@@ -65,8 +67,21 @@ def slatedbJextractLibrary = jextract.libraries.create('slatedb') {
 // Standard Java library configuration below.
 // ==============================================================================
 
+def repoRoot = layout.projectDirectory.dir('..').asFile.absoluteFile
+def workspaceCargoToml = new File(repoRoot, 'Cargo.toml')
+if (!workspaceCargoToml.isFile()) {
+    throw new GradleException("Expected workspace Cargo.toml at ${workspaceCargoToml}")
+}
+def workspaceCargoTomlText = workspaceCargoToml.getText('UTF-8')
+def workspaceVersionMatcher = (workspaceCargoTomlText =~ /(?ms)^\[workspace\.package\].*?^\s*version\s*=\s*"([^"]+)"\s*$/)
+if (!workspaceVersionMatcher.find()) {
+    throw new GradleException("Unable to determine workspace version from ${workspaceCargoToml}")
+}
+def workspaceVersion = workspaceVersionMatcher.group(1)
+def configuredVersion = (findProperty('slatedb.version') ?: '').toString().trim()
+
 group = 'io.slatedb'
-version = '0.1.0-SNAPSHOT'
+version = configuredVersion ?: workspaceVersion
 
 def minimumJava = 24
 def currentJava = JavaVersion.current()
@@ -80,6 +95,8 @@ java {
     }
     sourceCompatibility = JavaVersion.toVersion(minimumJava)
     targetCompatibility = JavaVersion.toVersion(minimumJava)
+    withSourcesJar()
+    withJavadocJar()
 }
 
 tasks.withType(JavaCompile).configureEach {
@@ -94,7 +111,6 @@ repositories {
 // Bundle native libraries from slatedb-c as resources in the JAR
 // ==============================================================================
 
-def repoRoot = layout.projectDirectory.dir('..').asFile.absoluteFile
 def nativePlatforms = [
     [id: 'linux-x86_64', rustTarget: 'x86_64-unknown-linux-gnu', libraryFile: 'libslatedb_c.so'],
     [id: 'linux-aarch64', rustTarget: 'aarch64-unknown-linux-gnu', libraryFile: 'libslatedb_c.so'],
@@ -138,6 +154,10 @@ def hostPlatformId = "${normalizeOs(System.getProperty('os.name', ''))}-${normal
 // - 'all': Build for all supported platforms.
 // - Comma-separated list of platform IDs (e.g. 'linux-x86_64,windows-x86_64').
 def nativeTargetSelection = (findProperty('slatedb.native.targets') ?: 'host').toString().trim()
+def nativePrebuiltDirProperty = (findProperty('slatedb.native.prebuiltDir') ?: '').toString().trim()
+def usePrebuiltNativeLibraries = !nativePrebuiltDirProperty.isEmpty()
+def nativePrebuiltDir = usePrebuiltNativeLibraries ? new File(nativePrebuiltDirProperty).absoluteFile : null
+
 def selectedNativePlatforms
 if (nativeTargetSelection.equalsIgnoreCase('all')) {
     selectedNativePlatforms = nativePlatforms
@@ -179,29 +199,40 @@ def toTaskSuffix = { String value ->
 }
 
 def nativeResourceStagingDir = layout.buildDirectory.dir('generated/resources/slatedb-native')
-def selectedNativeBuildTasks = selectedNativePlatforms.collect { platform ->
-    tasks.register("buildNativeLib${toTaskSuffix(platform.id)}", Exec) {
-        group = 'build'
-        description = "Build slatedb-c native library for ${platform.id}"
-        workingDir repoRoot
-        commandLine 'cargo', 'build', '-p', 'slatedb-c', '--release', '--target', platform.rustTarget
+def selectedNativeBuildTasks = usePrebuiltNativeLibraries
+    ? []
+    : selectedNativePlatforms.collect { platform ->
+        tasks.register("buildNativeLib${toTaskSuffix(platform.id)}", Exec) {
+            group = 'build'
+            description = "Build slatedb-c native library for ${platform.id}"
+            workingDir repoRoot
+            commandLine 'cargo', 'build', '-p', 'slatedb-c', '--release', '--target', platform.rustTarget
+        }
     }
-}
 
-// Task to prepare native libraries by copying the built artifacts from the Cargo target directory
-// into the resources staging directory. This task depends on the individual platform build tasks
-// constructed in selectedNativeBuildTasks.
+// Task to prepare native libraries by copying either:
+// - built artifacts from the Cargo target directory, or
+// - prebuilt artifacts from -Pslatedb.native.prebuiltDir.
+// This task depends on the individual platform build tasks when not in prebuilt mode.
 tasks.register('prepareNativeLibraries') {
     group = 'build'
-    description = "Build and stage SlateDB native libraries for ${selectedNativePlatforms*.id.join(', ')}."
+    description = "Stage SlateDB native libraries for ${selectedNativePlatforms*.id.join(', ')}."
     dependsOn selectedNativeBuildTasks
     outputs.dir(nativeResourceStagingDir)
     doLast {
         File outputDir = nativeResourceStagingDir.get().asFile
         project.delete(outputDir)
         selectedNativePlatforms.each { platform ->
-            File sourceFile = new File(repoRoot, "target/${platform.rustTarget}/release/${platform.libraryFile}")
+            File sourceFile = usePrebuiltNativeLibraries
+                ? new File(nativePrebuiltDir, "native/${platform.id}/${platform.libraryFile}")
+                : new File(repoRoot, "target/${platform.rustTarget}/release/${platform.libraryFile}")
             if (!sourceFile.isFile()) {
+                if (usePrebuiltNativeLibraries) {
+                    throw new GradleException(
+                        "Prebuilt native library for ${platform.id} is missing at ${sourceFile}. " +
+                            "Expected layout: <prebuilt-dir>/native/<platform-id>/${platform.libraryFile}"
+                    )
+                }
                 throw new GradleException(
                     "Native library for ${platform.id} is missing at ${sourceFile}. " +
                         "Ensure the Rust target '${platform.rustTarget}' is installed and buildable."
@@ -277,4 +308,37 @@ tasks.named('processResources') {
 test {
     useJUnitPlatform()
     jvmArgs '--enable-native-access=ALL-UNNAMED'
+}
+
+mavenPublishing {
+    publishToMavenCentral()
+    signAllPublications()
+    coordinates(group.toString(), 'slatedb', version.toString())
+
+    pom {
+        name = 'SlateDB Java'
+        description = 'Java bindings for SlateDB with bundled native libraries.'
+        url = 'https://github.com/slatedb/slatedb'
+
+        licenses {
+            license {
+                name = 'Apache License, Version 2.0'
+                url = 'https://www.apache.org/licenses/LICENSE-2.0.txt'
+            }
+        }
+
+        developers {
+            developer {
+                id = 'slatedb'
+                name = 'SlateDB Authors'
+                url = 'https://github.com/slatedb'
+            }
+        }
+
+        scm {
+            url = 'https://github.com/slatedb/slatedb'
+            connection = 'scm:git:https://github.com/slatedb/slatedb.git'
+            developerConnection = 'scm:git:ssh://git@github.com/slatedb/slatedb.git'
+        }
+    }
 }
