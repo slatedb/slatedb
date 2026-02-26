@@ -435,9 +435,7 @@ final class NativeInterop {
     static void slatedb_db_builder_with_merge_operator(
         DbBuilderHandle builder,
         MemorySegment mergeOperator,
-        MemorySegment mergeOperatorContext,
-        MemorySegment freeMergeResult,
-        MemorySegment freeMergeOperatorContext
+        MemorySegment freeMergeResult
     ) {
         Objects.requireNonNull(builder, "builder");
         Objects.requireNonNull(mergeOperator, "mergeOperator");
@@ -448,9 +446,7 @@ final class NativeInterop {
                     arena,
                     builder.segment(),
                     mergeOperator,
-                    nullToNullSegment(mergeOperatorContext),
-                    nullToNullSegment(freeMergeResult),
-                    nullToNullSegment(freeMergeOperatorContext)
+                    nullToNullSegment(freeMergeResult)
                 )
             );
         }

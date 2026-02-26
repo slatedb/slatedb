@@ -416,7 +416,6 @@ pub type slatedb_merge_operator_fn = Option<
         operand_len: usize,
         out_value: *mut *mut u8,
         out_value_len: *mut usize,
-        context: *mut c_void,
     ) -> bool,
 >;
 
@@ -424,13 +423,7 @@ pub type slatedb_merge_operator_fn = Option<
 /// `slatedb_merge_operator_fn`.
 #[allow(non_camel_case_types)]
 pub type slatedb_merge_operator_result_free_fn =
-    Option<unsafe extern "C" fn(value: *mut u8, value_len: usize, context: *mut c_void)>;
-
-/// Optional callback used to free merge operator context when the configured
-/// merge operator is dropped.
-#[allow(non_camel_case_types)]
-pub type slatedb_merge_operator_context_free_fn =
-    Option<unsafe extern "C" fn(context: *mut c_void)>;
+    Option<unsafe extern "C" fn(value: *mut u8, value_len: usize)>;
 
 /// C representation of a single range bound.
 #[repr(C)]

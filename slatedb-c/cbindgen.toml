@@ -48,7 +48,6 @@ include = [
     "slatedb_log_context_free_fn",
     "slatedb_merge_operator_fn",
     "slatedb_merge_operator_result_free_fn",
-    "slatedb_merge_operator_context_free_fn",
     "slatedb_bound_t",
     "slatedb_range_t",
     "slatedb_object_store_t",
