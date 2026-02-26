@@ -213,7 +213,7 @@ impl<P: Into<Path>> DbBuilder<P> {
         self
     }
 
-    /// Sets the memory cache to use for the database.
+    /// Sets the cache to use for the database for caching sst blocks
     ///
     /// SlateDB uses a cache to efficiently store and retrieve blocks and SST metadata locally.
     /// [`slatedb::db_cache::SplitCache`] is used by default.
@@ -222,6 +222,7 @@ impl<P: Into<Path>> DbBuilder<P> {
         self
     }
 
+    /// Disables the sst block/metadata cache
     pub fn with_db_cache_disabled(mut self) -> Self {
         self.db_cache = DbCacheOption::Disabled;
         self
@@ -1199,5 +1200,5 @@ enum DbCacheOption {
     Disabled,
     #[default]
     Default,
-    Some(Arc<dyn DbCache>)
+    Some(Arc<dyn DbCache>),
 }
