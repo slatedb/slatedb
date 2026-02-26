@@ -180,6 +180,49 @@ public final class SlateDbConfig {
         }
     }
 
+    /// Options for merge operations.
+    public static final class MergeOptions {
+        private final TtlType ttlType;
+        private final long ttlValueMs;
+
+        private MergeOptions(TtlType ttlType, long ttlValueMs) {
+            this.ttlType = Objects.requireNonNull(ttlType, "ttlType");
+            if (ttlValueMs < 0) {
+                throw new IllegalArgumentException("ttlValueMs must be >= 0");
+            }
+            this.ttlValueMs = ttlValueMs;
+        }
+
+        /// Uses SlateDB default TTL behavior.
+        public static MergeOptions defaultTtl() {
+            return new MergeOptions(TtlType.DEFAULT, 0);
+        }
+
+        /// Disables TTL expiry for the entry.
+        public static MergeOptions noExpiry() {
+            return new MergeOptions(TtlType.NO_EXPIRY, 0);
+        }
+
+        /// Expires the entry after the provided duration.
+        public static MergeOptions expireAfter(Duration ttl) {
+            Objects.requireNonNull(ttl, "ttl");
+            return expireAfterMillis(ttl.toMillis());
+        }
+
+        /// Expires the entry after the provided number of milliseconds.
+        public static MergeOptions expireAfterMillis(long ttlMillis) {
+            return new MergeOptions(TtlType.EXPIRE_AFTER, ttlMillis);
+        }
+
+        public TtlType ttlType() {
+            return ttlType;
+        }
+
+        public long ttlValueMs() {
+            return ttlValueMs;
+        }
+    }
+
     /// Options for write operations.
     public static final class WriteOptions {
         public static final WriteOptions DEFAULT = new WriteOptions(true);

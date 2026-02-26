@@ -631,7 +631,7 @@ final class NativeInterop {
         DbHandle db,
         byte[] key,
         byte[] value,
-        PutOptions mergeOptions,
+        MergeOptions mergeOptions,
         WriteOptions writeOptions
     ) {
         Objects.requireNonNull(db, "db");
@@ -1000,7 +1000,7 @@ final class NativeInterop {
         WriteBatchHandle writeBatch,
         byte[] key,
         byte[] value,
-        PutOptions mergeOptions
+        MergeOptions mergeOptions
     ) {
         Objects.requireNonNull(writeBatch, "writeBatch");
         Objects.requireNonNull(key, "key");
@@ -1483,7 +1483,7 @@ final class NativeInterop {
         return nativeOptions;
     }
 
-    private static MemorySegment marshalMergeOptions(Arena arena, PutOptions options) {
+    private static MemorySegment marshalMergeOptions(Arena arena, MergeOptions options) {
         if (options == null) {
             return MemorySegment.NULL;
         }

@@ -244,6 +244,26 @@ public final class SlateDb implements SlateDbReadable {
         return NativeInterop.slatedb_db_put_with_options(handle, key, value, putOptions, writeOptions);
     }
 
+    /// Merges a value into a key using default merge and write options.
+    ///
+    /// @param key key to merge into (non-empty).
+    /// @param value merge operand value.
+    /// @throws SlateDbException if the merge fails.
+    public SlateDbWriteHandle merge(byte[] key, byte[] value) {
+        return NativeInterop.slatedb_db_merge(handle, key, value);
+    }
+
+    /// Merges a value into a key with custom merge and write options.
+    ///
+    /// @param key key to merge into (non-empty).
+    /// @param value merge operand value.
+    /// @param mergeOptions merge options or `null` for defaults.
+    /// @param writeOptions write options or `null` for defaults.
+    /// @throws SlateDbException if the merge fails.
+    public SlateDbWriteHandle merge(byte[] key, byte[] value, @Nullable MergeOptions mergeOptions, @Nullable WriteOptions writeOptions) {
+        return NativeInterop.slatedb_db_merge_with_options(handle, key, value, mergeOptions, writeOptions);
+    }
+
     /// Reads a value from the database using default read options.
     ///
     /// @param key key to read.
