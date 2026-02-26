@@ -43,8 +43,8 @@ def slatedbIncludeFunctions = ((slatedbHeaderText =~ /(?m)^(?!\s*(?:\/\/|\/\*|\*
 def slatedbIncludeConstants = ((slatedbHeaderText =~ /(?m)^\s*#define\s+(SLATEDB_[A-Z0-9_]+)\b/).collect { it[1] } as Set).toList().sort()
 // Captures named struct types declared as `typedef struct slatedb_* { ... }`.
 def slatedbIncludeStructs = ((slatedbHeaderText =~ /(?m)^\s*typedef\s+struct\s+(slatedb_[A-Za-z0-9_]+)\s*\{/).collect { it[1] } as Set).toList().sort()
-// Captures `slatedb_*` typedef names, including function-pointer typedef aliases.
-def slatedbIncludeTypedefs = ((slatedbHeaderText =~ /(?ms)^\s*typedef\b.*?(?:\(\*\s*)?(slatedb_[A-Za-z0-9_]+)\s*\)?\s*;/).collect { it[1] } as Set).toList().sort()
+// Captures `slatedb_*` typedef names, including callback typedefs declared as `(*name)(...)`.
+def slatedbIncludeTypedefs = ((slatedbHeaderText =~ /(?ms)^\s*typedef\b.*?(?:\(\*\s*)?(slatedb_[A-Za-z0-9_]+)\s*\)?(?:\s*\([^;]*\))?\s*;/).collect { it[1] } as Set).toList().sort()
 
 def slatedbJextractLibrary = jextract.libraries.create('slatedb') {
     header = slatedbHeader
