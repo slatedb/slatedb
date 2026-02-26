@@ -55,7 +55,7 @@
 //! async fn main() -> Result<(), Error> {
 //!     let object_store = Arc::new(InMemory::new());
 //!     let db = Db::builder("test_db", object_store)
-//!         .with_memory_cache(Arc::new(FoyerCache::new()))
+//!         .with_db_cache(Arc::new(FoyerCache::new()))
 //!         .build()
 //!         .await?;
 //!     Ok(())
@@ -166,7 +166,7 @@ pub struct DbBuilder<P: Into<Path>> {
     settings: Settings,
     main_object_store: Arc<dyn ObjectStore>,
     wal_object_store: Option<Arc<dyn ObjectStore>>,
-    memory_cache: Option<Arc<dyn DbCache>>,
+    db_cache: DbCacheOption,
     system_clock: Option<Arc<dyn SystemClock>>,
     gc_runtime: Option<Handle>,
     compactor_builder: Option<CompactorBuilder<Path>>,
@@ -185,7 +185,7 @@ impl<P: Into<Path>> DbBuilder<P> {
             main_object_store,
             settings: Settings::default(),
             wal_object_store: None,
-            memory_cache: None,
+            db_cache: DbCacheOption::default(),
             system_clock: None,
             gc_runtime: None,
             compactor_builder: None,
@@ -217,8 +217,13 @@ impl<P: Into<Path>> DbBuilder<P> {
     ///
     /// SlateDB uses a cache to efficiently store and retrieve blocks and SST metadata locally.
     /// [`slatedb::db_cache::SplitCache`] is used by default.
-    pub fn with_memory_cache(mut self, memory_cache: Arc<dyn DbCache>) -> Self {
-        self.memory_cache = Some(memory_cache);
+    pub fn with_db_cache(mut self, db_cache: Arc<dyn DbCache>) -> Self {
+        self.db_cache = DbCacheOption::Some(db_cache);
+        self
+    }
+
+    pub fn with_db_cache_disabled(mut self) -> Self {
+        self.db_cache = DbCacheOption::Disabled;
         self
     }
 
@@ -353,16 +358,20 @@ impl<P: Into<Path>> DbBuilder<P> {
             );
         }
 
-        let memory_cache = self.memory_cache.or_else(|| {
-            let block_cache = default_block_cache();
-            let meta_cache = default_meta_cache();
-            Some(Arc::new(
-                SplitCache::new()
-                    .with_block_cache(block_cache)
-                    .with_meta_cache(meta_cache)
-                    .build(),
-            ))
-        });
+        let db_cache = match self.db_cache {
+            DbCacheOption::Disabled => None,
+            DbCacheOption::Some(db_cache) => Some(db_cache),
+            DbCacheOption::Default => {
+                let block_cache = default_block_cache();
+                let meta_cache = default_meta_cache();
+                Some(Arc::new(
+                    SplitCache::new()
+                        .with_block_cache(block_cache)
+                        .with_meta_cache(meta_cache)
+                        .build(),
+                ) as Arc<dyn DbCache>)
+            }
+        };
 
         let merge_operator = self.merge_operator.or(self.settings.merge_operator.clone());
 
@@ -438,7 +447,7 @@ impl<P: Into<Path>> DbBuilder<P> {
             sst_format.clone(),
             path_resolver.clone(),
             self.fp_registry.clone(),
-            memory_cache.as_ref().map(|c| {
+            db_cache.as_ref().map(|c| {
                 Arc::new(DbCacheWrapper::new(
                     c.clone(),
                     stat_registry.as_ref(),
@@ -1183,4 +1192,12 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
 
         Ok(reader)
     }
+}
+
+#[derive(Default)]
+enum DbCacheOption {
+    Disabled,
+    #[default]
+    Default,
+    Some(Arc<dyn DbCache>)
 }
