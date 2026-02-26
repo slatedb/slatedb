@@ -1295,10 +1295,7 @@ mod tests {
         let decoded = codec.decode(&bytes).expect("failed to decode manifest");
 
         // then:
-        assert_eq!(
-            decoded.core.l0[0].format_version,
-            SST_FORMAT_VERSION_LATEST
-        );
+        assert_eq!(decoded.core.l0[0].format_version, SST_FORMAT_VERSION_LATEST);
         assert_eq!(
             decoded.core.compacted[0].ssts[0].format_version,
             SST_FORMAT_VERSION_LATEST
@@ -1312,8 +1309,7 @@ mod tests {
         // on CompactedSsTable entries, simulating a legacy manifest
         use super::root_generated::{
             CompactedSsTable, CompactedSsTableArgs, ManifestV1, ManifestV1Args,
-            SortedRun as FbSortedRun, SortedRunArgs, SsTableInfo as FbSsTableInfo,
-            SsTableInfoArgs,
+            SortedRun as FbSortedRun, SortedRunArgs, SsTableInfo as FbSsTableInfo, SsTableInfoArgs,
         };
         let mut fbb = flatbuffers::FlatBufferBuilder::new();
         // Build an L0 SST without format_version
@@ -1378,9 +1374,8 @@ mod tests {
             },
         );
         let compacted_vec = fbb.create_vector(&[sorted_run]);
-        let checkpoints_vec = fbb.create_vector::<
-            flatbuffers::ForwardsUOffset<super::root_generated::Checkpoint>,
-        >(&[]);
+        let checkpoints_vec = fbb
+            .create_vector::<flatbuffers::ForwardsUOffset<super::root_generated::Checkpoint>>(&[]);
         let manifest = ManifestV1::create(
             &mut fbb,
             &ManifestV1Args {
@@ -1438,9 +1433,7 @@ mod tests {
         let decoded = codec.decode(&bytes).expect("failed to decode compactions");
 
         // then:
-        let decoded_compaction = decoded
-            .get(&compaction.id())
-            .expect("missing compaction");
+        let decoded_compaction = decoded.get(&compaction.id()).expect("missing compaction");
         assert_eq!(
             decoded_compaction.output_ssts()[0].format_version,
             SST_FORMAT_VERSION_LATEST
@@ -1453,8 +1446,8 @@ mod tests {
         // given: manually build a compactions flatbuffer with an output SST
         // that has no format_version set, simulating a legacy compactions file
         use super::root_generated::{
-            Compaction as FbCompaction, CompactionArgs as FbCompactionArgs,
-            CompactedSsTable, CompactedSsTableArgs, CompactionSpec as FbCompactionSpec,
+            CompactedSsTable, CompactedSsTableArgs, Compaction as FbCompaction,
+            CompactionArgs as FbCompactionArgs, CompactionSpec as FbCompactionSpec,
             CompactionStatus as FbCompactionStatus, CompactionsV1, CompactionsV1Args,
             SsTableInfo as FbSsTableInfo, SsTableInfoArgs, TieredCompactionSpec,
             TieredCompactionSpecArgs,
@@ -1541,9 +1534,7 @@ mod tests {
         let decoded = codec.decode(&bytes).expect("failed to decode compactions");
 
         // then: format_version should default to ORIGINAL_SST_FORMAT_VERSION
-        let decoded_compaction = decoded
-            .get(&compaction_ulid)
-            .expect("missing compaction");
+        let decoded_compaction = decoded.get(&compaction_ulid).expect("missing compaction");
         assert_eq!(
             decoded_compaction.output_ssts()[0].format_version,
             super::ORIGINAL_SST_FORMAT_VERSION

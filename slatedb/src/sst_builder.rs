@@ -1302,8 +1302,9 @@ mod tests {
             .unwrap();
 
         // then: the stored SST should be V1 format
-        let version = table_store.read_sst_version(&sst_handle).await.unwrap();
+        let version = table_store.read_sst_version(&sst_handle.id).await.unwrap();
         assert_eq!(version, SST_FORMAT_VERSION);
+        assert_eq!(sst_handle.format_version, SST_FORMAT_VERSION);
 
         // then: V1 blocks should have one offset per entry
         let blocks = table_store.read_blocks(&sst_handle, 0..1).await.unwrap();
@@ -1365,8 +1366,9 @@ mod tests {
             .unwrap();
 
         // then: the stored SST should be V2 format
-        let version = table_store.read_sst_version(&sst_handle).await.unwrap();
+        let version = table_store.read_sst_version(&sst_handle.id).await.unwrap();
         assert_eq!(version, SST_FORMAT_VERSION_LATEST);
+        assert_eq!(sst_handle.format_version, SST_FORMAT_VERSION_LATEST);
 
         // then: V2 blocks should have fewer offsets than entries (restart points only)
         let blocks = table_store.read_blocks(&sst_handle, 0..1).await.unwrap();

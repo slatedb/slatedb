@@ -275,10 +275,6 @@ pub(crate) struct InternalSstIterator<'a> {
     fetch_tasks: VecDeque<FetchTask>,
     table_store: Arc<TableStore>,
     options: SstIteratorOptions,
-    /// The SST format version, used to select the appropriate block iterator.
-    /// This is `None` until `ensure_metadata_loaded` is called, since the version
-    /// is read from the SST footer which is lazily loaded.
-    sst_version: Option<u16>,
     /// Buffer for descending iteration to maintain correct sequence order within keys.
     descending_buffer: Option<VecDeque<RowEntry>>,
     /// Pending entry that was read ahead but belongs to the next key group.
@@ -309,7 +305,6 @@ impl<'a> InternalSstIterator<'a> {
             fetch_tasks: VecDeque::new(),
             table_store,
             options,
-            sst_version: None,
             descending_buffer,
             pending_entry: None,
         })
@@ -519,9 +514,7 @@ impl<'a> InternalSstIterator<'a> {
         if self.index.is_none() {
             return Ok(None);
         }
-        let sst_version = self
-            .sst_version
-            .ok_or(SlateDBError::IteratorNotInitialized)?;
+        let sst_version = self.view.table_as_ref().format_version;
         loop {
             if spawn_fetches {
                 self.spawn_fetches();
@@ -611,19 +604,7 @@ impl<'a> InternalSstIterator<'a> {
         self.state.stop();
     }
 
-    async fn ensure_sst_version(&mut self) -> Result<(), SlateDBError> {
-        if self.sst_version.is_none() {
-            let version = self
-                .table_store
-                .read_sst_version(self.view.table_as_ref())
-                .await?;
-            self.sst_version = Some(version);
-        }
-        Ok(())
-    }
-
     async fn ensure_metadata_loaded(&mut self) -> Result<(), SlateDBError> {
-        self.ensure_sst_version().await?;
         if self.index.is_none() {
             let index = self
                 .table_store

@@ -330,21 +330,11 @@ impl TableStore {
         let path = self.path(id);
         let obj = ReadOnlyObject { object_store, path };
         let info = self.sst_format.read_info(&obj).await?;
-        let version = self.read_sst_version_for_id(id).await?;
+        let version = self.read_sst_version(id).await?;
         Ok(SsTableHandle::new(*id, version, info))
     }
 
-    pub(crate) async fn read_sst_version(
-        &self,
-        handle: &SsTableHandle,
-    ) -> Result<u16, SlateDBError> {
-        self.read_sst_version_for_id(&handle.id).await
-    }
-
-    pub(crate) async fn read_sst_version_for_id(
-        &self,
-        id: &SsTableId,
-    ) -> Result<u16, SlateDBError> {
+    pub(crate) async fn read_sst_version(&self, id: &SsTableId) -> Result<u16, SlateDBError> {
         let object_store = self.object_stores.store_for(id);
         let path = self.path(id);
         let obj = ReadOnlyObject { object_store, path };
