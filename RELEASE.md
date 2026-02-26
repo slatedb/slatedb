@@ -55,8 +55,8 @@ Before publishing Java artifacts, configure these repository secrets:
 
 1. `MAVEN_CENTRAL_USERNAME`: Sonatype Central Portal token username.
 2. `MAVEN_CENTRAL_PASSWORD`: Sonatype Central Portal token password.
-3. `SIGNING_KEY`: ASCII-armored private GPG key used to sign artifacts.
-4. `SIGNING_KEY_PASSWORD`: Passphrase for the signing key.
+3. `MAVEN_CENTRAL_SIGNING_KEY`: ASCII-armored private GPG key used to sign artifacts.
+4. `MAVEN_CENTRAL_SIGNING_KEY_PASSWORD`: Passphrase for the signing key.
 
 To create a Java release:
 
