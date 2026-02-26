@@ -12,6 +12,7 @@ import java.lang.foreign.ValueLayout;
 import java.nio.charset.StandardCharsets;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /// Java-typed wrappers around generated jextract bindings.
@@ -212,6 +213,153 @@ final class NativeInterop {
         long createTs() {
             return createTs;
         }
+    }
+
+    static final class MergeOperatorBinding implements AutoCloseable {
+        private final SlateDbMergeOperator mergeOperator;
+        private final Arena callbackArena;
+        private final MemorySegment mergeOperatorPtr;
+        private final MemorySegment freeMergeResultPtr;
+        private final ConcurrentHashMap<Long, Arena> mergeResultArenas;
+        private final AtomicBoolean closed;
+
+        private MergeOperatorBinding(SlateDbMergeOperator mergeOperator) {
+            this.mergeOperator = Objects.requireNonNull(mergeOperator, "mergeOperator");
+            this.callbackArena = Arena.ofShared();
+            this.mergeResultArenas = new ConcurrentHashMap<>();
+            this.closed = new AtomicBoolean(false);
+            this.mergeOperatorPtr = slatedb_merge_operator_fn.allocate(this::applyMerge, callbackArena);
+            this.freeMergeResultPtr = slatedb_merge_operator_out_free_fn.allocate(this::freeMergeResult, callbackArena);
+        }
+
+        MemorySegment mergeOperatorPtr() {
+            if (closed.get()) {
+                throw new IllegalStateException("MergeOperatorBinding is closed");
+            }
+            return mergeOperatorPtr;
+        }
+
+        MemorySegment freeMergeResultPtr() {
+            if (closed.get()) {
+                throw new IllegalStateException("MergeOperatorBinding is closed");
+            }
+            return freeMergeResultPtr;
+        }
+
+        @Override
+        public void close() {
+            if (!closed.compareAndSet(false, true)) {
+                return;
+            }
+
+            for (Arena arena : mergeResultArenas.values()) {
+                try {
+                    arena.close();
+                } catch (RuntimeException ignored) {
+                }
+            }
+            mergeResultArenas.clear();
+            callbackArena.close();
+        }
+
+        private boolean applyMerge(
+            MemorySegment key,
+            long keyLen,
+            boolean existingValuePresent,
+            MemorySegment existingValue,
+            long existingValueLen,
+            MemorySegment operand,
+            long operandLen,
+            MemorySegment outValue,
+            MemorySegment outValueLen
+        ) {
+            if (closed.get()) {
+                safeSetMergeOutput(outValue, outValueLen, MemorySegment.NULL, 0L);
+                return false;
+            }
+
+            Arena resultArena = null;
+            try {
+                byte[] keyBytes = readCallbackBytes(key, keyLen);
+                byte[] existingBytes = existingValuePresent
+                    ? readCallbackBytes(existingValue, existingValueLen)
+                    : null;
+                byte[] operandBytes = readCallbackBytes(operand, operandLen);
+
+                byte[] merged = mergeOperator.merge(keyBytes, existingBytes, operandBytes);
+                if (merged == null) {
+                    safeSetMergeOutput(outValue, outValueLen, MemorySegment.NULL, 0L);
+                    return false;
+                }
+
+                if (merged.length == 0) {
+                    safeSetMergeOutput(outValue, outValueLen, MemorySegment.NULL, 0L);
+                    return true;
+                }
+
+                resultArena = Arena.ofShared();
+                MemorySegment nativeBytes = resultArena.allocate(merged.length, 1);
+                MemorySegment.copy(MemorySegment.ofArray(merged), 0, nativeBytes, 0, merged.length);
+                long address = nativeBytes.address();
+                Arena previous = mergeResultArenas.put(address, resultArena);
+                if (previous != null) {
+                    previous.close();
+                }
+
+                safeSetMergeOutput(outValue, outValueLen, nativeBytes, merged.length);
+                resultArena = null; // ownership transferred to mergeResultArenas
+                return true;
+            } catch (Throwable ignored) {
+                safeSetMergeOutput(outValue, outValueLen, MemorySegment.NULL, 0L);
+                return false;
+            } finally {
+                if (resultArena != null) {
+                    resultArena.close();
+                }
+            }
+        }
+
+        private void freeMergeResult(MemorySegment value, long valueLen) {
+            if (value.equals(MemorySegment.NULL)) {
+                return;
+            }
+
+            Arena arena = mergeResultArenas.remove(value.address());
+            if (arena != null) {
+                arena.close();
+            }
+        }
+
+        private static byte[] readCallbackBytes(MemorySegment data, long len) {
+            if (len < 0) {
+                throw new IllegalArgumentException("merge callback length must be >= 0");
+            }
+            if (len == 0) {
+                return new byte[0];
+            }
+            if (data.equals(MemorySegment.NULL)) {
+                throw new IllegalArgumentException("merge callback pointer is null for non-zero length");
+            }
+            return data.reinterpret(len).toArray(ValueLayout.JAVA_BYTE);
+        }
+
+        private static void safeSetMergeOutput(
+            MemorySegment outValue,
+            MemorySegment outValueLen,
+            MemorySegment value,
+            long len
+        ) {
+            try {
+                outValue.set(Native.C_POINTER, 0, value);
+                outValueLen.set(Native.C_LONG, 0, len);
+            } catch (Throwable ignored) {
+            }
+        }
+    }
+
+    static MergeOperatorBinding createMergeOperatorBinding(SlateDbMergeOperator mergeOperator) {
+        Objects.requireNonNull(mergeOperator, "mergeOperator");
+        return new MergeOperatorBinding(mergeOperator);
     }
 
     static ObjectStoreHandle resolveObjectStore(String url, String envFile) {

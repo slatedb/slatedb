@@ -8,7 +8,7 @@ SlateDB Java is a Java 24 binding for SlateDB built on the `slatedb-c` FFI libra
 
 ## Introduction
 
-[SlateDB](https://slatedb.io) is an embedded storage engine built as a log-structured merge-tree that writes data to object storage (S3, GCS, ABS, MinIO, Tigris, and more). These Java bindings expose the core SlateDB API (get/put/delete, scans, batching, and readers) with minimal overhead.
+[SlateDB](https://slatedb.io) is an embedded storage engine built as a log-structured merge-tree that writes data to object storage (S3, GCS, ABS, MinIO, Tigris, and more). These Java bindings expose the core SlateDB API (get/put/delete/merge, scans, batching, and readers) with minimal overhead.
 
 ## Requirements
 
@@ -142,12 +142,13 @@ java --enable-native-access=ALL-UNNAMED \
 Core types:
 - `SlateDb`: Read/write database handle. Always close it (try-with-resources recommended).
 - `SlateDbConfig`: Options and enums for reads, writes, scans, and readers.
+- `SlateDbMergeOperator`: Callback interface for resolving merge operands.
 - `SlateDbReader`: Read-only handle for snapshot-style reads.
-- `SlateDbWriteBatch`: Batch of put/delete operations written atomically.
+- `SlateDbWriteBatch`: Batch of put/delete/merge operations written atomically.
 - `SlateDbScanIterator`: Iterator for range scans and prefix scans.
 
 Key operations:
-- `put`, `get`, `delete` for basic CRUD.
+- `put`, `get`, `delete`, `merge` for basic CRUD + merge operands.
 - `write(SlateDbWriteBatch)` for atomic batches.
 - `scan(startKey, endKey)` and `scanPrefix(prefix)` for range and prefix scans.
 - `flush()` to force writes to object storage.

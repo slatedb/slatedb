@@ -86,10 +86,15 @@ import java.util.Objects;
 /// ```
 public final class SlateDb implements SlateDbReadable {
     private NativeInterop.DbHandle handle;
+    private NativeInterop.MergeOperatorBinding mergeOperatorBinding;
     private boolean closed;
 
-    private SlateDb(NativeInterop.DbHandle handle) {
+    private SlateDb(
+        NativeInterop.DbHandle handle,
+        NativeInterop.MergeOperatorBinding mergeOperatorBinding
+    ) {
         this.handle = handle;
+        this.mergeOperatorBinding = mergeOperatorBinding;
     }
 
     /// Initializes SlateDB logging using a log level (for example, `"info"` or `"debug"`).
@@ -157,7 +162,7 @@ public final class SlateDb implements SlateDbReadable {
     /// ```
     public static SlateDb open(String path, @Nullable String url, @Nullable String envFile) {
         try (NativeInterop.ObjectStoreHandle objectStore = NativeInterop.resolveObjectStore(url, envFile)) {
-            return new SlateDb(NativeInterop.slatedb_db_open(path, objectStore));
+            return new SlateDb(NativeInterop.slatedb_db_open(path, objectStore), null);
         }
     }
 
@@ -416,9 +421,16 @@ public final class SlateDb implements SlateDbReadable {
         if (closed) {
             return;
         }
-        NativeInterop.slatedb_db_close(handle);
-        handle = null;
-        closed = true;
+        try {
+            NativeInterop.slatedb_db_close(handle);
+        } finally {
+            handle = null;
+            if (mergeOperatorBinding != null) {
+                mergeOperatorBinding.close();
+                mergeOperatorBinding = null;
+            }
+            closed = true;
+        }
     }
 
     /// Builder for creating a SlateDB instance with custom settings.
@@ -426,6 +438,7 @@ public final class SlateDb implements SlateDbReadable {
     /// The builder is consumed on [#build()] and must be closed if not used.
     public static final class Builder implements AutoCloseable {
         private NativeInterop.DbBuilderHandle builderPtr;
+        private NativeInterop.MergeOperatorBinding mergeOperatorBinding;
         private boolean closed;
 
         private Builder(NativeInterop.DbBuilderHandle builderPtr) {
@@ -456,6 +469,33 @@ public final class SlateDb implements SlateDbReadable {
             return this;
         }
 
+        /// Configures a merge operator callback for this builder.
+        ///
+        /// @param mergeOperator callback used to merge operands.
+        /// @throws SlateDbException if native registration fails.
+        public Builder withMergeOperator(SlateDbMergeOperator mergeOperator) {
+            Objects.requireNonNull(mergeOperator, "mergeOperator");
+
+            NativeInterop.MergeOperatorBinding newBinding = NativeInterop.createMergeOperatorBinding(mergeOperator);
+            try {
+                NativeInterop.slatedb_db_builder_with_merge_operator(
+                    builderPtr,
+                    newBinding.mergeOperatorPtr(),
+                    newBinding.freeMergeResultPtr()
+                );
+            } catch (RuntimeException error) {
+                newBinding.close();
+                throw error;
+            }
+
+            NativeInterop.MergeOperatorBinding oldBinding = mergeOperatorBinding;
+            mergeOperatorBinding = newBinding;
+            if (oldBinding != null) {
+                oldBinding.close();
+            }
+            return this;
+        }
+
         /// Builds and opens the database. The builder is consumed after this call.
         ///
         /// @return An open [SlateDb] instance. Always close it.
@@ -472,8 +512,15 @@ public final class SlateDb implements SlateDbReadable {
         /// }
         /// ```
         public SlateDb build() {
+            NativeInterop.MergeOperatorBinding bindingToTransfer = mergeOperatorBinding;
+            mergeOperatorBinding = null;
             try {
-                return new SlateDb(NativeInterop.slatedb_db_builder_build(builderPtr));
+                return new SlateDb(NativeInterop.slatedb_db_builder_build(builderPtr), bindingToTransfer);
+            } catch (RuntimeException error) {
+                if (bindingToTransfer != null) {
+                    bindingToTransfer.close();
+                }
+                throw error;
             } finally {
                 builderPtr = null;
                 closed = true;
@@ -488,9 +535,16 @@ public final class SlateDb implements SlateDbReadable {
             if (closed) {
                 return;
             }
-            NativeInterop.slatedb_db_builder_close(builderPtr);
-            builderPtr = null;
-            closed = true;
+            try {
+                NativeInterop.slatedb_db_builder_close(builderPtr);
+            } finally {
+                builderPtr = null;
+                if (mergeOperatorBinding != null) {
+                    mergeOperatorBinding.close();
+                    mergeOperatorBinding = null;
+                }
+                closed = true;
+            }
         }
 
     }
