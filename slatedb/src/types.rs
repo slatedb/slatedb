@@ -152,7 +152,10 @@ impl From<RowEntry> for KeyValue {
     fn from(entry: RowEntry) -> Self {
         KeyValue {
             key: entry.key,
-            value: entry.value.as_bytes().unwrap(),
+            value: entry
+                .value
+                .as_bytes()
+                .expect("RowEntry should have a value"),
         }
     }
 }
