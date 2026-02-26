@@ -296,6 +296,11 @@ impl DbIterator {
         Ok(entry_opt.map(Into::into))
     }
 
+    /// Get the next row in the scan.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error`] if the iterator has been invalidated due to an underlying error.
     pub async fn next_row(&mut self) -> Result<Option<RowEntry>, crate::Error> {
         self.next_row_internal().await.map_err(Into::into)
     }
