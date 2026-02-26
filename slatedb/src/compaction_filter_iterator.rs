@@ -47,9 +47,9 @@ impl<T: KeyValueIterator> KeyValueIterator for CompactionFilterIterator<T> {
         self.inner.init().await
     }
 
-    async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
+    async fn next(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
         loop {
-            match self.inner.next_entry().await? {
+            match self.inner.next().await? {
                 Some(entry) => {
                     if let Some(filtered) = self.apply_filter(entry).await? {
                         return Ok(Some(filtered));
@@ -102,7 +102,7 @@ mod tests {
             Ok(())
         }
 
-        async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
+        async fn next(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
             Ok(self.entries.pop_front())
         }
 
@@ -250,16 +250,16 @@ mod tests {
         let mut iter = CompactionFilterIterator::new(mock_iter, Box::new(KeepAllFilter));
         iter.init().await.unwrap();
 
-        let result1 = iter.next_entry().await.unwrap();
+        let result1 = iter.next().await.unwrap();
         assert_eq!(result1, Some(entries[0].clone()));
 
-        let result2 = iter.next_entry().await.unwrap();
+        let result2 = iter.next().await.unwrap();
         assert_eq!(result2, Some(entries[1].clone()));
 
-        let result3 = iter.next_entry().await.unwrap();
+        let result3 = iter.next().await.unwrap();
         assert_eq!(result3, Some(entries[2].clone()));
 
-        let result4 = iter.next_entry().await.unwrap();
+        let result4 = iter.next().await.unwrap();
         assert_eq!(result4, None);
     }
 
@@ -279,14 +279,14 @@ mod tests {
         iter.init().await.unwrap();
 
         // Should skip drop:key1 and return keep:key2
-        let result1 = iter.next_entry().await.unwrap();
+        let result1 = iter.next().await.unwrap();
         assert_eq!(result1, Some(entries[1].clone()));
 
         // Should skip drop:key3 and return keep:key4
-        let result2 = iter.next_entry().await.unwrap();
+        let result2 = iter.next().await.unwrap();
         assert_eq!(result2, Some(entries[3].clone()));
 
-        let result3 = iter.next_entry().await.unwrap();
+        let result3 = iter.next().await.unwrap();
         assert_eq!(result3, None);
     }
 
@@ -304,7 +304,7 @@ mod tests {
         iter.init().await.unwrap();
 
         // Value should be modified
-        let result1 = iter.next_entry().await.unwrap().unwrap();
+        let result1 = iter.next().await.unwrap().unwrap();
         assert_eq!(result1.key, Bytes::from_static(b"key1"));
         assert_eq!(
             result1.value,
@@ -312,10 +312,10 @@ mod tests {
         );
 
         // Tombstone should be unchanged (filter returns Keep for None value)
-        let result2 = iter.next_entry().await.unwrap().unwrap();
+        let result2 = iter.next().await.unwrap().unwrap();
         assert_eq!(result2, entries[1]);
 
-        let result3 = iter.next_entry().await.unwrap();
+        let result3 = iter.next().await.unwrap();
         assert_eq!(result3, None);
     }
 
@@ -334,22 +334,22 @@ mod tests {
         iter.init().await.unwrap();
 
         // delete:key1 should be converted to tombstone
-        let result1 = iter.next_entry().await.unwrap().unwrap();
+        let result1 = iter.next().await.unwrap().unwrap();
         assert_eq!(result1.key, Bytes::from_static(b"delete:key1"));
         assert!(result1.value.is_tombstone());
         assert_eq!(result1.seq, 1);
 
         // keep:key2 should be unchanged
-        let result2 = iter.next_entry().await.unwrap();
+        let result2 = iter.next().await.unwrap();
         assert_eq!(result2, Some(entries[1].clone()));
 
         // delete:key3 should be converted to tombstone
-        let result3 = iter.next_entry().await.unwrap().unwrap();
+        let result3 = iter.next().await.unwrap().unwrap();
         assert_eq!(result3.key, Bytes::from_static(b"delete:key3"));
         assert!(result3.value.is_tombstone());
         assert_eq!(result3.seq, 3);
 
-        let result4 = iter.next_entry().await.unwrap();
+        let result4 = iter.next().await.unwrap();
         assert_eq!(result4, None);
     }
 
@@ -370,21 +370,21 @@ mod tests {
         iter.init().await.unwrap();
 
         // delete:key1 (value) should be converted to tombstone
-        let result1 = iter.next_entry().await.unwrap().unwrap();
+        let result1 = iter.next().await.unwrap().unwrap();
         assert_eq!(result1.key, Bytes::from_static(b"delete:key1"));
         assert!(result1.value.is_tombstone());
 
         // delete:key2 (merge) should also be converted to tombstone
-        let result2 = iter.next_entry().await.unwrap().unwrap();
+        let result2 = iter.next().await.unwrap().unwrap();
         assert_eq!(result2.key, Bytes::from_static(b"delete:key2"));
         assert!(result2.value.is_tombstone());
 
         // keep:key3 should be unchanged
-        let result3 = iter.next_entry().await.unwrap().unwrap();
+        let result3 = iter.next().await.unwrap().unwrap();
         assert_eq!(result3.key, Bytes::from_static(b"keep:key3"));
         assert!(!result3.value.is_tombstone());
 
-        let result4 = iter.next_entry().await.unwrap();
+        let result4 = iter.next().await.unwrap();
         assert_eq!(result4, None);
     }
 
@@ -425,14 +425,14 @@ mod tests {
         iter.init().await.unwrap();
 
         // Consume all entries
-        assert!(iter.next_entry().await.unwrap().is_some());
-        assert!(iter.next_entry().await.unwrap().is_some());
+        assert!(iter.next().await.unwrap().is_some());
+        assert!(iter.next().await.unwrap().is_some());
 
         // on_compaction_end should not be called yet
         assert!(!end_called.load(Ordering::SeqCst));
 
         // This returns None and triggers on_compaction_end
-        assert!(iter.next_entry().await.unwrap().is_none());
+        assert!(iter.next().await.unwrap().is_none());
         assert!(end_called.load(Ordering::SeqCst));
     }
 
@@ -452,18 +452,18 @@ mod tests {
         iter.init().await.unwrap();
 
         // delete:key1 should be converted to tombstone with expire_ts cleared
-        let result1 = iter.next_entry().await.unwrap().unwrap();
+        let result1 = iter.next().await.unwrap().unwrap();
         assert_eq!(result1.key, Bytes::from_static(b"delete:key1"));
         assert!(result1.value.is_tombstone());
         assert_eq!(result1.expire_ts, None); // expire_ts should be cleared
 
         // keep:key2 should be unchanged with expire_ts preserved
-        let result2 = iter.next_entry().await.unwrap().unwrap();
+        let result2 = iter.next().await.unwrap().unwrap();
         assert_eq!(result2.key, Bytes::from_static(b"keep:key2"));
         assert!(!result2.value.is_tombstone());
         assert_eq!(result2.expire_ts, Some(67890)); // expire_ts preserved
 
-        let result3 = iter.next_entry().await.unwrap();
+        let result3 = iter.next().await.unwrap();
         assert_eq!(result3, None);
     }
 
@@ -479,7 +479,7 @@ mod tests {
         let mut iter = CompactionFilterIterator::new(mock_iter, Box::new(filter));
         iter.init().await.unwrap();
 
-        let result = iter.next_entry().await.unwrap().unwrap();
+        let result = iter.next().await.unwrap().unwrap();
         assert_eq!(result.key, Bytes::from_static(b"key1"));
         assert_eq!(
             result.value,
@@ -523,11 +523,11 @@ mod tests {
         iter.init().await.unwrap();
 
         // First entry should succeed
-        let result1 = iter.next_entry().await.unwrap();
+        let result1 = iter.next().await.unwrap();
         assert_eq!(result1, Some(entries[0].clone()));
 
         // Second entry should fail with filter error
-        let result2 = iter.next_entry().await;
+        let result2 = iter.next().await;
         assert!(result2.is_err());
         let err = result2.unwrap_err();
         assert!(matches!(

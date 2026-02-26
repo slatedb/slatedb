@@ -125,11 +125,11 @@ impl KeyValueIterator for GetIterator {
         Ok(())
     }
 
-    async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
+    async fn next(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
         while self.idx < self.iters.len() {
             // initialization is idempotent, so we can call it multiple times
             self.iters[self.idx].init().await?;
-            let result = self.iters[self.idx].next_entry().await?;
+            let result = self.iters[self.idx].next().await?;
             if let Some(entry) = result {
                 // Note: The Get iterator should not advance past tombstones, which is
                 // why we filter them out here. When a tombstone is encountered, we return None
@@ -194,8 +194,8 @@ impl KeyValueIterator for ScanIterator {
         self.delegate.init().await
     }
 
-    async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
-        self.delegate.next_entry().await
+    async fn next(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
+        self.delegate.next().await
     }
 
     async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
@@ -315,7 +315,7 @@ impl DbIterator {
             Err(error)
         } else {
             let result = loop {
-                match self.iter.next_entry().await {
+                match self.iter.next().await {
                     Ok(Some(entry)) => match entry.value {
                         ValueDeletable::Tombstone => continue,
                         _ => break Ok(Some(entry)),

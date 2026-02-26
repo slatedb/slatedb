@@ -1144,7 +1144,7 @@ mod tests {
                 .expect("Expected Some(iter) but got None");
 
                 // remove the key from the expected map and verify that the db matches
-                while let Some(kv) = iter.next_entry().await.unwrap().map(|e| e.into_key_value()) {
+                while let Some(kv) = iter.next().await.unwrap().map(|e| e.into_key_value()) {
                     let expected_v = expected
                         .remove(kv.key.as_ref())
                         .expect("removing unexpected key");
@@ -1229,7 +1229,7 @@ mod tests {
         .unwrap()
         .expect("Expected Some(iter) but got None");
 
-        let tombstone = iter.next_entry().await.unwrap();
+        let tombstone = iter.next().await.unwrap();
         assert!(tombstone.unwrap().value.is_tombstone());
 
         let db_state = await_compacted_compaction(
@@ -1257,9 +1257,9 @@ mod tests {
 
         // should be no tombstone for key 'a' because it was filtered
         // out of the last run
-        let next = iter.next_entry().await.unwrap().map(|e| e.into_key_value());
+        let next = iter.next().await.unwrap().map(|e| e.into_key_value());
         assert_eq!(next.unwrap().key.as_ref(), &[b'b'; 16]);
-        let next = iter.next_entry().await.unwrap().map(|e| e.into_key_value());
+        let next = iter.next().await.unwrap().map(|e| e.into_key_value());
         assert!(next.is_none());
     }
 
@@ -1357,12 +1357,12 @@ mod tests {
         //   The SST contains both versions
         // - Key 'b': value(seq=2) is protected
         // Expected result: both 'a' (as tombstone) and 'b' (as value) should be present
-        // Note: next_entry() returns all entries including tombstones and duplicates,
+        // Note: next() returns all entries including tombstones and duplicates,
         // so we need to track whether we've seen each key and verify the expected type
         let mut found_a_value = false;
         let mut found_a_tombstone = false;
         let mut found_b = false;
-        while let Some(next) = iter.next_entry().await.unwrap() {
+        while let Some(next) = iter.next().await.unwrap() {
             let key = next.key.as_ref();
             if key == [b'a'; 16] {
                 if next.value.is_tombstone() {
@@ -2196,7 +2196,7 @@ mod tests {
 
         // merge operations should be kept separate due to different expire times
         let mut key1_entries = vec![];
-        while let Some(entry) = iter.next_entry().await.unwrap() {
+        while let Some(entry) = iter.next().await.unwrap() {
             if entry.key.as_ref() == b"key1" {
                 key1_entries.push(entry);
             }

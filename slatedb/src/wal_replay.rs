@@ -222,7 +222,7 @@ impl WalReplayIterator<'_> {
         while !self.current_iter.is_finished() {
             if let Some(sst_iter) = &mut self.current_iter.current_iter {
                 let wal_id = sst_iter.table_id().unwrap_wal_id();
-                while let Some(row_entry) = sst_iter.next_entry().await? {
+                while let Some(row_entry) = sst_iter.next().await? {
                     // skip the entries that are already in the L0 SST.
                     if row_entry.seq <= self.min_seq {
                         continue;
@@ -395,8 +395,8 @@ mod tests {
             }
 
             let mut iter = replayed_table.table.table().iter();
-            while let Some(next_entry) = iter.next_entry().await.unwrap() {
-                full_replayed_table.put(next_entry);
+            while let Some(next) = iter.next().await.unwrap() {
+                full_replayed_table.put(next);
             }
         }
         assert_eq!(last_wal_id + 1, next_wal_id);
@@ -442,8 +442,8 @@ mod tests {
             assert!(replayed_table.table.metadata().entries_size_in_bytes <= max_memtable_bytes);
 
             let mut iter = replayed_table.table.table().iter();
-            while let Some(next_entry) = iter.next_entry().await.unwrap() {
-                full_replayed_table.put(next_entry);
+            while let Some(next) = iter.next().await.unwrap() {
+                full_replayed_table.put(next);
             }
         }
         assert_eq!(last_wal_id + 1, next_wal_id);
@@ -547,7 +547,7 @@ mod tests {
         let mut imm_table_iter = replayed_table.table.table().iter();
         let mut replayed_entries = BTreeMap::new();
         let mut total = 0;
-        while let Some(entry) = imm_table_iter.next_entry().await.unwrap() {
+        while let Some(entry) = imm_table_iter.next().await.unwrap() {
             assert!(entry.seq > min_seq);
             replayed_entries.insert(entry.key.clone(), entry.value);
             total += 1;

@@ -12,7 +12,7 @@
 //! order. Iterating each file with [`WalFile::iterator`] yields [`RowEntry`]
 //! values in the order they are stored in that WAL SST.
 //!
-//! `WalFileIterator` intentionally exposes `next_entry`, not `next`. This keeps
+//! `WalFileIterator` intentionally exposes `next`, not `next`. This keeps
 //! the API at [`RowEntry`] level and preserves tombstones and merge rows exactly
 //! as written to the WAL.
 //!
@@ -57,7 +57,7 @@
 //!     let reader = WalReader::new(path, object_store);
 //!     for wal_file in reader.list(..).await? {
 //!         let mut iter = wal_file.iterator().await?;
-//!         while let Some(entry) = iter.next_entry().await? {
+//!         while let Some(entry) = iter.next().await? {
 //!             let _ = entry;
 //!         }
 //!     }
@@ -93,8 +93,8 @@ impl WalFileIterator {
     }
 
     /// Returns the next entry in the WAL file.
-    pub async fn next_entry(&mut self) -> Result<Option<RowEntry>, crate::Error> {
-        self.iter.next_entry().await.map_err(Into::into)
+    pub async fn next(&mut self) -> Result<Option<RowEntry>, crate::Error> {
+        self.iter.next().await.map_err(Into::into)
     }
 }
 
@@ -281,7 +281,7 @@ mod tests {
         let mut rows = Vec::new();
         for wal_file in wal_files {
             let mut iter = wal_file.iterator().await.unwrap();
-            while let Some(entry) = iter.next_entry().await.unwrap() {
+            while let Some(entry) = iter.next().await.unwrap() {
                 rows.push(entry);
             }
         }
@@ -328,7 +328,7 @@ mod tests {
         let mut rows = Vec::new();
         for wal_file in wal_files {
             let mut iter = wal_file.iterator().await.unwrap();
-            while let Some(entry) = iter.next_entry().await.unwrap() {
+            while let Some(entry) = iter.next().await.unwrap() {
                 rows.push(entry);
             }
         }
@@ -491,7 +491,7 @@ mod tests {
         let mut rows = Vec::new();
         for wal_file in wal_files {
             let mut iter = wal_file.iterator().await.unwrap();
-            while let Some(entry) = iter.next_entry().await.unwrap() {
+            while let Some(entry) = iter.next().await.unwrap() {
                 rows.push(entry);
             }
         }
@@ -527,7 +527,7 @@ mod tests {
         let mut rows = Vec::new();
         for wal_file in wal_files {
             let mut iter = wal_file.iterator().await.unwrap();
-            while let Some(entry) = iter.next_entry().await.unwrap() {
+            while let Some(entry) = iter.next().await.unwrap() {
                 rows.push(entry);
             }
         }

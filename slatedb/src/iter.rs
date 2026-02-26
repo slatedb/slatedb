@@ -28,11 +28,11 @@ pub(crate) trait KeyValueIterator: Send + Sync {
     /// Will fail with `SlateDBError::IteratorNotInitialized` if the iterator is
     /// not yet initialized.
     ///
-    /// NOTE: we don't initialize the iterator when calling next_entry and instead
+    /// NOTE: we don't initialize the iterator when calling next and instead
     /// require the caller to explicitly initialize the iterator. This is in order
     /// to ensure that optimizations which eagerly initialize the iterator are not
     /// lost in a refactor and instead would throw errors.
-    async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError>;
+    async fn next(&mut self) -> Result<Option<RowEntry>, SlateDBError>;
 
     /// Seek to the next (inclusive) key
     ///
@@ -76,8 +76,8 @@ impl<'a> KeyValueIterator for Box<dyn KeyValueIterator + 'a> {
         self.as_mut().init().await
     }
 
-    async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
-        self.as_mut().next_entry().await
+    async fn next(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
+        self.as_mut().next().await
     }
 
     async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
@@ -91,8 +91,8 @@ impl<'a> KeyValueIterator for Box<dyn TrackedKeyValueIterator + 'a> {
         self.as_mut().init().await
     }
 
-    async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
-        self.as_mut().next_entry().await
+    async fn next(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
+        self.as_mut().next().await
     }
 
     async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
@@ -120,7 +120,7 @@ impl KeyValueIterator for EmptyIterator {
         Ok(())
     }
 
-    async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
+    async fn next(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
         Ok(None)
     }
 

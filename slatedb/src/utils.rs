@@ -205,12 +205,12 @@ pub(crate) async fn last_written_key_and_seq(
         SST_FORMAT_VERSION => {
             let mut block_iter = BlockIterator::new(block, IterationOrder::Descending);
             block_iter.init().await?;
-            block_iter.next_entry().await?
+            block_iter.next().await?
         }
         SST_FORMAT_VERSION_V2 => {
             let mut block_iter = BlockIteratorV2::new(block, IterationOrder::Descending);
             block_iter.init().await?;
-            block_iter.next_entry().await?
+            block_iter.next().await?
         }
         _ => {
             return Err(SlateDBError::InvalidVersion {

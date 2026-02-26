@@ -22,7 +22,7 @@ impl<T: KeyValueIterator> PeekingIterator<T> {
 
     /// Peek at the next entry without advancing the iterator.
     ///
-    /// Multiple calls to `peek` will return the same entry until `next_entry` is called.
+    /// Multiple calls to `peek` will return the same entry until `next` is called.
     ///
     /// ## Returns
     /// - `Ok(Some(&RowEntry))` if an entry is available.
@@ -33,7 +33,7 @@ impl<T: KeyValueIterator> PeekingIterator<T> {
     /// - `SlateDBError`: any error returned by the underlying iterator.
     pub(crate) async fn peek(&mut self) -> Result<Option<&RowEntry>, SlateDBError> {
         if !self.has_peeked {
-            self.peeked = self.iterator.next_entry().await?;
+            self.peeked = self.iterator.next().await?;
             self.has_peeked = true;
         }
         Ok(self.peeked.as_ref())
@@ -46,12 +46,12 @@ impl<T: KeyValueIterator> KeyValueIterator for PeekingIterator<T> {
         self.iterator.init().await
     }
 
-    async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
+    async fn next(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
         if self.has_peeked {
             self.has_peeked = false;
             return Ok(self.peeked.take());
         }
-        self.iterator.next_entry().await
+        self.iterator.next().await
     }
 
     async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
@@ -86,10 +86,10 @@ mod tests {
         let second_peek = iter.peek().await.unwrap().unwrap().clone();
         assert_eq!(first_peek, second_peek);
 
-        let first_next = iter.next_entry().await.unwrap().unwrap();
+        let first_next = iter.next().await.unwrap().unwrap();
         assert_eq!(first_next, RowEntry::new_value(b"key1", b"value1", 1));
 
-        let second_next = iter.next_entry().await.unwrap().unwrap();
+        let second_next = iter.next().await.unwrap().unwrap();
         assert_eq!(second_next, RowEntry::new_value(b"key2", b"value2", 2));
     }
 
@@ -104,7 +104,7 @@ mod tests {
         let _ = iter.peek().await.unwrap();
         iter.seek(b"key2").await.unwrap();
 
-        let next = iter.next_entry().await.unwrap().unwrap();
+        let next = iter.next().await.unwrap().unwrap();
         assert_eq!(next, RowEntry::new_value(b"key2", b"value2", 2));
         let peek = iter.peek().await.unwrap();
         assert!(peek.is_none());
@@ -117,6 +117,6 @@ mod tests {
 
         iter.init().await.unwrap();
         assert!(iter.peek().await.unwrap().is_none());
-        assert!(iter.next_entry().await.unwrap().is_none());
+        assert!(iter.next().await.unwrap().is_none());
     }
 }

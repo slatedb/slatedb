@@ -486,7 +486,7 @@ pub unsafe extern "C" fn slatedb_wal_file_iterator_next(
     *out_present = false;
 
     let handle = &mut *iter;
-    match handle.runtime.block_on(handle.iter.next_entry()) {
+    match handle.runtime.block_on(handle.iter.next()) {
         Ok(Some(entry)) => {
             let (key, key_len) = alloc_bytes(entry.key.as_ref());
             let (kind, value, value_len) = match &entry.value {

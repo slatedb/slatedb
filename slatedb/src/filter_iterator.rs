@@ -36,8 +36,8 @@ impl<T: KeyValueIterator> KeyValueIterator for FilterIterator<T> {
         self.iterator.init().await
     }
 
-    async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
-        while let Some(entry) = self.iterator.next_entry().await? {
+    async fn next(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
+        while let Some(entry) = self.iterator.next().await? {
             if (self.predicate)(&entry) {
                 return Ok(Some(entry));
             }
@@ -97,7 +97,7 @@ mod tests {
 
         assert_eq!(
             filter_iter
-                .next_entry()
+                .next()
                 .await
                 .unwrap()
                 .map(|e| e.into_key_value()),

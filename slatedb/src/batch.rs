@@ -317,7 +317,7 @@ impl WriteBatch {
         }
 
         let mut entries = Vec::new();
-        while let Some(entry) = it.next_entry().await? {
+        while let Some(entry) = it.next().await? {
             entries.push(entry);
         }
         Ok(entries)
@@ -398,7 +398,7 @@ impl KeyValueIterator for WriteBatchIterator {
         Ok(())
     }
 
-    async fn next_entry(&mut self) -> Result<Option<RowEntry>, crate::error::SlateDBError> {
+    async fn next(&mut self) -> Result<Option<RowEntry>, crate::error::SlateDBError> {
         Ok(self.iter.next().map(|(_, entry)| entry))
     }
 
@@ -625,7 +625,7 @@ mod tests {
         let batch = WriteBatch::new();
         let mut iter = WriteBatchIterator::new(batch.clone(), .., IterationOrder::Ascending);
 
-        let result = iter.next_entry().await.unwrap();
+        let result = iter.next().await.unwrap();
         assert!(result.is_none());
     }
 
@@ -641,7 +641,7 @@ mod tests {
         iter.seek(b"key2").await.unwrap();
 
         // Should get key3 (next available)
-        let result = iter.next_entry().await.unwrap();
+        let result = iter.next().await.unwrap();
         assert!(result.is_some());
         let entry = result.unwrap();
         assert_eq!(entry.key, Bytes::from_static(b"key3"));
@@ -663,7 +663,7 @@ mod tests {
         iter.seek(b"key9").await.unwrap();
 
         // Should be exhausted
-        let result = iter.next_entry().await.unwrap();
+        let result = iter.next().await.unwrap();
         assert!(result.is_none());
     }
 
@@ -711,7 +711,7 @@ mod tests {
         iter.seek(b"key1").await.unwrap();
 
         // Should get key2 (first available)
-        let result = iter.next_entry().await.unwrap();
+        let result = iter.next().await.unwrap();
         assert!(result.is_some());
         let entry = result.unwrap();
         assert_eq!(entry.key, Bytes::from_static(b"key2"));

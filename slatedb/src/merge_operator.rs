@@ -148,9 +148,9 @@ impl<T: KeyValueIterator> KeyValueIterator for MergeOperatorRequiredIterator<T> 
         self.delegate.init().await
     }
 
-    async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
-        let next_entry = self.delegate.next_entry().await?;
-        if let Some(entry) = next_entry {
+    async fn next(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
+        let next = self.delegate.next().await?;
+        if let Some(entry) = next {
             match &entry.value {
                 ValueDeletable::Merge(_) => {
                     return Err(SlateDBError::MergeOperatorMissing);
@@ -343,7 +343,7 @@ impl<T: KeyValueIterator> MergeOperatorIterator<T> {
                     results.push(self.process_batch(&key, &mut batch, &mut merge_tracker)?);
                 }
 
-                next = self.delegate.next_entry().await?;
+                next = self.delegate.next().await?;
             } else {
                 break None;
             }
@@ -387,12 +387,12 @@ impl<T: KeyValueIterator> KeyValueIterator for MergeOperatorIterator<T> {
         self.delegate.init().await
     }
 
-    async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
-        let next_entry = match self.buffered_entry.take() {
+    async fn next(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
+        let next = match self.buffered_entry.take() {
             Some(entry) => Some(entry),
-            None => self.delegate.next_entry().await?,
+            None => self.delegate.next().await?,
         };
-        if let Some(entry) = next_entry {
+        if let Some(entry) = next {
             match &entry.value {
                 ValueDeletable::Merge(_) => {
                     if let Some(snapshot_barrier_seq) = self.snapshot_barrier_seq {
@@ -663,7 +663,7 @@ mod tests {
             Ok(())
         }
 
-        async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
+        async fn next(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
             Ok(self.values.pop_front())
         }
 

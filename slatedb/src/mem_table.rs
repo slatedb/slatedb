@@ -182,15 +182,15 @@ impl KeyValueIterator for MemTableIterator {
         Ok(())
     }
 
-    async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
-        Ok(self.next_entry_sync())
+    async fn next(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
+        Ok(self.next_sync())
     }
 
     async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
         loop {
             let front = self.borrow_item().clone();
             if front.is_some_and(|record| record.key < next_key) {
-                self.next_entry_sync();
+                self.next_sync();
             } else {
                 return Ok(());
             }
@@ -199,14 +199,14 @@ impl KeyValueIterator for MemTableIterator {
 }
 
 impl MemTableIterator {
-    pub(crate) fn next_entry_sync(&mut self) -> Option<RowEntry> {
+    pub(crate) fn next_sync(&mut self) -> Option<RowEntry> {
         let ans = self.borrow_item().clone();
-        let next_entry = match self.borrow_ordering() {
+        let next = match self.borrow_ordering() {
             IterationOrder::Ascending => self.with_inner_mut(|inner| inner.next()),
             IterationOrder::Descending => self.with_inner_mut(|inner| inner.next_back()),
         };
 
-        let cloned_entry = next_entry.map(|entry| entry.value().clone());
+        let cloned_entry = next.map(|entry| entry.value().clone());
         self.with_item_mut(|item| *item = cloned_entry);
 
         ans
@@ -308,7 +308,7 @@ impl KVTable {
             item: None,
         }
         .build();
-        iterator.next_entry_sync();
+        iterator.next_sync();
         iterator
     }
 

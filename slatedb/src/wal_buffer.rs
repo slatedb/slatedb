@@ -878,17 +878,17 @@ mod tests {
         .unwrap()
         .unwrap();
 
-        let read_entry1 = iter.next_entry().await.unwrap().unwrap();
+        let read_entry1 = iter.next().await.unwrap().unwrap();
         assert_eq!(read_entry1.key, entry1.key);
         assert_eq!(read_entry1.value, entry1.value);
         assert_eq!(read_entry1.seq, entry1.seq);
 
-        let read_entry2 = iter.next_entry().await.unwrap().unwrap();
+        let read_entry2 = iter.next().await.unwrap().unwrap();
         assert_eq!(read_entry2.key, entry2.key);
         assert_eq!(read_entry2.value, entry2.value);
         assert_eq!(read_entry2.seq, entry2.seq);
 
-        assert!(iter.next_entry().await.unwrap().is_none());
+        assert!(iter.next().await.unwrap().is_none());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

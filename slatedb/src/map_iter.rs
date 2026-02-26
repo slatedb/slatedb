@@ -55,9 +55,9 @@ impl<T: KeyValueIterator> KeyValueIterator for MapIterator<T> {
         self.iterator.init().await
     }
 
-    async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
-        let next_entry = self.iterator.next_entry().await?;
-        if let Some(entry) = next_entry {
+    async fn next(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
+        let next = self.iterator.next().await?;
+        if let Some(entry) = next {
             Ok(Some((self.f)(entry)))
         } else {
             Ok(None)
@@ -91,15 +91,15 @@ mod tests {
         let mut map_iter = MapIterator::new(iter, map_fn);
 
         // then: entries should have mapped keys
-        let entry1 = map_iter.next_entry().await.unwrap().unwrap();
+        let entry1 = map_iter.next().await.unwrap().unwrap();
         assert_eq!(entry1.key, Bytes::from("mapped_key1"));
         assert_eq!(entry1.value, ValueDeletable::Value(Bytes::from("value1")));
 
-        let entry2 = map_iter.next_entry().await.unwrap().unwrap();
+        let entry2 = map_iter.next().await.unwrap().unwrap();
         assert_eq!(entry2.key, Bytes::from("mapped_key2"));
         assert_eq!(entry2.value, ValueDeletable::Value(Bytes::from("value2")));
 
-        assert!(map_iter.next_entry().await.unwrap().is_none());
+        assert!(map_iter.next().await.unwrap().is_none());
     }
 
     #[tokio::test]
@@ -112,7 +112,7 @@ mod tests {
         let mut map_iter = MapIterator::new(iter, map_fn);
 
         // then: should return None immediately
-        assert!(map_iter.next_entry().await.unwrap().is_none());
+        assert!(map_iter.next().await.unwrap().is_none());
     }
 
     #[tokio::test]
@@ -127,17 +127,17 @@ mod tests {
         let mut map_iter = MapIterator::new_with_ttl_now(iter, 80);
 
         // then: expired entry should be converted to tombstone
-        let entry1 = map_iter.next_entry().await.unwrap().unwrap();
+        let entry1 = map_iter.next().await.unwrap().unwrap();
         assert_eq!(entry1.key, Bytes::from("key1"));
         assert_eq!(entry1.value, ValueDeletable::Value(Bytes::from("value1")));
         assert_eq!(entry1.expire_ts, Some(100));
 
-        let entry2 = map_iter.next_entry().await.unwrap().unwrap();
+        let entry2 = map_iter.next().await.unwrap().unwrap();
         assert_eq!(entry2.key, Bytes::from("key2"));
         assert_eq!(entry2.value, ValueDeletable::Tombstone);
         assert_eq!(entry2.expire_ts, None); // cleared on tombstone
 
-        let entry3 = map_iter.next_entry().await.unwrap().unwrap();
+        let entry3 = map_iter.next().await.unwrap().unwrap();
         assert_eq!(entry3.key, Bytes::from("key3"));
         assert_eq!(entry3.value, ValueDeletable::Value(Bytes::from("value3")));
         assert_eq!(entry3.expire_ts, Some(150));
@@ -154,12 +154,12 @@ mod tests {
         let mut map_iter = MapIterator::new_with_ttl_now(iter, 100);
 
         // then: entries should pass through unchanged
-        let entry1 = map_iter.next_entry().await.unwrap().unwrap();
+        let entry1 = map_iter.next().await.unwrap().unwrap();
         assert_eq!(entry1.key, Bytes::from("key1"));
         assert_eq!(entry1.value, ValueDeletable::Value(Bytes::from("value1")));
         assert_eq!(entry1.expire_ts, None);
 
-        let entry2 = map_iter.next_entry().await.unwrap().unwrap();
+        let entry2 = map_iter.next().await.unwrap().unwrap();
         assert_eq!(entry2.key, Bytes::from("key2"));
         assert_eq!(entry2.value, ValueDeletable::Value(Bytes::from("value2")));
         assert_eq!(entry2.expire_ts, None);
@@ -187,14 +187,14 @@ mod tests {
         let mut map_iter = MapIterator::new(iter, map_fn);
 
         // then: sequence numbers should be preserved
-        let entry1 = map_iter.next_entry().await.unwrap().unwrap();
+        let entry1 = map_iter.next().await.unwrap().unwrap();
         assert_eq!(entry1.seq, 42);
         assert_eq!(
             entry1.value,
             ValueDeletable::Value(Bytes::from("modified_value1"))
         );
 
-        let entry2 = map_iter.next_entry().await.unwrap().unwrap();
+        let entry2 = map_iter.next().await.unwrap().unwrap();
         assert_eq!(entry2.seq, 100);
         assert_eq!(
             entry2.value,
@@ -216,15 +216,15 @@ mod tests {
         let mut map_iter = MapIterator::new(iter, map_fn);
 
         // then: should preserve tombstone entries
-        let result1 = map_iter.next_entry().await.unwrap().unwrap();
+        let result1 = map_iter.next().await.unwrap().unwrap();
         assert_eq!(result1.key, Bytes::from("key1"));
         assert!(matches!(result1.value, ValueDeletable::Value(_)));
 
-        let result2 = map_iter.next_entry().await.unwrap().unwrap();
+        let result2 = map_iter.next().await.unwrap().unwrap();
         assert_eq!(result2.key, Bytes::from("key2"));
         assert_eq!(result2.value, ValueDeletable::Tombstone);
 
-        let result3 = map_iter.next_entry().await.unwrap().unwrap();
+        let result3 = map_iter.next().await.unwrap().unwrap();
         assert_eq!(result3.key, Bytes::from("key3"));
         assert!(matches!(result3.value, ValueDeletable::Value(_)));
     }

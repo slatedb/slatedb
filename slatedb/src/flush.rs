@@ -19,7 +19,7 @@ impl DbInner {
     ) -> Result<SsTableHandle, SlateDBError> {
         let mut sst_builder = self.table_store.table_builder();
         let mut iter = self.iter_imm_table(imm_table.clone()).await?;
-        while let Some(entry) = iter.next_entry().await? {
+        while let Some(entry) = iter.next().await? {
             sst_builder.add(entry).await?;
         }
 
@@ -138,7 +138,7 @@ mod tests {
             let mut block_iter = BlockIteratorLatest::new_ascending(block);
             block_iter.init().await.unwrap();
 
-            while let Some(entry) = block_iter.next_entry().await.unwrap() {
+            while let Some(entry) = block_iter.next().await.unwrap() {
                 found_entries.push((entry.key.clone(), entry.seq, entry.value.clone()));
             }
         }

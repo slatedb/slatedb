@@ -192,12 +192,12 @@ impl<T: KeyValueIterator> KeyValueIterator for RetentionIterator<T> {
     /// 3. Returns filtered entries one by one in sequence number order (newest first)
     ///
     /// The state machine ensures efficient processing by batching operations for each key.
-    async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
+    async fn next(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
         loop {
             match self.buffer.state() {
                 RetentionBufferState::NeedPush => {
                     // Fetch next entry from upstream iterator
-                    let entry = match self.inner.next_entry().await? {
+                    let entry = match self.inner.next().await? {
                         Some(entry) => entry,
                         None => {
                             // No more entries from upstream, mark end of input
@@ -269,7 +269,7 @@ struct RetentionBuffer {
     current_versions: BTreeMap<Reverse<u64>, RowEntry>,
     /// The first entry of the next key (if available). This is used to note the current key has
     /// been exhausted, and await to process the current key versions.
-    next_entry: Option<RowEntry>,
+    next: Option<RowEntry>,
     /// After the current key versions have been exhausted, process_retention will be called, and
     /// this flag will be set to true.
     processed: bool,
@@ -297,7 +297,7 @@ impl RetentionBuffer {
     fn new() -> Self {
         Self {
             current_versions: BTreeMap::new(),
-            next_entry: None,
+            next: None,
             processed: false,
             end_of_input: false,
         }
@@ -320,7 +320,7 @@ impl RetentionBuffer {
                 return RetentionBufferState::NeedPopAndContinue;
             }
         }
-        if self.end_of_input || self.next_entry.is_some() {
+        if self.end_of_input || self.next.is_some() {
             return RetentionBufferState::NeedProcess;
         }
         RetentionBufferState::NeedPush
@@ -331,7 +331,7 @@ impl RetentionBuffer {
     /// Called when seeking to a new position in the iterator.
     fn clear(&mut self) {
         self.current_versions.clear();
-        self.next_entry = None;
+        self.next = None;
         self.processed = false;
         self.end_of_input = false;
     }
@@ -360,7 +360,7 @@ impl RetentionBuffer {
 
         // Different key detected - store as next entry and signal key transition
         if entry.key != current_key {
-            self.next_entry = Some(entry);
+            self.next = Some(entry);
             return;
         }
 
@@ -390,8 +390,8 @@ impl RetentionBuffer {
             Some((_, entry)) => Some(entry),
             None => {
                 // Current versions exhausted - promote next entry to current versions
-                let next_entry = self.next_entry.take();
-                if let Some(entry) = next_entry {
+                let next = self.next.take();
+                if let Some(entry) = next {
                     self.current_versions.insert(Reverse(entry.seq), entry);
                     self.processed = false;
                     None // Signal that we need to continue processing
@@ -420,7 +420,7 @@ mod tests {
         name: &'static str,
         build: fn() -> RetentionBuffer,
         expected_current_versions_len: usize,
-        expected_has_next_entry: bool,
+        expected_has_next: bool,
         expected_processed: bool,
         expected_end_of_input: bool,
         expected_state: RetentionBufferState,
@@ -432,7 +432,7 @@ mod tests {
         name: "empty_buffer",
         build: || RetentionBuffer::new(),
         expected_current_versions_len: 0,
-        expected_has_next_entry: false,
+        expected_has_next: false,
         expected_processed: false,
         expected_end_of_input: false,
         expected_state: RetentionBufferState::NeedPush,
@@ -445,7 +445,7 @@ mod tests {
             buffer
         },
         expected_current_versions_len: 1,
-        expected_has_next_entry: false,
+        expected_has_next: false,
         expected_processed: false,
         expected_end_of_input: false,
         expected_state: RetentionBufferState::NeedPush,
@@ -459,7 +459,7 @@ mod tests {
             buffer
         },
         expected_current_versions_len: 1,
-        expected_has_next_entry: true,
+        expected_has_next: true,
         expected_processed: false,
         expected_end_of_input: false,
         expected_state: RetentionBufferState::NeedProcess,
@@ -473,7 +473,7 @@ mod tests {
             buffer
         },
         expected_current_versions_len: 1,
-        expected_has_next_entry: false,
+        expected_has_next: false,
         expected_processed: true,
         expected_end_of_input: false,
         expected_state: RetentionBufferState::NeedPopAndContinue,
@@ -488,7 +488,7 @@ mod tests {
             buffer
         },
         expected_current_versions_len: 1,
-        expected_has_next_entry: false,
+        expected_has_next: false,
         expected_processed: true,
         expected_end_of_input: true,
         expected_state: RetentionBufferState::NeedPopAndQuit,
@@ -503,7 +503,7 @@ mod tests {
             buffer
         },
         expected_current_versions_len: 3,
-        expected_has_next_entry: false,
+        expected_has_next: false,
         expected_processed: false,
         expected_end_of_input: false,
         expected_state: RetentionBufferState::NeedPush,
@@ -519,7 +519,7 @@ mod tests {
             buffer
         },
         expected_current_versions_len: 1,
-        expected_has_next_entry: false,
+        expected_has_next: false,
         expected_processed: true,
         expected_end_of_input: false,
         expected_state: RetentionBufferState::NeedPopAndContinue,
@@ -536,7 +536,7 @@ mod tests {
             buffer
         },
         expected_current_versions_len: 0,
-        expected_has_next_entry: false,
+        expected_has_next: false,
         expected_processed: false,
         expected_end_of_input: false,
         expected_state: RetentionBufferState::NeedPush,
@@ -550,7 +550,7 @@ mod tests {
             buffer
         },
         expected_current_versions_len: 2,
-        expected_has_next_entry: false,
+        expected_has_next: false,
         expected_processed: false,
         expected_end_of_input: false,
         expected_state: RetentionBufferState::NeedPush,
@@ -565,7 +565,7 @@ mod tests {
             buffer
         },
         expected_current_versions_len: 3,
-        expected_has_next_entry: false,
+        expected_has_next: false,
         expected_processed: false,
         expected_end_of_input: false,
         expected_state: RetentionBufferState::NeedPush,
@@ -581,9 +581,9 @@ mod tests {
             test_case.name
         );
         assert_eq!(
-            buffer.next_entry.is_some(),
-            test_case.expected_has_next_entry,
-            "Test case '{}': has_next_entry mismatch",
+            buffer.next.is_some(),
+            test_case.expected_has_next,
+            "Test case '{}': has_next mismatch",
             test_case.name
         );
         assert_eq!(

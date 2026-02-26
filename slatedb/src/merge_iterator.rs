@@ -22,7 +22,7 @@ impl<'a> MergeIteratorHeapEntry<'a> {
             Ok(Some(self))
         } else {
             self.iterator.seek(next_key).await?;
-            if let Some(next_kv) = self.iterator.next_entry().await? {
+            if let Some(next_kv) = self.iterator.next().await? {
                 Ok(Some(MergeIteratorHeapEntry {
                     next_kv,
                     index: self.index,
@@ -110,7 +110,7 @@ impl<'a> MergeIterator<'a> {
 
         for (index, mut iterator) in self.pending_iterators.drain(..) {
             iterator.init().await?;
-            if let Some(next_kv) = iterator.next_entry().await? {
+            if let Some(next_kv) = iterator.next().await? {
                 self.iterators.push(Reverse(MergeIteratorHeapEntry {
                     next_kv,
                     index,
@@ -138,7 +138,7 @@ impl<'a> MergeIterator<'a> {
         self.ensure_initialized().await?;
         if let Some(mut iterator_state) = self.current.take() {
             let current_kv = iterator_state.next_kv;
-            if let Some(kv) = iterator_state.iterator.next_entry().await? {
+            if let Some(kv) = iterator_state.iterator.next().await? {
                 iterator_state.next_kv = kv;
                 self.iterators.push(Reverse(iterator_state));
             }
@@ -160,7 +160,7 @@ impl KeyValueIterator for MergeIterator<'_> {
         self.initialize().await
     }
 
-    async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
+    async fn next(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
         if !self.initialized {
             return Err(SlateDBError::IteratorNotInitialized);
         }
@@ -226,7 +226,7 @@ impl TrackedKeyValueIterator for MergeIterator<'_> {
 mod tests {
     use crate::iter::KeyValueIterator;
     use crate::merge_iterator::MergeIterator;
-    use crate::test_utils::{assert_iterator, assert_next_entry, TestIterator};
+    use crate::test_utils::{assert_iterator, assert_next, TestIterator};
     use crate::types::RowEntry;
     use std::collections::VecDeque;
     use std::vec;
@@ -401,7 +401,7 @@ mod tests {
         );
 
         let mut merge_iter = MergeIterator::new(iters).unwrap();
-        assert_next_entry(&mut merge_iter, &RowEntry::new_value(b"aa", b"aa1", 0)).await;
+        assert_next(&mut merge_iter, &RowEntry::new_value(b"aa", b"aa1", 0)).await;
 
         merge_iter.seek(b"bb".as_ref()).await.unwrap();
 

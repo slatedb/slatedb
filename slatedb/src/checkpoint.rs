@@ -403,7 +403,7 @@ mod tests {
         .unwrap()
         .expect("Expected Some(iter) but got None");
 
-        let sst_entry = sst_iter.next_entry().await.unwrap().unwrap();
+        let sst_entry = sst_iter.next().await.unwrap().unwrap();
         let val = match sst_entry.value {
             crate::types::ValueDeletable::Value(v) => v,
             _ => panic!("Expected a Value"),

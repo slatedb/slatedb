@@ -232,7 +232,7 @@ impl<B: BlockLike> KeyValueIterator for BlockIteratorV2<B> {
         Ok(())
     }
 
-    async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
+    async fn next(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
         match &mut self.inner {
             BlockIteratorInner::Ascending(state) => {
                 if state.is_empty() {
@@ -262,7 +262,7 @@ impl<B: BlockLike> KeyValueIterator for BlockIteratorV2<B> {
 
                 Ok(Some(entry))
             }
-            BlockIteratorInner::Descending(iter) => iter.next_entry().await,
+            BlockIteratorInner::Descending(iter) => iter.next().await,
         }
     }
 
@@ -400,7 +400,7 @@ impl<B: BlockLike> KeyValueIterator for DescendingBlockIteratorV2<B> {
         Ok(())
     }
 
-    async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
+    async fn next(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
         if !self.initialized {
             self.init().await?;
         }
@@ -504,17 +504,17 @@ mod tests {
         let mut iter = BlockIteratorV2::new_ascending(&block);
 
         // when/then: iterating returns all entries in order
-        let kv = iter.next_entry().await.unwrap().unwrap();
+        let kv = iter.next().await.unwrap().unwrap();
         assert_eq!(kv.key.as_ref(), b"apple");
         assert_eq!(kv.value, ValueDeletable::Value(Bytes::from("1")));
 
-        let kv = iter.next_entry().await.unwrap().unwrap();
+        let kv = iter.next().await.unwrap().unwrap();
         assert_eq!(kv.key.as_ref(), b"banana");
 
-        let kv = iter.next_entry().await.unwrap().unwrap();
+        let kv = iter.next().await.unwrap().unwrap();
         assert_eq!(kv.key.as_ref(), b"cherry");
 
-        assert!(iter.next_entry().await.unwrap().is_none());
+        assert!(iter.next().await.unwrap().is_none());
     }
 
     #[tokio::test]
@@ -536,7 +536,7 @@ mod tests {
         iter.seek(b"banana").await.unwrap();
 
         // then: returns that key
-        let kv = iter.next_entry().await.unwrap().unwrap();
+        let kv = iter.next().await.unwrap().unwrap();
         assert_eq!(kv.key.as_ref(), b"banana");
     }
 
@@ -551,7 +551,7 @@ mod tests {
         iter.seek(b"banana").await.unwrap();
 
         // then: returns the next key >= banana
-        let kv = iter.next_entry().await.unwrap().unwrap();
+        let kv = iter.next().await.unwrap().unwrap();
         assert_eq!(kv.key.as_ref(), b"cherry");
     }
 
@@ -577,7 +577,7 @@ mod tests {
         iter.seek(b"e").await.unwrap();
 
         // then: finds the correct entry
-        let kv = iter.next_entry().await.unwrap().unwrap();
+        let kv = iter.next().await.unwrap().unwrap();
         assert_eq!(kv.key.as_ref(), b"e");
     }
 
@@ -600,11 +600,11 @@ mod tests {
         iter.seek(b"user:1001").await.unwrap();
 
         // then: correct entries are returned
-        let kv = iter.next_entry().await.unwrap().unwrap();
+        let kv = iter.next().await.unwrap().unwrap();
         assert_eq!(kv.key.as_ref(), b"user:1001");
         assert_eq!(kv.value, ValueDeletable::Value(Bytes::from("bob")));
 
-        let kv = iter.next_entry().await.unwrap().unwrap();
+        let kv = iter.next().await.unwrap().unwrap();
         assert_eq!(kv.key.as_ref(), b"user:1002");
     }
 
@@ -624,12 +624,12 @@ mod tests {
         iter.seek(b"key_00050").await.unwrap();
 
         // then: correct key is found
-        let kv = iter.next_entry().await.unwrap().unwrap();
+        let kv = iter.next().await.unwrap().unwrap();
         assert_eq!(kv.key.as_ref(), b"key_00050");
 
         // Seek to another key
         iter.seek(b"key_00075").await.unwrap();
-        let kv = iter.next_entry().await.unwrap().unwrap();
+        let kv = iter.next().await.unwrap().unwrap();
         assert_eq!(kv.key.as_ref(), b"key_00075");
     }
 
@@ -644,7 +644,7 @@ mod tests {
         iter.seek(b"apple").await.unwrap();
 
         // then: first entry is returned
-        let kv = iter.next_entry().await.unwrap().unwrap();
+        let kv = iter.next().await.unwrap().unwrap();
         assert_eq!(kv.key.as_ref(), b"apple");
     }
 
@@ -659,7 +659,7 @@ mod tests {
         iter.seek(b"apple").await.unwrap();
 
         // then: first entry is returned
-        let kv = iter.next_entry().await.unwrap().unwrap();
+        let kv = iter.next().await.unwrap().unwrap();
         assert_eq!(kv.key.as_ref(), b"banana");
     }
 
@@ -674,7 +674,7 @@ mod tests {
         iter.seek(b"zebra").await.unwrap();
 
         // then: no more entries
-        assert!(iter.next_entry().await.unwrap().is_none());
+        assert!(iter.next().await.unwrap().is_none());
     }
 
     #[tokio::test]
@@ -685,11 +685,11 @@ mod tests {
         let mut iter = BlockIteratorV2::new_ascending(&block);
 
         // when: iterating
-        let kv = iter.next_entry().await.unwrap().unwrap();
+        let kv = iter.next().await.unwrap().unwrap();
         assert_eq!(kv.key.as_ref(), b"only");
 
         // then: no more entries
-        assert!(iter.next_entry().await.unwrap().is_none());
+        assert!(iter.next().await.unwrap().is_none());
     }
 
     #[tokio::test]
@@ -703,7 +703,7 @@ mod tests {
         iter.seek(b"only").await.unwrap();
 
         // then: entry is returned
-        let kv = iter.next_entry().await.unwrap().unwrap();
+        let kv = iter.next().await.unwrap().unwrap();
         assert_eq!(kv.key.as_ref(), b"only");
     }
 
@@ -730,12 +730,12 @@ mod tests {
         let mut iter = BlockIteratorV2::new_ascending(&block);
 
         // when: iterating
-        let kv = iter.next_entry().await.unwrap().unwrap();
+        let kv = iter.next().await.unwrap().unwrap();
         assert_eq!(kv.key.as_ref(), b"key1");
         assert_eq!(kv.create_ts, Some(100));
         assert_eq!(kv.expire_ts, Some(200));
 
-        let kv = iter.next_entry().await.unwrap().unwrap();
+        let kv = iter.next().await.unwrap().unwrap();
         assert_eq!(kv.key.as_ref(), b"key2");
         assert!(matches!(kv.value, ValueDeletable::Tombstone));
         assert_eq!(kv.create_ts, Some(300));
@@ -758,11 +758,11 @@ mod tests {
 
         // when/then: all entries are returned in order
         for i in 0..10 {
-            let kv = iter.next_entry().await.unwrap().unwrap();
+            let kv = iter.next().await.unwrap().unwrap();
             let expected_key = format!("key_{}", i);
             assert_eq!(kv.key.as_ref(), expected_key.as_bytes());
         }
-        assert!(iter.next_entry().await.unwrap().is_none());
+        assert!(iter.next().await.unwrap().is_none());
     }
 
     #[tokio::test]
@@ -783,17 +783,17 @@ mod tests {
 
         // when: seeking multiple times
         iter.seek(b"b").await.unwrap();
-        let kv = iter.next_entry().await.unwrap().unwrap();
+        let kv = iter.next().await.unwrap().unwrap();
         assert_eq!(kv.key.as_ref(), b"b");
 
         iter.seek(b"d").await.unwrap();
-        let kv = iter.next_entry().await.unwrap().unwrap();
+        let kv = iter.next().await.unwrap().unwrap();
         assert_eq!(kv.key.as_ref(), b"d");
 
         iter.seek(b"a").await.unwrap();
         // Note: seeking backward from current position may not work as expected
         // because we don't reset the iterator. Let's test seeking forward from current.
-        let kv = iter.next_entry().await.unwrap();
+        let kv = iter.next().await.unwrap();
         // After seeking to "a" from position "d", behavior depends on implementation
         // Our implementation should allow seeking to any position
         assert!(kv.is_some());
@@ -822,10 +822,10 @@ mod tests {
         let mut iter = BlockIteratorV2::new_ascending(&block);
 
         // when: iterating
-        let kv = iter.next_entry().await.unwrap().unwrap();
+        let kv = iter.next().await.unwrap().unwrap();
         assert!(matches!(kv.value, ValueDeletable::Value(_)));
 
-        let kv = iter.next_entry().await.unwrap().unwrap();
+        let kv = iter.next().await.unwrap().unwrap();
         assert!(matches!(kv.value, ValueDeletable::Merge(_)));
         if let ValueDeletable::Merge(v) = kv.value {
             assert_eq!(v.as_ref(), b"delta");
@@ -845,16 +845,16 @@ mod tests {
         let mut iter = DescendingBlockIteratorV2::new(&block);
 
         // when/then: iterating returns all entries in reverse order
-        let kv = iter.next_entry().await.unwrap().unwrap();
+        let kv = iter.next().await.unwrap().unwrap();
         assert_eq!(kv.key.as_ref(), b"cherry");
 
-        let kv = iter.next_entry().await.unwrap().unwrap();
+        let kv = iter.next().await.unwrap().unwrap();
         assert_eq!(kv.key.as_ref(), b"banana");
 
-        let kv = iter.next_entry().await.unwrap().unwrap();
+        let kv = iter.next().await.unwrap().unwrap();
         assert_eq!(kv.key.as_ref(), b"apple");
 
-        assert!(iter.next_entry().await.unwrap().is_none());
+        assert!(iter.next().await.unwrap().is_none());
     }
 
     #[tokio::test]
@@ -876,22 +876,22 @@ mod tests {
         let mut iter = DescendingBlockIteratorV2::new(&block);
 
         // when/then: iterating returns all entries in reverse order
-        let kv = iter.next_entry().await.unwrap().unwrap();
+        let kv = iter.next().await.unwrap().unwrap();
         assert_eq!(kv.key.as_ref(), b"e");
 
-        let kv = iter.next_entry().await.unwrap().unwrap();
+        let kv = iter.next().await.unwrap().unwrap();
         assert_eq!(kv.key.as_ref(), b"d");
 
-        let kv = iter.next_entry().await.unwrap().unwrap();
+        let kv = iter.next().await.unwrap().unwrap();
         assert_eq!(kv.key.as_ref(), b"c");
 
-        let kv = iter.next_entry().await.unwrap().unwrap();
+        let kv = iter.next().await.unwrap().unwrap();
         assert_eq!(kv.key.as_ref(), b"b");
 
-        let kv = iter.next_entry().await.unwrap().unwrap();
+        let kv = iter.next().await.unwrap().unwrap();
         assert_eq!(kv.key.as_ref(), b"a");
 
-        assert!(iter.next_entry().await.unwrap().is_none());
+        assert!(iter.next().await.unwrap().is_none());
     }
 
     #[tokio::test]
@@ -913,11 +913,11 @@ mod tests {
         iter.seek(b"cherry").await.unwrap();
 
         // then: returns that key
-        let kv = iter.next_entry().await.unwrap().unwrap();
+        let kv = iter.next().await.unwrap().unwrap();
         assert_eq!(kv.key.as_ref(), b"cherry");
 
         // and continues descending
-        let kv = iter.next_entry().await.unwrap().unwrap();
+        let kv = iter.next().await.unwrap().unwrap();
         assert_eq!(kv.key.as_ref(), b"banana");
     }
 
@@ -932,11 +932,11 @@ mod tests {
         iter.seek(b"banana").await.unwrap();
 
         // then: returns the largest key <= banana, which is apple
-        let kv = iter.next_entry().await.unwrap().unwrap();
+        let kv = iter.next().await.unwrap().unwrap();
         assert_eq!(kv.key.as_ref(), b"apple");
 
         // and no more entries (we're at the beginning)
-        assert!(iter.next_entry().await.unwrap().is_none());
+        assert!(iter.next().await.unwrap().is_none());
     }
 
     #[tokio::test]
@@ -950,7 +950,7 @@ mod tests {
         iter.seek(b"zebra").await.unwrap();
 
         // then: returns the last (largest) key
-        let kv = iter.next_entry().await.unwrap().unwrap();
+        let kv = iter.next().await.unwrap().unwrap();
         assert_eq!(kv.key.as_ref(), b"banana");
     }
 
@@ -965,7 +965,7 @@ mod tests {
         iter.seek(b"apple").await.unwrap();
 
         // then: no entries (nothing <= apple)
-        assert!(iter.next_entry().await.unwrap().is_none());
+        assert!(iter.next().await.unwrap().is_none());
     }
 
     #[tokio::test]
@@ -976,11 +976,11 @@ mod tests {
         let mut iter = DescendingBlockIteratorV2::new(&block);
 
         // when: iterating
-        let kv = iter.next_entry().await.unwrap().unwrap();
+        let kv = iter.next().await.unwrap().unwrap();
         assert_eq!(kv.key.as_ref(), b"only");
 
         // then: no more entries
-        assert!(iter.next_entry().await.unwrap().is_none());
+        assert!(iter.next().await.unwrap().is_none());
     }
 
     #[tokio::test]
@@ -999,20 +999,20 @@ mod tests {
         let mut iter = DescendingBlockIteratorV2::new(&block);
 
         // when/then: iterating returns entries in reverse order
-        let kv = iter.next_entry().await.unwrap().unwrap();
+        let kv = iter.next().await.unwrap().unwrap();
         assert_eq!(kv.key.as_ref(), b"user:1003");
         assert_eq!(kv.value, ValueDeletable::Value(Bytes::from("dave")));
 
-        let kv = iter.next_entry().await.unwrap().unwrap();
+        let kv = iter.next().await.unwrap().unwrap();
         assert_eq!(kv.key.as_ref(), b"user:1002");
 
-        let kv = iter.next_entry().await.unwrap().unwrap();
+        let kv = iter.next().await.unwrap().unwrap();
         assert_eq!(kv.key.as_ref(), b"user:1001");
 
-        let kv = iter.next_entry().await.unwrap().unwrap();
+        let kv = iter.next().await.unwrap().unwrap();
         assert_eq!(kv.key.as_ref(), b"user:1000");
 
-        assert!(iter.next_entry().await.unwrap().is_none());
+        assert!(iter.next().await.unwrap().is_none());
     }
 
     #[tokio::test]
@@ -1033,11 +1033,11 @@ mod tests {
 
         // when/then: all entries are returned in reverse order
         for i in (0..20).rev() {
-            let kv = iter.next_entry().await.unwrap().unwrap();
+            let kv = iter.next().await.unwrap().unwrap();
             let expected_key = format!("key_{:02}", i);
             assert_eq!(kv.key.as_ref(), expected_key.as_bytes());
         }
-        assert!(iter.next_entry().await.unwrap().is_none());
+        assert!(iter.next().await.unwrap().is_none());
     }
 
     #[tokio::test]
@@ -1065,35 +1065,35 @@ mod tests {
         iter.seek(b"key_10").await.unwrap();
 
         // then: returns key_10 and continues descending
-        let kv = iter.next_entry().await.unwrap().unwrap();
+        let kv = iter.next().await.unwrap().unwrap();
         assert_eq!(kv.key.as_ref(), b"key_10");
 
-        let kv = iter.next_entry().await.unwrap().unwrap();
+        let kv = iter.next().await.unwrap().unwrap();
         assert_eq!(kv.key.as_ref(), b"key_09");
 
-        let kv = iter.next_entry().await.unwrap().unwrap();
+        let kv = iter.next().await.unwrap().unwrap();
         assert_eq!(kv.key.as_ref(), b"key_08");
 
         // crosses into previous restart region
-        let kv = iter.next_entry().await.unwrap().unwrap();
+        let kv = iter.next().await.unwrap().unwrap();
         assert_eq!(kv.key.as_ref(), b"key_07");
 
         // when: seeking to a key between entries
         iter.seek(b"key_14a").await.unwrap();
 
         // then: returns the largest key <= key_14a, which is key_14
-        let kv = iter.next_entry().await.unwrap().unwrap();
+        let kv = iter.next().await.unwrap().unwrap();
         assert_eq!(kv.key.as_ref(), b"key_14");
 
         // when: seeking to a key at the start of a restart region
         iter.seek(b"key_04").await.unwrap();
 
         // then: returns key_04
-        let kv = iter.next_entry().await.unwrap().unwrap();
+        let kv = iter.next().await.unwrap().unwrap();
         assert_eq!(kv.key.as_ref(), b"key_04");
 
         // and continues to previous region
-        let kv = iter.next_entry().await.unwrap().unwrap();
+        let kv = iter.next().await.unwrap().unwrap();
         assert_eq!(kv.key.as_ref(), b"key_03");
     }
 
@@ -1111,16 +1111,16 @@ mod tests {
         let mut iter = BlockIteratorV2::new(&block, IterationOrder::Descending);
 
         // then: iterating returns all entries in reverse order
-        let kv = iter.next_entry().await.unwrap().unwrap();
+        let kv = iter.next().await.unwrap().unwrap();
         assert_eq!(kv.key.as_ref(), b"cherry");
 
-        let kv = iter.next_entry().await.unwrap().unwrap();
+        let kv = iter.next().await.unwrap().unwrap();
         assert_eq!(kv.key.as_ref(), b"banana");
 
-        let kv = iter.next_entry().await.unwrap().unwrap();
+        let kv = iter.next().await.unwrap().unwrap();
         assert_eq!(kv.key.as_ref(), b"apple");
 
-        assert!(iter.next_entry().await.unwrap().is_none());
+        assert!(iter.next().await.unwrap().is_none());
     }
 
     #[tokio::test]
@@ -1139,10 +1139,10 @@ mod tests {
         iter.seek(b"key_10").await.unwrap();
 
         // then: returns key_10 and continues descending
-        let kv = iter.next_entry().await.unwrap().unwrap();
+        let kv = iter.next().await.unwrap().unwrap();
         assert_eq!(kv.key.as_ref(), b"key_10");
 
-        let kv = iter.next_entry().await.unwrap().unwrap();
+        let kv = iter.next().await.unwrap().unwrap();
         assert_eq!(kv.key.as_ref(), b"key_09");
     }
 
@@ -1168,7 +1168,7 @@ mod tests {
 
         // then: should find all 6 entries starting from the first
         for expected_seq in 0..6u64 {
-            let kv = iter.next_entry().await.unwrap().unwrap();
+            let kv = iter.next().await.unwrap().unwrap();
             assert_eq!(kv.key.as_ref(), b"dup");
             assert_eq!(
                 kv.seq, expected_seq,
@@ -1177,7 +1177,7 @@ mod tests {
             );
         }
 
-        assert!(iter.next_entry().await.unwrap().is_none());
+        assert!(iter.next().await.unwrap().is_none());
     }
 
     #[tokio::test]
@@ -1204,24 +1204,24 @@ mod tests {
         iter.seek(b"dup").await.unwrap();
 
         // then: should find all 4 "dup" entries starting from seq=2
-        let kv = iter.next_entry().await.unwrap().unwrap();
+        let kv = iter.next().await.unwrap().unwrap();
         assert_eq!(kv.key.as_ref(), b"dup");
         assert_eq!(kv.seq, 2);
 
-        let kv = iter.next_entry().await.unwrap().unwrap();
+        let kv = iter.next().await.unwrap().unwrap();
         assert_eq!(kv.key.as_ref(), b"dup");
         assert_eq!(kv.seq, 3);
 
-        let kv = iter.next_entry().await.unwrap().unwrap();
+        let kv = iter.next().await.unwrap().unwrap();
         assert_eq!(kv.key.as_ref(), b"dup");
         assert_eq!(kv.seq, 4);
 
-        let kv = iter.next_entry().await.unwrap().unwrap();
+        let kv = iter.next().await.unwrap().unwrap();
         assert_eq!(kv.key.as_ref(), b"dup");
         assert_eq!(kv.seq, 5);
 
         // next should be "b"
-        let kv = iter.next_entry().await.unwrap().unwrap();
+        let kv = iter.next().await.unwrap().unwrap();
         assert_eq!(kv.key.as_ref(), b"b");
     }
 
@@ -1251,13 +1251,13 @@ mod tests {
 
         // then: should find ALL dup entries starting from the very first one (seq=0)
         for expected_seq in 0..4u64 {
-            let kv = iter.next_entry().await.unwrap().unwrap();
+            let kv = iter.next().await.unwrap().unwrap();
             assert_eq!(kv.key.as_ref(), b"dup");
             assert_eq!(kv.seq, expected_seq);
         }
 
         // next should be "z"
-        let kv = iter.next_entry().await.unwrap().unwrap();
+        let kv = iter.next().await.unwrap().unwrap();
         assert_eq!(kv.key.as_ref(), b"z");
     }
 
@@ -1281,7 +1281,7 @@ mod tests {
 
         // then: should find all 6 entries in reverse order (last seq first)
         for expected_seq in (0..6u64).rev() {
-            let kv = iter.next_entry().await.unwrap().unwrap();
+            let kv = iter.next().await.unwrap().unwrap();
             assert_eq!(kv.key.as_ref(), b"dup");
             assert_eq!(
                 kv.seq, expected_seq,
@@ -1290,7 +1290,7 @@ mod tests {
             );
         }
 
-        assert!(iter.next_entry().await.unwrap().is_none());
+        assert!(iter.next().await.unwrap().is_none());
     }
 
     #[tokio::test]
@@ -1317,24 +1317,24 @@ mod tests {
         iter.seek(b"dup").await.unwrap();
 
         // then: should find all 4 "dup" entries in reverse order
-        let kv = iter.next_entry().await.unwrap().unwrap();
+        let kv = iter.next().await.unwrap().unwrap();
         assert_eq!(kv.key.as_ref(), b"dup");
         assert_eq!(kv.seq, 5);
 
-        let kv = iter.next_entry().await.unwrap().unwrap();
+        let kv = iter.next().await.unwrap().unwrap();
         assert_eq!(kv.key.as_ref(), b"dup");
         assert_eq!(kv.seq, 4);
 
-        let kv = iter.next_entry().await.unwrap().unwrap();
+        let kv = iter.next().await.unwrap().unwrap();
         assert_eq!(kv.key.as_ref(), b"dup");
         assert_eq!(kv.seq, 3);
 
-        let kv = iter.next_entry().await.unwrap().unwrap();
+        let kv = iter.next().await.unwrap().unwrap();
         assert_eq!(kv.key.as_ref(), b"dup");
         assert_eq!(kv.seq, 2);
 
         // next should be "a"
-        let kv = iter.next_entry().await.unwrap().unwrap();
+        let kv = iter.next().await.unwrap().unwrap();
         assert_eq!(kv.key.as_ref(), b"a");
     }
 
@@ -1364,13 +1364,13 @@ mod tests {
 
         // then: should find ALL dup entries in reverse order (last seq first)
         for expected_seq in (1..5u64).rev() {
-            let kv = iter.next_entry().await.unwrap().unwrap();
+            let kv = iter.next().await.unwrap().unwrap();
             assert_eq!(kv.key.as_ref(), b"dup");
             assert_eq!(kv.seq, expected_seq);
         }
 
         // next should be "a"
-        let kv = iter.next_entry().await.unwrap().unwrap();
+        let kv = iter.next().await.unwrap().unwrap();
         assert_eq!(kv.key.as_ref(), b"a");
     }
 
@@ -1441,7 +1441,7 @@ mod tests {
                             .collect();
 
                         // First entry should be the first occurrence of the seek key
-                        let first = iter.next_entry().await.unwrap();
+                        let first = iter.next().await.unwrap();
                         prop_assert!(first.is_some(), "seek to {:?} should find an entry", seek_key);
                         let first = first.unwrap();
                         prop_assert_eq!(
@@ -1455,14 +1455,14 @@ mod tests {
 
                         // Remaining entries should match in order
                         for (expected_key, expected_seq) in &expected[1..] {
-                            let entry = iter.next_entry().await.unwrap();
+                            let entry = iter.next().await.unwrap();
                             prop_assert!(entry.is_some());
                             let entry = entry.unwrap();
                             prop_assert_eq!(entry.key.as_ref(), expected_key.as_slice());
                             prop_assert_eq!(entry.seq, *expected_seq);
                         }
 
-                        prop_assert!(iter.next_entry().await.unwrap().is_none());
+                        prop_assert!(iter.next().await.unwrap().is_none());
                     }
                     Ok(())
                 });
@@ -1489,7 +1489,7 @@ mod tests {
                             .collect();
 
                         // First entry should be the last occurrence of the seek key
-                        let first = iter.next_entry().await.unwrap();
+                        let first = iter.next().await.unwrap();
                         prop_assert!(first.is_some(), "descending seek to {:?} should find an entry", seek_key);
                         let first = first.unwrap();
                         prop_assert_eq!(
@@ -1503,14 +1503,14 @@ mod tests {
 
                         // Remaining entries should match in reverse order
                         for (expected_key, expected_seq) in &expected[1..] {
-                            let entry = iter.next_entry().await.unwrap();
+                            let entry = iter.next().await.unwrap();
                             prop_assert!(entry.is_some());
                             let entry = entry.unwrap();
                             prop_assert_eq!(entry.key.as_ref(), expected_key.as_slice());
                             prop_assert_eq!(entry.seq, *expected_seq);
                         }
 
-                        prop_assert!(iter.next_entry().await.unwrap().is_none());
+                        prop_assert!(iter.next().await.unwrap().is_none());
                     }
                     Ok(())
                 });

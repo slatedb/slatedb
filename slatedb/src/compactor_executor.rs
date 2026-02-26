@@ -133,7 +133,7 @@ impl<T: KeyValueIterator> ResumingIterator<T> {
                 if entry.seq < seq {
                     break;
                 }
-                resuming_iter.iterator.next_entry().await?;
+                resuming_iter.iterator.next().await?;
             }
         }
         Ok(resuming_iter)
@@ -152,8 +152,8 @@ impl<T: KeyValueIterator> KeyValueIterator for ResumingIterator<T> {
         self.iterator.init().await
     }
 
-    async fn next_entry(&mut self) -> Result<Option<crate::types::RowEntry>, SlateDBError> {
-        self.iterator.next_entry().await
+    async fn next(&mut self) -> Result<Option<crate::types::RowEntry>, SlateDBError> {
+        self.iterator.next().await
     }
 
     async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
@@ -398,7 +398,7 @@ impl TokioCompactionExecutorInner {
             estimate_bytes_before_key(args.sorted_runs.as_slice(), k)
         });
 
-        while let Some(kv) = all_iter.next_entry().await? {
+        while let Some(kv) = all_iter.next().await? {
             let duration_since_last_report =
                 self.clock.now().signed_duration_since(last_progress_report);
             if duration_since_last_report > TimeDelta::seconds(1) {
@@ -1060,7 +1060,7 @@ mod tests {
         // after the persisted prefix and continuing in sorted order.
         let mut iter = executor.inner.load_iterators(&job_args).await.unwrap();
         let mut resumed_entries = Vec::new();
-        while let Some(entry) = iter.next_entry().await.unwrap() {
+        while let Some(entry) = iter.next().await.unwrap() {
             resumed_entries.push(entry);
         }
         assert_eq!(resumed_entries, expected_rows);
@@ -1231,7 +1231,7 @@ mod tests {
                     )
                     .unwrap();
                     iter.init().await.unwrap();
-                    while let Some(entry) = iter.next_entry().await.unwrap() {
+                    while let Some(entry) = iter.next().await.unwrap() {
                         expected_entries.push(entry);
                     }
                 }
@@ -1276,7 +1276,7 @@ mod tests {
                         )
                         .unwrap();
                         iter.init().await.unwrap();
-                        while let Some(entry) = iter.next_entry().await.unwrap() {
+                        while let Some(entry) = iter.next().await.unwrap() {
                             resumed_entries.push(entry);
                         }
                     }
@@ -1448,28 +1448,28 @@ mod tests {
         )
         .unwrap();
         iter.init().await.unwrap();
-        let next = iter.next_entry().await.unwrap().unwrap();
+        let next = iter.next().await.unwrap().unwrap();
         assert_eq!(next.key, Bytes::from(b"foo".as_slice()));
         assert_eq!(
             next.value,
             ValueDeletable::Merge(Bytes::from(b"3".as_slice()))
         );
         assert_eq!(next.seq, retention_min_seq_num + 2);
-        let next = iter.next_entry().await.unwrap().unwrap();
+        let next = iter.next().await.unwrap().unwrap();
         assert_eq!(next.key, Bytes::from(b"foo".as_slice()));
         assert_eq!(
             next.value,
             ValueDeletable::Merge(Bytes::from(b"2".as_slice()))
         );
         assert_eq!(next.seq, retention_min_seq_num + 1);
-        let next = iter.next_entry().await.unwrap().unwrap();
+        let next = iter.next().await.unwrap().unwrap();
         assert_eq!(next.key, Bytes::from(b"foo".as_slice()));
         assert_eq!(
             next.value,
             ValueDeletable::Merge(Bytes::from(b"01".as_slice()))
         );
         assert_eq!(next.seq, retention_min_seq_num);
-        assert!(iter.next_entry().await.unwrap().is_none());
+        assert!(iter.next().await.unwrap().is_none());
     }
 
     #[cfg(feature = "compaction_filters")]
@@ -1594,7 +1594,7 @@ mod tests {
         // drop:key1 and drop:key2 should be DROPPED (not present)
 
         // keep:key3 - unchanged (Keep decision)
-        let next = iter.next_entry().await.unwrap().unwrap();
+        let next = iter.next().await.unwrap().unwrap();
         assert_eq!(next.key, Bytes::from(b"keep:key3".as_slice()));
         assert_eq!(
             next.value,
@@ -1602,7 +1602,7 @@ mod tests {
         );
 
         // keep:key4 - unchanged (Keep decision)
-        let next = iter.next_entry().await.unwrap().unwrap();
+        let next = iter.next().await.unwrap().unwrap();
         assert_eq!(next.key, Bytes::from(b"keep:key4".as_slice()));
         assert_eq!(
             next.value,
@@ -1610,7 +1610,7 @@ mod tests {
         );
 
         // modify:key5 - value modified (Modify decision)
-        let next = iter.next_entry().await.unwrap().unwrap();
+        let next = iter.next().await.unwrap().unwrap();
         assert_eq!(next.key, Bytes::from(b"modify:key5".as_slice()));
         assert_eq!(
             next.value,
@@ -1618,7 +1618,7 @@ mod tests {
         );
 
         // modify:key6 - value modified (Modify decision)
-        let next = iter.next_entry().await.unwrap().unwrap();
+        let next = iter.next().await.unwrap().unwrap();
         assert_eq!(next.key, Bytes::from(b"modify:key6".as_slice()));
         assert_eq!(
             next.value,
@@ -1626,17 +1626,17 @@ mod tests {
         );
 
         // tombstone:key7 - converted to tombstone (Modify to Tombstone decision)
-        let next = iter.next_entry().await.unwrap().unwrap();
+        let next = iter.next().await.unwrap().unwrap();
         assert_eq!(next.key, Bytes::from(b"tombstone:key7".as_slice()));
         assert!(next.value.is_tombstone());
 
         // tombstone:key8 - converted to tombstone (Modify to Tombstone decision)
-        let next = iter.next_entry().await.unwrap().unwrap();
+        let next = iter.next().await.unwrap().unwrap();
         assert_eq!(next.key, Bytes::from(b"tombstone:key8".as_slice()));
         assert!(next.value.is_tombstone());
 
         // No more entries
-        assert!(iter.next_entry().await.unwrap().is_none());
+        assert!(iter.next().await.unwrap().is_none());
     }
 
     #[cfg(feature = "compaction_filters")]
