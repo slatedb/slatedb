@@ -38,7 +38,7 @@ With that in mind, I propose to create a type alias for settings called `Setting
 
 ### Provide a builder API that allows users to customize the engine
 
-Instead of having to pass all the components to the `Db::open` method, we will provide a builder API that allows users to customize the engine. This API will also include a method to provide the settings to the engine. The methods in this builder API will be named after the components they customize, for example `with_block_cache`, or `with_object_store`.
+Instead of having to pass all the components to the `Db::open` method, we will provide a builder API that allows users to customize the engine. This API will also include a method to provide the settings to the engine. The methods in this builder API will be named after the components they customize, for example `with_db_cache`, or `with_object_store`.
 
 ```rust
 let object_store = Arc::new(InMemory::new());
