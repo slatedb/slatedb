@@ -1,17 +1,17 @@
 use async_trait::async_trait;
 
 use crate::error::SlateDBError;
-use crate::iter::KeyValueIterator;
+use crate::iter::RowEntryIterator;
 use crate::types::RowEntry;
 
 pub(crate) type FilterPredicate = Box<dyn Fn(&RowEntry) -> bool + Send + Sync>;
 
-pub(crate) struct FilterIterator<T: KeyValueIterator> {
+pub(crate) struct FilterIterator<T: RowEntryIterator> {
     iterator: T,
     predicate: FilterPredicate,
 }
 
-impl<T: KeyValueIterator> FilterIterator<T> {
+impl<T: RowEntryIterator> FilterIterator<T> {
     pub(crate) fn new(iterator: T, predicate: FilterPredicate) -> Self {
         Self {
             predicate,
@@ -31,7 +31,7 @@ impl<T: KeyValueIterator> FilterIterator<T> {
 }
 
 #[async_trait]
-impl<T: KeyValueIterator> KeyValueIterator for FilterIterator<T> {
+impl<T: RowEntryIterator> RowEntryIterator for FilterIterator<T> {
     async fn init(&mut self) -> Result<(), SlateDBError> {
         self.iterator.init().await
     }

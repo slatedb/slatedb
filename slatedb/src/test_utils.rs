@@ -5,7 +5,7 @@ use crate::config::{CompactorOptions, PutOptions, WriteOptions};
 use crate::db_state::{SortedRun, SsTableHandle, SsTableId};
 use crate::error::SlateDBError;
 use crate::format::row::SstRowCodecV0;
-use crate::iter::{IterationOrder, KeyValueIterator};
+use crate::iter::{IterationOrder, RowEntryIterator};
 use crate::tablestore::TableStore;
 use crate::types::{KeyValue, RowAttributes, RowEntry, ValueDeletable};
 use async_trait::async_trait;
@@ -34,7 +34,7 @@ use tracing_subscriber::EnvFilter;
 use ulid::Ulid;
 
 /// Asserts that the iterator returns the exact set of expected values in correct order.
-pub(crate) async fn assert_iterator<T: KeyValueIterator>(iterator: &mut T, entries: Vec<RowEntry>) {
+pub(crate) async fn assert_iterator<T: RowEntryIterator>(iterator: &mut T, entries: Vec<RowEntry>) {
     iterator
         .init()
         .await
@@ -49,7 +49,7 @@ pub(crate) async fn assert_iterator<T: KeyValueIterator>(iterator: &mut T, entri
         .is_none());
 }
 
-pub(crate) async fn assert_next<T: KeyValueIterator>(iterator: &mut T, expected_entry: &RowEntry) {
+pub(crate) async fn assert_next<T: RowEntryIterator>(iterator: &mut T, expected_entry: &RowEntry) {
     iterator
         .init()
         .await
@@ -105,7 +105,7 @@ impl TestIterator {
 }
 
 #[async_trait]
-impl KeyValueIterator for TestIterator {
+impl RowEntryIterator for TestIterator {
     async fn init(&mut self) -> Result<(), SlateDBError> {
         Ok(())
     }
@@ -201,7 +201,7 @@ pub(crate) async fn assert_ranged_db_scan<T: RangeBounds<Bytes>>(
     }
 }
 
-pub(crate) async fn assert_ranged_kv_scan<T: KeyValueIterator>(
+pub(crate) async fn assert_ranged_kv_scan<T: RowEntryIterator>(
     table: &BTreeMap<Bytes, Bytes>,
     range: &BytesRange,
     ordering: IterationOrder,

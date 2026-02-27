@@ -1,6 +1,6 @@
 use crate::db_state::{ManifestCore, SsTableId};
 use crate::error::SlateDBError;
-use crate::iter::KeyValueIterator;
+use crate::iter::RowEntryIterator;
 use crate::mem_table::WritableKVTable;
 use crate::sst_iter::{SstIterator, SstIteratorOptions};
 use crate::tablestore::TableStore;
@@ -285,7 +285,7 @@ mod tests {
     use crate::bytes_range::BytesRange;
     use crate::db_state::{ManifestCore, SsTableId};
     use crate::format::sst::SsTableFormat;
-    use crate::iter::{IterationOrder, KeyValueIterator};
+    use crate::iter::{IterationOrder, RowEntryIterator};
     use crate::mem_table::WritableKVTable;
     use crate::object_stores::ObjectStores;
     use crate::proptest_util::{rng, sample};

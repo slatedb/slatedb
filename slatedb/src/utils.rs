@@ -10,7 +10,7 @@ use crate::db_state::SortedRun;
 use crate::db_state::SsTableHandle;
 use crate::error::SlateDBError;
 use crate::format::sst::{SST_FORMAT_VERSION, SST_FORMAT_VERSION_V2};
-use crate::iter::{IterationOrder, KeyValueIterator};
+use crate::iter::{IterationOrder, RowEntryIterator};
 use crate::paths::PathResolver;
 use crate::tablestore::TableStore;
 use crate::types::RowEntry;

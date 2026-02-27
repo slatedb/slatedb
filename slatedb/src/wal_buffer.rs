@@ -602,7 +602,7 @@ mod tests {
     use crate::clock::MonotonicClock;
     use crate::db_status::DbStatusReporter;
     use crate::format::sst::SsTableFormat;
-    use crate::iter::KeyValueIterator;
+    use crate::iter::RowEntryIterator;
     use crate::manifest::store::test_utils::new_dirty_manifest;
     use crate::object_stores::ObjectStores;
     use crate::sst_iter::{SstIterator, SstIteratorOptions};

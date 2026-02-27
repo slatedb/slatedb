@@ -1626,7 +1626,7 @@ mod tests {
     use crate::db_state::ManifestCore;
     use crate::db_stats::IMMUTABLE_MEMTABLE_FLUSHES;
     use crate::format::sst::SsTableFormat;
-    use crate::iter::KeyValueIterator;
+    use crate::iter::RowEntryIterator;
     use crate::manifest::store::{ManifestStore, StoredManifest};
     use crate::object_stores::ObjectStores;
     use crate::proptest_util::arbitrary;

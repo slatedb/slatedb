@@ -5,7 +5,7 @@ use crate::block_iterator::BlockLike;
 use crate::error::SlateDBError;
 use crate::format::row_codec_v2::SstRowCodecV2;
 use crate::iter::IterationOrder;
-use crate::iter::KeyValueIterator;
+use crate::iter::RowEntryIterator;
 use crate::types::RowEntry;
 
 /// Internal state for ascending iteration.
@@ -227,7 +227,7 @@ impl<B: BlockLike> AscendingState<B> {
 }
 
 #[async_trait]
-impl<B: BlockLike> KeyValueIterator for BlockIteratorV2<B> {
+impl<B: BlockLike> RowEntryIterator for BlockIteratorV2<B> {
     async fn init(&mut self) -> Result<(), SlateDBError> {
         Ok(())
     }
@@ -391,7 +391,7 @@ impl<B: BlockLike> DescendingBlockIteratorV2<B> {
 }
 
 #[async_trait]
-impl<B: BlockLike> KeyValueIterator for DescendingBlockIteratorV2<B> {
+impl<B: BlockLike> RowEntryIterator for DescendingBlockIteratorV2<B> {
     async fn init(&mut self) -> Result<(), SlateDBError> {
         if !self.initialized && !self.exhausted {
             self.load_restart_region(self.current_restart_idx as usize)?;

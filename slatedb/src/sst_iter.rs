@@ -19,7 +19,7 @@ use crate::format::block::Block;
 use crate::format::sst::{SST_FORMAT_VERSION, SST_FORMAT_VERSION_V2};
 use crate::{
     block_iterator::BlockIterator,
-    iter::{init_optional_iterator, IterationOrder, KeyValueIterator},
+    iter::{init_optional_iterator, IterationOrder, RowEntryIterator},
     partitioned_keyspace,
     tablestore::TableStore,
     types::RowEntry,
@@ -682,7 +682,7 @@ impl<'a> InternalSstIterator<'a> {
 }
 
 #[async_trait]
-impl KeyValueIterator for InternalSstIterator<'_> {
+impl RowEntryIterator for InternalSstIterator<'_> {
     async fn init(&mut self) -> Result<(), SlateDBError> {
         if !self.state.is_initialized() {
             self.advance_block().await?;
@@ -846,7 +846,7 @@ impl<'a> BloomFilterIterator<'a> {
 }
 
 #[async_trait]
-impl KeyValueIterator for BloomFilterIterator<'_> {
+impl RowEntryIterator for BloomFilterIterator<'_> {
     async fn init(&mut self) -> Result<(), SlateDBError> {
         if !self.initialized {
             let maybe_filter = self
@@ -1073,7 +1073,7 @@ impl<'a> SstIterator<'a> {
 }
 
 #[async_trait]
-impl KeyValueIterator for SstIterator<'_> {
+impl RowEntryIterator for SstIterator<'_> {
     async fn init(&mut self) -> Result<(), SlateDBError> {
         match &mut self.delegate {
             SstIteratorDelegate::Direct(inner) => inner.init().await,

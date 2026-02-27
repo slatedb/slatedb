@@ -6,7 +6,7 @@
 
 use crate::config::{MergeOptions, PutOptions};
 use crate::error::SlateDBError;
-use crate::iter::{IterationOrder, KeyValueIterator};
+use crate::iter::{IterationOrder, RowEntryIterator};
 use crate::mem_table::{KVTableInternalKeyRange, SequencedKey};
 use crate::merge_operator::{MergeOperatorIterator, MergeOperatorType};
 use crate::types::{RowEntry, ValueDeletable};
@@ -298,7 +298,7 @@ impl WriteBatch {
         default_ttl: Option<u64>,
         merger: Option<MergeOperatorType>,
     ) -> Result<Vec<RowEntry>, SlateDBError> {
-        let mut it: Box<dyn KeyValueIterator> = Box::new(WriteBatchIterator::new_with_seq_and_ttl(
+        let mut it: Box<dyn RowEntryIterator> = Box::new(WriteBatchIterator::new_with_seq_and_ttl(
             self,
             ..,
             IterationOrder::Ascending,
@@ -393,7 +393,7 @@ impl WriteBatchIterator {
 }
 
 #[async_trait]
-impl KeyValueIterator for WriteBatchIterator {
+impl RowEntryIterator for WriteBatchIterator {
     async fn init(&mut self) -> Result<(), crate::error::SlateDBError> {
         Ok(())
     }

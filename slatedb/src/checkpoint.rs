@@ -65,7 +65,7 @@ mod tests {
     use crate::db::Db;
     use crate::db_state::SsTableId;
     use crate::format::sst::SsTableFormat;
-    use crate::iter::KeyValueIterator;
+    use crate::iter::RowEntryIterator;
     use crate::manifest::store::ManifestStore;
     use crate::manifest::Manifest;
     use crate::object_stores::ObjectStores;

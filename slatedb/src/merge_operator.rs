@@ -6,7 +6,7 @@ use thiserror::Error;
 
 use crate::{
     error::SlateDBError,
-    iter::{KeyValueIterator, TrackedKeyValueIterator},
+    iter::{RowEntryIterator, TrackedRowEntryIterator},
     types::{RowEntry, ValueDeletable},
     utils::{is_not_expired, merge_options},
 };
@@ -132,18 +132,18 @@ pub(crate) type MergeOperatorType = Arc<dyn MergeOperator + Send + Sync>;
 const MERGE_BATCH_SIZE: usize = 100;
 
 /// An iterator that ensures merge operands are not returned when no merge operator is configured.
-pub(crate) struct MergeOperatorRequiredIterator<T: KeyValueIterator> {
+pub(crate) struct MergeOperatorRequiredIterator<T: RowEntryIterator> {
     delegate: T,
 }
 
-impl<T: KeyValueIterator> MergeOperatorRequiredIterator<T> {
+impl<T: RowEntryIterator> MergeOperatorRequiredIterator<T> {
     pub(crate) fn new(delegate: T) -> Self {
         Self { delegate }
     }
 }
 
 #[async_trait]
-impl<T: KeyValueIterator> KeyValueIterator for MergeOperatorRequiredIterator<T> {
+impl<T: RowEntryIterator> RowEntryIterator for MergeOperatorRequiredIterator<T> {
     async fn init(&mut self) -> Result<(), SlateDBError> {
         self.delegate.init().await
     }
@@ -166,7 +166,7 @@ impl<T: KeyValueIterator> KeyValueIterator for MergeOperatorRequiredIterator<T> 
     }
 }
 
-impl<T: TrackedKeyValueIterator> TrackedKeyValueIterator for MergeOperatorRequiredIterator<T> {
+impl<T: TrackedRowEntryIterator> TrackedRowEntryIterator for MergeOperatorRequiredIterator<T> {
     fn bytes_processed(&self) -> u64 {
         self.delegate.bytes_processed()
     }
@@ -177,7 +177,7 @@ impl<T: TrackedKeyValueIterator> TrackedKeyValueIterator for MergeOperatorRequir
 /// It is expected that this is the top level iterator in a merge scan, and therefore
 /// return a ValueDeletable::Value entry (instead of a Merge even if the resolved value
 /// is a merge operand).
-pub(crate) struct MergeOperatorIterator<T: KeyValueIterator> {
+pub(crate) struct MergeOperatorIterator<T: RowEntryIterator> {
     merge_operator: MergeOperatorType,
     delegate: T,
     /// Entry from the delegate that we've peeked ahead and buffered.
@@ -243,7 +243,7 @@ impl MergeTracker {
 }
 
 #[allow(unused)]
-impl<T: KeyValueIterator> MergeOperatorIterator<T> {
+impl<T: RowEntryIterator> MergeOperatorIterator<T> {
     pub(crate) fn new(
         merge_operator: MergeOperatorType,
         delegate: T,
@@ -262,7 +262,7 @@ impl<T: KeyValueIterator> MergeOperatorIterator<T> {
     }
 }
 
-impl<T: KeyValueIterator> MergeOperatorIterator<T> {
+impl<T: RowEntryIterator> MergeOperatorIterator<T> {
     /// Checks if an entry matches the current key and expiration timestamp.
     /// Returns true if keys match and either `merge_different_expire_ts` is enabled
     /// or the expire_ts matches.
@@ -382,7 +382,7 @@ impl<T: KeyValueIterator> MergeOperatorIterator<T> {
 }
 
 #[async_trait]
-impl<T: KeyValueIterator> KeyValueIterator for MergeOperatorIterator<T> {
+impl<T: RowEntryIterator> RowEntryIterator for MergeOperatorIterator<T> {
     async fn init(&mut self) -> Result<(), SlateDBError> {
         self.delegate.init().await
     }
@@ -416,7 +416,7 @@ impl<T: KeyValueIterator> KeyValueIterator for MergeOperatorIterator<T> {
     }
 }
 
-impl<T: TrackedKeyValueIterator> TrackedKeyValueIterator for MergeOperatorIterator<T> {
+impl<T: TrackedRowEntryIterator> TrackedRowEntryIterator for MergeOperatorIterator<T> {
     fn bytes_processed(&self) -> u64 {
         self.delegate.bytes_processed()
     }
@@ -519,7 +519,7 @@ mod tests {
             RowEntry::new_merge(b"key3", b"2", 7),
             RowEntry::new_merge(b"key3", b"3", 8),
         ];
-        let mut iterator = MergeOperatorIterator::<MockKeyValueIterator>::new(
+        let mut iterator = MergeOperatorIterator::<MockRowEntryIterator>::new(
             merge_operator,
             data.into(),
             true,
@@ -643,7 +643,7 @@ mod tests {
     #[tokio::test]
     async fn test(#[case] test_case: TestCase) {
         let merge_operator = Arc::new(MockMergeOperator {});
-        let mut iterator = MergeOperatorIterator::<MockKeyValueIterator>::new(
+        let mut iterator = MergeOperatorIterator::<MockRowEntryIterator>::new(
             merge_operator,
             test_case.unsorted_data.into(),
             test_case.merge_different_expire_ts,
@@ -653,12 +653,12 @@ mod tests {
         assert_iterator(&mut iterator, test_case.expected).await;
     }
 
-    struct MockKeyValueIterator {
+    struct MockRowEntryIterator {
         values: VecDeque<RowEntry>,
     }
 
     #[async_trait]
-    impl KeyValueIterator for MockKeyValueIterator {
+    impl RowEntryIterator for MockRowEntryIterator {
         async fn init(&mut self) -> Result<(), SlateDBError> {
             Ok(())
         }
@@ -673,8 +673,8 @@ mod tests {
         }
     }
 
-    impl From<Vec<RowEntry>> for MockKeyValueIterator {
-        /// Converts a vector of RowEntries into a MockKeyValueIterator. The vector is sorted
+    impl From<Vec<RowEntry>> for MockRowEntryIterator {
+        /// Converts a vector of RowEntries into a MockRowEntryIterator. The vector is sorted
         /// by key and reverse sequence number.
         fn from(values: Vec<RowEntry>) -> Self {
             let mut sorted_values = values;
@@ -786,7 +786,7 @@ mod tests {
             RowEntry::new_merge(b"max:score", &3u64.to_le_bytes(), 6),
         ];
 
-        let mut iterator = MergeOperatorIterator::<MockKeyValueIterator>::new(
+        let mut iterator = MergeOperatorIterator::<MockRowEntryIterator>::new(
             merge_operator,
             data.into(),
             true,
@@ -817,7 +817,7 @@ mod tests {
             data.push(RowEntry::new_merge(b"key1", &[i as u8], i));
         }
 
-        let mut iterator = MergeOperatorIterator::<MockKeyValueIterator>::new(
+        let mut iterator = MergeOperatorIterator::<MockRowEntryIterator>::new(
             merge_operator,
             data.into(),
             true,
@@ -841,7 +841,7 @@ mod tests {
             data.push(RowEntry::new_merge(b"key1", &[i as u8], i));
         }
 
-        let mut iterator = MergeOperatorIterator::<MockKeyValueIterator>::new(
+        let mut iterator = MergeOperatorIterator::<MockRowEntryIterator>::new(
             merge_operator,
             data.into(),
             true,
@@ -866,7 +866,7 @@ mod tests {
             data.push(RowEntry::new_merge(b"key1", &[i as u8], i));
         }
 
-        let mut iterator = MergeOperatorIterator::<MockKeyValueIterator>::new(
+        let mut iterator = MergeOperatorIterator::<MockRowEntryIterator>::new(
             merge_operator,
             data.into(),
             true,
@@ -898,7 +898,7 @@ mod tests {
             data.push(RowEntry::new_merge(b"key1", &[i as u8], i));
         }
 
-        let mut iterator = MergeOperatorIterator::<MockKeyValueIterator>::new(
+        let mut iterator = MergeOperatorIterator::<MockRowEntryIterator>::new(
             merge_operator,
             data.into(),
             true,
@@ -937,7 +937,7 @@ mod tests {
             RowEntry::new_merge(b"key1", b"3", 3).with_expire_ts(50),
         ];
 
-        let mut iterator = MergeOperatorIterator::<MockKeyValueIterator>::new(
+        let mut iterator = MergeOperatorIterator::<MockRowEntryIterator>::new(
             merge_operator,
             data.into(),
             true,
@@ -978,7 +978,7 @@ mod tests {
             RowEntry::new_value(b"key1", b"BASE", 0).with_expire_ts(200),
         ];
 
-        let mut iterator = MergeOperatorIterator::<MockKeyValueIterator>::new(
+        let mut iterator = MergeOperatorIterator::<MockRowEntryIterator>::new(
             merge_operator,
             data.into(),
             true,
@@ -1011,7 +1011,7 @@ mod tests {
             RowEntry::new_merge(b"key1", b"3", 3).with_expire_ts(90),
         ];
 
-        let mut iterator = MergeOperatorIterator::<MockKeyValueIterator>::new(
+        let mut iterator = MergeOperatorIterator::<MockRowEntryIterator>::new(
             merge_operator,
             data.into(),
             true,

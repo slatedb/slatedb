@@ -1,17 +1,17 @@
 use async_trait::async_trait;
 
 use crate::error::SlateDBError;
-use crate::iter::{KeyValueIterator, TrackedKeyValueIterator};
+use crate::iter::{RowEntryIterator, TrackedRowEntryIterator};
 use crate::types::RowEntry;
 
 /// An iterator adapter that can peek at the next [`RowEntry`] without advancing.
-pub(crate) struct PeekingIterator<T: KeyValueIterator> {
+pub(crate) struct PeekingIterator<T: RowEntryIterator> {
     iterator: T,
     peeked: Option<RowEntry>,
     has_peeked: bool,
 }
 
-impl<T: KeyValueIterator> PeekingIterator<T> {
+impl<T: RowEntryIterator> PeekingIterator<T> {
     pub(crate) fn new(iterator: T) -> Self {
         Self {
             iterator,
@@ -41,7 +41,7 @@ impl<T: KeyValueIterator> PeekingIterator<T> {
 }
 
 #[async_trait]
-impl<T: KeyValueIterator> KeyValueIterator for PeekingIterator<T> {
+impl<T: RowEntryIterator> RowEntryIterator for PeekingIterator<T> {
     async fn init(&mut self) -> Result<(), SlateDBError> {
         self.iterator.init().await
     }
@@ -61,7 +61,7 @@ impl<T: KeyValueIterator> KeyValueIterator for PeekingIterator<T> {
     }
 }
 
-impl<T: TrackedKeyValueIterator> TrackedKeyValueIterator for PeekingIterator<T> {
+impl<T: TrackedRowEntryIterator> TrackedRowEntryIterator for PeekingIterator<T> {
     fn bytes_processed(&self) -> u64 {
         self.iterator.bytes_processed()
     }

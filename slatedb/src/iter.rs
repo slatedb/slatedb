@@ -15,7 +15,7 @@ pub(crate) enum IterationOrder {
 /// See: https://github.com/slatedb/slatedb/issues/12
 
 #[async_trait]
-pub(crate) trait KeyValueIterator: Send + Sync {
+pub(crate) trait RowEntryIterator: Send + Sync {
     /// Performs any expensive initialization required before regular iteration.
     ///
     /// This method should be idempotent and can be called multiple times, only
@@ -48,17 +48,17 @@ pub(crate) trait KeyValueIterator: Send + Sync {
 
 /// Iterator trait that tracks bytes processed for progress reporting.
 ///
-/// This extends `KeyValueIterator` with progress tracking capability.
+/// This extends `RowEntryIterator` with progress tracking capability.
 /// Only iterators used in the compaction pipeline implement this trait.
 /// The bottom-most iterator (MergeIterator) tracks actual bytes, while
 /// wrapper iterators delegate to their inner iterator.
-pub(crate) trait TrackedKeyValueIterator: KeyValueIterator {
+pub(crate) trait TrackedRowEntryIterator: RowEntryIterator {
     /// Returns the total bytes processed (key + value length) by this iterator.
     fn bytes_processed(&self) -> u64;
 }
 
 /// Initializes the iterator contained in the option, propagating `None` unchanged.
-pub(crate) async fn init_optional_iterator<T: KeyValueIterator>(
+pub(crate) async fn init_optional_iterator<T: RowEntryIterator>(
     iter: Option<T>,
 ) -> Result<Option<T>, SlateDBError> {
     match iter {
@@ -71,7 +71,7 @@ pub(crate) async fn init_optional_iterator<T: KeyValueIterator>(
 }
 
 #[async_trait]
-impl<'a> KeyValueIterator for Box<dyn KeyValueIterator + 'a> {
+impl<'a> RowEntryIterator for Box<dyn RowEntryIterator + 'a> {
     async fn init(&mut self) -> Result<(), SlateDBError> {
         self.as_mut().init().await
     }
@@ -86,7 +86,7 @@ impl<'a> KeyValueIterator for Box<dyn KeyValueIterator + 'a> {
 }
 
 #[async_trait]
-impl<'a> KeyValueIterator for Box<dyn TrackedKeyValueIterator + 'a> {
+impl<'a> RowEntryIterator for Box<dyn TrackedRowEntryIterator + 'a> {
     async fn init(&mut self) -> Result<(), SlateDBError> {
         self.as_mut().init().await
     }
@@ -100,7 +100,7 @@ impl<'a> KeyValueIterator for Box<dyn TrackedKeyValueIterator + 'a> {
     }
 }
 
-impl<'a> TrackedKeyValueIterator for Box<dyn TrackedKeyValueIterator + 'a> {
+impl<'a> TrackedRowEntryIterator for Box<dyn TrackedRowEntryIterator + 'a> {
     fn bytes_processed(&self) -> u64 {
         self.as_ref().bytes_processed()
     }
@@ -115,7 +115,7 @@ impl EmptyIterator {
 }
 
 #[async_trait]
-impl KeyValueIterator for EmptyIterator {
+impl RowEntryIterator for EmptyIterator {
     async fn init(&mut self) -> Result<(), SlateDBError> {
         Ok(())
     }

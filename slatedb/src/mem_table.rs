@@ -15,7 +15,7 @@ use chrono::{DateTime, Utc};
 use parking_lot::Mutex;
 
 use crate::error::SlateDBError;
-use crate::iter::{IterationOrder, KeyValueIterator};
+use crate::iter::{IterationOrder, RowEntryIterator};
 use crate::seq_tracker::{SequenceTracker, TrackedSeq};
 use crate::types::RowEntry;
 use crate::utils::{WatchableOnceCell, WatchableOnceCellReader};
@@ -177,7 +177,7 @@ pub(crate) struct MemTableIteratorInner<T: RangeBounds<SequencedKey>> {
 pub(crate) type MemTableIterator = MemTableIteratorInner<KVTableInternalKeyRange>;
 
 #[async_trait]
-impl KeyValueIterator for MemTableIterator {
+impl RowEntryIterator for MemTableIterator {
     async fn init(&mut self) -> Result<(), SlateDBError> {
         Ok(())
     }

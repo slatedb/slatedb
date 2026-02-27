@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::error::SlateDBError;
-use crate::iter::{KeyValueIterator, TrackedKeyValueIterator};
+use crate::iter::{RowEntryIterator, TrackedRowEntryIterator};
 use crate::seq_tracker::{FindOption, SequenceTracker};
 use crate::types::ValueDeletable::Tombstone;
 use crate::types::{RowEntry, ValueDeletable};
@@ -16,7 +16,7 @@ use slatedb_common::clock::SystemClock;
 /// This iterator implements a retention policy by filtering out entries that are older than a specified
 /// retention period. It assumes the upstream iterator provides entries in decreasing order of sequence numbers
 /// (newest first) and groups entries by key to apply retention filtering across all versions of each key.
-pub(crate) struct RetentionIterator<T: KeyValueIterator> {
+pub(crate) struct RetentionIterator<T: RowEntryIterator> {
     /// The upstream iterator providing entries in decreasing order of sequence numbers
     inner: T,
     /// Retention time duration. Entries with create_ts older than (current_time - retention_time)
@@ -38,7 +38,7 @@ pub(crate) struct RetentionIterator<T: KeyValueIterator> {
     sequence_tracker: Arc<SequenceTracker>,
 }
 
-impl<T: KeyValueIterator> RetentionIterator<T> {
+impl<T: RowEntryIterator> RetentionIterator<T> {
     /// Creates a new retention iterator with the specified retention policy
     pub(crate) async fn new(
         inner: T,
@@ -178,7 +178,7 @@ impl<T: KeyValueIterator> RetentionIterator<T> {
 }
 
 #[async_trait]
-impl<T: KeyValueIterator> KeyValueIterator for RetentionIterator<T> {
+impl<T: RowEntryIterator> RowEntryIterator for RetentionIterator<T> {
     async fn init(&mut self) -> Result<(), SlateDBError> {
         self.inner.init().await?;
         Ok(())
@@ -253,7 +253,7 @@ impl<T: KeyValueIterator> KeyValueIterator for RetentionIterator<T> {
     }
 }
 
-impl<T: TrackedKeyValueIterator> TrackedKeyValueIterator for RetentionIterator<T> {
+impl<T: TrackedRowEntryIterator> TrackedRowEntryIterator for RetentionIterator<T> {
     fn bytes_processed(&self) -> u64 {
         self.inner.bytes_processed()
     }

@@ -1,16 +1,16 @@
 use crate::compaction_filter::{CompactionFilter, CompactionFilterDecision};
 use crate::error::SlateDBError;
-use crate::iter::{KeyValueIterator, TrackedKeyValueIterator};
+use crate::iter::{RowEntryIterator, TrackedRowEntryIterator};
 use crate::types::RowEntry;
 use async_trait::async_trait;
 
 /// Iterator that applies a compaction filter to entries during compaction.
-pub(crate) struct CompactionFilterIterator<T: KeyValueIterator> {
+pub(crate) struct CompactionFilterIterator<T: RowEntryIterator> {
     inner: T,
     filter: Box<dyn CompactionFilter>,
 }
 
-impl<T: KeyValueIterator> CompactionFilterIterator<T> {
+impl<T: RowEntryIterator> CompactionFilterIterator<T> {
     /// Creates a new CompactionFilterIterator.
     pub(crate) fn new(inner: T, filter: Box<dyn CompactionFilter>) -> Self {
         Self { inner, filter }
@@ -42,7 +42,7 @@ impl<T: KeyValueIterator> CompactionFilterIterator<T> {
 }
 
 #[async_trait]
-impl<T: KeyValueIterator> KeyValueIterator for CompactionFilterIterator<T> {
+impl<T: RowEntryIterator> RowEntryIterator for CompactionFilterIterator<T> {
     async fn init(&mut self) -> Result<(), SlateDBError> {
         self.inner.init().await
     }
@@ -70,7 +70,7 @@ impl<T: KeyValueIterator> KeyValueIterator for CompactionFilterIterator<T> {
     }
 }
 
-impl<T: TrackedKeyValueIterator> TrackedKeyValueIterator for CompactionFilterIterator<T> {
+impl<T: TrackedRowEntryIterator> TrackedRowEntryIterator for CompactionFilterIterator<T> {
     fn bytes_processed(&self) -> u64 {
         self.inner.bytes_processed()
     }
@@ -97,7 +97,7 @@ mod tests {
     }
 
     #[async_trait]
-    impl KeyValueIterator for MockIterator {
+    impl RowEntryIterator for MockIterator {
         async fn init(&mut self) -> Result<(), SlateDBError> {
             Ok(())
         }

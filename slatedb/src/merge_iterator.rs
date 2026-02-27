@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 
 use crate::error::SlateDBError;
-use crate::iter::{KeyValueIterator, TrackedKeyValueIterator};
+use crate::iter::{RowEntryIterator, TrackedRowEntryIterator};
 use crate::types::{RowEntry, ValueDeletable};
 use std::cmp::{Ordering, Reverse};
 use std::collections::{BinaryHeap, VecDeque};
@@ -9,7 +9,7 @@ use std::collections::{BinaryHeap, VecDeque};
 struct MergeIteratorHeapEntry<'a> {
     next_kv: RowEntry,
     index: usize,
-    iterator: Box<dyn KeyValueIterator + 'a>,
+    iterator: Box<dyn RowEntryIterator + 'a>,
 }
 
 impl<'a> MergeIteratorHeapEntry<'a> {
@@ -67,7 +67,7 @@ pub(crate) struct MergeIterator<'a> {
     /// Use a heap to perform merge sort.
     iterators: BinaryHeap<Reverse<MergeIteratorHeapEntry<'a>>>,
     /// Iterators that have not yet been initialized and seeded.
-    pending_iterators: Vec<(usize, Box<dyn KeyValueIterator + 'a>)>,
+    pending_iterators: Vec<(usize, Box<dyn RowEntryIterator + 'a>)>,
     /// Whether to deduplicate entries of multiple versions with the same key. It's enabled by
     /// default, but it is useful to disable when we want to have some merge logics during
     /// compaction.
@@ -79,7 +79,7 @@ pub(crate) struct MergeIterator<'a> {
 }
 
 impl<'a> MergeIterator<'a> {
-    pub(crate) fn new<T: KeyValueIterator + 'a>(
+    pub(crate) fn new<T: RowEntryIterator + 'a>(
         iterators: impl IntoIterator<Item = T>,
     ) -> Result<Self, SlateDBError> {
         Ok(Self {
@@ -89,7 +89,7 @@ impl<'a> MergeIterator<'a> {
                 .into_iter()
                 .enumerate()
                 .map(|(index, iterator)| {
-                    (index, Box::new(iterator) as Box<dyn KeyValueIterator + 'a>)
+                    (index, Box::new(iterator) as Box<dyn RowEntryIterator + 'a>)
                 })
                 .collect(),
             dedup: true,
@@ -155,7 +155,7 @@ impl<'a> MergeIterator<'a> {
 }
 
 #[async_trait]
-impl KeyValueIterator for MergeIterator<'_> {
+impl RowEntryIterator for MergeIterator<'_> {
     async fn init(&mut self) -> Result<(), SlateDBError> {
         self.initialize().await
     }
@@ -216,7 +216,7 @@ impl KeyValueIterator for MergeIterator<'_> {
     }
 }
 
-impl TrackedKeyValueIterator for MergeIterator<'_> {
+impl TrackedRowEntryIterator for MergeIterator<'_> {
     fn bytes_processed(&self) -> u64 {
         self.bytes_processed
     }
@@ -224,7 +224,7 @@ impl TrackedKeyValueIterator for MergeIterator<'_> {
 
 #[cfg(test)]
 mod tests {
-    use crate::iter::KeyValueIterator;
+    use crate::iter::RowEntryIterator;
     use crate::merge_iterator::MergeIterator;
     use crate::test_utils::{assert_iterator, assert_next, TestIterator};
     use crate::types::RowEntry;

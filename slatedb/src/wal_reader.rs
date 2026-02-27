@@ -74,7 +74,7 @@ use object_store::ObjectStore;
 
 use crate::db_state::SsTableId;
 use crate::format::sst::SsTableFormat;
-use crate::iter::{EmptyIterator, KeyValueIterator};
+use crate::iter::{EmptyIterator, RowEntryIterator};
 use crate::object_stores::ObjectStores;
 use crate::sst_iter::{SstIterator, SstIteratorOptions};
 use crate::tablestore::TableStore;
@@ -82,13 +82,13 @@ use crate::types::RowEntry;
 
 /// Iterator over entries in a WAL file.
 pub struct WalFileIterator {
-    iter: Box<dyn KeyValueIterator + 'static>,
+    iter: Box<dyn RowEntryIterator + 'static>,
 }
 
 impl WalFileIterator {
-    /// Creates a new WAL file iterator from a boxed `KeyValueIterator`. The iterator
+    /// Creates a new WAL file iterator from a boxed `RowEntryIterator`. The iterator
     /// must be initialized before being passed in.
-    fn new(iter: Box<dyn KeyValueIterator + 'static>) -> Self {
+    fn new(iter: Box<dyn RowEntryIterator + 'static>) -> Self {
         Self { iter }
     }
 
@@ -159,8 +159,8 @@ impl WalFile {
         )
         .await
         {
-            Ok(Some(iter)) => Box::new(iter) as Box<dyn KeyValueIterator + 'static>,
-            Ok(None) => Box::new(EmptyIterator::new()) as Box<dyn KeyValueIterator + 'static>,
+            Ok(Some(iter)) => Box::new(iter) as Box<dyn RowEntryIterator + 'static>,
+            Ok(None) => Box::new(EmptyIterator::new()) as Box<dyn RowEntryIterator + 'static>,
             Err(err) => return Err(err.into()),
         };
         Ok(WalFileIterator::new(iter))

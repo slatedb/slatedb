@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 
 use crate::error::SlateDBError;
-use crate::iter::KeyValueIterator;
+use crate::iter::RowEntryIterator;
 use crate::types::{RowEntry, ValueDeletable};
 use crate::utils::is_not_expired;
 
@@ -16,14 +16,14 @@ use crate::utils::is_not_expired;
 ///     entry
 /// }));
 /// ```
-pub(crate) struct MapIterator<T: KeyValueIterator> {
+pub(crate) struct MapIterator<T: RowEntryIterator> {
     /// The underlying iterator providing [`RowEntry`] elements.
     iterator: T,
     /// The mapping function applied to each row entry.
     f: Box<dyn Fn(RowEntry) -> RowEntry + Send + Sync>,
 }
 
-impl<T: KeyValueIterator> MapIterator<T> {
+impl<T: RowEntryIterator> MapIterator<T> {
     pub(crate) fn new(iterator: T, f: Box<dyn Fn(RowEntry) -> RowEntry + Send + Sync>) -> Self {
         Self { iterator, f }
     }
@@ -50,7 +50,7 @@ impl<T: KeyValueIterator> MapIterator<T> {
 }
 
 #[async_trait]
-impl<T: KeyValueIterator> KeyValueIterator for MapIterator<T> {
+impl<T: RowEntryIterator> RowEntryIterator for MapIterator<T> {
     async fn init(&mut self) -> Result<(), SlateDBError> {
         self.iterator.init().await
     }

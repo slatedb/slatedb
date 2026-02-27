@@ -1,7 +1,7 @@
 use crate::bytes_range::BytesRange;
 use crate::db_state::{SortedRun, SsTableHandle};
 use crate::error::SlateDBError;
-use crate::iter::KeyValueIterator;
+use crate::iter::RowEntryIterator;
 use crate::sst_iter::{SstIterator, SstIteratorOptions, SstView};
 use crate::tablestore::TableStore;
 use crate::types::RowEntry;
@@ -144,7 +144,7 @@ impl<'a> SortedRunIterator<'a> {
 }
 
 #[async_trait]
-impl KeyValueIterator for SortedRunIterator<'_> {
+impl RowEntryIterator for SortedRunIterator<'_> {
     async fn init(&mut self) -> Result<(), SlateDBError> {
         if !self.initialized {
             if let Some(iter) = self.current_iter.as_mut() {

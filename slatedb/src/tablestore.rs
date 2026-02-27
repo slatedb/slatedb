@@ -685,7 +685,7 @@ mod tests {
     use crate::test_utils::FlakyObjectStore;
     use crate::test_utils::{assert_iterator, build_test_sst};
     use crate::types::{RowEntry, ValueDeletable};
-    use crate::{block_iterator::BlockIteratorLatest, db_state::SsTableId, iter::KeyValueIterator};
+    use crate::{block_iterator::BlockIteratorLatest, db_state::SsTableId, iter::RowEntryIterator};
     use slatedb_common::clock::DefaultSystemClock;
 
     const ROOT: &str = "/root";

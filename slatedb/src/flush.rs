@@ -2,7 +2,7 @@ use crate::db::DbInner;
 use crate::db_state;
 use crate::db_state::SsTableHandle;
 use crate::error::SlateDBError;
-use crate::iter::KeyValueIterator;
+use crate::iter::RowEntryIterator;
 use crate::mem_table::KVTable;
 use crate::merge_operator::{MergeOperatorIterator, MergeOperatorRequiredIterator};
 use crate::oracle::Oracle;
@@ -38,7 +38,7 @@ impl DbInner {
     async fn iter_imm_table(
         &self,
         imm_table: Arc<KVTable>,
-    ) -> Result<RetentionIterator<Box<dyn KeyValueIterator>>, SlateDBError> {
+    ) -> Result<RetentionIterator<Box<dyn RowEntryIterator>>, SlateDBError> {
         let state = self.state.read().view();
 
         // Compute retention boundary using both active transactions AND durable watermark.
@@ -62,7 +62,7 @@ impl DbInner {
             ))
         } else {
             Box::new(MergeOperatorRequiredIterator::new(imm_table.iter()))
-                as Box<dyn KeyValueIterator>
+                as Box<dyn RowEntryIterator>
         };
         let mut iter = RetentionIterator::new(
             merge_iter,
@@ -86,7 +86,7 @@ mod tests {
     use crate::db_state::{SsTableHandle, SsTableId};
     use crate::error::SlateDBError;
     use crate::error::SlateDBError::MergeOperatorMissing;
-    use crate::iter::KeyValueIterator;
+    use crate::iter::RowEntryIterator;
     use crate::mem_table::WritableKVTable;
     use crate::object_store::memory::InMemory;
     use crate::test_utils::StringConcatMergeOperator;

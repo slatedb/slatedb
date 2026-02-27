@@ -5,7 +5,7 @@ use crate::format::block::Block;
 use crate::format::row::SstRowCodecV0;
 use crate::iter::IterationOrder;
 use crate::iter::IterationOrder::Ascending;
-use crate::{error::SlateDBError, iter::KeyValueIterator, types::RowEntry};
+use crate::{error::SlateDBError, iter::RowEntryIterator, types::RowEntry};
 use async_trait::async_trait;
 use bytes::{Buf, Bytes, BytesMut};
 use IterationOrder::Descending;
@@ -60,7 +60,7 @@ pub(crate) struct BlockIterator<B: BlockLike> {
 }
 
 #[async_trait]
-impl<B: BlockLike> KeyValueIterator for BlockIterator<B> {
+impl<B: BlockLike> RowEntryIterator for BlockIterator<B> {
     async fn init(&mut self) -> Result<(), SlateDBError> {
         Ok(())
     }
@@ -222,7 +222,7 @@ mod tests {
     use crate::bytes_range::BytesRange;
     use crate::format::sst::BlockBuilder;
     use crate::iter::IterationOrder::Descending;
-    use crate::iter::KeyValueIterator;
+    use crate::iter::RowEntryIterator;
     use crate::proptest_util::{arbitrary, sample};
     use crate::test_utils::{assert_iterator, assert_next, gen_attrs, gen_empty_attrs};
     use crate::types::{KeyValue, RowEntry};
