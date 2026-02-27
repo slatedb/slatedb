@@ -20,6 +20,8 @@
 //! }
 //! ```
 
+pub use crate::db_status::DbStatus;
+
 use std::ops::RangeBounds;
 use std::sync::Arc;
 
@@ -46,8 +48,8 @@ use crate::bytes_range::BytesRange;
 use crate::cached_object_store::CachedObjectStore;
 use crate::clock::MonotonicClock;
 use crate::config::{
-    FlushOptions, FlushType, MergeOptions, PreloadLevel, PutOptions, ReadOptions, ScanOptions,
-    Settings, WriteOptions,
+    FlushOptions, FlushType, MergeOptions, PutOptions, ReadOptions, ScanOptions, Settings,
+    WriteOptions,
 };
 use crate::db_iter::DbIterator;
 use crate::db_read::DbRead;
@@ -55,8 +57,9 @@ use crate::db_snapshot::DbSnapshot;
 use crate::db_state::{DbState, SsTableId};
 use crate::db_stats::DbStats;
 use crate::error::SlateDBError;
+use crate::iter::IterationOrder;
 use crate::manifest::store::FenceableManifest;
-use crate::manifest::Manifest;
+use crate::manifest::{Manifest, ManifestCore};
 use crate::mem_table::WritableKVTable;
 use crate::mem_table_flush::{MemtableFlushMsg, MEMTABLE_FLUSHER_TASK_NAME};
 use crate::oracle::{DbOracle, Oracle};
@@ -67,13 +70,15 @@ use crate::sst_iter::SstIteratorOptions;
 use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
 use crate::transaction_manager::TransactionManager;
-use crate::utils::{format_bytes_si, MonotonicSeq, SendSafely};
+use crate::utils::{format_bytes_si, SendSafely};
 use crate::wal_buffer::{WalBufferManager, WAL_BUFFER_TASK_NAME};
 use crate::wal_replay::{WalReplayIterator, WalReplayOptions};
 use slatedb_common::clock::SystemClock;
 use slatedb_txn_obj::DirtyObject;
 
+use crate::db_status::DbStatusReporter;
 pub use builder::DbBuilder;
+pub use builder::DbReaderBuilder;
 
 pub(crate) mod builder;
 
@@ -100,6 +105,7 @@ pub(crate) struct DbInner {
     pub(crate) wal_enabled: bool,
     /// [`txn_manager`] tracks all the live transactions and related metadata.
     pub(crate) txn_manager: Arc<TransactionManager>,
+    pub(crate) status_reporter: DbStatusReporter,
 }
 
 impl DbInner {
@@ -117,13 +123,12 @@ impl DbInner {
     ) -> Result<Self, SlateDBError> {
         // both last_seq and last_committed_seq will be updated after WAL replay.
         let last_l0_seq = manifest.value.core.last_l0_seq;
-        let last_seq = MonotonicSeq::new(last_l0_seq);
-        let last_committed_seq = MonotonicSeq::new(last_l0_seq);
-        let last_remote_persisted_seq = MonotonicSeq::new(last_l0_seq);
+        let status_reporter = DbStatusReporter::new(last_l0_seq);
         let oracle = Arc::new(DbOracle::new(
-            last_seq,
-            last_committed_seq,
-            last_remote_persisted_seq,
+            last_l0_seq,
+            last_l0_seq,
+            last_l0_seq,
+            status_reporter.clone(),
         ));
 
         let mono_clock = Arc::new(MonotonicClock::new(
@@ -132,7 +137,8 @@ impl DbInner {
         ));
 
         // state are mostly manifest, including IMM, L0, etc.
-        let state = Arc::new(RwLock::new(DbState::new(manifest)));
+        let db_state = DbState::new(manifest, status_reporter.clone());
+        let state = Arc::new(RwLock::new(db_state));
 
         let db_stats = DbStats::new(stat_registry.as_ref());
         let wal_enabled = DbInner::wal_enabled_in_options(&settings);
@@ -158,7 +164,7 @@ impl DbInner {
             settings.flush_interval,
         ));
 
-        let txn_manager = Arc::new(TransactionManager::new(rand.clone()));
+        let txn_manager = Arc::new(TransactionManager::new(oracle.clone(), rand.clone()));
 
         let db_inner = Self {
             state,
@@ -177,6 +183,7 @@ impl DbInner {
             fp_registry,
             reader,
             txn_manager,
+            status_reporter,
         };
         Ok(db_inner)
     }
@@ -489,6 +496,7 @@ impl DbInner {
             blocks_to_fetch: 256,
             cache_blocks: false,
             eager_spawn: true,
+            order: IterationOrder::Ascending,
         };
 
         let replay_options = WalReplayOptions {
@@ -508,14 +516,12 @@ impl DbInner {
             // durable. Update `last_remote_persisted_seq` before replaying to avoid a race with
             // the memtable flusher. The flusher calls flush_wals() to guarantee all data in the
             // memtable is already durable in the WAL. Since we're replaying, the WAL is empty and
-            // `last_remote_persisted_seq` does not get updated; it remaiuns at l0_last_seq. This
-            // would cause the flusher's assertion that the remoted persisted seq is always >= the
+            // `last_remote_persisted_seq` does not get updated; it remains at l0_last_seq. This
+            // would cause the flusher's assertion that the remote persisted seq is always >= the
             // last seq in the memtable to fail. By updating `last_remote_persisted_seq` here, we
             // ensure the assertion holds true.
-            assert!(self.oracle.last_remote_persisted_seq.load() <= replayed_table.last_seq);
-            self.oracle
-                .last_remote_persisted_seq
-                .store_if_greater(replayed_table.last_seq);
+            assert!(self.oracle.last_remote_persisted_seq() <= replayed_table.last_seq);
+            self.oracle.advance_durable_seq(replayed_table.last_seq);
             self.maybe_apply_backpressure().await?;
             self.replay_memtable(replayed_table)?;
         }
@@ -528,91 +534,16 @@ impl DbInner {
         cached_obj_store: &CachedObjectStore,
         path_resolver: &PathResolver,
     ) -> Result<(), SlateDBError> {
-        let current_state = self.state.read().state();
-        let max_cache_size = self
-            .settings
-            .object_store_cache_options
-            .max_cache_size_bytes
-            .unwrap_or(usize::MAX);
-
-        match self
-            .settings
-            .object_store_cache_options
-            .preload_disk_cache_on_startup
-        {
-            Some(PreloadLevel::AllSst) => {
-                // Preload both L0 and compacted SSTs
-                let l0_count = current_state.manifest.value.core.l0.len();
-                let compacted_count: usize = current_state
-                    .manifest
-                    .value
-                    .core
-                    .compacted
-                    .iter()
-                    .map(|level| level.ssts.len())
-                    .sum();
-                let total_capacity = l0_count + compacted_count;
-
-                let mut all_sst_paths: Vec<object_store::path::Path> =
-                    Vec::with_capacity(total_capacity);
-
-                // Add L0 SSTs
-                all_sst_paths.extend(
-                    current_state
-                        .manifest
-                        .value
-                        .core
-                        .l0
-                        .iter()
-                        .map(|sst_handle| path_resolver.table_path(&sst_handle.id)),
-                );
-
-                // Add compacted SSTs
-                all_sst_paths.extend(
-                    current_state
-                        .manifest
-                        .value
-                        .core
-                        .compacted
-                        .iter()
-                        .flat_map(|level| &level.ssts)
-                        .map(|sst_handle| path_resolver.table_path(&sst_handle.id)),
-                );
-
-                if !all_sst_paths.is_empty() {
-                    if let Err(e) = cached_obj_store
-                        .load_files_to_cache(all_sst_paths, max_cache_size)
-                        .await
-                    {
-                        warn!("Failed to preload all SSTs to cache: {:?}", e);
-                    }
-                }
-            }
-            Some(PreloadLevel::L0Sst) => {
-                // Preload only L0 SSTs
-                let l0_sst_paths: Vec<object_store::path::Path> = current_state
-                    .manifest
-                    .value
-                    .core
-                    .l0
-                    .iter()
-                    .map(|sst_handle| path_resolver.table_path(&sst_handle.id))
-                    .collect();
-
-                if !l0_sst_paths.is_empty() {
-                    if let Err(e) = cached_obj_store
-                        .load_files_to_cache(l0_sst_paths, max_cache_size)
-                        .await
-                    {
-                        warn!("failed to preload L0 SSTs to cache [error={:?}]", e);
-                    }
-                }
-            }
-            None => {
-                // No preloading
-            }
-        }
-        Ok(())
+        let state = self.state.read().state();
+        let cache_opts = &self.settings.object_store_cache_options;
+        crate::utils::preload_cache_from_manifest(
+            &state.manifest.value.core,
+            cached_obj_store,
+            path_resolver,
+            cache_opts.preload_disk_cache_on_startup,
+            cache_opts.max_cache_size_bytes.unwrap_or(usize::MAX),
+        )
+        .await
     }
 
     /// Returns an error if the database has been closed.
@@ -823,8 +754,7 @@ impl Db {
     /// ```
     pub async fn snapshot(&self) -> Result<Arc<DbSnapshot>, crate::Error> {
         self.inner.status()?;
-        let seq = self.inner.oracle.last_committed_seq();
-        let snapshot = DbSnapshot::new(self.inner.clone(), self.inner.txn_manager.clone(), seq);
+        let snapshot = DbSnapshot::new(self.inner.clone(), self.inner.txn_manager.clone(), None);
         Ok(snapshot)
     }
 
@@ -1505,6 +1435,54 @@ impl Db {
         self.inner.stat_registry.clone()
     }
 
+    /// Get the current manifest state.
+    ///
+    /// This returns the in-memory manifest snapshot currently held by the `Db`.
+    pub fn manifest(&self) -> ManifestCore {
+        self.inner.state.read().state().core().clone()
+    }
+
+    /// Subscribe to database state changes.
+    ///
+    /// Returns a [`tokio::sync::watch::Receiver<DbStatus>`] that always
+    /// reflects the latest database status. For example, you can wait for a
+    /// specific sequence number to become durable:
+    ///
+    /// ```ignore
+    /// let seq = 42; // sequence number from a write operation
+    /// let mut rx = db.subscribe();
+    /// rx.wait_for(|s| s.durable_seq >= seq).await.expect("db dropped");
+    /// ```
+    ///
+    /// # Deadlock risk
+    ///
+    /// The returned receiver holds a read lock on the current value while
+    /// borrowed (via [`borrow`](tokio::sync::watch::Receiver::borrow),
+    /// [`borrow_and_update`](tokio::sync::watch::Receiver::borrow_and_update),
+    /// or the guard returned by [`wait_for`](tokio::sync::watch::Receiver::wait_for)).
+    /// The database must acquire a write lock to publish new status updates.
+    /// Holding the read guard for an extended period will block all database
+    /// status updates and may cause a deadlock. See the [deadlock warning in
+    /// `Receiver::borrow`](https://docs.rs/tokio/latest/tokio/sync/watch/struct.Receiver.html#method.borrow)
+    /// for details. Always clone or copy the data you need:
+    ///
+    /// ```ignore
+    /// // Good: clone the status and release the lock immediately.
+    /// let status = rx.borrow().clone();
+    /// some_async_fn(status.durable_seq).await;
+    ///
+    /// // Good: copy the durable seq and releate the lock immediately.
+    /// let durable_seq = rx.borrow().durable_seq; // uses Copy trait
+    /// some_async_fn(durable_seq).await;
+    ///
+    /// // Bad: holding the status across an await blocks all senders.
+    /// let status = rx.borrow();
+    /// some_async_fn(status.durable_seq).await; // deadlock!
+    /// ```
+    pub fn subscribe(&self) -> tokio::sync::watch::Receiver<DbStatus> {
+        self.inner.status_reporter.subscribe()
+    }
+
     /// Begin a new transaction with the specified isolation level.
     ///
     /// ## Arguments
@@ -1533,11 +1511,9 @@ impl Db {
         isolation_level: IsolationLevel,
     ) -> Result<DbTransaction, crate::Error> {
         self.inner.status()?;
-        let seq = self.inner.oracle.last_committed_seq();
         let txn = DbTransaction::new(
             self.inner.clone(),
             self.inner.txn_manager.clone(),
-            seq,
             isolation_level,
         );
         Ok(txn)
@@ -1646,10 +1622,11 @@ mod tests {
         ObjectStoreCacheOptions, PutOptions, Settings, Ttl, WriteOptions,
     };
     use crate::db::builder::GarbageCollectorBuilder;
+    use crate::db_common::MAX_WAL_FLUSHES_BEFORE_L0_FLUSH;
     use crate::db_state::ManifestCore;
     use crate::db_stats::IMMUTABLE_MEMTABLE_FLUSHES;
     use crate::format::sst::SsTableFormat;
-    use crate::iter::KeyValueIterator;
+    use crate::iter::RowEntryIterator;
     use crate::manifest::store::{ManifestStore, StoredManifest};
     use crate::object_stores::ObjectStores;
     use crate::proptest_util::arbitrary;
@@ -1662,7 +1639,7 @@ mod tests {
     };
     use crate::types::RowEntry;
     use crate::wal_reader::WalReader;
-    use crate::{proptest_util, test_utils, CloseReason, KeyValue};
+    use crate::{proptest_util, test_utils, CloseReason, CompactorBuilder, KeyValue};
     use async_trait::async_trait;
     use chrono::TimeDelta;
     use chrono::{TimeZone, Utc};
@@ -1701,6 +1678,24 @@ mod tests {
         kv_store.delete(key).await.unwrap();
         assert_eq!(None, kv_store.get(key).await.unwrap());
         kv_store.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_manifest_returns_current_manifest_core() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let db = Db::builder("/tmp/test_manifest_accessor", object_store)
+            .with_settings(test_db_options(0, 1024, None))
+            .build()
+            .await
+            .unwrap();
+
+        db.put(b"test_key", b"test_value").await.unwrap();
+
+        let manifest = db.manifest();
+        let expected = db.inner.state.read().state().core().clone();
+        assert_eq!(manifest, expected);
+
+        db.close().await.unwrap();
     }
 
     #[tokio::test]
@@ -3650,13 +3645,13 @@ mod tests {
             .await
             .unwrap()
             .expect("Expected Some(iter) but got None");
-            let kv = iter.next().await.unwrap().unwrap();
+            let kv: KeyValue = iter.next().await.unwrap().unwrap().into();
             assert_eq!(kv.key.as_ref(), [b'a' + i; 16]);
             assert_eq!(kv.value.as_ref(), [b'b' + i; 50]);
-            let kv = iter.next().await.unwrap().unwrap();
+            let kv: KeyValue = iter.next().await.unwrap().unwrap().into();
             assert_eq!(kv.key.as_ref(), [b'j' + i; 16]);
             assert_eq!(kv.value.as_ref(), [b'k' + i; 50]);
-            let kv = iter.next().await.unwrap();
+            let kv = iter.next().await.unwrap().map(KeyValue::from);
             assert!(kv.is_none());
         }
         assert!(
@@ -3667,6 +3662,105 @@ mod tests {
                 .get()
                 > 0
         );
+    }
+
+    #[tokio::test]
+    async fn test_put_flushes_memtable_after_max_wal_flushes() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = "/tmp/test_flush_memtable_max_wal_flushes";
+
+        let mut settings = test_db_options(0, usize::MAX, None);
+        settings.flush_interval = None; // Disable flushing
+
+        let kv_store = Db::builder(path, object_store.clone())
+            .with_settings(settings)
+            .build()
+            .await
+            .unwrap();
+
+        let manifest_store = Arc::new(ManifestStore::new(&Path::from(path), object_store.clone()));
+        let mut stored_manifest =
+            StoredManifest::load(manifest_store.clone(), Arc::new(DefaultSystemClock::new()))
+                .await
+                .unwrap();
+
+        let write_options: WriteOptions = WriteOptions {
+            await_durable: false,
+        };
+        let put_options = PutOptions::default();
+
+        for i in 0..(MAX_WAL_FLUSHES_BEFORE_L0_FLUSH - 1) {
+            let key = format!("key{:08}", i);
+            kv_store
+                .put_with_options(key.as_bytes(), b"v", &put_options, &write_options)
+                .await
+                .unwrap();
+            kv_store.flush().await.unwrap();
+        }
+
+        // Verify WALs flushes.
+        let wal_id = kv_store.inner.wal_buffer.recent_flushed_wal_id();
+        assert_eq!(wal_id, MAX_WAL_FLUSHES_BEFORE_L0_FLUSH); // account for the empty WAL written for fencing
+
+        // Verify no memtable was frozen or L0 flush happened.
+        {
+            let guard = kv_store.inner.state.read();
+            assert!(guard.state().imm_memtable.is_empty());
+            assert_eq!(guard.state().core().l0.len(), 0);
+        }
+
+        // This put() triggers a freeze.
+        let key = format!("key{:08}", MAX_WAL_FLUSHES_BEFORE_L0_FLUSH - 1);
+        kv_store
+            .put_with_options(key.as_bytes(), b"v", &put_options, &write_options)
+            .await
+            .unwrap();
+
+        // Verify that the WAL count threshold triggered a memtable freeze and L0 flush.
+        // replay_after_wal_id should have advanced to the threshold, and there should
+        // be exactly one L0 SST.
+        let db_state = wait_for_manifest_condition(
+            &mut stored_manifest,
+            |s| s.replay_after_wal_id == MAX_WAL_FLUSHES_BEFORE_L0_FLUSH,
+            Duration::from_secs(30),
+        )
+        .await;
+        assert_eq!(db_state.l0.len(), 1);
+
+        // Run MAX_WAL_FLUSHES_BEFORE_L0_FLUSH more put()/flush() cycles
+        // and see if the threshold triggers again.
+        for i in 0..(MAX_WAL_FLUSHES_BEFORE_L0_FLUSH - 1) {
+            let key = format!("key{:08}", i);
+            kv_store
+                .put_with_options(key.as_bytes(), b"v", &put_options, &write_options)
+                .await
+                .unwrap();
+            kv_store.flush().await.unwrap();
+        }
+
+        // Verify no more memtables were frozen or L0 flush happened.
+        {
+            let guard = kv_store.inner.state.read();
+            assert_eq!(guard.state().core().l0.len(), 1);
+        }
+
+        // This put() triggers a freeze.
+        let key = format!("key{:08}", MAX_WAL_FLUSHES_BEFORE_L0_FLUSH);
+        kv_store
+            .put_with_options(key.as_bytes(), b"v", &put_options, &write_options)
+            .await
+            .unwrap();
+
+        // Wait for the flush to happen.
+        let db_state = wait_for_manifest_condition(
+            &mut stored_manifest,
+            |s| s.replay_after_wal_id == MAX_WAL_FLUSHES_BEFORE_L0_FLUSH * 2,
+            Duration::from_secs(30),
+        )
+        .await;
+        assert_eq!(db_state.l0.len(), 2); // We should have two L0 flushes.
+
+        kv_store.close().await.unwrap();
     }
 
     #[tokio::test]
@@ -3790,7 +3884,7 @@ mod tests {
 
         // Collect all key-value pairs from the SST
         let mut found_keys = std::collections::HashSet::new();
-        while let Some(kv) = iter.next().await.unwrap() {
+        while let Some(kv) = iter.next().await.unwrap().map(KeyValue::from) {
             found_keys.insert(kv.key.to_vec());
         }
 
@@ -3848,7 +3942,7 @@ mod tests {
             .await
             .expect("expected successful WAL iterator call");
         while let Some(entry) = wal_iter
-            .next_entry()
+            .next()
             .await
             .expect("expected successful WAL rows read")
         {
@@ -4362,15 +4456,15 @@ mod tests {
         };
 
         let mut iter = memtable.iter();
-        let kv = iter.next().await.unwrap().unwrap();
+        let kv: KeyValue = iter.next().await.unwrap().unwrap().into();
         assert_eq!(kv.key, b"abc1111".as_slice());
 
         kv_store.flush().await.unwrap();
 
-        let kv = iter.next().await.unwrap().unwrap();
+        let kv: KeyValue = iter.next().await.unwrap().unwrap().into();
         assert_eq!(kv.key, b"abc2222".as_slice());
 
-        let kv = iter.next().await.unwrap().unwrap();
+        let kv: KeyValue = iter.next().await.unwrap().unwrap().into();
         assert_eq!(kv.key, b"abc3333".as_slice());
     }
 
@@ -4548,7 +4642,10 @@ mod tests {
         let db = Db::builder(path, object_store.clone())
             .with_settings(test_db_options(0, 1024 * 1024, None))
             .with_merge_operator(Arc::new(StringConcatMergeOperator {}))
-            .with_compaction_scheduler_supplier(compaction_scheduler)
+            .with_compactor_builder(
+                CompactorBuilder::new(path, object_store.clone())
+                    .with_scheduler_supplier(compaction_scheduler.clone()),
+            )
             .build()
             .await
             .unwrap();
@@ -5083,7 +5180,7 @@ mod tests {
         assert!(manifest.core.next_wal_sst_id > next_wal_sst_id);
     }
 
-    async fn do_test_should_read_compacted_db(options: Settings) {
+    async fn do_test_should_read_compacted_db(mut options: Settings) {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = "/tmp/test_kv_store";
         let should_compact_l0 = Arc::new(AtomicBool::new(false));
@@ -5092,9 +5189,14 @@ mod tests {
             move |_state| this_should_compact_l0.swap(false, Ordering::SeqCst),
         )));
 
+        let compactor_options = options.compactor_options.take();
         let db = Db::builder(path, object_store.clone())
             .with_settings(options)
-            .with_compaction_scheduler_supplier(compaction_scheduler.clone())
+            .with_compactor_builder(
+                CompactorBuilder::new(path, object_store.clone())
+                    .with_scheduler_supplier(compaction_scheduler.clone())
+                    .with_options(compactor_options.unwrap()),
+            )
             .build()
             .await
             .unwrap();
@@ -5863,6 +5965,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_recent_snapshot_min_seq_monotonic() {
+        use crate::oracle::Oracle;
+
         let path = "/tmp/test_recent_snapshot_min_seq_monotonic";
         let object_store = Arc::new(InMemory::new());
         let settings = Settings {
@@ -6464,5 +6568,318 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, SlateDBError::EmptyBatch));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_txn_conflict_when_first_commit_paused_post_commit() {
+        // This test reproduces the error in #1301. Befor the fix, the commited seqnum
+        // in the oracle was advanced outside the commit lock. This caused a race where
+        // another transaction could start, see the original seqnum (pre-commit), but not
+        // see conflicts. See #1301 for more details.
+        let fp_registry = Arc::new(FailPointRegistry::new());
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let db = Db::builder("/tmp/test_txn_conflict_post_commit_pause", object_store)
+            .with_settings(test_db_options(0, 1024, None))
+            .with_fp_registry(fp_registry.clone())
+            .build()
+            .await
+            .unwrap();
+
+        // 1-2. Create txn1 and write k1=v1.
+        let txn1 = db
+            .begin(IsolationLevel::SerializableSnapshot)
+            .await
+            .unwrap();
+        txn1.put(b"k1", b"v1").unwrap();
+
+        // 3. Pause on write-batch-post-commit so txn1 blocks after conflict metadata is tracked.
+        fail_parallel::cfg(fp_registry.clone(), "write-batch-post-commit", "pause").unwrap();
+
+        let txn1_start_seq = txn1.seqnum();
+
+        // 4. Commit txn1 in the background; it should pause at write-batch-post-commit.
+        let txn1_commit_task = tokio::spawn(async move { txn1.commit().await });
+
+        // 5. Wait until txn1 reaches post-commit pause:
+        // - txn1 is no longer active in txn_manager
+        let pause_reached = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let txn1_removed_from_active = db.inner.txn_manager.min_active_seq().is_none();
+                if txn1_removed_from_active {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .is_ok();
+        if !pause_reached {
+            fail_parallel::cfg(fp_registry.clone(), "write-batch-post-commit", "off").unwrap();
+            let _ = txn1_commit_task.await;
+            panic!("txn1 did not pause at write-batch-post-commit");
+        }
+
+        // 5.1. Add/drop txn to trigger a recycle that removes txn1 from recent commits.
+        let txn_dropped = db
+            .begin(IsolationLevel::SerializableSnapshot)
+            .await
+            .unwrap();
+        drop(txn_dropped);
+
+        // 6. Create txn2 after txn1 is committed but before batch_write is complete.
+        // The seqnum should advance transactionally with the commit, so txn2 should
+        // see txn1's post-write seqnum.
+        let txn2 = db
+            .begin(IsolationLevel::SerializableSnapshot)
+            .await
+            .unwrap();
+
+        // 6.1. txn2 should see k1=v1 since it started after txn1's commit, even though the
+        // batch write is not fully complete until after txn2 starts.
+        assert_eq!(
+            txn2.get(b"k1").await.unwrap(),
+            Some(Bytes::from_static(b"v1"))
+        );
+
+        // 7. Unpause write-batch-post-commit, advance seqnum.
+        fail_parallel::cfg(fp_registry.clone(), "write-batch-post-commit", "off").unwrap();
+
+        // 8. Wait for txn1 to finish committing. txn1 is dropped when this finishes.
+        let _ = txn1_commit_task
+            .await
+            .expect("failed to join txn1 commit task")
+            .expect("txn1 commit should succeed");
+        assert_eq!(
+            txn2.seqnum(),
+            txn1_start_seq + 1, // 1 row was written
+            "txn2 should see the commit seqnum after txn1's commit"
+        );
+
+        // 9-10. txn2 writes k1=v2 then attempts to commit (should not conflict).
+        txn2.put(b"k1", b"v2").unwrap();
+        txn2.put(b"k2", b"v2").unwrap();
+        assert!(txn2.commit().await.is_ok());
+
+        // 11. txn2 committed, so the db should show it.
+        assert_eq!(
+            db.get(b"k1").await.unwrap(),
+            Some(Bytes::from_static(b"v2"))
+        );
+
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn should_notify_seq_watcher_on_wal_flush() {
+        // Given: a DB with WAL enabled and a seq watcher
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let db = Db::builder("/tmp/test_watch_wal", object_store)
+            .build()
+            .await
+            .unwrap();
+        let mut watcher = db.subscribe();
+
+        // When: writing multiple keys and flushing the WAL
+        db.put(b"key1", b"value1").await.unwrap();
+        db.put(b"key2", b"value2").await.unwrap();
+        db.put(b"key3", b"value3").await.unwrap();
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::Wal,
+        })
+        .await
+        .unwrap();
+
+        // Then: the watcher should report durable_seq >= 3
+        let status = tokio::time::timeout(
+            Duration::from_secs(10),
+            watcher.wait_for(|s| s.durable_seq >= 3),
+        )
+        .await
+        .expect("timed out waiting for seq update")
+        .expect("watch channel closed")
+        .clone();
+        assert!(
+            status.durable_seq >= 3,
+            "expected durable seq >= 3, got {}",
+            status.durable_seq
+        );
+
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn should_close_watcher_on_db_drop() {
+        // Given: a DB with a watcher
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let db = Db::builder("/tmp/test_watch_drop", object_store)
+            .build()
+            .await
+            .unwrap();
+        let mut watcher = db.subscribe();
+
+        // When: the DB is closed
+        db.close().await.unwrap();
+
+        // Then: the watcher should report close_reason = Clean
+        let status = watcher
+            .wait_for(|s| s.close_reason.is_some())
+            .await
+            .expect("watch channel closed")
+            .clone();
+        assert_eq!(
+            status.close_reason,
+            Some(CloseReason::Clean),
+            "expected close_reason = Clean after db close",
+        );
+
+        // When: the DB is dropped (drops the watch sender)
+        drop(db);
+
+        // Then: the watcher's changed() should return Err (channel closed)
+        let result = watcher.changed().await;
+        assert!(
+            result.is_err(),
+            "expected watch channel closed after db drop, got Ok",
+        );
+    }
+
+    #[tokio::test]
+    async fn should_report_close_reason_clean_on_db_close() {
+        // Given: a DB with a watcher
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let db = Db::builder("/tmp/test_close_reason_clean", object_store)
+            .build()
+            .await
+            .unwrap();
+        let mut watcher = db.subscribe();
+
+        // When: the DB is closed cleanly
+        db.close().await.unwrap();
+
+        // Then: the watcher should report close_reason = Clean
+        let status = watcher
+            .wait_for(|s| s.close_reason.is_some())
+            .await
+            .expect("watch channel closed")
+            .clone();
+        assert_eq!(status.close_reason, Some(CloseReason::Clean));
+    }
+
+    #[tokio::test]
+    async fn should_report_close_reason_panic_on_background_task_failure() {
+        // Given: a DB with a failpoint on WAL flush and a watcher
+        let fp_registry = Arc::new(FailPointRegistry::new());
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let db = Db::builder("/tmp/test_close_reason_panic", object_store)
+            .with_settings(test_db_options(0, 128, None))
+            .with_fp_registry(fp_registry.clone())
+            .build()
+            .await
+            .unwrap();
+        let mut watcher = db.subscribe();
+
+        // When: a background task panics
+        fail_parallel::cfg(fp_registry.clone(), "write-wal-sst-io-error", "panic").unwrap();
+        let _ = db.put(b"foo", b"bar").await;
+
+        // Then: the watcher should report close_reason = Panic
+        let status = tokio::time::timeout(
+            Duration::from_secs(10),
+            watcher.wait_for(|s| s.close_reason.is_some()),
+        )
+        .await
+        .expect("timed out waiting for close reason")
+        .expect("watch channel closed")
+        .clone();
+        assert_eq!(status.close_reason, Some(CloseReason::Panic));
+    }
+
+    #[tokio::test]
+    async fn should_report_close_reason_fenced_on_fenced_error() {
+        // Given: a DB with a watcher
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let db = Db::builder("/tmp/test_close_reason_fenced", object_store)
+            .with_settings(test_db_options(0, 1024, None))
+            .build()
+            .await
+            .unwrap();
+        let mut watcher = db.subscribe();
+
+        // When: the DB is fenced (simulated via closed_result)
+        db.inner
+            .state
+            .write()
+            .closed_result()
+            .write(Err(crate::error::SlateDBError::Fenced));
+
+        // Then: the watcher should report close_reason = Fenced
+        let status = tokio::time::timeout(
+            Duration::from_secs(10),
+            watcher.wait_for(|s| s.close_reason.is_some()),
+        )
+        .await
+        .expect("timed out waiting for close reason")
+        .expect("watch channel closed")
+        .clone();
+        assert_eq!(status.close_reason, Some(CloseReason::Fenced));
+    }
+
+    #[cfg(feature = "wal_disable")]
+    #[tokio::test]
+    async fn should_notify_seq_watcher_on_l0_flush_when_wal_disabled() {
+        // Given: a DB with WAL disabled and a seq watcher
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let mut options = test_db_options(0, 256, None);
+        options.wal_enabled = false;
+        let db = Db::builder("/tmp/test_watch_l0", object_store)
+            .with_settings(options)
+            .build()
+            .await
+            .unwrap();
+        let mut watcher = db.subscribe();
+
+        // When: writing multiple keys and flushing the memtable to L0
+        db.put_with_options(
+            b"key1",
+            b"value1",
+            &PutOptions::default(),
+            &WriteOptions {
+                await_durable: false,
+            },
+        )
+        .await
+        .unwrap();
+        db.put_with_options(
+            b"key2",
+            b"value2",
+            &PutOptions::default(),
+            &WriteOptions {
+                await_durable: false,
+            },
+        )
+        .await
+        .unwrap();
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::MemTable,
+        })
+        .await
+        .unwrap();
+
+        // Then: the watcher should report durable_seq >= 2
+        let status = tokio::time::timeout(
+            Duration::from_secs(10),
+            watcher.wait_for(|s| s.durable_seq >= 2),
+        )
+        .await
+        .expect("timed out waiting for seq update")
+        .expect("watch channel closed")
+        .clone();
+        assert!(
+            status.durable_seq >= 2,
+            "expected durable seq >= 2, got {}",
+            status.durable_seq
+        );
+
+        db.close().await.unwrap();
     }
 }

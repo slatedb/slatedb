@@ -1,17 +1,17 @@
 use async_trait::async_trait;
 
 use crate::error::SlateDBError;
-use crate::iter::KeyValueIterator;
+use crate::iter::RowEntryIterator;
 use crate::types::RowEntry;
 
 pub(crate) type FilterPredicate = Box<dyn Fn(&RowEntry) -> bool + Send + Sync>;
 
-pub(crate) struct FilterIterator<T: KeyValueIterator> {
+pub(crate) struct FilterIterator<T: RowEntryIterator> {
     iterator: T,
     predicate: FilterPredicate,
 }
 
-impl<T: KeyValueIterator> FilterIterator<T> {
+impl<T: RowEntryIterator> FilterIterator<T> {
     pub(crate) fn new(iterator: T, predicate: FilterPredicate) -> Self {
         Self {
             predicate,
@@ -31,13 +31,13 @@ impl<T: KeyValueIterator> FilterIterator<T> {
 }
 
 #[async_trait]
-impl<T: KeyValueIterator> KeyValueIterator for FilterIterator<T> {
+impl<T: RowEntryIterator> RowEntryIterator for FilterIterator<T> {
     async fn init(&mut self) -> Result<(), SlateDBError> {
         self.iterator.init().await
     }
 
-    async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
-        while let Some(entry) = self.iterator.next_entry().await? {
+    async fn next(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
+        while let Some(entry) = self.iterator.next().await? {
             if (self.predicate)(&entry) {
                 return Ok(Some(entry));
             }
@@ -54,7 +54,7 @@ impl<T: KeyValueIterator> KeyValueIterator for FilterIterator<T> {
 mod tests {
     use super::*;
     use crate::test_utils::assert_iterator;
-    use crate::types::RowEntry;
+    use crate::types::{KeyValue, RowEntry};
 
     #[tokio::test]
     async fn test_filter_iterator_should_return_only_matching_entries() {
@@ -95,7 +95,7 @@ mod tests {
 
         let mut filter_iter = FilterIterator::new(iter, Box::new(filter_entry));
 
-        assert_eq!(filter_iter.next().await.unwrap(), None);
+        assert_eq!(filter_iter.next().await.unwrap().map(KeyValue::from), None);
     }
 
     #[tokio::test]

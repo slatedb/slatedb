@@ -6,13 +6,12 @@
 use crate::ffi::{
     create_runtime, cstr_to_string, error_from_slate_error, error_result, require_handle,
     require_out_ptr, slatedb_db_builder_t, slatedb_db_t, slatedb_error_kind_t,
-    slatedb_merge_operator_context_free_fn, slatedb_merge_operator_fn,
-    slatedb_merge_operator_result_free_fn, slatedb_object_store_t, slatedb_result_t,
-    slatedb_settings_t, slatedb_sst_block_size_t, sst_block_size_from_u8, success_result,
+    slatedb_merge_operator_fn, slatedb_merge_operator_out_free_fn, slatedb_object_store_t,
+    slatedb_result_t, slatedb_settings_t, slatedb_sst_block_size_t, sst_block_size_from_u8,
+    success_result,
 };
 use crate::merge_operator::CMergeOperator;
 use slatedb::Db;
-use std::ffi::c_void;
 use std::sync::Arc;
 
 /// Creates a new database builder.
@@ -218,11 +217,8 @@ pub unsafe extern "C" fn slatedb_db_builder_with_settings(
 /// ## Arguments
 /// - `builder`: Builder handle.
 /// - `merge_operator`: Merge callback used to resolve merge operands.
-/// - `merge_operator_context`: Opaque caller context passed to callbacks.
 /// - `free_merge_result`: Optional callback to release merge result buffers
 ///   returned by `merge_operator`.
-/// - `free_merge_operator_context`: Optional callback to release
-///   `merge_operator_context` when the configured merge operator is dropped.
 ///
 /// ## Returns
 /// - `slatedb_result_t` indicating success/failure.
@@ -236,15 +232,13 @@ pub unsafe extern "C" fn slatedb_db_builder_with_settings(
 /// - `merge_operator` must be non-null.
 /// - If `merge_operator` allocates `out_value`, supply `free_merge_result` to
 ///   free that allocation (do not rely on `slatedb_bytes_free`).
-/// - Callback and context pointers must remain valid and thread-safe for as long
+/// - Callback pointers must remain valid and thread-safe for as long
 ///   as any database built from this builder is alive.
 #[no_mangle]
 pub unsafe extern "C" fn slatedb_db_builder_with_merge_operator(
     builder: *mut slatedb_db_builder_t,
     merge_operator: slatedb_merge_operator_fn,
-    merge_operator_context: *mut c_void,
-    free_merge_result: slatedb_merge_operator_result_free_fn,
-    free_merge_operator_context: slatedb_merge_operator_context_free_fn,
+    free_merge_result: slatedb_merge_operator_out_free_fn,
 ) -> slatedb_result_t {
     if let Err(err) = require_handle(builder, "builder") {
         return err;
@@ -268,12 +262,7 @@ pub unsafe extern "C" fn slatedb_db_builder_with_merge_operator(
         );
     };
 
-    let merge_operator = Arc::new(CMergeOperator::new(
-        merge_operator_fn,
-        merge_operator_context,
-        free_merge_result,
-        free_merge_operator_context,
-    ));
+    let merge_operator = Arc::new(CMergeOperator::new(merge_operator_fn, free_merge_result));
     handle.builder = Some(current.with_merge_operator(merge_operator));
     success_result()
 }

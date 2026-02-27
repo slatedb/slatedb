@@ -76,6 +76,7 @@ use crate::compactor_executor::{
 use crate::compactor_state_protocols::CompactorStateWriter;
 use crate::config::CompactorOptions;
 use crate::db_state::SortedRun;
+use crate::db_status::ClosedResultWriter;
 use crate::dispatcher::{MessageFactory, MessageHandler, MessageHandlerExecutor};
 use crate::error::{Error, SlateDBError};
 use crate::manifest::store::ManifestStore;
@@ -84,7 +85,7 @@ use crate::merge_operator::MergeOperatorType;
 use crate::rand::DbRand;
 use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
-use crate::utils::{format_bytes_si, IdGenerator, WatchableOnceCell};
+use crate::utils::{format_bytes_si, IdGenerator};
 use slatedb_common::clock::SystemClock;
 
 pub use crate::compactor_state::{
@@ -280,7 +281,7 @@ impl Compactor {
         rand: Arc<DbRand>,
         stat_registry: Arc<StatRegistry>,
         system_clock: Arc<dyn SystemClock>,
-        closed_result: WatchableOnceCell<Result<(), SlateDBError>>,
+        closed_result: ClosedResultWriter,
         merge_operator: Option<MergeOperatorType>,
         #[cfg(feature = "compaction_filters")] compaction_filter_supplier: Option<
             Arc<dyn CompactionFilterSupplier>,
@@ -1053,8 +1054,8 @@ mod tests {
     use crate::db::Db;
     use crate::db_state::{ManifestCore, SortedRun, SsTableHandle, SsTableId, SsTableInfo};
     use crate::error::SlateDBError;
-    use crate::format::sst::SsTableFormat;
-    use crate::iter::KeyValueIterator;
+    use crate::format::sst::{SsTableFormat, SST_FORMAT_VERSION_LATEST};
+    use crate::iter::RowEntryIterator;
     use crate::manifest::store::{ManifestStore, StoredManifest};
     use crate::manifest::Manifest;
     use crate::merge_operator::{MergeOperator, MergeOperatorError};
@@ -1064,6 +1065,7 @@ mod tests {
     use crate::stats::StatRegistry;
     use crate::tablestore::TableStore;
     use crate::test_utils::assert_iterator;
+    use crate::types::KeyValue;
     use crate::types::RowEntry;
     use bytes::Bytes;
     use slatedb_common::clock::{DefaultSystemClock, SystemClock};
@@ -1144,7 +1146,7 @@ mod tests {
                 .expect("Expected Some(iter) but got None");
 
                 // remove the key from the expected map and verify that the db matches
-                while let Some(kv) = iter.next().await.unwrap() {
+                while let Some(kv) = iter.next().await.unwrap().map(KeyValue::from) {
                     let expected_v = expected
                         .remove(kv.key.as_ref())
                         .expect("removing unexpected key");
@@ -1173,14 +1175,17 @@ mod tests {
             },
         )));
 
-        let mut options = db_options(Some(compactor_options()));
+        let mut options = db_options(None);
         options.wal_enabled = false;
         options.l0_sst_size_bytes = 128;
 
         let db = Db::builder(PATH, os.clone())
             .with_settings(options)
             .with_system_clock(system_clock.clone())
-            .with_compaction_scheduler_supplier(scheduler.clone())
+            .with_compactor_builder(compactor_builder_with_scheduler(
+                os.clone(),
+                scheduler.clone(),
+            ))
             .build()
             .await
             .unwrap();
@@ -1226,7 +1231,7 @@ mod tests {
         .unwrap()
         .expect("Expected Some(iter) but got None");
 
-        let tombstone = iter.next_entry().await.unwrap();
+        let tombstone = iter.next().await.unwrap();
         assert!(tombstone.unwrap().value.is_tombstone());
 
         let db_state = await_compacted_compaction(
@@ -1254,9 +1259,9 @@ mod tests {
 
         // should be no tombstone for key 'a' because it was filtered
         // out of the last run
-        let next = iter.next().await.unwrap();
+        let next = iter.next().await.unwrap().map(KeyValue::from);
         assert_eq!(next.unwrap().key.as_ref(), &[b'b'; 16]);
-        let next = iter.next().await.unwrap();
+        let next = iter.next().await.unwrap().map(KeyValue::from);
         assert!(next.is_none());
     }
 
@@ -1277,14 +1282,17 @@ mod tests {
             },
         )));
 
-        let mut options = db_options(Some(compactor_options()));
+        let mut options = db_options(None);
         options.wal_enabled = false;
         options.l0_sst_size_bytes = 128;
 
         let db = Db::builder(PATH, os.clone())
             .with_settings(options)
             .with_system_clock(system_clock.clone())
-            .with_compaction_scheduler_supplier(scheduler.clone())
+            .with_compactor_builder(compactor_builder_with_scheduler(
+                os.clone(),
+                scheduler.clone(),
+            ))
             .build()
             .await
             .unwrap();
@@ -1348,22 +1356,25 @@ mod tests {
 
         // After compaction with an active snapshot (protecting seq >= 1):
         // - Key 'a': Both the tombstone(seq=3) and original value(seq=1) are protected
-        //   The SST contains both versions, but the iterator returns the latest (tombstone)
+        //   The SST contains both versions
         // - Key 'b': value(seq=2) is protected
         // Expected result: both 'a' (as tombstone) and 'b' (as value) should be present
-        let next = iter.next().await.unwrap();
-        let entry_a = next.unwrap();
-        assert_eq!(entry_a.key.as_ref(), &[b'a'; 16]);
+        // Note: next() returns all entries including tombstones and duplicates,
+        // so we need to track whether we've seen each key and verify the expected type
+        let next = iter.next().await.unwrap().unwrap();
+        assert_eq!(next.key.as_ref(), &[b'a'; 16]);
+        assert!(next.value.is_tombstone());
+
+        let next = iter.next().await.unwrap().unwrap();
+        assert_eq!(next.key.as_ref(), &[b'a'; 16]);
+        assert_eq!(next.value.as_bytes().unwrap().as_ref(), &[b'a'; 32]);
+
+        let next = iter.next().await.unwrap().unwrap();
+        assert_eq!(next.key.as_ref(), &[b'b'; 16]);
+        assert_eq!(next.value.as_bytes().unwrap().as_ref(), &[b'a'; 32]);
 
         let next = iter.next().await.unwrap();
-        let entry_b = next.unwrap();
-        assert_eq!(entry_b.key.as_ref(), &[b'b'; 16]);
-
-        let next = iter.next().await.unwrap();
-        assert!(
-            next.is_none(),
-            "Expected two keys (a and b) in the compacted SST"
-        );
+        assert!(next.is_none());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1376,12 +1387,15 @@ mod tests {
         let compaction_scheduler = Arc::new(OnDemandCompactionSchedulerSupplier::new(Arc::new(
             |state| state.manifest().l0.len() >= 2,
         )));
-        let options = db_options(Some(compactor_options()));
+        let options = db_options(None);
 
         let db = Db::builder(PATH, os.clone())
             .with_settings(options)
             .with_system_clock(system_clock.clone())
-            .with_compaction_scheduler_supplier(compaction_scheduler)
+            .with_compactor_builder(compactor_builder_with_scheduler(
+                os.clone(),
+                compaction_scheduler.clone(),
+            ))
             .with_merge_operator(Arc::new(StringConcatMergeOperator))
             .build()
             .await
@@ -1502,12 +1516,15 @@ mod tests {
         let compaction_scheduler = Arc::new(OnDemandCompactionSchedulerSupplier::new(Arc::new(
             |state| !state.manifest().l0.is_empty(),
         )));
-        let options = db_options(Some(compactor_options()));
+        let options = db_options(None);
 
         let db = Db::builder(PATH, os.clone())
             .with_settings(options)
             .with_system_clock(system_clock.clone())
-            .with_compaction_scheduler_supplier(compaction_scheduler)
+            .with_compactor_builder(compactor_builder_with_scheduler(
+                os.clone(),
+                compaction_scheduler.clone(),
+            ))
             .with_merge_operator(Arc::new(StringConcatMergeOperator))
             .build()
             .await
@@ -1633,12 +1650,15 @@ mod tests {
         let compaction_scheduler = Arc::new(OnDemandCompactionSchedulerSupplier::new(Arc::new(
             |state| state.manifest().l0.len() >= 2,
         )));
-        let options = db_options(Some(compactor_options()));
+        let options = db_options(None);
 
         let db = Db::builder(PATH, os.clone())
             .with_settings(options)
             .with_system_clock(system_clock.clone())
-            .with_compaction_scheduler_supplier(compaction_scheduler)
+            .with_compactor_builder(compactor_builder_with_scheduler(
+                os.clone(),
+                compaction_scheduler.clone(),
+            ))
             .with_merge_operator(Arc::new(StringConcatMergeOperator))
             .build()
             .await
@@ -1746,12 +1766,15 @@ mod tests {
         let compaction_scheduler = Arc::new(OnDemandCompactionSchedulerSupplier::new(Arc::new(
             |state| state.manifest().l0.len() >= 3,
         )));
-        let options = db_options(Some(compactor_options()));
+        let options = db_options(None);
 
         let db = Db::builder(PATH, os.clone())
             .with_settings(options)
             .with_system_clock(system_clock.clone())
-            .with_compaction_scheduler_supplier(compaction_scheduler)
+            .with_compactor_builder(compactor_builder_with_scheduler(
+                os.clone(),
+                compaction_scheduler.clone(),
+            ))
             .with_merge_operator(Arc::new(StringConcatMergeOperator))
             .build()
             .await
@@ -1876,14 +1899,17 @@ mod tests {
             |state| state.manifest().l0.len() >= 2,
         )));
 
-        let mut options = db_options(Some(compactor_options()));
+        let mut options = db_options(None);
         options.wal_enabled = false;
         options.l0_sst_size_bytes = 128;
 
         let db = Db::builder(PATH, os.clone())
             .with_settings(options)
             .with_system_clock(insert_clock.clone())
-            .with_compaction_scheduler_supplier(scheduler)
+            .with_compactor_builder(compactor_builder_with_scheduler(
+                os.clone(),
+                scheduler.clone(),
+            ))
             .with_merge_operator(Arc::new(StringConcatMergeOperator))
             .build()
             .await
@@ -1958,12 +1984,15 @@ mod tests {
         let compaction_scheduler = Arc::new(OnDemandCompactionSchedulerSupplier::new(Arc::new(
             |state| state.manifest().l0.len() >= 2,
         )));
-        let options = db_options(Some(compactor_options()));
+        let options = db_options(None);
 
         let db = Db::builder(PATH, os.clone())
             .with_settings(options)
             .with_system_clock(system_clock.clone())
-            .with_compaction_scheduler_supplier(compaction_scheduler)
+            .with_compactor_builder(compactor_builder_with_scheduler(
+                os.clone(),
+                compaction_scheduler.clone(),
+            ))
             .with_merge_operator(Arc::new(StringConcatMergeOperator))
             .build()
             .await
@@ -2056,12 +2085,15 @@ mod tests {
         let compaction_scheduler = Arc::new(OnDemandCompactionSchedulerSupplier::new(Arc::new(
             |state| state.manifest().l0.len() >= 2,
         )));
-        let options = db_options(Some(compactor_options()));
+        let options = db_options(None);
 
         let db = Db::builder(PATH, os.clone())
             .with_settings(options)
             .with_system_clock(system_clock.clone())
-            .with_compaction_scheduler_supplier(compaction_scheduler)
+            .with_compactor_builder(compactor_builder_with_scheduler(
+                os.clone(),
+                compaction_scheduler.clone(),
+            ))
             .with_merge_operator(Arc::new(StringConcatMergeOperator))
             .build()
             .await
@@ -2151,7 +2183,7 @@ mod tests {
 
         // merge operations should be kept separate due to different expire times
         let mut key1_entries = vec![];
-        while let Some(entry) = iter.next_entry().await.unwrap() {
+        while let Some(entry) = iter.next().await.unwrap() {
             if entry.key.as_ref() == b"key1" {
                 key1_entries.push(entry);
             }
@@ -2483,14 +2515,23 @@ mod tests {
             ..SsTableInfo::default()
         };
         dirty.value.core.l0 = VecDeque::from(vec![
-            SsTableHandle::new(SsTableId::Compacted(l0_newest), l0_info.clone()),
-            SsTableHandle::new(SsTableId::Compacted(l0_oldest), l0_info.clone()),
+            SsTableHandle::new(
+                SsTableId::Compacted(l0_newest),
+                SST_FORMAT_VERSION_LATEST,
+                l0_info.clone(),
+            ),
+            SsTableHandle::new(
+                SsTableId::Compacted(l0_oldest),
+                SST_FORMAT_VERSION_LATEST,
+                l0_info.clone(),
+            ),
         ]);
         dirty.value.core.compacted = vec![
             SortedRun {
                 id: 2,
                 ssts: vec![SsTableHandle::new(
                     SsTableId::Compacted(Ulid::new()),
+                    SST_FORMAT_VERSION_LATEST,
                     sr_info.clone(),
                 )],
             },
@@ -2498,6 +2539,7 @@ mod tests {
                 id: 1,
                 ssts: vec![SsTableHandle::new(
                     SsTableId::Compacted(Ulid::new()),
+                    SST_FORMAT_VERSION_LATEST,
                     sr_info.clone(),
                 )],
             },
@@ -2578,14 +2620,23 @@ mod tests {
             ..SsTableInfo::default()
         };
         core.l0 = VecDeque::from(vec![
-            SsTableHandle::new(SsTableId::Compacted(l0_first), l0_info.clone()),
-            SsTableHandle::new(SsTableId::Compacted(l0_second), l0_info),
+            SsTableHandle::new(
+                SsTableId::Compacted(l0_first),
+                SST_FORMAT_VERSION_LATEST,
+                l0_info.clone(),
+            ),
+            SsTableHandle::new(
+                SsTableId::Compacted(l0_second),
+                SST_FORMAT_VERSION_LATEST,
+                l0_info,
+            ),
         ]);
         core.compacted = vec![
             SortedRun {
                 id: 5,
                 ssts: vec![SsTableHandle::new(
                     SsTableId::Compacted(Ulid::from_parts(10, 0)),
+                    SST_FORMAT_VERSION_LATEST,
                     sr_info.clone(),
                 )],
             },
@@ -2593,6 +2644,7 @@ mod tests {
                 id: 2,
                 ssts: vec![SsTableHandle::new(
                     SsTableId::Compacted(Ulid::from_parts(11, 0)),
+                    SST_FORMAT_VERSION_LATEST,
                     sr_info,
                 )],
             },
@@ -2961,7 +3013,11 @@ mod tests {
             first_entry: Some(Bytes::from_static(b"a")),
             ..SsTableInfo::default()
         };
-        let output_sst = SsTableHandle::new(SsTableId::Compacted(Ulid::new()), sst_info);
+        let output_sst = SsTableHandle::new(
+            SsTableId::Compacted(Ulid::new()),
+            SST_FORMAT_VERSION_LATEST,
+            sst_info,
+        );
         let output_ssts = vec![output_sst.clone()];
 
         fixture
@@ -3695,6 +3751,15 @@ mod tests {
             scheduler_options: Default::default(),
             ..CompactorOptions::default()
         }
+    }
+
+    fn compactor_builder_with_scheduler(
+        os: Arc<dyn ObjectStore>,
+        scheduler_supplier: Arc<dyn CompactionSchedulerSupplier>,
+    ) -> CompactorBuilder<&'static str> {
+        CompactorBuilder::new(PATH, os)
+            .with_options(compactor_options())
+            .with_scheduler_supplier(scheduler_supplier)
     }
 
     struct MockSchedulerInner {

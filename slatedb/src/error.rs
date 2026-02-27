@@ -75,6 +75,9 @@ pub(crate) enum SlateDBError {
     #[error("invalid compaction")]
     InvalidCompaction,
 
+    #[error("invalid compactor options: {0}")]
+    InvalidCompactorOptions(String),
+
     #[error("compaction executor failed")]
     CompactionExecutorFailed,
 
@@ -230,6 +233,9 @@ pub(crate) enum SlateDBError {
 
     #[error("invalid environment variable {key} value `{value}`")]
     InvalidEnvironmentVariable { key: String, value: String },
+
+    #[error("unexpected tombstone encountered where a value was expected")]
+    UnexpectedTombstone,
 }
 
 impl From<TransactionalObjectError> for SlateDBError {
@@ -346,6 +352,15 @@ pub enum ErrorKind {
     /// Please [open a Github issue](https://github.com/slatedb/slatedb/issues/new?template=bug_report.md&title=Internal+error+returned)
     /// if you receive this error.
     Internal,
+}
+
+impl From<ErrorKind> for CloseReason {
+    fn from(kind: ErrorKind) -> Self {
+        match kind {
+            ErrorKind::Closed(reason) => reason,
+            _ => CloseReason::Panic,
+        }
+    }
 }
 
 impl std::fmt::Display for ErrorKind {
@@ -501,6 +516,7 @@ impl From<SlateDBError> for Error {
             SlateDBError::IdenticalClonePaths { .. } => Error::invalid(msg),
             SlateDBError::WalDisabled => Error::invalid(msg),
             SlateDBError::InvalidCompaction => Error::invalid(msg),
+            SlateDBError::InvalidCompactorOptions(_) => Error::invalid(msg),
             SlateDBError::InvalidClockTick { .. } => Error::invalid(msg),
             SlateDBError::InvalidDeletion => Error::invalid(msg),
             SlateDBError::MergeOperatorError(err) => Error::invalid(msg).with_source(Box::new(err)),
@@ -550,6 +566,7 @@ impl From<SlateDBError> for Error {
             SlateDBError::BackgroundTaskExists(_) => Error::internal(msg),
             SlateDBError::BackgroundTaskCancelled(_) => Error::internal(msg),
             SlateDBError::BackgroundTaskExecutorStarted => Error::internal(msg),
+            SlateDBError::UnexpectedTombstone => Error::internal(msg),
             SlateDBError::TransactionalObjectError(err) => {
                 Error::internal(msg).with_source(Box::new(err))
             }

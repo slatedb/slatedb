@@ -2,7 +2,6 @@ use async_trait::async_trait;
 
 use crate::error::SlateDBError;
 use crate::types::RowEntry;
-use crate::types::{KeyValue, ValueDeletable};
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum IterationOrder {
@@ -16,39 +15,12 @@ pub(crate) enum IterationOrder {
 /// See: https://github.com/slatedb/slatedb/issues/12
 
 #[async_trait]
-pub(crate) trait KeyValueIterator: Send + Sync {
+pub(crate) trait RowEntryIterator: Send + Sync {
     /// Performs any expensive initialization required before regular iteration.
     ///
     /// This method should be idempotent and can be called multiple times, only
     /// the first initialization should perform expensive operations.
     async fn init(&mut self) -> Result<(), SlateDBError>;
-
-    /// Returns the next non-deleted key-value pair in the iterator.
-    async fn next(&mut self) -> Result<Option<KeyValue>, SlateDBError> {
-        loop {
-            let entry = self.next_entry().await?;
-            if let Some(kv) = entry {
-                match kv.value {
-                    ValueDeletable::Value(v) => {
-                        return Ok(Some(KeyValue {
-                            key: kv.key,
-                            value: v,
-                        }))
-                    }
-                    // next() should only be called at the top level and therefore
-                    // if a merge is returned it's because there was no base value.
-                    // Since the merge is fully resolved at this point we can just
-                    // return it as is
-                    ValueDeletable::Merge(value) => {
-                        return Ok(Some(KeyValue { key: kv.key, value }))
-                    }
-                    ValueDeletable::Tombstone => continue,
-                }
-            } else {
-                return Ok(None);
-            }
-        }
-    }
 
     /// Returns the next entry in the iterator, which may be a key-value pair or
     /// a tombstone of a deleted key-value pair.
@@ -56,11 +28,11 @@ pub(crate) trait KeyValueIterator: Send + Sync {
     /// Will fail with `SlateDBError::IteratorNotInitialized` if the iterator is
     /// not yet initialized.
     ///
-    /// NOTE: we don't initialize the iterator when calling next_entry and instead
+    /// NOTE: we don't initialize the iterator when calling next and instead
     /// require the caller to explicitly initialize the iterator. This is in order
     /// to ensure that optimizations which eagerly initialize the iterator are not
     /// lost in a refactor and instead would throw errors.
-    async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError>;
+    async fn next(&mut self) -> Result<Option<RowEntry>, SlateDBError>;
 
     /// Seek to the next (inclusive) key
     ///
@@ -76,17 +48,17 @@ pub(crate) trait KeyValueIterator: Send + Sync {
 
 /// Iterator trait that tracks bytes processed for progress reporting.
 ///
-/// This extends `KeyValueIterator` with progress tracking capability.
+/// This extends `RowEntryIterator` with progress tracking capability.
 /// Only iterators used in the compaction pipeline implement this trait.
 /// The bottom-most iterator (MergeIterator) tracks actual bytes, while
 /// wrapper iterators delegate to their inner iterator.
-pub(crate) trait TrackedKeyValueIterator: KeyValueIterator {
+pub(crate) trait TrackedRowEntryIterator: RowEntryIterator {
     /// Returns the total bytes processed (key + value length) by this iterator.
     fn bytes_processed(&self) -> u64;
 }
 
 /// Initializes the iterator contained in the option, propagating `None` unchanged.
-pub(crate) async fn init_optional_iterator<T: KeyValueIterator>(
+pub(crate) async fn init_optional_iterator<T: RowEntryIterator>(
     iter: Option<T>,
 ) -> Result<Option<T>, SlateDBError> {
     match iter {
@@ -99,17 +71,13 @@ pub(crate) async fn init_optional_iterator<T: KeyValueIterator>(
 }
 
 #[async_trait]
-impl<'a> KeyValueIterator for Box<dyn KeyValueIterator + 'a> {
+impl<'a> RowEntryIterator for Box<dyn RowEntryIterator + 'a> {
     async fn init(&mut self) -> Result<(), SlateDBError> {
         self.as_mut().init().await
     }
 
-    async fn next(&mut self) -> Result<Option<KeyValue>, SlateDBError> {
+    async fn next(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
         self.as_mut().next().await
-    }
-
-    async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
-        self.as_mut().next_entry().await
     }
 
     async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
@@ -118,17 +86,13 @@ impl<'a> KeyValueIterator for Box<dyn KeyValueIterator + 'a> {
 }
 
 #[async_trait]
-impl<'a> KeyValueIterator for Box<dyn TrackedKeyValueIterator + 'a> {
+impl<'a> RowEntryIterator for Box<dyn TrackedRowEntryIterator + 'a> {
     async fn init(&mut self) -> Result<(), SlateDBError> {
         self.as_mut().init().await
     }
 
-    async fn next(&mut self) -> Result<Option<KeyValue>, SlateDBError> {
+    async fn next(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
         self.as_mut().next().await
-    }
-
-    async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
-        self.as_mut().next_entry().await
     }
 
     async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
@@ -136,7 +100,7 @@ impl<'a> KeyValueIterator for Box<dyn TrackedKeyValueIterator + 'a> {
     }
 }
 
-impl<'a> TrackedKeyValueIterator for Box<dyn TrackedKeyValueIterator + 'a> {
+impl<'a> TrackedRowEntryIterator for Box<dyn TrackedRowEntryIterator + 'a> {
     fn bytes_processed(&self) -> u64 {
         self.as_ref().bytes_processed()
     }
@@ -151,12 +115,12 @@ impl EmptyIterator {
 }
 
 #[async_trait]
-impl KeyValueIterator for EmptyIterator {
+impl RowEntryIterator for EmptyIterator {
     async fn init(&mut self) -> Result<(), SlateDBError> {
         Ok(())
     }
 
-    async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
+    async fn next(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
         Ok(None)
     }
 

@@ -5,19 +5,22 @@ use crate::config::{CheckpointOptions, DbReaderOptions, ReadOptions, ScanOptions
 use crate::db_read::DbRead;
 use crate::db_state::ManifestCore;
 use crate::db_stats::DbStats;
+use crate::db_status::ClosedResultWriter;
 use crate::dispatcher::{MessageFactory, MessageHandler, MessageHandlerExecutor};
 use crate::error::SlateDBError;
+use crate::iter::IterationOrder;
 use crate::manifest::store::{ManifestStore, StoredManifest};
 use crate::manifest::Manifest;
 use crate::mem_table::{ImmutableMemtable, KVTable};
 use crate::oracle::DbReaderOracle;
+use crate::paths::PathResolver;
 use crate::rand::DbRand;
 use crate::reader::{DbStateReader, Reader};
 use crate::sst_iter::SstIteratorOptions;
 use crate::stats::StatRegistry;
-use crate::store_provider::{DefaultStoreProvider, StoreProvider};
+use crate::store_provider::StoreProvider;
 use crate::tablestore::TableStore;
-use crate::utils::{IdGenerator, MonotonicSeq, WatchableOnceCell};
+use crate::utils::{IdGenerator, WatchableOnceCell};
 use crate::wal_replay::{WalReplayIterator, WalReplayOptions};
 use crate::{Checkpoint, DbIterator};
 use async_trait::async_trait;
@@ -28,7 +31,7 @@ use object_store::path::Path;
 use object_store::ObjectStore;
 use once_cell::sync::Lazy;
 use parking_lot::RwLock;
-use slatedb_common::clock::{DefaultSystemClock, SystemClock};
+use slatedb_common::clock::SystemClock;
 use std::collections::VecDeque;
 use std::ops::{RangeBounds, Sub};
 use std::sync::Arc;
@@ -55,7 +58,7 @@ struct DbReaderInner {
     user_checkpoint_id: Option<Uuid>,
     oracle: Arc<DbReaderOracle>,
     reader: Reader,
-    closed_result_watcher: WatchableOnceCell<Result<(), SlateDBError>>,
+    closed_result_watcher: ClosedResultWriter,
     rand: Arc<DbRand>,
 }
 
@@ -95,7 +98,7 @@ impl DbReaderInner {
         table_store: Arc<TableStore>,
         options: DbReaderOptions,
         checkpoint_id: Option<Uuid>,
-        closed_result_watcher: WatchableOnceCell<Result<(), SlateDBError>>,
+        closed_result_watcher: ClosedResultWriter,
         system_clock: Arc<dyn SystemClock>,
         rand: Arc<DbRand>,
     ) -> Result<Self, SlateDBError> {
@@ -128,9 +131,10 @@ impl DbReaderInner {
 
         // initial_state contains the last_committed_seq after WAL replay. in no-wal mode, we can simply fallback
         // to last_l0_seq.
-        let last_remote_persisted_seq = MonotonicSeq::new(initial_state.core().last_l0_seq);
-        last_remote_persisted_seq.store_if_greater(initial_state.last_remote_persisted_seq);
-        let oracle = Arc::new(DbReaderOracle::new(last_remote_persisted_seq));
+        let initial_durable_seq = initial_state
+            .last_remote_persisted_seq
+            .max(initial_state.core().last_l0_seq);
+        let oracle = Arc::new(DbReaderOracle::new(initial_durable_seq));
 
         let stat_registry = Arc::new(StatRegistry::new());
         let db_stats = DbStats::new(stat_registry.as_ref());
@@ -231,8 +235,7 @@ impl DbReaderInner {
     async fn reestablish_checkpoint(&self, checkpoint: Checkpoint) -> Result<(), SlateDBError> {
         let new_checkpoint_state = self.rebuild_checkpoint_state(checkpoint).await?;
         self.oracle
-            .last_remote_persisted_seq
-            .store_if_greater(new_checkpoint_state.last_remote_persisted_seq);
+            .advance_durable_seq(new_checkpoint_state.last_remote_persisted_seq);
         let mut write_guard = self.state.write();
         *write_guard = Arc::new(new_checkpoint_state);
         Ok(())
@@ -257,9 +260,7 @@ impl DbReaderInner {
             )
             .await?;
 
-            self.oracle
-                .last_remote_persisted_seq
-                .store(last_committed_seq);
+            self.oracle.advance_durable_seq(last_committed_seq);
             let mut write_guard = self.state.write();
             *write_guard = Arc::new(CheckpointState {
                 checkpoint: current_checkpoint.checkpoint.clone(),
@@ -402,6 +403,7 @@ impl DbReaderInner {
             blocks_to_fetch: 256,
             cache_blocks: true,
             eager_spawn: true,
+            order: IterationOrder::Ascending,
         };
 
         let replay_options = WalReplayOptions {
@@ -540,6 +542,26 @@ impl DbReader {
         Ok(())
     }
 
+    /// Preload the disk cache from the current manifest state.
+    pub(crate) async fn preload_cache(
+        &self,
+        cached_obj_store: &CachedObjectStore,
+        path: object_store::path::Path,
+    ) -> Result<(), SlateDBError> {
+        let state = Arc::clone(&self.inner.state.read());
+        let external_ssts = state.manifest.external_ssts();
+        let path_resolver = PathResolver::new_with_external_ssts(path, external_ssts);
+        let cache_opts = &self.inner.options.object_store_cache_options;
+        crate::utils::preload_cache_from_manifest(
+            &state.manifest.core,
+            cached_obj_store,
+            &path_resolver,
+            cache_opts.preload_disk_cache_on_startup,
+            cache_opts.max_cache_size_bytes.unwrap_or(usize::MAX),
+        )
+        .await
+    }
+
     /// Creates a database reader that can read the contents of a database (but cannot write any
     /// data). The caller can provide an optional checkpoint. If the checkpoint is provided, the
     /// reader will read using the specified checkpoint and will not periodically refresh the
@@ -552,38 +574,53 @@ impl DbReader {
         checkpoint_id: Option<Uuid>,
         options: DbReaderOptions,
     ) -> Result<Self, crate::Error> {
-        let path = path.into();
-        let clock = Arc::new(DefaultSystemClock::default());
-        let rand = Arc::new(DbRand::default());
-        let stat_registry = StatRegistry::new();
-
-        // Setup object store with optional caching
-        let object_store: Arc<dyn ObjectStore> = match CachedObjectStore::from_config(
-            object_store.clone(),
-            &options.object_store_cache_options,
-            &stat_registry,
-            clock.clone(),
-            rand.clone(),
-        )
-        .await?
-        {
-            Some(cached) => cached,
-            None => object_store,
-        };
-
-        let store_provider = DefaultStoreProvider {
-            path,
-            object_store,
-            block_cache: options.block_cache.clone(),
-            block_transformer: options.block_transformer.clone(),
-        };
-
-        Self::open_internal(&store_provider, checkpoint_id, options, clock, rand)
-            .await
-            .map_err(Into::into)
+        // Use the builder API internally
+        let mut builder = Self::builder(path, object_store).with_options(options);
+        if let Some(id) = checkpoint_id {
+            builder = builder.with_checkpoint_id(id);
+        }
+        builder.build().await
     }
 
-    async fn open_internal(
+    /// Creates a new builder for a database reader at the given path.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - The path to the database.
+    /// * `object_store` - The object store to use.
+    ///
+    /// # Returns
+    ///
+    /// A `DbReaderBuilder` that can be used to configure and build a `DbReader`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use slatedb::{Db, DbReader, Error};
+    /// use slatedb::object_store::{ObjectStore, memory::InMemory};
+    /// use std::sync::Arc;
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> Result<(), Error> {
+    ///     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    ///     // First create a database
+    ///     let db = Db::open("test_db", Arc::clone(&object_store)).await?;
+    ///     db.close().await?;
+    ///     // Then open a reader
+    ///     let reader = DbReader::builder("test_db", object_store)
+    ///         .build()
+    ///         .await?;
+    ///     Ok(())
+    /// }
+    /// ```
+    pub fn builder<P: Into<Path>>(
+        path: P,
+        object_store: Arc<dyn ObjectStore>,
+    ) -> crate::db::builder::DbReaderBuilder<P> {
+        crate::db::builder::DbReaderBuilder::new(path, object_store)
+    }
+
+    pub(crate) async fn open_internal(
         store_provider: &dyn StoreProvider,
         checkpoint_id: Option<Uuid>,
         options: DbReaderOptions,
@@ -592,7 +629,7 @@ impl DbReader {
     ) -> Result<Self, SlateDBError> {
         Self::validate_options(&options)?;
 
-        let closed_result_watcher = WatchableOnceCell::new();
+        let closed_result_watcher = ClosedResultWriter::new(WatchableOnceCell::new());
         let task_executor =
             MessageHandlerExecutor::new(closed_result_watcher.clone(), system_clock.clone());
         let manifest_store = store_provider.manifest_store();

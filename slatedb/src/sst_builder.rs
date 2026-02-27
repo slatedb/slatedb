@@ -55,7 +55,7 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 
 use crate::config::CompressionCodec;
-use crate::db_state::SsTableInfoCodec;
+use crate::db_state::{SsTableInfoCodec, SstType};
 use crate::error::SlateDBError;
 use crate::filter::BloomFilterBuilder;
 use crate::flatbuffer_types::{BlockMeta, BlockMetaArgs};
@@ -125,6 +125,7 @@ pub(crate) struct EncodedSsTableBuilder<'a> {
     index_builder: flatbuffers::FlatBufferBuilder<'a, DefaultAllocator>,
     first_key: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, u8>>>,
     sst_first_key: Option<Bytes>,
+    sst_last_key: Option<Bytes>,
     current_block_max_key: Option<Bytes>,
     block_meta: Vec<flatbuffers::WIPOffset<BlockMeta<'a>>>,
     current_len: u64,
@@ -154,6 +155,7 @@ impl EncodedSsTableBuilder<'_> {
             block_meta: Vec::new(),
             first_key: None,
             sst_first_key: None,
+            sst_last_key: None,
             current_block_max_key: None,
             block_size,
             block_format: BlockFormat::Latest,
@@ -227,6 +229,7 @@ impl EncodedSsTableBuilder<'_> {
         if is_sst_first_key {
             self.sst_first_key = Some(entry.key.clone());
         }
+        self.sst_last_key = Some(entry.key.clone());
         self.current_block_max_key = Some(entry.key.clone());
 
         self.builder.add(entry)?;
@@ -331,10 +334,12 @@ impl EncodedSsTableBuilder<'_> {
         let mut footer_builder = EncodedSsTableFooterBuilder::new(
             self.current_len,
             self.sst_first_key,
+            self.sst_last_key,
             &*self.sst_codec,
             self.index_builder,
             self.block_meta,
             self.sst_format_version,
+            SstType::Compacted,
         );
         if let Some(codec) = self.compression_codec {
             footer_builder = footer_builder.with_compression_codec(codec);
@@ -353,6 +358,7 @@ impl EncodedSsTableBuilder<'_> {
         let footer = footer_builder.build().await?;
 
         Ok(EncodedSsTable {
+            format_version: self.sst_format_version,
             info: footer.info,
             index: footer.index,
             filter: footer.filter,
@@ -1296,8 +1302,9 @@ mod tests {
             .unwrap();
 
         // then: the stored SST should be V1 format
-        let version = table_store.read_sst_version(&sst_handle).await.unwrap();
+        let version = table_store.read_sst_version(&sst_handle.id).await.unwrap();
         assert_eq!(version, SST_FORMAT_VERSION);
+        assert_eq!(sst_handle.format_version, SST_FORMAT_VERSION);
 
         // then: V1 blocks should have one offset per entry
         let blocks = table_store.read_blocks(&sst_handle, 0..1).await.unwrap();
@@ -1359,8 +1366,9 @@ mod tests {
             .unwrap();
 
         // then: the stored SST should be V2 format
-        let version = table_store.read_sst_version(&sst_handle).await.unwrap();
+        let version = table_store.read_sst_version(&sst_handle.id).await.unwrap();
         assert_eq!(version, SST_FORMAT_VERSION_LATEST);
+        assert_eq!(sst_handle.format_version, SST_FORMAT_VERSION_LATEST);
 
         // then: V2 blocks should have fewer offsets than entries (restart points only)
         let blocks = table_store.read_blocks(&sst_handle, 0..1).await.unwrap();

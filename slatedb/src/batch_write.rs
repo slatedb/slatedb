@@ -101,6 +101,7 @@ impl MessageHandler<WriteBatchMessage> for WriteBatchEventHandler {
                 });
             }
         }
+        self.is_first_write = false;
         _ = done.send(result);
         Ok(())
     }
@@ -128,7 +129,7 @@ impl DbInner {
         #[cfg(dst)]
         // Force the current timestamp for DST operations. See #719 for details.
         let now = options.now;
-        let commit_seq = self.oracle.last_seq.next();
+        let commit_seq = self.oracle.next_seq();
 
         // Check for transaction conflicts before proceeding with the write batch
         // if this batch is part of a transaction.
@@ -168,7 +169,7 @@ impl DbInner {
         // and flushed to the remote storage, WAL buffer manager will recycle these WAL entries.
         self.wal_buffer.track_last_applied_seq(commit_seq);
 
-        // insert a fail point for easier to test the case where the last_committed_seq is not updated.
+        // insert a fail point to make it easier to test the case where the last_committed_seq is not updated.
         // this is useful for testing the case where the reader is not able to see the writes.
         fail_point!(
             Arc::clone(&self.fp_registry),
@@ -187,8 +188,16 @@ impl DbInner {
                 .track_recent_committed_write_batch(&write_keys, commit_seq);
         }
 
-        // update the last_committed_seq, so the writes will be visible to the readers.
-        self.oracle.last_committed_seq.store(commit_seq);
+        // insert a fail point to make it easier to test the case where the transaction is committed but
+        // but remaining work hasn't been done. this is useful for testing that transaction commits and
+        // commited seqnums get updated in lock-step. See #1301 for details.
+        fail_point!(
+            Arc::clone(&self.fp_registry),
+            "write-batch-post-commit",
+            |_| { Err(SlateDBError::from(std::io::Error::other("oops"))) }
+        );
+
+        // record the memtable sequence in the memtable's sequence tracker.
         self.record_memtable_sequence(commit_seq);
 
         // maybe freeze the memtable.
@@ -233,5 +242,43 @@ async fn monitor_first_write(
             is reached. If writer is single threaded or has low throughput, the \
             applications must call `flush` to ensure durability in a timely manner.");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::object_store::memory::InMemory;
+    use crate::Db;
+
+    #[tokio::test]
+    async fn test_is_first_write_set_false_after_first_write() {
+        let object_store = Arc::new(InMemory::new());
+        let db = Db::open(
+            "/tmp/test_is_first_write_set_false_after_first_write",
+            object_store,
+        )
+        .await
+        .unwrap();
+
+        let mut handler = WriteBatchEventHandler::new(db.inner.clone());
+        assert!(handler.is_first_write);
+
+        let mut batch = WriteBatch::new();
+        batch.put(b"key", b"value");
+
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+        handler
+            .handle(WriteBatchMessage {
+                batch,
+                options: WriteOptions::default(),
+                done: done_tx,
+            })
+            .await
+            .unwrap();
+
+        let result = done_rx.await.unwrap();
+        assert!(result.is_ok());
+        assert!(!handler.is_first_write);
     }
 }

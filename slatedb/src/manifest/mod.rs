@@ -1,5 +1,5 @@
 use std::cmp::{max, min};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
 use std::ops::Bound;
 use std::sync::Arc;
@@ -208,6 +208,17 @@ pub(crate) struct ExternalDb {
 }
 
 impl Manifest {
+    /// Returns a map from SST ID to the external DB path for all external SSTs.
+    pub(crate) fn external_ssts(&self) -> HashMap<SsTableId, object_store::path::Path> {
+        let mut external_ssts = HashMap::new();
+        for external_db in &self.external_dbs {
+            for id in &external_db.sst_ids {
+                external_ssts.insert(*id, external_db.path.clone().into());
+            }
+        }
+        external_ssts
+    }
+
     pub(crate) fn has_wal_sst_reference(&self, wal_sst_id: u64) -> bool {
         wal_sst_id > self.core.replay_after_wal_id && wal_sst_id < self.core.next_wal_sst_id
     }
@@ -219,8 +230,10 @@ mod tests {
     use crate::manifest::store::{ManifestStore, StoredManifest};
     use slatedb_common::clock::{DefaultSystemClock, SystemClock};
 
+    use super::Manifest;
     use crate::config::CheckpointOptions;
     use crate::db_state::{ManifestCore, SortedRun, SsTableHandle, SsTableId, SsTableInfo};
+    use crate::format::sst::SST_FORMAT_VERSION_LATEST;
     use crate::rand::DbRand;
     use bytes::Bytes;
     use object_store::memory::InMemory;
@@ -231,8 +244,6 @@ mod tests {
     use std::ops::{Bound, Range, RangeBounds};
     use std::sync::Arc;
     use ulid::Ulid;
-
-    use super::Manifest;
 
     #[tokio::test]
     async fn test_init_clone_manifest() {
@@ -545,6 +556,7 @@ mod tests {
         for entry in &manifest.l0 {
             core.l0.push_back(SsTableHandle::new_compacted(
                 sst_id_fn(entry.sst_alias),
+                SST_FORMAT_VERSION_LATEST,
                 SsTableInfo {
                     first_entry: Some(entry.first_entry.clone()),
                     ..SsTableInfo::default()
@@ -560,6 +572,7 @@ mod tests {
                     .map(|entry| {
                         SsTableHandle::new_compacted(
                             sst_id_fn(entry.sst_alias),
+                            SST_FORMAT_VERSION_LATEST,
                             SsTableInfo {
                                 first_entry: Some(entry.first_entry.clone()),
                                 ..SsTableInfo::default()

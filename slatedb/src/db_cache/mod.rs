@@ -124,7 +124,7 @@ static NEXT_CACHE_SCOPE_ID: AtomicU64 = AtomicU64::new(0);
 ///     let object_store = Arc::new(InMemory::new());
 ///     let cache = Arc::new(MyCache::new(128u64 * 1024 * 1024));
 ///     let db = Db::builder("/path/to/db", object_store)
-///         .with_memory_cache(cache)
+///         .with_db_cache(cache)
 ///         .build()
 ///         .await;
 /// }

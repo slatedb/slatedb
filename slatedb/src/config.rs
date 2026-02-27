@@ -191,7 +191,7 @@ use uuid::Uuid;
 
 use crate::error::SlateDBError;
 
-use crate::db_cache::DbCache;
+use crate::db_cache::{DbCache, SplitCache};
 use crate::format::sst::BlockTransformer;
 use crate::garbage_collector::{DEFAULT_INTERVAL, DEFAULT_MIN_AGE};
 use crate::merge_operator::MergeOperatorType;
@@ -559,6 +559,9 @@ pub struct CheckpointOptions {
 ///
 /// This is separate from components (like block_cache, clock, etc.) which are responsible
 /// for performing the work in the database.
+///
+/// Note: `compactor_options` is mutually exclusive with `DbBuilder::with_compactor_builder`.
+/// Setting both will result in an error.
 ///
 /// For backward compatibility, DBOptions is a type alias for Settings.
 #[derive(Clone, Deserialize, Serialize)]
@@ -973,7 +976,16 @@ impl Default for DbReaderOptions {
             manifest_poll_interval: Duration::from_secs(10),
             checkpoint_lifetime: Duration::from_secs(10 * 60),
             max_memtable_bytes: 64 * 1024 * 1024,
-            block_cache: default_block_cache(),
+            block_cache: {
+                let block_cache = default_block_cache();
+                let meta_cache = default_meta_cache();
+                Some(Arc::new(
+                    SplitCache::new()
+                        .with_block_cache(block_cache)
+                        .with_meta_cache(meta_cache)
+                        .build(),
+                ))
+            },
             merge_operator: None,
             block_transformer: None,
             object_store_cache_options: ObjectStoreCacheOptions::default(),

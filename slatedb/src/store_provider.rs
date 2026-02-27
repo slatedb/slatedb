@@ -15,6 +15,7 @@ pub(crate) trait StoreProvider: Send + Sync {
 pub(crate) struct DefaultStoreProvider {
     pub(crate) path: Path,
     pub(crate) object_store: Arc<dyn ObjectStore>,
+    pub(crate) wal_object_store: Option<Arc<dyn ObjectStore>>,
     pub(crate) block_cache: Option<Arc<dyn DbCache>>,
     pub(crate) block_transformer: Option<Arc<dyn BlockTransformer>>,
 }
@@ -26,7 +27,10 @@ impl StoreProvider for DefaultStoreProvider {
             ..SsTableFormat::default()
         };
         Arc::new(TableStore::new(
-            ObjectStores::new(Arc::clone(&self.object_store), None),
+            ObjectStores::new(
+                Arc::clone(&self.object_store),
+                self.wal_object_store.clone(),
+            ),
             sst_format,
             self.path.clone(),
             self.block_cache.clone(),

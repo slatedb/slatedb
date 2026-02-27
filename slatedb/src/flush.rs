@@ -2,7 +2,7 @@ use crate::db::DbInner;
 use crate::db_state;
 use crate::db_state::SsTableHandle;
 use crate::error::SlateDBError;
-use crate::iter::KeyValueIterator;
+use crate::iter::RowEntryIterator;
 use crate::mem_table::KVTable;
 use crate::merge_operator::{MergeOperatorIterator, MergeOperatorRequiredIterator};
 use crate::oracle::Oracle;
@@ -19,7 +19,7 @@ impl DbInner {
     ) -> Result<SsTableHandle, SlateDBError> {
         let mut sst_builder = self.table_store.table_builder();
         let mut iter = self.iter_imm_table(imm_table.clone()).await?;
-        while let Some(entry) = iter.next_entry().await? {
+        while let Some(entry) = iter.next().await? {
             sst_builder.add(entry).await?;
         }
 
@@ -38,7 +38,7 @@ impl DbInner {
     async fn iter_imm_table(
         &self,
         imm_table: Arc<KVTable>,
-    ) -> Result<RetentionIterator<Box<dyn KeyValueIterator>>, SlateDBError> {
+    ) -> Result<RetentionIterator<Box<dyn RowEntryIterator>>, SlateDBError> {
         let state = self.state.read().view();
 
         // Compute retention boundary using both active transactions AND durable watermark.
@@ -62,7 +62,7 @@ impl DbInner {
             ))
         } else {
             Box::new(MergeOperatorRequiredIterator::new(imm_table.iter()))
-                as Box<dyn KeyValueIterator>
+                as Box<dyn RowEntryIterator>
         };
         let mut iter = RetentionIterator::new(
             merge_iter,
@@ -86,7 +86,7 @@ mod tests {
     use crate::db_state::{SsTableHandle, SsTableId};
     use crate::error::SlateDBError;
     use crate::error::SlateDBError::MergeOperatorMissing;
-    use crate::iter::KeyValueIterator;
+    use crate::iter::RowEntryIterator;
     use crate::mem_table::WritableKVTable;
     use crate::object_store::memory::InMemory;
     use crate::test_utils::StringConcatMergeOperator;
@@ -138,7 +138,7 @@ mod tests {
             let mut block_iter = BlockIteratorLatest::new_ascending(block);
             block_iter.init().await.unwrap();
 
-            while let Some(entry) = block_iter.next_entry().await.unwrap() {
+            while let Some(entry) = block_iter.next().await.unwrap() {
                 found_entries.push((entry.key.clone(), entry.seq, entry.value.clone()));
             }
         }
@@ -320,9 +320,11 @@ mod tests {
     async fn test_flush(#[case] test_case: FlushImmTableTestCase) {
         // Given
         let db = setup_test_db_with_merge_operator().await;
-        db.inner.txn_manager.new_txn(test_case.min_active_seq, true);
+        db.inner
+            .txn_manager
+            .new_snapshot(Some(test_case.min_active_seq));
         // Set durable watermark high so it doesn't interfere with transaction-based retention tests
-        db.inner.oracle.last_remote_persisted_seq.store(u64::MAX);
+        db.inner.oracle.advance_durable_seq(u64::MAX);
         let table = WritableKVTable::new();
         let row_entries_length = test_case.row_entries.len();
         for row_entry in test_case.row_entries {
@@ -348,7 +350,7 @@ mod tests {
     async fn test_err_when_merge_operator_not_set_and_merges_exist() {
         // Given
         let db = setup_test_db_without_merge_operator().await;
-        db.inner.txn_manager.new_txn(0, true);
+        db.inner.txn_manager.new_snapshot(Some(0));
         let table = WritableKVTable::new();
         table.put(RowEntry::new_value(&Bytes::from("key"), b"value1", 1));
         table.put(RowEntry::new_merge(&Bytes::from("key"), b"value2", 2));
@@ -372,7 +374,7 @@ mod tests {
     async fn test_no_err_merge_operator_not_set_and_no_merges() {
         // Given
         let db = setup_test_db_without_merge_operator().await;
-        db.inner.txn_manager.new_txn(0, true);
+        db.inner.txn_manager.new_snapshot(Some(0));
         let table = WritableKVTable::new();
         table.put(RowEntry::new_value(&Bytes::from("key1"), b"value1", 1));
         table.put(RowEntry::new_tombstone(&Bytes::from("key2"), 2));
@@ -391,7 +393,7 @@ mod tests {
         // This can happen when the WAL has flushed up to seq=2, but newer writes
         // (seq=3) are still in the memtable and not yet durable.
         let db = setup_test_db_with_merge_operator().await;
-        db.inner.oracle.last_remote_persisted_seq.store(2);
+        db.inner.oracle.advance_durable_seq(2);
         // No active transaction created - min_active_seq() will return None
 
         let table = WritableKVTable::new();
@@ -435,8 +437,8 @@ mod tests {
     async fn should_use_min_of_active_seq_and_durable_boundary() {
         // Given: DB with active transaction at seq=3, durable watermark at seq=1
         let db = setup_test_db_with_merge_operator().await;
-        db.inner.oracle.last_remote_persisted_seq.store(1);
-        db.inner.txn_manager.new_txn(3, true); // Active txn at seq=3
+        db.inner.oracle.advance_durable_seq(1);
+        db.inner.txn_manager.new_snapshot(Some(3)); // Active txn at seq=3
 
         let table = WritableKVTable::new();
         // Add versions: seq=1, seq=2, seq=3, seq=4

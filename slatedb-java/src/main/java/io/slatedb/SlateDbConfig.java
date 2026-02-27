@@ -111,6 +111,32 @@ public final class SlateDbConfig {
         }
     }
 
+    /// Kind of a row entry.
+    public enum RowEntryKind {
+        VALUE((byte) 0),
+        TOMBSTONE((byte) 1),
+        MERGE((byte) 2);
+
+        private final byte code;
+
+        RowEntryKind(byte code) {
+            this.code = code;
+        }
+
+        byte code() {
+            return code;
+        }
+
+        static RowEntryKind fromCode(byte code) {
+            for (RowEntryKind value : values()) {
+                if (value.code == code) {
+                    return value;
+                }
+            }
+            throw new IllegalArgumentException("Unknown row entry kind code: " + code);
+        }
+    }
+
     /// Options for put operations.
     public static final class PutOptions {
         private final TtlType ttlType;
@@ -143,6 +169,49 @@ public final class SlateDbConfig {
         /// Expires the entry after the provided number of milliseconds.
         public static PutOptions expireAfterMillis(long ttlMillis) {
             return new PutOptions(TtlType.EXPIRE_AFTER, ttlMillis);
+        }
+
+        public TtlType ttlType() {
+            return ttlType;
+        }
+
+        public long ttlValueMs() {
+            return ttlValueMs;
+        }
+    }
+
+    /// Options for merge operations.
+    public static final class MergeOptions {
+        private final TtlType ttlType;
+        private final long ttlValueMs;
+
+        private MergeOptions(TtlType ttlType, long ttlValueMs) {
+            this.ttlType = Objects.requireNonNull(ttlType, "ttlType");
+            if (ttlValueMs < 0) {
+                throw new IllegalArgumentException("ttlValueMs must be >= 0");
+            }
+            this.ttlValueMs = ttlValueMs;
+        }
+
+        /// Uses SlateDB default TTL behavior.
+        public static MergeOptions defaultTtl() {
+            return new MergeOptions(TtlType.DEFAULT, 0);
+        }
+
+        /// Disables TTL expiry for the entry.
+        public static MergeOptions noExpiry() {
+            return new MergeOptions(TtlType.NO_EXPIRY, 0);
+        }
+
+        /// Expires the entry after the provided duration.
+        public static MergeOptions expireAfter(Duration ttl) {
+            Objects.requireNonNull(ttl, "ttl");
+            return expireAfterMillis(ttl.toMillis());
+        }
+
+        /// Expires the entry after the provided number of milliseconds.
+        public static MergeOptions expireAfterMillis(long ttlMillis) {
+            return new MergeOptions(TtlType.EXPIRE_AFTER, ttlMillis);
         }
 
         public TtlType ttlType() {

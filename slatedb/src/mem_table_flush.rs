@@ -5,6 +5,7 @@ use crate::db_state::SsTableId;
 use crate::dispatcher::{MessageFactory, MessageHandler};
 use crate::error::SlateDBError;
 use crate::manifest::store::FenceableManifest;
+use crate::oracle::Oracle;
 use crate::utils::IdGenerator;
 use async_trait::async_trait;
 use fail_parallel::fail_point;
@@ -121,10 +122,10 @@ impl MemtableFlusher {
         } {
             if self.db_inner.wal_enabled {
                 let last_seq = imm_memtable.table().last_seq().unwrap_or(0);
-                if self.db_inner.oracle.last_remote_persisted_seq.load() < last_seq {
+                if self.db_inner.oracle.last_remote_persisted_seq() < last_seq {
                     self.db_inner.flush_wals().await?;
                     assert!(
-                        self.db_inner.oracle.last_remote_persisted_seq.load() >= last_seq,
+                        self.db_inner.oracle.last_remote_persisted_seq() >= last_seq,
                         "flush_wals did not flush up to the last seq in the imm memtable"
                     );
                 }
@@ -204,10 +205,7 @@ impl MemtableFlusher {
                     // at this point we know the data in the memtable is durably stored
                     // so notify the relevant listeners
                     imm_memtable.table().notify_durable(Ok(()));
-                    self.db_inner
-                        .oracle
-                        .last_remote_persisted_seq
-                        .store_if_greater(last_seq);
+                    self.db_inner.oracle.advance_durable_seq(last_seq);
                 }
                 Err(err) => {
                     if matches!(err, SlateDBError::Fenced) {

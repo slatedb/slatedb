@@ -1,0 +1,200 @@
+name: Publish Release (Java)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "The version of the release (e.g., 1.0.0)"
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  verify-version:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify version
+        uses: matt-usurp/validate-semver@v2
+        with:
+          version: ${{ github.event.inputs.version }}
+
+  native-linux:
+    name: Build native libraries (Linux)
+    runs-on: ubuntu-22.04
+    needs: verify-version
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: "v${{ github.event.inputs.version }}"
+
+      - name: Setup Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cross-compile toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+
+      - name: Add Rust targets
+        run: rustup target add x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu
+
+      - name: Build x86_64 Linux library
+        run: cargo build -p slatedb-c --release --target x86_64-unknown-linux-gnu
+
+      - name: Build aarch64 Linux library
+        env:
+          CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
+          CXX_aarch64_unknown_linux_gnu: aarch64-linux-gnu-g++
+          AR_aarch64_unknown_linux_gnu: aarch64-linux-gnu-ar
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+        run: cargo build -p slatedb-c --release --target aarch64-unknown-linux-gnu
+
+      - name: Stage Linux native artifacts
+        run: |
+          mkdir -p artifacts/linux-x86_64 artifacts/linux-aarch64
+          cp target/x86_64-unknown-linux-gnu/release/libslatedb_c.so artifacts/linux-x86_64/
+          cp target/aarch64-unknown-linux-gnu/release/libslatedb_c.so artifacts/linux-aarch64/
+
+      - name: Upload Linux native artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-linux
+          path: artifacts
+
+  native-macos:
+    name: Build native libraries (macOS)
+    runs-on: macos-14
+    needs: verify-version
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: "v${{ github.event.inputs.version }}"
+
+      - name: Setup Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Add Rust targets
+        run: rustup target add x86_64-apple-darwin aarch64-apple-darwin
+
+      - name: Build x86_64 macOS library
+        run: cargo build -p slatedb-c --release --target x86_64-apple-darwin
+
+      - name: Build aarch64 macOS library
+        run: cargo build -p slatedb-c --release --target aarch64-apple-darwin
+
+      - name: Stage macOS native artifacts
+        run: |
+          mkdir -p artifacts/macos-x86_64 artifacts/macos-aarch64
+          cp target/x86_64-apple-darwin/release/libslatedb_c.dylib artifacts/macos-x86_64/
+          cp target/aarch64-apple-darwin/release/libslatedb_c.dylib artifacts/macos-aarch64/
+
+      - name: Upload macOS native artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-macos
+          path: artifacts
+
+  native-windows:
+    name: Build native libraries (Windows)
+    runs-on: windows-latest
+    needs: verify-version
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: "v${{ github.event.inputs.version }}"
+
+      - name: Setup Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Add Rust targets
+        run: rustup target add x86_64-pc-windows-msvc aarch64-pc-windows-msvc
+
+      - name: Build x86_64 Windows library
+        run: cargo build -p slatedb-c --release --target x86_64-pc-windows-msvc
+
+      - name: Build aarch64 Windows library
+        run: cargo build -p slatedb-c --release --target aarch64-pc-windows-msvc
+
+      - name: Stage Windows native artifacts
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path artifacts/windows-x86_64 | Out-Null
+          New-Item -ItemType Directory -Force -Path artifacts/windows-aarch64 | Out-Null
+          Copy-Item target/x86_64-pc-windows-msvc/release/slatedb_c.dll artifacts/windows-x86_64/
+          Copy-Item target/aarch64-pc-windows-msvc/release/slatedb_c.dll artifacts/windows-aarch64/
+
+      - name: Upload Windows native artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-windows
+          path: artifacts
+
+  publish-java:
+    name: Publish Java to Maven Central
+    runs-on: ubuntu-latest
+    needs: [native-linux, native-macos, native-windows]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: "v${{ github.event.inputs.version }}"
+
+      - name: Set up Java 24
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "24"
+
+      - name: Download Linux artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: native-linux
+          path: native-libs/linux
+
+      - name: Download macOS artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: native-macos
+          path: native-libs/macos
+
+      - name: Download Windows artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: native-windows
+          path: native-libs/windows
+
+      - name: Assemble universal native directory
+        run: |
+          mkdir -p native-libs/merged/native/linux-x86_64
+          mkdir -p native-libs/merged/native/linux-aarch64
+          mkdir -p native-libs/merged/native/macos-x86_64
+          mkdir -p native-libs/merged/native/macos-aarch64
+          mkdir -p native-libs/merged/native/windows-x86_64
+          mkdir -p native-libs/merged/native/windows-aarch64
+
+          cp native-libs/linux/linux-x86_64/libslatedb_c.so native-libs/merged/native/linux-x86_64/
+          cp native-libs/linux/linux-aarch64/libslatedb_c.so native-libs/merged/native/linux-aarch64/
+          cp native-libs/macos/macos-x86_64/libslatedb_c.dylib native-libs/merged/native/macos-x86_64/
+          cp native-libs/macos/macos-aarch64/libslatedb_c.dylib native-libs/merged/native/macos-aarch64/
+          cp native-libs/windows/windows-x86_64/slatedb_c.dll native-libs/merged/native/windows-x86_64/
+          cp native-libs/windows/windows-aarch64/slatedb_c.dll native-libs/merged/native/windows-aarch64/
+
+      - name: Verify native artifact layout
+        run: |
+          test -f native-libs/merged/native/linux-x86_64/libslatedb_c.so
+          test -f native-libs/merged/native/linux-aarch64/libslatedb_c.so
+          test -f native-libs/merged/native/macos-x86_64/libslatedb_c.dylib
+          test -f native-libs/merged/native/macos-aarch64/libslatedb_c.dylib
+          test -f native-libs/merged/native/windows-x86_64/slatedb_c.dll
+          test -f native-libs/merged/native/windows-aarch64/slatedb_c.dll
+
+      - name: Publish to Maven Central
+        env:
+          ORG_GRADLE_PROJECT_mavenCentralUsername: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
+          ORG_GRADLE_PROJECT_mavenCentralPassword: ${{ secrets.MAVEN_CENTRAL_PASSWORD }}
+          ORG_GRADLE_PROJECT_signingInMemoryKey: ${{ secrets.MAVEN_CENTRAL_SIGNING_KEY }}
+          ORG_GRADLE_PROJECT_signingInMemoryKeyPassword: ${{ secrets.MAVEN_CENTRAL_SIGNING_KEY_PASSWORD }}
+        run: |
+          ./slatedb-java/gradlew -p slatedb-java check publishAndReleaseToMavenCentral \
+            -Pslatedb.version=${{ github.event.inputs.version }} \
+            -Pslatedb.native.prebuiltDir="${{ github.workspace }}/native-libs/merged"

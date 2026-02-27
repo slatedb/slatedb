@@ -112,7 +112,7 @@ class SlateDbScanIteratorTest {
 
     @Test
     void scanAndSeekWithOptions() throws Exception {
-        TestSupport.ensureNativeReady();
+        TestSupport.ensureLoggingInitialized();
         TestSupport.DbContext context = TestSupport.createDbContext();
 
         byte[] keyA = "scan-a".getBytes(StandardCharsets.UTF_8);

@@ -29,7 +29,7 @@ class SlateDbReaderTest {
 
     @Test
     void readerGetAndScan() throws Exception {
-        TestSupport.ensureNativeReady();
+        TestSupport.ensureLoggingInitialized();
         final var context = TestSupport.createDbContext();
         final var readerObjectStoreUrl = "file://" + context.objectStoreRoot().toAbsolutePath();
 
@@ -57,7 +57,7 @@ class SlateDbReaderTest {
 
     @Test
     void readerGetMissingKey() throws Exception {
-        TestSupport.ensureNativeReady();
+        TestSupport.ensureLoggingInitialized();
         final var context = TestSupport.createDbContext();
         final var readerObjectStoreUrl = "file://" + context.objectStoreRoot().toAbsolutePath();
 
@@ -76,7 +76,7 @@ class SlateDbReaderTest {
 
     @Test
     void readerCloseIsIdempotentAndGuardsMethods() throws Exception {
-        TestSupport.ensureNativeReady();
+        TestSupport.ensureLoggingInitialized();
         final var context = TestSupport.createDbContext();
         final var readerObjectStoreUrl = "file://" + context.objectStoreRoot().toAbsolutePath();
 

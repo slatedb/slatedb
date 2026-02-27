@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 
 use crate::error::SlateDBError;
-use crate::iter::{KeyValueIterator, TrackedKeyValueIterator};
+use crate::iter::{RowEntryIterator, TrackedRowEntryIterator};
 use crate::types::{RowEntry, ValueDeletable};
 use std::cmp::{Ordering, Reverse};
 use std::collections::{BinaryHeap, VecDeque};
@@ -9,7 +9,7 @@ use std::collections::{BinaryHeap, VecDeque};
 struct MergeIteratorHeapEntry<'a> {
     next_kv: RowEntry,
     index: usize,
-    iterator: Box<dyn KeyValueIterator + 'a>,
+    iterator: Box<dyn RowEntryIterator + 'a>,
 }
 
 impl<'a> MergeIteratorHeapEntry<'a> {
@@ -22,7 +22,7 @@ impl<'a> MergeIteratorHeapEntry<'a> {
             Ok(Some(self))
         } else {
             self.iterator.seek(next_key).await?;
-            if let Some(next_kv) = self.iterator.next_entry().await? {
+            if let Some(next_kv) = self.iterator.next().await? {
                 Ok(Some(MergeIteratorHeapEntry {
                     next_kv,
                     index: self.index,
@@ -67,7 +67,7 @@ pub(crate) struct MergeIterator<'a> {
     /// Use a heap to perform merge sort.
     iterators: BinaryHeap<Reverse<MergeIteratorHeapEntry<'a>>>,
     /// Iterators that have not yet been initialized and seeded.
-    pending_iterators: Vec<(usize, Box<dyn KeyValueIterator + 'a>)>,
+    pending_iterators: Vec<(usize, Box<dyn RowEntryIterator + 'a>)>,
     /// Whether to deduplicate entries of multiple versions with the same key. It's enabled by
     /// default, but it is useful to disable when we want to have some merge logics during
     /// compaction.
@@ -79,7 +79,7 @@ pub(crate) struct MergeIterator<'a> {
 }
 
 impl<'a> MergeIterator<'a> {
-    pub(crate) fn new<T: KeyValueIterator + 'a>(
+    pub(crate) fn new<T: RowEntryIterator + 'a>(
         iterators: impl IntoIterator<Item = T>,
     ) -> Result<Self, SlateDBError> {
         Ok(Self {
@@ -89,7 +89,7 @@ impl<'a> MergeIterator<'a> {
                 .into_iter()
                 .enumerate()
                 .map(|(index, iterator)| {
-                    (index, Box::new(iterator) as Box<dyn KeyValueIterator + 'a>)
+                    (index, Box::new(iterator) as Box<dyn RowEntryIterator + 'a>)
                 })
                 .collect(),
             dedup: true,
@@ -110,7 +110,7 @@ impl<'a> MergeIterator<'a> {
 
         for (index, mut iterator) in self.pending_iterators.drain(..) {
             iterator.init().await?;
-            if let Some(next_kv) = iterator.next_entry().await? {
+            if let Some(next_kv) = iterator.next().await? {
                 self.iterators.push(Reverse(MergeIteratorHeapEntry {
                     next_kv,
                     index,
@@ -138,7 +138,7 @@ impl<'a> MergeIterator<'a> {
         self.ensure_initialized().await?;
         if let Some(mut iterator_state) = self.current.take() {
             let current_kv = iterator_state.next_kv;
-            if let Some(kv) = iterator_state.iterator.next_entry().await? {
+            if let Some(kv) = iterator_state.iterator.next().await? {
                 iterator_state.next_kv = kv;
                 self.iterators.push(Reverse(iterator_state));
             }
@@ -155,12 +155,12 @@ impl<'a> MergeIterator<'a> {
 }
 
 #[async_trait]
-impl KeyValueIterator for MergeIterator<'_> {
+impl RowEntryIterator for MergeIterator<'_> {
     async fn init(&mut self) -> Result<(), SlateDBError> {
         self.initialize().await
     }
 
-    async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
+    async fn next(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
         if !self.initialized {
             return Err(SlateDBError::IteratorNotInitialized);
         }
@@ -216,7 +216,7 @@ impl KeyValueIterator for MergeIterator<'_> {
     }
 }
 
-impl TrackedKeyValueIterator for MergeIterator<'_> {
+impl TrackedRowEntryIterator for MergeIterator<'_> {
     fn bytes_processed(&self) -> u64 {
         self.bytes_processed
     }
@@ -224,9 +224,9 @@ impl TrackedKeyValueIterator for MergeIterator<'_> {
 
 #[cfg(test)]
 mod tests {
-    use crate::iter::KeyValueIterator;
+    use crate::iter::RowEntryIterator;
     use crate::merge_iterator::MergeIterator;
-    use crate::test_utils::{assert_iterator, assert_next_entry, TestIterator};
+    use crate::test_utils::{assert_iterator, assert_next, TestIterator};
     use crate::types::RowEntry;
     use std::collections::VecDeque;
     use std::vec;
@@ -401,7 +401,7 @@ mod tests {
         );
 
         let mut merge_iter = MergeIterator::new(iters).unwrap();
-        assert_next_entry(&mut merge_iter, &RowEntry::new_value(b"aa", b"aa1", 0)).await;
+        assert_next(&mut merge_iter, &RowEntry::new_value(b"aa", b"aa1", 0)).await;
 
         merge_iter.seek(b"bb".as_ref()).await.unwrap();
 

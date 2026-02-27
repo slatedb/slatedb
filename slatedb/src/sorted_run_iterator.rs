@@ -1,7 +1,7 @@
 use crate::bytes_range::BytesRange;
 use crate::db_state::{SortedRun, SsTableHandle};
 use crate::error::SlateDBError;
-use crate::iter::KeyValueIterator;
+use crate::iter::RowEntryIterator;
 use crate::sst_iter::{SstIterator, SstIteratorOptions, SstView};
 use crate::tablestore::TableStore;
 use crate::types::RowEntry;
@@ -144,7 +144,7 @@ impl<'a> SortedRunIterator<'a> {
 }
 
 #[async_trait]
-impl KeyValueIterator for SortedRunIterator<'_> {
+impl RowEntryIterator for SortedRunIterator<'_> {
     async fn init(&mut self) -> Result<(), SlateDBError> {
         if !self.initialized {
             if let Some(iter) = self.current_iter.as_mut() {
@@ -155,12 +155,12 @@ impl KeyValueIterator for SortedRunIterator<'_> {
         Ok(())
     }
 
-    async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
+    async fn next(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
         if !self.initialized {
             return Err(SlateDBError::IteratorNotInitialized);
         }
         while let Some(iter) = &mut self.current_iter {
-            if let Some(kv) = iter.next_entry().await? {
+            if let Some(kv) = iter.next().await? {
                 return Ok(Some(kv));
             } else {
                 self.advance_table().await?;
@@ -196,6 +196,7 @@ mod tests {
     use crate::proptest_util;
     use crate::proptest_util::sample;
     use crate::test_utils::{assert_kv, gen_attrs};
+    use crate::types::KeyValue;
 
     use crate::object_stores::ObjectStores;
     use bytes::{BufMut, BytesMut};
@@ -251,16 +252,16 @@ mod tests {
         .await
         .unwrap();
 
-        let kv = iter.next().await.unwrap().unwrap();
+        let kv: KeyValue = iter.next().await.unwrap().unwrap().into();
         assert_eq!(kv.key, b"key1".as_slice());
         assert_eq!(kv.value, b"value1".as_slice());
-        let kv = iter.next().await.unwrap().unwrap();
+        let kv: KeyValue = iter.next().await.unwrap().unwrap().into();
         assert_eq!(kv.key, b"key2".as_slice());
         assert_eq!(kv.value, b"value2".as_slice());
-        let kv = iter.next().await.unwrap().unwrap();
+        let kv: KeyValue = iter.next().await.unwrap().unwrap().into();
         assert_eq!(kv.key, b"key3".as_slice());
         assert_eq!(kv.value, b"value3".as_slice());
-        let kv = iter.next().await.unwrap();
+        let kv = iter.next().await.unwrap().map(KeyValue::from);
         assert!(kv.is_none());
     }
 
@@ -312,16 +313,16 @@ mod tests {
         .await
         .unwrap();
 
-        let kv = iter.next().await.unwrap().unwrap();
+        let kv: KeyValue = iter.next().await.unwrap().unwrap().into();
         assert_eq!(kv.key, b"key1".as_slice());
         assert_eq!(kv.value, b"value1".as_slice());
-        let kv = iter.next().await.unwrap().unwrap();
+        let kv: KeyValue = iter.next().await.unwrap().unwrap().into();
         assert_eq!(kv.key, b"key2".as_slice());
         assert_eq!(kv.value, b"value2".as_slice());
-        let kv = iter.next().await.unwrap().unwrap();
+        let kv: KeyValue = iter.next().await.unwrap().unwrap().into();
         assert_eq!(kv.key, b"key3".as_slice());
         assert_eq!(kv.value, b"value3".as_slice());
-        let kv = iter.next().await.unwrap();
+        let kv = iter.next().await.unwrap().map(KeyValue::from);
         assert!(kv.is_none());
     }
 
@@ -360,7 +361,7 @@ mod tests {
             .unwrap();
             for _ in 0..30 - i {
                 assert_kv(
-                    &iter.next().await.unwrap().unwrap(),
+                    &iter.next().await.unwrap().unwrap().into(),
                     expected_key_gen.next().as_ref(),
                     expected_val_gen.next().as_ref(),
                 );
@@ -399,7 +400,7 @@ mod tests {
 
         for _ in 0..30 {
             assert_kv(
-                &iter.next().await.unwrap().unwrap(),
+                &iter.next().await.unwrap().unwrap().into(),
                 expected_key_gen.next().as_ref(),
                 expected_val_gen.next().as_ref(),
             );
@@ -475,7 +476,7 @@ mod tests {
             sr_iter.seek(&seek_key).await.unwrap();
 
             for (key, value) in table_iter.by_ref().take(run as usize) {
-                let kv = sr_iter.next().await.unwrap().unwrap();
+                let kv: KeyValue = sr_iter.next().await.unwrap().unwrap().into();
                 assert_eq!(*key, kv.key);
                 assert_eq!(*value, kv.value);
             }
@@ -627,14 +628,14 @@ mod tests {
 
             // then: all keys should be returned in order across both v1 and v2 SSTs
             for i in 1..=8 {
-                let kv = iter.next().await.unwrap().unwrap();
+                let kv: KeyValue = iter.next().await.unwrap().unwrap().into();
                 let expected_key = format!("key{:02}", i);
                 let expected_value = format!("value{:02}", i);
                 assert_eq!(kv.key.as_ref(), expected_key.as_bytes());
                 assert_eq!(kv.value.as_ref(), expected_value.as_bytes());
             }
 
-            let kv = iter.next().await.unwrap();
+            let kv = iter.next().await.unwrap().map(KeyValue::from);
             assert!(kv.is_none());
         }
 
@@ -694,18 +695,18 @@ mod tests {
             iter.seek(b"key05").await.unwrap();
 
             // then: we should get key05 and subsequent keys
-            let kv = iter.next().await.unwrap().unwrap();
+            let kv: KeyValue = iter.next().await.unwrap().unwrap().into();
             assert_eq!(kv.key.as_ref(), b"key05");
             assert_eq!(kv.value.as_ref(), b"value05");
 
-            let kv = iter.next().await.unwrap().unwrap();
+            let kv: KeyValue = iter.next().await.unwrap().unwrap().into();
             assert_eq!(kv.key.as_ref(), b"key06");
             assert_eq!(kv.value.as_ref(), b"value06");
 
             // Seek again to a v2 SST
             iter.seek(b"key07").await.unwrap();
 
-            let kv = iter.next().await.unwrap().unwrap();
+            let kv: KeyValue = iter.next().await.unwrap().unwrap().into();
             assert_eq!(kv.key.as_ref(), b"key07");
             assert_eq!(kv.value.as_ref(), b"value07");
         }

@@ -3,6 +3,8 @@ package io.slatedb;
 import io.slatedb.SlateDbConfig.*;
 import io.slatedb.ffi.*;
 import io.slatedb.ffi.Native;
+import io.slatedb.ffi.slatedb_row_entry_t;
+import io.slatedb.ffi.slatedb_wal_file_metadata_t;
 
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
@@ -14,6 +16,8 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Objects;
+import java.util.Optional;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /// Java-typed wrappers around generated jextract bindings.
@@ -159,6 +163,45 @@ final class NativeInterop {
         }
     }
 
+    static final class WalReaderHandle extends NativeHandle {
+        private WalReaderHandle(MemorySegment segment) {
+            super("WalReaderHandle", segment);
+        }
+
+        @Override
+        protected void closeNative(MemorySegment segment) {
+            try (Arena arena = Arena.ofConfined()) {
+                checkResult(Native.slatedb_wal_reader_close(arena, segment));
+            }
+        }
+    }
+
+    static final class WalFileHandle extends NativeHandle {
+        private WalFileHandle(MemorySegment segment) {
+            super("WalFileHandle", segment);
+        }
+
+        @Override
+        protected void closeNative(MemorySegment segment) {
+            try (Arena arena = Arena.ofConfined()) {
+                checkResult(Native.slatedb_wal_file_close(arena, segment));
+            }
+        }
+    }
+
+    static final class WalFileIteratorHandle extends NativeHandle {
+        private WalFileIteratorHandle(MemorySegment segment) {
+            super("WalFileIteratorHandle", segment);
+        }
+
+        @Override
+        protected void closeNative(MemorySegment segment) {
+            try (Arena arena = Arena.ofConfined()) {
+                checkResult(Native.slatedb_wal_file_iterator_close(arena, segment));
+            }
+        }
+    }
+
     static final class WriteHandleHandle {
         private final long seq;
         private final long createTs;
@@ -175,6 +218,153 @@ final class NativeInterop {
         long createTs() {
             return createTs;
         }
+    }
+
+    static final class MergeOperatorBinding implements AutoCloseable {
+        private final SlateDbMergeOperator mergeOperator;
+        private final Arena callbackArena;
+        private final MemorySegment mergeOperatorPtr;
+        private final MemorySegment freeMergeResultPtr;
+        private final ConcurrentHashMap<Long, Arena> mergeResultArenas;
+        private final AtomicBoolean closed;
+
+        private MergeOperatorBinding(SlateDbMergeOperator mergeOperator) {
+            this.mergeOperator = Objects.requireNonNull(mergeOperator, "mergeOperator");
+            this.callbackArena = Arena.ofShared();
+            this.mergeResultArenas = new ConcurrentHashMap<>();
+            this.closed = new AtomicBoolean(false);
+            this.mergeOperatorPtr = slatedb_merge_operator_fn.allocate(this::applyMerge, callbackArena);
+            this.freeMergeResultPtr = slatedb_merge_operator_out_free_fn.allocate(this::freeMergeResult, callbackArena);
+        }
+
+        MemorySegment mergeOperatorPtr() {
+            if (closed.get()) {
+                throw new IllegalStateException("MergeOperatorBinding is closed");
+            }
+            return mergeOperatorPtr;
+        }
+
+        MemorySegment freeMergeResultPtr() {
+            if (closed.get()) {
+                throw new IllegalStateException("MergeOperatorBinding is closed");
+            }
+            return freeMergeResultPtr;
+        }
+
+        @Override
+        public void close() {
+            if (!closed.compareAndSet(false, true)) {
+                return;
+            }
+
+            for (Arena arena : mergeResultArenas.values()) {
+                try {
+                    arena.close();
+                } catch (RuntimeException ignored) {
+                }
+            }
+            mergeResultArenas.clear();
+            callbackArena.close();
+        }
+
+        private boolean applyMerge(
+            MemorySegment key,
+            long keyLen,
+            boolean existingValuePresent,
+            MemorySegment existingValue,
+            long existingValueLen,
+            MemorySegment operand,
+            long operandLen,
+            MemorySegment outValue,
+            MemorySegment outValueLen
+        ) {
+            if (closed.get()) {
+                safeSetMergeOutput(outValue, outValueLen, MemorySegment.NULL, 0L);
+                return false;
+            }
+
+            Arena resultArena = null;
+            try {
+                byte[] keyBytes = readCallbackBytes(key, keyLen);
+                byte[] existingBytes = existingValuePresent
+                    ? readCallbackBytes(existingValue, existingValueLen)
+                    : null;
+                byte[] operandBytes = readCallbackBytes(operand, operandLen);
+
+                byte[] merged = mergeOperator.merge(keyBytes, existingBytes, operandBytes);
+                if (merged == null) {
+                    safeSetMergeOutput(outValue, outValueLen, MemorySegment.NULL, 0L);
+                    return false;
+                }
+
+                if (merged.length == 0) {
+                    safeSetMergeOutput(outValue, outValueLen, MemorySegment.NULL, 0L);
+                    return true;
+                }
+
+                resultArena = Arena.ofShared();
+                MemorySegment nativeBytes = resultArena.allocate(merged.length, 1);
+                MemorySegment.copy(MemorySegment.ofArray(merged), 0, nativeBytes, 0, merged.length);
+                long address = nativeBytes.address();
+                Arena previous = mergeResultArenas.put(address, resultArena);
+                if (previous != null) {
+                    previous.close();
+                }
+
+                safeSetMergeOutput(outValue, outValueLen, nativeBytes, merged.length);
+                resultArena = null; // ownership transferred to mergeResultArenas
+                return true;
+            } catch (Throwable ignored) {
+                safeSetMergeOutput(outValue, outValueLen, MemorySegment.NULL, 0L);
+                return false;
+            } finally {
+                if (resultArena != null) {
+                    resultArena.close();
+                }
+            }
+        }
+
+        private void freeMergeResult(MemorySegment value, long valueLen) {
+            if (value.equals(MemorySegment.NULL)) {
+                return;
+            }
+
+            Arena arena = mergeResultArenas.remove(value.address());
+            if (arena != null) {
+                arena.close();
+            }
+        }
+
+        private static byte[] readCallbackBytes(MemorySegment data, long len) {
+            if (len < 0) {
+                throw new IllegalArgumentException("merge callback length must be >= 0");
+            }
+            if (len == 0) {
+                return new byte[0];
+            }
+            if (data.equals(MemorySegment.NULL)) {
+                throw new IllegalArgumentException("merge callback pointer is null for non-zero length");
+            }
+            return data.reinterpret(len).toArray(ValueLayout.JAVA_BYTE);
+        }
+
+        private static void safeSetMergeOutput(
+            MemorySegment outValue,
+            MemorySegment outValueLen,
+            MemorySegment value,
+            long len
+        ) {
+            try {
+                outValue.set(Native.C_POINTER, 0, value);
+                outValueLen.set(Native.C_LONG, 0, len);
+            } catch (Throwable ignored) {
+            }
+        }
+    }
+
+    static MergeOperatorBinding createMergeOperatorBinding(SlateDbMergeOperator mergeOperator) {
+        Objects.requireNonNull(mergeOperator, "mergeOperator");
+        return new MergeOperatorBinding(mergeOperator);
     }
 
     static ObjectStoreHandle resolveObjectStore(String url, String envFile) {
@@ -398,9 +588,7 @@ final class NativeInterop {
     static void slatedb_db_builder_with_merge_operator(
         DbBuilderHandle builder,
         MemorySegment mergeOperator,
-        MemorySegment mergeOperatorContext,
-        MemorySegment freeMergeResult,
-        MemorySegment freeMergeOperatorContext
+        MemorySegment freeMergeResult
     ) {
         Objects.requireNonNull(builder, "builder");
         Objects.requireNonNull(mergeOperator, "mergeOperator");
@@ -411,9 +599,7 @@ final class NativeInterop {
                     arena,
                     builder.segment(),
                     mergeOperator,
-                    nullToNullSegment(mergeOperatorContext),
-                    nullToNullSegment(freeMergeResult),
-                    nullToNullSegment(freeMergeOperatorContext)
+                    nullToNullSegment(freeMergeResult)
                 )
             );
         }
@@ -594,7 +780,7 @@ final class NativeInterop {
         DbHandle db,
         byte[] key,
         byte[] value,
-        PutOptions mergeOptions,
+        MergeOptions mergeOptions,
         WriteOptions writeOptions
     ) {
         Objects.requireNonNull(db, "db");
@@ -1013,7 +1199,7 @@ final class NativeInterop {
         WriteBatchHandle writeBatch,
         byte[] key,
         byte[] value,
-        PutOptions mergeOptions
+        MergeOptions mergeOptions
     ) {
         Objects.requireNonNull(writeBatch, "writeBatch");
         Objects.requireNonNull(key, "key");
@@ -1063,6 +1249,245 @@ final class NativeInterop {
     static void slatedb_bytes_free(MemorySegment data, long len) {
         Objects.requireNonNull(data, "data");
         Native.slatedb_bytes_free(data, len);
+    }
+
+    static WalReaderHandle slatedb_wal_reader_new(String path, ObjectStoreHandle objectStore) {
+        Objects.requireNonNull(path, "path");
+        Objects.requireNonNull(objectStore, "objectStore");
+
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment outReader = arena.allocate(Native.C_POINTER);
+            checkResult(
+                Native.slatedb_wal_reader_new(
+                    arena,
+                    marshalCString(arena, path),
+                    objectStore.segment(),
+                    outReader
+                )
+            );
+            return new WalReaderHandle(outReader.get(Native.C_POINTER, 0));
+        }
+    }
+
+    static java.util.List<WalFileHandle> slatedb_wal_reader_list(
+        WalReaderHandle reader,
+        Long startId,
+        Long endId
+    ) {
+        Objects.requireNonNull(reader, "reader");
+
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment outFiles = arena.allocate(Native.C_POINTER);
+            MemorySegment outCount = arena.allocate(Native.C_LONG);
+
+            checkResult(
+                Native.slatedb_wal_reader_list(
+                    arena,
+                    reader.segment(),
+                    marshalU64Range(arena, startId, endId),
+                    outFiles,
+                    outCount
+                )
+            );
+
+            MemorySegment filesPtr = outFiles.get(Native.C_POINTER, 0);
+            long count = outCount.get(Native.C_LONG, 0);
+
+            if (filesPtr.equals(MemorySegment.NULL) || count == 0) {
+                return java.util.List.of();
+            }
+
+            MemorySegment filesArray = filesPtr.reinterpret(count * Native.C_POINTER.byteSize());
+            java.util.List<WalFileHandle> handles = new java.util.ArrayList<>((int) count);
+            for (long i = 0; i < count; i++) {
+                MemorySegment filePtr = filesArray.get(Native.C_POINTER, i * Native.C_POINTER.byteSize());
+                handles.add(new WalFileHandle(filePtr));
+            }
+            Native.slatedb_wal_files_free(filesPtr, count);
+            return handles;
+        }
+    }
+
+    static WalFileHandle slatedb_wal_reader_get(WalReaderHandle reader, long id) {
+        Objects.requireNonNull(reader, "reader");
+
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment outFile = arena.allocate(Native.C_POINTER);
+            checkResult(Native.slatedb_wal_reader_get(arena, reader.segment(), id, outFile));
+            return new WalFileHandle(outFile.get(Native.C_POINTER, 0));
+        }
+    }
+
+    static void slatedb_wal_reader_close(WalReaderHandle reader) {
+        Objects.requireNonNull(reader, "reader");
+        reader.close();
+    }
+
+    static long slatedb_wal_file_id(WalFileHandle file) {
+        Objects.requireNonNull(file, "file");
+
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment outId = arena.allocate(Native.C_LONG_LONG);
+            checkResult(Native.slatedb_wal_file_id(arena, file.segment(), outId));
+            return outId.get(Native.C_LONG_LONG, 0);
+        }
+    }
+
+    static long slatedb_wal_file_next_id(WalFileHandle file) {
+        Objects.requireNonNull(file, "file");
+
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment outId = arena.allocate(Native.C_LONG_LONG);
+            checkResult(Native.slatedb_wal_file_next_id(arena, file.segment(), outId));
+            return outId.get(Native.C_LONG_LONG, 0);
+        }
+    }
+
+    static WalFileHandle slatedb_wal_file_next_file(WalFileHandle file) {
+        Objects.requireNonNull(file, "file");
+
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment outFile = arena.allocate(Native.C_POINTER);
+            checkResult(Native.slatedb_wal_file_next_file(arena, file.segment(), outFile));
+            return new WalFileHandle(outFile.get(Native.C_POINTER, 0));
+        }
+    }
+
+    static SlateDbWalFileMetadata slatedb_wal_file_metadata(WalFileHandle file) {
+        Objects.requireNonNull(file, "file");
+
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment outMeta = slatedb_wal_file_metadata_t.allocate(arena);
+            checkResult(Native.slatedb_wal_file_metadata(arena, file.segment(), outMeta));
+
+            long secs = slatedb_wal_file_metadata_t.last_modified_secs(outMeta);
+            int nanos = slatedb_wal_file_metadata_t.last_modified_nanos(outMeta);
+            long sizeBytes = slatedb_wal_file_metadata_t.size_bytes(outMeta);
+            MemorySegment locationPtr = slatedb_wal_file_metadata_t.location(outMeta);
+            long locationLen = slatedb_wal_file_metadata_t.location_len(outMeta);
+
+            String location = new String(
+                locationPtr.reinterpret(locationLen).toArray(ValueLayout.JAVA_BYTE),
+                java.nio.charset.StandardCharsets.UTF_8
+            );
+
+            Native.slatedb_wal_file_metadata_free(outMeta);
+
+            return new SlateDbWalFileMetadata(
+                java.time.Instant.ofEpochSecond(secs, Integer.toUnsignedLong(nanos)),
+                sizeBytes,
+                location
+            );
+        }
+    }
+
+    static WalFileIteratorHandle slatedb_wal_file_iterator(WalFileHandle file) {
+        Objects.requireNonNull(file, "file");
+
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment outIter = arena.allocate(Native.C_POINTER);
+            checkResult(Native.slatedb_wal_file_iterator(arena, file.segment(), outIter));
+            return new WalFileIteratorHandle(outIter.get(Native.C_POINTER, 0));
+        }
+    }
+
+    static void slatedb_wal_file_close(WalFileHandle file) {
+        Objects.requireNonNull(file, "file");
+        file.close();
+    }
+
+    static WalIteratorNextResult slatedb_wal_file_iterator_next(WalFileIteratorHandle iter) {
+        Objects.requireNonNull(iter, "iter");
+
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment outPresent = arena.allocate(Native.C_BOOL);
+            MemorySegment outEntry = slatedb_row_entry_t.allocate(arena);
+
+            checkResult(
+                Native.slatedb_wal_file_iterator_next(arena, iter.segment(), outPresent, outEntry)
+            );
+
+            boolean present = outPresent.get(Native.C_BOOL, 0);
+            if (!present) {
+                return new WalIteratorNextResult(false, (byte) 0, null, null, 0, null, null);
+            }
+
+            byte kind = slatedb_row_entry_t.kind(outEntry);
+            MemorySegment keyPtr = slatedb_row_entry_t.key(outEntry);
+            long keyLen = slatedb_row_entry_t.key_len(outEntry);
+            MemorySegment valuePtr = slatedb_row_entry_t.value(outEntry);
+            long valueLen = slatedb_row_entry_t.value_len(outEntry);
+            long seq = slatedb_row_entry_t.seq(outEntry);
+            boolean hasCreateTs = slatedb_row_entry_t.create_ts_present(outEntry);
+            long createTsRaw = slatedb_row_entry_t.create_ts(outEntry);
+            boolean hasExpireTs = slatedb_row_entry_t.expire_ts_present(outEntry);
+            long expireTsRaw = slatedb_row_entry_t.expire_ts(outEntry);
+
+            byte[] key = keyPtr.reinterpret(keyLen).toArray(ValueLayout.JAVA_BYTE);
+            byte[] value = valuePtr.equals(MemorySegment.NULL)
+                ? null
+                : valuePtr.reinterpret(valueLen).toArray(ValueLayout.JAVA_BYTE);
+
+            Native.slatedb_row_entry_free(outEntry);
+
+            return new WalIteratorNextResult(
+                true,
+                kind,
+                key,
+                value,
+                seq,
+                hasCreateTs ? Optional.of(createTsRaw) : Optional.empty(),
+                hasExpireTs ? Optional.of(expireTsRaw) : Optional.empty()
+            );
+        }
+    }
+
+    static void slatedb_wal_file_iterator_close(WalFileIteratorHandle iter) {
+        Objects.requireNonNull(iter, "iter");
+        iter.close();
+    }
+
+    record WalIteratorNextResult(
+        boolean present,
+        byte kind,
+        byte[] key,
+        byte[] value,
+        long seq,
+        Optional<Long> createTs,
+        Optional<Long> expireTs
+    ) {
+    }
+
+    private static MemorySegment marshalU64Range(Arena arena, Long startId, Long endId) {
+        MemorySegment range = slatedb_range_t.allocate(arena);
+
+        MemorySegment start = slatedb_bound_t.allocate(arena);
+        fillU64Bound(arena, start, startId, true);
+        slatedb_range_t.start(range, start);
+
+        MemorySegment end = slatedb_bound_t.allocate(arena);
+        fillU64Bound(arena, end, endId, false);
+        slatedb_range_t.end(range, end);
+
+        return range;
+    }
+
+    private static void fillU64Bound(Arena arena, MemorySegment bound, Long value, boolean inclusive) {
+        if (value == null) {
+            slatedb_bound_t.kind(bound, (byte) Native.SLATEDB_BOUND_KIND_UNBOUNDED());
+            slatedb_bound_t.data(bound, MemorySegment.NULL);
+            slatedb_bound_t.len(bound, 0L);
+            return;
+        }
+
+        slatedb_bound_t.kind(
+            bound,
+            (byte) (inclusive ? Native.SLATEDB_BOUND_KIND_INCLUDED() : Native.SLATEDB_BOUND_KIND_EXCLUDED())
+        );
+        MemorySegment val = arena.allocate(ValueLayout.JAVA_LONG);
+        val.set(ValueLayout.JAVA_LONG, 0, value);
+        slatedb_bound_t.data(bound, val);
+        slatedb_bound_t.len(bound, 0L);
     }
 
     static final class MetricGetResult {
@@ -1257,7 +1682,7 @@ final class NativeInterop {
         return nativeOptions;
     }
 
-    private static MemorySegment marshalMergeOptions(Arena arena, PutOptions options) {
+    private static MemorySegment marshalMergeOptions(Arena arena, MergeOptions options) {
         if (options == null) {
             return MemorySegment.NULL;
         }

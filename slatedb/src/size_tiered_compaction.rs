@@ -429,6 +429,7 @@ mod tests {
     };
     use crate::config::{CompactorOptions, SizeTieredCompactionSchedulerOptions};
     use crate::db_state::{ManifestCore, SortedRun, SsTableHandle, SsTableId, SsTableInfo};
+    use crate::format::sst::SST_FORMAT_VERSION_LATEST;
     use crate::manifest::store::test_utils::new_dirty_manifest;
     use crate::seq_tracker::SequenceTracker;
     use crate::size_tiered_compaction::{
@@ -845,13 +846,19 @@ mod tests {
     fn create_sst(size: u64) -> SsTableHandle {
         let info = SsTableInfo {
             first_entry: None,
+            last_entry: None,
             index_offset: size,
             index_len: 0,
             filter_offset: 0,
             filter_len: 0,
             compression_codec: None,
+            ..Default::default()
         };
-        SsTableHandle::new(SsTableId::Compacted(ulid::Ulid::new()), info)
+        SsTableHandle::new(
+            SsTableId::Compacted(ulid::Ulid::new()),
+            SST_FORMAT_VERSION_LATEST,
+            info,
+        )
     }
 
     fn create_sr2(id: u32, size: u64) -> SortedRun {

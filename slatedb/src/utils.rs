@@ -1,25 +1,27 @@
 use crate::block_iterator::BlockIterator;
 use crate::block_iterator_v2::BlockIteratorV2;
+use crate::cached_object_store::CachedObjectStore;
 use crate::clock::MonotonicClock;
 use crate::config::DurabilityLevel;
 use crate::config::DurabilityLevel::{Memory, Remote};
+use crate::config::PreloadLevel;
+use crate::db_state::ManifestCore;
 use crate::db_state::SortedRun;
 use crate::db_state::SsTableHandle;
 use crate::error::SlateDBError;
 use crate::format::sst::{SST_FORMAT_VERSION, SST_FORMAT_VERSION_V2};
-use crate::iter::{IterationOrder, KeyValueIterator};
+use crate::iter::{IterationOrder, RowEntryIterator};
+use crate::paths::PathResolver;
 use crate::tablestore::TableStore;
 use crate::types::RowEntry;
 use bytes::{BufMut, Bytes};
 use futures::FutureExt;
-use log::error;
+use log::{error, warn};
 use rand::{Rng, RngCore};
 use slatedb_common::clock::SystemClock;
 use std::any::Any;
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
-use std::sync::atomic::AtomicU64;
-use std::sync::atomic::Ordering::SeqCst;
 use std::sync::Arc;
 use tokio::sync::mpsc::UnboundedSender;
 use ulid::Ulid;
@@ -196,23 +198,22 @@ pub(crate) async fn last_written_key_and_seq(
 
     // Sort descending so we get the last row from the last block, which
     // should be the last written key/seq.
-    let sst_version = table_store.read_sst_version(output_sst).await?;
-    let entry = match sst_version {
+    let entry = match output_sst.format_version {
         SST_FORMAT_VERSION => {
             let mut block_iter = BlockIterator::new(block, IterationOrder::Descending);
             block_iter.init().await?;
-            block_iter.next_entry().await?
+            block_iter.next().await?
         }
         SST_FORMAT_VERSION_V2 => {
             let mut block_iter = BlockIteratorV2::new(block, IterationOrder::Descending);
             block_iter.init().await?;
-            block_iter.next_entry().await?
+            block_iter.next().await?
         }
         _ => {
             return Err(SlateDBError::InvalidVersion {
                 format_name: "SST",
                 supported_versions: vec![SST_FORMAT_VERSION, SST_FORMAT_VERSION_V2],
-                actual_version: sst_version,
+                actual_version: output_sst.format_version,
             });
         }
     };
@@ -260,35 +261,6 @@ fn compute_lower_bound(prev_block_last_key: &Bytes, this_block_first_key: &Bytes
     // if we didn't find a mismatch yet then the prev block's key must be shorter,
     // so just use the common prefix plus the next byte in this block's key
     this_block_first_key.slice(..prev_block_last_key.len() + 1)
-}
-
-#[derive(Debug)]
-pub(crate) struct MonotonicSeq {
-    val: AtomicU64,
-}
-
-impl MonotonicSeq {
-    pub(crate) fn new(initial_value: u64) -> Self {
-        Self {
-            val: AtomicU64::new(initial_value),
-        }
-    }
-
-    pub(crate) fn next(&self) -> u64 {
-        self.val.fetch_add(1, SeqCst) + 1
-    }
-
-    pub(crate) fn store(&self, value: u64) {
-        self.val.store(value, SeqCst);
-    }
-
-    pub(crate) fn load(&self) -> u64 {
-        self.val.load(SeqCst)
-    }
-
-    pub(crate) fn store_if_greater(&self, value: u64) {
-        self.val.fetch_max(value, SeqCst);
-    }
 }
 
 /// An extension trait that adds a `.send_safely(...)` method to tokio's `UnboundedSender<T>`.
@@ -755,6 +727,57 @@ pub(crate) fn varint_len(mut value: u32) -> usize {
     len
 }
 
+/// Preload SST files into the disk cache based on the configured [`PreloadLevel`].
+pub(crate) async fn preload_cache_from_manifest(
+    core: &ManifestCore,
+    cached_obj_store: &CachedObjectStore,
+    path_resolver: &PathResolver,
+    preload_level: Option<PreloadLevel>,
+    max_cache_size: usize,
+) -> Result<(), SlateDBError> {
+    match preload_level {
+        Some(PreloadLevel::AllSst) => {
+            let mut all_sst_paths: Vec<object_store::path::Path> = Vec::with_capacity(
+                core.l0.len() + core.compacted.iter().map(|sr| sr.ssts.len()).sum::<usize>(),
+            );
+            all_sst_paths.extend(core.l0.iter().map(|sst| path_resolver.table_path(&sst.id)));
+            all_sst_paths.extend(
+                core.compacted
+                    .iter()
+                    .flat_map(|sr| &sr.ssts)
+                    .map(|sst| path_resolver.table_path(&sst.id)),
+            );
+            if !all_sst_paths.is_empty() {
+                if let Err(e) = cached_obj_store
+                    .load_files_to_cache(all_sst_paths, max_cache_size)
+                    .await
+                {
+                    warn!("Failed to preload all SSTs to cache: {:?}", e);
+                }
+            }
+        }
+        Some(PreloadLevel::L0Sst) => {
+            let l0_sst_paths: Vec<object_store::path::Path> = core
+                .l0
+                .iter()
+                .map(|sst| path_resolver.table_path(&sst.id))
+                .collect();
+            if !l0_sst_paths.is_empty() {
+                if let Err(e) = cached_obj_store
+                    .load_files_to_cache(l0_sst_paths, max_cache_size)
+                    .await
+                {
+                    warn!("Failed to preload L0 SSTs to cache: {:?}", e);
+                }
+            }
+        }
+        None => {
+            // No preloading
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use rstest::rstest;
@@ -763,6 +786,7 @@ mod tests {
     use crate::clock::MonotonicClock;
     use crate::db_state::{SortedRun, SsTableHandle, SsTableId, SsTableInfo};
     use crate::error::SlateDBError;
+    use crate::format::sst::SST_FORMAT_VERSION_LATEST;
     use crate::sst_builder::BlockFormat;
     use crate::types::RowEntry;
     use crate::utils::{
@@ -810,7 +834,12 @@ mod tests {
             index_len: 1,
             ..Default::default()
         };
-        SsTableHandle::new_compacted(SsTableId::Compacted(Ulid::new()), info, None)
+        SsTableHandle::new_compacted(
+            SsTableId::Compacted(Ulid::new()),
+            SST_FORMAT_VERSION_LATEST,
+            info,
+            None,
+        )
     }
 
     #[test]
