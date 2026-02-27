@@ -311,9 +311,7 @@ mod tests {
     }
 
     fn put_kv(db: *mut slatedb_db_t, key: &[u8], val: &[u8]) {
-        assert_ok(unsafe {
-            slatedb_db_put(db, key.as_ptr(), key.len(), val.as_ptr(), val.len())
-        });
+        assert_ok(unsafe { slatedb_db_put(db, key.as_ptr(), key.len(), val.as_ptr(), val.len()) });
     }
 
     fn unbounded_range() -> slatedb_range_t {
@@ -345,11 +343,9 @@ mod tests {
         let mut offset = 0;
         let mut pairs = Vec::with_capacity(count);
         for _ in 0..count {
-            let key_len =
-                u64::from_le_bytes(buf[offset..offset + 8].try_into().unwrap()) as usize;
+            let key_len = u64::from_le_bytes(buf[offset..offset + 8].try_into().unwrap()) as usize;
             offset += 8;
-            let val_len =
-                u64::from_le_bytes(buf[offset..offset + 8].try_into().unwrap()) as usize;
+            let val_len = u64::from_le_bytes(buf[offset..offset + 8].try_into().unwrap()) as usize;
             offset += 8;
             let key = buf[offset..offset + key_len].to_vec();
             offset += key_len;
@@ -365,7 +361,11 @@ mod tests {
     fn test_next_batch_returns_all_entries() {
         let db = open_test_db();
         for i in 0..5 {
-            put_kv(db, format!("key_{i:02}").as_bytes(), format!("val_{i:02}").as_bytes());
+            put_kv(
+                db,
+                format!("key_{i:02}").as_bytes(),
+                format!("val_{i:02}").as_bytes(),
+            );
         }
 
         let iter = scan_all(db);
@@ -374,7 +374,14 @@ mod tests {
         let mut out_count: usize = 0;
 
         assert_ok(unsafe {
-            slatedb_iterator_next_batch(iter, 10, 0, &mut out_data, &mut out_data_len, &mut out_count)
+            slatedb_iterator_next_batch(
+                iter,
+                10,
+                0,
+                &mut out_data,
+                &mut out_data_len,
+                &mut out_count,
+            )
         });
 
         assert_eq!(out_count, 5);
@@ -395,7 +402,11 @@ mod tests {
     fn test_next_batch_respects_max_count() {
         let db = open_test_db();
         for i in 0..5 {
-            put_kv(db, format!("key_{i:02}").as_bytes(), format!("val_{i:02}").as_bytes());
+            put_kv(
+                db,
+                format!("key_{i:02}").as_bytes(),
+                format!("val_{i:02}").as_bytes(),
+            );
         }
 
         let iter = scan_all(db);
@@ -406,7 +417,14 @@ mod tests {
         let mut out_data_len: usize = 0;
         let mut out_count: usize = 0;
         assert_ok(unsafe {
-            slatedb_iterator_next_batch(iter, 2, 0, &mut out_data, &mut out_data_len, &mut out_count)
+            slatedb_iterator_next_batch(
+                iter,
+                2,
+                0,
+                &mut out_data,
+                &mut out_data_len,
+                &mut out_count,
+            )
         });
         assert_eq!(out_count, 2);
         all_pairs.extend(parse_batch(out_data, out_data_len, out_count));
@@ -417,7 +435,14 @@ mod tests {
         out_data_len = 0;
         out_count = 0;
         assert_ok(unsafe {
-            slatedb_iterator_next_batch(iter, 2, 0, &mut out_data, &mut out_data_len, &mut out_count)
+            slatedb_iterator_next_batch(
+                iter,
+                2,
+                0,
+                &mut out_data,
+                &mut out_data_len,
+                &mut out_count,
+            )
         });
         assert_eq!(out_count, 2);
         all_pairs.extend(parse_batch(out_data, out_data_len, out_count));
@@ -428,7 +453,14 @@ mod tests {
         out_data_len = 0;
         out_count = 0;
         assert_ok(unsafe {
-            slatedb_iterator_next_batch(iter, 2, 0, &mut out_data, &mut out_data_len, &mut out_count)
+            slatedb_iterator_next_batch(
+                iter,
+                2,
+                0,
+                &mut out_data,
+                &mut out_data_len,
+                &mut out_count,
+            )
         });
         assert_eq!(out_count, 1);
         all_pairs.extend(parse_batch(out_data, out_data_len, out_count));
@@ -454,7 +486,14 @@ mod tests {
         let mut out_count: usize = 0;
 
         assert_ok(unsafe {
-            slatedb_iterator_next_batch(iter, 10, 0, &mut out_data, &mut out_data_len, &mut out_count)
+            slatedb_iterator_next_batch(
+                iter,
+                10,
+                0,
+                &mut out_data,
+                &mut out_data_len,
+                &mut out_count,
+            )
         });
 
         assert_eq!(out_count, 0);
@@ -469,21 +508,30 @@ mod tests {
     fn test_next_batch_after_seek() {
         let db = open_test_db();
         for i in 0..5 {
-            put_kv(db, format!("key_{i:02}").as_bytes(), format!("val_{i:02}").as_bytes());
+            put_kv(
+                db,
+                format!("key_{i:02}").as_bytes(),
+                format!("val_{i:02}").as_bytes(),
+            );
         }
 
         let iter = scan_all(db);
         let seek_key = b"key_02";
-        assert_ok(unsafe {
-            slatedb_iterator_seek(iter, seek_key.as_ptr(), seek_key.len())
-        });
+        assert_ok(unsafe { slatedb_iterator_seek(iter, seek_key.as_ptr(), seek_key.len()) });
 
         let mut out_data: *mut u8 = std::ptr::null_mut();
         let mut out_data_len: usize = 0;
         let mut out_count: usize = 0;
 
         assert_ok(unsafe {
-            slatedb_iterator_next_batch(iter, 10, 0, &mut out_data, &mut out_data_len, &mut out_count)
+            slatedb_iterator_next_batch(
+                iter,
+                10,
+                0,
+                &mut out_data,
+                &mut out_data_len,
+                &mut out_count,
+            )
         });
 
         assert_eq!(out_count, 3);
@@ -519,7 +567,14 @@ mod tests {
         // But note: the check happens BEFORE reading the next entry, so with
         // max_bytes=40, after 2 entries buf.len()=40 >= 40, loop breaks.
         assert_ok(unsafe {
-            slatedb_iterator_next_batch(iter, 0, 40, &mut out_data, &mut out_data_len, &mut out_count)
+            slatedb_iterator_next_batch(
+                iter,
+                0,
+                40,
+                &mut out_data,
+                &mut out_data_len,
+                &mut out_count,
+            )
         });
 
         assert_eq!(out_count, 2);
@@ -533,7 +588,14 @@ mod tests {
         out_data_len = 0;
         out_count = 0;
         assert_ok(unsafe {
-            slatedb_iterator_next_batch(iter, 0, 40, &mut out_data, &mut out_data_len, &mut out_count)
+            slatedb_iterator_next_batch(
+                iter,
+                0,
+                40,
+                &mut out_data,
+                &mut out_data_len,
+                &mut out_count,
+            )
         });
         assert_eq!(out_count, 2);
         let pairs = parse_batch(out_data, out_data_len, out_count);
@@ -546,7 +608,14 @@ mod tests {
         out_data_len = 0;
         out_count = 0;
         assert_ok(unsafe {
-            slatedb_iterator_next_batch(iter, 0, 40, &mut out_data, &mut out_data_len, &mut out_count)
+            slatedb_iterator_next_batch(
+                iter,
+                0,
+                40,
+                &mut out_data,
+                &mut out_data_len,
+                &mut out_count,
+            )
         });
         assert_eq!(out_count, 1);
         let pairs = parse_batch(out_data, out_data_len, out_count);
@@ -561,7 +630,11 @@ mod tests {
     fn test_next_batch_zero_limits_means_unlimited() {
         let db = open_test_db();
         for i in 0..5 {
-            put_kv(db, format!("key_{i:02}").as_bytes(), format!("val_{i:02}").as_bytes());
+            put_kv(
+                db,
+                format!("key_{i:02}").as_bytes(),
+                format!("val_{i:02}").as_bytes(),
+            );
         }
 
         let iter = scan_all(db);
@@ -571,7 +644,14 @@ mod tests {
 
         // Both limits 0 = unlimited, should return all entries
         assert_ok(unsafe {
-            slatedb_iterator_next_batch(iter, 0, 0, &mut out_data, &mut out_data_len, &mut out_count)
+            slatedb_iterator_next_batch(
+                iter,
+                0,
+                0,
+                &mut out_data,
+                &mut out_data_len,
+                &mut out_count,
+            )
         });
 
         assert_eq!(out_count, 5);
