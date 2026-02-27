@@ -14,10 +14,9 @@ use log::{debug, warn};
 use object_store::path::Path;
 use object_store::{Attributes, ObjectMeta};
 use rand::{distr::Alphanumeric, Rng};
-use tokio::fs::File;
 use tokio::{
     fs::{self, OpenOptions},
-    io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt},
+    io::AsyncWriteExt,
     sync::{Mutex, OnceCell},
 };
 use walkdir::WalkDir;
@@ -191,29 +190,44 @@ impl LocalCacheEntry for FsCacheEntry {
             self.part_size,
         );
 
-        // if the part file does not exist, return None
-        let exists = fs::try_exists(&part_path).await.unwrap_or(false);
-        if !exists {
-            return Ok(None);
-        }
+        #[allow(clippy::disallowed_methods)]
+        let result = tokio::task::spawn_blocking(move || {
+            use std::io::{Read, Seek};
+
+            let mut file = match std::fs::File::open(&part_path) {
+                Ok(f) => f,
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+                Err(err) => return Err(wrap_io_err(err)),
+            };
+
+            let mut buffer = vec![0; range_in_part.len()];
+            file.seek(SeekFrom::Start(range_in_part.start as u64))
+                .map_err(wrap_io_err)?;
+            file.read_exact(&mut buffer).map_err(wrap_io_err)?;
+            Ok(Some(Bytes::from(buffer)))
+        })
+        .await
+        .map_err(wrap_io_err)??;
 
         // track the part access for evictor
-        if let Some(evictor) = &self.evictor {
-            evictor
-                .track_entry_accessed(part_path.to_path_buf(), self.part_size, false)
-                .await;
+        if result.is_some() {
+            if let Some(evictor) = &self.evictor {
+                evictor
+                    .track_entry_accessed(
+                        Self::make_part_path(
+                            self.root_folder.clone(),
+                            &self.location,
+                            part_number,
+                            self.part_size,
+                        ),
+                        self.part_size,
+                        false,
+                    )
+                    .await;
+            }
         }
 
-        // read the part file, and return the bytes
-        let file = File::open(&part_path).await.map_err(wrap_io_err)?;
-        let mut reader = tokio::io::BufReader::new(file);
-        let mut buffer = vec![0; range_in_part.len()];
-        reader
-            .seek(SeekFrom::Start(range_in_part.start as u64))
-            .await
-            .map_err(wrap_io_err)?;
-        reader.read_exact(&mut buffer).await.map_err(wrap_io_err)?;
-        Ok(Some(Bytes::from(buffer)))
+        Ok(result)
     }
 
     #[cfg(test)]
@@ -294,30 +308,39 @@ impl LocalCacheEntry for FsCacheEntry {
     async fn read_head(&self) -> object_store::Result<Option<(ObjectMeta, Attributes)>> {
         let head_path = Self::make_head_path(self.root_folder.clone(), &self.location);
 
-        // if the head file does not exist, return None
-        let head_size_bytes = match fs::metadata(&head_path).await {
-            Ok(metadata) => metadata.len() as usize,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(err) => return Err(wrap_io_err(err)),
-        };
+        #[allow(clippy::disallowed_methods)]
+        let result = tokio::task::spawn_blocking(move || {
+            use std::io::Read;
 
-        // track the head access for evictor
-        if let Some(evictor) = &self.evictor {
-            evictor
-                .track_entry_accessed(head_path.to_path_buf(), head_size_bytes, false)
-                .await;
+            let metadata = match std::fs::metadata(&head_path) {
+                Ok(m) => m,
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+                Err(err) => return Err(wrap_io_err(err)),
+            };
+            let head_size_bytes = metadata.len() as usize;
+
+            let mut file = std::fs::File::open(&head_path).map_err(wrap_io_err)?;
+            let mut content = String::new();
+            file.read_to_string(&mut content).map_err(wrap_io_err)?;
+
+            let head: LocalCacheHead = serde_json::from_str(&content).map_err(wrap_io_err)?;
+            Ok(Some((head.meta(), head.attributes(), head_size_bytes)))
+        })
+        .await
+        .map_err(wrap_io_err)??;
+
+        if let Some((meta, attributes, head_size_bytes)) = result {
+            // track the head access for evictor
+            if let Some(evictor) = &self.evictor {
+                let head_path = Self::make_head_path(self.root_folder.clone(), &self.location);
+                evictor
+                    .track_entry_accessed(head_path, head_size_bytes, false)
+                    .await;
+            }
+            Ok(Some((meta, attributes)))
+        } else {
+            Ok(None)
         }
-
-        let file = File::open(&head_path).await.map_err(wrap_io_err)?;
-        let mut reader = tokio::io::BufReader::new(file);
-        let mut content = String::new();
-        reader
-            .read_to_string(&mut content)
-            .await
-            .map_err(wrap_io_err)?;
-
-        let head: LocalCacheHead = serde_json::from_str(&content).map_err(wrap_io_err)?;
-        Ok(Some((head.meta(), head.attributes())))
     }
 }
 
