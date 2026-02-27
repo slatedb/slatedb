@@ -266,7 +266,7 @@ pub(crate) struct EncodedSsTableFooterBuilder<'a, 'b> {
     last_entry: Option<Bytes>,
     /// codec for compressing data blocks, index blocks, and filter blocks
     compression_codec: Option<CompressionCodec>,
-    /// transformer for transforming data blocks, index blocks, and filter blocks
+    /// transformer for transforming data blocks, index blocks, filter blocks, and stats blocks
     block_transformer: Option<Arc<dyn BlockTransformer>>,
     /// codec for the SST info
     sst_info_codec: &'a dyn SsTableInfoCodec,
