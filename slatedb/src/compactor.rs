@@ -1367,11 +1367,11 @@ mod tests {
 
         let next = iter.next().await.unwrap().unwrap();
         assert_eq!(next.key.as_ref(), &[b'a'; 16]);
-        assert!(!next.value.is_tombstone());
+        assert_eq!(next.value.as_bytes().unwrap().as_ref(), &[b'a'; 32]);
 
         let next = iter.next().await.unwrap().unwrap();
         assert_eq!(next.key.as_ref(), &[b'b'; 16]);
-        assert!(!next.value.is_tombstone());
+        assert_eq!(next.value.as_bytes().unwrap().as_ref(), &[b'a'; 32]);
 
         let next = iter.next().await.unwrap();
         assert!(next.is_none());
