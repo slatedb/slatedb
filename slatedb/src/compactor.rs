@@ -1360,35 +1360,20 @@ mod tests {
         // Expected result: both 'a' (as tombstone) and 'b' (as value) should be present
         // Note: next() returns all entries including tombstones and duplicates,
         // so we need to track whether we've seen each key and verify the expected type
-        let mut found_a_value = false;
-        let mut found_a_tombstone = false;
-        let mut found_b = false;
-        while let Some(next) = iter.next().await.unwrap() {
-            let key = next.key.as_ref();
-            if key == [b'a'; 16] {
-                if next.value.is_tombstone() {
-                    assert!(
-                        !found_a_tombstone,
-                        "Should only encounter key 'a' tombstone once"
-                    );
-                    found_a_tombstone = true;
-                } else {
-                    assert!(!found_a_value, "Should only encounter key 'a' value once");
-                    found_a_value = true;
-                }
-            } else if key == [b'b'; 16] {
-                assert!(!found_b, "Should only encounter key 'b' once");
-                let kv: KeyValue = next.into();
-                assert_eq!(kv.key.as_ref(), &[b'b'; 16]);
-                found_b = true;
-            }
+        let next = iter.next().await.unwrap().unwrap();
+        assert_eq!(next.key.as_ref(), &[b'a'; 16]);
+        assert!(next.value.is_tombstone());
 
-            if found_a_tombstone && found_b {
-                break;
-            }
-        }
-        assert!(found_a_tombstone, "Should have found key 'a' as tombstone");
-        assert!(found_b, "Should have found key 'b'");
+        let next = iter.next().await.unwrap().unwrap();
+        assert_eq!(next.key.as_ref(), &[b'a'; 16]);
+        assert!(!next.value.is_tombstone());
+
+        let next = iter.next().await.unwrap().unwrap();
+        assert_eq!(next.key.as_ref(), &[b'b'; 16]);
+        assert!(!next.value.is_tombstone());
+
+        let next = iter.next().await.unwrap();
+        assert!(next.is_none());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
