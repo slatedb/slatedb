@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use std::{fmt::Display, io::SeekFrom};
 use std::os::unix::fs::FileExt;
+use std::path::PathBuf;
 use crate::cached_object_store::stats::CachedObjectStoreStats;
 use crate::clock::SystemClock;
 use crate::rand::DbRand;
@@ -29,6 +30,7 @@ pub struct FsCacheStorage {
     root_folder: std::path::PathBuf,
     evictor: Option<Arc<FsCacheEvictor>>,
     rand: Arc<DbRand>,
+    head_cache: Arc<std::sync::Mutex<HashMap<PathBuf, (ObjectMeta, Attributes)>>>
 }
 
 impl FsCacheStorage {
@@ -55,6 +57,7 @@ impl FsCacheStorage {
             root_folder,
             evictor,
             rand,
+            head_cache: Arc::new(std::sync::Mutex::new(HashMap::new())),
         }
     }
 }
@@ -72,6 +75,7 @@ impl LocalCacheStorage for FsCacheStorage {
             evictor: self.evictor.clone(),
             part_size,
             rand: self.rand.clone(),
+            head_cache: self.head_cache.clone(),
         })
     }
 
@@ -95,6 +99,7 @@ pub(crate) struct FsCacheEntry {
     part_size: usize,
     evictor: Option<Arc<FsCacheEvictor>>,
     rand: Arc<DbRand>,
+    head_cache: Arc<std::sync::Mutex<HashMap<PathBuf, (ObjectMeta, Attributes)>>>
 }
 
 impl FsCacheEntry {
@@ -306,6 +311,15 @@ impl LocalCacheEntry for FsCacheEntry {
     async fn read_head(&self) -> object_store::Result<Option<(ObjectMeta, Attributes)>> {
         let head_path = Self::make_head_path(self.root_folder.clone(), &self.location);
 
+        {
+            let head_cache = self.head_cache.lock().unwrap();
+            if let Some(head) = head_cache.get(&head_path) {
+                return Ok(Some(head.clone()));
+            }
+        }
+
+        let head_path2 = head_path.clone();
+
         #[allow(clippy::disallowed_methods)]
         let result = tokio::task::spawn_blocking(move || {
             use std::io::Read;
@@ -335,6 +349,8 @@ impl LocalCacheEntry for FsCacheEntry {
                     .track_entry_accessed(head_path, head_size_bytes, false)
                     .await;
             }
+            let mut guard = self.head_cache.lock().unwrap();
+            guard.insert(head_path2, (meta.clone(), attributes.clone()));
             Ok(Some((meta, attributes)))
         } else {
             Ok(None)
