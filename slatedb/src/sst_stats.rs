@@ -15,6 +15,11 @@ pub(crate) struct SstStats {
 }
 
 impl SstStats {
+    /// Returns the total number of rows (puts + deletes + merges).
+    pub(crate) fn num_rows(&self) -> u64 {
+        self.num_puts + self.num_deletes + self.num_merges
+    }
+
     /// Encode stats to bytes via FlatBuffers.
     pub(crate) fn encode(&self) -> Bytes {
         let mut builder = FlatBufferBuilder::new();

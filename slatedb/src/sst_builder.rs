@@ -137,7 +137,6 @@ pub(crate) struct EncodedSsTableBuilder<'a> {
     block_format: BlockFormat,
     sst_format_version: u16,
     min_filter_keys: u32,
-    num_keys: u32,
     stats: SstStats,
     filter_builder: BloomFilterBuilder,
     sst_codec: Box<dyn SsTableInfoCodec>,
@@ -166,7 +165,6 @@ impl EncodedSsTableBuilder<'_> {
             builder: BlockBuilder::new_latest(block_size),
             sst_format_version: SST_FORMAT_VERSION_LATEST,
             min_filter_keys,
-            num_keys: 0,
             stats: SstStats::default(),
             filter_builder: BloomFilterBuilder::new(filter_bits_per_key),
             index_builder: flatbuffers::FlatBufferBuilder::new(),
@@ -204,7 +202,8 @@ impl EncodedSsTableBuilder<'_> {
     /// result in mixed block types within the SST.
     pub(crate) fn with_block_format(mut self, block_format: BlockFormat) -> Self {
         assert_eq!(
-            self.num_keys, 0,
+            self.stats.num_rows(),
+            0,
             "cannot change block format after data has been added"
         );
         self.block_format = block_format;
@@ -217,8 +216,6 @@ impl EncodedSsTableBuilder<'_> {
     /// The block size is calculated after applying any compression if enabled.
     /// The block size is None if the builder has not finished compacting a block yet.
     pub(crate) async fn add(&mut self, entry: RowEntry) -> Result<Option<usize>, SlateDBError> {
-        self.num_keys += 1;
-
         // Accumulate stats
         self.stats.raw_key_size += entry.key.len() as u64;
         self.stats.raw_val_size += entry.value.len() as u64;
@@ -368,14 +365,13 @@ impl EncodedSsTableBuilder<'_> {
         if let Some(transformer) = self.block_transformer.clone() {
             footer_builder = footer_builder.with_block_transformer(transformer);
         }
-        footer_builder = footer_builder.with_stats(self.stats);
-
         // Add filter if enough keys
-        if self.num_keys >= self.min_filter_keys {
+        if self.stats.num_rows() >= self.min_filter_keys as u64 {
             let filter = Arc::new(self.filter_builder.build());
             let encoded_filter = filter.encode();
             footer_builder = footer_builder.with_filter(filter, encoded_filter);
         }
+        footer_builder = footer_builder.with_stats(self.stats);
 
         let footer = footer_builder.build().await?;
 
