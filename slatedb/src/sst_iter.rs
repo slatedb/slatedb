@@ -2355,9 +2355,9 @@ mod tests {
                         .map(KeyValue::from)
                         .unwrap_or_else(|| {
                             panic!(
-                            "Expected key{:03} in ascending order, but got None. Count so far: {}",
-                            i, count
-                        )
+                                "Expected key{:03} in ascending order, but got None. Count so far: {}",
+                                i, count
+                            )
                         });
                     assert_eq!(
                         kv.key,
@@ -2378,9 +2378,9 @@ mod tests {
                         .map(KeyValue::from)
                         .unwrap_or_else(|| {
                             panic!(
-                            "Expected key{:03} in descending order, but got None. Count so far: {}",
-                            i, count
-                        )
+                                "Expected key{:03} in descending order, but got None. Count so far: {}",
+                                i, count
+                            )
                         });
                     assert_eq!(
                         kv.key,
