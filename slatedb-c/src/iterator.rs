@@ -388,9 +388,9 @@ mod tests {
         assert!(!out_data.is_null());
 
         let pairs = parse_batch(out_data, out_data_len, out_count);
-        for i in 0..5 {
-            assert_eq!(pairs[i].0, format!("key_{i:02}").as_bytes());
-            assert_eq!(pairs[i].1, format!("val_{i:02}").as_bytes());
+        for (i, (key, val)) in pairs.iter().enumerate().take(5) {
+            assert_eq!(key, &format!("key_{i:02}").as_bytes());
+            assert_eq!(val, &format!("val_{i:02}").as_bytes());
         }
 
         slatedb_bytes_free(out_data, out_data_len);
@@ -467,9 +467,9 @@ mod tests {
         slatedb_bytes_free(out_data, out_data_len);
 
         // Verify ordering across batches
-        for i in 0..5 {
-            assert_eq!(all_pairs[i].0, format!("key_{i:02}").as_bytes());
-            assert_eq!(all_pairs[i].1, format!("val_{i:02}").as_bytes());
+        for (i, (key, val)) in all_pairs.iter().enumerate().take(5) {
+            assert_eq!(key, &format!("key_{i:02}").as_bytes());
+            assert_eq!(val, &format!("val_{i:02}").as_bytes());
         }
 
         assert_ok(unsafe { slatedb_iterator_close(iter) });
@@ -656,9 +656,9 @@ mod tests {
 
         assert_eq!(out_count, 5);
         let pairs = parse_batch(out_data, out_data_len, out_count);
-        for i in 0..5 {
-            assert_eq!(pairs[i].0, format!("key_{i:02}").as_bytes());
-            assert_eq!(pairs[i].1, format!("val_{i:02}").as_bytes());
+        for (i, (key, val)) in pairs.iter().enumerate().take(5) {
+            assert_eq!(key, &format!("key_{i:02}").as_bytes());
+            assert_eq!(val, &format!("val_{i:02}").as_bytes());
         }
 
         slatedb_bytes_free(out_data, out_data_len);
