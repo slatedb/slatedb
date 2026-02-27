@@ -96,9 +96,7 @@ impl ClosedResultWriter {
     pub(crate) fn write(&self, result: Result<(), SlateDBError>) {
         let reason = match &result {
             Ok(()) => CloseReason::Clean,
-            Err(SlateDBError::Fenced) => CloseReason::Fenced,
-            Err(SlateDBError::BackgroundTaskPanic(_)) => CloseReason::Panic,
-            Err(_) => CloseReason::Panic,
+            Err(err) => CloseReason::from(crate::Error::from(err.clone()).kind()),
         };
         self.cell.write(result);
         if let Some(on_close) = &self.on_close {
