@@ -1077,6 +1077,7 @@ impl<P: Into<Path>> CompactorBuilder<P> {
 pub struct DbReaderBuilder<P: Into<Path>> {
     path: P,
     object_store: Arc<dyn ObjectStore>,
+    wal_object_store: Option<Arc<dyn ObjectStore>>,
     checkpoint_id: Option<uuid::Uuid>,
     options: DbReaderOptions,
     system_clock: Arc<dyn SystemClock>,
@@ -1090,6 +1091,7 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
         Self {
             path,
             object_store,
+            wal_object_store: None,
             checkpoint_id: None,
             options: DbReaderOptions::default(),
             system_clock: Arc::new(DefaultSystemClock::default()),
@@ -1102,6 +1104,13 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
     /// If not set, the reader will create and manage its own checkpoint.
     pub fn with_checkpoint_id(mut self, checkpoint_id: uuid::Uuid) -> Self {
         self.checkpoint_id = Some(checkpoint_id);
+        self
+    }
+
+    /// Sets a separate object store for the WAL.
+    /// Use this when the database was configured with a separate WAL object store.
+    pub fn with_wal_object_store(mut self, wal_object_store: Arc<dyn ObjectStore>) -> Self {
+        self.wal_object_store = Some(wal_object_store);
         self
     }
 
@@ -1142,6 +1151,15 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
             self.system_clock.clone(),
         ));
 
+        let retrying_wal_object_store: Option<Arc<dyn ObjectStore>> =
+            self.wal_object_store.map(|s| {
+                Arc::new(RetryingObjectStore::new(
+                    s,
+                    self.rand.clone(),
+                    self.system_clock.clone(),
+                )) as Arc<dyn ObjectStore>
+            });
+
         // Setup object store with optional caching
         let maybe_cached = CachedObjectStore::from_config(
             retrying_object_store.clone(),
@@ -1160,6 +1178,7 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
         let store_provider = DefaultStoreProvider {
             path: path.clone(),
             object_store,
+            wal_object_store: retrying_wal_object_store,
             block_cache: self.options.block_cache.clone(),
             block_transformer: self.options.block_transformer.clone(),
         };
