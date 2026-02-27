@@ -7,6 +7,60 @@ import java.nio.charset.StandardCharsets;
 
 class SlateDbScanIteratorTest {
     @Test
+    void seekWithinBufferedRange() throws Exception {
+        TestSupport.ensureNativeReady();
+        TestSupport.DbContext context = TestSupport.createDbContext();
+
+        int totalEntries = 100; // > 64 (DEFAULT_BATCH_SIZE)
+
+        try (SlateDb db = SlateDb.open(context.dbPath().toAbsolutePath().toString(), context.objectStoreUrl(), null)) {
+            for (int i = 0; i < totalEntries; i++) {
+                String key = String.format("key-%04d", i);
+                String value = String.format("val-%04d", i);
+                db.put(key.getBytes(StandardCharsets.UTF_8), value.getBytes(StandardCharsets.UTF_8));
+            }
+
+            try (SlateDbScanIterator iter = db.scan(null, null)) {
+                // Fetch first batch (64 items). next() returns item 0, buffer holds items 1-63.
+                SlateDbKeyValue first = iter.next();
+                assertKeyValue(first, 0);
+
+                // Scenario A — Seek within buffer (local drain, no native seek)
+                iter.seek(String.format("key-%04d", 30).getBytes(StandardCharsets.UTF_8));
+                assertKeyValue(iter.next(), 30);
+                assertKeyValue(iter.next(), 31);
+
+                // Scenario B — Second seek within buffer
+                iter.seek(String.format("key-%04d", 50).getBytes(StandardCharsets.UTF_8));
+                assertKeyValue(iter.next(), 50);
+
+                // Scenario C — Seek to exact buffer head (no drain needed)
+                iter.seek(String.format("key-%04d", 51).getBytes(StandardCharsets.UTF_8));
+                assertKeyValue(iter.next(), 51);
+
+                // Scenario D — Seek beyond buffer (native seek required)
+                iter.seek(String.format("key-%04d", 80).getBytes(StandardCharsets.UTF_8));
+                assertKeyValue(iter.next(), 80);
+
+                // Final check: count remaining entries (key-0081 through key-0099)
+                int remaining = 0;
+                while (iter.next() != null) {
+                    remaining++;
+                }
+                Assertions.assertEquals(19, remaining, "should have 19 remaining entries (key-0081 through key-0099)");
+            }
+        }
+    }
+
+    private static void assertKeyValue(SlateDbKeyValue kv, int index) {
+        Assertions.assertNotNull(kv, "expected non-null entry at index " + index);
+        String expectedKey = String.format("key-%04d", index);
+        String expectedValue = String.format("val-%04d", index);
+        Assertions.assertArrayEquals(expectedKey.getBytes(StandardCharsets.UTF_8), kv.key());
+        Assertions.assertArrayEquals(expectedValue.getBytes(StandardCharsets.UTF_8), kv.value());
+    }
+
+    @Test
     void seekAcrossBatchBoundaries() throws Exception {
         TestSupport.ensureNativeReady();
         TestSupport.DbContext context = TestSupport.createDbContext();

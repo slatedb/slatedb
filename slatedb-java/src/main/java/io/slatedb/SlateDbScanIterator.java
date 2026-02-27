@@ -1,6 +1,7 @@
 package io.slatedb;
 
 import java.util.ArrayDeque;
+import java.util.Arrays;
 import java.util.List;
 
 /// Iterator over scan results. Always close after use.
@@ -32,9 +33,7 @@ public final class SlateDbScanIterator implements AutoCloseable {
             exhausted = true;
             return null;
         }
-        for (SlateDbKeyValue kv : batch) {
-            buffer.add(kv);
-        }
+        buffer.addAll(batch);
         return buffer.poll();
     }
 
@@ -48,7 +47,7 @@ public final class SlateDbScanIterator implements AutoCloseable {
     public void seek(byte[] key) {
         // Drain buffered items that are before the seek target.
         while (!buffer.isEmpty()) {
-            if (compareUnsigned(buffer.peek().key(), key) >= 0) {
+            if (Arrays.compareUnsigned(buffer.peek().key(), key) >= 0) {
                 break;
             }
             buffer.poll();
@@ -77,18 +76,5 @@ public final class SlateDbScanIterator implements AutoCloseable {
         NativeInterop.slatedb_iterator_close(iterPtr);
         iterPtr = null;
         closed = true;
-    }
-
-    /// Compares two byte arrays lexicographically as unsigned bytes,
-    /// matching the key ordering used by the native iterator.
-    private static int compareUnsigned(byte[] a, byte[] b) {
-        int len = Math.min(a.length, b.length);
-        for (int i = 0; i < len; i++) {
-            int cmp = Byte.toUnsignedInt(a[i]) - Byte.toUnsignedInt(b[i]);
-            if (cmp != 0) {
-                return cmp;
-            }
-        }
-        return a.length - b.length;
     }
 }
