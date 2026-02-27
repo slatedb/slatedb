@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use std::{fmt::Display, io::SeekFrom};
-
+use std::os::unix::fs::FileExt;
 use crate::cached_object_store::stats::CachedObjectStoreStats;
 use crate::clock::SystemClock;
 use crate::rand::DbRand;
@@ -201,9 +201,7 @@ impl LocalCacheEntry for FsCacheEntry {
             };
 
             let mut buffer = vec![0; range_in_part.len()];
-            file.seek(SeekFrom::Start(range_in_part.start as u64))
-                .map_err(wrap_io_err)?;
-            file.read_exact(&mut buffer).map_err(wrap_io_err)?;
+            file.read_exact_at(&mut buffer, range_in_part.start as u64).map_err(wrap_io_err)?;
             Ok(Some(Bytes::from(buffer)))
         })
         .await
