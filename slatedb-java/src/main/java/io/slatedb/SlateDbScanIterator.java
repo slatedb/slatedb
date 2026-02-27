@@ -6,6 +6,7 @@ import java.util.List;
 /// Iterator over scan results. Always close after use.
 public final class SlateDbScanIterator implements AutoCloseable {
     private static final int DEFAULT_BATCH_SIZE = 64;
+    private static final long DEFAULT_BATCH_MAX_BYTES = 4L * 1024 * 1024;
 
     private NativeInterop.IteratorHandle iterPtr;
     private boolean closed;
@@ -26,7 +27,7 @@ public final class SlateDbScanIterator implements AutoCloseable {
         if (exhausted) {
             return null;
         }
-        List<SlateDbKeyValue> batch = NativeInterop.slatedb_iterator_next_batch(iterPtr, DEFAULT_BATCH_SIZE);
+        List<SlateDbKeyValue> batch = NativeInterop.slatedb_iterator_next_batch(iterPtr, DEFAULT_BATCH_SIZE, DEFAULT_BATCH_MAX_BYTES);
         if (batch.isEmpty()) {
             exhausted = true;
             return null;

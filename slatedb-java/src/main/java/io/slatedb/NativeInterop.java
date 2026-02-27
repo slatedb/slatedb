@@ -874,7 +874,7 @@ final class NativeInterop {
         }
     }
 
-    static List<SlateDbKeyValue> slatedb_iterator_next_batch(IteratorHandle iterator, int maxCount) {
+    static List<SlateDbKeyValue> slatedb_iterator_next_batch(IteratorHandle iterator, long maxCount, long maxBytes) {
         Objects.requireNonNull(iterator, "iterator");
 
         try (Arena arena = Arena.ofConfined()) {
@@ -887,6 +887,7 @@ final class NativeInterop {
                     arena,
                     iterator.segment(),
                     maxCount,
+                    maxBytes,
                     outData,
                     outDataLen,
                     outCount

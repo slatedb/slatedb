@@ -82,7 +82,8 @@ pub unsafe extern "C" fn slatedb_iterator_next(
     }
 }
 
-/// Retrieves up to `max_count` key/value pairs from an iterator in a single call.
+/// Retrieves up to `max_count` key/value pairs (or up to `max_bytes` of packed
+/// data) from an iterator in a single call — whichever limit is reached first.
 ///
 /// Results are packed into a single buffer with the following layout per entry:
 /// ```text
@@ -91,7 +92,11 @@ pub unsafe extern "C" fn slatedb_iterator_next(
 ///
 /// ## Arguments
 /// - `iterator`: Iterator handle created by scan APIs.
-/// - `max_count`: Maximum number of key/value pairs to return.
+/// - `max_count`: Maximum number of key/value pairs to return. Pass `0` for no
+///   count limit.
+/// - `max_bytes`: Maximum packed buffer size in bytes. The last entry is allowed
+///   to push the buffer over this limit so that at least one entry is always
+///   returned when the iterator is not exhausted. Pass `0` for no byte limit.
 /// - `out_data`: Output buffer pointer (allocated by Rust, single allocation).
 /// - `out_data_len`: Output total buffer length in bytes.
 /// - `out_count`: Output number of key/value pairs in the buffer.
@@ -111,6 +116,7 @@ pub unsafe extern "C" fn slatedb_iterator_next(
 pub unsafe extern "C" fn slatedb_iterator_next_batch(
     iterator: *mut slatedb_iterator_t,
     max_count: usize,
+    max_bytes: usize,
     out_data: *mut *mut u8,
     out_data_len: *mut usize,
     out_count: *mut usize,
@@ -136,7 +142,14 @@ pub unsafe extern "C" fn slatedb_iterator_next_batch(
     let mut buf = Vec::new();
     let mut count: usize = 0;
 
-    for _ in 0..max_count {
+    loop {
+        if max_count > 0 && count >= max_count {
+            break;
+        }
+        if max_bytes > 0 && count > 0 && buf.len() >= max_bytes {
+            break;
+        }
+
         match handle.runtime.block_on(handle.iter.next()) {
             Ok(Some(kv)) => {
                 let key = kv.key.as_ref();
