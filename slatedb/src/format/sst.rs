@@ -709,14 +709,16 @@ impl SsTableFormat {
         &self,
         info: &SsTableInfo,
         obj: &impl ReadOnlyBlob,
-    ) -> Result<SstStats, SlateDBError> {
+    ) -> Result<Option<SstStats>, SlateDBError> {
         if info.stats_len == 0 {
-            return Ok(SstStats::default());
+            return Ok(None);
         }
         let stats_end = info.stats_offset + info.stats_len;
         let stats_bytes = obj.read_range(info.stats_offset..stats_end).await?;
         let compression_codec = info.compression_codec;
-        self.decode_stats(stats_bytes, compression_codec).await
+        Ok(Some(
+            self.decode_stats(stats_bytes, compression_codec).await?,
+        ))
     }
 
     #[allow(dead_code)]

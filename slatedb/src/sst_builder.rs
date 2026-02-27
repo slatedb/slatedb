@@ -1479,7 +1479,11 @@ mod tests {
             .write_sst(&SsTableId::Wal(0), encoded, false)
             .await
             .unwrap();
-        let stats = table_store.read_stats(&sst_handle).await.unwrap();
+        let stats = table_store
+            .read_stats(&sst_handle)
+            .await
+            .unwrap()
+            .expect("stats should be present");
 
         assert_eq!(stats.num_puts, 2);
         assert_eq!(stats.num_deletes, 1);
@@ -1497,7 +1501,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_stats_block_backward_compat() {
-        // Old SSTs without stats block should return default (all zeros)
+        // Old SSTs without stats block should return None
         let info = crate::db_state::SsTableInfo {
             stats_offset: 0,
             stats_len: 0,
@@ -1507,7 +1511,7 @@ mod tests {
         let bytes = Bytes::from(vec![0u8; 100]);
         let blob = BytesBlob { bytes };
         let stats = format.read_stats(&info, &blob).await.unwrap();
-        assert_eq!(stats, crate::sst_stats::SstStats::default());
+        assert!(stats.is_none());
     }
 
     #[rstest]
@@ -1544,7 +1548,11 @@ mod tests {
             .write_sst(&SsTableId::Wal(0), encoded, false)
             .await
             .unwrap();
-        let stats = table_store.read_stats(&sst_handle).await.unwrap();
+        let stats = table_store
+            .read_stats(&sst_handle)
+            .await
+            .unwrap()
+            .expect("stats should be present");
 
         assert_eq!(stats.num_puts, 2);
         assert_eq!(stats.num_deletes, 0);
@@ -1582,7 +1590,11 @@ mod tests {
             .write_sst(&SsTableId::Wal(0), encoded, false)
             .await
             .unwrap();
-        let stats = table_store.read_stats(&sst_handle).await.unwrap();
+        let stats = table_store
+            .read_stats(&sst_handle)
+            .await
+            .unwrap()
+            .expect("stats should be present");
 
         assert_eq!(stats.num_puts, 2);
         assert_eq!(stats.num_deletes, 0);

@@ -390,7 +390,7 @@ impl TableStore {
     pub(crate) async fn read_stats(
         &self,
         handle: &SsTableHandle,
-    ) -> Result<SstStats, SlateDBError> {
+    ) -> Result<Option<SstStats>, SlateDBError> {
         let object_store = self.object_stores.store_for(&handle.id);
         let path = self.path(&handle.id);
         let obj = ReadOnlyObject { object_store, path };
