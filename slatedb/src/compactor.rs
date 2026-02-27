@@ -1039,6 +1039,7 @@ mod tests {
     use ulid::Ulid;
 
     use super::*;
+    use crate::types::KeyValue;
     use crate::compactions_store::{FenceableCompactions, StoredCompactions};
     use crate::compactor::stats::CompactionStats;
     use crate::compactor::stats::LAST_COMPACTION_TS_SEC;
@@ -1144,7 +1145,7 @@ mod tests {
                 .expect("Expected Some(iter) but got None");
 
                 // remove the key from the expected map and verify that the db matches
-                while let Some(kv) = iter.next().await.unwrap().map(crate::types::KeyValue::from) {
+                while let Some(kv) = iter.next().await.unwrap().map(KeyValue::from) {
                     let expected_v = expected
                         .remove(kv.key.as_ref())
                         .expect("removing unexpected key");
@@ -1257,9 +1258,9 @@ mod tests {
 
         // should be no tombstone for key 'a' because it was filtered
         // out of the last run
-        let next = iter.next().await.unwrap().map(crate::types::KeyValue::from);
+        let next = iter.next().await.unwrap().map(KeyValue::from);
         assert_eq!(next.unwrap().key.as_ref(), &[b'b'; 16]);
-        let next = iter.next().await.unwrap().map(crate::types::KeyValue::from);
+        let next = iter.next().await.unwrap().map(KeyValue::from);
         assert!(next.is_none());
     }
 
@@ -1377,7 +1378,7 @@ mod tests {
                 }
             } else if key == [b'b'; 16] {
                 assert!(!found_b, "Should only encounter key 'b' once");
-                let kv: crate::types::KeyValue = next.into();
+                let kv: KeyValue = next.into();
                 assert_eq!(kv.key.as_ref(), &[b'b'; 16]);
                 found_b = true;
             }

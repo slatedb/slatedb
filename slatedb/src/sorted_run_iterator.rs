@@ -190,6 +190,7 @@ impl KeyValueIterator for SortedRunIterator<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::KeyValue;
     use crate::bytes_generator::OrderedBytesGenerator;
     use crate::db_state::SsTableId;
     use crate::format::sst::SsTableFormat;
@@ -251,16 +252,16 @@ mod tests {
         .await
         .unwrap();
 
-        let kv: crate::types::KeyValue = iter.next().await.unwrap().unwrap().into();
+        let kv: KeyValue = iter.next().await.unwrap().unwrap().into();
         assert_eq!(kv.key, b"key1".as_slice());
         assert_eq!(kv.value, b"value1".as_slice());
-        let kv: crate::types::KeyValue = iter.next().await.unwrap().unwrap().into();
+        let kv: KeyValue = iter.next().await.unwrap().unwrap().into();
         assert_eq!(kv.key, b"key2".as_slice());
         assert_eq!(kv.value, b"value2".as_slice());
-        let kv: crate::types::KeyValue = iter.next().await.unwrap().unwrap().into();
+        let kv: KeyValue = iter.next().await.unwrap().unwrap().into();
         assert_eq!(kv.key, b"key3".as_slice());
         assert_eq!(kv.value, b"value3".as_slice());
-        let kv = iter.next().await.unwrap().map(crate::types::KeyValue::from);
+        let kv = iter.next().await.unwrap().map(KeyValue::from);
         assert!(kv.is_none());
     }
 
@@ -312,16 +313,16 @@ mod tests {
         .await
         .unwrap();
 
-        let kv: crate::types::KeyValue = iter.next().await.unwrap().unwrap().into();
+        let kv: KeyValue = iter.next().await.unwrap().unwrap().into();
         assert_eq!(kv.key, b"key1".as_slice());
         assert_eq!(kv.value, b"value1".as_slice());
-        let kv: crate::types::KeyValue = iter.next().await.unwrap().unwrap().into();
+        let kv: KeyValue = iter.next().await.unwrap().unwrap().into();
         assert_eq!(kv.key, b"key2".as_slice());
         assert_eq!(kv.value, b"value2".as_slice());
-        let kv: crate::types::KeyValue = iter.next().await.unwrap().unwrap().into();
+        let kv: KeyValue = iter.next().await.unwrap().unwrap().into();
         assert_eq!(kv.key, b"key3".as_slice());
         assert_eq!(kv.value, b"value3".as_slice());
-        let kv = iter.next().await.unwrap().map(crate::types::KeyValue::from);
+        let kv = iter.next().await.unwrap().map(KeyValue::from);
         assert!(kv.is_none());
     }
 
@@ -475,7 +476,7 @@ mod tests {
             sr_iter.seek(&seek_key).await.unwrap();
 
             for (key, value) in table_iter.by_ref().take(run as usize) {
-                let kv: crate::types::KeyValue = sr_iter.next().await.unwrap().unwrap().into();
+                let kv: KeyValue = sr_iter.next().await.unwrap().unwrap().into();
                 assert_eq!(*key, kv.key);
                 assert_eq!(*value, kv.value);
             }
@@ -627,14 +628,14 @@ mod tests {
 
             // then: all keys should be returned in order across both v1 and v2 SSTs
             for i in 1..=8 {
-                let kv: crate::types::KeyValue = iter.next().await.unwrap().unwrap().into();
+                let kv: KeyValue = iter.next().await.unwrap().unwrap().into();
                 let expected_key = format!("key{:02}", i);
                 let expected_value = format!("value{:02}", i);
                 assert_eq!(kv.key.as_ref(), expected_key.as_bytes());
                 assert_eq!(kv.value.as_ref(), expected_value.as_bytes());
             }
 
-            let kv = iter.next().await.unwrap().map(crate::types::KeyValue::from);
+            let kv = iter.next().await.unwrap().map(KeyValue::from);
             assert!(kv.is_none());
         }
 
@@ -694,18 +695,18 @@ mod tests {
             iter.seek(b"key05").await.unwrap();
 
             // then: we should get key05 and subsequent keys
-            let kv: crate::types::KeyValue = iter.next().await.unwrap().unwrap().into();
+            let kv: KeyValue = iter.next().await.unwrap().unwrap().into();
             assert_eq!(kv.key.as_ref(), b"key05");
             assert_eq!(kv.value.as_ref(), b"value05");
 
-            let kv: crate::types::KeyValue = iter.next().await.unwrap().unwrap().into();
+            let kv: KeyValue = iter.next().await.unwrap().unwrap().into();
             assert_eq!(kv.key.as_ref(), b"key06");
             assert_eq!(kv.value.as_ref(), b"value06");
 
             // Seek again to a v2 SST
             iter.seek(b"key07").await.unwrap();
 
-            let kv: crate::types::KeyValue = iter.next().await.unwrap().unwrap().into();
+            let kv: KeyValue = iter.next().await.unwrap().unwrap().into();
             assert_eq!(kv.key.as_ref(), b"key07");
             assert_eq!(kv.value.as_ref(), b"value07");
         }

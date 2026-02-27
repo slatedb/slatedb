@@ -662,6 +662,7 @@ mod tests {
     use rstest::rstest;
     use std::collections::VecDeque;
     use std::sync::Arc;
+    use crate::types::KeyValue;
 
     use crate::db_cache::test_utils::TestCache;
     use crate::db_cache::SplitCache;
@@ -1243,7 +1244,7 @@ mod tests {
 
         while let (Some(block), Some(expected_item)) = (block_iter.next(), expected_iter.next()) {
             let mut iter = BlockIteratorLatest::new_ascending(block.clone());
-            let kv: crate::types::KeyValue = iter.next().await.unwrap().unwrap().into();
+            let kv: KeyValue = iter.next().await.unwrap().unwrap().into();
             assert_eq!(kv.key, expected_item.0);
             assert_eq!(ValueDeletable::Value(kv.value), expected_item.1);
         }

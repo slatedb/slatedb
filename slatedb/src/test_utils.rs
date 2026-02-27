@@ -214,7 +214,7 @@ pub(crate) async fn assert_ranged_kv_scan<T: KeyValueIterator>(
             IterationOrder::Ascending => expected.next(),
             IterationOrder::Descending => expected.next_back(),
         };
-        let actual_next = iter.next().await.unwrap().map(crate::types::KeyValue::from);
+        let actual_next = iter.next().await.unwrap().map(KeyValue::from);
         if expected_next.is_none() && actual_next.is_none() {
             return;
         }
