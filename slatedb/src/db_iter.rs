@@ -293,7 +293,18 @@ impl DbIterator {
     /// Returns [`Error`] if the iterator has been invalidated due to an underlying error.
     pub async fn next(&mut self) -> Result<Option<KeyValue>, crate::Error> {
         let entry_opt = self.next_row().await?;
-        Ok(entry_opt.map(Into::into))
+        match entry_opt {
+            Some(entry) => {
+                let val_bytes = entry.value.as_bytes().ok_or_else(|| {
+                    crate::Error::from(crate::error::SlateDBError::UnexpectedTombstone)
+                })?;
+                Ok(Some(KeyValue {
+                    key: entry.key,
+                    value: val_bytes,
+                }))
+            }
+            None => Ok(None),
+        }
     }
 
     /// Get the next row in the scan.
