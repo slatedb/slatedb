@@ -190,13 +190,13 @@ impl KeyValueIterator for SortedRunIterator<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::KeyValue;
     use crate::bytes_generator::OrderedBytesGenerator;
     use crate::db_state::SsTableId;
     use crate::format::sst::SsTableFormat;
     use crate::proptest_util;
     use crate::proptest_util::sample;
     use crate::test_utils::{assert_kv, gen_attrs};
+    use crate::types::KeyValue;
 
     use crate::object_stores::ObjectStores;
     use bytes::{BufMut, BytesMut};

@@ -653,6 +653,7 @@ fn slatedb_io_error() -> SlateDBError {
 
 #[cfg(test)]
 mod tests {
+    use crate::types::KeyValue;
     use bytes::Bytes;
     use futures::future;
     use futures::StreamExt;
@@ -662,7 +663,6 @@ mod tests {
     use rstest::rstest;
     use std::collections::VecDeque;
     use std::sync::Arc;
-    use crate::types::KeyValue;
 
     use crate::db_cache::test_utils::TestCache;
     use crate::db_cache::SplitCache;

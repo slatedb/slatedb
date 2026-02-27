@@ -201,13 +201,13 @@ impl KeyValueIterator for MemTableIterator {
 impl MemTableIterator {
     pub(crate) fn next_sync(&mut self) -> Option<RowEntry> {
         let ans = self.borrow_item().clone();
-        let next = match self.borrow_ordering() {
+        let next_entry = match self.borrow_ordering() {
             IterationOrder::Ascending => self.with_inner_mut(|inner| inner.next()),
             IterationOrder::Descending => self.with_inner_mut(|inner| inner.next_back()),
         };
 
-        let cloned_entry = next.map(|entry| entry.value().clone());
-        self.with_item_mut(|item| *item = cloned_entry);
+        let cloned_next = next_entry.map(|entry| entry.value().clone());
+        self.with_item_mut(|item| *item = cloned_next);
 
         ans
     }

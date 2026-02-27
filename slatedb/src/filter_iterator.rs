@@ -95,14 +95,7 @@ mod tests {
 
         let mut filter_iter = FilterIterator::new(iter, Box::new(filter_entry));
 
-        assert_eq!(
-            filter_iter
-                .next()
-                .await
-                .unwrap()
-                .map(KeyValue::from),
-            None
-        );
+        assert_eq!(filter_iter.next().await.unwrap().map(KeyValue::from), None);
     }
 
     #[tokio::test]

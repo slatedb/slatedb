@@ -1039,7 +1039,6 @@ mod tests {
     use ulid::Ulid;
 
     use super::*;
-    use crate::types::KeyValue;
     use crate::compactions_store::{FenceableCompactions, StoredCompactions};
     use crate::compactor::stats::CompactionStats;
     use crate::compactor::stats::LAST_COMPACTION_TS_SEC;
@@ -1065,6 +1064,7 @@ mod tests {
     use crate::stats::StatRegistry;
     use crate::tablestore::TableStore;
     use crate::test_utils::assert_iterator;
+    use crate::types::KeyValue;
     use crate::types::RowEntry;
     use bytes::Bytes;
     use slatedb_common::clock::{DefaultSystemClock, SystemClock};

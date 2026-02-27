@@ -1776,12 +1776,10 @@ mod tests {
 
         for i in (0..nkeys).step_by(100) {
             iter_large_fetch.seek(&key_values[i].0).await.unwrap();
-            let kv_large_fetch: KeyValue =
-                iter_large_fetch.next().await.unwrap().unwrap().into();
+            let kv_large_fetch: KeyValue = iter_large_fetch.next().await.unwrap().unwrap().into();
 
             iter_small_fetch.seek(&key_values[i].0).await.unwrap();
-            let kv_small_fetch: KeyValue =
-                iter_small_fetch.next().await.unwrap().unwrap().into();
+            let kv_small_fetch: KeyValue = iter_small_fetch.next().await.unwrap().unwrap().into();
 
             assert_eq!(kv_large_fetch.key, key_values[i].0);
             assert_eq!(kv_large_fetch.value, key_values[i].1);
