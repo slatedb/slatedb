@@ -9,14 +9,14 @@ use log::error;
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use super::{GcStats, GcTask, DEFAULT_MIN_AGE};
+use super::{GcStats, GcTask};
 
 pub(crate) struct CompactedGcTask {
     manifest_store: Arc<ManifestStore>,
     compactions_store: Arc<CompactionsStore>,
     table_store: Arc<TableStore>,
     stats: Arc<GcStats>,
-    compacted_options: Option<GarbageCollectorDirectoryOptions>,
+    compacted_options: GarbageCollectorDirectoryOptions,
 }
 
 impl std::fmt::Debug for CompactedGcTask {
@@ -33,7 +33,7 @@ impl CompactedGcTask {
         compactions_store: Arc<CompactionsStore>,
         table_store: Arc<TableStore>,
         stats: Arc<GcStats>,
-        compacted_options: Option<GarbageCollectorDirectoryOptions>,
+        compacted_options: GarbageCollectorDirectoryOptions,
     ) -> Self {
         CompactedGcTask {
             manifest_store,
@@ -45,10 +45,7 @@ impl CompactedGcTask {
     }
 
     fn compacted_sst_min_age(&self) -> chrono::Duration {
-        let min_age = self
-            .compacted_options
-            .map_or(DEFAULT_MIN_AGE, |opts| opts.min_age);
-        chrono::Duration::from_std(min_age).expect("invalid duration")
+        chrono::Duration::from_std(self.compacted_options.min_age).expect("invalid duration")
     }
 
     /// Lists all SSTs referenced by the latest manifest and its checkpoints.
@@ -315,10 +312,10 @@ mod tests {
 
         // GC task with min_age = 5 seconds. Using utc_now at 10 seconds after the epoch
         // yields a configured_min_age_dt of 5 seconds.
-        let opts = Some(GarbageCollectorDirectoryOptions {
+        let opts = GarbageCollectorDirectoryOptions {
             interval: None,
             min_age: Duration::from_secs(5),
-        });
+        };
         let stats = Arc::new(GcStats::new(stat_registry.clone()));
         let task = CompactedGcTask::new(
             manifest_store.clone(),
@@ -417,10 +414,10 @@ mod tests {
         // min_age = 0, so configured_min_age_dt == utc_now (10 seconds after epoch).
         // The manifest's most recent SST (3 seconds) is the smallest cutoff, so only
         // SSTs older than that should be deleted.
-        let opts = Some(GarbageCollectorDirectoryOptions {
+        let opts = GarbageCollectorDirectoryOptions {
             interval: None,
             min_age: Duration::from_secs(0),
-        });
+        };
         let stats = Arc::new(GcStats::new(stat_registry.clone()));
         let task = CompactedGcTask::new(
             manifest_store.clone(),
@@ -514,10 +511,10 @@ mod tests {
         stored_compactions.update(compactions_dirty).await.unwrap();
 
         // GC task with min_age = 0
-        let opts = Some(GarbageCollectorDirectoryOptions {
+        let opts = GarbageCollectorDirectoryOptions {
             interval: None,
             min_age: Duration::from_secs(0),
-        });
+        };
         let stat_registry = Arc::new(StatRegistry::new());
         let stats = Arc::new(GcStats::new(stat_registry.clone()));
         let task = CompactedGcTask::new(
@@ -604,10 +601,10 @@ mod tests {
 
         // With min_age=2s and newest_l0=9s, the cutoff becomes 8s; without a watermark
         // this incorrectly allows deleting the compaction output.
-        let opts = Some(GarbageCollectorDirectoryOptions {
+        let opts = GarbageCollectorDirectoryOptions {
             interval: None,
             min_age: Duration::from_secs(2),
-        });
+        };
         let stats = Arc::new(GcStats::new(Arc::new(StatRegistry::new())));
         let task = CompactedGcTask::new(
             manifest_store.clone(),

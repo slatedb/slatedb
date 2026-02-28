@@ -26,12 +26,12 @@ use chrono::{DateTime, Utc};
 use log::error;
 use std::sync::Arc;
 
-use super::{GcStats, GcTask, DEFAULT_MIN_AGE};
+use super::{GcStats, GcTask};
 
 pub(crate) struct CompactionsGcTask {
     compactions_store: Arc<CompactionsStore>,
     stats: Arc<GcStats>,
-    compactions_options: Option<GarbageCollectorDirectoryOptions>,
+    compactions_options: GarbageCollectorDirectoryOptions,
 }
 
 impl std::fmt::Debug for CompactionsGcTask {
@@ -46,7 +46,7 @@ impl CompactionsGcTask {
     pub(super) fn new(
         compactions_store: Arc<CompactionsStore>,
         stats: Arc<GcStats>,
-        compactions_options: Option<GarbageCollectorDirectoryOptions>,
+        compactions_options: GarbageCollectorDirectoryOptions,
     ) -> Self {
         Self {
             compactions_store,
@@ -56,10 +56,7 @@ impl CompactionsGcTask {
     }
 
     fn compactions_min_age(&self) -> chrono::Duration {
-        let min_age = self
-            .compactions_options
-            .map_or(DEFAULT_MIN_AGE, |opts| opts.min_age);
-        chrono::Duration::from_std(min_age).expect("invalid duration")
+        chrono::Duration::from_std(self.compactions_options.min_age).expect("invalid duration")
     }
 }
 

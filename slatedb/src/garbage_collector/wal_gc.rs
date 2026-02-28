@@ -9,13 +9,13 @@ use log::error;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use super::{GcStats, GcTask, DEFAULT_MIN_AGE};
+use super::{GcStats, GcTask};
 
 pub(crate) struct WalGcTask {
     manifest_store: Arc<ManifestStore>,
     table_store: Arc<TableStore>,
     stats: Arc<GcStats>,
-    wal_options: Option<GarbageCollectorDirectoryOptions>,
+    wal_options: GarbageCollectorDirectoryOptions,
 }
 
 impl std::fmt::Debug for WalGcTask {
@@ -31,7 +31,7 @@ impl WalGcTask {
         manifest_store: Arc<ManifestStore>,
         table_store: Arc<TableStore>,
         stats: Arc<GcStats>,
-        wal_options: Option<GarbageCollectorDirectoryOptions>,
+        wal_options: GarbageCollectorDirectoryOptions,
     ) -> Self {
         WalGcTask {
             manifest_store,
@@ -58,10 +58,7 @@ impl WalGcTask {
     }
 
     fn wal_sst_min_age(&self) -> chrono::Duration {
-        let min_age = self
-            .wal_options
-            .map_or(DEFAULT_MIN_AGE, |opts| opts.min_age);
-        chrono::Duration::from_std(min_age).expect("invalid duration")
+        chrono::Duration::from_std(self.wal_options.min_age).expect("invalid duration")
     }
 }
 

@@ -567,10 +567,11 @@ impl<P: Into<Path>> DbBuilder<P> {
             )?;
         }
 
-        // To keep backwards compatibility, check if the gc_runtime or garbage_collector_options are set.
-        // If either are set, we need to initialize the garbage collector.
-        if self.settings.garbage_collector_options.is_some() || self.gc_runtime.is_some() {
-            let gc_options = self.settings.garbage_collector_options.unwrap_or_default();
+        if let Some(gc_options) = self
+            .settings
+            .garbage_collector_options
+            .filter(|opts| !opts.is_empty())
+        {
             let gc = GarbageCollector::new(
                 manifest_store.clone(),
                 compactions_store.clone(),
@@ -581,7 +582,8 @@ impl<P: Into<Path>> DbBuilder<P> {
             );
             // Garbage collector only uses tickers, so pass in a dummy rx channel
             let (_, rx) = mpsc::unbounded_channel();
-            task_executor.add_handler(GC_TASK_NAME.to_string(), Box::new(gc), rx, &tokio_handle)?;
+            let gc_handle = self.gc_runtime.as_ref().unwrap_or(&tokio_handle);
+            task_executor.add_handler(GC_TASK_NAME.to_string(), Box::new(gc), rx, gc_handle)?;
         }
 
         // Monitor background tasks
@@ -1209,4 +1211,52 @@ fn default_db_cache() -> Option<Arc<dyn DbCache>> {
             .with_meta_cache(meta_cache)
             .build(),
     ) as Arc<dyn DbCache>)
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::config::Settings;
+    use crate::garbage_collector::stats::GC_COUNT;
+    use object_store::memory::InMemory;
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn test_db_builder_starts_gc_by_default() {
+        let db = crate::Db::builder(
+            "test_db_builder_starts_gc_by_default",
+            Arc::new(InMemory::new()),
+        )
+        .build()
+        .await
+        .expect("failed to build db");
+
+        assert!(
+            db.metrics().lookup(GC_COUNT).is_some(),
+            "GC should be initialized by default"
+        );
+
+        db.close().await.expect("failed to close db");
+    }
+
+    #[tokio::test]
+    async fn test_db_builder_disables_gc_when_gc_options_are_none() {
+        let db = crate::Db::builder(
+            "test_db_builder_disables_gc_when_gc_options_are_none",
+            Arc::new(InMemory::new()),
+        )
+        .with_settings(Settings {
+            garbage_collector_options: None,
+            ..Settings::default()
+        })
+        .build()
+        .await
+        .expect("failed to build db");
+
+        assert!(
+            db.metrics().lookup(GC_COUNT).is_none(),
+            "GC should not be initialized when options are None"
+        );
+
+        db.close().await.expect("failed to close db");
+    }
 }
