@@ -568,10 +568,13 @@ impl<P: Into<Path>> DbBuilder<P> {
             )?;
         }
 
-        // To keep backwards compatibility, check if the gc_runtime or garbage_collector_options are set.
-        // If either are set, we need to initialize the garbage collector.
-        if self.settings.garbage_collector_options.is_some() || self.gc_runtime.is_some() {
-            let gc_options = self.settings.garbage_collector_options.unwrap_or_default();
+        if let Some(gc_options) = self
+            .settings
+            .garbage_collector_options
+            .as_ref()
+            .filter(|opts| !opts.is_empty())
+            .cloned()
+        {
             let gc = GarbageCollector::new(
                 manifest_store.clone(),
                 compactions_store.clone(),
@@ -582,7 +585,8 @@ impl<P: Into<Path>> DbBuilder<P> {
             );
             // Garbage collector only uses tickers, so pass in a dummy rx channel
             let (_, rx) = mpsc::unbounded_channel();
-            task_executor.add_handler(GC_TASK_NAME.to_string(), Box::new(gc), rx, &tokio_handle)?;
+            let gc_handle = self.gc_runtime.as_ref().unwrap_or(&tokio_handle);
+            task_executor.add_handler(GC_TASK_NAME.to_string(), Box::new(gc), rx, gc_handle)?;
         }
 
         // Monitor background tasks

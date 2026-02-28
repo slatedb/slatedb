@@ -914,7 +914,7 @@ impl Default for Settings {
             compactor_options: Some(CompactorOptions::default()),
             compression_codec: None,
             object_store_cache_options: ObjectStoreCacheOptions::default(),
-            garbage_collector_options: None,
+            garbage_collector_options: Some(GarbageCollectorOptions::default()),
             filter_bits_per_key: 10,
             default_ttl: None,
             merge_operator: None,
@@ -1279,18 +1279,21 @@ pub struct GarbageCollectorDirectoryOptions {
     pub min_age: Duration,
 }
 
-/// Default options for the garbage collector. The default options are:
-/// * Manifest options: interval of 60 seconds, min age of 1 day
-/// * WAL options: interval of 60 seconds, min age of 1 minute
-/// * Compacted options: interval of 60 seconds, min age of 1 day
-/// * Compactions options: interval of 60 seconds, min age of 1 day
+/// Default options for the garbage collector.
+///
+/// By default, garbage collection is enabled for all managed directories
+/// (manifest, WAL, compacted SSTs, and compactions) using
+/// [`GarbageCollectorDirectoryOptions::default()`].
+///
+/// To disable garbage collection for a specific file type, set that
+/// directory option to `None`.
 impl Default for GarbageCollectorOptions {
     fn default() -> Self {
         Self {
-            manifest_options: None,
-            wal_options: None,
-            compacted_options: None,
-            compactions_options: None,
+            manifest_options: Some(GarbageCollectorDirectoryOptions::default()),
+            wal_options: Some(GarbageCollectorDirectoryOptions::default()),
+            compacted_options: Some(GarbageCollectorDirectoryOptions::default()),
+            compactions_options: Some(GarbageCollectorDirectoryOptions::default()),
         }
     }
 }
