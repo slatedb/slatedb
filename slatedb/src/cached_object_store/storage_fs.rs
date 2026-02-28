@@ -9,9 +9,8 @@ use rand::{distr::Alphanumeric, Rng};
 use slatedb_common::clock::SystemClock;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
-use std::io::Write;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::ops::Range;
-use std::os::unix::fs::FileExt;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -208,15 +207,18 @@ impl LocalCacheEntry for FsCacheEntry {
         let this_part_path = part_path.clone();
         #[allow(clippy::disallowed_methods)]
         let result = tokio::task::spawn_blocking(move || {
-            let file = match std::fs::File::open(&this_part_path) {
+            let mut file = match std::fs::File::open(&this_part_path) {
                 Ok(f) => f,
                 Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
                 Err(err) => return Err(wrap_io_err(err)),
             };
 
             let mut buffer = vec![0; range_in_part.len()];
-            file.read_exact_at(&mut buffer, range_in_part.start as u64)
+            let pos = file
+                .seek(SeekFrom::Start(range_in_part.start as u64))
                 .map_err(wrap_io_err)?;
+            assert_eq!(pos, range_in_part.start as u64);
+            file.read_exact(&mut buffer).map_err(wrap_io_err)?;
             Ok(Some(Bytes::from(buffer)))
         })
         .await
