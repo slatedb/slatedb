@@ -126,24 +126,32 @@ impl MessageHandler<GcMessage> for GarbageCollector {
     async fn handle(&mut self, message: GcMessage) -> Result<(), SlateDBError> {
         match message {
             GcMessage::GcManifest => {
-                if let Some(task) = &self.manifest_gc_task {
-                    self.run_gc_task(task).await;
-                }
+                let task = self
+                    .manifest_gc_task
+                    .as_ref()
+                    .expect("got manifest tick with unconfigured manifest task");
+                self.run_gc_task(task).await;
             }
             GcMessage::GcWal => {
-                if let Some(task) = &self.wal_gc_task {
-                    self.run_gc_task(task).await;
-                }
+                let task = self
+                    .wal_gc_task
+                    .as_ref()
+                    .expect("got wal tick with unconfigured wal task");
+                self.run_gc_task(task).await;
             }
             GcMessage::GcCompacted => {
-                if let Some(task) = &self.compacted_gc_task {
-                    self.run_gc_task(task).await;
-                }
+                let task = self
+                    .compacted_gc_task
+                    .as_ref()
+                    .expect("got compacted tick with unconfigured compacted task");
+                self.run_gc_task(task).await;
             }
             GcMessage::GcCompactions => {
-                if let Some(task) = &self.compactions_gc_task {
-                    self.run_gc_task(task).await;
-                }
+                let task = self
+                    .compactions_gc_task
+                    .as_ref()
+                    .expect("got compactions tick with unconfigured compactions task");
+                self.run_gc_task(task).await;
             }
             GcMessage::LogStats => self.log_stats(),
         }
