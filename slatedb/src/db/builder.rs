@@ -248,8 +248,10 @@ impl<P: Into<Path>> DbBuilder<P> {
 
     /// Sets a custom CompactorBuilder for compaction orchestration.
     ///
-    /// Mutually exclusive with `Settings::compactor_options`. Setting both
-    /// will result in an error.
+    /// Setting a [`CompactorBuilder`] will ignore any previous
+    /// [`Settings::compactor_options`] configuration passed in through
+    /// [`DbBuilder::with_settings`] since the [`CompactorBuilder`] provides its own
+    /// configuration.
     pub fn with_compactor_builder(mut self, compactor_builder: CompactorBuilder<P>) -> Self {
         self.compactor_builder = Some(compactor_builder.into_path_builder());
         self
