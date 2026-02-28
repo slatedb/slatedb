@@ -106,6 +106,7 @@ use std::sync::Arc;
 
 use fail_parallel::FailPointRegistry;
 use log::info;
+use log::warn;
 use object_store::path::Path;
 use object_store::ObjectStore;
 use tokio::runtime::Handle;
@@ -200,6 +201,9 @@ impl<P: Into<Path>> DbBuilder<P> {
 
     /// Sets the database settings.
     pub fn with_settings(mut self, settings: Settings) -> Self {
+        if self.compactor_builder.is_some() && settings.compactor_options.is_some() {
+            warn!("compactor_builder and settings.compactor_options both set; compactor_builder will take precedence");
+        }
         self.settings = settings;
         self
     }
@@ -244,8 +248,10 @@ impl<P: Into<Path>> DbBuilder<P> {
 
     /// Sets a custom CompactorBuilder for compaction orchestration.
     ///
-    /// Mutually exclusive with `Settings::compactor_options`. Setting both
-    /// will result in an error.
+    /// Setting a [`CompactorBuilder`] will ignore any previous
+    /// [`Settings::compactor_options`] configuration passed in through
+    /// [`DbBuilder::with_settings`] since the [`CompactorBuilder`] provides its own
+    /// configuration.
     pub fn with_compactor_builder(mut self, compactor_builder: CompactorBuilder<P>) -> Self {
         self.compactor_builder = Some(compactor_builder.into_path_builder());
         self
@@ -528,13 +534,6 @@ impl<P: Into<Path>> DbBuilder<P> {
             self.fp_registry.clone(),
             None,
         ));
-
-        if self.compactor_builder.is_some() && self.settings.compactor_options.is_some() {
-            return Err(SlateDBError::InvalidCompactorOptions(
-                "cannot set both compactor_builder and compactor_options".into(),
-            )
-            .into());
-        }
 
         let compactor_builder = self.compactor_builder.or_else(|| {
             self.settings.compactor_options.as_ref().map(|opts| {

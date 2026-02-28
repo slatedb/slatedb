@@ -75,9 +75,6 @@ pub(crate) enum SlateDBError {
     #[error("invalid compaction")]
     InvalidCompaction,
 
-    #[error("invalid compactor options: {0}")]
-    InvalidCompactorOptions(String),
-
     #[error("compaction executor failed")]
     CompactionExecutorFailed,
 
@@ -516,7 +513,6 @@ impl From<SlateDBError> for Error {
             SlateDBError::IdenticalClonePaths { .. } => Error::invalid(msg),
             SlateDBError::WalDisabled => Error::invalid(msg),
             SlateDBError::InvalidCompaction => Error::invalid(msg),
-            SlateDBError::InvalidCompactorOptions(_) => Error::invalid(msg),
             SlateDBError::InvalidClockTick { .. } => Error::invalid(msg),
             SlateDBError::InvalidDeletion => Error::invalid(msg),
             SlateDBError::MergeOperatorError(err) => Error::invalid(msg).with_source(Box::new(err)),
