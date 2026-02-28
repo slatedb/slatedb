@@ -8,7 +8,7 @@ import java.nio.charset.StandardCharsets;
 class SlateDbScanIteratorTest {
     @Test
     void seekWithinBufferedRange() throws Exception {
-        TestSupport.ensureNativeReady();
+        TestSupport.ensureLoggingInitialized();
         TestSupport.DbContext context = TestSupport.createDbContext();
 
         int totalEntries = 100; // > 64 (DEFAULT_BATCH_SIZE)
@@ -62,7 +62,7 @@ class SlateDbScanIteratorTest {
 
     @Test
     void seekAcrossBatchBoundaries() throws Exception {
-        TestSupport.ensureNativeReady();
+        TestSupport.ensureLoggingInitialized();
         TestSupport.DbContext context = TestSupport.createDbContext();
 
         int totalEntries = 100; // > 64 (DEFAULT_BATCH_SIZE)
