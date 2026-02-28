@@ -1233,16 +1233,24 @@ impl From<SizeTieredCompactionSchedulerOptions> for HashMap<String, String> {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct GarbageCollectorOptions {
     /// Garbage collection options for the manifest directory.
+    ///
+    /// None means garbage collection is disabled for the manifest directory.
     pub manifest_options: Option<GarbageCollectorDirectoryOptions>,
 
     /// Garbage collection options for the WAL directory.
+    ///
+    /// None means garbage collection is disabled for the WAL directory.
     pub wal_options: Option<GarbageCollectorDirectoryOptions>,
 
     /// Garbage collection options for the compacted directory.
+    ///
+    /// None means garbage collection is disabled for the compacted directory.
     pub compacted_options: Option<GarbageCollectorDirectoryOptions>,
 
     /// Garbage collection options for the compactions directory, which
     /// contains compactor job state `.compactions` files.
+    ///
+    /// None means garbage collection is disabled for the compactions directory.
     pub compactions_options: Option<GarbageCollectorDirectoryOptions>,
 }
 
@@ -1255,6 +1263,10 @@ impl GarbageCollectorOptions {
     }
 }
 
+/// Default options for the garbage collector for a directory.
+///
+/// By default, the garbage collector will run every minute and deletes files
+/// that are at least 5 minutes old.
 impl Default for GarbageCollectorDirectoryOptions {
     fn default() -> Self {
         Self {
@@ -1267,8 +1279,12 @@ impl Default for GarbageCollectorDirectoryOptions {
 /// Garbage collector options for a directory.
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 pub struct GarbageCollectorDirectoryOptions {
-    /// The interval at which the garbage collector will run
-    /// in the background thread.
+    /// The interval at which the garbage collector will run in the background
+    /// thread.
+    ///
+    /// If set to None, recurring garbage collection will be disabled for the
+    /// directory, but one-time garbage collection can still be triggered
+    /// [`crate::garbage_collector::GarbageCollector::run_gc_once`].
     #[serde(deserialize_with = "deserialize_option_duration")]
     #[serde(serialize_with = "serialize_option_duration")]
     pub interval: Option<Duration>,
