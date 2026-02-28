@@ -214,7 +214,7 @@ class SlateDbTest {
 
     @Test
     void getRowReturnsMetadata() throws Exception {
-        TestSupport.ensureNativeReady();
+        TestSupport.ensureLoggingInitialized();
         final var context = TestSupport.createDbContext();
 
         final var key = "row-key".getBytes(StandardCharsets.UTF_8);
