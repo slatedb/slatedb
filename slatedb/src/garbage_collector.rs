@@ -190,7 +190,7 @@ impl GarbageCollector {
                 manifest_store.clone(),
                 table_store.clone(),
                 stats.clone(),
-                Some(wal_options),
+                wal_options,
             )
         });
         let compacted_gc_task = options.compacted_options.map(|compacted_options| {
@@ -199,22 +199,18 @@ impl GarbageCollector {
                 compactions_store.clone(),
                 table_store.clone(),
                 stats.clone(),
-                Some(compacted_options),
+                compacted_options,
             )
         });
         let compactions_gc_task = options.compactions_options.map(|compactions_options| {
             CompactionsGcTask::new(
                 compactions_store.clone(),
                 stats.clone(),
-                Some(compactions_options),
+                compactions_options,
             )
         });
         let manifest_gc_task = options.manifest_options.map(|manifest_options| {
-            ManifestGcTask::new(
-                manifest_store.clone(),
-                stats.clone(),
-                Some(manifest_options),
-            )
+            ManifestGcTask::new(manifest_store.clone(), stats.clone(), manifest_options)
         });
         Self {
             manifest_store,
