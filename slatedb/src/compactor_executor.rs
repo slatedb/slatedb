@@ -18,7 +18,7 @@ use crate::compactor::CompactorMessage::CompactionJobFinished;
 use crate::config::CompactorOptions;
 use crate::db_state::{SortedRun, SsTableHandle, SsTableId};
 use crate::error::SlateDBError;
-use crate::iter::{KeyValueIterator, TrackedKeyValueIterator};
+use crate::iter::{IterationOrder, RowEntryIterator, TrackedRowEntryIterator};
 use crate::manifest::store::{ManifestStore, StoredManifest};
 use crate::merge_iterator::MergeIterator;
 use crate::merge_operator::{
@@ -90,12 +90,12 @@ impl std::fmt::Debug for StartCompactionJobArgs {
 }
 
 /// Iterator adapter that can resume after a persisted compaction output SST.
-struct ResumingIterator<T: KeyValueIterator> {
+struct ResumingIterator<T: RowEntryIterator> {
     iterator: PeekingIterator<T>,
     start: Option<(Bytes, u64)>,
 }
 
-impl<T: KeyValueIterator> ResumingIterator<T> {
+impl<T: RowEntryIterator> ResumingIterator<T> {
     /// Create a new resuming iterator that wraps the provided iterator. The iterator
     /// must be initialized prior to calling this method.
     ///
@@ -133,7 +133,7 @@ impl<T: KeyValueIterator> ResumingIterator<T> {
                 if entry.seq < seq {
                     break;
                 }
-                resuming_iter.iterator.next_entry().await?;
+                resuming_iter.iterator.next().await?;
             }
         }
         Ok(resuming_iter)
@@ -147,13 +147,13 @@ impl<T: KeyValueIterator> ResumingIterator<T> {
 }
 
 #[async_trait::async_trait]
-impl<T: KeyValueIterator> KeyValueIterator for ResumingIterator<T> {
+impl<T: RowEntryIterator> RowEntryIterator for ResumingIterator<T> {
     async fn init(&mut self) -> Result<(), SlateDBError> {
         self.iterator.init().await
     }
 
-    async fn next_entry(&mut self) -> Result<Option<crate::types::RowEntry>, SlateDBError> {
-        self.iterator.next_entry().await
+    async fn next(&mut self) -> Result<Option<crate::types::RowEntry>, SlateDBError> {
+        self.iterator.next().await
     }
 
     async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
@@ -161,7 +161,7 @@ impl<T: KeyValueIterator> KeyValueIterator for ResumingIterator<T> {
     }
 }
 
-impl<T: TrackedKeyValueIterator> TrackedKeyValueIterator for ResumingIterator<T> {
+impl<T: TrackedRowEntryIterator> TrackedRowEntryIterator for ResumingIterator<T> {
     fn bytes_processed(&self) -> u64 {
         self.iterator.bytes_processed()
     }
@@ -260,7 +260,7 @@ impl TokioCompactionExecutorInner {
     async fn load_iterators<'a>(
         &self,
         job_args: &'a StartCompactionJobArgs,
-    ) -> Result<ResumingIterator<Box<dyn TrackedKeyValueIterator + 'a>>, SlateDBError> {
+    ) -> Result<ResumingIterator<Box<dyn TrackedRowEntryIterator + 'a>>, SlateDBError> {
         let resume_cursor = match job_args.output_ssts.last() {
             Some(output_sst) => {
                 last_written_key_and_seq(self.table_store.clone(), output_sst).await?
@@ -272,6 +272,7 @@ impl TokioCompactionExecutorInner {
             blocks_to_fetch: 256,
             cache_blocks: false, // don't clobber the cache
             eager_spawn: true,
+            order: IterationOrder::Ascending,
         };
 
         let max_parallel = compute_max_parallel(job_args.ssts.len(), &job_args.sorted_runs, 4);
@@ -296,7 +297,7 @@ impl TokioCompactionExecutorInner {
         let sr_merge_iter = MergeIterator::new(sr_iters)?.with_dedup(false);
 
         let merge_iter = MergeIterator::new([l0_merge_iter, sr_merge_iter])?.with_dedup(false);
-        let merge_iter: Box<dyn TrackedKeyValueIterator> =
+        let merge_iter: Box<dyn TrackedRowEntryIterator> =
             if let Some(merge_operator) = self.merge_operator.clone() {
                 Box::new(MergeOperatorIterator::new(
                     merge_operator,
@@ -335,12 +336,12 @@ impl TokioCompactionExecutorInner {
             };
             let filter = supplier.create_compaction_filter(&context).await?;
             let filter_iter = CompactionFilterIterator::new(retention_iter, filter);
-            let boxed: Box<dyn TrackedKeyValueIterator> = Box::new(filter_iter);
+            let boxed: Box<dyn TrackedRowEntryIterator> = Box::new(filter_iter);
             let resuming_iter = ResumingIterator::new(boxed, resume_cursor).await?;
             return Ok(resuming_iter);
         }
 
-        let boxed: Box<dyn TrackedKeyValueIterator> = Box::new(retention_iter);
+        let boxed: Box<dyn TrackedRowEntryIterator> = Box::new(retention_iter);
         let resuming_iter = ResumingIterator::new(boxed, resume_cursor).await?;
         Ok(resuming_iter)
     }
@@ -397,7 +398,7 @@ impl TokioCompactionExecutorInner {
             estimate_bytes_before_key(args.sorted_runs.as_slice(), k)
         });
 
-        while let Some(kv) = all_iter.next_entry().await? {
+        while let Some(kv) = all_iter.next().await? {
             let duration_since_last_report =
                 self.clock.now().signed_duration_since(last_progress_report);
             if duration_since_last_report > TimeDelta::seconds(1) {
@@ -1059,7 +1060,7 @@ mod tests {
         // after the persisted prefix and continuing in sorted order.
         let mut iter = executor.inner.load_iterators(&job_args).await.unwrap();
         let mut resumed_entries = Vec::new();
-        while let Some(entry) = iter.next_entry().await.unwrap() {
+        while let Some(entry) = iter.next().await.unwrap() {
             resumed_entries.push(entry);
         }
         assert_eq!(resumed_entries, expected_rows);
@@ -1230,7 +1231,7 @@ mod tests {
                     )
                     .unwrap();
                     iter.init().await.unwrap();
-                    while let Some(entry) = iter.next_entry().await.unwrap() {
+                    while let Some(entry) = iter.next().await.unwrap() {
                         expected_entries.push(entry);
                     }
                 }
@@ -1275,7 +1276,7 @@ mod tests {
                         )
                         .unwrap();
                         iter.init().await.unwrap();
-                        while let Some(entry) = iter.next_entry().await.unwrap() {
+                        while let Some(entry) = iter.next().await.unwrap() {
                             resumed_entries.push(entry);
                         }
                     }
@@ -1447,28 +1448,28 @@ mod tests {
         )
         .unwrap();
         iter.init().await.unwrap();
-        let next = iter.next_entry().await.unwrap().unwrap();
+        let next = iter.next().await.unwrap().unwrap();
         assert_eq!(next.key, Bytes::from(b"foo".as_slice()));
         assert_eq!(
             next.value,
             ValueDeletable::Merge(Bytes::from(b"3".as_slice()))
         );
         assert_eq!(next.seq, retention_min_seq_num + 2);
-        let next = iter.next_entry().await.unwrap().unwrap();
+        let next = iter.next().await.unwrap().unwrap();
         assert_eq!(next.key, Bytes::from(b"foo".as_slice()));
         assert_eq!(
             next.value,
             ValueDeletable::Merge(Bytes::from(b"2".as_slice()))
         );
         assert_eq!(next.seq, retention_min_seq_num + 1);
-        let next = iter.next_entry().await.unwrap().unwrap();
+        let next = iter.next().await.unwrap().unwrap();
         assert_eq!(next.key, Bytes::from(b"foo".as_slice()));
         assert_eq!(
             next.value,
             ValueDeletable::Merge(Bytes::from(b"01".as_slice()))
         );
         assert_eq!(next.seq, retention_min_seq_num);
-        assert!(iter.next_entry().await.unwrap().is_none());
+        assert!(iter.next().await.unwrap().is_none());
     }
 
     #[cfg(feature = "compaction_filters")]
@@ -1593,7 +1594,7 @@ mod tests {
         // drop:key1 and drop:key2 should be DROPPED (not present)
 
         // keep:key3 - unchanged (Keep decision)
-        let next = iter.next_entry().await.unwrap().unwrap();
+        let next = iter.next().await.unwrap().unwrap();
         assert_eq!(next.key, Bytes::from(b"keep:key3".as_slice()));
         assert_eq!(
             next.value,
@@ -1601,7 +1602,7 @@ mod tests {
         );
 
         // keep:key4 - unchanged (Keep decision)
-        let next = iter.next_entry().await.unwrap().unwrap();
+        let next = iter.next().await.unwrap().unwrap();
         assert_eq!(next.key, Bytes::from(b"keep:key4".as_slice()));
         assert_eq!(
             next.value,
@@ -1609,7 +1610,7 @@ mod tests {
         );
 
         // modify:key5 - value modified (Modify decision)
-        let next = iter.next_entry().await.unwrap().unwrap();
+        let next = iter.next().await.unwrap().unwrap();
         assert_eq!(next.key, Bytes::from(b"modify:key5".as_slice()));
         assert_eq!(
             next.value,
@@ -1617,7 +1618,7 @@ mod tests {
         );
 
         // modify:key6 - value modified (Modify decision)
-        let next = iter.next_entry().await.unwrap().unwrap();
+        let next = iter.next().await.unwrap().unwrap();
         assert_eq!(next.key, Bytes::from(b"modify:key6".as_slice()));
         assert_eq!(
             next.value,
@@ -1625,17 +1626,17 @@ mod tests {
         );
 
         // tombstone:key7 - converted to tombstone (Modify to Tombstone decision)
-        let next = iter.next_entry().await.unwrap().unwrap();
+        let next = iter.next().await.unwrap().unwrap();
         assert_eq!(next.key, Bytes::from(b"tombstone:key7".as_slice()));
         assert!(next.value.is_tombstone());
 
         // tombstone:key8 - converted to tombstone (Modify to Tombstone decision)
-        let next = iter.next_entry().await.unwrap().unwrap();
+        let next = iter.next().await.unwrap().unwrap();
         assert_eq!(next.key, Bytes::from(b"tombstone:key8".as_slice()));
         assert!(next.value.is_tombstone());
 
         // No more entries
-        assert!(iter.next_entry().await.unwrap().is_none());
+        assert!(iter.next().await.unwrap().is_none());
     }
 
     #[cfg(feature = "compaction_filters")]

@@ -5,8 +5,10 @@ use crate::config::{CheckpointOptions, DbReaderOptions, ReadOptions, ScanOptions
 use crate::db_read::DbRead;
 use crate::db_state::ManifestCore;
 use crate::db_stats::DbStats;
+use crate::db_status::ClosedResultWriter;
 use crate::dispatcher::{MessageFactory, MessageHandler, MessageHandlerExecutor};
 use crate::error::SlateDBError;
+use crate::iter::IterationOrder;
 use crate::manifest::store::{ManifestStore, StoredManifest};
 use crate::manifest::Manifest;
 use crate::mem_table::{ImmutableMemtable, KVTable};
@@ -18,7 +20,7 @@ use crate::sst_iter::SstIteratorOptions;
 use crate::stats::StatRegistry;
 use crate::store_provider::StoreProvider;
 use crate::tablestore::TableStore;
-use crate::utils::{IdGenerator, MonotonicSeq, WatchableOnceCell};
+use crate::utils::{IdGenerator, WatchableOnceCell};
 use crate::wal_replay::{WalReplayIterator, WalReplayOptions};
 use crate::{Checkpoint, DbIterator};
 use async_trait::async_trait;
@@ -56,7 +58,7 @@ struct DbReaderInner {
     user_checkpoint_id: Option<Uuid>,
     oracle: Arc<DbReaderOracle>,
     reader: Reader,
-    closed_result_watcher: WatchableOnceCell<Result<(), SlateDBError>>,
+    closed_result_watcher: ClosedResultWriter,
     rand: Arc<DbRand>,
 }
 
@@ -96,7 +98,7 @@ impl DbReaderInner {
         table_store: Arc<TableStore>,
         options: DbReaderOptions,
         checkpoint_id: Option<Uuid>,
-        closed_result_watcher: WatchableOnceCell<Result<(), SlateDBError>>,
+        closed_result_watcher: ClosedResultWriter,
         system_clock: Arc<dyn SystemClock>,
         rand: Arc<DbRand>,
     ) -> Result<Self, SlateDBError> {
@@ -129,9 +131,10 @@ impl DbReaderInner {
 
         // initial_state contains the last_committed_seq after WAL replay. in no-wal mode, we can simply fallback
         // to last_l0_seq.
-        let last_remote_persisted_seq = MonotonicSeq::new(initial_state.core().last_l0_seq);
-        last_remote_persisted_seq.store_if_greater(initial_state.last_remote_persisted_seq);
-        let oracle = Arc::new(DbReaderOracle::new(last_remote_persisted_seq));
+        let initial_durable_seq = initial_state
+            .last_remote_persisted_seq
+            .max(initial_state.core().last_l0_seq);
+        let oracle = Arc::new(DbReaderOracle::new(initial_durable_seq));
 
         let stat_registry = Arc::new(StatRegistry::new());
         let db_stats = DbStats::new(stat_registry.as_ref());
@@ -232,8 +235,7 @@ impl DbReaderInner {
     async fn reestablish_checkpoint(&self, checkpoint: Checkpoint) -> Result<(), SlateDBError> {
         let new_checkpoint_state = self.rebuild_checkpoint_state(checkpoint).await?;
         self.oracle
-            .last_remote_persisted_seq
-            .store_if_greater(new_checkpoint_state.last_remote_persisted_seq);
+            .advance_durable_seq(new_checkpoint_state.last_remote_persisted_seq);
         let mut write_guard = self.state.write();
         *write_guard = Arc::new(new_checkpoint_state);
         Ok(())
@@ -258,9 +260,7 @@ impl DbReaderInner {
             )
             .await?;
 
-            self.oracle
-                .last_remote_persisted_seq
-                .store(last_committed_seq);
+            self.oracle.advance_durable_seq(last_committed_seq);
             let mut write_guard = self.state.write();
             *write_guard = Arc::new(CheckpointState {
                 checkpoint: current_checkpoint.checkpoint.clone(),
@@ -403,6 +403,7 @@ impl DbReaderInner {
             blocks_to_fetch: 256,
             cache_blocks: true,
             eager_spawn: true,
+            order: IterationOrder::Ascending,
         };
 
         let replay_options = WalReplayOptions {
@@ -628,7 +629,7 @@ impl DbReader {
     ) -> Result<Self, SlateDBError> {
         Self::validate_options(&options)?;
 
-        let closed_result_watcher = WatchableOnceCell::new();
+        let closed_result_watcher = ClosedResultWriter::new(WatchableOnceCell::new());
         let task_executor =
             MessageHandlerExecutor::new(closed_result_watcher.clone(), system_clock.clone());
         let manifest_store = store_provider.manifest_store();

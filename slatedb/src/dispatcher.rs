@@ -119,6 +119,7 @@ use tokio::{runtime::Handle, sync::mpsc, task::JoinHandle};
 use tokio_util::{sync::CancellationToken, task::JoinMap};
 
 use crate::{
+    db_status::ClosedResultWriter,
     error::SlateDBError,
     utils::{panic_string, split_join_result, split_unwind_result, WatchableOnceCell},
 };
@@ -403,9 +404,10 @@ pub(crate) struct MessageHandlerExecutor {
     tokens: SkipMap<String, CancellationToken>,
     /// A map of (task name, results) for dispatchers that have returned.
     results: Arc<SkipMap<String, WatchableOnceCell<Result<(), SlateDBError>>>>,
-    /// A watchable cell that stores the final result of the database lifecycle.
-    /// Ok(()) indicates a clean shutdown; Err(e) indicates an error.
-    closed_result: WatchableOnceCell<Result<(), SlateDBError>>,
+    /// A wrapper that stores the final result of the database lifecycle and
+    /// auto-reports the close reason. Ok(()) indicates a clean shutdown; Err(e)
+    /// indicates an error.
+    closed_result: ClosedResultWriter,
     /// A system clock for time keeping.
     clock: Arc<dyn SystemClock>,
     /// A fail point registry for fail points.
@@ -418,16 +420,14 @@ impl MessageHandlerExecutor {
     ///
     /// ## Arguments
     ///
-    /// * `closed_result`: A [WatchableOnceCell] that stores the database close result.
+    /// * `closed_result`: A [ClosedResultWriter] that stores the database close result
+    ///   and auto-reports the close reason.
     /// * `clock`: A [SystemClock] to use for tickers and timekeeping.
     ///
     /// ## Returns
     ///
     /// The new [MessageHandlerExecutor].
-    pub(crate) fn new(
-        closed_result: WatchableOnceCell<Result<(), SlateDBError>>,
-        clock: Arc<dyn SystemClock>,
-    ) -> Self {
+    pub(crate) fn new(closed_result: ClosedResultWriter, clock: Arc<dyn SystemClock>) -> Self {
         Self {
             futures: Mutex::new(Some(vec![])),
             closed_result,
@@ -666,6 +666,7 @@ impl MessageHandlerExecutor {
 #[cfg(all(test, feature = "test-util"))]
 mod test {
     use super::{MessageDispatcher, MessageHandler};
+    use crate::db_status::ClosedResultWriter;
     use crate::dispatcher::{MessageFactory, MessageHandlerExecutor};
     use crate::error::SlateDBError;
     use crate::utils::WatchableOnceCell;
@@ -841,7 +842,7 @@ mod test {
         let (tx, rx) = mpsc::unbounded_channel();
         let clock = Arc::new(MockSystemClock::new());
         let handler = TestHandler::new(log.clone(), cleanup_called.clone(), clock.clone());
-        let closed_result = WatchableOnceCell::new();
+        let closed_result = ClosedResultWriter::new(WatchableOnceCell::new());
         let fp_registry = Arc::new(FailPointRegistry::default());
         let task_executor = MessageHandlerExecutor::new(closed_result.clone(), clock.clone())
             .with_fp_registry(fp_registry.clone());
@@ -1208,7 +1209,7 @@ mod test {
         let (tx, rx) = mpsc::unbounded_channel::<u8>();
         let clock = Arc::new(DefaultSystemClock::new());
         let handler = PanicHandler { cleanup_called };
-        let closed_result = WatchableOnceCell::new();
+        let closed_result = ClosedResultWriter::new(WatchableOnceCell::new());
         let task_executor = MessageHandlerExecutor::new(closed_result.clone(), clock.clone());
 
         // Spawn the panic task
@@ -1260,7 +1261,7 @@ mod test {
         drop(tx); // no messages needed
         let clock = Arc::new(DefaultSystemClock::new());
         let handler = TestHandler::new(log.clone(), cleanup_called.clone(), clock.clone());
-        let closed_result = WatchableOnceCell::new();
+        let closed_result = ClosedResultWriter::new(WatchableOnceCell::new());
         let fp_registry = Arc::new(FailPointRegistry::default());
         let task_executor = MessageHandlerExecutor::new(closed_result.clone(), clock.clone())
             .with_fp_registry(fp_registry.clone());

@@ -2,7 +2,7 @@ use crate::batch::WriteBatchIterator;
 use crate::bytes_range::BytesRange;
 use crate::error::SlateDBError;
 use crate::filter_iterator::FilterIterator;
-use crate::iter::{EmptyIterator, KeyValueIterator};
+use crate::iter::{EmptyIterator, RowEntryIterator};
 use crate::map_iter::MapIterator;
 use crate::merge_iterator::MergeIterator;
 use crate::merge_operator::{
@@ -92,17 +92,17 @@ impl DbIteratorRangeTracker {
 
 struct GetIterator {
     key: Bytes,
-    iters: Vec<Box<dyn KeyValueIterator + 'static>>,
+    iters: Vec<Box<dyn RowEntryIterator + 'static>>,
     idx: usize,
 }
 
 impl GetIterator {
     pub(crate) fn new(
         key: Bytes,
-        write_batch_iter: Box<dyn KeyValueIterator + 'static>,
-        mem_iters: impl IntoIterator<Item = Box<dyn KeyValueIterator + 'static>>,
-        l0_iters: impl IntoIterator<Item = Box<dyn KeyValueIterator + 'static>>,
-        sr_iters: impl IntoIterator<Item = Box<dyn KeyValueIterator + 'static>>,
+        write_batch_iter: Box<dyn RowEntryIterator + 'static>,
+        mem_iters: impl IntoIterator<Item = Box<dyn RowEntryIterator + 'static>>,
+        l0_iters: impl IntoIterator<Item = Box<dyn RowEntryIterator + 'static>>,
+        sr_iters: impl IntoIterator<Item = Box<dyn RowEntryIterator + 'static>>,
     ) -> Self {
         let iters = vec![write_batch_iter]
             .into_iter()
@@ -116,20 +116,20 @@ impl GetIterator {
 }
 
 #[async_trait]
-impl KeyValueIterator for GetIterator {
+impl RowEntryIterator for GetIterator {
     async fn init(&mut self) -> Result<(), SlateDBError> {
-        // GetIterator departs from the normal convention for KeyValueIterator
+        // GetIterator departs from the normal convention for RowEntryIterator
         // in that it lazily initializes the iterators only when necessary -
         // this is because it is used in a way that will early exit before all
         // iterators are used.
         Ok(())
     }
 
-    async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
+    async fn next(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
         while self.idx < self.iters.len() {
             // initialization is idempotent, so we can call it multiple times
             self.iters[self.idx].init().await?;
-            let result = self.iters[self.idx].next_entry().await?;
+            let result = self.iters[self.idx].next().await?;
             if let Some(entry) = result {
                 // Note: The Get iterator should not advance past tombstones, which is
                 // why we filter them out here. When a tombstone is encountered, we return None
@@ -164,15 +164,15 @@ impl KeyValueIterator for GetIterator {
 }
 
 struct ScanIterator {
-    delegate: Box<dyn KeyValueIterator + 'static>,
+    delegate: Box<dyn RowEntryIterator + 'static>,
 }
 
 impl ScanIterator {
     pub(crate) fn new(
-        write_batch_iter: Box<dyn KeyValueIterator + 'static>,
-        mem_iters: impl IntoIterator<Item = Box<dyn KeyValueIterator + 'static>>,
-        l0_iters: impl IntoIterator<Item = Box<dyn KeyValueIterator + 'static>>,
-        sr_iters: impl IntoIterator<Item = Box<dyn KeyValueIterator + 'static>>,
+        write_batch_iter: Box<dyn RowEntryIterator + 'static>,
+        mem_iters: impl IntoIterator<Item = Box<dyn RowEntryIterator + 'static>>,
+        l0_iters: impl IntoIterator<Item = Box<dyn RowEntryIterator + 'static>>,
+        sr_iters: impl IntoIterator<Item = Box<dyn RowEntryIterator + 'static>>,
     ) -> Result<Self, SlateDBError> {
         // wrap each in a merge iterator
         let iters = vec![
@@ -189,13 +189,13 @@ impl ScanIterator {
 }
 
 #[async_trait]
-impl KeyValueIterator for ScanIterator {
+impl RowEntryIterator for ScanIterator {
     async fn init(&mut self) -> Result<(), SlateDBError> {
         self.delegate.init().await
     }
 
-    async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
-        self.delegate.next_entry().await
+    async fn next(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
+        self.delegate.next().await
     }
 
     async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
@@ -205,7 +205,7 @@ impl KeyValueIterator for ScanIterator {
 
 pub struct DbIterator {
     range: BytesRange,
-    iter: Box<dyn KeyValueIterator + 'static>,
+    iter: Box<dyn RowEntryIterator + 'static>,
     invalidated_error: Option<SlateDBError>,
     last_key: Option<Bytes>,
     range_tracker: Option<Arc<DbIteratorRangeTracker>>,
@@ -215,9 +215,9 @@ impl DbIterator {
     pub(crate) async fn new(
         range: BytesRange,
         write_batch_iter: Option<WriteBatchIterator>,
-        mem_iters: impl IntoIterator<Item = Box<dyn KeyValueIterator + 'static>>,
-        l0_iters: impl IntoIterator<Item = Box<dyn KeyValueIterator + 'static>>,
-        sr_iters: impl IntoIterator<Item = Box<dyn KeyValueIterator + 'static>>,
+        mem_iters: impl IntoIterator<Item = Box<dyn RowEntryIterator + 'static>>,
+        l0_iters: impl IntoIterator<Item = Box<dyn RowEntryIterator + 'static>>,
+        sr_iters: impl IntoIterator<Item = Box<dyn RowEntryIterator + 'static>>,
         max_seq: Option<u64>,
         range_tracker: Option<Arc<DbIteratorRangeTracker>>,
         now: i64,
@@ -227,7 +227,7 @@ impl DbIterator {
         // writes made during the transaction. We do not need to apply the max_seq filter to them, because they do
         // not have an real committed sequence number yet.
         let write_batch_iter = write_batch_iter
-            .map(|iter| Box::new(iter) as Box<dyn KeyValueIterator + 'static>)
+            .map(|iter| Box::new(iter) as Box<dyn RowEntryIterator + 'static>)
             .unwrap_or_else(|| Box::new(EmptyIterator::new()));
 
         // Apply the max_seq filter to all the iterators. Please note that we should apply this filter BEFORE
@@ -250,13 +250,13 @@ impl DbIterator {
                 mem_iters,
                 l0_iters,
                 sr_iters,
-            )) as Box<dyn KeyValueIterator + 'static>,
+            )) as Box<dyn RowEntryIterator + 'static>,
             None => Box::new(ScanIterator::new(
                 write_batch_iter,
                 mem_iters,
                 l0_iters,
                 sr_iters,
-            )?) as Box<dyn KeyValueIterator + 'static>,
+            )?) as Box<dyn RowEntryIterator + 'static>,
         };
 
         if let Some(merge_operator) = merge_operator {
@@ -295,36 +295,44 @@ impl DbIterator {
     ///
     /// Returns [`Error`] if the iterator has been invalidated due to an underlying error.
     pub async fn next(&mut self) -> Result<Option<KeyValue>, crate::Error> {
-        if let Some(error) = self.invalidated_error.clone() {
-            Err(error.into())
-        } else {
-            let result = self.iter.next().await;
-            let result = self.maybe_invalidate(result);
-            if let Ok(Some(ref kv)) = result {
-                self.last_key = Some(kv.key.clone());
-                // Track the key in range tracker if present
-                if let Some(tracker) = &self.range_tracker {
-                    tracker.track_key(&kv.key);
-                }
+        let entry_opt = self.next_row().await?;
+        match entry_opt {
+            Some(entry) => {
+                let val_bytes = entry.value.as_bytes().ok_or_else(|| {
+                    crate::Error::from(crate::error::SlateDBError::UnexpectedTombstone)
+                })?;
+                Ok(Some(KeyValue {
+                    key: entry.key,
+                    value: val_bytes,
+                }))
             }
-            result.map_err(Into::into)
+            None => Ok(None),
         }
     }
 
-    /// Get the next raw entry.
-    ///
-    /// Unlike [`Self::next`], this method returns the full [`RowEntry`] struct, which includes
-    /// metadata such as the sequence number, creation timestamp, and expiration timestamp.
-    /// It does not automatically filter out tombstones.
+    /// Get the next row in the scan.
     ///
     /// # Errors
     ///
     /// Returns [`Error`] if the iterator has been invalidated due to an underlying error.
     pub async fn next_row(&mut self) -> Result<Option<RowEntry>, crate::Error> {
+        self.next_row_internal().await.map_err(Into::into)
+    }
+
+    pub(crate) async fn next_row_internal(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
         if let Some(error) = self.invalidated_error.clone() {
-            Err(error.into())
+            Err(error)
         } else {
-            let result = self.iter.next_entry().await;
+            let result = loop {
+                match self.iter.next().await {
+                    Ok(Some(entry)) => match entry.value {
+                        ValueDeletable::Tombstone => continue,
+                        _ => break Ok(Some(entry)),
+                    },
+                    Ok(None) => break Ok(None),
+                    Err(e) => break Err(e),
+                }
+            };
             let result = self.maybe_invalidate(result);
             if let Ok(Some(ref entry)) = result {
                 self.last_key = Some(entry.key.clone());
@@ -333,7 +341,7 @@ impl DbIterator {
                     tracker.track_key(&entry.key);
                 }
             }
-            result.map_err(Into::into)
+            result
         }
     }
 
@@ -390,16 +398,16 @@ pub(crate) fn apply_filters<T>(
     iters: impl IntoIterator<Item = T>,
     max_seq: Option<u64>,
     now: i64,
-) -> Vec<Box<dyn KeyValueIterator>>
+) -> Vec<Box<dyn RowEntryIterator>>
 where
-    T: KeyValueIterator + 'static,
+    T: RowEntryIterator + 'static,
 {
     iters
         .into_iter()
         .map(|iter| FilterIterator::new_with_max_seq(iter, max_seq))
         .map(|iter| MapIterator::new_with_ttl_now(iter, now))
-        .map(|iter| Box::new(iter) as Box<dyn KeyValueIterator + 'static>)
-        .collect::<Vec<Box<dyn KeyValueIterator>>>()
+        .map(|iter| Box::new(iter) as Box<dyn RowEntryIterator + 'static>)
+        .collect::<Vec<Box<dyn RowEntryIterator>>>()
 }
 
 #[cfg(test)]
@@ -408,7 +416,7 @@ mod tests {
     use crate::bytes_range::BytesRange;
     use crate::db_iter::DbIterator;
     use crate::error::SlateDBError;
-    use crate::iter::{IterationOrder, KeyValueIterator};
+    use crate::iter::{IterationOrder, RowEntryIterator};
     use crate::test_utils::TestIterator;
     use crate::types::RowEntry;
     use bytes::Bytes;
@@ -416,7 +424,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_invalidated_iterator() {
-        let mem_iters: VecDeque<Box<dyn KeyValueIterator + 'static>> = VecDeque::new();
+        let mem_iters: VecDeque<Box<dyn RowEntryIterator + 'static>> = VecDeque::new();
         let mut iter = DbIterator::new(
             BytesRange::from(..),
             None,
@@ -460,8 +468,8 @@ mod tests {
             BytesRange::from(..),
             None,
             vec![
-                Box::new(mem_iter1) as Box<dyn KeyValueIterator + 'static>,
-                Box::new(mem_iter2) as Box<dyn KeyValueIterator + 'static>,
+                Box::new(mem_iter1) as Box<dyn RowEntryIterator + 'static>,
+                Box::new(mem_iter2) as Box<dyn RowEntryIterator + 'static>,
             ],
             VecDeque::new(),
             VecDeque::new(),
@@ -494,7 +502,7 @@ mod tests {
         let mut iter = DbIterator::new(
             BytesRange::from(..),
             None,
-            vec![Box::new(mem_iter) as Box<dyn KeyValueIterator + 'static>],
+            vec![Box::new(mem_iter) as Box<dyn RowEntryIterator + 'static>],
             VecDeque::new(),
             VecDeque::new(),
             None,
@@ -540,7 +548,7 @@ mod tests {
         let wb_iter = WriteBatchIterator::new(batch.clone(), .., IterationOrder::Ascending);
 
         // Create DbIterator with WriteBatch
-        let mem_iters: VecDeque<Box<dyn KeyValueIterator + 'static>> = VecDeque::new();
+        let mem_iters: VecDeque<Box<dyn RowEntryIterator + 'static>> = VecDeque::new();
         let mut iter = DbIterator::new(
             BytesRange::from(..),
             Some(wb_iter),
@@ -593,7 +601,7 @@ mod tests {
         let mut iter = DbIterator::new(
             BytesRange::from(..),
             None,
-            vec![Box::new(mem_iter) as Box<dyn KeyValueIterator + 'static>],
+            vec![Box::new(mem_iter) as Box<dyn RowEntryIterator + 'static>],
             VecDeque::new(),
             VecDeque::new(),
             None,
@@ -639,7 +647,7 @@ mod tests {
         let mut iter = DbIterator::new(
             BytesRange::from(..),
             None,
-            vec![Box::new(mem_iter) as Box<dyn KeyValueIterator + 'static>],
+            vec![Box::new(mem_iter) as Box<dyn RowEntryIterator + 'static>],
             VecDeque::new(),
             VecDeque::new(),
             None,
@@ -681,7 +689,7 @@ mod tests {
         let mut iter = DbIterator::new(
             BytesRange::from(..),
             None,
-            vec![Box::new(mem_iter) as Box<dyn KeyValueIterator + 'static>],
+            vec![Box::new(mem_iter) as Box<dyn RowEntryIterator + 'static>],
             VecDeque::new(),
             VecDeque::new(),
             None,
@@ -719,7 +727,7 @@ mod tests {
         let mut iter = DbIterator::new(
             BytesRange::from(..),
             None,
-            vec![Box::new(mem_iter) as Box<dyn KeyValueIterator + 'static>],
+            vec![Box::new(mem_iter) as Box<dyn RowEntryIterator + 'static>],
             VecDeque::new(),
             VecDeque::new(),
             None,
@@ -761,7 +769,7 @@ mod tests {
         let mut iter = DbIterator::new(
             BytesRange::from(..),
             None,
-            vec![Box::new(mem_iter) as Box<dyn KeyValueIterator + 'static>],
+            vec![Box::new(mem_iter) as Box<dyn RowEntryIterator + 'static>],
             VecDeque::new(),
             VecDeque::new(),
             None,
@@ -792,7 +800,7 @@ mod tests {
         let mut iter = DbIterator::new(
             BytesRange::from(..),
             None,
-            vec![Box::new(mem_iter) as Box<dyn KeyValueIterator + 'static>],
+            vec![Box::new(mem_iter) as Box<dyn RowEntryIterator + 'static>],
             VecDeque::new(),
             VecDeque::new(),
             None,

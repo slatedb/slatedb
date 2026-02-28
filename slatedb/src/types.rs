@@ -147,6 +147,19 @@ impl RowEntry {
     }
 }
 
+#[cfg(test)]
+impl From<RowEntry> for KeyValue {
+    fn from(entry: RowEntry) -> Self {
+        KeyValue {
+            key: entry.key,
+            value: entry
+                .value
+                .as_bytes()
+                .expect("RowEntry should have a value"),
+        }
+    }
+}
+
 /// The metadata associated with a `KeyValueDeletable`
 /// TODO: can be removed
 #[cfg(test)]

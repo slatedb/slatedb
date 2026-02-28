@@ -16,7 +16,7 @@ import java.nio.file.Path;
 class SlateDbTest {
     @Test
     void openPutGetClose() throws Exception {
-        TestSupport.ensureNativeReady();
+        TestSupport.ensureLoggingInitialized();
         TestSupport.DbContext context = TestSupport.createDbContext();
 
         byte[] key = "smoke-key".getBytes(StandardCharsets.UTF_8);
@@ -35,7 +35,7 @@ class SlateDbTest {
 
     @Test
     void closeIsIdempotentAndGuardsMethods() throws Exception {
-        TestSupport.ensureNativeReady();
+        TestSupport.ensureLoggingInitialized();
         TestSupport.DbContext context = TestSupport.createDbContext();
 
         byte[] key = "close-key".getBytes(StandardCharsets.UTF_8);
@@ -53,7 +53,7 @@ class SlateDbTest {
 
     @Test
     void settingsFunctionsReturnJson() throws Exception {
-        TestSupport.ensureNativeReady();
+        TestSupport.ensureLoggingInitialized();
 
         String defaults = SlateDb.settingsDefault();
         Assertions.assertNotNull(defaults);
@@ -93,7 +93,7 @@ class SlateDbTest {
 
     @Test
     void builderCreatesDatabase() throws Exception {
-        TestSupport.ensureNativeReady();
+        TestSupport.ensureLoggingInitialized();
         TestSupport.DbContext context = TestSupport.createDbContext();
 
         String settingsJson = SlateDb.settingsDefault();
@@ -115,7 +115,7 @@ class SlateDbTest {
 
     @Test
     void builderInvalidUrlReportsNativeError() throws Exception {
-        TestSupport.ensureNativeReady();
+        TestSupport.ensureLoggingInitialized();
         TestSupport.DbContext context = TestSupport.createDbContext();
 
         SlateDbException failure = Assertions.assertThrows(
@@ -137,7 +137,7 @@ class SlateDbTest {
 
     @Test
     void builderWithInvalidSettingsJsonThrowsIllegalArgumentException() throws Exception {
-        TestSupport.ensureNativeReady();
+        TestSupport.ensureLoggingInitialized();
         TestSupport.DbContext context = TestSupport.createDbContext();
 
         try (SlateDb.Builder builder = SlateDb.builder(
@@ -156,7 +156,7 @@ class SlateDbTest {
 
     @Test
     void builderBuildFailureClosesBuilder() throws Exception {
-        TestSupport.ensureNativeReady();
+        TestSupport.ensureLoggingInitialized();
         TestSupport.DbContext context = TestSupport.createDbContext();
 
         Path cacheRootDir = Files.createTempDirectory("slatedb-java-cache");
@@ -188,7 +188,7 @@ class SlateDbTest {
 
     @Test
     void putGetDeleteWithOptionsAndMetrics() throws Exception {
-        TestSupport.ensureNativeReady();
+        TestSupport.ensureLoggingInitialized();
         final var context = TestSupport.createDbContext();
 
         final var key = "opts-key".getBytes(StandardCharsets.UTF_8);

@@ -9,6 +9,7 @@ use slatedb::config::GarbageCollectorOptions;
 use slatedb::config::SizeTieredCompactionSchedulerOptions;
 use slatedb::object_store::ObjectStore;
 use slatedb::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier;
+use slatedb::CompactorBuilder;
 use slatedb::Db;
 use slatedb::DbBuilder;
 use slatedb::DbRand;
@@ -76,12 +77,31 @@ pub async fn build_db(
 ) -> Db {
     let object_store = Arc::new(ClockedObjectStore::new(object_store, system_clock.clone()));
     let settings = build_settings(rand).await;
+    // Prevent scheduler from having a higher min compaction sources than L0 max SSTS.
+    // Otherwise, the compactor never runs and writers get blocked permanently.
+    let min_compaction_sources = rand.rng().random_range(4..10).min(settings.l0_max_ssts);
+    // Prevent scheduler from having a higher min compaction sources than max compaction sources.
+    let max_compaction_sources = 8.max(min_compaction_sources);
+    let scheduler_options = SizeTieredCompactionSchedulerOptions {
+        min_compaction_sources,
+        max_compaction_sources,
+        ..Default::default()
+    }
+    .into();
+    let compactor_options = CompactorOptions {
+        scheduler_options,
+        ..Default::default()
+    };
     let compaction_scheduler_supplier = Arc::new(SizeTieredCompactionSchedulerSupplier::new());
-    let mut builder = DbBuilder::new("test_db", object_store);
+    let mut builder = DbBuilder::new("test_db", object_store.clone());
     builder = builder.with_settings(settings);
     builder = builder.with_seed(rand.rng().random_range(0..u64::MAX));
     builder = builder.with_system_clock(system_clock.clone());
-    builder = builder.with_compaction_scheduler_supplier(compaction_scheduler_supplier);
+    builder = builder.with_compactor_builder(
+        CompactorBuilder::new("test_db", object_store)
+            .with_options(compactor_options)
+            .with_scheduler_supplier(compaction_scheduler_supplier),
+    );
     builder.build().await.unwrap()
 }
 
@@ -105,21 +125,6 @@ pub async fn build_settings(rand: &DbRand) -> Settings {
         } else {
             None
         };
-    // Prevent scheduler from having a higher min compaction sources than L0 max SSTS.
-    // Otherwise, the compactor never runs and writers get blocked permanently.
-    let min_compaction_sources = rng.random_range(4..10).min(l0_max_ssts);
-    // Prevent scheduler from having a higher min compaction sources than max compaction sources.
-    let max_compaction_sources = 8.max(min_compaction_sources);
-    let scheduler_options = SizeTieredCompactionSchedulerOptions {
-        min_compaction_sources,
-        max_compaction_sources,
-        ..Default::default()
-    }
-    .into();
-    let compactor_options = CompactorOptions {
-        scheduler_options,
-        ..Default::default()
-    };
 
     Settings {
         flush_interval: Some(flush_interval),
@@ -157,7 +162,7 @@ pub async fn build_settings(rand: &DbRand) -> Settings {
                 min_age: rng.random_range(Duration::from_millis(20)..Duration::from_secs(900)),
             }),
         }),
-        compactor_options: Some(compactor_options),
+        compactor_options: None,
         wal_enabled: rng.random_bool(0.5),
         ..Default::default()
     }

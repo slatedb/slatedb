@@ -230,8 +230,10 @@ mod tests {
     use crate::manifest::store::{ManifestStore, StoredManifest};
     use slatedb_common::clock::{DefaultSystemClock, SystemClock};
 
+    use super::Manifest;
     use crate::config::CheckpointOptions;
     use crate::db_state::{ManifestCore, SortedRun, SsTableHandle, SsTableId, SsTableInfo};
+    use crate::format::sst::SST_FORMAT_VERSION_LATEST;
     use crate::rand::DbRand;
     use bytes::Bytes;
     use object_store::memory::InMemory;
@@ -242,8 +244,6 @@ mod tests {
     use std::ops::{Bound, Range, RangeBounds};
     use std::sync::Arc;
     use ulid::Ulid;
-
-    use super::Manifest;
 
     #[tokio::test]
     async fn test_init_clone_manifest() {
@@ -556,6 +556,7 @@ mod tests {
         for entry in &manifest.l0 {
             core.l0.push_back(SsTableHandle::new_compacted(
                 sst_id_fn(entry.sst_alias),
+                SST_FORMAT_VERSION_LATEST,
                 SsTableInfo {
                     first_entry: Some(entry.first_entry.clone()),
                     ..SsTableInfo::default()
@@ -571,6 +572,7 @@ mod tests {
                     .map(|entry| {
                         SsTableHandle::new_compacted(
                             sst_id_fn(entry.sst_alias),
+                            SST_FORMAT_VERSION_LATEST,
                             SsTableInfo {
                                 first_entry: Some(entry.first_entry.clone()),
                                 ..SsTableInfo::default()

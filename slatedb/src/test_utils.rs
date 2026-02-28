@@ -5,7 +5,7 @@ use crate::config::{CompactorOptions, PutOptions, WriteOptions};
 use crate::db_state::{SortedRun, SsTableHandle, SsTableId};
 use crate::error::SlateDBError;
 use crate::format::row::SstRowCodecV0;
-use crate::iter::{IterationOrder, KeyValueIterator};
+use crate::iter::{IterationOrder, RowEntryIterator};
 use crate::tablestore::TableStore;
 use crate::types::{KeyValue, RowAttributes, RowEntry, ValueDeletable};
 use async_trait::async_trait;
@@ -34,33 +34,30 @@ use tracing_subscriber::EnvFilter;
 use ulid::Ulid;
 
 /// Asserts that the iterator returns the exact set of expected values in correct order.
-pub(crate) async fn assert_iterator<T: KeyValueIterator>(iterator: &mut T, entries: Vec<RowEntry>) {
+pub(crate) async fn assert_iterator<T: RowEntryIterator>(iterator: &mut T, entries: Vec<RowEntry>) {
     iterator
         .init()
         .await
         .expect("iterator init failed in assert_iterator");
     for expected_entry in entries.iter() {
-        assert_next_entry(iterator, expected_entry).await;
+        assert_next(iterator, expected_entry).await;
     }
     assert!(iterator
-        .next_entry()
+        .next()
         .await
-        .expect("iterator next_entry failed")
+        .expect("iterator next failed")
         .is_none());
 }
 
-pub(crate) async fn assert_next_entry<T: KeyValueIterator>(
-    iterator: &mut T,
-    expected_entry: &RowEntry,
-) {
+pub(crate) async fn assert_next<T: RowEntryIterator>(iterator: &mut T, expected_entry: &RowEntry) {
     iterator
         .init()
         .await
-        .expect("iterator init failed in assert_next_entry");
+        .expect("iterator init failed in assert_next");
     let actual_entry = iterator
-        .next_entry()
+        .next()
         .await
-        .expect("iterator next_entry failed")
+        .expect("iterator next failed")
         .expect("expected iterator to return a value");
     assert_eq!(actual_entry, expected_entry.clone())
 }
@@ -108,12 +105,12 @@ impl TestIterator {
 }
 
 #[async_trait]
-impl KeyValueIterator for TestIterator {
+impl RowEntryIterator for TestIterator {
     async fn init(&mut self) -> Result<(), SlateDBError> {
         Ok(())
     }
 
-    async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
+    async fn next(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
         self.entries.pop_front().map_or(Ok(None), |e| match e {
             Ok(kv) => Ok(Some(kv)),
             Err(err) => Err(err),
@@ -204,7 +201,7 @@ pub(crate) async fn assert_ranged_db_scan<T: RangeBounds<Bytes>>(
     }
 }
 
-pub(crate) async fn assert_ranged_kv_scan<T: KeyValueIterator>(
+pub(crate) async fn assert_ranged_kv_scan<T: RowEntryIterator>(
     table: &BTreeMap<Bytes, Bytes>,
     range: &BytesRange,
     ordering: IterationOrder,
@@ -217,7 +214,7 @@ pub(crate) async fn assert_ranged_kv_scan<T: KeyValueIterator>(
             IterationOrder::Ascending => expected.next(),
             IterationOrder::Descending => expected.next_back(),
         };
-        let actual_next = iter.next().await.unwrap();
+        let actual_next = iter.next().await.unwrap().map(KeyValue::from);
         if expected_next.is_none() && actual_next.is_none() {
             return;
         }

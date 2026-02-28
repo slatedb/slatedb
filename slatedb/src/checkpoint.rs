@@ -65,7 +65,7 @@ mod tests {
     use crate::db::Db;
     use crate::db_state::SsTableId;
     use crate::format::sst::SsTableFormat;
-    use crate::iter::KeyValueIterator;
+    use crate::iter::RowEntryIterator;
     use crate::manifest::store::ManifestStore;
     use crate::manifest::Manifest;
     use crate::object_stores::ObjectStores;
@@ -404,7 +404,11 @@ mod tests {
         .expect("Expected Some(iter) but got None");
 
         let sst_entry = sst_iter.next().await.unwrap().unwrap();
-        assert_eq!(*kv.1, sst_entry.value)
+        let val = match sst_entry.value {
+            crate::types::ValueDeletable::Value(v) => v,
+            _ => panic!("Expected a Value"),
+        };
+        assert_eq!(*kv.1, val)
     }
 
     #[tokio::test]

@@ -200,6 +200,91 @@ impl<'a> flatbuffers::Verifiable for CompressionFormat {
 
 impl flatbuffers::SimpleToVerifyInSlice for CompressionFormat {}
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
+pub const ENUM_MIN_SST_TYPE: i8 = 0;
+#[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
+pub const ENUM_MAX_SST_TYPE: i8 = 1;
+#[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
+#[allow(non_camel_case_types)]
+pub const ENUM_VALUES_SST_TYPE: [SstType; 2] = [
+  SstType::Compacted,
+  SstType::Wal,
+];
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+#[repr(transparent)]
+pub struct SstType(pub i8);
+#[allow(non_upper_case_globals)]
+impl SstType {
+  pub const Compacted: Self = Self(0);
+  pub const Wal: Self = Self(1);
+
+  pub const ENUM_MIN: i8 = 0;
+  pub const ENUM_MAX: i8 = 1;
+  pub const ENUM_VALUES: &'static [Self] = &[
+    Self::Compacted,
+    Self::Wal,
+  ];
+  /// Returns the variant's name or "" if unknown.
+  pub fn variant_name(self) -> Option<&'static str> {
+    match self {
+      Self::Compacted => Some("Compacted"),
+      Self::Wal => Some("Wal"),
+      _ => None,
+    }
+  }
+}
+impl core::fmt::Debug for SstType {
+  fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
+    if let Some(name) = self.variant_name() {
+      f.write_str(name)
+    } else {
+      f.write_fmt(format_args!("<UNKNOWN {:?}>", self.0))
+    }
+  }
+}
+impl<'a> flatbuffers::Follow<'a> for SstType {
+  type Inner = Self;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    let b = flatbuffers::read_scalar_at::<i8>(buf, loc);
+    Self(b)
+  }
+}
+
+impl flatbuffers::Push for SstType {
+    type Output = SstType;
+    #[inline]
+    unsafe fn push(&self, dst: &mut [u8], _written_len: usize) {
+        flatbuffers::emplace_scalar::<i8>(dst, self.0);
+    }
+}
+
+impl flatbuffers::EndianScalar for SstType {
+  type Scalar = i8;
+  #[inline]
+  fn to_little_endian(self) -> i8 {
+    self.0.to_le()
+  }
+  #[inline]
+  #[allow(clippy::wrong_self_convention)]
+  fn from_little_endian(v: i8) -> Self {
+    let b = i8::from_le(v);
+    Self(b)
+  }
+}
+
+impl<'a> flatbuffers::Verifiable for SstType {
+  #[inline]
+  fn run_verifier(
+    v: &mut flatbuffers::Verifier, pos: usize
+  ) -> Result<(), flatbuffers::InvalidFlatbuffer> {
+    use self::flatbuffers::Verifiable;
+    i8::run_verifier(v, pos)
+  }
+}
+
+impl flatbuffers::SimpleToVerifyInSlice for SstType {}
+#[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
 pub const ENUM_MIN_COMPACTION_SPEC: u8 = 0;
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
 pub const ENUM_MAX_COMPACTION_SPEC: u8 = 1;
@@ -950,6 +1035,8 @@ impl<'a> SsTableInfo<'a> {
   pub const VT_FILTER_OFFSET: flatbuffers::VOffsetT = 10;
   pub const VT_FILTER_LEN: flatbuffers::VOffsetT = 12;
   pub const VT_COMPRESSION_FORMAT: flatbuffers::VOffsetT = 14;
+  pub const VT_SST_TYPE: flatbuffers::VOffsetT = 16;
+  pub const VT_LAST_ENTRY: flatbuffers::VOffsetT = 18;
 
   #[inline]
   pub unsafe fn init_from_table(table: flatbuffers::Table<'a>) -> Self {
@@ -965,7 +1052,9 @@ impl<'a> SsTableInfo<'a> {
     builder.add_filter_offset(args.filter_offset);
     builder.add_index_len(args.index_len);
     builder.add_index_offset(args.index_offset);
+    if let Some(x) = args.last_entry { builder.add_last_entry(x); }
     if let Some(x) = args.first_entry { builder.add_first_entry(x); }
+    builder.add_sst_type(args.sst_type);
     builder.add_compression_format(args.compression_format);
     builder.finish()
   }
@@ -1013,6 +1102,20 @@ impl<'a> SsTableInfo<'a> {
     // which contains a valid value in this slot
     unsafe { self._tab.get::<CompressionFormat>(SsTableInfo::VT_COMPRESSION_FORMAT, Some(CompressionFormat::None)).unwrap()}
   }
+  #[inline]
+  pub fn sst_type(&self) -> SstType {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<SstType>(SsTableInfo::VT_SST_TYPE, Some(SstType::Compacted)).unwrap()}
+  }
+  #[inline]
+  pub fn last_entry(&self) -> Option<flatbuffers::Vector<'a, u8>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'a, u8>>>(SsTableInfo::VT_LAST_ENTRY, None)}
+  }
 }
 
 impl flatbuffers::Verifiable for SsTableInfo<'_> {
@@ -1028,6 +1131,8 @@ impl flatbuffers::Verifiable for SsTableInfo<'_> {
      .visit_field::<u64>("filter_offset", Self::VT_FILTER_OFFSET, false)?
      .visit_field::<u64>("filter_len", Self::VT_FILTER_LEN, false)?
      .visit_field::<CompressionFormat>("compression_format", Self::VT_COMPRESSION_FORMAT, false)?
+     .visit_field::<SstType>("sst_type", Self::VT_SST_TYPE, false)?
+     .visit_field::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'_, u8>>>("last_entry", Self::VT_LAST_ENTRY, false)?
      .finish();
     Ok(())
   }
@@ -1039,6 +1144,8 @@ pub struct SsTableInfoArgs<'a> {
     pub filter_offset: u64,
     pub filter_len: u64,
     pub compression_format: CompressionFormat,
+    pub sst_type: SstType,
+    pub last_entry: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, u8>>>,
 }
 impl<'a> Default for SsTableInfoArgs<'a> {
   #[inline]
@@ -1050,6 +1157,8 @@ impl<'a> Default for SsTableInfoArgs<'a> {
       filter_offset: 0,
       filter_len: 0,
       compression_format: CompressionFormat::None,
+      sst_type: SstType::Compacted,
+      last_entry: None,
     }
   }
 }
@@ -1084,6 +1193,14 @@ impl<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> SsTableInfoBuilder<'a, 'b, A> {
     self.fbb_.push_slot::<CompressionFormat>(SsTableInfo::VT_COMPRESSION_FORMAT, compression_format, CompressionFormat::None);
   }
   #[inline]
+  pub fn add_sst_type(&mut self, sst_type: SstType) {
+    self.fbb_.push_slot::<SstType>(SsTableInfo::VT_SST_TYPE, sst_type, SstType::Compacted);
+  }
+  #[inline]
+  pub fn add_last_entry(&mut self, last_entry: flatbuffers::WIPOffset<flatbuffers::Vector<'b , u8>>) {
+    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(SsTableInfo::VT_LAST_ENTRY, last_entry);
+  }
+  #[inline]
   pub fn new(_fbb: &'b mut flatbuffers::FlatBufferBuilder<'a, A>) -> SsTableInfoBuilder<'a, 'b, A> {
     let start = _fbb.start_table();
     SsTableInfoBuilder {
@@ -1107,6 +1224,8 @@ impl core::fmt::Debug for SsTableInfo<'_> {
       ds.field("filter_offset", &self.filter_offset());
       ds.field("filter_len", &self.filter_len());
       ds.field("compression_format", &self.compression_format());
+      ds.field("sst_type", &self.sst_type());
+      ds.field("last_entry", &self.last_entry());
       ds.finish()
   }
 }
@@ -1342,6 +1461,7 @@ impl<'a> CompactedSsTable<'a> {
   pub const VT_ID: flatbuffers::VOffsetT = 4;
   pub const VT_INFO: flatbuffers::VOffsetT = 6;
   pub const VT_VISIBLE_RANGE: flatbuffers::VOffsetT = 8;
+  pub const VT_FORMAT_VERSION: flatbuffers::VOffsetT = 10;
 
   #[inline]
   pub unsafe fn init_from_table(table: flatbuffers::Table<'a>) -> Self {
@@ -1356,6 +1476,7 @@ impl<'a> CompactedSsTable<'a> {
     if let Some(x) = args.visible_range { builder.add_visible_range(x); }
     if let Some(x) = args.info { builder.add_info(x); }
     if let Some(x) = args.id { builder.add_id(x); }
+    if let Some(x) = args.format_version { builder.add_format_version(x); }
     builder.finish()
   }
 
@@ -1381,6 +1502,13 @@ impl<'a> CompactedSsTable<'a> {
     // which contains a valid value in this slot
     unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<BytesRange>>(CompactedSsTable::VT_VISIBLE_RANGE, None)}
   }
+  #[inline]
+  pub fn format_version(&self) -> Option<u16> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u16>(CompactedSsTable::VT_FORMAT_VERSION, None)}
+  }
 }
 
 impl flatbuffers::Verifiable for CompactedSsTable<'_> {
@@ -1393,6 +1521,7 @@ impl flatbuffers::Verifiable for CompactedSsTable<'_> {
      .visit_field::<flatbuffers::ForwardsUOffset<Ulid>>("id", Self::VT_ID, true)?
      .visit_field::<flatbuffers::ForwardsUOffset<SsTableInfo>>("info", Self::VT_INFO, true)?
      .visit_field::<flatbuffers::ForwardsUOffset<BytesRange>>("visible_range", Self::VT_VISIBLE_RANGE, false)?
+     .visit_field::<u16>("format_version", Self::VT_FORMAT_VERSION, false)?
      .finish();
     Ok(())
   }
@@ -1401,6 +1530,7 @@ pub struct CompactedSsTableArgs<'a> {
     pub id: Option<flatbuffers::WIPOffset<Ulid<'a>>>,
     pub info: Option<flatbuffers::WIPOffset<SsTableInfo<'a>>>,
     pub visible_range: Option<flatbuffers::WIPOffset<BytesRange<'a>>>,
+    pub format_version: Option<u16>,
 }
 impl<'a> Default for CompactedSsTableArgs<'a> {
   #[inline]
@@ -1409,6 +1539,7 @@ impl<'a> Default for CompactedSsTableArgs<'a> {
       id: None, // required field
       info: None, // required field
       visible_range: None,
+      format_version: None,
     }
   }
 }
@@ -1429,6 +1560,10 @@ impl<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> CompactedSsTableBuilder<'a, 'b,
   #[inline]
   pub fn add_visible_range(&mut self, visible_range: flatbuffers::WIPOffset<BytesRange<'b >>) {
     self.fbb_.push_slot_always::<flatbuffers::WIPOffset<BytesRange>>(CompactedSsTable::VT_VISIBLE_RANGE, visible_range);
+  }
+  #[inline]
+  pub fn add_format_version(&mut self, format_version: u16) {
+    self.fbb_.push_slot_always::<u16>(CompactedSsTable::VT_FORMAT_VERSION, format_version);
   }
   #[inline]
   pub fn new(_fbb: &'b mut flatbuffers::FlatBufferBuilder<'a, A>) -> CompactedSsTableBuilder<'a, 'b, A> {
@@ -1453,6 +1588,7 @@ impl core::fmt::Debug for CompactedSsTable<'_> {
       ds.field("id", &self.id());
       ds.field("info", &self.info());
       ds.field("visible_range", &self.visible_range());
+      ds.field("format_version", &self.format_version());
       ds.finish()
   }
 }

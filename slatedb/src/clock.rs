@@ -18,7 +18,7 @@
 #![allow(clippy::disallowed_methods)]
 
 use crate::error::SlateDBError;
-use log::info;
+use log::debug;
 use slatedb_common::clock::SystemClock;
 use std::{
     cmp,
@@ -67,7 +67,7 @@ impl MonotonicClock {
                 next_tick: _,
             }) => {
                 let sync_millis = cmp::min(10_000, 2 * (last_tick - tick).unsigned_abs());
-                info!(
+                debug!(
                     "Clock tick {} is lagging behind the last known tick {}. \
                     Sleeping {}ms to potentially resolve skew before returning InvalidClockTick.",
                     tick, last_tick, sync_millis

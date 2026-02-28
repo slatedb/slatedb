@@ -12,7 +12,7 @@
 //! order. Iterating each file with [`WalFile::iterator`] yields [`RowEntry`]
 //! values in the order they are stored in that WAL SST.
 //!
-//! `WalFileIterator` intentionally exposes `next_entry`, not `next`. This keeps
+//! `WalFileIterator` intentionally exposes `next`, not `next`. This keeps
 //! the API at [`RowEntry`] level and preserves tombstones and merge rows exactly
 //! as written to the WAL.
 //!
@@ -57,7 +57,7 @@
 //!     let reader = WalReader::new(path, object_store);
 //!     for wal_file in reader.list(..).await? {
 //!         let mut iter = wal_file.iterator().await?;
-//!         while let Some(entry) = iter.next_entry().await? {
+//!         while let Some(entry) = iter.next().await? {
 //!             let _ = entry;
 //!         }
 //!     }
@@ -74,7 +74,7 @@ use object_store::ObjectStore;
 
 use crate::db_state::SsTableId;
 use crate::format::sst::SsTableFormat;
-use crate::iter::{EmptyIterator, KeyValueIterator};
+use crate::iter::{EmptyIterator, RowEntryIterator};
 use crate::object_stores::ObjectStores;
 use crate::sst_iter::{SstIterator, SstIteratorOptions};
 use crate::tablestore::TableStore;
@@ -82,19 +82,19 @@ use crate::types::RowEntry;
 
 /// Iterator over entries in a WAL file.
 pub struct WalFileIterator {
-    iter: Box<dyn KeyValueIterator + 'static>,
+    iter: Box<dyn RowEntryIterator + 'static>,
 }
 
 impl WalFileIterator {
-    /// Creates a new WAL file iterator from a boxed `KeyValueIterator`. The iterator
+    /// Creates a new WAL file iterator from a boxed `RowEntryIterator`. The iterator
     /// must be initialized before being passed in.
-    fn new(iter: Box<dyn KeyValueIterator + 'static>) -> Self {
+    fn new(iter: Box<dyn RowEntryIterator + 'static>) -> Self {
         Self { iter }
     }
 
     /// Returns the next entry in the WAL file.
-    pub async fn next_entry(&mut self) -> Result<Option<RowEntry>, crate::Error> {
-        self.iter.next_entry().await.map_err(Into::into)
+    pub async fn next(&mut self) -> Result<Option<RowEntry>, crate::Error> {
+        self.iter.next().await.map_err(Into::into)
     }
 }
 
@@ -159,8 +159,8 @@ impl WalFile {
         )
         .await
         {
-            Ok(Some(iter)) => Box::new(iter) as Box<dyn KeyValueIterator + 'static>,
-            Ok(None) => Box::new(EmptyIterator::new()) as Box<dyn KeyValueIterator + 'static>,
+            Ok(Some(iter)) => Box::new(iter) as Box<dyn RowEntryIterator + 'static>,
+            Ok(None) => Box::new(EmptyIterator::new()) as Box<dyn RowEntryIterator + 'static>,
             Err(err) => return Err(err.into()),
         };
         Ok(WalFileIterator::new(iter))
@@ -281,7 +281,7 @@ mod tests {
         let mut rows = Vec::new();
         for wal_file in wal_files {
             let mut iter = wal_file.iterator().await.unwrap();
-            while let Some(entry) = iter.next_entry().await.unwrap() {
+            while let Some(entry) = iter.next().await.unwrap() {
                 rows.push(entry);
             }
         }
@@ -328,7 +328,7 @@ mod tests {
         let mut rows = Vec::new();
         for wal_file in wal_files {
             let mut iter = wal_file.iterator().await.unwrap();
-            while let Some(entry) = iter.next_entry().await.unwrap() {
+            while let Some(entry) = iter.next().await.unwrap() {
                 rows.push(entry);
             }
         }
@@ -491,7 +491,7 @@ mod tests {
         let mut rows = Vec::new();
         for wal_file in wal_files {
             let mut iter = wal_file.iterator().await.unwrap();
-            while let Some(entry) = iter.next_entry().await.unwrap() {
+            while let Some(entry) = iter.next().await.unwrap() {
                 rows.push(entry);
             }
         }
@@ -527,7 +527,7 @@ mod tests {
         let mut rows = Vec::new();
         for wal_file in wal_files {
             let mut iter = wal_file.iterator().await.unwrap();
-            while let Some(entry) = iter.next_entry().await.unwrap() {
+            while let Some(entry) = iter.next().await.unwrap() {
                 rows.push(entry);
             }
         }

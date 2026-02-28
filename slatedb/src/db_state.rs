@@ -1,6 +1,7 @@
 use crate::bytes_range::BytesRange;
 use crate::checkpoint::Checkpoint;
 use crate::config::CompressionCodec;
+use crate::db_status::{ClosedResultWriter, DbStatusReporter};
 use crate::error::SlateDBError;
 use crate::manifest::Manifest;
 use crate::mem_table::{ImmutableMemtable, KVTable, WritableKVTable};
@@ -27,6 +28,9 @@ pub struct SsTableHandle {
     /// The unique identifier for this SSTable. The table can be either a WAL SST or a compacted SST.
     pub id: SsTableId,
 
+    /// The format version that this SSTable was serialized with.
+    pub(crate) format_version: u16,
+
     /// Metadata information about this SSTable.
     pub info: SsTableInfo,
 
@@ -50,16 +54,21 @@ impl Debug for SsTableHandle {
 }
 
 impl SsTableHandle {
-    pub(crate) fn new(id: SsTableId, info: SsTableInfo) -> Self {
+    pub(crate) fn new(id: SsTableId, format_version: u16, info: SsTableInfo) -> Self {
         let effective_range = match info.first_entry.clone() {
             Some(physical_first_entry) => {
-                BytesRange::new(Included(physical_first_entry), Unbounded)
+                let end_bound = match info.last_entry.clone() {
+                    Some(physical_last_entry) => Included(physical_last_entry),
+                    None => Unbounded,
+                };
+                BytesRange::new(Included(physical_first_entry), end_bound)
             }
             None => BytesRange::new_empty(),
         };
 
         SsTableHandle {
             id,
+            format_version,
             info,
             visible_range: None,
             effective_range,
@@ -68,12 +77,17 @@ impl SsTableHandle {
 
     pub(crate) fn new_compacted(
         id: SsTableId,
+        format_version: u16,
         info: SsTableInfo,
         visible_range: Option<BytesRange>,
     ) -> Self {
         let mut effective_range = match info.first_entry.clone() {
             Some(physical_first_entry) => {
-                BytesRange::new(Included(physical_first_entry), Unbounded)
+                let end_bound = match info.last_entry.clone() {
+                    Some(physical_last_entry) => Included(physical_last_entry),
+                    None => Unbounded,
+                };
+                BytesRange::new(Included(physical_first_entry), end_bound)
             }
             None => {
                 unreachable!("SST always has a first entry.")
@@ -90,6 +104,7 @@ impl SsTableHandle {
         }
         SsTableHandle {
             id,
+            format_version,
             info,
             visible_range,
             effective_range,
@@ -97,7 +112,12 @@ impl SsTableHandle {
     }
 
     pub(crate) fn with_visible_range(&self, visible_range: BytesRange) -> Self {
-        Self::new_compacted(self.id, self.info.clone(), Some(visible_range))
+        Self::new_compacted(
+            self.id,
+            self.format_version,
+            self.info.clone(),
+            Some(visible_range),
+        )
     }
 
     /// The range of keys that are visible to the user.
@@ -169,6 +189,9 @@ impl SsTableHandle {
         if let Some(visible_range) = &self.visible_range {
             return range.intersect(visible_range);
         }
+        if self.info.last_entry.is_some() {
+            return range.intersect(&self.effective_range);
+        }
         Some(range)
     }
 
@@ -224,6 +247,16 @@ impl Debug for SsTableId {
     }
 }
 
+/// The type of an SSTable, distinguishing between compacted and WAL SSTs.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize)]
+pub enum SstType {
+    /// A compacted SST (L0 or sorted run). This is the default for backwards compatibility.
+    #[default]
+    Compacted,
+    /// A WAL (Write-Ahead Log) SST.
+    Wal,
+}
+
 /// Metadata information about an SSTable. See [`crate::sst_builder::EncodedSsTableBuilder`] for
 /// more information on the format of the SSTable and its metadata.
 #[derive(Clone, Debug, PartialEq, Serialize, Default)]
@@ -232,6 +265,10 @@ pub struct SsTableInfo {
     /// The first entry is a key in an SST for compacted data
     /// and it is a sequence number in a WAL SST.
     pub first_entry: Option<Bytes>,
+    /// The last entry in the SSTable, if any.
+    /// The last entry is a key in an SST for compacted data.
+    /// Not set for WAL SSTs (keys are not sorted).
+    pub last_entry: Option<Bytes>,
     /// The offset of the index block within the SSTable file.
     pub index_offset: u64,
     /// The length of the index block within the SSTable file.
@@ -242,6 +279,8 @@ pub struct SsTableInfo {
     pub filter_len: u64,
     /// The compression codec used for the SSTable, if any.
     pub compression_codec: Option<CompressionCodec>,
+    /// The type of this SSTable.
+    pub sst_type: SstType,
 }
 
 pub(crate) trait SsTableInfoCodec: Send + Sync {
@@ -345,7 +384,7 @@ pub(crate) struct DbState {
     ///
     /// - `Ok(())` if the database was closed successfully.
     /// - `Err(e)` if the database was closed with an error.
-    closed_result: WatchableOnceCell<Result<(), SlateDBError>>,
+    closed_result: ClosedResultWriter,
 }
 
 // represents the state that is mutated by creating a new copy with the mutations
@@ -488,14 +527,17 @@ impl DbStateReader for DbStateView {
 }
 
 impl DbState {
-    pub(crate) fn new(manifest: DirtyObject<Manifest>) -> Self {
+    pub(crate) fn new(manifest: DirtyObject<Manifest>, status_reporter: DbStatusReporter) -> Self {
+        let closed_result = ClosedResultWriter::new(WatchableOnceCell::new()).with_on_close(
+            Arc::new(move |reason| status_reporter.report_closed(reason)),
+        );
         Self {
             memtable: WritableKVTable::new(),
             state: Arc::new(COWDbState {
                 imm_memtable: VecDeque::new(),
                 manifest,
             }),
-            closed_result: WatchableOnceCell::new(),
+            closed_result,
         }
     }
 
@@ -514,7 +556,7 @@ impl DbState {
         self.closed_result.reader()
     }
 
-    pub(crate) fn closed_result(&self) -> WatchableOnceCell<Result<(), SlateDBError>> {
+    pub(crate) fn closed_result(&self) -> ClosedResultWriter {
         self.closed_result.clone()
     }
 
@@ -647,7 +689,9 @@ impl WalIdStore for parking_lot::RwLock<DbState> {
 #[cfg(test)]
 mod tests {
     use crate::checkpoint::Checkpoint;
-    use crate::db_state::{DbState, SortedRun, SsTableHandle, SsTableId, SsTableInfo};
+    use crate::db_state::{DbState, SortedRun, SsTableHandle, SsTableId, SsTableInfo, SstType};
+    use crate::db_status::DbStatusReporter;
+    use crate::format::sst::SST_FORMAT_VERSION_LATEST;
     use crate::manifest::store::test_utils::new_dirty_manifest;
     use crate::proptest_util::arbitrary;
     use crate::test_utils;
@@ -662,7 +706,7 @@ mod tests {
     #[test]
     fn test_should_merge_db_state_with_new_checkpoints() {
         // given:
-        let mut db_state = DbState::new(new_dirty_manifest());
+        let mut db_state = DbState::new(new_dirty_manifest(), DbStatusReporter::new(0));
         // mimic an externally added checkpoint
         let mut updated_state = new_dirty_manifest();
         updated_state.value.core = db_state.state.core().clone();
@@ -689,7 +733,7 @@ mod tests {
     #[test]
     fn test_should_merge_db_state_with_l0s_up_to_last_compacted() {
         // given:
-        let mut db_state = DbState::new(new_dirty_manifest());
+        let mut db_state = DbState::new(new_dirty_manifest(), DbStatusReporter::new(0));
         add_l0s_to_dbstate(&mut db_state, 4);
         // mimic the compactor popping off l0s
         let mut compactor_state = new_dirty_manifest();
@@ -716,7 +760,7 @@ mod tests {
     #[test]
     fn test_should_merge_db_state_with_all_l0s_if_none_compacted() {
         // given:
-        let mut db_state = DbState::new(new_dirty_manifest());
+        let mut db_state = DbState::new(new_dirty_manifest(), DbStatusReporter::new(0));
         add_l0s_to_dbstate(&mut db_state, 4);
         let l0s = db_state.state.core().l0.clone();
 
@@ -736,8 +780,11 @@ mod tests {
                 .freeze_memtable(i as u64)
                 .expect("db in error state");
             let imm = db_state.state.imm_memtable.back().unwrap().clone();
-            let handle =
-                SsTableHandle::new(SsTableId::Compacted(ulid::Ulid::new()), dummy_info.clone());
+            let handle = SsTableHandle::new(
+                SsTableId::Compacted(ulid::Ulid::new()),
+                SST_FORMAT_VERSION_LATEST,
+                dummy_info.clone(),
+            );
             db_state.modify(|modifier| {
                 modifier.state.manifest.value.core.l0.push_front(handle);
                 modifier.state.manifest.value.core.replay_after_wal_id =
@@ -799,17 +846,19 @@ mod tests {
     fn create_compacted_sst_handle(first_entry: Option<Bytes>) -> SsTableHandle {
         let sst_info = create_sst_info(first_entry);
         let sst_id = SsTableId::Compacted(ulid::Ulid::new());
-        SsTableHandle::new(sst_id, sst_info)
+        SsTableHandle::new(sst_id, SST_FORMAT_VERSION_LATEST, sst_info)
     }
 
     fn create_sst_info(first_entry: Option<Bytes>) -> SsTableInfo {
         SsTableInfo {
             first_entry,
+            last_entry: None,
             index_offset: 0,
             index_len: 0,
             filter_offset: 0,
             filter_len: 0,
             compression_codec: None,
+            sst_type: SstType::default(),
         }
     }
 }

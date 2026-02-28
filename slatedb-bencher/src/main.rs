@@ -86,7 +86,7 @@ async fn exec_benchmark_db(path: Path, object_store: Arc<dyn ObjectStore>, args:
     let mut builder = Db::builder(path.clone(), object_store.clone()).with_settings(config);
 
     if let Some(memory_cache) = memory_cache {
-        builder = builder.with_memory_cache(memory_cache);
+        builder = builder.with_db_cache(memory_cache);
     }
 
     let db = Arc::new(builder.build().await.unwrap());
@@ -158,7 +158,7 @@ async fn exec_benchmark_transaction(
     let mut builder = Db::builder(path.clone(), object_store.clone()).with_settings(config);
 
     if let Some(memory_cache) = memory_cache {
-        builder = builder.with_memory_cache(memory_cache);
+        builder = builder.with_db_cache(memory_cache);
     }
 
     let db = Arc::new(builder.build().await.unwrap());

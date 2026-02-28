@@ -17,11 +17,12 @@ Table of Contents:
    * [Size and Cardinality Estimation](#size-and-cardinality-estimation)
       + [Coarse estimate — SST-level, no I/O beyond `manifest()`](#coarse-estimate-sst-level-no-io-beyond-manifest)
       + [Refined estimate — block-level for boundary SSTs](#refined-estimate-block-level-for-boundary-ssts)
+      + [Record counting — via per-block stats](#record-counting-via-per-block-stats)
       + [L0 handling](#l0-handling)
       + [Staleness and GC](#staleness-and-gc)
       + [Memtable contribution](#memtable-contribution)
    * [Implementation Phases](#implementation-phases)
-      + [Phase 1 - SST Stats Block](#phase-1-sst-stats-block)
+      + [Phase 1 - SST Format Changes](#phase-1-sst-format-changes)
       + [Phase 2 - `SstReader`, `SstFile`, and `Db::manifest()`](#phase-2-sstreader-sstfile-and-dbmanifest)
 - [Impact Analysis](#impact-analysis)
    * [Core API & Query Semantics](#core-api-query-semantics)
@@ -53,8 +54,8 @@ Authors:
 ## Summary
 
 This RFC proposes:
-1. Adding a per-SST stats block to the SST file format containing statistics (`num_puts`, `num_deletes`, `num_merges`, `raw_key_size`, `raw_val_size`).
-2. Exposing lower-level primitives — `DbReader::manifest()`, `SstReader`, and `SstFile` — that allow users to walk the manifest, open individual SSTs, and read per-SST stats and index data for size estimation. Memtable stats are exposed via the existing `StatRegistry` (accessible through `Db::metrics()`).
+1. Adding a per-SST stats block to the SST file format containing aggregate statistics (`num_puts`, `num_deletes`, `num_merges`, `raw_key_size`, `raw_val_size`) and per-block statistics (`block_stats`), enabling efficient record counting within key ranges.
+2. Exposing lower-level primitives — `DbReader::manifest()`, `SstReader`, and `SstFile` — that allow users to walk the manifest, open individual SSTs, and read per-SST stats and index data for size and cardinality estimation. Memtable stats are exposed via the existing `StatRegistry` (accessible through `Db::metrics()`).
 
 Rather than providing a single high-level `Db::metadata(range)` function, this approach exposes modular building blocks. Users call `db.manifest()` to discover which SSTs exist, then use `SstReader` to open and inspect individual SSTs. This makes SlateDB more composable and avoids coupling the estimation logic to a specific API shape.
 
@@ -69,11 +70,13 @@ Users want to understand data distribution and storage usage for specific key ra
 
 Currently there is no better way than to scan the whole range to get an estimate or approximation of the data size.
 
+Beyond size estimation, some workloads need to count records in a key range efficiently — for example, append-only logs computing consumption lag, query planners estimating `records_in_range()`, or systems deciding where to split data. Today this requires a full scan. Adding per-block record counts to the stats block enables block-level counting with at most two data block reads per boundary SST.
+
 An earlier revision of this RFC proposed high-level functions (`estimate_size_with_options` and `estimate_key_count`) with configuration options like `error_margin`, `include_memtables`, and `include_files`. However, different use cases demand different knobs — compressed vs uncompressed sizes, varying accuracy vs I/O tradeoffs, inclusion or exclusion of memtables, etc. Baking all of these into the API through configuration options risks making the interface rigid and opinionated. Instead, we expose lower-level building blocks so users can compute whatever they need. For example, a user interested in key counts can derive `num_puts + num_merges - num_deletes` from per-SST stats, while a user interested in on-disk size can sum `SsTableHandle::estimate_size()` across covering SSTs, and one needing finer accuracy can use `SstFile::index()` to estimate at block granularity.
 
 ## Goals
 
-- Add a per-SST stats block with key/value counts and sizes, referenced by `stats_offset`/`stats_len` in `SsTableInfo` and sst.fbs
+- Add a per-SST stats block with aggregate and per-block statistics, referenced by `stats_offset`/`stats_len` in `SsTableInfo` and sst.fbs
 - Expose `Db::manifest()` so users can discover SSTs covering a key range
 - Provide `SstReader` and `SstFile` for opening individual SSTs and reading their stats (as `SstStats`) and index data
 - Expose memtable stats as metrics via the existing `StatRegistry` / `Db::metrics()`
@@ -145,8 +148,9 @@ impl SstFile {
     /// Returns SsTableInfo from the metadata block.
     pub fn info(&self) -> &SsTableInfo;
 
-    /// Reads the stats block from object storage.
-    pub async fn stats(&self) -> Result<SstStats, crate::Error>;
+    /// Reads the stats block from object storage. Returns `None` for old
+    /// SSTs that were written before the stats block was added.
+    pub async fn stats(&self) -> Result<Option<SstStats>, crate::Error>;
 
     /// Returns `(block_offset, first_key)` pairs from the SST index block.
     pub async fn index(&self) -> Result<Vec<(u64, Bytes)>, crate::Error>;
@@ -160,6 +164,13 @@ pub struct SstStats {
     pub num_merges: u64,
     pub raw_key_size: u64,
     pub raw_val_size: u64,
+    pub block_stats: Vec<BlockStats>,
+}
+
+pub struct BlockStats {
+    pub num_puts: u16,
+    pub num_deletes: u16,
+    pub num_merges: u16,
 }
 ```
 
@@ -232,13 +243,19 @@ For cardinality: open each covering SST with `SstReader` and call `SstFile::stat
 
 #### Refined estimate — block-level for boundary SSTs
 
-Most SSTs returned by `tables_covering_range()` are fully contained within the query range — their stats apply directly. Only the first and last SST in each sorted run partially overlap. For these two boundary SSTs, call `sst_file.index()` to get the block index `[(offset, first_key), ...]`. Binary search for the range start key in the first boundary SST to find where the range begins; binary search for the range end key in the last boundary SST to find where it ends.
+Most SSTs returned by `tables_covering_range()` are fully contained within the query range — their stats apply directly. Only the first and last SST in each sorted run partially overlap. For these two boundary SSTs, call `sst_file.index()` to get the index `[(offset, first_key), ...]`. Binary search for the range start key in the first boundary SST to find where the range begins; binary search for the range end key in the last boundary SST to find where it ends.
 
 These offsets are compressed/stored sizes since the block index tracks on-disk offsets.
 
 For proportional stat scaling on boundary SSTs: compute `covered_fraction = covered_bytes / total_sst_stored_bytes` and scale `SstStats` fields proportionally (e.g. `estimated_puts = num_puts * covered_fraction`). This assumes uniform key distribution within the SST.
 
 There is existing related work in `estimate_bytes_before_key` (in `utils.rs`) that does SST-granularity estimation across sorted runs. The block-level approach here goes one level deeper within a single SST.
+
+#### Record counting — via per-block stats
+
+For each overlapping SST, call `sst_file.stats()` to get `SstStats` with its `block_stats` vector. Use `sst_file.index()` to binary search for the range start and end block indices. Interior blocks are counted by summing `num_puts + num_deletes + num_merges` per block from `block_stats`. For exact counts, read the two boundary blocks and count matching entries — at most 2 data block reads per SST. For approximate counts, include boundary blocks in full without reading them, overcounting by at most 2 blocks' worth of records per SST.
+
+Summing across SSTs may count duplicate keys across levels. This is exact for append-only workloads where keys are never overwritten. For general key-value workloads, it is an overestimate — a deduplicated count requires merge iteration.
 
 #### L0 handling
 
@@ -254,28 +271,34 @@ Add memtable stats from `db.metrics()` (`memtable_num_puts`, `memtable_raw_key_b
 
 ### Implementation Phases
 
-#### Phase 1 - SST Stats Block
+#### Phase 1 - SST Format Changes
 
-Add a stats block to the SST file format containing per-SST statistics. This follows the same pattern as the existing index and filter blocks — the SST metadata (`SsTableInfo` in `sst.fbs`) gains `stats_offset` and `stats_len` fields that point to the block's location within the file. Add an `SstStats` struct and a `read_stats` method to `TableStore`.
+**Stats block.** Add a stats block to the SST file format containing per-SST statistics. This follows the same pattern as the existing index and filter blocks — the SST metadata (`SsTableInfo` in `sst.fbs`) gains `stats_offset` and `stats_len` fields that point to the block's location within the file. Add an `SstStats` struct and a `read_stats` method to `TableStore`.
 
-The stats block contains the following fields:
-- `num_puts`
-- `num_deletes`
-- `num_merges`
-- `raw_key_size`
-- `raw_val_size`
+The stats block is a FlatBuffers-encoded `SstStats` table containing aggregate statistics and per-block statistics:
 
-```rust
-pub struct SstStats {
-    pub num_puts: u64,
-    pub num_deletes: u64,
-    pub num_merges: u64,
-    pub raw_key_size: u64,
-    pub raw_val_size: u64,
+```flatbuffers
+table SstStats {
+    num_puts: ulong;
+    num_deletes: ulong;
+    num_merges: ulong;
+    raw_key_size: ulong;
+    raw_val_size: ulong;
+    block_stats: [BlockStats];
+}
+
+table BlockStats {
+    num_puts: ushort;
+    num_deletes: ushort;
+    num_merges: ushort;
 }
 ```
 
-Since `SsTableInfo` is a FlatBuffers table, the new `stats_offset`/`stats_len` fields can be appended without breaking existing readers — missing fields return their default value (`0` for `ulong`). The `flatc --conform` CI check enforces that schema changes are purely additive. Old SSTs without a stats block will have `stats_offset = 0` and `stats_len = 0`, and `SstFile::stats()` returns zeros for these.
+The `block_stats` vector is parallel to the SST index — `block_stats[i]` corresponds to the `i`th `BlockMeta` entry. The builder tracks per-block counters for each record type and records the final counts when finishing each block. `BlockStats` is a FlatBuffers `table` (not `struct`) to allow adding fields in future without breaking compatibility.
+
+The total record count for an SST is `num_puts + num_deletes + num_merges`, derivable from the aggregate fields. The same breakdown at the block level enables finer-grained record counting for boundary SSTs (see "Record counting" in the estimation section).
+
+Since `SsTableInfo` is a FlatBuffers table, the new `stats_offset`/`stats_len` fields can be appended without breaking existing readers — missing fields return their default value (`0` for `ulong`). The `flatc --conform` CI check enforces that schema changes are purely additive. Old SSTs without a stats block will have `stats_offset = 0` and `stats_len = 0`, and `SstFile::stats()` returns `None` for these.
 
 This approach keeps `SsTableInfo` (and therefore the manifest) lean — only 16 bytes per SST are added rather than the full 40 bytes of stats. This matters for large DBs where manifest size is dominated by SST infos. The stats are read from the SST file on demand via `SstFile::stats()`.
 
@@ -284,7 +307,7 @@ This approach keeps `SsTableInfo` (and therefore the manifest) lean — only 16 
 #### Phase 2 - `SstReader`, `SstFile`, and `Db::manifest()`
 
 - **`SstReader`**: New public struct wrapping object store access for SSTs. Internally reuses `SsTableFormat::read_info` and `SsTableFormat::read_index`.
-- **`SstFile`**: New public struct returned by `SstReader::open()` or `SstReader::open_with_handle()`. Provides `info()` (returning `SsTableInfo`), `stats()` (reading the stats block), and `index()` (block-level offset/key pairs).
+- **`SstFile`**: New public struct returned by `SstReader::open()` or `SstReader::open_with_handle()`. Provides `info()` (returning `SsTableInfo`), `stats()` (reading the stats block with aggregate and per-block stats), and `index()` (block offset/key pairs).
 - **`SstFileMetadata`**: Change existing struct in `tablestore.rs` from `pub(crate)` to `pub`. Returned by `SstFile::metadata()`.
 - **`SortedRun::tables_covering_range()`**: Make `pub` (currently `pub(crate)`).
 - **`SsTableHandle::estimate_size()`**: Make `pub` (currently `pub(crate)`).
@@ -338,7 +361,7 @@ SlateDB features and components that this RFC interacts with. Check all that app
 - [x] Block cache - `SstFile::index()` may cache index blocks
 - [x] Object store cache - `SstFile::index()` reads index blocks from object storage
 - [x] Indexing (bloom filters, metadata) - Uses existing SST index blocks for `SstFile::index()`
-- [x] SST format or block format - Adds stats block to SST files and `stats_offset`/`stats_len` to `SsTableInfo`
+- [x] SST format or block format - Adds stats block (with per-block stats) to SST files and `stats_offset`/`stats_len` to `SsTableInfo`
 
 ### Ecosystem & Operations
 
@@ -351,7 +374,8 @@ SlateDB features and components that this RFC interacts with. Check all that app
 ### Performance & Cost
 
 SST stats block:
-- 16 bytes per SST added to `SsTableInfo` (`stats_offset` + `stats_len`). Stats block itself (~40 bytes) is stored in the SST file, not the manifest.
+- 16 bytes per SST added to `SsTableInfo` (`stats_offset` + `stats_len`). Stats block itself is stored in the SST file, not the manifest.
+- Stats block size scales with block count: ~40 bytes for aggregate fields plus ~14 bytes per block for `BlockStats` (FlatBuffers table overhead + 3 × `ushort`). For a 256 MB SST with 4 KB blocks (~65K blocks), the stats block is ~950 KB.
 
 `Db::manifest()`:
 - Clones in-memory state. No I/O. Cost proportional to number of SST handles in the manifest.
@@ -360,11 +384,11 @@ SST stats block:
 - One object store read per SST to load the metadata. `open_with_handle()` requires no I/O.
 
 `SstFile::stats()`:
-- One object store read per SST to load the stats block (~40 bytes). Skipped for old SSTs without a stats block.
+- One object store read per SST to load the stats block. Skipped for old SSTs without a stats block.
+- Record counting requires both stats (for `block_stats`) and index (for binary search on keys). Approximate count: stats + index reads. Exact count: + at most 2 data block reads per boundary SST.
 
 `SstFile::index()`:
-- One index block read per SST (~300-500KB for a 256MB SST), cacheable via the block cache.
-- Returns up to ~65K entries for a 256MB SST with 4KB blocks. Users should downsample if needed.
+- One index block read per SST, cacheable via the block cache. No changes to `BlockMeta` format.
 
 Memtable metrics via `Db::metrics()`:
 - No I/O. Reads atomic counters.
@@ -388,7 +412,7 @@ Memtable stats (`num_puts`, `num_deletes`, `num_merges`, `raw_key_bytes`, `raw_v
 
 ### Compatibility
 
-- `SsTableInfo` gets new `stats_offset`/`stats_len` fields in Phase 1. Old SSTs without a stats block will have these fields default to `0` (FlatBuffers default), and `SstFile::stats()` returns zeros.
+- `SsTableInfo` gets new `stats_offset`/`stats_len` fields in Phase 1. Old SSTs without a stats block will have these fields default to `0` (FlatBuffers default), and `SstFile::stats()` returns `None`.
 - New APIs are additive only
 - No breaking changes to existing APIs
 - Language bindings will need to expose new types and methods
@@ -396,12 +420,14 @@ Memtable stats (`num_puts`, `num_deletes`, `num_merges`, `raw_key_bytes`, `raw_v
 ## Testing
 
 Unit tests:
-- SST stats block encoding/decoding and backwards compatibility with old SSTs (missing stats block returns zeros)
+- SST stats block encoding/decoding and backwards compatibility with old SSTs (missing stats block returns `None`)
 - `stats_offset`/`stats_len` fields in `SsTableInfo` encoding/decoding
 - `SstReader::open()`: loading SST footer and constructing `SstFile`
 - `SstReader::open_with_handle()`: constructing `SstFile` from an existing `SsTableHandle`
 - `SstFile::stats()`: correct reading and population of `SstStats` from the stats block
 - `SstFile::index()`: returns correct `(offset, first_key)` pairs matching the SST's block index
+- `block_stats` vector: parallel to index, builder correctly tracks per-block put/delete/merge counts
+- Backward compatibility: old SSTs without stats return `None`
 - `Db::manifest()`: returns current manifest state with L0 and sorted runs
 - `SortedRun::tables_covering_range()`: full and partial range overlap detection
 - Memtable metrics: correct registration, increment on write, decrement on flush
@@ -438,6 +464,8 @@ The immediately preceding revision proposed a `Db::metadata(range)` API returnin
 
 Another alternative not explored is sample-based estimation: sample N random blocks and extrapolate key counts or compression ratios. This could complement the current approach but adds complexity.
 
+**Per-block record counts in `BlockMeta` (SST index) instead of `SstStats`.** An earlier revision stored per-block counts directly in the SST index (`BlockMeta`). This avoids needing a separate stats read for record counting, but inflates the index — which is on the hot path for every scan and get. Moving per-block counts to the stats block keeps the index lean and isolates the overhead to estimation use cases.
+
 ## Open Questions
 
 ## References
@@ -463,3 +491,4 @@ Another alternative not explored is sample-based estimation: sample N random blo
 - **2026-02-11**: Major revision — replaced `Db::metadata(range)` / `RangeMetadata` / `SizeEstimate` trait approach with lower-level primitives: `Db::manifest()`, `SstReader`, `SstFile` with `stats()` and `index()` methods. Removed `RangeMetadata`, `SstMetadata`, `MemtableMetadata`, `Coverage` enum, and `SizeEstimate` trait. Memtable stats now exposed via `StatRegistry` metrics instead of `MemtableMetadata` structs. Added "Size and Cardinality Estimation" section describing estimation algorithms at three levels of accuracy. (PR #1220 review feedback from @criccomini, Feb 9).
 - **2026-02-16**: Stats fields moved into `SsTableInfo` (in `sst.fbs`) instead of a separate footer block. Removed `SstStats` struct — `SstFile::info()` returns `SsTableInfo` directly. `SstFile` now holds `SsTableHandle` + `Arc<TableStore>`. Added `object_store_cache_options` parameter to `SstReader::new()`. (PR #1220 review feedback from @criccomini).
 - **2026-02-19**: Reverted to separate stats block approach. Stats fields moved back out of `SsTableInfo` into a dedicated stats block within the SST file, referenced by `stats_offset`/`stats_len` in `SsTableInfo`. Reintroduced `SstStats` struct and `SstFile::stats()` method. This keeps `SsTableInfo` (and the manifest) lean — 16 bytes per SST vs 40 bytes — which matters for large DBs. Added `SstReader::open_with_handle()` for zero-I/O construction from an existing `SsTableHandle`. (PR #1220 review feedback from @rodesai and @criccomini).
+- **2026-02-25**: Added per-block record counts as `block_stats: [BlockStats]` in `SstStats` (stats block). `BlockStats` contains `num_puts`/`num_deletes`/`num_merges`, mirroring the SST-level aggregate fields. `BlockStats` uses a FlatBuffers `table` for future extensibility.

@@ -4,7 +4,7 @@ use crate::clock::MonotonicClock;
 use crate::config::{DurabilityLevel, ReadOptions, ScanOptions};
 use crate::db_state::ManifestCore;
 use crate::db_stats::DbStats;
-use crate::iter::{IterationOrder, KeyValueIterator};
+use crate::iter::{IterationOrder, RowEntryIterator};
 use crate::mem_table::{ImmutableMemtable, KVTable};
 use crate::oracle::Oracle;
 use crate::sorted_run_iterator::SortedRunIterator;
@@ -28,9 +28,9 @@ pub(crate) trait DbStateReader {
 
 struct IteratorSources {
     write_batch_iter: Option<WriteBatchIterator>,
-    mem_iters: Vec<Box<dyn KeyValueIterator + 'static>>,
-    l0_iters: VecDeque<Box<dyn KeyValueIterator + 'static>>,
-    sr_iters: VecDeque<Box<dyn KeyValueIterator + 'static>>,
+    mem_iters: Vec<Box<dyn RowEntryIterator + 'static>>,
+    l0_iters: VecDeque<Box<dyn RowEntryIterator + 'static>>,
+    sr_iters: VecDeque<Box<dyn RowEntryIterator + 'static>>,
 }
 
 pub(crate) struct Reader {
@@ -103,7 +103,7 @@ impl Reader {
             .iter()
             .map(|table| {
                 Box::new(table.range_ascending(range.clone()))
-                    as Box<dyn KeyValueIterator + 'static>
+                    as Box<dyn RowEntryIterator + 'static>
             })
             .collect::<Vec<_>>();
 
@@ -148,7 +148,7 @@ impl Reader {
         db_state: &(dyn DbStateReader + Sync),
         sst_iter_options: SstIteratorOptions,
         db_stats: Option<DbStats>,
-    ) -> Result<VecDeque<Box<dyn KeyValueIterator + 'a>>, SlateDBError> {
+    ) -> Result<VecDeque<Box<dyn RowEntryIterator + 'a>>, SlateDBError> {
         let mut iters = VecDeque::new();
         for sst in &db_state.core().l0 {
             let iterator = SstIterator::new_owned_with_stats(
@@ -159,7 +159,7 @@ impl Reader {
                 db_stats.clone(),
             )?;
             if let Some(iterator) = iterator {
-                iters.push_back(Box::new(iterator) as Box<dyn KeyValueIterator + 'a>);
+                iters.push_back(Box::new(iterator) as Box<dyn RowEntryIterator + 'a>);
             }
         }
         Ok(iters)
@@ -172,7 +172,7 @@ impl Reader {
         db_state: &(dyn DbStateReader + Sync),
         sst_iter_options: SstIteratorOptions,
         db_stats: Option<DbStats>,
-    ) -> Result<VecDeque<Box<dyn KeyValueIterator + 'a>>, SlateDBError> {
+    ) -> Result<VecDeque<Box<dyn RowEntryIterator + 'a>>, SlateDBError> {
         let mut iters = VecDeque::new();
         for sr in &db_state.core().compacted {
             if let Some(handle) = sr.find_sst_with_range_covering_key(key.as_ref()) {
@@ -184,7 +184,7 @@ impl Reader {
                     db_stats.clone(),
                 )?;
                 if let Some(iterator) = iterator {
-                    iters.push_back(Box::new(iterator) as Box<dyn KeyValueIterator + 'a>);
+                    iters.push_back(Box::new(iterator) as Box<dyn RowEntryIterator + 'a>);
                 }
             }
         }
@@ -197,7 +197,7 @@ impl Reader {
         db_state: &(dyn DbStateReader + Sync),
         sst_iter_options: SstIteratorOptions,
         max_parallel: usize,
-    ) -> Result<VecDeque<Box<dyn KeyValueIterator + 'a>>, SlateDBError> {
+    ) -> Result<VecDeque<Box<dyn RowEntryIterator + 'a>>, SlateDBError> {
         let range_clone = range.clone();
         let table_store = self.table_store.clone();
         build_concurrent(
@@ -215,7 +215,7 @@ impl Reader {
                     )
                     .await
                     .map(|maybe_iter| {
-                        maybe_iter.map(|iter| Box::new(iter) as Box<dyn KeyValueIterator + 'a>)
+                        maybe_iter.map(|iter| Box::new(iter) as Box<dyn RowEntryIterator + 'a>)
                     })
                 }
             },
@@ -229,7 +229,7 @@ impl Reader {
         db_state: &(dyn DbStateReader + Sync),
         sst_iter_options: SstIteratorOptions,
         max_parallel: usize,
-    ) -> Result<VecDeque<Box<dyn KeyValueIterator + 'a>>, SlateDBError> {
+    ) -> Result<VecDeque<Box<dyn RowEntryIterator + 'a>>, SlateDBError> {
         let range_clone = range.clone();
         let table_store = self.table_store.clone();
         build_concurrent(
@@ -246,7 +246,7 @@ impl Reader {
                         sst_iter_options,
                     )
                     .await
-                    .map(|iter| Some(Box::new(iter) as Box<dyn KeyValueIterator + 'a>))
+                    .map(|iter| Some(Box::new(iter) as Box<dyn RowEntryIterator + 'a>))
                 }
             },
         )
@@ -324,13 +324,14 @@ impl Reader {
         )
         .await?;
 
-        if let Some(entry) = iterator
-            .next_row()
-            .await
-            .map_err(|e| SlateDBError::IoError(Arc::new(std::io::Error::other(e.to_string()))))?
-        {
+        if let Some(entry) = iterator.next_row_internal().await? {
             if entry.key == target_key {
-                return Ok(entry.value.as_bytes());
+                return Ok(Some(
+                    entry
+                        .value
+                        .as_bytes()
+                        .ok_or(SlateDBError::UnexpectedTombstone)?,
+                ));
             }
         }
 
@@ -378,6 +379,7 @@ impl Reader {
             blocks_to_fetch: read_ahead_blocks,
             cache_blocks: options.cache_blocks,
             eager_spawn: true,
+            order: IterationOrder::Ascending,
         };
 
         let IteratorSources {
@@ -1296,10 +1298,8 @@ mod tests {
         let mono_clock = Arc::new(MonotonicClock::new(test_clock as Arc<dyn SystemClock>, 0));
 
         // Create Oracle with appropriate last_committed_seq
-        let oracle = Arc::new(DbReaderOracle::new(crate::utils::MonotonicSeq::new(0)));
         let last_committed_seq = test_case.last_committed_seq.unwrap_or(u64::MAX);
-        // reader oracle uses last_remote_persisted_seq for all seq nums
-        oracle.last_remote_persisted_seq.store(last_committed_seq);
+        let oracle = Arc::new(DbReaderOracle::new(last_committed_seq));
 
         // Enable merge operator if the test description contains "[MERGE]"
         let merge_operator = if test_case.description.contains("[MERGE]") {
@@ -1766,10 +1766,8 @@ mod tests {
         let mono_clock = Arc::new(MonotonicClock::new(test_clock as Arc<dyn SystemClock>, 0));
 
         // Create Oracle with appropriate last_committed_seq
-        let oracle = Arc::new(DbReaderOracle::new(crate::utils::MonotonicSeq::new(0)));
         let last_committed_seq = test_case.last_committed_seq.unwrap_or(u64::MAX);
-        // reader oracle uses last_remote_persisted_seq for all seq nums
-        oracle.last_remote_persisted_seq.store(last_committed_seq);
+        let oracle = Arc::new(DbReaderOracle::new(last_committed_seq));
 
         // Enable merge operator if the test description contains "[MERGE"
         let merge_operator = if test_case.description.contains("[MERGE") {

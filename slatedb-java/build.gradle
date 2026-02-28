@@ -1,6 +1,28 @@
+// This build creates a Java library that contains generated FFI bindings and bundled
+// native SlateDB binaries. jextract reads ../slatedb-c/include/slatedb.h and generates
+// Java sources for the C API, using an automatically derived whitelist so generated
+// bindings stay aligned with the header.
+//
+// After generation, `patchJextractNativeLoader` rewrites the generated loader call
+// to use io.slatedb.NativeLibraryLoader.loadFromClasspath() instead of directly
+// calling System.loadLibrary(...).
+//
+// Native binaries are built from the Rust crate `slatedb-c` for the host platform.
+// When -Pslatedb.native.prebuiltDir is provided, the build stages prebuilt binaries
+// instead; in that mode, all supported platform IDs are expected from the prebuilt
+// directory. `prepareNativeLibraries` validates and stages artifacts under
+// build/generated/resources/slatedb-native/native/<platform-id>/.
+// These staged artifacts are then included in the final JAR.
+//
+// The main source set includes both the jextract output and these staged native files.
+// Task wiring ensures compileJava depends on patchJextractNativeLoader and
+// processResources depends on prepareNativeLibraries, so `build` and `test` always run
+// with patched bindings and packaged native libraries available from the classpath.
+
 plugins {
     id 'java-library'
     id 'de.infolektuell.jextract' version '1.2.0'
+    id 'com.vanniktech.maven.publish' version '0.34.0'
 }
 
 // ==============================================================================
@@ -22,8 +44,8 @@ def slatedbIncludeFunctions = ((slatedbHeaderText =~ /(?m)^(?!\s*(?:\/\/|\/\*|\*
 def slatedbIncludeConstants = ((slatedbHeaderText =~ /(?m)^\s*#define\s+(SLATEDB_[A-Z0-9_]+)\b/).collect { it[1] } as Set).toList().sort()
 // Captures named struct types declared as `typedef struct slatedb_* { ... }`.
 def slatedbIncludeStructs = ((slatedbHeaderText =~ /(?m)^\s*typedef\s+struct\s+(slatedb_[A-Za-z0-9_]+)\s*\{/).collect { it[1] } as Set).toList().sort()
-// Captures `slatedb_*` typedef names, including function-pointer typedef aliases.
-def slatedbIncludeTypedefs = ((slatedbHeaderText =~ /(?ms)^\s*typedef\b.*?(?:\(\*\s*)?(slatedb_[A-Za-z0-9_]+)\s*\)?\s*;/).collect { it[1] } as Set).toList().sort()
+// Captures `slatedb_*` typedef names, including callback typedefs declared as `(*name)(...)`.
+def slatedbIncludeTypedefs = ((slatedbHeaderText =~ /(?ms)^\s*typedef\b.*?(?:\(\*\s*)?(slatedb_[A-Za-z0-9_]+)\s*\)?(?:\s*\([^;]*\))?\s*;/).collect { it[1] } as Set).toList().sort()
 
 def slatedbJextractLibrary = jextract.libraries.create('slatedb') {
     header = slatedbHeader
@@ -44,8 +66,21 @@ def slatedbJextractLibrary = jextract.libraries.create('slatedb') {
 // Standard Java library configuration below.
 // ==============================================================================
 
+def repoRoot = layout.projectDirectory.dir('..').asFile.absoluteFile
+def workspaceCargoToml = new File(repoRoot, 'Cargo.toml')
+if (!workspaceCargoToml.isFile()) {
+    throw new GradleException("Expected workspace Cargo.toml at ${workspaceCargoToml}")
+}
+def workspaceCargoTomlText = workspaceCargoToml.getText('UTF-8')
+def workspaceVersionMatcher = (workspaceCargoTomlText =~ /(?ms)^\[workspace\.package\].*?^\s*version\s*=\s*"([^"]+)"\s*$/)
+if (!workspaceVersionMatcher.find()) {
+    throw new GradleException("Unable to determine workspace version from ${workspaceCargoToml}")
+}
+def workspaceVersion = workspaceVersionMatcher.group(1)
+def configuredVersion = (findProperty('slatedb.version') ?: '').toString().trim()
+
 group = 'io.slatedb'
-version = '0.1.0-SNAPSHOT'
+version = configuredVersion ?: workspaceVersion
 
 def minimumJava = 24
 def currentJava = JavaVersion.current()
@@ -59,6 +94,8 @@ java {
     }
     sourceCompatibility = JavaVersion.toVersion(minimumJava)
     targetCompatibility = JavaVersion.toVersion(minimumJava)
+    withSourcesJar()
+    withJavadocJar()
 }
 
 tasks.withType(JavaCompile).configureEach {
@@ -69,10 +106,165 @@ repositories {
     mavenCentral()
 }
 
+// ==============================================================================
+// Bundle native libraries from slatedb-c as resources in the JAR
+// ==============================================================================
+
+def nativePlatforms = [
+    [id: 'linux-x86_64', rustTarget: 'x86_64-unknown-linux-gnu', libraryFile: 'libslatedb_c.so'],
+    [id: 'linux-aarch64', rustTarget: 'aarch64-unknown-linux-gnu', libraryFile: 'libslatedb_c.so'],
+    [id: 'macos-x86_64', rustTarget: 'x86_64-apple-darwin', libraryFile: 'libslatedb_c.dylib'],
+    [id: 'macos-aarch64', rustTarget: 'aarch64-apple-darwin', libraryFile: 'libslatedb_c.dylib'],
+    [id: 'windows-x86_64', rustTarget: 'x86_64-pc-windows-msvc', libraryFile: 'slatedb_c.dll'],
+    [id: 'windows-aarch64', rustTarget: 'aarch64-pc-windows-msvc', libraryFile: 'slatedb_c.dll']
+]
+def nativePlatformsById = nativePlatforms.collectEntries { platform -> [(platform.id): platform] }
+
+// Helper functions to normalize OS and architecture names for host platform detection.
+def normalizeOs = { String osName ->
+    String normalized = osName.toLowerCase(Locale.ROOT)
+    if (normalized.contains('win')) {
+        return 'windows'
+    }
+    if (normalized.contains('mac') || normalized.contains('darwin')) {
+        return 'macos'
+    }
+    if (normalized.contains('linux')) {
+        return 'linux'
+    }
+    return normalized
+}
+
+def normalizeArch = { String archName ->
+    String normalized = archName.toLowerCase(Locale.ROOT)
+    if (normalized in ['amd64', 'x86_64', 'x64']) {
+        return 'x86_64'
+    }
+    if (normalized in ['aarch64', 'arm64']) {
+        return 'aarch64'
+    }
+    return normalized
+}
+
+def hostPlatformId = "${normalizeOs(System.getProperty('os.name', ''))}-${normalizeArch(System.getProperty('os.arch', ''))}"
+def nativePrebuiltDirProperty = (findProperty('slatedb.native.prebuiltDir') ?: '').toString().trim()
+def usePrebuiltNativeLibraries = !nativePrebuiltDirProperty.isEmpty()
+def nativePrebuiltDir = usePrebuiltNativeLibraries ? new File(nativePrebuiltDirProperty).absoluteFile : null
+
+def hostPlatform = nativePlatformsById[hostPlatformId]
+if (hostPlatform == null) {
+    throw new GradleException(
+        "Unsupported host platform '${hostPlatformId}'. " +
+            "Supported IDs: ${nativePlatforms*.id.join(', ')}"
+    )
+}
+def selectedNativePlatforms = usePrebuiltNativeLibraries ? nativePlatforms : [hostPlatform]
+
+// Define tasks to build the native libraries for the selected platforms using Cargo. Each task is
+// named like 'buildNativeLibLinuxX86_64' based on the platform ID.
+def toTaskSuffix = { String value ->
+    value.split(/[-_]/).collect { it.capitalize() }.join('')
+}
+
+def nativeResourceStagingDir = layout.buildDirectory.dir('generated/resources/slatedb-native')
+def nativeSourceFileForPlatform = { platform ->
+    usePrebuiltNativeLibraries
+        ? new File(nativePrebuiltDir, "native/${platform.id}/${platform.libraryFile}")
+        : new File(repoRoot, "target/${platform.rustTarget}/release/${platform.libraryFile}")
+}
+
+def selectedNativeBuildTasks = usePrebuiltNativeLibraries
+    ? []
+    : selectedNativePlatforms.collect { platform ->
+        tasks.register("buildNativeLib${toTaskSuffix(platform.id)}", Exec) {
+            group = 'build'
+            description = "Build slatedb-c native library for ${platform.id}"
+            workingDir repoRoot
+            commandLine 'cargo', 'build', '-p', 'slatedb-c', '--release', '--target', platform.rustTarget
+        }
+    }
+
+// Task to prepare native libraries by copying either:
+// - built artifacts from the Cargo target directory, or
+// - prebuilt artifacts from -Pslatedb.native.prebuiltDir.
+// This task depends on the individual platform build tasks when not in prebuilt mode.
+tasks.register('prepareNativeLibraries') {
+    group = 'build'
+    description = "Stage SlateDB native libraries for ${selectedNativePlatforms*.id.join(', ')}."
+    dependsOn selectedNativeBuildTasks
+    inputs.property('nativeMode', usePrebuiltNativeLibraries ? 'prebuilt' : 'local')
+    inputs.property('nativeTargets', selectedNativePlatforms*.id.join(','))
+    if (usePrebuiltNativeLibraries) {
+        inputs.property('nativePrebuiltDir', nativePrebuiltDir.absolutePath)
+    }
+    inputs.files(selectedNativePlatforms.collect { platform -> nativeSourceFileForPlatform(platform) })
+    outputs.dir(nativeResourceStagingDir)
+    doLast {
+        File outputDir = nativeResourceStagingDir.get().asFile
+        project.delete(outputDir)
+        selectedNativePlatforms.each { platform ->
+            File sourceFile = nativeSourceFileForPlatform(platform)
+            if (!sourceFile.isFile()) {
+                if (usePrebuiltNativeLibraries) {
+                    throw new GradleException(
+                        "Prebuilt native library for ${platform.id} is missing at ${sourceFile}. " +
+                            "Expected layout: <prebuilt-dir>/native/<platform-id>/${platform.libraryFile}"
+                    )
+                }
+                throw new GradleException(
+                    "Native library for ${platform.id} is missing at ${sourceFile}. " +
+                        "Ensure the Rust target '${platform.rustTarget}' is installed and buildable."
+                )
+            }
+            project.copy {
+                from sourceFile
+                into new File(outputDir, "native/${platform.id}")
+            }
+        }
+    }
+}
+
+// Patch the generated jextract Native.java to replace the System.loadLibrary call with loading from the classpath.
+// This is necessary because the generated jextract bindings will attempt to load the native library using
+// System.loadLibrary, which won't work with our approach of bundling the native libraries as resources in the
+// JAR. See the discussion in https://github.com/openjdk/jextract/pull/295 for more context on why jextract doesn't
+// currently support customizing the native loading logic.
+def generatedJextractNative = layout.buildDirectory.file('generated/sources/jextract/slatedb/io/slatedb/ffi/Native.java')
+tasks.register('patchJextractNativeLoader') {
+    dependsOn tasks.named('slatedbJextractGenerateBindings')
+    inputs.file(generatedJextractNative)
+    outputs.file(generatedJextractNative)
+    doLast {
+        File generatedNativeJava = generatedJextractNative.get().asFile
+        if (!generatedNativeJava.isFile()) {
+            throw new GradleException("Expected generated jextract file at ${generatedNativeJava}")
+        }
+
+        String sourceText = generatedNativeJava.getText('UTF-8')
+        String originalLoaderCall = 'System.loadLibrary("slatedb_c");'
+        String patchedLoaderCall = 'io.slatedb.NativeLibraryLoader.loadFromClasspath();'
+        if (!sourceText.contains(originalLoaderCall) && !sourceText.contains(patchedLoaderCall)) {
+            throw new GradleException(
+                "Unable to patch jextract native loader call in ${generatedNativeJava}. " +
+                    "Expected to find either '${originalLoaderCall}' or '${patchedLoaderCall}'."
+            )
+        }
+
+        generatedNativeJava.setText(sourceText.replace(originalLoaderCall, patchedLoaderCall), 'UTF-8')
+    }
+}
+
+// ==============================================================================
+// Define basic library and task dependencies.
+// ==============================================================================
+
 sourceSets {
     main {
         jextract {
             libraries.add(slatedbJextractLibrary)
+        }
+        resources {
+            srcDir(nativeResourceStagingDir)
         }
     }
 }
@@ -83,21 +275,52 @@ dependencies {
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher:1.10.2'
 }
 
+tasks.named('compileJava') {
+    dependsOn tasks.named('patchJextractNativeLoader')
+}
+
+tasks.named('processResources') {
+    dependsOn tasks.named('prepareNativeLibraries')
+}
+
 test {
     useJUnitPlatform()
     jvmArgs '--enable-native-access=ALL-UNNAMED'
+}
 
-    // jextract's system-load mode requires java.library.path to be set before JVM startup.
-    // Set java.library.path to include the output directories of the slatedb C library's
-    // debug and release directories, as well as any existing java.library.path entries.
-    def repoRoot = layout.projectDirectory.dir('..').asFile.absoluteFile
-    def libraryPathEntries = [
-        new File(repoRoot, 'target/release').absolutePath,
-        new File(repoRoot, 'target/debug').absolutePath
-    ]
-    def existingLibraryPath = System.getProperty('java.library.path')
-    if (existingLibraryPath != null && !existingLibraryPath.isBlank()) {
-        libraryPathEntries.add(existingLibraryPath)
+// ==============================================================================
+// Maven central publication.
+// ==============================================================================
+
+mavenPublishing {
+    publishToMavenCentral()
+    signAllPublications()
+    coordinates(group.toString(), 'slatedb', version.toString())
+
+    pom {
+        name = 'SlateDB Java'
+        description = 'Java bindings for SlateDB with bundled native libraries.'
+        url = 'https://github.com/slatedb/slatedb'
+
+        licenses {
+            license {
+                name = 'Apache License, Version 2.0'
+                url = 'https://www.apache.org/licenses/LICENSE-2.0.txt'
+            }
+        }
+
+        developers {
+            developer {
+                id = 'slatedb'
+                name = 'SlateDB Authors'
+                url = 'https://github.com/slatedb'
+            }
+        }
+
+        scm {
+            url = 'https://github.com/slatedb/slatedb'
+            connection = 'scm:git:https://github.com/slatedb/slatedb.git'
+            developerConnection = 'scm:git:ssh://git@github.com/slatedb/slatedb.git'
+        }
     }
-    jvmArgs "-Djava.library.path=${libraryPathEntries.join(File.pathSeparator)}"
 }

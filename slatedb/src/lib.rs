@@ -42,7 +42,7 @@ pub use compaction_filter::{
 };
 pub use compactor::CompactorBuilder;
 pub use config::{Settings, SstBlockSize};
-pub use db::{Db, DbBuilder, DbReaderBuilder, WriteHandle};
+pub use db::{Db, DbBuilder, DbReaderBuilder, DbStatus, WriteHandle};
 pub use db_cache::stats as db_cache_stats;
 pub use db_iter::DbIterator;
 pub use db_read::DbRead;
@@ -103,6 +103,7 @@ mod db_read;
 mod db_reader;
 mod db_snapshot;
 mod db_state;
+mod db_status;
 mod db_transaction;
 mod dispatcher;
 mod error;

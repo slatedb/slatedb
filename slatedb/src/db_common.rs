@@ -4,6 +4,7 @@ use crate::db::DbInner;
 use crate::db_state::DbState;
 use crate::error::SlateDBError;
 use crate::mem_table_flush::MemtableFlushMsg;
+use crate::oracle::Oracle;
 use crate::utils::SendSafely;
 use crate::wal_replay::ReplayedMemtable;
 
@@ -77,12 +78,11 @@ impl DbInner {
         // we know these won't move backwards (even though the replayed wal files might contain some
         // older rows) because the wal replay iterator ignores any entries with seq num lower than
         // l0_last_seq from the manifest
-        assert!(self.oracle.last_seq.load() <= replayed_memtable.last_seq);
-        self.oracle.last_seq.store(replayed_memtable.last_seq);
-        assert!(self.oracle.last_committed_seq.load() <= replayed_memtable.last_seq);
+        assert!(self.oracle.last_seq() <= replayed_memtable.last_seq);
+        self.oracle.advance_last_seq(replayed_memtable.last_seq);
+        assert!(self.oracle.last_committed_seq() <= replayed_memtable.last_seq);
         self.oracle
-            .last_committed_seq
-            .store(replayed_memtable.last_seq);
+            .advance_committed_seq(replayed_memtable.last_seq);
         self.mono_clock.set_last_tick(replayed_memtable.last_tick)?;
 
         // replace the memtable
