@@ -213,34 +213,21 @@ impl CachedObjectStore {
     /// Returns `Some(root)` when `meta_location == root + requested_location`,
     /// otherwise returns `None`.
     fn infer_root(requested_location: &Path, meta_location: &Path) -> Option<Path> {
-        let requested_parts: Vec<String> = requested_location
-            .parts()
-            .map(|part| part.as_ref().to_string())
-            .collect();
-        let actual_parts: Vec<String> = meta_location
-            .parts()
-            .map(|part| part.as_ref().to_string())
-            .collect();
+        let requested_str = requested_location.as_ref().trim_end_matches('/');
+        let meta_str = meta_location.as_ref().trim_end_matches('/');
 
-        if requested_parts.is_empty() {
+        if requested_str.is_empty() {
             return Some(meta_location.clone());
         }
 
-        if requested_parts.len() > actual_parts.len() {
+        let prefix = meta_str.strip_suffix(requested_str)?;
+
+        // Ensure suffix matching happens at a path-segment boundary.
+        if !prefix.is_empty() && !prefix.ends_with('/') {
             return None;
         }
 
-        let root_len = actual_parts.len() - requested_parts.len();
-        if actual_parts[root_len..] != requested_parts {
-            return None;
-        }
-
-        Some(
-            actual_parts[..root_len]
-                .iter()
-                .map(String::as_str)
-                .collect(),
-        )
+        Some(Path::from(prefix.trim_end_matches('/')))
     }
 
     #[cfg(test)]
@@ -897,6 +884,10 @@ mod tests {
                 &Path::from("manifest/0001.manifest"),
                 &Path::from("other/path")
             ),
+            None
+        );
+        assert_eq!(
+            CachedObjectStore::infer_root(&Path::from("b/c"), &Path::from("ab/c")),
             None
         );
     }
