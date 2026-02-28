@@ -571,9 +571,7 @@ impl<P: Into<Path>> DbBuilder<P> {
         if let Some(gc_options) = self
             .settings
             .garbage_collector_options
-            .as_ref()
             .filter(|opts| !opts.is_empty())
-            .cloned()
         {
             let gc = GarbageCollector::new(
                 manifest_store.clone(),
