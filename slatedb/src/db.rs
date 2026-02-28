@@ -211,19 +211,10 @@ impl DbInner {
     ) -> Result<Option<RowEntry>, SlateDBError> {
         self.db_stats.get_requests.inc();
         self.status()?;
-        let range = BytesRange::from(
-            Bytes::copy_from_slice(key.as_ref())..=Bytes::copy_from_slice(key.as_ref()),
-        );
-        let scan_options = ScanOptions {
-            durability_filter: options.durability_filter,
-            dirty: options.dirty,
-            cache_blocks: options.cache_blocks,
-            ..Default::default()
-        };
-        let mut iter = self.scan_with_options(range, &scan_options).await?;
-        iter.next_row()
+        let db_state = self.state.read().view();
+        self.reader
+            .get_row_with_options(key, options, &db_state, None, None)
             .await
-            .map_err(|e| SlateDBError::IoError(Arc::new(std::io::Error::other(e.to_string()))))
     }
 
     pub(crate) async fn scan_with_options(
