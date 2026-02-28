@@ -1196,3 +1196,51 @@ fn default_db_cache() -> Option<Arc<dyn DbCache>> {
             .build(),
     ) as Arc<dyn DbCache>)
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::config::Settings;
+    use crate::garbage_collector::stats::GC_COUNT;
+    use object_store::memory::InMemory;
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn test_db_builder_starts_gc_by_default() {
+        let db = crate::Db::builder(
+            "test_db_builder_starts_gc_by_default",
+            Arc::new(InMemory::new()),
+        )
+        .build()
+        .await
+        .expect("failed to build db");
+
+        assert!(
+            db.metrics().lookup(GC_COUNT).is_some(),
+            "GC should be initialized by default"
+        );
+
+        db.close().await.expect("failed to close db");
+    }
+
+    #[tokio::test]
+    async fn test_db_builder_disables_gc_when_gc_options_are_none() {
+        let db = crate::Db::builder(
+            "test_db_builder_disables_gc_when_gc_options_are_none",
+            Arc::new(InMemory::new()),
+        )
+        .with_settings(Settings {
+            garbage_collector_options: None,
+            ..Settings::default()
+        })
+        .build()
+        .await
+        .expect("failed to build db");
+
+        assert!(
+            db.metrics().lookup(GC_COUNT).is_none(),
+            "GC should not be initialized when options are None"
+        );
+
+        db.close().await.expect("failed to close db");
+    }
+}
