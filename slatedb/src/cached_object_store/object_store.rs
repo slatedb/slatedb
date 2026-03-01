@@ -514,45 +514,20 @@ impl CachedObjectStore {
         Box::pin(async move {
             this.stats.object_store_cache_part_access.inc();
 
+            // Try local cache first.
             if let Some(cache_location) = this.cache_location_for(&location) {
                 let entry = this
                     .cache_storage
                     .entry(&cache_location, this.part_size_bytes);
+                // Cache hit, so return immediately.
                 if let Ok(Some(bytes)) = entry.read_part(part_id, range_in_part.clone()).await {
                     this.stats.object_store_cache_part_hits.inc();
                     return Ok(bytes);
                 }
-
-                // if the part is not cached, fallback to the object store to get the missing part.
-                // the object stores is expected to return the result whenever the `start` of the range
-                // is not out of the object size.
-                let range = Range {
-                    start: (part_id * this.part_size_bytes) as u64,
-                    end: ((part_id + 1) * this.part_size_bytes) as u64,
-                };
-                let get_result = this
-                    .object_store
-                    .get_opts(
-                        &location,
-                        GetOptions {
-                            range: Some(GetRange::Bounded(range)),
-                            ..Default::default()
-                        },
-                    )
-                    .await?;
-
-                // save it to the disk cache, we'll ignore the error on writing to disk here, just return
-                // the bytes from the object store.
-                let meta = get_result.meta.clone();
-                let attrs = get_result.attributes.clone();
-                let bytes = get_result.bytes().await?;
-                entry.save_head((&meta, &attrs)).await.ok();
-                entry.save_part(part_id, bytes.clone()).await.ok();
-                return Ok(Bytes::copy_from_slice(&bytes.slice(range_in_part)));
             }
 
-            // If root isn't resolved yet, bypass cache for this read.
-            let range = Range {
+            // Cache miss, so we need to fetch from the object store.
+            let part_range = Range {
                 start: (part_id * this.part_size_bytes) as u64,
                 end: ((part_id + 1) * this.part_size_bytes) as u64,
             };
@@ -561,13 +536,36 @@ impl CachedObjectStore {
                 .get_opts(
                     &location,
                     GetOptions {
-                        range: Some(GetRange::Bounded(range)),
+                        range: Some(GetRange::Bounded(part_range)),
                         ..Default::default()
                     },
                 )
                 .await?;
+
+            // Resolve root after successful get result since this might be the first
+            // time we see the metadata location.
             this.resolve_root(&location, &get_result.meta.location);
-            let bytes = get_result.bytes().await?;
+
+            // Load the cache entry again in case the resolve_root just set `resolved_root`
+            // and made the cache location available.
+            let cache_entry = this.cache_location_for(&location).map(|cache_location| {
+                this.cache_storage
+                    .entry(&cache_location, this.part_size_bytes)
+            });
+
+            let bytes = if let Some(entry) = cache_entry {
+                // Save the head and the part to cache for future accesses.
+                let meta = get_result.meta.clone();
+                let attrs = get_result.attributes.clone();
+                let bytes = get_result.bytes().await?;
+                entry.save_head((&meta, &attrs)).await.ok();
+                entry.save_part(part_id, bytes.clone()).await.ok();
+                bytes
+            } else {
+                // Just read the bytes if we still can't derive a canonical cache key.
+                get_result.bytes().await?
+            };
+
             Ok(Bytes::copy_from_slice(&bytes.slice(range_in_part)))
         })
     }
