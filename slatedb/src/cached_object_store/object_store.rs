@@ -542,17 +542,20 @@ impl CachedObjectStore {
                 )
                 .await?;
 
-            // Resolve root after successful get result since this might be the first
-            // time we see the metadata location.
-            this.resolve_root(&location, &get_result.meta.location);
+            // Get the cache entry again after successful get so we can cache the part.
+            let cache_entry = if this.resolve_root(&location, &get_result.meta.location) {
+                this.cache_location_for(&location).map(|cache_location| {
+                    this.cache_storage
+                        .entry(&cache_location, this.part_size_bytes)
+                })
+            } else {
+                // If the root resolution fails, we won't be able to derive a canonical cache
+                // key. Skip saving to cache to avoid poisoning the cache with unsafe keys.
+                None
+            };
 
-            // Load the cache entry again in case the resolve_root just set `resolved_root`
-            // and made the cache location available.
-            let cache_entry = this.cache_location_for(&location).map(|cache_location| {
-                this.cache_storage
-                    .entry(&cache_location, this.part_size_bytes)
-            });
-
+            // Save the head and the part to cache for future accesses. Just read the bytes
+            // if we still can't derive a canonical cache key.
             let bytes = if let Some(entry) = cache_entry {
                 // Save the head and the part to cache for future accesses.
                 let meta = get_result.meta.clone();
@@ -562,7 +565,6 @@ impl CachedObjectStore {
                 entry.save_part(part_id, bytes.clone()).await.ok();
                 bytes
             } else {
-                // Just read the bytes if we still can't derive a canonical cache key.
                 get_result.bytes().await?
             };
 
