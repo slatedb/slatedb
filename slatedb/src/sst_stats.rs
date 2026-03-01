@@ -20,6 +20,16 @@ impl SstStats {
         self.num_puts + self.num_deletes + self.num_merges
     }
 
+    /// Returns the in-memory size in bytes (5 u64 fields).
+    pub(crate) fn size(&self) -> usize {
+        std::mem::size_of::<Self>()
+    }
+
+    /// Returns a clone (no heap allocations to clamp).
+    pub(crate) fn clamp_allocated_size(&self) -> Self {
+        self.clone()
+    }
+
     /// Encode stats to bytes via FlatBuffers.
     pub(crate) fn encode(&self) -> Bytes {
         let mut builder = FlatBufferBuilder::new();

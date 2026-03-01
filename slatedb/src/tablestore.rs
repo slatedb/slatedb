@@ -390,11 +390,35 @@ impl TableStore {
     pub(crate) async fn read_stats(
         &self,
         handle: &SsTableHandle,
+        cache_blocks: bool,
     ) -> Result<Option<SstStats>, SlateDBError> {
+        if let Some(ref cache) = self.cache {
+            if let Some(stats) = cache
+                .get_stats(&(handle.id, handle.info.stats_offset).into())
+                .await
+                .unwrap_or(None)
+                .and_then(|e| e.sst_stats())
+            {
+                return Ok(Some(stats.as_ref().clone()));
+            }
+        }
         let object_store = self.object_stores.store_for(&handle.id);
         let path = self.path(&handle.id);
         let obj = ReadOnlyObject { object_store, path };
-        self.sst_format.read_stats(&handle.info, &obj).await
+        let stats = self.sst_format.read_stats(&handle.info, &obj).await?;
+        if cache_blocks {
+            if let Some(ref cache) = self.cache {
+                if let Some(ref stats) = stats {
+                    cache
+                        .insert(
+                            (handle.id, handle.info.stats_offset).into(),
+                            CachedEntry::with_sst_stats(Arc::new(stats.clone())),
+                        )
+                        .await;
+                }
+            }
+        }
+        Ok(stats)
     }
 
     /// Reads the index of an SSTable.

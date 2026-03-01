@@ -10,6 +10,7 @@ use crate::error::SlateDBError;
 use crate::filter::BloomFilter;
 use crate::flatbuffer_types::SsTableIndexOwned;
 use crate::format::block::Block;
+use crate::sst_stats::SstStats;
 use bytes::Bytes;
 use serde::de::Error;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -94,6 +95,7 @@ enum SerializedCachedEntryV1 {
     Block(Bytes),
     SsTableIndex(Bytes),
     BloomFilter(Bytes),
+    SstStats(Bytes),
 }
 
 impl SerializedCachedEntryV1 {
@@ -110,6 +112,10 @@ impl SerializedCachedEntryV1 {
             SerializedCachedEntryV1::BloomFilter(encoded) => {
                 let filter = BloomFilter::decode(encoded.as_ref());
                 CachedItem::BloomFilter(Arc::new(filter))
+            }
+            SerializedCachedEntryV1::SstStats(encoded) => {
+                let stats = SstStats::decode(encoded)?;
+                CachedItem::SstStats(Arc::new(stats))
             }
         };
         Ok(CachedEntry { item })
@@ -143,6 +149,10 @@ impl From<CachedEntry> for SerializedCachedEntry {
             CachedItem::BloomFilter(filter) => {
                 let encoded = filter.encode();
                 SerializedCachedEntry::V1(SerializedCachedEntryV1::BloomFilter(encoded))
+            }
+            CachedItem::SstStats(stats) => {
+                let encoded = stats.encode();
+                SerializedCachedEntry::V1(SerializedCachedEntryV1::SstStats(encoded))
             }
         }
     }

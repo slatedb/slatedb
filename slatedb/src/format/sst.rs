@@ -253,6 +253,8 @@ pub(crate) struct EncodedSsTableFooter {
     pub(crate) info: SsTableInfo,
     pub(crate) index: SsTableIndexOwned,
     pub(crate) filter: Option<Arc<BloomFilter>>,
+    #[allow(dead_code)]
+    pub(crate) stats: Option<SstStats>,
     pub(crate) encoded_bytes: Bytes,
 }
 
@@ -266,7 +268,7 @@ pub(crate) struct EncodedSsTableFooterBuilder<'a, 'b> {
     last_entry: Option<Bytes>,
     /// codec for compressing data blocks, index blocks, and filter blocks
     compression_codec: Option<CompressionCodec>,
-    /// transformer for transforming data blocks, index blocks, filter blocks, and stats blocks
+    /// transformer for transforming data blocks, index blocks, and filter blocks
     block_transformer: Option<Arc<dyn BlockTransformer>>,
     /// codec for the SST info
     sst_info_codec: &'a dyn SsTableInfoCodec,
@@ -375,7 +377,8 @@ impl<'a, 'b> EncodedSsTableFooterBuilder<'a, 'b> {
         .await? as u64;
 
         // Write stats block if present
-        let (stats_offset, stats_len) = match self.stats.take() {
+        let maybe_stats = self.stats.take();
+        let (stats_offset, stats_len) = match &maybe_stats {
             Some(stats) => {
                 let offset = self.blocks_size + buf.len() as u64;
                 let len = compress_and_transform(
@@ -412,6 +415,7 @@ impl<'a, 'b> EncodedSsTableFooterBuilder<'a, 'b> {
             info,
             index,
             filter: maybe_filter,
+            stats: maybe_stats,
             encoded_bytes: Bytes::from(buf),
         })
     }
@@ -422,6 +426,8 @@ pub(crate) struct EncodedSsTable {
     pub(crate) info: SsTableInfo,
     pub(crate) index: SsTableIndexOwned,
     pub(crate) filter: Option<Arc<BloomFilter>>,
+    #[allow(dead_code)]
+    pub(crate) stats: Option<SstStats>,
     pub(crate) unconsumed_blocks: VecDeque<EncodedSsTableBlock>,
     pub(crate) footer: Bytes,
 }
@@ -716,9 +722,7 @@ impl SsTableFormat {
         let stats_end = info.stats_offset + info.stats_len;
         let stats_bytes = obj.read_range(info.stats_offset..stats_end).await?;
         let compression_codec = info.compression_codec;
-        Ok(Some(
-            self.decode_stats(stats_bytes, compression_codec).await?,
-        ))
+        Ok(Some(self.decode_stats(stats_bytes, compression_codec).await?))
     }
 
     #[allow(dead_code)]
@@ -909,7 +913,7 @@ impl SsTableFormat {
             guess_at_average_first_key_size_bytes,
         );
         ans += self.estimate_encoded_size_filter(entry_num);
-        // estimate sum of Stats (only compacted SSTs include stats)
+        // estimate sum of Stats
         ans += 5 * SIZEOF_U64 + CHECKSUM_SIZE;
         ans
     }

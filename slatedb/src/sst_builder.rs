@@ -380,6 +380,7 @@ impl EncodedSsTableBuilder<'_> {
             info: footer.info,
             index: footer.index,
             filter: footer.filter,
+            stats: footer.stats,
             unconsumed_blocks: self.blocks,
             footer: footer.encoded_bytes,
         })
@@ -1480,7 +1481,7 @@ mod tests {
             .await
             .unwrap();
         let stats = table_store
-            .read_stats(&sst_handle)
+            .read_stats(&sst_handle, true)
             .await
             .unwrap()
             .expect("stats should be present");
@@ -1549,7 +1550,7 @@ mod tests {
             .await
             .unwrap();
         let stats = table_store
-            .read_stats(&sst_handle)
+            .read_stats(&sst_handle, true)
             .await
             .unwrap()
             .expect("stats should be present");
@@ -1591,7 +1592,7 @@ mod tests {
             .await
             .unwrap();
         let stats = table_store
-            .read_stats(&sst_handle)
+            .read_stats(&sst_handle, true)
             .await
             .unwrap()
             .expect("stats should be present");

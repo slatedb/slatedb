@@ -268,6 +268,7 @@ impl EncodedWalSsTableBuilder {
             info: footer.info,
             index: footer.index,
             filter: None,
+            stats: None,
             unconsumed_blocks: self.blocks,
             footer: footer.encoded_bytes,
         })

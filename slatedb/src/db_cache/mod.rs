@@ -22,6 +22,7 @@ use parking_lot::Mutex;
 use crate::db_cache::stats::DbCacheStats;
 use crate::format::block::Block;
 use crate::stats::StatRegistry;
+use crate::sst_stats::SstStats;
 use crate::{db_state::SsTableId, filter::BloomFilter, flatbuffer_types::SsTableIndexOwned};
 use slatedb_common::clock::SystemClock;
 
@@ -98,6 +99,11 @@ static NEXT_CACHE_SCOPE_ID: AtomicU64 = AtomicU64::new(0);
 ///         Ok(guard.data.get(key).cloned())
 ///     }
 ///
+///     async fn get_stats(&self, key: &CachedKey) -> Result<Option<CachedEntry>, Error> {
+///         let guard = self.inner.lock().unwrap();
+///         Ok(guard.data.get(key).cloned())
+///     }
+///
 ///     async fn insert(&self, key: CachedKey, value: CachedEntry) {
 ///         let mut guard = self.inner.lock().unwrap();
 ///         guard.usage += value.size() as u64;
@@ -134,6 +140,7 @@ pub trait DbCache: Send + Sync {
     async fn get_block(&self, key: &CachedKey) -> Result<Option<CachedEntry>, crate::Error>;
     async fn get_index(&self, key: &CachedKey) -> Result<Option<CachedEntry>, crate::Error>;
     async fn get_filter(&self, key: &CachedKey) -> Result<Option<CachedEntry>, crate::Error>;
+    async fn get_stats(&self, key: &CachedKey) -> Result<Option<CachedEntry>, crate::Error>;
     async fn insert(&self, key: CachedKey, value: CachedEntry);
     #[allow(dead_code)]
     async fn remove(&self, key: &CachedKey);
@@ -184,6 +191,7 @@ enum CachedItem {
     Block(Arc<Block>),
     SsTableIndex(Arc<SsTableIndexOwned>),
     BloomFilter(Arc<BloomFilter>),
+    SstStats(Arc<SstStats>),
 }
 
 /// A cached entry stored in the cache.
@@ -218,6 +226,13 @@ impl CachedEntry {
         }
     }
 
+    /// Create a new `CachedEntry` with the given SST stats.
+    pub(crate) fn with_sst_stats(stats: Arc<SstStats>) -> Self {
+        Self {
+            item: CachedItem::SstStats(stats),
+        }
+    }
+
     pub(crate) fn block(&self) -> Option<Arc<Block>> {
         match &self.item {
             CachedItem::Block(block) => Some(block.clone()),
@@ -239,6 +254,13 @@ impl CachedEntry {
         }
     }
 
+    pub(crate) fn sst_stats(&self) -> Option<Arc<SstStats>> {
+        match &self.item {
+            CachedItem::SstStats(stats) => Some(stats.clone()),
+            _ => None,
+        }
+    }
+
     /// Returns the size of the cached entry in bytes.
     ///
     /// This method is public to allow external cache implementations
@@ -248,6 +270,7 @@ impl CachedEntry {
             CachedItem::Block(block) => block.size(),
             CachedItem::SsTableIndex(sst_index) => sst_index.size(),
             CachedItem::BloomFilter(bloom_filter) => bloom_filter.size(),
+            CachedItem::SstStats(stats) => stats.size(),
         }
     }
 
@@ -259,6 +282,9 @@ impl CachedEntry {
             }
             CachedItem::BloomFilter(bloom_filter) => {
                 Self::with_bloom_filter(Arc::new(bloom_filter.clamp_allocated_size()))
+            }
+            CachedItem::SstStats(stats) => {
+                Self::with_sst_stats(Arc::new(stats.clamp_allocated_size()))
             }
         }
     }
@@ -326,6 +352,14 @@ impl DbCache for SplitCache {
         }
     }
 
+    async fn get_stats(&self, key: &CachedKey) -> Result<Option<CachedEntry>, crate::Error> {
+        if let Some(cache) = &self.meta_cache {
+            cache.get_stats(key).await
+        } else {
+            Ok(None)
+        }
+    }
+
     async fn insert(&self, key: CachedKey, value: CachedEntry) {
         match &value.item {
             CachedItem::Block(_) => {
@@ -335,7 +369,9 @@ impl DbCache for SplitCache {
                     trace!("no block cache available for insertion");
                 }
             }
-            CachedItem::SsTableIndex(_) | CachedItem::BloomFilter(_) => {
+            CachedItem::SsTableIndex(_)
+            | CachedItem::BloomFilter(_)
+            | CachedItem::SstStats(_) => {
                 if let Some(ref cache) = self.meta_cache {
                     cache.insert(key, value.clamp_allocated_size()).await;
                 } else {
@@ -491,6 +527,23 @@ impl DbCache for DbCacheWrapper {
         Ok(entry)
     }
 
+    async fn get_stats(&self, key: &CachedKey) -> Result<Option<CachedEntry>, crate::Error> {
+        let scoped_key = self.scoped_key(key);
+        let entry = match self.cache.get_stats(&scoped_key).await {
+            Ok(e) => e,
+            Err(err) => {
+                self.record_get_err("stats", &err);
+                return Err(err);
+            }
+        };
+        if entry.is_some() {
+            self.stats.stats_hit.inc();
+        } else {
+            self.stats.stats_miss.inc();
+        }
+        Ok(entry)
+    }
+
     async fn insert(&self, key: CachedKey, value: CachedEntry) {
         let scoped_key = self.scoped_key(&key);
         self.cache.insert(scoped_key, value).await
@@ -523,6 +576,8 @@ pub mod stats {
     pub const DB_CACHE_INDEX_MISS: &str = dbcache_stat_name!("index_miss");
     pub const DB_CACHE_DATA_BLOCK_HIT: &str = dbcache_stat_name!("data_block_hit");
     pub const DB_CACHE_DATA_BLOCK_MISS: &str = dbcache_stat_name!("data_block_miss");
+    pub const DB_CACHE_STATS_HIT: &str = dbcache_stat_name!("stats_hit");
+    pub const DB_CACHE_STATS_MISS: &str = dbcache_stat_name!("stats_miss");
     pub const DB_CACHE_GET_ERROR: &str = dbcache_stat_name!("get_error");
 
     pub(super) struct DbCacheStats {
@@ -532,6 +587,8 @@ pub mod stats {
         pub(super) index_miss: Arc<Counter>,
         pub(super) data_block_hit: Arc<Counter>,
         pub(super) data_block_miss: Arc<Counter>,
+        pub(super) stats_hit: Arc<Counter>,
+        pub(super) stats_miss: Arc<Counter>,
         pub(super) get_error: Arc<Counter>,
     }
 
@@ -544,6 +601,8 @@ pub mod stats {
                 index_miss: Arc::new(Counter::default()),
                 data_block_hit: Arc::new(Counter::default()),
                 data_block_miss: Arc::new(Counter::default()),
+                stats_hit: Arc::new(Counter::default()),
+                stats_miss: Arc::new(Counter::default()),
                 get_error: Arc::new(Counter::default()),
             };
             registry.register(DB_CACHE_FILTER_HIT, stats.filter_hit.clone());
@@ -552,6 +611,8 @@ pub mod stats {
             registry.register(DB_CACHE_INDEX_MISS, stats.index_miss.clone());
             registry.register(DB_CACHE_DATA_BLOCK_HIT, stats.data_block_hit.clone());
             registry.register(DB_CACHE_DATA_BLOCK_MISS, stats.data_block_miss.clone());
+            registry.register(DB_CACHE_STATS_HIT, stats.stats_hit.clone());
+            registry.register(DB_CACHE_STATS_MISS, stats.stats_miss.clone());
             registry.register(DB_CACHE_GET_ERROR, stats.get_error.clone());
             stats
         }
@@ -590,6 +651,11 @@ pub(crate) mod test_utils {
         }
 
         async fn get_filter(&self, key: &CachedKey) -> Result<Option<CachedEntry>, crate::Error> {
+            let guard = self.items.lock().unwrap();
+            Ok(guard.get(key).cloned())
+        }
+
+        async fn get_stats(&self, key: &CachedKey) -> Result<Option<CachedEntry>, crate::Error> {
             let guard = self.items.lock().unwrap();
             Ok(guard.get(key).cloned())
         }
