@@ -281,7 +281,8 @@ impl CachedObjectStore {
         let get_range = opts.range.clone();
         let (meta, attributes) = self.maybe_prefetch_range(location, opts).await?;
 
-        // We couldn't infer a safe canonical cache key. Bypass cache for this read.
+        // If we still can't derive a safe canonical cache key after calling
+        // maybe_prefetch_range, bypass cache for this request.
         if self.cache_location_for(location).is_none() {
             return self.object_store.get_opts(location, original_opts).await;
         }
@@ -289,8 +290,9 @@ impl CachedObjectStore {
         let range = self.canonicalize_range(get_range, meta.size)?;
         let parts = self.split_range_into_parts(range.clone());
 
-        // read parts, and concatenate them into a single stream. please note that some of these part may not be cached,
-        // we'll still fallback to the object store to get the missing parts.
+        // read parts, and concatenate them into a single stream. please note that
+        // some of these part may not be cached, we'll still fallback to the object
+        // store to get the missing parts.
         let futures = parts
             .into_iter()
             .map(|(part_id, range_in_part)| self.read_part(location, part_id, range_in_part))
