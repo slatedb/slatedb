@@ -244,12 +244,6 @@ impl CachedObjectStore {
         Some(Path::from(prefix.trim_end_matches('/')))
     }
 
-    #[cfg(test)]
-    /// Returns the lazily resolved root, if any.
-    fn resolved_root_for_test(&self) -> Option<Path> {
-        self.resolved_root.get().cloned()
-    }
-
     pub(crate) async fn cached_head(&self, location: &Path) -> object_store::Result<ObjectMeta> {
         if let Some(cache_location) = self.cache_location_for(location) {
             let entry = self
@@ -931,7 +925,7 @@ mod tests {
             .put(&full_location, PutPayload::from_bytes(payload.clone()))
             .await?;
 
-        assert_eq!(cached_store.resolved_root_for_test(), None);
+        assert_eq!(cached_store.resolved_root.get().cloned(), None);
         let got = cached_store
             .cached_get_opts(&relative_location, GetOptions::default())
             .await?
@@ -939,7 +933,7 @@ mod tests {
             .await?;
         assert_eq!(got, payload);
         assert_eq!(
-            cached_store.resolved_root_for_test(),
+            cached_store.resolved_root.get().cloned(),
             Some(Path::from("tenant-a"))
         );
 
@@ -1021,8 +1015,14 @@ mod tests {
             .await?;
         assert_eq!(got_a, payload_a);
         assert_eq!(got_b, payload_b);
-        assert_eq!(cached_a.resolved_root_for_test(), Some(Path::from("db-a")));
-        assert_eq!(cached_b.resolved_root_for_test(), Some(Path::from("db-b")));
+        assert_eq!(
+            cached_a.resolved_root.get().cloned(),
+            Some(Path::from("db-a"))
+        );
+        assert_eq!(
+            cached_b.resolved_root.get().cloned(),
+            Some(Path::from("db-b"))
+        );
 
         let unscoped_entry = cache_storage.entry(&relative, 1024);
         assert_eq!(unscoped_entry.cached_parts().await?.len(), 0);
@@ -1074,14 +1074,14 @@ mod tests {
             .put(&location, PutPayload::from_bytes(payload.clone()))
             .await?;
 
-        assert_eq!(cached_store.resolved_root_for_test(), None);
+        assert_eq!(cached_store.resolved_root.get().cloned(), None);
         let got = cached_store
             .cached_get_opts(&location, GetOptions::default())
             .await?
             .bytes()
             .await?;
         assert_eq!(got, payload);
-        assert_eq!(cached_store.resolved_root_for_test(), None);
+        assert_eq!(cached_store.resolved_root.get().cloned(), None);
         let entry = cached_store.cache_storage.entry(&location, 1024);
         assert_eq!(entry.cached_parts().await?.len(), 0);
         Ok(())
