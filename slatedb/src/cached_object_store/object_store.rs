@@ -171,41 +171,55 @@ impl CachedObjectStore {
         })
     }
 
-    /// Checks whether the derived canonical cache key matches `meta.location`.
+    /// Lazily resolves the root prefix and validates the derived cache key.
     ///
-    /// This is a defensive guard: on mismatch, cache writes are skipped to
-    /// avoid poisoning cache entries with unsafe keys.
-    fn cache_location_matches_meta(&self, location: &Path, meta_location: &Path) -> bool {
-        let Some(cache_location) = self.cache_location_for(location) else {
+    /// ## Arguments
+    ///
+    /// - `requested_location`: the location from the incoming request, treated as a suffix
+    ///   for root inference.
+    /// - `meta_location`: the location from the observed metadata, expected to be
+    ///   `root + requested_location`.
+    ///
+    /// ## Returns
+    ///
+    /// Returns `true` only when:
+    ///
+    /// - `resolved_root` is already known or can be safely inferred from metadata; and
+    /// - the derived canonical cache key matches `meta_location`.
+    ///
+    /// Returns `false` otherwise. This is a defensive guard: on mismatch, cache writes are
+    /// skipped to avoid poisoning cache entries with unsafe keys.
+    fn resolve_root(&self, requested_location: &Path, meta_location: &Path) -> bool {
+        // If root is not resolved yet, try to infer it from the metadata location
+        if self.resolved_root.get().is_none() {
+            let Some(root) = Self::infer_root(requested_location, meta_location) else {
+                warn!(
+                    "failed to resolve cache root lazily [requested_location={}, meta_location={}]",
+                    requested_location, meta_location,
+                );
+                return false;
+            };
+            let _ = self.resolved_root.set(root);
+        }
+        // Get cache location so we can verify it matches the metadata location. This should always
+        // succeed after root resolution.
+        let Some(cache_location) = self.cache_location_for(requested_location) else {
+            warn!(
+                "cache location is unexpectedly unavailable after root resolution [requested_location={}, meta_location={}]",
+                requested_location, meta_location,
+            );
             return false;
         };
+        // Verify the cache location matches the metadata location. Again, should always be true, but
+        // you can never trust object stores completely.
         if &cache_location != meta_location {
             warn!(
                 "resolved root mismatch [requested_location={}, cache_location={}, meta_location={}]",
-                location, cache_location, meta_location,
+                requested_location, cache_location, meta_location,
             );
             return false;
         }
         true
-    }
-
-    /// Attempts to lazily resolve the root prefix from an observed read result.
-    ///
-    /// This is a one-time operation; if the root has already been set, this is a no-op.
-    fn maybe_set_resolved_root(&self, requested_location: &Path, meta_location: &Path) {
-        if self.resolved_root.get().is_some() {
-            return;
-        }
-
-        let Some(root) = Self::infer_root(requested_location, meta_location) else {
-            warn!(
-                "failed to resolve cache root lazily [requested_location={}, meta_location={}]",
-                requested_location, meta_location,
-            );
-            return;
-        };
-
-        let _ = self.resolved_root.set(root);
     }
 
     /// Infers a root prefix by treating `requested_location` as a suffix of `meta_location`.
@@ -258,8 +272,7 @@ impl CachedObjectStore {
             )
             .await?;
         let meta = result.meta.clone();
-        self.maybe_set_resolved_root(location, &meta.location);
-        if self.cache_location_matches_meta(location, &meta.location) {
+        if self.resolve_root(location, &meta.location) {
             self.save_get_result(result).await.ok();
         }
         Ok(meta)
@@ -379,11 +392,10 @@ impl CachedObjectStore {
         let get_result = self.object_store.get_opts(location, opts).await?;
         let result_meta = get_result.meta.clone();
         let result_attrs = get_result.attributes.clone();
-        self.maybe_set_resolved_root(location, &result_meta.location);
         // swallow the error on saving to disk here (the disk might be already full), just fallback
         // to the object store.
         // TODO: add a warning log here.
-        if self.cache_location_matches_meta(location, &result_meta.location) {
+        if self.resolve_root(location, &result_meta.location) {
             self.save_get_result(get_result).await.ok();
         }
         Ok((result_meta, result_attrs))
@@ -555,7 +567,7 @@ impl CachedObjectStore {
                     },
                 )
                 .await?;
-            this.maybe_set_resolved_root(&location, &get_result.meta.location);
+            this.resolve_root(&location, &get_result.meta.location);
             let bytes = get_result.bytes().await?;
             Ok(Bytes::copy_from_slice(&bytes.slice(range_in_part)))
         })
