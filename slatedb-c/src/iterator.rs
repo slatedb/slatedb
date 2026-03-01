@@ -146,7 +146,7 @@ pub unsafe extern "C" fn slatedb_iterator_next_batch(
         if max_count > 0 && count >= max_count {
             break;
         }
-        if max_bytes > 0 && count > 0 && buf.len() >= max_bytes {
+        if max_bytes > 0 && buf.len() >= max_bytes {
             break;
         }
 
