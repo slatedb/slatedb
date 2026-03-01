@@ -277,16 +277,16 @@ impl CachedObjectStore {
         location: &Path,
         opts: GetOptions,
     ) -> object_store::Result<GetResult> {
-        let original_opts = opts.clone();
-        let get_range = opts.range.clone();
-        let (meta, attributes) = self.maybe_prefetch_range(location, opts).await?;
+        let (meta, attributes) = self.maybe_prefetch_range(location, opts.clone()).await?;
 
         // If we still can't derive a safe canonical cache key after calling
-        // maybe_prefetch_range, bypass cache for this request.
+        // maybe_prefetch_range, bypass cache for this request since there's no
+        // point in fetching by range.
         if self.cache_location_for(location).is_none() {
-            return self.object_store.get_opts(location, original_opts).await;
+            return self.object_store.get_opts(location, opts.clone()).await;
         }
 
+        let get_range = opts.range.clone();
         let range = self.canonicalize_range(get_range, meta.size)?;
         let parts = self.split_range_into_parts(range.clone());
 
@@ -375,8 +375,11 @@ impl CachedObjectStore {
             match entry.read_head().await {
                 Ok(Some((meta, attrs))) => return Ok((meta, attrs)),
                 Ok(None) => {}
-                Err(_) => {
-                    // TODO: add a warning log
+                Err(e) => {
+                    warn!(
+                        "failed to read head from disk cache, will fallback to object store [location={}, error={:?}]",
+                        location, e,
+                    );
                 }
             }
         }
