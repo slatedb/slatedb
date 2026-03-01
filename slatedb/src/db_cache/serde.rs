@@ -187,12 +187,12 @@ mod tests {
     use crate::db_cache::{CachedEntry, CachedItem, CachedKey};
     use crate::db_state::SsTableId;
     use crate::filter::BloomFilterBuilder;
-    use crate::sst_stats::SstStats;
     use crate::flatbuffer_types::{
         BlockMeta, BlockMetaArgs, SsTableIndex, SsTableIndexArgs, SsTableIndexOwned,
     };
     use crate::format::sst::BlockBuilder;
     use crate::iter::IterationOrder;
+    use crate::sst_stats::SstStats;
     use crate::test_utils::assert_iterator;
     use crate::types::RowEntry;
     use bytes::Bytes;

@@ -21,8 +21,8 @@ use parking_lot::Mutex;
 
 use crate::db_cache::stats::DbCacheStats;
 use crate::format::block::Block;
-use crate::stats::StatRegistry;
 use crate::sst_stats::SstStats;
+use crate::stats::StatRegistry;
 use crate::{db_state::SsTableId, filter::BloomFilter, flatbuffer_types::SsTableIndexOwned};
 use slatedb_common::clock::SystemClock;
 
@@ -369,9 +369,7 @@ impl DbCache for SplitCache {
                     trace!("no block cache available for insertion");
                 }
             }
-            CachedItem::SsTableIndex(_)
-            | CachedItem::BloomFilter(_)
-            | CachedItem::SstStats(_) => {
+            CachedItem::SsTableIndex(_) | CachedItem::BloomFilter(_) | CachedItem::SstStats(_) => {
                 if let Some(ref cache) = self.meta_cache {
                     cache.insert(key, value.clamp_allocated_size()).await;
                 } else {
