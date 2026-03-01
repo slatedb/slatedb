@@ -187,6 +187,7 @@ mod tests {
     use crate::db_cache::{CachedEntry, CachedItem, CachedKey};
     use crate::db_state::SsTableId;
     use crate::filter::BloomFilterBuilder;
+    use crate::sst_stats::SstStats;
     use crate::flatbuffer_types::{
         BlockMeta, BlockMetaArgs, SsTableIndex, SsTableIndexArgs, SsTableIndexOwned,
     };
@@ -283,6 +284,26 @@ mod tests {
 
         let decoded_filter = decoded.bloom_filter().unwrap();
         assert!(filter.as_ref() == decoded_filter.as_ref());
+    }
+
+    #[test]
+    fn test_should_serialize_deserialize_stats() {
+        let stats = Arc::new(SstStats {
+            num_puts: 100,
+            num_deletes: 10,
+            num_merges: 5,
+            raw_key_size: 2048,
+            raw_val_size: 8192,
+        });
+        let entry = CachedEntry {
+            item: CachedItem::SstStats(stats.clone()),
+        };
+
+        let encoded = bincode::serialize(&entry).unwrap();
+        let decoded: CachedEntry = bincode::deserialize(&encoded).unwrap();
+
+        let decoded_stats = decoded.sst_stats().unwrap();
+        assert_eq!(stats.as_ref(), decoded_stats.as_ref());
     }
 
     fn build_index_with_first_keys(first_keys: &[&[u8]]) -> SsTableIndexOwned {
