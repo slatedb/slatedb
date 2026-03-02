@@ -1146,6 +1146,8 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
     /// Builds and returns a DbReader instance.
     pub async fn build(self) -> Result<DbReader, crate::Error> {
         let path = self.path.into();
+        // TODO: proper URI generation, for now it works just as a flag
+        let wal_object_store_uri = self.wal_object_store.as_ref().map(|_| String::new());
         let retrying_object_store = Arc::new(RetryingObjectStore::new(
             self.object_store,
             self.rand.clone(),
@@ -1175,6 +1177,16 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
             Some(cached) => Arc::clone(cached) as Arc<dyn ObjectStore>,
             None => retrying_object_store,
         };
+
+        // Validate WAL object store configuration.
+        let manifest_store = Arc::new(ManifestStore::new(&path, object_store.clone()));
+        let latest_manifest =
+            StoredManifest::try_load(manifest_store, self.system_clock.clone()).await?;
+        if let Some(latest_manifest) = &latest_manifest {
+            if latest_manifest.db_state().wal_object_store_uri != wal_object_store_uri {
+                return Err(SlateDBError::WalStoreReconfigurationError.into());
+            }
+        }
 
         let store_provider = DefaultStoreProvider {
             path: path.clone(),
