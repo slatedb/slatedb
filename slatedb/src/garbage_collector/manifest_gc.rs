@@ -6,12 +6,12 @@ use log::error;
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use super::{GcStats, GcTask, DEFAULT_MIN_AGE};
+use super::{GcStats, GcTask};
 
 pub(crate) struct ManifestGcTask {
     manifest_store: Arc<ManifestStore>,
     stats: Arc<GcStats>,
-    manifest_options: Option<GarbageCollectorDirectoryOptions>,
+    manifest_options: GarbageCollectorDirectoryOptions,
 }
 
 impl std::fmt::Debug for ManifestGcTask {
@@ -26,7 +26,7 @@ impl ManifestGcTask {
     pub(super) fn new(
         manifest_store: Arc<ManifestStore>,
         stats: Arc<GcStats>,
-        manifest_options: Option<GarbageCollectorDirectoryOptions>,
+        manifest_options: GarbageCollectorDirectoryOptions,
     ) -> Self {
         ManifestGcTask {
             manifest_store,
@@ -36,10 +36,7 @@ impl ManifestGcTask {
     }
 
     fn manifest_min_age(&self) -> chrono::Duration {
-        let min_age = self
-            .manifest_options
-            .map_or(DEFAULT_MIN_AGE, |opts| opts.min_age);
-        chrono::Duration::from_std(min_age).expect("invalid duration")
+        chrono::Duration::from_std(self.manifest_options.min_age).expect("invalid duration")
     }
 }
 

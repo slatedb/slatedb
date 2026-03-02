@@ -106,6 +106,7 @@ use std::sync::Arc;
 
 use fail_parallel::FailPointRegistry;
 use log::info;
+use log::warn;
 use object_store::path::Path;
 use object_store::ObjectStore;
 use tokio::runtime::Handle;
@@ -200,6 +201,9 @@ impl<P: Into<Path>> DbBuilder<P> {
 
     /// Sets the database settings.
     pub fn with_settings(mut self, settings: Settings) -> Self {
+        if self.compactor_builder.is_some() && settings.compactor_options.is_some() {
+            warn!("compactor_builder and settings.compactor_options both set; compactor_builder will take precedence");
+        }
         self.settings = settings;
         self
     }
@@ -244,8 +248,10 @@ impl<P: Into<Path>> DbBuilder<P> {
 
     /// Sets a custom CompactorBuilder for compaction orchestration.
     ///
-    /// Mutually exclusive with `Settings::compactor_options`. Setting both
-    /// will result in an error.
+    /// Setting a [`CompactorBuilder`] will ignore any previous
+    /// [`Settings::compactor_options`] configuration passed in through
+    /// [`DbBuilder::with_settings`] since the [`CompactorBuilder`] provides its own
+    /// configuration.
     pub fn with_compactor_builder(mut self, compactor_builder: CompactorBuilder<P>) -> Self {
         self.compactor_builder = Some(compactor_builder.into_path_builder());
         self
@@ -529,13 +535,6 @@ impl<P: Into<Path>> DbBuilder<P> {
             None,
         ));
 
-        if self.compactor_builder.is_some() && self.settings.compactor_options.is_some() {
-            return Err(SlateDBError::InvalidCompactorOptions(
-                "cannot set both compactor_builder and compactor_options".into(),
-            )
-            .into());
-        }
-
         let compactor_builder = self.compactor_builder.or_else(|| {
             self.settings.compactor_options.as_ref().map(|opts| {
                 CompactorBuilder::new(path.clone(), retrying_main_object_store.clone())
@@ -568,10 +567,11 @@ impl<P: Into<Path>> DbBuilder<P> {
             )?;
         }
 
-        // To keep backwards compatibility, check if the gc_runtime or garbage_collector_options are set.
-        // If either are set, we need to initialize the garbage collector.
-        if self.settings.garbage_collector_options.is_some() || self.gc_runtime.is_some() {
-            let gc_options = self.settings.garbage_collector_options.unwrap_or_default();
+        if let Some(gc_options) = self
+            .settings
+            .garbage_collector_options
+            .filter(|opts| !opts.is_empty())
+        {
             let gc = GarbageCollector::new(
                 manifest_store.clone(),
                 compactions_store.clone(),
@@ -582,7 +582,8 @@ impl<P: Into<Path>> DbBuilder<P> {
             );
             // Garbage collector only uses tickers, so pass in a dummy rx channel
             let (_, rx) = mpsc::unbounded_channel();
-            task_executor.add_handler(GC_TASK_NAME.to_string(), Box::new(gc), rx, &tokio_handle)?;
+            let gc_handle = self.gc_runtime.as_ref().unwrap_or(&tokio_handle);
+            task_executor.add_handler(GC_TASK_NAME.to_string(), Box::new(gc), rx, gc_handle)?;
         }
 
         // Monitor background tasks
@@ -1145,6 +1146,8 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
     /// Builds and returns a DbReader instance.
     pub async fn build(self) -> Result<DbReader, crate::Error> {
         let path = self.path.into();
+        // TODO: proper URI generation, for now it works just as a flag
+        let wal_object_store_uri = self.wal_object_store.as_ref().map(|_| String::new());
         let retrying_object_store = Arc::new(RetryingObjectStore::new(
             self.object_store,
             self.rand.clone(),
@@ -1174,6 +1177,16 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
             Some(cached) => Arc::clone(cached) as Arc<dyn ObjectStore>,
             None => retrying_object_store,
         };
+
+        // Validate WAL object store configuration.
+        let manifest_store = Arc::new(ManifestStore::new(&path, object_store.clone()));
+        let latest_manifest =
+            StoredManifest::try_load(manifest_store, self.system_clock.clone()).await?;
+        if let Some(latest_manifest) = &latest_manifest {
+            if latest_manifest.db_state().wal_object_store_uri != wal_object_store_uri {
+                return Err(SlateDBError::WalStoreReconfigurationError.into());
+            }
+        }
 
         let store_provider = DefaultStoreProvider {
             path: path.clone(),
@@ -1210,4 +1223,52 @@ fn default_db_cache() -> Option<Arc<dyn DbCache>> {
             .with_meta_cache(meta_cache)
             .build(),
     ) as Arc<dyn DbCache>)
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::config::Settings;
+    use crate::garbage_collector::stats::GC_COUNT;
+    use object_store::memory::InMemory;
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn test_db_builder_starts_gc_by_default() {
+        let db = crate::Db::builder(
+            "test_db_builder_starts_gc_by_default",
+            Arc::new(InMemory::new()),
+        )
+        .build()
+        .await
+        .expect("failed to build db");
+
+        assert!(
+            db.metrics().lookup(GC_COUNT).is_some(),
+            "GC should be initialized by default"
+        );
+
+        db.close().await.expect("failed to close db");
+    }
+
+    #[tokio::test]
+    async fn test_db_builder_disables_gc_when_gc_options_are_none() {
+        let db = crate::Db::builder(
+            "test_db_builder_disables_gc_when_gc_options_are_none",
+            Arc::new(InMemory::new()),
+        )
+        .with_settings(Settings {
+            garbage_collector_options: None,
+            ..Settings::default()
+        })
+        .build()
+        .await
+        .expect("failed to build db");
+
+        assert!(
+            db.metrics().lookup(GC_COUNT).is_none(),
+            "GC should not be initialized when options are None"
+        );
+
+        db.close().await.expect("failed to close db");
+    }
 }

@@ -59,7 +59,8 @@ pub use db_reader::{
 };
 
 pub use iterator::{
-    slatedb_iterator_close, slatedb_iterator_next, slatedb_iterator_next_row, slatedb_iterator_seek,
+    slatedb_iterator_close, slatedb_iterator_next, slatedb_iterator_next_batch,
+    slatedb_iterator_next_row, slatedb_iterator_seek,
 };
 pub use logging::{
     slatedb_logging_clear_callback, slatedb_logging_init, slatedb_logging_set_callback,

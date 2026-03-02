@@ -1220,6 +1220,43 @@ struct slatedb_result_t slatedb_iterator_next_row(struct slatedb_iterator_t *ite
                                                   bool *out_present,
                                                   struct slatedb_row_entry_t **out_row);
 
+// Retrieves up to `max_count` key/value pairs (or up to `max_bytes` of packed
+// data) from an iterator in a single call — whichever limit is reached first.
+//
+// Results are packed into a single buffer with the following layout per entry:
+// ```text
+// [key_len: 8 bytes LE u64][val_len: 8 bytes LE u64][key_bytes][val_bytes]
+// ```
+//
+// ## Arguments
+// - `iterator`: Iterator handle created by scan APIs.
+// - `max_count`: Maximum number of key/value pairs to return. Pass `0` for no
+//   count limit.
+// - `max_bytes`: Maximum packed buffer size in bytes. The last entry is allowed
+//   to push the buffer over this limit so that at least one entry is always
+//   returned when the iterator is not exhausted. Pass `0` for no byte limit.
+// - `out_data`: Output buffer pointer (allocated by Rust, single allocation).
+// - `out_data_len`: Output total buffer length in bytes.
+// - `out_count`: Output number of key/value pairs in the buffer.
+//
+// ## Returns
+// - `slatedb_result_t` with `kind == SLATEDB_ERROR_KIND_NONE` on success.
+// - `out_count == 0` means the iterator is exhausted.
+//
+// ## Errors
+// - Returns `SLATEDB_ERROR_KIND_INVALID` for null pointers or invalid handles.
+// - Returns mapped SlateDB error kinds if iteration fails.
+//
+// ## Safety
+// - All output pointers must be valid, non-null writable pointers.
+// - The buffer returned in `out_data` must be freed with `slatedb_bytes_free`.
+struct slatedb_result_t slatedb_iterator_next_batch(struct slatedb_iterator_t *iterator,
+                                                    uintptr_t max_count,
+                                                    uintptr_t max_bytes,
+                                                    uint8_t **out_data,
+                                                    uintptr_t *out_data_len,
+                                                    uintptr_t *out_count);
+
 // Seeks the iterator to the first key greater than or equal to `key`.
 //
 // ## Arguments

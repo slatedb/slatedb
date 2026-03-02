@@ -914,7 +914,7 @@ impl Default for Settings {
             compactor_options: Some(CompactorOptions::default()),
             compression_codec: None,
             object_store_cache_options: ObjectStoreCacheOptions::default(),
-            garbage_collector_options: None,
+            garbage_collector_options: Some(GarbageCollectorOptions::default()),
             filter_bits_per_key: 10,
             default_ttl: None,
             merge_operator: None,
@@ -1233,16 +1233,24 @@ impl From<SizeTieredCompactionSchedulerOptions> for HashMap<String, String> {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct GarbageCollectorOptions {
     /// Garbage collection options for the manifest directory.
+    ///
+    /// None means garbage collection is disabled for the manifest directory.
     pub manifest_options: Option<GarbageCollectorDirectoryOptions>,
 
     /// Garbage collection options for the WAL directory.
+    ///
+    /// None means garbage collection is disabled for the WAL directory.
     pub wal_options: Option<GarbageCollectorDirectoryOptions>,
 
     /// Garbage collection options for the compacted directory.
+    ///
+    /// None means garbage collection is disabled for the compacted directory.
     pub compacted_options: Option<GarbageCollectorDirectoryOptions>,
 
     /// Garbage collection options for the compactions directory, which
     /// contains compactor job state `.compactions` files.
+    ///
+    /// None means garbage collection is disabled for the compactions directory.
     pub compactions_options: Option<GarbageCollectorDirectoryOptions>,
 }
 
@@ -1255,6 +1263,10 @@ impl GarbageCollectorOptions {
     }
 }
 
+/// Default options for the garbage collector for a directory.
+///
+/// By default, the garbage collector will run every minute and deletes files
+/// that are at least 5 minutes old.
 impl Default for GarbageCollectorDirectoryOptions {
     fn default() -> Self {
         Self {
@@ -1267,8 +1279,12 @@ impl Default for GarbageCollectorDirectoryOptions {
 /// Garbage collector options for a directory.
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 pub struct GarbageCollectorDirectoryOptions {
-    /// The interval at which the garbage collector will run
-    /// in the background thread.
+    /// The interval at which the garbage collector will run in the background
+    /// thread.
+    ///
+    /// If set to None, recurring garbage collection will be disabled for the
+    /// directory, but one-time garbage collection can still be triggered
+    /// [`crate::garbage_collector::GarbageCollector::run_gc_once`].
     #[serde(deserialize_with = "deserialize_option_duration")]
     #[serde(serialize_with = "serialize_option_duration")]
     pub interval: Option<Duration>,
@@ -1279,18 +1295,21 @@ pub struct GarbageCollectorDirectoryOptions {
     pub min_age: Duration,
 }
 
-/// Default options for the garbage collector. The default options are:
-/// * Manifest options: interval of 60 seconds, min age of 1 day
-/// * WAL options: interval of 60 seconds, min age of 1 minute
-/// * Compacted options: interval of 60 seconds, min age of 1 day
-/// * Compactions options: interval of 60 seconds, min age of 1 day
+/// Default options for the garbage collector.
+///
+/// By default, garbage collection is enabled for all managed directories
+/// (manifest, WAL, compacted SSTs, and compactions) using
+/// [`GarbageCollectorDirectoryOptions::default()`].
+///
+/// To disable garbage collection for a specific file type, set that
+/// directory option to `None`.
 impl Default for GarbageCollectorOptions {
     fn default() -> Self {
         Self {
-            manifest_options: None,
-            wal_options: None,
-            compacted_options: None,
-            compactions_options: None,
+            manifest_options: Some(GarbageCollectorDirectoryOptions::default()),
+            wal_options: Some(GarbageCollectorDirectoryOptions::default()),
+            compacted_options: Some(GarbageCollectorDirectoryOptions::default()),
+            compactions_options: Some(GarbageCollectorDirectoryOptions::default()),
         }
     }
 }
