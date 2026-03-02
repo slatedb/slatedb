@@ -66,17 +66,26 @@ jobs:
           generateReleaseNotes: true
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      # Publish the crate to crates.io
-      - name: Publish SlateDB to crates.io
+      # Publish crate chain to crates.io in dependency order
+      - name: Publish SlateDB crates to crates.io
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        working-directory: slatedb
         run: |
-          if cargo add slatedb@${{ github.event.inputs.version }} --dry-run >/dev/null 2>&1; then
-            echo "✔ slate v${{ github.event.inputs.version }} already published, skipping"
-          else
-            cargo publish
-          fi
+          VERSION="${{ github.event.inputs.version }}"
+
+          publish_if_missing() {
+            local crate="$1"
+
+            if cargo add "${crate}@${VERSION}" --dry-run >/dev/null 2>&1; then
+              echo "✔ ${crate} v${VERSION} already published, skipping"
+            else
+              cargo publish -p "${crate}"
+            fi
+          }
+
+          publish_if_missing "slatedb-common"
+          publish_if_missing "slatedb-txn-obj"
+          publish_if_missing "slatedb"
 
       - name: Publish SlateDB CLI to crates.io
         env:
@@ -84,7 +93,7 @@ jobs:
         working-directory: slatedb-cli
         run:  |
           if cargo add slatedb-cli@${{ github.event.inputs.version }} --dry-run >/dev/null 2>&1; then
-            echo "✔ slate-cli v${{ github.event.inputs.version }} already published, skipping"
+            echo "✔ slatedb-cli v${{ github.event.inputs.version }} already published, skipping"
           else
             cargo publish
           fi
