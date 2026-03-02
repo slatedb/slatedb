@@ -389,11 +389,14 @@ impl Admin {
             &self.path,
             self.object_stores.store_of(ObjectStoreType::Main).clone(),
         ));
-        manifest_store
-            .validate_no_wal_object_store_configured()
-            .await?;
         let mut stored_manifest =
             StoredManifest::load(manifest_store, self.system_clock.clone()).await?;
+
+        let manifest_has_wal = stored_manifest.db_state().wal_object_store_uri.is_some();
+        if self.object_stores.has_wal_object_store() != manifest_has_wal {
+            return Err(SlateDBError::WalStoreReconfigurationError.into());
+        }
+
         let checkpoint_id = self.rand.rng().gen_uuid();
         let checkpoint = stored_manifest
             .write_checkpoint(checkpoint_id, options)
