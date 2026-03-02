@@ -1200,3 +1200,19 @@ def test_txn_delete(db_path, env_file):
         assert db.get(b"td1") is None
     finally:
         db.close()
+
+
+def test_get_key_value(db: SlateDB):
+    key = b"key1"
+    value = b"value1"
+    db.put(key, value)
+
+    row = db.get_key_value(key)
+    assert row is not None
+    assert row.key == key
+    assert row.value == value
+    assert row.seq > 0
+    assert row.create_ts is not None
+
+    non_existent = db.get_key_value(b"non_existent")
+    assert non_existent is None

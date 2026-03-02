@@ -19,10 +19,13 @@ type DB struct {
 	handle *C.slatedb_db_t
 }
 
-// KeyValue represents a key-value pair from scan operations.
+// KeyValue represents a key-value pair with metadata.
 type KeyValue struct {
-	Key   []byte
-	Value []byte
+	Key      []byte
+	Value    []byte
+	Seq      uint64
+	CreateTs *int64
+	ExpireTs *int64
 }
 
 // ScanResult represents the result of a scan operation.
@@ -343,18 +346,18 @@ func (db *DB) GetWithOptions(key []byte, readOpts *ReadOptions) ([]byte, error) 
 	return copyBytesAndFree(value, valueLen), nil
 }
 
-// GetRow retrieves a value and metadata by key with default read options.
+// GetKeyValue retrieves a value and metadata by key with default read options.
 //
 // Returns `nil, nil` if the key does not exist.
-func (db *DB) GetRow(key []byte) (*RowEntry, error) {
-	return db.GetRowWithOptions(key, nil)
+func (db *DB) GetKeyValue(key []byte) (*KeyValue, error) {
+	return db.GetKeyValueWithOptions(key, nil)
 }
 
-// GetRowWithOptions retrieves a value and metadata by key with explicit read options.
+// GetKeyValueWithOptions retrieves a value and metadata by key with explicit read options.
 //
 // Pass nil options to use defaults.
 // Returns `nil, nil` if the key does not exist.
-func (db *DB) GetRowWithOptions(key []byte, readOpts *ReadOptions) (*RowEntry, error) {
+func (db *DB) GetKeyValueWithOptions(key []byte, readOpts *ReadOptions) (*KeyValue, error) {
 	if db == nil || db.handle == nil {
 		return nil, ErrInvalid
 	}
@@ -366,15 +369,15 @@ func (db *DB) GetRowWithOptions(key []byte, readOpts *ReadOptions) (*RowEntry, e
 	cReadOpts := convertToCReadOptions(readOpts)
 
 	var present C.bool
-	var rowPtr *C.slatedb_row_entry_t
+	var kvPtr *C.slatedb_key_value_t
 
-	result := C.slatedb_db_get_row_with_options(
+	result := C.slatedb_db_get_key_value_with_options(
 		db.handle,
 		keyPtr,
 		keyLen,
 		cReadOpts,
 		&present,
-		&rowPtr,
+		&kvPtr,
 	)
 	if err := resultToErrorAndFree(result); err != nil {
 		return nil, err
@@ -383,28 +386,24 @@ func (db *DB) GetRowWithOptions(key []byte, readOpts *ReadOptions) (*RowEntry, e
 	if present == C.bool(false) {
 		return nil, nil
 	}
-	defer C.slatedb_row_entry_free(rowPtr)
+	defer C.slatedb_key_value_free(kvPtr)
 
-	row := &RowEntry{
-		Kind: RowEntryKind(rowPtr.kind),
-		Key:  C.GoBytes(unsafe.Pointer(rowPtr.key), C.int(rowPtr.key_len)),
-		Seq:  uint64(rowPtr.seq),
+	kv := &KeyValue{
+		Key:   C.GoBytes(unsafe.Pointer(kvPtr.key), C.int(kvPtr.key_len)),
+		Value: C.GoBytes(unsafe.Pointer(kvPtr.value), C.int(kvPtr.value_len)),
+		Seq:   uint64(kvPtr.seq),
 	}
 
-	if rowPtr.value != nil {
-		row.Value = C.GoBytes(unsafe.Pointer(rowPtr.value), C.int(rowPtr.value_len))
+	if bool(kvPtr.create_ts_present) {
+		ts := int64(kvPtr.create_ts)
+		kv.CreateTs = &ts
+	}
+	if bool(kvPtr.expire_ts_present) {
+		ts := int64(kvPtr.expire_ts)
+		kv.ExpireTs = &ts
 	}
 
-	if bool(rowPtr.create_ts_present) {
-		ts := int64(rowPtr.create_ts)
-		row.CreateTs = &ts
-	}
-	if bool(rowPtr.expire_ts_present) {
-		ts := int64(rowPtr.expire_ts)
-		row.ExpireTs = &ts
-	}
-
-	return row, nil
+	return kv, nil
 }
 
 // Write executes a WriteBatch atomically with default write options.

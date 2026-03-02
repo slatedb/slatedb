@@ -224,7 +224,7 @@ mod tests {
     use crate::iter::IterationOrder::Descending;
     use crate::iter::RowEntryIterator;
     use crate::proptest_util::{arbitrary, sample};
-    use crate::test_utils::{assert_iterator, assert_next, gen_attrs, gen_empty_attrs};
+    use crate::test_utils::{assert_iterator, assert_next};
     use crate::types::{KeyValue, RowEntry};
     use crate::{proptest_util, test_utils};
     use std::sync::Arc;
@@ -233,9 +233,9 @@ mod tests {
     #[tokio::test]
     async fn test_iterator() {
         let mut block_builder = BlockBuilder::new_v1(1024);
-        assert!(block_builder.add_value(b"donkey", b"kong", gen_attrs(1)));
-        assert!(block_builder.add_value(b"kratos", b"atreus", gen_attrs(2)));
-        assert!(block_builder.add_value(b"super", b"mario", gen_attrs(3)));
+        assert!(block_builder.add_value(b"donkey", b"kong", Some(1), None));
+        assert!(block_builder.add_value(b"kratos", b"atreus", Some(2), None));
+        assert!(block_builder.add_value(b"super", b"mario", Some(3), None));
         let block = block_builder.build().unwrap();
         let mut iter = BlockIterator::new_ascending(&block);
         let kv: KeyValue = iter.next().await.unwrap().unwrap().into();
@@ -250,9 +250,9 @@ mod tests {
     #[tokio::test]
     async fn test_seek_to_existing_key() {
         let mut block_builder = BlockBuilder::new_v1(1024);
-        assert!(block_builder.add_value(b"donkey", b"kong", gen_attrs(1)));
-        assert!(block_builder.add_value(b"kratos", b"atreus", gen_attrs(2)));
-        assert!(block_builder.add_value(b"super", b"mario", gen_attrs(3)));
+        assert!(block_builder.add_value(b"donkey", b"kong", Some(1), None));
+        assert!(block_builder.add_value(b"kratos", b"atreus", Some(2), None));
+        assert!(block_builder.add_value(b"super", b"mario", Some(3), None));
         let block = block_builder.build().unwrap();
         let mut iter = BlockIterator::new_ascending(&block);
         iter.seek(b"kratos").await.unwrap();
@@ -266,9 +266,9 @@ mod tests {
     #[tokio::test]
     async fn test_seek_to_nonexisting_key() {
         let mut block_builder = BlockBuilder::new_v1(1024);
-        assert!(block_builder.add_value(b"donkey", b"kong", gen_attrs(1)));
-        assert!(block_builder.add_value(b"kratos", b"atreus", gen_attrs(2)));
-        assert!(block_builder.add_value(b"super", b"mario", gen_attrs(3)));
+        assert!(block_builder.add_value(b"donkey", b"kong", Some(1), None));
+        assert!(block_builder.add_value(b"kratos", b"atreus", Some(2), None));
+        assert!(block_builder.add_value(b"super", b"mario", Some(3), None));
         let block = block_builder.build().unwrap();
         let mut iter = BlockIterator::new_ascending(&block);
         iter.seek(b"ka").await.unwrap();
@@ -282,9 +282,9 @@ mod tests {
     #[tokio::test]
     async fn test_seek_to_key_beyond_last_key() {
         let mut block_builder = BlockBuilder::new_v1(1024);
-        assert!(block_builder.add_value(b"donkey", b"kong", gen_attrs(1)));
-        assert!(block_builder.add_value(b"kratos", b"atreus", gen_attrs(2)));
-        assert!(block_builder.add_value(b"super", b"mario", gen_attrs(3)));
+        assert!(block_builder.add_value(b"donkey", b"kong", Some(1), None));
+        assert!(block_builder.add_value(b"kratos", b"atreus", Some(2), None));
+        assert!(block_builder.add_value(b"super", b"mario", Some(3), None));
         let block = block_builder.build().unwrap();
         let mut iter = BlockIterator::new_ascending(&block);
         iter.seek(b"zzz").await.unwrap();
@@ -294,9 +294,9 @@ mod tests {
     #[tokio::test]
     async fn test_seek_to_key_skips_records_prior_to_next_key() {
         let mut block_builder = BlockBuilder::new_v1(1024);
-        assert!(block_builder.add_value(b"donkey", b"kong", gen_empty_attrs()));
-        assert!(block_builder.add_value(b"kratos", b"atreus", gen_empty_attrs()));
-        assert!(block_builder.add_value(b"super", b"mario", gen_empty_attrs()));
+        assert!(block_builder.add_value(b"donkey", b"kong", None, None));
+        assert!(block_builder.add_value(b"kratos", b"atreus", None, None));
+        assert!(block_builder.add_value(b"super", b"mario", None, None));
         let block = block_builder.build().unwrap();
         let mut iter = BlockIterator::new_ascending(block);
         assert_next(&mut iter, &RowEntry::new_value(b"donkey", b"kong", 0)).await;
@@ -307,9 +307,9 @@ mod tests {
     #[tokio::test]
     async fn test_seek_to_key_with_iterator_at_seek_point() {
         let mut block_builder = BlockBuilder::new_v1(1024);
-        assert!(block_builder.add_value(b"donkey", b"kong", gen_empty_attrs()));
-        assert!(block_builder.add_value(b"kratos", b"atreus", gen_empty_attrs()));
-        assert!(block_builder.add_value(b"super", b"mario", gen_empty_attrs()));
+        assert!(block_builder.add_value(b"donkey", b"kong", None, None));
+        assert!(block_builder.add_value(b"kratos", b"atreus", None, None));
+        assert!(block_builder.add_value(b"super", b"mario", None, None));
         let block = block_builder.build().unwrap();
         let mut iter = BlockIterator::new_ascending(block);
         assert_next(&mut iter, &RowEntry::new_value(b"donkey", b"kong", 0)).await;
@@ -327,9 +327,9 @@ mod tests {
     #[tokio::test]
     async fn test_seek_to_key_beyond_last_key_in_block() {
         let mut block_builder = BlockBuilder::new_v1(1024);
-        assert!(block_builder.add_value(b"donkey", b"kong", gen_attrs(1)));
-        assert!(block_builder.add_value(b"kratos", b"atreus", gen_attrs(2)));
-        assert!(block_builder.add_value(b"super", b"mario", gen_attrs(3)));
+        assert!(block_builder.add_value(b"donkey", b"kong", Some(1), None));
+        assert!(block_builder.add_value(b"kratos", b"atreus", Some(2), None));
+        assert!(block_builder.add_value(b"super", b"mario", Some(3), None));
         let block = block_builder.build().unwrap();
         let mut iter = BlockIterator::new_ascending(block);
         iter.seek(b"zelda".as_ref()).await.unwrap();
@@ -344,7 +344,7 @@ mod tests {
 
         let mut block_builder = BlockBuilder::new_v1(1024);
         for (key, value) in &sample_table {
-            block_builder.add_value(key, value, gen_empty_attrs());
+            block_builder.add_value(key, value, None, None);
         }
         let block = Arc::new(block_builder.build().unwrap());
 
@@ -371,7 +371,7 @@ mod tests {
         for i in 0..100u32 {
             let key = format!("key_{:05}", i);
             let value = format!("value_{}", i);
-            assert!(block_builder.add_value(key.as_bytes(), value.as_bytes(), gen_empty_attrs()));
+            assert!(block_builder.add_value(key.as_bytes(), value.as_bytes(), None, None));
         }
         let block = block_builder.build().unwrap();
 
@@ -397,9 +397,9 @@ mod tests {
     async fn should_seek_to_first_key_in_block() {
         // given: a block with multiple entries
         let mut block_builder = BlockBuilder::new_v1(1024);
-        assert!(block_builder.add_value(b"apple", b"1", gen_empty_attrs()));
-        assert!(block_builder.add_value(b"banana", b"2", gen_empty_attrs()));
-        assert!(block_builder.add_value(b"cherry", b"3", gen_empty_attrs()));
+        assert!(block_builder.add_value(b"apple", b"1", None, None));
+        assert!(block_builder.add_value(b"banana", b"2", None, None));
+        assert!(block_builder.add_value(b"cherry", b"3", None, None));
         let block = block_builder.build().unwrap();
 
         // when: seeking to the first key
@@ -415,9 +415,9 @@ mod tests {
     async fn should_seek_to_last_key_in_block() {
         // given: a block with multiple entries
         let mut block_builder = BlockBuilder::new_v1(1024);
-        assert!(block_builder.add_value(b"apple", b"1", gen_empty_attrs()));
-        assert!(block_builder.add_value(b"banana", b"2", gen_empty_attrs()));
-        assert!(block_builder.add_value(b"cherry", b"3", gen_empty_attrs()));
+        assert!(block_builder.add_value(b"apple", b"1", None, None));
+        assert!(block_builder.add_value(b"banana", b"2", None, None));
+        assert!(block_builder.add_value(b"cherry", b"3", None, None));
         let block = block_builder.build().unwrap();
 
         // when: seeking to the last key
@@ -434,8 +434,8 @@ mod tests {
     async fn should_seek_to_key_before_first() {
         // given: a block with entries
         let mut block_builder = BlockBuilder::new_v1(1024);
-        assert!(block_builder.add_value(b"banana", b"2", gen_empty_attrs()));
-        assert!(block_builder.add_value(b"cherry", b"3", gen_empty_attrs()));
+        assert!(block_builder.add_value(b"banana", b"2", None, None));
+        assert!(block_builder.add_value(b"cherry", b"3", None, None));
         let block = block_builder.build().unwrap();
 
         // when: seeking to a key before the first entry
@@ -451,11 +451,11 @@ mod tests {
     async fn should_seek_with_shared_prefix_keys() {
         // given: a block with keys that share prefixes (tests prefix encoding interaction)
         let mut block_builder = BlockBuilder::new_v1(4096);
-        assert!(block_builder.add_value(b"user:1000", b"alice", gen_empty_attrs()));
-        assert!(block_builder.add_value(b"user:1001", b"bob", gen_empty_attrs()));
-        assert!(block_builder.add_value(b"user:1002", b"carol", gen_empty_attrs()));
-        assert!(block_builder.add_value(b"user:1010", b"dave", gen_empty_attrs()));
-        assert!(block_builder.add_value(b"user:1020", b"eve", gen_empty_attrs()));
+        assert!(block_builder.add_value(b"user:1000", b"alice", None, None));
+        assert!(block_builder.add_value(b"user:1001", b"bob", None, None));
+        assert!(block_builder.add_value(b"user:1002", b"carol", None, None));
+        assert!(block_builder.add_value(b"user:1010", b"dave", None, None));
+        assert!(block_builder.add_value(b"user:1020", b"eve", None, None));
         let block = block_builder.build().unwrap();
 
         // when: seeking to various keys with shared prefixes
@@ -479,11 +479,11 @@ mod tests {
     async fn should_seek_multiple_times_sequentially() {
         // given: a block with multiple entries
         let mut block_builder = BlockBuilder::new_v1(1024);
-        assert!(block_builder.add_value(b"a", b"1", gen_empty_attrs()));
-        assert!(block_builder.add_value(b"b", b"2", gen_empty_attrs()));
-        assert!(block_builder.add_value(b"c", b"3", gen_empty_attrs()));
-        assert!(block_builder.add_value(b"d", b"4", gen_empty_attrs()));
-        assert!(block_builder.add_value(b"e", b"5", gen_empty_attrs()));
+        assert!(block_builder.add_value(b"a", b"1", None, None));
+        assert!(block_builder.add_value(b"b", b"2", None, None));
+        assert!(block_builder.add_value(b"c", b"3", None, None));
+        assert!(block_builder.add_value(b"d", b"4", None, None));
+        assert!(block_builder.add_value(b"e", b"5", None, None));
         let block = block_builder.build().unwrap();
         let mut iter = BlockIterator::new_ascending(block);
 
@@ -505,10 +505,10 @@ mod tests {
     async fn should_seek_bidirectionally_ascending() {
         // given: a block with entries and an iterator advanced past the first entry
         let mut block_builder = BlockBuilder::new_v1(1024);
-        assert!(block_builder.add_value(b"a", b"1", gen_empty_attrs()));
-        assert!(block_builder.add_value(b"b", b"2", gen_empty_attrs()));
-        assert!(block_builder.add_value(b"c", b"3", gen_empty_attrs()));
-        assert!(block_builder.add_value(b"d", b"4", gen_empty_attrs()));
+        assert!(block_builder.add_value(b"a", b"1", None, None));
+        assert!(block_builder.add_value(b"b", b"2", None, None));
+        assert!(block_builder.add_value(b"c", b"3", None, None));
+        assert!(block_builder.add_value(b"d", b"4", None, None));
         let block = block_builder.build().unwrap();
         let mut iter = BlockIterator::new_ascending(block);
 
@@ -537,7 +537,7 @@ mod tests {
     async fn should_seek_in_single_entry_block() {
         // given: a block with only one entry
         let mut block_builder = BlockBuilder::new_v1(1024);
-        assert!(block_builder.add_value(b"only", b"one", gen_empty_attrs()));
+        assert!(block_builder.add_value(b"only", b"one", None, None));
         let block = block_builder.build().unwrap();
 
         // when: seeking to the exact key
@@ -568,9 +568,9 @@ mod tests {
     async fn should_decode_key_at_index_correctly() {
         // given: a block with entries that have shared prefixes
         let mut block_builder = BlockBuilder::new_v1(4096);
-        assert!(block_builder.add_value(b"prefix_aaa", b"1", gen_empty_attrs()));
-        assert!(block_builder.add_value(b"prefix_bbb", b"2", gen_empty_attrs()));
-        assert!(block_builder.add_value(b"prefix_ccc", b"3", gen_empty_attrs()));
+        assert!(block_builder.add_value(b"prefix_aaa", b"1", None, None));
+        assert!(block_builder.add_value(b"prefix_bbb", b"2", None, None));
+        assert!(block_builder.add_value(b"prefix_ccc", b"3", None, None));
         let block = block_builder.build().unwrap();
         let iter = BlockIterator::new_ascending(&block);
 
@@ -592,9 +592,9 @@ mod tests {
     async fn should_seek_descending_to_exact_key() {
         // given: a block with multiple entries
         let mut block_builder = BlockBuilder::new_v1(1024);
-        assert!(block_builder.add_value(b"apple", b"1", gen_empty_attrs()));
-        assert!(block_builder.add_value(b"banana", b"2", gen_empty_attrs()));
-        assert!(block_builder.add_value(b"cherry", b"3", gen_empty_attrs()));
+        assert!(block_builder.add_value(b"apple", b"1", None, None));
+        assert!(block_builder.add_value(b"banana", b"2", None, None));
+        assert!(block_builder.add_value(b"cherry", b"3", None, None));
         let block = block_builder.build().unwrap();
 
         // when: seeking to exact key in descending order
@@ -613,9 +613,9 @@ mod tests {
     async fn should_seek_descending_beyond_last_key() {
         // given: a block with keys apple, banana, cherry
         let mut block_builder = BlockBuilder::new_v1(1024);
-        assert!(block_builder.add_value(b"apple", b"1", gen_empty_attrs()));
-        assert!(block_builder.add_value(b"banana", b"2", gen_empty_attrs()));
-        assert!(block_builder.add_value(b"cherry", b"3", gen_empty_attrs()));
+        assert!(block_builder.add_value(b"apple", b"1", None, None));
+        assert!(block_builder.add_value(b"banana", b"2", None, None));
+        assert!(block_builder.add_value(b"cherry", b"3", None, None));
         let block = block_builder.build().unwrap();
 
         // when: seeking to key beyond last key (zzz > cherry)
@@ -636,9 +636,9 @@ mod tests {
     async fn should_seek_descending_to_key_before_first() {
         // given: a block with keys banana, cherry, dragon
         let mut block_builder = BlockBuilder::new_v1(1024);
-        assert!(block_builder.add_value(b"banana", b"2", gen_empty_attrs()));
-        assert!(block_builder.add_value(b"cherry", b"3", gen_empty_attrs()));
-        assert!(block_builder.add_value(b"dragon", b"4", gen_empty_attrs()));
+        assert!(block_builder.add_value(b"banana", b"2", None, None));
+        assert!(block_builder.add_value(b"cherry", b"3", None, None));
+        assert!(block_builder.add_value(b"dragon", b"4", None, None));
         let block = block_builder.build().unwrap();
 
         // when: seeking to key before first key (apple < banana)
@@ -653,9 +653,9 @@ mod tests {
     async fn should_seek_descending_to_key_between_entries() {
         // given: a block with keys apple, cherry, dragon
         let mut block_builder = BlockBuilder::new_v1(1024);
-        assert!(block_builder.add_value(b"apple", b"1", gen_empty_attrs()));
-        assert!(block_builder.add_value(b"cherry", b"3", gen_empty_attrs()));
-        assert!(block_builder.add_value(b"dragon", b"4", gen_empty_attrs()));
+        assert!(block_builder.add_value(b"apple", b"1", None, None));
+        assert!(block_builder.add_value(b"cherry", b"3", None, None));
+        assert!(block_builder.add_value(b"dragon", b"4", None, None));
         let block = block_builder.build().unwrap();
 
         // when: seeking to "banana" which is between apple and cherry
@@ -672,9 +672,9 @@ mod tests {
     async fn should_full_descending_iteration_work() {
         // given: a block with multiple entries
         let mut block_builder = BlockBuilder::new_v1(1024);
-        assert!(block_builder.add_value(b"apple", b"1", gen_empty_attrs()));
-        assert!(block_builder.add_value(b"banana", b"2", gen_empty_attrs()));
-        assert!(block_builder.add_value(b"cherry", b"3", gen_empty_attrs()));
+        assert!(block_builder.add_value(b"apple", b"1", None, None));
+        assert!(block_builder.add_value(b"banana", b"2", None, None));
+        assert!(block_builder.add_value(b"cherry", b"3", None, None));
         let block = block_builder.build().unwrap();
 
         // when: iterating in descending order without seek
@@ -694,11 +694,11 @@ mod tests {
     async fn should_seek_descending_bidirectionally() {
         // given: a block with multiple entries
         let mut block_builder = BlockBuilder::new_v1(1024);
-        assert!(block_builder.add_value(b"a", b"v1", gen_attrs(1)));
-        assert!(block_builder.add_value(b"b", b"v2", gen_attrs(2)));
-        assert!(block_builder.add_value(b"c", b"v3", gen_attrs(3)));
-        assert!(block_builder.add_value(b"d", b"v4", gen_attrs(4)));
-        assert!(block_builder.add_value(b"e", b"v5", gen_attrs(5)));
+        assert!(block_builder.add_value(b"a", b"v1", Some(1), None));
+        assert!(block_builder.add_value(b"b", b"v2", Some(2), None));
+        assert!(block_builder.add_value(b"c", b"v3", Some(3), None));
+        assert!(block_builder.add_value(b"d", b"v4", Some(4), None));
+        assert!(block_builder.add_value(b"e", b"v5", Some(5), None));
         let block = block_builder.build().unwrap();
 
         // when: iterating in descending

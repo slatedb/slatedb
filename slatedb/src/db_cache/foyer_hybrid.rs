@@ -119,7 +119,6 @@ mod tests {
     use crate::db_cache::{CachedEntry, CachedKey, DbCache};
     use crate::db_state::SsTableId;
     use crate::format::sst::BlockBuilder;
-    use crate::types::RowAttributes;
     use foyer::{DirectFsDeviceOptions, Engine, HybridCacheBuilder};
     use rand::RngCore;
     use std::collections::HashMap;
@@ -161,14 +160,7 @@ mod tests {
             rng.fill_bytes(&mut k);
             let mut v = vec![0u8; 128];
             rng.fill_bytes(&mut v);
-            if builder.add_value(
-                &k,
-                &v,
-                RowAttributes {
-                    ts: None,
-                    expire_ts: None,
-                },
-            ) {
+            if builder.add_value(&k, &v, None, None) {
                 break;
             }
         }

@@ -6,6 +6,9 @@ use bytes::Bytes;
 pub struct KeyValue {
     pub key: Bytes,
     pub value: Bytes,
+    pub seq: u64,
+    pub create_ts: Option<i64>,
+    pub expire_ts: Option<i64>,
 }
 
 impl<K, V> From<(&K, &V)> for KeyValue
@@ -16,7 +19,13 @@ where
     fn from(record: (&K, &V)) -> Self {
         let key = Bytes::copy_from_slice(record.0.as_ref());
         let value = Bytes::copy_from_slice(record.1.as_ref());
-        KeyValue { key, value }
+        KeyValue {
+            key,
+            value,
+            seq: 0,
+            create_ts: None,
+            expire_ts: None,
+        }
     }
 }
 
@@ -147,7 +156,6 @@ impl RowEntry {
     }
 }
 
-#[cfg(test)]
 impl From<RowEntry> for KeyValue {
     fn from(entry: RowEntry) -> Self {
         KeyValue {
@@ -156,17 +164,11 @@ impl From<RowEntry> for KeyValue {
                 .value
                 .as_bytes()
                 .expect("RowEntry should have a value"),
+            seq: entry.seq,
+            create_ts: entry.create_ts,
+            expire_ts: entry.expire_ts,
         }
     }
-}
-
-/// The metadata associated with a `KeyValueDeletable`
-/// TODO: can be removed
-#[cfg(test)]
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) struct RowAttributes {
-    pub(crate) ts: Option<i64>,
-    pub(crate) expire_ts: Option<i64>,
 }
 
 /// Represents a value for a key.

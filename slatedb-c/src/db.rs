@@ -8,12 +8,11 @@ use crate::ffi::{
     error_from_slate_error, error_result, flush_options_from_ptr, merge_options_from_ptr,
     put_options_from_ptr, read_options_from_ptr, require_handle, require_out_ptr,
     scan_options_from_ptr, slatedb_db_t, slatedb_error_kind_t, slatedb_flush_options_t,
-    slatedb_iterator_t, slatedb_merge_options_t, slatedb_object_store_t, slatedb_put_options_t,
-    slatedb_range_t, slatedb_read_options_t, slatedb_result_t, slatedb_row_entry_t,
+    slatedb_iterator_t, slatedb_key_value_t, slatedb_merge_options_t, slatedb_object_store_t,
+    slatedb_put_options_t, slatedb_range_t, slatedb_read_options_t, slatedb_result_t,
     slatedb_scan_options_t, slatedb_write_batch_t, slatedb_write_handle_t, slatedb_write_options_t,
     success_result, take_write_batch, validate_write_key, validate_write_key_value,
-    write_options_from_ptr, SLATEDB_ROW_ENTRY_KIND_MERGE, SLATEDB_ROW_ENTRY_KIND_TOMBSTONE,
-    SLATEDB_ROW_ENTRY_KIND_VALUE,
+    write_options_from_ptr,
 };
 use serde_json::{Map, Value};
 use slatedb::Db;
@@ -340,15 +339,15 @@ pub unsafe extern "C" fn slatedb_db_get_with_options(
 /// - `key` must point to at least `key_len` bytes of valid memory.
 /// - `read_options` must be a valid pointer to `slatedb_read_options_t` or NULL.
 /// - `out_present` must be a valid pointer to a `bool`.
-/// - `out_row` must be a valid pointer to a `*mut slatedb_row_entry_t`.
+/// - `out_row` must be a valid pointer to a `*mut slatedb_key_value_t`.
 #[no_mangle]
-pub unsafe extern "C" fn slatedb_db_get_row_with_options(
+pub unsafe extern "C" fn slatedb_db_get_key_value_with_options(
     db: *mut slatedb_db_t,
     key: *const u8,
     key_len: usize,
     read_options: *const slatedb_read_options_t,
     out_present: *mut bool,
-    out_row: *mut *mut slatedb_row_entry_t,
+    out_row: *mut *mut slatedb_key_value_t,
 ) -> slatedb_result_t {
     if db.is_null() {
         return error_result(slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID, "db");
@@ -370,35 +369,22 @@ pub unsafe extern "C" fn slatedb_db_get_row_with_options(
     let handle = &mut *db;
     match handle
         .runtime
-        .block_on(handle.db.get_row_with_options(key, &read_options))
+        .block_on(handle.db.get_key_value_with_options(key, &read_options))
     {
-        Ok(Some(row)) => {
-            let (key, key_len) = alloc_bytes(row.key.as_ref());
-            let (kind, value, value_len) = match &row.value {
-                slatedb::ValueDeletable::Value(v) => {
-                    let (val, val_len) = alloc_bytes(v.as_ref());
-                    (SLATEDB_ROW_ENTRY_KIND_VALUE, val, val_len)
-                }
-                slatedb::ValueDeletable::Merge(v) => {
-                    let (val, val_len) = alloc_bytes(v.as_ref());
-                    (SLATEDB_ROW_ENTRY_KIND_MERGE, val, val_len)
-                }
-                slatedb::ValueDeletable::Tombstone => {
-                    (SLATEDB_ROW_ENTRY_KIND_TOMBSTONE, std::ptr::null_mut(), 0)
-                }
-            };
+        Ok(Some(kv)) => {
+            let (key, key_len) = alloc_bytes(kv.key.as_ref());
+            let (val, val_len) = alloc_bytes(kv.value.as_ref());
 
-            let c_row = Box::new(slatedb_row_entry_t {
-                kind,
+            let c_row = Box::new(slatedb_key_value_t {
                 key,
                 key_len,
-                value,
-                value_len,
-                seq: row.seq,
-                create_ts: row.create_ts.unwrap_or(0),
-                create_ts_present: row.create_ts.is_some(),
-                expire_ts: row.expire_ts.unwrap_or(0),
-                expire_ts_present: row.expire_ts.is_some(),
+                value: val,
+                value_len: val_len,
+                seq: kv.seq,
+                create_ts: kv.create_ts.unwrap_or(0),
+                create_ts_present: kv.create_ts.is_some(),
+                expire_ts: kv.expire_ts.unwrap_or(0),
+                expire_ts_present: kv.expire_ts.is_some(),
             });
 
             *out_row = Box::into_raw(c_row);

@@ -84,33 +84,29 @@ var _ = Describe("Iterator", func() {
 			Expect(count).To(Equal(4))
 		})
 
-		It("should iterate through all items with NextRow()", func() {
+		It("should iterate through all items with metadata", func() {
 			count := 0
 			var lastKey []byte
 
 			for {
-				row, err := iter.NextRow()
+				kv, err := iter.Next()
 				if err == io.EOF {
 					break
 				}
 				Expect(err).NotTo(HaveOccurred())
-				Expect(row).NotTo(BeNil())
-				Expect(len(row.Key)).To(BeNumerically(">", 0))
-				Expect(len(row.Value)).To(BeNumerically(">", 0))
-				Expect(row.Seq).To(BeNumerically(">", 0))
-				if row.CreateTs != nil {
-					Expect(*row.CreateTs).To(BeNumerically(">", 0))
-				}
-				if row.ExpireTs != nil {
-					Expect(*row.ExpireTs).To(BeNumerically(">", 0))
+				Expect(len(kv.Key)).To(BeNumerically(">", 0))
+				Expect(len(kv.Value)).To(BeNumerically(">", 0))
+				Expect(kv.Seq).To(BeNumerically(">", 0))
+				if kv.CreateTs != nil {
+					Expect(*kv.CreateTs).To(BeNumerically(">", 0))
 				}
 
 				// Keys should be in order
 				if lastKey != nil {
-					Expect(string(row.Key) >= string(lastKey)).To(BeTrue(),
-						"Keys should be in lexicographical order: %s >= %s", string(row.Key), string(lastKey))
+					Expect(string(kv.Key) >= string(lastKey)).To(BeTrue(),
+						"Keys should be in lexicographical order: %s >= %s", string(kv.Key), string(lastKey))
 				}
-				lastKey = row.Key
+				lastKey = kv.Key
 				count++
 			}
 			Expect(count).To(Equal(4))

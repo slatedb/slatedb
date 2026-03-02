@@ -43,18 +43,12 @@ func (iter *Iterator) Next() (KeyValue, error) {
 	}
 
 	var present C.bool
-	var keyPtr *C.uint8_t
-	var keyLen C.uintptr_t
-	var valuePtr *C.uint8_t
-	var valueLen C.uintptr_t
+	var kvPtr *C.slatedb_key_value_t
 
 	result := C.slatedb_iterator_next(
 		iter.ptr,
 		&present,
-		&keyPtr,
-		&keyLen,
-		&valuePtr,
-		&valueLen,
+		&kvPtr,
 	)
 	if err := resultToErrorAndFree(result); err != nil {
 		return KeyValue{}, err
@@ -63,61 +57,24 @@ func (iter *Iterator) Next() (KeyValue, error) {
 	if present == C.bool(false) {
 		return KeyValue{}, io.EOF
 	}
+	defer C.slatedb_key_value_free(kvPtr)
 
-	return KeyValue{
-		Key:   copyBytesAndFree(keyPtr, keyLen),
-		Value: copyBytesAndFree(valuePtr, valueLen),
-	}, nil
-}
-
-// NextRow returns the next key-value pair with metadata from the iterator.
-//
-// Returns `io.EOF` when iteration is complete.
-func (iter *Iterator) NextRow() (*RowEntry, error) {
-	if iter.closed {
-		return nil, errors.New("iterator is closed")
-	}
-	if iter.ptr == nil {
-		return nil, errors.New("invalid iterator")
+	kv := KeyValue{
+		Key:   C.GoBytes(unsafe.Pointer(kvPtr.key), C.int(kvPtr.key_len)),
+		Value: C.GoBytes(unsafe.Pointer(kvPtr.value), C.int(kvPtr.value_len)),
+		Seq:   uint64(kvPtr.seq),
 	}
 
-	var present C.bool
-	var rowPtr *C.slatedb_row_entry_t
-
-	result := C.slatedb_iterator_next_row(
-		iter.ptr,
-		&present,
-		&rowPtr,
-	)
-	if err := resultToErrorAndFree(result); err != nil {
-		return nil, err
+	if bool(kvPtr.create_ts_present) {
+		ts := int64(kvPtr.create_ts)
+		kv.CreateTs = &ts
+	}
+	if bool(kvPtr.expire_ts_present) {
+		ts := int64(kvPtr.expire_ts)
+		kv.ExpireTs = &ts
 	}
 
-	if present == C.bool(false) {
-		return nil, io.EOF
-	}
-	defer C.slatedb_row_entry_free(rowPtr)
-
-	row := &RowEntry{
-		Kind: RowEntryKind(rowPtr.kind),
-		Key:  C.GoBytes(unsafe.Pointer(rowPtr.key), C.int(rowPtr.key_len)),
-		Seq:  uint64(rowPtr.seq),
-	}
-
-	if rowPtr.value != nil {
-		row.Value = C.GoBytes(unsafe.Pointer(rowPtr.value), C.int(rowPtr.value_len))
-	}
-
-	if bool(rowPtr.create_ts_present) {
-		ts := int64(rowPtr.create_ts)
-		row.CreateTs = &ts
-	}
-	if bool(rowPtr.expire_ts_present) {
-		ts := int64(rowPtr.expire_ts)
-		row.ExpireTs = &ts
-	}
-
-	return row, nil
+	return kv, nil
 }
 
 // Seek moves the iterator to the first key greater than or equal to `key`.

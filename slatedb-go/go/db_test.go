@@ -69,22 +69,22 @@ var _ = Describe("DB", func() {
 				Expect(retrievedValue).To(Equal(value))
 			})
 
-			It("should get row with metadata", func() {
+			It("should get key-value with metadata", func() {
 				key := []byte("row_test_key")
 				value := []byte("row_test_value")
 
 				wh, err := db.Put(key, value)
 				Expect(err).NotTo(HaveOccurred())
 
-				row, err := db.GetRow(key)
+				kv, err := db.GetKeyValue(key)
 				Expect(err).NotTo(HaveOccurred())
-				Expect(row).NotTo(BeNil())
-				Expect(row.Key).To(Equal(key))
-				Expect(row.Value).To(Equal(value))
-				Expect(row.Seq).To(Equal(wh.Seq))
+				Expect(kv).NotTo(BeNil())
+				Expect(kv.Key).To(Equal(key))
+				Expect(kv.Value).To(Equal(value))
+				Expect(kv.Seq).To(Equal(wh.Seq))
 				if wh.CreateTs > 0 {
-					Expect(row.CreateTs).NotTo(BeNil())
-					Expect(*row.CreateTs).To(Equal(wh.CreateTs))
+					Expect(kv.CreateTs).NotTo(BeNil())
+					Expect(*kv.CreateTs).To(Equal(wh.CreateTs))
 				}
 			})
 

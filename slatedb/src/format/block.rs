@@ -159,27 +159,28 @@ impl BlockBuilderV1 {
         &mut self,
         key: &[u8],
         value: &[u8],
-        attrs: crate::types::RowAttributes,
+        ts: Option<i64>,
+        expire_ts: Option<i64>,
     ) -> bool {
         let entry = RowEntry::new(
             key.to_vec().into(),
             crate::types::ValueDeletable::Value(Bytes::copy_from_slice(value)),
             0,
-            attrs.ts,
-            attrs.expire_ts,
+            ts,
+            expire_ts,
         );
         self.add(entry).unwrap_or(false)
     }
 
     #[allow(dead_code)]
     #[cfg(test)]
-    fn add_tombstone(&mut self, key: &[u8], attrs: crate::types::RowAttributes) -> bool {
+    fn add_tombstone(&mut self, key: &[u8], ts: Option<i64>, expire_ts: Option<i64>) -> bool {
         let entry = RowEntry::new(
             key.to_vec().into(),
             crate::types::ValueDeletable::Tombstone,
             0,
-            attrs.ts,
-            attrs.expire_ts,
+            ts,
+            expire_ts,
         );
         self.add(entry).unwrap_or(false)
     }

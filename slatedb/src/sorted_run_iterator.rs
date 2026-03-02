@@ -195,7 +195,7 @@ mod tests {
     use crate::format::sst::SsTableFormat;
     use crate::proptest_util;
     use crate::proptest_util::sample;
-    use crate::test_utils::{assert_kv, gen_attrs};
+    use crate::test_utils::assert_kv;
     use crate::types::KeyValue;
 
     use crate::object_stores::ObjectStores;
@@ -224,15 +224,15 @@ mod tests {
         ));
         let mut builder = table_store.table_builder();
         builder
-            .add_value(b"key1", b"value1", gen_attrs(1))
+            .add_value(b"key1", b"value1", Some(1), None)
             .await
             .unwrap();
         builder
-            .add_value(b"key2", b"value2", gen_attrs(2))
+            .add_value(b"key2", b"value2", Some(2), None)
             .await
             .unwrap();
         builder
-            .add_value(b"key3", b"value3", gen_attrs(3))
+            .add_value(b"key3", b"value3", Some(3), None)
             .await
             .unwrap();
         let encoded = builder.build().await.unwrap();
@@ -281,11 +281,11 @@ mod tests {
         ));
         let mut builder = table_store.table_builder();
         builder
-            .add_value(b"key1", b"value1", gen_attrs(1))
+            .add_value(b"key1", b"value1", Some(1), None)
             .await
             .unwrap();
         builder
-            .add_value(b"key2", b"value2", gen_attrs(2))
+            .add_value(b"key2", b"value2", Some(2), None)
             .await
             .unwrap();
         let encoded = builder.build().await.unwrap();
@@ -293,7 +293,7 @@ mod tests {
         let handle1 = table_store.write_sst(&id1, encoded, false).await.unwrap();
         let mut builder = table_store.table_builder();
         builder
-            .add_value(b"key3", b"value3", gen_attrs(3))
+            .add_value(b"key3", b"value3", Some(3), None)
             .await
             .unwrap();
         let encoded = builder.build().await.unwrap();
@@ -507,7 +507,7 @@ mod tests {
             }
 
             for (key, value) in sst_kvs {
-                builder.add_value(key, value, gen_attrs(0)).await.unwrap();
+                builder.add_value(key, value, Some(0), None).await.unwrap();
             }
 
             let encoded = builder.build().await.unwrap();
@@ -552,7 +552,7 @@ mod tests {
                 .table_builder()
                 .with_block_format(BlockFormat::V1);
             for (key, value) in keys_and_values {
-                builder.add_value(key, value, gen_attrs(0)).await.unwrap();
+                builder.add_value(key, value, Some(0), None).await.unwrap();
             }
             let encoded = builder.build().await.unwrap();
             let id = SsTableId::Compacted(ulid::Ulid::new());
@@ -566,7 +566,7 @@ mod tests {
             // V2 is now the default, so no need to explicitly set block format
             let mut builder = table_store.table_builder();
             for (key, value) in keys_and_values {
-                builder.add_value(key, value, gen_attrs(0)).await.unwrap();
+                builder.add_value(key, value, Some(0), None).await.unwrap();
             }
             let encoded = builder.build().await.unwrap();
             let id = SsTableId::Compacted(ulid::Ulid::new());

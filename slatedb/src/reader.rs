@@ -325,7 +325,7 @@ impl Reader {
         )
         .await?;
 
-        if let Some(entry) = iterator.next_row_internal().await? {
+        if let Some(entry) = iterator.next_entry().await? {
             if entry.key == target_key {
                 return Ok(Some(entry));
             }

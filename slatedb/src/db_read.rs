@@ -1,6 +1,7 @@
 use crate::{
     bytes_range::BytesRange,
     config::{ReadOptions, ScanOptions},
+    types::KeyValue,
     DbIterator,
 };
 use bytes::Bytes;
@@ -60,6 +61,54 @@ pub trait DbRead {
         key: K,
         options: &ReadOptions,
     ) -> Result<Option<Bytes>, crate::Error>;
+
+    /// Get a key-value pair from the database with default read options.
+    ///
+    /// Returns the key along with its value and metadata (sequence number,
+    /// creation timestamp, expiration timestamp). Unlike [`get`](Self::get),
+    /// which returns only the value bytes, this method returns a [`KeyValue`]
+    /// that includes row metadata.
+    ///
+    /// ## Arguments
+    /// - `key`: the key to look up
+    ///
+    /// ## Returns
+    /// - `Ok(Some(KeyValue))`: if the key exists and is not deleted/expired
+    /// - `Ok(None)`: if the key does not exist or is deleted/expired
+    ///
+    /// ## Errors
+    /// - `Error`: if there was an error reading from the database
+    async fn get_key_value<K: AsRef<[u8]> + Send>(
+        &self,
+        key: K,
+    ) -> Result<Option<KeyValue>, crate::Error> {
+        self.get_key_value_with_options(key, &ReadOptions::default())
+            .await
+    }
+
+    /// Get a key-value pair from the database with custom read options.
+    ///
+    /// Returns the key along with its value and metadata (sequence number,
+    /// creation timestamp, expiration timestamp). Unlike
+    /// [`get_with_options`](Self::get_with_options), which returns only the
+    /// value bytes, this method returns a [`KeyValue`] that includes row
+    /// metadata.
+    ///
+    /// ## Arguments
+    /// - `key`: the key to look up
+    /// - `options`: the read options to use
+    ///
+    /// ## Returns
+    /// - `Ok(Some(KeyValue))`: if the key exists and is not deleted/expired
+    /// - `Ok(None)`: if the key does not exist or is deleted/expired
+    ///
+    /// ## Errors
+    /// - `Error`: if there was an error reading from the database
+    async fn get_key_value_with_options<K: AsRef<[u8]> + Send>(
+        &self,
+        key: K,
+        options: &ReadOptions,
+    ) -> Result<Option<KeyValue>, crate::Error>;
 
     /// Scan a range of keys using the default scan options.
     ///

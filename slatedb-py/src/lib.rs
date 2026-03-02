@@ -215,6 +215,7 @@ fn slatedb(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyDbIterator>()?;
     m.add_class::<PyWriteHandle>()?;
     m.add_class::<PyRowEntry>()?;
+    m.add_class::<PyKeyValue>()?;
     // Export exception types
     m.add("TransactionError", py.get_type::<TransactionError>())?;
     m.add("ClosedError", py.get_type::<ClosedError>())?;
@@ -400,6 +401,33 @@ impl From<::slatedb::RowEntry> for PyRowEntry {
             seq: r.seq,
             create_ts: r.create_ts,
             expire_ts: r.expire_ts,
+        }
+    }
+}
+
+#[pyclass(name = "KeyValue")]
+#[derive(Clone)]
+struct PyKeyValue {
+    #[pyo3(get)]
+    key: PyByteVec,
+    #[pyo3(get)]
+    value: PyByteVec,
+    #[pyo3(get)]
+    seq: u64,
+    #[pyo3(get)]
+    create_ts: Option<i64>,
+    #[pyo3(get)]
+    expire_ts: Option<i64>,
+}
+
+impl From<::slatedb::KeyValue> for PyKeyValue {
+    fn from(kv: ::slatedb::KeyValue) -> Self {
+        PyKeyValue {
+            key: kv.key.to_vec(),
+            value: kv.value.to_vec(),
+            seq: kv.seq,
+            create_ts: kv.create_ts,
+            expire_ts: kv.expire_ts,
         }
     }
 }
@@ -601,44 +629,45 @@ impl PySlateDB {
     }
 
     #[pyo3(signature = (key))]
-    fn get_row<'py>(
+    fn get_key_value<'py>(
         &self,
         py: Python<'py>,
         key: Vec<u8>,
-    ) -> PyResult<Option<Bound<'py, PyRowEntry>>> {
+    ) -> PyResult<Option<Bound<'py, PyKeyValue>>> {
         if key.is_empty() {
             return Err(InvalidError::new_err("key cannot be empty"));
         }
         let db = self.inner.clone();
         let rt = get_runtime();
-        let res: Option<::slatedb::RowEntry> =
-            py.allow_threads(|| rt.block_on(async { db.get_row(&key).await.map_err(map_error) }))?;
-        Ok(res.map(|r| Bound::new(py, PyRowEntry::from(r)).unwrap()))
+        let res: Option<::slatedb::KeyValue> = py.allow_threads(|| {
+            rt.block_on(async { db.get_key_value(&key).await.map_err(map_error) })
+        })?;
+        Ok(res.map(|kv| Bound::new(py, PyKeyValue::from(kv)).unwrap()))
     }
 
     #[pyo3(signature = (key, *, durability_filter = None, dirty = None, cache_blocks = None))]
-    fn get_row_with_options<'py>(
+    fn get_key_value_with_options<'py>(
         &self,
         py: Python<'py>,
         key: Vec<u8>,
         durability_filter: Option<String>,
         dirty: Option<bool>,
         cache_blocks: Option<bool>,
-    ) -> PyResult<Option<Bound<'py, PyRowEntry>>> {
+    ) -> PyResult<Option<Bound<'py, PyKeyValue>>> {
         if key.is_empty() {
             return Err(InvalidError::new_err("key cannot be empty"));
         }
         let db = self.inner.clone();
         let opts = build_read_options(durability_filter, dirty, cache_blocks)?;
         let rt = get_runtime();
-        let res: Option<::slatedb::RowEntry> = py.allow_threads(|| {
+        let res: Option<::slatedb::KeyValue> = py.allow_threads(|| {
             rt.block_on(async {
-                db.get_row_with_options(&key, &opts)
+                db.get_key_value_with_options(&key, &opts)
                     .await
                     .map_err(map_error)
             })
         })?;
-        Ok(res.map(|r| Bound::new(py, PyRowEntry::from(r)).unwrap()))
+        Ok(res.map(|kv| Bound::new(py, PyKeyValue::from(kv)).unwrap()))
     }
 
     #[pyo3(signature = (key, *, durability_filter = None, dirty = None, cache_blocks = None))]
@@ -3228,22 +3257,6 @@ impl PyDbIterator {
             }
             None => Err(pyo3::exceptions::PyStopIteration::new_err("")),
         }
-    }
-
-    fn next_row(&mut self, py: Python<'_>) -> PyResult<Option<PyRowEntry>> {
-        let inner = self.inner_iter.clone();
-        let rt = get_runtime();
-        let row_opt = py.allow_threads(|| {
-            rt.block_on(async {
-                let mut guard = inner.lock().await;
-                let iter = guard
-                    .as_mut()
-                    .ok_or_else(|| InternalError::new_err("iterator not initialized"))?;
-                let next = iter.next_row().await.map_err(map_error)?;
-                Ok::<_, PyErr>(next)
-            })
-        })?;
-        Ok(row_opt.map(PyRowEntry::from))
     }
 
     /// Enable `async for` by providing an async iterator protocol.

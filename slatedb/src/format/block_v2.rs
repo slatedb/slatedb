@@ -227,14 +227,15 @@ impl BlockBuilderV2 {
         &mut self,
         key: &[u8],
         value: &[u8],
-        attrs: crate::types::RowAttributes,
+        ts: Option<i64>,
+        expire_ts: Option<i64>,
     ) -> bool {
         let entry = RowEntry::new(
             key.to_vec().into(),
             crate::types::ValueDeletable::Value(Bytes::copy_from_slice(value)),
             0,
-            attrs.ts,
-            attrs.expire_ts,
+            ts,
+            expire_ts,
         );
         self.add(entry).unwrap_or(false)
     }
@@ -248,7 +249,6 @@ impl BlockBuilderV2 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::gen_empty_attrs;
     use crate::types::ValueDeletable;
     use rstest::rstest;
 
@@ -514,8 +514,8 @@ mod tests {
         let mut builder = BlockBuilderV2::new(4096);
 
         // when: using add_value helper
-        assert!(builder.add_value(b"key1", b"value1", gen_empty_attrs()));
-        assert!(builder.add_value(b"key2", b"value2", gen_empty_attrs()));
+        assert!(builder.add_value(b"key1", b"value1", None, None));
+        assert!(builder.add_value(b"key2", b"value2", None, None));
 
         // then: block builds successfully
         let block = builder.build().expect("build failed");

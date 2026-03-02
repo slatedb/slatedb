@@ -4,16 +4,16 @@ import java.time.Instant;
 import java.util.Optional;
 
 /**
- * Represents a row in the database, including metadata.
+ * Represents a key-value pair with metadata from the database.
  */
-public class RowEntry {
+public class KeyValue {
     private final byte[] key;
     private final byte[] value;
     private final long seq;
     private final Long createTs;
     private final Long expireTs;
 
-    public RowEntry(byte[] key, byte[] value, long seq, Long createTs, Long expireTs) {
+    public KeyValue(byte[] key, byte[] value, long seq, Long createTs, Long expireTs) {
         this.key = key;
         this.value = value;
         this.seq = seq;

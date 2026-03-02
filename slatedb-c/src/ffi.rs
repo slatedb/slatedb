@@ -207,6 +207,36 @@ pub struct slatedb_row_entry_t {
     pub expire_ts: i64,
 }
 
+/// C representation of a key-value pair returned by iterators and point lookups.
+///
+/// Unlike `slatedb_row_entry_t`, this type does not carry tombstone or merge
+/// information — the value is always a regular (resolved) value.
+///
+/// `key` and `value` reference Rust-allocated buffers that must be freed by
+/// calling `slatedb_key_value_free`.
+#[repr(C)]
+#[allow(non_camel_case_types)]
+pub struct slatedb_key_value_t {
+    /// Key bytes.
+    pub key: *mut u8,
+    /// Length of `key` in bytes.
+    pub key_len: usize,
+    /// Value bytes.
+    pub value: *mut u8,
+    /// Length of `value` in bytes.
+    pub value_len: usize,
+    /// Sequence number assigned to this entry.
+    pub seq: u64,
+    /// Whether `create_ts` is populated.
+    pub create_ts_present: bool,
+    /// Creation timestamp (valid when `create_ts_present` is true).
+    pub create_ts: i64,
+    /// Whether `expire_ts` is populated.
+    pub expire_ts_present: bool,
+    /// Expiration timestamp (valid when `expire_ts_present` is true).
+    pub expire_ts: i64,
+}
+
 /// Public error kind mirroring `slatedb::ErrorKind`.
 #[repr(C)]
 #[allow(non_camel_case_types)]

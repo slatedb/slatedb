@@ -13,6 +13,7 @@ use crate::db::WriteHandle;
 use crate::db_iter::{DbIterator, DbIteratorRangeTracker};
 use crate::error::SlateDBError;
 use crate::transaction_manager::{IsolationLevel, TransactionManager};
+use crate::types::KeyValue;
 use crate::DbRead;
 
 /// A database transaction that provides atomic read-write operations with
@@ -144,6 +145,51 @@ impl DbTransaction {
             )
             .await
             .map_err(Into::into)
+    }
+
+    /// Get a key-value pair from the transaction with default read options.
+    pub async fn get_key_value<K: AsRef<[u8]> + Send>(
+        &self,
+        key: K,
+    ) -> Result<Option<KeyValue>, crate::Error> {
+        self.get_key_value_with_options(key, &ReadOptions::default())
+            .await
+    }
+
+    /// Get a key-value pair from the transaction with custom read options.
+    pub async fn get_key_value_with_options<K: AsRef<[u8]> + Send>(
+        &self,
+        key: K,
+        options: &ReadOptions,
+    ) -> Result<Option<KeyValue>, crate::Error> {
+        self.db_inner.status()?;
+
+        if self.isolation_level == IsolationLevel::SerializableSnapshot {
+            let key_bytes = Bytes::copy_from_slice(key.as_ref());
+            let mut read_keys = HashSet::new();
+            read_keys.insert(key_bytes);
+            self.txn_manager.track_read_keys(&self.txn_id, read_keys);
+        }
+
+        let db_state = self.db_inner.state.read().view();
+        let write_batch_cloned = self.write_batch.read().clone();
+
+        let row = self
+            .db_inner
+            .reader
+            .get_row_with_options(
+                key,
+                options,
+                &db_state,
+                Some(write_batch_cloned),
+                Some(self.started_seq),
+            )
+            .await
+            .map_err(crate::Error::from)?;
+        match row {
+            Some(entry) if !entry.value.is_tombstone() => Ok(Some(KeyValue::from(entry))),
+            _ => Ok(None),
+        }
     }
 
     /// Scan a range of keys using the default scan options.
@@ -550,6 +596,14 @@ impl DbRead for DbTransaction {
         options: &ReadOptions,
     ) -> Result<Option<Bytes>, crate::Error> {
         self.get_with_options(key, options).await
+    }
+
+    async fn get_key_value_with_options<K: AsRef<[u8]> + Send>(
+        &self,
+        key: K,
+        options: &ReadOptions,
+    ) -> Result<Option<KeyValue>, crate::Error> {
+        self.get_key_value_with_options(key, options).await
     }
 
     async fn scan_with_options<K, T>(

@@ -20,6 +20,7 @@ use crate::sst_iter::SstIteratorOptions;
 use crate::stats::StatRegistry;
 use crate::store_provider::StoreProvider;
 use crate::tablestore::TableStore;
+use crate::types::{KeyValue, RowEntry};
 use crate::utils::{IdGenerator, WatchableOnceCell};
 use crate::wal_replay::{WalReplayIterator, WalReplayOptions};
 use crate::{Checkpoint, DbIterator};
@@ -194,6 +195,18 @@ impl DbReaderInner {
         let db_state = Arc::clone(&self.state.read());
         self.reader
             .get_with_options(key, options, db_state.as_ref(), None, None)
+            .await
+    }
+
+    async fn get_row_with_options<K: AsRef<[u8]> + Send>(
+        &self,
+        key: K,
+        options: &ReadOptions,
+    ) -> Result<Option<RowEntry>, SlateDBError> {
+        self.check_closed()?;
+        let db_state = Arc::clone(&self.state.read());
+        self.reader
+            .get_row_with_options(key, options, db_state.as_ref(), None, None)
             .await
     }
 
@@ -761,6 +774,32 @@ impl DbReader {
             .map_err(Into::into)
     }
 
+    /// Get a key-value pair from the reader with default read options.
+    pub async fn get_key_value<K: AsRef<[u8]> + Send>(
+        &self,
+        key: K,
+    ) -> Result<Option<KeyValue>, crate::Error> {
+        self.get_key_value_with_options(key, &ReadOptions::default())
+            .await
+    }
+
+    /// Get a key-value pair from the reader with custom read options.
+    pub async fn get_key_value_with_options<K: AsRef<[u8]> + Send>(
+        &self,
+        key: K,
+        options: &ReadOptions,
+    ) -> Result<Option<KeyValue>, crate::Error> {
+        let row = self
+            .inner
+            .get_row_with_options(key, options)
+            .await
+            .map_err(crate::Error::from)?;
+        match row {
+            Some(entry) if !entry.value.is_tombstone() => Ok(Some(KeyValue::from(entry))),
+            _ => Ok(None),
+        }
+    }
+
     /// Scan a range of keys using the default scan options.
     ///
     /// returns a `DbIterator`
@@ -949,6 +988,14 @@ impl DbRead for DbReader {
         options: &ReadOptions,
     ) -> Result<Option<Bytes>, crate::Error> {
         self.get_with_options(key, options).await
+    }
+
+    async fn get_key_value_with_options<K: AsRef<[u8]> + Send>(
+        &self,
+        key: K,
+        options: &ReadOptions,
+    ) -> Result<Option<KeyValue>, crate::Error> {
+        self.get_key_value_with_options(key, options).await
     }
 
     async fn scan_with_options<K, T>(

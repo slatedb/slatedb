@@ -213,7 +213,7 @@ class SlateDbTest {
     }
 
     @Test
-    void getRowReturnsMetadata() throws Exception {
+    void getKeyValueReturnsMetadata() throws Exception {
         TestSupport.ensureLoggingInitialized();
         final var context = TestSupport.createDbContext();
 
@@ -223,18 +223,18 @@ class SlateDbTest {
         try (final SlateDb db = SlateDb.open(context.dbPath().toAbsolutePath().toString(), context.objectStoreUrl(), null)) {
             SlateDbWriteHandle wh = db.put(key, value);
             
-            RowEntry row = db.getRow(key);
-            assertNotNull(row);
-            assertArrayEquals(key, row.key());
-            assertArrayEquals(value, row.value());
-            assertEquals(wh.seq(), row.seq());
+            KeyValue kv = db.getKeyValue(key);
+            assertNotNull(kv);
+            assertArrayEquals(key, kv.key());
+            assertArrayEquals(value, kv.value());
+            assertEquals(wh.seq(), kv.seq());
             if (wh.createTs() > 0) {
-                assertTrue(row.createTs().isPresent());
-                assertEquals(wh.createTs(), row.createTs().get().toEpochMilli());
+                assertTrue(kv.createTs().isPresent());
+                assertEquals(wh.createTs(), kv.createTs().get().toEpochMilli());
             }
 
             // Test non-existent key
-            assertNull(db.getRow("non-existent".getBytes(StandardCharsets.UTF_8)));
+            assertNull(db.getKeyValue("non-existent".getBytes(StandardCharsets.UTF_8)));
         }
     }
 }

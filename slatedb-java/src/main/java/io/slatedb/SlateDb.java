@@ -292,23 +292,23 @@ public final class SlateDb implements SlateDbReadable {
         return NativeInterop.slatedb_db_get_with_options(handle, key, options);
     }
 
-    /// Reads a row (value + metadata) from the database using default read options.
+    /// Reads a key-value pair with metadata from the database using default read options.
     ///
     /// @param key key to read.
-    /// @return The row for the key, or `null` if the key does not exist.
+    /// @return The key-value for the key, or `null` if the key does not exist.
     /// @throws SlateDbException if the read fails.
-    public RowEntry getRow(byte[] key) {
-        return NativeInterop.slatedb_db_get_row(handle, key);
+    public KeyValue getKeyValue(byte[] key) {
+        return NativeInterop.slatedb_db_get_key_value(handle, key);
     }
 
-    /// Reads a row (value + metadata) from the database with custom read options.
+    /// Reads a key-value pair with metadata from the database with custom read options.
     ///
     /// @param key key to read.
     /// @param options read options or `null` for defaults.
-    /// @return The row for the key, or `null` if the key does not exist.
+    /// @return The key-value for the key, or `null` if the key does not exist.
     /// @throws SlateDbException if the read fails.
-    public RowEntry getRow(byte[] key, @Nullable ReadOptions options) {
-        return NativeInterop.slatedb_db_get_row_with_options(handle, key, options);
+    public KeyValue getKeyValue(byte[] key, @Nullable ReadOptions options) {
+        return NativeInterop.slatedb_db_get_key_value_with_options(handle, key, options);
     }
 
     /// Deletes a key using default write options.
