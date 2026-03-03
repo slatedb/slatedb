@@ -78,6 +78,66 @@ table ManifestV1 {
     sequence_tracker: [ubyte];
 }
 
+// Manifest to persist state of DB, version 2 (CompactedSsTable changed to CompactedSsTableView).
+table ManifestV2 {
+    // Id of manifest. Manifest file name will be derived from this id.
+    manifest_id: ulong;
+
+    // List of external databases referenced by this manifest.
+    external_dbs: [ExternalDb];
+
+    // Flag to indicate whether initialization has finished. When creating the initial manifest for
+    // a root db (one that is not a clone), this flag will be set to true. When creating the initial
+    // manifest for a clone db, this flag will be set to false and then updated to true once clone
+    // initialization has completed.
+    initialized: bool;
+
+    // The current writer's epoch.
+    writer_epoch: ulong;
+
+    // The current compactor's epoch.
+    compactor_epoch: ulong;
+
+    // Tracks the most recent SST in the WAL that has been flushed on the last L0 is compacted. When an Immutable 
+    // Memtable (IMM) is flushed to L0, we record the recent flushed WAL ID as `replay_after_wal_id`. During recovery,
+    // we use `replay_after_wal_id + 1` as the starting point for WAL replay, and skip the WAL entries with
+    // smaller `seq` than `last_l0_seq`.
+    replay_after_wal_id: ulong;
+
+    // The most recent SST in the WAL at the time manifest was updated.
+    wal_id_last_seen: ulong;
+
+    // The last compacted l0
+    l0_last_compacted: Ulid;
+
+    // A list of the L0 SSTs that are valid to read in the `compacted` folder.
+    l0: [CompactedSsTableView] (required);
+
+    // A list of the sorted runs that are valid to read in the `compacted` folder.
+    compacted: [SortedRunV2] (required);
+
+    // The last L0 clock tick (the database should restore the latest
+    // tick when recovering from WAL if there are any WAL entries)
+    last_l0_clock_tick: long;
+
+    // A list of checkpoints that are currently open.
+    checkpoints: [Checkpoint] (required);
+
+    // The last seq number
+    last_l0_seq: ulong;
+
+    // The URI of the object store dedicated specifically for WAL, if any.
+    wal_object_store_uri: string;
+
+    // Minimum sequence number across all recent in-memory (write) snapshots. The compactor
+    // needs this to determine whether it's safe to drop duplicate key writes. If a recent snapshot
+    // still references an older version of a key, it should not be dropped.
+    recent_snapshot_min_seq: ulong;
+
+    // Serialized sequence tracker data as defined in RFC-0012.
+    sequence_tracker: [ubyte];
+}
+
 table WriterCheckpoint {
     epoch: uint64;
 }

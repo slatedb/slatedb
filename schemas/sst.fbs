@@ -80,11 +80,23 @@ table SsTableIndex {
 table CompactedSsTable {
     id: Ulid (required);
     info: SsTableInfo (required);
+    // deprecated: visible_range is moved to CompactedSsTableView
     visible_range: BytesRange;
     format_version: uint16 = null;
 }
 
+table CompactedSsTableView {
+    sst: CompactedSsTable (required);
+    visible_range: BytesRange;
+}
+
+// deprecated: use SortedRunV2
 table SortedRun {
     id: uint32;
     ssts: [CompactedSsTable] (required);
+}
+
+table SortedRunV2 {
+    id: uint32;
+    ssts: [CompactedSsTableView] (required);
 }
