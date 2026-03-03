@@ -1049,7 +1049,8 @@ mod tests {
     use crate::compactor_state::CompactionStatus;
     use crate::compactor_state::SourceId;
     use crate::config::{
-        MergeOptions, PutOptions, Settings, SizeTieredCompactionSchedulerOptions, Ttl, WriteOptions,
+        FlushOptions, FlushType, MergeOptions, PutOptions, Settings,
+        SizeTieredCompactionSchedulerOptions, Ttl, WriteOptions,
     };
     use crate::db::Db;
     use crate::db_state::{ManifestCore, SortedRun, SsTableHandle, SsTableId, SsTableInfo};
@@ -1093,7 +1094,9 @@ mod tests {
         let os = Arc::new(InMemory::new());
         let system_clock = Arc::new(MockSystemClock::new());
         let mut options = db_options(Some(compactor_options()));
-        options.l0_sst_size_bytes = 128;
+        // Bigger than all writes so we keep all writes in a single SST.
+        // This makes it easier to verify all KV pairs are in that SST.
+        options.l0_sst_size_bytes = 512;
         let scheduler_options = SizeTieredCompactionSchedulerOptions {
             min_compaction_sources: 1,
             max_compaction_sources: 999,
@@ -1119,14 +1122,37 @@ mod tests {
             let k = vec![b'a' + i as u8; 16];
             let v = vec![b'b' + i as u8; 48];
             expected.insert(k.clone(), v.clone());
-            db.put(&k, &v).await.unwrap();
+            db.put_with_options(
+                &k,
+                &v,
+                &PutOptions::default(),
+                &WriteOptions {
+                    await_durable: false,
+                },
+            )
+            .await
+            .unwrap();
             let k = vec![b'j' + i as u8; 16];
             let v = vec![b'k' + i as u8; 48];
-            db.put(&k, &v).await.unwrap();
+            db.put_with_options(
+                &k,
+                &v,
+                &PutOptions::default(),
+                &WriteOptions {
+                    await_durable: false,
+                },
+            )
+            .await
+            .unwrap();
             expected.insert(k.clone(), v.clone());
         }
 
-        db.flush().await.unwrap();
+        // Force all writes to a single L0 SST.
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::MemTable,
+        })
+        .await
+        .unwrap();
 
         // when:
         let db_state = await_compaction(&db, Some(system_clock.clone())).await;
