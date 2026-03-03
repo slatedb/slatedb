@@ -214,7 +214,6 @@ fn slatedb(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyWriteBatch>()?;
     m.add_class::<PyDbIterator>()?;
     m.add_class::<PyWriteHandle>()?;
-    m.add_class::<PyRowEntry>()?;
     m.add_class::<PyKeyValue>()?;
     // Export exception types
     m.add("TransactionError", py.get_type::<TransactionError>())?;
@@ -376,42 +375,13 @@ fn build_write_options(await_durable: Option<bool>) -> WriteOptions {
     }
 }
 
-#[pyclass(name = "RowEntry")]
-#[derive(Clone)]
-struct PyRowEntry {
-    #[pyo3(get)]
-    key: PyByteVec,
-    #[pyo3(get)]
-    value: PyByteVec,
-    #[pyo3(get)]
-    seq: u64,
-    #[pyo3(get)]
-    create_ts: Option<i64>,
-    #[pyo3(get)]
-    expire_ts: Option<i64>,
-}
-
-type PyByteVec = Vec<u8>;
-
-impl From<::slatedb::RowEntry> for PyRowEntry {
-    fn from(r: ::slatedb::RowEntry) -> Self {
-        PyRowEntry {
-            key: r.key.to_vec(),
-            value: r.value.as_bytes().map(|b| b.to_vec()).unwrap_or_default(),
-            seq: r.seq,
-            create_ts: r.create_ts,
-            expire_ts: r.expire_ts,
-        }
-    }
-}
-
 #[pyclass(name = "KeyValue")]
 #[derive(Clone)]
 struct PyKeyValue {
     #[pyo3(get)]
-    key: PyByteVec,
+    key: Vec<u8>,
     #[pyo3(get)]
-    value: PyByteVec,
+    value: Vec<u8>,
     #[pyo3(get)]
     seq: u64,
     #[pyo3(get)]
