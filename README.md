@@ -160,6 +160,7 @@ See who's using SlateDB.
 - [Responsive](https://responsive.dev)
 - [s2-lite](https://github.com/s2-streamstore/s2)
 - [SQLync](https://sqlync.com)
+- [Storrito](https://storrito.com)
 - [Tensorlake](https://www.tensorlake.ai)
 - [ZeroFS](https://zerofs.net)
 
