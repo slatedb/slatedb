@@ -96,7 +96,6 @@ java {
     sourceCompatibility = JavaVersion.toVersion(minimumJava)
     targetCompatibility = JavaVersion.toVersion(minimumJava)
     withSourcesJar()
-    withJavadocJar()
 }
 
 tasks.withType(JavaCompile).configureEach {
@@ -296,12 +295,11 @@ tasks.named('sourcesJar') {
 }
 
 // Why this exists:
-// - We publish with com.vanniktech.maven.publish, which creates `plainJavadocJar`.
-// - The Java plugin also creates `javadocJar` because we call `withJavadocJar()`.
-// - Gradle 9 validates task inputs/outputs more strictly during publishing.
-//   Without an explicit edge, the metadata task can read the javadoc artifact
-//   before `plainJavadocJar` runs, and CI fails with an "implicit dependency" error.
-// This dependency tells Gradle the required order for publishing only.
+// - `com.vanniktech.maven.publish` attaches `plainJavadocJar` to the `maven` publication.
+// - Gradle 9 can schedule `generateMetadataFileForMavenPublication` before
+//   `plainJavadocJar` unless we add an explicit task edge.
+// - That ordering causes publication-time missing-artifact/signature issues in CI.
+// Keep metadata generation ordered after `plainJavadocJar` for publish tasks.
 tasks.matching { it.name == 'generateMetadataFileForMavenPublication' }.configureEach {
     dependsOn 'plainJavadocJar'
 }
