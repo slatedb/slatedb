@@ -217,8 +217,8 @@ class SlateDbTest {
         TestSupport.ensureLoggingInitialized();
         final var context = TestSupport.createDbContext();
 
-        final var key = "row-key".getBytes(StandardCharsets.UTF_8);
-        final var value = "row-value".getBytes(StandardCharsets.UTF_8);
+        final var key = "test-key".getBytes(StandardCharsets.UTF_8);
+        final var value = "test-value".getBytes(StandardCharsets.UTF_8);
 
         try (final SlateDb db = SlateDb.open(context.dbPath().toAbsolutePath().toString(), context.objectStoreUrl(), null)) {
             SlateDbWriteHandle wh = db.put(key, value);
