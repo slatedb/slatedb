@@ -5225,11 +5225,7 @@ mod tests {
         )
         .await;
         let manifest = db.manifest();
-        info!(
-            "1 l0: {} {}",
-            manifest.l0.len(),
-            manifest.compacted.len()
-        );
+        info!("1 l0: {} {}", manifest.l0.len(), manifest.compacted.len());
 
         // write more l0s and wait for compaction
         for i in 0..4 {
@@ -5251,11 +5247,7 @@ mod tests {
         )
         .await;
         let manifest = db.manifest();
-        info!(
-            "2 l0: {} {}",
-            manifest.l0.len(),
-            manifest.compacted.len()
-        );
+        info!("2 l0: {} {}", manifest.l0.len(), manifest.compacted.len());
         // write another l0
         db.put(&[b'a'; 32], &[128u8; 32]).await.unwrap();
         db.put(&[b'm'; 32], &[129u8; 32]).await.unwrap();
@@ -5266,11 +5258,7 @@ mod tests {
         assert_eq!(val, Some(Bytes::copy_from_slice(&[129u8; 32])));
         for i in 1..4 {
             let manifest = db.manifest();
-            info!(
-                "3 l0: {} {}",
-                manifest.l0.len(),
-                manifest.compacted.len()
-            );
+            info!("3 l0: {} {}", manifest.l0.len(), manifest.compacted.len());
             let val = db.get([b'a' + i; 32]).await.unwrap();
             assert_eq!(val, Some(Bytes::copy_from_slice(&[1u8 + i; 32])));
             let val = db.get([b'm' + i; 32]).await.unwrap();
