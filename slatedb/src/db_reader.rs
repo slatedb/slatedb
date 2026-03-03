@@ -835,7 +835,9 @@ impl DbReader {
     ///       DbReaderOptions::default(),
     ///     ).await?;
     ///     let mut iter = reader.scan("a".."b").await?;
-    ///     assert_eq!(Some((b"a", b"a_value").into()), iter.next().await?);
+    ///     let kv = iter.next().await?.unwrap();
+    ///     assert_eq!(kv.key.as_ref(), b"a");
+    ///     assert_eq!(kv.value.as_ref(), b"a_value");
     ///     assert_eq!(None, iter.next().await?);
     ///     Ok(())
     /// }
@@ -888,7 +890,9 @@ impl DbReader {
     ///         read_ahead_bytes: 1024 * 1024,
     ///         ..ScanOptions::default()
     ///     }).await?;
-    ///     assert_eq!(Some((b"a", b"a_value").into()), iter.next().await?);
+    ///     let kv = iter.next().await?.unwrap();
+    ///     assert_eq!(kv.key.as_ref(), b"a");
+    ///     assert_eq!(kv.value.as_ref(), b"a_value");
     ///     assert_eq!(None, iter.next().await?);
     ///     Ok(())
     /// }

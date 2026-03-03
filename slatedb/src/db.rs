@@ -941,7 +941,9 @@ impl Db {
     ///     db.put(b"b", b"b_value").await?;
     ///
     ///     let mut iter = db.scan("a".."b").await?;
-    ///     assert_eq!(Some((b"a", b"a_value").into()), iter.next().await?);
+    ///     let kv = iter.next().await?.unwrap();
+    ///     assert_eq!(kv.key.as_ref(), b"a");
+    ///     assert_eq!(kv.value.as_ref(), b"a_value");
     ///     assert_eq!(None, iter.next().await?);
     ///     Ok(())
     /// }
@@ -979,7 +981,9 @@ impl Db {
     ///         durability_filter: DurabilityLevel::Memory,
     ///         ..ScanOptions::default()
     ///     }).await?;
-    ///     assert_eq!(Some((b"a", b"a_value").into()), iter.next().await?);
+    ///     let kv = iter.next().await?.unwrap();
+    ///     assert_eq!(kv.key.as_ref(), b"a");
+    ///     assert_eq!(kv.value.as_ref(), b"a_value");
     ///     assert_eq!(None, iter.next().await?);
     ///     Ok(())
     /// }
@@ -1030,8 +1034,12 @@ impl Db {
     ///     db.put(b"b", b"v2").await?;
     ///
     ///     let mut iter = db.scan_prefix(b"ab").await?;
-    ///     assert_eq!(Some((b"ab", b"v0").into()), iter.next().await?);
-    ///     assert_eq!(Some((b"aba", b"v1").into()), iter.next().await?);
+    ///     let kv = iter.next().await?.unwrap();
+    ///     assert_eq!(kv.key.as_ref(), b"ab");
+    ///     assert_eq!(kv.value.as_ref(), b"v0");
+    ///     let kv = iter.next().await?.unwrap();
+    ///     assert_eq!(kv.key.as_ref(), b"aba");
+    ///     assert_eq!(kv.value.as_ref(), b"v1");
     ///     assert_eq!(None, iter.next().await?);
     ///     Ok(())
     /// }
@@ -1074,8 +1082,12 @@ impl Db {
     ///         ..ScanOptions::default()
     ///     };
     ///     let mut iter = db.scan_prefix_with_options(b"x", &options).await?;
-    ///     assert_eq!(Some((b"x1", b"v1").into()), iter.next().await?);
-    ///     assert_eq!(Some((b"x2", b"v2").into()), iter.next().await?);
+    ///     let kv = iter.next().await?.unwrap();
+    ///     assert_eq!(kv.key.as_ref(), b"x1");
+    ///     assert_eq!(kv.value.as_ref(), b"v1");
+    ///     let kv = iter.next().await?.unwrap();
+    ///     assert_eq!(kv.key.as_ref(), b"x2");
+    ///     assert_eq!(kv.value.as_ref(), b"v2");
     ///     assert_eq!(None, iter.next().await?);
     ///     Ok(())
     /// }
