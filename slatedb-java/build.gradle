@@ -14,10 +14,11 @@
 // build/generated/resources/slatedb-native/native/<platform-id>/.
 // These staged artifacts are then included in the final JAR.
 //
-// The main source set includes both the jextract output and these staged native files.
-// Task wiring ensures compileJava depends on patchJextractNativeLoader and
-// processResources depends on prepareNativeLibraries, so `build` and `test` always run
-// with patched bindings and packaged native libraries available from the classpath.
+// The main source set includes jextract output. Task wiring ensures compileJava
+// depends on patchJextractNativeLoader, while processResources depends on
+// prepareNativeLibraries and copies staged binaries into the resources output, so
+// `build` and `test` always run with patched bindings and packaged native libraries
+// available from the classpath.
 
 plugins {
     id 'java-library'
@@ -264,7 +265,9 @@ sourceSets {
             libraries.add(slatedbJextractLibrary)
         }
         resources {
-            srcDir(nativeResourceStagingDir)
+            // Keep sources/resources rooted at the canonical resources directory.
+            // Native binaries are injected by processResources, not sourceSets.
+            setSrcDirs(['src/main/resources'])
         }
     }
 }
@@ -281,6 +284,15 @@ tasks.named('compileJava') {
 
 tasks.named('processResources') {
     dependsOn tasks.named('prepareNativeLibraries')
+    from(nativeResourceStagingDir)
+}
+
+tasks.named('sourcesJar') {
+    // sourcesJar includes generated sources/resources from main sourceSet.
+    // Wire producer tasks explicitly to satisfy Gradle 9 task validation.
+    dependsOn tasks.named('patchJextractNativeLoader')
+    // jextract sources can be surfaced via multiple source-set paths; keep one copy.
+    duplicatesStrategy = org.gradle.api.file.DuplicatesStrategy.EXCLUDE
 }
 
 test {
