@@ -672,13 +672,13 @@ struct slatedb_result_t slatedb_db_get_with_options(struct slatedb_db_t *db,
 // - `key` must point to at least `key_len` bytes of valid memory.
 // - `read_options` must be a valid pointer to `slatedb_read_options_t` or NULL.
 // - `out_present` must be a valid pointer to a `bool`.
-// - `out_row` must be a valid pointer to a `*mut slatedb_key_value_t`.
+// - `out_kv` must be a valid pointer to a `*mut slatedb_key_value_t`.
 struct slatedb_result_t slatedb_db_get_key_value_with_options(struct slatedb_db_t *db,
                                                               const uint8_t *key,
                                                               uintptr_t key_len,
                                                               const struct slatedb_read_options_t *read_options,
                                                               bool *out_present,
-                                                              struct slatedb_key_value_t **out_row);
+                                                              struct slatedb_key_value_t **out_kv);
 
 // Writes a key/value pair using default put/write options.
 //

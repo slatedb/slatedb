@@ -339,7 +339,7 @@ pub unsafe extern "C" fn slatedb_db_get_with_options(
 /// - `key` must point to at least `key_len` bytes of valid memory.
 /// - `read_options` must be a valid pointer to `slatedb_read_options_t` or NULL.
 /// - `out_present` must be a valid pointer to a `bool`.
-/// - `out_row` must be a valid pointer to a `*mut slatedb_key_value_t`.
+/// - `out_kv` must be a valid pointer to a `*mut slatedb_key_value_t`.
 #[no_mangle]
 pub unsafe extern "C" fn slatedb_db_get_key_value_with_options(
     db: *mut slatedb_db_t,
@@ -347,7 +347,7 @@ pub unsafe extern "C" fn slatedb_db_get_key_value_with_options(
     key_len: usize,
     read_options: *const slatedb_read_options_t,
     out_present: *mut bool,
-    out_row: *mut *mut slatedb_key_value_t,
+    out_kv: *mut *mut slatedb_key_value_t,
 ) -> slatedb_result_t {
     if db.is_null() {
         return error_result(slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID, "db");
@@ -375,7 +375,7 @@ pub unsafe extern "C" fn slatedb_db_get_key_value_with_options(
             let (key, key_len) = alloc_bytes(kv.key.as_ref());
             let (val, val_len) = alloc_bytes(kv.value.as_ref());
 
-            let c_row = Box::new(slatedb_key_value_t {
+            let c_kv = Box::new(slatedb_key_value_t {
                 key,
                 key_len,
                 value: val,
@@ -385,7 +385,7 @@ pub unsafe extern "C" fn slatedb_db_get_key_value_with_options(
                 expire_ts: kv.expire_ts,
             });
 
-            *out_row = Box::into_raw(c_row);
+            *out_kv = Box::into_raw(c_kv);
             *out_present = true;
             success_result()
         }
