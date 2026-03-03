@@ -292,7 +292,12 @@ impl Manifest {
                         };
                         l0_by_id.insert(
                             sst.id,
-                            SsTableHandle::new_compacted(sst.id, sst.info.clone(), merged_range),
+                            SsTableHandle::new_compacted(
+                                sst.id,
+                                crate::format::sst::SST_FORMAT_VERSION_LATEST,
+                                sst.info.clone(),
+                                merged_range,
+                            ),
                         );
                     }
                     None => {
@@ -879,7 +884,7 @@ mod tests {
         // ULIDs created with Ulid::new() within the same millisecond have random
         // ordering, which makes test assertions on L0 sort order non-deterministic.
         let mut next_ts: u64 = 1000;
-        let manifests: Vec<(Manifest, String, Uuid)> = test_case
+        let manifests: Vec<(Manifest, String, uuid::Uuid)> = test_case
             .manifests
             .iter()
             .enumerate()
@@ -894,7 +899,7 @@ mod tests {
                         sst_id
                     }
                 });
-                (manifest, format!("source_{}", i), Uuid::new_v4())
+                (manifest, format!("source_{}", i), uuid::Uuid::new_v4())
             })
             .collect();
 
@@ -920,7 +925,7 @@ mod tests {
                 sorted_runs: vec![],
             },
         ];
-        let manifests: Vec<(Manifest, String, Uuid)> = manifests
+        let manifests: Vec<(Manifest, String, uuid::Uuid)> = manifests
             .iter()
             .enumerate()
             .map(|(i, m)| {
@@ -933,7 +938,7 @@ mod tests {
                         sst_id
                     }
                 });
-                (manifest, format!("source_{}", i), Uuid::new_v4())
+                (manifest, format!("source_{}", i), uuid::Uuid::new_v4())
             })
             .collect();
 
@@ -1203,6 +1208,7 @@ mod tests {
             id: 0,
             ssts: vec![SsTableHandle::new_compacted(
                 sst_id,
+                SST_FORMAT_VERSION_LATEST,
                 SsTableInfo {
                     first_entry: Some(Bytes::from_static(first_entry)),
                     ..SsTableInfo::default()
@@ -1219,8 +1225,8 @@ mod tests {
         use std::collections::HashSet;
 
         let shared_path = "shared_ancestor".to_string();
-        let shared_source_cp = Uuid::new_v4();
-        let original_final_cp = Uuid::new_v4();
+        let shared_source_cp = uuid::Uuid::new_v4();
+        let original_final_cp = uuid::Uuid::new_v4();
 
         let sst_a = SsTableId::Compacted(Ulid::from_parts(1000, 0));
         let sst_b = SsTableId::Compacted(Ulid::from_parts(1001, 0));
@@ -1248,8 +1254,8 @@ mod tests {
         });
 
         let sources = vec![
-            (m1, "path1".to_string(), Uuid::new_v4()),
-            (m2, "path2".to_string(), Uuid::new_v4()),
+            (m1, "path1".to_string(), uuid::Uuid::new_v4()),
+            (m2, "path2".to_string(), uuid::Uuid::new_v4()),
         ];
 
         let result = Manifest::union(sources, Arc::new(DbRand::default())).unwrap();
@@ -1287,9 +1293,9 @@ mod tests {
     fn test_union_regenerates_checkpoint_id_for_unique_external_db() {
         use super::ExternalDb;
 
-        let original_final_cp = Uuid::new_v4();
+        let original_final_cp = uuid::Uuid::new_v4();
         let ancestor_path = "ancestor".to_string();
-        let ancestor_source_cp = Uuid::new_v4();
+        let ancestor_source_cp = uuid::Uuid::new_v4();
 
         let sst_own1 = SsTableId::Compacted(Ulid::from_parts(1000, 0));
         let sst_own2 = SsTableId::Compacted(Ulid::from_parts(2000, 0));
@@ -1309,8 +1315,8 @@ mod tests {
         let m2 = manifest_with_one_compacted_sst(sst_own2, b"m", BytesRange::from_ref("m"..));
 
         let sources = vec![
-            (m1, "path1".to_string(), Uuid::new_v4()),
-            (m2, "path2".to_string(), Uuid::new_v4()),
+            (m1, "path1".to_string(), uuid::Uuid::new_v4()),
+            (m2, "path2".to_string(), uuid::Uuid::new_v4()),
         ];
 
         let result = Manifest::union(sources, Arc::new(DbRand::default())).unwrap();
@@ -1342,8 +1348,8 @@ mod tests {
 
         let path1 = "source_db_1".to_string();
         let path2 = "source_db_2".to_string();
-        let cp1 = Uuid::new_v4();
-        let cp2 = Uuid::new_v4();
+        let cp1 = uuid::Uuid::new_v4();
+        let cp2 = uuid::Uuid::new_v4();
 
         let sources = vec![(m1, path1.clone(), cp1), (m2, path2.clone(), cp2)];
 
@@ -1382,8 +1388,8 @@ mod tests {
         assert!(m2.core.initialized);
 
         let sources = vec![
-            (m1, "path1".to_string(), Uuid::new_v4()),
-            (m2, "path2".to_string(), Uuid::new_v4()),
+            (m1, "path1".to_string(), uuid::Uuid::new_v4()),
+            (m2, "path2".to_string(), uuid::Uuid::new_v4()),
         ];
 
         let result = Manifest::union(sources, Arc::new(DbRand::default())).unwrap();
@@ -1406,8 +1412,8 @@ mod tests {
         m2.core.last_l0_seq = 100;
 
         let sources = vec![
-            (m1, "path1".to_string(), Uuid::new_v4()),
-            (m2, "path2".to_string(), Uuid::new_v4()),
+            (m1, "path1".to_string(), uuid::Uuid::new_v4()),
+            (m2, "path2".to_string(), uuid::Uuid::new_v4()),
         ];
 
         let result = Manifest::union(sources, Arc::new(DbRand::default())).unwrap();
