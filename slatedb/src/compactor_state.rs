@@ -6,7 +6,7 @@ use log::{error, info};
 use serde::{Deserialize, Serialize};
 use ulid::Ulid;
 
-use crate::db_state::{ManifestCore, SortedRun, SsTableHandle};
+use crate::db_state::{ManifestCore, SortedRun, SsTableHandle, SsTableView};
 use crate::error::SlateDBError;
 use crate::manifest::Manifest;
 use slatedb_txn_obj::DirtyObject;
@@ -206,11 +206,11 @@ impl Compaction {
     ///
     /// ## Arguments
     /// - `db_state`: The current core DB state from the manifest.
-    pub(crate) fn get_ssts(&self, db_state: &ManifestCore) -> Vec<SsTableHandle> {
-        let ssts_by_id: HashMap<Ulid, &SsTableHandle> = db_state
+    pub(crate) fn get_ssts(&self, db_state: &ManifestCore) -> Vec<SsTableView> {
+        let ssts_by_id: HashMap<Ulid, &SsTableView> = db_state
             .l0
             .iter()
-            .map(|sst| (sst.id.unwrap_compacted_id(), sst))
+            .map(|sst| (sst.sst.id.unwrap_compacted_id(), sst))
             .collect();
 
         self.spec
@@ -531,7 +531,7 @@ impl CompactorState {
         let mut merged_l0s = VecDeque::new();
         let writer_l0 = &remote_manifest.value.core.l0;
         for writer_l0_sst in writer_l0 {
-            let writer_l0_id = writer_l0_sst.id.unwrap_compacted_id();
+            let writer_l0_id = writer_l0_sst.sst.id.unwrap_compacted_id();
             // todo: this is brittle. we are relying on the l0 list always being updated in
             //       an expected order. We should instead encode the ordering in the l0 SST IDs
             //       and assert that it follows the order
@@ -643,11 +643,11 @@ impl CompactorState {
                 .chain(std::iter::once(&SourceId::SortedRun(spec.destination())))
                 .filter_map(|id| id.maybe_unwrap_sorted_run())
                 .collect();
-            let new_l0: VecDeque<SsTableHandle> = db_state
+            let new_l0: VecDeque<SsTableView> = db_state
                 .l0
                 .iter()
                 .filter_map(|l0| {
-                    let l0_id = l0.id.unwrap_compacted_id();
+                    let l0_id = l0.sst.id.unwrap_compacted_id();
                     if compaction_l0s.contains(&l0_id) {
                         return None;
                     }
@@ -924,6 +924,7 @@ mod tests {
                     .l0
                     .front()
                     .unwrap()
+                    .sst
                     .id
                     .unwrap_compacted_id()
             )
@@ -931,7 +932,7 @@ mod tests {
         assert_eq!(state.db_state().l0.len(), 0);
         assert_eq!(state.db_state().compacted.len(), 1);
         assert_eq!(state.db_state().compacted.first().unwrap().id, sr.id);
-        let expected_ids: Vec<SsTableId> = sr.ssts.iter().map(|h| h.id).collect();
+        let expected_ids: Vec<SsTableId> = sr.ssts.iter().map(|h| h.sst.id).collect();
         let found_ids: Vec<SsTableId> = state
             .db_state()
             .compacted
@@ -939,7 +940,7 @@ mod tests {
             .unwrap()
             .ssts
             .iter()
-            .map(|h| h.id)
+            .map(|h| h.sst.id)
             .collect();
         assert_eq!(expected_ids, found_ids);
     }
@@ -990,13 +991,13 @@ mod tests {
             .core
             .l0
             .iter()
-            .map(|t| t.id.unwrap_compacted_id())
+            .map(|t| t.sst.id.unwrap_compacted_id())
             .collect();
         let merged_l0s: Vec<Ulid> = state
             .db_state()
             .l0
             .iter()
-            .map(|h| h.id.unwrap_compacted_id())
+            .map(|h| h.sst.id.unwrap_compacted_id())
             .collect();
         assert_eq!(expected_merged_l0s, merged_l0s);
     }
@@ -1010,7 +1011,12 @@ mod tests {
         let original_l0s = &state.db_state().clone().l0;
         let compaction_id = rand.rng().gen_ulid(system_clock.as_ref());
         let spec = CompactionSpec::new(
-            vec![Sst(original_l0s.back().unwrap().id.unwrap_compacted_id())],
+            vec![Sst(original_l0s
+                .back()
+                .unwrap()
+                .sst
+                .id
+                .unwrap_compacted_id())],
             0,
         );
         let compaction = Compaction::new(compaction_id, spec);
@@ -1038,7 +1044,7 @@ mod tests {
         let db_state = state.db_state();
         let mut expected_merged_l0s: VecDeque<Ulid> = original_l0s
             .iter()
-            .map(|h| h.id.unwrap_compacted_id())
+            .map(|h| h.sst.id.unwrap_compacted_id())
             .collect();
         expected_merged_l0s.pop_back();
         let new_l0 = sm
@@ -1047,13 +1053,14 @@ mod tests {
             .l0
             .front()
             .unwrap()
+            .sst
             .id
             .unwrap_compacted_id();
         expected_merged_l0s.push_front(new_l0);
         let merged_l0: VecDeque<Ulid> = db_state
             .l0
             .iter()
-            .map(|h| h.id.unwrap_compacted_id())
+            .map(|h| h.sst.id.unwrap_compacted_id())
             .collect();
         assert_eq!(merged_l0, expected_merged_l0s);
         assert_eq!(
@@ -1079,7 +1086,7 @@ mod tests {
         let spec = CompactionSpec::new(
             original_l0s
                 .iter()
-                .map(|h| Sst(h.id.unwrap_compacted_id()))
+                .map(|h| Sst(h.sst.id.unwrap_compacted_id()))
                 .collect(),
             0,
         );
@@ -1113,13 +1120,14 @@ mod tests {
             .l0
             .front()
             .unwrap()
+            .sst
             .id
             .unwrap_compacted_id();
         expected_merged_l0s.push_front(new_l0);
         let merged_l0: VecDeque<Ulid> = db_state
             .l0
             .iter()
-            .map(|h| h.id.unwrap_compacted_id())
+            .map(|h| h.sst.id.unwrap_compacted_id())
             .collect();
         assert_eq!(merged_l0, expected_merged_l0s);
     }
@@ -1161,7 +1169,7 @@ mod tests {
                 .iter()
                 .enumerate()
                 .filter(|(i, _e)| i > &2usize)
-                .map(|(_i, x)| Sst(x.id.unwrap_compacted_id()))
+                .map(|(_i, x)| Sst(x.sst.id.unwrap_compacted_id()))
                 .collect::<Vec<SourceId>>(),
             0,
         );
@@ -1183,7 +1191,7 @@ mod tests {
         let l0_sources = original_l0s
             .iter()
             .skip(3)
-            .map(|h| SourceId::Sst(h.id.unwrap_compacted_id()));
+            .map(|h| SourceId::Sst(h.sst.id.unwrap_compacted_id()));
 
         // SRs: first 3 (index < 3)
         let sr_sources = original_srs
@@ -1255,7 +1263,7 @@ mod tests {
     fn sorted_run_to_description(sr: &SortedRun) -> SortedRunDescription {
         SortedRunDescription {
             id: sr.id,
-            ssts: sr.ssts.iter().map(|h| h.id).collect(),
+            ssts: sr.ssts.iter().map(|h| h.sst.id).collect(),
         }
     }
 
@@ -1274,10 +1282,10 @@ mod tests {
         .expect("no manifest found with l0 len");
     }
 
-    fn build_l0_compaction(ssts: &VecDeque<SsTableHandle>, dst: u32) -> CompactionSpec {
+    fn build_l0_compaction(ssts: &VecDeque<SsTableView>, dst: u32) -> CompactionSpec {
         let sources = ssts
             .iter()
-            .map(|h| SourceId::Sst(h.id.unwrap_compacted_id()))
+            .map(|h| SourceId::Sst(h.sst.id.unwrap_compacted_id()))
             .collect();
         CompactionSpec::new(sources, dst)
     }

@@ -2423,7 +2423,12 @@ mod tests {
         let state = db.inner.state.read().view();
         assert_eq!(1, state.state.manifest.value.core.l0.len());
         let sst = state.state.manifest.value.core.l0.front().unwrap();
-        let index = db.inner.table_store.read_index(sst, true).await.unwrap();
+        let index = db
+            .inner
+            .table_store
+            .read_index(&sst.sst, true)
+            .await
+            .unwrap();
         assert!(!index.borrow().block_meta().is_empty());
         assert_eq!(
             Some(Bytes::copy_from_slice(last_val.as_bytes())),
@@ -6468,7 +6473,7 @@ mod tests {
             1,
             "expected exactly one L0 SST in manifest"
         );
-        let l0_id = manifest.core.l0[0].id;
+        let l0_id = manifest.core.l0[0].sst.id;
         assert_eq!(
             l0_id, ssts[0].id,
             "expected SST {:?} but found SST {:?}",

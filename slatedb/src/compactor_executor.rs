@@ -16,7 +16,7 @@ use crate::compaction_filter_iterator::CompactionFilterIterator;
 use crate::compactor::CompactorMessage;
 use crate::compactor::CompactorMessage::CompactionJobFinished;
 use crate::config::CompactorOptions;
-use crate::db_state::{SortedRun, SsTableHandle, SsTableId};
+use crate::db_state::{SortedRun, SsTableHandle, SsTableId, SsTableView};
 use crate::error::SlateDBError;
 use crate::iter::{IterationOrder, RowEntryIterator, TrackedRowEntryIterator};
 use crate::manifest::store::{ManifestStore, StoredManifest};
@@ -59,7 +59,7 @@ pub(crate) struct StartCompactionJobArgs {
     /// Destination sorted run id to be produced by this job.
     pub(crate) destination: u32,
     /// Input L0 SSTs for this job.
-    pub(crate) ssts: Vec<SsTableHandle>,
+    pub(crate) ssts: Vec<SsTableView>,
     /// Input existing sorted runs for this job.
     pub(crate) sorted_runs: Vec<SortedRun>,
     /// Output SSTs already written for this compaction when resuming.
@@ -454,7 +454,7 @@ impl TokioCompactionExecutorInner {
 
         Ok(SortedRun {
             id: args.destination,
-            ssts: output_ssts,
+            ssts: output_ssts.into_iter().map(SsTableView::new).collect(),
         })
     }
 
@@ -1018,7 +1018,7 @@ mod tests {
 
         for entries in &l0_entry_sets {
             let ssts = write_sst(&table_store, entries, usize::MAX).await;
-            l0_ssts.extend(ssts);
+            l0_ssts.extend(ssts.into_iter().map(SsTableView::new));
             all_entries.extend(entries.iter().cloned());
         }
 
@@ -1034,7 +1034,7 @@ mod tests {
                 }
                 sorted_runs.push(SortedRun {
                     id: sr_id as u32,
-                    ssts: sr_ssts,
+                    ssts: sr_ssts.into_iter().map(SsTableView::new).collect(),
                 });
             }
         }
@@ -1217,7 +1217,7 @@ mod tests {
                 let mut l0_ssts = Vec::new();
                 for entries in &l0_entry_sets {
                     let ssts = write_ssts(&table_store, entries, usize::MAX).await;
-                    l0_ssts.extend(ssts);
+                    l0_ssts.extend(ssts.into_iter().map(SsTableView::new));
                 }
 
                 let sorted_runs = build_sorted_runs(&table_store, &sr_entry_sets, usize::MAX).await;
@@ -1394,7 +1394,7 @@ mod tests {
                 id: Ulid::new(),
                 compaction_id: Ulid::new(),
                 destination: 0,
-                ssts,
+                ssts: ssts.into_iter().map(SsTableView::new).collect(),
                 sorted_runs: vec![],
                 output_ssts: vec![],
                 compaction_clock_tick: 0,

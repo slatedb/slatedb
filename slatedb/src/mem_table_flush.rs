@@ -1,7 +1,7 @@
 use crate::checkpoint::CheckpointCreateResult;
 use crate::config::CheckpointOptions;
 use crate::db::DbInner;
-use crate::db_state::SsTableId;
+use crate::db_state::{SsTableId, SsTableView};
 use crate::dispatcher::{MessageFactory, MessageHandler};
 use crate::error::SlateDBError;
 use crate::manifest::store::FenceableManifest;
@@ -159,7 +159,13 @@ impl MemtableFlusher {
                         .pop_back()
                         .expect("expected imm memtable");
                     assert!(Arc::ptr_eq(&popped, &imm_memtable));
-                    modifier.state.manifest.value.core.l0.push_front(sst_handle);
+                    modifier
+                        .state
+                        .manifest
+                        .value
+                        .core
+                        .l0
+                        .push_front(SsTableView::new(sst_handle));
                     modifier.state.manifest.value.core.replay_after_wal_id =
                         imm_memtable.recent_flushed_wal_id();
 

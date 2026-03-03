@@ -63,7 +63,7 @@ mod tests {
     use crate::checkpoint::CheckpointCreateResult;
     use crate::config::{CheckpointOptions, CheckpointScope, Settings};
     use crate::db::Db;
-    use crate::db_state::SsTableId;
+    use crate::db_state::{SsTableId, SsTableView};
     use crate::format::sst::SsTableFormat;
     use crate::iter::RowEntryIterator;
     use crate::manifest::store::ManifestStore;
@@ -324,8 +324,10 @@ mod tests {
             flush_interval: Some(Duration::from_millis(5000)),
             ..Settings::default()
         };
-        test_checkpoint_scope_all(db_options, |manifest| manifest.core.l0.front().unwrap().id)
-            .await;
+        test_checkpoint_scope_all(db_options, |manifest| {
+            manifest.core.l0.front().unwrap().sst.id
+        })
+        .await;
     }
 
     #[tokio::test]
@@ -336,8 +338,10 @@ mod tests {
             wal_enabled: false,
             ..Settings::default()
         };
-        test_checkpoint_scope_all(db_options, |manifest| manifest.core.l0.front().unwrap().id)
-            .await;
+        test_checkpoint_scope_all(db_options, |manifest| {
+            manifest.core.l0.front().unwrap().sst.id
+        })
+        .await;
     }
 
     async fn test_checkpoint_scope_all<F: FnOnce(Manifest) -> SsTableId>(
@@ -390,7 +394,7 @@ mod tests {
             path.clone(),
             None,
         ));
-        let sst_handle = table_store.open_sst(table_id).await.unwrap();
+        let sst_handle = SsTableView::new(table_store.open_sst(table_id).await.unwrap());
 
         let mut sst_iter = SstIterator::for_key_with_stats_initialized(
             &sst_handle,

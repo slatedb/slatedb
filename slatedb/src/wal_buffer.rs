@@ -600,6 +600,7 @@ impl MessageHandler<WalFlushWork> for WalFlushHandler {
 mod tests {
     use super::*;
     use crate::clock::MonotonicClock;
+    use crate::db_state::SsTableView;
     use crate::db_status::DbStatusReporter;
     use crate::format::sst::SsTableFormat;
     use crate::iter::RowEntryIterator;
@@ -870,7 +871,7 @@ mod tests {
         };
         let mut iter = SstIterator::new_owned_initialized(
             ..,
-            table_store.open_sst(&SsTableId::Wal(1)).await.unwrap(),
+            SsTableView::new(table_store.open_sst(&SsTableId::Wal(1)).await.unwrap()),
             table_store.clone(),
             sst_iter_options,
         )

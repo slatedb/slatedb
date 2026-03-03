@@ -740,12 +740,16 @@ pub(crate) async fn preload_cache_from_manifest(
             let mut all_sst_paths: Vec<object_store::path::Path> = Vec::with_capacity(
                 core.l0.len() + core.compacted.iter().map(|sr| sr.ssts.len()).sum::<usize>(),
             );
-            all_sst_paths.extend(core.l0.iter().map(|sst| path_resolver.table_path(&sst.id)));
+            all_sst_paths.extend(
+                core.l0
+                    .iter()
+                    .map(|sst| path_resolver.table_path(&sst.sst.id)),
+            );
             all_sst_paths.extend(
                 core.compacted
                     .iter()
                     .flat_map(|sr| &sr.ssts)
-                    .map(|sst| path_resolver.table_path(&sst.id)),
+                    .map(|sst| path_resolver.table_path(&sst.sst.id)),
             );
             if !all_sst_paths.is_empty() {
                 if let Err(e) = cached_obj_store
@@ -760,7 +764,7 @@ pub(crate) async fn preload_cache_from_manifest(
             let l0_sst_paths: Vec<object_store::path::Path> = core
                 .l0
                 .iter()
-                .map(|sst| path_resolver.table_path(&sst.id))
+                .map(|sst| path_resolver.table_path(&sst.sst.id))
                 .collect();
             if !l0_sst_paths.is_empty() {
                 if let Err(e) = cached_obj_store
@@ -784,7 +788,7 @@ mod tests {
     use slatedb_common::MockSystemClock;
 
     use crate::clock::MonotonicClock;
-    use crate::db_state::{SortedRun, SsTableHandle, SsTableId, SsTableInfo};
+    use crate::db_state::{SortedRun, SsTableHandle, SsTableId, SsTableInfo, SsTableView};
     use crate::error::SlateDBError;
     use crate::format::sst::SST_FORMAT_VERSION_LATEST;
     use crate::sst_builder::BlockFormat;
@@ -827,19 +831,18 @@ mod tests {
         }
     }
 
-    fn make_compacted_sst(start_key: &str, size: u64) -> SsTableHandle {
+    fn make_compacted_sst(start_key: &str, size: u64) -> SsTableView {
         let info = SsTableInfo {
             first_entry: Some(Bytes::from(start_key.as_bytes().to_vec())),
             index_offset: size.saturating_sub(1),
             index_len: 1,
             ..Default::default()
         };
-        SsTableHandle::new_compacted(
+        SsTableView::new(SsTableHandle::new(
             SsTableId::Compacted(Ulid::new()),
             SST_FORMAT_VERSION_LATEST,
             info,
-            None,
-        )
+        ))
     }
 
     #[test]

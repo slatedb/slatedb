@@ -72,7 +72,7 @@ use chrono::{DateTime, Utc};
 use object_store::path::Path;
 use object_store::ObjectStore;
 
-use crate::db_state::SsTableId;
+use crate::db_state::{SsTableId, SsTableView};
 use crate::format::sst::SsTableFormat;
 use crate::iter::{EmptyIterator, RowEntryIterator};
 use crate::object_stores::ObjectStores;
@@ -153,7 +153,7 @@ impl WalFile {
         let sst = self.table_store.open_sst(&SsTableId::Wal(self.id)).await?;
         let iter = match SstIterator::new_owned_initialized(
             ..,
-            sst,
+            SsTableView::new(sst),
             Arc::clone(&self.table_store),
             SstIteratorOptions::default(),
         )

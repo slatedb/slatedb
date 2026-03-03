@@ -175,7 +175,7 @@ pub trait CompactionScheduler: Send + Sync {
                 let sources = manifest
                     .l0
                     .iter()
-                    .map(|sst| SourceId::Sst(sst.id.unwrap_compacted_id()))
+                    .map(|sst| SourceId::Sst(sst.sst.id.unwrap_compacted_id()))
                     .chain(
                         manifest
                             .compacted
@@ -600,13 +600,13 @@ impl CompactorEventHandler {
         compaction: &Compaction,
         db_state: &crate::db_state::ManifestCore,
     ) -> u64 {
-        use crate::db_state::{SortedRun, SsTableHandle, SsTableId};
+        use crate::db_state::{SortedRun, SsTableId, SsTableView};
         use std::collections::HashMap;
 
-        let ssts_by_id: HashMap<Ulid, &SsTableHandle> = db_state
+        let ssts_by_id: HashMap<Ulid, &SsTableView> = db_state
             .l0
             .iter()
-            .map(|sst| match sst.id {
+            .map(|sst| match sst.sst.id {
                 SsTableId::Compacted(id) => (id, sst),
                 SsTableId::Wal(_) => unreachable!("L0 SSTs should never have SsTableId::Wal"),
             })
@@ -691,7 +691,7 @@ impl CompactorEventHandler {
         let l0_ids = db_state
             .l0
             .iter()
-            .filter_map(|sst| match sst.id {
+            .filter_map(|sst| match sst.sst.id {
                 crate::db_state::SsTableId::Compacted(id) => Some(id),
                 crate::db_state::SsTableId::Wal(_) => None,
             })
@@ -1053,7 +1053,9 @@ mod tests {
         SizeTieredCompactionSchedulerOptions, Ttl, WriteOptions,
     };
     use crate::db::Db;
-    use crate::db_state::{ManifestCore, SortedRun, SsTableHandle, SsTableId, SsTableInfo};
+    use crate::db_state::{
+        ManifestCore, SortedRun, SsTableHandle, SsTableId, SsTableInfo, SsTableView,
+    };
     use crate::error::SlateDBError;
     use crate::format::sst::{SsTableFormat, SST_FORMAT_VERSION_LATEST};
     use crate::iter::RowEntryIterator;
@@ -2550,33 +2552,33 @@ mod tests {
             ..SsTableInfo::default()
         };
         dirty.value.core.l0 = VecDeque::from(vec![
-            SsTableHandle::new(
+            SsTableView::new(SsTableHandle::new(
                 SsTableId::Compacted(l0_newest),
                 SST_FORMAT_VERSION_LATEST,
                 l0_info.clone(),
-            ),
-            SsTableHandle::new(
+            )),
+            SsTableView::new(SsTableHandle::new(
                 SsTableId::Compacted(l0_oldest),
                 SST_FORMAT_VERSION_LATEST,
                 l0_info.clone(),
-            ),
+            )),
         ]);
         dirty.value.core.compacted = vec![
             SortedRun {
                 id: 2,
-                ssts: vec![SsTableHandle::new(
+                ssts: vec![SsTableView::new(SsTableHandle::new(
                     SsTableId::Compacted(Ulid::new()),
                     SST_FORMAT_VERSION_LATEST,
                     sr_info.clone(),
-                )],
+                ))],
             },
             SortedRun {
                 id: 1,
-                ssts: vec![SsTableHandle::new(
+                ssts: vec![SsTableView::new(SsTableHandle::new(
                     SsTableId::Compacted(Ulid::new()),
                     SST_FORMAT_VERSION_LATEST,
                     sr_info.clone(),
-                )],
+                ))],
             },
         ];
         stored_manifest.update(dirty).await.unwrap();
@@ -2655,33 +2657,33 @@ mod tests {
             ..SsTableInfo::default()
         };
         core.l0 = VecDeque::from(vec![
-            SsTableHandle::new(
+            SsTableView::new(SsTableHandle::new(
                 SsTableId::Compacted(l0_first),
                 SST_FORMAT_VERSION_LATEST,
                 l0_info.clone(),
-            ),
-            SsTableHandle::new(
+            )),
+            SsTableView::new(SsTableHandle::new(
                 SsTableId::Compacted(l0_second),
                 SST_FORMAT_VERSION_LATEST,
                 l0_info,
-            ),
+            )),
         ]);
         core.compacted = vec![
             SortedRun {
                 id: 5,
-                ssts: vec![SsTableHandle::new(
+                ssts: vec![SsTableView::new(SsTableHandle::new(
                     SsTableId::Compacted(Ulid::from_parts(10, 0)),
                     SST_FORMAT_VERSION_LATEST,
                     sr_info.clone(),
-                )],
+                ))],
             },
             SortedRun {
                 id: 2,
-                ssts: vec![SsTableHandle::new(
+                ssts: vec![SsTableView::new(SsTableHandle::new(
                     SsTableId::Compacted(Ulid::from_parts(11, 0)),
                     SST_FORMAT_VERSION_LATEST,
                     sr_info,
-                )],
+                ))],
             },
         ];
         let state = CompactorStateView {
@@ -2809,7 +2811,7 @@ mod tests {
             let l0_ids_to_compact: Vec<SourceId> = db_state
                 .l0
                 .iter()
-                .map(|h| SourceId::Sst(h.id.unwrap_compacted_id()))
+                .map(|h| SourceId::Sst(h.sst.id.unwrap_compacted_id()))
                 .collect();
             CompactionSpec::new(l0_ids_to_compact, 0)
         }
@@ -2909,14 +2911,14 @@ mod tests {
         let db_state = fixture.latest_db_state().await;
         assert_eq!(db_state.l0.len(), 1);
         assert_eq!(db_state.compacted.len(), 1);
-        let l0_id = db_state.l0.front().unwrap().id.unwrap_compacted_id();
+        let l0_id = db_state.l0.front().unwrap().sst.id.unwrap_compacted_id();
         let compacted_l0s: Vec<Ulid> = db_state
             .compacted
             .first()
             .unwrap()
             .ssts
             .iter()
-            .map(|sst| sst.id.unwrap_compacted_id())
+            .map(|sst| sst.sst.id.unwrap_compacted_id())
             .collect();
         assert!(!compacted_l0s.contains(&l0_id));
         assert_eq!(
@@ -3269,7 +3271,7 @@ mod tests {
         let sources = db_state
             .l0
             .iter()
-            .map(|h| SourceId::Sst(h.id.unwrap_compacted_id()))
+            .map(|h| SourceId::Sst(h.sst.id.unwrap_compacted_id()))
             .collect::<Vec<_>>();
         let spec = CompactionSpec::new(sources, 0);
         let compaction_id = Ulid::new();
@@ -3502,7 +3504,7 @@ mod tests {
             .core
             .l0
             .iter()
-            .map(|sst| SourceId::Sst(sst.id.unwrap_compacted_id()))
+            .map(|sst| SourceId::Sst(sst.sst.id.unwrap_compacted_id()))
             .collect();
         assert_eq!(&l0_ids, compaction.sources());
     }
@@ -3659,7 +3661,7 @@ mod tests {
         fixture.handler.handle_ticker().await.unwrap();
         let state = fixture.latest_db_state().await;
         let sr_id = state.compacted.first().unwrap().id;
-        let l0_ulid = state.l0.front().unwrap().id.unwrap_compacted_id();
+        let l0_ulid = state.l0.front().unwrap().sst.id.unwrap_compacted_id();
         let mixed = CompactionSpec::new(
             vec![SourceId::SortedRun(sr_id), SourceId::Sst(l0_ulid)],
             sr_id,

@@ -22,7 +22,7 @@ use ulid::Ulid;
 use uuid::Uuid;
 use SsTableId::{Compacted, Wal};
 
-/// A handle to an SSTable, including its ID, metadata, and visible key ranges.
+/// A handle to an SSTable — the physical SST on disk.
 #[derive(Clone, PartialEq, Serialize)]
 pub struct SsTableHandle {
     /// The unique identifier for this SSTable. The table can be either a WAL SST or a compacted SST.
@@ -33,31 +33,69 @@ pub struct SsTableHandle {
 
     /// Metadata information about this SSTable.
     pub info: SsTableInfo,
-
-    /// The range of keys that are visible to the user. If non-empty, this handle represents a projection
-    /// over the SST file.
-    pub(crate) visible_range: Option<BytesRange>,
-
-    /// The effective range of keys that are visible to the user, which is the intersection of the
-    /// physical range (first_key..unbounded) and any projection range. If a projection is specified,
-    /// this handle represents a subset of the SST file.
-    effective_range: BytesRange,
 }
 
 impl Debug for SsTableHandle {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        f.write_fmt(format_args!(
-            "SsTableHandle({:?}, {:?})",
-            self.id, self.visible_range
-        ))
+        f.write_fmt(format_args!("SsTableHandle({:?})", self.id))
     }
 }
 
 impl SsTableHandle {
     pub(crate) fn new(id: SsTableId, format_version: u16, info: SsTableInfo) -> Self {
-        let effective_range = match info.first_entry.clone() {
+        SsTableHandle {
+            id,
+            format_version,
+            info,
+        }
+    }
+
+    pub(crate) fn estimate_size(&self) -> u64 {
+        // this is a hacky estimate of the sst size since we don't have it stored anywhere
+        // right now. Just use the index's offset and add the index length. Since the index
+        // is the last thing we put in the SST before the info footer, this should be a good
+        // estimate for now.
+        self.info.index_offset + self.info.index_len
+    }
+}
+
+impl AsRef<SsTableHandle> for SsTableHandle {
+    fn as_ref(&self) -> &SsTableHandle {
+        self
+    }
+}
+
+/// A projected view of an SSTable, combining the physical SST handle with an
+/// optional visible_range projection.
+#[derive(Clone, PartialEq, Serialize)]
+pub struct SsTableView {
+    /// The underlying physical SSTable handle.
+    pub sst: SsTableHandle,
+
+    /// The range of keys that are visible to the user. If non-empty, this view represents a projection
+    /// over the SST file.
+    pub(crate) visible_range: Option<BytesRange>,
+
+    /// The effective range of keys that are visible to the user, which is the intersection of the
+    /// physical range (first_key..unbounded) and any projection range.
+    effective_range: BytesRange,
+}
+
+impl Debug for SsTableView {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.write_fmt(format_args!(
+            "SsTableView({:?}, {:?})",
+            self.sst.id, self.visible_range
+        ))
+    }
+}
+
+impl SsTableView {
+    /// Create a new view with no visible_range projection.
+    pub(crate) fn new(sst: SsTableHandle) -> Self {
+        let effective_range = match sst.info.first_entry.clone() {
             Some(physical_first_entry) => {
-                let end_bound = match info.last_entry.clone() {
+                let end_bound = match sst.info.last_entry.clone() {
                     Some(physical_last_entry) => Included(physical_last_entry),
                     None => Unbounded,
                 };
@@ -66,24 +104,18 @@ impl SsTableHandle {
             None => BytesRange::new_empty(),
         };
 
-        SsTableHandle {
-            id,
-            format_version,
-            info,
+        SsTableView {
+            sst,
             visible_range: None,
             effective_range,
         }
     }
 
-    pub(crate) fn new_compacted(
-        id: SsTableId,
-        format_version: u16,
-        info: SsTableInfo,
-        visible_range: Option<BytesRange>,
-    ) -> Self {
-        let mut effective_range = match info.first_entry.clone() {
+    /// Create a new projected view with an optional visible_range.
+    pub(crate) fn new_projected(sst: SsTableHandle, visible_range: Option<BytesRange>) -> Self {
+        let mut effective_range = match sst.info.first_entry.clone() {
             Some(physical_first_entry) => {
-                let end_bound = match info.last_entry.clone() {
+                let end_bound = match sst.info.last_entry.clone() {
                     Some(physical_last_entry) => Included(physical_last_entry),
                     None => Unbounded,
                 };
@@ -102,22 +134,15 @@ impl SsTableHandle {
                 .intersect(visible_range)
                 .expect("An intersection of visible and physical range must be non-empty.")
         }
-        SsTableHandle {
-            id,
-            format_version,
-            info,
+        SsTableView {
+            sst,
             visible_range,
             effective_range,
         }
     }
 
     pub(crate) fn with_visible_range(&self, visible_range: BytesRange) -> Self {
-        Self::new_compacted(
-            self.id,
-            self.format_version,
-            self.info.clone(),
-            Some(visible_range),
-        )
+        Self::new_projected(self.sst.clone(), Some(visible_range))
     }
 
     /// The range of keys that are visible to the user.
@@ -133,7 +158,7 @@ impl SsTableHandle {
     // memtable flushes, which should never produce empty SSTs. This method returns
     // the start bound after applying projections.
     pub(crate) fn compacted_effective_start_bound(&self) -> Bound<Bytes> {
-        assert!(matches!(self.id, Compacted(_)));
+        assert!(matches!(self.sst.id, Compacted(_)));
         self.effective_range.start_bound().cloned()
     }
 
@@ -141,7 +166,7 @@ impl SsTableHandle {
     // memtable flushes, which should never produce empty SSTs. This method returns
     // the start key after applying projections.
     pub(crate) fn compacted_effective_start_key(&self) -> &Bytes {
-        assert!(matches!(self.id, Compacted(_)));
+        assert!(matches!(self.sst.id, Compacted(_)));
         match self.effective_range.start_bound() {
             Included(k) => k,
             _ => unreachable!("Invalid start bound"),
@@ -154,14 +179,14 @@ impl SsTableHandle {
 
     pub(crate) fn compacted_intersection(
         &self,
-        next_handle: Option<&SsTableHandle>,
+        next_view: Option<&SsTableView>,
         range: &BytesRange,
     ) -> Option<BytesRange> {
-        assert!(matches!(self.id, Compacted(_)));
-        if let Some(next_handle) = next_handle {
+        assert!(matches!(self.sst.id, Compacted(_)));
+        if let Some(next_view) = next_view {
             BytesRange::new(
                 self.compacted_effective_start_bound(),
-                Excluded(next_handle.compacted_effective_start_key().clone()),
+                Excluded(next_view.compacted_effective_start_key().clone()),
             )
             .intersect(range)
         } else {
@@ -189,24 +214,14 @@ impl SsTableHandle {
         if let Some(visible_range) = &self.visible_range {
             return range.intersect(visible_range);
         }
-        if self.info.last_entry.is_some() {
+        if self.sst.info.last_entry.is_some() {
             return range.intersect(&self.effective_range);
         }
         Some(range)
     }
 
     pub(crate) fn estimate_size(&self) -> u64 {
-        // this is a hacky estimate of the sst size since we don't have it stored anywhere
-        // right now. Just use the index's offset and add the index length. Since the index
-        // is the last thing we put in the SST before the info footer, this should be a good
-        // estimate for now.
-        self.info.index_offset + self.info.index_len
-    }
-}
-
-impl AsRef<SsTableHandle> for SsTableHandle {
-    fn as_ref(&self) -> &SsTableHandle {
-        self
+        self.sst.estimate_size()
     }
 }
 
@@ -309,8 +324,8 @@ impl Clone for Box<dyn SsTableInfoCodec> {
 pub struct SortedRun {
     /// The unique identifier for this sorted run.
     pub id: u32,
-    /// The list of SSTables in this sorted run.
-    pub ssts: Vec<SsTableHandle>,
+    /// The list of SSTable views in this sorted run.
+    pub ssts: Vec<SsTableView>,
 }
 
 impl SortedRun {
@@ -331,7 +346,7 @@ impl SortedRun {
         None
     }
 
-    pub(crate) fn find_sst_with_range_covering_key(&self, key: &[u8]) -> Option<&SsTableHandle> {
+    pub(crate) fn find_sst_with_range_covering_key(&self, key: &[u8]) -> Option<&SsTableView> {
         self.find_sst_with_range_covering_key_idx(key)
             .map(|idx| &self.ssts[idx])
     }
@@ -365,7 +380,7 @@ impl SortedRun {
         }
     }
 
-    pub(crate) fn tables_covering_range(&self, range: &BytesRange) -> VecDeque<&SsTableHandle> {
+    pub(crate) fn tables_covering_range(&self, range: &BytesRange) -> VecDeque<&SsTableView> {
         let matching_range = self.table_idx_covering_range(range);
         self.ssts[matching_range].iter().collect()
     }
@@ -373,7 +388,7 @@ impl SortedRun {
     pub(crate) fn into_tables_covering_range(
         mut self,
         range: &BytesRange,
-    ) -> VecDeque<SsTableHandle> {
+    ) -> VecDeque<SsTableView> {
         let matching_range = self.table_idx_covering_range(range);
         self.ssts.drain(matching_range).collect()
     }
@@ -417,8 +432,8 @@ pub struct ManifestCore {
     /// The last compacted l0.
     pub l0_last_compacted: Option<Ulid>,
 
-    /// A list of the L0 SSTs that are valid to read in the `compacted` folder.
-    pub l0: VecDeque<SsTableHandle>,
+    /// A list of the L0 SST views that are valid to read in the `compacted` folder.
+    pub l0: VecDeque<SsTableView>,
 
     /// A list of the sorted runs that are valid to read in the `compacted` folder.
     pub compacted: Vec<SortedRun>,
@@ -645,7 +660,7 @@ impl<'a> StateModifier<'a> {
                 .l0
                 .iter()
                 .cloned()
-                .take_while(|sst| sst.id.unwrap_compacted_id() != *l0_last_compacted)
+                .take_while(|sst| sst.sst.id.unwrap_compacted_id() != *l0_last_compacted)
                 .collect()
         } else {
             self.state.manifest.value.core.l0.iter().cloned().collect()
@@ -693,7 +708,9 @@ impl WalIdStore for parking_lot::RwLock<DbState> {
 #[cfg(test)]
 mod tests {
     use crate::checkpoint::Checkpoint;
-    use crate::db_state::{DbState, SortedRun, SsTableHandle, SsTableId, SsTableInfo, SstType};
+    use crate::db_state::{
+        DbState, SortedRun, SsTableHandle, SsTableId, SsTableInfo, SsTableView, SstType,
+    };
     use crate::db_status::DbStatusReporter;
     use crate::format::sst::SST_FORMAT_VERSION_LATEST;
     use crate::manifest::store::test_utils::new_dirty_manifest;
@@ -744,7 +761,7 @@ mod tests {
         compactor_state.value.core = db_state.state.core().clone();
         let last_compacted = compactor_state.value.core.l0.pop_back().unwrap();
         compactor_state.value.core.l0_last_compacted =
-            Some(last_compacted.id.unwrap_compacted_id());
+            Some(last_compacted.sst.id.unwrap_compacted_id());
 
         // when:
         db_state.merge_remote_manifest(compactor_state.clone());
@@ -755,9 +772,15 @@ mod tests {
             .core
             .l0
             .iter()
-            .map(|l0| l0.id)
+            .map(|l0| l0.sst.id)
             .collect();
-        let merged: Vec<SsTableId> = db_state.state.core().l0.iter().map(|l0| l0.id).collect();
+        let merged: Vec<SsTableId> = db_state
+            .state
+            .core()
+            .l0
+            .iter()
+            .map(|l0| l0.sst.id)
+            .collect();
         assert_eq!(expected, merged);
     }
 
@@ -772,8 +795,14 @@ mod tests {
         db_state.merge_remote_manifest(new_dirty_manifest());
 
         // then:
-        let expected: Vec<SsTableId> = l0s.iter().map(|l0| l0.id).collect();
-        let merged: Vec<SsTableId> = db_state.state.core().l0.iter().map(|l0| l0.id).collect();
+        let expected: Vec<SsTableId> = l0s.iter().map(|l0| l0.sst.id).collect();
+        let merged: Vec<SsTableId> = db_state
+            .state
+            .core()
+            .l0
+            .iter()
+            .map(|l0| l0.sst.id)
+            .collect();
         assert_eq!(expected, merged);
     }
 
@@ -789,8 +818,9 @@ mod tests {
                 SST_FORMAT_VERSION_LATEST,
                 dummy_info.clone(),
             );
+            let view = SsTableView::new(handle);
             db_state.modify(|modifier| {
-                modifier.state.manifest.value.core.l0.push_front(handle);
+                modifier.state.manifest.value.core.l0.push_front(view);
                 modifier.state.manifest.value.core.replay_after_wal_id =
                     imm.recent_flushed_wal_id();
             });
@@ -842,15 +872,16 @@ mod tests {
     fn create_sorted_run(id: u32, first_keys: &BTreeSet<Bytes>) -> SortedRun {
         let mut ssts = Vec::new();
         for first_key in first_keys {
-            ssts.push(create_compacted_sst_handle(Some(first_key.clone())));
+            ssts.push(create_compacted_sst_view(Some(first_key.clone())));
         }
         SortedRun { id, ssts }
     }
 
-    fn create_compacted_sst_handle(first_entry: Option<Bytes>) -> SsTableHandle {
+    fn create_compacted_sst_view(first_entry: Option<Bytes>) -> SsTableView {
         let sst_info = create_sst_info(first_entry);
         let sst_id = SsTableId::Compacted(ulid::Ulid::new());
-        SsTableHandle::new(sst_id, SST_FORMAT_VERSION_LATEST, sst_info)
+        let handle = SsTableHandle::new(sst_id, SST_FORMAT_VERSION_LATEST, sst_info);
+        SsTableView::new(handle)
     }
 
     fn create_sst_info(first_entry: Option<Bytes>) -> SsTableInfo {

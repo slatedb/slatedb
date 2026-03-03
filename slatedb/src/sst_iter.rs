@@ -10,7 +10,7 @@ use tokio::task::JoinHandle;
 use crate::block_iterator::BlockLike;
 use crate::block_iterator_v2::BlockIteratorV2;
 use crate::bytes_range::BytesRange;
-use crate::db_state::{SsTableHandle, SsTableId};
+use crate::db_state::{SsTableId, SsTableView};
 use crate::db_stats::DbStats;
 use crate::error::SlateDBError;
 use crate::filter::{self, BloomFilter};
@@ -92,12 +92,12 @@ impl Default for SstIteratorOptions {
 }
 
 /// This enum encapsulates access to an SST and corresponding ownership requirements.
-/// For example, [`SstView::Owned`] allows the table handle to be owned, which is
+/// For example, [`SstView::Owned`] allows the table view to be owned, which is
 /// needed for [`crate::db::Db::scan`] since it returns the iterator, while [`SstView::Borrowed`]
 /// accommodates access by reference which is useful for [`crate::db::Db::get`].
 pub(crate) enum SstView<'a> {
-    Owned(Box<SsTableHandle>, BytesRange),
-    Borrowed(&'a SsTableHandle, BytesRange),
+    Owned(Box<SsTableView>, BytesRange),
+    Borrowed(&'a SsTableView, BytesRange),
 }
 
 impl SstView<'_> {
@@ -120,7 +120,7 @@ impl SstView<'_> {
         }
     }
 
-    fn table_as_ref(&self) -> &SsTableHandle {
+    fn table_as_ref(&self) -> &SsTableView {
         match self {
             SstView::Owned(t, _) => t,
             SstView::Borrowed(t, _) => t,
@@ -311,7 +311,7 @@ impl<'a> InternalSstIterator<'a> {
     }
 
     fn table_id(&self) -> SsTableId {
-        self.view.table_as_ref().id
+        self.view.table_as_ref().sst.id
     }
 
     fn view(&self) -> &SstView<'a> {
@@ -324,7 +324,7 @@ impl<'a> InternalSstIterator<'a> {
 
     fn new_owned<T: RangeBounds<Bytes>>(
         range: T,
-        table: SsTableHandle,
+        table: SsTableView,
         table_store: Arc<TableStore>,
         options: SstIteratorOptions,
     ) -> Result<Option<Self>, SlateDBError> {
@@ -337,7 +337,7 @@ impl<'a> InternalSstIterator<'a> {
 
     async fn new_owned_initialized<T: RangeBounds<Bytes>>(
         range: T,
-        table: SsTableHandle,
+        table: SsTableView,
         table_store: Arc<TableStore>,
         options: SstIteratorOptions,
     ) -> Result<Option<Self>, SlateDBError> {
@@ -347,7 +347,7 @@ impl<'a> InternalSstIterator<'a> {
 
     fn new_borrowed<T: RangeBounds<Bytes>>(
         range: T,
-        table: &'a SsTableHandle,
+        table: &'a SsTableView,
         table_store: Arc<TableStore>,
         options: SstIteratorOptions,
     ) -> Result<Option<Self>, SlateDBError> {
@@ -360,7 +360,7 @@ impl<'a> InternalSstIterator<'a> {
 
     async fn new_borrowed_initialized<T: RangeBounds<Bytes>>(
         range: T,
-        table: &'a SsTableHandle,
+        table: &'a SsTableView,
         table_store: Arc<TableStore>,
         options: SstIteratorOptions,
     ) -> Result<Option<Self>, SlateDBError> {
@@ -369,7 +369,7 @@ impl<'a> InternalSstIterator<'a> {
     }
 
     fn for_key(
-        table: &'a SsTableHandle,
+        table: &'a SsTableView,
         key: &'a [u8],
         table_store: Arc<TableStore>,
         options: SstIteratorOptions,
@@ -383,7 +383,7 @@ impl<'a> InternalSstIterator<'a> {
     }
 
     async fn for_key_initialized(
-        table: &'a SsTableHandle,
+        table: &'a SsTableView,
         key: &'a [u8],
         table_store: Arc<TableStore>,
         options: SstIteratorOptions,
@@ -455,7 +455,7 @@ impl<'a> InternalSstIterator<'a> {
                         self.options.blocks_to_fetch,
                         self.block_idx_range.end - self.next_block_idx_to_fetch,
                     );
-                    let table = self.view.table_as_ref().clone();
+                    let table = self.view.table_as_ref().sst.clone();
                     let table_store = self.table_store.clone();
                     let blocks_start = self.next_block_idx_to_fetch;
                     let blocks_end = self.next_block_idx_to_fetch + blocks_to_fetch;
@@ -484,7 +484,7 @@ impl<'a> InternalSstIterator<'a> {
                         self.options.blocks_to_fetch,
                         self.next_block_idx_to_fetch - self.block_idx_range.start,
                     );
-                    let table = self.view.table_as_ref().clone();
+                    let table = self.view.table_as_ref().sst.clone();
                     let table_store = self.table_store.clone();
                     let blocks_end = self.next_block_idx_to_fetch;
                     let blocks_start = blocks_end - blocks_to_fetch;
@@ -514,7 +514,7 @@ impl<'a> InternalSstIterator<'a> {
         if self.index.is_none() {
             return Ok(None);
         }
-        let sst_version = self.view.table_as_ref().format_version;
+        let sst_version = self.view.table_as_ref().sst.format_version;
         loop {
             if spawn_fetches {
                 self.spawn_fetches();
@@ -608,7 +608,7 @@ impl<'a> InternalSstIterator<'a> {
         if self.index.is_none() {
             let index = self
                 .table_store
-                .read_index(self.view.table_as_ref(), self.options.cache_blocks)
+                .read_index(&self.view.table_as_ref().sst, self.options.cache_blocks)
                 .await?;
             let block_idx_range =
                 InternalSstIterator::blocks_covering_view(&index.borrow(), &self.view);
@@ -853,7 +853,7 @@ impl RowEntryIterator for BloomFilterIterator<'_> {
                 .inner
                 .table_store()
                 .read_filter(
-                    self.inner.view().table_as_ref(),
+                    &self.inner.view().table_as_ref().sst,
                     self.inner.options.cache_blocks,
                 )
                 .await?;
@@ -931,7 +931,7 @@ impl<'a> SstIterator<'a> {
     #[allow(dead_code)]
     pub(crate) fn new_owned_with_stats<T: RangeBounds<Bytes>>(
         range: T,
-        table: SsTableHandle,
+        table: SsTableView,
         table_store: Arc<TableStore>,
         options: SstIteratorOptions,
         db_stats: Option<DbStats>,
@@ -943,7 +943,7 @@ impl<'a> SstIterator<'a> {
     #[allow(dead_code)]
     pub(crate) fn new_owned<T: RangeBounds<Bytes>>(
         range: T,
-        table: SsTableHandle,
+        table: SsTableView,
         table_store: Arc<TableStore>,
         options: SstIteratorOptions,
     ) -> Result<Option<Self>, SlateDBError> {
@@ -952,7 +952,7 @@ impl<'a> SstIterator<'a> {
 
     pub(crate) async fn new_owned_initialized<T: RangeBounds<Bytes>>(
         range: T,
-        table: SsTableHandle,
+        table: SsTableView,
         table_store: Arc<TableStore>,
         options: SstIteratorOptions,
     ) -> Result<Option<Self>, SlateDBError> {
@@ -976,7 +976,7 @@ impl<'a> SstIterator<'a> {
     #[allow(dead_code)]
     fn new_borrowed_with_stats<T: RangeBounds<Bytes>>(
         range: T,
-        table: &'a SsTableHandle,
+        table: &'a SsTableView,
         table_store: Arc<TableStore>,
         options: SstIteratorOptions,
         db_stats: Option<DbStats>,
@@ -988,7 +988,7 @@ impl<'a> SstIterator<'a> {
     #[allow(dead_code)]
     pub(crate) fn new_borrowed<T: RangeBounds<Bytes>>(
         range: T,
-        table: &'a SsTableHandle,
+        table: &'a SsTableView,
         table_store: Arc<TableStore>,
         options: SstIteratorOptions,
     ) -> Result<Option<Self>, SlateDBError> {
@@ -997,7 +997,7 @@ impl<'a> SstIterator<'a> {
 
     pub(crate) async fn new_borrowed_initialized<T: RangeBounds<Bytes>>(
         range: T,
-        table: &'a SsTableHandle,
+        table: &'a SsTableView,
         table_store: Arc<TableStore>,
         options: SstIteratorOptions,
     ) -> Result<Option<Self>, SlateDBError> {
@@ -1021,7 +1021,7 @@ impl<'a> SstIterator<'a> {
 
     #[allow(dead_code)]
     pub(crate) fn for_key_with_stats(
-        table: &'a SsTableHandle,
+        table: &'a SsTableView,
         key: &'a [u8],
         table_store: Arc<TableStore>,
         options: SstIteratorOptions,
@@ -1033,7 +1033,7 @@ impl<'a> SstIterator<'a> {
 
     #[allow(dead_code)]
     pub(crate) async fn for_key_with_stats_initialized(
-        table: &'a SsTableHandle,
+        table: &'a SsTableView,
         key: &'a [u8],
         table_store: Arc<TableStore>,
         options: SstIteratorOptions,
@@ -1103,7 +1103,7 @@ mod tests {
     use crate::db_cache::test_utils::TestCache;
     use crate::db_cache::DbCache;
     use crate::db_cache::SplitCache;
-    use crate::db_state::SsTableId;
+    use crate::db_state::{SsTableId, SsTableView};
     use crate::db_stats::DbStats;
     use crate::filter;
     use crate::format::sst::SsTableFormat;
@@ -1168,7 +1168,7 @@ mod tests {
         };
         let mut iter = SstIterator::new_owned_initialized(
             ..,
-            sst_handle,
+            SsTableView::new(sst_handle),
             table_store.clone(),
             sst_iter_options,
         )
@@ -1268,7 +1268,7 @@ mod tests {
         let sst_handle = build_single_block_sst(&table_store, &existing_keys).await;
 
         let filter = table_store
-            .read_filter(&sst_handle, true)
+            .read_filter(&sst_handle.sst, true)
             .await
             .expect("filter read should succeed")
             .expect("filter should exist");
@@ -1324,14 +1324,16 @@ mod tests {
             .add_value(b"key2", b"value2", Some(2), None)
             .await
             .unwrap();
-        let handle = writer
-            .write_sst(
-                &SsTableId::Compacted(ulid::Ulid::new()),
-                builder.build().await.unwrap(),
-                false,
-            )
-            .await
-            .unwrap();
+        let handle = SsTableView::new(
+            writer
+                .write_sst(
+                    &SsTableId::Compacted(ulid::Ulid::new()),
+                    builder.build().await.unwrap(),
+                    false,
+                )
+                .await
+                .unwrap(),
+        );
 
         let meta_cache = Arc::new(TestCache::new());
         let cache = Arc::new(
@@ -1363,7 +1365,7 @@ mod tests {
         let _ = iter.next().await.unwrap();
 
         assert!(meta_cache
-            .get_filter(&(handle.id, handle.info.filter_offset).into())
+            .get_filter(&(handle.sst.id, handle.sst.info.filter_offset).into())
             .await
             .unwrap()
             .is_none());
@@ -1385,7 +1387,7 @@ mod tests {
         let _ = iter.next().await.unwrap();
 
         assert!(meta_cache
-            .get_filter(&(handle.id, handle.info.filter_offset).into())
+            .get_filter(&(handle.sst.id, handle.sst.info.filter_offset).into())
             .await
             .unwrap()
             .is_some());
@@ -1407,10 +1409,7 @@ mod tests {
         ))
     }
 
-    async fn build_single_block_sst(
-        table_store: &Arc<TableStore>,
-        keys: &[&[u8]],
-    ) -> SsTableHandle {
+    async fn build_single_block_sst(table_store: &Arc<TableStore>, keys: &[&[u8]]) -> SsTableView {
         let mut builder = table_store.table_builder();
         for key in keys {
             let value = format!("v_{}", String::from_utf8_lossy(key));
@@ -1421,7 +1420,7 @@ mod tests {
         }
         let encoded = builder.build().await.unwrap();
         let id = SsTableId::Compacted(ulid::Ulid::new());
-        table_store.write_sst(&id, encoded, false).await.unwrap()
+        SsTableView::new(table_store.write_sst(&id, encoded, false).await.unwrap())
     }
 
     #[tokio::test]
@@ -1475,7 +1474,7 @@ mod tests {
         };
         let mut iter = SstIterator::new_owned_initialized(
             ..,
-            sst_handle,
+            SsTableView::new(sst_handle),
             table_store.clone(),
             sst_iter_options,
         )
@@ -1677,7 +1676,8 @@ mod tests {
 
         let encoded = builder.build().await.unwrap();
         let id = SsTableId::Compacted(ulid::Ulid::new());
-        let sst_handle = table_store.write_sst(&id, encoded, false).await.unwrap();
+        let sst_handle =
+            SsTableView::new(table_store.write_sst(&id, encoded, false).await.unwrap());
 
         // Initialize iterator in descending order with full range
         let mut iter = SstIterator::new_borrowed_initialized(
@@ -1794,7 +1794,7 @@ mod tests {
         ts: Arc<TableStore>,
         mut key_gen: OrderedBytesGenerator,
         mut val_gen: OrderedBytesGenerator,
-    ) -> (SsTableHandle, usize) {
+    ) -> (SsTableView, usize) {
         let mut writer = ts.table_writer(SsTableId::Wal(0));
         let mut nkeys = 0usize;
         while writer.blocks_written() < n {
@@ -1803,7 +1803,7 @@ mod tests {
             nkeys += 1;
         }
         let sst = writer.close().await.unwrap();
-        (sst, nkeys)
+        (SsTableView::new(sst), nkeys)
     }
 
     #[tokio::test]
@@ -1854,7 +1854,7 @@ mod tests {
         let encoded = builder.build().await.unwrap();
         let id = SsTableId::Compacted(ulid::Ulid::new());
         table_store.write_sst(&id, encoded, false).await.unwrap();
-        let sst_handle = table_store.open_sst(&id).await.unwrap();
+        let sst_handle = SsTableView::new(table_store.open_sst(&id).await.unwrap());
 
         let sst_iter_options = SstIteratorOptions {
             cache_blocks: true,
@@ -1888,7 +1888,7 @@ mod tests {
 
         // remove block from cache and verify that it is not cached when iterating with cache_blocks=false
         block_cache.remove(&(id, 0).into()).await;
-        let sst_handle = table_store.open_sst(&id).await.unwrap();
+        let sst_handle = SsTableView::new(table_store.open_sst(&id).await.unwrap());
         let sst_iter_options = SstIteratorOptions {
             cache_blocks: false,
             ..SstIteratorOptions::default()
@@ -1923,7 +1923,7 @@ mod tests {
     async fn build_v2_sst(
         table_store: &Arc<TableStore>,
         keys_and_values: &[(&[u8], &[u8])],
-    ) -> SsTableHandle {
+    ) -> SsTableView {
         let mut builder = table_store
             .table_builder()
             .with_block_format(BlockFormat::V2);
@@ -1932,7 +1932,7 @@ mod tests {
         }
         let encoded = builder.build().await.unwrap();
         let id = SsTableId::Compacted(ulid::Ulid::new());
-        table_store.write_sst(&id, encoded, false).await.unwrap()
+        SsTableView::new(table_store.write_sst(&id, encoded, false).await.unwrap())
     }
 
     #[tokio::test]
@@ -2066,7 +2066,8 @@ mod tests {
 
         let encoded = builder.build().await.unwrap();
         let id = SsTableId::Compacted(ulid::Ulid::new());
-        let sst_handle = table_store.write_sst(&id, encoded, false).await.unwrap();
+        let sst_handle =
+            SsTableView::new(table_store.write_sst(&id, encoded, false).await.unwrap());
 
         // when: iterating over all keys
         let sst_iter_options = SstIteratorOptions {
@@ -2139,10 +2140,11 @@ mod tests {
         );
 
         // when: seeking to a key in a later block (key_0030)
+        let sst_view = SsTableView::new(sst_handle);
         let seek_key = b"key_0030";
         let mut iter = SstIterator::new_borrowed_initialized(
             BytesRange::from_slice(seek_key.as_ref()..),
-            &sst_handle,
+            &sst_view,
             table_store.clone(),
             SstIteratorOptions::default(),
         )
@@ -2194,7 +2196,8 @@ mod tests {
 
         let encoded = builder.build().await.unwrap();
         let id = SsTableId::Compacted(ulid::Ulid::new());
-        let sst_handle = table_store.write_sst(&id, encoded, false).await.unwrap();
+        let sst_handle =
+            SsTableView::new(table_store.write_sst(&id, encoded, false).await.unwrap());
 
         // when: searching for a non-existent key (odd number)
         let mut iter = SstIterator::for_key_with_stats_initialized(
@@ -2245,7 +2248,8 @@ mod tests {
 
         let encoded = builder.build().await.unwrap();
         let id = SsTableId::Compacted(ulid::Ulid::new());
-        let sst_handle = table_store.write_sst(&id, encoded, false).await.unwrap();
+        let sst_handle =
+            SsTableView::new(table_store.write_sst(&id, encoded, false).await.unwrap());
 
         // when: seeking past the last key
         let iter = SstIterator::new_borrowed_initialized(
@@ -2332,7 +2336,7 @@ mod tests {
         };
         let mut iter = SstIterator::new_owned_initialized(
             BytesRange::from_slice(start_key.as_ref()..=end_key.as_ref()),
-            sst_handle,
+            SsTableView::new(sst_handle),
             table_store.clone(),
             sst_iter_options,
         )
@@ -2457,7 +2461,7 @@ mod tests {
         };
         let mut iter = SstIterator::new_owned_initialized(
             ..,
-            sst_handle,
+            SsTableView::new(sst_handle),
             table_store.clone(),
             sst_iter_options,
         )
@@ -2521,7 +2525,7 @@ mod tests {
 
         let mut iter = SstIterator::new_owned_initialized(
             ..,
-            handle,
+            SsTableView::new(handle),
             table_store.clone(),
             SstIteratorOptions {
                 order,

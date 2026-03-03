@@ -15,7 +15,9 @@ use uuid::Uuid;
 pub(crate) mod store;
 
 // TODO: should probably move these into manifest/mod.rs (this file)
-pub use crate::db_state::{ManifestCore, SortedRun, SsTableHandle, SsTableId, SsTableInfo};
+pub use crate::db_state::{
+    ManifestCore, SortedRun, SsTableHandle, SsTableId, SsTableInfo, SsTableView,
+};
 
 #[derive(Clone, Serialize, PartialEq, Debug)]
 pub(crate) struct Manifest {
@@ -63,8 +65,8 @@ impl Manifest {
             .core
             .compacted
             .iter()
-            .flat_map(|sr| sr.ssts.iter().map(|s| s.id))
-            .chain(parent_manifest.core.l0.iter().map(|s| s.id))
+            .flat_map(|sr| sr.ssts.iter().map(|s| s.sst.id))
+            .chain(parent_manifest.core.l0.iter().map(|s| s.sst.id))
             .filter(|id| !parent_external_sst_ids.contains(id))
             .collect();
 
@@ -102,9 +104,9 @@ impl Manifest {
         handles: T,
         handles_overlap: bool,
         projection_range: &BytesRange,
-    ) -> Vec<SsTableHandle>
+    ) -> Vec<SsTableView>
     where
-        T: IntoIterator<Item = &'a SsTableHandle>,
+        T: IntoIterator<Item = &'a SsTableView>,
     {
         let mut iter = handles.into_iter().peekable();
         let mut filtered_handles = vec![];
@@ -232,7 +234,9 @@ mod tests {
 
     use super::Manifest;
     use crate::config::CheckpointOptions;
-    use crate::db_state::{ManifestCore, SortedRun, SsTableHandle, SsTableId, SsTableInfo};
+    use crate::db_state::{
+        ManifestCore, SortedRun, SsTableHandle, SsTableId, SsTableInfo, SsTableView,
+    };
     use crate::format::sst::SST_FORMAT_VERSION_LATEST;
     use crate::rand::DbRand;
     use bytes::Bytes;
@@ -554,13 +558,15 @@ mod tests {
     {
         let mut core = ManifestCore::new();
         for entry in &manifest.l0 {
-            core.l0.push_back(SsTableHandle::new_compacted(
-                sst_id_fn(entry.sst_alias),
-                SST_FORMAT_VERSION_LATEST,
-                SsTableInfo {
-                    first_entry: Some(entry.first_entry.clone()),
-                    ..SsTableInfo::default()
-                },
+            core.l0.push_back(SsTableView::new_projected(
+                SsTableHandle::new(
+                    sst_id_fn(entry.sst_alias),
+                    SST_FORMAT_VERSION_LATEST,
+                    SsTableInfo {
+                        first_entry: Some(entry.first_entry.clone()),
+                        ..SsTableInfo::default()
+                    },
+                ),
                 entry.visible_range.clone(),
             ));
         }
@@ -570,13 +576,15 @@ mod tests {
                 ssts: sorted_run
                     .iter()
                     .map(|entry| {
-                        SsTableHandle::new_compacted(
-                            sst_id_fn(entry.sst_alias),
-                            SST_FORMAT_VERSION_LATEST,
-                            SsTableInfo {
-                                first_entry: Some(entry.first_entry.clone()),
-                                ..SsTableInfo::default()
-                            },
+                        SsTableView::new_projected(
+                            SsTableHandle::new(
+                                sst_id_fn(entry.sst_alias),
+                                SST_FORMAT_VERSION_LATEST,
+                                SsTableInfo {
+                                    first_entry: Some(entry.first_entry.clone()),
+                                    ..SsTableInfo::default()
+                                },
+                            ),
                             entry.visible_range.clone(),
                         )
                     })
@@ -600,11 +608,12 @@ mod tests {
             // Format actual L0 entries
             for (idx, handle) in actual.core.l0.iter().enumerate() {
                 let id_str = sst_aliases
-                    .get(&handle.id)
+                    .get(&handle.sst.id)
                     .map(|a| a.as_str())
                     .unwrap_or("UNKNOWN");
 
                 let first_entry = handle
+                    .sst
                     .info
                     .first_entry
                     .as_ref()
@@ -637,9 +646,10 @@ mod tests {
 
             // Format expected L0 entries
             for (idx, handle) in expected.core.l0.iter().enumerate() {
-                let id_str = sst_aliases.get(&handle.id).unwrap();
+                let id_str = sst_aliases.get(&handle.sst.id).unwrap();
 
                 let first_entry = handle
+                    .sst
                     .info
                     .first_entry
                     .as_ref()

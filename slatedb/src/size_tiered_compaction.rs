@@ -215,7 +215,7 @@ impl CompactionScheduler for SizeTieredCompactionScheduler {
             .manifest()
             .l0
             .iter()
-            .map(|sst| SourceId::Sst(sst.id.unwrap_compacted_id()))
+            .map(|sst| SourceId::Sst(sst.sst.id.unwrap_compacted_id()))
             .chain(
                 state
                     .manifest()
@@ -379,7 +379,7 @@ impl SizeTieredCompactionScheduler {
                 .l0
                 .iter()
                 .map(|l0| CompactionSource {
-                    source: SourceId::Sst(l0.id.unwrap_compacted_id()),
+                    source: SourceId::Sst(l0.sst.id.unwrap_compacted_id()),
                     size: l0.estimate_size(),
                 })
                 .collect(),
@@ -428,7 +428,9 @@ mod tests {
         Compaction, CompactionSpec, Compactions, CompactorState, SourceId,
     };
     use crate::config::{CompactorOptions, SizeTieredCompactionSchedulerOptions};
-    use crate::db_state::{ManifestCore, SortedRun, SsTableHandle, SsTableId, SsTableInfo};
+    use crate::db_state::{
+        ManifestCore, SortedRun, SsTableHandle, SsTableId, SsTableInfo, SsTableView,
+    };
     use crate::format::sst::SST_FORMAT_VERSION_LATEST;
     use crate::manifest::store::test_utils::new_dirty_manifest;
     use crate::seq_tracker::SequenceTracker;
@@ -457,7 +459,7 @@ mod tests {
         let request = requests.first().unwrap();
         let expected_sources: Vec<SourceId> = l0
             .iter()
-            .map(|h| SourceId::Sst(h.id.unwrap_compacted_id()))
+            .map(|h| SourceId::Sst(h.sst.id.unwrap_compacted_id()))
             .collect();
         assert_eq!(request.sources(), &expected_sources);
         assert_eq!(request.destination(), 0);
@@ -490,7 +492,7 @@ mod tests {
         let request = requests.first().unwrap();
         let expected_sources: Vec<SourceId> = l0
             .iter()
-            .map(|h| SourceId::Sst(h.id.unwrap_compacted_id()))
+            .map(|h| SourceId::Sst(h.sst.id.unwrap_compacted_id()))
             .collect();
         assert_eq!(request.sources(), &expected_sources);
     }
@@ -843,7 +845,7 @@ mod tests {
         assert!(result.is_err());
     }
 
-    fn create_sst(size: u64) -> SsTableHandle {
+    fn create_sst(size: u64) -> SsTableView {
         let info = SsTableInfo {
             first_entry: None,
             last_entry: None,
@@ -854,11 +856,11 @@ mod tests {
             compression_codec: None,
             ..Default::default()
         };
-        SsTableHandle::new(
+        SsTableView::new(SsTableHandle::new(
             SsTableId::Compacted(ulid::Ulid::new()),
             SST_FORMAT_VERSION_LATEST,
             info,
-        )
+        ))
     }
 
     fn create_sr2(id: u32, size: u64) -> SortedRun {
@@ -870,11 +872,11 @@ mod tests {
     }
 
     fn create_sr(id: u32, sst_size: u64, num_ssts: usize) -> SortedRun {
-        let ssts: Vec<SsTableHandle> = (0..num_ssts).map(|_| create_sst(sst_size)).collect();
+        let ssts: Vec<SsTableView> = (0..num_ssts).map(|_| create_sst(sst_size)).collect();
         SortedRun { id, ssts }
     }
 
-    fn create_db_state(l0: VecDeque<SsTableHandle>, srs: Vec<SortedRun>) -> ManifestCore {
+    fn create_db_state(l0: VecDeque<SsTableView>, srs: Vec<SortedRun>) -> ManifestCore {
         ManifestCore {
             initialized: true,
             l0_last_compacted: None,
@@ -898,10 +900,10 @@ mod tests {
         CompactorState::new(dirty, compactions)
     }
 
-    fn create_l0_compaction(l0: &[SsTableHandle], dst: u32) -> CompactionSpec {
+    fn create_l0_compaction(l0: &[SsTableView], dst: u32) -> CompactionSpec {
         let sources: Vec<SourceId> = l0
             .iter()
-            .map(|h| SourceId::Sst(h.id.unwrap_compacted_id()))
+            .map(|h| SourceId::Sst(h.sst.id.unwrap_compacted_id()))
             .collect();
 
         CompactionSpec::new(sources, dst)

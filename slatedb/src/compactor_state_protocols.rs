@@ -588,23 +588,21 @@ mod tests {
         .unwrap();
 
         let output_ssts = vec![
-            SsTableHandle::new_compacted(
+            SsTableHandle::new(
                 SsTableId::Compacted(Ulid::from_parts(10, 0)),
                 SST_FORMAT_VERSION_LATEST,
                 SsTableInfo {
                     first_entry: Some(Bytes::copy_from_slice(b"a")),
                     ..Default::default()
                 },
-                None,
             ),
-            SsTableHandle::new_compacted(
+            SsTableHandle::new(
                 SsTableId::Compacted(Ulid::from_parts(11, 0)),
                 SST_FORMAT_VERSION_LATEST,
                 SsTableInfo {
                     first_entry: Some(Bytes::copy_from_slice(b"m")),
                     ..Default::default()
                 },
-                None,
             ),
         ];
 

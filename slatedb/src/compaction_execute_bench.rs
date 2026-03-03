@@ -23,7 +23,7 @@ use crate::compactor_executor::{
 };
 use crate::compactor_state::{Compaction, CompactionSpec, SourceId};
 use crate::config::{CompactorOptions, CompressionCodec};
-use crate::db_state::{SsTableHandle, SsTableId};
+use crate::db_state::{SsTableHandle, SsTableId, SsTableView};
 use crate::error::SlateDBError;
 use crate::format::sst::SsTableFormat;
 use crate::manifest::store::{ManifestStore, StoredManifest};
@@ -245,9 +245,9 @@ impl CompactionExecuteBench {
             ssts_by_id.insert(id, handle);
         }
         info!("finished loading");
-        let ssts: Vec<SsTableHandle> = sst_ids
+        let ssts: Vec<SsTableView> = sst_ids
             .into_iter()
-            .map(|id| ssts_by_id.get(&id).expect("expected sst").clone())
+            .map(|id| SsTableView::new(ssts_by_id.get(&id).expect("expected sst").clone()))
             .collect();
         Ok(StartCompactionJobArgs {
             id: rand.rng().gen_ulid(system_clock.as_ref()),

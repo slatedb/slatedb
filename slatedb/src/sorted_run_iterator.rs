@@ -1,5 +1,5 @@
 use crate::bytes_range::BytesRange;
-use crate::db_state::{SortedRun, SsTableHandle};
+use crate::db_state::{SortedRun, SsTableView};
 use crate::error::SlateDBError;
 use crate::iter::RowEntryIterator;
 use crate::sst_iter::{SstIterator, SstIteratorOptions, SstView};
@@ -13,9 +13,9 @@ use std::sync::Arc;
 
 #[derive(Debug)]
 enum SortedRunView<'a> {
-    Owned(VecDeque<SsTableHandle>, BytesRange),
+    Owned(VecDeque<SsTableView>, BytesRange),
     Borrowed(
-        VecDeque<&'a SsTableHandle>,
+        VecDeque<&'a SsTableView>,
         (Bound<&'a [u8]>, Bound<&'a [u8]>),
     ),
 }
@@ -45,7 +45,7 @@ impl<'a> SortedRunView<'a> {
         Ok(next_iter)
     }
 
-    fn peek_next_table(&self) -> Option<&SsTableHandle> {
+    fn peek_next_table(&self) -> Option<&SsTableView> {
         match self {
             SortedRunView::Owned(tables, _) => tables.front(),
             SortedRunView::Borrowed(tables, _) => tables.front().copied(),
@@ -191,7 +191,7 @@ impl RowEntryIterator for SortedRunIterator<'_> {
 mod tests {
     use super::*;
     use crate::bytes_generator::OrderedBytesGenerator;
-    use crate::db_state::SsTableId;
+    use crate::db_state::{SsTableHandle, SsTableId};
     use crate::format::sst::SsTableFormat;
     use crate::proptest_util;
     use crate::proptest_util::sample;
@@ -240,7 +240,7 @@ mod tests {
         let handle = table_store.write_sst(&id, encoded, false).await.unwrap();
         let sr = SortedRun {
             id: 0,
-            ssts: vec![handle],
+            ssts: vec![SsTableView::new(handle)],
         };
 
         let mut iter = SortedRunIterator::new_owned_initialized(
@@ -301,7 +301,7 @@ mod tests {
         let handle2 = table_store.write_sst(&id2, encoded, false).await.unwrap();
         let sr = SortedRun {
             id: 0,
-            ssts: vec![handle1, handle2],
+            ssts: vec![SsTableView::new(handle1), SsTableView::new(handle2)],
         };
 
         let mut iter = SortedRunIterator::new_owned_initialized(
@@ -513,7 +513,7 @@ mod tests {
             let encoded = builder.build().await.unwrap();
             let id = SsTableId::Compacted(ulid::Ulid::new());
             let handle = table_store.write_sst(&id, encoded, false).await.unwrap();
-            ssts.push(handle);
+            ssts.push(SsTableView::new(handle));
         }
 
         SortedRun { id: 0, ssts }
@@ -526,7 +526,7 @@ mod tests {
         mut key_gen: OrderedBytesGenerator,
         mut val_gen: OrderedBytesGenerator,
     ) -> SortedRun {
-        let mut ssts = Vec::<SsTableHandle>::new();
+        let mut ssts = Vec::<SsTableView>::new();
         for _ in 0..n {
             let mut writer = table_store.table_writer(SsTableId::Compacted(ulid::Ulid::new()));
             for _ in 0..keys_per_sst {
@@ -535,7 +535,7 @@ mod tests {
                 writer.add(entry).await.unwrap();
             }
             let sst = writer.close().await.unwrap();
-            ssts.push(sst);
+            ssts.push(SsTableView::new(sst));
         }
         SortedRun { id: 0, ssts }
     }
@@ -613,7 +613,12 @@ mod tests {
 
             let sorted_run = SortedRun {
                 id: 0,
-                ssts: vec![sst1_v1, sst2_v2, sst3_v1, sst4_v2],
+                ssts: vec![
+                    SsTableView::new(sst1_v1),
+                    SsTableView::new(sst2_v2),
+                    SsTableView::new(sst3_v1),
+                    SsTableView::new(sst4_v2),
+                ],
             };
 
             // when: iterating over the sorted run
@@ -679,7 +684,12 @@ mod tests {
 
             let sorted_run = SortedRun {
                 id: 0,
-                ssts: vec![sst1_v1, sst2_v2, sst3_v1, sst4_v2],
+                ssts: vec![
+                    SsTableView::new(sst1_v1),
+                    SsTableView::new(sst2_v2),
+                    SsTableView::new(sst3_v1),
+                    SsTableView::new(sst4_v2),
+                ],
             };
 
             let mut iter = SortedRunIterator::new_owned_initialized(
