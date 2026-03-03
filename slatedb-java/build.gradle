@@ -295,6 +295,17 @@ tasks.named('sourcesJar') {
     duplicatesStrategy = org.gradle.api.file.DuplicatesStrategy.EXCLUDE
 }
 
+// Why this exists:
+// - We publish with com.vanniktech.maven.publish, which creates `plainJavadocJar`.
+// - The Java plugin also creates `javadocJar` because we call `withJavadocJar()`.
+// - Gradle 9 validates task inputs/outputs more strictly during publishing.
+//   Without an explicit edge, the metadata task can read the javadoc artifact
+//   before `plainJavadocJar` runs, and CI fails with an "implicit dependency" error.
+// This dependency tells Gradle the required order for publishing only.
+tasks.matching { it.name == 'generateMetadataFileForMavenPublication' }.configureEach {
+    dependsOn 'plainJavadocJar'
+}
+
 test {
     useJUnitPlatform()
     jvmArgs '--enable-native-access=ALL-UNNAMED'
