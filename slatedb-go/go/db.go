@@ -24,8 +24,8 @@ type KeyValue struct {
 	Key      []byte
 	Value    []byte
 	Seq      uint64
-	CreateTs *int64
-	ExpireTs *int64
+	CreateTs int64
+	ExpireTs int64
 }
 
 // ScanResult represents the result of a scan operation.
@@ -389,18 +389,11 @@ func (db *DB) GetKeyValueWithOptions(key []byte, readOpts *ReadOptions) (*KeyVal
 	defer C.slatedb_key_value_free(kvPtr)
 
 	kv := &KeyValue{
-		Key:   C.GoBytes(unsafe.Pointer(kvPtr.key), C.int(kvPtr.key_len)),
-		Value: C.GoBytes(unsafe.Pointer(kvPtr.value), C.int(kvPtr.value_len)),
-		Seq:   uint64(kvPtr.seq),
-	}
-
-	if bool(kvPtr.create_ts_present) {
-		ts := int64(kvPtr.create_ts)
-		kv.CreateTs = &ts
-	}
-	if bool(kvPtr.expire_ts_present) {
-		ts := int64(kvPtr.expire_ts)
-		kv.ExpireTs = &ts
+		Key:      C.GoBytes(unsafe.Pointer(kvPtr.key), C.int(kvPtr.key_len)),
+		Value:    C.GoBytes(unsafe.Pointer(kvPtr.value), C.int(kvPtr.value_len)),
+		Seq:      uint64(kvPtr.seq),
+		CreateTs: int64(kvPtr.create_ts),
+		ExpireTs: int64(kvPtr.expire_ts),
 	}
 
 	return kv, nil

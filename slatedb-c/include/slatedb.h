@@ -223,13 +223,9 @@ typedef struct slatedb_key_value_t {
     uintptr_t value_len;
     // Sequence number assigned to this entry.
     uint64_t seq;
-    // Whether `create_ts` is populated.
-    bool create_ts_present;
-    // Creation timestamp (valid when `create_ts_present` is true).
+    // Creation timestamp in milliseconds since epoch, or 0 if not set.
     int64_t create_ts;
-    // Whether `expire_ts` is populated.
-    bool expire_ts_present;
-    // Expiration timestamp (valid when `expire_ts_present` is true).
+    // Expiration timestamp in milliseconds since epoch, or 0 if not set.
     int64_t expire_ts;
 } slatedb_key_value_t;
 

@@ -228,10 +228,7 @@ class SlateDbTest {
             assertArrayEquals(key, kv.key());
             assertArrayEquals(value, kv.value());
             assertEquals(wh.seq(), kv.seq());
-            if (wh.createTs() > 0) {
-                assertTrue(kv.createTs().isPresent());
-                assertEquals(wh.createTs(), kv.createTs().get().toEpochMilli());
-            }
+            assertEquals(wh.createTs(), kv.createTs().toEpochMilli());
 
             // Test non-existent key
             assertNull(db.getKeyValue("non-existent".getBytes(StandardCharsets.UTF_8)));

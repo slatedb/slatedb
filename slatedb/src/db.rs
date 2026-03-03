@@ -7008,8 +7008,8 @@ mod tests {
         assert_eq!(kv.key, Bytes::from_static(key));
         assert_eq!(kv.value, Bytes::from_static(value));
         assert_eq!(kv.seq, 1);
-        assert_eq!(kv.create_ts, Some(100));
-        assert_eq!(kv.expire_ts, Some(150));
+        assert_eq!(kv.create_ts, 100);
+        assert_eq!(kv.expire_ts, 150);
     }
 
     #[tokio::test]

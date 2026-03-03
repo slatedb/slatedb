@@ -227,13 +227,9 @@ pub struct slatedb_key_value_t {
     pub value_len: usize,
     /// Sequence number assigned to this entry.
     pub seq: u64,
-    /// Whether `create_ts` is populated.
-    pub create_ts_present: bool,
-    /// Creation timestamp (valid when `create_ts_present` is true).
+    /// Creation timestamp in milliseconds since epoch, or 0 if not set.
     pub create_ts: i64,
-    /// Whether `expire_ts` is populated.
-    pub expire_ts_present: bool,
-    /// Expiration timestamp (valid when `expire_ts_present` is true).
+    /// Expiration timestamp in milliseconds since epoch, or 0 if not set.
     pub expire_ts: i64,
 }
 

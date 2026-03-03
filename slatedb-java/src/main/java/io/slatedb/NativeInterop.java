@@ -895,10 +895,8 @@ final class NativeInterop {
         MemorySegment valuePtr = slatedb_key_value_t.value(kv);
         long valueLen = slatedb_key_value_t.value_len(kv);
         long seq = slatedb_key_value_t.seq(kv);
-        boolean createTsPresent = slatedb_key_value_t.create_ts_present(kv);
-        Long createTs = createTsPresent ? slatedb_key_value_t.create_ts(kv) : null;
-        boolean expireTsPresent = slatedb_key_value_t.expire_ts_present(kv);
-        Long expireTs = expireTsPresent ? slatedb_key_value_t.expire_ts(kv) : null;
+        long createTs = slatedb_key_value_t.create_ts(kv);
+        long expireTs = slatedb_key_value_t.expire_ts(kv);
 
         byte[] key = new byte[(int) keyLen];
         MemorySegment.copy(keyPtr, 0, MemorySegment.ofArray(key), 0, keyLen);

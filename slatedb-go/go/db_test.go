@@ -70,8 +70,8 @@ var _ = Describe("DB", func() {
 			})
 
 			It("should get key-value with metadata", func() {
-				key := []byte("row_test_key")
-				value := []byte("row_test_value")
+				key := []byte("test-key")
+				value := []byte("test-value")
 
 				wh, err := db.Put(key, value)
 				Expect(err).NotTo(HaveOccurred())
@@ -82,10 +82,7 @@ var _ = Describe("DB", func() {
 				Expect(kv.Key).To(Equal(key))
 				Expect(kv.Value).To(Equal(value))
 				Expect(kv.Seq).To(Equal(wh.Seq))
-				if wh.CreateTs > 0 {
-					Expect(kv.CreateTs).NotTo(BeNil())
-					Expect(*kv.CreateTs).To(Equal(wh.CreateTs))
-				}
+				Expect(kv.CreateTs).To(Equal(wh.CreateTs))
 			})
 
 			It("should return nil,nil for non-existent key", func() {

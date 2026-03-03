@@ -58,10 +58,8 @@ pub unsafe extern "C" fn slatedb_iterator_next(
                 value: val,
                 value_len: val_len,
                 seq: kv.seq,
-                create_ts: kv.create_ts.unwrap_or(0),
-                create_ts_present: kv.create_ts.is_some(),
-                expire_ts: kv.expire_ts.unwrap_or(0),
-                expire_ts_present: kv.expire_ts.is_some(),
+                create_ts: kv.create_ts,
+                expire_ts: kv.expire_ts,
             });
             *out_kv = Box::into_raw(c_kv);
             *out_present = true;

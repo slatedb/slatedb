@@ -7,8 +7,8 @@ pub struct KeyValue {
     pub key: Bytes,
     pub value: Bytes,
     pub seq: u64,
-    pub create_ts: Option<i64>,
-    pub expire_ts: Option<i64>,
+    pub create_ts: i64,
+    pub expire_ts: i64,
 }
 
 impl<K, V> From<(&K, &V)> for KeyValue
@@ -23,8 +23,8 @@ where
             key,
             value,
             seq: 0,
-            create_ts: None,
-            expire_ts: None,
+            create_ts: 0,
+            expire_ts: 0,
         }
     }
 }
@@ -165,8 +165,8 @@ impl From<RowEntry> for KeyValue {
                 .as_bytes()
                 .expect("RowEntry should have a value"),
             seq: entry.seq,
-            create_ts: entry.create_ts,
-            expire_ts: entry.expire_ts,
+            create_ts: entry.create_ts.unwrap_or(0),
+            expire_ts: entry.expire_ts.unwrap_or(0),
         }
     }
 }

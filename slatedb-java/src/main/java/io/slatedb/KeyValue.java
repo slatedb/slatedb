@@ -1,7 +1,6 @@
 package io.slatedb;
 
 import java.time.Instant;
-import java.util.Optional;
 
 /**
  * Represents a key-value pair with metadata from the database.
@@ -10,10 +9,10 @@ public class KeyValue {
     private final byte[] key;
     private final byte[] value;
     private final long seq;
-    private final Long createTs;
-    private final Long expireTs;
+    private final long createTs;
+    private final long expireTs;
 
-    public KeyValue(byte[] key, byte[] value, long seq, Long createTs, Long expireTs) {
+    public KeyValue(byte[] key, byte[] value, long seq, long createTs, long expireTs) {
         this.key = key;
         this.value = value;
         this.seq = seq;
@@ -33,11 +32,11 @@ public class KeyValue {
         return seq;
     }
 
-    public Optional<Instant> createTs() {
-        return createTs != null ? Optional.of(Instant.ofEpochMilli(createTs)) : Optional.empty();
+    public Instant createTs() {
+        return Instant.ofEpochMilli(createTs);
     }
 
-    public Optional<Instant> expireTs() {
-        return expireTs != null ? Optional.of(Instant.ofEpochMilli(expireTs)) : Optional.empty();
+    public Instant expireTs() {
+        return Instant.ofEpochMilli(expireTs);
     }
 }

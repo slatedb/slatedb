@@ -97,9 +97,7 @@ var _ = Describe("Iterator", func() {
 				Expect(len(kv.Key)).To(BeNumerically(">", 0))
 				Expect(len(kv.Value)).To(BeNumerically(">", 0))
 				Expect(kv.Seq).To(BeNumerically(">", 0))
-				if kv.CreateTs != nil {
-					Expect(*kv.CreateTs).To(BeNumerically(">", 0))
-				}
+				Expect(kv.CreateTs).To(BeNumerically(">", 0))
 
 				// Keys should be in order
 				if lastKey != nil {
