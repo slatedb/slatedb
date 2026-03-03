@@ -396,7 +396,7 @@ mod tests {
     fn test_compactor_state_to_view() {
         let mut manifest = Manifest::initial(ManifestCore::new());
         manifest.compactor_epoch = 11;
-        manifest.core.l0_last_compacted = Some(Ulid::from_parts(5, 0));
+        manifest.core.last_compacted_l0_sst_view_id = Some(Ulid::from_parts(5, 0));
 
         let mut compactions = Compactions::new(manifest.compactor_epoch);
         let compaction_id = Ulid::from_parts(10, 0);
@@ -588,23 +588,21 @@ mod tests {
         .unwrap();
 
         let output_ssts = vec![
-            SsTableHandle::new_compacted(
+            SsTableHandle::new(
                 SsTableId::Compacted(Ulid::from_parts(10, 0)),
                 SST_FORMAT_VERSION_LATEST,
                 SsTableInfo {
                     first_entry: Some(Bytes::copy_from_slice(b"a")),
                     ..Default::default()
                 },
-                None,
             ),
-            SsTableHandle::new_compacted(
+            SsTableHandle::new(
                 SsTableId::Compacted(Ulid::from_parts(11, 0)),
                 SST_FORMAT_VERSION_LATEST,
                 SsTableInfo {
                     first_entry: Some(Bytes::copy_from_slice(b"m")),
                     ..Default::default()
                 },
-                None,
             ),
         ];
 
