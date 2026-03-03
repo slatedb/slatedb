@@ -7010,11 +7010,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_scan_row() {
+    async fn test_scan_row_entry() {
         use crate::types::ValueDeletable;
 
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let path = "/tmp/test_scan_row";
+        let path = "/tmp/test_scan_row_entry";
         let clock = Arc::new(MockSystemClock::new());
         let db = Db::builder(path, object_store)
             .with_settings(test_db_options(0, 1024, None))
@@ -7047,35 +7047,35 @@ mod tests {
 
         let mut iter = db.scan::<Bytes, _>(..).await.unwrap();
 
-        let kv1 = iter.next_entry().await.unwrap().unwrap();
-        assert_eq!(kv1.key, Bytes::from_static(b"key1"));
+        let row_entry1 = iter.next_entry().await.unwrap().unwrap();
+        assert_eq!(row_entry1.key, Bytes::from_static(b"key1"));
         assert_eq!(
-            kv1.value,
+            row_entry1.value,
             ValueDeletable::Value(Bytes::from_static(b"value1"))
         );
-        assert_eq!(kv1.seq, 1);
-        assert_eq!(kv1.create_ts, Some(100));
-        assert_eq!(kv1.expire_ts, Some(150));
+        assert_eq!(row_entry1.seq, 1);
+        assert_eq!(row_entry1.create_ts, Some(100));
+        assert_eq!(row_entry1.expire_ts, Some(150));
 
-        let kv2 = iter.next_entry().await.unwrap().unwrap();
-        assert_eq!(kv2.key, Bytes::from_static(b"key2"));
+        let row_entry2 = iter.next_entry().await.unwrap().unwrap();
+        assert_eq!(row_entry2.key, Bytes::from_static(b"key2"));
         assert_eq!(
-            kv2.value,
+            row_entry2.value,
             ValueDeletable::Value(Bytes::from_static(b"value2"))
         );
-        assert_eq!(kv2.seq, 2);
-        assert_eq!(kv2.create_ts, Some(110));
-        assert_eq!(kv2.expire_ts, Some(160));
+        assert_eq!(row_entry2.seq, 2);
+        assert_eq!(row_entry2.create_ts, Some(110));
+        assert_eq!(row_entry2.expire_ts, Some(160));
 
-        let kv3 = iter.next_entry().await.unwrap().unwrap();
-        assert_eq!(kv3.key, Bytes::from_static(b"key3"));
+        let row_entry3 = iter.next_entry().await.unwrap().unwrap();
+        assert_eq!(row_entry3.key, Bytes::from_static(b"key3"));
         assert_eq!(
-            kv3.value,
+            row_entry3.value,
             ValueDeletable::Value(Bytes::from_static(b"value3"))
         );
-        assert_eq!(kv3.seq, 3);
-        assert_eq!(kv3.create_ts, Some(120));
-        assert_eq!(kv3.expire_ts, Some(170));
+        assert_eq!(row_entry3.seq, 3);
+        assert_eq!(row_entry3.create_ts, Some(120));
+        assert_eq!(row_entry3.expire_ts, Some(170));
 
         assert!(iter.next_entry().await.unwrap().is_none());
     }
