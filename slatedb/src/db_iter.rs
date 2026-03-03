@@ -776,7 +776,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_next_row() {
+    async fn test_next_entry() {
         use crate::types::ValueDeletable;
         let entry = RowEntry::new(
             Bytes::from_static(b"key1"),
@@ -801,14 +801,14 @@ mod tests {
         .await
         .unwrap();
 
-        let row = iter.next_entry().await.unwrap().unwrap();
-        assert_eq!(row.key, Bytes::from_static(b"key1"));
+        let entry = iter.next_entry().await.unwrap().unwrap();
+        assert_eq!(entry.key, Bytes::from_static(b"key1"));
         assert_eq!(
-            row.value,
+            entry.value,
             ValueDeletable::Value(Bytes::from_static(b"value1"))
         );
-        assert_eq!(row.seq, 100);
-        assert_eq!(row.create_ts, Some(1000));
-        assert_eq!(row.expire_ts, Some(2000));
+        assert_eq!(entry.seq, 100);
+        assert_eq!(entry.create_ts, Some(1000));
+        assert_eq!(entry.expire_ts, Some(2000));
     }
 }

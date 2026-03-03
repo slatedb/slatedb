@@ -174,10 +174,10 @@ impl DbTransaction {
         let db_state = self.db_inner.state.read().view();
         let write_batch_cloned = self.write_batch.read().clone();
 
-        let row = self
+        let kv = self
             .db_inner
             .reader
-            .get_row_with_options(
+            .get_key_value_with_options(
                 key,
                 options,
                 &db_state,
@@ -186,10 +186,7 @@ impl DbTransaction {
             )
             .await
             .map_err(crate::Error::from)?;
-        match row {
-            Some(entry) if !entry.value.is_tombstone() => Ok(Some(KeyValue::from(entry))),
-            _ => Ok(None),
-        }
+        Ok(kv)
     }
 
     /// Scan a range of keys using the default scan options.

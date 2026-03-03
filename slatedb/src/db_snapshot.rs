@@ -89,16 +89,13 @@ impl DbSnapshot {
     ) -> Result<Option<KeyValue>, crate::Error> {
         self.db_inner.status()?;
         let db_state = self.db_inner.state.read().view();
-        let row = self
+        let kv = self
             .db_inner
             .reader
-            .get_row_with_options(key, options, &db_state, None, Some(self.started_seq))
+            .get_key_value_with_options(key, options, &db_state, None, Some(self.started_seq))
             .await
             .map_err(crate::Error::from)?;
-        match row {
-            Some(entry) if !entry.value.is_tombstone() => Ok(Some(KeyValue::from(entry))),
-            _ => Ok(None),
-        }
+        Ok(kv)
     }
 
     /// Scan a range of keys using the default scan options.

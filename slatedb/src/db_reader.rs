@@ -20,7 +20,7 @@ use crate::sst_iter::SstIteratorOptions;
 use crate::stats::StatRegistry;
 use crate::store_provider::StoreProvider;
 use crate::tablestore::TableStore;
-use crate::types::{KeyValue, RowEntry};
+use crate::types::KeyValue;
 use crate::utils::{IdGenerator, WatchableOnceCell};
 use crate::wal_replay::{WalReplayIterator, WalReplayOptions};
 use crate::{Checkpoint, DbIterator};
@@ -198,15 +198,15 @@ impl DbReaderInner {
             .await
     }
 
-    async fn get_row_with_options<K: AsRef<[u8]> + Send>(
+    async fn get_key_value_with_options<K: AsRef<[u8]> + Send>(
         &self,
         key: K,
         options: &ReadOptions,
-    ) -> Result<Option<RowEntry>, SlateDBError> {
+    ) -> Result<Option<KeyValue>, SlateDBError> {
         self.check_closed()?;
         let db_state = Arc::clone(&self.state.read());
         self.reader
-            .get_row_with_options(key, options, db_state.as_ref(), None, None)
+            .get_key_value_with_options(key, options, db_state.as_ref(), None, None)
             .await
     }
 
@@ -789,15 +789,12 @@ impl DbReader {
         key: K,
         options: &ReadOptions,
     ) -> Result<Option<KeyValue>, crate::Error> {
-        let row = self
+        let kv = self
             .inner
-            .get_row_with_options(key, options)
+            .get_key_value_with_options(key, options)
             .await
             .map_err(crate::Error::from)?;
-        match row {
-            Some(entry) if !entry.value.is_tombstone() => Ok(Some(KeyValue::from(entry))),
-            _ => Ok(None),
-        }
+        Ok(kv)
     }
 
     /// Scan a range of keys using the default scan options.

@@ -1207,12 +1207,12 @@ def test_get_key_value(db: SlateDB):
     value = b"value1"
     db.put(key, value)
 
-    row = db.get_key_value(key)
-    assert row is not None
-    assert row.key == key
-    assert row.value == value
-    assert row.seq > 0
-    assert row.create_ts is not None
+    kv = db.get_key_value(key)
+    assert kv is not None
+    assert kv.key == key
+    assert kv.value == value
+    assert kv.seq > 0
+    assert kv.create_ts is not None
 
     non_existent = db.get_key_value(b"non_existent")
     assert non_existent is None

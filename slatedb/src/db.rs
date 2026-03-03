@@ -70,7 +70,7 @@ use crate::sst_iter::SstIteratorOptions;
 use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
 use crate::transaction_manager::TransactionManager;
-use crate::types::{KeyValue, RowEntry};
+use crate::types::KeyValue;
 use crate::utils::{format_bytes_si, SendSafely};
 use crate::wal_buffer::{WalBufferManager, WAL_BUFFER_TASK_NAME};
 use crate::wal_replay::{WalReplayIterator, WalReplayOptions};
@@ -204,16 +204,16 @@ impl DbInner {
     }
 
     /// Get the full row entry for a given key.
-    pub(crate) async fn get_row_with_options<K: AsRef<[u8]>>(
+    pub(crate) async fn get_key_value_with_options<K: AsRef<[u8]>>(
         &self,
         key: K,
         options: &ReadOptions,
-    ) -> Result<Option<RowEntry>, SlateDBError> {
+    ) -> Result<Option<KeyValue>, SlateDBError> {
         self.db_stats.get_requests.inc();
         self.status()?;
         let db_state = self.state.read().view();
         self.reader
-            .get_row_with_options(key, options, &db_state, None, None)
+            .get_key_value_with_options(key, options, &db_state, None, None)
             .await
     }
 
@@ -905,15 +905,12 @@ impl Db {
         key: K,
         options: &ReadOptions,
     ) -> Result<Option<KeyValue>, crate::Error> {
-        let row = self
+        let kv = self
             .inner
-            .get_row_with_options(key, options)
+            .get_key_value_with_options(key, options)
             .await
             .map_err(crate::Error::from)?;
-        match row {
-            Some(entry) if !entry.value.is_tombstone() => Ok(Some(KeyValue::from(entry))),
-            _ => Ok(None),
-        }
+        Ok(kv)
     }
 
     /// Scan a range of keys using the default scan options.
@@ -7050,35 +7047,35 @@ mod tests {
 
         let mut iter = db.scan::<Bytes, _>(..).await.unwrap();
 
-        let row1 = iter.next_entry().await.unwrap().unwrap();
-        assert_eq!(row1.key, Bytes::from_static(b"key1"));
+        let kv1 = iter.next_entry().await.unwrap().unwrap();
+        assert_eq!(kv1.key, Bytes::from_static(b"key1"));
         assert_eq!(
-            row1.value,
+            kv1.value,
             ValueDeletable::Value(Bytes::from_static(b"value1"))
         );
-        assert_eq!(row1.seq, 1);
-        assert_eq!(row1.create_ts, Some(100));
-        assert_eq!(row1.expire_ts, Some(150));
+        assert_eq!(kv1.seq, 1);
+        assert_eq!(kv1.create_ts, Some(100));
+        assert_eq!(kv1.expire_ts, Some(150));
 
-        let row2 = iter.next_entry().await.unwrap().unwrap();
-        assert_eq!(row2.key, Bytes::from_static(b"key2"));
+        let kv2 = iter.next_entry().await.unwrap().unwrap();
+        assert_eq!(kv2.key, Bytes::from_static(b"key2"));
         assert_eq!(
-            row2.value,
+            kv2.value,
             ValueDeletable::Value(Bytes::from_static(b"value2"))
         );
-        assert_eq!(row2.seq, 2);
-        assert_eq!(row2.create_ts, Some(110));
-        assert_eq!(row2.expire_ts, Some(160));
+        assert_eq!(kv2.seq, 2);
+        assert_eq!(kv2.create_ts, Some(110));
+        assert_eq!(kv2.expire_ts, Some(160));
 
-        let row3 = iter.next_entry().await.unwrap().unwrap();
-        assert_eq!(row3.key, Bytes::from_static(b"key3"));
+        let kv3 = iter.next_entry().await.unwrap().unwrap();
+        assert_eq!(kv3.key, Bytes::from_static(b"key3"));
         assert_eq!(
-            row3.value,
+            kv3.value,
             ValueDeletable::Value(Bytes::from_static(b"value3"))
         );
-        assert_eq!(row3.seq, 3);
-        assert_eq!(row3.create_ts, Some(120));
-        assert_eq!(row3.expire_ts, Some(170));
+        assert_eq!(kv3.seq, 3);
+        assert_eq!(kv3.create_ts, Some(120));
+        assert_eq!(kv3.expire_ts, Some(170));
 
         assert!(iter.next_entry().await.unwrap().is_none());
     }

@@ -10,7 +10,7 @@ use crate::oracle::Oracle;
 use crate::sorted_run_iterator::SortedRunIterator;
 use crate::sst_iter::{SstIterator, SstIteratorOptions};
 use crate::tablestore::TableStore;
-use crate::types::RowEntry;
+use crate::types::KeyValue;
 #[cfg(not(dst))]
 use crate::utils::get_now_for_read;
 use crate::utils::{build_concurrent, compute_max_parallel};
@@ -273,14 +273,14 @@ impl Reader {
     ///   provided, the read will not return entries with a sequence number
     ///   greater than this value. The final bound is the minimum of this value
     ///   and the bound derived from `options` (e.g., durability, dirty read).
-    pub(crate) async fn get_row_with_options<K: AsRef<[u8]>>(
+    pub(crate) async fn get_key_value_with_options<K: AsRef<[u8]>>(
         &self,
         key: K,
         options: &ReadOptions,
         db_state: &(dyn DbStateReader + Sync + Send),
         write_batch: Option<WriteBatch>,
         max_seq: Option<u64>,
-    ) -> Result<Option<RowEntry>, SlateDBError> {
+    ) -> Result<Option<KeyValue>, SlateDBError> {
         #[cfg(not(dst))]
         let now = get_now_for_read(self.mono_clock.clone(), options.durability_filter).await?;
         #[cfg(dst)]
@@ -326,8 +326,8 @@ impl Reader {
         .await?;
 
         if let Some(entry) = iterator.next_entry().await? {
-            if entry.key == target_key {
-                return Ok(Some(entry));
+            if entry.key == target_key && !entry.value.is_tombstone() {
+                return Ok(Some(KeyValue::from(entry)));
             }
         }
 
@@ -340,8 +340,8 @@ impl Reader {
     /// `Ok(None)` if the key is deleted or the latest visible value is expired,
     /// and an error if the read fails.
     ///
-    /// This is a thin wrapper around [`get_row_with_options`] that extracts the
-    /// value bytes from the returned row entry.
+    /// This is a thin wrapper around [`get_key_value_with_options`] that extracts the
+    /// value bytes from the returned key-value pair.
     pub(crate) async fn get_with_options<K: AsRef<[u8]>>(
         &self,
         key: K,
@@ -351,15 +351,10 @@ impl Reader {
         max_seq: Option<u64>,
     ) -> Result<Option<Bytes>, SlateDBError> {
         match self
-            .get_row_with_options(key, options, db_state, write_batch, max_seq)
+            .get_key_value_with_options(key, options, db_state, write_batch, max_seq)
             .await?
         {
-            Some(entry) => Ok(Some(
-                entry
-                    .value
-                    .as_bytes()
-                    .ok_or(SlateDBError::UnexpectedTombstone)?,
-            )),
+            Some(kv) => Ok(Some(kv.value)),
             None => Ok(None),
         }
     }
