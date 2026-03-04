@@ -314,7 +314,7 @@ impl DbReaderInner {
             new_checkpoint,
             manifest,
             imm_memtable,
-            true,
+            !self.options.skip_wal_replay,
             Arc::clone(&self.table_store),
             &self.options,
         )
@@ -1351,6 +1351,66 @@ mod tests {
             reader2.get(wal_only_key).await.unwrap(),
             Some(Bytes::from_static(wal_only_value))
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn skip_wal_replay_should_be_respected_during_reestablish_checkpoint() {
+        use crate::config::{FlushOptions, FlushType};
+
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_kv_store");
+        let test_provider = TestProvider::new(path.clone(), Arc::clone(&object_store));
+
+        let db = test_provider.new_db(Settings::default()).await.unwrap();
+
+        // Write initial data and flush to L0 so the reader opens with this state
+        db.put(b"key1", b"value1").await.unwrap();
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::MemTable,
+        })
+        .await
+        .unwrap();
+
+        // Open reader with skip_wal_replay=true. The poller's first tick fires
+        // immediately (during the next yield) and sees no manifest change.
+        let reader_options = DbReaderOptions {
+            manifest_poll_interval: Duration::from_millis(100),
+            skip_wal_replay: true,
+            ..DbReaderOptions::default()
+        };
+        let reader = test_provider
+            .new_db_reader(reader_options, None)
+            .await
+            .unwrap();
+
+        // Write more data and flush to L0, changing the manifest's L0 state.
+        // This makes should_reestablish_checkpoint() return true on the next poll.
+        db.put(b"key2", b"value2").await.unwrap();
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::MemTable,
+        })
+        .await
+        .unwrap();
+
+        // Inject a failpoint on WAL listing. When reestablish_checkpoint is called
+        // with the buggy replay_new_wals=true, it calls last_seen_wal_id() which
+        // lists WAL SSTs and hits this failpoint. With the fix (replay_new_wals=false),
+        // the WAL listing is skipped entirely.
+        fail_parallel::cfg(
+            Arc::clone(&test_provider.fp_registry),
+            "list-wal-ssts",
+            "return",
+        )
+        .unwrap();
+
+        // Wait for the manifest poller's second tick to fire and trigger
+        // reestablish_checkpoint due to the changed L0 state.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // With the fix, the reader should still work (poller didn't crash).
+        // Without the fix, the poller crashes and get() returns an error.
+        let result = reader.get(b"key1").await;
+        assert!(result.is_ok());
     }
 
     #[tokio::test]
