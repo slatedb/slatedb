@@ -6873,4 +6873,296 @@ mod tests {
 
         db.close().await.unwrap();
     }
+
+    #[cfg(feature = "wal_disable")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn repro_get_fails_when_compacted_sr_splits_same_key_across_ssts() {
+        use crate::SstBlockSize;
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = "/tmp/test_merge_split_sr_repro";
+        let should_compact = Arc::new(AtomicBool::new(false));
+        let should_compact2 = should_compact.clone();
+        let compaction_scheduler = Arc::new(OnDemandCompactionSchedulerSupplier::new(Arc::new(
+            move |_state| {
+                let result = should_compact2
+                    .compare_exchange(true, false, Ordering::SeqCst, Ordering::SeqCst)
+                    .unwrap_or(false);
+                if result {
+                    info!("TRIGGER COMPACT");
+                }
+                result
+            },
+        )));
+
+        // Force frequent L0 flushes and tiny compacted SSTs so a single SR ends up with multiple SSTs.
+        let mut settings = test_db_options(
+            0,
+            128,
+            Some(CompactorOptions {
+                poll_interval: Duration::from_millis(20),
+                max_sst_size: 128,
+                max_concurrent_compactions: 1,
+                manifest_update_timeout: Duration::from_secs(300),
+                ..Default::default()
+            }),
+        );
+        settings.l0_max_ssts = 10_000;
+        settings.flush_interval = None;
+        settings.wal_enabled = false;
+
+        let compactor_options = settings.compactor_options.take().unwrap();
+        let db = Db::builder(path, object_store.clone())
+            .with_settings(settings)
+            .with_sst_block_size(SstBlockSize::Other(64))
+            .with_merge_operator(Arc::new(StringConcatMergeOperator))
+            .with_compactor_builder(
+                CompactorBuilder::new(path, object_store.clone())
+                    .with_scheduler_supplier(compaction_scheduler)
+                    .with_options(compactor_options),
+            )
+            .build()
+            .await
+            .unwrap();
+
+        // Write a base value and keep a snapshot alive so later versions are retained by compaction.
+        db.put_with_options(
+            b"k",
+            b"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa0",
+            &PutOptions::default(),
+            &WriteOptions {
+                await_durable: false,
+            },
+        )
+        .await
+        .unwrap();
+        let _snapshot = db.snapshot().await.unwrap();
+
+        // Write many merge operands for the same key, each forced into L0.
+        for i in 0..16u16 {
+            let val = format!("{}{}", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", i + 1);
+            db.put_with_options(
+                b"k",
+                val.as_bytes(),
+                &PutOptions::default(),
+                &WriteOptions {
+                    await_durable: false,
+                },
+            )
+            .await
+            .unwrap();
+        }
+
+        let manifest_store = Arc::new(ManifestStore::new(&Path::from(path), object_store.clone()));
+        let mut stored_manifest =
+            StoredManifest::load(manifest_store.clone(), Arc::new(DefaultSystemClock::new()))
+                .await
+                .unwrap();
+        wait_for_manifest_condition(
+            &mut stored_manifest,
+            |m| m.l0.len() > 2,
+            Duration::from_secs(30),
+        )
+        .await;
+
+        info!("GOT MANIFEST WITH 3 L0s");
+
+        // Compact until we observe a sorted run with more than one SST.
+        should_compact.store(true, Ordering::SeqCst);
+        tokio::time::timeout(Duration::from_secs(60), async {
+            loop {
+                {
+                    let state = db.inner.state.read();
+                    info!(
+                        "l0: {:?}",
+                        state
+                            .state()
+                            .core()
+                            .l0
+                            .iter()
+                            .map(|t| t.estimate_size())
+                            .collect::<Vec<_>>()
+                    );
+                    info!(
+                        "compacted: {:?}",
+                        state
+                            .state()
+                            .core()
+                            .compacted
+                            .iter()
+                            .map(|t| t.estimate_size())
+                            .collect::<Vec<_>>()
+                    );
+                    if !state.state().core().compacted.is_empty() {
+                        break;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(3000)).await;
+            }
+        })
+        .await
+        .expect("timed out waiting for compacted SR with >1 SST");
+
+        let data = db.get(b"k").await.unwrap().unwrap();
+        let expected = Bytes::from(b"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa16".as_ref());
+        let data_scan = db
+            .scan(b"k".as_slice()..)
+            .await
+            .unwrap()
+            .next()
+            .await
+            .unwrap()
+            .unwrap();
+        info!("data: {:?}", data);
+        info!("data (scan): {:?}", data_scan.value);
+        assert_eq!(data, expected);
+        assert_eq!(data_scan.value, expected);
+    }
+
+    #[cfg(feature = "wal_disable")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn repro_get_fails_when_compacted_sr_splits_same_merge_key_across_ssts() {
+        use crate::SstBlockSize;
+        use bytes::{BufMut as _, BytesMut};
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = "/tmp/test_merge_split_sr_repro";
+        let should_compact = Arc::new(AtomicBool::new(false));
+        let should_compact2 = should_compact.clone();
+        let compaction_scheduler = Arc::new(OnDemandCompactionSchedulerSupplier::new(Arc::new(
+            move |_state| {
+                let result = should_compact2
+                    .compare_exchange(true, false, Ordering::SeqCst, Ordering::SeqCst)
+                    .unwrap_or(false);
+                if result {
+                    info!("TRIGGER COMPACT");
+                }
+                result
+            },
+        )));
+
+        // Force frequent L0 flushes and tiny compacted SSTs so a single SR ends up with multiple SSTs.
+        let mut settings = test_db_options(
+            0,
+            128,
+            Some(CompactorOptions {
+                poll_interval: Duration::from_millis(20),
+                max_sst_size: 128,
+                max_concurrent_compactions: 1,
+                manifest_update_timeout: Duration::from_secs(300),
+                ..Default::default()
+            }),
+        );
+        settings.l0_max_ssts = 10_000;
+        settings.flush_interval = None;
+        settings.wal_enabled = false;
+
+        let compactor_options = settings.compactor_options.take().unwrap();
+        let db = Db::builder(path, object_store.clone())
+            .with_settings(settings)
+            .with_sst_block_size(SstBlockSize::Other(64))
+            .with_merge_operator(Arc::new(StringConcatMergeOperator))
+            .with_compactor_builder(
+                CompactorBuilder::new(path, object_store.clone())
+                    .with_scheduler_supplier(compaction_scheduler)
+                    .with_options(compactor_options),
+            )
+            .build()
+            .await
+            .unwrap();
+
+        // Write a base value and keep a snapshot alive so later versions are retained by compaction.
+        let mut expected = BytesMut::new();
+        db.put_with_options(
+            b"k",
+            b"base",
+            &PutOptions::default(),
+            &WriteOptions {
+                await_durable: false,
+            },
+        )
+        .await
+        .unwrap();
+        expected.put(b"base".as_slice());
+        let _snapshot = db.snapshot().await.unwrap();
+
+        // Write many merge operands for the same key, each forced into L0.
+        for _ in 0..16u16 {
+            let operand = vec![b'a'; 32];
+            expected.put(operand.as_slice());
+            db.merge_with_options(
+                b"k",
+                operand,
+                &MergeOptions::default(),
+                &WriteOptions {
+                    await_durable: false,
+                },
+            )
+            .await
+            .unwrap();
+        }
+
+        let manifest_store = Arc::new(ManifestStore::new(&Path::from(path), object_store.clone()));
+        let mut stored_manifest =
+            StoredManifest::load(manifest_store.clone(), Arc::new(DefaultSystemClock::new()))
+                .await
+                .unwrap();
+        wait_for_manifest_condition(
+            &mut stored_manifest,
+            |m| m.l0.len() > 2,
+            Duration::from_secs(30),
+        )
+        .await;
+
+        info!("GOT MANIFEST WITH 3 L0s");
+
+        // Compact until we observe a sorted run with more than one SST.
+        should_compact.store(true, Ordering::SeqCst);
+        tokio::time::timeout(Duration::from_secs(60), async {
+            loop {
+                {
+                    let state = db.inner.state.read();
+                    info!(
+                        "l0: {:?}",
+                        state
+                            .state()
+                            .core()
+                            .l0
+                            .iter()
+                            .map(|t| t.estimate_size())
+                            .collect::<Vec<_>>()
+                    );
+                    info!(
+                        "compacted: {:?}",
+                        state
+                            .state()
+                            .core()
+                            .compacted
+                            .iter()
+                            .map(|t| t.estimate_size())
+                            .collect::<Vec<_>>()
+                    );
+                    if !state.state().core().compacted.is_empty() {
+                        break;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(3000)).await;
+            }
+        })
+        .await
+        .expect("timed out waiting for compacted SR with >1 SST");
+
+        let data = db.get(b"k").await.unwrap().unwrap();
+        let expected = expected.freeze();
+        let data_scan = db
+            .scan(b"k".as_slice()..)
+            .await
+            .unwrap()
+            .next()
+            .await
+            .unwrap()
+            .unwrap();
+        info!("data: {:?}", data);
+        info!("data (scan): {:?}", data_scan.value);
+        assert_eq!(data, expected);
+        assert_eq!(data_scan.value, expected);
+    }
 }
