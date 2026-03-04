@@ -133,7 +133,10 @@ impl CachedObjectStore {
         let _result = build_concurrent(files_to_load.into_iter(), degree_of_parallelism, |path| {
             let this = self.clone();
             async move {
-                match this.maybe_prefetch_range(&path, GetOptions::default()).await {
+                match this
+                    .maybe_prefetch_range(&path, GetOptions::default())
+                    .await
+                {
                     Ok(_) => Ok(Some(())),
                     Err(e) => {
                         warn!(
