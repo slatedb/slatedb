@@ -121,6 +121,7 @@ Visit [slatedb.io](https://slatedb.io) to learn more.
 - [.NET](https://github.com/Pulsy-Global/slatedb-dotnet)
 - [Python](https://github.com/slatedb/slatedb/tree/main/slatedb-py) (official)
 - [Ruby](https://github.com/catkins/slatedb-rb)
+- [TypeScript](https://github.com/gadget-inc/slatedb-node)
 
 ## Features
 
