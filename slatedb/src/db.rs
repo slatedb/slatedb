@@ -1639,7 +1639,7 @@ mod tests {
     };
     use crate::types::RowEntry;
     use crate::wal_reader::WalReader;
-    use crate::{proptest_util, test_utils, CloseReason, CompactorBuilder, KeyValue, SstBlockSize};
+    use crate::{proptest_util, test_utils, CloseReason, CompactorBuilder, KeyValue};
     use async_trait::async_trait;
     use chrono::TimeDelta;
     use chrono::{TimeZone, Utc};
@@ -6877,6 +6877,7 @@ mod tests {
     #[cfg(feature = "wal_disable")]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn repro_get_fails_when_compacted_sr_splits_same_key_across_ssts() {
+        use crate::SstBlockSize;
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = "/tmp/test_merge_split_sr_repro";
         let should_compact = Arc::new(AtomicBool::new(false));
@@ -7020,6 +7021,7 @@ mod tests {
     #[cfg(feature = "wal_disable")]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn repro_get_fails_when_compacted_sr_splits_same_merge_key_across_ssts() {
+        use crate::SstBlockSize;
         use bytes::{BufMut as _, BytesMut};
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = "/tmp/test_merge_split_sr_repro";
