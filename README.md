@@ -155,6 +155,7 @@ SlateDB follows Semantic Versioning. We release new versions approximately every
 See who's using SlateDB.
 
 - [Embucket](https://www.embucket.com)
+- [Gadget](https://gadget.dev)
 - [Malstrom](https://github.com/MalstromDevelopers/malstrom)
 - [Massive](https://massive.com)
 - [Merklemap](https://merklemap.com)
