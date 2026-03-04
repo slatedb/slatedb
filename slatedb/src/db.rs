@@ -6887,7 +6887,7 @@ mod tests {
                     .compare_exchange(true, false, Ordering::SeqCst, Ordering::SeqCst)
                     .unwrap_or_else(|_| false);
                 if result {
-                    println!("TRIGGER COMPACT");
+                    info!("TRIGGER COMPACT");
                 }
                 result
             },
@@ -6963,7 +6963,7 @@ mod tests {
         )
         .await;
 
-        println!("GOT MANIFEST WITH 3 L0s");
+        info!("GOT MANIFEST WITH 3 L0s");
 
         // Compact until we observe a sorted run with more than one SST.
         should_compact.store(true, Ordering::SeqCst);
@@ -6971,7 +6971,7 @@ mod tests {
             loop {
                 {
                     let state = db.inner.state.read();
-                    println!(
+                    info!(
                         "l0: {:?}",
                         state
                             .state()
@@ -6981,7 +6981,7 @@ mod tests {
                             .map(|t| t.estimate_size())
                             .collect::<Vec<_>>()
                     );
-                    println!(
+                    info!(
                         "compacted: {:?}",
                         state
                             .state()
@@ -7011,8 +7011,8 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        println!("data: {:?}", data);
-        println!("data (scan): {:?}", data_scan.value);
+        info!("data: {:?}", data);
+        info!("data (scan): {:?}", data_scan.value);
         assert_eq!(data, expected);
         assert_eq!(data_scan.value, expected);
     }
@@ -7030,7 +7030,7 @@ mod tests {
                     .compare_exchange(true, false, Ordering::SeqCst, Ordering::SeqCst)
                     .unwrap_or_else(|_| false);
                 if result {
-                    println!("TRIGGER COMPACT");
+                    info!("TRIGGER COMPACT");
                 }
                 result
             },
@@ -7109,7 +7109,7 @@ mod tests {
         )
         .await;
 
-        println!("GOT MANIFEST WITH 3 L0s");
+        info!("GOT MANIFEST WITH 3 L0s");
 
         // Compact until we observe a sorted run with more than one SST.
         should_compact.store(true, Ordering::SeqCst);
@@ -7117,7 +7117,7 @@ mod tests {
             loop {
                 {
                     let state = db.inner.state.read();
-                    println!(
+                    info!(
                         "l0: {:?}",
                         state
                             .state()
@@ -7127,7 +7127,7 @@ mod tests {
                             .map(|t| t.estimate_size())
                             .collect::<Vec<_>>()
                     );
-                    println!(
+                    info!(
                         "compacted: {:?}",
                         state
                             .state()
@@ -7157,8 +7157,8 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        println!("data: {:?}", data);
-        println!("data (scan): {:?}", data_scan.value);
+        info!("data: {:?}", data);
+        info!("data (scan): {:?}", data_scan.value);
         assert_eq!(data, expected);
         assert_eq!(data_scan.value, expected);
     }
