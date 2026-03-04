@@ -6885,7 +6885,7 @@ mod tests {
             move |_state| {
                 let result = should_compact2
                     .compare_exchange(true, false, Ordering::SeqCst, Ordering::SeqCst)
-                    .unwrap_or_else(|_| false);
+                    .unwrap_or(false);
                 if result {
                     info!("TRIGGER COMPACT");
                 }
@@ -6991,7 +6991,7 @@ mod tests {
                             .map(|t| t.estimate_size())
                             .collect::<Vec<_>>()
                     );
-                    if state.state().core().compacted.len() > 0 {
+                    if !state.state().core().compacted.is_empty() {
                         break;
                     }
                 }
@@ -7029,7 +7029,7 @@ mod tests {
             move |_state| {
                 let result = should_compact2
                     .compare_exchange(true, false, Ordering::SeqCst, Ordering::SeqCst)
-                    .unwrap_or_else(|_| false);
+                    .unwrap_or(false);
                 if result {
                     info!("TRIGGER COMPACT");
                 }
@@ -7138,7 +7138,7 @@ mod tests {
                             .map(|t| t.estimate_size())
                             .collect::<Vec<_>>()
                     );
-                    if state.state().core().compacted.len() > 0 {
+                    if !state.state().core().compacted.is_empty() {
                         break;
                     }
                 }
