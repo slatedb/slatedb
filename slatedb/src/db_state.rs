@@ -341,7 +341,14 @@ impl SortedRun {
 
             let upper_bound = if idx + 1 < self.ssts.len() {
                 let next_sst = &self.ssts[idx + 1];
-                Excluded(next_sst.compacted_effective_start_key().clone())
+                if current_sst
+                    .effective_range
+                    .contains(next_sst.compacted_effective_start_key())
+                {
+                    Included(next_sst.compacted_effective_start_key().clone())
+                } else {
+                    Excluded(next_sst.compacted_effective_start_key().clone())
+                }
             } else {
                 Unbounded
             };

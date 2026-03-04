@@ -18,6 +18,7 @@ use crate::{db_iter::DbIteratorRangeTracker, error::SlateDBError, DbIterator};
 use bytes::Bytes;
 use futures::future::join;
 use std::collections::VecDeque;
+use std::ops::Bound::Included;
 use std::sync::Arc;
 
 pub(crate) trait DbStateReader {
@@ -173,9 +174,10 @@ impl Reader {
         sst_iter_options: SstIteratorOptions,
         db_stats: Option<DbStats>,
     ) -> Result<VecDeque<Box<dyn RowEntryIterator + 'a>>, SlateDBError> {
+        let range = BytesRange::new(Included(key.clone()), Included(key.clone()));
         let mut iters = VecDeque::new();
         for sr in &db_state.core().compacted {
-            if let Some(handle) = sr.find_sst_with_range_covering_key(key.as_ref()) {
+            for handle in sr.tables_covering_range(&range) {
                 let iterator = SstIterator::new_owned_with_stats(
                     range.clone(),
                     handle.clone(),
