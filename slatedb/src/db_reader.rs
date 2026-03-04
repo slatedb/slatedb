@@ -1383,19 +1383,27 @@ mod tests {
             .await
             .unwrap();
 
-        // Write more data and flush to L0, changing the manifest's L0 state.
-        // This makes should_reestablish_checkpoint() return true on the next poll.
-        db.put(b"key2", b"value2").await.unwrap();
-        db.flush_with_options(FlushOptions {
-            flush_type: FlushType::MemTable,
-        })
-        .await
-        .unwrap();
+        // Capture checkpoint ID before the flush so the wait condition is not
+        // affected by a race where the poller replaces the checkpoint during
+        // the flush.
+        let manifest_store = test_provider.manifest_store();
+        let mut stored_manifest =
+            StoredManifest::load(manifest_store, test_provider.system_clock.clone())
+                .await
+                .unwrap();
+        let initial_checkpoint_id = stored_manifest
+            .manifest()
+            .core
+            .checkpoints
+            .first()
+            .unwrap()
+            .id;
 
-        // Inject a failpoint on WAL listing. When reestablish_checkpoint is called
-        // with the buggy replay_new_wals=true, it calls last_seen_wal_id() which
-        // lists WAL SSTs and hits this failpoint. With the fix (replay_new_wals=false),
-        // the WAL listing is skipped entirely.
+        // Inject a failpoint on WAL listing before flushing so it is active
+        // when the poller fires. With the buggy replay_new_wals=true,
+        // reestablish_checkpoint calls last_seen_wal_id() which lists WAL SSTs
+        // and hits this failpoint. With the fix (replay_new_wals=false), the
+        // WAL listing is skipped entirely.
         fail_parallel::cfg(
             Arc::clone(&test_provider.fp_registry),
             "list-wal-ssts",
@@ -1403,9 +1411,34 @@ mod tests {
         )
         .unwrap();
 
-        // Wait for the manifest poller's second tick to fire and trigger
-        // reestablish_checkpoint due to the changed L0 state.
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        // Write more data and flush to L0, changing the manifest's L0 state.
+        // This makes should_reestablish_checkpoint() return true on the next poll.
+        // Note: the writer uses its own TableStore (not the test_provider's),
+        // so the failpoint above does not affect the writer's flush path.
+        db.put(b"key2", b"value2").await.unwrap();
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::MemTable,
+        })
+        .await
+        .unwrap();
+
+        // Wait for the manifest poller to see the changed L0 state and
+        // reestablish the checkpoint. Without the fix, the poller crashes
+        // on the WAL listing failpoint.
+        let timeout = Duration::from_secs(5);
+        let start = tokio::time::Instant::now();
+        loop {
+            assert!(
+                start.elapsed() < timeout,
+                "timed out waiting for checkpoint reestablishment"
+            );
+            let manifest = stored_manifest.refresh().await.unwrap();
+            let current_checkpoint = manifest.core.checkpoints.first().unwrap();
+            if current_checkpoint.id != initial_checkpoint_id {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
 
         // With the fix, the reader should still work (poller didn't crash).
         // Without the fix, the poller crashes and get() returns an error.
