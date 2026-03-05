@@ -9,6 +9,7 @@ use crate::db_state::ManifestCore;
 
 use crate::error::Error;
 use log::warn;
+use ulid::Ulid;
 
 const DEFAULT_MAX_CONCURRENT_COMPACTIONS: usize = 4;
 
@@ -374,24 +375,30 @@ impl SizeTieredCompactionScheduler {
         &self,
         db_state: &ManifestCore,
     ) -> (Vec<CompactionSource>, Vec<CompactionSource>) {
-        (
-            db_state
-                .l0
-                .iter()
-                .map(|l0| CompactionSource {
-                    source: SourceId::Sst(l0.sst.id.unwrap_compacted_id()),
+        let mut collected_l0: Vec<CompactionSource> = Vec::new();
+        // Deduplicate Ulid: duplicated Ulid might result from union() operation
+        // and interfere with max_compaction_sources
+        let mut seen_l0: HashSet<Ulid> = HashSet::new();
+        for l0 in db_state.l0.iter() {
+            let ulid = l0.sst.id.unwrap_compacted_id();
+            if seen_l0.insert(ulid) {
+                collected_l0.push(CompactionSource {
+                    source: SourceId::Sst(ulid),
                     size: l0.estimate_size(),
-                })
-                .collect(),
-            db_state
-                .compacted
-                .iter()
-                .map(|sr| CompactionSource {
-                    source: SourceId::SortedRun(sr.id),
-                    size: sr.estimate_size(),
-                })
-                .collect(),
-        )
+                });
+            }
+        }
+
+        let collected_sr = db_state
+            .compacted
+            .iter()
+            .map(|sr| CompactionSource {
+                source: SourceId::SortedRun(sr.id),
+                size: sr.estimate_size(),
+            })
+            .collect();
+
+        (collected_l0, collected_sr)
     }
 }
 
