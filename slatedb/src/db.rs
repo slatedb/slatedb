@@ -2984,9 +2984,10 @@ mod tests {
         // Use the first WAL entry since it's guaranteed to exist because
         // it's the fencing write.
         cached_object_store
-            .head(&object_store::path::Path::from(
-                format!("{}/wal/00000000000000000001.sst", db_path)
-            ))
+            .head(&object_store::path::Path::from(format!(
+                "{}/wal/00000000000000000001.sst",
+                db_path
+            )))
             .await
             .unwrap();
         let key = b"test_key";
