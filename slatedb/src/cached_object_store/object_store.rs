@@ -227,8 +227,8 @@ impl CachedObjectStore {
     /// Returns `Some(root)` when `meta_location == root + requested_location`,
     /// otherwise returns `None`.
     fn infer_root(requested_location: &Path, meta_location: &Path) -> Option<Path> {
-        let requested_str = requested_location.as_ref().trim_end_matches('/');
-        let meta_str = meta_location.as_ref().trim_end_matches('/');
+        let requested_str = requested_location.as_ref();
+        let meta_str = meta_location.as_ref();
 
         if requested_str.is_empty() {
             return Some(meta_location.clone());
