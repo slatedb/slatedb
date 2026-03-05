@@ -207,17 +207,18 @@ impl Compaction {
     /// ## Arguments
     /// - `db_state`: The current core DB state from the manifest.
     pub(crate) fn get_ssts(&self, db_state: &ManifestCore) -> Vec<SsTableView> {
-        let ssts_by_id: HashMap<Ulid, &SsTableView> = db_state
-            .l0
-            .iter()
-            .map(|sst| (sst.sst.id.unwrap_compacted_id(), sst))
-            .collect();
-
-        self.spec
+        let ulid_set: HashSet<Ulid> = self
+            .spec
             .sources()
             .iter()
             .filter_map(|s| s.maybe_unwrap_sst())
-            .filter_map(|ulid| ssts_by_id.get(&ulid).map(|t| (*t).clone()))
+            .collect();
+
+        db_state
+            .l0
+            .iter()
+            .filter(|view| ulid_set.contains(&view.sst.id.unwrap_compacted_id()))
+            .map(|view| (*view).clone())
             .collect()
     }
 
