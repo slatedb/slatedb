@@ -121,6 +121,7 @@ Visit [slatedb.io](https://slatedb.io) to learn more.
 - [.NET](https://github.com/Pulsy-Global/slatedb-dotnet)
 - [Python](https://github.com/slatedb/slatedb/tree/main/slatedb-py) (official)
 - [Ruby](https://github.com/catkins/slatedb-rb)
+- [TypeScript](https://github.com/gadget-inc/slatedb-node)
 
 ## Features
 
@@ -154,12 +155,14 @@ SlateDB follows Semantic Versioning. We release new versions approximately every
 See who's using SlateDB.
 
 - [Embucket](https://www.embucket.com)
+- [Gadget](https://gadget.dev)
 - [Malstrom](https://github.com/MalstromDevelopers/malstrom)
 - [Massive](https://massive.com)
 - [Merklemap](https://merklemap.com)
 - [Responsive](https://responsive.dev)
 - [s2-lite](https://github.com/s2-streamstore/s2)
 - [SQLync](https://sqlync.com)
+- [Storrito](https://storrito.com)
 - [Tensorlake](https://www.tensorlake.ai)
 - [ZeroFS](https://zerofs.net)
 
