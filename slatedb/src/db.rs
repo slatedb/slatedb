@@ -2983,13 +2983,12 @@ mod tests {
         // `resolve_root`. Call head to force the root to be resolved.
         // Use the first WAL entry since it's guaranteed to exist because
         // it's the fencing write.
-        let r = cached_object_store
+        cached_object_store
             .head(&object_store::path::Path::from(
-                "tmp/test_kv_store_with_put_cache_enabled/wal/00000000000000000001.sst",
+                format!("{}/wal/00000000000000000001.sst", db_path)
             ))
             .await
             .unwrap();
-        println!("Head result: {:?}", r);
         let key = b"test_key";
         let value = b"test_value";
         kv_store.put(key, value).await.unwrap();
