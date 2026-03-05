@@ -1,10 +1,3 @@
-use std::collections::{HashMap, HashSet};
-use std::ops::Range;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
-use std::time::Duration;
-use std::{fmt::Display, io::SeekFrom};
-
 use crate::cached_object_store::stats::CachedObjectStoreStats;
 use crate::rand::DbRand;
 use bytes::Bytes;
@@ -14,12 +7,14 @@ use object_store::path::Path;
 use object_store::{Attributes, ObjectMeta};
 use rand::{distr::Alphanumeric, Rng};
 use slatedb_common::clock::SystemClock;
-use tokio::fs::File;
-use tokio::{
-    fs::{self, OpenOptions},
-    io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt},
-    sync::{Mutex, OnceCell},
-};
+use std::collections::{HashMap, HashSet};
+use std::fmt::Display;
+use std::io::{Read, Seek, SeekFrom, Write};
+use std::ops::Range;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::{Mutex, OnceCell};
 use walkdir::WalkDir;
 
 use crate::cached_object_store::storage::{LocalCacheEntry, LocalCacheHead, LocalCacheStorage};
@@ -99,36 +94,48 @@ pub(crate) struct FsCacheEntry {
 }
 
 impl FsCacheEntry {
-    async fn atomic_write(&self, path: &std::path::Path, buf: Bytes) -> object_store::Result<()> {
+    async fn atomic_write(&self, path: std::path::PathBuf, buf: Bytes) -> object_store::Result<()> {
         let tmp_path = path.with_extension(format!("_tmp{}", self.make_rand_suffix()));
-
-        // ensure the parent folder exists
-        if let Some(folder_path) = tmp_path.parent() {
-            fs::create_dir_all(folder_path).await.map_err(wrap_io_err)?;
-        }
 
         // try triggering evict before writing
         if let Some(evictor) = &self.evictor {
             // If the evictor is backpressured, skip this cache write to avoid
             // stalling foreground PUTs. Cache writes are best-effort.
             if !evictor
-                .track_entry_accessed(path.to_path_buf(), buf.len(), true)
+                .track_entry_accessed(path.clone(), buf.len(), true)
                 .await
             {
                 return Ok(());
             }
         }
 
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(&tmp_path)
-            .await
-            .map_err(wrap_io_err)?;
-        file.write_all(&buf).await.map_err(wrap_io_err)?;
-        file.sync_all().await.map_err(wrap_io_err)?;
-        fs::rename(tmp_path, path).await.map_err(wrap_io_err)
+        // Spawn a blocking task and do synchronous I/O rather than use the tokio async apis.
+        // Under the hood, on linux systems , tokio itself spawns a blocking task for each call to
+        // drive i/o since it hasn't yet adopted the native fully async i/o api (io_uring). Each
+        // blocking task adds overhead, so its better to just batch all the calls into a single
+        // blocking task.
+        // see https://github.com/slatedb/slatedb/pull/1342
+        #[allow(clippy::disallowed_methods)]
+        tokio::task::spawn_blocking(move || {
+            let tmp_path = tmp_path.as_path();
+            // ensure the parent folder exists
+            if let Some(folder_path) = tmp_path.parent() {
+                std::fs::create_dir_all(folder_path).map_err(wrap_io_err)?;
+            }
+
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(tmp_path)
+                .map_err(wrap_io_err)?;
+            file.write_all(&buf).map_err(wrap_io_err)?;
+            file.sync_all().map_err(wrap_io_err)?;
+            std::fs::rename(tmp_path, path).map_err(wrap_io_err)
+        })
+        .await?
+        .map_err(wrap_io_err)?;
+        Ok(())
     }
 
     // every origin file will be split into multiple parts, and all the parts will be saved in the same
@@ -176,12 +183,7 @@ impl LocalCacheEntry for FsCacheEntry {
             self.part_size,
         );
 
-        // if the part already exists, do not save again.
-        if Some(true) == fs::try_exists(&part_path).await.ok() {
-            return Ok(());
-        }
-
-        self.atomic_write(&part_path, buf).await
+        self.atomic_write(part_path, buf).await
     }
 
     async fn read_part(
@@ -196,29 +198,42 @@ impl LocalCacheEntry for FsCacheEntry {
             self.part_size,
         );
 
-        // if the part file does not exist, return None
-        let exists = fs::try_exists(&part_path).await.unwrap_or(false);
-        if !exists {
-            return Ok(None);
-        }
+        // Spawn a blocking task and do synchronous I/O rather than use the tokio async apis.
+        // Under the hood, on linux systems , tokio itself spawns a blocking task for each call to
+        // drive i/o since it hasn't yet adopted the native fully async i/o api (io_uring). Each
+        // blocking task adds overhead, so its better to just batch all the calls into a single
+        // blocking task.
+        // see https://github.com/slatedb/slatedb/pull/1342
+        let this_part_path = part_path.clone();
+        #[allow(clippy::disallowed_methods)]
+        let result = tokio::task::spawn_blocking(move || {
+            let mut file = match std::fs::File::open(&this_part_path) {
+                Ok(f) => f,
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+                Err(err) => return Err(wrap_io_err(err)),
+            };
+
+            let mut buffer = vec![0; range_in_part.len()];
+            let pos = file
+                .seek(SeekFrom::Start(range_in_part.start as u64))
+                .map_err(wrap_io_err)?;
+            assert_eq!(pos, range_in_part.start as u64);
+            file.read_exact(&mut buffer).map_err(wrap_io_err)?;
+            Ok(Some(Bytes::from(buffer)))
+        })
+        .await
+        .map_err(wrap_io_err)??;
 
         // track the part access for evictor
-        if let Some(evictor) = &self.evictor {
-            evictor
-                .track_entry_accessed(part_path.to_path_buf(), self.part_size, false)
-                .await;
+        if result.is_some() {
+            if let Some(evictor) = &self.evictor {
+                evictor
+                    .track_entry_accessed(part_path, self.part_size, false)
+                    .await;
+            }
         }
 
-        // read the part file, and return the bytes
-        let file = File::open(&part_path).await.map_err(wrap_io_err)?;
-        let mut reader = tokio::io::BufReader::new(file);
-        let mut buffer = vec![0; range_in_part.len()];
-        reader
-            .seek(SeekFrom::Start(range_in_part.start as u64))
-            .await
-            .map_err(wrap_io_err)?;
-        reader.read_exact(&mut buffer).await.map_err(wrap_io_err)?;
-        Ok(Some(Bytes::from(buffer)))
+        Ok(result)
     }
 
     #[cfg(test)]
@@ -227,56 +242,58 @@ impl LocalCacheEntry for FsCacheEntry {
     ) -> object_store::Result<Vec<crate::cached_object_store::storage::PartID>> {
         let head_path = Self::make_head_path(self.root_folder.clone(), &self.location);
         let directory_path = match head_path.parent() {
-            Some(directory_path) => directory_path,
+            Some(directory_path) => directory_path.to_path_buf(),
             None => return Ok(vec![]),
         };
-        let target_prefix = "_part";
 
-        let mut entries = match fs::read_dir(directory_path).await {
-            Ok(entries) => entries,
-            Err(err) => {
-                if err.kind() == std::io::ErrorKind::NotFound {
-                    return Ok(vec![]);
-                } else {
-                    return Err(wrap_io_err(err));
+        #[allow(clippy::disallowed_methods)]
+        tokio::task::spawn_blocking(move || {
+            let target_prefix = "_part";
+
+            let entries = match std::fs::read_dir(&directory_path) {
+                Ok(entries) => entries,
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
+                Err(err) => return Err(wrap_io_err(err)),
+            };
+
+            let mut part_file_names = vec![];
+            for entry in entries {
+                let entry = entry.map_err(wrap_io_err)?;
+                let metadata = entry.metadata().map_err(wrap_io_err)?;
+                if metadata.is_dir() {
+                    continue;
+                }
+                let file_name = entry.file_name();
+                let file_name_str = file_name.to_string_lossy();
+                if file_name_str.starts_with(target_prefix) {
+                    part_file_names.push(file_name_str.to_string());
                 }
             }
-        };
 
-        let mut part_file_names = vec![];
-        while let Some(entry) = entries.next_entry().await.map_err(wrap_io_err)? {
-            let metadata = entry.metadata().await.map_err(wrap_io_err)?;
-            if metadata.is_dir() {
-                continue;
+            // not cached at all
+            if part_file_names.is_empty() {
+                return Ok(vec![]);
             }
-            let file_name = entry.file_name();
-            let file_name_str = file_name.to_string_lossy();
-            if file_name_str.starts_with(target_prefix) {
-                part_file_names.push(file_name_str.to_string());
+
+            // sort the paths in alphabetical order
+            part_file_names.sort();
+
+            // retrieve the part numbers from the paths
+            let mut part_numbers = Vec::with_capacity(part_file_names.len());
+            for part_file_name in part_file_names.iter() {
+                let part_number = part_file_name
+                    .split('-')
+                    .next_back()
+                    .and_then(|part_number| part_number.parse::<usize>().ok());
+                if let Some(part_number) = part_number {
+                    part_numbers.push(part_number);
+                }
             }
-        }
 
-        // not cached at all
-        if part_file_names.is_empty() {
-            return Ok(vec![]);
-        }
-
-        // sort the paths in alphabetical order
-        part_file_names.sort();
-
-        // retrieve the part numbers from the paths
-        let mut part_numbers = Vec::with_capacity(part_file_names.len());
-        for part_file_name in part_file_names.iter() {
-            let part_number = part_file_name
-                .split('-')
-                .next_back()
-                .and_then(|part_number| part_number.parse::<usize>().ok());
-            if let Some(part_number) = part_number {
-                part_numbers.push(part_number);
-            }
-        }
-
-        Ok(part_numbers)
+            Ok(part_numbers)
+        })
+        .await
+        .map_err(wrap_io_err)?
     }
 
     async fn save_head(&self, head: (&ObjectMeta, &Attributes)) -> object_store::Result<()> {
@@ -290,39 +307,54 @@ impl LocalCacheEntry for FsCacheEntry {
         }
 
         let head: LocalCacheHead = head.into();
-        let buf = serde_json::to_vec(&head).map_err(wrap_io_err)?;
+        let buf: Bytes = serde_json::to_vec(&head).map_err(wrap_io_err)?.into();
 
         let meta_path = Self::make_head_path(self.root_folder.clone(), &self.location);
-        self.atomic_write(&meta_path, buf.into()).await
+
+        self.atomic_write(meta_path, buf).await
     }
 
     async fn read_head(&self) -> object_store::Result<Option<(ObjectMeta, Attributes)>> {
         let head_path = Self::make_head_path(self.root_folder.clone(), &self.location);
 
-        // if the head file does not exist, return None
-        let head_size_bytes = match fs::metadata(&head_path).await {
-            Ok(metadata) => metadata.len() as usize,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(err) => return Err(wrap_io_err(err)),
-        };
+        // Spawn a blocking task and do synchronous I/O rather than use the tokio async apis.
+        // Under the hood, on linux systems , tokio itself spawns a blocking task for each call to
+        // drive i/o since it hasn't yet adopted the native fully async i/o api (io_uring). Each
+        // blocking task adds overhead, so its better to just batch all the calls into a single
+        // blocking task.
+        #[allow(clippy::disallowed_methods)]
+        let result = tokio::task::spawn_blocking(move || {
+            use std::io::Read;
 
-        // track the head access for evictor
-        if let Some(evictor) = &self.evictor {
-            evictor
-                .track_entry_accessed(head_path.to_path_buf(), head_size_bytes, false)
-                .await;
+            let metadata = match std::fs::metadata(&head_path) {
+                Ok(m) => m,
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+                Err(err) => return Err(wrap_io_err(err)),
+            };
+            let head_size_bytes = metadata.len() as usize;
+
+            let mut file = std::fs::File::open(&head_path).map_err(wrap_io_err)?;
+            let mut content = String::new();
+            file.read_to_string(&mut content).map_err(wrap_io_err)?;
+
+            let head: LocalCacheHead = serde_json::from_str(&content).map_err(wrap_io_err)?;
+            Ok(Some((head.meta(), head.attributes(), head_size_bytes)))
+        })
+        .await
+        .map_err(wrap_io_err)??;
+
+        if let Some((meta, attributes, head_size_bytes)) = result {
+            // track the head access for evictor
+            if let Some(evictor) = &self.evictor {
+                let head_path = Self::make_head_path(self.root_folder.clone(), &self.location);
+                evictor
+                    .track_entry_accessed(head_path, head_size_bytes, false)
+                    .await;
+            }
+            Ok(Some((meta, attributes)))
+        } else {
+            Ok(None)
         }
-
-        let file = File::open(&head_path).await.map_err(wrap_io_err)?;
-        let mut reader = tokio::io::BufReader::new(file);
-        let mut content = String::new();
-        reader
-            .read_to_string(&mut content)
-            .await
-            .map_err(wrap_io_err)?;
-
-        let head: LocalCacheHead = serde_json::from_str(&content).map_err(wrap_io_err)?;
-        Ok(Some((head.meta(), head.attributes())))
     }
 }
 

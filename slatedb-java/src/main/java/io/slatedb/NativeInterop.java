@@ -9,7 +9,12 @@ import io.slatedb.ffi.slatedb_wal_file_metadata_t;
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
@@ -1052,6 +1057,56 @@ final class NativeInterop {
             byte[] key = takeOwnedBytes(outKey, outKeyLen);
             byte[] value = takeOwnedBytes(outVal, outValLen);
             return new IteratorNextResult(true, key, value);
+        }
+    }
+
+    static List<SlateDbKeyValue> slatedb_iterator_next_batch(IteratorHandle iterator, long maxCount, long maxBytes) {
+        Objects.requireNonNull(iterator, "iterator");
+
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment outData = arena.allocate(Native.C_POINTER);
+            MemorySegment outDataLen = arena.allocate(Native.C_LONG);
+            MemorySegment outCount = arena.allocate(Native.C_LONG);
+
+            checkResult(
+                Native.slatedb_iterator_next_batch(
+                    arena,
+                    iterator.segment(),
+                    maxCount,
+                    maxBytes,
+                    outData,
+                    outDataLen,
+                    outCount
+                )
+            );
+
+            long count = outCount.get(Native.C_LONG, 0);
+            if (count == 0) {
+                return Collections.emptyList();
+            }
+
+            MemorySegment dataPtr = outData.get(Native.C_POINTER, 0);
+            long dataLen = outDataLen.get(Native.C_LONG, 0);
+
+            byte[] packed;
+            try {
+                packed = dataPtr.reinterpret(dataLen).toArray(ValueLayout.JAVA_BYTE);
+            } finally {
+                Native.slatedb_bytes_free(dataPtr, dataLen);
+            }
+
+            ByteBuffer buf = ByteBuffer.wrap(packed).order(ByteOrder.LITTLE_ENDIAN);
+            List<SlateDbKeyValue> results = new ArrayList<>((int) count);
+            for (long i = 0; i < count; i++) {
+                long keyLen = buf.getLong();
+                long valLen = buf.getLong();
+                byte[] key = new byte[(int) keyLen];
+                buf.get(key);
+                byte[] value = new byte[(int) valLen];
+                buf.get(value);
+                results.add(new SlateDbKeyValue(key, value));
+            }
+            return results;
         }
     }
 
