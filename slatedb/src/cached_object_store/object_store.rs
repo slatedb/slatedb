@@ -326,32 +326,19 @@ impl CachedObjectStore {
             .await?;
 
         // Then, save to local cache if admission policy allows it
-        // Get metadata and attributes using our cached head method (this also saves the head to cache)
-        match self.cached_head(location).await {
-            Ok(_meta) => {
-                let Some(cache_location) = self.cache_location_for(location) else {
-                    return Ok(result);
-                };
-                let entry = self
-                    .cache_storage
-                    .entry(&cache_location, self.part_size_bytes);
-                if self.admission_picker.pick(entry.as_ref()).admitted() {
-                    // Convert PutPayload to stream and save parts to cache.
-                    // Note: cached_head() already saved the head, so we only need to save parts
-                    let stream =
-                        stream::iter(payload.into_iter()).map(Ok::<Bytes, object_store::Error>);
+        let Some(cache_location) = self.cache_location_for(location) else {
+            return Ok(result);
+        };
+        let entry = self
+            .cache_storage
+            .entry(&cache_location, self.part_size_bytes);
+        if self.admission_picker.pick(entry.as_ref()).admitted() {
+            // Convert PutPayload to stream and save parts to cache.
+            // Note: cached_head() already saved the head, so we only need to save parts
+            let stream = stream::iter(payload.into_iter()).map(Ok::<Bytes, object_store::Error>);
 
-                    // Save parts only, ignoring errors (cache failures shouldn't fail the PUT operation)
-                    self.save_parts_stream(entry, stream, 0).await.ok();
-                }
-            }
-            Err(e) => {
-                // Log warning but don't fail the PUT operation
-                warn!(
-                    "failed to save head to disk cache [location={}, error={:?}]",
-                    location, e
-                );
-            }
+            // Save parts only, ignoring errors (cache failures shouldn't fail the PUT operation)
+            self.save_parts_stream(entry, stream, 0).await.ok();
         }
 
         Ok(result)
