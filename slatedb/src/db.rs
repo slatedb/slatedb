@@ -2979,6 +2979,17 @@ mod tests {
             .build()
             .await
             .unwrap();
+        // `cache_puts_enabled` won't take effect until after the first
+        // `resolve_root`. Call head to force the root to be resolved.
+        // Use the first WAL entry since it's guaranteed to exist because
+        // it's the fencing write.
+        let r = cached_object_store
+            .head(&object_store::path::Path::from(
+                "tmp/test_kv_store_with_put_cache_enabled/wal/00000000000000000001.sst",
+            ))
+            .await
+            .unwrap();
+        println!("Head result: {:?}", r);
         let key = b"test_key";
         let value = b"test_value";
         kv_store.put(key, value).await.unwrap();
@@ -3025,9 +3036,13 @@ mod tests {
     async fn test_get_with_object_store_cache_put_caching_enabled() {
         let expected_cache_parts =
             vec![
-            ("tmp/test_kv_store_with_put_cache_enabled/manifest/00000000000000000001.manifest", 1),
-            ("tmp/test_kv_store_with_put_cache_enabled/manifest/00000000000000000002.manifest", 1),
+            // not cached because manifests are put before the root is resolved, which is when
+            // `cache_puts_enabled` starts taking effect.
+            ("tmp/test_kv_store_with_put_cache_enabled/manifest/00000000000000000001.manifest", 0),
+            ("tmp/test_kv_store_with_put_cache_enabled/manifest/00000000000000000002.manifest", 0),
+            // 1 part is cached because of wal_replay after fencing (which reads the SST, thereby caching it)
             ("tmp/test_kv_store_with_put_cache_enabled/wal/00000000000000000001.sst", 1),
+            // 1 part is cached because the put with cache_puts enabled should cache the test_key put
             ("tmp/test_kv_store_with_put_cache_enabled/wal/00000000000000000002.sst", 1),
         ];
 
