@@ -1,6 +1,7 @@
 use slatedb::{object_store::memory::InMemory, Db, Error};
 use std::sync::Arc;
 
+
 #[tokio::main]
 async fn main() -> Result<(), Error> {
     // Setup
@@ -35,23 +36,21 @@ async fn main() -> Result<(), Error> {
 
     // Scan over bound range
     let mut iter = kv_store.scan("test_key1"..="test_key2").await?;
-    assert_eq!(
-        iter.next().await?,
-        Some((b"test_key1", b"test_value1").into())
-    );
-    assert_eq!(
-        iter.next().await?,
-        Some((b"test_key2", b"test_value2").into())
-    );
+    let kv1 = iter.next().await?.unwrap();
+    assert_eq!(kv1.key, b"test_key1".as_slice());
+    assert_eq!(kv1.value, b"test_value1".as_slice());
+
+    let kv2 = iter.next().await?.unwrap();
+    assert_eq!(kv2.key, b"test_key2".as_slice());
+    assert_eq!(kv2.value, b"test_value2".as_slice());
 
     // Seek ahead to next key
     let mut iter = kv_store.scan::<Vec<u8>, _>(..).await?;
     let next_key = b"test_key4";
     iter.seek(next_key).await?;
-    assert_eq!(
-        iter.next().await?,
-        Some((b"test_key4", b"test_value4").into())
-    );
+    let kv4 = iter.next().await?.unwrap();
+    assert_eq!(kv4.key, b"test_key4".as_slice());
+    assert_eq!(kv4.value, b"test_value4".as_slice());
     assert_eq!(iter.next().await?, None);
 
     // Close

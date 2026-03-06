@@ -11,24 +11,6 @@ pub struct KeyValue {
     pub expire_ts: i64,
 }
 
-impl<K, V> From<(&K, &V)> for KeyValue
-where
-    K: AsRef<[u8]>,
-    V: AsRef<[u8]>,
-{
-    fn from(record: (&K, &V)) -> Self {
-        let key = Bytes::copy_from_slice(record.0.as_ref());
-        let value = Bytes::copy_from_slice(record.1.as_ref());
-        KeyValue {
-            key,
-            value,
-            seq: 0,
-            create_ts: 0,
-            expire_ts: 0,
-        }
-    }
-}
-
 /// Represents a key-value pair that may be a tombstone.
 ///
 /// This is the entry type passed to compaction for each key value pair.
