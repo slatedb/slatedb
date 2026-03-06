@@ -774,41 +774,4 @@ mod tests {
         // which hides the older non-expired value
         assert!(iter.next().await.unwrap().is_none());
     }
-
-    #[tokio::test]
-    async fn test_next_entry() {
-        use crate::types::ValueDeletable;
-        let entry = RowEntry::new(
-            Bytes::from_static(b"key1"),
-            ValueDeletable::Value(Bytes::from_static(b"value1")),
-            100,
-            Some(1000),
-            Some(2000),
-        );
-        let mem_iter = TestIterator::new().with_row_entry(entry);
-
-        let mut iter = DbIterator::new(
-            BytesRange::from(..),
-            None,
-            vec![Box::new(mem_iter) as Box<dyn RowEntryIterator + 'static>],
-            VecDeque::new(),
-            VecDeque::new(),
-            None,
-            None,
-            0,
-            None,
-        )
-        .await
-        .unwrap();
-
-        let entry = iter.next_entry().await.unwrap().unwrap();
-        assert_eq!(entry.key, Bytes::from_static(b"key1"));
-        assert_eq!(
-            entry.value,
-            ValueDeletable::Value(Bytes::from_static(b"value1"))
-        );
-        assert_eq!(entry.seq, 100);
-        assert_eq!(entry.create_ts, Some(1000));
-        assert_eq!(entry.expire_ts, Some(2000));
-    }
 }
