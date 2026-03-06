@@ -191,11 +191,9 @@ impl DbReaderInner {
         key: K,
         options: &ReadOptions,
     ) -> Result<Option<Bytes>, SlateDBError> {
-        self.check_closed()?;
-        let db_state = Arc::clone(&self.state.read());
-        self.reader
-            .get_with_options(key, options, db_state.as_ref(), None, None)
+        self.get_key_value_with_options(key, options)
             .await
+            .map(|kv_opt| kv_opt.map(|kv| kv.value))
     }
 
     async fn get_key_value_with_options<K: AsRef<[u8]> + Send>(

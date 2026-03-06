@@ -195,12 +195,9 @@ impl DbInner {
         key: K,
         options: &ReadOptions,
     ) -> Result<Option<Bytes>, SlateDBError> {
-        self.db_stats.get_requests.inc();
-        self.status()?;
-        let db_state = self.state.read().view();
-        self.reader
-            .get_with_options(key, options, &db_state, None, None)
+        self.get_key_value_with_options(key, options)
             .await
+            .map(|kv_opt| kv_opt.map(|kv| kv.value))
     }
 
     /// Get the full row entry for a given key.
