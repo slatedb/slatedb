@@ -350,13 +350,10 @@ impl Reader {
         write_batch: Option<WriteBatch>,
         max_seq: Option<u64>,
     ) -> Result<Option<Bytes>, SlateDBError> {
-        match self
+        Ok(self
             .get_key_value_with_options(key, options, db_state, write_batch, max_seq)
             .await?
-        {
-            Some(kv) => Ok(Some(kv.value)),
-            None => Ok(None),
-        }
+            .map(|kv| kv.value))
     }
 
     /// Create an iterator over a key range.
