@@ -40,6 +40,10 @@ impl ObjectStores {
         }
     }
 
+    pub(crate) fn has_wal_object_store(&self) -> bool {
+        self.wal_object_store.is_some()
+    }
+
     pub(crate) fn store_for(&self, id: &SsTableId) -> Arc<dyn ObjectStore> {
         match id {
             SsTableId::Wal(..) => self.store_of(ObjectStoreType::Wal).clone(),
