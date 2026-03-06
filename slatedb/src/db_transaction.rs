@@ -148,8 +148,11 @@ impl DbTransaction {
         }
 
         let db_state = self.db_inner.state.read().view();
+
+        // Clone the WriteBatch for snapshot isolation
         let write_batch_cloned = self.write_batch.read().clone();
 
+        // For now, delegate to the underlying reader
         let kv = self
             .db_inner
             .reader
