@@ -288,7 +288,6 @@ impl Reader {
         let now = options.now;
         let max_seq = self.prepare_max_seq(max_seq, options.durability_filter, options.dirty);
         let key_slice = key.as_ref();
-        let target_key = Bytes::copy_from_slice(key_slice);
         let range = BytesRange::from_slice(key_slice..=key_slice);
 
         let sst_iter_options = SstIteratorOptions {
@@ -325,13 +324,13 @@ impl Reader {
         )
         .await?;
 
-        if let Some(entry) = iterator.next_entry().await? {
-            if entry.key == target_key && !entry.value.is_tombstone() {
-                return Ok(Some(KeyValue::from(entry)));
+        iterator.next_entry().await?.map(|entry| {
+            if entry.value.is_tombstone() {
+                Err(SlateDBError::UnexpectedTombstone)
+            } else {
+                Ok(KeyValue::from(entry))
             }
-        }
-
-        Ok(None)
+        }).transpose()
     }
 
     /// Get the value for the given key.
