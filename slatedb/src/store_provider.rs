@@ -2,6 +2,7 @@ use crate::db_cache::DbCache;
 use crate::format::sst::{BlockTransformer, SsTableFormat};
 use crate::manifest::store::ManifestStore;
 use crate::object_stores::ObjectStores;
+use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
 use object_store::path::Path;
 use object_store::ObjectStore;
@@ -18,6 +19,7 @@ pub(crate) struct DefaultStoreProvider {
     pub(crate) wal_object_store: Option<Arc<dyn ObjectStore>>,
     pub(crate) block_cache: Option<Arc<dyn DbCache>>,
     pub(crate) block_transformer: Option<Arc<dyn BlockTransformer>>,
+    pub(crate) stat_registry: Arc<StatRegistry>,
 }
 
 impl StoreProvider for DefaultStoreProvider {
@@ -34,6 +36,7 @@ impl StoreProvider for DefaultStoreProvider {
             sst_format,
             self.path.clone(),
             self.block_cache.clone(),
+            self.stat_registry.clone(),
         ))
     }
 

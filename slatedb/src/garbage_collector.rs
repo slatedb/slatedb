@@ -1216,6 +1216,7 @@ mod tests {
             sst_format,
             path,
             None,
+            Arc::new(StatRegistry::new()),
         ));
 
         (

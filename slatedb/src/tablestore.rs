@@ -1,5 +1,6 @@
 use std::collections::VecDeque;
 use std::ops::{Range, RangeBounds};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -24,8 +25,35 @@ use crate::format::sst::{EncodedSsTable, SsTableFormat};
 use crate::object_stores::{ObjectStoreType, ObjectStores};
 use crate::paths::PathResolver;
 use crate::sst_builder::EncodedSsTableBuilder;
+use crate::stats::StatRegistry;
+use crate::tablestore::stats::TableStoreStats;
 use crate::types::RowEntry;
 use crate::wal::wal_sst_builder::EncodedWalSsTableBuilder;
+
+/// Stats tracked by ReadOnlyObject for each read operation
+#[derive(Default)]
+struct BlobReadStats {
+    read_count: AtomicU64,
+    bytes_read: AtomicU64,
+}
+
+impl BlobReadStats {
+    fn inc_reads(&self) {
+        self.read_count.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn add_bytes(&self, bytes: u64) {
+        self.bytes_read.fetch_add(bytes, Ordering::Relaxed);
+    }
+
+    fn read_count(&self) -> u64 {
+        self.read_count.load(Ordering::Relaxed)
+    }
+
+    fn bytes_read(&self) -> u64 {
+        self.bytes_read.load(Ordering::Relaxed)
+    }
+}
 
 pub(crate) struct TableStore {
     object_stores: ObjectStores,
@@ -35,27 +63,36 @@ pub(crate) struct TableStore {
     fp_registry: Arc<FailPointRegistry>,
     /// In-memory cache for data blocks, indices, and filters
     cache: Option<Arc<dyn DbCache>>,
+    /// Stats for tracking object store reads
+    stats: Arc<TableStoreStats>,
 }
 
-struct ReadOnlyObject {
+struct ReadOnlyObject<'a> {
     object_store: Arc<dyn ObjectStore>,
     path: Path,
+    stats: &'a BlobReadStats,
 }
 
-impl ReadOnlyBlob for ReadOnlyObject {
+impl ReadOnlyBlob for ReadOnlyObject<'_> {
     async fn len(&self) -> Result<u64, SlateDBError> {
+        // HEAD request counts as a read but transfers minimal bytes
+        self.stats.inc_reads();
         let object_metadata = self.object_store.head(&self.path).await?;
         Ok(object_metadata.size)
     }
 
     async fn read_range(&self, range: Range<u64>) -> Result<Bytes, SlateDBError> {
+        self.stats.inc_reads();
         let bytes = self.object_store.get_range(&self.path, range).await?;
+        self.stats.add_bytes(bytes.len() as u64);
         Ok(bytes)
     }
 
     async fn read(&self) -> Result<Bytes, SlateDBError> {
+        self.stats.inc_reads();
         let file = self.object_store.get(&self.path).await?;
         let bytes = file.bytes().await?;
+        self.stats.add_bytes(bytes.len() as u64);
         Ok(bytes)
     }
 }
@@ -75,6 +112,7 @@ impl TableStore {
         sst_format: SsTableFormat,
         root_path: P,
         block_cache: Option<Arc<dyn DbCache>>,
+        stat_registry: Arc<StatRegistry>,
     ) -> Self {
         Self::new_with_fp_registry(
             object_stores,
@@ -82,6 +120,7 @@ impl TableStore {
             PathResolver::new(root_path),
             Arc::new(FailPointRegistry::new()),
             block_cache,
+            TableStoreStats::new(stat_registry),
         )
     }
 
@@ -91,6 +130,7 @@ impl TableStore {
         path_resolver: PathResolver,
         fp_registry: Arc<FailPointRegistry>,
         cache: Option<Arc<dyn DbCache>>,
+        stats: Arc<TableStoreStats>,
     ) -> Self {
         Self {
             object_stores,
@@ -98,6 +138,7 @@ impl TableStore {
             path_resolver,
             fp_registry,
             cache,
+            stats,
         }
     }
 
@@ -328,8 +369,14 @@ impl TableStore {
     pub(crate) async fn open_sst(&self, id: &SsTableId) -> Result<SsTableHandle, SlateDBError> {
         let object_store = self.object_stores.store_for(id);
         let path = self.path(id);
-        let obj = ReadOnlyObject { object_store, path };
+        let blob_stats = BlobReadStats::default();
+        let obj = ReadOnlyObject {
+            object_store,
+            path,
+            stats: &blob_stats,
+        };
         let info = self.sst_format.read_info(&obj).await?;
+        self.stats.accumulate(&blob_stats);
         let version = self.read_sst_version(id).await?;
         Ok(SsTableHandle::new(*id, version, info))
     }
@@ -337,7 +384,12 @@ impl TableStore {
     pub(crate) async fn read_sst_version(&self, id: &SsTableId) -> Result<u16, SlateDBError> {
         let object_store = self.object_stores.store_for(id);
         let path = self.path(id);
-        let obj = ReadOnlyObject { object_store, path };
+        let blob_stats = BlobReadStats::default();
+        let obj = ReadOnlyObject {
+            object_store,
+            path,
+            stats: &blob_stats,
+        };
         self.sst_format.read_version(&obj).await
     }
 
@@ -363,8 +415,15 @@ impl TableStore {
         }
         let object_store = self.object_stores.store_for(&handle.id);
         let path = self.path(&handle.id);
-        let obj = ReadOnlyObject { object_store, path };
-        let filter = self.sst_format.read_filter(&handle.info, &obj).await?;
+        let blob_stats = BlobReadStats::default();
+        let obj = ReadOnlyObject {
+            object_store,
+            path,
+            stats: &blob_stats,
+        };
+        let result = self.sst_format.read_filter(&handle.info, &obj).await;
+        self.stats.accumulate(&blob_stats);
+        let filter = result?;
         if cache_blocks {
             if let Some(ref cache) = self.cache {
                 if let Some(filter) = filter.as_ref() {
@@ -402,8 +461,15 @@ impl TableStore {
         }
         let object_store = self.object_stores.store_for(&handle.id);
         let path = self.path(&handle.id);
-        let obj = ReadOnlyObject { object_store, path };
-        let index = Arc::new(self.sst_format.read_index(&handle.info, &obj).await?);
+        let blob_stats = BlobReadStats::default();
+        let obj = ReadOnlyObject {
+            object_store,
+            path,
+            stats: &blob_stats,
+        };
+        let result = self.sst_format.read_index(&handle.info, &obj).await;
+        self.stats.accumulate(&blob_stats);
+        let index = Arc::new(result?);
         if cache_blocks {
             if let Some(ref cache) = self.cache {
                 cache
@@ -425,11 +491,25 @@ impl TableStore {
     ) -> Result<VecDeque<Block>, SlateDBError> {
         let object_store = self.object_stores.store_for(&handle.id);
         let path = self.path(&handle.id);
-        let obj = ReadOnlyObject { object_store, path };
-        let index = self.sst_format.read_index(&handle.info, &obj).await?;
-        self.sst_format
+        let blob_stats = BlobReadStats::default();
+        let obj = ReadOnlyObject {
+            object_store,
+            path,
+            stats: &blob_stats,
+        };
+        let index = match self.sst_format.read_index(&handle.info, &obj).await {
+            Ok(idx) => idx,
+            Err(e) => {
+                self.stats.accumulate(&blob_stats);
+                return Err(e);
+            }
+        };
+        let result = self
+            .sst_format
             .read_blocks(&handle.info, &index, blocks, &obj)
-            .await
+            .await;
+        self.stats.accumulate(&blob_stats);
+        result
     }
 
     /// Reads specified blocks from an SSTable using the provided index.
@@ -448,7 +528,12 @@ impl TableStore {
         // Create a ReadOnlyObject for accessing the SSTable file
         let object_store = self.object_stores.store_for(&handle.id);
         let path = self.path(&handle.id);
-        let obj = ReadOnlyObject { object_store, path };
+        let blob_stats = BlobReadStats::default();
+        let obj = ReadOnlyObject {
+            object_store,
+            path,
+            stats: &blob_stats,
+        };
         // Initialize the result vector and a vector to track uncached ranges
         let mut blocks_read = VecDeque::with_capacity(blocks.end - blocks.start);
         let mut uncached_ranges = Vec::new();
@@ -508,17 +593,34 @@ impl TableStore {
 
         // Merge uncached blocks with blocks_read and prepare blocks for caching
         let mut blocks_to_cache = vec![];
+        let mut read_error: Option<SlateDBError> = None;
         for (range, range_blocks) in uncached_ranges.into_iter().zip(uncached_blocks) {
-            let index_borrow = index.borrow();
-            for (block_num, block_read) in range.zip(range_blocks?) {
-                let block = Arc::new(block_read);
-                if cache_blocks {
-                    let block_meta = index_borrow.block_meta().get(block_num);
-                    let offset = block_meta.offset();
-                    blocks_to_cache.push((handle.id, offset, block.clone()));
+            match range_blocks {
+                Ok(range_blocks) => {
+                    let index_borrow = index.borrow();
+                    for (block_num, block_read) in range.zip(range_blocks) {
+                        let block = Arc::new(block_read);
+                        if cache_blocks {
+                            let block_meta = index_borrow.block_meta().get(block_num);
+                            let offset = block_meta.offset();
+                            blocks_to_cache.push((handle.id, offset, block.clone()));
+                        }
+                        blocks_read.insert(block_num - blocks.start, block);
+                    }
                 }
-                blocks_read.insert(block_num - blocks.start, block);
+                Err(e) => {
+                    read_error = Some(e);
+                    break;
+                }
             }
+        }
+
+        // Always accumulate stats, even on error
+        self.stats.accumulate(&blob_stats);
+
+        // Return error if any read failed
+        if let Some(e) = read_error {
+            return Err(e);
         }
 
         // Cache the newly read blocks if caching is enabled
@@ -542,11 +644,25 @@ impl TableStore {
     ) -> Result<Block, SlateDBError> {
         let object_store = self.object_stores.store_for(&handle.id);
         let path = self.path(&handle.id);
-        let obj = ReadOnlyObject { object_store, path };
-        let index = self.sst_format.read_index(&handle.info, &obj).await?;
-        self.sst_format
+        let blob_stats = BlobReadStats::default();
+        let obj = ReadOnlyObject {
+            object_store,
+            path,
+            stats: &blob_stats,
+        };
+        let index = match self.sst_format.read_index(&handle.info, &obj).await {
+            Ok(idx) => idx,
+            Err(e) => {
+                self.stats.accumulate(&blob_stats);
+                return Err(e);
+            }
+        };
+        let result = self
+            .sst_format
             .read_block(&handle.info, &index, block, &obj)
-            .await
+            .await;
+        self.stats.accumulate(&blob_stats);
+        result
     }
 
     fn path(&self, id: &SsTableId) -> Path {
@@ -657,6 +773,50 @@ fn slatedb_io_error() -> SlateDBError {
     SlateDBError::from(std::io::Error::other("oops"))
 }
 
+pub(crate) mod stats {
+    use crate::stats::{Counter, StatRegistry};
+    use std::sync::Arc;
+
+    macro_rules! tablestore_stat_name {
+        ($suffix:expr) => {
+            crate::stat_name!("tablestore", $suffix)
+        };
+    }
+
+    pub(crate) const READS_TO_OBJECT_STORE: &str = tablestore_stat_name!("reads_to_object_store");
+    pub(crate) const BYTES_READ_FROM_OBJECT_STORE: &str =
+        tablestore_stat_name!("bytes_read_from_object_store");
+
+    /// Stats for TableStore operations.
+    #[derive(Debug)]
+    pub(crate) struct TableStoreStats {
+        pub(super) reads_to_object_store: Arc<Counter>,
+        pub(super) bytes_read_from_object_store: Arc<Counter>,
+    }
+
+    impl TableStoreStats {
+        /// Create a new TableStoreStats instance and register with the given registry.
+        pub(crate) fn new(registry: Arc<StatRegistry>) -> Arc<Self> {
+            let stats = Arc::new(Self {
+                reads_to_object_store: Arc::new(Counter::default()),
+                bytes_read_from_object_store: Arc::new(Counter::default()),
+            });
+            registry.register(READS_TO_OBJECT_STORE, stats.reads_to_object_store.clone());
+            registry.register(
+                BYTES_READ_FROM_OBJECT_STORE,
+                stats.bytes_read_from_object_store.clone(),
+            );
+            stats
+        }
+
+        pub(super) fn accumulate(&self, blob_stats: &super::BlobReadStats) {
+            self.reads_to_object_store.add(blob_stats.read_count());
+            self.bytes_read_from_object_store
+                .add(blob_stats.bytes_read());
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::types::KeyValue;
@@ -731,6 +891,7 @@ mod tests {
             format,
             Path::from(ROOT),
             None,
+            Arc::new(StatRegistry::new()),
         ));
         let id = SsTableId::Compacted(ulid::Ulid::new());
 
@@ -799,6 +960,7 @@ mod tests {
             format,
             Path::from(ROOT),
             None,
+            Arc::new(StatRegistry::new()),
         ));
         let id = SsTableId::Wal(123);
 
@@ -863,6 +1025,7 @@ mod tests {
             format,
             Path::from(ROOT),
             None,
+            Arc::new(StatRegistry::new()),
         ));
         let wal_id = SsTableId::Wal(1);
 
@@ -897,7 +1060,7 @@ mod tests {
             ..SsTableFormat::default()
         };
 
-        let stat_registry = StatRegistry::new();
+        let stat_registry = Arc::new(StatRegistry::new());
         let block_cache = Arc::new(MokaCache::new());
         let meta_cache = Arc::new(MokaCache::new());
 
@@ -918,6 +1081,7 @@ mod tests {
             format,
             Path::from("/root"),
             Some(wrapper.clone()),
+            stat_registry,
         ));
 
         // Create and write SST
@@ -1045,6 +1209,7 @@ mod tests {
             format.clone(),
             Path::from(ROOT),
             None,
+            Arc::new(StatRegistry::new()),
         );
 
         let mut builder = writer.table_builder();
@@ -1073,6 +1238,7 @@ mod tests {
             format,
             Path::from(ROOT),
             Some(cache),
+            Arc::new(StatRegistry::new()),
         );
         assert_eq!(meta_cache.entry_count(), 0);
 
@@ -1103,6 +1269,7 @@ mod tests {
             format.clone(),
             Path::from(ROOT),
             None,
+            Arc::new(StatRegistry::new()),
         );
 
         let mut builder = writer.table_builder();
@@ -1131,6 +1298,7 @@ mod tests {
             format,
             Path::from(ROOT),
             Some(cache),
+            Arc::new(StatRegistry::new()),
         );
         assert_eq!(meta_cache.entry_count(), 0);
 
@@ -1153,7 +1321,7 @@ mod tests {
     #[tokio::test]
     async fn test_write_sst_should_write_cache() {
         let os = Arc::new(InMemory::new());
-        let stat_registry = StatRegistry::new();
+        let stat_registry = Arc::new(StatRegistry::new());
 
         let block_cache = Arc::new(TestCache::new());
         let meta_cache = Arc::new(TestCache::new());
@@ -1174,6 +1342,7 @@ mod tests {
             SsTableFormat::default(),
             Path::from("/root"),
             Some(wrapper.clone()),
+            stat_registry,
         ));
         let id = SsTableId::Compacted(ulid::Ulid::new());
         let sst = build_test_sst(&ts.sst_format, 3).await;
@@ -1207,7 +1376,7 @@ mod tests {
     #[tokio::test]
     async fn test_write_sst_should_not_write_cache() {
         let os = Arc::new(InMemory::new());
-        let stat_registry = StatRegistry::new();
+        let stat_registry = Arc::new(StatRegistry::new());
         let cache = Arc::new(TestCache::new());
         let wrapper = Arc::new(DbCacheWrapper::new(
             cache.clone(),
@@ -1219,6 +1388,7 @@ mod tests {
             SsTableFormat::default(),
             Path::from("/root"),
             Some(wrapper),
+            stat_registry,
         ));
         let id = SsTableId::Compacted(ulid::Ulid::new());
         let sst = build_test_sst(&ts.sst_format, 3).await;
@@ -1279,6 +1449,7 @@ mod tests {
             format,
             Path::from(ROOT),
             None,
+            Arc::new(StatRegistry::new()),
         ));
 
         // Create id1, id2, and i3 as three random UUIDs that have been sorted ascending.
@@ -1348,6 +1519,7 @@ mod tests {
             format,
             Path::from(ROOT),
             None,
+            Arc::new(StatRegistry::new()),
         ));
 
         let id1 = SsTableId::Wal(1);
@@ -1429,6 +1601,7 @@ mod tests {
             format.clone(),
             Path::from(ROOT),
             None,
+            Arc::new(StatRegistry::new()),
         ));
 
         // Build an SST and compute expected bytes
@@ -1466,6 +1639,7 @@ mod tests {
             format,
             Path::from(ROOT),
             None,
+            Arc::new(StatRegistry::new()),
         ));
 
         let id1 = SsTableId::Compacted(ulid::Ulid::new());
@@ -1510,6 +1684,7 @@ mod tests {
             format,
             Path::from(ROOT),
             None,
+            Arc::new(StatRegistry::new()),
         ));
 
         let id1 = SsTableId::Wal(123);
@@ -1559,6 +1734,7 @@ mod tests {
             SsTableFormat::default(),
             Path::from(ROOT),
             None,
+            Arc::new(StatRegistry::new()),
         ));
         let id = SsTableId::Compacted(ulid::Ulid::new());
         let path = ts.path(&id);
@@ -1583,6 +1759,7 @@ mod tests {
             SsTableFormat::default(),
             Path::from(ROOT),
             None,
+            Arc::new(StatRegistry::new()),
         ));
         let id = SsTableId::Wal(42);
         let path = ts.path(&id);
@@ -1607,7 +1784,7 @@ mod tests {
             let os = Arc::new(InMemory::new());
             let format = SsTableFormat { block_size, ..SsTableFormat::default() };
             let ts = Arc::new(TableStore::new(ObjectStores::new(os, None),
-                format, Path::from(ROOT), None));
+                format, Path::from(ROOT), None, Arc::new(StatRegistry::new())));
             if let Some(bytes) = block_size.checked_mul(num_blocks) {
                 assert_eq!(num_blocks, ts.bytes_to_blocks(bytes));
             }

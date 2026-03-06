@@ -977,7 +977,9 @@ mod tests {
     use crate::proptest_util::rng::new_test_rng;
     use crate::proptest_util::sample;
     use crate::rand::DbRand;
+    use crate::stats::StatRegistry;
     use crate::store_provider::StoreProvider;
+    use crate::tablestore::stats::TableStoreStats;
     use crate::tablestore::TableStore;
     use crate::{error::SlateDBError, test_utils, Db};
     use bytes::Bytes;
@@ -1578,6 +1580,7 @@ mod tests {
                 PathResolver::new(self.path.clone()),
                 Arc::clone(&self.fp_registry),
                 None,
+                TableStoreStats::new(Arc::new(StatRegistry::new())),
             ))
         }
 

@@ -250,6 +250,7 @@ mod tests {
             format.clone(),
             Path::from("/root"),
             None,
+            Arc::new(StatRegistry::new()),
         ));
 
         // Manifest store and initial manifest
@@ -351,6 +352,7 @@ mod tests {
             format.clone(),
             Path::from("/root"),
             None,
+            Arc::new(StatRegistry::new()),
         ));
 
         // Manifest store and initial manifest
@@ -454,6 +456,7 @@ mod tests {
             format.clone(),
             Path::from("/root"),
             None,
+            Arc::new(StatRegistry::new()),
         ));
 
         // Manifest store with empty DB
@@ -553,6 +556,7 @@ mod tests {
             format.clone(),
             Path::from("/root"),
             None,
+            Arc::new(StatRegistry::new()),
         ));
 
         // Manifest with an L0 newer than the compaction output.

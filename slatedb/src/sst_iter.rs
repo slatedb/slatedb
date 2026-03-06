@@ -1134,6 +1134,7 @@ mod tests {
             format,
             root_path.clone(),
             None,
+            Arc::new(StatRegistry::new()),
         ));
         let mut builder = table_store.table_builder();
         builder
@@ -1314,6 +1315,7 @@ mod tests {
             format.clone(),
             root_path.clone(),
             None,
+            Arc::new(StatRegistry::new()),
         );
         let mut builder = writer.table_builder();
         builder
@@ -1344,6 +1346,7 @@ mod tests {
             format,
             root_path,
             Some(cache),
+            Arc::new(StatRegistry::new()),
         ));
 
         let no_cache_options = SstIteratorOptions {
@@ -1404,6 +1407,7 @@ mod tests {
             format,
             root_path,
             None,
+            Arc::new(StatRegistry::new()),
         ))
     }
 
@@ -1442,6 +1446,7 @@ mod tests {
             format,
             root_path.clone(),
             None,
+            Arc::new(StatRegistry::new()),
         ));
         let mut builder = table_store.table_builder();
 
@@ -1517,6 +1522,7 @@ mod tests {
             format,
             root_path.clone(),
             None,
+            Arc::new(StatRegistry::new()),
         ));
         let first_key = [b'a'; 16];
         let key_gen = OrderedBytesGenerator::new_with_byte_range(&first_key, b'a', b'z');
@@ -1567,6 +1573,7 @@ mod tests {
             format,
             root_path.clone(),
             None,
+            Arc::new(StatRegistry::new()),
         ));
         let first_key = [b'b'; 16];
         let key_gen = OrderedBytesGenerator::new_with_byte_range(&first_key, b'a', b'y');
@@ -1611,6 +1618,7 @@ mod tests {
             format,
             root_path.clone(),
             None,
+            Arc::new(StatRegistry::new()),
         ));
         let first_key = [b'b'; 16];
         let key_gen = OrderedBytesGenerator::new_with_byte_range(&first_key, b'a', b'y');
@@ -1652,6 +1660,7 @@ mod tests {
             format,
             root_path.clone(),
             None,
+            Arc::new(StatRegistry::new()),
         ));
 
         // Build SST with specified format (keys 0-99)
@@ -1726,6 +1735,7 @@ mod tests {
             format,
             root_path.clone(),
             None,
+            Arc::new(StatRegistry::new()),
         ));
         let first_key = [b'b'; 16];
         let key_gen = OrderedBytesGenerator::new_with_byte_range(&first_key, b'a', b'y');
@@ -1830,6 +1840,7 @@ mod tests {
             format,
             root_path.clone(),
             Some(split_cache.clone()),
+            Arc::new(StatRegistry::new()),
         ));
 
         let mut builder = table_store.table_builder();
@@ -1947,6 +1958,7 @@ mod tests {
             format,
             root_path,
             None,
+            Arc::new(StatRegistry::new()),
         ));
 
         let keys_and_values = vec![
@@ -1995,6 +2007,7 @@ mod tests {
             format,
             root_path,
             None,
+            Arc::new(StatRegistry::new()),
         ));
 
         let keys_and_values = vec![
@@ -2045,6 +2058,7 @@ mod tests {
             format,
             root_path,
             None,
+            Arc::new(StatRegistry::new()),
         ));
 
         // Create keys with shared prefixes to exercise prefix compression
@@ -2107,6 +2121,7 @@ mod tests {
             format,
             root_path,
             None,
+            Arc::new(StatRegistry::new()),
         ));
 
         // Create keys that will span multiple blocks
@@ -2174,6 +2189,7 @@ mod tests {
             format,
             root_path,
             None,
+            Arc::new(StatRegistry::new()),
         ));
 
         let mut builder = table_store
@@ -2226,6 +2242,7 @@ mod tests {
             format,
             root_path,
             None,
+            Arc::new(StatRegistry::new()),
         ));
 
         let mut builder = table_store
@@ -2284,6 +2301,7 @@ mod tests {
             format,
             root_path.clone(),
             None,
+            Arc::new(StatRegistry::new()),
         ));
 
         // Build an SST with enough keys to span multiple blocks
@@ -2418,6 +2436,7 @@ mod tests {
             format,
             root_path.clone(),
             None,
+            Arc::new(StatRegistry::new()),
         ));
 
         // Build an SST with enough data for multiple blocks
@@ -2486,6 +2505,7 @@ mod tests {
             format,
             root_path.clone(),
             None,
+            Arc::new(StatRegistry::new()),
         ));
 
         let mut writer = table_store.table_writer(SsTableId::Wal(0));

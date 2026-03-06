@@ -78,6 +78,7 @@ impl CompactionExecuteBench {
             sst_format,
             self.path.clone(),
             None,
+            Arc::new(StatRegistry::new()),
         ));
         let num_keys = sst_bytes / (val_bytes + key_bytes);
         let mut key_start = vec![0u8; key_bytes - mem::size_of::<u32>()];
@@ -317,6 +318,7 @@ impl CompactionExecuteBench {
             sst_format,
             self.path.clone(),
             None,
+            Arc::new(StatRegistry::new()),
         ));
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let compactor_options = CompactorOptions::default();

@@ -817,6 +817,7 @@ mod tests {
             SsTableFormat::default(),
             Path::from("/root"),
             None,
+            Arc::new(StatRegistry::new()),
         ));
         let test_clock = Arc::new(MockSystemClock::new());
         let mono_clock = Arc::new(MonotonicClock::new(test_clock.clone(), 0));

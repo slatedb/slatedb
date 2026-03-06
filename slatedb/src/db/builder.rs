@@ -138,6 +138,7 @@ use crate::db_cache::SplitCache;
 use crate::db_cache::{DbCache, DbCacheWrapper};
 use crate::db_reader::DbReader;
 use crate::db_state::ManifestCore;
+use crate::db_stats::DbStats;
 use crate::db_status::ClosedResultWriter;
 use crate::dispatcher::MessageHandlerExecutor;
 use crate::error::SlateDBError;
@@ -154,6 +155,7 @@ use crate::rand::DbRand;
 use crate::retrying_object_store::RetryingObjectStore;
 use crate::stats::StatRegistry;
 use crate::store_provider::DefaultStoreProvider;
+use crate::tablestore::stats::TableStoreStats;
 use crate::tablestore::TableStore;
 use crate::utils::WatchableOnceCell;
 use slatedb_common::clock::DefaultSystemClock;
@@ -430,8 +432,10 @@ impl<P: Into<Path>> DbBuilder<P> {
             None => HashMap::new(),
         };
 
-        // Create path resolver and table store
+        // Create path resolver, db stats, and table store
         let path_resolver = PathResolver::new_with_external_ssts(path.clone(), external_ssts);
+        let db_stats = DbStats::new(stat_registry.as_ref());
+        let table_store_stats = TableStoreStats::new(stat_registry.clone());
         let table_store = Arc::new(TableStore::new_with_fp_registry(
             ObjectStores::new(
                 maybe_cached_main_object_store.clone(),
@@ -447,6 +451,7 @@ impl<P: Into<Path>> DbBuilder<P> {
                     system_clock.clone(),
                 )) as Arc<dyn DbCache>
             }),
+            table_store_stats.clone(),
         ));
 
         // Get next WAL ID before writing manifest
@@ -489,7 +494,8 @@ impl<P: Into<Path>> DbBuilder<P> {
                 manifest.prepare_dirty()?,
                 memtable_flush_tx,
                 write_tx,
-                stat_registry,
+                stat_registry.clone(),
+                db_stats,
                 self.fp_registry.clone(),
                 merge_operator.clone(),
             )
@@ -533,6 +539,7 @@ impl<P: Into<Path>> DbBuilder<P> {
             path_resolver.clone(),
             self.fp_registry.clone(),
             None,
+            table_store_stats.clone(),
         ));
 
         let compactor_builder = self.compactor_builder.or_else(|| {
@@ -772,6 +779,7 @@ impl<P: Into<Path>> GarbageCollectorBuilder<P> {
             SsTableFormat::default(), // read only SSTs can use default
             path,
             None, // no need for cache in GC
+            self.stat_registry.clone(),
         ));
         GarbageCollector::new(
             manifest_store,
@@ -945,6 +953,7 @@ impl<P: Into<Path>> CompactorBuilder<P> {
             sst_format,
             path,
             None, // no need for cache in GC
+            self.stat_registry.clone(),
         ));
 
         let scheduler_supplier = self
@@ -1194,6 +1203,7 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
             wal_object_store: retrying_wal_object_store,
             block_cache: self.options.block_cache.clone(),
             block_transformer: self.options.block_transformer.clone(),
+            stat_registry: Arc::new(StatRegistry::new()),
         };
 
         let reader = DbReader::open_internal(
