@@ -118,33 +118,9 @@ impl DbTransaction {
         key: K,
         options: &ReadOptions,
     ) -> Result<Option<Bytes>, crate::Error> {
-        self.db_inner.status()?;
-
-        // Track read key for SSI conflict detection if needed
-        if self.isolation_level == IsolationLevel::SerializableSnapshot {
-            let key_bytes = Bytes::copy_from_slice(key.as_ref());
-            let mut read_keys = HashSet::new();
-            read_keys.insert(key_bytes);
-            self.txn_manager.track_read_keys(&self.txn_id, read_keys);
-        }
-
-        let db_state = self.db_inner.state.read().view();
-
-        // Clone the WriteBatch for snapshot isolation
-        let write_batch_cloned = self.write_batch.read().clone();
-
-        // For now, delegate to the underlying reader
-        self.db_inner
-            .reader
-            .get_with_options(
-                key,
-                options,
-                &db_state,
-                Some(write_batch_cloned),
-                Some(self.started_seq),
-            )
+        self.get_key_value_with_options(key, options)
             .await
-            .map_err(Into::into)
+            .map(|kv_opt| kv_opt.map(|kv| kv.value))
     }
 
     /// Get a key-value pair from the transaction with default read options.

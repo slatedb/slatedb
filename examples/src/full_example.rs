@@ -1,7 +1,6 @@
 use slatedb::{object_store::memory::InMemory, Db, Error};
 use std::sync::Arc;
 
-
 #[tokio::main]
 async fn main() -> Result<(), Error> {
     // Setup

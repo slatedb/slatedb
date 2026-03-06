@@ -63,13 +63,9 @@ impl DbSnapshot {
         key: K,
         options: &ReadOptions,
     ) -> Result<Option<Bytes>, crate::Error> {
-        self.db_inner.status()?;
-        let db_state = self.db_inner.state.read().view();
-        self.db_inner
-            .reader
-            .get_with_options(key, options, &db_state, None, Some(self.started_seq))
+        self.get_key_value_with_options(key, options)
             .await
-            .map_err(Into::into)
+            .map(|kv_opt| kv_opt.map(|kv| kv.value))
     }
 
     /// Get a key-value pair from the snapshot with default read options.

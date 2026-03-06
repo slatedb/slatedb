@@ -324,35 +324,17 @@ impl Reader {
         )
         .await?;
 
-        iterator.next_entry().await?.map(|entry| {
-            if entry.value.is_tombstone() {
-                Err(SlateDBError::UnexpectedTombstone)
-            } else {
-                Ok(KeyValue::from(entry))
-            }
-        }).transpose()
-    }
-
-    /// Get the value for the given key.
-    ///
-    /// Returns `Ok(Some(value))` if a non-expired value exists for `key`,
-    /// `Ok(None)` if the key is deleted or the latest visible value is expired,
-    /// and an error if the read fails.
-    ///
-    /// This is a thin wrapper around [`get_key_value_with_options`] that extracts the
-    /// value bytes from the returned key-value pair.
-    pub(crate) async fn get_with_options<K: AsRef<[u8]>>(
-        &self,
-        key: K,
-        options: &ReadOptions,
-        db_state: &(dyn DbStateReader + Sync + Send),
-        write_batch: Option<WriteBatch>,
-        max_seq: Option<u64>,
-    ) -> Result<Option<Bytes>, SlateDBError> {
-        Ok(self
-            .get_key_value_with_options(key, options, db_state, write_batch, max_seq)
+        iterator
+            .next_entry()
             .await?
-            .map(|kv| kv.value))
+            .map(|entry| {
+                if entry.value.is_tombstone() {
+                    Err(SlateDBError::UnexpectedTombstone)
+                } else {
+                    Ok(KeyValue::from(entry))
+                }
+            })
+            .transpose()
     }
 
     /// Create an iterator over a key range.
@@ -1333,10 +1315,10 @@ mod tests {
             merge_operator,
         };
 
-        // Call the actual get_with_options method
+        // Call the actual get_key_value_with_options method
         let read_options = ReadOptions::default().with_dirty(test_case.dirty);
         let result = reader
-            .get_with_options(
+            .get_key_value_with_options(
                 test_case.query_key,
                 &read_options,
                 &test_db_state,
@@ -1345,7 +1327,7 @@ mod tests {
             )
             .await?;
 
-        let actual = result.as_ref().map(|b| b.as_ref());
+        let actual = result.as_ref().map(|kv| kv.value.as_ref());
         let expected = test_case.expected;
         assert_eq!(
             actual,
