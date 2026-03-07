@@ -1537,11 +1537,11 @@ mod tests {
         );
         let mut builder = table_store.table_builder();
         builder
-            .add_value(b"key1", b"value1", gen_attrs(1))
+            .add_value(b"key1", b"value1", Some(1), None)
             .await
             .unwrap();
         builder
-            .add_value(b"key2", b"value2", gen_attrs(2))
+            .add_value(b"key2", b"value2", Some(2), None)
             .await
             .unwrap();
         let encoded = builder.build().await.unwrap();
@@ -1579,11 +1579,11 @@ mod tests {
         );
         let mut builder = table_store.table_builder();
         builder
-            .add_value(b"key1", b"value1", gen_attrs(1))
+            .add_value(b"key1", b"value1", Some(1), None)
             .await
             .unwrap();
         builder
-            .add_value(b"key2", b"value2", gen_attrs(2))
+            .add_value(b"key2", b"value2", Some(2), None)
             .await
             .unwrap();
         let encoded = builder.build().await.unwrap();
