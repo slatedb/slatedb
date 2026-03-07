@@ -177,13 +177,9 @@ impl Admin {
         spec: CompactionSpec,
     ) -> Result<Compaction, Box<dyn Error>> {
         let compactions_store = Arc::new(self.compactions_store());
-        let compaction_id = Compactor::submit(
-            spec,
-            compactions_store,
-            Arc::new(DbRand::new(self.rand.rng().next_u64())),
-            self.system_clock.clone(),
-        )
-        .await?;
+        let rand = Arc::new(DbRand::new(self.rand.rng().next_u64()));
+        let compaction_id =
+            Compactor::submit(spec, compactions_store, rand, self.system_clock.clone()).await?;
         let Some(compaction) = self.read_compaction(compaction_id, None).await? else {
             return Err(Box::new(SlateDBError::InvalidDBState));
         };
