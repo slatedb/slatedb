@@ -140,6 +140,7 @@ impl DbTransaction {
     ) -> Result<Option<KeyValue>, crate::Error> {
         self.db_inner.status()?;
 
+        // Track read key for SSI conflict detection if needed
         if self.isolation_level == IsolationLevel::SerializableSnapshot {
             let key_bytes = Bytes::copy_from_slice(key.as_ref());
             let mut read_keys = HashSet::new();
