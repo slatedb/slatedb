@@ -387,7 +387,7 @@ struct PyKeyValue {
     #[pyo3(get)]
     create_ts: i64,
     #[pyo3(get)]
-    expire_ts: i64,
+    expire_ts: Option<i64>,
 }
 
 impl From<::slatedb::KeyValue> for PyKeyValue {

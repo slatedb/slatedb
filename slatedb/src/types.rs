@@ -8,7 +8,7 @@ pub struct KeyValue {
     pub value: Bytes,
     pub seq: u64,
     pub create_ts: i64,
-    pub expire_ts: i64,
+    pub expire_ts: Option<i64>,
 }
 
 /// Represents a key-value pair that may be a tombstone.
@@ -148,7 +148,7 @@ impl From<RowEntry> for KeyValue {
                 .expect("RowEntry should have a value"),
             seq: entry.seq,
             create_ts: entry.create_ts.unwrap_or(0),
-            expire_ts: entry.expire_ts.unwrap_or(0),
+            expire_ts: entry.expire_ts,
         }
     }
 }

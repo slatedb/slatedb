@@ -10,9 +10,9 @@ public class KeyValue {
     private final byte[] value;
     private final long seq;
     private final long createTs;
-    private final long expireTs;
+    private final Long expireTs;
 
-    public KeyValue(byte[] key, byte[] value, long seq, long createTs, long expireTs) {
+    public KeyValue(byte[] key, byte[] value, long seq, long createTs, Long expireTs) {
         this.key = key;
         this.value = value;
         this.seq = seq;
@@ -37,6 +37,6 @@ public class KeyValue {
     }
 
     public Instant expireTs() {
-        return Instant.ofEpochMilli(expireTs);
+        return expireTs == null ? null : Instant.ofEpochMilli(expireTs);
     }
 }

@@ -897,13 +897,14 @@ final class NativeInterop {
         long seq = slatedb_key_value_t.seq(kv);
         long createTs = slatedb_key_value_t.create_ts(kv);
         long expireTs = slatedb_key_value_t.expire_ts(kv);
+        boolean expireTsPresent = slatedb_key_value_t.expire_ts_present(kv);
 
         byte[] key = new byte[(int) keyLen];
         MemorySegment.copy(keyPtr, 0, MemorySegment.ofArray(key), 0, keyLen);
         byte[] value = new byte[(int) valueLen];
         MemorySegment.copy(valuePtr, 0, MemorySegment.ofArray(value), 0, valueLen);
 
-        return new KeyValue(key, value, seq, createTs, expireTs);
+        return new KeyValue(key, value, seq, createTs, expireTsPresent ? expireTs : null);
     }
 
     static KeyValue slatedb_db_get_key_value(DbHandle db, byte[] key) {
