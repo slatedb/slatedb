@@ -20,6 +20,7 @@ use chrono::{DateTime, Utc};
 use fail_parallel::FailPointRegistry;
 use object_store::path::Path;
 use object_store::ObjectStore;
+use rand::RngCore;
 use std::env;
 use std::env::VarError;
 use std::error::Error;
@@ -179,7 +180,7 @@ impl Admin {
         let compaction_id = Compactor::submit(
             spec,
             compactions_store,
-            Arc::new(DbRand::new(self.rand.seed())),
+            Arc::new(DbRand::new(self.rand.rng().next_u64())),
             self.system_clock.clone(),
         )
         .await?;
@@ -254,7 +255,7 @@ impl Admin {
         .with_system_clock(self.system_clock.clone())
         .with_wal_object_store(self.object_stores.store_of(ObjectStoreType::Wal).clone())
         .with_options(gc_opts)
-        .with_seed(self.rand.seed())
+        .with_seed(self.rand.rng().next_u64())
         .build();
         gc.run_gc_once().await;
         Ok(())
@@ -276,7 +277,7 @@ impl Admin {
         .with_system_clock(self.system_clock.clone())
         .with_wal_object_store(self.object_stores.store_of(ObjectStoreType::Wal).clone())
         .with_options(gc_opts)
-        .with_seed(self.rand.seed())
+        .with_seed(self.rand.rng().next_u64())
         .build();
 
         let (_, rx) = mpsc::unbounded_channel();
@@ -315,7 +316,7 @@ impl Admin {
             self.object_stores.store_of(ObjectStoreType::Main).clone(),
         )
         .with_system_clock(self.system_clock.clone())
-        .with_seed(self.rand.seed());
+        .with_seed(self.rand.rng().next_u64());
 
         #[cfg(feature = "compaction_filters")]
         if let Some(supplier) = &self.compaction_filter_supplier {
