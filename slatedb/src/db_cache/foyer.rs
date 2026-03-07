@@ -109,6 +109,10 @@ impl DbCache for FoyerCache {
         Ok(self.inner.get(key).map(|entry| entry.value().clone()))
     }
 
+    async fn get_stats(&self, key: &CachedKey) -> Result<Option<CachedEntry>, crate::Error> {
+        Ok(self.inner.get(key).map(|entry| entry.value().clone()))
+    }
+
     async fn insert(&self, key: CachedKey, value: CachedEntry) {
         self.inner.insert(key, value);
     }

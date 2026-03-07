@@ -118,6 +118,10 @@ impl DbCache for MokaCache {
         Ok(self.inner.get(key).await)
     }
 
+    async fn get_stats(&self, key: &CachedKey) -> Result<Option<CachedEntry>, crate::Error> {
+        Ok(self.inner.get(key).await)
+    }
+
     async fn insert(&self, key: CachedKey, value: CachedEntry) {
         self.inner.insert(key, value).await;
     }

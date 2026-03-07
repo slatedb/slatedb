@@ -3515,7 +3515,7 @@ mod tests {
         use crate::{test_utils::assert_iterator, types::RowEntry};
 
         let clock = Arc::new(MockSystemClock::new());
-        let mut options = test_db_options(0, 256, None);
+        let mut options = test_db_options(0, 300, None);
         options.wal_enabled = false;
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/tmp/test_kv_store");
