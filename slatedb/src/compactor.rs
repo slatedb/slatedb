@@ -1211,6 +1211,7 @@ mod tests {
             .with_compactor_builder(compactor_builder_with_scheduler(
                 os.clone(),
                 scheduler.clone(),
+                system_clock.clone(),
             ))
             .build()
             .await
@@ -1318,6 +1319,7 @@ mod tests {
             .with_compactor_builder(compactor_builder_with_scheduler(
                 os.clone(),
                 scheduler.clone(),
+                system_clock.clone(),
             ))
             .build()
             .await
@@ -1421,6 +1423,7 @@ mod tests {
             .with_compactor_builder(compactor_builder_with_scheduler(
                 os.clone(),
                 compaction_scheduler.clone(),
+                system_clock.clone(),
             ))
             .with_merge_operator(Arc::new(StringConcatMergeOperator))
             .build()
@@ -1550,6 +1553,7 @@ mod tests {
             .with_compactor_builder(compactor_builder_with_scheduler(
                 os.clone(),
                 compaction_scheduler.clone(),
+                system_clock.clone(),
             ))
             .with_merge_operator(Arc::new(StringConcatMergeOperator))
             .build()
@@ -1684,6 +1688,7 @@ mod tests {
             .with_compactor_builder(compactor_builder_with_scheduler(
                 os.clone(),
                 compaction_scheduler.clone(),
+                system_clock.clone(),
             ))
             .with_merge_operator(Arc::new(StringConcatMergeOperator))
             .build()
@@ -1800,6 +1805,7 @@ mod tests {
             .with_compactor_builder(compactor_builder_with_scheduler(
                 os.clone(),
                 compaction_scheduler.clone(),
+                system_clock.clone(),
             ))
             .with_merge_operator(Arc::new(StringConcatMergeOperator))
             .build()
@@ -1935,6 +1941,7 @@ mod tests {
             .with_compactor_builder(compactor_builder_with_scheduler(
                 os.clone(),
                 scheduler.clone(),
+                insert_clock.clone(),
             ))
             .with_merge_operator(Arc::new(StringConcatMergeOperator))
             .build()
@@ -2018,6 +2025,7 @@ mod tests {
             .with_compactor_builder(compactor_builder_with_scheduler(
                 os.clone(),
                 compaction_scheduler.clone(),
+                system_clock.clone(),
             ))
             .with_merge_operator(Arc::new(StringConcatMergeOperator))
             .build()
@@ -2119,6 +2127,7 @@ mod tests {
             .with_compactor_builder(compactor_builder_with_scheduler(
                 os.clone(),
                 compaction_scheduler.clone(),
+                system_clock.clone(),
             ))
             .with_merge_operator(Arc::new(StringConcatMergeOperator))
             .build()
@@ -3782,8 +3791,10 @@ mod tests {
     fn compactor_builder_with_scheduler(
         os: Arc<dyn ObjectStore>,
         scheduler_supplier: Arc<dyn CompactionSchedulerSupplier>,
+        system_clock: Arc<dyn SystemClock>,
     ) -> CompactorBuilder<&'static str> {
         CompactorBuilder::new(PATH, os)
+            .with_system_clock(system_clock)
             .with_options(compactor_options())
             .with_scheduler_supplier(scheduler_supplier)
     }

@@ -109,6 +109,7 @@ use log::info;
 use log::warn;
 use object_store::path::Path;
 use object_store::ObjectStore;
+use rand::RngCore;
 use tokio::runtime::Handle;
 use tokio::sync::mpsc;
 
@@ -546,7 +547,7 @@ impl<P: Into<Path>> DbBuilder<P> {
             let mut builder = compactor_builder
                 .with_system_clock(system_clock.clone())
                 .with_stat_registry(inner.stat_registry.clone())
-                .with_seed(rand.seed());
+                .with_seed(rand.rng().next_u64());
 
             if let Some(operator) = merge_operator {
                 builder = builder.with_merge_operator(operator);
