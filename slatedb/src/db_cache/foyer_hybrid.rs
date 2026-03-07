@@ -99,6 +99,10 @@ impl DbCache for FoyerHybridCache {
         self.get(key).await
     }
 
+    async fn get_stats(&self, key: &CachedKey) -> Result<Option<CachedEntry>, crate::Error> {
+        self.get(key).await
+    }
+
     async fn insert(&self, key: CachedKey, value: CachedEntry) {
         self.inner.insert(key, value);
     }

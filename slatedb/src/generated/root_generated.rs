@@ -1037,6 +1037,8 @@ impl<'a> SsTableInfo<'a> {
   pub const VT_COMPRESSION_FORMAT: flatbuffers::VOffsetT = 14;
   pub const VT_SST_TYPE: flatbuffers::VOffsetT = 16;
   pub const VT_LAST_ENTRY: flatbuffers::VOffsetT = 18;
+  pub const VT_STATS_OFFSET: flatbuffers::VOffsetT = 20;
+  pub const VT_STATS_LEN: flatbuffers::VOffsetT = 22;
 
   #[inline]
   pub unsafe fn init_from_table(table: flatbuffers::Table<'a>) -> Self {
@@ -1048,6 +1050,8 @@ impl<'a> SsTableInfo<'a> {
     args: &'args SsTableInfoArgs<'args>
   ) -> flatbuffers::WIPOffset<SsTableInfo<'bldr>> {
     let mut builder = SsTableInfoBuilder::new(_fbb);
+    builder.add_stats_len(args.stats_len);
+    builder.add_stats_offset(args.stats_offset);
     builder.add_filter_len(args.filter_len);
     builder.add_filter_offset(args.filter_offset);
     builder.add_index_len(args.index_len);
@@ -1116,6 +1120,20 @@ impl<'a> SsTableInfo<'a> {
     // which contains a valid value in this slot
     unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'a, u8>>>(SsTableInfo::VT_LAST_ENTRY, None)}
   }
+  #[inline]
+  pub fn stats_offset(&self) -> u64 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u64>(SsTableInfo::VT_STATS_OFFSET, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn stats_len(&self) -> u64 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u64>(SsTableInfo::VT_STATS_LEN, Some(0)).unwrap()}
+  }
 }
 
 impl flatbuffers::Verifiable for SsTableInfo<'_> {
@@ -1133,6 +1151,8 @@ impl flatbuffers::Verifiable for SsTableInfo<'_> {
      .visit_field::<CompressionFormat>("compression_format", Self::VT_COMPRESSION_FORMAT, false)?
      .visit_field::<SstType>("sst_type", Self::VT_SST_TYPE, false)?
      .visit_field::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'_, u8>>>("last_entry", Self::VT_LAST_ENTRY, false)?
+     .visit_field::<u64>("stats_offset", Self::VT_STATS_OFFSET, false)?
+     .visit_field::<u64>("stats_len", Self::VT_STATS_LEN, false)?
      .finish();
     Ok(())
   }
@@ -1146,6 +1166,8 @@ pub struct SsTableInfoArgs<'a> {
     pub compression_format: CompressionFormat,
     pub sst_type: SstType,
     pub last_entry: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, u8>>>,
+    pub stats_offset: u64,
+    pub stats_len: u64,
 }
 impl<'a> Default for SsTableInfoArgs<'a> {
   #[inline]
@@ -1159,6 +1181,8 @@ impl<'a> Default for SsTableInfoArgs<'a> {
       compression_format: CompressionFormat::None,
       sst_type: SstType::Compacted,
       last_entry: None,
+      stats_offset: 0,
+      stats_len: 0,
     }
   }
 }
@@ -1201,6 +1225,14 @@ impl<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> SsTableInfoBuilder<'a, 'b, A> {
     self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(SsTableInfo::VT_LAST_ENTRY, last_entry);
   }
   #[inline]
+  pub fn add_stats_offset(&mut self, stats_offset: u64) {
+    self.fbb_.push_slot::<u64>(SsTableInfo::VT_STATS_OFFSET, stats_offset, 0);
+  }
+  #[inline]
+  pub fn add_stats_len(&mut self, stats_len: u64) {
+    self.fbb_.push_slot::<u64>(SsTableInfo::VT_STATS_LEN, stats_len, 0);
+  }
+  #[inline]
   pub fn new(_fbb: &'b mut flatbuffers::FlatBufferBuilder<'a, A>) -> SsTableInfoBuilder<'a, 'b, A> {
     let start = _fbb.start_table();
     SsTableInfoBuilder {
@@ -1226,6 +1258,173 @@ impl core::fmt::Debug for SsTableInfo<'_> {
       ds.field("compression_format", &self.compression_format());
       ds.field("sst_type", &self.sst_type());
       ds.field("last_entry", &self.last_entry());
+      ds.field("stats_offset", &self.stats_offset());
+      ds.field("stats_len", &self.stats_len());
+      ds.finish()
+  }
+}
+pub enum SstStatsOffset {}
+#[derive(Copy, Clone, PartialEq)]
+
+pub struct SstStats<'a> {
+  pub _tab: flatbuffers::Table<'a>,
+}
+
+impl<'a> flatbuffers::Follow<'a> for SstStats<'a> {
+  type Inner = SstStats<'a>;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    Self { _tab: flatbuffers::Table::new(buf, loc) }
+  }
+}
+
+impl<'a> SstStats<'a> {
+  pub const VT_NUM_PUTS: flatbuffers::VOffsetT = 4;
+  pub const VT_NUM_DELETES: flatbuffers::VOffsetT = 6;
+  pub const VT_NUM_MERGES: flatbuffers::VOffsetT = 8;
+  pub const VT_RAW_KEY_SIZE: flatbuffers::VOffsetT = 10;
+  pub const VT_RAW_VAL_SIZE: flatbuffers::VOffsetT = 12;
+
+  #[inline]
+  pub unsafe fn init_from_table(table: flatbuffers::Table<'a>) -> Self {
+    SstStats { _tab: table }
+  }
+  #[allow(unused_mut)]
+  pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: flatbuffers::Allocator + 'bldr>(
+    _fbb: &'mut_bldr mut flatbuffers::FlatBufferBuilder<'bldr, A>,
+    args: &'args SstStatsArgs
+  ) -> flatbuffers::WIPOffset<SstStats<'bldr>> {
+    let mut builder = SstStatsBuilder::new(_fbb);
+    builder.add_raw_val_size(args.raw_val_size);
+    builder.add_raw_key_size(args.raw_key_size);
+    builder.add_num_merges(args.num_merges);
+    builder.add_num_deletes(args.num_deletes);
+    builder.add_num_puts(args.num_puts);
+    builder.finish()
+  }
+
+
+  #[inline]
+  pub fn num_puts(&self) -> u64 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u64>(SstStats::VT_NUM_PUTS, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn num_deletes(&self) -> u64 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u64>(SstStats::VT_NUM_DELETES, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn num_merges(&self) -> u64 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u64>(SstStats::VT_NUM_MERGES, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn raw_key_size(&self) -> u64 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u64>(SstStats::VT_RAW_KEY_SIZE, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn raw_val_size(&self) -> u64 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u64>(SstStats::VT_RAW_VAL_SIZE, Some(0)).unwrap()}
+  }
+}
+
+impl flatbuffers::Verifiable for SstStats<'_> {
+  #[inline]
+  fn run_verifier(
+    v: &mut flatbuffers::Verifier, pos: usize
+  ) -> Result<(), flatbuffers::InvalidFlatbuffer> {
+    use self::flatbuffers::Verifiable;
+    v.visit_table(pos)?
+     .visit_field::<u64>("num_puts", Self::VT_NUM_PUTS, false)?
+     .visit_field::<u64>("num_deletes", Self::VT_NUM_DELETES, false)?
+     .visit_field::<u64>("num_merges", Self::VT_NUM_MERGES, false)?
+     .visit_field::<u64>("raw_key_size", Self::VT_RAW_KEY_SIZE, false)?
+     .visit_field::<u64>("raw_val_size", Self::VT_RAW_VAL_SIZE, false)?
+     .finish();
+    Ok(())
+  }
+}
+pub struct SstStatsArgs {
+    pub num_puts: u64,
+    pub num_deletes: u64,
+    pub num_merges: u64,
+    pub raw_key_size: u64,
+    pub raw_val_size: u64,
+}
+impl<'a> Default for SstStatsArgs {
+  #[inline]
+  fn default() -> Self {
+    SstStatsArgs {
+      num_puts: 0,
+      num_deletes: 0,
+      num_merges: 0,
+      raw_key_size: 0,
+      raw_val_size: 0,
+    }
+  }
+}
+
+pub struct SstStatsBuilder<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> {
+  fbb_: &'b mut flatbuffers::FlatBufferBuilder<'a, A>,
+  start_: flatbuffers::WIPOffset<flatbuffers::TableUnfinishedWIPOffset>,
+}
+impl<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> SstStatsBuilder<'a, 'b, A> {
+  #[inline]
+  pub fn add_num_puts(&mut self, num_puts: u64) {
+    self.fbb_.push_slot::<u64>(SstStats::VT_NUM_PUTS, num_puts, 0);
+  }
+  #[inline]
+  pub fn add_num_deletes(&mut self, num_deletes: u64) {
+    self.fbb_.push_slot::<u64>(SstStats::VT_NUM_DELETES, num_deletes, 0);
+  }
+  #[inline]
+  pub fn add_num_merges(&mut self, num_merges: u64) {
+    self.fbb_.push_slot::<u64>(SstStats::VT_NUM_MERGES, num_merges, 0);
+  }
+  #[inline]
+  pub fn add_raw_key_size(&mut self, raw_key_size: u64) {
+    self.fbb_.push_slot::<u64>(SstStats::VT_RAW_KEY_SIZE, raw_key_size, 0);
+  }
+  #[inline]
+  pub fn add_raw_val_size(&mut self, raw_val_size: u64) {
+    self.fbb_.push_slot::<u64>(SstStats::VT_RAW_VAL_SIZE, raw_val_size, 0);
+  }
+  #[inline]
+  pub fn new(_fbb: &'b mut flatbuffers::FlatBufferBuilder<'a, A>) -> SstStatsBuilder<'a, 'b, A> {
+    let start = _fbb.start_table();
+    SstStatsBuilder {
+      fbb_: _fbb,
+      start_: start,
+    }
+  }
+  #[inline]
+  pub fn finish(self) -> flatbuffers::WIPOffset<SstStats<'a>> {
+    let o = self.fbb_.end_table(self.start_);
+    flatbuffers::WIPOffset::new(o.value())
+  }
+}
+
+impl core::fmt::Debug for SstStats<'_> {
+  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+    let mut ds = f.debug_struct("SstStats");
+      ds.field("num_puts", &self.num_puts());
+      ds.field("num_deletes", &self.num_deletes());
+      ds.field("num_merges", &self.num_merges());
+      ds.field("raw_key_size", &self.raw_key_size());
+      ds.field("raw_val_size", &self.raw_val_size());
       ds.finish()
   }
 }

@@ -23,7 +23,8 @@ use crate::db_state::{ManifestCore, SsTableHandle};
 mod root_generated;
 pub(crate) use root_generated::{
     BlockMeta, BlockMetaArgs, ManifestV1, ManifestV1Args, SsTableIndex, SsTableIndexArgs,
-    SsTableInfo as FbSsTableInfo, SsTableInfoArgs,
+    SsTableInfo as FbSsTableInfo, SsTableInfoArgs, SstStats as FbSstStats,
+    SstStatsArgs as FbSstStatsArgs,
 };
 
 use crate::config::CompressionCodec;
@@ -137,6 +138,8 @@ impl FlatBufferSsTableInfoCodec {
             filter_len: info.filter_len(),
             compression_codec: info.compression_format().into(),
             sst_type: info.sst_type().into(),
+            stats_offset: info.stats_offset(),
+            stats_len: info.stats_len(),
         }
     }
 
@@ -445,6 +448,8 @@ impl<'b> DbFlatBufferBuilder<'b> {
                 filter_len: info.filter_len,
                 compression_format: info.compression_codec.into(),
                 sst_type: info.sst_type.into(),
+                stats_offset: info.stats_offset,
+                stats_len: info.stats_len,
             },
         )
     }

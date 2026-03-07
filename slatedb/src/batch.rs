@@ -281,12 +281,12 @@ impl WriteBatch {
         self.write_idx += 1;
     }
 
-    pub(crate) fn keys(&self) -> HashSet<Bytes> {
-        self.ops.keys().map(|key| key.user_key.clone()).collect()
+    pub fn is_empty(&self) -> bool {
+        self.ops.is_empty()
     }
 
-    pub(crate) fn is_empty(&self) -> bool {
-        self.ops.is_empty()
+    pub(crate) fn keys(&self) -> HashSet<Bytes> {
+        self.ops.keys().map(|key| key.user_key.clone()).collect()
     }
 
     /// Converts a WriteBatch into a vector of RowEntry objects with seq and timestamp set,

@@ -412,6 +412,7 @@ impl<T: RowEntryIterator> RowEntryIterator for MergeOperatorIterator<T> {
     }
 
     async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
+        self.buffered_entry = None;
         self.delegate.seek(next_key).await
     }
 }
@@ -535,6 +536,34 @@ mod tests {
             ],
         )
         .await;
+    }
+
+    #[tokio::test]
+    async fn test_seek_clears_buffered_entry() {
+        let merge_operator = Arc::new(MockMergeOperator {});
+        let data = vec![
+            RowEntry::new_merge(b"key1", b"1", 1),
+            RowEntry::new_merge(b"key1", b"2", 2),
+            RowEntry::new_value(b"key2", b"v", 3),
+        ];
+        let mut iterator = MergeOperatorIterator::<MockRowEntryIterator>::new(
+            merge_operator,
+            data.into(),
+            true,
+            0,
+            None,
+        );
+
+        iterator.init().await.unwrap();
+        let first = iterator.next().await.unwrap().unwrap();
+        assert_eq!(first.key.as_ref(), b"key1");
+        assert_eq!(first.value.as_bytes().unwrap().as_ref(), b"12");
+
+        iterator.seek(b"key3").await.unwrap();
+        assert!(
+            iterator.next().await.unwrap().is_none(),
+            "seek should not return a stale buffered entry"
+        );
     }
 
     #[derive(Debug)]

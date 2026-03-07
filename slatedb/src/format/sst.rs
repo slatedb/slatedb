@@ -9,6 +9,7 @@ use crate::flatbuffer_types::{
 use crate::format::block::{Block, BlockBuilderV1};
 use crate::format::block_v2::BlockBuilderV2;
 use crate::format::row;
+use crate::sst_stats::SstStats;
 use async_trait::async_trait;
 use bytes::{Buf, BufMut, Bytes};
 use flatbuffers::DefaultAllocator;
@@ -248,11 +249,13 @@ impl EncodedSsTableBlockBuilder {
     }
 }
 
-/// The encoded footer of an SSTable, containing filter, index, info, and metadata.
+/// The encoded footer of an SSTable, containing filter, index, stats, info, and metadata.
 pub(crate) struct EncodedSsTableFooter {
     pub(crate) info: SsTableInfo,
     pub(crate) index: SsTableIndexOwned,
     pub(crate) filter: Option<Arc<BloomFilter>>,
+    #[allow(dead_code)]
+    pub(crate) stats: Option<SstStats>,
     pub(crate) encoded_bytes: Bytes,
 }
 
@@ -276,6 +279,8 @@ pub(crate) struct EncodedSsTableFooterBuilder<'a, 'b> {
     block_meta: Vec<flatbuffers::WIPOffset<BlockMeta<'b>>>,
     /// filter block
     filter: Option<(Arc<BloomFilter>, Bytes)>,
+    /// stats block
+    stats: Option<SstStats>,
     /// SST format version
     sst_format_version: u16,
     /// type of SST (Compacted or Wal)
@@ -303,6 +308,7 @@ impl<'a, 'b> EncodedSsTableFooterBuilder<'a, 'b> {
             index_builder,
             block_meta,
             filter: None,
+            stats: None,
             sst_format_version,
             sst_type,
         }
@@ -320,13 +326,19 @@ impl<'a, 'b> EncodedSsTableFooterBuilder<'a, 'b> {
         self
     }
 
+    /// Adds stats to the footer.
+    pub(crate) fn with_stats(mut self, stats: SstStats) -> Self {
+        self.stats = Some(stats);
+        self
+    }
+
     /// Adds a bloom filter to the footer.
     pub(crate) fn with_filter(mut self, filter: Arc<BloomFilter>, encoded_filter: Bytes) -> Self {
         self.filter = Some((filter, encoded_filter));
         self
     }
 
-    /// Builds the footer with the index and optional filter.
+    /// Builds the footer with the index, optional filter and optional stats.
     pub(crate) async fn build(mut self) -> Result<EncodedSsTableFooter, SlateDBError> {
         let mut buf = Vec::new();
 
@@ -365,6 +377,23 @@ impl<'a, 'b> EncodedSsTableFooterBuilder<'a, 'b> {
         )
         .await? as u64;
 
+        // Write stats block if present
+        let maybe_stats = self.stats.take();
+        let (stats_offset, stats_len) = match &maybe_stats {
+            Some(stats) => {
+                let offset = self.blocks_size + buf.len() as u64;
+                let len = compress_and_transform(
+                    &mut buf,
+                    stats.encode(),
+                    self.compression_codec,
+                    self.block_transformer.as_ref(),
+                )
+                .await? as u64;
+                (offset, len)
+            }
+            None => (0u64, 0u64),
+        };
+
         let meta_offset = self.blocks_size + buf.len() as u64;
         let info = SsTableInfo {
             first_entry: self.first_entry,
@@ -375,6 +404,8 @@ impl<'a, 'b> EncodedSsTableFooterBuilder<'a, 'b> {
             filter_len,
             compression_codec: self.compression_codec,
             sst_type: self.sst_type,
+            stats_offset,
+            stats_len,
         };
         SsTableInfo::encode(&info, &mut buf, self.sst_info_codec);
 
@@ -385,6 +416,7 @@ impl<'a, 'b> EncodedSsTableFooterBuilder<'a, 'b> {
             info,
             index,
             filter: maybe_filter,
+            stats: maybe_stats,
             encoded_bytes: Bytes::from(buf),
         })
     }
@@ -395,6 +427,8 @@ pub(crate) struct EncodedSsTable {
     pub(crate) info: SsTableInfo,
     pub(crate) index: SsTableIndexOwned,
     pub(crate) filter: Option<Arc<BloomFilter>>,
+    #[allow(dead_code)]
+    pub(crate) stats: Option<SstStats>,
     pub(crate) unconsumed_blocks: VecDeque<EncodedSsTableBlock>,
     pub(crate) footer: Bytes,
 }
@@ -676,6 +710,45 @@ impl SsTableFormat {
         Ok(SsTableIndexOwned::new(decompressed_bytes)?)
     }
 
+    // Used by TableStore::read_stats (RFC 0020 Phase 2)
+    #[allow(dead_code)]
+    pub(crate) async fn read_stats(
+        &self,
+        info: &SsTableInfo,
+        obj: &impl ReadOnlyBlob,
+    ) -> Result<Option<SstStats>, SlateDBError> {
+        if info.stats_len == 0 {
+            return Ok(None);
+        }
+        let stats_end = info.stats_offset + info.stats_len;
+        let stats_bytes = obj.read_range(info.stats_offset..stats_end).await?;
+        let compression_codec = info.compression_codec;
+        Ok(Some(
+            self.decode_stats(stats_bytes, compression_codec).await?,
+        ))
+    }
+
+    #[allow(dead_code)]
+    async fn decode_stats(
+        &self,
+        bytes: Bytes,
+        compression_codec: Option<CompressionCodec>,
+    ) -> Result<SstStats, SlateDBError> {
+        let stats_bytes = self.validate_checksum(bytes)?;
+        let untransformed_bytes = match &self.block_transformer {
+            Some(t) => t
+                .decode(stats_bytes)
+                .await
+                .map_err(|_| SlateDBError::BlockTransformError)?,
+            None => stats_bytes,
+        };
+        let decompressed_bytes = match compression_codec {
+            Some(c) => Self::decompress(untransformed_bytes, c)?,
+            None => untransformed_bytes,
+        };
+        SstStats::decode(decompressed_bytes)
+    }
+
     /// Decompresses the compressed data using the specified compression codec.
     fn decompress(
         #[allow(unused_variables)] compressed_data: Bytes,
@@ -843,6 +916,8 @@ impl SsTableFormat {
             guess_at_average_first_key_size_bytes,
         );
         ans += self.estimate_encoded_size_filter(entry_num);
+        // estimate sum of Stats
+        ans += 5 * SIZEOF_U64 + CHECKSUM_SIZE;
         ans
     }
 

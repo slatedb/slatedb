@@ -24,6 +24,7 @@ use crate::format::sst::{EncodedSsTable, SsTableFormat};
 use crate::object_stores::{ObjectStoreType, ObjectStores};
 use crate::paths::PathResolver;
 use crate::sst_builder::EncodedSsTableBuilder;
+use crate::sst_stats::SstStats;
 use crate::types::RowEntry;
 use crate::wal::wal_sst_builder::EncodedWalSsTableBuilder;
 
@@ -378,6 +379,46 @@ impl TableStore {
             }
         }
         Ok(filter)
+    }
+
+    /// Reads the stats block of an SSTable.
+    ///
+    /// ## Arguments
+    /// - `handle`: The handle of the SSTable to read the stats from.
+    // Used by SstFile::stats (RFC 0020 Phase 2)
+    #[allow(dead_code)]
+    pub(crate) async fn read_stats(
+        &self,
+        handle: &SsTableHandle,
+        cache_blocks: bool,
+    ) -> Result<Option<SstStats>, SlateDBError> {
+        if let Some(ref cache) = self.cache {
+            if let Some(stats) = cache
+                .get_stats(&(handle.id, handle.info.stats_offset).into())
+                .await
+                .unwrap_or(None)
+                .and_then(|e| e.sst_stats())
+            {
+                return Ok(Some(stats.as_ref().clone()));
+            }
+        }
+        let object_store = self.object_stores.store_for(&handle.id);
+        let path = self.path(&handle.id);
+        let obj = ReadOnlyObject { object_store, path };
+        let stats = self.sst_format.read_stats(&handle.info, &obj).await?;
+        if cache_blocks {
+            if let Some(ref cache) = self.cache {
+                if let Some(ref stats) = stats {
+                    cache
+                        .insert(
+                            (handle.id, handle.info.stats_offset).into(),
+                            CachedEntry::with_sst_stats(Arc::new(stats.clone())),
+                        )
+                        .await;
+                }
+            }
+        }
+        Ok(stats)
     }
 
     /// Reads the index of an SSTable.

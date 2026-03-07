@@ -16,6 +16,8 @@
 //! +------------------+
 //! |   Index Block    |  <- Block metadata (offsets, first keys)
 //! +------------------+
+//! |   Stats Block    |  <- Per-SST statistics (num_puts, num_deletes, etc.)
+//! +------------------+
 //! |   SST Info       |  <- Table metadata (key range, compression, etc.)
 //! +------------------+
 //! |  Metadata offset |  <- Metadata offset (8 bytes)
@@ -64,6 +66,7 @@ use crate::format::sst::{
     EncodedSsTableFooterBuilder, SsTableFormat, SST_FORMAT_VERSION, SST_FORMAT_VERSION_LATEST,
     SST_FORMAT_VERSION_V2,
 };
+use crate::sst_stats::SstStats;
 use crate::types::RowEntry;
 use crate::utils::compute_index_key;
 use crate::BlockTransformer;
@@ -134,7 +137,7 @@ pub(crate) struct EncodedSsTableBuilder<'a> {
     block_format: BlockFormat,
     sst_format_version: u16,
     min_filter_keys: u32,
-    num_keys: u32,
+    stats: SstStats,
     filter_builder: BloomFilterBuilder,
     sst_codec: Box<dyn SsTableInfoCodec>,
     compression_codec: Option<CompressionCodec>,
@@ -162,7 +165,7 @@ impl EncodedSsTableBuilder<'_> {
             builder: BlockBuilder::new_latest(block_size),
             sst_format_version: SST_FORMAT_VERSION_LATEST,
             min_filter_keys,
-            num_keys: 0,
+            stats: SstStats::default(),
             filter_builder: BloomFilterBuilder::new(filter_bits_per_key),
             index_builder: flatbuffers::FlatBufferBuilder::new(),
             sst_codec,
@@ -199,7 +202,8 @@ impl EncodedSsTableBuilder<'_> {
     /// result in mixed block types within the SST.
     pub(crate) fn with_block_format(mut self, block_format: BlockFormat) -> Self {
         assert_eq!(
-            self.num_keys, 0,
+            self.stats.num_rows(),
+            0,
             "cannot change block format after data has been added"
         );
         self.block_format = block_format;
@@ -212,7 +216,14 @@ impl EncodedSsTableBuilder<'_> {
     /// The block size is calculated after applying any compression if enabled.
     /// The block size is None if the builder has not finished compacting a block yet.
     pub(crate) async fn add(&mut self, entry: RowEntry) -> Result<Option<usize>, SlateDBError> {
-        self.num_keys += 1;
+        // Accumulate stats
+        self.stats.raw_key_size += entry.key.len() as u64;
+        self.stats.raw_val_size += entry.value.len() as u64;
+        match &entry.value {
+            crate::types::ValueDeletable::Value(_) => self.stats.num_puts += 1,
+            crate::types::ValueDeletable::Merge(_) => self.stats.num_merges += 1,
+            crate::types::ValueDeletable::Tombstone => self.stats.num_deletes += 1,
+        }
 
         let index_key = compute_index_key(self.current_block_max_key.take(), &entry.key);
         let is_sst_first_key = self.sst_first_key.is_none();
@@ -319,6 +330,13 @@ impl EncodedSsTableBuilder<'_> {
     /// |  | 4-byte Checksum (CRC32 of index data)       |  |
     /// |  +---------------------------------------------+  |
     /// +---------------------------------------------------+
+    /// |                Stats Block                        |
+    /// |  +---------------------------------------------+  |
+    /// |  | Stats Data (compressed encoded stats)       |  |
+    /// |  +---------------------------------------------+  |
+    /// |  | 4-byte Checksum (CRC32 of stats data)       |  |
+    /// |  +---------------------------------------------+  |
+    /// +---------------------------------------------------+
     /// |                Metadata Block                     |
     /// |    (SsTableInfo encoded with FlatBuffers)         |
     /// +---------------------------------------------------+
@@ -348,13 +366,13 @@ impl EncodedSsTableBuilder<'_> {
         if let Some(transformer) = self.block_transformer.clone() {
             footer_builder = footer_builder.with_block_transformer(transformer);
         }
-
         // Add filter if enough keys
-        if self.num_keys >= self.min_filter_keys {
+        if self.stats.num_rows() >= self.min_filter_keys as u64 {
             let filter = Arc::new(self.filter_builder.build());
             let encoded_filter = filter.encode();
             footer_builder = footer_builder.with_filter(filter, encoded_filter);
         }
+        footer_builder = footer_builder.with_stats(self.stats);
 
         let footer = footer_builder.build().await?;
 
@@ -363,6 +381,7 @@ impl EncodedSsTableBuilder<'_> {
             info: footer.info,
             index: footer.index,
             filter: footer.filter,
+            stats: footer.stats,
             unconsumed_blocks: self.blocks,
             footer: footer.encoded_bytes,
         })
@@ -1394,5 +1413,194 @@ mod tests {
 
         // then: all data should be readable
         assert_iterator(&mut iter, expected).await;
+    }
+
+    #[tokio::test]
+    async fn test_stats_block_with_mixed_entry_types() {
+        use crate::types::ValueDeletable;
+
+        let root_path = Path::from("");
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let format = SsTableFormat::default();
+        let table_store = TableStore::new(
+            ObjectStores::new(object_store, None),
+            format,
+            root_path,
+            None,
+        );
+        let mut builder = table_store.table_builder();
+
+        // Add a put
+        builder
+            .add(RowEntry::new(
+                Bytes::from_static(b"key1"),
+                ValueDeletable::Value(Bytes::from_static(b"val1")),
+                0,
+                None,
+                None,
+            ))
+            .await
+            .unwrap();
+        // Add a delete
+        builder
+            .add(RowEntry::new(
+                Bytes::from_static(b"key2"),
+                ValueDeletable::Tombstone,
+                0,
+                None,
+                None,
+            ))
+            .await
+            .unwrap();
+        // Add a merge
+        builder
+            .add(RowEntry::new(
+                Bytes::from_static(b"key3"),
+                ValueDeletable::Merge(Bytes::from_static(b"merge_val")),
+                0,
+                None,
+                None,
+            ))
+            .await
+            .unwrap();
+        // Add another put
+        builder
+            .add(RowEntry::new(
+                Bytes::from_static(b"key4"),
+                ValueDeletable::Value(Bytes::from_static(b"val4")),
+                0,
+                None,
+                None,
+            ))
+            .await
+            .unwrap();
+
+        let encoded = builder.build().await.unwrap();
+        let sst_handle = table_store
+            .write_sst(&SsTableId::Wal(0), encoded, false)
+            .await
+            .unwrap();
+        let stats = table_store
+            .read_stats(&sst_handle, true)
+            .await
+            .unwrap()
+            .expect("stats should be present");
+
+        assert_eq!(stats.num_puts, 2);
+        assert_eq!(stats.num_deletes, 1);
+        assert_eq!(stats.num_merges, 1);
+        assert_eq!(
+            stats.raw_key_size,
+            (b"key1".len() + b"key2".len() + b"key3".len() + b"key4".len()) as u64
+        );
+        // Tombstone has 0 value size
+        assert_eq!(
+            stats.raw_val_size,
+            (b"val1".len() + b"merge_val".len() + b"val4".len()) as u64
+        );
+    }
+
+    #[tokio::test]
+    async fn test_stats_block_backward_compat() {
+        // Old SSTs without stats block should return None
+        let info = crate::db_state::SsTableInfo {
+            stats_offset: 0,
+            stats_len: 0,
+            ..Default::default()
+        };
+        let format = SsTableFormat::default();
+        let bytes = Bytes::from(vec![0u8; 100]);
+        let blob = BytesBlob { bytes };
+        let stats = format.read_stats(&info, &blob).await.unwrap();
+        assert!(stats.is_none());
+    }
+
+    #[rstest]
+    #[case::none(None)]
+    #[cfg_attr(feature = "snappy", case::snappy(Some(CompressionCodec::Snappy)))]
+    #[cfg_attr(feature = "zlib", case::zlib(Some(CompressionCodec::Zlib)))]
+    #[cfg_attr(feature = "lz4", case::lz4(Some(CompressionCodec::Lz4)))]
+    #[cfg_attr(feature = "zstd", case::zstd(Some(CompressionCodec::Zstd)))]
+    #[tokio::test]
+    async fn test_stats_block_with_compression(#[case] compression: Option<CompressionCodec>) {
+        let root_path = Path::from("");
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let format = SsTableFormat {
+            compression_codec: compression,
+            ..SsTableFormat::default()
+        };
+        let table_store = TableStore::new(
+            ObjectStores::new(object_store, None),
+            format,
+            root_path,
+            None,
+        );
+        let mut builder = table_store.table_builder();
+        builder
+            .add_value(b"key1", b"value1", gen_attrs(1))
+            .await
+            .unwrap();
+        builder
+            .add_value(b"key2", b"value2", gen_attrs(2))
+            .await
+            .unwrap();
+        let encoded = builder.build().await.unwrap();
+        let sst_handle = table_store
+            .write_sst(&SsTableId::Wal(0), encoded, false)
+            .await
+            .unwrap();
+        let stats = table_store
+            .read_stats(&sst_handle, true)
+            .await
+            .unwrap()
+            .expect("stats should be present");
+
+        assert_eq!(stats.num_puts, 2);
+        assert_eq!(stats.num_deletes, 0);
+        assert_eq!(stats.num_merges, 0);
+        assert_eq!(stats.raw_key_size, 8);
+        assert_eq!(stats.raw_val_size, 12);
+    }
+
+    #[tokio::test]
+    async fn test_stats_block_with_block_transformer() {
+        let root_path = Path::from("");
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let transformer = Arc::new(XorTransformer { key: 0x42 });
+        let format = SsTableFormat {
+            block_transformer: Some(transformer),
+            ..SsTableFormat::default()
+        };
+        let table_store = TableStore::new(
+            ObjectStores::new(object_store, None),
+            format,
+            root_path,
+            None,
+        );
+        let mut builder = table_store.table_builder();
+        builder
+            .add_value(b"key1", b"value1", gen_attrs(1))
+            .await
+            .unwrap();
+        builder
+            .add_value(b"key2", b"value2", gen_attrs(2))
+            .await
+            .unwrap();
+        let encoded = builder.build().await.unwrap();
+        let sst_handle = table_store
+            .write_sst(&SsTableId::Wal(0), encoded, false)
+            .await
+            .unwrap();
+        let stats = table_store
+            .read_stats(&sst_handle, true)
+            .await
+            .unwrap()
+            .expect("stats should be present");
+
+        assert_eq!(stats.num_puts, 2);
+        assert_eq!(stats.num_deletes, 0);
+        assert_eq!(stats.num_merges, 0);
+        assert_eq!(stats.raw_key_size, 8);
+        assert_eq!(stats.raw_val_size, 12);
     }
 }
