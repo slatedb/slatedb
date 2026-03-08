@@ -127,8 +127,6 @@ impl CachedObjectStore {
         }
 
         // Second pass: load the selected files in bounded parallelism and cache them.
-        // We only need to call maybe_prefetch_range to download and save SSTs to disk.
-        // There's no need to read the data back into memory via result.bytes().
         let degree_of_parallelism = 32;
         let _result = build_concurrent(files_to_load.into_iter(), degree_of_parallelism, |path| {
             let this = self.clone();
