@@ -679,7 +679,7 @@ struct slatedb_result_t slatedb_db_get_key_value_with_options(struct slatedb_db_
                                                               const uint8_t *key,
                                                               uintptr_t key_len,
                                                               const struct slatedb_read_options_t *read_options,
-                                                              bool *out_present,
+                                                              bool *out_kv_present,
                                                               struct slatedb_key_value_t **out_kv);
 
 // Writes a key/value pair using default put/write options.

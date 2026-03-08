@@ -346,15 +346,20 @@ pub unsafe extern "C" fn slatedb_db_get_key_value_with_options(
     key: *const u8,
     key_len: usize,
     read_options: *const slatedb_read_options_t,
-    out_present: *mut bool,
+    out_kv_present: *mut bool,
     out_kv: *mut *mut slatedb_key_value_t,
 ) -> slatedb_result_t {
-    if db.is_null() {
-        return error_result(slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID, "db");
+    if let Err(err) = require_handle(db, "db") {
+        return err;
     }
-    if key.is_null() {
-        return error_result(slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID, "key");
+    if let Err(err) = require_out_ptr(out_kv_present, "out_present") {
+        return err;
     }
+    if let Err(err) = require_out_ptr(out_kv, "out_kv") {
+        return err;
+    }
+    *out_kv_present = false;
+    *out_kv = std::ptr::null_mut();
 
     let key = match bytes_from_ptr(key, key_len, "key") {
         Ok(key) => key,
@@ -386,12 +391,13 @@ pub unsafe extern "C" fn slatedb_db_get_key_value_with_options(
                 expire_ts: kv.expire_ts.unwrap_or(0),
             });
 
+            *out_kv_present = true;
             *out_kv = Box::into_raw(c_kv);
-            *out_present = true;
             success_result()
         }
         Ok(None) => {
-            *out_present = false;
+            *out_kv_present = false;
+            *out_kv = std::ptr::null_mut();
             success_result()
         }
         Err(err) => error_from_slate_error(&err),
