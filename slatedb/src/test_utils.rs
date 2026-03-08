@@ -7,7 +7,7 @@ use crate::error::SlateDBError;
 use crate::format::row::SstRowCodecV0;
 use crate::iter::{IterationOrder, RowEntryIterator};
 use crate::tablestore::TableStore;
-use crate::types::{KeyValue, RowAttributes, RowEntry, ValueDeletable};
+use crate::types::{KeyValue, RowEntry, ValueDeletable};
 use async_trait::async_trait;
 use bytes::{BufMut, Bytes, BytesMut};
 use futures::stream::BoxStream;
@@ -65,20 +65,6 @@ pub(crate) async fn assert_next<T: RowEntryIterator>(iterator: &mut T, expected_
 pub(crate) fn assert_kv(kv: &KeyValue, key: &[u8], val: &[u8]) {
     assert_eq!(kv.key, key);
     assert_eq!(kv.value, val);
-}
-
-pub(crate) fn gen_attrs(ts: i64) -> RowAttributes {
-    RowAttributes {
-        ts: Some(ts),
-        expire_ts: None,
-    }
-}
-
-pub(crate) fn gen_empty_attrs() -> RowAttributes {
-    RowAttributes {
-        ts: None,
-        expire_ts: None,
-    }
 }
 
 pub(crate) struct TestIterator {

@@ -214,6 +214,7 @@ fn slatedb(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyWriteBatch>()?;
     m.add_class::<PyDbIterator>()?;
     m.add_class::<PyWriteHandle>()?;
+    m.add_class::<PyKeyValue>()?;
     // Export exception types
     m.add("TransactionError", py.get_type::<TransactionError>())?;
     m.add("ClosedError", py.get_type::<ClosedError>())?;
@@ -371,6 +372,33 @@ fn build_merge_options(ttl: Option<u64>) -> MergeOptions {
 fn build_write_options(await_durable: Option<bool>) -> WriteOptions {
     WriteOptions {
         await_durable: await_durable.unwrap_or(true),
+    }
+}
+
+#[pyclass(name = "KeyValue")]
+#[derive(Clone)]
+struct PyKeyValue {
+    #[pyo3(get)]
+    key: Vec<u8>,
+    #[pyo3(get)]
+    value: Vec<u8>,
+    #[pyo3(get)]
+    seq: u64,
+    #[pyo3(get)]
+    create_ts: i64,
+    #[pyo3(get)]
+    expire_ts: Option<i64>,
+}
+
+impl From<::slatedb::KeyValue> for PyKeyValue {
+    fn from(kv: ::slatedb::KeyValue) -> Self {
+        PyKeyValue {
+            key: kv.key.to_vec(),
+            value: kv.value.to_vec(),
+            seq: kv.seq,
+            create_ts: kv.create_ts,
+            expire_ts: kv.expire_ts,
+        }
     }
 }
 
@@ -568,6 +596,48 @@ impl PySlateDB {
             })
         })?;
         Ok(res.map(|b| PyBytes::new(py, &b)))
+    }
+
+    #[pyo3(signature = (key))]
+    fn get_key_value<'py>(
+        &self,
+        py: Python<'py>,
+        key: Vec<u8>,
+    ) -> PyResult<Option<Bound<'py, PyKeyValue>>> {
+        if key.is_empty() {
+            return Err(InvalidError::new_err("key cannot be empty"));
+        }
+        let db = self.inner.clone();
+        let rt = get_runtime();
+        let res: Option<::slatedb::KeyValue> = py.allow_threads(|| {
+            rt.block_on(async { db.get_key_value(&key).await.map_err(map_error) })
+        })?;
+        Ok(res.map(|kv| Bound::new(py, PyKeyValue::from(kv)).unwrap()))
+    }
+
+    #[pyo3(signature = (key, *, durability_filter = None, dirty = None, cache_blocks = None))]
+    fn get_key_value_with_options<'py>(
+        &self,
+        py: Python<'py>,
+        key: Vec<u8>,
+        durability_filter: Option<String>,
+        dirty: Option<bool>,
+        cache_blocks: Option<bool>,
+    ) -> PyResult<Option<Bound<'py, PyKeyValue>>> {
+        if key.is_empty() {
+            return Err(InvalidError::new_err("key cannot be empty"));
+        }
+        let db = self.inner.clone();
+        let opts = build_read_options(durability_filter, dirty, cache_blocks)?;
+        let rt = get_runtime();
+        let res: Option<::slatedb::KeyValue> = py.allow_threads(|| {
+            rt.block_on(async {
+                db.get_key_value_with_options(&key, &opts)
+                    .await
+                    .map_err(map_error)
+            })
+        })?;
+        Ok(res.map(|kv| Bound::new(py, PyKeyValue::from(kv)).unwrap()))
     }
 
     #[pyo3(signature = (key, *, durability_filter = None, dirty = None, cache_blocks = None))]

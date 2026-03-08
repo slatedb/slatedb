@@ -19,10 +19,13 @@ type DB struct {
 	handle *C.slatedb_db_t
 }
 
-// KeyValue represents a key-value pair from scan operations.
+// KeyValue represents a key-value pair with metadata.
 type KeyValue struct {
-	Key   []byte
-	Value []byte
+	Key      []byte
+	Value    []byte
+	Seq      uint64
+	CreateTs int64
+	ExpireTs *int64
 }
 
 // ScanResult represents the result of a scan operation.
@@ -341,6 +344,65 @@ func (db *DB) GetWithOptions(key []byte, readOpts *ReadOptions) ([]byte, error) 
 		return nil, nil
 	}
 	return copyBytesAndFree(value, valueLen), nil
+}
+
+// GetKeyValue retrieves a value and metadata by key with default read options.
+//
+// Returns `nil, nil` if the key does not exist.
+func (db *DB) GetKeyValue(key []byte) (*KeyValue, error) {
+	return db.GetKeyValueWithOptions(key, nil)
+}
+
+// GetKeyValueWithOptions retrieves a value and metadata by key with explicit read options.
+//
+// Pass nil options to use defaults.
+// Returns `nil, nil` if the key does not exist.
+func (db *DB) GetKeyValueWithOptions(key []byte, readOpts *ReadOptions) (*KeyValue, error) {
+	if db == nil || db.handle == nil {
+		return nil, ErrInvalid
+	}
+	if len(key) == 0 {
+		return nil, ErrInvalid
+	}
+
+	keyPtr, keyLen := ptrFromBytes(key)
+	cReadOpts := convertToCReadOptions(readOpts)
+
+	var present C.bool
+	var kvPtr *C.slatedb_key_value_t
+
+	result := C.slatedb_db_get_key_value_with_options(
+		db.handle,
+		keyPtr,
+		keyLen,
+		cReadOpts,
+		&present,
+		&kvPtr,
+	)
+	if err := resultToErrorAndFree(result); err != nil {
+		return nil, err
+	}
+
+	if present == C.bool(false) {
+		return nil, nil
+	}
+	defer C.slatedb_key_value_free(kvPtr)
+
+	var expireTs *int64
+	if kvPtr.expire_ts_present != C.bool(false) {
+		ts := int64(kvPtr.expire_ts)
+		expireTs = &ts
+	}
+
+	kv := &KeyValue{
+		Key:      C.GoBytes(unsafe.Pointer(kvPtr.key), C.int(kvPtr.key_len)),
+		Value:    C.GoBytes(unsafe.Pointer(kvPtr.value), C.int(kvPtr.value_len)),
+		Seq:      uint64(kvPtr.seq),
+		CreateTs: int64(kvPtr.create_ts),
+		ExpireTs: expireTs,
+	}
+
+	return kv, nil
 }
 
 // Write executes a WriteBatch atomically with default write options.

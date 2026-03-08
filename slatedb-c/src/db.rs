@@ -8,10 +8,11 @@ use crate::ffi::{
     error_from_slate_error, error_result, flush_options_from_ptr, merge_options_from_ptr,
     put_options_from_ptr, read_options_from_ptr, require_handle, require_out_ptr,
     scan_options_from_ptr, slatedb_db_t, slatedb_error_kind_t, slatedb_flush_options_t,
-    slatedb_iterator_t, slatedb_merge_options_t, slatedb_object_store_t, slatedb_put_options_t,
-    slatedb_range_t, slatedb_read_options_t, slatedb_result_t, slatedb_scan_options_t,
-    slatedb_write_batch_t, slatedb_write_handle_t, slatedb_write_options_t, success_result,
-    take_write_batch, validate_write_key, validate_write_key_value, write_options_from_ptr,
+    slatedb_iterator_t, slatedb_key_value_t, slatedb_merge_options_t, slatedb_object_store_t,
+    slatedb_put_options_t, slatedb_range_t, slatedb_read_options_t, slatedb_result_t,
+    slatedb_scan_options_t, slatedb_write_batch_t, slatedb_write_handle_t, slatedb_write_options_t,
+    success_result, take_write_batch, validate_write_key, validate_write_key_value,
+    write_options_from_ptr,
 };
 use serde_json::{Map, Value};
 use slatedb::Db;
@@ -327,6 +328,76 @@ pub unsafe extern "C" fn slatedb_db_get_with_options(
         }
         Ok(None) => {
             *out_present = false;
+            success_result()
+        }
+        Err(err) => error_from_slate_error(&err),
+    }
+}
+
+/// ## Safety
+/// - `db` must be a valid database handle.
+/// - `key` must point to at least `key_len` bytes of valid memory.
+/// - `read_options` must be a valid pointer to `slatedb_read_options_t` or NULL.
+/// - `out_present` must be a valid pointer to a `bool`.
+/// - `out_kv` must be a valid pointer to a `*mut slatedb_key_value_t`.
+#[no_mangle]
+pub unsafe extern "C" fn slatedb_db_get_key_value_with_options(
+    db: *mut slatedb_db_t,
+    key: *const u8,
+    key_len: usize,
+    read_options: *const slatedb_read_options_t,
+    out_kv_present: *mut bool,
+    out_kv: *mut *mut slatedb_key_value_t,
+) -> slatedb_result_t {
+    if let Err(err) = require_handle(db, "db") {
+        return err;
+    }
+    if let Err(err) = require_out_ptr(out_kv_present, "out_present") {
+        return err;
+    }
+    if let Err(err) = require_out_ptr(out_kv, "out_kv") {
+        return err;
+    }
+    *out_kv_present = false;
+    *out_kv = std::ptr::null_mut();
+
+    let key = match bytes_from_ptr(key, key_len, "key") {
+        Ok(key) => key,
+        Err(err) => return err,
+    };
+
+    let read_options = match read_options_from_ptr(read_options) {
+        Ok(options) => options,
+        Err(err) => return err,
+    };
+
+    let handle = &mut *db;
+    match handle
+        .runtime
+        .block_on(handle.db.get_key_value_with_options(key, &read_options))
+    {
+        Ok(Some(kv)) => {
+            let (key, key_len) = alloc_bytes(kv.key.as_ref());
+            let (val, val_len) = alloc_bytes(kv.value.as_ref());
+
+            let c_kv = Box::new(slatedb_key_value_t {
+                key,
+                key_len,
+                value: val,
+                value_len: val_len,
+                seq: kv.seq,
+                create_ts: kv.create_ts,
+                expire_ts_present: kv.expire_ts.is_some(),
+                expire_ts: kv.expire_ts.unwrap_or(0),
+            });
+
+            *out_kv_present = true;
+            *out_kv = Box::into_raw(c_kv);
+            success_result()
+        }
+        Ok(None) => {
+            *out_kv_present = false;
+            *out_kv = std::ptr::null_mut();
             success_result()
         }
         Err(err) => error_from_slate_error(&err),

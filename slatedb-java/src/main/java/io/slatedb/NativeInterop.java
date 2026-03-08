@@ -888,6 +888,63 @@ final class NativeInterop {
         return new SlateDbWriteHandle(new WriteHandleHandle(seq, createTs));
     }
 
+    private static KeyValue readKeyValue(MemorySegment kvPtr) {
+        MemorySegment kv = kvPtr.reinterpret(slatedb_key_value_t.layout().byteSize());
+        MemorySegment keyPtr = slatedb_key_value_t.key(kv);
+        long keyLen = slatedb_key_value_t.key_len(kv);
+        MemorySegment valuePtr = slatedb_key_value_t.value(kv);
+        long valueLen = slatedb_key_value_t.value_len(kv);
+        long seq = slatedb_key_value_t.seq(kv);
+        long createTs = slatedb_key_value_t.create_ts(kv);
+        long expireTs = slatedb_key_value_t.expire_ts(kv);
+        boolean expireTsPresent = slatedb_key_value_t.expire_ts_present(kv);
+
+        byte[] key = new byte[(int) keyLen];
+        MemorySegment.copy(keyPtr, 0, MemorySegment.ofArray(key), 0, keyLen);
+        byte[] value = new byte[(int) valueLen];
+        MemorySegment.copy(valuePtr, 0, MemorySegment.ofArray(value), 0, valueLen);
+
+        return new KeyValue(key, value, seq, createTs, expireTsPresent ? expireTs : null);
+    }
+
+    static KeyValue slatedb_db_get_key_value(DbHandle db, byte[] key) {
+        return slatedb_db_get_key_value_with_options(db, key, null);
+    }
+
+    static KeyValue slatedb_db_get_key_value_with_options(DbHandle db, byte[] key, ReadOptions readOptions) {
+        Objects.requireNonNull(db, "db");
+        Objects.requireNonNull(key, "key");
+
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment outPresent = arena.allocate(Native.C_BOOL);
+            MemorySegment outKv = arena.allocate(Native.C_POINTER);
+
+            checkResult(
+                    Native.slatedb_db_get_key_value_with_options(
+                            arena,
+                            db.segment(),
+                            marshalBytes(arena, key),
+                            key.length,
+                            marshalReadOptions(arena, readOptions),
+                            outPresent,
+                            outKv
+                    )
+            );
+
+            boolean present = outPresent.get(Native.C_BOOL, 0);
+            if (!present) {
+                return null;
+            }
+
+            MemorySegment kvPtr = outKv.get(Native.C_POINTER, 0);
+            try {
+                return readKeyValue(kvPtr);
+            } finally {
+                Native.slatedb_key_value_free(kvPtr);
+            }
+        }
+    }
+
     static void slatedb_db_flush(DbHandle db) {
         Objects.requireNonNull(db, "db");
         try (Arena arena = Arena.ofConfined()) {
@@ -1032,20 +1089,14 @@ final class NativeInterop {
 
         try (Arena arena = Arena.ofConfined()) {
             MemorySegment outPresent = arena.allocate(Native.C_BOOL);
-            MemorySegment outKey = arena.allocate(Native.C_POINTER);
-            MemorySegment outKeyLen = arena.allocate(Native.C_LONG);
-            MemorySegment outVal = arena.allocate(Native.C_POINTER);
-            MemorySegment outValLen = arena.allocate(Native.C_LONG);
+            MemorySegment outKv = arena.allocate(Native.C_POINTER);
 
             checkResult(
                 Native.slatedb_iterator_next(
                     arena,
                     iterator.segment(),
                     outPresent,
-                    outKey,
-                    outKeyLen,
-                    outVal,
-                    outValLen
+                    outKv
                 )
             );
 
@@ -1054,9 +1105,22 @@ final class NativeInterop {
                 return new IteratorNextResult(false, null, null);
             }
 
-            byte[] key = takeOwnedBytes(outKey, outKeyLen);
-            byte[] value = takeOwnedBytes(outVal, outValLen);
-            return new IteratorNextResult(true, key, value);
+            MemorySegment kvPtr = outKv.get(Native.C_POINTER, 0);
+            try {
+                MemorySegment kv = kvPtr.reinterpret(slatedb_key_value_t.layout().byteSize());
+                MemorySegment keyPtr = slatedb_key_value_t.key(kv);
+                long keyLen = slatedb_key_value_t.key_len(kv);
+                MemorySegment valPtr = slatedb_key_value_t.value(kv);
+                long valLen = slatedb_key_value_t.value_len(kv);
+
+                byte[] key = new byte[(int) keyLen];
+                MemorySegment.copy(keyPtr, 0, MemorySegment.ofArray(key), 0, keyLen);
+                byte[] value = new byte[(int) valLen];
+                MemorySegment.copy(valPtr, 0, MemorySegment.ofArray(value), 0, valLen);
+                return new IteratorNextResult(true, key, value);
+            } finally {
+                Native.slatedb_key_value_free(kvPtr);
+            }
         }
     }
 

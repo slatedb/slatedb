@@ -205,6 +205,32 @@ typedef struct slatedb_read_options_t {
     bool cache_blocks;
 } slatedb_read_options_t;
 
+// C representation of a key-value pair returned by iterators and point lookups.
+//
+// Unlike `slatedb_row_entry_t`, this type does not carry tombstone or merge
+// information — the value is always a regular (resolved) value.
+//
+// `key` and `value` reference Rust-allocated buffers that must be freed by
+// calling `slatedb_key_value_free`.
+typedef struct slatedb_key_value_t {
+    // Key bytes.
+    uint8_t *key;
+    // Length of `key` in bytes.
+    uintptr_t key_len;
+    // Value bytes.
+    uint8_t *value;
+    // Length of `value` in bytes.
+    uintptr_t value_len;
+    // Sequence number assigned to this entry.
+    uint64_t seq;
+    // Creation timestamp in milliseconds since epoch, or 0 if not set.
+    int64_t create_ts;
+    // Whether `expire_ts` is populated.
+    bool expire_ts_present;
+    // Expiration timestamp in milliseconds since epoch (valid when `expire_ts_present` is true).
+    int64_t expire_ts;
+} slatedb_key_value_t;
+
 // Put options passed to put operations.
 typedef struct slatedb_put_options_t {
     // TTL type. Use `SLATEDB_TTL_TYPE_*` constants.
@@ -642,6 +668,19 @@ struct slatedb_result_t slatedb_db_get_with_options(struct slatedb_db_t *db,
                                                     bool *out_present,
                                                     uint8_t **out_val,
                                                     uintptr_t *out_val_len);
+
+// ## Safety
+// - `db` must be a valid database handle.
+// - `key` must point to at least `key_len` bytes of valid memory.
+// - `read_options` must be a valid pointer to `slatedb_read_options_t` or NULL.
+// - `out_present` must be a valid pointer to a `bool`.
+// - `out_kv` must be a valid pointer to a `*mut slatedb_key_value_t`.
+struct slatedb_result_t slatedb_db_get_key_value_with_options(struct slatedb_db_t *db,
+                                                              const uint8_t *key,
+                                                              uintptr_t key_len,
+                                                              const struct slatedb_read_options_t *read_options,
+                                                              bool *out_kv_present,
+                                                              struct slatedb_key_value_t **out_kv);
 
 // Writes a key/value pair using default put/write options.
 //
@@ -1171,15 +1210,16 @@ struct slatedb_result_t slatedb_db_reader_scan_prefix_with_options(struct slated
 // - `reader` must be a valid non-null handle obtained from this library.
 struct slatedb_result_t slatedb_db_reader_close(struct slatedb_db_reader_t *reader);
 
-// Retrieves the next key/value pair from an iterator.
+// Retrieves the next key-value pair from an iterator.
+//
+// Returns a `slatedb_key_value_t` containing key, value, sequence number,
+// and optional timestamps. The returned struct must be freed with
+// `slatedb_key_value_free`.
 //
 // ## Arguments
 // - `iterator`: Iterator handle created by scan APIs.
-// - `out_present`: Set to `true` when a row is returned.
-// - `out_key`: Output key buffer pointer (allocated by Rust).
-// - `out_key_len`: Output key length.
-// - `out_val`: Output value buffer pointer (allocated by Rust).
-// - `out_val_len`: Output value length.
+// - `out_present`: Set to `true` when a key-value pair is returned.
+// - `out_kv`: Output pointer to the allocated `slatedb_key_value_t`.
 //
 // ## Returns
 // - `slatedb_result_t` with `kind == SLATEDB_ERROR_KIND_NONE` on success.
@@ -1190,14 +1230,17 @@ struct slatedb_result_t slatedb_db_reader_close(struct slatedb_db_reader_t *read
 //
 // ## Safety
 // - All output pointers must be valid, non-null writable pointers.
-// - Buffers returned in `out_key`/`out_val` must be freed with
-//   `slatedb_bytes_free`.
+// - The struct returned in `out_kv` must be freed with `slatedb_key_value_free`.
 struct slatedb_result_t slatedb_iterator_next(struct slatedb_iterator_t *iterator,
                                               bool *out_present,
-                                              uint8_t **out_key,
-                                              uintptr_t *out_key_len,
-                                              uint8_t **out_val,
-                                              uintptr_t *out_val_len);
+                                              struct slatedb_key_value_t **out_kv);
+
+// Frees a `slatedb_key_value_t` and its `key` / `value` buffers.
+//
+// ## Safety
+// - `kv` must be a valid pointer returned by `slatedb_iterator_next`
+//   or `slatedb_db_get_key_value_with_options`, or null (no-op).
+void slatedb_key_value_free(struct slatedb_key_value_t *kv);
 
 // Retrieves up to `max_count` key/value pairs (or up to `max_bytes` of packed
 // data) from an iterator in a single call — whichever limit is reached first.

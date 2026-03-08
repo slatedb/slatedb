@@ -1110,7 +1110,7 @@ mod tests {
     use crate::object_stores::ObjectStores;
     use crate::sst_builder::BlockFormat;
     use crate::stats::{ReadableStat, StatRegistry};
-    use crate::test_utils::{assert_kv, gen_attrs};
+    use crate::test_utils::assert_kv;
     use crate::types::{KeyValue, ValueDeletable};
     use object_store::path::Path;
     use object_store::{memory::InMemory, ObjectStore};
@@ -1137,19 +1137,19 @@ mod tests {
         ));
         let mut builder = table_store.table_builder();
         builder
-            .add_value(b"key1", b"value1", gen_attrs(1))
+            .add_value(b"key1", b"value1", Some(1), None)
             .await
             .unwrap();
         builder
-            .add_value(b"key2", b"value2", gen_attrs(2))
+            .add_value(b"key2", b"value2", Some(2), None)
             .await
             .unwrap();
         builder
-            .add_value(b"key3", b"value3", gen_attrs(3))
+            .add_value(b"key3", b"value3", Some(3), None)
             .await
             .unwrap();
         builder
-            .add_value(b"key4", b"value4", gen_attrs(4))
+            .add_value(b"key4", b"value4", Some(4), None)
             .await
             .unwrap();
         let encoded = builder.build().await.unwrap();
@@ -1317,11 +1317,11 @@ mod tests {
         );
         let mut builder = writer.table_builder();
         builder
-            .add_value(b"key1", b"value1", gen_attrs(1))
+            .add_value(b"key1", b"value1", Some(1), None)
             .await
             .unwrap();
         builder
-            .add_value(b"key2", b"value2", gen_attrs(2))
+            .add_value(b"key2", b"value2", Some(2), None)
             .await
             .unwrap();
         let handle = writer
@@ -1415,7 +1415,7 @@ mod tests {
         for key in keys {
             let value = format!("v_{}", String::from_utf8_lossy(key));
             builder
-                .add_value(key, value.as_bytes(), gen_attrs(0))
+                .add_value(key, value.as_bytes(), Some(0), None)
                 .await
                 .unwrap();
         }
@@ -1450,7 +1450,8 @@ mod tests {
                 .add_value(
                     format!("key{}", i).as_bytes(),
                     format!("value{}", i).as_bytes(),
-                    gen_attrs(i),
+                    Some(i),
+                    None,
                 )
                 .await
                 .unwrap();
@@ -1667,7 +1668,8 @@ mod tests {
                 .add_value(
                     format!("key{:03}", i).as_bytes(),
                     format!("value{:03}", i).as_bytes(),
-                    gen_attrs(i),
+                    Some(i),
+                    None,
                 )
                 .await
                 .unwrap();
@@ -1834,19 +1836,19 @@ mod tests {
 
         let mut builder = table_store.table_builder();
         builder
-            .add_value(b"key1", b"value1", gen_attrs(1))
+            .add_value(b"key1", b"value1", Some(1), None)
             .await
             .unwrap();
         builder
-            .add_value(b"key2", b"value2", gen_attrs(2))
+            .add_value(b"key2", b"value2", Some(2), None)
             .await
             .unwrap();
         builder
-            .add_value(b"key3", b"value3", gen_attrs(3))
+            .add_value(b"key3", b"value3", Some(3), None)
             .await
             .unwrap();
         builder
-            .add_value(b"key4", b"value4", gen_attrs(4))
+            .add_value(b"key4", b"value4", Some(4), None)
             .await
             .unwrap();
         let encoded = builder.build().await.unwrap();
@@ -1926,7 +1928,7 @@ mod tests {
             .table_builder()
             .with_block_format(BlockFormat::V2);
         for (key, value) in keys_and_values {
-            builder.add_value(key, value, gen_attrs(0)).await.unwrap();
+            builder.add_value(key, value, Some(0), None).await.unwrap();
         }
         let encoded = builder.build().await.unwrap();
         let id = SsTableId::Compacted(ulid::Ulid::new());
@@ -2057,7 +2059,7 @@ mod tests {
             let key = format!("prefix_{:04}", i);
             let value = format!("value_{:04}", i);
             builder
-                .add_value(key.as_bytes(), value.as_bytes(), gen_attrs(i))
+                .add_value(key.as_bytes(), value.as_bytes(), Some(i), None)
                 .await
                 .unwrap();
         }
@@ -2119,7 +2121,7 @@ mod tests {
             let key = format!("key_{:04}", i);
             let value = format!("value_{:04}", i);
             builder
-                .add_value(key.as_bytes(), value.as_bytes(), gen_attrs(i))
+                .add_value(key.as_bytes(), value.as_bytes(), Some(i), None)
                 .await
                 .unwrap();
         }
@@ -2185,7 +2187,7 @@ mod tests {
             let key = format!("key_{:04}", i);
             let value = format!("value_{:04}", i);
             builder
-                .add_value(key.as_bytes(), value.as_bytes(), gen_attrs(i))
+                .add_value(key.as_bytes(), value.as_bytes(), Some(i), None)
                 .await
                 .unwrap();
         }
@@ -2236,7 +2238,7 @@ mod tests {
             let key = format!("key_{:04}", i);
             let value = format!("value_{:04}", i);
             builder
-                .add_value(key.as_bytes(), value.as_bytes(), gen_attrs(i))
+                .add_value(key.as_bytes(), value.as_bytes(), Some(i), None)
                 .await
                 .unwrap();
         }
@@ -2294,7 +2296,8 @@ mod tests {
                 .add_value(
                     format!("key{:03}", i).as_bytes(),
                     format!("value{:03}", i).as_bytes(),
-                    gen_attrs(i),
+                    Some(i),
+                    None,
                 )
                 .await
                 .unwrap();
@@ -2427,7 +2430,8 @@ mod tests {
                 .add_value(
                     format!("key{:03}", i).as_bytes(),
                     format!("value{:03}", i).as_bytes(),
-                    gen_attrs(i),
+                    Some(i),
+                    None,
                 )
                 .await
                 .unwrap();

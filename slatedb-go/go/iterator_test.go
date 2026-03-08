@@ -84,6 +84,32 @@ var _ = Describe("Iterator", func() {
 			Expect(count).To(Equal(4))
 		})
 
+		It("should iterate through all items with metadata", func() {
+			count := 0
+			var lastKey []byte
+
+			for {
+				kv, err := iter.Next()
+				if err == io.EOF {
+					break
+				}
+				Expect(err).NotTo(HaveOccurred())
+				Expect(len(kv.Key)).To(BeNumerically(">", 0))
+				Expect(len(kv.Value)).To(BeNumerically(">", 0))
+				Expect(kv.Seq).To(BeNumerically(">", 0))
+				Expect(kv.CreateTs).To(BeNumerically(">", 0))
+
+				// Keys should be in order
+				if lastKey != nil {
+					Expect(string(kv.Key) >= string(lastKey)).To(BeTrue(),
+						"Keys should be in lexicographical order: %s >= %s", string(kv.Key), string(lastKey))
+				}
+				lastKey = kv.Key
+				count++
+			}
+			Expect(count).To(Equal(4))
+		})
+
 		It("should seek to a specific key position", func() {
 			err := iter.Seek([]byte("item:02"))
 			Expect(err).NotTo(HaveOccurred())

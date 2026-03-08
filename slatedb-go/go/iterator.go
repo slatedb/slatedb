@@ -9,6 +9,7 @@ import "C"
 import (
 	"errors"
 	"io"
+	"unsafe"
 )
 
 // Iterator represents a streaming iterator over key-value pairs.
@@ -42,18 +43,12 @@ func (iter *Iterator) Next() (KeyValue, error) {
 	}
 
 	var present C.bool
-	var keyPtr *C.uint8_t
-	var keyLen C.uintptr_t
-	var valuePtr *C.uint8_t
-	var valueLen C.uintptr_t
+	var kvPtr *C.slatedb_key_value_t
 
 	result := C.slatedb_iterator_next(
 		iter.ptr,
 		&present,
-		&keyPtr,
-		&keyLen,
-		&valuePtr,
-		&valueLen,
+		&kvPtr,
 	)
 	if err := resultToErrorAndFree(result); err != nil {
 		return KeyValue{}, err
@@ -62,11 +57,23 @@ func (iter *Iterator) Next() (KeyValue, error) {
 	if present == C.bool(false) {
 		return KeyValue{}, io.EOF
 	}
+	defer C.slatedb_key_value_free(kvPtr)
 
-	return KeyValue{
-		Key:   copyBytesAndFree(keyPtr, keyLen),
-		Value: copyBytesAndFree(valuePtr, valueLen),
-	}, nil
+	var expireTs *int64
+	if kvPtr.expire_ts_present != C.bool(false) {
+		ts := int64(kvPtr.expire_ts)
+		expireTs = &ts
+	}
+
+	kv := KeyValue{
+		Key:      C.GoBytes(unsafe.Pointer(kvPtr.key), C.int(kvPtr.key_len)),
+		Value:    C.GoBytes(unsafe.Pointer(kvPtr.value), C.int(kvPtr.value_len)),
+		Seq:      uint64(kvPtr.seq),
+		CreateTs: int64(kvPtr.create_ts),
+		ExpireTs: expireTs,
+	}
+
+	return kv, nil
 }
 
 // Seek moves the iterator to the first key greater than or equal to `key`.

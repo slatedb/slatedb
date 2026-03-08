@@ -10,6 +10,7 @@ use crate::oracle::Oracle;
 use crate::sorted_run_iterator::SortedRunIterator;
 use crate::sst_iter::{SstIterator, SstIteratorOptions};
 use crate::tablestore::TableStore;
+use crate::types::KeyValue;
 #[cfg(not(dst))]
 use crate::utils::get_now_for_read;
 use crate::utils::{build_concurrent, compute_max_parallel};
@@ -253,11 +254,11 @@ impl Reader {
         .await
     }
 
-    /// Get the value for the given key.
+    /// Get the full row entry for the given key.
     ///
-    /// Returns `Ok(Some(value))` if a non-expired value exists for `key`,
-    /// `Ok(None)` if the key is deleted or the latest visible value is expired,
-    /// and an error if the read fails.
+    /// Returns `Ok(Some(entry))` if a non-expired, non-tombstone entry exists
+    /// for `key`, `Ok(None)` if the key is deleted or the latest visible value
+    /// is expired, and an error if the read fails.
     ///
     /// Arguments:
     /// - `key`: The user key to read. Any type that can be viewed as a byte
@@ -272,14 +273,14 @@ impl Reader {
     ///   provided, the read will not return entries with a sequence number
     ///   greater than this value. The final bound is the minimum of this value
     ///   and the bound derived from `options` (e.g., durability, dirty read).
-    pub(crate) async fn get_with_options<K: AsRef<[u8]>>(
+    pub(crate) async fn get_key_value_with_options<K: AsRef<[u8]>>(
         &self,
         key: K,
         options: &ReadOptions,
         db_state: &(dyn DbStateReader + Sync + Send),
         write_batch: Option<WriteBatch>,
         max_seq: Option<u64>,
-    ) -> Result<Option<Bytes>, SlateDBError> {
+    ) -> Result<Option<KeyValue>, SlateDBError> {
         #[cfg(not(dst))]
         let now = get_now_for_read(self.mono_clock.clone(), options.durability_filter).await?;
         #[cfg(dst)]
@@ -287,7 +288,6 @@ impl Reader {
         let now = options.now;
         let max_seq = self.prepare_max_seq(max_seq, options.durability_filter, options.dirty);
         let key_slice = key.as_ref();
-        let target_key = Bytes::copy_from_slice(key_slice);
         let range = BytesRange::from_slice(key_slice..=key_slice);
 
         let sst_iter_options = SstIteratorOptions {
@@ -324,18 +324,17 @@ impl Reader {
         )
         .await?;
 
-        if let Some(entry) = iterator.next_row_internal().await? {
-            if entry.key == target_key {
-                return Ok(Some(
-                    entry
-                        .value
-                        .as_bytes()
-                        .ok_or(SlateDBError::UnexpectedTombstone)?,
-                ));
-            }
-        }
-
-        Ok(None)
+        iterator
+            .next_entry()
+            .await?
+            .map(|entry| {
+                if entry.value.is_tombstone() {
+                    Err(SlateDBError::UnexpectedTombstone)
+                } else {
+                    Ok(KeyValue::from(entry))
+                }
+            })
+            .transpose()
     }
 
     /// Create an iterator over a key range.
@@ -1316,10 +1315,10 @@ mod tests {
             merge_operator,
         };
 
-        // Call the actual get_with_options method
+        // Call the actual get_key_value_with_options method
         let read_options = ReadOptions::default().with_dirty(test_case.dirty);
         let result = reader
-            .get_with_options(
+            .get_key_value_with_options(
                 test_case.query_key,
                 &read_options,
                 &test_db_state,
@@ -1328,7 +1327,7 @@ mod tests {
             )
             .await?;
 
-        let actual = result.as_ref().map(|b| b.as_ref());
+        let actual = result.as_ref().map(|kv| kv.value.as_ref());
         let expected = test_case.expected;
         assert_eq!(
             actual,

@@ -286,37 +286,30 @@ impl DbIterator {
         })
     }
 
-    /// Get the next record in the scan.
+    /// Get the next key-value pair.
+    ///
+    /// This method filters out tombstones and returns the user-facing [`KeyValue`] struct,
+    /// which contains only the key and value.
     ///
     /// # Errors
     ///
     /// Returns [`Error`] if the iterator has been invalidated due to an underlying error.
     pub async fn next(&mut self) -> Result<Option<KeyValue>, crate::Error> {
-        let entry_opt = self.next_row().await?;
+        let entry_opt = self.next_entry().await?;
         match entry_opt {
             Some(entry) => {
-                let val_bytes = entry.value.as_bytes().ok_or_else(|| {
-                    crate::Error::from(crate::error::SlateDBError::UnexpectedTombstone)
-                })?;
-                Ok(Some(KeyValue {
-                    key: entry.key,
-                    value: val_bytes,
-                }))
+                if entry.value.is_tombstone() {
+                    return Err(crate::Error::from(
+                        crate::error::SlateDBError::UnexpectedTombstone,
+                    ));
+                }
+                Ok(Some(KeyValue::from(entry)))
             }
             None => Ok(None),
         }
     }
 
-    /// Get the next row in the scan.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error`] if the iterator has been invalidated due to an underlying error.
-    pub async fn next_row(&mut self) -> Result<Option<RowEntry>, crate::Error> {
-        self.next_row_internal().await.map_err(Into::into)
-    }
-
-    pub(crate) async fn next_row_internal(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
+    pub(crate) async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
         if let Some(error) = self.invalidated_error.clone() {
             Err(error)
         } else {

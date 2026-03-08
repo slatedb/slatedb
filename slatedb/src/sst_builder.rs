@@ -253,14 +253,15 @@ impl EncodedSsTableBuilder<'_> {
         &mut self,
         key: &[u8],
         val: &[u8],
-        attrs: crate::types::RowAttributes,
+        ts: Option<i64>,
+        expire_ts: Option<i64>,
     ) -> Result<Option<usize>, SlateDBError> {
         let entry = RowEntry::new(
             key.to_vec().into(),
             crate::types::ValueDeletable::Value(Bytes::copy_from_slice(val)),
             0,
-            attrs.ts,
-            attrs.expire_ts,
+            ts,
+            expire_ts,
         );
         self.add(entry).await
     }
@@ -414,7 +415,7 @@ mod tests {
     use crate::object_stores::ObjectStores;
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
     use crate::tablestore::TableStore;
-    use crate::test_utils::{assert_iterator, build_test_sst, gen_attrs, gen_empty_attrs};
+    use crate::test_utils::{assert_iterator, build_test_sst};
 
     #[test]
     fn test_estimate_encoded_size() {
@@ -468,15 +469,15 @@ mod tests {
         );
         let mut builder = table_store.table_builder();
         builder
-            .add_value(&[b'a'; 8], &[b'1'; 8], gen_attrs(1))
+            .add_value(&[b'a'; 8], &[b'1'; 8], Some(1), None)
             .await
             .unwrap();
         builder
-            .add_value(&[b'b'; 8], &[b'2'; 8], gen_attrs(2))
+            .add_value(&[b'b'; 8], &[b'2'; 8], Some(2), None)
             .await
             .unwrap();
         builder
-            .add_value(&[b'c'; 8], &[b'3'; 8], gen_attrs(3))
+            .add_value(&[b'c'; 8], &[b'3'; 8], Some(3), None)
             .await
             .unwrap();
 
@@ -495,7 +496,7 @@ mod tests {
         .await;
         assert!(builder.next_block().is_none());
         builder
-            .add_value(&[b'd'; 8], &[b'4'; 8], gen_attrs(1))
+            .add_value(&[b'd'; 8], &[b'4'; 8], Some(1), None)
             .await
             .unwrap();
         let mut iter = next_block_to_iter(&mut builder);
@@ -523,15 +524,15 @@ mod tests {
         );
         let mut builder = table_store.table_builder();
         builder
-            .add_value(&[b'a'; 8], &[b'1'; 8], gen_attrs(1))
+            .add_value(&[b'a'; 8], &[b'1'; 8], Some(1), None)
             .await
             .unwrap();
         builder
-            .add_value(&[b'b'; 8], &[b'2'; 8], gen_attrs(2))
+            .add_value(&[b'b'; 8], &[b'2'; 8], Some(2), None)
             .await
             .unwrap();
         builder
-            .add_value(&[b'c'; 8], &[b'3'; 8], gen_attrs(3))
+            .add_value(&[b'c'; 8], &[b'3'; 8], Some(3), None)
             .await
             .unwrap();
         let first_block = builder.next_block();
@@ -625,7 +626,8 @@ mod tests {
                 .add_value(
                     format!("key{}", k).as_bytes(),
                     format!("value{}", k).as_bytes(),
-                    gen_attrs(k),
+                    Some(k),
+                    None,
                 )
                 .await
                 .unwrap();
@@ -703,11 +705,11 @@ mod tests {
         );
         let mut builder = table_store.table_builder();
         builder
-            .add_value(b"key1", b"value1", gen_attrs(1))
+            .add_value(b"key1", b"value1", Some(1), None)
             .await
             .unwrap();
         builder
-            .add_value(b"key2", b"value2", gen_attrs(2))
+            .add_value(b"key2", b"value2", Some(2), None)
             .await
             .unwrap();
         let encoded = builder.build().await.unwrap();
@@ -772,11 +774,11 @@ mod tests {
         );
         let mut builder = table_store.table_builder();
         builder
-            .add_value(b"key1", b"value1", gen_attrs(1))
+            .add_value(b"key1", b"value1", Some(1), None)
             .await
             .unwrap();
         builder
-            .add_value(b"key2", b"value2", gen_attrs(2))
+            .add_value(b"key2", b"value2", Some(2), None)
             .await
             .unwrap();
         let encoded = builder.build().await.unwrap();
@@ -859,19 +861,19 @@ mod tests {
         );
         let mut builder = table_store.table_builder();
         builder
-            .add_value(&[b'a'; 2], &[1u8; 2], gen_empty_attrs())
+            .add_value(&[b'a'; 2], &[1u8; 2], None, None)
             .await
             .unwrap();
         builder
-            .add_value(&[b'b'; 2], &[2u8; 2], gen_empty_attrs())
+            .add_value(&[b'b'; 2], &[2u8; 2], None, None)
             .await
             .unwrap();
         builder
-            .add_value(&[b'c'; 20], &[3u8; 20], gen_attrs(3))
+            .add_value(&[b'c'; 20], &[3u8; 20], Some(3), None)
             .await
             .unwrap();
         builder
-            .add_value(&[b'd'; 20], &[4u8; 20], gen_attrs(4))
+            .add_value(&[b'd'; 20], &[4u8; 20], Some(4), None)
             .await
             .unwrap();
         let encoded = builder.build().await.unwrap();
@@ -911,11 +913,11 @@ mod tests {
         );
         let mut builder = table_store.table_builder();
         builder
-            .add_value(b"key1", b"value1", gen_attrs(1))
+            .add_value(b"key1", b"value1", Some(1), None)
             .await
             .unwrap();
         builder
-            .add_value(b"key2", b"value2", gen_attrs(2))
+            .add_value(b"key2", b"value2", Some(2), None)
             .await
             .unwrap();
         let encoded = builder.build().await.unwrap();
@@ -979,11 +981,11 @@ mod tests {
         );
         let mut builder = table_store.table_builder();
         builder
-            .add_value(b"key1", b"value1", gen_attrs(1))
+            .add_value(b"key1", b"value1", Some(1), None)
             .await
             .unwrap();
         builder
-            .add_value(b"key2", b"value2", gen_attrs(2))
+            .add_value(b"key2", b"value2", Some(2), None)
             .await
             .unwrap();
         let encoded = builder.build().await.unwrap();
@@ -1035,9 +1037,7 @@ mod tests {
         let mut builder = table_store.table_builder();
         for key in 'a'..='z' {
             let key_bytes = [key as u8];
-            builder
-                .add_value(&key_bytes, b"value", gen_empty_attrs())
-                .await?;
+            builder.add_value(&key_bytes, b"value", None, None).await?;
         }
         let encoded = builder.build().await?;
 
@@ -1157,11 +1157,11 @@ mod tests {
         );
         let mut builder = table_store.table_builder();
         builder
-            .add_value(b"key1", b"value1", gen_attrs(1))
+            .add_value(b"key1", b"value1", Some(1), None)
             .await
             .unwrap();
         builder
-            .add_value(b"key2", b"value2", gen_attrs(2))
+            .add_value(b"key2", b"value2", Some(2), None)
             .await
             .unwrap();
         let encoded = builder.build().await.unwrap();
@@ -1214,11 +1214,11 @@ mod tests {
         );
         let mut builder = table_store.table_builder();
         builder
-            .add_value(b"key1", b"value1", gen_attrs(1))
+            .add_value(b"key1", b"value1", Some(1), None)
             .await
             .unwrap();
         builder
-            .add_value(b"key2", b"value2", gen_attrs(2))
+            .add_value(b"key2", b"value2", Some(2), None)
             .await
             .unwrap();
         let encoded = builder.build().await.unwrap();
@@ -1255,7 +1255,7 @@ mod tests {
         let format = SsTableFormat::default();
         let mut builder = format.table_builder();
         builder
-            .add_value(b"key1", b"value1", gen_attrs(1))
+            .add_value(b"key1", b"value1", Some(1), None)
             .await
             .unwrap();
 
@@ -1307,7 +1307,7 @@ mod tests {
             let key = format!("key_{:03}", i);
             let value = format!("value_{}", i);
             builder
-                .add_value(key.as_bytes(), value.as_bytes(), gen_attrs(i as i64))
+                .add_value(key.as_bytes(), value.as_bytes(), Some(i as i64), None)
                 .await
                 .unwrap();
             expected.push(
@@ -1371,7 +1371,7 @@ mod tests {
             let key = format!("key_{:03}", i);
             let value = format!("value_{}", i);
             builder
-                .add_value(key.as_bytes(), value.as_bytes(), gen_attrs(i as i64))
+                .add_value(key.as_bytes(), value.as_bytes(), Some(i as i64), None)
                 .await
                 .unwrap();
             expected.push(
@@ -1537,11 +1537,11 @@ mod tests {
         );
         let mut builder = table_store.table_builder();
         builder
-            .add_value(b"key1", b"value1", gen_attrs(1))
+            .add_value(b"key1", b"value1", Some(1), None)
             .await
             .unwrap();
         builder
-            .add_value(b"key2", b"value2", gen_attrs(2))
+            .add_value(b"key2", b"value2", Some(2), None)
             .await
             .unwrap();
         let encoded = builder.build().await.unwrap();
@@ -1579,11 +1579,11 @@ mod tests {
         );
         let mut builder = table_store.table_builder();
         builder
-            .add_value(b"key1", b"value1", gen_attrs(1))
+            .add_value(b"key1", b"value1", Some(1), None)
             .await
             .unwrap();
         builder
-            .add_value(b"key2", b"value2", gen_attrs(2))
+            .add_value(b"key2", b"value2", Some(2), None)
             .await
             .unwrap();
         let encoded = builder.build().await.unwrap();

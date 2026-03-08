@@ -70,6 +70,7 @@ use crate::sst_iter::SstIteratorOptions;
 use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
 use crate::transaction_manager::TransactionManager;
+use crate::types::KeyValue;
 use crate::utils::{format_bytes_si, SendSafely};
 use crate::wal_buffer::{WalBufferManager, WAL_BUFFER_TASK_NAME};
 use crate::wal_replay::{WalReplayIterator, WalReplayOptions};
@@ -194,11 +195,22 @@ impl DbInner {
         key: K,
         options: &ReadOptions,
     ) -> Result<Option<Bytes>, SlateDBError> {
+        self.get_key_value_with_options(key, options)
+            .await
+            .map(|kv_opt| kv_opt.map(|kv| kv.value))
+    }
+
+    /// Get the full row entry for a given key.
+    pub(crate) async fn get_key_value_with_options<K: AsRef<[u8]>>(
+        &self,
+        key: K,
+        options: &ReadOptions,
+    ) -> Result<Option<KeyValue>, SlateDBError> {
         self.db_stats.get_requests.inc();
         self.status()?;
         let db_state = self.state.read().view();
         self.reader
-            .get_with_options(key, options, &db_state, None, None)
+            .get_key_value_with_options(key, options, &db_state, None, None)
             .await
     }
 
@@ -843,6 +855,61 @@ impl Db {
             .map_err(Into::into)
     }
 
+    /// Get a key-value pair from the database with default read options.
+    ///
+    /// Returns the key along with its value and metadata (sequence number,
+    /// creation timestamp, expiration timestamp). Unlike [`get`](Self::get),
+    /// which returns only the value bytes, this method returns a [`KeyValue`]
+    /// that includes row metadata.
+    ///
+    /// ## Arguments
+    /// - `key`: the key to look up
+    ///
+    /// ## Returns
+    /// - `Ok(Some(KeyValue))`: if the key exists and is not deleted/expired
+    /// - `Ok(None)`: if the key does not exist or is deleted/expired
+    ///
+    /// ## Errors
+    /// - `Error`: if there was an error reading from the database
+    pub async fn get_key_value<K: AsRef<[u8]> + Send>(
+        &self,
+        key: K,
+    ) -> Result<Option<KeyValue>, crate::Error> {
+        self.get_key_value_with_options(key, &ReadOptions::default())
+            .await
+    }
+
+    /// Get a key-value pair from the database with custom read options.
+    ///
+    /// Returns the key along with its value and metadata (sequence number,
+    /// creation timestamp, expiration timestamp). Unlike
+    /// [`get_with_options`](Self::get_with_options), which returns only the
+    /// value bytes, this method returns a [`KeyValue`] that includes row
+    /// metadata.
+    ///
+    /// ## Arguments
+    /// - `key`: the key to look up
+    /// - `options`: the read options to use
+    ///
+    /// ## Returns
+    /// - `Ok(Some(KeyValue))`: if the key exists and is not deleted/expired
+    /// - `Ok(None)`: if the key does not exist or is deleted/expired
+    ///
+    /// ## Errors
+    /// - `Error`: if there was an error reading from the database
+    pub async fn get_key_value_with_options<K: AsRef<[u8]> + Send>(
+        &self,
+        key: K,
+        options: &ReadOptions,
+    ) -> Result<Option<KeyValue>, crate::Error> {
+        let kv = self
+            .inner
+            .get_key_value_with_options(key, options)
+            .await
+            .map_err(crate::Error::from)?;
+        Ok(kv)
+    }
+
     /// Scan a range of keys using the default scan options.
     ///
     /// returns a `DbIterator`
@@ -868,7 +935,9 @@ impl Db {
     ///     db.put(b"b", b"b_value").await?;
     ///
     ///     let mut iter = db.scan("a".."b").await?;
-    ///     assert_eq!(Some((b"a", b"a_value").into()), iter.next().await?);
+    ///     let kv = iter.next().await?.unwrap();
+    ///     assert_eq!(kv.key.as_ref(), b"a");
+    ///     assert_eq!(kv.value.as_ref(), b"a_value");
     ///     assert_eq!(None, iter.next().await?);
     ///     Ok(())
     /// }
@@ -906,7 +975,9 @@ impl Db {
     ///         durability_filter: DurabilityLevel::Memory,
     ///         ..ScanOptions::default()
     ///     }).await?;
-    ///     assert_eq!(Some((b"a", b"a_value").into()), iter.next().await?);
+    ///     let kv = iter.next().await?.unwrap();
+    ///     assert_eq!(kv.key.as_ref(), b"a");
+    ///     assert_eq!(kv.value.as_ref(), b"a_value");
     ///     assert_eq!(None, iter.next().await?);
     ///     Ok(())
     /// }
@@ -957,8 +1028,12 @@ impl Db {
     ///     db.put(b"b", b"v2").await?;
     ///
     ///     let mut iter = db.scan_prefix(b"ab").await?;
-    ///     assert_eq!(Some((b"ab", b"v0").into()), iter.next().await?);
-    ///     assert_eq!(Some((b"aba", b"v1").into()), iter.next().await?);
+    ///     let kv = iter.next().await?.unwrap();
+    ///     assert_eq!(kv.key.as_ref(), b"ab");
+    ///     assert_eq!(kv.value.as_ref(), b"v0");
+    ///     let kv = iter.next().await?.unwrap();
+    ///     assert_eq!(kv.key.as_ref(), b"aba");
+    ///     assert_eq!(kv.value.as_ref(), b"v1");
     ///     assert_eq!(None, iter.next().await?);
     ///     Ok(())
     /// }
@@ -1001,8 +1076,12 @@ impl Db {
     ///         ..ScanOptions::default()
     ///     };
     ///     let mut iter = db.scan_prefix_with_options(b"x", &options).await?;
-    ///     assert_eq!(Some((b"x1", b"v1").into()), iter.next().await?);
-    ///     assert_eq!(Some((b"x2", b"v2").into()), iter.next().await?);
+    ///     let kv = iter.next().await?.unwrap();
+    ///     assert_eq!(kv.key.as_ref(), b"x1");
+    ///     assert_eq!(kv.value.as_ref(), b"v1");
+    ///     let kv = iter.next().await?.unwrap();
+    ///     assert_eq!(kv.key.as_ref(), b"x2");
+    ///     assert_eq!(kv.value.as_ref(), b"v2");
     ///     assert_eq!(None, iter.next().await?);
     ///     Ok(())
     /// }
@@ -1569,6 +1648,14 @@ impl DbRead for Db {
         options: &ReadOptions,
     ) -> Result<Option<Bytes>, crate::Error> {
         self.get_with_options(key, options).await
+    }
+
+    async fn get_key_value_with_options<K: AsRef<[u8]> + Send>(
+        &self,
+        key: K,
+        options: &ReadOptions,
+    ) -> Result<Option<KeyValue>, crate::Error> {
+        self.get_key_value_with_options(key, options).await
     }
 
     async fn scan_with_options<K, T>(
@@ -7179,5 +7266,112 @@ mod tests {
         info!("data (scan): {:?}", data_scan.value);
         assert_eq!(data, expected);
         assert_eq!(data_scan.value, expected);
+    }
+
+    #[tokio::test]
+    async fn test_get_key_value() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = "/tmp/test_get_key_value";
+        let clock = Arc::new(MockSystemClock::new());
+        let db = Db::builder(path, object_store)
+            .with_settings(test_db_options(0, 1024, None))
+            .with_system_clock(clock.clone())
+            .build()
+            .await
+            .unwrap();
+
+        clock.set(100);
+        let key = b"key1";
+        let value = b"value1";
+        db.put_with_options(
+            key,
+            value,
+            &PutOptions {
+                ttl: Ttl::ExpireAfter(50),
+            },
+            &WriteOptions {
+                await_durable: false,
+            },
+        )
+        .await
+        .unwrap();
+
+        let kv = db.get_key_value(key).await.unwrap().unwrap();
+        assert_eq!(kv.key, Bytes::from_static(key));
+        assert_eq!(kv.value, Bytes::from_static(value));
+        assert_eq!(kv.seq, 1);
+        assert_eq!(kv.create_ts, 100);
+        assert_eq!(kv.expire_ts, Some(150));
+    }
+
+    #[tokio::test]
+    async fn test_scan_row_entry() {
+        use crate::types::ValueDeletable;
+
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = "/tmp/test_scan_row_entry";
+        let clock = Arc::new(MockSystemClock::new());
+        let db = Db::builder(path, object_store)
+            .with_settings(test_db_options(0, 1024, None))
+            .with_system_clock(clock.clone())
+            .build()
+            .await
+            .unwrap();
+
+        let put_opts = PutOptions {
+            ttl: Ttl::ExpireAfter(50),
+        };
+        let write_opts = WriteOptions {
+            await_durable: false,
+        };
+
+        clock.set(100);
+        db.put_with_options(b"key1", b"value1", &put_opts, &write_opts)
+            .await
+            .unwrap();
+
+        clock.set(110);
+        db.put_with_options(b"key2", b"value2", &put_opts, &write_opts)
+            .await
+            .unwrap();
+
+        clock.set(120);
+        db.put_with_options(b"key3", b"value3", &put_opts, &write_opts)
+            .await
+            .unwrap();
+
+        let mut iter = db.scan::<Bytes, _>(..).await.unwrap();
+
+        let row_entry1 = iter.next_entry().await.unwrap().unwrap();
+        assert_eq!(row_entry1.key, Bytes::from_static(b"key1"));
+        assert_eq!(
+            row_entry1.value,
+            ValueDeletable::Value(Bytes::from_static(b"value1"))
+        );
+        assert_eq!(row_entry1.seq, 1);
+        assert_eq!(row_entry1.create_ts, Some(100));
+        assert_eq!(row_entry1.expire_ts, Some(150));
+
+        let row_entry2 = iter.next_entry().await.unwrap().unwrap();
+        assert_eq!(row_entry2.key, Bytes::from_static(b"key2"));
+        assert_eq!(
+            row_entry2.value,
+            ValueDeletable::Value(Bytes::from_static(b"value2"))
+        );
+        assert_eq!(row_entry2.seq, 2);
+        assert_eq!(row_entry2.create_ts, Some(110));
+        assert_eq!(row_entry2.expire_ts, Some(160));
+
+        let row_entry3 = iter.next_entry().await.unwrap().unwrap();
+        assert_eq!(row_entry3.key, Bytes::from_static(b"key3"));
+        assert_eq!(
+            row_entry3.value,
+            ValueDeletable::Value(Bytes::from_static(b"value3"))
+        );
+        assert_eq!(row_entry3.seq, 3);
+        assert_eq!(row_entry3.create_ts, Some(120));
+        assert_eq!(row_entry3.expire_ts, Some(170));
+
+        assert!(iter.next_entry().await.unwrap().is_none());
     }
 }

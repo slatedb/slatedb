@@ -579,28 +579,19 @@ mod tests {
         let mut keys = Vec::new();
         loop {
             let mut present = false;
-            let mut key_ptr: *mut u8 = std::ptr::null_mut();
-            let mut key_len = 0usize;
-            let mut val_ptr: *mut u8 = std::ptr::null_mut();
-            let mut val_len = 0usize;
+            let mut kv_ptr: *mut crate::ffi::slatedb_key_value_t = std::ptr::null_mut();
 
             assert_ok(unsafe {
-                crate::iterator::slatedb_iterator_next(
-                    iterator,
-                    &mut present,
-                    &mut key_ptr,
-                    &mut key_len,
-                    &mut val_ptr,
-                    &mut val_len,
-                )
+                crate::iterator::slatedb_iterator_next(iterator, &mut present, &mut kv_ptr)
             });
             if !present {
                 break;
             }
 
-            let key = read_value(key_ptr, key_len);
-            let _ = read_value(val_ptr, val_len);
+            let kv = unsafe { &*kv_ptr };
+            let key = unsafe { std::slice::from_raw_parts(kv.key, kv.key_len) }.to_vec();
             keys.push(key);
+            unsafe { crate::iterator::slatedb_key_value_free(kv_ptr) };
         }
 
         assert_eq!(keys, vec![b"pref:a".to_vec(), b"pref:b".to_vec()]);

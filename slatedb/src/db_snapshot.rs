@@ -6,6 +6,7 @@ use uuid::Uuid;
 use crate::bytes_range::BytesRange;
 use crate::config::{ReadOptions, ScanOptions};
 use crate::db_iter::DbIterator;
+use crate::types::KeyValue;
 
 use crate::db::DbInner;
 use crate::transaction_manager::TransactionManager;
@@ -62,13 +63,35 @@ impl DbSnapshot {
         key: K,
         options: &ReadOptions,
     ) -> Result<Option<Bytes>, crate::Error> {
+        self.get_key_value_with_options(key, options)
+            .await
+            .map(|kv_opt| kv_opt.map(|kv| kv.value))
+    }
+
+    /// Get a key-value pair from the snapshot with default read options.
+    pub async fn get_key_value<K: AsRef<[u8]> + Send>(
+        &self,
+        key: K,
+    ) -> Result<Option<KeyValue>, crate::Error> {
+        self.get_key_value_with_options(key, &ReadOptions::default())
+            .await
+    }
+
+    /// Get a key-value pair from the snapshot with custom read options.
+    pub async fn get_key_value_with_options<K: AsRef<[u8]> + Send>(
+        &self,
+        key: K,
+        options: &ReadOptions,
+    ) -> Result<Option<KeyValue>, crate::Error> {
         self.db_inner.status()?;
         let db_state = self.db_inner.state.read().view();
-        self.db_inner
+        let kv = self
+            .db_inner
             .reader
-            .get_with_options(key, options, &db_state, None, Some(self.started_seq))
+            .get_key_value_with_options(key, options, &db_state, None, Some(self.started_seq))
             .await
-            .map_err(Into::into)
+            .map_err(crate::Error::from)?;
+        Ok(kv)
     }
 
     /// Scan a range of keys using the default scan options.
@@ -171,6 +194,14 @@ impl DbRead for DbSnapshot {
         options: &ReadOptions,
     ) -> Result<Option<Bytes>, crate::Error> {
         self.get_with_options(key, options).await
+    }
+
+    async fn get_key_value_with_options<K: AsRef<[u8]> + Send>(
+        &self,
+        key: K,
+        options: &ReadOptions,
+    ) -> Result<Option<KeyValue>, crate::Error> {
+        self.get_key_value_with_options(key, options).await
     }
 
     async fn scan_with_options<K, T>(

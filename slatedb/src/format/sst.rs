@@ -96,11 +96,12 @@ impl BlockBuilder {
         &mut self,
         key: &[u8],
         value: &[u8],
-        attrs: crate::types::RowAttributes,
+        ts: Option<i64>,
+        expire_ts: Option<i64>,
     ) -> bool {
         match self {
-            Self::V1(builder) => builder.add_value(key, value, attrs),
-            Self::V2(builder) => builder.add_value(key, value, attrs),
+            Self::V1(builder) => builder.add_value(key, value, ts, expire_ts),
+            Self::V2(builder) => builder.add_value(key, value, ts, expire_ts),
         }
     }
 }
