@@ -1807,7 +1807,7 @@ impl<'a> flatbuffers::Follow<'a> for CompactedSsTableView<'a> {
 }
 
 impl<'a> CompactedSsTableView<'a> {
-  pub const VT_SST: flatbuffers::VOffsetT = 4;
+  pub const VT_ID: flatbuffers::VOffsetT = 4;
   pub const VT_VISIBLE_RANGE: flatbuffers::VOffsetT = 6;
 
   #[inline]
@@ -1821,17 +1821,17 @@ impl<'a> CompactedSsTableView<'a> {
   ) -> flatbuffers::WIPOffset<CompactedSsTableView<'bldr>> {
     let mut builder = CompactedSsTableViewBuilder::new(_fbb);
     if let Some(x) = args.visible_range { builder.add_visible_range(x); }
-    if let Some(x) = args.sst { builder.add_sst(x); }
+    if let Some(x) = args.id { builder.add_id(x); }
     builder.finish()
   }
 
 
   #[inline]
-  pub fn sst(&self) -> CompactedSsTable<'a> {
+  pub fn id(&self) -> Ulid<'a> {
     // Safety:
     // Created from valid Table for this object
     // which contains a valid value in this slot
-    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<CompactedSsTable>>(CompactedSsTableView::VT_SST, None).unwrap()}
+    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<Ulid>>(CompactedSsTableView::VT_ID, None).unwrap()}
   }
   #[inline]
   pub fn visible_range(&self) -> Option<BytesRange<'a>> {
@@ -1849,21 +1849,21 @@ impl flatbuffers::Verifiable for CompactedSsTableView<'_> {
   ) -> Result<(), flatbuffers::InvalidFlatbuffer> {
     use self::flatbuffers::Verifiable;
     v.visit_table(pos)?
-     .visit_field::<flatbuffers::ForwardsUOffset<CompactedSsTable>>("sst", Self::VT_SST, true)?
+     .visit_field::<flatbuffers::ForwardsUOffset<Ulid>>("id", Self::VT_ID, true)?
      .visit_field::<flatbuffers::ForwardsUOffset<BytesRange>>("visible_range", Self::VT_VISIBLE_RANGE, false)?
      .finish();
     Ok(())
   }
 }
 pub struct CompactedSsTableViewArgs<'a> {
-    pub sst: Option<flatbuffers::WIPOffset<CompactedSsTable<'a>>>,
+    pub id: Option<flatbuffers::WIPOffset<Ulid<'a>>>,
     pub visible_range: Option<flatbuffers::WIPOffset<BytesRange<'a>>>,
 }
 impl<'a> Default for CompactedSsTableViewArgs<'a> {
   #[inline]
   fn default() -> Self {
     CompactedSsTableViewArgs {
-      sst: None, // required field
+      id: None, // required field
       visible_range: None,
     }
   }
@@ -1875,8 +1875,8 @@ pub struct CompactedSsTableViewBuilder<'a: 'b, 'b, A: flatbuffers::Allocator + '
 }
 impl<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> CompactedSsTableViewBuilder<'a, 'b, A> {
   #[inline]
-  pub fn add_sst(&mut self, sst: flatbuffers::WIPOffset<CompactedSsTable<'b >>) {
-    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<CompactedSsTable>>(CompactedSsTableView::VT_SST, sst);
+  pub fn add_id(&mut self, id: flatbuffers::WIPOffset<Ulid<'b >>) {
+    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<Ulid>>(CompactedSsTableView::VT_ID, id);
   }
   #[inline]
   pub fn add_visible_range(&mut self, visible_range: flatbuffers::WIPOffset<BytesRange<'b >>) {
@@ -1893,7 +1893,7 @@ impl<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> CompactedSsTableViewBuilder<'a,
   #[inline]
   pub fn finish(self) -> flatbuffers::WIPOffset<CompactedSsTableView<'a>> {
     let o = self.fbb_.end_table(self.start_);
-    self.fbb_.required(o, CompactedSsTableView::VT_SST,"sst");
+    self.fbb_.required(o, CompactedSsTableView::VT_ID,"id");
     flatbuffers::WIPOffset::new(o.value())
   }
 }
@@ -1901,7 +1901,7 @@ impl<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> CompactedSsTableViewBuilder<'a,
 impl core::fmt::Debug for CompactedSsTableView<'_> {
   fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
     let mut ds = f.debug_struct("CompactedSsTableView");
-      ds.field("sst", &self.sst());
+      ds.field("id", &self.id());
       ds.field("visible_range", &self.visible_range());
       ds.finish()
   }
@@ -3092,14 +3092,15 @@ impl<'a> ManifestV2<'a> {
   pub const VT_REPLAY_AFTER_WAL_ID: flatbuffers::VOffsetT = 14;
   pub const VT_WAL_ID_LAST_SEEN: flatbuffers::VOffsetT = 16;
   pub const VT_L0_LAST_COMPACTED: flatbuffers::VOffsetT = 18;
-  pub const VT_L0: flatbuffers::VOffsetT = 20;
-  pub const VT_COMPACTED: flatbuffers::VOffsetT = 22;
-  pub const VT_LAST_L0_CLOCK_TICK: flatbuffers::VOffsetT = 24;
-  pub const VT_CHECKPOINTS: flatbuffers::VOffsetT = 26;
-  pub const VT_LAST_L0_SEQ: flatbuffers::VOffsetT = 28;
-  pub const VT_WAL_OBJECT_STORE_URI: flatbuffers::VOffsetT = 30;
-  pub const VT_RECENT_SNAPSHOT_MIN_SEQ: flatbuffers::VOffsetT = 32;
-  pub const VT_SEQUENCE_TRACKER: flatbuffers::VOffsetT = 34;
+  pub const VT_SSTS: flatbuffers::VOffsetT = 20;
+  pub const VT_L0: flatbuffers::VOffsetT = 22;
+  pub const VT_COMPACTED: flatbuffers::VOffsetT = 24;
+  pub const VT_LAST_L0_CLOCK_TICK: flatbuffers::VOffsetT = 26;
+  pub const VT_CHECKPOINTS: flatbuffers::VOffsetT = 28;
+  pub const VT_LAST_L0_SEQ: flatbuffers::VOffsetT = 30;
+  pub const VT_WAL_OBJECT_STORE_URI: flatbuffers::VOffsetT = 32;
+  pub const VT_RECENT_SNAPSHOT_MIN_SEQ: flatbuffers::VOffsetT = 34;
+  pub const VT_SEQUENCE_TRACKER: flatbuffers::VOffsetT = 36;
 
   #[inline]
   pub unsafe fn init_from_table(table: flatbuffers::Table<'a>) -> Self {
@@ -3124,6 +3125,7 @@ impl<'a> ManifestV2<'a> {
     if let Some(x) = args.checkpoints { builder.add_checkpoints(x); }
     if let Some(x) = args.compacted { builder.add_compacted(x); }
     if let Some(x) = args.l0 { builder.add_l0(x); }
+    if let Some(x) = args.ssts { builder.add_ssts(x); }
     if let Some(x) = args.l0_last_compacted { builder.add_l0_last_compacted(x); }
     if let Some(x) = args.external_dbs { builder.add_external_dbs(x); }
     builder.add_initialized(args.initialized);
@@ -3186,6 +3188,13 @@ impl<'a> ManifestV2<'a> {
     // Created from valid Table for this object
     // which contains a valid value in this slot
     unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<Ulid>>(ManifestV2::VT_L0_LAST_COMPACTED, None)}
+  }
+  #[inline]
+  pub fn ssts(&self) -> flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<CompactedSsTable<'a>>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<CompactedSsTable>>>>(ManifestV2::VT_SSTS, None).unwrap()}
   }
   #[inline]
   pub fn l0(&self) -> flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<CompactedSsTableView<'a>>> {
@@ -3260,6 +3269,7 @@ impl flatbuffers::Verifiable for ManifestV2<'_> {
      .visit_field::<u64>("replay_after_wal_id", Self::VT_REPLAY_AFTER_WAL_ID, false)?
      .visit_field::<u64>("wal_id_last_seen", Self::VT_WAL_ID_LAST_SEEN, false)?
      .visit_field::<flatbuffers::ForwardsUOffset<Ulid>>("l0_last_compacted", Self::VT_L0_LAST_COMPACTED, false)?
+     .visit_field::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'_, flatbuffers::ForwardsUOffset<CompactedSsTable>>>>("ssts", Self::VT_SSTS, true)?
      .visit_field::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'_, flatbuffers::ForwardsUOffset<CompactedSsTableView>>>>("l0", Self::VT_L0, true)?
      .visit_field::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'_, flatbuffers::ForwardsUOffset<SortedRunV2>>>>("compacted", Self::VT_COMPACTED, true)?
      .visit_field::<i64>("last_l0_clock_tick", Self::VT_LAST_L0_CLOCK_TICK, false)?
@@ -3281,6 +3291,7 @@ pub struct ManifestV2Args<'a> {
     pub replay_after_wal_id: u64,
     pub wal_id_last_seen: u64,
     pub l0_last_compacted: Option<flatbuffers::WIPOffset<Ulid<'a>>>,
+    pub ssts: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<CompactedSsTable<'a>>>>>,
     pub l0: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<CompactedSsTableView<'a>>>>>,
     pub compacted: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<SortedRunV2<'a>>>>>,
     pub last_l0_clock_tick: i64,
@@ -3302,6 +3313,7 @@ impl<'a> Default for ManifestV2Args<'a> {
       replay_after_wal_id: 0,
       wal_id_last_seen: 0,
       l0_last_compacted: None,
+      ssts: None, // required field
       l0: None, // required field
       compacted: None, // required field
       last_l0_clock_tick: 0,
@@ -3352,6 +3364,10 @@ impl<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> ManifestV2Builder<'a, 'b, A> {
     self.fbb_.push_slot_always::<flatbuffers::WIPOffset<Ulid>>(ManifestV2::VT_L0_LAST_COMPACTED, l0_last_compacted);
   }
   #[inline]
+  pub fn add_ssts(&mut self, ssts: flatbuffers::WIPOffset<flatbuffers::Vector<'b , flatbuffers::ForwardsUOffset<CompactedSsTable<'b >>>>) {
+    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(ManifestV2::VT_SSTS, ssts);
+  }
+  #[inline]
   pub fn add_l0(&mut self, l0: flatbuffers::WIPOffset<flatbuffers::Vector<'b , flatbuffers::ForwardsUOffset<CompactedSsTableView<'b >>>>) {
     self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(ManifestV2::VT_L0, l0);
   }
@@ -3394,6 +3410,7 @@ impl<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> ManifestV2Builder<'a, 'b, A> {
   #[inline]
   pub fn finish(self) -> flatbuffers::WIPOffset<ManifestV2<'a>> {
     let o = self.fbb_.end_table(self.start_);
+    self.fbb_.required(o, ManifestV2::VT_SSTS,"ssts");
     self.fbb_.required(o, ManifestV2::VT_L0,"l0");
     self.fbb_.required(o, ManifestV2::VT_COMPACTED,"compacted");
     self.fbb_.required(o, ManifestV2::VT_CHECKPOINTS,"checkpoints");
@@ -3412,6 +3429,7 @@ impl core::fmt::Debug for ManifestV2<'_> {
       ds.field("replay_after_wal_id", &self.replay_after_wal_id());
       ds.field("wal_id_last_seen", &self.wal_id_last_seen());
       ds.field("l0_last_compacted", &self.l0_last_compacted());
+      ds.field("ssts", &self.ssts());
       ds.field("l0", &self.l0());
       ds.field("compacted", &self.compacted());
       ds.field("last_l0_clock_tick", &self.last_l0_clock_tick());

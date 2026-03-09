@@ -177,7 +177,7 @@ impl ObjectCodec<Manifest> for FlatBufferManifestCodec {
                     &verifier_options(),
                     unversioned_bytes.as_ref(),
                 )?;
-                Ok(Self::manifest_v2(&manifest))
+                Self::manifest_v2(&manifest)
             }
             _ => Err(Box::new(SlateDBError::InvalidVersion {
                 format_name: "manifest",
@@ -311,36 +311,53 @@ impl FlatBufferManifestCodec {
         }
     }
 
-    fn decode_compacted_sst_view(view: &CompactedSsTableView) -> SsTableView {
-        let fb_sst = view.sst();
-        let sst_id = Compacted(fb_sst.id().ulid());
-        let format_version = fb_sst
-            .format_version()
-            .unwrap_or(ORIGINAL_SST_FORMAT_VERSION);
-        let sst_info = FlatBufferSsTableInfoCodec::sst_info(&fb_sst.info());
-        let handle = SsTableHandle::new(sst_id, format_version, sst_info);
-        SsTableView::new_projected(handle, view.visible_range().map(Self::decode_bytes_range))
+    fn decode_compacted_sst_view(
+        view: &CompactedSsTableView,
+        sst_lookup: &std::collections::HashMap<Ulid, SsTableHandle>,
+    ) -> Result<SsTableView, Box<dyn std::error::Error + Send + Sync>> {
+        let ulid = view.id().ulid();
+        let handle = sst_lookup
+            .get(&ulid)
+            .ok_or_else(|| format!("CompactedSsTableView references unknown SST id: {ulid}"))?
+            .clone();
+        Ok(SsTableView::new_projected(
+            handle,
+            view.visible_range().map(Self::decode_bytes_range),
+        ))
     }
 
-    pub(crate) fn manifest_v2(manifest: &ManifestV2) -> Manifest {
+    pub(crate) fn manifest_v2(
+        manifest: &ManifestV2,
+    ) -> Result<Manifest, Box<dyn std::error::Error + Send + Sync>> {
+        let sst_lookup: std::collections::HashMap<Ulid, SsTableHandle> = manifest
+            .ssts()
+            .iter()
+            .map(|fb_sst| {
+                let ulid = fb_sst.id().ulid();
+                let handle = FlatBufferCompactionsCodec::compacted_sst(fb_sst);
+                (ulid, handle)
+            })
+            .collect();
         let l0_last_compacted = manifest.l0_last_compacted().map(|id| id.ulid());
         let l0: VecDeque<SsTableView> = manifest
             .l0()
             .iter()
-            .map(|view| Self::decode_compacted_sst_view(&view))
-            .collect();
+            .map(|view| Self::decode_compacted_sst_view(&view, &sst_lookup))
+            .collect::<Result<_, _>>()?;
         let compacted: Vec<db_state::SortedRun> = manifest
             .compacted()
             .iter()
-            .map(|sr| db_state::SortedRun {
-                id: sr.id(),
-                ssts: sr
-                    .ssts()
-                    .iter()
-                    .map(|view| Self::decode_compacted_sst_view(&view))
-                    .collect(),
-            })
-            .collect();
+            .map(
+                |sr| -> Result<_, Box<dyn std::error::Error + Send + Sync>> {
+                    let ssts = sr
+                        .ssts()
+                        .iter()
+                        .map(|view| Self::decode_compacted_sst_view(&view, &sst_lookup))
+                        .collect::<Result<_, _>>()?;
+                    Ok(db_state::SortedRun { id: sr.id(), ssts })
+                },
+            )
+            .collect::<Result<_, _>>()?;
         let checkpoints: Vec<checkpoint::Checkpoint> = manifest
             .checkpoints()
             .iter()
@@ -393,12 +410,12 @@ impl FlatBufferManifestCodec {
                 .collect()
         });
 
-        Manifest {
+        Ok(Manifest {
             external_dbs: external_dbs.unwrap_or_default(),
             core,
             writer_epoch: manifest.writer_epoch(),
             compactor_epoch: manifest.compactor_epoch(),
-        }
+        })
     }
 
     pub(crate) fn create_from_manifest(manifest: &Manifest) -> Bytes {
@@ -618,29 +635,18 @@ impl<'b> DbFlatBufferBuilder<'b> {
         &mut self,
         view: &SsTableView,
     ) -> WIPOffset<CompactedSsTableView<'b>> {
-        // Build the inner CompactedSsTable without visible_range (it lives on the view).
         let ulid = match view.sst.id {
             SsTableId::Wal(_) => {
                 unreachable!("cannot pass WAL SST handle to create compacted sst view")
             }
             SsTableId::Compacted(ulid) => ulid,
         };
-        let compacted_sst_id = self.add_compacted_sst_id(&ulid);
-        let compacted_sst_info = self.add_sst_info(&view.sst.info);
-        let sst = CompactedSsTable::create(
-            &mut self.builder,
-            &CompactedSsTableArgs {
-                id: Some(compacted_sst_id),
-                info: Some(compacted_sst_info),
-                visible_range: None,
-                format_version: Some(view.sst.format_version),
-            },
-        );
+        let id = self.add_compacted_sst_id(&ulid);
         let visible_range = view.visible_range.as_ref().map(|r| self.add_bytes_range(r));
         CompactedSsTableView::create(
             &mut self.builder,
             &CompactedSsTableViewArgs {
-                sst: Some(sst),
+                id: Some(id),
                 visible_range,
             },
         )
@@ -820,6 +826,30 @@ impl<'b> DbFlatBufferBuilder<'b> {
 
     fn create_manifest(&mut self, manifest: &Manifest) -> Bytes {
         let core = &manifest.core;
+
+        // Collect all unique SSTs from l0 and compacted runs.
+        let mut unique_ssts: std::collections::HashMap<Ulid, &SsTableHandle> =
+            std::collections::HashMap::new();
+        for view in core.l0.iter() {
+            if let SsTableId::Compacted(ulid) = view.sst.id {
+                unique_ssts.entry(ulid).or_insert(&view.sst);
+            }
+        }
+        for sr in core.compacted.iter() {
+            for view in sr.ssts.iter() {
+                if let SsTableId::Compacted(ulid) = view.sst.id {
+                    unique_ssts.entry(ulid).or_insert(&view.sst);
+                }
+            }
+        }
+        let ssts = {
+            let sst_offsets: Vec<WIPOffset<CompactedSsTable>> = unique_ssts
+                .values()
+                .map(|handle| self.add_compacted_sst(handle))
+                .collect();
+            self.builder.create_vector(sst_offsets.as_ref())
+        };
+
         let l0 = self.add_compacted_sst_views(core.l0.iter());
         let mut l0_last_compacted = None;
         if let Some(ulid) = core.l0_last_compacted.as_ref() {
@@ -866,6 +896,7 @@ impl<'b> DbFlatBufferBuilder<'b> {
                 replay_after_wal_id: core.replay_after_wal_id,
                 wal_id_last_seen: core.next_wal_sst_id - 1,
                 l0_last_compacted,
+                ssts: Some(ssts),
                 l0: Some(l0),
                 compacted: Some(compacted),
                 last_l0_clock_tick: core.last_l0_clock_tick,

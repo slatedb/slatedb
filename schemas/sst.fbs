@@ -86,7 +86,8 @@ table CompactedSsTable {
 }
 
 table CompactedSsTableView {
-    sst: CompactedSsTable (required);
+    // Reference to a CompactedSsTable by its id (stored at the top level of ManifestV2).
+    id: Ulid (required);
     visible_range: BytesRange;
 }
 

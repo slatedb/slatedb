@@ -110,6 +110,9 @@ table ManifestV2 {
     // The last compacted l0
     l0_last_compacted: Ulid;
 
+    // All compacted SSTs referenced by l0 and compacted (sorted runs) views.
+    ssts: [CompactedSsTable] (required);
+
     // A list of the L0 SSTs that are valid to read in the `compacted` folder.
     l0: [CompactedSsTableView] (required);
 
