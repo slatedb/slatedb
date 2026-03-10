@@ -92,26 +92,26 @@ impl Manifest {
         for sorter_run in &projected.core.compacted {
             sorter_runs_filtered.push(SortedRun {
                 id: sorter_run.id,
-                ssts: Self::filter_sst_handles(&sorter_run.ssts, false, &range),
+                ssts: Self::filter_view_handles(&sorter_run.ssts, false, &range),
             });
         }
-        projected.core.l0 = Self::filter_sst_handles(&projected.core.l0, true, &range).into();
+        projected.core.l0 = Self::filter_view_handles(&projected.core.l0, true, &range).into();
         projected.core.compacted = sorter_runs_filtered;
         projected
     }
 
-    fn filter_sst_handles<'a, T>(
-        handles: T,
-        handles_overlap: bool,
+    fn filter_view_handles<'a, T>(
+        views: T,
+        views_overlap: bool,
         projection_range: &BytesRange,
     ) -> Vec<SsTableView>
     where
         T: IntoIterator<Item = &'a SsTableView>,
     {
-        let mut iter = handles.into_iter().peekable();
+        let mut iter = views.into_iter().peekable();
         let mut filtered_handles = vec![];
         while let Some(current_handle) = iter.next() {
-            let next_handle = if handles_overlap {
+            let next_handle = if views_overlap {
                 None
             } else {
                 iter.peek().copied()
