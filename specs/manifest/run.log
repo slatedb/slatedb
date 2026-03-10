@@ -1,0 +1,72 @@
+fizz specs/manifest/ManifestProjectUnion.fizz
+
+Model checking specs/manifest/ManifestProjectUnion.json
+configFileName: specs/manifest/fizz.yaml
+fizz.yaml not found. Using default options
+StateSpaceOptions: options:{max_actions:5  max_concurrent_actions:2}
+Nodes: 20000, queued: 64847, elapsed: 15.923865375s
+Nodes: 40000, queued: 124759, elapsed: 32.570811959s
+Nodes: 80000, queued: 241785, elapsed: 1m5.481299167s
+Nodes: 120000, queued: 252720, elapsed: 1m38.048305084s
+Nodes: 140000, queued: 250574, elapsed: 1m54.876441s
+Nodes: 180000, queued: 245976, elapsed: 2m27.265887334s
+Nodes: 200000, queued: 242627, elapsed: 2m44.83595225s
+Nodes: 220000, queued: 239374, elapsed: 3m2.415618375s
+Nodes: 240000, queued: 235969, elapsed: 3m19.760548209s
+Nodes: 260000, queued: 234552, elapsed: 3m37.300952584s
+Nodes: 280000, queued: 233970, elapsed: 3m54.892749084s
+Nodes: 320000, queued: 232492, elapsed: 4m29.048749125s
+Nodes: 360000, queued: 233349, elapsed: 5m3.927329625s
+Nodes: 380000, queued: 231624, elapsed: 5m21.929696167s
+Nodes: 420000, queued: 229445, elapsed: 5m56.592918167s
+Nodes: 440000, queued: 230224, elapsed: 6m14.3062925s
+Nodes: 460000, queued: 230192, elapsed: 6m32.598392542s
+Nodes: 480000, queued: 228266, elapsed: 6m50.205122042s
+Nodes: 500000, queued: 227078, elapsed: 7m7.567698125s
+Nodes: 540000, queued: 227267, elapsed: 7m41.592293s
+Nodes: 560000, queued: 226966, elapsed: 8m0.7685005s
+Nodes: 580000, queued: 226306, elapsed: 8m18.701811584s
+Nodes: 600000, queued: 225474, elapsed: 8m37.157333667s
+Nodes: 620000, queued: 224649, elapsed: 8m57.457867084s
+Nodes: 640000, queued: 226082, elapsed: 9m24.318331834s
+Nodes: 660000, queued: 225705, elapsed: 9m50.089379084s
+Nodes: 680000, queued: 224337, elapsed: 10m12.564740042s
+Nodes: 700000, queued: 222630, elapsed: 10m35.745664792s
+Nodes: 720000, queued: 221420, elapsed: 10m59.63130825s
+Nodes: 760000, queued: 222356, elapsed: 11m51.891520292s
+Nodes: 780000, queued: 220568, elapsed: 12m16.102995459s
+Nodes: 860000, queued: 219293, elapsed: 14m11.316343959s
+Nodes: 880000, queued: 218468, elapsed: 14m39.613428625s
+Nodes: 900000, queued: 217813, elapsed: 15m11.819447625s
+Nodes: 920000, queued: 217424, elapsed: 15m42.705740792s
+Nodes: 940000, queued: 218677, elapsed: 16m21.104253959s
+Nodes: 960000, queued: 217911, elapsed: 16m57.781644292s
+Nodes: 980000, queued: 216699, elapsed: 17m34.677494417s
+Nodes: 1020000, queued: 215426, elapsed: 19m2.038933959s
+Nodes: 1040000, queued: 215487, elapsed: 19m55.598540542s
+Nodes: 1060000, queued: 214573, elapsed: 20m40.48205725s
+Nodes: 1080000, queued: 213195, elapsed: 21m28.095491709s
+Nodes: 1100000, queued: 211250, elapsed: 22m11.5463095s
+Nodes: 1140000, queued: 212287, elapsed: 23m37.567221625s
+Nodes: 1160000, queued: 211624, elapsed: 24m21.579874834s
+Nodes: 1180000, queued: 210806, elapsed: 25m7.476051917s
+Nodes: 1200000, queued: 209983, elapsed: 25m54.44016575s
+Nodes: 1220000, queued: 211411, elapsed: 26m44.908532125s
+Nodes: 1240000, queued: 211099, elapsed: 27m35.706263125s
+Nodes: 1260000, queued: 210056, elapsed: 28m11.451402959s
+Nodes: 1300000, queued: 207083, elapsed: 29m47.634289042s
+Nodes: 1320000, queued: 208200, elapsed: 30m43.995284875s
+Nodes: 1340000, queued: 207754, elapsed: 31m41.989002917s
+Nodes: 1380000, queued: 205567, elapsed: 33m10.402768084s
+Nodes: 1400000, queued: 204105, elapsed: 34m9.925815292s
+Nodes: 1408053, queued: 0, elapsed: 35m23.223970417s
+Time taken for model checking: 35m23.2240015s
+Skipping dotfile generation. Too many Nodes: 1408053
+Writen communication diagram dotfile: specs/manifest/out/run_2026-02-23_21-19-34/communication.dot
+To generate svg, run:
+dot -Tsvg specs/manifest/out/run_2026-02-23_21-19-34/communication.dot -o communication.svg && open communication.svg
+Valid Nodes: 1408053 Unique states: 1005069
+IsLive: true
+Time taken to check liveness: 7.596010291s
+PASSED: Model checker completed successfully
+Writen 2 node files and 1 link files to dir specs/manifest/out/run_2026-02-23_21-19-34

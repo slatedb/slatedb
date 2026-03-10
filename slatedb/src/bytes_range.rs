@@ -142,6 +142,12 @@ impl BytesRange {
             .map(|inner| Self { inner })
     }
 
+    /// Compute the union of two ranges. Returns `None` if the ranges are not
+    /// contiguous (neither intersecting nor adjacent).
+    pub(crate) fn union(&self, other: &Self) -> Option<Self> {
+        self.inner.union(&other.inner).map(|inner| Self { inner })
+    }
+
     pub(crate) fn is_start_bound_included_or_unbounded(&self) -> bool {
         !matches!(self.start_bound(), Excluded(_))
     }
