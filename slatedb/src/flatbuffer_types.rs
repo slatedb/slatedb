@@ -170,7 +170,7 @@ impl ObjectCodec<Manifest> for FlatBufferManifestCodec {
                     &verifier_options(),
                     unversioned_bytes.as_ref(),
                 )?;
-                Ok(Self::manifest_v1(&manifest))
+                Self::manifest_v1(&manifest)
             }
             2 => {
                 let manifest = flatbuffers::root_with_opts::<ManifestV2>(
@@ -214,7 +214,9 @@ impl FlatBufferManifestCodec {
         }
     }
 
-    pub(crate) fn manifest_v1(manifest: &ManifestV1) -> Manifest {
+    pub(crate) fn manifest_v1(
+        manifest: &ManifestV1,
+    ) -> Result<Manifest, Box<dyn std::error::Error + Send + Sync>> {
         let l0_last_compacted = manifest.l0_last_compacted().map(|id| id.ulid());
         let mut l0 = VecDeque::new();
 
@@ -303,12 +305,12 @@ impl FlatBufferManifestCodec {
                 .collect()
         });
 
-        Manifest {
+        Ok(Manifest {
             external_dbs: external_dbs.unwrap_or_default(),
             core,
             writer_epoch: manifest.writer_epoch(),
             compactor_epoch: manifest.compactor_epoch(),
-        }
+        })
     }
 
     fn decode_compacted_sst_view(
