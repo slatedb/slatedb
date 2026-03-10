@@ -250,9 +250,6 @@ impl TransactionManager {
 
     /// Record a recent committed transaction for conflict detection.
     /// This method should be called after confirming no conflicts exist.
-    ///
-    /// The transaction will be moved from active_txns to recent_committed_txns
-    /// if it is still needed for future conflict checking with other transactions.
     pub(crate) fn track_recent_committed_txn(&self, txn_id: &Uuid, committed_seq: u64) {
         // remove the transaction from active_txns, and add it to recent_committed_txns
         let mut inner = self.inner.write();
