@@ -245,7 +245,7 @@ impl CompactionExecuteBench {
             ssts_by_id.insert(id, handle);
         }
         info!("finished loading");
-        let ssts: Vec<SsTableView> = sst_ids
+        let sst_views: Vec<SsTableView> = sst_ids
             .into_iter()
             .map(|id| ssts_by_id.get(&id).expect("expected sst").clone().into())
             .collect();
@@ -253,7 +253,7 @@ impl CompactionExecuteBench {
             id: rand.rng().gen_ulid(system_clock.as_ref()),
             compaction_id: rand.rng().gen_ulid(system_clock.as_ref()),
             destination: 0,
-            ssts,
+            ssts: sst_views,
             sorted_runs: vec![],
             output_ssts: vec![],
             compaction_clock_tick: manifest.db_state().last_l0_clock_tick,

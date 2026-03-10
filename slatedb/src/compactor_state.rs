@@ -206,7 +206,7 @@ impl Compaction {
     ///
     /// ## Arguments
     /// - `db_state`: The current core DB state from the manifest.
-    pub(crate) fn get_ssts(&self, db_state: &ManifestCore) -> Vec<SsTableView> {
+    pub(crate) fn get_l0_sst_views(&self, db_state: &ManifestCore) -> Vec<SsTableView> {
         let ulid_set: HashSet<Ulid> = self
             .spec
             .sources()

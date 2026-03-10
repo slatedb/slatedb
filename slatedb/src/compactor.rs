@@ -869,7 +869,7 @@ impl CompactorEventHandler {
         self.log_compaction_state();
         let db_state = self.state().db_state();
 
-        let ssts = compaction.get_ssts(db_state);
+        let sst_views = compaction.get_l0_sst_views(db_state);
         let sorted_runs = compaction.get_sorted_runs(db_state);
         let spec = compaction.spec();
         // if there are no SRs when we compact L0 then the resulting SR is the last sorted run.
@@ -883,7 +883,7 @@ impl CompactorEventHandler {
             id: job_id,
             compaction_id: compaction.id(),
             destination: spec.destination(),
-            ssts,
+            ssts: sst_views,
             sorted_runs,
             output_ssts: compaction.output_ssts().clone(),
             compaction_clock_tick: db_state.last_l0_clock_tick,
