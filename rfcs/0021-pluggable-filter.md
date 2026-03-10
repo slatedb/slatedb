@@ -16,15 +16,15 @@ Table of Contents:
   * [Read Path Integration](#read-path-integration)
   * [Write Path Integration](#write-path-integration)
 - [Impact Analysis](#impact-analysis)
-  * [Core API & Query Semantics](#core-api-query-semantics)
+  * [Core API and Query Semantics](#core-api-and-query-semantics)
   * [Consistency, Isolation, and Multi-Versioning](#consistency-isolation-and-multi-versioning)
   * [Time, Retention, and Derived State](#time-retention-and-derived-state)
   * [Metadata, Coordination, and Lifecycles](#metadata-coordination-and-lifecycles)
   * [Compaction](#compaction)
   * [Storage Engine Internals](#storage-engine-internals)
-  * [Ecosystem & Operations](#ecosystem-operations)
+  * [Ecosystem and Operations](#ecosystem-and-operations)
 - [Operations](#operations)
-  * [Performance & Cost](#performance-cost)
+  * [Performance and Cost](#performance-and-cost)
   * [Observability](#observability)
   * [Compatibility](#compatibility)
 - [Testing](#testing)
@@ -40,7 +40,7 @@ Status: Draft
 
 Authors:
 
-* [Hussein Nomier](https://github.com/husseinnomier)
+* [Hussein Nomier](https://github.com/nomiero)
 
 ## Summary
 
@@ -464,7 +464,7 @@ block, and `policy.name()` is stored in the SST info.
 
 SlateDB features and components that this RFC interacts with. Check all that apply.
 
-### Core API & Query Semantics
+### Core API and Query Semantics
 
 - [x] Basic KV API (`get`/`put`/`delete`)
 - [x] Range queries, iterators, seek semantics
@@ -509,7 +509,7 @@ SlateDB features and components that this RFC interacts with. Check all that app
 - [x] Indexing (bloom filters, metadata)
 - [x] SST format or block format
 
-### Ecosystem & Operations
+### Ecosystem and Operations
 
 - [ ] CLI tools
 - [x] Language bindings (Go/Python/etc)
@@ -517,7 +517,7 @@ SlateDB features and components that this RFC interacts with. Check all that app
 
 ## Operations
 
-### Performance & Cost
+### Performance and Cost
 
 - **Point lookup latency**: Negligible change. The dynamic dispatch overhead of
   `dyn Filter` is a single vtable lookup per SST which shouldn't be a bottleneck
