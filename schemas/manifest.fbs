@@ -78,7 +78,7 @@ table ManifestV1 {
     sequence_tracker: [ubyte];
 }
 
-// Manifest to persist state of DB, version 2 (CompactedSsTable changed to CompactedSsTableView).
+// Manifest to persist state of DB, version 2 (CompactedSsTableV2 changed to CompactedSsTableView).
 table ManifestV2 {
     // Id of manifest. Manifest file name will be derived from this id.
     manifest_id: ulong;
@@ -111,7 +111,7 @@ table ManifestV2 {
     l0_last_compacted: Ulid;
 
     // All compacted SSTs referenced by l0 and compacted (sorted runs) views.
-    ssts: [CompactedSsTable] (required);
+    ssts: [CompactedSsTableV2] (required);
 
     // A list of the L0 SSTs that are valid to read in the `compacted` folder.
     l0: [CompactedSsTableView] (required);

@@ -77,11 +77,17 @@ table SsTableIndex {
     block_meta: [BlockMeta] (required);
 }
 
+// deprecated: use CompactedSsTableV2
 table CompactedSsTable {
     id: Ulid (required);
     info: SsTableInfo (required);
-    // deprecated: visible_range is moved to CompactedSsTableView
     visible_range: BytesRange;
+    format_version: uint16 = null;
+}
+
+table CompactedSsTableV2 {
+    id: Ulid (required);
+    info: SsTableInfo (required);
     format_version: uint16 = null;
 }
 
