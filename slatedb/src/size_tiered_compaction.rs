@@ -454,7 +454,12 @@ mod tests {
     fn test_should_compact_l0s_to_first_sr() {
         // given:
         let scheduler = SizeTieredCompactionScheduler::default();
-        let l0 = [create_sst(1), create_sst(1), create_sst(1), create_sst(1)];
+        let l0 = [
+            create_sst_view(1),
+            create_sst_view(1),
+            create_sst_view(1),
+            create_sst_view(1),
+        ];
         let state =
             &create_compactor_state(create_db_state(l0.iter().cloned().collect(), Vec::new()));
 
@@ -487,7 +492,7 @@ mod tests {
             ..CompactorOptions::default()
         };
         let scheduler = supplier.compaction_scheduler(&compactor_options);
-        let l0 = [create_sst(1), create_sst(1)];
+        let l0 = [create_sst_view(1), create_sst_view(1)];
         let state =
             &create_compactor_state(create_db_state(l0.iter().cloned().collect(), Vec::new()));
 
@@ -508,7 +513,12 @@ mod tests {
     fn test_should_compact_l0s_to_new_sr() {
         // given:
         let scheduler = SizeTieredCompactionScheduler::default();
-        let l0 = [create_sst(1), create_sst(1), create_sst(1), create_sst(1)];
+        let l0 = [
+            create_sst_view(1),
+            create_sst_view(1),
+            create_sst_view(1),
+            create_sst_view(1),
+        ];
         let state = &create_compactor_state(create_db_state(
             l0.iter().cloned().collect(),
             vec![create_sr2(10, 2), create_sr2(0, 2)],
@@ -527,7 +537,7 @@ mod tests {
     fn test_should_not_compact_l0s_if_fewer_than_min_threshold() {
         // given:
         let scheduler = SizeTieredCompactionScheduler::default();
-        let l0 = [create_sst(1), create_sst(1), create_sst(1)];
+        let l0 = [create_sst_view(1), create_sst_view(1), create_sst_view(1)];
         let state = &create_compactor_state(create_db_state(l0.iter().cloned().collect(), vec![]));
 
         // when:
@@ -710,7 +720,12 @@ mod tests {
     fn test_should_apply_backpressure_for_l0s() {
         // given:
         let scheduler = SizeTieredCompactionScheduler::default();
-        let l0 = [create_sst(1), create_sst(1), create_sst(1), create_sst(1)];
+        let l0 = [
+            create_sst_view(1),
+            create_sst_view(1),
+            create_sst_view(1),
+            create_sst_view(1),
+        ];
         let mut state = create_compactor_state(create_db_state(
             l0.iter().cloned().collect(),
             vec![
@@ -747,7 +762,12 @@ mod tests {
     fn test_should_return_multiple_compactions() {
         // given:
         let scheduler = SizeTieredCompactionScheduler::default();
-        let l0 = vec![create_sst(1), create_sst(1), create_sst(1), create_sst(1)];
+        let l0 = vec![
+            create_sst_view(1),
+            create_sst_view(1),
+            create_sst_view(1),
+            create_sst_view(1),
+        ];
         let state = &create_compactor_state(create_db_state(
             l0.iter().cloned().collect(),
             vec![
@@ -782,7 +802,11 @@ mod tests {
     fn test_should_submit_invalid_compaction_wrong_order() {
         // given:
         let scheduler = SizeTieredCompactionScheduler::default();
-        let l0 = VecDeque::from(vec![create_sst(1), create_sst(1), create_sst(1)]);
+        let l0 = VecDeque::from(vec![
+            create_sst_view(1),
+            create_sst_view(1),
+            create_sst_view(1),
+        ]);
         let state = &create_compactor_state(create_db_state(l0.clone(), Vec::new()));
 
         let mut l0_sst = l0;
@@ -800,7 +824,11 @@ mod tests {
     fn test_should_submit_invalid_compaction_skipped_sst() {
         // given:
         let scheduler = SizeTieredCompactionScheduler::default();
-        let l0 = VecDeque::from(vec![create_sst(1), create_sst(1), create_sst(1)]);
+        let l0 = VecDeque::from(vec![
+            create_sst_view(1),
+            create_sst_view(1),
+            create_sst_view(1),
+        ]);
         let state = &create_compactor_state(create_db_state(l0.clone(), Vec::new()));
 
         let mut l0_sst = l0;
@@ -852,7 +880,7 @@ mod tests {
         assert!(result.is_err());
     }
 
-    fn create_sst(size: u64) -> SsTableView {
+    fn create_sst_view(size: u64) -> SsTableView {
         let info = SsTableInfo {
             first_entry: None,
             last_entry: None,
@@ -880,7 +908,7 @@ mod tests {
     }
 
     fn create_sr(id: u32, sst_size: u64, num_ssts: usize) -> SortedRun {
-        let ssts: Vec<SsTableView> = (0..num_ssts).map(|_| create_sst(sst_size)).collect();
+        let ssts: Vec<SsTableView> = (0..num_ssts).map(|_| create_sst_view(sst_size)).collect();
         SortedRun {
             id,
             sst_views: ssts,
