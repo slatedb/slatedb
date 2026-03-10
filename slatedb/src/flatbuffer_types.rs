@@ -33,8 +33,8 @@ use crate::db_state::SsTableId::Compacted;
 use crate::error::SlateDBError;
 use crate::flatbuffer_types::root_generated::{
     BoundType, Checkpoint, CheckpointArgs, CheckpointMetadata, CompactedSsTable,
-    CompactedSsTableArgs, CompactedSsTableView, CompactedSsTableViewArgs,
-    Compaction as FbCompaction, CompactionArgs as FbCompactionArgs,
+    CompactedSsTableArgs, CompactedSsTableV2, CompactedSsTableV2Args, CompactedSsTableView,
+    CompactedSsTableViewArgs, Compaction as FbCompaction, CompactionArgs as FbCompactionArgs,
     CompactionSpec as FbCompactionSpec, CompactionStatus as FbCompactionStatus, CompactionsV1,
     CompactionsV1Args, CompressionFormat, SortedRunV2, SortedRunV2Args, SstType as FbSstType,
     TieredCompactionSpec, TieredCompactionSpecArgs, Ulid as FbUlid, UlidArgs as FbUlidArgs, Uuid,
@@ -334,7 +334,7 @@ impl FlatBufferManifestCodec {
             .iter()
             .map(|fb_sst| {
                 let ulid = fb_sst.id().ulid();
-                let handle = FlatBufferCompactionsCodec::compacted_sst(fb_sst);
+                let handle = FlatBufferCompactionsCodec::compacted_sst_v2(fb_sst);
                 (ulid, handle)
             })
             .collect();
@@ -517,6 +517,15 @@ impl FlatBufferCompactionsCodec {
         SsTableHandle::new(id, format_version, info)
     }
 
+    fn compacted_sst_v2(compacted_sst: CompactedSsTableV2) -> SsTableHandle {
+        let id = Compacted(compacted_sst.id().ulid());
+        let format_version = compacted_sst
+            .format_version()
+            .unwrap_or(ORIGINAL_SST_FORMAT_VERSION);
+        let info = FlatBufferSsTableInfoCodec::sst_info(&compacted_sst.info());
+        SsTableHandle::new(id, format_version, info)
+    }
+
     pub(crate) fn create_from_compactions(compactions: &CompactorCompactions) -> Bytes {
         let builder = FlatBufferBuilder::new();
         let mut db_fb_builder = DbFlatBufferBuilder::new(builder);
@@ -629,6 +638,28 @@ impl<'b> DbFlatBufferBuilder<'b> {
         let compacted_ssts: Vec<WIPOffset<CompactedSsTable>> =
             ssts.map(|sst| self.add_compacted_sst(sst)).collect();
         self.builder.create_vector(compacted_ssts.as_ref())
+    }
+
+    fn add_compacted_sst_v2(
+        &mut self,
+        handle: &SsTableHandle,
+    ) -> WIPOffset<CompactedSsTableV2<'b>> {
+        let ulid = match handle.id {
+            SsTableId::Wal(_) => {
+                unreachable!("cannot pass WAL SST handle to create compacted sst v2")
+            }
+            SsTableId::Compacted(ulid) => ulid,
+        };
+        let compacted_sst_id = self.add_compacted_sst_id(&ulid);
+        let compacted_sst_info = self.add_sst_info(&handle.info);
+        CompactedSsTableV2::create(
+            &mut self.builder,
+            &CompactedSsTableV2Args {
+                id: Some(compacted_sst_id),
+                info: Some(compacted_sst_info),
+                format_version: Some(handle.format_version),
+            },
+        )
     }
 
     fn add_compacted_sst_view(
@@ -843,9 +874,9 @@ impl<'b> DbFlatBufferBuilder<'b> {
             }
         }
         let ssts = {
-            let sst_offsets: Vec<WIPOffset<CompactedSsTable>> = unique_ssts
+            let sst_offsets: Vec<WIPOffset<CompactedSsTableV2>> = unique_ssts
                 .values()
-                .map(|handle| self.add_compacted_sst(handle))
+                .map(|handle| self.add_compacted_sst_v2(handle))
                 .collect();
             self.builder.create_vector(sst_offsets.as_ref())
         };
