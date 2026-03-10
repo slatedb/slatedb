@@ -59,7 +59,7 @@ pub(crate) struct StartCompactionJobArgs {
     /// Destination sorted run id to be produced by this job.
     pub(crate) destination: u32,
     /// Input L0 SSTs for this job.
-    pub(crate) ssts: Vec<SsTableView>,
+    pub(crate) sst_views: Vec<SsTableView>,
     /// Input existing sorted runs for this job.
     pub(crate) sorted_runs: Vec<SortedRun>,
     /// Output SSTs already written for this compaction when resuming.
@@ -79,7 +79,7 @@ impl std::fmt::Debug for StartCompactionJobArgs {
             .field("id", &self.id)
             .field("job_id", &self.compaction_id)
             .field("destination", &self.destination)
-            .field("ssts", &self.ssts)
+            .field("ssts", &self.sst_views)
             .field("sorted_runs", &self.sorted_runs)
             .field("output_ssts", &self.output_ssts)
             .field("compaction_clock_tick", &self.compaction_clock_tick)
@@ -280,9 +280,9 @@ impl TokioCompactionExecutorInner {
             order: IterationOrder::Ascending,
         };
 
-        let max_parallel = compute_max_parallel(job_args.ssts.len(), &job_args.sorted_runs, 4);
+        let max_parallel = compute_max_parallel(job_args.sst_views.len(), &job_args.sorted_runs, 4);
         // L0 (borrowed)
-        let l0_iters_futures = build_concurrent(job_args.ssts.iter(), max_parallel, |h| {
+        let l0_iters_futures = build_concurrent(job_args.sst_views.iter(), max_parallel, |h| {
             SstIterator::new_borrowed_initialized(.., h, self.table_store.clone(), sst_iter_options)
         });
 
@@ -1064,7 +1064,7 @@ mod tests {
             id: Ulid::new(),
             compaction_id: Ulid::new(),
             destination: 0,
-            ssts: l0_ssts,
+            sst_views: l0_ssts,
             sorted_runs,
             output_ssts,
             compaction_clock_tick: 0,
@@ -1228,7 +1228,7 @@ mod tests {
                         id: Ulid::new(),
                         compaction_id: Ulid::new(),
                         destination: 0,
-                        ssts: l0_ssts.clone(),
+                        sst_views: l0_ssts.clone(),
                         sorted_runs: sorted_runs.clone(),
                         output_ssts: Vec::new(),
                         compaction_clock_tick: 0,
@@ -1273,7 +1273,7 @@ mod tests {
                             id: Ulid::new(),
                             compaction_id: Ulid::new(),
                             destination: 0,
-                            ssts: l0_ssts.clone(),
+                            sst_views: l0_ssts.clone(),
                             sorted_runs: sorted_runs.clone(),
                             output_ssts,
                             compaction_clock_tick: 0,
@@ -1394,7 +1394,7 @@ mod tests {
                 id: Ulid::new(),
                 compaction_id: Ulid::new(),
                 destination: 0,
-                ssts: ssts.into_iter().map(SsTableView::new).collect(),
+                sst_views: ssts.into_iter().map(SsTableView::new).collect(),
                 sorted_runs: vec![],
                 output_ssts: vec![],
                 compaction_clock_tick: 0,
