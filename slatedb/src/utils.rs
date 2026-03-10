@@ -831,7 +831,7 @@ mod tests {
         }
     }
 
-    fn make_compacted_sst(start_key: &str, size: u64) -> SsTableView {
+    fn make_sst_view(start_key: &str, size: u64) -> SsTableView {
         let info = SsTableInfo {
             first_entry: Some(Bytes::from(start_key.as_bytes().to_vec())),
             index_offset: size.saturating_sub(1),
@@ -1327,15 +1327,15 @@ mod tests {
         let run1 = SortedRun {
             id: 1,
             ssts: vec![
-                make_compacted_sst("a", 10),
-                make_compacted_sst("k", 20), // k < m < z, so only "a" counts
-                make_compacted_sst("z", 30),
+                make_sst_view("a", 10),
+                make_sst_view("k", 20), // k < m < z, so only "a" counts
+                make_sst_view("z", 30),
             ],
         };
         let run2 = SortedRun {
             id: 2,
             // f < m < ..., so only "b" counts
-            ssts: vec![make_compacted_sst("b", 40), make_compacted_sst("f", 50)],
+            ssts: vec![make_sst_view("b", 40), make_sst_view("f", 50)],
         };
 
         let key = Bytes::from("m");
