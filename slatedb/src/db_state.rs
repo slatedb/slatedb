@@ -331,19 +331,19 @@ pub struct SortedRun {
     /// The unique identifier for this sorted run.
     pub id: u32,
     /// The list of SSTable views in this sorted run.
-    pub ssts: Vec<SsTableView>,
+    pub sst_views: Vec<SsTableView>,
 }
 
 impl SortedRun {
     /// Estimate the total size of all SSTables in this sorted run.
     pub fn estimate_size(&self) -> u64 {
-        self.ssts.iter().map(|sst| sst.estimate_size()).sum()
+        self.sst_views.iter().map(|sst| sst.estimate_size()).sum()
     }
 
     pub(crate) fn find_sst_with_range_covering_key_idx(&self, key: &[u8]) -> Option<usize> {
         // returns the sst after the one whose range includes the key
         let first_sst = self
-            .ssts
+            .sst_views
             .partition_point(|sst| sst.compacted_effective_start_key() <= key);
         if first_sst > 0 {
             return Some(first_sst - 1);
@@ -354,18 +354,18 @@ impl SortedRun {
 
     pub(crate) fn find_sst_with_range_covering_key(&self, key: &[u8]) -> Option<&SsTableView> {
         self.find_sst_with_range_covering_key_idx(key)
-            .map(|idx| &self.ssts[idx])
+            .map(|idx| &self.sst_views[idx])
     }
 
     fn table_idx_covering_range(&self, range: &BytesRange) -> Range<usize> {
         let mut min_idx = None;
         let mut max_idx = 0;
 
-        for idx in 0..self.ssts.len() {
-            let current_sst = &self.ssts[idx];
+        for idx in 0..self.sst_views.len() {
+            let current_sst = &self.sst_views[idx];
 
-            let upper_bound = if idx + 1 < self.ssts.len() {
-                let next_sst = &self.ssts[idx + 1];
+            let upper_bound = if idx + 1 < self.sst_views.len() {
+                let next_sst = &self.sst_views[idx + 1];
                 Excluded(next_sst.compacted_effective_start_key().clone())
             } else {
                 Unbounded
@@ -388,7 +388,7 @@ impl SortedRun {
 
     pub(crate) fn tables_covering_range(&self, range: &BytesRange) -> VecDeque<&SsTableView> {
         let matching_range = self.table_idx_covering_range(range);
-        self.ssts[matching_range].iter().collect()
+        self.sst_views[matching_range].iter().collect()
     }
 
     pub(crate) fn into_tables_covering_range(
@@ -396,7 +396,7 @@ impl SortedRun {
         range: &BytesRange,
     ) -> VecDeque<SsTableView> {
         let matching_range = self.table_idx_covering_range(range);
-        self.ssts.drain(matching_range).collect()
+        self.sst_views.drain(matching_range).collect()
     }
 }
 
@@ -880,7 +880,10 @@ mod tests {
         for first_key in first_keys {
             ssts.push(create_compacted_sst_view(Some(first_key.clone())));
         }
-        SortedRun { id, ssts }
+        SortedRun {
+            id,
+            sst_views: ssts,
+        }
     }
 
     fn create_compacted_sst_view(first_entry: Option<Bytes>) -> SsTableView {

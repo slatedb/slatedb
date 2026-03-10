@@ -881,7 +881,10 @@ mod tests {
 
     fn create_sr(id: u32, sst_size: u64, num_ssts: usize) -> SortedRun {
         let ssts: Vec<SsTableView> = (0..num_ssts).map(|_| create_sst(sst_size)).collect();
-        SortedRun { id, ssts }
+        SortedRun {
+            id,
+            sst_views: ssts,
+        }
     }
 
     fn create_db_state(l0: VecDeque<SsTableView>, srs: Vec<SortedRun>) -> ManifestCore {

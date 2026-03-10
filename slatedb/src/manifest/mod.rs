@@ -65,7 +65,7 @@ impl Manifest {
             .core
             .compacted
             .iter()
-            .flat_map(|sr| sr.ssts.iter().map(|s| s.sst.id))
+            .flat_map(|sr| sr.sst_views.iter().map(|s| s.sst.id))
             .chain(parent_manifest.core.l0.iter().map(|s| s.sst.id))
             .filter(|id| !parent_external_sst_ids.contains(id))
             .collect();
@@ -92,7 +92,7 @@ impl Manifest {
         for sorter_run in &projected.core.compacted {
             sorter_runs_filtered.push(SortedRun {
                 id: sorter_run.id,
-                ssts: Self::filter_view_handles(&sorter_run.ssts, false, &range),
+                sst_views: Self::filter_view_handles(&sorter_run.sst_views, false, &range),
             });
         }
         projected.core.l0 = Self::filter_view_handles(&projected.core.l0, true, &range).into();
@@ -573,7 +573,7 @@ mod tests {
         for (idx, sorted_run) in manifest.sorted_runs.iter().enumerate() {
             core.compacted.push(SortedRun {
                 id: idx as u32,
-                ssts: sorted_run
+                sst_views: sorted_run
                     .iter()
                     .map(|entry| {
                         SsTableView::new_projected(

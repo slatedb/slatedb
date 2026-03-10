@@ -68,7 +68,7 @@ impl CompactedGcTask {
         let mut active_ssts = HashSet::new();
         for manifest in active_manifests.values() {
             for sr in manifest.core.compacted.iter() {
-                for view in sr.ssts.iter() {
+                for view in sr.sst_views.iter() {
                     active_ssts.insert(view.sst.id);
                 }
             }

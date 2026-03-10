@@ -1022,7 +1022,7 @@ mod tests {
         state.compacted.push(SortedRun {
             id: 1,
             // Don't add inactive_expired_sst_handle
-            ssts: vec![
+            sst_views: vec![
                 active_sst_handle.clone().into(),
                 active_expired_sst_handle.clone().into(),
             ],
@@ -1056,7 +1056,7 @@ mod tests {
         let current_manifest = manifest_store.read_latest_manifest().await.unwrap().1;
         assert_eq!(current_manifest.core.l0.len(), 2);
         assert_eq!(current_manifest.core.compacted.len(), 1);
-        assert_eq!(current_manifest.core.compacted[0].ssts.len(), 2);
+        assert_eq!(current_manifest.core.compacted[0].sst_views.len(), 2);
 
         // Start the garbage collector
         run_gc_once(
@@ -1088,7 +1088,7 @@ mod tests {
         let current_manifest = manifest_store.read_latest_manifest().await.unwrap().1;
         assert_eq!(current_manifest.core.l0.len(), 2);
         assert_eq!(current_manifest.core.compacted.len(), 1);
-        assert_eq!(current_manifest.core.compacted[0].ssts.len(), 2);
+        assert_eq!(current_manifest.core.compacted[0].sst_views.len(), 2);
     }
 
     /// This test creates six compacted SSTs:
@@ -1127,11 +1127,11 @@ mod tests {
             .push_back(active_checkpoint_l0_sst_handle.clone().into());
         state.compacted.push(SortedRun {
             id: 1,
-            ssts: vec![active_sst_handle.clone().into()],
+            sst_views: vec![active_sst_handle.clone().into()],
         });
         state.compacted.push(SortedRun {
             id: 2,
-            ssts: vec![active_checkpoint_sst_handle.clone().into()],
+            sst_views: vec![active_checkpoint_sst_handle.clone().into()],
         });
         let mut stored_manifest = StoredManifest::create_new_db(
             manifest_store.clone(),
@@ -1308,7 +1308,7 @@ mod tests {
             }
 
             for sr in &manifest.core.compacted {
-                for view in &sr.ssts {
+                for view in &sr.sst_views {
                     assert!(compacted_ssts.contains(&view.sst.id));
                 }
             }

@@ -512,11 +512,11 @@ mod tests {
 
             // Find or create the sorted run
             if let Some(sr) = self.core.compacted.iter_mut().find(|sr| sr.id == sr_id) {
-                sr.ssts.push(sst_handle.into());
+                sr.sst_views.push(sst_handle.into());
             } else {
                 let new_sr = SortedRun {
                     id: sr_id,
-                    ssts: vec![sst_handle.into()],
+                    sst_views: vec![sst_handle.into()],
                 };
                 self.core.compacted.push(new_sr);
             }

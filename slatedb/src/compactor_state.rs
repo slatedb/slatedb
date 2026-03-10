@@ -913,7 +913,7 @@ mod tests {
         let compacted_ssts = before_compaction.l0.iter().cloned().collect();
         let sr = SortedRun {
             id: 0,
-            ssts: compacted_ssts,
+            sst_views: compacted_ssts,
         };
         state.finish_compaction(compaction_id, sr.clone());
 
@@ -933,13 +933,13 @@ mod tests {
         assert_eq!(state.db_state().l0.len(), 0);
         assert_eq!(state.db_state().compacted.len(), 1);
         assert_eq!(state.db_state().compacted.first().unwrap().id, sr.id);
-        let expected_ids: Vec<SsTableId> = sr.ssts.iter().map(|h| h.sst.id).collect();
+        let expected_ids: Vec<SsTableId> = sr.sst_views.iter().map(|h| h.sst.id).collect();
         let found_ids: Vec<SsTableId> = state
             .db_state()
             .compacted
             .first()
             .unwrap()
-            .ssts
+            .sst_views
             .iter()
             .map(|h| h.sst.id)
             .collect();
@@ -963,7 +963,7 @@ mod tests {
         let compacted_ssts = before_compaction.l0.iter().cloned().collect();
         let sr = SortedRun {
             id: 0,
-            ssts: compacted_ssts,
+            sst_views: compacted_ssts,
         };
         state.finish_compaction(compaction_id, sr);
 
@@ -1028,7 +1028,7 @@ mod tests {
             compaction_id,
             SortedRun {
                 id: 0,
-                ssts: vec![original_l0s.back().unwrap().clone()],
+                sst_views: vec![original_l0s.back().unwrap().clone()],
             },
         );
         // open a new db and write another l0
@@ -1099,7 +1099,7 @@ mod tests {
             compaction_id,
             SortedRun {
                 id: 0,
-                ssts: original_l0s.clone().into(),
+                sst_views: original_l0s.clone().into(),
             },
         );
         assert_eq!(state.db_state().l0.len(), 0);
@@ -1264,7 +1264,7 @@ mod tests {
     fn sorted_run_to_description(sr: &SortedRun) -> SortedRunDescription {
         SortedRunDescription {
             id: sr.id,
-            ssts: sr.ssts.iter().map(|h| h.sst.id).collect(),
+            ssts: sr.sst_views.iter().map(|h| h.sst.id).collect(),
         }
     }
 

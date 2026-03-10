@@ -248,7 +248,7 @@ impl FlatBufferManifestCodec {
             }
             compacted.push(db_state::SortedRun {
                 id: manifest_sr.id(),
-                ssts,
+                sst_views: ssts,
             })
         }
         let checkpoints: Vec<checkpoint::Checkpoint> = manifest
@@ -354,7 +354,10 @@ impl FlatBufferManifestCodec {
                         .iter()
                         .map(|view| Self::decode_compacted_sst_view(&view, &sst_lookup))
                         .collect::<Result<_, _>>()?;
-                    Ok(db_state::SortedRun { id: sr.id(), ssts })
+                    Ok(db_state::SortedRun {
+                        id: sr.id(),
+                        sst_views: ssts,
+                    })
                 },
             )
             .collect::<Result<_, _>>()?;
@@ -699,7 +702,7 @@ impl<'b> DbFlatBufferBuilder<'b> {
         &mut self,
         sorted_run: &db_state::SortedRun,
     ) -> WIPOffset<SortedRunV2<'b>> {
-        let ssts = self.add_compacted_sst_views(sorted_run.ssts.iter());
+        let ssts = self.add_compacted_sst_views(sorted_run.sst_views.iter());
         SortedRunV2::create(
             &mut self.builder,
             &SortedRunV2Args {
@@ -867,7 +870,7 @@ impl<'b> DbFlatBufferBuilder<'b> {
             }
         }
         for sr in core.compacted.iter() {
-            for view in sr.ssts.iter() {
+            for view in sr.sst_views.iter() {
                 if let SsTableId::Compacted(ulid) = view.sst.id {
                     unique_ssts.entry(ulid).or_insert(&view.sst);
                 }
@@ -1152,14 +1155,14 @@ mod tests {
         manifest.core.compacted = vec![
             SortedRun {
                 id: 0,
-                ssts: vec![
+                sst_views: vec![
                     new_sst_handle(b"a", None),
                     new_sst_handle(b"d", Some(BytesRange::from_ref("e".."f"))),
                 ],
             },
             SortedRun {
                 id: 0,
-                ssts: vec![
+                sst_views: vec![
                     new_sst_handle(b"a", None),
                     new_sst_handle(b"c", Some(BytesRange::from_ref("c"..))),
                     new_sst_handle(b"d", Some(BytesRange::from_ref("e".."f"))),
@@ -1486,7 +1489,7 @@ mod tests {
         .into()]);
         manifest.core.compacted = vec![SortedRun {
             id: 1,
-            ssts: vec![SsTableHandle::new(
+            sst_views: vec![SsTableHandle::new(
                 SsTableId::Compacted(ulid::Ulid::new()),
                 SST_FORMAT_VERSION_LATEST,
                 SsTableInfo {
@@ -1508,7 +1511,7 @@ mod tests {
             SST_FORMAT_VERSION_LATEST
         );
         assert_eq!(
-            decoded.core.compacted[0].ssts[0].sst.format_version,
+            decoded.core.compacted[0].sst_views[0].sst.format_version,
             SST_FORMAT_VERSION_LATEST
         );
         assert_eq!(manifest, decoded);
@@ -1612,7 +1615,7 @@ mod tests {
             super::ORIGINAL_SST_FORMAT_VERSION
         );
         assert_eq!(
-            decoded.core.compacted[0].ssts[0].sst.format_version,
+            decoded.core.compacted[0].sst_views[0].sst.format_version,
             super::ORIGINAL_SST_FORMAT_VERSION
         );
     }

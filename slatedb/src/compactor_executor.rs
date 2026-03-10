@@ -454,7 +454,7 @@ impl TokioCompactionExecutorInner {
 
         Ok(SortedRun {
             id: args.destination,
-            ssts: output_ssts.into_iter().map(SsTableView::new).collect(),
+            sst_views: output_ssts.into_iter().map(SsTableView::new).collect(),
         })
     }
 
@@ -1034,7 +1034,7 @@ mod tests {
                 }
                 sorted_runs.push(SortedRun {
                     id: sr_id as u32,
-                    ssts: sr_ssts.into_iter().map(SsTableView::new).collect(),
+                    sst_views: sr_ssts.into_iter().map(SsTableView::new).collect(),
                 });
             }
         }
@@ -1239,7 +1239,7 @@ mod tests {
                     .unwrap();
 
                 let mut expected_entries = Vec::new();
-                for sst in &full_run.ssts {
+                for sst in &full_run.sst_views {
                     let mut iter = SstIterator::new(
                         SstView::Borrowed(sst, BytesRange::from(..)),
                         table_store.clone(),
@@ -1284,7 +1284,7 @@ mod tests {
                         .unwrap();
 
                     let mut resumed_entries = Vec::new();
-                    for sst in &resumed_run.ssts {
+                    for sst in &resumed_run.sst_views {
                         let mut iter = SstIterator::new(
                             SstView::Borrowed(sst, BytesRange::from(..)),
                             table_store.clone(),
@@ -1455,8 +1455,8 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(1, result.ssts.len());
-        let sst = result.ssts[0].clone();
+        assert_eq!(1, result.sst_views.len());
+        let sst = result.sst_views[0].clone();
         let mut iter = SstIterator::new(
             SstView::Borrowed(&sst, BytesRange::from(..)),
             table_store.clone(),
@@ -1597,8 +1597,8 @@ mod tests {
         let result = ctx.run_compaction(vec![l0], true, None).await.unwrap();
 
         // Verify the output SST
-        assert_eq!(1, result.ssts.len());
-        let sst = result.ssts[0].clone();
+        assert_eq!(1, result.sst_views.len());
+        let sst = result.sst_views[0].clone();
         let mut iter = SstIterator::new(
             SstView::Borrowed(&sst, BytesRange::from(..)),
             table_store.clone(),

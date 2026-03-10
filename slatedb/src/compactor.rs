@@ -1160,7 +1160,7 @@ mod tests {
         // then:
         let db_state = db_state.expect("db was not compacted");
         for run in db_state.compacted {
-            for sst in run.ssts {
+            for sst in run.sst_views {
                 let mut iter = SstIterator::new_borrowed_initialized(
                     ..,
                     &sst,
@@ -1270,7 +1270,7 @@ mod tests {
         .unwrap();
         assert_eq!(db_state.compacted.len(), 1);
 
-        let compacted = &db_state.compacted.first().unwrap().ssts;
+        let compacted = &db_state.compacted.first().unwrap().sst_views;
         assert_eq!(compacted.len(), 1);
         let handle = compacted.first().unwrap();
 
@@ -1368,7 +1368,7 @@ mod tests {
         .unwrap();
         assert_eq!(db_state.compacted.len(), 1);
 
-        let compacted = &db_state.compacted.first().unwrap().ssts;
+        let compacted = &db_state.compacted.first().unwrap().sst_views;
         assert_eq!(compacted.len(), 1);
         let handle = compacted.first().unwrap();
 
@@ -1503,7 +1503,7 @@ mod tests {
         // then:
         let db_state = db_state.expect("db was not compacted");
         assert_eq!(db_state.compacted.len(), 1);
-        let compacted = &db_state.compacted.first().unwrap().ssts;
+        let compacted = &db_state.compacted.first().unwrap().sst_views;
         assert_eq!(compacted.len(), 1);
         let handle = compacted.first().unwrap();
 
@@ -1641,7 +1641,7 @@ mod tests {
         // then:
         let db_state = db_state.expect("db was not compacted");
         assert_eq!(db_state.compacted.len(), 1);
-        let compacted = &db_state.compacted.first().unwrap().ssts;
+        let compacted = &db_state.compacted.first().unwrap().sst_views;
         assert_eq!(compacted.len(), 1);
         let handle = compacted.first().unwrap();
 
@@ -1758,7 +1758,7 @@ mod tests {
         // then:
         let db_state = db_state.expect("db was not compacted");
         assert_eq!(db_state.compacted.len(), 1);
-        let compacted = &db_state.compacted.first().unwrap().ssts;
+        let compacted = &db_state.compacted.first().unwrap().sst_views;
         assert_eq!(compacted.len(), 1);
         let handle = compacted.first().unwrap();
 
@@ -1887,7 +1887,7 @@ mod tests {
         // then:
         let db_state = db_state.expect("db was not compacted");
         assert_eq!(db_state.compacted.len(), 1);
-        let compacted = &db_state.compacted.first().unwrap().ssts;
+        let compacted = &db_state.compacted.first().unwrap().sst_views;
         assert_eq!(compacted.len(), 1);
         let handle = compacted.first().unwrap();
 
@@ -1985,7 +1985,7 @@ mod tests {
         assert_eq!(db_state.last_l0_clock_tick, 20);
 
         // then: the compacted SST should only contain the non-expired merge
-        let compacted = &db_state.compacted.first().unwrap().ssts;
+        let compacted = &db_state.compacted.first().unwrap().sst_views;
         assert_eq!(compacted.len(), 1);
         let handle = compacted.first().unwrap();
 
@@ -2202,7 +2202,7 @@ mod tests {
         );
 
         // The compacted sorted run should contain both merge operations separately
-        let compacted = &db_state.compacted.first().unwrap().ssts;
+        let compacted = &db_state.compacted.first().unwrap().sst_views;
         assert_eq!(compacted.len(), 1);
         let handle = compacted.first().unwrap();
 
@@ -2340,7 +2340,7 @@ mod tests {
         assert!(db_state.l0_last_compacted.is_some());
         assert_eq!(db_state.compacted.len(), 1);
         assert_eq!(db_state.last_l0_clock_tick, 70);
-        let compacted = &db_state.compacted.first().unwrap().ssts;
+        let compacted = &db_state.compacted.first().unwrap().sst_views;
         assert_eq!(compacted.len(), 1);
         let handle = compacted.first().unwrap();
         let mut iter = SstIterator::new_borrowed_initialized(
@@ -2566,7 +2566,7 @@ mod tests {
         dirty.value.core.compacted = vec![
             SortedRun {
                 id: 2,
-                ssts: vec![SsTableHandle::new(
+                sst_views: vec![SsTableHandle::new(
                     SsTableId::Compacted(Ulid::new()),
                     SST_FORMAT_VERSION_LATEST,
                     sr_info.clone(),
@@ -2575,7 +2575,7 @@ mod tests {
             },
             SortedRun {
                 id: 1,
-                ssts: vec![SsTableHandle::new(
+                sst_views: vec![SsTableHandle::new(
                     SsTableId::Compacted(Ulid::new()),
                     SST_FORMAT_VERSION_LATEST,
                     sr_info.clone(),
@@ -2675,7 +2675,7 @@ mod tests {
         core.compacted = vec![
             SortedRun {
                 id: 5,
-                ssts: vec![SsTableHandle::new(
+                sst_views: vec![SsTableHandle::new(
                     SsTableId::Compacted(Ulid::from_parts(10, 0)),
                     SST_FORMAT_VERSION_LATEST,
                     sr_info.clone(),
@@ -2684,7 +2684,7 @@ mod tests {
             },
             SortedRun {
                 id: 2,
-                ssts: vec![SsTableHandle::new(
+                sst_views: vec![SsTableHandle::new(
                     SsTableId::Compacted(Ulid::from_parts(11, 0)),
                     SST_FORMAT_VERSION_LATEST,
                     sr_info,
@@ -2922,7 +2922,7 @@ mod tests {
             .compacted
             .first()
             .unwrap()
-            .ssts
+            .sst_views
             .iter()
             .map(|view| view.sst.id.unwrap_compacted_id())
             .collect();
@@ -3323,7 +3323,7 @@ mod tests {
         let db_state = handler.state().db_state().clone();
         let output_sr = SortedRun {
             id: jobs[0].destination,
-            ssts: db_state.l0.iter().cloned().collect(),
+            sst_views: db_state.l0.iter().cloned().collect(),
         };
         let msg = CompactorMessage::CompactionJobFinished {
             id: compaction_id,
@@ -3436,7 +3436,7 @@ mod tests {
         let db_state = fixture.latest_db_state().await;
         let output_sr = SortedRun {
             id: compaction.destination(),
-            ssts: db_state.l0.iter().cloned().collect(),
+            sst_views: db_state.l0.iter().cloned().collect(),
         };
         let msg = CompactorMessage::CompactionJobFinished {
             id: job.id,

@@ -466,7 +466,7 @@ pub(crate) fn sign_extend(val: u32, bits: u8) -> i32 {
 /// Returns:
 /// - The effective max parallelism.
 pub(crate) fn compute_max_parallel(l0_count: usize, srs: &[SortedRun], cap: usize) -> usize {
-    let total_ssts = l0_count + srs.iter().map(|sr| sr.ssts.len()).sum::<usize>();
+    let total_ssts = l0_count + srs.iter().map(|sr| sr.sst_views.len()).sum::<usize>();
     total_ssts.min(cap).max(1)
 }
 
@@ -492,7 +492,7 @@ pub(crate) fn estimate_bytes_before_key(sorted_runs: &[SortedRun], key: &Bytes) 
                 return 0;
             };
             sorted_run
-                .ssts
+                .sst_views
                 .iter()
                 .take(idx)
                 .map(|sst| sst.estimate_size())
@@ -738,7 +738,12 @@ pub(crate) async fn preload_cache_from_manifest(
     match preload_level {
         Some(PreloadLevel::AllSst) => {
             let mut all_sst_paths: Vec<object_store::path::Path> = Vec::with_capacity(
-                core.l0.len() + core.compacted.iter().map(|sr| sr.ssts.len()).sum::<usize>(),
+                core.l0.len()
+                    + core
+                        .compacted
+                        .iter()
+                        .map(|sr| sr.sst_views.len())
+                        .sum::<usize>(),
             );
             all_sst_paths.extend(
                 core.l0
@@ -748,7 +753,7 @@ pub(crate) async fn preload_cache_from_manifest(
             all_sst_paths.extend(
                 core.compacted
                     .iter()
-                    .flat_map(|sr| &sr.ssts)
+                    .flat_map(|sr| &sr.sst_views)
                     .map(|view| path_resolver.table_path(&view.sst.id)),
             );
             if !all_sst_paths.is_empty() {
@@ -1327,7 +1332,7 @@ mod tests {
     fn test_estimate_bytes_before_key() {
         let run1 = SortedRun {
             id: 1,
-            ssts: vec![
+            sst_views: vec![
                 make_sst_view("a", 10),
                 make_sst_view("k", 20), // k < m < z, so only "a" counts
                 make_sst_view("z", 30),
@@ -1336,7 +1341,7 @@ mod tests {
         let run2 = SortedRun {
             id: 2,
             // f < m < ..., so only "b" counts
-            ssts: vec![make_sst_view("b", 40), make_sst_view("f", 50)],
+            sst_views: vec![make_sst_view("b", 40), make_sst_view("f", 50)],
         };
 
         let key = Bytes::from("m");
