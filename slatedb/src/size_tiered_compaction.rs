@@ -216,7 +216,7 @@ impl CompactionScheduler for SizeTieredCompactionScheduler {
             .manifest()
             .l0
             .iter()
-            .map(|sst| SourceId::Sst(sst.sst.id.unwrap_compacted_id()))
+            .map(|view| SourceId::Sst(view.sst.id.unwrap_compacted_id()))
             .chain(
                 state
                     .manifest()

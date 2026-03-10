@@ -2422,11 +2422,11 @@ mod tests {
 
         let state = db.inner.state.read().view();
         assert_eq!(1, state.state.manifest.value.core.l0.len());
-        let sst = state.state.manifest.value.core.l0.front().unwrap();
+        let view = state.state.manifest.value.core.l0.front().unwrap();
         let index = db
             .inner
             .table_store
-            .read_index(&sst.sst, true)
+            .read_index(&view.sst, true)
             .await
             .unwrap();
         assert!(!index.borrow().block_meta().is_empty());

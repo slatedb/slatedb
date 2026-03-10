@@ -68,12 +68,12 @@ impl CompactedGcTask {
         let mut active_ssts = HashSet::new();
         for manifest in active_manifests.values() {
             for sr in manifest.core.compacted.iter() {
-                for sst in sr.ssts.iter() {
-                    active_ssts.insert(sst.sst.id);
+                for view in sr.ssts.iter() {
+                    active_ssts.insert(view.sst.id);
                 }
             }
-            for sst in manifest.core.l0.iter() {
-                active_ssts.insert(sst.sst.id);
+            for view in manifest.core.l0.iter() {
+                active_ssts.insert(view.sst.id);
             }
         }
         Ok(active_ssts)
@@ -103,7 +103,7 @@ impl CompactedGcTask {
                 .core
                 .l0
                 .iter()
-                .map(|sst| DateTime::<Utc>::from(sst.sst.id.unwrap_compacted_id().datetime()))
+                .map(|view| DateTime::<Utc>::from(view.sst.id.unwrap_compacted_id().datetime()))
                 .collect::<Vec<_>>()
         } else if let Some(l0_last_compacted) = manifest.core.l0_last_compacted {
             // Else fall back to the last compacted L0, which can serve as a conservative barrier

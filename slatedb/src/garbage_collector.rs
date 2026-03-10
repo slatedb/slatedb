@@ -1305,13 +1305,13 @@ mod tests {
                 assert!(wal_ssts.contains(&SsTableId::Wal(wal_sst_id)));
             }
 
-            for sst in &manifest.core.l0 {
-                assert!(compacted_ssts.contains(&sst.sst.id));
+            for view in &manifest.core.l0 {
+                assert!(compacted_ssts.contains(&view.sst.id));
             }
 
             for sr in &manifest.core.compacted {
-                for sst in &sr.ssts {
-                    assert!(compacted_ssts.contains(&sst.sst.id));
+                for view in &sr.ssts {
+                    assert!(compacted_ssts.contains(&view.sst.id));
                 }
             }
         }

@@ -660,7 +660,7 @@ impl<'a> StateModifier<'a> {
                 .l0
                 .iter()
                 .cloned()
-                .take_while(|sst| sst.sst.id.unwrap_compacted_id() != *l0_last_compacted)
+                .take_while(|view| view.sst.id.unwrap_compacted_id() != *l0_last_compacted)
                 .collect()
         } else {
             self.state.manifest.value.core.l0.iter().cloned().collect()

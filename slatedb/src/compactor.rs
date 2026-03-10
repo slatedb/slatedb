@@ -175,7 +175,7 @@ pub trait CompactionScheduler: Send + Sync {
                 let sources = manifest
                     .l0
                     .iter()
-                    .map(|sst| SourceId::Sst(sst.sst.id.unwrap_compacted_id()))
+                    .map(|view| SourceId::Sst(view.sst.id.unwrap_compacted_id()))
                     .chain(
                         manifest
                             .compacted
@@ -606,8 +606,8 @@ impl CompactorEventHandler {
         let ssts_by_id: HashMap<Ulid, &SsTableView> = db_state
             .l0
             .iter()
-            .map(|sst| match sst.sst.id {
-                SsTableId::Compacted(id) => (id, sst),
+            .map(|view| match view.sst.id {
+                SsTableId::Compacted(id) => (id, view),
                 SsTableId::Wal(_) => unreachable!("L0 SSTs should never have SsTableId::Wal"),
             })
             .collect();
@@ -691,7 +691,7 @@ impl CompactorEventHandler {
         let l0_ids = db_state
             .l0
             .iter()
-            .filter_map(|sst| match sst.sst.id {
+            .filter_map(|view| match view.sst.id {
                 crate::db_state::SsTableId::Compacted(id) => Some(id),
                 crate::db_state::SsTableId::Wal(_) => None,
             })
@@ -2918,7 +2918,7 @@ mod tests {
             .unwrap()
             .ssts
             .iter()
-            .map(|sst| sst.sst.id.unwrap_compacted_id())
+            .map(|view| view.sst.id.unwrap_compacted_id())
             .collect();
         assert!(!compacted_l0s.contains(&l0_id));
         assert_eq!(
@@ -3504,7 +3504,7 @@ mod tests {
             .core
             .l0
             .iter()
-            .map(|sst| SourceId::Sst(sst.sst.id.unwrap_compacted_id()))
+            .map(|view| SourceId::Sst(view.sst.id.unwrap_compacted_id()))
             .collect();
         assert_eq!(&l0_ids, compaction.sources());
     }
