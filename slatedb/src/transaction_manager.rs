@@ -250,9 +250,6 @@ impl TransactionManager {
 
     /// Record a recent committed transaction for conflict detection.
     /// This method should be called after confirming no conflicts exist.
-    ///
-    /// The transaction will be moved from active_txns to recent_committed_txns
-    /// for future conflict checking with other transactions.
     pub(crate) fn track_recent_committed_txn(&self, txn_id: &Uuid, committed_seq: u64) {
         // remove the transaction from active_txns, and add it to recent_committed_txns
         let mut inner = self.inner.write();
@@ -264,7 +261,7 @@ impl TransactionManager {
                 unreachable!("attempted to commit a read-only transaction");
             }
             txn_state.mark_as_committed(committed_seq);
-            inner.recent_committed_txns.push_back(txn_state);
+            inner.track_recent_committed_state(txn_state);
         }
 
         // update the last_committed_seq, so the writes will be visible to the readers.
@@ -274,6 +271,9 @@ impl TransactionManager {
     /// Track a write batch for conflict detection. This is used for regular write operations
     /// that are not part of an explicit transaction but still need to be tracked for conflict
     /// detection with concurrent transactions.
+    ///
+    /// The synthetic committed state is only retained while there is at least one active
+    /// non-readonly transaction that could still conflict with it.
     pub(crate) fn track_recent_committed_write_batch(
         &self,
         keys: &HashSet<Bytes>,
@@ -282,7 +282,7 @@ impl TransactionManager {
         // remove the transaction from active_txns, and add it to recent_committed_txns
         let mut inner = self.inner.write();
 
-        inner.recent_committed_txns.push_back(TransactionState {
+        inner.track_recent_committed_state(TransactionState {
             read_only: false,
             started_seq: committed_seq,
             committed_seq: Some(committed_seq),
@@ -313,6 +313,16 @@ impl TransactionManager {
 }
 
 impl TransactionManagerInner {
+    fn track_recent_committed_state(&mut self, txn_state: TransactionState) {
+        self.recent_committed_txns.push_back(txn_state);
+
+        if self.min_conflict_check_seq().is_none() {
+            // No active write transactions remain, so there is nobody left that can
+            // conflict with this committed state or any older committed state.
+            self.recent_committed_txns.clear();
+        }
+    }
+
     /// The min started_seq of all non-readonly transactions, this seq is useful to garbage
     /// collect the entries in the `recent_committed_txns` deque.
     fn min_conflict_check_seq(&self) -> Option<u64> {
@@ -983,6 +993,21 @@ mod tests {
     }
 
     #[test]
+    fn test_non_transactional_writes_do_not_accumulate_without_active_writers() {
+        let txn_manager = create_transaction_manager();
+
+        let keys: HashSet<Bytes> = ["key1", "key2"].into_iter().map(Bytes::from).collect();
+
+        txn_manager.track_recent_committed_write_batch(&keys, 100);
+        txn_manager.track_recent_committed_write_batch(&keys, 200);
+        txn_manager.track_recent_committed_write_batch(&keys, 300);
+
+        let inner = txn_manager.inner.read();
+        assert!(inner.recent_committed_txns.is_empty());
+        assert_eq!(inner.oracle.last_committed_seq(), 300);
+    }
+
+    #[test]
     fn test_recycle_recent_committed_txns_boundary_condition_equal_seq() {
         let txn_manager = create_transaction_manager();
 
@@ -1029,14 +1054,16 @@ mod tests {
             });
         }
 
+        // Keep active write transactions around so the committed history is retained
+        // until we explicitly trigger recycle.
+        let _active_txn1 = txn_manager.new_txn_with_id(150, false, Uuid::new_v4()); // This sets min to 150
+        let active_txn2 = txn_manager.new_txn_with_id(200, false, Uuid::new_v4());
+
         // Add a normal committed transaction
         let keys: HashSet<Bytes> = ["key1"].into_iter().map(Bytes::from).collect();
         txn_manager.track_recent_committed_write_batch(&keys, 100);
 
-        // Create active transactions and trigger garbage collection
-        let _active_txn1 = txn_manager.new_txn_with_id(150, false, Uuid::new_v4()); // This sets min to 150
-        let active_txn2 = txn_manager.new_txn_with_id(200, false, Uuid::new_v4());
-
+        // Trigger garbage collection with min_conflict_check_seq = 150
         txn_manager.drop_txn(&active_txn2);
 
         // The transaction with None committed_seq should be kept (safety)
@@ -1082,7 +1109,7 @@ mod tests {
 
         // Step 7: Verify final state
         assert!(txn_manager.inner.read().active_txns.is_empty());
-        assert_eq!(txn_manager.inner.read().recent_committed_txns.len(), 2);
+        assert!(txn_manager.inner.read().recent_committed_txns.is_empty());
 
         // Step 8: Verify min_active_seq is now None
         assert_eq!(txn_manager.min_active_seq(), None);
