@@ -714,7 +714,7 @@ mod tests {
     use crate::db_cache::test_utils::TestCache;
     use crate::db_cache::SplitCache;
     use crate::db_cache::{DbCache, DbCacheWrapper};
-    use crate::db_state::SsTableView;
+
     use crate::error;
     use crate::format::block::Block;
     use crate::format::sst::SsTableFormat;
@@ -801,15 +801,11 @@ mod tests {
             ..SstIteratorOptions::default()
         };
         // then:
-        let mut iter = SstIterator::new_owned_initialized(
-            ..,
-            SsTableView::new(sst),
-            ts.clone(),
-            sst_iter_options,
-        )
-        .await
-        .unwrap()
-        .expect("Expected Some(iter) but got None");
+        let mut iter =
+            SstIterator::new_owned_initialized(.., sst.into(), ts.clone(), sst_iter_options)
+                .await
+                .unwrap()
+                .expect("Expected Some(iter) but got None");
         assert_iterator(
             &mut iter,
             vec![
@@ -874,15 +870,11 @@ mod tests {
             ..SstIteratorOptions::default()
         };
         // then:
-        let mut iter = SstIterator::new_owned_initialized(
-            ..,
-            SsTableView::new(sst),
-            ts.clone(),
-            sst_iter_options,
-        )
-        .await
-        .unwrap()
-        .expect("Expected Some(iter) but got None");
+        let mut iter =
+            SstIterator::new_owned_initialized(.., sst.into(), ts.clone(), sst_iter_options)
+                .await
+                .unwrap()
+                .expect("Expected Some(iter) but got None");
         assert_iterator(
             &mut iter,
             vec![

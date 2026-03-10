@@ -247,7 +247,7 @@ impl CompactionExecuteBench {
         info!("finished loading");
         let ssts: Vec<SsTableView> = sst_ids
             .into_iter()
-            .map(|id| SsTableView::new(ssts_by_id.get(&id).expect("expected sst").clone()))
+            .map(|id| ssts_by_id.get(&id).expect("expected sst").clone().into())
             .collect();
         Ok(StartCompactionJobArgs {
             id: rand.rng().gen_ulid(system_clock.as_ref()),

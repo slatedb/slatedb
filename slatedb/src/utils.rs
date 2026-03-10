@@ -838,11 +838,12 @@ mod tests {
             index_len: 1,
             ..Default::default()
         };
-        SsTableView::new(SsTableHandle::new(
+        SsTableHandle::new(
             SsTableId::Compacted(Ulid::new()),
             SST_FORMAT_VERSION_LATEST,
             info,
-        ))
+        )
+        .into()
     }
 
     #[test]

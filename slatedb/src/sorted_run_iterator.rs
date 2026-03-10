@@ -240,7 +240,7 @@ mod tests {
         let handle = table_store.write_sst(&id, encoded, false).await.unwrap();
         let sr = SortedRun {
             id: 0,
-            ssts: vec![SsTableView::new(handle)],
+            ssts: vec![handle.into()],
         };
 
         let mut iter = SortedRunIterator::new_owned_initialized(
@@ -301,7 +301,7 @@ mod tests {
         let handle2 = table_store.write_sst(&id2, encoded, false).await.unwrap();
         let sr = SortedRun {
             id: 0,
-            ssts: vec![SsTableView::new(handle1), SsTableView::new(handle2)],
+            ssts: vec![handle1.into(), handle2.into()],
         };
 
         let mut iter = SortedRunIterator::new_owned_initialized(
@@ -513,7 +513,7 @@ mod tests {
             let encoded = builder.build().await.unwrap();
             let id = SsTableId::Compacted(ulid::Ulid::new());
             let handle = table_store.write_sst(&id, encoded, false).await.unwrap();
-            ssts.push(SsTableView::new(handle));
+            ssts.push(handle.into());
         }
 
         SortedRun { id: 0, ssts }
@@ -535,7 +535,7 @@ mod tests {
                 writer.add(entry).await.unwrap();
             }
             let sst = writer.close().await.unwrap();
-            ssts.push(SsTableView::new(sst));
+            ssts.push(sst.into());
         }
         SortedRun { id: 0, ssts }
     }
@@ -614,10 +614,10 @@ mod tests {
             let sorted_run = SortedRun {
                 id: 0,
                 ssts: vec![
-                    SsTableView::new(sst1_v1),
-                    SsTableView::new(sst2_v2),
-                    SsTableView::new(sst3_v1),
-                    SsTableView::new(sst4_v2),
+                    sst1_v1.into(),
+                    sst2_v2.into(),
+                    sst3_v1.into(),
+                    sst4_v2.into(),
                 ],
             };
 
@@ -685,10 +685,10 @@ mod tests {
             let sorted_run = SortedRun {
                 id: 0,
                 ssts: vec![
-                    SsTableView::new(sst1_v1),
-                    SsTableView::new(sst2_v2),
-                    SsTableView::new(sst3_v1),
-                    SsTableView::new(sst4_v2),
+                    sst1_v1.into(),
+                    sst2_v2.into(),
+                    sst3_v1.into(),
+                    sst4_v2.into(),
                 ],
             };
 

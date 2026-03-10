@@ -863,11 +863,12 @@ mod tests {
             compression_codec: None,
             ..Default::default()
         };
-        SsTableView::new(SsTableHandle::new(
+        SsTableHandle::new(
             SsTableId::Compacted(ulid::Ulid::new()),
             SST_FORMAT_VERSION_LATEST,
             info,
-        ))
+        )
+        .into()
     }
 
     fn create_sr2(id: u32, size: u64) -> SortedRun {

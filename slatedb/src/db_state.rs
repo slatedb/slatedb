@@ -225,6 +225,12 @@ impl SsTableView {
     }
 }
 
+impl From<SsTableHandle> for SsTableView {
+    fn from(sst: SsTableHandle) -> Self {
+        Self::new(sst)
+    }
+}
+
 /// An identifier for an SSTable, which can be either a WAL SST or a compacted SST.
 #[derive(Clone, PartialEq, Hash, Eq, Copy, Serialize)]
 pub enum SsTableId {
@@ -818,7 +824,7 @@ mod tests {
                 SST_FORMAT_VERSION_LATEST,
                 dummy_info.clone(),
             );
-            let view = SsTableView::new(handle);
+            let view = handle.into();
             db_state.modify(|modifier| {
                 modifier.state.manifest.value.core.l0.push_front(view);
                 modifier.state.manifest.value.core.replay_after_wal_id =
@@ -881,7 +887,7 @@ mod tests {
         let sst_info = create_sst_info(first_entry);
         let sst_id = SsTableId::Compacted(ulid::Ulid::new());
         let handle = SsTableHandle::new(sst_id, SST_FORMAT_VERSION_LATEST, sst_info);
-        SsTableView::new(handle)
+        handle.into()
     }
 
     fn create_sst_info(first_entry: Option<Bytes>) -> SsTableInfo {

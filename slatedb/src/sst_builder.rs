@@ -1042,7 +1042,7 @@ mod tests {
         let encoded = builder.build().await?;
 
         let sst_id = SsTableId::Wal(0);
-        let sst_handle = SsTableView::new(table_store.write_sst(&sst_id, encoded, false).await?)
+        let sst_handle = SsTableView::from(table_store.write_sst(&sst_id, encoded, false).await?)
             .with_visible_range(BytesRange::from_ref("c"..="f"));
 
         let expected_entries = vec![
@@ -1337,7 +1337,7 @@ mod tests {
         // when: reading the SST back
         let mut iter = SstIterator::new_owned_initialized(
             ..,
-            SsTableView::new(sst_handle),
+            sst_handle.into(),
             Arc::new(table_store),
             SstIteratorOptions::default(),
         )
@@ -1401,7 +1401,7 @@ mod tests {
         // when: reading the SST back
         let mut iter = SstIterator::new_owned_initialized(
             ..,
-            SsTableView::new(sst_handle),
+            sst_handle.into(),
             Arc::new(table_store),
             SstIteratorOptions::default(),
         )

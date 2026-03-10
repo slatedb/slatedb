@@ -1053,9 +1053,7 @@ mod tests {
         SizeTieredCompactionSchedulerOptions, Ttl, WriteOptions,
     };
     use crate::db::Db;
-    use crate::db_state::{
-        ManifestCore, SortedRun, SsTableHandle, SsTableId, SsTableInfo, SsTableView,
-    };
+    use crate::db_state::{ManifestCore, SortedRun, SsTableHandle, SsTableId, SsTableInfo};
     use crate::error::SlateDBError;
     use crate::format::sst::{SsTableFormat, SST_FORMAT_VERSION_LATEST};
     use crate::iter::RowEntryIterator;
@@ -2552,33 +2550,37 @@ mod tests {
             ..SsTableInfo::default()
         };
         dirty.value.core.l0 = VecDeque::from(vec![
-            SsTableView::new(SsTableHandle::new(
+            SsTableHandle::new(
                 SsTableId::Compacted(l0_newest),
                 SST_FORMAT_VERSION_LATEST,
                 l0_info.clone(),
-            )),
-            SsTableView::new(SsTableHandle::new(
+            )
+            .into(),
+            SsTableHandle::new(
                 SsTableId::Compacted(l0_oldest),
                 SST_FORMAT_VERSION_LATEST,
                 l0_info.clone(),
-            )),
+            )
+            .into(),
         ]);
         dirty.value.core.compacted = vec![
             SortedRun {
                 id: 2,
-                ssts: vec![SsTableView::new(SsTableHandle::new(
+                ssts: vec![SsTableHandle::new(
                     SsTableId::Compacted(Ulid::new()),
                     SST_FORMAT_VERSION_LATEST,
                     sr_info.clone(),
-                ))],
+                )
+                .into()],
             },
             SortedRun {
                 id: 1,
-                ssts: vec![SsTableView::new(SsTableHandle::new(
+                ssts: vec![SsTableHandle::new(
                     SsTableId::Compacted(Ulid::new()),
                     SST_FORMAT_VERSION_LATEST,
                     sr_info.clone(),
-                ))],
+                )
+                .into()],
             },
         ];
         stored_manifest.update(dirty).await.unwrap();
@@ -2657,33 +2659,37 @@ mod tests {
             ..SsTableInfo::default()
         };
         core.l0 = VecDeque::from(vec![
-            SsTableView::new(SsTableHandle::new(
+            SsTableHandle::new(
                 SsTableId::Compacted(l0_first),
                 SST_FORMAT_VERSION_LATEST,
                 l0_info.clone(),
-            )),
-            SsTableView::new(SsTableHandle::new(
+            )
+            .into(),
+            SsTableHandle::new(
                 SsTableId::Compacted(l0_second),
                 SST_FORMAT_VERSION_LATEST,
                 l0_info,
-            )),
+            )
+            .into(),
         ]);
         core.compacted = vec![
             SortedRun {
                 id: 5,
-                ssts: vec![SsTableView::new(SsTableHandle::new(
+                ssts: vec![SsTableHandle::new(
                     SsTableId::Compacted(Ulid::from_parts(10, 0)),
                     SST_FORMAT_VERSION_LATEST,
                     sr_info.clone(),
-                ))],
+                )
+                .into()],
             },
             SortedRun {
                 id: 2,
-                ssts: vec![SsTableView::new(SsTableHandle::new(
+                ssts: vec![SsTableHandle::new(
                     SsTableId::Compacted(Ulid::from_parts(11, 0)),
                     SST_FORMAT_VERSION_LATEST,
                     sr_info,
-                ))],
+                )
+                .into()],
             },
         ];
         let state = CompactorStateView {

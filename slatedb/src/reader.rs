@@ -415,7 +415,7 @@ mod tests {
 
     use crate::batch::WriteBatch;
     use crate::clock::MonotonicClock;
-    use crate::db_state::{SortedRun, SsTableHandle, SsTableId, SsTableView};
+    use crate::db_state::{SortedRun, SsTableHandle, SsTableId};
     use crate::format::sst::SsTableFormat;
     use crate::object_stores::ObjectStores;
     use crate::oracle::DbReaderOracle;
@@ -495,7 +495,7 @@ mod tests {
                 return Ok(());
             }
             let sst_handle = self.build_sst(entries).await?;
-            self.core.l0.push_front(SsTableView::new(sst_handle));
+            self.core.l0.push_front(sst_handle.into());
             Ok(())
         }
 
@@ -512,11 +512,11 @@ mod tests {
 
             // Find or create the sorted run
             if let Some(sr) = self.core.compacted.iter_mut().find(|sr| sr.id == sr_id) {
-                sr.ssts.push(SsTableView::new(sst_handle));
+                sr.ssts.push(sst_handle.into());
             } else {
                 let new_sr = SortedRun {
                     id: sr_id,
-                    ssts: vec![SsTableView::new(sst_handle)],
+                    ssts: vec![sst_handle.into()],
                 };
                 self.core.compacted.push(new_sr);
             }

@@ -63,7 +63,7 @@ mod tests {
     use crate::checkpoint::CheckpointCreateResult;
     use crate::config::{CheckpointOptions, CheckpointScope, Settings};
     use crate::db::Db;
-    use crate::db_state::{SsTableId, SsTableView};
+    use crate::db_state::SsTableId;
     use crate::format::sst::SsTableFormat;
     use crate::iter::RowEntryIterator;
     use crate::manifest::store::ManifestStore;
@@ -394,7 +394,7 @@ mod tests {
             path.clone(),
             None,
         ));
-        let sst_handle = SsTableView::new(table_store.open_sst(table_id).await.unwrap());
+        let sst_handle = table_store.open_sst(table_id).await.unwrap().into();
 
         let mut sst_iter = SstIterator::for_key_with_stats_initialized(
             &sst_handle,
