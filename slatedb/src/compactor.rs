@@ -883,7 +883,7 @@ impl CompactorEventHandler {
             id: job_id,
             compaction_id: compaction.id(),
             destination: spec.destination(),
-            sst_views: sst_views,
+            sst_views,
             sorted_runs,
             output_ssts: compaction.output_ssts().clone(),
             compaction_clock_tick: db_state.last_l0_clock_tick,
