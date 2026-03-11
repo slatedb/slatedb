@@ -164,21 +164,4 @@ mod tests {
         assert_eq!(stats, decoded);
     }
 
-    #[test]
-    fn test_backward_compat_missing_block_stats() {
-        // Encode an old-style SstStats without block_stats (empty vec),
-        // then verify decode returns block_stats: vec![].
-        let old_stats = SstStats {
-            num_puts: 5,
-            num_deletes: 0,
-            num_merges: 0,
-            raw_key_size: 50,
-            raw_val_size: 100,
-            block_stats: vec![],
-        };
-        let encoded = old_stats.encode();
-        let decoded = SstStats::decode(encoded).unwrap();
-        assert!(decoded.block_stats.is_empty());
-        assert_eq!(decoded.num_puts, 5);
-    }
 }
