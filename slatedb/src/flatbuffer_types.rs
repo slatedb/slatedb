@@ -23,9 +23,8 @@ use crate::db_state::{ManifestCore, SsTableHandle};
 mod root_generated;
 pub(crate) use root_generated::{
     BlockMeta, BlockMetaArgs, BlockStats as FbBlockStats, BlockStatsArgs as FbBlockStatsArgs,
-    ManifestV1, ManifestV1Args, SsTableIndex, SsTableIndexArgs,
-    SsTableInfo as FbSsTableInfo, SsTableInfoArgs, SstStats as FbSstStats,
-    SstStatsArgs as FbSstStatsArgs,
+    ManifestV1, ManifestV1Args, SsTableIndex, SsTableIndexArgs, SsTableInfo as FbSsTableInfo,
+    SsTableInfoArgs, SstStats as FbSstStats, SstStatsArgs as FbSstStatsArgs,
 };
 
 use crate::config::CompressionCodec;

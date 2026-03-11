@@ -163,5 +163,4 @@ mod tests {
         let decoded = SstStats::decode(encoded).unwrap();
         assert_eq!(stats, decoded);
     }
-
 }
