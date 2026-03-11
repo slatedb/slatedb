@@ -1940,7 +1940,7 @@ impl<'a> flatbuffers::Follow<'a> for CompactedSsTableView<'a> {
 }
 
 impl<'a> CompactedSsTableView<'a> {
-  pub const VT_ID: flatbuffers::VOffsetT = 4;
+  pub const VT_SST_ID: flatbuffers::VOffsetT = 4;
   pub const VT_VISIBLE_RANGE: flatbuffers::VOffsetT = 6;
 
   #[inline]
@@ -1954,17 +1954,17 @@ impl<'a> CompactedSsTableView<'a> {
   ) -> flatbuffers::WIPOffset<CompactedSsTableView<'bldr>> {
     let mut builder = CompactedSsTableViewBuilder::new(_fbb);
     if let Some(x) = args.visible_range { builder.add_visible_range(x); }
-    if let Some(x) = args.id { builder.add_id(x); }
+    if let Some(x) = args.sst_id { builder.add_sst_id(x); }
     builder.finish()
   }
 
 
   #[inline]
-  pub fn id(&self) -> Ulid<'a> {
+  pub fn sst_id(&self) -> Ulid<'a> {
     // Safety:
     // Created from valid Table for this object
     // which contains a valid value in this slot
-    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<Ulid>>(CompactedSsTableView::VT_ID, None).unwrap()}
+    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<Ulid>>(CompactedSsTableView::VT_SST_ID, None).unwrap()}
   }
   #[inline]
   pub fn visible_range(&self) -> Option<BytesRange<'a>> {
@@ -1982,21 +1982,21 @@ impl flatbuffers::Verifiable for CompactedSsTableView<'_> {
   ) -> Result<(), flatbuffers::InvalidFlatbuffer> {
     use self::flatbuffers::Verifiable;
     v.visit_table(pos)?
-     .visit_field::<flatbuffers::ForwardsUOffset<Ulid>>("id", Self::VT_ID, true)?
+     .visit_field::<flatbuffers::ForwardsUOffset<Ulid>>("sst_id", Self::VT_SST_ID, true)?
      .visit_field::<flatbuffers::ForwardsUOffset<BytesRange>>("visible_range", Self::VT_VISIBLE_RANGE, false)?
      .finish();
     Ok(())
   }
 }
 pub struct CompactedSsTableViewArgs<'a> {
-    pub id: Option<flatbuffers::WIPOffset<Ulid<'a>>>,
+    pub sst_id: Option<flatbuffers::WIPOffset<Ulid<'a>>>,
     pub visible_range: Option<flatbuffers::WIPOffset<BytesRange<'a>>>,
 }
 impl<'a> Default for CompactedSsTableViewArgs<'a> {
   #[inline]
   fn default() -> Self {
     CompactedSsTableViewArgs {
-      id: None, // required field
+      sst_id: None, // required field
       visible_range: None,
     }
   }
@@ -2008,8 +2008,8 @@ pub struct CompactedSsTableViewBuilder<'a: 'b, 'b, A: flatbuffers::Allocator + '
 }
 impl<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> CompactedSsTableViewBuilder<'a, 'b, A> {
   #[inline]
-  pub fn add_id(&mut self, id: flatbuffers::WIPOffset<Ulid<'b >>) {
-    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<Ulid>>(CompactedSsTableView::VT_ID, id);
+  pub fn add_sst_id(&mut self, sst_id: flatbuffers::WIPOffset<Ulid<'b >>) {
+    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<Ulid>>(CompactedSsTableView::VT_SST_ID, sst_id);
   }
   #[inline]
   pub fn add_visible_range(&mut self, visible_range: flatbuffers::WIPOffset<BytesRange<'b >>) {
@@ -2026,7 +2026,7 @@ impl<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> CompactedSsTableViewBuilder<'a,
   #[inline]
   pub fn finish(self) -> flatbuffers::WIPOffset<CompactedSsTableView<'a>> {
     let o = self.fbb_.end_table(self.start_);
-    self.fbb_.required(o, CompactedSsTableView::VT_ID,"id");
+    self.fbb_.required(o, CompactedSsTableView::VT_SST_ID,"sst_id");
     flatbuffers::WIPOffset::new(o.value())
   }
 }
@@ -2034,7 +2034,7 @@ impl<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> CompactedSsTableViewBuilder<'a,
 impl core::fmt::Debug for CompactedSsTableView<'_> {
   fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
     let mut ds = f.debug_struct("CompactedSsTableView");
-      ds.field("id", &self.id());
+      ds.field("sst_id", &self.sst_id());
       ds.field("visible_range", &self.visible_range());
       ds.finish()
   }

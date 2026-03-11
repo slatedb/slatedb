@@ -317,7 +317,7 @@ impl FlatBufferManifestCodec {
         view: &CompactedSsTableView,
         sst_lookup: &std::collections::HashMap<Ulid, SsTableHandle>,
     ) -> Result<SsTableView, Box<dyn std::error::Error + Send + Sync>> {
-        let ulid = view.id().ulid();
+        let ulid = view.sst_id().ulid();
         let handle = sst_lookup
             .get(&ulid)
             .ok_or_else(|| format!("CompactedSsTableView references unknown SST id: {ulid}"))?
@@ -682,7 +682,7 @@ impl<'b> DbFlatBufferBuilder<'b> {
         CompactedSsTableView::create(
             &mut self.builder,
             &CompactedSsTableViewArgs {
-                id: Some(id),
+                sst_id: Some(id),
                 visible_range,
             },
         )
