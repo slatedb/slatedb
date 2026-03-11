@@ -1616,7 +1616,6 @@ mod tests {
     async fn test_block_stats_multi_block() {
         // Use a small block_size (32) to force multiple blocks.
         // Each 8-byte key + 8-byte value put entry fills one block at this size
-        // (as established by test_builder_should_make_blocks_available).
         let root_path = Path::from("");
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let format = SsTableFormat {
@@ -1660,20 +1659,12 @@ mod tests {
         assert_eq!(stats.num_deletes, 0);
         assert_eq!(stats.num_merges, 0);
 
-        // block_stats is parallel to index block_meta: one entry per block.
+        // Block stats.
         assert_eq!(stats.block_stats.len(), 3);
         for bs in &stats.block_stats {
             assert_eq!(bs.num_puts, 1);
             assert_eq!(bs.num_deletes, 0);
             assert_eq!(bs.num_merges, 0);
         }
-
-        // Per-block sums equal aggregate totals.
-        let total_puts: u16 = stats.block_stats.iter().map(|b| b.num_puts).sum();
-        let total_deletes: u16 = stats.block_stats.iter().map(|b| b.num_deletes).sum();
-        let total_merges: u16 = stats.block_stats.iter().map(|b| b.num_merges).sum();
-        assert_eq!(total_puts as u64, stats.num_puts);
-        assert_eq!(total_deletes as u64, stats.num_deletes);
-        assert_eq!(total_merges as u64, stats.num_merges);
     }
 }
