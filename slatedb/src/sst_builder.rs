@@ -66,7 +66,7 @@ use crate::format::sst::{
     EncodedSsTableFooterBuilder, SsTableFormat, SST_FORMAT_VERSION, SST_FORMAT_VERSION_LATEST,
     SST_FORMAT_VERSION_V2,
 };
-use crate::sst_stats::SstStats;
+use crate::sst_stats::{BlockStats, SstStats};
 use crate::types::RowEntry;
 use crate::utils::compute_index_key;
 use crate::BlockTransformer;
@@ -138,6 +138,7 @@ pub(crate) struct EncodedSsTableBuilder<'a> {
     sst_format_version: u16,
     min_filter_keys: u32,
     stats: SstStats,
+    current_block_stats: BlockStats,
     filter_builder: BloomFilterBuilder,
     sst_codec: Box<dyn SsTableInfoCodec>,
     compression_codec: Option<CompressionCodec>,
@@ -166,6 +167,7 @@ impl EncodedSsTableBuilder<'_> {
             sst_format_version: SST_FORMAT_VERSION_LATEST,
             min_filter_keys,
             stats: SstStats::default(),
+            current_block_stats: BlockStats::default(),
             filter_builder: BloomFilterBuilder::new(filter_bits_per_key),
             index_builder: flatbuffers::FlatBufferBuilder::new(),
             sst_codec,
@@ -201,9 +203,8 @@ impl EncodedSsTableBuilder<'_> {
     /// Panics if called after data has been added to the builder, as this would
     /// result in mixed block types within the SST.
     pub(crate) fn with_block_format(mut self, block_format: BlockFormat) -> Self {
-        assert_eq!(
-            self.stats.num_rows(),
-            0,
+        assert!(
+            self.sst_first_key.is_none(),
             "cannot change block format after data has been added"
         );
         self.block_format = block_format;
@@ -216,14 +217,8 @@ impl EncodedSsTableBuilder<'_> {
     /// The block size is calculated after applying any compression if enabled.
     /// The block size is None if the builder has not finished compacting a block yet.
     pub(crate) async fn add(&mut self, entry: RowEntry) -> Result<Option<usize>, SlateDBError> {
-        // Accumulate stats
         self.stats.raw_key_size += entry.key.len() as u64;
         self.stats.raw_val_size += entry.value.len() as u64;
-        match &entry.value {
-            crate::types::ValueDeletable::Value(_) => self.stats.num_puts += 1,
-            crate::types::ValueDeletable::Merge(_) => self.stats.num_merges += 1,
-            crate::types::ValueDeletable::Tombstone => self.stats.num_deletes += 1,
-        }
 
         let index_key = compute_index_key(self.current_block_max_key.take(), &entry.key);
         let is_sst_first_key = self.sst_first_key.is_none();
@@ -234,6 +229,14 @@ impl EncodedSsTableBuilder<'_> {
             self.first_key = Some(self.index_builder.create_vector(&index_key));
         } else if is_sst_first_key {
             self.first_key = Some(self.index_builder.create_vector(&index_key));
+        }
+
+        // Increment per-block counters AFTER the potential block flush so the
+        // count is attributed to the block that actually contains the entry.
+        match &entry.value {
+            crate::types::ValueDeletable::Value(_) => self.current_block_stats.num_puts += 1,
+            crate::types::ValueDeletable::Merge(_) => self.current_block_stats.num_merges += 1,
+            crate::types::ValueDeletable::Tombstone => self.current_block_stats.num_deletes += 1,
         }
 
         self.filter_builder.add_key(&entry.key);
@@ -299,6 +302,11 @@ impl EncodedSsTableBuilder<'_> {
             },
         );
         self.block_meta.push(block_meta);
+        let block_stats = std::mem::take(&mut self.current_block_stats);
+        self.stats.num_puts += block_stats.num_puts as u64;
+        self.stats.num_deletes += block_stats.num_deletes as u64;
+        self.stats.num_merges += block_stats.num_merges as u64;
+        self.stats.block_stats.push(block_stats);
 
         let block_size = block.len();
         self.current_len += block_size as u64;
@@ -1602,5 +1610,70 @@ mod tests {
         assert_eq!(stats.num_merges, 0);
         assert_eq!(stats.raw_key_size, 8);
         assert_eq!(stats.raw_val_size, 12);
+    }
+
+    #[tokio::test]
+    async fn test_block_stats_multi_block() {
+        // Use a small block_size (32) to force multiple blocks.
+        // Each 8-byte key + 8-byte value put entry fills one block at this size
+        // (as established by test_builder_should_make_blocks_available).
+        let root_path = Path::from("");
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let format = SsTableFormat {
+            block_size: 32,
+            ..SsTableFormat::default()
+        };
+        let table_store = TableStore::new(
+            ObjectStores::new(object_store, None),
+            format,
+            root_path,
+            None,
+        );
+        let mut builder = table_store.table_builder();
+        // 3 puts, each in its own block.
+        builder
+            .add_value(&[b'a'; 8], &[b'1'; 8], Some(1), None)
+            .await
+            .unwrap();
+        builder
+            .add_value(&[b'b'; 8], &[b'2'; 8], Some(2), None)
+            .await
+            .unwrap();
+        builder
+            .add_value(&[b'c'; 8], &[b'3'; 8], Some(3), None)
+            .await
+            .unwrap();
+
+        let encoded = builder.build().await.unwrap();
+        let sst_handle = table_store
+            .write_sst(&SsTableId::Wal(0), encoded, false)
+            .await
+            .unwrap();
+        let stats = table_store
+            .read_stats(&sst_handle, true)
+            .await
+            .unwrap()
+            .expect("stats should be present");
+
+        // Aggregate totals
+        assert_eq!(stats.num_puts, 3);
+        assert_eq!(stats.num_deletes, 0);
+        assert_eq!(stats.num_merges, 0);
+
+        // block_stats is parallel to index block_meta: one entry per block.
+        assert_eq!(stats.block_stats.len(), 3);
+        for bs in &stats.block_stats {
+            assert_eq!(bs.num_puts, 1);
+            assert_eq!(bs.num_deletes, 0);
+            assert_eq!(bs.num_merges, 0);
+        }
+
+        // Per-block sums equal aggregate totals.
+        let total_puts: u16 = stats.block_stats.iter().map(|b| b.num_puts).sum();
+        let total_deletes: u16 = stats.block_stats.iter().map(|b| b.num_deletes).sum();
+        let total_merges: u16 = stats.block_stats.iter().map(|b| b.num_merges).sum();
+        assert_eq!(total_puts as u64, stats.num_puts);
+        assert_eq!(total_deletes as u64, stats.num_deletes);
+        assert_eq!(total_merges as u64, stats.num_merges);
     }
 }
