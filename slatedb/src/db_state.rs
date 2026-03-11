@@ -22,7 +22,7 @@ use ulid::Ulid;
 use uuid::Uuid;
 use SsTableId::{Compacted, Wal};
 
-/// A handle to an SSTable — the physical SST on disk.
+/// A handle to an SSTable — the physical SST on storage.
 #[derive(Clone, PartialEq, Serialize)]
 pub struct SsTableHandle {
     /// The unique identifier for this SSTable. The table can be either a WAL SST or a compacted SST.
