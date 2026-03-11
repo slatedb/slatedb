@@ -217,7 +217,8 @@ impl Compaction {
         db_state
             .l0
             .iter()
-            .filter(|view| ulid_set.contains(&view.sst.id.unwrap_compacted_id()))
+            .rev()
+            .take_while(|view| ulid_set.contains(&view.sst.id.unwrap_compacted_id()))
             .map(|view| (*view).clone())
             .collect()
     }
