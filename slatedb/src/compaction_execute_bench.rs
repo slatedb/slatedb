@@ -253,7 +253,7 @@ impl CompactionExecuteBench {
             id: rand.rng().gen_ulid(system_clock.as_ref()),
             compaction_id: rand.rng().gen_ulid(system_clock.as_ref()),
             destination: 0,
-            sst_views: sst_views,
+            sst_views,
             sorted_runs: vec![],
             output_ssts: vec![],
             compaction_clock_tick: manifest.db_state().last_l0_clock_tick,
