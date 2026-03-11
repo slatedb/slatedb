@@ -42,7 +42,6 @@ impl SstStats {
     /// Encode stats to bytes via FlatBuffers.
     pub(crate) fn encode(&self) -> Bytes {
         let mut builder = FlatBufferBuilder::new();
-        // Create nested block_stats vector before the root table.
         let block_stats_vec: Vec<_> = self
             .block_stats
             .iter()
