@@ -1,4 +1,4 @@
-# Pluggable Filter Policies
+# Prefix Bloom Filters via Pluggable Filter Policies
 
 Table of Contents:
 
@@ -10,8 +10,7 @@ Table of Contents:
 - [Non-Goals](#non-goals)
 - [Design](#design)
   * [Traits](#traits)
-  * [Built-in Implementations](#built-in-implementations)
-  * [Configuration](#configuration)
+  * [Built-in Implementation: BloomFilterPolicy](#built-in-implementation-bloomfilterpolicy)
   * [SST Format Changes](#sst-format-changes)
   * [Read Path Integration](#read-path-integration)
   * [Write Path Integration](#write-path-integration)
@@ -44,13 +43,13 @@ Authors:
 
 ## Summary
 
-This RFC proposes replacing SlateDB's hard-coded bloom filter with a pluggable
-filter policy abstraction. Users will be able to supply their own filter
-implementation (e.g., cuckoo filters, range filters) through traits. The
-existing bloom filter becomes the default implementation behind this trait,
-preserving full backwards compatibility. This enables prefix scan acceleration
-and other advanced filtering strategies without coupling the storage engine to
-a single filter design.
+This RFC proposes adding prefix bloom filters to SlateDB, enabling prefix
+scans to skip SSTs that don't contain matching keys. To support this cleanly,
+the hard-coded bloom filter is replaced with a pluggable filter policy
+abstraction where users can supply their own filter implementation (e.g., cuckoo
+filters, range filters) through traits. The existing bloom filter becomes the
+default implementation behind this trait, preserving full backwards
+compatibility.
 
 ## Motivation
 
@@ -78,9 +77,6 @@ specialized filters without modifying the engine.
 - Support future filter implementations without engine changes.
 - Maintain full backwards compatibility: existing databases with bloom filters continue to work.
 - Support both point-lookup filtering and prefix-scan.
-- Optimize prefix scans where the caller only needs a recent item for a given
-  prefix, by combining prefix filtering with a sequential (non-merging) scan
-  mode that visits sources in recency order.
 
 ## Non-Goals
 
@@ -142,16 +138,41 @@ pub trait PrefixExtractor {
     /// Changing the extractor (e.g. switching from a 4-byte fixed prefix
     /// to a delimiter-based one) changes which hashes are stored in the
     /// filter, so existing filters become invalid. The built-in
-    /// `PrefixBloomFilterPolicy` includes this name in the policy name
-    /// it writes to SST metadata, which lets the reader detect the
-    /// mismatch and skip the filter instead of returning wrong results.
+    /// `BloomFilterPolicy` includes this name in the policy name it
+    /// writes to SST metadata (e.g. `"slatedb.BloomFilter:prefix=fixed3"`),
+    /// which lets the reader detect the mismatch and skip the filter
+    /// instead of returning wrong results.
     ///
     /// Custom filter policies that use a `PrefixExtractor` should do
     /// the same.
     fn name(&self) -> &str;
 
+    /// Returns whether the given prefix is a valid output of `extract()`.
+    ///
+    /// This is used on the read path to verify that a scan prefix provided
+    /// by the user matches the prefix format indexed in the filter. If this
+    /// returns `false`, the filter must NOT be consulted; doing so can
+    /// produce false negatives (the filter says "not present" for data that
+    /// actually exists).
+    ///
+    /// **Example of incorrect behavior without this check:**
+    /// Assume a prefix extractor that extracts the first 3 bytes of a
+    /// key and an SST contains keys `abc_1`, `abc_2`, `abx_1`.
+    /// During SST construction, the filter indexes the extracted prefixes:
+    /// `abc` and `abx`.
+    /// At read time, a user calls `scan_prefix("ab")`. The 2-byte prefix
+    /// `"ab"` was never inserted into the filter, so `might_match("ab")`
+    /// returns `false`. The SST is skipped even though all three keys match
+    /// the scan prefix `"ab"`. This is a false negative.
+    ///
+    /// With `in_domain`: `in_domain("ab")` returns `false` (`"ab"` is not
+    /// a valid 3-byte prefix), so the engine skips the filter check and
+    /// falls back to scanning the SST directly.
+    fn in_domain(&self, prefix: &[u8]) -> bool;
+
     /// Extracts the prefix from a key. Returns `None` if the key does not
-    /// contain a recognizable prefix.
+    /// contain a recognizable prefix (i.e., `in_domain` would return `false`
+    /// for the key).
     fn extract<'a>(&self, key: &'a [u8]) -> Option<&'a [u8]>;
 }
 
@@ -183,28 +204,68 @@ Key design decisions:
    Decoding is on the `FilterPolicy` because the caller needs the policy
    (which knows the format) to reconstruct a `Filter` from raw bytes.
 
-### Built-in Implementations
+### Built-in Implementation: `BloomFilterPolicy`
 
-#### `BloomFilterPolicy` (default)
-
-The existing `BloomFilter` and `BloomFilterBuilder` will implement the `Filter`
-and `FilterBuilder` traits. The policy name would be `"slatedb.BloomFilter"`.
-
+A single `BloomFilterPolicy` handles both full-key and prefix filtering using
+one bloom filter per SST. Both full-key hashes and prefix hashes are added to
+the same bit array. The policy would look like:
 ```rust
 #[derive(Debug)]
 pub struct BloomFilterPolicy {
     bits_per_key: u32,
+
+    /// When true, full-key hashes are added to the filter. Point lookups
+    /// (`get`) probe the filter with the full-key hash.
+    /// Default: true.
+    whole_key_filtering: bool,
+
+    /// When set, prefix hashes are also added to the filter. Prefix scans
+    /// probe the filter with the prefix hash.
+    /// Default: None (no prefix filtering).
+    prefix_extractor: Option<Arc<dyn PrefixExtractor>>,
+
+    name: String,
+}
+
+impl BloomFilterPolicy {
+    pub fn new(bits_per_key: u32) -> Self {
+        Self {
+            bits_per_key,
+            whole_key_filtering: true,
+            prefix_extractor: None,
+            name: "slatedb.BloomFilter".to_string(),
+        }
+    }
+
+    pub fn with_prefix_extractor(mut self, extractor: Arc<dyn PrefixExtractor>) -> Self {
+        self.name = format!("slatedb.BloomFilter:prefix={}", extractor.name());
+        self.prefix_extractor = Some(extractor);
+        self
+    }
+
+    pub fn with_whole_key_filtering(mut self, enabled: bool) -> Self {
+        self.whole_key_filtering = enabled;
+        self
+    }
 }
 
 impl FilterPolicy for BloomFilterPolicy {
-    fn name(&self) -> &str { "slatedb.BloomFilter" }
+    fn name(&self) -> &str { &self.name }
 
     fn create_builder(&self) -> Box<dyn FilterBuilder> {
-        Box::new(BloomFilterBuilder::new(self.bits_per_key))
+        Box::new(BloomFilterBuilder::new(
+            self.bits_per_key,
+            self.whole_key_filtering,
+            self.prefix_extractor.clone(),
+        ))
     }
 
     fn decode(&self, data: &[u8]) -> Arc<dyn Filter> {
-        Arc::new(BloomFilter::decode(data))
+        Arc::new(BloomFilter::decode(
+            data,
+            self.whole_key_filtering,
+            self.prefix_extractor.is_some(),
+        ))
     }
 
     fn estimate_size(&self, num_keys: u32) -> usize {
@@ -213,140 +274,7 @@ impl FilterPolicy for BloomFilterPolicy {
 }
 ```
 
-`BloomFilter` implements `Filter`:
-
-```rust
-impl Filter for BloomFilter {
-    fn might_match(&self, query: &FilterQuery) -> bool {
-        match query {
-            FilterQuery::Point(key) => {
-                let hash = filter_hash(key.as_ref());
-                self.might_contain(hash)
-            }
-            // A full-key bloom filter cannot answer prefix queries.
-            FilterQuery::Prefix(_) => true,
-        }
-    }
-    // ... encode, size
-}
-```
-
-#### `PrefixBloomFilterPolicy`
-
-A bloom filter that hashes key prefixes instead of full keys. The user supplies
-a `PrefixExtractor` (see [Traits](#traits)) to define how prefixes are extracted.
-
-```rust
-#[derive(Debug)]
-pub struct PrefixBloomFilterPolicy {
-    bits_per_key: u32,
-    prefix_extractor: Arc<dyn PrefixExtractor>,
-    name: String,
-}
-
-impl PrefixBloomFilterPolicy {
-    pub fn new(bits_per_key: u32, prefix_extractor: Arc<dyn PrefixExtractor>) -> Self {
-        let name = format!("slatedb.PrefixBloomFilter:{}", prefix_extractor.name());
-        Self { bits_per_key, prefix_extractor, name }
-    }
-}
-
-impl FilterPolicy for PrefixBloomFilterPolicy {
-    fn name(&self) -> &str {
-        &self.name
-    }
-
-    fn create_builder(&self) -> Box<dyn FilterBuilder> {
-        Box::new(PrefixBloomFilterBuilder {
-            inner: BloomFilterBuilder::new(self.bits_per_key),
-            prefix_extractor: self.prefix_extractor.clone(),
-        })
-    }
-    // ...
-}
-```
-
-During construction, the builder extracts the prefix and adds it to the
-underlying bloom filter:
-
-```rust
-impl FilterBuilder for PrefixBloomFilterBuilder {
-    fn add_key(&mut self, key: &[u8]) {
-        if let Some(prefix) = self.prefix_extractor.extract(key) {
-            self.inner.add_key(prefix);
-        }
-        // Keys without a recognizable prefix are skipped. No false
-        // negatives: might_match() returns true when extraction fails.
-    }
-    // ...
-}
-```
-
-The filter answers prefix queries only:
-
-```rust
-impl Filter for PrefixBloomFilter {
-    fn might_match(&self, query: &FilterQuery) -> bool {
-        match query {
-            // Point lookups are not filtered — use DualFilterPolicy for that.
-            FilterQuery::Point(_) => true,
-            FilterQuery::Prefix(prefix) => {
-                let hash = filter_hash(prefix.as_ref());
-                self.inner.might_contain(hash)
-            }
-        }
-    }
-}
-```
-
-**Note:** A prefix bloom filter only answers prefix queries — point lookups
-always return `true` (no filtering). Use `DualFilterPolicy` below if you need
-both point-lookup filtering and prefix scan filtering.
-
-#### `DualFilterPolicy`
-
-For users who need both low-FPR point lookups and prefix scan filtering,
-`DualFilterPolicy` maintains two bloom filters per SST — one for full keys and
-one for prefixes — and routes queries to the appropriate filter:
-
-```rust
-pub struct DualFilterPolicy {
-    point_policy: BloomFilterPolicy,
-    prefix_policy: PrefixBloomFilterPolicy,
-    name: String,
-}
-
-impl FilterPolicy for DualFilterPolicy {
-    fn name(&self) -> &str { &self.name }
-
-    fn create_builder(&self) -> Box<dyn FilterBuilder> {
-        Box::new(DualFilterBuilder {
-            point_builder: self.point_policy.create_builder(),
-            prefix_builder: self.prefix_policy.create_builder(),
-        })
-    }
-    // ...
-}
-```
-
-The `DualFilter` routes queries:
-
-```rust
-impl Filter for DualFilter {
-    fn might_match(&self, query: &FilterQuery) -> bool {
-        match query {
-            FilterQuery::Point(_) => self.point_filter.might_match(query),
-            FilterQuery::Prefix(_) => self.prefix_filter.might_match(query),
-        }
-    }
-    // encode serializes both sub-filters; decode reconstructs both.
-}
-```
-
-The trade-off is additional filter space per SST (one full-key filter + one
-prefix filter).
-
-### Configuration
+#### Configuration
 
 The `Settings` struct replaces `filter_bits_per_key` with a `filter_policy`
 field. This is a **breaking change** — the old field is removed entirely.
@@ -365,18 +293,32 @@ pub struct Settings {
 }
 ```
 
+**Configuration modes:**
+
+| `whole_key_filtering` | `prefix_extractor` | Behavior                                                   |
+|-----------------------|--------------------|------------------------------------------------------------|
+| `true` (default)      | `None`             | Full-key bloom only, today's default, backwards compatible |
+| `true`                | `Some(...)`        | Both point lookups and prefix scans are filtered           |
+| `false`               | `Some(...)`        | Prefix-only — smaller filter, no point-lookup filtering    |
+
 Usage:
 
 ```rust
 // Default: full-key bloom filter (backwards compatible)
 let settings = Settings::default();
 
-// Prefix bloom filter with a user-defined extractor
+// Full-key + prefix bloom filter (recommended for prefix scan workloads)
 let settings = Settings {
-    filter_policy: Some(Arc::new(PrefixBloomFilterPolicy::new(
-        10, // bits per key
-        Arc::new(MyPrefixExtractor::new()),
-    ))),
+    filter_policy: Some(Arc::new(BloomFilterPolicy::new(10)
+        .with_prefix_extractor(Arc::new(MyPrefixExtractor::new())))),
+    ..Settings::default()
+};
+
+// Prefix-only bloom filter (smaller filter, no point-lookup filtering)
+let settings = Settings {
+    filter_policy: Some(Arc::new(BloomFilterPolicy::new(10)
+        .with_prefix_extractor(Arc::new(MyPrefixExtractor::new()))
+        .with_whole_key_filtering(false))),
     ..Settings::default()
 };
 
@@ -385,6 +327,37 @@ let settings = Settings {
     filter_policy: Some(Arc::new(MyCustomFilterPolicy::new(...))),
     ..Settings::default()
 };
+```
+
+#### Write path: building the filter
+
+During SST construction, the builder adds both hashes to the same underlying
+bloom filter. Consecutive keys sharing the same prefix only store the prefix
+hash once (deduplication), keeping the overhead minimal:
+
+#### Read path: querying the filter
+
+The same filter is probed with different hashes depending on the query type:
+
+```rust
+impl Filter for BloomFilter {
+    fn might_match(&self, query: &FilterQuery) -> bool {
+        match query {
+            FilterQuery::Point(key) => {
+                if !self.whole_key_filtering {
+                    return true; // Cannot answer point queries
+                }
+                self.might_contain(filter_hash(key.as_ref()))
+            }
+            FilterQuery::Prefix(prefix) => {
+                if !self.has_prefix_filter {
+                    return true; // Cannot answer prefix queries
+                }
+                self.might_contain(filter_hash(prefix.as_ref()))
+            }
+        }
+    }
+}
 ```
 
 ### SST Format Changes
@@ -431,27 +404,26 @@ that accept a prefix. Internally, the prefix will be wired through the reader an
 iterator chain so each SST's filter can be checked before opening it, skipping
 SSTs whose filter returns `false`.
 
-The default `BloomFilterPolicy` returns `true` for prefix queries (it only
-answers point lookups), so prefix filtering only takes effect when a
-`PrefixBloomFilterPolicy` or a custom policy is configured.
+When a `prefix_extractor` is configured on the `BloomFilterPolicy`, prefix
+scans probe the same bloom filter with `filter_hash(prefix)`. The default
+configuration (no `prefix_extractor`) returns `true` for prefix queries — no
+filtering. This is safe: point lookups still use the full-key hash.
 
-**Sequential scan mode:**
+**Limitation — prefix filtering alone is not enough for recency access
+patterns:**
 
-The default merge-based scan initializes all sources upfront to produce globally
-sorted output. For use cases where the caller only needs the most recently
-written entries for a prefix, a sequential scan mode can be opted into via `ScanOptions`:
-
-```rust
-pub struct ScanOptions {
-    // ... existing fields ...
-    pub sequential_scan: bool,
-}
-```
-
-Sequential scan visits sources one at a time in recency order (memtables → L0 →
-sorted runs) similar to `get` API. Entries within each source are ordered by key
-, but entries across sources are NOT globally sorted. Combined with prefix
-filtering, most sources are skipped entirely before any I/O.
+Prefix bloom filters significantly improve prefix scans by skipping SSTs that
+don't contain matching keys. However, for use cases like time-series data
+(keyed by `{sensor_id}:{timestamp}`) or versioned data where the caller only
+needs the first or *n*-th most recent item for a prefix, the merge-based scan
+still reads from every *matching* SST and merges them to produce global sort
+order — even though the caller knows the data is naturally sorted by recency
+(newest to oldest). This is analogous to the difference between RocksDB's
+`Get()` (which checks levels newest-first and stops at the first match) and
+its iterator (which always merges all levels). A non-merging iterator that
+returns data newest-first — similar to `Get()` but as an iterator — would
+address this gap. See
+[RFC 0022](./0022-recency-ordered-unmerged-scan.md) for the proposed design.
 
 ### Write Path Integration
 
@@ -527,9 +499,10 @@ SlateDB features and components that this RFC interacts with. Check all that app
   avoiding block reads.
 - **Write throughput**: No meaningful change. Filter construction cost is
   comparable.
-- **Space**: No change for the default bloom filter. Prefix bloom filters may
-  use slightly less space (fewer unique prefixes than keys). Other filter types
-  have their own space characteristics.
+- **Space**: No change for the default bloom filter (no `prefix_extractor`).
+  With a `prefix_extractor`, the filter grows slightly to accommodate prefix
+  hashes, but deduplication of consecutive same-prefix hashes keeps the
+  overhead minimal. Much less overhead than maintaining two separate filters.
 
 ### Observability
 
@@ -556,37 +529,32 @@ SlateDB features and components that this RFC interacts with. Check all that app
 - **Unit tests**: Filter policy correctness (no false negatives, expected false
   positive rates) for each built-in implementation.
 - **Integration tests**: Prefix scan SST skipping, mismatched filter policy
-  graceful degradation, backwards compatibility with old SSTs, and sequential
-  scan source-recency ordering.
+  graceful degradation, backwards compatibility with old SSTs.
 - **Performance tests**: Benchmark prefix scans with and without prefix bloom
-  filters. Benchmark sequential scan for first-item-in-prefix lookups vs
-  regular merge-based scan. The value should be very clear to justify the
-  effort here.
+  filters. The value should be very clear for prefix bloom filter results.
 
 ## Rollout
 
 Implementation will be in multiple phases:
 
-1. **Pluggable filter abstraction**: Trait definitions, bloom filter
-   implementation, SST format changes, and refactoring the write/read paths
-   to use `dyn FilterPolicy`. Breaking config change: `filter_bits_per_key`
-   replaced by `filter_policy`.
-2. **Prefix bloom filter**: `PrefixExtractor` trait, `PrefixBloomFilterPolicy`
-   implementation, and wiring the prefix through the read path so SST filters
-   are checked before opening. Skip SSTs whose filter rejects the prefix.
-3. **Dual filter policy**: `DualFilterPolicy` that maintains both key and
-   prefix bloom filters per SST.
-4. **Sequential scan mode**: Non-merging, opt-in iteration through sources in
-   recency order for use cases like fetching the most recent item for a prefix.
+1. **Pluggable filter abstraction**: Trait definitions (`FilterPolicy`,
+   `FilterBuilder`, `Filter`, `PrefixExtractor`), refactor the existing bloom
+   filter as the default `BloomFilterPolicy`, SST format changes
+   (`filter_policy_name`), and refactoring the write/read paths to use
+   `dyn FilterPolicy`. Breaking config change: `filter_bits_per_key` replaced
+   by `filter_policy`.
+2. **Prefix bloom filter**: Add `prefix_extractor` and `whole_key_filtering`
+   to `BloomFilterPolicy`. Wire the prefix through the read path so each
+   SST's filter can be probed with `FilterQuery::Prefix` before opening.
+   Skip SSTs whose filter rejects the prefix.
 
 ## Alternatives
 
-**1. Prefix extractor without pluggable policy (RocksDB approach):**
-Add only a `prefix_extractor` option that modifies the existing bloom filter's
-hashing. This is simpler but tightly couples the engine to bloom filters and
-makes it harder to adopt fundamentally different filter designs
-in the future. Rejected because the abstraction cost is low and the flexibility
-gain is high.
+**1. Separate filter structures per SST:**
+Maintain two separate bloom filters per SST: one for full keys and one for
+prefixes then route queries to the appropriate filter. This is conceptually
+clean but wastes space: two separate bit arrays have higher overhead than a
+single shared one. Rejected in favor of the single-filter approach.
 
 **2. Ship DIVA or SuRF as a built-in filter:**
 The optimal filter design is workload-dependent. Rather than picking one, the
