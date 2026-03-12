@@ -458,7 +458,7 @@ pub struct ManifestCore {
     /// initialization has completed.
     pub initialized: bool,
 
-    /// The last compacted l0.
+    /// The last compacted l0 SstView ID.
     pub l0_last_compacted: Option<Ulid>,
 
     /// A list of the L0 SST views that are valid to read in the `compacted` folder.
@@ -689,7 +689,7 @@ impl<'a> StateModifier<'a> {
                 .l0
                 .iter()
                 .cloned()
-                .take_while(|view| view.sst.id.unwrap_compacted_id() != *l0_last_compacted)
+                .take_while(|view| view.view_id != *l0_last_compacted)
                 .collect()
         } else {
             self.state.manifest.value.core.l0.iter().cloned().collect()
@@ -789,8 +789,7 @@ mod tests {
         let mut compactor_state = new_dirty_manifest();
         compactor_state.value.core = db_state.state.core().clone();
         let last_compacted = compactor_state.value.core.l0.pop_back().unwrap();
-        compactor_state.value.core.l0_last_compacted =
-            Some(last_compacted.sst.id.unwrap_compacted_id());
+        compactor_state.value.core.l0_last_compacted = Some(last_compacted.view_id);
 
         // when:
         db_state.merge_remote_manifest(compactor_state.clone());

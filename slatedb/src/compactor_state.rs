@@ -531,13 +531,12 @@ impl CompactorState {
         let mut merged_l0s = VecDeque::new();
         let writer_l0 = &remote_manifest.value.core.l0;
         for writer_l0_sst in writer_l0 {
-            let writer_l0_id = writer_l0_sst.sst.id.unwrap_compacted_id();
             // todo: this is brittle. we are relying on the l0 list always being updated in
             //       an expected order. We should instead encode the ordering in the l0 SST IDs
             //       and assert that it follows the order
             if match &last_compacted_l0 {
                 None => true,
-                Some(last_compacted_l0_id) => writer_l0_id != *last_compacted_l0_id,
+                Some(last_compacted_l0_id) => writer_l0_sst.view_id != *last_compacted_l0_id,
             } {
                 merged_l0s.push_back(writer_l0_sst.clone());
             } else {
@@ -671,11 +670,7 @@ impl CompactorState {
             if let Some(view_id) = first_source.maybe_unwrap_sst_view() {
                 // if there are l0s, the newest must be the first entry in sources.
                 // TODO: validate that this is the case
-                // Look up the SST ULID from the original L0 list.
-                if let Some(view) = db_state.l0.iter().find(|v| v.view_id == view_id) {
-                    // TODO: change db_state.l0_last_compacted to view ID?
-                    db_state.l0_last_compacted = Some(view.sst.id.unwrap_compacted_id());
-                }
+                db_state.l0_last_compacted = Some(view_id);
             }
             db_state.l0 = new_l0;
             db_state.compacted = new_compacted;
@@ -918,15 +913,7 @@ mod tests {
         // then:
         assert_eq!(
             state.db_state().l0_last_compacted,
-            Some(
-                before_compaction
-                    .l0
-                    .front()
-                    .unwrap()
-                    .sst
-                    .id
-                    .unwrap_compacted_id()
-            )
+            Some(before_compaction.l0.front().unwrap().view_id)
         );
         assert_eq!(state.db_state().l0.len(), 0);
         assert_eq!(state.db_state().compacted.len(), 1);

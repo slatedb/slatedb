@@ -258,6 +258,13 @@ impl FlatBufferManifestCodec {
                 sst_views: ssts,
             })
         }
+        // V1 stored l0_last_compacted as an SST ULID. Translate it to the
+        // corresponding view_id so the V2 code (which compares by view_id) works.
+        let l0_last_compacted = l0_last_compacted.and_then(|sst_ulid| {
+            l0.iter()
+                .find(|view| view.sst.id.unwrap_compacted_id() == sst_ulid)
+                .map(|view| view.view_id)
+        });
         let checkpoints: Vec<checkpoint::Checkpoint> = manifest
             .checkpoints()
             .iter()
