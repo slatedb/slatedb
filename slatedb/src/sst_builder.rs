@@ -138,7 +138,7 @@ pub(crate) struct EncodedSsTableBuilder<'a> {
     sst_format_version: u16,
     min_filter_keys: u32,
     stats: SstStats,
-    current_block_stats: BlockStats,
+    block_stats: BlockStats,
     filter_builder: BloomFilterBuilder,
     sst_codec: Box<dyn SsTableInfoCodec>,
     compression_codec: Option<CompressionCodec>,
@@ -167,7 +167,7 @@ impl EncodedSsTableBuilder<'_> {
             sst_format_version: SST_FORMAT_VERSION_LATEST,
             min_filter_keys,
             stats: SstStats::default(),
-            current_block_stats: BlockStats::default(),
+            block_stats: BlockStats::default(),
             filter_builder: BloomFilterBuilder::new(filter_bits_per_key),
             index_builder: flatbuffers::FlatBufferBuilder::new(),
             sst_codec,
@@ -234,9 +234,9 @@ impl EncodedSsTableBuilder<'_> {
         // Increment per-block counters AFTER the potential block flush so the
         // count is attributed to the block that actually contains the entry.
         match &entry.value {
-            crate::types::ValueDeletable::Value(_) => self.current_block_stats.num_puts += 1,
-            crate::types::ValueDeletable::Merge(_) => self.current_block_stats.num_merges += 1,
-            crate::types::ValueDeletable::Tombstone => self.current_block_stats.num_deletes += 1,
+            crate::types::ValueDeletable::Value(_) => self.block_stats.num_puts += 1,
+            crate::types::ValueDeletable::Merge(_) => self.block_stats.num_merges += 1,
+            crate::types::ValueDeletable::Tombstone => self.block_stats.num_deletes += 1,
         }
 
         self.filter_builder.add_key(&entry.key);
@@ -302,7 +302,7 @@ impl EncodedSsTableBuilder<'_> {
             },
         );
         self.block_meta.push(block_meta);
-        let block_stats = std::mem::take(&mut self.current_block_stats);
+        let block_stats = std::mem::take(&mut self.block_stats);
         self.stats.num_puts += block_stats.num_puts as u64;
         self.stats.num_deletes += block_stats.num_deletes as u64;
         self.stats.num_merges += block_stats.num_merges as u64;
