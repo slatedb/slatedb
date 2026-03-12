@@ -1675,24 +1675,19 @@ mod tests {
         assert_eq!(stats.num_deletes, 1);
         assert_eq!(stats.num_merges, 1);
 
-        // One block per entry, each with the correct type.
+        // Block stats: one block per entry, each with the correct type.
         assert_eq!(stats.block_stats.len(), 3);
+        // Block 0: put
         assert_eq!(stats.block_stats[0].num_puts, 1);
         assert_eq!(stats.block_stats[0].num_deletes, 0);
         assert_eq!(stats.block_stats[0].num_merges, 0);
+        // Block 1: delete
         assert_eq!(stats.block_stats[1].num_puts, 0);
         assert_eq!(stats.block_stats[1].num_deletes, 1);
         assert_eq!(stats.block_stats[1].num_merges, 0);
+        // Block 2: merge
         assert_eq!(stats.block_stats[2].num_puts, 0);
         assert_eq!(stats.block_stats[2].num_deletes, 0);
         assert_eq!(stats.block_stats[2].num_merges, 1);
-
-        // Per-block sums equal aggregate totals.
-        let total_puts: u16 = stats.block_stats.iter().map(|b| b.num_puts).sum();
-        let total_deletes: u16 = stats.block_stats.iter().map(|b| b.num_deletes).sum();
-        let total_merges: u16 = stats.block_stats.iter().map(|b| b.num_merges).sum();
-        assert_eq!(total_puts as u64, stats.num_puts);
-        assert_eq!(total_deletes as u64, stats.num_deletes);
-        assert_eq!(total_merges as u64, stats.num_merges);
     }
 }
