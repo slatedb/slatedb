@@ -92,21 +92,46 @@ filter types.
 ```rust
 /// A named, configurable filter policy.
 pub trait FilterPolicy {
-    /// An identifier for this policy. Stored per-SST so the reader
-    /// knows whether it can decode and use the filter block.
+    /// An identifier for this policy. Stored per-SST so the reader knows
+    /// whether it can decode and use the filter block.
+    ///
+    /// The name should encode anything that affects **compatibility** —
+    /// i.e., anything that would make a filter unreadable or produce wrong
+    /// results if mismatched. For the built-in bloom filter:
+    /// - `bits_per_key` is not included — changing it affects quality (FP
+    ///   rate) but not the encoding format, so any reader can decode any
+    ///   bloom filter regardless of bits_per_key.
+    /// - `prefix_extractor` name is included — it changes which hashes are
+    ///   stored, so querying with a different extractor produces false
+    ///   negatives.
+    ///
+    /// Examples: `"slatedb.BloomFilter"`,
+    /// `"slatedb.BloomFilter:prefix=fixed3"`.
     fn name(&self) -> &str;
 
     /// Creates a new builder for constructing a filter.
-    fn create_builder(&self) -> Box<dyn FilterBuilder>;
+    fn builder(&self) -> Box<dyn FilterBuilder>;
 
     /// Decodes a previously encoded filter.
+    ///
+    /// The engine validates that the SST's `filter_policy_name` matches
+    /// `self.name()` before calling this to ensure the policy can deserialize
+    /// the data.
     fn decode(&self, data: &[u8]) -> Arc<dyn Filter>;
 
     /// Estimates the encoded size in bytes for a filter with `num_keys` keys.
-    fn estimate_size(&self, num_keys: u32) -> usize;
+    ///
+    /// This is a hint used by the SST builder to reserve buffer space before
+    /// the filter is built. It does not need to be exact.
+    ///
+    /// For the built-in bloom filter, the actual filter is sized from the
+    /// real number of hashes collected during `add_key`, not from this estimate,
+    /// so overestimates waste a small allocation and underestimates just trigger
+    /// a reallocation.
+    fn estimate_size(&self, num_keys: usize) -> usize;
 }
 
-/// Accumulator for keys keys during SST construction and produces a [`Filter`].
+/// Accumulator for keys during SST construction that produces a [Filter].
 pub trait FilterBuilder {
     /// Adds a key to the filter being built.
     fn add_key(&mut self, key: &[u8]);
@@ -121,10 +146,14 @@ pub trait Filter {
     /// A return value of `false` guarantees no matching key exists.
     fn might_match(&self, query: &FilterQuery) -> bool;
 
-    /// Encodes the filter into a byte buffer for persistence.
-    fn encode(&self) -> Bytes;
+    /// Serializes the filter into the provided buffer.
+    fn encode(&self, writer: &mut impl BufMut);
 
-    /// Returns the in-memory size of this filter in bytes.
+    /// Returns the size of the filter's data in bytes.
+    ///
+    /// This should reflect the underlying data structure size (e.g., the
+    /// bit array length for a bloom filter). Can be used for memory
+    /// tracking, cache accounting, etc.
     fn size(&self) -> usize;
 }
 
@@ -176,12 +205,12 @@ pub trait PrefixExtractor {
     fn extract<'a>(&self, key: &'a [u8]) -> Option<&'a [u8]>;
 }
 
-/// Determines what type of query a filter can answer.
+/// A membership query passed to [`Filter::might_match`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FilterQuery {
     /// Used to test whether a specific key might exist in the SST.
     Point(Bytes),
-    /// Used to est whether any key with the given prefix might exist in the SST.
+    /// Used to test whether any key with the given prefix might exist in the SST.
     Prefix(Bytes),
 }
 ```
@@ -252,7 +281,7 @@ impl BloomFilterPolicy {
 impl FilterPolicy for BloomFilterPolicy {
     fn name(&self) -> &str { &self.name }
 
-    fn create_builder(&self) -> Box<dyn FilterBuilder> {
+    fn builder(&self) -> Box<dyn FilterBuilder> {
         Box::new(BloomFilterBuilder::new(
             self.bits_per_key,
             self.whole_key_filtering,
@@ -268,7 +297,7 @@ impl FilterPolicy for BloomFilterPolicy {
         ))
     }
 
-    fn estimate_size(&self, num_keys: u32) -> usize {
+    fn estimate_size(&self, num_keys: usize) -> usize {
         BloomFilter::estimate_encoded_size(num_keys, self.bits_per_key)
     }
 }
@@ -409,7 +438,7 @@ scans probe the same bloom filter with `filter_hash(prefix)`. The default
 configuration (no `prefix_extractor`) returns `true` for prefix queries — no
 filtering. This is safe: point lookups still use the full-key hash.
 
-**Limitation — prefix filtering alone is not enough for recency access
+**Limitation — prefix filtering alone is not ideal for recency access
 patterns:**
 
 Prefix bloom filters significantly improve prefix scans by skipping SSTs that
@@ -418,16 +447,11 @@ don't contain matching keys. However, for use cases like time-series data
 needs the first or *n*-th most recent item for a prefix, the merge-based scan
 still reads from every *matching* SST and merges them to produce global sort
 order — even though the caller knows the data is naturally sorted by recency
-(newest to oldest). This is analogous to the difference between RocksDB's
-`Get()` (which checks levels newest-first and stops at the first match) and
-its iterator (which always merges all levels). A non-merging iterator that
-returns data newest-first — similar to `Get()` but as an iterator — would
-address this gap. See
-[RFC 0022](./0022-recency-ordered-unmerged-scan.md) for the proposed design.
-
+(newest to oldest). A non-merging iterator that returns data newest-first
+similar to `Get()` but as an iterator address this gap.
 ### Write Path Integration
 
-The SST builder receives a `FilterPolicy` and calls `create_builder()` to
+The SST builder receives a `FilterPolicy` and calls `builder()` to
 obtain a `FilterBuilder`. Each key is fed to the builder via `add_key()`. On
 finalization, `build()` produces the filter, `encode()` writes it to the filter
 block, and `policy.name()` is stored in the SST info.
@@ -523,6 +547,17 @@ SlateDB features and components that this RFC interacts with. Check all that app
   field will ignore it (FlatBuffers forward compatibility). They will continue
   to decode filters as bloom filters, which is correct as long as the bloom
   filter policy is still in use.
+- **Prefix extractor changes**: Changing the prefix extractor changes the policy
+  name (e.g., `"slatedb.BloomFilter:prefix=fixed3"` →
+  `"slatedb.BloomFilter:prefix=delim:"`), causing old SSTs' filters to be
+  skipped entirely — including the full-key hashes that are still valid for
+  point lookups. Those SSTs regain filtering after compaction rewrites them
+  with the new policy.
+- **Compactor policy**: If the compactor runs in a separate process from the
+  writer (e.g., distributed compaction), it must be configured with the same
+  `FilterPolicy`. Otherwise, compacted SSTs will be written with a different
+  (or no) filter policy, and existing filters may be silently dropped during
+  compaction.
 
 ## Testing
 
@@ -535,7 +570,7 @@ SlateDB features and components that this RFC interacts with. Check all that app
 
 ## Rollout
 
-Implementation will be in multiple phases:
+Implementation will be in two phases:
 
 1. **Pluggable filter abstraction**: Trait definitions (`FilterPolicy`,
    `FilterBuilder`, `Filter`, `PrefixExtractor`), refactor the existing bloom
