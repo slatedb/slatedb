@@ -15,11 +15,11 @@ use slatedb_txn_obj::DirtyObject;
 ///
 /// A `SourceId` distinguishes between two kinds of inputs a compaction can read:
 /// an existing compacted sorted run (identified by its run id), or an L0 SSTable
-/// (identified by its ULID).
+/// view (identified by its view ID).
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SourceId {
     SortedRun(u32),
-    Sst(Ulid),
+    SstView(Ulid),
 }
 
 impl Display for SourceId {
@@ -31,7 +31,7 @@ impl Display for SourceId {
                 SourceId::SortedRun(id) => {
                     format!("{}", *id)
                 }
-                SourceId::Sst(_) => String::from("l0"),
+                SourceId::SstView(_) => String::from("l0"),
             }
         )
     }
@@ -44,25 +44,25 @@ impl SourceId {
     /// - The sorted run id.
     ///
     /// ## Panics
-    /// - If called on `SourceId::Sst`.
+    /// - If called on `SourceId::SstView`.
     pub(crate) fn unwrap_sorted_run(&self) -> u32 {
         self.maybe_unwrap_sorted_run()
-            .expect("tried to unwrap Sst as Sorted Run")
+            .expect("tried to unwrap SstView as Sorted Run")
     }
 
     /// Returns the sorted run id if this source is a `SortedRun`, otherwise `None`.
     pub(crate) fn maybe_unwrap_sorted_run(&self) -> Option<u32> {
         match self {
             SourceId::SortedRun(id) => Some(*id),
-            SourceId::Sst(_) => None,
+            SourceId::SstView(_) => None,
         }
     }
 
-    /// Returns the SST ULID if this source is an `Sst`, otherwise `None`.
-    pub(crate) fn maybe_unwrap_sst(&self) -> Option<Ulid> {
+    /// Returns the view ID if this source is an `SstView`, otherwise `None`.
+    pub(crate) fn maybe_unwrap_sst_view(&self) -> Option<Ulid> {
         match self {
             SourceId::SortedRun(_) => None,
-            SourceId::Sst(ulid) => Some(*ulid),
+            SourceId::SstView(view_id) => Some(*view_id),
         }
     }
 }
@@ -207,19 +207,17 @@ impl Compaction {
     /// ## Arguments
     /// - `db_state`: The current core DB state from the manifest.
     pub(crate) fn get_l0_sst_views(&self, db_state: &ManifestCore) -> Vec<SsTableView> {
-        let ulid_set: HashSet<Ulid> = self
-            .spec
-            .sources()
-            .iter()
-            .filter_map(|s| s.maybe_unwrap_sst())
-            .collect();
-
-        db_state
+        let sst_views_by_id: HashMap<Ulid, &SsTableView> = db_state
             .l0
             .iter()
-            .rev()
-            .take_while(|view| ulid_set.contains(&view.sst.id.unwrap_compacted_id()))
-            .map(|view| (*view).clone())
+            .map(|view| (view.view_id, view))
+            .collect();
+
+        self.spec
+            .sources()
+            .iter()
+            .filter_map(|s| s.maybe_unwrap_sst_view())
+            .filter_map(|ulid| sst_views_by_id.get(&ulid).map(|t| (*t).clone()))
             .collect()
     }
 
@@ -590,7 +588,7 @@ impl CompactorState {
             .any(|sr| sr.id == spec.destination())
             && !spec.sources().iter().any(|src| match src {
                 SourceId::SortedRun(sr) => *sr == spec.destination(),
-                SourceId::Sst(_) => false,
+                SourceId::SstView(_) => false,
             })
         {
             // the compaction overwrites an existing sr but doesn't include the sr
@@ -637,7 +635,7 @@ impl CompactorState {
             let compaction_l0s: HashSet<Ulid> = spec
                 .sources()
                 .iter()
-                .filter_map(|id| id.maybe_unwrap_sst())
+                .filter_map(|id| id.maybe_unwrap_sst_view())
                 .collect();
             let compaction_srs: HashSet<u32> = spec
                 .sources()
@@ -648,13 +646,8 @@ impl CompactorState {
             let new_l0: VecDeque<SsTableView> = db_state
                 .l0
                 .iter()
-                .filter_map(|l0| {
-                    let l0_id = l0.sst.id.unwrap_compacted_id();
-                    if compaction_l0s.contains(&l0_id) {
-                        return None;
-                    }
-                    Some(l0.clone())
-                })
+                .filter(|l0| !compaction_l0s.contains(&l0.view_id))
+                .cloned()
                 .collect();
             let mut new_compacted = Vec::new();
             let mut inserted = false;
@@ -675,10 +668,14 @@ impl CompactorState {
                 .sources()
                 .first()
                 .expect("illegal: empty compaction spec");
-            if let Some(compacted_l0) = first_source.maybe_unwrap_sst() {
-                // if there are l0s, the newest must be the first entry in sources
+            if let Some(view_id) = first_source.maybe_unwrap_sst_view() {
+                // if there are l0s, the newest must be the first entry in sources.
                 // TODO: validate that this is the case
-                db_state.l0_last_compacted = Some(compacted_l0)
+                // Look up the SST ULID from the original L0 list.
+                if let Some(view) = db_state.l0.iter().find(|v| v.view_id == view_id) {
+                    // TODO: change db_state.l0_last_compacted to view ID?
+                    db_state.l0_last_compacted = Some(view.sst.id.unwrap_compacted_id());
+                }
             }
             db_state.l0 = new_l0;
             db_state.compacted = new_compacted;
@@ -709,7 +706,7 @@ mod tests {
 
     use super::*;
     use crate::checkpoint::Checkpoint;
-    use crate::compactor_state::SourceId::Sst;
+    use crate::compactor_state::SourceId::SstView;
     use crate::config::Settings;
     use crate::db::Db;
     use crate::db_state::SsTableId;
@@ -1012,15 +1009,7 @@ mod tests {
         // compact the last sst
         let original_l0s = &state.db_state().clone().l0;
         let compaction_id = rand.rng().gen_ulid(system_clock.as_ref());
-        let spec = CompactionSpec::new(
-            vec![Sst(original_l0s
-                .back()
-                .unwrap()
-                .sst
-                .id
-                .unwrap_compacted_id())],
-            0,
-        );
+        let spec = CompactionSpec::new(vec![SstView(original_l0s.back().unwrap().view_id)], 0);
         let compaction = Compaction::new(compaction_id, spec);
         state
             .add_compaction(compaction)
@@ -1085,13 +1074,8 @@ mod tests {
         let original_l0s = &state.db_state().clone().l0;
         let compaction_id = rand.rng().gen_ulid(system_clock.as_ref());
 
-        let spec = CompactionSpec::new(
-            original_l0s
-                .iter()
-                .map(|h| Sst(h.sst.id.unwrap_compacted_id()))
-                .collect(),
-            0,
-        );
+        let spec =
+            CompactionSpec::new(original_l0s.iter().map(|h| SstView(h.view_id)).collect(), 0);
         let compaction = Compaction::new(compaction_id, spec);
         state
             .add_compaction(compaction)
@@ -1171,7 +1155,7 @@ mod tests {
                 .iter()
                 .enumerate()
                 .filter(|(i, _e)| i > &2usize)
-                .map(|(_i, x)| Sst(x.sst.id.unwrap_compacted_id()))
+                .map(|(_i, x)| SstView(x.view_id))
                 .collect::<Vec<SourceId>>(),
             0,
         );
@@ -1193,7 +1177,7 @@ mod tests {
         let l0_sources = original_l0s
             .iter()
             .skip(3)
-            .map(|h| SourceId::Sst(h.sst.id.unwrap_compacted_id()));
+            .map(|h| SourceId::SstView(h.view_id));
 
         // SRs: first 3 (index < 3)
         let sr_sources = original_srs
@@ -1285,10 +1269,7 @@ mod tests {
     }
 
     fn build_l0_compaction(ssts: &VecDeque<SsTableView>, dst: u32) -> CompactionSpec {
-        let sources = ssts
-            .iter()
-            .map(|h| SourceId::Sst(h.sst.id.unwrap_compacted_id()))
-            .collect();
+        let sources = ssts.iter().map(|h| SourceId::SstView(h.view_id)).collect();
         CompactionSpec::new(sources, dst)
     }
 

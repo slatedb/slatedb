@@ -69,6 +69,9 @@ impl AsRef<SsTableHandle> for SsTableHandle {
 /// optional visible_range projection.
 #[derive(Clone, PartialEq, Serialize)]
 pub struct SsTableView {
+    /// Unique identifier for this view.
+    pub(crate) view_id: Ulid,
+
     /// The underlying physical SSTable handle.
     pub sst: SsTableHandle,
 
@@ -90,9 +93,29 @@ impl Debug for SsTableView {
     }
 }
 
+impl From<SsTableHandle> for SsTableView {
+    /// Create a view using a deterministic view_id derived from the SST's own identity.
+    /// Use this only for ephemeral views (e.g. WAL iteration) or legacy migration
+    /// where no `DbRand` is available and the view_id is not stored in the manifest.
+    fn from(sst: SsTableHandle) -> Self {
+        Self::identity(sst)
+    }
+}
+
 impl SsTableView {
+    /// Create a view using a deterministic view_id derived from the SST's own identity.
+    /// Use this only for ephemeral views (e.g. WAL iteration) or legacy migration
+    /// where no `DbRand` is available and the view_id is not stored in the manifest.
+    pub(crate) fn identity(sst: SsTableHandle) -> Self {
+        let view_id = match &sst.id {
+            SsTableId::Compacted(ulid) => *ulid,
+            SsTableId::Wal(wal_id) => Ulid::from_parts(*wal_id, 0),
+        };
+        Self::new(view_id, sst)
+    }
+
     /// Create a new view with no visible_range projection.
-    pub(crate) fn new(sst: SsTableHandle) -> Self {
+    pub(crate) fn new(view_id: Ulid, sst: SsTableHandle) -> Self {
         let effective_range = match sst.info.first_entry.clone() {
             Some(physical_first_entry) => {
                 let end_bound = match sst.info.last_entry.clone() {
@@ -105,6 +128,7 @@ impl SsTableView {
         };
 
         SsTableView {
+            view_id,
             sst,
             visible_range: None,
             effective_range,
@@ -112,7 +136,11 @@ impl SsTableView {
     }
 
     /// Create a new projected view with an optional visible_range.
-    pub(crate) fn new_projected(sst: SsTableHandle, visible_range: Option<BytesRange>) -> Self {
+    pub(crate) fn new_projected(
+        view_id: Ulid,
+        sst: SsTableHandle,
+        visible_range: Option<BytesRange>,
+    ) -> Self {
         let mut effective_range = match sst.info.first_entry.clone() {
             Some(physical_first_entry) => {
                 let end_bound = match sst.info.last_entry.clone() {
@@ -135,6 +163,7 @@ impl SsTableView {
                 .expect("An intersection of visible and physical range must be non-empty.")
         }
         SsTableView {
+            view_id,
             sst,
             visible_range,
             effective_range,
@@ -142,7 +171,7 @@ impl SsTableView {
     }
 
     pub(crate) fn with_visible_range(&self, visible_range: BytesRange) -> Self {
-        Self::new_projected(self.sst.clone(), Some(visible_range))
+        Self::new_projected(self.view_id, self.sst.clone(), Some(visible_range))
     }
 
     /// The range of keys that are visible to the user.
@@ -222,12 +251,6 @@ impl SsTableView {
 
     pub(crate) fn estimate_size(&self) -> u64 {
         self.sst.estimate_size()
-    }
-}
-
-impl From<SsTableHandle> for SsTableView {
-    fn from(sst: SsTableHandle) -> Self {
-        Self::new(sst)
     }
 }
 
@@ -820,11 +843,11 @@ mod tests {
                 .expect("db in error state");
             let imm = db_state.state.imm_memtable.back().unwrap().clone();
             let handle = SsTableHandle::new(
-                SsTableId::Compacted(ulid::Ulid::new()),
+                SsTableId::Compacted(ulid::Ulid::from_parts(i as u64, 0)),
                 SST_FORMAT_VERSION_LATEST,
                 dummy_info.clone(),
             );
-            let view = handle.into();
+            let view: SsTableView = handle.into();
             db_state.modify(|modifier| {
                 modifier.state.manifest.value.core.l0.push_front(view);
                 modifier.state.manifest.value.core.replay_after_wal_id =
@@ -888,7 +911,7 @@ mod tests {
 
     fn create_compacted_sst_view(first_entry: Option<Bytes>) -> SsTableView {
         let sst_info = create_sst_info(first_entry);
-        let sst_id = SsTableId::Compacted(ulid::Ulid::new());
+        let sst_id = SsTableId::Compacted(ulid::Ulid::from_parts(0, 0));
         let handle = SsTableHandle::new(sst_id, SST_FORMAT_VERSION_LATEST, sst_info);
         handle.into()
     }

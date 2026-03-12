@@ -324,7 +324,7 @@ pub(crate) async fn build_sorted_runs(
         let mut sr_ssts = Vec::new();
         for entries in sr_sst_sets {
             let ssts = write_ssts(table_store, entries, max_sst_size).await;
-            sr_ssts.extend(ssts.into_iter().map(SsTableView::new));
+            sr_ssts.extend(ssts.into_iter().map(SsTableView::identity));
         }
         sorted_runs.push(SortedRun {
             id: sr_id as u32,
@@ -363,7 +363,7 @@ impl CompactionScheduler for OnDemandCompactionScheduler {
         let mut sources: Vec<SourceId> = db_state
             .l0
             .iter()
-            .map(|view| SourceId::Sst(view.sst.id.unwrap_compacted_id()))
+            .map(|view| SourceId::SstView(view.view_id))
             .collect();
 
         // Add SSTs from all sorted runs

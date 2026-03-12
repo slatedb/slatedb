@@ -454,7 +454,13 @@ impl TokioCompactionExecutorInner {
 
         Ok(SortedRun {
             id: args.destination,
-            sst_views: output_ssts.into_iter().map(SsTableView::new).collect(),
+            sst_views: output_ssts
+                .into_iter()
+                .map(|sst| {
+                    let view_id = self.rand.rng().gen_ulid(self.clock.as_ref());
+                    SsTableView::new(view_id, sst)
+                })
+                .collect(),
         })
     }
 
@@ -1018,7 +1024,7 @@ mod tests {
 
         for entries in &l0_entry_sets {
             let ssts = write_sst(&table_store, entries, usize::MAX).await;
-            l0_ssts.extend(ssts.into_iter().map(SsTableView::new));
+            l0_ssts.extend(ssts.into_iter().map(SsTableView::identity));
             all_entries.extend(entries.iter().cloned());
         }
 
@@ -1034,7 +1040,7 @@ mod tests {
                 }
                 sorted_runs.push(SortedRun {
                     id: sr_id as u32,
-                    sst_views: sr_ssts.into_iter().map(SsTableView::new).collect(),
+                    sst_views: sr_ssts.into_iter().map(SsTableView::identity).collect(),
                 });
             }
         }
@@ -1217,7 +1223,7 @@ mod tests {
                 let mut l0_ssts = Vec::new();
                 for entries in &l0_entry_sets {
                     let ssts = write_ssts(&table_store, entries, usize::MAX).await;
-                    l0_ssts.extend(ssts.into_iter().map(SsTableView::new));
+                    l0_ssts.extend(ssts.into_iter().map(SsTableView::identity));
                 }
 
                 let sorted_runs = build_sorted_runs(&table_store, &sr_entry_sets, usize::MAX).await;
@@ -1394,7 +1400,7 @@ mod tests {
                 id: Ulid::new(),
                 compaction_id: Ulid::new(),
                 destination: 0,
-                sst_views: ssts.into_iter().map(SsTableView::new).collect(),
+                sst_views: ssts.into_iter().map(SsTableView::identity).collect(),
                 sorted_runs: vec![],
                 output_ssts: vec![],
                 compaction_clock_tick: 0,

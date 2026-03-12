@@ -214,6 +214,9 @@ impl FlatBufferManifestCodec {
         }
     }
 
+    // ManifestV1 has no view IDs, so we generate fresh ones during migration.
+    // This is safe because V1 decode only runs once per DB upgrade to V2.
+    #[allow(clippy::disallowed_methods)]
     pub(crate) fn manifest_v1(
         manifest: &ManifestV1,
     ) -> Result<Manifest, Box<dyn std::error::Error + Send + Sync>> {
@@ -228,6 +231,7 @@ impl FlatBufferManifestCodec {
             let sst_info = FlatBufferSsTableInfoCodec::sst_info(&man_sst.info());
             let handle = SsTableHandle::new(sst_id, format_version, sst_info);
             let l0_sst = SsTableView::new_projected(
+                Ulid::new(),
                 handle,
                 man_sst.visible_range().map(Self::decode_bytes_range),
             );
@@ -244,6 +248,7 @@ impl FlatBufferManifestCodec {
                 let info = FlatBufferSsTableInfoCodec::sst_info(&manifest_sst.info());
                 let handle = SsTableHandle::new(id, format_version, info);
                 ssts.push(SsTableView::new_projected(
+                    Ulid::new(),
                     handle,
                     manifest_sst.visible_range().map(Self::decode_bytes_range),
                 ));
@@ -317,12 +322,14 @@ impl FlatBufferManifestCodec {
         view: &CompactedSsTableView,
         sst_lookup: &std::collections::HashMap<Ulid, SsTableHandle>,
     ) -> Result<SsTableView, Box<dyn std::error::Error + Send + Sync>> {
+        let view_id = view.view_id().ulid();
         let ulid = view.sst_id().ulid();
         let handle = sst_lookup
             .get(&ulid)
             .ok_or_else(|| format!("CompactedSsTableView references unknown SST id: {ulid}"))?
             .clone();
         Ok(SsTableView::new_projected(
+            view_id,
             handle,
             view.visible_range().map(Self::decode_bytes_range),
         ))
@@ -497,8 +504,13 @@ impl FlatBufferCompactionsCodec {
                     return Err(SlateDBError::InvalidCompaction);
                 };
                 let mut sources = Vec::new();
-                if let Some(ssts) = spec.ssts() {
-                    sources.extend(ssts.iter().map(|s| SourceId::Sst(s.ulid())));
+                if let Some(view_ids) = spec.l0_view_ids() {
+                    sources.extend(view_ids.iter().map(|id| SourceId::SstView(id.ulid())));
+                } else if let Some(ssts) = spec.ssts() {
+                    // Backward compat: old specs stored SST ULIDs, not view IDs.
+                    // These won't match any view precisely, but this path only
+                    // applies to in-flight compactions from before the upgrade.
+                    sources.extend(ssts.iter().map(|s| SourceId::SstView(s.ulid())));
                 }
                 let sorted_runs: Vec<u32> = spec
                     .sorted_runs()
@@ -679,11 +691,13 @@ impl<'b> DbFlatBufferBuilder<'b> {
         };
         let id = self.add_compacted_sst_id(&ulid);
         let visible_range = view.visible_range.as_ref().map(|r| self.add_bytes_range(r));
+        let view_id = Some(self.add_ulid(&view.view_id));
         CompactedSsTableView::create(
             &mut self.builder,
             &CompactedSsTableViewArgs {
                 sst_id: Some(id),
                 visible_range,
+                view_id,
             },
         )
     }
@@ -729,20 +743,24 @@ impl<'b> DbFlatBufferBuilder<'b> {
         &mut self,
         spec: &CompactorCompactionSpec,
     ) -> (FbCompactionSpec, WIPOffset<flatbuffers::UnionWIPOffset>) {
-        let mut ssts = Vec::new();
+        let mut view_ids = Vec::new();
         let mut sorted_runs = Vec::new();
         for source in spec.sources().iter() {
             match source {
-                SourceId::Sst(id) => ssts.push(*id),
+                SourceId::SstView(id) => view_ids.push(*id),
                 SourceId::SortedRun(id) => sorted_runs.push(*id),
             }
         }
-        let ssts = (!ssts.is_empty()).then(|| self.add_ulids(ssts.iter()));
+        let l0_view_ids = (!view_ids.is_empty()).then(|| self.add_ulids(view_ids.iter()));
         let sorted_runs =
             (!sorted_runs.is_empty()).then(|| self.builder.create_vector(sorted_runs.as_slice()));
         let tiered_spec = TieredCompactionSpec::create(
             &mut self.builder,
-            &TieredCompactionSpecArgs { ssts, sorted_runs },
+            &TieredCompactionSpecArgs {
+                ssts: None,
+                sorted_runs,
+                l0_view_ids,
+            },
         );
         (
             FbCompactionSpec::TieredCompactionSpec,
@@ -1134,10 +1152,14 @@ mod tests {
 
     #[test]
     fn test_should_encode_decode_ssts_with_visible_ranges() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(1);
         fn new_sst_handle(first_entry: &[u8], visible_range: Option<BytesRange>) -> SsTableView {
+            let ulid = ulid::Ulid::from_parts(COUNTER.fetch_add(1, Ordering::Relaxed), 0);
             SsTableView::new_projected(
+                ulid,
                 SsTableHandle::new(
-                    SsTableId::Compacted(ulid::Ulid::new()),
+                    SsTableId::Compacted(ulid),
                     SST_FORMAT_VERSION_LATEST,
                     SsTableInfo {
                         first_entry: Some(Bytes::copy_from_slice(first_entry)),
@@ -1333,7 +1355,7 @@ mod tests {
         let output_ssts = vec![new_output_sst(b"a"), new_output_sst(b"m")];
         let compaction_l0 = Compaction::new(
             ulid::Ulid::new(),
-            CompactionSpec::new(vec![SourceId::Sst(ulid::Ulid::new())], 0),
+            CompactionSpec::new(vec![SourceId::SstView(ulid::Ulid::new())], 0),
         )
         .with_status(CompactionStatus::Running)
         .with_output_ssts(output_ssts);
@@ -1635,7 +1657,7 @@ mod tests {
         );
         let compaction = Compaction::new(
             ulid::Ulid::new(),
-            CompactionSpec::new(vec![SourceId::Sst(ulid::Ulid::new())], 0),
+            CompactionSpec::new(vec![SourceId::SstView(ulid::Ulid::new())], 0),
         )
         .with_status(CompactionStatus::Running)
         .with_output_ssts(vec![output_sst]);
@@ -1710,6 +1732,7 @@ mod tests {
             &TieredCompactionSpecArgs {
                 ssts: Some(source_ssts),
                 sorted_runs: None,
+                l0_view_ids: None,
             },
         );
         let compaction_ulid = ulid::Ulid::new();

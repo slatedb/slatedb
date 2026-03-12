@@ -1940,8 +1940,9 @@ impl<'a> flatbuffers::Follow<'a> for CompactedSsTableView<'a> {
 }
 
 impl<'a> CompactedSsTableView<'a> {
-  pub const VT_SST_ID: flatbuffers::VOffsetT = 4;
-  pub const VT_VISIBLE_RANGE: flatbuffers::VOffsetT = 6;
+  pub const VT_VIEW_ID: flatbuffers::VOffsetT = 4;
+  pub const VT_SST_ID: flatbuffers::VOffsetT = 6;
+  pub const VT_VISIBLE_RANGE: flatbuffers::VOffsetT = 8;
 
   #[inline]
   pub unsafe fn init_from_table(table: flatbuffers::Table<'a>) -> Self {
@@ -1955,10 +1956,18 @@ impl<'a> CompactedSsTableView<'a> {
     let mut builder = CompactedSsTableViewBuilder::new(_fbb);
     if let Some(x) = args.visible_range { builder.add_visible_range(x); }
     if let Some(x) = args.sst_id { builder.add_sst_id(x); }
+    if let Some(x) = args.view_id { builder.add_view_id(x); }
     builder.finish()
   }
 
 
+  #[inline]
+  pub fn view_id(&self) -> Ulid<'a> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<Ulid>>(CompactedSsTableView::VT_VIEW_ID, None).unwrap()}
+  }
   #[inline]
   pub fn sst_id(&self) -> Ulid<'a> {
     // Safety:
@@ -1982,6 +1991,7 @@ impl flatbuffers::Verifiable for CompactedSsTableView<'_> {
   ) -> Result<(), flatbuffers::InvalidFlatbuffer> {
     use self::flatbuffers::Verifiable;
     v.visit_table(pos)?
+     .visit_field::<flatbuffers::ForwardsUOffset<Ulid>>("view_id", Self::VT_VIEW_ID, true)?
      .visit_field::<flatbuffers::ForwardsUOffset<Ulid>>("sst_id", Self::VT_SST_ID, true)?
      .visit_field::<flatbuffers::ForwardsUOffset<BytesRange>>("visible_range", Self::VT_VISIBLE_RANGE, false)?
      .finish();
@@ -1989,6 +1999,7 @@ impl flatbuffers::Verifiable for CompactedSsTableView<'_> {
   }
 }
 pub struct CompactedSsTableViewArgs<'a> {
+    pub view_id: Option<flatbuffers::WIPOffset<Ulid<'a>>>,
     pub sst_id: Option<flatbuffers::WIPOffset<Ulid<'a>>>,
     pub visible_range: Option<flatbuffers::WIPOffset<BytesRange<'a>>>,
 }
@@ -1996,6 +2007,7 @@ impl<'a> Default for CompactedSsTableViewArgs<'a> {
   #[inline]
   fn default() -> Self {
     CompactedSsTableViewArgs {
+      view_id: None, // required field
       sst_id: None, // required field
       visible_range: None,
     }
@@ -2007,6 +2019,10 @@ pub struct CompactedSsTableViewBuilder<'a: 'b, 'b, A: flatbuffers::Allocator + '
   start_: flatbuffers::WIPOffset<flatbuffers::TableUnfinishedWIPOffset>,
 }
 impl<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> CompactedSsTableViewBuilder<'a, 'b, A> {
+  #[inline]
+  pub fn add_view_id(&mut self, view_id: flatbuffers::WIPOffset<Ulid<'b >>) {
+    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<Ulid>>(CompactedSsTableView::VT_VIEW_ID, view_id);
+  }
   #[inline]
   pub fn add_sst_id(&mut self, sst_id: flatbuffers::WIPOffset<Ulid<'b >>) {
     self.fbb_.push_slot_always::<flatbuffers::WIPOffset<Ulid>>(CompactedSsTableView::VT_SST_ID, sst_id);
@@ -2026,6 +2042,7 @@ impl<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> CompactedSsTableViewBuilder<'a,
   #[inline]
   pub fn finish(self) -> flatbuffers::WIPOffset<CompactedSsTableView<'a>> {
     let o = self.fbb_.end_table(self.start_);
+    self.fbb_.required(o, CompactedSsTableView::VT_VIEW_ID,"view_id");
     self.fbb_.required(o, CompactedSsTableView::VT_SST_ID,"sst_id");
     flatbuffers::WIPOffset::new(o.value())
   }
@@ -2034,6 +2051,7 @@ impl<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> CompactedSsTableViewBuilder<'a,
 impl core::fmt::Debug for CompactedSsTableView<'_> {
   fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
     let mut ds = f.debug_struct("CompactedSsTableView");
+      ds.field("view_id", &self.view_id());
       ds.field("sst_id", &self.sst_id());
       ds.field("visible_range", &self.visible_range());
       ds.finish()
@@ -2286,7 +2304,8 @@ impl<'a> flatbuffers::Follow<'a> for TieredCompactionSpec<'a> {
 
 impl<'a> TieredCompactionSpec<'a> {
   pub const VT_SSTS: flatbuffers::VOffsetT = 4;
-  pub const VT_SORTED_RUNS: flatbuffers::VOffsetT = 6;
+  pub const VT_L0_VIEW_IDS: flatbuffers::VOffsetT = 6;
+  pub const VT_SORTED_RUNS: flatbuffers::VOffsetT = 8;
 
   #[inline]
   pub unsafe fn init_from_table(table: flatbuffers::Table<'a>) -> Self {
@@ -2299,6 +2318,7 @@ impl<'a> TieredCompactionSpec<'a> {
   ) -> flatbuffers::WIPOffset<TieredCompactionSpec<'bldr>> {
     let mut builder = TieredCompactionSpecBuilder::new(_fbb);
     if let Some(x) = args.sorted_runs { builder.add_sorted_runs(x); }
+    if let Some(x) = args.l0_view_ids { builder.add_l0_view_ids(x); }
     if let Some(x) = args.ssts { builder.add_ssts(x); }
     builder.finish()
   }
@@ -2310,6 +2330,13 @@ impl<'a> TieredCompactionSpec<'a> {
     // Created from valid Table for this object
     // which contains a valid value in this slot
     unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<Ulid>>>>(TieredCompactionSpec::VT_SSTS, None)}
+  }
+  #[inline]
+  pub fn l0_view_ids(&self) -> Option<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<Ulid<'a>>>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<Ulid>>>>(TieredCompactionSpec::VT_L0_VIEW_IDS, None)}
   }
   #[inline]
   pub fn sorted_runs(&self) -> Option<flatbuffers::Vector<'a, u32>> {
@@ -2328,6 +2355,7 @@ impl flatbuffers::Verifiable for TieredCompactionSpec<'_> {
     use self::flatbuffers::Verifiable;
     v.visit_table(pos)?
      .visit_field::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'_, flatbuffers::ForwardsUOffset<Ulid>>>>("ssts", Self::VT_SSTS, false)?
+     .visit_field::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'_, flatbuffers::ForwardsUOffset<Ulid>>>>("l0_view_ids", Self::VT_L0_VIEW_IDS, false)?
      .visit_field::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'_, u32>>>("sorted_runs", Self::VT_SORTED_RUNS, false)?
      .finish();
     Ok(())
@@ -2335,6 +2363,7 @@ impl flatbuffers::Verifiable for TieredCompactionSpec<'_> {
 }
 pub struct TieredCompactionSpecArgs<'a> {
     pub ssts: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<Ulid<'a>>>>>,
+    pub l0_view_ids: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<Ulid<'a>>>>>,
     pub sorted_runs: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, u32>>>,
 }
 impl<'a> Default for TieredCompactionSpecArgs<'a> {
@@ -2342,6 +2371,7 @@ impl<'a> Default for TieredCompactionSpecArgs<'a> {
   fn default() -> Self {
     TieredCompactionSpecArgs {
       ssts: None,
+      l0_view_ids: None,
       sorted_runs: None,
     }
   }
@@ -2355,6 +2385,10 @@ impl<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> TieredCompactionSpecBuilder<'a,
   #[inline]
   pub fn add_ssts(&mut self, ssts: flatbuffers::WIPOffset<flatbuffers::Vector<'b , flatbuffers::ForwardsUOffset<Ulid<'b >>>>) {
     self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(TieredCompactionSpec::VT_SSTS, ssts);
+  }
+  #[inline]
+  pub fn add_l0_view_ids(&mut self, l0_view_ids: flatbuffers::WIPOffset<flatbuffers::Vector<'b , flatbuffers::ForwardsUOffset<Ulid<'b >>>>) {
+    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(TieredCompactionSpec::VT_L0_VIEW_IDS, l0_view_ids);
   }
   #[inline]
   pub fn add_sorted_runs(&mut self, sorted_runs: flatbuffers::WIPOffset<flatbuffers::Vector<'b , u32>>) {
@@ -2379,6 +2413,7 @@ impl core::fmt::Debug for TieredCompactionSpec<'_> {
   fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
     let mut ds = f.debug_struct("TieredCompactionSpec");
       ds.field("ssts", &self.ssts());
+      ds.field("l0_view_ids", &self.l0_view_ids());
       ds.field("sorted_runs", &self.sorted_runs());
       ds.finish()
   }

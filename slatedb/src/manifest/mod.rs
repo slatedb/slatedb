@@ -558,9 +558,12 @@ mod tests {
     {
         let mut core = ManifestCore::new();
         for entry in &manifest.l0 {
+            let sst_id = sst_id_fn(entry.sst_alias);
+            let view_id = sst_id.unwrap_compacted_id();
             core.l0.push_back(SsTableView::new_projected(
+                view_id,
                 SsTableHandle::new(
-                    sst_id_fn(entry.sst_alias),
+                    sst_id,
                     SST_FORMAT_VERSION_LATEST,
                     SsTableInfo {
                         first_entry: Some(entry.first_entry.clone()),
@@ -576,9 +579,12 @@ mod tests {
                 sst_views: sorted_run
                     .iter()
                     .map(|entry| {
+                        let sst_id = sst_id_fn(entry.sst_alias);
+                        let view_id = sst_id.unwrap_compacted_id();
                         SsTableView::new_projected(
+                            view_id,
                             SsTableHandle::new(
-                                sst_id_fn(entry.sst_alias),
+                                sst_id,
                                 SST_FORMAT_VERSION_LATEST,
                                 SsTableInfo {
                                     first_entry: Some(entry.first_entry.clone()),

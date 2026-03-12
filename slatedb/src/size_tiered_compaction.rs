@@ -9,7 +9,6 @@ use crate::db_state::ManifestCore;
 
 use crate::error::Error;
 use log::warn;
-use ulid::Ulid;
 
 const DEFAULT_MAX_CONCURRENT_COMPACTIONS: usize = 4;
 
@@ -216,7 +215,7 @@ impl CompactionScheduler for SizeTieredCompactionScheduler {
             .manifest()
             .l0
             .iter()
-            .map(|view| SourceId::Sst(view.sst.id.unwrap_compacted_id()))
+            .map(|view| SourceId::SstView(view.view_id))
             .chain(
                 state
                     .manifest()
@@ -375,19 +374,14 @@ impl SizeTieredCompactionScheduler {
         &self,
         db_state: &ManifestCore,
     ) -> (Vec<CompactionSource>, Vec<CompactionSource>) {
-        let mut collected_l0: Vec<CompactionSource> = Vec::new();
-        // Deduplicate Ulid: duplicated Ulid might result from union() operation
-        // and interfere with max_compaction_sources
-        let mut seen_l0: HashSet<Ulid> = HashSet::new();
-        for l0 in db_state.l0.iter() {
-            let ulid = l0.sst.id.unwrap_compacted_id();
-            if seen_l0.insert(ulid) {
-                collected_l0.push(CompactionSource {
-                    source: SourceId::Sst(ulid),
-                    size: l0.estimate_size(),
-                });
-            }
-        }
+        let collected_l0: Vec<CompactionSource> = db_state
+            .l0
+            .iter()
+            .map(|l0| CompactionSource {
+                source: SourceId::SstView(l0.view_id),
+                size: l0.estimate_size(),
+            })
+            .collect();
 
         let collected_sr = db_state
             .compacted
@@ -469,10 +463,8 @@ mod tests {
         // then:
         assert_eq!(requests.len(), 1);
         let request = requests.first().unwrap();
-        let expected_sources: Vec<SourceId> = l0
-            .iter()
-            .map(|h| SourceId::Sst(h.sst.id.unwrap_compacted_id()))
-            .collect();
+        let expected_sources: Vec<SourceId> =
+            l0.iter().map(|h| SourceId::SstView(h.view_id)).collect();
         assert_eq!(request.sources(), &expected_sources);
         assert_eq!(request.destination(), 0);
     }
@@ -502,10 +494,8 @@ mod tests {
         // then:
         assert_eq!(requests.len(), 1);
         let request = requests.first().unwrap();
-        let expected_sources: Vec<SourceId> = l0
-            .iter()
-            .map(|h| SourceId::Sst(h.sst.id.unwrap_compacted_id()))
-            .collect();
+        let expected_sources: Vec<SourceId> =
+            l0.iter().map(|h| SourceId::SstView(h.view_id)).collect();
         assert_eq!(request.sources(), &expected_sources);
     }
 
@@ -940,10 +930,7 @@ mod tests {
     }
 
     fn create_l0_compaction(l0: &[SsTableView], dst: u32) -> CompactionSpec {
-        let sources: Vec<SourceId> = l0
-            .iter()
-            .map(|h| SourceId::Sst(h.sst.id.unwrap_compacted_id()))
-            .collect();
+        let sources: Vec<SourceId> = l0.iter().map(|h| SourceId::SstView(h.view_id)).collect();
 
         CompactionSpec::new(sources, dst)
     }
