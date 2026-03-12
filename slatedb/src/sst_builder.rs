@@ -1614,8 +1614,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_block_stats_multi_block() {
-        // Use a small block_size (32) to force multiple blocks.
-        // Each 8-byte key + 8-byte value put entry fills one block at this size
+        use crate::types::ValueDeletable;
+        // Use a small block_size (32) with large entries (16-byte keys + 16-byte
+        // values) so every entry exceeds the block capacity and lands in its own
+        // block regardless of value type.
         let root_path = Path::from("");
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let format = SsTableFormat {
@@ -1629,17 +1631,31 @@ mod tests {
             None,
         );
         let mut builder = table_store.table_builder();
-        // 3 puts, each in its own block.
+        // Block 0: put
         builder
-            .add_value(&[b'a'; 8], &[b'1'; 8], Some(1), None)
+            .add_value(&[b'a'; 16], &[b'1'; 16], Some(1), None)
             .await
             .unwrap();
+        // Block 1: delete
         builder
-            .add_value(&[b'b'; 8], &[b'2'; 8], Some(2), None)
+            .add(RowEntry::new(
+                Bytes::from_static(&[b'b'; 16]),
+                ValueDeletable::Tombstone,
+                0,
+                None,
+                None,
+            ))
             .await
             .unwrap();
+        // Block 2: merge
         builder
-            .add_value(&[b'c'; 8], &[b'3'; 8], Some(3), None)
+            .add(RowEntry::new(
+                Bytes::from_static(&[b'c'; 16]),
+                ValueDeletable::Merge(Bytes::from_static(&[b'3'; 16])),
+                0,
+                None,
+                None,
+            ))
             .await
             .unwrap();
 
@@ -1655,16 +1671,28 @@ mod tests {
             .expect("stats should be present");
 
         // Aggregate totals
-        assert_eq!(stats.num_puts, 3);
-        assert_eq!(stats.num_deletes, 0);
-        assert_eq!(stats.num_merges, 0);
+        assert_eq!(stats.num_puts, 1);
+        assert_eq!(stats.num_deletes, 1);
+        assert_eq!(stats.num_merges, 1);
 
-        // Block stats.
+        // One block per entry, each with the correct type.
         assert_eq!(stats.block_stats.len(), 3);
-        for bs in &stats.block_stats {
-            assert_eq!(bs.num_puts, 1);
-            assert_eq!(bs.num_deletes, 0);
-            assert_eq!(bs.num_merges, 0);
-        }
+        assert_eq!(stats.block_stats[0].num_puts, 1);
+        assert_eq!(stats.block_stats[0].num_deletes, 0);
+        assert_eq!(stats.block_stats[0].num_merges, 0);
+        assert_eq!(stats.block_stats[1].num_puts, 0);
+        assert_eq!(stats.block_stats[1].num_deletes, 1);
+        assert_eq!(stats.block_stats[1].num_merges, 0);
+        assert_eq!(stats.block_stats[2].num_puts, 0);
+        assert_eq!(stats.block_stats[2].num_deletes, 0);
+        assert_eq!(stats.block_stats[2].num_merges, 1);
+
+        // Per-block sums equal aggregate totals.
+        let total_puts: u16 = stats.block_stats.iter().map(|b| b.num_puts).sum();
+        let total_deletes: u16 = stats.block_stats.iter().map(|b| b.num_deletes).sum();
+        let total_merges: u16 = stats.block_stats.iter().map(|b| b.num_merges).sum();
+        assert_eq!(total_puts as u64, stats.num_puts);
+        assert_eq!(total_deletes as u64, stats.num_deletes);
+        assert_eq!(total_merges as u64, stats.num_merges);
     }
 }
