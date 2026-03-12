@@ -130,17 +130,16 @@ impl CachedObjectStore {
             }
         }
 
-        // Second pass: load the selected files in bouded parallelism and cache them.
+        // Second pass: load the selected files in bounded parallelism and cache them.
         let degree_of_parallelism = 32;
         let _result = build_concurrent(files_to_load.into_iter(), degree_of_parallelism, |path| {
             let this = self.clone();
             async move {
-                match this.cached_get_opts(&path, GetOptions::default()).await {
-                    Ok(result) => {
-                        // trigger caching
-                        let _ = result.bytes().await;
-                        Ok(Some(())) // success → Some
-                    }
+                match this
+                    .maybe_prefetch_range(&path, GetOptions::default())
+                    .await
+                {
+                    Ok(_) => Ok(Some(())),
                     Err(e) => {
                         warn!(
                             "Failed to prefetch file into cache [path={}, error={:?}]",
