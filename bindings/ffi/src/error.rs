@@ -4,7 +4,7 @@ use thiserror::Error;
 
 /// The reason a database handle was closed.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, uniffi::Enum)]
-pub enum CloseReason {
+pub enum FfiCloseReason {
     /// No close reason is available.
     #[default]
     None,
@@ -23,7 +23,7 @@ pub enum CloseReason {
 /// The FFI wrapper groups core SlateDB errors into a smaller set of stable
 /// categories while preserving the original message text.
 #[derive(Debug, Error, uniffi::Error)]
-pub enum SlatedbError {
+pub enum FfiSlatedbError {
     /// A transaction failed to commit or otherwise encountered a conflict.
     #[error("{message}")]
     Transaction {
@@ -35,7 +35,7 @@ pub enum SlatedbError {
     #[error("{message}")]
     Closed {
         /// The reason the handle was closed.
-        reason: CloseReason,
+        reason: FfiCloseReason,
         /// The original error message.
         message: String,
     },
@@ -71,7 +71,7 @@ pub enum SlatedbError {
 
 /// Error returned by foreign merge operator callbacks.
 #[derive(Debug, Error, uniffi::Error)]
-pub enum MergeOperatorCallbackError {
+pub enum FfiMergeOperatorCallbackError {
     /// The merge operator rejected the input or could not produce a merged value.
     #[error("{message}")]
     Failed {
@@ -80,7 +80,7 @@ pub enum MergeOperatorCallbackError {
     },
 }
 
-impl From<slatedb::Error> for SlatedbError {
+impl From<slatedb::Error> for FfiSlatedbError {
     fn from(error: slatedb::Error) -> Self {
         let message = error.to_string();
         match error.kind() {
@@ -98,7 +98,7 @@ impl From<slatedb::Error> for SlatedbError {
     }
 }
 
-impl From<serde_json::Error> for SlatedbError {
+impl From<serde_json::Error> for FfiSlatedbError {
     fn from(error: serde_json::Error) -> Self {
         Self::Invalid {
             message: error.to_string(),
@@ -106,7 +106,7 @@ impl From<serde_json::Error> for SlatedbError {
     }
 }
 
-impl From<slatedb::CloseReason> for CloseReason {
+impl From<slatedb::CloseReason> for FfiCloseReason {
     fn from(reason: slatedb::CloseReason) -> Self {
         match reason {
             slatedb::CloseReason::Clean => Self::Clean,

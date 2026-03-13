@@ -4,8 +4,8 @@ use std::sync::{Arc, Mutex as StdMutex};
 
 use slatedb::WriteBatch as CoreWriteBatch;
 
-use crate::config::{MergeOptions, PutOptions};
-use crate::error::SlatedbError;
+use crate::config::{FfiMergeOptions, FfiPutOptions};
+use crate::error::FfiSlatedbError;
 use crate::validation::{
     validate_key, validate_key_value, write_batch_closed, write_batch_consumed,
 };
@@ -26,8 +26,8 @@ impl WriteBatch {
     fn with_open<T>(
         &self,
         update: impl FnOnce(&mut CoreWriteBatch) -> T,
-    ) -> Result<T, SlatedbError> {
-        let mut guard = self.state.lock().map_err(|_| SlatedbError::Internal {
+    ) -> Result<T, FfiSlatedbError> {
+        let mut guard = self.state.lock().map_err(|_| FfiSlatedbError::Internal {
             message: "write batch mutex poisoned".to_owned(),
         })?;
         match &mut *guard {
@@ -37,8 +37,8 @@ impl WriteBatch {
         }
     }
 
-    pub(crate) fn take_for_write(&self) -> Result<CoreWriteBatch, SlatedbError> {
-        let mut guard = self.state.lock().map_err(|_| SlatedbError::Internal {
+    pub(crate) fn take_for_write(&self) -> Result<CoreWriteBatch, FfiSlatedbError> {
+        let mut guard = self.state.lock().map_err(|_| FfiSlatedbError::Internal {
             message: "write batch mutex poisoned".to_owned(),
         })?;
 
@@ -67,7 +67,7 @@ impl WriteBatch {
     }
 
     /// Append a put operation using default put options.
-    pub fn put(&self, key: Vec<u8>, value: Vec<u8>) -> Result<(), SlatedbError> {
+    pub fn put(&self, key: Vec<u8>, value: Vec<u8>) -> Result<(), FfiSlatedbError> {
         validate_key_value(&key, &value)?;
         self.with_open(|batch| batch.put(key, value))
     }
@@ -77,15 +77,15 @@ impl WriteBatch {
         &self,
         key: Vec<u8>,
         value: Vec<u8>,
-        options: PutOptions,
-    ) -> Result<(), SlatedbError> {
+        options: FfiPutOptions,
+    ) -> Result<(), FfiSlatedbError> {
         validate_key_value(&key, &value)?;
         let options = options.into_core();
         self.with_open(|batch| batch.put_with_options(key, value, &options))
     }
 
     /// Append a merge operation using default merge options.
-    pub fn merge(&self, key: Vec<u8>, operand: Vec<u8>) -> Result<(), SlatedbError> {
+    pub fn merge(&self, key: Vec<u8>, operand: Vec<u8>) -> Result<(), FfiSlatedbError> {
         validate_key_value(&key, &operand)?;
         self.with_open(|batch| batch.merge(key, operand))
     }
@@ -95,22 +95,22 @@ impl WriteBatch {
         &self,
         key: Vec<u8>,
         operand: Vec<u8>,
-        options: MergeOptions,
-    ) -> Result<(), SlatedbError> {
+        options: FfiMergeOptions,
+    ) -> Result<(), FfiSlatedbError> {
         validate_key_value(&key, &operand)?;
         let options = options.into_core();
         self.with_open(|batch| batch.merge_with_options(key, operand, &options))
     }
 
     /// Append a delete operation.
-    pub fn delete(&self, key: Vec<u8>) -> Result<(), SlatedbError> {
+    pub fn delete(&self, key: Vec<u8>) -> Result<(), FfiSlatedbError> {
         validate_key(&key)?;
         self.with_open(|batch| batch.delete(key))
     }
 
     /// Explicitly close the batch handle.
-    pub fn close(&self) -> Result<(), SlatedbError> {
-        let mut guard = self.state.lock().map_err(|_| SlatedbError::Internal {
+    pub fn close(&self) -> Result<(), FfiSlatedbError> {
+        let mut guard = self.state.lock().map_err(|_| FfiSlatedbError::Internal {
             message: "write batch mutex poisoned".to_owned(),
         })?;
         if matches!(&*guard, WriteBatchState::Closed) {

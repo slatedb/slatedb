@@ -2,8 +2,8 @@
 
 use tokio::sync::Mutex as AsyncMutex;
 
-use crate::config::KeyValue;
-use crate::error::SlatedbError;
+use crate::config::FfiKeyValue;
+use crate::error::FfiSlatedbError;
 
 /// An asynchronous iterator over key-value pairs.
 ///
@@ -27,11 +27,11 @@ impl DbIterator {
     /// Return the next item from the iterator.
     ///
     /// ## Returns
-    /// - `Result<Option<KeyValue>, SlatedbError>`: the next key-value pair, or
+    /// - `Result<Option<FfiKeyValue>, FfiSlatedbError>`: the next key-value pair, or
     ///   `None` when the iterator is exhausted.
-    pub async fn next(&self) -> Result<Option<KeyValue>, SlatedbError> {
+    pub async fn next(&self) -> Result<Option<FfiKeyValue>, FfiSlatedbError> {
         let mut guard = self.inner.lock().await;
-        Ok(guard.next().await?.map(KeyValue::from_core))
+        Ok(guard.next().await?.map(FfiKeyValue::from_core))
     }
 
     /// Reposition the iterator to the first key greater than or equal to `key`.
@@ -40,11 +40,11 @@ impl DbIterator {
     /// - `key`: the key to seek to within the iterator's range.
     ///
     /// ## Errors
-    /// - `SlatedbError::Invalid`: if `key` is empty.
-    /// - `SlatedbError`: if the key falls outside the iterator's valid range.
-    pub async fn seek(&self, key: Vec<u8>) -> Result<(), SlatedbError> {
+    /// - `FfiSlatedbError::Invalid`: if `key` is empty.
+    /// - `FfiSlatedbError`: if the key falls outside the iterator's valid range.
+    pub async fn seek(&self, key: Vec<u8>) -> Result<(), FfiSlatedbError> {
         if key.is_empty() {
-            return Err(SlatedbError::Invalid {
+            return Err(FfiSlatedbError::Invalid {
                 message: "seek key cannot be empty".to_owned(),
             });
         }

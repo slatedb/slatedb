@@ -1,6 +1,6 @@
 //! Helpers for working with serialized SlateDB settings.
 
-use crate::error::SlatedbError;
+use crate::error::FfiSlatedbError;
 
 /// Return the default [`slatedb::Settings`] value as JSON.
 ///
@@ -9,12 +9,12 @@ use crate::error::SlatedbError;
 /// to [`crate::DbBuilder::with_settings_json`].
 ///
 /// ## Returns
-/// - `Result<String, SlatedbError>`: the default settings encoded as JSON.
+/// - `Result<String, FfiSlatedbError>`: the default settings encoded as JSON.
 #[uniffi::export]
-pub fn default_settings_json() -> Result<String, SlatedbError> {
+pub fn default_settings_json() -> Result<String, FfiSlatedbError> {
     slatedb::Settings::default()
         .to_json_string()
-        .map_err(|error| SlatedbError::Internal {
+        .map_err(|error| FfiSlatedbError::Internal {
             message: error.to_string(),
         })
 }

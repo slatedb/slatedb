@@ -2,11 +2,11 @@
 
 use std::ffi::CStr;
 
-use crate::error::{CloseReason, SlatedbError};
+use crate::error::{FfiCloseReason, FfiSlatedbError};
 
 /// The available logging levels.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, uniffi::Enum)]
-pub enum LogLevel {
+pub enum FfiLogLevel {
     Trace,
     Debug,
     #[default]
@@ -15,7 +15,7 @@ pub enum LogLevel {
     Error,
 }
 
-impl LogLevel {
+impl FfiLogLevel {
     fn into_c(self) -> slatedb_c::slatedb_log_level_t {
         match self {
             Self::Trace => slatedb_c::SLATEDB_LOG_LEVEL_TRACE,
@@ -27,13 +27,13 @@ impl LogLevel {
     }
 }
 
-fn map_c_close_reason(reason: slatedb_c::slatedb_close_reason_t) -> CloseReason {
+fn map_c_close_reason(reason: slatedb_c::slatedb_close_reason_t) -> FfiCloseReason {
     match reason {
-        slatedb_c::slatedb_close_reason_t::SLATEDB_CLOSE_REASON_NONE => CloseReason::None,
-        slatedb_c::slatedb_close_reason_t::SLATEDB_CLOSE_REASON_CLEAN => CloseReason::Clean,
-        slatedb_c::slatedb_close_reason_t::SLATEDB_CLOSE_REASON_FENCED => CloseReason::Fenced,
-        slatedb_c::slatedb_close_reason_t::SLATEDB_CLOSE_REASON_PANIC => CloseReason::Panic,
-        _ => CloseReason::Unknown,
+        slatedb_c::slatedb_close_reason_t::SLATEDB_CLOSE_REASON_NONE => FfiCloseReason::None,
+        slatedb_c::slatedb_close_reason_t::SLATEDB_CLOSE_REASON_CLEAN => FfiCloseReason::Clean,
+        slatedb_c::slatedb_close_reason_t::SLATEDB_CLOSE_REASON_FENCED => FfiCloseReason::Fenced,
+        slatedb_c::slatedb_close_reason_t::SLATEDB_CLOSE_REASON_PANIC => FfiCloseReason::Panic,
+        _ => FfiCloseReason::Unknown,
     }
 }
 
@@ -49,32 +49,36 @@ fn take_c_message(result: &slatedb_c::slatedb_result_t) -> String {
     }
 }
 
-fn result_from_slatedb_c(result: slatedb_c::slatedb_result_t) -> Result<(), SlatedbError> {
+fn result_from_slatedb_c(result: slatedb_c::slatedb_result_t) -> Result<(), FfiSlatedbError> {
     let mapped = match result.kind {
         slatedb_c::slatedb_error_kind_t::SLATEDB_ERROR_KIND_NONE => Ok(()),
         slatedb_c::slatedb_error_kind_t::SLATEDB_ERROR_KIND_TRANSACTION => {
-            Err(SlatedbError::Transaction {
+            Err(FfiSlatedbError::Transaction {
                 message: take_c_message(&result),
             })
         }
-        slatedb_c::slatedb_error_kind_t::SLATEDB_ERROR_KIND_CLOSED => Err(SlatedbError::Closed {
-            reason: map_c_close_reason(result.close_reason),
-            message: take_c_message(&result),
-        }),
+        slatedb_c::slatedb_error_kind_t::SLATEDB_ERROR_KIND_CLOSED => {
+            Err(FfiSlatedbError::Closed {
+                reason: map_c_close_reason(result.close_reason),
+                message: take_c_message(&result),
+            })
+        }
         slatedb_c::slatedb_error_kind_t::SLATEDB_ERROR_KIND_UNAVAILABLE => {
-            Err(SlatedbError::Unavailable {
+            Err(FfiSlatedbError::Unavailable {
                 message: take_c_message(&result),
             })
         }
-        slatedb_c::slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID => Err(SlatedbError::Invalid {
-            message: take_c_message(&result),
-        }),
-        slatedb_c::slatedb_error_kind_t::SLATEDB_ERROR_KIND_DATA => Err(SlatedbError::Data {
+        slatedb_c::slatedb_error_kind_t::SLATEDB_ERROR_KIND_INVALID => {
+            Err(FfiSlatedbError::Invalid {
+                message: take_c_message(&result),
+            })
+        }
+        slatedb_c::slatedb_error_kind_t::SLATEDB_ERROR_KIND_DATA => Err(FfiSlatedbError::Data {
             message: take_c_message(&result),
         }),
         slatedb_c::slatedb_error_kind_t::SLATEDB_ERROR_KIND_INTERNAL
         | slatedb_c::slatedb_error_kind_t::SLATEDB_ERROR_KIND_UNKNOWN => {
-            Err(SlatedbError::Internal {
+            Err(FfiSlatedbError::Internal {
                 message: take_c_message(&result),
             })
         }
@@ -87,18 +91,18 @@ fn result_from_slatedb_c(result: slatedb_c::slatedb_result_t) -> Result<(), Slat
 
 /// Initialize SlateDB logging at the requested level.
 #[uniffi::export]
-pub fn init_logging(level: LogLevel) -> Result<(), SlatedbError> {
+pub fn init_logging(level: FfiLogLevel) -> Result<(), FfiSlatedbError> {
     result_from_slatedb_c(slatedb_c::slatedb_logging_init(level.into_c()))
 }
 
 /// Update the process-global SlateDB logging level.
 #[uniffi::export]
-pub fn set_logging_level(level: LogLevel) -> Result<(), SlatedbError> {
+pub fn set_logging_level(level: FfiLogLevel) -> Result<(), FfiSlatedbError> {
     result_from_slatedb_c(slatedb_c::slatedb_logging_set_level(level.into_c()))
 }
 
 /// Initialize SlateDB logging at the default `Info` level.
 #[uniffi::export]
-pub fn init_default_logging() -> Result<(), SlatedbError> {
-    init_logging(LogLevel::Info)
+pub fn init_default_logging() -> Result<(), FfiSlatedbError> {
+    init_logging(FfiLogLevel::Info)
 }

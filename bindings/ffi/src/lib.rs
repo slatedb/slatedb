@@ -21,20 +21,22 @@ mod write_batch;
 
 pub use builder::{DbBuilder, DbReaderBuilder};
 pub use config::{
-    DurabilityLevel, FlushOptions, FlushType, IsolationLevel, KeyRange, KeyValue, MergeOptions,
-    PutOptions, ReadOptions, ReaderOptions, ScanOptions, SstBlockSize, Ttl, WriteHandle,
-    WriteOperation, WriteOptions,
+    FfiDurabilityLevel, FfiFlushOptions, FfiFlushType, FfiIsolationLevel, FfiKeyRange, FfiKeyValue,
+    FfiMergeOptions, FfiPutOptions, FfiReadOptions, FfiReaderOptions, FfiScanOptions,
+    FfiSstBlockSize, FfiTtl, FfiWriteHandle, FfiWriteOperation, FfiWriteOptions,
 };
 pub use db::{Db, DbSnapshot};
 pub use db_reader::DbReader;
-pub use error::{CloseReason, MergeOperatorCallbackError, SlatedbError};
+pub use error::{FfiCloseReason, FfiMergeOperatorCallbackError, FfiSlatedbError};
 pub use iterator::DbIterator;
-pub use logging::{init_default_logging, init_logging, set_logging_level, LogLevel};
+pub use logging::{init_default_logging, init_logging, set_logging_level, FfiLogLevel};
 pub use merge_operator::MergeOperator;
 pub use object_store::{resolve_object_store, ObjectStore};
 pub use settings::default_settings_json;
 pub use transaction::DbTransaction;
-pub use wal::{RowEntry, RowEntryKind, WalFile, WalFileIterator, WalFileMetadata, WalReader};
+pub use wal::{
+    FfiRowEntry, FfiRowEntryKind, FfiWalFileMetadata, WalFile, WalFileIterator, WalReader,
+};
 pub use write_batch::WriteBatch;
 
 uniffi::setup_scaffolding!("slatedb");
