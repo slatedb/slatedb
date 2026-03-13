@@ -1,0 +1,22 @@
+[package]
+name = "slatedb-ffi"
+description = "UniFFI bindings for SlateDB"
+publish = false
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+license.workspace = true
+homepage.workspace = true
+
+[lib]
+name = "slatedb_ffi"
+crate-type = ["cdylib", "rlib"]
+doc = false
+bench = false
+
+[dependencies]
+slatedb = { workspace = true, features = ["all"] }
+uniffi = { workspace = true }
+
+[lints]
+workspace = true
