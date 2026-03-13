@@ -10,7 +10,10 @@ pub struct FfiObjectStore {
 }
 
 #[uniffi::export]
-pub fn ffi_resolve_object_store(url: String) -> Result<Arc<FfiObjectStore>, FfiSlatedbError> {
-    let inner = Db::resolve_object_store(&url)?;
-    Ok(Arc::new(FfiObjectStore { inner }))
+impl FfiObjectStore {
+    #[uniffi::constructor]
+    pub fn resolve(url: String) -> Result<Arc<Self>, FfiSlatedbError> {
+        let inner = Db::resolve_object_store(&url)?;
+        Ok(Arc::new(Self { inner }))
+    }
 }
