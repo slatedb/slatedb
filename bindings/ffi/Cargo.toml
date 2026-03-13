@@ -16,7 +16,13 @@ bench = false
 
 [dependencies]
 slatedb = { workspace = true, features = ["all"] }
-uniffi = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync"] }
+uniffi = { workspace = true, features = ["tokio"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }
 
 [lints]
 workspace = true
