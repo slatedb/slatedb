@@ -215,7 +215,7 @@ impl CompactionScheduler for SizeTieredCompactionScheduler {
             .manifest()
             .l0
             .iter()
-            .map(|sst| SourceId::Sst(sst.id.unwrap_compacted_id()))
+            .map(|view| SourceId::SstView(view.id))
             .chain(
                 state
                     .manifest()
@@ -374,24 +374,25 @@ impl SizeTieredCompactionScheduler {
         &self,
         db_state: &ManifestCore,
     ) -> (Vec<CompactionSource>, Vec<CompactionSource>) {
-        (
-            db_state
-                .l0
-                .iter()
-                .map(|l0| CompactionSource {
-                    source: SourceId::Sst(l0.id.unwrap_compacted_id()),
-                    size: l0.estimate_size(),
-                })
-                .collect(),
-            db_state
-                .compacted
-                .iter()
-                .map(|sr| CompactionSource {
-                    source: SourceId::SortedRun(sr.id),
-                    size: sr.estimate_size(),
-                })
-                .collect(),
-        )
+        let collected_l0: Vec<CompactionSource> = db_state
+            .l0
+            .iter()
+            .map(|l0| CompactionSource {
+                source: SourceId::SstView(l0.id),
+                size: l0.estimate_size(),
+            })
+            .collect();
+
+        let collected_sr = db_state
+            .compacted
+            .iter()
+            .map(|sr| CompactionSource {
+                source: SourceId::SortedRun(sr.id),
+                size: sr.estimate_size(),
+            })
+            .collect();
+
+        (collected_l0, collected_sr)
     }
 }
 
@@ -428,7 +429,9 @@ mod tests {
         Compaction, CompactionSpec, Compactions, CompactorState, SourceId,
     };
     use crate::config::{CompactorOptions, SizeTieredCompactionSchedulerOptions};
-    use crate::db_state::{ManifestCore, SortedRun, SsTableHandle, SsTableId, SsTableInfo};
+    use crate::db_state::{
+        ManifestCore, SortedRun, SsTableHandle, SsTableId, SsTableInfo, SsTableView,
+    };
     use crate::format::sst::SST_FORMAT_VERSION_LATEST;
     use crate::manifest::store::test_utils::new_dirty_manifest;
     use crate::seq_tracker::SequenceTracker;
@@ -445,7 +448,12 @@ mod tests {
     fn test_should_compact_l0s_to_first_sr() {
         // given:
         let scheduler = SizeTieredCompactionScheduler::default();
-        let l0 = [create_sst(1), create_sst(1), create_sst(1), create_sst(1)];
+        let l0 = [
+            create_sst_view(1),
+            create_sst_view(1),
+            create_sst_view(1),
+            create_sst_view(1),
+        ];
         let state =
             &create_compactor_state(create_db_state(l0.iter().cloned().collect(), Vec::new()));
 
@@ -455,10 +463,7 @@ mod tests {
         // then:
         assert_eq!(requests.len(), 1);
         let request = requests.first().unwrap();
-        let expected_sources: Vec<SourceId> = l0
-            .iter()
-            .map(|h| SourceId::Sst(h.id.unwrap_compacted_id()))
-            .collect();
+        let expected_sources: Vec<SourceId> = l0.iter().map(|h| SourceId::SstView(h.id)).collect();
         assert_eq!(request.sources(), &expected_sources);
         assert_eq!(request.destination(), 0);
     }
@@ -478,7 +483,7 @@ mod tests {
             ..CompactorOptions::default()
         };
         let scheduler = supplier.compaction_scheduler(&compactor_options);
-        let l0 = [create_sst(1), create_sst(1)];
+        let l0 = [create_sst_view(1), create_sst_view(1)];
         let state =
             &create_compactor_state(create_db_state(l0.iter().cloned().collect(), Vec::new()));
 
@@ -488,10 +493,7 @@ mod tests {
         // then:
         assert_eq!(requests.len(), 1);
         let request = requests.first().unwrap();
-        let expected_sources: Vec<SourceId> = l0
-            .iter()
-            .map(|h| SourceId::Sst(h.id.unwrap_compacted_id()))
-            .collect();
+        let expected_sources: Vec<SourceId> = l0.iter().map(|h| SourceId::SstView(h.id)).collect();
         assert_eq!(request.sources(), &expected_sources);
     }
 
@@ -499,7 +501,12 @@ mod tests {
     fn test_should_compact_l0s_to_new_sr() {
         // given:
         let scheduler = SizeTieredCompactionScheduler::default();
-        let l0 = [create_sst(1), create_sst(1), create_sst(1), create_sst(1)];
+        let l0 = [
+            create_sst_view(1),
+            create_sst_view(1),
+            create_sst_view(1),
+            create_sst_view(1),
+        ];
         let state = &create_compactor_state(create_db_state(
             l0.iter().cloned().collect(),
             vec![create_sr2(10, 2), create_sr2(0, 2)],
@@ -518,7 +525,7 @@ mod tests {
     fn test_should_not_compact_l0s_if_fewer_than_min_threshold() {
         // given:
         let scheduler = SizeTieredCompactionScheduler::default();
-        let l0 = [create_sst(1), create_sst(1), create_sst(1)];
+        let l0 = [create_sst_view(1), create_sst_view(1), create_sst_view(1)];
         let state = &create_compactor_state(create_db_state(l0.iter().cloned().collect(), vec![]));
 
         // when:
@@ -701,7 +708,12 @@ mod tests {
     fn test_should_apply_backpressure_for_l0s() {
         // given:
         let scheduler = SizeTieredCompactionScheduler::default();
-        let l0 = [create_sst(1), create_sst(1), create_sst(1), create_sst(1)];
+        let l0 = [
+            create_sst_view(1),
+            create_sst_view(1),
+            create_sst_view(1),
+            create_sst_view(1),
+        ];
         let mut state = create_compactor_state(create_db_state(
             l0.iter().cloned().collect(),
             vec![
@@ -738,7 +750,12 @@ mod tests {
     fn test_should_return_multiple_compactions() {
         // given:
         let scheduler = SizeTieredCompactionScheduler::default();
-        let l0 = vec![create_sst(1), create_sst(1), create_sst(1), create_sst(1)];
+        let l0 = vec![
+            create_sst_view(1),
+            create_sst_view(1),
+            create_sst_view(1),
+            create_sst_view(1),
+        ];
         let state = &create_compactor_state(create_db_state(
             l0.iter().cloned().collect(),
             vec![
@@ -773,7 +790,11 @@ mod tests {
     fn test_should_submit_invalid_compaction_wrong_order() {
         // given:
         let scheduler = SizeTieredCompactionScheduler::default();
-        let l0 = VecDeque::from(vec![create_sst(1), create_sst(1), create_sst(1)]);
+        let l0 = VecDeque::from(vec![
+            create_sst_view(1),
+            create_sst_view(1),
+            create_sst_view(1),
+        ]);
         let state = &create_compactor_state(create_db_state(l0.clone(), Vec::new()));
 
         let mut l0_sst = l0;
@@ -791,7 +812,11 @@ mod tests {
     fn test_should_submit_invalid_compaction_skipped_sst() {
         // given:
         let scheduler = SizeTieredCompactionScheduler::default();
-        let l0 = VecDeque::from(vec![create_sst(1), create_sst(1), create_sst(1)]);
+        let l0 = VecDeque::from(vec![
+            create_sst_view(1),
+            create_sst_view(1),
+            create_sst_view(1),
+        ]);
         let state = &create_compactor_state(create_db_state(l0.clone(), Vec::new()));
 
         let mut l0_sst = l0;
@@ -843,7 +868,7 @@ mod tests {
         assert!(result.is_err());
     }
 
-    fn create_sst(size: u64) -> SsTableHandle {
+    fn create_sst_view(size: u64) -> SsTableView {
         let info = SsTableInfo {
             first_entry: None,
             last_entry: None,
@@ -854,11 +879,11 @@ mod tests {
             compression_codec: None,
             ..Default::default()
         };
-        SsTableHandle::new(
+        SsTableView::identity(SsTableHandle::new(
             SsTableId::Compacted(ulid::Ulid::new()),
             SST_FORMAT_VERSION_LATEST,
             info,
-        )
+        ))
     }
 
     fn create_sr2(id: u32, size: u64) -> SortedRun {
@@ -870,14 +895,17 @@ mod tests {
     }
 
     fn create_sr(id: u32, sst_size: u64, num_ssts: usize) -> SortedRun {
-        let ssts: Vec<SsTableHandle> = (0..num_ssts).map(|_| create_sst(sst_size)).collect();
-        SortedRun { id, ssts }
+        let ssts: Vec<SsTableView> = (0..num_ssts).map(|_| create_sst_view(sst_size)).collect();
+        SortedRun {
+            id,
+            sst_views: ssts,
+        }
     }
 
-    fn create_db_state(l0: VecDeque<SsTableHandle>, srs: Vec<SortedRun>) -> ManifestCore {
+    fn create_db_state(l0: VecDeque<SsTableView>, srs: Vec<SortedRun>) -> ManifestCore {
         ManifestCore {
             initialized: true,
-            l0_last_compacted: None,
+            last_compacted_l0_sst_view_id: None,
             l0,
             compacted: srs,
             next_wal_sst_id: 0,
@@ -898,11 +926,8 @@ mod tests {
         CompactorState::new(dirty, compactions)
     }
 
-    fn create_l0_compaction(l0: &[SsTableHandle], dst: u32) -> CompactionSpec {
-        let sources: Vec<SourceId> = l0
-            .iter()
-            .map(|h| SourceId::Sst(h.id.unwrap_compacted_id()))
-            .collect();
+    fn create_l0_compaction(l0: &[SsTableView], dst: u32) -> CompactionSpec {
+        let sources: Vec<SourceId> = l0.iter().map(|h| SourceId::SstView(h.id)).collect();
 
         CompactionSpec::new(sources, dst)
     }

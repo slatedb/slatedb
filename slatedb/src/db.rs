@@ -2422,8 +2422,13 @@ mod tests {
 
         let state = db.inner.state.read().view();
         assert_eq!(1, state.state.manifest.value.core.l0.len());
-        let sst = state.state.manifest.value.core.l0.front().unwrap();
-        let index = db.inner.table_store.read_index(sst, true).await.unwrap();
+        let view = state.state.manifest.value.core.l0.front().unwrap();
+        let index = db
+            .inner
+            .table_store
+            .read_index(&view.sst, true)
+            .await
+            .unwrap();
         assert!(!index.borrow().block_meta().is_empty());
         assert_eq!(
             Some(Bytes::copy_from_slice(last_val.as_bytes())),
@@ -5321,7 +5326,7 @@ mod tests {
                 // flushed (await_durable in the put()'s above only wait for the writes to hit
                 // the WAL before returning).
                 should_compact_l0.store(true, Ordering::SeqCst);
-                s.l0_last_compacted.is_some() && s.l0.is_empty()
+                s.last_compacted_l0_sst_view_id.is_some() && s.l0.is_empty()
             },
             Duration::from_secs(10),
         )
@@ -5343,7 +5348,7 @@ mod tests {
                 // flushed (await_durable in the put()'s above only wait for the writes to hit
                 // the WAL before returning).
                 should_compact_l0.store(true, Ordering::SeqCst);
-                s.l0_last_compacted.is_some() && s.l0.is_empty()
+                s.last_compacted_l0_sst_view_id.is_some() && s.l0.is_empty()
             },
             Duration::from_secs(10),
         )
@@ -6468,7 +6473,7 @@ mod tests {
             1,
             "expected exactly one L0 SST in manifest"
         );
-        let l0_id = manifest.core.l0[0].id;
+        let l0_id = manifest.core.l0[0].sst.id;
         assert_eq!(
             l0_id, ssts[0].id,
             "expected SST {:?} but found SST {:?}",

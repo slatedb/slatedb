@@ -466,7 +466,7 @@ pub(crate) fn sign_extend(val: u32, bits: u8) -> i32 {
 /// Returns:
 /// - The effective max parallelism.
 pub(crate) fn compute_max_parallel(l0_count: usize, srs: &[SortedRun], cap: usize) -> usize {
-    let total_ssts = l0_count + srs.iter().map(|sr| sr.ssts.len()).sum::<usize>();
+    let total_ssts = l0_count + srs.iter().map(|sr| sr.sst_views.len()).sum::<usize>();
     total_ssts.min(cap).max(1)
 }
 
@@ -492,7 +492,7 @@ pub(crate) fn estimate_bytes_before_key(sorted_runs: &[SortedRun], key: &Bytes) 
                 return 0;
             };
             sorted_run
-                .ssts
+                .sst_views
                 .iter()
                 .take(idx)
                 .map(|sst| sst.estimate_size())
@@ -738,14 +738,23 @@ pub(crate) async fn preload_cache_from_manifest(
     match preload_level {
         Some(PreloadLevel::AllSst) => {
             let mut all_sst_paths: Vec<object_store::path::Path> = Vec::with_capacity(
-                core.l0.len() + core.compacted.iter().map(|sr| sr.ssts.len()).sum::<usize>(),
+                core.l0.len()
+                    + core
+                        .compacted
+                        .iter()
+                        .map(|sr| sr.sst_views.len())
+                        .sum::<usize>(),
             );
-            all_sst_paths.extend(core.l0.iter().map(|sst| path_resolver.table_path(&sst.id)));
+            all_sst_paths.extend(
+                core.l0
+                    .iter()
+                    .map(|view| path_resolver.table_path(&view.sst.id)),
+            );
             all_sst_paths.extend(
                 core.compacted
                     .iter()
-                    .flat_map(|sr| &sr.ssts)
-                    .map(|sst| path_resolver.table_path(&sst.id)),
+                    .flat_map(|sr| &sr.sst_views)
+                    .map(|view| path_resolver.table_path(&view.sst.id)),
             );
             if !all_sst_paths.is_empty() {
                 if let Err(e) = cached_obj_store
@@ -760,7 +769,7 @@ pub(crate) async fn preload_cache_from_manifest(
             let l0_sst_paths: Vec<object_store::path::Path> = core
                 .l0
                 .iter()
-                .map(|sst| path_resolver.table_path(&sst.id))
+                .map(|view| path_resolver.table_path(&view.sst.id))
                 .collect();
             if !l0_sst_paths.is_empty() {
                 if let Err(e) = cached_obj_store
@@ -784,7 +793,7 @@ mod tests {
     use slatedb_common::MockSystemClock;
 
     use crate::clock::MonotonicClock;
-    use crate::db_state::{SortedRun, SsTableHandle, SsTableId, SsTableInfo};
+    use crate::db_state::{SortedRun, SsTableHandle, SsTableId, SsTableInfo, SsTableView};
     use crate::error::SlateDBError;
     use crate::format::sst::SST_FORMAT_VERSION_LATEST;
     use crate::sst_builder::BlockFormat;
@@ -827,19 +836,18 @@ mod tests {
         }
     }
 
-    fn make_compacted_sst(start_key: &str, size: u64) -> SsTableHandle {
+    fn make_sst_view(start_key: &str, size: u64) -> SsTableView {
         let info = SsTableInfo {
             first_entry: Some(Bytes::from(start_key.as_bytes().to_vec())),
             index_offset: size.saturating_sub(1),
             index_len: 1,
             ..Default::default()
         };
-        SsTableHandle::new_compacted(
+        SsTableView::identity(SsTableHandle::new(
             SsTableId::Compacted(Ulid::new()),
             SST_FORMAT_VERSION_LATEST,
             info,
-            None,
-        )
+        ))
     }
 
     #[test]
@@ -1323,16 +1331,16 @@ mod tests {
     fn test_estimate_bytes_before_key() {
         let run1 = SortedRun {
             id: 1,
-            ssts: vec![
-                make_compacted_sst("a", 10),
-                make_compacted_sst("k", 20), // k < m < z, so only "a" counts
-                make_compacted_sst("z", 30),
+            sst_views: vec![
+                make_sst_view("a", 10),
+                make_sst_view("k", 20), // k < m < z, so only "a" counts
+                make_sst_view("z", 30),
             ],
         };
         let run2 = SortedRun {
             id: 2,
             // f < m < ..., so only "b" counts
-            ssts: vec![make_compacted_sst("b", 40), make_compacted_sst("f", 50)],
+            sst_views: vec![make_sst_view("b", 40), make_sst_view("f", 50)],
         };
 
         let key = Bytes::from("m");

@@ -224,7 +224,7 @@ impl DbReaderInner {
         let read_guard = self.state.read();
         let current_state = read_guard.core();
         latest.replay_after_wal_id > current_state.replay_after_wal_id
-            || latest.l0_last_compacted != current_state.l0_last_compacted
+            || latest.last_compacted_l0_sst_view_id != current_state.last_compacted_l0_sst_view_id
             || latest.compacted != current_state.compacted
     }
 
