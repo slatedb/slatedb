@@ -6,12 +6,32 @@ use tempfile::tempdir;
 struct CounterMergeOperator;
 
 impl MergeOperator for CounterMergeOperator {
-    fn merge(&self, _key: Vec<u8>, existing_value: Option<Vec<u8>>, value: Vec<u8>) -> Vec<u8> {
+    fn merge(
+        &self,
+        _key: Vec<u8>,
+        existing_value: Option<Vec<u8>>,
+        value: Vec<u8>,
+    ) -> Result<Vec<u8>, MergeOperatorCallbackError> {
         let existing = existing_value
             .map(|value| u64::from_le_bytes(value.try_into().expect("8-byte existing value")))
             .unwrap_or(0);
         let delta = u64::from_le_bytes(value.try_into().expect("8-byte delta"));
-        (existing + delta).to_le_bytes().to_vec()
+        Ok((existing + delta).to_le_bytes().to_vec())
+    }
+}
+
+struct FailingMergeOperator;
+
+impl MergeOperator for FailingMergeOperator {
+    fn merge(
+        &self,
+        _key: Vec<u8>,
+        _existing_value: Option<Vec<u8>>,
+        _value: Vec<u8>,
+    ) -> Result<Vec<u8>, MergeOperatorCallbackError> {
+        Err(MergeOperatorCallbackError::Failed {
+            message: "bad operand".to_owned(),
+        })
     }
 }
 
@@ -90,6 +110,26 @@ async fn supports_merge_operator_and_merge_writes() {
 
     let value = db.get(b"counter".to_vec()).await.unwrap().unwrap();
     assert_eq!(u64::from_le_bytes(value.try_into().unwrap()), 3);
+}
+
+#[tokio::test]
+async fn propagates_merge_operator_failures() {
+    let store = resolve_object_store("memory:///".to_owned()).unwrap();
+    let builder = DbBuilder::new("merge-db-error".to_owned(), store);
+    builder
+        .with_merge_operator(Box::new(FailingMergeOperator))
+        .unwrap();
+    let db = builder.build().await.unwrap();
+
+    db.put(b"counter".to_vec(), 1_u64.to_le_bytes().to_vec())
+        .await
+        .unwrap();
+    let err = db
+        .merge(b"counter".to_vec(), 2_u64.to_le_bytes().to_vec())
+        .await
+        .unwrap_err();
+    assert!(matches!(err, SlatedbError::Invalid { .. }));
+    assert!(err.to_string().contains("bad operand"));
 }
 
 #[tokio::test]

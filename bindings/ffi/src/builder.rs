@@ -11,7 +11,7 @@ use slatedb::{
 
 use crate::config::SstBlockSize;
 use crate::db::Db;
-use crate::error::SlatedbError;
+use crate::error::{MergeOperatorCallbackError, SlatedbError};
 use crate::object_store::ObjectStore;
 use crate::validation::builder_consumed;
 
@@ -29,8 +29,14 @@ pub trait MergeOperator: Send + Sync {
     /// - `value`: the new merge operand.
     ///
     /// ## Returns
-    /// - `Vec<u8>`: the merged value that should become visible for the key.
-    fn merge(&self, key: Vec<u8>, existing_value: Option<Vec<u8>>, value: Vec<u8>) -> Vec<u8>;
+    /// - `Result<Vec<u8>, MergeOperatorCallbackError>`: the merged value that
+    ///   should become visible for the key.
+    fn merge(
+        &self,
+        key: Vec<u8>,
+        existing_value: Option<Vec<u8>>,
+        value: Vec<u8>,
+    ) -> Result<Vec<u8>, MergeOperatorCallbackError>;
 }
 
 /// Builder used to configure and open a [`Db`].
@@ -61,11 +67,16 @@ impl CoreMergeOperatorTrait for MergeOperatorAdapter {
         existing_value: Option<Bytes>,
         value: Bytes,
     ) -> Result<Bytes, CoreMergeOperatorError> {
-        Ok(Bytes::from(self.inner.merge(
-            key.to_vec(),
-            existing_value.map(|value| value.to_vec()),
-            value.to_vec(),
-        )))
+        self.inner
+            .merge(
+                key.to_vec(),
+                existing_value.map(|value| value.to_vec()),
+                value.to_vec(),
+            )
+            .map(Bytes::from)
+            .map_err(|error| CoreMergeOperatorError::Callback {
+                message: error.to_string(),
+            })
     }
 }
 

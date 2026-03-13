@@ -7,17 +7,23 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
 type counterMergeOperator struct{}
+type failingMergeOperator struct{}
 
-func (counterMergeOperator) Merge(_ []byte, existingValue *[]byte, value []byte) []byte {
+func (counterMergeOperator) Merge(_ []byte, existingValue *[]byte, value []byte) ([]byte, error) {
 	var existing uint64
 	if existingValue != nil {
 		existing = binary.LittleEndian.Uint64(*existingValue)
 	}
-	return binary.LittleEndian.AppendUint64(nil, existing+binary.LittleEndian.Uint64(value))
+	return binary.LittleEndian.AppendUint64(nil, existing+binary.LittleEndian.Uint64(value)), nil
+}
+
+func (failingMergeOperator) Merge(_ []byte, _ *[]byte, _ []byte) ([]byte, error) {
+	return nil, NewMergeOperatorCallbackErrorFailed("bad operand")
 }
 
 func ptrBytes(value []byte) *[]byte {
@@ -178,6 +184,34 @@ func TestMergeOperatorRoundTrip(t *testing.T) {
 	}
 	if got := binary.LittleEndian.Uint64(*value); got != 3 {
 		t.Fatalf("counter = %d, want 3", got)
+	}
+}
+
+func TestMergeOperatorFailurePropagates(t *testing.T) {
+	store := requireMemoryStore(t)
+	defer store.Destroy()
+
+	builder := requireBuilder(t, "merge-failure", store)
+	defer builder.Destroy()
+
+	if err := builder.WithMergeOperator(failingMergeOperator{}); err != nil {
+		t.Fatalf("WithMergeOperator(failing): %v", err)
+	}
+
+	db := requireDb(t, builder)
+	defer db.Destroy()
+	defer func() { _ = db.Close() }()
+
+	if _, err := db.Put([]byte("counter"), binary.LittleEndian.AppendUint64(nil, 1)); err != nil {
+		t.Fatalf("Put(counter): %v", err)
+	}
+
+	_, err := db.Merge([]byte("counter"), binary.LittleEndian.AppendUint64(nil, 2))
+	if !errors.Is(err, ErrSlatedbErrorInvalid) {
+		t.Fatalf("Merge(counter) = %v, want invalid error", err)
+	}
+	if err == nil || !strings.Contains(err.Error(), "bad operand") {
+		t.Fatalf("Merge(counter) = %v, want bad operand message", err)
 	}
 }
 
