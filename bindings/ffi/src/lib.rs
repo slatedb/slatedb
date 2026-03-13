@@ -4,7 +4,6 @@ mod db;
 mod db_reader;
 mod error;
 mod iterator;
-mod logging;
 mod merge_operator;
 mod object_store;
 mod settings;
