@@ -465,6 +465,11 @@ uint64_t uniffi_slatedb_ffi_fn_method_db_merge(void* ptr, RustBuffer key, RustBu
 uint64_t uniffi_slatedb_ffi_fn_method_db_merge_with_options(void* ptr, RustBuffer key, RustBuffer operand, RustBuffer merge_options, RustBuffer write_options
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_METHOD_DB_METRICS
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_METHOD_DB_METRICS
+RustBuffer uniffi_slatedb_ffi_fn_method_db_metrics(void* ptr, RustCallStatus *out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_METHOD_DB_PUT
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_METHOD_DB_PUT
 uint64_t uniffi_slatedb_ffi_fn_method_db_put(void* ptr, RustBuffer key, RustBuffer value
@@ -513,6 +518,16 @@ void uniffi_slatedb_ffi_fn_method_db_status(void* ptr, RustCallStatus *out_statu
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_METHOD_DB_WRITE
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_METHOD_DB_WRITE
 uint64_t uniffi_slatedb_ffi_fn_method_db_write(void* ptr, RustBuffer operations
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_METHOD_DB_WRITE_BATCH
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_METHOD_DB_WRITE_BATCH
+uint64_t uniffi_slatedb_ffi_fn_method_db_write_batch(void* ptr, void* batch
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_METHOD_DB_WRITE_BATCH_WITH_OPTIONS
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_METHOD_DB_WRITE_BATCH_WITH_OPTIONS
+uint64_t uniffi_slatedb_ffi_fn_method_db_write_batch_with_options(void* ptr, void* batch, RustBuffer options
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_METHOD_DB_WRITE_WITH_OPTIONS
@@ -588,6 +603,81 @@ uint64_t uniffi_slatedb_ffi_fn_method_dbiterator_next(void* ptr
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_METHOD_DBITERATOR_SEEK
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_METHOD_DBITERATOR_SEEK
 uint64_t uniffi_slatedb_ffi_fn_method_dbiterator_seek(void* ptr, RustBuffer key
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_CLONE_DBREADER
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_CLONE_DBREADER
+void* uniffi_slatedb_ffi_fn_clone_dbreader(void* ptr, RustCallStatus *out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_FREE_DBREADER
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_FREE_DBREADER
+void uniffi_slatedb_ffi_fn_free_dbreader(void* ptr, RustCallStatus *out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_METHOD_DBREADER_CLOSE
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_METHOD_DBREADER_CLOSE
+uint64_t uniffi_slatedb_ffi_fn_method_dbreader_close(void* ptr
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_METHOD_DBREADER_GET
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_METHOD_DBREADER_GET
+uint64_t uniffi_slatedb_ffi_fn_method_dbreader_get(void* ptr, RustBuffer key
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_METHOD_DBREADER_GET_WITH_OPTIONS
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_METHOD_DBREADER_GET_WITH_OPTIONS
+uint64_t uniffi_slatedb_ffi_fn_method_dbreader_get_with_options(void* ptr, RustBuffer key, RustBuffer options
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_METHOD_DBREADER_SCAN
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_METHOD_DBREADER_SCAN
+uint64_t uniffi_slatedb_ffi_fn_method_dbreader_scan(void* ptr, RustBuffer range
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_METHOD_DBREADER_SCAN_PREFIX
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_METHOD_DBREADER_SCAN_PREFIX
+uint64_t uniffi_slatedb_ffi_fn_method_dbreader_scan_prefix(void* ptr, RustBuffer prefix
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_METHOD_DBREADER_SCAN_PREFIX_WITH_OPTIONS
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_METHOD_DBREADER_SCAN_PREFIX_WITH_OPTIONS
+uint64_t uniffi_slatedb_ffi_fn_method_dbreader_scan_prefix_with_options(void* ptr, RustBuffer prefix, RustBuffer options
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_METHOD_DBREADER_SCAN_WITH_OPTIONS
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_METHOD_DBREADER_SCAN_WITH_OPTIONS
+uint64_t uniffi_slatedb_ffi_fn_method_dbreader_scan_with_options(void* ptr, RustBuffer range, RustBuffer options
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_CLONE_DBREADERBUILDER
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_CLONE_DBREADERBUILDER
+void* uniffi_slatedb_ffi_fn_clone_dbreaderbuilder(void* ptr, RustCallStatus *out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_FREE_DBREADERBUILDER
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_FREE_DBREADERBUILDER
+void uniffi_slatedb_ffi_fn_free_dbreaderbuilder(void* ptr, RustCallStatus *out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_CONSTRUCTOR_DBREADERBUILDER_NEW
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_CONSTRUCTOR_DBREADERBUILDER_NEW
+void* uniffi_slatedb_ffi_fn_constructor_dbreaderbuilder_new(RustBuffer path, void* object_store, RustCallStatus *out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_METHOD_DBREADERBUILDER_BUILD
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_METHOD_DBREADERBUILDER_BUILD
+uint64_t uniffi_slatedb_ffi_fn_method_dbreaderbuilder_build(void* ptr
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_METHOD_DBREADERBUILDER_WITH_CHECKPOINT_ID
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_METHOD_DBREADERBUILDER_WITH_CHECKPOINT_ID
+void uniffi_slatedb_ffi_fn_method_dbreaderbuilder_with_checkpoint_id(void* ptr, RustBuffer checkpoint_id, RustCallStatus *out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_METHOD_DBREADERBUILDER_WITH_OPTIONS
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_METHOD_DBREADERBUILDER_WITH_OPTIONS
+void uniffi_slatedb_ffi_fn_method_dbreaderbuilder_with_options(void* ptr, RustBuffer options, RustCallStatus *out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_CLONE_DBSNAPSHOT
@@ -760,6 +850,142 @@ void* uniffi_slatedb_ffi_fn_clone_objectstore(void* ptr, RustCallStatus *out_sta
 void uniffi_slatedb_ffi_fn_free_objectstore(void* ptr, RustCallStatus *out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_CLONE_WALFILE
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_CLONE_WALFILE
+void* uniffi_slatedb_ffi_fn_clone_walfile(void* ptr, RustCallStatus *out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_FREE_WALFILE
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_FREE_WALFILE
+void uniffi_slatedb_ffi_fn_free_walfile(void* ptr, RustCallStatus *out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_METHOD_WALFILE_CLOSE
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_METHOD_WALFILE_CLOSE
+void uniffi_slatedb_ffi_fn_method_walfile_close(void* ptr, RustCallStatus *out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_METHOD_WALFILE_ID
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_METHOD_WALFILE_ID
+uint64_t uniffi_slatedb_ffi_fn_method_walfile_id(void* ptr, RustCallStatus *out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_METHOD_WALFILE_ITERATOR
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_METHOD_WALFILE_ITERATOR
+uint64_t uniffi_slatedb_ffi_fn_method_walfile_iterator(void* ptr
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_METHOD_WALFILE_METADATA
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_METHOD_WALFILE_METADATA
+uint64_t uniffi_slatedb_ffi_fn_method_walfile_metadata(void* ptr
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_METHOD_WALFILE_NEXT_FILE
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_METHOD_WALFILE_NEXT_FILE
+void* uniffi_slatedb_ffi_fn_method_walfile_next_file(void* ptr, RustCallStatus *out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_METHOD_WALFILE_NEXT_ID
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_METHOD_WALFILE_NEXT_ID
+uint64_t uniffi_slatedb_ffi_fn_method_walfile_next_id(void* ptr, RustCallStatus *out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_CLONE_WALFILEITERATOR
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_CLONE_WALFILEITERATOR
+void* uniffi_slatedb_ffi_fn_clone_walfileiterator(void* ptr, RustCallStatus *out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_FREE_WALFILEITERATOR
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_FREE_WALFILEITERATOR
+void uniffi_slatedb_ffi_fn_free_walfileiterator(void* ptr, RustCallStatus *out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_METHOD_WALFILEITERATOR_CLOSE
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_METHOD_WALFILEITERATOR_CLOSE
+void uniffi_slatedb_ffi_fn_method_walfileiterator_close(void* ptr, RustCallStatus *out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_METHOD_WALFILEITERATOR_NEXT
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_METHOD_WALFILEITERATOR_NEXT
+uint64_t uniffi_slatedb_ffi_fn_method_walfileiterator_next(void* ptr
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_CLONE_WALREADER
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_CLONE_WALREADER
+void* uniffi_slatedb_ffi_fn_clone_walreader(void* ptr, RustCallStatus *out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_FREE_WALREADER
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_FREE_WALREADER
+void uniffi_slatedb_ffi_fn_free_walreader(void* ptr, RustCallStatus *out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_CONSTRUCTOR_WALREADER_NEW
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_CONSTRUCTOR_WALREADER_NEW
+void* uniffi_slatedb_ffi_fn_constructor_walreader_new(RustBuffer path, void* object_store, RustCallStatus *out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_METHOD_WALREADER_CLOSE
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_METHOD_WALREADER_CLOSE
+void uniffi_slatedb_ffi_fn_method_walreader_close(void* ptr, RustCallStatus *out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_METHOD_WALREADER_GET
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_METHOD_WALREADER_GET
+void* uniffi_slatedb_ffi_fn_method_walreader_get(void* ptr, uint64_t id, RustCallStatus *out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_METHOD_WALREADER_LIST
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_METHOD_WALREADER_LIST
+uint64_t uniffi_slatedb_ffi_fn_method_walreader_list(void* ptr, RustBuffer start_id, RustBuffer end_id
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_CLONE_WRITEBATCH
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_CLONE_WRITEBATCH
+void* uniffi_slatedb_ffi_fn_clone_writebatch(void* ptr, RustCallStatus *out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_FREE_WRITEBATCH
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_FREE_WRITEBATCH
+void uniffi_slatedb_ffi_fn_free_writebatch(void* ptr, RustCallStatus *out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_CONSTRUCTOR_WRITEBATCH_NEW
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_CONSTRUCTOR_WRITEBATCH_NEW
+void* uniffi_slatedb_ffi_fn_constructor_writebatch_new(RustCallStatus *out_status
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_METHOD_WRITEBATCH_CLOSE
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_METHOD_WRITEBATCH_CLOSE
+void uniffi_slatedb_ffi_fn_method_writebatch_close(void* ptr, RustCallStatus *out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_METHOD_WRITEBATCH_DELETE
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_METHOD_WRITEBATCH_DELETE
+void uniffi_slatedb_ffi_fn_method_writebatch_delete(void* ptr, RustBuffer key, RustCallStatus *out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_METHOD_WRITEBATCH_MERGE
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_METHOD_WRITEBATCH_MERGE
+void uniffi_slatedb_ffi_fn_method_writebatch_merge(void* ptr, RustBuffer key, RustBuffer operand, RustCallStatus *out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_METHOD_WRITEBATCH_MERGE_WITH_OPTIONS
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_METHOD_WRITEBATCH_MERGE_WITH_OPTIONS
+void uniffi_slatedb_ffi_fn_method_writebatch_merge_with_options(void* ptr, RustBuffer key, RustBuffer operand, RustBuffer options, RustCallStatus *out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_METHOD_WRITEBATCH_PUT
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_METHOD_WRITEBATCH_PUT
+void uniffi_slatedb_ffi_fn_method_writebatch_put(void* ptr, RustBuffer key, RustBuffer value, RustCallStatus *out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_METHOD_WRITEBATCH_PUT_WITH_OPTIONS
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_METHOD_WRITEBATCH_PUT_WITH_OPTIONS
+void uniffi_slatedb_ffi_fn_method_writebatch_put_with_options(void* ptr, RustBuffer key, RustBuffer value, RustBuffer options, RustCallStatus *out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_INIT_CALLBACK_VTABLE_MERGEOPERATOR
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_INIT_CALLBACK_VTABLE_MERGEOPERATOR
 void uniffi_slatedb_ffi_fn_init_callback_vtable_mergeoperator(UniffiVTableCallbackInterfaceMergeOperator* vtable
@@ -771,9 +997,25 @@ RustBuffer uniffi_slatedb_ffi_fn_func_default_settings_json(RustCallStatus *out_
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_FUNC_INIT_DEFAULT_LOGGING
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_FUNC_INIT_DEFAULT_LOGGING
+void uniffi_slatedb_ffi_fn_func_init_default_logging(RustCallStatus *out_status
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_FUNC_INIT_LOGGING
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_FUNC_INIT_LOGGING
+void uniffi_slatedb_ffi_fn_func_init_logging(RustBuffer level, RustCallStatus *out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_FUNC_RESOLVE_OBJECT_STORE
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_FUNC_RESOLVE_OBJECT_STORE
 void* uniffi_slatedb_ffi_fn_func_resolve_object_store(RustBuffer url, RustCallStatus *out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_FUNC_SET_LOGGING_LEVEL
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_FUNC_SET_LOGGING_LEVEL
+void uniffi_slatedb_ffi_fn_func_set_logging_level(RustBuffer level, RustCallStatus *out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_FFI_SLATEDB_FFI_RUSTBUFFER_ALLOC
@@ -1062,9 +1304,27 @@ uint16_t uniffi_slatedb_ffi_checksum_func_default_settings_json(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_CHECKSUM_FUNC_INIT_DEFAULT_LOGGING
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_CHECKSUM_FUNC_INIT_DEFAULT_LOGGING
+uint16_t uniffi_slatedb_ffi_checksum_func_init_default_logging(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_CHECKSUM_FUNC_INIT_LOGGING
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_CHECKSUM_FUNC_INIT_LOGGING
+uint16_t uniffi_slatedb_ffi_checksum_func_init_logging(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_CHECKSUM_FUNC_RESOLVE_OBJECT_STORE
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_CHECKSUM_FUNC_RESOLVE_OBJECT_STORE
 uint16_t uniffi_slatedb_ffi_checksum_func_resolve_object_store(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_CHECKSUM_FUNC_SET_LOGGING_LEVEL
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_CHECKSUM_FUNC_SET_LOGGING_LEVEL
+uint16_t uniffi_slatedb_ffi_checksum_func_set_logging_level(void
     
 );
 #endif
@@ -1134,6 +1394,12 @@ uint16_t uniffi_slatedb_ffi_checksum_method_db_merge_with_options(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_CHECKSUM_METHOD_DB_METRICS
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_CHECKSUM_METHOD_DB_METRICS
+uint16_t uniffi_slatedb_ffi_checksum_method_db_metrics(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_CHECKSUM_METHOD_DB_PUT
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_CHECKSUM_METHOD_DB_PUT
 uint16_t uniffi_slatedb_ffi_checksum_method_db_put(void
@@ -1194,6 +1460,18 @@ uint16_t uniffi_slatedb_ffi_checksum_method_db_write(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_CHECKSUM_METHOD_DB_WRITE_BATCH
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_CHECKSUM_METHOD_DB_WRITE_BATCH
+uint16_t uniffi_slatedb_ffi_checksum_method_db_write_batch(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_CHECKSUM_METHOD_DB_WRITE_BATCH_WITH_OPTIONS
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_CHECKSUM_METHOD_DB_WRITE_BATCH_WITH_OPTIONS
+uint16_t uniffi_slatedb_ffi_checksum_method_db_write_batch_with_options(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_CHECKSUM_METHOD_DB_WRITE_WITH_OPTIONS
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_CHECKSUM_METHOD_DB_WRITE_WITH_OPTIONS
 uint16_t uniffi_slatedb_ffi_checksum_method_db_write_with_options(void
@@ -1251,6 +1529,66 @@ uint16_t uniffi_slatedb_ffi_checksum_method_dbiterator_next(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_CHECKSUM_METHOD_DBITERATOR_SEEK
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_CHECKSUM_METHOD_DBITERATOR_SEEK
 uint16_t uniffi_slatedb_ffi_checksum_method_dbiterator_seek(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_CHECKSUM_METHOD_DBREADER_CLOSE
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_CHECKSUM_METHOD_DBREADER_CLOSE
+uint16_t uniffi_slatedb_ffi_checksum_method_dbreader_close(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_CHECKSUM_METHOD_DBREADER_GET
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_CHECKSUM_METHOD_DBREADER_GET
+uint16_t uniffi_slatedb_ffi_checksum_method_dbreader_get(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_CHECKSUM_METHOD_DBREADER_GET_WITH_OPTIONS
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_CHECKSUM_METHOD_DBREADER_GET_WITH_OPTIONS
+uint16_t uniffi_slatedb_ffi_checksum_method_dbreader_get_with_options(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_CHECKSUM_METHOD_DBREADER_SCAN
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_CHECKSUM_METHOD_DBREADER_SCAN
+uint16_t uniffi_slatedb_ffi_checksum_method_dbreader_scan(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_CHECKSUM_METHOD_DBREADER_SCAN_PREFIX
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_CHECKSUM_METHOD_DBREADER_SCAN_PREFIX
+uint16_t uniffi_slatedb_ffi_checksum_method_dbreader_scan_prefix(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_CHECKSUM_METHOD_DBREADER_SCAN_PREFIX_WITH_OPTIONS
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_CHECKSUM_METHOD_DBREADER_SCAN_PREFIX_WITH_OPTIONS
+uint16_t uniffi_slatedb_ffi_checksum_method_dbreader_scan_prefix_with_options(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_CHECKSUM_METHOD_DBREADER_SCAN_WITH_OPTIONS
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_CHECKSUM_METHOD_DBREADER_SCAN_WITH_OPTIONS
+uint16_t uniffi_slatedb_ffi_checksum_method_dbreader_scan_with_options(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_CHECKSUM_METHOD_DBREADERBUILDER_BUILD
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_CHECKSUM_METHOD_DBREADERBUILDER_BUILD
+uint16_t uniffi_slatedb_ffi_checksum_method_dbreaderbuilder_build(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_CHECKSUM_METHOD_DBREADERBUILDER_WITH_CHECKPOINT_ID
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_CHECKSUM_METHOD_DBREADERBUILDER_WITH_CHECKPOINT_ID
+uint16_t uniffi_slatedb_ffi_checksum_method_dbreaderbuilder_with_checkpoint_id(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_CHECKSUM_METHOD_DBREADERBUILDER_WITH_OPTIONS
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_CHECKSUM_METHOD_DBREADERBUILDER_WITH_OPTIONS
+uint16_t uniffi_slatedb_ffi_checksum_method_dbreaderbuilder_with_options(void
     
 );
 #endif
@@ -1422,9 +1760,129 @@ uint16_t uniffi_slatedb_ffi_checksum_method_dbtransaction_unmark_write(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_CHECKSUM_METHOD_WALFILE_CLOSE
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_CHECKSUM_METHOD_WALFILE_CLOSE
+uint16_t uniffi_slatedb_ffi_checksum_method_walfile_close(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_CHECKSUM_METHOD_WALFILE_ID
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_CHECKSUM_METHOD_WALFILE_ID
+uint16_t uniffi_slatedb_ffi_checksum_method_walfile_id(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_CHECKSUM_METHOD_WALFILE_ITERATOR
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_CHECKSUM_METHOD_WALFILE_ITERATOR
+uint16_t uniffi_slatedb_ffi_checksum_method_walfile_iterator(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_CHECKSUM_METHOD_WALFILE_METADATA
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_CHECKSUM_METHOD_WALFILE_METADATA
+uint16_t uniffi_slatedb_ffi_checksum_method_walfile_metadata(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_CHECKSUM_METHOD_WALFILE_NEXT_FILE
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_CHECKSUM_METHOD_WALFILE_NEXT_FILE
+uint16_t uniffi_slatedb_ffi_checksum_method_walfile_next_file(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_CHECKSUM_METHOD_WALFILE_NEXT_ID
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_CHECKSUM_METHOD_WALFILE_NEXT_ID
+uint16_t uniffi_slatedb_ffi_checksum_method_walfile_next_id(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_CHECKSUM_METHOD_WALFILEITERATOR_CLOSE
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_CHECKSUM_METHOD_WALFILEITERATOR_CLOSE
+uint16_t uniffi_slatedb_ffi_checksum_method_walfileiterator_close(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_CHECKSUM_METHOD_WALFILEITERATOR_NEXT
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_CHECKSUM_METHOD_WALFILEITERATOR_NEXT
+uint16_t uniffi_slatedb_ffi_checksum_method_walfileiterator_next(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_CHECKSUM_METHOD_WALREADER_CLOSE
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_CHECKSUM_METHOD_WALREADER_CLOSE
+uint16_t uniffi_slatedb_ffi_checksum_method_walreader_close(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_CHECKSUM_METHOD_WALREADER_GET
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_CHECKSUM_METHOD_WALREADER_GET
+uint16_t uniffi_slatedb_ffi_checksum_method_walreader_get(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_CHECKSUM_METHOD_WALREADER_LIST
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_CHECKSUM_METHOD_WALREADER_LIST
+uint16_t uniffi_slatedb_ffi_checksum_method_walreader_list(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_CHECKSUM_METHOD_WRITEBATCH_CLOSE
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_CHECKSUM_METHOD_WRITEBATCH_CLOSE
+uint16_t uniffi_slatedb_ffi_checksum_method_writebatch_close(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_CHECKSUM_METHOD_WRITEBATCH_DELETE
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_CHECKSUM_METHOD_WRITEBATCH_DELETE
+uint16_t uniffi_slatedb_ffi_checksum_method_writebatch_delete(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_CHECKSUM_METHOD_WRITEBATCH_MERGE
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_CHECKSUM_METHOD_WRITEBATCH_MERGE
+uint16_t uniffi_slatedb_ffi_checksum_method_writebatch_merge(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_CHECKSUM_METHOD_WRITEBATCH_MERGE_WITH_OPTIONS
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_CHECKSUM_METHOD_WRITEBATCH_MERGE_WITH_OPTIONS
+uint16_t uniffi_slatedb_ffi_checksum_method_writebatch_merge_with_options(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_CHECKSUM_METHOD_WRITEBATCH_PUT
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_CHECKSUM_METHOD_WRITEBATCH_PUT
+uint16_t uniffi_slatedb_ffi_checksum_method_writebatch_put(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_CHECKSUM_METHOD_WRITEBATCH_PUT_WITH_OPTIONS
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_CHECKSUM_METHOD_WRITEBATCH_PUT_WITH_OPTIONS
+uint16_t uniffi_slatedb_ffi_checksum_method_writebatch_put_with_options(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_CHECKSUM_CONSTRUCTOR_DBBUILDER_NEW
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_CHECKSUM_CONSTRUCTOR_DBBUILDER_NEW
 uint16_t uniffi_slatedb_ffi_checksum_constructor_dbbuilder_new(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_CHECKSUM_CONSTRUCTOR_DBREADERBUILDER_NEW
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_CHECKSUM_CONSTRUCTOR_DBREADERBUILDER_NEW
+uint16_t uniffi_slatedb_ffi_checksum_constructor_dbreaderbuilder_new(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_CHECKSUM_CONSTRUCTOR_WALREADER_NEW
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_CHECKSUM_CONSTRUCTOR_WALREADER_NEW
+uint16_t uniffi_slatedb_ffi_checksum_constructor_walreader_new(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_CHECKSUM_CONSTRUCTOR_WRITEBATCH_NEW
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_CHECKSUM_CONSTRUCTOR_WRITEBATCH_NEW
+uint16_t uniffi_slatedb_ffi_checksum_constructor_writebatch_new(void
     
 );
 #endif

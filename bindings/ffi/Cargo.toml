@@ -16,10 +16,12 @@ bench = false
 
 [dependencies]
 slatedb = { workspace = true, features = ["all"] }
+slatedb-c = { path = "../../slatedb-c" }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync"] }
 uniffi = { workspace = true, features = ["tokio"] }
+uuid = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

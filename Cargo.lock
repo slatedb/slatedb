@@ -3525,10 +3525,12 @@ version = "0.11.1"
 dependencies = [
  "serde_json",
  "slatedb",
+ "slatedb-c",
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
  "uniffi",
+ "uuid",
 ]
 
 [[package]]

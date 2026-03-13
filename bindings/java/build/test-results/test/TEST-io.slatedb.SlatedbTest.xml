@@ -1,12 +1,12 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<testsuite name="io.slatedb.SlatedbTest" tests="6" skipped="0" failures="0" errors="0" timestamp="2026-03-13T06:08:51.622Z" hostname="mac.lan" time="1.534">
+<testsuite name="io.slatedb.SlatedbTest" tests="6" skipped="0" failures="0" errors="0" timestamp="2026-03-13T17:28:33.813Z" hostname="mac.lan" time="1.793">
   <properties/>
-  <testcase name="iteratorAndTransactionLifecycle()" classname="io.slatedb.SlatedbTest" time="1.078"/>
-  <testcase name="defaultSettingsAndBuilderLifecycle()" classname="io.slatedb.SlatedbTest" time="0.005"/>
-  <testcase name="putGetSnapshotAndShutdown()" classname="io.slatedb.SlatedbTest" time="0.213"/>
-  <testcase name="mergeOperatorRoundTrip()" classname="io.slatedb.SlatedbTest" time="0.111"/>
-  <testcase name="mergeOperatorFailurePropagates()" classname="io.slatedb.SlatedbTest" time="0.011"/>
-  <testcase name="writeBatchUsesGeneratedOperationTypes()" classname="io.slatedb.SlatedbTest" time="0.107"/>
+  <testcase name="iteratorAndTransactionLifecycle()" classname="io.slatedb.SlatedbTest" time="1.138"/>
+  <testcase name="defaultSettingsAndBuilderLifecycle()" classname="io.slatedb.SlatedbTest" time="0.006"/>
+  <testcase name="putGetSnapshotAndShutdown()" classname="io.slatedb.SlatedbTest" time="0.21"/>
+  <testcase name="mergeOperatorRoundTrip()" classname="io.slatedb.SlatedbTest" time="0.21"/>
+  <testcase name="mergeOperatorFailurePropagates()" classname="io.slatedb.SlatedbTest" time="0.112"/>
+  <testcase name="writeBatchUsesGeneratedOperationTypes()" classname="io.slatedb.SlatedbTest" time="0.106"/>
   <system-out><![CDATA[]]></system-out>
   <system-err><![CDATA[]]></system-err>
 </testsuite>

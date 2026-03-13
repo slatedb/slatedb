@@ -2,6 +2,22 @@
 
 use thiserror::Error;
 
+/// The reason a database handle was closed.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, uniffi::Enum)]
+pub enum CloseReason {
+    /// No close reason is available.
+    #[default]
+    None,
+    /// The database was closed cleanly.
+    Clean,
+    /// The database instance was fenced by another writer.
+    Fenced,
+    /// A background task panicked.
+    Panic,
+    /// The close reason was not recognized by this binding version.
+    Unknown,
+}
+
 /// Error returned by the SlateDB FFI layer.
 ///
 /// The FFI wrapper groups core SlateDB errors into a smaller set of stable
@@ -18,6 +34,8 @@ pub enum SlatedbError {
     /// The database or transaction handle has already been closed.
     #[error("{message}")]
     Closed {
+        /// The reason the handle was closed.
+        reason: CloseReason,
         /// The original error message.
         message: String,
     },
@@ -67,7 +85,10 @@ impl From<slatedb::Error> for SlatedbError {
         let message = error.to_string();
         match error.kind() {
             slatedb::ErrorKind::Transaction => Self::Transaction { message },
-            slatedb::ErrorKind::Closed(_) => Self::Closed { message },
+            slatedb::ErrorKind::Closed(reason) => Self::Closed {
+                reason: reason.into(),
+                message,
+            },
             slatedb::ErrorKind::Unavailable => Self::Unavailable { message },
             slatedb::ErrorKind::Invalid => Self::Invalid { message },
             slatedb::ErrorKind::Data => Self::Data { message },
@@ -81,6 +102,17 @@ impl From<serde_json::Error> for SlatedbError {
     fn from(error: serde_json::Error) -> Self {
         Self::Invalid {
             message: error.to_string(),
+        }
+    }
+}
+
+impl From<slatedb::CloseReason> for CloseReason {
+    fn from(reason: slatedb::CloseReason) -> Self {
+        match reason {
+            slatedb::CloseReason::Clean => Self::Clean,
+            slatedb::CloseReason::Fenced => Self::Fenced,
+            slatedb::CloseReason::Panic => Self::Panic,
+            _ => Self::Unknown,
         }
     }
 }

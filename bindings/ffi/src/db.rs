@@ -1,5 +1,6 @@
 //! Database and snapshot handles exposed by the FFI wrapper.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use slatedb::{Db as CoreDb, DbSnapshot as CoreDbSnapshot};
@@ -12,6 +13,7 @@ use crate::error::SlatedbError;
 use crate::iterator::DbIterator;
 use crate::transaction::DbTransaction;
 use crate::validation::{build_write_batch, validate_key, validate_key_value};
+use crate::write_batch::WriteBatch;
 
 /// Handle to an open SlateDB database.
 ///
@@ -41,6 +43,18 @@ impl Db {
     /// - `Result<(), SlatedbError>`: `Ok(())` if the database is open.
     pub fn status(&self) -> Result<(), SlatedbError> {
         self.inner.status().map_err(Into::into)
+    }
+
+    /// Snapshot the current database metrics registry.
+    pub fn metrics(&self) -> Result<HashMap<String, i64>, SlatedbError> {
+        let registry = self.inner.metrics();
+        let mut snapshot = HashMap::new();
+        for name in registry.names() {
+            if let Some(stat) = registry.lookup(name) {
+                snapshot.insert(name.to_owned(), stat.get());
+            }
+        }
+        Ok(snapshot)
     }
 }
 
@@ -224,6 +238,25 @@ impl Db {
         options: DbWriteOptions,
     ) -> Result<WriteHandle, SlatedbError> {
         let batch = build_write_batch(operations)?;
+        let options = options.into_core();
+        Ok(WriteHandle::from_core(
+            self.inner.write_with_options(batch, &options).await?,
+        ))
+    }
+
+    /// Apply an existing write batch atomically using default write options.
+    pub async fn write_batch(&self, batch: Arc<WriteBatch>) -> Result<WriteHandle, SlatedbError> {
+        let batch = batch.take_for_write()?;
+        Ok(WriteHandle::from_core(self.inner.write(batch).await?))
+    }
+
+    /// Apply an existing write batch atomically using custom write options.
+    pub async fn write_batch_with_options(
+        &self,
+        batch: Arc<WriteBatch>,
+        options: DbWriteOptions,
+    ) -> Result<WriteHandle, SlatedbError> {
+        let batch = batch.take_for_write()?;
         let options = options.into_core();
         Ok(WriteHandle::from_core(
             self.inner.write_with_options(batch, &options).await?,

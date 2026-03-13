@@ -69,6 +69,11 @@ public interface DbInterface {
     public CompletableFuture<WriteHandle> mergeWithOptions(byte[] key, byte[] operand, DbMergeOptions mergeOptions, DbWriteOptions writeOptions) ;
     
     /**
+     * Snapshot the current database metrics registry.
+     */
+    public Map<String, Long> metrics() throws SlatedbException;
+    
+    /**
      * Put a value for a key using default options.
      *
      * ## Errors
@@ -123,6 +128,16 @@ public interface DbInterface {
      * Apply a batch of operations atomically using default write options.
      */
     public CompletableFuture<WriteHandle> write(List<DbWriteOperation> operations) ;
+    
+    /**
+     * Apply an existing write batch atomically using default write options.
+     */
+    public CompletableFuture<WriteHandle> writeBatch(WriteBatch batch) ;
+    
+    /**
+     * Apply an existing write batch atomically using custom write options.
+     */
+    public CompletableFuture<WriteHandle> writeBatchWithOptions(WriteBatch batch, DbWriteOptions options) ;
     
     /**
      * Apply a batch of operations atomically using custom write options.
