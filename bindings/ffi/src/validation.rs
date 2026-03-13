@@ -12,21 +12,21 @@ pub(crate) fn build_write_batch(
         match operation {
             DbWriteOperation::Put {
                 key,
-                value,
+                value_bytes,
                 options,
             } => {
-                validate_key_value(&key, &value)?;
+                validate_key_value(&key, &value_bytes)?;
                 let options = options.into_core();
-                batch.put_with_options(key, value, &options);
+                batch.put_with_options(key, value_bytes, &options);
             }
             DbWriteOperation::Merge {
                 key,
-                value,
+                operand,
                 options,
             } => {
-                validate_key_value(&key, &value)?;
+                validate_key_value(&key, &operand)?;
                 let options = options.into_core();
-                batch.merge_with_options(key, value, &options);
+                batch.merge_with_options(key, operand, &options);
             }
             DbWriteOperation::Delete { key } => {
                 validate_key(&key)?;

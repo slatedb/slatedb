@@ -47,6 +47,7 @@ impl Db {
 #[uniffi::export(async_runtime = "tokio")]
 impl Db {
     /// Close the database.
+    #[uniffi::method(name = "shutdown")]
     pub async fn close(&self) -> Result<(), SlatedbError> {
         self.inner.close().await.map_err(Into::into)
     }
@@ -72,7 +73,11 @@ impl Db {
 
     /// Get the full row metadata for a key using default read options.
     pub async fn get_key_value(&self, key: Vec<u8>) -> Result<Option<KeyValue>, SlatedbError> {
-        Ok(self.inner.get_key_value(key).await?.map(KeyValue::from_core))
+        Ok(self
+            .inner
+            .get_key_value(key)
+            .await?
+            .map(KeyValue::from_core))
     }
 
     /// Get the full row metadata for a key using custom read options.
@@ -104,7 +109,10 @@ impl Db {
     ) -> Result<Arc<DbIterator>, SlatedbError> {
         let range = range.into_bounds()?;
         let options = options.into_core()?;
-        let iter = self.inner.scan_with_options::<Vec<u8>, _>(range, &options).await?;
+        let iter = self
+            .inner
+            .scan_with_options::<Vec<u8>, _>(range, &options)
+            .await?;
         Ok(Arc::new(DbIterator::new(iter)))
     }
 
@@ -121,7 +129,10 @@ impl Db {
         options: DbScanOptions,
     ) -> Result<Arc<DbIterator>, SlatedbError> {
         let options = options.into_core()?;
-        let iter = self.inner.scan_prefix_with_options(prefix, &options).await?;
+        let iter = self
+            .inner
+            .scan_prefix_with_options(prefix, &options)
+            .await?;
         Ok(Arc::new(DbIterator::new(iter)))
     }
 
@@ -172,29 +183,27 @@ impl Db {
     }
 
     /// Merge an operand into a key using default options.
-    pub async fn merge(
-        &self,
-        key: Vec<u8>,
-        value: Vec<u8>,
-    ) -> Result<WriteHandle, SlatedbError> {
-        validate_key_value(&key, &value)?;
-        Ok(WriteHandle::from_core(self.inner.merge(key, value).await?))
+    pub async fn merge(&self, key: Vec<u8>, operand: Vec<u8>) -> Result<WriteHandle, SlatedbError> {
+        validate_key_value(&key, &operand)?;
+        Ok(WriteHandle::from_core(
+            self.inner.merge(key, operand).await?,
+        ))
     }
 
     /// Merge an operand into a key using custom merge and write options.
     pub async fn merge_with_options(
         &self,
         key: Vec<u8>,
-        value: Vec<u8>,
+        operand: Vec<u8>,
         merge_options: DbMergeOptions,
         write_options: DbWriteOptions,
     ) -> Result<WriteHandle, SlatedbError> {
-        validate_key_value(&key, &value)?;
+        validate_key_value(&key, &operand)?;
         let merge_options = merge_options.into_core();
         let write_options = write_options.into_core();
         Ok(WriteHandle::from_core(
             self.inner
-                .merge_with_options(key, value, &merge_options, &write_options)
+                .merge_with_options(key, operand, &merge_options, &write_options)
                 .await?,
         ))
     }
@@ -274,7 +283,11 @@ impl DbSnapshot {
 
     /// Get the full row metadata for a key from the snapshot using default read options.
     pub async fn get_key_value(&self, key: Vec<u8>) -> Result<Option<KeyValue>, SlatedbError> {
-        Ok(self.inner.get_key_value(key).await?.map(KeyValue::from_core))
+        Ok(self
+            .inner
+            .get_key_value(key)
+            .await?
+            .map(KeyValue::from_core))
     }
 
     /// Get the full row metadata for a key from the snapshot using custom read options.
@@ -306,7 +319,10 @@ impl DbSnapshot {
     ) -> Result<Arc<DbIterator>, SlatedbError> {
         let range = range.into_bounds()?;
         let options = options.into_core()?;
-        let iter = self.inner.scan_with_options::<Vec<u8>, _>(range, &options).await?;
+        let iter = self
+            .inner
+            .scan_with_options::<Vec<u8>, _>(range, &options)
+            .await?;
         Ok(Arc::new(DbIterator::new(iter)))
     }
 
@@ -323,7 +339,10 @@ impl DbSnapshot {
         options: DbScanOptions,
     ) -> Result<Arc<DbIterator>, SlatedbError> {
         let options = options.into_core()?;
-        let iter = self.inner.scan_prefix_with_options(prefix, &options).await?;
+        let iter = self
+            .inner
+            .scan_prefix_with_options(prefix, &options)
+            .await?;
         Ok(Arc::new(DbIterator::new(iter)))
     }
 }

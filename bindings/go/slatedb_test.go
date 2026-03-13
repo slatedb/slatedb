@@ -85,7 +85,7 @@ func TestResolveMemoryObjectStoreAndBuilderLifecycle(t *testing.T) {
 
 	db := requireDb(t, builder)
 	defer db.Destroy()
-	defer func() { _ = db.Close() }()
+	defer func() { _ = db.Shutdown() }()
 
 	if err := db.Status(); err != nil {
 		t.Fatalf("Status before close: %v", err)
@@ -96,7 +96,7 @@ func TestResolveMemoryObjectStoreAndBuilderLifecycle(t *testing.T) {
 	}
 }
 
-func TestPutGetSnapshotAndClose(t *testing.T) {
+func TestPutGetSnapshotAndShutdown(t *testing.T) {
 	store := requireMemoryStore(t)
 	defer store.Destroy()
 
@@ -105,7 +105,7 @@ func TestPutGetSnapshotAndClose(t *testing.T) {
 
 	db := requireDb(t, builder)
 	defer db.Destroy()
-	defer func() { _ = db.Close() }()
+	defer func() { _ = db.Shutdown() }()
 
 	if _, err := db.Put([]byte("k1"), []byte("v1")); err != nil {
 		t.Fatalf("Put(k1): %v", err)
@@ -145,11 +145,11 @@ func TestPutGetSnapshotAndClose(t *testing.T) {
 		t.Fatalf("Snapshot.Get(k2) = %#v, want nil", snapshotValue)
 	}
 
-	if err := db.Close(); err != nil {
-		t.Fatalf("Close: %v", err)
+	if err := db.Shutdown(); err != nil {
+		t.Fatalf("Shutdown: %v", err)
 	}
 	if err := db.Status(); !errors.Is(err, ErrSlatedbErrorClosed) {
-		t.Fatalf("Status after Close() = %v, want closed error", err)
+		t.Fatalf("Status after Shutdown() = %v, want closed error", err)
 	}
 }
 
@@ -166,7 +166,7 @@ func TestMergeOperatorRoundTrip(t *testing.T) {
 
 	db := requireDb(t, builder)
 	defer db.Destroy()
-	defer func() { _ = db.Close() }()
+	defer func() { _ = db.Shutdown() }()
 
 	if _, err := db.Put([]byte("counter"), binary.LittleEndian.AppendUint64(nil, 1)); err != nil {
 		t.Fatalf("Put(counter): %v", err)
@@ -200,7 +200,7 @@ func TestMergeOperatorFailurePropagates(t *testing.T) {
 
 	db := requireDb(t, builder)
 	defer db.Destroy()
-	defer func() { _ = db.Close() }()
+	defer func() { _ = db.Shutdown() }()
 
 	if _, err := db.Put([]byte("counter"), binary.LittleEndian.AppendUint64(nil, 1)); err != nil {
 		t.Fatalf("Put(counter): %v", err)
@@ -224,7 +224,7 @@ func TestIteratorAndTransactionLifecycle(t *testing.T) {
 
 	db := requireDb(t, builder)
 	defer db.Destroy()
-	defer func() { _ = db.Close() }()
+	defer func() { _ = db.Shutdown() }()
 
 	for key, value := range map[string]string{
 		"a": "1",
@@ -348,7 +348,7 @@ func TestFileObjectStoreRoundTrip(t *testing.T) {
 
 	db := requireDb(t, builder)
 	defer db.Destroy()
-	defer func() { _ = db.Close() }()
+	defer func() { _ = db.Shutdown() }()
 
 	if _, err := db.Put([]byte("k"), []byte("v")); err != nil {
 		t.Fatalf("Put(file): %v", err)
@@ -356,8 +356,8 @@ func TestFileObjectStoreRoundTrip(t *testing.T) {
 	if err := db.Flush(); err != nil {
 		t.Fatalf("Flush(file): %v", err)
 	}
-	if err := db.Close(); err != nil {
-		t.Fatalf("Close(file): %v", err)
+	if err := db.Shutdown(); err != nil {
+		t.Fatalf("Shutdown(file): %v", err)
 	}
 
 	value, err := db.Get([]byte("k"))

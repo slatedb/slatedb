@@ -10,12 +10,12 @@ impl MergeOperator for CounterMergeOperator {
         &self,
         _key: Vec<u8>,
         existing_value: Option<Vec<u8>>,
-        value: Vec<u8>,
+        operand: Vec<u8>,
     ) -> Result<Vec<u8>, MergeOperatorCallbackError> {
         let existing = existing_value
             .map(|value| u64::from_le_bytes(value.try_into().expect("8-byte existing value")))
             .unwrap_or(0);
-        let delta = u64::from_le_bytes(value.try_into().expect("8-byte delta"));
+        let delta = u64::from_le_bytes(operand.try_into().expect("8-byte delta"));
         Ok((existing + delta).to_le_bytes().to_vec())
     }
 }
@@ -27,7 +27,7 @@ impl MergeOperator for FailingMergeOperator {
         &self,
         _key: Vec<u8>,
         _existing_value: Option<Vec<u8>>,
-        _value: Vec<u8>,
+        _operand: Vec<u8>,
     ) -> Result<Vec<u8>, MergeOperatorCallbackError> {
         Err(MergeOperatorCallbackError::Failed {
             message: "bad operand".to_owned(),
@@ -41,8 +41,19 @@ async fn resolves_memory_object_store() {
     let location = Path::from("hello");
     let payload = Bytes::from_static(b"world");
 
-    store.inner.put(&location, payload.clone().into()).await.unwrap();
-    let result = store.inner.get(&location).await.unwrap().bytes().await.unwrap();
+    store
+        .inner
+        .put(&location, payload.clone().into())
+        .await
+        .unwrap();
+    let result = store
+        .inner
+        .get(&location)
+        .await
+        .unwrap()
+        .bytes()
+        .await
+        .unwrap();
 
     assert_eq!(result, payload);
 }
@@ -56,7 +67,11 @@ async fn resolves_local_object_store() {
     let location = Path::from("nested/file.txt");
     let payload = Bytes::from_static(b"payload");
 
-    store.inner.put(&location, payload.clone().into()).await.unwrap();
+    store
+        .inner
+        .put(&location, payload.clone().into())
+        .await
+        .unwrap();
 
     let stored = tokio::fs::read(prefix_path.join("nested").join("file.txt"))
         .await
@@ -159,7 +174,10 @@ async fn supports_scan_iterator_seek_and_transaction_lifecycle() {
 
     let txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
     txn.put(b"tx".to_vec(), b"value".to_vec()).await.unwrap();
-    assert_eq!(txn.get(b"tx".to_vec()).await.unwrap(), Some(b"value".to_vec()));
+    assert_eq!(
+        txn.get(b"tx".to_vec()).await.unwrap(),
+        Some(b"value".to_vec())
+    );
     let handle = txn.commit().await.unwrap().unwrap();
     assert!(handle.seqnum > 0);
     assert!(txn.commit().await.is_err());
