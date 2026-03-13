@@ -63,7 +63,7 @@ mod tests {
     use crate::checkpoint::CheckpointCreateResult;
     use crate::config::{CheckpointOptions, CheckpointScope, Settings};
     use crate::db::Db;
-    use crate::db_state::SsTableId;
+    use crate::db_state::{SsTableId, SsTableView};
     use crate::format::sst::SsTableFormat;
     use crate::iter::RowEntryIterator;
     use crate::manifest::store::ManifestStore;
@@ -325,7 +325,7 @@ mod tests {
             ..Settings::default()
         };
         test_checkpoint_scope_all(db_options, |manifest| {
-            manifest.core.l0.front().unwrap().sst.id
+            manifest.core.l0.front().unwrap().clone()
         })
         .await;
     }
@@ -339,12 +339,12 @@ mod tests {
             ..Settings::default()
         };
         test_checkpoint_scope_all(db_options, |manifest| {
-            manifest.core.l0.front().unwrap().sst.id
+            manifest.core.l0.front().unwrap().clone()
         })
         .await;
     }
 
-    async fn test_checkpoint_scope_all<F: FnOnce(Manifest) -> SsTableId>(
+    async fn test_checkpoint_scope_all<F: FnOnce(Manifest) -> SsTableView>(
         db_options: Settings,
         last_flushed_table: F,
     ) {
@@ -376,7 +376,7 @@ mod tests {
         assert_flushed_entry(
             Arc::clone(&object_store),
             path,
-            &last_flushed_table_id,
+            &last_flushed_table_id.sst.id,
             last_written_kv,
         )
         .await;
