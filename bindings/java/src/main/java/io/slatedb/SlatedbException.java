@@ -47,19 +47,34 @@ public class SlatedbException extends Exception {
     public static class Closed extends SlatedbException {
       
         /**
+         * The reason the handle was closed.
+         */
+      CloseReason reason;
+      
+        /**
          * The original error message.
          */
       String message;
-      public Closed(String message) {
+      public Closed(CloseReason reason, String message) {
         super(new StringBuilder()
+        .append("reason=")
+        .append(reason)
+        
+        .append(", ")
+        
+        
         .append("message=")
         .append(message)
         
         
         .toString());
+        this.reason = reason;
         this.message = message;
         }
 
+      public CloseReason reason() {
+        return this.reason;
+      }
       public String message() {
         return this.message;
       }

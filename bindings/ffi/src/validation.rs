@@ -79,3 +79,15 @@ pub(crate) fn transaction_completed() -> SlatedbError {
         message: "transaction has already been completed".to_owned(),
     }
 }
+
+pub(crate) fn write_batch_consumed() -> SlatedbError {
+    SlatedbError::Invalid {
+        message: "write batch has already been consumed".to_owned(),
+    }
+}
+
+pub(crate) fn write_batch_closed() -> SlatedbError {
+    SlatedbError::Invalid {
+        message: "write batch is already closed".to_owned(),
+    }
+}

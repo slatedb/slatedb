@@ -1,6 +1,7 @@
 //! FFI-safe configuration types shared across the SlateDB wrapper.
 
 use std::ops::Bound;
+use std::time::Duration;
 
 use slatedb::config as core_config;
 use slatedb::{
@@ -90,6 +91,30 @@ impl Default for DbReadOptions {
             durability_filter: DurabilityLevel::default(),
             dirty: false,
             cache_blocks: true,
+        }
+    }
+}
+
+/// Options for constructing a read-only database reader.
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct DbReaderOptions {
+    /// How often to poll manifests and WALs for refreshed reader state.
+    pub manifest_poll_interval_ms: u64,
+    /// How long reader-owned checkpoints should remain valid.
+    pub checkpoint_lifetime_ms: u64,
+    /// Maximum WAL replay memtable size in bytes.
+    pub max_memtable_bytes: u64,
+    /// Whether WAL replay should be skipped entirely.
+    pub skip_wal_replay: bool,
+}
+
+impl Default for DbReaderOptions {
+    fn default() -> Self {
+        Self {
+            manifest_poll_interval_ms: 10_000,
+            checkpoint_lifetime_ms: 600_000,
+            max_memtable_bytes: 64 * 1024 * 1024,
+            skip_wal_replay: false,
         }
     }
 }
@@ -288,6 +313,17 @@ impl DbReadOptions {
             dirty: self.dirty,
             cache_blocks: self.cache_blocks,
         }
+    }
+}
+
+impl DbReaderOptions {
+    pub(crate) fn into_core(self) -> core_config::DbReaderOptions {
+        let mut options = core_config::DbReaderOptions::default();
+        options.manifest_poll_interval = Duration::from_millis(self.manifest_poll_interval_ms);
+        options.checkpoint_lifetime = Duration::from_millis(self.checkpoint_lifetime_ms);
+        options.max_memtable_bytes = self.max_memtable_bytes;
+        options.skip_wal_replay = self.skip_wal_replay;
+        options
     }
 }
 

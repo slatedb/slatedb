@@ -14,6 +14,7 @@ public enum FfiConverterTypeSlatedbError implements FfiConverterRustBuffer<Slate
                 FfiConverterString.INSTANCE.read(buf)
                 );
             case 2 -> new SlatedbException.Closed(
+                FfiConverterTypeCloseReason.INSTANCE.read(buf),
                 FfiConverterString.INSTANCE.read(buf)
                 );
             case 3 -> new SlatedbException.Unavailable(
@@ -43,6 +44,7 @@ public enum FfiConverterTypeSlatedbError implements FfiConverterRustBuffer<Slate
             case SlatedbException.Closed x -> (
                 // Add the size for the Int that specifies the variant plus the size needed for all fields
                 4L
+                + FfiConverterTypeCloseReason.INSTANCE.allocationSize(x.reason)
                 + FfiConverterString.INSTANCE.allocationSize(x.message)
             );
             case SlatedbException.Unavailable x -> (
@@ -78,6 +80,7 @@ public enum FfiConverterTypeSlatedbError implements FfiConverterRustBuffer<Slate
             }
             case SlatedbException.Closed x -> {
                 buf.putInt(2);
+                FfiConverterTypeCloseReason.INSTANCE.write(x.reason, buf);
                 FfiConverterString.INSTANCE.write(x.message, buf);
             }
             case SlatedbException.Unavailable x -> {

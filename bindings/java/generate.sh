@@ -47,3 +47,22 @@ trap 'rm -rf "${STAGING_DIR}"' EXIT
 mkdir -p "${TARGET_DIR_JAVA}"
 find "${TARGET_DIR_JAVA}" -maxdepth 1 -type f -name '*.java' -delete 2>/dev/null || true
 cp "${STAGING_DIR}/io/slatedb/"*.java "${TARGET_DIR_JAVA}/"
+
+# UniFFI-generated Java objects already include an AutoCloseable `close()` used
+# for handle cleanup. For the object types that also expose an explicit FFI
+# `close()` method, that generated cleanup method collides with the API method.
+# Rename the cleanup method to `destroy()` in those classes so the exported
+# close surface remains available.
+for file in \
+  "${TARGET_DIR_JAVA}/DbReader.java" \
+  "${TARGET_DIR_JAVA}/WalFile.java" \
+  "${TARGET_DIR_JAVA}/WalFileIterator.java" \
+  "${TARGET_DIR_JAVA}/WalReader.java" \
+  "${TARGET_DIR_JAVA}/WriteBatch.java"; do
+  perl -0pi -e 's/\n\s*\@Override\n\s*public synchronized void close\(\) \{\n/\n  public synchronized void destroy() {\n/s' "${file}"
+done
+
+# `DbReader.close()` is async in the UniFFI surface, so the generated class
+# cannot also implement `AutoCloseable.close()`.
+perl -0pi -e 's/implements AutoCloseable, DbReaderInterface/implements DbReaderInterface/' \
+  "${TARGET_DIR_JAVA}/DbReader.java"

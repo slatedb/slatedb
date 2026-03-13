@@ -374,6 +374,42 @@ public class Db implements AutoCloseable, DbInterface {
 
   
     /**
+     * Snapshot the current database metrics registry.
+     */
+    @Override
+    public Map<String, Long> metrics() throws SlatedbException {
+            try {
+                return FfiConverterMapStringLong.INSTANCE.lift(
+    callWithPointer(it -> {
+        try {
+    
+            return
+    UniffiHelpers.uniffiRustCallWithError(new SlatedbExceptionErrorHandler(), _status -> {
+        return UniffiLib.INSTANCE.uniffi_slatedb_ffi_fn_method_db_metrics(
+            it, _status);
+    });
+    
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+    })
+    );
+            } catch (RuntimeException _e) {
+                
+                if (SlatedbException.class.isInstance(_e.getCause())) {
+                    throw (SlatedbException)_e.getCause();
+                }
+                
+                if (InternalException.class.isInstance(_e.getCause())) {
+                    throw (InternalException)_e.getCause();
+                }
+                throw _e;
+            }
+    }
+    
+
+  
+    /**
      * Put a value for a key using default options.
      *
      * ## Errors
@@ -617,6 +653,54 @@ public class Db implements AutoCloseable, DbInterface {
             return UniffiLib.INSTANCE.uniffi_slatedb_ffi_fn_method_db_write(
                 thisPtr,
                 FfiConverterSequenceTypeDbWriteOperation.INSTANCE.lower(operations)
+            );
+        }),
+        (future, callback, continuation) -> UniffiLib.INSTANCE.ffi_slatedb_ffi_rust_future_poll_rust_buffer(future, callback, continuation),
+        (future, continuation) -> UniffiLib.INSTANCE.ffi_slatedb_ffi_rust_future_complete_rust_buffer(future, continuation),
+        (future) -> UniffiLib.INSTANCE.ffi_slatedb_ffi_rust_future_free_rust_buffer(future),
+        // lift function
+        (it) -> FfiConverterTypeWriteHandle.INSTANCE.lift(it),
+        // Error FFI converter
+        new SlatedbExceptionErrorHandler()
+    );
+    }
+
+  
+    /**
+     * Apply an existing write batch atomically using default write options.
+     */
+    @Override
+    
+    public CompletableFuture<WriteHandle> writeBatch(WriteBatch batch){
+        return UniffiAsyncHelpers.uniffiRustCallAsync(
+        callWithPointer(thisPtr -> {
+            return UniffiLib.INSTANCE.uniffi_slatedb_ffi_fn_method_db_write_batch(
+                thisPtr,
+                FfiConverterTypeWriteBatch.INSTANCE.lower(batch)
+            );
+        }),
+        (future, callback, continuation) -> UniffiLib.INSTANCE.ffi_slatedb_ffi_rust_future_poll_rust_buffer(future, callback, continuation),
+        (future, continuation) -> UniffiLib.INSTANCE.ffi_slatedb_ffi_rust_future_complete_rust_buffer(future, continuation),
+        (future) -> UniffiLib.INSTANCE.ffi_slatedb_ffi_rust_future_free_rust_buffer(future),
+        // lift function
+        (it) -> FfiConverterTypeWriteHandle.INSTANCE.lift(it),
+        // Error FFI converter
+        new SlatedbExceptionErrorHandler()
+    );
+    }
+
+  
+    /**
+     * Apply an existing write batch atomically using custom write options.
+     */
+    @Override
+    
+    public CompletableFuture<WriteHandle> writeBatchWithOptions(WriteBatch batch, DbWriteOptions options){
+        return UniffiAsyncHelpers.uniffiRustCallAsync(
+        callWithPointer(thisPtr -> {
+            return UniffiLib.INSTANCE.uniffi_slatedb_ffi_fn_method_db_write_batch_with_options(
+                thisPtr,
+                FfiConverterTypeWriteBatch.INSTANCE.lower(batch), FfiConverterTypeDbWriteOptions.INSTANCE.lower(options)
             );
         }),
         (future, callback, continuation) -> UniffiLib.INSTANCE.ffi_slatedb_ffi_rust_future_poll_rust_buffer(future, callback, continuation),

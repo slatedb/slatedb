@@ -39,6 +39,56 @@ public class Slatedb {
 
   
     /**
+     * Initialize SlateDB logging at the default `Info` level.
+     */public static void initDefaultLogging() throws SlatedbException {
+            try {
+                
+    UniffiHelpers.uniffiRustCallWithError(new SlatedbExceptionErrorHandler(), _status -> {
+        UniffiLib.INSTANCE.uniffi_slatedb_ffi_fn_func_init_default_logging(
+            _status);
+    })
+    ;
+            } catch (RuntimeException _e) {
+                
+                if (SlatedbException.class.isInstance(_e.getCause())) {
+                    throw (SlatedbException)_e.getCause();
+                }
+                
+                if (InternalException.class.isInstance(_e.getCause())) {
+                    throw (InternalException)_e.getCause();
+                }
+                throw _e;
+            }
+    }
+    
+
+  
+    /**
+     * Initialize SlateDB logging at the requested level.
+     */public static void initLogging(LogLevel level) throws SlatedbException {
+            try {
+                
+    UniffiHelpers.uniffiRustCallWithError(new SlatedbExceptionErrorHandler(), _status -> {
+        UniffiLib.INSTANCE.uniffi_slatedb_ffi_fn_func_init_logging(
+            FfiConverterTypeLogLevel.INSTANCE.lower(level), _status);
+    })
+    ;
+            } catch (RuntimeException _e) {
+                
+                if (SlatedbException.class.isInstance(_e.getCause())) {
+                    throw (SlatedbException)_e.getCause();
+                }
+                
+                if (InternalException.class.isInstance(_e.getCause())) {
+                    throw (InternalException)_e.getCause();
+                }
+                throw _e;
+            }
+    }
+    
+
+  
+    /**
      * Resolve an object store from a URL.
      *
      * ## Arguments
@@ -57,6 +107,31 @@ public class Slatedb {
             FfiConverterString.INSTANCE.lower(url), _status);
     })
     );
+            } catch (RuntimeException _e) {
+                
+                if (SlatedbException.class.isInstance(_e.getCause())) {
+                    throw (SlatedbException)_e.getCause();
+                }
+                
+                if (InternalException.class.isInstance(_e.getCause())) {
+                    throw (InternalException)_e.getCause();
+                }
+                throw _e;
+            }
+    }
+    
+
+  
+    /**
+     * Update the process-global SlateDB logging level.
+     */public static void setLoggingLevel(LogLevel level) throws SlatedbException {
+            try {
+                
+    UniffiHelpers.uniffiRustCallWithError(new SlatedbExceptionErrorHandler(), _status -> {
+        UniffiLib.INSTANCE.uniffi_slatedb_ffi_fn_func_set_logging_level(
+            FfiConverterTypeLogLevel.INSTANCE.lower(level), _status);
+    })
+    ;
             } catch (RuntimeException _e) {
                 
                 if (SlatedbException.class.isInstance(_e.getCause())) {
