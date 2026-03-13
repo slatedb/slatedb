@@ -1018,13 +1018,13 @@ mod tests {
 
         // Materialize L0 SSTs from the provided entry sets. Use a huge max size so
         // each entry set stays in a single SST, keeping the inputs predictable.
-        let mut l0_ssts = Vec::new();
+        let mut l0_sst_views = Vec::new();
         let mut sorted_runs = Vec::new();
         let mut all_entries = Vec::new();
 
         for entries in &l0_entry_sets {
             let ssts = write_sst(&table_store, entries, usize::MAX).await;
-            l0_ssts.extend(ssts.into_iter().map(SsTableView::identity));
+            l0_sst_views.extend(ssts.into_iter().map(SsTableView::identity));
             all_entries.extend(entries.iter().cloned());
         }
 
@@ -1070,7 +1070,7 @@ mod tests {
             id: Ulid::new(),
             compaction_id: Ulid::new(),
             destination: 0,
-            sst_views: l0_ssts,
+            sst_views: l0_sst_views,
             sorted_runs,
             output_ssts,
             compaction_clock_tick: 0,
