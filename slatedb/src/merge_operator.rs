@@ -16,6 +16,9 @@ use crate::{
 pub enum MergeOperatorError {
     #[error("merge_batch called with empty operands and no existing value")]
     EmptyBatch,
+
+    #[error("{message}")]
+    Callback { message: String },
 }
 
 /// A trait for implementing custom merge operations in SlateDB.

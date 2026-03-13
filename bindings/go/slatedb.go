@@ -6,6 +6,7 @@ import "C"
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -933,7 +934,7 @@ func uniffiCheckChecksums() {
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_slatedb_ffi_checksum_method_mergeoperator_merge()
 		})
-		if checksum != 53067 {
+		if checksum != 27627 {
 			// If this happens try cleaning and rebuilding your project
 			panic("slatedb: uniffi_slatedb_ffi_checksum_method_mergeoperator_merge: UniFFI API checksum mismatch")
 		}
@@ -4276,6 +4277,115 @@ type FfiDestroyerIsolationLevel struct{}
 func (_ FfiDestroyerIsolationLevel) Destroy(value IsolationLevel) {
 }
 
+// Error returned by foreign merge operator callbacks.
+type MergeOperatorCallbackError struct {
+	err error
+}
+
+// Convience method to turn *MergeOperatorCallbackError into error
+// Avoiding treating nil pointer as non nil error interface
+func (err *MergeOperatorCallbackError) AsError() error {
+	if err == nil {
+		return nil
+	} else {
+		return err
+	}
+}
+
+func (err MergeOperatorCallbackError) Error() string {
+	return fmt.Sprintf("MergeOperatorCallbackError: %s", err.err.Error())
+}
+
+func (err MergeOperatorCallbackError) Unwrap() error {
+	return err.err
+}
+
+// Err* are used for checking error type with `errors.Is`
+var ErrMergeOperatorCallbackErrorFailed = fmt.Errorf("MergeOperatorCallbackErrorFailed")
+
+// Variant structs
+// The merge operator rejected the input or could not produce a merged value.
+type MergeOperatorCallbackErrorFailed struct {
+	Message string
+}
+
+// The merge operator rejected the input or could not produce a merged value.
+func NewMergeOperatorCallbackErrorFailed(
+	message string,
+) *MergeOperatorCallbackError {
+	return &MergeOperatorCallbackError{err: &MergeOperatorCallbackErrorFailed{
+		Message: message}}
+}
+
+func (e MergeOperatorCallbackErrorFailed) destroy() {
+	FfiDestroyerString{}.Destroy(e.Message)
+}
+
+func (err MergeOperatorCallbackErrorFailed) Error() string {
+	return fmt.Sprint("Failed",
+		": ",
+
+		"Message=",
+		err.Message,
+	)
+}
+
+func (self MergeOperatorCallbackErrorFailed) Is(target error) bool {
+	return target == ErrMergeOperatorCallbackErrorFailed
+}
+
+type FfiConverterMergeOperatorCallbackError struct{}
+
+var FfiConverterMergeOperatorCallbackErrorINSTANCE = FfiConverterMergeOperatorCallbackError{}
+
+func (c FfiConverterMergeOperatorCallbackError) Lift(eb RustBufferI) *MergeOperatorCallbackError {
+	return LiftFromRustBuffer[*MergeOperatorCallbackError](c, eb)
+}
+
+func (c FfiConverterMergeOperatorCallbackError) Lower(value *MergeOperatorCallbackError) C.RustBuffer {
+	return LowerIntoRustBuffer[*MergeOperatorCallbackError](c, value)
+}
+
+func (c FfiConverterMergeOperatorCallbackError) LowerExternal(value *MergeOperatorCallbackError) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[*MergeOperatorCallbackError](c, value))
+}
+
+func (c FfiConverterMergeOperatorCallbackError) Read(reader io.Reader) *MergeOperatorCallbackError {
+	errorID := readUint32(reader)
+
+	switch errorID {
+	case 1:
+		return &MergeOperatorCallbackError{&MergeOperatorCallbackErrorFailed{
+			Message: FfiConverterStringINSTANCE.Read(reader),
+		}}
+	default:
+		panic(fmt.Sprintf("Unknown error code %d in FfiConverterMergeOperatorCallbackError.Read()", errorID))
+	}
+}
+
+func (c FfiConverterMergeOperatorCallbackError) Write(writer io.Writer, value *MergeOperatorCallbackError) {
+	switch variantValue := value.err.(type) {
+	case *MergeOperatorCallbackErrorFailed:
+		writeInt32(writer, 1)
+		FfiConverterStringINSTANCE.Write(writer, variantValue.Message)
+	default:
+		_ = variantValue
+		panic(fmt.Sprintf("invalid error value `%v` in FfiConverterMergeOperatorCallbackError.Write", value))
+	}
+}
+
+type FfiDestroyerMergeOperatorCallbackError struct{}
+
+func (_ FfiDestroyerMergeOperatorCallbackError) Destroy(value *MergeOperatorCallbackError) {
+	switch variantValue := value.err.(type) {
+	case MergeOperatorCallbackErrorFailed:
+		variantValue.destroy()
+	default:
+		_ = variantValue
+		panic(fmt.Sprintf("invalid error value `%v` in FfiDestroyerMergeOperatorCallbackError.Destroy", value))
+	}
+}
+
 // Error returned by the SlateDB FFI layer.
 //
 // The FFI wrapper groups core SlateDB errors into a smaller set of stable
@@ -4731,8 +4841,9 @@ type MergeOperator interface {
 	// - `value`: the new merge operand.
 	//
 	// ## Returns
-	// - `Vec<u8>`: the merged value that should become visible for the key.
-	Merge(key []byte, existingValue *[]byte, value []byte) []byte
+	// - `Result<Vec<u8>, MergeOperatorCallbackError>`: the merged value that
+	// should become visible for the key.
+	Merge(key []byte, existingValue *[]byte, value []byte) ([]byte, error)
 }
 
 type FfiConverterCallbackInterfaceMergeOperator struct {
@@ -4821,7 +4932,7 @@ func slatedb_ffi_cgo_dispatchCallbackInterfaceMergeOperatorMethod0(uniffiHandle 
 		panic(fmt.Errorf("no callback in handle map: %d", handle))
 	}
 
-	res :=
+	res, err :=
 		uniffiObj.Merge(
 			FfiConverterBytesINSTANCE.Lift(GoRustBuffer{
 				inner: key,
@@ -4833,6 +4944,21 @@ func slatedb_ffi_cgo_dispatchCallbackInterfaceMergeOperatorMethod0(uniffiHandle 
 				inner: value,
 			}),
 		)
+
+	if err != nil {
+		var actualError *MergeOperatorCallbackError
+		if errors.As(err, &actualError) {
+			*callStatus = C.RustCallStatus{
+				code:     C.int8_t(uniffiCallbackResultError),
+				errorBuf: FfiConverterMergeOperatorCallbackErrorINSTANCE.Lower(actualError),
+			}
+		} else {
+			*callStatus = C.RustCallStatus{
+				code: C.int8_t(uniffiCallbackUnexpectedResultError),
+			}
+		}
+		return
+	}
 
 	*uniffiOutReturn = FfiConverterBytesINSTANCE.Lower(res)
 }

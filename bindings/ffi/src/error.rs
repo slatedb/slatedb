@@ -51,6 +51,17 @@ pub enum SlatedbError {
     },
 }
 
+/// Error returned by foreign merge operator callbacks.
+#[derive(Debug, Error, uniffi::Error)]
+pub enum MergeOperatorCallbackError {
+    /// The merge operator rejected the input or could not produce a merged value.
+    #[error("{message}")]
+    Failed {
+        /// The original error message.
+        message: String,
+    },
+}
+
 impl From<slatedb::Error> for SlatedbError {
     fn from(error: slatedb::Error) -> Self {
         let message = error.to_string();

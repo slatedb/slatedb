@@ -21,7 +21,7 @@ pub use config::{
     SstBlockSize, Ttl, WriteHandle,
 };
 pub use db::{Db, DbSnapshot};
-pub use error::SlatedbError;
+pub use error::{MergeOperatorCallbackError, SlatedbError};
 pub use iterator::DbIterator;
 pub use object_store::{resolve_object_store, ObjectStore};
 pub use settings::default_settings_json;
