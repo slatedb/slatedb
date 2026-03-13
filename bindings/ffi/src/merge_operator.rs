@@ -10,10 +10,10 @@ use crate::error::FfiMergeOperatorCallbackError;
 
 /// Callback interface for SlateDB merge operators.
 ///
-/// Merge operators are configured on [`crate::DbBuilder`] and are used by merge
+/// Merge operators are configured on [`crate::FfiDbBuilder`] and are used by merge
 /// reads and writes to combine an existing value with a new operand.
 #[uniffi::export(callback_interface)]
-pub trait MergeOperator: Send + Sync {
+pub trait FfiMergeOperator: Send + Sync {
     /// Merge a new operand into the existing value for a key.
     ///
     /// ## Arguments
@@ -33,7 +33,7 @@ pub trait MergeOperator: Send + Sync {
 }
 
 struct MergeOperatorAdapter {
-    inner: Arc<dyn MergeOperator>,
+    inner: Arc<dyn FfiMergeOperator>,
 }
 
 impl CoreMergeOperator for MergeOperatorAdapter {
@@ -57,7 +57,7 @@ impl CoreMergeOperator for MergeOperatorAdapter {
 }
 
 pub(crate) fn adapt_merge_operator(
-    merge_operator: Box<dyn MergeOperator>,
+    merge_operator: Box<dyn FfiMergeOperator>,
 ) -> Arc<dyn CoreMergeOperator + Send + Sync> {
     Arc::new(MergeOperatorAdapter {
         inner: merge_operator.into(),

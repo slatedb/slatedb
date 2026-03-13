@@ -7,14 +7,14 @@ use crate::error::FfiSlatedbError;
 
 /// An asynchronous iterator over key-value pairs.
 ///
-/// Instances of this type are returned by scan operations on [`crate::Db`],
-/// [`crate::DbSnapshot`], and [`crate::DbTransaction`].
+/// Instances of this type are returned by scan operations on [`crate::FfiDb`],
+/// [`crate::FfiDbSnapshot`], and [`crate::FfiDbTransaction`].
 #[derive(uniffi::Object)]
-pub struct DbIterator {
+pub struct FfiDbIterator {
     inner: Mutex<slatedb::DbIterator>,
 }
 
-impl DbIterator {
+impl FfiDbIterator {
     pub(crate) fn new(inner: slatedb::DbIterator) -> Self {
         Self {
             inner: Mutex::new(inner),
@@ -23,7 +23,7 @@ impl DbIterator {
 }
 
 #[uniffi::export(async_runtime = "tokio")]
-impl DbIterator {
+impl FfiDbIterator {
     /// Return the next item from the iterator.
     ///
     /// ## Returns

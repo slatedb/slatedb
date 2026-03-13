@@ -12,7 +12,7 @@ use crate::validation::{
 
 /// A mutable batch of write operations that can be written atomically.
 #[derive(uniffi::Object)]
-pub struct WriteBatch {
+pub struct FfiWriteBatch {
     state: Mutex<WriteBatchState>,
 }
 
@@ -22,7 +22,7 @@ enum WriteBatchState {
     Closed,
 }
 
-impl WriteBatch {
+impl FfiWriteBatch {
     fn with_open<T>(
         &self,
         update: impl FnOnce(&mut CoreWriteBatch) -> T,
@@ -57,7 +57,7 @@ impl WriteBatch {
 }
 
 #[uniffi::export]
-impl WriteBatch {
+impl FfiWriteBatch {
     /// Create a new empty write batch.
     #[uniffi::constructor]
     pub fn new() -> Arc<Self> {

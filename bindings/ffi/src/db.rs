@@ -10,33 +10,33 @@ use crate::config::{
     FfiReadOptions, FfiScanOptions, FfiWriteHandle, FfiWriteOperation, FfiWriteOptions,
 };
 use crate::error::FfiSlatedbError;
-use crate::iterator::DbIterator;
-use crate::transaction::DbTransaction;
+use crate::iterator::FfiDbIterator;
+use crate::transaction::FfiDbTransaction;
 use crate::validation::{build_write_batch, validate_key, validate_key_value};
-use crate::write_batch::WriteBatch;
+use crate::write_batch::FfiWriteBatch;
 
 /// Handle to an open SlateDB database.
 ///
-/// Instances of this type are created by [`crate::DbBuilder::build`].
+/// Instances of this type are created by [`crate::FfiDbBuilder::build`].
 #[derive(uniffi::Object)]
-pub struct Db {
+pub struct FfiDb {
     inner: CoreDb,
 }
 
 /// A stable point-in-time view of a database.
 #[derive(uniffi::Object)]
-pub struct DbSnapshot {
+pub struct FfiDbSnapshot {
     inner: Arc<CoreDbSnapshot>,
 }
 
-impl Db {
+impl FfiDb {
     pub(crate) fn new(inner: CoreDb) -> Self {
         Self { inner }
     }
 }
 
 #[uniffi::export]
-impl Db {
+impl FfiDb {
     /// Check whether the database is still open.
     ///
     /// ## Returns
@@ -59,7 +59,7 @@ impl Db {
 }
 
 #[uniffi::export(async_runtime = "tokio")]
-impl Db {
+impl FfiDb {
     /// Close the database.
     #[uniffi::method(name = "shutdown")]
     pub async fn close(&self) -> Result<(), FfiSlatedbError> {
@@ -112,10 +112,10 @@ impl Db {
     }
 
     /// Scan a key range using default scan options.
-    pub async fn scan(&self, range: FfiKeyRange) -> Result<Arc<DbIterator>, FfiSlatedbError> {
+    pub async fn scan(&self, range: FfiKeyRange) -> Result<Arc<FfiDbIterator>, FfiSlatedbError> {
         let range = range.into_bounds()?;
         let iter = self.inner.scan::<Vec<u8>, _>(range).await?;
-        Ok(Arc::new(DbIterator::new(iter)))
+        Ok(Arc::new(FfiDbIterator::new(iter)))
     }
 
     /// Scan a key range using custom scan options.
@@ -123,20 +123,23 @@ impl Db {
         &self,
         range: FfiKeyRange,
         options: FfiScanOptions,
-    ) -> Result<Arc<DbIterator>, FfiSlatedbError> {
+    ) -> Result<Arc<FfiDbIterator>, FfiSlatedbError> {
         let range = range.into_bounds()?;
         let options = options.into_core()?;
         let iter = self
             .inner
             .scan_with_options::<Vec<u8>, _>(range, &options)
             .await?;
-        Ok(Arc::new(DbIterator::new(iter)))
+        Ok(Arc::new(FfiDbIterator::new(iter)))
     }
 
     /// Scan all keys that share the provided prefix.
-    pub async fn scan_prefix(&self, prefix: Vec<u8>) -> Result<Arc<DbIterator>, FfiSlatedbError> {
+    pub async fn scan_prefix(
+        &self,
+        prefix: Vec<u8>,
+    ) -> Result<Arc<FfiDbIterator>, FfiSlatedbError> {
         let iter = self.inner.scan_prefix(prefix).await?;
-        Ok(Arc::new(DbIterator::new(iter)))
+        Ok(Arc::new(FfiDbIterator::new(iter)))
     }
 
     /// Scan all keys that share the provided prefix using custom scan options.
@@ -144,13 +147,13 @@ impl Db {
         &self,
         prefix: Vec<u8>,
         options: FfiScanOptions,
-    ) -> Result<Arc<DbIterator>, FfiSlatedbError> {
+    ) -> Result<Arc<FfiDbIterator>, FfiSlatedbError> {
         let options = options.into_core()?;
         let iter = self
             .inner
             .scan_prefix_with_options(prefix, &options)
             .await?;
-        Ok(Arc::new(DbIterator::new(iter)))
+        Ok(Arc::new(FfiDbIterator::new(iter)))
     }
 
     /// Put a value for a key using default options.
@@ -258,7 +261,7 @@ impl Db {
     /// Apply an existing write batch atomically using default write options.
     pub async fn write_batch(
         &self,
-        batch: Arc<WriteBatch>,
+        batch: Arc<FfiWriteBatch>,
     ) -> Result<FfiWriteHandle, FfiSlatedbError> {
         let batch = batch.take_for_write()?;
         Ok(FfiWriteHandle::from_core(self.inner.write(batch).await?))
@@ -267,7 +270,7 @@ impl Db {
     /// Apply an existing write batch atomically using custom write options.
     pub async fn write_batch_with_options(
         &self,
-        batch: Arc<WriteBatch>,
+        batch: Arc<FfiWriteBatch>,
         options: FfiWriteOptions,
     ) -> Result<FfiWriteHandle, FfiSlatedbError> {
         let batch = batch.take_for_write()?;
@@ -294,8 +297,8 @@ impl Db {
     }
 
     /// Create a point-in-time snapshot of the database.
-    pub async fn snapshot(&self) -> Result<Arc<DbSnapshot>, FfiSlatedbError> {
-        Ok(Arc::new(DbSnapshot {
+    pub async fn snapshot(&self) -> Result<Arc<FfiDbSnapshot>, FfiSlatedbError> {
+        Ok(Arc::new(FfiDbSnapshot {
             inner: self.inner.snapshot().await?,
         }))
     }
@@ -304,14 +307,14 @@ impl Db {
     pub async fn begin(
         &self,
         isolation_level: FfiIsolationLevel,
-    ) -> Result<Arc<DbTransaction>, FfiSlatedbError> {
+    ) -> Result<Arc<FfiDbTransaction>, FfiSlatedbError> {
         let tx = self.inner.begin(isolation_level.into_core()).await?;
-        Ok(Arc::new(DbTransaction::new(tx)))
+        Ok(Arc::new(FfiDbTransaction::new(tx)))
     }
 }
 
 #[uniffi::export(async_runtime = "tokio")]
-impl DbSnapshot {
+impl FfiDbSnapshot {
     /// Get the value for a key from the snapshot using default read options.
     pub async fn get(&self, key: Vec<u8>) -> Result<Option<Vec<u8>>, FfiSlatedbError> {
         Ok(self.inner.get(key).await?.map(|value| value.to_vec()))
@@ -358,10 +361,10 @@ impl DbSnapshot {
     }
 
     /// Scan a key range from the snapshot using default scan options.
-    pub async fn scan(&self, range: FfiKeyRange) -> Result<Arc<DbIterator>, FfiSlatedbError> {
+    pub async fn scan(&self, range: FfiKeyRange) -> Result<Arc<FfiDbIterator>, FfiSlatedbError> {
         let range = range.into_bounds()?;
         let iter = self.inner.scan::<Vec<u8>, _>(range).await?;
-        Ok(Arc::new(DbIterator::new(iter)))
+        Ok(Arc::new(FfiDbIterator::new(iter)))
     }
 
     /// Scan a key range from the snapshot using custom scan options.
@@ -369,20 +372,23 @@ impl DbSnapshot {
         &self,
         range: FfiKeyRange,
         options: FfiScanOptions,
-    ) -> Result<Arc<DbIterator>, FfiSlatedbError> {
+    ) -> Result<Arc<FfiDbIterator>, FfiSlatedbError> {
         let range = range.into_bounds()?;
         let options = options.into_core()?;
         let iter = self
             .inner
             .scan_with_options::<Vec<u8>, _>(range, &options)
             .await?;
-        Ok(Arc::new(DbIterator::new(iter)))
+        Ok(Arc::new(FfiDbIterator::new(iter)))
     }
 
     /// Scan all keys with the provided prefix from the snapshot.
-    pub async fn scan_prefix(&self, prefix: Vec<u8>) -> Result<Arc<DbIterator>, FfiSlatedbError> {
+    pub async fn scan_prefix(
+        &self,
+        prefix: Vec<u8>,
+    ) -> Result<Arc<FfiDbIterator>, FfiSlatedbError> {
         let iter = self.inner.scan_prefix(prefix).await?;
-        Ok(Arc::new(DbIterator::new(iter)))
+        Ok(Arc::new(FfiDbIterator::new(iter)))
     }
 
     /// Scan all keys with the provided prefix from the snapshot using custom scan options.
@@ -390,12 +396,12 @@ impl DbSnapshot {
         &self,
         prefix: Vec<u8>,
         options: FfiScanOptions,
-    ) -> Result<Arc<DbIterator>, FfiSlatedbError> {
+    ) -> Result<Arc<FfiDbIterator>, FfiSlatedbError> {
         let options = options.into_core()?;
         let iter = self
             .inner
             .scan_prefix_with_options(prefix, &options)
             .await?;
-        Ok(Arc::new(DbIterator::new(iter)))
+        Ok(Arc::new(FfiDbIterator::new(iter)))
     }
 }

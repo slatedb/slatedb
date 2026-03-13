@@ -10,26 +10,26 @@ use slatedb::{
 use uuid::Uuid;
 
 use crate::config::{FfiReaderOptions, FfiSstBlockSize};
-use crate::db::Db;
-use crate::db_reader::DbReader;
+use crate::db::FfiDb;
+use crate::db_reader::FfiDbReader;
 use crate::error::FfiSlatedbError;
-use crate::merge_operator::{adapt_merge_operator, MergeOperator};
-use crate::object_store::ObjectStore;
+use crate::merge_operator::{adapt_merge_operator, FfiMergeOperator};
+use crate::object_store::FfiObjectStore;
 use crate::validation::builder_consumed;
 
-/// Builder used to configure and open a [`Db`].
+/// Builder used to configure and open a [`FfiDb`].
 #[derive(uniffi::Object)]
-pub struct DbBuilder {
+pub struct FfiDbBuilder {
     builder: Mutex<Option<CoreDbBuilder<String>>>,
 }
 
-/// Builder used to configure and open a [`DbReader`].
+/// Builder used to configure and open a [`FfiDbReader`].
 #[derive(uniffi::Object)]
-pub struct DbReaderBuilder {
+pub struct FfiDbReaderBuilder {
     builder: Mutex<Option<CoreDbReaderBuilder<String>>>,
 }
 
-impl DbBuilder {
+impl FfiDbBuilder {
     fn update_builder(
         &self,
         update: impl FnOnce(CoreDbBuilder<String>) -> CoreDbBuilder<String>,
@@ -50,7 +50,7 @@ impl DbBuilder {
     }
 }
 
-impl DbReaderBuilder {
+impl FfiDbReaderBuilder {
     fn update_builder(
         &self,
         update: impl FnOnce(CoreDbReaderBuilder<String>) -> CoreDbReaderBuilder<String>,
@@ -72,7 +72,7 @@ impl DbReaderBuilder {
 }
 
 #[uniffi::export]
-impl DbBuilder {
+impl FfiDbBuilder {
     /// Create a new builder for a database.
     ///
     /// ## Arguments
@@ -80,9 +80,9 @@ impl DbBuilder {
     /// - `object_store`: the object store that will back the database.
     ///
     /// ## Returns
-    /// - `Arc<DbBuilder>`: a new builder instance.
+    /// - `Arc<FfiDbBuilder>`: a new builder instance.
     #[uniffi::constructor]
-    pub fn new(path: String, object_store: Arc<ObjectStore>) -> Arc<Self> {
+    pub fn new(path: String, object_store: Arc<FfiObjectStore>) -> Arc<Self> {
         Arc::new(Self {
             builder: Mutex::new(Some(CoreDb::builder(path, object_store.inner.clone()))),
         })
@@ -106,7 +106,7 @@ impl DbBuilder {
     /// - `wal_object_store`: the object store to use for WAL files.
     pub fn with_wal_object_store(
         &self,
-        wal_object_store: Arc<ObjectStore>,
+        wal_object_store: Arc<FfiObjectStore>,
     ) -> Result<(), FfiSlatedbError> {
         self.update_builder(|builder| builder.with_wal_object_store(wal_object_store.inner.clone()))
     }
@@ -142,7 +142,7 @@ impl DbBuilder {
     /// - `merge_operator`: the callback implementation to use.
     pub fn with_merge_operator(
         &self,
-        merge_operator: Box<dyn MergeOperator>,
+        merge_operator: Box<dyn FfiMergeOperator>,
     ) -> Result<(), FfiSlatedbError> {
         self.update_builder(|builder| {
             builder.with_merge_operator(adapt_merge_operator(merge_operator))
@@ -151,29 +151,29 @@ impl DbBuilder {
 }
 
 #[uniffi::export(async_runtime = "tokio")]
-impl DbBuilder {
+impl FfiDbBuilder {
     /// Open the database using the builder's current configuration.
     ///
     /// This consumes the builder state. Reusing the same builder after a
     /// successful or failed call to `build()` returns an error.
     ///
     /// ## Returns
-    /// - `Result<Arc<Db>, FfiSlatedbError>`: the opened database handle.
+    /// - `Result<Arc<FfiDb>, FfiSlatedbError>`: the opened database handle.
     ///
     /// ## Errors
     /// - `FfiSlatedbError`: if the builder was already consumed or the database cannot be opened.
-    pub async fn build(&self) -> Result<Arc<Db>, FfiSlatedbError> {
+    pub async fn build(&self) -> Result<Arc<FfiDb>, FfiSlatedbError> {
         let builder = self.take_builder()?;
         let db = builder.build().await?;
-        Ok(Arc::new(Db::new(db)))
+        Ok(Arc::new(FfiDb::new(db)))
     }
 }
 
 #[uniffi::export]
-impl DbReaderBuilder {
+impl FfiDbReaderBuilder {
     /// Create a new builder for a read-only database reader.
     #[uniffi::constructor]
-    pub fn new(path: String, object_store: Arc<ObjectStore>) -> Arc<Self> {
+    pub fn new(path: String, object_store: Arc<FfiObjectStore>) -> Arc<Self> {
         Arc::new(Self {
             builder: Mutex::new(Some(CoreDbReader::builder(
                 path,
@@ -199,11 +199,11 @@ impl DbReaderBuilder {
 }
 
 #[uniffi::export(async_runtime = "tokio")]
-impl DbReaderBuilder {
+impl FfiDbReaderBuilder {
     /// Build the configured database reader.
-    pub async fn build(&self) -> Result<Arc<DbReader>, FfiSlatedbError> {
+    pub async fn build(&self) -> Result<Arc<FfiDbReader>, FfiSlatedbError> {
         let builder = self.take_builder()?;
         let reader = builder.build().await?;
-        Ok(Arc::new(DbReader::new(reader)))
+        Ok(Arc::new(FfiDbReader::new(reader)))
     }
 }
