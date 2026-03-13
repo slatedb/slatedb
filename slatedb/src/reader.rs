@@ -12,7 +12,6 @@ use crate::sst_iter::{SstIterator, SstIteratorOptions};
 use crate::tablestore::TableStore;
 use crate::types::KeyValue;
 #[cfg(not(dst))]
-use crate::utils::get_now_for_read;
 use crate::utils::{build_concurrent, compute_max_parallel};
 use crate::{db_iter::DbIteratorRangeTracker, error::SlateDBError, DbIterator};
 
@@ -281,11 +280,6 @@ impl Reader {
         write_batch: Option<WriteBatch>,
         max_seq: Option<u64>,
     ) -> Result<Option<KeyValue>, SlateDBError> {
-        #[cfg(not(dst))]
-        let now = get_now_for_read(self.mono_clock.clone(), options.durability_filter).await?;
-        #[cfg(dst)]
-        // Force the current timestamp for DST operations. See #719 for details.
-        let now = options.now;
         let max_seq = self.prepare_max_seq(max_seq, options.durability_filter, options.dirty);
         let key_slice = key.as_ref();
         let range = BytesRange::from_slice(key_slice..=key_slice);
@@ -319,7 +313,6 @@ impl Reader {
             sr_iters,
             max_seq,
             None,
-            now,
             self.merge_operator.clone(),
         )
         .await?;
@@ -366,11 +359,6 @@ impl Reader {
         range_tracker: Option<Arc<DbIteratorRangeTracker>>,
     ) -> Result<DbIterator, SlateDBError> {
         let max_seq = self.prepare_max_seq(max_seq, options.durability_filter, options.dirty);
-        #[cfg(not(dst))]
-        let now = get_now_for_read(self.mono_clock.clone(), options.durability_filter).await?;
-        #[cfg(dst)]
-        // Force the current timestamp for DST operations. See #719 for details.
-        let now = options.now;
         let read_ahead_blocks = self.table_store.bytes_to_blocks(options.read_ahead_bytes);
 
         let sst_iter_options = SstIteratorOptions {
@@ -398,7 +386,6 @@ impl Reader {
             sr_iters,
             max_seq,
             range_tracker,
-            now,
             self.merge_operator.clone(),
         )
         .await
@@ -722,8 +709,6 @@ mod tests {
         expected: Option<&'static [u8]>,
         /// Test description
         description: &'static str,
-        /// Current time for TTL filtering (None = 0)
-        now: Option<i64>,
         /// Whether to allow dirty reads (default: false for realistic testing)
         dirty: bool,
         /// Oracle's last committed sequence (None = u64::MAX for all committed)
@@ -743,7 +728,7 @@ mod tests {
         ],
         query_key: b"key1",
         expected: Some(b"wb_value"),
-        description: "write batch should override memtable and L0", now: None, dirty: true, last_committed_seq: None, max_seq: None,
+        description: "write batch should override memtable and L0", dirty: true, last_committed_seq: None, max_seq: None,
     })]
     // Test 2: Memtable overrides L0 and sorted runs
     #[case(LayerPriorityTestCase {
@@ -754,7 +739,7 @@ mod tests {
         ],
         query_key: b"key1",
         expected: Some(b"mem_value"),
-        description: "memtable should override L0 and sorted run", now: None, dirty: true, last_committed_seq: None, max_seq: None,
+        description: "memtable should override L0 and sorted run", dirty: true, last_committed_seq: None, max_seq: None,
     })]
     // Test 3: Tombstone in write batch hides all lower layers
     #[case(LayerPriorityTestCase {
@@ -765,7 +750,7 @@ mod tests {
         ],
         query_key: b"key1",
         expected: None,
-        description: "tombstone in write batch should hide all values", now: None, dirty: true, last_committed_seq: None, max_seq: None,
+        description: "tombstone in write batch should hide all values", dirty: true, last_committed_seq: None, max_seq: None,
     })]
     // Test 4: Tombstone in memtable hides L0
     #[case(LayerPriorityTestCase {
@@ -775,7 +760,7 @@ mod tests {
         ],
         query_key: b"key1",
         expected: None,
-        description: "tombstone in memtable should hide L0 value", now: None, dirty: true, last_committed_seq: None, max_seq: None,
+        description: "tombstone in memtable should hide L0 value", dirty: true, last_committed_seq: None, max_seq: None,
     })]
     // Test 5: Tombstone in L0 hides sorted run
     #[case(LayerPriorityTestCase {
@@ -785,7 +770,7 @@ mod tests {
         ],
         query_key: b"key1",
         expected: None,
-        description: "tombstone in L0 should hide sorted run value", now: None, dirty: true, last_committed_seq: None, max_seq: None,
+        description: "tombstone in L0 should hide sorted run value", dirty: true, last_committed_seq: None, max_seq: None,
     })]
     // Test 6: Value after tombstone (higher seq number)
     #[case(LayerPriorityTestCase {
@@ -795,7 +780,7 @@ mod tests {
         ],
         query_key: b"key1",
         expected: Some(b"new_value"),
-        description: "newer value should override older tombstone", now: None, dirty: true, last_committed_seq: None, max_seq: None,
+        description: "newer value should override older tombstone", dirty: true, last_committed_seq: None, max_seq: None,
     })]
     // Test 7: Multiple L0 SSTs - newest wins
     #[case(LayerPriorityTestCase {
@@ -805,7 +790,7 @@ mod tests {
         ],
         query_key: b"key1",
         expected: Some(b"l0_newer"),
-        description: "newer L0 SST should win over older L0 SST", now: None, dirty: true, last_committed_seq: None, max_seq: None,
+        description: "newer L0 SST should win over older L0 SST", dirty: true, last_committed_seq: None, max_seq: None,
     })]
     // Test 8: L0 overrides sorted run
     #[case(LayerPriorityTestCase {
@@ -815,7 +800,7 @@ mod tests {
         ],
         query_key: b"key1",
         expected: Some(b"l0_value"),
-        description: "L0 value should override sorted run value", now: None, dirty: true, last_committed_seq: None, max_seq: None,
+        description: "L0 value should override sorted run value", dirty: true, last_committed_seq: None, max_seq: None,
     })]
     // Test 9: Nonexistent key returns None
     #[case(LayerPriorityTestCase {
@@ -824,7 +809,7 @@ mod tests {
         ],
         query_key: b"key1",
         expected: None,
-        description: "nonexistent key should return None", now: None, dirty: true, last_committed_seq: None, max_seq: None,
+        description: "nonexistent key should return None", dirty: true, last_committed_seq: None, max_seq: None,
     })]
     // Test 10: Only tombstone, no value
     #[case(LayerPriorityTestCase {
@@ -833,7 +818,7 @@ mod tests {
         ],
         query_key: b"key1",
         expected: None,
-        description: "tombstone with no previous value should return None", now: None, dirty: true, last_committed_seq: None, max_seq: None,
+        description: "tombstone with no previous value should return None", dirty: true, last_committed_seq: None, max_seq: None,
     })]
     // Test 11: Multiple layers all with same key, write batch wins
     #[case(LayerPriorityTestCase {
@@ -846,7 +831,7 @@ mod tests {
         ],
         query_key: b"key1",
         expected: Some(b"wb"),
-        description: "write batch should win", now: None, dirty: true, last_committed_seq: None, max_seq: None,
+        description: "write batch should win", dirty: true, last_committed_seq: None, max_seq: None,
     })]
     // Test 12: Multiple entries per L0 SST
     #[case(LayerPriorityTestCase {
@@ -857,7 +842,7 @@ mod tests {
         ],
         query_key: b"key1",
         expected: Some(b"l0_0_val1"),
-        description: "first L0 SST entry should win", now: None, dirty: true, last_committed_seq: None, max_seq: None,
+        description: "first L0 SST entry should win", dirty: true, last_committed_seq: None, max_seq: None,
     })]
     // Test 13: Multiple sorted runs
     #[case(LayerPriorityTestCase {
@@ -867,7 +852,7 @@ mod tests {
         ],
         query_key: b"key1",
         expected: Some(b"sr0"),
-        description: "first sorted run should win", now: None, dirty: true, last_committed_seq: None, max_seq: None,
+        description: "first sorted run should win", dirty: true, last_committed_seq: None, max_seq: None,
     })]
     // Test 14: Multiple immutable memtables
     #[case(LayerPriorityTestCase {
@@ -878,7 +863,7 @@ mod tests {
         ],
         query_key: b"key1",
         expected: Some(b"imm0"),
-        description: "first immutable memtable should win over second and L0", now: None, dirty: true, last_committed_seq: None, max_seq: None,
+        description: "first immutable memtable should win over second and L0", dirty: true, last_committed_seq: None, max_seq: None,
     })]
     // Test 15: Complex scenario with multiple entries across all layers
     #[case(LayerPriorityTestCase {
@@ -896,58 +881,9 @@ mod tests {
         ],
         query_key: b"key1",
         expected: Some(b"mem"),
-        description: "memtable value should win in complex multi-layer scenario", now: None, dirty: true, last_committed_seq: None, max_seq: None,
+        description: "memtable value should win in complex multi-layer scenario", dirty: true, last_committed_seq: None, max_seq: None,
     })]
-    // Test 16: Expired value in memtable should return None
-    #[case(LayerPriorityTestCase {
-        entries: vec![
-            TestEntry::value(b"key1", b"mem_value", 50).with_expire_ts(100),
-        ],
-        query_key: b"key1",
-        expected: None,
-        description: "expired value should return None", now: Some(150), dirty: true, last_committed_seq: None, max_seq: None,
-    })]
-    // Test 17: Expired value in L0 should not return older value from SR
-    #[case(LayerPriorityTestCase {
-        entries: vec![
-            TestEntry::value(b"key1", b"l0_value", 50).with_location(LayerLocation::L0Sst(0)).with_expire_ts(100),
-            TestEntry::value(b"key1", b"sr_old_value", 30).with_location(LayerLocation::SortedRun(0)),
-        ],
-        query_key: b"key1",
-        expected: None,
-        description: "expired newer value should not revive older value", now: Some(150), dirty: true, last_committed_seq: None, max_seq: None,
-    })]
-    // Test 18: Non-expired value should be returned when now < expire_ts
-    #[case(LayerPriorityTestCase {
-        entries: vec![
-            TestEntry::value(b"key1", b"mem_value", 50).with_expire_ts(200),
-        ],
-        query_key: b"key1",
-        expected: Some(b"mem_value"),
-        description: "non-expired value should be returned", now: Some(150), dirty: true, last_committed_seq: None, max_seq: None,
-    })]
-    // Test 19: Expired value in memtable should not expose L0 value
-    #[case(LayerPriorityTestCase {
-        entries: vec![
-            TestEntry::value(b"key1", b"mem_value", 60).with_expire_ts(100),
-            TestEntry::value(b"key1", b"l0_value", 50).with_location(LayerLocation::L0Sst(0)),
-        ],
-        query_key: b"key1",
-        expected: None,
-        description: "expired memtable value should not expose L0", now: Some(150), dirty: true, last_committed_seq: None, max_seq: None,
-    })]
-    // Test 20: Mixed expired and non-expired values across layers
-    #[case(LayerPriorityTestCase {
-        entries: vec![
-            TestEntry::value(b"key1", b"l0_new_expired", 60).with_location(LayerLocation::L0Sst(1)).with_expire_ts(100),
-            TestEntry::value(b"key1", b"l0_old_valid", 50).with_location(LayerLocation::L0Sst(0)).with_expire_ts(200),
-            TestEntry::value(b"key1", b"sr_value", 30).with_location(LayerLocation::SortedRun(0)),
-        ],
-        query_key: b"key1",
-        expected: None,
-        description: "expired newer L0 should not expose older L0 even if valid", now: Some(150), dirty: true, last_committed_seq: None, max_seq: None,
-    })]
-    // Test 21: Tombstone prevents revival even when newer value expires
+    // Test 16: Tombstone prevents revival even when newer value expires
     #[case(LayerPriorityTestCase {
         entries: vec![
             TestEntry::tombstone(b"key1", 60).with_location(LayerLocation::L0Sst(1)),
@@ -955,7 +891,7 @@ mod tests {
         ],
         query_key: b"key1",
         expected: None,
-        description: "tombstone should prevent returning older value regardless of TTL", now: Some(150), dirty: true, last_committed_seq: None, max_seq: None,
+        description: "tombstone should prevent returning older value regardless of TTL", dirty: true, last_committed_seq: None, max_seq: None,
     })]
     // Test 22: Value with no expiration should always be returned
     #[case(LayerPriorityTestCase {
@@ -964,7 +900,7 @@ mod tests {
         ],
         query_key: b"key1",
         expected: Some(b"mem_value"),
-        description: "value with no expiration should be returned at any time", now: Some(1000000), dirty: true, last_committed_seq: None, max_seq: None,
+        description: "value with no expiration should be returned at any time", dirty: true, last_committed_seq: None, max_seq: None,
     })]
     // Test 23: Committed read filters out uncommitted data in memtable
     #[case(LayerPriorityTestCase {
@@ -973,7 +909,7 @@ mod tests {
         ],
         query_key: b"key1",
         expected: None,
-        description: "committed read should not see uncommitted data", now: None, dirty: false, last_committed_seq: Some(50), max_seq: None,
+        description: "committed read should not see uncommitted data", dirty: false, last_committed_seq: Some(50), max_seq: None,
     })]
     // Test 24: Committed read sees committed data
     #[case(LayerPriorityTestCase {
@@ -982,7 +918,7 @@ mod tests {
         ],
         query_key: b"key1",
         expected: Some(b"committed"),
-        description: "committed read should see data within committed range", now: None, dirty: false, last_committed_seq: Some(50), max_seq: None,
+        description: "committed read should see data within committed range", dirty: false, last_committed_seq: Some(50), max_seq: None,
     })]
     // Test 25: Uncommitted value doesn't hide older committed value
     #[case(LayerPriorityTestCase {
@@ -992,7 +928,7 @@ mod tests {
         ],
         query_key: b"key1",
         expected: Some(b"committed"),
-        description: "committed read should see older committed value when newer is uncommitted", now: None, dirty: false, last_committed_seq: Some(50), max_seq: None,
+        description: "committed read should see older committed value when newer is uncommitted", dirty: false, last_committed_seq: Some(50), max_seq: None,
     })]
     // Test 26: Snapshot with max_seq filters newer values
     #[case(LayerPriorityTestCase {
@@ -1002,7 +938,7 @@ mod tests {
         ],
         query_key: b"key1",
         expected: Some(b"older"),
-        description: "snapshot read should only see values up to max_seq", now: None, dirty: true, last_committed_seq: None, max_seq: Some(60),
+        description: "snapshot read should only see values up to max_seq", dirty: true, last_committed_seq: None, max_seq: Some(60),
     })]
     // Test 27: Snapshot with max_seq returns None when all values are newer
     #[case(LayerPriorityTestCase {
@@ -1011,7 +947,7 @@ mod tests {
         ],
         query_key: b"key1",
         expected: None,
-        description: "snapshot should return None when all values exceed max_seq", now: None, dirty: true, last_committed_seq: None, max_seq: Some(60),
+        description: "snapshot should return None when all values exceed max_seq", dirty: true, last_committed_seq: None, max_seq: Some(60),
     })]
     // Test 28: Combined max_seq and last_committed_seq filtering
     #[case(LayerPriorityTestCase {
@@ -1022,7 +958,7 @@ mod tests {
         ],
         query_key: b"key1",
         expected: Some(b"v3"),
-        description: "should respect both max_seq and committed_seq constraints", now: None, dirty: false, last_committed_seq: Some(50), max_seq: Some(60),
+        description: "should respect both max_seq and committed_seq constraints", dirty: false, last_committed_seq: Some(50), max_seq: Some(60),
     })]
     // Test 29: Tombstone within sequence bounds hides older values
     #[case(LayerPriorityTestCase {
@@ -1032,7 +968,7 @@ mod tests {
         ],
         query_key: b"key1",
         expected: None,
-        description: "tombstone within seq bounds should hide older values", now: None, dirty: false, last_committed_seq: Some(50), max_seq: None,
+        description: "tombstone within seq bounds should hide older values", dirty: false, last_committed_seq: Some(50), max_seq: None,
     })]
     // Test 30: Newer tombstone filtered out doesn't prevent reading older value
     #[case(LayerPriorityTestCase {
@@ -1042,7 +978,7 @@ mod tests {
         ],
         query_key: b"key1",
         expected: Some(b"old_value"),
-        description: "filtered tombstone should not hide visible older value", now: None, dirty: false, last_committed_seq: Some(50), max_seq: None,
+        description: "filtered tombstone should not hide visible older value", dirty: false, last_committed_seq: Some(50), max_seq: None,
     })]
     // Test 31: Sequence filtering works across all layers
     #[case(LayerPriorityTestCase {
@@ -1054,7 +990,7 @@ mod tests {
         ],
         query_key: b"key1",
         expected: Some(b"l0"),
-        description: "sequence filtering should work uniformly across all layers", now: None, dirty: false, last_committed_seq: Some(60), max_seq: None,
+        description: "sequence filtering should work uniformly across all layers", dirty: false, last_committed_seq: Some(60), max_seq: None,
     })]
     // Test 32: Dirty read sees all uncommitted data
     #[case(LayerPriorityTestCase {
@@ -1063,7 +999,7 @@ mod tests {
         ],
         query_key: b"key1",
         expected: Some(b"uncommitted"),
-        description: "dirty read should see uncommitted data", now: None, dirty: true, last_committed_seq: Some(50), max_seq: None,
+        description: "dirty read should see uncommitted data", dirty: true, last_committed_seq: Some(50), max_seq: None,
     })]
     // NOTE: for tests that use WriteBatch, the order in which the merge operations are listed
     // in the test case is important. The first merge should be the "oldest" that happened because
@@ -1077,7 +1013,7 @@ mod tests {
         ],
         query_key: b"key1",
         expected: Some(b"mem_valuewb_merge"),  // Merge("mem_value", "wb_merge") = "mem_valuewb_merge"
-        description: "[MERGE] write batch merge should merge with memtable value", now: None, dirty: true, last_committed_seq: None, max_seq: None,
+        description: "[MERGE] write batch merge should merge with memtable value", dirty: true, last_committed_seq: None, max_seq: None,
     })]
     // Test 34: WriteBatch with multiple merge operations for same key
     #[case(LayerPriorityTestCase {
@@ -1088,7 +1024,7 @@ mod tests {
         ],
         query_key: b"key1",
         expected: Some(b"basemerge1merge2"),  // Merge(base, merge1, merge2) = "basemerge1merge2"
-        description: "[MERGE] multiple write batch merges should merge with base value", now: None, dirty: true, last_committed_seq: None, max_seq: None,
+        description: "[MERGE] multiple write batch merges should merge with base value", dirty: true, last_committed_seq: None, max_seq: None,
     })]
     // Test 35: WriteBatch merge with tombstone clears history
     #[case(LayerPriorityTestCase {
@@ -1100,7 +1036,7 @@ mod tests {
         ],
         query_key: b"key1",
         expected: Some(b"new_merge"),  // Tombstone clears history, only merge after tombstone applies
-        description: "[MERGE] write batch tombstone should clear merge history", now: None, dirty: true, last_committed_seq: None, max_seq: None,
+        description: "[MERGE] write batch tombstone should clear merge history", dirty: true, last_committed_seq: None, max_seq: None,
     })]
     // Test 36: WriteBatch merge with value acts as new base
     #[case(LayerPriorityTestCase {
@@ -1112,7 +1048,7 @@ mod tests {
         ],
         query_key: b"key1",
         expected: Some(b"new_basemerge"),  // Value acts as barrier, only Merge("new_base", "merge") applies
-        description: "[MERGE] write batch value should act as new base for subsequent merges", now: None, dirty: true, last_committed_seq: None, max_seq: None,
+        description: "[MERGE] write batch value should act as new base for subsequent merges", dirty: true, last_committed_seq: None, max_seq: None,
     })]
     // Test 37: WriteBatch merges without base values
     #[case(LayerPriorityTestCase {
@@ -1122,7 +1058,7 @@ mod tests {
         ],
         query_key: b"key1",
         expected: Some(b"merge1merge2"),  // Only merge operands, no base value
-        description: "[MERGE] write batch merges without base values should merge together", now: None, dirty: true, last_committed_seq: None, max_seq: None,
+        description: "[MERGE] write batch merges without base values should merge together", dirty: true, last_committed_seq: None, max_seq: None,
     })]
     // Test 33: Single merge operand without base value acts as base
     #[case(LayerPriorityTestCase {
@@ -1131,7 +1067,7 @@ mod tests {
         ],
         query_key: b"key1",
         expected: Some(b"a"),  // Single merge operand with no base returns the operand
-        description: "[MERGE] single merge operand without base should be returned as-is", now: None, dirty: true, last_committed_seq: None, max_seq: None,
+        description: "[MERGE] single merge operand without base should be returned as-is", dirty: true, last_committed_seq: None, max_seq: None,
     })]
     // Test 34: Merge operand with base value should merge
     #[case(LayerPriorityTestCase {
@@ -1141,7 +1077,7 @@ mod tests {
         ],
         query_key: b"key1",
         expected: Some(b"ab"),  // Merge("a", "b") = "ab" (concatenation)
-        description: "[MERGE] merge operand should be merged with base value", now: None, dirty: true, last_committed_seq: None, max_seq: None,
+        description: "[MERGE] merge operand should be merged with base value", dirty: true, last_committed_seq: None, max_seq: None,
     })]
     // Test 35: Multiple merge operands should be applied in sequence number order
     #[case(LayerPriorityTestCase {
@@ -1152,7 +1088,7 @@ mod tests {
         ],
         query_key: b"key1",
         expected: Some(b"abc"),  // Merge(Merge("a", "b"), "c") = "abc"
-        description: "[MERGE] multiple merge operands should be applied in sequence order", now: None, dirty: true, last_committed_seq: None, max_seq: None,
+        description: "[MERGE] multiple merge operands should be applied in sequence order", dirty: true, last_committed_seq: None, max_seq: None,
     })]
     // Test 36: Tombstone clears all merge history
     #[case(LayerPriorityTestCase {
@@ -1164,7 +1100,7 @@ mod tests {
         ],
         query_key: b"key1",
         expected: Some(b"d"),  // Tombstone acts as barrier, only merge after tombstone is applied
-        description: "[MERGE] tombstone should clear merge history", now: None, dirty: true, last_committed_seq: None, max_seq: None,
+        description: "[MERGE] tombstone should clear merge history", dirty: true, last_committed_seq: None, max_seq: None,
     })]
     // Test 37: Value after merges acts as new base
     #[case(LayerPriorityTestCase {
@@ -1176,7 +1112,7 @@ mod tests {
         ],
         query_key: b"key1",
         expected: Some(b"yz"),  // Value("y") acts as barrier, only Merge("y", "z") is applied
-        description: "[MERGE] value should act as new base for subsequent merges", now: None, dirty: true, last_committed_seq: None, max_seq: None,
+        description: "[MERGE] value should act as new base for subsequent merges", dirty: true, last_committed_seq: None, max_seq: None,
     })]
     // Test 38: Merges across multiple layers
     #[case(LayerPriorityTestCase {
@@ -1188,42 +1124,9 @@ mod tests {
         ],
         query_key: b"key1",
         expected: Some(b"abcd"),  // Merge(Merge(Merge("a", "b"), "c"), "d") = "abcd"
-        description: "[MERGE] merges should work across all layers", now: None, dirty: true, last_committed_seq: None, max_seq: None,
+        description: "[MERGE] merges should work across all layers", dirty: true, last_committed_seq: None, max_seq: None,
     })]
-    // Test 39: Expired merge operand should be filtered
-    #[case(LayerPriorityTestCase {
-        entries: vec![
-            TestEntry::merge(b"key1", b"c", 70).with_expire_ts(100),
-            TestEntry::merge(b"key1", b"b", 60).with_location(LayerLocation::L0Sst(0)),
-            TestEntry::value(b"key1", b"a", 50).with_location(LayerLocation::SortedRun(0)),
-        ],
-        query_key: b"key1",
-        expected: Some(b"ab"),  // Expired merge is filtered, only Merge("a", "b") is applied
-        description: "[MERGE] expired merge operand should be filtered out", now: Some(150), dirty: true, last_committed_seq: None, max_seq: None,
-    })]
-    // Test 40: Expired base value with merge operands still applies merges
-    #[case(LayerPriorityTestCase {
-        entries: vec![
-            TestEntry::merge(b"key1", b"b", 70),
-            TestEntry::value(b"key1", b"a", 50).with_location(LayerLocation::L0Sst(0)).with_expire_ts(100),
-        ],
-        query_key: b"key1",
-        expected: Some(b"b"),  // Base value expired (None passed to merge operator), merge operands still applied
-        description: "[MERGE] expired base value passes None to merge operator, merge operands still apply", now: Some(150), dirty: true, last_committed_seq: None, max_seq: None,
-    })]
-    // Test 41: Mixed TTLs - only non-expired merges are applied
-    #[case(LayerPriorityTestCase {
-        entries: vec![
-            TestEntry::merge(b"key1", b"d", 80).with_expire_ts(200),  // Not expired
-            TestEntry::merge(b"key1", b"c", 70).with_location(LayerLocation::L0Sst(1)).with_expire_ts(100),  // Expired
-            TestEntry::merge(b"key1", b"b", 60).with_location(LayerLocation::L0Sst(0)),  // No TTL
-            TestEntry::value(b"key1", b"a", 50).with_location(LayerLocation::SortedRun(0)),
-        ],
-        query_key: b"key1",
-        expected: Some(b"abd"),  // Merge(Merge("a", "b"), "d") = "abd" (expired "c" is filtered)
-        description: "[MERGE] only non-expired merge operands should be applied", now: Some(150), dirty: true, last_committed_seq: None, max_seq: None,
-    })]
-    // Test 42: Merge with sequence filtering
+    // Test 39: Merge with sequence filtering
     #[case(LayerPriorityTestCase {
         entries: vec![
             TestEntry::merge(b"key1", b"c", 100),  // Filtered (uncommitted)
@@ -1232,7 +1135,7 @@ mod tests {
         ],
         query_key: b"key1",
         expected: Some(b"ab"),  // Merge("a", "b") = "ab" (seq 100 filtered)
-        description: "[MERGE] merge operands should respect sequence filtering", now: None, dirty: false, last_committed_seq: Some(50), max_seq: None,
+        description: "[MERGE] merge operands should respect sequence filtering", dirty: false, last_committed_seq: Some(50), max_seq: None,
     })]
     // Test 43: Snapshot isolation with merge operands
     #[case(LayerPriorityTestCase {
@@ -1243,7 +1146,7 @@ mod tests {
         ],
         query_key: b"key1",
         expected: Some(b"ab"),  // Merge("a", "b") = "ab" (seq 80 filtered by snapshot)
-        description: "[MERGE] snapshot should filter merge operands by max_seq", now: None, dirty: true, last_committed_seq: None, max_seq: Some(60),
+        description: "[MERGE] snapshot should filter merge operands by max_seq", dirty: true, last_committed_seq: None, max_seq: Some(60),
     })]
     // Test 44: Only merge operands, no tombstone/value base
     #[case(LayerPriorityTestCase {
@@ -1254,7 +1157,7 @@ mod tests {
         ],
         query_key: b"key1",
         expected: Some(b"abc"),  // String concatenation: "" + "a" + "b" + "c" = "abc"
-        description: "[MERGE] multiple merge operands without base should merge together", now: None, dirty: true, last_committed_seq: None, max_seq: None,
+        description: "[MERGE] multiple merge operands without base should merge together", dirty: true, last_committed_seq: None, max_seq: None,
     })]
     // Test 45: Tombstone after value prevents merge from applying to old value
     #[case(LayerPriorityTestCase {
@@ -1265,7 +1168,7 @@ mod tests {
         ],
         query_key: b"key1",
         expected: Some(b"new"),  // Tombstone blocks old value, merge becomes new base
-        description: "[MERGE] tombstone should prevent merge from applying to older value", now: None, dirty: true, last_committed_seq: None, max_seq: None,
+        description: "[MERGE] tombstone should prevent merge from applying to older value", dirty: true, last_committed_seq: None, max_seq: None,
     })]
     // Test 46: Merge operands in same layer (memtable)
     #[case(LayerPriorityTestCase {
@@ -1276,7 +1179,7 @@ mod tests {
         ],
         query_key: b"key1",
         expected: Some(b"abc"),  // All merges in memtable: Merge(Merge("a", "b"), "c") = "abc"
-        description: "[MERGE] multiple merge operands in same layer should merge in seq order", now: None, dirty: true, last_committed_seq: None, max_seq: None,
+        description: "[MERGE] multiple merge operands in same layer should merge in seq order", dirty: true, last_committed_seq: None, max_seq: None,
     })]
     async fn test_get_with_options_layer_priority(
         #[case] test_case: LayerPriorityTestCase,
@@ -1290,10 +1193,6 @@ mod tests {
         let stat_registry = StatRegistry::new();
         let db_stats = DbStats::new(&stat_registry);
         let test_clock = Arc::new(MockSystemClock::new());
-        // Set the clock to the test case's "now" value for TTL filtering
-        if let Some(now) = test_case.now {
-            test_clock.set(now);
-        }
         let mono_clock = Arc::new(MonotonicClock::new(test_clock as Arc<dyn SystemClock>, 0));
 
         // Create Oracle with appropriate last_committed_seq
@@ -1366,8 +1265,6 @@ mod tests {
         expected: Vec<(&'static [u8], &'static [u8])>,
         /// Test description
         description: &'static str,
-        /// Current time for TTL filtering (None = 0)
-        now: Option<i64>,
         /// Whether to allow dirty reads (default: false for realistic testing)
         dirty: bool,
         /// Oracle's last committed sequence (None = u64::MAX for all committed)
@@ -1388,7 +1285,7 @@ mod tests {
         range_start: b"key1",
         range_end: b"key4",
         expected: vec![(b"key1", b"val1"), (b"key2", b"val2"), (b"key3", b"val3")],
-        description: "scan should return keys in order", now: None, dirty: true, last_committed_seq: None, max_seq: None,
+        description: "scan should return keys in order", dirty: true, last_committed_seq: None, max_seq: None,
     })]
     // Test 2: Scan respects range boundaries
     #[case(ScanTestCase {
@@ -1400,7 +1297,7 @@ mod tests {
         range_start: b"key2",
         range_end: b"key3",
         expected: vec![(b"key2", b"val2")],
-        description: "scan should respect range boundaries (end exclusive)", now: None, dirty: true, last_committed_seq: None, max_seq: None,
+        description: "scan should respect range boundaries (end exclusive)", dirty: true, last_committed_seq: None, max_seq: None,
     })]
     // Test 3: Higher layer values override lower layers
     #[case(ScanTestCase {
@@ -1412,7 +1309,7 @@ mod tests {
         range_start: b"key1",
         range_end: b"key3",
         expected: vec![(b"key1", b"mem_val"), (b"key2", b"l0_val2")],
-        description: "scan should prefer higher layer values", now: None, dirty: true, last_committed_seq: None, max_seq: None,
+        description: "scan should prefer higher layer values", dirty: true, last_committed_seq: None, max_seq: None,
     })]
     // Test 4: Tombstones hide values in lower layers
     #[case(ScanTestCase {
@@ -1425,32 +1322,9 @@ mod tests {
         range_start: b"key1",
         range_end: b"key4",
         expected: vec![(b"key1", b"val1"), (b"key3", b"val3")],
-        description: "tombstones should hide values from lower layers", now: None, dirty: true, last_committed_seq: None, max_seq: None,
+        description: "tombstones should hide values from lower layers", dirty: true, last_committed_seq: None, max_seq: None,
     })]
-    // Test 5: Expired values are filtered out
-    #[case(ScanTestCase {
-        entries: vec![
-            TestEntry::value(b"key1", b"val1", 50),
-            TestEntry::value(b"key2", b"expired", 50).with_expire_ts(100),
-            TestEntry::value(b"key3", b"val3", 50),
-        ],
-        range_start: b"key1",
-        range_end: b"key4",
-        expected: vec![(b"key1", b"val1"), (b"key3", b"val3")],
-        description: "expired values should not appear in scan", now: Some(150), dirty: true, last_committed_seq: None, max_seq: None,
-    })]
-    // Test 6: Expired value doesn't revive older value
-    #[case(ScanTestCase {
-        entries: vec![
-            TestEntry::value(b"key1", b"expired", 60).with_expire_ts(100),
-            TestEntry::value(b"key1", b"old_value", 40).with_location(LayerLocation::L0Sst(0)),
-        ],
-        range_start: b"key1",
-        range_end: b"key2",
-        expected: vec![],
-        description: "expired value should not revive older value in scan", now: Some(150), dirty: true, last_committed_seq: None, max_seq: None,
-    })]
-    // Test 7: Uncommitted values filtered in committed read
+    // Test 5: Uncommitted values filtered in committed read
     #[case(ScanTestCase {
         entries: vec![
             TestEntry::value(b"key1", b"committed", 40),
@@ -1460,7 +1334,7 @@ mod tests {
         range_start: b"key1",
         range_end: b"key4",
         expected: vec![(b"key1", b"committed"), (b"key3", b"committed")],
-        description: "committed scan should filter uncommitted values", now: None, dirty: false, last_committed_seq: Some(50), max_seq: None,
+        description: "committed scan should filter uncommitted values", dirty: false, last_committed_seq: Some(50), max_seq: None,
     })]
     // Test 8: Uncommitted value doesn't hide older committed value
     #[case(ScanTestCase {
@@ -1471,7 +1345,7 @@ mod tests {
         range_start: b"key1",
         range_end: b"key2",
         expected: vec![(b"key1", b"committed")],
-        description: "uncommitted value should not hide committed value in scan", now: None, dirty: false, last_committed_seq: Some(50), max_seq: None,
+        description: "uncommitted value should not hide committed value in scan", dirty: false, last_committed_seq: Some(50), max_seq: None,
     })]
     // Test 9: Snapshot with max_seq
     #[case(ScanTestCase {
@@ -1483,7 +1357,7 @@ mod tests {
         range_start: b"key1",
         range_end: b"key3",
         expected: vec![(b"key1", b"v1_old"), (b"key2", b"v2")],
-        description: "snapshot scan should respect max_seq", now: None, dirty: true, last_committed_seq: None, max_seq: Some(60),
+        description: "snapshot scan should respect max_seq", dirty: true, last_committed_seq: None, max_seq: Some(60),
     })]
     // Test 10: Multiple layers with proper deduplication
     #[case(ScanTestCase {
@@ -1497,7 +1371,7 @@ mod tests {
         range_start: b"key1",
         range_end: b"key5",
         expected: vec![(b"key1", b"mem"), (b"key2", b"imm"), (b"key3", b"l0_new"), (b"key4", b"sr")],
-        description: "scan should properly deduplicate across all layers", now: None, dirty: true, last_committed_seq: None, max_seq: None,
+        description: "scan should properly deduplicate across all layers", dirty: true, last_committed_seq: None, max_seq: None,
     })]
     // Test 11: Empty range returns no results
     #[case(ScanTestCase {
@@ -1507,7 +1381,7 @@ mod tests {
         range_start: b"key5",
         range_end: b"key9",
         expected: vec![],
-        description: "scan of empty range should return no results", now: None, dirty: true, last_committed_seq: None, max_seq: None,
+        description: "scan of empty range should return no results", dirty: true, last_committed_seq: None, max_seq: None,
     })]
     // Test 12: Scan with all keys deleted
     #[case(ScanTestCase {
@@ -1518,7 +1392,7 @@ mod tests {
         range_start: b"key1",
         range_end: b"key3",
         expected: vec![],
-        description: "scan with all tombstones should return empty", now: None, dirty: true, last_committed_seq: None, max_seq: None,
+        description: "scan with all tombstones should return empty", dirty: true, last_committed_seq: None, max_seq: None,
     })]
     // Test 13: Complex sequence filtering across range
     #[case(ScanTestCase {
@@ -1531,7 +1405,7 @@ mod tests {
         range_start: b"key1",
         range_end: b"key4",
         expected: vec![(b"key1", b"committed1"), (b"key2", b"committed2")],
-        description: "complex committed scan should filter correctly", now: None, dirty: false, last_committed_seq: Some(50), max_seq: None,
+        description: "complex committed scan should filter correctly", dirty: false, last_committed_seq: Some(50), max_seq: None,
     })]
     // Test 14: Tombstone within seq bounds prevents reading old value
     #[case(ScanTestCase {
@@ -1543,7 +1417,7 @@ mod tests {
         range_start: b"key1",
         range_end: b"key3",
         expected: vec![(b"key2", b"val2")],
-        description: "tombstone in bounds should hide older value", now: None, dirty: false, last_committed_seq: Some(50), max_seq: None,
+        description: "tombstone in bounds should hide older value", dirty: false, last_committed_seq: Some(50), max_seq: None,
     })]
     // Test 15: Filtered tombstone doesn't hide visible value
     #[case(ScanTestCase {
@@ -1554,7 +1428,7 @@ mod tests {
         range_start: b"key1",
         range_end: b"key2",
         expected: vec![(b"key1", b"visible")],
-        description: "filtered tombstone should not hide visible value", now: None, dirty: false, last_committed_seq: Some(50), max_seq: None,
+        description: "filtered tombstone should not hide visible value", dirty: false, last_committed_seq: Some(50), max_seq: None,
     })]
     // ========================================
     // MERGE OPERATOR TESTS FOR SCAN OPERATIONS
@@ -1569,7 +1443,7 @@ mod tests {
         range_start: b"key1",
         range_end: b"key3",
         expected: vec![(b"key1", b"ab"), (b"key2", b"x")],  // key1: Merge("a", "b") = "ab"
-        description: "[MERGE SCAN] should merge operands with base values during scan", now: None, dirty: true, last_committed_seq: None, max_seq: None,
+        description: "[MERGE SCAN] should merge operands with base values during scan", dirty: true, last_committed_seq: None, max_seq: None,
     })]
     // Test 17: Scan with multiple keys having merge operands
     #[case(ScanTestCase {
@@ -1584,7 +1458,7 @@ mod tests {
         range_start: b"key1",
         range_end: b"key4",
         expected: vec![(b"key1", b"12"), (b"key2", b"ab"), (b"key3", b"xy")],
-        description: "[MERGE SCAN] should merge operands for multiple keys", now: None, dirty: true, last_committed_seq: None, max_seq: None,
+        description: "[MERGE SCAN] should merge operands for multiple keys", dirty: true, last_committed_seq: None, max_seq: None,
     })]
     // Test 18: Scan with tombstone clearing merge history
     #[case(ScanTestCase {
@@ -1597,22 +1471,9 @@ mod tests {
         range_start: b"key1",
         range_end: b"key3",
         expected: vec![(b"key1", b"new"), (b"key2", b"x")],  // Tombstone clears history
-        description: "[MERGE SCAN] tombstone should clear merge history in scan", now: None, dirty: true, last_committed_seq: None, max_seq: None,
+        description: "[MERGE SCAN] tombstone should clear merge history in scan", dirty: true, last_committed_seq: None, max_seq: None,
     })]
-    // Test 19: Scan with expired merge operands
-    #[case(ScanTestCase {
-        entries: vec![
-            TestEntry::merge(b"key1", b"c", 70).with_expire_ts(100),  // Expired
-            TestEntry::merge(b"key1", b"b", 60).with_location(LayerLocation::L0Sst(0)),
-            TestEntry::value(b"key1", b"a", 50).with_location(LayerLocation::SortedRun(0)),
-            TestEntry::value(b"key2", b"x", 50).with_location(LayerLocation::L0Sst(0)),
-        ],
-        range_start: b"key1",
-        range_end: b"key3",
-        expected: vec![(b"key1", b"ab"), (b"key2", b"x")],  // Expired merge filtered
-        description: "[MERGE SCAN] expired merge operands should be filtered in scan", now: Some(150), dirty: true, last_committed_seq: None, max_seq: None,
-    })]
-    // Test 20: Scan with only merge operands (no base values)
+    // Test 19: Scan with only merge operands (no base values)
     #[case(ScanTestCase {
         entries: vec![
             TestEntry::merge(b"key1", b"b", 60),
@@ -1623,7 +1484,7 @@ mod tests {
         range_start: b"key1",
         range_end: b"key3",
         expected: vec![(b"key1", b"ab"), (b"key2", b"xy")],
-        description: "[MERGE SCAN] should merge operands without base values", now: None, dirty: true, last_committed_seq: None, max_seq: None,
+        description: "[MERGE SCAN] should merge operands without base values", dirty: true, last_committed_seq: None, max_seq: None,
     })]
     // Test 21: Scan with merge operands across layers
     #[case(ScanTestCase {
@@ -1636,7 +1497,7 @@ mod tests {
         range_start: b"key1",
         range_end: b"key2",
         expected: vec![(b"key1", b"abcd")],  // Merge across all layers: "a"+"b"+"c"+"d" = "abcd"
-        description: "[MERGE SCAN] should merge operands across multiple layers", now: None, dirty: true, last_committed_seq: None, max_seq: None,
+        description: "[MERGE SCAN] should merge operands across multiple layers", dirty: true, last_committed_seq: None, max_seq: None,
     })]
     // Test 22: Scan with sequence filtering and merge operands
     #[case(ScanTestCase {
@@ -1649,7 +1510,7 @@ mod tests {
         range_start: b"key1",
         range_end: b"key3",
         expected: vec![(b"key1", b"ab"), (b"key2", b"x")],  // seq 100 filtered
-        description: "[MERGE SCAN] should filter merge operands by sequence number", now: None, dirty: false, last_committed_seq: Some(50), max_seq: None,
+        description: "[MERGE SCAN] should filter merge operands by sequence number", dirty: false, last_committed_seq: Some(50), max_seq: None,
     })]
     // Test 23: Scan with mixed values, merges, and tombstones
     #[case(ScanTestCase {
@@ -1664,7 +1525,7 @@ mod tests {
         range_start: b"key1",
         range_end: b"key4",
         expected: vec![(b"key1", b"ab"), (b"key3", b"xy")],  // key2 tombstoned
-        description: "[MERGE SCAN] should handle mix of values, merges, and tombstones", now: None, dirty: true, last_committed_seq: None, max_seq: None,
+        description: "[MERGE SCAN] should handle mix of values, merges, and tombstones", dirty: true, last_committed_seq: None, max_seq: None,
     })]
     // Test 24: Scan with WriteBatch merge operations
     #[case(ScanTestCase {
@@ -1676,7 +1537,7 @@ mod tests {
         range_start: b"key1",
         range_end: b"key3",
         expected: vec![(b"key1", b"basewb_merge"), (b"key2", b"normal")],  // key1: Merge("base", "wb_merge")
-        description: "[MERGE SCAN] should merge write batch operands with base values", now: None, dirty: true, last_committed_seq: None, max_seq: None,
+        description: "[MERGE SCAN] should merge write batch operands with base values", dirty: true, last_committed_seq: None, max_seq: None,
     })]
     // Test 25: Scan with multiple WriteBatch merge operations for same key
     #[case(ScanTestCase {
@@ -1690,7 +1551,7 @@ mod tests {
         range_start: b"key1",
         range_end: b"key3",
         expected: vec![(b"key1", b"basemerge1merge2merge3"), (b"key2", b"normal")],  // Multiple merges applied in sequence
-        description: "[MERGE SCAN] should apply multiple write batch merges in sequence", now: None, dirty: true, last_committed_seq: None, max_seq: None,
+        description: "[MERGE SCAN] should apply multiple write batch merges in sequence", dirty: true, last_committed_seq: None, max_seq: None,
     })]
     // Test 26: Scan with WriteBatch tombstone clearing merge history
     #[case(ScanTestCase {
@@ -1704,7 +1565,7 @@ mod tests {
         range_start: b"key1",
         range_end: b"key3",
         expected: vec![(b"key1", b"new_merge"), (b"key2", b"normal")],  // Tombstone clears history
-        description: "[MERGE SCAN] write batch tombstone should clear merge history", now: None, dirty: true, last_committed_seq: None, max_seq: None,
+        description: "[MERGE SCAN] write batch tombstone should clear merge history", dirty: true, last_committed_seq: None, max_seq: None,
     })]
     // Test 27: Scan with WriteBatch value acting as new base for merges
     #[case(ScanTestCase {
@@ -1718,7 +1579,7 @@ mod tests {
         range_start: b"key1",
         range_end: b"key3",
         expected: vec![(b"key1", b"new_basefinal_merge"), (b"key2", b"normal")],  // Value acts as barrier
-        description: "[MERGE SCAN] write batch value should act as new base for subsequent merges", now: None, dirty: true, last_committed_seq: None, max_seq: None,
+        description: "[MERGE SCAN] write batch value should act as new base for subsequent merges", dirty: true, last_committed_seq: None, max_seq: None,
     })]
     // Test 28: Scan with WriteBatch merges across multiple keys
     #[case(ScanTestCase {
@@ -1733,7 +1594,7 @@ mod tests {
         range_start: b"key1",
         range_end: b"key4",
         expected: vec![(b"key1", b"1_base1_merge"), (b"key2", b"2_base2_merge"), (b"key3", b"3_base3_merge")],
-        description: "[MERGE SCAN] should merge write batch operands for multiple keys", now: None, dirty: true, last_committed_seq: None, max_seq: None,
+        description: "[MERGE SCAN] should merge write batch operands for multiple keys", dirty: true, last_committed_seq: None, max_seq: None,
     })]
     // Test 29: Scan with WriteBatch merges without base values
     #[case(ScanTestCase {
@@ -1745,7 +1606,7 @@ mod tests {
         range_start: b"key1",
         range_end: b"key3",
         expected: vec![(b"key1", b"merge1merge2"), (b"key2", b"normal")],  // Only merge operands, no base value
-        description: "[MERGE SCAN] should merge write batch operands without base values", now: None, dirty: true, last_committed_seq: None, max_seq: None,
+        description: "[MERGE SCAN] should merge write batch operands without base values", dirty: true, last_committed_seq: None, max_seq: None,
     })]
     async fn test_scan_with_options_layer_priority(
         #[case] test_case: ScanTestCase,
@@ -1759,9 +1620,6 @@ mod tests {
         let stat_registry = StatRegistry::new();
         let db_stats = DbStats::new(&stat_registry);
         let test_clock = Arc::new(MockSystemClock::new());
-        if let Some(now) = test_case.now {
-            test_clock.set(now);
-        }
         let mono_clock = Arc::new(MonotonicClock::new(test_clock as Arc<dyn SystemClock>, 0));
 
         // Create Oracle with appropriate last_committed_seq
@@ -1837,6 +1695,177 @@ mod tests {
                     String::from_utf8_lossy(v)
                 ))
                 .collect::<Vec<_>>()
+        );
+
+        Ok(())
+    }
+
+    /// Helper to build a Reader for expire_ts tests.
+    async fn build_reader(
+        test_db_state: &TestDbState,
+        db_stats: DbStats,
+        with_merge: bool,
+    ) -> Reader {
+        let test_clock = Arc::new(MockSystemClock::new());
+        let mono_clock = Arc::new(MonotonicClock::new(test_clock as Arc<dyn SystemClock>, 0));
+        let oracle = Arc::new(DbReaderOracle::new(u64::MAX));
+        let merge_operator = if with_merge {
+            Some(Arc::new(StringConcatMergeOperator) as Arc<dyn MergeOperator + Send + Sync>)
+        } else {
+            None
+        };
+        Reader {
+            table_store: test_db_state.table_store.clone(),
+            db_stats,
+            mono_clock,
+            oracle,
+            merge_operator,
+        }
+    }
+
+    #[tokio::test]
+    async fn should_return_expire_ts_on_get() -> Result<(), SlateDBError> {
+        // given: a value with an expire_ts
+        let entries = vec![
+            TestEntry::value(b"key1", b"value1", 50).with_expire_ts(500),
+            TestEntry::value(b"key2", b"value2", 50),
+        ];
+
+        let mut test_db_state = TestDbState::new().await;
+        let write_batch = populate_db_state(&mut test_db_state, entries).await?;
+
+        let stat_registry = StatRegistry::new();
+        let db_stats = DbStats::new(&stat_registry);
+        let reader = build_reader(&test_db_state, db_stats, false).await;
+
+        // when/then: get key1 should have expire_ts
+        let result = reader
+            .get_key_value_with_options(
+                b"key1",
+                &ReadOptions::default().with_dirty(true),
+                &test_db_state,
+                write_batch.clone(),
+                None,
+            )
+            .await?;
+        let kv = result.expect("should return value");
+        assert_eq!(kv.value.as_ref(), b"value1");
+        assert_eq!(kv.expire_ts, Some(500));
+
+        // when/then: get key2 should have no expire_ts
+        let result = reader
+            .get_key_value_with_options(
+                b"key2",
+                &ReadOptions::default().with_dirty(true),
+                &test_db_state,
+                write_batch,
+                None,
+            )
+            .await?;
+        let kv = result.expect("should return value");
+        assert_eq!(kv.value.as_ref(), b"value2");
+        assert_eq!(kv.expire_ts, None);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn should_return_expire_ts_on_scan() -> Result<(), SlateDBError> {
+        // given: entries with mixed expire_ts
+        let entries = vec![
+            TestEntry::value(b"key1", b"val1", 50).with_expire_ts(100),
+            TestEntry::value(b"key2", b"val2", 50),
+            TestEntry::value(b"key3", b"val3", 50).with_expire_ts(300),
+        ];
+
+        let mut test_db_state = TestDbState::new().await;
+        let write_batch = populate_db_state(&mut test_db_state, entries).await?;
+
+        let stat_registry = StatRegistry::new();
+        let db_stats = DbStats::new(&stat_registry);
+        let reader = build_reader(&test_db_state, db_stats, false).await;
+
+        // when: scanning all keys
+        let range = BytesRange::from_slice(b"key1".as_ref()..b"key4".as_ref());
+        let scan_options = ScanOptions::default().with_dirty(true);
+        let mut iter = reader
+            .scan_with_options(
+                range,
+                &scan_options,
+                &test_db_state,
+                write_batch,
+                None,
+                None,
+            )
+            .await?;
+
+        // then: each result should carry its expire_ts
+        let kv1 = iter
+            .next()
+            .await
+            .map_err(|e| SlateDBError::IoError(Arc::new(std::io::Error::other(e))))?
+            .expect("should have key1");
+        assert_eq!(kv1.key.as_ref(), b"key1");
+        assert_eq!(kv1.expire_ts, Some(100));
+
+        let kv2 = iter
+            .next()
+            .await
+            .map_err(|e| SlateDBError::IoError(Arc::new(std::io::Error::other(e))))?
+            .expect("should have key2");
+        assert_eq!(kv2.key.as_ref(), b"key2");
+        assert_eq!(kv2.expire_ts, None);
+
+        let kv3 = iter
+            .next()
+            .await
+            .map_err(|e| SlateDBError::IoError(Arc::new(std::io::Error::other(e))))?
+            .expect("should have key3");
+        assert_eq!(kv3.key.as_ref(), b"key3");
+        assert_eq!(kv3.expire_ts, Some(300));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn should_return_min_expire_ts_from_merged_entries() -> Result<(), SlateDBError> {
+        // given: merge operands with different expire_ts across layers
+        let entries = vec![
+            TestEntry::merge(b"key1", b"d", 80).with_expire_ts(200),
+            TestEntry::merge(b"key1", b"c", 70)
+                .with_location(LayerLocation::L0Sst(1))
+                .with_expire_ts(100),
+            TestEntry::merge(b"key1", b"b", 60).with_location(LayerLocation::L0Sst(0)),
+            TestEntry::value(b"key1", b"a", 50)
+                .with_location(LayerLocation::SortedRun(0))
+                .with_expire_ts(300),
+        ];
+
+        let mut test_db_state = TestDbState::new().await;
+        let write_batch = populate_db_state(&mut test_db_state, entries).await?;
+
+        let stat_registry = StatRegistry::new();
+        let db_stats = DbStats::new(&stat_registry);
+        let reader = build_reader(&test_db_state, db_stats, true).await;
+
+        // when: reading the merged key
+        let result = reader
+            .get_key_value_with_options(
+                b"key1",
+                &ReadOptions::default().with_dirty(true),
+                &test_db_state,
+                write_batch,
+                None,
+            )
+            .await?;
+
+        // then: the result should have the min expire_ts across all operands
+        let kv = result.expect("should return merged value");
+        assert_eq!(kv.value.as_ref(), b"abcd");
+        assert_eq!(
+            kv.expire_ts,
+            Some(100),
+            "expire_ts should be the minimum across all merge operands"
         );
 
         Ok(())

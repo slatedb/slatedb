@@ -57,7 +57,6 @@ impl DbInner {
                 merge_operator,
                 imm_table.iter(),
                 false,
-                imm_table.last_tick(),
                 min_retention_seq,
             ))
         } else {

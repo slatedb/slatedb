@@ -3,7 +3,6 @@ use crate::bytes_range::BytesRange;
 use crate::error::SlateDBError;
 use crate::filter_iterator::FilterIterator;
 use crate::iter::{EmptyIterator, RowEntryIterator};
-use crate::map_iter::MapIterator;
 use crate::merge_iterator::MergeIterator;
 use crate::merge_operator::{
     MergeOperatorIterator, MergeOperatorRequiredIterator, MergeOperatorType,
@@ -220,7 +219,6 @@ impl DbIterator {
         sr_iters: impl IntoIterator<Item = Box<dyn RowEntryIterator + 'static>>,
         max_seq: Option<u64>,
         range_tracker: Option<Arc<DbIteratorRangeTracker>>,
-        now: i64,
         merge_operator: Option<MergeOperatorType>,
     ) -> Result<Self, SlateDBError> {
         // The write_batch iterator is provided only when operating within a Transaction. It represents the uncommitted
@@ -239,9 +237,9 @@ impl DbIterator {
         //
         // If we filter the iterator after merging with max_seq=100, we'll lost the entry with seq=96 from the
         // iterator A. But the element with seq=96 is actually the correct answer for this scan.
-        let mem_iters = apply_filters(mem_iters, max_seq, now);
-        let l0_iters = apply_filters(l0_iters, max_seq, now);
-        let sr_iters = apply_filters(sr_iters, max_seq, now);
+        let mem_iters = apply_filters(mem_iters, max_seq);
+        let l0_iters = apply_filters(l0_iters, max_seq);
+        let sr_iters = apply_filters(sr_iters, max_seq);
 
         let mut iter = match range.as_point() {
             Some(key) => Box::new(GetIterator::new(
@@ -264,7 +262,6 @@ impl DbIterator {
                 merge_operator,
                 iter,
                 true,
-                now,
                 // Its important not to set a snapshot seq num barrier for this merge iterator
                 // The entries in the write batch iterator have seq num u64::MAX and any merges
                 // there need to be merged with the entries from the other iterators.
@@ -387,7 +384,6 @@ impl DbIterator {
 pub(crate) fn apply_filters<T>(
     iters: impl IntoIterator<Item = T>,
     max_seq: Option<u64>,
-    now: i64,
 ) -> Vec<Box<dyn RowEntryIterator>>
 where
     T: RowEntryIterator + 'static,
@@ -395,7 +391,6 @@ where
     iters
         .into_iter()
         .map(|iter| FilterIterator::new_with_max_seq(iter, max_seq))
-        .map(|iter| MapIterator::new_with_ttl_now(iter, now))
         .map(|iter| Box::new(iter) as Box<dyn RowEntryIterator + 'static>)
         .collect::<Vec<Box<dyn RowEntryIterator>>>()
 }
@@ -408,7 +403,6 @@ mod tests {
     use crate::error::SlateDBError;
     use crate::iter::{IterationOrder, RowEntryIterator};
     use crate::test_utils::TestIterator;
-    use crate::types::RowEntry;
     use bytes::Bytes;
     use std::collections::VecDeque;
 
@@ -423,7 +417,6 @@ mod tests {
             VecDeque::new(),
             None,
             None,
-            0,
             None,
         )
         .await
@@ -465,7 +458,6 @@ mod tests {
             VecDeque::new(),
             Some(100),
             None,
-            0,
             None,
         )
         .await
@@ -497,7 +489,6 @@ mod tests {
             VecDeque::new(),
             None,
             None,
-            0,
             None,
         )
         .await
@@ -547,7 +538,6 @@ mod tests {
             VecDeque::new(),
             None,
             None,
-            0,
             None,
         )
         .await
@@ -565,213 +555,5 @@ mod tests {
         // Should be done
         let kv3 = iter.next().await.unwrap();
         assert!(kv3.is_none());
-    }
-
-    #[tokio::test]
-    async fn test_dbiterator_with_ttl_filtering() {
-        // Create test iterators with entries that have different TTLs
-        let mut entry1 = RowEntry::new_value(b"key1", b"value1", 1);
-        entry1.create_ts = Some(0);
-        entry1.expire_ts = Some(50);
-
-        let mut entry2 = RowEntry::new_value(b"key2", b"value2", 2);
-        entry2.create_ts = Some(0);
-        entry2.expire_ts = Some(100);
-
-        let mut entry3 = RowEntry::new_value(b"key3", b"value3", 3);
-        entry3.create_ts = Some(0);
-        entry3.expire_ts = None;
-
-        let mem_iter = TestIterator::new()
-            .with_row_entry(entry1)
-            .with_row_entry(entry2)
-            .with_row_entry(entry3);
-
-        // Test at t=49 - all entries should be returned
-        let mut iter = DbIterator::new(
-            BytesRange::from(..),
-            None,
-            vec![Box::new(mem_iter) as Box<dyn RowEntryIterator + 'static>],
-            VecDeque::new(),
-            VecDeque::new(),
-            None,
-            None,
-            49,
-            None,
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(
-            iter.next().await.unwrap().unwrap().key,
-            Bytes::from_static(b"key1")
-        );
-        assert_eq!(
-            iter.next().await.unwrap().unwrap().key,
-            Bytes::from_static(b"key2")
-        );
-        assert_eq!(
-            iter.next().await.unwrap().unwrap().key,
-            Bytes::from_static(b"key3")
-        );
-        assert!(iter.next().await.unwrap().is_none());
-
-        // Test at t=50 - key1 should be expired, key2 and key3 should be returned
-        let mut entry1 = RowEntry::new_value(b"key1", b"value1", 1);
-        entry1.create_ts = Some(0);
-        entry1.expire_ts = Some(50);
-
-        let mut entry2 = RowEntry::new_value(b"key2", b"value2", 2);
-        entry2.create_ts = Some(0);
-        entry2.expire_ts = Some(100);
-
-        let mut entry3 = RowEntry::new_value(b"key3", b"value3", 3);
-        entry3.create_ts = Some(0);
-        entry3.expire_ts = None;
-
-        let mem_iter = TestIterator::new()
-            .with_row_entry(entry1)
-            .with_row_entry(entry2)
-            .with_row_entry(entry3);
-
-        let mut iter = DbIterator::new(
-            BytesRange::from(..),
-            None,
-            vec![Box::new(mem_iter) as Box<dyn RowEntryIterator + 'static>],
-            VecDeque::new(),
-            VecDeque::new(),
-            None,
-            None,
-            50,
-            None,
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(
-            iter.next().await.unwrap().unwrap().key,
-            Bytes::from_static(b"key2")
-        );
-        assert_eq!(
-            iter.next().await.unwrap().unwrap().key,
-            Bytes::from_static(b"key3")
-        );
-        assert!(iter.next().await.unwrap().is_none());
-
-        // Test at t=100 - key1 and key2 should be expired, only key3 should be returned
-        let mut entry1 = RowEntry::new_value(b"key1", b"value1", 1);
-        entry1.create_ts = Some(0);
-        entry1.expire_ts = Some(50);
-
-        let mut entry2 = RowEntry::new_value(b"key2", b"value2", 2);
-        entry2.create_ts = Some(0);
-        entry2.expire_ts = Some(100);
-
-        let mut entry3 = RowEntry::new_value(b"key3", b"value3", 3);
-        entry3.create_ts = Some(0);
-        entry3.expire_ts = None;
-
-        let mem_iter = TestIterator::new()
-            .with_row_entry(entry1)
-            .with_row_entry(entry2)
-            .with_row_entry(entry3);
-
-        let mut iter = DbIterator::new(
-            BytesRange::from(..),
-            None,
-            vec![Box::new(mem_iter) as Box<dyn RowEntryIterator + 'static>],
-            VecDeque::new(),
-            VecDeque::new(),
-            None,
-            None,
-            100,
-            None,
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(
-            iter.next().await.unwrap().unwrap().key,
-            Bytes::from_static(b"key3")
-        );
-        assert!(iter.next().await.unwrap().is_none());
-
-        // Test at t=200 - only key3 (no TTL) should be returned
-        let mut entry1 = RowEntry::new_value(b"key1", b"value1", 1);
-        entry1.create_ts = Some(0);
-        entry1.expire_ts = Some(50);
-
-        let mut entry2 = RowEntry::new_value(b"key2", b"value2", 2);
-        entry2.create_ts = Some(0);
-        entry2.expire_ts = Some(100);
-
-        let mut entry3 = RowEntry::new_value(b"key3", b"value3", 3);
-        entry3.create_ts = Some(0);
-        entry3.expire_ts = None;
-
-        let mem_iter = TestIterator::new()
-            .with_row_entry(entry1)
-            .with_row_entry(entry2)
-            .with_row_entry(entry3);
-
-        let mut iter = DbIterator::new(
-            BytesRange::from(..),
-            None,
-            vec![Box::new(mem_iter) as Box<dyn RowEntryIterator + 'static>],
-            VecDeque::new(),
-            VecDeque::new(),
-            None,
-            None,
-            200,
-            None,
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(
-            iter.next().await.unwrap().unwrap().key,
-            Bytes::from_static(b"key3")
-        );
-        assert!(iter.next().await.unwrap().is_none());
-    }
-
-    #[tokio::test]
-    async fn test_dbiterator_expired_value_hides_older_valid_value() {
-        // Test the case where a newer value is expired and an older value is not expired.
-        // The newer expired value should become a tombstone and hide the older value,
-        // so the iterator should return None for that key.
-
-        // Newer entry (seq=100) that expires at t=50
-        let mut newer_entry = RowEntry::new_value(b"key1", b"newer_value", 100);
-        newer_entry.create_ts = Some(0);
-        newer_entry.expire_ts = Some(50);
-
-        // Older entry (seq=50) that doesn't expire
-        let mut older_entry = RowEntry::new_value(b"key1", b"older_value", 50);
-        older_entry.create_ts = Some(0);
-        older_entry.expire_ts = None;
-
-        let mem_iter = TestIterator::new()
-            .with_row_entry(newer_entry)
-            .with_row_entry(older_entry);
-
-        // Test at t=100 - the newer entry is expired and should hide the older entry
-        let mut iter = DbIterator::new(
-            BytesRange::from(..),
-            None,
-            vec![Box::new(mem_iter) as Box<dyn RowEntryIterator + 'static>],
-            VecDeque::new(),
-            VecDeque::new(),
-            None,
-            None,
-            100, // now = 100, so newer_entry with expire_ts=50 is expired
-            None,
-        )
-        .await
-        .unwrap();
-
-        // Should return None because the newer expired value becomes a tombstone
-        // which hides the older non-expired value
-        assert!(iter.next().await.unwrap().is_none());
     }
 }
