@@ -277,7 +277,7 @@ Keep the flat monolithic index. Rejected because the problem scales with SST siz
 ## Open Questions
 
 - Should partitioned bloom filters be included in this RFC or deferred to a follow-on? Partitioned filters would extend the same two-level structure to the bloom filter, with a top-level filter directory pointing to per-partition filter blocks, reducing filter cache pressure in the same way as partitioned indexes. The tradeoff is added scope and complexity now vs. a second format version bump later.
-- Should the top-level index directory be configurable to live in head memory instead of the block cache? RocksDB exposes this via `cache_index_and_filter_blocks`. Pinning in heap guarantees the top-level directory is always available without a cache lookup, at the cost of heap memory per open SST. SlateDB has no equivalent setting today. Given that the top-level directory is small, pinning in heap may be the simpler default, but a configuration option would give operators control over the tradeoff.
+- Should the top-level index directory be configurable to live in heap memory instead of the block cache? RocksDB exposes this via `cache_index_and_filter_blocks`. Pinning in heap guarantees the top-level directory is always available without a cache lookup, at the cost of heap memory per open SST. SlateDB has no equivalent setting today. Given that the top-level directory is small, pinning in heap may be the simpler default, but a configuration option would give operators control over the tradeoff.
 
 ## References
 
