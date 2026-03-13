@@ -2918,8 +2918,14 @@ mod tests {
             .map(|view| view.sst.id.unwrap_compacted_id())
             .collect();
         assert!(!compacted_l0s.contains(&l0_id));
-        // l0_last_compacted should be set (the compaction included L0 views)
-        assert!(db_state.l0_last_compacted.is_some());
+        assert_eq!(
+            db_state.l0_last_compacted.unwrap(),
+            compaction
+                .sources()
+                .first()
+                .and_then(|id| id.maybe_unwrap_sst_view())
+                .unwrap()
+        );
     }
 
     #[tokio::test]
