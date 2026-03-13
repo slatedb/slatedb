@@ -45,6 +45,6 @@ The package links `libslatedb_ffi` from `../../target/debug` and
 
 - The exported API mirrors the UniFFI surface from `bindings/ffi`.
 - Rust async functions and methods are exposed as blocking Go calls.
-- `Db` should be closed with `Close()`.
+- `Db` should be shut down with `Shutdown()`.
 - FFI-backed helper handles such as `ObjectStore`, `DbIterator`,
   `DbSnapshot`, and `DbTransaction` should be released with `Destroy()`.

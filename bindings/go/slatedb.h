@@ -380,14 +380,14 @@ static void call_UniffiForeignFutureCompleteVoid(
 #endif
 #ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_MERGE_OPERATOR_METHOD0
 #define UNIFFI_FFIDEF_CALLBACK_INTERFACE_MERGE_OPERATOR_METHOD0
-typedef void (*UniffiCallbackInterfaceMergeOperatorMethod0)(uint64_t uniffi_handle, RustBuffer key, RustBuffer existing_value, RustBuffer value, RustBuffer* uniffi_out_return, RustCallStatus* callStatus );
+typedef void (*UniffiCallbackInterfaceMergeOperatorMethod0)(uint64_t uniffi_handle, RustBuffer key, RustBuffer existing_value, RustBuffer operand, RustBuffer* uniffi_out_return, RustCallStatus* callStatus );
 
 // Making function static works arround:
 // https://github.com/golang/go/issues/11263
 static void call_UniffiCallbackInterfaceMergeOperatorMethod0(
-				UniffiCallbackInterfaceMergeOperatorMethod0 cb, uint64_t uniffi_handle, RustBuffer key, RustBuffer existing_value, RustBuffer value, RustBuffer* uniffi_out_return, RustCallStatus* callStatus )
+				UniffiCallbackInterfaceMergeOperatorMethod0 cb, uint64_t uniffi_handle, RustBuffer key, RustBuffer existing_value, RustBuffer operand, RustBuffer* uniffi_out_return, RustCallStatus* callStatus )
 {
-	return cb(uniffi_handle, key, existing_value, value, uniffi_out_return, callStatus );
+	return cb(uniffi_handle, key, existing_value, operand, uniffi_out_return, callStatus );
 }
 
 
@@ -413,11 +413,6 @@ void uniffi_slatedb_ffi_fn_free_db(void* ptr, RustCallStatus *out_status
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_METHOD_DB_BEGIN
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_METHOD_DB_BEGIN
 uint64_t uniffi_slatedb_ffi_fn_method_db_begin(void* ptr, RustBuffer isolation_level
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_METHOD_DB_CLOSE
-#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_METHOD_DB_CLOSE
-uint64_t uniffi_slatedb_ffi_fn_method_db_close(void* ptr
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_METHOD_DB_DELETE
@@ -462,12 +457,12 @@ uint64_t uniffi_slatedb_ffi_fn_method_db_get_with_options(void* ptr, RustBuffer 
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_METHOD_DB_MERGE
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_METHOD_DB_MERGE
-uint64_t uniffi_slatedb_ffi_fn_method_db_merge(void* ptr, RustBuffer key, RustBuffer value
+uint64_t uniffi_slatedb_ffi_fn_method_db_merge(void* ptr, RustBuffer key, RustBuffer operand
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_METHOD_DB_MERGE_WITH_OPTIONS
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_METHOD_DB_MERGE_WITH_OPTIONS
-uint64_t uniffi_slatedb_ffi_fn_method_db_merge_with_options(void* ptr, RustBuffer key, RustBuffer value, RustBuffer merge_options, RustBuffer write_options
+uint64_t uniffi_slatedb_ffi_fn_method_db_merge_with_options(void* ptr, RustBuffer key, RustBuffer operand, RustBuffer merge_options, RustBuffer write_options
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_METHOD_DB_PUT
@@ -498,6 +493,11 @@ uint64_t uniffi_slatedb_ffi_fn_method_db_scan_prefix_with_options(void* ptr, Rus
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_METHOD_DB_SCAN_WITH_OPTIONS
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_METHOD_DB_SCAN_WITH_OPTIONS
 uint64_t uniffi_slatedb_ffi_fn_method_db_scan_with_options(void* ptr, RustBuffer range, RustBuffer options
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_METHOD_DB_SHUTDOWN
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_METHOD_DB_SHUTDOWN
+uint64_t uniffi_slatedb_ffi_fn_method_db_shutdown(void* ptr
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_METHOD_DB_SNAPSHOT
@@ -697,12 +697,12 @@ uint64_t uniffi_slatedb_ffi_fn_method_dbtransaction_mark_read(void* ptr, RustBuf
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_METHOD_DBTRANSACTION_MERGE
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_METHOD_DBTRANSACTION_MERGE
-uint64_t uniffi_slatedb_ffi_fn_method_dbtransaction_merge(void* ptr, RustBuffer key, RustBuffer value
+uint64_t uniffi_slatedb_ffi_fn_method_dbtransaction_merge(void* ptr, RustBuffer key, RustBuffer operand
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_METHOD_DBTRANSACTION_MERGE_WITH_OPTIONS
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_METHOD_DBTRANSACTION_MERGE_WITH_OPTIONS
-uint64_t uniffi_slatedb_ffi_fn_method_dbtransaction_merge_with_options(void* ptr, RustBuffer key, RustBuffer value, RustBuffer options
+uint64_t uniffi_slatedb_ffi_fn_method_dbtransaction_merge_with_options(void* ptr, RustBuffer key, RustBuffer operand, RustBuffer options
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_METHOD_DBTRANSACTION_PUT
@@ -1074,12 +1074,6 @@ uint16_t uniffi_slatedb_ffi_checksum_method_db_begin(void
     
 );
 #endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_CHECKSUM_METHOD_DB_CLOSE
-#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_CHECKSUM_METHOD_DB_CLOSE
-uint16_t uniffi_slatedb_ffi_checksum_method_db_close(void
-    
-);
-#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_CHECKSUM_METHOD_DB_DELETE
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_CHECKSUM_METHOD_DB_DELETE
 uint16_t uniffi_slatedb_ffi_checksum_method_db_delete(void
@@ -1173,6 +1167,12 @@ uint16_t uniffi_slatedb_ffi_checksum_method_db_scan_prefix_with_options(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_CHECKSUM_METHOD_DB_SCAN_WITH_OPTIONS
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_CHECKSUM_METHOD_DB_SCAN_WITH_OPTIONS
 uint16_t uniffi_slatedb_ffi_checksum_method_db_scan_with_options(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_CHECKSUM_METHOD_DB_SHUTDOWN
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_CHECKSUM_METHOD_DB_SHUTDOWN
+uint16_t uniffi_slatedb_ffi_checksum_method_db_shutdown(void
     
 );
 #endif
@@ -1441,7 +1441,7 @@ uint32_t ffi_slatedb_ffi_uniffi_contract_version(void
 );
 #endif
 
- void slatedb_ffi_cgo_dispatchCallbackInterfaceMergeOperatorMethod0(uint64_t uniffi_handle, RustBuffer key, RustBuffer existing_value, RustBuffer value, RustBuffer* uniffi_out_return, RustCallStatus* callStatus );
+ void slatedb_ffi_cgo_dispatchCallbackInterfaceMergeOperatorMethod0(uint64_t uniffi_handle, RustBuffer key, RustBuffer existing_value, RustBuffer operand, RustBuffer* uniffi_out_return, RustCallStatus* callStatus );
  void slatedb_ffi_cgo_dispatchCallbackInterfaceMergeOperatorFree(uint64_t handle);
 
 void slatedb_uniffiFutureContinuationCallback(uint64_t, int8_t);

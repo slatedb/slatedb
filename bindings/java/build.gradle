@@ -1,0 +1,54 @@
+plugins {
+    id 'java-library'
+}
+
+def repoRoot = layout.projectDirectory.dir('../..').asFile.absoluteFile
+def workspaceCargoToml = new File(repoRoot, 'Cargo.toml')
+def workspaceVersion = '0.0.0-SNAPSHOT'
+if (workspaceCargoToml.isFile()) {
+    def matcher = (workspaceCargoToml.getText('UTF-8') =~ /(?ms)^\[workspace\.package\].*?^\s*version\s*=\s*"([^"]+)"\s*$/)
+    if (matcher.find()) {
+        workspaceVersion = matcher.group(1)
+    }
+}
+
+group = 'io.slatedb'
+version = workspaceVersion
+
+repositories {
+    mavenCentral()
+}
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(21)
+    }
+    sourceCompatibility = JavaVersion.toVersion(21)
+    targetCompatibility = JavaVersion.toVersion(21)
+}
+
+dependencies {
+    implementation 'net.java.dev.jna:jna:5.17.0'
+    testImplementation 'org.junit.jupiter:junit-jupiter:5.10.2'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher:1.10.2'
+}
+
+tasks.register('buildFfiDebug', Exec) {
+    group = 'build'
+    description = 'Build the UniFFI Rust library used by the Java binding tests.'
+    workingDir repoRoot
+    commandLine 'cargo', 'build', '-p', 'slatedb-ffi'
+}
+
+tasks.register('generateBindings', Exec) {
+    group = 'build'
+    description = 'Regenerate the Java bindings from bindings/ffi.'
+    workingDir projectDir
+    commandLine './generate.sh'
+}
+
+test {
+    dependsOn tasks.named('buildFfiDebug')
+    useJUnitPlatform()
+    systemProperty 'jna.library.path', new File(repoRoot, 'target/debug').absolutePath
+}

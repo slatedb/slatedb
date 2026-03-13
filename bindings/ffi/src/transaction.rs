@@ -68,7 +68,8 @@ impl DbTransaction {
         let options = options.into_core();
         let guard = self.inner.lock().await;
         let tx = guard.as_ref().ok_or_else(transaction_completed)?;
-        tx.put_with_options(key, value, &options).map_err(Into::into)
+        tx.put_with_options(key, value, &options)
+            .map_err(Into::into)
     }
 
     /// Buffer a delete inside the transaction.
@@ -80,25 +81,25 @@ impl DbTransaction {
     }
 
     /// Buffer a merge inside the transaction using default options.
-    pub async fn merge(&self, key: Vec<u8>, value: Vec<u8>) -> Result<(), SlatedbError> {
-        validate_key_value(&key, &value)?;
+    pub async fn merge(&self, key: Vec<u8>, operand: Vec<u8>) -> Result<(), SlatedbError> {
+        validate_key_value(&key, &operand)?;
         let guard = self.inner.lock().await;
         let tx = guard.as_ref().ok_or_else(transaction_completed)?;
-        tx.merge(key, value).map_err(Into::into)
+        tx.merge(key, operand).map_err(Into::into)
     }
 
     /// Buffer a merge inside the transaction using custom merge options.
     pub async fn merge_with_options(
         &self,
         key: Vec<u8>,
-        value: Vec<u8>,
+        operand: Vec<u8>,
         options: DbMergeOptions,
     ) -> Result<(), SlatedbError> {
-        validate_key_value(&key, &value)?;
+        validate_key_value(&key, &operand)?;
         let options = options.into_core();
         let guard = self.inner.lock().await;
         let tx = guard.as_ref().ok_or_else(transaction_completed)?;
-        tx.merge_with_options(key, value, &options)
+        tx.merge_with_options(key, operand, &options)
             .map_err(Into::into)
     }
 

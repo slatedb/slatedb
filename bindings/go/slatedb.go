@@ -401,15 +401,6 @@ func uniffiCheckChecksums() {
 	}
 	{
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_ffi_checksum_method_db_close()
-		})
-		if checksum != 48967 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_ffi_checksum_method_db_close: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_slatedb_ffi_checksum_method_db_delete()
 		})
 		if checksum != 53628 {
@@ -484,7 +475,7 @@ func uniffiCheckChecksums() {
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_slatedb_ffi_checksum_method_db_merge()
 		})
-		if checksum != 21334 {
+		if checksum != 49680 {
 			// If this happens try cleaning and rebuilding your project
 			panic("slatedb: uniffi_slatedb_ffi_checksum_method_db_merge: UniFFI API checksum mismatch")
 		}
@@ -493,7 +484,7 @@ func uniffiCheckChecksums() {
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_slatedb_ffi_checksum_method_db_merge_with_options()
 		})
-		if checksum != 26861 {
+		if checksum != 29273 {
 			// If this happens try cleaning and rebuilding your project
 			panic("slatedb: uniffi_slatedb_ffi_checksum_method_db_merge_with_options: UniFFI API checksum mismatch")
 		}
@@ -550,6 +541,15 @@ func uniffiCheckChecksums() {
 		if checksum != 26695 {
 			// If this happens try cleaning and rebuilding your project
 			panic("slatedb: uniffi_slatedb_ffi_checksum_method_db_scan_with_options: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_ffi_checksum_method_db_shutdown()
+		})
+		if checksum != 37181 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_ffi_checksum_method_db_shutdown: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -826,7 +826,7 @@ func uniffiCheckChecksums() {
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_slatedb_ffi_checksum_method_dbtransaction_merge()
 		})
-		if checksum != 40720 {
+		if checksum != 47972 {
 			// If this happens try cleaning and rebuilding your project
 			panic("slatedb: uniffi_slatedb_ffi_checksum_method_dbtransaction_merge: UniFFI API checksum mismatch")
 		}
@@ -835,7 +835,7 @@ func uniffiCheckChecksums() {
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_slatedb_ffi_checksum_method_dbtransaction_merge_with_options()
 		})
-		if checksum != 469 {
+		if checksum != 27318 {
 			// If this happens try cleaning and rebuilding your project
 			panic("slatedb: uniffi_slatedb_ffi_checksum_method_dbtransaction_merge_with_options: UniFFI API checksum mismatch")
 		}
@@ -934,7 +934,7 @@ func uniffiCheckChecksums() {
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_slatedb_ffi_checksum_method_mergeoperator_merge()
 		})
-		if checksum != 27627 {
+		if checksum != 14285 {
 			// If this happens try cleaning and rebuilding your project
 			panic("slatedb: uniffi_slatedb_ffi_checksum_method_mergeoperator_merge: UniFFI API checksum mismatch")
 		}
@@ -1191,8 +1191,6 @@ func (ffiObject *FfiObject) freeRustArcPtr() {
 type DbInterface interface {
 	// Begin a new transaction at the requested isolation level.
 	Begin(isolationLevel IsolationLevel) (*DbTransaction, error)
-	// Close the database.
-	Close() error
 	// Delete a key using default write options.
 	Delete(key []byte) (WriteHandle, error)
 	// Delete a key using custom write options.
@@ -1210,9 +1208,9 @@ type DbInterface interface {
 	// Get the value for a key using custom read options.
 	GetWithOptions(key []byte, options DbReadOptions) (*[]byte, error)
 	// Merge an operand into a key using default options.
-	Merge(key []byte, value []byte) (WriteHandle, error)
+	Merge(key []byte, operand []byte) (WriteHandle, error)
 	// Merge an operand into a key using custom merge and write options.
-	MergeWithOptions(key []byte, value []byte, mergeOptions DbMergeOptions, writeOptions DbWriteOptions) (WriteHandle, error)
+	MergeWithOptions(key []byte, operand []byte, mergeOptions DbMergeOptions, writeOptions DbWriteOptions) (WriteHandle, error)
 	// Put a value for a key using default options.
 	//
 	// ## Errors
@@ -1228,6 +1226,8 @@ type DbInterface interface {
 	ScanPrefixWithOptions(prefix []byte, options DbScanOptions) (*DbIterator, error)
 	// Scan a key range using custom scan options.
 	ScanWithOptions(varRange DbKeyRange, options DbScanOptions) (*DbIterator, error)
+	// Close the database.
+	Shutdown() error
 	// Create a point-in-time snapshot of the database.
 	Snapshot() (*DbSnapshot, error)
 	// Check whether the database is still open.
@@ -1280,38 +1280,6 @@ func (_self *Db) Begin(isolationLevel IsolationLevel) (*DbTransaction, error) {
 	}
 
 	return res, err
-}
-
-// Close the database.
-func (_self *Db) Close() error {
-	_pointer := _self.ffiObject.incrementPointer("*Db")
-	defer _self.ffiObject.decrementPointer()
-	_, err := uniffiRustCallAsync[SlatedbError](
-		FfiConverterSlatedbErrorINSTANCE,
-		// completeFn
-		func(handle C.uint64_t, status *C.RustCallStatus) struct{} {
-			C.ffi_slatedb_ffi_rust_future_complete_void(handle, status)
-			return struct{}{}
-		},
-		// liftFn
-		func(_ struct{}) struct{} { return struct{}{} },
-		C.uniffi_slatedb_ffi_fn_method_db_close(
-			_pointer),
-		// pollFn
-		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
-			C.ffi_slatedb_ffi_rust_future_poll_void(handle, continuation, data)
-		},
-		// freeFn
-		func(handle C.uint64_t) {
-			C.ffi_slatedb_ffi_rust_future_free_void(handle)
-		},
-	)
-
-	if err == nil {
-		return nil
-	}
-
-	return err
 }
 
 // Delete a key using default write options.
@@ -1595,7 +1563,7 @@ func (_self *Db) GetWithOptions(key []byte, options DbReadOptions) (*[]byte, err
 }
 
 // Merge an operand into a key using default options.
-func (_self *Db) Merge(key []byte, value []byte) (WriteHandle, error) {
+func (_self *Db) Merge(key []byte, operand []byte) (WriteHandle, error) {
 	_pointer := _self.ffiObject.incrementPointer("*Db")
 	defer _self.ffiObject.decrementPointer()
 	res, err := uniffiRustCallAsync[SlatedbError](
@@ -1612,7 +1580,7 @@ func (_self *Db) Merge(key []byte, value []byte) (WriteHandle, error) {
 			return FfiConverterWriteHandleINSTANCE.Lift(ffi)
 		},
 		C.uniffi_slatedb_ffi_fn_method_db_merge(
-			_pointer, FfiConverterBytesINSTANCE.Lower(key), FfiConverterBytesINSTANCE.Lower(value)),
+			_pointer, FfiConverterBytesINSTANCE.Lower(key), FfiConverterBytesINSTANCE.Lower(operand)),
 		// pollFn
 		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
 			C.ffi_slatedb_ffi_rust_future_poll_rust_buffer(handle, continuation, data)
@@ -1631,7 +1599,7 @@ func (_self *Db) Merge(key []byte, value []byte) (WriteHandle, error) {
 }
 
 // Merge an operand into a key using custom merge and write options.
-func (_self *Db) MergeWithOptions(key []byte, value []byte, mergeOptions DbMergeOptions, writeOptions DbWriteOptions) (WriteHandle, error) {
+func (_self *Db) MergeWithOptions(key []byte, operand []byte, mergeOptions DbMergeOptions, writeOptions DbWriteOptions) (WriteHandle, error) {
 	_pointer := _self.ffiObject.incrementPointer("*Db")
 	defer _self.ffiObject.decrementPointer()
 	res, err := uniffiRustCallAsync[SlatedbError](
@@ -1648,7 +1616,7 @@ func (_self *Db) MergeWithOptions(key []byte, value []byte, mergeOptions DbMerge
 			return FfiConverterWriteHandleINSTANCE.Lift(ffi)
 		},
 		C.uniffi_slatedb_ffi_fn_method_db_merge_with_options(
-			_pointer, FfiConverterBytesINSTANCE.Lower(key), FfiConverterBytesINSTANCE.Lower(value), FfiConverterDbMergeOptionsINSTANCE.Lower(mergeOptions), FfiConverterDbWriteOptionsINSTANCE.Lower(writeOptions)),
+			_pointer, FfiConverterBytesINSTANCE.Lower(key), FfiConverterBytesINSTANCE.Lower(operand), FfiConverterDbMergeOptionsINSTANCE.Lower(mergeOptions), FfiConverterDbWriteOptionsINSTANCE.Lower(writeOptions)),
 		// pollFn
 		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
 			C.ffi_slatedb_ffi_rust_future_poll_rust_buffer(handle, continuation, data)
@@ -1875,6 +1843,38 @@ func (_self *Db) ScanWithOptions(varRange DbKeyRange, options DbScanOptions) (*D
 	}
 
 	return res, err
+}
+
+// Close the database.
+func (_self *Db) Shutdown() error {
+	_pointer := _self.ffiObject.incrementPointer("*Db")
+	defer _self.ffiObject.decrementPointer()
+	_, err := uniffiRustCallAsync[SlatedbError](
+		FfiConverterSlatedbErrorINSTANCE,
+		// completeFn
+		func(handle C.uint64_t, status *C.RustCallStatus) struct{} {
+			C.ffi_slatedb_ffi_rust_future_complete_void(handle, status)
+			return struct{}{}
+		},
+		// liftFn
+		func(_ struct{}) struct{} { return struct{}{} },
+		C.uniffi_slatedb_ffi_fn_method_db_shutdown(
+			_pointer),
+		// pollFn
+		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+			C.ffi_slatedb_ffi_rust_future_poll_void(handle, continuation, data)
+		},
+		// freeFn
+		func(handle C.uint64_t) {
+			C.ffi_slatedb_ffi_rust_future_free_void(handle)
+		},
+	)
+
+	if err == nil {
+		return nil
+	}
+
+	return err
 }
 
 // Create a point-in-time snapshot of the database.
@@ -2829,9 +2829,9 @@ type DbTransactionInterface interface {
 	// Explicitly mark keys as read for conflict detection.
 	MarkRead(keys [][]byte) error
 	// Buffer a merge inside the transaction using default options.
-	Merge(key []byte, value []byte) error
+	Merge(key []byte, operand []byte) error
 	// Buffer a merge inside the transaction using custom merge options.
-	MergeWithOptions(key []byte, value []byte, options DbMergeOptions) error
+	MergeWithOptions(key []byte, operand []byte, options DbMergeOptions) error
 	// Buffer a put inside the transaction using default options.
 	Put(key []byte, value []byte) error
 	// Buffer a put inside the transaction using custom put options.
@@ -3157,7 +3157,7 @@ func (_self *DbTransaction) MarkRead(keys [][]byte) error {
 }
 
 // Buffer a merge inside the transaction using default options.
-func (_self *DbTransaction) Merge(key []byte, value []byte) error {
+func (_self *DbTransaction) Merge(key []byte, operand []byte) error {
 	_pointer := _self.ffiObject.incrementPointer("*DbTransaction")
 	defer _self.ffiObject.decrementPointer()
 	_, err := uniffiRustCallAsync[SlatedbError](
@@ -3170,7 +3170,7 @@ func (_self *DbTransaction) Merge(key []byte, value []byte) error {
 		// liftFn
 		func(_ struct{}) struct{} { return struct{}{} },
 		C.uniffi_slatedb_ffi_fn_method_dbtransaction_merge(
-			_pointer, FfiConverterBytesINSTANCE.Lower(key), FfiConverterBytesINSTANCE.Lower(value)),
+			_pointer, FfiConverterBytesINSTANCE.Lower(key), FfiConverterBytesINSTANCE.Lower(operand)),
 		// pollFn
 		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
 			C.ffi_slatedb_ffi_rust_future_poll_void(handle, continuation, data)
@@ -3189,7 +3189,7 @@ func (_self *DbTransaction) Merge(key []byte, value []byte) error {
 }
 
 // Buffer a merge inside the transaction using custom merge options.
-func (_self *DbTransaction) MergeWithOptions(key []byte, value []byte, options DbMergeOptions) error {
+func (_self *DbTransaction) MergeWithOptions(key []byte, operand []byte, options DbMergeOptions) error {
 	_pointer := _self.ffiObject.incrementPointer("*DbTransaction")
 	defer _self.ffiObject.decrementPointer()
 	_, err := uniffiRustCallAsync[SlatedbError](
@@ -3202,7 +3202,7 @@ func (_self *DbTransaction) MergeWithOptions(key []byte, value []byte, options D
 		// liftFn
 		func(_ struct{}) struct{} { return struct{}{} },
 		C.uniffi_slatedb_ffi_fn_method_dbtransaction_merge_with_options(
-			_pointer, FfiConverterBytesINSTANCE.Lower(key), FfiConverterBytesINSTANCE.Lower(value), FfiConverterDbMergeOptionsINSTANCE.Lower(options)),
+			_pointer, FfiConverterBytesINSTANCE.Lower(key), FfiConverterBytesINSTANCE.Lower(operand), FfiConverterDbMergeOptionsINSTANCE.Lower(options)),
 		// pollFn
 		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
 			C.ffi_slatedb_ffi_rust_future_poll_void(handle, continuation, data)
@@ -4061,27 +4061,27 @@ type DbWriteOperation interface {
 
 // Put a value for a key.
 type DbWriteOperationPut struct {
-	Key     []byte
-	Value   []byte
-	Options DbPutOptions
+	Key        []byte
+	ValueBytes []byte
+	Options    DbPutOptions
 }
 
 func (e DbWriteOperationPut) Destroy() {
 	FfiDestroyerBytes{}.Destroy(e.Key)
-	FfiDestroyerBytes{}.Destroy(e.Value)
+	FfiDestroyerBytes{}.Destroy(e.ValueBytes)
 	FfiDestroyerDbPutOptions{}.Destroy(e.Options)
 }
 
 // Merge an operand into a key.
 type DbWriteOperationMerge struct {
 	Key     []byte
-	Value   []byte
+	Operand []byte
 	Options DbMergeOptions
 }
 
 func (e DbWriteOperationMerge) Destroy() {
 	FfiDestroyerBytes{}.Destroy(e.Key)
-	FfiDestroyerBytes{}.Destroy(e.Value)
+	FfiDestroyerBytes{}.Destroy(e.Operand)
 	FfiDestroyerDbMergeOptions{}.Destroy(e.Options)
 }
 
@@ -4138,12 +4138,12 @@ func (FfiConverterDbWriteOperation) Write(writer io.Writer, value DbWriteOperati
 	case DbWriteOperationPut:
 		writeInt32(writer, 1)
 		FfiConverterBytesINSTANCE.Write(writer, variant_value.Key)
-		FfiConverterBytesINSTANCE.Write(writer, variant_value.Value)
+		FfiConverterBytesINSTANCE.Write(writer, variant_value.ValueBytes)
 		FfiConverterDbPutOptionsINSTANCE.Write(writer, variant_value.Options)
 	case DbWriteOperationMerge:
 		writeInt32(writer, 2)
 		FfiConverterBytesINSTANCE.Write(writer, variant_value.Key)
-		FfiConverterBytesINSTANCE.Write(writer, variant_value.Value)
+		FfiConverterBytesINSTANCE.Write(writer, variant_value.Operand)
 		FfiConverterDbMergeOptionsINSTANCE.Write(writer, variant_value.Options)
 	case DbWriteOperationDelete:
 		writeInt32(writer, 3)
@@ -4838,12 +4838,12 @@ type MergeOperator interface {
 	// ## Arguments
 	// - `key`: the key being merged.
 	// - `existing_value`: the current value, if one exists.
-	// - `value`: the new merge operand.
+	// - `operand`: the new merge operand.
 	//
 	// ## Returns
 	// - `Result<Vec<u8>, MergeOperatorCallbackError>`: the merged value that
 	// should become visible for the key.
-	Merge(key []byte, existingValue *[]byte, value []byte) ([]byte, error)
+	Merge(key []byte, existingValue *[]byte, operand []byte) ([]byte, error)
 }
 
 type FfiConverterCallbackInterfaceMergeOperator struct {
@@ -4925,7 +4925,7 @@ func (cm *concurrentHandleMap[T]) tryGet(handle uint64) (T, bool) {
 }
 
 //export slatedb_ffi_cgo_dispatchCallbackInterfaceMergeOperatorMethod0
-func slatedb_ffi_cgo_dispatchCallbackInterfaceMergeOperatorMethod0(uniffiHandle C.uint64_t, key C.RustBuffer, existingValue C.RustBuffer, value C.RustBuffer, uniffiOutReturn *C.RustBuffer, callStatus *C.RustCallStatus) {
+func slatedb_ffi_cgo_dispatchCallbackInterfaceMergeOperatorMethod0(uniffiHandle C.uint64_t, key C.RustBuffer, existingValue C.RustBuffer, operand C.RustBuffer, uniffiOutReturn *C.RustBuffer, callStatus *C.RustCallStatus) {
 	handle := uint64(uniffiHandle)
 	uniffiObj, ok := FfiConverterCallbackInterfaceMergeOperatorINSTANCE.handleMap.tryGet(handle)
 	if !ok {
@@ -4941,7 +4941,7 @@ func slatedb_ffi_cgo_dispatchCallbackInterfaceMergeOperatorMethod0(uniffiHandle 
 				inner: existingValue,
 			}),
 			FfiConverterBytesINSTANCE.Lift(GoRustBuffer{
-				inner: value,
+				inner: operand,
 			}),
 		)
 

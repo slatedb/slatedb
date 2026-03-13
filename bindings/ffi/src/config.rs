@@ -186,7 +186,7 @@ pub enum DbWriteOperation {
         /// The key to write.
         key: Vec<u8>,
         /// The value to write.
-        value: Vec<u8>,
+        value_bytes: Vec<u8>,
         /// Per-operation put options.
         options: DbPutOptions,
     },
@@ -195,7 +195,7 @@ pub enum DbWriteOperation {
         /// The key to merge into.
         key: Vec<u8>,
         /// The merge operand.
-        value: Vec<u8>,
+        operand: Vec<u8>,
         /// Per-operation merge options.
         options: DbMergeOptions,
     },
