@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex as StdMutex};
 
 use slatedb::WriteBatch as CoreWriteBatch;
 
-use crate::config::{DbMergeOptions, DbPutOptions};
+use crate::config::{MergeOptions, PutOptions};
 use crate::error::SlatedbError;
 use crate::validation::{
     validate_key, validate_key_value, write_batch_closed, write_batch_consumed,
@@ -77,7 +77,7 @@ impl WriteBatch {
         &self,
         key: Vec<u8>,
         value: Vec<u8>,
-        options: DbPutOptions,
+        options: PutOptions,
     ) -> Result<(), SlatedbError> {
         validate_key_value(&key, &value)?;
         let options = options.into_core();
@@ -95,7 +95,7 @@ impl WriteBatch {
         &self,
         key: Vec<u8>,
         operand: Vec<u8>,
-        options: DbMergeOptions,
+        options: MergeOptions,
     ) -> Result<(), SlatedbError> {
         validate_key_value(&key, &operand)?;
         let options = options.into_core();

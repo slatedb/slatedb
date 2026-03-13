@@ -6,8 +6,8 @@ use slatedb::DbTransaction as CoreDbTransaction;
 use tokio::sync::Mutex as AsyncMutex;
 
 use crate::config::{
-    DbKeyRange, DbMergeOptions, DbPutOptions, DbReadOptions, DbScanOptions, DbWriteOptions,
-    KeyValue, WriteHandle,
+    KeyRange, KeyValue, MergeOptions, PutOptions, ReadOptions, ScanOptions, WriteHandle,
+    WriteOptions,
 };
 use crate::error::SlatedbError;
 use crate::iterator::DbIterator;
@@ -62,7 +62,7 @@ impl DbTransaction {
         &self,
         key: Vec<u8>,
         value: Vec<u8>,
-        options: DbPutOptions,
+        options: PutOptions,
     ) -> Result<(), SlatedbError> {
         validate_key_value(&key, &value)?;
         let options = options.into_core();
@@ -93,7 +93,7 @@ impl DbTransaction {
         &self,
         key: Vec<u8>,
         operand: Vec<u8>,
-        options: DbMergeOptions,
+        options: MergeOptions,
     ) -> Result<(), SlatedbError> {
         validate_key_value(&key, &operand)?;
         let options = options.into_core();
@@ -136,7 +136,7 @@ impl DbTransaction {
     pub async fn get_with_options(
         &self,
         key: Vec<u8>,
-        options: DbReadOptions,
+        options: ReadOptions,
     ) -> Result<Option<Vec<u8>>, SlatedbError> {
         let options = options.into_core();
         let guard = self.inner.lock().await;
@@ -158,7 +158,7 @@ impl DbTransaction {
     pub async fn get_key_value_with_options(
         &self,
         key: Vec<u8>,
-        options: DbReadOptions,
+        options: ReadOptions,
     ) -> Result<Option<KeyValue>, SlatedbError> {
         let options = options.into_core();
         let guard = self.inner.lock().await;
@@ -170,7 +170,7 @@ impl DbTransaction {
     }
 
     /// Scan a key range using default scan options.
-    pub async fn scan(&self, range: DbKeyRange) -> Result<Arc<DbIterator>, SlatedbError> {
+    pub async fn scan(&self, range: KeyRange) -> Result<Arc<DbIterator>, SlatedbError> {
         let range = range.into_bounds()?;
         let guard = self.inner.lock().await;
         let tx = guard.as_ref().ok_or_else(transaction_completed)?;
@@ -181,8 +181,8 @@ impl DbTransaction {
     /// Scan a key range using custom scan options.
     pub async fn scan_with_options(
         &self,
-        range: DbKeyRange,
-        options: DbScanOptions,
+        range: KeyRange,
+        options: ScanOptions,
     ) -> Result<Arc<DbIterator>, SlatedbError> {
         let range = range.into_bounds()?;
         let options = options.into_core()?;
@@ -204,7 +204,7 @@ impl DbTransaction {
     pub async fn scan_prefix_with_options(
         &self,
         prefix: Vec<u8>,
-        options: DbScanOptions,
+        options: ScanOptions,
     ) -> Result<Arc<DbIterator>, SlatedbError> {
         let options = options.into_core()?;
         let guard = self.inner.lock().await;
@@ -229,7 +229,7 @@ impl DbTransaction {
     /// Commit the transaction using custom write options.
     pub async fn commit_with_options(
         &self,
-        options: DbWriteOptions,
+        options: WriteOptions,
     ) -> Result<Option<WriteHandle>, SlatedbError> {
         let options = options.into_core();
         let tx = {

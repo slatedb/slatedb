@@ -1,16 +1,16 @@
 use slatedb::WriteBatch as CoreWriteBatch;
 
-use crate::config::DbWriteOperation;
+use crate::config::WriteOperation;
 use crate::error::SlatedbError;
 
 pub(crate) fn build_write_batch(
-    operations: Vec<DbWriteOperation>,
+    operations: Vec<WriteOperation>,
 ) -> Result<CoreWriteBatch, SlatedbError> {
     let mut batch = CoreWriteBatch::new();
 
     for operation in operations {
         match operation {
-            DbWriteOperation::Put {
+            WriteOperation::Put {
                 key,
                 value_bytes,
                 options,
@@ -19,7 +19,7 @@ pub(crate) fn build_write_batch(
                 let options = options.into_core();
                 batch.put_with_options(key, value_bytes, &options);
             }
-            DbWriteOperation::Merge {
+            WriteOperation::Merge {
                 key,
                 operand,
                 options,
@@ -28,7 +28,7 @@ pub(crate) fn build_write_batch(
                 let options = options.into_core();
                 batch.merge_with_options(key, operand, &options);
             }
-            DbWriteOperation::Delete { key } => {
+            WriteOperation::Delete { key } => {
                 validate_key(&key)?;
                 batch.delete(key);
             }

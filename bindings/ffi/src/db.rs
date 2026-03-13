@@ -6,8 +6,8 @@ use std::sync::Arc;
 use slatedb::{Db as CoreDb, DbSnapshot as CoreDbSnapshot};
 
 use crate::config::{
-    DbFlushOptions, DbKeyRange, DbMergeOptions, DbPutOptions, DbReadOptions, DbScanOptions,
-    DbWriteOperation, DbWriteOptions, IsolationLevel, KeyValue, WriteHandle,
+    FlushOptions, IsolationLevel, KeyRange, KeyValue, MergeOptions, PutOptions, ReadOptions,
+    ScanOptions, WriteHandle, WriteOperation, WriteOptions,
 };
 use crate::error::SlatedbError;
 use crate::iterator::DbIterator;
@@ -75,7 +75,7 @@ impl Db {
     pub async fn get_with_options(
         &self,
         key: Vec<u8>,
-        options: DbReadOptions,
+        options: ReadOptions,
     ) -> Result<Option<Vec<u8>>, SlatedbError> {
         let options = options.into_core();
         Ok(self
@@ -98,7 +98,7 @@ impl Db {
     pub async fn get_key_value_with_options(
         &self,
         key: Vec<u8>,
-        options: DbReadOptions,
+        options: ReadOptions,
     ) -> Result<Option<KeyValue>, SlatedbError> {
         let options = options.into_core();
         Ok(self
@@ -109,7 +109,7 @@ impl Db {
     }
 
     /// Scan a key range using default scan options.
-    pub async fn scan(&self, range: DbKeyRange) -> Result<Arc<DbIterator>, SlatedbError> {
+    pub async fn scan(&self, range: KeyRange) -> Result<Arc<DbIterator>, SlatedbError> {
         let range = range.into_bounds()?;
         let iter = self.inner.scan::<Vec<u8>, _>(range).await?;
         Ok(Arc::new(DbIterator::new(iter)))
@@ -118,8 +118,8 @@ impl Db {
     /// Scan a key range using custom scan options.
     pub async fn scan_with_options(
         &self,
-        range: DbKeyRange,
-        options: DbScanOptions,
+        range: KeyRange,
+        options: ScanOptions,
     ) -> Result<Arc<DbIterator>, SlatedbError> {
         let range = range.into_bounds()?;
         let options = options.into_core()?;
@@ -140,7 +140,7 @@ impl Db {
     pub async fn scan_prefix_with_options(
         &self,
         prefix: Vec<u8>,
-        options: DbScanOptions,
+        options: ScanOptions,
     ) -> Result<Arc<DbIterator>, SlatedbError> {
         let options = options.into_core()?;
         let iter = self
@@ -164,8 +164,8 @@ impl Db {
         &self,
         key: Vec<u8>,
         value: Vec<u8>,
-        put_options: DbPutOptions,
-        write_options: DbWriteOptions,
+        put_options: PutOptions,
+        write_options: WriteOptions,
     ) -> Result<WriteHandle, SlatedbError> {
         validate_key_value(&key, &value)?;
         let put_options = put_options.into_core();
@@ -187,7 +187,7 @@ impl Db {
     pub async fn delete_with_options(
         &self,
         key: Vec<u8>,
-        options: DbWriteOptions,
+        options: WriteOptions,
     ) -> Result<WriteHandle, SlatedbError> {
         validate_key(&key)?;
         let options = options.into_core();
@@ -209,8 +209,8 @@ impl Db {
         &self,
         key: Vec<u8>,
         operand: Vec<u8>,
-        merge_options: DbMergeOptions,
-        write_options: DbWriteOptions,
+        merge_options: MergeOptions,
+        write_options: WriteOptions,
     ) -> Result<WriteHandle, SlatedbError> {
         validate_key_value(&key, &operand)?;
         let merge_options = merge_options.into_core();
@@ -225,7 +225,7 @@ impl Db {
     /// Apply a batch of operations atomically using default write options.
     pub async fn write(
         &self,
-        operations: Vec<DbWriteOperation>,
+        operations: Vec<WriteOperation>,
     ) -> Result<WriteHandle, SlatedbError> {
         let batch = build_write_batch(operations)?;
         Ok(WriteHandle::from_core(self.inner.write(batch).await?))
@@ -234,8 +234,8 @@ impl Db {
     /// Apply a batch of operations atomically using custom write options.
     pub async fn write_with_options(
         &self,
-        operations: Vec<DbWriteOperation>,
-        options: DbWriteOptions,
+        operations: Vec<WriteOperation>,
+        options: WriteOptions,
     ) -> Result<WriteHandle, SlatedbError> {
         let batch = build_write_batch(operations)?;
         let options = options.into_core();
@@ -254,7 +254,7 @@ impl Db {
     pub async fn write_batch_with_options(
         &self,
         batch: Arc<WriteBatch>,
-        options: DbWriteOptions,
+        options: WriteOptions,
     ) -> Result<WriteHandle, SlatedbError> {
         let batch = batch.take_for_write()?;
         let options = options.into_core();
@@ -269,7 +269,7 @@ impl Db {
     }
 
     /// Flush in-memory state using explicit flush options.
-    pub async fn flush_with_options(&self, options: DbFlushOptions) -> Result<(), SlatedbError> {
+    pub async fn flush_with_options(&self, options: FlushOptions) -> Result<(), SlatedbError> {
         self.inner
             .flush_with_options(options.into_core())
             .await
@@ -304,7 +304,7 @@ impl DbSnapshot {
     pub async fn get_with_options(
         &self,
         key: Vec<u8>,
-        options: DbReadOptions,
+        options: ReadOptions,
     ) -> Result<Option<Vec<u8>>, SlatedbError> {
         let options = options.into_core();
         Ok(self
@@ -327,7 +327,7 @@ impl DbSnapshot {
     pub async fn get_key_value_with_options(
         &self,
         key: Vec<u8>,
-        options: DbReadOptions,
+        options: ReadOptions,
     ) -> Result<Option<KeyValue>, SlatedbError> {
         let options = options.into_core();
         Ok(self
@@ -338,7 +338,7 @@ impl DbSnapshot {
     }
 
     /// Scan a key range from the snapshot using default scan options.
-    pub async fn scan(&self, range: DbKeyRange) -> Result<Arc<DbIterator>, SlatedbError> {
+    pub async fn scan(&self, range: KeyRange) -> Result<Arc<DbIterator>, SlatedbError> {
         let range = range.into_bounds()?;
         let iter = self.inner.scan::<Vec<u8>, _>(range).await?;
         Ok(Arc::new(DbIterator::new(iter)))
@@ -347,8 +347,8 @@ impl DbSnapshot {
     /// Scan a key range from the snapshot using custom scan options.
     pub async fn scan_with_options(
         &self,
-        range: DbKeyRange,
-        options: DbScanOptions,
+        range: KeyRange,
+        options: ScanOptions,
     ) -> Result<Arc<DbIterator>, SlatedbError> {
         let range = range.into_bounds()?;
         let options = options.into_core()?;
@@ -369,7 +369,7 @@ impl DbSnapshot {
     pub async fn scan_prefix_with_options(
         &self,
         prefix: Vec<u8>,
-        options: DbScanOptions,
+        options: ScanOptions,
     ) -> Result<Arc<DbIterator>, SlatedbError> {
         let options = options.into_core()?;
         let iter = self
