@@ -16,11 +16,6 @@ pub struct FfiDb {
     inner: slatedb::Db,
 }
 
-#[derive(uniffi::Object)]
-pub struct FfiDbSnapshot {
-    inner: Arc<slatedb::DbSnapshot>,
-}
-
 impl FfiDb {
     pub(crate) fn new(inner: slatedb::Db) -> Self {
         Self { inner }
@@ -272,6 +267,11 @@ impl FfiDb {
         let tx = self.inner.begin(isolation_level.into_core()).await?;
         Ok(Arc::new(FfiDbTransaction::new(tx)))
     }
+}
+
+#[derive(uniffi::Object)]
+pub struct FfiDbSnapshot {
+    inner: Arc<slatedb::DbSnapshot>,
 }
 
 #[uniffi::export(async_runtime = "tokio")]

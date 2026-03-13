@@ -8,15 +8,15 @@ use crate::validation::{
     validate_key, validate_key_value, write_batch_closed, write_batch_consumed,
 };
 
-#[derive(uniffi::Object)]
-pub struct FfiWriteBatch {
-    state: Mutex<WriteBatchState>,
-}
-
 enum WriteBatchState {
     Open(slatedb::WriteBatch),
     Consumed,
     Closed,
+}
+
+#[derive(uniffi::Object)]
+pub struct FfiWriteBatch {
+    state: Mutex<WriteBatchState>,
 }
 
 impl FfiWriteBatch {
