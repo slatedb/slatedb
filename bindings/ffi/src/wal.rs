@@ -3,10 +3,7 @@
 use std::ops::Bound;
 use std::sync::Arc;
 
-use slatedb::{
-    RowEntry, ValueDeletable, WalFile as CoreWalFile, WalFileIterator as CoreWalFileIterator,
-    WalReader as CoreWalReader,
-};
+use slatedb::{RowEntry, ValueDeletable};
 use tokio::sync::Mutex;
 
 use crate::error::FfiSlatedbError;
@@ -43,19 +40,19 @@ pub struct FfiWalFileMetadata {
 /// A WAL file handle.
 #[derive(uniffi::Object)]
 pub struct FfiWalFile {
-    inner: CoreWalFile,
+    inner: slatedb::WalFile,
 }
 
 /// An iterator over rows in a WAL file.
 #[derive(uniffi::Object)]
 pub struct FfiWalFileIterator {
-    inner: Mutex<CoreWalFileIterator>,
+    inner: Mutex<slatedb::WalFileIterator>,
 }
 
 /// A WAL reader scoped to a single database path and object store.
 #[derive(uniffi::Object)]
 pub struct FfiWalReader {
-    inner: CoreWalReader,
+    inner: slatedb::WalReader,
 }
 
 impl FfiRowEntry {
@@ -78,13 +75,13 @@ impl FfiRowEntry {
 }
 
 impl FfiWalFile {
-    fn new(inner: CoreWalFile) -> Self {
+    fn new(inner: slatedb::WalFile) -> Self {
         Self { inner }
     }
 }
 
 impl FfiWalFileIterator {
-    fn new(inner: CoreWalFileIterator) -> Self {
+    fn new(inner: slatedb::WalFileIterator) -> Self {
         Self {
             inner: Mutex::new(inner),
         }
@@ -97,7 +94,7 @@ impl FfiWalReader {
     #[uniffi::constructor]
     pub fn new(path: String, object_store: Arc<FfiObjectStore>) -> Arc<Self> {
         Arc::new(Self {
-            inner: CoreWalReader::new(path, object_store.inner.clone()),
+            inner: slatedb::WalReader::new(path, object_store.inner.clone()),
         })
     }
 

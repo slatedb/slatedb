@@ -3,7 +3,6 @@
 use std::sync::Arc;
 
 use slatedb::bytes::Bytes;
-use slatedb::MergeOperator as CoreMergeOperator;
 use slatedb::MergeOperatorError;
 
 use crate::error::FfiMergeOperatorCallbackError;
@@ -36,7 +35,7 @@ struct MergeOperatorAdapter {
     inner: Arc<dyn FfiMergeOperator>,
 }
 
-impl CoreMergeOperator for MergeOperatorAdapter {
+impl slatedb::MergeOperator for MergeOperatorAdapter {
     fn merge(
         &self,
         key: &Bytes,
@@ -58,7 +57,7 @@ impl CoreMergeOperator for MergeOperatorAdapter {
 
 pub(crate) fn adapt_merge_operator(
     merge_operator: Box<dyn FfiMergeOperator>,
-) -> Arc<dyn CoreMergeOperator + Send + Sync> {
+) -> Arc<dyn slatedb::MergeOperator + Send + Sync> {
     Arc::new(MergeOperatorAdapter {
         inner: merge_operator.into(),
     })

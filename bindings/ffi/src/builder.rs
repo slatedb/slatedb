@@ -4,10 +4,6 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 use serde_json::from_str;
-use slatedb::{
-    Db as CoreDb, DbBuilder as CoreDbBuilder, DbReader as CoreDbReader,
-    DbReaderBuilder as CoreDbReaderBuilder,
-};
 use uuid::Uuid;
 
 use crate::config::{FfiReaderOptions, FfiSstBlockSize};
@@ -21,19 +17,19 @@ use crate::validation::builder_consumed;
 /// Builder used to configure and open a [`FfiDb`].
 #[derive(uniffi::Object)]
 pub struct FfiDbBuilder {
-    builder: Mutex<Option<CoreDbBuilder<String>>>,
+    builder: Mutex<Option<slatedb::DbBuilder<String>>>,
 }
 
 /// Builder used to configure and open a [`FfiDbReader`].
 #[derive(uniffi::Object)]
 pub struct FfiDbReaderBuilder {
-    builder: Mutex<Option<CoreDbReaderBuilder<String>>>,
+    builder: Mutex<Option<slatedb::DbReaderBuilder<String>>>,
 }
 
 impl FfiDbBuilder {
     fn update_builder(
         &self,
-        update: impl FnOnce(CoreDbBuilder<String>) -> CoreDbBuilder<String>,
+        update: impl FnOnce(slatedb::DbBuilder<String>) -> slatedb::DbBuilder<String>,
     ) -> Result<(), FfiSlatedbError> {
         let mut guard = self.builder.lock();
         let builder = guard.take().ok_or_else(builder_consumed)?;
@@ -41,7 +37,7 @@ impl FfiDbBuilder {
         Ok(())
     }
 
-    fn take_builder(&self) -> Result<CoreDbBuilder<String>, FfiSlatedbError> {
+    fn take_builder(&self) -> Result<slatedb::DbBuilder<String>, FfiSlatedbError> {
         let mut guard = self.builder.lock();
         guard.take().ok_or_else(builder_consumed)
     }
@@ -50,7 +46,7 @@ impl FfiDbBuilder {
 impl FfiDbReaderBuilder {
     fn update_builder(
         &self,
-        update: impl FnOnce(CoreDbReaderBuilder<String>) -> CoreDbReaderBuilder<String>,
+        update: impl FnOnce(slatedb::DbReaderBuilder<String>) -> slatedb::DbReaderBuilder<String>,
     ) -> Result<(), FfiSlatedbError> {
         let mut guard = self.builder.lock();
         let builder = guard.take().ok_or_else(builder_consumed)?;
@@ -58,7 +54,7 @@ impl FfiDbReaderBuilder {
         Ok(())
     }
 
-    fn take_builder(&self) -> Result<CoreDbReaderBuilder<String>, FfiSlatedbError> {
+    fn take_builder(&self) -> Result<slatedb::DbReaderBuilder<String>, FfiSlatedbError> {
         let mut guard = self.builder.lock();
         guard.take().ok_or_else(builder_consumed)
     }
@@ -77,14 +73,14 @@ impl FfiDbBuilder {
     #[uniffi::constructor]
     pub fn new(path: String, object_store: Arc<FfiObjectStore>) -> Arc<Self> {
         Arc::new(Self {
-            builder: Mutex::new(Some(CoreDb::builder(path, object_store.inner.clone()))),
+            builder: Mutex::new(Some(slatedb::Db::builder(path, object_store.inner.clone()))),
         })
     }
 
-    /// Replace the default database settings with a JSON-encoded [`slatedb::Settings`] document.
+    /// Replace the default database settings with a [`slatedb::Settings`] document encoded in JSON.
     ///
     /// ## Arguments
-    /// - `settings_json`: the full settings document encoded as JSON.
+    /// - `settings_json`: the full settings document encoded in JSON.
     ///
     /// ## Errors
     /// - `FfiSlatedbError::Invalid`: if the JSON cannot be parsed.
@@ -106,7 +102,7 @@ impl FfiDbBuilder {
 
     /// Disable the database-level cache created by the builder.
     pub fn with_db_cache_disabled(&self) -> Result<(), FfiSlatedbError> {
-        self.update_builder(CoreDbBuilder::with_db_cache_disabled)
+        self.update_builder(slatedb::DbBuilder::with_db_cache_disabled)
     }
 
     /// Set the random seed used by the database.
@@ -168,7 +164,7 @@ impl FfiDbReaderBuilder {
     #[uniffi::constructor]
     pub fn new(path: String, object_store: Arc<FfiObjectStore>) -> Arc<Self> {
         Arc::new(Self {
-            builder: Mutex::new(Some(CoreDbReader::builder(
+            builder: Mutex::new(Some(slatedb::DbReader::builder(
                 path,
                 object_store.inner.clone(),
             ))),

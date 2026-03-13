@@ -2,7 +2,6 @@
 
 use std::sync::Arc;
 
-use slatedb::DbTransaction as CoreDbTransaction;
 use tokio::sync::Mutex;
 
 use crate::config::{
@@ -19,13 +18,13 @@ use crate::validation::{transaction_completed, validate_key, validate_key_value}
 /// rolled back. After completion, all further method calls return an error.
 #[derive(uniffi::Object)]
 pub struct FfiDbTransaction {
-    inner: Mutex<Option<CoreDbTransaction>>,
+    inner: Mutex<Option<slatedb::DbTransaction>>,
     id: String,
     seqnum: u64,
 }
 
 impl FfiDbTransaction {
-    pub(crate) fn new(inner: CoreDbTransaction) -> Self {
+    pub(crate) fn new(inner: slatedb::DbTransaction) -> Self {
         Self {
             id: inner.id().to_string(),
             seqnum: inner.seqnum(),
@@ -103,7 +102,7 @@ impl FfiDbTransaction {
             .map_err(Into::into)
     }
 
-    /// Explicitly mark keys as read for conflict detection.
+    /// Explicitly mark keys read for conflict detection.
     pub async fn mark_read(&self, keys: Vec<Vec<u8>>) -> Result<(), FfiSlatedbError> {
         let guard = self.inner.lock().await;
         let tx = guard.as_ref().ok_or_else(transaction_completed)?;

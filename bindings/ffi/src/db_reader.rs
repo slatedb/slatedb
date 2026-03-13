@@ -2,8 +2,6 @@
 
 use std::sync::Arc;
 
-use slatedb::DbReader as CoreDbReader;
-
 use crate::config::{FfiKeyRange, FfiReadOptions, FfiScanOptions};
 use crate::error::FfiSlatedbError;
 use crate::iterator::FfiDbIterator;
@@ -11,11 +9,11 @@ use crate::iterator::FfiDbIterator;
 /// A read-only database reader.
 #[derive(uniffi::Object)]
 pub struct FfiDbReader {
-    inner: CoreDbReader,
+    inner: slatedb::DbReader,
 }
 
 impl FfiDbReader {
-    pub(crate) fn new(inner: CoreDbReader) -> Self {
+    pub(crate) fn new(inner: slatedb::DbReader) -> Self {
         Self { inner }
     }
 }

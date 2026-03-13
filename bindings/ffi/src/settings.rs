@@ -2,14 +2,14 @@
 
 use crate::error::FfiSlatedbError;
 
-/// Return the default [`slatedb::Settings`] value as JSON.
+/// Return the default [`slatedb::Settings`] value encoded in JSON.
 ///
 /// This is useful for FFI callers that want to start from the Rust default
 /// configuration, modify selected fields, and pass the full JSON document back
 /// to [`crate::FfiDbBuilder::with_settings_json`].
 ///
 /// ## Returns
-/// - `Result<String, FfiSlatedbError>`: the default settings encoded as JSON.
+/// - `Result<String, FfiSlatedbError>`: the default settings encoded in JSON.
 #[uniffi::export]
 pub fn ffi_default_settings_json() -> Result<String, FfiSlatedbError> {
     slatedb::Settings::default()
