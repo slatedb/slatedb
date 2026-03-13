@@ -1,12 +1,12 @@
-use slatedb::WriteBatch as CoreWriteBatch;
+use slatedb::WriteBatch;
 
 use crate::config::FfiWriteOperation;
 use crate::error::FfiSlatedbError;
 
 pub(crate) fn build_write_batch(
     operations: Vec<FfiWriteOperation>,
-) -> Result<CoreWriteBatch, FfiSlatedbError> {
-    let mut batch = CoreWriteBatch::new();
+) -> Result<WriteBatch, FfiSlatedbError> {
+    let mut batch = WriteBatch::new();
 
     for operation in operations {
         match operation {

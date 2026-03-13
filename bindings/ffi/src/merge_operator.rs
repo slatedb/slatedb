@@ -3,7 +3,8 @@
 use std::sync::Arc;
 
 use slatedb::bytes::Bytes;
-use slatedb::{MergeOperator as CoreMergeOperator, MergeOperatorError as CoreMergeOperatorError};
+use slatedb::MergeOperator as CoreMergeOperator;
+use slatedb::MergeOperatorError;
 
 use crate::error::FfiMergeOperatorCallbackError;
 
@@ -41,7 +42,7 @@ impl CoreMergeOperator for MergeOperatorAdapter {
         key: &Bytes,
         existing_value: Option<Bytes>,
         operand: Bytes,
-    ) -> Result<Bytes, CoreMergeOperatorError> {
+    ) -> Result<Bytes, MergeOperatorError> {
         self.inner
             .merge(
                 key.to_vec(),
@@ -49,7 +50,7 @@ impl CoreMergeOperator for MergeOperatorAdapter {
                 operand.to_vec(),
             )
             .map(Bytes::from)
-            .map_err(|error| CoreMergeOperatorError::Callback {
+            .map_err(|error| MergeOperatorError::Callback {
                 message: error.to_string(),
             })
     }

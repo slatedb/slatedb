@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use slatedb::object_store::ObjectStore as ObjectStoreTrait;
-use slatedb::Db as CoreDb;
+use slatedb::Db;
 
 use crate::error::FfiSlatedbError;
 
@@ -28,6 +28,6 @@ pub struct ObjectStore {
 /// - `FfiSlatedbError`: if the URL cannot be parsed or the object-store backend is unsupported.
 #[uniffi::export]
 pub fn resolve_object_store(url: String) -> Result<Arc<ObjectStore>, FfiSlatedbError> {
-    let inner = CoreDb::resolve_object_store(&url)?;
+    let inner = Db::resolve_object_store(&url)?;
     Ok(Arc::new(ObjectStore { inner }))
 }
