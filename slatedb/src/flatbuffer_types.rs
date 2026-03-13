@@ -215,6 +215,7 @@ impl FlatBufferManifestCodec {
     }
 
     // ManifestV1 has no view IDs, so we use SST IDs during migration.
+    // This also allows to use l0_last_compacted from V1 which is an SST ID rather than SST view ID.
     #[allow(clippy::disallowed_methods)]
     pub(crate) fn manifest_v1(
         manifest: &ManifestV1,
@@ -257,13 +258,6 @@ impl FlatBufferManifestCodec {
                 sst_views: ssts,
             })
         }
-        // V1 stored l0_last_compacted as an SST ULID. Translate it to the
-        // corresponding view_id so the V2 code (which compares by view_id) works.
-        let l0_last_compacted = l0_last_compacted.and_then(|sst_ulid| {
-            l0.iter()
-                .find(|view| view.sst.id.unwrap_compacted_id() == sst_ulid)
-                .map(|view| view.id)
-        });
         let checkpoints: Vec<checkpoint::Checkpoint> = manifest
             .checkpoints()
             .iter()
