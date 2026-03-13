@@ -214,8 +214,7 @@ impl FlatBufferManifestCodec {
         }
     }
 
-    // ManifestV1 has no view IDs, so we generate fresh ones during migration.
-    // This is safe because V1 decode only runs once per DB upgrade to V2.
+    // ManifestV1 has no view IDs, so we use SST IDs during migration.
     #[allow(clippy::disallowed_methods)]
     pub(crate) fn manifest_v1(
         manifest: &ManifestV1,
@@ -224,14 +223,14 @@ impl FlatBufferManifestCodec {
         let mut l0 = VecDeque::new();
 
         for man_sst in manifest.l0().iter() {
-            let sst_id = Compacted(man_sst.id().ulid());
+            let sst_ulid = man_sst.id().ulid();
             let format_version = man_sst
                 .format_version()
                 .unwrap_or(ORIGINAL_SST_FORMAT_VERSION);
             let sst_info = FlatBufferSsTableInfoCodec::sst_info(&man_sst.info());
-            let handle = SsTableHandle::new(sst_id, format_version, sst_info);
+            let handle = SsTableHandle::new(Compacted(sst_ulid), format_version, sst_info);
             let l0_sst = SsTableView::new_projected(
-                Ulid::new(),
+                sst_ulid,
                 handle,
                 man_sst.visible_range().map(Self::decode_bytes_range),
             );
@@ -241,14 +240,14 @@ impl FlatBufferManifestCodec {
         for manifest_sr in manifest.compacted().iter() {
             let mut ssts = Vec::new();
             for manifest_sst in manifest_sr.ssts().iter() {
-                let id = Compacted(manifest_sst.id().ulid());
+                let sst_ulid = manifest_sst.id().ulid();
                 let format_version = manifest_sst
                     .format_version()
                     .unwrap_or(ORIGINAL_SST_FORMAT_VERSION);
                 let info = FlatBufferSsTableInfoCodec::sst_info(&manifest_sst.info());
-                let handle = SsTableHandle::new(id, format_version, info);
+                let handle = SsTableHandle::new(Compacted(sst_ulid), format_version, info);
                 ssts.push(SsTableView::new_projected(
-                    Ulid::new(),
+                    sst_ulid,
                     handle,
                     manifest_sst.visible_range().map(Self::decode_bytes_range),
                 ));
