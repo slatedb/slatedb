@@ -17,11 +17,6 @@ pub struct FfiDbBuilder {
     builder: Mutex<Option<slatedb::DbBuilder<String>>>,
 }
 
-#[derive(uniffi::Object)]
-pub struct FfiDbReaderBuilder {
-    builder: Mutex<Option<slatedb::DbReaderBuilder<String>>>,
-}
-
 impl FfiDbBuilder {
     fn update_builder(
         &self,
@@ -34,23 +29,6 @@ impl FfiDbBuilder {
     }
 
     fn take_builder(&self) -> Result<slatedb::DbBuilder<String>, FfiSlatedbError> {
-        let mut guard = self.builder.lock();
-        guard.take().ok_or_else(builder_consumed)
-    }
-}
-
-impl FfiDbReaderBuilder {
-    fn update_builder(
-        &self,
-        update: impl FnOnce(slatedb::DbReaderBuilder<String>) -> slatedb::DbReaderBuilder<String>,
-    ) -> Result<(), FfiSlatedbError> {
-        let mut guard = self.builder.lock();
-        let builder = guard.take().ok_or_else(builder_consumed)?;
-        *guard = Some(update(builder));
-        Ok(())
-    }
-
-    fn take_builder(&self) -> Result<slatedb::DbReaderBuilder<String>, FfiSlatedbError> {
         let mut guard = self.builder.lock();
         guard.take().ok_or_else(builder_consumed)
     }
@@ -109,6 +87,28 @@ impl FfiDbBuilder {
         let builder = self.take_builder()?;
         let db = builder.build().await?;
         Ok(Arc::new(FfiDb::new(db)))
+    }
+}
+
+#[derive(uniffi::Object)]
+pub struct FfiDbReaderBuilder {
+    builder: Mutex<Option<slatedb::DbReaderBuilder<String>>>,
+}
+
+impl FfiDbReaderBuilder {
+    fn update_builder(
+        &self,
+        update: impl FnOnce(slatedb::DbReaderBuilder<String>) -> slatedb::DbReaderBuilder<String>,
+    ) -> Result<(), FfiSlatedbError> {
+        let mut guard = self.builder.lock();
+        let builder = guard.take().ok_or_else(builder_consumed)?;
+        *guard = Some(update(builder));
+        Ok(())
+    }
+
+    fn take_builder(&self) -> Result<slatedb::DbReaderBuilder<String>, FfiSlatedbError> {
+        let mut guard = self.builder.lock();
+        guard.take().ok_or_else(builder_consumed)
     }
 }
 
