@@ -108,7 +108,7 @@ table ManifestV2 {
     wal_id_last_seen: ulong;
 
     // The last compacted l0
-    l0_last_compacted: Ulid;
+    last_compacted_l0_sst_view_id: Ulid;
 
     // All compacted SSTs referenced by l0 and compacted (sorted runs) views.
     ssts: [CompactedSsTableV2] (required);

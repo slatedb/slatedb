@@ -905,7 +905,7 @@ mod tests {
     fn create_db_state(l0: VecDeque<SsTableView>, srs: Vec<SortedRun>) -> ManifestCore {
         ManifestCore {
             initialized: true,
-            l0_last_compacted: None,
+            last_compacted_l0_sst_view_id: None,
             l0,
             compacted: srs,
             next_wal_sst_id: 0,

@@ -5326,7 +5326,7 @@ mod tests {
                 // flushed (await_durable in the put()'s above only wait for the writes to hit
                 // the WAL before returning).
                 should_compact_l0.store(true, Ordering::SeqCst);
-                s.l0_last_compacted.is_some() && s.l0.is_empty()
+                s.last_compacted_l0_sst_view_id.is_some() && s.l0.is_empty()
             },
             Duration::from_secs(10),
         )
@@ -5348,7 +5348,7 @@ mod tests {
                 // flushed (await_durable in the put()'s above only wait for the writes to hit
                 // the WAL before returning).
                 should_compact_l0.store(true, Ordering::SeqCst);
-                s.l0_last_compacted.is_some() && s.l0.is_empty()
+                s.last_compacted_l0_sst_view_id.is_some() && s.l0.is_empty()
             },
             Duration::from_secs(10),
         )

@@ -450,7 +450,7 @@ pub struct ManifestCore {
     pub initialized: bool,
 
     /// The last compacted l0 SstView ID.
-    pub l0_last_compacted: Option<Ulid>,
+    pub last_compacted_l0_sst_view_id: Option<Ulid>,
 
     /// A list of the L0 SST views that are valid to read in the `compacted` folder.
     pub l0: VecDeque<SsTableView>,
@@ -498,7 +498,7 @@ impl ManifestCore {
     pub(crate) fn new() -> Self {
         Self {
             initialized: true,
-            l0_last_compacted: None,
+            last_compacted_l0_sst_view_id: None,
             l0: VecDeque::new(),
             compacted: vec![],
             next_wal_sst_id: 1,
@@ -671,7 +671,7 @@ impl<'a> StateModifier<'a> {
     pub(crate) fn merge_remote_manifest(&mut self, mut remote_manifest: DirtyObject<Manifest>) {
         // The compactor removes tables from l0_last_compacted, so we
         // only want to keep the tables up to there.
-        let l0_last_compacted = &remote_manifest.value.core.l0_last_compacted;
+        let l0_last_compacted = &remote_manifest.value.core.last_compacted_l0_sst_view_id;
         let new_l0 = if let Some(l0_last_compacted) = l0_last_compacted {
             self.state
                 .manifest
@@ -689,7 +689,7 @@ impl<'a> StateModifier<'a> {
         let my_db_state = self.state.core();
         remote_manifest.value.core = ManifestCore {
             initialized: my_db_state.initialized,
-            l0_last_compacted: remote_manifest.value.core.l0_last_compacted,
+            last_compacted_l0_sst_view_id: remote_manifest.value.core.last_compacted_l0_sst_view_id,
             l0: new_l0,
             compacted: remote_manifest.value.core.compacted,
             next_wal_sst_id: my_db_state.next_wal_sst_id,
@@ -780,7 +780,7 @@ mod tests {
         let mut compactor_state = new_dirty_manifest();
         compactor_state.value.core = db_state.state.core().clone();
         let last_compacted = compactor_state.value.core.l0.pop_back().unwrap();
-        compactor_state.value.core.l0_last_compacted = Some(last_compacted.id);
+        compactor_state.value.core.last_compacted_l0_sst_view_id = Some(last_compacted.id);
 
         // when:
         db_state.merge_remote_manifest(compactor_state.clone());

@@ -2330,7 +2330,7 @@ mod tests {
 
         // then:
         let db_state = db_state.expect("db was not compacted");
-        assert!(db_state.l0_last_compacted.is_some());
+        assert!(db_state.last_compacted_l0_sst_view_id.is_some());
         assert_eq!(db_state.compacted.len(), 1);
         assert_eq!(db_state.last_l0_clock_tick, 70);
         let compacted = &db_state.compacted.first().unwrap().sst_views;
@@ -2911,7 +2911,7 @@ mod tests {
             .collect();
         assert!(!compacted_l0s.contains(&l0_id));
         assert_eq!(
-            db_state.l0_last_compacted.unwrap(),
+            db_state.last_compacted_l0_sst_view_id.unwrap(),
             compaction
                 .sources()
                 .first()

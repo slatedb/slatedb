@@ -2304,8 +2304,8 @@ impl<'a> flatbuffers::Follow<'a> for TieredCompactionSpec<'a> {
 
 impl<'a> TieredCompactionSpec<'a> {
   pub const VT_SSTS: flatbuffers::VOffsetT = 4;
-  pub const VT_L0_VIEW_IDS: flatbuffers::VOffsetT = 6;
-  pub const VT_SORTED_RUNS: flatbuffers::VOffsetT = 8;
+  pub const VT_SORTED_RUNS: flatbuffers::VOffsetT = 6;
+  pub const VT_L0_VIEW_IDS: flatbuffers::VOffsetT = 8;
 
   #[inline]
   pub unsafe fn init_from_table(table: flatbuffers::Table<'a>) -> Self {
@@ -2317,8 +2317,8 @@ impl<'a> TieredCompactionSpec<'a> {
     args: &'args TieredCompactionSpecArgs<'args>
   ) -> flatbuffers::WIPOffset<TieredCompactionSpec<'bldr>> {
     let mut builder = TieredCompactionSpecBuilder::new(_fbb);
-    if let Some(x) = args.sorted_runs { builder.add_sorted_runs(x); }
     if let Some(x) = args.l0_view_ids { builder.add_l0_view_ids(x); }
+    if let Some(x) = args.sorted_runs { builder.add_sorted_runs(x); }
     if let Some(x) = args.ssts { builder.add_ssts(x); }
     builder.finish()
   }
@@ -2332,18 +2332,18 @@ impl<'a> TieredCompactionSpec<'a> {
     unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<Ulid>>>>(TieredCompactionSpec::VT_SSTS, None)}
   }
   #[inline]
-  pub fn l0_view_ids(&self) -> Option<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<Ulid<'a>>>> {
-    // Safety:
-    // Created from valid Table for this object
-    // which contains a valid value in this slot
-    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<Ulid>>>>(TieredCompactionSpec::VT_L0_VIEW_IDS, None)}
-  }
-  #[inline]
   pub fn sorted_runs(&self) -> Option<flatbuffers::Vector<'a, u32>> {
     // Safety:
     // Created from valid Table for this object
     // which contains a valid value in this slot
     unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'a, u32>>>(TieredCompactionSpec::VT_SORTED_RUNS, None)}
+  }
+  #[inline]
+  pub fn l0_view_ids(&self) -> Option<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<Ulid<'a>>>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<Ulid>>>>(TieredCompactionSpec::VT_L0_VIEW_IDS, None)}
   }
 }
 
@@ -2355,24 +2355,24 @@ impl flatbuffers::Verifiable for TieredCompactionSpec<'_> {
     use self::flatbuffers::Verifiable;
     v.visit_table(pos)?
      .visit_field::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'_, flatbuffers::ForwardsUOffset<Ulid>>>>("ssts", Self::VT_SSTS, false)?
-     .visit_field::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'_, flatbuffers::ForwardsUOffset<Ulid>>>>("l0_view_ids", Self::VT_L0_VIEW_IDS, false)?
      .visit_field::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'_, u32>>>("sorted_runs", Self::VT_SORTED_RUNS, false)?
+     .visit_field::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'_, flatbuffers::ForwardsUOffset<Ulid>>>>("l0_view_ids", Self::VT_L0_VIEW_IDS, false)?
      .finish();
     Ok(())
   }
 }
 pub struct TieredCompactionSpecArgs<'a> {
     pub ssts: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<Ulid<'a>>>>>,
-    pub l0_view_ids: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<Ulid<'a>>>>>,
     pub sorted_runs: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, u32>>>,
+    pub l0_view_ids: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<Ulid<'a>>>>>,
 }
 impl<'a> Default for TieredCompactionSpecArgs<'a> {
   #[inline]
   fn default() -> Self {
     TieredCompactionSpecArgs {
       ssts: None,
-      l0_view_ids: None,
       sorted_runs: None,
+      l0_view_ids: None,
     }
   }
 }
@@ -2387,12 +2387,12 @@ impl<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> TieredCompactionSpecBuilder<'a,
     self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(TieredCompactionSpec::VT_SSTS, ssts);
   }
   #[inline]
-  pub fn add_l0_view_ids(&mut self, l0_view_ids: flatbuffers::WIPOffset<flatbuffers::Vector<'b , flatbuffers::ForwardsUOffset<Ulid<'b >>>>) {
-    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(TieredCompactionSpec::VT_L0_VIEW_IDS, l0_view_ids);
-  }
-  #[inline]
   pub fn add_sorted_runs(&mut self, sorted_runs: flatbuffers::WIPOffset<flatbuffers::Vector<'b , u32>>) {
     self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(TieredCompactionSpec::VT_SORTED_RUNS, sorted_runs);
+  }
+  #[inline]
+  pub fn add_l0_view_ids(&mut self, l0_view_ids: flatbuffers::WIPOffset<flatbuffers::Vector<'b , flatbuffers::ForwardsUOffset<Ulid<'b >>>>) {
+    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(TieredCompactionSpec::VT_L0_VIEW_IDS, l0_view_ids);
   }
   #[inline]
   pub fn new(_fbb: &'b mut flatbuffers::FlatBufferBuilder<'a, A>) -> TieredCompactionSpecBuilder<'a, 'b, A> {
@@ -2413,8 +2413,8 @@ impl core::fmt::Debug for TieredCompactionSpec<'_> {
   fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
     let mut ds = f.debug_struct("TieredCompactionSpec");
       ds.field("ssts", &self.ssts());
-      ds.field("l0_view_ids", &self.l0_view_ids());
       ds.field("sorted_runs", &self.sorted_runs());
+      ds.field("l0_view_ids", &self.l0_view_ids());
       ds.finish()
   }
 }
@@ -3259,7 +3259,7 @@ impl<'a> ManifestV2<'a> {
   pub const VT_COMPACTOR_EPOCH: flatbuffers::VOffsetT = 12;
   pub const VT_REPLAY_AFTER_WAL_ID: flatbuffers::VOffsetT = 14;
   pub const VT_WAL_ID_LAST_SEEN: flatbuffers::VOffsetT = 16;
-  pub const VT_L0_LAST_COMPACTED: flatbuffers::VOffsetT = 18;
+  pub const VT_LAST_COMPACTED_L0_SST_VIEW_ID: flatbuffers::VOffsetT = 18;
   pub const VT_SSTS: flatbuffers::VOffsetT = 20;
   pub const VT_L0: flatbuffers::VOffsetT = 22;
   pub const VT_COMPACTED: flatbuffers::VOffsetT = 24;
@@ -3294,7 +3294,7 @@ impl<'a> ManifestV2<'a> {
     if let Some(x) = args.compacted { builder.add_compacted(x); }
     if let Some(x) = args.l0 { builder.add_l0(x); }
     if let Some(x) = args.ssts { builder.add_ssts(x); }
-    if let Some(x) = args.l0_last_compacted { builder.add_l0_last_compacted(x); }
+    if let Some(x) = args.last_compacted_l0_sst_view_id { builder.add_last_compacted_l0_sst_view_id(x); }
     if let Some(x) = args.external_dbs { builder.add_external_dbs(x); }
     builder.add_initialized(args.initialized);
     builder.finish()
@@ -3351,11 +3351,11 @@ impl<'a> ManifestV2<'a> {
     unsafe { self._tab.get::<u64>(ManifestV2::VT_WAL_ID_LAST_SEEN, Some(0)).unwrap()}
   }
   #[inline]
-  pub fn l0_last_compacted(&self) -> Option<Ulid<'a>> {
+  pub fn last_compacted_l0_sst_view_id(&self) -> Option<Ulid<'a>> {
     // Safety:
     // Created from valid Table for this object
     // which contains a valid value in this slot
-    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<Ulid>>(ManifestV2::VT_L0_LAST_COMPACTED, None)}
+    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<Ulid>>(ManifestV2::VT_LAST_COMPACTED_L0_SST_VIEW_ID, None)}
   }
   #[inline]
   pub fn ssts(&self) -> flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<CompactedSsTableV2<'a>>> {
@@ -3436,7 +3436,7 @@ impl flatbuffers::Verifiable for ManifestV2<'_> {
      .visit_field::<u64>("compactor_epoch", Self::VT_COMPACTOR_EPOCH, false)?
      .visit_field::<u64>("replay_after_wal_id", Self::VT_REPLAY_AFTER_WAL_ID, false)?
      .visit_field::<u64>("wal_id_last_seen", Self::VT_WAL_ID_LAST_SEEN, false)?
-     .visit_field::<flatbuffers::ForwardsUOffset<Ulid>>("l0_last_compacted", Self::VT_L0_LAST_COMPACTED, false)?
+     .visit_field::<flatbuffers::ForwardsUOffset<Ulid>>("last_compacted_l0_sst_view_id", Self::VT_LAST_COMPACTED_L0_SST_VIEW_ID, false)?
      .visit_field::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'_, flatbuffers::ForwardsUOffset<CompactedSsTableV2>>>>("ssts", Self::VT_SSTS, true)?
      .visit_field::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'_, flatbuffers::ForwardsUOffset<CompactedSsTableView>>>>("l0", Self::VT_L0, true)?
      .visit_field::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'_, flatbuffers::ForwardsUOffset<SortedRunV2>>>>("compacted", Self::VT_COMPACTED, true)?
@@ -3458,7 +3458,7 @@ pub struct ManifestV2Args<'a> {
     pub compactor_epoch: u64,
     pub replay_after_wal_id: u64,
     pub wal_id_last_seen: u64,
-    pub l0_last_compacted: Option<flatbuffers::WIPOffset<Ulid<'a>>>,
+    pub last_compacted_l0_sst_view_id: Option<flatbuffers::WIPOffset<Ulid<'a>>>,
     pub ssts: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<CompactedSsTableV2<'a>>>>>,
     pub l0: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<CompactedSsTableView<'a>>>>>,
     pub compacted: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<SortedRunV2<'a>>>>>,
@@ -3480,7 +3480,7 @@ impl<'a> Default for ManifestV2Args<'a> {
       compactor_epoch: 0,
       replay_after_wal_id: 0,
       wal_id_last_seen: 0,
-      l0_last_compacted: None,
+      last_compacted_l0_sst_view_id: None,
       ssts: None, // required field
       l0: None, // required field
       compacted: None, // required field
@@ -3528,8 +3528,8 @@ impl<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> ManifestV2Builder<'a, 'b, A> {
     self.fbb_.push_slot::<u64>(ManifestV2::VT_WAL_ID_LAST_SEEN, wal_id_last_seen, 0);
   }
   #[inline]
-  pub fn add_l0_last_compacted(&mut self, l0_last_compacted: flatbuffers::WIPOffset<Ulid<'b >>) {
-    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<Ulid>>(ManifestV2::VT_L0_LAST_COMPACTED, l0_last_compacted);
+  pub fn add_last_compacted_l0_sst_view_id(&mut self, last_compacted_l0_sst_view_id: flatbuffers::WIPOffset<Ulid<'b >>) {
+    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<Ulid>>(ManifestV2::VT_LAST_COMPACTED_L0_SST_VIEW_ID, last_compacted_l0_sst_view_id);
   }
   #[inline]
   pub fn add_ssts(&mut self, ssts: flatbuffers::WIPOffset<flatbuffers::Vector<'b , flatbuffers::ForwardsUOffset<CompactedSsTableV2<'b >>>>) {
@@ -3596,7 +3596,7 @@ impl core::fmt::Debug for ManifestV2<'_> {
       ds.field("compactor_epoch", &self.compactor_epoch());
       ds.field("replay_after_wal_id", &self.replay_after_wal_id());
       ds.field("wal_id_last_seen", &self.wal_id_last_seen());
-      ds.field("l0_last_compacted", &self.l0_last_compacted());
+      ds.field("last_compacted_l0_sst_view_id", &self.last_compacted_l0_sst_view_id());
       ds.field("ssts", &self.ssts());
       ds.field("l0", &self.l0());
       ds.field("compacted", &self.compacted());

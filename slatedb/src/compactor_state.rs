@@ -524,7 +524,7 @@ impl CompactorState {
     pub(crate) fn merge_remote_manifest(&mut self, mut remote_manifest: DirtyObject<Manifest>) {
         // the writer may have added more l0 SSTs. Add these to our l0 list.
         let my_db_state = self.db_state();
-        let last_compacted_l0 = my_db_state.l0_last_compacted;
+        let last_compacted_l0 = my_db_state.last_compacted_l0_sst_view_id;
         let mut merged_l0s = VecDeque::new();
         let writer_l0 = &remote_manifest.value.core.l0;
         for writer_l0_sst in writer_l0 {
@@ -544,7 +544,7 @@ impl CompactorState {
         // write out the merged core db state and manifest
         let merged = ManifestCore {
             initialized: remote_manifest.value.core.initialized,
-            l0_last_compacted: my_db_state.l0_last_compacted,
+            last_compacted_l0_sst_view_id: my_db_state.last_compacted_l0_sst_view_id,
             l0: merged_l0s,
             compacted: my_db_state.compacted.clone(),
             next_wal_sst_id: remote_manifest.value.core.next_wal_sst_id,
@@ -667,7 +667,7 @@ impl CompactorState {
             if let Some(view_id) = first_source.maybe_unwrap_sst_view() {
                 // if there are l0s, the newest must be the first entry in sources.
                 // TODO: validate that this is the case
-                db_state.l0_last_compacted = Some(view_id);
+                db_state.last_compacted_l0_sst_view_id = Some(view_id);
             }
             db_state.l0 = new_l0;
             db_state.compacted = new_compacted;
@@ -909,7 +909,7 @@ mod tests {
 
         // then:
         assert_eq!(
-            state.db_state().l0_last_compacted,
+            state.db_state().last_compacted_l0_sst_view_id,
             Some(before_compaction.l0.front().unwrap().id)
         );
         assert_eq!(state.db_state().l0.len(), 0);
@@ -968,7 +968,7 @@ mod tests {
         state.merge_remote_manifest(sm.prepare_dirty().unwrap());
 
         // then:
-        assert!(state.db_state().l0_last_compacted.is_none());
+        assert!(state.db_state().last_compacted_l0_sst_view_id.is_none());
         let expected_merged_l0s: Vec<Ulid> = sm
             .manifest()
             .core

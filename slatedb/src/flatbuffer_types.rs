@@ -293,7 +293,7 @@ impl FlatBufferManifestCodec {
         };
         let core = ManifestCore {
             initialized: manifest.initialized(),
-            l0_last_compacted,
+            last_compacted_l0_sst_view_id: l0_last_compacted,
             l0,
             compacted,
             next_wal_sst_id: manifest.wal_id_last_seen() + 1,
@@ -354,7 +354,7 @@ impl FlatBufferManifestCodec {
                 (ulid, handle)
             })
             .collect();
-        let l0_last_compacted = manifest.l0_last_compacted().map(|id| id.ulid());
+        let l0_last_compacted = manifest.last_compacted_l0_sst_view_id().map(|id| id.ulid());
         let l0: VecDeque<SsTableView> = manifest
             .l0()
             .iter()
@@ -405,7 +405,7 @@ impl FlatBufferManifestCodec {
         };
         let core = ManifestCore {
             initialized: manifest.initialized(),
-            l0_last_compacted,
+            last_compacted_l0_sst_view_id: l0_last_compacted,
             l0,
             compacted,
             next_wal_sst_id: manifest.wal_id_last_seen() + 1,
@@ -913,7 +913,7 @@ impl<'b> DbFlatBufferBuilder<'b> {
 
         let l0 = self.add_compacted_sst_views(core.l0.iter());
         let mut l0_last_compacted = None;
-        if let Some(ulid) = core.l0_last_compacted.as_ref() {
+        if let Some(ulid) = core.last_compacted_l0_sst_view_id.as_ref() {
             l0_last_compacted = Some(self.add_compacted_sst_id(ulid))
         }
         let compacted = self.add_sorted_runs_v2(&core.compacted);
@@ -956,7 +956,7 @@ impl<'b> DbFlatBufferBuilder<'b> {
                 compactor_epoch: manifest.compactor_epoch,
                 replay_after_wal_id: core.replay_after_wal_id,
                 wal_id_last_seen: core.next_wal_sst_id - 1,
-                l0_last_compacted,
+                last_compacted_l0_sst_view_id: l0_last_compacted,
                 ssts: Some(ssts),
                 l0: Some(l0),
                 compacted: Some(compacted),

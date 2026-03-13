@@ -105,7 +105,7 @@ impl CompactedGcTask {
                 .iter()
                 .map(|view| DateTime::<Utc>::from(view.sst.id.unwrap_compacted_id().datetime()))
                 .collect::<Vec<_>>()
-        } else if let Some(l0_last_compacted) = manifest.core.l0_last_compacted {
+        } else if let Some(l0_last_compacted) = manifest.core.last_compacted_l0_sst_view_id {
             // Else fall back to the last compacted L0, which can serve as a conservative barrier
             vec![DateTime::<Utc>::from(l0_last_compacted.datetime())]
         } else {
