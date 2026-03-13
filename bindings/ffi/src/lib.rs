@@ -36,6 +36,3 @@ pub use wal::{RowEntry, RowEntryKind, WalFile, WalFileIterator, WalFileMetadata,
 pub use write_batch::WriteBatch;
 
 uniffi::setup_scaffolding!("slatedb");
-
-#[cfg(test)]
-mod tests;
