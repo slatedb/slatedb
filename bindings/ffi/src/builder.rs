@@ -1,5 +1,3 @@
-//! Database and reader builder interfaces.
-
 use std::sync::Arc;
 
 use parking_lot::Mutex;

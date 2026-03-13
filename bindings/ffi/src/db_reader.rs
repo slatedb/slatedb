@@ -1,5 +1,3 @@
-//! Read-only database reader wrapper.
-
 use std::sync::Arc;
 
 use crate::config::{FfiKeyRange, FfiReadOptions, FfiScanOptions};

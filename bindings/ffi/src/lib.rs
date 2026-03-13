@@ -1,9 +1,3 @@
-//! UniFFI wrappers for SlateDB.
-//!
-//! This crate exposes a builder-oriented FFI surface for opening a database,
-//! performing reads and writes, scanning keys, and working with transactions.
-//! Object stores are resolved explicitly and then passed into [`FfiDbBuilder`].
-
 mod builder;
 mod config;
 mod db;

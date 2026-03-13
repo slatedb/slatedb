@@ -1,5 +1,3 @@
-//! Database and snapshot handles exposed by the FFI wrapper.
-
 use std::collections::HashMap;
 use std::sync::Arc;
 

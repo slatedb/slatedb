@@ -1,5 +1,3 @@
-//! Logging helpers delegated to `slatedb-c`.
-
 use std::ffi::CStr;
 
 use crate::error::{FfiCloseReason, FfiSlatedbError};

@@ -1,5 +1,3 @@
-//! WAL inspection APIs exposed by UniFFI.
-
 use std::ops::Bound;
 use std::sync::Arc;
 

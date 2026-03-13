@@ -1,5 +1,3 @@
-//! Transaction handles exposed by the FFI wrapper.
-
 use std::sync::Arc;
 
 use tokio::sync::Mutex;

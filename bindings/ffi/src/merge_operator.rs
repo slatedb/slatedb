@@ -1,5 +1,3 @@
-//! Merge-operator callback interfaces and adapters.
-
 use std::sync::Arc;
 
 use slatedb::bytes::Bytes;

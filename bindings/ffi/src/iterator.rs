@@ -1,5 +1,3 @@
-//! Iterators returned by scan operations.
-
 use tokio::sync::Mutex;
 
 use crate::config::FfiKeyValue;
