@@ -2,82 +2,44 @@
 
 use thiserror::Error;
 
-/// The reason a database handle was closed.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, uniffi::Enum)]
 pub enum FfiCloseReason {
-    /// No close reason is available.
     #[default]
     None,
-    /// The database was closed cleanly.
     Clean,
-    /// The database instance was fenced by another writer.
     Fenced,
-    /// A background task panicked.
     Panic,
-    /// The close reason was not recognized by this binding version.
     Unknown,
 }
 
-/// Error returned by the SlateDB FFI layer.
-///
-/// The FFI wrapper groups core SlateDB errors into a smaller set of stable
-/// categories while preserving the original message text.
 #[derive(Debug, Error, uniffi::Error)]
 pub enum FfiSlatedbError {
-    /// A transaction failed to commit or otherwise encountered a conflict.
     #[error("{message}")]
-    Transaction {
-        /// The original error message.
-        message: String,
-    },
+    Transaction { message: String },
 
-    /// The database or transaction handle has already been closed.
     #[error("{message}")]
     Closed {
-        /// The reason the handle was closed.
         reason: FfiCloseReason,
-        /// The original error message.
         message: String,
     },
 
-    /// A required dependency or remote service is temporarily unavailable.
     #[error("{message}")]
-    Unavailable {
-        /// The original error message.
-        message: String,
-    },
+    Unavailable { message: String },
 
-    /// The caller supplied invalid input.
     #[error("{message}")]
-    Invalid {
-        /// The original error message.
-        message: String,
-    },
+    Invalid { message: String },
 
-    /// Stored data was invalid or could not be decoded.
     #[error("{message}")]
-    Data {
-        /// The original error message.
-        message: String,
-    },
+    Data { message: String },
 
-    /// An unexpected internal failure occurred.
     #[error("{message}")]
-    Internal {
-        /// The original error message.
-        message: String,
-    },
+    Internal { message: String },
 }
 
-/// Error returned by foreign merge operator callbacks.
 #[derive(Debug, Error, uniffi::Error)]
 pub enum FfiMergeOperatorCallbackError {
-    /// The merge operator rejected the input or could not produce a merged value.
     #[error("{message}")]
-    Failed {
-        /// The original error message.
-        message: String,
-    },
+    Failed { message: String },
 }
 
 impl From<slatedb::Error> for FfiSlatedbError {

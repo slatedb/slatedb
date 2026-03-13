@@ -7,22 +7,8 @@ use slatedb::MergeOperatorError;
 
 use crate::error::FfiMergeOperatorCallbackError;
 
-/// Callback interface for SlateDB merge operators.
-///
-/// Merge operators are configured on [`crate::FfiDbBuilder`] and are used by merge
-/// reads and writes to combine an existing value with a new operand.
 #[uniffi::export(callback_interface)]
 pub trait FfiMergeOperator: Send + Sync {
-    /// Merge a new operand into the existing value for a key.
-    ///
-    /// ## Arguments
-    /// - `key`: the key being merged.
-    /// - `existing_value`: the current value, if one exists.
-    /// - `operand`: the new merge operand.
-    ///
-    /// ## Returns
-    /// - `Result<Vec<u8>, FfiMergeOperatorCallbackError>`: the merged value that
-    ///   should become visible for the key.
     fn merge(
         &self,
         key: Vec<u8>,
