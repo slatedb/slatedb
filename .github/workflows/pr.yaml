@@ -202,6 +202,31 @@ jobs:
           LD_LIBRARY_PATH: "${{ github.workspace }}/target/release:${LD_LIBRARY_PATH}"
         run: go test -v ./...
 
+  bindings-go-uniffi:
+    runs-on: ubuntu-latest
+    needs: tests
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go 1.24.x
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24.x'
+
+      - name: Install build dependencies for CGO
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config
+
+      - name: Build Rust FFI library for UniFFI Go bindings
+        run: cargo build --release -p slatedb-ffi
+
+      - name: Run Go tests (bindings/go)
+        working-directory: ./bindings/go
+        env:
+          CGO_ENABLED: '1'
+        run: go test -v ./...
+
   bindings-java:
     runs-on: ubuntu-latest
     needs: tests
