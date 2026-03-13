@@ -38,7 +38,7 @@ pub enum FfiIsolationLevel {
     SerializableSnapshot,
 }
 
-/// SST block sizes that can be selected on [`crate::DbBuilder`].
+/// SST block sizes that can be selected on [`crate::FfiDbBuilder`].
 #[derive(Clone, Copy, Debug, Default, uniffi::Enum)]
 pub enum FfiSstBlockSize {
     /// Use 1 KiB SST blocks.

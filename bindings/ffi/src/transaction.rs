@@ -10,21 +10,21 @@ use crate::config::{
     FfiWriteHandle, FfiWriteOptions,
 };
 use crate::error::FfiSlatedbError;
-use crate::iterator::DbIterator;
+use crate::iterator::FfiDbIterator;
 use crate::validation::{transaction_completed, validate_key, validate_key_value};
 
-/// A read-write transaction over a [`crate::Db`].
+/// A read-write transaction over a [`crate::FfiDb`].
 ///
 /// Transactions can be read from and written to until they are committed or
 /// rolled back. After completion, all further method calls return an error.
 #[derive(uniffi::Object)]
-pub struct DbTransaction {
+pub struct FfiDbTransaction {
     inner: Mutex<Option<CoreDbTransaction>>,
     id: String,
     seqnum: u64,
 }
 
-impl DbTransaction {
+impl FfiDbTransaction {
     pub(crate) fn new(inner: CoreDbTransaction) -> Self {
         Self {
             id: inner.id().to_string(),
@@ -35,7 +35,7 @@ impl DbTransaction {
 }
 
 #[uniffi::export]
-impl DbTransaction {
+impl FfiDbTransaction {
     /// Return the sequence number visible to this transaction.
     pub fn seqnum(&self) -> u64 {
         self.seqnum
@@ -48,7 +48,7 @@ impl DbTransaction {
 }
 
 #[uniffi::export(async_runtime = "tokio")]
-impl DbTransaction {
+impl FfiDbTransaction {
     /// Buffer a put inside the transaction using default options.
     pub async fn put(&self, key: Vec<u8>, value: Vec<u8>) -> Result<(), FfiSlatedbError> {
         validate_key_value(&key, &value)?;
@@ -173,12 +173,12 @@ impl DbTransaction {
     }
 
     /// Scan a key range using default scan options.
-    pub async fn scan(&self, range: FfiKeyRange) -> Result<Arc<DbIterator>, FfiSlatedbError> {
+    pub async fn scan(&self, range: FfiKeyRange) -> Result<Arc<FfiDbIterator>, FfiSlatedbError> {
         let range = range.into_bounds()?;
         let guard = self.inner.lock().await;
         let tx = guard.as_ref().ok_or_else(transaction_completed)?;
         let iter = tx.scan::<Vec<u8>, _>(range).await?;
-        Ok(Arc::new(DbIterator::new(iter)))
+        Ok(Arc::new(FfiDbIterator::new(iter)))
     }
 
     /// Scan a key range using custom scan options.
@@ -186,21 +186,24 @@ impl DbTransaction {
         &self,
         range: FfiKeyRange,
         options: FfiScanOptions,
-    ) -> Result<Arc<DbIterator>, FfiSlatedbError> {
+    ) -> Result<Arc<FfiDbIterator>, FfiSlatedbError> {
         let range = range.into_bounds()?;
         let options = options.into_core()?;
         let guard = self.inner.lock().await;
         let tx = guard.as_ref().ok_or_else(transaction_completed)?;
         let iter = tx.scan_with_options::<Vec<u8>, _>(range, &options).await?;
-        Ok(Arc::new(DbIterator::new(iter)))
+        Ok(Arc::new(FfiDbIterator::new(iter)))
     }
 
     /// Scan all keys that share the provided prefix.
-    pub async fn scan_prefix(&self, prefix: Vec<u8>) -> Result<Arc<DbIterator>, FfiSlatedbError> {
+    pub async fn scan_prefix(
+        &self,
+        prefix: Vec<u8>,
+    ) -> Result<Arc<FfiDbIterator>, FfiSlatedbError> {
         let guard = self.inner.lock().await;
         let tx = guard.as_ref().ok_or_else(transaction_completed)?;
         let iter = tx.scan_prefix(prefix).await?;
-        Ok(Arc::new(DbIterator::new(iter)))
+        Ok(Arc::new(FfiDbIterator::new(iter)))
     }
 
     /// Scan all keys that share the provided prefix using custom scan options.
@@ -208,12 +211,12 @@ impl DbTransaction {
         &self,
         prefix: Vec<u8>,
         options: FfiScanOptions,
-    ) -> Result<Arc<DbIterator>, FfiSlatedbError> {
+    ) -> Result<Arc<FfiDbIterator>, FfiSlatedbError> {
         let options = options.into_core()?;
         let guard = self.inner.lock().await;
         let tx = guard.as_ref().ok_or_else(transaction_completed)?;
         let iter = tx.scan_prefix_with_options(prefix, &options).await?;
-        Ok(Arc::new(DbIterator::new(iter)))
+        Ok(Arc::new(FfiDbIterator::new(iter)))
     }
 
     /// Commit the transaction using default write options.
