@@ -240,7 +240,7 @@ mod tests {
         let handle = table_store.write_sst(&id, encoded, false).await.unwrap();
         let sr = SortedRun {
             id: 0,
-            sst_views: vec![handle.into()],
+            sst_views: vec![SsTableView::identity(handle)],
         };
 
         let mut iter = SortedRunIterator::new_owned_initialized(
@@ -301,7 +301,10 @@ mod tests {
         let handle2 = table_store.write_sst(&id2, encoded, false).await.unwrap();
         let sr = SortedRun {
             id: 0,
-            sst_views: vec![handle1.into(), handle2.into()],
+            sst_views: vec![
+                SsTableView::identity(handle1),
+                SsTableView::identity(handle2),
+            ],
         };
 
         let mut iter = SortedRunIterator::new_owned_initialized(
@@ -513,7 +516,7 @@ mod tests {
             let encoded = builder.build().await.unwrap();
             let id = SsTableId::Compacted(ulid::Ulid::new());
             let handle = table_store.write_sst(&id, encoded, false).await.unwrap();
-            ssts.push(handle.into());
+            ssts.push(SsTableView::identity(handle));
         }
 
         SortedRun {
@@ -538,7 +541,7 @@ mod tests {
                 writer.add(entry).await.unwrap();
             }
             let sst = writer.close().await.unwrap();
-            ssts.push(sst.into());
+            ssts.push(SsTableView::identity(sst));
         }
         SortedRun {
             id: 0,
@@ -620,10 +623,10 @@ mod tests {
             let sorted_run = SortedRun {
                 id: 0,
                 sst_views: vec![
-                    sst1_v1.into(),
-                    sst2_v2.into(),
-                    sst3_v1.into(),
-                    sst4_v2.into(),
+                    SsTableView::identity(sst1_v1),
+                    SsTableView::identity(sst2_v2),
+                    SsTableView::identity(sst3_v1),
+                    SsTableView::identity(sst4_v2),
                 ],
             };
 
@@ -691,10 +694,10 @@ mod tests {
             let sorted_run = SortedRun {
                 id: 0,
                 sst_views: vec![
-                    sst1_v1.into(),
-                    sst2_v2.into(),
-                    sst3_v1.into(),
-                    sst4_v2.into(),
+                    SsTableView::identity(sst1_v1),
+                    SsTableView::identity(sst2_v2),
+                    SsTableView::identity(sst3_v1),
+                    SsTableView::identity(sst4_v2),
                 ],
             };
 

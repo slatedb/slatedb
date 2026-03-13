@@ -2540,39 +2540,35 @@ mod tests {
             first_entry: Some(Bytes::from_static(b"m")),
             ..SsTableInfo::default()
         };
-        let l0_view_newest: SsTableView = SsTableHandle::new(
+        let l0_view_newest: SsTableView = SsTableView::identity(SsTableHandle::new(
             SsTableId::Compacted(Ulid::new()),
             SST_FORMAT_VERSION_LATEST,
             l0_info.clone(),
-        )
-        .into();
-        let l0_view_oldest: SsTableView = SsTableHandle::new(
+        ));
+        let l0_view_oldest: SsTableView = SsTableView::identity(SsTableHandle::new(
             SsTableId::Compacted(Ulid::new()),
             SST_FORMAT_VERSION_LATEST,
             l0_info.clone(),
-        )
-        .into();
+        ));
         let l0_newest = l0_view_newest.id;
         let l0_oldest = l0_view_oldest.id;
         dirty.value.core.l0 = VecDeque::from(vec![l0_view_newest, l0_view_oldest]);
         dirty.value.core.compacted = vec![
             SortedRun {
                 id: 2,
-                sst_views: vec![SsTableHandle::new(
+                sst_views: vec![SsTableView::identity(SsTableHandle::new(
                     SsTableId::Compacted(Ulid::new()),
                     SST_FORMAT_VERSION_LATEST,
                     sr_info.clone(),
-                )
-                .into()],
+                ))],
             },
             SortedRun {
                 id: 1,
-                sst_views: vec![SsTableHandle::new(
+                sst_views: vec![SsTableView::identity(SsTableHandle::new(
                     SsTableId::Compacted(Ulid::new()),
                     SST_FORMAT_VERSION_LATEST,
                     sr_info.clone(),
-                )
-                .into()],
+                ))],
             },
         ];
         stored_manifest.update(dirty).await.unwrap();
@@ -2648,39 +2644,35 @@ mod tests {
             first_entry: Some(Bytes::from_static(b"m")),
             ..SsTableInfo::default()
         };
-        let l0_view_first: SsTableView = SsTableHandle::new(
+        let l0_view_first: SsTableView = SsTableView::identity(SsTableHandle::new(
             SsTableId::Compacted(Ulid::from_parts(1, 0)),
             SST_FORMAT_VERSION_LATEST,
             l0_info.clone(),
-        )
-        .into();
-        let l0_view_second: SsTableView = SsTableHandle::new(
+        ));
+        let l0_view_second: SsTableView = SsTableView::identity(SsTableHandle::new(
             SsTableId::Compacted(Ulid::from_parts(2, 0)),
             SST_FORMAT_VERSION_LATEST,
             l0_info,
-        )
-        .into();
+        ));
         let l0_first = l0_view_first.id;
         let l0_second = l0_view_second.id;
         core.l0 = VecDeque::from(vec![l0_view_first, l0_view_second]);
         core.compacted = vec![
             SortedRun {
                 id: 5,
-                sst_views: vec![SsTableHandle::new(
+                sst_views: vec![SsTableView::identity(SsTableHandle::new(
                     SsTableId::Compacted(Ulid::from_parts(10, 0)),
                     SST_FORMAT_VERSION_LATEST,
                     sr_info.clone(),
-                )
-                .into()],
+                ))],
             },
             SortedRun {
                 id: 2,
-                sst_views: vec![SsTableHandle::new(
+                sst_views: vec![SsTableView::identity(SsTableHandle::new(
                     SsTableId::Compacted(Ulid::from_parts(11, 0)),
                     SST_FORMAT_VERSION_LATEST,
                     sr_info,
-                )
-                .into()],
+                ))],
             },
         ];
         let state = CompactorStateView {

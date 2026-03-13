@@ -230,7 +230,7 @@ mod tests {
     use super::*;
     use crate::compactions_store::{CompactionsStore, StoredCompactions};
     use crate::compactor_state::{Compaction, CompactionSpec, SourceId};
-    use crate::db_state::{ManifestCore, SsTableId};
+    use crate::db_state::{ManifestCore, SsTableId, SsTableView};
     use crate::format::sst::SsTableFormat;
     use crate::manifest::store::StoredManifest;
     use crate::object_stores::ObjectStores;
@@ -305,7 +305,11 @@ mod tests {
         // Mark one SST as active in the manifest so that most_recent_sst_dt
         // is newer than the configured minimum-age cutoff.
         let mut dirty = stored_manifest.prepare_dirty().unwrap();
-        dirty.value.core.l0.push_back(active_handle.into());
+        dirty
+            .value
+            .core
+            .l0
+            .push_back(SsTableView::identity(active_handle));
         stored_manifest.update(dirty).await.unwrap();
 
         let stat_registry = Arc::new(StatRegistry::new());
@@ -406,7 +410,11 @@ mod tests {
         // Mark id_manifest as the only active SST in the manifest so that
         // most_recent_sst_dt is 3_000ms, which becomes the cutoff.
         let mut dirty = stored_manifest.prepare_dirty().unwrap();
-        dirty.value.core.l0.push_back(manifest_handle.into());
+        dirty
+            .value
+            .core
+            .l0
+            .push_back(SsTableView::identity(manifest_handle));
         stored_manifest.update(dirty).await.unwrap();
 
         let stat_registry = Arc::new(StatRegistry::new());
@@ -495,7 +503,11 @@ mod tests {
         // most_recent_sst_dt boundary is 3_000ms and the compaction
         // low watermark (2_000ms) becomes the effective cutoff (see below).
         let mut dirty = stored_manifest.prepare_dirty().unwrap();
-        dirty.value.core.l0.push_back(active_handle.into());
+        dirty
+            .value
+            .core
+            .l0
+            .push_back(SsTableView::identity(active_handle));
         stored_manifest.update(dirty).await.unwrap();
 
         // Persist a running compaction with a start time at 2_000ms to act as the GC barrier.
@@ -584,7 +596,11 @@ mod tests {
             .await
             .unwrap();
         let mut dirty_manifest = stored_manifest.prepare_dirty().unwrap();
-        dirty_manifest.value.core.l0.push_back(l0_handle.into());
+        dirty_manifest
+            .value
+            .core
+            .l0
+            .push_back(SsTableView::identity(l0_handle));
         stored_manifest.update(dirty_manifest).await.unwrap();
 
         // Simulate a compaction that starts after GC reads compaction state, writes an

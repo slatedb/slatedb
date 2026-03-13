@@ -843,12 +843,11 @@ mod tests {
             index_len: 1,
             ..Default::default()
         };
-        SsTableHandle::new(
+        SsTableView::identity(SsTableHandle::new(
             SsTableId::Compacted(Ulid::new()),
             SST_FORMAT_VERSION_LATEST,
             info,
-        )
-        .into()
+        ))
     }
 
     #[test]

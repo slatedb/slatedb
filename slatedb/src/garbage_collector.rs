@@ -341,7 +341,7 @@ mod tests {
     use crate::format::sst::SsTableFormat;
     use crate::utils::WatchableOnceCell;
     use crate::{
-        db_state::{ManifestCore, SortedRun, SsTableHandle, SsTableId},
+        db_state::{ManifestCore, SortedRun, SsTableHandle, SsTableId, SsTableView},
         manifest::store::{ManifestStore, StoredManifest},
         tablestore::TableStore,
     };
@@ -1014,17 +1014,19 @@ mod tests {
 
         // Create a manifest
         let mut state = ManifestCore::new();
-        state.l0.push_back(l0_sst_handle.clone().into());
         state
             .l0
-            .push_back(active_expired_l0_sst_handle.clone().into());
+            .push_back(SsTableView::identity(l0_sst_handle.clone()));
+        state
+            .l0
+            .push_back(SsTableView::identity(active_expired_l0_sst_handle.clone()));
         // Dont' push inactive_expired_l0_sst_handle
         state.compacted.push(SortedRun {
             id: 1,
             // Don't add inactive_expired_sst_handle
             sst_views: vec![
-                active_sst_handle.clone().into(),
-                active_expired_sst_handle.clone().into(),
+                SsTableView::identity(active_sst_handle.clone()),
+                SsTableView::identity(active_expired_sst_handle.clone()),
             ],
         });
         StoredManifest::create_new_db(
@@ -1121,17 +1123,19 @@ mod tests {
 
         // Create an initial manifest with active and active checkpoint tables
         let mut state = ManifestCore::new();
-        state.l0.push_back(active_l0_sst_handle.clone().into());
         state
             .l0
-            .push_back(active_checkpoint_l0_sst_handle.clone().into());
+            .push_back(SsTableView::identity(active_l0_sst_handle.clone()));
+        state.l0.push_back(SsTableView::identity(
+            active_checkpoint_l0_sst_handle.clone(),
+        ));
         state.compacted.push(SortedRun {
             id: 1,
-            sst_views: vec![active_sst_handle.clone().into()],
+            sst_views: vec![SsTableView::identity(active_sst_handle.clone())],
         });
         state.compacted.push(SortedRun {
             id: 2,
-            sst_views: vec![active_checkpoint_sst_handle.clone().into()],
+            sst_views: vec![SsTableView::identity(active_checkpoint_sst_handle.clone())],
         });
         let mut stored_manifest = StoredManifest::create_new_db(
             manifest_store.clone(),

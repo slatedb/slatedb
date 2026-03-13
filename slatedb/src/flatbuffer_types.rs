@@ -1509,26 +1509,24 @@ mod tests {
     fn test_should_encode_decode_manifest_sst_with_version_set() {
         // given: a manifest with one L0 SST and one sorted run SST
         let mut manifest = Manifest::initial(ManifestCore::new());
-        manifest.core.l0 = VecDeque::from(vec![SsTableHandle::new(
+        manifest.core.l0 = VecDeque::from(vec![SsTableView::identity(SsTableHandle::new(
             SsTableId::Compacted(ulid::Ulid::new()),
             SST_FORMAT_VERSION_LATEST,
             SsTableInfo {
                 first_entry: Some(Bytes::from_static(b"l0key")),
                 ..Default::default()
             },
-        )
-        .into()]);
+        ))]);
         manifest.core.compacted = vec![SortedRun {
             id: 1,
-            sst_views: vec![SsTableHandle::new(
+            sst_views: vec![SsTableView::identity(SsTableHandle::new(
                 SsTableId::Compacted(ulid::Ulid::new()),
                 SST_FORMAT_VERSION_LATEST,
                 SsTableInfo {
                     first_entry: Some(Bytes::from_static(b"srkey")),
                     ..Default::default()
                 },
-            )
-            .into()],
+            ))],
         }];
         let codec = FlatBufferManifestCodec {};
 

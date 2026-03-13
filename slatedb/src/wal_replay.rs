@@ -1,6 +1,7 @@
 use crate::db_state::{ManifestCore, SsTableId};
 use crate::error::SlateDBError;
 use crate::iter::RowEntryIterator;
+use crate::manifest::SsTableView;
 use crate::mem_table::WritableKVTable;
 use crate::sst_iter::{SstIterator, SstIteratorOptions};
 use crate::tablestore::TableStore;
@@ -159,7 +160,7 @@ impl WalReplayIterator<'_> {
             let sst = table_store.open_sst(&SsTableId::Wal(wal_id)).await?;
             SstIterator::new_owned_initialized(
                 ..,
-                sst.into(),
+                SsTableView::identity(sst),
                 Arc::clone(&table_store),
                 sst_iter_options,
             )

@@ -605,6 +605,7 @@ mod tests {
     use crate::format::sst::SsTableFormat;
     use crate::iter::RowEntryIterator;
     use crate::manifest::store::test_utils::new_dirty_manifest;
+    use crate::manifest::SsTableView;
     use crate::object_stores::ObjectStores;
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
     use crate::stats::StatRegistry;
@@ -871,11 +872,7 @@ mod tests {
         };
         let mut iter = SstIterator::new_owned_initialized(
             ..,
-            table_store
-                .open_sst(&SsTableId::Wal(1))
-                .await
-                .unwrap()
-                .into(),
+            SsTableView::identity(table_store.open_sst(&SsTableId::Wal(1)).await.unwrap()),
             table_store.clone(),
             sst_iter_options,
         )

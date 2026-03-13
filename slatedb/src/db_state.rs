@@ -93,15 +93,6 @@ impl Debug for SsTableView {
     }
 }
 
-impl From<SsTableHandle> for SsTableView {
-    /// Create a view using a deterministic id derived from the SST's own identity.
-    /// Use this only for ephemeral views (e.g. WAL iteration) or legacy migration
-    /// where no `DbRand` is available and the id is not stored in the manifest.
-    fn from(sst: SsTableHandle) -> Self {
-        Self::identity(sst)
-    }
-}
-
 impl SsTableView {
     /// Create a view using a deterministic id derived from the SST's own identity.
     /// Use this only for ephemeral views (e.g. WAL iteration) or legacy migration
@@ -846,7 +837,7 @@ mod tests {
                 SST_FORMAT_VERSION_LATEST,
                 dummy_info.clone(),
             );
-            let view: SsTableView = handle.into();
+            let view: SsTableView = SsTableView::identity(handle);
             db_state.modify(|modifier| {
                 modifier.state.manifest.value.core.l0.push_front(view);
                 modifier.state.manifest.value.core.replay_after_wal_id =
@@ -912,7 +903,7 @@ mod tests {
         let sst_info = create_sst_info(first_entry);
         let sst_id = SsTableId::Compacted(ulid::Ulid::from_parts(0, 0));
         let handle = SsTableHandle::new(sst_id, SST_FORMAT_VERSION_LATEST, sst_info);
-        handle.into()
+        SsTableView::identity(handle)
     }
 
     fn create_sst_info(first_entry: Option<Bytes>) -> SsTableInfo {
