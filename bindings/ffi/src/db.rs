@@ -42,6 +42,7 @@ impl FfiDb {
 
 #[uniffi::export(async_runtime = "tokio")]
 impl FfiDb {
+    // `shutdown` because `close` is reserved by uniffi for the destructor
     #[uniffi::method(name = "shutdown")]
     pub async fn close(&self) -> Result<(), FfiSlatedbError> {
         self.inner.close().await.map_err(Into::into)
