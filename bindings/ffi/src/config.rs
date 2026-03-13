@@ -3,11 +3,7 @@
 use std::ops::Bound;
 use std::time::Duration;
 
-use slatedb::config as core_config;
-use slatedb::{
-    IsolationLevel as CoreIsolationLevel, KeyValue as CoreKeyValue,
-    SstBlockSize as CoreSstBlockSize, WriteHandle as CoreWriteHandle,
-};
+use slatedb::{IsolationLevel, KeyValue, SstBlockSize, WriteHandle};
 
 use crate::error::FfiSlatedbError;
 use crate::validation::try_usize;
@@ -256,59 +252,59 @@ pub struct FfiWriteHandle {
 }
 
 impl FfiDurabilityLevel {
-    pub(crate) fn into_core(self) -> core_config::DurabilityLevel {
+    pub(crate) fn into_core(self) -> slatedb::config::DurabilityLevel {
         match self {
-            Self::Remote => core_config::DurabilityLevel::Remote,
-            Self::Memory => core_config::DurabilityLevel::Memory,
+            Self::Remote => slatedb::config::DurabilityLevel::Remote,
+            Self::Memory => slatedb::config::DurabilityLevel::Memory,
         }
     }
 }
 
 impl FfiFlushType {
-    pub(crate) fn into_core(self) -> core_config::FlushType {
+    pub(crate) fn into_core(self) -> slatedb::config::FlushType {
         match self {
-            Self::MemTable => core_config::FlushType::MemTable,
-            Self::Wal => core_config::FlushType::Wal,
+            Self::MemTable => slatedb::config::FlushType::MemTable,
+            Self::Wal => slatedb::config::FlushType::Wal,
         }
     }
 }
 
 impl FfiIsolationLevel {
-    pub(crate) fn into_core(self) -> CoreIsolationLevel {
+    pub(crate) fn into_core(self) -> IsolationLevel {
         match self {
-            Self::Snapshot => CoreIsolationLevel::Snapshot,
-            Self::SerializableSnapshot => CoreIsolationLevel::SerializableSnapshot,
+            Self::Snapshot => IsolationLevel::Snapshot,
+            Self::SerializableSnapshot => IsolationLevel::SerializableSnapshot,
         }
     }
 }
 
 impl FfiSstBlockSize {
-    pub(crate) fn into_core(self) -> CoreSstBlockSize {
+    pub(crate) fn into_core(self) -> SstBlockSize {
         match self {
-            Self::Block1Kib => CoreSstBlockSize::Block1Kib,
-            Self::Block2Kib => CoreSstBlockSize::Block2Kib,
-            Self::Block4Kib => CoreSstBlockSize::Block4Kib,
-            Self::Block8Kib => CoreSstBlockSize::Block8Kib,
-            Self::Block16Kib => CoreSstBlockSize::Block16Kib,
-            Self::Block32Kib => CoreSstBlockSize::Block32Kib,
-            Self::Block64Kib => CoreSstBlockSize::Block64Kib,
+            Self::Block1Kib => SstBlockSize::Block1Kib,
+            Self::Block2Kib => SstBlockSize::Block2Kib,
+            Self::Block4Kib => SstBlockSize::Block4Kib,
+            Self::Block8Kib => SstBlockSize::Block8Kib,
+            Self::Block16Kib => SstBlockSize::Block16Kib,
+            Self::Block32Kib => SstBlockSize::Block32Kib,
+            Self::Block64Kib => SstBlockSize::Block64Kib,
         }
     }
 }
 
 impl FfiTtl {
-    pub(crate) fn into_core(self) -> core_config::Ttl {
+    pub(crate) fn into_core(self) -> slatedb::config::Ttl {
         match self {
-            Self::Default => core_config::Ttl::Default,
-            Self::NoExpiry => core_config::Ttl::NoExpiry,
-            Self::ExpireAfterTicks(ttl) => core_config::Ttl::ExpireAfter(ttl),
+            Self::Default => slatedb::config::Ttl::Default,
+            Self::NoExpiry => slatedb::config::Ttl::NoExpiry,
+            Self::ExpireAfterTicks(ttl) => slatedb::config::Ttl::ExpireAfter(ttl),
         }
     }
 }
 
 impl FfiReadOptions {
-    pub(crate) fn into_core(self) -> core_config::ReadOptions {
-        core_config::ReadOptions {
+    pub(crate) fn into_core(self) -> slatedb::config::ReadOptions {
+        slatedb::config::ReadOptions {
             durability_filter: self.durability_filter.into_core(),
             dirty: self.dirty,
             cache_blocks: self.cache_blocks,
@@ -317,8 +313,8 @@ impl FfiReadOptions {
 }
 
 impl FfiReaderOptions {
-    pub(crate) fn into_core(self) -> core_config::DbReaderOptions {
-        let mut options = core_config::DbReaderOptions::default();
+    pub(crate) fn into_core(self) -> slatedb::config::DbReaderOptions {
+        let mut options = slatedb::config::DbReaderOptions::default();
         options.manifest_poll_interval = Duration::from_millis(self.manifest_poll_interval_ms);
         options.checkpoint_lifetime = Duration::from_millis(self.checkpoint_lifetime_ms);
         options.max_memtable_bytes = self.max_memtable_bytes;
@@ -328,8 +324,8 @@ impl FfiReaderOptions {
 }
 
 impl FfiScanOptions {
-    pub(crate) fn into_core(self) -> Result<core_config::ScanOptions, FfiSlatedbError> {
-        Ok(core_config::ScanOptions {
+    pub(crate) fn into_core(self) -> Result<slatedb::config::ScanOptions, FfiSlatedbError> {
+        Ok(slatedb::config::ScanOptions {
             durability_filter: self.durability_filter.into_core(),
             dirty: self.dirty,
             read_ahead_bytes: try_usize(self.read_ahead_bytes, "read_ahead_bytes")?,
@@ -340,32 +336,32 @@ impl FfiScanOptions {
 }
 
 impl FfiWriteOptions {
-    pub(crate) fn into_core(self) -> core_config::WriteOptions {
-        core_config::WriteOptions {
+    pub(crate) fn into_core(self) -> slatedb::config::WriteOptions {
+        slatedb::config::WriteOptions {
             await_durable: self.await_durable,
         }
     }
 }
 
 impl FfiPutOptions {
-    pub(crate) fn into_core(self) -> core_config::PutOptions {
-        core_config::PutOptions {
+    pub(crate) fn into_core(self) -> slatedb::config::PutOptions {
+        slatedb::config::PutOptions {
             ttl: self.ttl.into_core(),
         }
     }
 }
 
 impl FfiMergeOptions {
-    pub(crate) fn into_core(self) -> core_config::MergeOptions {
-        core_config::MergeOptions {
+    pub(crate) fn into_core(self) -> slatedb::config::MergeOptions {
+        slatedb::config::MergeOptions {
             ttl: self.ttl.into_core(),
         }
     }
 }
 
 impl FfiFlushOptions {
-    pub(crate) fn into_core(self) -> core_config::FlushOptions {
-        core_config::FlushOptions {
+    pub(crate) fn into_core(self) -> slatedb::config::FlushOptions {
+        slatedb::config::FlushOptions {
             flush_type: self.flush_type.into_core(),
         }
     }
@@ -416,7 +412,7 @@ impl FfiKeyRange {
 }
 
 impl FfiKeyValue {
-    pub(crate) fn from_core(value: CoreKeyValue) -> Self {
+    pub(crate) fn from_core(value: KeyValue) -> Self {
         Self {
             key: value.key.to_vec(),
             value: value.value.to_vec(),
@@ -428,7 +424,7 @@ impl FfiKeyValue {
 }
 
 impl FfiWriteHandle {
-    pub(crate) fn from_core(value: CoreWriteHandle) -> Self {
+    pub(crate) fn from_core(value: WriteHandle) -> Self {
         Self {
             seqnum: value.seqnum(),
             create_ts: value.create_ts(),

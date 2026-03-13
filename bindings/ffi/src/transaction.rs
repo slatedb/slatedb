@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use slatedb::DbTransaction as CoreDbTransaction;
-use tokio::sync::Mutex as AsyncMutex;
+use tokio::sync::Mutex;
 
 use crate::config::{
     FfiKeyRange, FfiKeyValue, FfiMergeOptions, FfiPutOptions, FfiReadOptions, FfiScanOptions,
@@ -19,7 +19,7 @@ use crate::validation::{transaction_completed, validate_key, validate_key_value}
 /// rolled back. After completion, all further method calls return an error.
 #[derive(uniffi::Object)]
 pub struct DbTransaction {
-    inner: AsyncMutex<Option<CoreDbTransaction>>,
+    inner: Mutex<Option<CoreDbTransaction>>,
     id: String,
     seqnum: u64,
 }
@@ -29,7 +29,7 @@ impl DbTransaction {
         Self {
             id: inner.id().to_string(),
             seqnum: inner.seqnum(),
-            inner: AsyncMutex::new(Some(inner)),
+            inner: Mutex::new(Some(inner)),
         }
     }
 }

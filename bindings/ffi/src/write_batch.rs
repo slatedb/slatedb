@@ -1,6 +1,6 @@
 //! First-class write batch wrapper exposed by UniFFI.
 
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::{Arc, Mutex};
 
 use slatedb::WriteBatch as CoreWriteBatch;
 
@@ -13,7 +13,7 @@ use crate::validation::{
 /// A mutable batch of write operations that can be written atomically.
 #[derive(uniffi::Object)]
 pub struct WriteBatch {
-    state: StdMutex<WriteBatchState>,
+    state: Mutex<WriteBatchState>,
 }
 
 enum WriteBatchState {
@@ -62,7 +62,7 @@ impl WriteBatch {
     #[uniffi::constructor]
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
-            state: StdMutex::new(WriteBatchState::Open(CoreWriteBatch::new())),
+            state: Mutex::new(WriteBatchState::Open(CoreWriteBatch::new())),
         })
     }
 

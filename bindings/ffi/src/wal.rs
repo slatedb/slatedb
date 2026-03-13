@@ -4,10 +4,10 @@ use std::ops::Bound;
 use std::sync::Arc;
 
 use slatedb::{
-    RowEntry as CoreRowEntry, ValueDeletable, WalFile as CoreWalFile,
-    WalFileIterator as CoreWalFileIterator, WalReader as CoreWalReader,
+    RowEntry, ValueDeletable, WalFile as CoreWalFile, WalFileIterator as CoreWalFileIterator,
+    WalReader as CoreWalReader,
 };
-use tokio::sync::Mutex as AsyncMutex;
+use tokio::sync::Mutex;
 
 use crate::error::FfiSlatedbError;
 use crate::object_store::ObjectStore;
@@ -49,7 +49,7 @@ pub struct WalFile {
 /// An iterator over rows in a WAL file.
 #[derive(uniffi::Object)]
 pub struct WalFileIterator {
-    inner: AsyncMutex<CoreWalFileIterator>,
+    inner: Mutex<CoreWalFileIterator>,
 }
 
 /// A WAL reader scoped to a single database path and object store.
@@ -59,7 +59,7 @@ pub struct WalReader {
 }
 
 impl FfiRowEntry {
-    fn from_core(entry: CoreRowEntry) -> Self {
+    fn from_core(entry: RowEntry) -> Self {
         let (kind, value) = match entry.value {
             ValueDeletable::Value(value) => (FfiRowEntryKind::Value, Some(value.to_vec())),
             ValueDeletable::Tombstone => (FfiRowEntryKind::Tombstone, None),
@@ -86,7 +86,7 @@ impl WalFile {
 impl WalFileIterator {
     fn new(inner: CoreWalFileIterator) -> Self {
         Self {
-            inner: AsyncMutex::new(inner),
+            inner: Mutex::new(inner),
         }
     }
 }

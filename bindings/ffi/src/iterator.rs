@@ -1,6 +1,6 @@
 //! Iterators returned by scan operations.
 
-use tokio::sync::Mutex as AsyncMutex;
+use tokio::sync::Mutex;
 
 use crate::config::FfiKeyValue;
 use crate::error::FfiSlatedbError;
@@ -11,13 +11,13 @@ use crate::error::FfiSlatedbError;
 /// [`crate::DbSnapshot`], and [`crate::DbTransaction`].
 #[derive(uniffi::Object)]
 pub struct DbIterator {
-    inner: AsyncMutex<slatedb::DbIterator>,
+    inner: Mutex<slatedb::DbIterator>,
 }
 
 impl DbIterator {
     pub(crate) fn new(inner: slatedb::DbIterator) -> Self {
         Self {
-            inner: AsyncMutex::new(inner),
+            inner: Mutex::new(inner),
         }
     }
 }
