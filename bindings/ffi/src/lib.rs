@@ -22,7 +22,6 @@ pub use db::{FfiDb, FfiDbSnapshot};
 pub use db_reader::FfiDbReader;
 pub use error::{FfiCloseReason, FfiMergeOperatorCallbackError, FfiSlatedbError};
 pub use iterator::FfiDbIterator;
-pub use logging::{ffi_init_default_logging, ffi_init_logging, ffi_set_logging_level, FfiLogLevel};
 pub use merge_operator::FfiMergeOperator;
 pub use object_store::{ffi_resolve_object_store, FfiObjectStore};
 pub use settings::ffi_default_settings_json;
