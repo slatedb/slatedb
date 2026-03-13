@@ -714,7 +714,6 @@ mod tests {
     use crate::db_cache::test_utils::TestCache;
     use crate::db_cache::SplitCache;
     use crate::db_cache::{DbCache, DbCacheWrapper};
-
     use crate::error;
     use crate::format::block::Block;
     use crate::format::sst::SsTableFormat;

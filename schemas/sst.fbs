@@ -91,11 +91,13 @@ table CompactedSsTableV2 {
     format_version: uint16 = null;
 }
 
+// A view over an SST specifying the key range that is visible for reads and compactions
 table CompactedSsTableView {
     // Unique identifier for this view. Used to track individual views in compaction specs.
     id: Ulid (required);
     // Reference to a CompactedSsTable by its id (stored at the top level of ManifestV2).
     sst_id: Ulid (required);
+    // The key range that this view is restricted to over
     visible_range: BytesRange;
 }
 

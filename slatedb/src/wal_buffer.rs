@@ -600,7 +600,6 @@ impl MessageHandler<WalFlushWork> for WalFlushHandler {
 mod tests {
     use super::*;
     use crate::clock::MonotonicClock;
-
     use crate::db_status::DbStatusReporter;
     use crate::format::sst::SsTableFormat;
     use crate::iter::RowEntryIterator;
