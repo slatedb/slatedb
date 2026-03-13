@@ -263,7 +263,7 @@ impl FlatBufferManifestCodec {
         let l0_last_compacted = l0_last_compacted.and_then(|sst_ulid| {
             l0.iter()
                 .find(|view| view.sst.id.unwrap_compacted_id() == sst_ulid)
-                .map(|view| view.view_id)
+                .map(|view| view.id)
         });
         let checkpoints: Vec<checkpoint::Checkpoint> = manifest
             .checkpoints()
@@ -329,14 +329,14 @@ impl FlatBufferManifestCodec {
         view: &CompactedSsTableView,
         sst_lookup: &std::collections::HashMap<Ulid, SsTableHandle>,
     ) -> Result<SsTableView, Box<dyn std::error::Error + Send + Sync>> {
-        let view_id = view.view_id().ulid();
+        let id = view.id().ulid();
         let ulid = view.sst_id().ulid();
         let handle = sst_lookup
             .get(&ulid)
             .ok_or_else(|| format!("CompactedSsTableView references unknown SST id: {ulid}"))?
             .clone();
         Ok(SsTableView::new_projected(
-            view_id,
+            id,
             handle,
             view.visible_range().map(Self::decode_bytes_range),
         ))
@@ -696,15 +696,15 @@ impl<'b> DbFlatBufferBuilder<'b> {
             }
             SsTableId::Compacted(ulid) => ulid,
         };
-        let id = self.add_compacted_sst_id(&ulid);
+        let sst_id = self.add_compacted_sst_id(&ulid);
         let visible_range = view.visible_range.as_ref().map(|r| self.add_bytes_range(r));
-        let view_id = Some(self.add_ulid(&view.view_id));
+        let id = Some(self.add_ulid(&view.id));
         CompactedSsTableView::create(
             &mut self.builder,
             &CompactedSsTableViewArgs {
-                sst_id: Some(id),
+                sst_id: Some(sst_id),
                 visible_range,
-                view_id,
+                id,
             },
         )
     }

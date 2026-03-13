@@ -363,7 +363,7 @@ impl CompactionScheduler for OnDemandCompactionScheduler {
         let mut sources: Vec<SourceId> = db_state
             .l0
             .iter()
-            .map(|view| SourceId::SstView(view.view_id))
+            .map(|view| SourceId::SstView(view.id))
             .collect();
 
         // Add SSTs from all sorted runs

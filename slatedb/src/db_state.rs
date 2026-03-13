@@ -70,7 +70,7 @@ impl AsRef<SsTableHandle> for SsTableHandle {
 #[derive(Clone, PartialEq, Serialize)]
 pub struct SsTableView {
     /// Unique identifier for this view.
-    pub(crate) view_id: Ulid,
+    pub(crate) id: Ulid,
 
     /// The underlying physical SSTable handle.
     pub sst: SsTableHandle,
@@ -94,28 +94,28 @@ impl Debug for SsTableView {
 }
 
 impl From<SsTableHandle> for SsTableView {
-    /// Create a view using a deterministic view_id derived from the SST's own identity.
+    /// Create a view using a deterministic id derived from the SST's own identity.
     /// Use this only for ephemeral views (e.g. WAL iteration) or legacy migration
-    /// where no `DbRand` is available and the view_id is not stored in the manifest.
+    /// where no `DbRand` is available and the id is not stored in the manifest.
     fn from(sst: SsTableHandle) -> Self {
         Self::identity(sst)
     }
 }
 
 impl SsTableView {
-    /// Create a view using a deterministic view_id derived from the SST's own identity.
+    /// Create a view using a deterministic id derived from the SST's own identity.
     /// Use this only for ephemeral views (e.g. WAL iteration) or legacy migration
-    /// where no `DbRand` is available and the view_id is not stored in the manifest.
+    /// where no `DbRand` is available and the id is not stored in the manifest.
     pub(crate) fn identity(sst: SsTableHandle) -> Self {
-        let view_id = match &sst.id {
+        let id = match &sst.id {
             SsTableId::Compacted(ulid) => *ulid,
             SsTableId::Wal(wal_id) => Ulid::from_parts(*wal_id, 0),
         };
-        Self::new(view_id, sst)
+        Self::new(id, sst)
     }
 
     /// Create a new view with no visible_range projection.
-    pub(crate) fn new(view_id: Ulid, sst: SsTableHandle) -> Self {
+    pub(crate) fn new(id: Ulid, sst: SsTableHandle) -> Self {
         let effective_range = match sst.info.first_entry.clone() {
             Some(physical_first_entry) => {
                 let end_bound = match sst.info.last_entry.clone() {
@@ -128,7 +128,7 @@ impl SsTableView {
         };
 
         SsTableView {
-            view_id,
+            id,
             sst,
             visible_range: None,
             effective_range,
@@ -137,7 +137,7 @@ impl SsTableView {
 
     /// Create a new projected view with an optional visible_range.
     pub(crate) fn new_projected(
-        view_id: Ulid,
+        id: Ulid,
         sst: SsTableHandle,
         visible_range: Option<BytesRange>,
     ) -> Self {
@@ -163,7 +163,7 @@ impl SsTableView {
                 .expect("An intersection of visible and physical range must be non-empty.")
         }
         SsTableView {
-            view_id,
+            id,
             sst,
             visible_range,
             effective_range,
@@ -171,7 +171,7 @@ impl SsTableView {
     }
 
     pub(crate) fn with_visible_range(&self, visible_range: BytesRange) -> Self {
-        Self::new_projected(self.view_id, self.sst.clone(), Some(visible_range))
+        Self::new_projected(self.id, self.sst.clone(), Some(visible_range))
     }
 
     /// The range of keys that are visible to the user.
@@ -689,7 +689,7 @@ impl<'a> StateModifier<'a> {
                 .l0
                 .iter()
                 .cloned()
-                .take_while(|view| view.view_id != *l0_last_compacted)
+                .take_while(|view| view.id != *l0_last_compacted)
                 .collect()
         } else {
             self.state.manifest.value.core.l0.iter().cloned().collect()
@@ -789,7 +789,7 @@ mod tests {
         let mut compactor_state = new_dirty_manifest();
         compactor_state.value.core = db_state.state.core().clone();
         let last_compacted = compactor_state.value.core.l0.pop_back().unwrap();
-        compactor_state.value.core.l0_last_compacted = Some(last_compacted.view_id);
+        compactor_state.value.core.l0_last_compacted = Some(last_compacted.id);
 
         // when:
         db_state.merge_remote_manifest(compactor_state.clone());

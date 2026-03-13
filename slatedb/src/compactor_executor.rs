@@ -457,8 +457,8 @@ impl TokioCompactionExecutorInner {
             sst_views: output_ssts
                 .into_iter()
                 .map(|sst| {
-                    let view_id = self.rand.rng().gen_ulid(self.clock.as_ref());
-                    SsTableView::new(view_id, sst)
+                    let id = self.rand.rng().gen_ulid(self.clock.as_ref());
+                    SsTableView::new(id, sst)
                 })
                 .collect(),
         })

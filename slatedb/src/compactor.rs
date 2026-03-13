@@ -175,7 +175,7 @@ pub trait CompactionScheduler: Send + Sync {
                 let sources = manifest
                     .l0
                     .iter()
-                    .map(|view| SourceId::SstView(view.view_id))
+                    .map(|view| SourceId::SstView(view.id))
                     .chain(
                         manifest
                             .compacted
@@ -603,11 +603,8 @@ impl CompactorEventHandler {
         use crate::db_state::{SortedRun, SsTableView};
         use std::collections::HashMap;
 
-        let views_by_id: HashMap<Ulid, &SsTableView> = db_state
-            .l0
-            .iter()
-            .map(|view| (view.view_id, view))
-            .collect();
+        let views_by_id: HashMap<Ulid, &SsTableView> =
+            db_state.l0.iter().map(|view| (view.id, view)).collect();
         let srs_by_id: HashMap<u32, &SortedRun> =
             db_state.compacted.iter().map(|sr| (sr.id, sr)).collect();
 
@@ -688,7 +685,7 @@ impl CompactorEventHandler {
         let l0_view_ids = db_state
             .l0
             .iter()
-            .map(|view| view.view_id)
+            .map(|view| view.id)
             .collect::<std::collections::HashSet<_>>();
         let sr_ids = db_state
             .compacted
@@ -2555,8 +2552,8 @@ mod tests {
             l0_info.clone(),
         )
         .into();
-        let l0_newest = l0_view_newest.view_id;
-        let l0_oldest = l0_view_oldest.view_id;
+        let l0_newest = l0_view_newest.id;
+        let l0_oldest = l0_view_oldest.id;
         dirty.value.core.l0 = VecDeque::from(vec![l0_view_newest, l0_view_oldest]);
         dirty.value.core.compacted = vec![
             SortedRun {
@@ -2663,8 +2660,8 @@ mod tests {
             l0_info,
         )
         .into();
-        let l0_first = l0_view_first.view_id;
-        let l0_second = l0_view_second.view_id;
+        let l0_first = l0_view_first.id;
+        let l0_second = l0_view_second.id;
         core.l0 = VecDeque::from(vec![l0_view_first, l0_view_second]);
         core.compacted = vec![
             SortedRun {
@@ -2811,7 +2808,7 @@ mod tests {
             let l0_ids_to_compact: Vec<SourceId> = db_state
                 .l0
                 .iter()
-                .map(|h| SourceId::SstView(h.view_id))
+                .map(|h| SourceId::SstView(h.id))
                 .collect();
             CompactionSpec::new(l0_ids_to_compact, 0)
         }
@@ -3265,7 +3262,7 @@ mod tests {
         let sources = db_state
             .l0
             .iter()
-            .map(|h| SourceId::SstView(h.view_id))
+            .map(|h| SourceId::SstView(h.id))
             .collect::<Vec<_>>();
         let spec = CompactionSpec::new(sources, 0);
         let compaction_id = Ulid::new();
@@ -3498,7 +3495,7 @@ mod tests {
             .core
             .l0
             .iter()
-            .map(|view| SourceId::SstView(view.view_id))
+            .map(|view| SourceId::SstView(view.id))
             .collect();
         assert_eq!(&l0_ids, compaction.sources());
     }
@@ -3655,7 +3652,7 @@ mod tests {
         fixture.handler.handle_ticker().await.unwrap();
         let state = fixture.latest_db_state().await;
         let sr_id = state.compacted.first().unwrap().id;
-        let l0_view_id = state.l0.front().unwrap().view_id;
+        let l0_view_id = state.l0.front().unwrap().id;
         let mixed = CompactionSpec::new(
             vec![SourceId::SortedRun(sr_id), SourceId::SstView(l0_view_id)],
             sr_id,

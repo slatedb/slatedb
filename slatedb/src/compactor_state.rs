@@ -62,7 +62,7 @@ impl SourceId {
     pub(crate) fn maybe_unwrap_sst_view(&self) -> Option<Ulid> {
         match self {
             SourceId::SortedRun(_) => None,
-            SourceId::SstView(view_id) => Some(*view_id),
+            SourceId::SstView(id) => Some(*id),
         }
     }
 }
@@ -207,11 +207,8 @@ impl Compaction {
     /// ## Arguments
     /// - `db_state`: The current core DB state from the manifest.
     pub(crate) fn get_l0_sst_views(&self, db_state: &ManifestCore) -> Vec<SsTableView> {
-        let sst_views_by_id: HashMap<Ulid, &SsTableView> = db_state
-            .l0
-            .iter()
-            .map(|view| (view.view_id, view))
-            .collect();
+        let sst_views_by_id: HashMap<Ulid, &SsTableView> =
+            db_state.l0.iter().map(|view| (view.id, view)).collect();
 
         self.spec
             .sources()
@@ -536,7 +533,7 @@ impl CompactorState {
             //       and assert that it follows the order
             if match &last_compacted_l0 {
                 None => true,
-                Some(last_compacted_l0_id) => writer_l0_sst.view_id != *last_compacted_l0_id,
+                Some(last_compacted_l0_id) => writer_l0_sst.id != *last_compacted_l0_id,
             } {
                 merged_l0s.push_back(writer_l0_sst.clone());
             } else {
@@ -645,7 +642,7 @@ impl CompactorState {
             let new_l0: VecDeque<SsTableView> = db_state
                 .l0
                 .iter()
-                .filter(|l0| !compaction_l0s.contains(&l0.view_id))
+                .filter(|l0| !compaction_l0s.contains(&l0.id))
                 .cloned()
                 .collect();
             let mut new_compacted = Vec::new();
@@ -913,7 +910,7 @@ mod tests {
         // then:
         assert_eq!(
             state.db_state().l0_last_compacted,
-            Some(before_compaction.l0.front().unwrap().view_id)
+            Some(before_compaction.l0.front().unwrap().id)
         );
         assert_eq!(state.db_state().l0.len(), 0);
         assert_eq!(state.db_state().compacted.len(), 1);
@@ -996,7 +993,7 @@ mod tests {
         // compact the last sst
         let original_l0s = &state.db_state().clone().l0;
         let compaction_id = rand.rng().gen_ulid(system_clock.as_ref());
-        let spec = CompactionSpec::new(vec![SstView(original_l0s.back().unwrap().view_id)], 0);
+        let spec = CompactionSpec::new(vec![SstView(original_l0s.back().unwrap().id)], 0);
         let compaction = Compaction::new(compaction_id, spec);
         state
             .add_compaction(compaction)
@@ -1061,8 +1058,7 @@ mod tests {
         let original_l0s = &state.db_state().clone().l0;
         let compaction_id = rand.rng().gen_ulid(system_clock.as_ref());
 
-        let spec =
-            CompactionSpec::new(original_l0s.iter().map(|h| SstView(h.view_id)).collect(), 0);
+        let spec = CompactionSpec::new(original_l0s.iter().map(|h| SstView(h.id)).collect(), 0);
         let compaction = Compaction::new(compaction_id, spec);
         state
             .add_compaction(compaction)
@@ -1142,7 +1138,7 @@ mod tests {
                 .iter()
                 .enumerate()
                 .filter(|(i, _e)| i > &2usize)
-                .map(|(_i, x)| SstView(x.view_id))
+                .map(|(_i, x)| SstView(x.id))
                 .collect::<Vec<SourceId>>(),
             0,
         );
@@ -1161,10 +1157,7 @@ mod tests {
         let original_l0s = &state.db_state().clone().l0;
         let original_srs = &state.db_state().clone().compacted;
         // L0: from 4th onward (index > 2)
-        let l0_sources = original_l0s
-            .iter()
-            .skip(3)
-            .map(|h| SourceId::SstView(h.view_id));
+        let l0_sources = original_l0s.iter().skip(3).map(|h| SourceId::SstView(h.id));
 
         // SRs: first 3 (index < 3)
         let sr_sources = original_srs
@@ -1256,7 +1249,7 @@ mod tests {
     }
 
     fn build_l0_compaction(ssts: &VecDeque<SsTableView>, dst: u32) -> CompactionSpec {
-        let sources = ssts.iter().map(|h| SourceId::SstView(h.view_id)).collect();
+        let sources = ssts.iter().map(|h| SourceId::SstView(h.id)).collect();
         CompactionSpec::new(sources, dst)
     }
 

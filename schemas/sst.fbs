@@ -93,7 +93,7 @@ table CompactedSsTableV2 {
 
 table CompactedSsTableView {
     // Unique identifier for this view. Used to track individual views in compaction specs.
-    view_id: Ulid (required);
+    id: Ulid (required);
     // Reference to a CompactedSsTable by its id (stored at the top level of ManifestV2).
     sst_id: Ulid (required);
     visible_range: BytesRange;

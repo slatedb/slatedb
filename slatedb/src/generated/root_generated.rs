@@ -1940,7 +1940,7 @@ impl<'a> flatbuffers::Follow<'a> for CompactedSsTableView<'a> {
 }
 
 impl<'a> CompactedSsTableView<'a> {
-  pub const VT_VIEW_ID: flatbuffers::VOffsetT = 4;
+  pub const VT_ID: flatbuffers::VOffsetT = 4;
   pub const VT_SST_ID: flatbuffers::VOffsetT = 6;
   pub const VT_VISIBLE_RANGE: flatbuffers::VOffsetT = 8;
 
@@ -1956,17 +1956,17 @@ impl<'a> CompactedSsTableView<'a> {
     let mut builder = CompactedSsTableViewBuilder::new(_fbb);
     if let Some(x) = args.visible_range { builder.add_visible_range(x); }
     if let Some(x) = args.sst_id { builder.add_sst_id(x); }
-    if let Some(x) = args.view_id { builder.add_view_id(x); }
+    if let Some(x) = args.id { builder.add_id(x); }
     builder.finish()
   }
 
 
   #[inline]
-  pub fn view_id(&self) -> Ulid<'a> {
+  pub fn id(&self) -> Ulid<'a> {
     // Safety:
     // Created from valid Table for this object
     // which contains a valid value in this slot
-    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<Ulid>>(CompactedSsTableView::VT_VIEW_ID, None).unwrap()}
+    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<Ulid>>(CompactedSsTableView::VT_ID, None).unwrap()}
   }
   #[inline]
   pub fn sst_id(&self) -> Ulid<'a> {
@@ -1991,7 +1991,7 @@ impl flatbuffers::Verifiable for CompactedSsTableView<'_> {
   ) -> Result<(), flatbuffers::InvalidFlatbuffer> {
     use self::flatbuffers::Verifiable;
     v.visit_table(pos)?
-     .visit_field::<flatbuffers::ForwardsUOffset<Ulid>>("view_id", Self::VT_VIEW_ID, true)?
+     .visit_field::<flatbuffers::ForwardsUOffset<Ulid>>("id", Self::VT_ID, true)?
      .visit_field::<flatbuffers::ForwardsUOffset<Ulid>>("sst_id", Self::VT_SST_ID, true)?
      .visit_field::<flatbuffers::ForwardsUOffset<BytesRange>>("visible_range", Self::VT_VISIBLE_RANGE, false)?
      .finish();
@@ -1999,7 +1999,7 @@ impl flatbuffers::Verifiable for CompactedSsTableView<'_> {
   }
 }
 pub struct CompactedSsTableViewArgs<'a> {
-    pub view_id: Option<flatbuffers::WIPOffset<Ulid<'a>>>,
+    pub id: Option<flatbuffers::WIPOffset<Ulid<'a>>>,
     pub sst_id: Option<flatbuffers::WIPOffset<Ulid<'a>>>,
     pub visible_range: Option<flatbuffers::WIPOffset<BytesRange<'a>>>,
 }
@@ -2007,7 +2007,7 @@ impl<'a> Default for CompactedSsTableViewArgs<'a> {
   #[inline]
   fn default() -> Self {
     CompactedSsTableViewArgs {
-      view_id: None, // required field
+      id: None, // required field
       sst_id: None, // required field
       visible_range: None,
     }
@@ -2020,8 +2020,8 @@ pub struct CompactedSsTableViewBuilder<'a: 'b, 'b, A: flatbuffers::Allocator + '
 }
 impl<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> CompactedSsTableViewBuilder<'a, 'b, A> {
   #[inline]
-  pub fn add_view_id(&mut self, view_id: flatbuffers::WIPOffset<Ulid<'b >>) {
-    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<Ulid>>(CompactedSsTableView::VT_VIEW_ID, view_id);
+  pub fn add_id(&mut self, id: flatbuffers::WIPOffset<Ulid<'b >>) {
+    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<Ulid>>(CompactedSsTableView::VT_ID, id);
   }
   #[inline]
   pub fn add_sst_id(&mut self, sst_id: flatbuffers::WIPOffset<Ulid<'b >>) {
@@ -2042,7 +2042,7 @@ impl<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> CompactedSsTableViewBuilder<'a,
   #[inline]
   pub fn finish(self) -> flatbuffers::WIPOffset<CompactedSsTableView<'a>> {
     let o = self.fbb_.end_table(self.start_);
-    self.fbb_.required(o, CompactedSsTableView::VT_VIEW_ID,"view_id");
+    self.fbb_.required(o, CompactedSsTableView::VT_ID,"id");
     self.fbb_.required(o, CompactedSsTableView::VT_SST_ID,"sst_id");
     flatbuffers::WIPOffset::new(o.value())
   }
@@ -2051,7 +2051,7 @@ impl<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> CompactedSsTableViewBuilder<'a,
 impl core::fmt::Debug for CompactedSsTableView<'_> {
   fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
     let mut ds = f.debug_struct("CompactedSsTableView");
-      ds.field("view_id", &self.view_id());
+      ds.field("id", &self.id());
       ds.field("sst_id", &self.sst_id());
       ds.field("visible_range", &self.visible_range());
       ds.finish()

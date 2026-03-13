@@ -215,7 +215,7 @@ impl CompactionScheduler for SizeTieredCompactionScheduler {
             .manifest()
             .l0
             .iter()
-            .map(|view| SourceId::SstView(view.view_id))
+            .map(|view| SourceId::SstView(view.id))
             .chain(
                 state
                     .manifest()
@@ -378,7 +378,7 @@ impl SizeTieredCompactionScheduler {
             .l0
             .iter()
             .map(|l0| CompactionSource {
-                source: SourceId::SstView(l0.view_id),
+                source: SourceId::SstView(l0.id),
                 size: l0.estimate_size(),
             })
             .collect();
@@ -463,8 +463,7 @@ mod tests {
         // then:
         assert_eq!(requests.len(), 1);
         let request = requests.first().unwrap();
-        let expected_sources: Vec<SourceId> =
-            l0.iter().map(|h| SourceId::SstView(h.view_id)).collect();
+        let expected_sources: Vec<SourceId> = l0.iter().map(|h| SourceId::SstView(h.id)).collect();
         assert_eq!(request.sources(), &expected_sources);
         assert_eq!(request.destination(), 0);
     }
@@ -494,8 +493,7 @@ mod tests {
         // then:
         assert_eq!(requests.len(), 1);
         let request = requests.first().unwrap();
-        let expected_sources: Vec<SourceId> =
-            l0.iter().map(|h| SourceId::SstView(h.view_id)).collect();
+        let expected_sources: Vec<SourceId> = l0.iter().map(|h| SourceId::SstView(h.id)).collect();
         assert_eq!(request.sources(), &expected_sources);
     }
 
@@ -930,7 +928,7 @@ mod tests {
     }
 
     fn create_l0_compaction(l0: &[SsTableView], dst: u32) -> CompactionSpec {
-        let sources: Vec<SourceId> = l0.iter().map(|h| SourceId::SstView(h.view_id)).collect();
+        let sources: Vec<SourceId> = l0.iter().map(|h| SourceId::SstView(h.id)).collect();
 
         CompactionSpec::new(sources, dst)
     }
