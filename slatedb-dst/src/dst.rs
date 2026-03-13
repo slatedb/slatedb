@@ -313,14 +313,7 @@ impl DefaultDstDistribution {
         } else if start_key == end_key {
             end_key.push(b'\0');
         }
-        DstAction::Scan(
-            start_key.clone(),
-            end_key.clone(),
-            ScanOptions {
-                now: self.system_clock.now().timestamp_millis(),
-                ..Default::default()
-            },
-        )
+        DstAction::Scan(start_key.clone(), end_key.clone(), ScanOptions::default())
     }
 
     fn sample_flush(&self) -> DstAction {
@@ -392,12 +385,11 @@ impl DefaultDstDistribution {
     /// improved in the future.
     #[inline]
     fn maybe_get_existing_key(&self, state: &SQLiteState) -> Option<Vec<u8>> {
-        let now = self.system_clock.now().timestamp_millis();
         let hit_probability = self.rand.rng().random_range(0.0..1.0);
-        let is_db_hit = !state.is_empty(now) && self.rand.rng().random_bool(hit_probability);
+        let is_db_hit = !state.is_empty() && self.rand.rng().random_bool(hit_probability);
 
         if is_db_hit {
-            let keys = state.keys(now).unwrap_or_default();
+            let keys = state.keys().unwrap_or_default();
             let existing_key = keys
                 .into_iter()
                 .choose(&mut self.rand.rng())
@@ -449,10 +441,7 @@ impl DefaultDstDistribution {
 
     #[inline]
     fn gen_read_options(&self) -> ReadOptions {
-        ReadOptions {
-            now: self.system_clock.now().timestamp_millis(),
-            ..Default::default()
-        }
+        ReadOptions::default()
     }
 
     /// Returns true if the operation is a put, false if it is a delete.
@@ -603,7 +592,7 @@ impl Dst {
     async fn run_get(&mut self, key: &Vec<u8>, read_options: &ReadOptions) -> Result<(), Error> {
         let future = self.db.get_with_options(key, read_options);
         let result = self.poll_await(future, 0f64).await?;
-        let expected_val = self.state.get(key, read_options.now)?;
+        let expected_val = self.state.get(key)?;
         let actual_val = result.map(|b| b.to_vec());
         assert_eq!(expected_val, actual_val);
         Ok(())
@@ -622,7 +611,7 @@ impl Dst {
         }
         let future = self.db.scan_with_options(start_key..end_key, scan_options);
         let mut actual_itr = self.poll_await(future, 0f64).await?;
-        let expected_itr = self.state.scan(start_key, end_key, scan_options.now)?;
+        let expected_itr = self.state.scan(start_key, end_key)?;
 
         for (expected_key, expected_val) in expected_itr {
             let actual_key_val = actual_itr

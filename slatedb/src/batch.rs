@@ -311,7 +311,6 @@ impl WriteBatch {
                 merge_operator.clone(),
                 it,
                 false,
-                now,
                 None,
             ));
         }

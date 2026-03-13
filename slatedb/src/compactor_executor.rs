@@ -308,7 +308,6 @@ impl TokioCompactionExecutorInner {
                     merge_operator,
                     merge_iter,
                     false,
-                    job_args.compaction_clock_tick,
                     job_args.retention_min_seq,
                 ))
             } else {
