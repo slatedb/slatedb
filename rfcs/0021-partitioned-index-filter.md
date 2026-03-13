@@ -153,7 +153,7 @@ A new `SST_FORMAT_VERSION_V3 = 3` is introduced in `format/sst.rs`. SSTs written
 
 Instead of serializing all `block_meta` into a single flat `SsTableIndex`, the builder:
 
-1. Groups `block_meta` entries into partitions of ~128KB of serialized index data each (analogous to RocksDB's default).
+1. Groups `block_meta` entries into partitions of ~4KB of serialized index data each (analogous to RocksDB's default).
 2. Serializes each chunk as a `PartitionIndex` and writes it to the file, recording its offset, length, and first key.
 3. Serializes a `SsTableIndex` (with `index_type = Partitioned`) from the recorded partition metadata and writes it to the same location as the flat index.
 
@@ -234,7 +234,7 @@ SlateDB features and components that this RFC interacts with. Check all that app
 
 ### Observability
 
-- **Configuration:** expose a `partition_index_block_size` setting (default ~128KB of index data per partition) to control partition granularity.
+- **Configuration:** expose a `partition_index_block_size` setting (default ~4KB of index data per partition, analogous to RocksDB's default) to control partition granularity.
 - **Metrics:** add cache hit/miss counters scoped to partition index blocks, separate from data block and top-level directory hits, so the effectiveness of partition caching is visible.
 
 ### Compatibility
