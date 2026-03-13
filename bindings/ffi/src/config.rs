@@ -1,3 +1,5 @@
+//! FFI-safe configuration types shared across the SlateDB wrapper.
+
 use std::ops::Bound;
 
 use slatedb::config as core_config;
@@ -9,51 +11,76 @@ use slatedb::{
 use crate::error::SlatedbError;
 use crate::validation::try_usize;
 
+/// Controls which durability level reads are allowed to observe.
 #[derive(Clone, Copy, Debug, Default, uniffi::Enum)]
 pub enum DurabilityLevel {
+    /// Return only data durable in remote object storage.
     Remote,
+    /// Return the latest visible data, including in-memory state.
     #[default]
     Memory,
 }
 
+/// Selects which in-memory structures should be flushed.
 #[derive(Clone, Copy, Debug, Default, uniffi::Enum)]
 pub enum FlushType {
+    /// Flush the memtable contents.
     MemTable,
+    /// Flush the WAL contents.
     #[default]
     Wal,
 }
 
+/// Isolation level used when starting a transaction.
 #[derive(Clone, Copy, Debug, Default, uniffi::Enum)]
 pub enum IsolationLevel {
+    /// Snapshot isolation.
     #[default]
     Snapshot,
+    /// Serializable snapshot isolation.
     SerializableSnapshot,
 }
 
+/// SST block sizes that can be selected on [`crate::DbBuilder`].
 #[derive(Clone, Copy, Debug, Default, uniffi::Enum)]
 pub enum SstBlockSize {
+    /// Use 1 KiB SST blocks.
     Block1Kib,
+    /// Use 2 KiB SST blocks.
     Block2Kib,
+    /// Use 4 KiB SST blocks.
     #[default]
     Block4Kib,
+    /// Use 8 KiB SST blocks.
     Block8Kib,
+    /// Use 16 KiB SST blocks.
     Block16Kib,
+    /// Use 32 KiB SST blocks.
     Block32Kib,
+    /// Use 64 KiB SST blocks.
     Block64Kib,
 }
 
+/// Time-to-live configuration for put and merge operations.
 #[derive(Clone, Debug, Default, uniffi::Enum)]
 pub enum Ttl {
+    /// Use the database default TTL behavior.
     #[default]
     Default,
+    /// Store the value without an expiry.
     NoExpiry,
+    /// Expire the value after the provided number of clock ticks.
     ExpireAfterTicks(u64),
 }
 
+/// Options for point reads.
 #[derive(Clone, Debug, uniffi::Record)]
 pub struct DbReadOptions {
+    /// The durability level that the read must observe.
     pub durability_filter: DurabilityLevel,
+    /// Whether dirty state may be returned.
     pub dirty: bool,
+    /// Whether fetched blocks should be inserted into the cache.
     pub cache_blocks: bool,
 }
 
@@ -67,12 +94,18 @@ impl Default for DbReadOptions {
     }
 }
 
+/// Options for range scans and prefix scans.
 #[derive(Clone, Debug, uniffi::Record)]
 pub struct DbScanOptions {
+    /// The durability level that the scan must observe.
     pub durability_filter: DurabilityLevel,
+    /// Whether dirty state may be returned.
     pub dirty: bool,
+    /// The number of bytes to read ahead while scanning.
     pub read_ahead_bytes: u64,
+    /// Whether fetched blocks should be inserted into the cache.
     pub cache_blocks: bool,
+    /// The maximum number of background fetch tasks.
     pub max_fetch_tasks: u64,
 }
 
@@ -88,8 +121,10 @@ impl Default for DbScanOptions {
     }
 }
 
+/// Options that control write durability.
 #[derive(Clone, Debug, uniffi::Record)]
 pub struct DbWriteOptions {
+    /// Whether the call should wait for the write to become durable.
     pub await_durable: bool,
 }
 
@@ -101,18 +136,24 @@ impl Default for DbWriteOptions {
     }
 }
 
+/// Options for put operations.
 #[derive(Clone, Debug, Default, uniffi::Record)]
 pub struct DbPutOptions {
+    /// TTL to apply to the written value.
     pub ttl: Ttl,
 }
 
+/// Options for merge operations.
 #[derive(Clone, Debug, Default, uniffi::Record)]
 pub struct DbMergeOptions {
+    /// TTL to apply to the merged value.
     pub ttl: Ttl,
 }
 
+/// Options for manual flushes.
 #[derive(Clone, Debug, uniffi::Record)]
 pub struct DbFlushOptions {
+    /// The flush mode to execute.
     pub flush_type: FlushType,
 }
 
@@ -124,43 +165,68 @@ impl Default for DbFlushOptions {
     }
 }
 
+/// A range of keys used for scans.
 #[derive(Clone, Debug, Default, uniffi::Record)]
 pub struct DbKeyRange {
+    /// The optional lower bound of the range.
     pub start: Option<Vec<u8>>,
+    /// Whether the lower bound is inclusive.
     pub start_inclusive: bool,
+    /// The optional upper bound of the range.
     pub end: Option<Vec<u8>>,
+    /// Whether the upper bound is inclusive.
     pub end_inclusive: bool,
 }
 
+/// A single operation in a batch write.
 #[derive(Clone, Debug, uniffi::Enum)]
 pub enum DbWriteOperation {
+    /// Put a value for a key.
     Put {
+        /// The key to write.
         key: Vec<u8>,
+        /// The value to write.
         value: Vec<u8>,
+        /// Per-operation put options.
         options: DbPutOptions,
     },
+    /// Merge an operand into a key.
     Merge {
+        /// The key to merge into.
         key: Vec<u8>,
+        /// The merge operand.
         value: Vec<u8>,
+        /// Per-operation merge options.
         options: DbMergeOptions,
     },
+    /// Delete a key.
     Delete {
+        /// The key to delete.
         key: Vec<u8>,
     },
 }
 
+/// A key-value pair returned by reads and iterators.
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct KeyValue {
+    /// The row key.
     pub key: Vec<u8>,
+    /// The row value.
     pub value: Vec<u8>,
+    /// The sequence number that produced this row.
     pub seq: u64,
+    /// The creation timestamp assigned by SlateDB.
     pub create_ts: i64,
+    /// The optional expiry timestamp assigned by SlateDB.
     pub expire_ts: Option<i64>,
 }
 
+/// Metadata returned from a successful write.
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct WriteHandle {
+    /// The sequence number assigned to the write.
     pub seqnum: u64,
+    /// The creation timestamp assigned to the write.
     pub create_ts: i64,
 }
 

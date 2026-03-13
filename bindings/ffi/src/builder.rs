@@ -1,3 +1,5 @@
+//! Database builder and merge-operator interfaces.
+
 use std::sync::{Arc, Mutex as StdMutex};
 
 use serde_json::from_str;
@@ -13,11 +15,25 @@ use crate::error::SlatedbError;
 use crate::object_store::ObjectStore;
 use crate::validation::builder_consumed;
 
+/// Callback interface for SlateDB merge operators.
+///
+/// Merge operators are configured on [`DbBuilder`] and are used by merge reads
+/// and writes to combine an existing value with a new operand.
 #[uniffi::export(callback_interface)]
 pub trait MergeOperator: Send + Sync {
+    /// Merge a new operand into the existing value for a key.
+    ///
+    /// ## Arguments
+    /// - `key`: the key being merged.
+    /// - `existing_value`: the current value, if one exists.
+    /// - `value`: the new merge operand.
+    ///
+    /// ## Returns
+    /// - `Vec<u8>`: the merged value that should become visible for the key.
     fn merge(&self, key: Vec<u8>, existing_value: Option<Vec<u8>>, value: Vec<u8>) -> Vec<u8>;
 }
 
+/// Builder used to configure and open a [`Db`].
 #[derive(uniffi::Object)]
 pub struct DbBuilder {
     state: StdMutex<Option<BuilderState>>,
@@ -75,6 +91,14 @@ impl DbBuilder {
 
 #[uniffi::export]
 impl DbBuilder {
+    /// Create a new builder for a database.
+    ///
+    /// ## Arguments
+    /// - `path`: the database path within the object store.
+    /// - `object_store`: the object store that will back the database.
+    ///
+    /// ## Returns
+    /// - `Arc<DbBuilder>`: a new builder instance.
     #[uniffi::constructor]
     pub fn new(path: String, object_store: Arc<ObjectStore>) -> Arc<Self> {
         Arc::new(Self {
@@ -91,6 +115,13 @@ impl DbBuilder {
         })
     }
 
+    /// Replace the default database settings with a JSON-encoded [`slatedb::Settings`] document.
+    ///
+    /// ## Arguments
+    /// - `settings_json`: the full settings document encoded as JSON.
+    ///
+    /// ## Errors
+    /// - `SlatedbError::Invalid`: if the JSON cannot be parsed.
     pub fn with_settings_json(&self, settings_json: String) -> Result<(), SlatedbError> {
         let settings = from_str::<slatedb::Settings>(&settings_json)?;
         self.with_state(|state| {
@@ -99,6 +130,10 @@ impl DbBuilder {
         })
     }
 
+    /// Configure a separate object store for WAL data.
+    ///
+    /// ## Arguments
+    /// - `wal_object_store`: the object store to use for WAL files.
     pub fn with_wal_object_store(
         &self,
         wal_object_store: Arc<ObjectStore>,
@@ -109,6 +144,7 @@ impl DbBuilder {
         })
     }
 
+    /// Disable the database-level cache created by the builder.
     pub fn with_db_cache_disabled(&self) -> Result<(), SlatedbError> {
         self.with_state(|state| {
             state.db_cache_disabled = true;
@@ -116,6 +152,10 @@ impl DbBuilder {
         })
     }
 
+    /// Set the random seed used by the database.
+    ///
+    /// ## Arguments
+    /// - `seed`: the seed to use when constructing the database.
     pub fn with_seed(&self, seed: u64) -> Result<(), SlatedbError> {
         self.with_state(|state| {
             state.seed = Some(seed);
@@ -123,6 +163,10 @@ impl DbBuilder {
         })
     }
 
+    /// Override the SST block size used for new SSTs.
+    ///
+    /// ## Arguments
+    /// - `sst_block_size`: the block size to use.
     pub fn with_sst_block_size(&self, sst_block_size: SstBlockSize) -> Result<(), SlatedbError> {
         self.with_state(|state| {
             state.sst_block_size = Some(sst_block_size);
@@ -130,6 +174,10 @@ impl DbBuilder {
         })
     }
 
+    /// Configure the merge operator used for merge reads and writes.
+    ///
+    /// ## Arguments
+    /// - `merge_operator`: the callback implementation to use.
     pub fn with_merge_operator(
         &self,
         merge_operator: Box<dyn MergeOperator>,
@@ -143,6 +191,16 @@ impl DbBuilder {
 
 #[uniffi::export(async_runtime = "tokio")]
 impl DbBuilder {
+    /// Open the database using the builder's current configuration.
+    ///
+    /// This consumes the builder state. Reusing the same builder after a
+    /// successful or failed call to `build()` returns an error.
+    ///
+    /// ## Returns
+    /// - `Result<Arc<Db>, SlatedbError>`: the opened database handle.
+    ///
+    /// ## Errors
+    /// - `SlatedbError`: if the builder was already consumed or the database cannot be opened.
     pub async fn build(&self) -> Result<Arc<Db>, SlatedbError> {
         let state = self.take_state()?;
 
