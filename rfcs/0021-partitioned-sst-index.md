@@ -1,4 +1,4 @@
-# Partitioned Indexes for SlateDB
+# Partitioned SST Index for SlateDB
 
 Table of Contents:
 
