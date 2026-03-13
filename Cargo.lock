@@ -204,6 +204,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "async-compat"
+version = "0.2.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a1ba85bc55464dcbf728b56d97e119d673f4cf9062be330a9a26f3acf504a590"
+dependencies = [
+ "futures-core",
+ "futures-io",
+ "once_cell",
+ "pin-project-lite",
+ "tokio",
+]
+
+[[package]]
 name = "async-lock"
 version = "3.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3510,7 +3523,11 @@ dependencies = [
 name = "slatedb-ffi"
 version = "0.11.1"
 dependencies = [
+ "serde_json",
  "slatedb",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
  "uniffi",
 ]
 
@@ -4159,6 +4176,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f38a9a27529ccff732f8efddb831b65b1e07f7dea3fd4cacd4a35a8c4b253b98"
 dependencies = [
  "anyhow",
+ "async-compat",
  "bytes",
  "once_cell",
  "static_assertions",
