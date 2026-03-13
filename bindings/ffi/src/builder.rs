@@ -1,43 +1,21 @@
-//! Database builder and merge-operator interfaces.
+//! Database and reader builder interfaces.
 
 use std::sync::{Arc, Mutex};
 
 use serde_json::from_str;
-use slatedb::bytes::Bytes;
 use slatedb::{
-    Db as CoreDb, DbBuilder as CoreDbBuilder, MergeOperator as CoreMergeOperatorTrait,
-    MergeOperatorError as CoreMergeOperatorError,
+    Db as CoreDb, DbBuilder as CoreDbBuilder, DbReader as CoreDbReader,
+    DbReaderBuilder as CoreDbReaderBuilder,
 };
+use uuid::Uuid;
 
-use crate::config::SstBlockSize;
+use crate::config::{ReaderOptions, SstBlockSize};
 use crate::db::Db;
-use crate::error::{MergeOperatorCallbackError, SlatedbError};
+use crate::db_reader::DbReader;
+use crate::error::SlatedbError;
+use crate::merge_operator::{adapt_merge_operator, MergeOperator};
 use crate::object_store::ObjectStore;
 use crate::validation::builder_consumed;
-
-/// Callback interface for SlateDB merge operators.
-///
-/// Merge operators are configured on [`DbBuilder`] and are used by merge reads
-/// and writes to combine an existing value with a new operand.
-#[uniffi::export(callback_interface)]
-pub trait MergeOperator: Send + Sync {
-    /// Merge a new operand into the existing value for a key.
-    ///
-    /// ## Arguments
-    /// - `key`: the key being merged.
-    /// - `existing_value`: the current value, if one exists.
-    /// - `operand`: the new merge operand.
-    ///
-    /// ## Returns
-    /// - `Result<Vec<u8>, MergeOperatorCallbackError>`: the merged value that
-    ///   should become visible for the key.
-    fn merge(
-        &self,
-        key: Vec<u8>,
-        existing_value: Option<Vec<u8>>,
-        operand: Vec<u8>,
-    ) -> Result<Vec<u8>, MergeOperatorCallbackError>;
-}
 
 /// Builder used to configure and open a [`Db`].
 #[derive(uniffi::Object)]
@@ -45,28 +23,10 @@ pub struct DbBuilder {
     builder: Mutex<Option<CoreDbBuilder<String>>>,
 }
 
-struct MergeOperatorAdapter {
-    inner: Arc<dyn MergeOperator>,
-}
-
-impl CoreMergeOperatorTrait for MergeOperatorAdapter {
-    fn merge(
-        &self,
-        key: &Bytes,
-        existing_value: Option<Bytes>,
-        operand: Bytes,
-    ) -> Result<Bytes, CoreMergeOperatorError> {
-        self.inner
-            .merge(
-                key.to_vec(),
-                existing_value.map(|value| value.to_vec()),
-                operand.to_vec(),
-            )
-            .map(Bytes::from)
-            .map_err(|error| CoreMergeOperatorError::Callback {
-                message: error.to_string(),
-            })
-    }
+/// Builder used to configure and open a [`DbReader`].
+#[derive(uniffi::Object)]
+pub struct DbReaderBuilder {
+    builder: Mutex<Option<CoreDbReaderBuilder<String>>>,
 }
 
 impl DbBuilder {
@@ -85,6 +45,27 @@ impl DbBuilder {
     fn take_builder(&self) -> Result<CoreDbBuilder<String>, SlatedbError> {
         let mut guard = self.builder.lock().map_err(|_| SlatedbError::Internal {
             message: "builder mutex poisoned".to_owned(),
+        })?;
+        guard.take().ok_or_else(builder_consumed)
+    }
+}
+
+impl DbReaderBuilder {
+    fn update_builder(
+        &self,
+        update: impl FnOnce(CoreDbReaderBuilder<String>) -> CoreDbReaderBuilder<String>,
+    ) -> Result<(), SlatedbError> {
+        let mut guard = self.builder.lock().map_err(|_| SlatedbError::Internal {
+            message: "reader builder mutex poisoned".to_owned(),
+        })?;
+        let builder = guard.take().ok_or_else(builder_consumed)?;
+        *guard = Some(update(builder));
+        Ok(())
+    }
+
+    fn take_builder(&self) -> Result<CoreDbReaderBuilder<String>, SlatedbError> {
+        let mut guard = self.builder.lock().map_err(|_| SlatedbError::Internal {
+            message: "reader builder mutex poisoned".to_owned(),
         })?;
         guard.take().ok_or_else(builder_consumed)
     }
@@ -160,10 +141,9 @@ impl DbBuilder {
         &self,
         merge_operator: Box<dyn MergeOperator>,
     ) -> Result<(), SlatedbError> {
-        let merge_operator = Arc::new(MergeOperatorAdapter {
-            inner: merge_operator.into(),
-        });
-        self.update_builder(|builder| builder.with_merge_operator(merge_operator))
+        self.update_builder(|builder| {
+            builder.with_merge_operator(adapt_merge_operator(merge_operator))
+        })
     }
 }
 
@@ -183,5 +163,44 @@ impl DbBuilder {
         let builder = self.take_builder()?;
         let db = builder.build().await?;
         Ok(Arc::new(Db::new(db)))
+    }
+}
+
+#[uniffi::export]
+impl DbReaderBuilder {
+    /// Create a new builder for a read-only database reader.
+    #[uniffi::constructor]
+    pub fn new(path: String, object_store: Arc<ObjectStore>) -> Arc<Self> {
+        Arc::new(Self {
+            builder: Mutex::new(Some(CoreDbReader::builder(
+                path,
+                object_store.inner.clone(),
+            ))),
+        })
+    }
+
+    /// Set the checkpoint UUID for the reader and validate it immediately.
+    pub fn with_checkpoint_id(&self, checkpoint_id: String) -> Result<(), SlatedbError> {
+        let checkpoint_id =
+            Uuid::parse_str(&checkpoint_id).map_err(|err| SlatedbError::Invalid {
+                message: format!("invalid checkpoint_id UUID: {err}"),
+            })?;
+        self.update_builder(|builder| builder.with_checkpoint_id(checkpoint_id))
+    }
+
+    /// Set reader options.
+    pub fn with_options(&self, options: ReaderOptions) -> Result<(), SlatedbError> {
+        let options = options.into_core();
+        self.update_builder(|builder| builder.with_options(options))
+    }
+}
+
+#[uniffi::export(async_runtime = "tokio")]
+impl DbReaderBuilder {
+    /// Build the configured database reader.
+    pub async fn build(&self) -> Result<Arc<DbReader>, SlatedbError> {
+        let builder = self.take_builder()?;
+        let reader = builder.build().await?;
+        Ok(Arc::new(DbReader::new(reader)))
     }
 }

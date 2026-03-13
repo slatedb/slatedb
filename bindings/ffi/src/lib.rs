@@ -11,6 +11,7 @@ mod db_reader;
 mod error;
 mod iterator;
 mod logging;
+mod merge_operator;
 mod object_store;
 mod settings;
 mod transaction;
@@ -18,17 +19,18 @@ mod validation;
 mod wal;
 mod write_batch;
 
-pub use builder::{DbBuilder, MergeOperator};
+pub use builder::{DbBuilder, DbReaderBuilder};
 pub use config::{
-    DbFlushOptions, DbKeyRange, DbMergeOptions, DbPutOptions, DbReadOptions, DbReaderOptions,
-    DbScanOptions, DbWriteOperation, DbWriteOptions, DurabilityLevel, FlushType, IsolationLevel,
-    KeyValue, SstBlockSize, Ttl, WriteHandle,
+    DurabilityLevel, FlushOptions, FlushType, IsolationLevel, KeyRange, KeyValue, MergeOptions,
+    PutOptions, ReadOptions, ReaderOptions, ScanOptions, SstBlockSize, Ttl, WriteHandle,
+    WriteOperation, WriteOptions,
 };
 pub use db::{Db, DbSnapshot};
-pub use db_reader::{DbReader, DbReaderBuilder};
+pub use db_reader::DbReader;
 pub use error::{CloseReason, MergeOperatorCallbackError, SlatedbError};
 pub use iterator::DbIterator;
 pub use logging::{init_default_logging, init_logging, set_logging_level, LogLevel};
+pub use merge_operator::MergeOperator;
 pub use object_store::{resolve_object_store, ObjectStore};
 pub use settings::default_settings_json;
 pub use transaction::DbTransaction;

@@ -76,7 +76,7 @@ pub enum Ttl {
 
 /// Options for point reads.
 #[derive(Clone, Debug, uniffi::Record)]
-pub struct DbReadOptions {
+pub struct ReadOptions {
     /// The durability level that the read must observe.
     pub durability_filter: DurabilityLevel,
     /// Whether dirty state may be returned.
@@ -85,7 +85,7 @@ pub struct DbReadOptions {
     pub cache_blocks: bool,
 }
 
-impl Default for DbReadOptions {
+impl Default for ReadOptions {
     fn default() -> Self {
         Self {
             durability_filter: DurabilityLevel::default(),
@@ -97,7 +97,7 @@ impl Default for DbReadOptions {
 
 /// Options for constructing a read-only database reader.
 #[derive(Clone, Debug, uniffi::Record)]
-pub struct DbReaderOptions {
+pub struct ReaderOptions {
     /// How often to poll manifests and WALs for refreshed reader state.
     pub manifest_poll_interval_ms: u64,
     /// How long reader-owned checkpoints should remain valid.
@@ -108,7 +108,7 @@ pub struct DbReaderOptions {
     pub skip_wal_replay: bool,
 }
 
-impl Default for DbReaderOptions {
+impl Default for ReaderOptions {
     fn default() -> Self {
         Self {
             manifest_poll_interval_ms: 10_000,
@@ -121,7 +121,7 @@ impl Default for DbReaderOptions {
 
 /// Options for range scans and prefix scans.
 #[derive(Clone, Debug, uniffi::Record)]
-pub struct DbScanOptions {
+pub struct ScanOptions {
     /// The durability level that the scan must observe.
     pub durability_filter: DurabilityLevel,
     /// Whether dirty state may be returned.
@@ -134,7 +134,7 @@ pub struct DbScanOptions {
     pub max_fetch_tasks: u64,
 }
 
-impl Default for DbScanOptions {
+impl Default for ScanOptions {
     fn default() -> Self {
         Self {
             durability_filter: DurabilityLevel::default(),
@@ -148,12 +148,12 @@ impl Default for DbScanOptions {
 
 /// Options that control write durability.
 #[derive(Clone, Debug, uniffi::Record)]
-pub struct DbWriteOptions {
+pub struct WriteOptions {
     /// Whether the call should wait for the write to become durable.
     pub await_durable: bool,
 }
 
-impl Default for DbWriteOptions {
+impl Default for WriteOptions {
     fn default() -> Self {
         Self {
             await_durable: true,
@@ -163,26 +163,26 @@ impl Default for DbWriteOptions {
 
 /// Options for put operations.
 #[derive(Clone, Debug, Default, uniffi::Record)]
-pub struct DbPutOptions {
+pub struct PutOptions {
     /// TTL to apply to the written value.
     pub ttl: Ttl,
 }
 
 /// Options for merge operations.
 #[derive(Clone, Debug, Default, uniffi::Record)]
-pub struct DbMergeOptions {
+pub struct MergeOptions {
     /// TTL to apply to the merged value.
     pub ttl: Ttl,
 }
 
 /// Options for manual flushes.
 #[derive(Clone, Debug, uniffi::Record)]
-pub struct DbFlushOptions {
+pub struct FlushOptions {
     /// The flush mode to execute.
     pub flush_type: FlushType,
 }
 
-impl Default for DbFlushOptions {
+impl Default for FlushOptions {
     fn default() -> Self {
         Self {
             flush_type: FlushType::default(),
@@ -192,7 +192,7 @@ impl Default for DbFlushOptions {
 
 /// A range of keys used for scans.
 #[derive(Clone, Debug, Default, uniffi::Record)]
-pub struct DbKeyRange {
+pub struct KeyRange {
     /// The optional lower bound of the range.
     pub start: Option<Vec<u8>>,
     /// Whether the lower bound is inclusive.
@@ -205,7 +205,7 @@ pub struct DbKeyRange {
 
 /// A single operation in a batch write.
 #[derive(Clone, Debug, uniffi::Enum)]
-pub enum DbWriteOperation {
+pub enum WriteOperation {
     /// Put a value for a key.
     Put {
         /// The key to write.
@@ -213,7 +213,7 @@ pub enum DbWriteOperation {
         /// The value to write.
         value_bytes: Vec<u8>,
         /// Per-operation put options.
-        options: DbPutOptions,
+        options: PutOptions,
     },
     /// Merge an operand into a key.
     Merge {
@@ -222,7 +222,7 @@ pub enum DbWriteOperation {
         /// The merge operand.
         operand: Vec<u8>,
         /// Per-operation merge options.
-        options: DbMergeOptions,
+        options: MergeOptions,
     },
     /// Delete a key.
     Delete {
@@ -306,7 +306,7 @@ impl Ttl {
     }
 }
 
-impl DbReadOptions {
+impl ReadOptions {
     pub(crate) fn into_core(self) -> core_config::ReadOptions {
         core_config::ReadOptions {
             durability_filter: self.durability_filter.into_core(),
@@ -316,7 +316,7 @@ impl DbReadOptions {
     }
 }
 
-impl DbReaderOptions {
+impl ReaderOptions {
     pub(crate) fn into_core(self) -> core_config::DbReaderOptions {
         let mut options = core_config::DbReaderOptions::default();
         options.manifest_poll_interval = Duration::from_millis(self.manifest_poll_interval_ms);
@@ -327,7 +327,7 @@ impl DbReaderOptions {
     }
 }
 
-impl DbScanOptions {
+impl ScanOptions {
     pub(crate) fn into_core(self) -> Result<core_config::ScanOptions, SlatedbError> {
         Ok(core_config::ScanOptions {
             durability_filter: self.durability_filter.into_core(),
@@ -339,7 +339,7 @@ impl DbScanOptions {
     }
 }
 
-impl DbWriteOptions {
+impl WriteOptions {
     pub(crate) fn into_core(self) -> core_config::WriteOptions {
         core_config::WriteOptions {
             await_durable: self.await_durable,
@@ -347,7 +347,7 @@ impl DbWriteOptions {
     }
 }
 
-impl DbPutOptions {
+impl PutOptions {
     pub(crate) fn into_core(self) -> core_config::PutOptions {
         core_config::PutOptions {
             ttl: self.ttl.into_core(),
@@ -355,7 +355,7 @@ impl DbPutOptions {
     }
 }
 
-impl DbMergeOptions {
+impl MergeOptions {
     pub(crate) fn into_core(self) -> core_config::MergeOptions {
         core_config::MergeOptions {
             ttl: self.ttl.into_core(),
@@ -363,7 +363,7 @@ impl DbMergeOptions {
     }
 }
 
-impl DbFlushOptions {
+impl FlushOptions {
     pub(crate) fn into_core(self) -> core_config::FlushOptions {
         core_config::FlushOptions {
             flush_type: self.flush_type.into_core(),
@@ -371,7 +371,7 @@ impl DbFlushOptions {
     }
 }
 
-impl DbKeyRange {
+impl KeyRange {
     pub(crate) fn into_bounds(self) -> Result<(Bound<Vec<u8>>, Bound<Vec<u8>>), SlatedbError> {
         if self.start.as_ref().is_some_and(|start| start.is_empty()) {
             return Err(SlatedbError::Invalid {
