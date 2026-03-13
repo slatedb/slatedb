@@ -1,5 +1,3 @@
-//! Helpers for working with serialized SlateDB settings.
-
 use crate::error::FfiSlatedbError;
 
 #[uniffi::export]

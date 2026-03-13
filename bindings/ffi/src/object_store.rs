@@ -1,5 +1,3 @@
-//! Object-store handles and helpers for resolving them from URLs.
-
 use std::sync::Arc;
 
 use slatedb::Db;

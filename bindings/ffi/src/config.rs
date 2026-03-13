@@ -1,5 +1,3 @@
-//! FFI-safe configuration types shared across the SlateDB wrapper.
-
 use std::ops::Bound;
 use std::time::Duration;
 

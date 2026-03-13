@@ -1,5 +1,3 @@
-//! Error types returned by the SlateDB FFI wrapper.
-
 use thiserror::Error;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, uniffi::Enum)]

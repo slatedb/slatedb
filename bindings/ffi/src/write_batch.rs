@@ -1,5 +1,3 @@
-//! First-class write batch wrapper exposed by UniFFI.
-
 use std::sync::Arc;
 
 use parking_lot::Mutex;
