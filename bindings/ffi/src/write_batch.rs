@@ -3,7 +3,6 @@
 use std::sync::Arc;
 
 use parking_lot::Mutex;
-use slatedb::WriteBatch as CoreWriteBatch;
 
 use crate::config::{FfiMergeOptions, FfiPutOptions};
 use crate::error::FfiSlatedbError;
@@ -18,7 +17,7 @@ pub struct FfiWriteBatch {
 }
 
 enum WriteBatchState {
-    Open(CoreWriteBatch),
+    Open(slatedb::WriteBatch),
     Consumed,
     Closed,
 }
@@ -26,7 +25,7 @@ enum WriteBatchState {
 impl FfiWriteBatch {
     fn with_open<T>(
         &self,
-        update: impl FnOnce(&mut CoreWriteBatch) -> T,
+        update: impl FnOnce(&mut slatedb::WriteBatch) -> T,
     ) -> Result<T, FfiSlatedbError> {
         let mut guard = self.state.lock();
         match &mut *guard {
@@ -36,7 +35,7 @@ impl FfiWriteBatch {
         }
     }
 
-    pub(crate) fn take_for_write(&self) -> Result<CoreWriteBatch, FfiSlatedbError> {
+    pub(crate) fn take_for_write(&self) -> Result<slatedb::WriteBatch, FfiSlatedbError> {
         let mut guard = self.state.lock();
 
         match std::mem::replace(&mut *guard, WriteBatchState::Consumed) {
@@ -59,7 +58,7 @@ impl FfiWriteBatch {
     #[uniffi::constructor]
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
-            state: Mutex::new(WriteBatchState::Open(CoreWriteBatch::new())),
+            state: Mutex::new(WriteBatchState::Open(slatedb::WriteBatch::new())),
         })
     }
 

@@ -3,8 +3,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use slatedb::{Db as CoreDb, DbSnapshot as CoreDbSnapshot};
-
 use crate::config::{
     FfiFlushOptions, FfiIsolationLevel, FfiKeyRange, FfiKeyValue, FfiMergeOptions, FfiPutOptions,
     FfiReadOptions, FfiScanOptions, FfiWriteHandle, FfiWriteOperation, FfiWriteOptions,
@@ -20,17 +18,17 @@ use crate::write_batch::FfiWriteBatch;
 /// Instances of this type are created by [`crate::FfiDbBuilder::build`].
 #[derive(uniffi::Object)]
 pub struct FfiDb {
-    inner: CoreDb,
+    inner: slatedb::Db,
 }
 
 /// A stable point-in-time view of a database.
 #[derive(uniffi::Object)]
 pub struct FfiDbSnapshot {
-    inner: Arc<CoreDbSnapshot>,
+    inner: Arc<slatedb::DbSnapshot>,
 }
 
 impl FfiDb {
-    pub(crate) fn new(inner: CoreDb) -> Self {
+    pub(crate) fn new(inner: slatedb::Db) -> Self {
         Self { inner }
     }
 }

@@ -2,7 +2,6 @@
 
 use std::sync::Arc;
 
-use slatedb::object_store::ObjectStore as ObjectStoreTrait;
 use slatedb::Db;
 
 use crate::error::FfiSlatedbError;
@@ -13,7 +12,7 @@ use crate::error::FfiSlatedbError;
 /// into [`crate::FfiDbBuilder`] for the main database store or the WAL store.
 #[derive(uniffi::Object)]
 pub struct FfiObjectStore {
-    pub(crate) inner: Arc<dyn ObjectStoreTrait>,
+    pub(crate) inner: Arc<dyn slatedb::object_store::ObjectStore>,
 }
 
 /// Resolve an object store from a URL.

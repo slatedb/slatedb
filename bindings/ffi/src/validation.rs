@@ -44,7 +44,7 @@ pub(crate) fn validate_key(key: &[u8]) -> Result<(), FfiSlatedbError> {
             message: "key cannot be empty".to_owned(),
         });
     }
-    if key.len() > u16::MAX as usize {
+    if u16::try_from(key.len()).is_err() {
         return Err(FfiSlatedbError::Invalid {
             message: "key size must be <= u16::MAX".to_owned(),
         });
@@ -54,7 +54,7 @@ pub(crate) fn validate_key(key: &[u8]) -> Result<(), FfiSlatedbError> {
 
 pub(crate) fn validate_key_value(key: &[u8], value: &[u8]) -> Result<(), FfiSlatedbError> {
     validate_key(key)?;
-    if value.len() > u32::MAX as usize {
+    if u32::try_from(value.len()).is_err() {
         return Err(FfiSlatedbError::Invalid {
             message: "value size must be <= u32::MAX".to_owned(),
         });
