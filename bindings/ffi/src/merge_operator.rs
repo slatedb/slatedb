@@ -5,7 +5,7 @@ use std::sync::Arc;
 use slatedb::bytes::Bytes;
 use slatedb::{MergeOperator as CoreMergeOperator, MergeOperatorError as CoreMergeOperatorError};
 
-use crate::error::MergeOperatorCallbackError;
+use crate::error::FfiMergeOperatorCallbackError;
 
 /// Callback interface for SlateDB merge operators.
 ///
@@ -21,14 +21,14 @@ pub trait MergeOperator: Send + Sync {
     /// - `operand`: the new merge operand.
     ///
     /// ## Returns
-    /// - `Result<Vec<u8>, MergeOperatorCallbackError>`: the merged value that
+    /// - `Result<Vec<u8>, FfiMergeOperatorCallbackError>`: the merged value that
     ///   should become visible for the key.
     fn merge(
         &self,
         key: Vec<u8>,
         existing_value: Option<Vec<u8>>,
         operand: Vec<u8>,
-    ) -> Result<Vec<u8>, MergeOperatorCallbackError>;
+    ) -> Result<Vec<u8>, FfiMergeOperatorCallbackError>;
 }
 
 struct MergeOperatorAdapter {

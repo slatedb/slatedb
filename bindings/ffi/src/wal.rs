@@ -9,12 +9,12 @@ use slatedb::{
 };
 use tokio::sync::Mutex as AsyncMutex;
 
-use crate::error::SlatedbError;
+use crate::error::FfiSlatedbError;
 use crate::object_store::ObjectStore;
 
 /// The kind of entry stored in a WAL row.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
-pub enum RowEntryKind {
+pub enum FfiRowEntryKind {
     Value,
     Tombstone,
     Merge,
@@ -22,8 +22,8 @@ pub enum RowEntryKind {
 
 /// A row entry returned by WAL iteration.
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
-pub struct RowEntry {
-    pub kind: RowEntryKind,
+pub struct FfiRowEntry {
+    pub kind: FfiRowEntryKind,
     pub key: Vec<u8>,
     pub value: Option<Vec<u8>>,
     pub seq: u64,
@@ -33,7 +33,7 @@ pub struct RowEntry {
 
 /// Metadata for a single WAL file.
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
-pub struct WalFileMetadata {
+pub struct FfiWalFileMetadata {
     pub last_modified_seconds: i64,
     pub last_modified_nanos: u32,
     pub size_bytes: u64,
@@ -58,12 +58,12 @@ pub struct WalReader {
     inner: CoreWalReader,
 }
 
-impl RowEntry {
+impl FfiRowEntry {
     fn from_core(entry: CoreRowEntry) -> Self {
         let (kind, value) = match entry.value {
-            ValueDeletable::Value(value) => (RowEntryKind::Value, Some(value.to_vec())),
-            ValueDeletable::Tombstone => (RowEntryKind::Tombstone, None),
-            ValueDeletable::Merge(value) => (RowEntryKind::Merge, Some(value.to_vec())),
+            ValueDeletable::Value(value) => (FfiRowEntryKind::Value, Some(value.to_vec())),
+            ValueDeletable::Tombstone => (FfiRowEntryKind::Tombstone, None),
+            ValueDeletable::Merge(value) => (FfiRowEntryKind::Merge, Some(value.to_vec())),
         };
 
         Self {
@@ -107,7 +107,7 @@ impl WalReader {
     }
 
     /// Close the WAL reader.
-    pub fn close(&self) -> Result<(), SlatedbError> {
+    pub fn close(&self) -> Result<(), FfiSlatedbError> {
         Ok(())
     }
 }
@@ -119,7 +119,7 @@ impl WalReader {
         &self,
         start_id: Option<u64>,
         end_id: Option<u64>,
-    ) -> Result<Vec<Arc<WalFile>>, SlatedbError> {
+    ) -> Result<Vec<Arc<WalFile>>, FfiSlatedbError> {
         let start = start_id.map(Bound::Included).unwrap_or(Bound::Unbounded);
         let end = end_id.map(Bound::Excluded).unwrap_or(Bound::Unbounded);
         let files = self.inner.list((start, end)).await?;
@@ -148,7 +148,7 @@ impl WalFile {
     }
 
     /// Close the WAL file handle.
-    pub fn close(&self) -> Result<(), SlatedbError> {
+    pub fn close(&self) -> Result<(), FfiSlatedbError> {
         Ok(())
     }
 }
@@ -156,9 +156,9 @@ impl WalFile {
 #[uniffi::export(async_runtime = "tokio")]
 impl WalFile {
     /// Fetch metadata for this WAL file.
-    pub async fn metadata(&self) -> Result<WalFileMetadata, SlatedbError> {
+    pub async fn metadata(&self) -> Result<FfiWalFileMetadata, FfiSlatedbError> {
         let metadata = self.inner.metadata().await?;
-        Ok(WalFileMetadata {
+        Ok(FfiWalFileMetadata {
             last_modified_seconds: metadata.last_modified_dt.timestamp(),
             last_modified_nanos: metadata.last_modified_dt.timestamp_subsec_nanos(),
             size_bytes: metadata.size_bytes,
@@ -167,7 +167,7 @@ impl WalFile {
     }
 
     /// Create an iterator over rows in this WAL file.
-    pub async fn iterator(&self) -> Result<Arc<WalFileIterator>, SlatedbError> {
+    pub async fn iterator(&self) -> Result<Arc<WalFileIterator>, FfiSlatedbError> {
         let iter = self.inner.iterator().await?;
         Ok(Arc::new(WalFileIterator::new(iter)))
     }
@@ -176,7 +176,7 @@ impl WalFile {
 #[uniffi::export]
 impl WalFileIterator {
     /// Close the WAL iterator.
-    pub fn close(&self) -> Result<(), SlatedbError> {
+    pub fn close(&self) -> Result<(), FfiSlatedbError> {
         Ok(())
     }
 }
@@ -184,8 +184,8 @@ impl WalFileIterator {
 #[uniffi::export(async_runtime = "tokio")]
 impl WalFileIterator {
     /// Return the next WAL entry, or `None` when the iterator is exhausted.
-    pub async fn next(&self) -> Result<Option<RowEntry>, SlatedbError> {
+    pub async fn next(&self) -> Result<Option<FfiRowEntry>, FfiSlatedbError> {
         let mut guard = self.inner.lock().await;
-        Ok(guard.next().await?.map(RowEntry::from_core))
+        Ok(guard.next().await?.map(FfiRowEntry::from_core))
     }
 }

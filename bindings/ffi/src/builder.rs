@@ -9,10 +9,10 @@ use slatedb::{
 };
 use uuid::Uuid;
 
-use crate::config::{ReaderOptions, SstBlockSize};
+use crate::config::{FfiReaderOptions, FfiSstBlockSize};
 use crate::db::Db;
 use crate::db_reader::DbReader;
-use crate::error::SlatedbError;
+use crate::error::FfiSlatedbError;
 use crate::merge_operator::{adapt_merge_operator, MergeOperator};
 use crate::object_store::ObjectStore;
 use crate::validation::builder_consumed;
@@ -33,8 +33,8 @@ impl DbBuilder {
     fn update_builder(
         &self,
         update: impl FnOnce(CoreDbBuilder<String>) -> CoreDbBuilder<String>,
-    ) -> Result<(), SlatedbError> {
-        let mut guard = self.builder.lock().map_err(|_| SlatedbError::Internal {
+    ) -> Result<(), FfiSlatedbError> {
+        let mut guard = self.builder.lock().map_err(|_| FfiSlatedbError::Internal {
             message: "builder mutex poisoned".to_owned(),
         })?;
         let builder = guard.take().ok_or_else(builder_consumed)?;
@@ -42,8 +42,8 @@ impl DbBuilder {
         Ok(())
     }
 
-    fn take_builder(&self) -> Result<CoreDbBuilder<String>, SlatedbError> {
-        let mut guard = self.builder.lock().map_err(|_| SlatedbError::Internal {
+    fn take_builder(&self) -> Result<CoreDbBuilder<String>, FfiSlatedbError> {
+        let mut guard = self.builder.lock().map_err(|_| FfiSlatedbError::Internal {
             message: "builder mutex poisoned".to_owned(),
         })?;
         guard.take().ok_or_else(builder_consumed)
@@ -54,8 +54,8 @@ impl DbReaderBuilder {
     fn update_builder(
         &self,
         update: impl FnOnce(CoreDbReaderBuilder<String>) -> CoreDbReaderBuilder<String>,
-    ) -> Result<(), SlatedbError> {
-        let mut guard = self.builder.lock().map_err(|_| SlatedbError::Internal {
+    ) -> Result<(), FfiSlatedbError> {
+        let mut guard = self.builder.lock().map_err(|_| FfiSlatedbError::Internal {
             message: "reader builder mutex poisoned".to_owned(),
         })?;
         let builder = guard.take().ok_or_else(builder_consumed)?;
@@ -63,8 +63,8 @@ impl DbReaderBuilder {
         Ok(())
     }
 
-    fn take_builder(&self) -> Result<CoreDbReaderBuilder<String>, SlatedbError> {
-        let mut guard = self.builder.lock().map_err(|_| SlatedbError::Internal {
+    fn take_builder(&self) -> Result<CoreDbReaderBuilder<String>, FfiSlatedbError> {
+        let mut guard = self.builder.lock().map_err(|_| FfiSlatedbError::Internal {
             message: "reader builder mutex poisoned".to_owned(),
         })?;
         guard.take().ok_or_else(builder_consumed)
@@ -94,8 +94,8 @@ impl DbBuilder {
     /// - `settings_json`: the full settings document encoded as JSON.
     ///
     /// ## Errors
-    /// - `SlatedbError::Invalid`: if the JSON cannot be parsed.
-    pub fn with_settings_json(&self, settings_json: String) -> Result<(), SlatedbError> {
+    /// - `FfiSlatedbError::Invalid`: if the JSON cannot be parsed.
+    pub fn with_settings_json(&self, settings_json: String) -> Result<(), FfiSlatedbError> {
         let settings = from_str::<slatedb::Settings>(&settings_json)?;
         self.update_builder(|builder| builder.with_settings(settings))
     }
@@ -107,12 +107,12 @@ impl DbBuilder {
     pub fn with_wal_object_store(
         &self,
         wal_object_store: Arc<ObjectStore>,
-    ) -> Result<(), SlatedbError> {
+    ) -> Result<(), FfiSlatedbError> {
         self.update_builder(|builder| builder.with_wal_object_store(wal_object_store.inner.clone()))
     }
 
     /// Disable the database-level cache created by the builder.
-    pub fn with_db_cache_disabled(&self) -> Result<(), SlatedbError> {
+    pub fn with_db_cache_disabled(&self) -> Result<(), FfiSlatedbError> {
         self.update_builder(CoreDbBuilder::with_db_cache_disabled)
     }
 
@@ -120,7 +120,7 @@ impl DbBuilder {
     ///
     /// ## Arguments
     /// - `seed`: the seed to use when constructing the database.
-    pub fn with_seed(&self, seed: u64) -> Result<(), SlatedbError> {
+    pub fn with_seed(&self, seed: u64) -> Result<(), FfiSlatedbError> {
         self.update_builder(|builder| builder.with_seed(seed))
     }
 
@@ -128,7 +128,10 @@ impl DbBuilder {
     ///
     /// ## Arguments
     /// - `sst_block_size`: the block size to use.
-    pub fn with_sst_block_size(&self, sst_block_size: SstBlockSize) -> Result<(), SlatedbError> {
+    pub fn with_sst_block_size(
+        &self,
+        sst_block_size: FfiSstBlockSize,
+    ) -> Result<(), FfiSlatedbError> {
         let sst_block_size = sst_block_size.into_core();
         self.update_builder(|builder| builder.with_sst_block_size(sst_block_size))
     }
@@ -140,7 +143,7 @@ impl DbBuilder {
     pub fn with_merge_operator(
         &self,
         merge_operator: Box<dyn MergeOperator>,
-    ) -> Result<(), SlatedbError> {
+    ) -> Result<(), FfiSlatedbError> {
         self.update_builder(|builder| {
             builder.with_merge_operator(adapt_merge_operator(merge_operator))
         })
@@ -155,11 +158,11 @@ impl DbBuilder {
     /// successful or failed call to `build()` returns an error.
     ///
     /// ## Returns
-    /// - `Result<Arc<Db>, SlatedbError>`: the opened database handle.
+    /// - `Result<Arc<Db>, FfiSlatedbError>`: the opened database handle.
     ///
     /// ## Errors
-    /// - `SlatedbError`: if the builder was already consumed or the database cannot be opened.
-    pub async fn build(&self) -> Result<Arc<Db>, SlatedbError> {
+    /// - `FfiSlatedbError`: if the builder was already consumed or the database cannot be opened.
+    pub async fn build(&self) -> Result<Arc<Db>, FfiSlatedbError> {
         let builder = self.take_builder()?;
         let db = builder.build().await?;
         Ok(Arc::new(Db::new(db)))
@@ -180,16 +183,16 @@ impl DbReaderBuilder {
     }
 
     /// Set the checkpoint UUID for the reader and validate it immediately.
-    pub fn with_checkpoint_id(&self, checkpoint_id: String) -> Result<(), SlatedbError> {
+    pub fn with_checkpoint_id(&self, checkpoint_id: String) -> Result<(), FfiSlatedbError> {
         let checkpoint_id =
-            Uuid::parse_str(&checkpoint_id).map_err(|err| SlatedbError::Invalid {
+            Uuid::parse_str(&checkpoint_id).map_err(|err| FfiSlatedbError::Invalid {
                 message: format!("invalid checkpoint_id UUID: {err}"),
             })?;
         self.update_builder(|builder| builder.with_checkpoint_id(checkpoint_id))
     }
 
     /// Set reader options.
-    pub fn with_options(&self, options: ReaderOptions) -> Result<(), SlatedbError> {
+    pub fn with_options(&self, options: FfiReaderOptions) -> Result<(), FfiSlatedbError> {
         let options = options.into_core();
         self.update_builder(|builder| builder.with_options(options))
     }
@@ -198,7 +201,7 @@ impl DbReaderBuilder {
 #[uniffi::export(async_runtime = "tokio")]
 impl DbReaderBuilder {
     /// Build the configured database reader.
-    pub async fn build(&self) -> Result<Arc<DbReader>, SlatedbError> {
+    pub async fn build(&self) -> Result<Arc<DbReader>, FfiSlatedbError> {
         let builder = self.take_builder()?;
         let reader = builder.build().await?;
         Ok(Arc::new(DbReader::new(reader)))

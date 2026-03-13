@@ -9,12 +9,12 @@ use slatedb::{
     SstBlockSize as CoreSstBlockSize, WriteHandle as CoreWriteHandle,
 };
 
-use crate::error::SlatedbError;
+use crate::error::FfiSlatedbError;
 use crate::validation::try_usize;
 
 /// Controls which durability level reads are allowed to observe.
 #[derive(Clone, Copy, Debug, Default, uniffi::Enum)]
-pub enum DurabilityLevel {
+pub enum FfiDurabilityLevel {
     /// Return only data durable in remote object storage.
     Remote,
     /// Return the latest visible data, including in-memory state.
@@ -24,7 +24,7 @@ pub enum DurabilityLevel {
 
 /// Selects which in-memory structures should be flushed.
 #[derive(Clone, Copy, Debug, Default, uniffi::Enum)]
-pub enum FlushType {
+pub enum FfiFlushType {
     /// Flush the memtable contents.
     MemTable,
     /// Flush the WAL contents.
@@ -34,7 +34,7 @@ pub enum FlushType {
 
 /// Isolation level used when starting a transaction.
 #[derive(Clone, Copy, Debug, Default, uniffi::Enum)]
-pub enum IsolationLevel {
+pub enum FfiIsolationLevel {
     /// Snapshot isolation.
     #[default]
     Snapshot,
@@ -44,7 +44,7 @@ pub enum IsolationLevel {
 
 /// SST block sizes that can be selected on [`crate::DbBuilder`].
 #[derive(Clone, Copy, Debug, Default, uniffi::Enum)]
-pub enum SstBlockSize {
+pub enum FfiSstBlockSize {
     /// Use 1 KiB SST blocks.
     Block1Kib,
     /// Use 2 KiB SST blocks.
@@ -64,7 +64,7 @@ pub enum SstBlockSize {
 
 /// Time-to-live configuration for put and merge operations.
 #[derive(Clone, Debug, Default, uniffi::Enum)]
-pub enum Ttl {
+pub enum FfiTtl {
     /// Use the database default TTL behavior.
     #[default]
     Default,
@@ -76,19 +76,19 @@ pub enum Ttl {
 
 /// Options for point reads.
 #[derive(Clone, Debug, uniffi::Record)]
-pub struct ReadOptions {
+pub struct FfiReadOptions {
     /// The durability level that the read must observe.
-    pub durability_filter: DurabilityLevel,
+    pub durability_filter: FfiDurabilityLevel,
     /// Whether dirty state may be returned.
     pub dirty: bool,
     /// Whether fetched blocks should be inserted into the cache.
     pub cache_blocks: bool,
 }
 
-impl Default for ReadOptions {
+impl Default for FfiReadOptions {
     fn default() -> Self {
         Self {
-            durability_filter: DurabilityLevel::default(),
+            durability_filter: FfiDurabilityLevel::default(),
             dirty: false,
             cache_blocks: true,
         }
@@ -97,7 +97,7 @@ impl Default for ReadOptions {
 
 /// Options for constructing a read-only database reader.
 #[derive(Clone, Debug, uniffi::Record)]
-pub struct ReaderOptions {
+pub struct FfiReaderOptions {
     /// How often to poll manifests and WALs for refreshed reader state.
     pub manifest_poll_interval_ms: u64,
     /// How long reader-owned checkpoints should remain valid.
@@ -108,7 +108,7 @@ pub struct ReaderOptions {
     pub skip_wal_replay: bool,
 }
 
-impl Default for ReaderOptions {
+impl Default for FfiReaderOptions {
     fn default() -> Self {
         Self {
             manifest_poll_interval_ms: 10_000,
@@ -121,9 +121,9 @@ impl Default for ReaderOptions {
 
 /// Options for range scans and prefix scans.
 #[derive(Clone, Debug, uniffi::Record)]
-pub struct ScanOptions {
+pub struct FfiScanOptions {
     /// The durability level that the scan must observe.
-    pub durability_filter: DurabilityLevel,
+    pub durability_filter: FfiDurabilityLevel,
     /// Whether dirty state may be returned.
     pub dirty: bool,
     /// The number of bytes to read ahead while scanning.
@@ -134,10 +134,10 @@ pub struct ScanOptions {
     pub max_fetch_tasks: u64,
 }
 
-impl Default for ScanOptions {
+impl Default for FfiScanOptions {
     fn default() -> Self {
         Self {
-            durability_filter: DurabilityLevel::default(),
+            durability_filter: FfiDurabilityLevel::default(),
             dirty: false,
             read_ahead_bytes: 1,
             cache_blocks: false,
@@ -148,12 +148,12 @@ impl Default for ScanOptions {
 
 /// Options that control write durability.
 #[derive(Clone, Debug, uniffi::Record)]
-pub struct WriteOptions {
+pub struct FfiWriteOptions {
     /// Whether the call should wait for the write to become durable.
     pub await_durable: bool,
 }
 
-impl Default for WriteOptions {
+impl Default for FfiWriteOptions {
     fn default() -> Self {
         Self {
             await_durable: true,
@@ -163,36 +163,36 @@ impl Default for WriteOptions {
 
 /// Options for put operations.
 #[derive(Clone, Debug, Default, uniffi::Record)]
-pub struct PutOptions {
+pub struct FfiPutOptions {
     /// TTL to apply to the written value.
-    pub ttl: Ttl,
+    pub ttl: FfiTtl,
 }
 
 /// Options for merge operations.
 #[derive(Clone, Debug, Default, uniffi::Record)]
-pub struct MergeOptions {
+pub struct FfiMergeOptions {
     /// TTL to apply to the merged value.
-    pub ttl: Ttl,
+    pub ttl: FfiTtl,
 }
 
 /// Options for manual flushes.
 #[derive(Clone, Debug, uniffi::Record)]
-pub struct FlushOptions {
+pub struct FfiFlushOptions {
     /// The flush mode to execute.
-    pub flush_type: FlushType,
+    pub flush_type: FfiFlushType,
 }
 
-impl Default for FlushOptions {
+impl Default for FfiFlushOptions {
     fn default() -> Self {
         Self {
-            flush_type: FlushType::default(),
+            flush_type: FfiFlushType::default(),
         }
     }
 }
 
 /// A range of keys used for scans.
 #[derive(Clone, Debug, Default, uniffi::Record)]
-pub struct KeyRange {
+pub struct FfiKeyRange {
     /// The optional lower bound of the range.
     pub start: Option<Vec<u8>>,
     /// Whether the lower bound is inclusive.
@@ -205,7 +205,7 @@ pub struct KeyRange {
 
 /// A single operation in a batch write.
 #[derive(Clone, Debug, uniffi::Enum)]
-pub enum WriteOperation {
+pub enum FfiWriteOperation {
     /// Put a value for a key.
     Put {
         /// The key to write.
@@ -213,7 +213,7 @@ pub enum WriteOperation {
         /// The value to write.
         value_bytes: Vec<u8>,
         /// Per-operation put options.
-        options: PutOptions,
+        options: FfiPutOptions,
     },
     /// Merge an operand into a key.
     Merge {
@@ -222,7 +222,7 @@ pub enum WriteOperation {
         /// The merge operand.
         operand: Vec<u8>,
         /// Per-operation merge options.
-        options: MergeOptions,
+        options: FfiMergeOptions,
     },
     /// Delete a key.
     Delete {
@@ -233,7 +233,7 @@ pub enum WriteOperation {
 
 /// A key-value pair returned by reads and iterators.
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
-pub struct KeyValue {
+pub struct FfiKeyValue {
     /// The row key.
     pub key: Vec<u8>,
     /// The row value.
@@ -248,14 +248,14 @@ pub struct KeyValue {
 
 /// Metadata returned from a successful write.
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
-pub struct WriteHandle {
+pub struct FfiWriteHandle {
     /// The sequence number assigned to the write.
     pub seqnum: u64,
     /// The creation timestamp assigned to the write.
     pub create_ts: i64,
 }
 
-impl DurabilityLevel {
+impl FfiDurabilityLevel {
     pub(crate) fn into_core(self) -> core_config::DurabilityLevel {
         match self {
             Self::Remote => core_config::DurabilityLevel::Remote,
@@ -264,7 +264,7 @@ impl DurabilityLevel {
     }
 }
 
-impl FlushType {
+impl FfiFlushType {
     pub(crate) fn into_core(self) -> core_config::FlushType {
         match self {
             Self::MemTable => core_config::FlushType::MemTable,
@@ -273,7 +273,7 @@ impl FlushType {
     }
 }
 
-impl IsolationLevel {
+impl FfiIsolationLevel {
     pub(crate) fn into_core(self) -> CoreIsolationLevel {
         match self {
             Self::Snapshot => CoreIsolationLevel::Snapshot,
@@ -282,7 +282,7 @@ impl IsolationLevel {
     }
 }
 
-impl SstBlockSize {
+impl FfiSstBlockSize {
     pub(crate) fn into_core(self) -> CoreSstBlockSize {
         match self {
             Self::Block1Kib => CoreSstBlockSize::Block1Kib,
@@ -296,7 +296,7 @@ impl SstBlockSize {
     }
 }
 
-impl Ttl {
+impl FfiTtl {
     pub(crate) fn into_core(self) -> core_config::Ttl {
         match self {
             Self::Default => core_config::Ttl::Default,
@@ -306,7 +306,7 @@ impl Ttl {
     }
 }
 
-impl ReadOptions {
+impl FfiReadOptions {
     pub(crate) fn into_core(self) -> core_config::ReadOptions {
         core_config::ReadOptions {
             durability_filter: self.durability_filter.into_core(),
@@ -316,7 +316,7 @@ impl ReadOptions {
     }
 }
 
-impl ReaderOptions {
+impl FfiReaderOptions {
     pub(crate) fn into_core(self) -> core_config::DbReaderOptions {
         let mut options = core_config::DbReaderOptions::default();
         options.manifest_poll_interval = Duration::from_millis(self.manifest_poll_interval_ms);
@@ -327,8 +327,8 @@ impl ReaderOptions {
     }
 }
 
-impl ScanOptions {
-    pub(crate) fn into_core(self) -> Result<core_config::ScanOptions, SlatedbError> {
+impl FfiScanOptions {
+    pub(crate) fn into_core(self) -> Result<core_config::ScanOptions, FfiSlatedbError> {
         Ok(core_config::ScanOptions {
             durability_filter: self.durability_filter.into_core(),
             dirty: self.dirty,
@@ -339,7 +339,7 @@ impl ScanOptions {
     }
 }
 
-impl WriteOptions {
+impl FfiWriteOptions {
     pub(crate) fn into_core(self) -> core_config::WriteOptions {
         core_config::WriteOptions {
             await_durable: self.await_durable,
@@ -347,7 +347,7 @@ impl WriteOptions {
     }
 }
 
-impl PutOptions {
+impl FfiPutOptions {
     pub(crate) fn into_core(self) -> core_config::PutOptions {
         core_config::PutOptions {
             ttl: self.ttl.into_core(),
@@ -355,7 +355,7 @@ impl PutOptions {
     }
 }
 
-impl MergeOptions {
+impl FfiMergeOptions {
     pub(crate) fn into_core(self) -> core_config::MergeOptions {
         core_config::MergeOptions {
             ttl: self.ttl.into_core(),
@@ -363,7 +363,7 @@ impl MergeOptions {
     }
 }
 
-impl FlushOptions {
+impl FfiFlushOptions {
     pub(crate) fn into_core(self) -> core_config::FlushOptions {
         core_config::FlushOptions {
             flush_type: self.flush_type.into_core(),
@@ -371,15 +371,15 @@ impl FlushOptions {
     }
 }
 
-impl KeyRange {
-    pub(crate) fn into_bounds(self) -> Result<(Bound<Vec<u8>>, Bound<Vec<u8>>), SlatedbError> {
+impl FfiKeyRange {
+    pub(crate) fn into_bounds(self) -> Result<(Bound<Vec<u8>>, Bound<Vec<u8>>), FfiSlatedbError> {
         if self.start.as_ref().is_some_and(|start| start.is_empty()) {
-            return Err(SlatedbError::Invalid {
+            return Err(FfiSlatedbError::Invalid {
                 message: "range start cannot be empty".to_owned(),
             });
         }
         if self.end.as_ref().is_some_and(|end| end.is_empty()) {
-            return Err(SlatedbError::Invalid {
+            return Err(FfiSlatedbError::Invalid {
                 message: "range end cannot be empty".to_owned(),
             });
         }
@@ -387,12 +387,12 @@ impl KeyRange {
         if let (Some(start), Some(end)) = (&self.start, &self.end) {
             match start.cmp(end) {
                 std::cmp::Ordering::Greater => {
-                    return Err(SlatedbError::Invalid {
+                    return Err(FfiSlatedbError::Invalid {
                         message: "range start must not be greater than range end".to_owned(),
                     });
                 }
                 std::cmp::Ordering::Equal if !(self.start_inclusive && self.end_inclusive) => {
-                    return Err(SlatedbError::Invalid {
+                    return Err(FfiSlatedbError::Invalid {
                         message: "range must be non-empty".to_owned(),
                     });
                 }
@@ -415,7 +415,7 @@ impl KeyRange {
     }
 }
 
-impl KeyValue {
+impl FfiKeyValue {
     pub(crate) fn from_core(value: CoreKeyValue) -> Self {
         Self {
             key: value.key.to_vec(),
@@ -427,7 +427,7 @@ impl KeyValue {
     }
 }
 
-impl WriteHandle {
+impl FfiWriteHandle {
     pub(crate) fn from_core(value: CoreWriteHandle) -> Self {
         Self {
             seqnum: value.seqnum(),

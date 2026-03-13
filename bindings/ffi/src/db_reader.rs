@@ -4,8 +4,8 @@ use std::sync::Arc;
 
 use slatedb::DbReader as CoreDbReader;
 
-use crate::config::{KeyRange, ReadOptions, ScanOptions};
-use crate::error::SlatedbError;
+use crate::config::{FfiKeyRange, FfiReadOptions, FfiScanOptions};
+use crate::error::FfiSlatedbError;
 use crate::iterator::DbIterator;
 
 /// A read-only database reader.
@@ -23,7 +23,7 @@ impl DbReader {
 #[uniffi::export(async_runtime = "tokio")]
 impl DbReader {
     /// Get the value for a key using default read options.
-    pub async fn get(&self, key: Vec<u8>) -> Result<Option<Vec<u8>>, SlatedbError> {
+    pub async fn get(&self, key: Vec<u8>) -> Result<Option<Vec<u8>>, FfiSlatedbError> {
         Ok(self.inner.get(key).await?.map(|value| value.to_vec()))
     }
 
@@ -31,8 +31,8 @@ impl DbReader {
     pub async fn get_with_options(
         &self,
         key: Vec<u8>,
-        options: ReadOptions,
-    ) -> Result<Option<Vec<u8>>, SlatedbError> {
+        options: FfiReadOptions,
+    ) -> Result<Option<Vec<u8>>, FfiSlatedbError> {
         let options = options.into_core();
         Ok(self
             .inner
@@ -42,7 +42,7 @@ impl DbReader {
     }
 
     /// Scan a key range using default scan options.
-    pub async fn scan(&self, range: KeyRange) -> Result<Arc<DbIterator>, SlatedbError> {
+    pub async fn scan(&self, range: FfiKeyRange) -> Result<Arc<DbIterator>, FfiSlatedbError> {
         let range = range.into_bounds()?;
         let iter = self.inner.scan::<Vec<u8>, _>(range).await?;
         Ok(Arc::new(DbIterator::new(iter)))
@@ -51,9 +51,9 @@ impl DbReader {
     /// Scan a key range using custom scan options.
     pub async fn scan_with_options(
         &self,
-        range: KeyRange,
-        options: ScanOptions,
-    ) -> Result<Arc<DbIterator>, SlatedbError> {
+        range: FfiKeyRange,
+        options: FfiScanOptions,
+    ) -> Result<Arc<DbIterator>, FfiSlatedbError> {
         let range = range.into_bounds()?;
         let options = options.into_core()?;
         let iter = self
@@ -64,7 +64,7 @@ impl DbReader {
     }
 
     /// Scan all keys that share the provided prefix.
-    pub async fn scan_prefix(&self, prefix: Vec<u8>) -> Result<Arc<DbIterator>, SlatedbError> {
+    pub async fn scan_prefix(&self, prefix: Vec<u8>) -> Result<Arc<DbIterator>, FfiSlatedbError> {
         let iter = self.inner.scan_prefix(prefix).await?;
         Ok(Arc::new(DbIterator::new(iter)))
     }
@@ -73,8 +73,8 @@ impl DbReader {
     pub async fn scan_prefix_with_options(
         &self,
         prefix: Vec<u8>,
-        options: ScanOptions,
-    ) -> Result<Arc<DbIterator>, SlatedbError> {
+        options: FfiScanOptions,
+    ) -> Result<Arc<DbIterator>, FfiSlatedbError> {
         let options = options.into_core()?;
         let iter = self
             .inner
@@ -84,7 +84,7 @@ impl DbReader {
     }
 
     /// Close the reader.
-    pub async fn close(&self) -> Result<(), SlatedbError> {
+    pub async fn close(&self) -> Result<(), FfiSlatedbError> {
         self.inner.close().await.map_err(Into::into)
     }
 }
