@@ -20,11 +20,11 @@ table TieredCompactionSpec {
     // deprecated: use l0_view_ids
     ssts: [Ulid];
 
-    // input L0 SSTable View IDs
-    l0_view_ids: [Ulid];
-
     // input Sorted Run IDs
     sorted_runs: [uint32];
+
+    // input L0 SSTable View IDs
+    l0_view_ids: [Ulid];
 }
 
 table Compaction {
