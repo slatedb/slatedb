@@ -1,7 +1,8 @@
 //! Database and reader builder interfaces.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
+use parking_lot::Mutex;
 use serde_json::from_str;
 use slatedb::{
     Db as CoreDb, DbBuilder as CoreDbBuilder, DbReader as CoreDbReader,
@@ -34,18 +35,14 @@ impl FfiDbBuilder {
         &self,
         update: impl FnOnce(CoreDbBuilder<String>) -> CoreDbBuilder<String>,
     ) -> Result<(), FfiSlatedbError> {
-        let mut guard = self.builder.lock().map_err(|_| FfiSlatedbError::Internal {
-            message: "builder mutex poisoned".to_owned(),
-        })?;
+        let mut guard = self.builder.lock();
         let builder = guard.take().ok_or_else(builder_consumed)?;
         *guard = Some(update(builder));
         Ok(())
     }
 
     fn take_builder(&self) -> Result<CoreDbBuilder<String>, FfiSlatedbError> {
-        let mut guard = self.builder.lock().map_err(|_| FfiSlatedbError::Internal {
-            message: "builder mutex poisoned".to_owned(),
-        })?;
+        let mut guard = self.builder.lock();
         guard.take().ok_or_else(builder_consumed)
     }
 }
@@ -55,18 +52,14 @@ impl FfiDbReaderBuilder {
         &self,
         update: impl FnOnce(CoreDbReaderBuilder<String>) -> CoreDbReaderBuilder<String>,
     ) -> Result<(), FfiSlatedbError> {
-        let mut guard = self.builder.lock().map_err(|_| FfiSlatedbError::Internal {
-            message: "reader builder mutex poisoned".to_owned(),
-        })?;
+        let mut guard = self.builder.lock();
         let builder = guard.take().ok_or_else(builder_consumed)?;
         *guard = Some(update(builder));
         Ok(())
     }
 
     fn take_builder(&self) -> Result<CoreDbReaderBuilder<String>, FfiSlatedbError> {
-        let mut guard = self.builder.lock().map_err(|_| FfiSlatedbError::Internal {
-            message: "reader builder mutex poisoned".to_owned(),
-        })?;
+        let mut guard = self.builder.lock();
         guard.take().ok_or_else(builder_consumed)
     }
 }

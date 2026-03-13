@@ -15,6 +15,7 @@ doc = false
 bench = false
 
 [dependencies]
+parking_lot = { workspace = true }
 slatedb = { workspace = true, features = ["all"] }
 slatedb-c = { path = "../../slatedb-c" }
 serde_json = { workspace = true }

@@ -1,7 +1,8 @@
 //! First-class write batch wrapper exposed by UniFFI.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
+use parking_lot::Mutex;
 use slatedb::WriteBatch as CoreWriteBatch;
 
 use crate::config::{FfiMergeOptions, FfiPutOptions};
@@ -27,9 +28,7 @@ impl FfiWriteBatch {
         &self,
         update: impl FnOnce(&mut CoreWriteBatch) -> T,
     ) -> Result<T, FfiSlatedbError> {
-        let mut guard = self.state.lock().map_err(|_| FfiSlatedbError::Internal {
-            message: "write batch mutex poisoned".to_owned(),
-        })?;
+        let mut guard = self.state.lock();
         match &mut *guard {
             WriteBatchState::Open(batch) => Ok(update(batch)),
             WriteBatchState::Consumed => Err(write_batch_consumed()),
@@ -38,9 +37,7 @@ impl FfiWriteBatch {
     }
 
     pub(crate) fn take_for_write(&self) -> Result<CoreWriteBatch, FfiSlatedbError> {
-        let mut guard = self.state.lock().map_err(|_| FfiSlatedbError::Internal {
-            message: "write batch mutex poisoned".to_owned(),
-        })?;
+        let mut guard = self.state.lock();
 
         match std::mem::replace(&mut *guard, WriteBatchState::Consumed) {
             WriteBatchState::Open(batch) => Ok(batch),
@@ -110,9 +107,7 @@ impl FfiWriteBatch {
 
     /// Explicitly close the batch handle.
     pub fn close(&self) -> Result<(), FfiSlatedbError> {
-        let mut guard = self.state.lock().map_err(|_| FfiSlatedbError::Internal {
-            message: "write batch mutex poisoned".to_owned(),
-        })?;
+        let mut guard = self.state.lock();
         if matches!(&*guard, WriteBatchState::Closed) {
             Err(write_batch_closed())
         } else {
