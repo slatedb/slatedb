@@ -6,7 +6,6 @@ use crate::config::{FfiKeyRange, FfiReadOptions, FfiScanOptions};
 use crate::error::FfiSlatedbError;
 use crate::iterator::FfiDbIterator;
 
-/// A read-only database reader.
 #[derive(uniffi::Object)]
 pub struct FfiDbReader {
     inner: slatedb::DbReader,
@@ -20,12 +19,10 @@ impl FfiDbReader {
 
 #[uniffi::export(async_runtime = "tokio")]
 impl FfiDbReader {
-    /// Get the value for a key using default read options.
     pub async fn get(&self, key: Vec<u8>) -> Result<Option<Vec<u8>>, FfiSlatedbError> {
         Ok(self.inner.get(key).await?.map(|value| value.to_vec()))
     }
 
-    /// Get the value for a key using custom read options.
     pub async fn get_with_options(
         &self,
         key: Vec<u8>,
@@ -39,14 +36,12 @@ impl FfiDbReader {
             .map(|value| value.to_vec()))
     }
 
-    /// Scan a key range using default scan options.
     pub async fn scan(&self, range: FfiKeyRange) -> Result<Arc<FfiDbIterator>, FfiSlatedbError> {
         let range = range.into_bounds()?;
         let iter = self.inner.scan::<Vec<u8>, _>(range).await?;
         Ok(Arc::new(FfiDbIterator::new(iter)))
     }
 
-    /// Scan a key range using custom scan options.
     pub async fn scan_with_options(
         &self,
         range: FfiKeyRange,
@@ -61,7 +56,6 @@ impl FfiDbReader {
         Ok(Arc::new(FfiDbIterator::new(iter)))
     }
 
-    /// Scan all keys that share the provided prefix.
     pub async fn scan_prefix(
         &self,
         prefix: Vec<u8>,
@@ -70,7 +64,6 @@ impl FfiDbReader {
         Ok(Arc::new(FfiDbIterator::new(iter)))
     }
 
-    /// Scan all keys that share the provided prefix using custom scan options.
     pub async fn scan_prefix_with_options(
         &self,
         prefix: Vec<u8>,
@@ -84,7 +77,6 @@ impl FfiDbReader {
         Ok(Arc::new(FfiDbIterator::new(iter)))
     }
 
-    /// Close the reader.
     pub async fn close(&self) -> Result<(), FfiSlatedbError> {
         self.inner.close().await.map_err(Into::into)
     }

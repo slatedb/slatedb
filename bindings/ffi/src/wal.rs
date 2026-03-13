@@ -9,7 +9,6 @@ use tokio::sync::Mutex;
 use crate::error::FfiSlatedbError;
 use crate::object_store::FfiObjectStore;
 
-/// The kind of entry stored in a WAL row.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
 pub enum FfiRowEntryKind {
     Value,
@@ -17,7 +16,6 @@ pub enum FfiRowEntryKind {
     Merge,
 }
 
-/// A row entry returned by WAL iteration.
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct FfiRowEntry {
     pub kind: FfiRowEntryKind,
@@ -28,7 +26,6 @@ pub struct FfiRowEntry {
     pub expire_ts: Option<i64>,
 }
 
-/// Metadata for a single WAL file.
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct FfiWalFileMetadata {
     pub last_modified_seconds: i64,
@@ -37,19 +34,16 @@ pub struct FfiWalFileMetadata {
     pub location: String,
 }
 
-/// A WAL file handle.
 #[derive(uniffi::Object)]
 pub struct FfiWalFile {
     inner: slatedb::WalFile,
 }
 
-/// An iterator over rows in a WAL file.
 #[derive(uniffi::Object)]
 pub struct FfiWalFileIterator {
     inner: Mutex<slatedb::WalFileIterator>,
 }
 
-/// A WAL reader scoped to a single database path and object store.
 #[derive(uniffi::Object)]
 pub struct FfiWalReader {
     inner: slatedb::WalReader,
@@ -90,7 +84,6 @@ impl FfiWalFileIterator {
 
 #[uniffi::export]
 impl FfiWalReader {
-    /// Create a WAL reader for the provided database path and object store.
     #[uniffi::constructor]
     pub fn new(path: String, object_store: Arc<FfiObjectStore>) -> Arc<Self> {
         Arc::new(Self {
@@ -98,12 +91,10 @@ impl FfiWalReader {
         })
     }
 
-    /// Return a handle for a specific WAL file ID.
     pub fn get(&self, id: u64) -> Arc<FfiWalFile> {
         Arc::new(FfiWalFile::new(self.inner.get(id)))
     }
 
-    /// Close the WAL reader.
     pub fn close(&self) -> Result<(), FfiSlatedbError> {
         Ok(())
     }
@@ -111,7 +102,6 @@ impl FfiWalReader {
 
 #[uniffi::export(async_runtime = "tokio")]
 impl FfiWalReader {
-    /// List WAL files in ascending ID order.
     pub async fn list(
         &self,
         start_id: Option<u64>,
@@ -129,22 +119,18 @@ impl FfiWalReader {
 
 #[uniffi::export]
 impl FfiWalFile {
-    /// Return this file's WAL ID.
     pub fn id(&self) -> u64 {
         self.inner.id
     }
 
-    /// Return the next WAL ID after this file.
     pub fn next_id(&self) -> u64 {
         self.inner.next_id()
     }
 
-    /// Return a handle for the next WAL file after this one.
     pub fn next_file(&self) -> Arc<FfiWalFile> {
         Arc::new(FfiWalFile::new(self.inner.next_file()))
     }
 
-    /// Close the WAL file handle.
     pub fn close(&self) -> Result<(), FfiSlatedbError> {
         Ok(())
     }
@@ -152,7 +138,6 @@ impl FfiWalFile {
 
 #[uniffi::export(async_runtime = "tokio")]
 impl FfiWalFile {
-    /// Fetch metadata for this WAL file.
     pub async fn metadata(&self) -> Result<FfiWalFileMetadata, FfiSlatedbError> {
         let metadata = self.inner.metadata().await?;
         Ok(FfiWalFileMetadata {
@@ -163,7 +148,6 @@ impl FfiWalFile {
         })
     }
 
-    /// Create an iterator over rows in this WAL file.
     pub async fn iterator(&self) -> Result<Arc<FfiWalFileIterator>, FfiSlatedbError> {
         let iter = self.inner.iterator().await?;
         Ok(Arc::new(FfiWalFileIterator::new(iter)))
@@ -172,7 +156,6 @@ impl FfiWalFile {
 
 #[uniffi::export]
 impl FfiWalFileIterator {
-    /// Close the WAL iterator.
     pub fn close(&self) -> Result<(), FfiSlatedbError> {
         Ok(())
     }
@@ -180,7 +163,6 @@ impl FfiWalFileIterator {
 
 #[uniffi::export(async_runtime = "tokio")]
 impl FfiWalFileIterator {
-    /// Return the next WAL entry, or `None` when the iterator is exhausted.
     pub async fn next(&self) -> Result<Option<FfiRowEntry>, FfiSlatedbError> {
         let mut guard = self.inner.lock().await;
         Ok(guard.next().await?.map(FfiRowEntry::from_core))

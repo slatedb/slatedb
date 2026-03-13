@@ -4,7 +4,6 @@ use std::ffi::CStr;
 
 use crate::error::{FfiCloseReason, FfiSlatedbError};
 
-/// The available logging levels.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, uniffi::Enum)]
 pub enum FfiLogLevel {
     Trace,
@@ -89,19 +88,16 @@ fn result_from_slatedb_c(result: slatedb_c::slatedb_result_t) -> Result<(), FfiS
     mapped
 }
 
-/// Initialize SlateDB logging at the requested level.
 #[uniffi::export]
 pub fn ffi_init_logging(level: FfiLogLevel) -> Result<(), FfiSlatedbError> {
     result_from_slatedb_c(slatedb_c::slatedb_logging_init(level.into_c()))
 }
 
-/// Update the process-global SlateDB logging level.
 #[uniffi::export]
 pub fn ffi_set_logging_level(level: FfiLogLevel) -> Result<(), FfiSlatedbError> {
     result_from_slatedb_c(slatedb_c::slatedb_logging_set_level(level.into_c()))
 }
 
-/// Initialize SlateDB logging at the default `Info` level.
 #[uniffi::export]
 pub fn ffi_init_default_logging() -> Result<(), FfiSlatedbError> {
     ffi_init_logging(FfiLogLevel::Info)
