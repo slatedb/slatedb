@@ -2,7 +2,7 @@
 
 use std::sync::{Arc, Mutex as StdMutex};
 
-use slatedb::DbReader as CoreDbReader;
+use slatedb::{DbReader as CoreDbReader, DbReaderBuilder as CoreDbReaderBuilder};
 use uuid::Uuid;
 
 use crate::config::{DbKeyRange, DbReadOptions, DbReaderOptions, DbScanOptions};
@@ -14,14 +14,7 @@ use crate::validation::builder_consumed;
 /// Builder used to configure and open a [`DbReader`].
 #[derive(uniffi::Object)]
 pub struct DbReaderBuilder {
-    state: StdMutex<Option<DbReaderBuilderState>>,
-}
-
-struct DbReaderBuilderState {
-    path: String,
-    object_store: Arc<ObjectStore>,
-    checkpoint_id: Option<Uuid>,
-    options: Option<DbReaderOptions>,
+    builder: StdMutex<Option<CoreDbReaderBuilder<String>>>,
 }
 
 /// A read-only database reader.
@@ -31,19 +24,20 @@ pub struct DbReader {
 }
 
 impl DbReaderBuilder {
-    fn with_state<T>(
+    fn update_builder(
         &self,
-        update: impl FnOnce(&mut DbReaderBuilderState) -> Result<T, SlatedbError>,
-    ) -> Result<T, SlatedbError> {
-        let mut guard = self.state.lock().map_err(|_| SlatedbError::Internal {
+        update: impl FnOnce(CoreDbReaderBuilder<String>) -> CoreDbReaderBuilder<String>,
+    ) -> Result<(), SlatedbError> {
+        let mut guard = self.builder.lock().map_err(|_| SlatedbError::Internal {
             message: "reader builder mutex poisoned".to_owned(),
         })?;
-        let state = guard.as_mut().ok_or_else(builder_consumed)?;
-        update(state)
+        let builder = guard.take().ok_or_else(builder_consumed)?;
+        *guard = Some(update(builder));
+        Ok(())
     }
 
-    fn take_state(&self) -> Result<DbReaderBuilderState, SlatedbError> {
-        let mut guard = self.state.lock().map_err(|_| SlatedbError::Internal {
+    fn take_builder(&self) -> Result<CoreDbReaderBuilder<String>, SlatedbError> {
+        let mut guard = self.builder.lock().map_err(|_| SlatedbError::Internal {
             message: "reader builder mutex poisoned".to_owned(),
         })?;
         guard.take().ok_or_else(builder_consumed)
@@ -62,12 +56,10 @@ impl DbReaderBuilder {
     #[uniffi::constructor]
     pub fn new(path: String, object_store: Arc<ObjectStore>) -> Arc<Self> {
         Arc::new(Self {
-            state: StdMutex::new(Some(DbReaderBuilderState {
+            builder: StdMutex::new(Some(CoreDbReader::builder(
                 path,
-                object_store,
-                checkpoint_id: None,
-                options: None,
-            })),
+                object_store.inner.clone(),
+            ))),
         })
     }
 
@@ -77,18 +69,13 @@ impl DbReaderBuilder {
             Uuid::parse_str(&checkpoint_id).map_err(|err| SlatedbError::Invalid {
                 message: format!("invalid checkpoint_id UUID: {err}"),
             })?;
-        self.with_state(|state| {
-            state.checkpoint_id = Some(checkpoint_id);
-            Ok(())
-        })
+        self.update_builder(|builder| builder.with_checkpoint_id(checkpoint_id))
     }
 
     /// Set reader options.
     pub fn with_options(&self, options: DbReaderOptions) -> Result<(), SlatedbError> {
-        self.with_state(|state| {
-            state.options = Some(options);
-            Ok(())
-        })
+        let options = options.into_core();
+        self.update_builder(|builder| builder.with_options(options))
     }
 }
 
@@ -96,16 +83,7 @@ impl DbReaderBuilder {
 impl DbReaderBuilder {
     /// Build the configured database reader.
     pub async fn build(&self) -> Result<Arc<DbReader>, SlatedbError> {
-        let state = self.take_state()?;
-        let mut builder = CoreDbReader::builder(state.path, state.object_store.inner.clone());
-
-        if let Some(checkpoint_id) = state.checkpoint_id {
-            builder = builder.with_checkpoint_id(checkpoint_id);
-        }
-        if let Some(options) = state.options {
-            builder = builder.with_options(options.into_core());
-        }
-
+        let builder = self.take_builder()?;
         let reader = builder.build().await?;
         Ok(Arc::new(DbReader::new(reader)))
     }
