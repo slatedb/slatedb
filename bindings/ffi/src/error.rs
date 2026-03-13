@@ -1,24 +1,54 @@
+//! Error types returned by the SlateDB FFI wrapper.
+
 use thiserror::Error;
 
+/// Error returned by the SlateDB FFI layer.
+///
+/// The FFI wrapper groups core SlateDB errors into a smaller set of stable
+/// categories while preserving the original message text.
 #[derive(Debug, Error, uniffi::Error)]
 pub enum SlatedbError {
+    /// A transaction failed to commit or otherwise encountered a conflict.
     #[error("{message}")]
-    Transaction { message: String },
+    Transaction {
+        /// The original error message.
+        message: String,
+    },
 
+    /// The database or transaction handle has already been closed.
     #[error("{message}")]
-    Closed { message: String },
+    Closed {
+        /// The original error message.
+        message: String,
+    },
 
+    /// A required dependency or remote service is temporarily unavailable.
     #[error("{message}")]
-    Unavailable { message: String },
+    Unavailable {
+        /// The original error message.
+        message: String,
+    },
 
+    /// The caller supplied invalid input.
     #[error("{message}")]
-    Invalid { message: String },
+    Invalid {
+        /// The original error message.
+        message: String,
+    },
 
+    /// Stored data was invalid or could not be decoded.
     #[error("{message}")]
-    Data { message: String },
+    Data {
+        /// The original error message.
+        message: String,
+    },
 
+    /// An unexpected internal failure occurred.
     #[error("{message}")]
-    Internal { message: String },
+    Internal {
+        /// The original error message.
+        message: String,
+    },
 }
 
 impl From<slatedb::Error> for SlatedbError {

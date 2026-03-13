@@ -1,3 +1,5 @@
+//! Database and snapshot handles exposed by the FFI wrapper.
+
 use std::sync::Arc;
 
 use slatedb::{Db as CoreDb, DbSnapshot as CoreDbSnapshot};
@@ -11,11 +13,15 @@ use crate::iterator::DbIterator;
 use crate::transaction::DbTransaction;
 use crate::validation::{build_write_batch, validate_key, validate_key_value};
 
+/// Handle to an open SlateDB database.
+///
+/// Instances of this type are created by [`crate::DbBuilder::build`].
 #[derive(uniffi::Object)]
 pub struct Db {
     inner: CoreDb,
 }
 
+/// A stable point-in-time view of a database.
 #[derive(uniffi::Object)]
 pub struct DbSnapshot {
     inner: Arc<CoreDbSnapshot>,
@@ -29,6 +35,10 @@ impl Db {
 
 #[uniffi::export]
 impl Db {
+    /// Check whether the database is still open.
+    ///
+    /// ## Returns
+    /// - `Result<(), SlatedbError>`: `Ok(())` if the database is open.
     pub fn status(&self) -> Result<(), SlatedbError> {
         self.inner.status().map_err(Into::into)
     }
@@ -36,14 +46,17 @@ impl Db {
 
 #[uniffi::export(async_runtime = "tokio")]
 impl Db {
+    /// Close the database.
     pub async fn close(&self) -> Result<(), SlatedbError> {
         self.inner.close().await.map_err(Into::into)
     }
 
+    /// Get the value for a key using default read options.
     pub async fn get(&self, key: Vec<u8>) -> Result<Option<Vec<u8>>, SlatedbError> {
         Ok(self.inner.get(key).await?.map(|value| value.to_vec()))
     }
 
+    /// Get the value for a key using custom read options.
     pub async fn get_with_options(
         &self,
         key: Vec<u8>,
@@ -57,10 +70,12 @@ impl Db {
             .map(|value| value.to_vec()))
     }
 
+    /// Get the full row metadata for a key using default read options.
     pub async fn get_key_value(&self, key: Vec<u8>) -> Result<Option<KeyValue>, SlatedbError> {
         Ok(self.inner.get_key_value(key).await?.map(KeyValue::from_core))
     }
 
+    /// Get the full row metadata for a key using custom read options.
     pub async fn get_key_value_with_options(
         &self,
         key: Vec<u8>,
@@ -74,12 +89,14 @@ impl Db {
             .map(KeyValue::from_core))
     }
 
+    /// Scan a key range using default scan options.
     pub async fn scan(&self, range: DbKeyRange) -> Result<Arc<DbIterator>, SlatedbError> {
         let range = range.into_bounds()?;
         let iter = self.inner.scan::<Vec<u8>, _>(range).await?;
         Ok(Arc::new(DbIterator::new(iter)))
     }
 
+    /// Scan a key range using custom scan options.
     pub async fn scan_with_options(
         &self,
         range: DbKeyRange,
@@ -91,11 +108,13 @@ impl Db {
         Ok(Arc::new(DbIterator::new(iter)))
     }
 
+    /// Scan all keys that share the provided prefix.
     pub async fn scan_prefix(&self, prefix: Vec<u8>) -> Result<Arc<DbIterator>, SlatedbError> {
         let iter = self.inner.scan_prefix(prefix).await?;
         Ok(Arc::new(DbIterator::new(iter)))
     }
 
+    /// Scan all keys that share the provided prefix using custom scan options.
     pub async fn scan_prefix_with_options(
         &self,
         prefix: Vec<u8>,
@@ -106,11 +125,16 @@ impl Db {
         Ok(Arc::new(DbIterator::new(iter)))
     }
 
+    /// Put a value for a key using default options.
+    ///
+    /// ## Errors
+    /// - `SlatedbError::Invalid`: if the key is empty or exceeds SlateDB limits.
     pub async fn put(&self, key: Vec<u8>, value: Vec<u8>) -> Result<WriteHandle, SlatedbError> {
         validate_key_value(&key, &value)?;
         Ok(WriteHandle::from_core(self.inner.put(key, value).await?))
     }
 
+    /// Put a value for a key using custom put and write options.
     pub async fn put_with_options(
         &self,
         key: Vec<u8>,
@@ -128,11 +152,13 @@ impl Db {
         ))
     }
 
+    /// Delete a key using default write options.
     pub async fn delete(&self, key: Vec<u8>) -> Result<WriteHandle, SlatedbError> {
         validate_key(&key)?;
         Ok(WriteHandle::from_core(self.inner.delete(key).await?))
     }
 
+    /// Delete a key using custom write options.
     pub async fn delete_with_options(
         &self,
         key: Vec<u8>,
@@ -145,6 +171,7 @@ impl Db {
         ))
     }
 
+    /// Merge an operand into a key using default options.
     pub async fn merge(
         &self,
         key: Vec<u8>,
@@ -154,6 +181,7 @@ impl Db {
         Ok(WriteHandle::from_core(self.inner.merge(key, value).await?))
     }
 
+    /// Merge an operand into a key using custom merge and write options.
     pub async fn merge_with_options(
         &self,
         key: Vec<u8>,
@@ -171,6 +199,7 @@ impl Db {
         ))
     }
 
+    /// Apply a batch of operations atomically using default write options.
     pub async fn write(
         &self,
         operations: Vec<DbWriteOperation>,
@@ -179,6 +208,7 @@ impl Db {
         Ok(WriteHandle::from_core(self.inner.write(batch).await?))
     }
 
+    /// Apply a batch of operations atomically using custom write options.
     pub async fn write_with_options(
         &self,
         operations: Vec<DbWriteOperation>,
@@ -191,10 +221,12 @@ impl Db {
         ))
     }
 
+    /// Flush in-memory state using the database defaults.
     pub async fn flush(&self) -> Result<(), SlatedbError> {
         self.inner.flush().await.map_err(Into::into)
     }
 
+    /// Flush in-memory state using explicit flush options.
     pub async fn flush_with_options(&self, options: DbFlushOptions) -> Result<(), SlatedbError> {
         self.inner
             .flush_with_options(options.into_core())
@@ -202,12 +234,14 @@ impl Db {
             .map_err(Into::into)
     }
 
+    /// Create a point-in-time snapshot of the database.
     pub async fn snapshot(&self) -> Result<Arc<DbSnapshot>, SlatedbError> {
         Ok(Arc::new(DbSnapshot {
             inner: self.inner.snapshot().await?,
         }))
     }
 
+    /// Begin a new transaction at the requested isolation level.
     pub async fn begin(
         &self,
         isolation_level: IsolationLevel,
@@ -219,10 +253,12 @@ impl Db {
 
 #[uniffi::export(async_runtime = "tokio")]
 impl DbSnapshot {
+    /// Get the value for a key from the snapshot using default read options.
     pub async fn get(&self, key: Vec<u8>) -> Result<Option<Vec<u8>>, SlatedbError> {
         Ok(self.inner.get(key).await?.map(|value| value.to_vec()))
     }
 
+    /// Get the value for a key from the snapshot using custom read options.
     pub async fn get_with_options(
         &self,
         key: Vec<u8>,
@@ -236,10 +272,12 @@ impl DbSnapshot {
             .map(|value| value.to_vec()))
     }
 
+    /// Get the full row metadata for a key from the snapshot using default read options.
     pub async fn get_key_value(&self, key: Vec<u8>) -> Result<Option<KeyValue>, SlatedbError> {
         Ok(self.inner.get_key_value(key).await?.map(KeyValue::from_core))
     }
 
+    /// Get the full row metadata for a key from the snapshot using custom read options.
     pub async fn get_key_value_with_options(
         &self,
         key: Vec<u8>,
@@ -253,12 +291,14 @@ impl DbSnapshot {
             .map(KeyValue::from_core))
     }
 
+    /// Scan a key range from the snapshot using default scan options.
     pub async fn scan(&self, range: DbKeyRange) -> Result<Arc<DbIterator>, SlatedbError> {
         let range = range.into_bounds()?;
         let iter = self.inner.scan::<Vec<u8>, _>(range).await?;
         Ok(Arc::new(DbIterator::new(iter)))
     }
 
+    /// Scan a key range from the snapshot using custom scan options.
     pub async fn scan_with_options(
         &self,
         range: DbKeyRange,
@@ -270,11 +310,13 @@ impl DbSnapshot {
         Ok(Arc::new(DbIterator::new(iter)))
     }
 
+    /// Scan all keys with the provided prefix from the snapshot.
     pub async fn scan_prefix(&self, prefix: Vec<u8>) -> Result<Arc<DbIterator>, SlatedbError> {
         let iter = self.inner.scan_prefix(prefix).await?;
         Ok(Arc::new(DbIterator::new(iter)))
     }
 
+    /// Scan all keys with the provided prefix from the snapshot using custom scan options.
     pub async fn scan_prefix_with_options(
         &self,
         prefix: Vec<u8>,
