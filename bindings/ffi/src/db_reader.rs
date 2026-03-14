@@ -1,8 +1,9 @@
 use std::sync::Arc;
 
-use crate::config::{FfiKeyRange, FfiReadOptions, FfiScanOptions};
+use crate::config::{FfiReadOptions, FfiScanOptions};
 use crate::error::FfiSlatedbError;
 use crate::iterator::FfiDbIterator;
+use crate::types::FfiKeyRange;
 
 #[derive(uniffi::Object)]
 pub struct FfiDbReader {

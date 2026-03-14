@@ -1,47 +1,11 @@
 use std::ops::Bound;
 use std::sync::Arc;
 
-use slatedb::{RowEntry, ValueDeletable};
 use tokio::sync::Mutex;
 
 use crate::error::FfiSlatedbError;
 use crate::object_store::FfiObjectStore;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
-pub enum FfiRowEntryKind {
-    Value,
-    Tombstone,
-    Merge,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
-pub struct FfiRowEntry {
-    pub kind: FfiRowEntryKind,
-    pub key: Vec<u8>,
-    pub value: Option<Vec<u8>>,
-    pub seq: u64,
-    pub create_ts: Option<i64>,
-    pub expire_ts: Option<i64>,
-}
-
-impl FfiRowEntry {
-    fn from_core(entry: RowEntry) -> Self {
-        let (kind, value) = match entry.value {
-            ValueDeletable::Value(value) => (FfiRowEntryKind::Value, Some(value.to_vec())),
-            ValueDeletable::Tombstone => (FfiRowEntryKind::Tombstone, None),
-            ValueDeletable::Merge(value) => (FfiRowEntryKind::Merge, Some(value.to_vec())),
-        };
-
-        Self {
-            kind,
-            key: entry.key.to_vec(),
-            value,
-            seq: entry.seq,
-            create_ts: entry.create_ts,
-            expire_ts: entry.expire_ts,
-        }
-    }
-}
+use crate::types::FfiRowEntry;
 
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct FfiWalFileMetadata {

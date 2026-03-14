@@ -2,12 +2,13 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::config::{
-    FfiFlushOptions, FfiIsolationLevel, FfiKeyRange, FfiKeyValue, FfiMergeOptions, FfiPutOptions,
-    FfiReadOptions, FfiScanOptions, FfiWriteHandle, FfiWriteOperation, FfiWriteOptions,
+    FfiFlushOptions, FfiIsolationLevel, FfiMergeOptions, FfiPutOptions, FfiReadOptions,
+    FfiScanOptions, FfiWriteOperation, FfiWriteOptions,
 };
 use crate::error::FfiSlatedbError;
 use crate::iterator::FfiDbIterator;
 use crate::transaction::FfiDbTransaction;
+use crate::types::{FfiKeyRange, FfiKeyValue, FfiWriteHandle};
 use crate::validation::{build_write_batch, validate_key, validate_key_value};
 use crate::write_batch::FfiWriteBatch;
 
