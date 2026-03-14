@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
 use parking_lot::Mutex;
-use serde_json::from_str;
 use uuid::Uuid;
 
 use crate::config::{FfiReaderOptions, FfiSstBlockSize};
@@ -10,6 +9,7 @@ use crate::db_reader::FfiDbReader;
 use crate::error::FfiSlatedbError;
 use crate::merge_operator::{adapt_merge_operator, FfiMergeOperator};
 use crate::object_store::FfiObjectStore;
+use crate::settings::FfiSettings;
 use crate::validation::builder_consumed;
 
 #[derive(uniffi::Object)]
@@ -43,8 +43,8 @@ impl FfiDbBuilder {
         })
     }
 
-    pub fn with_settings_json(&self, settings_json: String) -> Result<(), FfiSlatedbError> {
-        let settings = from_str::<slatedb::Settings>(&settings_json)?;
+    pub fn with_settings(&self, settings: Arc<FfiSettings>) -> Result<(), FfiSlatedbError> {
+        let settings = settings.inner();
         self.update_builder(|builder| builder.with_settings(settings))
     }
 

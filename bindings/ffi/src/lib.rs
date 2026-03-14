@@ -25,7 +25,7 @@ pub use error::{FfiCloseReason, FfiMergeOperatorCallbackError, FfiSlatedbError};
 pub use iterator::FfiDbIterator;
 pub use merge_operator::FfiMergeOperator;
 pub use object_store::FfiObjectStore;
-pub use settings::ffi_default_settings_json;
+pub use settings::FfiSettings;
 pub use transaction::FfiDbTransaction;
 pub use types::{FfiKeyRange, FfiKeyValue, FfiRowEntry, FfiRowEntryKind, FfiWriteHandle};
 pub use wal::{FfiWalFile, FfiWalFileIterator, FfiWalFileMetadata, FfiWalReader};
