@@ -1,3 +1,5 @@
+use std::error::Error as StdError;
+
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -55,6 +57,12 @@ pub(crate) enum FfiSlateDbError {
 
     #[error("settings update produced invalid settings: {source}")]
     InvalidSettingsUpdate { source: serde_json::Error },
+
+    #[error("object store creation failed: {source}")]
+    ObjectStoreCreationError {
+        #[from]
+        source: Box<dyn StdError>,
+    },
 }
 
 #[derive(Debug, Error, uniffi::Error)]
