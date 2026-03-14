@@ -17,19 +17,3 @@ pub(crate) fn validate_key_value(key: &[u8], value: &[u8]) -> Result<(), FfiSlat
     }
     Ok(())
 }
-
-pub(crate) fn try_usize(value: u64, field: &'static str) -> Result<usize, FfiSlateDbError> {
-    usize::try_from(value).map_err(|_| FfiSlateDbError::ValueTooLargeForUsize { field })
-}
-
-pub(crate) fn builder_consumed() -> FfiSlateDbError {
-    FfiSlateDbError::BuilderConsumed
-}
-
-pub(crate) fn transaction_completed() -> FfiSlateDbError {
-    FfiSlateDbError::TransactionCompleted
-}
-
-pub(crate) fn write_batch_consumed() -> FfiSlateDbError {
-    FfiSlateDbError::WriteBatchConsumed
-}

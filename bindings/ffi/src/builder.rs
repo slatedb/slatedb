@@ -10,7 +10,6 @@ use crate::error::{FfiError, FfiSlateDbError};
 use crate::merge_operator::{adapt_merge_operator, FfiMergeOperator};
 use crate::object_store::FfiObjectStore;
 use crate::settings::FfiSettings;
-use crate::validation::builder_consumed;
 
 #[derive(uniffi::Object)]
 pub struct FfiDbBuilder {
@@ -23,14 +22,14 @@ impl FfiDbBuilder {
         update: impl FnOnce(slatedb::DbBuilder<String>) -> slatedb::DbBuilder<String>,
     ) -> Result<(), FfiSlateDbError> {
         let mut guard = self.builder.lock();
-        let builder = guard.take().ok_or_else(builder_consumed)?;
+        let builder = guard.take().ok_or(FfiSlateDbError::BuilderConsumed)?;
         *guard = Some(update(builder));
         Ok(())
     }
 
     fn take_builder(&self) -> Result<slatedb::DbBuilder<String>, FfiSlateDbError> {
         let mut guard = self.builder.lock();
-        guard.take().ok_or_else(builder_consumed)
+        guard.take().ok_or(FfiSlateDbError::BuilderConsumed)
     }
 }
 
@@ -104,14 +103,14 @@ impl FfiDbReaderBuilder {
         update: impl FnOnce(slatedb::DbReaderBuilder<String>) -> slatedb::DbReaderBuilder<String>,
     ) -> Result<(), FfiSlateDbError> {
         let mut guard = self.builder.lock();
-        let builder = guard.take().ok_or_else(builder_consumed)?;
+        let builder = guard.take().ok_or(FfiSlateDbError::BuilderConsumed)?;
         *guard = Some(update(builder));
         Ok(())
     }
 
     fn take_builder(&self) -> Result<slatedb::DbReaderBuilder<String>, FfiSlateDbError> {
         let mut guard = self.builder.lock();
-        guard.take().ok_or_else(builder_consumed)
+        guard.take().ok_or(FfiSlateDbError::BuilderConsumed)
     }
 }
 
