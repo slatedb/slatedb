@@ -3,7 +3,6 @@ use std::time::Duration;
 use slatedb::{IsolationLevel, SstBlockSize};
 
 use crate::error::FfiSlateDbError;
-use crate::validation::try_usize;
 
 #[derive(Clone, Copy, Debug, Default, uniffi::Enum)]
 pub enum FfiDurabilityLevel {
@@ -180,9 +179,17 @@ impl FfiScanOptions {
         Ok(slatedb::config::ScanOptions {
             durability_filter: self.durability_filter.into_core(),
             dirty: self.dirty,
-            read_ahead_bytes: try_usize(self.read_ahead_bytes, "read_ahead_bytes")?,
+            read_ahead_bytes: usize::try_from(self.read_ahead_bytes).map_err(|_| {
+                FfiSlateDbError::ValueTooLargeForUsize {
+                    field: "read_ahead_bytes",
+                }
+            })?,
             cache_blocks: self.cache_blocks,
-            max_fetch_tasks: try_usize(self.max_fetch_tasks, "max_fetch_tasks")?,
+            max_fetch_tasks: usize::try_from(self.max_fetch_tasks).map_err(|_| {
+                FfiSlateDbError::ValueTooLargeForUsize {
+                    field: "max_fetch_tasks",
+                }
+            })?,
         })
     }
 }

@@ -4,7 +4,7 @@ use parking_lot::Mutex;
 
 use crate::config::{FfiMergeOptions, FfiPutOptions};
 use crate::error::{FfiError, FfiSlateDbError};
-use crate::validation::{validate_key, validate_key_value, write_batch_consumed};
+use crate::validation::{validate_key, validate_key_value};
 
 #[derive(uniffi::Object)]
 pub struct FfiWriteBatch {
@@ -17,13 +17,13 @@ impl FfiWriteBatch {
         update: impl FnOnce(&mut slatedb::WriteBatch) -> T,
     ) -> Result<T, FfiSlateDbError> {
         let mut guard = self.state.lock();
-        let batch = guard.as_mut().ok_or_else(write_batch_consumed)?;
+        let batch = guard.as_mut().ok_or(FfiSlateDbError::WriteBatchConsumed)?;
         Ok(update(batch))
     }
 
     pub(crate) fn take_for_write(&self) -> Result<slatedb::WriteBatch, FfiSlateDbError> {
         let mut guard = self.state.lock();
-        guard.take().ok_or_else(write_batch_consumed)
+        guard.take().ok_or(FfiSlateDbError::WriteBatchConsumed)
     }
 }
 
