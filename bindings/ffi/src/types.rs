@@ -4,6 +4,9 @@ use slatedb::{KeyValue, RowEntry, ValueDeletable, WriteHandle};
 
 use crate::error::FfiSlateDbError;
 
+type FfiKeyBound = Bound<Vec<u8>>;
+type FfiKeyBounds = (FfiKeyBound, FfiKeyBound);
+
 #[derive(Clone, Debug, Default, uniffi::Record)]
 pub struct FfiKeyRange {
     pub start: Option<Vec<u8>>,
@@ -13,7 +16,7 @@ pub struct FfiKeyRange {
 }
 
 impl FfiKeyRange {
-    pub(crate) fn into_bounds(self) -> Result<(Bound<Vec<u8>>, Bound<Vec<u8>>), FfiSlateDbError> {
+    pub(crate) fn into_bounds(self) -> Result<FfiKeyBounds, FfiSlateDbError> {
         if self.start.as_ref().is_some_and(|start| start.is_empty()) {
             return Err(FfiSlateDbError::EmptyRangeStart);
         }
