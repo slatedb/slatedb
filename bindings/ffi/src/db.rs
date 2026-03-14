@@ -5,7 +5,7 @@ use crate::config::{
     FfiFlushOptions, FfiIsolationLevel, FfiMergeOptions, FfiPutOptions, FfiReadOptions,
     FfiScanOptions, FfiWriteOptions,
 };
-use crate::error::FfiSlatedbError;
+use crate::error::FfiError;
 use crate::iterator::FfiDbIterator;
 use crate::transaction::FfiDbTransaction;
 use crate::types::{FfiKeyRange, FfiKeyValue, FfiWriteHandle};
@@ -25,11 +25,11 @@ impl FfiDb {
 
 #[uniffi::export]
 impl FfiDb {
-    pub fn status(&self) -> Result<(), FfiSlatedbError> {
+    pub fn status(&self) -> Result<(), FfiError> {
         self.inner.status().map_err(Into::into)
     }
 
-    pub fn metrics(&self) -> Result<HashMap<String, i64>, FfiSlatedbError> {
+    pub fn metrics(&self) -> Result<HashMap<String, i64>, FfiError> {
         let registry = self.inner.metrics();
         let mut snapshot = HashMap::new();
         for name in registry.names() {
@@ -45,11 +45,11 @@ impl FfiDb {
 impl FfiDb {
     // `shutdown` because `close` is reserved by uniffi for the destructor
     #[uniffi::method(name = "shutdown")]
-    pub async fn close(&self) -> Result<(), FfiSlatedbError> {
+    pub async fn close(&self) -> Result<(), FfiError> {
         self.inner.close().await.map_err(Into::into)
     }
 
-    pub async fn get(&self, key: Vec<u8>) -> Result<Option<Vec<u8>>, FfiSlatedbError> {
+    pub async fn get(&self, key: Vec<u8>) -> Result<Option<Vec<u8>>, FfiError> {
         Ok(self.inner.get(key).await?.map(|value| value.to_vec()))
     }
 
@@ -57,7 +57,7 @@ impl FfiDb {
         &self,
         key: Vec<u8>,
         options: FfiReadOptions,
-    ) -> Result<Option<Vec<u8>>, FfiSlatedbError> {
+    ) -> Result<Option<Vec<u8>>, FfiError> {
         let options = options.into_core();
         Ok(self
             .inner
@@ -66,10 +66,7 @@ impl FfiDb {
             .map(|value| value.to_vec()))
     }
 
-    pub async fn get_key_value(
-        &self,
-        key: Vec<u8>,
-    ) -> Result<Option<FfiKeyValue>, FfiSlatedbError> {
+    pub async fn get_key_value(&self, key: Vec<u8>) -> Result<Option<FfiKeyValue>, FfiError> {
         Ok(self
             .inner
             .get_key_value(key)
@@ -81,7 +78,7 @@ impl FfiDb {
         &self,
         key: Vec<u8>,
         options: FfiReadOptions,
-    ) -> Result<Option<FfiKeyValue>, FfiSlatedbError> {
+    ) -> Result<Option<FfiKeyValue>, FfiError> {
         let options = options.into_core();
         Ok(self
             .inner
@@ -90,7 +87,7 @@ impl FfiDb {
             .map(FfiKeyValue::from_core))
     }
 
-    pub async fn scan(&self, range: FfiKeyRange) -> Result<Arc<FfiDbIterator>, FfiSlatedbError> {
+    pub async fn scan(&self, range: FfiKeyRange) -> Result<Arc<FfiDbIterator>, FfiError> {
         let range = range.into_bounds()?;
         let iter = self.inner.scan::<Vec<u8>, _>(range).await?;
         Ok(Arc::new(FfiDbIterator::new(iter)))
@@ -100,7 +97,7 @@ impl FfiDb {
         &self,
         range: FfiKeyRange,
         options: FfiScanOptions,
-    ) -> Result<Arc<FfiDbIterator>, FfiSlatedbError> {
+    ) -> Result<Arc<FfiDbIterator>, FfiError> {
         let range = range.into_bounds()?;
         let options = options.into_core()?;
         let iter = self
@@ -110,10 +107,7 @@ impl FfiDb {
         Ok(Arc::new(FfiDbIterator::new(iter)))
     }
 
-    pub async fn scan_prefix(
-        &self,
-        prefix: Vec<u8>,
-    ) -> Result<Arc<FfiDbIterator>, FfiSlatedbError> {
+    pub async fn scan_prefix(&self, prefix: Vec<u8>) -> Result<Arc<FfiDbIterator>, FfiError> {
         let iter = self.inner.scan_prefix(prefix).await?;
         Ok(Arc::new(FfiDbIterator::new(iter)))
     }
@@ -122,7 +116,7 @@ impl FfiDb {
         &self,
         prefix: Vec<u8>,
         options: FfiScanOptions,
-    ) -> Result<Arc<FfiDbIterator>, FfiSlatedbError> {
+    ) -> Result<Arc<FfiDbIterator>, FfiError> {
         let options = options.into_core()?;
         let iter = self
             .inner
@@ -131,11 +125,7 @@ impl FfiDb {
         Ok(Arc::new(FfiDbIterator::new(iter)))
     }
 
-    pub async fn put(
-        &self,
-        key: Vec<u8>,
-        value: Vec<u8>,
-    ) -> Result<FfiWriteHandle, FfiSlatedbError> {
+    pub async fn put(&self, key: Vec<u8>, value: Vec<u8>) -> Result<FfiWriteHandle, FfiError> {
         validate_key_value(&key, &value)?;
         Ok(FfiWriteHandle::from_core(self.inner.put(key, value).await?))
     }
@@ -146,7 +136,7 @@ impl FfiDb {
         value: Vec<u8>,
         put_options: FfiPutOptions,
         write_options: FfiWriteOptions,
-    ) -> Result<FfiWriteHandle, FfiSlatedbError> {
+    ) -> Result<FfiWriteHandle, FfiError> {
         validate_key_value(&key, &value)?;
         let put_options = put_options.into_core();
         let write_options = write_options.into_core();
@@ -157,7 +147,7 @@ impl FfiDb {
         ))
     }
 
-    pub async fn delete(&self, key: Vec<u8>) -> Result<FfiWriteHandle, FfiSlatedbError> {
+    pub async fn delete(&self, key: Vec<u8>) -> Result<FfiWriteHandle, FfiError> {
         validate_key(&key)?;
         Ok(FfiWriteHandle::from_core(self.inner.delete(key).await?))
     }
@@ -166,7 +156,7 @@ impl FfiDb {
         &self,
         key: Vec<u8>,
         options: FfiWriteOptions,
-    ) -> Result<FfiWriteHandle, FfiSlatedbError> {
+    ) -> Result<FfiWriteHandle, FfiError> {
         validate_key(&key)?;
         let options = options.into_core();
         Ok(FfiWriteHandle::from_core(
@@ -174,11 +164,7 @@ impl FfiDb {
         ))
     }
 
-    pub async fn merge(
-        &self,
-        key: Vec<u8>,
-        operand: Vec<u8>,
-    ) -> Result<FfiWriteHandle, FfiSlatedbError> {
+    pub async fn merge(&self, key: Vec<u8>, operand: Vec<u8>) -> Result<FfiWriteHandle, FfiError> {
         validate_key_value(&key, &operand)?;
         Ok(FfiWriteHandle::from_core(
             self.inner.merge(key, operand).await?,
@@ -191,7 +177,7 @@ impl FfiDb {
         operand: Vec<u8>,
         merge_options: FfiMergeOptions,
         write_options: FfiWriteOptions,
-    ) -> Result<FfiWriteHandle, FfiSlatedbError> {
+    ) -> Result<FfiWriteHandle, FfiError> {
         validate_key_value(&key, &operand)?;
         let merge_options = merge_options.into_core();
         let write_options = write_options.into_core();
@@ -202,10 +188,7 @@ impl FfiDb {
         ))
     }
 
-    pub async fn write(
-        &self,
-        batch: Arc<FfiWriteBatch>,
-    ) -> Result<FfiWriteHandle, FfiSlatedbError> {
+    pub async fn write(&self, batch: Arc<FfiWriteBatch>) -> Result<FfiWriteHandle, FfiError> {
         let batch = batch.take_for_write()?;
         Ok(FfiWriteHandle::from_core(self.inner.write(batch).await?))
     }
@@ -214,7 +197,7 @@ impl FfiDb {
         &self,
         batch: Arc<FfiWriteBatch>,
         options: FfiWriteOptions,
-    ) -> Result<FfiWriteHandle, FfiSlatedbError> {
+    ) -> Result<FfiWriteHandle, FfiError> {
         let batch = batch.take_for_write()?;
         let options = options.into_core();
         Ok(FfiWriteHandle::from_core(
@@ -222,21 +205,18 @@ impl FfiDb {
         ))
     }
 
-    pub async fn flush(&self) -> Result<(), FfiSlatedbError> {
+    pub async fn flush(&self) -> Result<(), FfiError> {
         self.inner.flush().await.map_err(Into::into)
     }
 
-    pub async fn flush_with_options(
-        &self,
-        options: FfiFlushOptions,
-    ) -> Result<(), FfiSlatedbError> {
+    pub async fn flush_with_options(&self, options: FfiFlushOptions) -> Result<(), FfiError> {
         self.inner
             .flush_with_options(options.into_core())
             .await
             .map_err(Into::into)
     }
 
-    pub async fn snapshot(&self) -> Result<Arc<FfiDbSnapshot>, FfiSlatedbError> {
+    pub async fn snapshot(&self) -> Result<Arc<FfiDbSnapshot>, FfiError> {
         Ok(Arc::new(FfiDbSnapshot {
             inner: self.inner.snapshot().await?,
         }))
@@ -245,7 +225,7 @@ impl FfiDb {
     pub async fn begin(
         &self,
         isolation_level: FfiIsolationLevel,
-    ) -> Result<Arc<FfiDbTransaction>, FfiSlatedbError> {
+    ) -> Result<Arc<FfiDbTransaction>, FfiError> {
         let tx = self.inner.begin(isolation_level.into_core()).await?;
         Ok(Arc::new(FfiDbTransaction::new(tx)))
     }
@@ -258,7 +238,7 @@ pub struct FfiDbSnapshot {
 
 #[uniffi::export(async_runtime = "tokio")]
 impl FfiDbSnapshot {
-    pub async fn get(&self, key: Vec<u8>) -> Result<Option<Vec<u8>>, FfiSlatedbError> {
+    pub async fn get(&self, key: Vec<u8>) -> Result<Option<Vec<u8>>, FfiError> {
         Ok(self.inner.get(key).await?.map(|value| value.to_vec()))
     }
 
@@ -266,7 +246,7 @@ impl FfiDbSnapshot {
         &self,
         key: Vec<u8>,
         options: FfiReadOptions,
-    ) -> Result<Option<Vec<u8>>, FfiSlatedbError> {
+    ) -> Result<Option<Vec<u8>>, FfiError> {
         let options = options.into_core();
         Ok(self
             .inner
@@ -275,10 +255,7 @@ impl FfiDbSnapshot {
             .map(|value| value.to_vec()))
     }
 
-    pub async fn get_key_value(
-        &self,
-        key: Vec<u8>,
-    ) -> Result<Option<FfiKeyValue>, FfiSlatedbError> {
+    pub async fn get_key_value(&self, key: Vec<u8>) -> Result<Option<FfiKeyValue>, FfiError> {
         Ok(self
             .inner
             .get_key_value(key)
@@ -290,7 +267,7 @@ impl FfiDbSnapshot {
         &self,
         key: Vec<u8>,
         options: FfiReadOptions,
-    ) -> Result<Option<FfiKeyValue>, FfiSlatedbError> {
+    ) -> Result<Option<FfiKeyValue>, FfiError> {
         let options = options.into_core();
         Ok(self
             .inner
@@ -299,7 +276,7 @@ impl FfiDbSnapshot {
             .map(FfiKeyValue::from_core))
     }
 
-    pub async fn scan(&self, range: FfiKeyRange) -> Result<Arc<FfiDbIterator>, FfiSlatedbError> {
+    pub async fn scan(&self, range: FfiKeyRange) -> Result<Arc<FfiDbIterator>, FfiError> {
         let range = range.into_bounds()?;
         let iter = self.inner.scan::<Vec<u8>, _>(range).await?;
         Ok(Arc::new(FfiDbIterator::new(iter)))
@@ -309,7 +286,7 @@ impl FfiDbSnapshot {
         &self,
         range: FfiKeyRange,
         options: FfiScanOptions,
-    ) -> Result<Arc<FfiDbIterator>, FfiSlatedbError> {
+    ) -> Result<Arc<FfiDbIterator>, FfiError> {
         let range = range.into_bounds()?;
         let options = options.into_core()?;
         let iter = self
@@ -319,10 +296,7 @@ impl FfiDbSnapshot {
         Ok(Arc::new(FfiDbIterator::new(iter)))
     }
 
-    pub async fn scan_prefix(
-        &self,
-        prefix: Vec<u8>,
-    ) -> Result<Arc<FfiDbIterator>, FfiSlatedbError> {
+    pub async fn scan_prefix(&self, prefix: Vec<u8>) -> Result<Arc<FfiDbIterator>, FfiError> {
         let iter = self.inner.scan_prefix(prefix).await?;
         Ok(Arc::new(FfiDbIterator::new(iter)))
     }
@@ -331,7 +305,7 @@ impl FfiDbSnapshot {
         &self,
         prefix: Vec<u8>,
         options: FfiScanOptions,
-    ) -> Result<Arc<FfiDbIterator>, FfiSlatedbError> {
+    ) -> Result<Arc<FfiDbIterator>, FfiError> {
         let options = options.into_core()?;
         let iter = self
             .inner

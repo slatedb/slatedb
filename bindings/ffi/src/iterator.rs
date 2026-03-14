@@ -1,6 +1,6 @@
 use tokio::sync::Mutex;
 
-use crate::error::FfiSlatedbError;
+use crate::error::{FfiError, FfiSlateDbError};
 use crate::types::FfiKeyValue;
 
 #[derive(uniffi::Object)]
@@ -18,16 +18,14 @@ impl FfiDbIterator {
 
 #[uniffi::export(async_runtime = "tokio")]
 impl FfiDbIterator {
-    pub async fn next(&self) -> Result<Option<FfiKeyValue>, FfiSlatedbError> {
+    pub async fn next(&self) -> Result<Option<FfiKeyValue>, FfiError> {
         let mut guard = self.inner.lock().await;
         Ok(guard.next().await?.map(FfiKeyValue::from_core))
     }
 
-    pub async fn seek(&self, key: Vec<u8>) -> Result<(), FfiSlatedbError> {
+    pub async fn seek(&self, key: Vec<u8>) -> Result<(), FfiError> {
         if key.is_empty() {
-            return Err(FfiSlatedbError::Invalid {
-                message: "seek key cannot be empty".to_owned(),
-            });
+            return Err(FfiSlateDbError::EmptySeekKey.into());
         }
         let mut guard = self.inner.lock().await;
         guard.seek(key).await.map_err(Into::into)

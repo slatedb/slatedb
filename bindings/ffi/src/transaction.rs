@@ -5,7 +5,7 @@ use tokio::sync::Mutex;
 use crate::config::{
     FfiMergeOptions, FfiPutOptions, FfiReadOptions, FfiScanOptions, FfiWriteOptions,
 };
-use crate::error::FfiSlatedbError;
+use crate::error::FfiError;
 use crate::iterator::FfiDbIterator;
 use crate::types::{FfiKeyRange, FfiKeyValue, FfiWriteHandle};
 use crate::validation::{transaction_completed, validate_key, validate_key_value};
@@ -40,7 +40,7 @@ impl FfiDbTransaction {
 
 #[uniffi::export(async_runtime = "tokio")]
 impl FfiDbTransaction {
-    pub async fn put(&self, key: Vec<u8>, value: Vec<u8>) -> Result<(), FfiSlatedbError> {
+    pub async fn put(&self, key: Vec<u8>, value: Vec<u8>) -> Result<(), FfiError> {
         validate_key_value(&key, &value)?;
         let guard = self.inner.lock().await;
         let tx = guard.as_ref().ok_or_else(transaction_completed)?;
@@ -52,7 +52,7 @@ impl FfiDbTransaction {
         key: Vec<u8>,
         value: Vec<u8>,
         options: FfiPutOptions,
-    ) -> Result<(), FfiSlatedbError> {
+    ) -> Result<(), FfiError> {
         validate_key_value(&key, &value)?;
         let options = options.into_core();
         let guard = self.inner.lock().await;
@@ -61,14 +61,14 @@ impl FfiDbTransaction {
             .map_err(Into::into)
     }
 
-    pub async fn delete(&self, key: Vec<u8>) -> Result<(), FfiSlatedbError> {
+    pub async fn delete(&self, key: Vec<u8>) -> Result<(), FfiError> {
         validate_key(&key)?;
         let guard = self.inner.lock().await;
         let tx = guard.as_ref().ok_or_else(transaction_completed)?;
         tx.delete(key).map_err(Into::into)
     }
 
-    pub async fn merge(&self, key: Vec<u8>, operand: Vec<u8>) -> Result<(), FfiSlatedbError> {
+    pub async fn merge(&self, key: Vec<u8>, operand: Vec<u8>) -> Result<(), FfiError> {
         validate_key_value(&key, &operand)?;
         let guard = self.inner.lock().await;
         let tx = guard.as_ref().ok_or_else(transaction_completed)?;
@@ -80,7 +80,7 @@ impl FfiDbTransaction {
         key: Vec<u8>,
         operand: Vec<u8>,
         options: FfiMergeOptions,
-    ) -> Result<(), FfiSlatedbError> {
+    ) -> Result<(), FfiError> {
         validate_key_value(&key, &operand)?;
         let options = options.into_core();
         let guard = self.inner.lock().await;
@@ -89,26 +89,26 @@ impl FfiDbTransaction {
             .map_err(Into::into)
     }
 
-    pub async fn mark_read(&self, keys: Vec<Vec<u8>>) -> Result<(), FfiSlatedbError> {
+    pub async fn mark_read(&self, keys: Vec<Vec<u8>>) -> Result<(), FfiError> {
         let guard = self.inner.lock().await;
         let tx = guard.as_ref().ok_or_else(transaction_completed)?;
         tx.mark_read(keys).map_err(Into::into)
     }
 
-    pub async fn unmark_write(&self, keys: Vec<Vec<u8>>) -> Result<(), FfiSlatedbError> {
+    pub async fn unmark_write(&self, keys: Vec<Vec<u8>>) -> Result<(), FfiError> {
         let guard = self.inner.lock().await;
         let tx = guard.as_ref().ok_or_else(transaction_completed)?;
         tx.unmark_write(keys).map_err(Into::into)
     }
 
-    pub async fn rollback(&self) -> Result<(), FfiSlatedbError> {
+    pub async fn rollback(&self) -> Result<(), FfiError> {
         let mut guard = self.inner.lock().await;
         let tx = guard.take().ok_or_else(transaction_completed)?;
         tx.rollback();
         Ok(())
     }
 
-    pub async fn get(&self, key: Vec<u8>) -> Result<Option<Vec<u8>>, FfiSlatedbError> {
+    pub async fn get(&self, key: Vec<u8>) -> Result<Option<Vec<u8>>, FfiError> {
         let guard = self.inner.lock().await;
         let tx = guard.as_ref().ok_or_else(transaction_completed)?;
         Ok(tx.get(key).await?.map(|value| value.to_vec()))
@@ -118,7 +118,7 @@ impl FfiDbTransaction {
         &self,
         key: Vec<u8>,
         options: FfiReadOptions,
-    ) -> Result<Option<Vec<u8>>, FfiSlatedbError> {
+    ) -> Result<Option<Vec<u8>>, FfiError> {
         let options = options.into_core();
         let guard = self.inner.lock().await;
         let tx = guard.as_ref().ok_or_else(transaction_completed)?;
@@ -128,10 +128,7 @@ impl FfiDbTransaction {
             .map(|value| value.to_vec()))
     }
 
-    pub async fn get_key_value(
-        &self,
-        key: Vec<u8>,
-    ) -> Result<Option<FfiKeyValue>, FfiSlatedbError> {
+    pub async fn get_key_value(&self, key: Vec<u8>) -> Result<Option<FfiKeyValue>, FfiError> {
         let guard = self.inner.lock().await;
         let tx = guard.as_ref().ok_or_else(transaction_completed)?;
         Ok(tx.get_key_value(key).await?.map(FfiKeyValue::from_core))
@@ -141,7 +138,7 @@ impl FfiDbTransaction {
         &self,
         key: Vec<u8>,
         options: FfiReadOptions,
-    ) -> Result<Option<FfiKeyValue>, FfiSlatedbError> {
+    ) -> Result<Option<FfiKeyValue>, FfiError> {
         let options = options.into_core();
         let guard = self.inner.lock().await;
         let tx = guard.as_ref().ok_or_else(transaction_completed)?;
@@ -151,7 +148,7 @@ impl FfiDbTransaction {
             .map(FfiKeyValue::from_core))
     }
 
-    pub async fn scan(&self, range: FfiKeyRange) -> Result<Arc<FfiDbIterator>, FfiSlatedbError> {
+    pub async fn scan(&self, range: FfiKeyRange) -> Result<Arc<FfiDbIterator>, FfiError> {
         let range = range.into_bounds()?;
         let guard = self.inner.lock().await;
         let tx = guard.as_ref().ok_or_else(transaction_completed)?;
@@ -163,7 +160,7 @@ impl FfiDbTransaction {
         &self,
         range: FfiKeyRange,
         options: FfiScanOptions,
-    ) -> Result<Arc<FfiDbIterator>, FfiSlatedbError> {
+    ) -> Result<Arc<FfiDbIterator>, FfiError> {
         let range = range.into_bounds()?;
         let options = options.into_core()?;
         let guard = self.inner.lock().await;
@@ -172,10 +169,7 @@ impl FfiDbTransaction {
         Ok(Arc::new(FfiDbIterator::new(iter)))
     }
 
-    pub async fn scan_prefix(
-        &self,
-        prefix: Vec<u8>,
-    ) -> Result<Arc<FfiDbIterator>, FfiSlatedbError> {
+    pub async fn scan_prefix(&self, prefix: Vec<u8>) -> Result<Arc<FfiDbIterator>, FfiError> {
         let guard = self.inner.lock().await;
         let tx = guard.as_ref().ok_or_else(transaction_completed)?;
         let iter = tx.scan_prefix(prefix).await?;
@@ -186,7 +180,7 @@ impl FfiDbTransaction {
         &self,
         prefix: Vec<u8>,
         options: FfiScanOptions,
-    ) -> Result<Arc<FfiDbIterator>, FfiSlatedbError> {
+    ) -> Result<Arc<FfiDbIterator>, FfiError> {
         let options = options.into_core()?;
         let guard = self.inner.lock().await;
         let tx = guard.as_ref().ok_or_else(transaction_completed)?;
@@ -194,7 +188,7 @@ impl FfiDbTransaction {
         Ok(Arc::new(FfiDbIterator::new(iter)))
     }
 
-    pub async fn commit(&self) -> Result<Option<FfiWriteHandle>, FfiSlatedbError> {
+    pub async fn commit(&self) -> Result<Option<FfiWriteHandle>, FfiError> {
         let tx = {
             let mut guard = self.inner.lock().await;
             guard.take().ok_or_else(transaction_completed)?
@@ -205,7 +199,7 @@ impl FfiDbTransaction {
     pub async fn commit_with_options(
         &self,
         options: FfiWriteOptions,
-    ) -> Result<Option<FfiWriteHandle>, FfiSlatedbError> {
+    ) -> Result<Option<FfiWriteHandle>, FfiError> {
         let options = options.into_core();
         let tx = {
             let mut guard = self.inner.lock().await;
