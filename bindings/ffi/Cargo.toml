@@ -1,0 +1,43 @@
+[package]
+name = "slatedb-ffi"
+description = "UniFFI bindings for SlateDB"
+publish = false
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+license.workspace = true
+homepage.workspace = true
+
+[lib]
+name = "slatedb_ffi"
+crate-type = ["cdylib"]
+doc = false
+bench = false
+
+[features]
+bindgen-cli = ["uniffi/cli"]
+
+[[bin]]
+name = "slatedb-uniffi-bindgen"
+path = "src/bin/slatedb-uniffi-bindgen.rs"
+required-features = ["bindgen-cli"]
+
+[dependencies]
+log = { workspace = true }
+parking_lot = { workspace = true }
+slatedb = { workspace = true, features = ["all"] }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync"] }
+tracing = { workspace = true }
+tracing-log = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["fmt"] }
+uniffi = { workspace = true, features = ["tokio"] }
+uuid = { workspace = true }
+
+[dev-dependencies]
+figment = { workspace = true, features = ["test"] }
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

@@ -1,0 +1,32 @@
+use tokio::sync::Mutex;
+
+use crate::error::FfiError;
+use crate::types::FfiKeyValue;
+use crate::validation::validate_key;
+
+#[derive(uniffi::Object)]
+pub struct FfiDbIterator {
+    inner: Mutex<slatedb::DbIterator>,
+}
+
+impl FfiDbIterator {
+    pub(crate) fn new(inner: slatedb::DbIterator) -> Self {
+        Self {
+            inner: Mutex::new(inner),
+        }
+    }
+}
+
+#[uniffi::export(async_runtime = "tokio")]
+impl FfiDbIterator {
+    pub async fn next(&self) -> Result<Option<FfiKeyValue>, FfiError> {
+        let mut guard = self.inner.lock().await;
+        Ok(guard.next().await?.map(FfiKeyValue::from_core))
+    }
+
+    pub async fn seek(&self, key: Vec<u8>) -> Result<(), FfiError> {
+        validate_key(&key)?;
+        let mut guard = self.inner.lock().await;
+        guard.seek(key).await.map_err(Into::into)
+    }
+}
