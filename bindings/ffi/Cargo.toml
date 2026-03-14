@@ -10,7 +10,7 @@ homepage.workspace = true
 
 [lib]
 name = "slatedb_ffi"
-crate-type = ["cdylib", "rlib"]
+crate-type = ["cdylib"]
 doc = false
 bench = false
 
