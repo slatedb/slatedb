@@ -144,12 +144,13 @@ impl Default for FfiReaderOptions {
 
 impl FfiReaderOptions {
     pub(crate) fn into_core(self) -> slatedb::config::DbReaderOptions {
-        let mut options = slatedb::config::DbReaderOptions::default();
-        options.manifest_poll_interval = Duration::from_millis(self.manifest_poll_interval_ms);
-        options.checkpoint_lifetime = Duration::from_millis(self.checkpoint_lifetime_ms);
-        options.max_memtable_bytes = self.max_memtable_bytes;
-        options.skip_wal_replay = self.skip_wal_replay;
-        options
+        slatedb::config::DbReaderOptions {
+            manifest_poll_interval: Duration::from_millis(self.manifest_poll_interval_ms),
+            checkpoint_lifetime: Duration::from_millis(self.checkpoint_lifetime_ms),
+            max_memtable_bytes: self.max_memtable_bytes,
+            skip_wal_replay: self.skip_wal_replay,
+            ..Default::default()
+        }
     }
 }
 
@@ -241,17 +242,9 @@ impl FfiMergeOptions {
     }
 }
 
-#[derive(Clone, Debug, uniffi::Record)]
+#[derive(Clone, Debug, uniffi::Record, Default)]
 pub struct FfiFlushOptions {
     pub flush_type: FfiFlushType,
-}
-
-impl Default for FfiFlushOptions {
-    fn default() -> Self {
-        Self {
-            flush_type: FfiFlushType::default(),
-        }
-    }
 }
 
 impl FfiFlushOptions {

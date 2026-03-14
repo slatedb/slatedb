@@ -22,11 +22,17 @@ impl FfiSettings {
     }
 }
 
+impl Default for FfiSettings {
+    fn default() -> Self {
+        Self::new(slatedb::Settings::default())
+    }
+}
+
 #[uniffi::export]
 impl FfiSettings {
-    #[uniffi::constructor]
-    pub fn default() -> Arc<Self> {
-        Arc::new(Self::new(slatedb::Settings::default()))
+    #[uniffi::constructor(name = "default")]
+    pub fn with_defaults() -> Arc<Self> {
+        Arc::new(Self::default())
     }
 
     #[uniffi::constructor]

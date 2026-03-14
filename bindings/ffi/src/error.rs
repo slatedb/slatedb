@@ -119,9 +119,7 @@ pub enum FfiError {
 impl From<FfiSlateDbError> for FfiError {
     fn from(error: FfiSlateDbError) -> Self {
         let message = error.to_string();
-        match error {
-            _ => Self::Invalid { message },
-        }
+        Self::Invalid { message }
     }
 }
 
