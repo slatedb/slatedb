@@ -1,7 +1,7 @@
 use tokio::sync::Mutex;
 
-use crate::config::FfiKeyValue;
 use crate::error::FfiSlatedbError;
+use crate::types::FfiKeyValue;
 
 #[derive(uniffi::Object)]
 pub struct FfiDbIterator {

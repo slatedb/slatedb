@@ -8,15 +8,16 @@ mod merge_operator;
 mod object_store;
 mod settings;
 mod transaction;
+mod types;
 mod validation;
 mod wal;
 mod write_batch;
 
 pub use builder::{FfiDbBuilder, FfiDbReaderBuilder};
 pub use config::{
-    FfiDurabilityLevel, FfiFlushOptions, FfiFlushType, FfiIsolationLevel, FfiKeyRange, FfiKeyValue,
-    FfiMergeOptions, FfiPutOptions, FfiReadOptions, FfiReaderOptions, FfiScanOptions,
-    FfiSstBlockSize, FfiTtl, FfiWriteHandle, FfiWriteOperation, FfiWriteOptions,
+    FfiDurabilityLevel, FfiFlushOptions, FfiFlushType, FfiIsolationLevel, FfiMergeOptions,
+    FfiPutOptions, FfiReadOptions, FfiReaderOptions, FfiScanOptions, FfiSstBlockSize, FfiTtl,
+    FfiWriteOperation, FfiWriteOptions,
 };
 pub use db::{FfiDb, FfiDbSnapshot};
 pub use db_reader::FfiDbReader;
@@ -26,9 +27,8 @@ pub use merge_operator::FfiMergeOperator;
 pub use object_store::FfiObjectStore;
 pub use settings::ffi_default_settings_json;
 pub use transaction::FfiDbTransaction;
-pub use wal::{
-    FfiRowEntry, FfiRowEntryKind, FfiWalFile, FfiWalFileIterator, FfiWalFileMetadata, FfiWalReader,
-};
+pub use types::{FfiKeyRange, FfiKeyValue, FfiRowEntry, FfiRowEntryKind, FfiWriteHandle};
+pub use wal::{FfiWalFile, FfiWalFileIterator, FfiWalFileMetadata, FfiWalReader};
 pub use write_batch::FfiWriteBatch;
 
 uniffi::setup_scaffolding!("slatedb");

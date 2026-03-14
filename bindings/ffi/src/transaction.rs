@@ -3,11 +3,11 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 use crate::config::{
-    FfiKeyRange, FfiKeyValue, FfiMergeOptions, FfiPutOptions, FfiReadOptions, FfiScanOptions,
-    FfiWriteHandle, FfiWriteOptions,
+    FfiMergeOptions, FfiPutOptions, FfiReadOptions, FfiScanOptions, FfiWriteOptions,
 };
 use crate::error::FfiSlatedbError;
 use crate::iterator::FfiDbIterator;
+use crate::types::{FfiKeyRange, FfiKeyValue, FfiWriteHandle};
 use crate::validation::{transaction_completed, validate_key, validate_key_value};
 
 #[derive(uniffi::Object)]
