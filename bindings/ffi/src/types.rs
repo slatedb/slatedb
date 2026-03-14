@@ -2,7 +2,7 @@ use std::ops::Bound;
 
 use slatedb::{KeyValue, RowEntry, ValueDeletable, WriteHandle};
 
-use crate::error::FfiSlatedbError;
+use crate::error::FfiSlateDbError;
 
 #[derive(Clone, Debug, Default, uniffi::Record)]
 pub struct FfiKeyRange {
@@ -13,29 +13,21 @@ pub struct FfiKeyRange {
 }
 
 impl FfiKeyRange {
-    pub(crate) fn into_bounds(self) -> Result<(Bound<Vec<u8>>, Bound<Vec<u8>>), FfiSlatedbError> {
+    pub(crate) fn into_bounds(self) -> Result<(Bound<Vec<u8>>, Bound<Vec<u8>>), FfiSlateDbError> {
         if self.start.as_ref().is_some_and(|start| start.is_empty()) {
-            return Err(FfiSlatedbError::Invalid {
-                message: "range start cannot be empty".to_owned(),
-            });
+            return Err(FfiSlateDbError::EmptyRangeStart);
         }
         if self.end.as_ref().is_some_and(|end| end.is_empty()) {
-            return Err(FfiSlatedbError::Invalid {
-                message: "range end cannot be empty".to_owned(),
-            });
+            return Err(FfiSlateDbError::EmptyRangeEnd);
         }
 
         if let (Some(start), Some(end)) = (&self.start, &self.end) {
             match start.cmp(end) {
                 std::cmp::Ordering::Greater => {
-                    return Err(FfiSlatedbError::Invalid {
-                        message: "range start must not be greater than range end".to_owned(),
-                    });
+                    return Err(FfiSlateDbError::RangeStartGreaterThanEnd);
                 }
                 std::cmp::Ordering::Equal if !(self.start_inclusive && self.end_inclusive) => {
-                    return Err(FfiSlatedbError::Invalid {
-                        message: "range must be non-empty".to_owned(),
-                    });
+                    return Err(FfiSlateDbError::EmptyRange);
                 }
                 _ => {}
             }

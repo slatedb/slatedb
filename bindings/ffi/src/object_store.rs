@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use slatedb::Db;
 
-use crate::error::FfiSlatedbError;
+use crate::error::FfiError;
 
 #[derive(uniffi::Object)]
 pub struct FfiObjectStore {
@@ -12,7 +12,7 @@ pub struct FfiObjectStore {
 #[uniffi::export]
 impl FfiObjectStore {
     #[uniffi::constructor]
-    pub fn resolve(url: String) -> Result<Arc<Self>, FfiSlatedbError> {
+    pub fn resolve(url: String) -> Result<Arc<Self>, FfiError> {
         let inner = Db::resolve_object_store(&url)?;
         Ok(Arc::new(Self { inner }))
     }

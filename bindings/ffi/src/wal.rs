@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use tokio::sync::Mutex;
 
-use crate::error::FfiSlatedbError;
+use crate::error::FfiError;
 use crate::object_store::FfiObjectStore;
 use crate::types::FfiRowEntry;
 
@@ -40,14 +40,14 @@ impl FfiWalFile {
         Arc::new(FfiWalFile::new(self.inner.next_file()))
     }
 
-    pub fn close(&self) -> Result<(), FfiSlatedbError> {
+    pub fn close(&self) -> Result<(), FfiError> {
         Ok(())
     }
 }
 
 #[uniffi::export(async_runtime = "tokio")]
 impl FfiWalFile {
-    pub async fn metadata(&self) -> Result<FfiWalFileMetadata, FfiSlatedbError> {
+    pub async fn metadata(&self) -> Result<FfiWalFileMetadata, FfiError> {
         let metadata = self.inner.metadata().await?;
         Ok(FfiWalFileMetadata {
             last_modified_seconds: metadata.last_modified_dt.timestamp(),
@@ -57,7 +57,7 @@ impl FfiWalFile {
         })
     }
 
-    pub async fn iterator(&self) -> Result<Arc<FfiWalFileIterator>, FfiSlatedbError> {
+    pub async fn iterator(&self) -> Result<Arc<FfiWalFileIterator>, FfiError> {
         let iter = self.inner.iterator().await?;
         Ok(Arc::new(FfiWalFileIterator::new(iter)))
     }
@@ -78,14 +78,14 @@ impl FfiWalFileIterator {
 
 #[uniffi::export]
 impl FfiWalFileIterator {
-    pub fn close(&self) -> Result<(), FfiSlatedbError> {
+    pub fn close(&self) -> Result<(), FfiError> {
         Ok(())
     }
 }
 
 #[uniffi::export(async_runtime = "tokio")]
 impl FfiWalFileIterator {
-    pub async fn next(&self) -> Result<Option<FfiRowEntry>, FfiSlatedbError> {
+    pub async fn next(&self) -> Result<Option<FfiRowEntry>, FfiError> {
         let mut guard = self.inner.lock().await;
         Ok(guard.next().await?.map(FfiRowEntry::from_core))
     }
@@ -109,7 +109,7 @@ impl FfiWalReader {
         Arc::new(FfiWalFile::new(self.inner.get(id)))
     }
 
-    pub fn close(&self) -> Result<(), FfiSlatedbError> {
+    pub fn close(&self) -> Result<(), FfiError> {
         Ok(())
     }
 }
@@ -120,7 +120,7 @@ impl FfiWalReader {
         &self,
         start_id: Option<u64>,
         end_id: Option<u64>,
-    ) -> Result<Vec<Arc<FfiWalFile>>, FfiSlatedbError> {
+    ) -> Result<Vec<Arc<FfiWalFile>>, FfiError> {
         let start = start_id.map(Bound::Included).unwrap_or(Bound::Unbounded);
         let end = end_id.map(Bound::Excluded).unwrap_or(Bound::Unbounded);
         let files = self.inner.list((start, end)).await?;

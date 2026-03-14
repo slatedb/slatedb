@@ -3,7 +3,7 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 use serde_json::{Map, Value};
 
-use crate::error::FfiSlatedbError;
+use crate::error::{FfiError, FfiSlateDbError};
 
 #[derive(uniffi::Object)]
 pub struct FfiSettings {
@@ -30,19 +30,20 @@ impl FfiSettings {
     }
 
     #[uniffi::constructor]
-    pub fn from_file(path: String) -> Result<Arc<Self>, FfiSlatedbError> {
+    pub fn from_file(path: String) -> Result<Arc<Self>, FfiError> {
         Ok(Arc::new(Self::new(slatedb::Settings::from_file(path)?)))
     }
 
     #[uniffi::constructor]
-    pub fn from_json_string(json: String) -> Result<Arc<Self>, FfiSlatedbError> {
-        Ok(Arc::new(Self::new(serde_json::from_str::<
-            slatedb::Settings,
-        >(&json)?)))
+    pub fn from_json_string(json: String) -> Result<Arc<Self>, FfiError> {
+        Ok(Arc::new(Self::new(
+            serde_json::from_str::<slatedb::Settings>(&json)
+                .map_err(|source| FfiSlateDbError::SettingsJsonParse { source })?,
+        )))
     }
 
     #[uniffi::constructor]
-    pub fn from_env(prefix: String) -> Result<Arc<Self>, FfiSlatedbError> {
+    pub fn from_env(prefix: String) -> Result<Arc<Self>, FfiError> {
         Ok(Arc::new(Self::new(slatedb::Settings::from_env(&prefix)?)))
     }
 
@@ -50,14 +51,14 @@ impl FfiSettings {
     pub fn from_env_with_default(
         prefix: String,
         default_settings: Arc<FfiSettings>,
-    ) -> Result<Arc<Self>, FfiSlatedbError> {
+    ) -> Result<Arc<Self>, FfiError> {
         Ok(Arc::new(Self::new(
             slatedb::Settings::from_env_with_default(&prefix, default_settings.inner())?,
         )))
     }
 
     #[uniffi::constructor]
-    pub fn load() -> Result<Arc<Self>, FfiSlatedbError> {
+    pub fn load() -> Result<Arc<Self>, FfiError> {
         Ok(Arc::new(Self::new(slatedb::Settings::load()?)))
     }
 
@@ -84,48 +85,32 @@ impl FfiSettings {
     /// - `set("default_ttl", "null")`
     /// - `set("compactor_options.max_sst_size", "33554432")`
     /// - `set("object_store_cache_options.root_folder", "\"/tmp/slatedb-cache\"")`
-    pub fn set(&self, key: String, value_json: String) -> Result<(), FfiSlatedbError> {
+    pub fn set(&self, key: String, value_json: String) -> Result<(), FfiError> {
         let mut guard = self.inner.lock();
-        let mut settings_json =
-            serde_json::to_value(&*guard).map_err(|error| FfiSlatedbError::Internal {
-                message: format!("settings serialization failed: {error}"),
-            })?;
+        let mut settings_json = serde_json::to_value(&*guard)
+            .map_err(|source| FfiSlateDbError::SettingsSerialization { source })?;
 
         if !settings_json.is_object() {
-            return Err(FfiSlatedbError::Internal {
-                message: "settings JSON root was not an object".to_owned(),
-            });
+            return Err(FfiSlateDbError::SettingsJsonRootNotObject.into());
         }
 
-        let value = serde_json::from_str::<Value>(&value_json).map_err(|error| {
-            FfiSlatedbError::Invalid {
-                message: format!("value_json is not valid JSON: {error}"),
-            }
-        })?;
+        let value = serde_json::from_str::<Value>(&value_json)
+            .map_err(|source| FfiSlateDbError::InvalidValueJson { source })?;
 
-        apply_dotted_json_path(&mut settings_json, &key, value).map_err(|message| {
-            FfiSlatedbError::Invalid {
-                message: format!("key invalid: {message}"),
-            }
-        })?;
+        apply_dotted_json_path(&mut settings_json, &key, value)
+            .map_err(|message| FfiSlateDbError::InvalidSettingsKey { message })?;
 
-        let settings =
-            serde_json::from_value::<slatedb::Settings>(settings_json).map_err(|error| {
-                FfiSlatedbError::Invalid {
-                    message: format!("settings update produced invalid settings: {error}"),
-                }
-            })?;
+        let settings = serde_json::from_value::<slatedb::Settings>(settings_json)
+            .map_err(|source| FfiSlateDbError::InvalidSettingsUpdate { source })?;
         *guard = settings;
         Ok(())
     }
 
-    pub fn to_json_string(&self) -> Result<String, FfiSlatedbError> {
+    pub fn to_json_string(&self) -> Result<String, FfiError> {
         self.inner
             .lock()
             .to_json_string()
-            .map_err(|error| FfiSlatedbError::Internal {
-                message: format!("settings serialization failed: {error}"),
-            })
+            .map_err(|source| FfiSlateDbError::SettingsSerialization { source }.into())
     }
 }
 
@@ -176,7 +161,7 @@ mod tests {
     use std::time::Duration;
 
     use super::{apply_dotted_json_path, FfiSettings};
-    use crate::error::FfiSlatedbError;
+    use crate::error::FfiError;
 
     #[test]
     fn apply_dotted_json_path_sets_top_level_key() {
@@ -288,7 +273,7 @@ mod tests {
             .expect_err("expected invalid JSON");
 
         assert!(
-            matches!(err, FfiSlatedbError::Invalid { .. }),
+            matches!(err, FfiError::Invalid { .. }),
             "unexpected error: {err:?}"
         );
     }
@@ -303,7 +288,7 @@ mod tests {
             .expect_err("expected invalid settings");
 
         assert!(
-            matches!(err, FfiSlatedbError::Invalid { .. }),
+            matches!(err, FfiError::Invalid { .. }),
             "unexpected error: {err:?}"
         );
         assert_eq!(settings.inner().flush_interval, before.flush_interval);

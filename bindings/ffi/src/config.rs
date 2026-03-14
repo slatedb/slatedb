@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use slatedb::{IsolationLevel, SstBlockSize};
 
-use crate::error::FfiSlatedbError;
+use crate::error::FfiSlateDbError;
 use crate::validation::try_usize;
 
 #[derive(Clone, Copy, Debug, Default, uniffi::Enum)]
@@ -176,7 +176,7 @@ impl Default for FfiScanOptions {
 }
 
 impl FfiScanOptions {
-    pub(crate) fn into_core(self) -> Result<slatedb::config::ScanOptions, FfiSlatedbError> {
+    pub(crate) fn into_core(self) -> Result<slatedb::config::ScanOptions, FfiSlateDbError> {
         Ok(slatedb::config::ScanOptions {
             durability_filter: self.durability_filter.into_core(),
             dirty: self.dirty,

@@ -21,7 +21,7 @@ pub use config::{
 };
 pub use db::{FfiDb, FfiDbSnapshot};
 pub use db_reader::FfiDbReader;
-pub use error::{FfiCloseReason, FfiMergeOperatorCallbackError, FfiSlatedbError};
+pub use error::{FfiCloseReason, FfiError, FfiMergeOperatorCallbackError};
 pub use iterator::FfiDbIterator;
 pub use merge_operator::FfiMergeOperator;
 pub use object_store::FfiObjectStore;
