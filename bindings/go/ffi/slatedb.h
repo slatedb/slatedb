@@ -627,11 +627,6 @@ void* uniffi_slatedb_ffi_fn_clone_ffidbreader(void* ptr, RustCallStatus *out_sta
 void uniffi_slatedb_ffi_fn_free_ffidbreader(void* ptr, RustCallStatus *out_status
 );
 #endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_METHOD_FFIDBREADER_CLOSE
-#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_METHOD_FFIDBREADER_CLOSE
-uint64_t uniffi_slatedb_ffi_fn_method_ffidbreader_close(void* ptr
-);
-#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_METHOD_FFIDBREADER_GET
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_METHOD_FFIDBREADER_GET
 uint64_t uniffi_slatedb_ffi_fn_method_ffidbreader_get(void* ptr, RustBuffer key
@@ -660,6 +655,11 @@ uint64_t uniffi_slatedb_ffi_fn_method_ffidbreader_scan_prefix_with_options(void*
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_METHOD_FFIDBREADER_SCAN_WITH_OPTIONS
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_METHOD_FFIDBREADER_SCAN_WITH_OPTIONS
 uint64_t uniffi_slatedb_ffi_fn_method_ffidbreader_scan_with_options(void* ptr, RustBuffer range, RustBuffer options
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_METHOD_FFIDBREADER_SHUTDOWN
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_METHOD_FFIDBREADER_SHUTDOWN
+uint64_t uniffi_slatedb_ffi_fn_method_ffidbreader_shutdown(void* ptr
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_CLONE_FFIDBREADERBUILDER
@@ -984,11 +984,6 @@ void* uniffi_slatedb_ffi_fn_clone_ffiwalfile(void* ptr, RustCallStatus *out_stat
 void uniffi_slatedb_ffi_fn_free_ffiwalfile(void* ptr, RustCallStatus *out_status
 );
 #endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_METHOD_FFIWALFILE_CLOSE
-#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_METHOD_FFIWALFILE_CLOSE
-void uniffi_slatedb_ffi_fn_method_ffiwalfile_close(void* ptr, RustCallStatus *out_status
-);
-#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_METHOD_FFIWALFILE_ID
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_METHOD_FFIWALFILE_ID
 uint64_t uniffi_slatedb_ffi_fn_method_ffiwalfile_id(void* ptr, RustCallStatus *out_status
@@ -1014,6 +1009,11 @@ void* uniffi_slatedb_ffi_fn_method_ffiwalfile_next_file(void* ptr, RustCallStatu
 uint64_t uniffi_slatedb_ffi_fn_method_ffiwalfile_next_id(void* ptr, RustCallStatus *out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_METHOD_FFIWALFILE_SHUTDOWN
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_METHOD_FFIWALFILE_SHUTDOWN
+void uniffi_slatedb_ffi_fn_method_ffiwalfile_shutdown(void* ptr, RustCallStatus *out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_CLONE_FFIWALFILEITERATOR
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_CLONE_FFIWALFILEITERATOR
 void* uniffi_slatedb_ffi_fn_clone_ffiwalfileiterator(void* ptr, RustCallStatus *out_status
@@ -1024,14 +1024,14 @@ void* uniffi_slatedb_ffi_fn_clone_ffiwalfileiterator(void* ptr, RustCallStatus *
 void uniffi_slatedb_ffi_fn_free_ffiwalfileiterator(void* ptr, RustCallStatus *out_status
 );
 #endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_METHOD_FFIWALFILEITERATOR_CLOSE
-#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_METHOD_FFIWALFILEITERATOR_CLOSE
-void uniffi_slatedb_ffi_fn_method_ffiwalfileiterator_close(void* ptr, RustCallStatus *out_status
-);
-#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_METHOD_FFIWALFILEITERATOR_NEXT
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_METHOD_FFIWALFILEITERATOR_NEXT
 uint64_t uniffi_slatedb_ffi_fn_method_ffiwalfileiterator_next(void* ptr
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_METHOD_FFIWALFILEITERATOR_SHUTDOWN
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_METHOD_FFIWALFILEITERATOR_SHUTDOWN
+void uniffi_slatedb_ffi_fn_method_ffiwalfileiterator_shutdown(void* ptr, RustCallStatus *out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_CLONE_FFIWALREADER
@@ -1049,11 +1049,6 @@ void uniffi_slatedb_ffi_fn_free_ffiwalreader(void* ptr, RustCallStatus *out_stat
 void* uniffi_slatedb_ffi_fn_constructor_ffiwalreader_new(RustBuffer path, void* object_store, RustCallStatus *out_status
 );
 #endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_METHOD_FFIWALREADER_CLOSE
-#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_METHOD_FFIWALREADER_CLOSE
-void uniffi_slatedb_ffi_fn_method_ffiwalreader_close(void* ptr, RustCallStatus *out_status
-);
-#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_METHOD_FFIWALREADER_GET
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_METHOD_FFIWALREADER_GET
 void* uniffi_slatedb_ffi_fn_method_ffiwalreader_get(void* ptr, uint64_t id, RustCallStatus *out_status
@@ -1062,6 +1057,11 @@ void* uniffi_slatedb_ffi_fn_method_ffiwalreader_get(void* ptr, uint64_t id, Rust
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_METHOD_FFIWALREADER_LIST
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_METHOD_FFIWALREADER_LIST
 uint64_t uniffi_slatedb_ffi_fn_method_ffiwalreader_list(void* ptr, RustBuffer start_id, RustBuffer end_id
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_METHOD_FFIWALREADER_SHUTDOWN
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_METHOD_FFIWALREADER_SHUTDOWN
+void uniffi_slatedb_ffi_fn_method_ffiwalreader_shutdown(void* ptr, RustCallStatus *out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_FN_CLONE_FFIWRITEBATCH
@@ -1588,12 +1588,6 @@ uint16_t uniffi_slatedb_ffi_checksum_method_ffidbiterator_seek(void
     
 );
 #endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_CHECKSUM_METHOD_FFIDBREADER_CLOSE
-#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_CHECKSUM_METHOD_FFIDBREADER_CLOSE
-uint16_t uniffi_slatedb_ffi_checksum_method_ffidbreader_close(void
-    
-);
-#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_CHECKSUM_METHOD_FFIDBREADER_GET
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_CHECKSUM_METHOD_FFIDBREADER_GET
 uint16_t uniffi_slatedb_ffi_checksum_method_ffidbreader_get(void
@@ -1627,6 +1621,12 @@ uint16_t uniffi_slatedb_ffi_checksum_method_ffidbreader_scan_prefix_with_options
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_CHECKSUM_METHOD_FFIDBREADER_SCAN_WITH_OPTIONS
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_CHECKSUM_METHOD_FFIDBREADER_SCAN_WITH_OPTIONS
 uint16_t uniffi_slatedb_ffi_checksum_method_ffidbreader_scan_with_options(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_CHECKSUM_METHOD_FFIDBREADER_SHUTDOWN
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_CHECKSUM_METHOD_FFIDBREADER_SHUTDOWN
+uint16_t uniffi_slatedb_ffi_checksum_method_ffidbreader_shutdown(void
     
 );
 #endif
@@ -1852,12 +1852,6 @@ uint16_t uniffi_slatedb_ffi_checksum_method_ffisettings_to_json_string(void
     
 );
 #endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_CHECKSUM_METHOD_FFIWALFILE_CLOSE
-#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_CHECKSUM_METHOD_FFIWALFILE_CLOSE
-uint16_t uniffi_slatedb_ffi_checksum_method_ffiwalfile_close(void
-    
-);
-#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_CHECKSUM_METHOD_FFIWALFILE_ID
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_CHECKSUM_METHOD_FFIWALFILE_ID
 uint16_t uniffi_slatedb_ffi_checksum_method_ffiwalfile_id(void
@@ -1888,9 +1882,9 @@ uint16_t uniffi_slatedb_ffi_checksum_method_ffiwalfile_next_id(void
     
 );
 #endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_CHECKSUM_METHOD_FFIWALFILEITERATOR_CLOSE
-#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_CHECKSUM_METHOD_FFIWALFILEITERATOR_CLOSE
-uint16_t uniffi_slatedb_ffi_checksum_method_ffiwalfileiterator_close(void
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_CHECKSUM_METHOD_FFIWALFILE_SHUTDOWN
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_CHECKSUM_METHOD_FFIWALFILE_SHUTDOWN
+uint16_t uniffi_slatedb_ffi_checksum_method_ffiwalfile_shutdown(void
     
 );
 #endif
@@ -1900,9 +1894,9 @@ uint16_t uniffi_slatedb_ffi_checksum_method_ffiwalfileiterator_next(void
     
 );
 #endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_CHECKSUM_METHOD_FFIWALREADER_CLOSE
-#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_CHECKSUM_METHOD_FFIWALREADER_CLOSE
-uint16_t uniffi_slatedb_ffi_checksum_method_ffiwalreader_close(void
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_CHECKSUM_METHOD_FFIWALFILEITERATOR_SHUTDOWN
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_CHECKSUM_METHOD_FFIWALFILEITERATOR_SHUTDOWN
+uint16_t uniffi_slatedb_ffi_checksum_method_ffiwalfileiterator_shutdown(void
     
 );
 #endif
@@ -1915,6 +1909,12 @@ uint16_t uniffi_slatedb_ffi_checksum_method_ffiwalreader_get(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_CHECKSUM_METHOD_FFIWALREADER_LIST
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_CHECKSUM_METHOD_FFIWALREADER_LIST
 uint16_t uniffi_slatedb_ffi_checksum_method_ffiwalreader_list(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_CHECKSUM_METHOD_FFIWALREADER_SHUTDOWN
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_FFI_CHECKSUM_METHOD_FFIWALREADER_SHUTDOWN
+uint16_t uniffi_slatedb_ffi_checksum_method_ffiwalreader_shutdown(void
     
 );
 #endif
