@@ -3523,6 +3523,7 @@ dependencies = [
 name = "slatedb-ffi"
 version = "0.11.1"
 dependencies = [
+ "figment",
  "parking_lot",
  "serde_json",
  "slatedb",
