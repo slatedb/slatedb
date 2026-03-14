@@ -5,8 +5,7 @@ use slatedb::MergeOperatorError;
 
 use crate::error::FfiMergeOperatorCallbackError;
 
-// TODO should we use #[uniffi::export(with_foreign)] instead?
-#[uniffi::export(callback_interface)]
+#[uniffi::export(with_foreign)]
 pub trait FfiMergeOperator: Send + Sync {
     fn merge(
         &self,
@@ -41,9 +40,9 @@ impl slatedb::MergeOperator for MergeOperatorAdapter {
 }
 
 pub(crate) fn adapt_merge_operator(
-    merge_operator: Box<dyn FfiMergeOperator>,
+    merge_operator: Arc<dyn FfiMergeOperator>,
 ) -> Arc<dyn slatedb::MergeOperator + Send + Sync> {
     Arc::new(MergeOperatorAdapter {
-        inner: merge_operator.into(),
+        inner: merge_operator,
     })
 }
