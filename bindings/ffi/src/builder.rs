@@ -133,6 +133,24 @@ impl FfiDbReaderBuilder {
             .map_err(Into::into)
     }
 
+    pub fn with_wal_object_store(
+        &self,
+        wal_object_store: Arc<FfiObjectStore>,
+    ) -> Result<(), FfiError> {
+        self.update_builder(|builder| builder.with_wal_object_store(wal_object_store.inner.clone()))
+            .map_err(Into::into)
+    }
+
+    pub fn with_merge_operator(
+        &self,
+        merge_operator: Arc<dyn FfiMergeOperator>,
+    ) -> Result<(), FfiError> {
+        self.update_builder(|builder| {
+            builder.with_merge_operator(adapt_merge_operator(merge_operator))
+        })
+        .map_err(Into::into)
+    }
+
     pub fn with_options(&self, options: FfiReaderOptions) -> Result<(), FfiError> {
         let options = options.into_core();
         self.update_builder(|builder| builder.with_options(options))
