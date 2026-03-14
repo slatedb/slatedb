@@ -36,9 +36,9 @@ impl FfiSettings {
 
     #[uniffi::constructor]
     pub fn from_json_string(json: String) -> Result<Arc<Self>, FfiSlatedbError> {
-        Ok(Arc::new(Self::new(serde_json::from_str::<slatedb::Settings>(
-            &json,
-        )?)))
+        Ok(Arc::new(Self::new(serde_json::from_str::<
+            slatedb::Settings,
+        >(&json)?)))
     }
 
     #[uniffi::constructor]
@@ -51,10 +51,9 @@ impl FfiSettings {
         prefix: String,
         default_settings: Arc<FfiSettings>,
     ) -> Result<Arc<Self>, FfiSlatedbError> {
-        Ok(Arc::new(Self::new(slatedb::Settings::from_env_with_default(
-            &prefix,
-            default_settings.inner(),
-        )?)))
+        Ok(Arc::new(Self::new(
+            slatedb::Settings::from_env_with_default(&prefix, default_settings.inner())?,
+        )))
     }
 
     #[uniffi::constructor]
@@ -225,7 +224,10 @@ mod tests {
         let err = apply_dotted_json_path(&mut root, "compactor_options.max_sst_size", json!(1))
             .expect_err("expected invalid key");
 
-        assert!(err.contains("not an object"), "unexpected error message: {err}");
+        assert!(
+            err.contains("not an object"),
+            "unexpected error message: {err}"
+        );
     }
 
     #[test]
@@ -366,11 +368,9 @@ flush_interval = "1s"
                 .set("flush_interval".to_owned(), "\"250ms\"".to_owned())
                 .unwrap();
 
-            let settings = FfiSettings::from_env_with_default(
-                "FFI_SETTINGS_".to_owned(),
-                defaults.clone(),
-            )
-            .unwrap();
+            let settings =
+                FfiSettings::from_env_with_default("FFI_SETTINGS_".to_owned(), defaults.clone())
+                    .unwrap();
 
             assert_eq!(
                 settings.inner().flush_interval,

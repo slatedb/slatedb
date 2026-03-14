@@ -254,20 +254,3 @@ impl FfiFlushOptions {
         }
     }
 }
-
-#[derive(Clone, Debug, uniffi::Enum)]
-pub enum FfiWriteOperation {
-    Put {
-        key: Vec<u8>,
-        value_bytes: Vec<u8>,
-        options: FfiPutOptions,
-    },
-    Merge {
-        key: Vec<u8>,
-        operand: Vec<u8>,
-        options: FfiMergeOptions,
-    },
-    Delete {
-        key: Vec<u8>,
-    },
-}

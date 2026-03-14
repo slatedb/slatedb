@@ -3,13 +3,13 @@ use std::sync::Arc;
 
 use crate::config::{
     FfiFlushOptions, FfiIsolationLevel, FfiMergeOptions, FfiPutOptions, FfiReadOptions,
-    FfiScanOptions, FfiWriteOperation, FfiWriteOptions,
+    FfiScanOptions, FfiWriteOptions,
 };
 use crate::error::FfiSlatedbError;
 use crate::iterator::FfiDbIterator;
 use crate::transaction::FfiDbTransaction;
 use crate::types::{FfiKeyRange, FfiKeyValue, FfiWriteHandle};
-use crate::validation::{build_write_batch, validate_key, validate_key_value};
+use crate::validation::{validate_key, validate_key_value};
 use crate::write_batch::FfiWriteBatch;
 
 #[derive(uniffi::Object)]
@@ -204,33 +204,13 @@ impl FfiDb {
 
     pub async fn write(
         &self,
-        operations: Vec<FfiWriteOperation>,
-    ) -> Result<FfiWriteHandle, FfiSlatedbError> {
-        let batch = build_write_batch(operations)?;
-        Ok(FfiWriteHandle::from_core(self.inner.write(batch).await?))
-    }
-
-    pub async fn write_with_options(
-        &self,
-        operations: Vec<FfiWriteOperation>,
-        options: FfiWriteOptions,
-    ) -> Result<FfiWriteHandle, FfiSlatedbError> {
-        let batch = build_write_batch(operations)?;
-        let options = options.into_core();
-        Ok(FfiWriteHandle::from_core(
-            self.inner.write_with_options(batch, &options).await?,
-        ))
-    }
-
-    pub async fn write_batch(
-        &self,
         batch: Arc<FfiWriteBatch>,
     ) -> Result<FfiWriteHandle, FfiSlatedbError> {
         let batch = batch.take_for_write()?;
         Ok(FfiWriteHandle::from_core(self.inner.write(batch).await?))
     }
 
-    pub async fn write_batch_with_options(
+    pub async fn write_with_options(
         &self,
         batch: Arc<FfiWriteBatch>,
         options: FfiWriteOptions,
