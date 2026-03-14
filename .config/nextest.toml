@@ -5,7 +5,16 @@ experimental = ["wrapper-scripts"]
 slow-timeout = { period = "30s", terminate-after = 4 }
 
 [scripts.wrapper.backtrace-on-timeout]
-command = "../scripts/backtrace-on-timeout.sh"
+command = [
+  "sh",
+  "-c",
+  """
+ workspace_manifest=$(cargo locate-project --workspace --message-format plain)
+ root=$(dirname "$workspace_manifest")
+ exec "$root/scripts/backtrace-on-timeout.sh" "$@"
+""",
+  "sh",
+]
 
 [[profile.ci.scripts]]
 filter = "all()"
