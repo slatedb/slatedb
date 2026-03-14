@@ -74,7 +74,7 @@ impl FfiDbBuilder {
 
     pub fn with_merge_operator(
         &self,
-        merge_operator: Box<dyn FfiMergeOperator>,
+        merge_operator: Arc<dyn FfiMergeOperator>,
     ) -> Result<(), FfiError> {
         self.update_builder(|builder| {
             builder.with_merge_operator(adapt_merge_operator(merge_operator))
