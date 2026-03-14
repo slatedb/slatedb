@@ -23,9 +23,6 @@ pub(crate) enum FfiSlateDbError {
     #[error("write batch has already been consumed")]
     WriteBatchConsumed,
 
-    #[error("seek key cannot be empty")]
-    EmptySeekKey,
-
     #[error("invalid checkpoint_id UUID: {source}")]
     InvalidCheckpointId { source: uuid::Error },
 

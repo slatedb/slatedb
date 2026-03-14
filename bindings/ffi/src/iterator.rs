@@ -1,7 +1,8 @@
 use tokio::sync::Mutex;
 
-use crate::error::{FfiError, FfiSlateDbError};
+use crate::error::FfiError;
 use crate::types::FfiKeyValue;
+use crate::validation::validate_key;
 
 #[derive(uniffi::Object)]
 pub struct FfiDbIterator {
@@ -24,9 +25,7 @@ impl FfiDbIterator {
     }
 
     pub async fn seek(&self, key: Vec<u8>) -> Result<(), FfiError> {
-        if key.is_empty() {
-            return Err(FfiSlateDbError::EmptySeekKey.into());
-        }
+        validate_key(&key)?;
         let mut guard = self.inner.lock().await;
         guard.seek(key).await.map_err(Into::into)
     }
