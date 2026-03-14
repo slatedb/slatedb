@@ -672,15 +672,6 @@ func uniffiCheckChecksums() {
 	}
 	{
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_ffi_checksum_method_ffidbreader_close()
-		})
-		if checksum != 5001 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_ffi_checksum_method_ffidbreader_close: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_slatedb_ffi_checksum_method_ffidbreader_get()
 		})
 		if checksum != 46156 {
@@ -731,6 +722,15 @@ func uniffiCheckChecksums() {
 		if checksum != 19389 {
 			// If this happens try cleaning and rebuilding your project
 			panic("slatedb: uniffi_slatedb_ffi_checksum_method_ffidbreader_scan_with_options: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_ffi_checksum_method_ffidbreader_shutdown()
+		})
+		if checksum != 60272 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_ffi_checksum_method_ffidbreader_shutdown: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -1068,15 +1068,6 @@ func uniffiCheckChecksums() {
 	}
 	{
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_ffi_checksum_method_ffiwalfile_close()
-		})
-		if checksum != 1861 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_ffi_checksum_method_ffiwalfile_close: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_slatedb_ffi_checksum_method_ffiwalfile_id()
 		})
 		if checksum != 4476 {
@@ -1122,11 +1113,11 @@ func uniffiCheckChecksums() {
 	}
 	{
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_ffi_checksum_method_ffiwalfileiterator_close()
+			return C.uniffi_slatedb_ffi_checksum_method_ffiwalfile_shutdown()
 		})
-		if checksum != 31243 {
+		if checksum != 1197 {
 			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_ffi_checksum_method_ffiwalfileiterator_close: UniFFI API checksum mismatch")
+			panic("slatedb: uniffi_slatedb_ffi_checksum_method_ffiwalfile_shutdown: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -1140,11 +1131,11 @@ func uniffiCheckChecksums() {
 	}
 	{
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_ffi_checksum_method_ffiwalreader_close()
+			return C.uniffi_slatedb_ffi_checksum_method_ffiwalfileiterator_shutdown()
 		})
-		if checksum != 37220 {
+		if checksum != 10991 {
 			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_ffi_checksum_method_ffiwalreader_close: UniFFI API checksum mismatch")
+			panic("slatedb: uniffi_slatedb_ffi_checksum_method_ffiwalfileiterator_shutdown: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -1163,6 +1154,15 @@ func uniffiCheckChecksums() {
 		if checksum != 64696 {
 			// If this happens try cleaning and rebuilding your project
 			panic("slatedb: uniffi_slatedb_ffi_checksum_method_ffiwalreader_list: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_ffi_checksum_method_ffiwalreader_shutdown()
+		})
+		if checksum != 48499 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_ffi_checksum_method_ffiwalreader_shutdown: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -2693,47 +2693,16 @@ func (_ FfiDestroyerFfiDbIterator) Destroy(value *FfiDbIterator) {
 }
 
 type FfiDbReaderInterface interface {
-	Close() error
 	Get(key []byte) (*[]byte, error)
 	GetWithOptions(key []byte, options FfiReadOptions) (*[]byte, error)
 	Scan(varRange FfiKeyRange) (*FfiDbIterator, error)
 	ScanPrefix(prefix []byte) (*FfiDbIterator, error)
 	ScanPrefixWithOptions(prefix []byte, options FfiScanOptions) (*FfiDbIterator, error)
 	ScanWithOptions(varRange FfiKeyRange, options FfiScanOptions) (*FfiDbIterator, error)
+	Shutdown() error
 }
 type FfiDbReader struct {
 	ffiObject FfiObject
-}
-
-func (_self *FfiDbReader) Close() error {
-	_pointer := _self.ffiObject.incrementPointer("*FfiDbReader")
-	defer _self.ffiObject.decrementPointer()
-	_, err := uniffiRustCallAsync[FfiError](
-		FfiConverterFfiErrorINSTANCE,
-		// completeFn
-		func(handle C.uint64_t, status *C.RustCallStatus) struct{} {
-			C.ffi_slatedb_ffi_rust_future_complete_void(handle, status)
-			return struct{}{}
-		},
-		// liftFn
-		func(_ struct{}) struct{} { return struct{}{} },
-		C.uniffi_slatedb_ffi_fn_method_ffidbreader_close(
-			_pointer),
-		// pollFn
-		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
-			C.ffi_slatedb_ffi_rust_future_poll_void(handle, continuation, data)
-		},
-		// freeFn
-		func(handle C.uint64_t) {
-			C.ffi_slatedb_ffi_rust_future_free_void(handle)
-		},
-	)
-
-	if err == nil {
-		return nil
-	}
-
-	return err
 }
 
 func (_self *FfiDbReader) Get(key []byte) (*[]byte, error) {
@@ -2936,6 +2905,37 @@ func (_self *FfiDbReader) ScanWithOptions(varRange FfiKeyRange, options FfiScanO
 	}
 
 	return res, err
+}
+
+func (_self *FfiDbReader) Shutdown() error {
+	_pointer := _self.ffiObject.incrementPointer("*FfiDbReader")
+	defer _self.ffiObject.decrementPointer()
+	_, err := uniffiRustCallAsync[FfiError](
+		FfiConverterFfiErrorINSTANCE,
+		// completeFn
+		func(handle C.uint64_t, status *C.RustCallStatus) struct{} {
+			C.ffi_slatedb_ffi_rust_future_complete_void(handle, status)
+			return struct{}{}
+		},
+		// liftFn
+		func(_ struct{}) struct{} { return struct{}{} },
+		C.uniffi_slatedb_ffi_fn_method_ffidbreader_shutdown(
+			_pointer),
+		// pollFn
+		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+			C.ffi_slatedb_ffi_rust_future_poll_void(handle, continuation, data)
+		},
+		// freeFn
+		func(handle C.uint64_t) {
+			C.ffi_slatedb_ffi_rust_future_free_void(handle)
+		},
+	)
+
+	if err == nil {
+		return nil
+	}
+
+	return err
 }
 func (object *FfiDbReader) Destroy() {
 	runtime.SetFinalizer(object, nil)
@@ -4704,26 +4704,15 @@ func (_ FfiDestroyerFfiSettings) Destroy(value *FfiSettings) {
 }
 
 type FfiWalFileInterface interface {
-	Close() error
 	Id() uint64
 	Iterator() (*FfiWalFileIterator, error)
 	Metadata() (FfiWalFileMetadata, error)
 	NextFile() *FfiWalFile
 	NextId() uint64
+	Shutdown() error
 }
 type FfiWalFile struct {
 	ffiObject FfiObject
-}
-
-func (_self *FfiWalFile) Close() error {
-	_pointer := _self.ffiObject.incrementPointer("*FfiWalFile")
-	defer _self.ffiObject.decrementPointer()
-	_, _uniffiErr := rustCallWithError[FfiError](FfiConverterFfiError{}, func(_uniffiStatus *C.RustCallStatus) bool {
-		C.uniffi_slatedb_ffi_fn_method_ffiwalfile_close(
-			_pointer, _uniffiStatus)
-		return false
-	})
-	return _uniffiErr.AsError()
 }
 
 func (_self *FfiWalFile) Id() uint64 {
@@ -4820,6 +4809,17 @@ func (_self *FfiWalFile) NextId() uint64 {
 			_pointer, _uniffiStatus)
 	}))
 }
+
+func (_self *FfiWalFile) Shutdown() error {
+	_pointer := _self.ffiObject.incrementPointer("*FfiWalFile")
+	defer _self.ffiObject.decrementPointer()
+	_, _uniffiErr := rustCallWithError[FfiError](FfiConverterFfiError{}, func(_uniffiStatus *C.RustCallStatus) bool {
+		C.uniffi_slatedb_ffi_fn_method_ffiwalfile_shutdown(
+			_pointer, _uniffiStatus)
+		return false
+	})
+	return _uniffiErr.AsError()
+}
 func (object *FfiWalFile) Destroy() {
 	runtime.SetFinalizer(object, nil)
 	object.ffiObject.destroy()
@@ -4870,22 +4870,11 @@ func (_ FfiDestroyerFfiWalFile) Destroy(value *FfiWalFile) {
 }
 
 type FfiWalFileIteratorInterface interface {
-	Close() error
 	Next() (*FfiRowEntry, error)
+	Shutdown() error
 }
 type FfiWalFileIterator struct {
 	ffiObject FfiObject
-}
-
-func (_self *FfiWalFileIterator) Close() error {
-	_pointer := _self.ffiObject.incrementPointer("*FfiWalFileIterator")
-	defer _self.ffiObject.decrementPointer()
-	_, _uniffiErr := rustCallWithError[FfiError](FfiConverterFfiError{}, func(_uniffiStatus *C.RustCallStatus) bool {
-		C.uniffi_slatedb_ffi_fn_method_ffiwalfileiterator_close(
-			_pointer, _uniffiStatus)
-		return false
-	})
-	return _uniffiErr.AsError()
 }
 
 func (_self *FfiWalFileIterator) Next() (*FfiRowEntry, error) {
@@ -4921,6 +4910,17 @@ func (_self *FfiWalFileIterator) Next() (*FfiRowEntry, error) {
 	}
 
 	return res, err
+}
+
+func (_self *FfiWalFileIterator) Shutdown() error {
+	_pointer := _self.ffiObject.incrementPointer("*FfiWalFileIterator")
+	defer _self.ffiObject.decrementPointer()
+	_, _uniffiErr := rustCallWithError[FfiError](FfiConverterFfiError{}, func(_uniffiStatus *C.RustCallStatus) bool {
+		C.uniffi_slatedb_ffi_fn_method_ffiwalfileiterator_shutdown(
+			_pointer, _uniffiStatus)
+		return false
+	})
+	return _uniffiErr.AsError()
 }
 func (object *FfiWalFileIterator) Destroy() {
 	runtime.SetFinalizer(object, nil)
@@ -4972,9 +4972,9 @@ func (_ FfiDestroyerFfiWalFileIterator) Destroy(value *FfiWalFileIterator) {
 }
 
 type FfiWalReaderInterface interface {
-	Close() error
 	Get(id uint64) *FfiWalFile
 	List(startId *uint64, endId *uint64) ([]*FfiWalFile, error)
+	Shutdown() error
 }
 type FfiWalReader struct {
 	ffiObject FfiObject
@@ -4984,17 +4984,6 @@ func NewFfiWalReader(path string, objectStore *FfiObjectStore) *FfiWalReader {
 	return FfiConverterFfiWalReaderINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) unsafe.Pointer {
 		return C.uniffi_slatedb_ffi_fn_constructor_ffiwalreader_new(FfiConverterStringINSTANCE.Lower(path), FfiConverterFfiObjectStoreINSTANCE.Lower(objectStore), _uniffiStatus)
 	}))
-}
-
-func (_self *FfiWalReader) Close() error {
-	_pointer := _self.ffiObject.incrementPointer("*FfiWalReader")
-	defer _self.ffiObject.decrementPointer()
-	_, _uniffiErr := rustCallWithError[FfiError](FfiConverterFfiError{}, func(_uniffiStatus *C.RustCallStatus) bool {
-		C.uniffi_slatedb_ffi_fn_method_ffiwalreader_close(
-			_pointer, _uniffiStatus)
-		return false
-	})
-	return _uniffiErr.AsError()
 }
 
 func (_self *FfiWalReader) Get(id uint64) *FfiWalFile {
@@ -5039,6 +5028,17 @@ func (_self *FfiWalReader) List(startId *uint64, endId *uint64) ([]*FfiWalFile, 
 	}
 
 	return res, err
+}
+
+func (_self *FfiWalReader) Shutdown() error {
+	_pointer := _self.ffiObject.incrementPointer("*FfiWalReader")
+	defer _self.ffiObject.decrementPointer()
+	_, _uniffiErr := rustCallWithError[FfiError](FfiConverterFfiError{}, func(_uniffiStatus *C.RustCallStatus) bool {
+		C.uniffi_slatedb_ffi_fn_method_ffiwalreader_shutdown(
+			_pointer, _uniffiStatus)
+		return false
+	})
+	return _uniffiErr.AsError()
 }
 func (object *FfiWalReader) Destroy() {
 	runtime.SetFinalizer(object, nil)
