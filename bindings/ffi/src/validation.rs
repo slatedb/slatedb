@@ -85,9 +85,3 @@ pub(crate) fn write_batch_consumed() -> FfiSlatedbError {
         message: "write batch has already been consumed".to_owned(),
     }
 }
-
-pub(crate) fn write_batch_closed() -> FfiSlatedbError {
-    FfiSlatedbError::Invalid {
-        message: "write batch is already closed".to_owned(),
-    }
-}
