@@ -49,7 +49,7 @@ case "${FORMAT_GENERATED_PYTHON}" in
 esac
 
 if [[ "${FORMAT_GENERATED_PYTHON}" = "1" ]]; then
-    require_cmd "${PYTHON_FORMATTER_BIN}"
+    require_cmd uv
 fi
 
 case "$(uname -s)" in
@@ -121,5 +121,5 @@ done
 cp "${lib_path}" "${out_dir}/"
 
 if [[ "${FORMAT_GENERATED_PYTHON}" = "1" ]]; then
-    "${PYTHON_FORMATTER_BIN}" format "${out_dir}/slatedb.py"
+    uv tool run "${PYTHON_FORMATTER_BIN}" format "${out_dir}/slatedb.py"
 fi

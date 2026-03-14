@@ -18,14 +18,13 @@ intentionally kept open for a future higher-level Python wrapper.
 Run from the repository root:
 
 ```bash
-python3 -m pip install -e 'bindings/python[lint]'
 ./scripts/generate_python_bindings.sh
 ```
 
 The script builds `slatedb-ffi`, regenerates the Python wrapper using the
 workspace-pinned UniFFI CLI, copies the resulting host library beside the
-generated module, and then formats `src/slatedb/ffi/slatedb.py` with `ruff
-format`.
+generated module, and then formats `src/slatedb/ffi/slatedb.py` via `uv tool
+run ruff format`. This requires `uv` to be installed.
 
 Optional environment variables:
 
@@ -33,7 +32,7 @@ Optional environment variables:
 - `PYTHON_BINDINGS_OUT_DIR`: alternate output directory (`bindings/python/src/slatedb/ffi` by default)
 - `CARGO_TARGET_DIR`: alternate Cargo target directory
 - `FORMAT_GENERATED_PYTHON`: `1` to format after generation, `0` to skip formatting (`1` by default)
-- `PYTHON_FORMATTER_BIN`: formatter executable to invoke (`ruff` by default)
+- `PYTHON_FORMATTER_BIN`: formatter package and command to invoke with `uv tool run` (`ruff` by default)
 
 ## Local Install
 
