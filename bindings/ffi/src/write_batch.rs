@@ -4,19 +4,11 @@ use parking_lot::Mutex;
 
 use crate::config::{FfiMergeOptions, FfiPutOptions};
 use crate::error::FfiSlatedbError;
-use crate::validation::{
-    validate_key, validate_key_value, write_batch_closed, write_batch_consumed,
-};
-
-enum WriteBatchState {
-    Open(slatedb::WriteBatch),
-    Consumed,
-    Closed,
-}
+use crate::validation::{validate_key, validate_key_value, write_batch_consumed};
 
 #[derive(uniffi::Object)]
 pub struct FfiWriteBatch {
-    state: Mutex<WriteBatchState>,
+    state: Mutex<Option<slatedb::WriteBatch>>,
 }
 
 impl FfiWriteBatch {
@@ -25,27 +17,13 @@ impl FfiWriteBatch {
         update: impl FnOnce(&mut slatedb::WriteBatch) -> T,
     ) -> Result<T, FfiSlatedbError> {
         let mut guard = self.state.lock();
-        match &mut *guard {
-            WriteBatchState::Open(batch) => Ok(update(batch)),
-            WriteBatchState::Consumed => Err(write_batch_consumed()),
-            WriteBatchState::Closed => Err(write_batch_closed()),
-        }
+        let batch = guard.as_mut().ok_or_else(write_batch_consumed)?;
+        Ok(update(batch))
     }
 
     pub(crate) fn take_for_write(&self) -> Result<slatedb::WriteBatch, FfiSlatedbError> {
         let mut guard = self.state.lock();
-
-        match std::mem::replace(&mut *guard, WriteBatchState::Consumed) {
-            WriteBatchState::Open(batch) => Ok(batch),
-            state @ WriteBatchState::Consumed => {
-                *guard = state;
-                Err(write_batch_consumed())
-            }
-            state @ WriteBatchState::Closed => {
-                *guard = state;
-                Err(write_batch_closed())
-            }
-        }
+        guard.take().ok_or_else(write_batch_consumed)
     }
 }
 
@@ -54,7 +32,7 @@ impl FfiWriteBatch {
     #[uniffi::constructor]
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
-            state: Mutex::new(WriteBatchState::Open(slatedb::WriteBatch::new())),
+            state: Mutex::new(Some(slatedb::WriteBatch::new())),
         })
     }
 
@@ -93,15 +71,5 @@ impl FfiWriteBatch {
     pub fn delete(&self, key: Vec<u8>) -> Result<(), FfiSlatedbError> {
         validate_key(&key)?;
         self.with_open(|batch| batch.delete(key))
-    }
-
-    pub fn close(&self) -> Result<(), FfiSlatedbError> {
-        let mut guard = self.state.lock();
-        if matches!(&*guard, WriteBatchState::Closed) {
-            Err(write_batch_closed())
-        } else {
-            *guard = WriteBatchState::Closed;
-            Ok(())
-        }
     }
 }
