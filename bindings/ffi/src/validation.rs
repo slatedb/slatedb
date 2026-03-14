@@ -1,42 +1,4 @@
-use slatedb::WriteBatch;
-
-use crate::config::FfiWriteOperation;
 use crate::error::FfiSlatedbError;
-
-pub(crate) fn build_write_batch(
-    operations: Vec<FfiWriteOperation>,
-) -> Result<WriteBatch, FfiSlatedbError> {
-    let mut batch = WriteBatch::new();
-
-    for operation in operations {
-        match operation {
-            FfiWriteOperation::Put {
-                key,
-                value_bytes,
-                options,
-            } => {
-                validate_key_value(&key, &value_bytes)?;
-                let options = options.into_core();
-                batch.put_with_options(key, value_bytes, &options);
-            }
-            FfiWriteOperation::Merge {
-                key,
-                operand,
-                options,
-            } => {
-                validate_key_value(&key, &operand)?;
-                let options = options.into_core();
-                batch.merge_with_options(key, operand, &options);
-            }
-            FfiWriteOperation::Delete { key } => {
-                validate_key(&key)?;
-                batch.delete(key);
-            }
-        }
-    }
-
-    Ok(batch)
-}
 
 pub(crate) fn validate_key(key: &[u8]) -> Result<(), FfiSlatedbError> {
     if key.is_empty() {

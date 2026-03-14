@@ -17,7 +17,7 @@ pub use builder::{FfiDbBuilder, FfiDbReaderBuilder};
 pub use config::{
     FfiDurabilityLevel, FfiFlushOptions, FfiFlushType, FfiIsolationLevel, FfiMergeOptions,
     FfiPutOptions, FfiReadOptions, FfiReaderOptions, FfiScanOptions, FfiSstBlockSize, FfiTtl,
-    FfiWriteOperation, FfiWriteOptions,
+    FfiWriteOptions,
 };
 pub use db::{FfiDb, FfiDbSnapshot};
 pub use db_reader::FfiDbReader;
