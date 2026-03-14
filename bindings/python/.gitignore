@@ -1,0 +1,7 @@
+__pycache__/
+*.egg-info/
+build/
+dist/
+src/slatedb/ffi/*.so
+src/slatedb/ffi/*.dylib
+src/slatedb/ffi/*.dll
