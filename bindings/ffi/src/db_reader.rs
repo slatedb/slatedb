@@ -73,6 +73,8 @@ impl FfiDbReader {
         Ok(Arc::new(FfiDbIterator::new(iter)))
     }
 
+    // `shutdown` because `close` is reserved by uniffi for the destructor.
+    #[uniffi::method(name = "shutdown")]
     pub async fn close(&self) -> Result<(), FfiError> {
         self.inner.close().await.map_err(Into::into)
     }
