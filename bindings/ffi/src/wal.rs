@@ -40,6 +40,8 @@ impl FfiWalFile {
         Arc::new(FfiWalFile::new(self.inner.next_file()))
     }
 
+    // `shutdown` because `close` is reserved by uniffi for the destructor.
+    #[uniffi::method(name = "shutdown")]
     pub fn close(&self) -> Result<(), FfiError> {
         Ok(())
     }
@@ -78,6 +80,8 @@ impl FfiWalFileIterator {
 
 #[uniffi::export]
 impl FfiWalFileIterator {
+    // `shutdown` because `close` is reserved by uniffi for the destructor.
+    #[uniffi::method(name = "shutdown")]
     pub fn close(&self) -> Result<(), FfiError> {
         Ok(())
     }
@@ -109,6 +113,8 @@ impl FfiWalReader {
         Arc::new(FfiWalFile::new(self.inner.get(id)))
     }
 
+    // `shutdown` because `close` is reserved by uniffi for the destructor.
+    #[uniffi::method(name = "shutdown")]
     pub fn close(&self) -> Result<(), FfiError> {
         Ok(())
     }

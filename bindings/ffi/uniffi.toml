@@ -1,0 +1,3 @@
+[bindings.java]
+package_name = "io.slatedb.jna.ffi"
+cdylib_name = "slatedb_ffi"
