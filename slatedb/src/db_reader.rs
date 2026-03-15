@@ -424,8 +424,8 @@ impl DbReaderInner {
             sst_iter_options,
         };
 
-        let wal_id_start = if let Some(last_replayed_table) = into_tables.back() {
-            last_replayed_table.recent_flushed_wal_id() + 1
+        let wal_id_start = if let Some(latest_replayed_table) = into_tables.front() {
+            latest_replayed_table.recent_flushed_wal_id() + 1
         } else {
             core.replay_after_wal_id + 1
         };
@@ -450,7 +450,7 @@ impl DbReaderInner {
             last_committed_seq = replayed_table.last_seq;
             let imm_memtable =
                 ImmutableMemtable::new(replayed_table.table, replayed_table.last_wal_id);
-            into_tables.push_back(Arc::new(imm_memtable));
+            into_tables.push_front(Arc::new(imm_memtable));
         }
 
         Ok((last_wal_id, last_committed_seq))
