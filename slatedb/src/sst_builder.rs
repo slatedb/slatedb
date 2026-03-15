@@ -62,11 +62,11 @@ use crate::error::SlateDBError;
 use crate::filter::BloomFilterBuilder;
 use crate::flatbuffer_types::{BlockMeta, BlockMetaArgs};
 use crate::format::sst::{
-    BlockBuilder, EncodedSsTable, EncodedSsTableBlock, EncodedSsTableBlockBuilder,
-    EncodedSsTableFooterBuilder, SsTableFormat, SST_FORMAT_VERSION, SST_FORMAT_VERSION_LATEST,
-    SST_FORMAT_VERSION_V2,
+    BlockBuilder, BlockBuilderWithStats, EncodedSsTable, EncodedSsTableBlock,
+    EncodedSsTableBlockBuilder, EncodedSsTableFooterBuilder, SsTableFormat, SST_FORMAT_VERSION,
+    SST_FORMAT_VERSION_LATEST, SST_FORMAT_VERSION_V2,
 };
-use crate::sst_stats::{BlockStats, SstStats};
+use crate::sst_stats::SstStats;
 use crate::types::RowEntry;
 use crate::utils::compute_index_key;
 use crate::BlockTransformer;
@@ -124,7 +124,7 @@ impl SsTableFormat {
 
 /// Builds an SSTable from key-value pairs.
 pub(crate) struct EncodedSsTableBuilder<'a> {
-    builder: BlockBuilder,
+    builder: BlockBuilderWithStats,
     index_builder: flatbuffers::FlatBufferBuilder<'a, DefaultAllocator>,
     first_key: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, u8>>>,
     sst_first_key: Option<Bytes>,
@@ -138,7 +138,6 @@ pub(crate) struct EncodedSsTableBuilder<'a> {
     sst_format_version: u16,
     min_filter_keys: u32,
     stats: SstStats,
-    block_stats: BlockStats,
     filter_builder: BloomFilterBuilder,
     sst_codec: Box<dyn SsTableInfoCodec>,
     compression_codec: Option<CompressionCodec>,
@@ -163,11 +162,10 @@ impl EncodedSsTableBuilder<'_> {
             current_block_max_key: None,
             block_size,
             block_format: BlockFormat::Latest,
-            builder: BlockBuilder::new_latest(block_size),
+            builder: BlockBuilderWithStats::new(BlockBuilder::new_latest(block_size)),
             sst_format_version: SST_FORMAT_VERSION_LATEST,
             min_filter_keys,
             stats: SstStats::default(),
-            block_stats: BlockStats::default(),
             filter_builder: BloomFilterBuilder::new(filter_bits_per_key),
             index_builder: flatbuffers::FlatBufferBuilder::new(),
             sst_codec,
@@ -176,12 +174,13 @@ impl EncodedSsTableBuilder<'_> {
         }
     }
 
-    fn new_block_builder(&self) -> BlockBuilder {
-        match self.block_format {
+    fn new_block_builder(&self) -> BlockBuilderWithStats {
+        let builder = match self.block_format {
             BlockFormat::V1 => BlockBuilder::new_v1(self.block_size),
             BlockFormat::V2 => BlockBuilder::new_v2(self.block_size),
             BlockFormat::Latest => BlockBuilder::new_latest(self.block_size),
-        }
+        };
+        BlockBuilderWithStats::new(builder)
     }
 
     /// Sets the compression codec for compressing the blocks
@@ -231,14 +230,6 @@ impl EncodedSsTableBuilder<'_> {
             self.first_key = Some(self.index_builder.create_vector(&index_key));
         }
 
-        // Increment per-block counters AFTER the potential block flush so the
-        // count is attributed to the block that actually contains the entry.
-        match &entry.value {
-            crate::types::ValueDeletable::Value(_) => self.block_stats.num_puts += 1,
-            crate::types::ValueDeletable::Merge(_) => self.block_stats.num_merges += 1,
-            crate::types::ValueDeletable::Tombstone => self.block_stats.num_deletes += 1,
-        }
-
         self.filter_builder.add_key(&entry.key);
         if is_sst_first_key {
             self.sst_first_key = Some(entry.key.clone());
@@ -285,7 +276,8 @@ impl EncodedSsTableBuilder<'_> {
         }
 
         let new_builder = self.new_block_builder();
-        let builder = std::mem::replace(&mut self.builder, new_builder);
+        let old_builder = std::mem::replace(&mut self.builder, new_builder);
+        let (builder, block_stats) = old_builder.into_parts();
         let mut block_builder = EncodedSsTableBlockBuilder::new(builder, self.current_len);
         if let Some(codec) = self.compression_codec {
             block_builder = block_builder.with_compression_codec(codec);
@@ -302,7 +294,6 @@ impl EncodedSsTableBuilder<'_> {
             },
         );
         self.block_meta.push(block_meta);
-        let block_stats = std::mem::take(&mut self.block_stats);
         self.stats.num_puts += block_stats.num_puts as u64;
         self.stats.num_deletes += block_stats.num_deletes as u64;
         self.stats.num_merges += block_stats.num_merges as u64;
