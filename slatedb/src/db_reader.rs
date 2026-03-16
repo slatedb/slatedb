@@ -329,7 +329,7 @@ impl DbReaderInner {
                 // have sequence numbers < manifest.core.last_l0_seq, while others have sequence
                 // numbers > manifest.core.last_l0_seq. Retain only those that are more recent
                 // than the manifest's last L0 sequence number.
-                let filtered_table = table.filter_by_seq(manifest.core.last_l0_seq);
+                let filtered_table = table.filter_after_seq(manifest.core.last_l0_seq);
                 // Push to the back because we are iterating prior from newest to oldest, and we
                 // want the imm memtables in checkpoint state to be ordered the same way.
                 imm_memtable.push_back(Arc::new(filtered_table));
