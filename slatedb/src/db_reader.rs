@@ -313,13 +313,22 @@ impl DbReaderInner {
             .manifest_store
             .read_manifest(new_checkpoint.manifest_id)
             .await?;
+        let mut imm_memtable = VecDeque::new();
 
-        let imm_memtable = prior
-            .imm_memtable
-            .iter()
-            .filter(|table| table.recent_flushed_wal_id() <= manifest.core.replay_after_wal_id)
-            .cloned()
-            .collect();
+        for table in prior.imm_memtable.iter() {
+            // If the table contains more recent writes than the object store data, we need
+            // to keep it around.
+            if table.table().last_seq().unwrap_or(0) > manifest.core.last_l0_seq {
+                // The table can span multiple WAL files. Some of those WAL files might have
+                // sequence numbers < manifest.core.last_l0_seq, while others have sequence
+                // numbers > manifest.core.last_l0_seq. Retain only those that are more recent
+                // than the manifest's last L0 sequence number.
+                let filtered_table = table.filter_by_seq(manifest.core.last_l0_seq);
+                // Push to the back because we are iterating prior from newest to oldest, and we
+                // want the imm memtables in checkpoint state to be ordered the same way.
+                imm_memtable.push_back(Arc::new(filtered_table));
+            }
+        }
 
         Self::build_checkpoint_state(
             new_checkpoint,

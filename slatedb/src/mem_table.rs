@@ -243,6 +243,20 @@ impl ImmutableMemtable {
     pub(crate) fn sequence_tracker(&self) -> &SequenceTracker {
         &self.sequence_tracker
     }
+
+    /// Returns a new [`ImmutableMemtable`] that only contains entries with sequence
+    /// number greater than the given `seq`. [`ImmutableMemtable::recent_flushed_wal_id`]
+    /// remains the same.
+    pub(crate) fn filter_by_seq(&self, seq: u64) -> Self {
+        let new_table = WritableKVTable::new();
+        let mut table_iter = self.table.iter();
+        while let Some(entry) = table_iter.next_sync() {
+            if entry.seq > seq {
+                new_table.put(entry);
+            }
+        }
+        Self::new(new_table, self.recent_flushed_wal_id)
+    }
 }
 
 impl KVTable {
