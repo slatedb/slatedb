@@ -1012,7 +1012,10 @@ impl DbRead for DbReader {
 
 #[cfg(test)]
 mod tests {
-    use crate::config::{CheckpointOptions, CheckpointScope, Settings};
+    use crate::config::{
+        CheckpointOptions, CheckpointScope, FlushOptions, FlushType, MergeOptions, Settings,
+        WriteOptions,
+    };
     use crate::db_reader::{DbReader, DbReaderInner, DbReaderOptions};
     use crate::db_state::{ManifestCore, SsTableId};
     use crate::format::sst::SsTableFormat;
@@ -1034,6 +1037,7 @@ mod tests {
     use object_store::path::Path;
     use object_store::ObjectStore;
     use slatedb_common::clock::{DefaultSystemClock, SystemClock};
+    use slatedb_common::MockSystemClock;
     use std::collections::{BTreeMap, VecDeque};
     use std::ops::RangeFull;
     use std::sync::Arc;
@@ -1719,5 +1723,156 @@ mod tests {
                 Arc::clone(&self.object_store),
             ))
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn db_reader_get_returns_correct_merge_result_after_reestablish_from_l0() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_db_reader_merge_reestablish_from_l0");
+        let clock = Arc::new(MockSystemClock::new());
+
+        let mut test_provider = TestProvider::new(path.clone(), Arc::clone(&object_store));
+        test_provider.system_clock = clock.clone();
+
+        let merge_operator: crate::merge_operator::MergeOperatorType =
+            Arc::new(crate::test_utils::StringConcatMergeOperator);
+
+        let db = Db::builder(path.clone(), Arc::clone(&object_store))
+            .with_settings(Settings {
+                flush_interval: None,
+                compactor_options: None,
+                garbage_collector_options: None,
+                ..Settings::default()
+            })
+            .with_system_clock(clock.clone())
+            .with_merge_operator(merge_operator.clone())
+            .build()
+            .await
+            .unwrap();
+
+        let key = b"k";
+
+        // Phase A: make the reader recover merge operands from WAL into replayed IMMs.
+        db.merge_with_options(
+            key,
+            b"a",
+            &MergeOptions::default(),
+            &WriteOptions {
+                await_durable: false,
+            },
+        )
+        .await
+        .unwrap();
+        db.merge_with_options(
+            key,
+            b"b",
+            &MergeOptions::default(),
+            &WriteOptions {
+                await_durable: false,
+            },
+        )
+        .await
+        .unwrap();
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::Wal,
+        })
+        .await
+        .unwrap();
+
+        let reader = test_provider
+            .new_db_reader(
+                DbReaderOptions {
+                    manifest_poll_interval: Duration::from_millis(100),
+                    checkpoint_lifetime: Duration::from_secs(30),
+                    merge_operator: Some(merge_operator),
+                    ..DbReaderOptions::default()
+                },
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            reader.get(key).await.unwrap(),
+            Some(Bytes::from_static(b"ab"))
+        );
+        assert!(
+            !reader.inner.state.read().imm_memtable.is_empty(),
+            "reader should have replayed WAL data into immutable memtables"
+        );
+
+        // Let the reader's immediate first ticker fire and settle before phase B.
+        tokio::task::yield_now().await;
+
+        // Phase B: write newer merge operands and flush the writer memtable to L0.
+        db.merge_with_options(
+            key,
+            b"c",
+            &MergeOptions::default(),
+            &WriteOptions {
+                await_durable: false,
+            },
+        )
+        .await
+        .unwrap();
+        db.merge_with_options(
+            key,
+            b"d",
+            &MergeOptions::default(),
+            &WriteOptions {
+                await_durable: false,
+            },
+        )
+        .await
+        .unwrap();
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::MemTable,
+        })
+        .await
+        .unwrap();
+
+        let manifest_store = test_provider.manifest_store();
+        let mut stored_manifest =
+            StoredManifest::load(manifest_store, test_provider.system_clock.clone())
+                .await
+                .unwrap();
+
+        let start = tokio::time::Instant::now();
+        loop {
+            let manifest = stored_manifest.refresh().await.unwrap();
+            if manifest.core.l0.len() == 1 {
+                break;
+            }
+            assert!(
+                start.elapsed() < Duration::from_secs(30),
+                "timed out waiting for writer manifest to include the L0 flush"
+            );
+            tokio::task::yield_now().await;
+        }
+
+        // Drive the reader poller with the shared mock clock so it reestablishes
+        // from the new manifest that now includes the L0.
+        clock.advance(Duration::from_millis(100)).await;
+
+        let start = tokio::time::Instant::now();
+        loop {
+            if reader.inner.state.read().manifest.core.l0.len() == 1 {
+                break;
+            }
+            assert!(
+                start.elapsed() < Duration::from_secs(30),
+                "timed out waiting for reader to reestablish from the new manifest"
+            );
+            tokio::task::yield_now().await;
+        }
+
+        // Correct behavior: the reader should return the full merged value after reestablish.
+        assert_eq!(
+            reader.get(key).await.unwrap(),
+            Some(Bytes::from_static(b"abcd"))
+        );
+
+        reader.close().await.unwrap();
+        db.close().await.unwrap();
     }
 }
