@@ -316,11 +316,17 @@ impl DbReaderInner {
         let mut imm_memtable = VecDeque::new();
 
         for table in prior.imm_memtable.iter() {
-            // If the table contains more recent writes than the object store data, we need
-            // to keep it around.
-            if table.table().last_seq().unwrap_or(0) > manifest.core.last_l0_seq {
-                // The table can span multiple WAL files. Some of those WAL files might have
-                // sequence numbers < manifest.core.last_l0_seq, while others have sequence
+            let table_meta = table.table().metadata();
+            if table_meta.last_seq <= manifest.core.last_l0_seq {
+                // Skip since the entire table is older than L0+ contains all data in this table.
+                continue;
+            } else if table_meta.first_seq > manifest.core.last_l0_seq {
+                // Keep the entire table since all rows are newer than L0+.
+                imm_memtable.push_back(Arc::clone(table));
+            } else {
+                // The table has some rows that are newer than L0+ and some that are older. This
+                // happens when the table spans multiple WAL files. Some of those WAL files can
+                // have sequence numbers < manifest.core.last_l0_seq, while others have sequence
                 // numbers > manifest.core.last_l0_seq. Retain only those that are more recent
                 // than the manifest's last L0 sequence number.
                 let filtered_table = table.filter_by_seq(manifest.core.last_l0_seq);

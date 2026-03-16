@@ -97,6 +97,8 @@ pub(crate) struct KVTable {
     last_tick: AtomicI64,
     /// the sequence number of the most recent operation on this KVTable
     last_seq: AtomicU64,
+    /// the sequence number of the oldest entry in this KVTable
+    first_seq: AtomicU64,
     /// A sequence tracker that correlates sequence numbers with system clock ticks.
     /// The tracker is limited to 8192 entries and downsamples data when it gets full.
     sequence_tracker: Mutex<SequenceTracker>,
@@ -110,8 +112,9 @@ pub(crate) struct KVTableMetadata {
     #[allow(dead_code)]
     pub(crate) last_tick: i64,
     /// the sequence number of the most recent operation on this KVTable
-    #[allow(dead_code)]
     pub(crate) last_seq: u64,
+    /// the sequence number of the oldest entry in this KVTable
+    pub(crate) first_seq: u64,
 }
 
 pub(crate) struct WritableKVTable {
@@ -267,6 +270,7 @@ impl KVTable {
             durable: WatchableOnceCell::new(),
             last_tick: AtomicI64::new(i64::MIN),
             last_seq: AtomicU64::new(0),
+            first_seq: AtomicU64::new(0),
             sequence_tracker: Mutex::new(SequenceTracker::new()),
         }
     }
@@ -276,11 +280,13 @@ impl KVTable {
         let entries_size_in_bytes = self.entries_size_in_bytes.load(Ordering::Relaxed);
         let last_tick = self.last_tick.load(SeqCst);
         let last_seq = self.last_seq.load(SeqCst);
+        let first_seq = self.first_seq.load(SeqCst);
         KVTableMetadata {
             entry_num,
             entries_size_in_bytes,
             last_tick,
             last_seq,
+            first_seq,
         }
     }
 
@@ -298,6 +304,16 @@ impl KVTable {
         } else {
             let last_seq = self.last_seq.load(SeqCst);
             Some(last_seq)
+        }
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn first_seq(&self) -> Option<u64> {
+        if self.is_empty() {
+            None
+        } else {
+            let first_seq = self.first_seq.load(SeqCst);
+            Some(first_seq)
         }
     }
 
@@ -339,6 +355,8 @@ impl KVTable {
         }
         // update the last seq number if it is greater than the current last seq
         self.last_seq.fetch_max(row.seq, atomic::Ordering::SeqCst);
+        // update the first seq number if it is smaller than the current first seq
+        self.first_seq.fetch_min(row.seq, atomic::Ordering::SeqCst);
 
         let row_size = row.estimated_size();
         self.map.compare_insert(internal_key, row, |previous_row| {
@@ -400,6 +418,7 @@ mod tests {
         table.put(RowEntry::new_value(b"abc444", b"value4", 4));
         table.put(RowEntry::new_value(b"abc222", b"value2", 5));
         assert_eq!(table.table().last_seq(), Some(5));
+        assert_eq!(table.table().first_seq(), Some(1));
 
         let mut iter = table.table().iter();
         assert_iterator(
@@ -536,34 +555,41 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_memtable_track_last_seq() {
+    async fn test_memtable_track_seqs() {
         let table = WritableKVTable::new();
         let mut metadata = table.table().metadata();
 
         assert_eq!(metadata.last_seq, 0);
+        assert_eq!(metadata.first_seq, 0);
         table.put(RowEntry::new_value(b"first", b"foo", 1));
         metadata = table.table().metadata();
         assert_eq!(metadata.last_seq, 1);
+        assert_eq!(metadata.first_seq, 1);
 
         table.put(RowEntry::new_tombstone(b"first", 2));
         metadata = table.table().metadata();
         assert_eq!(metadata.last_seq, 2);
+        assert_eq!(metadata.first_seq, 1);
 
         table.put(RowEntry::new_value(b"abc333", b"val1", 1));
         metadata = table.table().metadata();
         assert_eq!(metadata.last_seq, 2);
+        assert_eq!(metadata.first_seq, 1);
 
         table.put(RowEntry::new_value(b"def456", b"blablabla", 2));
         metadata = table.table().metadata();
         assert_eq!(metadata.last_seq, 2);
+        assert_eq!(metadata.first_seq, 1);
 
         table.put(RowEntry::new_value(b"def456", b"blabla", 3));
         metadata = table.table().metadata();
         assert_eq!(metadata.last_seq, 3);
+        assert_eq!(metadata.first_seq, 1);
 
         table.put(RowEntry::new_tombstone(b"abc333", 4));
         metadata = table.table().metadata();
         assert_eq!(metadata.last_seq, 4);
+        assert_eq!(metadata.first_seq, 1);
     }
 
     #[rstest]
