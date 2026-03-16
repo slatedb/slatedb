@@ -12,8 +12,8 @@ Table of Contents:
   * [Traits](#traits)
   * [Built-in Implementation: BloomFilterPolicy](#built-in-implementation-bloomfilterpolicy)
   * [SST Format Changes](#sst-format-changes)
-  * [Read Path Integration](#read-path-integration)
   * [Write Path Integration](#write-path-integration)
+  * [Read Path Integration](#read-path-integration)
 - [Impact Analysis](#impact-analysis)
   * [Core API and Query Semantics](#core-api-and-query-semantics)
   * [Consistency, Isolation, and Multi-Versioning](#consistency-isolation-and-multi-versioning)
@@ -28,6 +28,9 @@ Table of Contents:
   * [Compatibility](#compatibility)
 - [Testing](#testing)
 - [Rollout](#rollout)
+- [Future Enhancements](#future-enhancements)
+  * [Recency-Based Iterator](#recency-based-iterator)
+  * [Block-Level Filter Granularity](#block-level-filter-granularity)
 - [Alternatives](#alternatives)
 - [Open Questions](#open-questions)
 - [References](#references)
@@ -75,6 +78,8 @@ specialized filters without modifying the engine.
 - Refactor the existing bloom filter as the default implementation.
 - Support prefix bloom filters by allowing a user-defined key transformation before hashing.
 - Support future filter implementations without engine changes.
+- Support multiple concurrent filter policies per SST (e.g., bloom + min/max) with AND-logic evaluation.
+- Enable safe migration from one filter policy to another without losing filtering on existing SSTs.
 - Maintain full backwards compatibility: existing databases with bloom filters continue to work.
 - Support both point-lookup filtering and prefix-scan.
 
@@ -114,9 +119,9 @@ pub trait FilterPolicy {
 
     /// Decodes a previously encoded filter.
     ///
-    /// The engine validates that the SST's `filter_policy_name` matches
-    /// `self.name()` before calling this to ensure the policy can deserialize
-    /// the data.
+    /// The engine matches the policy name stored in the composite filter
+    /// block against `self.name()` before calling this to ensure the policy
+    /// can deserialize the data.
     fn decode(&self, data: &[u8]) -> Arc<dyn Filter>;
 
     /// Estimates the encoded size in bytes for a filter with `num_keys` keys.
@@ -206,8 +211,17 @@ pub trait PrefixExtractor {
 }
 
 /// A membership query passed to [`Filter::might_match`].
+pub struct FilterQuery {
+    /// The kind of query (point or prefix).
+    pub kind: FilterQueryKind,
+    /// Opaque hints provided by the caller (e.g., version bounds).
+    /// Keyed by a string name so custom filters can look up relevant hints.
+    pub hints: HashMap<String, Bytes>,
+}
+
+/// The kind of filter query.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum FilterQuery {
+pub enum FilterQueryKind {
     /// Used to test whether a specific key might exist in the SST.
     Point(Bytes),
     /// Used to test whether any key with the given prefix might exist in the SST.
@@ -217,18 +231,26 @@ pub enum FilterQuery {
 
 Key design decisions:
 
-1. **`name()` for safety**: The policy name is stored per-SST in the SST info.
-   When reading an SST, if the stored name doesn't match the current policy,
-   the filter block is skipped rather than misinterpreted. This allows safe
-   policy migration without manifest-level validation (same pattern as
-   LevelDB's `FilterPolicy::Name()`).
+1. **`FilterQuery` with hints**: `FilterQuery` is a struct rather than a plain
+   enum so it can carry opaque `hints` alongside the query kind. Hints are a
+   `HashMap<String, Bytes>` that the caller populates and custom filters inspect.
+   For example, a min/max filter could use a `"version_bounds"` hint to narrow
+   its check, or a time-range filter could use a `"timestamp_range"` hint. The
+   built-in bloom filter ignores hints. Users pass hints via `ScanOptions::filter_hints`
+   which are threaded through the iterator chain to `FilterQuery::with_hints`.
 
-2. **`FilterQuery` enum**: Instead of just accepting a hash, the `might_match`
-   method takes a `FilterQuery` that distinguishes point lookups and prefix
-   lookups. Filters that only support point lookups can conservatively return
-   `true` for prefix queries.
+2. **`name()` for safety**: Each policy's name is stored alongside its filter
+   data in the composite filter block. When reading an SST, if a stored name
+   doesn't match any configured policy, that sub-filter is skipped rather than
+   misinterpreted. This allows safe policy migration without manifest-level
+   validation (same pattern as LevelDB's `FilterPolicy::Name()`).
 
-3. **`encode` on `Filter`, `decode` on `FilterPolicy`**: Encoding is on the
+3. **`FilterQueryKind` enum**: Instead of just accepting a hash, the `might_match`
+   method takes a `FilterQuery` whose `kind` field distinguishes point lookups
+   and prefix lookups. Filters that only support point lookups can conservatively
+   return `true` for prefix queries.
+
+4. **`encode` on `Filter`, `decode` on `FilterPolicy`**: Encoding is on the
    `Filter` instance because it knows its own internal representation.
    Decoding is on the `FilterPolicy` because the caller needs the policy
    (which knows the format) to reconstruct a `Filter` from raw bytes.
@@ -305,7 +327,7 @@ impl FilterPolicy for BloomFilterPolicy {
 
 #### Configuration
 
-The `Settings` struct replaces `filter_bits_per_key` with a `filter_policy`
+The `Settings` struct replaces `filter_bits_per_key` with a `filter_policies`
 field. This is a **breaking change** — the old field is removed entirely.
 
 ```rust
@@ -316,13 +338,32 @@ pub struct Settings {
     /// is greater than or equal to this value.
     pub min_filter_keys: u32,
 
-    /// The filter policy to use. Defaults to `BloomFilterPolicy` with
-    /// 10 bits per key. Set to `None` to disable filters.
-    pub filter_policy: Option<Arc<dyn FilterPolicy>>,
+    /// The filter policies to use. Each policy produces a separate filter
+    /// per SST, stored in a composite filter block. On read, all filters
+    /// are evaluated with AND logic — an SST is skipped if any filter
+    /// returns `false`.
+    ///
+    /// Defaults to `vec![Arc::new(BloomFilterPolicy::new(10))]`.
+    /// Set to an empty vec to disable filters.
+    pub filter_policies: Vec<Arc<dyn FilterPolicy>>,
 }
 ```
 
-**Configuration modes:**
+`ScanOptions` gains a `filter_hints` field for passing opaque hints to custom
+filters:
+
+```rust
+pub struct ScanOptions {
+    // ... existing fields ...
+
+    /// Opaque hints passed to custom filters at query time.
+    /// Keyed by a string name so custom filters can look up relevant hints
+    /// (e.g., version bounds for a min/max filter).
+    pub filter_hints: HashMap<String, Bytes>,
+}
+```
+
+**Configuration modes (for BloomFilterPolicy):**
 
 | `whole_key_filtering` | `prefix_extractor` | Behavior                                                   |
 |-----------------------|--------------------|------------------------------------------------------------|
@@ -338,23 +379,35 @@ let settings = Settings::default();
 
 // Full-key + prefix bloom filter (recommended for prefix scan workloads)
 let settings = Settings {
-    filter_policy: Some(Arc::new(BloomFilterPolicy::new(10)
-        .with_prefix_extractor(Arc::new(MyPrefixExtractor::new())))),
+    filter_policies: vec![Arc::new(BloomFilterPolicy::new(10)
+        .with_prefix_extractor(Arc::new(MyPrefixExtractor::new())))],
     ..Settings::default()
 };
 
 // Prefix-only bloom filter (smaller filter, no point-lookup filtering)
 let settings = Settings {
-    filter_policy: Some(Arc::new(BloomFilterPolicy::new(10)
+    filter_policies: vec![Arc::new(BloomFilterPolicy::new(10)
         .with_prefix_extractor(Arc::new(MyPrefixExtractor::new()))
-        .with_whole_key_filtering(false))),
+        .with_whole_key_filtering(false))],
     ..Settings::default()
 };
 
-// Custom filter
+// Multiple filters: bloom + custom min/max filter
 let settings = Settings {
-    filter_policy: Some(Arc::new(MyCustomFilterPolicy::new(...))),
+    filter_policies: vec![
+        Arc::new(BloomFilterPolicy::new(10)
+            .with_prefix_extractor(Arc::new(MyPrefixExtractor::new()))),
+        Arc::new(MyMinMaxFilterPolicy::new(...)),
+    ],
     ..Settings::default()
+};
+
+// Passing hints to custom filters at scan time
+let scan_options = ScanOptions {
+    filter_hints: HashMap::from([
+        ("version_bounds".to_string(), Bytes::from("v42")),
+    ]),
+    ..ScanOptions::default()
 };
 ```
 
@@ -362,7 +415,7 @@ let settings = Settings {
 
 During SST construction, the builder adds both hashes to the same underlying
 bloom filter. Consecutive keys sharing the same prefix only store the prefix
-hash once (deduplication), keeping the overhead minimal:
+hash once (deduplication), keeping the overhead minimal.
 
 #### Read path: querying the filter
 
@@ -371,14 +424,14 @@ The same filter is probed with different hashes depending on the query type:
 ```rust
 impl Filter for BloomFilter {
     fn might_match(&self, query: &FilterQuery) -> bool {
-        match query {
-            FilterQuery::Point(key) => {
+        match &query.kind {
+            FilterQueryKind::Point(key) => {
                 if !self.whole_key_filtering {
                     return true; // Cannot answer point queries
                 }
                 self.might_contain(filter_hash(key.as_ref()))
             }
-            FilterQuery::Prefix(prefix) => {
+            FilterQueryKind::Prefix(prefix) => {
                 if !self.has_prefix_filter {
                     return true; // Cannot answer prefix queries
                 }
@@ -391,25 +444,60 @@ impl Filter for BloomFilter {
 
 ### SST Format Changes
 
-The SST needs a new field to identify which filter policy produced the filter block:
+The SST gains a `filter_version` field to distinguish the new composite block
+format from the legacy single-bloom format:
 
 ```fbs
-table SstInfo {
-    // ... existing fields ...
-    filter_policy_name: string;
+table SsTableInfo {
+    // ... existing fields (filter_offset, filter_len, etc.) ...
+
+    // Version of the filter block format.
+    // Absent or 1: legacy single bloom filter (raw bytes).
+    // 2: composite block list of named filters.
+    filter_version: uint16;
 }
 ```
 
-When reading an SST, SlateDB checks that the `filter_policy_name` matches the
-current policy's `name()`. If they don't match, the filter block is ignored
-(treated as if no filter exists) and a warning is logged. This allows safe
-rollout: old SSTs with the previous policy's filter are simply not used for
-filtering until they are compacted and rewritten with the new policy.
+#### Composite filter block encoding
+
+When `filter_version` is `2`, the filter block at
+`filter_offset`/`filter_len` contains a self-describing list of named filters:
+
+```
+[num_filters: u32]
+[name_len: u32][name: bytes][data_len: u32][data: bytes]   // filter 0
+[name_len: u32][name: bytes][data_len: u32][data: bytes]   // filter 1
+...
+```
+
+Each sub-filter self-identifies by its policy's `name()`. Even with a single
+policy, the block uses this format (a list of one).
+
+#### Reading logic (backwards compatibility)
+
+When reading an SST's filter block:
+
+- **`filter_version` absent or `1`**: Legacy pre-RFC SST. The raw bytes are
+  decoded using the built-in `BloomFilterPolicy`. If no matching bloom policy
+  is configured, the filter is skipped.
+- **`filter_version` = `2`**: Parse the composite block. For each
+  `(name, data)` entry, find a matching policy in `Settings.filter_policies`
+  by `name()` and call `policy.decode(data)`. Unknown names are skipped
+  (reduces filtering power but never produces incorrect results).
+
+### Write Path Integration
+
+The SST builder receives the `filter_policies` array. For each policy, it calls
+`builder()` to obtain a `FilterBuilder`. Each key is fed to all builders via
+`add_key()`. On finalization, each builder produces a filter via `build()`, and
+all filters are encoded into a composite filter block. The SST info's
+`filter_version` is set to `2`.
 
 ### Read Path Integration
 
 The current read path uses `filter_hash()` and `BloomFilter::might_contain()`
-directly. We replace this with the `FilterQuery` abstraction.
+directly. We replace this with the `FilterQuery` abstraction and AND-logic
+evaluation across all filters.
 
 **Point lookups (`get`):**
 
@@ -422,39 +510,27 @@ let key_hash = filter::filter_hash(self.key.as_ref());
 filter.might_contain(key_hash)
 
 // After:
-let query = FilterQuery::Point(self.key.clone());
-filter.might_match(&query)
+let query = FilterQuery::point(self.key.clone());
+// AND logic: skip SST if ANY filter returns false
+filters.iter().all(|f| f.might_match(&query))
 ```
 
 **Prefix scans:**
 
 SlateDB already provides `scan_prefix` and `scan_prefix_with_options` methods
 that accept a prefix. Internally, the prefix will be wired through the reader and
-iterator chain so each SST's filter can be checked before opening it, skipping
-SSTs whose filter returns `false`.
+iterator chain so each SST's filters can be checked before opening it, skipping
+SSTs where any filter returns `false`.
 
 When a `prefix_extractor` is configured on the `BloomFilterPolicy`, prefix
-scans probe the same bloom filter with `filter_hash(prefix)`. The default
-configuration (no `prefix_extractor`) returns `true` for prefix queries — no
-filtering. This is safe: point lookups still use the full-key hash.
+scans probe the bloom filter with `filter_hash(prefix)`. The default
+configuration (no `prefix_extractor`) returns `true` for prefix queries, so no
+filtering. This is safe: point lookups still use the full-key hash. Other
+filters in the array may still reject the SST based on hints or other criteria.
 
-**Limitation — prefix filtering alone is not ideal for recency access
-patterns:**
-
-Prefix bloom filters significantly improve prefix scans by skipping SSTs that
-don't contain matching keys. However, for use cases like time-series data
-(keyed by `{sensor_id}:{timestamp}`) or versioned data where the caller only
-needs the first or *n*-th most recent item for a prefix, the merge-based scan
-still reads from every *matching* SST and merges them to produce global sort
-order — even though the caller knows the data is naturally sorted by recency
-(newest to oldest). A non-merging iterator that returns data newest-first
-similar to `Get()` but as an iterator address this gap.
-### Write Path Integration
-
-The SST builder receives a `FilterPolicy` and calls `builder()` to
-obtain a `FilterBuilder`. Each key is fed to the builder via `add_key()`. On
-finalization, `build()` produces the filter, `encode()` writes it to the filter
-block, and `policy.name()` is stored in the SST info.
+Note: prefix filtering alone is not ideal for recency access patterns where
+the caller only needs a recent entry for a prefix. See
+[Recency-Based Iterator](#recency-based-iterator) in Future Enhancements.
 
 ## Impact Analysis
 
@@ -500,7 +576,7 @@ SlateDB features and components that this RFC interacts with. Check all that app
 ### Storage Engine Internals
 
 - [ ] Write-ahead log (WAL)
-- [ ] Block cache
+- [x] Block cache
 - [ ] Object store cache
 - [x] Indexing (bloom filters, metadata)
 - [x] SST format or block format
@@ -530,7 +606,7 @@ SlateDB features and components that this RFC interacts with. Check all that app
 
 ### Observability
 
-- **Configuration**: New `filter_policy` setting (programmatic only; not
+- **Configuration**: New `filter_policies` setting (programmatic only; not
   serializable to TOML/JSON). `filter_bits_per_key` has been removed.
 - **Metrics**: Existing `sst_filter_positives`, `sst_filter_negatives`,
   `sst_filter_false_positives` metrics are preserved.
@@ -538,25 +614,27 @@ SlateDB features and components that this RFC interacts with. Check all that app
 ### Compatibility
 
 - **On-disk format**: The filter block encoding is policy-specific but the SST
-  envelope is unchanged. A new `filter_policy_name` field is added to SST info.
-  Old SSTs without this field are assumed to use `"slatedb.BloomFilter"`.
+  envelope is unchanged. A new `filter_version` field is added to SST info.
+  Old SSTs without this field are assumed to use the legacy single-bloom format
+  (see [SST Format Changes](#sst-format-changes)).
 - **Public API**: `filter_bits_per_key` on `Settings` is removed and replaced
-  by `filter_policy: Option<Arc<dyn FilterPolicy>>`. See [Configuration](#configuration)
+  by `filter_policies: Vec<Arc<dyn FilterPolicy>>`. `ScanOptions` gains a
+  `filter_hints: HashMap<String, Bytes>` field. See [Configuration](#configuration)
   for migration examples.
-- **Rolling upgrades**: Old readers that don't understand the filter policy name
+- **Rolling upgrades**: Old readers that don't understand the `filter_version`
   field will ignore it (FlatBuffers forward compatibility). They will continue
   to decode filters as bloom filters, which is correct as long as the bloom
   filter policy is still in use.
 - **Prefix extractor changes**: Changing the prefix extractor changes the policy
   name (e.g., `"slatedb.BloomFilter:prefix=fixed3"` →
-  `"slatedb.BloomFilter:prefix=delim:"`), causing old SSTs' filters to be
-  skipped entirely — including the full-key hashes that are still valid for
-  point lookups. Those SSTs regain filtering after compaction rewrites them
-  with the new policy.
+  `"slatedb.BloomFilter:prefix=delim:"`). With the array design, the old
+  policy can remain in `filter_policies` alongside the new one, so existing
+  SSTs' filters remain usable while new SSTs are written with both. After
+  compaction rewrites all SSTs, the old policy can be removed.
 - **Compactor policy**: If the compactor runs in a separate process from the
   writer (e.g., distributed compaction), it must be configured with the same
-  `FilterPolicy`. Otherwise, compacted SSTs will be written with a different
-  (or no) filter policy, and existing filters may be silently dropped during
+  `filter_policies`. Otherwise, compacted SSTs will be written with different
+  (or no) filter policies, and existing filters may be silently dropped during
   compaction.
 
 ## Testing
@@ -575,13 +653,52 @@ Implementation will be in two phases:
 1. **Pluggable filter abstraction**: Trait definitions (`FilterPolicy`,
    `FilterBuilder`, `Filter`, `PrefixExtractor`), refactor the existing bloom
    filter as the default `BloomFilterPolicy`, SST format changes
-   (`filter_policy_name`), and refactoring the write/read paths to use
-   `dyn FilterPolicy`. Breaking config change: `filter_bits_per_key` replaced
-   by `filter_policy`.
+   (`filter_version`, composite filter block), and refactoring the write/read
+   paths to use `filter_policies: Vec<Arc<dyn FilterPolicy>>` with AND-logic
+   evaluation. Breaking config change: `filter_bits_per_key` replaced by
+   `filter_policies`.
 2. **Prefix bloom filter**: Add `prefix_extractor` and `whole_key_filtering`
    to `BloomFilterPolicy`. Wire the prefix through the read path so each
-   SST's filter can be probed with `FilterQuery::Prefix` before opening.
-   Skip SSTs whose filter rejects the prefix.
+   SST's filters can be probed with `FilterQuery::Prefix` before opening.
+   Skip SSTs where any filter rejects the prefix.
+
+## Future Enhancements
+
+### Recency-Based Iterator
+
+Prefix bloom filters skip SSTs that don't contain matching keys, but the
+merge-based scan still reads from every *matching* SST and merges them to
+produce global sort order. For workloads where the caller only needs the most
+recent entry for a prefix (e.g., latest version of a versioned key, most
+recent reading from a sensor), this is wasteful — the answer is almost always
+in the newest SST.
+
+A recency-based iterator would return entries newest-first (most recent SST
+first, then next most recent) without merging, similar to how `get()` walks
+sources in recency order and returns the first match. Combined with prefix
+bloom filters, the iterator would skip SSTs with no matching prefix, read
+matching SSTs in recency order, and stop early once the caller has enough
+results.
+
+### Block-Level Filter Granularity
+
+This RFC's filters operate at SST granularity; the reader either skips an
+entire SST or reads it. This is appropriate for bloom filters (which need many
+keys for good false-positive rates) but too coarse for metadata-style filters.
+
+For example, a min/max version filter on an SST whose blocks span versions
+`[1,50]`, `[51,100]`, and `[101,150]` can only report the SST-level range
+`[1,150]`. A query for version ≤ 110 must read the entire SST even though only
+the first block is relevant. With per-block metadata, the remaining blocks
+would be skipped without loading them from storage.
+
+The `FilterPolicy`, `FilterBuilder`, and `Filter` traits defined in this RFC
+are sufficient to support block-level granularity. The core change is
+configuration: each policy would declare whether it applies at SST level,
+block level, or both. On the write path, block-level builders are finalized
+and reset per block in `finish_block()` instead of once at SST completion.
+On the read path, per-block filter data stored in `BlockMeta` is checked
+before loading a data block, using the same `might_match` interface.
 
 ## Alternatives
 
@@ -624,6 +741,30 @@ yield the same prefix, that prefix is used for filter evaluation.
 
 - Pro: Prefix filtering works transparently for any range that happens to be a prefix range.
 - Con: Implicit behavior — the caller has no control over whether the filter is used.
+
+### Should `filter_policies` be an array or a single policy?
+
+This RFC proposes `filter_policies: Vec<Arc<dyn FilterPolicy>>` (an array of
+policies with a composite filter block and AND-logic evaluation). The
+alternative is a simpler `filter_policy: Option<Arc<dyn FilterPolicy>>`
+(singular), where each SST has exactly one filter.
+
+**Why array is chosen:**
+
+- **Migration**: The old policy stays in the array alongside the new one, so
+  existing SSTs' filters remain usable during the transition. A singular slot
+  forces an all-or-nothing switch where old filters are disabled until
+  compaction rewrites all SSTs.
+- **Multi-filter composition**: Users can combine complementary filter types
+  (e.g., bloom + min/max) as separate policies without implementing a custom
+  composite `FilterPolicy`.
+- **API stability**: Starting with a singular slot and migrating to an array
+  later would be a breaking API change. Starting with the array avoids this.
+
+**Tradeoff**: The array adds complexity like composite filter block encoding, the
+write path iterates over policies instead of calling one, and the read path
+evaluates multiple filters in sequence. The trait interfaces themselves are
+unchanged.
 
 ### Should range scan filtering be added?
 
