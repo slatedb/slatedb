@@ -424,8 +424,8 @@ impl DbReaderInner {
             sst_iter_options,
         };
 
-        let wal_id_start = if let Some(last_replayed_table) = into_tables.back() {
-            last_replayed_table.recent_flushed_wal_id() + 1
+        let wal_id_start = if let Some(latest_replayed_table) = into_tables.front() {
+            latest_replayed_table.recent_flushed_wal_id() + 1
         } else {
             core.replay_after_wal_id + 1
         };
@@ -450,7 +450,7 @@ impl DbReaderInner {
             last_committed_seq = replayed_table.last_seq;
             let imm_memtable =
                 ImmutableMemtable::new(replayed_table.table, replayed_table.last_wal_id);
-            into_tables.push_back(Arc::new(imm_memtable));
+            into_tables.push_front(Arc::new(imm_memtable));
         }
 
         Ok((last_wal_id, last_committed_seq))
@@ -1013,11 +1013,12 @@ impl DbRead for DbReader {
 #[cfg(test)]
 mod tests {
     use crate::config::{CheckpointOptions, CheckpointScope, Settings};
-    use crate::db_reader::{DbReader, DbReaderOptions};
-    use crate::db_state::ManifestCore;
+    use crate::db_reader::{DbReader, DbReaderInner, DbReaderOptions};
+    use crate::db_state::{ManifestCore, SsTableId};
     use crate::format::sst::SsTableFormat;
     use crate::manifest::store::{ManifestStore, StoredManifest};
     use crate::manifest::Manifest;
+    use crate::mem_table::{ImmutableMemtable, WritableKVTable};
     use crate::object_stores::ObjectStores;
     use crate::paths::PathResolver;
     use crate::proptest_util::rng::new_test_rng;
@@ -1025,6 +1026,7 @@ mod tests {
     use crate::rand::DbRand;
     use crate::store_provider::StoreProvider;
     use crate::tablestore::TableStore;
+    use crate::types::RowEntry;
     use crate::{error::SlateDBError, test_utils, Db};
     use bytes::Bytes;
     use fail_parallel::FailPointRegistry;
@@ -1032,7 +1034,7 @@ mod tests {
     use object_store::path::Path;
     use object_store::ObjectStore;
     use slatedb_common::clock::{DefaultSystemClock, SystemClock};
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, VecDeque};
     use std::ops::RangeFull;
     use std::sync::Arc;
     use std::time::Duration;
@@ -1304,6 +1306,66 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn replay_wal_into_should_use_latest_existing_table_and_keep_newest_first_order() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_db_reader_replay_order");
+        let test_provider = TestProvider::new(path, Arc::clone(&object_store));
+        let table_store = test_provider.table_store();
+
+        write_wal_sst(
+            Arc::clone(&table_store),
+            3,
+            vec![RowEntry::new_value(b"stale_key", b"stale_value", 3)],
+        )
+        .await
+        .unwrap();
+        write_wal_sst(
+            Arc::clone(&table_store),
+            4,
+            vec![RowEntry::new_value(b"fresh_key", b"fresh_value", 4)],
+        )
+        .await
+        .unwrap();
+
+        let mut into_tables = VecDeque::new();
+        into_tables.push_front(immutable_memtable(
+            3,
+            vec![RowEntry::new_value(b"stale_key", b"stale_value", 3)],
+        ));
+        into_tables.push_back(immutable_memtable(
+            2,
+            vec![RowEntry::new_value(b"older_key", b"older_value", 2)],
+        ));
+
+        let mut core = ManifestCore::new();
+        core.next_wal_sst_id = 5;
+
+        let (last_wal_id, last_committed_seq) = DbReaderInner::replay_wal_into(
+            Arc::clone(&table_store),
+            &DbReaderOptions::default(),
+            &core,
+            &mut into_tables,
+            false,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(last_wal_id, 4);
+        assert_eq!(last_committed_seq, 4);
+
+        let newest_replayed = into_tables.front().unwrap();
+        assert_eq!(newest_replayed.recent_flushed_wal_id(), 4);
+
+        let newest_table = newest_replayed.table();
+        let mut newest_iter = newest_table.iter();
+        test_utils::assert_iterator(
+            &mut newest_iter,
+            vec![RowEntry::new_value(b"fresh_key", b"fresh_value", 4)],
+        )
+        .await;
+    }
+
     #[tokio::test(start_paused = true)]
     async fn should_fail_new_reads_if_manifest_poller_crashes() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
@@ -1572,6 +1634,30 @@ mod tests {
             )
             .await
         }
+    }
+
+    fn immutable_memtable(
+        recent_flushed_wal_id: u64,
+        entries: Vec<RowEntry>,
+    ) -> Arc<ImmutableMemtable> {
+        let table = WritableKVTable::new();
+        for entry in entries {
+            table.put(entry);
+        }
+        Arc::new(ImmutableMemtable::new(table, recent_flushed_wal_id))
+    }
+
+    async fn write_wal_sst(
+        table_store: Arc<TableStore>,
+        wal_id: u64,
+        entries: Vec<RowEntry>,
+    ) -> Result<(), SlateDBError> {
+        let mut writer = table_store.table_writer(SsTableId::Wal(wal_id));
+        for entry in entries {
+            writer.add(entry).await?;
+        }
+        writer.close().await?;
+        Ok(())
     }
 
     #[tokio::test]
