@@ -1263,6 +1263,137 @@ impl core::fmt::Debug for SsTableInfo<'_> {
       ds.finish()
   }
 }
+pub enum BlockStatsOffset {}
+#[derive(Copy, Clone, PartialEq)]
+
+pub struct BlockStats<'a> {
+  pub _tab: flatbuffers::Table<'a>,
+}
+
+impl<'a> flatbuffers::Follow<'a> for BlockStats<'a> {
+  type Inner = BlockStats<'a>;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    Self { _tab: flatbuffers::Table::new(buf, loc) }
+  }
+}
+
+impl<'a> BlockStats<'a> {
+  pub const VT_NUM_PUTS: flatbuffers::VOffsetT = 4;
+  pub const VT_NUM_DELETES: flatbuffers::VOffsetT = 6;
+  pub const VT_NUM_MERGES: flatbuffers::VOffsetT = 8;
+
+  #[inline]
+  pub unsafe fn init_from_table(table: flatbuffers::Table<'a>) -> Self {
+    BlockStats { _tab: table }
+  }
+  #[allow(unused_mut)]
+  pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: flatbuffers::Allocator + 'bldr>(
+    _fbb: &'mut_bldr mut flatbuffers::FlatBufferBuilder<'bldr, A>,
+    args: &'args BlockStatsArgs
+  ) -> flatbuffers::WIPOffset<BlockStats<'bldr>> {
+    let mut builder = BlockStatsBuilder::new(_fbb);
+    builder.add_num_merges(args.num_merges);
+    builder.add_num_deletes(args.num_deletes);
+    builder.add_num_puts(args.num_puts);
+    builder.finish()
+  }
+
+
+  #[inline]
+  pub fn num_puts(&self) -> u16 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u16>(BlockStats::VT_NUM_PUTS, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn num_deletes(&self) -> u16 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u16>(BlockStats::VT_NUM_DELETES, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn num_merges(&self) -> u16 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u16>(BlockStats::VT_NUM_MERGES, Some(0)).unwrap()}
+  }
+}
+
+impl flatbuffers::Verifiable for BlockStats<'_> {
+  #[inline]
+  fn run_verifier(
+    v: &mut flatbuffers::Verifier, pos: usize
+  ) -> Result<(), flatbuffers::InvalidFlatbuffer> {
+    use self::flatbuffers::Verifiable;
+    v.visit_table(pos)?
+     .visit_field::<u16>("num_puts", Self::VT_NUM_PUTS, false)?
+     .visit_field::<u16>("num_deletes", Self::VT_NUM_DELETES, false)?
+     .visit_field::<u16>("num_merges", Self::VT_NUM_MERGES, false)?
+     .finish();
+    Ok(())
+  }
+}
+pub struct BlockStatsArgs {
+    pub num_puts: u16,
+    pub num_deletes: u16,
+    pub num_merges: u16,
+}
+impl<'a> Default for BlockStatsArgs {
+  #[inline]
+  fn default() -> Self {
+    BlockStatsArgs {
+      num_puts: 0,
+      num_deletes: 0,
+      num_merges: 0,
+    }
+  }
+}
+
+pub struct BlockStatsBuilder<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> {
+  fbb_: &'b mut flatbuffers::FlatBufferBuilder<'a, A>,
+  start_: flatbuffers::WIPOffset<flatbuffers::TableUnfinishedWIPOffset>,
+}
+impl<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> BlockStatsBuilder<'a, 'b, A> {
+  #[inline]
+  pub fn add_num_puts(&mut self, num_puts: u16) {
+    self.fbb_.push_slot::<u16>(BlockStats::VT_NUM_PUTS, num_puts, 0);
+  }
+  #[inline]
+  pub fn add_num_deletes(&mut self, num_deletes: u16) {
+    self.fbb_.push_slot::<u16>(BlockStats::VT_NUM_DELETES, num_deletes, 0);
+  }
+  #[inline]
+  pub fn add_num_merges(&mut self, num_merges: u16) {
+    self.fbb_.push_slot::<u16>(BlockStats::VT_NUM_MERGES, num_merges, 0);
+  }
+  #[inline]
+  pub fn new(_fbb: &'b mut flatbuffers::FlatBufferBuilder<'a, A>) -> BlockStatsBuilder<'a, 'b, A> {
+    let start = _fbb.start_table();
+    BlockStatsBuilder {
+      fbb_: _fbb,
+      start_: start,
+    }
+  }
+  #[inline]
+  pub fn finish(self) -> flatbuffers::WIPOffset<BlockStats<'a>> {
+    let o = self.fbb_.end_table(self.start_);
+    flatbuffers::WIPOffset::new(o.value())
+  }
+}
+
+impl core::fmt::Debug for BlockStats<'_> {
+  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+    let mut ds = f.debug_struct("BlockStats");
+      ds.field("num_puts", &self.num_puts());
+      ds.field("num_deletes", &self.num_deletes());
+      ds.field("num_merges", &self.num_merges());
+      ds.finish()
+  }
+}
 pub enum SstStatsOffset {}
 #[derive(Copy, Clone, PartialEq)]
 
@@ -1284,6 +1415,7 @@ impl<'a> SstStats<'a> {
   pub const VT_NUM_MERGES: flatbuffers::VOffsetT = 8;
   pub const VT_RAW_KEY_SIZE: flatbuffers::VOffsetT = 10;
   pub const VT_RAW_VAL_SIZE: flatbuffers::VOffsetT = 12;
+  pub const VT_BLOCK_STATS: flatbuffers::VOffsetT = 14;
 
   #[inline]
   pub unsafe fn init_from_table(table: flatbuffers::Table<'a>) -> Self {
@@ -1292,7 +1424,7 @@ impl<'a> SstStats<'a> {
   #[allow(unused_mut)]
   pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: flatbuffers::Allocator + 'bldr>(
     _fbb: &'mut_bldr mut flatbuffers::FlatBufferBuilder<'bldr, A>,
-    args: &'args SstStatsArgs
+    args: &'args SstStatsArgs<'args>
   ) -> flatbuffers::WIPOffset<SstStats<'bldr>> {
     let mut builder = SstStatsBuilder::new(_fbb);
     builder.add_raw_val_size(args.raw_val_size);
@@ -1300,6 +1432,7 @@ impl<'a> SstStats<'a> {
     builder.add_num_merges(args.num_merges);
     builder.add_num_deletes(args.num_deletes);
     builder.add_num_puts(args.num_puts);
+    if let Some(x) = args.block_stats { builder.add_block_stats(x); }
     builder.finish()
   }
 
@@ -1339,6 +1472,13 @@ impl<'a> SstStats<'a> {
     // which contains a valid value in this slot
     unsafe { self._tab.get::<u64>(SstStats::VT_RAW_VAL_SIZE, Some(0)).unwrap()}
   }
+  #[inline]
+  pub fn block_stats(&self) -> Option<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<BlockStats<'a>>>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<BlockStats>>>>(SstStats::VT_BLOCK_STATS, None)}
+  }
 }
 
 impl flatbuffers::Verifiable for SstStats<'_> {
@@ -1353,18 +1493,20 @@ impl flatbuffers::Verifiable for SstStats<'_> {
      .visit_field::<u64>("num_merges", Self::VT_NUM_MERGES, false)?
      .visit_field::<u64>("raw_key_size", Self::VT_RAW_KEY_SIZE, false)?
      .visit_field::<u64>("raw_val_size", Self::VT_RAW_VAL_SIZE, false)?
+     .visit_field::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'_, flatbuffers::ForwardsUOffset<BlockStats>>>>("block_stats", Self::VT_BLOCK_STATS, false)?
      .finish();
     Ok(())
   }
 }
-pub struct SstStatsArgs {
+pub struct SstStatsArgs<'a> {
     pub num_puts: u64,
     pub num_deletes: u64,
     pub num_merges: u64,
     pub raw_key_size: u64,
     pub raw_val_size: u64,
+    pub block_stats: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<BlockStats<'a>>>>>,
 }
-impl<'a> Default for SstStatsArgs {
+impl<'a> Default for SstStatsArgs<'a> {
   #[inline]
   fn default() -> Self {
     SstStatsArgs {
@@ -1373,6 +1515,7 @@ impl<'a> Default for SstStatsArgs {
       num_merges: 0,
       raw_key_size: 0,
       raw_val_size: 0,
+      block_stats: None,
     }
   }
 }
@@ -1403,6 +1546,10 @@ impl<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> SstStatsBuilder<'a, 'b, A> {
     self.fbb_.push_slot::<u64>(SstStats::VT_RAW_VAL_SIZE, raw_val_size, 0);
   }
   #[inline]
+  pub fn add_block_stats(&mut self, block_stats: flatbuffers::WIPOffset<flatbuffers::Vector<'b , flatbuffers::ForwardsUOffset<BlockStats<'b >>>>) {
+    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(SstStats::VT_BLOCK_STATS, block_stats);
+  }
+  #[inline]
   pub fn new(_fbb: &'b mut flatbuffers::FlatBufferBuilder<'a, A>) -> SstStatsBuilder<'a, 'b, A> {
     let start = _fbb.start_table();
     SstStatsBuilder {
@@ -1425,6 +1572,7 @@ impl core::fmt::Debug for SstStats<'_> {
       ds.field("num_merges", &self.num_merges());
       ds.field("raw_key_size", &self.raw_key_size());
       ds.field("raw_val_size", &self.raw_val_size());
+      ds.field("block_stats", &self.block_stats());
       ds.finish()
   }
 }
