@@ -9,28 +9,28 @@ Table of Contents:
 - [Goals](#goals)
 - [Non-Goals](#non-goals)
 - [Design](#design)
-  * [Traits](#traits)
-  * [Built-in Implementation: BloomFilterPolicy](#built-in-implementation-bloomfilterpolicy)
-  * [SST Format Changes](#sst-format-changes)
-  * [Write Path Integration](#write-path-integration)
-  * [Read Path Integration](#read-path-integration)
+   - [Traits](#traits)
+   - [Built-in Implementation: BloomFilterPolicy](#built-in-implementation-bloomfilterpolicy)
+   - [SST Format Changes](#sst-format-changes)
+   - [Write Path Integration](#write-path-integration)
+   - [Read Path Integration](#read-path-integration)
 - [Impact Analysis](#impact-analysis)
-  * [Core API and Query Semantics](#core-api-and-query-semantics)
-  * [Consistency, Isolation, and Multi-Versioning](#consistency-isolation-and-multi-versioning)
-  * [Time, Retention, and Derived State](#time-retention-and-derived-state)
-  * [Metadata, Coordination, and Lifecycles](#metadata-coordination-and-lifecycles)
-  * [Compaction](#compaction)
-  * [Storage Engine Internals](#storage-engine-internals)
-  * [Ecosystem and Operations](#ecosystem-and-operations)
+   - [Core API and Query Semantics](#core-api-and-query-semantics)
+   - [Consistency, Isolation, and Multi-Versioning](#consistency-isolation-and-multi-versioning)
+   - [Time, Retention, and Derived State](#time-retention-and-derived-state)
+   - [Metadata, Coordination, and Lifecycles](#metadata-coordination-and-lifecycles)
+   - [Compaction](#compaction)
+   - [Storage Engine Internals](#storage-engine-internals)
+   - [Ecosystem and Operations](#ecosystem-and-operations)
 - [Operations](#operations)
-  * [Performance and Cost](#performance-and-cost)
-  * [Observability](#observability)
-  * [Compatibility](#compatibility)
+   - [Performance and Cost](#performance-and-cost)
+   - [Observability](#observability)
+   - [Compatibility](#compatibility)
 - [Testing](#testing)
 - [Rollout](#rollout)
 - [Future Enhancements](#future-enhancements)
-  * [Recency-Based Iterator](#recency-based-iterator)
-  * [Block-Level Filter Granularity](#block-level-filter-granularity)
+   - [Recency-Based Iterator](#recency-based-iterator)
+   - [Block-Level Filter Granularity](#block-level-filter-granularity)
 - [Alternatives](#alternatives)
 - [Open Questions](#open-questions)
 - [References](#references)
@@ -78,7 +78,7 @@ specialized filters without modifying the engine.
 - Refactor the existing bloom filter as the default implementation.
 - Support prefix bloom filters by allowing a user-defined key transformation before hashing.
 - Support future filter implementations without engine changes.
-- Support multiple concurrent filter policies per SST (e.g., bloom + min/max) with AND-logic evaluation.
+- Support multiple concurrent filter policies per SST with AND logic evaluation.
 - Enable safe migration from one filter policy to another without losing filtering on existing SSTs.
 - Maintain full backwards compatibility: existing databases with bloom filters continue to work.
 - Support both point-lookup filtering and prefix-scan.
@@ -328,7 +328,7 @@ impl FilterPolicy for BloomFilterPolicy {
 #### Configuration
 
 The `Settings` struct replaces `filter_bits_per_key` with a `filter_policies`
-field. This is a **breaking change** — the old field is removed entirely.
+field. This is a **breaking change** because the old field is removed entirely.
 
 ```rust
 pub struct Settings {
@@ -349,7 +349,7 @@ pub struct Settings {
 }
 ```
 
-`ScanOptions` gains a `filter_hints` field for passing opaque hints to custom
+`ScanOptions` get a `filter_hints` field for passing opaque hints to custom
 filters:
 
 ```rust
@@ -384,7 +384,7 @@ let settings = Settings {
     ..Settings::default()
 };
 
-// Prefix-only bloom filter (smaller filter, no point-lookup filtering)
+// Prefix-only bloom filter (no point-lookup filtering)
 let settings = Settings {
     filter_policies: vec![Arc::new(BloomFilterPolicy::new(10)
         .with_prefix_extractor(Arc::new(MyPrefixExtractor::new()))
@@ -405,7 +405,7 @@ let settings = Settings {
 // Passing hints to custom filters at scan time
 let scan_options = ScanOptions {
     filter_hints: HashMap::from([
-        ("version_bounds".to_string(), Bytes::from("v42")),
+        ("version_upper_bound".to_string(), Bytes::from("v42")),
     ]),
     ..ScanOptions::default()
 };
