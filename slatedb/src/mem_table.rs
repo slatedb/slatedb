@@ -270,7 +270,7 @@ impl KVTable {
             durable: WatchableOnceCell::new(),
             last_tick: AtomicI64::new(i64::MIN),
             last_seq: AtomicU64::new(0),
-            first_seq: AtomicU64::new(0),
+            first_seq: AtomicU64::new(u64::MAX),
             sequence_tracker: Mutex::new(SequenceTracker::new()),
         }
     }
@@ -279,8 +279,8 @@ impl KVTable {
         let entry_num = self.map.len();
         let entries_size_in_bytes = self.entries_size_in_bytes.load(Ordering::Relaxed);
         let last_tick = self.last_tick.load(SeqCst);
-        let last_seq = self.last_seq.load(SeqCst);
-        let first_seq = self.first_seq.load(SeqCst);
+        let last_seq = self.last_seq().unwrap_or(0);
+        let first_seq = self.first_seq().unwrap_or(0);
         KVTableMetadata {
             entry_num,
             entries_size_in_bytes,
