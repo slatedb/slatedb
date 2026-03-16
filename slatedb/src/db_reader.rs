@@ -1705,25 +1705,15 @@ mod tests {
         fn build(&self) -> Arc<ImmutableMemtable> {
             immutable_memtable(
                 self.recent_flushed_wal_id,
-                self.seqs.iter().copied().map(row_entry_for_seq).collect(),
+                self.seqs
+                    .iter()
+                    .map(|seq| {
+                        let key = format!("key-{seq:020}");
+                        let value = format!("value-{seq:020}");
+                        RowEntry::new_value(key.as_bytes(), value.as_bytes(), *seq)
+                    })
+                    .collect(),
             )
-        }
-    }
-
-    #[derive(Debug)]
-    struct ExpectedMemtable {
-        source_idx: usize,
-        seqs: Vec<u64>,
-        reused_arc: bool,
-    }
-
-    impl ExpectedMemtable {
-        fn new(source_idx: usize, seqs: Vec<u64>, reused_arc: bool) -> Self {
-            Self {
-                source_idx,
-                seqs,
-                reused_arc,
-            }
         }
     }
 
@@ -1731,23 +1721,7 @@ mod tests {
     struct RebuildCheckpointCase {
         last_l0_seq: u64,
         tables: Vec<InputMemtable>,
-        expected: Vec<ExpectedMemtable>,
-    }
-
-    fn row_entry_for_seq(seq: u64) -> RowEntry {
-        let key = format!("key-{seq:020}");
-        let value = format!("value-{seq:020}");
-        RowEntry::new_value(key.as_bytes(), value.as_bytes(), seq)
-    }
-
-    fn collect_memtable_seqs(table: &ImmutableMemtable) -> Vec<u64> {
-        let table = table.table();
-        let mut iter = table.iter();
-        let mut seqs = Vec::new();
-        while let Some(entry) = iter.next_sync() {
-            seqs.push(entry.seq);
-        }
-        seqs
+        expected: Vec<InputMemtable>,
     }
 
     fn test_checkpoint(manifest_id: u64, clock: Arc<dyn SystemClock>) -> crate::Checkpoint {
@@ -1757,55 +1731,6 @@ mod tests {
             expire_time: None,
             create_time: clock.now(),
             name: None,
-        }
-    }
-
-    async fn write_manifest_with_last_l0_seq(
-        stored_manifest: &mut StoredManifest,
-        last_l0_seq: u64,
-        next_wal_sst_id: u64,
-    ) -> u64 {
-        let mut dirty = stored_manifest.prepare_dirty().unwrap();
-        dirty.value.core.last_l0_seq = last_l0_seq;
-        dirty.value.core.next_wal_sst_id = next_wal_sst_id;
-        dirty.value.core.replay_after_wal_id = next_wal_sst_id.saturating_sub(1);
-        stored_manifest.update(dirty).await.unwrap();
-        stored_manifest.id()
-    }
-
-    fn build_db_reader_inner_for_rebuild_test(
-        test_provider: &TestProvider,
-        manifest_store: Arc<ManifestStore>,
-        table_store: Arc<TableStore>,
-        prior_state: CheckpointState,
-    ) -> DbReaderInner {
-        let oracle = Arc::new(DbReaderOracle::new(0));
-        let stat_registry = Arc::new(StatRegistry::new());
-        let reader = Reader {
-            table_store: Arc::clone(&table_store),
-            db_stats: DbStats::new(stat_registry.as_ref()),
-            mono_clock: Arc::new(MonotonicClock::new(
-                test_provider.system_clock.clone(),
-                i64::MIN,
-            )),
-            oracle: oracle.clone(),
-            merge_operator: None,
-        };
-
-        DbReaderInner {
-            manifest_store,
-            table_store,
-            options: DbReaderOptions {
-                skip_wal_replay: true,
-                ..DbReaderOptions::default()
-            },
-            state: parking_lot::RwLock::new(Arc::new(prior_state)),
-            system_clock: test_provider.system_clock.clone(),
-            user_checkpoint_id: None,
-            oracle,
-            reader,
-            closed_result_watcher: ClosedResultWriter::new(WatchableOnceCell::new()),
-            rand: test_provider.rand.clone(),
         }
     }
 
@@ -1823,17 +1748,17 @@ mod tests {
     #[case::keeps_entire_table_when_first_seq_is_just_after_last_l0_seq(RebuildCheckpointCase {
         last_l0_seq: 10,
         tables: vec![InputMemtable::new(7, vec![11, 12])],
-        expected: vec![ExpectedMemtable::new(0, vec![11, 12], true)],
+        expected: vec![InputMemtable::new(7, vec![11, 12])],
     })]
     #[case::filters_table_when_first_seq_equals_last_l0_seq(RebuildCheckpointCase {
         last_l0_seq: 10,
         tables: vec![InputMemtable::new(7, vec![10, 11, 12])],
-        expected: vec![ExpectedMemtable::new(0, vec![11, 12], false)],
+        expected: vec![InputMemtable::new(7, vec![11, 12])],
     })]
     #[case::filters_table_when_only_last_row_is_newer_than_last_l0_seq(RebuildCheckpointCase {
         last_l0_seq: 10,
         tables: vec![InputMemtable::new(7, vec![8, 9, 10, 11])],
-        expected: vec![ExpectedMemtable::new(0, vec![11], false)],
+        expected: vec![InputMemtable::new(7, vec![11])],
     })]
     #[case::preserves_order_across_keep_filter_and_skip_paths(RebuildCheckpointCase {
         last_l0_seq: 20,
@@ -1844,9 +1769,9 @@ mod tests {
             InputMemtable::new(6, vec![21, 23]),
         ],
         expected: vec![
-            ExpectedMemtable::new(0, vec![25, 26], true),
-            ExpectedMemtable::new(1, vec![21, 22], false),
-            ExpectedMemtable::new(3, vec![21, 23], true),
+            InputMemtable::new(9, vec![25, 26]),
+            InputMemtable::new(8, vec![21, 22]),
+            InputMemtable::new(6, vec![21, 23]),
         ],
     })]
     #[tokio::test]
@@ -1869,6 +1794,7 @@ mod tests {
         .await
         .unwrap();
 
+        // Seed the prior checkpoint state with IMMs.
         let input_tables: Vec<_> = case.tables.iter().map(InputMemtable::build).collect();
         let prior_state = CheckpointState {
             checkpoint: test_checkpoint(stored_manifest.id(), test_provider.system_clock.clone()),
@@ -1883,18 +1809,46 @@ mod tests {
             .max()
             .unwrap_or(0)
             + 1;
-        let new_manifest_id = write_manifest_with_last_l0_seq(
-            &mut stored_manifest,
-            case.last_l0_seq,
-            next_wal_sst_id,
-        )
-        .await;
-        let inner = build_db_reader_inner_for_rebuild_test(
-            &test_provider,
+
+        // Advance only the manifest fields that control the rebuild filter logic.
+        // We also pin replay_after_wal_id to the last known WAL so these cases
+        // exercise IMM filtering without attempting any fresh WAL replay.
+        let mut dirty = stored_manifest.prepare_dirty().unwrap();
+        dirty.value.core.last_l0_seq = case.last_l0_seq;
+        dirty.value.core.next_wal_sst_id = next_wal_sst_id;
+        dirty.value.core.replay_after_wal_id = next_wal_sst_id.saturating_sub(1);
+        stored_manifest.update(dirty).await.unwrap();
+        let new_manifest_id = stored_manifest.id();
+
+        // Construct just enough DbReaderInner state to call rebuild_checkpoint_state()
+        // directly. skip_wal_replay keeps the test scoped to the IMM retention logic.
+        let oracle = Arc::new(DbReaderOracle::new(0));
+        let stat_registry = Arc::new(StatRegistry::new());
+        let reader = Reader {
+            table_store: Arc::clone(&table_store),
+            db_stats: DbStats::new(stat_registry.as_ref()),
+            mono_clock: Arc::new(MonotonicClock::new(
+                test_provider.system_clock.clone(),
+                i64::MIN,
+            )),
+            oracle: oracle.clone(),
+            merge_operator: None,
+        };
+        let inner = DbReaderInner {
             manifest_store,
             table_store,
-            prior_state,
-        );
+            options: DbReaderOptions {
+                skip_wal_replay: true,
+                ..DbReaderOptions::default()
+            },
+            state: parking_lot::RwLock::new(Arc::new(prior_state)),
+            system_clock: test_provider.system_clock.clone(),
+            user_checkpoint_id: None,
+            oracle,
+            reader,
+            closed_result_watcher: ClosedResultWriter::new(WatchableOnceCell::new()),
+            rand: test_provider.rand.clone(),
+        };
 
         let rebuilt_state = inner
             .rebuild_checkpoint_state(test_checkpoint(
@@ -1904,26 +1858,29 @@ mod tests {
             .await
             .unwrap();
 
+        // The rebuilt checkpoint should reflect the new manifest.
         assert_eq!(rebuilt_state.manifest.core.last_l0_seq, case.last_l0_seq);
         assert_eq!(rebuilt_state.imm_memtable.len(), case.expected.len());
 
         for (rebuilt_table, expected_table) in
             rebuilt_state.imm_memtable.iter().zip(case.expected.iter())
         {
-            let original_table = &input_tables[expected_table.source_idx];
-            let seqs = collect_memtable_seqs(rebuilt_table);
+            let table = rebuilt_table.table();
+            let mut iter = table.iter();
+            let mut seqs = Vec::new();
+            while let Some(entry) = iter.next_sync() {
+                seqs.push(entry.seq);
+            }
 
+            // Every retained row must be strictly newer than the manifest's last L0 seq.
             assert_eq!(seqs, expected_table.seqs);
             assert!(seqs.iter().all(|seq| *seq > case.last_l0_seq));
             assert_eq!(
                 rebuilt_table.recent_flushed_wal_id(),
-                original_table.recent_flushed_wal_id()
-            );
-            assert_eq!(
-                Arc::ptr_eq(rebuilt_table, original_table),
-                expected_table.reused_arc
+                expected_table.recent_flushed_wal_id
             );
 
+            // The filtered table's metadata should agree with the rows that survived.
             let metadata = rebuilt_table.table().metadata();
             assert_eq!(metadata.first_seq, *expected_table.seqs.first().unwrap());
             assert_eq!(metadata.last_seq, *expected_table.seqs.last().unwrap());

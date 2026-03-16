@@ -307,7 +307,6 @@ impl KVTable {
         }
     }
 
-    #[allow(dead_code)]
     pub(crate) fn first_seq(&self) -> Option<u64> {
         if self.is_empty() {
             None
