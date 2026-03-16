@@ -51,6 +51,16 @@ table SsTableInfo {
     stats_len: ulong;
 }
 
+// Per-block statistics.
+table BlockStats {
+    // Number of put entries in the block.
+    num_puts: ushort;
+    // Number of delete entries in the block.
+    num_deletes: ushort;
+    // Number of merge entries in the block.
+    num_merges: ushort;
+}
+
 // Per-SST statistics collected during SST building.
 table SstStats {
     // Number of put entries in the SST.
@@ -63,6 +73,8 @@ table SstStats {
     raw_key_size: ulong;
     // Total uncompressed size of all values in bytes.
     raw_val_size: ulong;
+    // Per-block statistics.
+    block_stats: [BlockStats];
 }
 
 table BlockMeta {
