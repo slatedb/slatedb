@@ -313,13 +313,28 @@ impl DbReaderInner {
             .manifest_store
             .read_manifest(new_checkpoint.manifest_id)
             .await?;
+        let mut imm_memtable = VecDeque::new();
 
-        let imm_memtable = prior
-            .imm_memtable
-            .iter()
-            .filter(|table| table.recent_flushed_wal_id() <= manifest.core.replay_after_wal_id)
-            .cloned()
-            .collect();
+        for table in prior.imm_memtable.iter() {
+            let table_meta = table.table().metadata();
+            if table_meta.last_seq <= manifest.core.last_l0_seq {
+                // Skip since the entire table is older than L0+.
+                continue;
+            } else if table_meta.first_seq > manifest.core.last_l0_seq {
+                // Keep the entire table since all rows are newer than L0+.
+                imm_memtable.push_back(Arc::clone(table));
+            } else {
+                // The table has some rows that are newer than L0+ and some that are older. This
+                // happens when the table spans multiple WAL files. Some of those WAL files can
+                // have sequence numbers < manifest.core.last_l0_seq, while others have sequence
+                // numbers > manifest.core.last_l0_seq. Retain only those that are more recent
+                // than the manifest's last L0 sequence number.
+                let filtered_table = table.filter_after_seq(manifest.core.last_l0_seq);
+                // Push to the back because we are iterating prior from newest to oldest, and we
+                // want the imm memtables in checkpoint state to be ordered the same way.
+                imm_memtable.push_back(Arc::new(filtered_table));
+            }
+        }
 
         Self::build_checkpoint_state(
             new_checkpoint,
@@ -1012,28 +1027,41 @@ impl DbRead for DbReader {
 
 #[cfg(test)]
 mod tests {
-    use crate::config::{CheckpointOptions, CheckpointScope, Settings};
+    use super::CheckpointState;
+    use crate::clock::MonotonicClock;
+    use crate::config::{
+        CheckpointOptions, CheckpointScope, FlushOptions, FlushType, MergeOptions, Settings,
+        WriteOptions,
+    };
     use crate::db_reader::{DbReader, DbReaderInner, DbReaderOptions};
     use crate::db_state::{ManifestCore, SsTableId};
+    use crate::db_stats::DbStats;
+    use crate::db_status::ClosedResultWriter;
     use crate::format::sst::SsTableFormat;
     use crate::manifest::store::{ManifestStore, StoredManifest};
     use crate::manifest::Manifest;
     use crate::mem_table::{ImmutableMemtable, WritableKVTable};
     use crate::object_stores::ObjectStores;
+    use crate::oracle::DbReaderOracle;
     use crate::paths::PathResolver;
     use crate::proptest_util::rng::new_test_rng;
     use crate::proptest_util::sample;
     use crate::rand::DbRand;
+    use crate::reader::Reader;
+    use crate::stats::StatRegistry;
     use crate::store_provider::StoreProvider;
     use crate::tablestore::TableStore;
     use crate::types::RowEntry;
+    use crate::utils::WatchableOnceCell;
     use crate::{error::SlateDBError, test_utils, Db};
     use bytes::Bytes;
     use fail_parallel::FailPointRegistry;
     use object_store::memory::InMemory;
     use object_store::path::Path;
     use object_store::ObjectStore;
+    use rstest::rstest;
     use slatedb_common::clock::{DefaultSystemClock, SystemClock};
+    use slatedb_common::MockSystemClock;
     use std::collections::{BTreeMap, VecDeque};
     use std::ops::RangeFull;
     use std::sync::Arc;
@@ -1660,6 +1688,205 @@ mod tests {
         Ok(())
     }
 
+    #[derive(Debug)]
+    struct InputMemtable {
+        recent_flushed_wal_id: u64,
+        seqs: Vec<u64>,
+    }
+
+    impl InputMemtable {
+        fn new(recent_flushed_wal_id: u64, seqs: Vec<u64>) -> Self {
+            Self {
+                recent_flushed_wal_id,
+                seqs,
+            }
+        }
+
+        fn build(&self) -> Arc<ImmutableMemtable> {
+            immutable_memtable(
+                self.recent_flushed_wal_id,
+                self.seqs
+                    .iter()
+                    .map(|seq| {
+                        let key = format!("key-{seq:020}");
+                        let value = format!("value-{seq:020}");
+                        RowEntry::new_value(key.as_bytes(), value.as_bytes(), *seq)
+                    })
+                    .collect(),
+            )
+        }
+    }
+
+    #[derive(Debug)]
+    struct RebuildCheckpointCase {
+        last_l0_seq: u64,
+        tables: Vec<InputMemtable>,
+        expected: Vec<InputMemtable>,
+    }
+
+    fn test_checkpoint(manifest_id: u64, clock: Arc<dyn SystemClock>) -> crate::Checkpoint {
+        crate::Checkpoint {
+            id: Uuid::new_v4(),
+            manifest_id,
+            expire_time: None,
+            create_time: clock.now(),
+            name: None,
+        }
+    }
+
+    #[rstest]
+    #[case::skips_table_when_last_seq_is_below_last_l0_seq(RebuildCheckpointCase {
+        last_l0_seq: 10,
+        tables: vec![InputMemtable::new(7, vec![7, 8, 9])],
+        expected: vec![],
+    })]
+    #[case::skips_table_when_last_seq_equals_last_l0_seq(RebuildCheckpointCase {
+        last_l0_seq: 10,
+        tables: vec![InputMemtable::new(7, vec![10])],
+        expected: vec![],
+    })]
+    #[case::keeps_entire_table_when_first_seq_is_just_after_last_l0_seq(RebuildCheckpointCase {
+        last_l0_seq: 10,
+        tables: vec![InputMemtable::new(7, vec![11, 12])],
+        expected: vec![InputMemtable::new(7, vec![11, 12])],
+    })]
+    #[case::filters_table_when_first_seq_equals_last_l0_seq(RebuildCheckpointCase {
+        last_l0_seq: 10,
+        tables: vec![InputMemtable::new(7, vec![10, 11, 12])],
+        expected: vec![InputMemtable::new(7, vec![11, 12])],
+    })]
+    #[case::filters_table_when_only_last_row_is_newer_than_last_l0_seq(RebuildCheckpointCase {
+        last_l0_seq: 10,
+        tables: vec![InputMemtable::new(7, vec![8, 9, 10, 11])],
+        expected: vec![InputMemtable::new(7, vec![11])],
+    })]
+    #[case::preserves_order_across_keep_filter_and_skip_paths(RebuildCheckpointCase {
+        last_l0_seq: 20,
+        tables: vec![
+            InputMemtable::new(9, vec![25, 26]),
+            InputMemtable::new(8, vec![20, 21, 22]),
+            InputMemtable::new(7, vec![18, 19, 20]),
+            InputMemtable::new(6, vec![21, 23]),
+        ],
+        expected: vec![
+            InputMemtable::new(9, vec![25, 26]),
+            InputMemtable::new(8, vec![21, 22]),
+            InputMemtable::new(6, vec![21, 23]),
+        ],
+    })]
+    #[tokio::test]
+    async fn rebuild_checkpoint_state_should_filter_existing_imm_memtables_by_last_l0_seq(
+        #[case] case: RebuildCheckpointCase,
+    ) {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from(format!(
+            "/tmp/test_db_reader_rebuild_checkpoint_state_{}",
+            Uuid::new_v4()
+        ));
+        let test_provider = TestProvider::new(path, Arc::clone(&object_store));
+        let manifest_store = test_provider.manifest_store();
+        let table_store = test_provider.table_store();
+        let mut stored_manifest = StoredManifest::create_new_db(
+            Arc::clone(&manifest_store),
+            ManifestCore::new(),
+            test_provider.system_clock.clone(),
+        )
+        .await
+        .unwrap();
+
+        // Seed the prior checkpoint state with IMMs.
+        let input_tables: Vec<_> = case.tables.iter().map(InputMemtable::build).collect();
+        let prior_state = CheckpointState {
+            checkpoint: test_checkpoint(stored_manifest.id(), test_provider.system_clock.clone()),
+            manifest: stored_manifest.manifest().clone(),
+            imm_memtable: input_tables.iter().cloned().collect(),
+            last_wal_id: 0,
+            last_remote_persisted_seq: 0,
+        };
+        let next_wal_sst_id = input_tables
+            .iter()
+            .map(|table| table.recent_flushed_wal_id())
+            .max()
+            .unwrap_or(0)
+            + 1;
+
+        // Advance only the manifest fields that control the rebuild filter logic.
+        // We also pin replay_after_wal_id to the last known WAL so these cases
+        // exercise IMM filtering without attempting any fresh WAL replay.
+        let mut dirty = stored_manifest.prepare_dirty().unwrap();
+        dirty.value.core.last_l0_seq = case.last_l0_seq;
+        dirty.value.core.next_wal_sst_id = next_wal_sst_id;
+        dirty.value.core.replay_after_wal_id = next_wal_sst_id.saturating_sub(1);
+        stored_manifest.update(dirty).await.unwrap();
+        let new_manifest_id = stored_manifest.id();
+
+        // Construct just enough DbReaderInner state to call rebuild_checkpoint_state()
+        // directly. skip_wal_replay keeps the test scoped to the IMM retention logic.
+        let oracle = Arc::new(DbReaderOracle::new(0));
+        let stat_registry = Arc::new(StatRegistry::new());
+        let reader = Reader {
+            table_store: Arc::clone(&table_store),
+            db_stats: DbStats::new(stat_registry.as_ref()),
+            mono_clock: Arc::new(MonotonicClock::new(
+                test_provider.system_clock.clone(),
+                i64::MIN,
+            )),
+            oracle: oracle.clone(),
+            merge_operator: None,
+        };
+        let inner = DbReaderInner {
+            manifest_store,
+            table_store,
+            options: DbReaderOptions {
+                skip_wal_replay: true,
+                ..DbReaderOptions::default()
+            },
+            state: parking_lot::RwLock::new(Arc::new(prior_state)),
+            system_clock: test_provider.system_clock.clone(),
+            user_checkpoint_id: None,
+            oracle,
+            reader,
+            closed_result_watcher: ClosedResultWriter::new(WatchableOnceCell::new()),
+            rand: test_provider.rand.clone(),
+        };
+
+        let rebuilt_state = inner
+            .rebuild_checkpoint_state(test_checkpoint(
+                new_manifest_id,
+                test_provider.system_clock.clone(),
+            ))
+            .await
+            .unwrap();
+
+        // The rebuilt checkpoint should reflect the new manifest.
+        assert_eq!(rebuilt_state.manifest.core.last_l0_seq, case.last_l0_seq);
+        assert_eq!(rebuilt_state.imm_memtable.len(), case.expected.len());
+
+        for (rebuilt_table, expected_table) in
+            rebuilt_state.imm_memtable.iter().zip(case.expected.iter())
+        {
+            let table = rebuilt_table.table();
+            let mut iter = table.iter();
+            let mut seqs = Vec::new();
+            while let Some(entry) = iter.next_sync() {
+                seqs.push(entry.seq);
+            }
+
+            // Every retained row must be strictly newer than the manifest's last L0 seq.
+            assert_eq!(seqs, expected_table.seqs);
+            assert!(seqs.iter().all(|seq| *seq > case.last_l0_seq));
+            assert_eq!(
+                rebuilt_table.recent_flushed_wal_id(),
+                expected_table.recent_flushed_wal_id
+            );
+
+            // The filtered table's metadata should agree with the rows that survived.
+            let metadata = rebuilt_table.table().metadata();
+            assert_eq!(metadata.first_seq, *expected_table.seqs.first().unwrap());
+            assert_eq!(metadata.last_seq, *expected_table.seqs.last().unwrap());
+        }
+    }
+
     #[tokio::test]
     async fn should_populate_disk_cache_on_read() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
@@ -1719,5 +1946,156 @@ mod tests {
                 Arc::clone(&self.object_store),
             ))
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn db_reader_get_returns_correct_merge_result_after_reestablish_from_l0() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_db_reader_merge_reestablish_from_l0");
+        let clock = Arc::new(MockSystemClock::new());
+
+        let mut test_provider = TestProvider::new(path.clone(), Arc::clone(&object_store));
+        test_provider.system_clock = clock.clone();
+
+        let merge_operator: crate::merge_operator::MergeOperatorType =
+            Arc::new(crate::test_utils::StringConcatMergeOperator);
+
+        let db = Db::builder(path.clone(), Arc::clone(&object_store))
+            .with_settings(Settings {
+                flush_interval: None,
+                compactor_options: None,
+                garbage_collector_options: None,
+                ..Settings::default()
+            })
+            .with_system_clock(clock.clone())
+            .with_merge_operator(merge_operator.clone())
+            .build()
+            .await
+            .unwrap();
+
+        let key = b"k";
+
+        // Phase A: make the reader recover merge operands from WAL into replayed IMMs.
+        db.merge_with_options(
+            key,
+            b"a",
+            &MergeOptions::default(),
+            &WriteOptions {
+                await_durable: false,
+            },
+        )
+        .await
+        .unwrap();
+        db.merge_with_options(
+            key,
+            b"b",
+            &MergeOptions::default(),
+            &WriteOptions {
+                await_durable: false,
+            },
+        )
+        .await
+        .unwrap();
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::Wal,
+        })
+        .await
+        .unwrap();
+
+        let reader = test_provider
+            .new_db_reader(
+                DbReaderOptions {
+                    manifest_poll_interval: Duration::from_millis(100),
+                    checkpoint_lifetime: Duration::from_secs(30),
+                    merge_operator: Some(merge_operator),
+                    ..DbReaderOptions::default()
+                },
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            reader.get(key).await.unwrap(),
+            Some(Bytes::from_static(b"ab"))
+        );
+        assert!(
+            !reader.inner.state.read().imm_memtable.is_empty(),
+            "reader should have replayed WAL data into immutable memtables"
+        );
+
+        // Let the reader's immediate first ticker fire and settle before phase B.
+        tokio::task::yield_now().await;
+
+        // Phase B: write newer merge operands and flush the writer memtable to L0.
+        db.merge_with_options(
+            key,
+            b"c",
+            &MergeOptions::default(),
+            &WriteOptions {
+                await_durable: false,
+            },
+        )
+        .await
+        .unwrap();
+        db.merge_with_options(
+            key,
+            b"d",
+            &MergeOptions::default(),
+            &WriteOptions {
+                await_durable: false,
+            },
+        )
+        .await
+        .unwrap();
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::MemTable,
+        })
+        .await
+        .unwrap();
+
+        let manifest_store = test_provider.manifest_store();
+        let mut stored_manifest =
+            StoredManifest::load(manifest_store, test_provider.system_clock.clone())
+                .await
+                .unwrap();
+
+        let start = tokio::time::Instant::now();
+        loop {
+            let manifest = stored_manifest.refresh().await.unwrap();
+            if manifest.core.l0.len() == 1 {
+                break;
+            }
+            assert!(
+                start.elapsed() < Duration::from_secs(30),
+                "timed out waiting for writer manifest to include the L0 flush"
+            );
+            tokio::task::yield_now().await;
+        }
+
+        // Drive the reader poller with the shared mock clock so it reestablishes
+        // from the new manifest that now includes the L0.
+        clock.advance(Duration::from_millis(100)).await;
+
+        let start = tokio::time::Instant::now();
+        loop {
+            if reader.inner.state.read().manifest.core.l0.len() == 1 {
+                break;
+            }
+            assert!(
+                start.elapsed() < Duration::from_secs(30),
+                "timed out waiting for reader to reestablish from the new manifest"
+            );
+            tokio::task::yield_now().await;
+        }
+
+        // Correct behavior: the reader should return the full merged value after reestablish.
+        assert_eq!(
+            reader.get(key).await.unwrap(),
+            Some(Bytes::from_static(b"abcd"))
+        );
+
+        reader.close().await.unwrap();
+        db.close().await.unwrap();
     }
 }
