@@ -1,9 +1,6 @@
 use crate::block_iterator::BlockIterator;
 use crate::block_iterator_v2::BlockIteratorV2;
 use crate::cached_object_store::CachedObjectStore;
-use crate::clock::MonotonicClock;
-use crate::config::DurabilityLevel;
-use crate::config::DurabilityLevel::{Memory, Remote};
 use crate::config::PreloadLevel;
 use crate::db_state::ManifestCore;
 use crate::db_state::SortedRun;
@@ -13,7 +10,6 @@ use crate::format::sst::{SST_FORMAT_VERSION, SST_FORMAT_VERSION_V2};
 use crate::iter::{IterationOrder, RowEntryIterator};
 use crate::paths::PathResolver;
 use crate::tablestore::TableStore;
-use crate::types::RowEntry;
 use bytes::{BufMut, Bytes};
 use futures::FutureExt;
 use log::{error, warn};
@@ -117,41 +113,6 @@ where
         result
     });
     handle.spawn(wrapped)
-}
-
-#[allow(dead_code)] // unused during DST
-pub(crate) async fn get_now_for_read(
-    mono_clock: Arc<MonotonicClock>,
-    durability_level: DurabilityLevel,
-) -> Result<i64, SlateDBError> {
-    /*
-     Note: the semantics of filtering expired records on read differ slightly depending on
-     the configured ReadLevel. For Uncommitted we can just use the actual clock's "now"
-     as this corresponds to the current time seen by uncommitted writes but is not persisted
-     and only enforces monotonicity via the local in-memory MonotonicClock. This means it's
-     possible for the mono_clock.now() to go "backwards" following a crash and recovery, which
-     could result in records that were filtered out before the crash coming back to life and being
-     returned after the crash.
-     If the read level is instead set to Committed, we only use the last_tick of the monotonic
-     clock to filter out expired records, since this corresponds to the highest time of any
-     persisted batch and is thus recoverable following a crash. Since the last tick is the
-     last persisted time we are guaranteed monotonicity of the #get_last_tick function and
-     thus will not see this "time travel" phenomenon -- with Committed, once a record is
-     filtered out due to ttl expiry, it is guaranteed not to be seen again by future Committed
-     reads.
-    */
-    match durability_level {
-        Remote => Ok(mono_clock.get_last_durable_tick()),
-        Memory => mono_clock.now().await,
-    }
-}
-
-pub(crate) fn is_not_expired(entry: &RowEntry, now: i64) -> bool {
-    if let Some(expire_ts) = entry.expire_ts {
-        expire_ts > now
-    } else {
-        true
-    }
 }
 
 /// Merge two options using the provided function.

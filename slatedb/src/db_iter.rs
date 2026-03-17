@@ -3,7 +3,6 @@ use crate::bytes_range::BytesRange;
 use crate::error::SlateDBError;
 use crate::filter_iterator::FilterIterator;
 use crate::iter::{EmptyIterator, RowEntryIterator};
-use crate::map_iter::MapIterator;
 use crate::merge_iterator::MergeIterator;
 use crate::merge_operator::{
     MergeOperatorIterator, MergeOperatorRequiredIterator, MergeOperatorType,
@@ -220,7 +219,6 @@ impl DbIterator {
         sr_iters: impl IntoIterator<Item = Box<dyn RowEntryIterator + 'static>>,
         max_seq: Option<u64>,
         range_tracker: Option<Arc<DbIteratorRangeTracker>>,
-        now: i64,
         merge_operator: Option<MergeOperatorType>,
     ) -> Result<Self, SlateDBError> {
         // The write_batch iterator is provided only when operating within a Transaction. It represents the uncommitted
@@ -239,9 +237,9 @@ impl DbIterator {
         //
         // If we filter the iterator after merging with max_seq=100, we'll lost the entry with seq=96 from the
         // iterator A. But the element with seq=96 is actually the correct answer for this scan.
-        let mem_iters = apply_filters(mem_iters, max_seq, now);
-        let l0_iters = apply_filters(l0_iters, max_seq, now);
-        let sr_iters = apply_filters(sr_iters, max_seq, now);
+        let mem_iters = apply_filters(mem_iters, max_seq);
+        let l0_iters = apply_filters(l0_iters, max_seq);
+        let sr_iters = apply_filters(sr_iters, max_seq);
 
         let mut iter = match range.as_point() {
             Some(key) => Box::new(GetIterator::new(
@@ -264,7 +262,6 @@ impl DbIterator {
                 merge_operator,
                 iter,
                 true,
-                now,
                 // Its important not to set a snapshot seq num barrier for this merge iterator
                 // The entries in the write batch iterator have seq num u64::MAX and any merges
                 // there need to be merged with the entries from the other iterators.
@@ -387,7 +384,6 @@ impl DbIterator {
 pub(crate) fn apply_filters<T>(
     iters: impl IntoIterator<Item = T>,
     max_seq: Option<u64>,
-    now: i64,
 ) -> Vec<Box<dyn RowEntryIterator>>
 where
     T: RowEntryIterator + 'static,
@@ -395,7 +391,6 @@ where
     iters
         .into_iter()
         .map(|iter| FilterIterator::new_with_max_seq(iter, max_seq))
-        .map(|iter| MapIterator::new_with_ttl_now(iter, now))
         .map(|iter| Box::new(iter) as Box<dyn RowEntryIterator + 'static>)
         .collect::<Vec<Box<dyn RowEntryIterator>>>()
 }

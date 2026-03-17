@@ -11,8 +11,6 @@ use crate::sorted_run_iterator::SortedRunIterator;
 use crate::sst_iter::{SstIterator, SstIteratorOptions};
 use crate::tablestore::TableStore;
 use crate::types::KeyValue;
-#[cfg(not(dst))]
-use crate::utils::get_now_for_read;
 use crate::utils::{build_concurrent, compute_max_parallel};
 use crate::{db_iter::DbIteratorRangeTracker, error::SlateDBError, DbIterator};
 
@@ -281,11 +279,6 @@ impl Reader {
         write_batch: Option<WriteBatch>,
         max_seq: Option<u64>,
     ) -> Result<Option<KeyValue>, SlateDBError> {
-        #[cfg(not(dst))]
-        let now = get_now_for_read(self.mono_clock.clone(), options.durability_filter).await?;
-        #[cfg(dst)]
-        // Force the current timestamp for DST operations. See #719 for details.
-        let now = options.now;
         let max_seq = self.prepare_max_seq(max_seq, options.durability_filter, options.dirty);
         let key_slice = key.as_ref();
         let range = BytesRange::from_slice(key_slice..=key_slice);
@@ -319,7 +312,6 @@ impl Reader {
             sr_iters,
             max_seq,
             None,
-            now,
             self.merge_operator.clone(),
         )
         .await?;
@@ -366,11 +358,6 @@ impl Reader {
         range_tracker: Option<Arc<DbIteratorRangeTracker>>,
     ) -> Result<DbIterator, SlateDBError> {
         let max_seq = self.prepare_max_seq(max_seq, options.durability_filter, options.dirty);
-        #[cfg(not(dst))]
-        let now = get_now_for_read(self.mono_clock.clone(), options.durability_filter).await?;
-        #[cfg(dst)]
-        // Force the current timestamp for DST operations. See #719 for details.
-        let now = options.now;
         let read_ahead_blocks = self.table_store.bytes_to_blocks(options.read_ahead_bytes);
 
         let sst_iter_options = SstIteratorOptions {
@@ -398,7 +385,6 @@ impl Reader {
             sr_iters,
             max_seq,
             range_tracker,
-            now,
             self.merge_operator.clone(),
         )
         .await

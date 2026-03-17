@@ -8,7 +8,7 @@ use crate::{
     error::SlateDBError,
     iter::{RowEntryIterator, TrackedRowEntryIterator},
     types::{RowEntry, ValueDeletable},
-    utils::{is_not_expired, merge_options},
+    utils::merge_options,
 };
 
 #[non_exhaustive]
@@ -184,7 +184,6 @@ pub(crate) struct MergeOperatorIterator<T: RowEntryIterator> {
     buffered_entry: Option<RowEntry>,
     /// Whether to merge entries with different expire timestamps.
     merge_different_expire_ts: bool,
-    now: i64,
     /// A barrier sequence number that supports snapshot reads using this iterator. If not None,
     /// the iterator will not merge entries with sequence number greater than this value.
     snapshot_barrier_seq: Option<u64>,
@@ -248,7 +247,6 @@ impl<T: RowEntryIterator> MergeOperatorIterator<T> {
         merge_operator: MergeOperatorType,
         delegate: T,
         merge_different_expire_ts: bool,
-        now: i64,
         snapshot_barrier_seq: Option<u64>,
     ) -> Self {
         Self {
@@ -256,7 +254,6 @@ impl<T: RowEntryIterator> MergeOperatorIterator<T> {
             delegate,
             buffered_entry: None,
             merge_different_expire_ts,
-            now,
             snapshot_barrier_seq,
         }
     }
@@ -334,7 +331,7 @@ impl<T: RowEntryIterator> MergeOperatorIterator<T> {
                 } else if !matches!(entry.value, ValueDeletable::Merge(_)) {
                     // found a Value or Tombstone, this is the base value
                     break Some(entry);
-                } else if is_not_expired(&entry, self.now) {
+                } else {
                     batch.push(entry);
                 }
 
@@ -356,6 +353,12 @@ impl<T: RowEntryIterator> MergeOperatorIterator<T> {
 
         let base_value = base.as_ref().and_then(|b| b.value.as_bytes());
         let found_base = base.is_some();
+
+        // Fold the base entry's metadata into the tracker so that its
+        // create_ts and expire_ts are reflected in the merged result.
+        if let Some(ref base_entry) = base {
+            merge_tracker.update(base_entry)?;
+        }
 
         // If we have no results and either no base or a tombstone base, return None
         if results.is_empty() && base_value.is_none() {
