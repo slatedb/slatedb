@@ -439,11 +439,15 @@ impl DbReaderInner {
             sst_iter_options,
         };
 
-        let wal_id_start = if let Some(latest_replayed_table) = into_tables.front() {
-            latest_replayed_table.recent_flushed_wal_id() + 1
-        } else {
-            core.replay_after_wal_id + 1
-        };
+        let (mut last_wal_id, mut last_committed_seq) =
+            if let Some(latest_replayed_table) = into_tables.front() {
+                (
+                    latest_replayed_table.recent_flushed_wal_id(),
+                    latest_replayed_table.table().last_seq().unwrap_or(0),
+                )
+            } else {
+                (core.replay_after_wal_id, core.last_l0_seq)
+            };
         let wal_id_end = if replay_new_wals {
             table_store.last_seen_wal_id().await? + 1
         } else {
@@ -451,16 +455,17 @@ impl DbReaderInner {
         };
 
         let mut replay_iter = WalReplayIterator::range(
-            wal_id_start..wal_id_end,
+            (last_wal_id + 1)..wal_id_end,
             core,
             replay_options,
             Arc::clone(&table_store),
         )
         .await?;
 
-        let mut last_wal_id = 0;
-        let mut last_committed_seq = 0;
         while let Some(replayed_table) = replay_iter.next().await? {
+            assert!(replayed_table.last_wal_id > last_wal_id);
+            // Allow equality here since it's possible that a WAL file is an empty fence entry.
+            assert!(replayed_table.last_seq >= last_committed_seq);
             last_wal_id = replayed_table.last_wal_id;
             last_committed_seq = replayed_table.last_seq;
             let imm_memtable =
