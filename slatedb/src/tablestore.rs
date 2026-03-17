@@ -717,6 +717,7 @@ mod tests {
     use crate::error;
     use crate::format::block::Block;
     use crate::format::sst::SsTableFormat;
+    use crate::manifest::SsTableView;
     use crate::object_stores::ObjectStores;
     use crate::rand::DbRand;
     use crate::retrying_object_store::RetryingObjectStore;
@@ -800,10 +801,15 @@ mod tests {
             ..SstIteratorOptions::default()
         };
         // then:
-        let mut iter = SstIterator::new_owned_initialized(.., sst, ts.clone(), sst_iter_options)
-            .await
-            .unwrap()
-            .expect("Expected Some(iter) but got None");
+        let mut iter = SstIterator::new_owned_initialized(
+            ..,
+            SsTableView::identity(sst),
+            ts.clone(),
+            sst_iter_options,
+        )
+        .await
+        .unwrap()
+        .expect("Expected Some(iter) but got None");
         assert_iterator(
             &mut iter,
             vec![
@@ -868,10 +874,15 @@ mod tests {
             ..SstIteratorOptions::default()
         };
         // then:
-        let mut iter = SstIterator::new_owned_initialized(.., sst, ts.clone(), sst_iter_options)
-            .await
-            .unwrap()
-            .expect("Expected Some(iter) but got None");
+        let mut iter = SstIterator::new_owned_initialized(
+            ..,
+            SsTableView::identity(sst),
+            ts.clone(),
+            sst_iter_options,
+        )
+        .await
+        .unwrap()
+        .expect("Expected Some(iter) but got None");
         assert_iterator(
             &mut iter,
             vec![

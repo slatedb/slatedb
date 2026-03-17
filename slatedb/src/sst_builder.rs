@@ -408,7 +408,7 @@ mod tests {
     use crate::blob::ReadOnlyBlob;
     use crate::block_iterator::{BlockIteratorLatest, BlockLike};
     use crate::bytes_range::BytesRange;
-    use crate::db_state::SsTableId;
+    use crate::db_state::{SsTableId, SsTableView};
     use crate::filter::filter_hash;
     use crate::format::block::Block;
     use crate::object_stores::ObjectStores;
@@ -1041,10 +1041,9 @@ mod tests {
         let encoded = builder.build().await?;
 
         let sst_id = SsTableId::Wal(0);
-        let sst_handle = table_store
-            .write_sst(&sst_id, encoded, false)
-            .await?
-            .with_visible_range(BytesRange::from_ref("c"..="f"));
+        let sst_handle =
+            SsTableView::identity(table_store.write_sst(&sst_id, encoded, false).await?)
+                .with_visible_range(BytesRange::from_ref("c"..="f"));
 
         let expected_entries = vec![
             RowEntry::new_value(b"c", b"value", 0),
@@ -1338,7 +1337,7 @@ mod tests {
         // when: reading the SST back
         let mut iter = SstIterator::new_owned_initialized(
             ..,
-            sst_handle,
+            SsTableView::identity(sst_handle),
             Arc::new(table_store),
             SstIteratorOptions::default(),
         )
@@ -1402,7 +1401,7 @@ mod tests {
         // when: reading the SST back
         let mut iter = SstIterator::new_owned_initialized(
             ..,
-            sst_handle,
+            SsTableView::identity(sst_handle),
             Arc::new(table_store),
             SstIteratorOptions::default(),
         )
