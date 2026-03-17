@@ -1530,6 +1530,67 @@ mod tests {
         test_utils::assert_iterator(&mut replayed_iter, vec![wal_1_row, wal_2_row_1]).await;
     }
 
+    #[tokio::test]
+    async fn replay_wal_into_should_noop_for_fresh_db_with_no_writes() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_db_reader_fresh_db_no_writes");
+        let test_provider = TestProvider::new(path, Arc::clone(&object_store));
+        let table_store = test_provider.table_store();
+
+        let mut into_tables = VecDeque::new();
+        let core = ManifestCore::new();
+
+        let (last_wal_id, last_committed_seq) = DbReaderInner::replay_wal_into(
+            Arc::clone(&table_store),
+            &DbReaderOptions::default(),
+            &core,
+            &mut into_tables,
+            true,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(last_wal_id, 0);
+        assert_eq!(last_committed_seq, 0);
+        assert!(into_tables.is_empty());
+    }
+
+    #[tokio::test]
+    async fn replay_wal_into_should_replay_single_wal_for_fresh_db() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_db_reader_fresh_db_one_wal");
+        let test_provider = TestProvider::new(path, Arc::clone(&object_store));
+        let table_store = test_provider.table_store();
+
+        let wal_row = RowEntry::new_value(b"key", b"value", 1);
+        write_wal_sst(Arc::clone(&table_store), 1, vec![wal_row.clone()])
+            .await
+            .unwrap();
+
+        let mut into_tables = VecDeque::new();
+        let core = ManifestCore::new();
+
+        let (last_wal_id, last_committed_seq) = DbReaderInner::replay_wal_into(
+            Arc::clone(&table_store),
+            &DbReaderOptions::default(),
+            &core,
+            &mut into_tables,
+            true,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(last_wal_id, 1);
+        assert_eq!(last_committed_seq, 1);
+        assert_eq!(into_tables.len(), 1);
+
+        let replayed = into_tables.front().unwrap();
+        assert_eq!(replayed.recent_flushed_wal_id(), 1);
+
+        let mut replayed_iter = replayed.table().iter();
+        test_utils::assert_iterator(&mut replayed_iter, vec![wal_row]).await;
+    }
+
     #[tokio::test(start_paused = true)]
     async fn should_fail_new_reads_if_manifest_poller_crashes() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
