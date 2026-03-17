@@ -439,7 +439,7 @@ impl DbReaderInner {
             sst_iter_options,
         };
 
-        let (mut last_wal_id, mut last_committed_seq) =
+        let (mut replay_after_wal_id, mut last_committed_seq) =
             if let Some(latest_replayed_table) = into_tables.front() {
                 (
                     latest_replayed_table.recent_flushed_wal_id(),
@@ -455,7 +455,7 @@ impl DbReaderInner {
         };
 
         let mut replay_iter = WalReplayIterator::range(
-            (last_wal_id + 1)..wal_id_end,
+            (replay_after_wal_id + 1)..wal_id_end,
             core,
             replay_options,
             Arc::clone(&table_store),
@@ -468,17 +468,17 @@ impl DbReaderInner {
             Err(err) if has_not_found_object_store_error(&err) => None,
             Err(err) => return Err(err),
         } {
-            assert!(replayed_table.last_wal_id > last_wal_id);
+            assert!(replayed_table.last_wal_id > replay_after_wal_id);
             // Allow equality here since it's possible that a WAL file is an empty fence entry.
             assert!(replayed_table.last_seq >= last_committed_seq);
-            last_wal_id = replayed_table.last_wal_id;
+            replay_after_wal_id = replayed_table.last_wal_id;
             last_committed_seq = replayed_table.last_seq;
             let imm_memtable =
                 ImmutableMemtable::new(replayed_table.table, replayed_table.last_wal_id);
             into_tables.push_front(Arc::new(imm_memtable));
         }
 
-        Ok((last_wal_id, last_committed_seq))
+        Ok((replay_after_wal_id, last_committed_seq))
     }
 
     /// Returns an error if the reader has been closed.
