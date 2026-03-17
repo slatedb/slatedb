@@ -462,7 +462,12 @@ impl DbReaderInner {
         )
         .await?;
 
-        while let Some(replayed_table) = replay_iter.next().await? {
+        while let Some(replayed_table) = match replay_iter.next().await {
+            Ok(Some(replayed_table)) => Some(replayed_table),
+            Ok(None) => None,
+            Err(err) if has_not_found_object_store_error(&err) => None,
+            Err(err) => return Err(err),
+        } {
             assert!(replayed_table.last_wal_id > last_wal_id);
             // Allow equality here since it's possible that a WAL file is an empty fence entry.
             assert!(replayed_table.last_seq >= last_committed_seq);
@@ -1030,6 +1035,24 @@ impl DbRead for DbReader {
     }
 }
 
+/// Checks if the error or any of its sources is an `object_store::Error::NotFound` error.
+fn has_not_found_object_store_error(err: &(dyn std::error::Error + 'static)) -> bool {
+    let mut current = Some(err);
+    while let Some(current_err) = current {
+        if current_err
+            .downcast_ref::<object_store::Error>()
+            .is_some_and(|err| matches!(err, object_store::Error::NotFound { .. }))
+            || current_err
+                .downcast_ref::<Arc<object_store::Error>>()
+                .is_some_and(|err| matches!(err.as_ref(), object_store::Error::NotFound { .. }))
+        {
+            return true;
+        }
+        current = current_err.source();
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::CheckpointState;
@@ -1397,6 +1420,114 @@ mod tests {
             vec![RowEntry::new_value(b"fresh_key", b"fresh_value", 4)],
         )
         .await;
+    }
+
+    #[test]
+    fn has_not_found_object_store_error_should_walk_nested_error_sources() {
+        let err = crate::Error::from(SlateDBError::from(object_store::Error::NotFound {
+            path: "missing-wal".to_string(),
+            source: Box::new(std::io::Error::other("missing")),
+        }));
+
+        assert!(super::has_not_found_object_store_error(&err));
+    }
+
+    #[test]
+    fn has_not_found_object_store_error_should_ignore_non_not_found_errors() {
+        let err = SlateDBError::from(object_store::Error::NotImplemented);
+
+        assert!(!super::has_not_found_object_store_error(&err));
+    }
+
+    #[tokio::test]
+    async fn replay_wal_into_should_treat_missing_wal_sst_as_end_of_iteration() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_db_reader_missing_wal");
+        let test_provider = TestProvider::new(path, Arc::clone(&object_store));
+        let table_store = test_provider.table_store();
+
+        write_wal_sst(
+            Arc::clone(&table_store),
+            1,
+            vec![RowEntry::new_value(b"key", b"value", 1)],
+        )
+        .await
+        .unwrap();
+
+        let mut into_tables = VecDeque::new();
+        let mut core = ManifestCore::new();
+        core.next_wal_sst_id = 3;
+
+        let (last_wal_id, last_committed_seq) = DbReaderInner::replay_wal_into(
+            Arc::clone(&table_store),
+            &DbReaderOptions::default(),
+            &core,
+            &mut into_tables,
+            false,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(last_wal_id, 0);
+        assert_eq!(last_committed_seq, 0);
+        assert!(into_tables.is_empty());
+    }
+
+    #[tokio::test]
+    async fn replay_wal_into_should_keep_previously_replayed_tables_before_missing_wal_sst() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_db_reader_missing_wal_after_replay");
+        let test_provider = TestProvider::new(path, Arc::clone(&object_store));
+        let table_store = test_provider.table_store();
+
+        let wal_1_row = RowEntry::new_value(b"a", &vec![b'a'; 8], 1);
+        let wal_2_row_1 = RowEntry::new_value(b"b", &vec![b'b'; 40], 2);
+        let wal_2_row_2 = RowEntry::new_value(b"c", &vec![b'c'; 40], 3);
+
+        let max_memtable_bytes = table_store.estimate_encoded_size_compacted(
+            2,
+            wal_1_row.estimated_size() + wal_2_row_1.estimated_size(),
+        ) as u64;
+
+        write_wal_sst(Arc::clone(&table_store), 1, vec![wal_1_row.clone()])
+            .await
+            .unwrap();
+        write_wal_sst(
+            Arc::clone(&table_store),
+            2,
+            vec![wal_2_row_1.clone(), wal_2_row_2],
+        )
+        .await
+        .unwrap();
+
+        let mut into_tables = VecDeque::new();
+        let mut core = ManifestCore::new();
+        // Force the reader to attempt to read up to 4 even though 3 and 4 don't exist.
+        core.next_wal_sst_id = 4;
+        let reader_options = DbReaderOptions {
+            max_memtable_bytes,
+            ..DbReaderOptions::default()
+        };
+
+        let (last_wal_id, last_committed_seq) = DbReaderInner::replay_wal_into(
+            Arc::clone(&table_store),
+            &reader_options,
+            &core,
+            &mut into_tables,
+            false,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(last_wal_id, 2);
+        assert_eq!(last_committed_seq, 2);
+        assert_eq!(into_tables.len(), 1);
+
+        let replayed = into_tables.front().unwrap();
+        assert_eq!(replayed.recent_flushed_wal_id(), 2);
+
+        let mut replayed_iter = replayed.table().iter();
+        test_utils::assert_iterator(&mut replayed_iter, vec![wal_1_row, wal_2_row_1]).await;
     }
 
     #[tokio::test(start_paused = true)]
