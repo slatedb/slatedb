@@ -223,11 +223,8 @@ impl DbReaderInner {
     fn should_reestablish_checkpoint(&self, latest: &ManifestCore) -> bool {
         let read_guard = self.state.read();
         let current_state = read_guard.core();
-        latest.replay_after_wal_id > current_state.replay_after_wal_id
-            || latest.l0_last_compacted != current_state.l0_last_compacted
+        latest.l0_last_compacted != current_state.l0_last_compacted
             || latest.compacted != current_state.compacted
-            // If the latest manifest is fully beyond our in-memory memtables, just
-            // drop them and reestablish the checkpoint from scratch.
             || latest.last_l0_seq > read_guard.last_remote_persisted_seq
     }
 
