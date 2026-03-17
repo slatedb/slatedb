@@ -527,7 +527,6 @@ mod tests {
             merge_operator,
             data.into(),
             true,
-            0,
             None,
         );
         assert_iterator(
@@ -553,7 +552,6 @@ mod tests {
             merge_operator,
             data.into(),
             true,
-            0,
             None,
         );
 
@@ -679,7 +677,6 @@ mod tests {
             merge_operator,
             test_case.unsorted_data.into(),
             test_case.merge_different_expire_ts,
-            0,
             test_case.snapshot_barrier_seq,
         );
         assert_iterator(&mut iterator, test_case.expected).await;
@@ -822,7 +819,6 @@ mod tests {
             merge_operator,
             data.into(),
             true,
-            0,
             None,
         );
 
@@ -853,7 +849,6 @@ mod tests {
             merge_operator,
             data.into(),
             true,
-            0,
             None,
         );
 
@@ -877,7 +872,6 @@ mod tests {
             merge_operator,
             data.into(),
             true,
-            0,
             None,
         );
 
@@ -902,7 +896,6 @@ mod tests {
             merge_operator,
             data.into(),
             true,
-            0,
             None,
         );
 
@@ -934,7 +927,6 @@ mod tests {
             merge_operator,
             data.into(),
             true,
-            0,
             None,
         );
 
@@ -952,19 +944,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_merge_operator_filters_expired_entries() {
+    async fn test_merge_operator_merges_entries_with_mixed_expire_ts() {
         let merge_operator = Arc::new(MockMergeOperator {});
 
         // Create entries with different expiration times
-        // now = 100, so entries with expire_ts <= 100 are expired
-        // Entries are sorted by reverse seq, so we need the first entry (highest seq) to be non-expired
-        // to properly initialize the tracker
         let data = vec![
-            // Non-expired merge operands (expire_ts > 100) - highest seq first
             RowEntry::new_merge(b"key1", b"4", 4).with_expire_ts(300),
             RowEntry::new_merge(b"key1", b"2", 2).with_expire_ts(150),
             RowEntry::new_merge(b"key1", b"1", 1).with_expire_ts(200),
-            // Expired merge operands (expire_ts <= 100) - should be filtered out
             RowEntry::new_merge(b"key1", b"5", 5).with_expire_ts(100),
             RowEntry::new_merge(b"key1", b"3", 3).with_expire_ts(50),
         ];
@@ -973,40 +960,29 @@ mod tests {
             merge_operator,
             data.into(),
             true,
-            100, // now = 100
             None,
         );
 
-        // Only non-expired entries (4, 2, 1) should be merged
-        // Entries with expire_ts 50 and 100 should be filtered out
-        // Since entries are sorted by reverse seq, first entry is seq=5 (expired)
-        // Tracker initializes with seq=5, but max_create_ts and min_expire_ts are None
-        // Seq=5 is filtered out (expired), then seq=4, 2, 1 are added to batch
-        // process_batch updates tracker: min_expire_ts becomes 150 (min of 300, 150, 200)
-        // Batch is [4, 2, 1], reversed to [1, 2, 4], merged to "124"
-        // Final seq is 5 (from first entry initialization), min_expire_ts is 150
+        // Entries sorted by reverse seq: seq=5, 4, 3, 2, 1
+        // Reversed to seq asc: b"1", b"2", b"3", b"4", b"5" -> merged to "12345"
+        // min_expire_ts = min(200, 150, 50, 300, 100) = 50
         assert_iterator(
             &mut iterator,
-            vec![RowEntry::new_merge(b"key1", b"124", 5).with_expire_ts(150)], // seq=5 from first entry, min_expire_ts=150 from non-expired entries
+            vec![RowEntry::new_merge(b"key1", b"12345", 5).with_expire_ts(50)],
         )
         .await;
     }
 
     #[tokio::test]
-    async fn test_merge_operator_filters_expired_entries_with_base_value() {
+    async fn test_merge_operator_merges_entries_with_base_value_and_mixed_expire_ts() {
         let merge_operator = Arc::new(MockMergeOperator {});
 
-        // Create entries with a base value and mixed expired/non-expired merge operands
-        // Entries are sorted by reverse seq, so base value (seq=0) comes last
-        // We need non-expired merge operands with higher seq to come first
+        // Create entries with a base value and merge operands with different expire_ts
         let data = vec![
-            // Non-expired merge operands (higher seq first)
             RowEntry::new_merge(b"key1", b"4", 4).with_expire_ts(300),
             RowEntry::new_merge(b"key1", b"2", 2).with_expire_ts(250),
             RowEntry::new_merge(b"key1", b"1", 1).with_expire_ts(150),
-            // Expired merge operand - should be filtered out
             RowEntry::new_merge(b"key1", b"3", 3).with_expire_ts(50),
-            // Base value (non-expired) - comes last due to seq=0
             RowEntry::new_value(b"key1", b"BASE", 0).with_expire_ts(200),
         ];
 
@@ -1014,29 +990,24 @@ mod tests {
             merge_operator,
             data.into(),
             true,
-            100, // now = 100,
             None,
         );
 
-        // Base value + non-expired entries (4, 2, 1) should be merged
-        // Entry with expire_ts 50 should be filtered out
-        // First entry is seq=4 (non-expired), tracker starts with seq=4, but max_create_ts and min_expire_ts are None
-        // Seq=4, 2, 1 are added to batch (all non-expired)
-        // process_batch updates tracker: min_expire_ts becomes 150 (min of 300, 250, 150)
-        // Batch is [4, 2, 1], reversed to [1, 2, 4], merged to "124", then merged with BASE to "BASE124"
-        // Final seq is 4 (from first entry initialization), min_expire_ts is 150
+        // Sorted by reverse seq: seq=4, 3, 2, 1, 0(BASE)
+        // Merge operands [4, 3, 2, 1] reversed to [1, 2, 3, 4], merged to "1234", then merged with BASE
+        // min_expire_ts = min(300, 50, 250, 150, 200) = 50
         assert_iterator(
             &mut iterator,
-            vec![RowEntry::new_value(b"key1", b"BASE124", 4).with_expire_ts(150)], // seq=4 from first entry, min_expire_ts=150
+            vec![RowEntry::new_value(b"key1", b"BASE1234", 4).with_expire_ts(50)],
         )
         .await;
     }
 
     #[tokio::test]
-    async fn test_merge_operator_handles_all_expired_entries() {
+    async fn test_merge_operator_merges_all_entries_with_expire_ts() {
         let merge_operator = Arc::new(MockMergeOperator {});
 
-        // All merge operands are expired
+        // All merge operands have expire_ts set
         let data = vec![
             RowEntry::new_merge(b"key1", b"1", 1).with_expire_ts(50),
             RowEntry::new_merge(b"key1", b"2", 2).with_expire_ts(80),
@@ -1047,11 +1018,41 @@ mod tests {
             merge_operator,
             data.into(),
             true,
-            100, // now = 100, all entries are expired,
             None,
         );
 
-        // All entries are expired, so nothing should be returned
-        assert_iterator(&mut iterator, vec![]).await;
+        // Sorted by reverse seq: seq=3, 2, 1
+        // Reversed to [1, 2, 3], merged to "123"
+        // min_expire_ts = min(50, 80, 90) = 50
+        assert_iterator(
+            &mut iterator,
+            vec![RowEntry::new_merge(b"key1", b"123", 3).with_expire_ts(50)],
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn should_use_base_expire_ts_when_it_is_the_earliest() {
+        // given: a base value with the earliest expire_ts
+        let merge_operator = Arc::new(MockMergeOperator {});
+        let data = vec![
+            RowEntry::new_merge(b"key1", b"2", 2).with_expire_ts(300),
+            RowEntry::new_merge(b"key1", b"1", 1).with_expire_ts(200),
+            RowEntry::new_value(b"key1", b"BASE", 0).with_expire_ts(50),
+        ];
+
+        let mut iterator = MergeOperatorIterator::<MockRowEntryIterator>::new(
+            merge_operator,
+            data.into(),
+            true,
+            None,
+        );
+
+        // then: min_expire_ts should come from the base value (50)
+        assert_iterator(
+            &mut iterator,
+            vec![RowEntry::new_value(b"key1", b"BASE12", 2).with_expire_ts(50)],
+        )
+        .await;
     }
 }
