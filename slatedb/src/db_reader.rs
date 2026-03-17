@@ -1483,9 +1483,9 @@ mod tests {
         let test_provider = TestProvider::new(path, Arc::clone(&object_store));
         let table_store = test_provider.table_store();
 
-        let wal_1_row = RowEntry::new_value(b"a", &vec![b'a'; 8], 1);
-        let wal_2_row_1 = RowEntry::new_value(b"b", &vec![b'b'; 40], 2);
-        let wal_2_row_2 = RowEntry::new_value(b"c", &vec![b'c'; 40], 3);
+        let wal_1_row = RowEntry::new_value(b"a", &[b'a'; 8], 1);
+        let wal_2_row_1 = RowEntry::new_value(b"b", &[b'b'; 40], 2);
+        let wal_2_row_2 = RowEntry::new_value(b"c", &[b'c'; 40], 3);
 
         let max_memtable_bytes = table_store.estimate_encoded_size_compacted(
             2,
