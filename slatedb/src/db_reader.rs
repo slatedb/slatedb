@@ -226,6 +226,9 @@ impl DbReaderInner {
         latest.replay_after_wal_id > current_state.replay_after_wal_id
             || latest.l0_last_compacted != current_state.l0_last_compacted
             || latest.compacted != current_state.compacted
+            // If the latest manifest is fully beyond our in-memory memtables, just
+            // drop them and reestablish the checkpoint from scratch.
+            || latest.last_l0_seq > read_guard.last_remote_persisted_seq
     }
 
     async fn replace_checkpoint(
@@ -2082,6 +2085,65 @@ mod tests {
             assert_eq!(metadata.first_seq, *expected_table.seqs.first().unwrap());
             assert_eq!(metadata.last_seq, *expected_table.seqs.last().unwrap());
         }
+    }
+
+    #[test]
+    fn should_reestablish_checkpoint_when_latest_last_l0_seq_exceeds_last_remote_persisted_seq() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from(format!(
+            "/tmp/test_db_reader_should_reestablish_checkpoint_{}",
+            Uuid::new_v4()
+        ));
+        let test_provider = TestProvider::new(path, Arc::clone(&object_store));
+        let manifest_store = test_provider.manifest_store();
+        let table_store = test_provider.table_store();
+
+        let mut current_core = ManifestCore::new();
+        current_core.last_l0_seq = 10;
+        current_core.next_wal_sst_id = 2;
+
+        let prior_state = CheckpointState {
+            checkpoint: test_checkpoint(1, test_provider.system_clock.clone()),
+            manifest: Manifest::initial(current_core.clone()),
+            imm_memtable: VecDeque::from([immutable_memtable(
+                1,
+                vec![RowEntry::new_value(b"key", b"value", 10)],
+            )]),
+            last_wal_id: 1,
+            last_remote_persisted_seq: 10,
+        };
+
+        let oracle = Arc::new(DbReaderOracle::new(0));
+        let stat_registry = Arc::new(StatRegistry::new());
+        let reader = Reader {
+            table_store: Arc::clone(&table_store),
+            db_stats: DbStats::new(stat_registry.as_ref()),
+            mono_clock: Arc::new(MonotonicClock::new(
+                test_provider.system_clock.clone(),
+                i64::MIN,
+            )),
+            oracle: oracle.clone(),
+            merge_operator: None,
+        };
+        let inner = DbReaderInner {
+            manifest_store,
+            table_store,
+            options: DbReaderOptions::default(),
+            state: parking_lot::RwLock::new(Arc::new(prior_state)),
+            system_clock: test_provider.system_clock.clone(),
+            user_checkpoint_id: None,
+            oracle,
+            reader,
+            closed_result_watcher: ClosedResultWriter::new(WatchableOnceCell::new()),
+            rand: test_provider.rand.clone(),
+        };
+
+        assert!(!inner.should_reestablish_checkpoint(&current_core));
+
+        let mut latest = current_core.clone();
+        latest.last_l0_seq = 11;
+
+        assert!(inner.should_reestablish_checkpoint(&latest));
     }
 
     #[tokio::test]
