@@ -14,14 +14,6 @@ crate-type = ["cdylib"]
 doc = false
 bench = false
 
-[features]
-bindgen-cli = ["uniffi/cli"]
-
-[[bin]]
-name = "slatedb-uniffi-bindgen"
-path = "src/bin/slatedb-uniffi-bindgen.rs"
-required-features = ["bindgen-cli"]
-
 [dependencies]
 log = { workspace = true }
 parking_lot = { workspace = true }
