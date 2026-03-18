@@ -57,8 +57,8 @@ pub struct WriteHandle {
     pub create_ts: i64,
 }
 
-impl WriteHandle {
-    pub(crate) fn from_core(value: slatedb::WriteHandle) -> Self {
+impl From<slatedb::WriteHandle> for WriteHandle {
+    fn from(value: slatedb::WriteHandle) -> Self {
         Self {
             seqnum: value.seqnum(),
             create_ts: value.create_ts(),
@@ -75,8 +75,8 @@ pub struct KeyValue {
     pub expire_ts: Option<i64>,
 }
 
-impl KeyValue {
-    pub(crate) fn from_core(value: slatedb::KeyValue) -> Self {
+impl From<slatedb::KeyValue> for KeyValue {
+    fn from(value: slatedb::KeyValue) -> Self {
         Self {
             key: value.key.to_vec(),
             value: value.value.to_vec(),
@@ -104,8 +104,8 @@ pub struct RowEntry {
     pub expire_ts: Option<i64>,
 }
 
-impl RowEntry {
-    pub(crate) fn from_core(entry: slatedb::RowEntry) -> Self {
+impl From<slatedb::RowEntry> for RowEntry {
+    fn from(entry: slatedb::RowEntry) -> Self {
         let (kind, value) = match entry.value {
             ValueDeletable::Value(value) => (RowEntryKind::Value, Some(value.to_vec())),
             ValueDeletable::Tombstone => (RowEntryKind::Tombstone, None),

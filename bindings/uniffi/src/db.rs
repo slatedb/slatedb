@@ -67,11 +67,7 @@ impl Db {
     }
 
     pub async fn get_key_value(&self, key: Vec<u8>) -> Result<Option<KeyValue>, Error> {
-        Ok(self
-            .inner
-            .get_key_value(key)
-            .await?
-            .map(KeyValue::from_core))
+        Ok(self.inner.get_key_value(key).await?.map(KeyValue::from))
     }
 
     pub async fn get_key_value_with_options(
@@ -84,7 +80,7 @@ impl Db {
             .inner
             .get_key_value_with_options(key, &options)
             .await?
-            .map(KeyValue::from_core))
+            .map(KeyValue::from))
     }
 
     pub async fn scan(&self, range: KeyRange) -> Result<Arc<DbIterator>, Error> {
@@ -127,7 +123,7 @@ impl Db {
 
     pub async fn put(&self, key: Vec<u8>, value: Vec<u8>) -> Result<WriteHandle, Error> {
         validate_key_value(&key, &value)?;
-        Ok(WriteHandle::from_core(self.inner.put(key, value).await?))
+        Ok(self.inner.put(key, value).await?.into())
     }
 
     pub async fn put_with_options(
@@ -140,16 +136,16 @@ impl Db {
         validate_key_value(&key, &value)?;
         let put_options = put_options.into_core();
         let write_options = write_options.into_core();
-        Ok(WriteHandle::from_core(
-            self.inner
-                .put_with_options(key, value, &put_options, &write_options)
-                .await?,
-        ))
+        Ok(self
+            .inner
+            .put_with_options(key, value, &put_options, &write_options)
+            .await?
+            .into())
     }
 
     pub async fn delete(&self, key: Vec<u8>) -> Result<WriteHandle, Error> {
         validate_key(&key)?;
-        Ok(WriteHandle::from_core(self.inner.delete(key).await?))
+        Ok(self.inner.delete(key).await?.into())
     }
 
     pub async fn delete_with_options(
@@ -159,16 +155,12 @@ impl Db {
     ) -> Result<WriteHandle, Error> {
         validate_key(&key)?;
         let options = options.into_core();
-        Ok(WriteHandle::from_core(
-            self.inner.delete_with_options(key, &options).await?,
-        ))
+        Ok(self.inner.delete_with_options(key, &options).await?.into())
     }
 
     pub async fn merge(&self, key: Vec<u8>, operand: Vec<u8>) -> Result<WriteHandle, Error> {
         validate_key_value(&key, &operand)?;
-        Ok(WriteHandle::from_core(
-            self.inner.merge(key, operand).await?,
-        ))
+        Ok(self.inner.merge(key, operand).await?.into())
     }
 
     pub async fn merge_with_options(
@@ -181,16 +173,16 @@ impl Db {
         validate_key_value(&key, &operand)?;
         let merge_options = merge_options.into_core();
         let write_options = write_options.into_core();
-        Ok(WriteHandle::from_core(
-            self.inner
-                .merge_with_options(key, operand, &merge_options, &write_options)
-                .await?,
-        ))
+        Ok(self
+            .inner
+            .merge_with_options(key, operand, &merge_options, &write_options)
+            .await?
+            .into())
     }
 
     pub async fn write(&self, batch: Arc<WriteBatch>) -> Result<WriteHandle, Error> {
         let batch = batch.take_for_write()?;
-        Ok(WriteHandle::from_core(self.inner.write(batch).await?))
+        Ok(self.inner.write(batch).await?.into())
     }
 
     pub async fn write_with_options(
@@ -200,9 +192,7 @@ impl Db {
     ) -> Result<WriteHandle, Error> {
         let batch = batch.take_for_write()?;
         let options = options.into_core();
-        Ok(WriteHandle::from_core(
-            self.inner.write_with_options(batch, &options).await?,
-        ))
+        Ok(self.inner.write_with_options(batch, &options).await?.into())
     }
 
     pub async fn flush(&self) -> Result<(), Error> {

@@ -36,11 +36,7 @@ impl DbSnapshot {
     }
 
     pub async fn get_key_value(&self, key: Vec<u8>) -> Result<Option<KeyValue>, Error> {
-        Ok(self
-            .inner
-            .get_key_value(key)
-            .await?
-            .map(KeyValue::from_core))
+        Ok(self.inner.get_key_value(key).await?.map(KeyValue::from))
     }
 
     pub async fn get_key_value_with_options(
@@ -53,7 +49,7 @@ impl DbSnapshot {
             .inner
             .get_key_value_with_options(key, &options)
             .await?
-            .map(KeyValue::from_core))
+            .map(KeyValue::from))
     }
 
     pub async fn scan(&self, range: KeyRange) -> Result<Arc<DbIterator>, Error> {

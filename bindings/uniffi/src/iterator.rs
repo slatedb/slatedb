@@ -21,7 +21,7 @@ impl DbIterator {
 impl DbIterator {
     pub async fn next(&self) -> Result<Option<KeyValue>, Error> {
         let mut guard = self.inner.lock().await;
-        Ok(guard.next().await?.map(KeyValue::from_core))
+        Ok(guard.next().await?.map(KeyValue::from))
     }
 
     pub async fn seek(&self, key: Vec<u8>) -> Result<(), Error> {

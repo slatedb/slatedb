@@ -129,7 +129,7 @@ impl DbTransaction {
     pub async fn get_key_value(&self, key: Vec<u8>) -> Result<Option<KeyValue>, Error> {
         let guard = self.inner.lock().await;
         let tx = guard.as_ref().ok_or(SlateDbError::TransactionCompleted)?;
-        Ok(tx.get_key_value(key).await?.map(KeyValue::from_core))
+        Ok(tx.get_key_value(key).await?.map(KeyValue::from))
     }
 
     pub async fn get_key_value_with_options(
@@ -143,7 +143,7 @@ impl DbTransaction {
         Ok(tx
             .get_key_value_with_options(key, &options)
             .await?
-            .map(KeyValue::from_core))
+            .map(KeyValue::from))
     }
 
     pub async fn scan(&self, range: KeyRange) -> Result<Arc<DbIterator>, Error> {
@@ -191,7 +191,7 @@ impl DbTransaction {
             let mut guard = self.inner.lock().await;
             guard.take().ok_or(SlateDbError::TransactionCompleted)?
         };
-        Ok(tx.commit().await?.map(WriteHandle::from_core))
+        Ok(tx.commit().await?.map(WriteHandle::from))
     }
 
     pub async fn commit_with_options(
@@ -206,6 +206,6 @@ impl DbTransaction {
         Ok(tx
             .commit_with_options(&options)
             .await?
-            .map(WriteHandle::from_core))
+            .map(WriteHandle::from))
     }
 }
