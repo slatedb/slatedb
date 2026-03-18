@@ -184,7 +184,13 @@ impl Manifest {
     fn range(&self) -> Option<BytesRange> {
         let mut start_bound = None;
         let mut end_bound = None;
-        for sst in &self.core.l0 {
+        let all_views = self.core.l0.iter().chain(
+            self.core
+                .compacted
+                .iter()
+                .flat_map(|sr| sr.sst_views.iter()),
+        );
+        for sst in all_views {
             let range = sst.compacted_effective_range();
             start_bound = start_bound
                 .map(|b| min(b, range.comparable_start_bound()))
@@ -586,6 +592,28 @@ mod tests {
         let union = Manifest::union(manifests);
 
         assert_manifest_equal(&union, &expected_manifest, &sst_ids);
+    }
+
+    #[test]
+    fn test_range_includes_compacted_ssts() {
+        let manifest = build_manifest(
+            &SimpleManifest::new(
+                vec![],
+                vec![(
+                    0,
+                    vec![
+                        SstEntry::projected("sr_a", "a", "a".."m"),
+                        SstEntry::projected("sr_n", "n", "m"..),
+                    ],
+                )],
+            ),
+            |_| SsTableId::Compacted(Ulid::new()),
+        );
+        let range = manifest
+            .range()
+            .expect("range should be Some for manifest with sorted runs");
+        assert_eq!(range.start_bound(), Bound::Included(&Bytes::from("a")));
+        assert_eq!(range.end_bound(), Bound::Unbounded);
     }
 
     fn build_manifest<F>(manifest: &SimpleManifest, mut sst_id_fn: F) -> Manifest
