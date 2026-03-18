@@ -7,11 +7,16 @@ use crate::error::SlateDbError;
 type KeyBound = Bound<Vec<u8>>;
 type KeyBounds = (KeyBound, KeyBound);
 
+/// A half-open or closed byte-key range used by scan APIs.
 #[derive(Clone, Debug, Default, uniffi::Record)]
 pub struct KeyRange {
+    /// Inclusive or exclusive lower bound. `None` means unbounded.
     pub start: Option<Vec<u8>>,
+    /// Whether `start` is inclusive when present.
     pub start_inclusive: bool,
+    /// Inclusive or exclusive upper bound. `None` means unbounded.
     pub end: Option<Vec<u8>>,
+    /// Whether `end` is inclusive when present.
     pub end_inclusive: bool,
 }
 
@@ -51,9 +56,12 @@ impl KeyRange {
     }
 }
 
+/// Metadata returned by a successful write.
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct WriteHandle {
+    /// Sequence number assigned to the write.
     pub seqnum: u64,
+    /// Creation timestamp assigned to the write.
     pub create_ts: i64,
 }
 
@@ -66,12 +74,18 @@ impl From<slatedb::WriteHandle> for WriteHandle {
     }
 }
 
+/// A key/value pair together with the row version metadata that produced it.
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct KeyValue {
+    /// Row key.
     pub key: Vec<u8>,
+    /// Row value bytes.
     pub value: Vec<u8>,
+    /// Sequence number of the row version.
     pub seq: u64,
+    /// Creation timestamp of the row version.
     pub create_ts: i64,
+    /// Expiration timestamp, if the row has a TTL.
     pub expire_ts: Option<i64>,
 }
 
@@ -87,20 +101,31 @@ impl From<slatedb::KeyValue> for KeyValue {
     }
 }
 
+/// Kind of row entry stored in WAL iteration results.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
 pub enum RowEntryKind {
+    /// A regular value row.
     Value,
+    /// A delete tombstone.
     Tombstone,
+    /// A merge operand row.
     Merge,
 }
 
+/// A raw row entry returned from WAL inspection.
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct RowEntry {
+    /// Encoded row kind.
     pub kind: RowEntryKind,
+    /// Row key.
     pub key: Vec<u8>,
+    /// Row value for value and merge entries. `None` for tombstones.
     pub value: Option<Vec<u8>>,
+    /// Sequence number of the entry.
     pub seq: u64,
+    /// Creation timestamp if present in the WAL entry.
     pub create_ts: Option<i64>,
+    /// Expiration timestamp if present in the WAL entry.
     pub expire_ts: Option<i64>,
 }
 

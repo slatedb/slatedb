@@ -11,6 +11,9 @@ use crate::merge_operator::{adapt_merge_operator, MergeOperator};
 use crate::object_store::ObjectStore;
 use crate::settings::Settings;
 
+/// Builder for opening a writable [`crate::Db`].
+///
+/// Builders are single-use: calling [`DbBuilder::build`] consumes the builder.
 #[derive(uniffi::Object)]
 pub struct DbBuilder {
     builder: Mutex<Option<slatedb::DbBuilder<String>>>,
@@ -35,6 +38,7 @@ impl DbBuilder {
 
 #[uniffi::export]
 impl DbBuilder {
+    /// Creates a new database builder for `path` in `object_store`.
     #[uniffi::constructor]
     pub fn new(path: String, object_store: Arc<ObjectStore>) -> Arc<Self> {
         Arc::new(Self {
@@ -42,33 +46,39 @@ impl DbBuilder {
         })
     }
 
+    /// Applies a [`crate::Settings`] object to the builder.
     pub fn with_settings(&self, settings: Arc<Settings>) -> Result<(), Error> {
         let settings = settings.inner();
         self.update_builder(|builder| builder.with_settings(settings))
             .map_err(Into::into)
     }
 
+    /// Uses a separate object store for WAL files.
     pub fn with_wal_object_store(&self, wal_object_store: Arc<ObjectStore>) -> Result<(), Error> {
         self.update_builder(|builder| builder.with_wal_object_store(wal_object_store.inner.clone()))
             .map_err(Into::into)
     }
 
+    /// Disables the SST block and metadata cache.
     pub fn with_db_cache_disabled(&self) -> Result<(), Error> {
         self.update_builder(slatedb::DbBuilder::with_db_cache_disabled)
             .map_err(Into::into)
     }
 
+    /// Sets the seed used for SlateDB's internal random number generation.
     pub fn with_seed(&self, seed: u64) -> Result<(), Error> {
         self.update_builder(|builder| builder.with_seed(seed))
             .map_err(Into::into)
     }
 
+    /// Sets the SSTable block size used for newly written tables.
     pub fn with_sst_block_size(&self, sst_block_size: SstBlockSize) -> Result<(), Error> {
         let sst_block_size = sst_block_size.into();
         self.update_builder(|builder| builder.with_sst_block_size(sst_block_size))
             .map_err(Into::into)
     }
 
+    /// Installs an application-defined merge operator.
     pub fn with_merge_operator(&self, merge_operator: Arc<dyn MergeOperator>) -> Result<(), Error> {
         self.update_builder(|builder| {
             builder.with_merge_operator(adapt_merge_operator(merge_operator))
@@ -79,6 +89,7 @@ impl DbBuilder {
 
 #[uniffi::export(async_runtime = "tokio")]
 impl DbBuilder {
+    /// Opens the database and consumes this builder.
     pub async fn build(&self) -> Result<Arc<Db>, Error> {
         let builder = self.take_builder()?;
         let db = builder.build().await?;
@@ -86,6 +97,9 @@ impl DbBuilder {
     }
 }
 
+/// Builder for opening a read-only [`crate::DbReader`].
+///
+/// Builders are single-use: calling [`DbReaderBuilder::build`] consumes the builder.
 #[derive(uniffi::Object)]
 pub struct DbReaderBuilder {
     builder: Mutex<Option<slatedb::DbReaderBuilder<String>>>,
@@ -110,6 +124,7 @@ impl DbReaderBuilder {
 
 #[uniffi::export]
 impl DbReaderBuilder {
+    /// Creates a new reader builder for `path` in `object_store`.
     #[uniffi::constructor]
     pub fn new(path: String, object_store: Arc<ObjectStore>) -> Arc<Self> {
         Arc::new(Self {
@@ -120,6 +135,7 @@ impl DbReaderBuilder {
         })
     }
 
+    /// Pins the reader to an existing checkpoint UUID string.
     pub fn with_checkpoint_id(&self, checkpoint_id: String) -> Result<(), Error> {
         let checkpoint_id = Uuid::parse_str(&checkpoint_id)
             .map_err(|source| SlateDbError::InvalidCheckpointId { source })?;
@@ -127,11 +143,13 @@ impl DbReaderBuilder {
             .map_err(Into::into)
     }
 
+    /// Uses a separate object store for WAL files.
     pub fn with_wal_object_store(&self, wal_object_store: Arc<ObjectStore>) -> Result<(), Error> {
         self.update_builder(|builder| builder.with_wal_object_store(wal_object_store.inner.clone()))
             .map_err(Into::into)
     }
 
+    /// Installs an application-defined merge operator used while reading merge rows.
     pub fn with_merge_operator(&self, merge_operator: Arc<dyn MergeOperator>) -> Result<(), Error> {
         self.update_builder(|builder| {
             builder.with_merge_operator(adapt_merge_operator(merge_operator))
@@ -139,6 +157,7 @@ impl DbReaderBuilder {
         .map_err(Into::into)
     }
 
+    /// Applies custom reader options.
     pub fn with_options(&self, options: ReaderOptions) -> Result<(), Error> {
         let options = options.into();
         self.update_builder(|builder| builder.with_options(options))
@@ -148,6 +167,7 @@ impl DbReaderBuilder {
 
 #[uniffi::export(async_runtime = "tokio")]
 impl DbReaderBuilder {
+    /// Opens the reader and consumes this builder.
     pub async fn build(&self) -> Result<Arc<DbReader>, Error> {
         let builder = self.take_builder()?;
         let reader = builder.build().await?;

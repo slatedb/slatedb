@@ -2,9 +2,12 @@ use std::time::Duration;
 
 use crate::error::{Error, SlateDbError};
 
+/// Minimum durability level required for data returned by reads and scans.
 #[derive(Clone, Copy, Debug, Default, uniffi::Enum)]
 pub enum DurabilityLevel {
+    /// Return only data that has been flushed to remote object storage.
     Remote,
+    /// Return both remote data and newer in-memory data.
     #[default]
     Memory,
 }
@@ -18,9 +21,12 @@ impl From<DurabilityLevel> for slatedb::config::DurabilityLevel {
     }
 }
 
+/// Storage layer targeted by an explicit flush.
 #[derive(Clone, Copy, Debug, Default, uniffi::Enum)]
 pub enum FlushType {
+    /// Flush the active memtable and any immutable memtables to object storage.
     MemTable,
+    /// Flush the active WAL and any immutable WAL segments to object storage.
     #[default]
     Wal,
 }
@@ -34,10 +40,13 @@ impl From<FlushType> for slatedb::config::FlushType {
     }
 }
 
+/// Isolation level used when starting a transaction.
 #[derive(Clone, Copy, Debug, Default, uniffi::Enum)]
 pub enum IsolationLevel {
+    /// Reads see a stable snapshot without full serializable conflict checking.
     #[default]
     Snapshot,
+    /// Reads see a stable snapshot with serializable conflict detection.
     SerializableSnapshot,
 }
 
@@ -50,15 +59,23 @@ impl From<IsolationLevel> for slatedb::IsolationLevel {
     }
 }
 
+/// Block size used for newly written SSTable blocks.
 #[derive(Clone, Copy, Debug, Default, uniffi::Enum)]
 pub enum SstBlockSize {
+    /// 1 KiB blocks.
     Block1Kib,
+    /// 2 KiB blocks.
     Block2Kib,
+    /// 4 KiB blocks.
     #[default]
     Block4Kib,
+    /// 8 KiB blocks.
     Block8Kib,
+    /// 16 KiB blocks.
     Block16Kib,
+    /// 32 KiB blocks.
     Block32Kib,
+    /// 64 KiB blocks.
     Block64Kib,
 }
 
@@ -76,11 +93,15 @@ impl From<SstBlockSize> for slatedb::SstBlockSize {
     }
 }
 
+/// Time-to-live policy applied to an inserted value or merge operand.
 #[derive(Clone, Debug, Default, uniffi::Enum)]
 pub enum Ttl {
+    /// Use the database default TTL.
     #[default]
     Default,
+    /// Store the value without expiration.
     NoExpiry,
+    /// Expire the value after the given number of clock ticks.
     ExpireAfterTicks(u64),
 }
 
@@ -94,10 +115,14 @@ impl From<Ttl> for slatedb::config::Ttl {
     }
 }
 
+/// Options that control a point read.
 #[derive(Clone, Debug, uniffi::Record)]
 pub struct ReadOptions {
+    /// Minimum durability level a returned row must satisfy.
     pub durability_filter: DurabilityLevel,
+    /// Whether uncommitted dirty data may be returned.
     pub dirty: bool,
+    /// Whether fetched blocks should be inserted into the block cache.
     pub cache_blocks: bool,
 }
 
@@ -121,11 +146,16 @@ impl From<ReadOptions> for slatedb::config::ReadOptions {
     }
 }
 
+/// Options for opening a [`crate::DbReader`].
 #[derive(Clone, Debug, uniffi::Record)]
 pub struct ReaderOptions {
+    /// How often the reader polls for new manifests and WAL data, in milliseconds.
     pub manifest_poll_interval_ms: u64,
+    /// Lifetime of an internally managed checkpoint, in milliseconds.
     pub checkpoint_lifetime_ms: u64,
+    /// Maximum size of one in-memory table used while replaying WAL data.
     pub max_memtable_bytes: u64,
+    /// Whether WAL replay should be skipped entirely.
     pub skip_wal_replay: bool,
 }
 
@@ -152,12 +182,18 @@ impl From<ReaderOptions> for slatedb::config::DbReaderOptions {
     }
 }
 
+/// Options that control range scans and prefix scans.
 #[derive(Clone, Debug, uniffi::Record)]
 pub struct ScanOptions {
+    /// Minimum durability level a returned row must satisfy.
     pub durability_filter: DurabilityLevel,
+    /// Whether uncommitted dirty data may be returned.
     pub dirty: bool,
+    /// Number of bytes to read ahead while scanning.
     pub read_ahead_bytes: u64,
+    /// Whether fetched blocks should be inserted into the block cache.
     pub cache_blocks: bool,
+    /// Maximum number of concurrent fetch tasks used by the scan.
     pub max_fetch_tasks: u64,
 }
 
@@ -195,8 +231,10 @@ impl TryFrom<ScanOptions> for slatedb::config::ScanOptions {
     }
 }
 
+/// Options that control durability behavior for writes and commits.
 #[derive(Clone, Debug, uniffi::Record)]
 pub struct WriteOptions {
+    /// Whether the call waits for the write to become durable before returning.
     pub await_durable: bool,
 }
 
@@ -216,8 +254,10 @@ impl From<WriteOptions> for slatedb::config::WriteOptions {
     }
 }
 
+/// Options applied to a put operation.
 #[derive(Clone, Debug, Default, uniffi::Record)]
 pub struct PutOptions {
+    /// TTL policy for the inserted value.
     pub ttl: Ttl,
 }
 
@@ -229,8 +269,10 @@ impl From<PutOptions> for slatedb::config::PutOptions {
     }
 }
 
+/// Options applied to a merge operation.
 #[derive(Clone, Debug, Default, uniffi::Record)]
 pub struct MergeOptions {
+    /// TTL policy for the inserted merge operand.
     pub ttl: Ttl,
 }
 
@@ -242,8 +284,10 @@ impl From<MergeOptions> for slatedb::config::MergeOptions {
     }
 }
 
+/// Options for an explicit flush request.
 #[derive(Clone, Debug, uniffi::Record, Default)]
 pub struct FlushOptions {
+    /// Which storage layer should be flushed.
     pub flush_type: FlushType,
 }
 

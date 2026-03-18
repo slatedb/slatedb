@@ -11,14 +11,21 @@ use tracing_subscriber::Layer;
 
 use crate::error::Error;
 
+/// Log level used by [`init_logging`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, uniffi::Enum)]
 pub enum LogLevel {
+    /// Disable logging.
     #[default]
     Off,
+    /// Error-level logs only.
     Error,
+    /// Warning and error logs.
     Warn,
+    /// Info, warning, and error logs.
     Info,
+    /// Debug, info, warning, and error logs.
     Debug,
+    /// Trace and all higher-severity logs.
     Trace,
 }
 
@@ -58,13 +65,20 @@ impl From<&tracing::Level> for LogLevel {
     }
 }
 
+/// A single log event forwarded to a foreign callback.
 #[derive(Clone, Debug, Default, PartialEq, Eq, uniffi::Record)]
 pub struct LogRecord {
+    /// Event severity.
     pub level: LogLevel,
+    /// Logging target or explicit `log.target` field.
     pub target: String,
+    /// Rendered log message.
     pub message: String,
+    /// Rust module path, when available.
     pub module_path: Option<String>,
+    /// Source file path, when available.
     pub file: Option<String>,
+    /// Source line number, when available.
     pub line: Option<u32>,
 }
 
@@ -89,8 +103,10 @@ impl LogRecord {
     }
 }
 
+/// Callback invoked for each emitted log record.
 #[uniffi::export(with_foreign)]
 pub trait LogCallback: Send + Sync {
+    /// Handles one log record.
     fn log(&self, record: LogRecord);
 }
 
@@ -101,6 +117,10 @@ fn init_lock() -> &'static Mutex<()> {
 
 static LOGGING_INITIALIZED: AtomicBool = AtomicBool::new(false);
 
+/// Installs SlateDB logging exactly once for the current process.
+///
+/// If `callback` is provided, log records are forwarded to it. Otherwise logs
+/// are written to standard error using the default tracing formatter.
 #[uniffi::export]
 pub fn init_logging(level: LogLevel, callback: Option<Arc<dyn LogCallback>>) -> Result<(), Error> {
     if LOGGING_INITIALIZED.load(Ordering::Acquire) {

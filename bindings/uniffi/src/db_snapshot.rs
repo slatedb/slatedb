@@ -5,6 +5,7 @@ use crate::error::Error;
 use crate::iterator::DbIterator;
 use crate::types::{KeyRange, KeyValue};
 
+/// Read-only snapshot representing a consistent view of the database.
 #[derive(uniffi::Object)]
 pub struct DbSnapshot {
     inner: Arc<slatedb::DbSnapshot>,
@@ -18,10 +19,12 @@ impl DbSnapshot {
 
 #[uniffi::export(async_runtime = "tokio")]
 impl DbSnapshot {
+    /// Reads the value visible in this snapshot for `key`.
     pub async fn get(&self, key: Vec<u8>) -> Result<Option<Vec<u8>>, Error> {
         Ok(self.inner.get(key).await?.map(|value| value.to_vec()))
     }
 
+    /// Reads the value visible in this snapshot for `key` using custom read options.
     pub async fn get_with_options(
         &self,
         key: Vec<u8>,
@@ -35,10 +38,12 @@ impl DbSnapshot {
             .map(|value| value.to_vec()))
     }
 
+    /// Reads the row version visible in this snapshot for `key`.
     pub async fn get_key_value(&self, key: Vec<u8>) -> Result<Option<KeyValue>, Error> {
         Ok(self.inner.get_key_value(key).await?.map(KeyValue::from))
     }
 
+    /// Reads the row version visible in this snapshot for `key` using custom read options.
     pub async fn get_key_value_with_options(
         &self,
         key: Vec<u8>,
@@ -52,12 +57,14 @@ impl DbSnapshot {
             .map(KeyValue::from))
     }
 
+    /// Scans rows inside `range` as of this snapshot.
     pub async fn scan(&self, range: KeyRange) -> Result<Arc<DbIterator>, Error> {
         let range = range.into_bounds()?;
         let iter = self.inner.scan::<Vec<u8>, _>(range).await?;
         Ok(Arc::new(DbIterator::new(iter)))
     }
 
+    /// Scans rows inside `range` as of this snapshot using custom scan options.
     pub async fn scan_with_options(
         &self,
         range: KeyRange,
@@ -72,11 +79,13 @@ impl DbSnapshot {
         Ok(Arc::new(DbIterator::new(iter)))
     }
 
+    /// Scans rows whose keys start with `prefix` as of this snapshot.
     pub async fn scan_prefix(&self, prefix: Vec<u8>) -> Result<Arc<DbIterator>, Error> {
         let iter = self.inner.scan_prefix(prefix).await?;
         Ok(Arc::new(DbIterator::new(iter)))
     }
 
+    /// Scans rows whose keys start with `prefix` as of this snapshot using custom options.
     pub async fn scan_prefix_with_options(
         &self,
         prefix: Vec<u8>,
