@@ -58,7 +58,7 @@ impl Db {
         key: Vec<u8>,
         options: ReadOptions,
     ) -> Result<Option<Vec<u8>>, Error> {
-        let options = options.into_core();
+        let options = options.into();
         Ok(self
             .inner
             .get_with_options(key, &options)
@@ -75,7 +75,7 @@ impl Db {
         key: Vec<u8>,
         options: ReadOptions,
     ) -> Result<Option<KeyValue>, Error> {
-        let options = options.into_core();
+        let options = options.into();
         Ok(self
             .inner
             .get_key_value_with_options(key, &options)
@@ -95,7 +95,7 @@ impl Db {
         options: ScanOptions,
     ) -> Result<Arc<DbIterator>, Error> {
         let range = range.into_bounds()?;
-        let options = options.into_core()?;
+        let options = options.try_into()?;
         let iter = self
             .inner
             .scan_with_options::<Vec<u8>, _>(range, &options)
@@ -113,7 +113,7 @@ impl Db {
         prefix: Vec<u8>,
         options: ScanOptions,
     ) -> Result<Arc<DbIterator>, Error> {
-        let options = options.into_core()?;
+        let options = options.try_into()?;
         let iter = self
             .inner
             .scan_prefix_with_options(prefix, &options)
@@ -134,8 +134,8 @@ impl Db {
         write_options: WriteOptions,
     ) -> Result<WriteHandle, Error> {
         validate_key_value(&key, &value)?;
-        let put_options = put_options.into_core();
-        let write_options = write_options.into_core();
+        let put_options = put_options.into();
+        let write_options = write_options.into();
         Ok(self
             .inner
             .put_with_options(key, value, &put_options, &write_options)
@@ -154,7 +154,7 @@ impl Db {
         options: WriteOptions,
     ) -> Result<WriteHandle, Error> {
         validate_key(&key)?;
-        let options = options.into_core();
+        let options = options.into();
         Ok(self.inner.delete_with_options(key, &options).await?.into())
     }
 
@@ -171,8 +171,8 @@ impl Db {
         write_options: WriteOptions,
     ) -> Result<WriteHandle, Error> {
         validate_key_value(&key, &operand)?;
-        let merge_options = merge_options.into_core();
-        let write_options = write_options.into_core();
+        let merge_options = merge_options.into();
+        let write_options = write_options.into();
         Ok(self
             .inner
             .merge_with_options(key, operand, &merge_options, &write_options)
@@ -191,7 +191,7 @@ impl Db {
         options: WriteOptions,
     ) -> Result<WriteHandle, Error> {
         let batch = batch.take_for_write()?;
-        let options = options.into_core();
+        let options = options.into();
         Ok(self.inner.write_with_options(batch, &options).await?.into())
     }
 
@@ -201,7 +201,7 @@ impl Db {
 
     pub async fn flush_with_options(&self, options: FlushOptions) -> Result<(), Error> {
         self.inner
-            .flush_with_options(options.into_core())
+            .flush_with_options(options.into())
             .await
             .map_err(Into::into)
     }
@@ -214,7 +214,7 @@ impl Db {
         &self,
         isolation_level: IsolationLevel,
     ) -> Result<Arc<DbTransaction>, Error> {
-        let tx = self.inner.begin(isolation_level.into_core()).await?;
+        let tx = self.inner.begin(isolation_level.into()).await?;
         Ok(Arc::new(DbTransaction::new(tx)))
     }
 }

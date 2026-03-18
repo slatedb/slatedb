@@ -102,10 +102,7 @@ fn init_lock() -> &'static Mutex<()> {
 static LOGGING_INITIALIZED: AtomicBool = AtomicBool::new(false);
 
 #[uniffi::export]
-pub fn init_logging(
-    level: LogLevel,
-    callback: Option<Arc<dyn LogCallback>>,
-) -> Result<(), Error> {
+pub fn init_logging(level: LogLevel, callback: Option<Arc<dyn LogCallback>>) -> Result<(), Error> {
     if LOGGING_INITIALIZED.load(Ordering::Acquire) {
         return Err(logging_already_initialized_error());
     }

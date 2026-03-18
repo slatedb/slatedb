@@ -49,7 +49,7 @@ impl WriteBatch {
         options: PutOptions,
     ) -> Result<(), Error> {
         validate_key_value(&key, &value)?;
-        let options = options.into_core();
+        let options = options.into();
         self.with_open(|batch| batch.put_with_options(key, value, &options))
             .map_err(Into::into)
     }
@@ -67,7 +67,7 @@ impl WriteBatch {
         options: MergeOptions,
     ) -> Result<(), Error> {
         validate_key_value(&key, &operand)?;
-        let options = options.into_core();
+        let options = options.into();
         self.with_open(|batch| batch.merge_with_options(key, operand, &options))
             .map_err(Into::into)
     }

@@ -52,7 +52,7 @@ impl DbTransaction {
         options: PutOptions,
     ) -> Result<(), Error> {
         validate_key_value(&key, &value)?;
-        let options = options.into_core();
+        let options = options.into();
         let guard = self.inner.lock().await;
         let tx = guard.as_ref().ok_or(SlateDbError::TransactionCompleted)?;
         tx.put_with_options(key, value, &options)
@@ -80,7 +80,7 @@ impl DbTransaction {
         options: MergeOptions,
     ) -> Result<(), Error> {
         validate_key_value(&key, &operand)?;
-        let options = options.into_core();
+        let options = options.into();
         let guard = self.inner.lock().await;
         let tx = guard.as_ref().ok_or(SlateDbError::TransactionCompleted)?;
         tx.merge_with_options(key, operand, &options)
@@ -117,7 +117,7 @@ impl DbTransaction {
         key: Vec<u8>,
         options: ReadOptions,
     ) -> Result<Option<Vec<u8>>, Error> {
-        let options = options.into_core();
+        let options = options.into();
         let guard = self.inner.lock().await;
         let tx = guard.as_ref().ok_or(SlateDbError::TransactionCompleted)?;
         Ok(tx
@@ -137,7 +137,7 @@ impl DbTransaction {
         key: Vec<u8>,
         options: ReadOptions,
     ) -> Result<Option<KeyValue>, Error> {
-        let options = options.into_core();
+        let options = options.into();
         let guard = self.inner.lock().await;
         let tx = guard.as_ref().ok_or(SlateDbError::TransactionCompleted)?;
         Ok(tx
@@ -160,7 +160,7 @@ impl DbTransaction {
         options: ScanOptions,
     ) -> Result<Arc<DbIterator>, Error> {
         let range = range.into_bounds()?;
-        let options = options.into_core()?;
+        let options = options.try_into()?;
         let guard = self.inner.lock().await;
         let tx = guard.as_ref().ok_or(SlateDbError::TransactionCompleted)?;
         let iter = tx.scan_with_options::<Vec<u8>, _>(range, &options).await?;
@@ -179,7 +179,7 @@ impl DbTransaction {
         prefix: Vec<u8>,
         options: ScanOptions,
     ) -> Result<Arc<DbIterator>, Error> {
-        let options = options.into_core()?;
+        let options = options.try_into()?;
         let guard = self.inner.lock().await;
         let tx = guard.as_ref().ok_or(SlateDbError::TransactionCompleted)?;
         let iter = tx.scan_prefix_with_options(prefix, &options).await?;
@@ -198,7 +198,7 @@ impl DbTransaction {
         &self,
         options: WriteOptions,
     ) -> Result<Option<WriteHandle>, Error> {
-        let options = options.into_core();
+        let options = options.into();
         let tx = {
             let mut guard = self.inner.lock().await;
             guard.take().ok_or(SlateDbError::TransactionCompleted)?

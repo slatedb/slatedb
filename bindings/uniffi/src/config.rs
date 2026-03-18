@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use crate::error::SlateDbError;
+use crate::error::{Error, SlateDbError};
 
 #[derive(Clone, Copy, Debug, Default, uniffi::Enum)]
 pub enum DurabilityLevel {
@@ -9,11 +9,11 @@ pub enum DurabilityLevel {
     Memory,
 }
 
-impl DurabilityLevel {
-    pub(crate) fn into_core(self) -> slatedb::config::DurabilityLevel {
-        match self {
-            Self::Remote => slatedb::config::DurabilityLevel::Remote,
-            Self::Memory => slatedb::config::DurabilityLevel::Memory,
+impl From<DurabilityLevel> for slatedb::config::DurabilityLevel {
+    fn from(value: DurabilityLevel) -> Self {
+        match value {
+            DurabilityLevel::Remote => Self::Remote,
+            DurabilityLevel::Memory => Self::Memory,
         }
     }
 }
@@ -25,11 +25,11 @@ pub enum FlushType {
     Wal,
 }
 
-impl FlushType {
-    pub(crate) fn into_core(self) -> slatedb::config::FlushType {
-        match self {
-            Self::MemTable => slatedb::config::FlushType::MemTable,
-            Self::Wal => slatedb::config::FlushType::Wal,
+impl From<FlushType> for slatedb::config::FlushType {
+    fn from(value: FlushType) -> Self {
+        match value {
+            FlushType::MemTable => Self::MemTable,
+            FlushType::Wal => Self::Wal,
         }
     }
 }
@@ -41,11 +41,11 @@ pub enum IsolationLevel {
     SerializableSnapshot,
 }
 
-impl IsolationLevel {
-    pub(crate) fn into_core(self) -> slatedb::IsolationLevel {
-        match self {
-            Self::Snapshot => slatedb::IsolationLevel::Snapshot,
-            Self::SerializableSnapshot => slatedb::IsolationLevel::SerializableSnapshot,
+impl From<IsolationLevel> for slatedb::IsolationLevel {
+    fn from(value: IsolationLevel) -> Self {
+        match value {
+            IsolationLevel::Snapshot => Self::Snapshot,
+            IsolationLevel::SerializableSnapshot => Self::SerializableSnapshot,
         }
     }
 }
@@ -62,16 +62,16 @@ pub enum SstBlockSize {
     Block64Kib,
 }
 
-impl SstBlockSize {
-    pub(crate) fn into_core(self) -> slatedb::SstBlockSize {
-        match self {
-            Self::Block1Kib => slatedb::SstBlockSize::Block1Kib,
-            Self::Block2Kib => slatedb::SstBlockSize::Block2Kib,
-            Self::Block4Kib => slatedb::SstBlockSize::Block4Kib,
-            Self::Block8Kib => slatedb::SstBlockSize::Block8Kib,
-            Self::Block16Kib => slatedb::SstBlockSize::Block16Kib,
-            Self::Block32Kib => slatedb::SstBlockSize::Block32Kib,
-            Self::Block64Kib => slatedb::SstBlockSize::Block64Kib,
+impl From<SstBlockSize> for slatedb::SstBlockSize {
+    fn from(value: SstBlockSize) -> Self {
+        match value {
+            SstBlockSize::Block1Kib => Self::Block1Kib,
+            SstBlockSize::Block2Kib => Self::Block2Kib,
+            SstBlockSize::Block4Kib => Self::Block4Kib,
+            SstBlockSize::Block8Kib => Self::Block8Kib,
+            SstBlockSize::Block16Kib => Self::Block16Kib,
+            SstBlockSize::Block32Kib => Self::Block32Kib,
+            SstBlockSize::Block64Kib => Self::Block64Kib,
         }
     }
 }
@@ -84,12 +84,12 @@ pub enum Ttl {
     ExpireAfterTicks(u64),
 }
 
-impl Ttl {
-    pub(crate) fn into_core(self) -> slatedb::config::Ttl {
-        match self {
-            Self::Default => slatedb::config::Ttl::Default,
-            Self::NoExpiry => slatedb::config::Ttl::NoExpiry,
-            Self::ExpireAfterTicks(ttl) => slatedb::config::Ttl::ExpireAfter(ttl),
+impl From<Ttl> for slatedb::config::Ttl {
+    fn from(value: Ttl) -> Self {
+        match value {
+            Ttl::Default => Self::Default,
+            Ttl::NoExpiry => Self::NoExpiry,
+            Ttl::ExpireAfterTicks(ttl) => Self::ExpireAfter(ttl),
         }
     }
 }
@@ -111,12 +111,12 @@ impl Default for ReadOptions {
     }
 }
 
-impl ReadOptions {
-    pub(crate) fn into_core(self) -> slatedb::config::ReadOptions {
+impl From<ReadOptions> for slatedb::config::ReadOptions {
+    fn from(value: ReadOptions) -> Self {
         slatedb::config::ReadOptions {
-            durability_filter: self.durability_filter.into_core(),
-            dirty: self.dirty,
-            cache_blocks: self.cache_blocks,
+            durability_filter: value.durability_filter.into(),
+            dirty: value.dirty,
+            cache_blocks: value.cache_blocks,
         }
     }
 }
@@ -140,13 +140,13 @@ impl Default for ReaderOptions {
     }
 }
 
-impl ReaderOptions {
-    pub(crate) fn into_core(self) -> slatedb::config::DbReaderOptions {
+impl From<ReaderOptions> for slatedb::config::DbReaderOptions {
+    fn from(value: ReaderOptions) -> Self {
         slatedb::config::DbReaderOptions {
-            manifest_poll_interval: Duration::from_millis(self.manifest_poll_interval_ms),
-            checkpoint_lifetime: Duration::from_millis(self.checkpoint_lifetime_ms),
-            max_memtable_bytes: self.max_memtable_bytes,
-            skip_wal_replay: self.skip_wal_replay,
+            manifest_poll_interval: Duration::from_millis(value.manifest_poll_interval_ms),
+            checkpoint_lifetime: Duration::from_millis(value.checkpoint_lifetime_ms),
+            max_memtable_bytes: value.max_memtable_bytes,
+            skip_wal_replay: value.skip_wal_replay,
             ..Default::default()
         }
     }
@@ -173,21 +173,23 @@ impl Default for ScanOptions {
     }
 }
 
-impl ScanOptions {
-    pub(crate) fn into_core(self) -> Result<slatedb::config::ScanOptions, SlateDbError> {
+impl TryFrom<ScanOptions> for slatedb::config::ScanOptions {
+    type Error = Error;
+
+    fn try_from(value: ScanOptions) -> Result<Self, Self::Error> {
         Ok(slatedb::config::ScanOptions {
-            durability_filter: self.durability_filter.into_core(),
-            dirty: self.dirty,
-            read_ahead_bytes: usize::try_from(self.read_ahead_bytes).map_err(|_| {
-                SlateDbError::ValueTooLargeForUsize {
+            durability_filter: value.durability_filter.into(),
+            dirty: value.dirty,
+            read_ahead_bytes: usize::try_from(value.read_ahead_bytes).map_err(|_| {
+                Error::from(SlateDbError::ValueTooLargeForUsize {
                     field: "read_ahead_bytes",
-                }
+                })
             })?,
-            cache_blocks: self.cache_blocks,
-            max_fetch_tasks: usize::try_from(self.max_fetch_tasks).map_err(|_| {
-                SlateDbError::ValueTooLargeForUsize {
+            cache_blocks: value.cache_blocks,
+            max_fetch_tasks: usize::try_from(value.max_fetch_tasks).map_err(|_| {
+                Error::from(SlateDbError::ValueTooLargeForUsize {
                     field: "max_fetch_tasks",
-                }
+                })
             })?,
         })
     }
@@ -206,10 +208,10 @@ impl Default for WriteOptions {
     }
 }
 
-impl WriteOptions {
-    pub(crate) fn into_core(self) -> slatedb::config::WriteOptions {
+impl From<WriteOptions> for slatedb::config::WriteOptions {
+    fn from(value: WriteOptions) -> Self {
         slatedb::config::WriteOptions {
-            await_durable: self.await_durable,
+            await_durable: value.await_durable,
         }
     }
 }
@@ -219,10 +221,10 @@ pub struct PutOptions {
     pub ttl: Ttl,
 }
 
-impl PutOptions {
-    pub(crate) fn into_core(self) -> slatedb::config::PutOptions {
+impl From<PutOptions> for slatedb::config::PutOptions {
+    fn from(value: PutOptions) -> Self {
         slatedb::config::PutOptions {
-            ttl: self.ttl.into_core(),
+            ttl: value.ttl.into(),
         }
     }
 }
@@ -232,10 +234,10 @@ pub struct MergeOptions {
     pub ttl: Ttl,
 }
 
-impl MergeOptions {
-    pub(crate) fn into_core(self) -> slatedb::config::MergeOptions {
+impl From<MergeOptions> for slatedb::config::MergeOptions {
+    fn from(value: MergeOptions) -> Self {
         slatedb::config::MergeOptions {
-            ttl: self.ttl.into_core(),
+            ttl: value.ttl.into(),
         }
     }
 }
@@ -245,10 +247,10 @@ pub struct FlushOptions {
     pub flush_type: FlushType,
 }
 
-impl FlushOptions {
-    pub(crate) fn into_core(self) -> slatedb::config::FlushOptions {
+impl From<FlushOptions> for slatedb::config::FlushOptions {
+    fn from(value: FlushOptions) -> Self {
         slatedb::config::FlushOptions {
-            flush_type: self.flush_type.into_core(),
+            flush_type: value.flush_type.into(),
         }
     }
 }

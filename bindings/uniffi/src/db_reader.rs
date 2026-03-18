@@ -27,7 +27,7 @@ impl DbReader {
         key: Vec<u8>,
         options: ReadOptions,
     ) -> Result<Option<Vec<u8>>, Error> {
-        let options = options.into_core();
+        let options = options.into();
         Ok(self
             .inner
             .get_with_options(key, &options)
@@ -47,7 +47,7 @@ impl DbReader {
         options: ScanOptions,
     ) -> Result<Arc<DbIterator>, Error> {
         let range = range.into_bounds()?;
-        let options = options.into_core()?;
+        let options = options.try_into()?;
         let iter = self
             .inner
             .scan_with_options::<Vec<u8>, _>(range, &options)
@@ -65,7 +65,7 @@ impl DbReader {
         prefix: Vec<u8>,
         options: ScanOptions,
     ) -> Result<Arc<DbIterator>, Error> {
-        let options = options.into_core()?;
+        let options = options.try_into()?;
         let iter = self
             .inner
             .scan_prefix_with_options(prefix, &options)

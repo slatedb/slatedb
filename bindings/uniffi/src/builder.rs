@@ -64,15 +64,12 @@ impl DbBuilder {
     }
 
     pub fn with_sst_block_size(&self, sst_block_size: SstBlockSize) -> Result<(), Error> {
-        let sst_block_size = sst_block_size.into_core();
+        let sst_block_size = sst_block_size.into();
         self.update_builder(|builder| builder.with_sst_block_size(sst_block_size))
             .map_err(Into::into)
     }
 
-    pub fn with_merge_operator(
-        &self,
-        merge_operator: Arc<dyn MergeOperator>,
-    ) -> Result<(), Error> {
+    pub fn with_merge_operator(&self, merge_operator: Arc<dyn MergeOperator>) -> Result<(), Error> {
         self.update_builder(|builder| {
             builder.with_merge_operator(adapt_merge_operator(merge_operator))
         })
@@ -135,10 +132,7 @@ impl DbReaderBuilder {
             .map_err(Into::into)
     }
 
-    pub fn with_merge_operator(
-        &self,
-        merge_operator: Arc<dyn MergeOperator>,
-    ) -> Result<(), Error> {
+    pub fn with_merge_operator(&self, merge_operator: Arc<dyn MergeOperator>) -> Result<(), Error> {
         self.update_builder(|builder| {
             builder.with_merge_operator(adapt_merge_operator(merge_operator))
         })
@@ -146,7 +140,7 @@ impl DbReaderBuilder {
     }
 
     pub fn with_options(&self, options: ReaderOptions) -> Result<(), Error> {
-        let options = options.into_core();
+        let options = options.into();
         self.update_builder(|builder| builder.with_options(options))
             .map_err(Into::into)
     }
