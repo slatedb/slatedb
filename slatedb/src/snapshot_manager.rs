@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 ///
 /// Both `DbSnapshot` and `DbTransaction` (via its internal snapshot) register
 /// here so the flusher/compactor knows the oldest seq that must be retained.
-/// The BTreeMap provides O(1) min lookup via `first_key_value()`.
+/// The BTreeMap provides an efficient min lookup via `first_key_value()`.
 pub(crate) struct SnapshotManager {
     inner: RwLock<BTreeMap<u64, u32>>,
 }
