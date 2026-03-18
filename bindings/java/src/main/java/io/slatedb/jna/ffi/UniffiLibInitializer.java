@@ -11,8 +11,8 @@ final class UniffiLibInitializer {
     UniffiLib instance = NamespaceLibrary.loadIndirect("slatedb", UniffiLib.class);
     NamespaceLibrary.uniffiCheckContractApiVersion(instance);
     NamespaceLibrary.uniffiCheckApiChecksums(instance);
-    UniffiCallbackInterfaceFfiLogCallback.INSTANCE.register(instance);
-    UniffiCallbackInterfaceFfiMergeOperator.INSTANCE.register(instance);
+    UniffiCallbackInterfaceLogCallback.INSTANCE.register(instance);
+    UniffiCallbackInterfaceMergeOperator.INSTANCE.register(instance);
     return instance;
   }
 }

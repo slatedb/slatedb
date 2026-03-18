@@ -29,450 +29,439 @@ final class NamespaceLibrary {
   }
 
   static void uniffiCheckApiChecksums(UniffiLib lib) {
-    if (lib.uniffi_slatedb_ffi_checksum_func_ffi_init_logging() != ((short) 42559)) {
+    if (lib.uniffi_slatedb_ffi_checksum_func_init_logging() != ((short) 54254)) {
       throw new RuntimeException(
           "UniFFI API checksum mismatch: try cleaning and rebuilding your project");
     }
-    if (lib.uniffi_slatedb_ffi_checksum_method_ffidb_begin() != ((short) 27320)) {
+    if (lib.uniffi_slatedb_ffi_checksum_method_db_begin() != ((short) 28200)) {
       throw new RuntimeException(
           "UniFFI API checksum mismatch: try cleaning and rebuilding your project");
     }
-    if (lib.uniffi_slatedb_ffi_checksum_method_ffidb_delete() != ((short) 23170)) {
+    if (lib.uniffi_slatedb_ffi_checksum_method_db_delete() != ((short) 50032)) {
       throw new RuntimeException(
           "UniFFI API checksum mismatch: try cleaning and rebuilding your project");
     }
-    if (lib.uniffi_slatedb_ffi_checksum_method_ffidb_delete_with_options() != ((short) 36049)) {
+    if (lib.uniffi_slatedb_ffi_checksum_method_db_delete_with_options() != ((short) 32367)) {
       throw new RuntimeException(
           "UniFFI API checksum mismatch: try cleaning and rebuilding your project");
     }
-    if (lib.uniffi_slatedb_ffi_checksum_method_ffidb_flush() != ((short) 8494)) {
+    if (lib.uniffi_slatedb_ffi_checksum_method_db_flush() != ((short) 39017)) {
       throw new RuntimeException(
           "UniFFI API checksum mismatch: try cleaning and rebuilding your project");
     }
-    if (lib.uniffi_slatedb_ffi_checksum_method_ffidb_flush_with_options() != ((short) 49534)) {
+    if (lib.uniffi_slatedb_ffi_checksum_method_db_flush_with_options() != ((short) 21103)) {
       throw new RuntimeException(
           "UniFFI API checksum mismatch: try cleaning and rebuilding your project");
     }
-    if (lib.uniffi_slatedb_ffi_checksum_method_ffidb_get() != ((short) 41469)) {
+    if (lib.uniffi_slatedb_ffi_checksum_method_db_get() != ((short) 47753)) {
       throw new RuntimeException(
           "UniFFI API checksum mismatch: try cleaning and rebuilding your project");
     }
-    if (lib.uniffi_slatedb_ffi_checksum_method_ffidb_get_key_value() != ((short) 4319)) {
+    if (lib.uniffi_slatedb_ffi_checksum_method_db_get_key_value() != ((short) 40515)) {
       throw new RuntimeException(
           "UniFFI API checksum mismatch: try cleaning and rebuilding your project");
     }
-    if (lib.uniffi_slatedb_ffi_checksum_method_ffidb_get_key_value_with_options()
-        != ((short) 30550)) {
+    if (lib.uniffi_slatedb_ffi_checksum_method_db_get_key_value_with_options() != ((short) 49009)) {
       throw new RuntimeException(
           "UniFFI API checksum mismatch: try cleaning and rebuilding your project");
     }
-    if (lib.uniffi_slatedb_ffi_checksum_method_ffidb_get_with_options() != ((short) 24693)) {
+    if (lib.uniffi_slatedb_ffi_checksum_method_db_get_with_options() != ((short) 59259)) {
       throw new RuntimeException(
           "UniFFI API checksum mismatch: try cleaning and rebuilding your project");
     }
-    if (lib.uniffi_slatedb_ffi_checksum_method_ffidb_merge() != ((short) 17131)) {
+    if (lib.uniffi_slatedb_ffi_checksum_method_db_merge() != ((short) 31328)) {
       throw new RuntimeException(
           "UniFFI API checksum mismatch: try cleaning and rebuilding your project");
     }
-    if (lib.uniffi_slatedb_ffi_checksum_method_ffidb_merge_with_options() != ((short) 20187)) {
+    if (lib.uniffi_slatedb_ffi_checksum_method_db_merge_with_options() != ((short) 18622)) {
       throw new RuntimeException(
           "UniFFI API checksum mismatch: try cleaning and rebuilding your project");
     }
-    if (lib.uniffi_slatedb_ffi_checksum_method_ffidb_metrics() != ((short) 17180)) {
+    if (lib.uniffi_slatedb_ffi_checksum_method_db_metrics() != ((short) 10479)) {
       throw new RuntimeException(
           "UniFFI API checksum mismatch: try cleaning and rebuilding your project");
     }
-    if (lib.uniffi_slatedb_ffi_checksum_method_ffidb_put() != ((short) 35423)) {
+    if (lib.uniffi_slatedb_ffi_checksum_method_db_put() != ((short) 37265)) {
       throw new RuntimeException(
           "UniFFI API checksum mismatch: try cleaning and rebuilding your project");
     }
-    if (lib.uniffi_slatedb_ffi_checksum_method_ffidb_put_with_options() != ((short) 3469)) {
+    if (lib.uniffi_slatedb_ffi_checksum_method_db_put_with_options() != ((short) 23832)) {
       throw new RuntimeException(
           "UniFFI API checksum mismatch: try cleaning and rebuilding your project");
     }
-    if (lib.uniffi_slatedb_ffi_checksum_method_ffidb_scan() != ((short) 13606)) {
+    if (lib.uniffi_slatedb_ffi_checksum_method_db_scan() != ((short) 16785)) {
       throw new RuntimeException(
           "UniFFI API checksum mismatch: try cleaning and rebuilding your project");
     }
-    if (lib.uniffi_slatedb_ffi_checksum_method_ffidb_scan_prefix() != ((short) 35855)) {
+    if (lib.uniffi_slatedb_ffi_checksum_method_db_scan_prefix() != ((short) 52231)) {
       throw new RuntimeException(
           "UniFFI API checksum mismatch: try cleaning and rebuilding your project");
     }
-    if (lib.uniffi_slatedb_ffi_checksum_method_ffidb_scan_prefix_with_options()
-        != ((short) 28845)) {
+    if (lib.uniffi_slatedb_ffi_checksum_method_db_scan_prefix_with_options() != ((short) 32993)) {
       throw new RuntimeException(
           "UniFFI API checksum mismatch: try cleaning and rebuilding your project");
     }
-    if (lib.uniffi_slatedb_ffi_checksum_method_ffidb_scan_with_options() != ((short) 16422)) {
+    if (lib.uniffi_slatedb_ffi_checksum_method_db_scan_with_options() != ((short) 38619)) {
       throw new RuntimeException(
           "UniFFI API checksum mismatch: try cleaning and rebuilding your project");
     }
-    if (lib.uniffi_slatedb_ffi_checksum_method_ffidb_shutdown() != ((short) 62539)) {
+    if (lib.uniffi_slatedb_ffi_checksum_method_db_shutdown() != ((short) 1011)) {
       throw new RuntimeException(
           "UniFFI API checksum mismatch: try cleaning and rebuilding your project");
     }
-    if (lib.uniffi_slatedb_ffi_checksum_method_ffidb_snapshot() != ((short) 61667)) {
+    if (lib.uniffi_slatedb_ffi_checksum_method_db_snapshot() != ((short) 420)) {
       throw new RuntimeException(
           "UniFFI API checksum mismatch: try cleaning and rebuilding your project");
     }
-    if (lib.uniffi_slatedb_ffi_checksum_method_ffidb_status() != ((short) 6095)) {
+    if (lib.uniffi_slatedb_ffi_checksum_method_db_status() != ((short) 21747)) {
       throw new RuntimeException(
           "UniFFI API checksum mismatch: try cleaning and rebuilding your project");
     }
-    if (lib.uniffi_slatedb_ffi_checksum_method_ffidb_write() != ((short) 50936)) {
+    if (lib.uniffi_slatedb_ffi_checksum_method_db_write() != ((short) 55178)) {
       throw new RuntimeException(
           "UniFFI API checksum mismatch: try cleaning and rebuilding your project");
     }
-    if (lib.uniffi_slatedb_ffi_checksum_method_ffidb_write_with_options() != ((short) 566)) {
+    if (lib.uniffi_slatedb_ffi_checksum_method_db_write_with_options() != ((short) 23668)) {
       throw new RuntimeException(
           "UniFFI API checksum mismatch: try cleaning and rebuilding your project");
     }
-    if (lib.uniffi_slatedb_ffi_checksum_method_ffidbbuilder_build() != ((short) 20111)) {
+    if (lib.uniffi_slatedb_ffi_checksum_method_dbbuilder_build() != ((short) 54479)) {
       throw new RuntimeException(
           "UniFFI API checksum mismatch: try cleaning and rebuilding your project");
     }
-    if (lib.uniffi_slatedb_ffi_checksum_method_ffidbbuilder_with_db_cache_disabled()
-        != ((short) 29934)) {
+    if (lib.uniffi_slatedb_ffi_checksum_method_dbbuilder_with_db_cache_disabled()
+        != ((short) 41151)) {
       throw new RuntimeException(
           "UniFFI API checksum mismatch: try cleaning and rebuilding your project");
     }
-    if (lib.uniffi_slatedb_ffi_checksum_method_ffidbbuilder_with_merge_operator()
-        != ((short) 13534)) {
+    if (lib.uniffi_slatedb_ffi_checksum_method_dbbuilder_with_merge_operator() != ((short) 11670)) {
       throw new RuntimeException(
           "UniFFI API checksum mismatch: try cleaning and rebuilding your project");
     }
-    if (lib.uniffi_slatedb_ffi_checksum_method_ffidbbuilder_with_seed() != ((short) 50434)) {
+    if (lib.uniffi_slatedb_ffi_checksum_method_dbbuilder_with_seed() != ((short) 18556)) {
       throw new RuntimeException(
           "UniFFI API checksum mismatch: try cleaning and rebuilding your project");
     }
-    if (lib.uniffi_slatedb_ffi_checksum_method_ffidbbuilder_with_settings() != ((short) 21510)) {
+    if (lib.uniffi_slatedb_ffi_checksum_method_dbbuilder_with_settings() != ((short) 11407)) {
       throw new RuntimeException(
           "UniFFI API checksum mismatch: try cleaning and rebuilding your project");
     }
-    if (lib.uniffi_slatedb_ffi_checksum_method_ffidbbuilder_with_sst_block_size()
-        != ((short) 43234)) {
+    if (lib.uniffi_slatedb_ffi_checksum_method_dbbuilder_with_sst_block_size() != ((short) 24601)) {
       throw new RuntimeException(
           "UniFFI API checksum mismatch: try cleaning and rebuilding your project");
     }
-    if (lib.uniffi_slatedb_ffi_checksum_method_ffidbbuilder_with_wal_object_store()
-        != ((short) 54976)) {
+    if (lib.uniffi_slatedb_ffi_checksum_method_dbbuilder_with_wal_object_store()
+        != ((short) 15581)) {
       throw new RuntimeException(
           "UniFFI API checksum mismatch: try cleaning and rebuilding your project");
     }
-    if (lib.uniffi_slatedb_ffi_checksum_method_ffidbiterator_next() != ((short) 35396)) {
+    if (lib.uniffi_slatedb_ffi_checksum_method_dbiterator_next() != ((short) 63746)) {
       throw new RuntimeException(
           "UniFFI API checksum mismatch: try cleaning and rebuilding your project");
     }
-    if (lib.uniffi_slatedb_ffi_checksum_method_ffidbiterator_seek() != ((short) 16218)) {
+    if (lib.uniffi_slatedb_ffi_checksum_method_dbiterator_seek() != ((short) 3174)) {
       throw new RuntimeException(
           "UniFFI API checksum mismatch: try cleaning and rebuilding your project");
     }
-    if (lib.uniffi_slatedb_ffi_checksum_method_ffidbreader_get() != ((short) 46156)) {
+    if (lib.uniffi_slatedb_ffi_checksum_method_dbreader_get() != ((short) 150)) {
       throw new RuntimeException(
           "UniFFI API checksum mismatch: try cleaning and rebuilding your project");
     }
-    if (lib.uniffi_slatedb_ffi_checksum_method_ffidbreader_get_with_options() != ((short) 13809)) {
+    if (lib.uniffi_slatedb_ffi_checksum_method_dbreader_get_with_options() != ((short) 53767)) {
       throw new RuntimeException(
           "UniFFI API checksum mismatch: try cleaning and rebuilding your project");
     }
-    if (lib.uniffi_slatedb_ffi_checksum_method_ffidbreader_scan() != ((short) 587)) {
+    if (lib.uniffi_slatedb_ffi_checksum_method_dbreader_scan() != ((short) 48493)) {
       throw new RuntimeException(
           "UniFFI API checksum mismatch: try cleaning and rebuilding your project");
     }
-    if (lib.uniffi_slatedb_ffi_checksum_method_ffidbreader_scan_prefix() != ((short) 2092)) {
+    if (lib.uniffi_slatedb_ffi_checksum_method_dbreader_scan_prefix() != ((short) 42624)) {
       throw new RuntimeException(
           "UniFFI API checksum mismatch: try cleaning and rebuilding your project");
     }
-    if (lib.uniffi_slatedb_ffi_checksum_method_ffidbreader_scan_prefix_with_options()
-        != ((short) 2695)) {
+    if (lib.uniffi_slatedb_ffi_checksum_method_dbreader_scan_prefix_with_options()
+        != ((short) 44039)) {
       throw new RuntimeException(
           "UniFFI API checksum mismatch: try cleaning and rebuilding your project");
     }
-    if (lib.uniffi_slatedb_ffi_checksum_method_ffidbreader_scan_with_options() != ((short) 19389)) {
+    if (lib.uniffi_slatedb_ffi_checksum_method_dbreader_scan_with_options() != ((short) 653)) {
       throw new RuntimeException(
           "UniFFI API checksum mismatch: try cleaning and rebuilding your project");
     }
-    if (lib.uniffi_slatedb_ffi_checksum_method_ffidbreader_shutdown() != ((short) 60272)) {
+    if (lib.uniffi_slatedb_ffi_checksum_method_dbreader_shutdown() != ((short) 61444)) {
       throw new RuntimeException(
           "UniFFI API checksum mismatch: try cleaning and rebuilding your project");
     }
-    if (lib.uniffi_slatedb_ffi_checksum_method_ffidbreaderbuilder_build() != ((short) 10134)) {
+    if (lib.uniffi_slatedb_ffi_checksum_method_dbreaderbuilder_build() != ((short) 53002)) {
       throw new RuntimeException(
           "UniFFI API checksum mismatch: try cleaning and rebuilding your project");
     }
-    if (lib.uniffi_slatedb_ffi_checksum_method_ffidbreaderbuilder_with_checkpoint_id()
-        != ((short) 43622)) {
+    if (lib.uniffi_slatedb_ffi_checksum_method_dbreaderbuilder_with_checkpoint_id()
+        != ((short) 60214)) {
       throw new RuntimeException(
           "UniFFI API checksum mismatch: try cleaning and rebuilding your project");
     }
-    if (lib.uniffi_slatedb_ffi_checksum_method_ffidbreaderbuilder_with_merge_operator()
-        != ((short) 48295)) {
+    if (lib.uniffi_slatedb_ffi_checksum_method_dbreaderbuilder_with_merge_operator()
+        != ((short) 15355)) {
       throw new RuntimeException(
           "UniFFI API checksum mismatch: try cleaning and rebuilding your project");
     }
-    if (lib.uniffi_slatedb_ffi_checksum_method_ffidbreaderbuilder_with_options()
-        != ((short) 1731)) {
+    if (lib.uniffi_slatedb_ffi_checksum_method_dbreaderbuilder_with_options() != ((short) 58185)) {
       throw new RuntimeException(
           "UniFFI API checksum mismatch: try cleaning and rebuilding your project");
     }
-    if (lib.uniffi_slatedb_ffi_checksum_method_ffidbreaderbuilder_with_wal_object_store()
-        != ((short) 35691)) {
+    if (lib.uniffi_slatedb_ffi_checksum_method_dbreaderbuilder_with_wal_object_store()
+        != ((short) 39998)) {
       throw new RuntimeException(
           "UniFFI API checksum mismatch: try cleaning and rebuilding your project");
     }
-    if (lib.uniffi_slatedb_ffi_checksum_method_ffidbsnapshot_get() != ((short) 20211)) {
+    if (lib.uniffi_slatedb_ffi_checksum_method_dbsnapshot_get() != ((short) 25831)) {
       throw new RuntimeException(
           "UniFFI API checksum mismatch: try cleaning and rebuilding your project");
     }
-    if (lib.uniffi_slatedb_ffi_checksum_method_ffidbsnapshot_get_key_value() != ((short) 59292)) {
+    if (lib.uniffi_slatedb_ffi_checksum_method_dbsnapshot_get_key_value() != ((short) 34552)) {
       throw new RuntimeException(
           "UniFFI API checksum mismatch: try cleaning and rebuilding your project");
     }
-    if (lib.uniffi_slatedb_ffi_checksum_method_ffidbsnapshot_get_key_value_with_options()
-        != ((short) 4124)) {
+    if (lib.uniffi_slatedb_ffi_checksum_method_dbsnapshot_get_key_value_with_options()
+        != ((short) 33632)) {
       throw new RuntimeException(
           "UniFFI API checksum mismatch: try cleaning and rebuilding your project");
     }
-    if (lib.uniffi_slatedb_ffi_checksum_method_ffidbsnapshot_get_with_options()
-        != ((short) 20033)) {
+    if (lib.uniffi_slatedb_ffi_checksum_method_dbsnapshot_get_with_options() != ((short) 31030)) {
       throw new RuntimeException(
           "UniFFI API checksum mismatch: try cleaning and rebuilding your project");
     }
-    if (lib.uniffi_slatedb_ffi_checksum_method_ffidbsnapshot_scan() != ((short) 5732)) {
+    if (lib.uniffi_slatedb_ffi_checksum_method_dbsnapshot_scan() != ((short) 473)) {
       throw new RuntimeException(
           "UniFFI API checksum mismatch: try cleaning and rebuilding your project");
     }
-    if (lib.uniffi_slatedb_ffi_checksum_method_ffidbsnapshot_scan_prefix() != ((short) 43819)) {
+    if (lib.uniffi_slatedb_ffi_checksum_method_dbsnapshot_scan_prefix() != ((short) 50321)) {
       throw new RuntimeException(
           "UniFFI API checksum mismatch: try cleaning and rebuilding your project");
     }
-    if (lib.uniffi_slatedb_ffi_checksum_method_ffidbsnapshot_scan_prefix_with_options()
-        != ((short) 41123)) {
+    if (lib.uniffi_slatedb_ffi_checksum_method_dbsnapshot_scan_prefix_with_options()
+        != ((short) 5354)) {
       throw new RuntimeException(
           "UniFFI API checksum mismatch: try cleaning and rebuilding your project");
     }
-    if (lib.uniffi_slatedb_ffi_checksum_method_ffidbsnapshot_scan_with_options()
-        != ((short) 10211)) {
+    if (lib.uniffi_slatedb_ffi_checksum_method_dbsnapshot_scan_with_options() != ((short) 47474)) {
       throw new RuntimeException(
           "UniFFI API checksum mismatch: try cleaning and rebuilding your project");
     }
-    if (lib.uniffi_slatedb_ffi_checksum_method_ffidbtransaction_commit() != ((short) 48317)) {
+    if (lib.uniffi_slatedb_ffi_checksum_method_dbtransaction_commit() != ((short) 428)) {
       throw new RuntimeException(
           "UniFFI API checksum mismatch: try cleaning and rebuilding your project");
     }
-    if (lib.uniffi_slatedb_ffi_checksum_method_ffidbtransaction_commit_with_options()
-        != ((short) 23549)) {
+    if (lib.uniffi_slatedb_ffi_checksum_method_dbtransaction_commit_with_options()
+        != ((short) 62426)) {
       throw new RuntimeException(
           "UniFFI API checksum mismatch: try cleaning and rebuilding your project");
     }
-    if (lib.uniffi_slatedb_ffi_checksum_method_ffidbtransaction_delete() != ((short) 16039)) {
+    if (lib.uniffi_slatedb_ffi_checksum_method_dbtransaction_delete() != ((short) 36751)) {
       throw new RuntimeException(
           "UniFFI API checksum mismatch: try cleaning and rebuilding your project");
     }
-    if (lib.uniffi_slatedb_ffi_checksum_method_ffidbtransaction_get() != ((short) 22094)) {
+    if (lib.uniffi_slatedb_ffi_checksum_method_dbtransaction_get() != ((short) 17479)) {
       throw new RuntimeException(
           "UniFFI API checksum mismatch: try cleaning and rebuilding your project");
     }
-    if (lib.uniffi_slatedb_ffi_checksum_method_ffidbtransaction_get_key_value()
-        != ((short) 27481)) {
+    if (lib.uniffi_slatedb_ffi_checksum_method_dbtransaction_get_key_value() != ((short) 42847)) {
       throw new RuntimeException(
           "UniFFI API checksum mismatch: try cleaning and rebuilding your project");
     }
-    if (lib.uniffi_slatedb_ffi_checksum_method_ffidbtransaction_get_key_value_with_options()
-        != ((short) 41640)) {
+    if (lib.uniffi_slatedb_ffi_checksum_method_dbtransaction_get_key_value_with_options()
+        != ((short) 12647)) {
       throw new RuntimeException(
           "UniFFI API checksum mismatch: try cleaning and rebuilding your project");
     }
-    if (lib.uniffi_slatedb_ffi_checksum_method_ffidbtransaction_get_with_options()
-        != ((short) 43185)) {
+    if (lib.uniffi_slatedb_ffi_checksum_method_dbtransaction_get_with_options()
+        != ((short) 51567)) {
       throw new RuntimeException(
           "UniFFI API checksum mismatch: try cleaning and rebuilding your project");
     }
-    if (lib.uniffi_slatedb_ffi_checksum_method_ffidbtransaction_id() != ((short) 54287)) {
+    if (lib.uniffi_slatedb_ffi_checksum_method_dbtransaction_id() != ((short) 6904)) {
       throw new RuntimeException(
           "UniFFI API checksum mismatch: try cleaning and rebuilding your project");
     }
-    if (lib.uniffi_slatedb_ffi_checksum_method_ffidbtransaction_mark_read() != ((short) 22753)) {
+    if (lib.uniffi_slatedb_ffi_checksum_method_dbtransaction_mark_read() != ((short) 55492)) {
       throw new RuntimeException(
           "UniFFI API checksum mismatch: try cleaning and rebuilding your project");
     }
-    if (lib.uniffi_slatedb_ffi_checksum_method_ffidbtransaction_merge() != ((short) 35715)) {
+    if (lib.uniffi_slatedb_ffi_checksum_method_dbtransaction_merge() != ((short) 14786)) {
       throw new RuntimeException(
           "UniFFI API checksum mismatch: try cleaning and rebuilding your project");
     }
-    if (lib.uniffi_slatedb_ffi_checksum_method_ffidbtransaction_merge_with_options()
-        != ((short) 25941)) {
+    if (lib.uniffi_slatedb_ffi_checksum_method_dbtransaction_merge_with_options()
+        != ((short) 63514)) {
       throw new RuntimeException(
           "UniFFI API checksum mismatch: try cleaning and rebuilding your project");
     }
-    if (lib.uniffi_slatedb_ffi_checksum_method_ffidbtransaction_put() != ((short) 44076)) {
+    if (lib.uniffi_slatedb_ffi_checksum_method_dbtransaction_put() != ((short) 18111)) {
       throw new RuntimeException(
           "UniFFI API checksum mismatch: try cleaning and rebuilding your project");
     }
-    if (lib.uniffi_slatedb_ffi_checksum_method_ffidbtransaction_put_with_options()
-        != ((short) 21098)) {
+    if (lib.uniffi_slatedb_ffi_checksum_method_dbtransaction_put_with_options()
+        != ((short) 41295)) {
       throw new RuntimeException(
           "UniFFI API checksum mismatch: try cleaning and rebuilding your project");
     }
-    if (lib.uniffi_slatedb_ffi_checksum_method_ffidbtransaction_rollback() != ((short) 9781)) {
+    if (lib.uniffi_slatedb_ffi_checksum_method_dbtransaction_rollback() != ((short) 45610)) {
       throw new RuntimeException(
           "UniFFI API checksum mismatch: try cleaning and rebuilding your project");
     }
-    if (lib.uniffi_slatedb_ffi_checksum_method_ffidbtransaction_scan() != ((short) 36573)) {
+    if (lib.uniffi_slatedb_ffi_checksum_method_dbtransaction_scan() != ((short) 37690)) {
       throw new RuntimeException(
           "UniFFI API checksum mismatch: try cleaning and rebuilding your project");
     }
-    if (lib.uniffi_slatedb_ffi_checksum_method_ffidbtransaction_scan_prefix() != ((short) 49503)) {
+    if (lib.uniffi_slatedb_ffi_checksum_method_dbtransaction_scan_prefix() != ((short) 8910)) {
       throw new RuntimeException(
           "UniFFI API checksum mismatch: try cleaning and rebuilding your project");
     }
-    if (lib.uniffi_slatedb_ffi_checksum_method_ffidbtransaction_scan_prefix_with_options()
-        != ((short) 29076)) {
+    if (lib.uniffi_slatedb_ffi_checksum_method_dbtransaction_scan_prefix_with_options()
+        != ((short) 747)) {
       throw new RuntimeException(
           "UniFFI API checksum mismatch: try cleaning and rebuilding your project");
     }
-    if (lib.uniffi_slatedb_ffi_checksum_method_ffidbtransaction_scan_with_options()
-        != ((short) 34855)) {
+    if (lib.uniffi_slatedb_ffi_checksum_method_dbtransaction_scan_with_options()
+        != ((short) 48535)) {
       throw new RuntimeException(
           "UniFFI API checksum mismatch: try cleaning and rebuilding your project");
     }
-    if (lib.uniffi_slatedb_ffi_checksum_method_ffidbtransaction_seqnum() != ((short) 22659)) {
+    if (lib.uniffi_slatedb_ffi_checksum_method_dbtransaction_seqnum() != ((short) 32854)) {
       throw new RuntimeException(
           "UniFFI API checksum mismatch: try cleaning and rebuilding your project");
     }
-    if (lib.uniffi_slatedb_ffi_checksum_method_ffidbtransaction_unmark_write() != ((short) 13895)) {
+    if (lib.uniffi_slatedb_ffi_checksum_method_dbtransaction_unmark_write() != ((short) 28889)) {
       throw new RuntimeException(
           "UniFFI API checksum mismatch: try cleaning and rebuilding your project");
     }
-    if (lib.uniffi_slatedb_ffi_checksum_method_ffilogcallback_log() != ((short) 63108)) {
+    if (lib.uniffi_slatedb_ffi_checksum_method_logcallback_log() != ((short) 29875)) {
       throw new RuntimeException(
           "UniFFI API checksum mismatch: try cleaning and rebuilding your project");
     }
-    if (lib.uniffi_slatedb_ffi_checksum_method_ffimergeoperator_merge() != ((short) 64881)) {
+    if (lib.uniffi_slatedb_ffi_checksum_method_mergeoperator_merge() != ((short) 9527)) {
       throw new RuntimeException(
           "UniFFI API checksum mismatch: try cleaning and rebuilding your project");
     }
-    if (lib.uniffi_slatedb_ffi_checksum_method_ffisettings_set() != ((short) 25271)) {
+    if (lib.uniffi_slatedb_ffi_checksum_method_settings_set() != ((short) 35534)) {
       throw new RuntimeException(
           "UniFFI API checksum mismatch: try cleaning and rebuilding your project");
     }
-    if (lib.uniffi_slatedb_ffi_checksum_method_ffisettings_to_json_string() != ((short) 6471)) {
+    if (lib.uniffi_slatedb_ffi_checksum_method_settings_to_json_string() != ((short) 56273)) {
       throw new RuntimeException(
           "UniFFI API checksum mismatch: try cleaning and rebuilding your project");
     }
-    if (lib.uniffi_slatedb_ffi_checksum_method_ffiwalfile_id() != ((short) 4476)) {
+    if (lib.uniffi_slatedb_ffi_checksum_method_walfile_id() != ((short) 46596)) {
       throw new RuntimeException(
           "UniFFI API checksum mismatch: try cleaning and rebuilding your project");
     }
-    if (lib.uniffi_slatedb_ffi_checksum_method_ffiwalfile_iterator() != ((short) 26463)) {
+    if (lib.uniffi_slatedb_ffi_checksum_method_walfile_iterator() != ((short) 44079)) {
       throw new RuntimeException(
           "UniFFI API checksum mismatch: try cleaning and rebuilding your project");
     }
-    if (lib.uniffi_slatedb_ffi_checksum_method_ffiwalfile_metadata() != ((short) 53251)) {
+    if (lib.uniffi_slatedb_ffi_checksum_method_walfile_metadata() != ((short) 11831)) {
       throw new RuntimeException(
           "UniFFI API checksum mismatch: try cleaning and rebuilding your project");
     }
-    if (lib.uniffi_slatedb_ffi_checksum_method_ffiwalfile_next_file() != ((short) 583)) {
+    if (lib.uniffi_slatedb_ffi_checksum_method_walfile_next_file() != ((short) 18713)) {
       throw new RuntimeException(
           "UniFFI API checksum mismatch: try cleaning and rebuilding your project");
     }
-    if (lib.uniffi_slatedb_ffi_checksum_method_ffiwalfile_next_id() != ((short) 17961)) {
+    if (lib.uniffi_slatedb_ffi_checksum_method_walfile_next_id() != ((short) 11112)) {
       throw new RuntimeException(
           "UniFFI API checksum mismatch: try cleaning and rebuilding your project");
     }
-    if (lib.uniffi_slatedb_ffi_checksum_method_ffiwalfile_shutdown() != ((short) 1197)) {
+    if (lib.uniffi_slatedb_ffi_checksum_method_walfile_shutdown() != ((short) 61794)) {
       throw new RuntimeException(
           "UniFFI API checksum mismatch: try cleaning and rebuilding your project");
     }
-    if (lib.uniffi_slatedb_ffi_checksum_method_ffiwalfileiterator_next() != ((short) 25733)) {
+    if (lib.uniffi_slatedb_ffi_checksum_method_walfileiterator_next() != ((short) 44449)) {
       throw new RuntimeException(
           "UniFFI API checksum mismatch: try cleaning and rebuilding your project");
     }
-    if (lib.uniffi_slatedb_ffi_checksum_method_ffiwalfileiterator_shutdown() != ((short) 10991)) {
+    if (lib.uniffi_slatedb_ffi_checksum_method_walfileiterator_shutdown() != ((short) 8034)) {
       throw new RuntimeException(
           "UniFFI API checksum mismatch: try cleaning and rebuilding your project");
     }
-    if (lib.uniffi_slatedb_ffi_checksum_method_ffiwalreader_get() != ((short) 42864)) {
+    if (lib.uniffi_slatedb_ffi_checksum_method_walreader_get() != ((short) 2234)) {
       throw new RuntimeException(
           "UniFFI API checksum mismatch: try cleaning and rebuilding your project");
     }
-    if (lib.uniffi_slatedb_ffi_checksum_method_ffiwalreader_list() != ((short) 64696)) {
+    if (lib.uniffi_slatedb_ffi_checksum_method_walreader_list() != ((short) 34786)) {
       throw new RuntimeException(
           "UniFFI API checksum mismatch: try cleaning and rebuilding your project");
     }
-    if (lib.uniffi_slatedb_ffi_checksum_method_ffiwalreader_shutdown() != ((short) 48499)) {
+    if (lib.uniffi_slatedb_ffi_checksum_method_walreader_shutdown() != ((short) 16293)) {
       throw new RuntimeException(
           "UniFFI API checksum mismatch: try cleaning and rebuilding your project");
     }
-    if (lib.uniffi_slatedb_ffi_checksum_method_ffiwritebatch_delete() != ((short) 48646)) {
+    if (lib.uniffi_slatedb_ffi_checksum_method_writebatch_delete() != ((short) 33429)) {
       throw new RuntimeException(
           "UniFFI API checksum mismatch: try cleaning and rebuilding your project");
     }
-    if (lib.uniffi_slatedb_ffi_checksum_method_ffiwritebatch_merge() != ((short) 16539)) {
+    if (lib.uniffi_slatedb_ffi_checksum_method_writebatch_merge() != ((short) 23805)) {
       throw new RuntimeException(
           "UniFFI API checksum mismatch: try cleaning and rebuilding your project");
     }
-    if (lib.uniffi_slatedb_ffi_checksum_method_ffiwritebatch_merge_with_options()
-        != ((short) 14093)) {
+    if (lib.uniffi_slatedb_ffi_checksum_method_writebatch_merge_with_options() != ((short) 5442)) {
       throw new RuntimeException(
           "UniFFI API checksum mismatch: try cleaning and rebuilding your project");
     }
-    if (lib.uniffi_slatedb_ffi_checksum_method_ffiwritebatch_put() != ((short) 9515)) {
+    if (lib.uniffi_slatedb_ffi_checksum_method_writebatch_put() != ((short) 46996)) {
       throw new RuntimeException(
           "UniFFI API checksum mismatch: try cleaning and rebuilding your project");
     }
-    if (lib.uniffi_slatedb_ffi_checksum_method_ffiwritebatch_put_with_options()
-        != ((short) 35097)) {
+    if (lib.uniffi_slatedb_ffi_checksum_method_writebatch_put_with_options() != ((short) 54841)) {
       throw new RuntimeException(
           "UniFFI API checksum mismatch: try cleaning and rebuilding your project");
     }
-    if (lib.uniffi_slatedb_ffi_checksum_constructor_ffidbbuilder_new() != ((short) 22766)) {
+    if (lib.uniffi_slatedb_ffi_checksum_constructor_dbbuilder_new() != ((short) 64175)) {
       throw new RuntimeException(
           "UniFFI API checksum mismatch: try cleaning and rebuilding your project");
     }
-    if (lib.uniffi_slatedb_ffi_checksum_constructor_ffidbreaderbuilder_new() != ((short) 56685)) {
+    if (lib.uniffi_slatedb_ffi_checksum_constructor_dbreaderbuilder_new() != ((short) 43902)) {
       throw new RuntimeException(
           "UniFFI API checksum mismatch: try cleaning and rebuilding your project");
     }
-    if (lib.uniffi_slatedb_ffi_checksum_constructor_ffiobjectstore_from_env() != ((short) 29333)) {
+    if (lib.uniffi_slatedb_ffi_checksum_constructor_objectstore_from_env() != ((short) 16566)) {
       throw new RuntimeException(
           "UniFFI API checksum mismatch: try cleaning and rebuilding your project");
     }
-    if (lib.uniffi_slatedb_ffi_checksum_constructor_ffiobjectstore_resolve() != ((short) 52192)) {
+    if (lib.uniffi_slatedb_ffi_checksum_constructor_objectstore_resolve() != ((short) 25816)) {
       throw new RuntimeException(
           "UniFFI API checksum mismatch: try cleaning and rebuilding your project");
     }
-    if (lib.uniffi_slatedb_ffi_checksum_constructor_ffisettings_default() != ((short) 37692)) {
+    if (lib.uniffi_slatedb_ffi_checksum_constructor_settings_default() != ((short) 47128)) {
       throw new RuntimeException(
           "UniFFI API checksum mismatch: try cleaning and rebuilding your project");
     }
-    if (lib.uniffi_slatedb_ffi_checksum_constructor_ffisettings_from_env() != ((short) 42524)) {
+    if (lib.uniffi_slatedb_ffi_checksum_constructor_settings_from_env() != ((short) 51006)) {
       throw new RuntimeException(
           "UniFFI API checksum mismatch: try cleaning and rebuilding your project");
     }
-    if (lib.uniffi_slatedb_ffi_checksum_constructor_ffisettings_from_env_with_default()
-        != ((short) 57925)) {
+    if (lib.uniffi_slatedb_ffi_checksum_constructor_settings_from_env_with_default()
+        != ((short) 19363)) {
       throw new RuntimeException(
           "UniFFI API checksum mismatch: try cleaning and rebuilding your project");
     }
-    if (lib.uniffi_slatedb_ffi_checksum_constructor_ffisettings_from_file() != ((short) 47421)) {
+    if (lib.uniffi_slatedb_ffi_checksum_constructor_settings_from_file() != ((short) 34482)) {
       throw new RuntimeException(
           "UniFFI API checksum mismatch: try cleaning and rebuilding your project");
     }
-    if (lib.uniffi_slatedb_ffi_checksum_constructor_ffisettings_from_json_string()
-        != ((short) 32936)) {
+    if (lib.uniffi_slatedb_ffi_checksum_constructor_settings_from_json_string() != ((short) 4001)) {
       throw new RuntimeException(
           "UniFFI API checksum mismatch: try cleaning and rebuilding your project");
     }
-    if (lib.uniffi_slatedb_ffi_checksum_constructor_ffisettings_load() != ((short) 61074)) {
+    if (lib.uniffi_slatedb_ffi_checksum_constructor_settings_load() != ((short) 6890)) {
       throw new RuntimeException(
           "UniFFI API checksum mismatch: try cleaning and rebuilding your project");
     }
-    if (lib.uniffi_slatedb_ffi_checksum_constructor_ffiwalreader_new() != ((short) 2695)) {
+    if (lib.uniffi_slatedb_ffi_checksum_constructor_walreader_new() != ((short) 8955)) {
       throw new RuntimeException(
           "UniFFI API checksum mismatch: try cleaning and rebuilding your project");
     }
-    if (lib.uniffi_slatedb_ffi_checksum_constructor_ffiwritebatch_new() != ((short) 46470)) {
+    if (lib.uniffi_slatedb_ffi_checksum_constructor_writebatch_new() != ((short) 37826)) {
       throw new RuntimeException(
           "UniFFI API checksum mismatch: try cleaning and rebuilding your project");
     }

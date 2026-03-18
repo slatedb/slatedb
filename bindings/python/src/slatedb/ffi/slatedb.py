@@ -492,426 +492,423 @@ def _uniffi_check_contract_api_version(lib):
 
 
 def _uniffi_check_api_checksums(lib):
-    if lib.uniffi_slatedb_ffi_checksum_func_ffi_init_logging() != 42559:
+    if lib.uniffi_slatedb_ffi_checksum_func_init_logging() != 54254:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_ffidb_begin() != 27320:
+    if lib.uniffi_slatedb_ffi_checksum_method_db_begin() != 28200:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_ffidb_delete() != 23170:
+    if lib.uniffi_slatedb_ffi_checksum_method_db_delete() != 50032:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_ffidb_delete_with_options() != 36049:
+    if lib.uniffi_slatedb_ffi_checksum_method_db_delete_with_options() != 32367:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_ffidb_flush() != 8494:
+    if lib.uniffi_slatedb_ffi_checksum_method_db_flush() != 39017:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_ffidb_flush_with_options() != 49534:
+    if lib.uniffi_slatedb_ffi_checksum_method_db_flush_with_options() != 21103:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_ffidb_get() != 41469:
+    if lib.uniffi_slatedb_ffi_checksum_method_db_get() != 47753:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_ffidb_get_key_value() != 4319:
+    if lib.uniffi_slatedb_ffi_checksum_method_db_get_key_value() != 40515:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_ffidb_get_key_value_with_options() != 30550:
+    if lib.uniffi_slatedb_ffi_checksum_method_db_get_key_value_with_options() != 49009:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_ffidb_get_with_options() != 24693:
+    if lib.uniffi_slatedb_ffi_checksum_method_db_get_with_options() != 59259:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_ffidb_merge() != 17131:
+    if lib.uniffi_slatedb_ffi_checksum_method_db_merge() != 31328:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_ffidb_merge_with_options() != 20187:
+    if lib.uniffi_slatedb_ffi_checksum_method_db_merge_with_options() != 18622:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_ffidb_metrics() != 17180:
+    if lib.uniffi_slatedb_ffi_checksum_method_db_metrics() != 10479:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_ffidb_put() != 35423:
+    if lib.uniffi_slatedb_ffi_checksum_method_db_put() != 37265:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_ffidb_put_with_options() != 3469:
+    if lib.uniffi_slatedb_ffi_checksum_method_db_put_with_options() != 23832:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_ffidb_scan() != 13606:
+    if lib.uniffi_slatedb_ffi_checksum_method_db_scan() != 16785:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_ffidb_scan_prefix() != 35855:
+    if lib.uniffi_slatedb_ffi_checksum_method_db_scan_prefix() != 52231:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_ffidb_scan_prefix_with_options() != 28845:
+    if lib.uniffi_slatedb_ffi_checksum_method_db_scan_prefix_with_options() != 32993:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_ffidb_scan_with_options() != 16422:
+    if lib.uniffi_slatedb_ffi_checksum_method_db_scan_with_options() != 38619:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_ffidb_shutdown() != 62539:
+    if lib.uniffi_slatedb_ffi_checksum_method_db_shutdown() != 1011:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_ffidb_snapshot() != 61667:
+    if lib.uniffi_slatedb_ffi_checksum_method_db_snapshot() != 420:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_ffidb_status() != 6095:
+    if lib.uniffi_slatedb_ffi_checksum_method_db_status() != 21747:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_ffidb_write() != 50936:
+    if lib.uniffi_slatedb_ffi_checksum_method_db_write() != 55178:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_ffidb_write_with_options() != 566:
+    if lib.uniffi_slatedb_ffi_checksum_method_db_write_with_options() != 23668:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_ffidbbuilder_build() != 20111:
+    if lib.uniffi_slatedb_ffi_checksum_method_dbbuilder_build() != 54479:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_ffidbbuilder_with_db_cache_disabled() != 29934:
+    if lib.uniffi_slatedb_ffi_checksum_method_dbbuilder_with_db_cache_disabled() != 41151:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_ffidbbuilder_with_merge_operator() != 13534:
+    if lib.uniffi_slatedb_ffi_checksum_method_dbbuilder_with_merge_operator() != 11670:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_ffidbbuilder_with_seed() != 50434:
+    if lib.uniffi_slatedb_ffi_checksum_method_dbbuilder_with_seed() != 18556:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_ffidbbuilder_with_settings() != 21510:
+    if lib.uniffi_slatedb_ffi_checksum_method_dbbuilder_with_settings() != 11407:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_ffidbbuilder_with_sst_block_size() != 43234:
+    if lib.uniffi_slatedb_ffi_checksum_method_dbbuilder_with_sst_block_size() != 24601:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_ffidbbuilder_with_wal_object_store() != 54976:
+    if lib.uniffi_slatedb_ffi_checksum_method_dbbuilder_with_wal_object_store() != 15581:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_ffidbiterator_next() != 35396:
+    if lib.uniffi_slatedb_ffi_checksum_method_dbiterator_next() != 63746:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_ffidbiterator_seek() != 16218:
+    if lib.uniffi_slatedb_ffi_checksum_method_dbiterator_seek() != 3174:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_ffidbreader_get() != 46156:
+    if lib.uniffi_slatedb_ffi_checksum_method_dbreader_get() != 150:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_ffidbreader_get_with_options() != 13809:
+    if lib.uniffi_slatedb_ffi_checksum_method_dbreader_get_with_options() != 53767:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_ffidbreader_scan() != 587:
+    if lib.uniffi_slatedb_ffi_checksum_method_dbreader_scan() != 48493:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_ffidbreader_scan_prefix() != 2092:
+    if lib.uniffi_slatedb_ffi_checksum_method_dbreader_scan_prefix() != 42624:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_ffidbreader_scan_prefix_with_options() != 2695:
+    if lib.uniffi_slatedb_ffi_checksum_method_dbreader_scan_prefix_with_options() != 44039:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_ffidbreader_scan_with_options() != 19389:
+    if lib.uniffi_slatedb_ffi_checksum_method_dbreader_scan_with_options() != 653:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_ffidbreader_shutdown() != 60272:
+    if lib.uniffi_slatedb_ffi_checksum_method_dbreader_shutdown() != 61444:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_ffidbreaderbuilder_build() != 10134:
+    if lib.uniffi_slatedb_ffi_checksum_method_dbreaderbuilder_build() != 53002:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_ffidbreaderbuilder_with_checkpoint_id() != 43622:
+    if lib.uniffi_slatedb_ffi_checksum_method_dbreaderbuilder_with_checkpoint_id() != 60214:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_ffidbreaderbuilder_with_merge_operator() != 48295:
+    if lib.uniffi_slatedb_ffi_checksum_method_dbreaderbuilder_with_merge_operator() != 15355:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_ffidbreaderbuilder_with_options() != 1731:
+    if lib.uniffi_slatedb_ffi_checksum_method_dbreaderbuilder_with_options() != 58185:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_ffidbreaderbuilder_with_wal_object_store() != 35691:
+    if lib.uniffi_slatedb_ffi_checksum_method_dbreaderbuilder_with_wal_object_store() != 39998:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_ffidbsnapshot_get() != 20211:
+    if lib.uniffi_slatedb_ffi_checksum_method_dbsnapshot_get() != 25831:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_ffidbsnapshot_get_key_value() != 59292:
+    if lib.uniffi_slatedb_ffi_checksum_method_dbsnapshot_get_key_value() != 34552:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_ffidbsnapshot_get_key_value_with_options() != 4124:
+    if lib.uniffi_slatedb_ffi_checksum_method_dbsnapshot_get_key_value_with_options() != 33632:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_ffidbsnapshot_get_with_options() != 20033:
+    if lib.uniffi_slatedb_ffi_checksum_method_dbsnapshot_get_with_options() != 31030:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_ffidbsnapshot_scan() != 5732:
+    if lib.uniffi_slatedb_ffi_checksum_method_dbsnapshot_scan() != 473:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_ffidbsnapshot_scan_prefix() != 43819:
+    if lib.uniffi_slatedb_ffi_checksum_method_dbsnapshot_scan_prefix() != 50321:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_ffidbsnapshot_scan_prefix_with_options() != 41123:
+    if lib.uniffi_slatedb_ffi_checksum_method_dbsnapshot_scan_prefix_with_options() != 5354:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_ffidbsnapshot_scan_with_options() != 10211:
+    if lib.uniffi_slatedb_ffi_checksum_method_dbsnapshot_scan_with_options() != 47474:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_ffidbtransaction_commit() != 48317:
+    if lib.uniffi_slatedb_ffi_checksum_method_dbtransaction_commit() != 428:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_ffidbtransaction_commit_with_options() != 23549:
+    if lib.uniffi_slatedb_ffi_checksum_method_dbtransaction_commit_with_options() != 62426:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_ffidbtransaction_delete() != 16039:
+    if lib.uniffi_slatedb_ffi_checksum_method_dbtransaction_delete() != 36751:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_ffidbtransaction_get() != 22094:
+    if lib.uniffi_slatedb_ffi_checksum_method_dbtransaction_get() != 17479:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_ffidbtransaction_get_key_value() != 27481:
+    if lib.uniffi_slatedb_ffi_checksum_method_dbtransaction_get_key_value() != 42847:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if (
-        lib.uniffi_slatedb_ffi_checksum_method_ffidbtransaction_get_key_value_with_options()
-        != 41640
-    ):
+    if lib.uniffi_slatedb_ffi_checksum_method_dbtransaction_get_key_value_with_options() != 12647:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_ffidbtransaction_get_with_options() != 43185:
+    if lib.uniffi_slatedb_ffi_checksum_method_dbtransaction_get_with_options() != 51567:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_ffidbtransaction_id() != 54287:
+    if lib.uniffi_slatedb_ffi_checksum_method_dbtransaction_id() != 6904:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_ffidbtransaction_mark_read() != 22753:
+    if lib.uniffi_slatedb_ffi_checksum_method_dbtransaction_mark_read() != 55492:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_ffidbtransaction_merge() != 35715:
+    if lib.uniffi_slatedb_ffi_checksum_method_dbtransaction_merge() != 14786:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_ffidbtransaction_merge_with_options() != 25941:
+    if lib.uniffi_slatedb_ffi_checksum_method_dbtransaction_merge_with_options() != 63514:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_ffidbtransaction_put() != 44076:
+    if lib.uniffi_slatedb_ffi_checksum_method_dbtransaction_put() != 18111:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_ffidbtransaction_put_with_options() != 21098:
+    if lib.uniffi_slatedb_ffi_checksum_method_dbtransaction_put_with_options() != 41295:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_ffidbtransaction_rollback() != 9781:
+    if lib.uniffi_slatedb_ffi_checksum_method_dbtransaction_rollback() != 45610:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_ffidbtransaction_scan() != 36573:
+    if lib.uniffi_slatedb_ffi_checksum_method_dbtransaction_scan() != 37690:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_ffidbtransaction_scan_prefix() != 49503:
+    if lib.uniffi_slatedb_ffi_checksum_method_dbtransaction_scan_prefix() != 8910:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_ffidbtransaction_scan_prefix_with_options() != 29076:
+    if lib.uniffi_slatedb_ffi_checksum_method_dbtransaction_scan_prefix_with_options() != 747:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_ffidbtransaction_scan_with_options() != 34855:
+    if lib.uniffi_slatedb_ffi_checksum_method_dbtransaction_scan_with_options() != 48535:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_ffidbtransaction_seqnum() != 22659:
+    if lib.uniffi_slatedb_ffi_checksum_method_dbtransaction_seqnum() != 32854:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_ffidbtransaction_unmark_write() != 13895:
+    if lib.uniffi_slatedb_ffi_checksum_method_dbtransaction_unmark_write() != 28889:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_ffilogcallback_log() != 63108:
+    if lib.uniffi_slatedb_ffi_checksum_method_logcallback_log() != 29875:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_ffimergeoperator_merge() != 64881:
+    if lib.uniffi_slatedb_ffi_checksum_method_mergeoperator_merge() != 9527:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_ffisettings_set() != 25271:
+    if lib.uniffi_slatedb_ffi_checksum_method_settings_set() != 35534:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_ffisettings_to_json_string() != 6471:
+    if lib.uniffi_slatedb_ffi_checksum_method_settings_to_json_string() != 56273:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_ffiwalfile_id() != 4476:
+    if lib.uniffi_slatedb_ffi_checksum_method_walfile_id() != 46596:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_ffiwalfile_iterator() != 26463:
+    if lib.uniffi_slatedb_ffi_checksum_method_walfile_iterator() != 44079:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_ffiwalfile_metadata() != 53251:
+    if lib.uniffi_slatedb_ffi_checksum_method_walfile_metadata() != 11831:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_ffiwalfile_next_file() != 583:
+    if lib.uniffi_slatedb_ffi_checksum_method_walfile_next_file() != 18713:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_ffiwalfile_next_id() != 17961:
+    if lib.uniffi_slatedb_ffi_checksum_method_walfile_next_id() != 11112:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_ffiwalfile_shutdown() != 1197:
+    if lib.uniffi_slatedb_ffi_checksum_method_walfile_shutdown() != 61794:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_ffiwalfileiterator_next() != 25733:
+    if lib.uniffi_slatedb_ffi_checksum_method_walfileiterator_next() != 44449:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_ffiwalfileiterator_shutdown() != 10991:
+    if lib.uniffi_slatedb_ffi_checksum_method_walfileiterator_shutdown() != 8034:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_ffiwalreader_get() != 42864:
+    if lib.uniffi_slatedb_ffi_checksum_method_walreader_get() != 2234:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_ffiwalreader_list() != 64696:
+    if lib.uniffi_slatedb_ffi_checksum_method_walreader_list() != 34786:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_ffiwalreader_shutdown() != 48499:
+    if lib.uniffi_slatedb_ffi_checksum_method_walreader_shutdown() != 16293:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_ffiwritebatch_delete() != 48646:
+    if lib.uniffi_slatedb_ffi_checksum_method_writebatch_delete() != 33429:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_ffiwritebatch_merge() != 16539:
+    if lib.uniffi_slatedb_ffi_checksum_method_writebatch_merge() != 23805:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_ffiwritebatch_merge_with_options() != 14093:
+    if lib.uniffi_slatedb_ffi_checksum_method_writebatch_merge_with_options() != 5442:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_ffiwritebatch_put() != 9515:
+    if lib.uniffi_slatedb_ffi_checksum_method_writebatch_put() != 46996:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_ffiwritebatch_put_with_options() != 35097:
+    if lib.uniffi_slatedb_ffi_checksum_method_writebatch_put_with_options() != 54841:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_constructor_ffidbbuilder_new() != 22766:
+    if lib.uniffi_slatedb_ffi_checksum_constructor_dbbuilder_new() != 64175:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_constructor_ffidbreaderbuilder_new() != 56685:
+    if lib.uniffi_slatedb_ffi_checksum_constructor_dbreaderbuilder_new() != 43902:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_constructor_ffiobjectstore_from_env() != 29333:
+    if lib.uniffi_slatedb_ffi_checksum_constructor_objectstore_from_env() != 16566:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_constructor_ffiobjectstore_resolve() != 52192:
+    if lib.uniffi_slatedb_ffi_checksum_constructor_objectstore_resolve() != 25816:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_constructor_ffisettings_default() != 37692:
+    if lib.uniffi_slatedb_ffi_checksum_constructor_settings_default() != 47128:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_constructor_ffisettings_from_env() != 42524:
+    if lib.uniffi_slatedb_ffi_checksum_constructor_settings_from_env() != 51006:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_constructor_ffisettings_from_env_with_default() != 57925:
+    if lib.uniffi_slatedb_ffi_checksum_constructor_settings_from_env_with_default() != 19363:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_constructor_ffisettings_from_file() != 47421:
+    if lib.uniffi_slatedb_ffi_checksum_constructor_settings_from_file() != 34482:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_constructor_ffisettings_from_json_string() != 32936:
+    if lib.uniffi_slatedb_ffi_checksum_constructor_settings_from_json_string() != 4001:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_constructor_ffisettings_load() != 61074:
+    if lib.uniffi_slatedb_ffi_checksum_constructor_settings_load() != 6890:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_constructor_ffiwalreader_new() != 2695:
+    if lib.uniffi_slatedb_ffi_checksum_constructor_walreader_new() != 8955:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_constructor_ffiwritebatch_new() != 46470:
+    if lib.uniffi_slatedb_ffi_checksum_constructor_writebatch_new() != 37826:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
@@ -1122,14 +1119,14 @@ _UNIFFI_FOREIGN_FUTURE_COMPLETE_VOID = ctypes.CFUNCTYPE(
     ctypes.c_uint64,
     _UniffiForeignFutureStructVoid,
 )
-_UNIFFI_CALLBACK_INTERFACE_FFI_LOG_CALLBACK_METHOD0 = ctypes.CFUNCTYPE(
+_UNIFFI_CALLBACK_INTERFACE_LOG_CALLBACK_METHOD0 = ctypes.CFUNCTYPE(
     None,
     ctypes.c_uint64,
     _UniffiRustBuffer,
     ctypes.c_void_p,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UNIFFI_CALLBACK_INTERFACE_FFI_MERGE_OPERATOR_METHOD0 = ctypes.CFUNCTYPE(
+_UNIFFI_CALLBACK_INTERFACE_MERGE_OPERATOR_METHOD0 = ctypes.CFUNCTYPE(
     None,
     ctypes.c_uint64,
     _UniffiRustBuffer,
@@ -1140,744 +1137,738 @@ _UNIFFI_CALLBACK_INTERFACE_FFI_MERGE_OPERATOR_METHOD0 = ctypes.CFUNCTYPE(
 )
 
 
-class _UniffiVTableCallbackInterfaceFfiLogCallback(ctypes.Structure):
+class _UniffiVTableCallbackInterfaceLogCallback(ctypes.Structure):
     _fields_ = [
-        ("log", _UNIFFI_CALLBACK_INTERFACE_FFI_LOG_CALLBACK_METHOD0),
+        ("log", _UNIFFI_CALLBACK_INTERFACE_LOG_CALLBACK_METHOD0),
         ("uniffi_free", _UNIFFI_CALLBACK_INTERFACE_FREE),
     ]
 
 
-class _UniffiVTableCallbackInterfaceFfiMergeOperator(ctypes.Structure):
+class _UniffiVTableCallbackInterfaceMergeOperator(ctypes.Structure):
     _fields_ = [
-        ("merge", _UNIFFI_CALLBACK_INTERFACE_FFI_MERGE_OPERATOR_METHOD0),
+        ("merge", _UNIFFI_CALLBACK_INTERFACE_MERGE_OPERATOR_METHOD0),
         ("uniffi_free", _UNIFFI_CALLBACK_INTERFACE_FREE),
     ]
 
 
-_UniffiLib.uniffi_slatedb_ffi_fn_clone_ffidb.argtypes = (
+_UniffiLib.uniffi_slatedb_ffi_fn_clone_db.argtypes = (
     ctypes.c_void_p,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_clone_ffidb.restype = ctypes.c_void_p
-_UniffiLib.uniffi_slatedb_ffi_fn_free_ffidb.argtypes = (
+_UniffiLib.uniffi_slatedb_ffi_fn_clone_db.restype = ctypes.c_void_p
+_UniffiLib.uniffi_slatedb_ffi_fn_free_db.argtypes = (
     ctypes.c_void_p,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_free_ffidb.restype = None
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidb_begin.argtypes = (
+_UniffiLib.uniffi_slatedb_ffi_fn_free_db.restype = None
+_UniffiLib.uniffi_slatedb_ffi_fn_method_db_begin.argtypes = (
     ctypes.c_void_p,
     _UniffiRustBuffer,
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidb_begin.restype = ctypes.c_uint64
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidb_delete.argtypes = (
+_UniffiLib.uniffi_slatedb_ffi_fn_method_db_begin.restype = ctypes.c_uint64
+_UniffiLib.uniffi_slatedb_ffi_fn_method_db_delete.argtypes = (
     ctypes.c_void_p,
     _UniffiRustBuffer,
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidb_delete.restype = ctypes.c_uint64
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidb_delete_with_options.argtypes = (
-    ctypes.c_void_p,
-    _UniffiRustBuffer,
-    _UniffiRustBuffer,
-)
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidb_delete_with_options.restype = ctypes.c_uint64
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidb_flush.argtypes = (ctypes.c_void_p,)
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidb_flush.restype = ctypes.c_uint64
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidb_flush_with_options.argtypes = (
-    ctypes.c_void_p,
-    _UniffiRustBuffer,
-)
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidb_flush_with_options.restype = ctypes.c_uint64
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidb_get.argtypes = (
-    ctypes.c_void_p,
-    _UniffiRustBuffer,
-)
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidb_get.restype = ctypes.c_uint64
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidb_get_key_value.argtypes = (
-    ctypes.c_void_p,
-    _UniffiRustBuffer,
-)
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidb_get_key_value.restype = ctypes.c_uint64
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidb_get_key_value_with_options.argtypes = (
+_UniffiLib.uniffi_slatedb_ffi_fn_method_db_delete.restype = ctypes.c_uint64
+_UniffiLib.uniffi_slatedb_ffi_fn_method_db_delete_with_options.argtypes = (
     ctypes.c_void_p,
     _UniffiRustBuffer,
     _UniffiRustBuffer,
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidb_get_key_value_with_options.restype = ctypes.c_uint64
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidb_get_with_options.argtypes = (
+_UniffiLib.uniffi_slatedb_ffi_fn_method_db_delete_with_options.restype = ctypes.c_uint64
+_UniffiLib.uniffi_slatedb_ffi_fn_method_db_flush.argtypes = (ctypes.c_void_p,)
+_UniffiLib.uniffi_slatedb_ffi_fn_method_db_flush.restype = ctypes.c_uint64
+_UniffiLib.uniffi_slatedb_ffi_fn_method_db_flush_with_options.argtypes = (
+    ctypes.c_void_p,
+    _UniffiRustBuffer,
+)
+_UniffiLib.uniffi_slatedb_ffi_fn_method_db_flush_with_options.restype = ctypes.c_uint64
+_UniffiLib.uniffi_slatedb_ffi_fn_method_db_get.argtypes = (
+    ctypes.c_void_p,
+    _UniffiRustBuffer,
+)
+_UniffiLib.uniffi_slatedb_ffi_fn_method_db_get.restype = ctypes.c_uint64
+_UniffiLib.uniffi_slatedb_ffi_fn_method_db_get_key_value.argtypes = (
+    ctypes.c_void_p,
+    _UniffiRustBuffer,
+)
+_UniffiLib.uniffi_slatedb_ffi_fn_method_db_get_key_value.restype = ctypes.c_uint64
+_UniffiLib.uniffi_slatedb_ffi_fn_method_db_get_key_value_with_options.argtypes = (
     ctypes.c_void_p,
     _UniffiRustBuffer,
     _UniffiRustBuffer,
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidb_get_with_options.restype = ctypes.c_uint64
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidb_merge.argtypes = (
+_UniffiLib.uniffi_slatedb_ffi_fn_method_db_get_key_value_with_options.restype = ctypes.c_uint64
+_UniffiLib.uniffi_slatedb_ffi_fn_method_db_get_with_options.argtypes = (
     ctypes.c_void_p,
     _UniffiRustBuffer,
     _UniffiRustBuffer,
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidb_merge.restype = ctypes.c_uint64
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidb_merge_with_options.argtypes = (
+_UniffiLib.uniffi_slatedb_ffi_fn_method_db_get_with_options.restype = ctypes.c_uint64
+_UniffiLib.uniffi_slatedb_ffi_fn_method_db_merge.argtypes = (
+    ctypes.c_void_p,
+    _UniffiRustBuffer,
+    _UniffiRustBuffer,
+)
+_UniffiLib.uniffi_slatedb_ffi_fn_method_db_merge.restype = ctypes.c_uint64
+_UniffiLib.uniffi_slatedb_ffi_fn_method_db_merge_with_options.argtypes = (
     ctypes.c_void_p,
     _UniffiRustBuffer,
     _UniffiRustBuffer,
     _UniffiRustBuffer,
     _UniffiRustBuffer,
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidb_merge_with_options.restype = ctypes.c_uint64
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidb_metrics.argtypes = (
+_UniffiLib.uniffi_slatedb_ffi_fn_method_db_merge_with_options.restype = ctypes.c_uint64
+_UniffiLib.uniffi_slatedb_ffi_fn_method_db_metrics.argtypes = (
     ctypes.c_void_p,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidb_metrics.restype = _UniffiRustBuffer
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidb_put.argtypes = (
+_UniffiLib.uniffi_slatedb_ffi_fn_method_db_metrics.restype = _UniffiRustBuffer
+_UniffiLib.uniffi_slatedb_ffi_fn_method_db_put.argtypes = (
     ctypes.c_void_p,
     _UniffiRustBuffer,
     _UniffiRustBuffer,
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidb_put.restype = ctypes.c_uint64
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidb_put_with_options.argtypes = (
+_UniffiLib.uniffi_slatedb_ffi_fn_method_db_put.restype = ctypes.c_uint64
+_UniffiLib.uniffi_slatedb_ffi_fn_method_db_put_with_options.argtypes = (
     ctypes.c_void_p,
     _UniffiRustBuffer,
     _UniffiRustBuffer,
     _UniffiRustBuffer,
     _UniffiRustBuffer,
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidb_put_with_options.restype = ctypes.c_uint64
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidb_scan.argtypes = (
+_UniffiLib.uniffi_slatedb_ffi_fn_method_db_put_with_options.restype = ctypes.c_uint64
+_UniffiLib.uniffi_slatedb_ffi_fn_method_db_scan.argtypes = (
     ctypes.c_void_p,
     _UniffiRustBuffer,
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidb_scan.restype = ctypes.c_uint64
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidb_scan_prefix.argtypes = (
+_UniffiLib.uniffi_slatedb_ffi_fn_method_db_scan.restype = ctypes.c_uint64
+_UniffiLib.uniffi_slatedb_ffi_fn_method_db_scan_prefix.argtypes = (
     ctypes.c_void_p,
     _UniffiRustBuffer,
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidb_scan_prefix.restype = ctypes.c_uint64
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidb_scan_prefix_with_options.argtypes = (
-    ctypes.c_void_p,
-    _UniffiRustBuffer,
-    _UniffiRustBuffer,
-)
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidb_scan_prefix_with_options.restype = ctypes.c_uint64
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidb_scan_with_options.argtypes = (
+_UniffiLib.uniffi_slatedb_ffi_fn_method_db_scan_prefix.restype = ctypes.c_uint64
+_UniffiLib.uniffi_slatedb_ffi_fn_method_db_scan_prefix_with_options.argtypes = (
     ctypes.c_void_p,
     _UniffiRustBuffer,
     _UniffiRustBuffer,
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidb_scan_with_options.restype = ctypes.c_uint64
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidb_shutdown.argtypes = (ctypes.c_void_p,)
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidb_shutdown.restype = ctypes.c_uint64
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidb_snapshot.argtypes = (ctypes.c_void_p,)
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidb_snapshot.restype = ctypes.c_uint64
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidb_status.argtypes = (
+_UniffiLib.uniffi_slatedb_ffi_fn_method_db_scan_prefix_with_options.restype = ctypes.c_uint64
+_UniffiLib.uniffi_slatedb_ffi_fn_method_db_scan_with_options.argtypes = (
+    ctypes.c_void_p,
+    _UniffiRustBuffer,
+    _UniffiRustBuffer,
+)
+_UniffiLib.uniffi_slatedb_ffi_fn_method_db_scan_with_options.restype = ctypes.c_uint64
+_UniffiLib.uniffi_slatedb_ffi_fn_method_db_shutdown.argtypes = (ctypes.c_void_p,)
+_UniffiLib.uniffi_slatedb_ffi_fn_method_db_shutdown.restype = ctypes.c_uint64
+_UniffiLib.uniffi_slatedb_ffi_fn_method_db_snapshot.argtypes = (ctypes.c_void_p,)
+_UniffiLib.uniffi_slatedb_ffi_fn_method_db_snapshot.restype = ctypes.c_uint64
+_UniffiLib.uniffi_slatedb_ffi_fn_method_db_status.argtypes = (
     ctypes.c_void_p,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidb_status.restype = None
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidb_write.argtypes = (
+_UniffiLib.uniffi_slatedb_ffi_fn_method_db_status.restype = None
+_UniffiLib.uniffi_slatedb_ffi_fn_method_db_write.argtypes = (
     ctypes.c_void_p,
     ctypes.c_void_p,
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidb_write.restype = ctypes.c_uint64
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidb_write_with_options.argtypes = (
+_UniffiLib.uniffi_slatedb_ffi_fn_method_db_write.restype = ctypes.c_uint64
+_UniffiLib.uniffi_slatedb_ffi_fn_method_db_write_with_options.argtypes = (
     ctypes.c_void_p,
     ctypes.c_void_p,
     _UniffiRustBuffer,
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidb_write_with_options.restype = ctypes.c_uint64
-_UniffiLib.uniffi_slatedb_ffi_fn_clone_ffidbbuilder.argtypes = (
+_UniffiLib.uniffi_slatedb_ffi_fn_method_db_write_with_options.restype = ctypes.c_uint64
+_UniffiLib.uniffi_slatedb_ffi_fn_clone_dbbuilder.argtypes = (
     ctypes.c_void_p,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_clone_ffidbbuilder.restype = ctypes.c_void_p
-_UniffiLib.uniffi_slatedb_ffi_fn_free_ffidbbuilder.argtypes = (
+_UniffiLib.uniffi_slatedb_ffi_fn_clone_dbbuilder.restype = ctypes.c_void_p
+_UniffiLib.uniffi_slatedb_ffi_fn_free_dbbuilder.argtypes = (
     ctypes.c_void_p,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_free_ffidbbuilder.restype = None
-_UniffiLib.uniffi_slatedb_ffi_fn_constructor_ffidbbuilder_new.argtypes = (
+_UniffiLib.uniffi_slatedb_ffi_fn_free_dbbuilder.restype = None
+_UniffiLib.uniffi_slatedb_ffi_fn_constructor_dbbuilder_new.argtypes = (
     _UniffiRustBuffer,
     ctypes.c_void_p,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_constructor_ffidbbuilder_new.restype = ctypes.c_void_p
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbbuilder_build.argtypes = (ctypes.c_void_p,)
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbbuilder_build.restype = ctypes.c_uint64
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbbuilder_with_db_cache_disabled.argtypes = (
+_UniffiLib.uniffi_slatedb_ffi_fn_constructor_dbbuilder_new.restype = ctypes.c_void_p
+_UniffiLib.uniffi_slatedb_ffi_fn_method_dbbuilder_build.argtypes = (ctypes.c_void_p,)
+_UniffiLib.uniffi_slatedb_ffi_fn_method_dbbuilder_build.restype = ctypes.c_uint64
+_UniffiLib.uniffi_slatedb_ffi_fn_method_dbbuilder_with_db_cache_disabled.argtypes = (
     ctypes.c_void_p,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbbuilder_with_db_cache_disabled.restype = None
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbbuilder_with_merge_operator.argtypes = (
+_UniffiLib.uniffi_slatedb_ffi_fn_method_dbbuilder_with_db_cache_disabled.restype = None
+_UniffiLib.uniffi_slatedb_ffi_fn_method_dbbuilder_with_merge_operator.argtypes = (
     ctypes.c_void_p,
     ctypes.c_void_p,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbbuilder_with_merge_operator.restype = None
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbbuilder_with_seed.argtypes = (
+_UniffiLib.uniffi_slatedb_ffi_fn_method_dbbuilder_with_merge_operator.restype = None
+_UniffiLib.uniffi_slatedb_ffi_fn_method_dbbuilder_with_seed.argtypes = (
     ctypes.c_void_p,
     ctypes.c_uint64,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbbuilder_with_seed.restype = None
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbbuilder_with_settings.argtypes = (
+_UniffiLib.uniffi_slatedb_ffi_fn_method_dbbuilder_with_seed.restype = None
+_UniffiLib.uniffi_slatedb_ffi_fn_method_dbbuilder_with_settings.argtypes = (
     ctypes.c_void_p,
     ctypes.c_void_p,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbbuilder_with_settings.restype = None
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbbuilder_with_sst_block_size.argtypes = (
+_UniffiLib.uniffi_slatedb_ffi_fn_method_dbbuilder_with_settings.restype = None
+_UniffiLib.uniffi_slatedb_ffi_fn_method_dbbuilder_with_sst_block_size.argtypes = (
     ctypes.c_void_p,
     _UniffiRustBuffer,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbbuilder_with_sst_block_size.restype = None
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbbuilder_with_wal_object_store.argtypes = (
+_UniffiLib.uniffi_slatedb_ffi_fn_method_dbbuilder_with_sst_block_size.restype = None
+_UniffiLib.uniffi_slatedb_ffi_fn_method_dbbuilder_with_wal_object_store.argtypes = (
     ctypes.c_void_p,
     ctypes.c_void_p,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbbuilder_with_wal_object_store.restype = None
-_UniffiLib.uniffi_slatedb_ffi_fn_clone_ffidbiterator.argtypes = (
+_UniffiLib.uniffi_slatedb_ffi_fn_method_dbbuilder_with_wal_object_store.restype = None
+_UniffiLib.uniffi_slatedb_ffi_fn_clone_dbiterator.argtypes = (
     ctypes.c_void_p,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_clone_ffidbiterator.restype = ctypes.c_void_p
-_UniffiLib.uniffi_slatedb_ffi_fn_free_ffidbiterator.argtypes = (
+_UniffiLib.uniffi_slatedb_ffi_fn_clone_dbiterator.restype = ctypes.c_void_p
+_UniffiLib.uniffi_slatedb_ffi_fn_free_dbiterator.argtypes = (
     ctypes.c_void_p,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_free_ffidbiterator.restype = None
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbiterator_next.argtypes = (ctypes.c_void_p,)
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbiterator_next.restype = ctypes.c_uint64
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbiterator_seek.argtypes = (
+_UniffiLib.uniffi_slatedb_ffi_fn_free_dbiterator.restype = None
+_UniffiLib.uniffi_slatedb_ffi_fn_method_dbiterator_next.argtypes = (ctypes.c_void_p,)
+_UniffiLib.uniffi_slatedb_ffi_fn_method_dbiterator_next.restype = ctypes.c_uint64
+_UniffiLib.uniffi_slatedb_ffi_fn_method_dbiterator_seek.argtypes = (
     ctypes.c_void_p,
     _UniffiRustBuffer,
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbiterator_seek.restype = ctypes.c_uint64
-_UniffiLib.uniffi_slatedb_ffi_fn_clone_ffidbreader.argtypes = (
-    ctypes.c_void_p,
-    ctypes.POINTER(_UniffiRustCallStatus),
-)
-_UniffiLib.uniffi_slatedb_ffi_fn_clone_ffidbreader.restype = ctypes.c_void_p
-_UniffiLib.uniffi_slatedb_ffi_fn_free_ffidbreader.argtypes = (
+_UniffiLib.uniffi_slatedb_ffi_fn_method_dbiterator_seek.restype = ctypes.c_uint64
+_UniffiLib.uniffi_slatedb_ffi_fn_clone_dbreader.argtypes = (
     ctypes.c_void_p,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_free_ffidbreader.restype = None
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbreader_get.argtypes = (
+_UniffiLib.uniffi_slatedb_ffi_fn_clone_dbreader.restype = ctypes.c_void_p
+_UniffiLib.uniffi_slatedb_ffi_fn_free_dbreader.argtypes = (
+    ctypes.c_void_p,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_slatedb_ffi_fn_free_dbreader.restype = None
+_UniffiLib.uniffi_slatedb_ffi_fn_method_dbreader_get.argtypes = (
     ctypes.c_void_p,
     _UniffiRustBuffer,
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbreader_get.restype = ctypes.c_uint64
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbreader_get_with_options.argtypes = (
-    ctypes.c_void_p,
-    _UniffiRustBuffer,
-    _UniffiRustBuffer,
-)
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbreader_get_with_options.restype = ctypes.c_uint64
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbreader_scan.argtypes = (
-    ctypes.c_void_p,
-    _UniffiRustBuffer,
-)
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbreader_scan.restype = ctypes.c_uint64
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbreader_scan_prefix.argtypes = (
-    ctypes.c_void_p,
-    _UniffiRustBuffer,
-)
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbreader_scan_prefix.restype = ctypes.c_uint64
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbreader_scan_prefix_with_options.argtypes = (
+_UniffiLib.uniffi_slatedb_ffi_fn_method_dbreader_get.restype = ctypes.c_uint64
+_UniffiLib.uniffi_slatedb_ffi_fn_method_dbreader_get_with_options.argtypes = (
     ctypes.c_void_p,
     _UniffiRustBuffer,
     _UniffiRustBuffer,
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbreader_scan_prefix_with_options.restype = (
+_UniffiLib.uniffi_slatedb_ffi_fn_method_dbreader_get_with_options.restype = ctypes.c_uint64
+_UniffiLib.uniffi_slatedb_ffi_fn_method_dbreader_scan.argtypes = (
+    ctypes.c_void_p,
+    _UniffiRustBuffer,
+)
+_UniffiLib.uniffi_slatedb_ffi_fn_method_dbreader_scan.restype = ctypes.c_uint64
+_UniffiLib.uniffi_slatedb_ffi_fn_method_dbreader_scan_prefix.argtypes = (
+    ctypes.c_void_p,
+    _UniffiRustBuffer,
+)
+_UniffiLib.uniffi_slatedb_ffi_fn_method_dbreader_scan_prefix.restype = ctypes.c_uint64
+_UniffiLib.uniffi_slatedb_ffi_fn_method_dbreader_scan_prefix_with_options.argtypes = (
+    ctypes.c_void_p,
+    _UniffiRustBuffer,
+    _UniffiRustBuffer,
+)
+_UniffiLib.uniffi_slatedb_ffi_fn_method_dbreader_scan_prefix_with_options.restype = ctypes.c_uint64
+_UniffiLib.uniffi_slatedb_ffi_fn_method_dbreader_scan_with_options.argtypes = (
+    ctypes.c_void_p,
+    _UniffiRustBuffer,
+    _UniffiRustBuffer,
+)
+_UniffiLib.uniffi_slatedb_ffi_fn_method_dbreader_scan_with_options.restype = ctypes.c_uint64
+_UniffiLib.uniffi_slatedb_ffi_fn_method_dbreader_shutdown.argtypes = (ctypes.c_void_p,)
+_UniffiLib.uniffi_slatedb_ffi_fn_method_dbreader_shutdown.restype = ctypes.c_uint64
+_UniffiLib.uniffi_slatedb_ffi_fn_clone_dbreaderbuilder.argtypes = (
+    ctypes.c_void_p,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_slatedb_ffi_fn_clone_dbreaderbuilder.restype = ctypes.c_void_p
+_UniffiLib.uniffi_slatedb_ffi_fn_free_dbreaderbuilder.argtypes = (
+    ctypes.c_void_p,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_slatedb_ffi_fn_free_dbreaderbuilder.restype = None
+_UniffiLib.uniffi_slatedb_ffi_fn_constructor_dbreaderbuilder_new.argtypes = (
+    _UniffiRustBuffer,
+    ctypes.c_void_p,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_slatedb_ffi_fn_constructor_dbreaderbuilder_new.restype = ctypes.c_void_p
+_UniffiLib.uniffi_slatedb_ffi_fn_method_dbreaderbuilder_build.argtypes = (ctypes.c_void_p,)
+_UniffiLib.uniffi_slatedb_ffi_fn_method_dbreaderbuilder_build.restype = ctypes.c_uint64
+_UniffiLib.uniffi_slatedb_ffi_fn_method_dbreaderbuilder_with_checkpoint_id.argtypes = (
+    ctypes.c_void_p,
+    _UniffiRustBuffer,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_slatedb_ffi_fn_method_dbreaderbuilder_with_checkpoint_id.restype = None
+_UniffiLib.uniffi_slatedb_ffi_fn_method_dbreaderbuilder_with_merge_operator.argtypes = (
+    ctypes.c_void_p,
+    ctypes.c_void_p,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_slatedb_ffi_fn_method_dbreaderbuilder_with_merge_operator.restype = None
+_UniffiLib.uniffi_slatedb_ffi_fn_method_dbreaderbuilder_with_options.argtypes = (
+    ctypes.c_void_p,
+    _UniffiRustBuffer,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_slatedb_ffi_fn_method_dbreaderbuilder_with_options.restype = None
+_UniffiLib.uniffi_slatedb_ffi_fn_method_dbreaderbuilder_with_wal_object_store.argtypes = (
+    ctypes.c_void_p,
+    ctypes.c_void_p,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_slatedb_ffi_fn_method_dbreaderbuilder_with_wal_object_store.restype = None
+_UniffiLib.uniffi_slatedb_ffi_fn_clone_dbsnapshot.argtypes = (
+    ctypes.c_void_p,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_slatedb_ffi_fn_clone_dbsnapshot.restype = ctypes.c_void_p
+_UniffiLib.uniffi_slatedb_ffi_fn_free_dbsnapshot.argtypes = (
+    ctypes.c_void_p,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_slatedb_ffi_fn_free_dbsnapshot.restype = None
+_UniffiLib.uniffi_slatedb_ffi_fn_method_dbsnapshot_get.argtypes = (
+    ctypes.c_void_p,
+    _UniffiRustBuffer,
+)
+_UniffiLib.uniffi_slatedb_ffi_fn_method_dbsnapshot_get.restype = ctypes.c_uint64
+_UniffiLib.uniffi_slatedb_ffi_fn_method_dbsnapshot_get_key_value.argtypes = (
+    ctypes.c_void_p,
+    _UniffiRustBuffer,
+)
+_UniffiLib.uniffi_slatedb_ffi_fn_method_dbsnapshot_get_key_value.restype = ctypes.c_uint64
+_UniffiLib.uniffi_slatedb_ffi_fn_method_dbsnapshot_get_key_value_with_options.argtypes = (
+    ctypes.c_void_p,
+    _UniffiRustBuffer,
+    _UniffiRustBuffer,
+)
+_UniffiLib.uniffi_slatedb_ffi_fn_method_dbsnapshot_get_key_value_with_options.restype = (
     ctypes.c_uint64
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbreader_scan_with_options.argtypes = (
+_UniffiLib.uniffi_slatedb_ffi_fn_method_dbsnapshot_get_with_options.argtypes = (
     ctypes.c_void_p,
     _UniffiRustBuffer,
     _UniffiRustBuffer,
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbreader_scan_with_options.restype = ctypes.c_uint64
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbreader_shutdown.argtypes = (ctypes.c_void_p,)
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbreader_shutdown.restype = ctypes.c_uint64
-_UniffiLib.uniffi_slatedb_ffi_fn_clone_ffidbreaderbuilder.argtypes = (
-    ctypes.c_void_p,
-    ctypes.POINTER(_UniffiRustCallStatus),
-)
-_UniffiLib.uniffi_slatedb_ffi_fn_clone_ffidbreaderbuilder.restype = ctypes.c_void_p
-_UniffiLib.uniffi_slatedb_ffi_fn_free_ffidbreaderbuilder.argtypes = (
-    ctypes.c_void_p,
-    ctypes.POINTER(_UniffiRustCallStatus),
-)
-_UniffiLib.uniffi_slatedb_ffi_fn_free_ffidbreaderbuilder.restype = None
-_UniffiLib.uniffi_slatedb_ffi_fn_constructor_ffidbreaderbuilder_new.argtypes = (
-    _UniffiRustBuffer,
-    ctypes.c_void_p,
-    ctypes.POINTER(_UniffiRustCallStatus),
-)
-_UniffiLib.uniffi_slatedb_ffi_fn_constructor_ffidbreaderbuilder_new.restype = ctypes.c_void_p
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbreaderbuilder_build.argtypes = (ctypes.c_void_p,)
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbreaderbuilder_build.restype = ctypes.c_uint64
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbreaderbuilder_with_checkpoint_id.argtypes = (
-    ctypes.c_void_p,
-    _UniffiRustBuffer,
-    ctypes.POINTER(_UniffiRustCallStatus),
-)
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbreaderbuilder_with_checkpoint_id.restype = None
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbreaderbuilder_with_merge_operator.argtypes = (
-    ctypes.c_void_p,
-    ctypes.c_void_p,
-    ctypes.POINTER(_UniffiRustCallStatus),
-)
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbreaderbuilder_with_merge_operator.restype = None
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbreaderbuilder_with_options.argtypes = (
-    ctypes.c_void_p,
-    _UniffiRustBuffer,
-    ctypes.POINTER(_UniffiRustCallStatus),
-)
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbreaderbuilder_with_options.restype = None
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbreaderbuilder_with_wal_object_store.argtypes = (
-    ctypes.c_void_p,
-    ctypes.c_void_p,
-    ctypes.POINTER(_UniffiRustCallStatus),
-)
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbreaderbuilder_with_wal_object_store.restype = None
-_UniffiLib.uniffi_slatedb_ffi_fn_clone_ffidbsnapshot.argtypes = (
-    ctypes.c_void_p,
-    ctypes.POINTER(_UniffiRustCallStatus),
-)
-_UniffiLib.uniffi_slatedb_ffi_fn_clone_ffidbsnapshot.restype = ctypes.c_void_p
-_UniffiLib.uniffi_slatedb_ffi_fn_free_ffidbsnapshot.argtypes = (
-    ctypes.c_void_p,
-    ctypes.POINTER(_UniffiRustCallStatus),
-)
-_UniffiLib.uniffi_slatedb_ffi_fn_free_ffidbsnapshot.restype = None
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbsnapshot_get.argtypes = (
+_UniffiLib.uniffi_slatedb_ffi_fn_method_dbsnapshot_get_with_options.restype = ctypes.c_uint64
+_UniffiLib.uniffi_slatedb_ffi_fn_method_dbsnapshot_scan.argtypes = (
     ctypes.c_void_p,
     _UniffiRustBuffer,
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbsnapshot_get.restype = ctypes.c_uint64
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbsnapshot_get_key_value.argtypes = (
+_UniffiLib.uniffi_slatedb_ffi_fn_method_dbsnapshot_scan.restype = ctypes.c_uint64
+_UniffiLib.uniffi_slatedb_ffi_fn_method_dbsnapshot_scan_prefix.argtypes = (
     ctypes.c_void_p,
     _UniffiRustBuffer,
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbsnapshot_get_key_value.restype = ctypes.c_uint64
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbsnapshot_get_key_value_with_options.argtypes = (
+_UniffiLib.uniffi_slatedb_ffi_fn_method_dbsnapshot_scan_prefix.restype = ctypes.c_uint64
+_UniffiLib.uniffi_slatedb_ffi_fn_method_dbsnapshot_scan_prefix_with_options.argtypes = (
     ctypes.c_void_p,
     _UniffiRustBuffer,
     _UniffiRustBuffer,
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbsnapshot_get_key_value_with_options.restype = (
+_UniffiLib.uniffi_slatedb_ffi_fn_method_dbsnapshot_scan_prefix_with_options.restype = (
     ctypes.c_uint64
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbsnapshot_get_with_options.argtypes = (
+_UniffiLib.uniffi_slatedb_ffi_fn_method_dbsnapshot_scan_with_options.argtypes = (
     ctypes.c_void_p,
     _UniffiRustBuffer,
     _UniffiRustBuffer,
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbsnapshot_get_with_options.restype = ctypes.c_uint64
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbsnapshot_scan.argtypes = (
+_UniffiLib.uniffi_slatedb_ffi_fn_method_dbsnapshot_scan_with_options.restype = ctypes.c_uint64
+_UniffiLib.uniffi_slatedb_ffi_fn_clone_dbtransaction.argtypes = (
+    ctypes.c_void_p,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_slatedb_ffi_fn_clone_dbtransaction.restype = ctypes.c_void_p
+_UniffiLib.uniffi_slatedb_ffi_fn_free_dbtransaction.argtypes = (
+    ctypes.c_void_p,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_slatedb_ffi_fn_free_dbtransaction.restype = None
+_UniffiLib.uniffi_slatedb_ffi_fn_method_dbtransaction_commit.argtypes = (ctypes.c_void_p,)
+_UniffiLib.uniffi_slatedb_ffi_fn_method_dbtransaction_commit.restype = ctypes.c_uint64
+_UniffiLib.uniffi_slatedb_ffi_fn_method_dbtransaction_commit_with_options.argtypes = (
     ctypes.c_void_p,
     _UniffiRustBuffer,
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbsnapshot_scan.restype = ctypes.c_uint64
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbsnapshot_scan_prefix.argtypes = (
+_UniffiLib.uniffi_slatedb_ffi_fn_method_dbtransaction_commit_with_options.restype = ctypes.c_uint64
+_UniffiLib.uniffi_slatedb_ffi_fn_method_dbtransaction_delete.argtypes = (
     ctypes.c_void_p,
     _UniffiRustBuffer,
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbsnapshot_scan_prefix.restype = ctypes.c_uint64
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbsnapshot_scan_prefix_with_options.argtypes = (
+_UniffiLib.uniffi_slatedb_ffi_fn_method_dbtransaction_delete.restype = ctypes.c_uint64
+_UniffiLib.uniffi_slatedb_ffi_fn_method_dbtransaction_get.argtypes = (
+    ctypes.c_void_p,
+    _UniffiRustBuffer,
+)
+_UniffiLib.uniffi_slatedb_ffi_fn_method_dbtransaction_get.restype = ctypes.c_uint64
+_UniffiLib.uniffi_slatedb_ffi_fn_method_dbtransaction_get_key_value.argtypes = (
+    ctypes.c_void_p,
+    _UniffiRustBuffer,
+)
+_UniffiLib.uniffi_slatedb_ffi_fn_method_dbtransaction_get_key_value.restype = ctypes.c_uint64
+_UniffiLib.uniffi_slatedb_ffi_fn_method_dbtransaction_get_key_value_with_options.argtypes = (
     ctypes.c_void_p,
     _UniffiRustBuffer,
     _UniffiRustBuffer,
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbsnapshot_scan_prefix_with_options.restype = (
+_UniffiLib.uniffi_slatedb_ffi_fn_method_dbtransaction_get_key_value_with_options.restype = (
     ctypes.c_uint64
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbsnapshot_scan_with_options.argtypes = (
+_UniffiLib.uniffi_slatedb_ffi_fn_method_dbtransaction_get_with_options.argtypes = (
     ctypes.c_void_p,
     _UniffiRustBuffer,
     _UniffiRustBuffer,
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbsnapshot_scan_with_options.restype = ctypes.c_uint64
-_UniffiLib.uniffi_slatedb_ffi_fn_clone_ffidbtransaction.argtypes = (
+_UniffiLib.uniffi_slatedb_ffi_fn_method_dbtransaction_get_with_options.restype = ctypes.c_uint64
+_UniffiLib.uniffi_slatedb_ffi_fn_method_dbtransaction_id.argtypes = (
     ctypes.c_void_p,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_clone_ffidbtransaction.restype = ctypes.c_void_p
-_UniffiLib.uniffi_slatedb_ffi_fn_free_ffidbtransaction.argtypes = (
-    ctypes.c_void_p,
-    ctypes.POINTER(_UniffiRustCallStatus),
-)
-_UniffiLib.uniffi_slatedb_ffi_fn_free_ffidbtransaction.restype = None
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbtransaction_commit.argtypes = (ctypes.c_void_p,)
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbtransaction_commit.restype = ctypes.c_uint64
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbtransaction_commit_with_options.argtypes = (
+_UniffiLib.uniffi_slatedb_ffi_fn_method_dbtransaction_id.restype = _UniffiRustBuffer
+_UniffiLib.uniffi_slatedb_ffi_fn_method_dbtransaction_mark_read.argtypes = (
     ctypes.c_void_p,
     _UniffiRustBuffer,
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbtransaction_commit_with_options.restype = (
+_UniffiLib.uniffi_slatedb_ffi_fn_method_dbtransaction_mark_read.restype = ctypes.c_uint64
+_UniffiLib.uniffi_slatedb_ffi_fn_method_dbtransaction_merge.argtypes = (
+    ctypes.c_void_p,
+    _UniffiRustBuffer,
+    _UniffiRustBuffer,
+)
+_UniffiLib.uniffi_slatedb_ffi_fn_method_dbtransaction_merge.restype = ctypes.c_uint64
+_UniffiLib.uniffi_slatedb_ffi_fn_method_dbtransaction_merge_with_options.argtypes = (
+    ctypes.c_void_p,
+    _UniffiRustBuffer,
+    _UniffiRustBuffer,
+    _UniffiRustBuffer,
+)
+_UniffiLib.uniffi_slatedb_ffi_fn_method_dbtransaction_merge_with_options.restype = ctypes.c_uint64
+_UniffiLib.uniffi_slatedb_ffi_fn_method_dbtransaction_put.argtypes = (
+    ctypes.c_void_p,
+    _UniffiRustBuffer,
+    _UniffiRustBuffer,
+)
+_UniffiLib.uniffi_slatedb_ffi_fn_method_dbtransaction_put.restype = ctypes.c_uint64
+_UniffiLib.uniffi_slatedb_ffi_fn_method_dbtransaction_put_with_options.argtypes = (
+    ctypes.c_void_p,
+    _UniffiRustBuffer,
+    _UniffiRustBuffer,
+    _UniffiRustBuffer,
+)
+_UniffiLib.uniffi_slatedb_ffi_fn_method_dbtransaction_put_with_options.restype = ctypes.c_uint64
+_UniffiLib.uniffi_slatedb_ffi_fn_method_dbtransaction_rollback.argtypes = (ctypes.c_void_p,)
+_UniffiLib.uniffi_slatedb_ffi_fn_method_dbtransaction_rollback.restype = ctypes.c_uint64
+_UniffiLib.uniffi_slatedb_ffi_fn_method_dbtransaction_scan.argtypes = (
+    ctypes.c_void_p,
+    _UniffiRustBuffer,
+)
+_UniffiLib.uniffi_slatedb_ffi_fn_method_dbtransaction_scan.restype = ctypes.c_uint64
+_UniffiLib.uniffi_slatedb_ffi_fn_method_dbtransaction_scan_prefix.argtypes = (
+    ctypes.c_void_p,
+    _UniffiRustBuffer,
+)
+_UniffiLib.uniffi_slatedb_ffi_fn_method_dbtransaction_scan_prefix.restype = ctypes.c_uint64
+_UniffiLib.uniffi_slatedb_ffi_fn_method_dbtransaction_scan_prefix_with_options.argtypes = (
+    ctypes.c_void_p,
+    _UniffiRustBuffer,
+    _UniffiRustBuffer,
+)
+_UniffiLib.uniffi_slatedb_ffi_fn_method_dbtransaction_scan_prefix_with_options.restype = (
     ctypes.c_uint64
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbtransaction_delete.argtypes = (
-    ctypes.c_void_p,
-    _UniffiRustBuffer,
-)
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbtransaction_delete.restype = ctypes.c_uint64
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbtransaction_get.argtypes = (
-    ctypes.c_void_p,
-    _UniffiRustBuffer,
-)
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbtransaction_get.restype = ctypes.c_uint64
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbtransaction_get_key_value.argtypes = (
-    ctypes.c_void_p,
-    _UniffiRustBuffer,
-)
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbtransaction_get_key_value.restype = ctypes.c_uint64
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbtransaction_get_key_value_with_options.argtypes = (
+_UniffiLib.uniffi_slatedb_ffi_fn_method_dbtransaction_scan_with_options.argtypes = (
     ctypes.c_void_p,
     _UniffiRustBuffer,
     _UniffiRustBuffer,
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbtransaction_get_key_value_with_options.restype = (
-    ctypes.c_uint64
-)
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbtransaction_get_with_options.argtypes = (
-    ctypes.c_void_p,
-    _UniffiRustBuffer,
-    _UniffiRustBuffer,
-)
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbtransaction_get_with_options.restype = ctypes.c_uint64
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbtransaction_id.argtypes = (
+_UniffiLib.uniffi_slatedb_ffi_fn_method_dbtransaction_scan_with_options.restype = ctypes.c_uint64
+_UniffiLib.uniffi_slatedb_ffi_fn_method_dbtransaction_seqnum.argtypes = (
     ctypes.c_void_p,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbtransaction_id.restype = _UniffiRustBuffer
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbtransaction_mark_read.argtypes = (
+_UniffiLib.uniffi_slatedb_ffi_fn_method_dbtransaction_seqnum.restype = ctypes.c_uint64
+_UniffiLib.uniffi_slatedb_ffi_fn_method_dbtransaction_unmark_write.argtypes = (
     ctypes.c_void_p,
     _UniffiRustBuffer,
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbtransaction_mark_read.restype = ctypes.c_uint64
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbtransaction_merge.argtypes = (
-    ctypes.c_void_p,
-    _UniffiRustBuffer,
-    _UniffiRustBuffer,
-)
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbtransaction_merge.restype = ctypes.c_uint64
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbtransaction_merge_with_options.argtypes = (
-    ctypes.c_void_p,
-    _UniffiRustBuffer,
-    _UniffiRustBuffer,
-    _UniffiRustBuffer,
-)
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbtransaction_merge_with_options.restype = (
-    ctypes.c_uint64
-)
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbtransaction_put.argtypes = (
-    ctypes.c_void_p,
-    _UniffiRustBuffer,
-    _UniffiRustBuffer,
-)
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbtransaction_put.restype = ctypes.c_uint64
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbtransaction_put_with_options.argtypes = (
-    ctypes.c_void_p,
-    _UniffiRustBuffer,
-    _UniffiRustBuffer,
-    _UniffiRustBuffer,
-)
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbtransaction_put_with_options.restype = ctypes.c_uint64
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbtransaction_rollback.argtypes = (ctypes.c_void_p,)
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbtransaction_rollback.restype = ctypes.c_uint64
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbtransaction_scan.argtypes = (
-    ctypes.c_void_p,
-    _UniffiRustBuffer,
-)
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbtransaction_scan.restype = ctypes.c_uint64
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbtransaction_scan_prefix.argtypes = (
-    ctypes.c_void_p,
-    _UniffiRustBuffer,
-)
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbtransaction_scan_prefix.restype = ctypes.c_uint64
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbtransaction_scan_prefix_with_options.argtypes = (
-    ctypes.c_void_p,
-    _UniffiRustBuffer,
-    _UniffiRustBuffer,
-)
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbtransaction_scan_prefix_with_options.restype = (
-    ctypes.c_uint64
-)
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbtransaction_scan_with_options.argtypes = (
-    ctypes.c_void_p,
-    _UniffiRustBuffer,
-    _UniffiRustBuffer,
-)
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbtransaction_scan_with_options.restype = ctypes.c_uint64
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbtransaction_seqnum.argtypes = (
+_UniffiLib.uniffi_slatedb_ffi_fn_method_dbtransaction_unmark_write.restype = ctypes.c_uint64
+_UniffiLib.uniffi_slatedb_ffi_fn_clone_logcallback.argtypes = (
     ctypes.c_void_p,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbtransaction_seqnum.restype = ctypes.c_uint64
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbtransaction_unmark_write.argtypes = (
-    ctypes.c_void_p,
-    _UniffiRustBuffer,
-)
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbtransaction_unmark_write.restype = ctypes.c_uint64
-_UniffiLib.uniffi_slatedb_ffi_fn_clone_ffilogcallback.argtypes = (
+_UniffiLib.uniffi_slatedb_ffi_fn_clone_logcallback.restype = ctypes.c_void_p
+_UniffiLib.uniffi_slatedb_ffi_fn_free_logcallback.argtypes = (
     ctypes.c_void_p,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_clone_ffilogcallback.restype = ctypes.c_void_p
-_UniffiLib.uniffi_slatedb_ffi_fn_free_ffilogcallback.argtypes = (
-    ctypes.c_void_p,
-    ctypes.POINTER(_UniffiRustCallStatus),
+_UniffiLib.uniffi_slatedb_ffi_fn_free_logcallback.restype = None
+_UniffiLib.uniffi_slatedb_ffi_fn_init_callback_vtable_logcallback.argtypes = (
+    ctypes.POINTER(_UniffiVTableCallbackInterfaceLogCallback),
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_free_ffilogcallback.restype = None
-_UniffiLib.uniffi_slatedb_ffi_fn_init_callback_vtable_ffilogcallback.argtypes = (
-    ctypes.POINTER(_UniffiVTableCallbackInterfaceFfiLogCallback),
-)
-_UniffiLib.uniffi_slatedb_ffi_fn_init_callback_vtable_ffilogcallback.restype = None
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffilogcallback_log.argtypes = (
+_UniffiLib.uniffi_slatedb_ffi_fn_init_callback_vtable_logcallback.restype = None
+_UniffiLib.uniffi_slatedb_ffi_fn_method_logcallback_log.argtypes = (
     ctypes.c_void_p,
     _UniffiRustBuffer,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffilogcallback_log.restype = None
-_UniffiLib.uniffi_slatedb_ffi_fn_clone_ffimergeoperator.argtypes = (
+_UniffiLib.uniffi_slatedb_ffi_fn_method_logcallback_log.restype = None
+_UniffiLib.uniffi_slatedb_ffi_fn_clone_mergeoperator.argtypes = (
     ctypes.c_void_p,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_clone_ffimergeoperator.restype = ctypes.c_void_p
-_UniffiLib.uniffi_slatedb_ffi_fn_free_ffimergeoperator.argtypes = (
+_UniffiLib.uniffi_slatedb_ffi_fn_clone_mergeoperator.restype = ctypes.c_void_p
+_UniffiLib.uniffi_slatedb_ffi_fn_free_mergeoperator.argtypes = (
     ctypes.c_void_p,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_free_ffimergeoperator.restype = None
-_UniffiLib.uniffi_slatedb_ffi_fn_init_callback_vtable_ffimergeoperator.argtypes = (
-    ctypes.POINTER(_UniffiVTableCallbackInterfaceFfiMergeOperator),
+_UniffiLib.uniffi_slatedb_ffi_fn_free_mergeoperator.restype = None
+_UniffiLib.uniffi_slatedb_ffi_fn_init_callback_vtable_mergeoperator.argtypes = (
+    ctypes.POINTER(_UniffiVTableCallbackInterfaceMergeOperator),
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_init_callback_vtable_ffimergeoperator.restype = None
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffimergeoperator_merge.argtypes = (
+_UniffiLib.uniffi_slatedb_ffi_fn_init_callback_vtable_mergeoperator.restype = None
+_UniffiLib.uniffi_slatedb_ffi_fn_method_mergeoperator_merge.argtypes = (
     ctypes.c_void_p,
     _UniffiRustBuffer,
     _UniffiRustBuffer,
     _UniffiRustBuffer,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffimergeoperator_merge.restype = _UniffiRustBuffer
-_UniffiLib.uniffi_slatedb_ffi_fn_clone_ffiobjectstore.argtypes = (
+_UniffiLib.uniffi_slatedb_ffi_fn_method_mergeoperator_merge.restype = _UniffiRustBuffer
+_UniffiLib.uniffi_slatedb_ffi_fn_clone_objectstore.argtypes = (
     ctypes.c_void_p,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_clone_ffiobjectstore.restype = ctypes.c_void_p
-_UniffiLib.uniffi_slatedb_ffi_fn_free_ffiobjectstore.argtypes = (
+_UniffiLib.uniffi_slatedb_ffi_fn_clone_objectstore.restype = ctypes.c_void_p
+_UniffiLib.uniffi_slatedb_ffi_fn_free_objectstore.argtypes = (
     ctypes.c_void_p,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_free_ffiobjectstore.restype = None
-_UniffiLib.uniffi_slatedb_ffi_fn_constructor_ffiobjectstore_from_env.argtypes = (
+_UniffiLib.uniffi_slatedb_ffi_fn_free_objectstore.restype = None
+_UniffiLib.uniffi_slatedb_ffi_fn_constructor_objectstore_from_env.argtypes = (
     _UniffiRustBuffer,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_constructor_ffiobjectstore_from_env.restype = ctypes.c_void_p
-_UniffiLib.uniffi_slatedb_ffi_fn_constructor_ffiobjectstore_resolve.argtypes = (
+_UniffiLib.uniffi_slatedb_ffi_fn_constructor_objectstore_from_env.restype = ctypes.c_void_p
+_UniffiLib.uniffi_slatedb_ffi_fn_constructor_objectstore_resolve.argtypes = (
     _UniffiRustBuffer,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_constructor_ffiobjectstore_resolve.restype = ctypes.c_void_p
-_UniffiLib.uniffi_slatedb_ffi_fn_clone_ffisettings.argtypes = (
+_UniffiLib.uniffi_slatedb_ffi_fn_constructor_objectstore_resolve.restype = ctypes.c_void_p
+_UniffiLib.uniffi_slatedb_ffi_fn_clone_settings.argtypes = (
     ctypes.c_void_p,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_clone_ffisettings.restype = ctypes.c_void_p
-_UniffiLib.uniffi_slatedb_ffi_fn_free_ffisettings.argtypes = (
+_UniffiLib.uniffi_slatedb_ffi_fn_clone_settings.restype = ctypes.c_void_p
+_UniffiLib.uniffi_slatedb_ffi_fn_free_settings.argtypes = (
     ctypes.c_void_p,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_free_ffisettings.restype = None
-_UniffiLib.uniffi_slatedb_ffi_fn_constructor_ffisettings_default.argtypes = (
+_UniffiLib.uniffi_slatedb_ffi_fn_free_settings.restype = None
+_UniffiLib.uniffi_slatedb_ffi_fn_constructor_settings_default.argtypes = (
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_constructor_ffisettings_default.restype = ctypes.c_void_p
-_UniffiLib.uniffi_slatedb_ffi_fn_constructor_ffisettings_from_env.argtypes = (
+_UniffiLib.uniffi_slatedb_ffi_fn_constructor_settings_default.restype = ctypes.c_void_p
+_UniffiLib.uniffi_slatedb_ffi_fn_constructor_settings_from_env.argtypes = (
     _UniffiRustBuffer,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_constructor_ffisettings_from_env.restype = ctypes.c_void_p
-_UniffiLib.uniffi_slatedb_ffi_fn_constructor_ffisettings_from_env_with_default.argtypes = (
+_UniffiLib.uniffi_slatedb_ffi_fn_constructor_settings_from_env.restype = ctypes.c_void_p
+_UniffiLib.uniffi_slatedb_ffi_fn_constructor_settings_from_env_with_default.argtypes = (
     _UniffiRustBuffer,
     ctypes.c_void_p,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_constructor_ffisettings_from_env_with_default.restype = (
+_UniffiLib.uniffi_slatedb_ffi_fn_constructor_settings_from_env_with_default.restype = (
     ctypes.c_void_p
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_constructor_ffisettings_from_file.argtypes = (
+_UniffiLib.uniffi_slatedb_ffi_fn_constructor_settings_from_file.argtypes = (
     _UniffiRustBuffer,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_constructor_ffisettings_from_file.restype = ctypes.c_void_p
-_UniffiLib.uniffi_slatedb_ffi_fn_constructor_ffisettings_from_json_string.argtypes = (
+_UniffiLib.uniffi_slatedb_ffi_fn_constructor_settings_from_file.restype = ctypes.c_void_p
+_UniffiLib.uniffi_slatedb_ffi_fn_constructor_settings_from_json_string.argtypes = (
     _UniffiRustBuffer,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_constructor_ffisettings_from_json_string.restype = ctypes.c_void_p
-_UniffiLib.uniffi_slatedb_ffi_fn_constructor_ffisettings_load.argtypes = (
+_UniffiLib.uniffi_slatedb_ffi_fn_constructor_settings_from_json_string.restype = ctypes.c_void_p
+_UniffiLib.uniffi_slatedb_ffi_fn_constructor_settings_load.argtypes = (
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_constructor_ffisettings_load.restype = ctypes.c_void_p
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffisettings_set.argtypes = (
+_UniffiLib.uniffi_slatedb_ffi_fn_constructor_settings_load.restype = ctypes.c_void_p
+_UniffiLib.uniffi_slatedb_ffi_fn_method_settings_set.argtypes = (
     ctypes.c_void_p,
     _UniffiRustBuffer,
     _UniffiRustBuffer,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffisettings_set.restype = None
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffisettings_to_json_string.argtypes = (
+_UniffiLib.uniffi_slatedb_ffi_fn_method_settings_set.restype = None
+_UniffiLib.uniffi_slatedb_ffi_fn_method_settings_to_json_string.argtypes = (
     ctypes.c_void_p,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffisettings_to_json_string.restype = _UniffiRustBuffer
-_UniffiLib.uniffi_slatedb_ffi_fn_clone_ffiwalfile.argtypes = (
+_UniffiLib.uniffi_slatedb_ffi_fn_method_settings_to_json_string.restype = _UniffiRustBuffer
+_UniffiLib.uniffi_slatedb_ffi_fn_clone_walfile.argtypes = (
     ctypes.c_void_p,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_clone_ffiwalfile.restype = ctypes.c_void_p
-_UniffiLib.uniffi_slatedb_ffi_fn_free_ffiwalfile.argtypes = (
+_UniffiLib.uniffi_slatedb_ffi_fn_clone_walfile.restype = ctypes.c_void_p
+_UniffiLib.uniffi_slatedb_ffi_fn_free_walfile.argtypes = (
     ctypes.c_void_p,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_free_ffiwalfile.restype = None
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffiwalfile_id.argtypes = (
+_UniffiLib.uniffi_slatedb_ffi_fn_free_walfile.restype = None
+_UniffiLib.uniffi_slatedb_ffi_fn_method_walfile_id.argtypes = (
     ctypes.c_void_p,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffiwalfile_id.restype = ctypes.c_uint64
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffiwalfile_iterator.argtypes = (ctypes.c_void_p,)
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffiwalfile_iterator.restype = ctypes.c_uint64
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffiwalfile_metadata.argtypes = (ctypes.c_void_p,)
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffiwalfile_metadata.restype = ctypes.c_uint64
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffiwalfile_next_file.argtypes = (
+_UniffiLib.uniffi_slatedb_ffi_fn_method_walfile_id.restype = ctypes.c_uint64
+_UniffiLib.uniffi_slatedb_ffi_fn_method_walfile_iterator.argtypes = (ctypes.c_void_p,)
+_UniffiLib.uniffi_slatedb_ffi_fn_method_walfile_iterator.restype = ctypes.c_uint64
+_UniffiLib.uniffi_slatedb_ffi_fn_method_walfile_metadata.argtypes = (ctypes.c_void_p,)
+_UniffiLib.uniffi_slatedb_ffi_fn_method_walfile_metadata.restype = ctypes.c_uint64
+_UniffiLib.uniffi_slatedb_ffi_fn_method_walfile_next_file.argtypes = (
     ctypes.c_void_p,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffiwalfile_next_file.restype = ctypes.c_void_p
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffiwalfile_next_id.argtypes = (
+_UniffiLib.uniffi_slatedb_ffi_fn_method_walfile_next_file.restype = ctypes.c_void_p
+_UniffiLib.uniffi_slatedb_ffi_fn_method_walfile_next_id.argtypes = (
     ctypes.c_void_p,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffiwalfile_next_id.restype = ctypes.c_uint64
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffiwalfile_shutdown.argtypes = (
+_UniffiLib.uniffi_slatedb_ffi_fn_method_walfile_next_id.restype = ctypes.c_uint64
+_UniffiLib.uniffi_slatedb_ffi_fn_method_walfile_shutdown.argtypes = (
     ctypes.c_void_p,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffiwalfile_shutdown.restype = None
-_UniffiLib.uniffi_slatedb_ffi_fn_clone_ffiwalfileiterator.argtypes = (
+_UniffiLib.uniffi_slatedb_ffi_fn_method_walfile_shutdown.restype = None
+_UniffiLib.uniffi_slatedb_ffi_fn_clone_walfileiterator.argtypes = (
     ctypes.c_void_p,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_clone_ffiwalfileiterator.restype = ctypes.c_void_p
-_UniffiLib.uniffi_slatedb_ffi_fn_free_ffiwalfileiterator.argtypes = (
+_UniffiLib.uniffi_slatedb_ffi_fn_clone_walfileiterator.restype = ctypes.c_void_p
+_UniffiLib.uniffi_slatedb_ffi_fn_free_walfileiterator.argtypes = (
     ctypes.c_void_p,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_free_ffiwalfileiterator.restype = None
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffiwalfileiterator_next.argtypes = (ctypes.c_void_p,)
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffiwalfileiterator_next.restype = ctypes.c_uint64
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffiwalfileiterator_shutdown.argtypes = (
+_UniffiLib.uniffi_slatedb_ffi_fn_free_walfileiterator.restype = None
+_UniffiLib.uniffi_slatedb_ffi_fn_method_walfileiterator_next.argtypes = (ctypes.c_void_p,)
+_UniffiLib.uniffi_slatedb_ffi_fn_method_walfileiterator_next.restype = ctypes.c_uint64
+_UniffiLib.uniffi_slatedb_ffi_fn_method_walfileiterator_shutdown.argtypes = (
     ctypes.c_void_p,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffiwalfileiterator_shutdown.restype = None
-_UniffiLib.uniffi_slatedb_ffi_fn_clone_ffiwalreader.argtypes = (
+_UniffiLib.uniffi_slatedb_ffi_fn_method_walfileiterator_shutdown.restype = None
+_UniffiLib.uniffi_slatedb_ffi_fn_clone_walreader.argtypes = (
     ctypes.c_void_p,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_clone_ffiwalreader.restype = ctypes.c_void_p
-_UniffiLib.uniffi_slatedb_ffi_fn_free_ffiwalreader.argtypes = (
+_UniffiLib.uniffi_slatedb_ffi_fn_clone_walreader.restype = ctypes.c_void_p
+_UniffiLib.uniffi_slatedb_ffi_fn_free_walreader.argtypes = (
     ctypes.c_void_p,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_free_ffiwalreader.restype = None
-_UniffiLib.uniffi_slatedb_ffi_fn_constructor_ffiwalreader_new.argtypes = (
+_UniffiLib.uniffi_slatedb_ffi_fn_free_walreader.restype = None
+_UniffiLib.uniffi_slatedb_ffi_fn_constructor_walreader_new.argtypes = (
     _UniffiRustBuffer,
     ctypes.c_void_p,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_constructor_ffiwalreader_new.restype = ctypes.c_void_p
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffiwalreader_get.argtypes = (
+_UniffiLib.uniffi_slatedb_ffi_fn_constructor_walreader_new.restype = ctypes.c_void_p
+_UniffiLib.uniffi_slatedb_ffi_fn_method_walreader_get.argtypes = (
     ctypes.c_void_p,
     ctypes.c_uint64,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffiwalreader_get.restype = ctypes.c_void_p
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffiwalreader_list.argtypes = (
+_UniffiLib.uniffi_slatedb_ffi_fn_method_walreader_get.restype = ctypes.c_void_p
+_UniffiLib.uniffi_slatedb_ffi_fn_method_walreader_list.argtypes = (
     ctypes.c_void_p,
     _UniffiRustBuffer,
     _UniffiRustBuffer,
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffiwalreader_list.restype = ctypes.c_uint64
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffiwalreader_shutdown.argtypes = (
+_UniffiLib.uniffi_slatedb_ffi_fn_method_walreader_list.restype = ctypes.c_uint64
+_UniffiLib.uniffi_slatedb_ffi_fn_method_walreader_shutdown.argtypes = (
     ctypes.c_void_p,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffiwalreader_shutdown.restype = None
-_UniffiLib.uniffi_slatedb_ffi_fn_clone_ffiwritebatch.argtypes = (
+_UniffiLib.uniffi_slatedb_ffi_fn_method_walreader_shutdown.restype = None
+_UniffiLib.uniffi_slatedb_ffi_fn_clone_writebatch.argtypes = (
     ctypes.c_void_p,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_clone_ffiwritebatch.restype = ctypes.c_void_p
-_UniffiLib.uniffi_slatedb_ffi_fn_free_ffiwritebatch.argtypes = (
+_UniffiLib.uniffi_slatedb_ffi_fn_clone_writebatch.restype = ctypes.c_void_p
+_UniffiLib.uniffi_slatedb_ffi_fn_free_writebatch.argtypes = (
     ctypes.c_void_p,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_free_ffiwritebatch.restype = None
-_UniffiLib.uniffi_slatedb_ffi_fn_constructor_ffiwritebatch_new.argtypes = (
+_UniffiLib.uniffi_slatedb_ffi_fn_free_writebatch.restype = None
+_UniffiLib.uniffi_slatedb_ffi_fn_constructor_writebatch_new.argtypes = (
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_constructor_ffiwritebatch_new.restype = ctypes.c_void_p
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffiwritebatch_delete.argtypes = (
+_UniffiLib.uniffi_slatedb_ffi_fn_constructor_writebatch_new.restype = ctypes.c_void_p
+_UniffiLib.uniffi_slatedb_ffi_fn_method_writebatch_delete.argtypes = (
     ctypes.c_void_p,
     _UniffiRustBuffer,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffiwritebatch_delete.restype = None
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffiwritebatch_merge.argtypes = (
-    ctypes.c_void_p,
-    _UniffiRustBuffer,
-    _UniffiRustBuffer,
-    ctypes.POINTER(_UniffiRustCallStatus),
-)
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffiwritebatch_merge.restype = None
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffiwritebatch_merge_with_options.argtypes = (
-    ctypes.c_void_p,
-    _UniffiRustBuffer,
-    _UniffiRustBuffer,
-    _UniffiRustBuffer,
-    ctypes.POINTER(_UniffiRustCallStatus),
-)
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffiwritebatch_merge_with_options.restype = None
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffiwritebatch_put.argtypes = (
+_UniffiLib.uniffi_slatedb_ffi_fn_method_writebatch_delete.restype = None
+_UniffiLib.uniffi_slatedb_ffi_fn_method_writebatch_merge.argtypes = (
     ctypes.c_void_p,
     _UniffiRustBuffer,
     _UniffiRustBuffer,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffiwritebatch_put.restype = None
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffiwritebatch_put_with_options.argtypes = (
+_UniffiLib.uniffi_slatedb_ffi_fn_method_writebatch_merge.restype = None
+_UniffiLib.uniffi_slatedb_ffi_fn_method_writebatch_merge_with_options.argtypes = (
     ctypes.c_void_p,
     _UniffiRustBuffer,
     _UniffiRustBuffer,
     _UniffiRustBuffer,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_method_ffiwritebatch_put_with_options.restype = None
-_UniffiLib.uniffi_slatedb_ffi_fn_func_ffi_init_logging.argtypes = (
+_UniffiLib.uniffi_slatedb_ffi_fn_method_writebatch_merge_with_options.restype = None
+_UniffiLib.uniffi_slatedb_ffi_fn_method_writebatch_put.argtypes = (
+    ctypes.c_void_p,
     _UniffiRustBuffer,
     _UniffiRustBuffer,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_func_ffi_init_logging.restype = None
+_UniffiLib.uniffi_slatedb_ffi_fn_method_writebatch_put.restype = None
+_UniffiLib.uniffi_slatedb_ffi_fn_method_writebatch_put_with_options.argtypes = (
+    ctypes.c_void_p,
+    _UniffiRustBuffer,
+    _UniffiRustBuffer,
+    _UniffiRustBuffer,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_slatedb_ffi_fn_method_writebatch_put_with_options.restype = None
+_UniffiLib.uniffi_slatedb_ffi_fn_func_init_logging.argtypes = (
+    _UniffiRustBuffer,
+    _UniffiRustBuffer,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_slatedb_ffi_fn_func_init_logging.restype = None
 _UniffiLib.ffi_slatedb_ffi_rustbuffer_alloc.argtypes = (
     ctypes.c_uint64,
     ctypes.POINTER(_UniffiRustCallStatus),
@@ -2094,272 +2085,258 @@ _UniffiLib.ffi_slatedb_ffi_rust_future_complete_void.argtypes = (
     ctypes.POINTER(_UniffiRustCallStatus),
 )
 _UniffiLib.ffi_slatedb_ffi_rust_future_complete_void.restype = None
-_UniffiLib.uniffi_slatedb_ffi_checksum_func_ffi_init_logging.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_func_ffi_init_logging.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidb_begin.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidb_begin.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidb_delete.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidb_delete.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidb_delete_with_options.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidb_delete_with_options.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidb_flush.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidb_flush.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidb_flush_with_options.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidb_flush_with_options.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidb_get.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidb_get.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidb_get_key_value.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidb_get_key_value.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidb_get_key_value_with_options.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidb_get_key_value_with_options.restype = (
+_UniffiLib.uniffi_slatedb_ffi_checksum_func_init_logging.argtypes = ()
+_UniffiLib.uniffi_slatedb_ffi_checksum_func_init_logging.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_db_begin.argtypes = ()
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_db_begin.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_db_delete.argtypes = ()
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_db_delete.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_db_delete_with_options.argtypes = ()
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_db_delete_with_options.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_db_flush.argtypes = ()
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_db_flush.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_db_flush_with_options.argtypes = ()
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_db_flush_with_options.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_db_get.argtypes = ()
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_db_get.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_db_get_key_value.argtypes = ()
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_db_get_key_value.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_db_get_key_value_with_options.argtypes = ()
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_db_get_key_value_with_options.restype = (
     ctypes.c_uint16
 )
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidb_get_with_options.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidb_get_with_options.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidb_merge.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidb_merge.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidb_merge_with_options.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidb_merge_with_options.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidb_metrics.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidb_metrics.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidb_put.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidb_put.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidb_put_with_options.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidb_put_with_options.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidb_scan.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidb_scan.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidb_scan_prefix.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidb_scan_prefix.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidb_scan_prefix_with_options.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidb_scan_prefix_with_options.restype = (
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_db_get_with_options.argtypes = ()
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_db_get_with_options.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_db_merge.argtypes = ()
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_db_merge.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_db_merge_with_options.argtypes = ()
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_db_merge_with_options.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_db_metrics.argtypes = ()
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_db_metrics.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_db_put.argtypes = ()
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_db_put.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_db_put_with_options.argtypes = ()
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_db_put_with_options.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_db_scan.argtypes = ()
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_db_scan.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_db_scan_prefix.argtypes = ()
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_db_scan_prefix.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_db_scan_prefix_with_options.argtypes = ()
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_db_scan_prefix_with_options.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_db_scan_with_options.argtypes = ()
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_db_scan_with_options.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_db_shutdown.argtypes = ()
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_db_shutdown.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_db_snapshot.argtypes = ()
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_db_snapshot.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_db_status.argtypes = ()
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_db_status.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_db_write.argtypes = ()
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_db_write.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_db_write_with_options.argtypes = ()
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_db_write_with_options.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbbuilder_build.argtypes = ()
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbbuilder_build.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbbuilder_with_db_cache_disabled.argtypes = ()
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbbuilder_with_db_cache_disabled.restype = (
     ctypes.c_uint16
 )
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidb_scan_with_options.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidb_scan_with_options.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidb_shutdown.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidb_shutdown.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidb_snapshot.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidb_snapshot.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidb_status.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidb_status.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidb_write.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidb_write.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidb_write_with_options.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidb_write_with_options.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidbbuilder_build.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidbbuilder_build.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidbbuilder_with_db_cache_disabled.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidbbuilder_with_db_cache_disabled.restype = (
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbbuilder_with_merge_operator.argtypes = ()
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbbuilder_with_merge_operator.restype = (
     ctypes.c_uint16
 )
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidbbuilder_with_merge_operator.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidbbuilder_with_merge_operator.restype = (
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbbuilder_with_seed.argtypes = ()
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbbuilder_with_seed.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbbuilder_with_settings.argtypes = ()
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbbuilder_with_settings.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbbuilder_with_sst_block_size.argtypes = ()
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbbuilder_with_sst_block_size.restype = (
     ctypes.c_uint16
 )
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidbbuilder_with_seed.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidbbuilder_with_seed.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidbbuilder_with_settings.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidbbuilder_with_settings.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidbbuilder_with_sst_block_size.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidbbuilder_with_sst_block_size.restype = (
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbbuilder_with_wal_object_store.argtypes = ()
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbbuilder_with_wal_object_store.restype = (
     ctypes.c_uint16
 )
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidbbuilder_with_wal_object_store.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidbbuilder_with_wal_object_store.restype = (
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbiterator_next.argtypes = ()
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbiterator_next.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbiterator_seek.argtypes = ()
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbiterator_seek.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbreader_get.argtypes = ()
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbreader_get.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbreader_get_with_options.argtypes = ()
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbreader_get_with_options.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbreader_scan.argtypes = ()
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbreader_scan.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbreader_scan_prefix.argtypes = ()
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbreader_scan_prefix.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbreader_scan_prefix_with_options.argtypes = ()
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbreader_scan_prefix_with_options.restype = (
     ctypes.c_uint16
 )
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidbiterator_next.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidbiterator_next.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidbiterator_seek.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidbiterator_seek.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidbreader_get.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidbreader_get.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidbreader_get_with_options.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidbreader_get_with_options.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidbreader_scan.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidbreader_scan.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidbreader_scan_prefix.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidbreader_scan_prefix.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidbreader_scan_prefix_with_options.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidbreader_scan_prefix_with_options.restype = (
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbreader_scan_with_options.argtypes = ()
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbreader_scan_with_options.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbreader_shutdown.argtypes = ()
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbreader_shutdown.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbreaderbuilder_build.argtypes = ()
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbreaderbuilder_build.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbreaderbuilder_with_checkpoint_id.argtypes = ()
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbreaderbuilder_with_checkpoint_id.restype = (
     ctypes.c_uint16
 )
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidbreader_scan_with_options.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidbreader_scan_with_options.restype = (
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbreaderbuilder_with_merge_operator.argtypes = ()
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbreaderbuilder_with_merge_operator.restype = (
     ctypes.c_uint16
 )
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidbreader_shutdown.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidbreader_shutdown.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidbreaderbuilder_build.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidbreaderbuilder_build.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidbreaderbuilder_with_checkpoint_id.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidbreaderbuilder_with_checkpoint_id.restype = (
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbreaderbuilder_with_options.argtypes = ()
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbreaderbuilder_with_options.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbreaderbuilder_with_wal_object_store.argtypes = ()
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbreaderbuilder_with_wal_object_store.restype = (
     ctypes.c_uint16
 )
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidbreaderbuilder_with_merge_operator.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidbreaderbuilder_with_merge_operator.restype = (
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbsnapshot_get.argtypes = ()
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbsnapshot_get.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbsnapshot_get_key_value.argtypes = ()
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbsnapshot_get_key_value.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbsnapshot_get_key_value_with_options.argtypes = ()
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbsnapshot_get_key_value_with_options.restype = (
     ctypes.c_uint16
 )
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidbreaderbuilder_with_options.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidbreaderbuilder_with_options.restype = (
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbsnapshot_get_with_options.argtypes = ()
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbsnapshot_get_with_options.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbsnapshot_scan.argtypes = ()
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbsnapshot_scan.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbsnapshot_scan_prefix.argtypes = ()
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbsnapshot_scan_prefix.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbsnapshot_scan_prefix_with_options.argtypes = ()
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbsnapshot_scan_prefix_with_options.restype = (
     ctypes.c_uint16
 )
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidbreaderbuilder_with_wal_object_store.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidbreaderbuilder_with_wal_object_store.restype = (
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbsnapshot_scan_with_options.argtypes = ()
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbsnapshot_scan_with_options.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbtransaction_commit.argtypes = ()
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbtransaction_commit.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbtransaction_commit_with_options.argtypes = ()
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbtransaction_commit_with_options.restype = (
     ctypes.c_uint16
 )
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidbsnapshot_get.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidbsnapshot_get.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidbsnapshot_get_key_value.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidbsnapshot_get_key_value.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidbsnapshot_get_key_value_with_options.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidbsnapshot_get_key_value_with_options.restype = (
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbtransaction_delete.argtypes = ()
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbtransaction_delete.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbtransaction_get.argtypes = ()
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbtransaction_get.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbtransaction_get_key_value.argtypes = ()
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbtransaction_get_key_value.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbtransaction_get_key_value_with_options.argtypes = ()
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbtransaction_get_key_value_with_options.restype = (
     ctypes.c_uint16
 )
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidbsnapshot_get_with_options.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidbsnapshot_get_with_options.restype = (
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbtransaction_get_with_options.argtypes = ()
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbtransaction_get_with_options.restype = (
     ctypes.c_uint16
 )
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidbsnapshot_scan.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidbsnapshot_scan.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidbsnapshot_scan_prefix.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidbsnapshot_scan_prefix.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidbsnapshot_scan_prefix_with_options.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidbsnapshot_scan_prefix_with_options.restype = (
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbtransaction_id.argtypes = ()
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbtransaction_id.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbtransaction_mark_read.argtypes = ()
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbtransaction_mark_read.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbtransaction_merge.argtypes = ()
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbtransaction_merge.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbtransaction_merge_with_options.argtypes = ()
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbtransaction_merge_with_options.restype = (
     ctypes.c_uint16
 )
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidbsnapshot_scan_with_options.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidbsnapshot_scan_with_options.restype = (
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbtransaction_put.argtypes = ()
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbtransaction_put.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbtransaction_put_with_options.argtypes = ()
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbtransaction_put_with_options.restype = (
     ctypes.c_uint16
 )
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidbtransaction_commit.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidbtransaction_commit.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidbtransaction_commit_with_options.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidbtransaction_commit_with_options.restype = (
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbtransaction_rollback.argtypes = ()
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbtransaction_rollback.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbtransaction_scan.argtypes = ()
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbtransaction_scan.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbtransaction_scan_prefix.argtypes = ()
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbtransaction_scan_prefix.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbtransaction_scan_prefix_with_options.argtypes = ()
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbtransaction_scan_prefix_with_options.restype = (
     ctypes.c_uint16
 )
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidbtransaction_delete.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidbtransaction_delete.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidbtransaction_get.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidbtransaction_get.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidbtransaction_get_key_value.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidbtransaction_get_key_value.restype = (
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbtransaction_scan_with_options.argtypes = ()
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbtransaction_scan_with_options.restype = (
     ctypes.c_uint16
 )
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidbtransaction_get_key_value_with_options.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidbtransaction_get_key_value_with_options.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidbtransaction_get_with_options.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidbtransaction_get_with_options.restype = (
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbtransaction_seqnum.argtypes = ()
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbtransaction_seqnum.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbtransaction_unmark_write.argtypes = ()
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbtransaction_unmark_write.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_logcallback_log.argtypes = ()
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_logcallback_log.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_mergeoperator_merge.argtypes = ()
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_mergeoperator_merge.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_settings_set.argtypes = ()
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_settings_set.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_settings_to_json_string.argtypes = ()
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_settings_to_json_string.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_walfile_id.argtypes = ()
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_walfile_id.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_walfile_iterator.argtypes = ()
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_walfile_iterator.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_walfile_metadata.argtypes = ()
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_walfile_metadata.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_walfile_next_file.argtypes = ()
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_walfile_next_file.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_walfile_next_id.argtypes = ()
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_walfile_next_id.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_walfile_shutdown.argtypes = ()
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_walfile_shutdown.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_walfileiterator_next.argtypes = ()
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_walfileiterator_next.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_walfileiterator_shutdown.argtypes = ()
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_walfileiterator_shutdown.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_walreader_get.argtypes = ()
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_walreader_get.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_walreader_list.argtypes = ()
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_walreader_list.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_walreader_shutdown.argtypes = ()
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_walreader_shutdown.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_writebatch_delete.argtypes = ()
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_writebatch_delete.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_writebatch_merge.argtypes = ()
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_writebatch_merge.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_writebatch_merge_with_options.argtypes = ()
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_writebatch_merge_with_options.restype = (
     ctypes.c_uint16
 )
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidbtransaction_id.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidbtransaction_id.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidbtransaction_mark_read.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidbtransaction_mark_read.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidbtransaction_merge.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidbtransaction_merge.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidbtransaction_merge_with_options.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidbtransaction_merge_with_options.restype = (
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_writebatch_put.argtypes = ()
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_writebatch_put.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_writebatch_put_with_options.argtypes = ()
+_UniffiLib.uniffi_slatedb_ffi_checksum_method_writebatch_put_with_options.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_ffi_checksum_constructor_dbbuilder_new.argtypes = ()
+_UniffiLib.uniffi_slatedb_ffi_checksum_constructor_dbbuilder_new.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_ffi_checksum_constructor_dbreaderbuilder_new.argtypes = ()
+_UniffiLib.uniffi_slatedb_ffi_checksum_constructor_dbreaderbuilder_new.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_ffi_checksum_constructor_objectstore_from_env.argtypes = ()
+_UniffiLib.uniffi_slatedb_ffi_checksum_constructor_objectstore_from_env.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_ffi_checksum_constructor_objectstore_resolve.argtypes = ()
+_UniffiLib.uniffi_slatedb_ffi_checksum_constructor_objectstore_resolve.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_ffi_checksum_constructor_settings_default.argtypes = ()
+_UniffiLib.uniffi_slatedb_ffi_checksum_constructor_settings_default.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_ffi_checksum_constructor_settings_from_env.argtypes = ()
+_UniffiLib.uniffi_slatedb_ffi_checksum_constructor_settings_from_env.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_ffi_checksum_constructor_settings_from_env_with_default.argtypes = ()
+_UniffiLib.uniffi_slatedb_ffi_checksum_constructor_settings_from_env_with_default.restype = (
     ctypes.c_uint16
 )
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidbtransaction_put.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidbtransaction_put.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidbtransaction_put_with_options.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidbtransaction_put_with_options.restype = (
+_UniffiLib.uniffi_slatedb_ffi_checksum_constructor_settings_from_file.argtypes = ()
+_UniffiLib.uniffi_slatedb_ffi_checksum_constructor_settings_from_file.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_ffi_checksum_constructor_settings_from_json_string.argtypes = ()
+_UniffiLib.uniffi_slatedb_ffi_checksum_constructor_settings_from_json_string.restype = (
     ctypes.c_uint16
 )
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidbtransaction_rollback.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidbtransaction_rollback.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidbtransaction_scan.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidbtransaction_scan.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidbtransaction_scan_prefix.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidbtransaction_scan_prefix.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidbtransaction_scan_prefix_with_options.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidbtransaction_scan_prefix_with_options.restype = (
-    ctypes.c_uint16
-)
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidbtransaction_scan_with_options.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidbtransaction_scan_with_options.restype = (
-    ctypes.c_uint16
-)
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidbtransaction_seqnum.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidbtransaction_seqnum.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidbtransaction_unmark_write.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffidbtransaction_unmark_write.restype = (
-    ctypes.c_uint16
-)
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffilogcallback_log.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffilogcallback_log.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffimergeoperator_merge.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffimergeoperator_merge.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffisettings_set.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffisettings_set.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffisettings_to_json_string.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffisettings_to_json_string.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffiwalfile_id.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffiwalfile_id.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffiwalfile_iterator.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffiwalfile_iterator.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffiwalfile_metadata.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffiwalfile_metadata.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffiwalfile_next_file.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffiwalfile_next_file.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffiwalfile_next_id.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffiwalfile_next_id.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffiwalfile_shutdown.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffiwalfile_shutdown.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffiwalfileiterator_next.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffiwalfileiterator_next.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffiwalfileiterator_shutdown.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffiwalfileiterator_shutdown.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffiwalreader_get.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffiwalreader_get.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffiwalreader_list.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffiwalreader_list.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffiwalreader_shutdown.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffiwalreader_shutdown.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffiwritebatch_delete.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffiwritebatch_delete.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffiwritebatch_merge.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffiwritebatch_merge.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffiwritebatch_merge_with_options.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffiwritebatch_merge_with_options.restype = (
-    ctypes.c_uint16
-)
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffiwritebatch_put.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffiwritebatch_put.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffiwritebatch_put_with_options.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_ffiwritebatch_put_with_options.restype = (
-    ctypes.c_uint16
-)
-_UniffiLib.uniffi_slatedb_ffi_checksum_constructor_ffidbbuilder_new.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_constructor_ffidbbuilder_new.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_constructor_ffidbreaderbuilder_new.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_constructor_ffidbreaderbuilder_new.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_constructor_ffiobjectstore_from_env.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_constructor_ffiobjectstore_from_env.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_constructor_ffiobjectstore_resolve.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_constructor_ffiobjectstore_resolve.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_constructor_ffisettings_default.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_constructor_ffisettings_default.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_constructor_ffisettings_from_env.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_constructor_ffisettings_from_env.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_constructor_ffisettings_from_env_with_default.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_constructor_ffisettings_from_env_with_default.restype = (
-    ctypes.c_uint16
-)
-_UniffiLib.uniffi_slatedb_ffi_checksum_constructor_ffisettings_from_file.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_constructor_ffisettings_from_file.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_constructor_ffisettings_from_json_string.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_constructor_ffisettings_from_json_string.restype = (
-    ctypes.c_uint16
-)
-_UniffiLib.uniffi_slatedb_ffi_checksum_constructor_ffisettings_load.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_constructor_ffisettings_load.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_constructor_ffiwalreader_new.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_constructor_ffiwalreader_new.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_constructor_ffiwritebatch_new.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_constructor_ffiwritebatch_new.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_ffi_checksum_constructor_settings_load.argtypes = ()
+_UniffiLib.uniffi_slatedb_ffi_checksum_constructor_settings_load.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_ffi_checksum_constructor_walreader_new.argtypes = ()
+_UniffiLib.uniffi_slatedb_ffi_checksum_constructor_walreader_new.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_ffi_checksum_constructor_writebatch_new.argtypes = ()
+_UniffiLib.uniffi_slatedb_ffi_checksum_constructor_writebatch_new.restype = ctypes.c_uint16
 _UniffiLib.ffi_slatedb_ffi_uniffi_contract_version.argtypes = ()
 _UniffiLib.ffi_slatedb_ffi_uniffi_contract_version.restype = ctypes.c_uint32
 
@@ -2522,14 +2499,14 @@ class _UniffiConverterBytes(_UniffiConverterRustBuffer):
         buf.write(value)
 
 
-class FfiFlushOptions:
-    flush_type: "FfiFlushType"
+class FlushOptions:
+    flush_type: "FlushType"
 
-    def __init__(self, *, flush_type: "FfiFlushType"):
+    def __init__(self, *, flush_type: "FlushType"):
         self.flush_type = flush_type
 
     def __str__(self):
-        return "FfiFlushOptions(flush_type={})".format(self.flush_type)
+        return "FlushOptions(flush_type={})".format(self.flush_type)
 
     def __eq__(self, other):
         if self.flush_type != other.flush_type:
@@ -2537,23 +2514,23 @@ class FfiFlushOptions:
         return True
 
 
-class _UniffiConverterTypeFfiFlushOptions(_UniffiConverterRustBuffer):
+class _UniffiConverterTypeFlushOptions(_UniffiConverterRustBuffer):
     @staticmethod
     def read(buf):
-        return FfiFlushOptions(
-            flush_type=_UniffiConverterTypeFfiFlushType.read(buf),
+        return FlushOptions(
+            flush_type=_UniffiConverterTypeFlushType.read(buf),
         )
 
     @staticmethod
     def check_lower(value):
-        _UniffiConverterTypeFfiFlushType.check_lower(value.flush_type)
+        _UniffiConverterTypeFlushType.check_lower(value.flush_type)
 
     @staticmethod
     def write(value, buf):
-        _UniffiConverterTypeFfiFlushType.write(value.flush_type, buf)
+        _UniffiConverterTypeFlushType.write(value.flush_type, buf)
 
 
-class FfiKeyRange:
+class KeyRange:
     start: "typing.Optional[bytes]"
     start_inclusive: "bool"
     end: "typing.Optional[bytes]"
@@ -2573,7 +2550,7 @@ class FfiKeyRange:
         self.end_inclusive = end_inclusive
 
     def __str__(self):
-        return "FfiKeyRange(start={}, start_inclusive={}, end={}, end_inclusive={})".format(
+        return "KeyRange(start={}, start_inclusive={}, end={}, end_inclusive={})".format(
             self.start, self.start_inclusive, self.end, self.end_inclusive
         )
 
@@ -2589,10 +2566,10 @@ class FfiKeyRange:
         return True
 
 
-class _UniffiConverterTypeFfiKeyRange(_UniffiConverterRustBuffer):
+class _UniffiConverterTypeKeyRange(_UniffiConverterRustBuffer):
     @staticmethod
     def read(buf):
-        return FfiKeyRange(
+        return KeyRange(
             start=_UniffiConverterOptionalBytes.read(buf),
             start_inclusive=_UniffiConverterBool.read(buf),
             end=_UniffiConverterOptionalBytes.read(buf),
@@ -2614,7 +2591,7 @@ class _UniffiConverterTypeFfiKeyRange(_UniffiConverterRustBuffer):
         _UniffiConverterBool.write(value.end_inclusive, buf)
 
 
-class FfiKeyValue:
+class KeyValue:
     key: "bytes"
     value: "bytes"
     seq: "int"
@@ -2637,7 +2614,7 @@ class FfiKeyValue:
         self.expire_ts = expire_ts
 
     def __str__(self):
-        return "FfiKeyValue(key={}, value={}, seq={}, create_ts={}, expire_ts={})".format(
+        return "KeyValue(key={}, value={}, seq={}, create_ts={}, expire_ts={})".format(
             self.key, self.value, self.seq, self.create_ts, self.expire_ts
         )
 
@@ -2655,10 +2632,10 @@ class FfiKeyValue:
         return True
 
 
-class _UniffiConverterTypeFfiKeyValue(_UniffiConverterRustBuffer):
+class _UniffiConverterTypeKeyValue(_UniffiConverterRustBuffer):
     @staticmethod
     def read(buf):
-        return FfiKeyValue(
+        return KeyValue(
             key=_UniffiConverterBytes.read(buf),
             value=_UniffiConverterBytes.read(buf),
             seq=_UniffiConverterUInt64.read(buf),
@@ -2683,8 +2660,8 @@ class _UniffiConverterTypeFfiKeyValue(_UniffiConverterRustBuffer):
         _UniffiConverterOptionalInt64.write(value.expire_ts, buf)
 
 
-class FfiLogRecord:
-    level: "FfiLogLevel"
+class LogRecord:
+    level: "LogLevel"
     target: "str"
     message: "str"
     module_path: "typing.Optional[str]"
@@ -2694,7 +2671,7 @@ class FfiLogRecord:
     def __init__(
         self,
         *,
-        level: "FfiLogLevel",
+        level: "LogLevel",
         target: "str",
         message: "str",
         module_path: "typing.Optional[str]",
@@ -2709,8 +2686,10 @@ class FfiLogRecord:
         self.line = line
 
     def __str__(self):
-        return "FfiLogRecord(level={}, target={}, message={}, module_path={}, file={}, line={})".format(
-            self.level, self.target, self.message, self.module_path, self.file, self.line
+        return (
+            "LogRecord(level={}, target={}, message={}, module_path={}, file={}, line={})".format(
+                self.level, self.target, self.message, self.module_path, self.file, self.line
+            )
         )
 
     def __eq__(self, other):
@@ -2729,11 +2708,11 @@ class FfiLogRecord:
         return True
 
 
-class _UniffiConverterTypeFfiLogRecord(_UniffiConverterRustBuffer):
+class _UniffiConverterTypeLogRecord(_UniffiConverterRustBuffer):
     @staticmethod
     def read(buf):
-        return FfiLogRecord(
-            level=_UniffiConverterTypeFfiLogLevel.read(buf),
+        return LogRecord(
+            level=_UniffiConverterTypeLogLevel.read(buf),
             target=_UniffiConverterString.read(buf),
             message=_UniffiConverterString.read(buf),
             module_path=_UniffiConverterOptionalString.read(buf),
@@ -2743,7 +2722,7 @@ class _UniffiConverterTypeFfiLogRecord(_UniffiConverterRustBuffer):
 
     @staticmethod
     def check_lower(value):
-        _UniffiConverterTypeFfiLogLevel.check_lower(value.level)
+        _UniffiConverterTypeLogLevel.check_lower(value.level)
         _UniffiConverterString.check_lower(value.target)
         _UniffiConverterString.check_lower(value.message)
         _UniffiConverterOptionalString.check_lower(value.module_path)
@@ -2752,7 +2731,7 @@ class _UniffiConverterTypeFfiLogRecord(_UniffiConverterRustBuffer):
 
     @staticmethod
     def write(value, buf):
-        _UniffiConverterTypeFfiLogLevel.write(value.level, buf)
+        _UniffiConverterTypeLogLevel.write(value.level, buf)
         _UniffiConverterString.write(value.target, buf)
         _UniffiConverterString.write(value.message, buf)
         _UniffiConverterOptionalString.write(value.module_path, buf)
@@ -2760,14 +2739,14 @@ class _UniffiConverterTypeFfiLogRecord(_UniffiConverterRustBuffer):
         _UniffiConverterOptionalUInt32.write(value.line, buf)
 
 
-class FfiMergeOptions:
-    ttl: "FfiTtl"
+class MergeOptions:
+    ttl: "Ttl"
 
-    def __init__(self, *, ttl: "FfiTtl"):
+    def __init__(self, *, ttl: "Ttl"):
         self.ttl = ttl
 
     def __str__(self):
-        return "FfiMergeOptions(ttl={})".format(self.ttl)
+        return "MergeOptions(ttl={})".format(self.ttl)
 
     def __eq__(self, other):
         if self.ttl != other.ttl:
@@ -2775,30 +2754,30 @@ class FfiMergeOptions:
         return True
 
 
-class _UniffiConverterTypeFfiMergeOptions(_UniffiConverterRustBuffer):
+class _UniffiConverterTypeMergeOptions(_UniffiConverterRustBuffer):
     @staticmethod
     def read(buf):
-        return FfiMergeOptions(
-            ttl=_UniffiConverterTypeFfiTtl.read(buf),
+        return MergeOptions(
+            ttl=_UniffiConverterTypeTtl.read(buf),
         )
 
     @staticmethod
     def check_lower(value):
-        _UniffiConverterTypeFfiTtl.check_lower(value.ttl)
+        _UniffiConverterTypeTtl.check_lower(value.ttl)
 
     @staticmethod
     def write(value, buf):
-        _UniffiConverterTypeFfiTtl.write(value.ttl, buf)
+        _UniffiConverterTypeTtl.write(value.ttl, buf)
 
 
-class FfiPutOptions:
-    ttl: "FfiTtl"
+class PutOptions:
+    ttl: "Ttl"
 
-    def __init__(self, *, ttl: "FfiTtl"):
+    def __init__(self, *, ttl: "Ttl"):
         self.ttl = ttl
 
     def __str__(self):
-        return "FfiPutOptions(ttl={})".format(self.ttl)
+        return "PutOptions(ttl={})".format(self.ttl)
 
     def __eq__(self, other):
         if self.ttl != other.ttl:
@@ -2806,36 +2785,36 @@ class FfiPutOptions:
         return True
 
 
-class _UniffiConverterTypeFfiPutOptions(_UniffiConverterRustBuffer):
+class _UniffiConverterTypePutOptions(_UniffiConverterRustBuffer):
     @staticmethod
     def read(buf):
-        return FfiPutOptions(
-            ttl=_UniffiConverterTypeFfiTtl.read(buf),
+        return PutOptions(
+            ttl=_UniffiConverterTypeTtl.read(buf),
         )
 
     @staticmethod
     def check_lower(value):
-        _UniffiConverterTypeFfiTtl.check_lower(value.ttl)
+        _UniffiConverterTypeTtl.check_lower(value.ttl)
 
     @staticmethod
     def write(value, buf):
-        _UniffiConverterTypeFfiTtl.write(value.ttl, buf)
+        _UniffiConverterTypeTtl.write(value.ttl, buf)
 
 
-class FfiReadOptions:
-    durability_filter: "FfiDurabilityLevel"
+class ReadOptions:
+    durability_filter: "DurabilityLevel"
     dirty: "bool"
     cache_blocks: "bool"
 
     def __init__(
-        self, *, durability_filter: "FfiDurabilityLevel", dirty: "bool", cache_blocks: "bool"
+        self, *, durability_filter: "DurabilityLevel", dirty: "bool", cache_blocks: "bool"
     ):
         self.durability_filter = durability_filter
         self.dirty = dirty
         self.cache_blocks = cache_blocks
 
     def __str__(self):
-        return "FfiReadOptions(durability_filter={}, dirty={}, cache_blocks={})".format(
+        return "ReadOptions(durability_filter={}, dirty={}, cache_blocks={})".format(
             self.durability_filter, self.dirty, self.cache_blocks
         )
 
@@ -2849,29 +2828,29 @@ class FfiReadOptions:
         return True
 
 
-class _UniffiConverterTypeFfiReadOptions(_UniffiConverterRustBuffer):
+class _UniffiConverterTypeReadOptions(_UniffiConverterRustBuffer):
     @staticmethod
     def read(buf):
-        return FfiReadOptions(
-            durability_filter=_UniffiConverterTypeFfiDurabilityLevel.read(buf),
+        return ReadOptions(
+            durability_filter=_UniffiConverterTypeDurabilityLevel.read(buf),
             dirty=_UniffiConverterBool.read(buf),
             cache_blocks=_UniffiConverterBool.read(buf),
         )
 
     @staticmethod
     def check_lower(value):
-        _UniffiConverterTypeFfiDurabilityLevel.check_lower(value.durability_filter)
+        _UniffiConverterTypeDurabilityLevel.check_lower(value.durability_filter)
         _UniffiConverterBool.check_lower(value.dirty)
         _UniffiConverterBool.check_lower(value.cache_blocks)
 
     @staticmethod
     def write(value, buf):
-        _UniffiConverterTypeFfiDurabilityLevel.write(value.durability_filter, buf)
+        _UniffiConverterTypeDurabilityLevel.write(value.durability_filter, buf)
         _UniffiConverterBool.write(value.dirty, buf)
         _UniffiConverterBool.write(value.cache_blocks, buf)
 
 
-class FfiReaderOptions:
+class ReaderOptions:
     manifest_poll_interval_ms: "int"
     checkpoint_lifetime_ms: "int"
     max_memtable_bytes: "int"
@@ -2891,7 +2870,7 @@ class FfiReaderOptions:
         self.skip_wal_replay = skip_wal_replay
 
     def __str__(self):
-        return "FfiReaderOptions(manifest_poll_interval_ms={}, checkpoint_lifetime_ms={}, max_memtable_bytes={}, skip_wal_replay={})".format(
+        return "ReaderOptions(manifest_poll_interval_ms={}, checkpoint_lifetime_ms={}, max_memtable_bytes={}, skip_wal_replay={})".format(
             self.manifest_poll_interval_ms,
             self.checkpoint_lifetime_ms,
             self.max_memtable_bytes,
@@ -2910,10 +2889,10 @@ class FfiReaderOptions:
         return True
 
 
-class _UniffiConverterTypeFfiReaderOptions(_UniffiConverterRustBuffer):
+class _UniffiConverterTypeReaderOptions(_UniffiConverterRustBuffer):
     @staticmethod
     def read(buf):
-        return FfiReaderOptions(
+        return ReaderOptions(
             manifest_poll_interval_ms=_UniffiConverterUInt64.read(buf),
             checkpoint_lifetime_ms=_UniffiConverterUInt64.read(buf),
             max_memtable_bytes=_UniffiConverterUInt64.read(buf),
@@ -2935,8 +2914,8 @@ class _UniffiConverterTypeFfiReaderOptions(_UniffiConverterRustBuffer):
         _UniffiConverterBool.write(value.skip_wal_replay, buf)
 
 
-class FfiRowEntry:
-    kind: "FfiRowEntryKind"
+class RowEntry:
+    kind: "RowEntryKind"
     key: "bytes"
     value: "typing.Optional[bytes]"
     seq: "int"
@@ -2946,7 +2925,7 @@ class FfiRowEntry:
     def __init__(
         self,
         *,
-        kind: "FfiRowEntryKind",
+        kind: "RowEntryKind",
         key: "bytes",
         value: "typing.Optional[bytes]",
         seq: "int",
@@ -2961,7 +2940,7 @@ class FfiRowEntry:
         self.expire_ts = expire_ts
 
     def __str__(self):
-        return "FfiRowEntry(kind={}, key={}, value={}, seq={}, create_ts={}, expire_ts={})".format(
+        return "RowEntry(kind={}, key={}, value={}, seq={}, create_ts={}, expire_ts={})".format(
             self.kind, self.key, self.value, self.seq, self.create_ts, self.expire_ts
         )
 
@@ -2981,11 +2960,11 @@ class FfiRowEntry:
         return True
 
 
-class _UniffiConverterTypeFfiRowEntry(_UniffiConverterRustBuffer):
+class _UniffiConverterTypeRowEntry(_UniffiConverterRustBuffer):
     @staticmethod
     def read(buf):
-        return FfiRowEntry(
-            kind=_UniffiConverterTypeFfiRowEntryKind.read(buf),
+        return RowEntry(
+            kind=_UniffiConverterTypeRowEntryKind.read(buf),
             key=_UniffiConverterBytes.read(buf),
             value=_UniffiConverterOptionalBytes.read(buf),
             seq=_UniffiConverterUInt64.read(buf),
@@ -2995,7 +2974,7 @@ class _UniffiConverterTypeFfiRowEntry(_UniffiConverterRustBuffer):
 
     @staticmethod
     def check_lower(value):
-        _UniffiConverterTypeFfiRowEntryKind.check_lower(value.kind)
+        _UniffiConverterTypeRowEntryKind.check_lower(value.kind)
         _UniffiConverterBytes.check_lower(value.key)
         _UniffiConverterOptionalBytes.check_lower(value.value)
         _UniffiConverterUInt64.check_lower(value.seq)
@@ -3004,7 +2983,7 @@ class _UniffiConverterTypeFfiRowEntry(_UniffiConverterRustBuffer):
 
     @staticmethod
     def write(value, buf):
-        _UniffiConverterTypeFfiRowEntryKind.write(value.kind, buf)
+        _UniffiConverterTypeRowEntryKind.write(value.kind, buf)
         _UniffiConverterBytes.write(value.key, buf)
         _UniffiConverterOptionalBytes.write(value.value, buf)
         _UniffiConverterUInt64.write(value.seq, buf)
@@ -3012,8 +2991,8 @@ class _UniffiConverterTypeFfiRowEntry(_UniffiConverterRustBuffer):
         _UniffiConverterOptionalInt64.write(value.expire_ts, buf)
 
 
-class FfiScanOptions:
-    durability_filter: "FfiDurabilityLevel"
+class ScanOptions:
+    durability_filter: "DurabilityLevel"
     dirty: "bool"
     read_ahead_bytes: "int"
     cache_blocks: "bool"
@@ -3022,7 +3001,7 @@ class FfiScanOptions:
     def __init__(
         self,
         *,
-        durability_filter: "FfiDurabilityLevel",
+        durability_filter: "DurabilityLevel",
         dirty: "bool",
         read_ahead_bytes: "int",
         cache_blocks: "bool",
@@ -3035,7 +3014,7 @@ class FfiScanOptions:
         self.max_fetch_tasks = max_fetch_tasks
 
     def __str__(self):
-        return "FfiScanOptions(durability_filter={}, dirty={}, read_ahead_bytes={}, cache_blocks={}, max_fetch_tasks={})".format(
+        return "ScanOptions(durability_filter={}, dirty={}, read_ahead_bytes={}, cache_blocks={}, max_fetch_tasks={})".format(
             self.durability_filter,
             self.dirty,
             self.read_ahead_bytes,
@@ -3057,11 +3036,11 @@ class FfiScanOptions:
         return True
 
 
-class _UniffiConverterTypeFfiScanOptions(_UniffiConverterRustBuffer):
+class _UniffiConverterTypeScanOptions(_UniffiConverterRustBuffer):
     @staticmethod
     def read(buf):
-        return FfiScanOptions(
-            durability_filter=_UniffiConverterTypeFfiDurabilityLevel.read(buf),
+        return ScanOptions(
+            durability_filter=_UniffiConverterTypeDurabilityLevel.read(buf),
             dirty=_UniffiConverterBool.read(buf),
             read_ahead_bytes=_UniffiConverterUInt64.read(buf),
             cache_blocks=_UniffiConverterBool.read(buf),
@@ -3070,7 +3049,7 @@ class _UniffiConverterTypeFfiScanOptions(_UniffiConverterRustBuffer):
 
     @staticmethod
     def check_lower(value):
-        _UniffiConverterTypeFfiDurabilityLevel.check_lower(value.durability_filter)
+        _UniffiConverterTypeDurabilityLevel.check_lower(value.durability_filter)
         _UniffiConverterBool.check_lower(value.dirty)
         _UniffiConverterUInt64.check_lower(value.read_ahead_bytes)
         _UniffiConverterBool.check_lower(value.cache_blocks)
@@ -3078,14 +3057,14 @@ class _UniffiConverterTypeFfiScanOptions(_UniffiConverterRustBuffer):
 
     @staticmethod
     def write(value, buf):
-        _UniffiConverterTypeFfiDurabilityLevel.write(value.durability_filter, buf)
+        _UniffiConverterTypeDurabilityLevel.write(value.durability_filter, buf)
         _UniffiConverterBool.write(value.dirty, buf)
         _UniffiConverterUInt64.write(value.read_ahead_bytes, buf)
         _UniffiConverterBool.write(value.cache_blocks, buf)
         _UniffiConverterUInt64.write(value.max_fetch_tasks, buf)
 
 
-class FfiWalFileMetadata:
+class WalFileMetadata:
     last_modified_seconds: "int"
     last_modified_nanos: "int"
     size_bytes: "int"
@@ -3105,7 +3084,7 @@ class FfiWalFileMetadata:
         self.location = location
 
     def __str__(self):
-        return "FfiWalFileMetadata(last_modified_seconds={}, last_modified_nanos={}, size_bytes={}, location={})".format(
+        return "WalFileMetadata(last_modified_seconds={}, last_modified_nanos={}, size_bytes={}, location={})".format(
             self.last_modified_seconds, self.last_modified_nanos, self.size_bytes, self.location
         )
 
@@ -3121,10 +3100,10 @@ class FfiWalFileMetadata:
         return True
 
 
-class _UniffiConverterTypeFfiWalFileMetadata(_UniffiConverterRustBuffer):
+class _UniffiConverterTypeWalFileMetadata(_UniffiConverterRustBuffer):
     @staticmethod
     def read(buf):
-        return FfiWalFileMetadata(
+        return WalFileMetadata(
             last_modified_seconds=_UniffiConverterInt64.read(buf),
             last_modified_nanos=_UniffiConverterUInt32.read(buf),
             size_bytes=_UniffiConverterUInt64.read(buf),
@@ -3146,7 +3125,7 @@ class _UniffiConverterTypeFfiWalFileMetadata(_UniffiConverterRustBuffer):
         _UniffiConverterString.write(value.location, buf)
 
 
-class FfiWriteHandle:
+class WriteHandle:
     seqnum: "int"
     create_ts: "int"
 
@@ -3155,7 +3134,7 @@ class FfiWriteHandle:
         self.create_ts = create_ts
 
     def __str__(self):
-        return "FfiWriteHandle(seqnum={}, create_ts={})".format(self.seqnum, self.create_ts)
+        return "WriteHandle(seqnum={}, create_ts={})".format(self.seqnum, self.create_ts)
 
     def __eq__(self, other):
         if self.seqnum != other.seqnum:
@@ -3165,10 +3144,10 @@ class FfiWriteHandle:
         return True
 
 
-class _UniffiConverterTypeFfiWriteHandle(_UniffiConverterRustBuffer):
+class _UniffiConverterTypeWriteHandle(_UniffiConverterRustBuffer):
     @staticmethod
     def read(buf):
-        return FfiWriteHandle(
+        return WriteHandle(
             seqnum=_UniffiConverterUInt64.read(buf),
             create_ts=_UniffiConverterInt64.read(buf),
         )
@@ -3184,14 +3163,14 @@ class _UniffiConverterTypeFfiWriteHandle(_UniffiConverterRustBuffer):
         _UniffiConverterInt64.write(value.create_ts, buf)
 
 
-class FfiWriteOptions:
+class WriteOptions:
     await_durable: "bool"
 
     def __init__(self, *, await_durable: "bool"):
         self.await_durable = await_durable
 
     def __str__(self):
-        return "FfiWriteOptions(await_durable={})".format(self.await_durable)
+        return "WriteOptions(await_durable={})".format(self.await_durable)
 
     def __eq__(self, other):
         if self.await_durable != other.await_durable:
@@ -3199,10 +3178,10 @@ class FfiWriteOptions:
         return True
 
 
-class _UniffiConverterTypeFfiWriteOptions(_UniffiConverterRustBuffer):
+class _UniffiConverterTypeWriteOptions(_UniffiConverterRustBuffer):
     @staticmethod
     def read(buf):
-        return FfiWriteOptions(
+        return WriteOptions(
             await_durable=_UniffiConverterBool.read(buf),
         )
 
@@ -3215,7 +3194,7 @@ class _UniffiConverterTypeFfiWriteOptions(_UniffiConverterRustBuffer):
         _UniffiConverterBool.write(value.await_durable, buf)
 
 
-class FfiCloseReason(enum.Enum):
+class CloseReason(enum.Enum):
     NONE = 0
 
     CLEAN = 1
@@ -3227,97 +3206,65 @@ class FfiCloseReason(enum.Enum):
     UNKNOWN = 4
 
 
-class _UniffiConverterTypeFfiCloseReason(_UniffiConverterRustBuffer):
+class _UniffiConverterTypeCloseReason(_UniffiConverterRustBuffer):
     @staticmethod
     def read(buf):
         variant = buf.read_i32()
         if variant == 1:
-            return FfiCloseReason.NONE
+            return CloseReason.NONE
         if variant == 2:
-            return FfiCloseReason.CLEAN
+            return CloseReason.CLEAN
         if variant == 3:
-            return FfiCloseReason.FENCED
+            return CloseReason.FENCED
         if variant == 4:
-            return FfiCloseReason.PANIC
+            return CloseReason.PANIC
         if variant == 5:
-            return FfiCloseReason.UNKNOWN
+            return CloseReason.UNKNOWN
         raise InternalError("Raw enum value doesn't match any cases")
 
     @staticmethod
     def check_lower(value):
-        if value == FfiCloseReason.NONE:
+        if value == CloseReason.NONE:
             return
-        if value == FfiCloseReason.CLEAN:
+        if value == CloseReason.CLEAN:
             return
-        if value == FfiCloseReason.FENCED:
+        if value == CloseReason.FENCED:
             return
-        if value == FfiCloseReason.PANIC:
+        if value == CloseReason.PANIC:
             return
-        if value == FfiCloseReason.UNKNOWN:
+        if value == CloseReason.UNKNOWN:
             return
         raise ValueError(value)
 
     @staticmethod
     def write(value, buf):
-        if value == FfiCloseReason.NONE:
+        if value == CloseReason.NONE:
             buf.write_i32(1)
-        if value == FfiCloseReason.CLEAN:
+        if value == CloseReason.CLEAN:
             buf.write_i32(2)
-        if value == FfiCloseReason.FENCED:
+        if value == CloseReason.FENCED:
             buf.write_i32(3)
-        if value == FfiCloseReason.PANIC:
+        if value == CloseReason.PANIC:
             buf.write_i32(4)
-        if value == FfiCloseReason.UNKNOWN:
+        if value == CloseReason.UNKNOWN:
             buf.write_i32(5)
 
 
-class FfiDurabilityLevel(enum.Enum):
-    REMOTE = 0
-
-    MEMORY = 1
-
-
-class _UniffiConverterTypeFfiDurabilityLevel(_UniffiConverterRustBuffer):
-    @staticmethod
-    def read(buf):
-        variant = buf.read_i32()
-        if variant == 1:
-            return FfiDurabilityLevel.REMOTE
-        if variant == 2:
-            return FfiDurabilityLevel.MEMORY
-        raise InternalError("Raw enum value doesn't match any cases")
-
-    @staticmethod
-    def check_lower(value):
-        if value == FfiDurabilityLevel.REMOTE:
-            return
-        if value == FfiDurabilityLevel.MEMORY:
-            return
-        raise ValueError(value)
-
-    @staticmethod
-    def write(value, buf):
-        if value == FfiDurabilityLevel.REMOTE:
-            buf.write_i32(1)
-        if value == FfiDurabilityLevel.MEMORY:
-            buf.write_i32(2)
-
-
-# FfiError
+# DbError
 # We want to define each variant as a nested class that's also a subclass,
 # which is tricky in Python.  To accomplish this we're going to create each
 # class separately, then manually add the child classes to the base class's
 # __dict__.  All of this happens in dummy class to avoid polluting the module
 # namespace.
-class FfiError(Exception):
+class DbError(Exception):
     pass
 
 
-_UniffiTempFfiError = FfiError
+_UniffiTempDbError = DbError
 
 
-class FfiError:  # type: ignore
-    class Transaction(_UniffiTempFfiError):
+class DbError:  # type: ignore
+    class Transaction(_UniffiTempDbError):
         def __init__(self, message):
             super().__init__(
                 ", ".join(
@@ -3329,11 +3276,11 @@ class FfiError:  # type: ignore
             self.message = message
 
         def __repr__(self):
-            return "FfiError.Transaction({})".format(str(self))
+            return "DbError.Transaction({})".format(str(self))
 
-    _UniffiTempFfiError.Transaction = Transaction  # type: ignore
+    _UniffiTempDbError.Transaction = Transaction  # type: ignore
 
-    class Closed(_UniffiTempFfiError):
+    class Closed(_UniffiTempDbError):
         def __init__(self, reason, message):
             super().__init__(
                 ", ".join(
@@ -3347,11 +3294,11 @@ class FfiError:  # type: ignore
             self.message = message
 
         def __repr__(self):
-            return "FfiError.Closed({})".format(str(self))
+            return "DbError.Closed({})".format(str(self))
 
-    _UniffiTempFfiError.Closed = Closed  # type: ignore
+    _UniffiTempDbError.Closed = Closed  # type: ignore
 
-    class Unavailable(_UniffiTempFfiError):
+    class Unavailable(_UniffiTempDbError):
         def __init__(self, message):
             super().__init__(
                 ", ".join(
@@ -3363,11 +3310,11 @@ class FfiError:  # type: ignore
             self.message = message
 
         def __repr__(self):
-            return "FfiError.Unavailable({})".format(str(self))
+            return "DbError.Unavailable({})".format(str(self))
 
-    _UniffiTempFfiError.Unavailable = Unavailable  # type: ignore
+    _UniffiTempDbError.Unavailable = Unavailable  # type: ignore
 
-    class Invalid(_UniffiTempFfiError):
+    class Invalid(_UniffiTempDbError):
         def __init__(self, message):
             super().__init__(
                 ", ".join(
@@ -3379,11 +3326,11 @@ class FfiError:  # type: ignore
             self.message = message
 
         def __repr__(self):
-            return "FfiError.Invalid({})".format(str(self))
+            return "DbError.Invalid({})".format(str(self))
 
-    _UniffiTempFfiError.Invalid = Invalid  # type: ignore
+    _UniffiTempDbError.Invalid = Invalid  # type: ignore
 
-    class Data(_UniffiTempFfiError):
+    class Data(_UniffiTempDbError):
         def __init__(self, message):
             super().__init__(
                 ", ".join(
@@ -3395,11 +3342,11 @@ class FfiError:  # type: ignore
             self.message = message
 
         def __repr__(self):
-            return "FfiError.Data({})".format(str(self))
+            return "DbError.Data({})".format(str(self))
 
-    _UniffiTempFfiError.Data = Data  # type: ignore
+    _UniffiTempDbError.Data = Data  # type: ignore
 
-    class Internal(_UniffiTempFfiError):
+    class Internal(_UniffiTempDbError):
         def __init__(self, message):
             super().__init__(
                 ", ".join(
@@ -3411,156 +3358,188 @@ class FfiError:  # type: ignore
             self.message = message
 
         def __repr__(self):
-            return "FfiError.Internal({})".format(str(self))
+            return "DbError.Internal({})".format(str(self))
 
-    _UniffiTempFfiError.Internal = Internal  # type: ignore
-
-
-FfiError = _UniffiTempFfiError  # type: ignore
-del _UniffiTempFfiError
+    _UniffiTempDbError.Internal = Internal  # type: ignore
 
 
-class _UniffiConverterTypeFfiError(_UniffiConverterRustBuffer):
+DbError = _UniffiTempDbError  # type: ignore
+del _UniffiTempDbError
+
+
+class _UniffiConverterTypeDbError(_UniffiConverterRustBuffer):
     @staticmethod
     def read(buf):
         variant = buf.read_i32()
         if variant == 1:
-            return FfiError.Transaction(
+            return DbError.Transaction(
                 _UniffiConverterString.read(buf),
             )
         if variant == 2:
-            return FfiError.Closed(
-                _UniffiConverterTypeFfiCloseReason.read(buf),
+            return DbError.Closed(
+                _UniffiConverterTypeCloseReason.read(buf),
                 _UniffiConverterString.read(buf),
             )
         if variant == 3:
-            return FfiError.Unavailable(
+            return DbError.Unavailable(
                 _UniffiConverterString.read(buf),
             )
         if variant == 4:
-            return FfiError.Invalid(
+            return DbError.Invalid(
                 _UniffiConverterString.read(buf),
             )
         if variant == 5:
-            return FfiError.Data(
+            return DbError.Data(
                 _UniffiConverterString.read(buf),
             )
         if variant == 6:
-            return FfiError.Internal(
+            return DbError.Internal(
                 _UniffiConverterString.read(buf),
             )
         raise InternalError("Raw enum value doesn't match any cases")
 
     @staticmethod
     def check_lower(value):
-        if isinstance(value, FfiError.Transaction):
+        if isinstance(value, DbError.Transaction):
             _UniffiConverterString.check_lower(value.message)
             return
-        if isinstance(value, FfiError.Closed):
-            _UniffiConverterTypeFfiCloseReason.check_lower(value.reason)
+        if isinstance(value, DbError.Closed):
+            _UniffiConverterTypeCloseReason.check_lower(value.reason)
             _UniffiConverterString.check_lower(value.message)
             return
-        if isinstance(value, FfiError.Unavailable):
+        if isinstance(value, DbError.Unavailable):
             _UniffiConverterString.check_lower(value.message)
             return
-        if isinstance(value, FfiError.Invalid):
+        if isinstance(value, DbError.Invalid):
             _UniffiConverterString.check_lower(value.message)
             return
-        if isinstance(value, FfiError.Data):
+        if isinstance(value, DbError.Data):
             _UniffiConverterString.check_lower(value.message)
             return
-        if isinstance(value, FfiError.Internal):
+        if isinstance(value, DbError.Internal):
             _UniffiConverterString.check_lower(value.message)
             return
 
     @staticmethod
     def write(value, buf):
-        if isinstance(value, FfiError.Transaction):
+        if isinstance(value, DbError.Transaction):
             buf.write_i32(1)
             _UniffiConverterString.write(value.message, buf)
-        if isinstance(value, FfiError.Closed):
+        if isinstance(value, DbError.Closed):
             buf.write_i32(2)
-            _UniffiConverterTypeFfiCloseReason.write(value.reason, buf)
+            _UniffiConverterTypeCloseReason.write(value.reason, buf)
             _UniffiConverterString.write(value.message, buf)
-        if isinstance(value, FfiError.Unavailable):
+        if isinstance(value, DbError.Unavailable):
             buf.write_i32(3)
             _UniffiConverterString.write(value.message, buf)
-        if isinstance(value, FfiError.Invalid):
+        if isinstance(value, DbError.Invalid):
             buf.write_i32(4)
             _UniffiConverterString.write(value.message, buf)
-        if isinstance(value, FfiError.Data):
+        if isinstance(value, DbError.Data):
             buf.write_i32(5)
             _UniffiConverterString.write(value.message, buf)
-        if isinstance(value, FfiError.Internal):
+        if isinstance(value, DbError.Internal):
             buf.write_i32(6)
             _UniffiConverterString.write(value.message, buf)
 
 
-class FfiFlushType(enum.Enum):
+class DurabilityLevel(enum.Enum):
+    REMOTE = 0
+
+    MEMORY = 1
+
+
+class _UniffiConverterTypeDurabilityLevel(_UniffiConverterRustBuffer):
+    @staticmethod
+    def read(buf):
+        variant = buf.read_i32()
+        if variant == 1:
+            return DurabilityLevel.REMOTE
+        if variant == 2:
+            return DurabilityLevel.MEMORY
+        raise InternalError("Raw enum value doesn't match any cases")
+
+    @staticmethod
+    def check_lower(value):
+        if value == DurabilityLevel.REMOTE:
+            return
+        if value == DurabilityLevel.MEMORY:
+            return
+        raise ValueError(value)
+
+    @staticmethod
+    def write(value, buf):
+        if value == DurabilityLevel.REMOTE:
+            buf.write_i32(1)
+        if value == DurabilityLevel.MEMORY:
+            buf.write_i32(2)
+
+
+class FlushType(enum.Enum):
     MEM_TABLE = 0
 
     WAL = 1
 
 
-class _UniffiConverterTypeFfiFlushType(_UniffiConverterRustBuffer):
+class _UniffiConverterTypeFlushType(_UniffiConverterRustBuffer):
     @staticmethod
     def read(buf):
         variant = buf.read_i32()
         if variant == 1:
-            return FfiFlushType.MEM_TABLE
+            return FlushType.MEM_TABLE
         if variant == 2:
-            return FfiFlushType.WAL
+            return FlushType.WAL
         raise InternalError("Raw enum value doesn't match any cases")
 
     @staticmethod
     def check_lower(value):
-        if value == FfiFlushType.MEM_TABLE:
+        if value == FlushType.MEM_TABLE:
             return
-        if value == FfiFlushType.WAL:
+        if value == FlushType.WAL:
             return
         raise ValueError(value)
 
     @staticmethod
     def write(value, buf):
-        if value == FfiFlushType.MEM_TABLE:
+        if value == FlushType.MEM_TABLE:
             buf.write_i32(1)
-        if value == FfiFlushType.WAL:
+        if value == FlushType.WAL:
             buf.write_i32(2)
 
 
-class FfiIsolationLevel(enum.Enum):
+class IsolationLevel(enum.Enum):
     SNAPSHOT = 0
 
     SERIALIZABLE_SNAPSHOT = 1
 
 
-class _UniffiConverterTypeFfiIsolationLevel(_UniffiConverterRustBuffer):
+class _UniffiConverterTypeIsolationLevel(_UniffiConverterRustBuffer):
     @staticmethod
     def read(buf):
         variant = buf.read_i32()
         if variant == 1:
-            return FfiIsolationLevel.SNAPSHOT
+            return IsolationLevel.SNAPSHOT
         if variant == 2:
-            return FfiIsolationLevel.SERIALIZABLE_SNAPSHOT
+            return IsolationLevel.SERIALIZABLE_SNAPSHOT
         raise InternalError("Raw enum value doesn't match any cases")
 
     @staticmethod
     def check_lower(value):
-        if value == FfiIsolationLevel.SNAPSHOT:
+        if value == IsolationLevel.SNAPSHOT:
             return
-        if value == FfiIsolationLevel.SERIALIZABLE_SNAPSHOT:
+        if value == IsolationLevel.SERIALIZABLE_SNAPSHOT:
             return
         raise ValueError(value)
 
     @staticmethod
     def write(value, buf):
-        if value == FfiIsolationLevel.SNAPSHOT:
+        if value == IsolationLevel.SNAPSHOT:
             buf.write_i32(1)
-        if value == FfiIsolationLevel.SERIALIZABLE_SNAPSHOT:
+        if value == IsolationLevel.SERIALIZABLE_SNAPSHOT:
             buf.write_i32(2)
 
 
-class FfiLogLevel(enum.Enum):
+class LogLevel(enum.Enum):
     OFF = 0
 
     ERROR = 1
@@ -3574,71 +3553,71 @@ class FfiLogLevel(enum.Enum):
     TRACE = 5
 
 
-class _UniffiConverterTypeFfiLogLevel(_UniffiConverterRustBuffer):
+class _UniffiConverterTypeLogLevel(_UniffiConverterRustBuffer):
     @staticmethod
     def read(buf):
         variant = buf.read_i32()
         if variant == 1:
-            return FfiLogLevel.OFF
+            return LogLevel.OFF
         if variant == 2:
-            return FfiLogLevel.ERROR
+            return LogLevel.ERROR
         if variant == 3:
-            return FfiLogLevel.WARN
+            return LogLevel.WARN
         if variant == 4:
-            return FfiLogLevel.INFO
+            return LogLevel.INFO
         if variant == 5:
-            return FfiLogLevel.DEBUG
+            return LogLevel.DEBUG
         if variant == 6:
-            return FfiLogLevel.TRACE
+            return LogLevel.TRACE
         raise InternalError("Raw enum value doesn't match any cases")
 
     @staticmethod
     def check_lower(value):
-        if value == FfiLogLevel.OFF:
+        if value == LogLevel.OFF:
             return
-        if value == FfiLogLevel.ERROR:
+        if value == LogLevel.ERROR:
             return
-        if value == FfiLogLevel.WARN:
+        if value == LogLevel.WARN:
             return
-        if value == FfiLogLevel.INFO:
+        if value == LogLevel.INFO:
             return
-        if value == FfiLogLevel.DEBUG:
+        if value == LogLevel.DEBUG:
             return
-        if value == FfiLogLevel.TRACE:
+        if value == LogLevel.TRACE:
             return
         raise ValueError(value)
 
     @staticmethod
     def write(value, buf):
-        if value == FfiLogLevel.OFF:
+        if value == LogLevel.OFF:
             buf.write_i32(1)
-        if value == FfiLogLevel.ERROR:
+        if value == LogLevel.ERROR:
             buf.write_i32(2)
-        if value == FfiLogLevel.WARN:
+        if value == LogLevel.WARN:
             buf.write_i32(3)
-        if value == FfiLogLevel.INFO:
+        if value == LogLevel.INFO:
             buf.write_i32(4)
-        if value == FfiLogLevel.DEBUG:
+        if value == LogLevel.DEBUG:
             buf.write_i32(5)
-        if value == FfiLogLevel.TRACE:
+        if value == LogLevel.TRACE:
             buf.write_i32(6)
 
 
-# FfiMergeOperatorCallbackError
+# MergeOperatorCallbackError
 # We want to define each variant as a nested class that's also a subclass,
 # which is tricky in Python.  To accomplish this we're going to create each
 # class separately, then manually add the child classes to the base class's
 # __dict__.  All of this happens in dummy class to avoid polluting the module
 # namespace.
-class FfiMergeOperatorCallbackError(Exception):
+class MergeOperatorCallbackError(Exception):
     pass
 
 
-_UniffiTempFfiMergeOperatorCallbackError = FfiMergeOperatorCallbackError
+_UniffiTempMergeOperatorCallbackError = MergeOperatorCallbackError
 
 
-class FfiMergeOperatorCallbackError:  # type: ignore
-    class Failed(_UniffiTempFfiMergeOperatorCallbackError):
+class MergeOperatorCallbackError:  # type: ignore
+    class Failed(_UniffiTempMergeOperatorCallbackError):
         def __init__(self, message):
             super().__init__(
                 ", ".join(
@@ -3650,39 +3629,39 @@ class FfiMergeOperatorCallbackError:  # type: ignore
             self.message = message
 
         def __repr__(self):
-            return "FfiMergeOperatorCallbackError.Failed({})".format(str(self))
+            return "MergeOperatorCallbackError.Failed({})".format(str(self))
 
-    _UniffiTempFfiMergeOperatorCallbackError.Failed = Failed  # type: ignore
-
-
-FfiMergeOperatorCallbackError = _UniffiTempFfiMergeOperatorCallbackError  # type: ignore
-del _UniffiTempFfiMergeOperatorCallbackError
+    _UniffiTempMergeOperatorCallbackError.Failed = Failed  # type: ignore
 
 
-class _UniffiConverterTypeFfiMergeOperatorCallbackError(_UniffiConverterRustBuffer):
+MergeOperatorCallbackError = _UniffiTempMergeOperatorCallbackError  # type: ignore
+del _UniffiTempMergeOperatorCallbackError
+
+
+class _UniffiConverterTypeMergeOperatorCallbackError(_UniffiConverterRustBuffer):
     @staticmethod
     def read(buf):
         variant = buf.read_i32()
         if variant == 1:
-            return FfiMergeOperatorCallbackError.Failed(
+            return MergeOperatorCallbackError.Failed(
                 _UniffiConverterString.read(buf),
             )
         raise InternalError("Raw enum value doesn't match any cases")
 
     @staticmethod
     def check_lower(value):
-        if isinstance(value, FfiMergeOperatorCallbackError.Failed):
+        if isinstance(value, MergeOperatorCallbackError.Failed):
             _UniffiConverterString.check_lower(value.message)
             return
 
     @staticmethod
     def write(value, buf):
-        if isinstance(value, FfiMergeOperatorCallbackError.Failed):
+        if isinstance(value, MergeOperatorCallbackError.Failed):
             buf.write_i32(1)
             _UniffiConverterString.write(value.message, buf)
 
 
-class FfiRowEntryKind(enum.Enum):
+class RowEntryKind(enum.Enum):
     VALUE = 0
 
     TOMBSTONE = 1
@@ -3690,39 +3669,39 @@ class FfiRowEntryKind(enum.Enum):
     MERGE = 2
 
 
-class _UniffiConverterTypeFfiRowEntryKind(_UniffiConverterRustBuffer):
+class _UniffiConverterTypeRowEntryKind(_UniffiConverterRustBuffer):
     @staticmethod
     def read(buf):
         variant = buf.read_i32()
         if variant == 1:
-            return FfiRowEntryKind.VALUE
+            return RowEntryKind.VALUE
         if variant == 2:
-            return FfiRowEntryKind.TOMBSTONE
+            return RowEntryKind.TOMBSTONE
         if variant == 3:
-            return FfiRowEntryKind.MERGE
+            return RowEntryKind.MERGE
         raise InternalError("Raw enum value doesn't match any cases")
 
     @staticmethod
     def check_lower(value):
-        if value == FfiRowEntryKind.VALUE:
+        if value == RowEntryKind.VALUE:
             return
-        if value == FfiRowEntryKind.TOMBSTONE:
+        if value == RowEntryKind.TOMBSTONE:
             return
-        if value == FfiRowEntryKind.MERGE:
+        if value == RowEntryKind.MERGE:
             return
         raise ValueError(value)
 
     @staticmethod
     def write(value, buf):
-        if value == FfiRowEntryKind.VALUE:
+        if value == RowEntryKind.VALUE:
             buf.write_i32(1)
-        if value == FfiRowEntryKind.TOMBSTONE:
+        if value == RowEntryKind.TOMBSTONE:
             buf.write_i32(2)
-        if value == FfiRowEntryKind.MERGE:
+        if value == RowEntryKind.MERGE:
             buf.write_i32(3)
 
 
-class FfiSstBlockSize(enum.Enum):
+class SstBlockSize(enum.Enum):
     BLOCK1_KIB = 0
 
     BLOCK2_KIB = 1
@@ -3738,65 +3717,65 @@ class FfiSstBlockSize(enum.Enum):
     BLOCK64_KIB = 6
 
 
-class _UniffiConverterTypeFfiSstBlockSize(_UniffiConverterRustBuffer):
+class _UniffiConverterTypeSstBlockSize(_UniffiConverterRustBuffer):
     @staticmethod
     def read(buf):
         variant = buf.read_i32()
         if variant == 1:
-            return FfiSstBlockSize.BLOCK1_KIB
+            return SstBlockSize.BLOCK1_KIB
         if variant == 2:
-            return FfiSstBlockSize.BLOCK2_KIB
+            return SstBlockSize.BLOCK2_KIB
         if variant == 3:
-            return FfiSstBlockSize.BLOCK4_KIB
+            return SstBlockSize.BLOCK4_KIB
         if variant == 4:
-            return FfiSstBlockSize.BLOCK8_KIB
+            return SstBlockSize.BLOCK8_KIB
         if variant == 5:
-            return FfiSstBlockSize.BLOCK16_KIB
+            return SstBlockSize.BLOCK16_KIB
         if variant == 6:
-            return FfiSstBlockSize.BLOCK32_KIB
+            return SstBlockSize.BLOCK32_KIB
         if variant == 7:
-            return FfiSstBlockSize.BLOCK64_KIB
+            return SstBlockSize.BLOCK64_KIB
         raise InternalError("Raw enum value doesn't match any cases")
 
     @staticmethod
     def check_lower(value):
-        if value == FfiSstBlockSize.BLOCK1_KIB:
+        if value == SstBlockSize.BLOCK1_KIB:
             return
-        if value == FfiSstBlockSize.BLOCK2_KIB:
+        if value == SstBlockSize.BLOCK2_KIB:
             return
-        if value == FfiSstBlockSize.BLOCK4_KIB:
+        if value == SstBlockSize.BLOCK4_KIB:
             return
-        if value == FfiSstBlockSize.BLOCK8_KIB:
+        if value == SstBlockSize.BLOCK8_KIB:
             return
-        if value == FfiSstBlockSize.BLOCK16_KIB:
+        if value == SstBlockSize.BLOCK16_KIB:
             return
-        if value == FfiSstBlockSize.BLOCK32_KIB:
+        if value == SstBlockSize.BLOCK32_KIB:
             return
-        if value == FfiSstBlockSize.BLOCK64_KIB:
+        if value == SstBlockSize.BLOCK64_KIB:
             return
         raise ValueError(value)
 
     @staticmethod
     def write(value, buf):
-        if value == FfiSstBlockSize.BLOCK1_KIB:
+        if value == SstBlockSize.BLOCK1_KIB:
             buf.write_i32(1)
-        if value == FfiSstBlockSize.BLOCK2_KIB:
+        if value == SstBlockSize.BLOCK2_KIB:
             buf.write_i32(2)
-        if value == FfiSstBlockSize.BLOCK4_KIB:
+        if value == SstBlockSize.BLOCK4_KIB:
             buf.write_i32(3)
-        if value == FfiSstBlockSize.BLOCK8_KIB:
+        if value == SstBlockSize.BLOCK8_KIB:
             buf.write_i32(4)
-        if value == FfiSstBlockSize.BLOCK16_KIB:
+        if value == SstBlockSize.BLOCK16_KIB:
             buf.write_i32(5)
-        if value == FfiSstBlockSize.BLOCK32_KIB:
+        if value == SstBlockSize.BLOCK32_KIB:
             buf.write_i32(6)
-        if value == FfiSstBlockSize.BLOCK64_KIB:
+        if value == SstBlockSize.BLOCK64_KIB:
             buf.write_i32(7)
 
 
-class FfiTtl:
+class Ttl:
     def __init__(self):
-        raise RuntimeError("FfiTtl cannot be instantiated directly")
+        raise RuntimeError("Ttl cannot be instantiated directly")
 
     # Each enum variant is a nested class of the enum itself.
     class DEFAULT:
@@ -3806,7 +3785,7 @@ class FfiTtl:
             pass
 
         def __str__(self):
-            return "FfiTtl.DEFAULT()".format()
+            return "Ttl.DEFAULT()".format()
 
         def __eq__(self, other):
             if not other.is_DEFAULT():
@@ -3820,7 +3799,7 @@ class FfiTtl:
             pass
 
         def __str__(self):
-            return "FfiTtl.NO_EXPIRY()".format()
+            return "Ttl.NO_EXPIRY()".format()
 
         def __eq__(self, other):
             if not other.is_NO_EXPIRY():
@@ -3837,7 +3816,7 @@ class FfiTtl:
             return self._values[index]
 
         def __str__(self):
-            return f"FfiTtl.EXPIRE_AFTER_TICKS{self._values!r}"
+            return f"Ttl.EXPIRE_AFTER_TICKS{self._values!r}"
 
         def __eq__(self, other):
             if not other.is_EXPIRE_AFTER_TICKS():
@@ -3847,63 +3826,63 @@ class FfiTtl:
     # For each variant, we have `is_NAME` and `is_name` methods for easily checking
     # whether an instance is that variant.
     def is_DEFAULT(self) -> bool:
-        return isinstance(self, FfiTtl.DEFAULT)
+        return isinstance(self, Ttl.DEFAULT)
 
     def is_default(self) -> bool:
-        return isinstance(self, FfiTtl.DEFAULT)
+        return isinstance(self, Ttl.DEFAULT)
 
     def is_NO_EXPIRY(self) -> bool:
-        return isinstance(self, FfiTtl.NO_EXPIRY)
+        return isinstance(self, Ttl.NO_EXPIRY)
 
     def is_no_expiry(self) -> bool:
-        return isinstance(self, FfiTtl.NO_EXPIRY)
+        return isinstance(self, Ttl.NO_EXPIRY)
 
     def is_EXPIRE_AFTER_TICKS(self) -> bool:
-        return isinstance(self, FfiTtl.EXPIRE_AFTER_TICKS)
+        return isinstance(self, Ttl.EXPIRE_AFTER_TICKS)
 
     def is_expire_after_ticks(self) -> bool:
-        return isinstance(self, FfiTtl.EXPIRE_AFTER_TICKS)
+        return isinstance(self, Ttl.EXPIRE_AFTER_TICKS)
 
 
 # Now, a little trick - we make each nested variant class be a subclass of the main
 # enum class, so that method calls and instance checks etc will work intuitively.
 # We might be able to do this a little more neatly with a metaclass, but this'll do.
-FfiTtl.DEFAULT = type(
-    "FfiTtl.DEFAULT",
+Ttl.DEFAULT = type(
+    "Ttl.DEFAULT",
     (
-        FfiTtl.DEFAULT,
-        FfiTtl,
+        Ttl.DEFAULT,
+        Ttl,
     ),
     {},
 )  # type: ignore
-FfiTtl.NO_EXPIRY = type(
-    "FfiTtl.NO_EXPIRY",
+Ttl.NO_EXPIRY = type(
+    "Ttl.NO_EXPIRY",
     (
-        FfiTtl.NO_EXPIRY,
-        FfiTtl,
+        Ttl.NO_EXPIRY,
+        Ttl,
     ),
     {},
 )  # type: ignore
-FfiTtl.EXPIRE_AFTER_TICKS = type(
-    "FfiTtl.EXPIRE_AFTER_TICKS",
+Ttl.EXPIRE_AFTER_TICKS = type(
+    "Ttl.EXPIRE_AFTER_TICKS",
     (
-        FfiTtl.EXPIRE_AFTER_TICKS,
-        FfiTtl,
+        Ttl.EXPIRE_AFTER_TICKS,
+        Ttl,
     ),
     {},
 )  # type: ignore
 
 
-class _UniffiConverterTypeFfiTtl(_UniffiConverterRustBuffer):
+class _UniffiConverterTypeTtl(_UniffiConverterRustBuffer):
     @staticmethod
     def read(buf):
         variant = buf.read_i32()
         if variant == 1:
-            return FfiTtl.DEFAULT()
+            return Ttl.DEFAULT()
         if variant == 2:
-            return FfiTtl.NO_EXPIRY()
+            return Ttl.NO_EXPIRY()
         if variant == 3:
-            return FfiTtl.EXPIRE_AFTER_TICKS(
+            return Ttl.EXPIRE_AFTER_TICKS(
                 _UniffiConverterUInt64.read(buf),
             )
         raise InternalError("Raw enum value doesn't match any cases")
@@ -4060,11 +4039,11 @@ class _UniffiConverterOptionalBytes(_UniffiConverterRustBuffer):
             raise InternalError("Unexpected flag byte for optional type")
 
 
-class _UniffiConverterOptionalTypeFfiLogCallback(_UniffiConverterRustBuffer):
+class _UniffiConverterOptionalTypeLogCallback(_UniffiConverterRustBuffer):
     @classmethod
     def check_lower(cls, value):
         if value is not None:
-            _UniffiConverterTypeFfiLogCallback.check_lower(value)
+            _UniffiConverterTypeLogCallback.check_lower(value)
 
     @classmethod
     def write(cls, value, buf):
@@ -4073,7 +4052,7 @@ class _UniffiConverterOptionalTypeFfiLogCallback(_UniffiConverterRustBuffer):
             return
 
         buf.write_u8(1)
-        _UniffiConverterTypeFfiLogCallback.write(value, buf)
+        _UniffiConverterTypeLogCallback.write(value, buf)
 
     @classmethod
     def read(cls, buf):
@@ -4081,16 +4060,16 @@ class _UniffiConverterOptionalTypeFfiLogCallback(_UniffiConverterRustBuffer):
         if flag == 0:
             return None
         elif flag == 1:
-            return _UniffiConverterTypeFfiLogCallback.read(buf)
+            return _UniffiConverterTypeLogCallback.read(buf)
         else:
             raise InternalError("Unexpected flag byte for optional type")
 
 
-class _UniffiConverterOptionalTypeFfiKeyValue(_UniffiConverterRustBuffer):
+class _UniffiConverterOptionalTypeKeyValue(_UniffiConverterRustBuffer):
     @classmethod
     def check_lower(cls, value):
         if value is not None:
-            _UniffiConverterTypeFfiKeyValue.check_lower(value)
+            _UniffiConverterTypeKeyValue.check_lower(value)
 
     @classmethod
     def write(cls, value, buf):
@@ -4099,7 +4078,7 @@ class _UniffiConverterOptionalTypeFfiKeyValue(_UniffiConverterRustBuffer):
             return
 
         buf.write_u8(1)
-        _UniffiConverterTypeFfiKeyValue.write(value, buf)
+        _UniffiConverterTypeKeyValue.write(value, buf)
 
     @classmethod
     def read(cls, buf):
@@ -4107,16 +4086,16 @@ class _UniffiConverterOptionalTypeFfiKeyValue(_UniffiConverterRustBuffer):
         if flag == 0:
             return None
         elif flag == 1:
-            return _UniffiConverterTypeFfiKeyValue.read(buf)
+            return _UniffiConverterTypeKeyValue.read(buf)
         else:
             raise InternalError("Unexpected flag byte for optional type")
 
 
-class _UniffiConverterOptionalTypeFfiRowEntry(_UniffiConverterRustBuffer):
+class _UniffiConverterOptionalTypeRowEntry(_UniffiConverterRustBuffer):
     @classmethod
     def check_lower(cls, value):
         if value is not None:
-            _UniffiConverterTypeFfiRowEntry.check_lower(value)
+            _UniffiConverterTypeRowEntry.check_lower(value)
 
     @classmethod
     def write(cls, value, buf):
@@ -4125,7 +4104,7 @@ class _UniffiConverterOptionalTypeFfiRowEntry(_UniffiConverterRustBuffer):
             return
 
         buf.write_u8(1)
-        _UniffiConverterTypeFfiRowEntry.write(value, buf)
+        _UniffiConverterTypeRowEntry.write(value, buf)
 
     @classmethod
     def read(cls, buf):
@@ -4133,16 +4112,16 @@ class _UniffiConverterOptionalTypeFfiRowEntry(_UniffiConverterRustBuffer):
         if flag == 0:
             return None
         elif flag == 1:
-            return _UniffiConverterTypeFfiRowEntry.read(buf)
+            return _UniffiConverterTypeRowEntry.read(buf)
         else:
             raise InternalError("Unexpected flag byte for optional type")
 
 
-class _UniffiConverterOptionalTypeFfiWriteHandle(_UniffiConverterRustBuffer):
+class _UniffiConverterOptionalTypeWriteHandle(_UniffiConverterRustBuffer):
     @classmethod
     def check_lower(cls, value):
         if value is not None:
-            _UniffiConverterTypeFfiWriteHandle.check_lower(value)
+            _UniffiConverterTypeWriteHandle.check_lower(value)
 
     @classmethod
     def write(cls, value, buf):
@@ -4151,7 +4130,7 @@ class _UniffiConverterOptionalTypeFfiWriteHandle(_UniffiConverterRustBuffer):
             return
 
         buf.write_u8(1)
-        _UniffiConverterTypeFfiWriteHandle.write(value, buf)
+        _UniffiConverterTypeWriteHandle.write(value, buf)
 
     @classmethod
     def read(cls, buf):
@@ -4159,7 +4138,7 @@ class _UniffiConverterOptionalTypeFfiWriteHandle(_UniffiConverterRustBuffer):
         if flag == 0:
             return None
         elif flag == 1:
-            return _UniffiConverterTypeFfiWriteHandle.read(buf)
+            return _UniffiConverterTypeWriteHandle.read(buf)
         else:
             raise InternalError("Unexpected flag byte for optional type")
 
@@ -4186,18 +4165,18 @@ class _UniffiConverterSequenceBytes(_UniffiConverterRustBuffer):
         return [_UniffiConverterBytes.read(buf) for i in range(count)]
 
 
-class _UniffiConverterSequenceTypeFfiWalFile(_UniffiConverterRustBuffer):
+class _UniffiConverterSequenceTypeWalFile(_UniffiConverterRustBuffer):
     @classmethod
     def check_lower(cls, value):
         for item in value:
-            _UniffiConverterTypeFfiWalFile.check_lower(item)
+            _UniffiConverterTypeWalFile.check_lower(item)
 
     @classmethod
     def write(cls, value, buf):
         items = len(value)
         buf.write_i32(items)
         for item in value:
-            _UniffiConverterTypeFfiWalFile.write(item, buf)
+            _UniffiConverterTypeWalFile.write(item, buf)
 
     @classmethod
     def read(cls, buf):
@@ -4205,7 +4184,7 @@ class _UniffiConverterSequenceTypeFfiWalFile(_UniffiConverterRustBuffer):
         if count < 0:
             raise InternalError("Unexpected negative sequence length")
 
-        return [_UniffiConverterTypeFfiWalFile.read(buf) for i in range(count)]
+        return [_UniffiConverterTypeWalFile.read(buf) for i in range(count)]
 
 
 class _UniffiConverterMapStringInt64(_UniffiConverterRustBuffer):
@@ -4241,23 +4220,23 @@ class _UniffiConverterMapStringInt64(_UniffiConverterRustBuffer):
 
 
 # objects.
-class FfiLogCallbackProtocol(typing.Protocol):
-    def log(self, record: "FfiLogRecord"):
+class LogCallbackProtocol(typing.Protocol):
+    def log(self, record: "LogRecord"):
         raise NotImplementedError
 
 
-# FfiLogCallback is a foreign trait so treated like a callback interface, where the
+# LogCallback is a foreign trait so treated like a callback interface, where the
 # primary use-case is the trait being implemented locally.
 # It is a base-class local implementations might subclass.
 
 
-class FfiLogCallback:
-    def log(self, record: "FfiLogRecord"):
+class LogCallback:
+    def log(self, record: "LogRecord"):
         raise NotImplementedError
 
 
-# `FfiLogCallbackImpl` is the implementation for a Rust implemented version.
-class FfiLogCallbackImpl:
+# `LogCallbackImpl` is the implementation for a Rust implemented version.
+class LogCallbackImpl:
     _pointer: ctypes.c_void_p
 
     def __init__(self, *args, **kwargs):
@@ -4267,12 +4246,10 @@ class FfiLogCallbackImpl:
         # In case of partial initialization of instances.
         pointer = getattr(self, "_pointer", None)
         if pointer is not None:
-            _uniffi_rust_call(_UniffiLib.uniffi_slatedb_ffi_fn_free_ffilogcallback, pointer)
+            _uniffi_rust_call(_UniffiLib.uniffi_slatedb_ffi_fn_free_logcallback, pointer)
 
     def _uniffi_clone_pointer(self):
-        return _uniffi_rust_call(
-            _UniffiLib.uniffi_slatedb_ffi_fn_clone_ffilogcallback, self._pointer
-        )
+        return _uniffi_rust_call(_UniffiLib.uniffi_slatedb_ffi_fn_clone_logcallback, self._pointer)
 
     # Used by alternative constructors or any methods which return this type.
     @classmethod
@@ -4283,31 +4260,31 @@ class FfiLogCallbackImpl:
         inst._pointer = pointer
         return inst
 
-    def log(self, record: "FfiLogRecord") -> None:
-        _UniffiConverterTypeFfiLogRecord.check_lower(record)
+    def log(self, record: "LogRecord") -> None:
+        _UniffiConverterTypeLogRecord.check_lower(record)
 
         _uniffi_rust_call(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_ffilogcallback_log,
+            _UniffiLib.uniffi_slatedb_ffi_fn_method_logcallback_log,
             self._uniffi_clone_pointer(),
-            _UniffiConverterTypeFfiLogRecord.lower(record),
+            _UniffiConverterTypeLogRecord.lower(record),
         )
 
 
 # Put all the bits inside a class to keep the top-level namespace clean
-class _UniffiTraitImplFfiLogCallback:
+class _UniffiTraitImplLogCallback:
     # For each method, generate a callback function to pass to Rust
 
-    @_UNIFFI_CALLBACK_INTERFACE_FFI_LOG_CALLBACK_METHOD0
+    @_UNIFFI_CALLBACK_INTERFACE_LOG_CALLBACK_METHOD0
     def log(
         uniffi_handle,
         record,
         uniffi_out_return,
         uniffi_call_status_ptr,
     ):
-        uniffi_obj = _UniffiConverterTypeFfiLogCallback._handle_map.get(uniffi_handle)
+        uniffi_obj = _UniffiConverterTypeLogCallback._handle_map.get(uniffi_handle)
 
         def make_call():
-            args = (_UniffiConverterTypeFfiLogRecord.lift(record),)
+            args = (_UniffiConverterTypeLogRecord.lift(record),)
             method = uniffi_obj.log
             return method(*args)
 
@@ -4320,31 +4297,29 @@ class _UniffiTraitImplFfiLogCallback:
 
     @_UNIFFI_CALLBACK_INTERFACE_FREE
     def _uniffi_free(uniffi_handle):
-        _UniffiConverterTypeFfiLogCallback._handle_map.remove(uniffi_handle)
+        _UniffiConverterTypeLogCallback._handle_map.remove(uniffi_handle)
 
     # Generate the FFI VTable.  This has a field for each callback interface method.
-    _uniffi_vtable = _UniffiVTableCallbackInterfaceFfiLogCallback(log, _uniffi_free)
+    _uniffi_vtable = _UniffiVTableCallbackInterfaceLogCallback(log, _uniffi_free)
     # Send Rust a pointer to the VTable.  Note: this means we need to keep the struct alive forever,
     # or else bad things will happen when Rust tries to access it.
-    _UniffiLib.uniffi_slatedb_ffi_fn_init_callback_vtable_ffilogcallback(
-        ctypes.byref(_uniffi_vtable)
-    )
+    _UniffiLib.uniffi_slatedb_ffi_fn_init_callback_vtable_logcallback(ctypes.byref(_uniffi_vtable))
 
 
-class _UniffiConverterTypeFfiLogCallback:
+class _UniffiConverterTypeLogCallback:
     _handle_map = _UniffiHandleMap()
 
     @staticmethod
     def lift(value: int):
-        return FfiLogCallbackImpl._make_instance_(value)
+        return LogCallbackImpl._make_instance_(value)
 
     @staticmethod
-    def check_lower(value: FfiLogCallback):
+    def check_lower(value: LogCallback):
         pass
 
     @staticmethod
-    def lower(value: FfiLogCallbackProtocol):
-        return _UniffiConverterTypeFfiLogCallback._handle_map.insert(value)
+    def lower(value: LogCallbackProtocol):
+        return _UniffiConverterTypeLogCallback._handle_map.insert(value)
 
     @classmethod
     def read(cls, buf: _UniffiRustBuffer):
@@ -4354,27 +4329,27 @@ class _UniffiConverterTypeFfiLogCallback:
         return cls.lift(ptr)
 
     @classmethod
-    def write(cls, value: FfiLogCallbackProtocol, buf: _UniffiRustBuffer):
+    def write(cls, value: LogCallbackProtocol, buf: _UniffiRustBuffer):
         buf.write_u64(cls.lower(value))
 
 
-class FfiMergeOperatorProtocol(typing.Protocol):
+class MergeOperatorProtocol(typing.Protocol):
     def merge(self, key: "bytes", existing_value: "typing.Optional[bytes]", operand: "bytes"):
         raise NotImplementedError
 
 
-# FfiMergeOperator is a foreign trait so treated like a callback interface, where the
+# MergeOperator is a foreign trait so treated like a callback interface, where the
 # primary use-case is the trait being implemented locally.
 # It is a base-class local implementations might subclass.
 
 
-class FfiMergeOperator:
+class MergeOperator:
     def merge(self, key: "bytes", existing_value: "typing.Optional[bytes]", operand: "bytes"):
         raise NotImplementedError
 
 
-# `FfiMergeOperatorImpl` is the implementation for a Rust implemented version.
-class FfiMergeOperatorImpl:
+# `MergeOperatorImpl` is the implementation for a Rust implemented version.
+class MergeOperatorImpl:
     _pointer: ctypes.c_void_p
 
     def __init__(self, *args, **kwargs):
@@ -4384,11 +4359,11 @@ class FfiMergeOperatorImpl:
         # In case of partial initialization of instances.
         pointer = getattr(self, "_pointer", None)
         if pointer is not None:
-            _uniffi_rust_call(_UniffiLib.uniffi_slatedb_ffi_fn_free_ffimergeoperator, pointer)
+            _uniffi_rust_call(_UniffiLib.uniffi_slatedb_ffi_fn_free_mergeoperator, pointer)
 
     def _uniffi_clone_pointer(self):
         return _uniffi_rust_call(
-            _UniffiLib.uniffi_slatedb_ffi_fn_clone_ffimergeoperator, self._pointer
+            _UniffiLib.uniffi_slatedb_ffi_fn_clone_mergeoperator, self._pointer
         )
 
     # Used by alternative constructors or any methods which return this type.
@@ -4411,8 +4386,8 @@ class FfiMergeOperatorImpl:
 
         return _UniffiConverterBytes.lift(
             _uniffi_rust_call_with_error(
-                _UniffiConverterTypeFfiMergeOperatorCallbackError,
-                _UniffiLib.uniffi_slatedb_ffi_fn_method_ffimergeoperator_merge,
+                _UniffiConverterTypeMergeOperatorCallbackError,
+                _UniffiLib.uniffi_slatedb_ffi_fn_method_mergeoperator_merge,
                 self._uniffi_clone_pointer(),
                 _UniffiConverterBytes.lower(key),
                 _UniffiConverterOptionalBytes.lower(existing_value),
@@ -4422,10 +4397,10 @@ class FfiMergeOperatorImpl:
 
 
 # Put all the bits inside a class to keep the top-level namespace clean
-class _UniffiTraitImplFfiMergeOperator:
+class _UniffiTraitImplMergeOperator:
     # For each method, generate a callback function to pass to Rust
 
-    @_UNIFFI_CALLBACK_INTERFACE_FFI_MERGE_OPERATOR_METHOD0
+    @_UNIFFI_CALLBACK_INTERFACE_MERGE_OPERATOR_METHOD0
     def merge(
         uniffi_handle,
         key,
@@ -4434,7 +4409,7 @@ class _UniffiTraitImplFfiMergeOperator:
         uniffi_out_return,
         uniffi_call_status_ptr,
     ):
-        uniffi_obj = _UniffiConverterTypeFfiMergeOperator._handle_map.get(uniffi_handle)
+        uniffi_obj = _UniffiConverterTypeMergeOperator._handle_map.get(uniffi_handle)
 
         def make_call():
             args = (
@@ -4452,37 +4427,37 @@ class _UniffiTraitImplFfiMergeOperator:
             uniffi_call_status_ptr.contents,
             make_call,
             write_return_value,
-            FfiMergeOperatorCallbackError,
-            _UniffiConverterTypeFfiMergeOperatorCallbackError.lower,
+            MergeOperatorCallbackError,
+            _UniffiConverterTypeMergeOperatorCallbackError.lower,
         )
 
     @_UNIFFI_CALLBACK_INTERFACE_FREE
     def _uniffi_free(uniffi_handle):
-        _UniffiConverterTypeFfiMergeOperator._handle_map.remove(uniffi_handle)
+        _UniffiConverterTypeMergeOperator._handle_map.remove(uniffi_handle)
 
     # Generate the FFI VTable.  This has a field for each callback interface method.
-    _uniffi_vtable = _UniffiVTableCallbackInterfaceFfiMergeOperator(merge, _uniffi_free)
+    _uniffi_vtable = _UniffiVTableCallbackInterfaceMergeOperator(merge, _uniffi_free)
     # Send Rust a pointer to the VTable.  Note: this means we need to keep the struct alive forever,
     # or else bad things will happen when Rust tries to access it.
-    _UniffiLib.uniffi_slatedb_ffi_fn_init_callback_vtable_ffimergeoperator(
+    _UniffiLib.uniffi_slatedb_ffi_fn_init_callback_vtable_mergeoperator(
         ctypes.byref(_uniffi_vtable)
     )
 
 
-class _UniffiConverterTypeFfiMergeOperator:
+class _UniffiConverterTypeMergeOperator:
     _handle_map = _UniffiHandleMap()
 
     @staticmethod
     def lift(value: int):
-        return FfiMergeOperatorImpl._make_instance_(value)
+        return MergeOperatorImpl._make_instance_(value)
 
     @staticmethod
-    def check_lower(value: FfiMergeOperator):
+    def check_lower(value: MergeOperator):
         pass
 
     @staticmethod
-    def lower(value: FfiMergeOperatorProtocol):
-        return _UniffiConverterTypeFfiMergeOperator._handle_map.insert(value)
+    def lower(value: MergeOperatorProtocol):
+        return _UniffiConverterTypeMergeOperator._handle_map.insert(value)
 
     @classmethod
     def read(cls, buf: _UniffiRustBuffer):
@@ -4492,18 +4467,18 @@ class _UniffiConverterTypeFfiMergeOperator:
         return cls.lift(ptr)
 
     @classmethod
-    def write(cls, value: FfiMergeOperatorProtocol, buf: _UniffiRustBuffer):
+    def write(cls, value: MergeOperatorProtocol, buf: _UniffiRustBuffer):
         buf.write_u64(cls.lower(value))
 
 
-class FfiDbProtocol(typing.Protocol):
-    def begin(self, isolation_level: "FfiIsolationLevel"):
+class DbProtocol(typing.Protocol):
+    def begin(self, isolation_level: "IsolationLevel"):
         raise NotImplementedError
 
     def delete(self, key: "bytes"):
         raise NotImplementedError
 
-    def delete_with_options(self, key: "bytes", options: "FfiWriteOptions"):
+    def delete_with_options(self, key: "bytes", options: "WriteOptions"):
         raise NotImplementedError
 
     def flush(
@@ -4511,7 +4486,7 @@ class FfiDbProtocol(typing.Protocol):
     ):
         raise NotImplementedError
 
-    def flush_with_options(self, options: "FfiFlushOptions"):
+    def flush_with_options(self, options: "FlushOptions"):
         raise NotImplementedError
 
     def get(self, key: "bytes"):
@@ -4520,10 +4495,10 @@ class FfiDbProtocol(typing.Protocol):
     def get_key_value(self, key: "bytes"):
         raise NotImplementedError
 
-    def get_key_value_with_options(self, key: "bytes", options: "FfiReadOptions"):
+    def get_key_value_with_options(self, key: "bytes", options: "ReadOptions"):
         raise NotImplementedError
 
-    def get_with_options(self, key: "bytes", options: "FfiReadOptions"):
+    def get_with_options(self, key: "bytes", options: "ReadOptions"):
         raise NotImplementedError
 
     def merge(self, key: "bytes", operand: "bytes"):
@@ -4533,8 +4508,8 @@ class FfiDbProtocol(typing.Protocol):
         self,
         key: "bytes",
         operand: "bytes",
-        merge_options: "FfiMergeOptions",
-        write_options: "FfiWriteOptions",
+        merge_options: "MergeOptions",
+        write_options: "WriteOptions",
     ):
         raise NotImplementedError
 
@@ -4547,24 +4522,20 @@ class FfiDbProtocol(typing.Protocol):
         raise NotImplementedError
 
     def put_with_options(
-        self,
-        key: "bytes",
-        value: "bytes",
-        put_options: "FfiPutOptions",
-        write_options: "FfiWriteOptions",
+        self, key: "bytes", value: "bytes", put_options: "PutOptions", write_options: "WriteOptions"
     ):
         raise NotImplementedError
 
-    def scan(self, range: "FfiKeyRange"):
+    def scan(self, range: "KeyRange"):
         raise NotImplementedError
 
     def scan_prefix(self, prefix: "bytes"):
         raise NotImplementedError
 
-    def scan_prefix_with_options(self, prefix: "bytes", options: "FfiScanOptions"):
+    def scan_prefix_with_options(self, prefix: "bytes", options: "ScanOptions"):
         raise NotImplementedError
 
-    def scan_with_options(self, range: "FfiKeyRange", options: "FfiScanOptions"):
+    def scan_with_options(self, range: "KeyRange", options: "ScanOptions"):
         raise NotImplementedError
 
     def shutdown(
@@ -4582,15 +4553,15 @@ class FfiDbProtocol(typing.Protocol):
     ):
         raise NotImplementedError
 
-    def write(self, batch: "FfiWriteBatch"):
+    def write(self, batch: "WriteBatch"):
         raise NotImplementedError
 
-    def write_with_options(self, batch: "FfiWriteBatch", options: "FfiWriteOptions"):
+    def write_with_options(self, batch: "WriteBatch", options: "WriteOptions"):
         raise NotImplementedError
 
 
-# FfiDb is a Rust-only trait - it's a wrapper around a Rust implementation.
-class FfiDb:
+# Db is a Rust-only trait - it's a wrapper around a Rust implementation.
+class Db:
     _pointer: ctypes.c_void_p
 
     def __init__(self, *args, **kwargs):
@@ -4600,10 +4571,10 @@ class FfiDb:
         # In case of partial initialization of instances.
         pointer = getattr(self, "_pointer", None)
         if pointer is not None:
-            _uniffi_rust_call(_UniffiLib.uniffi_slatedb_ffi_fn_free_ffidb, pointer)
+            _uniffi_rust_call(_UniffiLib.uniffi_slatedb_ffi_fn_free_db, pointer)
 
     def _uniffi_clone_pointer(self):
-        return _uniffi_rust_call(_UniffiLib.uniffi_slatedb_ffi_fn_clone_ffidb, self._pointer)
+        return _uniffi_rust_call(_UniffiLib.uniffi_slatedb_ffi_fn_clone_db, self._pointer)
 
     # Used by alternative constructors or any methods which return this type.
     @classmethod
@@ -4614,59 +4585,57 @@ class FfiDb:
         inst._pointer = pointer
         return inst
 
-    async def begin(self, isolation_level: "FfiIsolationLevel") -> "FfiDbTransaction":
-        _UniffiConverterTypeFfiIsolationLevel.check_lower(isolation_level)
+    async def begin(self, isolation_level: "IsolationLevel") -> "DbTransaction":
+        _UniffiConverterTypeIsolationLevel.check_lower(isolation_level)
 
         return await _uniffi_rust_call_async(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_ffidb_begin(
+            _UniffiLib.uniffi_slatedb_ffi_fn_method_db_begin(
                 self._uniffi_clone_pointer(),
-                _UniffiConverterTypeFfiIsolationLevel.lower(isolation_level),
+                _UniffiConverterTypeIsolationLevel.lower(isolation_level),
             ),
             _UniffiLib.ffi_slatedb_ffi_rust_future_poll_pointer,
             _UniffiLib.ffi_slatedb_ffi_rust_future_complete_pointer,
             _UniffiLib.ffi_slatedb_ffi_rust_future_free_pointer,
             # lift function
-            _UniffiConverterTypeFfiDbTransaction.lift,
+            _UniffiConverterTypeDbTransaction.lift,
             # Error FFI converter
-            _UniffiConverterTypeFfiError,
+            _UniffiConverterTypeDbError,
         )
 
-    async def delete(self, key: "bytes") -> "FfiWriteHandle":
+    async def delete(self, key: "bytes") -> "WriteHandle":
         _UniffiConverterBytes.check_lower(key)
 
         return await _uniffi_rust_call_async(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_ffidb_delete(
+            _UniffiLib.uniffi_slatedb_ffi_fn_method_db_delete(
                 self._uniffi_clone_pointer(), _UniffiConverterBytes.lower(key)
             ),
             _UniffiLib.ffi_slatedb_ffi_rust_future_poll_rust_buffer,
             _UniffiLib.ffi_slatedb_ffi_rust_future_complete_rust_buffer,
             _UniffiLib.ffi_slatedb_ffi_rust_future_free_rust_buffer,
             # lift function
-            _UniffiConverterTypeFfiWriteHandle.lift,
+            _UniffiConverterTypeWriteHandle.lift,
             # Error FFI converter
-            _UniffiConverterTypeFfiError,
+            _UniffiConverterTypeDbError,
         )
 
-    async def delete_with_options(
-        self, key: "bytes", options: "FfiWriteOptions"
-    ) -> "FfiWriteHandle":
+    async def delete_with_options(self, key: "bytes", options: "WriteOptions") -> "WriteHandle":
         _UniffiConverterBytes.check_lower(key)
 
-        _UniffiConverterTypeFfiWriteOptions.check_lower(options)
+        _UniffiConverterTypeWriteOptions.check_lower(options)
 
         return await _uniffi_rust_call_async(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_ffidb_delete_with_options(
+            _UniffiLib.uniffi_slatedb_ffi_fn_method_db_delete_with_options(
                 self._uniffi_clone_pointer(),
                 _UniffiConverterBytes.lower(key),
-                _UniffiConverterTypeFfiWriteOptions.lower(options),
+                _UniffiConverterTypeWriteOptions.lower(options),
             ),
             _UniffiLib.ffi_slatedb_ffi_rust_future_poll_rust_buffer,
             _UniffiLib.ffi_slatedb_ffi_rust_future_complete_rust_buffer,
             _UniffiLib.ffi_slatedb_ffi_rust_future_free_rust_buffer,
             # lift function
-            _UniffiConverterTypeFfiWriteHandle.lift,
+            _UniffiConverterTypeWriteHandle.lift,
             # Error FFI converter
-            _UniffiConverterTypeFfiError,
+            _UniffiConverterTypeDbError,
         )
 
     async def flush(
@@ -4674,7 +4643,7 @@ class FfiDb:
     ) -> None:
 
         return await _uniffi_rust_call_async(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_ffidb_flush(
+            _UniffiLib.uniffi_slatedb_ffi_fn_method_db_flush(
                 self._uniffi_clone_pointer(),
             ),
             _UniffiLib.ffi_slatedb_ffi_rust_future_poll_void,
@@ -4683,16 +4652,16 @@ class FfiDb:
             # lift function
             lambda val: None,
             # Error FFI converter
-            _UniffiConverterTypeFfiError,
+            _UniffiConverterTypeDbError,
         )
 
-    async def flush_with_options(self, options: "FfiFlushOptions") -> None:
+    async def flush_with_options(self, options: "FlushOptions") -> None:
 
-        _UniffiConverterTypeFfiFlushOptions.check_lower(options)
+        _UniffiConverterTypeFlushOptions.check_lower(options)
 
         return await _uniffi_rust_call_async(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_ffidb_flush_with_options(
-                self._uniffi_clone_pointer(), _UniffiConverterTypeFfiFlushOptions.lower(options)
+            _UniffiLib.uniffi_slatedb_ffi_fn_method_db_flush_with_options(
+                self._uniffi_clone_pointer(), _UniffiConverterTypeFlushOptions.lower(options)
             ),
             _UniffiLib.ffi_slatedb_ffi_rust_future_poll_void,
             _UniffiLib.ffi_slatedb_ffi_rust_future_complete_void,
@@ -4700,14 +4669,14 @@ class FfiDb:
             # lift function
             lambda val: None,
             # Error FFI converter
-            _UniffiConverterTypeFfiError,
+            _UniffiConverterTypeDbError,
         )
 
     async def get(self, key: "bytes") -> "typing.Optional[bytes]":
         _UniffiConverterBytes.check_lower(key)
 
         return await _uniffi_rust_call_async(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_ffidb_get(
+            _UniffiLib.uniffi_slatedb_ffi_fn_method_db_get(
                 self._uniffi_clone_pointer(), _UniffiConverterBytes.lower(key)
             ),
             _UniffiLib.ffi_slatedb_ffi_rust_future_poll_rust_buffer,
@@ -4716,59 +4685,59 @@ class FfiDb:
             # lift function
             _UniffiConverterOptionalBytes.lift,
             # Error FFI converter
-            _UniffiConverterTypeFfiError,
+            _UniffiConverterTypeDbError,
         )
 
-    async def get_key_value(self, key: "bytes") -> "typing.Optional[FfiKeyValue]":
+    async def get_key_value(self, key: "bytes") -> "typing.Optional[KeyValue]":
         _UniffiConverterBytes.check_lower(key)
 
         return await _uniffi_rust_call_async(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_ffidb_get_key_value(
+            _UniffiLib.uniffi_slatedb_ffi_fn_method_db_get_key_value(
                 self._uniffi_clone_pointer(), _UniffiConverterBytes.lower(key)
             ),
             _UniffiLib.ffi_slatedb_ffi_rust_future_poll_rust_buffer,
             _UniffiLib.ffi_slatedb_ffi_rust_future_complete_rust_buffer,
             _UniffiLib.ffi_slatedb_ffi_rust_future_free_rust_buffer,
             # lift function
-            _UniffiConverterOptionalTypeFfiKeyValue.lift,
+            _UniffiConverterOptionalTypeKeyValue.lift,
             # Error FFI converter
-            _UniffiConverterTypeFfiError,
+            _UniffiConverterTypeDbError,
         )
 
     async def get_key_value_with_options(
-        self, key: "bytes", options: "FfiReadOptions"
-    ) -> "typing.Optional[FfiKeyValue]":
+        self, key: "bytes", options: "ReadOptions"
+    ) -> "typing.Optional[KeyValue]":
         _UniffiConverterBytes.check_lower(key)
 
-        _UniffiConverterTypeFfiReadOptions.check_lower(options)
+        _UniffiConverterTypeReadOptions.check_lower(options)
 
         return await _uniffi_rust_call_async(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_ffidb_get_key_value_with_options(
+            _UniffiLib.uniffi_slatedb_ffi_fn_method_db_get_key_value_with_options(
                 self._uniffi_clone_pointer(),
                 _UniffiConverterBytes.lower(key),
-                _UniffiConverterTypeFfiReadOptions.lower(options),
+                _UniffiConverterTypeReadOptions.lower(options),
             ),
             _UniffiLib.ffi_slatedb_ffi_rust_future_poll_rust_buffer,
             _UniffiLib.ffi_slatedb_ffi_rust_future_complete_rust_buffer,
             _UniffiLib.ffi_slatedb_ffi_rust_future_free_rust_buffer,
             # lift function
-            _UniffiConverterOptionalTypeFfiKeyValue.lift,
+            _UniffiConverterOptionalTypeKeyValue.lift,
             # Error FFI converter
-            _UniffiConverterTypeFfiError,
+            _UniffiConverterTypeDbError,
         )
 
     async def get_with_options(
-        self, key: "bytes", options: "FfiReadOptions"
+        self, key: "bytes", options: "ReadOptions"
     ) -> "typing.Optional[bytes]":
         _UniffiConverterBytes.check_lower(key)
 
-        _UniffiConverterTypeFfiReadOptions.check_lower(options)
+        _UniffiConverterTypeReadOptions.check_lower(options)
 
         return await _uniffi_rust_call_async(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_ffidb_get_with_options(
+            _UniffiLib.uniffi_slatedb_ffi_fn_method_db_get_with_options(
                 self._uniffi_clone_pointer(),
                 _UniffiConverterBytes.lower(key),
-                _UniffiConverterTypeFfiReadOptions.lower(options),
+                _UniffiConverterTypeReadOptions.lower(options),
             ),
             _UniffiLib.ffi_slatedb_ffi_rust_future_poll_rust_buffer,
             _UniffiLib.ffi_slatedb_ffi_rust_future_complete_rust_buffer,
@@ -4776,16 +4745,16 @@ class FfiDb:
             # lift function
             _UniffiConverterOptionalBytes.lift,
             # Error FFI converter
-            _UniffiConverterTypeFfiError,
+            _UniffiConverterTypeDbError,
         )
 
-    async def merge(self, key: "bytes", operand: "bytes") -> "FfiWriteHandle":
+    async def merge(self, key: "bytes", operand: "bytes") -> "WriteHandle":
         _UniffiConverterBytes.check_lower(key)
 
         _UniffiConverterBytes.check_lower(operand)
 
         return await _uniffi_rust_call_async(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_ffidb_merge(
+            _UniffiLib.uniffi_slatedb_ffi_fn_method_db_merge(
                 self._uniffi_clone_pointer(),
                 _UniffiConverterBytes.lower(key),
                 _UniffiConverterBytes.lower(operand),
@@ -4794,41 +4763,41 @@ class FfiDb:
             _UniffiLib.ffi_slatedb_ffi_rust_future_complete_rust_buffer,
             _UniffiLib.ffi_slatedb_ffi_rust_future_free_rust_buffer,
             # lift function
-            _UniffiConverterTypeFfiWriteHandle.lift,
+            _UniffiConverterTypeWriteHandle.lift,
             # Error FFI converter
-            _UniffiConverterTypeFfiError,
+            _UniffiConverterTypeDbError,
         )
 
     async def merge_with_options(
         self,
         key: "bytes",
         operand: "bytes",
-        merge_options: "FfiMergeOptions",
-        write_options: "FfiWriteOptions",
-    ) -> "FfiWriteHandle":
+        merge_options: "MergeOptions",
+        write_options: "WriteOptions",
+    ) -> "WriteHandle":
         _UniffiConverterBytes.check_lower(key)
 
         _UniffiConverterBytes.check_lower(operand)
 
-        _UniffiConverterTypeFfiMergeOptions.check_lower(merge_options)
+        _UniffiConverterTypeMergeOptions.check_lower(merge_options)
 
-        _UniffiConverterTypeFfiWriteOptions.check_lower(write_options)
+        _UniffiConverterTypeWriteOptions.check_lower(write_options)
 
         return await _uniffi_rust_call_async(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_ffidb_merge_with_options(
+            _UniffiLib.uniffi_slatedb_ffi_fn_method_db_merge_with_options(
                 self._uniffi_clone_pointer(),
                 _UniffiConverterBytes.lower(key),
                 _UniffiConverterBytes.lower(operand),
-                _UniffiConverterTypeFfiMergeOptions.lower(merge_options),
-                _UniffiConverterTypeFfiWriteOptions.lower(write_options),
+                _UniffiConverterTypeMergeOptions.lower(merge_options),
+                _UniffiConverterTypeWriteOptions.lower(write_options),
             ),
             _UniffiLib.ffi_slatedb_ffi_rust_future_poll_rust_buffer,
             _UniffiLib.ffi_slatedb_ffi_rust_future_complete_rust_buffer,
             _UniffiLib.ffi_slatedb_ffi_rust_future_free_rust_buffer,
             # lift function
-            _UniffiConverterTypeFfiWriteHandle.lift,
+            _UniffiConverterTypeWriteHandle.lift,
             # Error FFI converter
-            _UniffiConverterTypeFfiError,
+            _UniffiConverterTypeDbError,
         )
 
     def metrics(
@@ -4836,19 +4805,19 @@ class FfiDb:
     ) -> "dict[str, int]":
         return _UniffiConverterMapStringInt64.lift(
             _uniffi_rust_call_with_error(
-                _UniffiConverterTypeFfiError,
-                _UniffiLib.uniffi_slatedb_ffi_fn_method_ffidb_metrics,
+                _UniffiConverterTypeDbError,
+                _UniffiLib.uniffi_slatedb_ffi_fn_method_db_metrics,
                 self._uniffi_clone_pointer(),
             )
         )
 
-    async def put(self, key: "bytes", value: "bytes") -> "FfiWriteHandle":
+    async def put(self, key: "bytes", value: "bytes") -> "WriteHandle":
         _UniffiConverterBytes.check_lower(key)
 
         _UniffiConverterBytes.check_lower(value)
 
         return await _uniffi_rust_call_async(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_ffidb_put(
+            _UniffiLib.uniffi_slatedb_ffi_fn_method_db_put(
                 self._uniffi_clone_pointer(),
                 _UniffiConverterBytes.lower(key),
                 _UniffiConverterBytes.lower(value),
@@ -4857,117 +4826,111 @@ class FfiDb:
             _UniffiLib.ffi_slatedb_ffi_rust_future_complete_rust_buffer,
             _UniffiLib.ffi_slatedb_ffi_rust_future_free_rust_buffer,
             # lift function
-            _UniffiConverterTypeFfiWriteHandle.lift,
+            _UniffiConverterTypeWriteHandle.lift,
             # Error FFI converter
-            _UniffiConverterTypeFfiError,
+            _UniffiConverterTypeDbError,
         )
 
     async def put_with_options(
-        self,
-        key: "bytes",
-        value: "bytes",
-        put_options: "FfiPutOptions",
-        write_options: "FfiWriteOptions",
-    ) -> "FfiWriteHandle":
+        self, key: "bytes", value: "bytes", put_options: "PutOptions", write_options: "WriteOptions"
+    ) -> "WriteHandle":
         _UniffiConverterBytes.check_lower(key)
 
         _UniffiConverterBytes.check_lower(value)
 
-        _UniffiConverterTypeFfiPutOptions.check_lower(put_options)
+        _UniffiConverterTypePutOptions.check_lower(put_options)
 
-        _UniffiConverterTypeFfiWriteOptions.check_lower(write_options)
+        _UniffiConverterTypeWriteOptions.check_lower(write_options)
 
         return await _uniffi_rust_call_async(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_ffidb_put_with_options(
+            _UniffiLib.uniffi_slatedb_ffi_fn_method_db_put_with_options(
                 self._uniffi_clone_pointer(),
                 _UniffiConverterBytes.lower(key),
                 _UniffiConverterBytes.lower(value),
-                _UniffiConverterTypeFfiPutOptions.lower(put_options),
-                _UniffiConverterTypeFfiWriteOptions.lower(write_options),
+                _UniffiConverterTypePutOptions.lower(put_options),
+                _UniffiConverterTypeWriteOptions.lower(write_options),
             ),
             _UniffiLib.ffi_slatedb_ffi_rust_future_poll_rust_buffer,
             _UniffiLib.ffi_slatedb_ffi_rust_future_complete_rust_buffer,
             _UniffiLib.ffi_slatedb_ffi_rust_future_free_rust_buffer,
             # lift function
-            _UniffiConverterTypeFfiWriteHandle.lift,
+            _UniffiConverterTypeWriteHandle.lift,
             # Error FFI converter
-            _UniffiConverterTypeFfiError,
+            _UniffiConverterTypeDbError,
         )
 
-    async def scan(self, range: "FfiKeyRange") -> "FfiDbIterator":
-        _UniffiConverterTypeFfiKeyRange.check_lower(range)
+    async def scan(self, range: "KeyRange") -> "DbIterator":
+        _UniffiConverterTypeKeyRange.check_lower(range)
 
         return await _uniffi_rust_call_async(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_ffidb_scan(
-                self._uniffi_clone_pointer(), _UniffiConverterTypeFfiKeyRange.lower(range)
+            _UniffiLib.uniffi_slatedb_ffi_fn_method_db_scan(
+                self._uniffi_clone_pointer(), _UniffiConverterTypeKeyRange.lower(range)
             ),
             _UniffiLib.ffi_slatedb_ffi_rust_future_poll_pointer,
             _UniffiLib.ffi_slatedb_ffi_rust_future_complete_pointer,
             _UniffiLib.ffi_slatedb_ffi_rust_future_free_pointer,
             # lift function
-            _UniffiConverterTypeFfiDbIterator.lift,
+            _UniffiConverterTypeDbIterator.lift,
             # Error FFI converter
-            _UniffiConverterTypeFfiError,
+            _UniffiConverterTypeDbError,
         )
 
-    async def scan_prefix(self, prefix: "bytes") -> "FfiDbIterator":
+    async def scan_prefix(self, prefix: "bytes") -> "DbIterator":
         _UniffiConverterBytes.check_lower(prefix)
 
         return await _uniffi_rust_call_async(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_ffidb_scan_prefix(
+            _UniffiLib.uniffi_slatedb_ffi_fn_method_db_scan_prefix(
                 self._uniffi_clone_pointer(), _UniffiConverterBytes.lower(prefix)
             ),
             _UniffiLib.ffi_slatedb_ffi_rust_future_poll_pointer,
             _UniffiLib.ffi_slatedb_ffi_rust_future_complete_pointer,
             _UniffiLib.ffi_slatedb_ffi_rust_future_free_pointer,
             # lift function
-            _UniffiConverterTypeFfiDbIterator.lift,
+            _UniffiConverterTypeDbIterator.lift,
             # Error FFI converter
-            _UniffiConverterTypeFfiError,
+            _UniffiConverterTypeDbError,
         )
 
     async def scan_prefix_with_options(
-        self, prefix: "bytes", options: "FfiScanOptions"
-    ) -> "FfiDbIterator":
+        self, prefix: "bytes", options: "ScanOptions"
+    ) -> "DbIterator":
         _UniffiConverterBytes.check_lower(prefix)
 
-        _UniffiConverterTypeFfiScanOptions.check_lower(options)
+        _UniffiConverterTypeScanOptions.check_lower(options)
 
         return await _uniffi_rust_call_async(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_ffidb_scan_prefix_with_options(
+            _UniffiLib.uniffi_slatedb_ffi_fn_method_db_scan_prefix_with_options(
                 self._uniffi_clone_pointer(),
                 _UniffiConverterBytes.lower(prefix),
-                _UniffiConverterTypeFfiScanOptions.lower(options),
+                _UniffiConverterTypeScanOptions.lower(options),
             ),
             _UniffiLib.ffi_slatedb_ffi_rust_future_poll_pointer,
             _UniffiLib.ffi_slatedb_ffi_rust_future_complete_pointer,
             _UniffiLib.ffi_slatedb_ffi_rust_future_free_pointer,
             # lift function
-            _UniffiConverterTypeFfiDbIterator.lift,
+            _UniffiConverterTypeDbIterator.lift,
             # Error FFI converter
-            _UniffiConverterTypeFfiError,
+            _UniffiConverterTypeDbError,
         )
 
-    async def scan_with_options(
-        self, range: "FfiKeyRange", options: "FfiScanOptions"
-    ) -> "FfiDbIterator":
-        _UniffiConverterTypeFfiKeyRange.check_lower(range)
+    async def scan_with_options(self, range: "KeyRange", options: "ScanOptions") -> "DbIterator":
+        _UniffiConverterTypeKeyRange.check_lower(range)
 
-        _UniffiConverterTypeFfiScanOptions.check_lower(options)
+        _UniffiConverterTypeScanOptions.check_lower(options)
 
         return await _uniffi_rust_call_async(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_ffidb_scan_with_options(
+            _UniffiLib.uniffi_slatedb_ffi_fn_method_db_scan_with_options(
                 self._uniffi_clone_pointer(),
-                _UniffiConverterTypeFfiKeyRange.lower(range),
-                _UniffiConverterTypeFfiScanOptions.lower(options),
+                _UniffiConverterTypeKeyRange.lower(range),
+                _UniffiConverterTypeScanOptions.lower(options),
             ),
             _UniffiLib.ffi_slatedb_ffi_rust_future_poll_pointer,
             _UniffiLib.ffi_slatedb_ffi_rust_future_complete_pointer,
             _UniffiLib.ffi_slatedb_ffi_rust_future_free_pointer,
             # lift function
-            _UniffiConverterTypeFfiDbIterator.lift,
+            _UniffiConverterTypeDbIterator.lift,
             # Error FFI converter
-            _UniffiConverterTypeFfiError,
+            _UniffiConverterTypeDbError,
         )
 
     async def shutdown(
@@ -4975,7 +4938,7 @@ class FfiDb:
     ) -> None:
 
         return await _uniffi_rust_call_async(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_ffidb_shutdown(
+            _UniffiLib.uniffi_slatedb_ffi_fn_method_db_shutdown(
                 self._uniffi_clone_pointer(),
             ),
             _UniffiLib.ffi_slatedb_ffi_rust_future_poll_void,
@@ -4984,87 +4947,87 @@ class FfiDb:
             # lift function
             lambda val: None,
             # Error FFI converter
-            _UniffiConverterTypeFfiError,
+            _UniffiConverterTypeDbError,
         )
 
     async def snapshot(
         self,
-    ) -> "FfiDbSnapshot":
+    ) -> "DbSnapshot":
         return await _uniffi_rust_call_async(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_ffidb_snapshot(
+            _UniffiLib.uniffi_slatedb_ffi_fn_method_db_snapshot(
                 self._uniffi_clone_pointer(),
             ),
             _UniffiLib.ffi_slatedb_ffi_rust_future_poll_pointer,
             _UniffiLib.ffi_slatedb_ffi_rust_future_complete_pointer,
             _UniffiLib.ffi_slatedb_ffi_rust_future_free_pointer,
             # lift function
-            _UniffiConverterTypeFfiDbSnapshot.lift,
+            _UniffiConverterTypeDbSnapshot.lift,
             # Error FFI converter
-            _UniffiConverterTypeFfiError,
+            _UniffiConverterTypeDbError,
         )
 
     def status(
         self,
     ) -> None:
         _uniffi_rust_call_with_error(
-            _UniffiConverterTypeFfiError,
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_ffidb_status,
+            _UniffiConverterTypeDbError,
+            _UniffiLib.uniffi_slatedb_ffi_fn_method_db_status,
             self._uniffi_clone_pointer(),
         )
 
-    async def write(self, batch: "FfiWriteBatch") -> "FfiWriteHandle":
-        _UniffiConverterTypeFfiWriteBatch.check_lower(batch)
+    async def write(self, batch: "WriteBatch") -> "WriteHandle":
+        _UniffiConverterTypeWriteBatch.check_lower(batch)
 
         return await _uniffi_rust_call_async(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_ffidb_write(
-                self._uniffi_clone_pointer(), _UniffiConverterTypeFfiWriteBatch.lower(batch)
+            _UniffiLib.uniffi_slatedb_ffi_fn_method_db_write(
+                self._uniffi_clone_pointer(), _UniffiConverterTypeWriteBatch.lower(batch)
             ),
             _UniffiLib.ffi_slatedb_ffi_rust_future_poll_rust_buffer,
             _UniffiLib.ffi_slatedb_ffi_rust_future_complete_rust_buffer,
             _UniffiLib.ffi_slatedb_ffi_rust_future_free_rust_buffer,
             # lift function
-            _UniffiConverterTypeFfiWriteHandle.lift,
+            _UniffiConverterTypeWriteHandle.lift,
             # Error FFI converter
-            _UniffiConverterTypeFfiError,
+            _UniffiConverterTypeDbError,
         )
 
     async def write_with_options(
-        self, batch: "FfiWriteBatch", options: "FfiWriteOptions"
-    ) -> "FfiWriteHandle":
-        _UniffiConverterTypeFfiWriteBatch.check_lower(batch)
+        self, batch: "WriteBatch", options: "WriteOptions"
+    ) -> "WriteHandle":
+        _UniffiConverterTypeWriteBatch.check_lower(batch)
 
-        _UniffiConverterTypeFfiWriteOptions.check_lower(options)
+        _UniffiConverterTypeWriteOptions.check_lower(options)
 
         return await _uniffi_rust_call_async(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_ffidb_write_with_options(
+            _UniffiLib.uniffi_slatedb_ffi_fn_method_db_write_with_options(
                 self._uniffi_clone_pointer(),
-                _UniffiConverterTypeFfiWriteBatch.lower(batch),
-                _UniffiConverterTypeFfiWriteOptions.lower(options),
+                _UniffiConverterTypeWriteBatch.lower(batch),
+                _UniffiConverterTypeWriteOptions.lower(options),
             ),
             _UniffiLib.ffi_slatedb_ffi_rust_future_poll_rust_buffer,
             _UniffiLib.ffi_slatedb_ffi_rust_future_complete_rust_buffer,
             _UniffiLib.ffi_slatedb_ffi_rust_future_free_rust_buffer,
             # lift function
-            _UniffiConverterTypeFfiWriteHandle.lift,
+            _UniffiConverterTypeWriteHandle.lift,
             # Error FFI converter
-            _UniffiConverterTypeFfiError,
+            _UniffiConverterTypeDbError,
         )
 
 
-class _UniffiConverterTypeFfiDb:
+class _UniffiConverterTypeDb:
     @staticmethod
     def lift(value: int):
-        return FfiDb._make_instance_(value)
+        return Db._make_instance_(value)
 
     @staticmethod
-    def check_lower(value: FfiDb):
-        if not isinstance(value, FfiDb):
-            raise TypeError("Expected FfiDb instance, {} found".format(type(value).__name__))
+    def check_lower(value: Db):
+        if not isinstance(value, Db):
+            raise TypeError("Expected Db instance, {} found".format(type(value).__name__))
 
     @staticmethod
-    def lower(value: FfiDbProtocol):
-        if not isinstance(value, FfiDb):
-            raise TypeError("Expected FfiDb instance, {} found".format(type(value).__name__))
+    def lower(value: DbProtocol):
+        if not isinstance(value, Db):
+            raise TypeError("Expected Db instance, {} found".format(type(value).__name__))
         return value._uniffi_clone_pointer()
 
     @classmethod
@@ -5075,11 +5038,11 @@ class _UniffiConverterTypeFfiDb:
         return cls.lift(ptr)
 
     @classmethod
-    def write(cls, value: FfiDbProtocol, buf: _UniffiRustBuffer):
+    def write(cls, value: DbProtocol, buf: _UniffiRustBuffer):
         buf.write_u64(cls.lower(value))
 
 
-class FfiDbBuilderProtocol(typing.Protocol):
+class DbBuilderProtocol(typing.Protocol):
     def build(
         self,
     ):
@@ -5090,45 +5053,45 @@ class FfiDbBuilderProtocol(typing.Protocol):
     ):
         raise NotImplementedError
 
-    def with_merge_operator(self, merge_operator: "FfiMergeOperator"):
+    def with_merge_operator(self, merge_operator: "MergeOperator"):
         raise NotImplementedError
 
     def with_seed(self, seed: "int"):
         raise NotImplementedError
 
-    def with_settings(self, settings: "FfiSettings"):
+    def with_settings(self, settings: "Settings"):
         raise NotImplementedError
 
-    def with_sst_block_size(self, sst_block_size: "FfiSstBlockSize"):
+    def with_sst_block_size(self, sst_block_size: "SstBlockSize"):
         raise NotImplementedError
 
-    def with_wal_object_store(self, wal_object_store: "FfiObjectStore"):
+    def with_wal_object_store(self, wal_object_store: "ObjectStore"):
         raise NotImplementedError
 
 
-# FfiDbBuilder is a Rust-only trait - it's a wrapper around a Rust implementation.
-class FfiDbBuilder:
+# DbBuilder is a Rust-only trait - it's a wrapper around a Rust implementation.
+class DbBuilder:
     _pointer: ctypes.c_void_p
 
-    def __init__(self, path: "str", object_store: "FfiObjectStore"):
+    def __init__(self, path: "str", object_store: "ObjectStore"):
         _UniffiConverterString.check_lower(path)
 
-        _UniffiConverterTypeFfiObjectStore.check_lower(object_store)
+        _UniffiConverterTypeObjectStore.check_lower(object_store)
 
         self._pointer = _uniffi_rust_call(
-            _UniffiLib.uniffi_slatedb_ffi_fn_constructor_ffidbbuilder_new,
+            _UniffiLib.uniffi_slatedb_ffi_fn_constructor_dbbuilder_new,
             _UniffiConverterString.lower(path),
-            _UniffiConverterTypeFfiObjectStore.lower(object_store),
+            _UniffiConverterTypeObjectStore.lower(object_store),
         )
 
     def __del__(self):
         # In case of partial initialization of instances.
         pointer = getattr(self, "_pointer", None)
         if pointer is not None:
-            _uniffi_rust_call(_UniffiLib.uniffi_slatedb_ffi_fn_free_ffidbbuilder, pointer)
+            _uniffi_rust_call(_UniffiLib.uniffi_slatedb_ffi_fn_free_dbbuilder, pointer)
 
     def _uniffi_clone_pointer(self):
-        return _uniffi_rust_call(_UniffiLib.uniffi_slatedb_ffi_fn_clone_ffidbbuilder, self._pointer)
+        return _uniffi_rust_call(_UniffiLib.uniffi_slatedb_ffi_fn_clone_dbbuilder, self._pointer)
 
     # Used by alternative constructors or any methods which return this type.
     @classmethod
@@ -5141,94 +5104,94 @@ class FfiDbBuilder:
 
     async def build(
         self,
-    ) -> "FfiDb":
+    ) -> "Db":
         return await _uniffi_rust_call_async(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbbuilder_build(
+            _UniffiLib.uniffi_slatedb_ffi_fn_method_dbbuilder_build(
                 self._uniffi_clone_pointer(),
             ),
             _UniffiLib.ffi_slatedb_ffi_rust_future_poll_pointer,
             _UniffiLib.ffi_slatedb_ffi_rust_future_complete_pointer,
             _UniffiLib.ffi_slatedb_ffi_rust_future_free_pointer,
             # lift function
-            _UniffiConverterTypeFfiDb.lift,
+            _UniffiConverterTypeDb.lift,
             # Error FFI converter
-            _UniffiConverterTypeFfiError,
+            _UniffiConverterTypeDbError,
         )
 
     def with_db_cache_disabled(
         self,
     ) -> None:
         _uniffi_rust_call_with_error(
-            _UniffiConverterTypeFfiError,
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbbuilder_with_db_cache_disabled,
+            _UniffiConverterTypeDbError,
+            _UniffiLib.uniffi_slatedb_ffi_fn_method_dbbuilder_with_db_cache_disabled,
             self._uniffi_clone_pointer(),
         )
 
-    def with_merge_operator(self, merge_operator: "FfiMergeOperator") -> None:
-        _UniffiConverterTypeFfiMergeOperator.check_lower(merge_operator)
+    def with_merge_operator(self, merge_operator: "MergeOperator") -> None:
+        _UniffiConverterTypeMergeOperator.check_lower(merge_operator)
 
         _uniffi_rust_call_with_error(
-            _UniffiConverterTypeFfiError,
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbbuilder_with_merge_operator,
+            _UniffiConverterTypeDbError,
+            _UniffiLib.uniffi_slatedb_ffi_fn_method_dbbuilder_with_merge_operator,
             self._uniffi_clone_pointer(),
-            _UniffiConverterTypeFfiMergeOperator.lower(merge_operator),
+            _UniffiConverterTypeMergeOperator.lower(merge_operator),
         )
 
     def with_seed(self, seed: "int") -> None:
         _UniffiConverterUInt64.check_lower(seed)
 
         _uniffi_rust_call_with_error(
-            _UniffiConverterTypeFfiError,
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbbuilder_with_seed,
+            _UniffiConverterTypeDbError,
+            _UniffiLib.uniffi_slatedb_ffi_fn_method_dbbuilder_with_seed,
             self._uniffi_clone_pointer(),
             _UniffiConverterUInt64.lower(seed),
         )
 
-    def with_settings(self, settings: "FfiSettings") -> None:
-        _UniffiConverterTypeFfiSettings.check_lower(settings)
+    def with_settings(self, settings: "Settings") -> None:
+        _UniffiConverterTypeSettings.check_lower(settings)
 
         _uniffi_rust_call_with_error(
-            _UniffiConverterTypeFfiError,
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbbuilder_with_settings,
+            _UniffiConverterTypeDbError,
+            _UniffiLib.uniffi_slatedb_ffi_fn_method_dbbuilder_with_settings,
             self._uniffi_clone_pointer(),
-            _UniffiConverterTypeFfiSettings.lower(settings),
+            _UniffiConverterTypeSettings.lower(settings),
         )
 
-    def with_sst_block_size(self, sst_block_size: "FfiSstBlockSize") -> None:
-        _UniffiConverterTypeFfiSstBlockSize.check_lower(sst_block_size)
+    def with_sst_block_size(self, sst_block_size: "SstBlockSize") -> None:
+        _UniffiConverterTypeSstBlockSize.check_lower(sst_block_size)
 
         _uniffi_rust_call_with_error(
-            _UniffiConverterTypeFfiError,
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbbuilder_with_sst_block_size,
+            _UniffiConverterTypeDbError,
+            _UniffiLib.uniffi_slatedb_ffi_fn_method_dbbuilder_with_sst_block_size,
             self._uniffi_clone_pointer(),
-            _UniffiConverterTypeFfiSstBlockSize.lower(sst_block_size),
+            _UniffiConverterTypeSstBlockSize.lower(sst_block_size),
         )
 
-    def with_wal_object_store(self, wal_object_store: "FfiObjectStore") -> None:
-        _UniffiConverterTypeFfiObjectStore.check_lower(wal_object_store)
+    def with_wal_object_store(self, wal_object_store: "ObjectStore") -> None:
+        _UniffiConverterTypeObjectStore.check_lower(wal_object_store)
 
         _uniffi_rust_call_with_error(
-            _UniffiConverterTypeFfiError,
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbbuilder_with_wal_object_store,
+            _UniffiConverterTypeDbError,
+            _UniffiLib.uniffi_slatedb_ffi_fn_method_dbbuilder_with_wal_object_store,
             self._uniffi_clone_pointer(),
-            _UniffiConverterTypeFfiObjectStore.lower(wal_object_store),
+            _UniffiConverterTypeObjectStore.lower(wal_object_store),
         )
 
 
-class _UniffiConverterTypeFfiDbBuilder:
+class _UniffiConverterTypeDbBuilder:
     @staticmethod
     def lift(value: int):
-        return FfiDbBuilder._make_instance_(value)
+        return DbBuilder._make_instance_(value)
 
     @staticmethod
-    def check_lower(value: FfiDbBuilder):
-        if not isinstance(value, FfiDbBuilder):
-            raise TypeError("Expected FfiDbBuilder instance, {} found".format(type(value).__name__))
+    def check_lower(value: DbBuilder):
+        if not isinstance(value, DbBuilder):
+            raise TypeError("Expected DbBuilder instance, {} found".format(type(value).__name__))
 
     @staticmethod
-    def lower(value: FfiDbBuilderProtocol):
-        if not isinstance(value, FfiDbBuilder):
-            raise TypeError("Expected FfiDbBuilder instance, {} found".format(type(value).__name__))
+    def lower(value: DbBuilderProtocol):
+        if not isinstance(value, DbBuilder):
+            raise TypeError("Expected DbBuilder instance, {} found".format(type(value).__name__))
         return value._uniffi_clone_pointer()
 
     @classmethod
@@ -5239,11 +5202,11 @@ class _UniffiConverterTypeFfiDbBuilder:
         return cls.lift(ptr)
 
     @classmethod
-    def write(cls, value: FfiDbBuilderProtocol, buf: _UniffiRustBuffer):
+    def write(cls, value: DbBuilderProtocol, buf: _UniffiRustBuffer):
         buf.write_u64(cls.lower(value))
 
 
-class FfiDbIteratorProtocol(typing.Protocol):
+class DbIteratorProtocol(typing.Protocol):
     def next(
         self,
     ):
@@ -5253,8 +5216,8 @@ class FfiDbIteratorProtocol(typing.Protocol):
         raise NotImplementedError
 
 
-# FfiDbIterator is a Rust-only trait - it's a wrapper around a Rust implementation.
-class FfiDbIterator:
+# DbIterator is a Rust-only trait - it's a wrapper around a Rust implementation.
+class DbIterator:
     _pointer: ctypes.c_void_p
 
     def __init__(self, *args, **kwargs):
@@ -5264,12 +5227,10 @@ class FfiDbIterator:
         # In case of partial initialization of instances.
         pointer = getattr(self, "_pointer", None)
         if pointer is not None:
-            _uniffi_rust_call(_UniffiLib.uniffi_slatedb_ffi_fn_free_ffidbiterator, pointer)
+            _uniffi_rust_call(_UniffiLib.uniffi_slatedb_ffi_fn_free_dbiterator, pointer)
 
     def _uniffi_clone_pointer(self):
-        return _uniffi_rust_call(
-            _UniffiLib.uniffi_slatedb_ffi_fn_clone_ffidbiterator, self._pointer
-        )
+        return _uniffi_rust_call(_UniffiLib.uniffi_slatedb_ffi_fn_clone_dbiterator, self._pointer)
 
     # Used by alternative constructors or any methods which return this type.
     @classmethod
@@ -5282,18 +5243,18 @@ class FfiDbIterator:
 
     async def next(
         self,
-    ) -> "typing.Optional[FfiKeyValue]":
+    ) -> "typing.Optional[KeyValue]":
         return await _uniffi_rust_call_async(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbiterator_next(
+            _UniffiLib.uniffi_slatedb_ffi_fn_method_dbiterator_next(
                 self._uniffi_clone_pointer(),
             ),
             _UniffiLib.ffi_slatedb_ffi_rust_future_poll_rust_buffer,
             _UniffiLib.ffi_slatedb_ffi_rust_future_complete_rust_buffer,
             _UniffiLib.ffi_slatedb_ffi_rust_future_free_rust_buffer,
             # lift function
-            _UniffiConverterOptionalTypeFfiKeyValue.lift,
+            _UniffiConverterOptionalTypeKeyValue.lift,
             # Error FFI converter
-            _UniffiConverterTypeFfiError,
+            _UniffiConverterTypeDbError,
         )
 
     async def seek(self, key: "bytes") -> None:
@@ -5301,7 +5262,7 @@ class FfiDbIterator:
         _UniffiConverterBytes.check_lower(key)
 
         return await _uniffi_rust_call_async(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbiterator_seek(
+            _UniffiLib.uniffi_slatedb_ffi_fn_method_dbiterator_seek(
                 self._uniffi_clone_pointer(), _UniffiConverterBytes.lower(key)
             ),
             _UniffiLib.ffi_slatedb_ffi_rust_future_poll_void,
@@ -5310,28 +5271,24 @@ class FfiDbIterator:
             # lift function
             lambda val: None,
             # Error FFI converter
-            _UniffiConverterTypeFfiError,
+            _UniffiConverterTypeDbError,
         )
 
 
-class _UniffiConverterTypeFfiDbIterator:
+class _UniffiConverterTypeDbIterator:
     @staticmethod
     def lift(value: int):
-        return FfiDbIterator._make_instance_(value)
+        return DbIterator._make_instance_(value)
 
     @staticmethod
-    def check_lower(value: FfiDbIterator):
-        if not isinstance(value, FfiDbIterator):
-            raise TypeError(
-                "Expected FfiDbIterator instance, {} found".format(type(value).__name__)
-            )
+    def check_lower(value: DbIterator):
+        if not isinstance(value, DbIterator):
+            raise TypeError("Expected DbIterator instance, {} found".format(type(value).__name__))
 
     @staticmethod
-    def lower(value: FfiDbIteratorProtocol):
-        if not isinstance(value, FfiDbIterator):
-            raise TypeError(
-                "Expected FfiDbIterator instance, {} found".format(type(value).__name__)
-            )
+    def lower(value: DbIteratorProtocol):
+        if not isinstance(value, DbIterator):
+            raise TypeError("Expected DbIterator instance, {} found".format(type(value).__name__))
         return value._uniffi_clone_pointer()
 
     @classmethod
@@ -5342,27 +5299,27 @@ class _UniffiConverterTypeFfiDbIterator:
         return cls.lift(ptr)
 
     @classmethod
-    def write(cls, value: FfiDbIteratorProtocol, buf: _UniffiRustBuffer):
+    def write(cls, value: DbIteratorProtocol, buf: _UniffiRustBuffer):
         buf.write_u64(cls.lower(value))
 
 
-class FfiDbReaderProtocol(typing.Protocol):
+class DbReaderProtocol(typing.Protocol):
     def get(self, key: "bytes"):
         raise NotImplementedError
 
-    def get_with_options(self, key: "bytes", options: "FfiReadOptions"):
+    def get_with_options(self, key: "bytes", options: "ReadOptions"):
         raise NotImplementedError
 
-    def scan(self, range: "FfiKeyRange"):
+    def scan(self, range: "KeyRange"):
         raise NotImplementedError
 
     def scan_prefix(self, prefix: "bytes"):
         raise NotImplementedError
 
-    def scan_prefix_with_options(self, prefix: "bytes", options: "FfiScanOptions"):
+    def scan_prefix_with_options(self, prefix: "bytes", options: "ScanOptions"):
         raise NotImplementedError
 
-    def scan_with_options(self, range: "FfiKeyRange", options: "FfiScanOptions"):
+    def scan_with_options(self, range: "KeyRange", options: "ScanOptions"):
         raise NotImplementedError
 
     def shutdown(
@@ -5371,8 +5328,8 @@ class FfiDbReaderProtocol(typing.Protocol):
         raise NotImplementedError
 
 
-# FfiDbReader is a Rust-only trait - it's a wrapper around a Rust implementation.
-class FfiDbReader:
+# DbReader is a Rust-only trait - it's a wrapper around a Rust implementation.
+class DbReader:
     _pointer: ctypes.c_void_p
 
     def __init__(self, *args, **kwargs):
@@ -5382,10 +5339,10 @@ class FfiDbReader:
         # In case of partial initialization of instances.
         pointer = getattr(self, "_pointer", None)
         if pointer is not None:
-            _uniffi_rust_call(_UniffiLib.uniffi_slatedb_ffi_fn_free_ffidbreader, pointer)
+            _uniffi_rust_call(_UniffiLib.uniffi_slatedb_ffi_fn_free_dbreader, pointer)
 
     def _uniffi_clone_pointer(self):
-        return _uniffi_rust_call(_UniffiLib.uniffi_slatedb_ffi_fn_clone_ffidbreader, self._pointer)
+        return _uniffi_rust_call(_UniffiLib.uniffi_slatedb_ffi_fn_clone_dbreader, self._pointer)
 
     # Used by alternative constructors or any methods which return this type.
     @classmethod
@@ -5400,7 +5357,7 @@ class FfiDbReader:
         _UniffiConverterBytes.check_lower(key)
 
         return await _uniffi_rust_call_async(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbreader_get(
+            _UniffiLib.uniffi_slatedb_ffi_fn_method_dbreader_get(
                 self._uniffi_clone_pointer(), _UniffiConverterBytes.lower(key)
             ),
             _UniffiLib.ffi_slatedb_ffi_rust_future_poll_rust_buffer,
@@ -5409,21 +5366,21 @@ class FfiDbReader:
             # lift function
             _UniffiConverterOptionalBytes.lift,
             # Error FFI converter
-            _UniffiConverterTypeFfiError,
+            _UniffiConverterTypeDbError,
         )
 
     async def get_with_options(
-        self, key: "bytes", options: "FfiReadOptions"
+        self, key: "bytes", options: "ReadOptions"
     ) -> "typing.Optional[bytes]":
         _UniffiConverterBytes.check_lower(key)
 
-        _UniffiConverterTypeFfiReadOptions.check_lower(options)
+        _UniffiConverterTypeReadOptions.check_lower(options)
 
         return await _uniffi_rust_call_async(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbreader_get_with_options(
+            _UniffiLib.uniffi_slatedb_ffi_fn_method_dbreader_get_with_options(
                 self._uniffi_clone_pointer(),
                 _UniffiConverterBytes.lower(key),
-                _UniffiConverterTypeFfiReadOptions.lower(options),
+                _UniffiConverterTypeReadOptions.lower(options),
             ),
             _UniffiLib.ffi_slatedb_ffi_rust_future_poll_rust_buffer,
             _UniffiLib.ffi_slatedb_ffi_rust_future_complete_rust_buffer,
@@ -5431,83 +5388,81 @@ class FfiDbReader:
             # lift function
             _UniffiConverterOptionalBytes.lift,
             # Error FFI converter
-            _UniffiConverterTypeFfiError,
+            _UniffiConverterTypeDbError,
         )
 
-    async def scan(self, range: "FfiKeyRange") -> "FfiDbIterator":
-        _UniffiConverterTypeFfiKeyRange.check_lower(range)
+    async def scan(self, range: "KeyRange") -> "DbIterator":
+        _UniffiConverterTypeKeyRange.check_lower(range)
 
         return await _uniffi_rust_call_async(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbreader_scan(
-                self._uniffi_clone_pointer(), _UniffiConverterTypeFfiKeyRange.lower(range)
+            _UniffiLib.uniffi_slatedb_ffi_fn_method_dbreader_scan(
+                self._uniffi_clone_pointer(), _UniffiConverterTypeKeyRange.lower(range)
             ),
             _UniffiLib.ffi_slatedb_ffi_rust_future_poll_pointer,
             _UniffiLib.ffi_slatedb_ffi_rust_future_complete_pointer,
             _UniffiLib.ffi_slatedb_ffi_rust_future_free_pointer,
             # lift function
-            _UniffiConverterTypeFfiDbIterator.lift,
+            _UniffiConverterTypeDbIterator.lift,
             # Error FFI converter
-            _UniffiConverterTypeFfiError,
+            _UniffiConverterTypeDbError,
         )
 
-    async def scan_prefix(self, prefix: "bytes") -> "FfiDbIterator":
+    async def scan_prefix(self, prefix: "bytes") -> "DbIterator":
         _UniffiConverterBytes.check_lower(prefix)
 
         return await _uniffi_rust_call_async(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbreader_scan_prefix(
+            _UniffiLib.uniffi_slatedb_ffi_fn_method_dbreader_scan_prefix(
                 self._uniffi_clone_pointer(), _UniffiConverterBytes.lower(prefix)
             ),
             _UniffiLib.ffi_slatedb_ffi_rust_future_poll_pointer,
             _UniffiLib.ffi_slatedb_ffi_rust_future_complete_pointer,
             _UniffiLib.ffi_slatedb_ffi_rust_future_free_pointer,
             # lift function
-            _UniffiConverterTypeFfiDbIterator.lift,
+            _UniffiConverterTypeDbIterator.lift,
             # Error FFI converter
-            _UniffiConverterTypeFfiError,
+            _UniffiConverterTypeDbError,
         )
 
     async def scan_prefix_with_options(
-        self, prefix: "bytes", options: "FfiScanOptions"
-    ) -> "FfiDbIterator":
+        self, prefix: "bytes", options: "ScanOptions"
+    ) -> "DbIterator":
         _UniffiConverterBytes.check_lower(prefix)
 
-        _UniffiConverterTypeFfiScanOptions.check_lower(options)
+        _UniffiConverterTypeScanOptions.check_lower(options)
 
         return await _uniffi_rust_call_async(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbreader_scan_prefix_with_options(
+            _UniffiLib.uniffi_slatedb_ffi_fn_method_dbreader_scan_prefix_with_options(
                 self._uniffi_clone_pointer(),
                 _UniffiConverterBytes.lower(prefix),
-                _UniffiConverterTypeFfiScanOptions.lower(options),
+                _UniffiConverterTypeScanOptions.lower(options),
             ),
             _UniffiLib.ffi_slatedb_ffi_rust_future_poll_pointer,
             _UniffiLib.ffi_slatedb_ffi_rust_future_complete_pointer,
             _UniffiLib.ffi_slatedb_ffi_rust_future_free_pointer,
             # lift function
-            _UniffiConverterTypeFfiDbIterator.lift,
+            _UniffiConverterTypeDbIterator.lift,
             # Error FFI converter
-            _UniffiConverterTypeFfiError,
+            _UniffiConverterTypeDbError,
         )
 
-    async def scan_with_options(
-        self, range: "FfiKeyRange", options: "FfiScanOptions"
-    ) -> "FfiDbIterator":
-        _UniffiConverterTypeFfiKeyRange.check_lower(range)
+    async def scan_with_options(self, range: "KeyRange", options: "ScanOptions") -> "DbIterator":
+        _UniffiConverterTypeKeyRange.check_lower(range)
 
-        _UniffiConverterTypeFfiScanOptions.check_lower(options)
+        _UniffiConverterTypeScanOptions.check_lower(options)
 
         return await _uniffi_rust_call_async(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbreader_scan_with_options(
+            _UniffiLib.uniffi_slatedb_ffi_fn_method_dbreader_scan_with_options(
                 self._uniffi_clone_pointer(),
-                _UniffiConverterTypeFfiKeyRange.lower(range),
-                _UniffiConverterTypeFfiScanOptions.lower(options),
+                _UniffiConverterTypeKeyRange.lower(range),
+                _UniffiConverterTypeScanOptions.lower(options),
             ),
             _UniffiLib.ffi_slatedb_ffi_rust_future_poll_pointer,
             _UniffiLib.ffi_slatedb_ffi_rust_future_complete_pointer,
             _UniffiLib.ffi_slatedb_ffi_rust_future_free_pointer,
             # lift function
-            _UniffiConverterTypeFfiDbIterator.lift,
+            _UniffiConverterTypeDbIterator.lift,
             # Error FFI converter
-            _UniffiConverterTypeFfiError,
+            _UniffiConverterTypeDbError,
         )
 
     async def shutdown(
@@ -5515,7 +5470,7 @@ class FfiDbReader:
     ) -> None:
 
         return await _uniffi_rust_call_async(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbreader_shutdown(
+            _UniffiLib.uniffi_slatedb_ffi_fn_method_dbreader_shutdown(
                 self._uniffi_clone_pointer(),
             ),
             _UniffiLib.ffi_slatedb_ffi_rust_future_poll_void,
@@ -5524,24 +5479,24 @@ class FfiDbReader:
             # lift function
             lambda val: None,
             # Error FFI converter
-            _UniffiConverterTypeFfiError,
+            _UniffiConverterTypeDbError,
         )
 
 
-class _UniffiConverterTypeFfiDbReader:
+class _UniffiConverterTypeDbReader:
     @staticmethod
     def lift(value: int):
-        return FfiDbReader._make_instance_(value)
+        return DbReader._make_instance_(value)
 
     @staticmethod
-    def check_lower(value: FfiDbReader):
-        if not isinstance(value, FfiDbReader):
-            raise TypeError("Expected FfiDbReader instance, {} found".format(type(value).__name__))
+    def check_lower(value: DbReader):
+        if not isinstance(value, DbReader):
+            raise TypeError("Expected DbReader instance, {} found".format(type(value).__name__))
 
     @staticmethod
-    def lower(value: FfiDbReaderProtocol):
-        if not isinstance(value, FfiDbReader):
-            raise TypeError("Expected FfiDbReader instance, {} found".format(type(value).__name__))
+    def lower(value: DbReaderProtocol):
+        if not isinstance(value, DbReader):
+            raise TypeError("Expected DbReader instance, {} found".format(type(value).__name__))
         return value._uniffi_clone_pointer()
 
     @classmethod
@@ -5552,11 +5507,11 @@ class _UniffiConverterTypeFfiDbReader:
         return cls.lift(ptr)
 
     @classmethod
-    def write(cls, value: FfiDbReaderProtocol, buf: _UniffiRustBuffer):
+    def write(cls, value: DbReaderProtocol, buf: _UniffiRustBuffer):
         buf.write_u64(cls.lower(value))
 
 
-class FfiDbReaderBuilderProtocol(typing.Protocol):
+class DbReaderBuilderProtocol(typing.Protocol):
     def build(
         self,
     ):
@@ -5565,40 +5520,40 @@ class FfiDbReaderBuilderProtocol(typing.Protocol):
     def with_checkpoint_id(self, checkpoint_id: "str"):
         raise NotImplementedError
 
-    def with_merge_operator(self, merge_operator: "FfiMergeOperator"):
+    def with_merge_operator(self, merge_operator: "MergeOperator"):
         raise NotImplementedError
 
-    def with_options(self, options: "FfiReaderOptions"):
+    def with_options(self, options: "ReaderOptions"):
         raise NotImplementedError
 
-    def with_wal_object_store(self, wal_object_store: "FfiObjectStore"):
+    def with_wal_object_store(self, wal_object_store: "ObjectStore"):
         raise NotImplementedError
 
 
-# FfiDbReaderBuilder is a Rust-only trait - it's a wrapper around a Rust implementation.
-class FfiDbReaderBuilder:
+# DbReaderBuilder is a Rust-only trait - it's a wrapper around a Rust implementation.
+class DbReaderBuilder:
     _pointer: ctypes.c_void_p
 
-    def __init__(self, path: "str", object_store: "FfiObjectStore"):
+    def __init__(self, path: "str", object_store: "ObjectStore"):
         _UniffiConverterString.check_lower(path)
 
-        _UniffiConverterTypeFfiObjectStore.check_lower(object_store)
+        _UniffiConverterTypeObjectStore.check_lower(object_store)
 
         self._pointer = _uniffi_rust_call(
-            _UniffiLib.uniffi_slatedb_ffi_fn_constructor_ffidbreaderbuilder_new,
+            _UniffiLib.uniffi_slatedb_ffi_fn_constructor_dbreaderbuilder_new,
             _UniffiConverterString.lower(path),
-            _UniffiConverterTypeFfiObjectStore.lower(object_store),
+            _UniffiConverterTypeObjectStore.lower(object_store),
         )
 
     def __del__(self):
         # In case of partial initialization of instances.
         pointer = getattr(self, "_pointer", None)
         if pointer is not None:
-            _uniffi_rust_call(_UniffiLib.uniffi_slatedb_ffi_fn_free_ffidbreaderbuilder, pointer)
+            _uniffi_rust_call(_UniffiLib.uniffi_slatedb_ffi_fn_free_dbreaderbuilder, pointer)
 
     def _uniffi_clone_pointer(self):
         return _uniffi_rust_call(
-            _UniffiLib.uniffi_slatedb_ffi_fn_clone_ffidbreaderbuilder, self._pointer
+            _UniffiLib.uniffi_slatedb_ffi_fn_clone_dbreaderbuilder, self._pointer
         )
 
     # Used by alternative constructors or any methods which return this type.
@@ -5612,78 +5567,78 @@ class FfiDbReaderBuilder:
 
     async def build(
         self,
-    ) -> "FfiDbReader":
+    ) -> "DbReader":
         return await _uniffi_rust_call_async(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbreaderbuilder_build(
+            _UniffiLib.uniffi_slatedb_ffi_fn_method_dbreaderbuilder_build(
                 self._uniffi_clone_pointer(),
             ),
             _UniffiLib.ffi_slatedb_ffi_rust_future_poll_pointer,
             _UniffiLib.ffi_slatedb_ffi_rust_future_complete_pointer,
             _UniffiLib.ffi_slatedb_ffi_rust_future_free_pointer,
             # lift function
-            _UniffiConverterTypeFfiDbReader.lift,
+            _UniffiConverterTypeDbReader.lift,
             # Error FFI converter
-            _UniffiConverterTypeFfiError,
+            _UniffiConverterTypeDbError,
         )
 
     def with_checkpoint_id(self, checkpoint_id: "str") -> None:
         _UniffiConverterString.check_lower(checkpoint_id)
 
         _uniffi_rust_call_with_error(
-            _UniffiConverterTypeFfiError,
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbreaderbuilder_with_checkpoint_id,
+            _UniffiConverterTypeDbError,
+            _UniffiLib.uniffi_slatedb_ffi_fn_method_dbreaderbuilder_with_checkpoint_id,
             self._uniffi_clone_pointer(),
             _UniffiConverterString.lower(checkpoint_id),
         )
 
-    def with_merge_operator(self, merge_operator: "FfiMergeOperator") -> None:
-        _UniffiConverterTypeFfiMergeOperator.check_lower(merge_operator)
+    def with_merge_operator(self, merge_operator: "MergeOperator") -> None:
+        _UniffiConverterTypeMergeOperator.check_lower(merge_operator)
 
         _uniffi_rust_call_with_error(
-            _UniffiConverterTypeFfiError,
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbreaderbuilder_with_merge_operator,
+            _UniffiConverterTypeDbError,
+            _UniffiLib.uniffi_slatedb_ffi_fn_method_dbreaderbuilder_with_merge_operator,
             self._uniffi_clone_pointer(),
-            _UniffiConverterTypeFfiMergeOperator.lower(merge_operator),
+            _UniffiConverterTypeMergeOperator.lower(merge_operator),
         )
 
-    def with_options(self, options: "FfiReaderOptions") -> None:
-        _UniffiConverterTypeFfiReaderOptions.check_lower(options)
+    def with_options(self, options: "ReaderOptions") -> None:
+        _UniffiConverterTypeReaderOptions.check_lower(options)
 
         _uniffi_rust_call_with_error(
-            _UniffiConverterTypeFfiError,
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbreaderbuilder_with_options,
+            _UniffiConverterTypeDbError,
+            _UniffiLib.uniffi_slatedb_ffi_fn_method_dbreaderbuilder_with_options,
             self._uniffi_clone_pointer(),
-            _UniffiConverterTypeFfiReaderOptions.lower(options),
+            _UniffiConverterTypeReaderOptions.lower(options),
         )
 
-    def with_wal_object_store(self, wal_object_store: "FfiObjectStore") -> None:
-        _UniffiConverterTypeFfiObjectStore.check_lower(wal_object_store)
+    def with_wal_object_store(self, wal_object_store: "ObjectStore") -> None:
+        _UniffiConverterTypeObjectStore.check_lower(wal_object_store)
 
         _uniffi_rust_call_with_error(
-            _UniffiConverterTypeFfiError,
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbreaderbuilder_with_wal_object_store,
+            _UniffiConverterTypeDbError,
+            _UniffiLib.uniffi_slatedb_ffi_fn_method_dbreaderbuilder_with_wal_object_store,
             self._uniffi_clone_pointer(),
-            _UniffiConverterTypeFfiObjectStore.lower(wal_object_store),
+            _UniffiConverterTypeObjectStore.lower(wal_object_store),
         )
 
 
-class _UniffiConverterTypeFfiDbReaderBuilder:
+class _UniffiConverterTypeDbReaderBuilder:
     @staticmethod
     def lift(value: int):
-        return FfiDbReaderBuilder._make_instance_(value)
+        return DbReaderBuilder._make_instance_(value)
 
     @staticmethod
-    def check_lower(value: FfiDbReaderBuilder):
-        if not isinstance(value, FfiDbReaderBuilder):
+    def check_lower(value: DbReaderBuilder):
+        if not isinstance(value, DbReaderBuilder):
             raise TypeError(
-                "Expected FfiDbReaderBuilder instance, {} found".format(type(value).__name__)
+                "Expected DbReaderBuilder instance, {} found".format(type(value).__name__)
             )
 
     @staticmethod
-    def lower(value: FfiDbReaderBuilderProtocol):
-        if not isinstance(value, FfiDbReaderBuilder):
+    def lower(value: DbReaderBuilderProtocol):
+        if not isinstance(value, DbReaderBuilder):
             raise TypeError(
-                "Expected FfiDbReaderBuilder instance, {} found".format(type(value).__name__)
+                "Expected DbReaderBuilder instance, {} found".format(type(value).__name__)
             )
         return value._uniffi_clone_pointer()
 
@@ -5695,38 +5650,38 @@ class _UniffiConverterTypeFfiDbReaderBuilder:
         return cls.lift(ptr)
 
     @classmethod
-    def write(cls, value: FfiDbReaderBuilderProtocol, buf: _UniffiRustBuffer):
+    def write(cls, value: DbReaderBuilderProtocol, buf: _UniffiRustBuffer):
         buf.write_u64(cls.lower(value))
 
 
-class FfiDbSnapshotProtocol(typing.Protocol):
+class DbSnapshotProtocol(typing.Protocol):
     def get(self, key: "bytes"):
         raise NotImplementedError
 
     def get_key_value(self, key: "bytes"):
         raise NotImplementedError
 
-    def get_key_value_with_options(self, key: "bytes", options: "FfiReadOptions"):
+    def get_key_value_with_options(self, key: "bytes", options: "ReadOptions"):
         raise NotImplementedError
 
-    def get_with_options(self, key: "bytes", options: "FfiReadOptions"):
+    def get_with_options(self, key: "bytes", options: "ReadOptions"):
         raise NotImplementedError
 
-    def scan(self, range: "FfiKeyRange"):
+    def scan(self, range: "KeyRange"):
         raise NotImplementedError
 
     def scan_prefix(self, prefix: "bytes"):
         raise NotImplementedError
 
-    def scan_prefix_with_options(self, prefix: "bytes", options: "FfiScanOptions"):
+    def scan_prefix_with_options(self, prefix: "bytes", options: "ScanOptions"):
         raise NotImplementedError
 
-    def scan_with_options(self, range: "FfiKeyRange", options: "FfiScanOptions"):
+    def scan_with_options(self, range: "KeyRange", options: "ScanOptions"):
         raise NotImplementedError
 
 
-# FfiDbSnapshot is a Rust-only trait - it's a wrapper around a Rust implementation.
-class FfiDbSnapshot:
+# DbSnapshot is a Rust-only trait - it's a wrapper around a Rust implementation.
+class DbSnapshot:
     _pointer: ctypes.c_void_p
 
     def __init__(self, *args, **kwargs):
@@ -5736,12 +5691,10 @@ class FfiDbSnapshot:
         # In case of partial initialization of instances.
         pointer = getattr(self, "_pointer", None)
         if pointer is not None:
-            _uniffi_rust_call(_UniffiLib.uniffi_slatedb_ffi_fn_free_ffidbsnapshot, pointer)
+            _uniffi_rust_call(_UniffiLib.uniffi_slatedb_ffi_fn_free_dbsnapshot, pointer)
 
     def _uniffi_clone_pointer(self):
-        return _uniffi_rust_call(
-            _UniffiLib.uniffi_slatedb_ffi_fn_clone_ffidbsnapshot, self._pointer
-        )
+        return _uniffi_rust_call(_UniffiLib.uniffi_slatedb_ffi_fn_clone_dbsnapshot, self._pointer)
 
     # Used by alternative constructors or any methods which return this type.
     @classmethod
@@ -5756,7 +5709,7 @@ class FfiDbSnapshot:
         _UniffiConverterBytes.check_lower(key)
 
         return await _uniffi_rust_call_async(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbsnapshot_get(
+            _UniffiLib.uniffi_slatedb_ffi_fn_method_dbsnapshot_get(
                 self._uniffi_clone_pointer(), _UniffiConverterBytes.lower(key)
             ),
             _UniffiLib.ffi_slatedb_ffi_rust_future_poll_rust_buffer,
@@ -5765,59 +5718,59 @@ class FfiDbSnapshot:
             # lift function
             _UniffiConverterOptionalBytes.lift,
             # Error FFI converter
-            _UniffiConverterTypeFfiError,
+            _UniffiConverterTypeDbError,
         )
 
-    async def get_key_value(self, key: "bytes") -> "typing.Optional[FfiKeyValue]":
+    async def get_key_value(self, key: "bytes") -> "typing.Optional[KeyValue]":
         _UniffiConverterBytes.check_lower(key)
 
         return await _uniffi_rust_call_async(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbsnapshot_get_key_value(
+            _UniffiLib.uniffi_slatedb_ffi_fn_method_dbsnapshot_get_key_value(
                 self._uniffi_clone_pointer(), _UniffiConverterBytes.lower(key)
             ),
             _UniffiLib.ffi_slatedb_ffi_rust_future_poll_rust_buffer,
             _UniffiLib.ffi_slatedb_ffi_rust_future_complete_rust_buffer,
             _UniffiLib.ffi_slatedb_ffi_rust_future_free_rust_buffer,
             # lift function
-            _UniffiConverterOptionalTypeFfiKeyValue.lift,
+            _UniffiConverterOptionalTypeKeyValue.lift,
             # Error FFI converter
-            _UniffiConverterTypeFfiError,
+            _UniffiConverterTypeDbError,
         )
 
     async def get_key_value_with_options(
-        self, key: "bytes", options: "FfiReadOptions"
-    ) -> "typing.Optional[FfiKeyValue]":
+        self, key: "bytes", options: "ReadOptions"
+    ) -> "typing.Optional[KeyValue]":
         _UniffiConverterBytes.check_lower(key)
 
-        _UniffiConverterTypeFfiReadOptions.check_lower(options)
+        _UniffiConverterTypeReadOptions.check_lower(options)
 
         return await _uniffi_rust_call_async(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbsnapshot_get_key_value_with_options(
+            _UniffiLib.uniffi_slatedb_ffi_fn_method_dbsnapshot_get_key_value_with_options(
                 self._uniffi_clone_pointer(),
                 _UniffiConverterBytes.lower(key),
-                _UniffiConverterTypeFfiReadOptions.lower(options),
+                _UniffiConverterTypeReadOptions.lower(options),
             ),
             _UniffiLib.ffi_slatedb_ffi_rust_future_poll_rust_buffer,
             _UniffiLib.ffi_slatedb_ffi_rust_future_complete_rust_buffer,
             _UniffiLib.ffi_slatedb_ffi_rust_future_free_rust_buffer,
             # lift function
-            _UniffiConverterOptionalTypeFfiKeyValue.lift,
+            _UniffiConverterOptionalTypeKeyValue.lift,
             # Error FFI converter
-            _UniffiConverterTypeFfiError,
+            _UniffiConverterTypeDbError,
         )
 
     async def get_with_options(
-        self, key: "bytes", options: "FfiReadOptions"
+        self, key: "bytes", options: "ReadOptions"
     ) -> "typing.Optional[bytes]":
         _UniffiConverterBytes.check_lower(key)
 
-        _UniffiConverterTypeFfiReadOptions.check_lower(options)
+        _UniffiConverterTypeReadOptions.check_lower(options)
 
         return await _uniffi_rust_call_async(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbsnapshot_get_with_options(
+            _UniffiLib.uniffi_slatedb_ffi_fn_method_dbsnapshot_get_with_options(
                 self._uniffi_clone_pointer(),
                 _UniffiConverterBytes.lower(key),
-                _UniffiConverterTypeFfiReadOptions.lower(options),
+                _UniffiConverterTypeReadOptions.lower(options),
             ),
             _UniffiLib.ffi_slatedb_ffi_rust_future_poll_rust_buffer,
             _UniffiLib.ffi_slatedb_ffi_rust_future_complete_rust_buffer,
@@ -5825,104 +5778,98 @@ class FfiDbSnapshot:
             # lift function
             _UniffiConverterOptionalBytes.lift,
             # Error FFI converter
-            _UniffiConverterTypeFfiError,
+            _UniffiConverterTypeDbError,
         )
 
-    async def scan(self, range: "FfiKeyRange") -> "FfiDbIterator":
-        _UniffiConverterTypeFfiKeyRange.check_lower(range)
+    async def scan(self, range: "KeyRange") -> "DbIterator":
+        _UniffiConverterTypeKeyRange.check_lower(range)
 
         return await _uniffi_rust_call_async(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbsnapshot_scan(
-                self._uniffi_clone_pointer(), _UniffiConverterTypeFfiKeyRange.lower(range)
+            _UniffiLib.uniffi_slatedb_ffi_fn_method_dbsnapshot_scan(
+                self._uniffi_clone_pointer(), _UniffiConverterTypeKeyRange.lower(range)
             ),
             _UniffiLib.ffi_slatedb_ffi_rust_future_poll_pointer,
             _UniffiLib.ffi_slatedb_ffi_rust_future_complete_pointer,
             _UniffiLib.ffi_slatedb_ffi_rust_future_free_pointer,
             # lift function
-            _UniffiConverterTypeFfiDbIterator.lift,
+            _UniffiConverterTypeDbIterator.lift,
             # Error FFI converter
-            _UniffiConverterTypeFfiError,
+            _UniffiConverterTypeDbError,
         )
 
-    async def scan_prefix(self, prefix: "bytes") -> "FfiDbIterator":
+    async def scan_prefix(self, prefix: "bytes") -> "DbIterator":
         _UniffiConverterBytes.check_lower(prefix)
 
         return await _uniffi_rust_call_async(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbsnapshot_scan_prefix(
+            _UniffiLib.uniffi_slatedb_ffi_fn_method_dbsnapshot_scan_prefix(
                 self._uniffi_clone_pointer(), _UniffiConverterBytes.lower(prefix)
             ),
             _UniffiLib.ffi_slatedb_ffi_rust_future_poll_pointer,
             _UniffiLib.ffi_slatedb_ffi_rust_future_complete_pointer,
             _UniffiLib.ffi_slatedb_ffi_rust_future_free_pointer,
             # lift function
-            _UniffiConverterTypeFfiDbIterator.lift,
+            _UniffiConverterTypeDbIterator.lift,
             # Error FFI converter
-            _UniffiConverterTypeFfiError,
+            _UniffiConverterTypeDbError,
         )
 
     async def scan_prefix_with_options(
-        self, prefix: "bytes", options: "FfiScanOptions"
-    ) -> "FfiDbIterator":
+        self, prefix: "bytes", options: "ScanOptions"
+    ) -> "DbIterator":
         _UniffiConverterBytes.check_lower(prefix)
 
-        _UniffiConverterTypeFfiScanOptions.check_lower(options)
+        _UniffiConverterTypeScanOptions.check_lower(options)
 
         return await _uniffi_rust_call_async(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbsnapshot_scan_prefix_with_options(
+            _UniffiLib.uniffi_slatedb_ffi_fn_method_dbsnapshot_scan_prefix_with_options(
                 self._uniffi_clone_pointer(),
                 _UniffiConverterBytes.lower(prefix),
-                _UniffiConverterTypeFfiScanOptions.lower(options),
+                _UniffiConverterTypeScanOptions.lower(options),
             ),
             _UniffiLib.ffi_slatedb_ffi_rust_future_poll_pointer,
             _UniffiLib.ffi_slatedb_ffi_rust_future_complete_pointer,
             _UniffiLib.ffi_slatedb_ffi_rust_future_free_pointer,
             # lift function
-            _UniffiConverterTypeFfiDbIterator.lift,
+            _UniffiConverterTypeDbIterator.lift,
             # Error FFI converter
-            _UniffiConverterTypeFfiError,
+            _UniffiConverterTypeDbError,
         )
 
-    async def scan_with_options(
-        self, range: "FfiKeyRange", options: "FfiScanOptions"
-    ) -> "FfiDbIterator":
-        _UniffiConverterTypeFfiKeyRange.check_lower(range)
+    async def scan_with_options(self, range: "KeyRange", options: "ScanOptions") -> "DbIterator":
+        _UniffiConverterTypeKeyRange.check_lower(range)
 
-        _UniffiConverterTypeFfiScanOptions.check_lower(options)
+        _UniffiConverterTypeScanOptions.check_lower(options)
 
         return await _uniffi_rust_call_async(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbsnapshot_scan_with_options(
+            _UniffiLib.uniffi_slatedb_ffi_fn_method_dbsnapshot_scan_with_options(
                 self._uniffi_clone_pointer(),
-                _UniffiConverterTypeFfiKeyRange.lower(range),
-                _UniffiConverterTypeFfiScanOptions.lower(options),
+                _UniffiConverterTypeKeyRange.lower(range),
+                _UniffiConverterTypeScanOptions.lower(options),
             ),
             _UniffiLib.ffi_slatedb_ffi_rust_future_poll_pointer,
             _UniffiLib.ffi_slatedb_ffi_rust_future_complete_pointer,
             _UniffiLib.ffi_slatedb_ffi_rust_future_free_pointer,
             # lift function
-            _UniffiConverterTypeFfiDbIterator.lift,
+            _UniffiConverterTypeDbIterator.lift,
             # Error FFI converter
-            _UniffiConverterTypeFfiError,
+            _UniffiConverterTypeDbError,
         )
 
 
-class _UniffiConverterTypeFfiDbSnapshot:
+class _UniffiConverterTypeDbSnapshot:
     @staticmethod
     def lift(value: int):
-        return FfiDbSnapshot._make_instance_(value)
+        return DbSnapshot._make_instance_(value)
 
     @staticmethod
-    def check_lower(value: FfiDbSnapshot):
-        if not isinstance(value, FfiDbSnapshot):
-            raise TypeError(
-                "Expected FfiDbSnapshot instance, {} found".format(type(value).__name__)
-            )
+    def check_lower(value: DbSnapshot):
+        if not isinstance(value, DbSnapshot):
+            raise TypeError("Expected DbSnapshot instance, {} found".format(type(value).__name__))
 
     @staticmethod
-    def lower(value: FfiDbSnapshotProtocol):
-        if not isinstance(value, FfiDbSnapshot):
-            raise TypeError(
-                "Expected FfiDbSnapshot instance, {} found".format(type(value).__name__)
-            )
+    def lower(value: DbSnapshotProtocol):
+        if not isinstance(value, DbSnapshot):
+            raise TypeError("Expected DbSnapshot instance, {} found".format(type(value).__name__))
         return value._uniffi_clone_pointer()
 
     @classmethod
@@ -5933,17 +5880,17 @@ class _UniffiConverterTypeFfiDbSnapshot:
         return cls.lift(ptr)
 
     @classmethod
-    def write(cls, value: FfiDbSnapshotProtocol, buf: _UniffiRustBuffer):
+    def write(cls, value: DbSnapshotProtocol, buf: _UniffiRustBuffer):
         buf.write_u64(cls.lower(value))
 
 
-class FfiDbTransactionProtocol(typing.Protocol):
+class DbTransactionProtocol(typing.Protocol):
     def commit(
         self,
     ):
         raise NotImplementedError
 
-    def commit_with_options(self, options: "FfiWriteOptions"):
+    def commit_with_options(self, options: "WriteOptions"):
         raise NotImplementedError
 
     def delete(self, key: "bytes"):
@@ -5955,10 +5902,10 @@ class FfiDbTransactionProtocol(typing.Protocol):
     def get_key_value(self, key: "bytes"):
         raise NotImplementedError
 
-    def get_key_value_with_options(self, key: "bytes", options: "FfiReadOptions"):
+    def get_key_value_with_options(self, key: "bytes", options: "ReadOptions"):
         raise NotImplementedError
 
-    def get_with_options(self, key: "bytes", options: "FfiReadOptions"):
+    def get_with_options(self, key: "bytes", options: "ReadOptions"):
         raise NotImplementedError
 
     def id(
@@ -5972,13 +5919,13 @@ class FfiDbTransactionProtocol(typing.Protocol):
     def merge(self, key: "bytes", operand: "bytes"):
         raise NotImplementedError
 
-    def merge_with_options(self, key: "bytes", operand: "bytes", options: "FfiMergeOptions"):
+    def merge_with_options(self, key: "bytes", operand: "bytes", options: "MergeOptions"):
         raise NotImplementedError
 
     def put(self, key: "bytes", value: "bytes"):
         raise NotImplementedError
 
-    def put_with_options(self, key: "bytes", value: "bytes", options: "FfiPutOptions"):
+    def put_with_options(self, key: "bytes", value: "bytes", options: "PutOptions"):
         raise NotImplementedError
 
     def rollback(
@@ -5986,16 +5933,16 @@ class FfiDbTransactionProtocol(typing.Protocol):
     ):
         raise NotImplementedError
 
-    def scan(self, range: "FfiKeyRange"):
+    def scan(self, range: "KeyRange"):
         raise NotImplementedError
 
     def scan_prefix(self, prefix: "bytes"):
         raise NotImplementedError
 
-    def scan_prefix_with_options(self, prefix: "bytes", options: "FfiScanOptions"):
+    def scan_prefix_with_options(self, prefix: "bytes", options: "ScanOptions"):
         raise NotImplementedError
 
-    def scan_with_options(self, range: "FfiKeyRange", options: "FfiScanOptions"):
+    def scan_with_options(self, range: "KeyRange", options: "ScanOptions"):
         raise NotImplementedError
 
     def seqnum(
@@ -6007,8 +5954,8 @@ class FfiDbTransactionProtocol(typing.Protocol):
         raise NotImplementedError
 
 
-# FfiDbTransaction is a Rust-only trait - it's a wrapper around a Rust implementation.
-class FfiDbTransaction:
+# DbTransaction is a Rust-only trait - it's a wrapper around a Rust implementation.
+class DbTransaction:
     _pointer: ctypes.c_void_p
 
     def __init__(self, *args, **kwargs):
@@ -6018,11 +5965,11 @@ class FfiDbTransaction:
         # In case of partial initialization of instances.
         pointer = getattr(self, "_pointer", None)
         if pointer is not None:
-            _uniffi_rust_call(_UniffiLib.uniffi_slatedb_ffi_fn_free_ffidbtransaction, pointer)
+            _uniffi_rust_call(_UniffiLib.uniffi_slatedb_ffi_fn_free_dbtransaction, pointer)
 
     def _uniffi_clone_pointer(self):
         return _uniffi_rust_call(
-            _UniffiLib.uniffi_slatedb_ffi_fn_clone_ffidbtransaction, self._pointer
+            _UniffiLib.uniffi_slatedb_ffi_fn_clone_dbtransaction, self._pointer
         )
 
     # Used by alternative constructors or any methods which return this type.
@@ -6036,36 +5983,34 @@ class FfiDbTransaction:
 
     async def commit(
         self,
-    ) -> "typing.Optional[FfiWriteHandle]":
+    ) -> "typing.Optional[WriteHandle]":
         return await _uniffi_rust_call_async(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbtransaction_commit(
+            _UniffiLib.uniffi_slatedb_ffi_fn_method_dbtransaction_commit(
                 self._uniffi_clone_pointer(),
             ),
             _UniffiLib.ffi_slatedb_ffi_rust_future_poll_rust_buffer,
             _UniffiLib.ffi_slatedb_ffi_rust_future_complete_rust_buffer,
             _UniffiLib.ffi_slatedb_ffi_rust_future_free_rust_buffer,
             # lift function
-            _UniffiConverterOptionalTypeFfiWriteHandle.lift,
+            _UniffiConverterOptionalTypeWriteHandle.lift,
             # Error FFI converter
-            _UniffiConverterTypeFfiError,
+            _UniffiConverterTypeDbError,
         )
 
-    async def commit_with_options(
-        self, options: "FfiWriteOptions"
-    ) -> "typing.Optional[FfiWriteHandle]":
-        _UniffiConverterTypeFfiWriteOptions.check_lower(options)
+    async def commit_with_options(self, options: "WriteOptions") -> "typing.Optional[WriteHandle]":
+        _UniffiConverterTypeWriteOptions.check_lower(options)
 
         return await _uniffi_rust_call_async(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbtransaction_commit_with_options(
-                self._uniffi_clone_pointer(), _UniffiConverterTypeFfiWriteOptions.lower(options)
+            _UniffiLib.uniffi_slatedb_ffi_fn_method_dbtransaction_commit_with_options(
+                self._uniffi_clone_pointer(), _UniffiConverterTypeWriteOptions.lower(options)
             ),
             _UniffiLib.ffi_slatedb_ffi_rust_future_poll_rust_buffer,
             _UniffiLib.ffi_slatedb_ffi_rust_future_complete_rust_buffer,
             _UniffiLib.ffi_slatedb_ffi_rust_future_free_rust_buffer,
             # lift function
-            _UniffiConverterOptionalTypeFfiWriteHandle.lift,
+            _UniffiConverterOptionalTypeWriteHandle.lift,
             # Error FFI converter
-            _UniffiConverterTypeFfiError,
+            _UniffiConverterTypeDbError,
         )
 
     async def delete(self, key: "bytes") -> None:
@@ -6073,7 +6018,7 @@ class FfiDbTransaction:
         _UniffiConverterBytes.check_lower(key)
 
         return await _uniffi_rust_call_async(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbtransaction_delete(
+            _UniffiLib.uniffi_slatedb_ffi_fn_method_dbtransaction_delete(
                 self._uniffi_clone_pointer(), _UniffiConverterBytes.lower(key)
             ),
             _UniffiLib.ffi_slatedb_ffi_rust_future_poll_void,
@@ -6082,14 +6027,14 @@ class FfiDbTransaction:
             # lift function
             lambda val: None,
             # Error FFI converter
-            _UniffiConverterTypeFfiError,
+            _UniffiConverterTypeDbError,
         )
 
     async def get(self, key: "bytes") -> "typing.Optional[bytes]":
         _UniffiConverterBytes.check_lower(key)
 
         return await _uniffi_rust_call_async(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbtransaction_get(
+            _UniffiLib.uniffi_slatedb_ffi_fn_method_dbtransaction_get(
                 self._uniffi_clone_pointer(), _UniffiConverterBytes.lower(key)
             ),
             _UniffiLib.ffi_slatedb_ffi_rust_future_poll_rust_buffer,
@@ -6098,59 +6043,59 @@ class FfiDbTransaction:
             # lift function
             _UniffiConverterOptionalBytes.lift,
             # Error FFI converter
-            _UniffiConverterTypeFfiError,
+            _UniffiConverterTypeDbError,
         )
 
-    async def get_key_value(self, key: "bytes") -> "typing.Optional[FfiKeyValue]":
+    async def get_key_value(self, key: "bytes") -> "typing.Optional[KeyValue]":
         _UniffiConverterBytes.check_lower(key)
 
         return await _uniffi_rust_call_async(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbtransaction_get_key_value(
+            _UniffiLib.uniffi_slatedb_ffi_fn_method_dbtransaction_get_key_value(
                 self._uniffi_clone_pointer(), _UniffiConverterBytes.lower(key)
             ),
             _UniffiLib.ffi_slatedb_ffi_rust_future_poll_rust_buffer,
             _UniffiLib.ffi_slatedb_ffi_rust_future_complete_rust_buffer,
             _UniffiLib.ffi_slatedb_ffi_rust_future_free_rust_buffer,
             # lift function
-            _UniffiConverterOptionalTypeFfiKeyValue.lift,
+            _UniffiConverterOptionalTypeKeyValue.lift,
             # Error FFI converter
-            _UniffiConverterTypeFfiError,
+            _UniffiConverterTypeDbError,
         )
 
     async def get_key_value_with_options(
-        self, key: "bytes", options: "FfiReadOptions"
-    ) -> "typing.Optional[FfiKeyValue]":
+        self, key: "bytes", options: "ReadOptions"
+    ) -> "typing.Optional[KeyValue]":
         _UniffiConverterBytes.check_lower(key)
 
-        _UniffiConverterTypeFfiReadOptions.check_lower(options)
+        _UniffiConverterTypeReadOptions.check_lower(options)
 
         return await _uniffi_rust_call_async(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbtransaction_get_key_value_with_options(
+            _UniffiLib.uniffi_slatedb_ffi_fn_method_dbtransaction_get_key_value_with_options(
                 self._uniffi_clone_pointer(),
                 _UniffiConverterBytes.lower(key),
-                _UniffiConverterTypeFfiReadOptions.lower(options),
+                _UniffiConverterTypeReadOptions.lower(options),
             ),
             _UniffiLib.ffi_slatedb_ffi_rust_future_poll_rust_buffer,
             _UniffiLib.ffi_slatedb_ffi_rust_future_complete_rust_buffer,
             _UniffiLib.ffi_slatedb_ffi_rust_future_free_rust_buffer,
             # lift function
-            _UniffiConverterOptionalTypeFfiKeyValue.lift,
+            _UniffiConverterOptionalTypeKeyValue.lift,
             # Error FFI converter
-            _UniffiConverterTypeFfiError,
+            _UniffiConverterTypeDbError,
         )
 
     async def get_with_options(
-        self, key: "bytes", options: "FfiReadOptions"
+        self, key: "bytes", options: "ReadOptions"
     ) -> "typing.Optional[bytes]":
         _UniffiConverterBytes.check_lower(key)
 
-        _UniffiConverterTypeFfiReadOptions.check_lower(options)
+        _UniffiConverterTypeReadOptions.check_lower(options)
 
         return await _uniffi_rust_call_async(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbtransaction_get_with_options(
+            _UniffiLib.uniffi_slatedb_ffi_fn_method_dbtransaction_get_with_options(
                 self._uniffi_clone_pointer(),
                 _UniffiConverterBytes.lower(key),
-                _UniffiConverterTypeFfiReadOptions.lower(options),
+                _UniffiConverterTypeReadOptions.lower(options),
             ),
             _UniffiLib.ffi_slatedb_ffi_rust_future_poll_rust_buffer,
             _UniffiLib.ffi_slatedb_ffi_rust_future_complete_rust_buffer,
@@ -6158,7 +6103,7 @@ class FfiDbTransaction:
             # lift function
             _UniffiConverterOptionalBytes.lift,
             # Error FFI converter
-            _UniffiConverterTypeFfiError,
+            _UniffiConverterTypeDbError,
         )
 
     def id(
@@ -6166,7 +6111,7 @@ class FfiDbTransaction:
     ) -> "str":
         return _UniffiConverterString.lift(
             _uniffi_rust_call(
-                _UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbtransaction_id,
+                _UniffiLib.uniffi_slatedb_ffi_fn_method_dbtransaction_id,
                 self._uniffi_clone_pointer(),
             )
         )
@@ -6176,7 +6121,7 @@ class FfiDbTransaction:
         _UniffiConverterSequenceBytes.check_lower(keys)
 
         return await _uniffi_rust_call_async(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbtransaction_mark_read(
+            _UniffiLib.uniffi_slatedb_ffi_fn_method_dbtransaction_mark_read(
                 self._uniffi_clone_pointer(), _UniffiConverterSequenceBytes.lower(keys)
             ),
             _UniffiLib.ffi_slatedb_ffi_rust_future_poll_void,
@@ -6185,7 +6130,7 @@ class FfiDbTransaction:
             # lift function
             lambda val: None,
             # Error FFI converter
-            _UniffiConverterTypeFfiError,
+            _UniffiConverterTypeDbError,
         )
 
     async def merge(self, key: "bytes", operand: "bytes") -> None:
@@ -6195,7 +6140,7 @@ class FfiDbTransaction:
         _UniffiConverterBytes.check_lower(operand)
 
         return await _uniffi_rust_call_async(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbtransaction_merge(
+            _UniffiLib.uniffi_slatedb_ffi_fn_method_dbtransaction_merge(
                 self._uniffi_clone_pointer(),
                 _UniffiConverterBytes.lower(key),
                 _UniffiConverterBytes.lower(operand),
@@ -6206,25 +6151,25 @@ class FfiDbTransaction:
             # lift function
             lambda val: None,
             # Error FFI converter
-            _UniffiConverterTypeFfiError,
+            _UniffiConverterTypeDbError,
         )
 
     async def merge_with_options(
-        self, key: "bytes", operand: "bytes", options: "FfiMergeOptions"
+        self, key: "bytes", operand: "bytes", options: "MergeOptions"
     ) -> None:
 
         _UniffiConverterBytes.check_lower(key)
 
         _UniffiConverterBytes.check_lower(operand)
 
-        _UniffiConverterTypeFfiMergeOptions.check_lower(options)
+        _UniffiConverterTypeMergeOptions.check_lower(options)
 
         return await _uniffi_rust_call_async(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbtransaction_merge_with_options(
+            _UniffiLib.uniffi_slatedb_ffi_fn_method_dbtransaction_merge_with_options(
                 self._uniffi_clone_pointer(),
                 _UniffiConverterBytes.lower(key),
                 _UniffiConverterBytes.lower(operand),
-                _UniffiConverterTypeFfiMergeOptions.lower(options),
+                _UniffiConverterTypeMergeOptions.lower(options),
             ),
             _UniffiLib.ffi_slatedb_ffi_rust_future_poll_void,
             _UniffiLib.ffi_slatedb_ffi_rust_future_complete_void,
@@ -6232,7 +6177,7 @@ class FfiDbTransaction:
             # lift function
             lambda val: None,
             # Error FFI converter
-            _UniffiConverterTypeFfiError,
+            _UniffiConverterTypeDbError,
         )
 
     async def put(self, key: "bytes", value: "bytes") -> None:
@@ -6242,7 +6187,7 @@ class FfiDbTransaction:
         _UniffiConverterBytes.check_lower(value)
 
         return await _uniffi_rust_call_async(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbtransaction_put(
+            _UniffiLib.uniffi_slatedb_ffi_fn_method_dbtransaction_put(
                 self._uniffi_clone_pointer(),
                 _UniffiConverterBytes.lower(key),
                 _UniffiConverterBytes.lower(value),
@@ -6253,25 +6198,23 @@ class FfiDbTransaction:
             # lift function
             lambda val: None,
             # Error FFI converter
-            _UniffiConverterTypeFfiError,
+            _UniffiConverterTypeDbError,
         )
 
-    async def put_with_options(
-        self, key: "bytes", value: "bytes", options: "FfiPutOptions"
-    ) -> None:
+    async def put_with_options(self, key: "bytes", value: "bytes", options: "PutOptions") -> None:
 
         _UniffiConverterBytes.check_lower(key)
 
         _UniffiConverterBytes.check_lower(value)
 
-        _UniffiConverterTypeFfiPutOptions.check_lower(options)
+        _UniffiConverterTypePutOptions.check_lower(options)
 
         return await _uniffi_rust_call_async(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbtransaction_put_with_options(
+            _UniffiLib.uniffi_slatedb_ffi_fn_method_dbtransaction_put_with_options(
                 self._uniffi_clone_pointer(),
                 _UniffiConverterBytes.lower(key),
                 _UniffiConverterBytes.lower(value),
-                _UniffiConverterTypeFfiPutOptions.lower(options),
+                _UniffiConverterTypePutOptions.lower(options),
             ),
             _UniffiLib.ffi_slatedb_ffi_rust_future_poll_void,
             _UniffiLib.ffi_slatedb_ffi_rust_future_complete_void,
@@ -6279,7 +6222,7 @@ class FfiDbTransaction:
             # lift function
             lambda val: None,
             # Error FFI converter
-            _UniffiConverterTypeFfiError,
+            _UniffiConverterTypeDbError,
         )
 
     async def rollback(
@@ -6287,7 +6230,7 @@ class FfiDbTransaction:
     ) -> None:
 
         return await _uniffi_rust_call_async(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbtransaction_rollback(
+            _UniffiLib.uniffi_slatedb_ffi_fn_method_dbtransaction_rollback(
                 self._uniffi_clone_pointer(),
             ),
             _UniffiLib.ffi_slatedb_ffi_rust_future_poll_void,
@@ -6296,83 +6239,81 @@ class FfiDbTransaction:
             # lift function
             lambda val: None,
             # Error FFI converter
-            _UniffiConverterTypeFfiError,
+            _UniffiConverterTypeDbError,
         )
 
-    async def scan(self, range: "FfiKeyRange") -> "FfiDbIterator":
-        _UniffiConverterTypeFfiKeyRange.check_lower(range)
+    async def scan(self, range: "KeyRange") -> "DbIterator":
+        _UniffiConverterTypeKeyRange.check_lower(range)
 
         return await _uniffi_rust_call_async(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbtransaction_scan(
-                self._uniffi_clone_pointer(), _UniffiConverterTypeFfiKeyRange.lower(range)
+            _UniffiLib.uniffi_slatedb_ffi_fn_method_dbtransaction_scan(
+                self._uniffi_clone_pointer(), _UniffiConverterTypeKeyRange.lower(range)
             ),
             _UniffiLib.ffi_slatedb_ffi_rust_future_poll_pointer,
             _UniffiLib.ffi_slatedb_ffi_rust_future_complete_pointer,
             _UniffiLib.ffi_slatedb_ffi_rust_future_free_pointer,
             # lift function
-            _UniffiConverterTypeFfiDbIterator.lift,
+            _UniffiConverterTypeDbIterator.lift,
             # Error FFI converter
-            _UniffiConverterTypeFfiError,
+            _UniffiConverterTypeDbError,
         )
 
-    async def scan_prefix(self, prefix: "bytes") -> "FfiDbIterator":
+    async def scan_prefix(self, prefix: "bytes") -> "DbIterator":
         _UniffiConverterBytes.check_lower(prefix)
 
         return await _uniffi_rust_call_async(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbtransaction_scan_prefix(
+            _UniffiLib.uniffi_slatedb_ffi_fn_method_dbtransaction_scan_prefix(
                 self._uniffi_clone_pointer(), _UniffiConverterBytes.lower(prefix)
             ),
             _UniffiLib.ffi_slatedb_ffi_rust_future_poll_pointer,
             _UniffiLib.ffi_slatedb_ffi_rust_future_complete_pointer,
             _UniffiLib.ffi_slatedb_ffi_rust_future_free_pointer,
             # lift function
-            _UniffiConverterTypeFfiDbIterator.lift,
+            _UniffiConverterTypeDbIterator.lift,
             # Error FFI converter
-            _UniffiConverterTypeFfiError,
+            _UniffiConverterTypeDbError,
         )
 
     async def scan_prefix_with_options(
-        self, prefix: "bytes", options: "FfiScanOptions"
-    ) -> "FfiDbIterator":
+        self, prefix: "bytes", options: "ScanOptions"
+    ) -> "DbIterator":
         _UniffiConverterBytes.check_lower(prefix)
 
-        _UniffiConverterTypeFfiScanOptions.check_lower(options)
+        _UniffiConverterTypeScanOptions.check_lower(options)
 
         return await _uniffi_rust_call_async(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbtransaction_scan_prefix_with_options(
+            _UniffiLib.uniffi_slatedb_ffi_fn_method_dbtransaction_scan_prefix_with_options(
                 self._uniffi_clone_pointer(),
                 _UniffiConverterBytes.lower(prefix),
-                _UniffiConverterTypeFfiScanOptions.lower(options),
+                _UniffiConverterTypeScanOptions.lower(options),
             ),
             _UniffiLib.ffi_slatedb_ffi_rust_future_poll_pointer,
             _UniffiLib.ffi_slatedb_ffi_rust_future_complete_pointer,
             _UniffiLib.ffi_slatedb_ffi_rust_future_free_pointer,
             # lift function
-            _UniffiConverterTypeFfiDbIterator.lift,
+            _UniffiConverterTypeDbIterator.lift,
             # Error FFI converter
-            _UniffiConverterTypeFfiError,
+            _UniffiConverterTypeDbError,
         )
 
-    async def scan_with_options(
-        self, range: "FfiKeyRange", options: "FfiScanOptions"
-    ) -> "FfiDbIterator":
-        _UniffiConverterTypeFfiKeyRange.check_lower(range)
+    async def scan_with_options(self, range: "KeyRange", options: "ScanOptions") -> "DbIterator":
+        _UniffiConverterTypeKeyRange.check_lower(range)
 
-        _UniffiConverterTypeFfiScanOptions.check_lower(options)
+        _UniffiConverterTypeScanOptions.check_lower(options)
 
         return await _uniffi_rust_call_async(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbtransaction_scan_with_options(
+            _UniffiLib.uniffi_slatedb_ffi_fn_method_dbtransaction_scan_with_options(
                 self._uniffi_clone_pointer(),
-                _UniffiConverterTypeFfiKeyRange.lower(range),
-                _UniffiConverterTypeFfiScanOptions.lower(options),
+                _UniffiConverterTypeKeyRange.lower(range),
+                _UniffiConverterTypeScanOptions.lower(options),
             ),
             _UniffiLib.ffi_slatedb_ffi_rust_future_poll_pointer,
             _UniffiLib.ffi_slatedb_ffi_rust_future_complete_pointer,
             _UniffiLib.ffi_slatedb_ffi_rust_future_free_pointer,
             # lift function
-            _UniffiConverterTypeFfiDbIterator.lift,
+            _UniffiConverterTypeDbIterator.lift,
             # Error FFI converter
-            _UniffiConverterTypeFfiError,
+            _UniffiConverterTypeDbError,
         )
 
     def seqnum(
@@ -6380,7 +6321,7 @@ class FfiDbTransaction:
     ) -> "int":
         return _UniffiConverterUInt64.lift(
             _uniffi_rust_call(
-                _UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbtransaction_seqnum,
+                _UniffiLib.uniffi_slatedb_ffi_fn_method_dbtransaction_seqnum,
                 self._uniffi_clone_pointer(),
             )
         )
@@ -6390,7 +6331,7 @@ class FfiDbTransaction:
         _UniffiConverterSequenceBytes.check_lower(keys)
 
         return await _uniffi_rust_call_async(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_ffidbtransaction_unmark_write(
+            _UniffiLib.uniffi_slatedb_ffi_fn_method_dbtransaction_unmark_write(
                 self._uniffi_clone_pointer(), _UniffiConverterSequenceBytes.lower(keys)
             ),
             _UniffiLib.ffi_slatedb_ffi_rust_future_poll_void,
@@ -6399,27 +6340,27 @@ class FfiDbTransaction:
             # lift function
             lambda val: None,
             # Error FFI converter
-            _UniffiConverterTypeFfiError,
+            _UniffiConverterTypeDbError,
         )
 
 
-class _UniffiConverterTypeFfiDbTransaction:
+class _UniffiConverterTypeDbTransaction:
     @staticmethod
     def lift(value: int):
-        return FfiDbTransaction._make_instance_(value)
+        return DbTransaction._make_instance_(value)
 
     @staticmethod
-    def check_lower(value: FfiDbTransaction):
-        if not isinstance(value, FfiDbTransaction):
+    def check_lower(value: DbTransaction):
+        if not isinstance(value, DbTransaction):
             raise TypeError(
-                "Expected FfiDbTransaction instance, {} found".format(type(value).__name__)
+                "Expected DbTransaction instance, {} found".format(type(value).__name__)
             )
 
     @staticmethod
-    def lower(value: FfiDbTransactionProtocol):
-        if not isinstance(value, FfiDbTransaction):
+    def lower(value: DbTransactionProtocol):
+        if not isinstance(value, DbTransaction):
             raise TypeError(
-                "Expected FfiDbTransaction instance, {} found".format(type(value).__name__)
+                "Expected DbTransaction instance, {} found".format(type(value).__name__)
             )
         return value._uniffi_clone_pointer()
 
@@ -6431,16 +6372,16 @@ class _UniffiConverterTypeFfiDbTransaction:
         return cls.lift(ptr)
 
     @classmethod
-    def write(cls, value: FfiDbTransactionProtocol, buf: _UniffiRustBuffer):
+    def write(cls, value: DbTransactionProtocol, buf: _UniffiRustBuffer):
         buf.write_u64(cls.lower(value))
 
 
-class FfiObjectStoreProtocol(typing.Protocol):
+class ObjectStoreProtocol(typing.Protocol):
     pass
 
 
-# FfiObjectStore is a Rust-only trait - it's a wrapper around a Rust implementation.
-class FfiObjectStore:
+# ObjectStore is a Rust-only trait - it's a wrapper around a Rust implementation.
+class ObjectStore:
     _pointer: ctypes.c_void_p
 
     def __init__(self, *args, **kwargs):
@@ -6450,12 +6391,10 @@ class FfiObjectStore:
         # In case of partial initialization of instances.
         pointer = getattr(self, "_pointer", None)
         if pointer is not None:
-            _uniffi_rust_call(_UniffiLib.uniffi_slatedb_ffi_fn_free_ffiobjectstore, pointer)
+            _uniffi_rust_call(_UniffiLib.uniffi_slatedb_ffi_fn_free_objectstore, pointer)
 
     def _uniffi_clone_pointer(self):
-        return _uniffi_rust_call(
-            _UniffiLib.uniffi_slatedb_ffi_fn_clone_ffiobjectstore, self._pointer
-        )
+        return _uniffi_rust_call(_UniffiLib.uniffi_slatedb_ffi_fn_clone_objectstore, self._pointer)
 
     # Used by alternative constructors or any methods which return this type.
     @classmethod
@@ -6472,8 +6411,8 @@ class FfiObjectStore:
 
         # Call the (fallible) function before creating any half-baked object instances.
         pointer = _uniffi_rust_call_with_error(
-            _UniffiConverterTypeFfiError,
-            _UniffiLib.uniffi_slatedb_ffi_fn_constructor_ffiobjectstore_from_env,
+            _UniffiConverterTypeDbError,
+            _UniffiLib.uniffi_slatedb_ffi_fn_constructor_objectstore_from_env,
             _UniffiConverterOptionalString.lower(env_file),
         )
         return cls._make_instance_(pointer)
@@ -6484,31 +6423,27 @@ class FfiObjectStore:
 
         # Call the (fallible) function before creating any half-baked object instances.
         pointer = _uniffi_rust_call_with_error(
-            _UniffiConverterTypeFfiError,
-            _UniffiLib.uniffi_slatedb_ffi_fn_constructor_ffiobjectstore_resolve,
+            _UniffiConverterTypeDbError,
+            _UniffiLib.uniffi_slatedb_ffi_fn_constructor_objectstore_resolve,
             _UniffiConverterString.lower(url),
         )
         return cls._make_instance_(pointer)
 
 
-class _UniffiConverterTypeFfiObjectStore:
+class _UniffiConverterTypeObjectStore:
     @staticmethod
     def lift(value: int):
-        return FfiObjectStore._make_instance_(value)
+        return ObjectStore._make_instance_(value)
 
     @staticmethod
-    def check_lower(value: FfiObjectStore):
-        if not isinstance(value, FfiObjectStore):
-            raise TypeError(
-                "Expected FfiObjectStore instance, {} found".format(type(value).__name__)
-            )
+    def check_lower(value: ObjectStore):
+        if not isinstance(value, ObjectStore):
+            raise TypeError("Expected ObjectStore instance, {} found".format(type(value).__name__))
 
     @staticmethod
-    def lower(value: FfiObjectStoreProtocol):
-        if not isinstance(value, FfiObjectStore):
-            raise TypeError(
-                "Expected FfiObjectStore instance, {} found".format(type(value).__name__)
-            )
+    def lower(value: ObjectStoreProtocol):
+        if not isinstance(value, ObjectStore):
+            raise TypeError("Expected ObjectStore instance, {} found".format(type(value).__name__))
         return value._uniffi_clone_pointer()
 
     @classmethod
@@ -6519,11 +6454,11 @@ class _UniffiConverterTypeFfiObjectStore:
         return cls.lift(ptr)
 
     @classmethod
-    def write(cls, value: FfiObjectStoreProtocol, buf: _UniffiRustBuffer):
+    def write(cls, value: ObjectStoreProtocol, buf: _UniffiRustBuffer):
         buf.write_u64(cls.lower(value))
 
 
-class FfiSettingsProtocol(typing.Protocol):
+class SettingsProtocol(typing.Protocol):
     def set(self, key: "str", value_json: "str"):
         """
         Sets a settings field by dotted path using a JSON literal value.
@@ -6559,8 +6494,8 @@ class FfiSettingsProtocol(typing.Protocol):
         raise NotImplementedError
 
 
-# FfiSettings is a Rust-only trait - it's a wrapper around a Rust implementation.
-class FfiSettings:
+# Settings is a Rust-only trait - it's a wrapper around a Rust implementation.
+class Settings:
     _pointer: ctypes.c_void_p
 
     def __init__(self, *args, **kwargs):
@@ -6570,10 +6505,10 @@ class FfiSettings:
         # In case of partial initialization of instances.
         pointer = getattr(self, "_pointer", None)
         if pointer is not None:
-            _uniffi_rust_call(_UniffiLib.uniffi_slatedb_ffi_fn_free_ffisettings, pointer)
+            _uniffi_rust_call(_UniffiLib.uniffi_slatedb_ffi_fn_free_settings, pointer)
 
     def _uniffi_clone_pointer(self):
-        return _uniffi_rust_call(_UniffiLib.uniffi_slatedb_ffi_fn_clone_ffisettings, self._pointer)
+        return _uniffi_rust_call(_UniffiLib.uniffi_slatedb_ffi_fn_clone_settings, self._pointer)
 
     # Used by alternative constructors or any methods which return this type.
     @classmethod
@@ -6590,7 +6525,7 @@ class FfiSettings:
     ):
         # Call the (fallible) function before creating any half-baked object instances.
         pointer = _uniffi_rust_call(
-            _UniffiLib.uniffi_slatedb_ffi_fn_constructor_ffisettings_default,
+            _UniffiLib.uniffi_slatedb_ffi_fn_constructor_settings_default,
         )
         return cls._make_instance_(pointer)
 
@@ -6600,24 +6535,24 @@ class FfiSettings:
 
         # Call the (fallible) function before creating any half-baked object instances.
         pointer = _uniffi_rust_call_with_error(
-            _UniffiConverterTypeFfiError,
-            _UniffiLib.uniffi_slatedb_ffi_fn_constructor_ffisettings_from_env,
+            _UniffiConverterTypeDbError,
+            _UniffiLib.uniffi_slatedb_ffi_fn_constructor_settings_from_env,
             _UniffiConverterString.lower(prefix),
         )
         return cls._make_instance_(pointer)
 
     @classmethod
-    def from_env_with_default(cls, prefix: "str", default_settings: "FfiSettings"):
+    def from_env_with_default(cls, prefix: "str", default_settings: "Settings"):
         _UniffiConverterString.check_lower(prefix)
 
-        _UniffiConverterTypeFfiSettings.check_lower(default_settings)
+        _UniffiConverterTypeSettings.check_lower(default_settings)
 
         # Call the (fallible) function before creating any half-baked object instances.
         pointer = _uniffi_rust_call_with_error(
-            _UniffiConverterTypeFfiError,
-            _UniffiLib.uniffi_slatedb_ffi_fn_constructor_ffisettings_from_env_with_default,
+            _UniffiConverterTypeDbError,
+            _UniffiLib.uniffi_slatedb_ffi_fn_constructor_settings_from_env_with_default,
             _UniffiConverterString.lower(prefix),
-            _UniffiConverterTypeFfiSettings.lower(default_settings),
+            _UniffiConverterTypeSettings.lower(default_settings),
         )
         return cls._make_instance_(pointer)
 
@@ -6627,8 +6562,8 @@ class FfiSettings:
 
         # Call the (fallible) function before creating any half-baked object instances.
         pointer = _uniffi_rust_call_with_error(
-            _UniffiConverterTypeFfiError,
-            _UniffiLib.uniffi_slatedb_ffi_fn_constructor_ffisettings_from_file,
+            _UniffiConverterTypeDbError,
+            _UniffiLib.uniffi_slatedb_ffi_fn_constructor_settings_from_file,
             _UniffiConverterString.lower(path),
         )
         return cls._make_instance_(pointer)
@@ -6639,8 +6574,8 @@ class FfiSettings:
 
         # Call the (fallible) function before creating any half-baked object instances.
         pointer = _uniffi_rust_call_with_error(
-            _UniffiConverterTypeFfiError,
-            _UniffiLib.uniffi_slatedb_ffi_fn_constructor_ffisettings_from_json_string,
+            _UniffiConverterTypeDbError,
+            _UniffiLib.uniffi_slatedb_ffi_fn_constructor_settings_from_json_string,
             _UniffiConverterString.lower(json),
         )
         return cls._make_instance_(pointer)
@@ -6651,8 +6586,8 @@ class FfiSettings:
     ):
         # Call the (fallible) function before creating any half-baked object instances.
         pointer = _uniffi_rust_call_with_error(
-            _UniffiConverterTypeFfiError,
-            _UniffiLib.uniffi_slatedb_ffi_fn_constructor_ffisettings_load,
+            _UniffiConverterTypeDbError,
+            _UniffiLib.uniffi_slatedb_ffi_fn_constructor_settings_load,
         )
         return cls._make_instance_(pointer)
 
@@ -6688,8 +6623,8 @@ class FfiSettings:
         _UniffiConverterString.check_lower(value_json)
 
         _uniffi_rust_call_with_error(
-            _UniffiConverterTypeFfiError,
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_ffisettings_set,
+            _UniffiConverterTypeDbError,
+            _UniffiLib.uniffi_slatedb_ffi_fn_method_settings_set,
             self._uniffi_clone_pointer(),
             _UniffiConverterString.lower(key),
             _UniffiConverterString.lower(value_json),
@@ -6700,27 +6635,27 @@ class FfiSettings:
     ) -> "str":
         return _UniffiConverterString.lift(
             _uniffi_rust_call_with_error(
-                _UniffiConverterTypeFfiError,
-                _UniffiLib.uniffi_slatedb_ffi_fn_method_ffisettings_to_json_string,
+                _UniffiConverterTypeDbError,
+                _UniffiLib.uniffi_slatedb_ffi_fn_method_settings_to_json_string,
                 self._uniffi_clone_pointer(),
             )
         )
 
 
-class _UniffiConverterTypeFfiSettings:
+class _UniffiConverterTypeSettings:
     @staticmethod
     def lift(value: int):
-        return FfiSettings._make_instance_(value)
+        return Settings._make_instance_(value)
 
     @staticmethod
-    def check_lower(value: FfiSettings):
-        if not isinstance(value, FfiSettings):
-            raise TypeError("Expected FfiSettings instance, {} found".format(type(value).__name__))
+    def check_lower(value: Settings):
+        if not isinstance(value, Settings):
+            raise TypeError("Expected Settings instance, {} found".format(type(value).__name__))
 
     @staticmethod
-    def lower(value: FfiSettingsProtocol):
-        if not isinstance(value, FfiSettings):
-            raise TypeError("Expected FfiSettings instance, {} found".format(type(value).__name__))
+    def lower(value: SettingsProtocol):
+        if not isinstance(value, Settings):
+            raise TypeError("Expected Settings instance, {} found".format(type(value).__name__))
         return value._uniffi_clone_pointer()
 
     @classmethod
@@ -6731,11 +6666,11 @@ class _UniffiConverterTypeFfiSettings:
         return cls.lift(ptr)
 
     @classmethod
-    def write(cls, value: FfiSettingsProtocol, buf: _UniffiRustBuffer):
+    def write(cls, value: SettingsProtocol, buf: _UniffiRustBuffer):
         buf.write_u64(cls.lower(value))
 
 
-class FfiWalFileProtocol(typing.Protocol):
+class WalFileProtocol(typing.Protocol):
     def id(
         self,
     ):
@@ -6767,8 +6702,8 @@ class FfiWalFileProtocol(typing.Protocol):
         raise NotImplementedError
 
 
-# FfiWalFile is a Rust-only trait - it's a wrapper around a Rust implementation.
-class FfiWalFile:
+# WalFile is a Rust-only trait - it's a wrapper around a Rust implementation.
+class WalFile:
     _pointer: ctypes.c_void_p
 
     def __init__(self, *args, **kwargs):
@@ -6778,10 +6713,10 @@ class FfiWalFile:
         # In case of partial initialization of instances.
         pointer = getattr(self, "_pointer", None)
         if pointer is not None:
-            _uniffi_rust_call(_UniffiLib.uniffi_slatedb_ffi_fn_free_ffiwalfile, pointer)
+            _uniffi_rust_call(_UniffiLib.uniffi_slatedb_ffi_fn_free_walfile, pointer)
 
     def _uniffi_clone_pointer(self):
-        return _uniffi_rust_call(_UniffiLib.uniffi_slatedb_ffi_fn_clone_ffiwalfile, self._pointer)
+        return _uniffi_rust_call(_UniffiLib.uniffi_slatedb_ffi_fn_clone_walfile, self._pointer)
 
     # Used by alternative constructors or any methods which return this type.
     @classmethod
@@ -6797,49 +6732,49 @@ class FfiWalFile:
     ) -> "int":
         return _UniffiConverterUInt64.lift(
             _uniffi_rust_call(
-                _UniffiLib.uniffi_slatedb_ffi_fn_method_ffiwalfile_id,
+                _UniffiLib.uniffi_slatedb_ffi_fn_method_walfile_id,
                 self._uniffi_clone_pointer(),
             )
         )
 
     async def iterator(
         self,
-    ) -> "FfiWalFileIterator":
+    ) -> "WalFileIterator":
         return await _uniffi_rust_call_async(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_ffiwalfile_iterator(
+            _UniffiLib.uniffi_slatedb_ffi_fn_method_walfile_iterator(
                 self._uniffi_clone_pointer(),
             ),
             _UniffiLib.ffi_slatedb_ffi_rust_future_poll_pointer,
             _UniffiLib.ffi_slatedb_ffi_rust_future_complete_pointer,
             _UniffiLib.ffi_slatedb_ffi_rust_future_free_pointer,
             # lift function
-            _UniffiConverterTypeFfiWalFileIterator.lift,
+            _UniffiConverterTypeWalFileIterator.lift,
             # Error FFI converter
-            _UniffiConverterTypeFfiError,
+            _UniffiConverterTypeDbError,
         )
 
     async def metadata(
         self,
-    ) -> "FfiWalFileMetadata":
+    ) -> "WalFileMetadata":
         return await _uniffi_rust_call_async(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_ffiwalfile_metadata(
+            _UniffiLib.uniffi_slatedb_ffi_fn_method_walfile_metadata(
                 self._uniffi_clone_pointer(),
             ),
             _UniffiLib.ffi_slatedb_ffi_rust_future_poll_rust_buffer,
             _UniffiLib.ffi_slatedb_ffi_rust_future_complete_rust_buffer,
             _UniffiLib.ffi_slatedb_ffi_rust_future_free_rust_buffer,
             # lift function
-            _UniffiConverterTypeFfiWalFileMetadata.lift,
+            _UniffiConverterTypeWalFileMetadata.lift,
             # Error FFI converter
-            _UniffiConverterTypeFfiError,
+            _UniffiConverterTypeDbError,
         )
 
     def next_file(
         self,
-    ) -> "FfiWalFile":
-        return _UniffiConverterTypeFfiWalFile.lift(
+    ) -> "WalFile":
+        return _UniffiConverterTypeWalFile.lift(
             _uniffi_rust_call(
-                _UniffiLib.uniffi_slatedb_ffi_fn_method_ffiwalfile_next_file,
+                _UniffiLib.uniffi_slatedb_ffi_fn_method_walfile_next_file,
                 self._uniffi_clone_pointer(),
             )
         )
@@ -6849,7 +6784,7 @@ class FfiWalFile:
     ) -> "int":
         return _UniffiConverterUInt64.lift(
             _uniffi_rust_call(
-                _UniffiLib.uniffi_slatedb_ffi_fn_method_ffiwalfile_next_id,
+                _UniffiLib.uniffi_slatedb_ffi_fn_method_walfile_next_id,
                 self._uniffi_clone_pointer(),
             )
         )
@@ -6858,26 +6793,26 @@ class FfiWalFile:
         self,
     ) -> None:
         _uniffi_rust_call_with_error(
-            _UniffiConverterTypeFfiError,
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_ffiwalfile_shutdown,
+            _UniffiConverterTypeDbError,
+            _UniffiLib.uniffi_slatedb_ffi_fn_method_walfile_shutdown,
             self._uniffi_clone_pointer(),
         )
 
 
-class _UniffiConverterTypeFfiWalFile:
+class _UniffiConverterTypeWalFile:
     @staticmethod
     def lift(value: int):
-        return FfiWalFile._make_instance_(value)
+        return WalFile._make_instance_(value)
 
     @staticmethod
-    def check_lower(value: FfiWalFile):
-        if not isinstance(value, FfiWalFile):
-            raise TypeError("Expected FfiWalFile instance, {} found".format(type(value).__name__))
+    def check_lower(value: WalFile):
+        if not isinstance(value, WalFile):
+            raise TypeError("Expected WalFile instance, {} found".format(type(value).__name__))
 
     @staticmethod
-    def lower(value: FfiWalFileProtocol):
-        if not isinstance(value, FfiWalFile):
-            raise TypeError("Expected FfiWalFile instance, {} found".format(type(value).__name__))
+    def lower(value: WalFileProtocol):
+        if not isinstance(value, WalFile):
+            raise TypeError("Expected WalFile instance, {} found".format(type(value).__name__))
         return value._uniffi_clone_pointer()
 
     @classmethod
@@ -6888,11 +6823,11 @@ class _UniffiConverterTypeFfiWalFile:
         return cls.lift(ptr)
 
     @classmethod
-    def write(cls, value: FfiWalFileProtocol, buf: _UniffiRustBuffer):
+    def write(cls, value: WalFileProtocol, buf: _UniffiRustBuffer):
         buf.write_u64(cls.lower(value))
 
 
-class FfiWalFileIteratorProtocol(typing.Protocol):
+class WalFileIteratorProtocol(typing.Protocol):
     def next(
         self,
     ):
@@ -6904,8 +6839,8 @@ class FfiWalFileIteratorProtocol(typing.Protocol):
         raise NotImplementedError
 
 
-# FfiWalFileIterator is a Rust-only trait - it's a wrapper around a Rust implementation.
-class FfiWalFileIterator:
+# WalFileIterator is a Rust-only trait - it's a wrapper around a Rust implementation.
+class WalFileIterator:
     _pointer: ctypes.c_void_p
 
     def __init__(self, *args, **kwargs):
@@ -6915,11 +6850,11 @@ class FfiWalFileIterator:
         # In case of partial initialization of instances.
         pointer = getattr(self, "_pointer", None)
         if pointer is not None:
-            _uniffi_rust_call(_UniffiLib.uniffi_slatedb_ffi_fn_free_ffiwalfileiterator, pointer)
+            _uniffi_rust_call(_UniffiLib.uniffi_slatedb_ffi_fn_free_walfileiterator, pointer)
 
     def _uniffi_clone_pointer(self):
         return _uniffi_rust_call(
-            _UniffiLib.uniffi_slatedb_ffi_fn_clone_ffiwalfileiterator, self._pointer
+            _UniffiLib.uniffi_slatedb_ffi_fn_clone_walfileiterator, self._pointer
         )
 
     # Used by alternative constructors or any methods which return this type.
@@ -6933,47 +6868,47 @@ class FfiWalFileIterator:
 
     async def next(
         self,
-    ) -> "typing.Optional[FfiRowEntry]":
+    ) -> "typing.Optional[RowEntry]":
         return await _uniffi_rust_call_async(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_ffiwalfileiterator_next(
+            _UniffiLib.uniffi_slatedb_ffi_fn_method_walfileiterator_next(
                 self._uniffi_clone_pointer(),
             ),
             _UniffiLib.ffi_slatedb_ffi_rust_future_poll_rust_buffer,
             _UniffiLib.ffi_slatedb_ffi_rust_future_complete_rust_buffer,
             _UniffiLib.ffi_slatedb_ffi_rust_future_free_rust_buffer,
             # lift function
-            _UniffiConverterOptionalTypeFfiRowEntry.lift,
+            _UniffiConverterOptionalTypeRowEntry.lift,
             # Error FFI converter
-            _UniffiConverterTypeFfiError,
+            _UniffiConverterTypeDbError,
         )
 
     def shutdown(
         self,
     ) -> None:
         _uniffi_rust_call_with_error(
-            _UniffiConverterTypeFfiError,
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_ffiwalfileiterator_shutdown,
+            _UniffiConverterTypeDbError,
+            _UniffiLib.uniffi_slatedb_ffi_fn_method_walfileiterator_shutdown,
             self._uniffi_clone_pointer(),
         )
 
 
-class _UniffiConverterTypeFfiWalFileIterator:
+class _UniffiConverterTypeWalFileIterator:
     @staticmethod
     def lift(value: int):
-        return FfiWalFileIterator._make_instance_(value)
+        return WalFileIterator._make_instance_(value)
 
     @staticmethod
-    def check_lower(value: FfiWalFileIterator):
-        if not isinstance(value, FfiWalFileIterator):
+    def check_lower(value: WalFileIterator):
+        if not isinstance(value, WalFileIterator):
             raise TypeError(
-                "Expected FfiWalFileIterator instance, {} found".format(type(value).__name__)
+                "Expected WalFileIterator instance, {} found".format(type(value).__name__)
             )
 
     @staticmethod
-    def lower(value: FfiWalFileIteratorProtocol):
-        if not isinstance(value, FfiWalFileIterator):
+    def lower(value: WalFileIteratorProtocol):
+        if not isinstance(value, WalFileIterator):
             raise TypeError(
-                "Expected FfiWalFileIterator instance, {} found".format(type(value).__name__)
+                "Expected WalFileIterator instance, {} found".format(type(value).__name__)
             )
         return value._uniffi_clone_pointer()
 
@@ -6985,11 +6920,11 @@ class _UniffiConverterTypeFfiWalFileIterator:
         return cls.lift(ptr)
 
     @classmethod
-    def write(cls, value: FfiWalFileIteratorProtocol, buf: _UniffiRustBuffer):
+    def write(cls, value: WalFileIteratorProtocol, buf: _UniffiRustBuffer):
         buf.write_u64(cls.lower(value))
 
 
-class FfiWalReaderProtocol(typing.Protocol):
+class WalReaderProtocol(typing.Protocol):
     def get(self, id: "int"):
         raise NotImplementedError
 
@@ -7002,29 +6937,29 @@ class FfiWalReaderProtocol(typing.Protocol):
         raise NotImplementedError
 
 
-# FfiWalReader is a Rust-only trait - it's a wrapper around a Rust implementation.
-class FfiWalReader:
+# WalReader is a Rust-only trait - it's a wrapper around a Rust implementation.
+class WalReader:
     _pointer: ctypes.c_void_p
 
-    def __init__(self, path: "str", object_store: "FfiObjectStore"):
+    def __init__(self, path: "str", object_store: "ObjectStore"):
         _UniffiConverterString.check_lower(path)
 
-        _UniffiConverterTypeFfiObjectStore.check_lower(object_store)
+        _UniffiConverterTypeObjectStore.check_lower(object_store)
 
         self._pointer = _uniffi_rust_call(
-            _UniffiLib.uniffi_slatedb_ffi_fn_constructor_ffiwalreader_new,
+            _UniffiLib.uniffi_slatedb_ffi_fn_constructor_walreader_new,
             _UniffiConverterString.lower(path),
-            _UniffiConverterTypeFfiObjectStore.lower(object_store),
+            _UniffiConverterTypeObjectStore.lower(object_store),
         )
 
     def __del__(self):
         # In case of partial initialization of instances.
         pointer = getattr(self, "_pointer", None)
         if pointer is not None:
-            _uniffi_rust_call(_UniffiLib.uniffi_slatedb_ffi_fn_free_ffiwalreader, pointer)
+            _uniffi_rust_call(_UniffiLib.uniffi_slatedb_ffi_fn_free_walreader, pointer)
 
     def _uniffi_clone_pointer(self):
-        return _uniffi_rust_call(_UniffiLib.uniffi_slatedb_ffi_fn_clone_ffiwalreader, self._pointer)
+        return _uniffi_rust_call(_UniffiLib.uniffi_slatedb_ffi_fn_clone_walreader, self._pointer)
 
     # Used by alternative constructors or any methods which return this type.
     @classmethod
@@ -7035,12 +6970,12 @@ class FfiWalReader:
         inst._pointer = pointer
         return inst
 
-    def get(self, id: "int") -> "FfiWalFile":
+    def get(self, id: "int") -> "WalFile":
         _UniffiConverterUInt64.check_lower(id)
 
-        return _UniffiConverterTypeFfiWalFile.lift(
+        return _UniffiConverterTypeWalFile.lift(
             _uniffi_rust_call(
-                _UniffiLib.uniffi_slatedb_ffi_fn_method_ffiwalreader_get,
+                _UniffiLib.uniffi_slatedb_ffi_fn_method_walreader_get,
                 self._uniffi_clone_pointer(),
                 _UniffiConverterUInt64.lower(id),
             )
@@ -7048,13 +6983,13 @@ class FfiWalReader:
 
     async def list(
         self, start_id: "typing.Optional[int]", end_id: "typing.Optional[int]"
-    ) -> "typing.List[FfiWalFile]":
+    ) -> "typing.List[WalFile]":
         _UniffiConverterOptionalUInt64.check_lower(start_id)
 
         _UniffiConverterOptionalUInt64.check_lower(end_id)
 
         return await _uniffi_rust_call_async(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_ffiwalreader_list(
+            _UniffiLib.uniffi_slatedb_ffi_fn_method_walreader_list(
                 self._uniffi_clone_pointer(),
                 _UniffiConverterOptionalUInt64.lower(start_id),
                 _UniffiConverterOptionalUInt64.lower(end_id),
@@ -7063,35 +6998,35 @@ class FfiWalReader:
             _UniffiLib.ffi_slatedb_ffi_rust_future_complete_rust_buffer,
             _UniffiLib.ffi_slatedb_ffi_rust_future_free_rust_buffer,
             # lift function
-            _UniffiConverterSequenceTypeFfiWalFile.lift,
+            _UniffiConverterSequenceTypeWalFile.lift,
             # Error FFI converter
-            _UniffiConverterTypeFfiError,
+            _UniffiConverterTypeDbError,
         )
 
     def shutdown(
         self,
     ) -> None:
         _uniffi_rust_call_with_error(
-            _UniffiConverterTypeFfiError,
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_ffiwalreader_shutdown,
+            _UniffiConverterTypeDbError,
+            _UniffiLib.uniffi_slatedb_ffi_fn_method_walreader_shutdown,
             self._uniffi_clone_pointer(),
         )
 
 
-class _UniffiConverterTypeFfiWalReader:
+class _UniffiConverterTypeWalReader:
     @staticmethod
     def lift(value: int):
-        return FfiWalReader._make_instance_(value)
+        return WalReader._make_instance_(value)
 
     @staticmethod
-    def check_lower(value: FfiWalReader):
-        if not isinstance(value, FfiWalReader):
-            raise TypeError("Expected FfiWalReader instance, {} found".format(type(value).__name__))
+    def check_lower(value: WalReader):
+        if not isinstance(value, WalReader):
+            raise TypeError("Expected WalReader instance, {} found".format(type(value).__name__))
 
     @staticmethod
-    def lower(value: FfiWalReaderProtocol):
-        if not isinstance(value, FfiWalReader):
-            raise TypeError("Expected FfiWalReader instance, {} found".format(type(value).__name__))
+    def lower(value: WalReaderProtocol):
+        if not isinstance(value, WalReader):
+            raise TypeError("Expected WalReader instance, {} found".format(type(value).__name__))
         return value._uniffi_clone_pointer()
 
     @classmethod
@@ -7102,48 +7037,46 @@ class _UniffiConverterTypeFfiWalReader:
         return cls.lift(ptr)
 
     @classmethod
-    def write(cls, value: FfiWalReaderProtocol, buf: _UniffiRustBuffer):
+    def write(cls, value: WalReaderProtocol, buf: _UniffiRustBuffer):
         buf.write_u64(cls.lower(value))
 
 
-class FfiWriteBatchProtocol(typing.Protocol):
+class WriteBatchProtocol(typing.Protocol):
     def delete(self, key: "bytes"):
         raise NotImplementedError
 
     def merge(self, key: "bytes", operand: "bytes"):
         raise NotImplementedError
 
-    def merge_with_options(self, key: "bytes", operand: "bytes", options: "FfiMergeOptions"):
+    def merge_with_options(self, key: "bytes", operand: "bytes", options: "MergeOptions"):
         raise NotImplementedError
 
     def put(self, key: "bytes", value: "bytes"):
         raise NotImplementedError
 
-    def put_with_options(self, key: "bytes", value: "bytes", options: "FfiPutOptions"):
+    def put_with_options(self, key: "bytes", value: "bytes", options: "PutOptions"):
         raise NotImplementedError
 
 
-# FfiWriteBatch is a Rust-only trait - it's a wrapper around a Rust implementation.
-class FfiWriteBatch:
+# WriteBatch is a Rust-only trait - it's a wrapper around a Rust implementation.
+class WriteBatch:
     _pointer: ctypes.c_void_p
 
     def __init__(
         self,
     ):
         self._pointer = _uniffi_rust_call(
-            _UniffiLib.uniffi_slatedb_ffi_fn_constructor_ffiwritebatch_new,
+            _UniffiLib.uniffi_slatedb_ffi_fn_constructor_writebatch_new,
         )
 
     def __del__(self):
         # In case of partial initialization of instances.
         pointer = getattr(self, "_pointer", None)
         if pointer is not None:
-            _uniffi_rust_call(_UniffiLib.uniffi_slatedb_ffi_fn_free_ffiwritebatch, pointer)
+            _uniffi_rust_call(_UniffiLib.uniffi_slatedb_ffi_fn_free_writebatch, pointer)
 
     def _uniffi_clone_pointer(self):
-        return _uniffi_rust_call(
-            _UniffiLib.uniffi_slatedb_ffi_fn_clone_ffiwritebatch, self._pointer
-        )
+        return _uniffi_rust_call(_UniffiLib.uniffi_slatedb_ffi_fn_clone_writebatch, self._pointer)
 
     # Used by alternative constructors or any methods which return this type.
     @classmethod
@@ -7158,8 +7091,8 @@ class FfiWriteBatch:
         _UniffiConverterBytes.check_lower(key)
 
         _uniffi_rust_call_with_error(
-            _UniffiConverterTypeFfiError,
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_ffiwritebatch_delete,
+            _UniffiConverterTypeDbError,
+            _UniffiLib.uniffi_slatedb_ffi_fn_method_writebatch_delete,
             self._uniffi_clone_pointer(),
             _UniffiConverterBytes.lower(key),
         )
@@ -7170,29 +7103,27 @@ class FfiWriteBatch:
         _UniffiConverterBytes.check_lower(operand)
 
         _uniffi_rust_call_with_error(
-            _UniffiConverterTypeFfiError,
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_ffiwritebatch_merge,
+            _UniffiConverterTypeDbError,
+            _UniffiLib.uniffi_slatedb_ffi_fn_method_writebatch_merge,
             self._uniffi_clone_pointer(),
             _UniffiConverterBytes.lower(key),
             _UniffiConverterBytes.lower(operand),
         )
 
-    def merge_with_options(
-        self, key: "bytes", operand: "bytes", options: "FfiMergeOptions"
-    ) -> None:
+    def merge_with_options(self, key: "bytes", operand: "bytes", options: "MergeOptions") -> None:
         _UniffiConverterBytes.check_lower(key)
 
         _UniffiConverterBytes.check_lower(operand)
 
-        _UniffiConverterTypeFfiMergeOptions.check_lower(options)
+        _UniffiConverterTypeMergeOptions.check_lower(options)
 
         _uniffi_rust_call_with_error(
-            _UniffiConverterTypeFfiError,
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_ffiwritebatch_merge_with_options,
+            _UniffiConverterTypeDbError,
+            _UniffiLib.uniffi_slatedb_ffi_fn_method_writebatch_merge_with_options,
             self._uniffi_clone_pointer(),
             _UniffiConverterBytes.lower(key),
             _UniffiConverterBytes.lower(operand),
-            _UniffiConverterTypeFfiMergeOptions.lower(options),
+            _UniffiConverterTypeMergeOptions.lower(options),
         )
 
     def put(self, key: "bytes", value: "bytes") -> None:
@@ -7201,48 +7132,44 @@ class FfiWriteBatch:
         _UniffiConverterBytes.check_lower(value)
 
         _uniffi_rust_call_with_error(
-            _UniffiConverterTypeFfiError,
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_ffiwritebatch_put,
+            _UniffiConverterTypeDbError,
+            _UniffiLib.uniffi_slatedb_ffi_fn_method_writebatch_put,
             self._uniffi_clone_pointer(),
             _UniffiConverterBytes.lower(key),
             _UniffiConverterBytes.lower(value),
         )
 
-    def put_with_options(self, key: "bytes", value: "bytes", options: "FfiPutOptions") -> None:
+    def put_with_options(self, key: "bytes", value: "bytes", options: "PutOptions") -> None:
         _UniffiConverterBytes.check_lower(key)
 
         _UniffiConverterBytes.check_lower(value)
 
-        _UniffiConverterTypeFfiPutOptions.check_lower(options)
+        _UniffiConverterTypePutOptions.check_lower(options)
 
         _uniffi_rust_call_with_error(
-            _UniffiConverterTypeFfiError,
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_ffiwritebatch_put_with_options,
+            _UniffiConverterTypeDbError,
+            _UniffiLib.uniffi_slatedb_ffi_fn_method_writebatch_put_with_options,
             self._uniffi_clone_pointer(),
             _UniffiConverterBytes.lower(key),
             _UniffiConverterBytes.lower(value),
-            _UniffiConverterTypeFfiPutOptions.lower(options),
+            _UniffiConverterTypePutOptions.lower(options),
         )
 
 
-class _UniffiConverterTypeFfiWriteBatch:
+class _UniffiConverterTypeWriteBatch:
     @staticmethod
     def lift(value: int):
-        return FfiWriteBatch._make_instance_(value)
+        return WriteBatch._make_instance_(value)
 
     @staticmethod
-    def check_lower(value: FfiWriteBatch):
-        if not isinstance(value, FfiWriteBatch):
-            raise TypeError(
-                "Expected FfiWriteBatch instance, {} found".format(type(value).__name__)
-            )
+    def check_lower(value: WriteBatch):
+        if not isinstance(value, WriteBatch):
+            raise TypeError("Expected WriteBatch instance, {} found".format(type(value).__name__))
 
     @staticmethod
-    def lower(value: FfiWriteBatchProtocol):
-        if not isinstance(value, FfiWriteBatch):
-            raise TypeError(
-                "Expected FfiWriteBatch instance, {} found".format(type(value).__name__)
-            )
+    def lower(value: WriteBatchProtocol):
+        if not isinstance(value, WriteBatch):
+            raise TypeError("Expected WriteBatch instance, {} found".format(type(value).__name__))
         return value._uniffi_clone_pointer()
 
     @classmethod
@@ -7253,7 +7180,7 @@ class _UniffiConverterTypeFfiWriteBatch:
         return cls.lift(ptr)
 
     @classmethod
-    def write(cls, value: FfiWriteBatchProtocol, buf: _UniffiRustBuffer):
+    def write(cls, value: WriteBatchProtocol, buf: _UniffiRustBuffer):
         buf.write_u64(cls.lower(value))
 
 
@@ -7330,58 +7257,58 @@ async def _uniffi_rust_call_async(
         ffi_free(rust_future)
 
 
-def ffi_init_logging(level: "FfiLogLevel", callback: "typing.Optional[FfiLogCallback]") -> None:
-    _UniffiConverterTypeFfiLogLevel.check_lower(level)
+def init_logging(level: "LogLevel", callback: "typing.Optional[LogCallback]") -> None:
+    _UniffiConverterTypeLogLevel.check_lower(level)
 
-    _UniffiConverterOptionalTypeFfiLogCallback.check_lower(callback)
+    _UniffiConverterOptionalTypeLogCallback.check_lower(callback)
 
     _uniffi_rust_call_with_error(
-        _UniffiConverterTypeFfiError,
-        _UniffiLib.uniffi_slatedb_ffi_fn_func_ffi_init_logging,
-        _UniffiConverterTypeFfiLogLevel.lower(level),
-        _UniffiConverterOptionalTypeFfiLogCallback.lower(callback),
+        _UniffiConverterTypeDbError,
+        _UniffiLib.uniffi_slatedb_ffi_fn_func_init_logging,
+        _UniffiConverterTypeLogLevel.lower(level),
+        _UniffiConverterOptionalTypeLogCallback.lower(callback),
     )
 
 
 __all__ = [
     "InternalError",
-    "FfiCloseReason",
-    "FfiDurabilityLevel",
-    "FfiError",
-    "FfiFlushType",
-    "FfiIsolationLevel",
-    "FfiLogLevel",
-    "FfiMergeOperatorCallbackError",
-    "FfiRowEntryKind",
-    "FfiSstBlockSize",
-    "FfiTtl",
-    "FfiFlushOptions",
-    "FfiKeyRange",
-    "FfiKeyValue",
-    "FfiLogRecord",
-    "FfiMergeOptions",
-    "FfiPutOptions",
-    "FfiReadOptions",
-    "FfiReaderOptions",
-    "FfiRowEntry",
-    "FfiScanOptions",
-    "FfiWalFileMetadata",
-    "FfiWriteHandle",
-    "FfiWriteOptions",
-    "ffi_init_logging",
-    "FfiDb",
-    "FfiDbBuilder",
-    "FfiDbIterator",
-    "FfiDbReader",
-    "FfiDbReaderBuilder",
-    "FfiDbSnapshot",
-    "FfiDbTransaction",
-    "FfiLogCallback",
-    "FfiMergeOperator",
-    "FfiObjectStore",
-    "FfiSettings",
-    "FfiWalFile",
-    "FfiWalFileIterator",
-    "FfiWalReader",
-    "FfiWriteBatch",
+    "CloseReason",
+    "DbError",
+    "DurabilityLevel",
+    "FlushType",
+    "IsolationLevel",
+    "LogLevel",
+    "MergeOperatorCallbackError",
+    "RowEntryKind",
+    "SstBlockSize",
+    "Ttl",
+    "FlushOptions",
+    "KeyRange",
+    "KeyValue",
+    "LogRecord",
+    "MergeOptions",
+    "PutOptions",
+    "ReadOptions",
+    "ReaderOptions",
+    "RowEntry",
+    "ScanOptions",
+    "WalFileMetadata",
+    "WriteHandle",
+    "WriteOptions",
+    "init_logging",
+    "Db",
+    "DbBuilder",
+    "DbIterator",
+    "DbReader",
+    "DbReaderBuilder",
+    "DbSnapshot",
+    "DbTransaction",
+    "LogCallback",
+    "MergeOperator",
+    "ObjectStore",
+    "Settings",
+    "WalFile",
+    "WalFileIterator",
+    "WalReader",
+    "WriteBatch",
 ]

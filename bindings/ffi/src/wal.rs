@@ -3,12 +3,12 @@ use std::sync::Arc;
 
 use tokio::sync::Mutex;
 
-use crate::error::FfiError;
-use crate::object_store::FfiObjectStore;
-use crate::types::FfiRowEntry;
+use crate::error::DbError;
+use crate::object_store::ObjectStore;
+use crate::types::RowEntry;
 
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
-pub struct FfiWalFileMetadata {
+pub struct WalFileMetadata {
     pub last_modified_seconds: i64,
     pub last_modified_nanos: u32,
     pub size_bytes: u64,
@@ -16,18 +16,18 @@ pub struct FfiWalFileMetadata {
 }
 
 #[derive(uniffi::Object)]
-pub struct FfiWalFile {
+pub struct WalFile {
     inner: slatedb::WalFile,
 }
 
-impl FfiWalFile {
+impl WalFile {
     fn new(inner: slatedb::WalFile) -> Self {
         Self { inner }
     }
 }
 
 #[uniffi::export]
-impl FfiWalFile {
+impl WalFile {
     pub fn id(&self) -> u64 {
         self.inner.id
     }
@@ -36,22 +36,22 @@ impl FfiWalFile {
         self.inner.next_id()
     }
 
-    pub fn next_file(&self) -> Arc<FfiWalFile> {
-        Arc::new(FfiWalFile::new(self.inner.next_file()))
+    pub fn next_file(&self) -> Arc<WalFile> {
+        Arc::new(WalFile::new(self.inner.next_file()))
     }
 
     // `shutdown` because `close` is reserved by uniffi for the destructor.
     #[uniffi::method(name = "shutdown")]
-    pub fn close(&self) -> Result<(), FfiError> {
+    pub fn close(&self) -> Result<(), DbError> {
         Ok(())
     }
 }
 
 #[uniffi::export(async_runtime = "tokio")]
-impl FfiWalFile {
-    pub async fn metadata(&self) -> Result<FfiWalFileMetadata, FfiError> {
+impl WalFile {
+    pub async fn metadata(&self) -> Result<WalFileMetadata, DbError> {
         let metadata = self.inner.metadata().await?;
-        Ok(FfiWalFileMetadata {
+        Ok(WalFileMetadata {
             last_modified_seconds: metadata.last_modified_dt.timestamp(),
             last_modified_nanos: metadata.last_modified_dt.timestamp_subsec_nanos(),
             size_bytes: metadata.size_bytes,
@@ -59,18 +59,18 @@ impl FfiWalFile {
         })
     }
 
-    pub async fn iterator(&self) -> Result<Arc<FfiWalFileIterator>, FfiError> {
+    pub async fn iterator(&self) -> Result<Arc<WalFileIterator>, DbError> {
         let iter = self.inner.iterator().await?;
-        Ok(Arc::new(FfiWalFileIterator::new(iter)))
+        Ok(Arc::new(WalFileIterator::new(iter)))
     }
 }
 
 #[derive(uniffi::Object)]
-pub struct FfiWalFileIterator {
+pub struct WalFileIterator {
     inner: Mutex<slatedb::WalFileIterator>,
 }
 
-impl FfiWalFileIterator {
+impl WalFileIterator {
     fn new(inner: slatedb::WalFileIterator) -> Self {
         Self {
             inner: Mutex::new(inner),
@@ -79,60 +79,60 @@ impl FfiWalFileIterator {
 }
 
 #[uniffi::export]
-impl FfiWalFileIterator {
+impl WalFileIterator {
     // `shutdown` because `close` is reserved by uniffi for the destructor.
     #[uniffi::method(name = "shutdown")]
-    pub fn close(&self) -> Result<(), FfiError> {
+    pub fn close(&self) -> Result<(), DbError> {
         Ok(())
     }
 }
 
 #[uniffi::export(async_runtime = "tokio")]
-impl FfiWalFileIterator {
-    pub async fn next(&self) -> Result<Option<FfiRowEntry>, FfiError> {
+impl WalFileIterator {
+    pub async fn next(&self) -> Result<Option<RowEntry>, DbError> {
         let mut guard = self.inner.lock().await;
-        Ok(guard.next().await?.map(FfiRowEntry::from_core))
+        Ok(guard.next().await?.map(RowEntry::from_core))
     }
 }
 
 #[derive(uniffi::Object)]
-pub struct FfiWalReader {
+pub struct WalReader {
     inner: slatedb::WalReader,
 }
 
 #[uniffi::export]
-impl FfiWalReader {
+impl WalReader {
     #[uniffi::constructor]
-    pub fn new(path: String, object_store: Arc<FfiObjectStore>) -> Arc<Self> {
+    pub fn new(path: String, object_store: Arc<ObjectStore>) -> Arc<Self> {
         Arc::new(Self {
             inner: slatedb::WalReader::new(path, object_store.inner.clone()),
         })
     }
 
-    pub fn get(&self, id: u64) -> Arc<FfiWalFile> {
-        Arc::new(FfiWalFile::new(self.inner.get(id)))
+    pub fn get(&self, id: u64) -> Arc<WalFile> {
+        Arc::new(WalFile::new(self.inner.get(id)))
     }
 
     // `shutdown` because `close` is reserved by uniffi for the destructor.
     #[uniffi::method(name = "shutdown")]
-    pub fn close(&self) -> Result<(), FfiError> {
+    pub fn close(&self) -> Result<(), DbError> {
         Ok(())
     }
 }
 
 #[uniffi::export(async_runtime = "tokio")]
-impl FfiWalReader {
+impl WalReader {
     pub async fn list(
         &self,
         start_id: Option<u64>,
         end_id: Option<u64>,
-    ) -> Result<Vec<Arc<FfiWalFile>>, FfiError> {
+    ) -> Result<Vec<Arc<WalFile>>, DbError> {
         let start = start_id.map(Bound::Included).unwrap_or(Bound::Unbounded);
         let end = end_id.map(Bound::Excluded).unwrap_or(Bound::Unbounded);
         let files = self.inner.list((start, end)).await?;
         Ok(files
             .into_iter()
-            .map(|file| Arc::new(FfiWalFile::new(file)))
+            .map(|file| Arc::new(WalFile::new(file)))
             .collect())
     }
 }

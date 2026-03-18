@@ -9,10 +9,10 @@ use tracing_subscriber::filter::LevelFilter as TracingLevelFilter;
 use tracing_subscriber::layer::{Context, SubscriberExt};
 use tracing_subscriber::Layer;
 
-use crate::error::FfiError;
+use crate::error::DbError;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, uniffi::Enum)]
-pub enum FfiLogLevel {
+pub enum LogLevel {
     #[default]
     Off,
     Error,
@@ -22,7 +22,7 @@ pub enum FfiLogLevel {
     Trace,
 }
 
-impl FfiLogLevel {
+impl LogLevel {
     fn into_log_level_filter(self) -> LogLevelFilter {
         match self {
             Self::Off => LogLevelFilter::Off,
@@ -46,7 +46,7 @@ impl FfiLogLevel {
     }
 }
 
-impl From<&tracing::Level> for FfiLogLevel {
+impl From<&tracing::Level> for LogLevel {
     fn from(level: &tracing::Level) -> Self {
         match *level {
             tracing::Level::ERROR => Self::Error,
@@ -59,8 +59,8 @@ impl From<&tracing::Level> for FfiLogLevel {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, uniffi::Record)]
-pub struct FfiLogRecord {
-    pub level: FfiLogLevel,
+pub struct LogRecord {
+    pub level: LogLevel,
     pub target: String,
     pub message: String,
     pub module_path: Option<String>,
@@ -68,7 +68,7 @@ pub struct FfiLogRecord {
     pub line: Option<u32>,
 }
 
-impl FfiLogRecord {
+impl LogRecord {
     fn from_event(event: &Event<'_>) -> Self {
         let metadata = event.metadata();
         let mut visitor = EventFieldVisitor::default();
@@ -90,8 +90,8 @@ impl FfiLogRecord {
 }
 
 #[uniffi::export(with_foreign)]
-pub trait FfiLogCallback: Send + Sync {
-    fn log(&self, record: FfiLogRecord);
+pub trait LogCallback: Send + Sync {
+    fn log(&self, record: LogRecord);
 }
 
 fn init_lock() -> &'static Mutex<()> {
@@ -102,10 +102,10 @@ fn init_lock() -> &'static Mutex<()> {
 static LOGGING_INITIALIZED: AtomicBool = AtomicBool::new(false);
 
 #[uniffi::export]
-pub fn ffi_init_logging(
-    level: FfiLogLevel,
-    callback: Option<Arc<dyn FfiLogCallback>>,
-) -> Result<(), FfiError> {
+pub fn init_logging(
+    level: LogLevel,
+    callback: Option<Arc<dyn LogCallback>>,
+) -> Result<(), DbError> {
     if LOGGING_INITIALIZED.load(Ordering::Acquire) {
         return Err(logging_already_initialized_error());
     }
@@ -128,7 +128,7 @@ pub fn ffi_init_logging(
     Ok(())
 }
 
-fn install_log_tracer(level: FfiLogLevel) -> Result<(), FfiError> {
+fn install_log_tracer(level: LogLevel) -> Result<(), DbError> {
     LogTracer::builder()
         .with_max_level(level.into_log_level_filter())
         .init()
@@ -136,13 +136,13 @@ fn install_log_tracer(level: FfiLogLevel) -> Result<(), FfiError> {
 }
 
 fn install_subscriber(
-    level: FfiLogLevel,
-    callback: Option<Arc<dyn FfiLogCallback>>,
-) -> Result<(), FfiError> {
+    level: LogLevel,
+    callback: Option<Arc<dyn LogCallback>>,
+) -> Result<(), DbError> {
     let filter = level.into_tracing_level_filter();
     if let Some(callback) = callback {
-        let subscriber = tracing_subscriber::registry()
-            .with(FfiLogCallbackLayer { callback }.with_filter(filter));
+        let subscriber =
+            tracing_subscriber::registry().with(LogCallbackLayer { callback }.with_filter(filter));
         tracing::subscriber::set_global_default(subscriber).map_err(|_| {
             invalid_logging_error(
                 "global tracing subscriber already initialized by another library",
@@ -161,12 +161,12 @@ fn install_subscriber(
     }
 }
 
-fn logging_already_initialized_error() -> FfiError {
+fn logging_already_initialized_error() -> DbError {
     invalid_logging_error("logging already initialized")
 }
 
-fn invalid_logging_error(message: impl Into<String>) -> FfiError {
-    FfiError::Invalid {
+fn invalid_logging_error(message: impl Into<String>) -> DbError {
+    DbError::Invalid {
         message: message.into(),
     }
 }
@@ -219,15 +219,15 @@ impl tracing::field::Visit for EventFieldVisitor {
     }
 }
 
-struct FfiLogCallbackLayer {
-    callback: Arc<dyn FfiLogCallback>,
+struct LogCallbackLayer {
+    callback: Arc<dyn LogCallback>,
 }
 
-impl<S> Layer<S> for FfiLogCallbackLayer
+impl<S> Layer<S> for LogCallbackLayer
 where
     S: Subscriber,
 {
     fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
-        self.callback.log(FfiLogRecord::from_event(event));
+        self.callback.log(LogRecord::from_event(event));
     }
 }

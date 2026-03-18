@@ -1,19 +1,19 @@
-use crate::error::FfiSlateDbError;
+use crate::error::SlateDbError;
 
-pub(crate) fn validate_key(key: &[u8]) -> Result<(), FfiSlateDbError> {
+pub(crate) fn validate_key(key: &[u8]) -> Result<(), SlateDbError> {
     if key.is_empty() {
-        return Err(FfiSlateDbError::EmptyKey);
+        return Err(SlateDbError::EmptyKey);
     }
     if u16::try_from(key.len()).is_err() {
-        return Err(FfiSlateDbError::KeyTooLarge);
+        return Err(SlateDbError::KeyTooLarge);
     }
     Ok(())
 }
 
-pub(crate) fn validate_key_value(key: &[u8], value: &[u8]) -> Result<(), FfiSlateDbError> {
+pub(crate) fn validate_key_value(key: &[u8], value: &[u8]) -> Result<(), SlateDbError> {
     validate_key(key)?;
     if u32::try_from(value.len()).is_err() {
-        return Err(FfiSlateDbError::ValueTooLarge);
+        return Err(SlateDbError::ValueTooLarge);
     }
     Ok(())
 }

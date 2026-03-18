@@ -1,36 +1,36 @@
 use std::ops::Bound;
 
-use slatedb::{KeyValue, RowEntry, ValueDeletable, WriteHandle};
+use slatedb::ValueDeletable;
 
-use crate::error::FfiSlateDbError;
+use crate::error::SlateDbError;
 
-type FfiKeyBound = Bound<Vec<u8>>;
-type FfiKeyBounds = (FfiKeyBound, FfiKeyBound);
+type KeyBound = Bound<Vec<u8>>;
+type KeyBounds = (KeyBound, KeyBound);
 
 #[derive(Clone, Debug, Default, uniffi::Record)]
-pub struct FfiKeyRange {
+pub struct KeyRange {
     pub start: Option<Vec<u8>>,
     pub start_inclusive: bool,
     pub end: Option<Vec<u8>>,
     pub end_inclusive: bool,
 }
 
-impl FfiKeyRange {
-    pub(crate) fn into_bounds(self) -> Result<FfiKeyBounds, FfiSlateDbError> {
+impl KeyRange {
+    pub(crate) fn into_bounds(self) -> Result<KeyBounds, SlateDbError> {
         if self.start.as_ref().is_some_and(|start| start.is_empty()) {
-            return Err(FfiSlateDbError::EmptyRangeStart);
+            return Err(SlateDbError::EmptyRangeStart);
         }
         if self.end.as_ref().is_some_and(|end| end.is_empty()) {
-            return Err(FfiSlateDbError::EmptyRangeEnd);
+            return Err(SlateDbError::EmptyRangeEnd);
         }
 
         if let (Some(start), Some(end)) = (&self.start, &self.end) {
             match start.cmp(end) {
                 std::cmp::Ordering::Greater => {
-                    return Err(FfiSlateDbError::RangeStartGreaterThanEnd);
+                    return Err(SlateDbError::RangeStartGreaterThanEnd);
                 }
                 std::cmp::Ordering::Equal if !(self.start_inclusive && self.end_inclusive) => {
-                    return Err(FfiSlateDbError::EmptyRange);
+                    return Err(SlateDbError::EmptyRange);
                 }
                 _ => {}
             }
@@ -52,13 +52,13 @@ impl FfiKeyRange {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
-pub struct FfiWriteHandle {
+pub struct WriteHandle {
     pub seqnum: u64,
     pub create_ts: i64,
 }
 
-impl FfiWriteHandle {
-    pub(crate) fn from_core(value: WriteHandle) -> Self {
+impl WriteHandle {
+    pub(crate) fn from_core(value: slatedb::WriteHandle) -> Self {
         Self {
             seqnum: value.seqnum(),
             create_ts: value.create_ts(),
@@ -67,7 +67,7 @@ impl FfiWriteHandle {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
-pub struct FfiKeyValue {
+pub struct KeyValue {
     pub key: Vec<u8>,
     pub value: Vec<u8>,
     pub seq: u64,
@@ -75,8 +75,8 @@ pub struct FfiKeyValue {
     pub expire_ts: Option<i64>,
 }
 
-impl FfiKeyValue {
-    pub(crate) fn from_core(value: KeyValue) -> Self {
+impl KeyValue {
+    pub(crate) fn from_core(value: slatedb::KeyValue) -> Self {
         Self {
             key: value.key.to_vec(),
             value: value.value.to_vec(),
@@ -88,15 +88,15 @@ impl FfiKeyValue {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
-pub enum FfiRowEntryKind {
+pub enum RowEntryKind {
     Value,
     Tombstone,
     Merge,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
-pub struct FfiRowEntry {
-    pub kind: FfiRowEntryKind,
+pub struct RowEntry {
+    pub kind: RowEntryKind,
     pub key: Vec<u8>,
     pub value: Option<Vec<u8>>,
     pub seq: u64,
@@ -104,12 +104,12 @@ pub struct FfiRowEntry {
     pub expire_ts: Option<i64>,
 }
 
-impl FfiRowEntry {
-    pub(crate) fn from_core(entry: RowEntry) -> Self {
+impl RowEntry {
+    pub(crate) fn from_core(entry: slatedb::RowEntry) -> Self {
         let (kind, value) = match entry.value {
-            ValueDeletable::Value(value) => (FfiRowEntryKind::Value, Some(value.to_vec())),
-            ValueDeletable::Tombstone => (FfiRowEntryKind::Tombstone, None),
-            ValueDeletable::Merge(value) => (FfiRowEntryKind::Merge, Some(value.to_vec())),
+            ValueDeletable::Value(value) => (RowEntryKind::Value, Some(value.to_vec())),
+            ValueDeletable::Tombstone => (RowEntryKind::Tombstone, None),
+            ValueDeletable::Merge(value) => (RowEntryKind::Merge, Some(value.to_vec())),
         };
 
         Self {

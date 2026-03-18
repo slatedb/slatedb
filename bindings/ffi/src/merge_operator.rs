@@ -3,20 +3,20 @@ use std::sync::Arc;
 use slatedb::bytes::Bytes;
 use slatedb::MergeOperatorError;
 
-use crate::error::FfiMergeOperatorCallbackError;
+use crate::error::MergeOperatorCallbackError;
 
 #[uniffi::export(with_foreign)]
-pub trait FfiMergeOperator: Send + Sync {
+pub trait MergeOperator: Send + Sync {
     fn merge(
         &self,
         key: Vec<u8>,
         existing_value: Option<Vec<u8>>,
         operand: Vec<u8>,
-    ) -> Result<Vec<u8>, FfiMergeOperatorCallbackError>;
+    ) -> Result<Vec<u8>, MergeOperatorCallbackError>;
 }
 
 struct MergeOperatorAdapter {
-    inner: Arc<dyn FfiMergeOperator>,
+    inner: Arc<dyn MergeOperator>,
 }
 
 impl slatedb::MergeOperator for MergeOperatorAdapter {
@@ -40,7 +40,7 @@ impl slatedb::MergeOperator for MergeOperatorAdapter {
 }
 
 pub(crate) fn adapt_merge_operator(
-    merge_operator: Arc<dyn FfiMergeOperator>,
+    merge_operator: Arc<dyn MergeOperator>,
 ) -> Arc<dyn slatedb::MergeOperator + Send + Sync> {
     Arc::new(MergeOperatorAdapter {
         inner: merge_operator,

@@ -1,32 +1,32 @@
 use std::sync::Arc;
 
-use crate::config::{FfiReadOptions, FfiScanOptions};
-use crate::error::FfiError;
-use crate::iterator::FfiDbIterator;
-use crate::types::{FfiKeyRange, FfiKeyValue};
+use crate::config::{ReadOptions, ScanOptions};
+use crate::error::DbError;
+use crate::iterator::DbIterator;
+use crate::types::{KeyRange, KeyValue};
 
 #[derive(uniffi::Object)]
-pub struct FfiDbSnapshot {
+pub struct DbSnapshot {
     inner: Arc<slatedb::DbSnapshot>,
 }
 
-impl FfiDbSnapshot {
+impl DbSnapshot {
     pub(crate) fn new(inner: Arc<slatedb::DbSnapshot>) -> Self {
         Self { inner }
     }
 }
 
 #[uniffi::export(async_runtime = "tokio")]
-impl FfiDbSnapshot {
-    pub async fn get(&self, key: Vec<u8>) -> Result<Option<Vec<u8>>, FfiError> {
+impl DbSnapshot {
+    pub async fn get(&self, key: Vec<u8>) -> Result<Option<Vec<u8>>, DbError> {
         Ok(self.inner.get(key).await?.map(|value| value.to_vec()))
     }
 
     pub async fn get_with_options(
         &self,
         key: Vec<u8>,
-        options: FfiReadOptions,
-    ) -> Result<Option<Vec<u8>>, FfiError> {
+        options: ReadOptions,
+    ) -> Result<Option<Vec<u8>>, DbError> {
         let options = options.into_core();
         Ok(self
             .inner
@@ -35,62 +35,62 @@ impl FfiDbSnapshot {
             .map(|value| value.to_vec()))
     }
 
-    pub async fn get_key_value(&self, key: Vec<u8>) -> Result<Option<FfiKeyValue>, FfiError> {
+    pub async fn get_key_value(&self, key: Vec<u8>) -> Result<Option<KeyValue>, DbError> {
         Ok(self
             .inner
             .get_key_value(key)
             .await?
-            .map(FfiKeyValue::from_core))
+            .map(KeyValue::from_core))
     }
 
     pub async fn get_key_value_with_options(
         &self,
         key: Vec<u8>,
-        options: FfiReadOptions,
-    ) -> Result<Option<FfiKeyValue>, FfiError> {
+        options: ReadOptions,
+    ) -> Result<Option<KeyValue>, DbError> {
         let options = options.into_core();
         Ok(self
             .inner
             .get_key_value_with_options(key, &options)
             .await?
-            .map(FfiKeyValue::from_core))
+            .map(KeyValue::from_core))
     }
 
-    pub async fn scan(&self, range: FfiKeyRange) -> Result<Arc<FfiDbIterator>, FfiError> {
+    pub async fn scan(&self, range: KeyRange) -> Result<Arc<DbIterator>, DbError> {
         let range = range.into_bounds()?;
         let iter = self.inner.scan::<Vec<u8>, _>(range).await?;
-        Ok(Arc::new(FfiDbIterator::new(iter)))
+        Ok(Arc::new(DbIterator::new(iter)))
     }
 
     pub async fn scan_with_options(
         &self,
-        range: FfiKeyRange,
-        options: FfiScanOptions,
-    ) -> Result<Arc<FfiDbIterator>, FfiError> {
+        range: KeyRange,
+        options: ScanOptions,
+    ) -> Result<Arc<DbIterator>, DbError> {
         let range = range.into_bounds()?;
         let options = options.into_core()?;
         let iter = self
             .inner
             .scan_with_options::<Vec<u8>, _>(range, &options)
             .await?;
-        Ok(Arc::new(FfiDbIterator::new(iter)))
+        Ok(Arc::new(DbIterator::new(iter)))
     }
 
-    pub async fn scan_prefix(&self, prefix: Vec<u8>) -> Result<Arc<FfiDbIterator>, FfiError> {
+    pub async fn scan_prefix(&self, prefix: Vec<u8>) -> Result<Arc<DbIterator>, DbError> {
         let iter = self.inner.scan_prefix(prefix).await?;
-        Ok(Arc::new(FfiDbIterator::new(iter)))
+        Ok(Arc::new(DbIterator::new(iter)))
     }
 
     pub async fn scan_prefix_with_options(
         &self,
         prefix: Vec<u8>,
-        options: FfiScanOptions,
-    ) -> Result<Arc<FfiDbIterator>, FfiError> {
+        options: ScanOptions,
+    ) -> Result<Arc<DbIterator>, DbError> {
         let options = options.into_core()?;
         let iter = self
             .inner
             .scan_prefix_with_options(prefix, &options)
             .await?;
-        Ok(Arc::new(FfiDbIterator::new(iter)))
+        Ok(Arc::new(DbIterator::new(iter)))
     }
 }

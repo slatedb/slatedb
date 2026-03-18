@@ -3,14 +3,14 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 use serde_json::{Map, Value};
 
-use crate::error::{FfiError, FfiSlateDbError};
+use crate::error::{DbError, SlateDbError};
 
 #[derive(uniffi::Object)]
-pub struct FfiSettings {
+pub struct Settings {
     inner: Mutex<slatedb::Settings>,
 }
 
-impl FfiSettings {
+impl Settings {
     pub(crate) fn new(inner: slatedb::Settings) -> Self {
         Self {
             inner: Mutex::new(inner),
@@ -22,49 +22,49 @@ impl FfiSettings {
     }
 }
 
-impl Default for FfiSettings {
+impl Default for Settings {
     fn default() -> Self {
         Self::new(slatedb::Settings::default())
     }
 }
 
 #[uniffi::export]
-impl FfiSettings {
+impl Settings {
     #[uniffi::constructor(name = "default")]
     pub fn with_defaults() -> Arc<Self> {
         Arc::new(Self::default())
     }
 
     #[uniffi::constructor]
-    pub fn from_file(path: String) -> Result<Arc<Self>, FfiError> {
+    pub fn from_file(path: String) -> Result<Arc<Self>, DbError> {
         Ok(Arc::new(Self::new(slatedb::Settings::from_file(path)?)))
     }
 
     #[uniffi::constructor]
-    pub fn from_json_string(json: String) -> Result<Arc<Self>, FfiError> {
+    pub fn from_json_string(json: String) -> Result<Arc<Self>, DbError> {
         Ok(Arc::new(Self::new(
             serde_json::from_str::<slatedb::Settings>(&json)
-                .map_err(|source| FfiSlateDbError::SettingsJsonParse { source })?,
+                .map_err(|source| SlateDbError::SettingsJsonParse { source })?,
         )))
     }
 
     #[uniffi::constructor]
-    pub fn from_env(prefix: String) -> Result<Arc<Self>, FfiError> {
+    pub fn from_env(prefix: String) -> Result<Arc<Self>, DbError> {
         Ok(Arc::new(Self::new(slatedb::Settings::from_env(&prefix)?)))
     }
 
     #[uniffi::constructor]
     pub fn from_env_with_default(
         prefix: String,
-        default_settings: Arc<FfiSettings>,
-    ) -> Result<Arc<Self>, FfiError> {
+        default_settings: Arc<Settings>,
+    ) -> Result<Arc<Self>, DbError> {
         Ok(Arc::new(Self::new(
             slatedb::Settings::from_env_with_default(&prefix, default_settings.inner())?,
         )))
     }
 
     #[uniffi::constructor]
-    pub fn load() -> Result<Arc<Self>, FfiError> {
+    pub fn load() -> Result<Arc<Self>, DbError> {
         Ok(Arc::new(Self::new(slatedb::Settings::load()?)))
     }
 
@@ -91,32 +91,32 @@ impl FfiSettings {
     /// - `set("default_ttl", "null")`
     /// - `set("compactor_options.max_sst_size", "33554432")`
     /// - `set("object_store_cache_options.root_folder", "\"/tmp/slatedb-cache\"")`
-    pub fn set(&self, key: String, value_json: String) -> Result<(), FfiError> {
+    pub fn set(&self, key: String, value_json: String) -> Result<(), DbError> {
         let mut guard = self.inner.lock();
         let mut settings_json = serde_json::to_value(&*guard)
-            .map_err(|source| FfiSlateDbError::SettingsSerialization { source })?;
+            .map_err(|source| SlateDbError::SettingsSerialization { source })?;
 
         if !settings_json.is_object() {
-            return Err(FfiSlateDbError::SettingsJsonRootNotObject.into());
+            return Err(SlateDbError::SettingsJsonRootNotObject.into());
         }
 
         let value = serde_json::from_str::<Value>(&value_json)
-            .map_err(|source| FfiSlateDbError::InvalidValueJson { source })?;
+            .map_err(|source| SlateDbError::InvalidValueJson { source })?;
 
         apply_dotted_json_path(&mut settings_json, &key, value)
-            .map_err(|message| FfiSlateDbError::InvalidSettingsKey { message })?;
+            .map_err(|message| SlateDbError::InvalidSettingsKey { message })?;
 
         let settings = serde_json::from_value::<slatedb::Settings>(settings_json)
-            .map_err(|source| FfiSlateDbError::InvalidSettingsUpdate { source })?;
+            .map_err(|source| SlateDbError::InvalidSettingsUpdate { source })?;
         *guard = settings;
         Ok(())
     }
 
-    pub fn to_json_string(&self) -> Result<String, FfiError> {
+    pub fn to_json_string(&self) -> Result<String, DbError> {
         self.inner
             .lock()
             .to_json_string()
-            .map_err(|source| FfiSlateDbError::SettingsSerialization { source }.into())
+            .map_err(|source| SlateDbError::SettingsSerialization { source }.into())
     }
 }
 
@@ -166,8 +166,8 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use super::{apply_dotted_json_path, FfiSettings};
-    use crate::error::FfiError;
+    use super::{apply_dotted_json_path, Settings};
+    use crate::error::DbError;
 
     #[test]
     fn apply_dotted_json_path_sets_top_level_key() {
@@ -223,7 +223,7 @@ mod tests {
 
     #[test]
     fn settings_set_json_updates_top_level_field() {
-        let settings = Arc::new(FfiSettings::new(slatedb::Settings::default()));
+        let settings = Arc::new(Settings::new(slatedb::Settings::default()));
 
         settings
             .set("flush_interval".to_owned(), "\"250ms\"".to_owned())
@@ -237,7 +237,7 @@ mod tests {
 
     #[test]
     fn settings_set_json_materializes_nested_option_object() {
-        let settings = Arc::new(FfiSettings::new(slatedb::Settings::default()));
+        let settings = Arc::new(Settings::new(slatedb::Settings::default()));
 
         settings
             .set(
@@ -258,7 +258,7 @@ mod tests {
 
     #[test]
     fn settings_set_json_can_clear_optional_field() {
-        let settings = Arc::new(FfiSettings::new(slatedb::Settings::default()));
+        let settings = Arc::new(Settings::new(slatedb::Settings::default()));
 
         settings
             .set("default_ttl".to_owned(), "100".to_owned())
@@ -272,21 +272,21 @@ mod tests {
 
     #[test]
     fn settings_set_json_rejects_invalid_json_literal() {
-        let settings = Arc::new(FfiSettings::new(slatedb::Settings::default()));
+        let settings = Arc::new(Settings::new(slatedb::Settings::default()));
 
         let err = settings
             .set("flush_interval".to_owned(), "not-json".to_owned())
             .expect_err("expected invalid JSON");
 
         assert!(
-            matches!(err, FfiError::Invalid { .. }),
+            matches!(err, DbError::Invalid { .. }),
             "unexpected error: {err:?}"
         );
     }
 
     #[test]
     fn settings_set_json_preserves_previous_value_on_invalid_update() {
-        let settings = Arc::new(FfiSettings::new(slatedb::Settings::default()));
+        let settings = Arc::new(Settings::new(slatedb::Settings::default()));
         let before = settings.inner();
 
         let err = settings
@@ -294,7 +294,7 @@ mod tests {
             .expect_err("expected invalid settings");
 
         assert!(
-            matches!(err, FfiError::Invalid { .. }),
+            matches!(err, DbError::Invalid { .. }),
             "unexpected error: {err:?}"
         );
         assert_eq!(settings.inner().flush_interval, before.flush_interval);
@@ -302,14 +302,14 @@ mod tests {
 
     #[test]
     fn settings_round_trip_json_string() {
-        let settings = Arc::new(FfiSettings::new(slatedb::Settings::default()));
+        let settings = Arc::new(Settings::new(slatedb::Settings::default()));
 
         settings
             .set("default_ttl".to_owned(), "42".to_owned())
             .unwrap();
 
         let encoded = settings.to_json_string().unwrap();
-        let decoded = FfiSettings::from_json_string(encoded).unwrap();
+        let decoded = Settings::from_json_string(encoded).unwrap();
 
         assert_eq!(decoded.inner().default_ttl, Some(42));
     }
@@ -324,7 +324,7 @@ flush_interval = "1s"
 "#,
             )?;
 
-            let settings = FfiSettings::from_file("config.toml".to_owned()).unwrap();
+            let settings = Settings::from_file("config.toml".to_owned()).unwrap();
             assert_eq!(
                 settings.inner().flush_interval,
                 Some(Duration::from_secs(1))
@@ -339,7 +339,7 @@ flush_interval = "1s"
         figment::Jail::expect_with(|jail| {
             jail.set_env("FFI_SETTINGS_FLUSH_INTERVAL", "1s");
 
-            let settings = FfiSettings::from_env("FFI_SETTINGS_".to_owned()).unwrap();
+            let settings = Settings::from_env("FFI_SETTINGS_".to_owned()).unwrap();
             assert_eq!(
                 settings.inner().flush_interval,
                 Some(Duration::from_secs(1))
@@ -354,13 +354,13 @@ flush_interval = "1s"
         figment::Jail::expect_with(|jail| {
             jail.set_env("FFI_SETTINGS_DEFAULT_TTL", "42");
 
-            let defaults = Arc::new(FfiSettings::new(slatedb::Settings::default()));
+            let defaults = Arc::new(Settings::new(slatedb::Settings::default()));
             defaults
                 .set("flush_interval".to_owned(), "\"250ms\"".to_owned())
                 .unwrap();
 
             let settings =
-                FfiSettings::from_env_with_default("FFI_SETTINGS_".to_owned(), defaults.clone())
+                Settings::from_env_with_default("FFI_SETTINGS_".to_owned(), defaults.clone())
                     .unwrap();
 
             assert_eq!(
@@ -383,7 +383,7 @@ flush_interval = "2s"
 "#,
             )?;
 
-            let settings = FfiSettings::load().unwrap();
+            let settings = Settings::load().unwrap();
             assert_eq!(
                 settings.inner().flush_interval,
                 Some(Duration::from_secs(2))

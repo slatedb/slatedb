@@ -3,7 +3,7 @@ use std::error::Error as StdError;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
-pub(crate) enum FfiSlateDbError {
+pub(crate) enum SlateDbError {
     #[error("key cannot be empty")]
     EmptyKey,
 
@@ -66,13 +66,13 @@ pub(crate) enum FfiSlateDbError {
 }
 
 #[derive(Debug, Error, uniffi::Error)]
-pub enum FfiMergeOperatorCallbackError {
+pub enum MergeOperatorCallbackError {
     #[error("{message}")]
     Failed { message: String },
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, uniffi::Enum)]
-pub enum FfiCloseReason {
+pub enum CloseReason {
     #[default]
     None,
     Clean,
@@ -81,7 +81,7 @@ pub enum FfiCloseReason {
     Unknown,
 }
 
-impl From<slatedb::CloseReason> for FfiCloseReason {
+impl From<slatedb::CloseReason> for CloseReason {
     fn from(reason: slatedb::CloseReason) -> Self {
         match reason {
             slatedb::CloseReason::Clean => Self::Clean,
@@ -93,13 +93,13 @@ impl From<slatedb::CloseReason> for FfiCloseReason {
 }
 
 #[derive(Debug, Error, uniffi::Error)]
-pub enum FfiError {
+pub enum DbError {
     #[error("{message}")]
     Transaction { message: String },
 
     #[error("{message}")]
     Closed {
-        reason: FfiCloseReason,
+        reason: CloseReason,
         message: String,
     },
 
@@ -116,14 +116,14 @@ pub enum FfiError {
     Internal { message: String },
 }
 
-impl From<FfiSlateDbError> for FfiError {
-    fn from(error: FfiSlateDbError) -> Self {
+impl From<SlateDbError> for DbError {
+    fn from(error: SlateDbError) -> Self {
         let message = error.to_string();
         Self::Invalid { message }
     }
 }
 
-impl From<slatedb::Error> for FfiError {
+impl From<slatedb::Error> for DbError {
     fn from(error: slatedb::Error) -> Self {
         let message = error.to_string();
         match error.kind() {

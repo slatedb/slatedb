@@ -15,24 +15,23 @@ mod validation;
 mod wal;
 mod write_batch;
 
-pub use builder::{FfiDbBuilder, FfiDbReaderBuilder};
+pub use builder::{DbBuilder, DbReaderBuilder};
 pub use config::{
-    FfiDurabilityLevel, FfiFlushOptions, FfiFlushType, FfiIsolationLevel, FfiMergeOptions,
-    FfiPutOptions, FfiReadOptions, FfiReaderOptions, FfiScanOptions, FfiSstBlockSize, FfiTtl,
-    FfiWriteOptions,
+    DurabilityLevel, FlushOptions, FlushType, IsolationLevel, MergeOptions, PutOptions,
+    ReadOptions, ReaderOptions, ScanOptions, SstBlockSize, Ttl, WriteOptions,
 };
-pub use db::FfiDb;
-pub use db_reader::FfiDbReader;
-pub use db_snapshot::FfiDbSnapshot;
-pub use db_transaction::FfiDbTransaction;
-pub use error::{FfiCloseReason, FfiError, FfiMergeOperatorCallbackError};
-pub use iterator::FfiDbIterator;
-pub use logging::{ffi_init_logging, FfiLogCallback, FfiLogLevel, FfiLogRecord};
-pub use merge_operator::FfiMergeOperator;
-pub use object_store::FfiObjectStore;
-pub use settings::FfiSettings;
-pub use types::{FfiKeyRange, FfiKeyValue, FfiRowEntry, FfiRowEntryKind, FfiWriteHandle};
-pub use wal::{FfiWalFile, FfiWalFileIterator, FfiWalFileMetadata, FfiWalReader};
-pub use write_batch::FfiWriteBatch;
+pub use db::Db;
+pub use db_reader::DbReader;
+pub use db_snapshot::DbSnapshot;
+pub use db_transaction::DbTransaction;
+pub use error::{CloseReason, DbError, MergeOperatorCallbackError};
+pub use iterator::DbIterator;
+pub use logging::{init_logging, LogCallback, LogLevel, LogRecord};
+pub use merge_operator::MergeOperator;
+pub use object_store::ObjectStore;
+pub use settings::Settings;
+pub use types::{KeyRange, KeyValue, RowEntry, RowEntryKind, WriteHandle};
+pub use wal::{WalFile, WalFileIterator, WalFileMetadata, WalReader};
+pub use write_batch::WriteBatch;
 
 uniffi::setup_scaffolding!("slatedb");

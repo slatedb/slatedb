@@ -2,22 +2,21 @@ package io.slatedb.jna.ffi;
 
 
 public class Slatedb {
-  public static void ffiInitLogging(FfiLogLevel level, FfiLogCallback callback)
-      throws FfiException {
+  public static void initLogging(LogLevel level, LogCallback callback) throws DbException {
     try {
 
       UniffiHelpers.uniffiRustCallWithError(
-          new FfiExceptionErrorHandler(),
+          new DbExceptionErrorHandler(),
           _status -> {
-            UniffiLib.INSTANCE.uniffi_slatedb_ffi_fn_func_ffi_init_logging(
-                FfiConverterTypeFfiLogLevel.INSTANCE.lower(level),
-                FfiConverterOptionalTypeFfiLogCallback.INSTANCE.lower(callback),
+            UniffiLib.INSTANCE.uniffi_slatedb_ffi_fn_func_init_logging(
+                FfiConverterTypeLogLevel.INSTANCE.lower(level),
+                FfiConverterOptionalTypeLogCallback.INSTANCE.lower(callback),
                 _status);
           });
     } catch (RuntimeException _e) {
 
-      if (FfiException.class.isInstance(_e.getCause())) {
-        throw (FfiException) _e.getCause();
+      if (DbException.class.isInstance(_e.getCause())) {
+        throw (DbException) _e.getCause();
       }
 
       if (InternalException.class.isInstance(_e.getCause())) {

@@ -1,17 +1,15 @@
 use std::time::Duration;
 
-use slatedb::{IsolationLevel, SstBlockSize};
-
-use crate::error::FfiSlateDbError;
+use crate::error::SlateDbError;
 
 #[derive(Clone, Copy, Debug, Default, uniffi::Enum)]
-pub enum FfiDurabilityLevel {
+pub enum DurabilityLevel {
     Remote,
     #[default]
     Memory,
 }
 
-impl FfiDurabilityLevel {
+impl DurabilityLevel {
     pub(crate) fn into_core(self) -> slatedb::config::DurabilityLevel {
         match self {
             Self::Remote => slatedb::config::DurabilityLevel::Remote,
@@ -21,13 +19,13 @@ impl FfiDurabilityLevel {
 }
 
 #[derive(Clone, Copy, Debug, Default, uniffi::Enum)]
-pub enum FfiFlushType {
+pub enum FlushType {
     MemTable,
     #[default]
     Wal,
 }
 
-impl FfiFlushType {
+impl FlushType {
     pub(crate) fn into_core(self) -> slatedb::config::FlushType {
         match self {
             Self::MemTable => slatedb::config::FlushType::MemTable,
@@ -37,23 +35,23 @@ impl FfiFlushType {
 }
 
 #[derive(Clone, Copy, Debug, Default, uniffi::Enum)]
-pub enum FfiIsolationLevel {
+pub enum IsolationLevel {
     #[default]
     Snapshot,
     SerializableSnapshot,
 }
 
-impl FfiIsolationLevel {
-    pub(crate) fn into_core(self) -> IsolationLevel {
+impl IsolationLevel {
+    pub(crate) fn into_core(self) -> slatedb::IsolationLevel {
         match self {
-            Self::Snapshot => IsolationLevel::Snapshot,
-            Self::SerializableSnapshot => IsolationLevel::SerializableSnapshot,
+            Self::Snapshot => slatedb::IsolationLevel::Snapshot,
+            Self::SerializableSnapshot => slatedb::IsolationLevel::SerializableSnapshot,
         }
     }
 }
 
 #[derive(Clone, Copy, Debug, Default, uniffi::Enum)]
-pub enum FfiSstBlockSize {
+pub enum SstBlockSize {
     Block1Kib,
     Block2Kib,
     #[default]
@@ -64,29 +62,29 @@ pub enum FfiSstBlockSize {
     Block64Kib,
 }
 
-impl FfiSstBlockSize {
-    pub(crate) fn into_core(self) -> SstBlockSize {
+impl SstBlockSize {
+    pub(crate) fn into_core(self) -> slatedb::SstBlockSize {
         match self {
-            Self::Block1Kib => SstBlockSize::Block1Kib,
-            Self::Block2Kib => SstBlockSize::Block2Kib,
-            Self::Block4Kib => SstBlockSize::Block4Kib,
-            Self::Block8Kib => SstBlockSize::Block8Kib,
-            Self::Block16Kib => SstBlockSize::Block16Kib,
-            Self::Block32Kib => SstBlockSize::Block32Kib,
-            Self::Block64Kib => SstBlockSize::Block64Kib,
+            Self::Block1Kib => slatedb::SstBlockSize::Block1Kib,
+            Self::Block2Kib => slatedb::SstBlockSize::Block2Kib,
+            Self::Block4Kib => slatedb::SstBlockSize::Block4Kib,
+            Self::Block8Kib => slatedb::SstBlockSize::Block8Kib,
+            Self::Block16Kib => slatedb::SstBlockSize::Block16Kib,
+            Self::Block32Kib => slatedb::SstBlockSize::Block32Kib,
+            Self::Block64Kib => slatedb::SstBlockSize::Block64Kib,
         }
     }
 }
 
 #[derive(Clone, Debug, Default, uniffi::Enum)]
-pub enum FfiTtl {
+pub enum Ttl {
     #[default]
     Default,
     NoExpiry,
     ExpireAfterTicks(u64),
 }
 
-impl FfiTtl {
+impl Ttl {
     pub(crate) fn into_core(self) -> slatedb::config::Ttl {
         match self {
             Self::Default => slatedb::config::Ttl::Default,
@@ -97,23 +95,23 @@ impl FfiTtl {
 }
 
 #[derive(Clone, Debug, uniffi::Record)]
-pub struct FfiReadOptions {
-    pub durability_filter: FfiDurabilityLevel,
+pub struct ReadOptions {
+    pub durability_filter: DurabilityLevel,
     pub dirty: bool,
     pub cache_blocks: bool,
 }
 
-impl Default for FfiReadOptions {
+impl Default for ReadOptions {
     fn default() -> Self {
         Self {
-            durability_filter: FfiDurabilityLevel::default(),
+            durability_filter: DurabilityLevel::default(),
             dirty: false,
             cache_blocks: true,
         }
     }
 }
 
-impl FfiReadOptions {
+impl ReadOptions {
     pub(crate) fn into_core(self) -> slatedb::config::ReadOptions {
         slatedb::config::ReadOptions {
             durability_filter: self.durability_filter.into_core(),
@@ -124,14 +122,14 @@ impl FfiReadOptions {
 }
 
 #[derive(Clone, Debug, uniffi::Record)]
-pub struct FfiReaderOptions {
+pub struct ReaderOptions {
     pub manifest_poll_interval_ms: u64,
     pub checkpoint_lifetime_ms: u64,
     pub max_memtable_bytes: u64,
     pub skip_wal_replay: bool,
 }
 
-impl Default for FfiReaderOptions {
+impl Default for ReaderOptions {
     fn default() -> Self {
         Self {
             manifest_poll_interval_ms: 10_000,
@@ -142,7 +140,7 @@ impl Default for FfiReaderOptions {
     }
 }
 
-impl FfiReaderOptions {
+impl ReaderOptions {
     pub(crate) fn into_core(self) -> slatedb::config::DbReaderOptions {
         slatedb::config::DbReaderOptions {
             manifest_poll_interval: Duration::from_millis(self.manifest_poll_interval_ms),
@@ -155,18 +153,18 @@ impl FfiReaderOptions {
 }
 
 #[derive(Clone, Debug, uniffi::Record)]
-pub struct FfiScanOptions {
-    pub durability_filter: FfiDurabilityLevel,
+pub struct ScanOptions {
+    pub durability_filter: DurabilityLevel,
     pub dirty: bool,
     pub read_ahead_bytes: u64,
     pub cache_blocks: bool,
     pub max_fetch_tasks: u64,
 }
 
-impl Default for FfiScanOptions {
+impl Default for ScanOptions {
     fn default() -> Self {
         Self {
-            durability_filter: FfiDurabilityLevel::default(),
+            durability_filter: DurabilityLevel::default(),
             dirty: false,
             read_ahead_bytes: 1,
             cache_blocks: false,
@@ -175,19 +173,19 @@ impl Default for FfiScanOptions {
     }
 }
 
-impl FfiScanOptions {
-    pub(crate) fn into_core(self) -> Result<slatedb::config::ScanOptions, FfiSlateDbError> {
+impl ScanOptions {
+    pub(crate) fn into_core(self) -> Result<slatedb::config::ScanOptions, SlateDbError> {
         Ok(slatedb::config::ScanOptions {
             durability_filter: self.durability_filter.into_core(),
             dirty: self.dirty,
             read_ahead_bytes: usize::try_from(self.read_ahead_bytes).map_err(|_| {
-                FfiSlateDbError::ValueTooLargeForUsize {
+                SlateDbError::ValueTooLargeForUsize {
                     field: "read_ahead_bytes",
                 }
             })?,
             cache_blocks: self.cache_blocks,
             max_fetch_tasks: usize::try_from(self.max_fetch_tasks).map_err(|_| {
-                FfiSlateDbError::ValueTooLargeForUsize {
+                SlateDbError::ValueTooLargeForUsize {
                     field: "max_fetch_tasks",
                 }
             })?,
@@ -196,11 +194,11 @@ impl FfiScanOptions {
 }
 
 #[derive(Clone, Debug, uniffi::Record)]
-pub struct FfiWriteOptions {
+pub struct WriteOptions {
     pub await_durable: bool,
 }
 
-impl Default for FfiWriteOptions {
+impl Default for WriteOptions {
     fn default() -> Self {
         Self {
             await_durable: true,
@@ -208,7 +206,7 @@ impl Default for FfiWriteOptions {
     }
 }
 
-impl FfiWriteOptions {
+impl WriteOptions {
     pub(crate) fn into_core(self) -> slatedb::config::WriteOptions {
         slatedb::config::WriteOptions {
             await_durable: self.await_durable,
@@ -217,11 +215,11 @@ impl FfiWriteOptions {
 }
 
 #[derive(Clone, Debug, Default, uniffi::Record)]
-pub struct FfiPutOptions {
-    pub ttl: FfiTtl,
+pub struct PutOptions {
+    pub ttl: Ttl,
 }
 
-impl FfiPutOptions {
+impl PutOptions {
     pub(crate) fn into_core(self) -> slatedb::config::PutOptions {
         slatedb::config::PutOptions {
             ttl: self.ttl.into_core(),
@@ -230,11 +228,11 @@ impl FfiPutOptions {
 }
 
 #[derive(Clone, Debug, Default, uniffi::Record)]
-pub struct FfiMergeOptions {
-    pub ttl: FfiTtl,
+pub struct MergeOptions {
+    pub ttl: Ttl,
 }
 
-impl FfiMergeOptions {
+impl MergeOptions {
     pub(crate) fn into_core(self) -> slatedb::config::MergeOptions {
         slatedb::config::MergeOptions {
             ttl: self.ttl.into_core(),
@@ -243,11 +241,11 @@ impl FfiMergeOptions {
 }
 
 #[derive(Clone, Debug, uniffi::Record, Default)]
-pub struct FfiFlushOptions {
-    pub flush_type: FfiFlushType,
+pub struct FlushOptions {
+    pub flush_type: FlushType,
 }
 
-impl FfiFlushOptions {
+impl FlushOptions {
     pub(crate) fn into_core(self) -> slatedb::config::FlushOptions {
         slatedb::config::FlushOptions {
             flush_type: self.flush_type.into_core(),
