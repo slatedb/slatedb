@@ -2508,7 +2508,7 @@ impl PyCompactionSpec {
             .into_iter()
             .map(|source| match source {
                 CompactionSourceInput::SortedRun(id) => SourceId::SortedRun(id),
-                CompactionSourceInput::Sst(ulid) => SourceId::Sst(ulid),
+                CompactionSourceInput::Sst(ulid) => SourceId::SstView(ulid),
             })
             .collect();
         Self {
