@@ -3,7 +3,7 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 use serde_json::{Map, Value};
 
-use crate::error::{DbError, SlateDbError};
+use crate::error::{Error, SlateDbError};
 
 #[derive(uniffi::Object)]
 pub struct Settings {
@@ -36,12 +36,12 @@ impl Settings {
     }
 
     #[uniffi::constructor]
-    pub fn from_file(path: String) -> Result<Arc<Self>, DbError> {
+    pub fn from_file(path: String) -> Result<Arc<Self>, Error> {
         Ok(Arc::new(Self::new(slatedb::Settings::from_file(path)?)))
     }
 
     #[uniffi::constructor]
-    pub fn from_json_string(json: String) -> Result<Arc<Self>, DbError> {
+    pub fn from_json_string(json: String) -> Result<Arc<Self>, Error> {
         Ok(Arc::new(Self::new(
             serde_json::from_str::<slatedb::Settings>(&json)
                 .map_err(|source| SlateDbError::SettingsJsonParse { source })?,
@@ -49,7 +49,7 @@ impl Settings {
     }
 
     #[uniffi::constructor]
-    pub fn from_env(prefix: String) -> Result<Arc<Self>, DbError> {
+    pub fn from_env(prefix: String) -> Result<Arc<Self>, Error> {
         Ok(Arc::new(Self::new(slatedb::Settings::from_env(&prefix)?)))
     }
 
@@ -57,14 +57,14 @@ impl Settings {
     pub fn from_env_with_default(
         prefix: String,
         default_settings: Arc<Settings>,
-    ) -> Result<Arc<Self>, DbError> {
+    ) -> Result<Arc<Self>, Error> {
         Ok(Arc::new(Self::new(
             slatedb::Settings::from_env_with_default(&prefix, default_settings.inner())?,
         )))
     }
 
     #[uniffi::constructor]
-    pub fn load() -> Result<Arc<Self>, DbError> {
+    pub fn load() -> Result<Arc<Self>, Error> {
         Ok(Arc::new(Self::new(slatedb::Settings::load()?)))
     }
 
@@ -91,7 +91,7 @@ impl Settings {
     /// - `set("default_ttl", "null")`
     /// - `set("compactor_options.max_sst_size", "33554432")`
     /// - `set("object_store_cache_options.root_folder", "\"/tmp/slatedb-cache\"")`
-    pub fn set(&self, key: String, value_json: String) -> Result<(), DbError> {
+    pub fn set(&self, key: String, value_json: String) -> Result<(), Error> {
         let mut guard = self.inner.lock();
         let mut settings_json = serde_json::to_value(&*guard)
             .map_err(|source| SlateDbError::SettingsSerialization { source })?;
@@ -112,7 +112,7 @@ impl Settings {
         Ok(())
     }
 
-    pub fn to_json_string(&self) -> Result<String, DbError> {
+    pub fn to_json_string(&self) -> Result<String, Error> {
         self.inner
             .lock()
             .to_json_string()
@@ -167,7 +167,7 @@ mod tests {
     use std::time::Duration;
 
     use super::{apply_dotted_json_path, Settings};
-    use crate::error::DbError;
+    use crate::error::Error;
 
     #[test]
     fn apply_dotted_json_path_sets_top_level_key() {
@@ -279,7 +279,7 @@ mod tests {
             .expect_err("expected invalid JSON");
 
         assert!(
-            matches!(err, DbError::Invalid { .. }),
+            matches!(err, Error::Invalid { .. }),
             "unexpected error: {err:?}"
         );
     }
@@ -294,7 +294,7 @@ mod tests {
             .expect_err("expected invalid settings");
 
         assert!(
-            matches!(err, DbError::Invalid { .. }),
+            matches!(err, Error::Invalid { .. }),
             "unexpected error: {err:?}"
         );
         assert_eq!(settings.inner().flush_interval, before.flush_interval);

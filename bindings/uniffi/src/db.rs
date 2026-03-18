@@ -6,7 +6,7 @@ use crate::config::{
 };
 use crate::db_snapshot::DbSnapshot;
 use crate::db_transaction::DbTransaction;
-use crate::error::DbError;
+use crate::error::Error;
 use crate::iterator::DbIterator;
 use crate::types::{KeyRange, KeyValue, WriteHandle};
 use crate::validation::{validate_key, validate_key_value};
@@ -25,11 +25,11 @@ impl Db {
 
 #[uniffi::export]
 impl Db {
-    pub fn status(&self) -> Result<(), DbError> {
+    pub fn status(&self) -> Result<(), Error> {
         self.inner.status().map_err(Into::into)
     }
 
-    pub fn metrics(&self) -> Result<HashMap<String, i64>, DbError> {
+    pub fn metrics(&self) -> Result<HashMap<String, i64>, Error> {
         let registry = self.inner.metrics();
         let mut snapshot = HashMap::new();
         for name in registry.names() {
@@ -45,11 +45,11 @@ impl Db {
 impl Db {
     // `shutdown` because `close` is reserved by uniffi for the destructor
     #[uniffi::method(name = "shutdown")]
-    pub async fn close(&self) -> Result<(), DbError> {
+    pub async fn close(&self) -> Result<(), Error> {
         self.inner.close().await.map_err(Into::into)
     }
 
-    pub async fn get(&self, key: Vec<u8>) -> Result<Option<Vec<u8>>, DbError> {
+    pub async fn get(&self, key: Vec<u8>) -> Result<Option<Vec<u8>>, Error> {
         Ok(self.inner.get(key).await?.map(|value| value.to_vec()))
     }
 
@@ -57,7 +57,7 @@ impl Db {
         &self,
         key: Vec<u8>,
         options: ReadOptions,
-    ) -> Result<Option<Vec<u8>>, DbError> {
+    ) -> Result<Option<Vec<u8>>, Error> {
         let options = options.into_core();
         Ok(self
             .inner
@@ -66,7 +66,7 @@ impl Db {
             .map(|value| value.to_vec()))
     }
 
-    pub async fn get_key_value(&self, key: Vec<u8>) -> Result<Option<KeyValue>, DbError> {
+    pub async fn get_key_value(&self, key: Vec<u8>) -> Result<Option<KeyValue>, Error> {
         Ok(self
             .inner
             .get_key_value(key)
@@ -78,7 +78,7 @@ impl Db {
         &self,
         key: Vec<u8>,
         options: ReadOptions,
-    ) -> Result<Option<KeyValue>, DbError> {
+    ) -> Result<Option<KeyValue>, Error> {
         let options = options.into_core();
         Ok(self
             .inner
@@ -87,7 +87,7 @@ impl Db {
             .map(KeyValue::from_core))
     }
 
-    pub async fn scan(&self, range: KeyRange) -> Result<Arc<DbIterator>, DbError> {
+    pub async fn scan(&self, range: KeyRange) -> Result<Arc<DbIterator>, Error> {
         let range = range.into_bounds()?;
         let iter = self.inner.scan::<Vec<u8>, _>(range).await?;
         Ok(Arc::new(DbIterator::new(iter)))
@@ -97,7 +97,7 @@ impl Db {
         &self,
         range: KeyRange,
         options: ScanOptions,
-    ) -> Result<Arc<DbIterator>, DbError> {
+    ) -> Result<Arc<DbIterator>, Error> {
         let range = range.into_bounds()?;
         let options = options.into_core()?;
         let iter = self
@@ -107,7 +107,7 @@ impl Db {
         Ok(Arc::new(DbIterator::new(iter)))
     }
 
-    pub async fn scan_prefix(&self, prefix: Vec<u8>) -> Result<Arc<DbIterator>, DbError> {
+    pub async fn scan_prefix(&self, prefix: Vec<u8>) -> Result<Arc<DbIterator>, Error> {
         let iter = self.inner.scan_prefix(prefix).await?;
         Ok(Arc::new(DbIterator::new(iter)))
     }
@@ -116,7 +116,7 @@ impl Db {
         &self,
         prefix: Vec<u8>,
         options: ScanOptions,
-    ) -> Result<Arc<DbIterator>, DbError> {
+    ) -> Result<Arc<DbIterator>, Error> {
         let options = options.into_core()?;
         let iter = self
             .inner
@@ -125,7 +125,7 @@ impl Db {
         Ok(Arc::new(DbIterator::new(iter)))
     }
 
-    pub async fn put(&self, key: Vec<u8>, value: Vec<u8>) -> Result<WriteHandle, DbError> {
+    pub async fn put(&self, key: Vec<u8>, value: Vec<u8>) -> Result<WriteHandle, Error> {
         validate_key_value(&key, &value)?;
         Ok(WriteHandle::from_core(self.inner.put(key, value).await?))
     }
@@ -136,7 +136,7 @@ impl Db {
         value: Vec<u8>,
         put_options: PutOptions,
         write_options: WriteOptions,
-    ) -> Result<WriteHandle, DbError> {
+    ) -> Result<WriteHandle, Error> {
         validate_key_value(&key, &value)?;
         let put_options = put_options.into_core();
         let write_options = write_options.into_core();
@@ -147,7 +147,7 @@ impl Db {
         ))
     }
 
-    pub async fn delete(&self, key: Vec<u8>) -> Result<WriteHandle, DbError> {
+    pub async fn delete(&self, key: Vec<u8>) -> Result<WriteHandle, Error> {
         validate_key(&key)?;
         Ok(WriteHandle::from_core(self.inner.delete(key).await?))
     }
@@ -156,7 +156,7 @@ impl Db {
         &self,
         key: Vec<u8>,
         options: WriteOptions,
-    ) -> Result<WriteHandle, DbError> {
+    ) -> Result<WriteHandle, Error> {
         validate_key(&key)?;
         let options = options.into_core();
         Ok(WriteHandle::from_core(
@@ -164,7 +164,7 @@ impl Db {
         ))
     }
 
-    pub async fn merge(&self, key: Vec<u8>, operand: Vec<u8>) -> Result<WriteHandle, DbError> {
+    pub async fn merge(&self, key: Vec<u8>, operand: Vec<u8>) -> Result<WriteHandle, Error> {
         validate_key_value(&key, &operand)?;
         Ok(WriteHandle::from_core(
             self.inner.merge(key, operand).await?,
@@ -177,7 +177,7 @@ impl Db {
         operand: Vec<u8>,
         merge_options: MergeOptions,
         write_options: WriteOptions,
-    ) -> Result<WriteHandle, DbError> {
+    ) -> Result<WriteHandle, Error> {
         validate_key_value(&key, &operand)?;
         let merge_options = merge_options.into_core();
         let write_options = write_options.into_core();
@@ -188,7 +188,7 @@ impl Db {
         ))
     }
 
-    pub async fn write(&self, batch: Arc<WriteBatch>) -> Result<WriteHandle, DbError> {
+    pub async fn write(&self, batch: Arc<WriteBatch>) -> Result<WriteHandle, Error> {
         let batch = batch.take_for_write()?;
         Ok(WriteHandle::from_core(self.inner.write(batch).await?))
     }
@@ -197,7 +197,7 @@ impl Db {
         &self,
         batch: Arc<WriteBatch>,
         options: WriteOptions,
-    ) -> Result<WriteHandle, DbError> {
+    ) -> Result<WriteHandle, Error> {
         let batch = batch.take_for_write()?;
         let options = options.into_core();
         Ok(WriteHandle::from_core(
@@ -205,25 +205,25 @@ impl Db {
         ))
     }
 
-    pub async fn flush(&self) -> Result<(), DbError> {
+    pub async fn flush(&self) -> Result<(), Error> {
         self.inner.flush().await.map_err(Into::into)
     }
 
-    pub async fn flush_with_options(&self, options: FlushOptions) -> Result<(), DbError> {
+    pub async fn flush_with_options(&self, options: FlushOptions) -> Result<(), Error> {
         self.inner
             .flush_with_options(options.into_core())
             .await
             .map_err(Into::into)
     }
 
-    pub async fn snapshot(&self) -> Result<Arc<DbSnapshot>, DbError> {
+    pub async fn snapshot(&self) -> Result<Arc<DbSnapshot>, Error> {
         Ok(Arc::new(DbSnapshot::new(self.inner.snapshot().await?)))
     }
 
     pub async fn begin(
         &self,
         isolation_level: IsolationLevel,
-    ) -> Result<Arc<DbTransaction>, DbError> {
+    ) -> Result<Arc<DbTransaction>, Error> {
         let tx = self.inner.begin(isolation_level.into_core()).await?;
         Ok(Arc::new(DbTransaction::new(tx)))
     }

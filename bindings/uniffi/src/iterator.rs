@@ -1,6 +1,6 @@
 use tokio::sync::Mutex;
 
-use crate::error::DbError;
+use crate::error::Error;
 use crate::types::KeyValue;
 use crate::validation::validate_key;
 
@@ -19,12 +19,12 @@ impl DbIterator {
 
 #[uniffi::export(async_runtime = "tokio")]
 impl DbIterator {
-    pub async fn next(&self) -> Result<Option<KeyValue>, DbError> {
+    pub async fn next(&self) -> Result<Option<KeyValue>, Error> {
         let mut guard = self.inner.lock().await;
         Ok(guard.next().await?.map(KeyValue::from_core))
     }
 
-    pub async fn seek(&self, key: Vec<u8>) -> Result<(), DbError> {
+    pub async fn seek(&self, key: Vec<u8>) -> Result<(), Error> {
         validate_key(&key)?;
         let mut guard = self.inner.lock().await;
         guard.seek(key).await.map_err(Into::into)

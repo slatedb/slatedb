@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use crate::config::{ReadOptions, ScanOptions};
-use crate::error::DbError;
+use crate::error::Error;
 use crate::iterator::DbIterator;
 use crate::types::KeyRange;
 
@@ -18,7 +18,7 @@ impl DbReader {
 
 #[uniffi::export(async_runtime = "tokio")]
 impl DbReader {
-    pub async fn get(&self, key: Vec<u8>) -> Result<Option<Vec<u8>>, DbError> {
+    pub async fn get(&self, key: Vec<u8>) -> Result<Option<Vec<u8>>, Error> {
         Ok(self.inner.get(key).await?.map(|value| value.to_vec()))
     }
 
@@ -26,7 +26,7 @@ impl DbReader {
         &self,
         key: Vec<u8>,
         options: ReadOptions,
-    ) -> Result<Option<Vec<u8>>, DbError> {
+    ) -> Result<Option<Vec<u8>>, Error> {
         let options = options.into_core();
         Ok(self
             .inner
@@ -35,7 +35,7 @@ impl DbReader {
             .map(|value| value.to_vec()))
     }
 
-    pub async fn scan(&self, range: KeyRange) -> Result<Arc<DbIterator>, DbError> {
+    pub async fn scan(&self, range: KeyRange) -> Result<Arc<DbIterator>, Error> {
         let range = range.into_bounds()?;
         let iter = self.inner.scan::<Vec<u8>, _>(range).await?;
         Ok(Arc::new(DbIterator::new(iter)))
@@ -45,7 +45,7 @@ impl DbReader {
         &self,
         range: KeyRange,
         options: ScanOptions,
-    ) -> Result<Arc<DbIterator>, DbError> {
+    ) -> Result<Arc<DbIterator>, Error> {
         let range = range.into_bounds()?;
         let options = options.into_core()?;
         let iter = self
@@ -55,7 +55,7 @@ impl DbReader {
         Ok(Arc::new(DbIterator::new(iter)))
     }
 
-    pub async fn scan_prefix(&self, prefix: Vec<u8>) -> Result<Arc<DbIterator>, DbError> {
+    pub async fn scan_prefix(&self, prefix: Vec<u8>) -> Result<Arc<DbIterator>, Error> {
         let iter = self.inner.scan_prefix(prefix).await?;
         Ok(Arc::new(DbIterator::new(iter)))
     }
@@ -64,7 +64,7 @@ impl DbReader {
         &self,
         prefix: Vec<u8>,
         options: ScanOptions,
-    ) -> Result<Arc<DbIterator>, DbError> {
+    ) -> Result<Arc<DbIterator>, Error> {
         let options = options.into_core()?;
         let iter = self
             .inner
@@ -75,7 +75,7 @@ impl DbReader {
 
     // `shutdown` because `close` is reserved by uniffi for the destructor.
     #[uniffi::method(name = "shutdown")]
-    pub async fn close(&self) -> Result<(), DbError> {
+    pub async fn close(&self) -> Result<(), Error> {
         self.inner.close().await.map_err(Into::into)
     }
 }

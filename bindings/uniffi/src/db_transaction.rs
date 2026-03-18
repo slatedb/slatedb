@@ -3,7 +3,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 use crate::config::{MergeOptions, PutOptions, ReadOptions, ScanOptions, WriteOptions};
-use crate::error::{DbError, SlateDbError};
+use crate::error::{Error, SlateDbError};
 use crate::iterator::DbIterator;
 use crate::types::{KeyRange, KeyValue, WriteHandle};
 use crate::validation::{validate_key, validate_key_value};
@@ -38,7 +38,7 @@ impl DbTransaction {
 
 #[uniffi::export(async_runtime = "tokio")]
 impl DbTransaction {
-    pub async fn put(&self, key: Vec<u8>, value: Vec<u8>) -> Result<(), DbError> {
+    pub async fn put(&self, key: Vec<u8>, value: Vec<u8>) -> Result<(), Error> {
         validate_key_value(&key, &value)?;
         let guard = self.inner.lock().await;
         let tx = guard.as_ref().ok_or(SlateDbError::TransactionCompleted)?;
@@ -50,7 +50,7 @@ impl DbTransaction {
         key: Vec<u8>,
         value: Vec<u8>,
         options: PutOptions,
-    ) -> Result<(), DbError> {
+    ) -> Result<(), Error> {
         validate_key_value(&key, &value)?;
         let options = options.into_core();
         let guard = self.inner.lock().await;
@@ -59,14 +59,14 @@ impl DbTransaction {
             .map_err(Into::into)
     }
 
-    pub async fn delete(&self, key: Vec<u8>) -> Result<(), DbError> {
+    pub async fn delete(&self, key: Vec<u8>) -> Result<(), Error> {
         validate_key(&key)?;
         let guard = self.inner.lock().await;
         let tx = guard.as_ref().ok_or(SlateDbError::TransactionCompleted)?;
         tx.delete(key).map_err(Into::into)
     }
 
-    pub async fn merge(&self, key: Vec<u8>, operand: Vec<u8>) -> Result<(), DbError> {
+    pub async fn merge(&self, key: Vec<u8>, operand: Vec<u8>) -> Result<(), Error> {
         validate_key_value(&key, &operand)?;
         let guard = self.inner.lock().await;
         let tx = guard.as_ref().ok_or(SlateDbError::TransactionCompleted)?;
@@ -78,7 +78,7 @@ impl DbTransaction {
         key: Vec<u8>,
         operand: Vec<u8>,
         options: MergeOptions,
-    ) -> Result<(), DbError> {
+    ) -> Result<(), Error> {
         validate_key_value(&key, &operand)?;
         let options = options.into_core();
         let guard = self.inner.lock().await;
@@ -87,26 +87,26 @@ impl DbTransaction {
             .map_err(Into::into)
     }
 
-    pub async fn mark_read(&self, keys: Vec<Vec<u8>>) -> Result<(), DbError> {
+    pub async fn mark_read(&self, keys: Vec<Vec<u8>>) -> Result<(), Error> {
         let guard = self.inner.lock().await;
         let tx = guard.as_ref().ok_or(SlateDbError::TransactionCompleted)?;
         tx.mark_read(keys).map_err(Into::into)
     }
 
-    pub async fn unmark_write(&self, keys: Vec<Vec<u8>>) -> Result<(), DbError> {
+    pub async fn unmark_write(&self, keys: Vec<Vec<u8>>) -> Result<(), Error> {
         let guard = self.inner.lock().await;
         let tx = guard.as_ref().ok_or(SlateDbError::TransactionCompleted)?;
         tx.unmark_write(keys).map_err(Into::into)
     }
 
-    pub async fn rollback(&self) -> Result<(), DbError> {
+    pub async fn rollback(&self) -> Result<(), Error> {
         let mut guard = self.inner.lock().await;
         let tx = guard.take().ok_or(SlateDbError::TransactionCompleted)?;
         tx.rollback();
         Ok(())
     }
 
-    pub async fn get(&self, key: Vec<u8>) -> Result<Option<Vec<u8>>, DbError> {
+    pub async fn get(&self, key: Vec<u8>) -> Result<Option<Vec<u8>>, Error> {
         let guard = self.inner.lock().await;
         let tx = guard.as_ref().ok_or(SlateDbError::TransactionCompleted)?;
         Ok(tx.get(key).await?.map(|value| value.to_vec()))
@@ -116,7 +116,7 @@ impl DbTransaction {
         &self,
         key: Vec<u8>,
         options: ReadOptions,
-    ) -> Result<Option<Vec<u8>>, DbError> {
+    ) -> Result<Option<Vec<u8>>, Error> {
         let options = options.into_core();
         let guard = self.inner.lock().await;
         let tx = guard.as_ref().ok_or(SlateDbError::TransactionCompleted)?;
@@ -126,7 +126,7 @@ impl DbTransaction {
             .map(|value| value.to_vec()))
     }
 
-    pub async fn get_key_value(&self, key: Vec<u8>) -> Result<Option<KeyValue>, DbError> {
+    pub async fn get_key_value(&self, key: Vec<u8>) -> Result<Option<KeyValue>, Error> {
         let guard = self.inner.lock().await;
         let tx = guard.as_ref().ok_or(SlateDbError::TransactionCompleted)?;
         Ok(tx.get_key_value(key).await?.map(KeyValue::from_core))
@@ -136,7 +136,7 @@ impl DbTransaction {
         &self,
         key: Vec<u8>,
         options: ReadOptions,
-    ) -> Result<Option<KeyValue>, DbError> {
+    ) -> Result<Option<KeyValue>, Error> {
         let options = options.into_core();
         let guard = self.inner.lock().await;
         let tx = guard.as_ref().ok_or(SlateDbError::TransactionCompleted)?;
@@ -146,7 +146,7 @@ impl DbTransaction {
             .map(KeyValue::from_core))
     }
 
-    pub async fn scan(&self, range: KeyRange) -> Result<Arc<DbIterator>, DbError> {
+    pub async fn scan(&self, range: KeyRange) -> Result<Arc<DbIterator>, Error> {
         let range = range.into_bounds()?;
         let guard = self.inner.lock().await;
         let tx = guard.as_ref().ok_or(SlateDbError::TransactionCompleted)?;
@@ -158,7 +158,7 @@ impl DbTransaction {
         &self,
         range: KeyRange,
         options: ScanOptions,
-    ) -> Result<Arc<DbIterator>, DbError> {
+    ) -> Result<Arc<DbIterator>, Error> {
         let range = range.into_bounds()?;
         let options = options.into_core()?;
         let guard = self.inner.lock().await;
@@ -167,7 +167,7 @@ impl DbTransaction {
         Ok(Arc::new(DbIterator::new(iter)))
     }
 
-    pub async fn scan_prefix(&self, prefix: Vec<u8>) -> Result<Arc<DbIterator>, DbError> {
+    pub async fn scan_prefix(&self, prefix: Vec<u8>) -> Result<Arc<DbIterator>, Error> {
         let guard = self.inner.lock().await;
         let tx = guard.as_ref().ok_or(SlateDbError::TransactionCompleted)?;
         let iter = tx.scan_prefix(prefix).await?;
@@ -178,7 +178,7 @@ impl DbTransaction {
         &self,
         prefix: Vec<u8>,
         options: ScanOptions,
-    ) -> Result<Arc<DbIterator>, DbError> {
+    ) -> Result<Arc<DbIterator>, Error> {
         let options = options.into_core()?;
         let guard = self.inner.lock().await;
         let tx = guard.as_ref().ok_or(SlateDbError::TransactionCompleted)?;
@@ -186,7 +186,7 @@ impl DbTransaction {
         Ok(Arc::new(DbIterator::new(iter)))
     }
 
-    pub async fn commit(&self) -> Result<Option<WriteHandle>, DbError> {
+    pub async fn commit(&self) -> Result<Option<WriteHandle>, Error> {
         let tx = {
             let mut guard = self.inner.lock().await;
             guard.take().ok_or(SlateDbError::TransactionCompleted)?
@@ -197,7 +197,7 @@ impl DbTransaction {
     pub async fn commit_with_options(
         &self,
         options: WriteOptions,
-    ) -> Result<Option<WriteHandle>, DbError> {
+    ) -> Result<Option<WriteHandle>, Error> {
         let options = options.into_core();
         let tx = {
             let mut guard = self.inner.lock().await;

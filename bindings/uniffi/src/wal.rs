@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use tokio::sync::Mutex;
 
-use crate::error::DbError;
+use crate::error::Error;
 use crate::object_store::ObjectStore;
 use crate::types::RowEntry;
 
@@ -42,14 +42,14 @@ impl WalFile {
 
     // `shutdown` because `close` is reserved by uniffi for the destructor.
     #[uniffi::method(name = "shutdown")]
-    pub fn close(&self) -> Result<(), DbError> {
+    pub fn close(&self) -> Result<(), Error> {
         Ok(())
     }
 }
 
 #[uniffi::export(async_runtime = "tokio")]
 impl WalFile {
-    pub async fn metadata(&self) -> Result<WalFileMetadata, DbError> {
+    pub async fn metadata(&self) -> Result<WalFileMetadata, Error> {
         let metadata = self.inner.metadata().await?;
         Ok(WalFileMetadata {
             last_modified_seconds: metadata.last_modified_dt.timestamp(),
@@ -59,7 +59,7 @@ impl WalFile {
         })
     }
 
-    pub async fn iterator(&self) -> Result<Arc<WalFileIterator>, DbError> {
+    pub async fn iterator(&self) -> Result<Arc<WalFileIterator>, Error> {
         let iter = self.inner.iterator().await?;
         Ok(Arc::new(WalFileIterator::new(iter)))
     }
@@ -82,14 +82,14 @@ impl WalFileIterator {
 impl WalFileIterator {
     // `shutdown` because `close` is reserved by uniffi for the destructor.
     #[uniffi::method(name = "shutdown")]
-    pub fn close(&self) -> Result<(), DbError> {
+    pub fn close(&self) -> Result<(), Error> {
         Ok(())
     }
 }
 
 #[uniffi::export(async_runtime = "tokio")]
 impl WalFileIterator {
-    pub async fn next(&self) -> Result<Option<RowEntry>, DbError> {
+    pub async fn next(&self) -> Result<Option<RowEntry>, Error> {
         let mut guard = self.inner.lock().await;
         Ok(guard.next().await?.map(RowEntry::from_core))
     }
@@ -115,7 +115,7 @@ impl WalReader {
 
     // `shutdown` because `close` is reserved by uniffi for the destructor.
     #[uniffi::method(name = "shutdown")]
-    pub fn close(&self) -> Result<(), DbError> {
+    pub fn close(&self) -> Result<(), Error> {
         Ok(())
     }
 }
@@ -126,7 +126,7 @@ impl WalReader {
         &self,
         start_id: Option<u64>,
         end_id: Option<u64>,
-    ) -> Result<Vec<Arc<WalFile>>, DbError> {
+    ) -> Result<Vec<Arc<WalFile>>, Error> {
         let start = start_id.map(Bound::Included).unwrap_or(Bound::Unbounded);
         let end = end_id.map(Bound::Excluded).unwrap_or(Bound::Unbounded);
         let files = self.inner.list((start, end)).await?;

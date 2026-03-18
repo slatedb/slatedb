@@ -9,7 +9,7 @@ use tracing_subscriber::filter::LevelFilter as TracingLevelFilter;
 use tracing_subscriber::layer::{Context, SubscriberExt};
 use tracing_subscriber::Layer;
 
-use crate::error::DbError;
+use crate::error::Error;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, uniffi::Enum)]
 pub enum LogLevel {
@@ -105,7 +105,7 @@ static LOGGING_INITIALIZED: AtomicBool = AtomicBool::new(false);
 pub fn init_logging(
     level: LogLevel,
     callback: Option<Arc<dyn LogCallback>>,
-) -> Result<(), DbError> {
+) -> Result<(), Error> {
     if LOGGING_INITIALIZED.load(Ordering::Acquire) {
         return Err(logging_already_initialized_error());
     }
@@ -128,7 +128,7 @@ pub fn init_logging(
     Ok(())
 }
 
-fn install_log_tracer(level: LogLevel) -> Result<(), DbError> {
+fn install_log_tracer(level: LogLevel) -> Result<(), Error> {
     LogTracer::builder()
         .with_max_level(level.into_log_level_filter())
         .init()
@@ -138,7 +138,7 @@ fn install_log_tracer(level: LogLevel) -> Result<(), DbError> {
 fn install_subscriber(
     level: LogLevel,
     callback: Option<Arc<dyn LogCallback>>,
-) -> Result<(), DbError> {
+) -> Result<(), Error> {
     let filter = level.into_tracing_level_filter();
     if let Some(callback) = callback {
         let subscriber =
@@ -161,12 +161,12 @@ fn install_subscriber(
     }
 }
 
-fn logging_already_initialized_error() -> DbError {
+fn logging_already_initialized_error() -> Error {
     invalid_logging_error("logging already initialized")
 }
 
-fn invalid_logging_error(message: impl Into<String>) -> DbError {
-    DbError::Invalid {
+fn invalid_logging_error(message: impl Into<String>) -> Error {
+    Error::Invalid {
         message: message.into(),
     }
 }

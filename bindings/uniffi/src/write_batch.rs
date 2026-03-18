@@ -3,7 +3,7 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 
 use crate::config::{MergeOptions, PutOptions};
-use crate::error::{DbError, SlateDbError};
+use crate::error::{Error, SlateDbError};
 use crate::validation::{validate_key, validate_key_value};
 
 #[derive(uniffi::Object)]
@@ -36,7 +36,7 @@ impl WriteBatch {
         })
     }
 
-    pub fn put(&self, key: Vec<u8>, value: Vec<u8>) -> Result<(), DbError> {
+    pub fn put(&self, key: Vec<u8>, value: Vec<u8>) -> Result<(), Error> {
         validate_key_value(&key, &value)?;
         self.with_open(|batch| batch.put(key, value))
             .map_err(Into::into)
@@ -47,14 +47,14 @@ impl WriteBatch {
         key: Vec<u8>,
         value: Vec<u8>,
         options: PutOptions,
-    ) -> Result<(), DbError> {
+    ) -> Result<(), Error> {
         validate_key_value(&key, &value)?;
         let options = options.into_core();
         self.with_open(|batch| batch.put_with_options(key, value, &options))
             .map_err(Into::into)
     }
 
-    pub fn merge(&self, key: Vec<u8>, operand: Vec<u8>) -> Result<(), DbError> {
+    pub fn merge(&self, key: Vec<u8>, operand: Vec<u8>) -> Result<(), Error> {
         validate_key_value(&key, &operand)?;
         self.with_open(|batch| batch.merge(key, operand))
             .map_err(Into::into)
@@ -65,14 +65,14 @@ impl WriteBatch {
         key: Vec<u8>,
         operand: Vec<u8>,
         options: MergeOptions,
-    ) -> Result<(), DbError> {
+    ) -> Result<(), Error> {
         validate_key_value(&key, &operand)?;
         let options = options.into_core();
         self.with_open(|batch| batch.merge_with_options(key, operand, &options))
             .map_err(Into::into)
     }
 
-    pub fn delete(&self, key: Vec<u8>) -> Result<(), DbError> {
+    pub fn delete(&self, key: Vec<u8>) -> Result<(), Error> {
         validate_key(&key)?;
         self.with_open(|batch| batch.delete(key))
             .map_err(Into::into)

@@ -93,7 +93,7 @@ impl From<slatedb::CloseReason> for CloseReason {
 }
 
 #[derive(Debug, Error, uniffi::Error)]
-pub enum DbError {
+pub enum Error {
     #[error("{message}")]
     Transaction { message: String },
 
@@ -116,14 +116,14 @@ pub enum DbError {
     Internal { message: String },
 }
 
-impl From<SlateDbError> for DbError {
+impl From<SlateDbError> for Error {
     fn from(error: SlateDbError) -> Self {
         let message = error.to_string();
         Self::Invalid { message }
     }
 }
 
-impl From<slatedb::Error> for DbError {
+impl From<slatedb::Error> for Error {
     fn from(error: slatedb::Error) -> Self {
         let message = error.to_string();
         match error.kind() {
