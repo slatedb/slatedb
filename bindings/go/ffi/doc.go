@@ -1,6 +1,6 @@
 // Package ffi exposes the generated low-level Go bindings for SlateDB.
 //
-// This package is generated from the Rust UniFFI crate in `bindings/ffi` and is
+// This package is generated from the Rust UniFFI crate in `bindings/uniffi` and is
 // intentionally a close mechanical translation of that surface. It is the
 // lowest public Go layer over the Rust implementation: names remain Rust/FFI
 // flavored, optional values are represented with pointers, and asynchronous Rust

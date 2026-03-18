@@ -83,7 +83,7 @@ public class LogCallbackImpl implements AutoCloseable, LogCallback {
       if (pointer != null) {
         UniffiHelpers.uniffiRustCall(
             status -> {
-              UniffiLib.INSTANCE.uniffi_slatedb_ffi_fn_free_logcallback(pointer, status);
+              UniffiLib.INSTANCE.uniffi_slatedb_uniffi_fn_free_logcallback(pointer, status);
               return null;
             });
       }
@@ -96,7 +96,7 @@ public class LogCallbackImpl implements AutoCloseable, LogCallback {
           if (pointer == null) {
             throw new NullPointerException();
           }
-          return UniffiLib.INSTANCE.uniffi_slatedb_ffi_fn_clone_logcallback(pointer, status);
+          return UniffiLib.INSTANCE.uniffi_slatedb_uniffi_fn_clone_logcallback(pointer, status);
         });
   }
 
@@ -110,7 +110,7 @@ public class LogCallbackImpl implements AutoCloseable, LogCallback {
 
               UniffiHelpers.uniffiRustCall(
                   _status -> {
-                    UniffiLib.INSTANCE.uniffi_slatedb_ffi_fn_method_logcallback_log(
+                    UniffiLib.INSTANCE.uniffi_slatedb_uniffi_fn_method_logcallback_log(
                         it, FfiConverterTypeLogRecord.INSTANCE.lower(record), _status);
                   });
 

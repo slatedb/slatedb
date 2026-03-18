@@ -45,14 +45,14 @@ class _UniffiRustBuffer(ctypes.Structure):
 
     @staticmethod
     def alloc(size):
-        return _uniffi_rust_call(_UniffiLib.ffi_slatedb_ffi_rustbuffer_alloc, size)
+        return _uniffi_rust_call(_UniffiLib.ffi_slatedb_uniffi_rustbuffer_alloc, size)
 
     @staticmethod
     def reserve(rbuf, additional):
-        return _uniffi_rust_call(_UniffiLib.ffi_slatedb_ffi_rustbuffer_reserve, rbuf, additional)
+        return _uniffi_rust_call(_UniffiLib.ffi_slatedb_uniffi_rustbuffer_reserve, rbuf, additional)
 
     def free(self):
-        return _uniffi_rust_call(_UniffiLib.ffi_slatedb_ffi_rustbuffer_free, self)
+        return _uniffi_rust_call(_UniffiLib.ffi_slatedb_uniffi_rustbuffer_free, self)
 
     def __str__(self):
         return "_UniffiRustBuffer(capacity={}, len={}, data={})".format(
@@ -474,7 +474,7 @@ def _uniffi_load_indirect():
         # Anything else must be an ELF platform - Linux, *BSD, Solaris/illumos
         libname = "lib{}.so"
 
-    libname = libname.format("slatedb_ffi")
+    libname = libname.format("slatedb_uniffi")
     path = os.path.join(os.path.dirname(__file__), libname)
     lib = ctypes.cdll.LoadLibrary(path)
     return lib
@@ -484,7 +484,7 @@ def _uniffi_check_contract_api_version(lib):
     # Get the bindings contract version from our ComponentInterface
     bindings_contract_version = 29
     # Get the scaffolding contract version by calling the into the dylib
-    scaffolding_contract_version = lib.ffi_slatedb_ffi_uniffi_contract_version()
+    scaffolding_contract_version = lib.ffi_slatedb_uniffi_uniffi_contract_version()
     if bindings_contract_version != scaffolding_contract_version:
         raise InternalError(
             "UniFFI contract version mismatch: try cleaning and rebuilding your project"
@@ -492,423 +492,426 @@ def _uniffi_check_contract_api_version(lib):
 
 
 def _uniffi_check_api_checksums(lib):
-    if lib.uniffi_slatedb_ffi_checksum_func_init_logging() != 54254:
+    if lib.uniffi_slatedb_uniffi_checksum_func_init_logging() != 37619:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_db_begin() != 28200:
+    if lib.uniffi_slatedb_uniffi_checksum_method_db_begin() != 14329:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_db_delete() != 50032:
+    if lib.uniffi_slatedb_uniffi_checksum_method_db_delete() != 50713:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_db_delete_with_options() != 32367:
+    if lib.uniffi_slatedb_uniffi_checksum_method_db_delete_with_options() != 58476:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_db_flush() != 39017:
+    if lib.uniffi_slatedb_uniffi_checksum_method_db_flush() != 31907:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_db_flush_with_options() != 21103:
+    if lib.uniffi_slatedb_uniffi_checksum_method_db_flush_with_options() != 25305:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_db_get() != 47753:
+    if lib.uniffi_slatedb_uniffi_checksum_method_db_get() != 12477:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_db_get_key_value() != 40515:
+    if lib.uniffi_slatedb_uniffi_checksum_method_db_get_key_value() != 24743:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_db_get_key_value_with_options() != 49009:
+    if lib.uniffi_slatedb_uniffi_checksum_method_db_get_key_value_with_options() != 38272:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_db_get_with_options() != 59259:
+    if lib.uniffi_slatedb_uniffi_checksum_method_db_get_with_options() != 42757:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_db_merge() != 31328:
+    if lib.uniffi_slatedb_uniffi_checksum_method_db_merge() != 31600:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_db_merge_with_options() != 18622:
+    if lib.uniffi_slatedb_uniffi_checksum_method_db_merge_with_options() != 59982:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_db_metrics() != 10479:
+    if lib.uniffi_slatedb_uniffi_checksum_method_db_metrics() != 59929:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_db_put() != 37265:
+    if lib.uniffi_slatedb_uniffi_checksum_method_db_put() != 53709:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_db_put_with_options() != 23832:
+    if lib.uniffi_slatedb_uniffi_checksum_method_db_put_with_options() != 22274:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_db_scan() != 16785:
+    if lib.uniffi_slatedb_uniffi_checksum_method_db_scan() != 42782:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_db_scan_prefix() != 52231:
+    if lib.uniffi_slatedb_uniffi_checksum_method_db_scan_prefix() != 47427:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_db_scan_prefix_with_options() != 32993:
+    if lib.uniffi_slatedb_uniffi_checksum_method_db_scan_prefix_with_options() != 555:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_db_scan_with_options() != 38619:
+    if lib.uniffi_slatedb_uniffi_checksum_method_db_scan_with_options() != 44084:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_db_shutdown() != 1011:
+    if lib.uniffi_slatedb_uniffi_checksum_method_db_shutdown() != 16768:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_db_snapshot() != 420:
+    if lib.uniffi_slatedb_uniffi_checksum_method_db_snapshot() != 23166:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_db_status() != 21747:
+    if lib.uniffi_slatedb_uniffi_checksum_method_db_status() != 3648:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_db_write() != 55178:
+    if lib.uniffi_slatedb_uniffi_checksum_method_db_write() != 32974:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_db_write_with_options() != 23668:
+    if lib.uniffi_slatedb_uniffi_checksum_method_db_write_with_options() != 35773:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_dbbuilder_build() != 54479:
+    if lib.uniffi_slatedb_uniffi_checksum_method_dbbuilder_build() != 49797:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_dbbuilder_with_db_cache_disabled() != 41151:
+    if lib.uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_db_cache_disabled() != 23550:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_dbbuilder_with_merge_operator() != 11670:
+    if lib.uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_merge_operator() != 53509:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_dbbuilder_with_seed() != 18556:
+    if lib.uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_seed() != 24155:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_dbbuilder_with_settings() != 11407:
+    if lib.uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_settings() != 7581:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_dbbuilder_with_sst_block_size() != 24601:
+    if lib.uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_sst_block_size() != 55141:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_dbbuilder_with_wal_object_store() != 15581:
+    if lib.uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_wal_object_store() != 13745:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_dbiterator_next() != 63746:
+    if lib.uniffi_slatedb_uniffi_checksum_method_dbiterator_next() != 48403:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_dbiterator_seek() != 3174:
+    if lib.uniffi_slatedb_uniffi_checksum_method_dbiterator_seek() != 49966:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_dbreader_get() != 150:
+    if lib.uniffi_slatedb_uniffi_checksum_method_dbreader_get() != 8025:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_dbreader_get_with_options() != 53767:
+    if lib.uniffi_slatedb_uniffi_checksum_method_dbreader_get_with_options() != 58698:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_dbreader_scan() != 48493:
+    if lib.uniffi_slatedb_uniffi_checksum_method_dbreader_scan() != 18035:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_dbreader_scan_prefix() != 42624:
+    if lib.uniffi_slatedb_uniffi_checksum_method_dbreader_scan_prefix() != 197:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_dbreader_scan_prefix_with_options() != 44039:
+    if lib.uniffi_slatedb_uniffi_checksum_method_dbreader_scan_prefix_with_options() != 29037:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_dbreader_scan_with_options() != 653:
+    if lib.uniffi_slatedb_uniffi_checksum_method_dbreader_scan_with_options() != 48210:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_dbreader_shutdown() != 61444:
+    if lib.uniffi_slatedb_uniffi_checksum_method_dbreader_shutdown() != 55236:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_dbreaderbuilder_build() != 53002:
+    if lib.uniffi_slatedb_uniffi_checksum_method_dbreaderbuilder_build() != 44664:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_dbreaderbuilder_with_checkpoint_id() != 60214:
+    if lib.uniffi_slatedb_uniffi_checksum_method_dbreaderbuilder_with_checkpoint_id() != 38586:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_dbreaderbuilder_with_merge_operator() != 15355:
+    if lib.uniffi_slatedb_uniffi_checksum_method_dbreaderbuilder_with_merge_operator() != 14178:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_dbreaderbuilder_with_options() != 58185:
+    if lib.uniffi_slatedb_uniffi_checksum_method_dbreaderbuilder_with_options() != 12316:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_dbreaderbuilder_with_wal_object_store() != 39998:
+    if lib.uniffi_slatedb_uniffi_checksum_method_dbreaderbuilder_with_wal_object_store() != 63885:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_dbsnapshot_get() != 25831:
+    if lib.uniffi_slatedb_uniffi_checksum_method_dbsnapshot_get() != 37884:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_dbsnapshot_get_key_value() != 34552:
+    if lib.uniffi_slatedb_uniffi_checksum_method_dbsnapshot_get_key_value() != 33717:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_dbsnapshot_get_key_value_with_options() != 33632:
+    if lib.uniffi_slatedb_uniffi_checksum_method_dbsnapshot_get_key_value_with_options() != 36709:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_dbsnapshot_get_with_options() != 31030:
+    if lib.uniffi_slatedb_uniffi_checksum_method_dbsnapshot_get_with_options() != 37581:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_dbsnapshot_scan() != 473:
+    if lib.uniffi_slatedb_uniffi_checksum_method_dbsnapshot_scan() != 36474:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_dbsnapshot_scan_prefix() != 50321:
+    if lib.uniffi_slatedb_uniffi_checksum_method_dbsnapshot_scan_prefix() != 53560:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_dbsnapshot_scan_prefix_with_options() != 5354:
+    if lib.uniffi_slatedb_uniffi_checksum_method_dbsnapshot_scan_prefix_with_options() != 62871:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_dbsnapshot_scan_with_options() != 47474:
+    if lib.uniffi_slatedb_uniffi_checksum_method_dbsnapshot_scan_with_options() != 62995:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_dbtransaction_commit() != 428:
+    if lib.uniffi_slatedb_uniffi_checksum_method_dbtransaction_commit() != 43702:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_dbtransaction_commit_with_options() != 62426:
+    if lib.uniffi_slatedb_uniffi_checksum_method_dbtransaction_commit_with_options() != 13115:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_dbtransaction_delete() != 36751:
+    if lib.uniffi_slatedb_uniffi_checksum_method_dbtransaction_delete() != 54600:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_dbtransaction_get() != 17479:
+    if lib.uniffi_slatedb_uniffi_checksum_method_dbtransaction_get() != 61976:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_dbtransaction_get_key_value() != 42847:
+    if lib.uniffi_slatedb_uniffi_checksum_method_dbtransaction_get_key_value() != 11817:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_dbtransaction_get_key_value_with_options() != 12647:
+    if (
+        lib.uniffi_slatedb_uniffi_checksum_method_dbtransaction_get_key_value_with_options()
+        != 37760
+    ):
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_dbtransaction_get_with_options() != 51567:
+    if lib.uniffi_slatedb_uniffi_checksum_method_dbtransaction_get_with_options() != 23745:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_dbtransaction_id() != 6904:
+    if lib.uniffi_slatedb_uniffi_checksum_method_dbtransaction_id() != 19938:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_dbtransaction_mark_read() != 55492:
+    if lib.uniffi_slatedb_uniffi_checksum_method_dbtransaction_mark_read() != 57562:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_dbtransaction_merge() != 14786:
+    if lib.uniffi_slatedb_uniffi_checksum_method_dbtransaction_merge() != 34881:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_dbtransaction_merge_with_options() != 63514:
+    if lib.uniffi_slatedb_uniffi_checksum_method_dbtransaction_merge_with_options() != 37707:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_dbtransaction_put() != 18111:
+    if lib.uniffi_slatedb_uniffi_checksum_method_dbtransaction_put() != 21505:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_dbtransaction_put_with_options() != 41295:
+    if lib.uniffi_slatedb_uniffi_checksum_method_dbtransaction_put_with_options() != 56410:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_dbtransaction_rollback() != 45610:
+    if lib.uniffi_slatedb_uniffi_checksum_method_dbtransaction_rollback() != 11015:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_dbtransaction_scan() != 37690:
+    if lib.uniffi_slatedb_uniffi_checksum_method_dbtransaction_scan() != 9340:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_dbtransaction_scan_prefix() != 8910:
+    if lib.uniffi_slatedb_uniffi_checksum_method_dbtransaction_scan_prefix() != 215:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_dbtransaction_scan_prefix_with_options() != 747:
+    if lib.uniffi_slatedb_uniffi_checksum_method_dbtransaction_scan_prefix_with_options() != 17517:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_dbtransaction_scan_with_options() != 48535:
+    if lib.uniffi_slatedb_uniffi_checksum_method_dbtransaction_scan_with_options() != 56187:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_dbtransaction_seqnum() != 32854:
+    if lib.uniffi_slatedb_uniffi_checksum_method_dbtransaction_seqnum() != 62915:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_dbtransaction_unmark_write() != 28889:
+    if lib.uniffi_slatedb_uniffi_checksum_method_dbtransaction_unmark_write() != 16334:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_logcallback_log() != 29875:
+    if lib.uniffi_slatedb_uniffi_checksum_method_logcallback_log() != 34306:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_mergeoperator_merge() != 9527:
+    if lib.uniffi_slatedb_uniffi_checksum_method_mergeoperator_merge() != 4237:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_settings_set() != 35534:
+    if lib.uniffi_slatedb_uniffi_checksum_method_settings_set() != 8000:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_settings_to_json_string() != 56273:
+    if lib.uniffi_slatedb_uniffi_checksum_method_settings_to_json_string() != 25337:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_walfile_id() != 46596:
+    if lib.uniffi_slatedb_uniffi_checksum_method_walfile_id() != 6532:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_walfile_iterator() != 44079:
+    if lib.uniffi_slatedb_uniffi_checksum_method_walfile_iterator() != 23680:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_walfile_metadata() != 11831:
+    if lib.uniffi_slatedb_uniffi_checksum_method_walfile_metadata() != 52889:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_walfile_next_file() != 18713:
+    if lib.uniffi_slatedb_uniffi_checksum_method_walfile_next_file() != 7739:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_walfile_next_id() != 11112:
+    if lib.uniffi_slatedb_uniffi_checksum_method_walfile_next_id() != 40501:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_walfile_shutdown() != 61794:
+    if lib.uniffi_slatedb_uniffi_checksum_method_walfile_shutdown() != 36982:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_walfileiterator_next() != 44449:
+    if lib.uniffi_slatedb_uniffi_checksum_method_walfileiterator_next() != 41163:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_walfileiterator_shutdown() != 8034:
+    if lib.uniffi_slatedb_uniffi_checksum_method_walfileiterator_shutdown() != 60794:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_walreader_get() != 2234:
+    if lib.uniffi_slatedb_uniffi_checksum_method_walreader_get() != 34963:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_walreader_list() != 34786:
+    if lib.uniffi_slatedb_uniffi_checksum_method_walreader_list() != 42612:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_walreader_shutdown() != 16293:
+    if lib.uniffi_slatedb_uniffi_checksum_method_walreader_shutdown() != 34538:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_writebatch_delete() != 33429:
+    if lib.uniffi_slatedb_uniffi_checksum_method_writebatch_delete() != 22112:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_writebatch_merge() != 23805:
+    if lib.uniffi_slatedb_uniffi_checksum_method_writebatch_merge() != 15590:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_writebatch_merge_with_options() != 5442:
+    if lib.uniffi_slatedb_uniffi_checksum_method_writebatch_merge_with_options() != 26306:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_writebatch_put() != 46996:
+    if lib.uniffi_slatedb_uniffi_checksum_method_writebatch_put() != 23075:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_method_writebatch_put_with_options() != 54841:
+    if lib.uniffi_slatedb_uniffi_checksum_method_writebatch_put_with_options() != 7719:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_constructor_dbbuilder_new() != 64175:
+    if lib.uniffi_slatedb_uniffi_checksum_constructor_dbbuilder_new() != 57363:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_constructor_dbreaderbuilder_new() != 43902:
+    if lib.uniffi_slatedb_uniffi_checksum_constructor_dbreaderbuilder_new() != 14951:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_constructor_objectstore_from_env() != 16566:
+    if lib.uniffi_slatedb_uniffi_checksum_constructor_objectstore_from_env() != 51626:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_constructor_objectstore_resolve() != 25816:
+    if lib.uniffi_slatedb_uniffi_checksum_constructor_objectstore_resolve() != 20659:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_constructor_settings_default() != 47128:
+    if lib.uniffi_slatedb_uniffi_checksum_constructor_settings_default() != 31643:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_constructor_settings_from_env() != 51006:
+    if lib.uniffi_slatedb_uniffi_checksum_constructor_settings_from_env() != 31867:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_constructor_settings_from_env_with_default() != 19363:
+    if lib.uniffi_slatedb_uniffi_checksum_constructor_settings_from_env_with_default() != 22902:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_constructor_settings_from_file() != 34482:
+    if lib.uniffi_slatedb_uniffi_checksum_constructor_settings_from_file() != 18430:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_constructor_settings_from_json_string() != 4001:
+    if lib.uniffi_slatedb_uniffi_checksum_constructor_settings_from_json_string() != 13174:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_constructor_settings_load() != 6890:
+    if lib.uniffi_slatedb_uniffi_checksum_constructor_settings_load() != 23883:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_constructor_walreader_new() != 8955:
+    if lib.uniffi_slatedb_uniffi_checksum_constructor_walreader_new() != 28632:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
-    if lib.uniffi_slatedb_ffi_checksum_constructor_writebatch_new() != 37826:
+    if lib.uniffi_slatedb_uniffi_checksum_constructor_writebatch_new() != 11646:
         raise InternalError(
             "UniFFI API checksum mismatch: try cleaning and rebuilding your project"
         )
@@ -1151,1194 +1154,1214 @@ class _UniffiVTableCallbackInterfaceMergeOperator(ctypes.Structure):
     ]
 
 
-_UniffiLib.uniffi_slatedb_ffi_fn_clone_db.argtypes = (
+_UniffiLib.uniffi_slatedb_uniffi_fn_clone_db.argtypes = (
     ctypes.c_void_p,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_clone_db.restype = ctypes.c_void_p
-_UniffiLib.uniffi_slatedb_ffi_fn_free_db.argtypes = (
+_UniffiLib.uniffi_slatedb_uniffi_fn_clone_db.restype = ctypes.c_void_p
+_UniffiLib.uniffi_slatedb_uniffi_fn_free_db.argtypes = (
     ctypes.c_void_p,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_free_db.restype = None
-_UniffiLib.uniffi_slatedb_ffi_fn_method_db_begin.argtypes = (
+_UniffiLib.uniffi_slatedb_uniffi_fn_free_db.restype = None
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_db_begin.argtypes = (
     ctypes.c_void_p,
     _UniffiRustBuffer,
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_method_db_begin.restype = ctypes.c_uint64
-_UniffiLib.uniffi_slatedb_ffi_fn_method_db_delete.argtypes = (
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_db_begin.restype = ctypes.c_uint64
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_db_delete.argtypes = (
     ctypes.c_void_p,
     _UniffiRustBuffer,
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_method_db_delete.restype = ctypes.c_uint64
-_UniffiLib.uniffi_slatedb_ffi_fn_method_db_delete_with_options.argtypes = (
-    ctypes.c_void_p,
-    _UniffiRustBuffer,
-    _UniffiRustBuffer,
-)
-_UniffiLib.uniffi_slatedb_ffi_fn_method_db_delete_with_options.restype = ctypes.c_uint64
-_UniffiLib.uniffi_slatedb_ffi_fn_method_db_flush.argtypes = (ctypes.c_void_p,)
-_UniffiLib.uniffi_slatedb_ffi_fn_method_db_flush.restype = ctypes.c_uint64
-_UniffiLib.uniffi_slatedb_ffi_fn_method_db_flush_with_options.argtypes = (
-    ctypes.c_void_p,
-    _UniffiRustBuffer,
-)
-_UniffiLib.uniffi_slatedb_ffi_fn_method_db_flush_with_options.restype = ctypes.c_uint64
-_UniffiLib.uniffi_slatedb_ffi_fn_method_db_get.argtypes = (
-    ctypes.c_void_p,
-    _UniffiRustBuffer,
-)
-_UniffiLib.uniffi_slatedb_ffi_fn_method_db_get.restype = ctypes.c_uint64
-_UniffiLib.uniffi_slatedb_ffi_fn_method_db_get_key_value.argtypes = (
-    ctypes.c_void_p,
-    _UniffiRustBuffer,
-)
-_UniffiLib.uniffi_slatedb_ffi_fn_method_db_get_key_value.restype = ctypes.c_uint64
-_UniffiLib.uniffi_slatedb_ffi_fn_method_db_get_key_value_with_options.argtypes = (
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_db_delete.restype = ctypes.c_uint64
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_db_delete_with_options.argtypes = (
     ctypes.c_void_p,
     _UniffiRustBuffer,
     _UniffiRustBuffer,
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_method_db_get_key_value_with_options.restype = ctypes.c_uint64
-_UniffiLib.uniffi_slatedb_ffi_fn_method_db_get_with_options.argtypes = (
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_db_delete_with_options.restype = ctypes.c_uint64
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_db_flush.argtypes = (ctypes.c_void_p,)
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_db_flush.restype = ctypes.c_uint64
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_db_flush_with_options.argtypes = (
+    ctypes.c_void_p,
+    _UniffiRustBuffer,
+)
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_db_flush_with_options.restype = ctypes.c_uint64
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_db_get.argtypes = (
+    ctypes.c_void_p,
+    _UniffiRustBuffer,
+)
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_db_get.restype = ctypes.c_uint64
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_db_get_key_value.argtypes = (
+    ctypes.c_void_p,
+    _UniffiRustBuffer,
+)
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_db_get_key_value.restype = ctypes.c_uint64
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_db_get_key_value_with_options.argtypes = (
     ctypes.c_void_p,
     _UniffiRustBuffer,
     _UniffiRustBuffer,
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_method_db_get_with_options.restype = ctypes.c_uint64
-_UniffiLib.uniffi_slatedb_ffi_fn_method_db_merge.argtypes = (
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_db_get_key_value_with_options.restype = ctypes.c_uint64
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_db_get_with_options.argtypes = (
     ctypes.c_void_p,
     _UniffiRustBuffer,
     _UniffiRustBuffer,
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_method_db_merge.restype = ctypes.c_uint64
-_UniffiLib.uniffi_slatedb_ffi_fn_method_db_merge_with_options.argtypes = (
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_db_get_with_options.restype = ctypes.c_uint64
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_db_merge.argtypes = (
+    ctypes.c_void_p,
+    _UniffiRustBuffer,
+    _UniffiRustBuffer,
+)
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_db_merge.restype = ctypes.c_uint64
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_db_merge_with_options.argtypes = (
     ctypes.c_void_p,
     _UniffiRustBuffer,
     _UniffiRustBuffer,
     _UniffiRustBuffer,
     _UniffiRustBuffer,
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_method_db_merge_with_options.restype = ctypes.c_uint64
-_UniffiLib.uniffi_slatedb_ffi_fn_method_db_metrics.argtypes = (
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_db_merge_with_options.restype = ctypes.c_uint64
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_db_metrics.argtypes = (
     ctypes.c_void_p,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_method_db_metrics.restype = _UniffiRustBuffer
-_UniffiLib.uniffi_slatedb_ffi_fn_method_db_put.argtypes = (
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_db_metrics.restype = _UniffiRustBuffer
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_db_put.argtypes = (
     ctypes.c_void_p,
     _UniffiRustBuffer,
     _UniffiRustBuffer,
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_method_db_put.restype = ctypes.c_uint64
-_UniffiLib.uniffi_slatedb_ffi_fn_method_db_put_with_options.argtypes = (
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_db_put.restype = ctypes.c_uint64
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_db_put_with_options.argtypes = (
     ctypes.c_void_p,
     _UniffiRustBuffer,
     _UniffiRustBuffer,
     _UniffiRustBuffer,
     _UniffiRustBuffer,
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_method_db_put_with_options.restype = ctypes.c_uint64
-_UniffiLib.uniffi_slatedb_ffi_fn_method_db_scan.argtypes = (
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_db_put_with_options.restype = ctypes.c_uint64
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_db_scan.argtypes = (
     ctypes.c_void_p,
     _UniffiRustBuffer,
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_method_db_scan.restype = ctypes.c_uint64
-_UniffiLib.uniffi_slatedb_ffi_fn_method_db_scan_prefix.argtypes = (
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_db_scan.restype = ctypes.c_uint64
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_db_scan_prefix.argtypes = (
     ctypes.c_void_p,
     _UniffiRustBuffer,
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_method_db_scan_prefix.restype = ctypes.c_uint64
-_UniffiLib.uniffi_slatedb_ffi_fn_method_db_scan_prefix_with_options.argtypes = (
-    ctypes.c_void_p,
-    _UniffiRustBuffer,
-    _UniffiRustBuffer,
-)
-_UniffiLib.uniffi_slatedb_ffi_fn_method_db_scan_prefix_with_options.restype = ctypes.c_uint64
-_UniffiLib.uniffi_slatedb_ffi_fn_method_db_scan_with_options.argtypes = (
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_db_scan_prefix.restype = ctypes.c_uint64
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_db_scan_prefix_with_options.argtypes = (
     ctypes.c_void_p,
     _UniffiRustBuffer,
     _UniffiRustBuffer,
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_method_db_scan_with_options.restype = ctypes.c_uint64
-_UniffiLib.uniffi_slatedb_ffi_fn_method_db_shutdown.argtypes = (ctypes.c_void_p,)
-_UniffiLib.uniffi_slatedb_ffi_fn_method_db_shutdown.restype = ctypes.c_uint64
-_UniffiLib.uniffi_slatedb_ffi_fn_method_db_snapshot.argtypes = (ctypes.c_void_p,)
-_UniffiLib.uniffi_slatedb_ffi_fn_method_db_snapshot.restype = ctypes.c_uint64
-_UniffiLib.uniffi_slatedb_ffi_fn_method_db_status.argtypes = (
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_db_scan_prefix_with_options.restype = ctypes.c_uint64
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_db_scan_with_options.argtypes = (
+    ctypes.c_void_p,
+    _UniffiRustBuffer,
+    _UniffiRustBuffer,
+)
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_db_scan_with_options.restype = ctypes.c_uint64
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_db_shutdown.argtypes = (ctypes.c_void_p,)
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_db_shutdown.restype = ctypes.c_uint64
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_db_snapshot.argtypes = (ctypes.c_void_p,)
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_db_snapshot.restype = ctypes.c_uint64
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_db_status.argtypes = (
     ctypes.c_void_p,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_method_db_status.restype = None
-_UniffiLib.uniffi_slatedb_ffi_fn_method_db_write.argtypes = (
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_db_status.restype = None
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_db_write.argtypes = (
     ctypes.c_void_p,
     ctypes.c_void_p,
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_method_db_write.restype = ctypes.c_uint64
-_UniffiLib.uniffi_slatedb_ffi_fn_method_db_write_with_options.argtypes = (
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_db_write.restype = ctypes.c_uint64
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_db_write_with_options.argtypes = (
     ctypes.c_void_p,
     ctypes.c_void_p,
     _UniffiRustBuffer,
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_method_db_write_with_options.restype = ctypes.c_uint64
-_UniffiLib.uniffi_slatedb_ffi_fn_clone_dbbuilder.argtypes = (
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_db_write_with_options.restype = ctypes.c_uint64
+_UniffiLib.uniffi_slatedb_uniffi_fn_clone_dbbuilder.argtypes = (
     ctypes.c_void_p,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_clone_dbbuilder.restype = ctypes.c_void_p
-_UniffiLib.uniffi_slatedb_ffi_fn_free_dbbuilder.argtypes = (
+_UniffiLib.uniffi_slatedb_uniffi_fn_clone_dbbuilder.restype = ctypes.c_void_p
+_UniffiLib.uniffi_slatedb_uniffi_fn_free_dbbuilder.argtypes = (
     ctypes.c_void_p,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_free_dbbuilder.restype = None
-_UniffiLib.uniffi_slatedb_ffi_fn_constructor_dbbuilder_new.argtypes = (
+_UniffiLib.uniffi_slatedb_uniffi_fn_free_dbbuilder.restype = None
+_UniffiLib.uniffi_slatedb_uniffi_fn_constructor_dbbuilder_new.argtypes = (
     _UniffiRustBuffer,
     ctypes.c_void_p,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_constructor_dbbuilder_new.restype = ctypes.c_void_p
-_UniffiLib.uniffi_slatedb_ffi_fn_method_dbbuilder_build.argtypes = (ctypes.c_void_p,)
-_UniffiLib.uniffi_slatedb_ffi_fn_method_dbbuilder_build.restype = ctypes.c_uint64
-_UniffiLib.uniffi_slatedb_ffi_fn_method_dbbuilder_with_db_cache_disabled.argtypes = (
+_UniffiLib.uniffi_slatedb_uniffi_fn_constructor_dbbuilder_new.restype = ctypes.c_void_p
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_dbbuilder_build.argtypes = (ctypes.c_void_p,)
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_dbbuilder_build.restype = ctypes.c_uint64
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_dbbuilder_with_db_cache_disabled.argtypes = (
     ctypes.c_void_p,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_method_dbbuilder_with_db_cache_disabled.restype = None
-_UniffiLib.uniffi_slatedb_ffi_fn_method_dbbuilder_with_merge_operator.argtypes = (
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_dbbuilder_with_db_cache_disabled.restype = None
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_dbbuilder_with_merge_operator.argtypes = (
     ctypes.c_void_p,
     ctypes.c_void_p,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_method_dbbuilder_with_merge_operator.restype = None
-_UniffiLib.uniffi_slatedb_ffi_fn_method_dbbuilder_with_seed.argtypes = (
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_dbbuilder_with_merge_operator.restype = None
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_dbbuilder_with_seed.argtypes = (
     ctypes.c_void_p,
     ctypes.c_uint64,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_method_dbbuilder_with_seed.restype = None
-_UniffiLib.uniffi_slatedb_ffi_fn_method_dbbuilder_with_settings.argtypes = (
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_dbbuilder_with_seed.restype = None
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_dbbuilder_with_settings.argtypes = (
     ctypes.c_void_p,
     ctypes.c_void_p,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_method_dbbuilder_with_settings.restype = None
-_UniffiLib.uniffi_slatedb_ffi_fn_method_dbbuilder_with_sst_block_size.argtypes = (
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_dbbuilder_with_settings.restype = None
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_dbbuilder_with_sst_block_size.argtypes = (
     ctypes.c_void_p,
     _UniffiRustBuffer,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_method_dbbuilder_with_sst_block_size.restype = None
-_UniffiLib.uniffi_slatedb_ffi_fn_method_dbbuilder_with_wal_object_store.argtypes = (
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_dbbuilder_with_sst_block_size.restype = None
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_dbbuilder_with_wal_object_store.argtypes = (
     ctypes.c_void_p,
     ctypes.c_void_p,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_method_dbbuilder_with_wal_object_store.restype = None
-_UniffiLib.uniffi_slatedb_ffi_fn_clone_dbiterator.argtypes = (
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_dbbuilder_with_wal_object_store.restype = None
+_UniffiLib.uniffi_slatedb_uniffi_fn_clone_dbiterator.argtypes = (
     ctypes.c_void_p,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_clone_dbiterator.restype = ctypes.c_void_p
-_UniffiLib.uniffi_slatedb_ffi_fn_free_dbiterator.argtypes = (
+_UniffiLib.uniffi_slatedb_uniffi_fn_clone_dbiterator.restype = ctypes.c_void_p
+_UniffiLib.uniffi_slatedb_uniffi_fn_free_dbiterator.argtypes = (
     ctypes.c_void_p,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_free_dbiterator.restype = None
-_UniffiLib.uniffi_slatedb_ffi_fn_method_dbiterator_next.argtypes = (ctypes.c_void_p,)
-_UniffiLib.uniffi_slatedb_ffi_fn_method_dbiterator_next.restype = ctypes.c_uint64
-_UniffiLib.uniffi_slatedb_ffi_fn_method_dbiterator_seek.argtypes = (
+_UniffiLib.uniffi_slatedb_uniffi_fn_free_dbiterator.restype = None
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_dbiterator_next.argtypes = (ctypes.c_void_p,)
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_dbiterator_next.restype = ctypes.c_uint64
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_dbiterator_seek.argtypes = (
     ctypes.c_void_p,
     _UniffiRustBuffer,
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_method_dbiterator_seek.restype = ctypes.c_uint64
-_UniffiLib.uniffi_slatedb_ffi_fn_clone_dbreader.argtypes = (
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_dbiterator_seek.restype = ctypes.c_uint64
+_UniffiLib.uniffi_slatedb_uniffi_fn_clone_dbreader.argtypes = (
     ctypes.c_void_p,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_clone_dbreader.restype = ctypes.c_void_p
-_UniffiLib.uniffi_slatedb_ffi_fn_free_dbreader.argtypes = (
+_UniffiLib.uniffi_slatedb_uniffi_fn_clone_dbreader.restype = ctypes.c_void_p
+_UniffiLib.uniffi_slatedb_uniffi_fn_free_dbreader.argtypes = (
     ctypes.c_void_p,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_free_dbreader.restype = None
-_UniffiLib.uniffi_slatedb_ffi_fn_method_dbreader_get.argtypes = (
+_UniffiLib.uniffi_slatedb_uniffi_fn_free_dbreader.restype = None
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_dbreader_get.argtypes = (
     ctypes.c_void_p,
     _UniffiRustBuffer,
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_method_dbreader_get.restype = ctypes.c_uint64
-_UniffiLib.uniffi_slatedb_ffi_fn_method_dbreader_get_with_options.argtypes = (
-    ctypes.c_void_p,
-    _UniffiRustBuffer,
-    _UniffiRustBuffer,
-)
-_UniffiLib.uniffi_slatedb_ffi_fn_method_dbreader_get_with_options.restype = ctypes.c_uint64
-_UniffiLib.uniffi_slatedb_ffi_fn_method_dbreader_scan.argtypes = (
-    ctypes.c_void_p,
-    _UniffiRustBuffer,
-)
-_UniffiLib.uniffi_slatedb_ffi_fn_method_dbreader_scan.restype = ctypes.c_uint64
-_UniffiLib.uniffi_slatedb_ffi_fn_method_dbreader_scan_prefix.argtypes = (
-    ctypes.c_void_p,
-    _UniffiRustBuffer,
-)
-_UniffiLib.uniffi_slatedb_ffi_fn_method_dbreader_scan_prefix.restype = ctypes.c_uint64
-_UniffiLib.uniffi_slatedb_ffi_fn_method_dbreader_scan_prefix_with_options.argtypes = (
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_dbreader_get.restype = ctypes.c_uint64
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_dbreader_get_with_options.argtypes = (
     ctypes.c_void_p,
     _UniffiRustBuffer,
     _UniffiRustBuffer,
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_method_dbreader_scan_prefix_with_options.restype = ctypes.c_uint64
-_UniffiLib.uniffi_slatedb_ffi_fn_method_dbreader_scan_with_options.argtypes = (
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_dbreader_get_with_options.restype = ctypes.c_uint64
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_dbreader_scan.argtypes = (
+    ctypes.c_void_p,
+    _UniffiRustBuffer,
+)
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_dbreader_scan.restype = ctypes.c_uint64
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_dbreader_scan_prefix.argtypes = (
+    ctypes.c_void_p,
+    _UniffiRustBuffer,
+)
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_dbreader_scan_prefix.restype = ctypes.c_uint64
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_dbreader_scan_prefix_with_options.argtypes = (
     ctypes.c_void_p,
     _UniffiRustBuffer,
     _UniffiRustBuffer,
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_method_dbreader_scan_with_options.restype = ctypes.c_uint64
-_UniffiLib.uniffi_slatedb_ffi_fn_method_dbreader_shutdown.argtypes = (ctypes.c_void_p,)
-_UniffiLib.uniffi_slatedb_ffi_fn_method_dbreader_shutdown.restype = ctypes.c_uint64
-_UniffiLib.uniffi_slatedb_ffi_fn_clone_dbreaderbuilder.argtypes = (
-    ctypes.c_void_p,
-    ctypes.POINTER(_UniffiRustCallStatus),
-)
-_UniffiLib.uniffi_slatedb_ffi_fn_clone_dbreaderbuilder.restype = ctypes.c_void_p
-_UniffiLib.uniffi_slatedb_ffi_fn_free_dbreaderbuilder.argtypes = (
-    ctypes.c_void_p,
-    ctypes.POINTER(_UniffiRustCallStatus),
-)
-_UniffiLib.uniffi_slatedb_ffi_fn_free_dbreaderbuilder.restype = None
-_UniffiLib.uniffi_slatedb_ffi_fn_constructor_dbreaderbuilder_new.argtypes = (
-    _UniffiRustBuffer,
-    ctypes.c_void_p,
-    ctypes.POINTER(_UniffiRustCallStatus),
-)
-_UniffiLib.uniffi_slatedb_ffi_fn_constructor_dbreaderbuilder_new.restype = ctypes.c_void_p
-_UniffiLib.uniffi_slatedb_ffi_fn_method_dbreaderbuilder_build.argtypes = (ctypes.c_void_p,)
-_UniffiLib.uniffi_slatedb_ffi_fn_method_dbreaderbuilder_build.restype = ctypes.c_uint64
-_UniffiLib.uniffi_slatedb_ffi_fn_method_dbreaderbuilder_with_checkpoint_id.argtypes = (
-    ctypes.c_void_p,
-    _UniffiRustBuffer,
-    ctypes.POINTER(_UniffiRustCallStatus),
-)
-_UniffiLib.uniffi_slatedb_ffi_fn_method_dbreaderbuilder_with_checkpoint_id.restype = None
-_UniffiLib.uniffi_slatedb_ffi_fn_method_dbreaderbuilder_with_merge_operator.argtypes = (
-    ctypes.c_void_p,
-    ctypes.c_void_p,
-    ctypes.POINTER(_UniffiRustCallStatus),
-)
-_UniffiLib.uniffi_slatedb_ffi_fn_method_dbreaderbuilder_with_merge_operator.restype = None
-_UniffiLib.uniffi_slatedb_ffi_fn_method_dbreaderbuilder_with_options.argtypes = (
-    ctypes.c_void_p,
-    _UniffiRustBuffer,
-    ctypes.POINTER(_UniffiRustCallStatus),
-)
-_UniffiLib.uniffi_slatedb_ffi_fn_method_dbreaderbuilder_with_options.restype = None
-_UniffiLib.uniffi_slatedb_ffi_fn_method_dbreaderbuilder_with_wal_object_store.argtypes = (
-    ctypes.c_void_p,
-    ctypes.c_void_p,
-    ctypes.POINTER(_UniffiRustCallStatus),
-)
-_UniffiLib.uniffi_slatedb_ffi_fn_method_dbreaderbuilder_with_wal_object_store.restype = None
-_UniffiLib.uniffi_slatedb_ffi_fn_clone_dbsnapshot.argtypes = (
-    ctypes.c_void_p,
-    ctypes.POINTER(_UniffiRustCallStatus),
-)
-_UniffiLib.uniffi_slatedb_ffi_fn_clone_dbsnapshot.restype = ctypes.c_void_p
-_UniffiLib.uniffi_slatedb_ffi_fn_free_dbsnapshot.argtypes = (
-    ctypes.c_void_p,
-    ctypes.POINTER(_UniffiRustCallStatus),
-)
-_UniffiLib.uniffi_slatedb_ffi_fn_free_dbsnapshot.restype = None
-_UniffiLib.uniffi_slatedb_ffi_fn_method_dbsnapshot_get.argtypes = (
-    ctypes.c_void_p,
-    _UniffiRustBuffer,
-)
-_UniffiLib.uniffi_slatedb_ffi_fn_method_dbsnapshot_get.restype = ctypes.c_uint64
-_UniffiLib.uniffi_slatedb_ffi_fn_method_dbsnapshot_get_key_value.argtypes = (
-    ctypes.c_void_p,
-    _UniffiRustBuffer,
-)
-_UniffiLib.uniffi_slatedb_ffi_fn_method_dbsnapshot_get_key_value.restype = ctypes.c_uint64
-_UniffiLib.uniffi_slatedb_ffi_fn_method_dbsnapshot_get_key_value_with_options.argtypes = (
-    ctypes.c_void_p,
-    _UniffiRustBuffer,
-    _UniffiRustBuffer,
-)
-_UniffiLib.uniffi_slatedb_ffi_fn_method_dbsnapshot_get_key_value_with_options.restype = (
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_dbreader_scan_prefix_with_options.restype = (
     ctypes.c_uint64
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_method_dbsnapshot_get_with_options.argtypes = (
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_dbreader_scan_with_options.argtypes = (
     ctypes.c_void_p,
     _UniffiRustBuffer,
     _UniffiRustBuffer,
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_method_dbsnapshot_get_with_options.restype = ctypes.c_uint64
-_UniffiLib.uniffi_slatedb_ffi_fn_method_dbsnapshot_scan.argtypes = (
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_dbreader_scan_with_options.restype = ctypes.c_uint64
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_dbreader_shutdown.argtypes = (ctypes.c_void_p,)
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_dbreader_shutdown.restype = ctypes.c_uint64
+_UniffiLib.uniffi_slatedb_uniffi_fn_clone_dbreaderbuilder.argtypes = (
+    ctypes.c_void_p,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_slatedb_uniffi_fn_clone_dbreaderbuilder.restype = ctypes.c_void_p
+_UniffiLib.uniffi_slatedb_uniffi_fn_free_dbreaderbuilder.argtypes = (
+    ctypes.c_void_p,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_slatedb_uniffi_fn_free_dbreaderbuilder.restype = None
+_UniffiLib.uniffi_slatedb_uniffi_fn_constructor_dbreaderbuilder_new.argtypes = (
+    _UniffiRustBuffer,
+    ctypes.c_void_p,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_slatedb_uniffi_fn_constructor_dbreaderbuilder_new.restype = ctypes.c_void_p
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_dbreaderbuilder_build.argtypes = (ctypes.c_void_p,)
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_dbreaderbuilder_build.restype = ctypes.c_uint64
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_dbreaderbuilder_with_checkpoint_id.argtypes = (
+    ctypes.c_void_p,
+    _UniffiRustBuffer,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_dbreaderbuilder_with_checkpoint_id.restype = None
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_dbreaderbuilder_with_merge_operator.argtypes = (
+    ctypes.c_void_p,
+    ctypes.c_void_p,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_dbreaderbuilder_with_merge_operator.restype = None
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_dbreaderbuilder_with_options.argtypes = (
+    ctypes.c_void_p,
+    _UniffiRustBuffer,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_dbreaderbuilder_with_options.restype = None
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_dbreaderbuilder_with_wal_object_store.argtypes = (
+    ctypes.c_void_p,
+    ctypes.c_void_p,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_dbreaderbuilder_with_wal_object_store.restype = None
+_UniffiLib.uniffi_slatedb_uniffi_fn_clone_dbsnapshot.argtypes = (
+    ctypes.c_void_p,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_slatedb_uniffi_fn_clone_dbsnapshot.restype = ctypes.c_void_p
+_UniffiLib.uniffi_slatedb_uniffi_fn_free_dbsnapshot.argtypes = (
+    ctypes.c_void_p,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_slatedb_uniffi_fn_free_dbsnapshot.restype = None
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_dbsnapshot_get.argtypes = (
     ctypes.c_void_p,
     _UniffiRustBuffer,
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_method_dbsnapshot_scan.restype = ctypes.c_uint64
-_UniffiLib.uniffi_slatedb_ffi_fn_method_dbsnapshot_scan_prefix.argtypes = (
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_dbsnapshot_get.restype = ctypes.c_uint64
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_dbsnapshot_get_key_value.argtypes = (
     ctypes.c_void_p,
     _UniffiRustBuffer,
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_method_dbsnapshot_scan_prefix.restype = ctypes.c_uint64
-_UniffiLib.uniffi_slatedb_ffi_fn_method_dbsnapshot_scan_prefix_with_options.argtypes = (
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_dbsnapshot_get_key_value.restype = ctypes.c_uint64
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_dbsnapshot_get_key_value_with_options.argtypes = (
     ctypes.c_void_p,
     _UniffiRustBuffer,
     _UniffiRustBuffer,
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_method_dbsnapshot_scan_prefix_with_options.restype = (
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_dbsnapshot_get_key_value_with_options.restype = (
     ctypes.c_uint64
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_method_dbsnapshot_scan_with_options.argtypes = (
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_dbsnapshot_get_with_options.argtypes = (
     ctypes.c_void_p,
     _UniffiRustBuffer,
     _UniffiRustBuffer,
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_method_dbsnapshot_scan_with_options.restype = ctypes.c_uint64
-_UniffiLib.uniffi_slatedb_ffi_fn_clone_dbtransaction.argtypes = (
-    ctypes.c_void_p,
-    ctypes.POINTER(_UniffiRustCallStatus),
-)
-_UniffiLib.uniffi_slatedb_ffi_fn_clone_dbtransaction.restype = ctypes.c_void_p
-_UniffiLib.uniffi_slatedb_ffi_fn_free_dbtransaction.argtypes = (
-    ctypes.c_void_p,
-    ctypes.POINTER(_UniffiRustCallStatus),
-)
-_UniffiLib.uniffi_slatedb_ffi_fn_free_dbtransaction.restype = None
-_UniffiLib.uniffi_slatedb_ffi_fn_method_dbtransaction_commit.argtypes = (ctypes.c_void_p,)
-_UniffiLib.uniffi_slatedb_ffi_fn_method_dbtransaction_commit.restype = ctypes.c_uint64
-_UniffiLib.uniffi_slatedb_ffi_fn_method_dbtransaction_commit_with_options.argtypes = (
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_dbsnapshot_get_with_options.restype = ctypes.c_uint64
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_dbsnapshot_scan.argtypes = (
     ctypes.c_void_p,
     _UniffiRustBuffer,
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_method_dbtransaction_commit_with_options.restype = ctypes.c_uint64
-_UniffiLib.uniffi_slatedb_ffi_fn_method_dbtransaction_delete.argtypes = (
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_dbsnapshot_scan.restype = ctypes.c_uint64
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_dbsnapshot_scan_prefix.argtypes = (
     ctypes.c_void_p,
     _UniffiRustBuffer,
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_method_dbtransaction_delete.restype = ctypes.c_uint64
-_UniffiLib.uniffi_slatedb_ffi_fn_method_dbtransaction_get.argtypes = (
-    ctypes.c_void_p,
-    _UniffiRustBuffer,
-)
-_UniffiLib.uniffi_slatedb_ffi_fn_method_dbtransaction_get.restype = ctypes.c_uint64
-_UniffiLib.uniffi_slatedb_ffi_fn_method_dbtransaction_get_key_value.argtypes = (
-    ctypes.c_void_p,
-    _UniffiRustBuffer,
-)
-_UniffiLib.uniffi_slatedb_ffi_fn_method_dbtransaction_get_key_value.restype = ctypes.c_uint64
-_UniffiLib.uniffi_slatedb_ffi_fn_method_dbtransaction_get_key_value_with_options.argtypes = (
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_dbsnapshot_scan_prefix.restype = ctypes.c_uint64
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_dbsnapshot_scan_prefix_with_options.argtypes = (
     ctypes.c_void_p,
     _UniffiRustBuffer,
     _UniffiRustBuffer,
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_method_dbtransaction_get_key_value_with_options.restype = (
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_dbsnapshot_scan_prefix_with_options.restype = (
     ctypes.c_uint64
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_method_dbtransaction_get_with_options.argtypes = (
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_dbsnapshot_scan_with_options.argtypes = (
     ctypes.c_void_p,
     _UniffiRustBuffer,
     _UniffiRustBuffer,
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_method_dbtransaction_get_with_options.restype = ctypes.c_uint64
-_UniffiLib.uniffi_slatedb_ffi_fn_method_dbtransaction_id.argtypes = (
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_dbsnapshot_scan_with_options.restype = ctypes.c_uint64
+_UniffiLib.uniffi_slatedb_uniffi_fn_clone_dbtransaction.argtypes = (
     ctypes.c_void_p,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_method_dbtransaction_id.restype = _UniffiRustBuffer
-_UniffiLib.uniffi_slatedb_ffi_fn_method_dbtransaction_mark_read.argtypes = (
+_UniffiLib.uniffi_slatedb_uniffi_fn_clone_dbtransaction.restype = ctypes.c_void_p
+_UniffiLib.uniffi_slatedb_uniffi_fn_free_dbtransaction.argtypes = (
+    ctypes.c_void_p,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_slatedb_uniffi_fn_free_dbtransaction.restype = None
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_dbtransaction_commit.argtypes = (ctypes.c_void_p,)
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_dbtransaction_commit.restype = ctypes.c_uint64
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_dbtransaction_commit_with_options.argtypes = (
     ctypes.c_void_p,
     _UniffiRustBuffer,
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_method_dbtransaction_mark_read.restype = ctypes.c_uint64
-_UniffiLib.uniffi_slatedb_ffi_fn_method_dbtransaction_merge.argtypes = (
-    ctypes.c_void_p,
-    _UniffiRustBuffer,
-    _UniffiRustBuffer,
-)
-_UniffiLib.uniffi_slatedb_ffi_fn_method_dbtransaction_merge.restype = ctypes.c_uint64
-_UniffiLib.uniffi_slatedb_ffi_fn_method_dbtransaction_merge_with_options.argtypes = (
-    ctypes.c_void_p,
-    _UniffiRustBuffer,
-    _UniffiRustBuffer,
-    _UniffiRustBuffer,
-)
-_UniffiLib.uniffi_slatedb_ffi_fn_method_dbtransaction_merge_with_options.restype = ctypes.c_uint64
-_UniffiLib.uniffi_slatedb_ffi_fn_method_dbtransaction_put.argtypes = (
-    ctypes.c_void_p,
-    _UniffiRustBuffer,
-    _UniffiRustBuffer,
-)
-_UniffiLib.uniffi_slatedb_ffi_fn_method_dbtransaction_put.restype = ctypes.c_uint64
-_UniffiLib.uniffi_slatedb_ffi_fn_method_dbtransaction_put_with_options.argtypes = (
-    ctypes.c_void_p,
-    _UniffiRustBuffer,
-    _UniffiRustBuffer,
-    _UniffiRustBuffer,
-)
-_UniffiLib.uniffi_slatedb_ffi_fn_method_dbtransaction_put_with_options.restype = ctypes.c_uint64
-_UniffiLib.uniffi_slatedb_ffi_fn_method_dbtransaction_rollback.argtypes = (ctypes.c_void_p,)
-_UniffiLib.uniffi_slatedb_ffi_fn_method_dbtransaction_rollback.restype = ctypes.c_uint64
-_UniffiLib.uniffi_slatedb_ffi_fn_method_dbtransaction_scan.argtypes = (
-    ctypes.c_void_p,
-    _UniffiRustBuffer,
-)
-_UniffiLib.uniffi_slatedb_ffi_fn_method_dbtransaction_scan.restype = ctypes.c_uint64
-_UniffiLib.uniffi_slatedb_ffi_fn_method_dbtransaction_scan_prefix.argtypes = (
-    ctypes.c_void_p,
-    _UniffiRustBuffer,
-)
-_UniffiLib.uniffi_slatedb_ffi_fn_method_dbtransaction_scan_prefix.restype = ctypes.c_uint64
-_UniffiLib.uniffi_slatedb_ffi_fn_method_dbtransaction_scan_prefix_with_options.argtypes = (
-    ctypes.c_void_p,
-    _UniffiRustBuffer,
-    _UniffiRustBuffer,
-)
-_UniffiLib.uniffi_slatedb_ffi_fn_method_dbtransaction_scan_prefix_with_options.restype = (
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_dbtransaction_commit_with_options.restype = (
     ctypes.c_uint64
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_method_dbtransaction_scan_with_options.argtypes = (
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_dbtransaction_delete.argtypes = (
+    ctypes.c_void_p,
+    _UniffiRustBuffer,
+)
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_dbtransaction_delete.restype = ctypes.c_uint64
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_dbtransaction_get.argtypes = (
+    ctypes.c_void_p,
+    _UniffiRustBuffer,
+)
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_dbtransaction_get.restype = ctypes.c_uint64
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_dbtransaction_get_key_value.argtypes = (
+    ctypes.c_void_p,
+    _UniffiRustBuffer,
+)
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_dbtransaction_get_key_value.restype = ctypes.c_uint64
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_dbtransaction_get_key_value_with_options.argtypes = (
     ctypes.c_void_p,
     _UniffiRustBuffer,
     _UniffiRustBuffer,
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_method_dbtransaction_scan_with_options.restype = ctypes.c_uint64
-_UniffiLib.uniffi_slatedb_ffi_fn_method_dbtransaction_seqnum.argtypes = (
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_dbtransaction_get_key_value_with_options.restype = (
+    ctypes.c_uint64
+)
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_dbtransaction_get_with_options.argtypes = (
+    ctypes.c_void_p,
+    _UniffiRustBuffer,
+    _UniffiRustBuffer,
+)
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_dbtransaction_get_with_options.restype = ctypes.c_uint64
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_dbtransaction_id.argtypes = (
     ctypes.c_void_p,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_method_dbtransaction_seqnum.restype = ctypes.c_uint64
-_UniffiLib.uniffi_slatedb_ffi_fn_method_dbtransaction_unmark_write.argtypes = (
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_dbtransaction_id.restype = _UniffiRustBuffer
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_dbtransaction_mark_read.argtypes = (
     ctypes.c_void_p,
     _UniffiRustBuffer,
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_method_dbtransaction_unmark_write.restype = ctypes.c_uint64
-_UniffiLib.uniffi_slatedb_ffi_fn_clone_logcallback.argtypes = (
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_dbtransaction_mark_read.restype = ctypes.c_uint64
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_dbtransaction_merge.argtypes = (
+    ctypes.c_void_p,
+    _UniffiRustBuffer,
+    _UniffiRustBuffer,
+)
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_dbtransaction_merge.restype = ctypes.c_uint64
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_dbtransaction_merge_with_options.argtypes = (
+    ctypes.c_void_p,
+    _UniffiRustBuffer,
+    _UniffiRustBuffer,
+    _UniffiRustBuffer,
+)
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_dbtransaction_merge_with_options.restype = (
+    ctypes.c_uint64
+)
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_dbtransaction_put.argtypes = (
+    ctypes.c_void_p,
+    _UniffiRustBuffer,
+    _UniffiRustBuffer,
+)
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_dbtransaction_put.restype = ctypes.c_uint64
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_dbtransaction_put_with_options.argtypes = (
+    ctypes.c_void_p,
+    _UniffiRustBuffer,
+    _UniffiRustBuffer,
+    _UniffiRustBuffer,
+)
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_dbtransaction_put_with_options.restype = ctypes.c_uint64
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_dbtransaction_rollback.argtypes = (ctypes.c_void_p,)
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_dbtransaction_rollback.restype = ctypes.c_uint64
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_dbtransaction_scan.argtypes = (
+    ctypes.c_void_p,
+    _UniffiRustBuffer,
+)
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_dbtransaction_scan.restype = ctypes.c_uint64
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_dbtransaction_scan_prefix.argtypes = (
+    ctypes.c_void_p,
+    _UniffiRustBuffer,
+)
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_dbtransaction_scan_prefix.restype = ctypes.c_uint64
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_dbtransaction_scan_prefix_with_options.argtypes = (
+    ctypes.c_void_p,
+    _UniffiRustBuffer,
+    _UniffiRustBuffer,
+)
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_dbtransaction_scan_prefix_with_options.restype = (
+    ctypes.c_uint64
+)
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_dbtransaction_scan_with_options.argtypes = (
+    ctypes.c_void_p,
+    _UniffiRustBuffer,
+    _UniffiRustBuffer,
+)
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_dbtransaction_scan_with_options.restype = ctypes.c_uint64
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_dbtransaction_seqnum.argtypes = (
     ctypes.c_void_p,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_clone_logcallback.restype = ctypes.c_void_p
-_UniffiLib.uniffi_slatedb_ffi_fn_free_logcallback.argtypes = (
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_dbtransaction_seqnum.restype = ctypes.c_uint64
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_dbtransaction_unmark_write.argtypes = (
+    ctypes.c_void_p,
+    _UniffiRustBuffer,
+)
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_dbtransaction_unmark_write.restype = ctypes.c_uint64
+_UniffiLib.uniffi_slatedb_uniffi_fn_clone_logcallback.argtypes = (
     ctypes.c_void_p,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_free_logcallback.restype = None
-_UniffiLib.uniffi_slatedb_ffi_fn_init_callback_vtable_logcallback.argtypes = (
+_UniffiLib.uniffi_slatedb_uniffi_fn_clone_logcallback.restype = ctypes.c_void_p
+_UniffiLib.uniffi_slatedb_uniffi_fn_free_logcallback.argtypes = (
+    ctypes.c_void_p,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_slatedb_uniffi_fn_free_logcallback.restype = None
+_UniffiLib.uniffi_slatedb_uniffi_fn_init_callback_vtable_logcallback.argtypes = (
     ctypes.POINTER(_UniffiVTableCallbackInterfaceLogCallback),
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_init_callback_vtable_logcallback.restype = None
-_UniffiLib.uniffi_slatedb_ffi_fn_method_logcallback_log.argtypes = (
+_UniffiLib.uniffi_slatedb_uniffi_fn_init_callback_vtable_logcallback.restype = None
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_logcallback_log.argtypes = (
     ctypes.c_void_p,
     _UniffiRustBuffer,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_method_logcallback_log.restype = None
-_UniffiLib.uniffi_slatedb_ffi_fn_clone_mergeoperator.argtypes = (
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_logcallback_log.restype = None
+_UniffiLib.uniffi_slatedb_uniffi_fn_clone_mergeoperator.argtypes = (
     ctypes.c_void_p,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_clone_mergeoperator.restype = ctypes.c_void_p
-_UniffiLib.uniffi_slatedb_ffi_fn_free_mergeoperator.argtypes = (
+_UniffiLib.uniffi_slatedb_uniffi_fn_clone_mergeoperator.restype = ctypes.c_void_p
+_UniffiLib.uniffi_slatedb_uniffi_fn_free_mergeoperator.argtypes = (
     ctypes.c_void_p,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_free_mergeoperator.restype = None
-_UniffiLib.uniffi_slatedb_ffi_fn_init_callback_vtable_mergeoperator.argtypes = (
+_UniffiLib.uniffi_slatedb_uniffi_fn_free_mergeoperator.restype = None
+_UniffiLib.uniffi_slatedb_uniffi_fn_init_callback_vtable_mergeoperator.argtypes = (
     ctypes.POINTER(_UniffiVTableCallbackInterfaceMergeOperator),
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_init_callback_vtable_mergeoperator.restype = None
-_UniffiLib.uniffi_slatedb_ffi_fn_method_mergeoperator_merge.argtypes = (
+_UniffiLib.uniffi_slatedb_uniffi_fn_init_callback_vtable_mergeoperator.restype = None
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_mergeoperator_merge.argtypes = (
     ctypes.c_void_p,
     _UniffiRustBuffer,
     _UniffiRustBuffer,
     _UniffiRustBuffer,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_method_mergeoperator_merge.restype = _UniffiRustBuffer
-_UniffiLib.uniffi_slatedb_ffi_fn_clone_objectstore.argtypes = (
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_mergeoperator_merge.restype = _UniffiRustBuffer
+_UniffiLib.uniffi_slatedb_uniffi_fn_clone_objectstore.argtypes = (
     ctypes.c_void_p,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_clone_objectstore.restype = ctypes.c_void_p
-_UniffiLib.uniffi_slatedb_ffi_fn_free_objectstore.argtypes = (
+_UniffiLib.uniffi_slatedb_uniffi_fn_clone_objectstore.restype = ctypes.c_void_p
+_UniffiLib.uniffi_slatedb_uniffi_fn_free_objectstore.argtypes = (
     ctypes.c_void_p,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_free_objectstore.restype = None
-_UniffiLib.uniffi_slatedb_ffi_fn_constructor_objectstore_from_env.argtypes = (
+_UniffiLib.uniffi_slatedb_uniffi_fn_free_objectstore.restype = None
+_UniffiLib.uniffi_slatedb_uniffi_fn_constructor_objectstore_from_env.argtypes = (
     _UniffiRustBuffer,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_constructor_objectstore_from_env.restype = ctypes.c_void_p
-_UniffiLib.uniffi_slatedb_ffi_fn_constructor_objectstore_resolve.argtypes = (
+_UniffiLib.uniffi_slatedb_uniffi_fn_constructor_objectstore_from_env.restype = ctypes.c_void_p
+_UniffiLib.uniffi_slatedb_uniffi_fn_constructor_objectstore_resolve.argtypes = (
     _UniffiRustBuffer,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_constructor_objectstore_resolve.restype = ctypes.c_void_p
-_UniffiLib.uniffi_slatedb_ffi_fn_clone_settings.argtypes = (
+_UniffiLib.uniffi_slatedb_uniffi_fn_constructor_objectstore_resolve.restype = ctypes.c_void_p
+_UniffiLib.uniffi_slatedb_uniffi_fn_clone_settings.argtypes = (
     ctypes.c_void_p,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_clone_settings.restype = ctypes.c_void_p
-_UniffiLib.uniffi_slatedb_ffi_fn_free_settings.argtypes = (
+_UniffiLib.uniffi_slatedb_uniffi_fn_clone_settings.restype = ctypes.c_void_p
+_UniffiLib.uniffi_slatedb_uniffi_fn_free_settings.argtypes = (
     ctypes.c_void_p,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_free_settings.restype = None
-_UniffiLib.uniffi_slatedb_ffi_fn_constructor_settings_default.argtypes = (
+_UniffiLib.uniffi_slatedb_uniffi_fn_free_settings.restype = None
+_UniffiLib.uniffi_slatedb_uniffi_fn_constructor_settings_default.argtypes = (
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_constructor_settings_default.restype = ctypes.c_void_p
-_UniffiLib.uniffi_slatedb_ffi_fn_constructor_settings_from_env.argtypes = (
+_UniffiLib.uniffi_slatedb_uniffi_fn_constructor_settings_default.restype = ctypes.c_void_p
+_UniffiLib.uniffi_slatedb_uniffi_fn_constructor_settings_from_env.argtypes = (
     _UniffiRustBuffer,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_constructor_settings_from_env.restype = ctypes.c_void_p
-_UniffiLib.uniffi_slatedb_ffi_fn_constructor_settings_from_env_with_default.argtypes = (
+_UniffiLib.uniffi_slatedb_uniffi_fn_constructor_settings_from_env.restype = ctypes.c_void_p
+_UniffiLib.uniffi_slatedb_uniffi_fn_constructor_settings_from_env_with_default.argtypes = (
     _UniffiRustBuffer,
     ctypes.c_void_p,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_constructor_settings_from_env_with_default.restype = (
+_UniffiLib.uniffi_slatedb_uniffi_fn_constructor_settings_from_env_with_default.restype = (
     ctypes.c_void_p
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_constructor_settings_from_file.argtypes = (
+_UniffiLib.uniffi_slatedb_uniffi_fn_constructor_settings_from_file.argtypes = (
     _UniffiRustBuffer,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_constructor_settings_from_file.restype = ctypes.c_void_p
-_UniffiLib.uniffi_slatedb_ffi_fn_constructor_settings_from_json_string.argtypes = (
+_UniffiLib.uniffi_slatedb_uniffi_fn_constructor_settings_from_file.restype = ctypes.c_void_p
+_UniffiLib.uniffi_slatedb_uniffi_fn_constructor_settings_from_json_string.argtypes = (
     _UniffiRustBuffer,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_constructor_settings_from_json_string.restype = ctypes.c_void_p
-_UniffiLib.uniffi_slatedb_ffi_fn_constructor_settings_load.argtypes = (
+_UniffiLib.uniffi_slatedb_uniffi_fn_constructor_settings_from_json_string.restype = ctypes.c_void_p
+_UniffiLib.uniffi_slatedb_uniffi_fn_constructor_settings_load.argtypes = (
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_constructor_settings_load.restype = ctypes.c_void_p
-_UniffiLib.uniffi_slatedb_ffi_fn_method_settings_set.argtypes = (
+_UniffiLib.uniffi_slatedb_uniffi_fn_constructor_settings_load.restype = ctypes.c_void_p
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_settings_set.argtypes = (
     ctypes.c_void_p,
     _UniffiRustBuffer,
     _UniffiRustBuffer,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_method_settings_set.restype = None
-_UniffiLib.uniffi_slatedb_ffi_fn_method_settings_to_json_string.argtypes = (
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_settings_set.restype = None
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_settings_to_json_string.argtypes = (
     ctypes.c_void_p,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_method_settings_to_json_string.restype = _UniffiRustBuffer
-_UniffiLib.uniffi_slatedb_ffi_fn_clone_walfile.argtypes = (
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_settings_to_json_string.restype = _UniffiRustBuffer
+_UniffiLib.uniffi_slatedb_uniffi_fn_clone_walfile.argtypes = (
     ctypes.c_void_p,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_clone_walfile.restype = ctypes.c_void_p
-_UniffiLib.uniffi_slatedb_ffi_fn_free_walfile.argtypes = (
+_UniffiLib.uniffi_slatedb_uniffi_fn_clone_walfile.restype = ctypes.c_void_p
+_UniffiLib.uniffi_slatedb_uniffi_fn_free_walfile.argtypes = (
     ctypes.c_void_p,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_free_walfile.restype = None
-_UniffiLib.uniffi_slatedb_ffi_fn_method_walfile_id.argtypes = (
+_UniffiLib.uniffi_slatedb_uniffi_fn_free_walfile.restype = None
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_walfile_id.argtypes = (
     ctypes.c_void_p,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_method_walfile_id.restype = ctypes.c_uint64
-_UniffiLib.uniffi_slatedb_ffi_fn_method_walfile_iterator.argtypes = (ctypes.c_void_p,)
-_UniffiLib.uniffi_slatedb_ffi_fn_method_walfile_iterator.restype = ctypes.c_uint64
-_UniffiLib.uniffi_slatedb_ffi_fn_method_walfile_metadata.argtypes = (ctypes.c_void_p,)
-_UniffiLib.uniffi_slatedb_ffi_fn_method_walfile_metadata.restype = ctypes.c_uint64
-_UniffiLib.uniffi_slatedb_ffi_fn_method_walfile_next_file.argtypes = (
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_walfile_id.restype = ctypes.c_uint64
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_walfile_iterator.argtypes = (ctypes.c_void_p,)
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_walfile_iterator.restype = ctypes.c_uint64
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_walfile_metadata.argtypes = (ctypes.c_void_p,)
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_walfile_metadata.restype = ctypes.c_uint64
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_walfile_next_file.argtypes = (
     ctypes.c_void_p,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_method_walfile_next_file.restype = ctypes.c_void_p
-_UniffiLib.uniffi_slatedb_ffi_fn_method_walfile_next_id.argtypes = (
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_walfile_next_file.restype = ctypes.c_void_p
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_walfile_next_id.argtypes = (
     ctypes.c_void_p,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_method_walfile_next_id.restype = ctypes.c_uint64
-_UniffiLib.uniffi_slatedb_ffi_fn_method_walfile_shutdown.argtypes = (
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_walfile_next_id.restype = ctypes.c_uint64
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_walfile_shutdown.argtypes = (
     ctypes.c_void_p,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_method_walfile_shutdown.restype = None
-_UniffiLib.uniffi_slatedb_ffi_fn_clone_walfileiterator.argtypes = (
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_walfile_shutdown.restype = None
+_UniffiLib.uniffi_slatedb_uniffi_fn_clone_walfileiterator.argtypes = (
     ctypes.c_void_p,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_clone_walfileiterator.restype = ctypes.c_void_p
-_UniffiLib.uniffi_slatedb_ffi_fn_free_walfileiterator.argtypes = (
+_UniffiLib.uniffi_slatedb_uniffi_fn_clone_walfileiterator.restype = ctypes.c_void_p
+_UniffiLib.uniffi_slatedb_uniffi_fn_free_walfileiterator.argtypes = (
     ctypes.c_void_p,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_free_walfileiterator.restype = None
-_UniffiLib.uniffi_slatedb_ffi_fn_method_walfileiterator_next.argtypes = (ctypes.c_void_p,)
-_UniffiLib.uniffi_slatedb_ffi_fn_method_walfileiterator_next.restype = ctypes.c_uint64
-_UniffiLib.uniffi_slatedb_ffi_fn_method_walfileiterator_shutdown.argtypes = (
+_UniffiLib.uniffi_slatedb_uniffi_fn_free_walfileiterator.restype = None
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_walfileiterator_next.argtypes = (ctypes.c_void_p,)
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_walfileiterator_next.restype = ctypes.c_uint64
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_walfileiterator_shutdown.argtypes = (
     ctypes.c_void_p,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_method_walfileiterator_shutdown.restype = None
-_UniffiLib.uniffi_slatedb_ffi_fn_clone_walreader.argtypes = (
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_walfileiterator_shutdown.restype = None
+_UniffiLib.uniffi_slatedb_uniffi_fn_clone_walreader.argtypes = (
     ctypes.c_void_p,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_clone_walreader.restype = ctypes.c_void_p
-_UniffiLib.uniffi_slatedb_ffi_fn_free_walreader.argtypes = (
+_UniffiLib.uniffi_slatedb_uniffi_fn_clone_walreader.restype = ctypes.c_void_p
+_UniffiLib.uniffi_slatedb_uniffi_fn_free_walreader.argtypes = (
     ctypes.c_void_p,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_free_walreader.restype = None
-_UniffiLib.uniffi_slatedb_ffi_fn_constructor_walreader_new.argtypes = (
+_UniffiLib.uniffi_slatedb_uniffi_fn_free_walreader.restype = None
+_UniffiLib.uniffi_slatedb_uniffi_fn_constructor_walreader_new.argtypes = (
     _UniffiRustBuffer,
     ctypes.c_void_p,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_constructor_walreader_new.restype = ctypes.c_void_p
-_UniffiLib.uniffi_slatedb_ffi_fn_method_walreader_get.argtypes = (
+_UniffiLib.uniffi_slatedb_uniffi_fn_constructor_walreader_new.restype = ctypes.c_void_p
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_walreader_get.argtypes = (
     ctypes.c_void_p,
     ctypes.c_uint64,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_method_walreader_get.restype = ctypes.c_void_p
-_UniffiLib.uniffi_slatedb_ffi_fn_method_walreader_list.argtypes = (
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_walreader_get.restype = ctypes.c_void_p
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_walreader_list.argtypes = (
     ctypes.c_void_p,
     _UniffiRustBuffer,
     _UniffiRustBuffer,
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_method_walreader_list.restype = ctypes.c_uint64
-_UniffiLib.uniffi_slatedb_ffi_fn_method_walreader_shutdown.argtypes = (
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_walreader_list.restype = ctypes.c_uint64
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_walreader_shutdown.argtypes = (
     ctypes.c_void_p,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_method_walreader_shutdown.restype = None
-_UniffiLib.uniffi_slatedb_ffi_fn_clone_writebatch.argtypes = (
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_walreader_shutdown.restype = None
+_UniffiLib.uniffi_slatedb_uniffi_fn_clone_writebatch.argtypes = (
     ctypes.c_void_p,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_clone_writebatch.restype = ctypes.c_void_p
-_UniffiLib.uniffi_slatedb_ffi_fn_free_writebatch.argtypes = (
+_UniffiLib.uniffi_slatedb_uniffi_fn_clone_writebatch.restype = ctypes.c_void_p
+_UniffiLib.uniffi_slatedb_uniffi_fn_free_writebatch.argtypes = (
     ctypes.c_void_p,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_free_writebatch.restype = None
-_UniffiLib.uniffi_slatedb_ffi_fn_constructor_writebatch_new.argtypes = (
+_UniffiLib.uniffi_slatedb_uniffi_fn_free_writebatch.restype = None
+_UniffiLib.uniffi_slatedb_uniffi_fn_constructor_writebatch_new.argtypes = (
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_constructor_writebatch_new.restype = ctypes.c_void_p
-_UniffiLib.uniffi_slatedb_ffi_fn_method_writebatch_delete.argtypes = (
+_UniffiLib.uniffi_slatedb_uniffi_fn_constructor_writebatch_new.restype = ctypes.c_void_p
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_writebatch_delete.argtypes = (
     ctypes.c_void_p,
     _UniffiRustBuffer,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_method_writebatch_delete.restype = None
-_UniffiLib.uniffi_slatedb_ffi_fn_method_writebatch_merge.argtypes = (
-    ctypes.c_void_p,
-    _UniffiRustBuffer,
-    _UniffiRustBuffer,
-    ctypes.POINTER(_UniffiRustCallStatus),
-)
-_UniffiLib.uniffi_slatedb_ffi_fn_method_writebatch_merge.restype = None
-_UniffiLib.uniffi_slatedb_ffi_fn_method_writebatch_merge_with_options.argtypes = (
-    ctypes.c_void_p,
-    _UniffiRustBuffer,
-    _UniffiRustBuffer,
-    _UniffiRustBuffer,
-    ctypes.POINTER(_UniffiRustCallStatus),
-)
-_UniffiLib.uniffi_slatedb_ffi_fn_method_writebatch_merge_with_options.restype = None
-_UniffiLib.uniffi_slatedb_ffi_fn_method_writebatch_put.argtypes = (
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_writebatch_delete.restype = None
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_writebatch_merge.argtypes = (
     ctypes.c_void_p,
     _UniffiRustBuffer,
     _UniffiRustBuffer,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_method_writebatch_put.restype = None
-_UniffiLib.uniffi_slatedb_ffi_fn_method_writebatch_put_with_options.argtypes = (
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_writebatch_merge.restype = None
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_writebatch_merge_with_options.argtypes = (
     ctypes.c_void_p,
     _UniffiRustBuffer,
     _UniffiRustBuffer,
     _UniffiRustBuffer,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_method_writebatch_put_with_options.restype = None
-_UniffiLib.uniffi_slatedb_ffi_fn_func_init_logging.argtypes = (
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_writebatch_merge_with_options.restype = None
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_writebatch_put.argtypes = (
+    ctypes.c_void_p,
     _UniffiRustBuffer,
     _UniffiRustBuffer,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.uniffi_slatedb_ffi_fn_func_init_logging.restype = None
-_UniffiLib.ffi_slatedb_ffi_rustbuffer_alloc.argtypes = (
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_writebatch_put.restype = None
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_writebatch_put_with_options.argtypes = (
+    ctypes.c_void_p,
+    _UniffiRustBuffer,
+    _UniffiRustBuffer,
+    _UniffiRustBuffer,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_slatedb_uniffi_fn_method_writebatch_put_with_options.restype = None
+_UniffiLib.uniffi_slatedb_uniffi_fn_func_init_logging.argtypes = (
+    _UniffiRustBuffer,
+    _UniffiRustBuffer,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_slatedb_uniffi_fn_func_init_logging.restype = None
+_UniffiLib.ffi_slatedb_uniffi_rustbuffer_alloc.argtypes = (
     ctypes.c_uint64,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.ffi_slatedb_ffi_rustbuffer_alloc.restype = _UniffiRustBuffer
-_UniffiLib.ffi_slatedb_ffi_rustbuffer_from_bytes.argtypes = (
+_UniffiLib.ffi_slatedb_uniffi_rustbuffer_alloc.restype = _UniffiRustBuffer
+_UniffiLib.ffi_slatedb_uniffi_rustbuffer_from_bytes.argtypes = (
     _UniffiForeignBytes,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.ffi_slatedb_ffi_rustbuffer_from_bytes.restype = _UniffiRustBuffer
-_UniffiLib.ffi_slatedb_ffi_rustbuffer_free.argtypes = (
+_UniffiLib.ffi_slatedb_uniffi_rustbuffer_from_bytes.restype = _UniffiRustBuffer
+_UniffiLib.ffi_slatedb_uniffi_rustbuffer_free.argtypes = (
     _UniffiRustBuffer,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.ffi_slatedb_ffi_rustbuffer_free.restype = None
-_UniffiLib.ffi_slatedb_ffi_rustbuffer_reserve.argtypes = (
+_UniffiLib.ffi_slatedb_uniffi_rustbuffer_free.restype = None
+_UniffiLib.ffi_slatedb_uniffi_rustbuffer_reserve.argtypes = (
     _UniffiRustBuffer,
     ctypes.c_uint64,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.ffi_slatedb_ffi_rustbuffer_reserve.restype = _UniffiRustBuffer
-_UniffiLib.ffi_slatedb_ffi_rust_future_poll_u8.argtypes = (
+_UniffiLib.ffi_slatedb_uniffi_rustbuffer_reserve.restype = _UniffiRustBuffer
+_UniffiLib.ffi_slatedb_uniffi_rust_future_poll_u8.argtypes = (
     ctypes.c_uint64,
     _UNIFFI_RUST_FUTURE_CONTINUATION_CALLBACK,
     ctypes.c_uint64,
 )
-_UniffiLib.ffi_slatedb_ffi_rust_future_poll_u8.restype = None
-_UniffiLib.ffi_slatedb_ffi_rust_future_cancel_u8.argtypes = (ctypes.c_uint64,)
-_UniffiLib.ffi_slatedb_ffi_rust_future_cancel_u8.restype = None
-_UniffiLib.ffi_slatedb_ffi_rust_future_free_u8.argtypes = (ctypes.c_uint64,)
-_UniffiLib.ffi_slatedb_ffi_rust_future_free_u8.restype = None
-_UniffiLib.ffi_slatedb_ffi_rust_future_complete_u8.argtypes = (
+_UniffiLib.ffi_slatedb_uniffi_rust_future_poll_u8.restype = None
+_UniffiLib.ffi_slatedb_uniffi_rust_future_cancel_u8.argtypes = (ctypes.c_uint64,)
+_UniffiLib.ffi_slatedb_uniffi_rust_future_cancel_u8.restype = None
+_UniffiLib.ffi_slatedb_uniffi_rust_future_free_u8.argtypes = (ctypes.c_uint64,)
+_UniffiLib.ffi_slatedb_uniffi_rust_future_free_u8.restype = None
+_UniffiLib.ffi_slatedb_uniffi_rust_future_complete_u8.argtypes = (
     ctypes.c_uint64,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.ffi_slatedb_ffi_rust_future_complete_u8.restype = ctypes.c_uint8
-_UniffiLib.ffi_slatedb_ffi_rust_future_poll_i8.argtypes = (
+_UniffiLib.ffi_slatedb_uniffi_rust_future_complete_u8.restype = ctypes.c_uint8
+_UniffiLib.ffi_slatedb_uniffi_rust_future_poll_i8.argtypes = (
     ctypes.c_uint64,
     _UNIFFI_RUST_FUTURE_CONTINUATION_CALLBACK,
     ctypes.c_uint64,
 )
-_UniffiLib.ffi_slatedb_ffi_rust_future_poll_i8.restype = None
-_UniffiLib.ffi_slatedb_ffi_rust_future_cancel_i8.argtypes = (ctypes.c_uint64,)
-_UniffiLib.ffi_slatedb_ffi_rust_future_cancel_i8.restype = None
-_UniffiLib.ffi_slatedb_ffi_rust_future_free_i8.argtypes = (ctypes.c_uint64,)
-_UniffiLib.ffi_slatedb_ffi_rust_future_free_i8.restype = None
-_UniffiLib.ffi_slatedb_ffi_rust_future_complete_i8.argtypes = (
+_UniffiLib.ffi_slatedb_uniffi_rust_future_poll_i8.restype = None
+_UniffiLib.ffi_slatedb_uniffi_rust_future_cancel_i8.argtypes = (ctypes.c_uint64,)
+_UniffiLib.ffi_slatedb_uniffi_rust_future_cancel_i8.restype = None
+_UniffiLib.ffi_slatedb_uniffi_rust_future_free_i8.argtypes = (ctypes.c_uint64,)
+_UniffiLib.ffi_slatedb_uniffi_rust_future_free_i8.restype = None
+_UniffiLib.ffi_slatedb_uniffi_rust_future_complete_i8.argtypes = (
     ctypes.c_uint64,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.ffi_slatedb_ffi_rust_future_complete_i8.restype = ctypes.c_int8
-_UniffiLib.ffi_slatedb_ffi_rust_future_poll_u16.argtypes = (
+_UniffiLib.ffi_slatedb_uniffi_rust_future_complete_i8.restype = ctypes.c_int8
+_UniffiLib.ffi_slatedb_uniffi_rust_future_poll_u16.argtypes = (
     ctypes.c_uint64,
     _UNIFFI_RUST_FUTURE_CONTINUATION_CALLBACK,
     ctypes.c_uint64,
 )
-_UniffiLib.ffi_slatedb_ffi_rust_future_poll_u16.restype = None
-_UniffiLib.ffi_slatedb_ffi_rust_future_cancel_u16.argtypes = (ctypes.c_uint64,)
-_UniffiLib.ffi_slatedb_ffi_rust_future_cancel_u16.restype = None
-_UniffiLib.ffi_slatedb_ffi_rust_future_free_u16.argtypes = (ctypes.c_uint64,)
-_UniffiLib.ffi_slatedb_ffi_rust_future_free_u16.restype = None
-_UniffiLib.ffi_slatedb_ffi_rust_future_complete_u16.argtypes = (
+_UniffiLib.ffi_slatedb_uniffi_rust_future_poll_u16.restype = None
+_UniffiLib.ffi_slatedb_uniffi_rust_future_cancel_u16.argtypes = (ctypes.c_uint64,)
+_UniffiLib.ffi_slatedb_uniffi_rust_future_cancel_u16.restype = None
+_UniffiLib.ffi_slatedb_uniffi_rust_future_free_u16.argtypes = (ctypes.c_uint64,)
+_UniffiLib.ffi_slatedb_uniffi_rust_future_free_u16.restype = None
+_UniffiLib.ffi_slatedb_uniffi_rust_future_complete_u16.argtypes = (
     ctypes.c_uint64,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.ffi_slatedb_ffi_rust_future_complete_u16.restype = ctypes.c_uint16
-_UniffiLib.ffi_slatedb_ffi_rust_future_poll_i16.argtypes = (
+_UniffiLib.ffi_slatedb_uniffi_rust_future_complete_u16.restype = ctypes.c_uint16
+_UniffiLib.ffi_slatedb_uniffi_rust_future_poll_i16.argtypes = (
     ctypes.c_uint64,
     _UNIFFI_RUST_FUTURE_CONTINUATION_CALLBACK,
     ctypes.c_uint64,
 )
-_UniffiLib.ffi_slatedb_ffi_rust_future_poll_i16.restype = None
-_UniffiLib.ffi_slatedb_ffi_rust_future_cancel_i16.argtypes = (ctypes.c_uint64,)
-_UniffiLib.ffi_slatedb_ffi_rust_future_cancel_i16.restype = None
-_UniffiLib.ffi_slatedb_ffi_rust_future_free_i16.argtypes = (ctypes.c_uint64,)
-_UniffiLib.ffi_slatedb_ffi_rust_future_free_i16.restype = None
-_UniffiLib.ffi_slatedb_ffi_rust_future_complete_i16.argtypes = (
+_UniffiLib.ffi_slatedb_uniffi_rust_future_poll_i16.restype = None
+_UniffiLib.ffi_slatedb_uniffi_rust_future_cancel_i16.argtypes = (ctypes.c_uint64,)
+_UniffiLib.ffi_slatedb_uniffi_rust_future_cancel_i16.restype = None
+_UniffiLib.ffi_slatedb_uniffi_rust_future_free_i16.argtypes = (ctypes.c_uint64,)
+_UniffiLib.ffi_slatedb_uniffi_rust_future_free_i16.restype = None
+_UniffiLib.ffi_slatedb_uniffi_rust_future_complete_i16.argtypes = (
     ctypes.c_uint64,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.ffi_slatedb_ffi_rust_future_complete_i16.restype = ctypes.c_int16
-_UniffiLib.ffi_slatedb_ffi_rust_future_poll_u32.argtypes = (
+_UniffiLib.ffi_slatedb_uniffi_rust_future_complete_i16.restype = ctypes.c_int16
+_UniffiLib.ffi_slatedb_uniffi_rust_future_poll_u32.argtypes = (
     ctypes.c_uint64,
     _UNIFFI_RUST_FUTURE_CONTINUATION_CALLBACK,
     ctypes.c_uint64,
 )
-_UniffiLib.ffi_slatedb_ffi_rust_future_poll_u32.restype = None
-_UniffiLib.ffi_slatedb_ffi_rust_future_cancel_u32.argtypes = (ctypes.c_uint64,)
-_UniffiLib.ffi_slatedb_ffi_rust_future_cancel_u32.restype = None
-_UniffiLib.ffi_slatedb_ffi_rust_future_free_u32.argtypes = (ctypes.c_uint64,)
-_UniffiLib.ffi_slatedb_ffi_rust_future_free_u32.restype = None
-_UniffiLib.ffi_slatedb_ffi_rust_future_complete_u32.argtypes = (
+_UniffiLib.ffi_slatedb_uniffi_rust_future_poll_u32.restype = None
+_UniffiLib.ffi_slatedb_uniffi_rust_future_cancel_u32.argtypes = (ctypes.c_uint64,)
+_UniffiLib.ffi_slatedb_uniffi_rust_future_cancel_u32.restype = None
+_UniffiLib.ffi_slatedb_uniffi_rust_future_free_u32.argtypes = (ctypes.c_uint64,)
+_UniffiLib.ffi_slatedb_uniffi_rust_future_free_u32.restype = None
+_UniffiLib.ffi_slatedb_uniffi_rust_future_complete_u32.argtypes = (
     ctypes.c_uint64,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.ffi_slatedb_ffi_rust_future_complete_u32.restype = ctypes.c_uint32
-_UniffiLib.ffi_slatedb_ffi_rust_future_poll_i32.argtypes = (
+_UniffiLib.ffi_slatedb_uniffi_rust_future_complete_u32.restype = ctypes.c_uint32
+_UniffiLib.ffi_slatedb_uniffi_rust_future_poll_i32.argtypes = (
     ctypes.c_uint64,
     _UNIFFI_RUST_FUTURE_CONTINUATION_CALLBACK,
     ctypes.c_uint64,
 )
-_UniffiLib.ffi_slatedb_ffi_rust_future_poll_i32.restype = None
-_UniffiLib.ffi_slatedb_ffi_rust_future_cancel_i32.argtypes = (ctypes.c_uint64,)
-_UniffiLib.ffi_slatedb_ffi_rust_future_cancel_i32.restype = None
-_UniffiLib.ffi_slatedb_ffi_rust_future_free_i32.argtypes = (ctypes.c_uint64,)
-_UniffiLib.ffi_slatedb_ffi_rust_future_free_i32.restype = None
-_UniffiLib.ffi_slatedb_ffi_rust_future_complete_i32.argtypes = (
+_UniffiLib.ffi_slatedb_uniffi_rust_future_poll_i32.restype = None
+_UniffiLib.ffi_slatedb_uniffi_rust_future_cancel_i32.argtypes = (ctypes.c_uint64,)
+_UniffiLib.ffi_slatedb_uniffi_rust_future_cancel_i32.restype = None
+_UniffiLib.ffi_slatedb_uniffi_rust_future_free_i32.argtypes = (ctypes.c_uint64,)
+_UniffiLib.ffi_slatedb_uniffi_rust_future_free_i32.restype = None
+_UniffiLib.ffi_slatedb_uniffi_rust_future_complete_i32.argtypes = (
     ctypes.c_uint64,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.ffi_slatedb_ffi_rust_future_complete_i32.restype = ctypes.c_int32
-_UniffiLib.ffi_slatedb_ffi_rust_future_poll_u64.argtypes = (
+_UniffiLib.ffi_slatedb_uniffi_rust_future_complete_i32.restype = ctypes.c_int32
+_UniffiLib.ffi_slatedb_uniffi_rust_future_poll_u64.argtypes = (
     ctypes.c_uint64,
     _UNIFFI_RUST_FUTURE_CONTINUATION_CALLBACK,
     ctypes.c_uint64,
 )
-_UniffiLib.ffi_slatedb_ffi_rust_future_poll_u64.restype = None
-_UniffiLib.ffi_slatedb_ffi_rust_future_cancel_u64.argtypes = (ctypes.c_uint64,)
-_UniffiLib.ffi_slatedb_ffi_rust_future_cancel_u64.restype = None
-_UniffiLib.ffi_slatedb_ffi_rust_future_free_u64.argtypes = (ctypes.c_uint64,)
-_UniffiLib.ffi_slatedb_ffi_rust_future_free_u64.restype = None
-_UniffiLib.ffi_slatedb_ffi_rust_future_complete_u64.argtypes = (
+_UniffiLib.ffi_slatedb_uniffi_rust_future_poll_u64.restype = None
+_UniffiLib.ffi_slatedb_uniffi_rust_future_cancel_u64.argtypes = (ctypes.c_uint64,)
+_UniffiLib.ffi_slatedb_uniffi_rust_future_cancel_u64.restype = None
+_UniffiLib.ffi_slatedb_uniffi_rust_future_free_u64.argtypes = (ctypes.c_uint64,)
+_UniffiLib.ffi_slatedb_uniffi_rust_future_free_u64.restype = None
+_UniffiLib.ffi_slatedb_uniffi_rust_future_complete_u64.argtypes = (
     ctypes.c_uint64,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.ffi_slatedb_ffi_rust_future_complete_u64.restype = ctypes.c_uint64
-_UniffiLib.ffi_slatedb_ffi_rust_future_poll_i64.argtypes = (
+_UniffiLib.ffi_slatedb_uniffi_rust_future_complete_u64.restype = ctypes.c_uint64
+_UniffiLib.ffi_slatedb_uniffi_rust_future_poll_i64.argtypes = (
     ctypes.c_uint64,
     _UNIFFI_RUST_FUTURE_CONTINUATION_CALLBACK,
     ctypes.c_uint64,
 )
-_UniffiLib.ffi_slatedb_ffi_rust_future_poll_i64.restype = None
-_UniffiLib.ffi_slatedb_ffi_rust_future_cancel_i64.argtypes = (ctypes.c_uint64,)
-_UniffiLib.ffi_slatedb_ffi_rust_future_cancel_i64.restype = None
-_UniffiLib.ffi_slatedb_ffi_rust_future_free_i64.argtypes = (ctypes.c_uint64,)
-_UniffiLib.ffi_slatedb_ffi_rust_future_free_i64.restype = None
-_UniffiLib.ffi_slatedb_ffi_rust_future_complete_i64.argtypes = (
+_UniffiLib.ffi_slatedb_uniffi_rust_future_poll_i64.restype = None
+_UniffiLib.ffi_slatedb_uniffi_rust_future_cancel_i64.argtypes = (ctypes.c_uint64,)
+_UniffiLib.ffi_slatedb_uniffi_rust_future_cancel_i64.restype = None
+_UniffiLib.ffi_slatedb_uniffi_rust_future_free_i64.argtypes = (ctypes.c_uint64,)
+_UniffiLib.ffi_slatedb_uniffi_rust_future_free_i64.restype = None
+_UniffiLib.ffi_slatedb_uniffi_rust_future_complete_i64.argtypes = (
     ctypes.c_uint64,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.ffi_slatedb_ffi_rust_future_complete_i64.restype = ctypes.c_int64
-_UniffiLib.ffi_slatedb_ffi_rust_future_poll_f32.argtypes = (
+_UniffiLib.ffi_slatedb_uniffi_rust_future_complete_i64.restype = ctypes.c_int64
+_UniffiLib.ffi_slatedb_uniffi_rust_future_poll_f32.argtypes = (
     ctypes.c_uint64,
     _UNIFFI_RUST_FUTURE_CONTINUATION_CALLBACK,
     ctypes.c_uint64,
 )
-_UniffiLib.ffi_slatedb_ffi_rust_future_poll_f32.restype = None
-_UniffiLib.ffi_slatedb_ffi_rust_future_cancel_f32.argtypes = (ctypes.c_uint64,)
-_UniffiLib.ffi_slatedb_ffi_rust_future_cancel_f32.restype = None
-_UniffiLib.ffi_slatedb_ffi_rust_future_free_f32.argtypes = (ctypes.c_uint64,)
-_UniffiLib.ffi_slatedb_ffi_rust_future_free_f32.restype = None
-_UniffiLib.ffi_slatedb_ffi_rust_future_complete_f32.argtypes = (
+_UniffiLib.ffi_slatedb_uniffi_rust_future_poll_f32.restype = None
+_UniffiLib.ffi_slatedb_uniffi_rust_future_cancel_f32.argtypes = (ctypes.c_uint64,)
+_UniffiLib.ffi_slatedb_uniffi_rust_future_cancel_f32.restype = None
+_UniffiLib.ffi_slatedb_uniffi_rust_future_free_f32.argtypes = (ctypes.c_uint64,)
+_UniffiLib.ffi_slatedb_uniffi_rust_future_free_f32.restype = None
+_UniffiLib.ffi_slatedb_uniffi_rust_future_complete_f32.argtypes = (
     ctypes.c_uint64,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.ffi_slatedb_ffi_rust_future_complete_f32.restype = ctypes.c_float
-_UniffiLib.ffi_slatedb_ffi_rust_future_poll_f64.argtypes = (
+_UniffiLib.ffi_slatedb_uniffi_rust_future_complete_f32.restype = ctypes.c_float
+_UniffiLib.ffi_slatedb_uniffi_rust_future_poll_f64.argtypes = (
     ctypes.c_uint64,
     _UNIFFI_RUST_FUTURE_CONTINUATION_CALLBACK,
     ctypes.c_uint64,
 )
-_UniffiLib.ffi_slatedb_ffi_rust_future_poll_f64.restype = None
-_UniffiLib.ffi_slatedb_ffi_rust_future_cancel_f64.argtypes = (ctypes.c_uint64,)
-_UniffiLib.ffi_slatedb_ffi_rust_future_cancel_f64.restype = None
-_UniffiLib.ffi_slatedb_ffi_rust_future_free_f64.argtypes = (ctypes.c_uint64,)
-_UniffiLib.ffi_slatedb_ffi_rust_future_free_f64.restype = None
-_UniffiLib.ffi_slatedb_ffi_rust_future_complete_f64.argtypes = (
+_UniffiLib.ffi_slatedb_uniffi_rust_future_poll_f64.restype = None
+_UniffiLib.ffi_slatedb_uniffi_rust_future_cancel_f64.argtypes = (ctypes.c_uint64,)
+_UniffiLib.ffi_slatedb_uniffi_rust_future_cancel_f64.restype = None
+_UniffiLib.ffi_slatedb_uniffi_rust_future_free_f64.argtypes = (ctypes.c_uint64,)
+_UniffiLib.ffi_slatedb_uniffi_rust_future_free_f64.restype = None
+_UniffiLib.ffi_slatedb_uniffi_rust_future_complete_f64.argtypes = (
     ctypes.c_uint64,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.ffi_slatedb_ffi_rust_future_complete_f64.restype = ctypes.c_double
-_UniffiLib.ffi_slatedb_ffi_rust_future_poll_pointer.argtypes = (
+_UniffiLib.ffi_slatedb_uniffi_rust_future_complete_f64.restype = ctypes.c_double
+_UniffiLib.ffi_slatedb_uniffi_rust_future_poll_pointer.argtypes = (
     ctypes.c_uint64,
     _UNIFFI_RUST_FUTURE_CONTINUATION_CALLBACK,
     ctypes.c_uint64,
 )
-_UniffiLib.ffi_slatedb_ffi_rust_future_poll_pointer.restype = None
-_UniffiLib.ffi_slatedb_ffi_rust_future_cancel_pointer.argtypes = (ctypes.c_uint64,)
-_UniffiLib.ffi_slatedb_ffi_rust_future_cancel_pointer.restype = None
-_UniffiLib.ffi_slatedb_ffi_rust_future_free_pointer.argtypes = (ctypes.c_uint64,)
-_UniffiLib.ffi_slatedb_ffi_rust_future_free_pointer.restype = None
-_UniffiLib.ffi_slatedb_ffi_rust_future_complete_pointer.argtypes = (
+_UniffiLib.ffi_slatedb_uniffi_rust_future_poll_pointer.restype = None
+_UniffiLib.ffi_slatedb_uniffi_rust_future_cancel_pointer.argtypes = (ctypes.c_uint64,)
+_UniffiLib.ffi_slatedb_uniffi_rust_future_cancel_pointer.restype = None
+_UniffiLib.ffi_slatedb_uniffi_rust_future_free_pointer.argtypes = (ctypes.c_uint64,)
+_UniffiLib.ffi_slatedb_uniffi_rust_future_free_pointer.restype = None
+_UniffiLib.ffi_slatedb_uniffi_rust_future_complete_pointer.argtypes = (
     ctypes.c_uint64,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.ffi_slatedb_ffi_rust_future_complete_pointer.restype = ctypes.c_void_p
-_UniffiLib.ffi_slatedb_ffi_rust_future_poll_rust_buffer.argtypes = (
+_UniffiLib.ffi_slatedb_uniffi_rust_future_complete_pointer.restype = ctypes.c_void_p
+_UniffiLib.ffi_slatedb_uniffi_rust_future_poll_rust_buffer.argtypes = (
     ctypes.c_uint64,
     _UNIFFI_RUST_FUTURE_CONTINUATION_CALLBACK,
     ctypes.c_uint64,
 )
-_UniffiLib.ffi_slatedb_ffi_rust_future_poll_rust_buffer.restype = None
-_UniffiLib.ffi_slatedb_ffi_rust_future_cancel_rust_buffer.argtypes = (ctypes.c_uint64,)
-_UniffiLib.ffi_slatedb_ffi_rust_future_cancel_rust_buffer.restype = None
-_UniffiLib.ffi_slatedb_ffi_rust_future_free_rust_buffer.argtypes = (ctypes.c_uint64,)
-_UniffiLib.ffi_slatedb_ffi_rust_future_free_rust_buffer.restype = None
-_UniffiLib.ffi_slatedb_ffi_rust_future_complete_rust_buffer.argtypes = (
+_UniffiLib.ffi_slatedb_uniffi_rust_future_poll_rust_buffer.restype = None
+_UniffiLib.ffi_slatedb_uniffi_rust_future_cancel_rust_buffer.argtypes = (ctypes.c_uint64,)
+_UniffiLib.ffi_slatedb_uniffi_rust_future_cancel_rust_buffer.restype = None
+_UniffiLib.ffi_slatedb_uniffi_rust_future_free_rust_buffer.argtypes = (ctypes.c_uint64,)
+_UniffiLib.ffi_slatedb_uniffi_rust_future_free_rust_buffer.restype = None
+_UniffiLib.ffi_slatedb_uniffi_rust_future_complete_rust_buffer.argtypes = (
     ctypes.c_uint64,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.ffi_slatedb_ffi_rust_future_complete_rust_buffer.restype = _UniffiRustBuffer
-_UniffiLib.ffi_slatedb_ffi_rust_future_poll_void.argtypes = (
+_UniffiLib.ffi_slatedb_uniffi_rust_future_complete_rust_buffer.restype = _UniffiRustBuffer
+_UniffiLib.ffi_slatedb_uniffi_rust_future_poll_void.argtypes = (
     ctypes.c_uint64,
     _UNIFFI_RUST_FUTURE_CONTINUATION_CALLBACK,
     ctypes.c_uint64,
 )
-_UniffiLib.ffi_slatedb_ffi_rust_future_poll_void.restype = None
-_UniffiLib.ffi_slatedb_ffi_rust_future_cancel_void.argtypes = (ctypes.c_uint64,)
-_UniffiLib.ffi_slatedb_ffi_rust_future_cancel_void.restype = None
-_UniffiLib.ffi_slatedb_ffi_rust_future_free_void.argtypes = (ctypes.c_uint64,)
-_UniffiLib.ffi_slatedb_ffi_rust_future_free_void.restype = None
-_UniffiLib.ffi_slatedb_ffi_rust_future_complete_void.argtypes = (
+_UniffiLib.ffi_slatedb_uniffi_rust_future_poll_void.restype = None
+_UniffiLib.ffi_slatedb_uniffi_rust_future_cancel_void.argtypes = (ctypes.c_uint64,)
+_UniffiLib.ffi_slatedb_uniffi_rust_future_cancel_void.restype = None
+_UniffiLib.ffi_slatedb_uniffi_rust_future_free_void.argtypes = (ctypes.c_uint64,)
+_UniffiLib.ffi_slatedb_uniffi_rust_future_free_void.restype = None
+_UniffiLib.ffi_slatedb_uniffi_rust_future_complete_void.argtypes = (
     ctypes.c_uint64,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.ffi_slatedb_ffi_rust_future_complete_void.restype = None
-_UniffiLib.uniffi_slatedb_ffi_checksum_func_init_logging.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_func_init_logging.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_db_begin.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_db_begin.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_db_delete.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_db_delete.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_db_delete_with_options.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_db_delete_with_options.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_db_flush.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_db_flush.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_db_flush_with_options.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_db_flush_with_options.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_db_get.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_db_get.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_db_get_key_value.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_db_get_key_value.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_db_get_key_value_with_options.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_db_get_key_value_with_options.restype = (
+_UniffiLib.ffi_slatedb_uniffi_rust_future_complete_void.restype = None
+_UniffiLib.uniffi_slatedb_uniffi_checksum_func_init_logging.argtypes = ()
+_UniffiLib.uniffi_slatedb_uniffi_checksum_func_init_logging.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_db_begin.argtypes = ()
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_db_begin.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_db_delete.argtypes = ()
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_db_delete.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_db_delete_with_options.argtypes = ()
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_db_delete_with_options.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_db_flush.argtypes = ()
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_db_flush.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_db_flush_with_options.argtypes = ()
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_db_flush_with_options.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_db_get.argtypes = ()
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_db_get.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_db_get_key_value.argtypes = ()
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_db_get_key_value.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_db_get_key_value_with_options.argtypes = ()
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_db_get_key_value_with_options.restype = (
     ctypes.c_uint16
 )
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_db_get_with_options.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_db_get_with_options.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_db_merge.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_db_merge.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_db_merge_with_options.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_db_merge_with_options.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_db_metrics.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_db_metrics.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_db_put.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_db_put.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_db_put_with_options.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_db_put_with_options.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_db_scan.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_db_scan.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_db_scan_prefix.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_db_scan_prefix.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_db_scan_prefix_with_options.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_db_scan_prefix_with_options.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_db_scan_with_options.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_db_scan_with_options.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_db_shutdown.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_db_shutdown.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_db_snapshot.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_db_snapshot.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_db_status.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_db_status.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_db_write.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_db_write.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_db_write_with_options.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_db_write_with_options.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbbuilder_build.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbbuilder_build.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbbuilder_with_db_cache_disabled.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbbuilder_with_db_cache_disabled.restype = (
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_db_get_with_options.argtypes = ()
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_db_get_with_options.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_db_merge.argtypes = ()
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_db_merge.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_db_merge_with_options.argtypes = ()
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_db_merge_with_options.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_db_metrics.argtypes = ()
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_db_metrics.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_db_put.argtypes = ()
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_db_put.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_db_put_with_options.argtypes = ()
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_db_put_with_options.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_db_scan.argtypes = ()
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_db_scan.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_db_scan_prefix.argtypes = ()
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_db_scan_prefix.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_db_scan_prefix_with_options.argtypes = ()
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_db_scan_prefix_with_options.restype = (
     ctypes.c_uint16
 )
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbbuilder_with_merge_operator.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbbuilder_with_merge_operator.restype = (
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_db_scan_with_options.argtypes = ()
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_db_scan_with_options.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_db_shutdown.argtypes = ()
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_db_shutdown.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_db_snapshot.argtypes = ()
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_db_snapshot.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_db_status.argtypes = ()
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_db_status.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_db_write.argtypes = ()
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_db_write.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_db_write_with_options.argtypes = ()
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_db_write_with_options.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_dbbuilder_build.argtypes = ()
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_dbbuilder_build.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_db_cache_disabled.argtypes = ()
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_db_cache_disabled.restype = (
     ctypes.c_uint16
 )
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbbuilder_with_seed.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbbuilder_with_seed.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbbuilder_with_settings.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbbuilder_with_settings.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbbuilder_with_sst_block_size.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbbuilder_with_sst_block_size.restype = (
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_merge_operator.argtypes = ()
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_merge_operator.restype = (
     ctypes.c_uint16
 )
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbbuilder_with_wal_object_store.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbbuilder_with_wal_object_store.restype = (
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_seed.argtypes = ()
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_seed.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_settings.argtypes = ()
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_settings.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_sst_block_size.argtypes = ()
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_sst_block_size.restype = (
     ctypes.c_uint16
 )
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbiterator_next.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbiterator_next.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbiterator_seek.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbiterator_seek.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbreader_get.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbreader_get.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbreader_get_with_options.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbreader_get_with_options.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbreader_scan.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbreader_scan.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbreader_scan_prefix.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbreader_scan_prefix.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbreader_scan_prefix_with_options.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbreader_scan_prefix_with_options.restype = (
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_wal_object_store.argtypes = ()
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_wal_object_store.restype = (
     ctypes.c_uint16
 )
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbreader_scan_with_options.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbreader_scan_with_options.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbreader_shutdown.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbreader_shutdown.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbreaderbuilder_build.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbreaderbuilder_build.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbreaderbuilder_with_checkpoint_id.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbreaderbuilder_with_checkpoint_id.restype = (
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_dbiterator_next.argtypes = ()
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_dbiterator_next.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_dbiterator_seek.argtypes = ()
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_dbiterator_seek.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_dbreader_get.argtypes = ()
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_dbreader_get.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_dbreader_get_with_options.argtypes = ()
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_dbreader_get_with_options.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_dbreader_scan.argtypes = ()
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_dbreader_scan.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_dbreader_scan_prefix.argtypes = ()
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_dbreader_scan_prefix.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_dbreader_scan_prefix_with_options.argtypes = ()
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_dbreader_scan_prefix_with_options.restype = (
     ctypes.c_uint16
 )
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbreaderbuilder_with_merge_operator.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbreaderbuilder_with_merge_operator.restype = (
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_dbreader_scan_with_options.argtypes = ()
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_dbreader_scan_with_options.restype = (
     ctypes.c_uint16
 )
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbreaderbuilder_with_options.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbreaderbuilder_with_options.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbreaderbuilder_with_wal_object_store.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbreaderbuilder_with_wal_object_store.restype = (
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_dbreader_shutdown.argtypes = ()
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_dbreader_shutdown.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_dbreaderbuilder_build.argtypes = ()
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_dbreaderbuilder_build.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_dbreaderbuilder_with_checkpoint_id.argtypes = ()
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_dbreaderbuilder_with_checkpoint_id.restype = (
     ctypes.c_uint16
 )
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbsnapshot_get.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbsnapshot_get.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbsnapshot_get_key_value.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbsnapshot_get_key_value.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbsnapshot_get_key_value_with_options.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbsnapshot_get_key_value_with_options.restype = (
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_dbreaderbuilder_with_merge_operator.argtypes = ()
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_dbreaderbuilder_with_merge_operator.restype = (
     ctypes.c_uint16
 )
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbsnapshot_get_with_options.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbsnapshot_get_with_options.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbsnapshot_scan.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbsnapshot_scan.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbsnapshot_scan_prefix.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbsnapshot_scan_prefix.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbsnapshot_scan_prefix_with_options.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbsnapshot_scan_prefix_with_options.restype = (
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_dbreaderbuilder_with_options.argtypes = ()
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_dbreaderbuilder_with_options.restype = (
     ctypes.c_uint16
 )
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbsnapshot_scan_with_options.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbsnapshot_scan_with_options.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbtransaction_commit.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbtransaction_commit.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbtransaction_commit_with_options.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbtransaction_commit_with_options.restype = (
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_dbreaderbuilder_with_wal_object_store.argtypes = ()
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_dbreaderbuilder_with_wal_object_store.restype = (
     ctypes.c_uint16
 )
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbtransaction_delete.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbtransaction_delete.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbtransaction_get.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbtransaction_get.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbtransaction_get_key_value.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbtransaction_get_key_value.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbtransaction_get_key_value_with_options.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbtransaction_get_key_value_with_options.restype = (
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_dbsnapshot_get.argtypes = ()
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_dbsnapshot_get.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_dbsnapshot_get_key_value.argtypes = ()
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_dbsnapshot_get_key_value.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_dbsnapshot_get_key_value_with_options.argtypes = ()
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_dbsnapshot_get_key_value_with_options.restype = (
     ctypes.c_uint16
 )
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbtransaction_get_with_options.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbtransaction_get_with_options.restype = (
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_dbsnapshot_get_with_options.argtypes = ()
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_dbsnapshot_get_with_options.restype = (
     ctypes.c_uint16
 )
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbtransaction_id.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbtransaction_id.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbtransaction_mark_read.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbtransaction_mark_read.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbtransaction_merge.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbtransaction_merge.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbtransaction_merge_with_options.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbtransaction_merge_with_options.restype = (
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_dbsnapshot_scan.argtypes = ()
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_dbsnapshot_scan.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_dbsnapshot_scan_prefix.argtypes = ()
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_dbsnapshot_scan_prefix.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_dbsnapshot_scan_prefix_with_options.argtypes = ()
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_dbsnapshot_scan_prefix_with_options.restype = (
     ctypes.c_uint16
 )
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbtransaction_put.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbtransaction_put.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbtransaction_put_with_options.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbtransaction_put_with_options.restype = (
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_dbsnapshot_scan_with_options.argtypes = ()
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_dbsnapshot_scan_with_options.restype = (
     ctypes.c_uint16
 )
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbtransaction_rollback.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbtransaction_rollback.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbtransaction_scan.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbtransaction_scan.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbtransaction_scan_prefix.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbtransaction_scan_prefix.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbtransaction_scan_prefix_with_options.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbtransaction_scan_prefix_with_options.restype = (
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_dbtransaction_commit.argtypes = ()
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_dbtransaction_commit.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_dbtransaction_commit_with_options.argtypes = ()
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_dbtransaction_commit_with_options.restype = (
     ctypes.c_uint16
 )
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbtransaction_scan_with_options.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbtransaction_scan_with_options.restype = (
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_dbtransaction_delete.argtypes = ()
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_dbtransaction_delete.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_dbtransaction_get.argtypes = ()
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_dbtransaction_get.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_dbtransaction_get_key_value.argtypes = ()
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_dbtransaction_get_key_value.restype = (
     ctypes.c_uint16
 )
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbtransaction_seqnum.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbtransaction_seqnum.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbtransaction_unmark_write.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_dbtransaction_unmark_write.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_logcallback_log.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_logcallback_log.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_mergeoperator_merge.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_mergeoperator_merge.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_settings_set.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_settings_set.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_settings_to_json_string.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_settings_to_json_string.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_walfile_id.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_walfile_id.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_walfile_iterator.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_walfile_iterator.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_walfile_metadata.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_walfile_metadata.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_walfile_next_file.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_walfile_next_file.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_walfile_next_id.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_walfile_next_id.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_walfile_shutdown.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_walfile_shutdown.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_walfileiterator_next.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_walfileiterator_next.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_walfileiterator_shutdown.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_walfileiterator_shutdown.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_walreader_get.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_walreader_get.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_walreader_list.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_walreader_list.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_walreader_shutdown.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_walreader_shutdown.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_writebatch_delete.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_writebatch_delete.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_writebatch_merge.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_writebatch_merge.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_writebatch_merge_with_options.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_writebatch_merge_with_options.restype = (
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_dbtransaction_get_key_value_with_options.argtypes = ()
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_dbtransaction_get_key_value_with_options.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_dbtransaction_get_with_options.argtypes = ()
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_dbtransaction_get_with_options.restype = (
     ctypes.c_uint16
 )
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_writebatch_put.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_writebatch_put.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_writebatch_put_with_options.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_method_writebatch_put_with_options.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_constructor_dbbuilder_new.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_constructor_dbbuilder_new.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_constructor_dbreaderbuilder_new.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_constructor_dbreaderbuilder_new.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_constructor_objectstore_from_env.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_constructor_objectstore_from_env.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_constructor_objectstore_resolve.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_constructor_objectstore_resolve.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_constructor_settings_default.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_constructor_settings_default.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_constructor_settings_from_env.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_constructor_settings_from_env.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_constructor_settings_from_env_with_default.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_constructor_settings_from_env_with_default.restype = (
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_dbtransaction_id.argtypes = ()
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_dbtransaction_id.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_dbtransaction_mark_read.argtypes = ()
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_dbtransaction_mark_read.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_dbtransaction_merge.argtypes = ()
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_dbtransaction_merge.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_dbtransaction_merge_with_options.argtypes = ()
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_dbtransaction_merge_with_options.restype = (
     ctypes.c_uint16
 )
-_UniffiLib.uniffi_slatedb_ffi_checksum_constructor_settings_from_file.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_constructor_settings_from_file.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_constructor_settings_from_json_string.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_constructor_settings_from_json_string.restype = (
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_dbtransaction_put.argtypes = ()
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_dbtransaction_put.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_dbtransaction_put_with_options.argtypes = ()
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_dbtransaction_put_with_options.restype = (
     ctypes.c_uint16
 )
-_UniffiLib.uniffi_slatedb_ffi_checksum_constructor_settings_load.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_constructor_settings_load.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_constructor_walreader_new.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_constructor_walreader_new.restype = ctypes.c_uint16
-_UniffiLib.uniffi_slatedb_ffi_checksum_constructor_writebatch_new.argtypes = ()
-_UniffiLib.uniffi_slatedb_ffi_checksum_constructor_writebatch_new.restype = ctypes.c_uint16
-_UniffiLib.ffi_slatedb_ffi_uniffi_contract_version.argtypes = ()
-_UniffiLib.ffi_slatedb_ffi_uniffi_contract_version.restype = ctypes.c_uint32
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_dbtransaction_rollback.argtypes = ()
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_dbtransaction_rollback.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_dbtransaction_scan.argtypes = ()
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_dbtransaction_scan.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_dbtransaction_scan_prefix.argtypes = ()
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_dbtransaction_scan_prefix.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_dbtransaction_scan_prefix_with_options.argtypes = ()
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_dbtransaction_scan_prefix_with_options.restype = (
+    ctypes.c_uint16
+)
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_dbtransaction_scan_with_options.argtypes = ()
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_dbtransaction_scan_with_options.restype = (
+    ctypes.c_uint16
+)
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_dbtransaction_seqnum.argtypes = ()
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_dbtransaction_seqnum.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_dbtransaction_unmark_write.argtypes = ()
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_dbtransaction_unmark_write.restype = (
+    ctypes.c_uint16
+)
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_logcallback_log.argtypes = ()
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_logcallback_log.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_mergeoperator_merge.argtypes = ()
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_mergeoperator_merge.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_settings_set.argtypes = ()
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_settings_set.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_settings_to_json_string.argtypes = ()
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_settings_to_json_string.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_walfile_id.argtypes = ()
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_walfile_id.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_walfile_iterator.argtypes = ()
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_walfile_iterator.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_walfile_metadata.argtypes = ()
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_walfile_metadata.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_walfile_next_file.argtypes = ()
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_walfile_next_file.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_walfile_next_id.argtypes = ()
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_walfile_next_id.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_walfile_shutdown.argtypes = ()
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_walfile_shutdown.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_walfileiterator_next.argtypes = ()
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_walfileiterator_next.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_walfileiterator_shutdown.argtypes = ()
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_walfileiterator_shutdown.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_walreader_get.argtypes = ()
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_walreader_get.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_walreader_list.argtypes = ()
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_walreader_list.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_walreader_shutdown.argtypes = ()
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_walreader_shutdown.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_writebatch_delete.argtypes = ()
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_writebatch_delete.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_writebatch_merge.argtypes = ()
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_writebatch_merge.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_writebatch_merge_with_options.argtypes = ()
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_writebatch_merge_with_options.restype = (
+    ctypes.c_uint16
+)
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_writebatch_put.argtypes = ()
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_writebatch_put.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_writebatch_put_with_options.argtypes = ()
+_UniffiLib.uniffi_slatedb_uniffi_checksum_method_writebatch_put_with_options.restype = (
+    ctypes.c_uint16
+)
+_UniffiLib.uniffi_slatedb_uniffi_checksum_constructor_dbbuilder_new.argtypes = ()
+_UniffiLib.uniffi_slatedb_uniffi_checksum_constructor_dbbuilder_new.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_uniffi_checksum_constructor_dbreaderbuilder_new.argtypes = ()
+_UniffiLib.uniffi_slatedb_uniffi_checksum_constructor_dbreaderbuilder_new.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_uniffi_checksum_constructor_objectstore_from_env.argtypes = ()
+_UniffiLib.uniffi_slatedb_uniffi_checksum_constructor_objectstore_from_env.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_uniffi_checksum_constructor_objectstore_resolve.argtypes = ()
+_UniffiLib.uniffi_slatedb_uniffi_checksum_constructor_objectstore_resolve.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_uniffi_checksum_constructor_settings_default.argtypes = ()
+_UniffiLib.uniffi_slatedb_uniffi_checksum_constructor_settings_default.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_uniffi_checksum_constructor_settings_from_env.argtypes = ()
+_UniffiLib.uniffi_slatedb_uniffi_checksum_constructor_settings_from_env.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_uniffi_checksum_constructor_settings_from_env_with_default.argtypes = ()
+_UniffiLib.uniffi_slatedb_uniffi_checksum_constructor_settings_from_env_with_default.restype = (
+    ctypes.c_uint16
+)
+_UniffiLib.uniffi_slatedb_uniffi_checksum_constructor_settings_from_file.argtypes = ()
+_UniffiLib.uniffi_slatedb_uniffi_checksum_constructor_settings_from_file.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_uniffi_checksum_constructor_settings_from_json_string.argtypes = ()
+_UniffiLib.uniffi_slatedb_uniffi_checksum_constructor_settings_from_json_string.restype = (
+    ctypes.c_uint16
+)
+_UniffiLib.uniffi_slatedb_uniffi_checksum_constructor_settings_load.argtypes = ()
+_UniffiLib.uniffi_slatedb_uniffi_checksum_constructor_settings_load.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_uniffi_checksum_constructor_walreader_new.argtypes = ()
+_UniffiLib.uniffi_slatedb_uniffi_checksum_constructor_walreader_new.restype = ctypes.c_uint16
+_UniffiLib.uniffi_slatedb_uniffi_checksum_constructor_writebatch_new.argtypes = ()
+_UniffiLib.uniffi_slatedb_uniffi_checksum_constructor_writebatch_new.restype = ctypes.c_uint16
+_UniffiLib.ffi_slatedb_uniffi_uniffi_contract_version.argtypes = ()
+_UniffiLib.ffi_slatedb_uniffi_uniffi_contract_version.restype = ctypes.c_uint32
 
 _uniffi_check_contract_api_version(_UniffiLib)
 # _uniffi_check_api_checksums(_UniffiLib)
@@ -4246,10 +4269,12 @@ class LogCallbackImpl:
         # In case of partial initialization of instances.
         pointer = getattr(self, "_pointer", None)
         if pointer is not None:
-            _uniffi_rust_call(_UniffiLib.uniffi_slatedb_ffi_fn_free_logcallback, pointer)
+            _uniffi_rust_call(_UniffiLib.uniffi_slatedb_uniffi_fn_free_logcallback, pointer)
 
     def _uniffi_clone_pointer(self):
-        return _uniffi_rust_call(_UniffiLib.uniffi_slatedb_ffi_fn_clone_logcallback, self._pointer)
+        return _uniffi_rust_call(
+            _UniffiLib.uniffi_slatedb_uniffi_fn_clone_logcallback, self._pointer
+        )
 
     # Used by alternative constructors or any methods which return this type.
     @classmethod
@@ -4264,7 +4289,7 @@ class LogCallbackImpl:
         _UniffiConverterTypeLogRecord.check_lower(record)
 
         _uniffi_rust_call(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_logcallback_log,
+            _UniffiLib.uniffi_slatedb_uniffi_fn_method_logcallback_log,
             self._uniffi_clone_pointer(),
             _UniffiConverterTypeLogRecord.lower(record),
         )
@@ -4303,7 +4328,9 @@ class _UniffiTraitImplLogCallback:
     _uniffi_vtable = _UniffiVTableCallbackInterfaceLogCallback(log, _uniffi_free)
     # Send Rust a pointer to the VTable.  Note: this means we need to keep the struct alive forever,
     # or else bad things will happen when Rust tries to access it.
-    _UniffiLib.uniffi_slatedb_ffi_fn_init_callback_vtable_logcallback(ctypes.byref(_uniffi_vtable))
+    _UniffiLib.uniffi_slatedb_uniffi_fn_init_callback_vtable_logcallback(
+        ctypes.byref(_uniffi_vtable)
+    )
 
 
 class _UniffiConverterTypeLogCallback:
@@ -4359,11 +4386,11 @@ class MergeOperatorImpl:
         # In case of partial initialization of instances.
         pointer = getattr(self, "_pointer", None)
         if pointer is not None:
-            _uniffi_rust_call(_UniffiLib.uniffi_slatedb_ffi_fn_free_mergeoperator, pointer)
+            _uniffi_rust_call(_UniffiLib.uniffi_slatedb_uniffi_fn_free_mergeoperator, pointer)
 
     def _uniffi_clone_pointer(self):
         return _uniffi_rust_call(
-            _UniffiLib.uniffi_slatedb_ffi_fn_clone_mergeoperator, self._pointer
+            _UniffiLib.uniffi_slatedb_uniffi_fn_clone_mergeoperator, self._pointer
         )
 
     # Used by alternative constructors or any methods which return this type.
@@ -4387,7 +4414,7 @@ class MergeOperatorImpl:
         return _UniffiConverterBytes.lift(
             _uniffi_rust_call_with_error(
                 _UniffiConverterTypeMergeOperatorCallbackError,
-                _UniffiLib.uniffi_slatedb_ffi_fn_method_mergeoperator_merge,
+                _UniffiLib.uniffi_slatedb_uniffi_fn_method_mergeoperator_merge,
                 self._uniffi_clone_pointer(),
                 _UniffiConverterBytes.lower(key),
                 _UniffiConverterOptionalBytes.lower(existing_value),
@@ -4439,7 +4466,7 @@ class _UniffiTraitImplMergeOperator:
     _uniffi_vtable = _UniffiVTableCallbackInterfaceMergeOperator(merge, _uniffi_free)
     # Send Rust a pointer to the VTable.  Note: this means we need to keep the struct alive forever,
     # or else bad things will happen when Rust tries to access it.
-    _UniffiLib.uniffi_slatedb_ffi_fn_init_callback_vtable_mergeoperator(
+    _UniffiLib.uniffi_slatedb_uniffi_fn_init_callback_vtable_mergeoperator(
         ctypes.byref(_uniffi_vtable)
     )
 
@@ -4571,10 +4598,10 @@ class Db:
         # In case of partial initialization of instances.
         pointer = getattr(self, "_pointer", None)
         if pointer is not None:
-            _uniffi_rust_call(_UniffiLib.uniffi_slatedb_ffi_fn_free_db, pointer)
+            _uniffi_rust_call(_UniffiLib.uniffi_slatedb_uniffi_fn_free_db, pointer)
 
     def _uniffi_clone_pointer(self):
-        return _uniffi_rust_call(_UniffiLib.uniffi_slatedb_ffi_fn_clone_db, self._pointer)
+        return _uniffi_rust_call(_UniffiLib.uniffi_slatedb_uniffi_fn_clone_db, self._pointer)
 
     # Used by alternative constructors or any methods which return this type.
     @classmethod
@@ -4589,13 +4616,13 @@ class Db:
         _UniffiConverterTypeIsolationLevel.check_lower(isolation_level)
 
         return await _uniffi_rust_call_async(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_db_begin(
+            _UniffiLib.uniffi_slatedb_uniffi_fn_method_db_begin(
                 self._uniffi_clone_pointer(),
                 _UniffiConverterTypeIsolationLevel.lower(isolation_level),
             ),
-            _UniffiLib.ffi_slatedb_ffi_rust_future_poll_pointer,
-            _UniffiLib.ffi_slatedb_ffi_rust_future_complete_pointer,
-            _UniffiLib.ffi_slatedb_ffi_rust_future_free_pointer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_poll_pointer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_complete_pointer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_free_pointer,
             # lift function
             _UniffiConverterTypeDbTransaction.lift,
             # Error FFI converter
@@ -4606,12 +4633,12 @@ class Db:
         _UniffiConverterBytes.check_lower(key)
 
         return await _uniffi_rust_call_async(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_db_delete(
+            _UniffiLib.uniffi_slatedb_uniffi_fn_method_db_delete(
                 self._uniffi_clone_pointer(), _UniffiConverterBytes.lower(key)
             ),
-            _UniffiLib.ffi_slatedb_ffi_rust_future_poll_rust_buffer,
-            _UniffiLib.ffi_slatedb_ffi_rust_future_complete_rust_buffer,
-            _UniffiLib.ffi_slatedb_ffi_rust_future_free_rust_buffer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_poll_rust_buffer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_complete_rust_buffer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_free_rust_buffer,
             # lift function
             _UniffiConverterTypeWriteHandle.lift,
             # Error FFI converter
@@ -4624,14 +4651,14 @@ class Db:
         _UniffiConverterTypeWriteOptions.check_lower(options)
 
         return await _uniffi_rust_call_async(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_db_delete_with_options(
+            _UniffiLib.uniffi_slatedb_uniffi_fn_method_db_delete_with_options(
                 self._uniffi_clone_pointer(),
                 _UniffiConverterBytes.lower(key),
                 _UniffiConverterTypeWriteOptions.lower(options),
             ),
-            _UniffiLib.ffi_slatedb_ffi_rust_future_poll_rust_buffer,
-            _UniffiLib.ffi_slatedb_ffi_rust_future_complete_rust_buffer,
-            _UniffiLib.ffi_slatedb_ffi_rust_future_free_rust_buffer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_poll_rust_buffer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_complete_rust_buffer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_free_rust_buffer,
             # lift function
             _UniffiConverterTypeWriteHandle.lift,
             # Error FFI converter
@@ -4643,12 +4670,12 @@ class Db:
     ) -> None:
 
         return await _uniffi_rust_call_async(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_db_flush(
+            _UniffiLib.uniffi_slatedb_uniffi_fn_method_db_flush(
                 self._uniffi_clone_pointer(),
             ),
-            _UniffiLib.ffi_slatedb_ffi_rust_future_poll_void,
-            _UniffiLib.ffi_slatedb_ffi_rust_future_complete_void,
-            _UniffiLib.ffi_slatedb_ffi_rust_future_free_void,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_poll_void,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_complete_void,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_free_void,
             # lift function
             lambda val: None,
             # Error FFI converter
@@ -4660,12 +4687,12 @@ class Db:
         _UniffiConverterTypeFlushOptions.check_lower(options)
 
         return await _uniffi_rust_call_async(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_db_flush_with_options(
+            _UniffiLib.uniffi_slatedb_uniffi_fn_method_db_flush_with_options(
                 self._uniffi_clone_pointer(), _UniffiConverterTypeFlushOptions.lower(options)
             ),
-            _UniffiLib.ffi_slatedb_ffi_rust_future_poll_void,
-            _UniffiLib.ffi_slatedb_ffi_rust_future_complete_void,
-            _UniffiLib.ffi_slatedb_ffi_rust_future_free_void,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_poll_void,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_complete_void,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_free_void,
             # lift function
             lambda val: None,
             # Error FFI converter
@@ -4676,12 +4703,12 @@ class Db:
         _UniffiConverterBytes.check_lower(key)
 
         return await _uniffi_rust_call_async(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_db_get(
+            _UniffiLib.uniffi_slatedb_uniffi_fn_method_db_get(
                 self._uniffi_clone_pointer(), _UniffiConverterBytes.lower(key)
             ),
-            _UniffiLib.ffi_slatedb_ffi_rust_future_poll_rust_buffer,
-            _UniffiLib.ffi_slatedb_ffi_rust_future_complete_rust_buffer,
-            _UniffiLib.ffi_slatedb_ffi_rust_future_free_rust_buffer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_poll_rust_buffer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_complete_rust_buffer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_free_rust_buffer,
             # lift function
             _UniffiConverterOptionalBytes.lift,
             # Error FFI converter
@@ -4692,12 +4719,12 @@ class Db:
         _UniffiConverterBytes.check_lower(key)
 
         return await _uniffi_rust_call_async(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_db_get_key_value(
+            _UniffiLib.uniffi_slatedb_uniffi_fn_method_db_get_key_value(
                 self._uniffi_clone_pointer(), _UniffiConverterBytes.lower(key)
             ),
-            _UniffiLib.ffi_slatedb_ffi_rust_future_poll_rust_buffer,
-            _UniffiLib.ffi_slatedb_ffi_rust_future_complete_rust_buffer,
-            _UniffiLib.ffi_slatedb_ffi_rust_future_free_rust_buffer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_poll_rust_buffer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_complete_rust_buffer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_free_rust_buffer,
             # lift function
             _UniffiConverterOptionalTypeKeyValue.lift,
             # Error FFI converter
@@ -4712,14 +4739,14 @@ class Db:
         _UniffiConverterTypeReadOptions.check_lower(options)
 
         return await _uniffi_rust_call_async(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_db_get_key_value_with_options(
+            _UniffiLib.uniffi_slatedb_uniffi_fn_method_db_get_key_value_with_options(
                 self._uniffi_clone_pointer(),
                 _UniffiConverterBytes.lower(key),
                 _UniffiConverterTypeReadOptions.lower(options),
             ),
-            _UniffiLib.ffi_slatedb_ffi_rust_future_poll_rust_buffer,
-            _UniffiLib.ffi_slatedb_ffi_rust_future_complete_rust_buffer,
-            _UniffiLib.ffi_slatedb_ffi_rust_future_free_rust_buffer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_poll_rust_buffer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_complete_rust_buffer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_free_rust_buffer,
             # lift function
             _UniffiConverterOptionalTypeKeyValue.lift,
             # Error FFI converter
@@ -4734,14 +4761,14 @@ class Db:
         _UniffiConverterTypeReadOptions.check_lower(options)
 
         return await _uniffi_rust_call_async(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_db_get_with_options(
+            _UniffiLib.uniffi_slatedb_uniffi_fn_method_db_get_with_options(
                 self._uniffi_clone_pointer(),
                 _UniffiConverterBytes.lower(key),
                 _UniffiConverterTypeReadOptions.lower(options),
             ),
-            _UniffiLib.ffi_slatedb_ffi_rust_future_poll_rust_buffer,
-            _UniffiLib.ffi_slatedb_ffi_rust_future_complete_rust_buffer,
-            _UniffiLib.ffi_slatedb_ffi_rust_future_free_rust_buffer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_poll_rust_buffer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_complete_rust_buffer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_free_rust_buffer,
             # lift function
             _UniffiConverterOptionalBytes.lift,
             # Error FFI converter
@@ -4754,14 +4781,14 @@ class Db:
         _UniffiConverterBytes.check_lower(operand)
 
         return await _uniffi_rust_call_async(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_db_merge(
+            _UniffiLib.uniffi_slatedb_uniffi_fn_method_db_merge(
                 self._uniffi_clone_pointer(),
                 _UniffiConverterBytes.lower(key),
                 _UniffiConverterBytes.lower(operand),
             ),
-            _UniffiLib.ffi_slatedb_ffi_rust_future_poll_rust_buffer,
-            _UniffiLib.ffi_slatedb_ffi_rust_future_complete_rust_buffer,
-            _UniffiLib.ffi_slatedb_ffi_rust_future_free_rust_buffer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_poll_rust_buffer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_complete_rust_buffer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_free_rust_buffer,
             # lift function
             _UniffiConverterTypeWriteHandle.lift,
             # Error FFI converter
@@ -4784,16 +4811,16 @@ class Db:
         _UniffiConverterTypeWriteOptions.check_lower(write_options)
 
         return await _uniffi_rust_call_async(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_db_merge_with_options(
+            _UniffiLib.uniffi_slatedb_uniffi_fn_method_db_merge_with_options(
                 self._uniffi_clone_pointer(),
                 _UniffiConverterBytes.lower(key),
                 _UniffiConverterBytes.lower(operand),
                 _UniffiConverterTypeMergeOptions.lower(merge_options),
                 _UniffiConverterTypeWriteOptions.lower(write_options),
             ),
-            _UniffiLib.ffi_slatedb_ffi_rust_future_poll_rust_buffer,
-            _UniffiLib.ffi_slatedb_ffi_rust_future_complete_rust_buffer,
-            _UniffiLib.ffi_slatedb_ffi_rust_future_free_rust_buffer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_poll_rust_buffer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_complete_rust_buffer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_free_rust_buffer,
             # lift function
             _UniffiConverterTypeWriteHandle.lift,
             # Error FFI converter
@@ -4806,7 +4833,7 @@ class Db:
         return _UniffiConverterMapStringInt64.lift(
             _uniffi_rust_call_with_error(
                 _UniffiConverterTypeDbError,
-                _UniffiLib.uniffi_slatedb_ffi_fn_method_db_metrics,
+                _UniffiLib.uniffi_slatedb_uniffi_fn_method_db_metrics,
                 self._uniffi_clone_pointer(),
             )
         )
@@ -4817,14 +4844,14 @@ class Db:
         _UniffiConverterBytes.check_lower(value)
 
         return await _uniffi_rust_call_async(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_db_put(
+            _UniffiLib.uniffi_slatedb_uniffi_fn_method_db_put(
                 self._uniffi_clone_pointer(),
                 _UniffiConverterBytes.lower(key),
                 _UniffiConverterBytes.lower(value),
             ),
-            _UniffiLib.ffi_slatedb_ffi_rust_future_poll_rust_buffer,
-            _UniffiLib.ffi_slatedb_ffi_rust_future_complete_rust_buffer,
-            _UniffiLib.ffi_slatedb_ffi_rust_future_free_rust_buffer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_poll_rust_buffer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_complete_rust_buffer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_free_rust_buffer,
             # lift function
             _UniffiConverterTypeWriteHandle.lift,
             # Error FFI converter
@@ -4843,16 +4870,16 @@ class Db:
         _UniffiConverterTypeWriteOptions.check_lower(write_options)
 
         return await _uniffi_rust_call_async(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_db_put_with_options(
+            _UniffiLib.uniffi_slatedb_uniffi_fn_method_db_put_with_options(
                 self._uniffi_clone_pointer(),
                 _UniffiConverterBytes.lower(key),
                 _UniffiConverterBytes.lower(value),
                 _UniffiConverterTypePutOptions.lower(put_options),
                 _UniffiConverterTypeWriteOptions.lower(write_options),
             ),
-            _UniffiLib.ffi_slatedb_ffi_rust_future_poll_rust_buffer,
-            _UniffiLib.ffi_slatedb_ffi_rust_future_complete_rust_buffer,
-            _UniffiLib.ffi_slatedb_ffi_rust_future_free_rust_buffer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_poll_rust_buffer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_complete_rust_buffer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_free_rust_buffer,
             # lift function
             _UniffiConverterTypeWriteHandle.lift,
             # Error FFI converter
@@ -4863,12 +4890,12 @@ class Db:
         _UniffiConverterTypeKeyRange.check_lower(range)
 
         return await _uniffi_rust_call_async(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_db_scan(
+            _UniffiLib.uniffi_slatedb_uniffi_fn_method_db_scan(
                 self._uniffi_clone_pointer(), _UniffiConverterTypeKeyRange.lower(range)
             ),
-            _UniffiLib.ffi_slatedb_ffi_rust_future_poll_pointer,
-            _UniffiLib.ffi_slatedb_ffi_rust_future_complete_pointer,
-            _UniffiLib.ffi_slatedb_ffi_rust_future_free_pointer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_poll_pointer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_complete_pointer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_free_pointer,
             # lift function
             _UniffiConverterTypeDbIterator.lift,
             # Error FFI converter
@@ -4879,12 +4906,12 @@ class Db:
         _UniffiConverterBytes.check_lower(prefix)
 
         return await _uniffi_rust_call_async(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_db_scan_prefix(
+            _UniffiLib.uniffi_slatedb_uniffi_fn_method_db_scan_prefix(
                 self._uniffi_clone_pointer(), _UniffiConverterBytes.lower(prefix)
             ),
-            _UniffiLib.ffi_slatedb_ffi_rust_future_poll_pointer,
-            _UniffiLib.ffi_slatedb_ffi_rust_future_complete_pointer,
-            _UniffiLib.ffi_slatedb_ffi_rust_future_free_pointer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_poll_pointer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_complete_pointer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_free_pointer,
             # lift function
             _UniffiConverterTypeDbIterator.lift,
             # Error FFI converter
@@ -4899,14 +4926,14 @@ class Db:
         _UniffiConverterTypeScanOptions.check_lower(options)
 
         return await _uniffi_rust_call_async(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_db_scan_prefix_with_options(
+            _UniffiLib.uniffi_slatedb_uniffi_fn_method_db_scan_prefix_with_options(
                 self._uniffi_clone_pointer(),
                 _UniffiConverterBytes.lower(prefix),
                 _UniffiConverterTypeScanOptions.lower(options),
             ),
-            _UniffiLib.ffi_slatedb_ffi_rust_future_poll_pointer,
-            _UniffiLib.ffi_slatedb_ffi_rust_future_complete_pointer,
-            _UniffiLib.ffi_slatedb_ffi_rust_future_free_pointer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_poll_pointer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_complete_pointer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_free_pointer,
             # lift function
             _UniffiConverterTypeDbIterator.lift,
             # Error FFI converter
@@ -4919,14 +4946,14 @@ class Db:
         _UniffiConverterTypeScanOptions.check_lower(options)
 
         return await _uniffi_rust_call_async(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_db_scan_with_options(
+            _UniffiLib.uniffi_slatedb_uniffi_fn_method_db_scan_with_options(
                 self._uniffi_clone_pointer(),
                 _UniffiConverterTypeKeyRange.lower(range),
                 _UniffiConverterTypeScanOptions.lower(options),
             ),
-            _UniffiLib.ffi_slatedb_ffi_rust_future_poll_pointer,
-            _UniffiLib.ffi_slatedb_ffi_rust_future_complete_pointer,
-            _UniffiLib.ffi_slatedb_ffi_rust_future_free_pointer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_poll_pointer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_complete_pointer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_free_pointer,
             # lift function
             _UniffiConverterTypeDbIterator.lift,
             # Error FFI converter
@@ -4938,12 +4965,12 @@ class Db:
     ) -> None:
 
         return await _uniffi_rust_call_async(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_db_shutdown(
+            _UniffiLib.uniffi_slatedb_uniffi_fn_method_db_shutdown(
                 self._uniffi_clone_pointer(),
             ),
-            _UniffiLib.ffi_slatedb_ffi_rust_future_poll_void,
-            _UniffiLib.ffi_slatedb_ffi_rust_future_complete_void,
-            _UniffiLib.ffi_slatedb_ffi_rust_future_free_void,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_poll_void,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_complete_void,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_free_void,
             # lift function
             lambda val: None,
             # Error FFI converter
@@ -4954,12 +4981,12 @@ class Db:
         self,
     ) -> "DbSnapshot":
         return await _uniffi_rust_call_async(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_db_snapshot(
+            _UniffiLib.uniffi_slatedb_uniffi_fn_method_db_snapshot(
                 self._uniffi_clone_pointer(),
             ),
-            _UniffiLib.ffi_slatedb_ffi_rust_future_poll_pointer,
-            _UniffiLib.ffi_slatedb_ffi_rust_future_complete_pointer,
-            _UniffiLib.ffi_slatedb_ffi_rust_future_free_pointer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_poll_pointer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_complete_pointer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_free_pointer,
             # lift function
             _UniffiConverterTypeDbSnapshot.lift,
             # Error FFI converter
@@ -4971,7 +4998,7 @@ class Db:
     ) -> None:
         _uniffi_rust_call_with_error(
             _UniffiConverterTypeDbError,
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_db_status,
+            _UniffiLib.uniffi_slatedb_uniffi_fn_method_db_status,
             self._uniffi_clone_pointer(),
         )
 
@@ -4979,12 +5006,12 @@ class Db:
         _UniffiConverterTypeWriteBatch.check_lower(batch)
 
         return await _uniffi_rust_call_async(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_db_write(
+            _UniffiLib.uniffi_slatedb_uniffi_fn_method_db_write(
                 self._uniffi_clone_pointer(), _UniffiConverterTypeWriteBatch.lower(batch)
             ),
-            _UniffiLib.ffi_slatedb_ffi_rust_future_poll_rust_buffer,
-            _UniffiLib.ffi_slatedb_ffi_rust_future_complete_rust_buffer,
-            _UniffiLib.ffi_slatedb_ffi_rust_future_free_rust_buffer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_poll_rust_buffer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_complete_rust_buffer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_free_rust_buffer,
             # lift function
             _UniffiConverterTypeWriteHandle.lift,
             # Error FFI converter
@@ -4999,14 +5026,14 @@ class Db:
         _UniffiConverterTypeWriteOptions.check_lower(options)
 
         return await _uniffi_rust_call_async(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_db_write_with_options(
+            _UniffiLib.uniffi_slatedb_uniffi_fn_method_db_write_with_options(
                 self._uniffi_clone_pointer(),
                 _UniffiConverterTypeWriteBatch.lower(batch),
                 _UniffiConverterTypeWriteOptions.lower(options),
             ),
-            _UniffiLib.ffi_slatedb_ffi_rust_future_poll_rust_buffer,
-            _UniffiLib.ffi_slatedb_ffi_rust_future_complete_rust_buffer,
-            _UniffiLib.ffi_slatedb_ffi_rust_future_free_rust_buffer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_poll_rust_buffer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_complete_rust_buffer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_free_rust_buffer,
             # lift function
             _UniffiConverterTypeWriteHandle.lift,
             # Error FFI converter
@@ -5079,7 +5106,7 @@ class DbBuilder:
         _UniffiConverterTypeObjectStore.check_lower(object_store)
 
         self._pointer = _uniffi_rust_call(
-            _UniffiLib.uniffi_slatedb_ffi_fn_constructor_dbbuilder_new,
+            _UniffiLib.uniffi_slatedb_uniffi_fn_constructor_dbbuilder_new,
             _UniffiConverterString.lower(path),
             _UniffiConverterTypeObjectStore.lower(object_store),
         )
@@ -5088,10 +5115,10 @@ class DbBuilder:
         # In case of partial initialization of instances.
         pointer = getattr(self, "_pointer", None)
         if pointer is not None:
-            _uniffi_rust_call(_UniffiLib.uniffi_slatedb_ffi_fn_free_dbbuilder, pointer)
+            _uniffi_rust_call(_UniffiLib.uniffi_slatedb_uniffi_fn_free_dbbuilder, pointer)
 
     def _uniffi_clone_pointer(self):
-        return _uniffi_rust_call(_UniffiLib.uniffi_slatedb_ffi_fn_clone_dbbuilder, self._pointer)
+        return _uniffi_rust_call(_UniffiLib.uniffi_slatedb_uniffi_fn_clone_dbbuilder, self._pointer)
 
     # Used by alternative constructors or any methods which return this type.
     @classmethod
@@ -5106,12 +5133,12 @@ class DbBuilder:
         self,
     ) -> "Db":
         return await _uniffi_rust_call_async(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_dbbuilder_build(
+            _UniffiLib.uniffi_slatedb_uniffi_fn_method_dbbuilder_build(
                 self._uniffi_clone_pointer(),
             ),
-            _UniffiLib.ffi_slatedb_ffi_rust_future_poll_pointer,
-            _UniffiLib.ffi_slatedb_ffi_rust_future_complete_pointer,
-            _UniffiLib.ffi_slatedb_ffi_rust_future_free_pointer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_poll_pointer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_complete_pointer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_free_pointer,
             # lift function
             _UniffiConverterTypeDb.lift,
             # Error FFI converter
@@ -5123,7 +5150,7 @@ class DbBuilder:
     ) -> None:
         _uniffi_rust_call_with_error(
             _UniffiConverterTypeDbError,
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_dbbuilder_with_db_cache_disabled,
+            _UniffiLib.uniffi_slatedb_uniffi_fn_method_dbbuilder_with_db_cache_disabled,
             self._uniffi_clone_pointer(),
         )
 
@@ -5132,7 +5159,7 @@ class DbBuilder:
 
         _uniffi_rust_call_with_error(
             _UniffiConverterTypeDbError,
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_dbbuilder_with_merge_operator,
+            _UniffiLib.uniffi_slatedb_uniffi_fn_method_dbbuilder_with_merge_operator,
             self._uniffi_clone_pointer(),
             _UniffiConverterTypeMergeOperator.lower(merge_operator),
         )
@@ -5142,7 +5169,7 @@ class DbBuilder:
 
         _uniffi_rust_call_with_error(
             _UniffiConverterTypeDbError,
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_dbbuilder_with_seed,
+            _UniffiLib.uniffi_slatedb_uniffi_fn_method_dbbuilder_with_seed,
             self._uniffi_clone_pointer(),
             _UniffiConverterUInt64.lower(seed),
         )
@@ -5152,7 +5179,7 @@ class DbBuilder:
 
         _uniffi_rust_call_with_error(
             _UniffiConverterTypeDbError,
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_dbbuilder_with_settings,
+            _UniffiLib.uniffi_slatedb_uniffi_fn_method_dbbuilder_with_settings,
             self._uniffi_clone_pointer(),
             _UniffiConverterTypeSettings.lower(settings),
         )
@@ -5162,7 +5189,7 @@ class DbBuilder:
 
         _uniffi_rust_call_with_error(
             _UniffiConverterTypeDbError,
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_dbbuilder_with_sst_block_size,
+            _UniffiLib.uniffi_slatedb_uniffi_fn_method_dbbuilder_with_sst_block_size,
             self._uniffi_clone_pointer(),
             _UniffiConverterTypeSstBlockSize.lower(sst_block_size),
         )
@@ -5172,7 +5199,7 @@ class DbBuilder:
 
         _uniffi_rust_call_with_error(
             _UniffiConverterTypeDbError,
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_dbbuilder_with_wal_object_store,
+            _UniffiLib.uniffi_slatedb_uniffi_fn_method_dbbuilder_with_wal_object_store,
             self._uniffi_clone_pointer(),
             _UniffiConverterTypeObjectStore.lower(wal_object_store),
         )
@@ -5227,10 +5254,12 @@ class DbIterator:
         # In case of partial initialization of instances.
         pointer = getattr(self, "_pointer", None)
         if pointer is not None:
-            _uniffi_rust_call(_UniffiLib.uniffi_slatedb_ffi_fn_free_dbiterator, pointer)
+            _uniffi_rust_call(_UniffiLib.uniffi_slatedb_uniffi_fn_free_dbiterator, pointer)
 
     def _uniffi_clone_pointer(self):
-        return _uniffi_rust_call(_UniffiLib.uniffi_slatedb_ffi_fn_clone_dbiterator, self._pointer)
+        return _uniffi_rust_call(
+            _UniffiLib.uniffi_slatedb_uniffi_fn_clone_dbiterator, self._pointer
+        )
 
     # Used by alternative constructors or any methods which return this type.
     @classmethod
@@ -5245,12 +5274,12 @@ class DbIterator:
         self,
     ) -> "typing.Optional[KeyValue]":
         return await _uniffi_rust_call_async(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_dbiterator_next(
+            _UniffiLib.uniffi_slatedb_uniffi_fn_method_dbiterator_next(
                 self._uniffi_clone_pointer(),
             ),
-            _UniffiLib.ffi_slatedb_ffi_rust_future_poll_rust_buffer,
-            _UniffiLib.ffi_slatedb_ffi_rust_future_complete_rust_buffer,
-            _UniffiLib.ffi_slatedb_ffi_rust_future_free_rust_buffer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_poll_rust_buffer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_complete_rust_buffer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_free_rust_buffer,
             # lift function
             _UniffiConverterOptionalTypeKeyValue.lift,
             # Error FFI converter
@@ -5262,12 +5291,12 @@ class DbIterator:
         _UniffiConverterBytes.check_lower(key)
 
         return await _uniffi_rust_call_async(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_dbiterator_seek(
+            _UniffiLib.uniffi_slatedb_uniffi_fn_method_dbiterator_seek(
                 self._uniffi_clone_pointer(), _UniffiConverterBytes.lower(key)
             ),
-            _UniffiLib.ffi_slatedb_ffi_rust_future_poll_void,
-            _UniffiLib.ffi_slatedb_ffi_rust_future_complete_void,
-            _UniffiLib.ffi_slatedb_ffi_rust_future_free_void,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_poll_void,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_complete_void,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_free_void,
             # lift function
             lambda val: None,
             # Error FFI converter
@@ -5339,10 +5368,10 @@ class DbReader:
         # In case of partial initialization of instances.
         pointer = getattr(self, "_pointer", None)
         if pointer is not None:
-            _uniffi_rust_call(_UniffiLib.uniffi_slatedb_ffi_fn_free_dbreader, pointer)
+            _uniffi_rust_call(_UniffiLib.uniffi_slatedb_uniffi_fn_free_dbreader, pointer)
 
     def _uniffi_clone_pointer(self):
-        return _uniffi_rust_call(_UniffiLib.uniffi_slatedb_ffi_fn_clone_dbreader, self._pointer)
+        return _uniffi_rust_call(_UniffiLib.uniffi_slatedb_uniffi_fn_clone_dbreader, self._pointer)
 
     # Used by alternative constructors or any methods which return this type.
     @classmethod
@@ -5357,12 +5386,12 @@ class DbReader:
         _UniffiConverterBytes.check_lower(key)
 
         return await _uniffi_rust_call_async(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_dbreader_get(
+            _UniffiLib.uniffi_slatedb_uniffi_fn_method_dbreader_get(
                 self._uniffi_clone_pointer(), _UniffiConverterBytes.lower(key)
             ),
-            _UniffiLib.ffi_slatedb_ffi_rust_future_poll_rust_buffer,
-            _UniffiLib.ffi_slatedb_ffi_rust_future_complete_rust_buffer,
-            _UniffiLib.ffi_slatedb_ffi_rust_future_free_rust_buffer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_poll_rust_buffer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_complete_rust_buffer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_free_rust_buffer,
             # lift function
             _UniffiConverterOptionalBytes.lift,
             # Error FFI converter
@@ -5377,14 +5406,14 @@ class DbReader:
         _UniffiConverterTypeReadOptions.check_lower(options)
 
         return await _uniffi_rust_call_async(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_dbreader_get_with_options(
+            _UniffiLib.uniffi_slatedb_uniffi_fn_method_dbreader_get_with_options(
                 self._uniffi_clone_pointer(),
                 _UniffiConverterBytes.lower(key),
                 _UniffiConverterTypeReadOptions.lower(options),
             ),
-            _UniffiLib.ffi_slatedb_ffi_rust_future_poll_rust_buffer,
-            _UniffiLib.ffi_slatedb_ffi_rust_future_complete_rust_buffer,
-            _UniffiLib.ffi_slatedb_ffi_rust_future_free_rust_buffer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_poll_rust_buffer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_complete_rust_buffer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_free_rust_buffer,
             # lift function
             _UniffiConverterOptionalBytes.lift,
             # Error FFI converter
@@ -5395,12 +5424,12 @@ class DbReader:
         _UniffiConverterTypeKeyRange.check_lower(range)
 
         return await _uniffi_rust_call_async(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_dbreader_scan(
+            _UniffiLib.uniffi_slatedb_uniffi_fn_method_dbreader_scan(
                 self._uniffi_clone_pointer(), _UniffiConverterTypeKeyRange.lower(range)
             ),
-            _UniffiLib.ffi_slatedb_ffi_rust_future_poll_pointer,
-            _UniffiLib.ffi_slatedb_ffi_rust_future_complete_pointer,
-            _UniffiLib.ffi_slatedb_ffi_rust_future_free_pointer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_poll_pointer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_complete_pointer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_free_pointer,
             # lift function
             _UniffiConverterTypeDbIterator.lift,
             # Error FFI converter
@@ -5411,12 +5440,12 @@ class DbReader:
         _UniffiConverterBytes.check_lower(prefix)
 
         return await _uniffi_rust_call_async(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_dbreader_scan_prefix(
+            _UniffiLib.uniffi_slatedb_uniffi_fn_method_dbreader_scan_prefix(
                 self._uniffi_clone_pointer(), _UniffiConverterBytes.lower(prefix)
             ),
-            _UniffiLib.ffi_slatedb_ffi_rust_future_poll_pointer,
-            _UniffiLib.ffi_slatedb_ffi_rust_future_complete_pointer,
-            _UniffiLib.ffi_slatedb_ffi_rust_future_free_pointer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_poll_pointer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_complete_pointer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_free_pointer,
             # lift function
             _UniffiConverterTypeDbIterator.lift,
             # Error FFI converter
@@ -5431,14 +5460,14 @@ class DbReader:
         _UniffiConverterTypeScanOptions.check_lower(options)
 
         return await _uniffi_rust_call_async(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_dbreader_scan_prefix_with_options(
+            _UniffiLib.uniffi_slatedb_uniffi_fn_method_dbreader_scan_prefix_with_options(
                 self._uniffi_clone_pointer(),
                 _UniffiConverterBytes.lower(prefix),
                 _UniffiConverterTypeScanOptions.lower(options),
             ),
-            _UniffiLib.ffi_slatedb_ffi_rust_future_poll_pointer,
-            _UniffiLib.ffi_slatedb_ffi_rust_future_complete_pointer,
-            _UniffiLib.ffi_slatedb_ffi_rust_future_free_pointer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_poll_pointer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_complete_pointer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_free_pointer,
             # lift function
             _UniffiConverterTypeDbIterator.lift,
             # Error FFI converter
@@ -5451,14 +5480,14 @@ class DbReader:
         _UniffiConverterTypeScanOptions.check_lower(options)
 
         return await _uniffi_rust_call_async(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_dbreader_scan_with_options(
+            _UniffiLib.uniffi_slatedb_uniffi_fn_method_dbreader_scan_with_options(
                 self._uniffi_clone_pointer(),
                 _UniffiConverterTypeKeyRange.lower(range),
                 _UniffiConverterTypeScanOptions.lower(options),
             ),
-            _UniffiLib.ffi_slatedb_ffi_rust_future_poll_pointer,
-            _UniffiLib.ffi_slatedb_ffi_rust_future_complete_pointer,
-            _UniffiLib.ffi_slatedb_ffi_rust_future_free_pointer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_poll_pointer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_complete_pointer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_free_pointer,
             # lift function
             _UniffiConverterTypeDbIterator.lift,
             # Error FFI converter
@@ -5470,12 +5499,12 @@ class DbReader:
     ) -> None:
 
         return await _uniffi_rust_call_async(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_dbreader_shutdown(
+            _UniffiLib.uniffi_slatedb_uniffi_fn_method_dbreader_shutdown(
                 self._uniffi_clone_pointer(),
             ),
-            _UniffiLib.ffi_slatedb_ffi_rust_future_poll_void,
-            _UniffiLib.ffi_slatedb_ffi_rust_future_complete_void,
-            _UniffiLib.ffi_slatedb_ffi_rust_future_free_void,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_poll_void,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_complete_void,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_free_void,
             # lift function
             lambda val: None,
             # Error FFI converter
@@ -5540,7 +5569,7 @@ class DbReaderBuilder:
         _UniffiConverterTypeObjectStore.check_lower(object_store)
 
         self._pointer = _uniffi_rust_call(
-            _UniffiLib.uniffi_slatedb_ffi_fn_constructor_dbreaderbuilder_new,
+            _UniffiLib.uniffi_slatedb_uniffi_fn_constructor_dbreaderbuilder_new,
             _UniffiConverterString.lower(path),
             _UniffiConverterTypeObjectStore.lower(object_store),
         )
@@ -5549,11 +5578,11 @@ class DbReaderBuilder:
         # In case of partial initialization of instances.
         pointer = getattr(self, "_pointer", None)
         if pointer is not None:
-            _uniffi_rust_call(_UniffiLib.uniffi_slatedb_ffi_fn_free_dbreaderbuilder, pointer)
+            _uniffi_rust_call(_UniffiLib.uniffi_slatedb_uniffi_fn_free_dbreaderbuilder, pointer)
 
     def _uniffi_clone_pointer(self):
         return _uniffi_rust_call(
-            _UniffiLib.uniffi_slatedb_ffi_fn_clone_dbreaderbuilder, self._pointer
+            _UniffiLib.uniffi_slatedb_uniffi_fn_clone_dbreaderbuilder, self._pointer
         )
 
     # Used by alternative constructors or any methods which return this type.
@@ -5569,12 +5598,12 @@ class DbReaderBuilder:
         self,
     ) -> "DbReader":
         return await _uniffi_rust_call_async(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_dbreaderbuilder_build(
+            _UniffiLib.uniffi_slatedb_uniffi_fn_method_dbreaderbuilder_build(
                 self._uniffi_clone_pointer(),
             ),
-            _UniffiLib.ffi_slatedb_ffi_rust_future_poll_pointer,
-            _UniffiLib.ffi_slatedb_ffi_rust_future_complete_pointer,
-            _UniffiLib.ffi_slatedb_ffi_rust_future_free_pointer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_poll_pointer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_complete_pointer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_free_pointer,
             # lift function
             _UniffiConverterTypeDbReader.lift,
             # Error FFI converter
@@ -5586,7 +5615,7 @@ class DbReaderBuilder:
 
         _uniffi_rust_call_with_error(
             _UniffiConverterTypeDbError,
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_dbreaderbuilder_with_checkpoint_id,
+            _UniffiLib.uniffi_slatedb_uniffi_fn_method_dbreaderbuilder_with_checkpoint_id,
             self._uniffi_clone_pointer(),
             _UniffiConverterString.lower(checkpoint_id),
         )
@@ -5596,7 +5625,7 @@ class DbReaderBuilder:
 
         _uniffi_rust_call_with_error(
             _UniffiConverterTypeDbError,
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_dbreaderbuilder_with_merge_operator,
+            _UniffiLib.uniffi_slatedb_uniffi_fn_method_dbreaderbuilder_with_merge_operator,
             self._uniffi_clone_pointer(),
             _UniffiConverterTypeMergeOperator.lower(merge_operator),
         )
@@ -5606,7 +5635,7 @@ class DbReaderBuilder:
 
         _uniffi_rust_call_with_error(
             _UniffiConverterTypeDbError,
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_dbreaderbuilder_with_options,
+            _UniffiLib.uniffi_slatedb_uniffi_fn_method_dbreaderbuilder_with_options,
             self._uniffi_clone_pointer(),
             _UniffiConverterTypeReaderOptions.lower(options),
         )
@@ -5616,7 +5645,7 @@ class DbReaderBuilder:
 
         _uniffi_rust_call_with_error(
             _UniffiConverterTypeDbError,
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_dbreaderbuilder_with_wal_object_store,
+            _UniffiLib.uniffi_slatedb_uniffi_fn_method_dbreaderbuilder_with_wal_object_store,
             self._uniffi_clone_pointer(),
             _UniffiConverterTypeObjectStore.lower(wal_object_store),
         )
@@ -5691,10 +5720,12 @@ class DbSnapshot:
         # In case of partial initialization of instances.
         pointer = getattr(self, "_pointer", None)
         if pointer is not None:
-            _uniffi_rust_call(_UniffiLib.uniffi_slatedb_ffi_fn_free_dbsnapshot, pointer)
+            _uniffi_rust_call(_UniffiLib.uniffi_slatedb_uniffi_fn_free_dbsnapshot, pointer)
 
     def _uniffi_clone_pointer(self):
-        return _uniffi_rust_call(_UniffiLib.uniffi_slatedb_ffi_fn_clone_dbsnapshot, self._pointer)
+        return _uniffi_rust_call(
+            _UniffiLib.uniffi_slatedb_uniffi_fn_clone_dbsnapshot, self._pointer
+        )
 
     # Used by alternative constructors or any methods which return this type.
     @classmethod
@@ -5709,12 +5740,12 @@ class DbSnapshot:
         _UniffiConverterBytes.check_lower(key)
 
         return await _uniffi_rust_call_async(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_dbsnapshot_get(
+            _UniffiLib.uniffi_slatedb_uniffi_fn_method_dbsnapshot_get(
                 self._uniffi_clone_pointer(), _UniffiConverterBytes.lower(key)
             ),
-            _UniffiLib.ffi_slatedb_ffi_rust_future_poll_rust_buffer,
-            _UniffiLib.ffi_slatedb_ffi_rust_future_complete_rust_buffer,
-            _UniffiLib.ffi_slatedb_ffi_rust_future_free_rust_buffer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_poll_rust_buffer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_complete_rust_buffer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_free_rust_buffer,
             # lift function
             _UniffiConverterOptionalBytes.lift,
             # Error FFI converter
@@ -5725,12 +5756,12 @@ class DbSnapshot:
         _UniffiConverterBytes.check_lower(key)
 
         return await _uniffi_rust_call_async(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_dbsnapshot_get_key_value(
+            _UniffiLib.uniffi_slatedb_uniffi_fn_method_dbsnapshot_get_key_value(
                 self._uniffi_clone_pointer(), _UniffiConverterBytes.lower(key)
             ),
-            _UniffiLib.ffi_slatedb_ffi_rust_future_poll_rust_buffer,
-            _UniffiLib.ffi_slatedb_ffi_rust_future_complete_rust_buffer,
-            _UniffiLib.ffi_slatedb_ffi_rust_future_free_rust_buffer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_poll_rust_buffer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_complete_rust_buffer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_free_rust_buffer,
             # lift function
             _UniffiConverterOptionalTypeKeyValue.lift,
             # Error FFI converter
@@ -5745,14 +5776,14 @@ class DbSnapshot:
         _UniffiConverterTypeReadOptions.check_lower(options)
 
         return await _uniffi_rust_call_async(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_dbsnapshot_get_key_value_with_options(
+            _UniffiLib.uniffi_slatedb_uniffi_fn_method_dbsnapshot_get_key_value_with_options(
                 self._uniffi_clone_pointer(),
                 _UniffiConverterBytes.lower(key),
                 _UniffiConverterTypeReadOptions.lower(options),
             ),
-            _UniffiLib.ffi_slatedb_ffi_rust_future_poll_rust_buffer,
-            _UniffiLib.ffi_slatedb_ffi_rust_future_complete_rust_buffer,
-            _UniffiLib.ffi_slatedb_ffi_rust_future_free_rust_buffer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_poll_rust_buffer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_complete_rust_buffer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_free_rust_buffer,
             # lift function
             _UniffiConverterOptionalTypeKeyValue.lift,
             # Error FFI converter
@@ -5767,14 +5798,14 @@ class DbSnapshot:
         _UniffiConverterTypeReadOptions.check_lower(options)
 
         return await _uniffi_rust_call_async(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_dbsnapshot_get_with_options(
+            _UniffiLib.uniffi_slatedb_uniffi_fn_method_dbsnapshot_get_with_options(
                 self._uniffi_clone_pointer(),
                 _UniffiConverterBytes.lower(key),
                 _UniffiConverterTypeReadOptions.lower(options),
             ),
-            _UniffiLib.ffi_slatedb_ffi_rust_future_poll_rust_buffer,
-            _UniffiLib.ffi_slatedb_ffi_rust_future_complete_rust_buffer,
-            _UniffiLib.ffi_slatedb_ffi_rust_future_free_rust_buffer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_poll_rust_buffer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_complete_rust_buffer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_free_rust_buffer,
             # lift function
             _UniffiConverterOptionalBytes.lift,
             # Error FFI converter
@@ -5785,12 +5816,12 @@ class DbSnapshot:
         _UniffiConverterTypeKeyRange.check_lower(range)
 
         return await _uniffi_rust_call_async(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_dbsnapshot_scan(
+            _UniffiLib.uniffi_slatedb_uniffi_fn_method_dbsnapshot_scan(
                 self._uniffi_clone_pointer(), _UniffiConverterTypeKeyRange.lower(range)
             ),
-            _UniffiLib.ffi_slatedb_ffi_rust_future_poll_pointer,
-            _UniffiLib.ffi_slatedb_ffi_rust_future_complete_pointer,
-            _UniffiLib.ffi_slatedb_ffi_rust_future_free_pointer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_poll_pointer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_complete_pointer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_free_pointer,
             # lift function
             _UniffiConverterTypeDbIterator.lift,
             # Error FFI converter
@@ -5801,12 +5832,12 @@ class DbSnapshot:
         _UniffiConverterBytes.check_lower(prefix)
 
         return await _uniffi_rust_call_async(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_dbsnapshot_scan_prefix(
+            _UniffiLib.uniffi_slatedb_uniffi_fn_method_dbsnapshot_scan_prefix(
                 self._uniffi_clone_pointer(), _UniffiConverterBytes.lower(prefix)
             ),
-            _UniffiLib.ffi_slatedb_ffi_rust_future_poll_pointer,
-            _UniffiLib.ffi_slatedb_ffi_rust_future_complete_pointer,
-            _UniffiLib.ffi_slatedb_ffi_rust_future_free_pointer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_poll_pointer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_complete_pointer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_free_pointer,
             # lift function
             _UniffiConverterTypeDbIterator.lift,
             # Error FFI converter
@@ -5821,14 +5852,14 @@ class DbSnapshot:
         _UniffiConverterTypeScanOptions.check_lower(options)
 
         return await _uniffi_rust_call_async(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_dbsnapshot_scan_prefix_with_options(
+            _UniffiLib.uniffi_slatedb_uniffi_fn_method_dbsnapshot_scan_prefix_with_options(
                 self._uniffi_clone_pointer(),
                 _UniffiConverterBytes.lower(prefix),
                 _UniffiConverterTypeScanOptions.lower(options),
             ),
-            _UniffiLib.ffi_slatedb_ffi_rust_future_poll_pointer,
-            _UniffiLib.ffi_slatedb_ffi_rust_future_complete_pointer,
-            _UniffiLib.ffi_slatedb_ffi_rust_future_free_pointer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_poll_pointer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_complete_pointer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_free_pointer,
             # lift function
             _UniffiConverterTypeDbIterator.lift,
             # Error FFI converter
@@ -5841,14 +5872,14 @@ class DbSnapshot:
         _UniffiConverterTypeScanOptions.check_lower(options)
 
         return await _uniffi_rust_call_async(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_dbsnapshot_scan_with_options(
+            _UniffiLib.uniffi_slatedb_uniffi_fn_method_dbsnapshot_scan_with_options(
                 self._uniffi_clone_pointer(),
                 _UniffiConverterTypeKeyRange.lower(range),
                 _UniffiConverterTypeScanOptions.lower(options),
             ),
-            _UniffiLib.ffi_slatedb_ffi_rust_future_poll_pointer,
-            _UniffiLib.ffi_slatedb_ffi_rust_future_complete_pointer,
-            _UniffiLib.ffi_slatedb_ffi_rust_future_free_pointer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_poll_pointer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_complete_pointer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_free_pointer,
             # lift function
             _UniffiConverterTypeDbIterator.lift,
             # Error FFI converter
@@ -5965,11 +5996,11 @@ class DbTransaction:
         # In case of partial initialization of instances.
         pointer = getattr(self, "_pointer", None)
         if pointer is not None:
-            _uniffi_rust_call(_UniffiLib.uniffi_slatedb_ffi_fn_free_dbtransaction, pointer)
+            _uniffi_rust_call(_UniffiLib.uniffi_slatedb_uniffi_fn_free_dbtransaction, pointer)
 
     def _uniffi_clone_pointer(self):
         return _uniffi_rust_call(
-            _UniffiLib.uniffi_slatedb_ffi_fn_clone_dbtransaction, self._pointer
+            _UniffiLib.uniffi_slatedb_uniffi_fn_clone_dbtransaction, self._pointer
         )
 
     # Used by alternative constructors or any methods which return this type.
@@ -5985,12 +6016,12 @@ class DbTransaction:
         self,
     ) -> "typing.Optional[WriteHandle]":
         return await _uniffi_rust_call_async(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_dbtransaction_commit(
+            _UniffiLib.uniffi_slatedb_uniffi_fn_method_dbtransaction_commit(
                 self._uniffi_clone_pointer(),
             ),
-            _UniffiLib.ffi_slatedb_ffi_rust_future_poll_rust_buffer,
-            _UniffiLib.ffi_slatedb_ffi_rust_future_complete_rust_buffer,
-            _UniffiLib.ffi_slatedb_ffi_rust_future_free_rust_buffer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_poll_rust_buffer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_complete_rust_buffer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_free_rust_buffer,
             # lift function
             _UniffiConverterOptionalTypeWriteHandle.lift,
             # Error FFI converter
@@ -6001,12 +6032,12 @@ class DbTransaction:
         _UniffiConverterTypeWriteOptions.check_lower(options)
 
         return await _uniffi_rust_call_async(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_dbtransaction_commit_with_options(
+            _UniffiLib.uniffi_slatedb_uniffi_fn_method_dbtransaction_commit_with_options(
                 self._uniffi_clone_pointer(), _UniffiConverterTypeWriteOptions.lower(options)
             ),
-            _UniffiLib.ffi_slatedb_ffi_rust_future_poll_rust_buffer,
-            _UniffiLib.ffi_slatedb_ffi_rust_future_complete_rust_buffer,
-            _UniffiLib.ffi_slatedb_ffi_rust_future_free_rust_buffer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_poll_rust_buffer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_complete_rust_buffer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_free_rust_buffer,
             # lift function
             _UniffiConverterOptionalTypeWriteHandle.lift,
             # Error FFI converter
@@ -6018,12 +6049,12 @@ class DbTransaction:
         _UniffiConverterBytes.check_lower(key)
 
         return await _uniffi_rust_call_async(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_dbtransaction_delete(
+            _UniffiLib.uniffi_slatedb_uniffi_fn_method_dbtransaction_delete(
                 self._uniffi_clone_pointer(), _UniffiConverterBytes.lower(key)
             ),
-            _UniffiLib.ffi_slatedb_ffi_rust_future_poll_void,
-            _UniffiLib.ffi_slatedb_ffi_rust_future_complete_void,
-            _UniffiLib.ffi_slatedb_ffi_rust_future_free_void,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_poll_void,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_complete_void,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_free_void,
             # lift function
             lambda val: None,
             # Error FFI converter
@@ -6034,12 +6065,12 @@ class DbTransaction:
         _UniffiConverterBytes.check_lower(key)
 
         return await _uniffi_rust_call_async(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_dbtransaction_get(
+            _UniffiLib.uniffi_slatedb_uniffi_fn_method_dbtransaction_get(
                 self._uniffi_clone_pointer(), _UniffiConverterBytes.lower(key)
             ),
-            _UniffiLib.ffi_slatedb_ffi_rust_future_poll_rust_buffer,
-            _UniffiLib.ffi_slatedb_ffi_rust_future_complete_rust_buffer,
-            _UniffiLib.ffi_slatedb_ffi_rust_future_free_rust_buffer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_poll_rust_buffer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_complete_rust_buffer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_free_rust_buffer,
             # lift function
             _UniffiConverterOptionalBytes.lift,
             # Error FFI converter
@@ -6050,12 +6081,12 @@ class DbTransaction:
         _UniffiConverterBytes.check_lower(key)
 
         return await _uniffi_rust_call_async(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_dbtransaction_get_key_value(
+            _UniffiLib.uniffi_slatedb_uniffi_fn_method_dbtransaction_get_key_value(
                 self._uniffi_clone_pointer(), _UniffiConverterBytes.lower(key)
             ),
-            _UniffiLib.ffi_slatedb_ffi_rust_future_poll_rust_buffer,
-            _UniffiLib.ffi_slatedb_ffi_rust_future_complete_rust_buffer,
-            _UniffiLib.ffi_slatedb_ffi_rust_future_free_rust_buffer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_poll_rust_buffer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_complete_rust_buffer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_free_rust_buffer,
             # lift function
             _UniffiConverterOptionalTypeKeyValue.lift,
             # Error FFI converter
@@ -6070,14 +6101,14 @@ class DbTransaction:
         _UniffiConverterTypeReadOptions.check_lower(options)
 
         return await _uniffi_rust_call_async(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_dbtransaction_get_key_value_with_options(
+            _UniffiLib.uniffi_slatedb_uniffi_fn_method_dbtransaction_get_key_value_with_options(
                 self._uniffi_clone_pointer(),
                 _UniffiConverterBytes.lower(key),
                 _UniffiConverterTypeReadOptions.lower(options),
             ),
-            _UniffiLib.ffi_slatedb_ffi_rust_future_poll_rust_buffer,
-            _UniffiLib.ffi_slatedb_ffi_rust_future_complete_rust_buffer,
-            _UniffiLib.ffi_slatedb_ffi_rust_future_free_rust_buffer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_poll_rust_buffer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_complete_rust_buffer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_free_rust_buffer,
             # lift function
             _UniffiConverterOptionalTypeKeyValue.lift,
             # Error FFI converter
@@ -6092,14 +6123,14 @@ class DbTransaction:
         _UniffiConverterTypeReadOptions.check_lower(options)
 
         return await _uniffi_rust_call_async(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_dbtransaction_get_with_options(
+            _UniffiLib.uniffi_slatedb_uniffi_fn_method_dbtransaction_get_with_options(
                 self._uniffi_clone_pointer(),
                 _UniffiConverterBytes.lower(key),
                 _UniffiConverterTypeReadOptions.lower(options),
             ),
-            _UniffiLib.ffi_slatedb_ffi_rust_future_poll_rust_buffer,
-            _UniffiLib.ffi_slatedb_ffi_rust_future_complete_rust_buffer,
-            _UniffiLib.ffi_slatedb_ffi_rust_future_free_rust_buffer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_poll_rust_buffer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_complete_rust_buffer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_free_rust_buffer,
             # lift function
             _UniffiConverterOptionalBytes.lift,
             # Error FFI converter
@@ -6111,7 +6142,7 @@ class DbTransaction:
     ) -> "str":
         return _UniffiConverterString.lift(
             _uniffi_rust_call(
-                _UniffiLib.uniffi_slatedb_ffi_fn_method_dbtransaction_id,
+                _UniffiLib.uniffi_slatedb_uniffi_fn_method_dbtransaction_id,
                 self._uniffi_clone_pointer(),
             )
         )
@@ -6121,12 +6152,12 @@ class DbTransaction:
         _UniffiConverterSequenceBytes.check_lower(keys)
 
         return await _uniffi_rust_call_async(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_dbtransaction_mark_read(
+            _UniffiLib.uniffi_slatedb_uniffi_fn_method_dbtransaction_mark_read(
                 self._uniffi_clone_pointer(), _UniffiConverterSequenceBytes.lower(keys)
             ),
-            _UniffiLib.ffi_slatedb_ffi_rust_future_poll_void,
-            _UniffiLib.ffi_slatedb_ffi_rust_future_complete_void,
-            _UniffiLib.ffi_slatedb_ffi_rust_future_free_void,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_poll_void,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_complete_void,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_free_void,
             # lift function
             lambda val: None,
             # Error FFI converter
@@ -6140,14 +6171,14 @@ class DbTransaction:
         _UniffiConverterBytes.check_lower(operand)
 
         return await _uniffi_rust_call_async(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_dbtransaction_merge(
+            _UniffiLib.uniffi_slatedb_uniffi_fn_method_dbtransaction_merge(
                 self._uniffi_clone_pointer(),
                 _UniffiConverterBytes.lower(key),
                 _UniffiConverterBytes.lower(operand),
             ),
-            _UniffiLib.ffi_slatedb_ffi_rust_future_poll_void,
-            _UniffiLib.ffi_slatedb_ffi_rust_future_complete_void,
-            _UniffiLib.ffi_slatedb_ffi_rust_future_free_void,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_poll_void,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_complete_void,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_free_void,
             # lift function
             lambda val: None,
             # Error FFI converter
@@ -6165,15 +6196,15 @@ class DbTransaction:
         _UniffiConverterTypeMergeOptions.check_lower(options)
 
         return await _uniffi_rust_call_async(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_dbtransaction_merge_with_options(
+            _UniffiLib.uniffi_slatedb_uniffi_fn_method_dbtransaction_merge_with_options(
                 self._uniffi_clone_pointer(),
                 _UniffiConverterBytes.lower(key),
                 _UniffiConverterBytes.lower(operand),
                 _UniffiConverterTypeMergeOptions.lower(options),
             ),
-            _UniffiLib.ffi_slatedb_ffi_rust_future_poll_void,
-            _UniffiLib.ffi_slatedb_ffi_rust_future_complete_void,
-            _UniffiLib.ffi_slatedb_ffi_rust_future_free_void,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_poll_void,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_complete_void,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_free_void,
             # lift function
             lambda val: None,
             # Error FFI converter
@@ -6187,14 +6218,14 @@ class DbTransaction:
         _UniffiConverterBytes.check_lower(value)
 
         return await _uniffi_rust_call_async(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_dbtransaction_put(
+            _UniffiLib.uniffi_slatedb_uniffi_fn_method_dbtransaction_put(
                 self._uniffi_clone_pointer(),
                 _UniffiConverterBytes.lower(key),
                 _UniffiConverterBytes.lower(value),
             ),
-            _UniffiLib.ffi_slatedb_ffi_rust_future_poll_void,
-            _UniffiLib.ffi_slatedb_ffi_rust_future_complete_void,
-            _UniffiLib.ffi_slatedb_ffi_rust_future_free_void,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_poll_void,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_complete_void,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_free_void,
             # lift function
             lambda val: None,
             # Error FFI converter
@@ -6210,15 +6241,15 @@ class DbTransaction:
         _UniffiConverterTypePutOptions.check_lower(options)
 
         return await _uniffi_rust_call_async(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_dbtransaction_put_with_options(
+            _UniffiLib.uniffi_slatedb_uniffi_fn_method_dbtransaction_put_with_options(
                 self._uniffi_clone_pointer(),
                 _UniffiConverterBytes.lower(key),
                 _UniffiConverterBytes.lower(value),
                 _UniffiConverterTypePutOptions.lower(options),
             ),
-            _UniffiLib.ffi_slatedb_ffi_rust_future_poll_void,
-            _UniffiLib.ffi_slatedb_ffi_rust_future_complete_void,
-            _UniffiLib.ffi_slatedb_ffi_rust_future_free_void,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_poll_void,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_complete_void,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_free_void,
             # lift function
             lambda val: None,
             # Error FFI converter
@@ -6230,12 +6261,12 @@ class DbTransaction:
     ) -> None:
 
         return await _uniffi_rust_call_async(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_dbtransaction_rollback(
+            _UniffiLib.uniffi_slatedb_uniffi_fn_method_dbtransaction_rollback(
                 self._uniffi_clone_pointer(),
             ),
-            _UniffiLib.ffi_slatedb_ffi_rust_future_poll_void,
-            _UniffiLib.ffi_slatedb_ffi_rust_future_complete_void,
-            _UniffiLib.ffi_slatedb_ffi_rust_future_free_void,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_poll_void,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_complete_void,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_free_void,
             # lift function
             lambda val: None,
             # Error FFI converter
@@ -6246,12 +6277,12 @@ class DbTransaction:
         _UniffiConverterTypeKeyRange.check_lower(range)
 
         return await _uniffi_rust_call_async(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_dbtransaction_scan(
+            _UniffiLib.uniffi_slatedb_uniffi_fn_method_dbtransaction_scan(
                 self._uniffi_clone_pointer(), _UniffiConverterTypeKeyRange.lower(range)
             ),
-            _UniffiLib.ffi_slatedb_ffi_rust_future_poll_pointer,
-            _UniffiLib.ffi_slatedb_ffi_rust_future_complete_pointer,
-            _UniffiLib.ffi_slatedb_ffi_rust_future_free_pointer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_poll_pointer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_complete_pointer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_free_pointer,
             # lift function
             _UniffiConverterTypeDbIterator.lift,
             # Error FFI converter
@@ -6262,12 +6293,12 @@ class DbTransaction:
         _UniffiConverterBytes.check_lower(prefix)
 
         return await _uniffi_rust_call_async(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_dbtransaction_scan_prefix(
+            _UniffiLib.uniffi_slatedb_uniffi_fn_method_dbtransaction_scan_prefix(
                 self._uniffi_clone_pointer(), _UniffiConverterBytes.lower(prefix)
             ),
-            _UniffiLib.ffi_slatedb_ffi_rust_future_poll_pointer,
-            _UniffiLib.ffi_slatedb_ffi_rust_future_complete_pointer,
-            _UniffiLib.ffi_slatedb_ffi_rust_future_free_pointer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_poll_pointer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_complete_pointer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_free_pointer,
             # lift function
             _UniffiConverterTypeDbIterator.lift,
             # Error FFI converter
@@ -6282,14 +6313,14 @@ class DbTransaction:
         _UniffiConverterTypeScanOptions.check_lower(options)
 
         return await _uniffi_rust_call_async(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_dbtransaction_scan_prefix_with_options(
+            _UniffiLib.uniffi_slatedb_uniffi_fn_method_dbtransaction_scan_prefix_with_options(
                 self._uniffi_clone_pointer(),
                 _UniffiConverterBytes.lower(prefix),
                 _UniffiConverterTypeScanOptions.lower(options),
             ),
-            _UniffiLib.ffi_slatedb_ffi_rust_future_poll_pointer,
-            _UniffiLib.ffi_slatedb_ffi_rust_future_complete_pointer,
-            _UniffiLib.ffi_slatedb_ffi_rust_future_free_pointer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_poll_pointer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_complete_pointer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_free_pointer,
             # lift function
             _UniffiConverterTypeDbIterator.lift,
             # Error FFI converter
@@ -6302,14 +6333,14 @@ class DbTransaction:
         _UniffiConverterTypeScanOptions.check_lower(options)
 
         return await _uniffi_rust_call_async(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_dbtransaction_scan_with_options(
+            _UniffiLib.uniffi_slatedb_uniffi_fn_method_dbtransaction_scan_with_options(
                 self._uniffi_clone_pointer(),
                 _UniffiConverterTypeKeyRange.lower(range),
                 _UniffiConverterTypeScanOptions.lower(options),
             ),
-            _UniffiLib.ffi_slatedb_ffi_rust_future_poll_pointer,
-            _UniffiLib.ffi_slatedb_ffi_rust_future_complete_pointer,
-            _UniffiLib.ffi_slatedb_ffi_rust_future_free_pointer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_poll_pointer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_complete_pointer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_free_pointer,
             # lift function
             _UniffiConverterTypeDbIterator.lift,
             # Error FFI converter
@@ -6321,7 +6352,7 @@ class DbTransaction:
     ) -> "int":
         return _UniffiConverterUInt64.lift(
             _uniffi_rust_call(
-                _UniffiLib.uniffi_slatedb_ffi_fn_method_dbtransaction_seqnum,
+                _UniffiLib.uniffi_slatedb_uniffi_fn_method_dbtransaction_seqnum,
                 self._uniffi_clone_pointer(),
             )
         )
@@ -6331,12 +6362,12 @@ class DbTransaction:
         _UniffiConverterSequenceBytes.check_lower(keys)
 
         return await _uniffi_rust_call_async(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_dbtransaction_unmark_write(
+            _UniffiLib.uniffi_slatedb_uniffi_fn_method_dbtransaction_unmark_write(
                 self._uniffi_clone_pointer(), _UniffiConverterSequenceBytes.lower(keys)
             ),
-            _UniffiLib.ffi_slatedb_ffi_rust_future_poll_void,
-            _UniffiLib.ffi_slatedb_ffi_rust_future_complete_void,
-            _UniffiLib.ffi_slatedb_ffi_rust_future_free_void,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_poll_void,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_complete_void,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_free_void,
             # lift function
             lambda val: None,
             # Error FFI converter
@@ -6391,10 +6422,12 @@ class ObjectStore:
         # In case of partial initialization of instances.
         pointer = getattr(self, "_pointer", None)
         if pointer is not None:
-            _uniffi_rust_call(_UniffiLib.uniffi_slatedb_ffi_fn_free_objectstore, pointer)
+            _uniffi_rust_call(_UniffiLib.uniffi_slatedb_uniffi_fn_free_objectstore, pointer)
 
     def _uniffi_clone_pointer(self):
-        return _uniffi_rust_call(_UniffiLib.uniffi_slatedb_ffi_fn_clone_objectstore, self._pointer)
+        return _uniffi_rust_call(
+            _UniffiLib.uniffi_slatedb_uniffi_fn_clone_objectstore, self._pointer
+        )
 
     # Used by alternative constructors or any methods which return this type.
     @classmethod
@@ -6412,7 +6445,7 @@ class ObjectStore:
         # Call the (fallible) function before creating any half-baked object instances.
         pointer = _uniffi_rust_call_with_error(
             _UniffiConverterTypeDbError,
-            _UniffiLib.uniffi_slatedb_ffi_fn_constructor_objectstore_from_env,
+            _UniffiLib.uniffi_slatedb_uniffi_fn_constructor_objectstore_from_env,
             _UniffiConverterOptionalString.lower(env_file),
         )
         return cls._make_instance_(pointer)
@@ -6424,7 +6457,7 @@ class ObjectStore:
         # Call the (fallible) function before creating any half-baked object instances.
         pointer = _uniffi_rust_call_with_error(
             _UniffiConverterTypeDbError,
-            _UniffiLib.uniffi_slatedb_ffi_fn_constructor_objectstore_resolve,
+            _UniffiLib.uniffi_slatedb_uniffi_fn_constructor_objectstore_resolve,
             _UniffiConverterString.lower(url),
         )
         return cls._make_instance_(pointer)
@@ -6505,10 +6538,10 @@ class Settings:
         # In case of partial initialization of instances.
         pointer = getattr(self, "_pointer", None)
         if pointer is not None:
-            _uniffi_rust_call(_UniffiLib.uniffi_slatedb_ffi_fn_free_settings, pointer)
+            _uniffi_rust_call(_UniffiLib.uniffi_slatedb_uniffi_fn_free_settings, pointer)
 
     def _uniffi_clone_pointer(self):
-        return _uniffi_rust_call(_UniffiLib.uniffi_slatedb_ffi_fn_clone_settings, self._pointer)
+        return _uniffi_rust_call(_UniffiLib.uniffi_slatedb_uniffi_fn_clone_settings, self._pointer)
 
     # Used by alternative constructors or any methods which return this type.
     @classmethod
@@ -6525,7 +6558,7 @@ class Settings:
     ):
         # Call the (fallible) function before creating any half-baked object instances.
         pointer = _uniffi_rust_call(
-            _UniffiLib.uniffi_slatedb_ffi_fn_constructor_settings_default,
+            _UniffiLib.uniffi_slatedb_uniffi_fn_constructor_settings_default,
         )
         return cls._make_instance_(pointer)
 
@@ -6536,7 +6569,7 @@ class Settings:
         # Call the (fallible) function before creating any half-baked object instances.
         pointer = _uniffi_rust_call_with_error(
             _UniffiConverterTypeDbError,
-            _UniffiLib.uniffi_slatedb_ffi_fn_constructor_settings_from_env,
+            _UniffiLib.uniffi_slatedb_uniffi_fn_constructor_settings_from_env,
             _UniffiConverterString.lower(prefix),
         )
         return cls._make_instance_(pointer)
@@ -6550,7 +6583,7 @@ class Settings:
         # Call the (fallible) function before creating any half-baked object instances.
         pointer = _uniffi_rust_call_with_error(
             _UniffiConverterTypeDbError,
-            _UniffiLib.uniffi_slatedb_ffi_fn_constructor_settings_from_env_with_default,
+            _UniffiLib.uniffi_slatedb_uniffi_fn_constructor_settings_from_env_with_default,
             _UniffiConverterString.lower(prefix),
             _UniffiConverterTypeSettings.lower(default_settings),
         )
@@ -6563,7 +6596,7 @@ class Settings:
         # Call the (fallible) function before creating any half-baked object instances.
         pointer = _uniffi_rust_call_with_error(
             _UniffiConverterTypeDbError,
-            _UniffiLib.uniffi_slatedb_ffi_fn_constructor_settings_from_file,
+            _UniffiLib.uniffi_slatedb_uniffi_fn_constructor_settings_from_file,
             _UniffiConverterString.lower(path),
         )
         return cls._make_instance_(pointer)
@@ -6575,7 +6608,7 @@ class Settings:
         # Call the (fallible) function before creating any half-baked object instances.
         pointer = _uniffi_rust_call_with_error(
             _UniffiConverterTypeDbError,
-            _UniffiLib.uniffi_slatedb_ffi_fn_constructor_settings_from_json_string,
+            _UniffiLib.uniffi_slatedb_uniffi_fn_constructor_settings_from_json_string,
             _UniffiConverterString.lower(json),
         )
         return cls._make_instance_(pointer)
@@ -6587,7 +6620,7 @@ class Settings:
         # Call the (fallible) function before creating any half-baked object instances.
         pointer = _uniffi_rust_call_with_error(
             _UniffiConverterTypeDbError,
-            _UniffiLib.uniffi_slatedb_ffi_fn_constructor_settings_load,
+            _UniffiLib.uniffi_slatedb_uniffi_fn_constructor_settings_load,
         )
         return cls._make_instance_(pointer)
 
@@ -6624,7 +6657,7 @@ class Settings:
 
         _uniffi_rust_call_with_error(
             _UniffiConverterTypeDbError,
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_settings_set,
+            _UniffiLib.uniffi_slatedb_uniffi_fn_method_settings_set,
             self._uniffi_clone_pointer(),
             _UniffiConverterString.lower(key),
             _UniffiConverterString.lower(value_json),
@@ -6636,7 +6669,7 @@ class Settings:
         return _UniffiConverterString.lift(
             _uniffi_rust_call_with_error(
                 _UniffiConverterTypeDbError,
-                _UniffiLib.uniffi_slatedb_ffi_fn_method_settings_to_json_string,
+                _UniffiLib.uniffi_slatedb_uniffi_fn_method_settings_to_json_string,
                 self._uniffi_clone_pointer(),
             )
         )
@@ -6713,10 +6746,10 @@ class WalFile:
         # In case of partial initialization of instances.
         pointer = getattr(self, "_pointer", None)
         if pointer is not None:
-            _uniffi_rust_call(_UniffiLib.uniffi_slatedb_ffi_fn_free_walfile, pointer)
+            _uniffi_rust_call(_UniffiLib.uniffi_slatedb_uniffi_fn_free_walfile, pointer)
 
     def _uniffi_clone_pointer(self):
-        return _uniffi_rust_call(_UniffiLib.uniffi_slatedb_ffi_fn_clone_walfile, self._pointer)
+        return _uniffi_rust_call(_UniffiLib.uniffi_slatedb_uniffi_fn_clone_walfile, self._pointer)
 
     # Used by alternative constructors or any methods which return this type.
     @classmethod
@@ -6732,7 +6765,7 @@ class WalFile:
     ) -> "int":
         return _UniffiConverterUInt64.lift(
             _uniffi_rust_call(
-                _UniffiLib.uniffi_slatedb_ffi_fn_method_walfile_id,
+                _UniffiLib.uniffi_slatedb_uniffi_fn_method_walfile_id,
                 self._uniffi_clone_pointer(),
             )
         )
@@ -6741,12 +6774,12 @@ class WalFile:
         self,
     ) -> "WalFileIterator":
         return await _uniffi_rust_call_async(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_walfile_iterator(
+            _UniffiLib.uniffi_slatedb_uniffi_fn_method_walfile_iterator(
                 self._uniffi_clone_pointer(),
             ),
-            _UniffiLib.ffi_slatedb_ffi_rust_future_poll_pointer,
-            _UniffiLib.ffi_slatedb_ffi_rust_future_complete_pointer,
-            _UniffiLib.ffi_slatedb_ffi_rust_future_free_pointer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_poll_pointer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_complete_pointer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_free_pointer,
             # lift function
             _UniffiConverterTypeWalFileIterator.lift,
             # Error FFI converter
@@ -6757,12 +6790,12 @@ class WalFile:
         self,
     ) -> "WalFileMetadata":
         return await _uniffi_rust_call_async(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_walfile_metadata(
+            _UniffiLib.uniffi_slatedb_uniffi_fn_method_walfile_metadata(
                 self._uniffi_clone_pointer(),
             ),
-            _UniffiLib.ffi_slatedb_ffi_rust_future_poll_rust_buffer,
-            _UniffiLib.ffi_slatedb_ffi_rust_future_complete_rust_buffer,
-            _UniffiLib.ffi_slatedb_ffi_rust_future_free_rust_buffer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_poll_rust_buffer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_complete_rust_buffer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_free_rust_buffer,
             # lift function
             _UniffiConverterTypeWalFileMetadata.lift,
             # Error FFI converter
@@ -6774,7 +6807,7 @@ class WalFile:
     ) -> "WalFile":
         return _UniffiConverterTypeWalFile.lift(
             _uniffi_rust_call(
-                _UniffiLib.uniffi_slatedb_ffi_fn_method_walfile_next_file,
+                _UniffiLib.uniffi_slatedb_uniffi_fn_method_walfile_next_file,
                 self._uniffi_clone_pointer(),
             )
         )
@@ -6784,7 +6817,7 @@ class WalFile:
     ) -> "int":
         return _UniffiConverterUInt64.lift(
             _uniffi_rust_call(
-                _UniffiLib.uniffi_slatedb_ffi_fn_method_walfile_next_id,
+                _UniffiLib.uniffi_slatedb_uniffi_fn_method_walfile_next_id,
                 self._uniffi_clone_pointer(),
             )
         )
@@ -6794,7 +6827,7 @@ class WalFile:
     ) -> None:
         _uniffi_rust_call_with_error(
             _UniffiConverterTypeDbError,
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_walfile_shutdown,
+            _UniffiLib.uniffi_slatedb_uniffi_fn_method_walfile_shutdown,
             self._uniffi_clone_pointer(),
         )
 
@@ -6850,11 +6883,11 @@ class WalFileIterator:
         # In case of partial initialization of instances.
         pointer = getattr(self, "_pointer", None)
         if pointer is not None:
-            _uniffi_rust_call(_UniffiLib.uniffi_slatedb_ffi_fn_free_walfileiterator, pointer)
+            _uniffi_rust_call(_UniffiLib.uniffi_slatedb_uniffi_fn_free_walfileiterator, pointer)
 
     def _uniffi_clone_pointer(self):
         return _uniffi_rust_call(
-            _UniffiLib.uniffi_slatedb_ffi_fn_clone_walfileiterator, self._pointer
+            _UniffiLib.uniffi_slatedb_uniffi_fn_clone_walfileiterator, self._pointer
         )
 
     # Used by alternative constructors or any methods which return this type.
@@ -6870,12 +6903,12 @@ class WalFileIterator:
         self,
     ) -> "typing.Optional[RowEntry]":
         return await _uniffi_rust_call_async(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_walfileiterator_next(
+            _UniffiLib.uniffi_slatedb_uniffi_fn_method_walfileiterator_next(
                 self._uniffi_clone_pointer(),
             ),
-            _UniffiLib.ffi_slatedb_ffi_rust_future_poll_rust_buffer,
-            _UniffiLib.ffi_slatedb_ffi_rust_future_complete_rust_buffer,
-            _UniffiLib.ffi_slatedb_ffi_rust_future_free_rust_buffer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_poll_rust_buffer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_complete_rust_buffer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_free_rust_buffer,
             # lift function
             _UniffiConverterOptionalTypeRowEntry.lift,
             # Error FFI converter
@@ -6887,7 +6920,7 @@ class WalFileIterator:
     ) -> None:
         _uniffi_rust_call_with_error(
             _UniffiConverterTypeDbError,
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_walfileiterator_shutdown,
+            _UniffiLib.uniffi_slatedb_uniffi_fn_method_walfileiterator_shutdown,
             self._uniffi_clone_pointer(),
         )
 
@@ -6947,7 +6980,7 @@ class WalReader:
         _UniffiConverterTypeObjectStore.check_lower(object_store)
 
         self._pointer = _uniffi_rust_call(
-            _UniffiLib.uniffi_slatedb_ffi_fn_constructor_walreader_new,
+            _UniffiLib.uniffi_slatedb_uniffi_fn_constructor_walreader_new,
             _UniffiConverterString.lower(path),
             _UniffiConverterTypeObjectStore.lower(object_store),
         )
@@ -6956,10 +6989,10 @@ class WalReader:
         # In case of partial initialization of instances.
         pointer = getattr(self, "_pointer", None)
         if pointer is not None:
-            _uniffi_rust_call(_UniffiLib.uniffi_slatedb_ffi_fn_free_walreader, pointer)
+            _uniffi_rust_call(_UniffiLib.uniffi_slatedb_uniffi_fn_free_walreader, pointer)
 
     def _uniffi_clone_pointer(self):
-        return _uniffi_rust_call(_UniffiLib.uniffi_slatedb_ffi_fn_clone_walreader, self._pointer)
+        return _uniffi_rust_call(_UniffiLib.uniffi_slatedb_uniffi_fn_clone_walreader, self._pointer)
 
     # Used by alternative constructors or any methods which return this type.
     @classmethod
@@ -6975,7 +7008,7 @@ class WalReader:
 
         return _UniffiConverterTypeWalFile.lift(
             _uniffi_rust_call(
-                _UniffiLib.uniffi_slatedb_ffi_fn_method_walreader_get,
+                _UniffiLib.uniffi_slatedb_uniffi_fn_method_walreader_get,
                 self._uniffi_clone_pointer(),
                 _UniffiConverterUInt64.lower(id),
             )
@@ -6989,14 +7022,14 @@ class WalReader:
         _UniffiConverterOptionalUInt64.check_lower(end_id)
 
         return await _uniffi_rust_call_async(
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_walreader_list(
+            _UniffiLib.uniffi_slatedb_uniffi_fn_method_walreader_list(
                 self._uniffi_clone_pointer(),
                 _UniffiConverterOptionalUInt64.lower(start_id),
                 _UniffiConverterOptionalUInt64.lower(end_id),
             ),
-            _UniffiLib.ffi_slatedb_ffi_rust_future_poll_rust_buffer,
-            _UniffiLib.ffi_slatedb_ffi_rust_future_complete_rust_buffer,
-            _UniffiLib.ffi_slatedb_ffi_rust_future_free_rust_buffer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_poll_rust_buffer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_complete_rust_buffer,
+            _UniffiLib.ffi_slatedb_uniffi_rust_future_free_rust_buffer,
             # lift function
             _UniffiConverterSequenceTypeWalFile.lift,
             # Error FFI converter
@@ -7008,7 +7041,7 @@ class WalReader:
     ) -> None:
         _uniffi_rust_call_with_error(
             _UniffiConverterTypeDbError,
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_walreader_shutdown,
+            _UniffiLib.uniffi_slatedb_uniffi_fn_method_walreader_shutdown,
             self._uniffi_clone_pointer(),
         )
 
@@ -7066,17 +7099,19 @@ class WriteBatch:
         self,
     ):
         self._pointer = _uniffi_rust_call(
-            _UniffiLib.uniffi_slatedb_ffi_fn_constructor_writebatch_new,
+            _UniffiLib.uniffi_slatedb_uniffi_fn_constructor_writebatch_new,
         )
 
     def __del__(self):
         # In case of partial initialization of instances.
         pointer = getattr(self, "_pointer", None)
         if pointer is not None:
-            _uniffi_rust_call(_UniffiLib.uniffi_slatedb_ffi_fn_free_writebatch, pointer)
+            _uniffi_rust_call(_UniffiLib.uniffi_slatedb_uniffi_fn_free_writebatch, pointer)
 
     def _uniffi_clone_pointer(self):
-        return _uniffi_rust_call(_UniffiLib.uniffi_slatedb_ffi_fn_clone_writebatch, self._pointer)
+        return _uniffi_rust_call(
+            _UniffiLib.uniffi_slatedb_uniffi_fn_clone_writebatch, self._pointer
+        )
 
     # Used by alternative constructors or any methods which return this type.
     @classmethod
@@ -7092,7 +7127,7 @@ class WriteBatch:
 
         _uniffi_rust_call_with_error(
             _UniffiConverterTypeDbError,
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_writebatch_delete,
+            _UniffiLib.uniffi_slatedb_uniffi_fn_method_writebatch_delete,
             self._uniffi_clone_pointer(),
             _UniffiConverterBytes.lower(key),
         )
@@ -7104,7 +7139,7 @@ class WriteBatch:
 
         _uniffi_rust_call_with_error(
             _UniffiConverterTypeDbError,
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_writebatch_merge,
+            _UniffiLib.uniffi_slatedb_uniffi_fn_method_writebatch_merge,
             self._uniffi_clone_pointer(),
             _UniffiConverterBytes.lower(key),
             _UniffiConverterBytes.lower(operand),
@@ -7119,7 +7154,7 @@ class WriteBatch:
 
         _uniffi_rust_call_with_error(
             _UniffiConverterTypeDbError,
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_writebatch_merge_with_options,
+            _UniffiLib.uniffi_slatedb_uniffi_fn_method_writebatch_merge_with_options,
             self._uniffi_clone_pointer(),
             _UniffiConverterBytes.lower(key),
             _UniffiConverterBytes.lower(operand),
@@ -7133,7 +7168,7 @@ class WriteBatch:
 
         _uniffi_rust_call_with_error(
             _UniffiConverterTypeDbError,
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_writebatch_put,
+            _UniffiLib.uniffi_slatedb_uniffi_fn_method_writebatch_put,
             self._uniffi_clone_pointer(),
             _UniffiConverterBytes.lower(key),
             _UniffiConverterBytes.lower(value),
@@ -7148,7 +7183,7 @@ class WriteBatch:
 
         _uniffi_rust_call_with_error(
             _UniffiConverterTypeDbError,
-            _UniffiLib.uniffi_slatedb_ffi_fn_method_writebatch_put_with_options,
+            _UniffiLib.uniffi_slatedb_uniffi_fn_method_writebatch_put_with_options,
             self._uniffi_clone_pointer(),
             _UniffiConverterBytes.lower(key),
             _UniffiConverterBytes.lower(value),
@@ -7264,7 +7299,7 @@ def init_logging(level: "LogLevel", callback: "typing.Optional[LogCallback]") ->
 
     _uniffi_rust_call_with_error(
         _UniffiConverterTypeDbError,
-        _UniffiLib.uniffi_slatedb_ffi_fn_func_init_logging,
+        _UniffiLib.uniffi_slatedb_uniffi_fn_func_init_logging,
         _UniffiConverterTypeLogLevel.lower(level),
         _UniffiConverterOptionalTypeLogCallback.lower(callback),
     )

@@ -1,6 +1,6 @@
 # SlateDB Python UniFFI Bindings
 
-This package contains the low-level Python bindings generated from `bindings/ffi`
+This package contains the low-level Python bindings generated from `bindings/uniffi`
 with UniFFI.
 
 The raw API is exposed under `slatedb.ffi`. The `slatedb` package root is
@@ -11,7 +11,7 @@ intentionally kept open for a future higher-level Python wrapper.
 - `src/slatedb/__init__.py`: reserved for future idiomatic Python APIs
 - `src/slatedb/ffi/__init__.py`: stable raw binding entrypoint
 - `src/slatedb/ffi/slatedb.py`: generated UniFFI Python wrapper
-- `src/slatedb/ffi/libslatedb_ffi.{so,dylib,dll}`: host-built shared library copied in for local use
+- `src/slatedb/ffi/libslatedb_uniffi.{so,dylib,dll}`: host-built shared library copied in for local use
 
 ## Regenerate Bindings
 
@@ -21,7 +21,7 @@ Run from the repository root:
 ./scripts/generate_python_bindings.sh
 ```
 
-The script builds `slatedb-ffi`, regenerates the Python wrapper using the
+The script builds `slatedb-uniffi`, regenerates the Python wrapper using the
 workspace-pinned UniFFI CLI, copies the resulting host library beside the
 generated module, and then formats `src/slatedb/ffi/slatedb.py` via `uv tool
 run ruff format`. This requires `uv` to be installed.

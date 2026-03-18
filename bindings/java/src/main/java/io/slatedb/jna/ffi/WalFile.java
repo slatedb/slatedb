@@ -84,7 +84,7 @@ public class WalFile implements AutoCloseable, WalFileInterface {
       if (pointer != null) {
         UniffiHelpers.uniffiRustCall(
             status -> {
-              UniffiLib.INSTANCE.uniffi_slatedb_ffi_fn_free_walfile(pointer, status);
+              UniffiLib.INSTANCE.uniffi_slatedb_uniffi_fn_free_walfile(pointer, status);
               return null;
             });
       }
@@ -97,7 +97,7 @@ public class WalFile implements AutoCloseable, WalFileInterface {
           if (pointer == null) {
             throw new NullPointerException();
           }
-          return UniffiLib.INSTANCE.uniffi_slatedb_ffi_fn_clone_walfile(pointer, status);
+          return UniffiLib.INSTANCE.uniffi_slatedb_uniffi_fn_clone_walfile(pointer, status);
         });
   }
 
@@ -111,7 +111,7 @@ public class WalFile implements AutoCloseable, WalFileInterface {
 
                   return UniffiHelpers.uniffiRustCall(
                       _status -> {
-                        return UniffiLib.INSTANCE.uniffi_slatedb_ffi_fn_method_walfile_id(
+                        return UniffiLib.INSTANCE.uniffi_slatedb_uniffi_fn_method_walfile_id(
                             it, _status);
                       });
 
@@ -133,14 +133,15 @@ public class WalFile implements AutoCloseable, WalFileInterface {
     return UniffiAsyncHelpers.uniffiRustCallAsync(
         callWithPointer(
             thisPtr -> {
-              return UniffiLib.INSTANCE.uniffi_slatedb_ffi_fn_method_walfile_iterator(thisPtr);
+              return UniffiLib.INSTANCE.uniffi_slatedb_uniffi_fn_method_walfile_iterator(thisPtr);
             }),
         (future, callback, continuation) ->
-            UniffiLib.INSTANCE.ffi_slatedb_ffi_rust_future_poll_pointer(
+            UniffiLib.INSTANCE.ffi_slatedb_uniffi_rust_future_poll_pointer(
                 future, callback, continuation),
         (future, continuation) ->
-            UniffiLib.INSTANCE.ffi_slatedb_ffi_rust_future_complete_pointer(future, continuation),
-        (future) -> UniffiLib.INSTANCE.ffi_slatedb_ffi_rust_future_free_pointer(future),
+            UniffiLib.INSTANCE.ffi_slatedb_uniffi_rust_future_complete_pointer(
+                future, continuation),
+        (future) -> UniffiLib.INSTANCE.ffi_slatedb_uniffi_rust_future_free_pointer(future),
         // lift function
         (it) -> FfiConverterTypeWalFileIterator.INSTANCE.lift(it),
         // Error FFI converter
@@ -152,15 +153,15 @@ public class WalFile implements AutoCloseable, WalFileInterface {
     return UniffiAsyncHelpers.uniffiRustCallAsync(
         callWithPointer(
             thisPtr -> {
-              return UniffiLib.INSTANCE.uniffi_slatedb_ffi_fn_method_walfile_metadata(thisPtr);
+              return UniffiLib.INSTANCE.uniffi_slatedb_uniffi_fn_method_walfile_metadata(thisPtr);
             }),
         (future, callback, continuation) ->
-            UniffiLib.INSTANCE.ffi_slatedb_ffi_rust_future_poll_rust_buffer(
+            UniffiLib.INSTANCE.ffi_slatedb_uniffi_rust_future_poll_rust_buffer(
                 future, callback, continuation),
         (future, continuation) ->
-            UniffiLib.INSTANCE.ffi_slatedb_ffi_rust_future_complete_rust_buffer(
+            UniffiLib.INSTANCE.ffi_slatedb_uniffi_rust_future_complete_rust_buffer(
                 future, continuation),
-        (future) -> UniffiLib.INSTANCE.ffi_slatedb_ffi_rust_future_free_rust_buffer(future),
+        (future) -> UniffiLib.INSTANCE.ffi_slatedb_uniffi_rust_future_free_rust_buffer(future),
         // lift function
         (it) -> FfiConverterTypeWalFileMetadata.INSTANCE.lift(it),
         // Error FFI converter
@@ -177,7 +178,7 @@ public class WalFile implements AutoCloseable, WalFileInterface {
 
                   return UniffiHelpers.uniffiRustCall(
                       _status -> {
-                        return UniffiLib.INSTANCE.uniffi_slatedb_ffi_fn_method_walfile_next_file(
+                        return UniffiLib.INSTANCE.uniffi_slatedb_uniffi_fn_method_walfile_next_file(
                             it, _status);
                       });
 
@@ -204,7 +205,7 @@ public class WalFile implements AutoCloseable, WalFileInterface {
 
                   return UniffiHelpers.uniffiRustCall(
                       _status -> {
-                        return UniffiLib.INSTANCE.uniffi_slatedb_ffi_fn_method_walfile_next_id(
+                        return UniffiLib.INSTANCE.uniffi_slatedb_uniffi_fn_method_walfile_next_id(
                             it, _status);
                       });
 
@@ -232,7 +233,8 @@ public class WalFile implements AutoCloseable, WalFileInterface {
               UniffiHelpers.uniffiRustCallWithError(
                   new DbExceptionErrorHandler(),
                   _status -> {
-                    UniffiLib.INSTANCE.uniffi_slatedb_ffi_fn_method_walfile_shutdown(it, _status);
+                    UniffiLib.INSTANCE.uniffi_slatedb_uniffi_fn_method_walfile_shutdown(
+                        it, _status);
                   });
 
             } catch (Exception e) {

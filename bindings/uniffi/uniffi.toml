@@ -1,6 +1,6 @@
 [bindings.java]
 package_name = "io.slatedb.jna.ffi"
-cdylib_name = "slatedb_ffi"
+cdylib_name = "slatedb_uniffi"
 
 [bindings.python]
-cdylib_name = "slatedb_ffi"
+cdylib_name = "slatedb_uniffi"

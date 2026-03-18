@@ -3520,25 +3520,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "slatedb-ffi"
-version = "0.11.1"
-dependencies = [
- "figment",
- "log",
- "parking_lot",
- "serde_json",
- "slatedb",
- "tempfile",
- "thiserror 1.0.69",
- "tokio",
- "tracing",
- "tracing-log",
- "tracing-subscriber",
- "uniffi",
- "uuid",
-]
-
-[[package]]
 name = "slatedb-py"
 version = "0.11.1"
 dependencies = [
@@ -3568,6 +3549,25 @@ dependencies = [
  "slatedb-common",
  "thiserror 1.0.69",
  "tokio",
+]
+
+[[package]]
+name = "slatedb-uniffi"
+version = "0.11.1"
+dependencies = [
+ "figment",
+ "log",
+ "parking_lot",
+ "serde_json",
+ "slatedb",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "tracing-log",
+ "tracing-subscriber",
+ "uniffi",
+ "uuid",
 ]
 
 [[package]]

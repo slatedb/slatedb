@@ -1,5 +1,5 @@
 [package]
-name = "slatedb-ffi"
+name = "slatedb-uniffi"
 description = "UniFFI bindings for SlateDB"
 publish = false
 version.workspace = true
@@ -9,7 +9,7 @@ license.workspace = true
 homepage.workspace = true
 
 [lib]
-name = "slatedb_ffi"
+name = "slatedb_uniffi"
 crate-type = ["cdylib"]
 doc = false
 bench = false

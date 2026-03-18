@@ -20,7 +20,7 @@ public class UniffiCallbackInterfaceMergeOperator {
   // Registers the foreign callback with the Rust side.
   // This method is generated for each callback interface.
   void register(UniffiLib lib) {
-    lib.uniffi_slatedb_ffi_fn_init_callback_vtable_mergeoperator(vtable);
+    lib.uniffi_slatedb_uniffi_fn_init_callback_vtable_mergeoperator(vtable);
   }
 
   public static class merge implements UniffiCallbackInterfaceMergeOperatorMethod0 {

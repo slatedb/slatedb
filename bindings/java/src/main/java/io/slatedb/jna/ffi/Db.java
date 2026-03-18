@@ -85,7 +85,7 @@ public class Db implements AutoCloseable, DbInterface {
       if (pointer != null) {
         UniffiHelpers.uniffiRustCall(
             status -> {
-              UniffiLib.INSTANCE.uniffi_slatedb_ffi_fn_free_db(pointer, status);
+              UniffiLib.INSTANCE.uniffi_slatedb_uniffi_fn_free_db(pointer, status);
               return null;
             });
       }
@@ -98,7 +98,7 @@ public class Db implements AutoCloseable, DbInterface {
           if (pointer == null) {
             throw new NullPointerException();
           }
-          return UniffiLib.INSTANCE.uniffi_slatedb_ffi_fn_clone_db(pointer, status);
+          return UniffiLib.INSTANCE.uniffi_slatedb_uniffi_fn_clone_db(pointer, status);
         });
   }
 
@@ -107,15 +107,16 @@ public class Db implements AutoCloseable, DbInterface {
     return UniffiAsyncHelpers.uniffiRustCallAsync(
         callWithPointer(
             thisPtr -> {
-              return UniffiLib.INSTANCE.uniffi_slatedb_ffi_fn_method_db_begin(
+              return UniffiLib.INSTANCE.uniffi_slatedb_uniffi_fn_method_db_begin(
                   thisPtr, FfiConverterTypeIsolationLevel.INSTANCE.lower(isolationLevel));
             }),
         (future, callback, continuation) ->
-            UniffiLib.INSTANCE.ffi_slatedb_ffi_rust_future_poll_pointer(
+            UniffiLib.INSTANCE.ffi_slatedb_uniffi_rust_future_poll_pointer(
                 future, callback, continuation),
         (future, continuation) ->
-            UniffiLib.INSTANCE.ffi_slatedb_ffi_rust_future_complete_pointer(future, continuation),
-        (future) -> UniffiLib.INSTANCE.ffi_slatedb_ffi_rust_future_free_pointer(future),
+            UniffiLib.INSTANCE.ffi_slatedb_uniffi_rust_future_complete_pointer(
+                future, continuation),
+        (future) -> UniffiLib.INSTANCE.ffi_slatedb_uniffi_rust_future_free_pointer(future),
         // lift function
         (it) -> FfiConverterTypeDbTransaction.INSTANCE.lift(it),
         // Error FFI converter
@@ -127,16 +128,16 @@ public class Db implements AutoCloseable, DbInterface {
     return UniffiAsyncHelpers.uniffiRustCallAsync(
         callWithPointer(
             thisPtr -> {
-              return UniffiLib.INSTANCE.uniffi_slatedb_ffi_fn_method_db_delete(
+              return UniffiLib.INSTANCE.uniffi_slatedb_uniffi_fn_method_db_delete(
                   thisPtr, FfiConverterByteArray.INSTANCE.lower(key));
             }),
         (future, callback, continuation) ->
-            UniffiLib.INSTANCE.ffi_slatedb_ffi_rust_future_poll_rust_buffer(
+            UniffiLib.INSTANCE.ffi_slatedb_uniffi_rust_future_poll_rust_buffer(
                 future, callback, continuation),
         (future, continuation) ->
-            UniffiLib.INSTANCE.ffi_slatedb_ffi_rust_future_complete_rust_buffer(
+            UniffiLib.INSTANCE.ffi_slatedb_uniffi_rust_future_complete_rust_buffer(
                 future, continuation),
-        (future) -> UniffiLib.INSTANCE.ffi_slatedb_ffi_rust_future_free_rust_buffer(future),
+        (future) -> UniffiLib.INSTANCE.ffi_slatedb_uniffi_rust_future_free_rust_buffer(future),
         // lift function
         (it) -> FfiConverterTypeWriteHandle.INSTANCE.lift(it),
         // Error FFI converter
@@ -148,18 +149,18 @@ public class Db implements AutoCloseable, DbInterface {
     return UniffiAsyncHelpers.uniffiRustCallAsync(
         callWithPointer(
             thisPtr -> {
-              return UniffiLib.INSTANCE.uniffi_slatedb_ffi_fn_method_db_delete_with_options(
+              return UniffiLib.INSTANCE.uniffi_slatedb_uniffi_fn_method_db_delete_with_options(
                   thisPtr,
                   FfiConverterByteArray.INSTANCE.lower(key),
                   FfiConverterTypeWriteOptions.INSTANCE.lower(options));
             }),
         (future, callback, continuation) ->
-            UniffiLib.INSTANCE.ffi_slatedb_ffi_rust_future_poll_rust_buffer(
+            UniffiLib.INSTANCE.ffi_slatedb_uniffi_rust_future_poll_rust_buffer(
                 future, callback, continuation),
         (future, continuation) ->
-            UniffiLib.INSTANCE.ffi_slatedb_ffi_rust_future_complete_rust_buffer(
+            UniffiLib.INSTANCE.ffi_slatedb_uniffi_rust_future_complete_rust_buffer(
                 future, continuation),
-        (future) -> UniffiLib.INSTANCE.ffi_slatedb_ffi_rust_future_free_rust_buffer(future),
+        (future) -> UniffiLib.INSTANCE.ffi_slatedb_uniffi_rust_future_free_rust_buffer(future),
         // lift function
         (it) -> FfiConverterTypeWriteHandle.INSTANCE.lift(it),
         // Error FFI converter
@@ -171,14 +172,14 @@ public class Db implements AutoCloseable, DbInterface {
     return UniffiAsyncHelpers.uniffiRustCallAsync(
         callWithPointer(
             thisPtr -> {
-              return UniffiLib.INSTANCE.uniffi_slatedb_ffi_fn_method_db_flush(thisPtr);
+              return UniffiLib.INSTANCE.uniffi_slatedb_uniffi_fn_method_db_flush(thisPtr);
             }),
         (future, callback, continuation) ->
-            UniffiLib.INSTANCE.ffi_slatedb_ffi_rust_future_poll_void(
+            UniffiLib.INSTANCE.ffi_slatedb_uniffi_rust_future_poll_void(
                 future, callback, continuation),
         (future, continuation) ->
-            UniffiLib.INSTANCE.ffi_slatedb_ffi_rust_future_complete_void(future, continuation),
-        (future) -> UniffiLib.INSTANCE.ffi_slatedb_ffi_rust_future_free_void(future),
+            UniffiLib.INSTANCE.ffi_slatedb_uniffi_rust_future_complete_void(future, continuation),
+        (future) -> UniffiLib.INSTANCE.ffi_slatedb_uniffi_rust_future_free_void(future),
         // lift function
         () -> {},
         // Error FFI converter
@@ -190,15 +191,15 @@ public class Db implements AutoCloseable, DbInterface {
     return UniffiAsyncHelpers.uniffiRustCallAsync(
         callWithPointer(
             thisPtr -> {
-              return UniffiLib.INSTANCE.uniffi_slatedb_ffi_fn_method_db_flush_with_options(
+              return UniffiLib.INSTANCE.uniffi_slatedb_uniffi_fn_method_db_flush_with_options(
                   thisPtr, FfiConverterTypeFlushOptions.INSTANCE.lower(options));
             }),
         (future, callback, continuation) ->
-            UniffiLib.INSTANCE.ffi_slatedb_ffi_rust_future_poll_void(
+            UniffiLib.INSTANCE.ffi_slatedb_uniffi_rust_future_poll_void(
                 future, callback, continuation),
         (future, continuation) ->
-            UniffiLib.INSTANCE.ffi_slatedb_ffi_rust_future_complete_void(future, continuation),
-        (future) -> UniffiLib.INSTANCE.ffi_slatedb_ffi_rust_future_free_void(future),
+            UniffiLib.INSTANCE.ffi_slatedb_uniffi_rust_future_complete_void(future, continuation),
+        (future) -> UniffiLib.INSTANCE.ffi_slatedb_uniffi_rust_future_free_void(future),
         // lift function
         () -> {},
         // Error FFI converter
@@ -210,16 +211,16 @@ public class Db implements AutoCloseable, DbInterface {
     return UniffiAsyncHelpers.uniffiRustCallAsync(
         callWithPointer(
             thisPtr -> {
-              return UniffiLib.INSTANCE.uniffi_slatedb_ffi_fn_method_db_get(
+              return UniffiLib.INSTANCE.uniffi_slatedb_uniffi_fn_method_db_get(
                   thisPtr, FfiConverterByteArray.INSTANCE.lower(key));
             }),
         (future, callback, continuation) ->
-            UniffiLib.INSTANCE.ffi_slatedb_ffi_rust_future_poll_rust_buffer(
+            UniffiLib.INSTANCE.ffi_slatedb_uniffi_rust_future_poll_rust_buffer(
                 future, callback, continuation),
         (future, continuation) ->
-            UniffiLib.INSTANCE.ffi_slatedb_ffi_rust_future_complete_rust_buffer(
+            UniffiLib.INSTANCE.ffi_slatedb_uniffi_rust_future_complete_rust_buffer(
                 future, continuation),
-        (future) -> UniffiLib.INSTANCE.ffi_slatedb_ffi_rust_future_free_rust_buffer(future),
+        (future) -> UniffiLib.INSTANCE.ffi_slatedb_uniffi_rust_future_free_rust_buffer(future),
         // lift function
         (it) -> FfiConverterOptionalByteArray.INSTANCE.lift(it),
         // Error FFI converter
@@ -231,16 +232,16 @@ public class Db implements AutoCloseable, DbInterface {
     return UniffiAsyncHelpers.uniffiRustCallAsync(
         callWithPointer(
             thisPtr -> {
-              return UniffiLib.INSTANCE.uniffi_slatedb_ffi_fn_method_db_get_key_value(
+              return UniffiLib.INSTANCE.uniffi_slatedb_uniffi_fn_method_db_get_key_value(
                   thisPtr, FfiConverterByteArray.INSTANCE.lower(key));
             }),
         (future, callback, continuation) ->
-            UniffiLib.INSTANCE.ffi_slatedb_ffi_rust_future_poll_rust_buffer(
+            UniffiLib.INSTANCE.ffi_slatedb_uniffi_rust_future_poll_rust_buffer(
                 future, callback, continuation),
         (future, continuation) ->
-            UniffiLib.INSTANCE.ffi_slatedb_ffi_rust_future_complete_rust_buffer(
+            UniffiLib.INSTANCE.ffi_slatedb_uniffi_rust_future_complete_rust_buffer(
                 future, continuation),
-        (future) -> UniffiLib.INSTANCE.ffi_slatedb_ffi_rust_future_free_rust_buffer(future),
+        (future) -> UniffiLib.INSTANCE.ffi_slatedb_uniffi_rust_future_free_rust_buffer(future),
         // lift function
         (it) -> FfiConverterOptionalTypeKeyValue.INSTANCE.lift(it),
         // Error FFI converter
@@ -252,18 +253,19 @@ public class Db implements AutoCloseable, DbInterface {
     return UniffiAsyncHelpers.uniffiRustCallAsync(
         callWithPointer(
             thisPtr -> {
-              return UniffiLib.INSTANCE.uniffi_slatedb_ffi_fn_method_db_get_key_value_with_options(
-                  thisPtr,
-                  FfiConverterByteArray.INSTANCE.lower(key),
-                  FfiConverterTypeReadOptions.INSTANCE.lower(options));
+              return UniffiLib.INSTANCE
+                  .uniffi_slatedb_uniffi_fn_method_db_get_key_value_with_options(
+                      thisPtr,
+                      FfiConverterByteArray.INSTANCE.lower(key),
+                      FfiConverterTypeReadOptions.INSTANCE.lower(options));
             }),
         (future, callback, continuation) ->
-            UniffiLib.INSTANCE.ffi_slatedb_ffi_rust_future_poll_rust_buffer(
+            UniffiLib.INSTANCE.ffi_slatedb_uniffi_rust_future_poll_rust_buffer(
                 future, callback, continuation),
         (future, continuation) ->
-            UniffiLib.INSTANCE.ffi_slatedb_ffi_rust_future_complete_rust_buffer(
+            UniffiLib.INSTANCE.ffi_slatedb_uniffi_rust_future_complete_rust_buffer(
                 future, continuation),
-        (future) -> UniffiLib.INSTANCE.ffi_slatedb_ffi_rust_future_free_rust_buffer(future),
+        (future) -> UniffiLib.INSTANCE.ffi_slatedb_uniffi_rust_future_free_rust_buffer(future),
         // lift function
         (it) -> FfiConverterOptionalTypeKeyValue.INSTANCE.lift(it),
         // Error FFI converter
@@ -275,18 +277,18 @@ public class Db implements AutoCloseable, DbInterface {
     return UniffiAsyncHelpers.uniffiRustCallAsync(
         callWithPointer(
             thisPtr -> {
-              return UniffiLib.INSTANCE.uniffi_slatedb_ffi_fn_method_db_get_with_options(
+              return UniffiLib.INSTANCE.uniffi_slatedb_uniffi_fn_method_db_get_with_options(
                   thisPtr,
                   FfiConverterByteArray.INSTANCE.lower(key),
                   FfiConverterTypeReadOptions.INSTANCE.lower(options));
             }),
         (future, callback, continuation) ->
-            UniffiLib.INSTANCE.ffi_slatedb_ffi_rust_future_poll_rust_buffer(
+            UniffiLib.INSTANCE.ffi_slatedb_uniffi_rust_future_poll_rust_buffer(
                 future, callback, continuation),
         (future, continuation) ->
-            UniffiLib.INSTANCE.ffi_slatedb_ffi_rust_future_complete_rust_buffer(
+            UniffiLib.INSTANCE.ffi_slatedb_uniffi_rust_future_complete_rust_buffer(
                 future, continuation),
-        (future) -> UniffiLib.INSTANCE.ffi_slatedb_ffi_rust_future_free_rust_buffer(future),
+        (future) -> UniffiLib.INSTANCE.ffi_slatedb_uniffi_rust_future_free_rust_buffer(future),
         // lift function
         (it) -> FfiConverterOptionalByteArray.INSTANCE.lift(it),
         // Error FFI converter
@@ -298,18 +300,18 @@ public class Db implements AutoCloseable, DbInterface {
     return UniffiAsyncHelpers.uniffiRustCallAsync(
         callWithPointer(
             thisPtr -> {
-              return UniffiLib.INSTANCE.uniffi_slatedb_ffi_fn_method_db_merge(
+              return UniffiLib.INSTANCE.uniffi_slatedb_uniffi_fn_method_db_merge(
                   thisPtr,
                   FfiConverterByteArray.INSTANCE.lower(key),
                   FfiConverterByteArray.INSTANCE.lower(operand));
             }),
         (future, callback, continuation) ->
-            UniffiLib.INSTANCE.ffi_slatedb_ffi_rust_future_poll_rust_buffer(
+            UniffiLib.INSTANCE.ffi_slatedb_uniffi_rust_future_poll_rust_buffer(
                 future, callback, continuation),
         (future, continuation) ->
-            UniffiLib.INSTANCE.ffi_slatedb_ffi_rust_future_complete_rust_buffer(
+            UniffiLib.INSTANCE.ffi_slatedb_uniffi_rust_future_complete_rust_buffer(
                 future, continuation),
-        (future) -> UniffiLib.INSTANCE.ffi_slatedb_ffi_rust_future_free_rust_buffer(future),
+        (future) -> UniffiLib.INSTANCE.ffi_slatedb_uniffi_rust_future_free_rust_buffer(future),
         // lift function
         (it) -> FfiConverterTypeWriteHandle.INSTANCE.lift(it),
         // Error FFI converter
@@ -322,7 +324,7 @@ public class Db implements AutoCloseable, DbInterface {
     return UniffiAsyncHelpers.uniffiRustCallAsync(
         callWithPointer(
             thisPtr -> {
-              return UniffiLib.INSTANCE.uniffi_slatedb_ffi_fn_method_db_merge_with_options(
+              return UniffiLib.INSTANCE.uniffi_slatedb_uniffi_fn_method_db_merge_with_options(
                   thisPtr,
                   FfiConverterByteArray.INSTANCE.lower(key),
                   FfiConverterByteArray.INSTANCE.lower(operand),
@@ -330,12 +332,12 @@ public class Db implements AutoCloseable, DbInterface {
                   FfiConverterTypeWriteOptions.INSTANCE.lower(writeOptions));
             }),
         (future, callback, continuation) ->
-            UniffiLib.INSTANCE.ffi_slatedb_ffi_rust_future_poll_rust_buffer(
+            UniffiLib.INSTANCE.ffi_slatedb_uniffi_rust_future_poll_rust_buffer(
                 future, callback, continuation),
         (future, continuation) ->
-            UniffiLib.INSTANCE.ffi_slatedb_ffi_rust_future_complete_rust_buffer(
+            UniffiLib.INSTANCE.ffi_slatedb_uniffi_rust_future_complete_rust_buffer(
                 future, continuation),
-        (future) -> UniffiLib.INSTANCE.ffi_slatedb_ffi_rust_future_free_rust_buffer(future),
+        (future) -> UniffiLib.INSTANCE.ffi_slatedb_uniffi_rust_future_free_rust_buffer(future),
         // lift function
         (it) -> FfiConverterTypeWriteHandle.INSTANCE.lift(it),
         // Error FFI converter
@@ -353,7 +355,7 @@ public class Db implements AutoCloseable, DbInterface {
                   return UniffiHelpers.uniffiRustCallWithError(
                       new DbExceptionErrorHandler(),
                       _status -> {
-                        return UniffiLib.INSTANCE.uniffi_slatedb_ffi_fn_method_db_metrics(
+                        return UniffiLib.INSTANCE.uniffi_slatedb_uniffi_fn_method_db_metrics(
                             it, _status);
                       });
 
@@ -379,18 +381,18 @@ public class Db implements AutoCloseable, DbInterface {
     return UniffiAsyncHelpers.uniffiRustCallAsync(
         callWithPointer(
             thisPtr -> {
-              return UniffiLib.INSTANCE.uniffi_slatedb_ffi_fn_method_db_put(
+              return UniffiLib.INSTANCE.uniffi_slatedb_uniffi_fn_method_db_put(
                   thisPtr,
                   FfiConverterByteArray.INSTANCE.lower(key),
                   FfiConverterByteArray.INSTANCE.lower(value));
             }),
         (future, callback, continuation) ->
-            UniffiLib.INSTANCE.ffi_slatedb_ffi_rust_future_poll_rust_buffer(
+            UniffiLib.INSTANCE.ffi_slatedb_uniffi_rust_future_poll_rust_buffer(
                 future, callback, continuation),
         (future, continuation) ->
-            UniffiLib.INSTANCE.ffi_slatedb_ffi_rust_future_complete_rust_buffer(
+            UniffiLib.INSTANCE.ffi_slatedb_uniffi_rust_future_complete_rust_buffer(
                 future, continuation),
-        (future) -> UniffiLib.INSTANCE.ffi_slatedb_ffi_rust_future_free_rust_buffer(future),
+        (future) -> UniffiLib.INSTANCE.ffi_slatedb_uniffi_rust_future_free_rust_buffer(future),
         // lift function
         (it) -> FfiConverterTypeWriteHandle.INSTANCE.lift(it),
         // Error FFI converter
@@ -403,7 +405,7 @@ public class Db implements AutoCloseable, DbInterface {
     return UniffiAsyncHelpers.uniffiRustCallAsync(
         callWithPointer(
             thisPtr -> {
-              return UniffiLib.INSTANCE.uniffi_slatedb_ffi_fn_method_db_put_with_options(
+              return UniffiLib.INSTANCE.uniffi_slatedb_uniffi_fn_method_db_put_with_options(
                   thisPtr,
                   FfiConverterByteArray.INSTANCE.lower(key),
                   FfiConverterByteArray.INSTANCE.lower(value),
@@ -411,12 +413,12 @@ public class Db implements AutoCloseable, DbInterface {
                   FfiConverterTypeWriteOptions.INSTANCE.lower(writeOptions));
             }),
         (future, callback, continuation) ->
-            UniffiLib.INSTANCE.ffi_slatedb_ffi_rust_future_poll_rust_buffer(
+            UniffiLib.INSTANCE.ffi_slatedb_uniffi_rust_future_poll_rust_buffer(
                 future, callback, continuation),
         (future, continuation) ->
-            UniffiLib.INSTANCE.ffi_slatedb_ffi_rust_future_complete_rust_buffer(
+            UniffiLib.INSTANCE.ffi_slatedb_uniffi_rust_future_complete_rust_buffer(
                 future, continuation),
-        (future) -> UniffiLib.INSTANCE.ffi_slatedb_ffi_rust_future_free_rust_buffer(future),
+        (future) -> UniffiLib.INSTANCE.ffi_slatedb_uniffi_rust_future_free_rust_buffer(future),
         // lift function
         (it) -> FfiConverterTypeWriteHandle.INSTANCE.lift(it),
         // Error FFI converter
@@ -428,15 +430,16 @@ public class Db implements AutoCloseable, DbInterface {
     return UniffiAsyncHelpers.uniffiRustCallAsync(
         callWithPointer(
             thisPtr -> {
-              return UniffiLib.INSTANCE.uniffi_slatedb_ffi_fn_method_db_scan(
+              return UniffiLib.INSTANCE.uniffi_slatedb_uniffi_fn_method_db_scan(
                   thisPtr, FfiConverterTypeKeyRange.INSTANCE.lower(range));
             }),
         (future, callback, continuation) ->
-            UniffiLib.INSTANCE.ffi_slatedb_ffi_rust_future_poll_pointer(
+            UniffiLib.INSTANCE.ffi_slatedb_uniffi_rust_future_poll_pointer(
                 future, callback, continuation),
         (future, continuation) ->
-            UniffiLib.INSTANCE.ffi_slatedb_ffi_rust_future_complete_pointer(future, continuation),
-        (future) -> UniffiLib.INSTANCE.ffi_slatedb_ffi_rust_future_free_pointer(future),
+            UniffiLib.INSTANCE.ffi_slatedb_uniffi_rust_future_complete_pointer(
+                future, continuation),
+        (future) -> UniffiLib.INSTANCE.ffi_slatedb_uniffi_rust_future_free_pointer(future),
         // lift function
         (it) -> FfiConverterTypeDbIterator.INSTANCE.lift(it),
         // Error FFI converter
@@ -448,15 +451,16 @@ public class Db implements AutoCloseable, DbInterface {
     return UniffiAsyncHelpers.uniffiRustCallAsync(
         callWithPointer(
             thisPtr -> {
-              return UniffiLib.INSTANCE.uniffi_slatedb_ffi_fn_method_db_scan_prefix(
+              return UniffiLib.INSTANCE.uniffi_slatedb_uniffi_fn_method_db_scan_prefix(
                   thisPtr, FfiConverterByteArray.INSTANCE.lower(prefix));
             }),
         (future, callback, continuation) ->
-            UniffiLib.INSTANCE.ffi_slatedb_ffi_rust_future_poll_pointer(
+            UniffiLib.INSTANCE.ffi_slatedb_uniffi_rust_future_poll_pointer(
                 future, callback, continuation),
         (future, continuation) ->
-            UniffiLib.INSTANCE.ffi_slatedb_ffi_rust_future_complete_pointer(future, continuation),
-        (future) -> UniffiLib.INSTANCE.ffi_slatedb_ffi_rust_future_free_pointer(future),
+            UniffiLib.INSTANCE.ffi_slatedb_uniffi_rust_future_complete_pointer(
+                future, continuation),
+        (future) -> UniffiLib.INSTANCE.ffi_slatedb_uniffi_rust_future_free_pointer(future),
         // lift function
         (it) -> FfiConverterTypeDbIterator.INSTANCE.lift(it),
         // Error FFI converter
@@ -468,17 +472,18 @@ public class Db implements AutoCloseable, DbInterface {
     return UniffiAsyncHelpers.uniffiRustCallAsync(
         callWithPointer(
             thisPtr -> {
-              return UniffiLib.INSTANCE.uniffi_slatedb_ffi_fn_method_db_scan_prefix_with_options(
+              return UniffiLib.INSTANCE.uniffi_slatedb_uniffi_fn_method_db_scan_prefix_with_options(
                   thisPtr,
                   FfiConverterByteArray.INSTANCE.lower(prefix),
                   FfiConverterTypeScanOptions.INSTANCE.lower(options));
             }),
         (future, callback, continuation) ->
-            UniffiLib.INSTANCE.ffi_slatedb_ffi_rust_future_poll_pointer(
+            UniffiLib.INSTANCE.ffi_slatedb_uniffi_rust_future_poll_pointer(
                 future, callback, continuation),
         (future, continuation) ->
-            UniffiLib.INSTANCE.ffi_slatedb_ffi_rust_future_complete_pointer(future, continuation),
-        (future) -> UniffiLib.INSTANCE.ffi_slatedb_ffi_rust_future_free_pointer(future),
+            UniffiLib.INSTANCE.ffi_slatedb_uniffi_rust_future_complete_pointer(
+                future, continuation),
+        (future) -> UniffiLib.INSTANCE.ffi_slatedb_uniffi_rust_future_free_pointer(future),
         // lift function
         (it) -> FfiConverterTypeDbIterator.INSTANCE.lift(it),
         // Error FFI converter
@@ -490,17 +495,18 @@ public class Db implements AutoCloseable, DbInterface {
     return UniffiAsyncHelpers.uniffiRustCallAsync(
         callWithPointer(
             thisPtr -> {
-              return UniffiLib.INSTANCE.uniffi_slatedb_ffi_fn_method_db_scan_with_options(
+              return UniffiLib.INSTANCE.uniffi_slatedb_uniffi_fn_method_db_scan_with_options(
                   thisPtr,
                   FfiConverterTypeKeyRange.INSTANCE.lower(range),
                   FfiConverterTypeScanOptions.INSTANCE.lower(options));
             }),
         (future, callback, continuation) ->
-            UniffiLib.INSTANCE.ffi_slatedb_ffi_rust_future_poll_pointer(
+            UniffiLib.INSTANCE.ffi_slatedb_uniffi_rust_future_poll_pointer(
                 future, callback, continuation),
         (future, continuation) ->
-            UniffiLib.INSTANCE.ffi_slatedb_ffi_rust_future_complete_pointer(future, continuation),
-        (future) -> UniffiLib.INSTANCE.ffi_slatedb_ffi_rust_future_free_pointer(future),
+            UniffiLib.INSTANCE.ffi_slatedb_uniffi_rust_future_complete_pointer(
+                future, continuation),
+        (future) -> UniffiLib.INSTANCE.ffi_slatedb_uniffi_rust_future_free_pointer(future),
         // lift function
         (it) -> FfiConverterTypeDbIterator.INSTANCE.lift(it),
         // Error FFI converter
@@ -512,14 +518,14 @@ public class Db implements AutoCloseable, DbInterface {
     return UniffiAsyncHelpers.uniffiRustCallAsync(
         callWithPointer(
             thisPtr -> {
-              return UniffiLib.INSTANCE.uniffi_slatedb_ffi_fn_method_db_shutdown(thisPtr);
+              return UniffiLib.INSTANCE.uniffi_slatedb_uniffi_fn_method_db_shutdown(thisPtr);
             }),
         (future, callback, continuation) ->
-            UniffiLib.INSTANCE.ffi_slatedb_ffi_rust_future_poll_void(
+            UniffiLib.INSTANCE.ffi_slatedb_uniffi_rust_future_poll_void(
                 future, callback, continuation),
         (future, continuation) ->
-            UniffiLib.INSTANCE.ffi_slatedb_ffi_rust_future_complete_void(future, continuation),
-        (future) -> UniffiLib.INSTANCE.ffi_slatedb_ffi_rust_future_free_void(future),
+            UniffiLib.INSTANCE.ffi_slatedb_uniffi_rust_future_complete_void(future, continuation),
+        (future) -> UniffiLib.INSTANCE.ffi_slatedb_uniffi_rust_future_free_void(future),
         // lift function
         () -> {},
         // Error FFI converter
@@ -531,14 +537,15 @@ public class Db implements AutoCloseable, DbInterface {
     return UniffiAsyncHelpers.uniffiRustCallAsync(
         callWithPointer(
             thisPtr -> {
-              return UniffiLib.INSTANCE.uniffi_slatedb_ffi_fn_method_db_snapshot(thisPtr);
+              return UniffiLib.INSTANCE.uniffi_slatedb_uniffi_fn_method_db_snapshot(thisPtr);
             }),
         (future, callback, continuation) ->
-            UniffiLib.INSTANCE.ffi_slatedb_ffi_rust_future_poll_pointer(
+            UniffiLib.INSTANCE.ffi_slatedb_uniffi_rust_future_poll_pointer(
                 future, callback, continuation),
         (future, continuation) ->
-            UniffiLib.INSTANCE.ffi_slatedb_ffi_rust_future_complete_pointer(future, continuation),
-        (future) -> UniffiLib.INSTANCE.ffi_slatedb_ffi_rust_future_free_pointer(future),
+            UniffiLib.INSTANCE.ffi_slatedb_uniffi_rust_future_complete_pointer(
+                future, continuation),
+        (future) -> UniffiLib.INSTANCE.ffi_slatedb_uniffi_rust_future_free_pointer(future),
         // lift function
         (it) -> FfiConverterTypeDbSnapshot.INSTANCE.lift(it),
         // Error FFI converter
@@ -556,7 +563,7 @@ public class Db implements AutoCloseable, DbInterface {
               UniffiHelpers.uniffiRustCallWithError(
                   new DbExceptionErrorHandler(),
                   _status -> {
-                    UniffiLib.INSTANCE.uniffi_slatedb_ffi_fn_method_db_status(it, _status);
+                    UniffiLib.INSTANCE.uniffi_slatedb_uniffi_fn_method_db_status(it, _status);
                   });
 
             } catch (Exception e) {
@@ -581,16 +588,16 @@ public class Db implements AutoCloseable, DbInterface {
     return UniffiAsyncHelpers.uniffiRustCallAsync(
         callWithPointer(
             thisPtr -> {
-              return UniffiLib.INSTANCE.uniffi_slatedb_ffi_fn_method_db_write(
+              return UniffiLib.INSTANCE.uniffi_slatedb_uniffi_fn_method_db_write(
                   thisPtr, FfiConverterTypeWriteBatch.INSTANCE.lower(batch));
             }),
         (future, callback, continuation) ->
-            UniffiLib.INSTANCE.ffi_slatedb_ffi_rust_future_poll_rust_buffer(
+            UniffiLib.INSTANCE.ffi_slatedb_uniffi_rust_future_poll_rust_buffer(
                 future, callback, continuation),
         (future, continuation) ->
-            UniffiLib.INSTANCE.ffi_slatedb_ffi_rust_future_complete_rust_buffer(
+            UniffiLib.INSTANCE.ffi_slatedb_uniffi_rust_future_complete_rust_buffer(
                 future, continuation),
-        (future) -> UniffiLib.INSTANCE.ffi_slatedb_ffi_rust_future_free_rust_buffer(future),
+        (future) -> UniffiLib.INSTANCE.ffi_slatedb_uniffi_rust_future_free_rust_buffer(future),
         // lift function
         (it) -> FfiConverterTypeWriteHandle.INSTANCE.lift(it),
         // Error FFI converter
@@ -602,18 +609,18 @@ public class Db implements AutoCloseable, DbInterface {
     return UniffiAsyncHelpers.uniffiRustCallAsync(
         callWithPointer(
             thisPtr -> {
-              return UniffiLib.INSTANCE.uniffi_slatedb_ffi_fn_method_db_write_with_options(
+              return UniffiLib.INSTANCE.uniffi_slatedb_uniffi_fn_method_db_write_with_options(
                   thisPtr,
                   FfiConverterTypeWriteBatch.INSTANCE.lower(batch),
                   FfiConverterTypeWriteOptions.INSTANCE.lower(options));
             }),
         (future, callback, continuation) ->
-            UniffiLib.INSTANCE.ffi_slatedb_ffi_rust_future_poll_rust_buffer(
+            UniffiLib.INSTANCE.ffi_slatedb_uniffi_rust_future_poll_rust_buffer(
                 future, callback, continuation),
         (future, continuation) ->
-            UniffiLib.INSTANCE.ffi_slatedb_ffi_rust_future_complete_rust_buffer(
+            UniffiLib.INSTANCE.ffi_slatedb_uniffi_rust_future_complete_rust_buffer(
                 future, continuation),
-        (future) -> UniffiLib.INSTANCE.ffi_slatedb_ffi_rust_future_free_rust_buffer(future),
+        (future) -> UniffiLib.INSTANCE.ffi_slatedb_uniffi_rust_future_free_rust_buffer(future),
         // lift function
         (it) -> FfiConverterTypeWriteHandle.INSTANCE.lift(it),
         // Error FFI converter

@@ -32,7 +32,7 @@ public class WriteBatch implements AutoCloseable, WriteBatchInterface {
         (Pointer)
             UniffiHelpers.uniffiRustCall(
                 _status -> {
-                  return UniffiLib.INSTANCE.uniffi_slatedb_ffi_fn_constructor_writebatch_new(
+                  return UniffiLib.INSTANCE.uniffi_slatedb_uniffi_fn_constructor_writebatch_new(
                       _status);
                 }));
   }
@@ -93,7 +93,7 @@ public class WriteBatch implements AutoCloseable, WriteBatchInterface {
       if (pointer != null) {
         UniffiHelpers.uniffiRustCall(
             status -> {
-              UniffiLib.INSTANCE.uniffi_slatedb_ffi_fn_free_writebatch(pointer, status);
+              UniffiLib.INSTANCE.uniffi_slatedb_uniffi_fn_free_writebatch(pointer, status);
               return null;
             });
       }
@@ -106,7 +106,7 @@ public class WriteBatch implements AutoCloseable, WriteBatchInterface {
           if (pointer == null) {
             throw new NullPointerException();
           }
-          return UniffiLib.INSTANCE.uniffi_slatedb_ffi_fn_clone_writebatch(pointer, status);
+          return UniffiLib.INSTANCE.uniffi_slatedb_uniffi_fn_clone_writebatch(pointer, status);
         });
   }
 
@@ -121,7 +121,7 @@ public class WriteBatch implements AutoCloseable, WriteBatchInterface {
               UniffiHelpers.uniffiRustCallWithError(
                   new DbExceptionErrorHandler(),
                   _status -> {
-                    UniffiLib.INSTANCE.uniffi_slatedb_ffi_fn_method_writebatch_delete(
+                    UniffiLib.INSTANCE.uniffi_slatedb_uniffi_fn_method_writebatch_delete(
                         it, FfiConverterByteArray.INSTANCE.lower(key), _status);
                   });
 
@@ -153,7 +153,7 @@ public class WriteBatch implements AutoCloseable, WriteBatchInterface {
               UniffiHelpers.uniffiRustCallWithError(
                   new DbExceptionErrorHandler(),
                   _status -> {
-                    UniffiLib.INSTANCE.uniffi_slatedb_ffi_fn_method_writebatch_merge(
+                    UniffiLib.INSTANCE.uniffi_slatedb_uniffi_fn_method_writebatch_merge(
                         it,
                         FfiConverterByteArray.INSTANCE.lower(key),
                         FfiConverterByteArray.INSTANCE.lower(operand),
@@ -189,12 +189,13 @@ public class WriteBatch implements AutoCloseable, WriteBatchInterface {
               UniffiHelpers.uniffiRustCallWithError(
                   new DbExceptionErrorHandler(),
                   _status -> {
-                    UniffiLib.INSTANCE.uniffi_slatedb_ffi_fn_method_writebatch_merge_with_options(
-                        it,
-                        FfiConverterByteArray.INSTANCE.lower(key),
-                        FfiConverterByteArray.INSTANCE.lower(operand),
-                        FfiConverterTypeMergeOptions.INSTANCE.lower(options),
-                        _status);
+                    UniffiLib.INSTANCE
+                        .uniffi_slatedb_uniffi_fn_method_writebatch_merge_with_options(
+                            it,
+                            FfiConverterByteArray.INSTANCE.lower(key),
+                            FfiConverterByteArray.INSTANCE.lower(operand),
+                            FfiConverterTypeMergeOptions.INSTANCE.lower(options),
+                            _status);
                   });
 
             } catch (Exception e) {
@@ -225,7 +226,7 @@ public class WriteBatch implements AutoCloseable, WriteBatchInterface {
               UniffiHelpers.uniffiRustCallWithError(
                   new DbExceptionErrorHandler(),
                   _status -> {
-                    UniffiLib.INSTANCE.uniffi_slatedb_ffi_fn_method_writebatch_put(
+                    UniffiLib.INSTANCE.uniffi_slatedb_uniffi_fn_method_writebatch_put(
                         it,
                         FfiConverterByteArray.INSTANCE.lower(key),
                         FfiConverterByteArray.INSTANCE.lower(value),
@@ -260,7 +261,7 @@ public class WriteBatch implements AutoCloseable, WriteBatchInterface {
               UniffiHelpers.uniffiRustCallWithError(
                   new DbExceptionErrorHandler(),
                   _status -> {
-                    UniffiLib.INSTANCE.uniffi_slatedb_ffi_fn_method_writebatch_put_with_options(
+                    UniffiLib.INSTANCE.uniffi_slatedb_uniffi_fn_method_writebatch_put_with_options(
                         it,
                         FfiConverterByteArray.INSTANCE.lower(key),
                         FfiConverterByteArray.INSTANCE.lower(value),

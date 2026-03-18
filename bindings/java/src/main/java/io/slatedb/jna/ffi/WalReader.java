@@ -34,7 +34,7 @@ public class WalReader implements AutoCloseable, WalReaderInterface {
         (Pointer)
             UniffiHelpers.uniffiRustCall(
                 _status -> {
-                  return UniffiLib.INSTANCE.uniffi_slatedb_ffi_fn_constructor_walreader_new(
+                  return UniffiLib.INSTANCE.uniffi_slatedb_uniffi_fn_constructor_walreader_new(
                       FfiConverterString.INSTANCE.lower(path),
                       FfiConverterTypeObjectStore.INSTANCE.lower(objectStore),
                       _status);
@@ -97,7 +97,7 @@ public class WalReader implements AutoCloseable, WalReaderInterface {
       if (pointer != null) {
         UniffiHelpers.uniffiRustCall(
             status -> {
-              UniffiLib.INSTANCE.uniffi_slatedb_ffi_fn_free_walreader(pointer, status);
+              UniffiLib.INSTANCE.uniffi_slatedb_uniffi_fn_free_walreader(pointer, status);
               return null;
             });
       }
@@ -110,7 +110,7 @@ public class WalReader implements AutoCloseable, WalReaderInterface {
           if (pointer == null) {
             throw new NullPointerException();
           }
-          return UniffiLib.INSTANCE.uniffi_slatedb_ffi_fn_clone_walreader(pointer, status);
+          return UniffiLib.INSTANCE.uniffi_slatedb_uniffi_fn_clone_walreader(pointer, status);
         });
   }
 
@@ -124,7 +124,7 @@ public class WalReader implements AutoCloseable, WalReaderInterface {
 
                   return UniffiHelpers.uniffiRustCall(
                       _status -> {
-                        return UniffiLib.INSTANCE.uniffi_slatedb_ffi_fn_method_walreader_get(
+                        return UniffiLib.INSTANCE.uniffi_slatedb_uniffi_fn_method_walreader_get(
                             it, FfiConverterLong.INSTANCE.lower(id), _status);
                       });
 
@@ -146,18 +146,18 @@ public class WalReader implements AutoCloseable, WalReaderInterface {
     return UniffiAsyncHelpers.uniffiRustCallAsync(
         callWithPointer(
             thisPtr -> {
-              return UniffiLib.INSTANCE.uniffi_slatedb_ffi_fn_method_walreader_list(
+              return UniffiLib.INSTANCE.uniffi_slatedb_uniffi_fn_method_walreader_list(
                   thisPtr,
                   FfiConverterOptionalLong.INSTANCE.lower(startId),
                   FfiConverterOptionalLong.INSTANCE.lower(endId));
             }),
         (future, callback, continuation) ->
-            UniffiLib.INSTANCE.ffi_slatedb_ffi_rust_future_poll_rust_buffer(
+            UniffiLib.INSTANCE.ffi_slatedb_uniffi_rust_future_poll_rust_buffer(
                 future, callback, continuation),
         (future, continuation) ->
-            UniffiLib.INSTANCE.ffi_slatedb_ffi_rust_future_complete_rust_buffer(
+            UniffiLib.INSTANCE.ffi_slatedb_uniffi_rust_future_complete_rust_buffer(
                 future, continuation),
-        (future) -> UniffiLib.INSTANCE.ffi_slatedb_ffi_rust_future_free_rust_buffer(future),
+        (future) -> UniffiLib.INSTANCE.ffi_slatedb_uniffi_rust_future_free_rust_buffer(future),
         // lift function
         (it) -> FfiConverterSequenceTypeWalFile.INSTANCE.lift(it),
         // Error FFI converter
@@ -175,7 +175,8 @@ public class WalReader implements AutoCloseable, WalReaderInterface {
               UniffiHelpers.uniffiRustCallWithError(
                   new DbExceptionErrorHandler(),
                   _status -> {
-                    UniffiLib.INSTANCE.uniffi_slatedb_ffi_fn_method_walreader_shutdown(it, _status);
+                    UniffiLib.INSTANCE.uniffi_slatedb_uniffi_fn_method_walreader_shutdown(
+                        it, _status);
                   });
 
             } catch (Exception e) {

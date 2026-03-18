@@ -83,7 +83,7 @@ public class ObjectStore implements AutoCloseable, ObjectStoreInterface {
       if (pointer != null) {
         UniffiHelpers.uniffiRustCall(
             status -> {
-              UniffiLib.INSTANCE.uniffi_slatedb_ffi_fn_free_objectstore(pointer, status);
+              UniffiLib.INSTANCE.uniffi_slatedb_uniffi_fn_free_objectstore(pointer, status);
               return null;
             });
       }
@@ -96,7 +96,7 @@ public class ObjectStore implements AutoCloseable, ObjectStoreInterface {
           if (pointer == null) {
             throw new NullPointerException();
           }
-          return UniffiLib.INSTANCE.uniffi_slatedb_ffi_fn_clone_objectstore(pointer, status);
+          return UniffiLib.INSTANCE.uniffi_slatedb_uniffi_fn_clone_objectstore(pointer, status);
         });
   }
 
@@ -106,7 +106,7 @@ public class ObjectStore implements AutoCloseable, ObjectStoreInterface {
           UniffiHelpers.uniffiRustCallWithError(
               new DbExceptionErrorHandler(),
               _status -> {
-                return UniffiLib.INSTANCE.uniffi_slatedb_ffi_fn_constructor_objectstore_from_env(
+                return UniffiLib.INSTANCE.uniffi_slatedb_uniffi_fn_constructor_objectstore_from_env(
                     FfiConverterOptionalString.INSTANCE.lower(envFile), _status);
               }));
     } catch (RuntimeException _e) {
@@ -128,7 +128,7 @@ public class ObjectStore implements AutoCloseable, ObjectStoreInterface {
           UniffiHelpers.uniffiRustCallWithError(
               new DbExceptionErrorHandler(),
               _status -> {
-                return UniffiLib.INSTANCE.uniffi_slatedb_ffi_fn_constructor_objectstore_resolve(
+                return UniffiLib.INSTANCE.uniffi_slatedb_uniffi_fn_constructor_objectstore_resolve(
                     FfiConverterString.INSTANCE.lower(url), _status);
               }));
     } catch (RuntimeException _e) {

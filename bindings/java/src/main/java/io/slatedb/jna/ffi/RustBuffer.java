@@ -28,7 +28,7 @@ public class RustBuffer extends Structure {
         UniffiHelpers.uniffiRustCall(
             (UniffiRustCallStatus status) -> {
               return (RustBuffer.ByValue)
-                  UniffiLib.INSTANCE.ffi_slatedb_ffi_rustbuffer_alloc(size, status);
+                  UniffiLib.INSTANCE.ffi_slatedb_uniffi_rustbuffer_alloc(size, status);
             });
     if (buffer.data == null) {
       throw new RuntimeException(
@@ -40,7 +40,7 @@ public class RustBuffer extends Structure {
   public static void free(RustBuffer.ByValue buffer) {
     UniffiHelpers.uniffiRustCall(
         (status) -> {
-          UniffiLib.INSTANCE.ffi_slatedb_ffi_rustbuffer_free(buffer, status);
+          UniffiLib.INSTANCE.ffi_slatedb_uniffi_rustbuffer_free(buffer, status);
           return null;
         });
   }

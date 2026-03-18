@@ -4,8 +4,8 @@ set -euo pipefail
 
 EXPECTED_BINDGEN_VERSION="0.2.1"
 DEFAULT_OUT_DIR="bindings/java/src/main/java"
-CRATE_NAME="slatedb_ffi"
-LIB_NAME="slatedb_ffi"
+CRATE_NAME="slatedb_uniffi"
+LIB_NAME="slatedb_uniffi"
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "${script_dir}/.." && pwd)"
@@ -74,9 +74,9 @@ mkdir -p "${raw_dir}" "${out_dir}"
 (
     cd "${repo_root}"
     if [[ "${CARGO_PROFILE}" = "release" ]]; then
-        cargo build --release -p slatedb-ffi
+        cargo build --release -p slatedb-uniffi
     else
-        cargo build -p slatedb-ffi
+        cargo build -p slatedb-uniffi
     fi
 )
 

@@ -83,7 +83,7 @@ public class MergeOperatorImpl implements AutoCloseable, MergeOperator {
       if (pointer != null) {
         UniffiHelpers.uniffiRustCall(
             status -> {
-              UniffiLib.INSTANCE.uniffi_slatedb_ffi_fn_free_mergeoperator(pointer, status);
+              UniffiLib.INSTANCE.uniffi_slatedb_uniffi_fn_free_mergeoperator(pointer, status);
               return null;
             });
       }
@@ -96,7 +96,7 @@ public class MergeOperatorImpl implements AutoCloseable, MergeOperator {
           if (pointer == null) {
             throw new NullPointerException();
           }
-          return UniffiLib.INSTANCE.uniffi_slatedb_ffi_fn_clone_mergeoperator(pointer, status);
+          return UniffiLib.INSTANCE.uniffi_slatedb_uniffi_fn_clone_mergeoperator(pointer, status);
         });
   }
 
@@ -112,12 +112,13 @@ public class MergeOperatorImpl implements AutoCloseable, MergeOperator {
                   return UniffiHelpers.uniffiRustCallWithError(
                       new MergeOperatorCallbackExceptionErrorHandler(),
                       _status -> {
-                        return UniffiLib.INSTANCE.uniffi_slatedb_ffi_fn_method_mergeoperator_merge(
-                            it,
-                            FfiConverterByteArray.INSTANCE.lower(key),
-                            FfiConverterOptionalByteArray.INSTANCE.lower(existingValue),
-                            FfiConverterByteArray.INSTANCE.lower(operand),
-                            _status);
+                        return UniffiLib.INSTANCE
+                            .uniffi_slatedb_uniffi_fn_method_mergeoperator_merge(
+                                it,
+                                FfiConverterByteArray.INSTANCE.lower(key),
+                                FfiConverterOptionalByteArray.INSTANCE.lower(existingValue),
+                                FfiConverterByteArray.INSTANCE.lower(operand),
+                                _status);
                       });
 
                 } catch (Exception e) {

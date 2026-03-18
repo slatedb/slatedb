@@ -3,8 +3,8 @@
 set -euo pipefail
 
 DEFAULT_OUT_DIR="bindings/python/src/slatedb/ffi"
-CRATE_NAME="slatedb_ffi"
-LIB_NAME="slatedb_ffi"
+CRATE_NAME="slatedb_uniffi"
+LIB_NAME="slatedb_uniffi"
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "${script_dir}/.." && pwd)"
@@ -88,9 +88,9 @@ mkdir -p "${raw_dir}" "${out_dir}"
 (
     cd "${repo_root}"
     if [[ "${CARGO_PROFILE}" = "release" ]]; then
-        cargo build --release -p slatedb-ffi
+        cargo build --release -p slatedb-uniffi
     else
-        cargo build -p slatedb-ffi
+        cargo build -p slatedb-uniffi
     fi
 )
 
@@ -100,7 +100,7 @@ lib_path="${lib_dir}/${lib_filename}"
 
 (
     cd "${repo_root}"
-    cargo run -p slatedb-ffi --bin slatedb-uniffi-bindgen --features bindgen-cli -- generate \
+    cargo run -p slatedb-uniffi --bin slatedb-uniffi-bindgen --features bindgen-cli -- generate \
         --library \
         --crate "${CRATE_NAME}" \
         --language python \

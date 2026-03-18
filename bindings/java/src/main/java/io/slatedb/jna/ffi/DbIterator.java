@@ -84,7 +84,7 @@ public class DbIterator implements AutoCloseable, DbIteratorInterface {
       if (pointer != null) {
         UniffiHelpers.uniffiRustCall(
             status -> {
-              UniffiLib.INSTANCE.uniffi_slatedb_ffi_fn_free_dbiterator(pointer, status);
+              UniffiLib.INSTANCE.uniffi_slatedb_uniffi_fn_free_dbiterator(pointer, status);
               return null;
             });
       }
@@ -97,7 +97,7 @@ public class DbIterator implements AutoCloseable, DbIteratorInterface {
           if (pointer == null) {
             throw new NullPointerException();
           }
-          return UniffiLib.INSTANCE.uniffi_slatedb_ffi_fn_clone_dbiterator(pointer, status);
+          return UniffiLib.INSTANCE.uniffi_slatedb_uniffi_fn_clone_dbiterator(pointer, status);
         });
   }
 
@@ -106,15 +106,15 @@ public class DbIterator implements AutoCloseable, DbIteratorInterface {
     return UniffiAsyncHelpers.uniffiRustCallAsync(
         callWithPointer(
             thisPtr -> {
-              return UniffiLib.INSTANCE.uniffi_slatedb_ffi_fn_method_dbiterator_next(thisPtr);
+              return UniffiLib.INSTANCE.uniffi_slatedb_uniffi_fn_method_dbiterator_next(thisPtr);
             }),
         (future, callback, continuation) ->
-            UniffiLib.INSTANCE.ffi_slatedb_ffi_rust_future_poll_rust_buffer(
+            UniffiLib.INSTANCE.ffi_slatedb_uniffi_rust_future_poll_rust_buffer(
                 future, callback, continuation),
         (future, continuation) ->
-            UniffiLib.INSTANCE.ffi_slatedb_ffi_rust_future_complete_rust_buffer(
+            UniffiLib.INSTANCE.ffi_slatedb_uniffi_rust_future_complete_rust_buffer(
                 future, continuation),
-        (future) -> UniffiLib.INSTANCE.ffi_slatedb_ffi_rust_future_free_rust_buffer(future),
+        (future) -> UniffiLib.INSTANCE.ffi_slatedb_uniffi_rust_future_free_rust_buffer(future),
         // lift function
         (it) -> FfiConverterOptionalTypeKeyValue.INSTANCE.lift(it),
         // Error FFI converter
@@ -126,15 +126,15 @@ public class DbIterator implements AutoCloseable, DbIteratorInterface {
     return UniffiAsyncHelpers.uniffiRustCallAsync(
         callWithPointer(
             thisPtr -> {
-              return UniffiLib.INSTANCE.uniffi_slatedb_ffi_fn_method_dbiterator_seek(
+              return UniffiLib.INSTANCE.uniffi_slatedb_uniffi_fn_method_dbiterator_seek(
                   thisPtr, FfiConverterByteArray.INSTANCE.lower(key));
             }),
         (future, callback, continuation) ->
-            UniffiLib.INSTANCE.ffi_slatedb_ffi_rust_future_poll_void(
+            UniffiLib.INSTANCE.ffi_slatedb_uniffi_rust_future_poll_void(
                 future, callback, continuation),
         (future, continuation) ->
-            UniffiLib.INSTANCE.ffi_slatedb_ffi_rust_future_complete_void(future, continuation),
-        (future) -> UniffiLib.INSTANCE.ffi_slatedb_ffi_rust_future_free_void(future),
+            UniffiLib.INSTANCE.ffi_slatedb_uniffi_rust_future_complete_void(future, continuation),
+        (future) -> UniffiLib.INSTANCE.ffi_slatedb_uniffi_rust_future_free_void(future),
         // lift function
         () -> {},
         // Error FFI converter

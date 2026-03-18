@@ -33,10 +33,11 @@ public class DbReaderBuilder implements AutoCloseable, DbReaderBuilderInterface 
         (Pointer)
             UniffiHelpers.uniffiRustCall(
                 _status -> {
-                  return UniffiLib.INSTANCE.uniffi_slatedb_ffi_fn_constructor_dbreaderbuilder_new(
-                      FfiConverterString.INSTANCE.lower(path),
-                      FfiConverterTypeObjectStore.INSTANCE.lower(objectStore),
-                      _status);
+                  return UniffiLib.INSTANCE
+                      .uniffi_slatedb_uniffi_fn_constructor_dbreaderbuilder_new(
+                          FfiConverterString.INSTANCE.lower(path),
+                          FfiConverterTypeObjectStore.INSTANCE.lower(objectStore),
+                          _status);
                 }));
   }
 
@@ -96,7 +97,7 @@ public class DbReaderBuilder implements AutoCloseable, DbReaderBuilderInterface 
       if (pointer != null) {
         UniffiHelpers.uniffiRustCall(
             status -> {
-              UniffiLib.INSTANCE.uniffi_slatedb_ffi_fn_free_dbreaderbuilder(pointer, status);
+              UniffiLib.INSTANCE.uniffi_slatedb_uniffi_fn_free_dbreaderbuilder(pointer, status);
               return null;
             });
       }
@@ -109,7 +110,7 @@ public class DbReaderBuilder implements AutoCloseable, DbReaderBuilderInterface 
           if (pointer == null) {
             throw new NullPointerException();
           }
-          return UniffiLib.INSTANCE.uniffi_slatedb_ffi_fn_clone_dbreaderbuilder(pointer, status);
+          return UniffiLib.INSTANCE.uniffi_slatedb_uniffi_fn_clone_dbreaderbuilder(pointer, status);
         });
   }
 
@@ -118,14 +119,16 @@ public class DbReaderBuilder implements AutoCloseable, DbReaderBuilderInterface 
     return UniffiAsyncHelpers.uniffiRustCallAsync(
         callWithPointer(
             thisPtr -> {
-              return UniffiLib.INSTANCE.uniffi_slatedb_ffi_fn_method_dbreaderbuilder_build(thisPtr);
+              return UniffiLib.INSTANCE.uniffi_slatedb_uniffi_fn_method_dbreaderbuilder_build(
+                  thisPtr);
             }),
         (future, callback, continuation) ->
-            UniffiLib.INSTANCE.ffi_slatedb_ffi_rust_future_poll_pointer(
+            UniffiLib.INSTANCE.ffi_slatedb_uniffi_rust_future_poll_pointer(
                 future, callback, continuation),
         (future, continuation) ->
-            UniffiLib.INSTANCE.ffi_slatedb_ffi_rust_future_complete_pointer(future, continuation),
-        (future) -> UniffiLib.INSTANCE.ffi_slatedb_ffi_rust_future_free_pointer(future),
+            UniffiLib.INSTANCE.ffi_slatedb_uniffi_rust_future_complete_pointer(
+                future, continuation),
+        (future) -> UniffiLib.INSTANCE.ffi_slatedb_uniffi_rust_future_free_pointer(future),
         // lift function
         (it) -> FfiConverterTypeDbReader.INSTANCE.lift(it),
         // Error FFI converter
@@ -144,7 +147,7 @@ public class DbReaderBuilder implements AutoCloseable, DbReaderBuilderInterface 
                   new DbExceptionErrorHandler(),
                   _status -> {
                     UniffiLib.INSTANCE
-                        .uniffi_slatedb_ffi_fn_method_dbreaderbuilder_with_checkpoint_id(
+                        .uniffi_slatedb_uniffi_fn_method_dbreaderbuilder_with_checkpoint_id(
                             it, FfiConverterString.INSTANCE.lower(checkpointId), _status);
                   });
 
@@ -177,7 +180,7 @@ public class DbReaderBuilder implements AutoCloseable, DbReaderBuilderInterface 
                   new DbExceptionErrorHandler(),
                   _status -> {
                     UniffiLib.INSTANCE
-                        .uniffi_slatedb_ffi_fn_method_dbreaderbuilder_with_merge_operator(
+                        .uniffi_slatedb_uniffi_fn_method_dbreaderbuilder_with_merge_operator(
                             it,
                             FfiConverterTypeMergeOperator.INSTANCE.lower(mergeOperator),
                             _status);
@@ -211,7 +214,7 @@ public class DbReaderBuilder implements AutoCloseable, DbReaderBuilderInterface 
               UniffiHelpers.uniffiRustCallWithError(
                   new DbExceptionErrorHandler(),
                   _status -> {
-                    UniffiLib.INSTANCE.uniffi_slatedb_ffi_fn_method_dbreaderbuilder_with_options(
+                    UniffiLib.INSTANCE.uniffi_slatedb_uniffi_fn_method_dbreaderbuilder_with_options(
                         it, FfiConverterTypeReaderOptions.INSTANCE.lower(options), _status);
                   });
 
@@ -244,7 +247,7 @@ public class DbReaderBuilder implements AutoCloseable, DbReaderBuilderInterface 
                   new DbExceptionErrorHandler(),
                   _status -> {
                     UniffiLib.INSTANCE
-                        .uniffi_slatedb_ffi_fn_method_dbreaderbuilder_with_wal_object_store(
+                        .uniffi_slatedb_uniffi_fn_method_dbreaderbuilder_with_wal_object_store(
                             it,
                             FfiConverterTypeObjectStore.INSTANCE.lower(walObjectStore),
                             _status);

@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
-    "bindings/ffi",
+    "bindings/uniffi",
     "examples",
     "slatedb",
     "slatedb-common",

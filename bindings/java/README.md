@@ -1,6 +1,6 @@
 # SlateDB JNA Bindings
 
-This module contains low-level Java bindings generated from `bindings/ffi` with UniFFI and `uniffi-bindgen-java`.
+This module contains low-level Java bindings generated from `bindings/uniffi` with UniFFI and `uniffi-bindgen-java`.
 
 The published artifact name is `slatedb-jna`. The plain `slatedb` artifact name is intentionally left open for a future Panama/FFM-based Java binding.
 
@@ -56,18 +56,18 @@ bindings/java/build/libs/slatedb-jna-<version>.jar
 
 ## Runtime Native Library
 
-This module does not bundle native libraries in v1. Consumers must provide a built `slatedb_ffi` dynamic library separately.
+This module does not bundle native libraries in v1. Consumers must provide a built `slatedb_uniffi` dynamic library separately.
 
 You can let JNA resolve the library through its normal search path, or override it explicitly with:
 
 ```bash
--Duniffi.component.slatedb.libraryOverride=/absolute/path/to/libslatedb_ffi.dylib
+-Duniffi.component.slatedb.libraryOverride=/absolute/path/to/libslatedb_uniffi.dylib
 ```
 
-On Linux use `libslatedb_ffi.so`, and on Windows use `slatedb_ffi.dll`.
+On Linux use `libslatedb_uniffi.so`, and on Windows use `slatedb_uniffi.dll`.
 
 To build the host native library locally:
 
 ```bash
-cargo build -p slatedb-ffi
+cargo build -p slatedb-uniffi
 ```

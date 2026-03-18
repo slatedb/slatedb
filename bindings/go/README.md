@@ -1,6 +1,6 @@
 # SlateDB Go UniFFI Bindings
 
-This module contains low-level Go bindings generated from `bindings/ffi` with UniFFI.
+This module contains low-level Go bindings generated from `bindings/uniffi` with UniFFI.
 
 The generated API lives in `slatedb.io/slatedb-go/ffi`. The module root is intentionally left open for a future idiomatic wrapper layer.
 
@@ -39,7 +39,7 @@ Generated files are checked in. Normal `go build` and `go test` do not require t
 Build the Rust library first:
 
 ```bash
-cargo build -p slatedb-ffi
+cargo build -p slatedb-uniffi
 ```
 
 Then run Go tests from `bindings/go`:
@@ -59,7 +59,7 @@ Windows regeneration requires a bash-compatible shell such as Git Bash, MSYS2, o
 ## Layout
 
 - `ffi/`: generated low-level Go package plus minimal cgo glue
-- `../ffi/`: Rust UniFFI source crate used as the generation source of truth
+- `../uniffi/`: Rust UniFFI source crate used as the generation source of truth
 - `../../scripts/generate_go_bindings.sh`: reproducible regeneration entrypoint
 
 ## Minimal Example
@@ -74,12 +74,12 @@ import (
 )
 
 func main() {
-	store, err := ffi.FfiObjectStoreResolve("memory:///")
+	store, err := ffi.ObjectStoreResolve("memory:///")
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	builder := ffi.NewFfiDbBuilder("/tmp/slatedb-go-cache", store)
+	builder := ffi.NewDbBuilder("/tmp/slatedb-go-cache", store)
 	db, err := builder.Build()
 	if err != nil {
 		log.Fatal(err)

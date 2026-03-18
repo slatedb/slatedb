@@ -56,11 +56,11 @@ if (!(cargoProfile in ['debug', 'release'])) {
 
 tasks.register('buildNativeLib', Exec) {
     group = 'build'
-    description = "Build the host slatedb-ffi native library (${cargoProfile})."
+    description = "Build the host slatedb-uniffi native library (${cargoProfile})."
     workingDir repoRoot
     commandLine cargoProfile == 'release'
-        ? ['cargo', 'build', '--release', '-p', 'slatedb-ffi']
-        : ['cargo', 'build', '-p', 'slatedb-ffi']
+        ? ['cargo', 'build', '--release', '-p', 'slatedb-uniffi']
+        : ['cargo', 'build', '-p', 'slatedb-uniffi']
 }
 
 def generatedJavaSources = fileTree('src/main/java') {

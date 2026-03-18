@@ -83,7 +83,7 @@ public class Settings implements AutoCloseable, SettingsInterface {
       if (pointer != null) {
         UniffiHelpers.uniffiRustCall(
             status -> {
-              UniffiLib.INSTANCE.uniffi_slatedb_ffi_fn_free_settings(pointer, status);
+              UniffiLib.INSTANCE.uniffi_slatedb_uniffi_fn_free_settings(pointer, status);
               return null;
             });
       }
@@ -96,7 +96,7 @@ public class Settings implements AutoCloseable, SettingsInterface {
           if (pointer == null) {
             throw new NullPointerException();
           }
-          return UniffiLib.INSTANCE.uniffi_slatedb_ffi_fn_clone_settings(pointer, status);
+          return UniffiLib.INSTANCE.uniffi_slatedb_uniffi_fn_clone_settings(pointer, status);
         });
   }
 
@@ -131,7 +131,7 @@ public class Settings implements AutoCloseable, SettingsInterface {
               UniffiHelpers.uniffiRustCallWithError(
                   new DbExceptionErrorHandler(),
                   _status -> {
-                    UniffiLib.INSTANCE.uniffi_slatedb_ffi_fn_method_settings_set(
+                    UniffiLib.INSTANCE.uniffi_slatedb_uniffi_fn_method_settings_set(
                         it,
                         FfiConverterString.INSTANCE.lower(key),
                         FfiConverterString.INSTANCE.lower(valueJson),
@@ -167,7 +167,7 @@ public class Settings implements AutoCloseable, SettingsInterface {
                       new DbExceptionErrorHandler(),
                       _status -> {
                         return UniffiLib.INSTANCE
-                            .uniffi_slatedb_ffi_fn_method_settings_to_json_string(it, _status);
+                            .uniffi_slatedb_uniffi_fn_method_settings_to_json_string(it, _status);
                       });
 
                 } catch (Exception e) {
@@ -192,7 +192,7 @@ public class Settings implements AutoCloseable, SettingsInterface {
       return FfiConverterTypeSettings.INSTANCE.lift(
           UniffiHelpers.uniffiRustCall(
               _status -> {
-                return UniffiLib.INSTANCE.uniffi_slatedb_ffi_fn_constructor_settings_default(
+                return UniffiLib.INSTANCE.uniffi_slatedb_uniffi_fn_constructor_settings_default(
                     _status);
               }));
     } catch (RuntimeException _e) {
@@ -210,7 +210,7 @@ public class Settings implements AutoCloseable, SettingsInterface {
           UniffiHelpers.uniffiRustCallWithError(
               new DbExceptionErrorHandler(),
               _status -> {
-                return UniffiLib.INSTANCE.uniffi_slatedb_ffi_fn_constructor_settings_from_env(
+                return UniffiLib.INSTANCE.uniffi_slatedb_uniffi_fn_constructor_settings_from_env(
                     FfiConverterString.INSTANCE.lower(prefix), _status);
               }));
     } catch (RuntimeException _e) {
@@ -234,7 +234,7 @@ public class Settings implements AutoCloseable, SettingsInterface {
               new DbExceptionErrorHandler(),
               _status -> {
                 return UniffiLib.INSTANCE
-                    .uniffi_slatedb_ffi_fn_constructor_settings_from_env_with_default(
+                    .uniffi_slatedb_uniffi_fn_constructor_settings_from_env_with_default(
                         FfiConverterString.INSTANCE.lower(prefix),
                         FfiConverterTypeSettings.INSTANCE.lower(defaultSettings),
                         _status);
@@ -258,7 +258,7 @@ public class Settings implements AutoCloseable, SettingsInterface {
           UniffiHelpers.uniffiRustCallWithError(
               new DbExceptionErrorHandler(),
               _status -> {
-                return UniffiLib.INSTANCE.uniffi_slatedb_ffi_fn_constructor_settings_from_file(
+                return UniffiLib.INSTANCE.uniffi_slatedb_uniffi_fn_constructor_settings_from_file(
                     FfiConverterString.INSTANCE.lower(path), _status);
               }));
     } catch (RuntimeException _e) {
@@ -281,7 +281,7 @@ public class Settings implements AutoCloseable, SettingsInterface {
               new DbExceptionErrorHandler(),
               _status -> {
                 return UniffiLib.INSTANCE
-                    .uniffi_slatedb_ffi_fn_constructor_settings_from_json_string(
+                    .uniffi_slatedb_uniffi_fn_constructor_settings_from_json_string(
                         FfiConverterString.INSTANCE.lower(json), _status);
               }));
     } catch (RuntimeException _e) {
@@ -303,7 +303,8 @@ public class Settings implements AutoCloseable, SettingsInterface {
           UniffiHelpers.uniffiRustCallWithError(
               new DbExceptionErrorHandler(),
               _status -> {
-                return UniffiLib.INSTANCE.uniffi_slatedb_ffi_fn_constructor_settings_load(_status);
+                return UniffiLib.INSTANCE.uniffi_slatedb_uniffi_fn_constructor_settings_load(
+                    _status);
               }));
     } catch (RuntimeException _e) {
 

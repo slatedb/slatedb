@@ -8,7 +8,7 @@ public class Slatedb {
       UniffiHelpers.uniffiRustCallWithError(
           new DbExceptionErrorHandler(),
           _status -> {
-            UniffiLib.INSTANCE.uniffi_slatedb_ffi_fn_func_init_logging(
+            UniffiLib.INSTANCE.uniffi_slatedb_uniffi_fn_func_init_logging(
                 FfiConverterTypeLogLevel.INSTANCE.lower(level),
                 FfiConverterOptionalTypeLogCallback.INSTANCE.lower(callback),
                 _status);
