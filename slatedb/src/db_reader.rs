@@ -223,9 +223,9 @@ impl DbReaderInner {
     fn should_reestablish_checkpoint(&self, latest: &ManifestCore) -> bool {
         let read_guard = self.state.read();
         let current_state = read_guard.core();
-        latest.replay_after_wal_id > current_state.replay_after_wal_id
-            || latest.last_compacted_l0_sst_view_id != current_state.last_compacted_l0_sst_view_id
+        latest.last_compacted_l0_sst_view_id != current_state.last_compacted_l0_sst_view_id
             || latest.compacted != current_state.compacted
+            || latest.last_l0_seq > read_guard.last_remote_persisted_seq
     }
 
     async fn replace_checkpoint(
@@ -439,11 +439,15 @@ impl DbReaderInner {
             sst_iter_options,
         };
 
-        let wal_id_start = if let Some(latest_replayed_table) = into_tables.front() {
-            latest_replayed_table.recent_flushed_wal_id() + 1
-        } else {
-            core.replay_after_wal_id + 1
-        };
+        let (mut replay_after_wal_id, mut last_committed_seq) =
+            if let Some(latest_replayed_table) = into_tables.front() {
+                (
+                    latest_replayed_table.recent_flushed_wal_id(),
+                    latest_replayed_table.table().last_seq().unwrap_or(0),
+                )
+            } else {
+                (core.replay_after_wal_id, core.last_l0_seq)
+            };
         let wal_id_end = if replay_new_wals {
             table_store.last_seen_wal_id().await? + 1
         } else {
@@ -451,24 +455,30 @@ impl DbReaderInner {
         };
 
         let mut replay_iter = WalReplayIterator::range(
-            wal_id_start..wal_id_end,
+            (replay_after_wal_id + 1)..wal_id_end,
             core,
             replay_options,
             Arc::clone(&table_store),
         )
         .await?;
 
-        let mut last_wal_id = 0;
-        let mut last_committed_seq = 0;
-        while let Some(replayed_table) = replay_iter.next().await? {
-            last_wal_id = replayed_table.last_wal_id;
+        while let Some(replayed_table) = match replay_iter.next().await {
+            Ok(Some(replayed_table)) => Some(replayed_table),
+            Ok(None) => None,
+            Err(err) if has_not_found_object_store_error(&err) => None,
+            Err(err) => return Err(err),
+        } {
+            assert!(replayed_table.last_wal_id > replay_after_wal_id);
+            // Allow equality here since it's possible that a WAL file is an empty fence entry.
+            assert!(replayed_table.last_seq >= last_committed_seq);
+            replay_after_wal_id = replayed_table.last_wal_id;
             last_committed_seq = replayed_table.last_seq;
             let imm_memtable =
                 ImmutableMemtable::new(replayed_table.table, replayed_table.last_wal_id);
             into_tables.push_front(Arc::new(imm_memtable));
         }
 
-        Ok((last_wal_id, last_committed_seq))
+        Ok((replay_after_wal_id, last_committed_seq))
     }
 
     /// Returns an error if the reader has been closed.
@@ -1025,6 +1035,24 @@ impl DbRead for DbReader {
     }
 }
 
+/// Checks if the error or any of its sources is an `object_store::Error::NotFound` error.
+fn has_not_found_object_store_error(err: &(dyn std::error::Error + 'static)) -> bool {
+    let mut current = Some(err);
+    while let Some(current_err) = current {
+        if current_err
+            .downcast_ref::<object_store::Error>()
+            .is_some_and(|err| matches!(err, object_store::Error::NotFound { .. }))
+            || current_err
+                .downcast_ref::<Arc<object_store::Error>>()
+                .is_some_and(|err| matches!(err.as_ref(), object_store::Error::NotFound { .. }))
+        {
+            return true;
+        }
+        current = current_err.source();
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::CheckpointState;
@@ -1392,6 +1420,175 @@ mod tests {
             vec![RowEntry::new_value(b"fresh_key", b"fresh_value", 4)],
         )
         .await;
+    }
+
+    #[test]
+    fn has_not_found_object_store_error_should_walk_nested_error_sources() {
+        let err = crate::Error::from(SlateDBError::from(object_store::Error::NotFound {
+            path: "missing-wal".to_string(),
+            source: Box::new(std::io::Error::other("missing")),
+        }));
+
+        assert!(super::has_not_found_object_store_error(&err));
+    }
+
+    #[test]
+    fn has_not_found_object_store_error_should_ignore_non_not_found_errors() {
+        let err = SlateDBError::from(object_store::Error::NotImplemented);
+
+        assert!(!super::has_not_found_object_store_error(&err));
+    }
+
+    #[tokio::test]
+    async fn replay_wal_into_should_treat_missing_wal_sst_as_end_of_iteration() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_db_reader_missing_wal");
+        let test_provider = TestProvider::new(path, Arc::clone(&object_store));
+        let table_store = test_provider.table_store();
+
+        write_wal_sst(
+            Arc::clone(&table_store),
+            1,
+            vec![RowEntry::new_value(b"key", b"value", 1)],
+        )
+        .await
+        .unwrap();
+
+        let mut into_tables = VecDeque::new();
+        let mut core = ManifestCore::new();
+        core.next_wal_sst_id = 3;
+
+        let (last_wal_id, last_committed_seq) = DbReaderInner::replay_wal_into(
+            Arc::clone(&table_store),
+            &DbReaderOptions::default(),
+            &core,
+            &mut into_tables,
+            false,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(last_wal_id, 0);
+        assert_eq!(last_committed_seq, 0);
+        assert!(into_tables.is_empty());
+    }
+
+    #[tokio::test]
+    async fn replay_wal_into_should_keep_previously_replayed_tables_before_missing_wal_sst() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_db_reader_missing_wal_after_replay");
+        let test_provider = TestProvider::new(path, Arc::clone(&object_store));
+        let table_store = test_provider.table_store();
+
+        let wal_1_row = RowEntry::new_value(b"a", &[b'a'; 8], 1);
+        let wal_2_row_1 = RowEntry::new_value(b"b", &[b'b'; 40], 2);
+        let wal_2_row_2 = RowEntry::new_value(b"c", &[b'c'; 40], 3);
+
+        let max_memtable_bytes = table_store.estimate_encoded_size_compacted(
+            2,
+            wal_1_row.estimated_size() + wal_2_row_1.estimated_size(),
+        ) as u64;
+
+        write_wal_sst(Arc::clone(&table_store), 1, vec![wal_1_row.clone()])
+            .await
+            .unwrap();
+        write_wal_sst(
+            Arc::clone(&table_store),
+            2,
+            vec![wal_2_row_1.clone(), wal_2_row_2],
+        )
+        .await
+        .unwrap();
+
+        let mut into_tables = VecDeque::new();
+        let mut core = ManifestCore::new();
+        // Force the reader to attempt to read up to 4 even though 3 and 4 don't exist.
+        core.next_wal_sst_id = 4;
+        let reader_options = DbReaderOptions {
+            max_memtable_bytes,
+            ..DbReaderOptions::default()
+        };
+
+        let (last_wal_id, last_committed_seq) = DbReaderInner::replay_wal_into(
+            Arc::clone(&table_store),
+            &reader_options,
+            &core,
+            &mut into_tables,
+            false,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(last_wal_id, 2);
+        assert_eq!(last_committed_seq, 2);
+        assert_eq!(into_tables.len(), 1);
+
+        let replayed = into_tables.front().unwrap();
+        assert_eq!(replayed.recent_flushed_wal_id(), 2);
+
+        let mut replayed_iter = replayed.table().iter();
+        test_utils::assert_iterator(&mut replayed_iter, vec![wal_1_row, wal_2_row_1]).await;
+    }
+
+    #[tokio::test]
+    async fn replay_wal_into_should_noop_for_fresh_db_with_no_writes() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_db_reader_fresh_db_no_writes");
+        let test_provider = TestProvider::new(path, Arc::clone(&object_store));
+        let table_store = test_provider.table_store();
+
+        let mut into_tables = VecDeque::new();
+        let core = ManifestCore::new();
+
+        let (last_wal_id, last_committed_seq) = DbReaderInner::replay_wal_into(
+            Arc::clone(&table_store),
+            &DbReaderOptions::default(),
+            &core,
+            &mut into_tables,
+            true,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(last_wal_id, 0);
+        assert_eq!(last_committed_seq, 0);
+        assert!(into_tables.is_empty());
+    }
+
+    #[tokio::test]
+    async fn replay_wal_into_should_replay_single_wal_for_fresh_db() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_db_reader_fresh_db_one_wal");
+        let test_provider = TestProvider::new(path, Arc::clone(&object_store));
+        let table_store = test_provider.table_store();
+
+        let wal_row = RowEntry::new_value(b"key", b"value", 1);
+        write_wal_sst(Arc::clone(&table_store), 1, vec![wal_row.clone()])
+            .await
+            .unwrap();
+
+        let mut into_tables = VecDeque::new();
+        let core = ManifestCore::new();
+
+        let (last_wal_id, last_committed_seq) = DbReaderInner::replay_wal_into(
+            Arc::clone(&table_store),
+            &DbReaderOptions::default(),
+            &core,
+            &mut into_tables,
+            true,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(last_wal_id, 1);
+        assert_eq!(last_committed_seq, 1);
+        assert_eq!(into_tables.len(), 1);
+
+        let replayed = into_tables.front().unwrap();
+        assert_eq!(replayed.recent_flushed_wal_id(), 1);
+
+        let mut replayed_iter = replayed.table().iter();
+        test_utils::assert_iterator(&mut replayed_iter, vec![wal_row]).await;
     }
 
     #[tokio::test(start_paused = true)]
@@ -1885,6 +2082,65 @@ mod tests {
             assert_eq!(metadata.first_seq, *expected_table.seqs.first().unwrap());
             assert_eq!(metadata.last_seq, *expected_table.seqs.last().unwrap());
         }
+    }
+
+    #[test]
+    fn should_reestablish_checkpoint_when_latest_last_l0_seq_exceeds_last_remote_persisted_seq() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from(format!(
+            "/tmp/test_db_reader_should_reestablish_checkpoint_{}",
+            Uuid::new_v4()
+        ));
+        let test_provider = TestProvider::new(path, Arc::clone(&object_store));
+        let manifest_store = test_provider.manifest_store();
+        let table_store = test_provider.table_store();
+
+        let mut current_core = ManifestCore::new();
+        current_core.last_l0_seq = 10;
+        current_core.next_wal_sst_id = 2;
+
+        let prior_state = CheckpointState {
+            checkpoint: test_checkpoint(1, test_provider.system_clock.clone()),
+            manifest: Manifest::initial(current_core.clone()),
+            imm_memtable: VecDeque::from([immutable_memtable(
+                1,
+                vec![RowEntry::new_value(b"key", b"value", 10)],
+            )]),
+            last_wal_id: 1,
+            last_remote_persisted_seq: 10,
+        };
+
+        let oracle = Arc::new(DbReaderOracle::new(0));
+        let stat_registry = Arc::new(StatRegistry::new());
+        let reader = Reader {
+            table_store: Arc::clone(&table_store),
+            db_stats: DbStats::new(stat_registry.as_ref()),
+            mono_clock: Arc::new(MonotonicClock::new(
+                test_provider.system_clock.clone(),
+                i64::MIN,
+            )),
+            oracle: oracle.clone(),
+            merge_operator: None,
+        };
+        let inner = DbReaderInner {
+            manifest_store,
+            table_store,
+            options: DbReaderOptions::default(),
+            state: parking_lot::RwLock::new(Arc::new(prior_state)),
+            system_clock: test_provider.system_clock.clone(),
+            user_checkpoint_id: None,
+            oracle,
+            reader,
+            closed_result_watcher: ClosedResultWriter::new(WatchableOnceCell::new()),
+            rand: test_provider.rand.clone(),
+        };
+
+        assert!(!inner.should_reestablish_checkpoint(&current_core));
+
+        let mut latest = current_core.clone();
+        latest.last_l0_seq = 11;
+
+        assert!(inner.should_reestablish_checkpoint(&latest));
     }
 
     #[tokio::test]
