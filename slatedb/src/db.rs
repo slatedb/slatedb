@@ -66,6 +66,7 @@ use crate::oracle::{DbOracle, Oracle};
 use crate::paths::PathResolver;
 use crate::rand::DbRand;
 use crate::reader::Reader;
+use crate::snapshot_manager::SnapshotManager;
 use crate::sst_iter::SstIteratorOptions;
 use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
@@ -106,6 +107,7 @@ pub(crate) struct DbInner {
     pub(crate) wal_enabled: bool,
     /// [`txn_manager`] tracks all the live transactions and related metadata.
     pub(crate) txn_manager: Arc<TransactionManager>,
+    pub(crate) snapshot_manager: Arc<SnapshotManager>,
     pub(crate) status_reporter: DbStatusReporter,
 }
 
@@ -166,6 +168,7 @@ impl DbInner {
         ));
 
         let txn_manager = Arc::new(TransactionManager::new(oracle.clone(), rand.clone()));
+        let snapshot_manager = Arc::new(SnapshotManager::new());
 
         let db_inner = Self {
             state,
@@ -184,6 +187,7 @@ impl DbInner {
             fp_registry,
             reader,
             txn_manager,
+            snapshot_manager,
             status_reporter,
         };
         Ok(db_inner)
@@ -766,7 +770,7 @@ impl Db {
     /// ```
     pub async fn snapshot(&self) -> Result<Arc<DbSnapshot>, crate::Error> {
         self.inner.status()?;
-        let snapshot = DbSnapshot::new(self.inner.clone(), self.inner.txn_manager.clone(), None);
+        let snapshot = DbSnapshot::new(self.inner.clone(), None);
         Ok(snapshot)
     }
 
@@ -5374,19 +5378,17 @@ mod tests {
         db.put(b"key2", b"value2").await.unwrap();
         db.inner.flush_memtables().await.unwrap();
 
-        // Verify that txn_manager.min_active_seq() returns the snapshot seq
-        let min_active_seq = db.inner.txn_manager.min_active_seq();
+        let min_active_seq = db.inner.snapshot_manager.min_seq();
         assert!(min_active_seq.is_some());
         assert_eq!(min_active_seq.unwrap(), snapshot_seq);
 
-        // Verify recent_snapshot_min_seq should be the minimum active seq after flush
         {
             let state = db.inner.state.read();
             let recent_min_seq = state.state().core().recent_snapshot_min_seq;
             assert_eq!(
                 recent_min_seq,
                 min_active_seq.unwrap(),
-                "recent_snapshot_min_seq should equal min_active_seq after flush"
+                "recent_snapshot_min_seq should equal snapshot_manager.min_seq() after flush"
             );
         }
 
@@ -5967,7 +5969,7 @@ mod tests {
         // - txn1 is no longer active in txn_manager
         let pause_reached = tokio::time::timeout(Duration::from_secs(5), async {
             loop {
-                let txn1_removed_from_active = db.inner.txn_manager.min_active_seq().is_none();
+                let txn1_removed_from_active = !db.inner.txn_manager.has_active_txns();
                 if txn1_removed_from_active {
                     break;
                 }

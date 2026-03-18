@@ -1,42 +1,34 @@
 use bytes::Bytes;
 use std::ops::RangeBounds;
 use std::sync::Arc;
-use uuid::Uuid;
 
 use crate::bytes_range::BytesRange;
 use crate::config::{ReadOptions, ScanOptions};
 use crate::db_iter::DbIterator;
+use crate::oracle::Oracle;
 use crate::types::KeyValue;
 
 use crate::db::DbInner;
-use crate::transaction_manager::TransactionManager;
 use crate::DbRead;
 
 pub struct DbSnapshot {
-    /// txn_id is the id of the transaction that created this snapshot
-    txn_id: Uuid,
-    /// txn_seq is the sequence number of the transaction that created this snapshot
     started_seq: u64,
-    /// Reference to the transaction manager that created this snapshot
-    txn_manager: Arc<TransactionManager>,
-    /// Reference to the database
     db_inner: Arc<DbInner>,
 }
 
 impl DbSnapshot {
-    pub(crate) fn new(
-        db_inner: Arc<DbInner>,
-        txn_manager: Arc<TransactionManager>,
-        seq: Option<u64>,
-    ) -> Arc<Self> {
-        let (txn_id, seq) = txn_manager.new_snapshot(seq);
+    pub(crate) fn new(db_inner: Arc<DbInner>, seq: Option<u64>) -> Arc<Self> {
+        let seq = seq.unwrap_or_else(|| db_inner.oracle.last_committed_seq());
+        db_inner.snapshot_manager.register(seq);
 
         Arc::new(Self {
-            txn_id,
             started_seq: seq,
-            txn_manager,
             db_inner,
         })
+    }
+
+    pub(crate) fn started_seq(&self) -> u64 {
+        self.started_seq
     }
 
     /// Get a value from the snapshot with default read options.
@@ -217,10 +209,9 @@ impl DbRead for DbSnapshot {
     }
 }
 
-/// Unregister from transaction manager when dropped.
 impl Drop for DbSnapshot {
     fn drop(&mut self) {
-        self.txn_manager.drop_txn(&self.txn_id);
+        self.db_inner.snapshot_manager.unregister(self.started_seq);
     }
 }
 
@@ -232,7 +223,6 @@ mod tests {
     use crate::config::{CompactorOptions, PutOptions, Settings, WriteOptions};
     use crate::object_store::memory::InMemory;
     use crate::object_store::ObjectStore;
-    use crate::oracle::Oracle;
     use crate::{Db, Error};
     use bytes::Bytes;
     use fail_parallel::FailPointRegistry;
@@ -749,7 +739,7 @@ mod tests {
 
         // At this point the data is in the memtable but not committed; create the snapshot
         let snapshot = db.snapshot().await?;
-        assert_eq!(snapshot.started_seq, recent_committed_seq);
+        assert_eq!(snapshot.started_seq(), recent_committed_seq);
 
         // Turn off the failpoint to let the put complete
         fail_parallel::cfg(fp_registry.clone(), "write-batch-pre-commit", "off").unwrap();

@@ -41,13 +41,13 @@ impl DbInner {
     ) -> Result<RetentionIterator<Box<dyn RowEntryIterator>>, SlateDBError> {
         let state = self.state.read().view();
 
-        // Compute retention boundary using both active transactions AND durable watermark.
+        // Compute retention boundary using both active snapshots AND durable watermark.
         // Remote readers (DurabilityLevel::Remote) cap visibility at last_remote_persisted_seq,
         // so we must retain at least one version at or below that boundary for each key.
         // Otherwise, if we only keep a newer non-durable version, remote readers would skip
         // it and incorrectly fall back to an even older value.
         let durable_seq = self.oracle.last_remote_persisted_seq();
-        let min_retention_seq = match self.txn_manager.min_active_seq() {
+        let min_retention_seq = match self.snapshot_manager.min_seq() {
             Some(active_seq) => Some(active_seq.min(durable_seq)),
             None => Some(durable_seq),
         };
@@ -319,9 +319,7 @@ mod tests {
     async fn test_flush(#[case] test_case: FlushImmTableTestCase) {
         // Given
         let db = setup_test_db_with_merge_operator().await;
-        db.inner
-            .txn_manager
-            .new_snapshot(Some(test_case.min_active_seq));
+        db.inner.snapshot_manager.register(test_case.min_active_seq);
         // Set durable watermark high so it doesn't interfere with transaction-based retention tests
         db.inner.oracle.advance_durable_seq(u64::MAX);
         let table = WritableKVTable::new();
@@ -349,7 +347,7 @@ mod tests {
     async fn test_err_when_merge_operator_not_set_and_merges_exist() {
         // Given
         let db = setup_test_db_without_merge_operator().await;
-        db.inner.txn_manager.new_snapshot(Some(0));
+        db.inner.snapshot_manager.register(0);
         let table = WritableKVTable::new();
         table.put(RowEntry::new_value(&Bytes::from("key"), b"value1", 1));
         table.put(RowEntry::new_merge(&Bytes::from("key"), b"value2", 2));
@@ -373,7 +371,7 @@ mod tests {
     async fn test_no_err_merge_operator_not_set_and_no_merges() {
         // Given
         let db = setup_test_db_without_merge_operator().await;
-        db.inner.txn_manager.new_snapshot(Some(0));
+        db.inner.snapshot_manager.register(0);
         let table = WritableKVTable::new();
         table.put(RowEntry::new_value(&Bytes::from("key1"), b"value1", 1));
         table.put(RowEntry::new_tombstone(&Bytes::from("key2"), 2));
@@ -437,7 +435,7 @@ mod tests {
         // Given: DB with active transaction at seq=3, durable watermark at seq=1
         let db = setup_test_db_with_merge_operator().await;
         db.inner.oracle.advance_durable_seq(1);
-        db.inner.txn_manager.new_snapshot(Some(3)); // Active txn at seq=3
+        db.inner.snapshot_manager.register(3); // Active snapshot at seq=3
 
         let table = WritableKVTable::new();
         // Add versions: seq=1, seq=2, seq=3, seq=4
