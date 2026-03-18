@@ -12,7 +12,7 @@ mod object_store;
 mod settings;
 mod types;
 mod validation;
-mod wal;
+mod wal_reader;
 mod write_batch;
 
 pub use builder::{DbBuilder, DbReaderBuilder};
@@ -31,7 +31,7 @@ pub use merge_operator::MergeOperator;
 pub use object_store::ObjectStore;
 pub use settings::Settings;
 pub use types::{KeyRange, KeyValue, RowEntry, RowEntryKind, WriteHandle};
-pub use wal::{WalFile, WalFileIterator, WalFileMetadata, WalReader};
+pub use wal_reader::{WalFile, WalFileIterator, WalFileMetadata, WalReader};
 pub use write_batch::WriteBatch;
 
-uniffi::setup_scaffolding!("slatedb");
+uniffi::setup_scaffolding!("uniffi");

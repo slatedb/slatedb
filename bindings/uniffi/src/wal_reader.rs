@@ -48,13 +48,6 @@ impl WalFile {
     pub fn next_file(&self) -> Arc<WalFile> {
         Arc::new(WalFile::new(self.inner.next_file()))
     }
-
-    // `shutdown` because `close` is reserved by uniffi for the destructor.
-    /// No-op close method for API symmetry.
-    #[uniffi::method(name = "shutdown")]
-    pub fn close(&self) -> Result<(), Error> {
-        Ok(())
-    }
 }
 
 #[uniffi::export(async_runtime = "tokio")]
@@ -91,16 +84,6 @@ impl WalFileIterator {
     }
 }
 
-#[uniffi::export]
-impl WalFileIterator {
-    // `shutdown` because `close` is reserved by uniffi for the destructor.
-    /// No-op close method for API symmetry.
-    #[uniffi::method(name = "shutdown")]
-    pub fn close(&self) -> Result<(), Error> {
-        Ok(())
-    }
-}
-
 #[uniffi::export(async_runtime = "tokio")]
 impl WalFileIterator {
     /// Returns the next raw row entry from the WAL file.
@@ -129,13 +112,6 @@ impl WalReader {
     /// Returns a handle for the WAL file with the given ID.
     pub fn get(&self, id: u64) -> Arc<WalFile> {
         Arc::new(WalFile::new(self.inner.get(id)))
-    }
-
-    // `shutdown` because `close` is reserved by uniffi for the destructor.
-    /// No-op close method for API symmetry.
-    #[uniffi::method(name = "shutdown")]
-    pub fn close(&self) -> Result<(), Error> {
-        Ok(())
     }
 }
 
