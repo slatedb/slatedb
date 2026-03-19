@@ -164,6 +164,7 @@ See who's using SlateDB.
 - [SQLync](https://sqlync.com)
 - [Storrito](https://storrito.com)
 - [Tensorlake](https://www.tensorlake.ai)
+- [Volga](https://github.com/volga-project/volga)
 - [ZeroFS](https://zerofs.net)
 
 ## Talks
