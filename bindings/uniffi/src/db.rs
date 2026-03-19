@@ -55,6 +55,7 @@ impl Db {
 
     /// Reads the current value for `key`.
     pub async fn get(&self, key: Vec<u8>) -> Result<Option<Vec<u8>>, Error> {
+        validate_key(&key)?;
         Ok(self.inner.get(key).await?.map(|value| value.to_vec()))
     }
 
@@ -64,6 +65,7 @@ impl Db {
         key: Vec<u8>,
         options: ReadOptions,
     ) -> Result<Option<Vec<u8>>, Error> {
+        validate_key(&key)?;
         let options = options.into();
         Ok(self
             .inner
@@ -74,6 +76,7 @@ impl Db {
 
     /// Reads the current row version for `key`, including metadata.
     pub async fn get_key_value(&self, key: Vec<u8>) -> Result<Option<KeyValue>, Error> {
+        validate_key(&key)?;
         Ok(self.inner.get_key_value(key).await?.map(KeyValue::from))
     }
 
@@ -83,6 +86,7 @@ impl Db {
         key: Vec<u8>,
         options: ReadOptions,
     ) -> Result<Option<KeyValue>, Error> {
+        validate_key(&key)?;
         let options = options.into();
         Ok(self
             .inner

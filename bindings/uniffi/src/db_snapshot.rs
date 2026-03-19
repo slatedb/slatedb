@@ -4,6 +4,7 @@ use crate::config::{ReadOptions, ScanOptions};
 use crate::error::Error;
 use crate::iterator::DbIterator;
 use crate::types::{KeyRange, KeyValue};
+use crate::validation::validate_key;
 
 /// Read-only snapshot representing a consistent view of the database.
 #[derive(uniffi::Object)]
@@ -21,6 +22,7 @@ impl DbSnapshot {
 impl DbSnapshot {
     /// Reads the value visible in this snapshot for `key`.
     pub async fn get(&self, key: Vec<u8>) -> Result<Option<Vec<u8>>, Error> {
+        validate_key(&key)?;
         Ok(self.inner.get(key).await?.map(|value| value.to_vec()))
     }
 
@@ -30,6 +32,7 @@ impl DbSnapshot {
         key: Vec<u8>,
         options: ReadOptions,
     ) -> Result<Option<Vec<u8>>, Error> {
+        validate_key(&key)?;
         let options = options.into();
         Ok(self
             .inner
@@ -40,6 +43,7 @@ impl DbSnapshot {
 
     /// Reads the row version visible in this snapshot for `key`.
     pub async fn get_key_value(&self, key: Vec<u8>) -> Result<Option<KeyValue>, Error> {
+        validate_key(&key)?;
         Ok(self.inner.get_key_value(key).await?.map(KeyValue::from))
     }
 
@@ -49,6 +53,7 @@ impl DbSnapshot {
         key: Vec<u8>,
         options: ReadOptions,
     ) -> Result<Option<KeyValue>, Error> {
+        validate_key(&key)?;
         let options = options.into();
         Ok(self
             .inner

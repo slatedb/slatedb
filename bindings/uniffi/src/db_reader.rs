@@ -4,6 +4,7 @@ use crate::config::{ReadOptions, ScanOptions};
 use crate::error::Error;
 use crate::iterator::DbIterator;
 use crate::types::KeyRange;
+use crate::validation::validate_key;
 
 /// Read-only database handle opened by [`crate::DbReaderBuilder`].
 #[derive(uniffi::Object)]
@@ -21,6 +22,7 @@ impl DbReader {
 impl DbReader {
     /// Reads the current value for `key`.
     pub async fn get(&self, key: Vec<u8>) -> Result<Option<Vec<u8>>, Error> {
+        validate_key(&key)?;
         Ok(self.inner.get(key).await?.map(|value| value.to_vec()))
     }
 
@@ -30,6 +32,7 @@ impl DbReader {
         key: Vec<u8>,
         options: ReadOptions,
     ) -> Result<Option<Vec<u8>>, Error> {
+        validate_key(&key)?;
         let options = options.into();
         Ok(self
             .inner

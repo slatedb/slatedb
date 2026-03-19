@@ -122,6 +122,7 @@ impl DbTransaction {
 
     /// Reads the value visible to this transaction for `key`.
     pub async fn get(&self, key: Vec<u8>) -> Result<Option<Vec<u8>>, Error> {
+        validate_key(&key)?;
         let guard = self.inner.lock().await;
         let tx = guard.as_ref().ok_or(SlateDbError::TransactionCompleted)?;
         Ok(tx.get(key).await?.map(|value| value.to_vec()))
@@ -133,6 +134,7 @@ impl DbTransaction {
         key: Vec<u8>,
         options: ReadOptions,
     ) -> Result<Option<Vec<u8>>, Error> {
+        validate_key(&key)?;
         let options = options.into();
         let guard = self.inner.lock().await;
         let tx = guard.as_ref().ok_or(SlateDbError::TransactionCompleted)?;
@@ -144,6 +146,7 @@ impl DbTransaction {
 
     /// Reads the row version visible to this transaction for `key`.
     pub async fn get_key_value(&self, key: Vec<u8>) -> Result<Option<KeyValue>, Error> {
+        validate_key(&key)?;
         let guard = self.inner.lock().await;
         let tx = guard.as_ref().ok_or(SlateDbError::TransactionCompleted)?;
         Ok(tx.get_key_value(key).await?.map(KeyValue::from))
@@ -155,6 +158,7 @@ impl DbTransaction {
         key: Vec<u8>,
         options: ReadOptions,
     ) -> Result<Option<KeyValue>, Error> {
+        validate_key(&key)?;
         let options = options.into();
         let guard = self.inner.lock().await;
         let tx = guard.as_ref().ok_or(SlateDbError::TransactionCompleted)?;
