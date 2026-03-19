@@ -50,11 +50,8 @@ impl SsTableHandle {
         }
     }
 
-    pub(crate) fn estimate_size(&self) -> u64 {
-        // this is a hacky estimate of the sst size since we don't have it stored anywhere
-        // right now. Just use the index's offset and add the index length. Since the index
-        // is the last thing we put in the SST before the info footer, this should be a good
-        // estimate for now.
+    /// Returns an estimate of the SST's on-disk size in bytes.
+    pub fn estimate_size(&self) -> u64 {
         self.info.index_offset + self.info.index_len
     }
 }
@@ -240,7 +237,8 @@ impl SsTableView {
         Some(range)
     }
 
-    pub(crate) fn estimate_size(&self) -> u64 {
+    /// Returns an estimate of the underlying SST's on-disk size in bytes.
+    pub fn estimate_size(&self) -> u64 {
         self.sst.estimate_size()
     }
 }
@@ -400,8 +398,10 @@ impl SortedRun {
         }
     }
 
-    pub(crate) fn tables_covering_range(&self, range: &BytesRange) -> VecDeque<&SsTableView> {
-        let matching_range = self.table_idx_covering_range(range);
+    /// Returns the SST views in this sorted run that overlap the given key range.
+    pub fn tables_covering_range<R: RangeBounds<Bytes>>(&self, range: R) -> VecDeque<&SsTableView> {
+        let bytes_range = BytesRange::new(range.start_bound().cloned(), range.end_bound().cloned());
+        let matching_range = self.table_idx_covering_range(&bytes_range);
         self.sst_views[matching_range].iter().collect()
     }
 
@@ -876,7 +876,7 @@ mod tests {
         )| {
             let sorted_first_keys: BTreeSet<Bytes> = table_first_keys.into_iter().collect();
             let sorted_run = create_sorted_run(0, &sorted_first_keys);
-            let covering_tables = sorted_run.tables_covering_range(&range);
+            let covering_tables = sorted_run.tables_covering_range(range.clone());
             let first_key = sorted_first_keys.first().unwrap().clone();
 
             let range_start_key = test_utils::bound_as_option(range.start_bound())

@@ -109,8 +109,7 @@ impl<'a> SortedRunIterator<'a> {
         sst_iter_options: SstIteratorOptions,
     ) -> Result<Self, SlateDBError> {
         let range = (range.start_bound().cloned(), range.end_bound().cloned());
-        // todo remove conversion to bytesrange
-        let tables = sorted_run.tables_covering_range(&BytesRange::from_slice(range));
+        let tables = sorted_run.tables_covering_range(BytesRange::from_slice(range));
         let view = SortedRunView::Borrowed(tables, range);
         SortedRunIterator::new(view, table_store, sst_iter_options).await
     }
