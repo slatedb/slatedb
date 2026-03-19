@@ -1,4 +1,6 @@
 **/target
+**/.gradle/
+**/build/
 .DS_Store
 .idea
 .env

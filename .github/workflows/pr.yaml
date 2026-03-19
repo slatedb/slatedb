@@ -214,18 +214,27 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Java 24
+      - name: Set up Java 21
         uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
-          java-version: '24'
+          java-version: '21'
 
-      - name: Build Rust FFI library for Java bindings
-        run: cargo build --release -p slatedb-c
+      - name: Install uniffi-bindgen-java
+        env:
+          # uniffi-bindgen-java has some warnings that we don't want to fail the build, so we
+          # override RUSTFLAGS here to avoid the -Dwarnings from the global env.
+          RUSTFLAGS: ""
+        run: cargo install uniffi-bindgen-java --git https://github.com/IronCoreLabs/uniffi-bindgen-java.git
 
-      - name: Run Java tests (slatedb-java)
-        working-directory: ./slatedb-java
-        run: ./gradlew check
+      - name: Generate Java bindings
+        run: ./scripts/generate-java-uniffi.sh
+
+      - name: Check generated Java bindings
+        run: git diff --exit-code -- bindings/java
+
+      - name: Run Java tests (bindings/java)
+        run: ./bindings/java/gradlew -p bindings/java :slatedb-uniffi:check
 
   microbenchmarks:
     runs-on: ubuntu-latest

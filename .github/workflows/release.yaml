@@ -50,6 +50,10 @@ jobs:
         run: |
           sed -i "s/^version = \".*\"/version = \"${{ github.event.inputs.version }}\"/" slatedb-py/pyproject.toml
 
+      - name: Set Java package version
+        run: |
+          sed -i "s/^version=.*/version=${{ github.event.inputs.version }}-SNAPSHOT/" bindings/java/gradle.properties
+
       # Commit changes
       - name: Commit version bump
         uses: EndBug/add-and-commit@v9
