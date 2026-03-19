@@ -116,7 +116,7 @@ Visit [slatedb.io](https://slatedb.io) to learn more.
 
 ## Bindings
 
-- [Go](https://github.com/slatedb/slatedb/tree/main/slatedb-go) (official)
+- [Go](https://github.com/slatedb/slatedb/tree/main/bindings/go) (official)
 - [Java](https://github.com/slatedb/slatedb/tree/main/slatedb-java) (official)
 - [.NET](https://github.com/Pulsy-Global/slatedb-dotnet)
 - [Python](https://github.com/slatedb/slatedb/tree/main/slatedb-py) (official)

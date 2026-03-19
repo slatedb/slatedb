@@ -12,8 +12,6 @@ leads to better decisions. We seek to resolve disagreement by reaching
 consensus based on the merit of technical arguments, with no regard to status or
 formal role. This almost always works.
 
-_This document does not apply to https://github.com/slatedb/slatedb-go._
-
 # SlateDB Roles
 
 There are two formal roles in SlateDB:

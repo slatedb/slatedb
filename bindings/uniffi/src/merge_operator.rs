@@ -5,8 +5,12 @@ use slatedb::MergeOperatorError;
 
 use crate::error::MergeOperatorCallbackError;
 
+/// Application-provided merge operator used by merge-enabled databases.
 #[uniffi::export(with_foreign)]
 pub trait MergeOperator: Send + Sync {
+    /// Combines an existing value and a new merge operand into the next value.
+    ///
+    /// `existing_value` is `None` when the key has no visible base value.
     fn merge(
         &self,
         key: Vec<u8>,

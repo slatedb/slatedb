@@ -5,6 +5,7 @@ use serde_json::{Map, Value};
 
 use crate::error::{Error, SlateDbError};
 
+/// Mutable database settings object used to configure a [`crate::DbBuilder`].
 #[derive(uniffi::Object)]
 pub struct Settings {
     inner: Mutex<slatedb::Settings>,
@@ -30,16 +31,19 @@ impl Default for Settings {
 
 #[uniffi::export]
 impl Settings {
+    /// Creates a settings object populated with SlateDB defaults.
     #[uniffi::constructor(name = "default")]
     pub fn with_defaults() -> Arc<Self> {
         Arc::new(Self::default())
     }
 
+    /// Loads settings from a JSON, TOML, or YAML file based on its extension.
     #[uniffi::constructor]
     pub fn from_file(path: String) -> Result<Arc<Self>, Error> {
         Ok(Arc::new(Self::new(slatedb::Settings::from_file(path)?)))
     }
 
+    /// Parses settings from a JSON string.
     #[uniffi::constructor]
     pub fn from_json_string(json: String) -> Result<Arc<Self>, Error> {
         Ok(Arc::new(Self::new(
@@ -48,11 +52,13 @@ impl Settings {
         )))
     }
 
+    /// Loads settings from environment variables using `prefix`.
     #[uniffi::constructor]
     pub fn from_env(prefix: String) -> Result<Arc<Self>, Error> {
         Ok(Arc::new(Self::new(slatedb::Settings::from_env(&prefix)?)))
     }
 
+    /// Loads settings from environment variables, falling back to `default_settings`.
     #[uniffi::constructor]
     pub fn from_env_with_default(
         prefix: String,
@@ -63,6 +69,7 @@ impl Settings {
         )))
     }
 
+    /// Loads settings from SlateDB's default file and environment lookup order.
     #[uniffi::constructor]
     pub fn load() -> Result<Arc<Self>, Error> {
         Ok(Arc::new(Self::new(slatedb::Settings::load()?)))
@@ -112,6 +119,7 @@ impl Settings {
         Ok(())
     }
 
+    /// Serializes the current settings value to a JSON string.
     pub fn to_json_string(&self) -> Result<String, Error> {
         self.inner
             .lock()

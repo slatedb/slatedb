@@ -65,19 +65,24 @@ pub(crate) enum SlateDbError {
     },
 }
 
+/// Error returned by a foreign [`crate::MergeOperator`] implementation.
 #[derive(Debug, Error, uniffi::Error)]
 pub enum MergeOperatorCallbackError {
+    /// The merge callback failed with an application-defined message.
     #[error("{message}")]
     Failed { message: String },
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, uniffi::Enum)]
+/// Reason a database or reader reports itself as closed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
 pub enum CloseReason {
-    #[default]
-    None,
+    /// Closed cleanly by the caller.
     Clean,
+    /// Closed because another writer fenced this instance.
     Fenced,
+    /// Closed because of a panic in a background task.
     Panic,
+    /// Closed for a reason not modeled explicitly by this binding.
     Unknown,
 }
 
@@ -92,26 +97,35 @@ impl From<slatedb::CloseReason> for CloseReason {
     }
 }
 
+/// Error type returned by the UniFFI bindings.
 #[derive(Debug, Error, uniffi::Error)]
 pub enum Error {
+    /// Transaction-specific failure.
     #[error("{message}")]
     Transaction { message: String },
 
+    /// Operation attempted on a closed handle.
     #[error("{message}")]
     Closed {
+        /// Reported reason the handle is closed.
         reason: CloseReason,
+        /// Human-readable error message.
         message: String,
     },
 
+    /// Temporary unavailability, such as an unavailable dependency.
     #[error("{message}")]
     Unavailable { message: String },
 
+    /// Invalid input or invalid API usage.
     #[error("{message}")]
     Invalid { message: String },
 
+    /// Corrupt, missing, or otherwise invalid data was encountered.
     #[error("{message}")]
     Data { message: String },
 
+    /// Internal failure inside SlateDB or the binding layer.
     #[error("{message}")]
     Internal { message: String },
 }

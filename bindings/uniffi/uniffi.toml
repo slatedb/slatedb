@@ -1,0 +1,4 @@
+[bindings.go]
+go_mod = "slatedb.io/slatedb-go"
+package_name = "slatedb"
+c_module_filename = "slatedb"

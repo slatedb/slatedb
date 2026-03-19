@@ -181,26 +181,32 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Go 1.24.x
+      - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.24.x'
+          go-version-file: ./bindings/go/go.mod
 
       - name: Install build dependencies for CGO
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential pkg-config
 
-      - name: Build Rust FFI library for Go bindings
-        run: cargo build --release -p slatedb-c
+      - name: Install uniffi-bindgen-go
+        run: cargo install uniffi-bindgen-go --git https://github.com/NordSecurity/uniffi-bindgen-go --tag v0.5.0+v0.29.5
 
-      - name: Run Go tests (slatedb-go)
-        working-directory: ./slatedb-go/go
+      - name: Generate Go bindings
+        run: ./scripts/generate-go-uniffi.sh
+
+      - name: Check generated Go bindings
+        run: git diff --exit-code -- bindings/go
+
+      - name: Run Go tests (bindings/go)
+        working-directory: ./bindings/go
         env:
           CGO_ENABLED: '1'
-          CGO_LDFLAGS: "-L${{ github.workspace }}/target/release"
-          LD_LIBRARY_PATH: "${{ github.workspace }}/target/release:${LD_LIBRARY_PATH}"
-        run: go test -v ./...
+          CGO_LDFLAGS: "-L${{ github.workspace }}/target/debug"
+          LD_LIBRARY_PATH: "${{ github.workspace }}/target/debug:${LD_LIBRARY_PATH}"
+        run: go test ./...
 
   bindings-java:
     runs-on: ubuntu-latest
