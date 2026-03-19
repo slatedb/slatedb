@@ -1,4 +1,4 @@
-// Generate MDX wrappers for top-level RFCs so Starlight has frontmatter.
+// Generate Markdown wrappers for top-level RFCs so Starlight has frontmatter.
 // - Reads Markdown files via the `src/content/docs/rfcs` symlink.
 // - Writes wrappers to `src/content/docs/rfcs/` with frontmatter and rendered content.
 
@@ -96,9 +96,8 @@ export async function generateRfcWrappers() {
     // Remove wrappers that no longer have a source.
     const existing = await fs.readdir(wrappersDir).catch(() => []);
     for (const f of existing) {
-      if (!f.endsWith('.mdx')) continue;
-      const base = f.replace(/\.mdx$/, '.md');
-      if (!rfcFiles.includes(base)) {
+      if (!f.endsWith('.md')) continue;
+      if (!rfcFiles.includes(f)) {
         await fs.unlink(path.join(wrappersDir, f)).catch(() => {});
       }
     }
@@ -124,13 +123,13 @@ export async function generateRfcWrappers() {
         .filter(Boolean)
         .join('\n');
 
-      // Trim the first H1, strip any generated TOC, escape HTML entities, then write content as MDX.
+      // Trim the first H1, strip any generated TOC, then write content as Markdown.
       const contentWithoutH1 = raw.replace(/^\s*#\s+.+?(\r?\n)+/, '');
       const withoutToc = stripToc(contentWithoutH1);
       const withRfcLinks = rewriteRfcLinks(withoutToc, rfcFiles);
       const body = `${frontmatter}\n${withRfcLinks}\n`;
 
-      const outPath = path.join(wrappersDir, name.replace(/\.md$/, '.mdx'));
+      const outPath = path.join(wrappersDir, name);
       const prev = await fs.readFile(outPath, 'utf8').catch(() => null);
       if (prev !== body) {
         await fs.writeFile(outPath, body, 'utf8');
