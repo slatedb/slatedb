@@ -79,17 +79,6 @@ function rewriteRfcLinks(content, rfcFileNames) {
   );
 }
 
-// Escape HTML character entities and raw HTML so Markdown renders them as text.
-function escapeHtmlEntities(str) {
-  return str
-    // First, escape & but not already-encoded entities like &amp; &lt; &#x27; etc.
-    .replace(/&(?!(?:[a-zA-Z]+|#\d+|#x[0-9A-Fa-f]+);)/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
-}
-
 export async function generateRfcWrappers() {
   try {
     await fs.mkdir(wrappersDir, { recursive: true });
@@ -139,9 +128,7 @@ export async function generateRfcWrappers() {
       const contentWithoutH1 = raw.replace(/^\s*#\s+.+?(\r?\n)+/, '');
       const withoutToc = stripToc(contentWithoutH1);
       const withRfcLinks = rewriteRfcLinks(withoutToc, rfcFiles);
-      const safeContent = escapeHtmlEntities(withRfcLinks);
-
-      const body = `${frontmatter}\n${safeContent}\n`;
+      const body = `${frontmatter}\n${withRfcLinks}\n`;
 
       const outPath = path.join(wrappersDir, name.replace(/\.md$/, '.mdx'));
       const prev = await fs.readFile(outPath, 'utf8').catch(() => null);
