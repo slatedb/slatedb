@@ -402,6 +402,11 @@ impl SortedRun {
     }
 
     /// Returns the SST views in this sorted run that overlap the given key range.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a bound contains an empty `Bytes` value, or if the range is empty
+    /// (e.g. the start bound is greater than or equal to the end bound).
     pub fn tables_covering_range<R: RangeBounds<Bytes>>(&self, range: R) -> VecDeque<&SsTableView> {
         let bytes_range = BytesRange::new(range.start_bound().cloned(), range.end_bound().cloned());
         let matching_range = self.table_idx_covering_range(&bytes_range);
