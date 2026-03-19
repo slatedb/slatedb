@@ -34,4 +34,4 @@ pub use types::{KeyRange, KeyValue, RowEntry, RowEntryKind, WriteHandle};
 pub use wal_reader::{WalFile, WalFileIterator, WalFileMetadata, WalReader};
 pub use write_batch::WriteBatch;
 
-uniffi::setup_scaffolding!("uniffi");
+uniffi::setup_scaffolding!("slatedb");

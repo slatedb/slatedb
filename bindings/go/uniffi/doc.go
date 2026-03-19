@@ -1,10 +1,10 @@
-// Package uniffi exposes SlateDB's UniFFI-generated Go bindings.
+// Package slatedb exposes SlateDB's UniFFI-generated Go bindings.
 //
-// The module import path is:
+// The package import path is:
 //
-//	import "slatedb.io/slatedb-go"
+//	import "slatedb.io/slatedb-go/uniffi"
 //
-// The package name is `uniffi`. The API is intentionally close to the Rust
+// The package name is `slatedb`. The API is intentionally close to the Rust
 // UniFFI surface rather than a fully idiomatic handwritten Go wrapper, so most
 // types, option structs, and lifecycle methods map directly to the underlying
 // SlateDB API.
@@ -29,13 +29,13 @@
 // Most programs start by constructing an [ObjectStore], then using a
 // [DbBuilder] to open a writable [Db]:
 //
-//	store, err := uniffi.ObjectStoreResolve("memory:///")
+//	store, err := slatedb.ObjectStoreResolve("memory:///")
 //	if err != nil {
 //		panic(err)
 //	}
 //	defer store.Destroy()
 //
-//	builder := uniffi.NewDbBuilder("example-db", store)
+//	builder := slatedb.NewDbBuilder("example-db", store)
 //	defer builder.Destroy()
 //
 //	db, err := builder.Build()
@@ -171,4 +171,4 @@
 // Builders are single-use after `Build`. [WriteBatch] is single-use after
 // `Write`. Iterator `Next` methods return `nil` when exhausted, and transaction
 // commit methods may return `nil` when no write was emitted.
-package uniffi
+package slatedb

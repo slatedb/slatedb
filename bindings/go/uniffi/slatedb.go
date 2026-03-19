@@ -1,6 +1,6 @@
-package uniffi
+package slatedb
 
-// #include <uniffi.h>
+// #include <slatedb.h>
 import "C"
 
 import (
@@ -371,7 +371,7 @@ func uniffiCheckChecksums() {
 	})
 	if bindingsContractVersion != int(scaffoldingContractVersion) {
 		// If this happens try cleaning and rebuilding your project
-		panic("uniffi: UniFFI contract version mismatch")
+		panic("slatedb: UniFFI contract version mismatch")
 	}
 	{
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
@@ -379,7 +379,7 @@ func uniffiCheckChecksums() {
 		})
 		if checksum != 20973 {
 			// If this happens try cleaning and rebuilding your project
-			panic("uniffi: uniffi_slatedb_uniffi_checksum_func_init_logging: UniFFI API checksum mismatch")
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_func_init_logging: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -388,7 +388,7 @@ func uniffiCheckChecksums() {
 		})
 		if checksum != 51275 {
 			// If this happens try cleaning and rebuilding your project
-			panic("uniffi: uniffi_slatedb_uniffi_checksum_method_db_begin: UniFFI API checksum mismatch")
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_db_begin: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -397,7 +397,7 @@ func uniffiCheckChecksums() {
 		})
 		if checksum != 34129 {
 			// If this happens try cleaning and rebuilding your project
-			panic("uniffi: uniffi_slatedb_uniffi_checksum_method_db_delete: UniFFI API checksum mismatch")
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_db_delete: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -406,7 +406,7 @@ func uniffiCheckChecksums() {
 		})
 		if checksum != 42509 {
 			// If this happens try cleaning and rebuilding your project
-			panic("uniffi: uniffi_slatedb_uniffi_checksum_method_db_delete_with_options: UniFFI API checksum mismatch")
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_db_delete_with_options: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -415,7 +415,7 @@ func uniffiCheckChecksums() {
 		})
 		if checksum != 18130 {
 			// If this happens try cleaning and rebuilding your project
-			panic("uniffi: uniffi_slatedb_uniffi_checksum_method_db_flush: UniFFI API checksum mismatch")
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_db_flush: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -424,7 +424,7 @@ func uniffiCheckChecksums() {
 		})
 		if checksum != 63293 {
 			// If this happens try cleaning and rebuilding your project
-			panic("uniffi: uniffi_slatedb_uniffi_checksum_method_db_flush_with_options: UniFFI API checksum mismatch")
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_db_flush_with_options: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -433,7 +433,7 @@ func uniffiCheckChecksums() {
 		})
 		if checksum != 50068 {
 			// If this happens try cleaning and rebuilding your project
-			panic("uniffi: uniffi_slatedb_uniffi_checksum_method_db_get: UniFFI API checksum mismatch")
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_db_get: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -442,7 +442,7 @@ func uniffiCheckChecksums() {
 		})
 		if checksum != 57684 {
 			// If this happens try cleaning and rebuilding your project
-			panic("uniffi: uniffi_slatedb_uniffi_checksum_method_db_get_key_value: UniFFI API checksum mismatch")
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_db_get_key_value: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -451,7 +451,7 @@ func uniffiCheckChecksums() {
 		})
 		if checksum != 20648 {
 			// If this happens try cleaning and rebuilding your project
-			panic("uniffi: uniffi_slatedb_uniffi_checksum_method_db_get_key_value_with_options: UniFFI API checksum mismatch")
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_db_get_key_value_with_options: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -460,7 +460,7 @@ func uniffiCheckChecksums() {
 		})
 		if checksum != 20501 {
 			// If this happens try cleaning and rebuilding your project
-			panic("uniffi: uniffi_slatedb_uniffi_checksum_method_db_get_with_options: UniFFI API checksum mismatch")
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_db_get_with_options: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -469,7 +469,7 @@ func uniffiCheckChecksums() {
 		})
 		if checksum != 17999 {
 			// If this happens try cleaning and rebuilding your project
-			panic("uniffi: uniffi_slatedb_uniffi_checksum_method_db_merge: UniFFI API checksum mismatch")
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_db_merge: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -478,7 +478,7 @@ func uniffiCheckChecksums() {
 		})
 		if checksum != 61231 {
 			// If this happens try cleaning and rebuilding your project
-			panic("uniffi: uniffi_slatedb_uniffi_checksum_method_db_merge_with_options: UniFFI API checksum mismatch")
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_db_merge_with_options: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -487,7 +487,7 @@ func uniffiCheckChecksums() {
 		})
 		if checksum != 63278 {
 			// If this happens try cleaning and rebuilding your project
-			panic("uniffi: uniffi_slatedb_uniffi_checksum_method_db_metrics: UniFFI API checksum mismatch")
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_db_metrics: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -496,7 +496,7 @@ func uniffiCheckChecksums() {
 		})
 		if checksum != 59996 {
 			// If this happens try cleaning and rebuilding your project
-			panic("uniffi: uniffi_slatedb_uniffi_checksum_method_db_put: UniFFI API checksum mismatch")
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_db_put: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -505,7 +505,7 @@ func uniffiCheckChecksums() {
 		})
 		if checksum != 58268 {
 			// If this happens try cleaning and rebuilding your project
-			panic("uniffi: uniffi_slatedb_uniffi_checksum_method_db_put_with_options: UniFFI API checksum mismatch")
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_db_put_with_options: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -514,7 +514,7 @@ func uniffiCheckChecksums() {
 		})
 		if checksum != 38146 {
 			// If this happens try cleaning and rebuilding your project
-			panic("uniffi: uniffi_slatedb_uniffi_checksum_method_db_scan: UniFFI API checksum mismatch")
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_db_scan: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -523,7 +523,7 @@ func uniffiCheckChecksums() {
 		})
 		if checksum != 16589 {
 			// If this happens try cleaning and rebuilding your project
-			panic("uniffi: uniffi_slatedb_uniffi_checksum_method_db_scan_prefix: UniFFI API checksum mismatch")
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_db_scan_prefix: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -532,7 +532,7 @@ func uniffiCheckChecksums() {
 		})
 		if checksum != 37166 {
 			// If this happens try cleaning and rebuilding your project
-			panic("uniffi: uniffi_slatedb_uniffi_checksum_method_db_scan_prefix_with_options: UniFFI API checksum mismatch")
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_db_scan_prefix_with_options: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -541,7 +541,7 @@ func uniffiCheckChecksums() {
 		})
 		if checksum != 57778 {
 			// If this happens try cleaning and rebuilding your project
-			panic("uniffi: uniffi_slatedb_uniffi_checksum_method_db_scan_with_options: UniFFI API checksum mismatch")
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_db_scan_with_options: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -550,7 +550,7 @@ func uniffiCheckChecksums() {
 		})
 		if checksum != 43377 {
 			// If this happens try cleaning and rebuilding your project
-			panic("uniffi: uniffi_slatedb_uniffi_checksum_method_db_shutdown: UniFFI API checksum mismatch")
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_db_shutdown: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -559,7 +559,7 @@ func uniffiCheckChecksums() {
 		})
 		if checksum != 13313 {
 			// If this happens try cleaning and rebuilding your project
-			panic("uniffi: uniffi_slatedb_uniffi_checksum_method_db_snapshot: UniFFI API checksum mismatch")
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_db_snapshot: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -568,7 +568,7 @@ func uniffiCheckChecksums() {
 		})
 		if checksum != 55824 {
 			// If this happens try cleaning and rebuilding your project
-			panic("uniffi: uniffi_slatedb_uniffi_checksum_method_db_status: UniFFI API checksum mismatch")
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_db_status: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -577,7 +577,7 @@ func uniffiCheckChecksums() {
 		})
 		if checksum != 13969 {
 			// If this happens try cleaning and rebuilding your project
-			panic("uniffi: uniffi_slatedb_uniffi_checksum_method_db_write: UniFFI API checksum mismatch")
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_db_write: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -586,7 +586,7 @@ func uniffiCheckChecksums() {
 		})
 		if checksum != 34167 {
 			// If this happens try cleaning and rebuilding your project
-			panic("uniffi: uniffi_slatedb_uniffi_checksum_method_db_write_with_options: UniFFI API checksum mismatch")
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_db_write_with_options: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -595,7 +595,7 @@ func uniffiCheckChecksums() {
 		})
 		if checksum != 57780 {
 			// If this happens try cleaning and rebuilding your project
-			panic("uniffi: uniffi_slatedb_uniffi_checksum_method_dbbuilder_build: UniFFI API checksum mismatch")
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbbuilder_build: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -604,7 +604,7 @@ func uniffiCheckChecksums() {
 		})
 		if checksum != 47291 {
 			// If this happens try cleaning and rebuilding your project
-			panic("uniffi: uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_db_cache_disabled: UniFFI API checksum mismatch")
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_db_cache_disabled: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -613,7 +613,7 @@ func uniffiCheckChecksums() {
 		})
 		if checksum != 26367 {
 			// If this happens try cleaning and rebuilding your project
-			panic("uniffi: uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_merge_operator: UniFFI API checksum mismatch")
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_merge_operator: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -622,7 +622,7 @@ func uniffiCheckChecksums() {
 		})
 		if checksum != 4525 {
 			// If this happens try cleaning and rebuilding your project
-			panic("uniffi: uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_seed: UniFFI API checksum mismatch")
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_seed: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -631,7 +631,7 @@ func uniffiCheckChecksums() {
 		})
 		if checksum != 60845 {
 			// If this happens try cleaning and rebuilding your project
-			panic("uniffi: uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_settings: UniFFI API checksum mismatch")
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_settings: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -640,7 +640,7 @@ func uniffiCheckChecksums() {
 		})
 		if checksum != 9450 {
 			// If this happens try cleaning and rebuilding your project
-			panic("uniffi: uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_sst_block_size: UniFFI API checksum mismatch")
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_sst_block_size: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -649,7 +649,7 @@ func uniffiCheckChecksums() {
 		})
 		if checksum != 59224 {
 			// If this happens try cleaning and rebuilding your project
-			panic("uniffi: uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_wal_object_store: UniFFI API checksum mismatch")
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_wal_object_store: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -658,7 +658,7 @@ func uniffiCheckChecksums() {
 		})
 		if checksum != 49160 {
 			// If this happens try cleaning and rebuilding your project
-			panic("uniffi: uniffi_slatedb_uniffi_checksum_method_dbiterator_next: UniFFI API checksum mismatch")
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbiterator_next: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -667,7 +667,7 @@ func uniffiCheckChecksums() {
 		})
 		if checksum != 43547 {
 			// If this happens try cleaning and rebuilding your project
-			panic("uniffi: uniffi_slatedb_uniffi_checksum_method_dbiterator_seek: UniFFI API checksum mismatch")
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbiterator_seek: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -676,7 +676,7 @@ func uniffiCheckChecksums() {
 		})
 		if checksum != 22886 {
 			// If this happens try cleaning and rebuilding your project
-			panic("uniffi: uniffi_slatedb_uniffi_checksum_method_dbreader_get: UniFFI API checksum mismatch")
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbreader_get: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -685,7 +685,7 @@ func uniffiCheckChecksums() {
 		})
 		if checksum != 9133 {
 			// If this happens try cleaning and rebuilding your project
-			panic("uniffi: uniffi_slatedb_uniffi_checksum_method_dbreader_get_with_options: UniFFI API checksum mismatch")
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbreader_get_with_options: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -694,7 +694,7 @@ func uniffiCheckChecksums() {
 		})
 		if checksum != 19575 {
 			// If this happens try cleaning and rebuilding your project
-			panic("uniffi: uniffi_slatedb_uniffi_checksum_method_dbreader_scan: UniFFI API checksum mismatch")
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbreader_scan: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -703,7 +703,7 @@ func uniffiCheckChecksums() {
 		})
 		if checksum != 51732 {
 			// If this happens try cleaning and rebuilding your project
-			panic("uniffi: uniffi_slatedb_uniffi_checksum_method_dbreader_scan_prefix: UniFFI API checksum mismatch")
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbreader_scan_prefix: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -712,7 +712,7 @@ func uniffiCheckChecksums() {
 		})
 		if checksum != 24990 {
 			// If this happens try cleaning and rebuilding your project
-			panic("uniffi: uniffi_slatedb_uniffi_checksum_method_dbreader_scan_prefix_with_options: UniFFI API checksum mismatch")
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbreader_scan_prefix_with_options: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -721,7 +721,7 @@ func uniffiCheckChecksums() {
 		})
 		if checksum != 33406 {
 			// If this happens try cleaning and rebuilding your project
-			panic("uniffi: uniffi_slatedb_uniffi_checksum_method_dbreader_scan_with_options: UniFFI API checksum mismatch")
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbreader_scan_with_options: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -730,7 +730,7 @@ func uniffiCheckChecksums() {
 		})
 		if checksum != 33391 {
 			// If this happens try cleaning and rebuilding your project
-			panic("uniffi: uniffi_slatedb_uniffi_checksum_method_dbreader_shutdown: UniFFI API checksum mismatch")
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbreader_shutdown: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -739,7 +739,7 @@ func uniffiCheckChecksums() {
 		})
 		if checksum != 3383 {
 			// If this happens try cleaning and rebuilding your project
-			panic("uniffi: uniffi_slatedb_uniffi_checksum_method_dbreaderbuilder_build: UniFFI API checksum mismatch")
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbreaderbuilder_build: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -748,7 +748,7 @@ func uniffiCheckChecksums() {
 		})
 		if checksum != 20357 {
 			// If this happens try cleaning and rebuilding your project
-			panic("uniffi: uniffi_slatedb_uniffi_checksum_method_dbreaderbuilder_with_checkpoint_id: UniFFI API checksum mismatch")
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbreaderbuilder_with_checkpoint_id: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -757,7 +757,7 @@ func uniffiCheckChecksums() {
 		})
 		if checksum != 54971 {
 			// If this happens try cleaning and rebuilding your project
-			panic("uniffi: uniffi_slatedb_uniffi_checksum_method_dbreaderbuilder_with_merge_operator: UniFFI API checksum mismatch")
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbreaderbuilder_with_merge_operator: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -766,7 +766,7 @@ func uniffiCheckChecksums() {
 		})
 		if checksum != 5765 {
 			// If this happens try cleaning and rebuilding your project
-			panic("uniffi: uniffi_slatedb_uniffi_checksum_method_dbreaderbuilder_with_options: UniFFI API checksum mismatch")
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbreaderbuilder_with_options: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -775,7 +775,7 @@ func uniffiCheckChecksums() {
 		})
 		if checksum != 15471 {
 			// If this happens try cleaning and rebuilding your project
-			panic("uniffi: uniffi_slatedb_uniffi_checksum_method_dbreaderbuilder_with_wal_object_store: UniFFI API checksum mismatch")
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbreaderbuilder_with_wal_object_store: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -784,7 +784,7 @@ func uniffiCheckChecksums() {
 		})
 		if checksum != 37663 {
 			// If this happens try cleaning and rebuilding your project
-			panic("uniffi: uniffi_slatedb_uniffi_checksum_method_dbsnapshot_get: UniFFI API checksum mismatch")
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbsnapshot_get: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -793,7 +793,7 @@ func uniffiCheckChecksums() {
 		})
 		if checksum != 1007 {
 			// If this happens try cleaning and rebuilding your project
-			panic("uniffi: uniffi_slatedb_uniffi_checksum_method_dbsnapshot_get_key_value: UniFFI API checksum mismatch")
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbsnapshot_get_key_value: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -802,7 +802,7 @@ func uniffiCheckChecksums() {
 		})
 		if checksum != 20762 {
 			// If this happens try cleaning and rebuilding your project
-			panic("uniffi: uniffi_slatedb_uniffi_checksum_method_dbsnapshot_get_key_value_with_options: UniFFI API checksum mismatch")
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbsnapshot_get_key_value_with_options: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -811,7 +811,7 @@ func uniffiCheckChecksums() {
 		})
 		if checksum != 29177 {
 			// If this happens try cleaning and rebuilding your project
-			panic("uniffi: uniffi_slatedb_uniffi_checksum_method_dbsnapshot_get_with_options: UniFFI API checksum mismatch")
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbsnapshot_get_with_options: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -820,7 +820,7 @@ func uniffiCheckChecksums() {
 		})
 		if checksum != 18781 {
 			// If this happens try cleaning and rebuilding your project
-			panic("uniffi: uniffi_slatedb_uniffi_checksum_method_dbsnapshot_scan: UniFFI API checksum mismatch")
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbsnapshot_scan: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -829,7 +829,7 @@ func uniffiCheckChecksums() {
 		})
 		if checksum != 43063 {
 			// If this happens try cleaning and rebuilding your project
-			panic("uniffi: uniffi_slatedb_uniffi_checksum_method_dbsnapshot_scan_prefix: UniFFI API checksum mismatch")
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbsnapshot_scan_prefix: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -838,7 +838,7 @@ func uniffiCheckChecksums() {
 		})
 		if checksum != 39827 {
 			// If this happens try cleaning and rebuilding your project
-			panic("uniffi: uniffi_slatedb_uniffi_checksum_method_dbsnapshot_scan_prefix_with_options: UniFFI API checksum mismatch")
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbsnapshot_scan_prefix_with_options: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -847,7 +847,7 @@ func uniffiCheckChecksums() {
 		})
 		if checksum != 1457 {
 			// If this happens try cleaning and rebuilding your project
-			panic("uniffi: uniffi_slatedb_uniffi_checksum_method_dbsnapshot_scan_with_options: UniFFI API checksum mismatch")
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbsnapshot_scan_with_options: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -856,7 +856,7 @@ func uniffiCheckChecksums() {
 		})
 		if checksum != 17358 {
 			// If this happens try cleaning and rebuilding your project
-			panic("uniffi: uniffi_slatedb_uniffi_checksum_method_dbtransaction_commit: UniFFI API checksum mismatch")
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbtransaction_commit: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -865,7 +865,7 @@ func uniffiCheckChecksums() {
 		})
 		if checksum != 53495 {
 			// If this happens try cleaning and rebuilding your project
-			panic("uniffi: uniffi_slatedb_uniffi_checksum_method_dbtransaction_commit_with_options: UniFFI API checksum mismatch")
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbtransaction_commit_with_options: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -874,7 +874,7 @@ func uniffiCheckChecksums() {
 		})
 		if checksum != 9717 {
 			// If this happens try cleaning and rebuilding your project
-			panic("uniffi: uniffi_slatedb_uniffi_checksum_method_dbtransaction_delete: UniFFI API checksum mismatch")
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbtransaction_delete: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -883,7 +883,7 @@ func uniffiCheckChecksums() {
 		})
 		if checksum != 27661 {
 			// If this happens try cleaning and rebuilding your project
-			panic("uniffi: uniffi_slatedb_uniffi_checksum_method_dbtransaction_get: UniFFI API checksum mismatch")
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbtransaction_get: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -892,7 +892,7 @@ func uniffiCheckChecksums() {
 		})
 		if checksum != 62855 {
 			// If this happens try cleaning and rebuilding your project
-			panic("uniffi: uniffi_slatedb_uniffi_checksum_method_dbtransaction_get_key_value: UniFFI API checksum mismatch")
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbtransaction_get_key_value: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -901,7 +901,7 @@ func uniffiCheckChecksums() {
 		})
 		if checksum != 37939 {
 			// If this happens try cleaning and rebuilding your project
-			panic("uniffi: uniffi_slatedb_uniffi_checksum_method_dbtransaction_get_key_value_with_options: UniFFI API checksum mismatch")
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbtransaction_get_key_value_with_options: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -910,7 +910,7 @@ func uniffiCheckChecksums() {
 		})
 		if checksum != 53534 {
 			// If this happens try cleaning and rebuilding your project
-			panic("uniffi: uniffi_slatedb_uniffi_checksum_method_dbtransaction_get_with_options: UniFFI API checksum mismatch")
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbtransaction_get_with_options: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -919,7 +919,7 @@ func uniffiCheckChecksums() {
 		})
 		if checksum != 16876 {
 			// If this happens try cleaning and rebuilding your project
-			panic("uniffi: uniffi_slatedb_uniffi_checksum_method_dbtransaction_id: UniFFI API checksum mismatch")
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbtransaction_id: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -928,7 +928,7 @@ func uniffiCheckChecksums() {
 		})
 		if checksum != 26788 {
 			// If this happens try cleaning and rebuilding your project
-			panic("uniffi: uniffi_slatedb_uniffi_checksum_method_dbtransaction_mark_read: UniFFI API checksum mismatch")
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbtransaction_mark_read: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -937,7 +937,7 @@ func uniffiCheckChecksums() {
 		})
 		if checksum != 28294 {
 			// If this happens try cleaning and rebuilding your project
-			panic("uniffi: uniffi_slatedb_uniffi_checksum_method_dbtransaction_merge: UniFFI API checksum mismatch")
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbtransaction_merge: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -946,7 +946,7 @@ func uniffiCheckChecksums() {
 		})
 		if checksum != 63505 {
 			// If this happens try cleaning and rebuilding your project
-			panic("uniffi: uniffi_slatedb_uniffi_checksum_method_dbtransaction_merge_with_options: UniFFI API checksum mismatch")
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbtransaction_merge_with_options: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -955,7 +955,7 @@ func uniffiCheckChecksums() {
 		})
 		if checksum != 30341 {
 			// If this happens try cleaning and rebuilding your project
-			panic("uniffi: uniffi_slatedb_uniffi_checksum_method_dbtransaction_put: UniFFI API checksum mismatch")
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbtransaction_put: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -964,7 +964,7 @@ func uniffiCheckChecksums() {
 		})
 		if checksum != 24593 {
 			// If this happens try cleaning and rebuilding your project
-			panic("uniffi: uniffi_slatedb_uniffi_checksum_method_dbtransaction_put_with_options: UniFFI API checksum mismatch")
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbtransaction_put_with_options: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -973,7 +973,7 @@ func uniffiCheckChecksums() {
 		})
 		if checksum != 23348 {
 			// If this happens try cleaning and rebuilding your project
-			panic("uniffi: uniffi_slatedb_uniffi_checksum_method_dbtransaction_rollback: UniFFI API checksum mismatch")
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbtransaction_rollback: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -982,7 +982,7 @@ func uniffiCheckChecksums() {
 		})
 		if checksum != 12571 {
 			// If this happens try cleaning and rebuilding your project
-			panic("uniffi: uniffi_slatedb_uniffi_checksum_method_dbtransaction_scan: UniFFI API checksum mismatch")
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbtransaction_scan: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -991,7 +991,7 @@ func uniffiCheckChecksums() {
 		})
 		if checksum != 49961 {
 			// If this happens try cleaning and rebuilding your project
-			panic("uniffi: uniffi_slatedb_uniffi_checksum_method_dbtransaction_scan_prefix: UniFFI API checksum mismatch")
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbtransaction_scan_prefix: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -1000,7 +1000,7 @@ func uniffiCheckChecksums() {
 		})
 		if checksum != 33081 {
 			// If this happens try cleaning and rebuilding your project
-			panic("uniffi: uniffi_slatedb_uniffi_checksum_method_dbtransaction_scan_prefix_with_options: UniFFI API checksum mismatch")
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbtransaction_scan_prefix_with_options: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -1009,7 +1009,7 @@ func uniffiCheckChecksums() {
 		})
 		if checksum != 55349 {
 			// If this happens try cleaning and rebuilding your project
-			panic("uniffi: uniffi_slatedb_uniffi_checksum_method_dbtransaction_scan_with_options: UniFFI API checksum mismatch")
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbtransaction_scan_with_options: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -1018,7 +1018,7 @@ func uniffiCheckChecksums() {
 		})
 		if checksum != 60506 {
 			// If this happens try cleaning and rebuilding your project
-			panic("uniffi: uniffi_slatedb_uniffi_checksum_method_dbtransaction_seqnum: UniFFI API checksum mismatch")
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbtransaction_seqnum: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -1027,7 +1027,7 @@ func uniffiCheckChecksums() {
 		})
 		if checksum != 15301 {
 			// If this happens try cleaning and rebuilding your project
-			panic("uniffi: uniffi_slatedb_uniffi_checksum_method_dbtransaction_unmark_write: UniFFI API checksum mismatch")
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbtransaction_unmark_write: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -1036,7 +1036,7 @@ func uniffiCheckChecksums() {
 		})
 		if checksum != 11398 {
 			// If this happens try cleaning and rebuilding your project
-			panic("uniffi: uniffi_slatedb_uniffi_checksum_method_logcallback_log: UniFFI API checksum mismatch")
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_logcallback_log: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -1045,7 +1045,7 @@ func uniffiCheckChecksums() {
 		})
 		if checksum != 9511 {
 			// If this happens try cleaning and rebuilding your project
-			panic("uniffi: uniffi_slatedb_uniffi_checksum_method_mergeoperator_merge: UniFFI API checksum mismatch")
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_mergeoperator_merge: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -1054,7 +1054,7 @@ func uniffiCheckChecksums() {
 		})
 		if checksum != 31996 {
 			// If this happens try cleaning and rebuilding your project
-			panic("uniffi: uniffi_slatedb_uniffi_checksum_method_settings_set: UniFFI API checksum mismatch")
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_settings_set: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -1063,7 +1063,7 @@ func uniffiCheckChecksums() {
 		})
 		if checksum != 62526 {
 			// If this happens try cleaning and rebuilding your project
-			panic("uniffi: uniffi_slatedb_uniffi_checksum_method_settings_to_json_string: UniFFI API checksum mismatch")
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_settings_to_json_string: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -1072,7 +1072,7 @@ func uniffiCheckChecksums() {
 		})
 		if checksum != 51355 {
 			// If this happens try cleaning and rebuilding your project
-			panic("uniffi: uniffi_slatedb_uniffi_checksum_method_walfile_id: UniFFI API checksum mismatch")
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_walfile_id: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -1081,7 +1081,7 @@ func uniffiCheckChecksums() {
 		})
 		if checksum != 50239 {
 			// If this happens try cleaning and rebuilding your project
-			panic("uniffi: uniffi_slatedb_uniffi_checksum_method_walfile_iterator: UniFFI API checksum mismatch")
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_walfile_iterator: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -1090,7 +1090,7 @@ func uniffiCheckChecksums() {
 		})
 		if checksum != 30832 {
 			// If this happens try cleaning and rebuilding your project
-			panic("uniffi: uniffi_slatedb_uniffi_checksum_method_walfile_metadata: UniFFI API checksum mismatch")
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_walfile_metadata: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -1099,7 +1099,7 @@ func uniffiCheckChecksums() {
 		})
 		if checksum != 52353 {
 			// If this happens try cleaning and rebuilding your project
-			panic("uniffi: uniffi_slatedb_uniffi_checksum_method_walfile_next_file: UniFFI API checksum mismatch")
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_walfile_next_file: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -1108,7 +1108,7 @@ func uniffiCheckChecksums() {
 		})
 		if checksum != 60587 {
 			// If this happens try cleaning and rebuilding your project
-			panic("uniffi: uniffi_slatedb_uniffi_checksum_method_walfile_next_id: UniFFI API checksum mismatch")
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_walfile_next_id: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -1117,7 +1117,7 @@ func uniffiCheckChecksums() {
 		})
 		if checksum != 18233 {
 			// If this happens try cleaning and rebuilding your project
-			panic("uniffi: uniffi_slatedb_uniffi_checksum_method_walfileiterator_next: UniFFI API checksum mismatch")
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_walfileiterator_next: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -1126,7 +1126,7 @@ func uniffiCheckChecksums() {
 		})
 		if checksum != 40699 {
 			// If this happens try cleaning and rebuilding your project
-			panic("uniffi: uniffi_slatedb_uniffi_checksum_method_walreader_get: UniFFI API checksum mismatch")
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_walreader_get: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -1135,7 +1135,7 @@ func uniffiCheckChecksums() {
 		})
 		if checksum != 62366 {
 			// If this happens try cleaning and rebuilding your project
-			panic("uniffi: uniffi_slatedb_uniffi_checksum_method_walreader_list: UniFFI API checksum mismatch")
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_walreader_list: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -1144,7 +1144,7 @@ func uniffiCheckChecksums() {
 		})
 		if checksum != 37032 {
 			// If this happens try cleaning and rebuilding your project
-			panic("uniffi: uniffi_slatedb_uniffi_checksum_method_writebatch_delete: UniFFI API checksum mismatch")
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_writebatch_delete: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -1153,7 +1153,7 @@ func uniffiCheckChecksums() {
 		})
 		if checksum != 51939 {
 			// If this happens try cleaning and rebuilding your project
-			panic("uniffi: uniffi_slatedb_uniffi_checksum_method_writebatch_merge: UniFFI API checksum mismatch")
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_writebatch_merge: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -1162,7 +1162,7 @@ func uniffiCheckChecksums() {
 		})
 		if checksum != 30105 {
 			// If this happens try cleaning and rebuilding your project
-			panic("uniffi: uniffi_slatedb_uniffi_checksum_method_writebatch_merge_with_options: UniFFI API checksum mismatch")
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_writebatch_merge_with_options: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -1171,7 +1171,7 @@ func uniffiCheckChecksums() {
 		})
 		if checksum != 35694 {
 			// If this happens try cleaning and rebuilding your project
-			panic("uniffi: uniffi_slatedb_uniffi_checksum_method_writebatch_put: UniFFI API checksum mismatch")
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_writebatch_put: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -1180,7 +1180,7 @@ func uniffiCheckChecksums() {
 		})
 		if checksum != 23639 {
 			// If this happens try cleaning and rebuilding your project
-			panic("uniffi: uniffi_slatedb_uniffi_checksum_method_writebatch_put_with_options: UniFFI API checksum mismatch")
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_writebatch_put_with_options: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -1189,7 +1189,7 @@ func uniffiCheckChecksums() {
 		})
 		if checksum != 20774 {
 			// If this happens try cleaning and rebuilding your project
-			panic("uniffi: uniffi_slatedb_uniffi_checksum_constructor_dbbuilder_new: UniFFI API checksum mismatch")
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_constructor_dbbuilder_new: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -1198,7 +1198,7 @@ func uniffiCheckChecksums() {
 		})
 		if checksum != 63705 {
 			// If this happens try cleaning and rebuilding your project
-			panic("uniffi: uniffi_slatedb_uniffi_checksum_constructor_dbreaderbuilder_new: UniFFI API checksum mismatch")
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_constructor_dbreaderbuilder_new: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -1207,7 +1207,7 @@ func uniffiCheckChecksums() {
 		})
 		if checksum != 31525 {
 			// If this happens try cleaning and rebuilding your project
-			panic("uniffi: uniffi_slatedb_uniffi_checksum_constructor_objectstore_from_env: UniFFI API checksum mismatch")
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_constructor_objectstore_from_env: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -1216,7 +1216,7 @@ func uniffiCheckChecksums() {
 		})
 		if checksum != 27737 {
 			// If this happens try cleaning and rebuilding your project
-			panic("uniffi: uniffi_slatedb_uniffi_checksum_constructor_objectstore_resolve: UniFFI API checksum mismatch")
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_constructor_objectstore_resolve: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -1225,7 +1225,7 @@ func uniffiCheckChecksums() {
 		})
 		if checksum != 56170 {
 			// If this happens try cleaning and rebuilding your project
-			panic("uniffi: uniffi_slatedb_uniffi_checksum_constructor_settings_default: UniFFI API checksum mismatch")
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_constructor_settings_default: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -1234,7 +1234,7 @@ func uniffiCheckChecksums() {
 		})
 		if checksum != 49511 {
 			// If this happens try cleaning and rebuilding your project
-			panic("uniffi: uniffi_slatedb_uniffi_checksum_constructor_settings_from_env: UniFFI API checksum mismatch")
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_constructor_settings_from_env: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -1243,7 +1243,7 @@ func uniffiCheckChecksums() {
 		})
 		if checksum != 6106 {
 			// If this happens try cleaning and rebuilding your project
-			panic("uniffi: uniffi_slatedb_uniffi_checksum_constructor_settings_from_env_with_default: UniFFI API checksum mismatch")
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_constructor_settings_from_env_with_default: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -1252,7 +1252,7 @@ func uniffiCheckChecksums() {
 		})
 		if checksum != 40167 {
 			// If this happens try cleaning and rebuilding your project
-			panic("uniffi: uniffi_slatedb_uniffi_checksum_constructor_settings_from_file: UniFFI API checksum mismatch")
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_constructor_settings_from_file: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -1261,7 +1261,7 @@ func uniffiCheckChecksums() {
 		})
 		if checksum != 43399 {
 			// If this happens try cleaning and rebuilding your project
-			panic("uniffi: uniffi_slatedb_uniffi_checksum_constructor_settings_from_json_string: UniFFI API checksum mismatch")
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_constructor_settings_from_json_string: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -1270,7 +1270,7 @@ func uniffiCheckChecksums() {
 		})
 		if checksum != 3704 {
 			// If this happens try cleaning and rebuilding your project
-			panic("uniffi: uniffi_slatedb_uniffi_checksum_constructor_settings_load: UniFFI API checksum mismatch")
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_constructor_settings_load: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -1279,7 +1279,7 @@ func uniffiCheckChecksums() {
 		})
 		if checksum != 791 {
 			// If this happens try cleaning and rebuilding your project
-			panic("uniffi: uniffi_slatedb_uniffi_checksum_constructor_walreader_new: UniFFI API checksum mismatch")
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_constructor_walreader_new: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -1288,7 +1288,7 @@ func uniffiCheckChecksums() {
 		})
 		if checksum != 25201 {
 			// If this happens try cleaning and rebuilding your project
-			panic("uniffi: uniffi_slatedb_uniffi_checksum_constructor_writebatch_new: UniFFI API checksum mismatch")
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_constructor_writebatch_new: UniFFI API checksum mismatch")
 		}
 	}
 }
@@ -7450,8 +7450,8 @@ type rustFuturePollFunc func(C.uint64_t, C.UniffiRustFutureContinuationCallback,
 type rustFutureCompleteFunc[T any] func(C.uint64_t, *C.RustCallStatus) T
 type rustFutureFreeFunc func(C.uint64_t)
 
-//export uniffi_uniffiFutureContinuationCallback
-func uniffi_uniffiFutureContinuationCallback(data C.uint64_t, pollResult C.int8_t) {
+//export slatedb_uniffiFutureContinuationCallback
+func slatedb_uniffiFutureContinuationCallback(data C.uint64_t, pollResult C.int8_t) {
 	h := cgo.Handle(uintptr(data))
 	waiter := h.Value().(chan int8)
 	waiter <- int8(pollResult)
@@ -7476,7 +7476,7 @@ func uniffiRustCallAsync[E any, T any, F any](
 	for pollResult != uniffiRustFuturePollReady {
 		pollFunc(
 			rustFuture,
-			(C.UniffiRustFutureContinuationCallback)(C.uniffi_uniffiFutureContinuationCallback),
+			(C.UniffiRustFutureContinuationCallback)(C.slatedb_uniffiFutureContinuationCallback),
 			C.uint64_t(chanHandle),
 		)
 		pollResult = <-waiter
@@ -7495,8 +7495,8 @@ func uniffiRustCallAsync[E any, T any, F any](
 	return liftFunc(ffiValue), nil
 }
 
-//export uniffi_uniffiFreeGorutine
-func uniffi_uniffiFreeGorutine(data C.uint64_t) {
+//export slatedb_uniffiFreeGorutine
+func slatedb_uniffiFreeGorutine(data C.uint64_t) {
 	handle := cgo.Handle(uintptr(data))
 	defer handle.Delete()
 

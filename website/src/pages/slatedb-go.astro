@@ -9,8 +9,13 @@
   <main>
     <h1>SlateDB Go module</h1>
     <p>
-      Vanity import path for the Go module. Repository: 
+      Vanity import path for the Go module. Repository:
       <a href="https://github.com/slatedb/slatedb/tree/main/bindings/go">github.com/slatedb/slatedb/bindings/go</a>
+    </p>
+    <p>
+      The generated UniFFI package lives in
+      <a href="https://github.com/slatedb/slatedb/tree/main/bindings/go/uniffi">bindings/go/uniffi</a>
+      and should be imported as <code>slatedb.io/slatedb-go/uniffi</code>.
     </p>
   </main>
 </html>
@@ -21,6 +26,9 @@
   `github.com/slatedb/slatedb/bindings/go`. This is a bit ugly, so we use
   `slatedb.io/slatedb-go` instead. See https://go.dev/ref/mod#vcs-find for
   details.
+
+  The generated package lives under the module root in `bindings/go/uniffi`,
+  which maps to the import path `slatedb.io/slatedb-go/uniffi`.
 
   NOTE: We are using the `subdir` field in `go-import`, which is a new feature
   in Go 1.25.0. This means SlateDB's Go binding requires Go 1.25.0 or higher.

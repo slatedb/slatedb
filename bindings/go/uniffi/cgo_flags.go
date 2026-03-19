@@ -1,4 +1,4 @@
-package uniffi
+package slatedb
 
 /*
 #cgo LDFLAGS: -lslatedb_uniffi

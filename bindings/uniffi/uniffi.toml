@@ -1,4 +1,4 @@
 [bindings.go]
 go_mod = "slatedb.io/slatedb-go"
-package_name = "uniffi"
-c_module_filename = "uniffi"
+package_name = "slatedb"
+c_module_filename = "slatedb"

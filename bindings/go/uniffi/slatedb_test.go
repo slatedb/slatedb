@@ -1,4 +1,4 @@
-package uniffi_test
+package slatedb_test
 
 import (
 	"bytes"
@@ -9,25 +9,25 @@ import (
 	"testing"
 	"time"
 
-	uniffi "slatedb.io/slatedb-go"
+	slatedb "slatedb.io/slatedb-go/uniffi"
 )
 
 const testDBPath = "test-db"
 
 type testDB struct {
-	db   *uniffi.Db
+	db   *slatedb.Db
 	open bool
 }
 
 type testReader struct {
-	reader *uniffi.DbReader
+	reader *slatedb.DbReader
 	open   bool
 }
 
-func newMemoryStore(t *testing.T) *uniffi.ObjectStore {
+func newMemoryStore(t *testing.T) *slatedb.ObjectStore {
 	t.Helper()
 
-	store, err := uniffi.ObjectStoreResolve("memory:///")
+	store, err := slatedb.ObjectStoreResolve("memory:///")
 	if err != nil {
 		t.Fatalf("ObjectStoreResolve(memory:///): %v", err)
 	}
@@ -35,10 +35,10 @@ func newMemoryStore(t *testing.T) *uniffi.ObjectStore {
 	return store
 }
 
-func openTestDB(t *testing.T, store *uniffi.ObjectStore, configure func(*testing.T, *uniffi.DbBuilder)) *testDB {
+func openTestDB(t *testing.T, store *slatedb.ObjectStore, configure func(*testing.T, *slatedb.DbBuilder)) *testDB {
 	t.Helper()
 
-	builder := uniffi.NewDbBuilder(testDBPath, store)
+	builder := slatedb.NewDbBuilder(testDBPath, store)
 	defer builder.Destroy()
 
 	if configure != nil {
@@ -66,10 +66,10 @@ func openTestDB(t *testing.T, store *uniffi.ObjectStore, configure func(*testing
 	return handle
 }
 
-func openTestReader(t *testing.T, store *uniffi.ObjectStore, configure func(*testing.T, *uniffi.DbReaderBuilder)) *testReader {
+func openTestReader(t *testing.T, store *slatedb.ObjectStore, configure func(*testing.T, *slatedb.DbReaderBuilder)) *testReader {
 	t.Helper()
 
-	builder := uniffi.NewDbReaderBuilder(testDBPath, store)
+	builder := slatedb.NewDbReaderBuilder(testDBPath, store)
 	defer builder.Destroy()
 
 	if configure != nil {
@@ -97,10 +97,10 @@ func openTestReader(t *testing.T, store *uniffi.ObjectStore, configure func(*tes
 	return handle
 }
 
-func openTestWalReader(t *testing.T, store *uniffi.ObjectStore) *uniffi.WalReader {
+func openTestWalReader(t *testing.T, store *slatedb.ObjectStore) *slatedb.WalReader {
 	t.Helper()
 
-	reader := uniffi.NewWalReader(testDBPath, store)
+	reader := slatedb.NewWalReader(testDBPath, store)
 	if reader == nil {
 		t.Fatal("NewWalReader(): got nil reader")
 	}
@@ -114,10 +114,10 @@ func bytesPtr(b []byte) *[]byte {
 	return &clone
 }
 
-func drainIterator(t *testing.T, iter *uniffi.DbIterator) []uniffi.KeyValue {
+func drainIterator(t *testing.T, iter *slatedb.DbIterator) []slatedb.KeyValue {
 	t.Helper()
 
-	var rows []uniffi.KeyValue
+	var rows []slatedb.KeyValue
 	for {
 		row, err := iter.Next()
 		if err != nil {
@@ -130,10 +130,10 @@ func drainIterator(t *testing.T, iter *uniffi.DbIterator) []uniffi.KeyValue {
 	}
 }
 
-func drainWalIterator(t *testing.T, iter *uniffi.WalFileIterator) []uniffi.RowEntry {
+func drainWalIterator(t *testing.T, iter *slatedb.WalFileIterator) []slatedb.RowEntry {
 	t.Helper()
 
-	var rows []uniffi.RowEntry
+	var rows []slatedb.RowEntry
 	for {
 		row, err := iter.Next()
 		if err != nil {
@@ -146,7 +146,7 @@ func drainWalIterator(t *testing.T, iter *uniffi.WalFileIterator) []uniffi.RowEn
 	}
 }
 
-func requireRows(t *testing.T, got []uniffi.KeyValue, wantKeys []string, wantValues []string) {
+func requireRows(t *testing.T, got []slatedb.KeyValue, wantKeys []string, wantValues []string) {
 	t.Helper()
 
 	if len(got) != len(wantKeys) || len(got) != len(wantValues) {
@@ -189,17 +189,17 @@ func waitUntil(t *testing.T, timeout time.Duration, step time.Duration, check fu
 
 type logCollector struct {
 	mu      sync.Mutex
-	records []uniffi.LogRecord
+	records []slatedb.LogRecord
 }
 
-func (c *logCollector) Log(record uniffi.LogRecord) {
+func (c *logCollector) Log(record slatedb.LogRecord) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	c.records = append(c.records, cloneLogRecord(record))
 }
 
-func (c *logCollector) matchingRecord(predicate func(uniffi.LogRecord) bool) (uniffi.LogRecord, bool) {
+func (c *logCollector) matchingRecord(predicate func(slatedb.LogRecord) bool) (slatedb.LogRecord, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -209,11 +209,11 @@ func (c *logCollector) matchingRecord(predicate func(uniffi.LogRecord) bool) (un
 		}
 	}
 
-	return uniffi.LogRecord{}, false
+	return slatedb.LogRecord{}, false
 }
 
-func cloneLogRecord(record uniffi.LogRecord) uniffi.LogRecord {
-	return uniffi.LogRecord{
+func cloneLogRecord(record slatedb.LogRecord) slatedb.LogRecord {
+	return slatedb.LogRecord{
 		Level:      record.Level,
 		Target:     record.Target,
 		Message:    record.Message,
@@ -257,10 +257,10 @@ func (concatMergeOperator) Merge(_ []byte, existingValue *[]byte, operand []byte
 	return merged, nil
 }
 
-func seedWalFiles(t *testing.T, store *uniffi.ObjectStore) {
+func seedWalFiles(t *testing.T, store *slatedb.ObjectStore) {
 	t.Helper()
 
-	handle := openTestDB(t, store, func(t *testing.T, builder *uniffi.DbBuilder) {
+	handle := openTestDB(t, store, func(t *testing.T, builder *slatedb.DbBuilder) {
 		t.Helper()
 		if err := builder.WithMergeOperator(concatMergeOperator{}); err != nil {
 			t.Fatalf("WithMergeOperator(): %v", err)
@@ -273,21 +273,21 @@ func seedWalFiles(t *testing.T, store *uniffi.ObjectStore) {
 	if _, err := handle.db.Put([]byte("b"), []byte("2")); err != nil {
 		t.Fatalf("Put(b): %v", err)
 	}
-	if err := handle.db.FlushWithOptions(uniffi.FlushOptions{FlushType: uniffi.FlushTypeWal}); err != nil {
+	if err := handle.db.FlushWithOptions(slatedb.FlushOptions{FlushType: slatedb.FlushTypeWal}); err != nil {
 		t.Fatalf("FlushWithOptions(Wal) for value rows: %v", err)
 	}
 
 	if _, err := handle.db.Delete([]byte("a")); err != nil {
 		t.Fatalf("Delete(a): %v", err)
 	}
-	if err := handle.db.FlushWithOptions(uniffi.FlushOptions{FlushType: uniffi.FlushTypeWal}); err != nil {
+	if err := handle.db.FlushWithOptions(slatedb.FlushOptions{FlushType: slatedb.FlushTypeWal}); err != nil {
 		t.Fatalf("FlushWithOptions(Wal) for tombstone row: %v", err)
 	}
 
 	if _, err := handle.db.Merge([]byte("m"), []byte("x")); err != nil {
 		t.Fatalf("Merge(m): %v", err)
 	}
-	if err := handle.db.FlushWithOptions(uniffi.FlushOptions{FlushType: uniffi.FlushTypeWal}); err != nil {
+	if err := handle.db.FlushWithOptions(slatedb.FlushOptions{FlushType: slatedb.FlushTypeWal}); err != nil {
 		t.Fatalf("FlushWithOptions(Wal) for merge row: %v", err)
 	}
 }
@@ -310,19 +310,19 @@ func TestDbLifecycleAndStatus(t *testing.T) {
 	handle.open = false
 
 	err := handle.db.Status()
-	if !errors.Is(err, uniffi.ErrErrorClosed) {
+	if !errors.Is(err, slatedb.ErrErrorClosed) {
 		t.Fatalf("Status() after Shutdown(): got %v, want closed error", err)
 	}
 
-	var closedErr *uniffi.ErrorClosed
+	var closedErr *slatedb.ErrorClosed
 	if !errors.As(err, &closedErr) {
 		t.Fatalf("Status() after Shutdown(): expected *ErrorClosed, got %T", err)
 	}
-	if closedErr.Reason != uniffi.CloseReasonClean {
-		t.Fatalf("Status() after Shutdown(): got close reason %v, want %v", closedErr.Reason, uniffi.CloseReasonClean)
+	if closedErr.Reason != slatedb.CloseReasonClean {
+		t.Fatalf("Status() after Shutdown(): got close reason %v, want %v", closedErr.Reason, slatedb.CloseReasonClean)
 	}
 
-	if _, err := handle.db.Put([]byte("after-shutdown"), []byte("value")); !errors.Is(err, uniffi.ErrErrorClosed) {
+	if _, err := handle.db.Put([]byte("after-shutdown"), []byte("value")); !errors.Is(err, slatedb.ErrErrorClosed) {
 		t.Fatalf("Put() after Shutdown(): got %v, want closed error", err)
 	}
 }
@@ -331,14 +331,14 @@ func TestDbCrudAndMetadata(t *testing.T) {
 	store := newMemoryStore(t)
 	handle := openTestDB(t, store, nil)
 
-	readOptions := uniffi.ReadOptions{
-		DurabilityFilter: uniffi.DurabilityLevelMemory,
+	readOptions := slatedb.ReadOptions{
+		DurabilityFilter: slatedb.DurabilityLevelMemory,
 		Dirty:            false,
 		CacheBlocks:      true,
 	}
 
-	putOptions := uniffi.PutOptions{Ttl: uniffi.TtlDefault{}}
-	writeOptions := uniffi.WriteOptions{AwaitDurable: true}
+	putOptions := slatedb.PutOptions{Ttl: slatedb.TtlDefault{}}
+	writeOptions := slatedb.WriteOptions{AwaitDurable: true}
 
 	firstWrite, err := handle.db.Put([]byte("alpha"), []byte("one"))
 	if err != nil {
@@ -486,7 +486,7 @@ func TestDbScanVariants(t *testing.T) {
 		}
 	}
 
-	iter, err := handle.db.Scan(uniffi.KeyRange{})
+	iter, err := handle.db.Scan(slatedb.KeyRange{})
 	if err != nil {
 		t.Fatalf("Scan(full): %v", err)
 	}
@@ -495,7 +495,7 @@ func TestDbScanVariants(t *testing.T) {
 
 	rangeStart := bytesPtr([]byte("item:02"))
 	rangeEnd := bytesPtr([]byte("item:03"))
-	iter, err = handle.db.Scan(uniffi.KeyRange{
+	iter, err = handle.db.Scan(slatedb.KeyRange{
 		Start:          rangeStart,
 		StartInclusive: true,
 		End:            rangeEnd,
@@ -508,14 +508,14 @@ func TestDbScanVariants(t *testing.T) {
 	requireRows(t, drainIterator(t, iter), []string{"item:02", "item:03"}, []string{"second", "third"})
 
 	iter, err = handle.db.ScanWithOptions(
-		uniffi.KeyRange{
+		slatedb.KeyRange{
 			Start:          bytesPtr([]byte("item:01")),
 			StartInclusive: true,
 			End:            bytesPtr([]byte("item:99")),
 			EndInclusive:   false,
 		},
-		uniffi.ScanOptions{
-			DurabilityFilter: uniffi.DurabilityLevelMemory,
+		slatedb.ScanOptions{
+			DurabilityFilter: slatedb.DurabilityLevelMemory,
 			Dirty:            false,
 			ReadAheadBytes:   64,
 			CacheBlocks:      true,
@@ -537,8 +537,8 @@ func TestDbScanVariants(t *testing.T) {
 
 	iter, err = handle.db.ScanPrefixWithOptions(
 		[]byte("item:"),
-		uniffi.ScanOptions{
-			DurabilityFilter: uniffi.DurabilityLevelMemory,
+		slatedb.ScanOptions{
+			DurabilityFilter: slatedb.DurabilityLevelMemory,
 			Dirty:            false,
 			ReadAheadBytes:   32,
 			CacheBlocks:      false,
@@ -560,7 +560,7 @@ func TestDbBatchWriteAndConsumption(t *testing.T) {
 		t.Fatalf("Put(remove-me): %v", err)
 	}
 
-	batch := uniffi.NewWriteBatch()
+	batch := slatedb.NewWriteBatch()
 	t.Cleanup(batch.Destroy)
 
 	if err := batch.Put([]byte("batch-put"), []byte("value")); err != nil {
@@ -594,18 +594,18 @@ func TestDbBatchWriteAndConsumption(t *testing.T) {
 		t.Fatalf("Get(remove-me): got %q, want nil", *value)
 	}
 
-	if _, err := handle.db.Write(batch); !errors.Is(err, uniffi.ErrErrorInvalid) {
+	if _, err := handle.db.Write(batch); !errors.Is(err, slatedb.ErrErrorInvalid) {
 		t.Fatalf("Write(consumed batch): got %v, want invalid error", err)
 	}
 
-	secondBatch := uniffi.NewWriteBatch()
+	secondBatch := slatedb.NewWriteBatch()
 	t.Cleanup(secondBatch.Destroy)
 
-	if err := secondBatch.PutWithOptions([]byte("batch-put-2"), []byte("value-2"), uniffi.PutOptions{Ttl: uniffi.TtlDefault{}}); err != nil {
+	if err := secondBatch.PutWithOptions([]byte("batch-put-2"), []byte("value-2"), slatedb.PutOptions{Ttl: slatedb.TtlDefault{}}); err != nil {
 		t.Fatalf("WriteBatch.PutWithOptions(): %v", err)
 	}
 
-	if _, err := handle.db.WriteWithOptions(secondBatch, uniffi.WriteOptions{AwaitDurable: true}); err != nil {
+	if _, err := handle.db.WriteWithOptions(secondBatch, slatedb.WriteOptions{AwaitDurable: true}); err != nil {
 		t.Fatalf("WriteWithOptions(): %v", err)
 	}
 
@@ -630,11 +630,11 @@ func TestDbFlushAndMetrics(t *testing.T) {
 		t.Fatalf("Flush(): %v", err)
 	}
 
-	if err := handle.db.FlushWithOptions(uniffi.FlushOptions{FlushType: uniffi.FlushTypeWal}); err != nil {
+	if err := handle.db.FlushWithOptions(slatedb.FlushOptions{FlushType: slatedb.FlushTypeWal}); err != nil {
 		t.Fatalf("FlushWithOptions(Wal): %v", err)
 	}
 
-	if err := handle.db.FlushWithOptions(uniffi.FlushOptions{FlushType: uniffi.FlushTypeMemTable}); err != nil {
+	if err := handle.db.FlushWithOptions(slatedb.FlushOptions{FlushType: slatedb.FlushTypeMemTable}); err != nil {
 		t.Fatalf("FlushWithOptions(MemTable): %v", err)
 	}
 
@@ -649,7 +649,7 @@ func TestDbFlushAndMetrics(t *testing.T) {
 
 func TestDbMerge(t *testing.T) {
 	store := newMemoryStore(t)
-	handle := openTestDB(t, store, func(t *testing.T, builder *uniffi.DbBuilder) {
+	handle := openTestDB(t, store, func(t *testing.T, builder *slatedb.DbBuilder) {
 		t.Helper()
 		if err := builder.WithMergeOperator(concatMergeOperator{}); err != nil {
 			t.Fatalf("WithMergeOperator(): %v", err)
@@ -675,8 +675,8 @@ func TestDbMerge(t *testing.T) {
 	if _, err := handle.db.MergeWithOptions(
 		[]byte("merge"),
 		[]byte(":two"),
-		uniffi.MergeOptions{Ttl: uniffi.TtlDefault{}},
-		uniffi.WriteOptions{AwaitDurable: true},
+		slatedb.MergeOptions{Ttl: slatedb.TtlDefault{}},
+		slatedb.WriteOptions{AwaitDurable: true},
 	); err != nil {
 		t.Fatalf("MergeWithOptions(): %v", err)
 	}
@@ -729,7 +729,7 @@ func TestDbTransactions(t *testing.T) {
 	store := newMemoryStore(t)
 	handle := openTestDB(t, store, nil)
 
-	tx, err := handle.db.Begin(uniffi.IsolationLevelSnapshot)
+	tx, err := handle.db.Begin(slatedb.IsolationLevelSnapshot)
 	if err != nil {
 		t.Fatalf("Begin(): %v", err)
 	}
@@ -775,7 +775,7 @@ func TestDbTransactions(t *testing.T) {
 		t.Fatalf("db.Get(txn-key) after commit: got %v, want %q", liveValue, "pending")
 	}
 
-	rollbackTx, err := handle.db.Begin(uniffi.IsolationLevelSnapshot)
+	rollbackTx, err := handle.db.Begin(slatedb.IsolationLevelSnapshot)
 	if err != nil {
 		t.Fatalf("Begin() for rollback: %v", err)
 	}
@@ -802,31 +802,31 @@ func TestDbInvalidInputsAndErrorMapping(t *testing.T) {
 		store := newMemoryStore(t)
 		handle := openTestDB(t, store, nil)
 
-		if _, err := handle.db.Put([]byte{}, []byte("value")); !errors.Is(err, uniffi.ErrErrorInvalid) {
+		if _, err := handle.db.Put([]byte{}, []byte("value")); !errors.Is(err, slatedb.ErrErrorInvalid) {
 			t.Fatalf("Put(empty key): got %v, want invalid error", err)
 		}
 
-		if _, err := handle.db.Delete([]byte{}); !errors.Is(err, uniffi.ErrErrorInvalid) {
+		if _, err := handle.db.Delete([]byte{}); !errors.Is(err, slatedb.ErrErrorInvalid) {
 			t.Fatalf("Delete(empty key): got %v, want invalid error", err)
 		}
 
-		if _, err := handle.db.Scan(uniffi.KeyRange{
+		if _, err := handle.db.Scan(slatedb.KeyRange{
 			Start:          bytesPtr([]byte{}),
 			StartInclusive: true,
-		}); !errors.Is(err, uniffi.ErrErrorInvalid) {
+		}); !errors.Is(err, slatedb.ErrErrorInvalid) {
 			t.Fatalf("Scan(empty start): got %v, want invalid error", err)
 		}
 
-		if _, err := handle.db.Scan(uniffi.KeyRange{
+		if _, err := handle.db.Scan(slatedb.KeyRange{
 			Start:          bytesPtr([]byte("z")),
 			StartInclusive: true,
 			End:            bytesPtr([]byte("a")),
 			EndInclusive:   true,
-		}); !errors.Is(err, uniffi.ErrErrorInvalid) {
+		}); !errors.Is(err, slatedb.ErrErrorInvalid) {
 			t.Fatalf("Scan(start > end): got %v, want invalid error", err)
 		}
 
-		batch := uniffi.NewWriteBatch()
+		batch := slatedb.NewWriteBatch()
 		t.Cleanup(batch.Destroy)
 		if err := batch.Put([]byte("batch"), []byte("value")); err != nil {
 			t.Fatalf("WriteBatch.Put(): %v", err)
@@ -834,7 +834,7 @@ func TestDbInvalidInputsAndErrorMapping(t *testing.T) {
 		if _, err := handle.db.Write(batch); err != nil {
 			t.Fatalf("Write(): %v", err)
 		}
-		if _, err := handle.db.Write(batch); !errors.Is(err, uniffi.ErrErrorInvalid) {
+		if _, err := handle.db.Write(batch); !errors.Is(err, slatedb.ErrErrorInvalid) {
 			t.Fatalf("Write(consumed batch): got %v, want invalid error", err)
 		}
 	})
@@ -853,17 +853,17 @@ func TestDbInvalidInputsAndErrorMapping(t *testing.T) {
 		}
 
 		_, err := primary.db.Put([]byte("stale"), []byte("value"))
-		if !errors.Is(err, uniffi.ErrErrorClosed) {
+		if !errors.Is(err, slatedb.ErrErrorClosed) {
 			t.Fatalf("primary Put() after fencing: got %v, want closed error", err)
 		}
 		primary.open = false
 
-		var closedErr *uniffi.ErrorClosed
+		var closedErr *slatedb.ErrorClosed
 		if !errors.As(err, &closedErr) {
 			t.Fatalf("primary Put() after fencing: expected *ErrorClosed, got %T", err)
 		}
-		if closedErr.Reason != uniffi.CloseReasonFenced {
-			t.Fatalf("primary Put() after fencing: got close reason %v, want %v", closedErr.Reason, uniffi.CloseReasonFenced)
+		if closedErr.Reason != slatedb.CloseReasonFenced {
+			t.Fatalf("primary Put() after fencing: got close reason %v, want %v", closedErr.Reason, slatedb.CloseReasonFenced)
 		}
 	})
 }
@@ -876,7 +876,7 @@ func TestDbReaderLifecycleAndMissingDb(t *testing.T) {
 		if _, err := dbHandle.db.Put([]byte("reader"), []byte("value")); err != nil {
 			t.Fatalf("Put(reader): %v", err)
 		}
-		if err := dbHandle.db.FlushWithOptions(uniffi.FlushOptions{FlushType: uniffi.FlushTypeMemTable}); err != nil {
+		if err := dbHandle.db.FlushWithOptions(slatedb.FlushOptions{FlushType: slatedb.FlushTypeMemTable}); err != nil {
 			t.Fatalf("FlushWithOptions(MemTable): %v", err)
 		}
 
@@ -895,18 +895,18 @@ func TestDbReaderLifecycleAndMissingDb(t *testing.T) {
 		}
 		readerHandle.open = false
 
-		if _, err := readerHandle.reader.Get([]byte("reader")); !errors.Is(err, uniffi.ErrErrorClosed) {
+		if _, err := readerHandle.reader.Get([]byte("reader")); !errors.Is(err, slatedb.ErrErrorClosed) {
 			t.Fatalf("DbReader.Get() after Shutdown(): got %v, want closed error", err)
 		}
 	})
 
 	t.Run("missing db", func(t *testing.T) {
 		store := newMemoryStore(t)
-		builder := uniffi.NewDbReaderBuilder(testDBPath, store)
+		builder := slatedb.NewDbReaderBuilder(testDBPath, store)
 		defer builder.Destroy()
 
 		_, err := builder.Build()
-		if !errors.Is(err, uniffi.ErrErrorData) {
+		if !errors.Is(err, slatedb.ErrErrorData) {
 			t.Fatalf("DbReaderBuilder.Build() without db: got %v, want data error", err)
 		}
 	})
@@ -922,7 +922,7 @@ func TestDbReaderPointReads(t *testing.T) {
 	if _, err := dbHandle.db.Put([]byte("empty"), []byte{}); err != nil {
 		t.Fatalf("Put(empty): %v", err)
 	}
-	if err := dbHandle.db.FlushWithOptions(uniffi.FlushOptions{FlushType: uniffi.FlushTypeMemTable}); err != nil {
+	if err := dbHandle.db.FlushWithOptions(slatedb.FlushOptions{FlushType: slatedb.FlushTypeMemTable}); err != nil {
 		t.Fatalf("FlushWithOptions(MemTable): %v", err)
 	}
 
@@ -936,8 +936,8 @@ func TestDbReaderPointReads(t *testing.T) {
 		t.Fatalf("DbReader.Get(alpha): got %v, want %q", value, "one")
 	}
 
-	value, err = readerHandle.reader.GetWithOptions([]byte("alpha"), uniffi.ReadOptions{
-		DurabilityFilter: uniffi.DurabilityLevelMemory,
+	value, err = readerHandle.reader.GetWithOptions([]byte("alpha"), slatedb.ReadOptions{
+		DurabilityFilter: slatedb.DurabilityLevelMemory,
 		Dirty:            false,
 		CacheBlocks:      true,
 	})
@@ -984,20 +984,20 @@ func TestDbReaderScanVariants(t *testing.T) {
 			t.Fatalf("Put(%q): %v", entry.key, err)
 		}
 	}
-	if err := dbHandle.db.FlushWithOptions(uniffi.FlushOptions{FlushType: uniffi.FlushTypeMemTable}); err != nil {
+	if err := dbHandle.db.FlushWithOptions(slatedb.FlushOptions{FlushType: slatedb.FlushTypeMemTable}); err != nil {
 		t.Fatalf("FlushWithOptions(MemTable): %v", err)
 	}
 
 	readerHandle := openTestReader(t, store, nil)
 
-	iter, err := readerHandle.reader.Scan(uniffi.KeyRange{})
+	iter, err := readerHandle.reader.Scan(slatedb.KeyRange{})
 	if err != nil {
 		t.Fatalf("DbReader.Scan(full): %v", err)
 	}
 	t.Cleanup(iter.Destroy)
 	requireRows(t, drainIterator(t, iter), []string{"item:01", "item:02", "item:03", "other:01"}, []string{"first", "second", "third", "other"})
 
-	iter, err = readerHandle.reader.Scan(uniffi.KeyRange{
+	iter, err = readerHandle.reader.Scan(slatedb.KeyRange{
 		Start:          bytesPtr([]byte("item:02")),
 		StartInclusive: true,
 		End:            bytesPtr([]byte("item:03")),
@@ -1010,14 +1010,14 @@ func TestDbReaderScanVariants(t *testing.T) {
 	requireRows(t, drainIterator(t, iter), []string{"item:02", "item:03"}, []string{"second", "third"})
 
 	iter, err = readerHandle.reader.ScanWithOptions(
-		uniffi.KeyRange{
+		slatedb.KeyRange{
 			Start:          bytesPtr([]byte("item:01")),
 			StartInclusive: true,
 			End:            bytesPtr([]byte("item:99")),
 			EndInclusive:   false,
 		},
-		uniffi.ScanOptions{
-			DurabilityFilter: uniffi.DurabilityLevelMemory,
+		slatedb.ScanOptions{
+			DurabilityFilter: slatedb.DurabilityLevelMemory,
 			Dirty:            false,
 			ReadAheadBytes:   64,
 			CacheBlocks:      true,
@@ -1039,8 +1039,8 @@ func TestDbReaderScanVariants(t *testing.T) {
 
 	iter, err = readerHandle.reader.ScanPrefixWithOptions(
 		[]byte("item:"),
-		uniffi.ScanOptions{
-			DurabilityFilter: uniffi.DurabilityLevelMemory,
+		slatedb.ScanOptions{
+			DurabilityFilter: slatedb.DurabilityLevelMemory,
 			Dirty:            false,
 			ReadAheadBytes:   32,
 			CacheBlocks:      false,
@@ -1061,13 +1061,13 @@ func TestDbReaderRefreshBehavior(t *testing.T) {
 	if _, err := dbHandle.db.Put([]byte("seed"), []byte("value")); err != nil {
 		t.Fatalf("Put(seed): %v", err)
 	}
-	if err := dbHandle.db.FlushWithOptions(uniffi.FlushOptions{FlushType: uniffi.FlushTypeMemTable}); err != nil {
+	if err := dbHandle.db.FlushWithOptions(slatedb.FlushOptions{FlushType: slatedb.FlushTypeMemTable}); err != nil {
 		t.Fatalf("FlushWithOptions(MemTable): %v", err)
 	}
 
-	readerHandle := openTestReader(t, store, func(t *testing.T, builder *uniffi.DbReaderBuilder) {
+	readerHandle := openTestReader(t, store, func(t *testing.T, builder *slatedb.DbReaderBuilder) {
 		t.Helper()
-		if err := builder.WithOptions(uniffi.ReaderOptions{
+		if err := builder.WithOptions(slatedb.ReaderOptions{
 			ManifestPollIntervalMs: 100,
 			CheckpointLifetimeMs:   1000,
 			MaxMemtableBytes:       64 * 1024 * 1024,
@@ -1080,7 +1080,7 @@ func TestDbReaderRefreshBehavior(t *testing.T) {
 	if _, err := dbHandle.db.Put([]byte("refresh"), []byte("updated")); err != nil {
 		t.Fatalf("Put(refresh): %v", err)
 	}
-	if err := dbHandle.db.FlushWithOptions(uniffi.FlushOptions{FlushType: uniffi.FlushTypeMemTable}); err != nil {
+	if err := dbHandle.db.FlushWithOptions(slatedb.FlushOptions{FlushType: slatedb.FlushTypeMemTable}); err != nil {
 		t.Fatalf("FlushWithOptions(MemTable): %v", err)
 	}
 
@@ -1097,9 +1097,9 @@ func TestDbReaderWalReplayBehavior(t *testing.T) {
 	t.Run("default reader replays new wal data", func(t *testing.T) {
 		store := newMemoryStore(t)
 		dbHandle := openTestDB(t, store, nil)
-		readerHandle := openTestReader(t, store, func(t *testing.T, builder *uniffi.DbReaderBuilder) {
+		readerHandle := openTestReader(t, store, func(t *testing.T, builder *slatedb.DbReaderBuilder) {
 			t.Helper()
-			if err := builder.WithOptions(uniffi.ReaderOptions{
+			if err := builder.WithOptions(slatedb.ReaderOptions{
 				ManifestPollIntervalMs: 100,
 				CheckpointLifetimeMs:   1000,
 				MaxMemtableBytes:       64 * 1024 * 1024,
@@ -1112,7 +1112,7 @@ func TestDbReaderWalReplayBehavior(t *testing.T) {
 		if _, err := dbHandle.db.Put([]byte("wal-key"), []byte("wal-value")); err != nil {
 			t.Fatalf("Put(wal-key): %v", err)
 		}
-		if err := dbHandle.db.FlushWithOptions(uniffi.FlushOptions{FlushType: uniffi.FlushTypeWal}); err != nil {
+		if err := dbHandle.db.FlushWithOptions(slatedb.FlushOptions{FlushType: slatedb.FlushTypeWal}); err != nil {
 			t.Fatalf("FlushWithOptions(Wal): %v", err)
 		}
 
@@ -1132,20 +1132,20 @@ func TestDbReaderWalReplayBehavior(t *testing.T) {
 		if _, err := dbHandle.db.Put([]byte("flushed-key"), []byte("flushed-value")); err != nil {
 			t.Fatalf("Put(flushed-key): %v", err)
 		}
-		if err := dbHandle.db.FlushWithOptions(uniffi.FlushOptions{FlushType: uniffi.FlushTypeMemTable}); err != nil {
+		if err := dbHandle.db.FlushWithOptions(slatedb.FlushOptions{FlushType: slatedb.FlushTypeMemTable}); err != nil {
 			t.Fatalf("FlushWithOptions(MemTable) for flushed-key: %v", err)
 		}
 
 		if _, err := dbHandle.db.Put([]byte("wal-only-key"), []byte("wal-only-value")); err != nil {
 			t.Fatalf("Put(wal-only-key): %v", err)
 		}
-		if err := dbHandle.db.FlushWithOptions(uniffi.FlushOptions{FlushType: uniffi.FlushTypeWal}); err != nil {
+		if err := dbHandle.db.FlushWithOptions(slatedb.FlushOptions{FlushType: slatedb.FlushTypeWal}); err != nil {
 			t.Fatalf("FlushWithOptions(Wal) for wal-only-key: %v", err)
 		}
 
-		readerHandle := openTestReader(t, store, func(t *testing.T, builder *uniffi.DbReaderBuilder) {
+		readerHandle := openTestReader(t, store, func(t *testing.T, builder *slatedb.DbReaderBuilder) {
 			t.Helper()
-			if err := builder.WithOptions(uniffi.ReaderOptions{
+			if err := builder.WithOptions(slatedb.ReaderOptions{
 				ManifestPollIntervalMs: 100,
 				CheckpointLifetimeMs:   1000,
 				MaxMemtableBytes:       64 * 1024 * 1024,
@@ -1171,13 +1171,13 @@ func TestDbReaderWalReplayBehavior(t *testing.T) {
 			t.Fatalf("DbReader.Get(wal-only-key): got %q, want nil", *value)
 		}
 
-		if err := dbHandle.db.FlushWithOptions(uniffi.FlushOptions{FlushType: uniffi.FlushTypeMemTable}); err != nil {
+		if err := dbHandle.db.FlushWithOptions(slatedb.FlushOptions{FlushType: slatedb.FlushTypeMemTable}); err != nil {
 			t.Fatalf("FlushWithOptions(MemTable) for wal-only-key: %v", err)
 		}
 
-		readerHandle2 := openTestReader(t, store, func(t *testing.T, builder *uniffi.DbReaderBuilder) {
+		readerHandle2 := openTestReader(t, store, func(t *testing.T, builder *slatedb.DbReaderBuilder) {
 			t.Helper()
-			if err := builder.WithOptions(uniffi.ReaderOptions{
+			if err := builder.WithOptions(slatedb.ReaderOptions{
 				ManifestPollIntervalMs: 100,
 				CheckpointLifetimeMs:   1000,
 				MaxMemtableBytes:       64 * 1024 * 1024,
@@ -1199,7 +1199,7 @@ func TestDbReaderWalReplayBehavior(t *testing.T) {
 
 func TestDbReaderMergeOperator(t *testing.T) {
 	store := newMemoryStore(t)
-	dbHandle := openTestDB(t, store, func(t *testing.T, builder *uniffi.DbBuilder) {
+	dbHandle := openTestDB(t, store, func(t *testing.T, builder *slatedb.DbBuilder) {
 		t.Helper()
 		if err := builder.WithMergeOperator(concatMergeOperator{}); err != nil {
 			t.Fatalf("DbBuilder.WithMergeOperator(): %v", err)
@@ -1212,11 +1212,11 @@ func TestDbReaderMergeOperator(t *testing.T) {
 	if _, err := dbHandle.db.Merge([]byte("merge"), []byte(":reader")); err != nil {
 		t.Fatalf("Merge(merge): %v", err)
 	}
-	if err := dbHandle.db.FlushWithOptions(uniffi.FlushOptions{FlushType: uniffi.FlushTypeMemTable}); err != nil {
+	if err := dbHandle.db.FlushWithOptions(slatedb.FlushOptions{FlushType: slatedb.FlushTypeMemTable}); err != nil {
 		t.Fatalf("FlushWithOptions(MemTable): %v", err)
 	}
 
-	readerHandle := openTestReader(t, store, func(t *testing.T, builder *uniffi.DbReaderBuilder) {
+	readerHandle := openTestReader(t, store, func(t *testing.T, builder *slatedb.DbReaderBuilder) {
 		t.Helper()
 		if err := builder.WithMergeOperator(concatMergeOperator{}); err != nil {
 			t.Fatalf("DbReaderBuilder.WithMergeOperator(): %v", err)
@@ -1239,15 +1239,15 @@ func TestDbReaderBuilderValidationAndErrors(t *testing.T) {
 		if _, err := dbHandle.db.Put([]byte("seed"), []byte("value")); err != nil {
 			t.Fatalf("Put(seed): %v", err)
 		}
-		if err := dbHandle.db.FlushWithOptions(uniffi.FlushOptions{FlushType: uniffi.FlushTypeMemTable}); err != nil {
+		if err := dbHandle.db.FlushWithOptions(slatedb.FlushOptions{FlushType: slatedb.FlushTypeMemTable}); err != nil {
 			t.Fatalf("FlushWithOptions(MemTable): %v", err)
 		}
 
-		builder := uniffi.NewDbReaderBuilder(testDBPath, store)
+		builder := slatedb.NewDbReaderBuilder(testDBPath, store)
 		defer builder.Destroy()
 
 		err := builder.WithCheckpointId("not-a-uuid")
-		if !errors.Is(err, uniffi.ErrErrorInvalid) {
+		if !errors.Is(err, slatedb.ErrErrorInvalid) {
 			t.Fatalf("DbReaderBuilder.WithCheckpointId(invalid): got %v, want invalid error", err)
 		}
 	})
@@ -1258,11 +1258,11 @@ func TestDbReaderBuilderValidationAndErrors(t *testing.T) {
 		if _, err := dbHandle.db.Put([]byte("seed"), []byte("value")); err != nil {
 			t.Fatalf("Put(seed): %v", err)
 		}
-		if err := dbHandle.db.FlushWithOptions(uniffi.FlushOptions{FlushType: uniffi.FlushTypeMemTable}); err != nil {
+		if err := dbHandle.db.FlushWithOptions(slatedb.FlushOptions{FlushType: slatedb.FlushTypeMemTable}); err != nil {
 			t.Fatalf("FlushWithOptions(MemTable): %v", err)
 		}
 
-		builder := uniffi.NewDbReaderBuilder(testDBPath, store)
+		builder := slatedb.NewDbReaderBuilder(testDBPath, store)
 		defer builder.Destroy()
 
 		if err := builder.WithCheckpointId("ffffffff-ffff-ffff-ffff-ffffffffffff"); err != nil {
@@ -1270,7 +1270,7 @@ func TestDbReaderBuilderValidationAndErrors(t *testing.T) {
 		}
 
 		_, err := builder.Build()
-		if !errors.Is(err, uniffi.ErrErrorData) {
+		if !errors.Is(err, slatedb.ErrErrorData) {
 			t.Fatalf("DbReaderBuilder.Build() with missing checkpoint: got %v, want data error", err)
 		}
 	})
@@ -1281,11 +1281,11 @@ func TestDbReaderBuilderValidationAndErrors(t *testing.T) {
 		if _, err := dbHandle.db.Put([]byte("seed"), []byte("value")); err != nil {
 			t.Fatalf("Put(seed): %v", err)
 		}
-		if err := dbHandle.db.FlushWithOptions(uniffi.FlushOptions{FlushType: uniffi.FlushTypeMemTable}); err != nil {
+		if err := dbHandle.db.FlushWithOptions(slatedb.FlushOptions{FlushType: slatedb.FlushTypeMemTable}); err != nil {
 			t.Fatalf("FlushWithOptions(MemTable): %v", err)
 		}
 
-		builder := uniffi.NewDbReaderBuilder(testDBPath, store)
+		builder := slatedb.NewDbReaderBuilder(testDBPath, store)
 		defer builder.Destroy()
 
 		reader, err := builder.Build()
@@ -1298,7 +1298,7 @@ func TestDbReaderBuilderValidationAndErrors(t *testing.T) {
 		}
 
 		_, err = builder.Build()
-		if !errors.Is(err, uniffi.ErrErrorInvalid) {
+		if !errors.Is(err, slatedb.ErrErrorInvalid) {
 			t.Fatalf("second DbReaderBuilder.Build(): got %v, want invalid error", err)
 		}
 	})
@@ -1309,25 +1309,25 @@ func TestDbReaderBuilderValidationAndErrors(t *testing.T) {
 		if _, err := dbHandle.db.Put([]byte("seed"), []byte("value")); err != nil {
 			t.Fatalf("Put(seed): %v", err)
 		}
-		if err := dbHandle.db.FlushWithOptions(uniffi.FlushOptions{FlushType: uniffi.FlushTypeMemTable}); err != nil {
+		if err := dbHandle.db.FlushWithOptions(slatedb.FlushOptions{FlushType: slatedb.FlushTypeMemTable}); err != nil {
 			t.Fatalf("FlushWithOptions(MemTable): %v", err)
 		}
 
 		readerHandle := openTestReader(t, store, nil)
 
-		if _, err := readerHandle.reader.Scan(uniffi.KeyRange{
+		if _, err := readerHandle.reader.Scan(slatedb.KeyRange{
 			Start:          bytesPtr([]byte{}),
 			StartInclusive: true,
-		}); !errors.Is(err, uniffi.ErrErrorInvalid) {
+		}); !errors.Is(err, slatedb.ErrErrorInvalid) {
 			t.Fatalf("DbReader.Scan(empty start): got %v, want invalid error", err)
 		}
 
-		if _, err := readerHandle.reader.Scan(uniffi.KeyRange{
+		if _, err := readerHandle.reader.Scan(slatedb.KeyRange{
 			Start:          bytesPtr([]byte("z")),
 			StartInclusive: true,
 			End:            bytesPtr([]byte("a")),
 			EndInclusive:   true,
-		}); !errors.Is(err, uniffi.ErrErrorInvalid) {
+		}); !errors.Is(err, slatedb.ErrErrorInvalid) {
 			t.Fatalf("DbReader.Scan(start > end): got %v, want invalid error", err)
 		}
 	})
@@ -1431,7 +1431,7 @@ func TestWalReaderMetadataAndRows(t *testing.T) {
 		t.Fatalf("WalReader.List(nil, nil): got %d files, want at least 3", len(files))
 	}
 
-	var allRows []uniffi.RowEntry
+	var allRows []slatedb.RowEntry
 
 	for i, file := range files {
 		metadata, err := file.Metadata()
@@ -1464,28 +1464,28 @@ func TestWalReaderMetadataAndRows(t *testing.T) {
 		t.Fatalf("unexpected total WAL row count: got %d, want 4", len(allRows))
 	}
 
-	if allRows[0].Kind != uniffi.RowEntryKindValue || string(allRows[0].Key) != "a" {
+	if allRows[0].Kind != slatedb.RowEntryKindValue || string(allRows[0].Key) != "a" {
 		t.Fatalf("row 0: got kind=%v key=%q, want value/a", allRows[0].Kind, allRows[0].Key)
 	}
 	if allRows[0].Value == nil || !bytes.Equal(*allRows[0].Value, []byte("1")) {
 		t.Fatalf("row 0: got value %v, want %q", allRows[0].Value, "1")
 	}
 
-	if allRows[1].Kind != uniffi.RowEntryKindValue || string(allRows[1].Key) != "b" {
+	if allRows[1].Kind != slatedb.RowEntryKindValue || string(allRows[1].Key) != "b" {
 		t.Fatalf("row 1: got kind=%v key=%q, want value/b", allRows[1].Kind, allRows[1].Key)
 	}
 	if allRows[1].Value == nil || !bytes.Equal(*allRows[1].Value, []byte("2")) {
 		t.Fatalf("row 1: got value %v, want %q", allRows[1].Value, "2")
 	}
 
-	if allRows[2].Kind != uniffi.RowEntryKindTombstone || string(allRows[2].Key) != "a" {
+	if allRows[2].Kind != slatedb.RowEntryKindTombstone || string(allRows[2].Key) != "a" {
 		t.Fatalf("row 2: got kind=%v key=%q, want tombstone/a", allRows[2].Kind, allRows[2].Key)
 	}
 	if allRows[2].Value != nil {
 		t.Fatalf("row 2: got value %q, want nil", *allRows[2].Value)
 	}
 
-	if allRows[3].Kind != uniffi.RowEntryKindMerge || string(allRows[3].Key) != "m" {
+	if allRows[3].Kind != slatedb.RowEntryKindMerge || string(allRows[3].Key) != "m" {
 		t.Fatalf("row 3: got kind=%v key=%q, want merge/m", allRows[3].Kind, allRows[3].Key)
 	}
 	if allRows[3].Value == nil || !bytes.Equal(*allRows[3].Value, []byte("x")) {
@@ -1531,18 +1531,18 @@ func TestLoggingCallback(t *testing.T) {
 	store := newMemoryStore(t)
 
 	collector := &logCollector{}
-	var callback uniffi.LogCallback = collector
+	var callback slatedb.LogCallback = collector
 
-	if err := uniffi.InitLogging(uniffi.LogLevelInfo, &callback); err != nil {
+	if err := slatedb.InitLogging(slatedb.LogLevelInfo, &callback); err != nil {
 		t.Fatalf("InitLogging(first): %v", err)
 	}
 
-	err := uniffi.InitLogging(uniffi.LogLevelInfo, &callback)
-	if !errors.Is(err, uniffi.ErrErrorInvalid) {
+	err := slatedb.InitLogging(slatedb.LogLevelInfo, &callback)
+	if !errors.Is(err, slatedb.ErrErrorInvalid) {
 		t.Fatalf("InitLogging(second): got %v, want invalid error", err)
 	}
 
-	var invalidErr *uniffi.ErrorInvalid
+	var invalidErr *slatedb.ErrorInvalid
 	if !errors.As(err, &invalidErr) {
 		t.Fatalf("InitLogging(second): expected *ErrorInvalid, got %T", err)
 	}
@@ -1551,7 +1551,7 @@ func TestLoggingCallback(t *testing.T) {
 	}
 
 	path := fmt.Sprintf("test-db-logging-%d", time.Now().UnixNano())
-	builder := uniffi.NewDbBuilder(path, store)
+	builder := slatedb.NewDbBuilder(path, store)
 	defer builder.Destroy()
 
 	db, err := builder.Build()
@@ -1566,10 +1566,10 @@ func TestLoggingCallback(t *testing.T) {
 		}
 	}()
 
-	var openRecord uniffi.LogRecord
+	var openRecord slatedb.LogRecord
 	waitUntil(t, 60*time.Second, 10*time.Millisecond, func() (bool, error) {
-		record, found := collector.matchingRecord(func(record uniffi.LogRecord) bool {
-			return record.Level == uniffi.LogLevelInfo &&
+		record, found := collector.matchingRecord(func(record slatedb.LogRecord) bool {
+			return record.Level == slatedb.LogLevelInfo &&
 				strings.Contains(record.Message, "opening SlateDB database") &&
 				strings.Contains(record.Message, path)
 		})

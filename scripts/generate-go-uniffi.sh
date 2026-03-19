@@ -3,7 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." >/dev/null 2>&1 && pwd)"
-GO_DIR="${ROOT_DIR}/bindings/go"
+GO_PKG_DIR="${ROOT_DIR}/bindings/go/uniffi"
 UNIFFI_DIR="${ROOT_DIR}/bindings/uniffi"
 TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/slatedb-go-uniffi.XXXXXX")"
 
@@ -37,21 +37,26 @@ if [[ -z "${LIB_FILE}" ]]; then
   exit 1
 fi
 
-mkdir -p "${GO_DIR}"
+mkdir -p "${GO_PKG_DIR}"
 
 uniffi-bindgen-go "${LIB_FILE}" \
   --library \
   --config "${UNIFFI_DIR}/uniffi.toml" \
   --out-dir "${TMP_DIR}/out"
 
-GENERATED_DIR="${TMP_DIR}/out/uniffi"
+GENERATED_DIR="${TMP_DIR}/out/slatedb"
 
-if [[ ! -f "${GENERATED_DIR}/uniffi.go" || ! -f "${GENERATED_DIR}/uniffi.h" ]]; then
+GENERATED_GO_FILE="$(find "${GENERATED_DIR}" -maxdepth 1 -type f -name '*.go' | head -n 1)"
+GENERATED_H_FILE="$(find "${GENERATED_DIR}" -maxdepth 1 -type f -name '*.h' | head -n 1)"
+
+if [[ -z "${GENERATED_GO_FILE}" || -z "${GENERATED_H_FILE}" ]]; then
   echo "unexpected generator output in ${GENERATED_DIR}" >&2
   exit 1
 fi
 
-rm -f "${GO_DIR}/slatedb.go" "${GO_DIR}/slatedb.h" "${GO_DIR}/uniffi.go" "${GO_DIR}/uniffi.h"
-cp "${GENERATED_DIR}/uniffi.go" "${GO_DIR}/uniffi.go"
-cp "${GENERATED_DIR}/uniffi.h" "${GO_DIR}/uniffi.h"
-go -C "${GO_DIR}" fmt .
+rm -f \
+  "${GO_PKG_DIR}/slatedb.go" \
+  "${GO_PKG_DIR}/slatedb.h"
+cp "${GENERATED_GO_FILE}" "${GO_PKG_DIR}/$(basename "${GENERATED_GO_FILE}")"
+cp "${GENERATED_H_FILE}" "${GO_PKG_DIR}/$(basename "${GENERATED_H_FILE}")"
+go -C "${GO_PKG_DIR}" fmt ./...

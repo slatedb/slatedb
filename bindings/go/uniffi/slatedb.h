@@ -1999,5 +1999,5 @@ uint32_t ffi_slatedb_uniffi_uniffi_contract_version(void
  void slatedb_uniffi_cgo_dispatchCallbackInterfaceMergeOperatorMethod0(uint64_t uniffi_handle, RustBuffer key, RustBuffer existing_value, RustBuffer operand, RustBuffer* uniffi_out_return, RustCallStatus* callStatus );
  void slatedb_uniffi_cgo_dispatchCallbackInterfaceMergeOperatorFree(uint64_t handle);
 
-void uniffi_uniffiFutureContinuationCallback(uint64_t, int8_t);
-void uniffi_uniffiFreeGorutine(uint64_t);
+void slatedb_uniffiFutureContinuationCallback(uint64_t, int8_t);
+void slatedb_uniffiFreeGorutine(uint64_t);
