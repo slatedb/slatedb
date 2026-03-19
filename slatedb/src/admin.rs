@@ -1,3 +1,6 @@
+pub use crate::db::builder::CloneBuilder;
+pub use crate::db::builder::CloneSourceSpec;
+
 use crate::checkpoint::{Checkpoint, CheckpointCreateResult};
 use crate::compactions_store::CompactionsStore;
 use crate::compactor::{Compaction, CompactionSpec, Compactor, CompactorStateView};
@@ -12,22 +15,21 @@ use crate::garbage_collector::GC_TASK_NAME;
 use crate::manifest::store::{ManifestStore, StoredManifest};
 use slatedb_common::clock::SystemClock;
 
-use crate::clone;
 use crate::db_status::ClosedResultWriter;
 use crate::object_stores::{ObjectStoreType, ObjectStores};
 use crate::rand::DbRand;
 use crate::seq_tracker::FindOption;
 use crate::utils::IdGenerator;
 use crate::utils::WatchableOnceCell;
+use bytes::Bytes;
 use chrono::{DateTime, Utc};
-use fail_parallel::FailPointRegistry;
 use object_store::path::Path;
 use object_store::ObjectStore;
 use rand::RngCore;
 use std::env;
 use std::env::VarError;
 use std::error::Error;
-use std::ops::RangeBounds;
+use std::ops::{Bound, RangeBounds};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::runtime::Handle;
@@ -550,18 +552,13 @@ impl Admin {
         )
     }
 
-    /// Clone a database. If no db already exists at the specified path, then this will create
-    /// a new db under the path that is a clone of the db at parent_path.
+    /// Clone a database using a builder pattern. If no db already exists at the specified path,
+    /// then this will create a new db under the path that is a clone of the db at parent_path.
     ///
     /// A clone is a shallow copy of the parent database - it starts with a manifest that
     /// references the same SSTs, but doesn't actually copy those SSTs, except for the WAL.
     /// New writes will be written to the newly created db and will not be reflected in the
     /// parent database.
-    ///
-    /// The clone can optionally be created from an existing checkpoint. If
-    /// `parent_checkpoint` is present, then the referenced manifest is used
-    /// as the base for the clone db's manifest. Otherwise, this method creates a new checkpoint
-    /// for the current version of the parent db.
     ///
     /// # Examples
     ///
@@ -580,31 +577,28 @@ impl Admin {
     ///    db.close().await?;
     ///
     ///    let admin = AdminBuilder::new("clone_path", object_store).build();
-    ///    admin.create_clone(
-    ///      "parent_path",
-    ///      None,
-    ///    ).await?;
+    ///    admin.create_clone_builder("parent_path", None).build().await?;
     ///
     ///    Ok(())
     /// }
     /// ```
-    pub async fn create_clone<P: Into<Path>>(
+    pub fn create_clone_builder<P: Into<Path>>(
         &self,
         parent_path: P,
         parent_checkpoint: Option<Uuid>,
-    ) -> Result<(), Box<dyn Error>> {
-        clone::create_clone(
+    ) -> CloneBuilder<(Bound<Bytes>, Bound<Bytes>)> {
+        let source = match parent_checkpoint {
+            Some(cp) => CloneSourceSpec::with_checkpoint(parent_path, cp),
+            None => CloneSourceSpec::new(parent_path),
+        };
+        CloneBuilder::new(
             self.path.clone(),
-            parent_path.into(),
+            source,
             self.object_stores.store_of(ObjectStoreType::Main).clone(),
             self.object_stores.store_of(ObjectStoreType::Wal).clone(),
-            parent_checkpoint,
-            Arc::new(FailPointRegistry::new()),
             self.system_clock.clone(),
             self.rand.clone(),
         )
-        .await?;
-        Ok(())
     }
 
     /// Creates a new builder for an admin client at the given path.
@@ -1138,5 +1132,34 @@ mod tests {
             .build();
 
         assert!(admin.compaction_filter_supplier.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_create_clone_builder() {
+        use crate::manifest::store::ManifestStore;
+        use crate::Db;
+
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let parent_path = Path::from("/tmp/test_parent");
+        let clone_path = Path::from("/tmp/test_clone");
+
+        let parent_db = Db::open(parent_path.clone(), object_store.clone())
+            .await
+            .unwrap();
+        parent_db.close().await.unwrap();
+
+        let admin = AdminBuilder::new(clone_path.clone(), object_store.clone()).build();
+
+        // Test basic builder without checkpoint
+        admin
+            .create_clone_builder(parent_path.clone(), None)
+            .build()
+            .await
+            .expect("clone should succeed");
+
+        // Verify clone was created
+        let clone_manifest_store = ManifestStore::new(&clone_path, object_store.clone());
+        let manifest = clone_manifest_store.read_latest_manifest().await;
+        assert!(manifest.is_ok(), "cloned manifest should exist");
     }
 }
