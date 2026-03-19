@@ -707,6 +707,12 @@ impl<'a> StateModifier<'a> {
         };
 
         let my_db_state = self.state.core();
+        let remote_last_l0_seq = remote_manifest.value.core.last_l0_seq;
+        let mut merged_sequence_tracker = remote_manifest.value.core.sequence_tracker.clone();
+        let local_sequence_suffix = my_db_state
+            .sequence_tracker
+            .filter_after_seq(remote_last_l0_seq);
+        merged_sequence_tracker.extend_from(&local_sequence_suffix);
         remote_manifest.value.core = ManifestCore {
             initialized: my_db_state.initialized,
             last_compacted_l0_sst_view_id: remote_manifest.value.core.last_compacted_l0_sst_view_id,
@@ -718,7 +724,7 @@ impl<'a> StateModifier<'a> {
             last_l0_clock_tick: my_db_state.last_l0_clock_tick,
             last_l0_seq: my_db_state.last_l0_seq,
             recent_snapshot_min_seq: my_db_state.recent_snapshot_min_seq,
-            sequence_tracker: remote_manifest.value.core.sequence_tracker,
+            sequence_tracker: merged_sequence_tracker,
             checkpoints: remote_manifest.value.core.checkpoints,
             wal_object_store_uri: my_db_state.wal_object_store_uri.clone(),
         };
@@ -756,8 +762,10 @@ mod tests {
     use crate::format::sst::SST_FORMAT_VERSION_LATEST;
     use crate::manifest::store::test_utils::new_dirty_manifest;
     use crate::proptest_util::arbitrary;
+    use crate::seq_tracker::{FindOption, TrackedSeq};
     use crate::test_utils;
     use bytes::Bytes;
+    use chrono::{TimeZone, Utc};
     use proptest::collection::vec;
     use proptest::proptest;
     use slatedb_common::clock::{DefaultSystemClock, SystemClock};
@@ -844,6 +852,56 @@ mod tests {
             .map(|l0| l0.sst.id)
             .collect();
         assert_eq!(expected, merged);
+    }
+
+    #[test]
+    fn test_should_merge_sequence_tracker_from_remote_prefix_and_local_suffix() {
+        let mut db_state = DbState::new(new_dirty_manifest(), DbStatusReporter::new(0));
+        db_state.modify(|modifier| {
+            let core = &mut modifier.state.manifest.value.core;
+            core.last_l0_seq = 3;
+            core.sequence_tracker.insert(TrackedSeq {
+                seq: 1,
+                ts: Utc.timestamp_opt(60, 0).single().unwrap(),
+            });
+            core.sequence_tracker.insert(TrackedSeq {
+                seq: 2,
+                ts: Utc.timestamp_opt(120, 0).single().unwrap(),
+            });
+            core.sequence_tracker.insert(TrackedSeq {
+                seq: 3,
+                ts: Utc.timestamp_opt(180, 0).single().unwrap(),
+            });
+        });
+
+        let mut remote_state = new_dirty_manifest();
+        remote_state.value.core = db_state.state.core().clone();
+        remote_state.value.core.last_l0_seq = 1;
+        remote_state.value.core.sequence_tracker =
+            db_state.state.core().sequence_tracker.filter_after_seq(0);
+
+        db_state.merge_remote_manifest(remote_state);
+
+        let merged_tracker = &db_state.state.core().sequence_tracker;
+        assert_eq!(
+            merged_tracker.find_ts(1, FindOption::RoundDown),
+            Utc.timestamp_opt(60, 0).single()
+        );
+        assert_eq!(
+            merged_tracker.find_ts(2, FindOption::RoundDown),
+            Utc.timestamp_opt(120, 0).single()
+        );
+        assert_eq!(
+            merged_tracker.find_ts(3, FindOption::RoundDown),
+            Utc.timestamp_opt(180, 0).single()
+        );
+        assert_eq!(
+            merged_tracker.find_seq(
+                Utc.timestamp_opt(180, 0).single().unwrap(),
+                FindOption::RoundDown
+            ),
+            Some(3)
+        );
     }
 
     fn add_l0s_to_dbstate(db_state: &mut DbState, n: u32) {
