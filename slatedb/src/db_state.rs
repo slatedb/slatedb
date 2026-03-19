@@ -51,6 +51,9 @@ impl SsTableHandle {
     }
 
     /// Returns an estimate of the SST's on-disk size in bytes.
+    ///
+    /// This is a rough estimate: the index is the last thing written before
+    /// the info footer, so `index_offset + index_len` approximates the file size.
     pub fn estimate_size(&self) -> u64 {
         self.info.index_offset + self.info.index_len
     }
