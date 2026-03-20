@@ -50,6 +50,10 @@ jobs:
         run: |
           sed -i "s/^version = \".*\"/version = \"${{ github.event.inputs.version }}\"/" slatedb-py/pyproject.toml
 
+      - name: Set Java package version
+        run: |
+          sed -i "s/^version=.*/version=${{ github.event.inputs.version }}-SNAPSHOT/" bindings/java/gradle.properties
+
       # Commit changes
       - name: Commit version bump
         uses: EndBug/add-and-commit@v9
@@ -100,7 +104,7 @@ jobs:
 
       - name: Create Go module tag
         run: |
-          TAG="slatedb-go/go/v${{ github.event.inputs.version }}"
+          TAG="bindings/go/v${{ github.event.inputs.version }}"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           if git ls-remote --tags origin "${TAG}" | grep -q "refs/tags/${TAG}$"; then

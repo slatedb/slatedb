@@ -9,7 +9,7 @@ use crate::flatbuffer_types::{
 use crate::format::block::{Block, BlockBuilderV1};
 use crate::format::block_v2::BlockBuilderV2;
 use crate::format::row;
-use crate::sst_stats::SstStats;
+use crate::sst_stats::{BlockStats, SstStats};
 use async_trait::async_trait;
 use bytes::{Buf, BufMut, Bytes};
 use flatbuffers::DefaultAllocator;
@@ -105,6 +105,45 @@ impl BlockBuilder {
         }
     }
 }
+
+pub(crate) struct BlockBuilderWithStats {
+    builder: BlockBuilder,
+    stats: BlockStats,
+}
+
+impl BlockBuilderWithStats {
+    pub(crate) fn new(builder: BlockBuilder) -> Self {
+        Self {
+            builder,
+            stats: BlockStats::default(),
+        }
+    }
+
+    pub(crate) fn would_fit(&self, entry: &crate::types::RowEntry) -> bool {
+        self.builder.would_fit(entry)
+    }
+
+    pub(crate) fn add(
+        &mut self,
+        entry: crate::types::RowEntry,
+    ) -> Result<bool, crate::error::SlateDBError> {
+        match &entry.value {
+            crate::types::ValueDeletable::Value(_) => self.stats.num_puts += 1,
+            crate::types::ValueDeletable::Merge(_) => self.stats.num_merges += 1,
+            crate::types::ValueDeletable::Tombstone => self.stats.num_deletes += 1,
+        }
+        self.builder.add(entry)
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.builder.is_empty()
+    }
+
+    pub(crate) fn into_parts(self) -> (BlockBuilder, BlockStats) {
+        (self.builder, self.stats)
+    }
+}
+
 pub(crate) const SIZEOF_U16: usize = size_of::<u16>();
 pub(crate) const SIZEOF_U32: usize = size_of::<u32>();
 pub(crate) const SIZEOF_U64: usize = size_of::<u64>();

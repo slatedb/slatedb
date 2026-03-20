@@ -220,7 +220,7 @@ export default defineConfig({
 					items: [
 						{
 							label: 'Go',
-							link: 'https://pkg.go.dev/slatedb.io/slatedb-go',
+							link: 'https://pkg.go.dev/slatedb.io/slatedb-go/uniffi',
 							attrs: { target: '_blank' }
 						},
 						{

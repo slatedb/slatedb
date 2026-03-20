@@ -67,12 +67,12 @@ To create a Java release:
 The Java release action will do the following:
 
 1. Verify the version string follows semantic versioning.
-2. Build native `slatedb-c` libraries for all supported targets:
-   - `linux-x86_64`
+2. Build native `slatedb_uniffi` libraries for all supported targets:
+   - `linux-x86-64`
    - `linux-aarch64`
-   - `macos-x86_64`
-   - `macos-aarch64`
-   - `windows-x86_64`
-   - `windows-aarch64`
-3. Assemble one universal Java artifact containing all native libraries.
-4. Publish signed Maven artifacts (`jar`, `sources`, `javadoc`, `pom`) to Maven Central.
+   - `darwin-x86-64`
+   - `darwin-aarch64`
+   - `win32-x86-64`
+   - `win32-aarch64`
+3. Assemble one universal `io.slatedb:slatedb-uniffi` jar containing all native libraries as JNA-loadable resources.
+4. Publish signed Maven artifacts (`jar`, `sources`, `javadoc`, `pom`) to Maven Central from `bindings/java`.

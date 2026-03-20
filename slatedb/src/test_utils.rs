@@ -2,7 +2,7 @@ use crate::compactor::{CompactionScheduler, CompactionSchedulerSupplier};
 use crate::compactor_state::{CompactionSpec, SourceId};
 use crate::compactor_state_protocols::CompactorStateView;
 use crate::config::{CompactorOptions, PutOptions, WriteOptions};
-use crate::db_state::{SortedRun, SsTableHandle, SsTableId};
+use crate::db_state::{SortedRun, SsTableHandle, SsTableId, SsTableView};
 use crate::error::SlateDBError;
 use crate::format::row::SstRowCodecV0;
 use crate::iter::{IterationOrder, RowEntryIterator};
@@ -324,11 +324,11 @@ pub(crate) async fn build_sorted_runs(
         let mut sr_ssts = Vec::new();
         for entries in sr_sst_sets {
             let ssts = write_ssts(table_store, entries, max_sst_size).await;
-            sr_ssts.extend(ssts);
+            sr_ssts.extend(ssts.into_iter().map(SsTableView::identity));
         }
         sorted_runs.push(SortedRun {
             id: sr_id as u32,
-            ssts: sr_ssts,
+            sst_views: sr_ssts,
         });
     }
 
@@ -363,7 +363,7 @@ impl CompactionScheduler for OnDemandCompactionScheduler {
         let mut sources: Vec<SourceId> = db_state
             .l0
             .iter()
-            .map(|sst| SourceId::Sst(sst.id.unwrap_compacted_id()))
+            .map(|view| SourceId::SstView(view.id))
             .collect();
 
         // Add SSTs from all sorted runs

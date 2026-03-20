@@ -93,10 +93,24 @@ table ExternalDb {
     final_checkpoint_id: Uuid (required);
 
     // Compacted SST IDs belonging to external DB that are currently being referenced.
-    sst_ids: [CompactedSstId] (required);
+    sst_ids: [Ulid] (required);
 }
 
-table ManifestV1 {
+// A view referencing a CompactedSsTable by its id. This indirection allows the same
+// physical SST to appear multiple times in the manifest with different visible ranges
+// (e.g. after projection and union), without duplicating SST metadata.
+table CompactedSsTableView {
+    // Reference to a CompactedSsTable by its id (stored at the top level of ManifestV2).
+    id: Ulid (required);
+    visible_range: BytesRange;
+}
+
+table SortedRunV2 {
+    id: uint32;
+    ssts: [CompactedSsTableView] (required);
+}
+
+table ManifestV2 {
    // List of external databases referenced by this manifest.
    external_dbs: [ExternalDb];
 
@@ -110,6 +124,16 @@ table ManifestV1 {
    destroyed_at_s: u64;
 
    ...
+
+   // All compacted SSTs referenced by l0 and compacted (sorted runs) views.
+   // This is the single source of truth for SST metadata (id, info, format_version).
+   ssts: [CompactedSsTable] (required);
+
+   // L0 and sorted run entries reference SSTs via CompactedSsTableView, which holds
+   // only the SST id and a visible_range. This allows the same SST to be referenced
+   // multiple times with different visible ranges.
+   l0: [CompactedSsTableView] (required);
+   compacted: [SortedRunV2] (required);
 
    // A list of current checkpoints that may be active (note: this replaces the existing
    // snapshots field)
@@ -155,6 +179,24 @@ table Checkpoint {
    name: string;
 }
 ```
+
+### Manifest V1 to V2 Migration
+
+The introduction of ManifestV2 requires a phased rollout to ensure forward compatibility across
+mixed-version deployments:
+
+1. **Phase 1 (current):** Write V1, read V1+V2. All nodes can read the new V2 format, but manifests
+   are still written in V1 format. This allows older nodes that only understand V1 to continue
+   operating during a rolling upgrade. To support this, a `last_compacted_l0_sst_id` field is
+   maintained alongside `last_compacted_l0_sst_view_id`, since V1 encodes `l0_last_compacted` as an
+   SST ID rather than a view ID.
+
+2. **Phase 2:** Write V2, read V1+V2. Once all nodes are upgraded and can read V2, the writer
+   switches to emitting V2 manifests. V1 reading is retained for backward compatibility with
+   existing manifests on disk.
+
+3. **Phase 3:** Deprecate V1. Once no V1 manifests remain on disk (i.e., all have been superseded),
+   V1 reading support can be removed.
 
 ### Public API
 
