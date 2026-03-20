@@ -235,9 +235,8 @@ SlateDB features and components that this RFC interacts with. Check all that app
 
 ### Performance & Cost
 
-- **Read latency:** warm reads (index already cached) see no meaningful change. On a cold miss the top-level directory is small and always fetched first; if it is not cached, all partition blocks should be fetched in parallel upfront to avoid multiple sequential object-store round trips, since object-store latency is dominated by first-byte cost rather than throughput. Workloads that access key ranges spanning multiple partitions in the same SST benefit from this eager prefetch path.
+- **Read latency:** warm reads (index already cached) see no meaningful change. On a cold miss, all partition blocks are fetched which is the same cost as reading the flat index. These are cached at partition granularity and partitions are evicted as necessary.
 - **Write latency:** negligible impact. The footer builder does slightly more work splitting block_meta into partitions, but this is CPU-bound and minor relative to the I/O cost of writing data blocks.
-- **Object-store requests:** on a cold miss, all partition blocks are fetched in parallel (matching the flat index's single-pass behavior), so the GET count is the same. The difference is that only the accessed partitions need to stay in cache afterward — the rest can be evicted — whereas a flat index must be cached in full or not at all.
 - **Space amplification:** slight increase due to storing the top-level directory alongside the partition blocks, but the overhead is small (one entry per partition, not per block).
 - **Small SSTs:** for SSTs with few enough blocks to fit in a single partition, the top-level directory collapses to one entry and the read path is equivalent to today's flat index with negligible additional overhead. No special casing is needed.
 
