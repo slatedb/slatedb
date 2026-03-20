@@ -14,6 +14,7 @@ pub const SST_FILTER_NEGATIVES: &str = db_stat_name!("sst_filter_negatives");
 pub const BACKPRESSURE_COUNT: &str = db_stat_name!("backpressure_count");
 pub const WAL_BUFFER_ESTIMATED_BYTES: &str = db_stat_name!("wal_buffer_estimated_bytes");
 pub const WAL_BUFFER_FLUSHES: &str = db_stat_name!("wal_buffer_flushes");
+pub const WAL_BUFFER_FLUSH_REQUESTS: &str = db_stat_name!("wal_buffer_flush_requests");
 pub const GET_REQUESTS: &str = db_stat_name!("get_requests");
 pub const SCAN_REQUESTS: &str = db_stat_name!("scan_requests");
 pub const FLUSH_REQUESTS: &str = db_stat_name!("flush_requests");
@@ -28,6 +29,7 @@ pub(crate) struct DbStats {
     pub(crate) immutable_memtable_flushes: Arc<Counter>,
     pub(crate) wal_buffer_estimated_bytes: Arc<Gauge<i64>>,
     pub(crate) wal_buffer_flushes: Arc<Counter>,
+    pub(crate) wal_buffer_flush_requests: Arc<Counter>,
     pub(crate) sst_filter_false_positives: Arc<Counter>,
     pub(crate) sst_filter_positives: Arc<Counter>,
     pub(crate) sst_filter_negatives: Arc<Counter>,
@@ -47,6 +49,7 @@ impl DbStats {
             immutable_memtable_flushes: Arc::new(Counter::default()),
             wal_buffer_estimated_bytes: Arc::new(Gauge::default()),
             wal_buffer_flushes: Arc::new(Counter::default()),
+            wal_buffer_flush_requests: Arc::new(Counter::default()),
             sst_filter_false_positives: Arc::new(Counter::default()),
             sst_filter_positives: Arc::new(Counter::default()),
             sst_filter_negatives: Arc::new(Counter::default()),
@@ -68,6 +71,10 @@ impl DbStats {
             stats.wal_buffer_estimated_bytes.clone(),
         );
         registry.register(WAL_BUFFER_FLUSHES, stats.wal_buffer_flushes.clone());
+        registry.register(
+            WAL_BUFFER_FLUSH_REQUESTS,
+            stats.wal_buffer_flush_requests.clone(),
+        );
         registry.register(
             SST_FILTER_FALSE_POSITIVES,
             stats.sst_filter_false_positives.clone(),
