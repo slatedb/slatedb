@@ -1,4 +1,5 @@
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -58,6 +59,10 @@ pub(crate) struct WalBufferManager {
     table_store: Arc<TableStore>,
     max_wal_bytes_size: usize,
     max_flush_interval: Option<Duration>,
+    /// The largest flush_epoch for which a size-triggered flush request has been
+    /// sent. Compared against `flush_epoch` in the inner struct to avoid sending
+    /// redundant flush requests for the same WAL.
+    last_flush_requested_epoch: AtomicU64,
 }
 
 struct WalBufferManagerInner {
@@ -72,6 +77,10 @@ struct WalBufferManagerInner {
     /// Whenever a WAL is applied to Memtable and successfully flushed to remote storage,
     /// the immutable wal can be recycled in memory.
     last_applied_seq: Option<u64>,
+    /// Monotonically increasing epoch incremented each time the current WAL is
+    /// frozen. Used with `last_flush_requested_epoch` to deduplicate size-triggered
+    /// flush requests.
+    flush_epoch: u64,
     /// The flusher will update the recent_flushed_wal_id and last_flushed_seq when the flush is done.
     recent_flushed_wal_id: u64,
     /// The oracle to track the last flushed sequence number.
@@ -124,6 +133,7 @@ impl WalBufferManager {
             current_wal,
             immutable_wals,
             last_applied_seq: None,
+            flush_epoch: 1,
             recent_flushed_wal_id,
             flush_tx: None,
             task_executor: None,
@@ -138,6 +148,7 @@ impl WalBufferManager {
             mono_clock,
             max_wal_bytes_size,
             max_flush_interval,
+            last_flush_requested_epoch: AtomicU64::new(0),
         }
     }
 
@@ -232,7 +243,7 @@ impl WalBufferManager {
         &self,
     ) -> Result<WatchableOnceCellReader<Result<(), SlateDBError>>, SlateDBError> {
         // check the size of the current wal
-        let (durable_watcher, need_flush, flush_tx) = {
+        let (durable_watcher, need_flush, flush_epoch) = {
             let inner = self.inner.read();
             let current_wal_size = self
                 .table_store
@@ -246,17 +257,21 @@ impl WalBufferManager {
             (
                 inner.current_wal.durable_watcher(),
                 need_flush,
-                inner.flush_tx.clone(),
+                inner.flush_epoch,
             )
         };
         if need_flush {
-            flush_tx
-                .as_ref()
-                .expect("flush_tx not initialized, please call init first.")
-                .send_safely(
-                    self.db_state.read().closed_result_reader(),
-                    WalFlushWork { result_tx: None },
-                )?
+            // Only send a flush request if one hasn't already been sent for this epoch.
+            // compare_exchange ensures only one writer wins per epoch.
+            let last = self.last_flush_requested_epoch.load(Ordering::Relaxed);
+            if last < flush_epoch
+                && self
+                    .last_flush_requested_epoch
+                    .compare_exchange(last, flush_epoch, Ordering::Relaxed, Ordering::Relaxed)
+                    .is_ok()
+            {
+                self.send_flush_request(None)?;
+            }
         }
 
         let estimated_bytes = self.estimated_bytes()?;
@@ -283,21 +298,28 @@ impl WalBufferManager {
         }
     }
 
-    #[instrument(level = "trace", skip_all, err(level = tracing::Level::DEBUG))]
-    pub(crate) async fn flush(&self) -> Result<(), SlateDBError> {
+    /// Send a flush request to the background flush worker.
+    fn send_flush_request(
+        &self,
+        result_tx: Option<oneshot::Sender<Result<(), SlateDBError>>>,
+    ) -> Result<(), SlateDBError> {
+        self.db_stats.wal_buffer_flush_requests.inc();
         let flush_tx = self
             .inner
             .read()
             .flush_tx
             .clone()
             .expect("flush_tx not initialized, please call init first.");
-        let (result_tx, result_rx) = oneshot::channel();
         flush_tx.send_safely(
             self.db_state.read().closed_result_reader(),
-            WalFlushWork {
-                result_tx: Some(result_tx),
-            },
-        )?;
+            WalFlushWork { result_tx },
+        )
+    }
+
+    #[instrument(level = "trace", skip_all, err(level = tracing::Level::DEBUG))]
+    pub(crate) async fn flush(&self) -> Result<(), SlateDBError> {
+        let (result_tx, result_rx) = oneshot::channel();
+        self.send_flush_request(Some(result_tx))?;
         select! {
             result = result_rx => {
                 result?
@@ -381,6 +403,7 @@ impl WalBufferManager {
         let next_wal_id = self.wal_id_incrementor.next_wal_id();
         let mut inner = self.inner.write();
         let current_wal = std::mem::replace(&mut inner.current_wal, WalBuffer::new());
+        inner.flush_epoch += 1;
         inner
             .immutable_wals
             .push_back((next_wal_id, Arc::new(current_wal)));
@@ -607,7 +630,7 @@ mod tests {
     use crate::manifest::SsTableView;
     use crate::object_stores::ObjectStores;
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
-    use crate::stats::StatRegistry;
+    use crate::stats::{ReadableStat, StatRegistry};
     use crate::tablestore::TableStore;
     use crate::types::{RowEntry, ValueDeletable};
     use bytes::Bytes;
@@ -802,13 +825,23 @@ mod tests {
         }
     }
 
-    async fn setup_wal_buffer() -> (Arc<WalBufferManager>, Arc<TableStore>, Arc<MockSystemClock>) {
+    async fn setup_wal_buffer() -> (
+        Arc<WalBufferManager>,
+        Arc<TableStore>,
+        Arc<MockSystemClock>,
+        DbStats,
+    ) {
         setup_wal_buffer_with_flush_interval(Duration::from_millis(10)).await
     }
 
     async fn setup_wal_buffer_with_flush_interval(
         flush_interval: Duration,
-    ) -> (Arc<WalBufferManager>, Arc<TableStore>, Arc<MockSystemClock>) {
+    ) -> (
+        Arc<WalBufferManager>,
+        Arc<TableStore>,
+        Arc<MockSystemClock>,
+        DbStats,
+    ) {
         let wal_id_store: Arc<dyn WalIdStore + Send + Sync> = Arc::new(MockWalIdStore {
             next_id: AtomicU64::new(1),
         });
@@ -828,10 +861,11 @@ mod tests {
             new_dirty_manifest(),
             DbStatusReporter::new(0),
         )));
+        let db_stats = DbStats::new(&StatRegistry::new());
         let wal_buffer = Arc::new(WalBufferManager::new(
             wal_id_store,
             db_state.clone(),
-            DbStats::new(&StatRegistry::new()),
+            db_stats.clone(),
             0, // recent_flushed_wal_id
             oracle,
             table_store.clone(),
@@ -847,12 +881,12 @@ mod tests {
         task_executor
             .monitor_on(&Handle::current())
             .expect("failed to monitor executor");
-        (wal_buffer, table_store, test_clock)
+        (wal_buffer, table_store, test_clock, db_stats)
     }
 
     #[tokio::test]
     async fn test_basic_append_and_flush_operations() {
-        let (wal_buffer, table_store, _) = setup_wal_buffer().await;
+        let (wal_buffer, table_store, _, _) = setup_wal_buffer().await;
 
         // Append some entries
         let entry1 = make_entry("key1", "value1", 1, None);
@@ -894,7 +928,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_size_based_flush_triggering() {
-        let (wal_buffer, _, _) = setup_wal_buffer_with_flush_interval(Duration::MAX).await;
+        let (wal_buffer, _, _, _) = setup_wal_buffer_with_flush_interval(Duration::MAX).await;
 
         // Append entries until we exceed the size threshold
         let mut seq = 1;
@@ -911,7 +945,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_immutable_wal_reclaim() {
-        let (wal_buffer, _, _) = setup_wal_buffer().await;
+        let (wal_buffer, _, _, _) = setup_wal_buffer().await;
 
         // Append entries to create multiple WALs
         for i in 0..100 {
@@ -929,7 +963,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_immutable_wal_reclaim_with_flush_check() {
-        let (wal_buffer, _, _) = setup_wal_buffer().await;
+        let (wal_buffer, _, _, _) = setup_wal_buffer().await;
 
         // Append entries to create multiple WALs
         for i in 0..100 {
@@ -949,5 +983,44 @@ mod tests {
         }
         wal_buffer.track_last_applied_seq(90);
         assert_eq!(wal_buffer.inner.read().immutable_wals.len(), 20);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_maybe_trigger_flush_spams_flush_requests() {
+        let (wal_buffer, _, _, db_stats) =
+            setup_wal_buffer_with_flush_interval(Duration::MAX).await;
+
+        // Simulate many writers each appending a small entry and calling
+        // maybe_trigger_flush, just like the real write path does. Under
+        // load the WAL stays over the size threshold across many calls,
+        // and each one would send a redundant flush request without the fix.
+        let num_writes: u64 = 100;
+        for seq in 1..=num_writes {
+            let entry = make_entry(&format!("key{}", seq), &format!("value{}", seq), seq, None);
+            wal_buffer.append(&[entry]).unwrap();
+            wal_buffer.maybe_trigger_flush().unwrap();
+        }
+
+        let size_triggered_requests = db_stats.wal_buffer_flush_requests.get();
+
+        // Explicitly flush to drain everything, including any partial current WAL.
+        wal_buffer.flush().await.unwrap();
+
+        let actual_flushes = db_stats.wal_buffer_flushes.get();
+
+        // With the flush_requested flag, the number of size-triggered requests
+        // should be bounded by the number of WALs, not by the number of writes.
+        // Before the fix this was ~41 requests for 2 flushes (with 100 writes).
+        assert!(
+            actual_flushes >= 1,
+            "expected at least one flush but got {}",
+            actual_flushes,
+        );
+        assert!(
+            size_triggered_requests <= actual_flushes,
+            "size_triggered_requests ({}) should not exceed actual_flushes ({})",
+            size_triggered_requests,
+            actual_flushes,
+        );
     }
 }
