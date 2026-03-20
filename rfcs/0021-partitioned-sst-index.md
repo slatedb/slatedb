@@ -162,11 +162,11 @@ Instead of serializing all `block_meta` into a single flat `SsTableIndex`, the b
 
 1. Groups `block_meta` entries into partitions of ~4KB of serialized index data each (analogous to RocksDB's default).
 2. Serializes each chunk as a `PartitionIndex` and writes it to the file, recording its offset, length, and first key.
-3. Serializes a `SsTableIndex` (with `index_type = Partitioned` in `SsTableInfo`) from the recorded partition metadata and writes it to the same location as the flat index.
+3. Serializes an `SsTableIndex` (with `index_type = Partitioned` in `SsTableInfo`) from the recorded partition metadata and writes it to the same location as the flat index.
 
 ### Read path (`SsTableFormat::read_index`)
 
-On a read against a SST with partitioned index:
+On a read against an SST with partitioned index:
 
 1. Check whether the top-level `SsTableIndexV2` is available (pinned in heap by default; in the block cache when `cache_index_in_block_cache = true`).
    - **Cold miss** (top-level directory not in heap or cache): fetch the top-level directory and all partition blocks in a single object store read. Object store latency is dominated by first-byte latency (~50–100 ms TTFB per request), so issuing one read for the full index incurs lower TTFB than fetching the directory first and then each needed partition separately, each of which would pay its own TTFB. The full index is written to the disk cache. Only the relevant partition block is decoded and promoted into the block cache (keyed by `(sst_id, partition_offset)`); the remaining partition blocks stay on disk and are promoted on demand. The top-level directory is pinned in heap (or inserted into the block cache if `cache_index_in_block_cache = true`).
@@ -175,7 +175,7 @@ On a read against a SST with partitioned index:
 3. Fetch and decode the relevant `PartitionIndex` from the block cache. On a partial miss (top-level directory was warm but this specific partition was evicted), fetch only that partition block from the disk cache. Each `PartitionIndex` has its own cache key `(sst_id, partition_offset)` so partitions can be evicted independently.
 4. Binary search the `PartitionIndex.blocks` to find the data block offset, then proceed as today.
 
-On a read against a SST with `index_type = Flat` in the `SsTableInfo` footer, the existing flat-index path is used unchanged.
+On a read against an SST with `index_type = Flat` in the `SsTableInfo` footer, the existing flat-index path is used unchanged.
 
 
 ## Impact Analysis
