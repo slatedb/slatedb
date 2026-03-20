@@ -168,9 +168,11 @@ Instead of serializing all `block_meta` into a single flat `SsTableIndex`, the b
 
 On a read against a SST with partitioned index:
 
-1. Load and decode the `SsTableIndexV2` from `index_offset..index_offset+index_len`. This is small (one entry per partition) and is pinned in heap memory by default so it is always available without a cache lookup. When `cache_index_in_block_cache` is set to `true`, it competes for space in the block cache instead.
+1. Check whether the top-level `SsTableIndexV2` is available (pinned in heap by default; in the block cache when `cache_index_in_block_cache = true`).
+   - **Cold miss** (top-level directory not in heap or cache): fetch the top-level directory and all partition blocks in a single object store read. Object store latency is dominated by first-byte latency (~50–100 ms TTFB per request), so issuing one read for the full index incurs lower TTFB than fetching the directory first and then each needed partition separately, each of which would pay its own TTFB. The full index is written to the disk cache. Only the relevant partition block is decoded and promoted into the block cache (keyed by `(sst_id, partition_offset)`); the remaining partition blocks stay on disk and are promoted on demand. The top-level directory is pinned in heap (or inserted into the block cache if `cache_index_in_block_cache = true`).
+   - **Warm hit** (top-level directory available): proceed to step 2.
 2. Binary search `partitions` by key to find the relevant `PartitionMeta`.
-3. Fetch and decode only that `PartitionIndex`. Each `PartitionIndex` gets its own cache key `(sst_id, partition_offset)` so individual partitions can be evicted independently.
+3. Fetch and decode the relevant `PartitionIndex` from the block cache. On a partial miss (top-level directory was warm but this specific partition was evicted), fetch only that partition block from the disk cache. Each `PartitionIndex` has its own cache key `(sst_id, partition_offset)` so partitions can be evicted independently.
 4. Binary search the `PartitionIndex.blocks` to find the data block offset, then proceed as today.
 
 On a read against a SST with `index_type = Flat` in the `SsTableInfo` footer, the existing flat-index path is used unchanged.
@@ -235,7 +237,7 @@ SlateDB features and components that this RFC interacts with. Check all that app
 
 ### Performance & Cost
 
-- **Read latency:** warm reads (index already cached) see no meaningful change. On a cold miss, all partition blocks are fetched which is the same cost as reading the flat index. These are cached at partition granularity and partitions are evicted as necessary.
+- **Read latency:** warm reads (index already cached) see no meaningful change. On a cold miss, all partition blocks are fetched in a single object store read, incurring the same TTFB latency as reading the flat index. These are cached at partition granularity and partitions are evicted as necessary.
 - **Write latency:** negligible impact. The footer builder does slightly more work splitting block_meta into partitions, but this is CPU-bound and minor relative to the I/O cost of writing data blocks.
 - **Space amplification:** slight increase due to storing the top-level directory alongside the partition blocks, but the overhead is small (one entry per partition, not per block).
 - **Small SSTs:** for SSTs with few enough blocks to fit in a single partition, the top-level directory collapses to one entry and the read path is equivalent to today's flat index with negligible additional overhead. No special casing is needed.
