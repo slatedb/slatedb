@@ -46,29 +46,28 @@ Authors:
 
 <!-- Briefly explain what this RFC changes and why. Prefer 3–6 sentences. -->
 
-Currently, each SST in SlateDB has a single monolithic index block and bloom filter that must be loaded in full before any data block can be read. For a 256MB SST with 4KB blocks this means loading several MB of metadata to locate a single 4KB value.
+Currently, each SST in SlateDB has a single monolithic index block and bloom filter that must be loaded in full before any data block can be read. For a large SST with 4KB blocks this means loading several MB of metadata to locate a single 4KB value.
 
-This RFC proposes replacing the flat index with a two-level partitioned index: a small top-level directory that points to a set of partition index blocks, each covering a contiguous range of data blocks. On a point-get or short scan, only the relevant partition block needs to be fetched and cached rather than the entire index. This reduces cold read latency by replacing large, all-or-nothing metadata fetches with small targeted object store reads. It also reduces the amount of block cache consumed by index metadata, since only the partition blocks that are actually accessed need to be cached rather than the full index for every SST.
+This RFC proposes replacing the flat index with a two-level partitioned index: a small top-level directory that points to a set of partition index blocks, each covering a contiguous range of data blocks. Only the partition blocks that are actually accessed need to be kept in cache rather than the full index for every SST, significantly reducing the block cache memory consumed by index metadata.
 
 
 ## Motivation
 
 <!-- What problem are we solving? What user or system pain exists today? Include concrete examples and why "do nothing" is insufficient. -->
 
-SlateDB's current max SST size is 256MB. With a default 4KB block size, a full-sized SST contains ~64K blocks. The index stores a separator key and an 8-byte block offset per entry, so for average key sizes of 8–32 bytes the index alone ranges from ~1MB to ~2.5MB. The bloom filter adds further overhead on top of that.
+With a default 4KB block size, a 1GB SST contains ~256K blocks. The index stores a separator key and an 8-byte block offset per entry — measured at ~8MB uncompressed and ~4.5MB compressed (Snappy) for UUID keys. The in-memory representation is uncompressed and must be held in the block cache in full. The bloom filter adds further overhead on top of that.
 
 This creates two concrete problems:
 
-1. **Cold read latency:** On a cache miss, a single point-get must first fetch the full index and filter from the object store before it can identify which 4KB data block to read. This means paying O(SST metadata size) in object store I/O to locate a single 4KB data block.
+**Cache inefficiency:** The index and filter for a single SST consume several MB of block cache. For workloads that touch many SSTs concurrently, this metadata overhead crowds out data blocks that are far more likely to be reused.
 
-2. **Cache inefficiency:** The index and filter for a single SST consume several MB of block cache. For workloads that touch many SSTs concurrently, this metadata overhead crowds out data blocks that are far more likely to be reused.
+**Disk cache I/O throughput:** When indexes are not in the block cache they must be read from the local disk cache (NVMe). Because the index is monolithic, every miss reads the full ~4.5MB even though only a small slice is needed. At ~4GB/s NVMe throughput, reading a 4MB index takes ~1ms vs ~0.1ms for a 4KB partition block — a 10x difference. Note that this problem does not apply to object store reads, where latency is ~50-100ms regardless of object size due to first-byte costs.
 
 Both problems scale with SST size. Reducing the max SST size is not a practical mitigation, as it would increase the number of files and drive up compaction and object store overhead.
 
 ## Goals
 
 - Reduce block cache memory consumed by SST index and filter metadata.
-- Reduce object store read amplification for point gets and short range scans on large SSTs.
 - Load only the portion of the index (and optionally filter) relevant to a given key range, rather than the full structure.
 - Maintain backward compatibility with SSTs written in the current flat-index format.
 
@@ -105,26 +104,24 @@ The top-level directory is small, with one entry per partition rather than one p
 
 ### Schema changes (`schemas/sst.fbs`)
 
-A new `IndexType` enum is added to `SsTableIndex` so that the reader can distinguish old flat-index SSTs from new partitioned-index SSTs without needing to inspect `SsTableInfo`. Because FlatBuffers enum fields default to the zero value, `index_type` defaults to `Flat` for V1/V2 SSTs that predate this field, preserving backward compatibility.
-
-`SsTableInfo.index_offset` continues to point to `SsTableIndex` in all format versions. In the flat case `SsTableIndex.blocks` holds all `BlockMeta` entries directly. In the partitioned case `SsTableIndex.partitions` holds the top-level directory and the per-partition data is stored in separate `PartitionIndex` blocks, each covering a contiguous key range.
+A new `SsTableIndexV2` table is introduced for partitioned-index SSTs. The existing `SsTableIndex` table is left entirely unchanged. `SsTableInfo.index_offset` continues to point to the index structure; a new `index_type` field on `SsTableInfo` tells the reader which table to decode. Because FlatBuffers field additions are backward-compatible, old readers silently get the default value (`Flat`) and continue using the existing code path unchanged. The translation between the FlatBuffers representation and the internal Rust types is handled in `flatbuffer_types.rs`.
 
 ```fbs
 enum IndexType: byte {
-    Flat,         // existing format: SsTableIndex.blocks contains all BlockMeta entries
-    Partitioned,  // new format: SsTableIndex.partitions is the top-level directory
+    Flat,       // default — existing SsTableIndex
+    Partitioned // new SsTableIndexV2
 }
 
-// Top-level index structure. SsTableInfo.index_offset always points here.
+// Existing table — unchanged.
 table SsTableIndex {
-    // Distinguishes between flat and partitioned layouts. Defaults to Flat
-    // so that V1/V2 SSTs (which lack this field) are read correctly.
-    index_type: IndexType;
-
-    // Flat format: all block metadata in one place (index_type == Flat).
     blocks: [BlockMeta];
+}
 
-    // Partitioned format: one entry per partition (index_type == Partitioned).
+// New table for partitioned-index SSTs. SsTableInfo.index_offset points here
+// when SsTableInfo.index_type == Partitioned.
+// Contains only the top-level directory; per-partition data is stored in separate
+// PartitionIndex blocks, each covering a contiguous key range.
+table SsTableIndexV2 {
     partitions: [PartitionMeta];
 }
 
@@ -139,15 +136,25 @@ table PartitionMeta {
     first_key: [ubyte] (required);
 }
 
-// Per-partition index fetched lazily. Only used when index_type == Partitioned.
 table PartitionIndex {
     blocks: [BlockMeta] (required);
 }
 ```
 
+`SsTableInfo` gains one new field:
+
+```fbs
+table SsTableInfo {
+    // ... existing fields unchanged ...
+
+    // Type of index stored at index_offset. Defaults to Flat for backward compatibility.
+    index_type: IndexType;
+}
+```
+
 ### Format version
 
-A new `SST_FORMAT_VERSION_V3 = 3` is introduced in `format/sst.rs`. SSTs written with a partitioned index use V3. The existing V1 and V2 readers are unaffected. `is_supported_version` is updated to also accept V3, and the read path branches on `SsTableInfo.index_type` to handle both formats.
+No new format version is introduced. The `index_type` field added to `SsTableInfo` is a backward-compatible FlatBuffers field addition — old readers get the default value (`Flat`) and use the existing code path unchanged. The read path branches on `info.index_type` to choose between the flat and partitioned index structures.
 
 ### Write path (`EncodedSsTableFooterBuilder::build`)
 
@@ -155,18 +162,19 @@ Instead of serializing all `block_meta` into a single flat `SsTableIndex`, the b
 
 1. Groups `block_meta` entries into partitions of ~4KB of serialized index data each (analogous to RocksDB's default).
 2. Serializes each chunk as a `PartitionIndex` and writes it to the file, recording its offset, length, and first key.
-3. Serializes a `SsTableIndex` (with `index_type = Partitioned`) from the recorded partition metadata and writes it to the same location as the flat index.
+3. Serializes a `SsTableIndex` (with `index_type = Partitioned` in `SsTableInfo`) from the recorded partition metadata and writes it to the same location as the flat index.
 
 ### Read path (`SsTableFormat::read_index`)
 
-On a read against a V3 SST:
+On a read against a SST with partitioned index:
 
-1. Load and decode the `SsTableIndex` from `index_offset..index_offset+index_len`. This is small (one entry per partition) and is cached as a single cache entry.
+1. Load and decode the `SsTableIndexV2` from `index_offset..index_offset+index_len`. This is small (one entry per partition) and is pinned in heap memory by default so it is always available without a cache lookup. When `cache_index_in_block_cache` is set to `true`, it competes for space in the block cache instead.
 2. Binary search `partitions` by key to find the relevant `PartitionMeta`.
 3. Fetch and decode only that `PartitionIndex`. Each `PartitionIndex` gets its own cache key `(sst_id, partition_offset)` so individual partitions can be evicted independently.
 4. Binary search the `PartitionIndex.blocks` to find the data block offset, then proceed as today.
 
-On a read against a V1 or V2 SST the existing flat-index path is used unchanged.
+On a read against a SST with `index_type = Flat` in the `SsTableInfo` footer, the existing flat-index path is used unchanged.
+
 
 ## Impact Analysis
 
@@ -227,21 +235,22 @@ SlateDB features and components that this RFC interacts with. Check all that app
 
 ### Performance & Cost
 
-- **Read latency:** point gets and short scans improve on cold reads. Instead of fetching the full index, the reader fetches the small top-level directory then one partition block. Warm reads (index already cached) see no meaningful change.
+- **Read latency:** warm reads (index already cached) see no meaningful change. On a cold miss the top-level directory is small and always fetched first; if it is not cached, all partition blocks should be fetched in parallel upfront to avoid multiple sequential object-store round trips, since object-store latency is dominated by first-byte cost rather than throughput. Workloads that access key ranges spanning multiple partitions in the same SST benefit from this eager prefetch path.
 - **Write latency:** negligible impact. The footer builder does slightly more work splitting block_meta into partitions, but this is CPU-bound and minor relative to the I/O cost of writing data blocks.
-- **Object-store requests:** cold reads issue one additional GET (top-level directory + partition block vs. single flat index), but each GET is much smaller. Net object-store cost is lower for workloads that access a small key range within a large SST.
+- **Object-store requests:** on a cold miss, all partition blocks are fetched in parallel (matching the flat index's single-pass behavior), so the GET count is the same. The difference is that only the accessed partitions need to stay in cache afterward — the rest can be evicted — whereas a flat index must be cached in full or not at all.
 - **Space amplification:** slight increase due to storing the top-level directory alongside the partition blocks, but the overhead is small (one entry per partition, not per block).
+- **Small SSTs:** for SSTs with few enough blocks to fit in a single partition, the top-level directory collapses to one entry and the read path is equivalent to today's flat index with negligible additional overhead. No special casing is needed.
 
 ### Observability
 
-- **Configuration:** expose a `partition_index_block_size` setting (default ~4KB of index data per partition, analogous to RocksDB's default) to control partition granularity.
+- **Configuration:** expose a `partition_index_block_size` setting (default ~4KB of index data per partition, analogous to RocksDB's default) to control partition granularity. Expose a `cache_index_in_block_cache` boolean (default `false`) to control whether the top-level directory competes for space in the block cache; by default it is pinned in heap memory so it is always available without a cache lookup.
 - **Metrics:** add cache hit/miss counters scoped to partition index blocks, separate from data block and top-level directory hits, so the effectiveness of partition caching is visible.
 
 ### Compatibility
 
-- **Existing SSTs:** fully backward compatible. The `index_type` field in `SsTableIndex` defaults to `Flat`, so V1/V2 SSTs are read with the existing code path unchanged.
-- **New SSTs:** written as V3. An older version of SlateDB will reject a V3 SST with an `InvalidVersion` error rather than silently misreading it.
-- **Rolling upgrades:** readers must be upgraded before writers start producing V3 SSTs.
+- **Existing SSTs:** fully backward compatible. The `index_type` field on `SsTableInfo` defaults to `Flat`, so existing SSTs are read with the existing code path unchanged.
+- **New SSTs:** written with `index_type = Partitioned`. An older reader will decode `SsTableInfo` successfully (FlatBuffers ignores unknown fields) but will not know about `index_type` and will attempt to decode the index as `SsTableIndex`.
+- **Rolling upgrades:** readers must be upgraded before writers start producing partitioned-index SSTs.
 
 ## Testing
 
@@ -276,8 +285,7 @@ Keep the flat monolithic index. Rejected because the problem scales with SST siz
 
 ## Open Questions
 
-- Should partitioned bloom filters be included in this RFC or deferred to a follow-on? Partitioned filters would extend the same two-level structure to the bloom filter, with a top-level filter directory pointing to per-partition filter blocks, reducing filter cache pressure in the same way as partitioned indexes. The tradeoff is added scope and complexity now vs. a second format version bump later.
-- Should the top-level index directory be configurable to live in heap memory instead of the block cache? RocksDB exposes this via `cache_index_and_filter_blocks`. Pinning in heap guarantees the top-level directory is always available without a cache lookup, at the cost of heap memory per open SST. SlateDB has no equivalent setting today. Given that the top-level directory is small, pinning in heap may be the simpler default, but a configuration option would give operators control over the tradeoff.
+- ~~Should the top-level index directory be configurable to live in heap memory instead of the block cache?~~ Resolved: the top-level directory is pinned in heap by default. Because it is on the critical path for every read and is small (one entry per partition), heap-pinning eliminates a cache lookup on every access at negligible memory cost. A `cache_index_in_block_cache` option (default `false`) is exposed for operators who prefer to let it compete for block cache space instead.
 
 ## References
 
