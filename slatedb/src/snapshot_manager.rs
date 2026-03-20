@@ -32,6 +32,13 @@ impl SnapshotManager {
         }
     }
 
+    /// The min started_seq of all active snapshots. This value
+    /// is useful to inform the compactor about the min seq of data still needed to be
+    /// retained for active snapshots, so that the compactor can avoid deleting the
+    /// data that is still needed.
+    ///
+    /// min_seq will be persisted to the `recent_snapshot_min_seq` in the manifest
+    /// when a new L0 is flushed.
     pub(crate) fn min_seq(&self) -> Option<u64> {
         self.inner.read().first_key_value().map(|(&k, _)| k)
     }

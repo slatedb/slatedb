@@ -234,6 +234,9 @@ impl TransactionManager {
     /// Track a write batch for conflict detection. This is used for regular write operations
     /// that are not part of an explicit transaction but still need to be tracked for conflict
     /// detection with concurrent transactions.
+    ///
+    /// The synthetic committed state is only retained while there is at least one active
+    /// transaction that could still conflict with it.
     pub(crate) fn track_recent_committed_write_batch(
         &self,
         keys: &HashSet<Bytes>,
