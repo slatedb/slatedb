@@ -1790,6 +1790,78 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_coarse_size_estimation_via_manifest() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = "/tmp/test_coarse_size_estimation";
+        let should_compact = Arc::new(AtomicBool::new(false));
+        let should_compact_clone = should_compact.clone();
+        let compaction_scheduler = Arc::new(OnDemandCompactionSchedulerSupplier::new(Arc::new(
+            move |_state| should_compact_clone.swap(false, Ordering::SeqCst),
+        )));
+        let db = Db::builder(path, object_store.clone())
+            .with_settings(test_db_options(0, 1024, None))
+            .with_compactor_builder(
+                CompactorBuilder::new(path, object_store.clone())
+                    .with_scheduler_supplier(compaction_scheduler),
+            )
+            .build()
+            .await
+            .unwrap();
+        let db = Arc::new(db);
+
+        // Write keys in the range k0000..k0099 and flush to L0
+        for i in 0..100u32 {
+            let key = format!("k{:04}", i);
+            db.put(key.as_bytes(), &[0u8; 64]).await.unwrap();
+        }
+        db.flush().await.unwrap();
+
+        // estimate_size on L0 views should return non-zero
+        let manifest = db.manifest();
+        assert!(!manifest.l0.is_empty());
+        for view in &manifest.l0 {
+            assert!(view.estimate_size() > 0);
+        }
+
+        // Trigger compaction and wait for sorted runs
+        should_compact.store(true, Ordering::SeqCst);
+        let db_poll = db.clone();
+        tokio::time::timeout(Duration::from_secs(10), async move {
+            loop {
+                {
+                    let state = db_poll.inner.state.read();
+                    if !state.state().core().compacted.is_empty() {
+                        return;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+
+        let manifest = db.manifest();
+        assert!(!manifest.compacted.is_empty());
+
+        for sr in &manifest.compacted {
+            // A range covering all keys returns results
+            let covering = sr
+                .tables_covering_range(Bytes::from_static(b"k0000")..Bytes::from_static(b"k0100"));
+            assert!(!covering.is_empty());
+            for view in &covering {
+                assert!(view.estimate_size() > 0);
+            }
+
+            // A range before all keys returns nothing
+            let outside = sr
+                .tables_covering_range(Bytes::from_static(b"a0000")..Bytes::from_static(b"a9999"));
+            assert!(outside.is_empty());
+        }
+
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn test_scan_prefix_returns_matching_keys() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let kv_store = Db::builder("/tmp/test_scan_prefix", object_store)

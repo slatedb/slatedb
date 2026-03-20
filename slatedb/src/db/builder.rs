@@ -1116,6 +1116,12 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
         self
     }
 
+    /// Sets the merge operator to use when reading merge operands.
+    pub fn with_merge_operator(mut self, merge_operator: MergeOperatorType) -> Self {
+        self.options.merge_operator = Some(merge_operator);
+        self
+    }
+
     /// Sets the options to use for the reader.
     pub fn with_options(mut self, options: DbReaderOptions) -> Self {
         self.options = options;

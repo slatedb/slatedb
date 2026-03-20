@@ -116,8 +116,8 @@ Visit [slatedb.io](https://slatedb.io) to learn more.
 
 ## Bindings
 
-- [Go](https://github.com/slatedb/slatedb/tree/main/slatedb-go) (official)
-- [Java](https://github.com/slatedb/slatedb/tree/main/slatedb-java) (official)
+- [Go](https://github.com/slatedb/slatedb/tree/main/bindings/go) (official)
+- [Java](https://github.com/slatedb/slatedb/tree/main/bindings/java) (official)
 - [.NET](https://github.com/Pulsy-Global/slatedb-dotnet)
 - [Python](https://github.com/slatedb/slatedb/tree/main/slatedb-py) (official)
 - [Ruby](https://github.com/catkins/slatedb-rb)
@@ -156,6 +156,7 @@ See who's using SlateDB.
 
 - [Embucket](https://www.embucket.com)
 - [Gadget](https://gadget.dev)
+- [HelixDB](https://github.com/HelixDB/helix-db)
 - [Malstrom](https://github.com/MalstromDevelopers/malstrom)
 - [Massive](https://massive.com)
 - [Merklemap](https://merklemap.com)
@@ -164,6 +165,7 @@ See who's using SlateDB.
 - [SQLync](https://sqlync.com)
 - [Storrito](https://storrito.com)
 - [Tensorlake](https://www.tensorlake.ai)
+- [Volga](https://github.com/volga-project/volga)
 - [ZeroFS](https://zerofs.net)
 
 ## Talks

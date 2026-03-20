@@ -90,10 +90,13 @@ impl Manifest {
         let mut projected = source_manifest.clone();
         let mut sorter_runs_filtered = vec![];
         for sorter_run in &projected.core.compacted {
-            sorter_runs_filtered.push(SortedRun {
-                id: sorter_run.id,
-                sst_views: Self::filter_view_handles(&sorter_run.sst_views, false, &range),
-            });
+            let sst_views = Self::filter_view_handles(&sorter_run.sst_views, false, &range);
+            if !sst_views.is_empty() {
+                sorter_runs_filtered.push(SortedRun {
+                    id: sorter_run.id,
+                    sst_views,
+                });
+            }
         }
         projected.core.l0 = Self::filter_view_handles(&projected.core.l0, true, &range).into();
         projected.core.compacted = sorter_runs_filtered;
@@ -429,6 +432,39 @@ mod tests {
                 SstEntry::projected("bar", "k", "n".."p"),
             ],
             sorted_runs: vec![],
+        },
+    })]
+    #[case::empty_sorted_run_excluded(ProjectionTestCase {
+        visible_range: "a".."c",
+        existing_manifest: SimpleManifest {
+            l0: vec![],
+            sorted_runs: vec![
+                vec![
+                    SstEntry::regular("sr0_first", "a"),
+                    SstEntry::regular("sr0_second", "b"),
+                ],
+                vec![
+                    SstEntry::regular("sr1_first", "a"),
+                    SstEntry::regular("sr1_second", "e"),
+                ],
+                // sr2 is entirely outside "a".."c", so it should be excluded
+                vec![
+                    SstEntry::regular("sr2_first", "d"),
+                    SstEntry::regular("sr2_second", "f"),
+                ],
+            ],
+        },
+        expected_manifest: SimpleManifest {
+            l0: vec![],
+            sorted_runs: vec![
+                vec![
+                    SstEntry::projected("sr0_first", "a", "a".."b"),
+                    SstEntry::projected("sr0_second", "b", "b".."c"),
+                ],
+                vec![
+                    SstEntry::projected("sr1_first", "a", "a".."c"),
+                ],
+            ],
         },
     })]
     fn test_projected(#[case] test_case: ProjectionTestCase) {

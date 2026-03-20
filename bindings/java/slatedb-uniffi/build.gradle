@@ -1,0 +1,221 @@
+plugins {
+    id "java-library"
+    id "com.vanniktech.maven.publish" version "0.34.0"
+}
+
+def repoRoot = rootProject.ext.repoRoot
+
+def nativePlatforms = [
+    [
+        resourcePrefix: "linux-x86-64",
+        rustTarget: "x86_64-unknown-linux-gnu",
+        libraryFile: "libslatedb_uniffi.so",
+    ],
+    [
+        resourcePrefix: "linux-aarch64",
+        rustTarget: "aarch64-unknown-linux-gnu",
+        libraryFile: "libslatedb_uniffi.so",
+    ],
+    [
+        resourcePrefix: "darwin-x86-64",
+        rustTarget: "x86_64-apple-darwin",
+        libraryFile: "libslatedb_uniffi.dylib",
+    ],
+    [
+        resourcePrefix: "darwin-aarch64",
+        rustTarget: "aarch64-apple-darwin",
+        libraryFile: "libslatedb_uniffi.dylib",
+    ],
+    [
+        resourcePrefix: "win32-x86-64",
+        rustTarget: "x86_64-pc-windows-msvc",
+        libraryFile: "slatedb_uniffi.dll",
+    ],
+    [
+        resourcePrefix: "win32-aarch64",
+        rustTarget: "aarch64-pc-windows-msvc",
+        libraryFile: "slatedb_uniffi.dll",
+    ],
+]
+def nativePlatformsByPrefix = nativePlatforms.collectEntries { platform ->
+    [(platform.resourcePrefix): platform]
+}
+
+def normalizeOs = { String osName ->
+    String normalized = osName.toLowerCase(Locale.ROOT)
+    if (normalized.contains("win")) {
+        return "win32"
+    }
+    if (normalized.contains("mac") || normalized.contains("darwin")) {
+        return "darwin"
+    }
+    if (normalized.contains("linux")) {
+        return "linux"
+    }
+    return normalized
+}
+
+def normalizeArch = { String archName ->
+    String normalized = archName.toLowerCase(Locale.ROOT)
+    if (normalized in ["amd64", "x86_64", "x64"]) {
+        return "x86-64"
+    }
+    if (normalized in ["aarch64", "arm64"]) {
+        return "aarch64"
+    }
+    return normalized
+}
+
+def hostResourcePrefix = "${normalizeOs(System.getProperty("os.name", ""))}-${normalizeArch(System.getProperty("os.arch", ""))}"
+def hostPlatform = nativePlatformsByPrefix[hostResourcePrefix]
+if (hostPlatform == null) {
+    throw new GradleException(
+        "Unsupported host platform '${hostResourcePrefix}'. " +
+            "Supported JNA prefixes: ${nativePlatforms*.resourcePrefix.join(", ")}"
+    )
+}
+
+def nativePrebuiltDirProperty = (findProperty("slatedb.native.prebuiltDir") ?: "").toString().trim()
+def usePrebuiltNativeLibraries = !nativePrebuiltDirProperty.isEmpty()
+def nativePrebuiltDir = usePrebuiltNativeLibraries ? new File(nativePrebuiltDirProperty).absoluteFile : null
+def selectedNativePlatforms = usePrebuiltNativeLibraries ? nativePlatforms : [hostPlatform]
+def nativeResourceStagingDir = layout.buildDirectory.dir("generated/resources/slatedb-uniffi")
+
+def nativeSourceFileForPlatform = { platform ->
+    if (usePrebuiltNativeLibraries) {
+        return new File(nativePrebuiltDir, "${platform.resourcePrefix}/${platform.libraryFile}")
+    }
+    return new File(repoRoot, "target/debug/${platform.libraryFile}")
+}
+
+def buildNativeLibrary = usePrebuiltNativeLibraries
+    ? null
+    : tasks.register("buildNativeLibrary", Exec) {
+        group = "build"
+        description = "Build the host slatedb-uniffi native library"
+        workingDir repoRoot
+        commandLine "cargo", "build", "-p", "slatedb-uniffi"
+    }
+
+tasks.register("prepareNativeLibraries") {
+    group = "build"
+    description = "Stage JNA-loadable SlateDB UniFFI native libraries."
+    if (buildNativeLibrary != null) {
+        dependsOn buildNativeLibrary
+    }
+    inputs.property("nativeMode", usePrebuiltNativeLibraries ? "prebuilt" : "local")
+    inputs.property("nativeTargets", selectedNativePlatforms*.resourcePrefix.join(","))
+    if (usePrebuiltNativeLibraries) {
+        inputs.property("nativePrebuiltDir", nativePrebuiltDir.absolutePath)
+    }
+    inputs.files(selectedNativePlatforms.collect { platform -> nativeSourceFileForPlatform(platform) })
+    outputs.dir(nativeResourceStagingDir)
+    doLast {
+        File outputDir = nativeResourceStagingDir.get().asFile
+        project.delete(outputDir)
+
+        selectedNativePlatforms.each { platform ->
+            File sourceFile = nativeSourceFileForPlatform(platform)
+            if (!sourceFile.isFile()) {
+                if (usePrebuiltNativeLibraries) {
+                    throw new GradleException(
+                        "Prebuilt native library for ${platform.resourcePrefix} is missing at ${sourceFile}. " +
+                            "Expected layout: <prebuilt-dir>/<jna-prefix>/${platform.libraryFile}"
+                    )
+                }
+                throw new GradleException(
+                    "Host native library is missing at ${sourceFile}. " +
+                        "Ensure 'cargo build -p slatedb-uniffi' succeeds on this machine."
+                )
+            }
+
+            project.copy {
+                from sourceFile
+                into new File(outputDir, platform.resourcePrefix)
+            }
+        }
+    }
+}
+
+sourceSets {
+    main {
+        java {
+            setSrcDirs(["src/main/java", "src/generated/java"])
+        }
+        resources {
+            setSrcDirs(["src/main/resources"])
+        }
+    }
+}
+
+dependencies {
+    implementation "net.java.dev.jna:jna:5.18.1"
+    testImplementation "org.junit.jupiter:junit-jupiter:5.10.2"
+    testRuntimeOnly "org.junit.platform:junit-platform-launcher:1.10.2"
+}
+
+tasks.named("processResources") {
+    dependsOn tasks.named("prepareNativeLibraries")
+    from(nativeResourceStagingDir)
+}
+
+tasks.register("verifyJarNativeLayout") {
+    group = "verification"
+    description = "Verify the jar contains the expected bundled native libraries."
+    dependsOn tasks.named("jar")
+    inputs.file(tasks.named("jar").flatMap { it.archiveFile })
+    doLast {
+        File jarFile = tasks.named("jar").get().archiveFile.get().asFile
+        def jarEntries = new java.util.jar.JarFile(jarFile).withCloseable { openedJar ->
+            openedJar.entries().collect { it.name } as Set
+        }
+
+        selectedNativePlatforms.each { platform ->
+            String expectedEntry = "${platform.resourcePrefix}/${platform.libraryFile}"
+            if (!jarEntries.contains(expectedEntry)) {
+                throw new GradleException("Expected jar ${jarFile} to contain ${expectedEntry}")
+            }
+        }
+    }
+}
+
+tasks.named("check") {
+    dependsOn tasks.named("verifyJarNativeLayout")
+}
+
+tasks.matching { it.name == "generateMetadataFileForMavenPublication" }.configureEach {
+    dependsOn "plainJavadocJar"
+}
+
+mavenPublishing {
+    publishToMavenCentral()
+    signAllPublications()
+    coordinates(group.toString(), "slatedb-uniffi", version.toString())
+
+    pom {
+        name = "SlateDB UniFFI Java"
+        description = "Java bindings for SlateDB generated from UniFFI and packaged with native libraries."
+        url = "https://github.com/slatedb/slatedb"
+
+        licenses {
+            license {
+                name = "Apache License, Version 2.0"
+                url = "https://www.apache.org/licenses/LICENSE-2.0.txt"
+            }
+        }
+
+        developers {
+            developer {
+                id = "slatedb"
+                name = "SlateDB Authors"
+                url = "https://github.com/slatedb"
+            }
+        }
+
+        scm {
+            url = "https://github.com/slatedb/slatedb"
+            connection = "scm:git:https://github.com/slatedb/slatedb.git"
+            developerConnection = "scm:git:ssh://git@github.com/slatedb/slatedb.git"
+        }
+    }
+}

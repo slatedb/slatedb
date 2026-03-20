@@ -181,26 +181,32 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Go 1.24.x
+      - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.24.x'
+          go-version-file: ./bindings/go/go.mod
 
       - name: Install build dependencies for CGO
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential pkg-config
 
-      - name: Build Rust FFI library for Go bindings
-        run: cargo build --release -p slatedb-c
+      - name: Install uniffi-bindgen-go
+        run: cargo install uniffi-bindgen-go --git https://github.com/NordSecurity/uniffi-bindgen-go --tag v0.5.0+v0.29.5
 
-      - name: Run Go tests (slatedb-go)
-        working-directory: ./slatedb-go/go
+      - name: Generate Go bindings
+        run: ./scripts/generate-go-uniffi.sh
+
+      - name: Check generated Go bindings
+        run: git diff --exit-code -- bindings/go
+
+      - name: Run Go tests (bindings/go)
+        working-directory: ./bindings/go
         env:
           CGO_ENABLED: '1'
-          CGO_LDFLAGS: "-L${{ github.workspace }}/target/release"
-          LD_LIBRARY_PATH: "${{ github.workspace }}/target/release:${LD_LIBRARY_PATH}"
-        run: go test -v ./...
+          CGO_LDFLAGS: "-L${{ github.workspace }}/target/debug"
+          LD_LIBRARY_PATH: "${{ github.workspace }}/target/debug:${LD_LIBRARY_PATH}"
+        run: go test ./...
 
   bindings-java:
     runs-on: ubuntu-latest
@@ -208,18 +214,27 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Java 24
+      - name: Set up Java 21
         uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
-          java-version: '24'
+          java-version: '21'
 
-      - name: Build Rust FFI library for Java bindings
-        run: cargo build --release -p slatedb-c
+      - name: Install uniffi-bindgen-java
+        env:
+          # uniffi-bindgen-java has some warnings that we don't want to fail the build, so we
+          # override RUSTFLAGS here to avoid the -Dwarnings from the global env.
+          RUSTFLAGS: ""
+        run: cargo install uniffi-bindgen-java --git https://github.com/IronCoreLabs/uniffi-bindgen-java.git
 
-      - name: Run Java tests (slatedb-java)
-        working-directory: ./slatedb-java
-        run: ./gradlew check
+      - name: Generate Java bindings
+        run: ./scripts/generate-java-uniffi.sh
+
+      - name: Check generated Java bindings
+        run: git diff --exit-code -- bindings/java
+
+      - name: Run Java tests (bindings/java)
+        run: ./bindings/java/gradlew -p bindings/java :slatedb-uniffi:check
 
   microbenchmarks:
     runs-on: ubuntu-latest
