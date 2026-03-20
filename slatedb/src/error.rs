@@ -169,6 +169,15 @@ pub(crate) enum SlateDBError {
     )]
     IdenticalClonePaths(Path),
 
+    #[error("clone source paths must be unique, found duplicate: `{0}`")]
+    DuplicatedCloneSourcePath(Path),
+
+    #[error("Manifest union of sources with WAL is not supported, source with WAL: `{paths:?}`")]
+    InvalidUnionSourceWithWal { paths: Vec<Path> },
+
+    #[error("Source manifest set must not be empty")]
+    InvalidUnionSetEmpty(),
+
     #[error("invalid checkpoint lifetime. lifetime=`{0:?}`")]
     InvalidCheckpointLifetime(Duration),
 
@@ -570,6 +579,9 @@ impl From<SlateDBError> for Error {
             SlateDBError::TransactionalObjectError(err) => {
                 Error::internal(msg).with_source(Box::new(err))
             }
+            SlateDBError::DuplicatedCloneSourcePath(_) => Error::internal(msg),
+            SlateDBError::InvalidUnionSourceWithWal { .. } => Error::internal(msg),
+            SlateDBError::InvalidUnionSetEmpty() => Error::internal(msg),
         }
     }
 }

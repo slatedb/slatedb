@@ -1303,12 +1303,14 @@ mod tests {
         let parent_path = "/tmp/parent_store".to_string();
         let source_checkpoint_id = uuid::Uuid::new_v4();
 
-        let _ = StoredManifest::create_uninitialized_clone(
+        let _ = StoredManifest::store_uninitialized_clone(
             Arc::clone(&manifest_store),
-            &parent_manifest,
-            parent_path,
-            source_checkpoint_id,
-            Arc::new(DbRand::default()),
+            Manifest::cloned(
+                &parent_manifest,
+                parent_path,
+                source_checkpoint_id,
+                Arc::new(DbRand::default()),
+            ),
             Arc::new(DefaultSystemClock::new()),
         )
         .await

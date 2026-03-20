@@ -1143,15 +1143,95 @@ mod tests {
         let admin = AdminBuilder::new(clone_path.clone(), object_store.clone()).build();
 
         // Test basic builder without checkpoint
-        admin
-            .create_clone_builder(parent_path.clone(), None)
-            .build()
-            .await
-            .expect("clone should succeed");
+        let r = admin.create_clone_builder(parent_path.clone(), None);
+        r.build().await.expect("clone should succeed");
 
         // Verify clone was created
         let clone_manifest_store = ManifestStore::new(&clone_path, object_store.clone());
         let manifest = clone_manifest_store.read_latest_manifest().await;
         assert!(manifest.is_ok(), "cloned manifest should exist");
+    }
+
+    #[cfg(feature = "wal_disable")]
+    #[tokio::test]
+    async fn test_create_clone_with_multiple_sources() {
+        use crate::config::{PutOptions, Settings, WriteOptions};
+        use crate::manifest::store::ManifestStore;
+        use crate::{admin::CloneSourceSpec, Db};
+
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let grandparent_path1 = Path::from("/tmp/test_grandparent1");
+        let grandparent_path2 = Path::from("/tmp/test_grandparent2");
+        let parent_path1 = Path::from("/tmp/test_parent1");
+        let parent_path2 = Path::from("/tmp/test_parent2");
+        let clone_path = Path::from("/tmp/test_clone_multi");
+
+        let settings = Settings {
+            wal_enabled: false,
+            ..Settings::default()
+        };
+        let write_opts = WriteOptions {
+            await_durable: false,
+        };
+
+        // Two grandparents, each with a single-key SST. Disjoint ranges are required
+        // because the union path rejects overlapping source manifests.
+        let grandparent_db1 = Db::builder(grandparent_path1.clone(), object_store.clone())
+            .with_settings(settings.clone())
+            .build()
+            .await
+            .unwrap();
+        grandparent_db1
+            .put_with_options(b"a", b"1", &PutOptions::default(), &write_opts)
+            .await
+            .unwrap();
+        grandparent_db1.close().await.unwrap();
+
+        let grandparent_db2 = Db::builder(grandparent_path2.clone(), object_store.clone())
+            .with_settings(settings)
+            .build()
+            .await
+            .unwrap();
+        grandparent_db2
+            .put_with_options(b"z", b"2", &PutOptions::default(), &write_opts)
+            .await
+            .unwrap();
+        grandparent_db2.close().await.unwrap();
+
+        // Make each source a clone, so its manifest carries an external_db entry that
+        // propagates through `cloned_from_union`.
+        AdminBuilder::new(parent_path1.clone(), object_store.clone())
+            .build()
+            .create_clone_builder(grandparent_path1.clone(), None)
+            .build()
+            .await
+            .expect("parent clone 1 should succeed");
+
+        AdminBuilder::new(parent_path2.clone(), object_store.clone())
+            .build()
+            .create_clone_builder(grandparent_path2.clone(), None)
+            .build()
+            .await
+            .expect("parent clone 2 should succeed");
+
+        let admin = AdminBuilder::new(clone_path.clone(), object_store.clone()).build();
+
+        admin
+            .create_clone_builder(parent_path1.clone(), None)
+            .with_source(CloneSourceSpec::new(parent_path2.clone()))
+            .build()
+            .await
+            .expect("clone with multiple sources should succeed");
+
+        let clone_manifest_store = ManifestStore::new(&clone_path, object_store.clone());
+        let manifest = clone_manifest_store.read_latest_manifest().await;
+        assert!(manifest.is_ok(), "cloned manifest should exist");
+
+        let manifest_data = manifest.unwrap();
+        assert_eq!(
+            manifest_data.manifest.external_dbs.len(),
+            2,
+            "clone should have an external database for each parent"
+        );
     }
 }
