@@ -1,0 +1,48 @@
+plugins {
+    id "base"
+}
+
+def repoRoot = layout.projectDirectory.dir("../..").asFile.absoluteFile
+def configuredVersion = (findProperty("slatedb.version") ?: "").toString().trim()
+def defaultVersion = project.version.toString()
+def minimumJava = 21
+def currentJava = JavaVersion.current()
+def toolchainVersion = currentJava.isCompatibleWith(JavaVersion.toVersion(minimumJava))
+    ? Integer.parseInt(currentJava.majorVersion)
+    : minimumJava
+
+ext.repoRoot = repoRoot
+ext.slatedbVersion = configuredVersion ?: defaultVersion
+ext.minimumJava = minimumJava
+ext.toolchainVersion = toolchainVersion
+
+allprojects {
+    group = "io.slatedb"
+    version = rootProject.ext.slatedbVersion
+
+    repositories {
+        mavenCentral()
+    }
+}
+
+subprojects {
+    plugins.withId("java") {
+        java {
+            toolchain {
+                languageVersion = JavaLanguageVersion.of(rootProject.ext.toolchainVersion)
+            }
+            sourceCompatibility = JavaVersion.toVersion(rootProject.ext.minimumJava)
+            targetCompatibility = JavaVersion.toVersion(rootProject.ext.minimumJava)
+            withSourcesJar()
+        }
+
+        tasks.withType(JavaCompile).configureEach {
+            options.release = rootProject.ext.minimumJava
+        }
+
+        tasks.withType(Test).configureEach {
+            useJUnitPlatform()
+            jvmArgs("--enable-native-access=ALL-UNNAMED", "-Djna.nosys=true")
+        }
+    }
+}
