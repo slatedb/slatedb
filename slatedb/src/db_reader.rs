@@ -473,6 +473,14 @@ impl DbReaderInner {
             assert!(replayed_table.last_wal_id > replay_after_wal_id);
             replay_after_wal_id = replayed_table.last_wal_id;
             if !replayed_table.table.is_empty() && replayed_table.last_seq > last_committed_seq {
+                let first_seq = replayed_table
+                    .table
+                    .table()
+                    .first_seq()
+                    .expect("expected first_seq on non-empty table");
+                // The entire table should be newer than the last committed seq, since we filtered
+                // out entries <= last_committed_seq when creating the replay iterator.
+                assert!(first_seq > last_committed_seq);
                 last_committed_seq = replayed_table.last_seq;
                 let imm_memtable =
                     ImmutableMemtable::new(replayed_table.table, replayed_table.last_wal_id);
