@@ -156,6 +156,7 @@ See who's using SlateDB.
 
 - [Embucket](https://www.embucket.com)
 - [Gadget](https://gadget.dev)
+- [Goldsky](https://goldsky.com)
 - [HelixDB](https://github.com/HelixDB/helix-db)
 - [Malstrom](https://github.com/MalstromDevelopers/malstrom)
 - [Massive](https://massive.com)
