@@ -13,6 +13,9 @@ Table of Contents:
    * [Format version](#format-version)
    * [Write path (`EncodedSsTableFooterBuilder::build`)](#write-path-encodedsstablefooterbuilderbuild)
    * [Read path (`SsTableFormat::read_index`)](#read-path-sstableformatread_index)
+   * [Metadata cache changes (`slatedb/src/db_cache/mod.rs`)](#metadata-cache-changes-slatedbsrcdb_cachemodrs)
+      + [Cache key structure](#cache-key-structure)
+      + [Cache stats](#cache-stats)
 - [Impact Analysis](#impact-analysis)
    * [Core API & Query Semantics](#core-api-query-semantics)
    * [Consistency, Isolation, and Multi-Versioning](#consistency-isolation-and-multi-versioning)
@@ -33,7 +36,6 @@ Table of Contents:
 - [Open Questions](#open-questions)
 - [References](#references)
 - [Updates](#updates)
-
 <!-- TOC end -->
 
 Status: Draft
@@ -176,6 +178,47 @@ On a read against an SST with partitioned index:
 4. Binary search the `PartitionIndex.blocks` to find the data block offset, then proceed as today.
 
 On a read against an SST with `index_type = Flat` in the `SsTableInfo` footer, the existing flat-index path is used unchanged.
+
+### Metadata cache changes (`slatedb/src/db_cache/mod.rs`)
+
+Two new variants are added to the internal `CachedItem` enum, SsTableIndexV2 for the cached top-level index directory and PartitionIndex for the cached partitions of the index:
+
+```rust
+enum CachedItem {
+    Block(Arc<Block>),
+    SsTableIndex(Arc<SsTableIndexOwned>),      // existing flat v1 index
+    SsTableIndexV2(Arc<SsTableIndexV2Owned>),  // new top-level partition directory
+    PartitionIndex(Arc<PartitionIndexOwned>),   // individual partition blocks
+    BloomFilter(Arc<BloomFilter>),
+    SstStats(Arc<SstStats>),
+}
+```
+
+Both new types route to the **meta cache** in `SplitCache::insert`, consistent with the existing index and filter entries.
+
+#### Cache key structure
+
+`CachedKey` is `(scope_id, sst_id, block_id)` where `block_id` is a byte offset
+within the SST file. Within a single SST file, partition index blocks and data blocks occupy
+non-overlapping byte ranges, so their byte offsets are guaranteed to be distinct.
+No `CachedKey` collision is possible, and no changes to `CachedKey` are required. The `CachedItem` variant already encodes the
+type, providing an additional layer of differentiation.
+
+#### Cache stats
+
+`SsTableIndexV2` lookups reuse the existing `dbcache.index_hit` / `dbcache.index_miss`
+counters, since it fills the same conceptual role as the flat index (the top-level
+entry point for an SST's index structure).
+
+`PartitionIndex` gets two new counters registered in `DbCacheStats`:
+
+- `dbcache.partition_index_hit`
+- `dbcache.partition_index_miss`
+
+These are kept separate because partition block cache effectiveness is the primary
+observable outcome of this RFC; lumping them into the existing index counters would
+make it impossible to distinguish top-level directory hits from individual partition
+block hits.
 
 
 ## Impact Analysis
