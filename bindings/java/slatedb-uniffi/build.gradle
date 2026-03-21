@@ -1,9 +1,12 @@
+import org.gradle.process.ExecOperations
+
 plugins {
     id "java-library"
     id "com.vanniktech.maven.publish" version "0.34.0"
 }
 
 def repoRoot = rootProject.ext.repoRoot
+def execOperations = services.get(ExecOperations)
 
 def nativePlatforms = [
     [
@@ -80,12 +83,34 @@ def usePrebuiltNativeLibraries = !nativePrebuiltDirProperty.isEmpty()
 def nativePrebuiltDir = usePrebuiltNativeLibraries ? new File(nativePrebuiltDirProperty).absoluteFile : null
 def selectedNativePlatforms = usePrebuiltNativeLibraries ? nativePlatforms : [hostPlatform]
 def nativeResourceStagingDir = layout.buildDirectory.dir("generated/resources/slatedb-uniffi")
+def generatedJavaDir = layout.buildDirectory.dir("generated/sources/uniffi/java")
+def uniffiConfigFile = new File(repoRoot, "bindings/uniffi/uniffi.toml")
+def uniffiSourceDir = new File(repoRoot, "bindings/uniffi/src")
+def uniffiCargoManifest = new File(repoRoot, "bindings/uniffi/Cargo.toml")
+def workspaceCargoLock = new File(repoRoot, "Cargo.lock")
+def configuredUniffiBindgenBinary = (findProperty("slatedb.uniffi.bindgen")
+    ?: System.getenv("UNIFFI_BINDGEN_JAVA")
+    ?: "").toString().trim()
 
 def nativeSourceFileForPlatform = { platform ->
     if (usePrebuiltNativeLibraries) {
         return new File(nativePrebuiltDir, "${platform.resourcePrefix}/${platform.libraryFile}")
     }
     return new File(repoRoot, "target/debug/${platform.libraryFile}")
+}
+
+def hostNativeLibraryForGeneration = nativeSourceFileForPlatform(hostPlatform)
+def resolveUniffiBindgenBinary = {
+    if (!configuredUniffiBindgenBinary.isEmpty()) {
+        return configuredUniffiBindgenBinary
+    }
+
+    File cargoHomeBinary = new File(System.getProperty("user.home", ""), ".cargo/bin/uniffi-bindgen-java")
+    if (cargoHomeBinary.isFile()) {
+        return cargoHomeBinary.absolutePath
+    }
+
+    return "uniffi-bindgen-java"
 }
 
 def buildNativeLibrary = usePrebuiltNativeLibraries
@@ -96,6 +121,74 @@ def buildNativeLibrary = usePrebuiltNativeLibraries
         workingDir repoRoot
         commandLine "cargo", "build", "-p", "slatedb-uniffi"
     }
+
+def generateJavaBindings = tasks.register("generateJavaBindings") { task ->
+    group = "build"
+    description = "Generate Java bindings from the host slatedb-uniffi native library"
+    if (buildNativeLibrary != null) {
+        dependsOn buildNativeLibrary
+    }
+    inputs.property("nativeMode", usePrebuiltNativeLibraries ? "prebuilt" : "local")
+    inputs.property("hostPlatform", hostPlatform.resourcePrefix)
+    inputs.file(uniffiConfigFile)
+    inputs.dir(uniffiSourceDir)
+    inputs.file(uniffiCargoManifest)
+    inputs.file(workspaceCargoLock)
+    inputs.property("uniffiBindgenBinary", configuredUniffiBindgenBinary ?: "auto")
+    inputs.file(hostNativeLibraryForGeneration)
+    outputs.dir(generatedJavaDir)
+    doLast {
+        if (!hostNativeLibraryForGeneration.isFile()) {
+            if (usePrebuiltNativeLibraries) {
+                throw new GradleException(
+                    "Prebuilt host library for Java binding generation is missing at ${hostNativeLibraryForGeneration}. " +
+                        "Expected layout: <prebuilt-dir>/${hostPlatform.resourcePrefix}/${hostPlatform.libraryFile}"
+                )
+            }
+            throw new GradleException(
+                "Host native library for Java binding generation is missing at ${hostNativeLibraryForGeneration}. " +
+                    "Ensure 'cargo build -p slatedb-uniffi' succeeds on this machine."
+            )
+        }
+
+        String uniffiBindgenBinary = resolveUniffiBindgenBinary()
+        try {
+            execOperations.exec {
+                commandLine uniffiBindgenBinary, "--version"
+            }
+        } catch (Exception ex) {
+            throw new GradleException(
+                "uniffi-bindgen-java is required on PATH. Install it with: " +
+                    "cargo install uniffi-bindgen-java --git https://github.com/IronCoreLabs/uniffi-bindgen-java.git. " +
+                    "If Gradle cannot find it, set UNIFFI_BINDGEN_JAVA or -Pslatedb.uniffi.bindgen to the executable path.",
+                ex
+            )
+        }
+
+        File tempOutputDir = new File(task.temporaryDir, "out")
+        File outputDir = generatedJavaDir.get().asFile
+        project.delete(tempOutputDir)
+        project.delete(outputDir)
+        tempOutputDir.mkdirs()
+
+        execOperations.exec {
+            commandLine uniffiBindgenBinary, "generate",
+                "--library",
+                "--config", uniffiConfigFile.absolutePath,
+                "--out-dir", tempOutputDir.absolutePath,
+                hostNativeLibraryForGeneration.absolutePath
+        }
+
+        if (!new File(tempOutputDir, "io/slatedb/uniffi").isDirectory()) {
+            throw new GradleException("Unexpected generator output under ${tempOutputDir}")
+        }
+
+        project.copy {
+            from tempOutputDir
+            into outputDir
+        }
+    }
+}
 
 tasks.register("prepareNativeLibraries") {
     group = "build"
@@ -140,7 +233,8 @@ tasks.register("prepareNativeLibraries") {
 sourceSets {
     main {
         java {
-            setSrcDirs(["src/main/java", "src/generated/java"])
+            setSrcDirs(["src/main/java"])
+            srcDir(generateJavaBindings)
         }
         resources {
             setSrcDirs(["src/main/resources"])
@@ -152,6 +246,18 @@ dependencies {
     implementation "net.java.dev.jna:jna:5.18.1"
     testImplementation "org.junit.jupiter:junit-jupiter:5.10.2"
     testRuntimeOnly "org.junit.platform:junit-platform-launcher:1.10.2"
+}
+
+tasks.withType(JavaCompile).configureEach {
+    dependsOn generateJavaBindings
+}
+
+tasks.named("sourcesJar") {
+    dependsOn generateJavaBindings
+}
+
+tasks.named("javadoc") {
+    dependsOn generateJavaBindings
 }
 
 tasks.named("processResources") {

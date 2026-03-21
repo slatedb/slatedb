@@ -74,5 +74,6 @@ The Java release action will do the following:
    - `darwin-aarch64`
    - `win32-x86-64`
    - `win32-aarch64`
-3. Assemble one universal `io.slatedb:slatedb-uniffi` jar containing all native libraries as JNA-loadable resources.
-4. Publish signed Maven artifacts (`jar`, `sources`, `javadoc`, `pom`) to Maven Central from `bindings/java`.
+3. Generate UniFFI Java sources during the Gradle publish from the host Linux native library.
+4. Assemble one universal `io.slatedb:slatedb-uniffi` jar containing all native libraries as JNA-loadable resources.
+5. Publish signed Maven artifacts (`jar`, `sources`, `javadoc`, `pom`) to Maven Central from `bindings/java`.
