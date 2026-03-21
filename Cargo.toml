@@ -9,7 +9,6 @@ members = [
     "slatedb-cli",
     "slatedb-c",
     "slatedb-dst",
-    "slatedb-py",
     "slatedb-txn-obj",
 ]
 
