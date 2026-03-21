@@ -801,7 +801,8 @@ There are a few minor differences:
 3. **WAL is not carried over from any source database.** All source manifests must have their
    WAL fully compacted before the operation. The new database starts with an empty WAL. That also allows to start with
    new `wal_id_last_seen` and `replay_after_wal_id` on union
-4. Due to a temporary spike in the number of L0 after **union**, **`l0_max_ssts` might be exceeded** blocking the writes 
+4. SequenceTracker is re-initialized on union; Sequence Tracking only works for the records added afterwards
+5. Due to a temporary spike in the number of L0 after **union**, **`l0_max_ssts` might be exceeded** blocking the writes 
    (until compaction). This can be improved by merging adjacent SST views; and/or checking `l0_max_ssts` against a 
    maximum number of views per any key.
 
