@@ -21,6 +21,7 @@ use crate::filter::BloomFilter;
 use crate::flatbuffer_types::SsTableIndexOwned;
 use crate::format::block::Block;
 use crate::format::sst::{EncodedSsTable, SsTableFormat};
+use crate::manifest::SsTableInfo;
 use crate::object_stores::{ObjectStoreType, ObjectStores};
 use crate::paths::PathResolver;
 use crate::sst_builder::EncodedSsTableBuilder;
@@ -330,8 +331,7 @@ impl TableStore {
         let object_store = self.object_stores.store_for(id);
         let path = self.path(id);
         let obj = ReadOnlyObject { object_store, path };
-        let info = self.sst_format.read_info(&obj).await?;
-        let version = self.read_sst_version(id).await?;
+        let (info, version) = self.sst_format.read_info_and_version(&obj).await?;
         Ok(SsTableHandle::new(*id, version, info))
     }
 

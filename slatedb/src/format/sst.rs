@@ -568,7 +568,9 @@ pub(crate) async fn transform(
     Ok(transformed)
 }
 
-pub(crate) type OffsetAndVersion = (u64, u16);
+pub(crate) type LengthOffsetAndVersion = (u64, u64, u16);
+
+pub(crate) type TableInfoAndVersion = (SsTableInfo, u16);
 
 #[derive(Clone)]
 pub(crate) struct SsTableFormat {
@@ -596,10 +598,10 @@ impl Default for SsTableFormat {
 }
 
 impl SsTableFormat {
-    async fn read_metadata_offset_and_version(
+    async fn read_length_and_metadata_offset_and_version(
         &self,
         obj: &impl ReadOnlyBlob,
-    ) -> Result<OffsetAndVersion, SlateDBError> {
+    ) -> Result<LengthOffsetAndVersion, SlateDBError> {
         let obj_len = obj.len().await?;
         if obj_len <= NUM_FOOTER_BYTES_LONG {
             return Err(SlateDBError::EmptySSTable);
@@ -611,7 +613,7 @@ impl SsTableFormat {
 
         let version = header.slice(8..NUM_FOOTER_BYTES).get_u16();
         let sst_metadata_offset = header.slice(0..8).get_u64();
-        Ok((sst_metadata_offset, version))
+        Ok((obj_len, sst_metadata_offset, version))
     }
 
     fn validate_version(&self, version: u16) -> Result<(), SlateDBError> {
@@ -626,7 +628,7 @@ impl SsTableFormat {
     }
 
     pub(crate) async fn read_version(&self, obj: &impl ReadOnlyBlob) -> Result<u16, SlateDBError> {
-        let (_, version) = self.read_metadata_offset_and_version(obj).await?;
+        let (_, _, version) = self.read_length_and_metadata_offset_and_version(obj).await?;
         self.validate_version(version)?;
         Ok(version)
     }
@@ -635,13 +637,20 @@ impl SsTableFormat {
         &self,
         obj: &impl ReadOnlyBlob,
     ) -> Result<SsTableInfo, SlateDBError> {
-        let (sst_metadata_offset, version) = self.read_metadata_offset_and_version(obj).await?;
+        let (info, _) = self.read_info_and_version(obj).await?;
+        Ok(info)
+    }
+
+    pub(crate) async fn read_info_and_version(
+        &self,
+        obj: &impl ReadOnlyBlob,
+    ) -> Result<TableInfoAndVersion, SlateDBError> {
+        let (obj_len, sst_metadata_offset, version) = self.read_length_and_metadata_offset_and_version(obj).await?;
         self.validate_version(version)?;
-        let obj_len = obj.len().await?;
         let sst_metadata_bytes = obj
             .read_range(sst_metadata_offset..obj_len - NUM_FOOTER_BYTES_LONG)
             .await?;
-        SsTableInfo::decode(sst_metadata_bytes, &*self.sst_codec)
+        SsTableInfo::decode(sst_metadata_bytes, &*self.sst_codec).map(|info| (info, version))
     }
 
     pub(crate) async fn read_filter(
