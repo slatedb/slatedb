@@ -432,13 +432,6 @@ impl DbReaderInner {
             order: IterationOrder::Ascending,
         };
 
-        let replay_options = WalReplayOptions {
-            sst_batch_size: 4,
-            max_memtable_bytes: reader_options.max_memtable_bytes as usize,
-            min_memtable_bytes: usize::MAX,
-            sst_iter_options,
-        };
-
         let (mut replay_after_wal_id, mut last_committed_seq) =
             if let Some(latest_replayed_table) = into_tables.front() {
                 (
@@ -452,6 +445,15 @@ impl DbReaderInner {
             table_store.last_seen_wal_id().await? + 1
         } else {
             core.next_wal_sst_id
+        };
+
+        let replay_options = WalReplayOptions {
+            sst_batch_size: 4,
+            max_memtable_bytes: reader_options.max_memtable_bytes as usize,
+            min_memtable_bytes: usize::MAX,
+            sst_iter_options,
+            // Skip entries that we already have in `imm_memtable` (that might be above last_l0_seq).
+            min_seq: Some(last_committed_seq),
         };
 
         let mut replay_iter = WalReplayIterator::range(
@@ -469,13 +471,13 @@ impl DbReaderInner {
             Err(err) => return Err(err),
         } {
             assert!(replayed_table.last_wal_id > replay_after_wal_id);
-            // Allow equality here since it's possible that a WAL file is an empty fence entry.
-            assert!(replayed_table.last_seq >= last_committed_seq);
             replay_after_wal_id = replayed_table.last_wal_id;
-            last_committed_seq = replayed_table.last_seq;
-            let imm_memtable =
-                ImmutableMemtable::new(replayed_table.table, replayed_table.last_wal_id);
-            into_tables.push_front(Arc::new(imm_memtable));
+            if !replayed_table.table.is_empty() && replayed_table.last_seq > last_committed_seq {
+                last_committed_seq = replayed_table.last_seq;
+                let imm_memtable =
+                    ImmutableMemtable::new(replayed_table.table, replayed_table.last_wal_id);
+                into_tables.push_front(Arc::new(imm_memtable));
+            }
         }
 
         Ok((replay_after_wal_id, last_committed_seq))
