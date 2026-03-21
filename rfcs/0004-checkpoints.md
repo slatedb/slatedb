@@ -799,7 +799,8 @@ There are a few minor differences:
    are initialized to their default values rather than being copied from any source database. An exception
    is `last_l0_seq`, which is derived from the maximum across all sources during union (see step 5 above).
 3. **WAL is not carried over from any source database.** All source manifests must have their
-   WAL fully compacted before the operation. The new database starts with an empty WAL.
+   WAL fully compacted before the operation. The new database starts with an empty WAL. That also allows to start with
+   new `wal_id_last_seen` and `replay_after_wal_id` on union
 4. Due to a temporary spike in the number of L0 after **union**, **`l0_max_ssts` might be exceeded** blocking the writes 
    (until compaction). This can be improved by merging adjacent SST views; and/or checking `l0_max_ssts` against a 
    maximum number of views per any key.
