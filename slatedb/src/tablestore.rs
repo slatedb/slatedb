@@ -21,7 +21,6 @@ use crate::filter::BloomFilter;
 use crate::flatbuffer_types::SsTableIndexOwned;
 use crate::format::block::Block;
 use crate::format::sst::{EncodedSsTable, SsTableFormat};
-use crate::manifest::SsTableInfo;
 use crate::object_stores::{ObjectStoreType, ObjectStores};
 use crate::paths::PathResolver;
 use crate::sst_builder::EncodedSsTableBuilder;
