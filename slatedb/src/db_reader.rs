@@ -1591,6 +1591,44 @@ mod tests {
         test_utils::assert_iterator(&mut replayed_iter, vec![wal_row]).await;
     }
 
+    #[tokio::test]
+    async fn replay_wal_into_should_preserve_existing_last_committed_seq_for_empty_fence_wal() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_db_reader_empty_fence_wal");
+        let test_provider = TestProvider::new(path, Arc::clone(&object_store));
+        let table_store = test_provider.table_store();
+
+        write_wal_sst(Arc::clone(&table_store), 6, vec![])
+            .await
+            .unwrap();
+
+        let mut into_tables = VecDeque::new();
+        into_tables.push_front(immutable_memtable(
+            5,
+            vec![
+                RowEntry::new_value(b"existing_key_1", b"existing_value_1", 9),
+                RowEntry::new_value(b"existing_key_2", b"existing_value_2", 10),
+            ],
+        ));
+
+        let mut core = ManifestCore::new();
+        core.last_l0_seq = 8;
+        core.next_wal_sst_id = 5;
+
+        let (last_wal_id, last_committed_seq) = DbReaderInner::replay_wal_into(
+            Arc::clone(&table_store),
+            &DbReaderOptions::default(),
+            &core,
+            &mut into_tables,
+            true,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(last_wal_id, 6);
+        assert_eq!(last_committed_seq, 10);
+    }
+
     #[tokio::test(start_paused = true)]
     async fn should_fail_new_reads_if_manifest_poller_crashes() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
