@@ -45,11 +45,6 @@ jobs:
       - name: Set version
         run: cargo set-version ${{ github.event.inputs.version }}
 
-      # Set pyproject.toml version
-      - name: Set Python package version
-        run: |
-          sed -i "s/^version = \".*\"/version = \"${{ github.event.inputs.version }}\"/" slatedb-py/pyproject.toml
-
       - name: Set Java package version
         run: |
           sed -i "s/^version=.*/version=${{ github.event.inputs.version }}-SNAPSHOT/" bindings/java/gradle.properties

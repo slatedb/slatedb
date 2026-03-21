@@ -146,34 +146,34 @@ jobs:
         with:
           python-version: '3.10'
 
-      - name: Install maturin
-        run: pip install maturin
+      - name: Create Python virtualenv
+        working-directory: ./bindings/python
+        run: python -m venv .venv
 
-      - name: Build and install package with test dependencies
-        working-directory: ./slatedb-py
-        run: |
-          python -m venv .venv
-          source .venv/bin/activate
-          maturin develop
-          pip install -e .[test]
-
-      - name: Install lint dependencies (Ruff)
-        working-directory: ./slatedb-py
+      - name: Install Python packaging dependencies
+        working-directory: ./bindings/python
         run: |
           source .venv/bin/activate
-          pip install -e .[lint]
+          pip install --upgrade pip
+          pip install maturin "uniffi-bindgen==0.29.5" ruff
+
+      - name: Build editable package with test deps
+        working-directory: ./bindings/python
+        run: |
+          source .venv/bin/activate
+          maturin develop --extras test
 
       - name: Run Ruff linter
-        working-directory: ./slatedb-py
+        working-directory: ./bindings/python
         run: |
           source .venv/bin/activate
           ruff check . --output-format=github
 
-      - name: Run Python tests
-        working-directory: ./slatedb-py
+      - name: Run pytest
+        working-directory: ./bindings/python
         run: |
           source .venv/bin/activate
-          pytest -xvs
+          pytest
 
   bindings-go:
     runs-on: ubuntu-latest
