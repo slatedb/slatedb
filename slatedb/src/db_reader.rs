@@ -469,9 +469,23 @@ impl DbReaderInner {
             Err(err) => return Err(err),
         } {
             assert!(replayed_table.last_wal_id > replay_after_wal_id);
-            // Allow equality here since it's possible that a WAL file is an empty fence entry.
-            assert!(replayed_table.last_seq >= last_committed_seq);
+            // Always advance the WAL ID so we don't re-replay this WAL.
             replay_after_wal_id = replayed_table.last_wal_id;
+            // When the manifest advances (L0 flush) but old WAL files still
+            // exist, WalReplayIterator filters out all their entries
+            // (seq <= last_l0_seq), producing an empty table whose last_seq
+            // equals core.last_l0_seq.  If in-memory tables already have a
+            // higher last_seq from a prior replay, last_seq < last_committed_seq.
+            // This is safe to skip: the table is empty and all data is in L0.
+            if replayed_table.last_seq < last_committed_seq {
+                debug_assert!(
+                    replayed_table.table.is_empty(),
+                    "non-empty replayed table with last_seq ({}) < last_committed_seq ({})",
+                    replayed_table.last_seq,
+                    last_committed_seq,
+                );
+                continue;
+            }
             last_committed_seq = replayed_table.last_seq;
             let imm_memtable =
                 ImmutableMemtable::new(replayed_table.table, replayed_table.last_wal_id);
@@ -1589,6 +1603,89 @@ mod tests {
 
         let mut replayed_iter = replayed.table().iter();
         test_utils::assert_iterator(&mut replayed_iter, vec![wal_row]).await;
+    }
+
+    /// Reproduces a panic where `replay_wal_into` asserts
+    /// `replayed_table.last_seq >= last_committed_seq` during a manifest
+    /// refresh. The scenario:
+    ///
+    /// 1. Reader has in-memory tables from a prior WAL replay (last_seq = 10,
+    ///    WAL ID = 5).
+    /// 2. The manifest advances with last_l0_seq = 8 (writer flushed to L0).
+    /// 3. WAL 6 exists on disk but all its entries have seq <= 8, so
+    ///    WalReplayIterator filters them out, producing an empty table with
+    ///    last_seq = 8.
+    /// 4. last_committed_seq = 10 (from the existing in-memory table).
+    /// 5. 8 < 10 → the old assertion panicked.
+    ///
+    /// The fix: skip the empty table instead of asserting, since all its data
+    /// is already covered by L0.
+    #[tokio::test]
+    async fn replay_wal_into_should_skip_stale_wal_tables() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_db_reader_skip_stale_wal");
+        let test_provider = TestProvider::new(path, Arc::clone(&object_store));
+        let table_store = test_provider.table_store();
+
+        // WAL 6 has entries with seq 7 and 8 — both <= last_l0_seq (set below).
+        // WalReplayIterator will filter them all out.
+        write_wal_sst(
+            Arc::clone(&table_store),
+            6,
+            vec![
+                RowEntry::new_value(b"old1", b"v1", 7),
+                RowEntry::new_value(b"old2", b"v2", 8),
+            ],
+        )
+        .await
+        .unwrap();
+
+        // WAL 7 has a fresh entry with seq 11 (> last_committed_seq of 10).
+        write_wal_sst(
+            Arc::clone(&table_store),
+            7,
+            vec![RowEntry::new_value(b"new_key", b"new_value", 11)],
+        )
+        .await
+        .unwrap();
+
+        // Existing in-memory table from prior replay: WAL ID 5, last_seq 10.
+        let mut into_tables = VecDeque::new();
+        into_tables.push_front(immutable_memtable(
+            5,
+            vec![RowEntry::new_value(b"prior_key", b"prior_value", 10)],
+        ));
+
+        // Manifest has last_l0_seq = 8 (data up to seq 8 is in L0).
+        let mut core = ManifestCore::new();
+        core.last_l0_seq = 8;
+        core.next_wal_sst_id = 8;
+
+        let (last_wal_id, last_committed_seq) = DbReaderInner::replay_wal_into(
+            Arc::clone(&table_store),
+            &DbReaderOptions::default(),
+            &core,
+            &mut into_tables,
+            false,
+        )
+        .await
+        .unwrap();
+
+        // WAL 7 was replayed successfully.
+        assert_eq!(last_wal_id, 7);
+        assert_eq!(last_committed_seq, 11);
+
+        // into_tables should have: [wal7(new), prior(old)]
+        assert_eq!(into_tables.len(), 2);
+
+        let newest = into_tables.front().unwrap();
+        assert_eq!(newest.recent_flushed_wal_id(), 7);
+        let mut newest_iter = newest.table().iter();
+        test_utils::assert_iterator(
+            &mut newest_iter,
+            vec![RowEntry::new_value(b"new_key", b"new_value", 11)],
+        )
+        .await;
     }
 
     #[tokio::test(start_paused = true)]
