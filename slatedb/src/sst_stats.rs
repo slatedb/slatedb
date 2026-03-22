@@ -6,26 +6,35 @@ use crate::flatbuffer_types::{FbBlockStats, FbBlockStatsArgs, FbSstStats, FbSstS
 
 /// Per-block statistics.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(crate) struct BlockStats {
-    pub(crate) num_puts: u16,
-    pub(crate) num_deletes: u16,
-    pub(crate) num_merges: u16,
+pub struct BlockStats {
+    /// Number of put entries in this block.
+    pub num_puts: u16,
+    /// Number of delete entries in this block.
+    pub num_deletes: u16,
+    /// Number of merge entries in this block.
+    pub num_merges: u16,
 }
 
 /// Per-SST statistics collected during SST building.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(crate) struct SstStats {
-    pub(crate) num_puts: u64,
-    pub(crate) num_deletes: u64,
-    pub(crate) num_merges: u64,
-    pub(crate) raw_key_size: u64,
-    pub(crate) raw_val_size: u64,
-    pub(crate) block_stats: Vec<BlockStats>,
+pub struct SstStats {
+    /// Total number of put entries in this SST.
+    pub num_puts: u64,
+    /// Total number of delete entries in this SST.
+    pub num_deletes: u64,
+    /// Total number of merge entries in this SST.
+    pub num_merges: u64,
+    /// Total raw key size in bytes.
+    pub raw_key_size: u64,
+    /// Total raw value size in bytes.
+    pub raw_val_size: u64,
+    /// Per-block statistics, parallel to the SST index.
+    pub block_stats: Vec<BlockStats>,
 }
 
 impl SstStats {
     /// Returns the total number of rows (puts + deletes + merges).
-    pub(crate) fn num_rows(&self) -> u64 {
+    pub fn num_rows(&self) -> u64 {
         self.num_puts + self.num_deletes + self.num_merges
     }
 
@@ -76,8 +85,6 @@ impl SstStats {
         Bytes::from(builder.finished_data().to_vec())
     }
 
-    // Used by SsTableFormat::decode_stats (RFC 0020 Phase 2)
-    #[allow(dead_code)]
     pub(crate) fn decode(data: Bytes) -> Result<Self, SlateDBError> {
         let fb_stats = flatbuffers::root::<FbSstStats>(&data)?;
         let block_stats = fb_stats
