@@ -107,9 +107,6 @@ impl SstReader {
     }
 
     /// Creates an `SstFile` from an existing `SsTableHandle` (no I/O needed).
-    ///
-    /// This is useful when you already have a handle from the manifest and
-    /// want to inspect stats or index data without re-reading the footer.
     pub fn open_with_handle(&self, handle: SsTableHandle) -> SstFile {
         let id = handle.id.unwrap_compacted_id();
         SstFile {
@@ -199,12 +196,13 @@ impl SstFile {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{FlushOptions, FlushType, PutOptions, WriteOptions};
+    use crate::config::{FlushOptions, FlushType, PutOptions, SstBlockSize, WriteOptions};
+    use crate::test_utils::StringConcatMergeOperator;
     use crate::Db;
     use object_store::memory::InMemory;
 
-    /// Helper: create a DB, write some keys, flush to L0, and return the
-    /// object store + path + manifest for inspection.
+    /// Helper: create a DB with 10 puts, 3 deletes, and 2 merges, flush to
+    /// L0, and return the object store + path + manifest for inspection.
     async fn setup_db_with_l0() -> (
         Arc<dyn ObjectStore>,
         &'static str,
@@ -212,8 +210,14 @@ mod tests {
     ) {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = "/test_sst_reader";
-        let db = Db::open(path, object_store.clone()).await.unwrap();
+        let db = Db::builder(path, object_store.clone())
+            .with_merge_operator(Arc::new(StringConcatMergeOperator))
+            .with_sst_block_size(SstBlockSize::Other(64))
+            .build()
+            .await
+            .unwrap();
 
+        // 10 puts
         for i in 0..10u8 {
             db.put_with_options(
                 &[b'k', i],
@@ -224,6 +228,17 @@ mod tests {
             .await
             .unwrap();
         }
+
+        // 3 deletes
+        for i in 10..13u8 {
+            db.delete(&[b'k', i]).await.unwrap();
+        }
+
+        // 2 merges
+        for i in 13..15u8 {
+            db.merge(&[b'k', i], &[b'm', i]).await.unwrap();
+        }
+
         db.flush_with_options(FlushOptions {
             flush_type: FlushType::MemTable,
         })
@@ -275,8 +290,9 @@ mod tests {
 
         let stats = stats.expect("expected stats block to be present");
         assert_eq!(stats.num_puts, 10);
-        assert_eq!(stats.num_deletes, 0);
-        assert_eq!(stats.num_merges, 0);
+        assert_eq!(stats.num_deletes, 3);
+        assert_eq!(stats.num_merges, 2);
+        assert_eq!(stats.num_rows(), 15);
         assert!(stats.raw_key_size > 0);
         assert!(stats.raw_val_size > 0);
     }
