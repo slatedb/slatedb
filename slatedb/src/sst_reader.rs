@@ -1,4 +1,4 @@
-//! Read-only API for inspecting compacted SST files.
+//! Read-only, metadata-only API for inspecting compacted SST files.
 //!
 //! The main types are:
 //!
@@ -98,10 +98,7 @@ impl SstReader {
     /// Returns an error if the SST file does not exist (e.g. it was GC'd)
     /// or if there is an issue reading from object storage.
     pub async fn open(&self, id: Ulid) -> Result<SstFile, crate::Error> {
-        let handle = self
-            .table_store
-            .open_sst(&SsTableId::Compacted(id))
-            .await?;
+        let handle = self.table_store.open_sst(&SsTableId::Compacted(id)).await?;
         Ok(SstFile {
             id,
             handle,
@@ -208,8 +205,11 @@ mod tests {
 
     /// Helper: create a DB, write some keys, flush to L0, and return the
     /// object store + path + manifest for inspection.
-    async fn setup_db_with_l0() -> (Arc<dyn ObjectStore>, &'static str, crate::manifest::ManifestCore)
-    {
+    async fn setup_db_with_l0() -> (
+        Arc<dyn ObjectStore>,
+        &'static str,
+        crate::manifest::ManifestCore,
+    ) {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = "/test_sst_reader";
         let db = Db::open(path, object_store.clone()).await.unwrap();
