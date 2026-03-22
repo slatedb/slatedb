@@ -1081,6 +1081,7 @@ pub struct DbReaderBuilder<P: Into<Path>> {
     object_store: Arc<dyn ObjectStore>,
     wal_object_store: Option<Arc<dyn ObjectStore>>,
     checkpoint_id: Option<uuid::Uuid>,
+    merge_operator: Option<MergeOperatorType>,
     options: DbReaderOptions,
     system_clock: Arc<dyn SystemClock>,
     rand: Arc<DbRand>,
@@ -1095,6 +1096,7 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
             object_store,
             wal_object_store: None,
             checkpoint_id: None,
+            merge_operator: None,
             options: DbReaderOptions::default(),
             system_clock: Arc::new(DefaultSystemClock::default()),
             rand: Arc::new(DbRand::default()),
@@ -1118,7 +1120,7 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
 
     /// Sets the merge operator to use when reading merge operands.
     pub fn with_merge_operator(mut self, merge_operator: MergeOperatorType) -> Self {
-        self.options.merge_operator = Some(merge_operator);
+        self.merge_operator = Some(merge_operator);
         self
     }
 
@@ -1206,6 +1208,7 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
         let reader = DbReader::open_internal(
             &store_provider,
             self.checkpoint_id,
+            self.merge_operator,
             self.options,
             self.system_clock,
             self.rand,

@@ -935,9 +935,6 @@ pub struct DbReaderOptions {
     #[serde(skip)]
     pub block_cache: Option<Arc<dyn DbCache>>,
 
-    #[serde(skip)]
-    pub merge_operator: Option<MergeOperatorType>,
-
     /// An optional block transformer for custom encoding/decoding of blocks.
     /// Can be used for encryption, custom encoding, etc.
     #[serde(skip)]
@@ -976,7 +973,6 @@ impl Default for DbReaderOptions {
                         .build(),
                 ))
             },
-            merge_operator: None,
             block_transformer: None,
             object_store_cache_options: ObjectStoreCacheOptions::default(),
             skip_wal_replay: false,
