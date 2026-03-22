@@ -1077,6 +1077,7 @@ pub struct DbReaderBuilder<P: Into<Path>> {
     db_cache: Option<Arc<dyn DbCache>>,
     checkpoint_id: Option<uuid::Uuid>,
     merge_operator: Option<MergeOperatorType>,
+    block_transformer: Option<Arc<dyn BlockTransformer>>,
     options: DbReaderOptions,
     system_clock: Arc<dyn SystemClock>,
     rand: Arc<DbRand>,
@@ -1093,6 +1094,7 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
             db_cache: default_db_cache(),
             checkpoint_id: None,
             merge_operator: None,
+            block_transformer: None,
             options: DbReaderOptions::default(),
             system_clock: Arc::new(DefaultSystemClock::default()),
             rand: Arc::new(DbRand::default()),
@@ -1163,6 +1165,25 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
         self
     }
 
+    /// Sets the block transformer to use for the database. The block transformer
+    /// allows custom encoding/decoding of block data before storage and after
+    /// retrieval. This can be used for encryption or other transformations.
+    ///
+    /// The transformer is applied after compression on write and before
+    /// decompression on read. The checksum is calculated on the transformed data.
+    ///
+    /// # Arguments
+    ///
+    /// * `block_transformer` - An Arc-wrapped block transformer implementation.
+    ///
+    /// # Returns
+    ///
+    /// The builder instance for chaining.
+    pub fn with_block_transformer(mut self, block_transformer: Arc<dyn BlockTransformer>) -> Self {
+        self.block_transformer = Some(block_transformer);
+        self
+    }
+
     /// Builds and returns a DbReader instance.
     pub async fn build(self) -> Result<DbReader, crate::Error> {
         let path = self.path.into();
@@ -1213,7 +1234,7 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
             object_store,
             wal_object_store: retrying_wal_object_store,
             block_cache: self.db_cache.clone(),
-            block_transformer: self.options.block_transformer.clone(),
+            block_transformer: self.block_transformer.clone(),
         };
 
         let reader = DbReader::open_internal(

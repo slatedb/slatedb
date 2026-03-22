@@ -185,13 +185,11 @@ use log::warn;
 use serde::{Deserialize, Serialize, Serializer};
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::Arc;
 use std::{str::FromStr, time::Duration};
 use uuid::Uuid;
 
 use crate::error::SlateDBError;
 
-use crate::format::sst::BlockTransformer;
 use crate::garbage_collector::{DEFAULT_INTERVAL, DEFAULT_MIN_AGE};
 
 /// Enum representing different levels of cache preloading on startup
@@ -913,11 +911,6 @@ pub struct DbReaderOptions {
     /// Defaults to 64MB
     pub max_memtable_bytes: u64,
 
-    /// An optional block transformer for custom encoding/decoding of blocks.
-    /// Can be used for encryption, custom encoding, etc.
-    #[serde(skip)]
-    pub block_transformer: Option<Arc<dyn BlockTransformer>>,
-
     /// Options for the local disk cache. If `root_folder` is set, the reader
     /// will wrap its object store in a `CachedObjectStore` backed by the
     /// local filesystem, mirroring the behaviour of `Db`.
@@ -941,7 +934,6 @@ impl Default for DbReaderOptions {
             manifest_poll_interval: Duration::from_secs(10),
             checkpoint_lifetime: Duration::from_secs(10 * 60),
             max_memtable_bytes: 64 * 1024 * 1024,
-            block_transformer: None,
             object_store_cache_options: ObjectStoreCacheOptions::default(),
             skip_wal_replay: false,
         }
