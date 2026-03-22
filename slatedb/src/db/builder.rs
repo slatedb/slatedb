@@ -127,8 +127,6 @@ use crate::compactor::SizeTieredCompactionSchedulerSupplier;
 use crate::compactor::COMPACTOR_TASK_NAME;
 use crate::compactor::{CompactionSchedulerSupplier, Compactor};
 use crate::compactor_executor::{TokioCompactionExecutor, TokioCompactionExecutorOptions};
-use crate::config::default_block_cache;
-use crate::config::default_meta_cache;
 use crate::config::CompactorOptions;
 use crate::config::DbReaderOptions;
 use crate::config::GarbageCollectorOptions;
@@ -1076,6 +1074,7 @@ pub struct DbReaderBuilder<P: Into<Path>> {
     path: P,
     object_store: Arc<dyn ObjectStore>,
     wal_object_store: Option<Arc<dyn ObjectStore>>,
+    db_cache: Option<Arc<dyn DbCache>>,
     checkpoint_id: Option<uuid::Uuid>,
     merge_operator: Option<MergeOperatorType>,
     options: DbReaderOptions,
@@ -1091,6 +1090,7 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
             path,
             object_store,
             wal_object_store: None,
+            db_cache: default_db_cache(),
             checkpoint_id: None,
             merge_operator: None,
             options: DbReaderOptions::default(),
@@ -1123,6 +1123,21 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
     /// Sets the options to use for the reader.
     pub fn with_options(mut self, options: DbReaderOptions) -> Self {
         self.options = options;
+        self
+    }
+
+    /// Sets the cache to use for the database for caching sst blocks
+    ///
+    /// SlateDB uses a cache to efficiently store and retrieve blocks and SST metadata locally.
+    /// [`slatedb::db_cache::SplitCache`] is used by default.
+    pub fn with_db_cache(mut self, db_cache: Arc<dyn DbCache>) -> Self {
+        self.db_cache = Some(db_cache);
+        self
+    }
+
+    /// Disables the sst block/metadata cache
+    pub fn with_db_cache_disabled(mut self) -> Self {
+        self.db_cache = None;
         self
     }
 
@@ -1197,7 +1212,7 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
             path: path.clone(),
             object_store,
             wal_object_store: retrying_wal_object_store,
-            block_cache: self.options.block_cache.clone(),
+            block_cache: self.db_cache.clone(),
             block_transformer: self.options.block_transformer.clone(),
         };
 
@@ -1229,6 +1244,54 @@ fn default_db_cache() -> Option<Arc<dyn DbCache>> {
             .with_meta_cache(meta_cache)
             .build(),
     ) as Arc<dyn DbCache>)
+}
+
+#[allow(unreachable_code)]
+pub(crate) fn default_block_cache() -> Option<Arc<dyn DbCache>> {
+    #[cfg(feature = "foyer")]
+    {
+        return Some(Arc::new(crate::db_cache::foyer::FoyerCache::new_with_opts(
+            crate::db_cache::foyer::FoyerCacheOptions {
+                max_capacity: crate::db_cache::DEFAULT_BLOCK_CACHE_CAPACITY,
+                ..Default::default()
+            },
+        )));
+    }
+    #[cfg(feature = "moka")]
+    {
+        return Some(Arc::new(crate::db_cache::moka::MokaCache::new_with_opts(
+            crate::db_cache::moka::MokaCacheOptions {
+                max_capacity: crate::db_cache::DEFAULT_BLOCK_CACHE_CAPACITY,
+                time_to_live: None,
+                time_to_idle: None,
+            },
+        )));
+    }
+    None
+}
+
+#[allow(unreachable_code)]
+pub(crate) fn default_meta_cache() -> Option<Arc<dyn DbCache>> {
+    #[cfg(feature = "foyer")]
+    {
+        return Some(Arc::new(crate::db_cache::foyer::FoyerCache::new_with_opts(
+            crate::db_cache::foyer::FoyerCacheOptions {
+                max_capacity: crate::db_cache::DEFAULT_META_CACHE_CAPACITY,
+                ..Default::default()
+            },
+        )));
+    }
+    #[cfg(feature = "moka")]
+    {
+        return Some(Arc::new(crate::db_cache::moka::MokaCache::new_with_opts(
+            crate::db_cache::moka::MokaCacheOptions {
+                max_capacity: crate::db_cache::DEFAULT_META_CACHE_CAPACITY,
+                time_to_live: None,
+                time_to_idle: None,
+            },
+        )));
+    }
+    None
 }
 
 #[cfg(test)]

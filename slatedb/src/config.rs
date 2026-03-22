@@ -191,7 +191,6 @@ use uuid::Uuid;
 
 use crate::error::SlateDBError;
 
-use crate::db_cache::{DbCache, SplitCache};
 use crate::format::sst::BlockTransformer;
 use crate::garbage_collector::{DEFAULT_INTERVAL, DEFAULT_MIN_AGE};
 
@@ -914,9 +913,6 @@ pub struct DbReaderOptions {
     /// Defaults to 64MB
     pub max_memtable_bytes: u64,
 
-    #[serde(skip)]
-    pub block_cache: Option<Arc<dyn DbCache>>,
-
     /// An optional block transformer for custom encoding/decoding of blocks.
     /// Can be used for encryption, custom encoding, etc.
     #[serde(skip)]
@@ -945,69 +941,11 @@ impl Default for DbReaderOptions {
             manifest_poll_interval: Duration::from_secs(10),
             checkpoint_lifetime: Duration::from_secs(10 * 60),
             max_memtable_bytes: 64 * 1024 * 1024,
-            block_cache: {
-                let block_cache = default_block_cache();
-                let meta_cache = default_meta_cache();
-                Some(Arc::new(
-                    SplitCache::new()
-                        .with_block_cache(block_cache)
-                        .with_meta_cache(meta_cache)
-                        .build(),
-                ))
-            },
             block_transformer: None,
             object_store_cache_options: ObjectStoreCacheOptions::default(),
             skip_wal_replay: false,
         }
     }
-}
-
-#[allow(unreachable_code)]
-pub(crate) fn default_block_cache() -> Option<Arc<dyn DbCache>> {
-    #[cfg(feature = "foyer")]
-    {
-        return Some(Arc::new(crate::db_cache::foyer::FoyerCache::new_with_opts(
-            crate::db_cache::foyer::FoyerCacheOptions {
-                max_capacity: crate::db_cache::DEFAULT_BLOCK_CACHE_CAPACITY,
-                ..Default::default()
-            },
-        )));
-    }
-    #[cfg(feature = "moka")]
-    {
-        return Some(Arc::new(crate::db_cache::moka::MokaCache::new_with_opts(
-            crate::db_cache::moka::MokaCacheOptions {
-                max_capacity: crate::db_cache::DEFAULT_BLOCK_CACHE_CAPACITY,
-                time_to_live: None,
-                time_to_idle: None,
-            },
-        )));
-    }
-    None
-}
-
-#[allow(unreachable_code)]
-pub(crate) fn default_meta_cache() -> Option<Arc<dyn DbCache>> {
-    #[cfg(feature = "foyer")]
-    {
-        return Some(Arc::new(crate::db_cache::foyer::FoyerCache::new_with_opts(
-            crate::db_cache::foyer::FoyerCacheOptions {
-                max_capacity: crate::db_cache::DEFAULT_META_CACHE_CAPACITY,
-                ..Default::default()
-            },
-        )));
-    }
-    #[cfg(feature = "moka")]
-    {
-        return Some(Arc::new(crate::db_cache::moka::MokaCache::new_with_opts(
-            crate::db_cache::moka::MokaCacheOptions {
-                max_capacity: crate::db_cache::DEFAULT_META_CACHE_CAPACITY,
-                time_to_live: None,
-                time_to_idle: None,
-            },
-        )));
-    }
-    None
 }
 
 /// The compression algorithm to use for SSTables.
