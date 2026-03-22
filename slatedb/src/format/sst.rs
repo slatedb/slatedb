@@ -627,22 +627,6 @@ impl SsTableFormat {
         Ok(())
     }
 
-    pub(crate) async fn read_version(&self, obj: &impl ReadOnlyBlob) -> Result<u16, SlateDBError> {
-        let (_, _, version) = self
-            .read_length_and_metadata_offset_and_version(obj)
-            .await?;
-        self.validate_version(version)?;
-        Ok(version)
-    }
-
-    pub(crate) async fn read_info(
-        &self,
-        obj: &impl ReadOnlyBlob,
-    ) -> Result<SsTableInfo, SlateDBError> {
-        let (info, _) = self.read_info_and_version(obj).await?;
-        Ok(info)
-    }
-
     pub(crate) async fn read_info_and_version(
         &self,
         obj: &impl ReadOnlyBlob,
