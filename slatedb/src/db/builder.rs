@@ -367,8 +367,6 @@ impl<P: Into<Path>> DbBuilder<P> {
             );
         }
 
-        let merge_operator = self.merge_operator.or(self.settings.merge_operator.clone());
-
         // Setup the components
         let stat_registry = Arc::new(StatRegistry::new());
         let block_format = {
@@ -479,11 +477,9 @@ impl<P: Into<Path>> DbBuilder<P> {
         let (write_tx, write_rx) = tokio::sync::mpsc::unbounded_channel();
 
         // Create the database inner state
-        let mut settings = self.settings.clone();
-        settings.merge_operator = merge_operator.clone();
         let inner = Arc::new(
             DbInner::new(
-                settings,
+                self.settings.clone(),
                 system_clock.clone(),
                 rand.clone(),
                 table_store.clone(),
@@ -492,7 +488,7 @@ impl<P: Into<Path>> DbBuilder<P> {
                 write_tx,
                 stat_registry,
                 self.fp_registry.clone(),
-                merge_operator.clone(),
+                self.merge_operator.clone(),
             )
             .await?,
         );
@@ -549,7 +545,7 @@ impl<P: Into<Path>> DbBuilder<P> {
                 .with_stat_registry(inner.stat_registry.clone())
                 .with_seed(rand.rng().next_u64());
 
-            if let Some(operator) = merge_operator {
+            if let Some(operator) = self.merge_operator {
                 builder = builder.with_merge_operator(operator);
             }
 

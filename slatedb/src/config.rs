@@ -194,7 +194,6 @@ use crate::error::SlateDBError;
 use crate::db_cache::{DbCache, SplitCache};
 use crate::format::sst::BlockTransformer;
 use crate::garbage_collector::{DEFAULT_INTERVAL, DEFAULT_MIN_AGE};
-use crate::merge_operator::MergeOperatorType;
 
 /// Enum representing different levels of cache preloading on startup
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq)]
@@ -664,14 +663,6 @@ pub struct Settings {
     /// Default: no TTL (insertions will remain until deleted)
     pub default_ttl: Option<u64>,
 
-    /// The merge operator to use for the database. If not set, the database will not support merge operations.
-    ///
-    /// The merge operator allows applications to bypass the traditional read/modify/write cycle
-    /// by expressing partial updates using an associative operator. Merge operands are combined
-    /// during reads and compactions to produce the final result.
-    #[serde(skip)]
-    pub merge_operator: Option<MergeOperatorType>,
-
     /// The block format for SST files. This is only available in tests
     /// to verify backward compatibility between V1 and V2 formats.
     #[cfg(test)]
@@ -704,15 +695,7 @@ impl std::fmt::Debug for Settings {
             )
             .field("garbage_collector_options", &self.garbage_collector_options)
             .field("filter_bits_per_key", &self.filter_bits_per_key)
-            .field("default_ttl", &self.default_ttl)
-            .field(
-                "merge_operator",
-                &self
-                    .merge_operator
-                    .as_ref()
-                    .map(|_| "Some(merge_operator)")
-                    .unwrap_or("None"),
-            );
+            .field("default_ttl", &self.default_ttl);
         data.finish()
     }
 }
@@ -907,7 +890,6 @@ impl Default for Settings {
             garbage_collector_options: Some(GarbageCollectorOptions::default()),
             filter_bits_per_key: 10,
             default_ttl: None,
-            merge_operator: None,
             #[cfg(test)]
             block_format: None,
         }
