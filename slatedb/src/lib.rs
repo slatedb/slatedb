@@ -57,12 +57,12 @@ pub use merge_operator::{MergeOperator, MergeOperatorError};
 pub use rand::DbRand;
 #[cfg(test)]
 pub use sst_builder::BlockFormat;
-pub use transaction_manager::IsolationLevel;
-pub use types::KeyValue;
-pub use types::{RowEntry, ValueDeletable};
 pub use sst_reader::{SstFile, SstReader};
 pub use sst_stats::{BlockStats, SstStats};
 pub use tablestore::SstFileMetadata;
+pub use transaction_manager::IsolationLevel;
+pub use types::KeyValue;
+pub use types::{RowEntry, ValueDeletable};
 pub use wal_reader::{WalFile, WalFileIterator, WalFileMetadata, WalReader};
 
 pub mod admin;
