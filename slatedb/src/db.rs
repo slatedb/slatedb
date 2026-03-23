@@ -516,6 +516,7 @@ impl DbInner {
             min_memtable_bytes: self.settings.l0_sst_size_bytes,
             max_memtable_bytes: usize::MAX,
             sst_iter_options,
+            min_seq: None,
         };
 
         let db_state = self.state.read().state().core().clone();
