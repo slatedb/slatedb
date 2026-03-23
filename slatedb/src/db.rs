@@ -3522,7 +3522,7 @@ mod tests {
     async fn test_sequence_tracker_not_ahead_of_last_l0_seq_when_flush_races_with_writes() {
         let fp_registry = Arc::new(FailPointRegistry::new());
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let mut settings = test_db_options(0, 512, None);
+        let mut settings = test_db_options(0, 2048, None);
         settings.flush_interval = None;
 
         let system_clock = Arc::new(MockSystemClock::new());
