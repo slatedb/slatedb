@@ -29,12 +29,12 @@ impl SstStats {
         self.num_puts + self.num_deletes + self.num_merges
     }
 
-    /// Returns the in-memory size in bytes (5 u64 fields).
+    /// Returns the in-memory size in bytes (struct + heap-allocated block_stats).
     pub(crate) fn size(&self) -> usize {
-        std::mem::size_of::<Self>()
+        std::mem::size_of::<Self>() + self.block_stats.len() * std::mem::size_of::<BlockStats>()
     }
 
-    /// Returns a clone (no heap allocations to clamp).
+    /// Returns a clone.
     pub(crate) fn clamp_allocated_size(&self) -> Self {
         self.clone()
     }
