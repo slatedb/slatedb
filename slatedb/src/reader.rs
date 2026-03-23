@@ -405,6 +405,7 @@ mod tests {
     use crate::format::sst::SsTableFormat;
     use crate::manifest::SsTableView;
     use crate::object_stores::ObjectStores;
+    use crate::db_status::DbStatusReporter;
     use crate::oracle::DbReaderOracle;
     use crate::stats::StatRegistry;
     use crate::tablestore::TableStore;
@@ -1197,7 +1198,7 @@ mod tests {
 
         // Create Oracle with appropriate last_committed_seq
         let last_committed_seq = test_case.last_committed_seq.unwrap_or(u64::MAX);
-        let oracle = Arc::new(DbReaderOracle::new(last_committed_seq));
+        let oracle = Arc::new(DbReaderOracle::new(last_committed_seq, DbStatusReporter::new(0)));
 
         // Enable merge operator if the test description contains "[MERGE]"
         let merge_operator = if test_case.description.contains("[MERGE]") {
@@ -1624,7 +1625,7 @@ mod tests {
 
         // Create Oracle with appropriate last_committed_seq
         let last_committed_seq = test_case.last_committed_seq.unwrap_or(u64::MAX);
-        let oracle = Arc::new(DbReaderOracle::new(last_committed_seq));
+        let oracle = Arc::new(DbReaderOracle::new(last_committed_seq, DbStatusReporter::new(0)));
 
         // Enable merge operator if the test description contains "[MERGE"
         let merge_operator = if test_case.description.contains("[MERGE") {
@@ -1708,7 +1709,7 @@ mod tests {
     ) -> Reader {
         let test_clock = Arc::new(MockSystemClock::new());
         let mono_clock = Arc::new(MonotonicClock::new(test_clock as Arc<dyn SystemClock>, 0));
-        let oracle = Arc::new(DbReaderOracle::new(u64::MAX));
+        let oracle = Arc::new(DbReaderOracle::new(u64::MAX, DbStatusReporter::new(0)));
         let merge_operator = if with_merge {
             Some(Arc::new(StringConcatMergeOperator) as Arc<dyn MergeOperator + Send + Sync>)
         } else {

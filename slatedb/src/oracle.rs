@@ -1,7 +1,9 @@
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering::SeqCst;
 
-use crate::db_status::DbStatusReporter;
+use tokio::sync::watch;
+
+use crate::db_status::{DbStatus, DbStatusReporter};
 
 /// Oracle is a trait that centralizes the generation & maintenance of various
 /// sequence numbers. These sequence numbers are mostly related to the lifecycle
@@ -81,21 +83,29 @@ impl Oracle for DbOracle {
 
 pub(crate) struct DbReaderOracle {
     last_remote_persisted_seq: AtomicU64,
+    status_reporter: DbStatusReporter,
 }
 
 impl DbReaderOracle {
     /// for the read-only db instance (DbReader), only the last remote persisted sequence number
     /// is needed to be tracked, and last_seq and last_remote_persisted_seq are considered to be
     /// the same as last_committed_seq.
-    pub(crate) fn new(last_remote_persisted_seq: u64) -> Self {
+    pub(crate) fn new(last_remote_persisted_seq: u64, status_reporter: DbStatusReporter) -> Self {
         Self {
             last_remote_persisted_seq: AtomicU64::new(last_remote_persisted_seq),
+            status_reporter,
         }
     }
 
     pub(crate) fn advance_durable_seq(&self, seq: u64) {
         self.last_remote_persisted_seq.fetch_max(seq, SeqCst);
+        self.status_reporter.report_durable_seq(seq);
     }
+
+    pub(crate) fn subscribe(&self) -> watch::Receiver<DbStatus> {
+        self.status_reporter.subscribe()
+    }
+
 }
 
 impl Oracle for DbReaderOracle {
