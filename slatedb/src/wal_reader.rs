@@ -156,7 +156,11 @@ impl WalFile {
             ..,
             SsTableView::identity(sst),
             Arc::clone(&self.table_store),
-            SstIteratorOptions::default(),
+            SstIteratorOptions {
+                // Optimize for throughput. Go for 256MiB per-fetch (4096 bytes/block default).
+                blocks_to_fetch: 65_536,
+                ..Default::default()
+            },
         )
         .await
         {
