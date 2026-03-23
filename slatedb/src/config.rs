@@ -510,12 +510,11 @@ pub enum Ttl {
 }
 
 /// Defines the scope targeted by a given checkpoint. If set to All, then the checkpoint will
-/// include all writes that were issued at the time that create_checkpoint is called. If force_flush
-/// is true, then SlateDB will force the current wal, or memtable if wal_enabled is false, to flush
-/// its data. Otherwise, the database will wait for the current wal or memtable to be flushed due to
-/// flush_interval or reaching l0_sst_size_bytes, respectively. If set to Durable, then the
-/// checkpoint includes only writes that were durable at the time of the call. This will be faster,
-/// but may not include data from recent writes.
+/// include all writes that were issued at the time that create_checkpoint is called. SlateDB will
+/// flush WALs (if enabled) and do a best-effort flush of memtables to L0 SSTs in order to
+/// optimize for readers. The memtable flush will not await if blocked by backpressure. If set
+/// to Durable, then the checkpoint includes only writes that were durable at the time of the
+/// call. This will be faster, but may not include data from recent writes.
 #[non_exhaustive]
 #[derive(Debug, Copy, Clone)]
 pub enum CheckpointScope {
@@ -920,6 +919,8 @@ pub struct DbReaderOptions {
     /// compacted into L0 or lower levels. This is useful for read-heavy workloads that
     /// don't need to see the most recent uncommitted writes and want to minimize the
     /// cost of opening many readers.
+    ///
+    /// WAL replay is also skipped when the reader is opened from a checkpoint.
     ///
     /// When combined with manifest polling (no explicit checkpoint), the reader will
     /// still see newly compacted data as manifests are updated.
