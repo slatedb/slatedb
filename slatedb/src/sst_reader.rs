@@ -36,7 +36,7 @@
 //!
 //!     // Inspect L0 SSTs
 //!     for view in &manifest.l0 {
-//!         let sst_file = reader.open_with_handle(view.sst.clone());
+//!         let sst_file = reader.open_with_handle(view.sst.clone())?;
 //!         if let Some(stats) = sst_file.stats().await? {
 //!             let _ = stats.num_puts;
 //!         }
@@ -107,13 +107,24 @@ impl SstReader {
     }
 
     /// Creates an `SstFile` from an existing `SsTableHandle` (no I/O needed).
-    pub fn open_with_handle(&self, handle: SsTableHandle) -> SstFile {
-        let id = handle.id.unwrap_compacted_id();
-        SstFile {
+    ///
+    /// ## Errors
+    ///
+    /// Returns an error if the handle is not a compacted SST (e.g. a WAL SST).
+    pub fn open_with_handle(&self, handle: SsTableHandle) -> Result<SstFile, crate::Error> {
+        let id = match handle.id {
+            SsTableId::Compacted(ulid) => ulid,
+            SsTableId::Wal(_) => {
+                return Err(crate::Error::invalid(
+                    "SstReader only supports compacted SSTs, not WAL SSTs".to_string(),
+                ));
+            }
+        };
+        Ok(SstFile {
             id,
             handle,
             table_store: Arc::clone(&self.table_store),
-        }
+        })
     }
 }
 
@@ -273,7 +284,7 @@ mod tests {
         let reader = SstReader::new(path, store, None);
 
         let view = &manifest.l0[0];
-        let sst_file = reader.open_with_handle(view.sst.clone());
+        let sst_file = reader.open_with_handle(view.sst.clone()).unwrap();
 
         assert_eq!(sst_file.id(), view.sst.id.unwrap_compacted_id());
         assert_eq!(sst_file.info(), &view.sst.info);
@@ -285,7 +296,7 @@ mod tests {
         let reader = SstReader::new(path, store, None);
 
         let view = &manifest.l0[0];
-        let sst_file = reader.open_with_handle(view.sst.clone());
+        let sst_file = reader.open_with_handle(view.sst.clone()).unwrap();
         let stats = sst_file.stats().await.unwrap();
 
         let stats = stats.expect("expected stats block to be present");
@@ -303,7 +314,7 @@ mod tests {
         let reader = SstReader::new(path, store, None);
 
         let view = &manifest.l0[0];
-        let sst_file = reader.open_with_handle(view.sst.clone());
+        let sst_file = reader.open_with_handle(view.sst.clone()).unwrap();
         let index = sst_file.index().await.unwrap();
 
         assert!(!index.is_empty());
@@ -324,7 +335,7 @@ mod tests {
         let reader = SstReader::new(path, store, None);
 
         let view = &manifest.l0[0];
-        let sst_file = reader.open_with_handle(view.sst.clone());
+        let sst_file = reader.open_with_handle(view.sst.clone()).unwrap();
 
         let stats = sst_file
             .stats()
@@ -350,7 +361,7 @@ mod tests {
         let reader = SstReader::new(path, store, None);
 
         let view = &manifest.l0[0];
-        let sst_file = reader.open_with_handle(view.sst.clone());
+        let sst_file = reader.open_with_handle(view.sst.clone()).unwrap();
         let metadata = sst_file.metadata().await.unwrap();
 
         assert!(metadata.size > 0);
