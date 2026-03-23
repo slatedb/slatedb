@@ -32,7 +32,7 @@
 //!     .await?;
 //!
 //!     let manifest = db.manifest();
-//!     let reader = SstReader::new(path, object_store, None);
+//!     let reader = SstReader::new(path, object_store, None, None);
 //!
 //!     // Inspect L0 SSTs
 //!     for view in &manifest.l0 {
@@ -54,7 +54,7 @@ use ulid::Ulid;
 
 use crate::db_cache::DbCache;
 use crate::db_state::{SsTableHandle, SsTableId, SsTableInfo};
-use crate::format::sst::SsTableFormat;
+use crate::format::sst::{BlockTransformer, SsTableFormat};
 use crate::object_stores::ObjectStores;
 use crate::sst_stats::SstStats;
 use crate::tablestore::{SstFileMetadata, TableStore};
@@ -73,13 +73,18 @@ impl SstReader {
     ///
     /// The `object_store` should point at the same store used by the `Db`.
     /// An optional `DbCache` can be provided for in-memory caching of index
-    /// and stats blocks.
+    /// and stats blocks. If the database was opened with a `BlockTransformer`
+    /// (e.g. for encryption), the same transformer must be provided here.
     pub fn new<P: Into<Path>>(
         root_path: P,
         object_store: Arc<dyn ObjectStore>,
         cache: Option<Arc<dyn DbCache>>,
+        block_transformer: Option<Arc<dyn BlockTransformer>>,
     ) -> Self {
-        let sst_format = SsTableFormat::default();
+        let sst_format = SsTableFormat {
+            block_transformer,
+            ..SsTableFormat::default()
+        };
         let table_store = Arc::new(TableStore::new(
             ObjectStores::new(object_store, None),
             sst_format,
@@ -264,7 +269,7 @@ mod tests {
     #[tokio::test]
     async fn test_open_and_info() {
         let (store, path, manifest) = setup_db_with_l0().await;
-        let reader = SstReader::new(path, store, None);
+        let reader = SstReader::new(path, store, None, None);
 
         assert!(!manifest.l0.is_empty(), "expected at least one L0 SST");
         let view = &manifest.l0[0];
@@ -281,7 +286,7 @@ mod tests {
     #[tokio::test]
     async fn test_open_with_handle() {
         let (store, path, manifest) = setup_db_with_l0().await;
-        let reader = SstReader::new(path, store, None);
+        let reader = SstReader::new(path, store, None, None);
 
         let view = &manifest.l0[0];
         let sst_file = reader.open_with_handle(view.sst.clone()).unwrap();
@@ -293,7 +298,7 @@ mod tests {
     #[tokio::test]
     async fn test_stats() {
         let (store, path, manifest) = setup_db_with_l0().await;
-        let reader = SstReader::new(path, store, None);
+        let reader = SstReader::new(path, store, None, None);
 
         let view = &manifest.l0[0];
         let sst_file = reader.open_with_handle(view.sst.clone()).unwrap();
@@ -311,7 +316,7 @@ mod tests {
     #[tokio::test]
     async fn test_index() {
         let (store, path, manifest) = setup_db_with_l0().await;
-        let reader = SstReader::new(path, store, None);
+        let reader = SstReader::new(path, store, None, None);
 
         let view = &manifest.l0[0];
         let sst_file = reader.open_with_handle(view.sst.clone()).unwrap();
@@ -332,7 +337,7 @@ mod tests {
     #[tokio::test]
     async fn test_block_stats_parallel_to_index() {
         let (store, path, manifest) = setup_db_with_l0().await;
-        let reader = SstReader::new(path, store, None);
+        let reader = SstReader::new(path, store, None, None);
 
         let view = &manifest.l0[0];
         let sst_file = reader.open_with_handle(view.sst.clone()).unwrap();
@@ -358,7 +363,7 @@ mod tests {
     #[tokio::test]
     async fn test_metadata() {
         let (store, path, manifest) = setup_db_with_l0().await;
-        let reader = SstReader::new(path, store, None);
+        let reader = SstReader::new(path, store, None, None);
 
         let view = &manifest.l0[0];
         let sst_file = reader.open_with_handle(view.sst.clone()).unwrap();
@@ -371,7 +376,7 @@ mod tests {
     #[tokio::test]
     async fn test_open_with_wal_handle_returns_error() {
         let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let reader = SstReader::new("/test", store, None);
+        let reader = SstReader::new("/test", store, None, None);
 
         let wal_handle = SsTableHandle::new(
             SsTableId::Wal(42),
@@ -385,9 +390,72 @@ mod tests {
     #[tokio::test]
     async fn test_open_missing_sst() {
         let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let reader = SstReader::new("/nonexistent", store, None);
+        let reader = SstReader::new("/nonexistent", store, None, None);
 
         let result = reader.open(Ulid::new()).await;
         assert!(result.is_err());
+    }
+
+    struct XorTransformer {
+        key: u8,
+    }
+
+    #[async_trait::async_trait]
+    impl BlockTransformer for XorTransformer {
+        async fn encode(&self, data: Bytes) -> Result<Bytes, crate::Error> {
+            let transformed: Vec<u8> = data.iter().map(|b| b ^ self.key).collect();
+            Ok(Bytes::from(transformed))
+        }
+
+        async fn decode(&self, data: Bytes) -> Result<Bytes, crate::Error> {
+            self.encode(data).await
+        }
+    }
+
+    #[tokio::test]
+    async fn test_stats_with_block_transformer() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = "/test_sst_reader_transformer";
+        let transformer: Arc<dyn BlockTransformer> = Arc::new(XorTransformer { key: 0x42 });
+
+        // Write data with a block transformer
+        let db = Db::builder(path, object_store.clone())
+            .with_block_transformer(transformer.clone())
+            .build()
+            .await
+            .unwrap();
+
+        for i in 0..5u8 {
+            db.put_with_options(
+                &[b'k', i],
+                &[b'v', i],
+                &PutOptions::default(),
+                &WriteOptions::default(),
+            )
+            .await
+            .unwrap();
+        }
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::MemTable,
+        })
+        .await
+        .unwrap();
+
+        let manifest = db.manifest();
+        db.close().await.unwrap();
+
+        // Reading with the correct transformer should succeed
+        let reader = SstReader::new(path, object_store.clone(), None, Some(transformer));
+        let view = &manifest.l0[0];
+        let sst_file = reader.open_with_handle(view.sst.clone()).unwrap();
+        let stats = sst_file.stats().await.unwrap().expect("expected stats");
+        assert_eq!(stats.num_puts, 5);
+
+        // Reading without the transformer should fail
+        let reader_no_transformer = SstReader::new(path, object_store, None, None);
+        let sst_file = reader_no_transformer
+            .open_with_handle(view.sst.clone())
+            .unwrap();
+        assert!(sst_file.stats().await.is_err());
     }
 }
