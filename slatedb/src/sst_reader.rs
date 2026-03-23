@@ -369,6 +369,20 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_open_with_wal_handle_returns_error() {
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let reader = SstReader::new("/test", store, None);
+
+        let wal_handle = SsTableHandle::new(
+            SsTableId::Wal(42),
+            0,
+            crate::db_state::SsTableInfo::default(),
+        );
+        let result = reader.open_with_handle(wal_handle);
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
     async fn test_open_missing_sst() {
         let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let reader = SstReader::new("/nonexistent", store, None);
