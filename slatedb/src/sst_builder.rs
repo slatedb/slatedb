@@ -994,7 +994,7 @@ mod tests {
         let valid_blob = BytesBlob {
             bytes: bytes.clone(),
         };
-        let result = format.read_info(&valid_blob).await;
+        let result = format.read_info_and_version(&valid_blob).await;
         match result {
             Ok(_) => {}
             Err(e) => {
@@ -1009,7 +1009,7 @@ mod tests {
             bytes: invalid_bytes.freeze(),
         };
         assert!(matches!(
-            format.read_info(&invalid_blob).await,
+            format.read_info_and_version(&invalid_blob).await,
             Err(SlateDBError::InvalidVersion { .. })
         ));
     }
