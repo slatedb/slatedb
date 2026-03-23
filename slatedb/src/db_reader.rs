@@ -12,6 +12,7 @@ use crate::iter::IterationOrder;
 use crate::manifest::store::{ManifestStore, StoredManifest};
 use crate::manifest::Manifest;
 use crate::mem_table::{ImmutableMemtable, KVTable};
+use crate::merge_operator::MergeOperatorType;
 use crate::oracle::DbReaderOracle;
 use crate::paths::PathResolver;
 use crate::rand::DbRand;
@@ -99,6 +100,7 @@ impl DbReaderInner {
         table_store: Arc<TableStore>,
         options: DbReaderOptions,
         checkpoint_id: Option<Uuid>,
+        merge_operator: Option<MergeOperatorType>,
         closed_result_watcher: ClosedResultWriter,
         system_clock: Arc<dyn SystemClock>,
         rand: Arc<DbRand>,
@@ -146,7 +148,7 @@ impl DbReaderInner {
             db_stats,
             mono_clock: Arc::clone(&mono_clock),
             oracle: oracle.clone(),
-            merge_operator: options.merge_operator.clone(),
+            merge_operator,
         };
 
         Ok(Self {
@@ -659,6 +661,7 @@ impl DbReader {
     pub(crate) async fn open_internal(
         store_provider: &dyn StoreProvider,
         checkpoint_id: Option<Uuid>,
+        merge_operator: Option<MergeOperatorType>,
         options: DbReaderOptions,
         system_clock: Arc<dyn SystemClock>,
         rand: Arc<DbRand>,
@@ -676,6 +679,7 @@ impl DbReader {
                 table_store,
                 options,
                 checkpoint_id,
+                merge_operator,
                 closed_result_watcher,
                 system_clock,
                 rand,
@@ -1069,6 +1073,7 @@ mod tests {
     use crate::manifest::store::{ManifestStore, StoredManifest};
     use crate::manifest::Manifest;
     use crate::mem_table::{ImmutableMemtable, WritableKVTable};
+    use crate::merge_operator::MergeOperatorType;
     use crate::object_stores::ObjectStores;
     use crate::oracle::DbReaderOracle;
     use crate::paths::PathResolver;
@@ -1146,6 +1151,7 @@ mod tests {
         let reader = DbReader::open_internal(
             &test_provider,
             Some(checkpoint_result.id),
+            None,
             DbReaderOptions::default(),
             test_provider.system_clock.clone(),
             test_provider.rand.clone(),
@@ -1215,7 +1221,7 @@ mod tests {
         .unwrap();
 
         let err = test_provider
-            .new_db_reader(DbReaderOptions::default(), None)
+            .new_db_reader(DbReaderOptions::default(), None, None)
             .await;
         assert!(matches!(err, Err(SlateDBError::InvalidDBState)));
     }
@@ -1240,7 +1246,7 @@ mod tests {
         db.put(post_checkpoint_key, value).await.unwrap();
 
         let reader = test_provider
-            .new_db_reader(DbReaderOptions::default(), Some(checkpoint_result.id))
+            .new_db_reader(DbReaderOptions::default(), Some(checkpoint_result.id), None)
             .await
             .unwrap();
 
@@ -1270,7 +1276,7 @@ mod tests {
             ..DbReaderOptions::default()
         };
         let reader = test_provider
-            .new_db_reader(reader_options, None)
+            .new_db_reader(reader_options, None, None)
             .await
             .unwrap();
         let manifest_store = test_provider.manifest_store();
@@ -1308,7 +1314,7 @@ mod tests {
 
         let manifest_store = test_provider.manifest_store();
         let reader = test_provider
-            .new_db_reader(reader_options, None)
+            .new_db_reader(reader_options, None, None)
             .await
             .unwrap();
 
@@ -1347,7 +1353,7 @@ mod tests {
         };
 
         let reader = test_provider
-            .new_db_reader(reader_options, None)
+            .new_db_reader(reader_options, None, None)
             .await
             .unwrap();
         let key = b"test_key";
@@ -1603,7 +1609,7 @@ mod tests {
             ..DbReaderOptions::default()
         };
         let reader = test_provider
-            .new_db_reader(reader_options, None)
+            .new_db_reader(reader_options, None, None)
             .await
             .unwrap();
 
@@ -1655,7 +1661,7 @@ mod tests {
             ..DbReaderOptions::default()
         };
         let reader = test_provider
-            .new_db_reader(reader_options.clone(), None)
+            .new_db_reader(reader_options.clone(), None, None)
             .await
             .unwrap();
 
@@ -1677,7 +1683,7 @@ mod tests {
 
         // Open a new reader - it should see the newly flushed data
         let reader2 = test_provider
-            .new_db_reader(reader_options, None)
+            .new_db_reader(reader_options, None, None)
             .await
             .unwrap();
         assert_eq!(
@@ -1712,7 +1718,7 @@ mod tests {
             ..DbReaderOptions::default()
         };
         let reader = test_provider
-            .new_db_reader(reader_options, None)
+            .new_db_reader(reader_options, None, None)
             .await
             .unwrap();
 
@@ -1804,7 +1810,7 @@ mod tests {
             ..DbReaderOptions::default()
         };
         let reader = test_provider
-            .new_db_reader(reader_options, None)
+            .new_db_reader(reader_options, None, None)
             .await
             .unwrap();
 
@@ -1849,10 +1855,12 @@ mod tests {
             &self,
             options: DbReaderOptions,
             checkpoint: Option<Uuid>,
+            merge_operator: Option<MergeOperatorType>,
         ) -> Result<DbReader, SlateDBError> {
             DbReader::open_internal(
                 self,
                 checkpoint,
+                merge_operator,
                 options,
                 self.system_clock.clone(),
                 self.rand.clone(),
@@ -2263,10 +2271,10 @@ mod tests {
                 DbReaderOptions {
                     manifest_poll_interval: Duration::from_millis(100),
                     checkpoint_lifetime: Duration::from_secs(30),
-                    merge_operator: Some(merge_operator),
                     ..DbReaderOptions::default()
                 },
                 None,
+                Some(merge_operator),
             )
             .await
             .unwrap();

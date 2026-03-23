@@ -5355,7 +5355,6 @@ mod tests {
             l0_sst_size_bytes,
             compactor_options,
             compression_codec: None,
-            merge_operator: None,
             object_store_cache_options: ObjectStoreCacheOptions::default(),
             garbage_collector_options: None,
             default_ttl: ttl,

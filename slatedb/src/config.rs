@@ -185,16 +185,12 @@ use log::warn;
 use serde::{Deserialize, Serialize, Serializer};
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::Arc;
 use std::{str::FromStr, time::Duration};
 use uuid::Uuid;
 
 use crate::error::SlateDBError;
 
-use crate::db_cache::{DbCache, SplitCache};
-use crate::format::sst::BlockTransformer;
 use crate::garbage_collector::{DEFAULT_INTERVAL, DEFAULT_MIN_AGE};
-use crate::merge_operator::MergeOperatorType;
 
 /// Enum representing different levels of cache preloading on startup
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq)]
@@ -664,14 +660,6 @@ pub struct Settings {
     /// Default: no TTL (insertions will remain until deleted)
     pub default_ttl: Option<u64>,
 
-    /// The merge operator to use for the database. If not set, the database will not support merge operations.
-    ///
-    /// The merge operator allows applications to bypass the traditional read/modify/write cycle
-    /// by expressing partial updates using an associative operator. Merge operands are combined
-    /// during reads and compactions to produce the final result.
-    #[serde(skip)]
-    pub merge_operator: Option<MergeOperatorType>,
-
     /// The block format for SST files. This is only available in tests
     /// to verify backward compatibility between V1 and V2 formats.
     #[cfg(test)]
@@ -704,15 +692,7 @@ impl std::fmt::Debug for Settings {
             )
             .field("garbage_collector_options", &self.garbage_collector_options)
             .field("filter_bits_per_key", &self.filter_bits_per_key)
-            .field("default_ttl", &self.default_ttl)
-            .field(
-                "merge_operator",
-                &self
-                    .merge_operator
-                    .as_ref()
-                    .map(|_| "Some(merge_operator)")
-                    .unwrap_or("None"),
-            );
+            .field("default_ttl", &self.default_ttl);
         data.finish()
     }
 }
@@ -907,7 +887,6 @@ impl Default for Settings {
             garbage_collector_options: Some(GarbageCollectorOptions::default()),
             filter_bits_per_key: 10,
             default_ttl: None,
-            merge_operator: None,
             #[cfg(test)]
             block_format: None,
         }
@@ -932,17 +911,6 @@ pub struct DbReaderOptions {
     /// Defaults to 64MB
     pub max_memtable_bytes: u64,
 
-    #[serde(skip)]
-    pub block_cache: Option<Arc<dyn DbCache>>,
-
-    #[serde(skip)]
-    pub merge_operator: Option<MergeOperatorType>,
-
-    /// An optional block transformer for custom encoding/decoding of blocks.
-    /// Can be used for encryption, custom encoding, etc.
-    #[serde(skip)]
-    pub block_transformer: Option<Arc<dyn BlockTransformer>>,
-
     /// Options for the local disk cache. If `root_folder` is set, the reader
     /// will wrap its object store in a `CachedObjectStore` backed by the
     /// local filesystem, mirroring the behaviour of `Db`.
@@ -966,70 +934,10 @@ impl Default for DbReaderOptions {
             manifest_poll_interval: Duration::from_secs(10),
             checkpoint_lifetime: Duration::from_secs(10 * 60),
             max_memtable_bytes: 64 * 1024 * 1024,
-            block_cache: {
-                let block_cache = default_block_cache();
-                let meta_cache = default_meta_cache();
-                Some(Arc::new(
-                    SplitCache::new()
-                        .with_block_cache(block_cache)
-                        .with_meta_cache(meta_cache)
-                        .build(),
-                ))
-            },
-            merge_operator: None,
-            block_transformer: None,
             object_store_cache_options: ObjectStoreCacheOptions::default(),
             skip_wal_replay: false,
         }
     }
-}
-
-#[allow(unreachable_code)]
-pub(crate) fn default_block_cache() -> Option<Arc<dyn DbCache>> {
-    #[cfg(feature = "foyer")]
-    {
-        return Some(Arc::new(crate::db_cache::foyer::FoyerCache::new_with_opts(
-            crate::db_cache::foyer::FoyerCacheOptions {
-                max_capacity: crate::db_cache::DEFAULT_BLOCK_CACHE_CAPACITY,
-                ..Default::default()
-            },
-        )));
-    }
-    #[cfg(feature = "moka")]
-    {
-        return Some(Arc::new(crate::db_cache::moka::MokaCache::new_with_opts(
-            crate::db_cache::moka::MokaCacheOptions {
-                max_capacity: crate::db_cache::DEFAULT_BLOCK_CACHE_CAPACITY,
-                time_to_live: None,
-                time_to_idle: None,
-            },
-        )));
-    }
-    None
-}
-
-#[allow(unreachable_code)]
-pub(crate) fn default_meta_cache() -> Option<Arc<dyn DbCache>> {
-    #[cfg(feature = "foyer")]
-    {
-        return Some(Arc::new(crate::db_cache::foyer::FoyerCache::new_with_opts(
-            crate::db_cache::foyer::FoyerCacheOptions {
-                max_capacity: crate::db_cache::DEFAULT_META_CACHE_CAPACITY,
-                ..Default::default()
-            },
-        )));
-    }
-    #[cfg(feature = "moka")]
-    {
-        return Some(Arc::new(crate::db_cache::moka::MokaCache::new_with_opts(
-            crate::db_cache::moka::MokaCacheOptions {
-                max_capacity: crate::db_cache::DEFAULT_META_CACHE_CAPACITY,
-                time_to_live: None,
-                time_to_idle: None,
-            },
-        )));
-    }
-    None
 }
 
 /// The compression algorithm to use for SSTables.
