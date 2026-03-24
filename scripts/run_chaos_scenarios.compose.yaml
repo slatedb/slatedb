@@ -43,7 +43,7 @@ services:
     depends_on:
       - localstack
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:9001/health >/dev/null 2>&1 || exit 1"]
+      test: ["CMD", "/toxiproxy-cli", "list"]
       interval: 2s
       timeout: 2s
       retries: 15
