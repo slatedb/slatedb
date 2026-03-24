@@ -21,28 +21,25 @@ use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::fmt::format::FmtSpan;
 
-/// Reproduces a u64 underflow in `maybe_freeze_memtable` that occurs when:
-/// 1. WAL replay on reopen creates immutable memtables (recent_flushed_wal_id > 0)
-/// 2. L0 flush is delayed, so those immutable memtables stay in the queue
-/// 3. A new write calls `maybe_freeze_memtable` with wal_buffer.recent_flushed_wal_id()
-///    which is 0 (initialized from replay_after_wal_id before replay ran)
-/// 4. `wal_id(0) - last_freeze_wal_id(>0)` underflows on u64
+/// Verify that writes succeed after WAL replay when replayed immutable
+/// memtables have not yet been flushed to L0. Previously, the WAL buffer's
+/// recent_flushed_wal_id lagged behind the imm_memtable WAL IDs, causing
+/// a u64 underflow in maybe_freeze_memtable.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_replay_wal_then_write() {
     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
     let path = "/tmp/test_replay_wal_then_write";
     let fp_registry = Arc::new(FailPointRegistry::new());
 
-    // Small l0_sst_size_bytes so replay yields multiple ReplayedMemtables,
-    // which causes replay_memtable to freeze earlier chunks into immutable
-    // memtables.
+    // Small l0_sst_size_bytes so replay produces multiple ReplayedMemtables,
+    // creating immutable memtables during replay.
     let settings = Settings {
         flush_interval: None,
         l0_sst_size_bytes: 64,
         ..Default::default()
     };
 
-    // Block L0 flushes so only the WAL is persisted.
+    // Skip L0 flushes so only the WAL is persisted.
     fail_parallel::cfg(fp_registry.clone(), "flush-memtable-to-l0", "return").unwrap();
 
     let db = Db::builder(path, object_store.clone())
@@ -75,8 +72,7 @@ async fn test_replay_wal_then_write() {
 
     db.close().await.expect("failed to close db");
 
-    // Reopen with L0 flush short-circuited so replayed immutable memtables
-    // stay queued (return skips flush_imm_memtables_to_l0 entirely).
+    // Reopen with L0 flush paused so replayed immutable memtables stay queued.
     fail_parallel::cfg(fp_registry.clone(), "flush-memtable-to-l0", "pause").unwrap();
 
     let db = Db::builder(path, object_store.clone())
@@ -86,10 +82,7 @@ async fn test_replay_wal_then_write() {
         .await
         .expect("failed to reopen db");
 
-    // This write would previously underflow in maybe_freeze_memtable because
-    // wal_buffer.recent_flushed_wal_id() was 0 while imm_memtable entries had
-    // recent_flushed_wal_id > 0 from replay. The fix advances the WAL buffer's
-    // recent_flushed_wal_id during replay so the invariant holds.
+    // Write after replay — previously underflowed in maybe_freeze_memtable.
     db.put_with_options(
         b"new_key",
         b"new_value",
@@ -101,9 +94,7 @@ async fn test_replay_wal_then_write() {
     .await
     .expect("put after replay should succeed");
 
-    // Allow L0 flushes so close can drain.
     fail_parallel::cfg(fp_registry.clone(), "flush-memtable-to-l0", "off").unwrap();
-
     db.close().await.expect("failed to close db");
 }
 use tracing_subscriber::EnvFilter;
