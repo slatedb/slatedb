@@ -86,23 +86,20 @@ async fn test_replay_wal_then_write() {
         .await
         .expect("failed to reopen db");
 
-    // This write triggers maybe_freeze_memtable(wal_id=0) while
-    // imm_memtable.front().recent_flushed_wal_id() > 0, causing underflow.
-    let result = db
-        .put_with_options(
-            b"new_key",
-            b"new_value",
-            &PutOptions::default(),
-            &WriteOptions {
-                await_durable: false,
-            },
-        )
-        .await;
-
-    assert!(
-        result.is_err(),
-        "expected underflow error from maybe_freeze_memtable"
-    );
+    // This write would previously underflow in maybe_freeze_memtable because
+    // wal_buffer.recent_flushed_wal_id() was 0 while imm_memtable entries had
+    // recent_flushed_wal_id > 0 from replay. The fix advances the WAL buffer's
+    // recent_flushed_wal_id during replay so the invariant holds.
+    db.put_with_options(
+        b"new_key",
+        b"new_value",
+        &PutOptions::default(),
+        &WriteOptions {
+            await_durable: false,
+        },
+    )
+    .await
+    .expect("put after replay should succeed");
 
     // Allow L0 flushes so close can drain.
     fail_parallel::cfg(fp_registry.clone(), "flush-memtable-to-l0", "off").unwrap();

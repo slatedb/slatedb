@@ -195,6 +195,16 @@ impl WalBufferManager {
         inner.recent_flushed_wal_id
     }
 
+    /// Advance `recent_flushed_wal_id` to at least `wal_id`. Used during WAL
+    /// replay so the WAL buffer stays ahead of immutable memtables created from
+    /// replayed WALs (which are already durable in remote storage).
+    pub(crate) fn advance_recent_flushed_wal_id(&self, wal_id: u64) {
+        let mut inner = self.inner.write();
+        if wal_id > inner.recent_flushed_wal_id {
+            inner.recent_flushed_wal_id = wal_id;
+        }
+    }
+
     #[cfg(test)] // used in compactor.rs
     pub(crate) fn is_empty(&self) -> bool {
         let inner = self.inner.read();

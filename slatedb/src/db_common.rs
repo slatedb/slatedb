@@ -73,6 +73,12 @@ impl DbInner {
         } else {
             0
         };
+        // The replayed WALs are already durable in remote storage, so advance
+        // the WAL buffer's recent_flushed_wal_id before freezing. This maintains
+        // the invariant that recent_flushed_wal_id >= the WAL ID of any frozen
+        // immutable memtable, which maybe_freeze_memtable relies on.
+        self.wal_buffer
+            .advance_recent_flushed_wal_id(recent_flushed_wal_id);
         self.freeze_memtable(&mut guard, recent_flushed_wal_id)?;
 
         let last_wal = replayed_memtable.last_wal_id;
