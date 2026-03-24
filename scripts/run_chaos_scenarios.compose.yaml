@@ -1,6 +1,7 @@
 services:
   localstack:
-    image: localstack/localstack:latest
+    # Pin LocalStack so CI is not broken by `latest` drifting to auth-gated builds.
+    image: localstack/localstack:4.14.0
     container_name: localstack
     environment:
       - SERVICES=s3
