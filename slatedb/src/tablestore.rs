@@ -62,12 +62,15 @@ impl ReadOnlyBlob for ReadOnlyObject {
 }
 
 /// Represents the metadata of an SST file in the compacted directory.
-pub(crate) struct SstFileMetadata {
-    pub(crate) id: SsTableId,
-    #[allow(dead_code)]
-    pub(crate) location: Path,
-    pub(crate) last_modified: chrono::DateTime<Utc>,
-    pub(crate) size: u64,
+pub struct SstFileMetadata {
+    /// The SST identifier (WAL or Compacted).
+    pub id: SsTableId,
+    /// The object store path for this SST file.
+    pub location: Path,
+    /// The time this SST file was last modified.
+    pub last_modified: chrono::DateTime<Utc>,
+    /// The size of this SST file in bytes.
+    pub size: u64,
 }
 
 impl TableStore {
@@ -386,8 +389,6 @@ impl TableStore {
     ///
     /// ## Arguments
     /// - `handle`: The handle of the SSTable to read the stats from.
-    // Used by SstFile::stats (RFC 0020 Phase 2)
-    #[allow(dead_code)]
     pub(crate) async fn read_stats(
         &self,
         handle: &SsTableHandle,
