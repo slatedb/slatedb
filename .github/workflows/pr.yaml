@@ -228,7 +228,7 @@ jobs:
           # uniffi-bindgen-java has some warnings that we don't want to fail the build, so we
           # override RUSTFLAGS here to avoid the -Dwarnings from the global env.
           RUSTFLAGS: ""
-        run: cargo install uniffi-bindgen-java --git https://github.com/IronCoreLabs/uniffi-bindgen-java.git
+        run: cargo install uniffi-bindgen-java --git https://github.com/IronCoreLabs/uniffi-bindgen-java.git --rev 265d9b93645ce50307449bea2489b2b748fb67ee
 
       - name: Run Java tests (bindings/java)
         run: ./bindings/java/gradlew -p bindings/java :slatedb-uniffi:check

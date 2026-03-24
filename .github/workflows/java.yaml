@@ -151,7 +151,7 @@ jobs:
       - name: Install uniffi-bindgen-java
         env:
           RUSTFLAGS: ""
-        run: cargo install uniffi-bindgen-java --git https://github.com/IronCoreLabs/uniffi-bindgen-java.git
+        run: cargo install uniffi-bindgen-java --git https://github.com/IronCoreLabs/uniffi-bindgen-java.git --rev 265d9b93645ce50307449bea2489b2b748fb67ee
 
       - name: Download Linux artifacts
         uses: actions/download-artifact@v4
