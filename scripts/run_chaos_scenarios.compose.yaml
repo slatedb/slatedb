@@ -4,11 +4,12 @@ services:
     container_name: localstack
     environment:
       - SERVICES=s3
-      - DEFAULT_REGION=us-east-1
     ports:
       - "4566:4566"
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:4566/health || exit 1"]
+      test:
+        - CMD-SHELL
+        - curl -sf http://localhost:4566/_localstack/health || exit 1
       interval: 5s
       timeout: 3s
       retries: 20
