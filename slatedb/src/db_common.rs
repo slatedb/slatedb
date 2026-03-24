@@ -29,7 +29,11 @@ impl DbInner {
             .table_store
             .estimate_encoded_size_compacted(meta.entry_num, meta.entries_size_in_bytes);
 
-        if (wal_id - last_freeze_wal_id) < MAX_WAL_FLUSHES_BEFORE_L0_FLUSH
+        let wal_id_gap = wal_id
+            .checked_sub(last_freeze_wal_id)
+            .ok_or_else(|| SlateDBError::InvalidDBState)?;
+
+        if wal_id_gap < MAX_WAL_FLUSHES_BEFORE_L0_FLUSH
             && l0_sst_size_est < self.settings.l0_sst_size_bytes
         {
             Ok(())
