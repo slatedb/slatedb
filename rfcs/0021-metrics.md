@@ -366,7 +366,7 @@ impl MetricsRecorder for OtelRecorder {
 }
 
 // OTel exporters (OTLP, stdout, Prometheus bridge) are configured via SdkMeterProvider.
-// See: https://opentelemetry.io/docs/languages/rust/instrumentation/#metrics
+// See: https://docs.rs/opentelemetry/latest/opentelemetry/metrics/index.html
 let provider = SdkMeterProvider::builder()
     .with_periodic_exporter(opentelemetry_otlp::MetricExporter::builder().build()?)
     .build();
