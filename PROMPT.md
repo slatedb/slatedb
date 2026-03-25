@@ -1,7 +1,5 @@
 1. Fix the first item in the list.
 
-- website/src/content/docs/docs/get-started/introduction.mdx:20 says SlateDB has “no local state”. That’s no longer universally true: current config supports a local disk-
-  backed object-store cache, including cache_puts, in slatedb/src/config.rs:1223.
 - website/src/content/docs/docs/get-started/introduction.mdx:13 says “All object stores support compare-and-swap (CAS) operations.” That blanket claim is too strong for the
   current setup. Even the official S3 example has to explicitly opt into conditional puts via with_conditional_put(...) in examples/src/s3_compatible.rs:16.
 - The AWS comparison block in website/src/content/docs/docs/get-started/faq.mdx:48 is stale. The DynamoDB storage/request pricing quoted there is outdated, and website/src/co
