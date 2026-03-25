@@ -55,7 +55,8 @@ has several limitations:
 pub trait MetricsRecorder: Send + Sync {
     fn register_counter(&self, name: &str, description: &str, labels: &[(&str, &str)]) -> Arc<dyn CounterFn>;
     fn register_gauge(&self, name: &str, description: &str, labels: &[(&str, &str)]) -> Arc<dyn GaugeFn>;
-    fn register_histogram(&self, name: &str, description: &str, labels: &[(&str, &str)]) -> Arc<dyn HistogramFn>;
+    fn register_up_down_counter(&self, name: &str, description: &str, labels: &[(&str, &str)]) -> Arc<dyn UpDownCounterFn>;
+    fn register_histogram(&self, name: &str, description: &str, labels: &[(&str, &str)], boundaries: &[f64]) -> Arc<dyn HistogramFn>;
 }
 
 pub trait CounterFn: Send + Sync {
@@ -64,18 +65,34 @@ pub trait CounterFn: Send + Sync {
 
 pub trait GaugeFn: Send + Sync {
     fn set(&self, value: f64);
-    fn increment(&self, value: f64);  // negative to decrement
+}
+
+pub trait UpDownCounterFn: Send + Sync {
+    fn increment(&self, value: i64);
 }
 
 pub trait HistogramFn: Send + Sync {
     fn record(&self, value: f64);
 }
+
+/// Controls which metrics are active. Metrics with a level below the configured
+/// threshold are replaced with zero-cost no-op handles at registration time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum MetricLevel {
+    /// High-frequency or high-cardinality metrics on the hot path.
+    /// Only active when the configured level is `Debug`.
+    Debug,
+    /// Standard operational metrics. Always active at the default level.
+    Info,
+}
 ```
 
 **Key decisions:**
 - **Labels are `&[(&str, &str)]`** fixed at registration time. Label identity is an unordered set of unique key/value pairs, not the input slice order. Duplicate keys are invalid. SlateDB canonicalizes labels during registration (for example by sorting by key then value) so each unique `(name, labels)` combo maps to exactly one handle.
-- **Single gauge abstraction.** SlateDB exposes one `GaugeFn` for both absolute values (`set`) and additive changes (`increment` with negative values allowed). This keeps the API simple even though some backends, notably OpenTelemetry, distinguish between gauges and up/down counters more strictly.
-- **Counters stay integer; gauges and histograms use floating point.** `CounterFn` uses `u64`, while `GaugeFn` and `HistogramFn` use `f64`. This preserves natural counter semantics while simplifying the trait surface vs. the current generic `Gauge<T>` (which has separate impls for `i64`, `u64`, `i32`, `bool`). Precision loss for large integer-valued gauges is acceptable for metrics.
+- **Separate gauge and up/down counter.** Following OpenTelemetry semantics, `GaugeFn` supports only absolute `set` operations (e.g. current memory usage, queue depth snapshots), while `UpDownCounterFn` supports additive `increment` with negative values (e.g. active connection count, in-flight requests). This maps cleanly to OTel's instrument model and avoids forcing backend implementors to guess which semantic the caller intended.
+- **Counters stay integer; gauges and histograms use floating point.** `CounterFn` uses `u64` and `UpDownCounterFn` uses `i64`, while `GaugeFn` and `HistogramFn` use `f64`. This preserves natural counter semantics while simplifying the trait surface vs. the current generic `Gauge<T>` (which has separate impls for `i64`, `u64`, `i32`, `bool`). Precision loss for large integer-valued gauges is acceptable for metrics.
+- **Histogram boundaries are always explicit.** Both the `MetricsRecorder` trait and the internal builder require boundaries upfront — there are no implicit defaults. `register_histogram` accepts `boundaries: &[f64]` specifying the upper-exclusive bucket boundaries. SlateDB provides standard boundary constants (`LATENCY_BOUNDARIES`, `SIZE_BOUNDARIES`) that internal callers select from. This follows the Prometheus philosophy that bucket boundaries are always a deliberate choice.
+- **Metric levels for hot-path control.** Each metric is registered with a `MetricLevel` (`Info` or `Debug`). The configured level threshold (set via `Settings::metric_level`, default `Info`) determines which metrics are active. Metrics at or above the threshold are registered normally; metrics below it get static no-op handles — zero allocation, zero virtual dispatch on the hot path. This is decided once at registration time, not checked per-operation. The `MetricsRecorder` trait is not aware of levels; the builder short-circuits before calling the trait for filtered-out metrics. Because `metric_level` lives in `Settings`, it is serializable and supports env variable overrides.
 - **No external dependency.** SlateDB owns all trait definitions.
 
 ### Internal architecture
@@ -83,6 +100,9 @@ pub trait HistogramFn: Send + Sync {
 ```
 DbBuilder {
     metrics_recorder: Option<Arc<dyn MetricsRecorder>>,
+}
+Settings {
+    metric_level: MetricLevel,  // default: Info; supports env override
 }
          |
          v
@@ -114,12 +134,16 @@ This means:
 |------------|---------|-------------------|
 | Counter | `AtomicU64` | `.load(Relaxed)` |
 | Gauge | `AtomicU64` (f64 bit-cast) | `.load(Relaxed)` -> `f64::from_bits` |
-| Histogram | `AtomicU64` x4 (count, sum, min, max) | CAS loops on write; `.load(Relaxed)` on read |
+| UpDownCounter | `AtomicI64` | `.load(Relaxed)` |
+| Histogram | `AtomicU64` x4 (count, sum, min, max) + `Vec<AtomicU64>` bucket counts | CAS loops on write; `.load(Relaxed)` on read |
 
-**Histogram writes:** As of this RFC, we do **not** maintain bucket
-distributions, so users who need percentiles, heat maps, or
-Prometheus/OpenTelemetry-native histogram aggregation should provide their own
-recorder with proper bucket boundaries.
+**Histogram writes:** The default recorder maintains bucket counts using the
+boundaries supplied at registration time (always resolved by the builder before
+reaching the recorder). Each `record(value)` increments the first bucket whose
+boundary exceeds the value (plus an overflow bucket). This gives `db.metrics()`
+callers a basic distribution without requiring an external recorder. Users who
+need richer aggregation (e.g. exponential histograms, percentile sketches)
+should provide their own recorder.
 
 The default recorder stores registered metrics in a `Mutex<Vec<MetricEntry>>` (write-once at
 startup, never contended on the hot path since handles are cached).
@@ -128,7 +152,8 @@ startup, never contended on the hot path since handles are cached).
 
 `db.metrics()` returns a materialized snapshot of the current metric values. This API is intended
 for "lightweight" observability and debugging usecases. If performance is desired, it's better to
-configure a proper recorder.
+configure a proper recorder. Only metrics that were actually registered (i.e. not filtered out by
+the configured `MetricLevel`) appear in the snapshot.
 
 In this implementation, each metric is read individually via `Relaxed` atomic
 loads and copied into the returned `Metrics` value, so there is no guarantee
@@ -145,7 +170,8 @@ pub struct Metric {
 pub enum MetricValue {
     Counter(u64),
     Gauge(f64),
-    Histogram { count: u64, sum: f64, min: f64, max: f64 },
+    UpDownCounter(i64),
+    Histogram { count: u64, sum: f64, min: f64, max: f64, boundaries: Vec<f64>, bucket_counts: Vec<u64> },
 }
 
 /// Materialized snapshot of all registered metrics, with lookup methods.
@@ -238,18 +264,68 @@ Here is an AI-assisted listing of the current metrics and proposed mapped metric
 
 ### Registration ergonomics
 
-Internal code registers metrics during component initialization:
+Internal code does not call `MetricsRecorder` trait methods directly. Instead, a thin
+builder layer resolves defaults so that the trait always receives fully-specified parameters:
 
 ```rust
-// In DbStats::new(recorder: &dyn MetricsRecorder)
-let get_requests = recorder.register_counter(
-    "slatedb.db.request_count",
-    "Number of DB requests",
-    &[("op", "get")],
-);
+/// Internal helper that wraps a MetricsRecorder and the configured MetricLevel.
+/// Provides a builder API that resolves defaults and handles level filtering.
+impl MetricsRecorderHelper {
+    pub fn new(recorder: Arc<dyn MetricsRecorder>, level: MetricLevel) -> Self;
+    pub fn counter(&self, name: &str) -> CounterBuilder;
+    pub fn gauge(&self, name: &str) -> GaugeBuilder;
+    pub fn up_down_counter(&self, name: &str) -> UpDownCounterBuilder;
+    pub fn histogram(&self, name: &str, boundaries: &[f64]) -> HistogramBuilder;
+}
 
-// Hot path (unchanged pattern from today)
+impl HistogramBuilder {
+    pub fn description(self, desc: &str) -> Self;
+    pub fn labels(self, labels: &[(&str, &str)]) -> Self;
+    pub fn level(self, level: MetricLevel) -> Self;        // optional; defaults to Info
+    pub fn register(self) -> Arc<dyn HistogramFn> {
+        // If this metric's level is below the configured threshold, return a
+        // static no-op handle (no allocation, no virtual dispatch on hot path,
+        // no call to the user's MetricsRecorder).
+        // Otherwise, call recorder.register_histogram(...)
+    }
+}
+// CounterBuilder, GaugeBuilder, UpDownCounterBuilder follow the same pattern
+// (without boundaries).
+```
+
+Standard boundary constants (callers pick the appropriate set):
+
+```rust
+pub const LATENCY_BOUNDARIES: &[f64] = &[0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0];
+pub const SIZE_BOUNDARIES: &[f64] = &[128.0, 256.0, 512.0, 1024.0, 4096.0, 16384.0, 65536.0, 262144.0, 1048576.0, 4194304.0];
+```
+
+The builder is an internal convenience — it is not part of the public API.
+
+Internal registration looks like:
+
+```rust
+// In DbStats::new(recorder: &MetricsRecorderHelper)
+let get_requests = recorder.counter("slatedb.db.request_count")
+    .description("Number of DB requests")
+    .labels(&[("op", "get")])
+    .register();
+
+let request_latency = recorder.histogram("slatedb.db.request_duration_seconds", LATENCY_BOUNDARIES)
+    .description("DB request latency")
+    .labels(&[("op", "get")])
+    .register();
+
+// Debug-level metric: no-op unless Settings::metric_level is MetricLevel::Debug
+let sst_filter_check_latency = recorder.histogram("slatedb.db.sst_filter_check_duration_seconds", LATENCY_BOUNDARIES)
+    .description("Per-SST bloom filter check latency")
+    .level(MetricLevel::Debug)
+    .register();
+
+// Hot path (unchanged pattern from today — no branching, no level checks)
 self.db_stats.get_requests.increment(1);
+self.db_stats.request_latency.record(elapsed.as_secs_f64());
+self.db_stats.sst_filter_check_latency.record(elapsed.as_secs_f64()); // no-op if Debug not enabled
 ```
 
 Each stats struct changes its field types:
@@ -264,7 +340,7 @@ pub(crate) struct DbStats {
 // After:
 pub(crate) struct DbStats {
     pub(crate) get_requests: Arc<dyn CounterFn>,
-    pub(crate) wal_buffer_estimated_bytes: Arc<dyn GaugeFn>,
+    pub(crate) wal_buffer_estimated_bytes: Arc<dyn UpDownCounterFn>,
 }
 ```
 
@@ -303,12 +379,21 @@ impl MetricsRecorder for PrometheusRecorder {
         Arc::new(PrometheusGauge(gauge))
     }
 
-    fn register_histogram(&self, name: &str, desc: &str, labels: &[(&str, &str)]) -> Arc<dyn HistogramFn> {
+    fn register_up_down_counter(&self, name: &str, desc: &str, labels: &[(&str, &str)]) -> Arc<dyn UpDownCounterFn> {
+        // Prometheus has no native up/down counter; map to a gauge.
         let labels = PromLabels::from_slice(labels);
+        let family = self.lookup_or_register_gauge_family(name, desc);
+        let gauge = family.get_or_create(&labels).clone();
+        Arc::new(PrometheusUpDownCounter(gauge))
+    }
+
+    fn register_histogram(&self, name: &str, desc: &str, labels: &[(&str, &str)], boundaries: &[f64]) -> Arc<dyn HistogramFn> {
+        let labels = PromLabels::from_slice(labels);
+        let boundaries = boundaries.to_vec();
         let family = self.lookup_or_register_histogram_family(
             name,
             desc,
-            || PromHistogram::new(exponential_buckets(0.001, 2.0, 16)),
+            move || PromHistogram::new(boundaries.iter().copied()),
         );
         let histogram = family.get_or_create(&labels).clone();
         Arc::new(PrometheusHistogram(histogram))
@@ -317,6 +402,7 @@ impl MetricsRecorder for PrometheusRecorder {
 
 let db = Db::builder("my_db", object_store)
     .with_metrics_recorder(Arc::new(PrometheusRecorder::new()))
+    // metric_level is set via Settings (supports env override), not on DbBuilder
     .open()
     .await?;
 ```
@@ -356,11 +442,22 @@ impl MetricsRecorder for OtelRecorder {
         Arc::new(OtelGauge::new(gauge, attrs))
     }
 
-    fn register_histogram(&self, name: &str, desc: &str, labels: &[(&str, &str)]) -> Arc<dyn HistogramFn> {
+    fn register_up_down_counter(&self, name: &str, desc: &str, labels: &[(&str, &str)]) -> Arc<dyn UpDownCounterFn> {
         let attrs: Vec<opentelemetry::KeyValue> = labels.iter()
             .map(|(k, v)| opentelemetry::KeyValue::new(k.to_string(), v.to_string()))
             .collect();
-        let histogram = self.meter.f64_histogram(name).with_description(desc).build();
+        let counter = self.meter.i64_up_down_counter(name).with_description(desc).build();
+        Arc::new(OtelUpDownCounter { counter, attrs })
+    }
+
+    fn register_histogram(&self, name: &str, desc: &str, labels: &[(&str, &str)], boundaries: &[f64]) -> Arc<dyn HistogramFn> {
+        let attrs: Vec<opentelemetry::KeyValue> = labels.iter()
+            .map(|(k, v)| opentelemetry::KeyValue::new(k.to_string(), v.to_string()))
+            .collect();
+        let histogram = self.meter.f64_histogram(name)
+            .with_description(desc)
+            .with_boundaries(boundaries.to_vec())
+            .build();
         Arc::new(OtelHistogram { histogram, attrs })
     }
 }
@@ -377,15 +474,10 @@ let db = Db::builder("my_db", object_store)
     .await?;
 ```
 
-OpenTelemetry is stricter about instrument semantics than Prometheus, but this RFC chooses a
-simpler SlateDB-facing API over exact backend parity. A practical OTel recorder can implement
-`GaugeFn` in either of these ways:
-
-- map both `set` and `increment` onto a gauge by keeping local state and recording the current value
-- use a gauge for `set`-heavy metrics and an up/down counter internally for additive metrics
-
-The important point is that SlateDB exposes a simple recorder contract; exact instrument choice
-inside a backend adapter is an implementation detail.
+Because SlateDB separates `GaugeFn` (absolute `set`) from `UpDownCounterFn` (additive
+`increment`), the OTel recorder maps directly to the corresponding OTel instruments
+(`f64_gauge` and `i64_up_down_counter`) with no adapter logic needed. Prometheus recorders
+can map both to Prometheus gauges since Prometheus doesn't distinguish the two.
 
 ### UniFFI integration
 
@@ -461,14 +553,14 @@ trait and the structured read-side binding surface.
 
 ### Performance & Cost
 
-- **Hot path:** One additional virtual dispatch per metric operation (through composite handle). When no user recorder is configured, the composite delegates directly to the default atomic handle. This is negligible compared to I/O costs.
+- **Hot path:** One additional virtual dispatch per metric operation (through composite handle). When no user recorder is configured, the composite delegates directly to the default atomic handle. This is negligible compared to I/O costs. Debug-level metrics that are filtered out use static no-op handles — zero virtual dispatch, zero branch on the hot path.
 - **Registration:** Takes a mutex lock in `DefaultMetricsRecorder`, but only during startup. No contention on the hot path since handles are cached.
 - **Memory:** Slightly more per metric (two `Arc<dyn Fn>` handles instead of one `Arc<Counter>`) when a user recorder is present. Negligible.
 - No impact on object-store request patterns, space/read/write amplification.
 
 ### Observability
 
-- **Configuration changes:** New `DbBuilder::with_metrics_recorder(Arc<dyn MetricsRecorder>)` method. No changes to `Settings` (the recorder is a runtime component, not serializable config).
+- **Configuration changes:** New `DbBuilder::with_metrics_recorder(Arc<dyn MetricsRecorder>)` method (runtime component, not serializable). New `Settings::metric_level: MetricLevel` field (default `Info`, serializable, supports env variable override).
 - **New components:** `metrics.rs` module (~300 lines). `stats.rs` is removed.
 - **Metrics:** All 39 existing metrics preserved with new names/labels (see naming table above). Histogram support added as a new metric type.
 - **Logging:** No changes.
@@ -480,12 +572,12 @@ trait and the structured read-side binding surface.
   - `db.metrics()` return type: `Arc<StatRegistry>` -> `Metrics`
   - Removed: `StatRegistry`, `ReadableStat`, `Counter`, `Gauge<T>`, `stat_name!` macro
   - Removed: Public stat name constants (`db_stats::GET_REQUESTS`, etc.)
-  - New: `MetricsRecorder`, `CounterFn`, `GaugeFn`, `HistogramFn`, `Metrics`, `Metric`, `MetricValue`
+  - New: `MetricsRecorder`, `CounterFn`, `GaugeFn`, `UpDownCounterFn`, `HistogramFn`, `MetricLevel`, `Metrics`, `Metric`, `MetricValue`
 - **Bindings:** The `db.metrics()` return type is simpler to expose via UniFFI than the current trait-object-based `StatRegistry`. The bindings can return a sequence of `Metric` Records directly.
 
 ## Testing
 
-- **Unit tests:** `metrics.rs` tests for default recorder (counter/gauge/histogram tracking), composite recorder (forwards to both), edge cases (empty histogram).
+- **Unit tests:** `metrics.rs` tests for default recorder (counter/gauge/up-down-counter/histogram tracking, histogram bucket counts), composite recorder (forwards to both), edge cases (empty histogram). Builder tests for metric level filtering (Debug metrics produce no-ops at Info level, active at Debug level).
 - **Integration tests:** Register a mock `MetricsRecorder`, perform DB operations, verify handles receive correct calls with expected names and labels. Verify `db.metrics()` returns metrics with correct labels and non-zero values.
 - **Port existing tests:** All existing tests that read metrics (`compactor::test_compactor_compressed_block_size`, db cache hit/miss tests, `sst_iter` bloom filter tests) updated to new API.
 - Fault-injection/chaos tests: N/A
@@ -547,7 +639,9 @@ without changing any external API.
 
 ## Open Questions
 
-1. **Histogram default bucket boundaries:** For the default recorder, we track only count/sum/min/max. Should we also store a lightweight fixed-bucket histogram for richer `db.metrics()` output? Recommendation: start minimal, add later if needed.
+1. ~~**Histogram default boundaries:** For the default recorder, we track only count/sum/min/max. Should we also store a lightweight fixed-bucket histogram for richer `db.metrics()` output?~~ **Resolved:** The default recorder now maintains bucket counts using boundaries always provided at registration time, and the `Histogram` variant in `MetricValue` includes `boundaries` and `bucket_counts`.
+
+1. ~~**Standard boundaries per metric:** What default boundary sets should SlateDB define for its internal histograms?~~ **Resolved:** Boundaries are always explicit — required as a parameter to `recorder.histogram(name, boundaries)`. SlateDB provides `LATENCY_BOUNDARIES` and `SIZE_BOUNDARIES` constants that internal callers select from. Exact values may be tuned during implementation.
 
 ## References
 
