@@ -1,8 +1,5 @@
 1. Fix the first item in the list.
 
-- website/src/content/docs/docs/design/files.mdx:5 says a DB has three main directories and omits compactions/. Current code has a dedicated compactions store in slatedb/src/
-  compactions_store.rs:203, wires it into DB startup in slatedb/src/db/builder.rs:410, and creates the compactions file on compactor init in slatedb/src/
-  compactor_state_protocols.rs:178. The storage-layout docs are stale.
 - The storage tutorials repeat the same stale layout. website/src/content/docs/docs/tutorials/s3.mdx:101, website/src/content/docs/docs/tutorials/gcs.mdx:90, and website/src/
   content/docs/docs/tutorials/abs.mdx:80 describe only three folders, even though current DBs also use compactions/.
 - website/src/content/docs/docs/tutorials/s3.mdx:95 shows objects under s3://slatedb/test/, but the actual example opens /tmp/slatedb_s3_compatible in examples/src/s3_compati
