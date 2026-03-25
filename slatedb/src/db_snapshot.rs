@@ -5,7 +5,6 @@ use std::sync::Arc;
 use crate::bytes_range::BytesRange;
 use crate::config::{ReadOptions, ScanOptions};
 use crate::db_iter::DbIterator;
-use crate::oracle::Oracle;
 use crate::types::KeyValue;
 
 use crate::db::DbInner;
@@ -19,11 +18,10 @@ pub struct DbSnapshot {
 
 impl DbSnapshot {
     pub(crate) fn new(db_inner: Arc<DbInner>, seq: Option<u64>) -> Arc<Self> {
-        let seq = seq.unwrap_or_else(|| db_inner.oracle.last_committed_seq());
-        db_inner.snapshot_manager.register(seq);
+        let started_seq = db_inner.snapshot_manager.register(seq);
 
         Arc::new(Self {
-            started_seq: seq,
+            started_seq,
             db_inner,
         })
     }
@@ -226,6 +224,7 @@ mod tests {
     use crate::config::{CompactorOptions, PutOptions, Settings, WriteOptions};
     use crate::object_store::memory::InMemory;
     use crate::object_store::ObjectStore;
+    use crate::oracle::Oracle;
     use crate::{Db, Error};
     use bytes::Bytes;
     use fail_parallel::FailPointRegistry;

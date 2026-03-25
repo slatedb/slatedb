@@ -319,7 +319,9 @@ mod tests {
     async fn test_flush(#[case] test_case: FlushImmTableTestCase) {
         // Given
         let db = setup_test_db_with_merge_operator().await;
-        db.inner.snapshot_manager.register(test_case.min_active_seq);
+        db.inner
+            .snapshot_manager
+            .register(Some(test_case.min_active_seq));
         // Set durable watermark high so it doesn't interfere with transaction-based retention tests
         db.inner.oracle.advance_durable_seq(u64::MAX);
         let table = WritableKVTable::new();
@@ -347,7 +349,7 @@ mod tests {
     async fn test_err_when_merge_operator_not_set_and_merges_exist() {
         // Given
         let db = setup_test_db_without_merge_operator().await;
-        db.inner.snapshot_manager.register(0);
+        db.inner.snapshot_manager.register(Some(0));
         let table = WritableKVTable::new();
         table.put(RowEntry::new_value(&Bytes::from("key"), b"value1", 1));
         table.put(RowEntry::new_merge(&Bytes::from("key"), b"value2", 2));
@@ -371,7 +373,7 @@ mod tests {
     async fn test_no_err_merge_operator_not_set_and_no_merges() {
         // Given
         let db = setup_test_db_without_merge_operator().await;
-        db.inner.snapshot_manager.register(0);
+        db.inner.snapshot_manager.register(Some(0));
         let table = WritableKVTable::new();
         table.put(RowEntry::new_value(&Bytes::from("key1"), b"value1", 1));
         table.put(RowEntry::new_tombstone(&Bytes::from("key2"), 2));
@@ -435,7 +437,7 @@ mod tests {
         // Given: DB with active transaction at seq=3, durable watermark at seq=1
         let db = setup_test_db_with_merge_operator().await;
         db.inner.oracle.advance_durable_seq(1);
-        db.inner.snapshot_manager.register(3); // Active snapshot at seq=3
+        db.inner.snapshot_manager.register(Some(3));
 
         let table = WritableKVTable::new();
         // Add versions: seq=1, seq=2, seq=3, seq=4
