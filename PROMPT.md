@@ -5,16 +5,12 @@ You are in a Ralph Wiggum loop. This `PROMPT.md` file is fed back to you on each
 Your goal is to write accurate SlateDB documentation for the empty pages listed in the `## TODO` section below.
 
 Rules:
-- Use the repository code and existing docs as the source of truth.
-- Match the tone, structure, and level of detail used in nearby files under `website/src/content/docs/docs/`.
-- Replace placeholder pages with real documentation, not stubs.
-- Work in small chunks. A chunk can be one page or a few closely related pages.
-- After each completed chunk, you are allowed to make a git commit using conventional commit syntax, for example `docs: write caching and compression docs`.
+- Work on one TODO item per iteration.
 - After you complete a TODO item, update this `PROMPT.md` file to mark it done.
 - You may edit only the `## TODO` section of this file. Do not change any other part of `PROMPT.md`.
-- When updating progress, only change `- [ ]` to `- [x]` for completed items. Do not rewrite, reorder, or remove items.
+- You may add, update, or remove TODO items, provided they conform to the goals defined above.
 - Keep going until every TODO item is checked off.
-- When you have completed the TODO list, delete PROMPT.md
+- When you have completed the TODO list, delete PROMPT.md.
 
 ## Writing Style
 
@@ -34,12 +30,12 @@ Rules:
 - Don't include "use this page.." type guidance in pages.
 
 ## TODO
-- [ ] `website/src/content/docs/docs/design/caching.mdx`
-- [ ] `website/src/content/docs/docs/design/checkpoints.mdx`
-- [ ] `website/src/content/docs/docs/design/clones.mdx`
-- [ ] `website/src/content/docs/docs/design/compression.mdx`
-- [ ] `website/src/content/docs/docs/design/time.mdx`
-- [ ] `website/src/content/docs/docs/operations/compatibility.mdx`
-- [ ] `website/src/content/docs/docs/operations/configuration.mdx`
-- [ ] `website/src/content/docs/docs/operations/errors.mdx`
-- [ ] `website/src/content/docs/docs/operations/metrics.mdx`
+- [ ] Write `website/src/content/docs/docs/design/caching.mdx`
+- [ ] Write `website/src/content/docs/docs/design/checkpoints.mdx`
+- [ ] Write `website/src/content/docs/docs/design/clones.mdx`
+- [ ] Write `website/src/content/docs/docs/design/compression.mdx`
+- [ ] Write `website/src/content/docs/docs/design/time.mdx`
+- [ ] Write `website/src/content/docs/docs/operations/compatibility.mdx`
+- [ ] Write `website/src/content/docs/docs/operations/configuration.mdx`
+- [ ] Write `website/src/content/docs/docs/operations/errors.mdx`
+- [ ] Write `website/src/content/docs/docs/operations/metrics.mdx`
