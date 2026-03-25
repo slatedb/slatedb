@@ -194,22 +194,6 @@ pub enum MetricValue {
     },
 }
 
-impl MetricValue {
-    /// Returns the primary scalar value as an `i64`, useful for simple monitoring.
-    ///
-    /// For counters and up-down counters this returns the current count.
-    /// For gauges this truncates the floating-point value.
-    /// For histograms this returns the observation count.
-    pub fn as_i64(&self) -> i64 {
-        match self {
-            MetricValue::Counter(v) => *v as i64,
-            MetricValue::Gauge(v) => *v as i64,
-            MetricValue::UpDownCounter(v) => *v,
-            MetricValue::Histogram { count, .. } => *count as i64,
-        }
-    }
-}
-
 /// Materialized snapshot of all registered metrics, with lookup methods.
 #[derive(Debug, Clone)]
 pub struct Metrics {
@@ -417,17 +401,19 @@ impl DefaultMetricsRecorder {
     }
 
     /// Check whether a metric with the given name and labels already exists.
-    /// Returns `true` if a duplicate was found (and logs a warning).
-    fn check_duplicate(
-        entries: &[DefaultMetricEntry],
+    /// Returns the existing entry if a duplicate was found (and logs a warning).
+    fn find_duplicate<'a>(
+        entries: &'a [DefaultMetricEntry],
         name: &str,
         labels: &[(String, String)],
-    ) -> bool {
-        let duplicate = entries.iter().any(|e| e.name == name && e.labels == labels);
-        if duplicate {
+    ) -> Option<&'a DefaultMetricEntry> {
+        let entry = entries
+            .iter()
+            .find(|e| e.name == name && e.labels == labels);
+        if entry.is_some() {
             log::warn!("duplicate metric registration: name={name}, labels={labels:?}");
         }
-        duplicate
+        entry
     }
 
     /// Read all registered metrics and produce a point-in-time snapshot.
@@ -486,14 +472,9 @@ impl MetricsRecorder for DefaultMetricsRecorder {
     ) -> Arc<dyn CounterFn> {
         let canonical = canonicalize_labels(labels);
         let mut entries = self.entries.lock().expect("lock poisoned");
-        if Self::check_duplicate(&entries, name, &canonical) {
-            if let Some(entry) = entries
-                .iter()
-                .find(|e| e.name == name && e.labels == canonical)
-            {
-                if let DefaultMetricHandle::Counter(ref h) = entry.handle {
-                    return h.clone();
-                }
+        if let Some(entry) = Self::find_duplicate(&entries, name, &canonical) {
+            if let DefaultMetricHandle::Counter(ref h) = entry.handle {
+                return h.clone();
             }
         }
         let handle = Arc::new(DefaultCounter {
@@ -516,14 +497,9 @@ impl MetricsRecorder for DefaultMetricsRecorder {
     ) -> Arc<dyn GaugeFn> {
         let canonical = canonicalize_labels(labels);
         let mut entries = self.entries.lock().expect("lock poisoned");
-        if Self::check_duplicate(&entries, name, &canonical) {
-            if let Some(entry) = entries
-                .iter()
-                .find(|e| e.name == name && e.labels == canonical)
-            {
-                if let DefaultMetricHandle::Gauge(ref h) = entry.handle {
-                    return h.clone();
-                }
+        if let Some(entry) = Self::find_duplicate(&entries, name, &canonical) {
+            if let DefaultMetricHandle::Gauge(ref h) = entry.handle {
+                return h.clone();
             }
         }
         let handle = Arc::new(DefaultGauge {
@@ -546,14 +522,9 @@ impl MetricsRecorder for DefaultMetricsRecorder {
     ) -> Arc<dyn UpDownCounterFn> {
         let canonical = canonicalize_labels(labels);
         let mut entries = self.entries.lock().expect("lock poisoned");
-        if Self::check_duplicate(&entries, name, &canonical) {
-            if let Some(entry) = entries
-                .iter()
-                .find(|e| e.name == name && e.labels == canonical)
-            {
-                if let DefaultMetricHandle::UpDownCounter(ref h) = entry.handle {
-                    return h.clone();
-                }
+        if let Some(entry) = Self::find_duplicate(&entries, name, &canonical) {
+            if let DefaultMetricHandle::UpDownCounter(ref h) = entry.handle {
+                return h.clone();
             }
         }
         let handle = Arc::new(DefaultUpDownCounter {
@@ -577,14 +548,9 @@ impl MetricsRecorder for DefaultMetricsRecorder {
     ) -> Arc<dyn HistogramFn> {
         let canonical = canonicalize_labels(labels);
         let mut entries = self.entries.lock().expect("lock poisoned");
-        if Self::check_duplicate(&entries, name, &canonical) {
-            if let Some(entry) = entries
-                .iter()
-                .find(|e| e.name == name && e.labels == canonical)
-            {
-                if let DefaultMetricHandle::Histogram(ref h) = entry.handle {
-                    return h.clone();
-                }
+        if let Some(entry) = Self::find_duplicate(&entries, name, &canonical) {
+            if let DefaultMetricHandle::Histogram(ref h) = entry.handle {
+                return h.clone();
             }
         }
         let handle = Arc::new(DefaultHistogram::new(boundaries));
