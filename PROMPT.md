@@ -1,8 +1,5 @@
 1. Fix the first item in the list.
 
-- website/src/content/docs/docs/tutorials/s3.mdx:95 shows objects under s3://slatedb/test/, but the actual example opens /tmp/slatedb_s3_compatible in examples/src/s3_compati
-  ble.rs:20. website/src/content/docs/docs/tutorials/abs.mdx:75 shows test_slateDB/, but the example uses /tmp/slatedb_azure_blob_storage in examples/src/azure_blob_storage.r
-  s:17. Those sample paths no longer match the code they document.
 - website/src/content/docs/docs/tutorials/s3.mdx:115, website/src/content/docs/docs/tutorials/gcs.mdx:109, and website/src/content/docs/docs/tutorials/abs.mdx:100 say each
   WAL .sst file is a WAL “entry”. That is wrong now: a WAL file contains many RowEntrys, as documented in website/src/content/docs/docs/design/change-data-capture.mdx:25 and
   implemented in slatedb/src/wal_reader.rs:11.

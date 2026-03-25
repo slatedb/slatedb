@@ -89,10 +89,10 @@ This will write a 64 MiB value to SlateDB.
 
 ## Check the results
 
-Now' let's check the root of the bucket:
+Now' let's check the database path in the bucket:
 
 ```bash
-% aws --endpoint-url=http://localhost:4566 s3 ls s3://slatedb/test/
+% aws --endpoint-url=http://localhost:4566 s3 ls s3://slatedb/tmp/slatedb_s3_compatible/
                            PRE compacted/
                            PRE compactions/
                            PRE manifest/
@@ -109,7 +109,7 @@ There are four folders:
 Let's check the `wal` folder:
 
 ```bash
-% aws --endpoint-url=http://localhost:4566 s3 ls s3://slatedb/test/wal/
+% aws --endpoint-url=http://localhost:4566 s3 ls s3://slatedb/tmp/slatedb_s3_compatible/wal/
 2024-09-04 18:05:57         64 00000000000000000001.sst
 2024-09-04 18:05:58   67108996 00000000000000000002.sst
 ```
@@ -119,7 +119,7 @@ Each of these SST files is a write-ahead log entry. They get flushed based on th
 Finally, let's check the `compacted` folder:
 
 ```bash
-% aws --endpoint-url=http://localhost:4566 s3 ls s3://slatedb/test/compacted/ 
+% aws --endpoint-url=http://localhost:4566 s3 ls s3://slatedb/tmp/slatedb_s3_compatible/compacted/ 
 2024-09-04 18:05:59   67108996 01J6ZVEZ394GCJT1PHZYY1NZGP.sst
 ```
 Again, we see the 64 MiB SST file. This is the L0 SST file that was flushed with our value. Over time, the WAL entries will be removed, and the L0 SSTs will be compacted into higher levels.
