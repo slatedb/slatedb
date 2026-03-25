@@ -293,6 +293,16 @@ pub enum SstType {
     Wal,
 }
 
+/// The type of index stored at the index_offset of an SSTable.
+#[derive(Clone, Debug, PartialEq, Serialize, Default)]
+pub enum SstIndexType {
+    /// Flat monolithic index (existing format — `SsTableIndex` FlatBuffer).
+    #[default]
+    Flat,
+    /// Two-level partitioned index (`SsTableIndexV2` top-level directory + `PartitionIndex` blocks).
+    Partitioned,
+}
+
 /// Metadata information about an SSTable. See [`crate::sst_builder::EncodedSsTableBuilder`] for
 /// more information on the format of the SSTable and its metadata.
 #[derive(Clone, Debug, PartialEq, Serialize, Default)]
@@ -321,6 +331,8 @@ pub struct SsTableInfo {
     pub stats_offset: u64,
     /// The length of the stats block within the SSTable file.
     pub stats_len: u64,
+    /// The type of index stored at index_offset.
+    pub index_type: SstIndexType,
 }
 
 pub(crate) trait SsTableInfoCodec: Send + Sync {
@@ -753,7 +765,8 @@ impl WalIdStore for parking_lot::RwLock<DbState> {
 mod tests {
     use crate::checkpoint::Checkpoint;
     use crate::db_state::{
-        DbState, SortedRun, SsTableHandle, SsTableId, SsTableInfo, SsTableView, SstType,
+        DbState, SortedRun, SsTableHandle, SsTableId, SsTableInfo, SsTableView, SstIndexType,
+        SstType,
     };
     use crate::db_status::DbStatusReporter;
     use crate::format::sst::SST_FORMAT_VERSION_LATEST;
@@ -987,6 +1000,7 @@ mod tests {
             sst_type: SstType::default(),
             stats_offset: 0,
             stats_len: 0,
+            index_type: SstIndexType::default(),
         }
     }
 }

@@ -60,7 +60,6 @@ use crate::config::CompressionCodec;
 use crate::db_state::{SsTableInfoCodec, SstType};
 use crate::error::SlateDBError;
 use crate::filter::BloomFilterBuilder;
-use crate::flatbuffer_types::{BlockMeta, BlockMetaArgs};
 use crate::format::sst::{
     BlockBuilder, BlockBuilderWithStats, EncodedSsTable, EncodedSsTableBlock,
     EncodedSsTableBlockBuilder, EncodedSsTableFooterBuilder, SsTableFormat, SST_FORMAT_VERSION,
@@ -71,7 +70,6 @@ use crate::types::RowEntry;
 use crate::utils::compute_index_key;
 use crate::BlockTransformer;
 use bytes::Bytes;
-use flatbuffers::DefaultAllocator;
 
 /// SST block format version.
 ///
@@ -102,7 +100,7 @@ impl BlockFormat {
 }
 
 impl SsTableFormat {
-    pub(crate) fn table_builder(&self) -> EncodedSsTableBuilder<'_> {
+    pub(crate) fn table_builder(&self) -> EncodedSsTableBuilder {
         let mut builder = EncodedSsTableBuilder::new(
             self.block_size,
             self.min_filter_keys,
@@ -123,14 +121,15 @@ impl SsTableFormat {
 }
 
 /// Builds an SSTable from key-value pairs.
-pub(crate) struct EncodedSsTableBuilder<'a> {
+pub(crate) struct EncodedSsTableBuilder {
     builder: BlockBuilderWithStats,
-    index_builder: flatbuffers::FlatBufferBuilder<'a, DefaultAllocator>,
-    first_key: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, u8>>>,
+    /// First key bytes for the current (not yet flushed) block.
+    current_first_key: Option<Bytes>,
     sst_first_key: Option<Bytes>,
     sst_last_key: Option<Bytes>,
     current_block_max_key: Option<Bytes>,
-    block_meta: Vec<flatbuffers::WIPOffset<BlockMeta<'a>>>,
+    /// Accumulated block metadata: (block_offset, first_key_bytes).
+    raw_block_meta: Vec<(u64, Bytes)>,
     current_len: u64,
     blocks: VecDeque<EncodedSsTableBlock>,
     block_size: usize,
@@ -144,7 +143,7 @@ pub(crate) struct EncodedSsTableBuilder<'a> {
     block_transformer: Option<Arc<dyn BlockTransformer>>,
 }
 
-impl EncodedSsTableBuilder<'_> {
+impl EncodedSsTableBuilder {
     /// Create a builder based on target block size.
     pub(crate) fn new(
         block_size: usize,
@@ -155,8 +154,8 @@ impl EncodedSsTableBuilder<'_> {
         Self {
             current_len: 0,
             blocks: VecDeque::new(),
-            block_meta: Vec::new(),
-            first_key: None,
+            raw_block_meta: Vec::new(),
+            current_first_key: None,
             sst_first_key: None,
             sst_last_key: None,
             current_block_max_key: None,
@@ -167,7 +166,6 @@ impl EncodedSsTableBuilder<'_> {
             min_filter_keys,
             stats: SstStats::default(),
             filter_builder: BloomFilterBuilder::new(filter_bits_per_key),
-            index_builder: flatbuffers::FlatBufferBuilder::new(),
             sst_codec,
             compression_codec: None,
             block_transformer: None,
@@ -225,9 +223,9 @@ impl EncodedSsTableBuilder<'_> {
         let mut block_size = None;
         if !self.builder.would_fit(&entry) {
             block_size = self.finish_block().await?;
-            self.first_key = Some(self.index_builder.create_vector(&index_key));
+            self.current_first_key = Some(Bytes::from(index_key.to_vec()));
         } else if is_sst_first_key {
-            self.first_key = Some(self.index_builder.create_vector(&index_key));
+            self.current_first_key = Some(Bytes::from(index_key.to_vec()));
         }
 
         self.filter_builder.add_key(&entry.key);
@@ -266,8 +264,8 @@ impl EncodedSsTableBuilder<'_> {
 
     #[cfg(test)]
     pub(crate) fn num_blocks(&self) -> usize {
-        // use block_meta since blocks can be consumed as sst is being built
-        self.block_meta.len()
+        // use raw_block_meta since blocks can be consumed as sst is being built
+        self.raw_block_meta.len()
     }
 
     async fn finish_block(&mut self) -> Result<Option<usize>, SlateDBError> {
@@ -286,14 +284,11 @@ impl EncodedSsTableBuilder<'_> {
             block_builder = block_builder.with_block_transformer(transformer);
         }
         let block = block_builder.build().await?;
-        let block_meta = BlockMeta::create(
-            &mut self.index_builder,
-            &BlockMetaArgs {
-                offset: block.offset,
-                first_key: self.first_key,
-            },
-        );
-        self.block_meta.push(block_meta);
+        let first_key = self
+            .current_first_key
+            .take()
+            .expect("current_first_key must be set before finish_block");
+        self.raw_block_meta.push((block.offset, first_key));
         self.stats.num_puts += block_stats.num_puts as u64;
         self.stats.num_deletes += block_stats.num_deletes as u64;
         self.stats.num_merges += block_stats.num_merges as u64;
@@ -302,7 +297,6 @@ impl EncodedSsTableBuilder<'_> {
         let block_size = block.len();
         self.current_len += block_size as u64;
         self.blocks.push_back(block);
-        self.first_key = None;
 
         Ok(Some(block_size))
     }
@@ -354,8 +348,7 @@ impl EncodedSsTableBuilder<'_> {
             self.sst_first_key,
             self.sst_last_key,
             &*self.sst_codec,
-            self.index_builder,
-            self.block_meta,
+            self.raw_block_meta,
             self.sst_format_version,
             SstType::Compacted,
         );

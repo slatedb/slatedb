@@ -15,6 +15,12 @@ enum SstType: byte {
     Wal
 }
 
+// Type of index stored at index_offset. Defaults to Flat for backward compatibility.
+enum IndexType: byte {
+    Flat,       // default — existing SsTableIndex
+    Partitioned // new SsTableIndexV2
+}
+
 // Has metadata about a SST file.
 table SsTableInfo {
     // First entry in the SST file.
@@ -49,6 +55,9 @@ table SsTableInfo {
 
     // Length of the stats block. Length will be zero if stats are not present.
     stats_len: ulong;
+
+    // Type of index stored at index_offset. Defaults to Flat for backward compatibility.
+    index_type: IndexType;
 }
 
 // Per-block statistics.
@@ -87,6 +96,31 @@ table BlockMeta {
 
 table SsTableIndex {
     block_meta: [BlockMeta] (required);
+}
+
+// Per-partition metadata stored in the top-level SsTableIndexV2 directory.
+table PartitionMeta {
+    // Byte offset of the PartitionIndex for this partition within the SST file.
+    offset: ulong;
+
+    // Length of the PartitionIndex in bytes.
+    length: ulong;
+
+    // First key covered by this partition (used for binary search).
+    first_key: [ubyte] (required);
+}
+
+// Top-level index directory for partitioned-index SSTs. SsTableInfo.index_offset points here
+// when SsTableInfo.index_type == Partitioned.
+// Contains only the top-level directory; per-partition data is stored in separate
+// PartitionIndex blocks, each covering a contiguous key range.
+table SsTableIndexV2 {
+    partitions: [PartitionMeta];
+}
+
+// A single partition block containing BlockMeta entries for a contiguous key range.
+table PartitionIndex {
+    blocks: [BlockMeta] (required);
 }
 
 // deprecated: use CompactedSsTableV2

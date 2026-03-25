@@ -143,5 +143,10 @@ bench = false
 name = "db_operations"
 harness = false
 
+[[bench]]
+name = "sst_index"
+harness = false
+required-features = ["bencher"]
+
 [lints]
 workspace = true

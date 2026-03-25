@@ -23,7 +23,11 @@ use crate::db_cache::stats::DbCacheStats;
 use crate::format::block::Block;
 use crate::sst_stats::SstStats;
 use crate::stats::StatRegistry;
-use crate::{db_state::SsTableId, filter::BloomFilter, flatbuffer_types::SsTableIndexOwned};
+use crate::{
+    db_state::SsTableId,
+    filter::BloomFilter,
+    flatbuffer_types::{PartitionIndexOwned, SsTableIndexOwned, SsTableIndexV2Owned},
+};
 use slatedb_common::clock::SystemClock;
 
 #[cfg(feature = "foyer")]
@@ -190,6 +194,8 @@ impl From<(SsTableId, u64)> for CachedKey {
 enum CachedItem {
     Block(Arc<Block>),
     SsTableIndex(Arc<SsTableIndexOwned>),
+    SsTableIndexV2(Arc<SsTableIndexV2Owned>),
+    PartitionIndex(Arc<PartitionIndexOwned>),
     BloomFilter(Arc<BloomFilter>),
     SstStats(Arc<SstStats>),
 }
@@ -216,6 +222,20 @@ impl CachedEntry {
     pub(crate) fn with_sst_index(sst_index: Arc<SsTableIndexOwned>) -> Self {
         Self {
             item: CachedItem::SsTableIndex(sst_index),
+        }
+    }
+
+    /// Create a new `CachedEntry` with the given partitioned SST index directory.
+    pub(crate) fn with_sst_index_v2(v2: Arc<SsTableIndexV2Owned>) -> Self {
+        Self {
+            item: CachedItem::SsTableIndexV2(v2),
+        }
+    }
+
+    /// Create a new `CachedEntry` with the given partition index block.
+    pub(crate) fn with_partition_index(partition: Arc<PartitionIndexOwned>) -> Self {
+        Self {
+            item: CachedItem::PartitionIndex(partition),
         }
     }
 
@@ -247,6 +267,20 @@ impl CachedEntry {
         }
     }
 
+    pub(crate) fn sst_index_v2(&self) -> Option<Arc<SsTableIndexV2Owned>> {
+        match &self.item {
+            CachedItem::SsTableIndexV2(v2) => Some(v2.clone()),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn partition_index(&self) -> Option<Arc<PartitionIndexOwned>> {
+        match &self.item {
+            CachedItem::PartitionIndex(p) => Some(p.clone()),
+            _ => None,
+        }
+    }
+
     pub(crate) fn bloom_filter(&self) -> Option<Arc<BloomFilter>> {
         match &self.item {
             CachedItem::BloomFilter(bloom_filter) => Some(bloom_filter.clone()),
@@ -269,6 +303,8 @@ impl CachedEntry {
         match &self.item {
             CachedItem::Block(block) => block.size(),
             CachedItem::SsTableIndex(sst_index) => sst_index.size(),
+            CachedItem::SsTableIndexV2(v2) => v2.size(),
+            CachedItem::PartitionIndex(p) => p.size(),
             CachedItem::BloomFilter(bloom_filter) => bloom_filter.size(),
             CachedItem::SstStats(stats) => stats.size(),
         }
@@ -279,6 +315,12 @@ impl CachedEntry {
             CachedItem::Block(block) => Self::with_block(Arc::new(block.clamp_allocated_size())),
             CachedItem::SsTableIndex(sst_index) => {
                 Self::with_sst_index(Arc::new(sst_index.clamp_allocated_size()))
+            }
+            CachedItem::SsTableIndexV2(v2) => {
+                Self::with_sst_index_v2(Arc::new(v2.clamp_allocated_size()))
+            }
+            CachedItem::PartitionIndex(p) => {
+                Self::with_partition_index(Arc::new(p.clamp_allocated_size()))
             }
             CachedItem::BloomFilter(bloom_filter) => {
                 Self::with_bloom_filter(Arc::new(bloom_filter.clamp_allocated_size()))
@@ -369,7 +411,11 @@ impl DbCache for SplitCache {
                     trace!("no block cache available for insertion");
                 }
             }
-            CachedItem::SsTableIndex(_) | CachedItem::BloomFilter(_) | CachedItem::SstStats(_) => {
+            CachedItem::SsTableIndex(_)
+            | CachedItem::SsTableIndexV2(_)
+            | CachedItem::PartitionIndex(_)
+            | CachedItem::BloomFilter(_)
+            | CachedItem::SstStats(_) => {
                 if let Some(ref cache) = self.meta_cache {
                     cache.insert(key, value.clamp_allocated_size()).await;
                 } else {
@@ -746,10 +792,11 @@ mod tests {
     ) {
         // given:
         let key = CachedKey::from((SST_ID, 12345u64));
+        let index = Arc::new(sst.index.into_flat_index().unwrap());
         cache
             .insert(
                 key.clone(),
-                CachedEntry::with_sst_index(Arc::new(sst.index)),
+                CachedEntry::with_sst_index(index),
             )
             .await;
 
@@ -810,8 +857,9 @@ mod tests {
     ) {
         // given:
         let data = sst.remaining_as_bytes();
+        let flat_index = sst.index.into_flat_index().unwrap();
         let block = sst_format
-            .read_block_raw(&sst.info, &sst.index, 0, &data)
+            .read_block_raw(&sst.info, &flat_index, 0, &data)
             .await
             .unwrap();
         let key = CachedKey::from((SST_ID, 12345u64));
@@ -884,7 +932,7 @@ mod tests {
         let cache_b = DbCacheWrapper::new(shared_cache.clone(), &registry_b, system_clock);
 
         let sst = build_test_sst(&SsTableFormat::default(), 1).await;
-        let index = Arc::new(sst.index);
+        let index = Arc::new(sst.index.into_flat_index().unwrap());
         let key = CachedKey::from((SST_ID, 2u64));
 
         cache_a

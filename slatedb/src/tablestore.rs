@@ -15,12 +15,13 @@ use ulid::Ulid;
 
 use crate::blob::ReadOnlyBlob;
 use crate::db_cache::{CachedEntry, DbCache};
+use crate::db_state::SstIndexType;
 use crate::db_state::{SsTableHandle, SsTableId};
 use crate::error::SlateDBError;
 use crate::filter::BloomFilter;
-use crate::flatbuffer_types::SsTableIndexOwned;
+use crate::flatbuffer_types::{PartitionIndexOwned, SsTableIndexOwned, SsTableIndexV2Owned};
 use crate::format::block::Block;
-use crate::format::sst::{EncodedSsTable, SsTableFormat};
+use crate::format::sst::{EncodedSsTable, SsTableFormat, SstIndexData};
 use crate::object_stores::{ObjectStoreType, ObjectStores};
 use crate::paths::PathResolver;
 use crate::sst_builder::EncodedSsTableBuilder;
@@ -178,7 +179,7 @@ impl TableStore {
         }
     }
 
-    pub(crate) fn table_builder(&self) -> EncodedSsTableBuilder<'_> {
+    pub(crate) fn table_builder(&self) -> EncodedSsTableBuilder {
         self.sst_format.table_builder()
     }
 
@@ -219,12 +220,34 @@ impl TableStore {
                         .insert((*id, offset).into(), CachedEntry::with_block(block))
                         .await;
                 }
-                cache
-                    .insert(
-                        (*id, encoded_sst.info.index_offset).into(),
-                        CachedEntry::with_sst_index(Arc::new(encoded_sst.index)),
-                    )
-                    .await;
+                match encoded_sst.index {
+                    SstIndexData::Flat(flat) => {
+                        cache
+                            .insert(
+                                (*id, encoded_sst.info.index_offset).into(),
+                                CachedEntry::with_sst_index(Arc::new(flat)),
+                            )
+                            .await;
+                    }
+                    SstIndexData::Partitioned { v2, partitions } => {
+                        // Cache the small V2 directory at the index_offset key.
+                        cache
+                            .insert(
+                                (*id, encoded_sst.info.index_offset).into(),
+                                CachedEntry::with_sst_index_v2(v2),
+                            )
+                            .await;
+                        // Cache each partition block individually at its own offset.
+                        for (partition_offset, partition) in partitions {
+                            cache
+                                .insert(
+                                    (*id, partition_offset).into(),
+                                    CachedEntry::with_partition_index(partition),
+                                )
+                                .await;
+                        }
+                    }
+                }
             }
         }
         self.cache_filter(*id, encoded_sst.info.filter_offset, encoded_sst.filter)
@@ -433,6 +456,122 @@ impl TableStore {
         handle: &SsTableHandle,
         cache_blocks: bool,
     ) -> Result<Arc<SsTableIndexOwned>, SlateDBError> {
+        match handle.info.index_type {
+            SstIndexType::Flat => self.read_flat_index(handle, cache_blocks).await,
+            SstIndexType::Partitioned => {
+                self.read_partitioned_index_cached(handle, cache_blocks)
+                    .await
+            }
+        }
+    }
+
+    /// Like `read_index`, but for partitioned SSTs only loads the single partition
+    /// block that covers `key`. Saves cache space when only a subset of the key
+    /// range is accessed. Falls back to `read_flat_index` for flat-index SSTs.
+    pub(crate) async fn read_index_for_key(
+        &self,
+        handle: &SsTableHandle,
+        key: &[u8],
+        cache_blocks: bool,
+    ) -> Result<Arc<SsTableIndexOwned>, SlateDBError> {
+        match handle.info.index_type {
+            SstIndexType::Flat => self.read_flat_index(handle, cache_blocks).await,
+            SstIndexType::Partitioned => {
+                self.read_partitioned_index_for_key(handle, key, cache_blocks)
+                    .await
+            }
+        }
+    }
+
+    async fn read_partitioned_index_for_key(
+        &self,
+        handle: &SsTableHandle,
+        key: &[u8],
+        cache_blocks: bool,
+    ) -> Result<Arc<SsTableIndexOwned>, SlateDBError> {
+        use crate::partitioned_keyspace::last_partition_including_key;
+
+        let object_store = self.object_stores.store_for(&handle.id);
+        let path = self.path(&handle.id);
+        let obj = ReadOnlyObject { object_store, path };
+
+        // Step 1: Get or fetch the V2 directory.
+        let v2 = self
+            .get_or_fetch_v2_directory(handle, &obj, cache_blocks)
+            .await?;
+
+        // Step 2: Find the partition covering the key.
+        let partition_metas: Vec<(u64, u64)> = {
+            let v2_borrow = v2.borrow();
+            match v2_borrow.partitions() {
+                None => vec![],
+                Some(ps) => (0..ps.len())
+                    .map(|i| {
+                        let p = ps.get(i);
+                        (p.offset(), p.length())
+                    })
+                    .collect(),
+            }
+        };
+
+        if partition_metas.is_empty() {
+            return Ok(Arc::new(SsTableFormat::stitch_partitions_to_flat(&[])?));
+        }
+
+        let partition_idx = {
+            let v2_borrow = v2.borrow();
+            last_partition_including_key(&v2_borrow, key).unwrap_or(0)
+        };
+
+        let (offset, length) = partition_metas[partition_idx];
+
+        // Step 3: Try cache first, otherwise fetch just this one partition.
+        let partition = if let Some(ref cache) = self.cache {
+            if let Some(p) = cache
+                .get_index(&(handle.id, offset).into())
+                .await
+                .unwrap_or(None)
+                .and_then(|e| e.partition_index())
+            {
+                p
+            } else {
+                let p = Arc::new(
+                    self.sst_format
+                        .read_single_partition(&handle.info, offset, length, &obj)
+                        .await?,
+                );
+                if cache_blocks {
+                    cache
+                        .insert(
+                            (handle.id, offset).into(),
+                            CachedEntry::with_partition_index(p.clone()),
+                        )
+                        .await;
+                }
+                p
+            }
+        } else {
+            Arc::new(
+                self.sst_format
+                    .read_single_partition(&handle.info, offset, length, &obj)
+                    .await?,
+            )
+        };
+
+        // Step 4: Stitch just this partition into a flat index.
+        let partition_data = Arc::try_unwrap(partition).unwrap_or_else(|arc| {
+            PartitionIndexOwned::new(arc.data()).expect("valid partition data")
+        });
+        let flat =
+            SsTableFormat::stitch_partitions_to_flat(&[(offset, partition_data)])?;
+        Ok(Arc::new(flat))
+    }
+
+    async fn read_flat_index(
+        &self,
+        handle: &SsTableHandle,
+        cache_blocks: bool,
+    ) -> Result<Arc<SsTableIndexOwned>, SlateDBError> {
         if let Some(ref cache) = self.cache {
             if let Some(index) = cache
                 .get_index(&(handle.id, handle.info.index_offset).into())
@@ -458,6 +597,145 @@ impl TableStore {
             }
         }
         Ok(index)
+    }
+
+    /// For partitioned SSTs: caches the V2 directory and each partition block
+    /// individually. Never stores a stitched flat blob in the cache — only the
+    /// small V2 directory and the ~4 KB partition blocks are cached.
+    async fn read_partitioned_index_cached(
+        &self,
+        handle: &SsTableHandle,
+        cache_blocks: bool,
+    ) -> Result<Arc<SsTableIndexOwned>, SlateDBError> {
+        let object_store = self.object_stores.store_for(&handle.id);
+        let path = self.path(&handle.id);
+        let obj = ReadOnlyObject { object_store, path };
+
+        // Step 1: Get or fetch the V2 directory.
+        let v2 = self
+            .get_or_fetch_v2_directory(handle, &obj, cache_blocks)
+            .await?;
+
+        // Step 2: Collect partition offsets/lengths from the V2 directory.
+        let partition_metas: Vec<(u64, u64)> = {
+            let v2_borrow = v2.borrow();
+            match v2_borrow.partitions() {
+                None => vec![],
+                Some(ps) => (0..ps.len())
+                    .map(|i| {
+                        let p = ps.get(i);
+                        (p.offset(), p.length())
+                    })
+                    .collect(),
+            }
+        };
+
+        if partition_metas.is_empty() {
+            let flat = SsTableFormat::stitch_partitions_to_flat(&[])?;
+            return Ok(Arc::new(flat));
+        }
+
+        // Step 3: Try to load each partition from cache; collect which are missing.
+        let mut cached: Vec<Option<Arc<PartitionIndexOwned>>> = vec![None; partition_metas.len()];
+        let mut any_missing = false;
+        if let Some(ref cache) = self.cache {
+            for (i, (offset, _)) in partition_metas.iter().enumerate() {
+                if let Some(p) = cache
+                    .get_index(&(handle.id, *offset).into())
+                    .await
+                    .unwrap_or(None)
+                    .and_then(|e| e.partition_index())
+                {
+                    cached[i] = Some(p);
+                } else {
+                    any_missing = true;
+                }
+            }
+        } else {
+            any_missing = true;
+        }
+
+        // Step 4: If any partition is missing, fetch all in one range read from
+        // the object store, then fill gaps and cache newly fetched partitions.
+        let partitions: Vec<(u64, Arc<PartitionIndexOwned>)> = if any_missing {
+            let fetched = self
+                .sst_format
+                .read_partitions_from_store(&handle.info, &v2, &obj)
+                .await?;
+            let mut result = Vec::with_capacity(fetched.len());
+            for (i, (offset, partition)) in fetched.into_iter().enumerate() {
+                let p = match cached[i].take() {
+                    Some(cached_p) => cached_p,
+                    None => {
+                        let p = Arc::new(partition);
+                        if cache_blocks {
+                            if let Some(ref cache) = self.cache {
+                                cache
+                                    .insert(
+                                        (handle.id, offset).into(),
+                                        CachedEntry::with_partition_index(p.clone()),
+                                    )
+                                    .await;
+                            }
+                        }
+                        p
+                    }
+                };
+                result.push((offset, p));
+            }
+            result
+        } else {
+            partition_metas
+                .iter()
+                .zip(cached.into_iter())
+                .map(|((offset, _), p)| (*offset, p.unwrap()))
+                .collect()
+        };
+
+        // Step 5: Stitch into a flat index (ephemeral — not stored in cache).
+        let owned_partitions: Vec<(u64, PartitionIndexOwned)> = partitions
+            .into_iter()
+            .map(|(offset, p)| {
+                let inner = Arc::try_unwrap(p).unwrap_or_else(|arc| {
+                    // Clone the underlying data if there are other references.
+                    PartitionIndexOwned::new(arc.data()).expect("valid partition data")
+                });
+                (offset, inner)
+            })
+            .collect();
+        let flat = SsTableFormat::stitch_partitions_to_flat(&owned_partitions)?;
+        Ok(Arc::new(flat))
+    }
+
+    /// Gets the V2 directory from cache, or fetches and optionally caches it.
+    async fn get_or_fetch_v2_directory(
+        &self,
+        handle: &SsTableHandle,
+        obj: &ReadOnlyObject,
+        cache_blocks: bool,
+    ) -> Result<Arc<SsTableIndexV2Owned>, SlateDBError> {
+        if let Some(ref cache) = self.cache {
+            if let Some(v2) = cache
+                .get_index(&(handle.id, handle.info.index_offset).into())
+                .await
+                .unwrap_or(None)
+                .and_then(|e| e.sst_index_v2())
+            {
+                return Ok(v2);
+            }
+        }
+        let v2 = Arc::new(self.sst_format.read_v2_directory(&handle.info, obj).await?);
+        if cache_blocks {
+            if let Some(ref cache) = self.cache {
+                cache
+                    .insert(
+                        (handle.id, handle.info.index_offset).into(),
+                        CachedEntry::with_sst_index_v2(v2.clone()),
+                    )
+                    .await;
+            }
+        }
+        Ok(v2)
     }
 
     #[allow(dead_code)]
@@ -639,7 +917,7 @@ async fn write_sst_in_object_store(
 
 pub(crate) struct EncodedSsTableWriter<'a> {
     id: SsTableId,
-    builder: EncodedSsTableBuilder<'a>,
+    builder: EncodedSsTableBuilder,
     writer: BufWriter,
     table_store: &'a TableStore,
     #[cfg(test)]
@@ -1650,6 +1928,166 @@ mod tests {
         let metadata = ts.metadata(&id).await.unwrap();
         assert_eq!(metadata.size, bytes.len() as u64);
         assert_eq!(metadata.location, path);
+    }
+
+    /// Demonstrates that lazy partition loading (read_index_for_key) keeps far fewer
+    /// entries in the meta cache than eager loading when only a small portion of the
+    /// key range is accessed.
+    ///
+    /// Scenario: build a compacted SST with many partitions, read keys from the first
+    /// 50% of blocks only.  With lazy loading the meta cache holds only the V2 directory
+    /// plus the partition blocks that cover those keys — not all partitions.
+    #[tokio::test]
+    #[cfg(feature = "moka")]
+    async fn test_partitioned_index_lazy_loading_cache_footprint() {
+        use crate::bytes_generator::OrderedBytesGenerator;
+        use crate::db_cache::moka::MokaCache;
+        use crate::db_state::SstIndexType;
+
+        // Use small blocks so we get many partitions quickly.
+        let format = SsTableFormat {
+            block_size: 256,
+            min_filter_keys: u32::MAX, // disable bloom filter to isolate index cache
+            ..SsTableFormat::default()
+        };
+
+        let os = Arc::new(InMemory::new());
+        let stat_registry = StatRegistry::new();
+        let meta_cache = Arc::new(MokaCache::new());
+        let split_cache = Arc::new(
+            SplitCache::new()
+                .with_meta_cache(Some(meta_cache.clone()))
+                .build(),
+        );
+        let wrapper = Arc::new(DbCacheWrapper::new(
+            split_cache,
+            &stat_registry,
+            Arc::new(DefaultSystemClock::default()),
+        ));
+        let ts = Arc::new(TableStore::new(
+            ObjectStores::new(os.clone(), None),
+            format,
+            Path::from(ROOT),
+            Some(wrapper),
+        ));
+
+        // Build a large compacted SST with ~1000 data blocks.
+        let id = SsTableId::Compacted(ulid::Ulid::new());
+        let mut writer = ts.table_writer(id);
+        let mut keygen = OrderedBytesGenerator::new_with_suffix(&[], &[0u8; 8]);
+        let mut blocks_written = 0;
+        let target_blocks = 10000;
+        while blocks_written < target_blocks {
+            let key = keygen.next();
+            let value = bytes::Bytes::from(vec![0u8; 32]);
+            if writer
+                .add(RowEntry::new_value(&key, &value, 0))
+                .await
+                .unwrap()
+                .is_some()
+            {
+                blocks_written += 1;
+            }
+        }
+        let handle = writer.close().await.unwrap();
+
+        // Verify the SST was written with a partitioned index.
+        assert_eq!(
+            handle.info.index_type,
+            SstIndexType::Partitioned,
+            "expected a partitioned index"
+        );
+
+        // Load the full flat index (without caching) so we can enumerate block-first-keys.
+        let full_index = ts.read_index(&handle, false).await.unwrap();
+        let total_blocks = full_index.borrow().block_meta().len();
+        // Collect the first key of every block.
+        let all_probe_keys: Vec<bytes::Bytes> = (0..total_blocks)
+            .map(|i| {
+                bytes::Bytes::copy_from_slice(
+                    full_index.borrow().block_meta().get(i).first_key().bytes(),
+                )
+            })
+            .collect();
+        drop(full_index);
+
+        // For contrast: eager loading (read_index) caches every partition.
+        let eager_meta_cache = Arc::new(MokaCache::new());
+        let eager_split = Arc::new(
+            SplitCache::new()
+                .with_meta_cache(Some(eager_meta_cache.clone()))
+                .build(),
+        );
+        let eager_stat_registry = StatRegistry::new();
+        let eager_wrapper = Arc::new(DbCacheWrapper::new(
+            eager_split,
+            &eager_stat_registry,
+            Arc::new(DefaultSystemClock::default()),
+        ));
+        let ts_eager = Arc::new(TableStore::new(
+            ObjectStores::new(os.clone(), None),
+            SsTableFormat {
+                block_size: 256,
+                min_filter_keys: u32::MAX,
+                ..SsTableFormat::default()
+            },
+            Path::from(ROOT),
+            Some(eager_wrapper),
+        ));
+        ts_eager.read_index(&handle, true).await.unwrap();
+        eager_meta_cache.run_pending_tasks().await;
+        let eager_entries = eager_meta_cache.entry_count();
+
+        eprintln!("eager (full index, {total_blocks} blocks): {eager_entries} meta entries");
+
+        // Test lazy loading at 10%..=50% in increments of 10%.
+        for pct in (10..=50).step_by(10) {
+            let n_keys = total_blocks * pct / 100;
+            let probe_keys = &all_probe_keys[..n_keys];
+
+            let lazy_meta_cache = Arc::new(MokaCache::new());
+            let lazy_split = Arc::new(
+                SplitCache::new()
+                    .with_meta_cache(Some(lazy_meta_cache.clone()))
+                    .build(),
+            );
+            let lazy_stat_registry = StatRegistry::new();
+            let lazy_wrapper = Arc::new(DbCacheWrapper::new(
+                lazy_split,
+                &lazy_stat_registry,
+                Arc::new(DefaultSystemClock::default()),
+            ));
+            let ts_lazy = Arc::new(TableStore::new(
+                ObjectStores::new(os.clone(), None),
+                SsTableFormat {
+                    block_size: 256,
+                    min_filter_keys: u32::MAX,
+                    ..SsTableFormat::default()
+                },
+                Path::from(ROOT),
+                Some(lazy_wrapper),
+            ));
+
+            for key in probe_keys {
+                ts_lazy
+                    .read_index_for_key(&handle, key, true)
+                    .await
+                    .unwrap();
+            }
+
+            lazy_meta_cache.run_pending_tasks().await;
+            let lazy_entries = lazy_meta_cache.entry_count();
+
+            eprintln!(
+                "lazy {pct:>3}% ({n_keys} of {total_blocks} blocks): {lazy_entries} meta entries"
+            );
+
+            assert!(
+                lazy_entries < eager_entries,
+                "lazy loading at {pct}% ({lazy_entries} entries) should use fewer meta-cache \
+                 entries than eager loading ({eager_entries} entries)"
+            );
+        }
     }
 
     proptest! {

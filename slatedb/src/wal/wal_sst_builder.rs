@@ -55,7 +55,6 @@ use std::sync::Arc;
 use crate::config::CompressionCodec;
 use crate::db_state::{SsTableInfoCodec, SstType};
 use crate::error::SlateDBError;
-use crate::flatbuffer_types::{BlockMeta, BlockMetaArgs};
 use crate::format::sst::{
     BlockBuilder, BlockTransformer, EncodedSsTable, EncodedSsTableBlock,
     EncodedSsTableBlockBuilder, EncodedSsTableFooterBuilder, SsTableFormat,
@@ -63,7 +62,6 @@ use crate::format::sst::{
 };
 use crate::types::RowEntry;
 use bytes::Bytes;
-use flatbuffers::DefaultAllocator;
 
 impl SsTableFormat {
     pub(crate) fn wal_table_builder(&self) -> EncodedWalSsTableBuilder {
@@ -87,8 +85,8 @@ impl SsTableFormat {
 #[allow(unused)]
 pub(crate) struct EncodedWalSsTableBuilder {
     block_builder: BlockBuilder,
-    index_builder: flatbuffers::FlatBufferBuilder<'static, DefaultAllocator>,
-    block_meta: Vec<flatbuffers::WIPOffset<BlockMeta<'static>>>,
+    /// Raw block metadata: (block_offset, first_seq_bytes).
+    raw_block_meta: Vec<(u64, Bytes)>,
     data_size: u64,
     blocks: VecDeque<EncodedSsTableBlock>,
     block_size_config: usize,
@@ -96,7 +94,8 @@ pub(crate) struct EncodedWalSsTableBuilder {
     compression_codec: Option<CompressionCodec>,
     block_transformer: Option<Arc<dyn BlockTransformer>>,
     sst_first_seq: Option<Bytes>,
-    first_seq: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'static, u8>>>,
+    /// First sequence number bytes for the current (not yet flushed) block.
+    current_first_seq: Option<Bytes>,
     entries_count: usize,
     entries_size_bytes: usize,
 }
@@ -107,15 +106,14 @@ impl EncodedWalSsTableBuilder {
         Self {
             data_size: 0,
             blocks: VecDeque::new(),
-            block_meta: Vec::new(),
+            raw_block_meta: Vec::new(),
             block_size_config: block_size,
             block_builder: BlockBuilder::new_latest(block_size),
-            index_builder: flatbuffers::FlatBufferBuilder::new(),
             sst_codec,
             compression_codec: None,
             block_transformer: None,
             sst_first_seq: None,
-            first_seq: None,
+            current_first_seq: None,
             entries_count: 0,
             entries_size_bytes: 0,
         }
@@ -143,12 +141,10 @@ impl EncodedWalSsTableBuilder {
 
         let mut block_size = None;
         if !self.block_builder.would_fit(&entry) {
-            let first_seq_bytes = entry.seq.to_be_bytes();
             block_size = self.finish_block().await?;
-            self.first_seq = Some(self.index_builder.create_vector(&first_seq_bytes));
+            self.current_first_seq = Some(Bytes::from(entry.seq.to_be_bytes().to_vec()));
         } else if is_sst_first_seq {
-            let first_seq_bytes = entry.seq.to_be_bytes();
-            self.first_seq = Some(self.index_builder.create_vector(&first_seq_bytes));
+            self.current_first_seq = Some(Bytes::from(entry.seq.to_be_bytes().to_vec()));
         }
 
         let entry_size = entry.estimated_size();
@@ -198,19 +194,15 @@ impl EncodedWalSsTableBuilder {
             block_builder = block_builder.with_block_transformer(transformer);
         }
         let block = block_builder.build().await?;
-        let block_meta = BlockMeta::create(
-            &mut self.index_builder,
-            &BlockMetaArgs {
-                offset: block.offset,
-                first_key: self.first_seq,
-            },
-        );
-        self.block_meta.push(block_meta);
+        let first_seq = self
+            .current_first_seq
+            .take()
+            .expect("current_first_seq must be set before finish_block");
+        self.raw_block_meta.push((block.offset, first_seq));
 
         let block_size = block.len();
         self.data_size += block_size as u64;
         self.blocks.push_back(block);
-        self.first_seq = None;
 
         Ok(Some(block_size))
     }
@@ -250,8 +242,7 @@ impl EncodedWalSsTableBuilder {
             self.sst_first_seq,
             None, // WAL SSTs don't have sorted keys, so no last_entry
             &*self.sst_codec,
-            self.index_builder,
-            self.block_meta,
+            self.raw_block_meta,
             format_version,
             SstType::Wal,
         );
@@ -489,7 +480,8 @@ mod tests {
         let encoded = builder.build().await.unwrap();
 
         // Then
-        let index = encoded.index.borrow();
+        let flat = encoded.index.into_flat_index().unwrap();
+        let index = flat.borrow();
         let block_metas = index.block_meta();
         assert_eq!(3, block_metas.len(), "Index should have three entries");
         assert_eq!(block_metas.get(0).first_key().bytes(), &10u64.to_be_bytes());
@@ -600,7 +592,8 @@ mod tests {
         let encoded = builder.build().await.unwrap();
 
         // Then
-        let index = encoded.index.borrow();
+        let flat = encoded.index.into_flat_index().unwrap();
+        let index = flat.borrow();
         let block_metas = index.block_meta();
         assert_eq!(
             block_metas.get(0).first_key().bytes(),

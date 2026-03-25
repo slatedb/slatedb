@@ -70,6 +70,8 @@ pub mod cached_object_store;
 pub mod clock;
 #[cfg(feature = "bencher")]
 pub mod compaction_execute_bench;
+#[cfg(feature = "bencher")]
+pub mod sst_index_bench;
 pub mod compactor;
 pub mod config;
 pub mod db_cache;

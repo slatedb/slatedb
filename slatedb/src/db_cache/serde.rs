@@ -8,7 +8,7 @@ use crate::db_cache::{CachedEntry, CachedItem, CachedKey};
 use crate::db_state::SsTableId;
 use crate::error::SlateDBError;
 use crate::filter::BloomFilter;
-use crate::flatbuffer_types::SsTableIndexOwned;
+use crate::flatbuffer_types::{PartitionIndexOwned, SsTableIndexOwned, SsTableIndexV2Owned};
 use crate::format::block::Block;
 use crate::sst_stats::SstStats;
 use bytes::Bytes;
@@ -96,6 +96,8 @@ enum SerializedCachedEntryV1 {
     SsTableIndex(Bytes),
     BloomFilter(Bytes),
     SstStats(Bytes),
+    SsTableIndexV2(Bytes),
+    PartitionIndex(Bytes),
 }
 
 impl SerializedCachedEntryV1 {
@@ -116,6 +118,14 @@ impl SerializedCachedEntryV1 {
             SerializedCachedEntryV1::SstStats(encoded) => {
                 let stats = SstStats::decode(encoded)?;
                 CachedItem::SstStats(Arc::new(stats))
+            }
+            SerializedCachedEntryV1::SsTableIndexV2(encoded) => {
+                let v2 = SsTableIndexV2Owned::new(encoded)?;
+                CachedItem::SsTableIndexV2(Arc::new(v2))
+            }
+            SerializedCachedEntryV1::PartitionIndex(encoded) => {
+                let partition = PartitionIndexOwned::new(encoded)?;
+                CachedItem::PartitionIndex(Arc::new(partition))
             }
         };
         Ok(CachedEntry { item })
@@ -153,6 +163,12 @@ impl From<CachedEntry> for SerializedCachedEntry {
             CachedItem::SstStats(stats) => {
                 let encoded = stats.encode();
                 SerializedCachedEntry::V1(SerializedCachedEntryV1::SstStats(encoded))
+            }
+            CachedItem::SsTableIndexV2(v2) => {
+                SerializedCachedEntry::V1(SerializedCachedEntryV1::SsTableIndexV2(v2.data()))
+            }
+            CachedItem::PartitionIndex(p) => {
+                SerializedCachedEntry::V1(SerializedCachedEntryV1::PartitionIndex(p.data()))
             }
         }
     }

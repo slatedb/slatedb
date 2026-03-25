@@ -1,10 +1,12 @@
 use crate::blob::ReadOnlyBlob;
 use crate::config::CompressionCodec;
-use crate::db_state::{SsTableInfo, SsTableInfoCodec, SstType};
+use crate::db_state::{SsTableInfo, SsTableInfoCodec, SstIndexType, SstType};
 use crate::error::SlateDBError;
 use crate::filter::BloomFilter;
 use crate::flatbuffer_types::{
-    BlockMeta, FlatBufferSsTableInfoCodec, SsTableIndex, SsTableIndexArgs, SsTableIndexOwned,
+    BlockMeta, BlockMetaArgs, FlatBufferSsTableInfoCodec, PartitionIndex, PartitionIndexArgs,
+    PartitionIndexOwned, PartitionMeta, PartitionMetaArgs, SsTableIndex, SsTableIndexArgs,
+    SsTableIndexOwned, SsTableIndexV2, SsTableIndexV2Args, SsTableIndexV2Owned,
 };
 use crate::format::block::{Block, BlockBuilderV1};
 use crate::format::block_v2::BlockBuilderV2;
@@ -12,7 +14,6 @@ use crate::format::row;
 use crate::sst_stats::{BlockStats, SstStats};
 use async_trait::async_trait;
 use bytes::{Buf, BufMut, Bytes};
-use flatbuffers::DefaultAllocator;
 use std::collections::VecDeque;
 #[cfg(feature = "zlib")]
 use std::io::Read;
@@ -23,6 +24,10 @@ use std::sync::Arc;
 
 // 8 bytes for the metadata offset + 2 bytes for the version
 const NUM_FOOTER_BYTES: usize = 10;
+/// Target size in bytes for each partition index block. When the estimated
+/// serialized size of block-meta entries exceeds this threshold, a new
+/// partition is started.
+const PARTITION_INDEX_TARGET_SIZE: usize = 4096;
 const NUM_FOOTER_BYTES_LONG: u64 = NUM_FOOTER_BYTES as u64;
 const SEQNUM_SIZE: usize = size_of::<u64>();
 pub(crate) const SST_FORMAT_VERSION: u16 = 1;
@@ -288,10 +293,48 @@ impl EncodedSsTableBlockBuilder {
     }
 }
 
+/// The index data produced when building an SSTable footer, used to populate
+/// the in-memory cache after the SST is written to the object store.
+pub(crate) enum SstIndexData {
+    /// Flat index (used for WAL SSTs).
+    Flat(SsTableIndexOwned),
+    /// Partitioned index (used for compacted SSTs): the top-level V2 directory
+    /// plus the individually-decoded partition blocks at their on-disk offsets.
+    Partitioned {
+        v2: Arc<SsTableIndexV2Owned>,
+        /// (partition_offset_in_sst, decoded_partition)
+        partitions: Vec<(u64, Arc<PartitionIndexOwned>)>,
+    },
+}
+
+impl SstIndexData {
+    /// Reconstruct a flat `SsTableIndexOwned` from this index data.
+    /// For `Flat`, returns the index directly.
+    /// For `Partitioned`, stitches all partition blocks into a flat index.
+    #[cfg(test)]
+    pub(crate) fn into_flat_index(self) -> Result<SsTableIndexOwned, SlateDBError> {
+        match self {
+            SstIndexData::Flat(index) => Ok(index),
+            SstIndexData::Partitioned { partitions, .. } => {
+                let mut raw: Vec<(u64, Bytes)> = Vec::new();
+                for (_, partition) in &partitions {
+                    let p = partition.borrow();
+                    for j in 0..p.blocks().len() {
+                        let bm = p.blocks().get(j);
+                        raw.push((bm.offset(), Bytes::copy_from_slice(bm.first_key().bytes())));
+                    }
+                }
+                let flat = EncodedSsTableFooterBuilder::encode_flat_index(&raw);
+                Ok(SsTableIndexOwned::new(flat)?)
+            }
+        }
+    }
+}
+
 /// The encoded footer of an SSTable, containing filter, index, stats, info, and metadata.
 pub(crate) struct EncodedSsTableFooter {
     pub(crate) info: SsTableInfo,
-    pub(crate) index: SsTableIndexOwned,
+    pub(crate) index: SstIndexData,
     pub(crate) filter: Option<Arc<BloomFilter>>,
     #[allow(dead_code)]
     pub(crate) stats: Option<SstStats>,
@@ -299,7 +342,7 @@ pub(crate) struct EncodedSsTableFooter {
 }
 
 /// Builder for encoding the SSTable footer (filter, index, info, and metadata).
-pub(crate) struct EncodedSsTableFooterBuilder<'a, 'b> {
+pub(crate) struct EncodedSsTableFooterBuilder<'a> {
     /// size of all data blocks in the SST
     blocks_size: u64,
     /// first entry in the SST, key for compacted data, sequence number for WAL
@@ -312,10 +355,8 @@ pub(crate) struct EncodedSsTableFooterBuilder<'a, 'b> {
     block_transformer: Option<Arc<dyn BlockTransformer>>,
     /// codec for the SST info
     sst_info_codec: &'a dyn SsTableInfoCodec,
-    /// builder for the index block
-    index_builder: flatbuffers::FlatBufferBuilder<'b, flatbuffers::DefaultAllocator>,
-    /// metadata block
-    block_meta: Vec<flatbuffers::WIPOffset<BlockMeta<'b>>>,
+    /// raw block metadata: (block_offset, first_key_bytes)
+    raw_block_meta: Vec<(u64, Bytes)>,
     /// filter block
     filter: Option<(Arc<BloomFilter>, Bytes)>,
     /// stats block
@@ -326,14 +367,13 @@ pub(crate) struct EncodedSsTableFooterBuilder<'a, 'b> {
     sst_type: SstType,
 }
 
-impl<'a, 'b> EncodedSsTableFooterBuilder<'a, 'b> {
+impl<'a> EncodedSsTableFooterBuilder<'a> {
     pub(crate) fn new(
         blocks_len: u64,
         sst_first_entry: Option<Bytes>,
         sst_last_entry: Option<Bytes>,
         sst_codec: &'a dyn SsTableInfoCodec,
-        index_builder: flatbuffers::FlatBufferBuilder<'b, DefaultAllocator>,
-        block_meta: Vec<flatbuffers::WIPOffset<BlockMeta<'b>>>,
+        raw_block_meta: Vec<(u64, Bytes)>,
         sst_format_version: u16,
         sst_type: SstType,
     ) -> Self {
@@ -344,8 +384,7 @@ impl<'a, 'b> EncodedSsTableFooterBuilder<'a, 'b> {
             compression_codec: None,
             block_transformer: None,
             sst_info_codec: sst_codec,
-            index_builder,
-            block_meta,
+            raw_block_meta,
             filter: None,
             stats: None,
             sst_format_version,
@@ -397,24 +436,11 @@ impl<'a, 'b> EncodedSsTableFooterBuilder<'a, 'b> {
             None => (0u64, None),
         };
 
-        let vector = self.index_builder.create_vector(&self.block_meta);
-        let index_wip = SsTableIndex::create(
-            &mut self.index_builder,
-            &SsTableIndexArgs {
-                block_meta: Some(vector),
-            },
-        );
-        self.index_builder.finish(index_wip, None);
-        let index_data = Bytes::from(self.index_builder.finished_data().to_vec());
-        let index = SsTableIndexOwned::new(index_data.clone())?;
-        let index_offset = self.blocks_size + buf.len() as u64;
-        let index_len = compress_and_transform(
-            &mut buf,
-            index_data,
-            self.compression_codec,
-            self.block_transformer.as_ref(),
-        )
-        .await? as u64;
+        // Build index: partitioned for compacted SSTs, flat for WAL SSTs.
+        let (index_offset, index_len, index, index_type) = match self.sst_type {
+            SstType::Compacted => self.build_partitioned_index(&mut buf).await?,
+            SstType::Wal => self.build_flat_index(&mut buf).await?,
+        };
 
         // Write stats block if present
         let maybe_stats = self.stats.take();
@@ -445,6 +471,7 @@ impl<'a, 'b> EncodedSsTableFooterBuilder<'a, 'b> {
             sst_type: self.sst_type,
             stats_offset,
             stats_len,
+            index_type,
         };
         SsTableInfo::encode(&info, &mut buf, self.sst_info_codec);
 
@@ -459,12 +486,199 @@ impl<'a, 'b> EncodedSsTableFooterBuilder<'a, 'b> {
             encoded_bytes: Bytes::from(buf),
         })
     }
+
+    /// Builds a flat `SsTableIndex` from `raw_block_meta`, writes it to `buf`,
+    /// and returns `(index_offset, index_len, SstIndexData::Flat, SstIndexType::Flat)`.
+    async fn build_flat_index(
+        &self,
+        buf: &mut Vec<u8>,
+    ) -> Result<(u64, u64, SstIndexData, SstIndexType), SlateDBError> {
+        let index_data = Self::encode_flat_index(&self.raw_block_meta);
+        let index = SsTableIndexOwned::new(index_data.clone())?;
+        let index_offset = self.blocks_size + buf.len() as u64;
+        let index_len = compress_and_transform(
+            buf,
+            index_data,
+            self.compression_codec,
+            self.block_transformer.as_ref(),
+        )
+        .await? as u64;
+        Ok((
+            index_offset,
+            index_len,
+            SstIndexData::Flat(index),
+            SstIndexType::Flat,
+        ))
+    }
+
+    /// Builds a partitioned index from `raw_block_meta`:
+    /// - Writes each `PartitionIndex` block to `buf`
+    /// - Writes the top-level `SsTableIndexV2` directory to `buf`
+    /// - Returns `(index_offset, index_len, SstIndexData::Partitioned, SstIndexType::Partitioned)`
+    ///
+    /// The returned `SstIndexData::Partitioned` holds the decoded V2 directory and each
+    /// decoded partition block so the caller can cache them individually without stitching.
+    async fn build_partitioned_index(
+        &self,
+        buf: &mut Vec<u8>,
+    ) -> Result<(u64, u64, SstIndexData, SstIndexType), SlateDBError> {
+        if self.raw_block_meta.is_empty() {
+            // Empty SST: fall back to a flat empty index
+            return self.build_flat_index(buf).await;
+        }
+
+        // Group raw_block_meta into partitions of ~PARTITION_INDEX_TARGET_SIZE bytes.
+        let partition_slices = Self::partition_block_meta(&self.raw_block_meta);
+
+        // Write each PartitionIndex block and record its location.
+        let mut partition_metas: Vec<(u64, u64, Bytes)> = Vec::new();
+        let mut cached_partitions: Vec<(u64, Arc<PartitionIndexOwned>)> = Vec::new();
+        for partition_slice in &partition_slices {
+            let first_key = partition_slice[0].1.clone();
+            let partition_data = Self::encode_partition_index(partition_slice);
+            let partition_offset = self.blocks_size + buf.len() as u64;
+            // Stash the decoded partition before compression (for caching).
+            let partition_owned = Arc::new(PartitionIndexOwned::new(partition_data.clone())?);
+            let partition_len = compress_and_transform(
+                buf,
+                partition_data,
+                self.compression_codec,
+                self.block_transformer.as_ref(),
+            )
+            .await? as u64;
+            partition_metas.push((partition_offset, partition_len, first_key));
+            cached_partitions.push((partition_offset, partition_owned));
+        }
+
+        // Build and write the top-level SsTableIndexV2 directory.
+        let v2_data = Self::encode_sst_index_v2(&partition_metas);
+        let index_offset = self.blocks_size + buf.len() as u64;
+        let v2_owned = Arc::new(SsTableIndexV2Owned::new(v2_data.clone())?);
+        let index_len = compress_and_transform(
+            buf,
+            v2_data,
+            self.compression_codec,
+            self.block_transformer.as_ref(),
+        )
+        .await? as u64;
+
+        Ok((
+            index_offset,
+            index_len,
+            SstIndexData::Partitioned {
+                v2: v2_owned,
+                partitions: cached_partitions,
+            },
+            SstIndexType::Partitioned,
+        ))
+    }
+
+    /// Groups `raw_block_meta` into slices, each with an estimated serialized
+    /// size ≤ `PARTITION_INDEX_TARGET_SIZE`.
+    fn partition_block_meta(raw: &[(u64, Bytes)]) -> Vec<&[(u64, Bytes)]> {
+        // Conservative per-entry overhead: 8 (offset) + 4 (vec header) + 4 (alignment) + key
+        const OVERHEAD_PER_ENTRY: usize = 16;
+
+        let mut partitions: Vec<&[(u64, Bytes)]> = Vec::new();
+        let mut start = 0;
+        let mut current_size = 0;
+
+        for (i, (_, key)) in raw.iter().enumerate() {
+            current_size += OVERHEAD_PER_ENTRY + key.len();
+            let is_last = i + 1 == raw.len();
+            if (current_size >= PARTITION_INDEX_TARGET_SIZE && !is_last) || is_last {
+                partitions.push(&raw[start..=i]);
+                start = i + 1;
+                current_size = 0;
+            }
+        }
+        partitions
+    }
+
+    /// Encodes a slice of `(offset, first_key)` pairs as a flat `SsTableIndex` FlatBuffer.
+    fn encode_flat_index(raw: &[(u64, Bytes)]) -> Bytes {
+        let mut builder = flatbuffers::FlatBufferBuilder::new();
+        let entries: Vec<_> = raw
+            .iter()
+            .map(|(offset, key)| {
+                let key_vec = builder.create_vector(key);
+                BlockMeta::create(
+                    &mut builder,
+                    &BlockMetaArgs {
+                        offset: *offset,
+                        first_key: Some(key_vec),
+                    },
+                )
+            })
+            .collect();
+        let vec = builder.create_vector(&entries);
+        let index = SsTableIndex::create(
+            &mut builder,
+            &SsTableIndexArgs {
+                block_meta: Some(vec),
+            },
+        );
+        builder.finish(index, None);
+        Bytes::from(builder.finished_data().to_vec())
+    }
+
+    /// Encodes a partition's `(offset, first_key)` pairs as a `PartitionIndex` FlatBuffer.
+    fn encode_partition_index(raw: &[(u64, Bytes)]) -> Bytes {
+        let mut builder = flatbuffers::FlatBufferBuilder::new();
+        let entries: Vec<_> = raw
+            .iter()
+            .map(|(offset, key)| {
+                let key_vec = builder.create_vector(key);
+                BlockMeta::create(
+                    &mut builder,
+                    &BlockMetaArgs {
+                        offset: *offset,
+                        first_key: Some(key_vec),
+                    },
+                )
+            })
+            .collect();
+        let vec = builder.create_vector(&entries);
+        let partition =
+            PartitionIndex::create(&mut builder, &PartitionIndexArgs { blocks: Some(vec) });
+        builder.finish(partition, None);
+        Bytes::from(builder.finished_data().to_vec())
+    }
+
+    /// Encodes a list of `(partition_offset, partition_len, first_key)` as a
+    /// top-level `SsTableIndexV2` FlatBuffer.
+    fn encode_sst_index_v2(partition_metas: &[(u64, u64, Bytes)]) -> Bytes {
+        let mut builder = flatbuffers::FlatBufferBuilder::new();
+        let entries: Vec<_> = partition_metas
+            .iter()
+            .map(|(offset, length, first_key)| {
+                let key_vec = builder.create_vector(first_key);
+                PartitionMeta::create(
+                    &mut builder,
+                    &PartitionMetaArgs {
+                        offset: *offset,
+                        length: *length,
+                        first_key: Some(key_vec),
+                    },
+                )
+            })
+            .collect();
+        let vec = builder.create_vector(&entries);
+        let index_v2 = SsTableIndexV2::create(
+            &mut builder,
+            &SsTableIndexV2Args {
+                partitions: Some(vec),
+            },
+        );
+        builder.finish(index_v2, None);
+        Bytes::from(builder.finished_data().to_vec())
+    }
 }
 
 pub(crate) struct EncodedSsTable {
     pub(crate) format_version: u16,
     pub(crate) info: SsTableInfo,
-    pub(crate) index: SsTableIndexOwned,
+    pub(crate) index: SstIndexData,
     pub(crate) filter: Option<Arc<BloomFilter>>,
     #[allow(dead_code)]
     pub(crate) stats: Option<SstStats>,
@@ -704,11 +918,135 @@ impl SsTableFormat {
         info: &SsTableInfo,
         obj: &impl ReadOnlyBlob,
     ) -> Result<SsTableIndexOwned, SlateDBError> {
+        match info.index_type {
+            SstIndexType::Flat => {
+                let index_off = info.index_offset;
+                let index_end = index_off + info.index_len;
+                let index_bytes = obj.read_range(index_off..index_end).await?;
+                self.decode_index(index_bytes, info.compression_codec).await
+            }
+            SstIndexType::Partitioned => self.read_partitioned_index(info, obj).await,
+        }
+    }
+
+    /// Reads and decodes the top-level `SsTableIndexV2` directory from the object store.
+    pub(crate) async fn read_v2_directory(
+        &self,
+        info: &SsTableInfo,
+        obj: &impl ReadOnlyBlob,
+    ) -> Result<SsTableIndexV2Owned, SlateDBError> {
         let index_off = info.index_offset;
         let index_end = index_off + info.index_len;
-        let index_bytes = obj.read_range(index_off..index_end).await?;
-        let compression_codec = info.compression_codec;
-        self.decode_index(index_bytes, compression_codec).await
+        let v2_bytes = obj.read_range(index_off..index_end).await?;
+        let v2_bytes = self
+            .validate_and_decompress(v2_bytes, info.compression_codec)
+            .await?;
+        Ok(SsTableIndexV2Owned::new(v2_bytes)?)
+    }
+
+    /// Reads all partition blocks from the object store in a single range read,
+    /// returning each as a decoded `(partition_offset, PartitionIndexOwned)` pair.
+    pub(crate) async fn read_partitions_from_store(
+        &self,
+        info: &SsTableInfo,
+        v2: &SsTableIndexV2Owned,
+        obj: &impl ReadOnlyBlob,
+    ) -> Result<Vec<(u64, PartitionIndexOwned)>, SlateDBError> {
+        let v2_borrow = v2.borrow();
+        let Some(partitions) = v2_borrow.partitions() else {
+            return Ok(vec![]);
+        };
+        if partitions.len() == 0 {
+            return Ok(vec![]);
+        }
+
+        // Single contiguous read covering all partition blocks.
+        let first = partitions.get(0);
+        let last = partitions.get(partitions.len() - 1);
+        let read_start = first.offset();
+        let read_end = last.offset() + last.length();
+        let all_bytes = obj.read_range(read_start..read_end).await?;
+
+        let mut result = Vec::with_capacity(partitions.len());
+        for i in 0..partitions.len() {
+            let pm = partitions.get(i);
+            let slice_start = (pm.offset() - read_start) as usize;
+            let slice_end = slice_start + pm.length() as usize;
+            let partition_bytes = all_bytes.slice(slice_start..slice_end);
+            let partition_bytes = self
+                .validate_and_decompress(partition_bytes, info.compression_codec)
+                .await?;
+            result.push((pm.offset(), PartitionIndexOwned::new(partition_bytes)?));
+        }
+        Ok(result)
+    }
+
+    /// Reads and decodes a single partition block from the object store by its byte range.
+    pub(crate) async fn read_single_partition(
+        &self,
+        info: &SsTableInfo,
+        offset: u64,
+        length: u64,
+        obj: &impl ReadOnlyBlob,
+    ) -> Result<PartitionIndexOwned, SlateDBError> {
+        let partition_bytes = obj.read_range(offset..offset + length).await?;
+        let partition_bytes = self
+            .validate_and_decompress(partition_bytes, info.compression_codec)
+            .await?;
+        Ok(PartitionIndexOwned::new(partition_bytes)?)
+    }
+
+    /// Stitches a slice of decoded partition blocks into a flat `SsTableIndexOwned`.
+    pub(crate) fn stitch_partitions_to_flat(
+        partitions: &[(u64, PartitionIndexOwned)],
+    ) -> Result<SsTableIndexOwned, SlateDBError> {
+        let mut raw: Vec<(u64, Bytes)> = Vec::new();
+        for (_, partition) in partitions {
+            let p = partition.borrow();
+            for j in 0..p.blocks().len() {
+                let bm = p.blocks().get(j);
+                raw.push((bm.offset(), Bytes::copy_from_slice(bm.first_key().bytes())));
+            }
+        }
+        let flat = EncodedSsTableFooterBuilder::encode_flat_index(&raw);
+        Ok(SsTableIndexOwned::new(flat)?)
+    }
+
+    /// Reads a partitioned index by fetching the V2 directory and all partition
+    /// blocks in a single range read, then stitching into a flat `SsTableIndexOwned`.
+    async fn read_partitioned_index(
+        &self,
+        info: &SsTableInfo,
+        obj: &impl ReadOnlyBlob,
+    ) -> Result<SsTableIndexOwned, SlateDBError> {
+        let v2 = self.read_v2_directory(info, obj).await?;
+        let partitions = self.read_partitions_from_store(info, &v2, obj).await?;
+        if partitions.is_empty() {
+            return Ok(SsTableIndexOwned::new(
+                EncodedSsTableFooterBuilder::encode_flat_index(&[]),
+            )?);
+        }
+        Self::stitch_partitions_to_flat(&partitions)
+    }
+
+    /// Validates checksum, untransforms, and decompresses raw bytes from the object store.
+    async fn validate_and_decompress(
+        &self,
+        bytes: Bytes,
+        compression_codec: Option<CompressionCodec>,
+    ) -> Result<Bytes, SlateDBError> {
+        let bytes = self.validate_checksum(bytes)?;
+        let bytes = match &self.block_transformer {
+            Some(t) => t
+                .decode(bytes)
+                .await
+                .map_err(|_| SlateDBError::BlockTransformError)?,
+            None => bytes,
+        };
+        Ok(match compression_codec {
+            Some(c) => Self::decompress(bytes, c)?,
+            None => bytes,
+        })
     }
 
     #[cfg(test)]
@@ -717,11 +1055,49 @@ impl SsTableFormat {
         info: &SsTableInfo,
         sst_bytes: &Bytes,
     ) -> Result<SsTableIndexOwned, SlateDBError> {
-        let index_off = info.index_offset as usize;
-        let index_end = index_off + info.index_len as usize;
-        let index_bytes: Bytes = sst_bytes.slice(index_off..index_end);
-        let compression_codec = info.compression_codec;
-        self.decode_index(index_bytes, compression_codec).await
+        match info.index_type {
+            SstIndexType::Flat => {
+                let index_off = info.index_offset as usize;
+                let index_end = index_off + info.index_len as usize;
+                let index_bytes: Bytes = sst_bytes.slice(index_off..index_end);
+                self.decode_index(index_bytes, info.compression_codec).await
+            }
+            SstIndexType::Partitioned => {
+                // Decode V2 directory from sst_bytes, then stitch all partitions.
+                let index_off = info.index_offset as usize;
+                let index_end = index_off + info.index_len as usize;
+                let v2_bytes = sst_bytes.slice(index_off..index_end);
+                let v2_bytes = self
+                    .validate_and_decompress(v2_bytes, info.compression_codec)
+                    .await?;
+                let v2_owned = SsTableIndexV2Owned::new(v2_bytes)?;
+                let v2 = v2_owned.borrow();
+                let Some(partitions) = v2.partitions() else {
+                    return Ok(SsTableIndexOwned::new(
+                        EncodedSsTableFooterBuilder::encode_flat_index(&[]),
+                    )?);
+                };
+                let mut raw_block_meta: Vec<(u64, Bytes)> = Vec::new();
+                for i in 0..partitions.len() {
+                    let pm = partitions.get(i);
+                    let p_off = pm.offset() as usize;
+                    let p_end = p_off + pm.length() as usize;
+                    let p_bytes = sst_bytes.slice(p_off..p_end);
+                    let p_bytes = self
+                        .validate_and_decompress(p_bytes, info.compression_codec)
+                        .await?;
+                    let partition_owned = PartitionIndexOwned::new(p_bytes)?;
+                    let partition = partition_owned.borrow();
+                    for j in 0..partition.blocks().len() {
+                        let bm = partition.blocks().get(j);
+                        let key = Bytes::copy_from_slice(bm.first_key().bytes());
+                        raw_block_meta.push((bm.offset(), key));
+                    }
+                }
+                let flat_data = EncodedSsTableFooterBuilder::encode_flat_index(&raw_block_meta);
+                Ok(SsTableIndexOwned::new(flat_data)?)
+            }
+        }
     }
 
     async fn decode_index(

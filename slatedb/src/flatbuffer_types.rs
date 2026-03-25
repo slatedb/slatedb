@@ -14,7 +14,7 @@ use crate::compactor_state::{
     Compaction as CompactorCompaction, CompactionSpec as CompactorCompactionSpec, CompactionStatus,
     Compactions as CompactorCompactions, SourceId,
 };
-use crate::db_state::{self, SsTableInfo, SsTableInfoCodec, SstType};
+use crate::db_state::{self, SsTableInfo, SsTableInfoCodec, SstIndexType, SstType};
 use crate::db_state::{ManifestCore, SsTableHandle, SsTableView};
 
 #[path = "./generated/root_generated.rs"]
@@ -23,9 +23,10 @@ use crate::db_state::{ManifestCore, SsTableHandle, SsTableView};
 mod root_generated;
 pub(crate) use root_generated::{
     BlockMeta, BlockMetaArgs, BlockStats as FbBlockStats, BlockStatsArgs as FbBlockStatsArgs,
-    ManifestV1, ManifestV2, ManifestV2Args, SsTableIndex, SsTableIndexArgs,
-    SsTableInfo as FbSsTableInfo, SsTableInfoArgs, SstStats as FbSstStats,
-    SstStatsArgs as FbSstStatsArgs,
+    IndexType, ManifestV1, ManifestV2, ManifestV2Args, PartitionIndex, PartitionIndexArgs,
+    PartitionMeta, PartitionMetaArgs, SsTableIndex, SsTableIndexArgs,
+    SsTableInfo as FbSsTableInfo, SsTableInfoArgs, SsTableIndexV2, SsTableIndexV2Args,
+    SstStats as FbSstStats, SstStatsArgs as FbSstStatsArgs,
 };
 
 use crate::config::CompressionCodec;
@@ -95,6 +96,64 @@ impl SsTableIndexOwned {
     }
 }
 
+pub(crate) struct SsTableIndexV2Owned {
+    data: Bytes,
+}
+
+impl SsTableIndexV2Owned {
+    pub(crate) fn new(data: Bytes) -> Result<Self, InvalidFlatbuffer> {
+        flatbuffers::root_with_opts::<SsTableIndexV2>(&verifier_options(), &data)?;
+        Ok(Self { data })
+    }
+
+    pub(crate) fn borrow(&self) -> SsTableIndexV2<'_> {
+        let raw = &self.data;
+        unsafe { flatbuffers::root_unchecked::<SsTableIndexV2>(raw) }
+    }
+
+    pub(crate) fn data(&self) -> Bytes {
+        self.data.clone()
+    }
+
+    pub(crate) fn size(&self) -> usize {
+        self.data.len()
+    }
+
+    pub(crate) fn clamp_allocated_size(&self) -> Self {
+        Self::new(clamp_allocated_size_bytes(&self.data))
+            .expect("clamped buffer could not be decoded to SsTableIndexV2")
+    }
+}
+
+pub(crate) struct PartitionIndexOwned {
+    data: Bytes,
+}
+
+impl PartitionIndexOwned {
+    pub(crate) fn new(data: Bytes) -> Result<Self, InvalidFlatbuffer> {
+        flatbuffers::root_with_opts::<PartitionIndex>(&verifier_options(), &data)?;
+        Ok(Self { data })
+    }
+
+    pub(crate) fn borrow(&self) -> PartitionIndex<'_> {
+        let raw = &self.data;
+        unsafe { flatbuffers::root_unchecked::<PartitionIndex>(raw) }
+    }
+
+    pub(crate) fn data(&self) -> Bytes {
+        self.data.clone()
+    }
+
+    pub(crate) fn size(&self) -> usize {
+        self.data.len()
+    }
+
+    pub(crate) fn clamp_allocated_size(&self) -> Self {
+        Self::new(clamp_allocated_size_bytes(&self.data))
+            .expect("clamped buffer could not be decoded to PartitionIndex")
+    }
+}
+
 impl RangePartitionedKeySpace for SsTableIndex<'_> {
     fn partitions(&self) -> usize {
         self.block_meta().len()
@@ -102,6 +161,23 @@ impl RangePartitionedKeySpace for SsTableIndex<'_> {
 
     fn partition_first_key(&self, partition: usize) -> &[u8] {
         self.block_meta().get(partition).first_key().bytes()
+    }
+}
+
+impl RangePartitionedKeySpace for SsTableIndexV2<'_> {
+    fn partitions(&self) -> usize {
+        // Call the inherent method (which returns Option<Vector<...>>) to get the count.
+        SsTableIndexV2::partitions(self)
+            .map(|p| p.len())
+            .unwrap_or(0)
+    }
+
+    fn partition_first_key(&self, partition: usize) -> &[u8] {
+        SsTableIndexV2::partitions(self)
+            .unwrap()
+            .get(partition)
+            .first_key()
+            .bytes()
     }
 }
 
@@ -143,6 +219,7 @@ impl FlatBufferSsTableInfoCodec {
             sst_type: info.sst_type().into(),
             stats_offset: info.stats_offset(),
             stats_len: info.stats_len(),
+            index_type: info.index_type().into(),
         }
     }
 
@@ -601,6 +678,7 @@ impl<'b> DbFlatBufferBuilder<'b> {
                 sst_type: info.sst_type.into(),
                 stats_offset: info.stats_offset,
                 stats_len: info.stats_len,
+                index_type: info.index_type.clone().into(),
             },
         )
     }
@@ -1152,6 +1230,24 @@ impl From<FbSstType> for SstType {
     }
 }
 
+impl From<SstIndexType> for IndexType {
+    fn from(value: SstIndexType) -> Self {
+        match value {
+            SstIndexType::Flat => IndexType::Flat,
+            SstIndexType::Partitioned => IndexType::Partitioned,
+        }
+    }
+}
+
+impl From<IndexType> for SstIndexType {
+    fn from(value: IndexType) -> Self {
+        match value {
+            IndexType::Partitioned => SstIndexType::Partitioned,
+            _ => SstIndexType::Flat,
+        }
+    }
+}
+
 impl From<CompressionFormat> for Option<CompressionCodec> {
     fn from(value: CompressionFormat) -> Self {
         match value {
@@ -1210,9 +1306,7 @@ mod tests {
     use crate::db_state::{
         ManifestCore, SortedRun, SsTableHandle, SsTableId, SsTableInfo, SsTableView, SstType,
     };
-    use crate::flatbuffer_types::{
-        FlatBufferCompactionsCodec, FlatBufferManifestCodec, SsTableIndexOwned,
-    };
+    use crate::flatbuffer_types::{FlatBufferCompactionsCodec, FlatBufferManifestCodec};
     use crate::manifest::{ExternalDb, Manifest};
     use crate::{checkpoint, error::SlateDBError};
     use slatedb_txn_obj::ObjectCodec;
@@ -1359,10 +1453,10 @@ mod tests {
         let format = SsTableFormat::default();
         let sst = build_test_sst(&format, 3).await;
         let data = sst.remaining_as_bytes();
-        let start_off = sst.info.index_offset as usize;
-        let end_off = sst.info.index_offset as usize + sst.info.index_len as usize;
-        let index_bytes = data.slice(start_off..end_off);
-        let index = SsTableIndexOwned::new(index_bytes).unwrap();
+        let index = format
+            .read_index_raw(&sst.info, &data)
+            .await
+            .unwrap();
 
         let clamped = index.clamp_allocated_size();
 

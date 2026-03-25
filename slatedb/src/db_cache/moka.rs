@@ -104,6 +104,14 @@ impl Default for MokaCache {
     }
 }
 
+#[cfg(test)]
+impl MokaCache {
+    /// Flush all pending Moka internal tasks so that `entry_count()` is accurate.
+    pub(crate) async fn run_pending_tasks(&self) {
+        self.inner.run_pending_tasks().await;
+    }
+}
+
 #[async_trait]
 impl DbCache for MokaCache {
     async fn get_block(&self, key: &CachedKey) -> Result<Option<CachedEntry>, crate::Error> {
