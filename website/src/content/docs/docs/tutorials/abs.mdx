@@ -90,8 +90,8 @@ Let's check the `wal` folder.
 ```bash
 az storage blob list --container-name $ContainerName --account-name $StorageAccountName --prefix "tmp/slatedb_azure_blob_storage/wal/" --delimiter "/" --output table
 
-Name                                       Blob Type    Blob Tier    Length    Content Type              Last Modified              Snapshot
------------------------------------------  -----------  -----------  --------  ------------------------  -------------------------  ----------
+Name                                                         Blob Type    Blob Tier    Length    Content Type              Last Modified              Snapshot
+-----------------------------------------------------------  -----------  -----------  --------  ------------------------  -------------------------  ----------
 tmp/slatedb_azure_blob_storage/wal/00000000000000000001.sst  BlockBlob    Hot          64        application/octet-stream  2024-09-07T01:15:49+00:00
 tmp/slatedb_azure_blob_storage/wal/00000000000000000002.sst  BlockBlob    Hot          138       application/octet-stream  2024-09-07T01:15:49+00:00
 tmp/slatedb_azure_blob_storage/wal/00000000000000000003.sst  BlockBlob    Hot          23388     application/octet-stream  2024-09-07T01:15:49+00:00

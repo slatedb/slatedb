@@ -10,14 +10,14 @@ SlateDB is an embedded storage engine built as a [log-structured merge-tree](htt
 Object storage is an amazing technology. It provides highly-durable, highly-scalable, highly-available storage at a great cost. And recent advancements have made it even more attractive:
 
 * Google Cloud Storage supports multi-region and dual-region buckets for high availability.
-* Some object stores support compare-and-swap (CAS) operations or can be configured for conditional writes.
+* All object stores support compare-and-swap (CAS) operations.
 * Amazon Web Service's S3 Express One Zone has single-digit millisecond latency.
 
 We believe that the future of object storage are multi-region, low latency buckets that support atomic CAS operations. Inspired by [The Cloud Storage Triad: Latency, Cost, Durability](https://materializedview.io/p/cloud-storage-triad-latency-cost-durability), we set out to build a storage engine built for the cloud. SlateDB is that storage engine.
 
 ## Features
 
-* **Operational simplicity**: SlateDB is easy to operate. It runs as an in-process storage engine with no control plane and no replication protocol. Local disk-backed caching is optional.
+* **Zero-Disk architecture**: SlateDB is easy to operate. It can run as an in-process storage engine with no local state, no control plane, and no replication protocol.
 * **Single-writer**: SlateDB is designed for a single writer. Partitioning can easily be built on top of SlateDB since fencing is supported.
 * **Multiple-readers**: Multiple readers on different nodes can all read the same SlateDB database.
 * **Read caching**: SlateDB supports in-memory and (optional) on-disk read caching to reduce latency and API cost.
