@@ -2385,17 +2385,18 @@ mod tests {
             tokio::task::yield_now().await;
         }
 
-        // Drive the reader poller with the shared mock clock so it reestablishes
-        // from the new manifest that now includes the L0.
-        clock.advance(Duration::from_millis(100)).await;
-
+        let timeout = Duration::from_secs(30);
         let start = tokio::time::Instant::now();
         loop {
             if reader.inner.state.read().manifest.core.l0.len() == 1 {
                 break;
             }
+            // The reader poller may observe the pre-flush manifest on one tick and
+            // only see the new L0 on a later poll. Keep advancing the mock clock
+            // until the reader reestablishes from the updated manifest.
+            clock.advance(Duration::from_millis(100)).await;
             assert!(
-                start.elapsed() < Duration::from_secs(30),
+                start.elapsed() < timeout,
                 "timed out waiting for reader to reestablish from the new manifest"
             );
             tokio::task::yield_now().await;
