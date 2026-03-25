@@ -73,12 +73,14 @@ import absExample from '/../examples/src/azure_blob_storage.rs?raw'
 
 ```bash
 az storage blob list --container-name $ContainerName --account-name $StorageAccountName --prefix "test_slateDB/" --delimiter "/" --output table
+                           compactions/
                            wal/
                            manifest/
 ```
 
-There are three folders:
+SlateDB uses four top-level directories over time:
 
+- `compactions`: Contains the compaction-state snapshots.
 - `manifest`: Contains the manifest files. Manifest files defines the state of the DB, including the set of SSTs that are part of the DB.
 - `wal`: Contains the write-ahead log files.
 - `compacted`: Contains the compacted SST files. This short example does not create compacted files.

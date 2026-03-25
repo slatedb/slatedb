@@ -83,12 +83,14 @@ import gcsExample from '/../examples/src/google_cloud_storage.rs?raw'
 ```bash
 gcloud storage ls gs://$BucketName/tmp/slatedb_google_cloud_storage/
 
+gs://$BucketName/tmp/slatedb_google_cloud_storage/compactions/
 gs://$BucketName/tmp/slatedb_google_cloud_storage/manifest/
 gs://$BucketName/tmp/slatedb_google_cloud_storage/wal/
 ```
 
-There are three folders:
+SlateDB uses four top-level directories over time:
 
+- `compactions`: Contains the compaction-state snapshots.
 - `manifest`: Contains the manifest files. Manifest files define the state of the DB, including the set of SSTs that are part of the DB.
 - `wal`: Contains the write-ahead log files.
 - `compacted`: Contains the compacted SST files (may not appear in short examples).

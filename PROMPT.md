@@ -1,7 +1,5 @@
 1. Fix the first item in the list.
 
-- The storage tutorials repeat the same stale layout. website/src/content/docs/docs/tutorials/s3.mdx:101, website/src/content/docs/docs/tutorials/gcs.mdx:90, and website/src/
-  content/docs/docs/tutorials/abs.mdx:80 describe only three folders, even though current DBs also use compactions/.
 - website/src/content/docs/docs/tutorials/s3.mdx:95 shows objects under s3://slatedb/test/, but the actual example opens /tmp/slatedb_s3_compatible in examples/src/s3_compati
   ble.rs:20. website/src/content/docs/docs/tutorials/abs.mdx:75 shows test_slateDB/, but the example uses /tmp/slatedb_azure_blob_storage in examples/src/azure_blob_storage.r
   s:17. Those sample paths no longer match the code they document.
