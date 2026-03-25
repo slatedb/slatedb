@@ -51,6 +51,8 @@ The `compactions` directory contains an ordered list of compaction-state snapsho
 The compactor creates the first file when it initializes, then writes newer versions as it
 persists submitted, running, and recently completed compactions.
 
+See [RFC-0013](/rfcs/0013-compaction-state-persistence) for details on the compaction update protocol.
+
 ## SSTable
 
 `.sst` files in the `wal` and `compacted` directory share the same file format. Files in the `wal` directory are named `<wal_id>.sst`. `<wal_id>` is a zero-padded, 20 digit unsigned integer. Files in the `compacted` directory are named `<ulid>.sst`, where `<ulid>` is a [ULID](https://github.com/ulid/spec).
