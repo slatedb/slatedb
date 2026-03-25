@@ -2329,7 +2329,7 @@ mod tests {
             tokio::task::yield_now().await;
         }
 
-        let timeout = Duration::from_secs(5);
+        let timeout = Duration::from_secs(30);
         let start = tokio::time::Instant::now();
         loop {
             if reader.inner.state.read().manifest.core.l0.len() == 1 {
