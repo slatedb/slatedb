@@ -4,12 +4,13 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::{stream::BoxStream, StreamExt};
-use log::{error, trace};
+use log::{error, info, trace};
 use parking_lot::RwLock;
 use tokio::{
     runtime::Handle,
     select,
     sync::{mpsc, oneshot},
+    time::Instant,
 };
 use tracing::instrument;
 
@@ -74,6 +75,8 @@ struct WalBufferManagerInner {
     last_applied_seq: Option<u64>,
     /// The flusher will update the recent_flushed_wal_id and last_flushed_seq when the flush is done.
     recent_flushed_wal_id: u64,
+    /// Highest WAL frontier for which an implicit flush request has already been enqueued.
+    last_implicit_flush_request_wal_id: Option<u64>,
     /// The oracle to track the last flushed sequence number.
     oracle: Arc<DbOracle>,
 }
@@ -125,6 +128,7 @@ impl WalBufferManager {
             immutable_wals,
             last_applied_seq: None,
             recent_flushed_wal_id,
+            last_implicit_flush_request_wal_id: None,
             flush_tx: None,
             task_executor: None,
             oracle,
@@ -166,6 +170,11 @@ impl WalBufferManager {
             inner.task_executor = Some(task_executor);
         }
         result
+    }
+
+    pub(crate) fn advance_recent_flushed_wal_id(&self, wal_id: u64) {
+        let mut inner = self.inner.write();
+        inner.recent_flushed_wal_id = inner.recent_flushed_wal_id.max(wal_id);
     }
 
     #[cfg(test)]
@@ -232,8 +241,8 @@ impl WalBufferManager {
         &self,
     ) -> Result<WatchableOnceCellReader<Result<(), SlateDBError>>, SlateDBError> {
         // check the size of the current wal
-        let (durable_watcher, need_flush, flush_tx) = {
-            let inner = self.inner.read();
+        let (durable_watcher, need_flush, flush_tx, should_enqueue) = {
+            let mut inner = self.inner.write();
             let current_wal_size = self
                 .table_store
                 .estimate_encoded_size_wal(inner.current_wal.len(), inner.current_wal.size());
@@ -243,20 +252,27 @@ impl WalBufferManager {
                 format_bytes_si(self.max_wal_bytes_size as u64),
             );
             let need_flush = current_wal_size >= self.max_wal_bytes_size;
+            let flush_wal_id = inner.recent_flushed_wal_id + inner.immutable_wals.len() as u64 + 1;
+            let should_enqueue =
+                need_flush && inner.last_implicit_flush_request_wal_id != Some(flush_wal_id);
+            if should_enqueue {
+                inner.last_implicit_flush_request_wal_id = Some(flush_wal_id);
+            }
             (
                 inner.current_wal.durable_watcher(),
                 need_flush,
                 inner.flush_tx.clone(),
+                should_enqueue,
             )
         };
-        if need_flush {
+        if need_flush && should_enqueue {
             flush_tx
                 .as_ref()
                 .expect("flush_tx not initialized, please call init first.")
                 .send_safely(
                     self.db_state.read().closed_result_reader(),
                     WalFlushWork { result_tx: None },
-                )?
+                )?;
         }
 
         let estimated_bytes = self.estimated_bytes()?;
@@ -292,8 +308,9 @@ impl WalBufferManager {
             .clone()
             .expect("flush_tx not initialized, please call init first.");
         let (result_tx, result_rx) = oneshot::channel();
+        let closed_reader = self.db_state.read().closed_result_reader();
         flush_tx.send_safely(
-            self.db_state.read().closed_result_reader(),
+            closed_reader,
             WalFlushWork {
                 result_tx: Some(result_tx),
             },
@@ -345,6 +362,11 @@ impl WalBufferManager {
                     inner.oracle.advance_durable_seq(seq);
                 }
             }
+            info!(
+                "wal flush complete [wal_id={}, last_seq={:?}]",
+                wal_id,
+                wal.last_seq(),
+            );
 
             // notify durable only when the flush is successful.
             wal.notify_durable(result.clone());
@@ -364,9 +386,20 @@ impl WalBufferManager {
         }
 
         let encoded_sst = sst_builder.build().await?;
+        let written_bytes = encoded_sst.remaining_len() as u64;
+        #[allow(clippy::disallowed_methods)]
+        let start = Instant::now();
         self.table_store
             .write_sst(&SsTableId::Wal(wal_id), encoded_sst, false)
             .await?;
+        self.db_stats.wal_flush_bytes.add(written_bytes);
+        let elapsed = start.elapsed().as_secs_f64();
+        let throughput = if elapsed > 0.0 {
+            (written_bytes as f64 / elapsed) as u64
+        } else {
+            written_bytes
+        };
+        self.db_stats.wal_flush_throughput.set(throughput);
 
         self.mono_clock.fetch_max_last_durable_tick(last_tick);
         Ok(())
@@ -606,7 +639,7 @@ mod tests {
     use crate::manifest::store::test_utils::new_dirty_manifest;
     use crate::object_stores::ObjectStores;
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
-    use crate::stats::StatRegistry;
+    use crate::stats::{ReadableStat, StatRegistry};
     use crate::tablestore::TableStore;
     use crate::types::{RowEntry, ValueDeletable};
     use bytes::Bytes;
@@ -831,7 +864,7 @@ mod tests {
             wal_id_store,
             db_state.clone(),
             DbStats::new(&StatRegistry::new()),
-            0, // recent_flushed_wal_id
+            0,
             oracle,
             table_store.clone(),
             mono_clock,
@@ -889,6 +922,8 @@ mod tests {
         assert_eq!(read_entry2.seq, entry2.seq);
 
         assert!(iter.next().await.unwrap().is_none());
+        assert!(wal_buffer.db_stats.wal_flush_bytes.get() > 0);
+        assert!(wal_buffer.db_stats.wal_flush_throughput.get() >= 0);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -146,8 +146,7 @@ use crate::format::sst::{BlockTransformer, SsTableFormat};
 use crate::garbage_collector::GarbageCollector;
 use crate::garbage_collector::GC_TASK_NAME;
 use crate::manifest::store::{FenceableManifest, ManifestStore, StoredManifest};
-use crate::mem_table_flush::MemtableFlusher;
-use crate::mem_table_flush::MEMTABLE_FLUSHER_TASK_NAME;
+use crate::memtable_flusher::MemtableFlusher;
 use crate::merge_operator::MergeOperatorType;
 use crate::object_stores::ObjectStores;
 use crate::paths::PathResolver;
@@ -331,6 +330,12 @@ impl<P: Into<Path>> DbBuilder<P> {
 
     /// Builds and opens the database.
     pub async fn build(self) -> Result<Db, crate::Error> {
+        if self.settings.l0_flush_parallelism == 0 {
+            return Err(crate::Error::invalid(
+                "invalid configuration: l0_flush_parallelism must be at least 1".into(),
+            ));
+        }
+
         let path = self.path.into();
         // TODO: proper URI generation, for now it works just as a flag
         let wal_object_store_uri = self.wal_object_store.as_ref().map(|_| String::new());
@@ -475,12 +480,12 @@ impl<P: Into<Path>> DbBuilder<P> {
         .await?;
 
         // Setup communication channels
-        let (memtable_flush_tx, memtable_flush_rx) = tokio::sync::mpsc::unbounded_channel();
         let (write_tx, write_rx) = tokio::sync::mpsc::unbounded_channel();
 
         // Create the database inner state
         let mut settings = self.settings.clone();
         settings.merge_operator = merge_operator.clone();
+        let memtable_flusher = Arc::new(MemtableFlusher::new());
         let inner = Arc::new(
             DbInner::new(
                 settings,
@@ -488,7 +493,7 @@ impl<P: Into<Path>> DbBuilder<P> {
                 rand.clone(),
                 table_store.clone(),
                 manifest.prepare_dirty()?,
-                memtable_flush_tx,
+                Arc::clone(&memtable_flusher),
                 write_tx,
                 stat_registry,
                 self.fp_registry.clone(),
@@ -512,18 +517,11 @@ impl<P: Into<Path>> DbBuilder<P> {
             inner.wal_buffer.init(task_executor.clone()).await?;
         };
         task_executor.add_handler(
-            MEMTABLE_FLUSHER_TASK_NAME.to_string(),
-            Box::new(MemtableFlusher::new(inner.clone(), manifest)),
-            memtable_flush_rx,
-            &tokio_handle,
-        )?;
-        task_executor.add_handler(
             WRITE_BATCH_TASK_NAME.to_string(),
             Box::new(WriteBatchEventHandler::new(inner.clone())),
             write_rx,
             &tokio_handle,
         )?;
-
         // Not to pollute the cache during compaction or GC
         let uncached_table_store = Arc::new(TableStore::new_with_fp_registry(
             ObjectStores::new(
@@ -589,6 +587,10 @@ impl<P: Into<Path>> DbBuilder<P> {
 
         // Monitor background tasks
         task_executor.monitor_on(&tokio_handle)?;
+
+        // Start the memtable flusher before WAL replay so that
+        // replayed immutable memtables can be flushed concurrently.
+        memtable_flusher.start(inner.clone(), manifest, &tokio_handle);
 
         // Replay WAL
         inner.replay_wal().await?;
@@ -1229,6 +1231,7 @@ fn default_db_cache() -> Option<Arc<dyn DbCache>> {
 #[cfg(test)]
 mod tests {
     use crate::config::Settings;
+    use crate::error::ErrorKind;
     use crate::garbage_collector::stats::GC_COUNT;
     use object_store::memory::InMemory;
     use std::sync::Arc;
@@ -1271,5 +1274,31 @@ mod tests {
         );
 
         db.close().await.expect("failed to close db");
+    }
+
+    #[tokio::test]
+    async fn test_db_builder_rejects_zero_l0_flush_parallelism() {
+        let result = crate::Db::builder(
+            "test_db_builder_rejects_zero_l0_flush_parallelism",
+            Arc::new(InMemory::new()),
+        )
+        .with_settings(Settings {
+            l0_flush_parallelism: 0,
+            ..Settings::default()
+        })
+        .build()
+        .await;
+
+        let err = match result {
+            Ok(_) => panic!("expected invalid l0_flush_parallelism to fail"),
+            Err(err) => err,
+        };
+
+        assert!(matches!(err.kind(), ErrorKind::Invalid));
+        assert!(
+            err.to_string()
+                .contains("l0_flush_parallelism must be at least 1"),
+            "unexpected error: {err}"
+        );
     }
 }

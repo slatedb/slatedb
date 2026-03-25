@@ -1,5 +1,5 @@
 //! SlateDB makes use of [mpsc::channel] to offload work to background tasks when
-//! possible. Examples of these tasks include [crate::mem_table_flush],
+//! possible. Examples of these tasks include [crate::memtable_flusher],
 //! [crate::checkpoint], and [crate::compactor]. Each task's lifecycle is fairly
 //! similar; they:
 //!

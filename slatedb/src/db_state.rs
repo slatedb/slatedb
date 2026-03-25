@@ -637,6 +637,7 @@ impl<'a> StateModifier<'a> {
         // The compactor removes tables from l0_last_compacted, so we
         // only want to keep the tables up to there.
         let l0_last_compacted = &remote_manifest.value.core.l0_last_compacted;
+        let remote_last_l0_seq = remote_manifest.value.core.last_l0_seq;
         let new_l0 = if let Some(l0_last_compacted) = l0_last_compacted {
             self.state
                 .manifest
@@ -652,6 +653,11 @@ impl<'a> StateModifier<'a> {
         };
 
         let my_db_state = self.state.core();
+        let mut merged_sequence_tracker = remote_manifest.value.core.sequence_tracker.clone();
+        let local_sequence_suffix = my_db_state
+            .sequence_tracker
+            .filter_after_seq(remote_last_l0_seq);
+        merged_sequence_tracker.extend_from(&local_sequence_suffix);
         remote_manifest.value.core = ManifestCore {
             initialized: my_db_state.initialized,
             l0_last_compacted: remote_manifest.value.core.l0_last_compacted,
@@ -662,7 +668,7 @@ impl<'a> StateModifier<'a> {
             last_l0_clock_tick: my_db_state.last_l0_clock_tick,
             last_l0_seq: my_db_state.last_l0_seq,
             recent_snapshot_min_seq: my_db_state.recent_snapshot_min_seq,
-            sequence_tracker: remote_manifest.value.core.sequence_tracker,
+            sequence_tracker: merged_sequence_tracker,
             checkpoints: remote_manifest.value.core.checkpoints,
             wal_object_store_uri: my_db_state.wal_object_store_uri.clone(),
         };

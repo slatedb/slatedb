@@ -3,19 +3,16 @@ use parking_lot::RwLockWriteGuard;
 use crate::db::DbInner;
 use crate::db_state::DbState;
 use crate::error::SlateDBError;
-use crate::mem_table_flush::MemtableFlushMsg;
+use crate::memtable_flusher::FlushTarget;
 use crate::oracle::Oracle;
-use crate::utils::SendSafely;
 use crate::wal_replay::ReplayedMemtable;
 
 pub(crate) const MAX_WAL_FLUSHES_BEFORE_L0_FLUSH: u64 = 4096;
 
 impl DbInner {
-    pub(crate) fn maybe_freeze_memtable(
-        &self,
-        guard: &mut RwLockWriteGuard<'_, DbState>,
-        wal_id: u64,
-    ) -> Result<(), SlateDBError> {
+    pub(crate) fn maybe_freeze_current_memtable(&self) -> Result<(), SlateDBError> {
+        let wal_id = self.wal_buffer.recent_flushed_wal_id();
+        let mut guard = self.state.write();
         let meta = guard.memtable().metadata();
 
         let last_freeze_wal_id = guard
@@ -34,8 +31,14 @@ impl DbInner {
         {
             Ok(())
         } else {
-            self.freeze_memtable(guard, wal_id)
+            self.freeze_memtable(&mut guard, wal_id)
         }
+    }
+
+    pub(crate) fn freeze_current_memtable(&self) -> Result<(), SlateDBError> {
+        let wal_id = self.wal_buffer.recent_flushed_wal_id();
+        let mut guard = self.state.write();
+        self.freeze_memtable(&mut guard, wal_id)
     }
 
     pub(crate) fn freeze_memtable(
@@ -48,10 +51,6 @@ impl DbInner {
         }
 
         guard.freeze_memtable(wal_id)?;
-        self.memtable_flush_notifier.send_safely(
-            guard.closed_result_reader(),
-            MemtableFlushMsg::FlushImmutableMemtables { sender: None },
-        )?;
         Ok(())
     }
 
@@ -69,7 +68,12 @@ impl DbInner {
         } else {
             0
         };
+        self.wal_buffer
+            .advance_recent_flushed_wal_id(recent_flushed_wal_id);
         self.freeze_memtable(&mut guard, recent_flushed_wal_id)?;
+        let _ = self
+            .memtable_flusher()
+            .request_flush(FlushTarget::BestEffort);
 
         let last_wal = replayed_memtable.last_wal_id;
         guard.modify(|modifier| modifier.state.manifest.value.core.next_wal_sst_id = last_wal + 1);
