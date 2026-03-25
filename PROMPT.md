@@ -1,8 +1,5 @@
 1. Fix the first item in the list.
 
-- website/src/content/docs/docs/get-started/quickstart.mdx:13 says to install tokio with only tokio/macros, but the example it embeds uses #[tokio::main] in examples/src/
-  full_example.rs:4. Tokio’s default features are empty, and rt-multi-thread pulls in rt in /Users/chrisriccomini/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-
-  1.47.1/Cargo.toml:73. As written, that quick start command is insufficient.
 - website/src/content/docs/docs/tutorials/checkpoint.mdx:20 says to use Db::refresh_checkpoint, and website/src/content/docs/docs/tutorials/checkpoint.mdx:27 says to use
   Db::delete_checkpoint. The public methods actually live on Admin, not Db, in slatedb/src/admin.rs:411, and the bundled examples use AdminBuilder in examples/src/
   refresh_checkpoint.rs:15 and examples/src/delete_checkpoint.rs:15.
