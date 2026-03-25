@@ -1,8 +1,5 @@
 1. Fix the first item in the list.
 
-- website/src/content/docs/docs/tutorials/checkpoint.mdx:20 says to use Db::refresh_checkpoint, and website/src/content/docs/docs/tutorials/checkpoint.mdx:27 says to use
-  Db::delete_checkpoint. The public methods actually live on Admin, not Db, in slatedb/src/admin.rs:411, and the bundled examples use AdminBuilder in examples/src/
-  refresh_checkpoint.rs:15 and examples/src/delete_checkpoint.rs:15.
 - website/src/content/docs/docs/design/files.mdx:5 says a DB has three main directories and omits compactions/. Current code has a dedicated compactions store in slatedb/src/
   compactions_store.rs:203, wires it into DB startup in slatedb/src/db/builder.rs:410, and creates the compactions file on compactor init in slatedb/src/
   compactor_state_protocols.rs:178. The storage-layout docs are stale.
