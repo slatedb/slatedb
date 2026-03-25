@@ -2,7 +2,7 @@
 title: Files
 ---
 
-A SlateDB object store bucket contains three main directories:
+A SlateDB object store bucket contains four main directories:
 
 ```
 path/to/db/
@@ -14,13 +14,17 @@ path/to/db/
 │  ├─ 00000000000000000001.sst
 │  ├─ 00000000000000000002.sst
 │  └─ ...
+├─ compactions/
+│  ├─ 00000000000000000001.compactions
+│  ├─ 00000000000000000002.compactions
+│  └─ ...
 └─ compacted/
    ├─ 01K3XYV1W2WR4FDVB7A9S319YS.sst
    ├─ 01K3XYV9JFPSZ5BW3Y1DVMKDFS.sst
    └─ ...
 ```
 
-The directories names are self-explanatory. Let's look at each file type:
+The directory names are mostly self-explanatory. Let's look at each file type:
 
 ## Manifest
 
@@ -39,6 +43,15 @@ See [RFC-0001](/rfcs/0001-manifest) for details on the manifest update protocol.
 Users often ask why SlateDB has a WAL. Since SlateDB batches WAL writes, its WAL looks a lot like level 0 in a standard LSM tree. We address this question in the [FAQ](/docs/get-started/faq#why-does-slatedb-have-a-write-ahead-log).
 
 :::
+
+## Compactions
+
+The `compactions` directory contains an ordered list of compaction-state snapshots in the format
+`<compactions_id>.compactions`. `<compactions_id>` is a zero-padded, 20 digit unsigned integer.
+The compactor creates the first file when it initializes, then writes newer versions as it
+persists submitted, running, and recently completed compactions.
+
+See [RFC-0013](/rfcs/0013-compaction-state-persistence) for details on the compaction update protocol.
 
 ## SSTable
 

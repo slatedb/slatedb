@@ -17,14 +17,14 @@ This operation captures a consistent and durable view of the database state, anc
 
 ## Refreshing a Checkpoint
 
-To extend the lifetime of an existing checkpoint, use `Db::refresh_checkpoint`. 
+To extend the lifetime of an existing checkpoint, use `Admin::refresh_checkpoint`. 
 This updates the checkpoint’s expiration time, ensuring that the referenced SSTs remain protected from garbage collection for the specified duration.
 
 <Code code={refreshCheckpoint} lang="rust" title="main.rs" />
 
 ## Deleting a Checkpoint
 
-To remove a checkpoint, use `Db::delete_checkpoint`. 
+To remove a checkpoint, use `Admin::delete_checkpoint`. 
 This deletes the checkpoint metadata from the manifest, allowing the garbage collector to eventually reclaim any unreferenced SST files associated with that checkpoint.
 
 <Code code={deleteCheckpoint} lang="rust" title="main.rs" />
