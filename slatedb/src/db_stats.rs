@@ -14,6 +14,9 @@ pub const SST_FILTER_NEGATIVES: &str = db_stat_name!("sst_filter_negatives");
 pub const BACKPRESSURE_COUNT: &str = db_stat_name!("backpressure_count");
 pub const WAL_BUFFER_ESTIMATED_BYTES: &str = db_stat_name!("wal_buffer_estimated_bytes");
 pub const WAL_BUFFER_FLUSHES: &str = db_stat_name!("wal_buffer_flushes");
+pub const WAL_FLUSH_BYTES: &str = db_stat_name!("wal_flush_bytes");
+pub const WAL_FLUSH_THROUGHPUT_BYTES_PER_SEC: &str =
+    db_stat_name!("wal_flush_throughput_bytes_per_sec");
 pub const GET_REQUESTS: &str = db_stat_name!("get_requests");
 pub const SCAN_REQUESTS: &str = db_stat_name!("scan_requests");
 pub const FLUSH_REQUESTS: &str = db_stat_name!("flush_requests");
@@ -21,6 +24,11 @@ pub const WRITE_BATCH_COUNT: &str = db_stat_name!("write_batch_count");
 pub const WRITE_OPS: &str = db_stat_name!("write_ops");
 pub const TOTAL_MEM_SIZE_BYTES: &str = db_stat_name!("total_mem_size_bytes");
 pub const L0_SST_COUNT: &str = db_stat_name!("l0_sst_count");
+pub const L0_FLUSH_BYTES: &str = db_stat_name!("l0_flush_bytes");
+pub const L0_FLUSH_THROUGHPUT_BYTES_PER_SEC: &str =
+    db_stat_name!("l0_flush_throughput_bytes_per_sec");
+pub const L0_UPLOAD_BUSY_MILLIS: &str = db_stat_name!("l0_upload_busy_millis");
+pub const L0_UPLOAD_IDLE_MILLIS: &str = db_stat_name!("l0_upload_idle_millis");
 
 #[non_exhaustive]
 #[derive(Clone, Debug)]
@@ -28,6 +36,8 @@ pub(crate) struct DbStats {
     pub(crate) immutable_memtable_flushes: Arc<Counter>,
     pub(crate) wal_buffer_estimated_bytes: Arc<Gauge<i64>>,
     pub(crate) wal_buffer_flushes: Arc<Counter>,
+    pub(crate) wal_flush_bytes: Arc<Counter>,
+    pub(crate) wal_flush_throughput: Arc<Gauge<u64>>,
     pub(crate) sst_filter_false_positives: Arc<Counter>,
     pub(crate) sst_filter_positives: Arc<Counter>,
     pub(crate) sst_filter_negatives: Arc<Counter>,
@@ -39,6 +49,10 @@ pub(crate) struct DbStats {
     pub(crate) write_ops: Arc<Counter>,
     pub(crate) total_mem_size_bytes: Arc<Gauge<i64>>,
     pub(crate) l0_sst_count: Arc<Gauge<i64>>,
+    pub(crate) l0_flush_bytes: Arc<Counter>,
+    pub(crate) l0_flush_throughput: Arc<Gauge<u64>>,
+    pub(crate) l0_upload_busy_millis: Arc<Counter>,
+    pub(crate) l0_upload_idle_millis: Arc<Counter>,
 }
 
 impl DbStats {
@@ -47,6 +61,8 @@ impl DbStats {
             immutable_memtable_flushes: Arc::new(Counter::default()),
             wal_buffer_estimated_bytes: Arc::new(Gauge::default()),
             wal_buffer_flushes: Arc::new(Counter::default()),
+            wal_flush_bytes: Arc::new(Counter::default()),
+            wal_flush_throughput: Arc::new(Gauge::default()),
             sst_filter_false_positives: Arc::new(Counter::default()),
             sst_filter_positives: Arc::new(Counter::default()),
             sst_filter_negatives: Arc::new(Counter::default()),
@@ -58,6 +74,10 @@ impl DbStats {
             write_ops: Arc::new(Counter::default()),
             total_mem_size_bytes: Arc::new(Gauge::default()),
             l0_sst_count: Arc::new(Gauge::default()),
+            l0_flush_bytes: Arc::new(Counter::default()),
+            l0_flush_throughput: Arc::new(Gauge::default()),
+            l0_upload_busy_millis: Arc::new(Counter::default()),
+            l0_upload_idle_millis: Arc::new(Counter::default()),
         };
         registry.register(
             IMMUTABLE_MEMTABLE_FLUSHES,
@@ -68,6 +88,11 @@ impl DbStats {
             stats.wal_buffer_estimated_bytes.clone(),
         );
         registry.register(WAL_BUFFER_FLUSHES, stats.wal_buffer_flushes.clone());
+        registry.register(WAL_FLUSH_BYTES, stats.wal_flush_bytes.clone());
+        registry.register(
+            WAL_FLUSH_THROUGHPUT_BYTES_PER_SEC,
+            stats.wal_flush_throughput.clone(),
+        );
         registry.register(
             SST_FILTER_FALSE_POSITIVES,
             stats.sst_filter_false_positives.clone(),
@@ -82,6 +107,13 @@ impl DbStats {
         registry.register(WRITE_OPS, stats.write_ops.clone());
         registry.register(TOTAL_MEM_SIZE_BYTES, stats.total_mem_size_bytes.clone());
         registry.register(L0_SST_COUNT, stats.l0_sst_count.clone());
+        registry.register(L0_FLUSH_BYTES, stats.l0_flush_bytes.clone());
+        registry.register(
+            L0_FLUSH_THROUGHPUT_BYTES_PER_SEC,
+            stats.l0_flush_throughput.clone(),
+        );
+        registry.register(L0_UPLOAD_BUSY_MILLIS, stats.l0_upload_busy_millis.clone());
+        registry.register(L0_UPLOAD_IDLE_MILLIS, stats.l0_upload_idle_millis.clone());
         stats
     }
 }

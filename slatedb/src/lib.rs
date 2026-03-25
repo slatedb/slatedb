@@ -116,7 +116,7 @@ mod garbage_collector;
 mod iter;
 mod map_iter;
 mod mem_table;
-mod mem_table_flush;
+mod memtable_flusher;
 mod merge_iterator;
 mod merge_operator;
 mod object_stores;
