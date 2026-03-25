@@ -241,7 +241,8 @@ impl MemtableFlusher {
     async fn flush_and_record(&mut self) -> Result<(), SlateDBError> {
         fail_point!(
             Arc::clone(&self.db_inner.fp_registry),
-            "flush-memtable-to-l0"
+            "flush-memtable-to-l0",
+            |_| { Ok(()) }
         );
         let result = self.flush_imm_memtables_to_l0().await;
         if let Err(err) = &result {
