@@ -101,10 +101,10 @@ Now' let's check the database path in the bucket:
 
 There are four folders:
 
-- `compacted`: Contains the compacted SST files.
-- `compactions`: Contains the compaction-state snapshots.
-- `manifest`: Contains the manifest files.
+- `manifest`: Contains the manifest files. Manifest files define the state of the DB, including the set of SSTs that are part of the DB.
 - `wal`: Contains the write-ahead log files.
+- `compacted`: Contains the compacted SST files (may not appear in short examples).
+- `compactions`: Contains the compaction-state snapshots.
 
 Let's check the `wal` folder:
 
