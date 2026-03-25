@@ -23,6 +23,7 @@
 )]
 
 pub mod clock;
+pub mod metrics;
 pub mod utils;
 
 #[cfg(feature = "test-util")]

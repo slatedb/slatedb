@@ -9,9 +9,11 @@ homepage.workspace = true
 
 [dependencies]
 chrono = { workspace = true }
+serde = { workspace = true, features = ["derive"], optional = true }
 tokio = { workspace = true, features = ["macros", "rt", "time"] }
 
 [features]
+serde = ["dep:serde"]
 test-util = ["tokio/test-util"]
 
 [dev-dependencies]
