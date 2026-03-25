@@ -108,4 +108,4 @@ gcloud storage ls -l gs://$BucketName/tmp/slatedb_google_cloud_storage/wal/
         74  2025-10-05T15:42:19Z  gs://sibasishtest/tmp/slatedb_google_cloud_storage/wal/00000000000000000006.sst
 ```
 
-Each of these SST files is a write-ahead log (WAL) entry. They get flushed based on the `flush_interval` config or when `flush` is called explicitly.
+Each of these SST files is a write-ahead log (WAL) file, and each WAL file can contain many `RowEntry` values. They get flushed based on the `flush_interval` config or when `flush` is called explicitly.

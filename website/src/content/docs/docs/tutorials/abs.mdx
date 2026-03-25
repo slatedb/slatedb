@@ -99,6 +99,6 @@ tmp/slatedb_azure_blob_storage/wal/00000000000000000004.sst  BlockBlob    Hot   
 
 ```
 
-Each of these SST files is a write-ahead log (WAL) entry. They get flushed based on the `flush_interval` config or when `flush` is called explicitly.
+Each of these SST files is a write-ahead log (WAL) file, and each WAL file can contain many `RowEntry` values. They get flushed based on the `flush_interval` config or when `flush` is called explicitly.
 
 ```

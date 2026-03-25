@@ -1,8 +1,5 @@
 1. Fix the first item in the list.
 
-- website/src/content/docs/docs/tutorials/s3.mdx:115, website/src/content/docs/docs/tutorials/gcs.mdx:109, and website/src/content/docs/docs/tutorials/abs.mdx:100 say each
-  WAL .sst file is a WAL “entry”. That is wrong now: a WAL file contains many RowEntrys, as documented in website/src/content/docs/docs/design/change-data-capture.mdx:25 and
-  implemented in slatedb/src/wal_reader.rs:11.
 - website/src/content/docs/docs/get-started/introduction.mdx:20 says SlateDB has “no local state”. That’s no longer universally true: current config supports a local disk-
   backed object-store cache, including cache_puts, in slatedb/src/config.rs:1223.
 - website/src/content/docs/docs/get-started/introduction.mdx:13 says “All object stores support compare-and-swap (CAS) operations.” That blanket claim is too strong for the
