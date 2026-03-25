@@ -1,7 +1,5 @@
 1. Fix the first item in the list.
 
-- website/src/content/docs/docs/get-started/introduction.mdx:13 says “All object stores support compare-and-swap (CAS) operations.” That blanket claim is too strong for the
-  current setup. Even the official S3 example has to explicitly opt into conditional puts via with_conditional_put(...) in examples/src/s3_compatible.rs:16.
 - The AWS comparison block in website/src/content/docs/docs/get-started/faq.mdx:48 is stale. The DynamoDB storage/request pricing quoted there is outdated, and website/src/co
   ntent/docs/docs/get-started/faq.mdx:52 compares DynamoDB’s 99.999% figure to S3 Standard, but AWS’s current docs say DynamoDB Standard SLA is 99.99%, Global Tables is 99.99
   9%, and S3 Standard’s service commitment is 99.9%. Sources: DynamoDB pricing (https://aws.amazon.com/dynamodb/pricing/), DynamoDB SLA (https://aws.amazon.com/dynamodb/sla/),
