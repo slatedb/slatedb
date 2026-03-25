@@ -119,7 +119,7 @@ Visit [slatedb.io](https://slatedb.io) to learn more.
 - [Go](https://github.com/slatedb/slatedb/tree/main/bindings/go) (official)
 - [Java](https://github.com/slatedb/slatedb/tree/main/bindings/java) (official)
 - [.NET](https://github.com/Pulsy-Global/slatedb-dotnet)
-- [Python](https://github.com/slatedb/slatedb/tree/main/slatedb-py) (official)
+- [Python](https://github.com/slatedb/slatedb/tree/main/bindings/python) (official)
 - [Ruby](https://github.com/catkins/slatedb-rb)
 - [TypeScript](https://github.com/gadget-inc/slatedb-node)
 
@@ -156,10 +156,12 @@ See who's using SlateDB.
 
 - [Embucket](https://www.embucket.com)
 - [Gadget](https://gadget.dev)
+- [Goldsky](https://goldsky.com)
 - [HelixDB](https://github.com/HelixDB/helix-db)
 - [Malstrom](https://github.com/MalstromDevelopers/malstrom)
 - [Massive](https://massive.com)
 - [Merklemap](https://merklemap.com)
+- [OpenData](https://www.opendata.dev)
 - [Responsive](https://responsive.dev)
 - [s2-lite](https://github.com/s2-streamstore/s2)
 - [SQLync](https://sqlync.com)

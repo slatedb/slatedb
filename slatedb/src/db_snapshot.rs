@@ -28,7 +28,9 @@ impl DbSnapshot {
         })
     }
 
-    pub(crate) fn started_seq(&self) -> u64 {
+    /// Get the sequence number this snapshot was started at. This determines data visibility
+    /// for reads in this snapshot.
+    pub fn seq(&self) -> u64 {
         self.started_seq
     }
 
@@ -740,7 +742,7 @@ mod tests {
 
         // At this point the data is in the memtable but not committed; create the snapshot
         let snapshot = db.snapshot().await?;
-        assert_eq!(snapshot.started_seq(), recent_committed_seq);
+        assert_eq!(snapshot.seq(), recent_committed_seq);
 
         // Turn off the failpoint to let the put complete
         fail_parallel::cfg(fp_registry.clone(), "write-batch-pre-commit", "off").unwrap();

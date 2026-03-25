@@ -12,6 +12,7 @@ use crate::iter::IterationOrder;
 use crate::manifest::store::{ManifestStore, StoredManifest};
 use crate::manifest::Manifest;
 use crate::mem_table::{ImmutableMemtable, KVTable};
+use crate::merge_operator::MergeOperatorType;
 use crate::oracle::DbReaderOracle;
 use crate::paths::PathResolver;
 use crate::rand::DbRand;
@@ -99,6 +100,7 @@ impl DbReaderInner {
         table_store: Arc<TableStore>,
         options: DbReaderOptions,
         checkpoint_id: Option<Uuid>,
+        merge_operator: Option<MergeOperatorType>,
         closed_result_watcher: ClosedResultWriter,
         system_clock: Arc<dyn SystemClock>,
         rand: Arc<DbRand>,
@@ -146,7 +148,7 @@ impl DbReaderInner {
             db_stats,
             mono_clock: Arc::clone(&mono_clock),
             oracle: oracle.clone(),
-            merge_operator: options.merge_operator.clone(),
+            merge_operator,
         };
 
         Ok(Self {
@@ -432,13 +434,6 @@ impl DbReaderInner {
             order: IterationOrder::Ascending,
         };
 
-        let replay_options = WalReplayOptions {
-            sst_batch_size: 4,
-            max_memtable_bytes: reader_options.max_memtable_bytes as usize,
-            min_memtable_bytes: usize::MAX,
-            sst_iter_options,
-        };
-
         let (mut replay_after_wal_id, mut last_committed_seq) =
             if let Some(latest_replayed_table) = into_tables.front() {
                 (
@@ -452,6 +447,15 @@ impl DbReaderInner {
             table_store.last_seen_wal_id().await? + 1
         } else {
             core.next_wal_sst_id
+        };
+
+        let replay_options = WalReplayOptions {
+            sst_batch_size: 4,
+            max_memtable_bytes: reader_options.max_memtable_bytes as usize,
+            min_memtable_bytes: usize::MAX,
+            sst_iter_options,
+            // Skip entries that we already have in `imm_memtable` (that might be above last_l0_seq).
+            min_seq: Some(last_committed_seq),
         };
 
         let mut replay_iter = WalReplayIterator::range(
@@ -469,13 +473,21 @@ impl DbReaderInner {
             Err(err) => return Err(err),
         } {
             assert!(replayed_table.last_wal_id > replay_after_wal_id);
-            // Allow equality here since it's possible that a WAL file is an empty fence entry.
-            assert!(replayed_table.last_seq >= last_committed_seq);
             replay_after_wal_id = replayed_table.last_wal_id;
-            last_committed_seq = replayed_table.last_seq;
-            let imm_memtable =
-                ImmutableMemtable::new(replayed_table.table, replayed_table.last_wal_id);
-            into_tables.push_front(Arc::new(imm_memtable));
+            if !replayed_table.table.is_empty() && replayed_table.last_seq > last_committed_seq {
+                let first_seq = replayed_table
+                    .table
+                    .table()
+                    .first_seq()
+                    .expect("expected first_seq on non-empty table");
+                // The entire table should be newer than the last committed seq, since we filtered
+                // out entries <= last_committed_seq when creating the replay iterator.
+                assert!(first_seq > last_committed_seq);
+                last_committed_seq = replayed_table.last_seq;
+                let imm_memtable =
+                    ImmutableMemtable::new(replayed_table.table, replayed_table.last_wal_id);
+                into_tables.push_front(Arc::new(imm_memtable));
+            }
         }
 
         Ok((replay_after_wal_id, last_committed_seq))
@@ -659,6 +671,7 @@ impl DbReader {
     pub(crate) async fn open_internal(
         store_provider: &dyn StoreProvider,
         checkpoint_id: Option<Uuid>,
+        merge_operator: Option<MergeOperatorType>,
         options: DbReaderOptions,
         system_clock: Arc<dyn SystemClock>,
         rand: Arc<DbRand>,
@@ -676,6 +689,7 @@ impl DbReader {
                 table_store,
                 options,
                 checkpoint_id,
+                merge_operator,
                 closed_result_watcher,
                 system_clock,
                 rand,
@@ -1069,6 +1083,7 @@ mod tests {
     use crate::manifest::store::{ManifestStore, StoredManifest};
     use crate::manifest::Manifest;
     use crate::mem_table::{ImmutableMemtable, WritableKVTable};
+    use crate::merge_operator::MergeOperatorType;
     use crate::object_stores::ObjectStores;
     use crate::oracle::DbReaderOracle;
     use crate::paths::PathResolver;
@@ -1146,6 +1161,7 @@ mod tests {
         let reader = DbReader::open_internal(
             &test_provider,
             Some(checkpoint_result.id),
+            None,
             DbReaderOptions::default(),
             test_provider.system_clock.clone(),
             test_provider.rand.clone(),
@@ -1215,7 +1231,7 @@ mod tests {
         .unwrap();
 
         let err = test_provider
-            .new_db_reader(DbReaderOptions::default(), None)
+            .new_db_reader(DbReaderOptions::default(), None, None)
             .await;
         assert!(matches!(err, Err(SlateDBError::InvalidDBState)));
     }
@@ -1240,7 +1256,7 @@ mod tests {
         db.put(post_checkpoint_key, value).await.unwrap();
 
         let reader = test_provider
-            .new_db_reader(DbReaderOptions::default(), Some(checkpoint_result.id))
+            .new_db_reader(DbReaderOptions::default(), Some(checkpoint_result.id), None)
             .await
             .unwrap();
 
@@ -1270,7 +1286,7 @@ mod tests {
             ..DbReaderOptions::default()
         };
         let reader = test_provider
-            .new_db_reader(reader_options, None)
+            .new_db_reader(reader_options, None, None)
             .await
             .unwrap();
         let manifest_store = test_provider.manifest_store();
@@ -1308,7 +1324,7 @@ mod tests {
 
         let manifest_store = test_provider.manifest_store();
         let reader = test_provider
-            .new_db_reader(reader_options, None)
+            .new_db_reader(reader_options, None, None)
             .await
             .unwrap();
 
@@ -1347,7 +1363,7 @@ mod tests {
         };
 
         let reader = test_provider
-            .new_db_reader(reader_options, None)
+            .new_db_reader(reader_options, None, None)
             .await
             .unwrap();
         let key = b"test_key";
@@ -1591,6 +1607,44 @@ mod tests {
         test_utils::assert_iterator(&mut replayed_iter, vec![wal_row]).await;
     }
 
+    #[tokio::test]
+    async fn replay_wal_into_should_preserve_existing_last_committed_seq_for_empty_fence_wal() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_db_reader_empty_fence_wal");
+        let test_provider = TestProvider::new(path, Arc::clone(&object_store));
+        let table_store = test_provider.table_store();
+
+        write_wal_sst(Arc::clone(&table_store), 6, vec![])
+            .await
+            .unwrap();
+
+        let mut into_tables = VecDeque::new();
+        into_tables.push_front(immutable_memtable(
+            5,
+            vec![
+                RowEntry::new_value(b"existing_key_1", b"existing_value_1", 9),
+                RowEntry::new_value(b"existing_key_2", b"existing_value_2", 10),
+            ],
+        ));
+
+        let mut core = ManifestCore::new();
+        core.last_l0_seq = 8;
+        core.next_wal_sst_id = 5;
+
+        let (last_wal_id, last_committed_seq) = DbReaderInner::replay_wal_into(
+            Arc::clone(&table_store),
+            &DbReaderOptions::default(),
+            &core,
+            &mut into_tables,
+            true,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(last_wal_id, 6);
+        assert_eq!(last_committed_seq, 10);
+    }
+
     #[tokio::test(start_paused = true)]
     async fn should_fail_new_reads_if_manifest_poller_crashes() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
@@ -1603,7 +1657,7 @@ mod tests {
             ..DbReaderOptions::default()
         };
         let reader = test_provider
-            .new_db_reader(reader_options, None)
+            .new_db_reader(reader_options, None, None)
             .await
             .unwrap();
 
@@ -1655,7 +1709,7 @@ mod tests {
             ..DbReaderOptions::default()
         };
         let reader = test_provider
-            .new_db_reader(reader_options.clone(), None)
+            .new_db_reader(reader_options.clone(), None, None)
             .await
             .unwrap();
 
@@ -1677,7 +1731,7 @@ mod tests {
 
         // Open a new reader - it should see the newly flushed data
         let reader2 = test_provider
-            .new_db_reader(reader_options, None)
+            .new_db_reader(reader_options, None, None)
             .await
             .unwrap();
         assert_eq!(
@@ -1712,7 +1766,7 @@ mod tests {
             ..DbReaderOptions::default()
         };
         let reader = test_provider
-            .new_db_reader(reader_options, None)
+            .new_db_reader(reader_options, None, None)
             .await
             .unwrap();
 
@@ -1804,7 +1858,7 @@ mod tests {
             ..DbReaderOptions::default()
         };
         let reader = test_provider
-            .new_db_reader(reader_options, None)
+            .new_db_reader(reader_options, None, None)
             .await
             .unwrap();
 
@@ -1849,10 +1903,12 @@ mod tests {
             &self,
             options: DbReaderOptions,
             checkpoint: Option<Uuid>,
+            merge_operator: Option<MergeOperatorType>,
         ) -> Result<DbReader, SlateDBError> {
             DbReader::open_internal(
                 self,
                 checkpoint,
+                merge_operator,
                 options,
                 self.system_clock.clone(),
                 self.rand.clone(),
@@ -2263,10 +2319,10 @@ mod tests {
                 DbReaderOptions {
                     manifest_poll_interval: Duration::from_millis(100),
                     checkpoint_lifetime: Duration::from_secs(30),
-                    merge_operator: Some(merge_operator),
                     ..DbReaderOptions::default()
                 },
                 None,
+                Some(merge_operator),
             )
             .await
             .unwrap();

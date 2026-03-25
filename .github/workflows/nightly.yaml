@@ -319,7 +319,7 @@ jobs:
 
       - name: Start chaos services (docker compose)
         run: |
-          docker compose -f scripts/run_chaos_scenarios.compose.yaml up -d
+          docker compose -f scripts/run_chaos_scenarios.compose.yaml up -d --wait
 
       - name: Configure S3 toxiproxy proxy
         run: |
@@ -359,6 +359,7 @@ jobs:
       - name: Dump logs on failure
         if: failure()
         run: |
+          echo "--- Docker Compose PS ---"; docker compose -f scripts/run_chaos_scenarios.compose.yaml ps || true
           echo "--- LocalStack logs ---"; docker logs --tail 500 localstack || true
           echo "--- lowdown logs ---"; docker logs --tail 500 lowdown || true
           echo "--- Toxiproxy logs ---"; docker logs --tail 500 toxiproxy || true

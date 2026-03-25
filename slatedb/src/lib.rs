@@ -57,6 +57,9 @@ pub use merge_operator::{MergeOperator, MergeOperatorError};
 pub use rand::DbRand;
 #[cfg(test)]
 pub use sst_builder::BlockFormat;
+pub use sst_reader::{SstFile, SstReader};
+pub use sst_stats::{BlockStats, SstStats};
+pub use tablestore::SstFileMetadata;
 pub use transaction_manager::IsolationLevel;
 pub use types::KeyValue;
 pub use types::{RowEntry, ValueDeletable};
@@ -133,6 +136,7 @@ mod snapshot_manager;
 mod sorted_run_iterator;
 mod sst_builder;
 mod sst_iter;
+mod sst_reader;
 mod sst_stats;
 mod store_provider;
 mod tablestore;

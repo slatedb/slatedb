@@ -2738,7 +2738,7 @@ mod tests {
                     stats: compactor_stats.clone(),
                     clock: Arc::new(DefaultSystemClock::new()),
                     manifest_store: manifest_store.clone(),
-                    merge_operator: options.merge_operator.clone(),
+                    merge_operator: None,
                     #[cfg(feature = "compaction_filters")]
                     compaction_filter_supplier: None,
                 },

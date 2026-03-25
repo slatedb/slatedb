@@ -164,7 +164,7 @@ impl DbTransaction {
                 options,
                 &db_state,
                 Some(write_batch_cloned),
-                Some(self.snapshot.started_seq()),
+                Some(self.snapshot.seq()),
             )
             .await
             .map_err(crate::Error::from)?;
@@ -238,7 +238,7 @@ impl DbTransaction {
                 options,
                 &db_state,
                 Some(write_batch_cloned),
-                Some(self.snapshot.started_seq()),
+                Some(self.snapshot.seq()),
                 range_tracker,
             )
             .await
@@ -557,7 +557,7 @@ impl DbTransaction {
     /// the snapshot sequence number for this transaction, which determines data visibility
     /// for reads in this transaction.
     pub fn seqnum(&self) -> u64 {
-        self.snapshot.started_seq()
+        self.snapshot.seq()
     }
 
     /// Get the transaction ID. This is a unique identifier for this transaction, generated
@@ -1679,7 +1679,6 @@ mod tests {
             l0_sst_size_bytes,
             compactor_options,
             compression_codec: None,
-            merge_operator: None,
             object_store_cache_options: crate::config::ObjectStoreCacheOptions::default(),
             garbage_collector_options: None,
             default_ttl: None,

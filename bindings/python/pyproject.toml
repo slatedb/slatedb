@@ -1,0 +1,36 @@
+[build-system]
+requires = ["maturin>=1.10,<2.0", "uniffi-bindgen==0.29.5"]
+build-backend = "maturin"
+
+[project]
+name = "slatedb"
+description = "A cloud native embedded storage engine built on object storage."
+dynamic = ["version"]
+requires-python = ">=3.10"
+
+[project.optional-dependencies]
+docs = [
+    "sphinx>=7.4",
+    "sphinx-rtd-theme>=3.0",
+    "sphinx-autoapi>=3.0",
+]
+test = ["pytest>=8.3", "pytest-asyncio>=0.25.0"]
+
+[tool.maturin]
+bindings = "uniffi"
+manifest-path = "../uniffi/Cargo.toml"
+python-packages = ["slatedb/uniffi"]
+module-name = "slatedb.uniffi._slatedb_uniffi"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+extend-exclude = [
+    "dist",
+    "slatedb/uniffi/_slatedb_uniffi",
+    "slatedb/uniffi/_slatedb_uniffi.py",
+]
