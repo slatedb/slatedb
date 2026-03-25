@@ -9,6 +9,7 @@ homepage.workspace = true
 
 [dependencies]
 chrono = { workspace = true }
+log = { workspace = true }
 serde = { workspace = true, features = ["derive"], optional = true }
 tokio = { workspace = true, features = ["macros", "rt", "time"] }
 

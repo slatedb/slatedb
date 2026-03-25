@@ -10,8 +10,8 @@
 //!   observability backends.
 //! - [`DefaultMetricsRecorder`] is the built-in atomic-backed recorder that
 //!   powers metric snapshots via [`DefaultMetricsRecorder::snapshot`].
-//! - [`CompositeMetricsRecorder`] wraps the default recorder and an optional
-//!   user recorder, forwarding all events to both.
+//! - [`CompositeMetricsRecorder`] fans out all registrations and events to
+//!   multiple recorders (e.g. the built-in default plus a user-supplied one).
 //! - [`MetricsRecorderHelper`] provides a builder API with level filtering
 //!   for internal metric registration.
 
@@ -43,6 +43,15 @@ pub const SIZE_BOUNDARIES: &[f64] = &[
 /// (Prometheus, OTLP, etc.). If not provided, only the built-in
 /// [`DefaultMetricsRecorder`] is used.
 pub trait MetricsRecorder: Send + Sync {
+    /// Register a monotonically increasing counter.
+    ///
+    /// ## Arguments
+    /// - `name` – Dotted metric name (e.g. `"slatedb.compaction.bytes"`).
+    /// - `description` – Human-readable description of the metric.
+    /// - `labels` – Key-value label pairs attached to this metric instance.
+    ///
+    /// ## Returns
+    /// A handle that can be used to increment the counter.
     fn register_counter(
         &self,
         name: &str,
@@ -50,6 +59,15 @@ pub trait MetricsRecorder: Send + Sync {
         labels: &[(&str, &str)],
     ) -> Arc<dyn CounterFn>;
 
+    /// Register a gauge that can be set to arbitrary values.
+    ///
+    /// ## Arguments
+    /// - `name` – Dotted metric name.
+    /// - `description` – Human-readable description.
+    /// - `labels` – Key-value label pairs.
+    ///
+    /// ## Returns
+    /// A handle that can be used to set the gauge value.
     fn register_gauge(
         &self,
         name: &str,
@@ -57,6 +75,15 @@ pub trait MetricsRecorder: Send + Sync {
         labels: &[(&str, &str)],
     ) -> Arc<dyn GaugeFn>;
 
+    /// Register a counter that can be incremented or decremented.
+    ///
+    /// ## Arguments
+    /// - `name` – Dotted metric name.
+    /// - `description` – Human-readable description.
+    /// - `labels` – Key-value label pairs.
+    ///
+    /// ## Returns
+    /// A handle that can be used to increment or decrement the counter.
     fn register_up_down_counter(
         &self,
         name: &str,
@@ -64,6 +91,16 @@ pub trait MetricsRecorder: Send + Sync {
         labels: &[(&str, &str)],
     ) -> Arc<dyn UpDownCounterFn>;
 
+    /// Register a histogram that records value distributions.
+    ///
+    /// ## Arguments
+    /// - `name` – Dotted metric name.
+    /// - `description` – Human-readable description.
+    /// - `labels` – Key-value label pairs.
+    /// - `boundaries` – Bucket boundaries for the histogram.
+    ///
+    /// ## Returns
+    /// A handle that can be used to record values into the histogram.
     fn register_histogram(
         &self,
         name: &str,
@@ -73,19 +110,27 @@ pub trait MetricsRecorder: Send + Sync {
     ) -> Arc<dyn HistogramFn>;
 }
 
+/// Handle for incrementing a monotonic counter.
 pub trait CounterFn: Send + Sync {
+    /// Add `value` to the counter.
     fn increment(&self, value: u64);
 }
 
+/// Handle for setting a gauge to an arbitrary value.
 pub trait GaugeFn: Send + Sync {
+    /// Set the gauge to `value`.
     fn set(&self, value: f64);
 }
 
+/// Handle for incrementing or decrementing a bidirectional counter.
 pub trait UpDownCounterFn: Send + Sync {
+    /// Add `value` to the counter (may be negative).
     fn increment(&self, value: i64);
 }
 
+/// Handle for recording observations into a histogram.
 pub trait HistogramFn: Send + Sync {
+    /// Record a single observation.
     fn record(&self, value: f64);
 }
 
@@ -113,26 +158,56 @@ pub enum MetricLevel {
 /// A single metric with its name, labels, description, and current value.
 #[derive(Debug, Clone)]
 pub struct Metric {
+    /// The dotted metric name (e.g. `"slatedb.compaction.bytes"`).
     pub name: String,
+    /// Key-value label pairs attached to this metric instance.
     pub labels: Vec<(String, String)>,
+    /// Human-readable description of the metric.
     pub description: String,
+    /// The current value of the metric.
     pub value: MetricValue,
 }
 
 /// The value of a metric.
 #[derive(Debug, Clone)]
 pub enum MetricValue {
+    /// A monotonically increasing counter value.
     Counter(u64),
+    /// A gauge value that can be set to arbitrary values.
     Gauge(f64),
+    /// A bidirectional counter value.
     UpDownCounter(i64),
+    /// A histogram with bucket counts, sum, min, max, and boundaries.
     Histogram {
+        /// Total number of observations.
         count: u64,
+        /// Sum of all observed values.
         sum: f64,
+        /// Minimum observed value.
         min: f64,
+        /// Maximum observed value.
         max: f64,
+        /// Bucket boundaries.
         boundaries: Vec<f64>,
+        /// Number of observations in each bucket (len = boundaries.len() + 1).
         bucket_counts: Vec<u64>,
     },
+}
+
+impl MetricValue {
+    /// Returns the primary scalar value as an `i64`, useful for simple monitoring.
+    ///
+    /// For counters and up-down counters this returns the current count.
+    /// For gauges this truncates the floating-point value.
+    /// For histograms this returns the observation count.
+    pub fn as_i64(&self) -> i64 {
+        match self {
+            MetricValue::Counter(v) => *v as i64,
+            MetricValue::Gauge(v) => *v as i64,
+            MetricValue::UpDownCounter(v) => *v,
+            MetricValue::Histogram { count, .. } => *count as i64,
+        }
+    }
 }
 
 /// Materialized snapshot of all registered metrics, with lookup methods.
@@ -146,7 +221,7 @@ pub struct Metrics {
 }
 
 impl Metrics {
-    /// Return all metrics.
+    /// Return all metrics in this snapshot.
     pub fn all(&self) -> &[Metric] {
         &self.metrics
     }
@@ -327,28 +402,35 @@ struct DefaultMetricEntry {
 /// The built-in atomic-backed metrics recorder. Always active, powers
 /// metric snapshots for debugging.
 ///
-/// Panics if the same `(name, canonical_labels)` pair is registered twice,
-/// which indicates a bug in the metric registration code.
+/// If the same `(name, canonical_labels)` pair is registered twice, the
+/// duplicate is logged as a warning and the existing handle is returned.
 pub struct DefaultMetricsRecorder {
     entries: Mutex<Vec<DefaultMetricEntry>>,
 }
 
 impl DefaultMetricsRecorder {
+    /// Create a new, empty default metrics recorder.
     pub fn new() -> Self {
         Self {
             entries: Mutex::new(Vec::new()),
         }
     }
 
-    fn check_duplicate(entries: &[DefaultMetricEntry], name: &str, labels: &[(String, String)]) {
+    /// Check whether a metric with the given name and labels already exists.
+    /// Returns `true` if a duplicate was found (and logs a warning).
+    fn check_duplicate(
+        entries: &[DefaultMetricEntry],
+        name: &str,
+        labels: &[(String, String)],
+    ) -> bool {
         let duplicate = entries.iter().any(|e| e.name == name && e.labels == labels);
-        assert!(
-            !duplicate,
-            "duplicate metric registration: name={name}, labels={labels:?}"
-        );
+        if duplicate {
+            log::warn!("duplicate metric registration: name={name}, labels={labels:?}");
+        }
+        duplicate
     }
 
-    /// Read all registered metrics and produce a snapshot.
+    /// Read all registered metrics and produce a point-in-time snapshot.
     pub fn snapshot(&self) -> Metrics {
         let entries = self.entries.lock().expect("lock poisoned");
         let metrics = entries
@@ -403,11 +485,20 @@ impl MetricsRecorder for DefaultMetricsRecorder {
         labels: &[(&str, &str)],
     ) -> Arc<dyn CounterFn> {
         let canonical = canonicalize_labels(labels);
+        let mut entries = self.entries.lock().expect("lock poisoned");
+        if Self::check_duplicate(&entries, name, &canonical) {
+            if let Some(entry) = entries
+                .iter()
+                .find(|e| e.name == name && e.labels == canonical)
+            {
+                if let DefaultMetricHandle::Counter(ref h) = entry.handle {
+                    return h.clone();
+                }
+            }
+        }
         let handle = Arc::new(DefaultCounter {
             value: AtomicU64::new(0),
         });
-        let mut entries = self.entries.lock().expect("lock poisoned");
-        Self::check_duplicate(&entries, name, &canonical);
         entries.push(DefaultMetricEntry {
             name: name.to_owned(),
             description: description.to_owned(),
@@ -424,11 +515,20 @@ impl MetricsRecorder for DefaultMetricsRecorder {
         labels: &[(&str, &str)],
     ) -> Arc<dyn GaugeFn> {
         let canonical = canonicalize_labels(labels);
+        let mut entries = self.entries.lock().expect("lock poisoned");
+        if Self::check_duplicate(&entries, name, &canonical) {
+            if let Some(entry) = entries
+                .iter()
+                .find(|e| e.name == name && e.labels == canonical)
+            {
+                if let DefaultMetricHandle::Gauge(ref h) = entry.handle {
+                    return h.clone();
+                }
+            }
+        }
         let handle = Arc::new(DefaultGauge {
             bits: AtomicU64::new(f64::to_bits(0.0)),
         });
-        let mut entries = self.entries.lock().expect("lock poisoned");
-        Self::check_duplicate(&entries, name, &canonical);
         entries.push(DefaultMetricEntry {
             name: name.to_owned(),
             description: description.to_owned(),
@@ -445,11 +545,20 @@ impl MetricsRecorder for DefaultMetricsRecorder {
         labels: &[(&str, &str)],
     ) -> Arc<dyn UpDownCounterFn> {
         let canonical = canonicalize_labels(labels);
+        let mut entries = self.entries.lock().expect("lock poisoned");
+        if Self::check_duplicate(&entries, name, &canonical) {
+            if let Some(entry) = entries
+                .iter()
+                .find(|e| e.name == name && e.labels == canonical)
+            {
+                if let DefaultMetricHandle::UpDownCounter(ref h) = entry.handle {
+                    return h.clone();
+                }
+            }
+        }
         let handle = Arc::new(DefaultUpDownCounter {
             value: AtomicI64::new(0),
         });
-        let mut entries = self.entries.lock().expect("lock poisoned");
-        Self::check_duplicate(&entries, name, &canonical);
         entries.push(DefaultMetricEntry {
             name: name.to_owned(),
             description: description.to_owned(),
@@ -467,9 +576,18 @@ impl MetricsRecorder for DefaultMetricsRecorder {
         boundaries: &[f64],
     ) -> Arc<dyn HistogramFn> {
         let canonical = canonicalize_labels(labels);
-        let handle = Arc::new(DefaultHistogram::new(boundaries));
         let mut entries = self.entries.lock().expect("lock poisoned");
-        Self::check_duplicate(&entries, name, &canonical);
+        if Self::check_duplicate(&entries, name, &canonical) {
+            if let Some(entry) = entries
+                .iter()
+                .find(|e| e.name == name && e.labels == canonical)
+            {
+                if let DefaultMetricHandle::Histogram(ref h) = entry.handle {
+                    return h.clone();
+                }
+            }
+        }
+        let handle = Arc::new(DefaultHistogram::new(boundaries));
         entries.push(DefaultMetricEntry {
             name: name.to_owned(),
             description: description.to_owned(),
@@ -484,66 +602,70 @@ impl MetricsRecorder for DefaultMetricsRecorder {
 // Composite recorder
 // ---------------------------------------------------------------------------
 
-/// Composite counter that forwards to both default and user handles.
+/// Composite counter that fans out increments to multiple handles.
 struct CompositeCounter {
-    default: Arc<dyn CounterFn>,
-    user: Arc<dyn CounterFn>,
+    handles: Vec<Arc<dyn CounterFn>>,
 }
 impl CounterFn for CompositeCounter {
     fn increment(&self, value: u64) {
-        self.default.increment(value);
-        self.user.increment(value);
+        for h in &self.handles {
+            h.increment(value);
+        }
     }
 }
 
+/// Composite gauge that fans out set calls to multiple handles.
 struct CompositeGauge {
-    default: Arc<dyn GaugeFn>,
-    user: Arc<dyn GaugeFn>,
+    handles: Vec<Arc<dyn GaugeFn>>,
 }
 impl GaugeFn for CompositeGauge {
     fn set(&self, value: f64) {
-        self.default.set(value);
-        self.user.set(value);
+        for h in &self.handles {
+            h.set(value);
+        }
     }
 }
 
+/// Composite up-down counter that fans out increments to multiple handles.
 struct CompositeUpDownCounter {
-    default: Arc<dyn UpDownCounterFn>,
-    user: Arc<dyn UpDownCounterFn>,
+    handles: Vec<Arc<dyn UpDownCounterFn>>,
 }
 impl UpDownCounterFn for CompositeUpDownCounter {
     fn increment(&self, value: i64) {
-        self.default.increment(value);
-        self.user.increment(value);
+        for h in &self.handles {
+            h.increment(value);
+        }
     }
 }
 
+/// Composite histogram that fans out observations to multiple handles.
 struct CompositeHistogram {
-    default: Arc<dyn HistogramFn>,
-    user: Arc<dyn HistogramFn>,
+    handles: Vec<Arc<dyn HistogramFn>>,
 }
 impl HistogramFn for CompositeHistogram {
     fn record(&self, value: f64) {
-        self.default.record(value);
-        self.user.record(value);
+        for h in &self.handles {
+            h.record(value);
+        }
     }
 }
 
-/// Wraps a [`DefaultMetricsRecorder`] and an optional user-provided recorder.
-/// All registrations and operations are forwarded to both. When no user
-/// recorder is present, returns the default handle directly (single virtual
-/// dispatch, no branch).
+/// Fans out all metric registrations and operations to multiple recorders.
+///
+/// When only a single recorder is present, the handle is returned directly
+/// (single virtual dispatch, no branch). With two or more recorders, a
+/// composite handle iterates through all of them.
 pub struct CompositeMetricsRecorder {
-    default: Arc<DefaultMetricsRecorder>,
-    user: Option<Arc<dyn MetricsRecorder>>,
+    recorders: Vec<Arc<dyn MetricsRecorder>>,
 }
 
 impl CompositeMetricsRecorder {
-    pub fn new(
-        default: Arc<DefaultMetricsRecorder>,
-        user: Option<Arc<dyn MetricsRecorder>>,
-    ) -> Self {
-        Self { default, user }
+    /// Create a new composite recorder that forwards to all provided recorders.
+    ///
+    /// ## Arguments
+    /// - `recorders` – The list of recorders to fan out to.
+    pub fn new(recorders: Vec<Arc<dyn MetricsRecorder>>) -> Self {
+        Self { recorders }
     }
 }
 
@@ -554,16 +676,15 @@ impl MetricsRecorder for CompositeMetricsRecorder {
         description: &str,
         labels: &[(&str, &str)],
     ) -> Arc<dyn CounterFn> {
-        let default_handle = self.default.register_counter(name, description, labels);
-        match &self.user {
-            Some(user) => {
-                let user_handle = user.register_counter(name, description, labels);
-                Arc::new(CompositeCounter {
-                    default: default_handle,
-                    user: user_handle,
-                })
-            }
-            None => default_handle,
+        let handles: Vec<Arc<dyn CounterFn>> = self
+            .recorders
+            .iter()
+            .map(|r| r.register_counter(name, description, labels))
+            .collect();
+        if handles.len() == 1 {
+            handles.into_iter().next().expect("single recorder")
+        } else {
+            Arc::new(CompositeCounter { handles })
         }
     }
 
@@ -573,16 +694,15 @@ impl MetricsRecorder for CompositeMetricsRecorder {
         description: &str,
         labels: &[(&str, &str)],
     ) -> Arc<dyn GaugeFn> {
-        let default_handle = self.default.register_gauge(name, description, labels);
-        match &self.user {
-            Some(user) => {
-                let user_handle = user.register_gauge(name, description, labels);
-                Arc::new(CompositeGauge {
-                    default: default_handle,
-                    user: user_handle,
-                })
-            }
-            None => default_handle,
+        let handles: Vec<Arc<dyn GaugeFn>> = self
+            .recorders
+            .iter()
+            .map(|r| r.register_gauge(name, description, labels))
+            .collect();
+        if handles.len() == 1 {
+            handles.into_iter().next().expect("single recorder")
+        } else {
+            Arc::new(CompositeGauge { handles })
         }
     }
 
@@ -592,18 +712,15 @@ impl MetricsRecorder for CompositeMetricsRecorder {
         description: &str,
         labels: &[(&str, &str)],
     ) -> Arc<dyn UpDownCounterFn> {
-        let default_handle = self
-            .default
-            .register_up_down_counter(name, description, labels);
-        match &self.user {
-            Some(user) => {
-                let user_handle = user.register_up_down_counter(name, description, labels);
-                Arc::new(CompositeUpDownCounter {
-                    default: default_handle,
-                    user: user_handle,
-                })
-            }
-            None => default_handle,
+        let handles: Vec<Arc<dyn UpDownCounterFn>> = self
+            .recorders
+            .iter()
+            .map(|r| r.register_up_down_counter(name, description, labels))
+            .collect();
+        if handles.len() == 1 {
+            handles.into_iter().next().expect("single recorder")
+        } else {
+            Arc::new(CompositeUpDownCounter { handles })
         }
     }
 
@@ -614,18 +731,15 @@ impl MetricsRecorder for CompositeMetricsRecorder {
         labels: &[(&str, &str)],
         boundaries: &[f64],
     ) -> Arc<dyn HistogramFn> {
-        let default_handle = self
-            .default
-            .register_histogram(name, description, labels, boundaries);
-        match &self.user {
-            Some(user) => {
-                let user_handle = user.register_histogram(name, description, labels, boundaries);
-                Arc::new(CompositeHistogram {
-                    default: default_handle,
-                    user: user_handle,
-                })
-            }
-            None => default_handle,
+        let handles: Vec<Arc<dyn HistogramFn>> = self
+            .recorders
+            .iter()
+            .map(|r| r.register_histogram(name, description, labels, boundaries))
+            .collect();
+        if handles.len() == 1 {
+            handles.into_iter().next().expect("single recorder")
+        } else {
+            Arc::new(CompositeHistogram { handles })
         }
     }
 }
@@ -643,10 +757,19 @@ pub struct MetricsRecorderHelper {
 }
 
 impl MetricsRecorderHelper {
+    /// Create a new helper that delegates to `recorder` and filters at `level`.
+    ///
+    /// ## Arguments
+    /// - `recorder` – The recorder to delegate metric registration to.
+    /// - `level` – The minimum metric level required for a metric to be active.
     pub fn new(recorder: Arc<dyn MetricsRecorder>, level: MetricLevel) -> Self {
         Self { recorder, level }
     }
 
+    /// Start building a counter metric with the given name.
+    ///
+    /// ## Arguments
+    /// - `name` – Dotted metric name (e.g. `"slatedb.compaction.bytes"`).
     pub fn counter(&self, name: &str) -> CounterBuilder<'_> {
         CounterBuilder {
             recorder: &self.recorder,
@@ -658,6 +781,10 @@ impl MetricsRecorderHelper {
         }
     }
 
+    /// Start building a gauge metric with the given name.
+    ///
+    /// ## Arguments
+    /// - `name` – Dotted metric name.
     pub fn gauge(&self, name: &str) -> GaugeBuilder<'_> {
         GaugeBuilder {
             recorder: &self.recorder,
@@ -669,6 +796,10 @@ impl MetricsRecorderHelper {
         }
     }
 
+    /// Start building an up-down counter metric with the given name.
+    ///
+    /// ## Arguments
+    /// - `name` – Dotted metric name.
     pub fn up_down_counter(&self, name: &str) -> UpDownCounterBuilder<'_> {
         UpDownCounterBuilder {
             recorder: &self.recorder,
@@ -680,6 +811,11 @@ impl MetricsRecorderHelper {
         }
     }
 
+    /// Start building a histogram metric with the given name and boundaries.
+    ///
+    /// ## Arguments
+    /// - `name` – Dotted metric name.
+    /// - `boundaries` – Bucket boundaries for the histogram.
     pub fn histogram<'a>(&'a self, name: &str, boundaries: &[f64]) -> HistogramBuilder<'a> {
         HistogramBuilder {
             recorder: &self.recorder,
@@ -693,6 +829,7 @@ impl MetricsRecorderHelper {
     }
 }
 
+/// Builder for registering a counter metric.
 pub struct CounterBuilder<'a> {
     recorder: &'a Arc<dyn MetricsRecorder>,
     threshold: MetricLevel,
@@ -703,11 +840,13 @@ pub struct CounterBuilder<'a> {
 }
 
 impl CounterBuilder<'_> {
+    /// Set the human-readable description for the counter.
     pub fn description(mut self, desc: &str) -> Self {
         self.description = desc.to_owned();
         self
     }
 
+    /// Set the labels for the counter.
     pub fn labels(mut self, labels: &[(&str, &str)]) -> Self {
         self.labels = labels
             .iter()
@@ -716,11 +855,16 @@ impl CounterBuilder<'_> {
         self
     }
 
+    /// Set the metric level for level-based filtering.
     pub fn level(mut self, level: MetricLevel) -> Self {
         self.level = level;
         self
     }
 
+    /// Finalize and register the counter, returning a handle.
+    ///
+    /// ## Returns
+    /// A [`CounterFn`] handle, or a no-op if the metric level is below the threshold.
     pub fn register(self) -> Arc<dyn CounterFn> {
         if self.level < self.threshold {
             return noop_counter();
@@ -735,6 +879,7 @@ impl CounterBuilder<'_> {
     }
 }
 
+/// Builder for registering a gauge metric.
 pub struct GaugeBuilder<'a> {
     recorder: &'a Arc<dyn MetricsRecorder>,
     threshold: MetricLevel,
@@ -745,11 +890,13 @@ pub struct GaugeBuilder<'a> {
 }
 
 impl GaugeBuilder<'_> {
+    /// Set the human-readable description for the gauge.
     pub fn description(mut self, desc: &str) -> Self {
         self.description = desc.to_owned();
         self
     }
 
+    /// Set the labels for the gauge.
     pub fn labels(mut self, labels: &[(&str, &str)]) -> Self {
         self.labels = labels
             .iter()
@@ -758,11 +905,16 @@ impl GaugeBuilder<'_> {
         self
     }
 
+    /// Set the metric level for level-based filtering.
     pub fn level(mut self, level: MetricLevel) -> Self {
         self.level = level;
         self
     }
 
+    /// Finalize and register the gauge, returning a handle.
+    ///
+    /// ## Returns
+    /// A [`GaugeFn`] handle, or a no-op if the metric level is below the threshold.
     pub fn register(self) -> Arc<dyn GaugeFn> {
         if self.level < self.threshold {
             return noop_gauge();
@@ -777,6 +929,7 @@ impl GaugeBuilder<'_> {
     }
 }
 
+/// Builder for registering an up-down counter metric.
 pub struct UpDownCounterBuilder<'a> {
     recorder: &'a Arc<dyn MetricsRecorder>,
     threshold: MetricLevel,
@@ -787,11 +940,13 @@ pub struct UpDownCounterBuilder<'a> {
 }
 
 impl UpDownCounterBuilder<'_> {
+    /// Set the human-readable description for the up-down counter.
     pub fn description(mut self, desc: &str) -> Self {
         self.description = desc.to_owned();
         self
     }
 
+    /// Set the labels for the up-down counter.
     pub fn labels(mut self, labels: &[(&str, &str)]) -> Self {
         self.labels = labels
             .iter()
@@ -800,11 +955,16 @@ impl UpDownCounterBuilder<'_> {
         self
     }
 
+    /// Set the metric level for level-based filtering.
     pub fn level(mut self, level: MetricLevel) -> Self {
         self.level = level;
         self
     }
 
+    /// Finalize and register the up-down counter, returning a handle.
+    ///
+    /// ## Returns
+    /// An [`UpDownCounterFn`] handle, or a no-op if the metric level is below the threshold.
     pub fn register(self) -> Arc<dyn UpDownCounterFn> {
         if self.level < self.threshold {
             return noop_up_down_counter();
@@ -819,6 +979,7 @@ impl UpDownCounterBuilder<'_> {
     }
 }
 
+/// Builder for registering a histogram metric.
 pub struct HistogramBuilder<'a> {
     recorder: &'a Arc<dyn MetricsRecorder>,
     threshold: MetricLevel,
@@ -830,11 +991,13 @@ pub struct HistogramBuilder<'a> {
 }
 
 impl HistogramBuilder<'_> {
+    /// Set the human-readable description for the histogram.
     pub fn description(mut self, desc: &str) -> Self {
         self.description = desc.to_owned();
         self
     }
 
+    /// Set the labels for the histogram.
     pub fn labels(mut self, labels: &[(&str, &str)]) -> Self {
         self.labels = labels
             .iter()
@@ -843,11 +1006,16 @@ impl HistogramBuilder<'_> {
         self
     }
 
+    /// Set the metric level for level-based filtering.
     pub fn level(mut self, level: MetricLevel) -> Self {
         self.level = level;
         self
     }
 
+    /// Finalize and register the histogram, returning a handle.
+    ///
+    /// ## Returns
+    /// A [`HistogramFn`] handle, or a no-op if the metric level is below the threshold.
     pub fn register(self) -> Arc<dyn HistogramFn> {
         if self.level < self.threshold {
             return noop_histogram();
@@ -1068,7 +1236,10 @@ mod tests {
     fn should_forward_to_user_recorder() {
         let default = Arc::new(DefaultMetricsRecorder::new());
         let user = Arc::new(DefaultMetricsRecorder::new());
-        let composite = CompositeMetricsRecorder::new(default.clone(), Some(user.clone()));
+        let composite = CompositeMetricsRecorder::new(vec![
+            default.clone() as Arc<dyn MetricsRecorder>,
+            user.clone() as Arc<dyn MetricsRecorder>,
+        ]);
 
         let counter = composite.register_counter("test.counter", "desc", &[("k", "v")]);
         counter.increment(7);
@@ -1091,7 +1262,10 @@ mod tests {
     fn should_forward_gauge_to_user_recorder() {
         let default = Arc::new(DefaultMetricsRecorder::new());
         let user = Arc::new(DefaultMetricsRecorder::new());
-        let composite = CompositeMetricsRecorder::new(default.clone(), Some(user.clone()));
+        let composite = CompositeMetricsRecorder::new(vec![
+            default.clone() as Arc<dyn MetricsRecorder>,
+            user.clone() as Arc<dyn MetricsRecorder>,
+        ]);
 
         let gauge = composite.register_gauge("test.gauge", "desc", &[]);
         gauge.set(99.0);
@@ -1112,7 +1286,10 @@ mod tests {
     fn should_forward_up_down_counter_to_user_recorder() {
         let default = Arc::new(DefaultMetricsRecorder::new());
         let user = Arc::new(DefaultMetricsRecorder::new());
-        let composite = CompositeMetricsRecorder::new(default.clone(), Some(user.clone()));
+        let composite = CompositeMetricsRecorder::new(vec![
+            default.clone() as Arc<dyn MetricsRecorder>,
+            user.clone() as Arc<dyn MetricsRecorder>,
+        ]);
 
         let counter = composite.register_up_down_counter("test.udc", "desc", &[]);
         counter.increment(5);
@@ -1134,7 +1311,10 @@ mod tests {
     fn should_forward_histogram_to_user_recorder() {
         let default = Arc::new(DefaultMetricsRecorder::new());
         let user = Arc::new(DefaultMetricsRecorder::new());
-        let composite = CompositeMetricsRecorder::new(default.clone(), Some(user.clone()));
+        let composite = CompositeMetricsRecorder::new(vec![
+            default.clone() as Arc<dyn MetricsRecorder>,
+            user.clone() as Arc<dyn MetricsRecorder>,
+        ]);
 
         let hist = composite.register_histogram("test.hist", "desc", &[], &[1.0, 10.0]);
         hist.record(5.0);
@@ -1154,7 +1334,8 @@ mod tests {
     #[test]
     fn should_work_without_user_recorder() {
         let default = Arc::new(DefaultMetricsRecorder::new());
-        let composite = CompositeMetricsRecorder::new(default.clone(), None);
+        let composite =
+            CompositeMetricsRecorder::new(vec![default.clone() as Arc<dyn MetricsRecorder>]);
 
         let counter = composite.register_counter("test.counter", "desc", &[]);
         counter.increment(1);
@@ -1171,7 +1352,8 @@ mod tests {
     #[test]
     fn should_filter_debug_metrics_at_info_level() {
         let default = Arc::new(DefaultMetricsRecorder::new());
-        let composite = CompositeMetricsRecorder::new(default.clone(), None);
+        let composite =
+            CompositeMetricsRecorder::new(vec![default.clone() as Arc<dyn MetricsRecorder>]);
         let helper = MetricsRecorderHelper::new(
             Arc::new(composite) as Arc<dyn MetricsRecorder>,
             MetricLevel::Info,
@@ -1205,7 +1387,8 @@ mod tests {
     #[test]
     fn should_activate_debug_metrics_at_debug_level() {
         let default = Arc::new(DefaultMetricsRecorder::new());
-        let composite = CompositeMetricsRecorder::new(default.clone(), None);
+        let composite =
+            CompositeMetricsRecorder::new(vec![default.clone() as Arc<dyn MetricsRecorder>]);
         let helper = MetricsRecorderHelper::new(
             Arc::new(composite) as Arc<dyn MetricsRecorder>,
             MetricLevel::Debug,
@@ -1228,7 +1411,8 @@ mod tests {
     #[test]
     fn should_filter_debug_histogram_at_info_level() {
         let default = Arc::new(DefaultMetricsRecorder::new());
-        let composite = CompositeMetricsRecorder::new(default.clone(), None);
+        let composite =
+            CompositeMetricsRecorder::new(vec![default.clone() as Arc<dyn MetricsRecorder>]);
         let helper = MetricsRecorderHelper::new(
             Arc::new(composite) as Arc<dyn MetricsRecorder>,
             MetricLevel::Info,
@@ -1249,7 +1433,8 @@ mod tests {
     #[test]
     fn should_register_with_builder_labels() {
         let default = Arc::new(DefaultMetricsRecorder::new());
-        let composite = CompositeMetricsRecorder::new(default.clone(), None);
+        let composite =
+            CompositeMetricsRecorder::new(vec![default.clone() as Arc<dyn MetricsRecorder>]);
         let helper = MetricsRecorderHelper::new(
             Arc::new(composite) as Arc<dyn MetricsRecorder>,
             MetricLevel::Info,
@@ -1301,27 +1486,60 @@ mod tests {
     // -- Duplicate detection tests --
 
     #[test]
-    #[should_panic(expected = "duplicate metric registration")]
-    fn should_panic_on_duplicate_counter() {
+    fn should_warn_and_return_existing_on_duplicate_counter() {
         let recorder = DefaultMetricsRecorder::new();
-        recorder.register_counter("dup.counter", "first", &[("k", "v")]);
-        recorder.register_counter("dup.counter", "second", &[("k", "v")]);
+        let first = recorder.register_counter("dup.counter", "first", &[("k", "v")]);
+        first.increment(10);
+
+        // Second registration returns the same handle
+        let second = recorder.register_counter("dup.counter", "second", &[("k", "v")]);
+        second.increment(5);
+
+        let snap = recorder.snapshot();
+        let metrics = snap.by_name("dup.counter");
+        // Only one entry should exist
+        assert_eq!(metrics.len(), 1);
+        // Both increments should be on the same handle
+        match &metrics[0].value {
+            MetricValue::Counter(v) => assert_eq!(*v, 15),
+            other => panic!("expected Counter, got {:?}", other),
+        }
     }
 
     #[test]
-    #[should_panic(expected = "duplicate metric registration")]
-    fn should_panic_on_duplicate_gauge() {
+    fn should_warn_and_return_existing_on_duplicate_gauge() {
         let recorder = DefaultMetricsRecorder::new();
-        recorder.register_gauge("dup.gauge", "first", &[]);
-        recorder.register_gauge("dup.gauge", "second", &[]);
+        let first = recorder.register_gauge("dup.gauge", "first", &[]);
+        first.set(1.0);
+
+        let second = recorder.register_gauge("dup.gauge", "second", &[]);
+        second.set(2.0);
+
+        let snap = recorder.snapshot();
+        let metrics = snap.by_name("dup.gauge");
+        assert_eq!(metrics.len(), 1);
+        match &metrics[0].value {
+            MetricValue::Gauge(v) => assert!((v - 2.0).abs() < f64::EPSILON),
+            other => panic!("expected Gauge, got {:?}", other),
+        }
     }
 
     #[test]
-    #[should_panic(expected = "duplicate metric registration")]
-    fn should_panic_on_duplicate_counter_with_different_label_order() {
+    fn should_warn_and_return_existing_on_duplicate_counter_with_different_label_order() {
         let recorder = DefaultMetricsRecorder::new();
-        recorder.register_counter("dup.counter", "first", &[("a", "1"), ("b", "2")]);
-        recorder.register_counter("dup.counter", "second", &[("b", "2"), ("a", "1")]);
+        let first = recorder.register_counter("dup.counter", "first", &[("a", "1"), ("b", "2")]);
+        first.increment(10);
+
+        let second = recorder.register_counter("dup.counter", "second", &[("b", "2"), ("a", "1")]);
+        second.increment(5);
+
+        let snap = recorder.snapshot();
+        let metrics = snap.by_name("dup.counter");
+        assert_eq!(metrics.len(), 1);
+        match &metrics[0].value {
+            MetricValue::Counter(v) => assert_eq!(*v, 15),
+            other => panic!("expected Counter, got {:?}", other),
+        }
     }
 
     #[test]
