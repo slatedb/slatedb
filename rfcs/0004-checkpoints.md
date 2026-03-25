@@ -708,8 +708,11 @@ Projection is logically equivalent to deleting all entries outside the projected
 projected, its `visible_range` can only be narrowed further, never extended — the entries outside the original
 projection are treated as if they no longer exist.
 
-Note: currently, size estimation for the projected SSTs is not accurate, which might lead to suboptimal compactor 
+Note: currently, size estimation for the projected SSTs is not accurate, which might lead to suboptimal compactor
 decisions. This will be improved in the future iterations.
+
+Note: currently, it is the client responsibility to maintain the ranges associated with SlateDB instances and supply
+them to Projection and Union.
 
 #### Union
 
