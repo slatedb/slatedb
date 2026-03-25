@@ -130,16 +130,23 @@ pub trait FilterPolicy {
     /// the filter is built. It does not need to be exact.
     ///
     /// For the built-in bloom filter, the actual filter is sized from the
-    /// real number of hashes collected during `add_key`, not from this estimate,
+    /// real number of hashes collected during `add_entry`, not from this estimate,
     /// so overestimates waste a small allocation and underestimates just trigger
     /// a reallocation.
     fn estimate_size(&self, num_keys: usize) -> usize;
 }
 
-/// Accumulator for keys during SST construction that produces a [Filter].
+/// Accumulator for entries during SST construction that produces a [Filter].
 pub trait FilterBuilder {
-    /// Adds a key to the filter being built.
-    fn add_key(&mut self, key: &[u8]);
+    /// Feeds an SST entry to the filter being built.
+    ///
+    /// The builder receives the full `RowEntry` (key, value, sequence
+    /// number, timestamps) so that filter implementations are not limited
+    /// to key-only hashing.  A bloom filter will typically hash only the
+    /// key (or a prefix of it), but other filters — for example a min/max
+    /// timestamp filter or a sequence-number range filter — can inspect
+    /// whichever fields they need.
+    fn add_entry(&mut self, entry: &RowEntry);
 
     /// Finalizes and return the completed filter.
     fn build(&self) -> Arc<dyn Filter>;
@@ -327,8 +334,14 @@ impl FilterPolicy for BloomFilterPolicy {
 
 #### Configuration
 
-The `Settings` struct replaces `filter_bits_per_key` with a `filter_policies`
-field. This is a **breaking change** because the old field is removed entirely.
+The `filter_bits_per_key` field is removed from `Settings`. Filter policies
+are configured on `DbBuilder` and `CompactorBuilder` via `with_filter_policies`,
+following the same pattern as `merge_operator` and `block_transformer` which
+are also trait-object-based configuration that lives on the builders rather
+than the serializable `Settings` struct.
+
+`Settings` keeps `min_filter_keys` (a plain `u32` that is serializable) since
+it controls *whether* a filter is created, not *which* filter:
 
 ```rust
 pub struct Settings {
@@ -338,18 +351,45 @@ pub struct Settings {
     /// is greater than or equal to this value.
     pub min_filter_keys: u32,
 
-    /// The filter policies to use. Each policy produces a separate filter
-    /// per SST, stored in a composite filter block. On read, all filters
-    /// are evaluated with AND logic — an SST is skipped if any filter
-    /// returns `false`.
-    ///
-    /// Defaults to `vec![Arc::new(BloomFilterPolicy::new(10))]`.
-    /// Set to an empty vec to disable filters.
-    pub filter_policies: Vec<Arc<dyn FilterPolicy>>,
+    // filter_bits_per_key is removed — replaced by filter_policies on
+    // DbBuilder / CompactorBuilder.
 }
 ```
 
-`ScanOptions` get a `filter_hints` field for passing opaque hints to custom
+`DbBuilder` and `CompactorBuilder` gain a `with_filter_policies` method:
+
+```rust
+impl<P: Into<Path>> DbBuilder<P> {
+    /// Sets the filter policies for this database. Each policy produces a
+    /// separate filter per SST, stored in a composite filter block. On
+    /// read, all filters are evaluated with AND logic — an SST is skipped
+    /// if any filter returns `false`.
+    ///
+    /// Defaults to `vec![Arc::new(BloomFilterPolicy::new(10))]`.
+    /// Pass an empty vec to disable filters.
+    pub fn with_filter_policies(
+        mut self,
+        policies: Vec<Arc<dyn FilterPolicy>>,
+    ) -> Self {
+        self.filter_policies = policies;
+        self
+    }
+}
+
+impl<P: Into<Path>> CompactorBuilder<P> {
+    /// Sets the filter policies used when the compactor rewrites SSTs.
+    /// Must match the writer's policies to avoid silently dropping filters.
+    pub fn with_filter_policies(
+        mut self,
+        policies: Vec<Arc<dyn FilterPolicy>>,
+    ) -> Self {
+        self.filter_policies = policies;
+        self
+    }
+}
+```
+
+`ScanOptions` gets a `filter_hints` field for passing opaque hints to custom
 filters:
 
 ```rust
@@ -374,33 +414,33 @@ pub struct ScanOptions {
 Usage:
 
 ```rust
-// Default: full-key bloom filter (backwards compatible)
-let settings = Settings::default();
+// Default: full-key bloom filter (backwards compatible, no explicit call needed)
+let db = Db::builder("path", object_store).build().await?;
 
 // Full-key + prefix bloom filter (recommended for prefix scan workloads)
-let settings = Settings {
-    filter_policies: vec![Arc::new(BloomFilterPolicy::new(10)
-        .with_prefix_extractor(Arc::new(MyPrefixExtractor::new())))],
-    ..Settings::default()
-};
+let db = Db::builder("path", object_store)
+    .with_filter_policies(vec![Arc::new(BloomFilterPolicy::new(10)
+        .with_prefix_extractor(Arc::new(MyPrefixExtractor::new())))])
+    .build()
+    .await?;
 
 // Prefix-only bloom filter (no point-lookup filtering)
-let settings = Settings {
-    filter_policies: vec![Arc::new(BloomFilterPolicy::new(10)
+let db = Db::builder("path", object_store)
+    .with_filter_policies(vec![Arc::new(BloomFilterPolicy::new(10)
         .with_prefix_extractor(Arc::new(MyPrefixExtractor::new()))
-        .with_whole_key_filtering(false))],
-    ..Settings::default()
-};
+        .with_whole_key_filtering(false))])
+    .build()
+    .await?;
 
 // Multiple filters: bloom + custom min/max filter
-let settings = Settings {
-    filter_policies: vec![
+let db = Db::builder("path", object_store)
+    .with_filter_policies(vec![
         Arc::new(BloomFilterPolicy::new(10)
             .with_prefix_extractor(Arc::new(MyPrefixExtractor::new()))),
         Arc::new(MyMinMaxFilterPolicy::new(...)),
-    ],
-    ..Settings::default()
-};
+    ])
+    .build()
+    .await?;
 
 // Passing hints to custom filters at scan time
 let scan_options = ScanOptions {
@@ -481,7 +521,7 @@ When reading an SST's filter block:
   decoded using the built-in `BloomFilterPolicy`. If no matching bloom policy
   is configured, the filter is skipped.
 - **`filter_version` = `2`**: Parse the composite block. For each
-  `(name, data)` entry, find a matching policy in `Settings.filter_policies`
+  `(name, data)` entry, find a matching policy in the configured `filter_policies`
   by `name()` and call `policy.decode(data)`. Unknown names are skipped
   (reduces filtering power but never produces incorrect results).
 
@@ -489,7 +529,7 @@ When reading an SST's filter block:
 
 The SST builder receives the `filter_policies` array. For each policy, it calls
 `builder()` to obtain a `FilterBuilder`. Each key is fed to all builders via
-`add_key()`. On finalization, each builder produces a filter via `build()`, and
+`add_entry()`. On finalization, each builder produces a filter via `build()`, and
 all filters are encoded into a composite filter block. The SST info's
 `filter_version` is set to `2`.
 
@@ -606,8 +646,9 @@ SlateDB features and components that this RFC interacts with. Check all that app
 
 ### Observability
 
-- **Configuration**: New `filter_policies` setting (programmatic only; not
-  serializable to TOML/JSON). `filter_bits_per_key` has been removed.
+- **Configuration**: New `with_filter_policies` on `DbBuilder` /
+  `CompactorBuilder` (programmatic only; not serializable to TOML/JSON).
+  `filter_bits_per_key` has been removed from `Settings`.
 - **Metrics**: Existing `sst_filter_positives`, `sst_filter_negatives`,
   `sst_filter_false_positives` metrics are preserved.
 
@@ -617,10 +658,10 @@ SlateDB features and components that this RFC interacts with. Check all that app
   envelope is unchanged. A new `filter_version` field is added to SST info.
   Old SSTs without this field are assumed to use the legacy single-bloom format
   (see [SST Format Changes](#sst-format-changes)).
-- **Public API**: `filter_bits_per_key` on `Settings` is removed and replaced
-  by `filter_policies: Vec<Arc<dyn FilterPolicy>>`. `ScanOptions` gains a
-  `filter_hints: HashMap<String, Bytes>` field. See [Configuration](#configuration)
-  for migration examples.
+- **Public API**: `filter_bits_per_key` is removed from `Settings`.
+  `DbBuilder` and `CompactorBuilder` gain `with_filter_policies`. `ScanOptions`
+  gains a `filter_hints: HashMap<String, Bytes>` field. See
+  [Configuration](#configuration) for migration examples.
 - **Rolling upgrades**: Old readers that don't understand the `filter_version`
   field will ignore it (FlatBuffers forward compatibility). They will continue
   to decode filters as bloom filters, which is correct as long as the bloom
@@ -654,9 +695,9 @@ Implementation will be in two phases:
    `FilterBuilder`, `Filter`, `PrefixExtractor`), refactor the existing bloom
    filter as the default `BloomFilterPolicy`, SST format changes
    (`filter_version`, composite filter block), and refactoring the write/read
-   paths to use `filter_policies: Vec<Arc<dyn FilterPolicy>>` with AND-logic
-   evaluation. Breaking config change: `filter_bits_per_key` replaced by
-   `filter_policies`.
+   paths to use the pluggable filter policies with AND-logic evaluation.
+   Breaking config change: `filter_bits_per_key` removed from `Settings`;
+   `with_filter_policies` added to `DbBuilder` / `CompactorBuilder`.
 2. **Prefix bloom filter**: Add `prefix_extractor` and `whole_key_filtering`
    to `BloomFilterPolicy`. Wire the prefix through the read path so each
    SST's filters can be probed with `FilterQuery::Prefix` before opening.
