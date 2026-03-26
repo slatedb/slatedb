@@ -6878,6 +6878,15 @@ func (e TtlExpireAfterTicks) Destroy() {
 	FfiDestroyerUint64{}.Destroy(e.Field0)
 }
 
+// Expire the value at the given absolute timestamp (clock ticks).
+type TtlExpireAt struct {
+	Field0 int64
+}
+
+func (e TtlExpireAt) Destroy() {
+	FfiDestroyerInt64{}.Destroy(e.Field0)
+}
+
 type FfiConverterTtl struct{}
 
 var FfiConverterTtlINSTANCE = FfiConverterTtl{}
@@ -6904,6 +6913,10 @@ func (FfiConverterTtl) Read(reader io.Reader) Ttl {
 		return TtlExpireAfterTicks{
 			FfiConverterUint64INSTANCE.Read(reader),
 		}
+	case 4:
+		return TtlExpireAt{
+			FfiConverterInt64INSTANCE.Read(reader),
+		}
 	default:
 		panic(fmt.Sprintf("invalid enum value %v in FfiConverterTtl.Read()", id))
 	}
@@ -6918,6 +6931,9 @@ func (FfiConverterTtl) Write(writer io.Writer, value Ttl) {
 	case TtlExpireAfterTicks:
 		writeInt32(writer, 3)
 		FfiConverterUint64INSTANCE.Write(writer, variant_value.Field0)
+	case TtlExpireAt:
+		writeInt32(writer, 4)
+		FfiConverterInt64INSTANCE.Write(writer, variant_value.Field0)
 	default:
 		_ = variant_value
 		panic(fmt.Sprintf("invalid enum value `%v` in FfiConverterTtl.Write", value))
