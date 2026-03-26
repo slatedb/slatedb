@@ -236,37 +236,6 @@ jobs:
       - name: Ensure Java generation does not modify tracked files
         run: git diff --exit-code -- bindings/java
 
-  bindings-node:
-    runs-on: ubuntu-latest
-    needs: tests
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Node 20
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-
-      - name: Install uniffi-bindgen-node-js
-        env:
-          RUSTFLAGS: ""
-        run: cargo install uniffi-bindgen-node-js --git https://github.com/criccomini/uniffi-bindgen-node-js.git --branch main --locked
-
-      - name: Generate Node package with host prebuild
-        run: ./scripts/generate-node-package.sh --out-dir "${{ runner.temp }}/slatedb-node" --version 0.0.0-ci --stage-host-prebuild
-
-      - name: Validate generated Node package
-        shell: bash
-        env:
-          NPM_CONFIG_CACHE: ${{ runner.temp }}/npm-cache
-        run: |
-          cd "${{ runner.temp }}/slatedb-node"
-          npm install --no-package-lock
-          npm pack
-
-      - name: Ensure Node generation does not modify tracked files
-        run: git diff --exit-code
-
   microbenchmarks:
     runs-on: ubuntu-latest
     needs: tests

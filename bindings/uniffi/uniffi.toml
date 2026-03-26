@@ -6,9 +6,3 @@ c_module_filename = "slatedb"
 [bindings.java]
 package_name = "io.slatedb.uniffi"
 cdylib_name = "slatedb_uniffi"
-
-[bindings.node]
-package_name = "@slatedb/uniffi"
-cdylib_name = "slatedb_uniffi"
-node_engine = ">=20"
-bundled_prebuilds = true
