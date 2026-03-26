@@ -89,6 +89,10 @@ export default defineConfig({
 							link: '/docs/design/files/',
 						},
 						{
+							label: 'SSTs',
+							link: '/docs/design/sorted-string-table/',
+						},
+						{
 							label: 'Writes',
 							link: '/docs/design/writes/',
 						},
@@ -97,8 +101,16 @@ export default defineConfig({
 							link: '/docs/design/reads/',
 						},
 						{
+							label: 'DbReader',
+							link: '/docs/design/reader/',
+						},
+						{
 							label: 'Compaction',
 							link: '/docs/design/compaction/',
+						},
+						{
+							label: 'MergeOperator',
+							link: '/docs/design/merge-operator/',
 						},
 						{
 							label: 'Garbage Collection',
@@ -119,6 +131,10 @@ export default defineConfig({
 						{
 							label: 'Compression',
 							link: '/docs/design/compression/',
+						},
+						{
+							label: 'BlockTransformer',
+							link: '/docs/design/block-transformer/',
 						},
 						{
 							label: 'Clones',
