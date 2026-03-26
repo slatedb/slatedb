@@ -18,11 +18,10 @@ use crate::db::DbInner;
 use crate::error::SlateDBError;
 use crate::memtable_flusher::manifest_writer::{FlushResult, ManifestWriter, ManifestWriterEvent};
 use crate::memtable_flusher::uploader::{UploadJob, Uploader, UploaderEvent};
-use crate::memtable_flusher::{FlushTarget, FlusherCommand};
+use crate::memtable_flusher::{FlushTarget, FlushCommand};
 use crate::oracle::Oracle;
 use crate::utils::{IdGenerator, WatchableOnceCell};
 use fail_parallel::fail_point;
-use parking_lot::Mutex;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use tokio::sync::oneshot;
@@ -31,9 +30,8 @@ pub(super) struct FlushTracker {
     inner: Arc<DbInner>,
     uploader: Uploader,
     manifest_writer: ManifestWriter,
-    poisoned: Arc<Mutex<Option<SlateDBError>>>,
     closed_result: WatchableOnceCell<Result<(), SlateDBError>>,
-    commands: super::FlusherCommandReceiver,
+    commands: super::FlushCommandReceiver,
     next_epoch: FlushEpoch,
     tracked_imms: VecDeque<TrackedImm>,
 }
@@ -43,15 +41,13 @@ impl FlushTracker {
         inner: Arc<DbInner>,
         uploader: Uploader,
         manifest_writer: ManifestWriter,
-        poisoned: Arc<Mutex<Option<SlateDBError>>>,
         closed_result: WatchableOnceCell<Result<(), SlateDBError>>,
-        commands: super::FlusherCommandReceiver,
+        commands: super::FlushCommandReceiver,
     ) -> Self {
         Self {
             inner,
             uploader,
             manifest_writer,
-            poisoned,
             closed_result,
             commands,
             next_epoch: FlushEpoch(1),
@@ -74,16 +70,8 @@ impl FlushTracker {
     async fn run_once(&mut self) -> Result<bool, SlateDBError> {
         tokio::select! {
             maybe_command = self.commands.recv() => {
-                if let Some(command) = maybe_command {
-                    self.handle_command(command).await?;
-                    Ok(true)
-                } else {
-                    let uploader_result = self.uploader.close().await;
-                    let manifest_writer_result = self.manifest_writer.close().await;
-                    uploader_result?;
-                    manifest_writer_result?;
-                    Ok(false)
-                }
+                let command = maybe_command.unwrap_or(FlusherCommand::Shutdown);
+                self.handle_command(command).await
             }
             maybe_event = self.uploader.events().recv() => {
                 if let Some(event) = maybe_event {
@@ -104,25 +92,34 @@ impl FlushTracker {
         }
     }
 
-    async fn handle_command(&mut self, command: FlusherCommand) -> Result<(), SlateDBError> {
+    async fn handle_command(&mut self, command: FlushCommand) -> Result<bool, SlateDBError> {
         match command {
-            FlusherCommand::Flush { target, sender } => {
+            FlushCommand::Flush { target, sender } => {
                 fail_point!(
                     Arc::clone(&self.inner.fp_registry),
                     "flush-memtable-to-l0",
-                    |_| { Ok(()) }
+                    |_| { Ok(true) }
                 );
                 self.register_new_imm_memtables();
                 self.handle_flush_request(target, sender)?;
-                self.reconcile_and_dispatch().await
+                self.reconcile_and_dispatch().await?;
+                Ok(true)
             }
-            FlusherCommand::CreateCheckpoint {
+            FlushCommand::CreateCheckpoint {
                 target,
                 options,
                 sender,
             } => {
                 self.handle_checkpoint_request(target, options, sender)?;
-                self.reconcile_and_dispatch().await
+                self.reconcile_and_dispatch().await?;
+                Ok(true)
+            }
+            FlushCommand::Shutdown => {
+                let uploader_result = self.uploader.close().await;
+                let manifest_writer_result = self.manifest_writer.close().await;
+                uploader_result?;
+                manifest_writer_result?;
+                Ok(false)
             }
         }
     }
@@ -339,7 +336,6 @@ impl FlushTracker {
     }
 
     async fn handle_fatal_error(&mut self, err: SlateDBError) -> Result<(), SlateDBError> {
-        *self.poisoned.lock() = Some(err.clone());
         self.closed_result.write(Err(err.clone()));
         let _ = self.uploader.close().await;
         let _ = self.manifest_writer.close().await;

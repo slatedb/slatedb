@@ -45,7 +45,7 @@ pub(crate) enum FlushTarget {
     All,
 }
 
-pub(crate) enum FlusherCommand {
+pub(crate) enum FlushCommand {
     Flush {
         target: FlushTarget,
         sender: Option<oneshot::Sender<Result<FlushResult, SlateDBError>>>,
@@ -55,15 +55,16 @@ pub(crate) enum FlusherCommand {
         options: CheckpointOptions,
         sender: oneshot::Sender<Result<CheckpointCreateResult, SlateDBError>>,
     },
+    Shutdown,
 }
 
-pub(crate) type FlusherCommandSender = mpsc::UnboundedSender<FlusherCommand>;
-pub(crate) type FlusherCommandReceiver = mpsc::UnboundedReceiver<FlusherCommand>;
+type FlushCommandSender = mpsc::UnboundedSender<FlushCommand>;
+pub(crate) type FlushCommandReceiver = mpsc::UnboundedReceiver<FlushCommand>;
 
 /// Parallel L0 memtable flusher subsystem.
 pub(crate) struct MemtableFlusher {
-    commands: Mutex<Option<FlusherCommandSender>>,
-    poisoned: Arc<Mutex<Option<SlateDBError>>>,
+    commands: FlushCommandSender,
+    commands_rx: Mutex<Option<FlushCommandReceiver>>,
     closed_result: WatchableOnceCell<Result<(), SlateDBError>>,
     tracker_handle: Mutex<Option<JoinHandle<Result<(), SlateDBError>>>>,
 }
@@ -72,17 +73,21 @@ impl MemtableFlusher {
     /// Creates a new memtable flusher.
     /// Call [`start`](Self::start) to spawn the background task.
     pub(crate) fn new() -> Self {
+        let (commands_tx, commands_rx) = mpsc::unbounded_channel();
         Self {
-            commands: Mutex::new(None),
-            poisoned: Arc::new(Mutex::new(None)),
+            commands: commands_tx,
+            commands_rx: Mutex::new(Some(commands_rx)),
             closed_result: WatchableOnceCell::new(),
             tracker_handle: Mutex::new(None),
         }
     }
 
-    /// Spawns the flusher background task. Must be called after DbInner
-    /// is constructed so the task can hold a reference to it.
     pub(crate) fn start(&self, inner: Arc<DbInner>, manifest: FenceableManifest, handle: &Handle) {
+        let commands_rx = self
+            .commands_rx
+            .lock()
+            .take()
+            .expect("start called more than once");
         let uploader = Uploader::start(
             Arc::clone(&inner),
             inner.settings.l0_flush_parallelism,
@@ -95,14 +100,11 @@ impl MemtableFlusher {
             inner.settings.manifest_poll_interval,
             handle,
         );
-        let (commands_tx, commands_rx) = mpsc::unbounded_channel();
-        *self.commands.lock() = Some(commands_tx);
         let tracker_handle = handle.spawn(
             FlushTracker::new(
                 inner,
                 uploader,
                 manifest_writer,
-                Arc::clone(&self.poisoned),
                 self.closed_result.clone(),
                 commands_rx,
             )
@@ -128,7 +130,7 @@ impl MemtableFlusher {
         target: FlushTarget,
         sender: Option<oneshot::Sender<Result<FlushResult, SlateDBError>>>,
     ) -> Result<(), SlateDBError> {
-        self.send_command(FlusherCommand::Flush { target, sender })
+        self.send_command(FlushCommand::Flush { target, sender })
     }
 
     /// Creates a checkpoint using the memtable flusher's flush semantics.
@@ -138,7 +140,7 @@ impl MemtableFlusher {
         options: CheckpointOptions,
     ) -> Result<CheckpointCreateResult, SlateDBError> {
         let (tx, rx) = oneshot::channel();
-        self.send_command(FlusherCommand::CreateCheckpoint {
+        self.send_command(FlushCommand::CreateCheckpoint {
             target,
             options,
             sender: tx,
@@ -146,20 +148,15 @@ impl MemtableFlusher {
         rx.await.map_err(SlateDBError::ReadChannelError)?
     }
 
-    fn send_command(&self, command: FlusherCommand) -> Result<(), SlateDBError> {
-        if let Some(err) = self.poisoned.lock().clone() {
-            return Err(err);
-        }
+    fn send_command(&self, command: FlushCommand) -> Result<(), SlateDBError> {
         self.commands
-            .lock()
-            .as_ref()
-            .ok_or(SlateDBError::Closed)?
             .send_safely(self.closed_result.reader(), command)
     }
 
     /// Closes the flusher and any owned subsystems.
     pub(crate) async fn close(&self) -> Result<(), SlateDBError> {
-        self.commands.lock().take();
+        // Ignore send errors — the tracker may already be gone.
+        let _ = self.commands.send(FlushCommand::Shutdown);
         let tracker_handle = self.tracker_handle.lock().take();
         let result = if let Some(tracker_handle) = tracker_handle {
             match tracker_handle.await {
