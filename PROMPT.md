@@ -30,12 +30,11 @@ Rules:
 - Don't include "use this page.." type guidance in pages.
 
 ## TODO
-- [ ] Write `website/src/content/docs/docs/design/caching.mdx`
-- [ ] Write `website/src/content/docs/docs/design/checkpoints.mdx`
-- [ ] Write `website/src/content/docs/docs/design/clones.mdx`
-- [ ] Write `website/src/content/docs/docs/design/compression.mdx`
-- [ ] Write `website/src/content/docs/docs/design/time.mdx`
-- [ ] Write `website/src/content/docs/docs/operations/compatibility.mdx`
+- [x] Write `website/src/content/docs/docs/design/caching.mdx`
+- [x] Write `website/src/content/docs/docs/design/checkpoints.mdx`
+- [x] Write `website/src/content/docs/docs/design/clones.mdx`
+- [x] Write `website/src/content/docs/docs/design/compression.mdx`
+- [x] Write `website/src/content/docs/docs/design/time.mdx`
+- [x] Write `website/src/content/docs/docs/operations/compatibility.mdx`
 - [ ] Write `website/src/content/docs/docs/operations/configuration.mdx`
 - [ ] Write `website/src/content/docs/docs/operations/errors.mdx`
-- [ ] Write `website/src/content/docs/docs/operations/metrics.mdx`
