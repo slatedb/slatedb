@@ -1032,32 +1032,16 @@ impl DbReader {
 
     /// Subscribe to database status changes.
     ///
-    /// Returns a [`tokio::sync::watch::Receiver<DbStatus>`] that always
-    /// reflects the latest status. The `durable_seq` field is updated
-    /// whenever the manifest poller discovers new data written by a remote
-    /// writer.
-    ///
-    /// ```ignore
-    /// let mut rx = reader.subscribe();
-    /// rx.wait_for(|s| s.durable_seq >= target_seq).await.expect("reader dropped");
-    /// ```
-    ///
-    /// # Deadlock risk
-    ///
-    /// The returned receiver holds a read lock on the current value while
-    /// borrowed. Always clone or copy the data you need immediately.
+    /// See [`Db::subscribe`](crate::Db::subscribe) for full semantics and
+    /// deadlock warnings. The `durable_seq` field is updated whenever the
+    /// manifest poller discovers new data written by a remote writer.
     pub fn subscribe(&self) -> tokio::sync::watch::Receiver<DbStatus> {
         self.inner.status_reporter.subscribe()
     }
 
     /// Check the reader status.
     ///
-    /// This is a passive check that does not perform any I/O.
-    ///
-    /// ## Returns
-    /// - `Ok(())` if the reader is still open.
-    /// - `Err(ErrorKind::Closed)` if the reader was closed normally.
-    /// - `Err(e)` if the reader was closed with an error.
+    /// See [`Db::status`](crate::Db::status) for full semantics.
     pub fn status(&self) -> Result<(), crate::Error> {
         self.inner.check_closed().map_err(Into::into)
     }
@@ -2482,7 +2466,7 @@ mod tests {
             ..DbReaderOptions::default()
         };
         let reader = test_provider
-            .new_db_reader(reader_options, None)
+            .new_db_reader(reader_options, None, None)
             .await
             .unwrap();
 
@@ -2518,7 +2502,7 @@ mod tests {
 
         let db = test_provider.new_db(Settings::default()).await.unwrap();
         let reader = test_provider
-            .new_db_reader(DbReaderOptions::default(), None)
+            .new_db_reader(DbReaderOptions::default(), None, None)
             .await
             .unwrap();
 
@@ -2536,7 +2520,7 @@ mod tests {
 
         let db = test_provider.new_db(Settings::default()).await.unwrap();
         let reader = test_provider
-            .new_db_reader(DbReaderOptions::default(), None)
+            .new_db_reader(DbReaderOptions::default(), None, None)
             .await
             .unwrap();
 
@@ -2554,7 +2538,7 @@ mod tests {
 
         let db = test_provider.new_db(Settings::default()).await.unwrap();
         let reader = test_provider
-            .new_db_reader(DbReaderOptions::default(), None)
+            .new_db_reader(DbReaderOptions::default(), None, None)
             .await
             .unwrap();
 
