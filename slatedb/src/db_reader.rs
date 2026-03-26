@@ -61,6 +61,7 @@ struct DbReaderInner {
     oracle: Arc<DbReaderOracle>,
     reader: Reader,
     closed_result_watcher: ClosedResultWriter,
+    status_reporter: DbStatusReporter,
     rand: Arc<DbRand>,
 }
 
@@ -139,7 +140,7 @@ impl DbReaderInner {
             .last_remote_persisted_seq
             .max(initial_state.core().last_l0_seq);
         status_reporter.report_durable_seq(initial_durable_seq);
-        let oracle = Arc::new(DbReaderOracle::new(initial_durable_seq, status_reporter));
+        let oracle = Arc::new(DbReaderOracle::new(initial_durable_seq, status_reporter.clone()));
 
         let stat_registry = Arc::new(StatRegistry::new());
         let db_stats = DbStats::new(stat_registry.as_ref());
@@ -163,6 +164,7 @@ impl DbReaderInner {
             oracle,
             reader,
             closed_result_watcher,
+            status_reporter,
             rand,
         })
     }
@@ -1042,7 +1044,7 @@ impl DbReader {
     /// The returned receiver holds a read lock on the current value while
     /// borrowed. Always clone or copy the data you need immediately.
     pub fn subscribe(&self) -> tokio::sync::watch::Receiver<DbStatus> {
-        self.inner.oracle.subscribe()
+        self.inner.status_reporter.subscribe()
     }
 
     /// Check the reader status.
@@ -2140,6 +2142,7 @@ mod tests {
             oracle,
             reader,
             closed_result_watcher: ClosedResultWriter::new(WatchableOnceCell::new()),
+            status_reporter: DbStatusReporter::new(0),
             rand: test_provider.rand.clone(),
         };
 
@@ -2228,6 +2231,7 @@ mod tests {
             oracle,
             reader,
             closed_result_watcher: ClosedResultWriter::new(WatchableOnceCell::new()),
+            status_reporter: DbStatusReporter::new(0),
             rand: test_provider.rand.clone(),
         };
 
