@@ -1,14 +1,12 @@
-//! Parallel L0 memtable flusher.
+//! Flush tracker — the event loop that coordinates the parallel L0 flush pipeline.
 //!
-//! The memtable flusher is the control plane for the parallel L0 flush pipeline.
-//! It owns:
-//! - flush request semantics
+//! The tracker owns:
 //! - immutable-memtable frontier capture
 //! - upload dispatch policy
-//! - waiter tracking
 //! - coordination between uploader and manifest_writer
 //!
 //! It does not own:
+//! - flush request semantics (see [`super::MemtableFlusher`])
 //! - SST build/upload execution
 //! - manifest mutation
 //! - manifest durability sequencing
@@ -18,184 +16,36 @@ use crate::checkpoint::CheckpointCreateResult;
 use crate::config::CheckpointOptions;
 use crate::db::DbInner;
 use crate::error::SlateDBError;
-use crate::manifest::store::FenceableManifest;
 use crate::memtable_flusher::manifest_writer::{FlushResult, ManifestWriter, ManifestWriterEvent};
 use crate::memtable_flusher::uploader::{UploadJob, Uploader, UploaderEvent};
+use crate::memtable_flusher::{FlushTarget, FlusherCommand};
 use crate::oracle::Oracle;
-use crate::utils::{IdGenerator, SendSafely, WatchableOnceCell};
+use crate::utils::{IdGenerator, WatchableOnceCell};
 use fail_parallel::fail_point;
 use parking_lot::Mutex;
 use std::collections::VecDeque;
 use std::sync::Arc;
-use tokio::runtime::Handle;
-use tokio::sync::{mpsc, oneshot};
-use tokio::task::JoinHandle;
-/// Flush request target exposed by the memtable flusher.
-#[derive(Clone, Copy, Debug)]
-pub(crate) enum FlushTarget {
-    /// Attempt to make progress without waiting for a specific durability frontier.
-    BestEffort,
-    /// Operate against the currently durable frontier without requiring new flush work.
-    CurrentDurable,
-    /// Wait until all currently known immutable memtables are durably flushed.
-    All,
-}
+use tokio::sync::oneshot;
 
-/// Narrow dependency bundle for the parallel memtable flusher.
-/// Parallel L0 memtable flusher subsystem.
-pub(crate) struct MemtableFlusher {
-    commands: Mutex<Option<FlusherCommandSender>>,
-    poisoned: Arc<Mutex<Option<SlateDBError>>>,
-    closed_result: WatchableOnceCell<Result<(), SlateDBError>>,
-    task: Mutex<Option<JoinHandle<Result<(), SlateDBError>>>>,
-}
-
-enum FlusherCommand {
-    Flush {
-        target: FlushTarget,
-        sender: Option<oneshot::Sender<Result<FlushResult, SlateDBError>>>,
-    },
-    CreateCheckpoint {
-        target: FlushTarget,
-        options: CheckpointOptions,
-        sender: oneshot::Sender<Result<CheckpointCreateResult, SlateDBError>>,
-    },
-}
-
-type FlusherCommandSender = mpsc::UnboundedSender<FlusherCommand>;
-type FlusherCommandReceiver = mpsc::UnboundedReceiver<FlusherCommand>;
-
-impl MemtableFlusher {
-    /// Creates a new memtable flusher.
-    /// Call [`start`](Self::start) to spawn the background task.
-    pub(crate) fn new() -> Self {
-        Self {
-            commands: Mutex::new(None),
-            poisoned: Arc::new(Mutex::new(None)),
-            closed_result: WatchableOnceCell::new(),
-            task: Mutex::new(None),
-        }
-    }
-
-    /// Spawns the flusher background task. Must be called after DbInner
-    /// is constructed so the task can hold a reference to it.
-    pub(crate) fn start(&self, inner: Arc<DbInner>, manifest: FenceableManifest, handle: &Handle) {
-        let uploader = Uploader::start(
-            Arc::clone(&inner),
-            inner.settings.l0_flush_parallelism,
-            inner.settings.manifest_poll_interval,
-            handle,
-        );
-        let manifest_writer = ManifestWriter::start(
-            Arc::clone(&inner),
-            manifest,
-            inner.settings.manifest_poll_interval,
-            handle,
-        );
-        let (commands_tx, commands_rx) = mpsc::unbounded_channel();
-        *self.commands.lock() = Some(commands_tx);
-        let task = handle.spawn(
-            FlushTracker::new(
-                inner,
-                uploader,
-                manifest_writer,
-                Arc::clone(&self.poisoned),
-                self.closed_result.clone(),
-                commands_rx,
-            )
-            .run(),
-        );
-        *self.task.lock() = Some(task);
-    }
-
-    /// Processes one flush request using the requested target.
-    pub(crate) async fn flush(&self, target: FlushTarget) -> Result<FlushResult, SlateDBError> {
-        let (tx, rx) = oneshot::channel();
-        self.send_flush_command(target, Some(tx))?;
-        rx.await.map_err(SlateDBError::ReadChannelError)?
-    }
-
-    /// Sends a flush request without awaiting its result.
-    pub(crate) fn request_flush(&self, target: FlushTarget) -> Result<(), SlateDBError> {
-        self.send_flush_command(target, None)
-    }
-
-    fn send_flush_command(
-        &self,
-        target: FlushTarget,
-        sender: Option<oneshot::Sender<Result<FlushResult, SlateDBError>>>,
-    ) -> Result<(), SlateDBError> {
-        self.send_command(FlusherCommand::Flush { target, sender })
-    }
-
-    /// Creates a checkpoint using the memtable flusher's flush semantics.
-    pub(crate) async fn create_checkpoint(
-        &self,
-        target: FlushTarget,
-        options: CheckpointOptions,
-    ) -> Result<CheckpointCreateResult, SlateDBError> {
-        let (tx, rx) = oneshot::channel();
-        self.send_command(FlusherCommand::CreateCheckpoint {
-            target,
-            options,
-            sender: tx,
-        })?;
-        rx.await.map_err(SlateDBError::ReadChannelError)?
-    }
-
-    fn send_command(&self, command: FlusherCommand) -> Result<(), SlateDBError> {
-        if let Some(err) = self.poisoned.lock().clone() {
-            return Err(err);
-        }
-        self.commands
-            .lock()
-            .as_ref()
-            .ok_or(SlateDBError::Closed)?
-            .send_safely(self.closed_result.reader(), command)
-    }
-
-    /// Closes the flusher and any owned subsystems.
-    pub(crate) async fn close(&self) -> Result<(), SlateDBError> {
-        self.commands.lock().take();
-        let task = self.task.lock().take();
-        let result = if let Some(task) = task {
-            match task.await {
-                Ok(result) => result,
-                Err(join_err) if join_err.is_cancelled() => Ok(()),
-                Err(join_err) if join_err.is_panic() => {
-                    Err(SlateDBError::BackgroundTaskPanic("memtable_flusher".into()))
-                }
-                Err(_) => Err(SlateDBError::BackgroundTaskCancelled(
-                    "memtable_flusher".into(),
-                )),
-            }
-        } else {
-            Ok(())
-        };
-        self.closed_result.write(result.clone().map(|_| ()));
-        result
-    }
-}
-
-struct FlushTracker {
+pub(super) struct FlushTracker {
     inner: Arc<DbInner>,
     uploader: Uploader,
     manifest_writer: ManifestWriter,
     poisoned: Arc<Mutex<Option<SlateDBError>>>,
     closed_result: WatchableOnceCell<Result<(), SlateDBError>>,
-    commands: FlusherCommandReceiver,
+    commands: super::FlusherCommandReceiver,
     next_epoch: FlushEpoch,
     tracked_imms: VecDeque<TrackedImm>,
 }
 
 impl FlushTracker {
-    fn new(
+    pub(super) fn new(
         inner: Arc<DbInner>,
         uploader: Uploader,
         manifest_writer: ManifestWriter,
         poisoned: Arc<Mutex<Option<SlateDBError>>>,
         closed_result: WatchableOnceCell<Result<(), SlateDBError>>,
-        commands: FlusherCommandReceiver,
+        commands: super::FlusherCommandReceiver,
     ) -> Self {
         Self {
             inner,
@@ -209,7 +59,7 @@ impl FlushTracker {
         }
     }
 
-    async fn run(mut self) -> Result<(), SlateDBError> {
+    pub(super) async fn run(mut self) -> Result<(), SlateDBError> {
         loop {
             let should_continue = match self.run_once().await {
                 Ok(should_continue) => should_continue,
@@ -514,7 +364,6 @@ enum TrackedImmState {
 
 #[cfg(test)]
 mod tests {
-    use super::{FlushTarget, MemtableFlusher};
     use crate::config::{CheckpointOptions, Settings};
     use crate::db::DbInner;
     use crate::db_state::{
@@ -523,6 +372,7 @@ mod tests {
     use crate::error::SlateDBError;
     use crate::format::sst::{SsTableFormat, SST_FORMAT_VERSION_LATEST};
     use crate::manifest::store::{FenceableManifest, ManifestStore, StoredManifest};
+    use crate::memtable_flusher::{FlushTarget, MemtableFlusher};
     use crate::object_stores::ObjectStores;
     use crate::paths::PathResolver;
     use crate::rand::DbRand;
