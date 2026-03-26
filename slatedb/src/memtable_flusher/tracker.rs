@@ -18,7 +18,7 @@ use crate::db::DbInner;
 use crate::error::SlateDBError;
 use crate::memtable_flusher::manifest_writer::{FlushResult, ManifestWriter, ManifestWriterEvent};
 use crate::memtable_flusher::uploader::{UploadJob, Uploader, UploaderEvent};
-use crate::memtable_flusher::{FlushTarget, FlushCommand};
+use crate::memtable_flusher::{FlushCommand, FlushTarget};
 use crate::oracle::Oracle;
 use crate::utils::{IdGenerator, WatchableOnceCell};
 use fail_parallel::fail_point;
@@ -70,7 +70,7 @@ impl FlushTracker {
     async fn run_once(&mut self) -> Result<bool, SlateDBError> {
         tokio::select! {
             maybe_command = self.commands.recv() => {
-                let command = maybe_command.unwrap_or(FlusherCommand::Shutdown);
+                let command = maybe_command.unwrap_or(FlushCommand::Shutdown);
                 self.handle_command(command).await
             }
             maybe_event = self.uploader.events().recv() => {

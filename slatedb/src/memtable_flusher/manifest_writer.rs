@@ -22,7 +22,6 @@ use crate::error::SlateDBError;
 use crate::manifest::store::FenceableManifest;
 use crate::utils::IdGenerator;
 use crate::utils::{SendSafely, WatchableOnceCell};
-use parking_lot::Mutex;
 use std::cmp;
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -93,7 +92,6 @@ type ManifestWriterEventReceiver = mpsc::UnboundedReceiver<ManifestWriterEvent>;
 pub(crate) struct ManifestWriter {
     commands: Option<ManifestWriterCommandSender>,
     events: ManifestWriterEventReceiver,
-    poisoned: Arc<Mutex<Option<SlateDBError>>>,
     closed_result: WatchableOnceCell<Result<(), SlateDBError>>,
     task: Option<JoinHandle<Result<(), SlateDBError>>>,
 }
@@ -108,14 +106,12 @@ impl ManifestWriter {
     ) -> Self {
         let (commands_tx, commands_rx) = mpsc::unbounded_channel();
         let (events_tx, events_rx) = mpsc::unbounded_channel();
-        let poisoned = Arc::new(Mutex::new(None));
         let closed_result = WatchableOnceCell::new();
         let task = handle.spawn(
             ManifestWriterTask::new(
                 db,
                 manifest,
                 manifest_poll_interval,
-                Arc::clone(&poisoned),
                 closed_result.clone(),
                 commands_rx,
                 events_tx,
@@ -126,7 +122,6 @@ impl ManifestWriter {
         Self {
             commands: Some(commands_tx),
             events: events_rx,
-            poisoned,
             closed_result,
             task: Some(task),
         }
@@ -137,10 +132,6 @@ impl ManifestWriter {
         &self,
         uploaded_memtable: UploadedMemtable,
     ) -> Result<(), SlateDBError> {
-        if let Some(err) = self.poisoned.lock().clone() {
-            return Err(err);
-        }
-
         self.commands
             .as_ref()
             .ok_or(SlateDBError::Closed)?
@@ -157,10 +148,6 @@ impl ManifestWriter {
         through_epoch: Option<FlushEpoch>,
         sender: oneshot::Sender<Result<FlushResult, SlateDBError>>,
     ) -> Result<(), SlateDBError> {
-        if let Some(err) = self.poisoned.lock().clone() {
-            let _ = sender.send(Err(err.clone()));
-            return Err(err);
-        }
         self.commands
             .as_ref()
             .ok_or(SlateDBError::Closed)?
@@ -182,10 +169,6 @@ impl ManifestWriter {
         options: CheckpointOptions,
         sender: oneshot::Sender<Result<CheckpointCreateResult, SlateDBError>>,
     ) -> Result<(), SlateDBError> {
-        if let Some(err) = self.poisoned.lock().clone() {
-            let _ = sender.send(Err(err.clone()));
-            return Err(err);
-        }
         self.commands
             .as_ref()
             .ok_or(SlateDBError::Closed)?
@@ -231,7 +214,6 @@ struct ManifestWriterTask {
     db: Arc<DbInner>,
     manifest: FenceableManifest,
     manifest_poll_interval: Duration,
-    poisoned: Arc<Mutex<Option<SlateDBError>>>,
     closed_result: WatchableOnceCell<Result<(), SlateDBError>>,
     commands: ManifestWriterCommandReceiver,
     events: ManifestWriterEventSender,
@@ -248,7 +230,6 @@ impl ManifestWriterTask {
         db: Arc<DbInner>,
         manifest: FenceableManifest,
         manifest_poll_interval: Duration,
-        poisoned: Arc<Mutex<Option<SlateDBError>>>,
         closed_result: WatchableOnceCell<Result<(), SlateDBError>>,
         commands: ManifestWriterCommandReceiver,
         events: ManifestWriterEventSender,
@@ -257,7 +238,6 @@ impl ManifestWriterTask {
             db,
             manifest,
             manifest_poll_interval,
-            poisoned,
             closed_result,
             commands,
             events,
@@ -715,7 +695,6 @@ impl ManifestWriterTask {
     }
 
     async fn handle_fatal_error(&mut self, err: SlateDBError) -> Result<(), SlateDBError> {
-        *self.poisoned.lock() = Some(err.clone());
         self.closed_result.write(Err(err.clone()));
         for flush in self.pending_flushes.drain(..) {
             let _ = flush.sender.send(Err(err.clone()));
