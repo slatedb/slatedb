@@ -77,3 +77,33 @@ The Java release action will do the following:
 3. Generate UniFFI Java sources during the Gradle publish from the host Linux native library.
 4. Assemble one universal `io.slatedb:slatedb-uniffi` jar containing all native libraries as JNA-loadable resources.
 5. Publish signed Maven artifacts (`jar`, `sources`, `javadoc`, `pom`) to Maven Central from `bindings/java`.
+
+#### Node Bindings (npm)
+
+SlateDB Node bindings are published using `.github/workflows/node.yaml`.
+
+Before the first publish, configure npm trusted publishing for the package:
+
+```text
+@slatedb/uniffi
+```
+
+To create a Node release:
+
+1. Ensure the Rust release exists and the `vX.Y.Z` tag has been created.
+2. Go to the [node release action page](https://github.com/slatedb/slatedb/actions/workflows/node.yaml).
+3. Input the same version value used for the tag (format `X.Y.Z`) and click `Run workflow`.
+
+The Node release action will do the following:
+
+1. Verify the version string follows semantic versioning.
+2. Build native `slatedb_uniffi` libraries for:
+   - `linux-x64-gnu`
+   - `linux-arm64-gnu`
+   - `darwin-x64`
+   - `darwin-arm64`
+   - `win32-x64`
+   - `win32-arm64`
+3. Generate UniFFI Node bindings from the tagged source tree.
+4. Assemble one `@slatedb/uniffi` npm artifact containing all generated JavaScript files and all bundled native libraries under `prebuilds/<target>/`.
+5. Publish the package to npm using trusted publishing.

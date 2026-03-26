@@ -1,0 +1,224 @@
+name: Publish Release (Node)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "The version of the release (e.g., 1.0.0)"
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  verify-version:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify version
+        uses: matt-usurp/validate-semver@v2
+        with:
+          version: ${{ github.event.inputs.version }}
+
+  native-linux:
+    name: Build native libraries (Linux)
+    runs-on: ubuntu-22.04
+    needs: verify-version
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: "v${{ github.event.inputs.version }}"
+
+      - name: Setup Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cross-compile toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+
+      - name: Add Rust targets
+        run: rustup target add x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu
+
+      - name: Build x86_64 Linux library
+        run: cargo build -p slatedb-uniffi --release --target x86_64-unknown-linux-gnu
+
+      - name: Build aarch64 Linux library
+        env:
+          CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
+          CXX_aarch64_unknown_linux_gnu: aarch64-linux-gnu-g++
+          AR_aarch64_unknown_linux_gnu: aarch64-linux-gnu-ar
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+        run: cargo build -p slatedb-uniffi --release --target aarch64-unknown-linux-gnu
+
+      - name: Stage Linux native artifacts
+        run: |
+          mkdir -p artifacts/linux-x64-gnu artifacts/linux-arm64-gnu
+          cp target/x86_64-unknown-linux-gnu/release/libslatedb_uniffi.so artifacts/linux-x64-gnu/
+          cp target/aarch64-unknown-linux-gnu/release/libslatedb_uniffi.so artifacts/linux-arm64-gnu/
+
+      - name: Upload Linux native artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-linux
+          path: artifacts
+
+  native-macos:
+    name: Build native libraries (macOS)
+    runs-on: macos-14
+    needs: verify-version
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: "v${{ github.event.inputs.version }}"
+
+      - name: Setup Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Add Rust targets
+        run: rustup target add x86_64-apple-darwin aarch64-apple-darwin
+
+      - name: Build x86_64 macOS library
+        run: cargo build -p slatedb-uniffi --release --target x86_64-apple-darwin
+
+      - name: Build aarch64 macOS library
+        run: cargo build -p slatedb-uniffi --release --target aarch64-apple-darwin
+
+      - name: Stage macOS native artifacts
+        run: |
+          mkdir -p artifacts/darwin-x64 artifacts/darwin-arm64
+          cp target/x86_64-apple-darwin/release/libslatedb_uniffi.dylib artifacts/darwin-x64/
+          cp target/aarch64-apple-darwin/release/libslatedb_uniffi.dylib artifacts/darwin-arm64/
+
+      - name: Upload macOS native artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-macos
+          path: artifacts
+
+  native-windows:
+    name: Build native libraries (Windows)
+    runs-on: windows-latest
+    needs: verify-version
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: "v${{ github.event.inputs.version }}"
+
+      - name: Setup Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Add Rust targets
+        run: rustup target add x86_64-pc-windows-msvc aarch64-pc-windows-msvc
+
+      - name: Build x86_64 Windows library
+        run: cargo build -p slatedb-uniffi --release --target x86_64-pc-windows-msvc
+
+      - name: Build aarch64 Windows library
+        run: cargo build -p slatedb-uniffi --release --target aarch64-pc-windows-msvc
+
+      - name: Stage Windows native artifacts
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path artifacts/win32-x64 | Out-Null
+          New-Item -ItemType Directory -Force -Path artifacts/win32-arm64 | Out-Null
+          Copy-Item target/x86_64-pc-windows-msvc/release/slatedb_uniffi.dll artifacts/win32-x64/
+          Copy-Item target/aarch64-pc-windows-msvc/release/slatedb_uniffi.dll artifacts/win32-arm64/
+
+      - name: Upload Windows native artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-windows
+          path: artifacts
+
+  publish-node:
+    name: Publish Node to npm
+    runs-on: ubuntu-latest
+    needs: [native-linux, native-macos, native-windows]
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: "v${{ github.event.inputs.version }}"
+
+      - name: Set up Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Setup Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install uniffi-bindgen-node-js
+        env:
+          RUSTFLAGS: ""
+        run: cargo install uniffi-bindgen-node-js --git https://github.com/criccomini/uniffi-bindgen-node-js --rev 6b5c5b04c715ea888a88c3120d2c073bcb1df631
+
+      - name: Download Linux artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: native-linux
+          path: native-libs/linux
+
+      - name: Download macOS artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: native-macos
+          path: native-libs/macos
+
+      - name: Download Windows artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: native-windows
+          path: native-libs/windows
+
+      - name: Assemble universal native directory
+        run: |
+          mkdir -p native-libs/merged/linux-x64-gnu
+          mkdir -p native-libs/merged/linux-arm64-gnu
+          mkdir -p native-libs/merged/darwin-x64
+          mkdir -p native-libs/merged/darwin-arm64
+          mkdir -p native-libs/merged/win32-x64
+          mkdir -p native-libs/merged/win32-arm64
+
+          cp native-libs/linux/linux-x64-gnu/libslatedb_uniffi.so native-libs/merged/linux-x64-gnu/
+          cp native-libs/linux/linux-arm64-gnu/libslatedb_uniffi.so native-libs/merged/linux-arm64-gnu/
+          cp native-libs/macos/darwin-x64/libslatedb_uniffi.dylib native-libs/merged/darwin-x64/
+          cp native-libs/macos/darwin-arm64/libslatedb_uniffi.dylib native-libs/merged/darwin-arm64/
+          cp native-libs/windows/win32-x64/slatedb_uniffi.dll native-libs/merged/win32-x64/
+          cp native-libs/windows/win32-arm64/slatedb_uniffi.dll native-libs/merged/win32-arm64/
+
+      - name: Verify native artifact layout
+        run: |
+          test -f native-libs/merged/linux-x64-gnu/libslatedb_uniffi.so
+          test -f native-libs/merged/linux-arm64-gnu/libslatedb_uniffi.so
+          test -f native-libs/merged/darwin-x64/libslatedb_uniffi.dylib
+          test -f native-libs/merged/darwin-arm64/libslatedb_uniffi.dylib
+          test -f native-libs/merged/win32-x64/slatedb_uniffi.dll
+          test -f native-libs/merged/win32-arm64/slatedb_uniffi.dll
+
+      - name: Build Node package with prebuilt native libraries
+        run: npm --prefix bindings/node run build -- --prebuilt-dir native-libs/merged
+
+      - name: Pack Node package
+        working-directory: ./bindings/node
+        run: |
+          mkdir -p "${{ github.workspace }}/dist"
+          npm pack --pack-destination "${{ github.workspace }}/dist"
+
+      - name: Verify packed Node artifact layout
+        run: |
+          TARBALL="$(find dist -maxdepth 1 -name '*.tgz' | head -n 1)"
+          test -n "${TARBALL}"
+          tar -tf "${TARBALL}" | grep -Fx 'package/prebuilds/linux-x64-gnu/libslatedb_uniffi.so'
+          tar -tf "${TARBALL}" | grep -Fx 'package/prebuilds/linux-arm64-gnu/libslatedb_uniffi.so'
+          tar -tf "${TARBALL}" | grep -Fx 'package/prebuilds/darwin-x64/libslatedb_uniffi.dylib'
+          tar -tf "${TARBALL}" | grep -Fx 'package/prebuilds/darwin-arm64/libslatedb_uniffi.dylib'
+          tar -tf "${TARBALL}" | grep -Fx 'package/prebuilds/win32-x64/slatedb_uniffi.dll'
+          tar -tf "${TARBALL}" | grep -Fx 'package/prebuilds/win32-arm64/slatedb_uniffi.dll'
+
+      - name: Publish to npm
+        working-directory: ./bindings/node
+        run: npm publish --provenance --access public
