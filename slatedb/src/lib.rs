@@ -102,6 +102,7 @@ mod comparable_range;
 mod db;
 mod db_common;
 mod db_iter;
+pub(crate) mod db_metrics;
 mod db_read;
 mod db_reader;
 mod db_snapshot;

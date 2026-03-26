@@ -36,8 +36,8 @@ impl Db {
         let registry = self.inner.metrics();
         let mut snapshot = HashMap::new();
         for name in registry.names() {
-            if let Some(stat) = registry.lookup(name) {
-                snapshot.insert(name.to_owned(), stat.get());
+            if let Some(stat) = registry.lookup(&name) {
+                snapshot.insert(name.clone(), stat.get());
             }
         }
         Ok(snapshot)

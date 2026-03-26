@@ -724,7 +724,6 @@ mod tests {
     use crate::rand::DbRand;
     use crate::retrying_object_store::RetryingObjectStore;
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
-    use crate::stats::StatRegistry;
     use crate::tablestore::TableStore;
     use crate::test_utils::FlakyObjectStore;
     use crate::test_utils::{assert_iterator, build_test_sst};
@@ -951,7 +950,7 @@ mod tests {
             ..SsTableFormat::default()
         };
 
-        let stat_registry = StatRegistry::new();
+        let db_metrics = crate::db_metrics::DbMetrics::new(None);
         let block_cache = Arc::new(MokaCache::new());
         let meta_cache = Arc::new(MokaCache::new());
 
@@ -964,7 +963,7 @@ mod tests {
 
         let wrapper = Arc::new(DbCacheWrapper::new(
             split_cache,
-            &stat_registry,
+            &db_metrics,
             Arc::new(DefaultSystemClock::default()),
         ));
         let ts = Arc::new(TableStore::new(
@@ -1207,7 +1206,7 @@ mod tests {
     #[tokio::test]
     async fn test_write_sst_should_write_cache() {
         let os = Arc::new(InMemory::new());
-        let stat_registry = StatRegistry::new();
+        let db_metrics = crate::db_metrics::DbMetrics::new(None);
 
         let block_cache = Arc::new(TestCache::new());
         let meta_cache = Arc::new(TestCache::new());
@@ -1220,7 +1219,7 @@ mod tests {
 
         let wrapper = Arc::new(DbCacheWrapper::new(
             split_cache,
-            &stat_registry,
+            &db_metrics,
             Arc::new(DefaultSystemClock::default()),
         ));
         let ts = Arc::new(TableStore::new(
@@ -1261,11 +1260,11 @@ mod tests {
     #[tokio::test]
     async fn test_write_sst_should_not_write_cache() {
         let os = Arc::new(InMemory::new());
-        let stat_registry = StatRegistry::new();
+        let db_metrics = crate::db_metrics::DbMetrics::new(None);
         let cache = Arc::new(TestCache::new());
         let wrapper = Arc::new(DbCacheWrapper::new(
             cache.clone(),
-            &stat_registry,
+            &db_metrics,
             Arc::new(DefaultSystemClock::default()),
         ));
         let ts = Arc::new(TableStore::new(
