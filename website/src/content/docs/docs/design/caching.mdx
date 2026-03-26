@@ -3,41 +3,41 @@ title: Caching
 description: How SlateDB caches SST data and object-store reads
 ---
 
-MemTables already live in memory. Caching matters after data has been flushed into SST files in object storage. SlateDB uses two cache layers on that path: an in-memory database cache for decoded SST structures, and an optional local disk cache for object-store bytes.
+SlateDB has two cache layers for SST data: an in-memory database cache for decoded SST structures, and an optional local disk cache for raw object-store bytes. Reads can use both layers to avoid remote I/O, while writes only populate the disk cache if `cache_puts` is enabled.
 
 ## In-Memory Cache
 
-[`DbBuilder`](https://docs.rs/slatedb/latest/slatedb/db/struct.DbBuilder.html) installs a [`SplitCache`](https://docs.rs/slatedb/latest/slatedb/db_cache/struct.SplitCache.html) by default. It keeps data blocks separate from SST metadata so large reads are less likely to evict indexes and Bloom filters. SlateDB caches four decoded SST structures in memory:
+[`DbBuilder`](https://docs.rs/slatedb/latest/slatedb/db/struct.DbBuilder.html) installs a [`SplitCache`](https://docs.rs/slatedb/latest/slatedb/db_cache/struct.SplitCache.html) by default. The idea is to keep data blocks separate from SST metadata, so large reads are less likely to push out indexes and Bloom filters. SlateDB caches four decoded SST structures in memory:
 
 - Data blocks
 - Index blocks
 - Bloom filters
 - Stats blocks
 
-This cache sits above object storage. A hit avoids a remote GET and avoids decoding the block again.
+This cache sits above object storage. When a read hits here, SlateDB avoids the remote `GET` and skips decoding the block again.
 
-You can replace the cache with [`DbBuilder::with_db_cache`](https://docs.rs/slatedb/latest/slatedb/db/struct.DbBuilder.html#method.with_db_cache), or disable it with [`DbBuilder::with_db_cache_disabled`](https://docs.rs/slatedb/latest/slatedb/db/struct.DbBuilder.html#method.with_db_cache_disabled). Custom implementations use the [`DbCache`](https://docs.rs/slatedb/latest/slatedb/db_cache/trait.DbCache.html) trait.
+You can replace the cache with [`DbBuilder::with_db_cache`](https://docs.rs/slatedb/latest/slatedb/db/struct.DbBuilder.html#method.with_db_cache), or disable it with [`DbBuilder::with_db_cache_disabled`](https://docs.rs/slatedb/latest/slatedb/db/struct.DbBuilder.html#method.with_db_cache_disabled). If you want to plug in your own implementation, use the [`DbCache`](https://docs.rs/slatedb/latest/slatedb/db_cache/trait.DbCache.html) trait.
 
 ## Population
 
-Reads always consult the in-memory cache first. [`ReadOptions::cache_blocks`](https://docs.rs/slatedb/latest/slatedb/config/struct.ReadOptions.html#structfield.cache_blocks) and [`ScanOptions::cache_blocks`](https://docs.rs/slatedb/latest/slatedb/config/struct.ScanOptions.html#structfield.cache_blocks) control whether SlateDB inserts misses after it fetches them. They do not disable cache lookups.
+Reads always consult the in-memory cache first. [`ReadOptions::cache_blocks`](https://docs.rs/slatedb/latest/slatedb/config/struct.ReadOptions.html#structfield.cache_blocks) and [`ScanOptions::cache_blocks`](https://docs.rs/slatedb/latest/slatedb/config/struct.ScanOptions.html#structfield.cache_blocks) decide whether SlateDB inserts a block after fetching it on a miss. They do not disable cache lookups.
 
-Point reads default to `cache_blocks = true`. Scans default to `cache_blocks = false`. That keeps long sequential scans from filling the cache with cold blocks, while still letting scans benefit from entries that are already hot. Internal maintenance follows the same rule. WAL replay and compaction read SSTs without populating the foreground cache.
+The defaults reflect the usual access patterns. Point reads default to `cache_blocks = true` because they are more likely to revisit hot data. Scans default to `cache_blocks = false` so a long sequential read does not fill the cache with blocks that probably will not be reused soon. Scans can still benefit from entries that are already hot. Internal maintenance follows the same idea: WAL replay and compaction read SSTs without populating the foreground cache.
 
 ## Object-Store Cache
 
-[`ObjectStoreCacheOptions`](https://docs.rs/slatedb/latest/slatedb/config/struct.ObjectStoreCacheOptions.html) enables a second cache layer on local disk. When [`root_folder`](https://docs.rs/slatedb/latest/slatedb/config/struct.ObjectStoreCacheOptions.html#structfield.root_folder) is set, SlateDB wraps the configured object store in a local cache. It splits each object into fixed-size parts, stores those parts under the local root, and serves later `GET` and `HEAD` requests from disk when the requested parts are present.
+[`ObjectStoreCacheOptions`](https://docs.rs/slatedb/latest/slatedb/config/struct.ObjectStoreCacheOptions.html) enables a second cache layer on local disk. When [`root_folder`](https://docs.rs/slatedb/latest/slatedb/config/struct.ObjectStoreCacheOptions.html#structfield.root_folder) is set, SlateDB wraps the configured object store in a local cache. It splits each object into fixed-size parts, stores those parts under the local root, and can serve later `GET` and `HEAD` requests from disk when the needed parts are already present.
 
-This cache stores object-store bytes, not decoded SST blocks. It still helps when the in-memory cache is cold. On a miss, SlateDB aligns the requested range to the configured part size, fetches the larger range from the object store, and saves the returned parts locally. The default part size is 4 MiB.
+The important distinction is that this cache stores object-store bytes, not decoded SST blocks. It still helps when the in-memory cache is cold, because it can avoid a remote read even if SlateDB still needs to decode the block afterward. On a miss, SlateDB aligns the requested range to the configured part size, fetches that larger range from the object store, and saves the returned parts locally. The default part size is 4 MiB.
 
 ## Startup and Writes
 
-The disk cache is disabled unless `object_store_cache_options.root_folder` is set. You can preload it on startup with [`PreloadLevel::L0Sst`](https://docs.rs/slatedb/latest/slatedb/config/enum.PreloadLevel.html#variant.L0Sst) or [`PreloadLevel::AllSst`](https://docs.rs/slatedb/latest/slatedb/config/enum.PreloadLevel.html#variant.AllSst). SlateDB loads recent SSTs, or all SSTs, into the local cache until the cache size limit is reached.
+The disk cache stays disabled unless `object_store_cache_options.root_folder` is set. If you want it warm before serving traffic, you can preload it on startup with [`PreloadLevel::L0Sst`](https://docs.rs/slatedb/latest/slatedb/config/enum.PreloadLevel.html#variant.L0Sst) or [`PreloadLevel::AllSst`](https://docs.rs/slatedb/latest/slatedb/config/enum.PreloadLevel.html#variant.AllSst). SlateDB loads recent SSTs, or all SSTs, into the local cache until the cache size limit is reached.
 
-By default, writes go straight to the upstream object store and do not populate the disk cache. Setting [`cache_puts`](https://docs.rs/slatedb/latest/slatedb/config/struct.ObjectStoreCacheOptions.html#structfield.cache_puts) to `true` also stores `PUT` payloads locally, which can help if readers are likely to touch freshly written SSTs.
+By default, writes go straight to the upstream object store and do not populate the disk cache. Setting [`cache_puts`](https://docs.rs/slatedb/latest/slatedb/config/struct.ObjectStoreCacheOptions.html#structfield.cache_puts) to `true` also stores `PUT` payloads locally, which can help if readers are likely to touch freshly written SSTs soon afterward.
 
 ## Tradeoffs
 
-The in-memory cache removes decode work and remote I/O. The disk cache removes remote I/O but still requires local reads and block decoding. Many deployments use both: memory for the hot working set, disk for spillover. Block size controls cache granularity, so it also affects hit rate and read amplification. [Tuning](/docs/operations/tuning) covers that knob.
+The in-memory cache saves both remote I/O and decode work. The disk cache only saves the remote I/O; SlateDB still has to read from local disk and decode the block. Many deployments use both: memory for the hot working set, disk for spillover. Block size matters here too, because it controls cache granularity and therefore affects hit rate and read amplification. [Tuning](/docs/operations/tuning) covers that knob.
 
-[`FoyerHybridCache`](https://docs.rs/slatedb/latest/slatedb/db_cache/foyer_hybrid/struct.FoyerHybridCache.html) already has its own memory and disk tiers. If you enable it as the database cache and also enable the object-store cache, SlateDB may store the same SST data twice on local disk. That can be a reasonable trade if the object-store cache's range prefetching saves enough remote reads, but it increases local storage traffic.
+[`FoyerHybridCache`](https://docs.rs/slatedb/latest/slatedb/db_cache/foyer_hybrid/struct.FoyerHybridCache.html) already has its own memory and disk tiers. If you enable it as the database cache and also enable the object-store cache, SlateDB may store the same SST data twice on local disk. That can still be a reasonable trade if the object-store cache's range prefetching saves enough remote reads, but the cost is more local storage traffic.
