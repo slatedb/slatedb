@@ -1,4 +1,81 @@
 ---
 title: Errors
+description: How SlateDB classifies public errors and what each kind means for retries, closure, and diagnosis
 ---
 
+All public SlateDB APIs return [`slatedb::Error`](https://docs.rs/slatedb/latest/slatedb/struct.Error.html). The stable contract is [`Error::kind()`](https://docs.rs/slatedb/latest/slatedb/struct.Error.html#method.kind), which returns [`ErrorKind`](https://docs.rs/slatedb/latest/slatedb/enum.ErrorKind.html). The message and source chain are for diagnosis. They can change between releases, so application logic should branch on `ErrorKind`, not on message text.
+
+[`ErrorKind`](https://docs.rs/slatedb/latest/slatedb/enum.ErrorKind.html) and [`CloseReason`](https://docs.rs/slatedb/latest/slatedb/enum.CloseReason.html) are non-exhaustive. Keep a wildcard arm in matches.
+
+```rust
+use slatedb::{CloseReason, ErrorKind};
+
+match err.kind() {
+    ErrorKind::Transaction => {
+        // Retry the whole transaction.
+    }
+    ErrorKind::Unavailable => {
+        // Retry the operation with backoff.
+    }
+    ErrorKind::Closed(CloseReason::Fenced) => {
+        // Drop this handle and open a new writer if appropriate.
+    }
+    ErrorKind::Closed(CloseReason::Clean) => {
+        // The caller already closed this handle.
+    }
+    ErrorKind::Closed(CloseReason::Panic) => {
+        // Inspect logs, then recreate the handle.
+    }
+    ErrorKind::Closed(_) => {
+        // Future close reason.
+    }
+    ErrorKind::Invalid | ErrorKind::Data | ErrorKind::Internal => {
+        // Escalate or handle case-by-case.
+    }
+    _ => {
+        // Future error kind.
+    }
+}
+```
+
+## Kinds
+
+### Transaction
+
+[`ErrorKind::Transaction`](https://docs.rs/slatedb/latest/slatedb/enum.ErrorKind.html#variant.Transaction) means optimistic concurrency rejected the operation. SlateDB currently uses it for transaction conflicts. Retry the whole transaction from [`Db::begin`](https://docs.rs/slatedb/latest/slatedb/struct.Db.html#method.begin) through `commit`; do not reuse values that were read in the failed attempt.
+
+### Closed
+
+[`ErrorKind::Closed`](https://docs.rs/slatedb/latest/slatedb/enum.ErrorKind.html#variant.Closed) means that handle is no longer usable. Once a [`Db`](https://docs.rs/slatedb/latest/slatedb/struct.Db.html), [`DbReader`](https://docs.rs/slatedb/latest/slatedb/struct.DbReader.html), or other handle reaches this state, create a new one instead of retrying against the old instance.
+
+[`CloseReason::Clean`](https://docs.rs/slatedb/latest/slatedb/enum.CloseReason.html#variant.Clean) means the caller shut the handle down normally. [`CloseReason::Fenced`](https://docs.rs/slatedb/latest/slatedb/enum.CloseReason.html#variant.Fenced) means another writer or compactor won ownership of shared state. [`CloseReason::Panic`](https://docs.rs/slatedb/latest/slatedb/enum.CloseReason.html#variant.Panic) means a background task panicked.
+
+[`Db::status`](https://docs.rs/slatedb/latest/slatedb/struct.Db.html#method.status) is a passive check. It does not perform I/O. [`Db::subscribe`](https://docs.rs/slatedb/latest/slatedb/struct.Db.html#method.subscribe) exposes [`DbStatus`](https://docs.rs/slatedb/latest/slatedb/struct.DbStatus.html), including `durable_seq` and `close_reason`, so callers can wait for durability or detect closure without polling an operation path.
+
+### Unavailable
+
+[`ErrorKind::Unavailable`](https://docs.rs/slatedb/latest/slatedb/enum.ErrorKind.html#variant.Unavailable) means a dependency was unavailable. In the current implementation this covers cases such as I/O errors, most object-store failures, and transactional-object timeouts. Treat it as an operation-level retry signal: retry with backoff, or abort the request if your caller no longer wants the result.
+
+Not every storage failure is `Unavailable`. If SlateDB expected an object to exist and the object store returned `NotFound`, the public error is `Data` instead.
+
+### Invalid
+
+[`ErrorKind::Invalid`](https://docs.rs/slatedb/latest/slatedb/enum.ErrorKind.html#variant.Invalid) means the request, configuration, or process-local setup was wrong. Current examples include invalid settings files, invalid checkpoint timing, WAL operations when WAL is disabled, missing merge operators, invalid object-store URLs, and user-supplied callbacks that reject the request.
+
+Do not blindly retry `Invalid` errors. Fix the input, configuration, or builder setup first.
+
+### Data
+
+[`ErrorKind::Data`](https://docs.rs/slatedb/latest/slatedb/enum.ErrorKind.html#variant.Data) means SlateDB found persisted or referenced data in a state it could not use. Current examples include checksum mismatches, malformed flatbuffers, unsupported format versions, missing manifests, missing checkpoints, and objects that were expected to exist but were reported as `NotFound`.
+
+Treat `Data` as a real compatibility or integrity boundary. An unsupported format version is not a transient error. A missing file that SlateDB already referenced is not reported as a generic network failure. [Compatibility](/docs/operations/compatibility) covers the format-version boundary in more detail.
+
+### Internal
+
+[`ErrorKind::Internal`](https://docs.rs/slatedb/latest/slatedb/enum.ErrorKind.html#variant.Internal) means SlateDB hit an internal invariant or plumbing failure that is not part of the normal recovery contract. Log the full error, including its source chain, and treat it as a bug or unexpected environment failure until you have a more specific root cause.
+
+## Sources and Method Docs
+
+[`Error`](https://docs.rs/slatedb/latest/slatedb/struct.Error.html) implements the standard source chain. That chain is useful for logs and for narrow diagnostics, such as checking whether a `Data` error came from an underlying `object_store::Error::NotFound`. Use the source for investigation, not for the main recovery branch.
+
+This page describes the coarse public contract. For operation-specific details, read the rustdoc `## Errors` sections on the method you are calling. For example, [`WalFile::metadata`](https://docs.rs/slatedb/latest/slatedb/struct.WalFile.html#method.metadata) and [`WalFile::iterator`](https://docs.rs/slatedb/latest/slatedb/struct.WalFile.html#method.iterator) document how missing WAL objects surface through the public error API.

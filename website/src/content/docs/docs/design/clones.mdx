@@ -1,4 +1,40 @@
 ---
 title: Clones
+description: How SlateDB forks a database from a checkpoint without copying SSTs
 ---
 
+A clone is a new SlateDB database at a different object-store path. It starts from one checkpoint in a source database, then continues with its own manifest, WAL, and future SST files.
+
+Clone creation is shallow. SlateDB does not copy the SSTs that were already visible at the checkpoint. Instead, the clone manifest records which SST IDs still live in external databases and which checkpoints keep those files alive. The clone reads those SSTs from the source paths while writing new data into its own path.
+
+## Source State
+
+[`Admin::create_clone`](https://docs.rs/slatedb/latest/slatedb/admin/struct.Admin.html#method.create_clone) takes a source path and an optional checkpoint ID. If you pass a checkpoint ID, the clone starts from that exact manifest. If you do not pass one, SlateDB creates a short-lived checkpoint against the source database's latest manifest and uses that as the base.
+
+That detail matters when a writer is still running. `Admin::create_clone` works from manifest state only. It does not coordinate with an open writer to flush its in-memory state first. If you need the clone to include recent writes from an active writer, create a checkpoint through [`Db::create_checkpoint`](https://docs.rs/slatedb/latest/slatedb/struct.Db.html#method.create_checkpoint) with [`CheckpointScope::All`](https://docs.rs/slatedb/latest/slatedb/config/enum.CheckpointScope.html#variant.All) and clone from that checkpoint.
+
+## Shared Files
+
+The clone reuses any L0 and sorted-run SSTs that were visible at the chosen checkpoint, including SSTs that the source database may already have inherited from an older clone. Reads can therefore span files from the clone's own path and files from one or more external database paths.
+
+WAL state is handled differently. SlateDB copies any WAL SSTs referenced by the chosen checkpoint into the clone's `wal/` directory, then marks the clone initialized. Recovery for the cloned database uses those copied WAL files, and all future WAL files are written only under the clone path.
+
+## GC Pins
+
+Clone creation also creates a durable checkpoint in each external database that the clone references. That checkpoint pins the same manifest as the clone's source checkpoint, so [garbage collection](/docs/design/gc) in the external database cannot delete shared SSTs or older manifests that the clone still needs.
+
+This is why a source checkpoint can be temporary when you omit `parent_checkpoint`. SlateDB first creates a short-lived source checkpoint, then creates a second checkpoint in each external database to keep the referenced state alive for the clone.
+
+## Nested Clones
+
+A clone can itself be cloned. In that case the new clone inherits the parent clone's external database references and adds the immediate parent as another external database. The result is still shallow: the newest clone reads old SSTs from the original paths instead of copying them into each intermediate clone.
+
+## Creation Flow
+
+Clone creation uses two manifest states so retries are safe. SlateDB first writes the clone manifest with `initialized = false`, copies the required WAL SSTs, then updates the manifest to `initialized = true`. If the process stops after the first step, rerunning clone creation validates the same source path and checkpoint before continuing.
+
+The accepted design is described in [RFC 0004](/rfcs/0004-checkpoints), but the public API is the one in the current crate docs.
+
+## Constraints
+
+The clone path must be different from the source path. Clone creation also fails if the source database uses a separate WAL object store. Today, clones only support databases whose WAL and main data share the same object-store root.

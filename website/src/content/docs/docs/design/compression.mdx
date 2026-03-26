@@ -1,4 +1,32 @@
 ---
 title: Compression
+description: How SlateDB compresses SST data and metadata
 ---
 
+SlateDB compresses SST data in two different ways.
+
+The current SST block format uses prefix compression inside each data block. [`SstRowCodecV2`](https://github.com/slatedb/slatedb/blob/main/slatedb/src/format/row_codec_v2.rs) encodes each key relative to the previous key, with restart points that store full keys so readers can seek within the block. This reduces repeated key bytes even when block compression is disabled. The effect on key layout is covered in [Data Modeling](/docs/operations/data-modeling#prefix-compression).
+
+SlateDB also supports optional block compression through [`Settings::compression_codec`](https://docs.rs/slatedb/latest/slatedb/config/struct.Settings.html#structfield.compression_codec) and [`CompressionCodec`](https://docs.rs/slatedb/latest/slatedb/config/enum.CompressionCodec.html). That setting applies only to SST files. Manifest files and compaction-state files use their own encodings.
+
+## What Gets Compressed
+
+For regular SSTs, SlateDB compresses each data block before it writes the file to object storage. If the file has a Bloom filter or stats block, SlateDB compresses those blocks too. It also compresses the index block. The small footer that records offsets, key bounds, and the selected codec stays uncompressed.
+
+WAL SSTs use the same codec setting. They have no Bloom filter or stats block, so only their data blocks and index block are compressed.
+
+SlateDB writes the checksum after compression. On read, it verifies the checksum on the stored bytes, then decompresses and decodes the block. If you also configure a block transformer, the write order is compress, transform, checksum. The read order is checksum, reverse transform, decompress.
+
+## Codecs
+
+The available codecs are a build-time choice. The `slatedb` crate exposes Snappy, Zlib, LZ4, and Zstd behind Cargo features. The `compression` feature enables Snappy. The `zlib`, `lz4`, and `zstd` features enable those codecs directly.
+
+The selected codec is stored in each SST's metadata. Changing `compression_codec` only affects new WAL and SST files. Existing files keep the codec they were written with, so a database can temporarily contain a mix of uncompressed files and files written with different codecs while flush and compaction rewrite older data.
+
+In practice, that means readers and compactors must be built with support for every codec already present in the bucket. Otherwise they cannot decode those files.
+
+## Tradeoffs
+
+Compression reduces object-store bytes, network transfer, and cache footprint. That usually helps storage cost and scan-heavy workloads. The cost is CPU on both write and read.
+
+Block size changes the tradeoff. Larger blocks usually compress better. Smaller blocks reduce over-read on point lookups. The [Tuning](/docs/operations/tuning) page covers the operational knobs.

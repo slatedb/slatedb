@@ -1,3 +1,34 @@
 ---
 title: Checkpoints
+description: How SlateDB pins a manifest version for reads and garbage collection
 ---
+
+A checkpoint is a durable reference to one manifest version. SlateDB stores checkpoints in the latest manifest. Each checkpoint records an ID, the pinned `manifest_id`, its creation time, an optional expiration time, and an optional name.
+
+Creating a checkpoint does not copy WAL or SST files. It only adds metadata to the manifest, so it is cheap. The pinned manifest still matters, though. It defines the L0 SSTs, sorted runs, and other database state that readers see.
+
+## What It Protects
+
+The garbage collector keeps any manifest and SST file that is still reachable from an active checkpoint. That is how SlateDB holds a stable read view open while compaction and garbage collection continue in the background.
+
+When a checkpoint expires or is deleted, SlateDB removes that checkpoint entry from the manifest. After that, GC may reclaim manifests and SSTs that are no longer referenced by the latest database state or by any other checkpoint. [Garbage Collection](/docs/design/gc) covers the cleanup flow.
+
+A new checkpoint can also be created from an existing checkpoint through [`CheckpointOptions::source`](https://docs.rs/slatedb/latest/slatedb/config/struct.CheckpointOptions.html#structfield.source). In that case, the new checkpoint reuses the source checkpoint's `manifest_id`. This is useful when you want a different lifetime or name without pinning newer database state.
+
+## How SlateDB Creates Checkpoints
+
+[`Db::create_checkpoint`](https://docs.rs/slatedb/latest/slatedb/struct.Db.html#method.create_checkpoint) creates a checkpoint from an open writer handle. [`CheckpointScope::All`](https://docs.rs/slatedb/latest/slatedb/config/enum.CheckpointScope.html#variant.All) flushes WAL data and memtables first, so the checkpoint includes writes issued before the call. [`CheckpointScope::Durable`](https://docs.rs/slatedb/latest/slatedb/config/enum.CheckpointScope.html#variant.Durable) skips that extra flushing work and only includes data that was already durable.
+
+[`Admin::create_detached_checkpoint`](https://docs.rs/slatedb/latest/slatedb/admin/struct.Admin.html#method.create_detached_checkpoint) edits the manifest directly. It does not flush a writer's in-memory state first, so recent unflushed writes are not included.
+
+[`CheckpointOptions`](https://docs.rs/slatedb/latest/slatedb/config/struct.CheckpointOptions.html) lets you set a lifetime, a source checkpoint, and an optional name. Names are labels for listing checkpoints. They are not unique.
+
+## Readers and Background Tasks
+
+[`DbReader`](https://docs.rs/slatedb/latest/slatedb/struct.DbReader.html) uses checkpoints to separate reader lifetime from writer lifetime. If you open a reader without a checkpoint ID, the reader creates its own checkpoint, refreshes it, and replaces it as the manifest advances. If you open a reader with an explicit checkpoint ID, the reader stays on that fixed view and does not follow newer manifests or newer WAL data. [`DbReaderOptions::checkpoint_lifetime`](https://docs.rs/slatedb/latest/slatedb/config/struct.DbReaderOptions.html#structfield.checkpoint_lifetime) controls how long a reader-managed checkpoint lives before it must be refreshed.
+
+SlateDB also uses short-lived internal checkpoints during some background transitions. For example, the compactor writes a temporary checkpoint before publishing a manifest that drops obsolete SST references. That keeps recently replaced SSTs readable until GC can safely remove them.
+
+## Clones
+
+Clones build on the same mechanism. A clone starts from a checkpoint in the source database, then writes new data into its own path while continuing to reference source SSTs. [RFC 0004](/rfcs/0004-checkpoints) describes the full checkpoint and clone design.
