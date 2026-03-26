@@ -41,6 +41,6 @@ The current read path does not consult wall-clock time to hide expired rows. Ins
 
 Compaction is what turns expiration into deletion. Ordinary values may be rewritten to tombstones so older versions in lower levels do not become visible again. Expired merge operands are dropped instead of converted to tombstones because a tombstone would also erase older merge history. Physical removal still depends on later compaction and [garbage collection](/docs/design/gc).
 
-## Sequence Tracker
+## Mapping Between Timestamps and Sequence Numbers
 
 For approximate conversion between sequence numbers and wall-clock time, the manifest stores a bounded sequence tracker. [`Admin::get_timestamp_for_sequence()`](https://docs.rs/slatedb/latest/slatedb/admin/struct.Admin.html#method.get_timestamp_for_sequence) and [`Admin::get_sequence_for_timestamp()`](https://docs.rs/slatedb/latest/slatedb/admin/struct.Admin.html#method.get_sequence_for_timestamp) query that tracker, and `slatedb-cli` exposes the same conversion. The mapping is lossy by design: recent history has finer granularity, and older history is downsampled to keep manifest state bounded. See [RFC-0012](/rfcs/0012-sequence-tracker/) for its design.
