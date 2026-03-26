@@ -3,67 +3,10 @@ title: Configuration
 description: How SlateDB loads Settings, which knobs live there, and what must be configured through builders
 ---
 
-SlateDB splits configuration into two layers. [`Settings`](https://docs.rs/slatedb/latest/slatedb/config/struct.Settings.html) holds serializable runtime settings. [`DbBuilder`](https://docs.rs/slatedb/latest/slatedb/struct.DbBuilder.html) and [`DbReaderBuilder`](https://docs.rs/slatedb/latest/slatedb/struct.DbReaderBuilder.html) handle object stores, caches, and other process-local components.
+SlateDB configuration shows up in three main places:
 
-```rust
-use slatedb::{Db, Settings, SstBlockSize};
+- [`Settings`](https://docs.rs/slatedb/latest/slatedb/config/struct.Settings.html) holds serializable runtime settings.
+- Builders such as [`DbBuilder`](https://docs.rs/slatedb/latest/slatedb/struct.DbBuilder.html) and [`DbReaderBuilder`](https://docs.rs/slatedb/latest/slatedb/struct.DbReaderBuilder.html) have `with_*` functions to handle complex types and dependency injection.
+- Operation-specific option types such as [`ReadOptions`](https://docs.rs/slatedb/latest/slatedb/config/struct.ReadOptions.html) and [`WriteOptions`](https://docs.rs/slatedb/latest/slatedb/config/struct.WriteOptions.html).
 
-// object_store: Arc<dyn object_store::ObjectStore>
-let settings = Settings::from_file("SlateDb.toml")?;
-
-let db = Db::builder("tenant-a", object_store)
-    .with_settings(settings)
-    .with_sst_block_size(SstBlockSize::Block8Kib)
-    .build()
-    .await?;
-```
-
-For the complete surface and current defaults, read the [`slatedb::config`](https://docs.rs/slatedb/latest/slatedb/config/) rustdoc.
-
-## Loading Settings
-
-[`Settings::default()`](https://docs.rs/slatedb/latest/slatedb/config/struct.Settings.html#impl-Default-for-Settings) returns SlateDB's built-in defaults. [`Settings::from_file`](https://docs.rs/slatedb/latest/slatedb/config/struct.Settings.html#method.from_file) reads JSON, TOML, or YAML and merges the file onto those defaults. [`Settings::from_env`](https://docs.rs/slatedb/latest/slatedb/config/struct.Settings.html#method.from_env) reads environment variables with a prefix. [`Settings::from_env_with_default`](https://docs.rs/slatedb/latest/slatedb/config/struct.Settings.html#method.from_env_with_default) lets you start from a different base value.
-
-[`Settings::load`](https://docs.rs/slatedb/latest/slatedb/config/struct.Settings.html#method.load) uses a fixed lookup order:
-
-1. `Settings::default()`
-2. `SlateDb.json`
-3. `SlateDb.toml`
-4. `SlateDb.yaml`
-5. `SlateDb.yml`
-6. environment variables with the `SLATEDB_` prefix
-
-Later sources override earlier ones. Duration fields use strings such as `"100ms"`, `"5s"`, and `"300s"`.
-
-Nested environment variables use `.` separators:
-
-```bash
-export SLATEDB_FLUSH_INTERVAL=250ms
-export SLATEDB_OBJECT_STORE_CACHE_OPTIONS.ROOT_FOLDER=/var/cache/slatedb
-export SLATEDB_COMPACTOR_OPTIONS.MAX_SST_SIZE=268435456
-```
-
-Because file loading merges onto `Settings::default()`, leaving out an optional section does not disable a defaulted feature. For example, omitting `compactor_options` still leaves the embedded compactor enabled. Disable it in code with `settings.compactor_options = None`, or set the field to `null` in JSON or YAML. TOML cannot represent `null`.
-
-## What Settings Controls
-
-`Settings` covers the runtime knobs that affect file layout, visibility, and background maintenance:
-
-- `flush_interval`, `manifest_poll_interval`, and `manifest_update_timeout` control when writes are flushed, how quickly clients see manifest changes, and how long manifest updates are retried.
-- `l0_sst_size_bytes`, `l0_max_ssts`, and `max_unflushed_bytes` control flush sizing, L0 backlog, and writer backpressure.
-- `min_filter_keys`, `filter_bits_per_key`, and `compression_codec` control Bloom-filter creation and SST compression. Compression only works for codecs that were compiled into the binary. [Compression](/docs/design/compression) covers that boundary.
-- `object_store_cache_options` configures the optional local disk cache for object-store bytes. [Caching](/docs/design/caching) covers the cache layers and their tradeoffs.
-- `compactor_options` and `garbage_collector_options` control background maintenance. Set `compactor_options` to `None` if you want to disable the embedded compactor and run one separately. [Run a Standalone Compactor](/docs/tutorials/standalone-compactor) covers that setup.
-- `default_ttl` applies a default expiration policy to puts and merges. [Time](/docs/design/time) covers TTL semantics.
-
-## Builder-Only Configuration
-
-Builders configure the parts of SlateDB that are not represented as plain data:
-
-- [`DbBuilder::with_wal_object_store`](https://docs.rs/slatedb/latest/slatedb/struct.DbBuilder.html#method.with_wal_object_store) and [`DbReaderBuilder::with_wal_object_store`](https://docs.rs/slatedb/latest/slatedb/struct.DbReaderBuilder.html#method.with_wal_object_store) place WAL files in a separate object store.
-- [`DbBuilder::with_db_cache`](https://docs.rs/slatedb/latest/slatedb/struct.DbBuilder.html#method.with_db_cache), [`DbBuilder::with_db_cache_disabled`](https://docs.rs/slatedb/latest/slatedb/struct.DbBuilder.html#method.with_db_cache_disabled), and the corresponding reader methods control the in-memory SST block and metadata cache. That cache is separate from `object_store_cache_options`, which controls the local disk cache.
-- [`DbBuilder::with_sst_block_size`](https://docs.rs/slatedb/latest/slatedb/struct.DbBuilder.html#method.with_sst_block_size) changes the block size for newly written SSTs.
-- [`DbBuilder::with_compactor_builder`](https://docs.rs/slatedb/latest/slatedb/struct.DbBuilder.html#method.with_compactor_builder) installs an explicit compactor configuration and takes precedence over `settings.compactor_options`.
-- [`DbBuilder::with_merge_operator`](https://docs.rs/slatedb/latest/slatedb/struct.DbBuilder.html#method.with_merge_operator), [`DbBuilder::with_block_transformer`](https://docs.rs/slatedb/latest/slatedb/struct.DbBuilder.html#method.with_block_transformer), [`DbBuilder::with_system_clock`](https://docs.rs/slatedb/latest/slatedb/struct.DbBuilder.html#method.with_system_clock), [`DbBuilder::with_gc_runtime`](https://docs.rs/slatedb/latest/slatedb/struct.DbBuilder.html#method.with_gc_runtime), and [`DbBuilder::with_seed`](https://docs.rs/slatedb/latest/slatedb/struct.DbBuilder.html#method.with_seed) install process-local behavior.
-
-Read-only clients use [`DbReaderOptions`](https://docs.rs/slatedb/latest/slatedb/config/struct.DbReaderOptions.html) through [`DbReaderBuilder::with_options`](https://docs.rs/slatedb/latest/slatedb/struct.DbReaderBuilder.html#method.with_options), not `Settings`. Those options control reader manifest polling, checkpoint lifetime, WAL replay, replay memtable size, and the reader's object-store cache. [Checkpoints](/docs/design/checkpoints) covers the checkpoint-related pieces.
+For the complete configuration surface and current defaults, read the [`slatedb::config`](https://docs.rs/slatedb/latest/slatedb/config/) rustdoc.

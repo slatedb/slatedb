@@ -151,11 +151,6 @@ export default defineConfig({
 							link: '/docs/operations/configuration/',
 						},
 						{
-							label: 'Configuration',
-							link: 'https://docs.rs/slatedb/latest/slatedb/config',
-							attrs: { target: '_blank' }
-						},
-						{
 							label: 'Data Modeling',
 							link: '/docs/operations/data-modeling/',
 						},
