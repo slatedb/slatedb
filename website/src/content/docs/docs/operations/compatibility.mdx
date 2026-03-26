@@ -3,49 +3,12 @@ title: Compatibility
 description: What SlateDB currently guarantees across releases, storage formats, object stores, and tested targets
 ---
 
-SlateDB compatibility depends on which boundary you care about: Rust APIs, stored data, build features, or runtime targets. The project makes stronger promises about stored data than about compile-time APIs.
+SlateDB follows Semantic Versioning and guarantees forward and backward compatibility for storage formats between adjacent releases. **We do not currently guarantee compile-time API compatibility.**
 
-## Releases
-
-The [README release policy](https://github.com/slatedb/slatedb/blob/main/README.md#release-schedule) says SlateDB follows Semantic Versioning and guarantees forward and backward compatibility for storage formats between adjacent releases. It does not currently guarantee compile-time API compatibility.
-
-That implies shared deployments should move one release at a time. A rollout where some processes use `0.10.x` and others use `0.11.x` is within the documented storage-format guarantee. A rollout that skips directly from `0.9.x` to `0.11.x` is not.
-
-If several processes read and write the same database path, keep them within one release step of each other until the rollout is complete.
+Shared deployments should move one release at a time. If several processes read and write the same database path, keep them within one release step of each other until the rollout is complete.
 
 ## Stored Data
 
-SlateDB version-checks its persistent formats and fails fast when it sees a version it does not understand.
-
-Current format support in the crate:
-
-- Manifests: [`FlatBufferManifestCodec`](https://github.com/slatedb/slatedb/blob/main/slatedb/src/flatbuffer_types.rs) reads manifest versions `1` and `2`. It still writes version `1` today for rolling-upgrade compatibility.
-- SSTs: [`SST_FORMAT_VERSION`](https://github.com/slatedb/slatedb/blob/main/slatedb/src/format/sst.rs) and [`SST_FORMAT_VERSION_V2`](https://github.com/slatedb/slatedb/blob/main/slatedb/src/format/sst.rs) are both readable. New SSTs are written with version `2` by default.
-- Compaction-state files: [`COMPACTIONS_FORMAT_VERSION`](https://github.com/slatedb/slatedb/blob/main/slatedb/src/flatbuffer_types.rs) is currently `1`.
-
-A single database can therefore contain a mix of older and newer SST files during normal operation. That is expected. Readers and compactors must understand every format already present in the bucket.
+A single database can contain a mix of older and newer SST files during normal operation. Readers and compactors must understand every format already present in the bucket. SlateDB version-checks its persistent formats and fails fast when it sees a version it does not understand.
 
 Compression is part of compatibility too. A process can only read compressed SSTs for codecs that were compiled into that binary. If one deployment writes Zstd-compressed SSTs, every reader and compactor that touches that database needs the `zstd` feature enabled. [Compression](/docs/design/compression) covers the codec feature flags.
-
-The accepted manifest migration plan is described in [RFC 0004](/rfcs/0004-checkpoints). The current implementation matches its "write V1, read V1+V2" phase.
-
-## Object Stores
-
-At the storage backend boundary, SlateDB relies on the [`object_store::ObjectStore`](https://docs.rs/object_store/latest/object_store/trait.ObjectStore.html) trait. The [README](https://github.com/slatedb/slatedb/blob/main/README.md) states that SlateDB supports any object store that implements that trait.
-
-In this repository, the crate exposes built-in integrations through Cargo features for AWS and Azure, and the admin layer can also load `local`, `memory`, and OpenDAL-backed stores. For S3, the admin loader configures conditional puts with ETag matching.
-
-Compatibility here is about semantics, not just a URL scheme. If you change object-store layout decisions, keep all clients consistent. For example, detached admin operations validate whether the database was created with a separate WAL object store, and clones currently require WAL and main data to live under the same object-store root. [Clones](/docs/design/clones) covers that limitation.
-
-## Tested Targets
-
-The repository pins Rust `1.91.1` in [`rust-toolchain.toml`](https://github.com/slatedb/slatedb/blob/main/rust-toolchain.toml). PR CI runs the Rust test suite on Linux and also runs cross-platform test jobs on macOS and Windows in [`pr.yaml`](https://github.com/slatedb/slatedb/blob/main/.github/workflows/pr.yaml).
-
-That is the current tested matrix in this repository. It is not a stronger compatibility promise than the storage-format guarantee above.
-
-## Practical Rules
-
-- Upgrade shared databases one release at a time.
-- Build every process that touches the same database with support for the same required object-store backends and compression codecs.
-- Expect mixed manifest and SST generations during rolling upgrades and compaction.
-- Treat an unsupported format-version error as a real compatibility boundary, not a transient failure.
