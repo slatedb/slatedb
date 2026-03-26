@@ -9,6 +9,10 @@ A checkpoint is a durable reference to one manifest version. SlateDB stores chec
 
 Creating a checkpoint does not copy WAL or SST files. It only adds metadata to the manifest, so it is cheap. The pinned manifest still matters, though, because it defines the L0 SSTs, sorted runs, and other database state that readers see.
 
+:::note
+A checkpoint is not the same thing as a [`DbSnapshot`](https://docs.rs/slatedb/latest/slatedb/struct.DbSnapshot.html). A checkpoint is durable manifest metadata. It survives restarts and pins manifests and SSTs so garbage collection cannot remove them. A `DbSnapshot` is an in-process read view at a sequence number. It gives one running client a stable view, but it is not stored in the manifest and does not keep old manifests or SSTs alive by itself. See [Consistency](/docs/design/consistency) for more on snapshots.
+:::
+
 ## What It Protects
 
 The garbage collector keeps any manifest and SST file that is still reachable from an active checkpoint. That is how SlateDB holds a stable read view open while compaction and garbage collection continue in the background.

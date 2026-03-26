@@ -37,6 +37,10 @@ TTL is stored as an absolute expiration timestamp, not a relative duration. On c
 
 [`Settings::default_ttl`](https://docs.rs/slatedb/latest/slatedb/config/struct.Settings.html#structfield.default_ttl) sets a default TTL for puts and merges. [`PutOptions`](https://docs.rs/slatedb/latest/slatedb/config/struct.PutOptions.html) and [`MergeOptions`](https://docs.rs/slatedb/latest/slatedb/config/struct.MergeOptions.html) can override that per operation with [`Ttl::NoExpiry`](https://docs.rs/slatedb/latest/slatedb/config/enum.Ttl.html#variant.NoExpiry) or [`Ttl::ExpireAfter(u64)`](https://docs.rs/slatedb/latest/slatedb/config/enum.Ttl.html#variant.ExpireAfter). Deletes write tombstones and do not carry TTL.
 
+:::note
+When SlateDB materializes a value from merge operands, the resulting row reports the earliest `expire_ts` across the merged operands and any base value. A later merge with a longer TTL does not extend the lifetime of older merged data.
+:::
+
 The current read path does not consult wall-clock time to hide expired rows. Instead, SlateDB returns the recorded `expire_ts` to metadata-aware callers and uses `expire_ts` during compaction. Applications that need strict read-time TTL enforcement should compare `expire_ts` with their current time.
 
 Compaction is what turns expiration into deletion. Ordinary values may be rewritten to tombstones so older versions in lower levels do not become visible again. Expired merge operands are dropped instead of converted to tombstones because a tombstone would also erase older merge history. Physical removal still depends on later compaction and [garbage collection](/docs/design/gc).
