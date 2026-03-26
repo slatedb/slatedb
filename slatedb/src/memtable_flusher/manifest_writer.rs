@@ -17,6 +17,7 @@ use super::FlushEpoch;
 use crate::checkpoint::CheckpointCreateResult;
 use crate::config::CheckpointOptions;
 use crate::db::DbInner;
+use crate::db_state::SsTableView;
 use crate::error::SlateDBError;
 use crate::manifest::store::FenceableManifest;
 use crate::utils::IdGenerator;
@@ -521,7 +522,13 @@ impl ManifestWriterTask {
                     .value
                     .core
                     .l0
-                    .push_front(uploaded.sst_handle.clone());
+                    .push_front(SsTableView::new(
+                        self.db
+                            .rand
+                            .rng()
+                            .gen_ulid(self.db.system_clock.as_ref()),
+                        uploaded.sst_handle.clone(),
+                    ));
                 modifier.state.manifest.value.core.replay_after_wal_id =
                     uploaded.imm_memtable.recent_flushed_wal_id();
 

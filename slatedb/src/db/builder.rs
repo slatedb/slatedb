@@ -127,8 +127,6 @@ use crate::compactor::SizeTieredCompactionSchedulerSupplier;
 use crate::compactor::COMPACTOR_TASK_NAME;
 use crate::compactor::{CompactionSchedulerSupplier, Compactor};
 use crate::compactor_executor::{TokioCompactionExecutor, TokioCompactionExecutorOptions};
-use crate::config::default_block_cache;
-use crate::config::default_meta_cache;
 use crate::config::CompactorOptions;
 use crate::config::DbReaderOptions;
 use crate::config::GarbageCollectorOptions;
@@ -372,8 +370,6 @@ impl<P: Into<Path>> DbBuilder<P> {
             );
         }
 
-        let merge_operator = self.merge_operator.or(self.settings.merge_operator.clone());
-
         // Setup the components
         let stat_registry = Arc::new(StatRegistry::new());
         let block_format = {
@@ -483,12 +479,10 @@ impl<P: Into<Path>> DbBuilder<P> {
         let (write_tx, write_rx) = tokio::sync::mpsc::unbounded_channel();
 
         // Create the database inner state
-        let mut settings = self.settings.clone();
-        settings.merge_operator = merge_operator.clone();
         let memtable_flusher = Arc::new(MemtableFlusher::new());
         let inner = Arc::new(
             DbInner::new(
-                settings,
+                self.settings.clone(),
                 system_clock.clone(),
                 rand.clone(),
                 table_store.clone(),
@@ -497,7 +491,7 @@ impl<P: Into<Path>> DbBuilder<P> {
                 write_tx,
                 stat_registry,
                 self.fp_registry.clone(),
-                merge_operator.clone(),
+                self.merge_operator.clone(),
             )
             .await?,
         );
@@ -547,7 +541,7 @@ impl<P: Into<Path>> DbBuilder<P> {
                 .with_stat_registry(inner.stat_registry.clone())
                 .with_seed(rand.rng().next_u64());
 
-            if let Some(operator) = merge_operator {
+            if let Some(operator) = self.merge_operator {
                 builder = builder.with_merge_operator(operator);
             }
 
@@ -1082,7 +1076,10 @@ pub struct DbReaderBuilder<P: Into<Path>> {
     path: P,
     object_store: Arc<dyn ObjectStore>,
     wal_object_store: Option<Arc<dyn ObjectStore>>,
+    db_cache: Option<Arc<dyn DbCache>>,
     checkpoint_id: Option<uuid::Uuid>,
+    merge_operator: Option<MergeOperatorType>,
+    block_transformer: Option<Arc<dyn BlockTransformer>>,
     options: DbReaderOptions,
     system_clock: Arc<dyn SystemClock>,
     rand: Arc<DbRand>,
@@ -1096,7 +1093,10 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
             path,
             object_store,
             wal_object_store: None,
+            db_cache: default_db_cache(),
             checkpoint_id: None,
+            merge_operator: None,
+            block_transformer: None,
             options: DbReaderOptions::default(),
             system_clock: Arc::new(DefaultSystemClock::default()),
             rand: Arc::new(DbRand::default()),
@@ -1118,9 +1118,30 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
         self
     }
 
+    /// Sets the merge operator to use when reading merge operands.
+    pub fn with_merge_operator(mut self, merge_operator: MergeOperatorType) -> Self {
+        self.merge_operator = Some(merge_operator);
+        self
+    }
+
     /// Sets the options to use for the reader.
     pub fn with_options(mut self, options: DbReaderOptions) -> Self {
         self.options = options;
+        self
+    }
+
+    /// Sets the cache to use for the database for caching sst blocks
+    ///
+    /// SlateDB uses a cache to efficiently store and retrieve blocks and SST metadata locally.
+    /// [`slatedb::db_cache::SplitCache`] is used by default.
+    pub fn with_db_cache(mut self, db_cache: Arc<dyn DbCache>) -> Self {
+        self.db_cache = Some(db_cache);
+        self
+    }
+
+    /// Disables the sst block/metadata cache
+    pub fn with_db_cache_disabled(mut self) -> Self {
+        self.db_cache = None;
         self
     }
 
@@ -1143,6 +1164,25 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
     /// Sets the stats registry to use for the reader.
     pub fn with_stat_registry(mut self, stat_registry: Arc<StatRegistry>) -> Self {
         self.stat_registry = stat_registry;
+        self
+    }
+
+    /// Sets the block transformer to use for the database. The block transformer
+    /// allows custom encoding/decoding of block data before storage and after
+    /// retrieval. This can be used for encryption or other transformations.
+    ///
+    /// The transformer is applied after compression on write and before
+    /// decompression on read. The checksum is calculated on the transformed data.
+    ///
+    /// # Arguments
+    ///
+    /// * `block_transformer` - An Arc-wrapped block transformer implementation.
+    ///
+    /// # Returns
+    ///
+    /// The builder instance for chaining.
+    pub fn with_block_transformer(mut self, block_transformer: Arc<dyn BlockTransformer>) -> Self {
+        self.block_transformer = Some(block_transformer);
         self
     }
 
@@ -1195,13 +1235,14 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
             path: path.clone(),
             object_store,
             wal_object_store: retrying_wal_object_store,
-            block_cache: self.options.block_cache.clone(),
-            block_transformer: self.options.block_transformer.clone(),
+            block_cache: self.db_cache.clone(),
+            block_transformer: self.block_transformer.clone(),
         };
 
         let reader = DbReader::open_internal(
             &store_provider,
             self.checkpoint_id,
+            self.merge_operator,
             self.options,
             self.system_clock,
             self.rand,
@@ -1226,6 +1267,54 @@ fn default_db_cache() -> Option<Arc<dyn DbCache>> {
             .with_meta_cache(meta_cache)
             .build(),
     ) as Arc<dyn DbCache>)
+}
+
+#[allow(unreachable_code)]
+pub(crate) fn default_block_cache() -> Option<Arc<dyn DbCache>> {
+    #[cfg(feature = "foyer")]
+    {
+        return Some(Arc::new(crate::db_cache::foyer::FoyerCache::new_with_opts(
+            crate::db_cache::foyer::FoyerCacheOptions {
+                max_capacity: crate::db_cache::DEFAULT_BLOCK_CACHE_CAPACITY,
+                ..Default::default()
+            },
+        )));
+    }
+    #[cfg(feature = "moka")]
+    {
+        return Some(Arc::new(crate::db_cache::moka::MokaCache::new_with_opts(
+            crate::db_cache::moka::MokaCacheOptions {
+                max_capacity: crate::db_cache::DEFAULT_BLOCK_CACHE_CAPACITY,
+                time_to_live: None,
+                time_to_idle: None,
+            },
+        )));
+    }
+    None
+}
+
+#[allow(unreachable_code)]
+pub(crate) fn default_meta_cache() -> Option<Arc<dyn DbCache>> {
+    #[cfg(feature = "foyer")]
+    {
+        return Some(Arc::new(crate::db_cache::foyer::FoyerCache::new_with_opts(
+            crate::db_cache::foyer::FoyerCacheOptions {
+                max_capacity: crate::db_cache::DEFAULT_META_CACHE_CAPACITY,
+                ..Default::default()
+            },
+        )));
+    }
+    #[cfg(feature = "moka")]
+    {
+        return Some(Arc::new(crate::db_cache::moka::MokaCache::new_with_opts(
+            crate::db_cache::moka::MokaCacheOptions {
+                max_capacity: crate::db_cache::DEFAULT_META_CACHE_CAPACITY,
+                time_to_live: None,
+                time_to_idle: None,
+            },
+        )));
+    }
+    None
 }
 
 #[cfg(test)]

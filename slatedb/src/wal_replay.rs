@@ -1,6 +1,7 @@
 use crate::db_state::{ManifestCore, SsTableId};
 use crate::error::SlateDBError;
 use crate::iter::RowEntryIterator;
+use crate::manifest::SsTableView;
 use crate::mem_table::WritableKVTable;
 use crate::sst_iter::{SstIterator, SstIteratorOptions};
 use crate::tablestore::TableStore;
@@ -26,6 +27,10 @@ pub(crate) struct WalReplayOptions {
 
     /// Options to pass through to underlying SST iterators
     pub(crate) sst_iter_options: SstIteratorOptions,
+
+    /// The minimum seq number to replay. If unset, will replay all
+    /// entries after `last_l0_seq` in the manifest.
+    pub(crate) min_seq: Option<u64>,
 }
 
 impl Default for WalReplayOptions {
@@ -35,6 +40,7 @@ impl Default for WalReplayOptions {
             min_memtable_bytes: 64 * 1024 * 1024,
             max_memtable_bytes: 128 * 1024 * 1024,
             sst_iter_options: SstIteratorOptions::default(),
+            min_seq: None,
         }
     }
 }
@@ -103,7 +109,7 @@ impl WalReplayIterator<'_> {
         // replaying the entries that are already in the L0 SST. while replaying the WALs, we'll
         // update the last seq number to the max seq number, and this final `last_seq` will be passed
         // to the db_state for the further writes.
-        let min_seq = db_state.last_l0_seq;
+        let min_seq = options.min_seq.unwrap_or(db_state.last_l0_seq);
         let last_seq = db_state.last_l0_seq;
         let last_tick = db_state.last_l0_clock_tick;
         let next_wal_id = wal_id_range.start;
@@ -157,8 +163,13 @@ impl WalReplayIterator<'_> {
             table_store: Arc<TableStore>,
         ) -> Result<Option<SstIterator<'a>>, SlateDBError> {
             let sst = table_store.open_sst(&SsTableId::Wal(wal_id)).await?;
-            SstIterator::new_owned_initialized(.., sst, Arc::clone(&table_store), sst_iter_options)
-                .await
+            SstIterator::new_owned_initialized(
+                ..,
+                SsTableView::identity(sst),
+                Arc::clone(&table_store),
+                sst_iter_options,
+            )
+            .await
         }
 
         let handle = task::spawn(load_iter(

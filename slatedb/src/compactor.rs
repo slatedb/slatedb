@@ -175,7 +175,7 @@ pub trait CompactionScheduler: Send + Sync {
                 let sources = manifest
                     .l0
                     .iter()
-                    .map(|sst| SourceId::Sst(sst.id.unwrap_compacted_id()))
+                    .map(|view| SourceId::SstView(view.id))
                     .chain(
                         manifest
                             .compacted
@@ -600,17 +600,11 @@ impl CompactorEventHandler {
         compaction: &Compaction,
         db_state: &crate::db_state::ManifestCore,
     ) -> u64 {
-        use crate::db_state::{SortedRun, SsTableHandle, SsTableId};
+        use crate::db_state::{SortedRun, SsTableView};
         use std::collections::HashMap;
 
-        let ssts_by_id: HashMap<Ulid, &SsTableHandle> = db_state
-            .l0
-            .iter()
-            .map(|sst| match sst.id {
-                SsTableId::Compacted(id) => (id, sst),
-                SsTableId::Wal(_) => unreachable!("L0 SSTs should never have SsTableId::Wal"),
-            })
-            .collect();
+        let views_by_id: HashMap<Ulid, &SsTableView> =
+            db_state.l0.iter().map(|view| (view.id, view)).collect();
         let srs_by_id: HashMap<u32, &SortedRun> =
             db_state.compacted.iter().map(|sr| (sr.id, sr)).collect();
 
@@ -619,9 +613,9 @@ impl CompactorEventHandler {
             .sources()
             .iter()
             .map(|source| match source {
-                SourceId::Sst(id) => ssts_by_id
+                SourceId::SstView(id) => views_by_id
                     .get(id)
-                    .expect("compaction source SST not found in L0")
+                    .expect("compaction source view not found in L0")
                     .estimate_size(),
                 SourceId::SortedRun(id) => srs_by_id
                     .get(id)
@@ -688,13 +682,10 @@ impl CompactorEventHandler {
 
         // Validate compaction sources exist in DB state
         let db_state = self.state().db_state();
-        let l0_ids = db_state
+        let l0_view_ids = db_state
             .l0
             .iter()
-            .filter_map(|sst| match sst.id {
-                crate::db_state::SsTableId::Compacted(id) => Some(id),
-                crate::db_state::SsTableId::Wal(_) => None,
-            })
+            .map(|view| view.id)
             .collect::<std::collections::HashSet<_>>();
         let sr_ids = db_state
             .compacted
@@ -703,7 +694,7 @@ impl CompactorEventHandler {
             .collect::<std::collections::HashSet<_>>();
 
         if let Some(missing) = compaction.sources().iter().find(|source| match source {
-            SourceId::Sst(id) => !l0_ids.contains(id),
+            SourceId::SstView(id) => !l0_view_ids.contains(id),
             SourceId::SortedRun(id) => !sr_ids.contains(id),
         }) {
             warn!("compaction source missing from db state: {:?}", missing);
@@ -714,7 +705,7 @@ impl CompactorEventHandler {
         let has_only_l0 = compaction
             .sources()
             .iter()
-            .all(|s| matches!(s, SourceId::Sst(_)));
+            .all(|s| matches!(s, SourceId::SstView(_)));
 
         if has_only_l0 {
             // L0-only: must create new SR with id > highest_existing
@@ -869,7 +860,7 @@ impl CompactorEventHandler {
         self.log_compaction_state();
         let db_state = self.state().db_state();
 
-        let ssts = compaction.get_ssts(db_state);
+        let sst_views = compaction.get_l0_sst_views(db_state);
         let sorted_runs = compaction.get_sorted_runs(db_state);
         let spec = compaction.spec();
         // if there are no SRs when we compact L0 then the resulting SR is the last sorted run.
@@ -883,7 +874,7 @@ impl CompactorEventHandler {
             id: job_id,
             compaction_id: compaction.id(),
             destination: spec.destination(),
-            ssts,
+            sst_views,
             sorted_runs,
             output_ssts: compaction.output_ssts().clone(),
             compaction_clock_tick: db_state.last_l0_clock_tick,
@@ -1053,7 +1044,9 @@ mod tests {
         SizeTieredCompactionSchedulerOptions, Ttl, WriteOptions,
     };
     use crate::db::Db;
-    use crate::db_state::{ManifestCore, SortedRun, SsTableHandle, SsTableId, SsTableInfo};
+    use crate::db_state::{
+        ManifestCore, SortedRun, SsTableHandle, SsTableId, SsTableInfo, SsTableView,
+    };
     use crate::error::SlateDBError;
     use crate::format::sst::{SsTableFormat, SST_FORMAT_VERSION_LATEST};
     use crate::iter::RowEntryIterator;
@@ -1160,7 +1153,7 @@ mod tests {
         // then:
         let db_state = db_state.expect("db was not compacted");
         for run in db_state.compacted {
-            for sst in run.ssts {
+            for sst in run.sst_views {
                 let mut iter = SstIterator::new_borrowed_initialized(
                     ..,
                     &sst,
@@ -1270,7 +1263,7 @@ mod tests {
         .unwrap();
         assert_eq!(db_state.compacted.len(), 1);
 
-        let compacted = &db_state.compacted.first().unwrap().ssts;
+        let compacted = &db_state.compacted.first().unwrap().sst_views;
         assert_eq!(compacted.len(), 1);
         let handle = compacted.first().unwrap();
 
@@ -1368,7 +1361,7 @@ mod tests {
         .unwrap();
         assert_eq!(db_state.compacted.len(), 1);
 
-        let compacted = &db_state.compacted.first().unwrap().ssts;
+        let compacted = &db_state.compacted.first().unwrap().sst_views;
         assert_eq!(compacted.len(), 1);
         let handle = compacted.first().unwrap();
 
@@ -1503,7 +1496,7 @@ mod tests {
         // then:
         let db_state = db_state.expect("db was not compacted");
         assert_eq!(db_state.compacted.len(), 1);
-        let compacted = &db_state.compacted.first().unwrap().ssts;
+        let compacted = &db_state.compacted.first().unwrap().sst_views;
         assert_eq!(compacted.len(), 1);
         let handle = compacted.first().unwrap();
 
@@ -1641,7 +1634,7 @@ mod tests {
         // then:
         let db_state = db_state.expect("db was not compacted");
         assert_eq!(db_state.compacted.len(), 1);
-        let compacted = &db_state.compacted.first().unwrap().ssts;
+        let compacted = &db_state.compacted.first().unwrap().sst_views;
         assert_eq!(compacted.len(), 1);
         let handle = compacted.first().unwrap();
 
@@ -1758,7 +1751,7 @@ mod tests {
         // then:
         let db_state = db_state.expect("db was not compacted");
         assert_eq!(db_state.compacted.len(), 1);
-        let compacted = &db_state.compacted.first().unwrap().ssts;
+        let compacted = &db_state.compacted.first().unwrap().sst_views;
         assert_eq!(compacted.len(), 1);
         let handle = compacted.first().unwrap();
 
@@ -1887,7 +1880,7 @@ mod tests {
         // then:
         let db_state = db_state.expect("db was not compacted");
         assert_eq!(db_state.compacted.len(), 1);
-        let compacted = &db_state.compacted.first().unwrap().ssts;
+        let compacted = &db_state.compacted.first().unwrap().sst_views;
         assert_eq!(compacted.len(), 1);
         let handle = compacted.first().unwrap();
 
@@ -1985,7 +1978,7 @@ mod tests {
         assert_eq!(db_state.last_l0_clock_tick, 20);
 
         // then: the compacted SST should only contain the non-expired merge
-        let compacted = &db_state.compacted.first().unwrap().ssts;
+        let compacted = &db_state.compacted.first().unwrap().sst_views;
         assert_eq!(compacted.len(), 1);
         let handle = compacted.first().unwrap();
 
@@ -2202,7 +2195,7 @@ mod tests {
         );
 
         // The compacted sorted run should contain both merge operations separately
-        let compacted = &db_state.compacted.first().unwrap().ssts;
+        let compacted = &db_state.compacted.first().unwrap().sst_views;
         assert_eq!(compacted.len(), 1);
         let handle = compacted.first().unwrap();
 
@@ -2337,10 +2330,10 @@ mod tests {
 
         // then:
         let db_state = db_state.expect("db was not compacted");
-        assert!(db_state.l0_last_compacted.is_some());
+        assert!(db_state.last_compacted_l0_sst_view_id.is_some());
         assert_eq!(db_state.compacted.len(), 1);
         assert_eq!(db_state.last_l0_clock_tick, 70);
-        let compacted = &db_state.compacted.first().unwrap().ssts;
+        let compacted = &db_state.compacted.first().unwrap().sst_views;
         assert_eq!(compacted.len(), 1);
         let handle = compacted.first().unwrap();
         let mut iter = SstIterator::new_borrowed_initialized(
@@ -2538,8 +2531,6 @@ mod tests {
                 .await
                 .unwrap();
 
-        let l0_newest = Ulid::new();
-        let l0_oldest = Ulid::new();
         let mut dirty = stored_manifest.prepare_dirty().unwrap();
         let l0_info = SsTableInfo {
             first_entry: Some(Bytes::from_static(b"a")),
@@ -2549,34 +2540,35 @@ mod tests {
             first_entry: Some(Bytes::from_static(b"m")),
             ..SsTableInfo::default()
         };
-        dirty.value.core.l0 = VecDeque::from(vec![
-            SsTableHandle::new(
-                SsTableId::Compacted(l0_newest),
-                SST_FORMAT_VERSION_LATEST,
-                l0_info.clone(),
-            ),
-            SsTableHandle::new(
-                SsTableId::Compacted(l0_oldest),
-                SST_FORMAT_VERSION_LATEST,
-                l0_info.clone(),
-            ),
-        ]);
+        let l0_view_newest: SsTableView = SsTableView::identity(SsTableHandle::new(
+            SsTableId::Compacted(Ulid::new()),
+            SST_FORMAT_VERSION_LATEST,
+            l0_info.clone(),
+        ));
+        let l0_view_oldest: SsTableView = SsTableView::identity(SsTableHandle::new(
+            SsTableId::Compacted(Ulid::new()),
+            SST_FORMAT_VERSION_LATEST,
+            l0_info.clone(),
+        ));
+        let l0_newest = l0_view_newest.id;
+        let l0_oldest = l0_view_oldest.id;
+        dirty.value.core.l0 = VecDeque::from(vec![l0_view_newest, l0_view_oldest]);
         dirty.value.core.compacted = vec![
             SortedRun {
                 id: 2,
-                ssts: vec![SsTableHandle::new(
+                sst_views: vec![SsTableView::identity(SsTableHandle::new(
                     SsTableId::Compacted(Ulid::new()),
                     SST_FORMAT_VERSION_LATEST,
                     sr_info.clone(),
-                )],
+                ))],
             },
             SortedRun {
                 id: 1,
-                ssts: vec![SsTableHandle::new(
+                sst_views: vec![SsTableView::identity(SsTableHandle::new(
                     SsTableId::Compacted(Ulid::new()),
                     SST_FORMAT_VERSION_LATEST,
                     sr_info.clone(),
-                )],
+                ))],
             },
         ];
         stored_manifest.update(dirty).await.unwrap();
@@ -2613,8 +2605,8 @@ mod tests {
             .get(&compaction_id)
             .expect("missing submitted compaction");
         let expected_sources = vec![
-            SourceId::Sst(l0_newest),
-            SourceId::Sst(l0_oldest),
+            SourceId::SstView(l0_newest),
+            SourceId::SstView(l0_oldest),
             SourceId::SortedRun(2),
             SourceId::SortedRun(1),
         ];
@@ -2643,8 +2635,6 @@ mod tests {
     #[test]
     fn test_plan_full_uses_all_sources_and_min_destination() {
         let scheduler = MockScheduler::new();
-        let l0_first = Ulid::from_parts(1, 0);
-        let l0_second = Ulid::from_parts(2, 0);
         let mut core = ManifestCore::new();
         let l0_info = SsTableInfo {
             first_entry: Some(Bytes::from_static(b"a")),
@@ -2654,34 +2644,35 @@ mod tests {
             first_entry: Some(Bytes::from_static(b"m")),
             ..SsTableInfo::default()
         };
-        core.l0 = VecDeque::from(vec![
-            SsTableHandle::new(
-                SsTableId::Compacted(l0_first),
-                SST_FORMAT_VERSION_LATEST,
-                l0_info.clone(),
-            ),
-            SsTableHandle::new(
-                SsTableId::Compacted(l0_second),
-                SST_FORMAT_VERSION_LATEST,
-                l0_info,
-            ),
-        ]);
+        let l0_view_first: SsTableView = SsTableView::identity(SsTableHandle::new(
+            SsTableId::Compacted(Ulid::from_parts(1, 0)),
+            SST_FORMAT_VERSION_LATEST,
+            l0_info.clone(),
+        ));
+        let l0_view_second: SsTableView = SsTableView::identity(SsTableHandle::new(
+            SsTableId::Compacted(Ulid::from_parts(2, 0)),
+            SST_FORMAT_VERSION_LATEST,
+            l0_info,
+        ));
+        let l0_first = l0_view_first.id;
+        let l0_second = l0_view_second.id;
+        core.l0 = VecDeque::from(vec![l0_view_first, l0_view_second]);
         core.compacted = vec![
             SortedRun {
                 id: 5,
-                ssts: vec![SsTableHandle::new(
+                sst_views: vec![SsTableView::identity(SsTableHandle::new(
                     SsTableId::Compacted(Ulid::from_parts(10, 0)),
                     SST_FORMAT_VERSION_LATEST,
                     sr_info.clone(),
-                )],
+                ))],
             },
             SortedRun {
                 id: 2,
-                ssts: vec![SsTableHandle::new(
+                sst_views: vec![SsTableView::identity(SsTableHandle::new(
                     SsTableId::Compacted(Ulid::from_parts(11, 0)),
                     SST_FORMAT_VERSION_LATEST,
                     sr_info,
-                )],
+                ))],
             },
         ];
         let state = CompactorStateView {
@@ -2694,8 +2685,8 @@ mod tests {
             .unwrap();
 
         let expected_sources = vec![
-            SourceId::Sst(l0_first),
-            SourceId::Sst(l0_second),
+            SourceId::SstView(l0_first),
+            SourceId::SstView(l0_second),
             SourceId::SortedRun(5),
             SourceId::SortedRun(2),
         ];
@@ -2747,7 +2738,7 @@ mod tests {
                     stats: compactor_stats.clone(),
                     clock: Arc::new(DefaultSystemClock::new()),
                     manifest_store: manifest_store.clone(),
-                    merge_operator: options.merge_operator.clone(),
+                    merge_operator: None,
                     #[cfg(feature = "compaction_filters")]
                     compaction_filter_supplier: None,
                 },
@@ -2809,7 +2800,7 @@ mod tests {
             let l0_ids_to_compact: Vec<SourceId> = db_state
                 .l0
                 .iter()
-                .map(|h| SourceId::Sst(h.id.unwrap_compacted_id()))
+                .map(|h| SourceId::SstView(h.id))
                 .collect();
             CompactionSpec::new(l0_ids_to_compact, 0)
         }
@@ -2909,22 +2900,22 @@ mod tests {
         let db_state = fixture.latest_db_state().await;
         assert_eq!(db_state.l0.len(), 1);
         assert_eq!(db_state.compacted.len(), 1);
-        let l0_id = db_state.l0.front().unwrap().id.unwrap_compacted_id();
+        let l0_id = db_state.l0.front().unwrap().sst.id.unwrap_compacted_id();
         let compacted_l0s: Vec<Ulid> = db_state
             .compacted
             .first()
             .unwrap()
-            .ssts
+            .sst_views
             .iter()
-            .map(|sst| sst.id.unwrap_compacted_id())
+            .map(|view| view.sst.id.unwrap_compacted_id())
             .collect();
         assert!(!compacted_l0s.contains(&l0_id));
         assert_eq!(
-            db_state.l0_last_compacted.unwrap(),
+            db_state.last_compacted_l0_sst_view_id.unwrap(),
             compaction
                 .sources()
                 .first()
-                .and_then(|id| id.maybe_unwrap_sst())
+                .and_then(|id| id.maybe_unwrap_sst_view())
                 .unwrap()
         );
     }
@@ -3269,7 +3260,7 @@ mod tests {
         let sources = db_state
             .l0
             .iter()
-            .map(|h| SourceId::Sst(h.id.unwrap_compacted_id()))
+            .map(|h| SourceId::SstView(h.id))
             .collect::<Vec<_>>();
         let spec = CompactionSpec::new(sources, 0);
         let compaction_id = Ulid::new();
@@ -3315,7 +3306,7 @@ mod tests {
         let db_state = handler.state().db_state().clone();
         let output_sr = SortedRun {
             id: jobs[0].destination,
-            ssts: db_state.l0.iter().cloned().collect(),
+            sst_views: db_state.l0.iter().cloned().collect(),
         };
         let msg = CompactorMessage::CompactionJobFinished {
             id: compaction_id,
@@ -3428,7 +3419,7 @@ mod tests {
         let db_state = fixture.latest_db_state().await;
         let output_sr = SortedRun {
             id: compaction.destination(),
-            ssts: db_state.l0.iter().cloned().collect(),
+            sst_views: db_state.l0.iter().cloned().collect(),
         };
         let msg = CompactorMessage::CompactionJobFinished {
             id: job.id,
@@ -3502,7 +3493,7 @@ mod tests {
             .core
             .l0
             .iter()
-            .map(|sst| SourceId::Sst(sst.id.unwrap_compacted_id()))
+            .map(|view| SourceId::SstView(view.id))
             .collect();
         assert_eq!(&l0_ids, compaction.sources());
     }
@@ -3574,7 +3565,7 @@ mod tests {
     async fn test_validate_compaction_rejects_missing_l0_source() {
         let mut fixture = CompactorEventHandlerTestFixture::new().await;
         fixture.handler.handle_ticker().await.unwrap();
-        let c = CompactionSpec::new(vec![SourceId::Sst(Ulid::new())], 0);
+        let c = CompactionSpec::new(vec![SourceId::SstView(Ulid::new())], 0);
         let err = fixture.handler.validate_compaction(&c).unwrap_err();
         assert!(matches!(err, SlateDBError::InvalidCompaction));
     }
@@ -3659,9 +3650,9 @@ mod tests {
         fixture.handler.handle_ticker().await.unwrap();
         let state = fixture.latest_db_state().await;
         let sr_id = state.compacted.first().unwrap().id;
-        let l0_ulid = state.l0.front().unwrap().id.unwrap_compacted_id();
+        let l0_view_id = state.l0.front().unwrap().id;
         let mixed = CompactionSpec::new(
-            vec![SourceId::SortedRun(sr_id), SourceId::Sst(l0_ulid)],
+            vec![SourceId::SortedRun(sr_id), SourceId::SstView(l0_view_id)],
             sr_id,
         );
         // Compactor-level validation should not reject (scheduler default validate returns Ok(()))

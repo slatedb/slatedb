@@ -3,14 +3,14 @@ title: Quick Start
 description: Get started with SlateDB in minutes
 ---
 
-SlateDB is a Rust library. It doesn't currently ship with any language bindings, so you must use Rust or generate your own bindings.
+SlateDB is implemented in Rust. The repository also ships official Go, Python, and Java bindings, but this quick start covers the Rust API directly.
 
 ## Installation
 
 Add the following dependencies to your project:
 
 ```bash
-cargo add slatedb tokio --features tokio/macros
+cargo add slatedb tokio --features tokio/macros,tokio/rt-multi-thread
 ```
 
 ## Usage

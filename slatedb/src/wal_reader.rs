@@ -75,6 +75,7 @@ use object_store::ObjectStore;
 use crate::db_state::SsTableId;
 use crate::format::sst::SsTableFormat;
 use crate::iter::{EmptyIterator, RowEntryIterator};
+use crate::manifest::SsTableView;
 use crate::object_stores::ObjectStores;
 use crate::sst_iter::{SstIterator, SstIteratorOptions};
 use crate::tablestore::TableStore;
@@ -153,9 +154,13 @@ impl WalFile {
         let sst = self.table_store.open_sst(&SsTableId::Wal(self.id)).await?;
         let iter = match SstIterator::new_owned_initialized(
             ..,
-            sst,
+            SsTableView::identity(sst),
             Arc::clone(&self.table_store),
-            SstIteratorOptions::default(),
+            SstIteratorOptions {
+                // Optimize for throughput. Go for 256MiB per-fetch (4096 bytes/block default).
+                blocks_to_fetch: 65_536,
+                ..Default::default()
+            },
         )
         .await
         {

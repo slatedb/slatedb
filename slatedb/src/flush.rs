@@ -71,12 +71,11 @@ impl DbInner {
             None => Some(durable_seq),
         };
 
-        let merge_iter = if let Some(merge_operator) = self.settings.merge_operator.clone() {
+        let merge_iter = if let Some(merge_operator) = self.reader.merge_operator.clone() {
             Box::new(MergeOperatorIterator::new(
                 merge_operator,
                 imm_table.iter(),
                 false,
-                imm_table.last_tick(),
                 min_retention_seq,
             ))
         } else {

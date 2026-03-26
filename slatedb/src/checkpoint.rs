@@ -63,7 +63,7 @@ mod tests {
     use crate::checkpoint::CheckpointCreateResult;
     use crate::config::{CheckpointOptions, CheckpointScope, Settings};
     use crate::db::Db;
-    use crate::db_state::SsTableId;
+    use crate::db_state::{SsTableId, SsTableView};
     use crate::format::sst::SsTableFormat;
     use crate::iter::RowEntryIterator;
     use crate::manifest::store::ManifestStore;
@@ -324,8 +324,10 @@ mod tests {
             flush_interval: Some(Duration::from_millis(5000)),
             ..Settings::default()
         };
-        test_checkpoint_scope_all(db_options, |manifest| manifest.core.l0.front().unwrap().id)
-            .await;
+        test_checkpoint_scope_all(db_options, |manifest| {
+            manifest.core.l0.front().unwrap().clone()
+        })
+        .await;
     }
 
     #[tokio::test]
@@ -364,7 +366,7 @@ mod tests {
         assert_flushed_entry(
             Arc::clone(&object_store),
             path,
-            &latest_manifest.core.l0.front().unwrap().id,
+            &latest_manifest.core.l0.front().unwrap().sst.id,
             (&Bytes::from_static(b"k2"), &Bytes::from_static(b"v2")),
         )
         .await;
@@ -380,11 +382,13 @@ mod tests {
             wal_enabled: false,
             ..Settings::default()
         };
-        test_checkpoint_scope_all(db_options, |manifest| manifest.core.l0.front().unwrap().id)
-            .await;
+        test_checkpoint_scope_all(db_options, |manifest| {
+            manifest.core.l0.front().unwrap().clone()
+        })
+        .await;
     }
 
-    async fn test_checkpoint_scope_all<F: FnOnce(Manifest) -> SsTableId>(
+    async fn test_checkpoint_scope_all<F: FnOnce(Manifest) -> SsTableView>(
         db_options: Settings,
         last_flushed_table: F,
     ) {
@@ -416,7 +420,7 @@ mod tests {
         assert_flushed_entry(
             Arc::clone(&object_store),
             path,
-            &last_flushed_table_id,
+            &last_flushed_table_id.sst.id,
             last_written_kv,
         )
         .await;
@@ -434,7 +438,7 @@ mod tests {
             path.clone(),
             None,
         ));
-        let sst_handle = table_store.open_sst(table_id).await.unwrap();
+        let sst_handle = SsTableView::identity(table_store.open_sst(table_id).await.unwrap());
 
         let mut sst_iter = SstIterator::for_key_with_stats_initialized(
             &sst_handle,

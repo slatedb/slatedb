@@ -22,7 +22,7 @@ use ulid::Ulid;
 use uuid::Uuid;
 use SsTableId::{Compacted, Wal};
 
-/// A handle to an SSTable, including its ID, metadata, and visible key ranges.
+/// A handle to an SSTable — the physical SST on storage.
 #[derive(Clone, PartialEq, Serialize)]
 pub struct SsTableHandle {
     /// The unique identifier for this SSTable. The table can be either a WAL SST or a compacted SST.
@@ -33,31 +33,83 @@ pub struct SsTableHandle {
 
     /// Metadata information about this SSTable.
     pub info: SsTableInfo,
-
-    /// The range of keys that are visible to the user. If non-empty, this handle represents a projection
-    /// over the SST file.
-    pub(crate) visible_range: Option<BytesRange>,
-
-    /// The effective range of keys that are visible to the user, which is the intersection of the
-    /// physical range (first_key..unbounded) and any projection range. If a projection is specified,
-    /// this handle represents a subset of the SST file.
-    effective_range: BytesRange,
 }
 
 impl Debug for SsTableHandle {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        f.write_fmt(format_args!(
-            "SsTableHandle({:?}, {:?})",
-            self.id, self.visible_range
-        ))
+        f.write_fmt(format_args!("SsTableHandle({:?})", self.id))
     }
 }
 
 impl SsTableHandle {
     pub(crate) fn new(id: SsTableId, format_version: u16, info: SsTableInfo) -> Self {
-        let effective_range = match info.first_entry.clone() {
+        SsTableHandle {
+            id,
+            format_version,
+            info,
+        }
+    }
+
+    /// Returns an estimate of the SST's on-disk size in bytes.
+    ///
+    /// This is a rough estimate: the index is the last thing written before
+    /// the info footer, so `index_offset + index_len` approximates the file size.
+    pub fn estimate_size(&self) -> u64 {
+        self.info.index_offset + self.info.index_len
+    }
+}
+
+impl AsRef<SsTableHandle> for SsTableHandle {
+    fn as_ref(&self) -> &SsTableHandle {
+        self
+    }
+}
+
+/// A projected view of an SSTable, combining the physical SST handle with an
+/// optional visible_range projection.
+#[derive(Clone, PartialEq, Serialize)]
+pub struct SsTableView {
+    /// Unique identifier for this view.
+    pub(crate) id: Ulid,
+
+    /// The underlying physical SSTable handle.
+    pub sst: SsTableHandle,
+
+    /// The range of keys that are visible to the user. If non-empty, this view represents a projection
+    /// over the SST file.
+    pub(crate) visible_range: Option<BytesRange>,
+
+    /// The effective range of keys that are visible to the user, which is the intersection of the
+    /// physical range (first_key..unbounded) and any projection range.
+    effective_range: BytesRange,
+}
+
+impl Debug for SsTableView {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.write_fmt(format_args!(
+            "SsTableView({:?}, {:?})",
+            self.sst.id, self.visible_range
+        ))
+    }
+}
+
+impl SsTableView {
+    /// Create a view using a deterministic id derived from the SST's own identity.
+    /// Use this only for ephemeral views (e.g. WAL iteration) or legacy migration
+    /// where no `DbRand` is available and the id is not stored in the manifest.
+    pub(crate) fn identity(sst: SsTableHandle) -> Self {
+        let id = match &sst.id {
+            SsTableId::Compacted(ulid) => *ulid,
+            SsTableId::Wal(wal_id) => Ulid::from_parts(*wal_id, 0),
+        };
+        Self::new(id, sst)
+    }
+
+    /// Create a new view with no visible_range projection.
+    pub(crate) fn new(id: Ulid, sst: SsTableHandle) -> Self {
+        let effective_range = match sst.info.first_entry.clone() {
             Some(physical_first_entry) => {
-                let end_bound = match info.last_entry.clone() {
+                let end_bound = match sst.info.last_entry.clone() {
                     Some(physical_last_entry) => Included(physical_last_entry),
                     None => Unbounded,
                 };
@@ -66,24 +118,23 @@ impl SsTableHandle {
             None => BytesRange::new_empty(),
         };
 
-        SsTableHandle {
+        SsTableView {
             id,
-            format_version,
-            info,
+            sst,
             visible_range: None,
             effective_range,
         }
     }
 
-    pub(crate) fn new_compacted(
-        id: SsTableId,
-        format_version: u16,
-        info: SsTableInfo,
+    /// Create a new projected view with an optional visible_range.
+    pub(crate) fn new_projected(
+        id: Ulid,
+        sst: SsTableHandle,
         visible_range: Option<BytesRange>,
     ) -> Self {
-        let mut effective_range = match info.first_entry.clone() {
+        let mut effective_range = match sst.info.first_entry.clone() {
             Some(physical_first_entry) => {
-                let end_bound = match info.last_entry.clone() {
+                let end_bound = match sst.info.last_entry.clone() {
                     Some(physical_last_entry) => Included(physical_last_entry),
                     None => Unbounded,
                 };
@@ -102,22 +153,16 @@ impl SsTableHandle {
                 .intersect(visible_range)
                 .expect("An intersection of visible and physical range must be non-empty.")
         }
-        SsTableHandle {
+        SsTableView {
             id,
-            format_version,
-            info,
+            sst,
             visible_range,
             effective_range,
         }
     }
 
     pub(crate) fn with_visible_range(&self, visible_range: BytesRange) -> Self {
-        Self::new_compacted(
-            self.id,
-            self.format_version,
-            self.info.clone(),
-            Some(visible_range),
-        )
+        Self::new_projected(self.id, self.sst.clone(), Some(visible_range))
     }
 
     /// The range of keys that are visible to the user.
@@ -133,7 +178,7 @@ impl SsTableHandle {
     // memtable flushes, which should never produce empty SSTs. This method returns
     // the start bound after applying projections.
     pub(crate) fn compacted_effective_start_bound(&self) -> Bound<Bytes> {
-        assert!(matches!(self.id, Compacted(_)));
+        assert!(matches!(self.sst.id, Compacted(_)));
         self.effective_range.start_bound().cloned()
     }
 
@@ -141,7 +186,7 @@ impl SsTableHandle {
     // memtable flushes, which should never produce empty SSTs. This method returns
     // the start key after applying projections.
     pub(crate) fn compacted_effective_start_key(&self) -> &Bytes {
-        assert!(matches!(self.id, Compacted(_)));
+        assert!(matches!(self.sst.id, Compacted(_)));
         match self.effective_range.start_bound() {
             Included(k) => k,
             _ => unreachable!("Invalid start bound"),
@@ -154,14 +199,14 @@ impl SsTableHandle {
 
     pub(crate) fn compacted_intersection(
         &self,
-        next_handle: Option<&SsTableHandle>,
+        next_view: Option<&SsTableView>,
         range: &BytesRange,
     ) -> Option<BytesRange> {
-        assert!(matches!(self.id, Compacted(_)));
-        if let Some(next_handle) = next_handle {
+        assert!(matches!(self.sst.id, Compacted(_)));
+        if let Some(next_view) = next_view {
             BytesRange::new(
                 self.compacted_effective_start_bound(),
-                Excluded(next_handle.compacted_effective_start_key().clone()),
+                Excluded(next_view.compacted_effective_start_key().clone()),
             )
             .intersect(range)
         } else {
@@ -189,24 +234,15 @@ impl SsTableHandle {
         if let Some(visible_range) = &self.visible_range {
             return range.intersect(visible_range);
         }
-        if self.info.last_entry.is_some() {
+        if self.sst.info.last_entry.is_some() {
             return range.intersect(&self.effective_range);
         }
         Some(range)
     }
 
-    pub(crate) fn estimate_size(&self) -> u64 {
-        // this is a hacky estimate of the sst size since we don't have it stored anywhere
-        // right now. Just use the index's offset and add the index length. Since the index
-        // is the last thing we put in the SST before the info footer, this should be a good
-        // estimate for now.
-        self.info.index_offset + self.info.index_len
-    }
-}
-
-impl AsRef<SsTableHandle> for SsTableHandle {
-    fn as_ref(&self) -> &SsTableHandle {
-        self
+    /// Returns an estimate of the underlying SST's on-disk size in bytes.
+    pub fn estimate_size(&self) -> u64 {
+        self.sst.estimate_size()
     }
 }
 
@@ -309,20 +345,20 @@ impl Clone for Box<dyn SsTableInfoCodec> {
 pub struct SortedRun {
     /// The unique identifier for this sorted run.
     pub id: u32,
-    /// The list of SSTables in this sorted run.
-    pub ssts: Vec<SsTableHandle>,
+    /// The list of SSTable views in this sorted run.
+    pub sst_views: Vec<SsTableView>,
 }
 
 impl SortedRun {
     /// Estimate the total size of all SSTables in this sorted run.
     pub fn estimate_size(&self) -> u64 {
-        self.ssts.iter().map(|sst| sst.estimate_size()).sum()
+        self.sst_views.iter().map(|sst| sst.estimate_size()).sum()
     }
 
     pub(crate) fn find_sst_with_range_covering_key_idx(&self, key: &[u8]) -> Option<usize> {
         // returns the sst after the one whose range includes the key
         let first_sst = self
-            .ssts
+            .sst_views
             .partition_point(|sst| sst.compacted_effective_start_key() <= key);
         if first_sst > 0 {
             return Some(first_sst - 1);
@@ -331,20 +367,20 @@ impl SortedRun {
         None
     }
 
-    pub(crate) fn find_sst_with_range_covering_key(&self, key: &[u8]) -> Option<&SsTableHandle> {
+    pub(crate) fn find_sst_with_range_covering_key(&self, key: &[u8]) -> Option<&SsTableView> {
         self.find_sst_with_range_covering_key_idx(key)
-            .map(|idx| &self.ssts[idx])
+            .map(|idx| &self.sst_views[idx])
     }
 
     fn table_idx_covering_range(&self, range: &BytesRange) -> Range<usize> {
         let mut min_idx = None;
         let mut max_idx = 0;
 
-        for idx in 0..self.ssts.len() {
-            let current_sst = &self.ssts[idx];
+        for idx in 0..self.sst_views.len() {
+            let current_sst = &self.sst_views[idx];
 
-            let upper_bound = if idx + 1 < self.ssts.len() {
-                let next_sst = &self.ssts[idx + 1];
+            let upper_bound = if idx + 1 < self.sst_views.len() {
+                let next_sst = &self.sst_views[idx + 1];
                 Excluded(next_sst.compacted_effective_start_key().clone())
             } else {
                 Unbounded
@@ -365,17 +401,19 @@ impl SortedRun {
         }
     }
 
-    pub(crate) fn tables_covering_range(&self, range: &BytesRange) -> VecDeque<&SsTableHandle> {
-        let matching_range = self.table_idx_covering_range(range);
-        self.ssts[matching_range].iter().collect()
+    /// Returns the SST views in this sorted run that overlap the given key range.
+    pub fn tables_covering_range<R: RangeBounds<Bytes>>(&self, range: R) -> VecDeque<&SsTableView> {
+        let bytes_range = BytesRange::new(range.start_bound().cloned(), range.end_bound().cloned());
+        let matching_range = self.table_idx_covering_range(&bytes_range);
+        self.sst_views[matching_range].iter().collect()
     }
 
     pub(crate) fn into_tables_covering_range(
         mut self,
         range: &BytesRange,
-    ) -> VecDeque<SsTableHandle> {
+    ) -> VecDeque<SsTableView> {
         let matching_range = self.table_idx_covering_range(range);
-        self.ssts.drain(matching_range).collect()
+        self.sst_views.drain(matching_range).collect()
     }
 }
 
@@ -414,11 +452,16 @@ pub struct ManifestCore {
     /// initialization has completed.
     pub initialized: bool,
 
-    /// The last compacted l0.
-    pub l0_last_compacted: Option<Ulid>,
+    /// The last compacted l0 SstView ID.
+    pub last_compacted_l0_sst_view_id: Option<Ulid>,
 
-    /// A list of the L0 SSTs that are valid to read in the `compacted` folder.
-    pub l0: VecDeque<SsTableHandle>,
+    /// The SST ID of the last compacted L0. In V2, view IDs differ from SST IDs,
+    /// but V1 only stores SST IDs. This field preserves the SST ID so that a
+    /// V1-encoded manifest can correctly reference the compacted L0.
+    pub last_compacted_l0_sst_id: Option<Ulid>,
+
+    /// A list of the L0 SST views that are valid to read in the `compacted` folder.
+    pub l0: VecDeque<SsTableView>,
 
     /// A list of the sorted runs that are valid to read in the `compacted` folder.
     pub compacted: Vec<SortedRun>,
@@ -463,7 +506,8 @@ impl ManifestCore {
     pub(crate) fn new() -> Self {
         Self {
             initialized: true,
-            l0_last_compacted: None,
+            last_compacted_l0_sst_view_id: None,
+            last_compacted_l0_sst_id: None,
             l0: VecDeque::new(),
             compacted: vec![],
             next_wal_sst_id: 1,
@@ -636,9 +680,9 @@ impl<'a> StateModifier<'a> {
     pub(crate) fn merge_remote_manifest(&mut self, mut remote_manifest: DirtyObject<Manifest>) {
         // The compactor removes tables from l0_last_compacted, so we
         // only want to keep the tables up to there.
-        let l0_last_compacted = &remote_manifest.value.core.l0_last_compacted;
-        let remote_last_l0_seq = remote_manifest.value.core.last_l0_seq;
-        let new_l0 = if let Some(l0_last_compacted) = l0_last_compacted {
+        let l0_last_compacted_view_id = &remote_manifest.value.core.last_compacted_l0_sst_view_id;
+        let l0_last_compacted_sst_id = &remote_manifest.value.core.last_compacted_l0_sst_id;
+        let new_l0 = if l0_last_compacted_view_id.is_some() || l0_last_compacted_sst_id.is_some() {
             self.state
                 .manifest
                 .value
@@ -646,21 +690,30 @@ impl<'a> StateModifier<'a> {
                 .l0
                 .iter()
                 .cloned()
-                .take_while(|sst| sst.id.unwrap_compacted_id() != *l0_last_compacted)
+                .take_while(|view| {
+                    // Match by view ID first (V2 manifests), then fall back to SST ID (V1).
+                    if let Some(view_id) = l0_last_compacted_view_id {
+                        if view.id == *view_id {
+                            return false;
+                        }
+                    }
+                    if let Some(sst_id) = l0_last_compacted_sst_id {
+                        if view.sst.id.unwrap_compacted_id() == *sst_id {
+                            return false;
+                        }
+                    }
+                    true
+                })
                 .collect()
         } else {
             self.state.manifest.value.core.l0.iter().cloned().collect()
         };
 
         let my_db_state = self.state.core();
-        let mut merged_sequence_tracker = remote_manifest.value.core.sequence_tracker.clone();
-        let local_sequence_suffix = my_db_state
-            .sequence_tracker
-            .filter_after_seq(remote_last_l0_seq);
-        merged_sequence_tracker.extend_from(&local_sequence_suffix);
         remote_manifest.value.core = ManifestCore {
             initialized: my_db_state.initialized,
-            l0_last_compacted: remote_manifest.value.core.l0_last_compacted,
+            last_compacted_l0_sst_view_id: remote_manifest.value.core.last_compacted_l0_sst_view_id,
+            last_compacted_l0_sst_id: remote_manifest.value.core.last_compacted_l0_sst_id,
             l0: new_l0,
             compacted: remote_manifest.value.core.compacted,
             next_wal_sst_id: my_db_state.next_wal_sst_id,
@@ -668,7 +721,7 @@ impl<'a> StateModifier<'a> {
             last_l0_clock_tick: my_db_state.last_l0_clock_tick,
             last_l0_seq: my_db_state.last_l0_seq,
             recent_snapshot_min_seq: my_db_state.recent_snapshot_min_seq,
-            sequence_tracker: merged_sequence_tracker,
+            sequence_tracker: my_db_state.sequence_tracker.clone(),
             checkpoints: remote_manifest.value.core.checkpoints,
             wal_object_store_uri: my_db_state.wal_object_store_uri.clone(),
         };
@@ -699,13 +752,17 @@ impl WalIdStore for parking_lot::RwLock<DbState> {
 #[cfg(test)]
 mod tests {
     use crate::checkpoint::Checkpoint;
-    use crate::db_state::{DbState, SortedRun, SsTableHandle, SsTableId, SsTableInfo, SstType};
+    use crate::db_state::{
+        DbState, SortedRun, SsTableHandle, SsTableId, SsTableInfo, SsTableView, SstType,
+    };
     use crate::db_status::DbStatusReporter;
     use crate::format::sst::SST_FORMAT_VERSION_LATEST;
     use crate::manifest::store::test_utils::new_dirty_manifest;
     use crate::proptest_util::arbitrary;
+    use crate::seq_tracker::{FindOption, SequenceTracker, TrackedSeq};
     use crate::test_utils;
     use bytes::Bytes;
+    use chrono::{TimeZone, Utc};
     use proptest::collection::vec;
     use proptest::proptest;
     use slatedb_common::clock::{DefaultSystemClock, SystemClock};
@@ -749,8 +806,7 @@ mod tests {
         let mut compactor_state = new_dirty_manifest();
         compactor_state.value.core = db_state.state.core().clone();
         let last_compacted = compactor_state.value.core.l0.pop_back().unwrap();
-        compactor_state.value.core.l0_last_compacted =
-            Some(last_compacted.id.unwrap_compacted_id());
+        compactor_state.value.core.last_compacted_l0_sst_view_id = Some(last_compacted.id);
 
         // when:
         db_state.merge_remote_manifest(compactor_state.clone());
@@ -761,9 +817,15 @@ mod tests {
             .core
             .l0
             .iter()
-            .map(|l0| l0.id)
+            .map(|l0| l0.sst.id)
             .collect();
-        let merged: Vec<SsTableId> = db_state.state.core().l0.iter().map(|l0| l0.id).collect();
+        let merged: Vec<SsTableId> = db_state
+            .state
+            .core()
+            .l0
+            .iter()
+            .map(|l0| l0.sst.id)
+            .collect();
         assert_eq!(expected, merged);
     }
 
@@ -778,9 +840,58 @@ mod tests {
         db_state.merge_remote_manifest(new_dirty_manifest());
 
         // then:
-        let expected: Vec<SsTableId> = l0s.iter().map(|l0| l0.id).collect();
-        let merged: Vec<SsTableId> = db_state.state.core().l0.iter().map(|l0| l0.id).collect();
+        let expected: Vec<SsTableId> = l0s.iter().map(|l0| l0.sst.id).collect();
+        let merged: Vec<SsTableId> = db_state
+            .state
+            .core()
+            .l0
+            .iter()
+            .map(|l0| l0.sst.id)
+            .collect();
         assert_eq!(expected, merged);
+    }
+
+    #[test]
+    fn test_should_keep_local_sequence_tracker_on_merge() {
+        let mut db_state = DbState::new(new_dirty_manifest(), DbStatusReporter::new(0));
+        db_state.modify(|modifier| {
+            let core = &mut modifier.state.manifest.value.core;
+            core.last_l0_seq = 3;
+            core.sequence_tracker.insert(TrackedSeq {
+                seq: 1,
+                ts: Utc.timestamp_opt(60, 0).single().unwrap(),
+            });
+            core.sequence_tracker.insert(TrackedSeq {
+                seq: 2,
+                ts: Utc.timestamp_opt(120, 0).single().unwrap(),
+            });
+            core.sequence_tracker.insert(TrackedSeq {
+                seq: 3,
+                ts: Utc.timestamp_opt(180, 0).single().unwrap(),
+            });
+        });
+
+        // Remote has a stale sequence tracker (e.g. missing recent entries).
+        let mut remote_state = new_dirty_manifest();
+        remote_state.value.core = db_state.state.core().clone();
+        remote_state.value.core.sequence_tracker = SequenceTracker::new();
+
+        db_state.merge_remote_manifest(remote_state);
+
+        // The local tracker should be preserved as-is.
+        let tracker = &db_state.state.core().sequence_tracker;
+        assert_eq!(
+            tracker.find_ts(1, FindOption::RoundDown),
+            Utc.timestamp_opt(60, 0).single()
+        );
+        assert_eq!(
+            tracker.find_ts(2, FindOption::RoundDown),
+            Utc.timestamp_opt(120, 0).single()
+        );
+        assert_eq!(
+            tracker.find_ts(3, FindOption::RoundDown),
+            Utc.timestamp_opt(180, 0).single()
+        );
     }
 
     fn add_l0s_to_dbstate(db_state: &mut DbState, n: u32) {
@@ -791,12 +902,13 @@ mod tests {
                 .expect("db in error state");
             let imm = db_state.state.imm_memtable.back().unwrap().clone();
             let handle = SsTableHandle::new(
-                SsTableId::Compacted(ulid::Ulid::new()),
+                SsTableId::Compacted(ulid::Ulid::from_parts(i as u64, 0)),
                 SST_FORMAT_VERSION_LATEST,
                 dummy_info.clone(),
             );
+            let view: SsTableView = SsTableView::identity(handle);
             db_state.modify(|modifier| {
-                modifier.state.manifest.value.core.l0.push_front(handle);
+                modifier.state.manifest.value.core.l0.push_front(view);
                 modifier.state.manifest.value.core.replay_after_wal_id =
                     imm.recent_flushed_wal_id();
             });
@@ -812,7 +924,7 @@ mod tests {
         )| {
             let sorted_first_keys: BTreeSet<Bytes> = table_first_keys.into_iter().collect();
             let sorted_run = create_sorted_run(0, &sorted_first_keys);
-            let covering_tables = sorted_run.tables_covering_range(&range);
+            let covering_tables = sorted_run.tables_covering_range(range.clone());
             let first_key = sorted_first_keys.first().unwrap().clone();
 
             let range_start_key = test_utils::bound_as_option(range.start_bound())
@@ -848,15 +960,19 @@ mod tests {
     fn create_sorted_run(id: u32, first_keys: &BTreeSet<Bytes>) -> SortedRun {
         let mut ssts = Vec::new();
         for first_key in first_keys {
-            ssts.push(create_compacted_sst_handle(Some(first_key.clone())));
+            ssts.push(create_compacted_sst_view(Some(first_key.clone())));
         }
-        SortedRun { id, ssts }
+        SortedRun {
+            id,
+            sst_views: ssts,
+        }
     }
 
-    fn create_compacted_sst_handle(first_entry: Option<Bytes>) -> SsTableHandle {
+    fn create_compacted_sst_view(first_entry: Option<Bytes>) -> SsTableView {
         let sst_info = create_sst_info(first_entry);
-        let sst_id = SsTableId::Compacted(ulid::Ulid::new());
-        SsTableHandle::new(sst_id, SST_FORMAT_VERSION_LATEST, sst_info)
+        let sst_id = SsTableId::Compacted(ulid::Ulid::from_parts(0, 0));
+        let handle = SsTableHandle::new(sst_id, SST_FORMAT_VERSION_LATEST, sst_info);
+        SsTableView::identity(handle)
     }
 
     fn create_sst_info(first_entry: Option<Bytes>) -> SsTableInfo {

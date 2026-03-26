@@ -62,12 +62,15 @@ impl ReadOnlyBlob for ReadOnlyObject {
 }
 
 /// Represents the metadata of an SST file in the compacted directory.
-pub(crate) struct SstFileMetadata {
-    pub(crate) id: SsTableId,
-    #[allow(dead_code)]
-    pub(crate) location: Path,
-    pub(crate) last_modified: chrono::DateTime<Utc>,
-    pub(crate) size: u64,
+pub struct SstFileMetadata {
+    /// The SST identifier (WAL or Compacted).
+    pub id: SsTableId,
+    /// The object store path for this SST file.
+    pub location: Path,
+    /// The time this SST file was last modified.
+    pub last_modified: chrono::DateTime<Utc>,
+    /// The size of this SST file in bytes.
+    pub size: u64,
 }
 
 impl TableStore {
@@ -330,16 +333,17 @@ impl TableStore {
         let object_store = self.object_stores.store_for(id);
         let path = self.path(id);
         let obj = ReadOnlyObject { object_store, path };
-        let info = self.sst_format.read_info(&obj).await?;
-        let version = self.read_sst_version(id).await?;
+        let (info, version) = self.sst_format.read_info_and_version(&obj).await?;
         Ok(SsTableHandle::new(*id, version, info))
     }
 
+    #[cfg(test)]
     pub(crate) async fn read_sst_version(&self, id: &SsTableId) -> Result<u16, SlateDBError> {
         let object_store = self.object_stores.store_for(id);
         let path = self.path(id);
         let obj = ReadOnlyObject { object_store, path };
-        self.sst_format.read_version(&obj).await
+        let (_, version) = self.sst_format.read_info_and_version(&obj).await?;
+        Ok(version)
     }
 
     /// Reads the Bloom filter of an SSTable.
@@ -385,8 +389,6 @@ impl TableStore {
     ///
     /// ## Arguments
     /// - `handle`: The handle of the SSTable to read the stats from.
-    // Used by SstFile::stats (RFC 0020 Phase 2)
-    #[allow(dead_code)]
     pub(crate) async fn read_stats(
         &self,
         handle: &SsTableHandle,
@@ -717,6 +719,7 @@ mod tests {
     use crate::error;
     use crate::format::block::Block;
     use crate::format::sst::SsTableFormat;
+    use crate::manifest::SsTableView;
     use crate::object_stores::ObjectStores;
     use crate::rand::DbRand;
     use crate::retrying_object_store::RetryingObjectStore;
@@ -800,10 +803,15 @@ mod tests {
             ..SstIteratorOptions::default()
         };
         // then:
-        let mut iter = SstIterator::new_owned_initialized(.., sst, ts.clone(), sst_iter_options)
-            .await
-            .unwrap()
-            .expect("Expected Some(iter) but got None");
+        let mut iter = SstIterator::new_owned_initialized(
+            ..,
+            SsTableView::identity(sst),
+            ts.clone(),
+            sst_iter_options,
+        )
+        .await
+        .unwrap()
+        .expect("Expected Some(iter) but got None");
         assert_iterator(
             &mut iter,
             vec![
@@ -868,10 +876,15 @@ mod tests {
             ..SstIteratorOptions::default()
         };
         // then:
-        let mut iter = SstIterator::new_owned_initialized(.., sst, ts.clone(), sst_iter_options)
-            .await
-            .unwrap()
-            .expect("Expected Some(iter) but got None");
+        let mut iter = SstIterator::new_owned_initialized(
+            ..,
+            SsTableView::identity(sst),
+            ts.clone(),
+            sst_iter_options,
+        )
+        .await
+        .unwrap()
+        .expect("Expected Some(iter) but got None");
         assert_iterator(
             &mut iter,
             vec![

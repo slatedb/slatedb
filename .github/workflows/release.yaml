@@ -45,10 +45,9 @@ jobs:
       - name: Set version
         run: cargo set-version ${{ github.event.inputs.version }}
 
-      # Set pyproject.toml version
-      - name: Set Python package version
+      - name: Set Java package version
         run: |
-          sed -i "s/^version = \".*\"/version = \"${{ github.event.inputs.version }}\"/" slatedb-py/pyproject.toml
+          sed -i "s/^version=.*/version=${{ github.event.inputs.version }}-SNAPSHOT/" bindings/java/gradle.properties
 
       # Commit changes
       - name: Commit version bump
@@ -100,7 +99,7 @@ jobs:
 
       - name: Create Go module tag
         run: |
-          TAG="slatedb-go/go/v${{ github.event.inputs.version }}"
+          TAG="bindings/go/v${{ github.event.inputs.version }}"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           if git ls-remote --tags origin "${TAG}" | grep -q "refs/tags/${TAG}$"; then

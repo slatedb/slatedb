@@ -1,4 +1,7 @@
 **/target
+**/.gradle/
+**/build/
+**/.ruff_cache/
 .DS_Store
 .idea
 .env
@@ -8,6 +11,8 @@ tmp
 
 *.pyc
 *.so
-slatedb-py/dist
+bindings/python/dist
+bindings/python/slatedb/uniffi/_slatedb_uniffi/
+bindings/python/slatedb/_slatedb_uniffi/
 .claude/
 CLAUDE.md

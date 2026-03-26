@@ -257,7 +257,11 @@ impl FlushTracker {
     async fn handle_command(&mut self, command: FlusherCommand) -> Result<(), SlateDBError> {
         match command {
             FlusherCommand::Flush { target, sender } => {
-                fail_point!(Arc::clone(&self.inner.fp_registry), "flush-memtable-to-l0");
+                fail_point!(
+                    Arc::clone(&self.inner.fp_registry),
+                    "flush-memtable-to-l0",
+                    |_| { Ok(()) }
+                );
                 self.register_new_imm_memtables();
                 self.handle_flush_request(target, sender)?;
                 self.reconcile_and_dispatch().await
@@ -513,7 +517,9 @@ mod tests {
     use super::{FlushTarget, MemtableFlusher};
     use crate::config::{CheckpointOptions, Settings};
     use crate::db::DbInner;
-    use crate::db_state::{ManifestCore, SsTableHandle, SsTableId, SsTableInfo, SstType};
+    use crate::db_state::{
+        ManifestCore, SsTableHandle, SsTableId, SsTableInfo, SsTableView, SstType,
+    };
     use crate::error::SlateDBError;
     use crate::format::sst::{SsTableFormat, SST_FORMAT_VERSION_LATEST};
     use crate::manifest::store::{FenceableManifest, ManifestStore, StoredManifest};
@@ -662,11 +668,10 @@ mod tests {
         let mut dirty = stored_manifest.prepare_dirty().unwrap();
         dirty.value.core.l0.clear();
         for idx in 0..l0_len {
-            dirty
-                .value
-                .core
-                .l0
-                .push_back(seeded_l0_handle(format!("seed-{idx}").as_bytes()));
+            dirty.value.core.l0.push_back(SsTableView::new(
+                ulid::Ulid::new(),
+                seeded_l0_handle(format!("seed-{idx}").as_bytes()),
+            ));
         }
         stored_manifest.update(dirty).await.unwrap();
     }
@@ -682,7 +687,10 @@ mod tests {
                     .value
                     .core
                     .l0
-                    .push_back(seeded_l0_handle(format!("local-seed-{idx}").as_bytes()));
+                    .push_back(SsTableView::new(
+                        ulid::Ulid::new(),
+                        seeded_l0_handle(format!("local-seed-{idx}").as_bytes()),
+                    ));
             }
         });
     }

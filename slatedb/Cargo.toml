@@ -45,7 +45,7 @@ rand_xoshiro = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 siphasher = { workspace = true }
-slatedb-common = { workspace = true }
+slatedb-common = { workspace = true, features = ["serde"] }
 slatedb-txn-obj = { workspace = true }
 snap = { workspace = true, optional = true }
 thiserror = { workspace = true }
@@ -81,7 +81,7 @@ insta = { workspace = true }
 parking_lot = { workspace = true, features = ["deadlock_detection"] }
 proptest = { workspace = true }
 rstest = { workspace = true }
-slatedb-common = { workspace = true, features = ["test-util"] }
+slatedb-common = { workspace = true, features = ["serde", "test-util"] }
 slatedb-txn-obj = { workspace = true, features = ["test-util"] }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread"] }

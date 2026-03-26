@@ -72,31 +72,33 @@ import absExample from '/../examples/src/azure_blob_storage.rs?raw'
 ## Check the blob contents
 
 ```bash
-az storage blob list --container-name $ContainerName --account-name $StorageAccountName --prefix "test_slateDB/" --delimiter "/" --output table
+az storage blob list --container-name $ContainerName --account-name $StorageAccountName --prefix "tmp/slatedb_azure_blob_storage/" --delimiter "/" --output table
+                           compactions/
                            wal/
                            manifest/
 ```
 
-There are three folders:
+SlateDB uses four top-level directories over time:
 
-- `manifest`: Contains the manifest files. Manifest files defines the state of the DB, including the set of SSTs that are part of the DB.
+- `manifest`: Contains the manifest files. Manifest files define the state of the DB, including the set of SSTs that are part of the DB.
 - `wal`: Contains the write-ahead log files.
-- `compacted`: Contains the compacted SST files. This short example does not create compacted files.
+- `compacted`: Contains the compacted SST files (may not appear in short examples).
+- `compactions`: Contains the compaction-state snapshots.
 
 Let's check the `wal` folder. 
 
 ```bash
-az storage blob list --container-name $ContainerName --account-name $StorageAccountName --prefix "test_slateDB/wal/" --delimiter "/" --output table
+az storage blob list --container-name $ContainerName --account-name $StorageAccountName --prefix "tmp/slatedb_azure_blob_storage/wal/" --delimiter "/" --output table
 
-Name                                       Blob Type    Blob Tier    Length    Content Type              Last Modified              Snapshot
------------------------------------------  -----------  -----------  --------  ------------------------  -------------------------  ----------
-test_slateDB/wal/00000000000000000001.sst  BlockBlob    Hot          64        application/octet-stream  2024-09-07T01:15:49+00:00
-test_slateDB/wal/00000000000000000002.sst  BlockBlob    Hot          138       application/octet-stream  2024-09-07T01:15:49+00:00
-test_slateDB/wal/00000000000000000003.sst  BlockBlob    Hot          23388     application/octet-stream  2024-09-07T01:15:49+00:00
-test_slateDB/wal/00000000000000000004.sst  BlockBlob    Hot          64        application/octet-stream  2024-09-07T01:15:50+00:00
+Name                                                         Blob Type    Blob Tier    Length    Content Type              Last Modified              Snapshot
+-----------------------------------------------------------  -----------  -----------  --------  ------------------------  -------------------------  ----------
+tmp/slatedb_azure_blob_storage/wal/00000000000000000001.sst  BlockBlob    Hot          64        application/octet-stream  2024-09-07T01:15:49+00:00
+tmp/slatedb_azure_blob_storage/wal/00000000000000000002.sst  BlockBlob    Hot          138       application/octet-stream  2024-09-07T01:15:49+00:00
+tmp/slatedb_azure_blob_storage/wal/00000000000000000003.sst  BlockBlob    Hot          23388     application/octet-stream  2024-09-07T01:15:49+00:00
+tmp/slatedb_azure_blob_storage/wal/00000000000000000004.sst  BlockBlob    Hot          64        application/octet-stream  2024-09-07T01:15:50+00:00
 
 ```
 
-Each of these SST files is a write-ahead log (WAL) entry. They get flushed based on the `flush_interval` config or when `flush` is called explicitly.
+Each of these SST files is a write-ahead log (WAL) file, and each WAL file can contain many `RowEntry` values. They get flushed based on the `flush_interval` config or when `flush` is called explicitly.
 
 ```
