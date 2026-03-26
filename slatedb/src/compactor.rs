@@ -2235,6 +2235,233 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn should_merge_operations_with_same_expire_at() {
+        use crate::test_utils::OnDemandCompactionSchedulerSupplier;
+
+        // given:
+        let os = Arc::new(InMemory::new());
+        let system_clock = Arc::new(MockSystemClock::new());
+        let compaction_scheduler = Arc::new(OnDemandCompactionSchedulerSupplier::new(Arc::new(
+            |state| state.manifest().l0.len() >= 2,
+        )));
+        let options = db_options(None);
+
+        let db = Db::builder(PATH, os.clone())
+            .with_settings(options)
+            .with_system_clock(system_clock.clone())
+            .with_compactor_builder(compactor_builder_with_scheduler(
+                os.clone(),
+                compaction_scheduler.clone(),
+                system_clock.clone(),
+            ))
+            .with_merge_operator(Arc::new(StringConcatMergeOperator))
+            .build()
+            .await
+            .unwrap();
+
+        let (manifest_store, _compactions_store, table_store) = build_test_stores(os.clone());
+
+        let flush_opts = FlushOptions {
+            flush_type: FlushType::MemTable,
+        };
+
+        // write merge operations with the SAME ExpireAt timestamp at different clock times
+        system_clock.set(100);
+        db.merge_with_options(
+            b"key1",
+            b"a",
+            &MergeOptions {
+                ttl: Ttl::ExpireAt(1000),
+            },
+            &WriteOptions {
+                await_durable: false,
+            },
+        )
+        .await
+        .unwrap();
+        db.flush_with_options(flush_opts.clone()).await.unwrap();
+
+        system_clock.set(200);
+        db.merge_with_options(
+            b"key1",
+            b"b",
+            &MergeOptions {
+                ttl: Ttl::ExpireAt(1000),
+            },
+            &WriteOptions {
+                await_durable: false,
+            },
+        )
+        .await
+        .unwrap();
+        db.flush_with_options(flush_opts.clone()).await.unwrap();
+
+        // when:
+        let _ = await_compaction(&db, Some(system_clock)).await;
+
+        // then: verify in the compacted SST that all merge operations were combined
+        let stored_manifest =
+            StoredManifest::load(manifest_store.clone(), Arc::new(DefaultSystemClock::new()))
+                .await
+                .unwrap();
+        let db_state = stored_manifest.db_state();
+        assert!(
+            !db_state.compacted.is_empty(),
+            "compaction should have occurred"
+        );
+
+        let compacted = &db_state.compacted.first().unwrap().sst_views;
+        assert_eq!(compacted.len(), 1);
+        let handle = compacted.first().unwrap();
+
+        let mut iter = SstIterator::new_borrowed_initialized(
+            ..,
+            handle,
+            table_store.clone(),
+            SstIteratorOptions::default(),
+        )
+        .await
+        .unwrap()
+        .expect("Expected Some(iter) but got None");
+
+        // collect key1 entries from the compacted SST
+        let mut key1_entries = vec![];
+        while let Some(entry) = iter.next().await.unwrap() {
+            if entry.key.as_ref() == b"key1" {
+                key1_entries.push(entry);
+            }
+        }
+
+        // there should be exactly one merged entry for key1
+        assert_eq!(
+            key1_entries.len(),
+            1,
+            "expected a single merged entry for key1, got {}",
+            key1_entries.len()
+        );
+        let merged = &key1_entries[0];
+        assert_eq!(merged.expire_ts, Some(1000));
+        assert!(
+            matches!(&merged.value, crate::types::ValueDeletable::Merge(v) if v.as_ref() == b"ab"),
+            "expected merged value 'ab', got {:?}",
+            merged.value
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn should_compact_expired_expire_at_entries() {
+        // given:
+        let os = Arc::new(InMemory::new());
+        let insert_clock = Arc::new(MockSystemClock::new());
+
+        let scheduler_options = SizeTieredCompactionSchedulerOptions {
+            min_compaction_sources: 2,
+            max_compaction_sources: 2,
+            include_size_threshold: 4.0,
+        }
+        .into();
+        let mut options = db_options(Some(compactor_options()));
+        options
+            .compactor_options
+            .as_mut()
+            .expect("compactor options missing")
+            .scheduler_options = scheduler_options;
+        let db = Db::builder(PATH, os.clone())
+            .with_settings(options)
+            .with_system_clock(insert_clock.clone())
+            .build()
+            .await
+            .unwrap();
+
+        let (_, _, table_store) = build_test_stores(os.clone());
+
+        let value = &[b'a'; 64];
+        let flush_opts = FlushOptions {
+            flush_type: FlushType::MemTable,
+        };
+
+        // ticker time = 0, expire at 10
+        insert_clock.set(0);
+        db.put_with_options(
+            &[1; 16],
+            value,
+            &PutOptions {
+                ttl: Ttl::ExpireAt(10),
+            },
+            &WriteOptions {
+                await_durable: false,
+            },
+        )
+        .await
+        .unwrap();
+
+        // ticker time = 5, expire at far future (well beyond compaction time)
+        insert_clock.set(5);
+        db.put_with_options(
+            &[2; 16],
+            value,
+            &PutOptions {
+                ttl: Ttl::ExpireAt(i64::MAX),
+            },
+            &WriteOptions {
+                await_durable: false,
+            },
+        )
+        .await
+        .unwrap();
+
+        db.flush_with_options(flush_opts.clone()).await.unwrap();
+
+        // ticker time = 10, no expire time
+        insert_clock.set(10);
+        db.put_with_options(
+            &[3; 16],
+            value,
+            &PutOptions { ttl: Ttl::NoExpiry },
+            &WriteOptions {
+                await_durable: false,
+            },
+        )
+        .await
+        .unwrap();
+
+        db.flush_with_options(flush_opts.clone()).await.unwrap();
+
+        // when: await_compaction advances clock by 60s per iteration,
+        // so compaction_start_ts will be well past expire_at=10
+        let db_state = await_compaction(&db, Some(insert_clock)).await;
+
+        // then: key 1 should be expired (expire_at=10 < compaction_time),
+        //       key 2 should survive (expire_at=i64::MAX), key 3 has no expiry
+        let db_state = db_state.expect("db was not compacted");
+        assert!(db_state.last_compacted_l0_sst_view_id.is_some());
+        assert_eq!(db_state.compacted.len(), 1);
+        let compacted = &db_state.compacted.first().unwrap().sst_views;
+        assert_eq!(compacted.len(), 1);
+        let handle = compacted.first().unwrap();
+        let mut iter = SstIterator::new_borrowed_initialized(
+            ..,
+            handle,
+            table_store.clone(),
+            SstIteratorOptions::default(),
+        )
+        .await
+        .unwrap()
+        .expect("Expected Some(iter) but got None");
+
+        assert_iterator(
+            &mut iter,
+            vec![
+                RowEntry::new_value(&[2; 16], value, 2)
+                    .with_create_ts(5)
+                    .with_expire_ts(i64::MAX),
+                RowEntry::new_value(&[3; 16], value, 3).with_create_ts(10),
+            ],
+        )
+        .await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_should_compact_expired_entries() {
         // given:
         let os = Arc::new(InMemory::new());

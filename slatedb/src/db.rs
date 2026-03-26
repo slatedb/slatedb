@@ -6716,4 +6716,56 @@ mod tests {
 
         assert!(iter.next_entry().await.unwrap().is_none());
     }
+
+    #[tokio::test]
+    async fn should_get_key_value_with_expire_at() {
+        // given
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = "/tmp/test_get_key_value_expire_at";
+        let clock = Arc::new(MockSystemClock::new());
+        let db = Db::builder(path, object_store)
+            .with_settings(test_db_options(0, 1024, None))
+            .with_system_clock(clock.clone())
+            .build()
+            .await
+            .unwrap();
+
+        // when: write with ExpireAt at different clock times
+        clock.set(100);
+        db.put_with_options(
+            b"key1",
+            b"value1",
+            &PutOptions {
+                ttl: Ttl::ExpireAt(500),
+            },
+            &WriteOptions {
+                await_durable: false,
+            },
+        )
+        .await
+        .unwrap();
+
+        clock.set(200);
+        db.put_with_options(
+            b"key2",
+            b"value2",
+            &PutOptions {
+                ttl: Ttl::ExpireAt(500),
+            },
+            &WriteOptions {
+                await_durable: false,
+            },
+        )
+        .await
+        .unwrap();
+
+        // then: both keys have the same expire_ts regardless of write time
+        let kv1 = db.get_key_value(b"key1").await.unwrap().unwrap();
+        assert_eq!(kv1.expire_ts, Some(500));
+        assert_eq!(kv1.create_ts, 100);
+
+        let kv2 = db.get_key_value(b"key2").await.unwrap().unwrap();
+        assert_eq!(kv2.expire_ts, Some(500));
+        assert_eq!(kv2.create_ts, 200);
+    }
 }
