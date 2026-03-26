@@ -3,9 +3,11 @@ title: Checkpoints
 description: How SlateDB pins a manifest version for reads and garbage collection
 ---
 
+Checkpoints give SlateDB a cheap way to hold onto one stable view of the database while the live database keeps moving. They are useful for long-running reads, read-only clients that need a fixed view, [clones](/docs/design/clones), and administrative workflows that must keep old SSTs and manifests alive while compaction and garbage collection continue in the background.
+
 A checkpoint is a durable reference to one manifest version. SlateDB stores checkpoints in the latest manifest. Each checkpoint records an ID, the pinned `manifest_id`, its creation time, an optional expiration time, and an optional name.
 
-Creating a checkpoint does not copy WAL or SST files. It only adds metadata to the manifest, so it is cheap. The pinned manifest still matters, though. It defines the L0 SSTs, sorted runs, and other database state that readers see.
+Creating a checkpoint does not copy WAL or SST files. It only adds metadata to the manifest, so it is cheap. The pinned manifest still matters, though, because it defines the L0 SSTs, sorted runs, and other database state that readers see.
 
 ## What It Protects
 
