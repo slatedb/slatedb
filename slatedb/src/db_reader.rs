@@ -140,7 +140,10 @@ impl DbReaderInner {
             .last_remote_persisted_seq
             .max(initial_state.core().last_l0_seq);
         status_reporter.report_durable_seq(initial_durable_seq);
-        let oracle = Arc::new(DbReaderOracle::new(initial_durable_seq, status_reporter.clone()));
+        let oracle = Arc::new(DbReaderOracle::new(
+            initial_durable_seq,
+            status_reporter.clone(),
+        ));
 
         let stat_registry = Arc::new(StatRegistry::new());
         let db_stats = DbStats::new(stat_registry.as_ref());
@@ -2513,10 +2516,7 @@ mod tests {
         let path = Path::from("/tmp/test_kv_store");
         let test_provider = TestProvider::new(path.clone(), Arc::clone(&object_store));
 
-        let db = test_provider
-            .new_db(Settings::default())
-            .await
-            .unwrap();
+        let db = test_provider.new_db(Settings::default()).await.unwrap();
         let reader = test_provider
             .new_db_reader(DbReaderOptions::default(), None)
             .await
@@ -2534,10 +2534,7 @@ mod tests {
         let path = Path::from("/tmp/test_kv_store");
         let test_provider = TestProvider::new(path.clone(), Arc::clone(&object_store));
 
-        let db = test_provider
-            .new_db(Settings::default())
-            .await
-            .unwrap();
+        let db = test_provider.new_db(Settings::default()).await.unwrap();
         let reader = test_provider
             .new_db_reader(DbReaderOptions::default(), None)
             .await
@@ -2555,10 +2552,7 @@ mod tests {
         let path = Path::from("/tmp/test_kv_store");
         let test_provider = TestProvider::new(path.clone(), Arc::clone(&object_store));
 
-        let db = test_provider
-            .new_db(Settings::default())
-            .await
-            .unwrap();
+        let db = test_provider.new_db(Settings::default()).await.unwrap();
         let reader = test_provider
             .new_db_reader(DbReaderOptions::default(), None)
             .await

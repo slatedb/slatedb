@@ -402,10 +402,10 @@ mod tests {
     use crate::batch::WriteBatch;
     use crate::clock::MonotonicClock;
     use crate::db_state::{SortedRun, SsTableHandle, SsTableId};
+    use crate::db_status::DbStatusReporter;
     use crate::format::sst::SsTableFormat;
     use crate::manifest::SsTableView;
     use crate::object_stores::ObjectStores;
-    use crate::db_status::DbStatusReporter;
     use crate::oracle::DbReaderOracle;
     use crate::stats::StatRegistry;
     use crate::tablestore::TableStore;
@@ -1198,7 +1198,10 @@ mod tests {
 
         // Create Oracle with appropriate last_committed_seq
         let last_committed_seq = test_case.last_committed_seq.unwrap_or(u64::MAX);
-        let oracle = Arc::new(DbReaderOracle::new(last_committed_seq, DbStatusReporter::new(0)));
+        let oracle = Arc::new(DbReaderOracle::new(
+            last_committed_seq,
+            DbStatusReporter::new(0),
+        ));
 
         // Enable merge operator if the test description contains "[MERGE]"
         let merge_operator = if test_case.description.contains("[MERGE]") {
@@ -1625,7 +1628,10 @@ mod tests {
 
         // Create Oracle with appropriate last_committed_seq
         let last_committed_seq = test_case.last_committed_seq.unwrap_or(u64::MAX);
-        let oracle = Arc::new(DbReaderOracle::new(last_committed_seq, DbStatusReporter::new(0)));
+        let oracle = Arc::new(DbReaderOracle::new(
+            last_committed_seq,
+            DbStatusReporter::new(0),
+        ));
 
         // Enable merge operator if the test description contains "[MERGE"
         let merge_operator = if test_case.description.contains("[MERGE") {
