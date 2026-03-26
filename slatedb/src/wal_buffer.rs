@@ -5,13 +5,12 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::{stream::BoxStream, StreamExt};
-use log::{error, info, trace};
+use log::{error, trace};
 use parking_lot::RwLock;
 use tokio::{
     runtime::Handle,
     select,
     sync::{mpsc, oneshot},
-    time::Instant,
 };
 use tracing::instrument;
 
@@ -376,11 +375,6 @@ impl WalBufferManager {
                     inner.oracle.advance_durable_seq(seq);
                 }
             }
-            info!(
-                "wal flush complete [wal_id={}, last_seq={:?}]",
-                wal_id,
-                wal.last_seq(),
-            );
 
             // notify durable only when the flush is successful.
             wal.notify_durable(result.clone());
@@ -400,20 +394,9 @@ impl WalBufferManager {
         }
 
         let encoded_sst = sst_builder.build().await?;
-        let written_bytes = encoded_sst.remaining_len() as u64;
-        #[allow(clippy::disallowed_methods)]
-        let start = Instant::now();
         self.table_store
             .write_sst(&SsTableId::Wal(wal_id), encoded_sst, false)
             .await?;
-        self.db_stats.wal_flush_bytes.add(written_bytes);
-        let elapsed = start.elapsed().as_secs_f64();
-        let throughput = if elapsed > 0.0 {
-            (written_bytes as f64 / elapsed) as u64
-        } else {
-            written_bytes
-        };
-        self.db_stats.wal_flush_throughput.set(throughput);
 
         self.mono_clock.fetch_max_last_durable_tick(last_tick);
         Ok(())
@@ -949,8 +932,6 @@ mod tests {
         assert_eq!(read_entry2.seq, entry2.seq);
 
         assert!(iter.next().await.unwrap().is_none());
-        assert!(wal_buffer.db_stats.wal_flush_bytes.get() > 0);
-        assert!(wal_buffer.db_stats.wal_flush_throughput.get() >= 0);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

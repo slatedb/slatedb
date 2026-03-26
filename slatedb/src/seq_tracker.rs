@@ -130,37 +130,6 @@ impl SequenceTracker {
         }
     }
 
-    pub(crate) fn len(&self) -> usize {
-        self.sequence_numbers.len()
-    }
-
-    pub(crate) fn first_seq(&self) -> Option<u64> {
-        self.sequence_numbers.first().copied()
-    }
-
-    pub(crate) fn last_seq(&self) -> Option<u64> {
-        self.sequence_numbers.last().copied()
-    }
-
-    pub(crate) fn first_ts(&self) -> Option<i64> {
-        self.timestamps.first().copied()
-    }
-
-    pub(crate) fn last_ts(&self) -> Option<i64> {
-        self.timestamps.last().copied()
-    }
-
-    pub(crate) fn filter_after_seq(&self, min_exclusive_seq: u64) -> Self {
-        let start = self
-            .sequence_numbers
-            .partition_point(|seq| *seq <= min_exclusive_seq);
-        let mut filtered = Self::with_config(self.capacity, self.interval_secs);
-        filtered.sequence_numbers = self.sequence_numbers[start..].to_vec();
-        filtered.timestamps = self.timestamps[start..].to_vec();
-        filtered.last_recorded_ts = filtered.timestamps.last().copied();
-        filtered
-    }
-
     /// Downsample by removing every other entry
     fn downsample(&mut self) {
         let mut new_seqs = Vec::with_capacity(self.capacity as usize);

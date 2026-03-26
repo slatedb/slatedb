@@ -247,10 +247,8 @@ impl DbReaderInner {
 
     async fn reestablish_checkpoint(&self, checkpoint: Checkpoint) -> Result<(), SlateDBError> {
         let new_checkpoint_state = self.rebuild_checkpoint_state(checkpoint).await?;
-        let durable_seq = new_checkpoint_state
-            .last_remote_persisted_seq
-            .max(new_checkpoint_state.core().last_l0_seq);
-        self.oracle.advance_durable_seq(durable_seq);
+        self.oracle
+            .advance_durable_seq(new_checkpoint_state.last_remote_persisted_seq);
         let mut write_guard = self.state.write();
         *write_guard = Arc::new(new_checkpoint_state);
         Ok(())

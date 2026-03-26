@@ -22,7 +22,6 @@ use crate::error::SlateDBError;
 use crate::manifest::store::FenceableManifest;
 use crate::utils::IdGenerator;
 use crate::utils::{SendSafely, WatchableOnceCell};
-use log::debug;
 use parking_lot::Mutex;
 use std::cmp;
 use std::collections::BTreeMap;
@@ -523,10 +522,7 @@ impl ManifestWriterTask {
                     .core
                     .l0
                     .push_front(SsTableView::new(
-                        self.db
-                            .rand
-                            .rng()
-                            .gen_ulid(self.db.system_clock.as_ref()),
+                        self.db.rand.rng().gen_ulid(self.db.system_clock.as_ref()),
                         uploaded.sst_handle.clone(),
                     ));
                 modifier.state.manifest.value.core.replay_after_wal_id =
@@ -556,18 +552,6 @@ impl ManifestWriterTask {
                     .core
                     .sequence_tracker
                     .extend_from(uploaded_tracker);
-                let tracker = &modifier.state.manifest.value.core.sequence_tracker;
-                debug!(
-                    "manifest_writer applied uploaded state [epoch={}, last_seq={}, uploaded_tracker_len={}, manifest_tracker_len={}, manifest_tracker_first_seq={:?}, manifest_tracker_last_seq={:?}, manifest_tracker_first_ts={:?}, manifest_tracker_last_ts={:?}]",
-                    uploaded.epoch.0,
-                    uploaded.last_seq,
-                    uploaded_tracker.len(),
-                    tracker.len(),
-                    tracker.first_seq(),
-                    tracker.last_seq(),
-                    tracker.first_ts(),
-                    tracker.last_ts(),
-                );
             }
             Ok(())
         })
@@ -591,7 +575,7 @@ impl ManifestWriterTask {
         &mut self,
         checkpoint_options: &[&CheckpointOptions],
     ) -> Result<Vec<CheckpointCreateResult>, SlateDBError> {
-        let mut dirty = self.clone_local_manifest_for_write("manifest update");
+        let mut dirty = self.clone_local_manifest_for_write();
         let mut checkpoint_results = Vec::new();
         for options in checkpoint_options {
             let id = self.db.rand.rng().gen_uuid();
@@ -616,30 +600,17 @@ impl ManifestWriterTask {
     }
 
     async fn write_current_manifest(&mut self) -> Result<(), SlateDBError> {
-        let dirty = self.clone_local_manifest_for_write("current manifest");
+        let dirty = self.clone_local_manifest_for_write();
         self.manifest.update(dirty).await
     }
 
     fn clone_local_manifest_for_write(
         &self,
-        reason: &str,
     ) -> slatedb_txn_obj::DirtyObject<crate::manifest::Manifest> {
         let dirty = {
             let rguard_state = self.db.state.read();
             rguard_state.state().manifest.clone()
         };
-        debug!(
-            "manifest_writer writing {} [l0_len={}, last_l0_seq={}, replay_after_wal_id={}, tracker_len={}, tracker_first_seq={:?}, tracker_last_seq={:?}, tracker_first_ts={:?}, tracker_last_ts={:?}]",
-            reason,
-            dirty.value.core.l0.len(),
-            dirty.value.core.last_l0_seq,
-            dirty.value.core.replay_after_wal_id,
-            dirty.value.core.sequence_tracker.len(),
-            dirty.value.core.sequence_tracker.first_seq(),
-            dirty.value.core.sequence_tracker.last_seq(),
-            dirty.value.core.sequence_tracker.first_ts(),
-            dirty.value.core.sequence_tracker.last_ts(),
-        );
         dirty
     }
 
