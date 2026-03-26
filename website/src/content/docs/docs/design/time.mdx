@@ -35,7 +35,13 @@ SlateDB also preserves the same metadata in the WAL path, which is why [Change D
 
 TTL is stored as an absolute expiration timestamp, not a relative duration. On commit, SlateDB computes `expire_ts = create_ts + ttl`.
 
-[`Settings::default_ttl`](https://docs.rs/slatedb/latest/slatedb/config/struct.Settings.html#structfield.default_ttl) sets a default TTL for puts and merges. [`PutOptions`](https://docs.rs/slatedb/latest/slatedb/config/struct.PutOptions.html) and [`MergeOptions`](https://docs.rs/slatedb/latest/slatedb/config/struct.MergeOptions.html) can override that per operation with [`Ttl::NoExpiry`](https://docs.rs/slatedb/latest/slatedb/config/enum.Ttl.html#variant.NoExpiry) or [`Ttl::ExpireAfter(u64)`](https://docs.rs/slatedb/latest/slatedb/config/enum.Ttl.html#variant.ExpireAfter). Deletes write tombstones and do not carry TTL.
+[`Settings::default_ttl`](https://docs.rs/slatedb/latest/slatedb/config/struct.Settings.html#structfield.default_ttl) sets a default TTL for puts and merges. [`PutOptions`](https://docs.rs/slatedb/latest/slatedb/config/struct.PutOptions.html) and [`MergeOptions`](https://docs.rs/slatedb/latest/slatedb/config/struct.MergeOptions.html) can override that per operation:
+
+- [`Ttl::NoExpiry`](https://docs.rs/slatedb/latest/slatedb/config/enum.Ttl.html#variant.NoExpiry) — store the value without expiration
+- [`Ttl::ExpireAfter(u64)`](https://docs.rs/slatedb/latest/slatedb/config/enum.Ttl.html#variant.ExpireAfter) — expire after a relative duration (clock ticks)
+- [`Ttl::ExpireAt(i64)`](https://docs.rs/slatedb/latest/slatedb/config/enum.Ttl.html#variant.ExpireAt) — expire at a fixed absolute timestamp (clock ticks)
+
+Deletes write tombstones and do not carry TTL.
 
 :::note
 When SlateDB materializes a value from merge operands, the resulting row reports the earliest `expire_ts` across the merged operands and any base value. A later merge with a longer TTL does not extend the lifetime of older merged data.
