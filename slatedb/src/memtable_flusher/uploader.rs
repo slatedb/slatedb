@@ -19,7 +19,6 @@ use crate::format::sst::EncodedSsTable;
 use crate::mem_table::ImmutableMemtable;
 use crate::utils::{SendSafely, WatchableOnceCell, WatchableOnceCellReader};
 use log::{error, info};
-use parking_lot::Mutex;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::runtime::Handle;
@@ -104,7 +103,6 @@ type UploaderEventReceiver = mpsc::UnboundedReceiver<UploaderEvent>;
 pub(crate) struct Uploader {
     jobs: Option<UploadJobSender>,
     events: UploaderEventReceiver,
-    poisoned: Arc<Mutex<Option<SlateDBError>>>,
     closed_result: WatchableOnceCell<Result<(), SlateDBError>>,
     shutdown: CancellationToken,
     supervisor: Option<JoinHandle<Result<(), SlateDBError>>>,
@@ -124,7 +122,6 @@ impl Uploader {
     ) -> Self {
         let (jobs_tx, jobs_rx) = mpsc::unbounded_channel();
         let (events_tx, events_rx) = mpsc::unbounded_channel();
-        let poisoned = Arc::new(Mutex::new(None));
         let closed_result = WatchableOnceCell::new();
         let shutdown = CancellationToken::new();
         let mut workers = JoinSet::new();
@@ -144,7 +141,6 @@ impl Uploader {
 
         let supervisor = handle.spawn(Self::run_supervisor(
             workers,
-            Arc::clone(&poisoned),
             events_tx,
             closed_result.clone(),
             shutdown.clone(),
@@ -153,7 +149,6 @@ impl Uploader {
         Self {
             jobs: Some(jobs_tx),
             events: events_rx,
-            poisoned,
             closed_result,
             shutdown,
             supervisor: Some(supervisor),
@@ -165,10 +160,6 @@ impl Uploader {
     /// Returns an error if the uploader has already been poisoned or if the job
     /// channel has been closed.
     pub(crate) async fn submit(&self, job: UploadJob) -> Result<(), SlateDBError> {
-        if let Some(err) = self.poisoned.lock().clone() {
-            return Err(err);
-        }
-
         self.jobs
             .as_ref()
             .ok_or(SlateDBError::Closed)?
@@ -195,7 +186,12 @@ impl Uploader {
     /// and the fatal error is returned.
     pub(crate) async fn close(&mut self) -> Result<(), SlateDBError> {
         self.jobs.take();
-        if self.poisoned.lock().is_some() {
+        if self
+            .closed_result
+            .reader()
+            .read()
+            .is_some_and(|r| r.is_err())
+        {
             self.shutdown.cancel();
         }
         let result = if let Some(supervisor) = self.supervisor.take() {
@@ -219,7 +215,6 @@ impl Uploader {
 
     async fn run_supervisor(
         mut workers: JoinSet<Result<(), SlateDBError>>,
-        poisoned: Arc<Mutex<Option<SlateDBError>>>,
         events: UploaderEventSender,
         closed_result: WatchableOnceCell<Result<(), SlateDBError>>,
         shutdown: CancellationToken,
@@ -239,32 +234,22 @@ impl Uploader {
                         Ok(Ok(())) => {}
                         Ok(Err(err)) => {
                             return Self::handle_fatal_worker_error(
-                                &mut workers,
-                                poisoned,
-                                events,
-                                closed_result,
-                                err,
+                                &mut workers, events, closed_result, err,
                             )
                             .await;
                         }
                         Err(join_err) if join_err.is_panic() => {
                             return Self::handle_fatal_worker_error(
-                                &mut workers,
-                                poisoned,
-                                events,
-                                closed_result,
+                                &mut workers, events, closed_result,
                                 SlateDBError::BackgroundTaskPanic(
-                                "parallel_l0_flush_uploader_worker".into(),
+                                    "parallel_l0_flush_uploader_worker".into(),
                                 ),
                             )
                             .await;
                         }
                         Err(_) => {
                             return Self::handle_fatal_worker_error(
-                                &mut workers,
-                                poisoned,
-                                events,
-                                closed_result,
+                                &mut workers, events, closed_result,
                                 SlateDBError::BackgroundTaskCancelled(
                                     "parallel_l0_flush_uploader_worker".into(),
                                 ),
@@ -279,12 +264,10 @@ impl Uploader {
 
     async fn handle_fatal_worker_error(
         workers: &mut JoinSet<Result<(), SlateDBError>>,
-        poisoned: Arc<Mutex<Option<SlateDBError>>>,
         events: UploaderEventSender,
         closed_result: WatchableOnceCell<Result<(), SlateDBError>>,
         err: SlateDBError,
     ) -> Result<(), SlateDBError> {
-        *poisoned.lock() = Some(err.clone());
         closed_result.write(Err(err.clone()));
         let _ = events.send_safely(closed_result.reader(), UploaderEvent::Fatal(err.clone()));
         workers.abort_all();
