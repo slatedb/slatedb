@@ -390,7 +390,7 @@ pub(crate) mod safe_async_channel {
                 })
         }
 
-        pub(crate) fn close(&mut self) {
+        pub(crate) fn close(&self) {
             let _ = self.tx.close();
         }
     }

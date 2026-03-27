@@ -20,11 +20,11 @@ use crate::manifest::store::FenceableManifest;
 use crate::memtable_flusher::manifest_writer::ManifestWriter;
 use crate::memtable_flusher::tracker::FlushTracker;
 use crate::memtable_flusher::uploader::Uploader;
-use crate::utils::{SendSafely, WatchableOnceCell};
+use crate::utils::safe_async_channel;
 use parking_lot::Mutex;
 use std::sync::Arc;
 use tokio::runtime::Handle;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
 /// Monotonic ordering token assigned by the parallel L0 memtable flusher.
@@ -55,17 +55,16 @@ pub(crate) enum FlushCommand {
         options: CheckpointOptions,
         sender: oneshot::Sender<Result<CheckpointCreateResult, SlateDBError>>,
     },
-    Shutdown,
 }
 
-type FlushCommandSender = mpsc::UnboundedSender<FlushCommand>;
-pub(crate) type FlushCommandReceiver = mpsc::UnboundedReceiver<FlushCommand>;
-
 /// Parallel L0 memtable flusher subsystem.
+///
+/// Uses `safe_async_channel` for commands because its `close()` takes `&self`,
+/// avoiding a circular dependency with `DbInner` (which holds the flusher
+/// behind `Arc`).
 pub(crate) struct MemtableFlusher {
-    commands: FlushCommandSender,
-    commands_rx: Mutex<Option<FlushCommandReceiver>>,
-    closed_result: WatchableOnceCell<Result<(), SlateDBError>>,
+    commands_tx: safe_async_channel::SafeSender<FlushCommand>,
+    commands_rx: Mutex<Option<safe_async_channel::SafeReceiver<FlushCommand>>>,
     tracker_handle: Mutex<Option<JoinHandle<Result<(), SlateDBError>>>>,
 }
 
@@ -73,11 +72,10 @@ impl MemtableFlusher {
     /// Creates a new memtable flusher.
     /// Call [`start`](Self::start) to spawn the background task.
     pub(crate) fn new() -> Self {
-        let (commands_tx, commands_rx) = mpsc::unbounded_channel();
+        let (commands_tx, commands_rx) = safe_async_channel::unbounded_channel();
         Self {
-            commands: commands_tx,
+            commands_tx,
             commands_rx: Mutex::new(Some(commands_rx)),
-            closed_result: WatchableOnceCell::new(),
             tracker_handle: Mutex::new(None),
         }
     }
@@ -100,16 +98,8 @@ impl MemtableFlusher {
             inner.settings.manifest_poll_interval,
             handle,
         );
-        let tracker_handle = handle.spawn(
-            FlushTracker::new(
-                inner,
-                uploader,
-                manifest_writer,
-                self.closed_result.clone(),
-                commands_rx,
-            )
-            .run(),
-        );
+        let tracker_handle =
+            handle.spawn(FlushTracker::new(inner, uploader, manifest_writer, commands_rx).run());
         *self.tracker_handle.lock() = Some(tracker_handle);
     }
 
@@ -149,17 +139,15 @@ impl MemtableFlusher {
     }
 
     fn send_command(&self, command: FlushCommand) -> Result<(), SlateDBError> {
-        self.commands
-            .send_safely(self.closed_result.reader(), command)
+        self.commands_tx.send(command)
     }
 
     /// Closes the flusher and any owned subsystems.
     pub(crate) async fn close(&self) -> Result<(), SlateDBError> {
         // Ignore send errors — the tracker may already be gone.
-        #[allow(clippy::disallowed_methods)]
-        let _ = self.commands.send(FlushCommand::Shutdown);
+        self.commands_tx.close();
         let tracker_handle = self.tracker_handle.lock().take();
-        let result = if let Some(tracker_handle) = tracker_handle {
+        if let Some(tracker_handle) = tracker_handle {
             match tracker_handle.await {
                 Ok(result) => result,
                 Err(join_err) if join_err.is_cancelled() => Ok(()),
@@ -172,8 +160,6 @@ impl MemtableFlusher {
             }
         } else {
             Ok(())
-        };
-        self.closed_result.write(result.clone().map(|_| ()));
-        result
+        }
     }
 }

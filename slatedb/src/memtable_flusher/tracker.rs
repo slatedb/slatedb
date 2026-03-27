@@ -22,7 +22,8 @@ use crate::memtable_flusher::manifest_writer::{
 use crate::memtable_flusher::uploader::{UploadJob, UploadedMemtable, Uploader};
 use crate::memtable_flusher::{FlushCommand, FlushTarget};
 use crate::oracle::Oracle;
-use crate::utils::{IdGenerator, WatchableOnceCell};
+use crate::utils::safe_async_channel;
+use crate::utils::IdGenerator;
 use fail_parallel::fail_point;
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -32,8 +33,7 @@ pub(super) struct FlushTracker {
     inner: Arc<DbInner>,
     uploader: Uploader,
     manifest_writer: ManifestWriter,
-    closed_result: WatchableOnceCell<Result<(), SlateDBError>>,
-    commands: super::FlushCommandReceiver,
+    commands: safe_async_channel::SafeReceiver<FlushCommand>,
     next_epoch: FlushEpoch,
     tracked_imms: VecDeque<TrackedImm>,
 }
@@ -43,14 +43,12 @@ impl FlushTracker {
         inner: Arc<DbInner>,
         uploader: Uploader,
         manifest_writer: ManifestWriter,
-        closed_result: WatchableOnceCell<Result<(), SlateDBError>>,
-        commands: super::FlushCommandReceiver,
+        commands: safe_async_channel::SafeReceiver<FlushCommand>,
     ) -> Self {
         Self {
             inner,
             uploader,
             manifest_writer,
-            closed_result,
             commands,
             next_epoch: FlushEpoch(1),
             tracked_imms: VecDeque::new(),
@@ -61,14 +59,8 @@ impl FlushTracker {
         loop {
             match self.run_once().await {
                 Ok(true) => continue,
-                Ok(false) => return Ok(()),
-                Err(err) => {
-                    let shutdown_result = self.shutdown(Some(err)).await;
-                    if let Err(err) = &shutdown_result {
-                        self.closed_result.write(Err(err.clone()));
-                    }
-                    return shutdown_result;
-                }
+                Ok(false) => return self.shutdown(None).await,
+                Err(err) => return self.shutdown(Some(err)).await,
             }
         }
     }
@@ -76,8 +68,11 @@ impl FlushTracker {
     async fn run_once(&mut self) -> Result<bool, SlateDBError> {
         tokio::select! {
             maybe_command = self.commands.recv() => {
-                let command = maybe_command.unwrap_or(FlushCommand::Shutdown);
-                self.handle_command(command).await
+                if let Some(command) = maybe_command {
+                    self.handle_command(command).await
+                } else {
+                    Ok(false)
+                }
             }
             maybe_uploaded = self.uploader.events().recv() => {
                 if let Some(uploaded) = maybe_uploaded {
@@ -119,16 +114,6 @@ impl FlushTracker {
                 self.handle_checkpoint_request(target, options, sender)?;
                 self.reconcile_and_dispatch().await?;
                 Ok(true)
-            }
-            FlushCommand::Shutdown => {
-                let uploader_result = self.uploader.close(true).await;
-                let writer_close = self.manifest_writer.close().await;
-                self.cleanup_orphaned_uploads(&writer_close).await;
-                uploader_result?;
-                if let Some(err) = writer_close.err() {
-                    return Err(err);
-                }
-                Ok(false)
             }
         }
     }
@@ -302,7 +287,9 @@ impl FlushTracker {
         let uploader_err = self.uploader.close(false).await.err();
         let writer_close = self.manifest_writer.close().await;
         self.cleanup_orphaned_uploads(&writer_close).await;
-        Self::refined_error([err, writer_close.err(), uploader_err].into_iter())
+        let err = Self::refined_error([err, writer_close.err(), uploader_err].into_iter());
+        self.commands.close(err.clone());
+        err
     }
 
     /// Pick the most informative error from multiple shutdown sources.
