@@ -91,7 +91,7 @@ npm --prefix bindings/node run build
 - [x] Port the DB lifecycle, CRUD, scan, batch, flush, merge, snapshot, transaction, invalid-input, and fencing coverage into bindings/node/tests/db.test.mjs.
 - [x] Port the reader lifecycle, build-failure, point-read, scan, refresh, WAL replay, merge-operator, builder-validation, and invalid-range coverage into bindings/node/tests/
   reader.test.mjs.
-- [ ] Port the WAL reader empty-listing, navigation, metadata/row decoding, and missing-file coverage into bindings/node/tests/wal-reader.test.mjs.
+- [x] Port the WAL reader empty-listing, navigation, metadata/row decoding, and missing-file coverage into bindings/node/tests/wal-reader.test.mjs.
 - [ ] Port the logging callback and duplicate-init coverage into bindings/node/tests/logging.test.mjs.
 - [ ] Ensure all Node tests explicitly shutdown() and dispose() UniFFI objects to avoid leaked handles between tests.
 - [ ] Fix uniffi-bindgen-node-js so async-returned opaque objects are usable with real koffi in subsequent clone/free/method calls.
