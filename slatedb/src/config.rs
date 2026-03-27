@@ -446,6 +446,7 @@ impl PutOptions {
             },
             Ttl::NoExpiry => None,
             Ttl::ExpireAfter(ttl) => Self::checked_expire_ts(now, ttl),
+            Ttl::ExpireAt(ts) => Some(ts),
         }
     }
 
@@ -483,6 +484,7 @@ impl MergeOptions {
             },
             Ttl::NoExpiry => None,
             Ttl::ExpireAfter(ttl) => Self::checked_expire_ts(now, ttl),
+            Ttl::ExpireAt(ts) => Some(ts),
         }
     }
 
@@ -507,6 +509,7 @@ pub enum Ttl {
     Default,
     NoExpiry,
     ExpireAfter(u64),
+    ExpireAt(i64),
 }
 
 /// Defines the scope targeted by a given checkpoint. If set to All, then the checkpoint will
@@ -1486,5 +1489,79 @@ object_store_cache_options:
         assert_eq!(roundtripped.min_compaction_sources, 3);
         assert_eq!(roundtripped.max_compaction_sources, 9);
         assert_eq!(roundtripped.include_size_threshold, 7.0);
+    }
+
+    #[test]
+    fn should_return_exact_timestamp_for_put_expire_at() {
+        // given
+        let opts = PutOptions {
+            ttl: Ttl::ExpireAt(12345),
+        };
+
+        // when
+        let expire_ts = opts.expire_ts_from(None, 100);
+
+        // then
+        assert_eq!(expire_ts, Some(12345));
+    }
+
+    #[test]
+    fn should_ignore_default_ttl_for_put_expire_at() {
+        // given
+        let opts = PutOptions {
+            ttl: Ttl::ExpireAt(12345),
+        };
+
+        // when
+        let expire_ts = opts.expire_ts_from(Some(9999), 100);
+
+        // then
+        assert_eq!(expire_ts, Some(12345));
+    }
+
+    #[test]
+    fn should_allow_past_timestamp_for_put_expire_at() {
+        // given
+        let opts = PutOptions {
+            ttl: Ttl::ExpireAt(50),
+        };
+
+        // when
+        let expire_ts = opts.expire_ts_from(None, 100);
+
+        // then: past timestamp is allowed (entry will expire on next read/compaction)
+        assert_eq!(expire_ts, Some(50));
+    }
+
+    #[test]
+    fn should_return_exact_timestamp_for_merge_expire_at() {
+        // given
+        let opts = MergeOptions {
+            ttl: Ttl::ExpireAt(12345),
+        };
+
+        // when
+        let expire_ts = opts.expire_ts_from(None, 100);
+
+        // then
+        assert_eq!(expire_ts, Some(12345));
+    }
+
+    #[test]
+    fn should_return_deterministic_expire_ts_for_expire_at() {
+        // given: same ExpireAt value used at different times
+        let opts = PutOptions {
+            ttl: Ttl::ExpireAt(99999),
+        };
+
+        // when
+        let ts1 = opts.expire_ts_from(None, 100);
+        let ts2 = opts.expire_ts_from(None, 200);
+        let ts3 = opts.expire_ts_from(None, 300);
+
+        // then: all return the same absolute timestamp regardless of `now`
+        assert_eq!(ts1, Some(99999));
+        assert_eq!(ts2, Some(99999));
+        assert_eq!(ts3, Some(99999));
     }
 }
