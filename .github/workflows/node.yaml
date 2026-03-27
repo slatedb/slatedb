@@ -154,7 +154,7 @@ jobs:
       - name: Install uniffi-bindgen-node-js
         env:
           RUSTFLAGS: ""
-        run: cargo install uniffi-bindgen-node-js --git https://github.com/criccomini/uniffi-bindgen-node-js --rev 9a40782258ff843c3d8189d5922a3882255847a0
+        run: cargo install uniffi-bindgen-node-js --git https://github.com/criccomini/uniffi-bindgen-node-js --rev d02df083a2360d5450d11c7c1e2515c3901503bd
 
       - name: Download Linux artifacts
         uses: actions/download-artifact@v4
