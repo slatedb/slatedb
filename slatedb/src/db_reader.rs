@@ -144,8 +144,8 @@ impl DbReaderInner {
             status_reporter.clone(),
         ));
 
-        let db_metrics = crate::db_metrics::DbMetrics::new(None);
-        let db_stats = DbStats::new(&db_metrics);
+        let recorder = slatedb_common::metrics::MetricsRecorderHelper::noop();
+        let db_stats = DbStats::new(&recorder);
 
         let state = RwLock::new(initial_state);
         let reader = Reader {
@@ -2103,10 +2103,10 @@ mod tests {
         // Construct just enough DbReaderInner state to call rebuild_checkpoint_state()
         // directly. skip_wal_replay keeps the test scoped to the IMM retention logic.
         let oracle = Arc::new(DbReaderOracle::new(0, DbStatusReporter::new(0)));
-        let db_metrics = crate::db_metrics::DbMetrics::new(None);
+        let recorder = slatedb_common::metrics::MetricsRecorderHelper::noop();
         let reader = Reader {
             table_store: Arc::clone(&table_store),
-            db_stats: DbStats::new(&db_metrics),
+            db_stats: DbStats::new(&recorder),
             mono_clock: Arc::new(MonotonicClock::new(
                 test_provider.system_clock.clone(),
                 i64::MIN,
@@ -2195,10 +2195,10 @@ mod tests {
         };
 
         let oracle = Arc::new(DbReaderOracle::new(0, DbStatusReporter::new(0)));
-        let db_metrics = crate::db_metrics::DbMetrics::new(None);
+        let recorder = slatedb_common::metrics::MetricsRecorderHelper::noop();
         let reader = Reader {
             table_store: Arc::clone(&table_store),
-            db_stats: DbStats::new(&db_metrics),
+            db_stats: DbStats::new(&recorder),
             mono_clock: Arc::new(MonotonicClock::new(
                 test_provider.system_clock.clone(),
                 i64::MIN,

@@ -1114,6 +1114,9 @@ mod tests {
     use crate::types::{KeyValue, ValueDeletable};
     use object_store::path::Path;
     use object_store::{memory::InMemory, ObjectStore};
+    use slatedb_common::metrics::{
+        DefaultMetricsRecorder, MetricLevel, MetricValue, MetricsRecorderHelper,
+    };
     use std::sync::Arc;
 
     #[tokio::test]
@@ -1198,9 +1201,9 @@ mod tests {
     #[tokio::test]
     async fn should_record_bloom_filter_positive_for_single_key() {
         // given
-        let db_metrics = crate::db_metrics::DbMetrics::new(None);
-        let registry = Arc::try_unwrap(db_metrics.stat_registry()).ok().unwrap();
-        let db_stats = DbStats::new(&db_metrics);
+        let recorder = Arc::new(DefaultMetricsRecorder::new());
+        let helper = MetricsRecorderHelper::new(recorder.clone(), MetricLevel::default());
+        let db_stats = DbStats::new(&helper);
         let table_store = bloom_filter_enabled_table_store(10);
         let sst_handle = build_single_block_sst(&table_store, &[b"k1", b"k2"]).await;
 
@@ -1227,12 +1230,29 @@ mod tests {
             ValueDeletable::Value(value) => assert_eq!(value.as_ref(), b"v_k1"),
             other => panic!("expected value, found {other:?}"),
         }
-        assert_eq!(registry.lookup("db/sst_filter_positives").unwrap().get(), 1);
+        let snap = recorder.snapshot();
         assert_eq!(
-            registry
-                .lookup("db/sst_filter_false_positives")
+            match &snap
+                .by_name("db/sst_filter_positives")
+                .first()
                 .unwrap()
-                .get(),
+                .value
+            {
+                MetricValue::Counter(v) => *v,
+                other => panic!("expected counter, got {:?}", other),
+            },
+            1
+        );
+        assert_eq!(
+            match &snap
+                .by_name("db/sst_filter_false_positives")
+                .first()
+                .unwrap()
+                .value
+            {
+                MetricValue::Counter(v) => *v,
+                other => panic!("expected counter, got {:?}", other),
+            },
             0
         );
     }
@@ -1240,9 +1260,9 @@ mod tests {
     #[tokio::test]
     async fn should_record_bloom_filter_negative_for_missing_key() {
         // given
-        let db_metrics = crate::db_metrics::DbMetrics::new(None);
-        let registry = Arc::try_unwrap(db_metrics.stat_registry()).ok().unwrap();
-        let db_stats = DbStats::new(&db_metrics);
+        let recorder = Arc::new(DefaultMetricsRecorder::new());
+        let helper = MetricsRecorderHelper::new(recorder.clone(), MetricLevel::default());
+        let db_stats = DbStats::new(&helper);
         let table_store = bloom_filter_enabled_table_store(10);
         let sst_handle = build_single_block_sst(&table_store, &[b"k1", b"k3"]).await;
 
@@ -1259,12 +1279,29 @@ mod tests {
 
         // then
         assert!(iter.is_none(), "negative bloom result should skip iterator");
-        assert_eq!(registry.lookup("db/sst_filter_negatives").unwrap().get(), 1);
+        let snap = recorder.snapshot();
         assert_eq!(
-            registry
-                .lookup("db/sst_filter_false_positives")
+            match &snap
+                .by_name("db/sst_filter_negatives")
+                .first()
                 .unwrap()
-                .get(),
+                .value
+            {
+                MetricValue::Counter(v) => *v,
+                other => panic!("expected counter, got {:?}", other),
+            },
+            1
+        );
+        assert_eq!(
+            match &snap
+                .by_name("db/sst_filter_false_positives")
+                .first()
+                .unwrap()
+                .value
+            {
+                MetricValue::Counter(v) => *v,
+                other => panic!("expected counter, got {:?}", other),
+            },
             0
         );
     }
@@ -1272,9 +1309,9 @@ mod tests {
     #[tokio::test]
     async fn should_record_bloom_filter_false_positive_for_single_key() {
         // given
-        let db_metrics = crate::db_metrics::DbMetrics::new(None);
-        let registry = Arc::try_unwrap(db_metrics.stat_registry()).ok().unwrap();
-        let db_stats = DbStats::new(&db_metrics);
+        let recorder = Arc::new(DefaultMetricsRecorder::new());
+        let helper = MetricsRecorderHelper::new(recorder.clone(), MetricLevel::default());
+        let db_stats = DbStats::new(&helper);
         let table_store = bloom_filter_enabled_table_store(2);
         // these keys share the same bucket in the bloom filter (hard coded)
         // after testing with the SIP13 algorithm. The collision key must be
@@ -1311,15 +1348,43 @@ mod tests {
 
         // then
         assert!(entry.is_none(), "false positive must return no entry");
-        assert_eq!(registry.lookup("db/sst_filter_positives").unwrap().get(), 1);
+        let snap = recorder.snapshot();
         assert_eq!(
-            registry
-                .lookup("db/sst_filter_false_positives")
+            match &snap
+                .by_name("db/sst_filter_positives")
+                .first()
                 .unwrap()
-                .get(),
+                .value
+            {
+                MetricValue::Counter(v) => *v,
+                other => panic!("expected counter, got {:?}", other),
+            },
             1
         );
-        assert_eq!(registry.lookup("db/sst_filter_negatives").unwrap().get(), 0);
+        assert_eq!(
+            match &snap
+                .by_name("db/sst_filter_false_positives")
+                .first()
+                .unwrap()
+                .value
+            {
+                MetricValue::Counter(v) => *v,
+                other => panic!("expected counter, got {:?}", other),
+            },
+            1
+        );
+        assert_eq!(
+            match &snap
+                .by_name("db/sst_filter_negatives")
+                .first()
+                .unwrap()
+                .value
+            {
+                MetricValue::Counter(v) => *v,
+                other => panic!("expected counter, got {:?}", other),
+            },
+            0
+        );
     }
 
     #[tokio::test]

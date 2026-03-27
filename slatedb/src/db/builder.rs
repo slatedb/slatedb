@@ -1347,20 +1347,33 @@ mod tests {
     use crate::config::Settings;
     use crate::garbage_collector::stats::GC_COUNT;
     use object_store::memory::InMemory;
+    use slatedb_common::metrics::{DefaultMetricsRecorder, MetricValue};
     use std::sync::Arc;
+
+    fn lookup_metric(recorder: &DefaultMetricsRecorder, name: &str) -> Option<i64> {
+        let snap = recorder.snapshot();
+        snap.by_name(name).first().map(|m| match &m.value {
+            MetricValue::Counter(v) => *v as i64,
+            MetricValue::Gauge(v) => *v,
+            MetricValue::UpDownCounter(v) => *v,
+            MetricValue::Histogram { .. } => panic!("unexpected histogram metric"),
+        })
+    }
 
     #[tokio::test]
     async fn test_db_builder_starts_gc_by_default() {
+        let metrics_recorder = Arc::new(DefaultMetricsRecorder::new());
         let db = crate::Db::builder(
             "test_db_builder_starts_gc_by_default",
             Arc::new(InMemory::new()),
         )
+        .with_metrics_recorder(metrics_recorder.clone())
         .build()
         .await
         .expect("failed to build db");
 
         assert!(
-            db.metrics().lookup(GC_COUNT).is_some(),
+            lookup_metric(&metrics_recorder, GC_COUNT).is_some(),
             "GC should be initialized by default"
         );
 
@@ -1369,6 +1382,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_db_builder_disables_gc_when_gc_options_are_none() {
+        let metrics_recorder = Arc::new(DefaultMetricsRecorder::new());
         let db = crate::Db::builder(
             "test_db_builder_disables_gc_when_gc_options_are_none",
             Arc::new(InMemory::new()),
@@ -1377,12 +1391,13 @@ mod tests {
             garbage_collector_options: None,
             ..Settings::default()
         })
+        .with_metrics_recorder(metrics_recorder.clone())
         .build()
         .await
         .expect("failed to build db");
 
         assert!(
-            db.metrics().lookup(GC_COUNT).is_none(),
+            lookup_metric(&metrics_recorder, GC_COUNT).is_none(),
             "GC should not be initialized when options are None"
         );
 

@@ -1311,7 +1311,7 @@ mod tests {
         compaction_low_watermark_dt: Option<DateTime<Utc>>,
     ) {
         // Start the garbage collector
-        let db_metrics = crate::db_metrics::DbMetrics::new(None);
+        let recorder = MetricsRecorderHelper::noop();
 
         // Pretend a compaction job has already run with the specified start time
         if let Some(compaction_low_watermark_dt) = compaction_low_watermark_dt {
@@ -1369,7 +1369,7 @@ mod tests {
             compactions_store.clone(),
             table_store.clone(),
             gc_opts,
-            &db_metrics,
+            &recorder,
             Arc::new(DefaultSystemClock::default()),
         );
 
@@ -1410,7 +1410,7 @@ mod tests {
         assert_eq!(manifests.len(), 2);
 
         // Build a GC with standard options (1h min_age)
-        let db_metrics = crate::db_metrics::DbMetrics::new(None);
+        let recorder = MetricsRecorderHelper::noop();
         let gc_opts = GarbageCollectorOptions {
             manifest_options: Some(GarbageCollectorDirectoryOptions {
                 min_age: std::time::Duration::from_secs(3600),
@@ -1435,7 +1435,7 @@ mod tests {
             compactions_store.clone(),
             table_store.clone(),
             gc_opts,
-            &db_metrics,
+            &recorder,
             Arc::new(DefaultSystemClock::default()),
         );
 
@@ -1475,7 +1475,7 @@ mod tests {
             86400,
         );
 
-        let db_metrics = crate::db_metrics::DbMetrics::new(None);
+        let recorder = MetricsRecorderHelper::noop();
         let gc_opts = GarbageCollectorOptions {
             manifest_options: None,
             wal_options: Some(GarbageCollectorDirectoryOptions {
@@ -1497,7 +1497,7 @@ mod tests {
             compactions_store.clone(),
             table_store.clone(),
             gc_opts,
-            &db_metrics,
+            &recorder,
             Arc::new(DefaultSystemClock::default()),
         );
         gc.run_gc_once().await;
@@ -1515,7 +1515,7 @@ mod tests {
         use crate::dispatcher::MessageHandler;
 
         let (manifest_store, compactions_store, table_store, _) = build_objects();
-        let db_metrics = crate::db_metrics::DbMetrics::new(None);
+        let recorder = MetricsRecorderHelper::noop();
 
         let gc_opts = GarbageCollectorOptions {
             manifest_options: None,
@@ -1535,7 +1535,7 @@ mod tests {
             compactions_store,
             table_store,
             gc_opts,
-            &db_metrics,
+            &recorder,
             Arc::new(DefaultSystemClock::default()),
         );
 
@@ -1546,18 +1546,14 @@ mod tests {
             .collect();
         assert_eq!(
             intervals,
-            vec![
-                Duration::from_secs(11),
-                Duration::from_secs(17),
-                Duration::from_secs(60)
-            ]
+            vec![Duration::from_secs(11), Duration::from_secs(17),]
         );
     }
 
     #[tokio::test(start_paused = true)]
     async fn test_gc_shutdown() {
         let (manifest_store, compactions_store, table_store, _) = build_objects();
-        let db_metrics = crate::db_metrics::DbMetrics::new(None);
+        let recorder = MetricsRecorderHelper::noop();
 
         let gc_opts = GarbageCollectorOptions {
             manifest_options: Some(GarbageCollectorDirectoryOptions {
@@ -1583,7 +1579,7 @@ mod tests {
             compactions_store.clone(),
             table_store.clone(),
             gc_opts,
-            &db_metrics,
+            &recorder,
             Arc::new(DefaultSystemClock::default()),
         );
         let (_, rx) = mpsc::unbounded_channel();

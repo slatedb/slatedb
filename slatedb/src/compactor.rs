@@ -2616,18 +2616,25 @@ mod tests {
 
         fixture.handler.handle_log_ticker();
 
-        let total_bytes = fixture
-            .stats_registry
-            .lookup(TOTAL_BYTES_BEING_COMPACTED)
-            .unwrap()
-            .get();
+        let snap = fixture.test_recorder.snapshot();
+        let total_bytes = snap
+            .by_name(TOTAL_BYTES_BEING_COMPACTED)
+            .first()
+            .map(|m| match &m.value {
+                slatedb_common::metrics::MetricValue::Gauge(v) => *v,
+                other => panic!("unexpected metric type: {:?}", other),
+            })
+            .expect("metric not found");
         assert_eq!(total_bytes, 0);
 
-        let throughput = fixture
-            .stats_registry
-            .lookup(TOTAL_THROUGHPUT_BYTES_PER_SEC)
-            .unwrap()
-            .get();
+        let throughput = snap
+            .by_name(TOTAL_THROUGHPUT_BYTES_PER_SEC)
+            .first()
+            .map(|m| match &m.value {
+                slatedb_common::metrics::MetricValue::Gauge(v) => *v,
+                other => panic!("unexpected metric type: {:?}", other),
+            })
+            .expect("metric not found");
         assert!(
             throughput > 0,
             "Expected throughput > 0, got {}",
@@ -2668,14 +2675,16 @@ mod tests {
 
         let mut fixture = CompactorEventHandlerTestFixture::new().await;
 
-        assert_eq!(
-            fixture
-                .stats_registry
-                .lookup(RUNNING_COMPACTIONS)
-                .unwrap()
-                .get(),
-            0
-        );
+        let snap = fixture.test_recorder.snapshot();
+        let running = snap
+            .by_name(RUNNING_COMPACTIONS)
+            .first()
+            .map(|m| match &m.value {
+                slatedb_common::metrics::MetricValue::UpDownCounter(v) => *v,
+                other => panic!("unexpected metric type: {:?}", other),
+            })
+            .expect("metric not found");
+        assert_eq!(running, 0);
 
         let compaction = Compaction::new(Ulid::new(), CompactionSpec::new(vec![], 10));
         fixture
@@ -2921,7 +2930,7 @@ mod tests {
         executor: Arc<MockExecutor>,
         real_executor: Arc<dyn CompactionExecutor>,
         real_executor_rx: tokio::sync::mpsc::UnboundedReceiver<CompactorMessage>,
-        stats_registry: Arc<crate::stats::StatRegistry>,
+        test_recorder: Arc<slatedb_common::metrics::DefaultMetricsRecorder>,
         handler: CompactorEventHandler,
     }
 
@@ -2942,9 +2951,12 @@ mod tests {
             let executor = Arc::new(MockExecutor::new());
             let (real_executor_tx, real_executor_rx) = tokio::sync::mpsc::unbounded_channel();
             let rand = Arc::new(DbRand::default());
-            let db_metrics = crate::db_metrics::DbMetrics::new(None);
-            let stats_registry = db_metrics.stat_registry();
-            let compactor_stats = Arc::new(CompactionStats::new(&db_metrics));
+            let test_recorder = Arc::new(slatedb_common::metrics::DefaultMetricsRecorder::new());
+            let recorder = MetricsRecorderHelper::new(
+                test_recorder.clone() as Arc<dyn slatedb_common::metrics::MetricsRecorder>,
+                slatedb_common::metrics::MetricLevel::default(),
+            );
+            let compactor_stats = Arc::new(CompactionStats::new(&recorder));
             let real_executor = Arc::new(TokioCompactionExecutor::new(
                 TokioCompactionExecutorOptions {
                     handle: Handle::current(),
@@ -2986,7 +2998,7 @@ mod tests {
                 executor,
                 real_executor_rx,
                 real_executor,
-                stats_registry,
+                test_recorder,
                 handler,
             }
         }
@@ -3057,11 +3069,15 @@ mod tests {
         })
         .await
         .expect("timeout waiting for CompactionJobAttemptFinished");
-        let starting_last_ts = fixture
-            .stats_registry
-            .lookup(LAST_COMPACTION_TS_SEC)
-            .unwrap()
-            .get();
+        let snap = fixture.test_recorder.snapshot();
+        let starting_last_ts = snap
+            .by_name(LAST_COMPACTION_TS_SEC)
+            .first()
+            .map(|m| match &m.value {
+                slatedb_common::metrics::MetricValue::Gauge(v) => *v,
+                other => panic!("unexpected metric type: {:?}", other),
+            })
+            .expect("metric not found");
 
         // when:
         fixture
@@ -3071,14 +3087,16 @@ mod tests {
             .expect("fatal error handling compaction message");
 
         // then:
-        assert!(
-            fixture
-                .stats_registry
-                .lookup(LAST_COMPACTION_TS_SEC)
-                .unwrap()
-                .get()
-                > starting_last_ts
-        );
+        let snap = fixture.test_recorder.snapshot();
+        let last_ts = snap
+            .by_name(LAST_COMPACTION_TS_SEC)
+            .first()
+            .map(|m| match &m.value {
+                slatedb_common::metrics::MetricValue::Gauge(v) => *v,
+                other => panic!("unexpected metric type: {:?}", other),
+            })
+            .expect("metric not found");
+        assert!(last_ts > starting_last_ts);
     }
 
     #[tokio::test]
@@ -3497,8 +3515,8 @@ mod tests {
         let scheduler = Arc::new(MockScheduler::new());
         let executor = Arc::new(MockExecutor::new());
         let rand = Arc::new(DbRand::default());
-        let db_metrics = crate::db_metrics::DbMetrics::new(None);
-        let compactor_stats = Arc::new(CompactionStats::new(&db_metrics));
+        let recorder = slatedb_common::metrics::MetricsRecorderHelper::noop();
+        let compactor_stats = Arc::new(CompactionStats::new(&recorder));
         let mut handler = CompactorEventHandler::new(
             manifest_store,
             compactions_store.clone(),
@@ -3720,6 +3738,7 @@ mod tests {
     async fn test_compactor_compressed_block_size() {
         use crate::compactor::stats::BYTES_COMPACTED;
         use crate::config::{CompressionCodec, SstBlockSize};
+        use slatedb_common::metrics::{DefaultMetricsRecorder, MetricValue};
 
         // given:
         let os = Arc::new(InMemory::new());
@@ -3739,13 +3758,25 @@ mod tests {
             .expect("compactor options missing")
             .scheduler_options = scheduler_options;
 
+        let metrics_recorder = Arc::new(DefaultMetricsRecorder::new());
         let db = Db::builder(PATH, os.clone())
             .with_settings(options)
             .with_system_clock(system_clock.clone())
             .with_sst_block_size(SstBlockSize::Other(128))
+            .with_metrics_recorder(metrics_recorder.clone())
             .build()
             .await
             .unwrap();
+
+        fn lookup_metric(recorder: &DefaultMetricsRecorder, name: &str) -> Option<i64> {
+            let snap = recorder.snapshot();
+            snap.by_name(name).first().map(|m| match &m.value {
+                MetricValue::Counter(v) => *v as i64,
+                MetricValue::Gauge(v) => *v,
+                MetricValue::UpDownCounter(v) => *v,
+                MetricValue::Histogram { .. } => panic!("unexpected histogram metric"),
+            })
+        }
 
         for i in 0..4 {
             let k = vec![b'a' + i as u8; 16];
@@ -3764,8 +3795,7 @@ mod tests {
             .expect("db was not compacted");
 
         // then:
-        let metrics = db.metrics();
-        let bytes_compacted = metrics.lookup(BYTES_COMPACTED).unwrap().get();
+        let bytes_compacted = lookup_metric(&metrics_recorder, BYTES_COMPACTED).unwrap();
 
         assert!(bytes_compacted > 0, "bytes_compacted: {}", bytes_compacted);
     }

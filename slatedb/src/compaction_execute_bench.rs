@@ -23,7 +23,6 @@ use crate::compactor_executor::{
 };
 use crate::compactor_state::{Compaction, CompactionSpec, SourceId};
 use crate::config::{CompactorOptions, CompressionCodec};
-use crate::db_metrics::DbMetrics;
 use crate::db_state::{SsTableHandle, SsTableId, SsTableView};
 use crate::error::SlateDBError;
 use crate::format::sst::SsTableFormat;
@@ -35,6 +34,7 @@ use crate::types::RowEntry;
 use crate::types::ValueDeletable;
 use crate::utils::IdGenerator;
 use slatedb_common::clock::{DefaultSystemClock, SystemClock};
+use slatedb_common::metrics::MetricsRecorderHelper;
 
 pub struct CompactionExecuteBench {
     path: Path,
@@ -325,8 +325,8 @@ impl CompactionExecuteBench {
         ));
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let compactor_options = CompactorOptions::default();
-        let db_metrics = DbMetrics::new(None);
-        let stats = Arc::new(CompactionStats::new(&db_metrics));
+        let recorder = MetricsRecorderHelper::noop();
+        let stats = Arc::new(CompactionStats::new(&recorder));
         let os = self.object_store.clone();
 
         let manifest_store = Arc::new(ManifestStore::new(&self.path, os.clone()));

@@ -638,12 +638,14 @@ mod tests {
     use crate::manifest::SsTableView;
     use crate::object_stores::ObjectStores;
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
-    use crate::stats::StatRegistry;
     use crate::tablestore::TableStore;
     use crate::types::{RowEntry, ValueDeletable};
     use bytes::Bytes;
     use object_store::{memory::InMemory, path::Path, ObjectStore};
     use slatedb_common::clock::DefaultSystemClock;
+    use slatedb_common::metrics::{
+        DefaultMetricsRecorder, MetricLevel, MetricValue, MetricsRecorderHelper,
+    };
     use slatedb_common::MockSystemClock;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
@@ -838,7 +840,7 @@ mod tests {
         Arc<TableStore>,
         Arc<MockSystemClock>,
         DbStats,
-        Arc<StatRegistry>,
+        Arc<DefaultMetricsRecorder>,
     ) {
         setup_wal_buffer_with_flush_interval(Duration::from_millis(10)).await
     }
@@ -850,7 +852,7 @@ mod tests {
         Arc<TableStore>,
         Arc<MockSystemClock>,
         DbStats,
-        Arc<StatRegistry>,
+        Arc<DefaultMetricsRecorder>,
     ) {
         let wal_id_store: Arc<dyn WalIdStore + Send + Sync> = Arc::new(MockWalIdStore {
             next_id: AtomicU64::new(1),
@@ -871,8 +873,9 @@ mod tests {
             new_dirty_manifest(),
             DbStatusReporter::new(0),
         )));
-        let db_metrics = crate::db_metrics::DbMetrics::new(None);
-        let db_stats = DbStats::new(&db_metrics);
+        let recorder = Arc::new(DefaultMetricsRecorder::new());
+        let helper = MetricsRecorderHelper::new(recorder.clone(), MetricLevel::default());
+        let db_stats = DbStats::new(&helper);
         let wal_buffer = Arc::new(WalBufferManager::new(
             wal_id_store,
             db_state.clone(),
@@ -892,8 +895,7 @@ mod tests {
         task_executor
             .monitor_on(&Handle::current())
             .expect("failed to monitor executor");
-        let stat_registry = db_metrics.stat_registry();
-        (wal_buffer, table_store, test_clock, db_stats, stat_registry)
+        (wal_buffer, table_store, test_clock, db_stats, recorder)
     }
 
     #[tokio::test]
@@ -999,7 +1001,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_maybe_trigger_flush_spams_flush_requests() {
-        let (wal_buffer, _, _, _db_stats, stat_registry) =
+        let (wal_buffer, _, _, _db_stats, recorder) =
             setup_wal_buffer_with_flush_interval(Duration::MAX).await;
 
         // Simulate many writers each appending a small entry and calling
@@ -1013,15 +1015,30 @@ mod tests {
             wal_buffer.maybe_trigger_flush().unwrap();
         }
 
-        let size_triggered_requests = stat_registry
-            .lookup("db/wal_buffer_flush_requests")
+        let size_triggered_requests = match &recorder
+            .snapshot()
+            .by_name("db/wal_buffer_flush_requests")
+            .first()
             .unwrap()
-            .get();
+            .value
+        {
+            MetricValue::Counter(v) => *v as i64,
+            other => panic!("expected counter, got {:?}", other),
+        };
 
         // Explicitly flush to drain everything, including any partial current WAL.
         wal_buffer.flush().await.unwrap();
 
-        let actual_flushes = stat_registry.lookup("db/wal_buffer_flushes").unwrap().get();
+        let actual_flushes = match &recorder
+            .snapshot()
+            .by_name("db/wal_buffer_flushes")
+            .first()
+            .unwrap()
+            .value
+        {
+            MetricValue::Counter(v) => *v as i64,
+            other => panic!("expected counter, got {:?}", other),
+        };
 
         // With the flush_requested flag, the number of size-triggered requests
         // should be bounded by the number of WALs, not by the number of writes.
