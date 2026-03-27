@@ -434,7 +434,7 @@ impl TokioCompactionExecutorInner {
                     );
                     let sst = finished_writer.close().await?;
 
-                    self.stats.bytes_compacted.add(sst.info.filter_offset);
+                    self.stats.bytes_compacted.increment(sst.info.filter_offset);
                     output_ssts.push(sst);
                     bytes_written = 0;
                     let total_bytes = start_bytes_processed + all_iter.bytes_processed();
@@ -447,7 +447,7 @@ impl TokioCompactionExecutorInner {
         if !current_writer.is_drained() {
             let sst = current_writer.close().await?;
 
-            self.stats.bytes_compacted.add(sst.info.filter_offset);
+            self.stats.bytes_compacted.increment(sst.info.filter_offset);
             output_ssts.push(sst);
         }
 
@@ -470,7 +470,7 @@ impl TokioCompactionExecutorInner {
             return;
         }
         let dst = args.destination;
-        self.stats.running_compactions.inc();
+        self.stats.running_compactions.increment(1);
         assert!(!tasks.contains_key(&dst));
 
         let id = args.id;
@@ -501,7 +501,7 @@ impl TokioCompactionExecutorInner {
                         e
                     );
                 }
-                this_cleanup.stats.running_compactions.dec();
+                this_cleanup.stats.running_compactions.increment(-1);
             },
             async move { this.execute_compaction_job(args).await },
         );
@@ -551,7 +551,6 @@ mod tests {
     use crate::object_stores::ObjectStores;
     use crate::proptest_util::arbitrary;
     use crate::sst_iter::SstView;
-    use crate::stats::StatRegistry;
     use crate::test_utils::StringConcatMergeOperator;
     use crate::test_utils::{build_row_entries, build_sorted_runs, write_ssts};
     use crate::types::{RowEntry, ValueDeletable};
@@ -1007,7 +1006,10 @@ mod tests {
             worker_tx: tx,
             table_store: table_store.clone(),
             rand: Arc::new(DbRand::new(100u64)),
-            stats: Arc::new(CompactionStats::new(Arc::new(StatRegistry::new()))),
+            stats: {
+                let db_metrics = crate::db_metrics::DbMetrics::new(None);
+                Arc::new(CompactionStats::new(&db_metrics))
+            },
             clock,
             manifest_store,
             merge_operator,
@@ -1211,7 +1213,10 @@ mod tests {
                     worker_tx: tx,
                     table_store: table_store.clone(),
                     rand: Arc::new(DbRand::new(100u64)),
-                    stats: Arc::new(CompactionStats::new(Arc::new(StatRegistry::new()))),
+                    stats: {
+                        let db_metrics = crate::db_metrics::DbMetrics::new(None);
+                        Arc::new(CompactionStats::new(&db_metrics))
+                    },
                     clock,
                     manifest_store,
                     merge_operator,
@@ -1371,7 +1376,10 @@ mod tests {
                 worker_tx: tx,
                 table_store: table_store.clone(),
                 rand: Arc::new(DbRand::new(100u64)),
-                stats: Arc::new(CompactionStats::new(Arc::new(StatRegistry::new()))),
+                stats: {
+                    let db_metrics = crate::db_metrics::DbMetrics::new(None);
+                    Arc::new(CompactionStats::new(&db_metrics))
+                },
                 clock,
                 manifest_store,
                 merge_operator: self.merge_operator,

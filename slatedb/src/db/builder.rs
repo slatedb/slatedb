@@ -135,6 +135,7 @@ use crate::db::Db;
 use crate::db::DbInner;
 use crate::db_cache::SplitCache;
 use crate::db_cache::{DbCache, DbCacheWrapper};
+use crate::db_metrics::DbMetrics;
 use crate::db_reader::DbReader;
 use crate::db_state::ManifestCore;
 use crate::db_status::ClosedResultWriter;
@@ -151,12 +152,12 @@ use crate::object_stores::ObjectStores;
 use crate::paths::PathResolver;
 use crate::rand::DbRand;
 use crate::retrying_object_store::RetryingObjectStore;
-use crate::stats::StatRegistry;
 use crate::store_provider::DefaultStoreProvider;
 use crate::tablestore::TableStore;
 use crate::utils::WatchableOnceCell;
 use slatedb_common::clock::DefaultSystemClock;
 use slatedb_common::clock::SystemClock;
+use slatedb_common::metrics::MetricsRecorder;
 
 /// A builder for creating a new Db instance.
 ///
@@ -176,6 +177,7 @@ pub struct DbBuilder<P: Into<Path>> {
     sst_block_size: Option<SstBlockSize>,
     merge_operator: Option<MergeOperatorType>,
     block_transformer: Option<Arc<dyn BlockTransformer>>,
+    metrics_recorder: Option<Arc<dyn MetricsRecorder>>,
 }
 
 impl<P: Into<Path>> DbBuilder<P> {
@@ -195,6 +197,7 @@ impl<P: Into<Path>> DbBuilder<P> {
             sst_block_size: None,
             merge_operator: None,
             block_transformer: None,
+            metrics_recorder: None,
         }
     }
 
@@ -253,6 +256,13 @@ impl<P: Into<Path>> DbBuilder<P> {
     /// configuration.
     pub fn with_compactor_builder(mut self, compactor_builder: CompactorBuilder<P>) -> Self {
         self.compactor_builder = Some(compactor_builder.into_path_builder());
+        self
+    }
+
+    /// Sets a user-provided metrics recorder. The recorder will receive all
+    /// metric events alongside the built-in default recorder.
+    pub fn with_metrics_recorder(mut self, recorder: Arc<dyn MetricsRecorder>) -> Self {
+        self.metrics_recorder = Some(recorder);
         self
     }
 
@@ -366,7 +376,8 @@ impl<P: Into<Path>> DbBuilder<P> {
         }
 
         // Setup the components
-        let stat_registry = Arc::new(StatRegistry::new());
+        // Setup metrics recorder
+        let db_metrics = DbMetrics::new(self.metrics_recorder);
         let block_format = {
             #[cfg(test)]
             {
@@ -391,7 +402,7 @@ impl<P: Into<Path>> DbBuilder<P> {
         let cached_object_store = CachedObjectStore::from_config(
             retrying_main_object_store.clone(),
             &self.settings.object_store_cache_options,
-            stat_registry.as_ref(),
+            &db_metrics,
             system_clock.clone(),
             rand.clone(),
         )
@@ -440,7 +451,7 @@ impl<P: Into<Path>> DbBuilder<P> {
             self.db_cache.as_ref().map(|c| {
                 Arc::new(DbCacheWrapper::new(
                     c.clone(),
-                    stat_registry.as_ref(),
+                    &db_metrics,
                     system_clock.clone(),
                 )) as Arc<dyn DbCache>
             }),
@@ -484,7 +495,7 @@ impl<P: Into<Path>> DbBuilder<P> {
                 manifest.prepare_dirty()?,
                 memtable_flush_tx,
                 write_tx,
-                stat_registry,
+                db_metrics.clone(),
                 self.fp_registry.clone(),
                 self.merge_operator.clone(),
             )
@@ -540,7 +551,7 @@ impl<P: Into<Path>> DbBuilder<P> {
         if let Some(compactor_builder) = compactor_builder {
             let mut builder = compactor_builder
                 .with_system_clock(system_clock.clone())
-                .with_stat_registry(inner.stat_registry.clone())
+                .with_db_metrics(db_metrics.clone())
                 .with_seed(rand.rng().next_u64());
 
             if let Some(operator) = self.merge_operator {
@@ -572,7 +583,7 @@ impl<P: Into<Path>> DbBuilder<P> {
                 compactions_store.clone(),
                 uncached_table_store.clone(),
                 gc_options,
-                inner.stat_registry.clone(),
+                &db_metrics,
                 system_clock.clone(),
             );
             // Garbage collector only uses tickers, so pass in a dummy rx channel
@@ -686,7 +697,7 @@ pub struct GarbageCollectorBuilder<P: Into<Path>> {
     main_object_store: Arc<dyn ObjectStore>,
     wal_object_store: Option<Arc<dyn ObjectStore>>,
     options: GarbageCollectorOptions,
-    stat_registry: Arc<StatRegistry>,
+    db_metrics: DbMetrics,
     system_clock: Arc<dyn SystemClock>,
     rand: Arc<DbRand>,
 }
@@ -698,7 +709,7 @@ impl<P: Into<Path>> GarbageCollectorBuilder<P> {
             main_object_store,
             wal_object_store: None,
             options: GarbageCollectorOptions::default(),
-            stat_registry: Arc::new(StatRegistry::new()),
+            db_metrics: DbMetrics::new(None),
             system_clock: Arc::new(DefaultSystemClock::default()),
             rand: Arc::new(DbRand::default()),
         }
@@ -710,10 +721,16 @@ impl<P: Into<Path>> GarbageCollectorBuilder<P> {
         self
     }
 
-    /// Sets the stats registry to use for the garbage collector.
+    /// Sets a user-provided metrics recorder for the garbage collector.
+    pub fn with_metrics_recorder(mut self, recorder: Arc<dyn MetricsRecorder>) -> Self {
+        self.db_metrics = DbMetrics::new(Some(recorder));
+        self
+    }
+
+    /// Sets the internal db metrics (used when GC is created via DbBuilder).
     #[allow(unused)]
-    pub fn with_stat_registry(mut self, stat_registry: Arc<StatRegistry>) -> Self {
-        self.stat_registry = stat_registry;
+    pub(crate) fn with_db_metrics(mut self, db_metrics: DbMetrics) -> Self {
+        self.db_metrics = db_metrics;
         self
     }
 
@@ -773,7 +790,7 @@ impl<P: Into<Path>> GarbageCollectorBuilder<P> {
             compactions_store,
             table_store,
             self.options,
-            self.stat_registry,
+            &self.db_metrics,
             self.system_clock,
         )
     }
@@ -789,7 +806,7 @@ pub struct CompactorBuilder<P: Into<Path>> {
     options: CompactorOptions,
     scheduler_supplier: Option<Arc<dyn CompactionSchedulerSupplier>>,
     rand: Arc<DbRand>,
-    stat_registry: Arc<StatRegistry>,
+    db_metrics: DbMetrics,
     system_clock: Arc<dyn SystemClock>,
     closed_result: ClosedResultWriter,
     merge_operator: Option<MergeOperatorType>,
@@ -808,7 +825,7 @@ impl<P: Into<Path>> CompactorBuilder<P> {
             options: CompactorOptions::default(),
             scheduler_supplier: None,
             rand: Arc::new(DbRand::default()),
-            stat_registry: Arc::new(StatRegistry::new()),
+            db_metrics: DbMetrics::new(None),
             system_clock: Arc::new(DefaultSystemClock::default()),
             closed_result: ClosedResultWriter::new(WatchableOnceCell::new()),
             merge_operator: None,
@@ -826,7 +843,7 @@ impl<P: Into<Path>> CompactorBuilder<P> {
             options: self.options,
             scheduler_supplier: self.scheduler_supplier,
             rand: self.rand,
-            stat_registry: self.stat_registry,
+            db_metrics: self.db_metrics,
             system_clock: self.system_clock,
             closed_result: self.closed_result,
             merge_operator: self.merge_operator,
@@ -849,10 +866,15 @@ impl<P: Into<Path>> CompactorBuilder<P> {
         self
     }
 
-    /// Sets the stats registry to use for the compactor.
-    #[allow(unused)]
-    pub fn with_stat_registry(mut self, stat_registry: Arc<StatRegistry>) -> Self {
-        self.stat_registry = stat_registry;
+    /// Sets a user-provided metrics recorder for the compactor.
+    pub fn with_metrics_recorder(mut self, recorder: Arc<dyn MetricsRecorder>) -> Self {
+        self.db_metrics = DbMetrics::new(Some(recorder));
+        self
+    }
+
+    /// Sets the internal db metrics (used when compactor is created via DbBuilder).
+    pub(crate) fn with_db_metrics(mut self, db_metrics: DbMetrics) -> Self {
+        self.db_metrics = db_metrics;
         self
     }
 
@@ -954,7 +976,7 @@ impl<P: Into<Path>> CompactorBuilder<P> {
             scheduler_supplier,
             self.compaction_runtime,
             self.rand,
-            self.stat_registry,
+            &self.db_metrics,
             self.system_clock,
             self.closed_result,
             self.merge_operator,
@@ -987,7 +1009,7 @@ impl<P: Into<Path>> CompactorBuilder<P> {
             .unwrap_or(Arc::new(SizeTieredCompactionSchedulerSupplier));
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let scheduler = Arc::from(scheduler_supplier.compaction_scheduler(&options));
-        let stats = Arc::new(CompactionStats::new(self.stat_registry));
+        let stats = Arc::new(CompactionStats::new(&self.db_metrics));
         let executor = Arc::new(TokioCompactionExecutor::new(
             TokioCompactionExecutorOptions {
                 handle,
@@ -1081,7 +1103,7 @@ pub struct DbReaderBuilder<P: Into<Path>> {
     options: DbReaderOptions,
     system_clock: Arc<dyn SystemClock>,
     rand: Arc<DbRand>,
-    stat_registry: Arc<StatRegistry>,
+    db_metrics: DbMetrics,
 }
 
 impl<P: Into<Path>> DbReaderBuilder<P> {
@@ -1098,7 +1120,7 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
             options: DbReaderOptions::default(),
             system_clock: Arc::new(DefaultSystemClock::default()),
             rand: Arc::new(DbRand::default()),
-            stat_registry: Arc::new(StatRegistry::new()),
+            db_metrics: DbMetrics::new(None),
         }
     }
 
@@ -1159,9 +1181,10 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
         self
     }
 
-    /// Sets the stats registry to use for the reader.
-    pub fn with_stat_registry(mut self, stat_registry: Arc<StatRegistry>) -> Self {
-        self.stat_registry = stat_registry;
+    /// Sets the metrics to use for the reader.
+    #[allow(unused)]
+    pub(crate) fn with_db_metrics(mut self, db_metrics: DbMetrics) -> Self {
+        self.db_metrics = db_metrics;
         self
     }
 
@@ -1208,7 +1231,7 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
         let maybe_cached = CachedObjectStore::from_config(
             retrying_object_store.clone(),
             &self.options.object_store_cache_options,
-            self.stat_registry.as_ref(),
+            &self.db_metrics,
             self.system_clock.clone(),
             self.rand.clone(),
         )

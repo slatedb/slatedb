@@ -1,4 +1,5 @@
-use crate::stats::{Counter, Gauge, StatRegistry};
+use crate::db_metrics::DbMetrics;
+use slatedb_common::metrics::{CounterFn, GaugeFn};
 use std::sync::Arc;
 
 macro_rules! oscache_stat_name {
@@ -16,48 +17,29 @@ pub const OBJECT_STORE_CACHE_EVICTED_BYTES: &str = oscache_stat_name!("evicted_b
 
 #[derive(Debug, Clone)]
 pub struct CachedObjectStoreStats {
-    pub(super) object_store_cache_part_hits: Arc<Counter>,
-    pub(super) object_store_cache_part_access: Arc<Counter>,
-    pub(super) object_store_cache_keys: Arc<Gauge<u64>>,
-    pub(super) object_store_cache_bytes: Arc<Gauge<u64>>,
-    pub(super) object_store_cache_evicted_keys: Arc<Counter>,
-    pub(super) object_store_cache_evicted_bytes: Arc<Counter>,
+    pub(super) object_store_cache_part_hits: Arc<dyn CounterFn>,
+    pub(super) object_store_cache_part_access: Arc<dyn CounterFn>,
+    pub(super) object_store_cache_keys: Arc<dyn GaugeFn>,
+    pub(super) object_store_cache_bytes: Arc<dyn GaugeFn>,
+    pub(super) object_store_cache_evicted_keys: Arc<dyn CounterFn>,
+    pub(super) object_store_cache_evicted_bytes: Arc<dyn CounterFn>,
 }
 
 impl CachedObjectStoreStats {
-    pub fn new(registry: &StatRegistry) -> Self {
-        let stats = Self {
-            object_store_cache_part_hits: Arc::new(Counter::default()),
-            object_store_cache_part_access: Arc::new(Counter::default()),
-            object_store_cache_bytes: Arc::new(Gauge::default()),
-            object_store_cache_keys: Arc::new(Gauge::default()),
-            object_store_cache_evicted_bytes: Arc::new(Counter::default()),
-            object_store_cache_evicted_keys: Arc::new(Counter::default()),
-        };
-        registry.register(
-            OBJECT_STORE_CACHE_PART_HITS,
-            stats.object_store_cache_part_hits.clone(),
-        );
-        registry.register(
-            OBJECT_STORE_CACHE_PART_ACCESS,
-            stats.object_store_cache_part_access.clone(),
-        );
-        registry.register(
-            OBJECT_STORE_CACHE_KEYS,
-            stats.object_store_cache_keys.clone(),
-        );
-        registry.register(
-            OBJECT_STORE_CACHE_BYTES,
-            stats.object_store_cache_bytes.clone(),
-        );
-        registry.register(
-            OBJECT_STORE_CACHE_EVICTED_BYTES,
-            stats.object_store_cache_evicted_bytes.clone(),
-        );
-        registry.register(
-            OBJECT_STORE_CACHE_EVICTED_KEYS,
-            stats.object_store_cache_evicted_keys.clone(),
-        );
-        stats
+    pub(crate) fn new(recorder: &DbMetrics) -> Self {
+        Self {
+            object_store_cache_part_hits: recorder.counter(OBJECT_STORE_CACHE_PART_HITS).register(),
+            object_store_cache_part_access: recorder
+                .counter(OBJECT_STORE_CACHE_PART_ACCESS)
+                .register(),
+            object_store_cache_keys: recorder.gauge(OBJECT_STORE_CACHE_KEYS).register(),
+            object_store_cache_bytes: recorder.gauge(OBJECT_STORE_CACHE_BYTES).register(),
+            object_store_cache_evicted_keys: recorder
+                .counter(OBJECT_STORE_CACHE_EVICTED_KEYS)
+                .register(),
+            object_store_cache_evicted_bytes: recorder
+                .counter(OBJECT_STORE_CACHE_EVICTED_BYTES)
+                .register(),
+        }
     }
 }

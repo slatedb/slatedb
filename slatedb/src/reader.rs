@@ -407,7 +407,6 @@ mod tests {
     use crate::manifest::SsTableView;
     use crate::object_stores::ObjectStores;
     use crate::oracle::DbReaderOracle;
-    use crate::stats::StatRegistry;
     use crate::tablestore::TableStore;
     use object_store::{memory::InMemory, path::Path, ObjectStore};
     use std::collections::HashMap;
@@ -1191,8 +1190,8 @@ mod tests {
         let write_batch = populate_db_state(&mut test_db_state, test_case.entries).await?;
 
         // Create Reader with test clock
-        let stat_registry = StatRegistry::new();
-        let db_stats = DbStats::new(&stat_registry);
+        let db_metrics = crate::db_metrics::DbMetrics::new(None);
+        let db_stats = DbStats::new(&db_metrics);
         let test_clock = Arc::new(MockSystemClock::new());
         let mono_clock = Arc::new(MonotonicClock::new(test_clock as Arc<dyn SystemClock>, 0));
 
@@ -1621,8 +1620,8 @@ mod tests {
         let write_batch = populate_db_state(&mut test_db_state, test_case.entries).await?;
 
         // Create Reader with test clock
-        let stat_registry = StatRegistry::new();
-        let db_stats = DbStats::new(&stat_registry);
+        let db_metrics = crate::db_metrics::DbMetrics::new(None);
+        let db_stats = DbStats::new(&db_metrics);
         let test_clock = Arc::new(MockSystemClock::new());
         let mono_clock = Arc::new(MonotonicClock::new(test_clock as Arc<dyn SystemClock>, 0));
 
@@ -1741,8 +1740,8 @@ mod tests {
         let mut test_db_state = TestDbState::new().await;
         let write_batch = populate_db_state(&mut test_db_state, entries).await?;
 
-        let stat_registry = StatRegistry::new();
-        let db_stats = DbStats::new(&stat_registry);
+        let db_metrics = crate::db_metrics::DbMetrics::new(None);
+        let db_stats = DbStats::new(&db_metrics);
         let reader = build_reader(&test_db_state, db_stats, false).await;
 
         // when/then: get key1 should have expire_ts
@@ -1788,8 +1787,8 @@ mod tests {
         let mut test_db_state = TestDbState::new().await;
         let write_batch = populate_db_state(&mut test_db_state, entries).await?;
 
-        let stat_registry = StatRegistry::new();
-        let db_stats = DbStats::new(&stat_registry);
+        let db_metrics = crate::db_metrics::DbMetrics::new(None);
+        let db_stats = DbStats::new(&db_metrics);
         let reader = build_reader(&test_db_state, db_stats, false).await;
 
         // when: scanning all keys
@@ -1851,8 +1850,8 @@ mod tests {
         let mut test_db_state = TestDbState::new().await;
         let write_batch = populate_db_state(&mut test_db_state, entries).await?;
 
-        let stat_registry = StatRegistry::new();
-        let db_stats = DbStats::new(&stat_registry);
+        let db_metrics = crate::db_metrics::DbMetrics::new(None);
+        let db_stats = DbStats::new(&db_metrics);
         let reader = build_reader(&test_db_state, db_stats, true).await;
 
         // when: reading the merged key
@@ -1891,8 +1890,8 @@ mod tests {
         let mut test_db_state = TestDbState::new().await;
         let write_batch = populate_db_state(&mut test_db_state, entries).await?;
 
-        let stat_registry = StatRegistry::new();
-        let db_stats = DbStats::new(&stat_registry);
+        let db_metrics = crate::db_metrics::DbMetrics::new(None);
+        let db_stats = DbStats::new(&db_metrics);
         let reader = build_reader(&test_db_state, db_stats, true).await;
 
         // when: reading the merged key

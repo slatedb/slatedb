@@ -83,7 +83,7 @@ impl GcTask for CompactionsGcTask {
                         compactions_metadata.id, e
                     );
                 } else {
-                    self.stats.gc_compactions_count.inc();
+                    self.stats.gc_compactions_count.increment(1);
                 }
             }
         }

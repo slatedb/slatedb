@@ -80,7 +80,7 @@ impl GcTask for ManifestGcTask {
                         manifest_metadata.id, e
                     );
                 } else {
-                    self.stats.gc_manifest_count.inc();
+                    self.stats.gc_manifest_count.increment(1);
                 }
             }
         }
