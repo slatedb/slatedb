@@ -17,13 +17,12 @@ use crate::db_state::{SsTableHandle, SsTableId};
 use crate::error::SlateDBError;
 use crate::format::sst::EncodedSsTable;
 use crate::mem_table::ImmutableMemtable;
-use crate::utils::{SendSafely, WatchableOnceCell, WatchableOnceCellReader};
+use crate::utils::{safe_async_channel, safe_mpsc};
 use log::{error, info};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::runtime::Handle;
-use tokio::sync::{mpsc, Mutex as AsyncMutex};
-use tokio::task::{JoinHandle, JoinSet};
+use tokio::task::{JoinError, JoinHandle, JoinSet};
 use tokio_util::sync::CancellationToken;
 
 /// One immutable-memtable upload request submitted to the uploader.
@@ -58,9 +57,6 @@ pub(crate) struct UploadedMemtable {
     pub(crate) epoch: FlushEpoch,
     /// Same immutable memtable that was uploaded.
     pub(crate) imm_memtable: Arc<ImmutableMemtable>,
-    /// SST id used for the uploaded table.
-    #[allow(dead_code)]
-    pub(crate) sst_id: SsTableId,
     /// Handle for the uploaded SST in object storage.
     pub(crate) sst_handle: SsTableHandle,
     /// Highest sequence number present in the immutable memtable.
@@ -72,39 +68,22 @@ impl UploadedMemtable {
     pub(crate) fn new(
         epoch: FlushEpoch,
         imm_memtable: Arc<ImmutableMemtable>,
-        sst_id: SsTableId,
         sst_handle: SsTableHandle,
         last_seq: u64,
     ) -> Self {
         Self {
             epoch,
             imm_memtable,
-            sst_id,
             sst_handle,
             last_seq,
         }
     }
 }
 
-#[derive(Clone)]
-/// Event emitted by the uploader.
-pub(crate) enum UploaderEvent {
-    /// One upload job completed successfully.
-    Uploaded(Box<UploadedMemtable>),
-    /// The uploader encountered a fatal error and is now poisoned.
-    Fatal(SlateDBError),
-}
-
-type UploadJobSender = mpsc::UnboundedSender<UploadJob>;
-type UploadJobReceiver = Arc<AsyncMutex<mpsc::UnboundedReceiver<UploadJob>>>;
-type UploaderEventSender = mpsc::UnboundedSender<UploaderEvent>;
-type UploaderEventReceiver = mpsc::UnboundedReceiver<UploaderEvent>;
-
 pub(crate) struct Uploader {
-    jobs: Option<UploadJobSender>,
-    events: UploaderEventReceiver,
-    closed_result: WatchableOnceCell<Result<(), SlateDBError>>,
-    shutdown: CancellationToken,
+    jobs_tx: safe_async_channel::SafeSender<UploadJob>,
+    events_rx: safe_mpsc::SafeReceiver<UploadedMemtable>,
+    aborted: CancellationToken,
     supervisor: Option<JoinHandle<Result<(), SlateDBError>>>,
 }
 
@@ -112,45 +91,33 @@ impl Uploader {
     /// Starts the uploader subsystem and spawns `worker_count` worker tasks plus
     /// a supervisor task on the provided runtime handle.
     ///
-    /// Upload attempts use a fixed retry backoff. Fatal worker failures poison
-    /// the uploader and are emitted as [`UploaderEvent::Fatal`].
+    /// Upload attempts use a fixed retry backoff. Fatal worker failures close
+    /// the events channel; the error is returned by [`close`](Self::close).
     pub(crate) fn start(
         db: Arc<DbInner>,
         worker_count: usize,
         retry_backoff: Duration,
         handle: &Handle,
     ) -> Self {
-        let (jobs_tx, jobs_rx) = mpsc::unbounded_channel();
-        let (events_tx, events_rx) = mpsc::unbounded_channel();
-        let closed_result = WatchableOnceCell::new();
-        let shutdown = CancellationToken::new();
+        let (jobs_tx, jobs_rx) = safe_async_channel::unbounded_channel();
+        let (events_tx, events_rx) = safe_mpsc::unbounded_channel::<UploadedMemtable>();
+        let aborted = CancellationToken::new();
         let mut workers = JoinSet::new();
-        let jobs_rx = Arc::new(AsyncMutex::new(jobs_rx));
 
         for worker_id in 0..worker_count {
-            let worker = UploadWorker::new(
-                Arc::clone(&db),
-                shutdown.clone(),
-                retry_backoff,
-                closed_result.reader(),
-            );
-            let jobs = Arc::clone(&jobs_rx);
+            let worker = UploadWorker::new(Arc::clone(&db), aborted.clone(), retry_backoff);
+            let jobs = jobs_rx.clone();
             let events = events_tx.clone();
             workers.spawn(async move { worker.run(worker_id, jobs, events).await });
         }
 
-        let supervisor = handle.spawn(Self::run_supervisor(
-            workers,
-            events_tx,
-            closed_result.clone(),
-            shutdown.clone(),
-        ));
+        drop(events_tx);
+        let supervisor = handle.spawn(Self::run_supervisor(workers, jobs_rx, aborted.clone()));
 
         Self {
-            jobs: Some(jobs_tx),
-            events: events_rx,
-            closed_result,
-            shutdown,
+            jobs_tx,
+            events_rx,
+            aborted,
             supervisor: Some(supervisor),
         }
     }
@@ -160,39 +127,26 @@ impl Uploader {
     /// Returns an error if the uploader has already been poisoned or if the job
     /// channel has been closed.
     pub(crate) async fn submit(&self, job: UploadJob) -> Result<(), SlateDBError> {
-        self.jobs
-            .as_ref()
-            .ok_or(SlateDBError::Closed)?
-            .send_safely(self.closed_result.reader(), job)
+        self.jobs_tx.send(job)
     }
 
     /// Returns the shared uploader event receiver.
     ///
     /// The caller is expected to drive progress by consuming events until
-    /// shutdown. This returns a mutable receiver because Tokio's unbounded
+    /// aborted. This returns a mutable receiver because Tokio's unbounded
     /// receiver is single-consumer.
-    pub(crate) fn events(&mut self) -> &mut UploaderEventReceiver {
-        &mut self.events
+    pub(crate) fn events(&mut self) -> &mut safe_mpsc::SafeReceiver<UploadedMemtable> {
+        &mut self.events_rx
     }
 
     /// Closes the uploader.
     ///
-    /// On the healthy path this is a graceful drain:
-    /// - stop accepting new jobs
-    /// - let queued jobs finish
-    /// - wait for all worker results to be emitted
-    ///
-    /// If the uploader is already poisoned, the remaining workers are cancelled
-    /// and the fatal error is returned.
-    pub(crate) async fn close(&mut self) -> Result<(), SlateDBError> {
-        self.jobs.take();
-        if self
-            .closed_result
-            .reader()
-            .read()
-            .is_some_and(|r| r.is_err())
-        {
-            self.shutdown.cancel();
+    /// When `graceful` is true, queued jobs are allowed to finish before
+    /// workers exit. When false, workers are aborted immediately.
+    pub(crate) async fn close(&mut self, graceful: bool) -> Result<(), SlateDBError> {
+        self.jobs_tx.close();
+        if !graceful {
+            self.aborted.cancel();
         }
         let result = if let Some(supervisor) = self.supervisor.take() {
             match supervisor.await {
@@ -208,102 +162,80 @@ impl Uploader {
         } else {
             Ok(())
         };
-
-        self.closed_result.write(result.clone().map(|_| ()));
         result
     }
 
     async fn run_supervisor(
         mut workers: JoinSet<Result<(), SlateDBError>>,
-        events: UploaderEventSender,
-        closed_result: WatchableOnceCell<Result<(), SlateDBError>>,
-        shutdown: CancellationToken,
+        jobs_rx: safe_async_channel::SafeReceiver<UploadJob>,
+        aborted: CancellationToken,
     ) -> Result<(), SlateDBError> {
         loop {
             tokio::select! {
-                _ = shutdown.cancelled() => {
-                    workers.abort_all();
-                    while workers.join_next().await.is_some() {}
-                    return Ok(());
+                _ = aborted.cancelled() => {
+                    return Self::drain_workers(workers, jobs_rx, Ok(())).await;
                 }
                 maybe_result = workers.join_next() => {
-                    let Some(result) = maybe_result else {
-                        return Ok(());
-                    };
-                    match result {
-                        Ok(Ok(())) => {}
-                        Ok(Err(err)) => {
-                            return Self::handle_fatal_worker_error(
-                                &mut workers, events, closed_result, err,
-                            )
-                            .await;
-                        }
-                        Err(join_err) if join_err.is_panic() => {
-                            return Self::handle_fatal_worker_error(
-                                &mut workers, events, closed_result,
-                                SlateDBError::BackgroundTaskPanic(
-                                    "parallel_l0_flush_uploader_worker".into(),
-                                ),
-                            )
-                            .await;
-                        }
-                        Err(_) => {
-                            return Self::handle_fatal_worker_error(
-                                &mut workers, events, closed_result,
-                                SlateDBError::BackgroundTaskCancelled(
-                                    "parallel_l0_flush_uploader_worker".into(),
-                                ),
-                            )
-                            .await;
-                        }
+                    if let Some(result) = maybe_result {
+                        let resolved_result = Self::resolve(result);
+                        return Self::drain_workers(workers, jobs_rx, resolved_result).await;
                     }
                 }
             }
         }
     }
 
-    async fn handle_fatal_worker_error(
-        workers: &mut JoinSet<Result<(), SlateDBError>>,
-        events: UploaderEventSender,
-        closed_result: WatchableOnceCell<Result<(), SlateDBError>>,
-        err: SlateDBError,
+    fn resolve(result: Result<Result<(), SlateDBError>, JoinError>) -> Result<(), SlateDBError> {
+        match result {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(err)) => Err(err),
+            Err(join_err) if join_err.is_panic() => Err(SlateDBError::BackgroundTaskPanic(
+                "parallel_l0_flush_uploader_worker".into(),
+            )),
+            Err(_) => Err(SlateDBError::BackgroundTaskCancelled(
+                "parallel_l0_flush_uploader_worker".into(),
+            )),
+        }
+    }
+
+    async fn drain_workers(
+        mut workers: JoinSet<Result<(), SlateDBError>>,
+        jobs_rx: safe_async_channel::SafeReceiver<UploadJob>,
+        result: Result<(), SlateDBError>,
     ) -> Result<(), SlateDBError> {
-        closed_result.write(Err(err.clone()));
-        let _ = events.send_safely(closed_result.reader(), UploaderEvent::Fatal(err.clone()));
+        let mut joined_result = result;
         workers.abort_all();
-        while workers.join_next().await.is_some() {}
-        Err(err)
+        while let Some(result) = workers.join_next().await {
+            let worker_result = Self::resolve(result);
+            if joined_result.is_ok() && worker_result.is_err() {
+                joined_result = worker_result;
+            }
+        }
+        jobs_rx.close(joined_result.clone().map(|_| ()));
+        joined_result
     }
 }
 
 struct UploadWorker {
     db: Arc<DbInner>,
-    shutdown: CancellationToken,
+    aborted: CancellationToken,
     retry_backoff: Duration,
-    #[allow(dead_code)]
-    closed_result_reader: WatchableOnceCellReader<Result<(), SlateDBError>>,
 }
 
 impl UploadWorker {
-    fn new(
-        db: Arc<DbInner>,
-        shutdown: CancellationToken,
-        retry_backoff: Duration,
-        closed_result_reader: WatchableOnceCellReader<Result<(), SlateDBError>>,
-    ) -> Self {
+    fn new(db: Arc<DbInner>, aborted: CancellationToken, retry_backoff: Duration) -> Self {
         Self {
             db,
-            shutdown,
+            aborted,
             retry_backoff,
-            closed_result_reader,
         }
     }
 
     async fn run(
         self,
         worker_id: usize,
-        jobs: UploadJobReceiver,
-        events: UploaderEventSender,
+        jobs: safe_async_channel::SafeReceiver<UploadJob>,
+        events: safe_mpsc::SafeSender<UploadedMemtable>,
     ) -> Result<(), SlateDBError> {
         info!("l0 uploader worker started [worker_id={}]", worker_id);
         let result = self.recv_loop(jobs, events).await;
@@ -319,17 +251,14 @@ impl UploadWorker {
 
     async fn recv_loop(
         &self,
-        jobs: UploadJobReceiver,
-        events: UploaderEventSender,
+        jobs: safe_async_channel::SafeReceiver<UploadJob>,
+        events: safe_mpsc::SafeSender<UploadedMemtable>,
     ) -> Result<(), SlateDBError> {
         loop {
             let idle_start = self.db.system_clock.now();
             tokio::select! {
-                _ = self.shutdown.cancelled() => return Ok(()),
-                recv_result = async {
-                    let mut jobs = jobs.lock().await;
-                    jobs.recv().await
-                } => {
+                _ = self.aborted.cancelled() => return Ok(()),
+                recv_result = jobs.recv() => {
                     let idle_elapsed = self.db.system_clock.now()
                         .signed_duration_since(idle_start)
                         .to_std()
@@ -348,10 +277,7 @@ impl UploadWorker {
                         .map(|d| d.as_millis() as u64)
                         .unwrap_or(0);
                     self.db.db_stats.l0_upload_busy_millis.add(busy_elapsed);
-                    #[allow(clippy::disallowed_methods)]
-                    if events.send(UploaderEvent::Uploaded(Box::new(success))).is_err() {
-                        // The flusher is no longer listening for uploader events, so
-                        // treat this as normal shutdown rather than panicking.
+                    if events.send(success).is_err() {
                         return Ok(());
                     }
                 }
@@ -359,20 +285,16 @@ impl UploadWorker {
         }
     }
 
-    async fn build_sst(&self, job: &UploadJob) -> Result<EncodedSsTable, SlateDBError> {
-        self.db.build_imm_sst(job.imm_memtable.table()).await
-    }
-
     async fn upload_with_retry(&self, job: UploadJob) -> Result<UploadedMemtable, SlateDBError> {
         loop {
-            let encoded_sst = self.build_sst(&job).await?;
+            let encoded_sst = self.db.build_imm_sst(job.imm_memtable.table()).await?;
             tokio::select! {
-                _ = self.shutdown.cancelled() => return Err(SlateDBError::Closed),
+                _ = self.aborted.cancelled() => return Err(SlateDBError::Closed),
                 result = self.try_upload_once(&job, encoded_sst) => match result {
                     Ok(success) => return Ok(success),
                     Err(_) => {
                         tokio::select! {
-                            _ = self.shutdown.cancelled() => return Err(SlateDBError::Closed),
+                            _ = self.aborted.cancelled() => return Err(SlateDBError::Closed),
                             _ = self.db.system_clock.sleep(self.retry_backoff) => {}
                         }
                     }
@@ -395,30 +317,14 @@ impl UploadWorker {
             .last_seq()
             .expect("flush of l0 with no entries");
         let written_bytes = encoded_sst.remaining_len() as u64;
-        let start = self.db.system_clock.now();
         let sst_handle = self
             .db
             .upload_compacted_sst(&job.sst_id, job.imm_memtable.table(), encoded_sst, true)
             .await?;
         self.db.db_stats.l0_flush_bytes.add(written_bytes);
-        let elapsed = self
-            .db
-            .system_clock
-            .now()
-            .signed_duration_since(start)
-            .to_std()
-            .map(|duration| duration.as_secs_f64())
-            .unwrap_or(0.0);
-        let throughput = if elapsed > 0.0 {
-            (written_bytes as f64 / elapsed) as u64
-        } else {
-            written_bytes
-        };
-        self.db.db_stats.l0_flush_throughput.set(throughput);
         Ok(UploadedMemtable {
             epoch: job.epoch,
             imm_memtable: Arc::clone(&job.imm_memtable),
-            sst_id: job.sst_id,
             sst_handle,
             last_seq,
         })
@@ -427,7 +333,7 @@ impl UploadWorker {
 
 #[cfg(test)]
 mod tests {
-    use super::{FlushEpoch, UploadJob, Uploader, UploaderEvent};
+    use super::{FlushEpoch, UploadJob, Uploader};
     use crate::config::Settings;
     use crate::db::DbInner;
     use crate::db_state::{ManifestCore, SsTableId};
@@ -532,17 +438,11 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        match event {
-            UploaderEvent::Uploaded(success) => {
-                assert_eq!(success.epoch, FlushEpoch(1));
-                assert_eq!(success.last_seq, 1);
-            }
-            UploaderEvent::Fatal(err) => panic!("unexpected fatal uploader event: {err:?}"),
-        }
+        assert_eq!(event.epoch, FlushEpoch(1));
+        assert_eq!(event.last_seq, 1);
         assert!(db.db_stats.l0_flush_bytes.get() > 0);
-        assert!(db.db_stats.l0_flush_throughput.get() >= 0);
 
-        uploader.close().await.unwrap();
+        uploader.close(true).await.unwrap();
     }
 
     #[tokio::test]
@@ -569,14 +469,9 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        match event {
-            UploaderEvent::Uploaded(success) => {
-                assert_eq!(success.epoch, FlushEpoch(7));
-            }
-            UploaderEvent::Fatal(err) => panic!("unexpected fatal uploader event: {err:?}"),
-        }
+        assert_eq!(event.epoch, FlushEpoch(7));
 
-        uploader.close().await.unwrap();
+        uploader.close(true).await.unwrap();
     }
 
     #[tokio::test]
@@ -614,20 +509,16 @@ mod tests {
         );
         uploader.submit(job).await.unwrap();
 
+        // The worker fails and the events channel closes (recv returns None).
         let event = timeout(Duration::from_secs(5), uploader.events().recv())
             .await
-            .unwrap()
             .unwrap();
-        assert!(matches!(event, UploaderEvent::Fatal(_)));
+        assert!(event.is_none());
 
-        let err = uploader
-            .submit(next_upload_job(&db, 4, b"key2", b"value2", 2))
-            .await
-            .unwrap_err();
-        assert!(!matches!(err, SlateDBError::Closed));
-
-        let close_result = uploader.close().await;
+        // close() returns the worker's specific error.
+        let close_result = uploader.close(false).await;
         assert!(close_result.is_err());
+        assert!(!matches!(close_result, Err(SlateDBError::Closed)));
     }
 
     #[tokio::test]
@@ -649,16 +540,67 @@ mod tests {
         uploader.submit(job1).await.unwrap();
         uploader.submit(job2).await.unwrap();
 
-        uploader.close().await.unwrap();
+        uploader.close(true).await.unwrap();
 
         let mut uploaded_epochs = Vec::new();
-        while let Some(event) = uploader.events().recv().await {
-            match event {
-                UploaderEvent::Uploaded(success) => uploaded_epochs.push(success.epoch),
-                UploaderEvent::Fatal(err) => panic!("unexpected fatal uploader event: {err:?}"),
-            }
+        while let Some(success) = uploader.events().recv().await {
+            uploaded_epochs.push(success.epoch);
         }
 
         assert_eq!(uploaded_epochs, vec![FlushEpoch(1), FlushEpoch(2)]);
+    }
+
+    #[tokio::test]
+    async fn submit_should_fail_after_worker_fatal_error() {
+        let db = setup_db(
+            "/tmp/test_parallel_l0_flush_uploader_submit_after_fatal",
+            Arc::new(FailPointRegistry::new()),
+        )
+        .await;
+
+        // Create a merge entry without a merge operator — this causes a
+        // fatal build error in the worker.
+        {
+            let mut guard = db.state.write();
+            guard
+                .memtable()
+                .put(crate::types::RowEntry::new_merge(b"key", b"operand", 1));
+            guard.freeze_memtable(0).unwrap();
+        }
+        let imm_memtable = db
+            .state
+            .read()
+            .state()
+            .imm_memtable
+            .front()
+            .cloned()
+            .unwrap();
+        let sst_id = SsTableId::Compacted(db.rand.rng().gen_ulid(db.system_clock.as_ref()));
+        let bad_job = UploadJob::new(FlushEpoch(1), imm_memtable, sst_id);
+
+        let mut uploader = Uploader::start(
+            Arc::clone(&db),
+            1,
+            Duration::from_millis(1),
+            &Handle::current(),
+        );
+        uploader.submit(bad_job).await.unwrap();
+
+        // The worker fails and the events channel closes.
+        let event = timeout(Duration::from_secs(5), uploader.events().recv())
+            .await
+            .unwrap();
+        assert!(event.is_none());
+
+        // A subsequent submit should fail with the worker's error, not a
+        // generic Closed error.
+        let err = uploader
+            .submit(next_upload_job(&db, 2, b"key2", b"value2", 2))
+            .await
+            .unwrap_err();
+        assert!(
+            !matches!(err, SlateDBError::Closed),
+            "expected specific error, got Closed"
+        );
     }
 }

@@ -23,8 +23,6 @@ pub const WRITE_OPS: &str = db_stat_name!("write_ops");
 pub const TOTAL_MEM_SIZE_BYTES: &str = db_stat_name!("total_mem_size_bytes");
 pub const L0_SST_COUNT: &str = db_stat_name!("l0_sst_count");
 pub const L0_FLUSH_BYTES: &str = db_stat_name!("l0_flush_bytes");
-pub const L0_FLUSH_THROUGHPUT_BYTES_PER_SEC: &str =
-    db_stat_name!("l0_flush_throughput_bytes_per_sec");
 pub const L0_UPLOAD_BUSY_MILLIS: &str = db_stat_name!("l0_upload_busy_millis");
 pub const L0_UPLOAD_IDLE_MILLIS: &str = db_stat_name!("l0_upload_idle_millis");
 
@@ -47,7 +45,6 @@ pub(crate) struct DbStats {
     pub(crate) total_mem_size_bytes: Arc<Gauge<i64>>,
     pub(crate) l0_sst_count: Arc<Gauge<i64>>,
     pub(crate) l0_flush_bytes: Arc<Counter>,
-    pub(crate) l0_flush_throughput: Arc<Gauge<u64>>,
     pub(crate) l0_upload_busy_millis: Arc<Counter>,
     pub(crate) l0_upload_idle_millis: Arc<Counter>,
 }
@@ -71,7 +68,6 @@ impl DbStats {
             total_mem_size_bytes: Arc::new(Gauge::default()),
             l0_sst_count: Arc::new(Gauge::default()),
             l0_flush_bytes: Arc::new(Counter::default()),
-            l0_flush_throughput: Arc::new(Gauge::default()),
             l0_upload_busy_millis: Arc::new(Counter::default()),
             l0_upload_idle_millis: Arc::new(Counter::default()),
         };
@@ -103,10 +99,6 @@ impl DbStats {
         registry.register(TOTAL_MEM_SIZE_BYTES, stats.total_mem_size_bytes.clone());
         registry.register(L0_SST_COUNT, stats.l0_sst_count.clone());
         registry.register(L0_FLUSH_BYTES, stats.l0_flush_bytes.clone());
-        registry.register(
-            L0_FLUSH_THROUGHPUT_BYTES_PER_SEC,
-            stats.l0_flush_throughput.clone(),
-        );
         registry.register(L0_UPLOAD_BUSY_MILLIS, stats.l0_upload_busy_millis.clone());
         registry.register(L0_UPLOAD_IDLE_MILLIS, stats.l0_upload_idle_millis.clone());
         stats

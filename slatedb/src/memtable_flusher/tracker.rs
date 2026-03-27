@@ -16,8 +16,10 @@ use crate::checkpoint::CheckpointCreateResult;
 use crate::config::CheckpointOptions;
 use crate::db::DbInner;
 use crate::error::SlateDBError;
-use crate::memtable_flusher::manifest_writer::{FlushResult, ManifestWriter, ManifestWriterEvent};
-use crate::memtable_flusher::uploader::{UploadJob, Uploader, UploaderEvent};
+use crate::memtable_flusher::manifest_writer::{
+    FlushResult, ManifestWriter, ManifestWriterCloseResult, ManifestWriterEvent,
+};
+use crate::memtable_flusher::uploader::{UploadJob, UploadedMemtable, Uploader};
 use crate::memtable_flusher::{FlushCommand, FlushTarget};
 use crate::oracle::Oracle;
 use crate::utils::{IdGenerator, WatchableOnceCell};
@@ -57,12 +59,16 @@ impl FlushTracker {
 
     pub(super) async fn run(mut self) -> Result<(), SlateDBError> {
         loop {
-            let should_continue = match self.run_once().await {
-                Ok(should_continue) => should_continue,
-                Err(err) => return self.handle_fatal_error(err).await,
-            };
-            if !should_continue {
-                return Ok(());
+            match self.run_once().await {
+                Ok(true) => continue,
+                Ok(false) => return Ok(()),
+                Err(err) => {
+                    let shutdown_result = self.shutdown(Some(err)).await;
+                    if let Err(err) = &shutdown_result {
+                        self.closed_result.write(Err(err.clone()));
+                    }
+                    return shutdown_result;
+                }
             }
         }
     }
@@ -73,9 +79,9 @@ impl FlushTracker {
                 let command = maybe_command.unwrap_or(FlushCommand::Shutdown);
                 self.handle_command(command).await
             }
-            maybe_event = self.uploader.events().recv() => {
-                if let Some(event) = maybe_event {
-                    self.handle_uploader_event(event).await?;
+            maybe_uploaded = self.uploader.events().recv() => {
+                if let Some(uploaded) = maybe_uploaded {
+                    self.handle_uploaded(uploaded).await?;
                     Ok(true)
                 } else {
                     Err(SlateDBError::Closed)
@@ -115,10 +121,13 @@ impl FlushTracker {
                 Ok(true)
             }
             FlushCommand::Shutdown => {
-                let uploader_result = self.uploader.close().await;
-                let manifest_writer_result = self.manifest_writer.close().await;
+                let uploader_result = self.uploader.close(true).await;
+                let writer_close = self.manifest_writer.close().await;
+                self.cleanup_orphaned_uploads(&writer_close).await;
                 uploader_result?;
-                manifest_writer_result?;
+                if let Some(err) = writer_close.err() {
+                    return Err(err);
+                }
                 Ok(false)
             }
         }
@@ -164,15 +173,10 @@ impl FlushTracker {
         }
     }
 
-    async fn handle_uploader_event(&mut self, event: UploaderEvent) -> Result<(), SlateDBError> {
-        match event {
-            UploaderEvent::Uploaded(uploaded) => {
-                self.set_tracked_state(uploaded.epoch, TrackedImmState::WritingManifest);
-                self.manifest_writer.notify_uploaded(*uploaded).await?;
-                Ok(())
-            }
-            UploaderEvent::Fatal(err) => Err(err),
-        }
+    async fn handle_uploaded(&mut self, uploaded: UploadedMemtable) -> Result<(), SlateDBError> {
+        self.set_tracked_state(uploaded.epoch, TrackedImmState::WritingManifest);
+        self.manifest_writer.notify_uploaded(uploaded).await?;
+        Ok(())
     }
 
     async fn handle_manifest_writer_event(
@@ -180,26 +184,11 @@ impl FlushTracker {
         event: ManifestWriterEvent,
     ) -> Result<(), SlateDBError> {
         match event {
-            ManifestWriterEvent::Flushed { through_epoch, .. } => {
+            ManifestWriterEvent::Flushed { through_epoch } => {
                 self.retire_through(through_epoch);
                 self.reconcile_and_dispatch().await
             }
             ManifestWriterEvent::ManifestRefreshed => self.reconcile_and_dispatch().await,
-            ManifestWriterEvent::Fatal {
-                err,
-                last_durable_epoch,
-            } => {
-                // SSTs that never reached the manifest_writer are always safe to
-                // delete. For SSTs that were handed to the manifest_writer, we
-                // can only be sure the manifest write didn't land when the
-                // error is Fenced (another writer took the fence). For
-                // other errors the write may have succeeded silently, so
-                // we leave orphaned SSTs for the GC to clean up.
-                if matches!(err, SlateDBError::Fenced) {
-                    self.cleanup_nondurable_uploads(last_durable_epoch).await;
-                }
-                Err(err)
-            }
         }
     }
 
@@ -309,20 +298,53 @@ impl FlushTracker {
         through_wal_id
     }
 
-    async fn cleanup_nondurable_uploads(&mut self, last_durable_epoch: Option<FlushEpoch>) {
-        // Wait for the uploader to drain so all in-flight uploads complete
-        // before we attempt to delete orphaned SSTs.
-        let _ = self.uploader.close().await;
+    async fn shutdown(&mut self, err: Option<SlateDBError>) -> Result<(), SlateDBError> {
+        let uploader_err = self.uploader.close(false).await.err();
+        let writer_close = self.manifest_writer.close().await;
+        self.cleanup_orphaned_uploads(&writer_close).await;
+        Self::refined_error([err, writer_close.err(), uploader_err].into_iter())
+    }
 
+    /// Pick the most informative error from multiple shutdown sources.
+    /// Starts with `Ok`. `Closed` refines `Ok`. Any other error refines both.
+    fn refined_error(
+        errors: impl IntoIterator<Item = Option<SlateDBError>>,
+    ) -> Result<(), SlateDBError> {
+        let mut refined_err: Option<SlateDBError> = None;
+        for err in errors.into_iter().flatten() {
+            refined_err = match (refined_err, err) {
+                (None, err) => Some(err),
+                (Some(SlateDBError::Closed), err) => Some(err),
+                (err, _) => err,
+            }
+        }
+        if let Some(err) = refined_err {
+            Err(err)
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Delete orphaned SSTs that were never durably written to the manifest.
+    ///
+    /// Tables still in `Uploading` state are always cleaned up. Tables in
+    /// `WritingManifest` state are only cleaned up when the manifest writer
+    /// was fenced, since other errors may have silently succeeded.
+    async fn cleanup_orphaned_uploads(&mut self, writer_close: &ManifestWriterCloseResult) {
+        let (cleanup_writing, last_durable_epoch) = match writer_close {
+            ManifestWriterCloseResult::Ok { last_durable_epoch } => (false, *last_durable_epoch),
+            ManifestWriterCloseResult::Fenced { last_durable_epoch } => (true, *last_durable_epoch),
+            ManifestWriterCloseResult::Err(_) => (false, None),
+        };
         for tracked in &self.tracked_imms {
-            let beyond_durable =
-                last_durable_epoch.is_none_or(|durable_epoch| tracked.epoch > durable_epoch);
-            if beyond_durable
-                && matches!(
-                    tracked.state,
-                    TrackedImmState::Uploading | TrackedImmState::WritingManifest
-                )
-            {
+            let beyond_durable = last_durable_epoch.is_none_or(|epoch| tracked.epoch > epoch);
+            let should_clean = beyond_durable
+                && match tracked.state {
+                    TrackedImmState::Uploading => true,
+                    TrackedImmState::WritingManifest => cleanup_writing,
+                    TrackedImmState::PendingDispatch => false,
+                };
+            if should_clean {
                 if let Err(delete_err) = self.inner.table_store.delete_sst(&tracked.sst_id).await {
                     log::warn!(
                         "failed to delete orphaned SST [epoch={:?}, id={:?}, error={:?}]",
@@ -333,13 +355,6 @@ impl FlushTracker {
                 }
             }
         }
-    }
-
-    async fn handle_fatal_error(&mut self, err: SlateDBError) -> Result<(), SlateDBError> {
-        self.closed_result.write(Err(err.clone()));
-        let _ = self.uploader.close().await;
-        let _ = self.manifest_writer.close().await;
-        Err(err)
     }
 }
 
@@ -758,14 +773,17 @@ mod tests {
         freeze_merge_imm(&harness, b"k1", b"merge", 1, 31);
         let flusher = start_flusher(harness);
 
-        let err = timeout(Duration::from_secs(5), flusher.flush(FlushTarget::All))
+        // The flush fails because the pipeline shuts down before the
+        // epoch becomes durable.
+        let flush_result = timeout(Duration::from_secs(5), flusher.flush(FlushTarget::All))
             .await
-            .unwrap()
-            .unwrap_err();
-        assert!(!matches!(err, SlateDBError::Closed));
+            .unwrap();
+        assert!(flush_result.is_err());
 
+        // The specific upload error surfaces through close().
         let close_result = flusher.close().await;
         assert!(close_result.is_err());
+        assert!(!matches!(close_result, Err(SlateDBError::Closed)));
     }
 
     #[tokio::test]

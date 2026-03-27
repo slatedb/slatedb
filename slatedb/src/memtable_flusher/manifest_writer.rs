@@ -20,14 +20,14 @@ use crate::db::DbInner;
 use crate::db_state::SsTableView;
 use crate::error::SlateDBError;
 use crate::manifest::store::FenceableManifest;
+use crate::utils::safe_mpsc;
 use crate::utils::IdGenerator;
-use crate::utils::{SendSafely, WatchableOnceCell};
 use std::cmp;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::runtime::Handle;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use tokio::time;
 
@@ -58,42 +58,48 @@ enum ManifestWriterCommand {
 }
 
 /// Event emitted by the manifest_writer.
-///
-/// The event stream is the shared progress/supervision surface exposed to the
-/// caller. Durable frontier advances and fatal subsystem failures are reported
-/// on the same channel.
 #[derive(Clone, Debug)]
 pub(crate) enum ManifestWriterEvent {
     /// Durable progress advanced through a new contiguous flush frontier.
     Flushed {
         /// Highest contiguous flush epoch durably reflected in the manifest.
         through_epoch: FlushEpoch,
-        /// Highest durable sequence number covered by `through_epoch`.
-        #[allow(dead_code)]
-        through_seq: u64,
     },
     /// Remote manifest changes were merged into local state.
     ManifestRefreshed,
-    /// The manifest_writer encountered a fatal error and is now poisoned.
-    Fatal {
-        err: SlateDBError,
-        /// Last epoch durably written to the manifest before the error.
-        /// Epochs beyond this may have uploaded SSTs that need cleanup.
-        last_durable_epoch: Option<FlushEpoch>,
-    },
 }
 
-type ManifestWriterCommandSender = mpsc::UnboundedSender<ManifestWriterCommand>;
-type ManifestWriterCommandReceiver = mpsc::UnboundedReceiver<ManifestWriterCommand>;
-type ManifestWriterEventSender = mpsc::UnboundedSender<ManifestWriterEvent>;
-type ManifestWriterEventReceiver = mpsc::UnboundedReceiver<ManifestWriterEvent>;
+/// Result of closing the manifest writer.
+pub(crate) enum ManifestWriterCloseResult {
+    /// Clean shutdown.
+    Ok {
+        last_durable_epoch: Option<FlushEpoch>,
+    },
+    /// Fenced by another writer.
+    Fenced {
+        last_durable_epoch: Option<FlushEpoch>,
+    },
+    /// Unexpected error. The durable frontier is unknown because the
+    /// failed manifest write may have silently succeeded.
+    Err(SlateDBError),
+}
+
+impl ManifestWriterCloseResult {
+    /// Returns the error if the close was not clean.
+    pub(crate) fn err(&self) -> Option<SlateDBError> {
+        match self {
+            ManifestWriterCloseResult::Ok { .. } => None,
+            ManifestWriterCloseResult::Fenced { .. } => Some(SlateDBError::Fenced),
+            ManifestWriterCloseResult::Err(err) => Some(err.clone()),
+        }
+    }
+}
 
 /// Ordered L0 retirement and manifest update subsystem.
 pub(crate) struct ManifestWriter {
-    commands: Option<ManifestWriterCommandSender>,
-    events: ManifestWriterEventReceiver,
-    closed_result: WatchableOnceCell<Result<(), SlateDBError>>,
-    task: Option<JoinHandle<Result<(), SlateDBError>>>,
+    commands_tx: safe_mpsc::SafeSender<ManifestWriterCommand>,
+    events_rx: safe_mpsc::SafeReceiver<ManifestWriterEvent>,
+    task: Option<JoinHandle<ManifestWriterCloseResult>>,
 }
 
 impl ManifestWriter {
@@ -104,25 +110,16 @@ impl ManifestWriter {
         manifest_poll_interval: Duration,
         handle: &Handle,
     ) -> Self {
-        let (commands_tx, commands_rx) = mpsc::unbounded_channel();
-        let (events_tx, events_rx) = mpsc::unbounded_channel();
-        let closed_result = WatchableOnceCell::new();
+        let (commands_tx, commands_rx) = safe_mpsc::unbounded_channel();
+        let (events_tx, events_rx) = safe_mpsc::unbounded_channel();
         let task = handle.spawn(
-            ManifestWriterTask::new(
-                db,
-                manifest,
-                manifest_poll_interval,
-                closed_result.clone(),
-                commands_rx,
-                events_tx,
-            )
-            .run(),
+            ManifestWriterTask::new(db, manifest, manifest_poll_interval, commands_rx, events_tx)
+                .run(),
         );
 
         Self {
-            commands: Some(commands_tx),
-            events: events_rx,
-            closed_result,
+            commands_tx,
+            events_rx,
             task: Some(task),
         }
     }
@@ -132,13 +129,8 @@ impl ManifestWriter {
         &self,
         uploaded_memtable: UploadedMemtable,
     ) -> Result<(), SlateDBError> {
-        self.commands
-            .as_ref()
-            .ok_or(SlateDBError::Closed)?
-            .send_safely(
-                self.closed_result.reader(),
-                ManifestWriterCommand::Uploaded(Box::new(uploaded_memtable)),
-            )
+        self.commands_tx
+            .send(ManifestWriterCommand::Uploaded(Box::new(uploaded_memtable)))
     }
 
     /// Sends a flush request to the manifest_writer. The manifest_writer will respond
@@ -148,16 +140,10 @@ impl ManifestWriter {
         through_epoch: Option<FlushEpoch>,
         sender: oneshot::Sender<Result<FlushResult, SlateDBError>>,
     ) -> Result<(), SlateDBError> {
-        self.commands
-            .as_ref()
-            .ok_or(SlateDBError::Closed)?
-            .send_safely(
-                self.closed_result.reader(),
-                ManifestWriterCommand::AwaitFlush {
-                    through_epoch,
-                    sender,
-                },
-            )
+        self.commands_tx.send(ManifestWriterCommand::AwaitFlush {
+            through_epoch,
+            sender,
+        })
     }
 
     /// Sends a checkpoint request to the manifest_writer. The manifest_writer will write
@@ -169,44 +155,40 @@ impl ManifestWriter {
         options: CheckpointOptions,
         sender: oneshot::Sender<Result<CheckpointCreateResult, SlateDBError>>,
     ) -> Result<(), SlateDBError> {
-        self.commands
-            .as_ref()
-            .ok_or(SlateDBError::Closed)?
-            .send_safely(
-                self.closed_result.reader(),
-                ManifestWriterCommand::CreateCheckpoint {
-                    through_epoch,
-                    options,
-                    sender,
-                },
-            )
+        self.commands_tx
+            .send(ManifestWriterCommand::CreateCheckpoint {
+                through_epoch,
+                options,
+                sender,
+            })
     }
 
     /// Returns the shared manifest_writer event receiver.
-    pub(crate) fn events(&mut self) -> &mut ManifestWriterEventReceiver {
-        &mut self.events
+    pub(crate) fn events(&mut self) -> &mut safe_mpsc::SafeReceiver<ManifestWriterEvent> {
+        &mut self.events_rx
     }
 
     /// Closes the manifest_writer.
-    pub(crate) async fn close(&mut self) -> Result<(), SlateDBError> {
-        self.commands.take();
-        let result = if let Some(task) = self.task.take() {
+    pub(crate) async fn close(&mut self) -> ManifestWriterCloseResult {
+        self.commands_tx.close();
+        if let Some(task) = self.task.take() {
             match task.await {
                 Ok(result) => result,
-                Err(join_err) if join_err.is_cancelled() => Ok(()),
-                Err(join_err) if join_err.is_panic() => Err(SlateDBError::BackgroundTaskPanic(
-                    "parallel_l0_flush_manifest_writer".into(),
-                )),
-                Err(_) => Err(SlateDBError::BackgroundTaskCancelled(
+                Err(join_err) if join_err.is_cancelled() => ManifestWriterCloseResult::Ok {
+                    last_durable_epoch: None,
+                },
+                Err(join_err) if join_err.is_panic() => ManifestWriterCloseResult::Err(
+                    SlateDBError::BackgroundTaskPanic("parallel_l0_flush_manifest_writer".into()),
+                ),
+                Err(_) => ManifestWriterCloseResult::Err(SlateDBError::BackgroundTaskCancelled(
                     "parallel_l0_flush_manifest_writer".into(),
                 )),
             }
         } else {
-            Ok(())
-        };
-
-        self.closed_result.write(result.clone().map(|_| ()));
-        result
+            ManifestWriterCloseResult::Ok {
+                last_durable_epoch: None,
+            }
+        }
     }
 }
 
@@ -214,9 +196,8 @@ struct ManifestWriterTask {
     db: Arc<DbInner>,
     manifest: FenceableManifest,
     manifest_poll_interval: Duration,
-    closed_result: WatchableOnceCell<Result<(), SlateDBError>>,
-    commands: ManifestWriterCommandReceiver,
-    events: ManifestWriterEventSender,
+    commands_rx: safe_mpsc::SafeReceiver<ManifestWriterCommand>,
+    events_tx: safe_mpsc::SafeSender<ManifestWriterEvent>,
     ready: BTreeMap<FlushEpoch, UploadedMemtable>,
     next_epoch: FlushEpoch,
     durable_through: Option<(FlushEpoch, u64)>,
@@ -230,17 +211,15 @@ impl ManifestWriterTask {
         db: Arc<DbInner>,
         manifest: FenceableManifest,
         manifest_poll_interval: Duration,
-        closed_result: WatchableOnceCell<Result<(), SlateDBError>>,
-        commands: ManifestWriterCommandReceiver,
-        events: ManifestWriterEventSender,
+        commands_rx: safe_mpsc::SafeReceiver<ManifestWriterCommand>,
+        events_tx: safe_mpsc::SafeSender<ManifestWriterEvent>,
     ) -> Self {
         Self {
             db,
             manifest,
             manifest_poll_interval,
-            closed_result,
-            commands,
-            events,
+            commands_rx,
+            events_tx,
             durable_wal_id: None,
             pending_flushes: Vec::new(),
             ready: BTreeMap::new(),
@@ -251,25 +230,34 @@ impl ManifestWriterTask {
     }
 
     #[allow(clippy::disallowed_methods)]
-    async fn run(mut self) -> Result<(), SlateDBError> {
+    async fn run(mut self) -> ManifestWriterCloseResult {
         let mut poll = time::interval(self.manifest_poll_interval);
-        loop {
+        let result = loop {
             tokio::select! {
                 _ = poll.tick() => {
                     if let Err(err) = self.refresh_manifest_progress().await {
-                        return self.handle_fatal_error(err).await;
+                        break Err(err);
                     }
                 }
-                maybe_command = self.commands.recv() => {
+                maybe_command = self.commands_rx.recv() => {
                     let Some(command) = maybe_command else {
-                        return self.write_current_manifest_safely().await;
+                        let _ = self.write_current_manifest_safely().await;
+                        break Ok(());
                     };
                     let commands = self.drain_ready_commands(command);
                     if let Err(err) = self.handle_commands(commands).await {
-                        return self.handle_fatal_error(err).await;
+                        break Err(err);
                     }
                 }
             }
+        };
+        let last_durable_epoch = self.durable_through.map(|(epoch, _)| epoch);
+        self.fail_pending_flushes(&result, last_durable_epoch);
+        self.fail_pending_checkpoints(&result);
+        match result {
+            Ok(()) => ManifestWriterCloseResult::Ok { last_durable_epoch },
+            Err(SlateDBError::Fenced) => ManifestWriterCloseResult::Fenced { last_durable_epoch },
+            Err(err) => ManifestWriterCloseResult::Err(err),
         }
     }
 
@@ -278,7 +266,7 @@ impl ManifestWriterTask {
         first_command: ManifestWriterCommand,
     ) -> Vec<ManifestWriterCommand> {
         let mut commands = vec![first_command];
-        while let Ok(command) = self.commands.try_recv() {
+        while let Some(command) = self.commands_rx.try_recv() {
             commands.push(command);
         }
         commands
@@ -605,8 +593,7 @@ impl ManifestWriterTask {
         self.manifest.refresh().await?;
         let remote_dirty = self.manifest.prepare_dirty()?;
         self.merge_remote_manifest(remote_dirty);
-        #[allow(clippy::disallowed_methods)]
-        let _ = self.events.send(ManifestWriterEvent::ManifestRefreshed);
+        let _ = self.events_tx.send(ManifestWriterEvent::ManifestRefreshed);
         Ok(())
     }
 
@@ -654,11 +641,9 @@ impl ManifestWriterTask {
         {
             let _ = checkpoint.sender.send(Ok(result));
         }
-        #[allow(clippy::disallowed_methods)]
-        let _ = self.events.send(ManifestWriterEvent::Flushed {
-            through_epoch,
-            through_seq,
-        });
+        let _ = self
+            .events_tx
+            .send(ManifestWriterEvent::Flushed { through_epoch });
         Ok(())
     }
 
@@ -694,20 +679,42 @@ impl ManifestWriterTask {
         Ok(())
     }
 
-    async fn handle_fatal_error(&mut self, err: SlateDBError) -> Result<(), SlateDBError> {
-        self.closed_result.write(Err(err.clone()));
+    /// Resolve pending flush waiters on exit. Flushes whose target epoch was
+    /// reached get `Ok`; others get `Closed` (clean exit) or the specific error.
+    fn fail_pending_flushes(
+        &mut self,
+        result: &Result<(), SlateDBError>,
+        last_durable_epoch: Option<FlushEpoch>,
+    ) {
+        let flush_result = self.flush_result();
         for flush in self.pending_flushes.drain(..) {
-            let _ = flush.sender.send(Err(err.clone()));
+            let response = match result {
+                Ok(()) => {
+                    let reached = flush
+                        .through_epoch
+                        .is_none_or(|epoch| last_durable_epoch.is_some_and(|d| d >= epoch));
+                    if reached {
+                        Ok(flush_result.clone())
+                    } else {
+                        Err(SlateDBError::Closed)
+                    }
+                }
+                Err(err) => Err(err.clone()),
+            };
+            let _ = flush.sender.send(response);
         }
-        let last_durable_epoch = self.durable_through.map(|(epoch, _)| epoch);
-        let _ = self.events.send_safely(
-            self.closed_result.reader(),
-            ManifestWriterEvent::Fatal {
-                err: err.clone(),
-                last_durable_epoch,
-            },
-        );
-        Err(err)
+    }
+
+    /// Fail pending checkpoint waiters on exit. Checkpoints require a manifest
+    /// write which cannot happen during shutdown, so they always fail.
+    fn fail_pending_checkpoints(&mut self, result: &Result<(), SlateDBError>) {
+        for checkpoint in self.pending_checkpoints.drain(..) {
+            let err = match result {
+                Ok(()) => SlateDBError::Closed,
+                Err(err) => err.clone(),
+            };
+            let _ = checkpoint.sender.send(Err(err));
+        }
     }
 }
 
@@ -724,11 +731,13 @@ struct PendingCheckpoint {
 
 #[cfg(test)]
 mod tests {
-    use super::{FlushEpoch, ManifestWriter, ManifestWriterCommand, ManifestWriterEvent};
+    use super::{
+        FlushEpoch, ManifestWriter, ManifestWriterCloseResult, ManifestWriterCommand,
+        ManifestWriterEvent,
+    };
     use crate::config::{CheckpointOptions, Settings};
     use crate::db::DbInner;
     use crate::db_state::{ManifestCore, SsTableId};
-    use crate::error::SlateDBError;
     use crate::format::sst::SsTableFormat;
     use crate::manifest::store::{FenceableManifest, ManifestStore, StoredManifest};
     use crate::memtable_flusher::uploader::UploadedMemtable;
@@ -739,7 +748,6 @@ mod tests {
     use crate::tablestore::TableStore;
     use crate::types::RowEntry;
     use crate::utils::IdGenerator;
-    use crate::utils::SendSafely;
     use fail_parallel::FailPointRegistry;
     use object_store::memory::InMemory;
     use object_store::path::Path;
@@ -767,29 +775,20 @@ mod tests {
                 Ok(Some(ManifestWriterEvent::Flushed { .. })) => {
                     panic!("unexpected flushed event")
                 }
-                Ok(Some(ManifestWriterEvent::Fatal { err, .. })) => {
-                    panic!("unexpected fatal event: {err:?}")
-                }
                 Ok(None) => panic!("manifest_writer event channel closed"),
             }
         }
     }
 
-    async fn expect_flushed(manifest_writer: &mut ManifestWriter) -> (FlushEpoch, u64) {
+    async fn expect_flushed(manifest_writer: &mut ManifestWriter) -> FlushEpoch {
         loop {
             let event = timeout(Duration::from_secs(5), manifest_writer.events().recv())
                 .await
                 .expect("timed out waiting for flushed event")
                 .expect("manifest_writer event channel closed");
             match event {
-                ManifestWriterEvent::Flushed {
-                    through_epoch,
-                    through_seq,
-                } => return (through_epoch, through_seq),
+                ManifestWriterEvent::Flushed { through_epoch } => return through_epoch,
                 ManifestWriterEvent::ManifestRefreshed => continue,
-                ManifestWriterEvent::Fatal { err, .. } => {
-                    panic!("unexpected fatal manifest_writer event: {err:?}")
-                }
             }
         }
     }
@@ -928,13 +927,7 @@ mod tests {
             .await
             .unwrap();
         let last_seq = imm_memtable.table().last_seq().unwrap();
-        UploadedMemtable::new(
-            FlushEpoch(epoch),
-            imm_memtable,
-            sst_id,
-            sst_handle,
-            last_seq,
-        )
+        UploadedMemtable::new(FlushEpoch(epoch), imm_memtable, sst_handle, last_seq)
     }
 
     #[tokio::test]
@@ -954,11 +947,13 @@ mod tests {
         );
         manifest_writer.notify_uploaded(uploaded).await.unwrap();
 
-        let (through_epoch, through_seq) = expect_flushed(&mut manifest_writer).await;
+        let through_epoch = expect_flushed(&mut manifest_writer).await;
         assert_eq!(through_epoch, FlushEpoch(1));
-        assert_eq!(through_seq, 1);
 
-        manifest_writer.close().await.unwrap();
+        assert!(matches!(
+            manifest_writer.close().await,
+            ManifestWriterCloseResult::Ok { .. }
+        ));
     }
 
     #[tokio::test]
@@ -981,11 +976,13 @@ mod tests {
         assert_no_flush_event(&mut manifest_writer, Duration::from_millis(100)).await;
 
         manifest_writer.notify_uploaded(uploaded1).await.unwrap();
-        let (through_epoch, through_seq) = expect_flushed(&mut manifest_writer).await;
+        let through_epoch = expect_flushed(&mut manifest_writer).await;
         assert_eq!(through_epoch, FlushEpoch(2));
-        assert_eq!(through_seq, 2);
 
-        manifest_writer.close().await.unwrap();
+        assert!(matches!(
+            manifest_writer.close().await,
+            ManifestWriterCloseResult::Ok { .. }
+        ));
     }
 
     #[tokio::test]
@@ -1021,7 +1018,10 @@ mod tests {
         assert_eq!(after, before + 1);
         assert!(checkpoint.manifest_id > 0);
 
-        manifest_writer.close().await.unwrap();
+        assert!(matches!(
+            manifest_writer.close().await,
+            ManifestWriterCloseResult::Ok { .. }
+        ));
     }
 
     #[tokio::test]
@@ -1045,17 +1045,12 @@ mod tests {
 
         let (tx, rx) = oneshot::channel();
         manifest_writer
-            .commands
-            .as_ref()
-            .unwrap()
-            .send_safely(
-                manifest_writer.closed_result.reader(),
-                ManifestWriterCommand::CreateCheckpoint {
-                    through_epoch: Some(FlushEpoch(1)),
-                    options: CheckpointOptions::default(),
-                    sender: tx,
-                },
-            )
+            .commands_tx
+            .send(ManifestWriterCommand::CreateCheckpoint {
+                through_epoch: Some(FlushEpoch(1)),
+                options: CheckpointOptions::default(),
+                sender: tx,
+            })
             .unwrap();
 
         tokio::task::yield_now().await;
@@ -1063,9 +1058,8 @@ mod tests {
 
         manifest_writer.notify_uploaded(uploaded).await.unwrap();
 
-        let (through_epoch, through_seq) = expect_flushed(&mut manifest_writer).await;
+        let through_epoch = expect_flushed(&mut manifest_writer).await;
         assert_eq!(through_epoch, FlushEpoch(1));
-        assert_eq!(through_seq, 1);
 
         let checkpoint = rx.await.unwrap().unwrap();
         let after =
@@ -1074,7 +1068,10 @@ mod tests {
         assert_eq!(after, before + 1);
         assert!(checkpoint.manifest_id > 0);
 
-        manifest_writer.close().await.unwrap();
+        assert!(matches!(
+            manifest_writer.close().await,
+            ManifestWriterCloseResult::Ok { .. }
+        ));
     }
 
     #[tokio::test]
@@ -1096,22 +1093,16 @@ mod tests {
         let _fence = load_writer_manifest(&harness.path, Arc::clone(&harness.object_store)).await;
         manifest_writer.notify_uploaded(uploaded).await.unwrap();
 
+        // The manifest writer exits on fence — events channel closes.
         let event = timeout(Duration::from_secs(5), manifest_writer.events().recv())
             .await
-            .unwrap()
             .unwrap();
-        match event {
-            ManifestWriterEvent::Fatal {
-                err: SlateDBError::Fenced,
-                ..
-            } => {}
-            other => panic!("unexpected manifest_writer event after fence: {other:?}"),
-        }
+        assert!(event.is_none());
 
-        let (tx, _rx) = tokio::sync::oneshot::channel();
-        let err = manifest_writer
-            .send_checkpoint(None, CheckpointOptions::default(), tx)
-            .unwrap_err();
-        assert!(matches!(err, SlateDBError::Fenced));
+        // close() returns Fenced.
+        assert!(matches!(
+            manifest_writer.close().await,
+            ManifestWriterCloseResult::Fenced { .. }
+        ));
     }
 }

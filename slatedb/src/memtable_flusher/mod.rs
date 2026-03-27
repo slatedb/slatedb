@@ -156,6 +156,7 @@ impl MemtableFlusher {
     /// Closes the flusher and any owned subsystems.
     pub(crate) async fn close(&self) -> Result<(), SlateDBError> {
         // Ignore send errors — the tracker may already be gone.
+        #[allow(clippy::disallowed_methods)]
         let _ = self.commands.send(FlushCommand::Shutdown);
         let tracker_handle = self.tracker_handle.lock().take();
         let result = if let Some(tracker_handle) = tracker_handle {
