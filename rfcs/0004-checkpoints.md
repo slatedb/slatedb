@@ -750,11 +750,8 @@ The union process works as follows:
      well. The old ID is kept in `CompactedSsTableV2` as `original_id` and in `external_db.sst_ids` to allow path 
      resolution 
    - L0 SST views are copied from the source databases (preserving the order within each source database)
-   - Sorted runs are merged by tier: sorted runs with the same ID across input manifests are combined
-     into a single sorted run by concatenating their SSTs. Since the source manifests cover non-overlapping key
-     ranges, the SST views within each merged run remain non-overlapping. If source manifests have different numbers
-     of sorted runs, tiers that exist in only some manifests contribute their SSTs to the corresponding tier in
-     the result.
+   - Sorted runs are copied from the source manifests preserving their order within each source manifest. As an 
+     optimization, similarly sized SRs from different databases can be merged together to reduce LSM height.
 4. Sorted run IDs are preserved from the source manifests. The compactor does not assume contiguous IDs, so
    gaps left by projection (where empty sorted runs were removed) are acceptable. Preserving original IDs
    maintains tier identity across projection and union. The descending order is preserved to maintain compactor 
