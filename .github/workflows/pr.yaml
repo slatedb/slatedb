@@ -253,7 +253,7 @@ jobs:
       - name: Install uniffi-bindgen-node-js
         env:
           RUSTFLAGS: ""
-        run: cargo install uniffi-bindgen-node-js --git https://github.com/criccomini/uniffi-bindgen-node-js --rev 6b5c5b04c715ea888a88c3120d2c073bcb1df631
+        run: cargo install uniffi-bindgen-node-js --git https://github.com/criccomini/uniffi-bindgen-node-js --rev 9a40782258ff843c3d8189d5922a3882255847a0
 
       - name: Build Node package (bindings/node)
         run: npm --prefix bindings/node run build
