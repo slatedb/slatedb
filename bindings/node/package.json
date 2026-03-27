@@ -38,7 +38,8 @@
     "access": "public"
   },
   "scripts": {
-    "build": "node ./build.mjs"
+    "build": "node ./build.mjs",
+    "test": "npm run build && node --test"
   },
   "dependencies": {
     "koffi": "^2.0.0"
