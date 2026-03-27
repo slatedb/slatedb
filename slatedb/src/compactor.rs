@@ -673,6 +673,8 @@ impl CompactorEventHandler {
     /// - Compaction has sources
     /// - Compaction sources exist in DB state
     /// - Compactions with only L0 sources must have a destination > highest existing SR ID
+    /// - At most one L0 compaction may be active at a time (the `last_compacted_l0`
+    ///   watermark cannot handle out-of-order completion of parallel L0 compactions)
     fn validate_compaction(&self, compaction: &CompactionSpec) -> Result<(), SlateDBError> {
         // Validate compaction sources exist
         if compaction.sources().is_empty() {
@@ -702,13 +704,7 @@ impl CompactorEventHandler {
         }
 
         // Validate L0-only compactions create a new SR with id > highest existing
-        let has_only_l0 = compaction
-            .sources()
-            .iter()
-            .all(|s| matches!(s, SourceId::SstView(_)));
-
-        if has_only_l0 {
-            // L0-only: must create new SR with id > highest_existing
+        if compaction.has_l0_sources() && !compaction.has_sr_sources() {
             let highest_id = self
                 .state()
                 .db_state()
@@ -718,6 +714,20 @@ impl CompactorEventHandler {
             if compaction.destination() < highest_id {
                 warn!("compaction destination is lesser than the expected L0-only highest_id: {:?} {:?}",
                 compaction.destination(), highest_id);
+                return Err(SlateDBError::InvalidCompaction);
+            }
+        }
+
+        // Reject parallel L0 compactions. The last_compacted_l0 watermark assumes
+        // at most one L0 compaction is in flight; out-of-order completion would
+        // cause merge_remote_manifest to truncate still-in-flight L0 sources.
+        if compaction.has_l0_sources() {
+            let running_l0_exists = self
+                .state()
+                .compactions_with_status(CompactionStatus::Running)
+                .any(|c| c.spec().has_l0_sources());
+            if running_l0_exists {
+                warn!("rejected compaction: parallel L0 compaction already running");
                 return Err(SlateDBError::InvalidCompaction);
             }
         }
@@ -3884,6 +3894,30 @@ mod tests {
         );
         // Compactor-level validation should not reject (scheduler default validate returns Ok(()))
         fixture.handler.validate_compaction(&mixed).unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_validate_compaction_rejects_parallel_l0() {
+        let mut fixture = CompactorEventHandlerTestFixture::new().await;
+        // write two L0s so we can build two disjoint L0 compactions
+        fixture.write_l0().await;
+        fixture.write_l0().await;
+        fixture.handler.handle_ticker().await.unwrap();
+
+        let state = fixture.latest_db_state().await;
+        assert!(state.l0.len() >= 2);
+
+        // Build first L0 compaction from the oldest L0
+        let first_l0 = CompactionSpec::new(vec![SourceId::SstView(state.l0.back().unwrap().id)], 0);
+        // Inject and schedule it so it becomes active
+        fixture.scheduler.inject_compaction(first_l0.clone());
+        fixture.handler.handle_ticker().await.unwrap();
+
+        // Build second L0 compaction from the newest L0 (disjoint sources)
+        let second_l0 =
+            CompactionSpec::new(vec![SourceId::SstView(state.l0.front().unwrap().id)], 1);
+        let err = fixture.handler.validate_compaction(&second_l0).unwrap_err();
+        assert!(matches!(err, SlateDBError::InvalidCompaction));
     }
 
     async fn run_for<T, F>(duration: Duration, f: impl Fn() -> F) -> Option<T>

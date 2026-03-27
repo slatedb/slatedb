@@ -99,6 +99,20 @@ impl CompactionSpec {
     pub fn destination(&self) -> u32 {
         self.destination
     }
+
+    /// Returns true if any of the compaction sources are L0 SST views.
+    pub fn has_l0_sources(&self) -> bool {
+        self.sources
+            .iter()
+            .any(|s| matches!(s, SourceId::SstView(_)))
+    }
+
+    /// Returns true if any of the compaction sources are sorted runs.
+    pub fn has_sr_sources(&self) -> bool {
+        self.sources
+            .iter()
+            .any(|s| matches!(s, SourceId::SortedRun(_)))
+    }
 }
 
 impl Display for CompactionSpec {
