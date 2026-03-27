@@ -731,11 +731,9 @@ The union process works as follows:
 
 1. Sort the input manifests by the start bound of their key ranges.
 2. Validate that the manifests are non-overlapping. Each manifest's key range is computed from the effective ranges
-   of all its L0 and compacted SSTs. If any two manifests have intersecting key ranges, the operation fails.
-   Note: currently, even after projection, new SSTs flushed by the Writer or written by Compactor are not projected and
-   do not have `visible_range` (although their key space is inside the `visible_range`). Therefore, the caller is 
-   responsible for specifying the correct `visible_range` for each of the input manifests. Additionally, if the 
-   `visible_ranges` are explicitly provided then validate that they are adjacent.
+   of all its L0 and compacted SSTs and optionally intersected with `visible_range`s for each manifest if they are 
+   provided by the user. If any two manifests have intersecting key ranges, the operation fails.
+   If the `visible_ranges` are explicitly provided then validate that they are adjacent.
 3. Merge the contents of all input manifests:
    - `external_dbs` entries from all input manifests are merged and deduplicated by
      `(path, source_checkpoint_id)`. `external_dbs` with the same `(path, source_checkpoint_id)` originated from the 
