@@ -18,7 +18,6 @@ use crate::paths::PathResolver;
 use crate::rand::DbRand;
 use crate::reader::{DbStateReader, Reader};
 use crate::sst_iter::SstIteratorOptions;
-use crate::stats::StatRegistry;
 use crate::store_provider::StoreProvider;
 use crate::tablestore::TableStore;
 use crate::types::KeyValue;
@@ -145,8 +144,8 @@ impl DbReaderInner {
             status_reporter.clone(),
         ));
 
-        let stat_registry = Arc::new(StatRegistry::new());
-        let db_stats = DbStats::new(stat_registry.as_ref());
+        let db_metrics = crate::db_metrics::DbMetrics::new(None);
+        let db_stats = DbStats::new(&db_metrics);
 
         let state = RwLock::new(initial_state);
         let reader = Reader {
@@ -1120,7 +1119,6 @@ mod tests {
     use crate::proptest_util::sample;
     use crate::rand::DbRand;
     use crate::reader::Reader;
-    use crate::stats::StatRegistry;
     use crate::store_provider::StoreProvider;
     use crate::tablestore::TableStore;
     use crate::types::RowEntry;
@@ -2105,10 +2103,10 @@ mod tests {
         // Construct just enough DbReaderInner state to call rebuild_checkpoint_state()
         // directly. skip_wal_replay keeps the test scoped to the IMM retention logic.
         let oracle = Arc::new(DbReaderOracle::new(0, DbStatusReporter::new(0)));
-        let stat_registry = Arc::new(StatRegistry::new());
+        let db_metrics = crate::db_metrics::DbMetrics::new(None);
         let reader = Reader {
             table_store: Arc::clone(&table_store),
-            db_stats: DbStats::new(stat_registry.as_ref()),
+            db_stats: DbStats::new(&db_metrics),
             mono_clock: Arc::new(MonotonicClock::new(
                 test_provider.system_clock.clone(),
                 i64::MIN,
@@ -2197,10 +2195,10 @@ mod tests {
         };
 
         let oracle = Arc::new(DbReaderOracle::new(0, DbStatusReporter::new(0)));
-        let stat_registry = Arc::new(StatRegistry::new());
+        let db_metrics = crate::db_metrics::DbMetrics::new(None);
         let reader = Reader {
             table_store: Arc::clone(&table_store),
-            db_stats: DbStats::new(stat_registry.as_ref()),
+            db_stats: DbStats::new(&db_metrics),
             mono_clock: Arc::new(MonotonicClock::new(
                 test_provider.system_clock.clone(),
                 i64::MIN,

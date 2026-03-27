@@ -111,25 +111,25 @@ pub trait MetricsRecorder: Send + Sync {
 }
 
 /// Handle for incrementing a monotonic counter.
-pub trait CounterFn: Send + Sync {
+pub trait CounterFn: Send + Sync + std::fmt::Debug {
     /// Add `value` to the counter.
     fn increment(&self, value: u64);
 }
 
 /// Handle for setting a gauge to an arbitrary value.
-pub trait GaugeFn: Send + Sync {
+pub trait GaugeFn: Send + Sync + std::fmt::Debug {
     /// Set the gauge to `value`.
-    fn set(&self, value: f64);
+    fn set(&self, value: i64);
 }
 
 /// Handle for incrementing or decrementing a bidirectional counter.
-pub trait UpDownCounterFn: Send + Sync {
+pub trait UpDownCounterFn: Send + Sync + std::fmt::Debug {
     /// Add `value` to the counter (may be negative).
     fn increment(&self, value: i64);
 }
 
 /// Handle for recording observations into a histogram.
-pub trait HistogramFn: Send + Sync {
+pub trait HistogramFn: Send + Sync + std::fmt::Debug {
     /// Record a single observation.
     fn record(&self, value: f64);
 }
@@ -174,7 +174,7 @@ pub enum MetricValue {
     /// A monotonically increasing counter value.
     Counter(u64),
     /// A gauge value that can be set to arbitrary values.
-    Gauge(f64),
+    Gauge(i64),
     /// A bidirectional counter value.
     UpDownCounter(i64),
     /// A histogram with bucket counts, sum, min, max, and boundaries.
@@ -192,6 +192,25 @@ pub enum MetricValue {
         /// Number of observations in each bucket (len = boundaries.len() + 1).
         bucket_counts: Vec<u64>,
     },
+}
+
+impl std::fmt::Display for MetricValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            MetricValue::Counter(v) => write!(f, "{v}"),
+            MetricValue::Gauge(v) => write!(f, "{v}"),
+            MetricValue::UpDownCounter(v) => write!(f, "{v}"),
+            MetricValue::Histogram {
+                count,
+                sum,
+                min,
+                max,
+                ..
+            } => {
+                write!(f, "count={count}, sum={sum}, min={min}, max={max}")
+            }
+        }
+    }
 }
 
 /// Materialized snapshot of all registered metrics, with lookup methods.
@@ -238,21 +257,25 @@ impl Metrics {
 // No-op handles
 // ---------------------------------------------------------------------------
 
+#[derive(Debug)]
 struct NoopCounter;
 impl CounterFn for NoopCounter {
     fn increment(&self, _value: u64) {}
 }
 
+#[derive(Debug)]
 struct NoopGauge;
 impl GaugeFn for NoopGauge {
-    fn set(&self, _value: f64) {}
+    fn set(&self, _value: i64) {}
 }
 
+#[derive(Debug)]
 struct NoopUpDownCounter;
 impl UpDownCounterFn for NoopUpDownCounter {
     fn increment(&self, _value: i64) {}
 }
 
+#[derive(Debug)]
 struct NoopHistogram;
 impl HistogramFn for NoopHistogram {
     fn record(&self, _value: f64) {}
@@ -279,6 +302,7 @@ fn noop_histogram() -> Arc<dyn HistogramFn> {
 // ---------------------------------------------------------------------------
 
 /// Atomic-backed counter handle for the default recorder.
+#[derive(Debug)]
 struct DefaultCounter {
     value: AtomicU64,
 }
@@ -289,18 +313,20 @@ impl CounterFn for DefaultCounter {
     }
 }
 
-/// Atomic-backed gauge handle for the default recorder. Stores f64 via bit-cast.
+/// Atomic-backed gauge handle for the default recorder.
+#[derive(Debug)]
 struct DefaultGauge {
-    bits: AtomicU64,
+    value: AtomicI64,
 }
 
 impl GaugeFn for DefaultGauge {
-    fn set(&self, value: f64) {
-        self.bits.store(value.to_bits(), Ordering::Relaxed);
+    fn set(&self, value: i64) {
+        self.value.store(value, Ordering::Relaxed);
     }
 }
 
 /// Atomic-backed up/down counter handle for the default recorder.
+#[derive(Debug)]
 struct DefaultUpDownCounter {
     value: AtomicI64,
 }
@@ -312,6 +338,7 @@ impl UpDownCounterFn for DefaultUpDownCounter {
 }
 
 /// Atomic-backed histogram handle for the default recorder.
+#[derive(Debug)]
 struct DefaultHistogram {
     count: AtomicU64,
     sum: AtomicU64, // f64 bit-cast, updated via CAS
@@ -427,7 +454,7 @@ impl DefaultMetricsRecorder {
                         MetricValue::Counter(c.value.load(Ordering::Relaxed))
                     }
                     DefaultMetricHandle::Gauge(g) => {
-                        MetricValue::Gauge(f64::from_bits(g.bits.load(Ordering::Relaxed)))
+                        MetricValue::Gauge(g.value.load(Ordering::Relaxed))
                     }
                     DefaultMetricHandle::UpDownCounter(u) => {
                         MetricValue::UpDownCounter(u.value.load(Ordering::Relaxed))
@@ -503,7 +530,7 @@ impl MetricsRecorder for DefaultMetricsRecorder {
             }
         }
         let handle = Arc::new(DefaultGauge {
-            bits: AtomicU64::new(f64::to_bits(0.0)),
+            value: AtomicI64::new(0),
         });
         entries.push(DefaultMetricEntry {
             name: name.to_owned(),
@@ -569,6 +596,7 @@ impl MetricsRecorder for DefaultMetricsRecorder {
 // ---------------------------------------------------------------------------
 
 /// Composite counter that fans out increments to multiple handles.
+#[derive(Debug)]
 struct CompositeCounter {
     handles: Vec<Arc<dyn CounterFn>>,
 }
@@ -581,11 +609,12 @@ impl CounterFn for CompositeCounter {
 }
 
 /// Composite gauge that fans out set calls to multiple handles.
+#[derive(Debug)]
 struct CompositeGauge {
     handles: Vec<Arc<dyn GaugeFn>>,
 }
 impl GaugeFn for CompositeGauge {
-    fn set(&self, value: f64) {
+    fn set(&self, value: i64) {
         for h in &self.handles {
             h.set(value);
         }
@@ -593,6 +622,7 @@ impl GaugeFn for CompositeGauge {
 }
 
 /// Composite up-down counter that fans out increments to multiple handles.
+#[derive(Debug)]
 struct CompositeUpDownCounter {
     handles: Vec<Arc<dyn UpDownCounterFn>>,
 }
@@ -605,6 +635,7 @@ impl UpDownCounterFn for CompositeUpDownCounter {
 }
 
 /// Composite histogram that fans out observations to multiple handles.
+#[derive(Debug)]
 struct CompositeHistogram {
     handles: Vec<Arc<dyn HistogramFn>>,
 }
@@ -717,6 +748,7 @@ impl MetricsRecorder for CompositeMetricsRecorder {
 /// Internal helper that wraps a [`MetricsRecorder`] and the configured
 /// [`MetricLevel`]. Provides a builder API that resolves defaults and handles
 /// level filtering.
+#[derive(Clone)]
 pub struct MetricsRecorderHelper {
     recorder: Arc<dyn MetricsRecorder>,
     level: MetricLevel,
@@ -1021,6 +1053,23 @@ fn canonicalize_owned_labels(labels: &[(String, String)]) -> Vec<(String, String
 }
 
 // ---------------------------------------------------------------------------
+// Test utilities
+// ---------------------------------------------------------------------------
+
+/// Create a [`DefaultMetricsRecorder`] and a [`MetricsRecorderHelper`] wired
+/// together with the default metric level. Useful in tests that need both
+/// handles without repeating the boilerplate.
+#[cfg(any(test, feature = "test-util"))]
+pub fn test_recorder_helper() -> (Arc<DefaultMetricsRecorder>, MetricsRecorderHelper) {
+    let default_recorder = Arc::new(DefaultMetricsRecorder::new());
+    let helper = MetricsRecorderHelper::new(
+        default_recorder.clone() as Arc<dyn MetricsRecorder>,
+        MetricLevel::default(),
+    );
+    (default_recorder, helper)
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -1050,21 +1099,21 @@ mod tests {
     fn should_track_gauge() {
         let recorder = DefaultMetricsRecorder::new();
         let gauge = recorder.register_gauge("test.gauge", "A test gauge", &[]);
-        gauge.set(42.5);
+        gauge.set(42);
 
         let snapshot = recorder.snapshot();
         let metric = snapshot.by_name("test.gauge");
         assert_eq!(metric.len(), 1);
         match &metric[0].value {
-            MetricValue::Gauge(v) => assert!((v - 42.5).abs() < f64::EPSILON),
+            MetricValue::Gauge(v) => assert_eq!(*v, 42),
             other => panic!("expected Gauge, got {:?}", other),
         }
 
-        gauge.set(0.0);
+        gauge.set(0);
         let snapshot = recorder.snapshot();
         let metric = snapshot.by_name("test.gauge");
         match &metric[0].value {
-            MetricValue::Gauge(v) => assert!((v - 0.0).abs() < f64::EPSILON),
+            MetricValue::Gauge(v) => assert_eq!(*v, 0),
             other => panic!("expected Gauge, got {:?}", other),
         }
     }
@@ -1234,16 +1283,16 @@ mod tests {
         ]);
 
         let gauge = composite.register_gauge("test.gauge", "desc", &[]);
-        gauge.set(99.0);
+        gauge.set(99);
 
         let default_snap = default.snapshot();
         let user_snap = user.snapshot();
         match &default_snap.by_name("test.gauge")[0].value {
-            MetricValue::Gauge(v) => assert!((v - 99.0).abs() < f64::EPSILON),
+            MetricValue::Gauge(v) => assert_eq!(*v, 99),
             other => panic!("expected Gauge, got {:?}", other),
         }
         match &user_snap.by_name("test.gauge")[0].value {
-            MetricValue::Gauge(v) => assert!((v - 99.0).abs() < f64::EPSILON),
+            MetricValue::Gauge(v) => assert_eq!(*v, 99),
             other => panic!("expected Gauge, got {:?}", other),
         }
     }
@@ -1476,16 +1525,16 @@ mod tests {
     fn should_warn_and_return_existing_on_duplicate_gauge() {
         let recorder = DefaultMetricsRecorder::new();
         let first = recorder.register_gauge("dup.gauge", "first", &[]);
-        first.set(1.0);
+        first.set(1);
 
         let second = recorder.register_gauge("dup.gauge", "second", &[]);
-        second.set(2.0);
+        second.set(2);
 
         let snap = recorder.snapshot();
         let metrics = snap.by_name("dup.gauge");
         assert_eq!(metrics.len(), 1);
         match &metrics[0].value {
-            MetricValue::Gauge(v) => assert!((v - 2.0).abs() < f64::EPSILON),
+            MetricValue::Gauge(v) => assert_eq!(*v, 2),
             other => panic!("expected Gauge, got {:?}", other),
         }
     }

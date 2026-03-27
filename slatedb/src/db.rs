@@ -52,6 +52,7 @@ use crate::config::{
     WriteOptions,
 };
 use crate::db_iter::DbIterator;
+use crate::db_metrics::DbMetrics;
 use crate::db_read::DbRead;
 use crate::db_snapshot::DbSnapshot;
 use crate::db_state::{DbState, SsTableId};
@@ -90,7 +91,7 @@ pub(crate) struct DbInner {
     pub(crate) memtable_flush_notifier: UnboundedSender<MemtableFlushMsg>,
     pub(crate) write_notifier: UnboundedSender<WriteBatchMessage>,
     pub(crate) db_stats: DbStats,
-    pub(crate) stat_registry: Arc<StatRegistry>,
+    pub(crate) db_metrics: DbMetrics,
     #[allow(dead_code)]
     pub(crate) fp_registry: Arc<FailPointRegistry>,
     /// A clock which is guaranteed to be monotonic. it's previous value is
@@ -118,7 +119,7 @@ impl DbInner {
         manifest: DirtyObject<Manifest>,
         memtable_flush_notifier: UnboundedSender<MemtableFlushMsg>,
         write_notifier: UnboundedSender<WriteBatchMessage>,
-        stat_registry: Arc<StatRegistry>,
+        db_metrics: DbMetrics,
         fp_registry: Arc<FailPointRegistry>,
         merge_operator: Option<crate::merge_operator::MergeOperatorType>,
     ) -> Result<Self, SlateDBError> {
@@ -141,7 +142,7 @@ impl DbInner {
         let db_state = DbState::new(manifest, status_reporter.clone());
         let state = Arc::new(RwLock::new(db_state));
 
-        let db_stats = DbStats::new(stat_registry.as_ref());
+        let db_stats = DbStats::new(&db_metrics);
         let wal_enabled = DbInner::wal_enabled_in_options(&settings);
 
         let reader = Reader {
@@ -180,7 +181,7 @@ impl DbInner {
             mono_clock,
             system_clock,
             rand,
-            stat_registry,
+            db_metrics,
             fp_registry,
             reader,
             txn_manager,
@@ -206,7 +207,7 @@ impl DbInner {
         key: K,
         options: &ReadOptions,
     ) -> Result<Option<KeyValue>, SlateDBError> {
-        self.db_stats.get_requests.inc();
+        self.db_stats.get_requests.increment(1);
         self.status()?;
         let db_state = self.state.read().view();
         self.reader
@@ -219,7 +220,7 @@ impl DbInner {
         range: BytesRange,
         options: &ScanOptions,
     ) -> Result<DbIterator, SlateDBError> {
-        self.db_stats.scan_requests.inc();
+        self.db_stats.scan_requests.increment(1);
         self.status()?;
         let db_state = self.state.read().view();
         self.reader
@@ -277,8 +278,8 @@ impl DbInner {
         batch: WriteBatch,
         options: &WriteOptions,
     ) -> Result<WriteHandle, SlateDBError> {
-        self.db_stats.write_batch_count.inc();
-        self.db_stats.write_ops.add(batch.ops.len() as u64);
+        self.db_stats.write_batch_count.increment(1);
+        self.db_stats.write_ops.increment(batch.ops.len() as u64);
         self.status()?;
         if batch.ops.is_empty() {
             return Err(SlateDBError::EmptyBatch);
@@ -343,7 +344,7 @@ impl DbInner {
             );
 
             if total_mem_size_bytes >= self.settings.max_unflushed_bytes {
-                self.db_stats.backpressure_count.inc();
+                self.db_stats.backpressure_count.increment(1);
                 warn!(
                     "unflushed memtable size exceeds max_unflushed_bytes. applying backpressure. [total_mem_size_bytes={}, wal_size_bytes={}, imm_memtable_size_bytes={}, max_unflushed_bytes={}]",
                     format_bytes_si(total_mem_size_bytes as u64),
@@ -486,7 +487,7 @@ impl DbInner {
         options: FlushOptions,
         check_status: bool,
     ) -> Result<(), SlateDBError> {
-        self.db_stats.flush_requests.inc();
+        self.db_stats.flush_requests.increment(1);
         if check_status {
             self.status()?;
         }
@@ -1512,7 +1513,7 @@ impl Db {
 
     /// Get the metrics registry for the database.
     pub fn metrics(&self) -> Arc<StatRegistry> {
-        self.inner.stat_registry.clone()
+        self.inner.db_metrics.stat_registry()
     }
 
     /// Get the current manifest state.
@@ -2381,8 +2382,8 @@ mod tests {
             .tempdir()
             .unwrap();
 
-        let stats_registry = StatRegistry::new();
-        let cache_stats = Arc::new(CachedObjectStoreStats::new(&stats_registry));
+        let db_metrics = crate::db_metrics::DbMetrics::new(None);
+        let cache_stats = Arc::new(CachedObjectStoreStats::new(&db_metrics));
         let part_size = 1024;
         info!("temp_dir: {:?}", temp_dir.path());
 
@@ -3779,7 +3780,7 @@ mod tests {
             .build()
             .await
             .unwrap();
-        let db_stats = db.inner.db_stats.clone();
+        let stat_registry = db.metrics();
         let write_opts = WriteOptions {
             await_durable: false,
         };
@@ -3820,15 +3821,17 @@ mod tests {
                 .unwrap();
         });
 
-        let this_stats = db_stats.clone();
+        let this_registry = stat_registry.clone();
         // Wait up to 30s for backpressure to be applied to the second write.
         wait_for(Box::new(move || {
-            this_stats.backpressure_count.value.load(Ordering::SeqCst) > 0
+            this_registry
+                .lookup("db/backpressure_count")
+                .is_some_and(|s| s.get() > 0)
         }))
         .await;
 
         // Verify that backpressure is applied.
-        assert!(db_stats.backpressure_count.value.load(Ordering::SeqCst) >= 1);
+        assert!(stat_registry.lookup("db/backpressure_count").unwrap().get() >= 1);
 
         // Unblock so put_with_options in join_handle can complete and join_handle.await returns
         fail_parallel::cfg(fp_registry.clone(), "write-wal-sst-io-error", "off").unwrap();
@@ -5762,7 +5765,6 @@ mod tests {
 
         let gc = GarbageCollectorBuilder::new(path.clone(), object_store.clone())
             .with_options(gc_options)
-            .with_stat_registry(db.metrics())
             .with_system_clock(db.inner.system_clock.clone())
             .build();
 
