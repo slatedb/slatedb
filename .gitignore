@@ -16,3 +16,4 @@ bindings/python/slatedb/uniffi/_slatedb_uniffi/
 bindings/python/slatedb/_slatedb_uniffi/
 .claude/
 CLAUDE.md
+website/src/content/docs/rfcs/*.md
