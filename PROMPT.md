@@ -68,6 +68,7 @@ You are in a Ralph Wiggum loop. Work through the first few TODOs in the `## TODO
 - you may update the TODO items as you see fit--remove outdated items, add new items, mark items as completed
 - commit after each completed TODO
 - use conventional commit syntax for commit messages
+- if you run for more than 10 minutes, take a step back, break up the TODO into more parts, and stop
 - if there are no items left in the TODO, append a new line to the end of the file that simply contains ✅
 
 ## uniffi-bindgen-node-js changes
