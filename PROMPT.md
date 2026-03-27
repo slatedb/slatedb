@@ -9,6 +9,7 @@
 - Include a prerequisite fix in uniffi-bindgen-node-js: as observed locally on March 27, 2026 with Node v24.3.0 and koffi 2.15.2, a freshly generated SlateDB package fails on
   the first db.put() after DbBuilder.build() with TypeError: Unexpected <anonymous_49> * value, expected RustArcPtrDb. That generator/runtime incompatibility must be fixed
   before the Node suite can pass.
+- You are _NOT_ allowed to patch generated code. If you find issues with generated code, you must fix `uniffi-bindgen-node-js`. See the instructions toward the bottom of this file.
 
 ## Key Changes
 
@@ -83,6 +84,8 @@ Make sure to re-install and rebuild after changing that repo:
 cargo install --path ~/Code/uniffi-bindgen-node-js --force
 npm --prefix bindings/node run build
 ```
+
+You have permission to run these commands.
 
 ## TODO
 
