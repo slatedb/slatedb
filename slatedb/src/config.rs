@@ -639,7 +639,9 @@ pub struct Settings {
 
     /// Number of parallel workers for flushing immutable memtables to L0 SSTs.
     /// Higher values increase L0 flush throughput at the cost of more concurrent
-    /// object store uploads.
+    /// object store uploads. Increasing parallelism may require a higher `l0_max_ssts`
+    /// to avoid backpressure from compaction not keeping up with the higher steady-state
+    /// flush rate.
     pub l0_flush_parallelism: usize,
 
     /// Defines the max number of unflushed key/value pair bytes that should reside in memory
