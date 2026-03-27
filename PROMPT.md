@@ -88,7 +88,7 @@ npm --prefix bindings/node run build
 
 - [x] Add a test script in bindings/node/package.json that builds the package and runs the Node test runner.
 - [x] Add a shared bindings/node/tests support module with store/build/open/drain/assert/wait/cleanup helpers and ConcatMergeOperator.
-- [ ] Port the DB lifecycle, CRUD, scan, batch, flush, merge, snapshot, transaction, invalid-input, and fencing coverage into bindings/node/tests/db.test.mjs.
+- [x] Port the DB lifecycle, CRUD, scan, batch, flush, merge, snapshot, transaction, invalid-input, and fencing coverage into bindings/node/tests/db.test.mjs.
 - [ ] Port the reader lifecycle, build-failure, point-read, scan, refresh, WAL replay, merge-operator, builder-validation, and invalid-range coverage into bindings/node/tests/
   reader.test.mjs.
 - [ ] Port the WAL reader empty-listing, navigation, metadata/row decoding, and missing-file coverage into bindings/node/tests/wal-reader.test.mjs.
