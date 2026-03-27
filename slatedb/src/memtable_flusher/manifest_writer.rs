@@ -29,7 +29,6 @@ use std::time::Duration;
 use tokio::runtime::Handle;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
-use tokio::time;
 
 /// Result reported for a completed flush request.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -229,9 +228,9 @@ impl ManifestWriterTask {
         }
     }
 
-    #[allow(clippy::disallowed_methods)]
     async fn run(mut self) -> ManifestWriterCloseResult {
-        let mut poll = time::interval(self.manifest_poll_interval);
+        let clock = Arc::clone(&self.db.system_clock);
+        let mut poll = clock.ticker(self.manifest_poll_interval);
         let result = loop {
             tokio::select! {
                 _ = poll.tick() => {
