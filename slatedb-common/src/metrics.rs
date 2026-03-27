@@ -194,6 +194,25 @@ pub enum MetricValue {
     },
 }
 
+impl std::fmt::Display for MetricValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            MetricValue::Counter(v) => write!(f, "{v}"),
+            MetricValue::Gauge(v) => write!(f, "{v}"),
+            MetricValue::UpDownCounter(v) => write!(f, "{v}"),
+            MetricValue::Histogram {
+                count,
+                sum,
+                min,
+                max,
+                ..
+            } => {
+                write!(f, "count={count}, sum={sum}, min={min}, max={max}")
+            }
+        }
+    }
+}
+
 /// Materialized snapshot of all registered metrics, with lookup methods.
 #[derive(Debug, Clone)]
 pub struct Metrics {
@@ -1040,6 +1059,7 @@ fn canonicalize_owned_labels(labels: &[(String, String)]) -> Vec<(String, String
 /// Create a [`DefaultMetricsRecorder`] and a [`MetricsRecorderHelper`] wired
 /// together with the default metric level. Useful in tests that need both
 /// handles without repeating the boilerplate.
+#[cfg(any(test, feature = "test-util"))]
 pub fn test_recorder_helper() -> (Arc<DefaultMetricsRecorder>, MetricsRecorderHelper) {
     let default_recorder = Arc::new(DefaultMetricsRecorder::new());
     let helper = MetricsRecorderHelper::new(

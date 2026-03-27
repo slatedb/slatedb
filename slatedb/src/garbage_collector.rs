@@ -309,16 +309,11 @@ impl GarbageCollector {
             return;
         }
         let snapshot = self.db_metrics.snapshot();
-        let get_value = |name: &str| -> i64 {
+        let get_value = |name: &str| -> &MetricValue {
             snapshot
                 .by_name(name)
                 .first()
-                .map_or(0, |m| match &m.value {
-                    MetricValue::Counter(v) => *v as i64,
-                    MetricValue::UpDownCounter(v) => *v,
-                    MetricValue::Gauge(v) => *v,
-                    MetricValue::Histogram { count, .. } => *count as i64,
-                })
+                .map_or(&MetricValue::Counter(0), |m| &m.value)
         };
         debug!(
             "garbage collector stats [manifest_count={}, wals_count={}, compacted_count={}, compactions_count={}]",
