@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use parking_lot::Mutex;
+use slatedb_common::metrics::{DefaultMetricsRecorder, MetricsRecorder};
 use uuid::Uuid;
 
 use crate::config::{ReaderOptions, SstBlockSize};
@@ -90,10 +91,18 @@ impl DbBuilder {
 #[uniffi::export(async_runtime = "tokio")]
 impl DbBuilder {
     /// Opens the database and consumes this builder.
+    ///
+    /// Registers a `DefaultMetricsRecorder` so that `Db::metrics()` works from
+    /// bindings. Once UniFFI supports native `MetricsRecorder` callbacks this
+    /// can be removed in favor of user-supplied recorders.
     pub async fn build(&self) -> Result<Arc<Db>, Error> {
+        let metrics_recorder = Arc::new(DefaultMetricsRecorder::new());
         let builder = self.take_builder()?;
-        let db = builder.build().await?;
-        Ok(Arc::new(Db::new(db)))
+        let db = builder
+            .with_metrics_recorder(metrics_recorder.clone() as Arc<dyn MetricsRecorder>)
+            .build()
+            .await?;
+        Ok(Arc::new(Db::new(db, metrics_recorder)))
     }
 }
 

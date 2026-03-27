@@ -75,7 +75,6 @@ use crate::compactor_executor::{
 };
 use crate::compactor_state_protocols::CompactorStateWriter;
 use crate::config::CompactorOptions;
-use crate::db_metrics::DbMetrics;
 use crate::db_state::SortedRun;
 use crate::db_status::ClosedResultWriter;
 use crate::dispatcher::{MessageFactory, MessageHandler, MessageHandlerExecutor};
@@ -87,6 +86,7 @@ use crate::rand::DbRand;
 use crate::tablestore::TableStore;
 use crate::utils::{format_bytes_si, IdGenerator};
 use slatedb_common::clock::SystemClock;
+use slatedb_common::metrics::MetricsRecorderHelper;
 
 pub use crate::compactor_state::{
     Compaction, CompactionSpec, CompactionStatus, CompactionsCore, CompactorState, SourceId,
@@ -279,7 +279,7 @@ impl Compactor {
         scheduler_supplier: Arc<dyn CompactionSchedulerSupplier>,
         compactor_runtime: Handle,
         rand: Arc<DbRand>,
-        db_metrics: &DbMetrics,
+        recorder: &MetricsRecorderHelper,
         system_clock: Arc<dyn SystemClock>,
         closed_result: ClosedResultWriter,
         merge_operator: Option<MergeOperatorType>,
@@ -287,7 +287,7 @@ impl Compactor {
             Arc<dyn CompactionFilterSupplier>,
         >,
     ) -> Self {
-        let stats = Arc::new(CompactionStats::new(db_metrics));
+        let stats = Arc::new(CompactionStats::new(recorder));
         let task_executor = Arc::new(MessageHandlerExecutor::new(
             closed_result,
             system_clock.clone(),
@@ -967,13 +967,12 @@ impl CompactorEventHandler {
 }
 
 pub mod stats {
-    use crate::db_metrics::DbMetrics;
-    use slatedb_common::metrics::{CounterFn, GaugeFn, UpDownCounterFn};
+    use slatedb_common::metrics::{CounterFn, GaugeFn, MetricsRecorderHelper, UpDownCounterFn};
     use std::sync::Arc;
 
     macro_rules! compactor_stat_name {
         ($suffix:expr) => {
-            crate::stat_name!("compactor", $suffix)
+            concat!("compactor", "/", $suffix)
         };
     }
 
@@ -994,7 +993,7 @@ pub mod stats {
     }
 
     impl CompactionStats {
-        pub(crate) fn new(recorder: &DbMetrics) -> Self {
+        pub(crate) fn new(recorder: &MetricsRecorderHelper) -> Self {
             Self {
                 last_compaction_ts: recorder.gauge(LAST_COMPACTION_TS_SEC).register(),
                 running_compactions: recorder.up_down_counter(RUNNING_COMPACTIONS).register(),

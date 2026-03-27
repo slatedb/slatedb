@@ -52,7 +52,6 @@ use crate::config::{
     WriteOptions,
 };
 use crate::db_iter::DbIterator;
-use crate::db_metrics::DbMetrics;
 use crate::db_read::DbRead;
 use crate::db_snapshot::DbSnapshot;
 use crate::db_state::{DbState, SsTableId};
@@ -68,7 +67,6 @@ use crate::paths::PathResolver;
 use crate::rand::DbRand;
 use crate::reader::Reader;
 use crate::sst_iter::SstIteratorOptions;
-use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
 use crate::transaction_manager::TransactionManager;
 use crate::types::KeyValue;
@@ -76,6 +74,7 @@ use crate::utils::{format_bytes_si, SendSafely};
 use crate::wal_buffer::{WalBufferManager, WAL_BUFFER_TASK_NAME};
 use crate::wal_replay::{WalReplayIterator, WalReplayOptions};
 use slatedb_common::clock::SystemClock;
+use slatedb_common::metrics::MetricsRecorderHelper;
 use slatedb_txn_obj::DirtyObject;
 
 use crate::db_status::DbStatusReporter;
@@ -91,7 +90,8 @@ pub(crate) struct DbInner {
     pub(crate) memtable_flush_notifier: UnboundedSender<MemtableFlushMsg>,
     pub(crate) write_notifier: UnboundedSender<WriteBatchMessage>,
     pub(crate) db_stats: DbStats,
-    pub(crate) db_metrics: DbMetrics,
+    #[allow(dead_code)]
+    pub(crate) recorder: MetricsRecorderHelper,
     #[allow(dead_code)]
     pub(crate) fp_registry: Arc<FailPointRegistry>,
     /// A clock which is guaranteed to be monotonic. it's previous value is
@@ -119,7 +119,7 @@ impl DbInner {
         manifest: DirtyObject<Manifest>,
         memtable_flush_notifier: UnboundedSender<MemtableFlushMsg>,
         write_notifier: UnboundedSender<WriteBatchMessage>,
-        db_metrics: DbMetrics,
+        recorder: MetricsRecorderHelper,
         fp_registry: Arc<FailPointRegistry>,
         merge_operator: Option<crate::merge_operator::MergeOperatorType>,
     ) -> Result<Self, SlateDBError> {
@@ -142,7 +142,7 @@ impl DbInner {
         let db_state = DbState::new(manifest, status_reporter.clone());
         let state = Arc::new(RwLock::new(db_state));
 
-        let db_stats = DbStats::new(&db_metrics);
+        let db_stats = DbStats::new(&recorder);
         let wal_enabled = DbInner::wal_enabled_in_options(&settings);
 
         let reader = Reader {
@@ -181,7 +181,7 @@ impl DbInner {
             mono_clock,
             system_clock,
             rand,
-            db_metrics,
+            recorder,
             fp_registry,
             reader,
             txn_manager,
@@ -1509,11 +1509,6 @@ impl Db {
             .flush_with_options(options, true)
             .await
             .map_err(Into::into)
-    }
-
-    /// Get the metrics registry for the database.
-    pub fn metrics(&self) -> Arc<StatRegistry> {
-        self.inner.db_metrics.stat_registry()
     }
 
     /// Get the current manifest state.

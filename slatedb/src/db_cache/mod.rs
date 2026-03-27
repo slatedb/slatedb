@@ -20,11 +20,11 @@ use log::{debug, error, trace};
 use parking_lot::Mutex;
 
 use crate::db_cache::stats::DbCacheStats;
-use crate::db_metrics::DbMetrics;
 use crate::format::block::Block;
 use crate::sst_stats::SstStats;
 use crate::{db_state::SsTableId, filter::BloomFilter, flatbuffer_types::SsTableIndexOwned};
 use slatedb_common::clock::SystemClock;
+use slatedb_common::metrics::MetricsRecorderHelper;
 
 #[cfg(feature = "foyer")]
 pub mod foyer;
@@ -420,11 +420,11 @@ pub(crate) struct DbCacheWrapper {
 impl DbCacheWrapper {
     pub(crate) fn new(
         cache: Arc<dyn DbCache>,
-        db_metrics: &DbMetrics,
+        recorder: &MetricsRecorderHelper,
         system_clock: Arc<dyn SystemClock>,
     ) -> Self {
         Self {
-            stats: DbCacheStats::new(db_metrics),
+            stats: DbCacheStats::new(recorder),
             cache,
             scope_id: NEXT_CACHE_SCOPE_ID.fetch_add(1, Ordering::Relaxed),
             last_err_log_time: Mutex::new(None),
@@ -559,13 +559,12 @@ impl DbCache for DbCacheWrapper {
 }
 
 pub mod stats {
-    use crate::db_metrics::DbMetrics;
-    use slatedb_common::metrics::CounterFn;
+    use slatedb_common::metrics::{CounterFn, MetricsRecorderHelper};
     use std::sync::Arc;
 
     macro_rules! dbcache_stat_name {
         ($suffix:expr) => {
-            crate::stat_name!("dbcache", $suffix)
+            concat!("dbcache", "/", $suffix)
         };
     }
 
@@ -592,7 +591,7 @@ pub mod stats {
     }
 
     impl DbCacheStats {
-        pub(super) fn new(recorder: &DbMetrics) -> Self {
+        pub(super) fn new(recorder: &MetricsRecorderHelper) -> Self {
             Self {
                 filter_hit: recorder.counter(DB_CACHE_FILTER_HIT).register(),
                 filter_miss: recorder.counter(DB_CACHE_FILTER_MISS).register(),

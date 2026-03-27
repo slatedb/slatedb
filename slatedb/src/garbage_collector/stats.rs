@@ -1,10 +1,9 @@
-use crate::db_metrics::DbMetrics;
-use slatedb_common::metrics::CounterFn;
+use slatedb_common::metrics::{CounterFn, MetricsRecorderHelper};
 use std::sync::Arc;
 
 macro_rules! gc_stat_name {
     ($suffix:expr) => {
-        crate::stat_name!("gc", $suffix)
+        concat!("gc", "/", $suffix)
     };
 }
 
@@ -24,7 +23,7 @@ pub struct GcStats {
 }
 
 impl GcStats {
-    pub(crate) fn new(recorder: &DbMetrics) -> Self {
+    pub(crate) fn new(recorder: &MetricsRecorderHelper) -> Self {
         Self {
             gc_manifest_count: recorder.counter(GC_MANIFEST_COUNT).register(),
             gc_wal_count: recorder.counter(GC_WAL_COUNT).register(),

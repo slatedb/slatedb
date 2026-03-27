@@ -9,11 +9,9 @@ Authors:
 ## Summary
 
 Replace SlateDB's `StatRegistry` with a recorder-based metrics system that supports labels,
-histograms, and user-pluggable backends (Prometheus, OTLP, etc.) while preserving a
-zero-dependency, always-on default for `db.metrics()` debugging. The new system uses a
+histograms, and user-pluggable backends (Prometheus, OTLP, etc.). The new system uses a
 `MetricsRecorder` trait that users can implement to bridge metrics to their observability
-stack, and an internal composite recorder that forwards events to both the built-in default
-(atomic-backed) and the user's recorder.
+stack. When no recorder is configured, a zero-cost `NoopMetricsRecorder` is used by default.
 
 ## Motivation
 
@@ -35,8 +33,7 @@ has several limitations:
 - Support multi-dimensional metrics (labels) to reduce metric proliferation
 - Add histogram support for latency/size distributions
 - Provide a pluggable `MetricsRecorder` trait for Prometheus/OTLP/custom backends
-- Keep an always-on default recorder so `db.metrics()` works without configuration
-- Return FFI-friendly types from `db.metrics()`
+- Default to a zero-cost no-op recorder when no user recorder is configured
 - No new external dependencies
 
 ## Non-Goals
@@ -51,7 +48,7 @@ has several limitations:
 // slatedb/src/metrics.rs
 
 /// User-implemented trait to bridge SlateDB metrics to their observability system.
-/// Passed via DbBuilder. If not provided, only the built-in default recorder is used.
+/// Passed via DbBuilder. If not provided, a NoopMetricsRecorder is used.
 pub trait MetricsRecorder: Send + Sync {
     fn register_counter(&self, name: &str, description: &str, labels: &[(&str, &str)]) -> Arc<dyn CounterFn>;
     fn register_gauge(&self, name: &str, description: &str, labels: &[(&str, &str)]) -> Arc<dyn GaugeFn>;
@@ -64,7 +61,7 @@ pub trait CounterFn: Send + Sync {
 }
 
 pub trait GaugeFn: Send + Sync {
-    fn set(&self, value: f64);
+    fn set(&self, value: i64);
 }
 
 pub trait UpDownCounterFn: Send + Sync {
@@ -90,7 +87,7 @@ pub enum MetricLevel {
 **Key decisions:**
 - **Labels are `&[(&str, &str)]`** fixed at registration time. Label identity is an unordered set of unique key/value pairs, not the input slice order. Duplicate keys are invalid. SlateDB canonicalizes labels during registration (for example by sorting by key then value) so each unique `(name, labels)` combo maps to exactly one handle.
 - **Separate gauge and up/down counter.** Following OpenTelemetry semantics, `GaugeFn` supports only absolute `set` operations (e.g. current memory usage, queue depth snapshots), while `UpDownCounterFn` supports additive `increment` with negative values (e.g. active connection count, in-flight requests). This maps cleanly to OTel's instrument model and avoids forcing backend implementors to guess which semantic the caller intended.
-- **Counters stay integer; gauges and histograms use floating point.** `CounterFn` uses `u64` and `UpDownCounterFn` uses `i64`, while `GaugeFn` and `HistogramFn` use `f64`. This preserves natural counter semantics while simplifying the trait surface vs. the current generic `Gauge<T>` (which has separate impls for `i64`, `u64`, `i32`, `bool`). Precision loss for large integer-valued gauges is acceptable for metrics.
+- **Counters and gauges stay integer; histograms use floating point.** `CounterFn` uses `u64`, `UpDownCounterFn` uses `i64`, and `GaugeFn` uses `i64`, while `HistogramFn` uses `f64`. This preserves natural counter/gauge semantics while simplifying the trait surface vs. the current generic `Gauge<T>` (which has separate impls for `i64`, `u64`, `i32`, `bool`).
 - **Histogram boundaries are always explicit.** Both the `MetricsRecorder` trait and the internal builder require boundaries upfront — there are no implicit defaults. `register_histogram` accepts `boundaries: &[f64]` specifying the upper-exclusive bucket boundaries. SlateDB provides standard boundary constants (`LATENCY_BOUNDARIES`, `SIZE_BOUNDARIES`) that internal callers select from. This follows the Prometheus philosophy that bucket boundaries are always a deliberate choice.
 - **Metric levels for hot-path control.** Each metric is registered with a `MetricLevel` (`Info` or `Debug`). The configured level threshold (set via `Settings::metric_level`, default `Info`) determines which metrics are active. Metrics at or above the threshold are registered normally; metrics below it get static no-op handles — zero allocation, zero virtual dispatch on the hot path. This is decided once at registration time, not checked per-operation. The `MetricsRecorder` trait is not aware of levels; the builder short-circuits before calling the trait for filtered-out metrics. Because `metric_level` lives in `Settings`, it is serializable and supports env variable overrides.
 - **No external dependency.** SlateDB owns all trait definitions.
@@ -107,106 +104,25 @@ Settings {
          |
          v
   +------------------------+
-  | CompositeMetricsRecorder|  (wraps default + user's recorder)
+  | MetricsRecorderHelper  |  (wraps recorder + level filtering)
   +------------------------+
-       /              \
-      v                v
-  DefaultMetrics-    User's
-  Recorder           (Prometheus, OTLP, etc.)
-  (atomics)
+              |
+              v
+     User's recorder              OR    NoopMetricsRecorder
+     (Prometheus, OTLP, etc.)           (default, zero-cost)
 ```
 
-**CompositeMetricsRecorder** implements `MetricsRecorder` and is what all internal components
-receive (as `Arc<dyn MetricsRecorder>`). When a metric is registered:
+When `DbBuilder` opens a database, it creates a `MetricsRecorderHelper` wrapping either the
+user-provided `MetricsRecorder` or a `NoopMetricsRecorder` (the default). The helper is passed
+to all internal components for metric registration.
 
-1. Always registers with `DefaultMetricsRecorder` (atomic-backed, for `db.metrics()`)
-2. If user provided a recorder, also registers with it
-3. Returns a composite handle that forwards `increment`/`set`/`record` to both
+There is no built-in `DefaultMetricsRecorder` or `db.metrics()` snapshot API. Users who want to
+read metric values should provide their own recorder (e.g. `DefaultMetricsRecorder` from
+`slatedb-common` for testing, or a Prometheus/OTLP recorder for production).
 
-This means:
-- `db.metrics()` always works (reads from default recorder's atomics)
-- User's recorder gets all events too
-- When no user recorder is provided, the composite just delegates to the default (single virtual dispatch, no branch)
-
-### Default recorder internals
-
-| Metric type | Backing | Read |
-|------------|---------|-------------------|
-| Counter | `AtomicU64` | `.load(Relaxed)` |
-| Gauge | `AtomicU64` (f64 bit-cast) | `.load(Relaxed)` -> `f64::from_bits` |
-| UpDownCounter | `AtomicI64` | `.load(Relaxed)` |
-| Histogram | `AtomicU64` x4 (count, sum, min, max) + `Vec<AtomicU64>` bucket counts | CAS loops on write; `.load(Relaxed)` on read |
-
-**Histogram writes:** The default recorder maintains bucket counts using the
-boundaries supplied at registration time (always resolved by the builder before
-reaching the recorder). Each `record(value)` increments the first bucket whose
-boundary exceeds the value (plus an overflow bucket). This gives `db.metrics()`
-callers a basic distribution without requiring an external recorder. Users who
-need richer aggregation (e.g. exponential histograms, percentile sketches)
-should provide their own recorder.
-
-The default recorder stores registered metrics in a `Mutex<Vec<MetricEntry>>` (write-once at
-startup, never contended on the hot path since handles are cached).
-
-### Metrics API
-
-`db.metrics()` returns a materialized snapshot of the current metric values. This API is intended
-for "lightweight" observability and debugging usecases. If performance is desired, it's better to
-configure a proper recorder. Only metrics that were actually registered (i.e. not filtered out by
-the configured `MetricLevel`) appear in the snapshot.
-
-In this implementation, each metric is read individually via `Relaxed` atomic
-loads and copied into the returned `Metrics` value, so there is no guarantee
-that all values in a single result are from the same instant. 
-
-```rust
-pub struct Metric {
-    pub name: String,
-    pub labels: Vec<(String, String)>,
-    pub description: String,
-    pub value: MetricValue,
-}
-
-pub enum MetricValue {
-    Counter(u64),
-    Gauge(f64),
-    UpDownCounter(i64),
-    Histogram { count: u64, sum: f64, min: f64, max: f64, boundaries: Vec<f64>, bucket_counts: Vec<u64> },
-}
-
-/// Materialized snapshot of all registered metrics, with lookup methods.
-pub struct Metrics {
-    // private so we can change the impl in the future
-    metrics: Vec<Metric>,
-}
-
-impl Metrics {
-    /// Return all metrics.
-    pub fn all(&self) -> &[Metric] { ... }
-
-    /// Look up all metrics matching a given name (any labels).
-    pub fn by_name(&self, name: &str) -> Vec<&Metric> { ... }
-
-    /// Look up the unique metric matching a name and exact canonical label set.
-    /// Input label order does not matter.
-    pub fn by_name_and_labels(&self, name: &str, labels: &[(&str, &str)]) -> Option<&Metric> { ... }
-}
-
-impl Db {
-    /// Returns a snapshot of the current values of all registered metrics.
-    pub fn metrics(&self) -> Metrics;
-}
-```
-
-This replaces `pub fn metrics(&self) -> Arc<StatRegistry>`. The new return type preserves the
-ability to look up specific metrics by name (like `StatRegistry::lookup` today) while also
-supporting label-based filtering. It's FFI-friendly (the inner `Vec<Metric>` maps
-directly to a UniFFI sequence) and doesn't expose internal state. Additional query methods
-(e.g. `by_label`, `names()`) can be added later without breaking changes.
-
-The intended split is:
-- `db.metrics()`: snapshot API for debugging, tests, and language bindings
-- `MetricsRecorder`: event/export path for observability backends
+A `DefaultMetricsRecorder` (atomic-backed) is provided in `slatedb-common` for convenience and
+testing, but it is not used internally by default. Users can pass it as their recorder if they
+want snapshot-based access to metric values.
 
 ### Migration
 
@@ -481,20 +397,14 @@ can map both to Prometheus gauges since Prometheus doesn't distinguish the two.
 
 ### UniFFI integration
 
-The existing bindings expose `db.metrics()` as `HashMap<String, i64>`. The new design
-improves the read path and keeps the bindings aligned across the existing UniFFI surfaces:
+The UniFFI bindings layer automatically registers a `DefaultMetricsRecorder` when building a
+`Db`, so `db.metrics()` continues to work from Go, Java, and Python — returning
+`HashMap<String, i64>` as before. This recorder is internal to the bindings; the core Rust
+`Db` type has no `metrics()` method.
 
-**Read path:** `Metric` maps to a UniFFI Record, `MetricValue` to a UniFFI Enum, and
-`db.metrics()` returns a sequence of `Metric` values. Labels use a `MetricLabel { key, value }`
-Record since UniFFI doesn't support tuple fields like `(String, String)`. This keeps the
-foreign-language surface simple: Go, Java, and other bindings receive a fully materialized
-snapshot and can do name/label filtering locally.
-
-**Write path:** Out of scope for this RFC. Although the repository already uses UniFFI callback
-interfaces for some features, exposing `MetricsRecorder` itself to foreign languages would require
-additional design work around callback handle lifetimes, callback error handling, and the hot-path
-cost of forwarding every metric operation across FFI. This RFC only standardizes the core Rust
-trait and the structured read-side binding surface.
+Exposing `MetricsRecorder` itself to foreign languages via UniFFI callback interfaces is out of
+scope for this RFC. It would require additional design work around callback handle lifetimes,
+callback error handling, and the hot-path cost of forwarding every metric operation across FFI.
 
 ## Impact Analysis
 
@@ -553,33 +463,34 @@ trait and the structured read-side binding surface.
 
 ### Performance & Cost
 
-- **Hot path:** One additional virtual dispatch per metric operation (through composite handle). When no user recorder is configured, the composite delegates directly to the default atomic handle. This is negligible compared to I/O costs. Debug-level metrics that are filtered out use static no-op handles — zero virtual dispatch, zero branch on the hot path.
-- **Registration:** Takes a mutex lock in `DefaultMetricsRecorder`, but only during startup. No contention on the hot path since handles are cached.
-- **Memory:** Slightly more per metric (two `Arc<dyn Fn>` handles instead of one `Arc<Counter>`) when a user recorder is present. Negligible.
+- **Hot path:** One virtual dispatch per metric operation (through the recorder handle). When no user recorder is configured, `NoopMetricsRecorder` returns static no-op handles — zero allocation, zero work on the hot path. Debug-level metrics that are filtered out also use static no-op handles.
+- **Registration:** May take a lock depending on the user's recorder implementation, but only during startup. No contention on the hot path since handles are cached.
+- **Memory:** Minimal when using `NoopMetricsRecorder` (only `Arc<dyn Fn>` no-op handles). Slightly more per metric when a user recorder is present.
 - No impact on object-store request patterns, space/read/write amplification.
 
 ### Observability
 
 - **Configuration changes:** New `DbBuilder::with_metrics_recorder(Arc<dyn MetricsRecorder>)` method (runtime component, not serializable). New `Settings::metric_level: MetricLevel` field (default `Info`, serializable, supports env variable override).
-- **New components:** `metrics.rs` module (~300 lines). `stats.rs` is removed.
-- **Metrics:** All 39 existing metrics preserved with new names/labels (see naming table above). Histogram support added as a new metric type.
+- **New components:** `metrics.rs` module in `slatedb-common` (~300 lines). `stats.rs` and `db_metrics.rs` are removed.
+- **Metrics:** All 39 existing metrics preserved with new names/labels (see naming table above). Histogram support added as a new metric type. Default is no-op (no metrics collected unless a recorder is configured).
 - **Logging:** No changes.
 
 ### Compatibility
 
 - **On-disk/object storage formats:** No impact. Metrics are purely in-memory.
 - **Public API:** Breaking change:
-  - `db.metrics()` return type: `Arc<StatRegistry>` -> `Metrics`
+  - Removed: `db.metrics()` method entirely
   - Removed: `StatRegistry`, `ReadableStat`, `Counter`, `Gauge<T>`, `stat_name!` macro
   - Removed: Public stat name constants (`db_stats::GET_REQUESTS`, etc.)
-  - New: `MetricsRecorder`, `CounterFn`, `GaugeFn`, `UpDownCounterFn`, `HistogramFn`, `MetricLevel`, `Metrics`, `Metric`, `MetricValue`
-- **Bindings:** The `db.metrics()` return type is simpler to expose via UniFFI than the current trait-object-based `StatRegistry`. The bindings can return a sequence of `Metric` Records directly.
+  - New: `MetricsRecorder`, `CounterFn`, `GaugeFn`, `UpDownCounterFn`, `HistogramFn`, `MetricLevel`, `NoopMetricsRecorder`
+  - New: `DefaultMetricsRecorder` in `slatedb-common` (opt-in, not used by default)
+- **Bindings:** The UniFFI `metrics()` method is preserved — the bindings layer registers a `DefaultMetricsRecorder` internally. No change for Go/Java/Python users.
 
 ## Testing
 
 - **Unit tests:** `metrics.rs` tests for default recorder (counter/gauge/up-down-counter/histogram tracking, histogram bucket counts), composite recorder (forwards to both), edge cases (empty histogram). Builder tests for metric level filtering (Debug metrics produce no-ops at Info level, active at Debug level).
-- **Integration tests:** Register a mock `MetricsRecorder`, perform DB operations, verify handles receive correct calls with expected names and labels. Verify `db.metrics()` returns metrics with correct labels and non-zero values.
-- **Port existing tests:** All existing tests that read metrics (`compactor::test_compactor_compressed_block_size`, db cache hit/miss tests, `sst_iter` bloom filter tests) updated to new API.
+- **Integration tests:** Register a `DefaultMetricsRecorder`, perform DB operations, verify handles receive correct calls with expected names and labels via `snapshot()`.
+- **Port existing tests:** All existing tests that read metrics (`compactor::test_compactor_compressed_block_size`, db cache hit/miss tests, `sst_iter` bloom filter tests) updated to use `DefaultMetricsRecorder` + `snapshot()` instead of `StatRegistry`.
 - Fault-injection/chaos tests: N/A
 - Deterministic simulation tests: N/A
 - Formal methods verification: N/A
