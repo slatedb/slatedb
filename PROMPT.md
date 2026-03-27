@@ -98,5 +98,5 @@ npm --prefix bindings/node run build
 - [x] Fix uniffi-bindgen-node-js so async-returned opaque objects are usable with real koffi in subsequent clone/free/method calls.
 - [x] Add a generator regression in uniffi-bindgen-node-js for “async returns object, then immediately call a method on it”.
 - [x] Tighten the local Koffi fixture in uniffi-bindgen-node-js so named opaque-pointer behavior matches real koffi closely enough to catch this bug.
-- [ ] Run the generator regressions in uniffi-bindgen-node-js after the runtime fix.
+- [x] Run the generator regressions in uniffi-bindgen-node-js after the runtime fix.
 - [ ] Run npm --prefix bindings/node run test as the final verification step.
