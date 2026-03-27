@@ -1,57 +1,37 @@
 ---
-title: BlockTransformer
-description: How SlateDB transforms SST blocks before storing them in object storage
+title: Block Transforms
+description: How SlateDB transforms SST blocks before it writes them to object storage
 ---
 
-[`BlockTransformer`](https://docs.rs/slatedb/latest/slatedb/trait.BlockTransformer.html) is SlateDB's hook for custom per-block transforms such as encryption. SlateDB applies it only to SST blocks written to object storage. That includes data blocks plus the filter, index, and stats blocks in both WAL SSTs and compacted SSTs.
+[`BlockTransformer`](https://docs.rs/slatedb/latest/slatedb/trait.BlockTransformer.html) lets SlateDB apply a reversible byte transform to SST blocks, usually for encryption. SlateDB applies it to data blocks and to filter, index, and stats blocks in both WAL SSTs and compacted SSTs.
 
-It does not transform manifest files, compaction-state files, or the trailing [`SsTableInfo`](https://github.com/slatedb/slatedb/blob/main/slatedb/src/db_state.rs) record and final offset/version footer in an SST. SlateDB reads that footer first so it can find the transformed blocks and learn the stored compression codec.
+SlateDB does not transform manifest files, compaction-state files, or the trailing [`SsTableInfo`](https://github.com/slatedb/slatedb/blob/main/slatedb/src/db_state.rs) record and final offset/version footer in an SST. It reads that footer first so it can find the stored blocks and learn which compression codec to use.
 
 ## Order
 
-SlateDB applies the transform after optional block compression on write, and reverses that order on read.
+On write, SlateDB encodes the block, optionally compresses it, passes the bytes to [`BlockTransformer::encode`](https://docs.rs/slatedb/latest/slatedb/trait.BlockTransformer.html#tymethod.encode), computes CRC32 over the transformed bytes, and writes the result to object storage.
 
-```mermaid
-flowchart LR
-    A[Encoded block bytes] --> B{Compression enabled?}
-    B -- Yes --> C[Compress]
-    B -- No --> D[Keep bytes]
-    C --> E[BlockTransformer.encode]
-    D --> E
-    E --> F[CRC32 over transformed bytes]
-    F --> G[Write block]
+On read, SlateDB fetches the stored bytes, verifies the CRC32, calls [`BlockTransformer::decode`](https://docs.rs/slatedb/latest/slatedb/trait.BlockTransformer.html#tymethod.decode), optionally decompresses the decoded bytes, and then decodes the block contents.
 
-    G --> H[Read block]
-    H --> I[Verify CRC32]
-    I --> J[BlockTransformer.decode]
-    J --> K{Compression codec stored in SST?}
-    K -- Yes --> L[Decompress]
-    K -- No --> M[Keep decoded bytes]
-    L --> N[Decode block contents]
-    M --> N
-```
+The checksum covers the transformed payload, not the original plaintext block. Corruption in storage is detected before SlateDB calls `decode`. A mismatched transformer usually fails later, during `decode`, decompression, or block decoding.
 
-The checksum covers the transformed payload, not the original plaintext block. Corruption of the stored bytes is detected before SlateDB calls `decode`. A mismatched transformer usually fails later, during `decode`, decompression, or block decoding.
+If you combine a transformer with [Compression](/docs/design/compression), the transformer sees compressed bytes, not raw row encodings.
 
-This ordering matters when you combine a transformer with [Compression](/docs/design/compression). If the transformer encrypts data, it receives compressed bytes, not raw row encodings.
+## Contract
 
-## Trait Contract
+The trait has two async methods, [`encode`](https://docs.rs/slatedb/latest/slatedb/trait.BlockTransformer.html#tymethod.encode) and [`decode`](https://docs.rs/slatedb/latest/slatedb/trait.BlockTransformer.html#tymethod.decode). `decode` must invert `encode` for every block SlateDB writes. The methods are async so implementations can offload CPU-heavy work or call an external service.
 
-The trait has two async methods: [`encode`](https://docs.rs/slatedb/latest/slatedb/trait.BlockTransformer.html#tymethod.encode) and [`decode`](https://docs.rs/slatedb/latest/slatedb/trait.BlockTransformer.html#tymethod.decode). `decode` must invert `encode` for every block SlateDB writes.
+SlateDB does not record transformer identity, key ID, or format version in `SsTableInfo`. If you need key rotation or format changes, make the stored block self-describing or keep compatible configuration outside SlateDB.
 
-The methods are async so implementations can offload CPU-heavy work or call an external service. The trait docs include a minimal XOR example, but real deployments usually use it for encryption or another reversible byte transform.
+## Configuration
 
-SlateDB does not store transformer identity, key ID, or transform version in `SsTableInfo`. If you need key rotation or format evolution, the transformer has to make the stored block self-describing or rely on shared external configuration that every reader can still use later.
+Every process that reads or writes SST blocks needs compatible transformer logic.
 
-## Matching Configuration
+- Writers use [`DbBuilder::with_block_transformer`](https://docs.rs/slatedb/latest/slatedb/struct.DbBuilder.html#method.with_block_transformer).
+- Standalone compactors use [`CompactorBuilder::with_block_transformer`](https://docs.rs/slatedb/latest/slatedb/struct.CompactorBuilder.html#method.with_block_transformer).
+- Read-only handles use [`DbReaderBuilder::with_block_transformer`](https://docs.rs/slatedb/latest/slatedb/struct.DbReaderBuilder.html#method.with_block_transformer).
+- SST inspection uses [`SstReader::new`](https://docs.rs/slatedb/latest/slatedb/struct.SstReader.html#method.new).
 
-Every component that reads or writes SST blocks has to use compatible transformer logic.
+If a writer used a transformer and a reader does not, SlateDB can still open the footer metadata, but reads of the filter, index, stats, or data blocks fail. [Readers](/docs/design/readers) covers the reader-side configuration in more detail.
 
-- Writers configure it with [`DbBuilder::with_block_transformer`](https://docs.rs/slatedb/latest/slatedb/struct.DbBuilder.html#method.with_block_transformer).
-- Standalone compactors configure it with [`CompactorBuilder::with_block_transformer`](https://docs.rs/slatedb/latest/slatedb/struct.CompactorBuilder.html#method.with_block_transformer).
-- Read-only database handles configure it with [`DbReaderBuilder::with_block_transformer`](https://docs.rs/slatedb/latest/slatedb/struct.DbReaderBuilder.html#method.with_block_transformer).
-- SST inspection configures it through [`SstReader::new`](https://docs.rs/slatedb/latest/slatedb/struct.SstReader.html#method.new).
-
-If a writer used a transformer and a reader does not, SlateDB can still open the untransformed footer metadata, but reads of the filter, index, stats, or data blocks fail. That is why the [DbReader](/docs/design/reader) page calls out matching reader-side configuration explicitly.
-
-`WalReader` currently does not expose a `BlockTransformer` setting. WAL SSTs written with a custom transformer are therefore not inspectable through that API.
+[`WalReader`](https://docs.rs/slatedb/latest/slatedb/struct.WalReader.html) does not expose a `BlockTransformer` setting today. WAL SSTs written with a custom transformer are not inspectable through that API.

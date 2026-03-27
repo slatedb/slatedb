@@ -101,16 +101,16 @@ export default defineConfig({
 							link: '/docs/design/reads/',
 						},
 						{
-							label: 'DbReader',
-							link: '/docs/design/reader/',
+							label: 'Readers',
+							link: '/docs/design/readers/',
 						},
 						{
 							label: 'Compaction',
 							link: '/docs/design/compaction/',
 						},
 						{
-							label: 'MergeOperator',
-							link: '/docs/design/merge-operator/',
+							label: 'Merge Operators',
+							link: '/docs/design/merge-operators/',
 						},
 						{
 							label: 'Garbage Collection',
@@ -133,7 +133,7 @@ export default defineConfig({
 							link: '/docs/design/compression/',
 						},
 						{
-							label: 'BlockTransformer',
+							label: 'Block Transforms',
 							link: '/docs/design/block-transformer/',
 						},
 						{
