@@ -95,7 +95,7 @@ npm --prefix bindings/node run build
 - [x] Port the logging callback and duplicate-init coverage into bindings/node/tests/logging.test.mjs.
 - [x] Ensure all Node tests explicitly shutdown() and dispose() UniFFI objects to avoid leaked handles between tests.
 - [x] Fix callback-interface-backed object lowering so builder merge-operator hooks use `FfiConverterMergeOperator.lower(...)` instead of a missing object factory.
-- [ ] Fix uniffi-bindgen-node-js so async-returned opaque objects are usable with real koffi in subsequent clone/free/method calls.
+- [x] Fix uniffi-bindgen-node-js so async-returned opaque objects are usable with real koffi in subsequent clone/free/method calls.
 - [ ] Add a generator regression in uniffi-bindgen-node-js for “async returns object, then immediately call a method on it”.
 - [ ] Tighten the local Koffi fixture in uniffi-bindgen-node-js so named opaque-pointer behavior matches real koffi closely enough to catch this bug.
 - [ ] Run the generator regressions in uniffi-bindgen-node-js after the runtime fix.
