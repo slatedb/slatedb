@@ -19,10 +19,19 @@ export const WAIT_TIMEOUT_MS = 60_000;
 export const WAIT_STEP_MS = 25;
 
 export function bytes(value) {
+  if (typeof value === "string") {
+    return Uint8Array.from(Buffer.from(value, "utf8"));
+  }
   if (value instanceof Uint8Array) {
     return Uint8Array.from(value);
   }
-  return Buffer.from(value, "utf8");
+  if (ArrayBuffer.isView(value)) {
+    return new Uint8Array(value.buffer, value.byteOffset, value.byteLength).slice();
+  }
+  if (value instanceof ArrayBuffer) {
+    return new Uint8Array(value.slice(0));
+  }
+  return Uint8Array.from(value);
 }
 
 export function utf8(value) {
