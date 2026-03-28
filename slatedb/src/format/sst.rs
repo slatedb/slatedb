@@ -586,7 +586,7 @@ impl<'a> EncodedSsTableFooterBuilder<'a> {
         for (i, (_, key)) in raw.iter().enumerate() {
             current_size += OVERHEAD_PER_ENTRY + key.len();
             let is_last = i + 1 == raw.len();
-            if (current_size >= PARTITION_INDEX_TARGET_SIZE && !is_last) || is_last {
+            if current_size >= PARTITION_INDEX_TARGET_SIZE || is_last {
                 partitions.push(&raw[start..=i]);
                 start = i + 1;
                 current_size = 0;
@@ -956,7 +956,7 @@ impl SsTableFormat {
         let Some(partitions) = v2_borrow.partitions() else {
             return Ok(vec![]);
         };
-        if partitions.len() == 0 {
+        if partitions.is_empty() {
             return Ok(vec![]);
         }
 

@@ -468,6 +468,7 @@ impl TableStore {
     /// Like `read_index`, but for partitioned SSTs only loads the single partition
     /// block that covers `key`. Saves cache space when only a subset of the key
     /// range is accessed. Falls back to `read_flat_index` for flat-index SSTs.
+    #[allow(dead_code)]
     pub(crate) async fn read_index_for_key(
         &self,
         handle: &SsTableHandle,
@@ -562,8 +563,7 @@ impl TableStore {
         let partition_data = Arc::try_unwrap(partition).unwrap_or_else(|arc| {
             PartitionIndexOwned::new(arc.data()).expect("valid partition data")
         });
-        let flat =
-            SsTableFormat::stitch_partitions_to_flat(&[(offset, partition_data)])?;
+        let flat = SsTableFormat::stitch_partitions_to_flat(&[(offset, partition_data)])?;
         Ok(Arc::new(flat))
     }
 
@@ -688,7 +688,7 @@ impl TableStore {
             partition_metas
                 .iter()
                 .zip(cached.into_iter())
-                .map(|((offset, _), p)| (*offset, p.unwrap()))
+                .map(|((offset, _), p)| (*offset, p.expect("Partition metadata should be here")))
                 .collect()
         };
 

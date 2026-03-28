@@ -24,9 +24,9 @@ mod root_generated;
 pub(crate) use root_generated::{
     BlockMeta, BlockMetaArgs, BlockStats as FbBlockStats, BlockStatsArgs as FbBlockStatsArgs,
     IndexType, ManifestV1, ManifestV2, ManifestV2Args, PartitionIndex, PartitionIndexArgs,
-    PartitionMeta, PartitionMetaArgs, SsTableIndex, SsTableIndexArgs,
-    SsTableInfo as FbSsTableInfo, SsTableInfoArgs, SsTableIndexV2, SsTableIndexV2Args,
-    SstStats as FbSstStats, SstStatsArgs as FbSstStatsArgs,
+    PartitionMeta, PartitionMetaArgs, SsTableIndex, SsTableIndexArgs, SsTableIndexV2,
+    SsTableIndexV2Args, SsTableInfo as FbSsTableInfo, SsTableInfoArgs, SstStats as FbSstStats,
+    SstStatsArgs as FbSstStatsArgs,
 };
 
 use crate::config::CompressionCodec;
@@ -174,7 +174,7 @@ impl RangePartitionedKeySpace for SsTableIndexV2<'_> {
 
     fn partition_first_key(&self, partition: usize) -> &[u8] {
         SsTableIndexV2::partitions(self)
-            .unwrap()
+            .expect("First key should be there")
             .get(partition)
             .first_key()
             .bytes()
@@ -1453,10 +1453,7 @@ mod tests {
         let format = SsTableFormat::default();
         let sst = build_test_sst(&format, 3).await;
         let data = sst.remaining_as_bytes();
-        let index = format
-            .read_index_raw(&sst.info, &data)
-            .await
-            .unwrap();
+        let index = format.read_index_raw(&sst.info, &data).await.unwrap();
 
         let clamped = index.clamp_allocated_size();
 

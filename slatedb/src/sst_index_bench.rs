@@ -110,7 +110,10 @@ async fn build_wal_sst(
         val.put_bytes(0u8, 32);
         let entry = RowEntry::new(key, ValueDeletable::Value(val.freeze()), seq, None, None);
 
-        let finished = builder.add(entry).await.unwrap();
+        let finished = builder
+            .add(entry)
+            .await
+            .expect("WAL table builder should be adding entries");
         if finished.is_some() {
             blocks_finished += 1;
             if blocks_finished >= num_blocks {
@@ -120,7 +123,10 @@ async fn build_wal_sst(
         seq += 1;
     }
 
-    builder.build().await.unwrap()
+    builder
+        .build()
+        .await
+        .expect("WAL table builder should have succesfully built EncodedSsTable")
 }
 
 /// Builds a compacted SST with exactly `num_blocks` complete data blocks.
@@ -141,7 +147,10 @@ async fn build_compacted_sst(
         val.put_bytes(0u8, 32);
         let entry = RowEntry::new(key, ValueDeletable::Value(val.freeze()), 0, None, None);
 
-        let finished = builder.add(entry).await.unwrap();
+        let finished = builder
+            .add(entry)
+            .await
+            .expect("Table builder should be adding entries.");
         if finished.is_some() {
             blocks_finished += 1;
             if blocks_finished >= num_blocks {
@@ -150,5 +159,8 @@ async fn build_compacted_sst(
         }
     }
 
-    builder.build().await.unwrap()
+    builder
+        .build()
+        .await
+        .expect("Table builder wshould have built succesfully")
 }

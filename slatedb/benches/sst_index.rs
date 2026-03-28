@@ -23,11 +23,9 @@ fn bench_sst_index(c: &mut Criterion) {
         let flat = runtime.block_on(PreparedSst::build_flat(num_blocks));
         let partitioned = runtime.block_on(PreparedSst::build_partitioned(num_blocks));
 
-        group.bench_with_input(
-            BenchmarkId::new("flat", num_blocks),
-            &num_blocks,
-            |b, _| b.to_async(&runtime).iter(|| flat.read_index()),
-        );
+        group.bench_with_input(BenchmarkId::new("flat", num_blocks), &num_blocks, |b, _| {
+            b.to_async(&runtime).iter(|| flat.read_index())
+        });
 
         group.bench_with_input(
             BenchmarkId::new("partitioned", num_blocks),

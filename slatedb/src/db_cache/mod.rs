@@ -794,10 +794,7 @@ mod tests {
         let key = CachedKey::from((SST_ID, 12345u64));
         let index = Arc::new(sst.index.into_flat_index().unwrap());
         cache
-            .insert(
-                key.clone(),
-                CachedEntry::with_sst_index(index),
-            )
+            .insert(key.clone(), CachedEntry::with_sst_index(index))
             .await;
 
         for i in 1..4 {
