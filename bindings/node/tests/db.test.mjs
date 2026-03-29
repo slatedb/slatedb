@@ -56,7 +56,12 @@ test("db crud and metadata", async (t) => {
   const store = cleanup.track(newMemoryStore());
   const db = await openDb(store, { cleanup });
 
-  const firstWrite = await db.put(bytes("alpha"), bytes("one"));
+  const firstWrite = await db.put_with_options(
+    bytes("alpha"),
+    bytes("one"),
+    putOptions(),
+    writeOptions(false),
+  );
   assert.ok(firstWrite.seqnum > 0);
   assert.ok(firstWrite.create_ts > 0);
 
@@ -81,21 +86,26 @@ test("db crud and metadata", async (t) => {
     bytes("beta"),
     bytes("two"),
     putOptions(),
-    writeOptions(),
+    writeOptions(false),
   );
   assert.ok(secondWrite.seqnum > firstWrite.seqnum);
   assert.ok(secondWrite.create_ts > 0);
   assert.deepEqual(await db.get(bytes("beta")), bytes("two"));
 
-  await db.put(bytes("empty"), bytes(""));
+  await db.put_with_options(
+    bytes("empty"),
+    bytes(""),
+    putOptions(),
+    writeOptions(false),
+  );
   assert.deepEqual(await db.get(bytes("empty")), bytes(""));
   assert.equal(await db.get(bytes("missing")), undefined);
 
-  const deleteAlpha = await db.delete(bytes("alpha"));
+  const deleteAlpha = await db.delete_with_options(bytes("alpha"), writeOptions(false));
   assert.ok(deleteAlpha.seqnum > secondWrite.seqnum);
   assert.equal(await db.get(bytes("alpha")), undefined);
 
-  const deleteBeta = await db.delete_with_options(bytes("beta"), writeOptions());
+  const deleteBeta = await db.delete_with_options(bytes("beta"), writeOptions(false));
   assert.ok(deleteBeta.seqnum > secondWrite.seqnum);
   assert.equal(await db.get(bytes("beta")), undefined);
 });
@@ -105,10 +115,12 @@ test("db scan variants", async (t) => {
   const store = cleanup.track(newMemoryStore());
   const db = await openDb(store, { cleanup });
 
-  await db.put(bytes("item:01"), bytes("first"));
-  await db.put(bytes("item:02"), bytes("second"));
-  await db.put(bytes("item:03"), bytes("third"));
-  await db.put(bytes("other:01"), bytes("other"));
+  const batch = cleanup.track(new WriteBatch());
+  batch.put(bytes("item:01"), bytes("first"));
+  batch.put(bytes("item:02"), bytes("second"));
+  batch.put(bytes("item:03"), bytes("third"));
+  batch.put(bytes("other:01"), bytes("other"));
+  await db.write_with_options(batch, writeOptions(false));
 
   const fullScan = cleanup.track(await db.scan(fullRange()));
   requireRows(
@@ -167,7 +179,12 @@ test("db batch write and consumption", async (t) => {
   const store = cleanup.track(newMemoryStore());
   const db = await openDb(store, { cleanup });
 
-  await db.put(bytes("remove-me"), bytes("old"));
+  await db.put_with_options(
+    bytes("remove-me"),
+    bytes("old"),
+    putOptions(),
+    writeOptions(false),
+  );
 
   const batch = cleanup.track(new WriteBatch());
   batch.put(bytes("batch-put"), bytes("value"));
@@ -194,7 +211,12 @@ test("db flush and metrics", async (t) => {
   const store = cleanup.track(newMemoryStore());
   const db = await openDb(store, { cleanup });
 
-  await db.put(bytes("flush-key"), bytes("value"));
+  await db.put_with_options(
+    bytes("flush-key"),
+    bytes("value"),
+    putOptions(),
+    writeOptions(false),
+  );
   await db.flush();
   await db.flush_with_options({ flush_type: FlushType.Wal });
   await db.flush_with_options({ flush_type: FlushType.MemTable });
@@ -213,7 +235,12 @@ test("db merge and merge_with_options", async (t) => {
     },
   });
 
-  await db.put(bytes("merge"), bytes("base"));
+  await db.put_with_options(
+    bytes("merge"),
+    bytes("base"),
+    putOptions(),
+    writeOptions(false),
+  );
   await db.merge(bytes("merge"), bytes(":one"));
   assert.deepEqual(await db.get(bytes("merge")), bytes("base:one"));
 
@@ -231,10 +258,20 @@ test("db snapshot isolation", async (t) => {
   const store = cleanup.track(newMemoryStore());
   const db = await openDb(store, { cleanup });
 
-  await db.put(bytes("snapshot"), bytes("old"));
+  await db.put_with_options(
+    bytes("snapshot"),
+    bytes("old"),
+    putOptions(),
+    writeOptions(false),
+  );
 
   const snapshot = cleanup.track(await db.snapshot());
-  await db.put(bytes("snapshot"), bytes("new"));
+  await db.put_with_options(
+    bytes("snapshot"),
+    bytes("new"),
+    putOptions(),
+    writeOptions(false),
+  );
 
   assert.deepEqual(await snapshot.get(bytes("snapshot")), bytes("old"));
   assert.deepEqual(await db.get(bytes("snapshot")), bytes("new"));
@@ -313,10 +350,20 @@ test("db writer fencing reports closed reason", async (t) => {
   const cleanup = createCleanup(t);
   const store = cleanup.track(newMemoryStore());
   const primary = await openDb(store, { cleanup });
-  await primary.put(bytes("primary"), bytes("value"));
+  await primary.put_with_options(
+    bytes("primary"),
+    bytes("value"),
+    putOptions(),
+    writeOptions(false),
+  );
 
   const secondary = await openDb(store, { cleanup });
-  await secondary.put(bytes("secondary"), bytes("value"));
+  await secondary.put_with_options(
+    bytes("secondary"),
+    bytes("value"),
+    putOptions(),
+    writeOptions(false),
+  );
 
   const error = await expectClosed(
     () => primary.put(bytes("stale"), bytes("value")),

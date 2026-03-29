@@ -69,9 +69,9 @@ export function readerOptions(skipWalReplay) {
   };
 }
 
-export function writeOptions() {
+export function writeOptions(awaitDurable = true) {
   return {
-    await_durable: true,
+    await_durable: awaitDurable,
   };
 }
 
@@ -334,14 +334,19 @@ export async function seedWalFiles(store) {
   });
 
   try {
-    await db.put(bytes("a"), bytes("1"));
-    await db.put(bytes("b"), bytes("2"));
+    await db.put_with_options(bytes("a"), bytes("1"), putOptions(), writeOptions(false));
+    await db.put_with_options(bytes("b"), bytes("2"), putOptions(), writeOptions(false));
     await db.flush_with_options({ flush_type: FlushType.Wal });
 
-    await db.delete(bytes("a"));
+    await db.delete_with_options(bytes("a"), writeOptions(false));
     await db.flush_with_options({ flush_type: FlushType.Wal });
 
-    await db.merge(bytes("m"), bytes("x"));
+    await db.merge_with_options(
+      bytes("m"),
+      bytes("x"),
+      mergeOptions(),
+      writeOptions(false),
+    );
     await db.flush_with_options({ flush_type: FlushType.Wal });
   } finally {
     await shutdownAndDispose(db);

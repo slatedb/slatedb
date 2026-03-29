@@ -6,6 +6,7 @@ import {
   DbReaderBuilder,
   ErrorData,
   FlushType,
+  WriteBatch,
 } from "../index.js";
 import {
   ConcatMergeOperator,
@@ -20,11 +21,13 @@ import {
   newMemoryStore,
   openDb,
   openReader,
+  putOptions,
   readOptions,
   readerOptions,
   requireRows,
   scanOptions,
   waitUntil,
+  writeOptions,
 } from "./support.mjs";
 
 test("reader lifecycle", async (t) => {
@@ -32,7 +35,12 @@ test("reader lifecycle", async (t) => {
   const store = cleanup.track(newMemoryStore());
   const db = await openDb(store, { cleanup });
 
-  await db.put(bytes("reader"), bytes("value"));
+  await db.put_with_options(
+    bytes("reader"),
+    bytes("value"),
+    putOptions(),
+    writeOptions(false),
+  );
   await db.flush_with_options({ flush_type: FlushType.MemTable });
 
   const reader = await openReader(store, { cleanup });
@@ -63,8 +71,10 @@ test("reader point reads", async (t) => {
   const store = cleanup.track(newMemoryStore());
   const db = await openDb(store, { cleanup });
 
-  await db.put(bytes("alpha"), bytes("one"));
-  await db.put(bytes("empty"), bytes(""));
+  const batch = cleanup.track(new WriteBatch());
+  batch.put(bytes("alpha"), bytes("one"));
+  batch.put(bytes("empty"), bytes(""));
+  await db.write_with_options(batch, writeOptions(false));
   await db.flush_with_options({ flush_type: FlushType.MemTable });
 
   const reader = await openReader(store, { cleanup });
@@ -82,10 +92,12 @@ test("reader scan variants", async (t) => {
   const store = cleanup.track(newMemoryStore());
   const db = await openDb(store, { cleanup });
 
-  await db.put(bytes("item:01"), bytes("first"));
-  await db.put(bytes("item:02"), bytes("second"));
-  await db.put(bytes("item:03"), bytes("third"));
-  await db.put(bytes("other:01"), bytes("other"));
+  const batch = cleanup.track(new WriteBatch());
+  batch.put(bytes("item:01"), bytes("first"));
+  batch.put(bytes("item:02"), bytes("second"));
+  batch.put(bytes("item:03"), bytes("third"));
+  batch.put(bytes("other:01"), bytes("other"));
+  await db.write_with_options(batch, writeOptions(false));
   await db.flush_with_options({ flush_type: FlushType.MemTable });
 
   const reader = await openReader(store, { cleanup });
@@ -147,7 +159,12 @@ test("reader refresh polling updates visible state", async (t) => {
   const store = cleanup.track(newMemoryStore());
   const db = await openDb(store, { cleanup });
 
-  await db.put(bytes("seed"), bytes("value"));
+  await db.put_with_options(
+    bytes("seed"),
+    bytes("value"),
+    putOptions(),
+    writeOptions(false),
+  );
   await db.flush_with_options({ flush_type: FlushType.MemTable });
 
   const reader = await openReader(store, {
@@ -157,7 +174,12 @@ test("reader refresh polling updates visible state", async (t) => {
     },
   });
 
-  await db.put(bytes("refresh"), bytes("updated"));
+  await db.put_with_options(
+    bytes("refresh"),
+    bytes("updated"),
+    putOptions(),
+    writeOptions(false),
+  );
   await db.flush_with_options({ flush_type: FlushType.MemTable });
 
   await waitUntil(async () => {
@@ -179,7 +201,12 @@ test("reader default mode replays new wal data", async (t) => {
     },
   });
 
-  await db.put(bytes("wal-key"), bytes("wal-value"));
+  await db.put_with_options(
+    bytes("wal-key"),
+    bytes("wal-value"),
+    putOptions(),
+    writeOptions(false),
+  );
   await db.flush_with_options({ flush_type: FlushType.Wal });
 
   await waitUntil(async () => {
@@ -195,10 +222,20 @@ test("reader skip wal replay ignores wal-only data", async (t) => {
   const store = cleanup.track(newMemoryStore());
   const db = await openDb(store, { cleanup });
 
-  await db.put(bytes("flushed-key"), bytes("flushed-value"));
+  await db.put_with_options(
+    bytes("flushed-key"),
+    bytes("flushed-value"),
+    putOptions(),
+    writeOptions(false),
+  );
   await db.flush_with_options({ flush_type: FlushType.MemTable });
 
-  await db.put(bytes("wal-only-key"), bytes("wal-only-value"));
+  await db.put_with_options(
+    bytes("wal-only-key"),
+    bytes("wal-only-value"),
+    putOptions(),
+    writeOptions(false),
+  );
   await db.flush_with_options({ flush_type: FlushType.Wal });
 
   const initialReader = await openReader(store, {
@@ -234,7 +271,12 @@ test("reader merge operator", async (t) => {
     },
   });
 
-  await db.put(bytes("merge"), bytes("base"));
+  await db.put_with_options(
+    bytes("merge"),
+    bytes("base"),
+    putOptions(),
+    writeOptions(false),
+  );
   await db.merge(bytes("merge"), bytes(":reader"));
   await db.flush_with_options({ flush_type: FlushType.MemTable });
 
@@ -252,7 +294,12 @@ test("reader builder validation and errors", async (t) => {
   const store = cleanup.track(newMemoryStore());
   const db = await openDb(store, { cleanup });
 
-  await db.put(bytes("seed"), bytes("value"));
+  await db.put_with_options(
+    bytes("seed"),
+    bytes("value"),
+    putOptions(),
+    writeOptions(false),
+  );
   await db.flush_with_options({ flush_type: FlushType.MemTable });
 
   const invalidBuilder = cleanup.track(new DbReaderBuilder(TEST_DB_PATH, store), { shutdown: false });
@@ -286,7 +333,12 @@ test("reader rejects invalid key ranges", async (t) => {
   const store = cleanup.track(newMemoryStore());
   const db = await openDb(store, { cleanup });
 
-  await db.put(bytes("seed"), bytes("value"));
+  await db.put_with_options(
+    bytes("seed"),
+    bytes("value"),
+    putOptions(),
+    writeOptions(false),
+  );
   await db.flush_with_options({ flush_type: FlushType.MemTable });
 
   const reader = await openReader(store, { cleanup });
