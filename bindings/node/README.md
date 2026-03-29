@@ -7,7 +7,7 @@
 ```
 
 The package is generated from the UniFFI `slatedb-uniffi` cdylib using
-[`uniffi-bindgen-node-js`](https://github.com/criccomini/uniffi-bindgen-node-js)
+[`uniffi-bindgen-node-js`](https://crates.io/crates/uniffi-bindgen-node-js)
 and publishes one npm artifact containing generated JavaScript bindings plus
 bundled native libraries.
 
