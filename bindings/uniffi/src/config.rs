@@ -230,6 +230,7 @@ impl TryFrom<ScanOptions> for slatedb::config::ScanOptions {
                     field: "max_fetch_tasks",
                 })
             })?,
+            ..slatedb::config::ScanOptions::default()
         })
     }
 }
