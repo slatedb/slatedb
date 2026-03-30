@@ -156,6 +156,9 @@ pub trait FilterBuilder {
 pub trait Filter {
     /// Returns `true` if the filter cannot rule out the query.
     /// A return value of `false` guarantees no matching key exists.
+    ///
+    /// Filters that cannot answer a particular query kind should return
+    /// `true` to avoid false negatives.
     fn might_match(&self, query: &FilterQuery) -> bool;
 
     /// Serializes the filter into the provided buffer.
@@ -221,9 +224,13 @@ pub trait PrefixExtractor {
 pub struct FilterQuery {
     /// The kind of query (point or prefix).
     pub kind: FilterQueryKind,
-    /// Opaque hints provided by the caller (e.g., version bounds).
-    /// Keyed by a string name so custom filters can look up relevant hints.
-    pub hints: HashMap<String, Bytes>,
+    /// Opaque, caller-supplied context for custom filters.
+    ///
+    /// Custom filters downcast this to their expected type. For example,
+    /// a min/max version filter expects `Arc<VersionBounds>` and ignores
+    /// the query if the downcast fails. The built-in bloom filter ignores
+    /// this field entirely.
+    pub context: Option<Arc<dyn Any + Send + Sync>>,
 }
 
 /// The kind of filter query.
@@ -238,26 +245,51 @@ pub enum FilterQueryKind {
 
 Key design decisions:
 
-1. **`FilterQuery` with hints**: `FilterQuery` is a struct rather than a plain
-   enum so it can carry opaque `hints` alongside the query kind. Hints are a
-   `HashMap<String, Bytes>` that the caller populates and custom filters inspect.
-   For example, a min/max filter could use a `"version_bounds"` hint to narrow
-   its check, or a time-range filter could use a `"timestamp_range"` hint. The
-   built-in bloom filter ignores hints. Users pass hints via `ScanOptions::filter_hints`
-   which are threaded through the iterator chain to `FilterQuery::with_hints`.
+1. **`FilterQuery` with opaque context**: `FilterQuery` is a struct rather than
+   a plain enum so it can carry caller-supplied context alongside the query kind.
+   The `context` field is an `Option<Arc<dyn Any + Send + Sync>>` cloned from
+   `ScanOptions::filter_context`. Custom filters downcast it to their expected
+   type — e.g., a min/max version filter downcasts to `VersionBounds`. If the
+   downcast fails or context is `None`, the filter returns `true` (cannot
+   answer). The `Arc` clone is cheap (reference count bump) and the object can
+   be reused across concurrent scans without per-call allocation. The built-in
+   bloom filter ignores context entirely.
 
-2. **`name()` for safety**: Each policy's name is stored alongside its filter
+2. **Filter applicability is expressed through `might_match` returning `true`**:
+   Rather than adding a separate `applies_to` or `can_answer` method, filters
+   express inapplicability by returning `true` from `might_match` — meaning
+   "I cannot rule this out." This keeps the trait surface minimal and works
+   uniformly for all filter types:
+
+   - **Build time**: `FilterBuilder::add_entry` receives the full `RowEntry`.
+     Builders that don't care about certain entries simply ignore them (e.g.,
+     a timestamp-range filter ignores entries without timestamps, a prefix
+     bloom filter ignores entries whose key doesn't match the extractor).
+   - **Read time (`get`)**: `might_match` receives `FilterQueryKind::Point`
+     with the full key. Filters that can't answer point queries return `true`.
+   - **Read time (`scan_prefix`)**: `might_match` receives
+     `FilterQueryKind::Prefix` with only the prefix. Filters that can't answer
+     prefix queries return `true`. For bloom filters with a `PrefixExtractor`,
+     the `in_domain` check is performed *inside* `might_match` — if the prefix
+     is not in domain, the filter returns `true` rather than risk a false
+     negative.
+
+   This means the engine never needs to know which filters apply to which
+   queries. It always evaluates all filters with AND logic and trusts each
+   filter to return `true` when it cannot answer.
+
+3. **`name()` for safety**: Each policy's name is stored alongside its filter
    data in the composite filter block. When reading an SST, if a stored name
    doesn't match any configured policy, that sub-filter is skipped rather than
    misinterpreted. This allows safe policy migration without manifest-level
    validation (same pattern as LevelDB's `FilterPolicy::Name()`).
 
-3. **`FilterQueryKind` enum**: Instead of just accepting a hash, the `might_match`
+4. **`FilterQueryKind` enum**: Instead of just accepting a hash, the `might_match`
    method takes a `FilterQuery` whose `kind` field distinguishes point lookups
    and prefix lookups. Filters that only support point lookups can conservatively
    return `true` for prefix queries.
 
-4. **`encode` on `Filter`, `decode` on `FilterPolicy`**: Encoding is on the
+5. **`encode` on `Filter`, `decode` on `FilterPolicy`**: Encoding is on the
    `Filter` instance because it knows its own internal representation.
    Decoding is on the `FilterPolicy` because the caller needs the policy
    (which knows the format) to reconstruct a `Filter` from raw bytes.
@@ -389,17 +421,22 @@ impl<P: Into<Path>> CompactorBuilder<P> {
 }
 ```
 
-`ScanOptions` gets a `filter_hints` field for passing opaque hints to custom
-filters:
+`ScanOptions` gets a `filter_context` field for passing opaque context to
+custom filters:
 
 ```rust
 pub struct ScanOptions {
     // ... existing fields ...
 
-    /// Opaque hints passed to custom filters at query time.
-    /// Keyed by a string name so custom filters can look up relevant hints
-    /// (e.g., version bounds for a min/max filter).
-    pub filter_hints: HashMap<String, Bytes>,
+    /// Opaque context passed to custom filters at query time.
+    ///
+    /// Custom filters downcast this to their expected type inside
+    /// `might_match`. For example, a min/max version filter expects
+    /// `Arc<VersionBounds>`.
+    ///
+    /// `None` means no context is provided; filters that need context
+    /// return `true` (cannot rule out the SST).
+    pub filter_context: Option<Arc<dyn Any + Send + Sync>>,
 }
 ```
 
@@ -442,11 +479,14 @@ let db = Db::builder("path", object_store)
     .build()
     .await?;
 
-// Passing hints to custom filters at scan time
+// Passing context to custom filters at scan time
+// The Arc can be created once and reused across scans.
+let version_bounds: Arc<dyn Any + Send + Sync> = Arc::new(VersionBounds {
+    min_version: 0,
+    max_version: 42,
+});
 let scan_options = ScanOptions {
-    filter_hints: HashMap::from([
-        ("version_upper_bound".to_string(), Bytes::from("v42")),
-    ]),
+    filter_context: Some(version_bounds),
     ..ScanOptions::default()
 };
 ```
@@ -472,8 +512,14 @@ impl Filter for BloomFilter {
                 self.might_contain(filter_hash(key.as_ref()))
             }
             FilterQueryKind::Prefix(prefix) => {
-                if !self.has_prefix_filter {
-                    return true; // Cannot answer prefix queries
+                // No PrefixExtractor → cannot answer prefix queries
+                let Some(ref extractor) = self.prefix_extractor else {
+                    return true;
+                };
+                // in_domain check prevents false negatives when the prefix
+                // is shorter/incompatible with what was indexed
+                if !extractor.in_domain(prefix.as_ref()) {
+                    return true;
                 }
                 self.might_contain(filter_hash(prefix.as_ref()))
             }
@@ -566,7 +612,7 @@ When a `prefix_extractor` is configured on the `BloomFilterPolicy`, prefix
 scans probe the bloom filter with `filter_hash(prefix)`. The default
 configuration (no `prefix_extractor`) returns `true` for prefix queries, so no
 filtering. This is safe: point lookups still use the full-key hash. Other
-filters in the array may still reject the SST based on hints or other criteria.
+filters in the array may still reject the SST based on context or other criteria.
 
 Note: prefix filtering alone is not ideal for recency access patterns where
 the caller only needs a recent entry for a prefix. See
@@ -660,7 +706,7 @@ SlateDB features and components that this RFC interacts with. Check all that app
   (see [SST Format Changes](#sst-format-changes)).
 - **Public API**: `filter_bits_per_key` is removed from `Settings`.
   `DbBuilder` and `CompactorBuilder` gain `with_filter_policies`. `ScanOptions`
-  gains a `filter_hints: HashMap<String, Bytes>` field. See
+  gains a `filter_context: Option<Arc<dyn Any + Send + Sync>>` field. See
   [Configuration](#configuration) for migration examples.
 - **Rolling upgrades**: Old readers that don't understand the `filter_version`
   field will ignore it (FlatBuffers forward compatibility). They will continue
@@ -740,6 +786,51 @@ block level, or both. On the write path, block-level builders are finalized
 and reset per block in `finish_block()` instead of once at SST completion.
 On the read path, per-block filter data stored in `BlockMeta` is checked
 before loading a data block, using the same `might_match` interface.
+
+### Key Selection via `KeyFilter`
+
+The current `BloomFilterPolicy` applies to all keys in an SST. Some workloads
+need different filter strategies for different key subsets — e.g., a full-key
+bloom for keys starting with `user::` and a prefix bloom for keys starting
+with `post::`. With the current design, this requires implementing a custom `FilterPolicy` that
+hard-codes the selection logic in `add_entry` and `might_match`.
+
+A `KeyFilter` trait would make this composable without custom policies:
+
+```rust
+pub trait KeyFilter: Send + Sync {
+    fn name(&self) -> &str;
+    fn includes(&self, key: &[u8]) -> bool;
+}
+```
+
+`BloomFilterPolicy` would gain an optional `with_key_filter(Arc<dyn KeyFilter>)`
+method. On the write path, `KeyFilter::includes` gates entry inclusion — if
+`false`, the entry is skipped entirely (no full-key hash, no prefix hash). On
+the read path for Point queries, excluded keys return `true` (inapplicable).
+
+Prefix scan will still need `PrefixExtractor::in_domain` as the filter is mainly for keys.
+
+Example configuration:
+
+```rust
+let db = Db::builder("path", object_store)
+    .with_filter_policies(vec![
+        // Full-key bloom, only for "user::" keys
+        Arc::new(BloomFilterPolicy::new(10)
+            .with_key_filter(Arc::new(StartsWithFilter::new("user::")))),
+        // Prefix bloom, only for "post::" keys
+        Arc::new(BloomFilterPolicy::new(10)
+            .with_key_filter(Arc::new(StartsWithFilter::new("post::")))
+            .with_prefix_extractor(Arc::new(FixedPrefixExtractor::new(6)))
+            .with_whole_key_filtering(false)),
+    ])
+    .build().await?;
+```
+
+`KeyFilter` would be `BloomFilterPolicy`-specific, not part of the core
+`FilterPolicy`/`FilterBuilder`/`Filter` traits. Custom filter policies can
+implement their own selection logic directly in `add_entry`/`might_match`.
 
 ## Alternatives
 
