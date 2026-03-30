@@ -234,6 +234,16 @@ export default defineConfig({
 							attrs: { target: '_blank' }
 						},
 						{
+							label: 'Java',
+							link: 'https://javadoc.io/doc/io.slatedb/slatedb-uniffi',
+							attrs: { target: '_blank' }
+						},
+						{
+							label: 'Node',
+							link: 'https://www.jsdocs.io/package/@slatedb/uniffi',
+							attrs: { target: '_blank' }
+						},
+						{
 							label: 'Python',
 							link: 'https://slatedb.readthedocs.io/',
 							attrs: { target: '_blank' }
