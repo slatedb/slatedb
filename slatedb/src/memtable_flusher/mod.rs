@@ -37,11 +37,17 @@ pub(crate) struct FlushEpoch(pub(crate) u64);
 /// Flush request target exposed by the memtable flusher.
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum FlushTarget {
-    /// Attempt to make progress without waiting for a specific durability frontier.
+    /// Flush as many pending immutable memtables as L0 capacity allows. Used for
+    /// writer backpressure relief and WAL-enabled checkpoint creation, where making
+    /// some progress is sufficient.
     BestEffort,
-    /// Operate against the currently durable frontier without requiring new flush work.
+    /// Return the current durability frontier without initiating new flush work.
+    /// Used for `CheckpointScope::Durable` when the caller just needs a consistent
+    /// snapshot of what is already durable.
     CurrentDurable,
-    /// Wait until all currently known immutable memtables are durably flushed.
+    /// Wait until all currently known immutable memtables are durably flushed. Used
+    /// for explicit `flush()` calls and WAL-disabled checkpoint creation, where full
+    /// durability is required before proceeding.
     All,
 }
 

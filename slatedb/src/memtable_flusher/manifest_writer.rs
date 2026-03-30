@@ -12,6 +12,8 @@
 //! - flush request semantics
 //! - flush waiter bookkeeping
 
+use log::debug;
+
 use super::uploader::UploadedMemtable;
 use super::FlushEpoch;
 use crate::checkpoint::CheckpointCreateResult;
@@ -630,6 +632,12 @@ impl ManifestWriterTask {
         through_epoch: FlushEpoch,
         through_seq: u64,
     ) -> Result<(), SlateDBError> {
+        debug!(
+            "l0 flush batch written to manifest [through_epoch={:?}, batch_size={}, through_seq={}]",
+            through_epoch,
+            staged_batch.len(),
+            through_seq,
+        );
         self.durable_through = Some((through_epoch, through_seq));
         for uploaded in &staged_batch {
             self.durable_wal_id = Some(uploaded.imm_memtable.recent_flushed_wal_id());
@@ -641,6 +649,7 @@ impl ManifestWriterTask {
             .into_iter()
             .zip(checkpoint_results.into_iter())
         {
+            debug!("checkpoint created [id={}]", result.id);
             let _ = checkpoint.sender.send(Ok(result));
         }
         let _ = self

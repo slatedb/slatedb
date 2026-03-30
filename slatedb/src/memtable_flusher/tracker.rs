@@ -11,6 +11,8 @@
 //! - manifest mutation
 //! - manifest durability sequencing
 
+use log::debug;
+
 use super::FlushEpoch;
 use crate::checkpoint::CheckpointCreateResult;
 use crate::config::CheckpointOptions;
@@ -159,6 +161,10 @@ impl FlushTracker {
     }
 
     async fn handle_uploaded(&mut self, uploaded: UploadedMemtable) -> Result<(), SlateDBError> {
+        debug!(
+            "l0 upload completed [epoch={:?}, sst_id={:?}]",
+            uploaded.epoch, uploaded.sst_handle.id
+        );
         self.set_tracked_state(uploaded.epoch, TrackedImmState::WritingManifest);
         self.manifest_writer.notify_uploaded(uploaded).await?;
         Ok(())
@@ -177,6 +183,10 @@ impl FlushTracker {
         }
     }
 
+    /// Check for newly frozen immutable memtables and dispatch any that are ready.
+    /// New IMMs are typically announced through flush commands (e.g. from the write
+    /// path), but we re-check on every event to also pick up L0 slots freed by
+    /// compaction via manifest refresh.
     async fn reconcile_and_dispatch(&mut self) -> Result<(), SlateDBError> {
         self.register_new_imm_memtables();
         self.dispatch_ready_memtables().await
@@ -238,7 +248,12 @@ impl FlushTracker {
             let sst_id = tracked.sst_id;
             let imm_memtable = Arc::clone(&tracked.imm_memtable);
             let last_seq = tracked.imm_memtable.table().last_seq().unwrap_or(0);
+            debug!(
+                "dispatching l0 upload [epoch={:?}, sst_id={:?}]",
+                epoch, sst_id
+            );
 
+            // WAL SSTs must be durable before the L0 is uploaded (see #1255).
             if self.inner.wal_enabled && self.inner.oracle.last_remote_persisted_seq() < last_seq {
                 self.inner.flush_wals().await?;
             }
