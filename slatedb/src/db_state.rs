@@ -70,7 +70,7 @@ impl AsRef<SsTableHandle> for SsTableHandle {
 #[derive(Clone, PartialEq, Serialize)]
 pub struct SsTableView {
     /// Unique identifier for this view.
-    pub(crate) id: Ulid,
+    pub id: Ulid,
 
     /// The underlying physical SSTable handle.
     pub sst: SsTableHandle,

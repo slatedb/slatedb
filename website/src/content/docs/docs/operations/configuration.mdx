@@ -1,4 +1,62 @@
 ---
 title: Configuration
+description: How SlateDB loads Settings, which knobs live there, and what must be configured through builders
 ---
 
+SlateDB configuration shows up in three main places:
+
+1. [`Settings`](https://docs.rs/slatedb/latest/slatedb/config/struct.Settings.html) holds serializable runtime settings.
+2. Builders such as [`DbBuilder`](https://docs.rs/slatedb/latest/slatedb/struct.DbBuilder.html) and [`DbReaderBuilder`](https://docs.rs/slatedb/latest/slatedb/struct.DbReaderBuilder.html) have `with_*` functions to handle complex types and dependency injection.
+3. Operation-specific option types such as [`ReadOptions`](https://docs.rs/slatedb/latest/slatedb/config/struct.ReadOptions.html) and [`WriteOptions`](https://docs.rs/slatedb/latest/slatedb/config/struct.WriteOptions.html).
+
+For the complete configuration surface and current defaults, read the [`slatedb::config`](https://docs.rs/slatedb/latest/slatedb/config/) rustdoc.
+
+## Example
+
+This example shows all three configuration layers in one place:
+
+```rust
+use slatedb::{
+    config::{DbReaderOptions, ReadOptions, Settings},
+    db_cache::foyer::FoyerCache,
+    object_store::{memory::InMemory, ObjectStore},
+    Db, DbReader, Error,
+};
+use std::sync::Arc;
+use std::time::Duration;
+
+#[tokio::main]
+async fn main() -> Result<(), Error> {
+    let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+
+    // 1. Serializable runtime settings.
+    let mut settings = Settings::default();
+    settings.flush_interval = Some(Duration::from_millis(250));
+
+    // 2. Builder configuration for process-local components and wiring.
+    let db = Db::builder("example", Arc::clone(&object_store))
+        .with_settings(settings)
+        .with_db_cache(Arc::new(FoyerCache::new()))
+        .build()
+        .await?;
+
+    // 3. Per-call options for one operation.
+    let _value = db
+        .get_with_options(
+            b"key",
+            &ReadOptions::default().with_cache_blocks(false),
+        )
+        .await?;
+
+    // Reader-specific options configure the DbReader instance itself.
+    let mut reader_options = DbReaderOptions::default();
+    reader_options.skip_wal_replay = true;
+
+    let _reader = DbReader::builder("example", object_store)
+        .with_options(reader_options)
+        .build()
+        .await?;
+
+    Ok(())
+}
+```

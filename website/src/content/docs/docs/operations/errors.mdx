@@ -1,4 +1,19 @@
 ---
 title: Errors
+description: How SlateDB classifies public errors
 ---
 
+All public SlateDB APIs return [`slatedb::Error`](https://docs.rs/slatedb/latest/slatedb/struct.Error.html). The part applications should treat as stable is [`Error::kind()`](https://docs.rs/slatedb/latest/slatedb/struct.Error.html#method.kind), which returns [`ErrorKind`](https://docs.rs/slatedb/latest/slatedb/enum.ErrorKind.html). The formatted message and source chain are for logs and diagnosis; they can change between releases, so they are a poor place to hang recovery logic.
+
+In practice, this means you should branch on the kind of failure, not on the exact text.
+
+- [`ErrorKind::Transaction`](https://docs.rs/slatedb/latest/slatedb/enum.ErrorKind.html#variant.Transaction) means retry the whole transaction.
+- [`ErrorKind::Unavailable`](https://docs.rs/slatedb/latest/slatedb/enum.ErrorKind.html#variant.Unavailable) means a dependency failed and the operation may succeed on retry.
+- [`ErrorKind::Closed`](https://docs.rs/slatedb/latest/slatedb/enum.ErrorKind.html#variant.Closed) means the handle is done, and [`CloseReason`](https://docs.rs/slatedb/latest/slatedb/enum.CloseReason.html) explains why.
+- [`ErrorKind::Invalid`](https://docs.rs/slatedb/latest/slatedb/enum.ErrorKind.html#variant.Invalid), [`ErrorKind::Data`](https://docs.rs/slatedb/latest/slatedb/enum.ErrorKind.html#variant.Data), and [`ErrorKind::Internal`](https://docs.rs/slatedb/latest/slatedb/enum.ErrorKind.html#variant.Internal) usually mean you should stop and investigate instead of retrying blindly.
+
+See the [`slatedb::ErrorKind`](https://docs.rs/slatedb/latest/slatedb/enum.ErrorKind.html) rustdoc for a complete explanation of each kind.
+
+## Sources
+
+[`Error`](https://docs.rs/slatedb/latest/slatedb/struct.Error.html) implements the standard source chain. This chain is useful for logs and for narrow diagnostics, such as checking whether a `Data` error came from an underlying `object_store::Error::NotFound`.

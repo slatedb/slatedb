@@ -75,6 +75,7 @@ use crate::compactor_executor::{
 };
 use crate::compactor_state_protocols::CompactorStateWriter;
 use crate::config::CompactorOptions;
+use crate::db_metrics::DbMetrics;
 use crate::db_state::SortedRun;
 use crate::db_status::ClosedResultWriter;
 use crate::dispatcher::{MessageFactory, MessageHandler, MessageHandlerExecutor};
@@ -83,7 +84,6 @@ use crate::manifest::store::ManifestStore;
 use crate::manifest::SsTableHandle;
 use crate::merge_operator::MergeOperatorType;
 use crate::rand::DbRand;
-use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
 use crate::utils::{format_bytes_si, IdGenerator};
 use slatedb_common::clock::SystemClock;
@@ -279,7 +279,7 @@ impl Compactor {
         scheduler_supplier: Arc<dyn CompactionSchedulerSupplier>,
         compactor_runtime: Handle,
         rand: Arc<DbRand>,
-        stat_registry: Arc<StatRegistry>,
+        db_metrics: &DbMetrics,
         system_clock: Arc<dyn SystemClock>,
         closed_result: ClosedResultWriter,
         merge_operator: Option<MergeOperatorType>,
@@ -287,7 +287,7 @@ impl Compactor {
             Arc<dyn CompactionFilterSupplier>,
         >,
     ) -> Self {
-        let stats = Arc::new(CompactionStats::new(stat_registry));
+        let stats = Arc::new(CompactionStats::new(db_metrics));
         let task_executor = Arc::new(MessageHandlerExecutor::new(
             closed_result,
             system_clock.clone(),
@@ -591,8 +591,8 @@ impl CompactorEventHandler {
 
         self.stats
             .total_bytes_being_compacted
-            .set(total_estimated_bytes);
-        self.stats.total_throughput.set(total_throughput as u64);
+            .set(total_estimated_bytes as i64);
+        self.stats.total_throughput.set(total_throughput as i64);
     }
 
     /// Calculates the estimated total source bytes for a compaction.
@@ -673,6 +673,8 @@ impl CompactorEventHandler {
     /// - Compaction has sources
     /// - Compaction sources exist in DB state
     /// - Compactions with only L0 sources must have a destination > highest existing SR ID
+    /// - At most one L0 compaction may be active at a time (the `last_compacted_l0`
+    ///   watermark cannot handle out-of-order completion of parallel L0 compactions)
     fn validate_compaction(&self, compaction: &CompactionSpec) -> Result<(), SlateDBError> {
         // Validate compaction sources exist
         if compaction.sources().is_empty() {
@@ -702,13 +704,7 @@ impl CompactorEventHandler {
         }
 
         // Validate L0-only compactions create a new SR with id > highest existing
-        let has_only_l0 = compaction
-            .sources()
-            .iter()
-            .all(|s| matches!(s, SourceId::SstView(_)));
-
-        if has_only_l0 {
-            // L0-only: must create new SR with id > highest_existing
+        if compaction.has_l0_sources() && !compaction.has_sr_sources() {
             let highest_id = self
                 .state()
                 .db_state()
@@ -718,6 +714,20 @@ impl CompactorEventHandler {
             if compaction.destination() < highest_id {
                 warn!("compaction destination is lesser than the expected L0-only highest_id: {:?} {:?}",
                 compaction.destination(), highest_id);
+                return Err(SlateDBError::InvalidCompaction);
+            }
+        }
+
+        // Reject parallel L0 compactions. The last_compacted_l0 watermark assumes
+        // at most one L0 compaction is in flight; out-of-order completion would
+        // cause merge_remote_manifest to truncate still-in-flight L0 sources.
+        if compaction.has_l0_sources() {
+            let running_l0_exists = self
+                .state()
+                .compactions_with_status(CompactionStatus::Running)
+                .any(|c| c.spec().has_l0_sources());
+            if running_l0_exists {
+                warn!("rejected compaction: parallel L0 compaction already running");
                 return Err(SlateDBError::InvalidCompaction);
             }
         }
@@ -931,7 +941,7 @@ impl CompactorEventHandler {
         self.maybe_start_compactions().await?;
         self.stats
             .last_compaction_ts
-            .set(self.system_clock.now().timestamp() as u64);
+            .set(self.system_clock.now().timestamp());
         Ok(())
     }
 
@@ -957,7 +967,8 @@ impl CompactorEventHandler {
 }
 
 pub mod stats {
-    use crate::stats::{Counter, Gauge, StatRegistry};
+    use crate::db_metrics::DbMetrics;
+    use slatedb_common::metrics::{CounterFn, GaugeFn, UpDownCounterFn};
     use std::sync::Arc;
 
     macro_rules! compactor_stat_name {
@@ -975,42 +986,22 @@ pub mod stats {
         compactor_stat_name!("total_throughput_bytes_per_sec");
 
     pub(crate) struct CompactionStats {
-        pub(crate) last_compaction_ts: Arc<Gauge<u64>>,
-        pub(crate) running_compactions: Arc<Gauge<i64>>,
-        pub(crate) bytes_compacted: Arc<Counter>,
-        pub(crate) total_bytes_being_compacted: Arc<Gauge<u64>>,
-        pub(crate) total_throughput: Arc<Gauge<u64>>,
+        pub(crate) last_compaction_ts: Arc<dyn GaugeFn>,
+        pub(crate) running_compactions: Arc<dyn UpDownCounterFn>,
+        pub(crate) bytes_compacted: Arc<dyn CounterFn>,
+        pub(crate) total_bytes_being_compacted: Arc<dyn GaugeFn>,
+        pub(crate) total_throughput: Arc<dyn GaugeFn>,
     }
 
     impl CompactionStats {
-        /// Registers and returns a new set of compactor metrics in the provided registry.
-        ///
-        /// ## Metrics
-        /// - `last_compaction_timestamp_sec`: Unix timestamp of the last completed compaction.
-        /// - `running_compactions`: Gauge tracking active compaction attempts.
-        /// - `bytes_compacted`: Counter of bytes written by the executor.
-        /// - `total_bytes_being_compacted`: Total bytes across all running compactions.
-        /// - `total_throughput_bytes_per_sec`: Combined throughput across all running compactions.
-        pub(crate) fn new(stat_registry: Arc<StatRegistry>) -> Self {
-            let stats = Self {
-                last_compaction_ts: Arc::new(Gauge::default()),
-                running_compactions: Arc::new(Gauge::default()),
-                bytes_compacted: Arc::new(Counter::default()),
-                total_bytes_being_compacted: Arc::new(Gauge::default()),
-                total_throughput: Arc::new(Gauge::default()),
-            };
-            stat_registry.register(LAST_COMPACTION_TS_SEC, stats.last_compaction_ts.clone());
-            stat_registry.register(RUNNING_COMPACTIONS, stats.running_compactions.clone());
-            stat_registry.register(BYTES_COMPACTED, stats.bytes_compacted.clone());
-            stat_registry.register(
-                TOTAL_BYTES_BEING_COMPACTED,
-                stats.total_bytes_being_compacted.clone(),
-            );
-            stat_registry.register(
-                TOTAL_THROUGHPUT_BYTES_PER_SEC,
-                stats.total_throughput.clone(),
-            );
-            stats
+        pub(crate) fn new(recorder: &DbMetrics) -> Self {
+            Self {
+                last_compaction_ts: recorder.gauge(LAST_COMPACTION_TS_SEC).register(),
+                running_compactions: recorder.up_down_counter(RUNNING_COMPACTIONS).register(),
+                bytes_compacted: recorder.counter(BYTES_COMPACTED).register(),
+                total_bytes_being_compacted: recorder.gauge(TOTAL_BYTES_BEING_COMPACTED).register(),
+                total_throughput: recorder.gauge(TOTAL_THROUGHPUT_BYTES_PER_SEC).register(),
+            }
         }
     }
 }
@@ -1056,7 +1047,6 @@ mod tests {
     use crate::object_stores::ObjectStores;
     use crate::proptest_util::rng;
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
-    use crate::stats::StatRegistry;
     use crate::tablestore::TableStore;
     use crate::test_utils::assert_iterator;
     use crate::types::KeyValue;
@@ -2235,6 +2225,233 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn should_merge_operations_with_same_expire_at() {
+        use crate::test_utils::OnDemandCompactionSchedulerSupplier;
+
+        // given:
+        let os = Arc::new(InMemory::new());
+        let system_clock = Arc::new(MockSystemClock::new());
+        let compaction_scheduler = Arc::new(OnDemandCompactionSchedulerSupplier::new(Arc::new(
+            |state| state.manifest().l0.len() >= 2,
+        )));
+        let options = db_options(None);
+
+        let db = Db::builder(PATH, os.clone())
+            .with_settings(options)
+            .with_system_clock(system_clock.clone())
+            .with_compactor_builder(compactor_builder_with_scheduler(
+                os.clone(),
+                compaction_scheduler.clone(),
+                system_clock.clone(),
+            ))
+            .with_merge_operator(Arc::new(StringConcatMergeOperator))
+            .build()
+            .await
+            .unwrap();
+
+        let (manifest_store, _compactions_store, table_store) = build_test_stores(os.clone());
+
+        let flush_opts = FlushOptions {
+            flush_type: FlushType::MemTable,
+        };
+
+        // write merge operations with the SAME ExpireAt timestamp at different clock times
+        system_clock.set(100);
+        db.merge_with_options(
+            b"key1",
+            b"a",
+            &MergeOptions {
+                ttl: Ttl::ExpireAt(1000),
+            },
+            &WriteOptions {
+                await_durable: false,
+            },
+        )
+        .await
+        .unwrap();
+        db.flush_with_options(flush_opts.clone()).await.unwrap();
+
+        system_clock.set(200);
+        db.merge_with_options(
+            b"key1",
+            b"b",
+            &MergeOptions {
+                ttl: Ttl::ExpireAt(1000),
+            },
+            &WriteOptions {
+                await_durable: false,
+            },
+        )
+        .await
+        .unwrap();
+        db.flush_with_options(flush_opts.clone()).await.unwrap();
+
+        // when:
+        let _ = await_compaction(&db, Some(system_clock)).await;
+
+        // then: verify in the compacted SST that all merge operations were combined
+        let stored_manifest =
+            StoredManifest::load(manifest_store.clone(), Arc::new(DefaultSystemClock::new()))
+                .await
+                .unwrap();
+        let db_state = stored_manifest.db_state();
+        assert!(
+            !db_state.compacted.is_empty(),
+            "compaction should have occurred"
+        );
+
+        let compacted = &db_state.compacted.first().unwrap().sst_views;
+        assert_eq!(compacted.len(), 1);
+        let handle = compacted.first().unwrap();
+
+        let mut iter = SstIterator::new_borrowed_initialized(
+            ..,
+            handle,
+            table_store.clone(),
+            SstIteratorOptions::default(),
+        )
+        .await
+        .unwrap()
+        .expect("Expected Some(iter) but got None");
+
+        // collect key1 entries from the compacted SST
+        let mut key1_entries = vec![];
+        while let Some(entry) = iter.next().await.unwrap() {
+            if entry.key.as_ref() == b"key1" {
+                key1_entries.push(entry);
+            }
+        }
+
+        // there should be exactly one merged entry for key1
+        assert_eq!(
+            key1_entries.len(),
+            1,
+            "expected a single merged entry for key1, got {}",
+            key1_entries.len()
+        );
+        let merged = &key1_entries[0];
+        assert_eq!(merged.expire_ts, Some(1000));
+        assert!(
+            matches!(&merged.value, crate::types::ValueDeletable::Merge(v) if v.as_ref() == b"ab"),
+            "expected merged value 'ab', got {:?}",
+            merged.value
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn should_compact_expired_expire_at_entries() {
+        // given:
+        let os = Arc::new(InMemory::new());
+        let insert_clock = Arc::new(MockSystemClock::new());
+
+        let scheduler_options = SizeTieredCompactionSchedulerOptions {
+            min_compaction_sources: 2,
+            max_compaction_sources: 2,
+            include_size_threshold: 4.0,
+        }
+        .into();
+        let mut options = db_options(Some(compactor_options()));
+        options
+            .compactor_options
+            .as_mut()
+            .expect("compactor options missing")
+            .scheduler_options = scheduler_options;
+        let db = Db::builder(PATH, os.clone())
+            .with_settings(options)
+            .with_system_clock(insert_clock.clone())
+            .build()
+            .await
+            .unwrap();
+
+        let (_, _, table_store) = build_test_stores(os.clone());
+
+        let value = &[b'a'; 64];
+        let flush_opts = FlushOptions {
+            flush_type: FlushType::MemTable,
+        };
+
+        // ticker time = 0, expire at 10
+        insert_clock.set(0);
+        db.put_with_options(
+            &[1; 16],
+            value,
+            &PutOptions {
+                ttl: Ttl::ExpireAt(10),
+            },
+            &WriteOptions {
+                await_durable: false,
+            },
+        )
+        .await
+        .unwrap();
+
+        // ticker time = 5, expire at far future (well beyond compaction time)
+        insert_clock.set(5);
+        db.put_with_options(
+            &[2; 16],
+            value,
+            &PutOptions {
+                ttl: Ttl::ExpireAt(i64::MAX),
+            },
+            &WriteOptions {
+                await_durable: false,
+            },
+        )
+        .await
+        .unwrap();
+
+        db.flush_with_options(flush_opts.clone()).await.unwrap();
+
+        // ticker time = 10, no expire time
+        insert_clock.set(10);
+        db.put_with_options(
+            &[3; 16],
+            value,
+            &PutOptions { ttl: Ttl::NoExpiry },
+            &WriteOptions {
+                await_durable: false,
+            },
+        )
+        .await
+        .unwrap();
+
+        db.flush_with_options(flush_opts.clone()).await.unwrap();
+
+        // when: await_compaction advances clock by 60s per iteration,
+        // so compaction_start_ts will be well past expire_at=10
+        let db_state = await_compaction(&db, Some(insert_clock)).await;
+
+        // then: key 1 should be expired (expire_at=10 < compaction_time),
+        //       key 2 should survive (expire_at=i64::MAX), key 3 has no expiry
+        let db_state = db_state.expect("db was not compacted");
+        assert!(db_state.last_compacted_l0_sst_view_id.is_some());
+        assert_eq!(db_state.compacted.len(), 1);
+        let compacted = &db_state.compacted.first().unwrap().sst_views;
+        assert_eq!(compacted.len(), 1);
+        let handle = compacted.first().unwrap();
+        let mut iter = SstIterator::new_borrowed_initialized(
+            ..,
+            handle,
+            table_store.clone(),
+            SstIteratorOptions::default(),
+        )
+        .await
+        .unwrap()
+        .expect("Expected Some(iter) but got None");
+
+        assert_iterator(
+            &mut iter,
+            vec![
+                RowEntry::new_value(&[2; 16], value, 2)
+                    .with_create_ts(5)
+                    .with_expire_ts(i64::MAX),
+                RowEntry::new_value(&[3; 16], value, 3).with_create_ts(10),
+            ],
+        )
+        .await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_should_compact_expired_entries() {
         // given:
         let os = Arc::new(InMemory::new());
@@ -2705,7 +2922,7 @@ mod tests {
         executor: Arc<MockExecutor>,
         real_executor: Arc<dyn CompactionExecutor>,
         real_executor_rx: tokio::sync::mpsc::UnboundedReceiver<CompactorMessage>,
-        stats_registry: Arc<StatRegistry>,
+        stats_registry: Arc<crate::stats::StatRegistry>,
         handler: CompactorEventHandler,
     }
 
@@ -2726,8 +2943,9 @@ mod tests {
             let executor = Arc::new(MockExecutor::new());
             let (real_executor_tx, real_executor_rx) = tokio::sync::mpsc::unbounded_channel();
             let rand = Arc::new(DbRand::default());
-            let stats_registry = Arc::new(StatRegistry::new());
-            let compactor_stats = Arc::new(CompactionStats::new(stats_registry.clone()));
+            let db_metrics = crate::db_metrics::DbMetrics::new(None);
+            let stats_registry = db_metrics.stat_registry();
+            let compactor_stats = Arc::new(CompactionStats::new(&db_metrics));
             let real_executor = Arc::new(TokioCompactionExecutor::new(
                 TokioCompactionExecutorOptions {
                     handle: Handle::current(),
@@ -3280,8 +3498,8 @@ mod tests {
         let scheduler = Arc::new(MockScheduler::new());
         let executor = Arc::new(MockExecutor::new());
         let rand = Arc::new(DbRand::default());
-        let stats_registry = Arc::new(StatRegistry::new());
-        let compactor_stats = Arc::new(CompactionStats::new(stats_registry));
+        let db_metrics = crate::db_metrics::DbMetrics::new(None);
+        let compactor_stats = Arc::new(CompactionStats::new(&db_metrics));
         let mut handler = CompactorEventHandler::new(
             manifest_store,
             compactions_store.clone(),
@@ -3657,6 +3875,30 @@ mod tests {
         );
         // Compactor-level validation should not reject (scheduler default validate returns Ok(()))
         fixture.handler.validate_compaction(&mixed).unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_validate_compaction_rejects_parallel_l0() {
+        let mut fixture = CompactorEventHandlerTestFixture::new().await;
+        // write two L0s so we can build two disjoint L0 compactions
+        fixture.write_l0().await;
+        fixture.write_l0().await;
+        fixture.handler.handle_ticker().await.unwrap();
+
+        let state = fixture.latest_db_state().await;
+        assert!(state.l0.len() >= 2);
+
+        // Build first L0 compaction from the oldest L0
+        let first_l0 = CompactionSpec::new(vec![SourceId::SstView(state.l0.back().unwrap().id)], 0);
+        // Inject and schedule it so it becomes active
+        fixture.scheduler.inject_compaction(first_l0.clone());
+        fixture.handler.handle_ticker().await.unwrap();
+
+        // Build second L0 compaction from the newest L0 (disjoint sources)
+        let second_l0 =
+            CompactionSpec::new(vec![SourceId::SstView(state.l0.front().unwrap().id)], 1);
+        let err = fixture.handler.validate_compaction(&second_l0).unwrap_err();
+        assert!(matches!(err, SlateDBError::InvalidCompaction));
     }
 
     async fn run_for<T, F>(duration: Duration, f: impl Fn() -> F) -> Option<T>

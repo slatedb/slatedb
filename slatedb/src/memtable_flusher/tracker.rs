@@ -364,6 +364,7 @@ enum TrackedImmState {
 mod tests {
     use crate::config::{CheckpointOptions, Settings};
     use crate::db::DbInner;
+    use crate::db_metrics::DbMetrics;
     use crate::db_state::{
         ManifestCore, SsTableHandle, SsTableId, SsTableInfo, SsTableView, SstType,
     };
@@ -374,7 +375,6 @@ mod tests {
     use crate::object_stores::ObjectStores;
     use crate::paths::PathResolver;
     use crate::rand::DbRand;
-    use crate::stats::StatRegistry;
     use crate::tablestore::TableStore;
     use crate::types::RowEntry;
     use bytes::Bytes;
@@ -404,7 +404,7 @@ mod tests {
         let path = path.to_string();
         let system_clock: Arc<dyn SystemClock> = Arc::new(DefaultSystemClock::new());
         let rand = Arc::new(DbRand::new(42));
-        let stat_registry = Arc::new(StatRegistry::new());
+        let db_metrics = DbMetrics::new(None);
         let manifest_store = Arc::new(ManifestStore::new(
             &Path::from(path.clone()),
             Arc::clone(&object_store),
@@ -433,7 +433,7 @@ mod tests {
                 stored_manifest.prepare_dirty().unwrap(),
                 Arc::new(MemtableFlusher::new()),
                 write_tx,
-                Arc::clone(&stat_registry),
+                db_metrics,
                 fp_registry,
                 None,
             )

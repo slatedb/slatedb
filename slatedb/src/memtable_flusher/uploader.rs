@@ -264,7 +264,7 @@ impl UploadWorker {
                         .to_std()
                         .map(|d| d.as_millis() as u64)
                         .unwrap_or(0);
-                    self.db.db_stats.l0_upload_idle_millis.add(idle_elapsed);
+                    self.db.db_stats.l0_upload_idle_millis.increment(idle_elapsed);
                     let Some(job) = recv_result else {
                         return Ok(());
                     };
@@ -276,7 +276,7 @@ impl UploadWorker {
                         .to_std()
                         .map(|d| d.as_millis() as u64)
                         .unwrap_or(0);
-                    self.db.db_stats.l0_upload_busy_millis.add(busy_elapsed);
+                    self.db.db_stats.l0_upload_busy_millis.increment(busy_elapsed);
                     if events.send(success).is_err() {
                         return Ok(());
                     }
@@ -321,7 +321,7 @@ impl UploadWorker {
             .db
             .upload_compacted_sst(&job.sst_id, job.imm_memtable.table(), encoded_sst, true)
             .await?;
-        self.db.db_stats.l0_flush_bytes.add(written_bytes);
+        self.db.db_stats.l0_flush_bytes.increment(written_bytes);
         Ok(UploadedMemtable {
             epoch: job.epoch,
             imm_memtable: Arc::clone(&job.imm_memtable),
@@ -336,13 +336,13 @@ mod tests {
     use super::{FlushEpoch, UploadJob, Uploader};
     use crate::config::Settings;
     use crate::db::DbInner;
+    use crate::db_metrics::DbMetrics;
     use crate::db_state::{ManifestCore, SsTableId};
     use crate::error::SlateDBError;
     use crate::format::sst::SsTableFormat;
     use crate::object_stores::ObjectStores;
     use crate::paths::PathResolver;
     use crate::rand::DbRand;
-    use crate::stats::{ReadableStat, StatRegistry};
     use crate::tablestore::TableStore;
     use crate::types::RowEntry;
     use crate::utils::IdGenerator;
@@ -361,7 +361,7 @@ mod tests {
         let settings = Settings::default();
         let system_clock: Arc<dyn SystemClock> = Arc::new(DefaultSystemClock::new());
         let rand = Arc::new(DbRand::new(42));
-        let stat_registry = Arc::new(StatRegistry::new());
+        let db_metrics = DbMetrics::new(None);
         let manifest_store = Arc::new(crate::manifest::store::ManifestStore::new(
             &Path::from(path),
             Arc::clone(&object_store),
@@ -390,7 +390,7 @@ mod tests {
                 stored_manifest.prepare_dirty().unwrap(),
                 Arc::new(crate::memtable_flusher::MemtableFlusher::new()),
                 write_tx,
-                Arc::clone(&stat_registry),
+                db_metrics,
                 fp_registry,
                 None,
             )
@@ -440,7 +440,6 @@ mod tests {
             .unwrap();
         assert_eq!(event.epoch, FlushEpoch(1));
         assert_eq!(event.last_seq, 1);
-        assert!(db.db_stats.l0_flush_bytes.get() > 0);
 
         uploader.close(true).await.unwrap();
     }

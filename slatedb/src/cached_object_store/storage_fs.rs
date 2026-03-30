@@ -626,10 +626,10 @@ impl FsCacheEvictorInner {
             cache_state.entries.len()
         };
 
-        self.stats.object_store_cache_keys.set(entry_count as u64);
+        self.stats.object_store_cache_keys.set(entry_count as i64);
         self.stats
             .object_store_cache_bytes
-            .set(self.cache_size_bytes.load(Ordering::Relaxed));
+            .set(self.cache_size_bytes.load(Ordering::Relaxed) as i64);
 
         // if the cache size is still below the limit, do nothing
         if self.cache_size_bytes.load(Ordering::Relaxed) <= self.max_cache_size_bytes as u64 {
@@ -728,14 +728,14 @@ impl FsCacheEvictorInner {
         // Sync the metrics after eviction
         self.stats
             .object_store_cache_evicted_bytes
-            .add(total_evicted_bytes as u64);
+            .increment(total_evicted_bytes as u64);
         self.stats
             .object_store_cache_evicted_keys
-            .add(deleted_targets.len() as u64);
-        self.stats.object_store_cache_keys.set(entry_count as u64);
+            .increment(deleted_targets.len() as u64);
+        self.stats.object_store_cache_keys.set(entry_count as i64);
         self.stats
             .object_store_cache_bytes
-            .set(self.cache_size_bytes.load(Ordering::Relaxed));
+            .set(self.cache_size_bytes.load(Ordering::Relaxed) as i64);
 
         total_evicted_bytes
     }
@@ -852,7 +852,6 @@ fn wrap_io_err(err: impl std::error::Error + Send + Sync + 'static) -> object_st
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::stats::StatRegistry;
     use crate::test_utils::gen_rand_bytes;
     use filetime::FileTime;
     use slatedb_common::clock::DefaultSystemClock;
@@ -876,12 +875,12 @@ mod tests {
             .prefix("objstore_cache_test_evictor_")
             .tempdir()
             .unwrap();
-        let registry = StatRegistry::new();
+        let db_metrics = crate::db_metrics::DbMetrics::new(None);
 
         let evictor = FsCacheEvictorInner::new(
             temp_dir.path().to_path_buf(),
             1024 * 2,
-            Arc::new(CachedObjectStoreStats::new(&registry)),
+            Arc::new(CachedObjectStoreStats::new(&db_metrics)),
             Arc::new(DbRand::default()),
         );
 
@@ -916,13 +915,13 @@ mod tests {
             .prefix("objstore_cache_test_evictor_backpressure_")
             .tempdir()
             .unwrap();
-        let registry = StatRegistry::new();
+        let db_metrics = crate::db_metrics::DbMetrics::new(None);
 
         let evictor = FsCacheEvictor::new(
             temp_dir.path().to_path_buf(),
             1024,
             None,
-            Arc::new(CachedObjectStoreStats::new(&registry)),
+            Arc::new(CachedObjectStoreStats::new(&db_metrics)),
             Arc::new(DefaultSystemClock::new()),
             Arc::new(DbRand::default()),
         );
@@ -949,11 +948,11 @@ mod tests {
             .prefix("objstore_cache_test_evictor_")
             .tempdir()
             .unwrap();
-        let registry = StatRegistry::new();
+        let db_metrics = crate::db_metrics::DbMetrics::new(None);
         let evictor = Arc::new(FsCacheEvictorInner::new(
             temp_dir.path().to_path_buf(),
             1024 * 2,
-            Arc::new(CachedObjectStoreStats::new(&registry)),
+            Arc::new(CachedObjectStoreStats::new(&db_metrics)),
             Arc::new(DbRand::default()),
         ));
 
@@ -979,12 +978,12 @@ mod tests {
             .prefix("objstore_cache_test_evictor_")
             .tempdir()
             .unwrap();
-        let registry = StatRegistry::new();
+        let db_metrics = crate::db_metrics::DbMetrics::new(None);
 
         let evictor = Arc::new(FsCacheEvictorInner::new(
             temp_dir.path().to_path_buf(),
             1024 * 2,
-            Arc::new(CachedObjectStoreStats::new(&registry)),
+            Arc::new(CachedObjectStoreStats::new(&db_metrics)),
             Arc::new(DbRand::default()),
         ));
 
@@ -1030,11 +1029,11 @@ mod tests {
             .prefix("objstore_cache_test_pick_")
             .tempdir()
             .unwrap();
-        let registry = StatRegistry::new();
+        let db_metrics = crate::db_metrics::DbMetrics::new(None);
         let evictor = FsCacheEvictorInner::new(
             temp_dir.path().to_path_buf(),
             1024,
-            Arc::new(CachedObjectStoreStats::new(&registry)),
+            Arc::new(CachedObjectStoreStats::new(&db_metrics)),
             Arc::new(DbRand::default()),
         );
 

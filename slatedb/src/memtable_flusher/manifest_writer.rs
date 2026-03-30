@@ -440,7 +440,7 @@ impl ManifestWriterTask {
 
         for uploaded in &staged_batch {
             uploaded.imm_memtable.notify_flush_to_l0(Ok(()));
-            self.db.db_stats.immutable_memtable_flushes.inc();
+            self.db.db_stats.immutable_memtable_flushes.increment(1);
         }
 
         match self
@@ -736,6 +736,7 @@ mod tests {
     };
     use crate::config::{CheckpointOptions, Settings};
     use crate::db::DbInner;
+    use crate::db_metrics::DbMetrics;
     use crate::db_state::{ManifestCore, SsTableId};
     use crate::format::sst::SsTableFormat;
     use crate::manifest::store::{FenceableManifest, ManifestStore, StoredManifest};
@@ -743,7 +744,6 @@ mod tests {
     use crate::object_stores::ObjectStores;
     use crate::paths::PathResolver;
     use crate::rand::DbRand;
-    use crate::stats::StatRegistry;
     use crate::tablestore::TableStore;
     use crate::types::RowEntry;
     use crate::utils::IdGenerator;
@@ -805,7 +805,7 @@ mod tests {
         let settings = Settings::default();
         let system_clock: Arc<dyn SystemClock> = Arc::new(DefaultSystemClock::new());
         let rand = Arc::new(DbRand::new(42));
-        let stat_registry = Arc::new(StatRegistry::new());
+        let db_metrics = DbMetrics::new(None);
         let manifest_store = Arc::new(ManifestStore::new(
             &Path::from(path.clone()),
             Arc::clone(&object_store),
@@ -835,7 +835,7 @@ mod tests {
                 manifest_dirty,
                 Arc::new(crate::memtable_flusher::MemtableFlusher::new()),
                 write_tx,
-                Arc::clone(&stat_registry),
+                db_metrics,
                 fp_registry,
                 None,
             )

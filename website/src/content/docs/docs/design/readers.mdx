@@ -1,0 +1,57 @@
+---
+title: Readers
+description: How DbReader serves read-only traffic from a checkpointed manifest
+---
+
+[`DbReader`](https://docs.rs/slatedb/latest/slatedb/struct.DbReader.html) is SlateDB's read-only handle. It implements the same [`DbRead`](https://docs.rs/slatedb/latest/slatedb/trait.DbRead.html) operations as [`Db`](https://docs.rs/slatedb/latest/slatedb/struct.Db.html), but it does not own a mutable memtable and it does not write WAL records. It reads from a [checkpointed](/docs/design/checkpoints) manifest, the SSTs referenced by that manifest. When WAL replay is enabled, it also updates reader-local immutable memtables from newer WAL SSTs.
+
+## Opening
+
+This example opens a database, flushes one key to object storage, then opens a `DbReader` and reads that key back.
+
+```rust
+use slatedb::{Db, DbReader, Error};
+use slatedb::object_store::{memory::InMemory, ObjectStore};
+use std::sync::Arc;
+
+#[tokio::main]
+async fn main() -> Result<(), Error> {
+    let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+
+    let db = Db::open("example", Arc::clone(&object_store)).await?;
+    db.put(b"key", b"value").await?;
+    db.flush().await?;
+
+    let reader = DbReader::builder("example", object_store).build().await?;
+    assert_eq!(reader.get(b"key").await?, Some("value".into()));
+    Ok(())
+}
+```
+
+Without [`DbReaderBuilder::with_checkpoint_id`](https://docs.rs/slatedb/latest/slatedb/struct.DbReaderBuilder.html#method.with_checkpoint_id), SlateDB creates a checkpoint in the latest manifest and sets its lifetime from [`DbReaderOptions::checkpoint_lifetime`](https://docs.rs/slatedb/latest/slatedb/config/struct.DbReaderOptions.html#structfield.checkpoint_lifetime). That checkpoint pins the initial L0 and sorted-run view. The reader then replays newer WAL SSTs into immutable memtables unless [`DbReaderOptions::skip_wal_replay`](https://docs.rs/slatedb/latest/slatedb/config/struct.DbReaderOptions.html#structfield.skip_wal_replay) is `true`.
+
+With an explicit checkpoint ID, SlateDB opens exactly the manifest pinned by that checkpoint. It does not create a new checkpoint, refresh the user-managed checkpoint, delete it on close, or follow newer manifests or WAL SSTs.
+
+When `skip_wal_replay` is `true`, the reader only sees data already referenced by the manifest it opened. If the reader owns the checkpoint, it can still pick up later memtable flushes and compaction results when the manifest changes, but it ignores WAL-only data between those manifest updates.
+
+## State
+
+Internally, the reader tracks the pinned checkpoint and manifest, a deque of immutable memtables built from WAL replay, the last WAL file it replayed, and the highest durable sequence number it can expose. Reads go through the same internal [`Reader`](https://github.com/slatedb/slatedb/blob/main/slatedb/src/reader.rs) implementation that backs ordinary [`Db`](https://docs.rs/slatedb/latest/slatedb/struct.Db.html) reads.
+
+A `DbReader` has no mutable memtable of its own. Its precedence is replayed immutable memtables, then L0 SSTs, then sorted runs. When SlateDB replaces the reader's checkpoint with a newer manifest, it drops WAL-replayed rows whose sequence numbers are now at or below the new manifest's `last_l0_seq`, because L0 or lower levels already cover them.
+
+## Refresh Loop
+
+When the reader owns the checkpoint, it starts a background poller that wakes up every [`DbReaderOptions::manifest_poll_interval`](https://docs.rs/slatedb/latest/slatedb/config/struct.DbReaderOptions.html#structfield.manifest_poll_interval).
+
+On each tick, SlateDB loads the latest manifest. If the visible SST layout changed, or if the latest L0 sequence number moved past the WAL state already replayed into the reader, it replaces the checkpoint and rebuilds state from the new manifest. Otherwise it keeps the current checkpoint and only looks for newer WAL SSTs.
+
+SlateDB refreshes the checkpoint expiration after half of the configured lifetime has elapsed. [`DbReader::close`](https://docs.rs/slatedb/latest/slatedb/struct.DbReader.html#method.close) stops the poller and deletes the checkpoint the reader created for itself.
+
+## Read Semantics
+
+`get`, `get_key_value`, `scan`, and `scan_prefix` use the normal SST iterator stack. Options such as [`ReadOptions::cache_blocks`](https://docs.rs/slatedb/latest/slatedb/config/struct.ReadOptions.html#structfield.cache_blocks), [`ScanOptions::read_ahead_bytes`](https://docs.rs/slatedb/latest/slatedb/config/struct.ScanOptions.html#structfield.read_ahead_bytes), and [`ScanOptions::max_fetch_tasks`](https://docs.rs/slatedb/latest/slatedb/config/struct.ScanOptions.html#structfield.max_fetch_tasks) still control caching and scan behavior.
+
+Visibility is narrower than [`Db`](https://docs.rs/slatedb/latest/slatedb/struct.Db.html). A reader does not share a writer's live mutable memtable, so read options cannot expose unflushed writer state. `DbReader` only returns committed data that is already durable in object storage, either through the pinned manifest or through WAL SSTs it replayed itself.
+
+Reader-side block and object-store caches use the same configuration surface as [`Db`](https://docs.rs/slatedb/latest/slatedb/struct.Db.html). [Caching](/docs/design/caching) covers those layers.
