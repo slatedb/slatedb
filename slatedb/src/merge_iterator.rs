@@ -10,6 +10,7 @@ struct MergeIteratorHeapEntry<'a> {
     next_kv: RowEntry,
     index: usize,
     iterator: Box<dyn RowEntryIterator + 'a>,
+    order: IterationOrder,
 }
 
 impl<'a> MergeIteratorHeapEntry<'a> {
@@ -27,6 +28,7 @@ impl<'a> MergeIteratorHeapEntry<'a> {
                     next_kv,
                     index: self.index,
                     iterator: self.iterator,
+                    order: self.order,
                 }))
             } else {
                 Ok(None)
@@ -51,84 +53,16 @@ impl PartialOrd<Self> for MergeIteratorHeapEntry<'_> {
 
 impl Ord for MergeIteratorHeapEntry<'_> {
     fn cmp(&self, other: &Self) -> Ordering {
-        // we'll wrap a Reverse in the BinaryHeap, so the cmp here is in increasing order.
-        // the desired behavior is to return the entires with the lowest key first across keys
-        // but the highest seqnum first within a key.
-        match self.next_kv.key.cmp(&other.next_kv.key) {
-            Ordering::Equal => other.next_kv.seq.cmp(&self.next_kv.seq), // descending seq
-            ord => ord,                                                  // ascending key
-        }
-    }
-}
-
-/// Wrapper that reverses the key ordering of MergeIteratorHeapEntry while
-/// preserving the seq ordering within a key. This lets us use a BinaryHeap
-/// (max-heap) directly for descending iteration: largest key first, highest
-/// seq first within a key.
-struct DescendingEntry<'a>(MergeIteratorHeapEntry<'a>);
-
-impl Eq for DescendingEntry<'_> {}
-
-impl PartialEq for DescendingEntry<'_> {
-    fn eq(&self, other: &Self) -> bool {
-        self.0.eq(&other.0)
-    }
-}
-
-impl PartialOrd for DescendingEntry<'_> {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for DescendingEntry<'_> {
-    fn cmp(&self, other: &Self) -> Ordering {
-        // Natural ascending order for both key and seq. The max-heap pops the
-        // "largest" entry first, giving us: largest key first, and within a
-        // key, the highest seq first.
-        match self.0.next_kv.key.cmp(&other.0.next_kv.key) {
-            Ordering::Equal => self.0.next_kv.seq.cmp(&other.0.next_kv.seq),
+        // Wrapped in Reverse in the BinaryHeap, so the smallest entry here gets
+        // popped first. Within a key, always return highest seqnum first.
+        // Across keys, the direction depends on the iteration order.
+        let key_ord = match self.order {
+            IterationOrder::Ascending => self.next_kv.key.cmp(&other.next_kv.key),
+            IterationOrder::Descending => other.next_kv.key.cmp(&self.next_kv.key),
+        };
+        match key_ord {
+            Ordering::Equal => other.next_kv.seq.cmp(&self.next_kv.seq),
             ord => ord,
-        }
-    }
-}
-
-/// A heap that can operate as either a min-heap (ascending) or max-heap (descending).
-/// This avoids a branch in the hot-path comparator by choosing the heap variant once
-/// at construction time.
-enum MergeHeap<'a> {
-    /// Min-heap: pops the entry with the smallest key first.
-    Ascending(BinaryHeap<Reverse<MergeIteratorHeapEntry<'a>>>),
-    /// Max-heap: pops the entry with the largest key first.
-    Descending(BinaryHeap<DescendingEntry<'a>>),
-}
-
-impl<'a> MergeHeap<'a> {
-    fn new(order: IterationOrder) -> Self {
-        match order {
-            IterationOrder::Ascending => MergeHeap::Ascending(BinaryHeap::new()),
-            IterationOrder::Descending => MergeHeap::Descending(BinaryHeap::new()),
-        }
-    }
-
-    fn push(&mut self, entry: MergeIteratorHeapEntry<'a>) {
-        match self {
-            MergeHeap::Ascending(heap) => heap.push(Reverse(entry)),
-            MergeHeap::Descending(heap) => heap.push(DescendingEntry(entry)),
-        }
-    }
-
-    fn pop(&mut self) -> Option<MergeIteratorHeapEntry<'a>> {
-        match self {
-            MergeHeap::Ascending(heap) => heap.pop().map(|r| r.0),
-            MergeHeap::Descending(heap) => heap.pop().map(|r| r.0),
-        }
-    }
-
-    fn drain(&mut self) -> Vec<MergeIteratorHeapEntry<'a>> {
-        match self {
-            MergeHeap::Ascending(heap) => heap.drain().map(|r| r.0).collect(),
-            MergeHeap::Descending(heap) => heap.drain().map(|r| r.0).collect(),
         }
     }
 }
@@ -137,7 +71,7 @@ pub(crate) struct MergeIterator<'a> {
     /// The current entry popped from the heap.
     current: Option<MergeIteratorHeapEntry<'a>>,
     /// Use a heap to perform merge sort.
-    iterators: MergeHeap<'a>,
+    iterators: BinaryHeap<Reverse<MergeIteratorHeapEntry<'a>>>,
     /// Iterators that have not yet been initialized and seeded.
     pending_iterators: Vec<(usize, Box<dyn RowEntryIterator + 'a>)>,
     /// Whether to deduplicate entries of multiple versions with the same key. It's enabled by
@@ -148,6 +82,8 @@ pub(crate) struct MergeIterator<'a> {
     initialized: bool,
     /// Counter to track bytes processed (key + value length) for progress reporting.
     bytes_processed: u64,
+    /// The iteration order for key comparison in the merge heap.
+    order: IterationOrder,
 }
 
 impl<'a> MergeIterator<'a> {
@@ -163,7 +99,8 @@ impl<'a> MergeIterator<'a> {
     ) -> Result<Self, SlateDBError> {
         Ok(Self {
             current: None,
-            iterators: MergeHeap::new(order),
+            iterators: BinaryHeap::new(),
+            order,
             pending_iterators: iterators
                 .into_iter()
                 .enumerate()
@@ -190,14 +127,15 @@ impl<'a> MergeIterator<'a> {
         for (index, mut iterator) in self.pending_iterators.drain(..) {
             iterator.init().await?;
             if let Some(next_kv) = iterator.next().await? {
-                self.iterators.push(MergeIteratorHeapEntry {
+                self.iterators.push(Reverse(MergeIteratorHeapEntry {
                     next_kv,
                     index,
                     iterator,
-                });
+                    order: self.order,
+                }));
             }
         }
-        self.current = self.iterators.pop();
+        self.current = self.iterators.pop().map(|r| r.0);
         self.initialized = true;
         Ok(())
     }
@@ -219,9 +157,9 @@ impl<'a> MergeIterator<'a> {
             let current_kv = iterator_state.next_kv;
             if let Some(kv) = iterator_state.iterator.next().await? {
                 iterator_state.next_kv = kv;
-                self.iterators.push(iterator_state);
+                self.iterators.push(Reverse(iterator_state));
             }
-            self.current = self.iterators.pop();
+            self.current = self.iterators.pop().map(|r| r.0);
 
             // Track bytes processed for progress reporting
             let entry_bytes = current_kv.key.len() as u64 + current_kv.value.len() as u64;
@@ -281,16 +219,16 @@ impl RowEntryIterator for MergeIterator<'_> {
         }
 
         for iterator in self.iterators.drain() {
-            seek_futures.push_back(iterator.seek(next_key));
+            seek_futures.push_back(iterator.0.seek(next_key));
         }
 
         for seek_result in futures::future::join_all(seek_futures).await {
             if let Some(seeked_iterator) = seek_result? {
-                self.iterators.push(seeked_iterator);
+                self.iterators.push(Reverse(seeked_iterator));
             }
         }
 
-        self.current = self.iterators.pop();
+        self.current = self.iterators.pop().map(|r| r.0);
         Ok(())
     }
 }
