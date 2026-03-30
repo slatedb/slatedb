@@ -273,7 +273,7 @@ impl TokioCompactionExecutorInner {
             None => None,
         };
         let sst_iter_options = SstIteratorOptions {
-            max_fetch_tasks: 4,
+            max_fetch_tasks: self.options.max_fetch_tasks,
             blocks_to_fetch: 256,
             cache_blocks: false, // don't clobber the cache
             eager_spawn: true,
