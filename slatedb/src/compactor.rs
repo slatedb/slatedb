@@ -3738,7 +3738,7 @@ mod tests {
     async fn test_compactor_compressed_block_size() {
         use crate::compactor::stats::BYTES_COMPACTED;
         use crate::config::{CompressionCodec, SstBlockSize};
-        use slatedb_common::metrics::{DefaultMetricsRecorder, MetricValue};
+        use slatedb_common::metrics::{lookup_metric, DefaultMetricsRecorder};
 
         // given:
         let os = Arc::new(InMemory::new());
@@ -3767,16 +3767,6 @@ mod tests {
             .build()
             .await
             .unwrap();
-
-        fn lookup_metric(recorder: &DefaultMetricsRecorder, name: &str) -> Option<i64> {
-            let snap = recorder.snapshot();
-            snap.by_name(name).first().map(|m| match &m.value {
-                MetricValue::Counter(v) => *v as i64,
-                MetricValue::Gauge(v) => *v,
-                MetricValue::UpDownCounter(v) => *v,
-                MetricValue::Histogram { .. } => panic!("unexpected histogram metric"),
-            })
-        }
 
         for i in 0..4 {
             let k = vec![b'a' + i as u8; 16];

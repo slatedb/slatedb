@@ -682,7 +682,7 @@ mod tests {
     use crate::types::RowEntry;
     use rstest::{fixture, rstest};
     use slatedb_common::metrics::{
-        DefaultMetricsRecorder, MetricLevel, MetricValue, MetricsRecorderHelper,
+        lookup_metric, DefaultMetricsRecorder, MetricLevel, MetricsRecorderHelper,
     };
     use std::sync::Arc;
     use ulid::Ulid;
@@ -710,8 +710,11 @@ mod tests {
             let _ = cache.get_filter(&key).await;
 
             // then:
-            assert_eq!(0, get_counter(&registry, "dbcache/filter_miss"));
-            assert_eq!(i as i64, get_counter(&registry, "dbcache/filter_hit"));
+            assert_eq!(Some(0), lookup_metric(&registry, "dbcache/filter_miss"));
+            assert_eq!(
+                Some(i as i64),
+                lookup_metric(&registry, "dbcache/filter_hit")
+            );
         }
     }
 
@@ -727,8 +730,11 @@ mod tests {
             let _ = cache.get_filter(&key).await;
 
             // then:
-            assert_eq!(i as i64, get_counter(&registry, "dbcache/filter_miss"));
-            assert_eq!(0, get_counter(&registry, "dbcache/filter_hit"));
+            assert_eq!(
+                Some(i as i64),
+                lookup_metric(&registry, "dbcache/filter_miss")
+            );
+            assert_eq!(Some(0), lookup_metric(&registry, "dbcache/filter_hit"));
         }
     }
 
@@ -753,8 +759,11 @@ mod tests {
             let _ = cache.get_index(&key).await;
 
             // then:
-            assert_eq!(0, get_counter(&registry, "dbcache/index_miss"));
-            assert_eq!(i as i64, get_counter(&registry, "dbcache/index_hit"));
+            assert_eq!(Some(0), lookup_metric(&registry, "dbcache/index_miss"));
+            assert_eq!(
+                Some(i as i64),
+                lookup_metric(&registry, "dbcache/index_hit")
+            );
         }
     }
 
@@ -793,8 +802,11 @@ mod tests {
             let _ = cache.get_index(&key).await;
 
             // then:
-            assert_eq!(i as i64, get_counter(&registry, "dbcache/index_miss"));
-            assert_eq!(0, get_counter(&registry, "dbcache/index_hit"));
+            assert_eq!(
+                Some(i as i64),
+                lookup_metric(&registry, "dbcache/index_miss")
+            );
+            assert_eq!(Some(0), lookup_metric(&registry, "dbcache/index_hit"));
         }
     }
 
@@ -822,8 +834,11 @@ mod tests {
             let _ = cache.get_block(&key).await;
 
             // then:
-            assert_eq!(0, get_counter(&registry, "dbcache/data_block_miss"));
-            assert_eq!(i as i64, get_counter(&registry, "dbcache/data_block_hit"));
+            assert_eq!(Some(0), lookup_metric(&registry, "dbcache/data_block_miss"));
+            assert_eq!(
+                Some(i as i64),
+                lookup_metric(&registry, "dbcache/data_block_hit")
+            );
         }
     }
 
@@ -841,8 +856,11 @@ mod tests {
             let _ = cache.get_block(&key).await;
 
             // then:
-            assert_eq!(i as i64, get_counter(&registry, "dbcache/data_block_miss"));
-            assert_eq!(0, get_counter(&registry, "dbcache/data_block_hit"));
+            assert_eq!(
+                Some(i as i64),
+                lookup_metric(&registry, "dbcache/data_block_miss")
+            );
+            assert_eq!(Some(0), lookup_metric(&registry, "dbcache/data_block_hit"));
         }
     }
 
@@ -928,14 +946,6 @@ mod tests {
             .await;
 
         assert_eq!(2, shared_cache.entry_count());
-    }
-
-    fn get_counter(recorder: &DefaultMetricsRecorder, name: &str) -> i64 {
-        let snap = recorder.snapshot();
-        match &snap.by_name(name).first().unwrap().value {
-            MetricValue::Counter(v) => *v as i64,
-            other => panic!("expected counter, got {:?}", other),
-        }
     }
 
     #[fixture]

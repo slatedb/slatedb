@@ -90,6 +90,8 @@ pub(crate) struct DbInner {
     pub(crate) memtable_flush_notifier: UnboundedSender<MemtableFlushMsg>,
     pub(crate) write_notifier: UnboundedSender<WriteBatchMessage>,
     pub(crate) db_stats: DbStats,
+    /// Kept alive so the underlying `MetricsRecorder` is not dropped while
+    /// metric handles in `DbStats` (and other stats structs) are still in use.
     #[allow(dead_code)]
     pub(crate) recorder: MetricsRecorderHelper,
     #[allow(dead_code)]
@@ -1734,23 +1736,13 @@ mod tests {
     use proptest::test_runner::{TestRng, TestRunner};
     use slatedb_common::clock::DefaultSystemClock;
     use slatedb_common::clock::MockSystemClock;
-    use slatedb_common::metrics::{DefaultMetricsRecorder, MetricValue, MetricsRecorderHelper};
+    use slatedb_common::metrics::{lookup_metric, DefaultMetricsRecorder, MetricsRecorderHelper};
     use std::collections::BTreeMap;
     use std::collections::Bound::Included;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
     use tokio::runtime::Runtime;
     use tracing::info;
-
-    fn lookup_metric(recorder: &DefaultMetricsRecorder, name: &str) -> Option<i64> {
-        let snap = recorder.snapshot();
-        snap.by_name(name).first().map(|m| match &m.value {
-            MetricValue::Counter(v) => *v as i64,
-            MetricValue::Gauge(v) => *v,
-            MetricValue::UpDownCounter(v) => *v,
-            MetricValue::Histogram { .. } => panic!("unexpected histogram metric"),
-        })
-    }
 
     #[tokio::test]
     async fn test_put_get_delete() {

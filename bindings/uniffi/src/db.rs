@@ -1,7 +1,4 @@
-use std::collections::HashMap;
 use std::sync::Arc;
-
-use slatedb_common::metrics::{DefaultMetricsRecorder, MetricValue};
 
 use crate::config::{
     FlushOptions, IsolationLevel, MergeOptions, PutOptions, ReadOptions, ScanOptions, WriteOptions,
@@ -18,15 +15,11 @@ use crate::write_batch::WriteBatch;
 #[derive(uniffi::Object)]
 pub struct Db {
     inner: slatedb::Db,
-    metrics_recorder: Arc<DefaultMetricsRecorder>,
 }
 
 impl Db {
-    pub(crate) fn new(inner: slatedb::Db, metrics_recorder: Arc<DefaultMetricsRecorder>) -> Self {
-        Self {
-            inner,
-            metrics_recorder,
-        }
+    pub(crate) fn new(inner: slatedb::Db) -> Self {
+        Self { inner }
     }
 }
 
@@ -35,25 +28,6 @@ impl Db {
     /// Returns an error if the database is not currently healthy and open.
     pub fn status(&self) -> Result<(), Error> {
         self.inner.status().map_err(Into::into)
-    }
-
-    /// Returns a snapshot of the current integer metrics.
-    ///
-    /// Histograms are excluded since they cannot be meaningfully represented
-    /// as a single integer value.
-    pub fn metrics(&self) -> Result<HashMap<String, i64>, Error> {
-        let snapshot = self.metrics_recorder.snapshot();
-        let mut map = HashMap::new();
-        for metric in snapshot.all() {
-            let value = match &metric.value {
-                MetricValue::Counter(v) => *v as i64,
-                MetricValue::Gauge(v) => *v,
-                MetricValue::UpDownCounter(v) => *v,
-                MetricValue::Histogram { .. } => continue,
-            };
-            map.insert(metric.name.clone(), value);
-        }
-        Ok(map)
     }
 }
 

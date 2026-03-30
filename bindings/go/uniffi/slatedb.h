@@ -487,11 +487,6 @@ uint64_t uniffi_slatedb_uniffi_fn_method_db_merge(void* ptr, RustBuffer key, Rus
 uint64_t uniffi_slatedb_uniffi_fn_method_db_merge_with_options(void* ptr, RustBuffer key, RustBuffer operand, RustBuffer merge_options, RustBuffer write_options
 );
 #endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DB_METRICS
-#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DB_METRICS
-RustBuffer uniffi_slatedb_uniffi_fn_method_db_metrics(void* ptr, RustCallStatus *out_status
-);
-#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DB_PUT
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DB_PUT
 uint64_t uniffi_slatedb_uniffi_fn_method_db_put(void* ptr, RustBuffer key, RustBuffer value
@@ -1444,12 +1439,6 @@ uint16_t uniffi_slatedb_uniffi_checksum_method_db_merge(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DB_MERGE_WITH_OPTIONS
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DB_MERGE_WITH_OPTIONS
 uint16_t uniffi_slatedb_uniffi_checksum_method_db_merge_with_options(void
-    
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DB_METRICS
-#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DB_METRICS
-uint16_t uniffi_slatedb_uniffi_checksum_method_db_metrics(void
     
 );
 #endif

@@ -1347,18 +1347,8 @@ mod tests {
     use crate::config::Settings;
     use crate::garbage_collector::stats::GC_COUNT;
     use object_store::memory::InMemory;
-    use slatedb_common::metrics::{DefaultMetricsRecorder, MetricValue};
+    use slatedb_common::metrics::{lookup_metric, DefaultMetricsRecorder};
     use std::sync::Arc;
-
-    fn lookup_metric(recorder: &DefaultMetricsRecorder, name: &str) -> Option<i64> {
-        let snap = recorder.snapshot();
-        snap.by_name(name).first().map(|m| match &m.value {
-            MetricValue::Counter(v) => *v as i64,
-            MetricValue::Gauge(v) => *v,
-            MetricValue::UpDownCounter(v) => *v,
-            MetricValue::Histogram { .. } => panic!("unexpected histogram metric"),
-        })
-    }
 
     #[tokio::test]
     async fn test_db_builder_starts_gc_by_default() {

@@ -928,6 +928,23 @@ pub fn test_recorder_helper() -> (Arc<DefaultMetricsRecorder>, MetricsRecorderHe
     (default_recorder, helper)
 }
 
+/// Test-only helper to look up a scalar metric by name from a
+/// [`DefaultMetricsRecorder`] snapshot. Returns `None` if the metric does not
+/// exist. Panics on histograms since they cannot be represented as a single
+/// `i64` — use [`DefaultMetricsRecorder::snapshot`] directly when you need
+/// histogram data.
+#[cfg(any(test, feature = "test-util"))]
+#[allow(clippy::panic)]
+pub fn lookup_metric(recorder: &DefaultMetricsRecorder, name: &str) -> Option<i64> {
+    let snap = recorder.snapshot();
+    snap.by_name(name).first().map(|m| match &m.value {
+        MetricValue::Counter(v) => *v as i64,
+        MetricValue::Gauge(v) => *v,
+        MetricValue::UpDownCounter(v) => *v,
+        MetricValue::Histogram { .. } => panic!("unexpected histogram metric"),
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------

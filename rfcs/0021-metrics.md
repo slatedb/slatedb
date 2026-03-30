@@ -397,14 +397,11 @@ can map both to Prometheus gauges since Prometheus doesn't distinguish the two.
 
 ### UniFFI integration
 
-The UniFFI bindings layer automatically registers a `DefaultMetricsRecorder` when building a
-`Db`, so `db.metrics()` continues to work from Go, Java, and Python — returning
-`HashMap<String, i64>` as before. This recorder is internal to the bindings; the core Rust
-`Db` type has no `metrics()` method.
-
-Exposing `MetricsRecorder` itself to foreign languages via UniFFI callback interfaces is out of
-scope for this RFC. It would require additional design work around callback handle lifetimes,
-callback error handling, and the hot-path cost of forwarding every metric operation across FFI.
+The UniFFI bindings will expose the `MetricsRecorder` trait via callback interfaces, allowing
+Go, Java, and Python users to plug in their own recorders just like Rust users. This requires
+additional design work around callback handle lifetimes, callback error handling, and the
+hot-path cost of forwarding every metric operation across FFI, and will be handled as
+separate follow-up work.
 
 ## Impact Analysis
 
@@ -484,7 +481,7 @@ callback error handling, and the hot-path cost of forwarding every metric operat
   - Removed: Public stat name constants (`db_stats::GET_REQUESTS`, etc.)
   - New: `MetricsRecorder`, `CounterFn`, `GaugeFn`, `UpDownCounterFn`, `HistogramFn`, `MetricLevel`, `NoopMetricsRecorder`
   - New: `DefaultMetricsRecorder` in `slatedb-common` (opt-in, not used by default)
-- **Bindings:** The UniFFI `metrics()` method is preserved — the bindings layer registers a `DefaultMetricsRecorder` internally. No change for Go/Java/Python users.
+- **Bindings:** The `MetricsRecorder` trait will be exposed via UniFFI callback interfaces as follow-up work, enabling Go/Java/Python users to plug in their own recorders.
 
 ## Testing
 

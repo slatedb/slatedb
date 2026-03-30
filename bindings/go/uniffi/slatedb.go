@@ -483,15 +483,6 @@ func uniffiCheckChecksums() {
 	}
 	{
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_db_metrics()
-		})
-		if checksum != 63278 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_db_metrics: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_slatedb_uniffi_checksum_method_db_put()
 		})
 		if checksum != 59996 {
@@ -1585,8 +1576,6 @@ type DbInterface interface {
 	Merge(key []byte, operand []byte) (WriteHandle, error)
 	// Appends a merge operand using custom merge and write options.
 	MergeWithOptions(key []byte, operand []byte, mergeOptions MergeOptions, writeOptions WriteOptions) (WriteHandle, error)
-	// Returns a snapshot of the current integer metrics registry.
-	Metrics() (map[string]int64, error)
 	// Inserts or overwrites a value and returns metadata for the write.
 	//
 	// Keys must be non-empty and at most `u16::MAX` bytes. Values must be at
@@ -2007,24 +1996,6 @@ func (_self *Db) MergeWithOptions(key []byte, operand []byte, mergeOptions Merge
 	}
 
 	return res, err
-}
-
-// Returns a snapshot of the current integer metrics registry.
-func (_self *Db) Metrics() (map[string]int64, error) {
-	_pointer := _self.ffiObject.incrementPointer("*Db")
-	defer _self.ffiObject.decrementPointer()
-	_uniffiRV, _uniffiErr := rustCallWithError[Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) RustBufferI {
-		return GoRustBuffer{
-			inner: C.uniffi_slatedb_uniffi_fn_method_db_metrics(
-				_pointer, _uniffiStatus),
-		}
-	})
-	if _uniffiErr != nil {
-		var _uniffiDefaultValue map[string]int64
-		return _uniffiDefaultValue, _uniffiErr
-	} else {
-		return FfiConverterMapStringInt64INSTANCE.Lift(_uniffiRV), nil
-	}
 }
 
 // Inserts or overwrites a value and returns metadata for the write.
@@ -7406,54 +7377,6 @@ type FfiDestroyerSequenceWalFile struct{}
 func (FfiDestroyerSequenceWalFile) Destroy(sequence []*WalFile) {
 	for _, value := range sequence {
 		FfiDestroyerWalFile{}.Destroy(value)
-	}
-}
-
-type FfiConverterMapStringInt64 struct{}
-
-var FfiConverterMapStringInt64INSTANCE = FfiConverterMapStringInt64{}
-
-func (c FfiConverterMapStringInt64) Lift(rb RustBufferI) map[string]int64 {
-	return LiftFromRustBuffer[map[string]int64](c, rb)
-}
-
-func (_ FfiConverterMapStringInt64) Read(reader io.Reader) map[string]int64 {
-	result := make(map[string]int64)
-	length := readInt32(reader)
-	for i := int32(0); i < length; i++ {
-		key := FfiConverterStringINSTANCE.Read(reader)
-		value := FfiConverterInt64INSTANCE.Read(reader)
-		result[key] = value
-	}
-	return result
-}
-
-func (c FfiConverterMapStringInt64) Lower(value map[string]int64) C.RustBuffer {
-	return LowerIntoRustBuffer[map[string]int64](c, value)
-}
-
-func (c FfiConverterMapStringInt64) LowerExternal(value map[string]int64) ExternalCRustBuffer {
-	return RustBufferFromC(LowerIntoRustBuffer[map[string]int64](c, value))
-}
-
-func (_ FfiConverterMapStringInt64) Write(writer io.Writer, mapValue map[string]int64) {
-	if len(mapValue) > math.MaxInt32 {
-		panic("map[string]int64 is too large to fit into Int32")
-	}
-
-	writeInt32(writer, int32(len(mapValue)))
-	for key, value := range mapValue {
-		FfiConverterStringINSTANCE.Write(writer, key)
-		FfiConverterInt64INSTANCE.Write(writer, value)
-	}
-}
-
-type FfiDestroyerMapStringInt64 struct{}
-
-func (_ FfiDestroyerMapStringInt64) Destroy(mapValue map[string]int64) {
-	for key, value := range mapValue {
-		FfiDestroyerString{}.Destroy(key)
-		FfiDestroyerInt64{}.Destroy(value)
 	}
 }
 
