@@ -201,7 +201,6 @@ impl FlushTracker {
             self.tracked_imms.push_back(TrackedImm {
                 epoch: self.next_epoch,
                 ptr,
-                wal_id: imm_memtable.recent_flushed_wal_id(),
                 sst_id,
                 imm_memtable: Arc::clone(imm_memtable),
                 state: TrackedImmState::PendingDispatch,
@@ -260,27 +259,23 @@ impl FlushTracker {
     }
 
     fn set_tracked_state(&mut self, epoch: FlushEpoch, state: TrackedImmState) {
-        if let Some(tracked) = self
+        let tracked = self
             .tracked_imms
             .iter_mut()
             .find(|tracked| tracked.epoch == epoch)
-        {
-            tracked.state = state;
-        }
+            .expect("tracked imm not found for epoch");
+        tracked.state = state;
     }
 
-    /// Remove tracked imms through the given epoch and return the highest WAL ID.
-    fn retire_through(&mut self, through_epoch: FlushEpoch) -> Option<u64> {
-        let mut through_wal_id = None;
+    /// Remove tracked imms through the given epoch.
+    fn retire_through(&mut self, through_epoch: FlushEpoch) {
         while self
             .tracked_imms
             .front()
             .is_some_and(|tracked| tracked.epoch <= through_epoch)
         {
-            let tracked = self.tracked_imms.pop_front().expect("checked above");
-            through_wal_id = Some(tracked.wal_id);
+            self.tracked_imms.pop_front().expect("checked above");
         }
-        through_wal_id
     }
 
     async fn shutdown(&mut self, err: Option<SlateDBError>) -> Result<(), SlateDBError> {
@@ -348,7 +343,6 @@ impl FlushTracker {
 struct TrackedImm {
     epoch: FlushEpoch,
     ptr: usize,
-    wal_id: u64,
     sst_id: crate::db_state::SsTableId,
     imm_memtable: Arc<crate::mem_table::ImmutableMemtable>,
     state: TrackedImmState,

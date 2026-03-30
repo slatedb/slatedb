@@ -440,8 +440,11 @@ impl ManifestWriterTask {
 
         for uploaded in &staged_batch {
             uploaded.imm_memtable.notify_flush_to_l0(Ok(()));
-            self.db.db_stats.immutable_memtable_flushes.increment(1);
         }
+        self.db
+            .db_stats
+            .immutable_memtable_flushes
+            .increment(staged_batch.len() as u64);
 
         match self
             .write_manifest_update_safely(
