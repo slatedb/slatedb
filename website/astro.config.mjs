@@ -71,6 +71,10 @@ export default defineConfig({
 							link: '/docs/get-started/quickstart/',
 						},
 						{
+							label: 'Node.js Quickstart',
+							link: 'https://github.com/slatedb/slatedb/blob/main/bindings/node/README.md',
+						},
+						{
 							label: 'FAQ',
 							link: '/docs/get-started/faq/',
 						}

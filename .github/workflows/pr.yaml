@@ -250,6 +250,9 @@ jobs:
         with:
           node-version: "22"
 
+      - name: Install Node package dependencies
+        run: npm --prefix bindings/node ci
+
       - name: Install uniffi-bindgen-node-js
         env:
           RUSTFLAGS: ""
@@ -257,6 +260,10 @@ jobs:
 
       - name: Build Node package (bindings/node)
         run: npm --prefix bindings/node run build
+
+      - name: Run Node tests (bindings/node)
+        working-directory: ./bindings/node
+        run: node --test
 
       - name: Verify tracked Node package files are unchanged
         run: git diff --exit-code -- bindings/node
