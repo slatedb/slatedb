@@ -545,12 +545,12 @@ impl<'a> InternalSstIterator<'a> {
                 }
             } else {
                 assert!(self.fetch_tasks.is_empty());
-                // When spawn_fetches is true (normal iteration), all blocks
-                // must have been scheduled by this point. When false (called
-                // from seek's already_fetched path), the fetch cursor may
-                // not have reached the end because the seek drained buffered
-                // tasks without scheduling new ones and the caller handles
-                // resetting the cursor afterward.
+                // With spawn_fetches=true, running out of tasks means we've
+                // exhausted the entire range.
+                // With spawn_fetches=false, it only means the prefetch buffer
+                // is drained, but there may still be blocks in the range, and
+                // the caller is responsible for scheduling more fetches if
+                // needed.
                 if spawn_fetches {
                     match self.options.order {
                         IterationOrder::Ascending => {
