@@ -111,25 +111,25 @@ pub trait MetricsRecorder: Send + Sync {
 }
 
 /// Handle for incrementing a monotonic counter.
-pub trait CounterFn: Send + Sync + std::fmt::Debug {
+pub trait CounterFn: Send + Sync {
     /// Add `value` to the counter.
     fn increment(&self, value: u64);
 }
 
 /// Handle for setting a gauge to an arbitrary value.
-pub trait GaugeFn: Send + Sync + std::fmt::Debug {
+pub trait GaugeFn: Send + Sync {
     /// Set the gauge to `value`.
     fn set(&self, value: i64);
 }
 
 /// Handle for incrementing or decrementing a bidirectional counter.
-pub trait UpDownCounterFn: Send + Sync + std::fmt::Debug {
+pub trait UpDownCounterFn: Send + Sync {
     /// Add `value` to the counter (may be negative).
     fn increment(&self, value: i64);
 }
 
 /// Handle for recording observations into a histogram.
-pub trait HistogramFn: Send + Sync + std::fmt::Debug {
+pub trait HistogramFn: Send + Sync {
     /// Record a single observation.
     fn record(&self, value: f64);
 }
