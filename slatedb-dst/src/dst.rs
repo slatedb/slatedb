@@ -621,7 +621,26 @@ impl Dst {
 
     async fn run_flush(&self) -> Result<(), Error> {
         debug!("run_flush");
-        self.poll_await(self.db.flush(), 0f64).await
+        use futures::task::noop_waker_ref;
+        use std::task::Context;
+        use std::task::Poll;
+
+        let future = self.db.flush();
+        let mut fut = Box::pin(future);
+        let mut cx = Context::from_waker(noop_waker_ref());
+
+        loop {
+            match fut.as_mut().poll(&mut cx) {
+                Poll::Ready(res) => {
+                    return res;
+                }
+                Poll::Pending => {
+                    let sleep_ms = self.rand.rng().random_range(0..10);
+                    self.advance_system_time(Duration::from_millis(sleep_ms))
+                        .await;
+                }
+            }
+        }
     }
 
     async fn advance_system_time(&self, duration: Duration) {
@@ -659,7 +678,7 @@ impl Dst {
                     self.advance_system_time(Duration::from_millis(sleep_ms))
                         .await;
                     if self.rand.rng().random_bool(flush_probability) {
-                        self.db.flush().await?;
+                        self.run_flush().await?;
                     }
                 }
             }
