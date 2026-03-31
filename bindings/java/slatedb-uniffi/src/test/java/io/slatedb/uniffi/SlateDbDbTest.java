@@ -7,7 +7,6 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import java.util.Map;
 import org.junit.jupiter.api.Test;
 
 class SlateDbDbTest {
@@ -201,7 +200,7 @@ class SlateDbDbTest {
     }
 
     @Test
-    void dbFlushAndMetrics() throws Exception {
+    void dbFlush() throws Exception {
         try (ObjectStore store = TestSupport.newMemoryStore();
                 TestSupport.ManagedDb handle = TestSupport.openDb(store)) {
             Db db = handle.db();
@@ -210,9 +209,6 @@ class SlateDbDbTest {
             TestSupport.await(db.flush());
             TestSupport.await(db.flushWithOptions(new FlushOptions(FlushType.WAL)));
             TestSupport.await(db.flushWithOptions(new FlushOptions(FlushType.MEM_TABLE)));
-
-            Map<String, Long> metrics = db.metrics();
-            assertNotNull(metrics);
         }
     }
 

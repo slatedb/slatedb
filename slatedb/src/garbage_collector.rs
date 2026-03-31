@@ -16,7 +16,6 @@ use crate::checkpoint::Checkpoint;
 use crate::compactions_store::CompactionsStore;
 use crate::config::GarbageCollectorOptions;
 pub use crate::db::builder::GarbageCollectorBuilder;
-use crate::db_metrics::DbMetrics;
 use crate::dispatcher::{MessageFactory, MessageHandler};
 use crate::error::SlateDBError;
 use crate::garbage_collector::stats::GcStats;
@@ -28,10 +27,10 @@ use chrono::{DateTime, Utc};
 use compacted_gc::CompactedGcTask;
 use compactions_gc::CompactionsGcTask;
 use futures::stream::BoxStream;
-use log::{debug, error, info};
+use log::{error, info};
 use manifest_gc::ManifestGcTask;
 use slatedb_common::clock::SystemClock;
-use slatedb_common::metrics::MetricValue;
+use slatedb_common::metrics::MetricsRecorderHelper;
 use slatedb_txn_obj::{DirtyObject, SimpleTransactionalObject, TransactionalObject};
 use std::sync::Arc;
 use std::time::Duration;
@@ -55,11 +54,10 @@ trait GcTask {
 
 #[derive(Debug)]
 pub(crate) enum GcMessage {
-    GcWal,
-    GcCompacted,
-    GcCompactions,
-    GcManifest,
-    LogStats,
+    Wal,
+    Compacted,
+    Compactions,
+    Manifest,
 }
 
 /// SlateDB's garbage collector.
@@ -82,7 +80,6 @@ pub struct GarbageCollector {
     manifest_store: Arc<ManifestStore>,
     options: GarbageCollectorOptions,
     stats: Arc<GcStats>,
-    db_metrics: DbMetrics,
     system_clock: Arc<dyn SystemClock>,
     manifest_gc_task: Option<ManifestGcTask>,
     wal_gc_task: Option<WalGcTask>,
@@ -98,63 +95,61 @@ impl MessageHandler<GcMessage> for GarbageCollector {
         if let Some(opts) = self.options.manifest_options {
             tickers.push((
                 opts.interval.unwrap_or(DEFAULT_INTERVAL),
-                Box::new(|| GcMessage::GcManifest),
+                Box::new(|| GcMessage::Manifest),
             ));
         }
         if let Some(opts) = self.options.wal_options {
             tickers.push((
                 opts.interval.unwrap_or(DEFAULT_INTERVAL),
-                Box::new(|| GcMessage::GcWal),
+                Box::new(|| GcMessage::Wal),
             ));
         }
         if let Some(opts) = self.options.compacted_options {
             tickers.push((
                 opts.interval.unwrap_or(DEFAULT_INTERVAL),
-                Box::new(|| GcMessage::GcCompacted),
+                Box::new(|| GcMessage::Compacted),
             ));
         }
         if let Some(opts) = self.options.compactions_options {
             tickers.push((
                 opts.interval.unwrap_or(DEFAULT_INTERVAL),
-                Box::new(|| GcMessage::GcCompactions),
+                Box::new(|| GcMessage::Compactions),
             ));
         }
 
-        tickers.push((Duration::from_secs(60), Box::new(|| GcMessage::LogStats)));
         tickers
     }
 
     async fn handle(&mut self, message: GcMessage) -> Result<(), SlateDBError> {
         match message {
-            GcMessage::GcManifest => {
+            GcMessage::Manifest => {
                 let task = self
                     .manifest_gc_task
                     .as_ref()
                     .expect("got manifest tick with unconfigured manifest task");
                 self.run_gc_task(task).await;
             }
-            GcMessage::GcWal => {
+            GcMessage::Wal => {
                 let task = self
                     .wal_gc_task
                     .as_ref()
                     .expect("got wal tick with unconfigured wal task");
                 self.run_gc_task(task).await;
             }
-            GcMessage::GcCompacted => {
+            GcMessage::Compacted => {
                 let task = self
                     .compacted_gc_task
                     .as_ref()
                     .expect("got compacted tick with unconfigured compacted task");
                 self.run_gc_task(task).await;
             }
-            GcMessage::GcCompactions => {
+            GcMessage::Compactions => {
                 let task = self
                     .compactions_gc_task
                     .as_ref()
                     .expect("got compactions tick with unconfigured compactions task");
                 self.run_gc_task(task).await;
             }
-            GcMessage::LogStats => self.log_stats(),
         }
         Ok(())
     }
@@ -165,7 +160,6 @@ impl MessageHandler<GcMessage> for GarbageCollector {
         _result: Result<(), SlateDBError>,
     ) -> Result<(), SlateDBError> {
         info!("garbage collector shutdown");
-        self.log_stats();
         Ok(())
     }
 }
@@ -190,10 +184,10 @@ impl GarbageCollector {
         compactions_store: Arc<CompactionsStore>,
         table_store: Arc<TableStore>,
         options: GarbageCollectorOptions,
-        db_metrics: &DbMetrics,
+        recorder: &MetricsRecorderHelper,
         system_clock: Arc<dyn SystemClock>,
     ) -> Self {
-        let stats = Arc::new(GcStats::new(db_metrics));
+        let stats = Arc::new(GcStats::new(recorder));
         let wal_gc_task = options.wal_options.map(|wal_options| {
             WalGcTask::new(
                 manifest_store.clone(),
@@ -225,7 +219,6 @@ impl GarbageCollector {
             manifest_store,
             options,
             stats,
-            db_metrics: db_metrics.clone(),
             system_clock,
             manifest_gc_task,
             wal_gc_task,
@@ -302,26 +295,6 @@ impl GarbageCollector {
             None
         };
         Ok(maybe_dirty)
-    }
-
-    fn log_stats(&self) {
-        if !log::log_enabled!(log::Level::Debug) {
-            return;
-        }
-        let snapshot = self.db_metrics.snapshot();
-        let get_value = |name: &str| -> &MetricValue {
-            snapshot
-                .by_name(name)
-                .first()
-                .map_or(&MetricValue::Counter(0), |m| &m.value)
-        };
-        debug!(
-            "garbage collector stats [manifest_count={}, wals_count={}, compacted_count={}, compactions_count={}]",
-            get_value("gc/manifest_count"),
-            get_value("gc/wal_count"),
-            get_value("gc/compacted_count"),
-            get_value("gc/compactions_count"),
-        );
     }
 }
 
@@ -1338,7 +1311,7 @@ mod tests {
         compaction_low_watermark_dt: Option<DateTime<Utc>>,
     ) {
         // Start the garbage collector
-        let db_metrics = crate::db_metrics::DbMetrics::new(None);
+        let recorder = MetricsRecorderHelper::noop();
 
         // Pretend a compaction job has already run with the specified start time
         if let Some(compaction_low_watermark_dt) = compaction_low_watermark_dt {
@@ -1396,7 +1369,7 @@ mod tests {
             compactions_store.clone(),
             table_store.clone(),
             gc_opts,
-            &db_metrics,
+            &recorder,
             Arc::new(DefaultSystemClock::default()),
         );
 
@@ -1437,7 +1410,7 @@ mod tests {
         assert_eq!(manifests.len(), 2);
 
         // Build a GC with standard options (1h min_age)
-        let db_metrics = crate::db_metrics::DbMetrics::new(None);
+        let recorder = MetricsRecorderHelper::noop();
         let gc_opts = GarbageCollectorOptions {
             manifest_options: Some(GarbageCollectorDirectoryOptions {
                 min_age: std::time::Duration::from_secs(3600),
@@ -1462,13 +1435,13 @@ mod tests {
             compactions_store.clone(),
             table_store.clone(),
             gc_opts,
-            &db_metrics,
+            &recorder,
             Arc::new(DefaultSystemClock::default()),
         );
 
         // Send a WAL GC message. Correct behavior: only WAL GC runs.
         // Current bug: handle() calls run_gc_once(), running all tasks (including Manifest GC).
-        gc.handle(GcMessage::GcWal).await.unwrap();
+        gc.handle(GcMessage::Wal).await.unwrap();
 
         // Assert that manifests were not collected (should still be 2).
         // With the bug, Manifest GC will have deleted the first manifest and this will fail.
@@ -1502,7 +1475,7 @@ mod tests {
             86400,
         );
 
-        let db_metrics = crate::db_metrics::DbMetrics::new(None);
+        let recorder = MetricsRecorderHelper::noop();
         let gc_opts = GarbageCollectorOptions {
             manifest_options: None,
             wal_options: Some(GarbageCollectorDirectoryOptions {
@@ -1524,7 +1497,7 @@ mod tests {
             compactions_store.clone(),
             table_store.clone(),
             gc_opts,
-            &db_metrics,
+            &recorder,
             Arc::new(DefaultSystemClock::default()),
         );
         gc.run_gc_once().await;
@@ -1542,7 +1515,7 @@ mod tests {
         use crate::dispatcher::MessageHandler;
 
         let (manifest_store, compactions_store, table_store, _) = build_objects();
-        let db_metrics = crate::db_metrics::DbMetrics::new(None);
+        let recorder = MetricsRecorderHelper::noop();
 
         let gc_opts = GarbageCollectorOptions {
             manifest_options: None,
@@ -1562,7 +1535,7 @@ mod tests {
             compactions_store,
             table_store,
             gc_opts,
-            &db_metrics,
+            &recorder,
             Arc::new(DefaultSystemClock::default()),
         );
 
@@ -1573,18 +1546,14 @@ mod tests {
             .collect();
         assert_eq!(
             intervals,
-            vec![
-                Duration::from_secs(11),
-                Duration::from_secs(17),
-                Duration::from_secs(60)
-            ]
+            vec![Duration::from_secs(11), Duration::from_secs(17),]
         );
     }
 
     #[tokio::test(start_paused = true)]
     async fn test_gc_shutdown() {
         let (manifest_store, compactions_store, table_store, _) = build_objects();
-        let db_metrics = crate::db_metrics::DbMetrics::new(None);
+        let recorder = MetricsRecorderHelper::noop();
 
         let gc_opts = GarbageCollectorOptions {
             manifest_options: Some(GarbageCollectorDirectoryOptions {
@@ -1610,7 +1579,7 @@ mod tests {
             compactions_store.clone(),
             table_store.clone(),
             gc_opts,
-            &db_metrics,
+            &recorder,
             Arc::new(DefaultSystemClock::default()),
         );
         let (_, rx) = mpsc::unbounded_channel();

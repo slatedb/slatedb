@@ -1,10 +1,9 @@
-use crate::db_metrics::DbMetrics;
-use slatedb_common::metrics::{CounterFn, GaugeFn};
+use slatedb_common::metrics::{CounterFn, GaugeFn, MetricsRecorderHelper};
 use std::sync::Arc;
 
 macro_rules! db_stat_name {
     ($suffix:expr) => {
-        crate::stat_name!("db", $suffix)
+        concat!("db", "/", $suffix)
     };
 }
 
@@ -45,7 +44,7 @@ pub(crate) struct DbStats {
 }
 
 impl DbStats {
-    pub(crate) fn new(recorder: &DbMetrics) -> DbStats {
+    pub(crate) fn new(recorder: &MetricsRecorderHelper) -> DbStats {
         DbStats {
             immutable_memtable_flushes: recorder.counter(IMMUTABLE_MEMTABLE_FLUSHES).register(),
             wal_buffer_estimated_bytes: recorder.gauge(WAL_BUFFER_ESTIMATED_BYTES).register(),

@@ -1,10 +1,9 @@
-use crate::db_metrics::DbMetrics;
-use slatedb_common::metrics::{CounterFn, GaugeFn};
+use slatedb_common::metrics::{CounterFn, GaugeFn, MetricsRecorderHelper};
 use std::sync::Arc;
 
 macro_rules! oscache_stat_name {
     ($suffix:expr) => {
-        crate::stat_name!("oscache", $suffix)
+        concat!("oscache", "/", $suffix)
     };
 }
 
@@ -26,7 +25,7 @@ pub struct CachedObjectStoreStats {
 }
 
 impl CachedObjectStoreStats {
-    pub(crate) fn new(recorder: &DbMetrics) -> Self {
+    pub(crate) fn new(recorder: &MetricsRecorderHelper) -> Self {
         Self {
             object_store_cache_part_hits: recorder.counter(OBJECT_STORE_CACHE_PART_HITS).register(),
             object_store_cache_part_access: recorder

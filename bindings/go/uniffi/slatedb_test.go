@@ -618,7 +618,7 @@ func TestDbBatchWriteAndConsumption(t *testing.T) {
 	}
 }
 
-func TestDbFlushAndMetrics(t *testing.T) {
+func TestDbFlush(t *testing.T) {
 	store := newMemoryStore(t)
 	handle := openTestDB(t, store, nil)
 
@@ -638,13 +638,6 @@ func TestDbFlushAndMetrics(t *testing.T) {
 		t.Fatalf("FlushWithOptions(MemTable): %v", err)
 	}
 
-	metrics, err := handle.db.Metrics()
-	if err != nil {
-		t.Fatalf("Metrics(): %v", err)
-	}
-	if metrics == nil {
-		t.Fatal("Metrics(): got nil map")
-	}
 }
 
 func TestDbMerge(t *testing.T) {

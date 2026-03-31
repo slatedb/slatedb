@@ -1007,8 +1007,8 @@ mod tests {
             table_store: table_store.clone(),
             rand: Arc::new(DbRand::new(100u64)),
             stats: {
-                let db_metrics = crate::db_metrics::DbMetrics::new(None);
-                Arc::new(CompactionStats::new(&db_metrics))
+                let recorder = slatedb_common::metrics::MetricsRecorderHelper::noop();
+                Arc::new(CompactionStats::new(&recorder))
             },
             clock,
             manifest_store,
@@ -1214,8 +1214,8 @@ mod tests {
                     table_store: table_store.clone(),
                     rand: Arc::new(DbRand::new(100u64)),
                     stats: {
-                        let db_metrics = crate::db_metrics::DbMetrics::new(None);
-                        Arc::new(CompactionStats::new(&db_metrics))
+                        let recorder = slatedb_common::metrics::MetricsRecorderHelper::noop();
+                        Arc::new(CompactionStats::new(&recorder))
                     },
                     clock,
                     manifest_store,
@@ -1377,8 +1377,8 @@ mod tests {
                 table_store: table_store.clone(),
                 rand: Arc::new(DbRand::new(100u64)),
                 stats: {
-                    let db_metrics = crate::db_metrics::DbMetrics::new(None);
-                    Arc::new(CompactionStats::new(&db_metrics))
+                    let recorder = slatedb_common::metrics::MetricsRecorderHelper::noop();
+                    Arc::new(CompactionStats::new(&recorder))
                 },
                 clock,
                 manifest_store,

@@ -875,12 +875,12 @@ mod tests {
             .prefix("objstore_cache_test_evictor_")
             .tempdir()
             .unwrap();
-        let db_metrics = crate::db_metrics::DbMetrics::new(None);
+        let recorder = slatedb_common::metrics::MetricsRecorderHelper::noop();
 
         let evictor = FsCacheEvictorInner::new(
             temp_dir.path().to_path_buf(),
             1024 * 2,
-            Arc::new(CachedObjectStoreStats::new(&db_metrics)),
+            Arc::new(CachedObjectStoreStats::new(&recorder)),
             Arc::new(DbRand::default()),
         );
 
@@ -915,13 +915,13 @@ mod tests {
             .prefix("objstore_cache_test_evictor_backpressure_")
             .tempdir()
             .unwrap();
-        let db_metrics = crate::db_metrics::DbMetrics::new(None);
+        let recorder = slatedb_common::metrics::MetricsRecorderHelper::noop();
 
         let evictor = FsCacheEvictor::new(
             temp_dir.path().to_path_buf(),
             1024,
             None,
-            Arc::new(CachedObjectStoreStats::new(&db_metrics)),
+            Arc::new(CachedObjectStoreStats::new(&recorder)),
             Arc::new(DefaultSystemClock::new()),
             Arc::new(DbRand::default()),
         );
@@ -948,11 +948,11 @@ mod tests {
             .prefix("objstore_cache_test_evictor_")
             .tempdir()
             .unwrap();
-        let db_metrics = crate::db_metrics::DbMetrics::new(None);
+        let recorder = slatedb_common::metrics::MetricsRecorderHelper::noop();
         let evictor = Arc::new(FsCacheEvictorInner::new(
             temp_dir.path().to_path_buf(),
             1024 * 2,
-            Arc::new(CachedObjectStoreStats::new(&db_metrics)),
+            Arc::new(CachedObjectStoreStats::new(&recorder)),
             Arc::new(DbRand::default()),
         ));
 
@@ -978,12 +978,12 @@ mod tests {
             .prefix("objstore_cache_test_evictor_")
             .tempdir()
             .unwrap();
-        let db_metrics = crate::db_metrics::DbMetrics::new(None);
+        let recorder = slatedb_common::metrics::MetricsRecorderHelper::noop();
 
         let evictor = Arc::new(FsCacheEvictorInner::new(
             temp_dir.path().to_path_buf(),
             1024 * 2,
-            Arc::new(CachedObjectStoreStats::new(&db_metrics)),
+            Arc::new(CachedObjectStoreStats::new(&recorder)),
             Arc::new(DbRand::default()),
         ));
 
@@ -1029,11 +1029,11 @@ mod tests {
             .prefix("objstore_cache_test_pick_")
             .tempdir()
             .unwrap();
-        let db_metrics = crate::db_metrics::DbMetrics::new(None);
+        let recorder = slatedb_common::metrics::MetricsRecorderHelper::noop();
         let evictor = FsCacheEvictorInner::new(
             temp_dir.path().to_path_buf(),
             1024,
-            Arc::new(CachedObjectStoreStats::new(&db_metrics)),
+            Arc::new(CachedObjectStoreStats::new(&recorder)),
             Arc::new(DbRand::default()),
         );
 

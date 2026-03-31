@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::config::{
@@ -29,18 +28,6 @@ impl Db {
     /// Returns an error if the database is not currently healthy and open.
     pub fn status(&self) -> Result<(), Error> {
         self.inner.status().map_err(Into::into)
-    }
-
-    /// Returns a snapshot of the current integer metrics registry.
-    pub fn metrics(&self) -> Result<HashMap<String, i64>, Error> {
-        let registry = self.inner.metrics();
-        let mut snapshot = HashMap::new();
-        for name in registry.names() {
-            if let Some(stat) = registry.lookup(&name) {
-                snapshot.insert(name.clone(), stat.get());
-            }
-        }
-        Ok(snapshot)
     }
 }
 
