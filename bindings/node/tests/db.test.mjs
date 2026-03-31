@@ -206,7 +206,7 @@ test("db batch write and consumption", async (t) => {
   assert.deepEqual(await db.get(bytes("batch-put-2")), bytes("value-2"));
 });
 
-test("db flush and metrics", async (t) => {
+test("db flush", async (t) => {
   const cleanup = createCleanup(t);
   const store = cleanup.track(newMemoryStore());
   const db = await openDb(store, { cleanup });
@@ -220,9 +220,7 @@ test("db flush and metrics", async (t) => {
   await db.flush();
   await db.flush_with_options({ flush_type: FlushType.Wal });
   await db.flush_with_options({ flush_type: FlushType.MemTable });
-
-  const metrics = db.metrics();
-  assert.ok(metrics instanceof Map);
+  assert.deepEqual(await db.get(bytes("flush-key")), bytes("value"));
 });
 
 test("db merge and merge_with_options", async (t) => {
