@@ -621,7 +621,7 @@ impl Dst {
 
     async fn run_flush(&self) -> Result<(), Error> {
         debug!("run_flush");
-        self.db.flush().await
+        self.poll_await(self.db.flush(), 0f64).await
     }
 
     async fn advance_system_time(&self, duration: Duration) {
