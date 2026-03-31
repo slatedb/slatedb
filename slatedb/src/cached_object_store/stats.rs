@@ -1,4 +1,5 @@
 use slatedb_common::metrics::{CounterFn, GaugeFn, MetricsRecorderHelper};
+use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 
 macro_rules! oscache_stat_name {
@@ -14,7 +15,7 @@ pub const OBJECT_STORE_CACHE_BYTES: &str = oscache_stat_name!("cache_bytes");
 pub const OBJECT_STORE_CACHE_EVICTED_KEYS: &str = oscache_stat_name!("evicted_keys");
 pub const OBJECT_STORE_CACHE_EVICTED_BYTES: &str = oscache_stat_name!("evicted_bytes");
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct CachedObjectStoreStats {
     pub(super) object_store_cache_part_hits: Arc<dyn CounterFn>,
     pub(super) object_store_cache_part_access: Arc<dyn CounterFn>,
@@ -22,6 +23,19 @@ pub struct CachedObjectStoreStats {
     pub(super) object_store_cache_bytes: Arc<dyn GaugeFn>,
     pub(super) object_store_cache_evicted_keys: Arc<dyn CounterFn>,
     pub(super) object_store_cache_evicted_bytes: Arc<dyn CounterFn>,
+}
+
+impl Debug for CachedObjectStoreStats {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CachedObjectStoreStats")
+            .field("object_store_cache_part_hits", &"<counter>")
+            .field("object_store_cache_part_access", &"<counter>")
+            .field("object_store_cache_keys", &"<gauge>")
+            .field("object_store_cache_bytes", &"<gauge>")
+            .field("object_store_cache_evicted_keys", &"<counter>")
+            .field("object_store_cache_evicted_bytes", &"<counter>")
+            .finish()
+    }
 }
 
 impl CachedObjectStoreStats {
