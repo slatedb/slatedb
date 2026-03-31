@@ -644,7 +644,7 @@ mod tests {
     use object_store::{memory::InMemory, path::Path, ObjectStore};
     use slatedb_common::clock::DefaultSystemClock;
     use slatedb_common::metrics::{
-        DefaultMetricsRecorder, MetricLevel, MetricValue, MetricsRecorderHelper,
+        lookup_metric, DefaultMetricsRecorder, MetricLevel, MetricsRecorderHelper,
     };
     use slatedb_common::MockSystemClock;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -1015,30 +1015,13 @@ mod tests {
             wal_buffer.maybe_trigger_flush().unwrap();
         }
 
-        let size_triggered_requests = match &recorder
-            .snapshot()
-            .by_name("db/wal_buffer_flush_requests")
-            .first()
-            .unwrap()
-            .value
-        {
-            MetricValue::Counter(v) => *v as i64,
-            other => panic!("expected counter, got {:?}", other),
-        };
+        let size_triggered_requests =
+            lookup_metric(&recorder, "db/wal_buffer_flush_requests").unwrap();
 
         // Explicitly flush to drain everything, including any partial current WAL.
         wal_buffer.flush().await.unwrap();
 
-        let actual_flushes = match &recorder
-            .snapshot()
-            .by_name("db/wal_buffer_flushes")
-            .first()
-            .unwrap()
-            .value
-        {
-            MetricValue::Counter(v) => *v as i64,
-            other => panic!("expected counter, got {:?}", other),
-        };
+        let actual_flushes = lookup_metric(&recorder, "db/wal_buffer_flushes").unwrap();
 
         // With the flush_requested flag, the number of size-triggered requests
         // should be bounded by the number of WALs, not by the number of writes.

@@ -40,8 +40,8 @@ pub const SIZE_BOUNDARIES: &[f64] = &[
 // ---------------------------------------------------------------------------
 
 /// User-implemented trait to bridge metrics to an observability system
-/// (Prometheus, OTLP, etc.). If not provided, only the built-in
-/// [`DefaultMetricsRecorder`] is used.
+/// (Prometheus, OTLP, etc.). If not provided, SlateDB uses
+/// [`NoopMetricsRecorder`] and does not publish metrics.
 pub trait MetricsRecorder: Send + Sync {
     /// Register a monotonically increasing counter.
     ///
@@ -254,7 +254,7 @@ impl Metrics {
 }
 
 // ---------------------------------------------------------------------------
-// No-op handles
+// No-op recorder and handles
 // ---------------------------------------------------------------------------
 
 #[derive(Debug)]
@@ -295,6 +295,56 @@ fn noop_up_down_counter() -> Arc<dyn UpDownCounterFn> {
 
 fn noop_histogram() -> Arc<dyn HistogramFn> {
     Arc::new(NoopHistogram)
+}
+
+/// Recorder that discards all metric registrations and returns no-op handles.
+#[derive(Debug, Default)]
+pub struct NoopMetricsRecorder;
+
+impl NoopMetricsRecorder {
+    /// Create a new no-op recorder.
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl MetricsRecorder for NoopMetricsRecorder {
+    fn register_counter(
+        &self,
+        _name: &str,
+        _description: &str,
+        _labels: &[(&str, &str)],
+    ) -> Arc<dyn CounterFn> {
+        noop_counter()
+    }
+
+    fn register_gauge(
+        &self,
+        _name: &str,
+        _description: &str,
+        _labels: &[(&str, &str)],
+    ) -> Arc<dyn GaugeFn> {
+        noop_gauge()
+    }
+
+    fn register_up_down_counter(
+        &self,
+        _name: &str,
+        _description: &str,
+        _labels: &[(&str, &str)],
+    ) -> Arc<dyn UpDownCounterFn> {
+        noop_up_down_counter()
+    }
+
+    fn register_histogram(
+        &self,
+        _name: &str,
+        _description: &str,
+        _labels: &[(&str, &str)],
+        _boundaries: &[f64],
+    ) -> Arc<dyn HistogramFn> {
+        noop_histogram()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -615,10 +665,11 @@ impl MetricsRecorderHelper {
     }
 
     /// Create a no-op helper whose metrics are silently discarded.
-    /// Useful in tests that don't need to assert on metric values.
+    /// Useful as the default when no user recorder is configured, and in tests
+    /// that don't need to assert on metric values.
     pub fn noop() -> Self {
         Self {
-            recorder: Arc::new(DefaultMetricsRecorder::new()),
+            recorder: Arc::new(NoopMetricsRecorder::new()),
             level: MetricLevel::default(),
         }
     }

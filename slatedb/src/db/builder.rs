@@ -159,6 +159,7 @@ use slatedb_common::clock::SystemClock;
 use slatedb_common::metrics::MetricLevel;
 use slatedb_common::metrics::MetricsRecorder;
 use slatedb_common::metrics::MetricsRecorderHelper;
+use slatedb_common::metrics::NoopMetricsRecorder;
 
 /// A builder for creating a new Db instance.
 ///
@@ -178,7 +179,7 @@ pub struct DbBuilder<P: Into<Path>> {
     sst_block_size: Option<SstBlockSize>,
     merge_operator: Option<MergeOperatorType>,
     block_transformer: Option<Arc<dyn BlockTransformer>>,
-    metrics_recorder: Option<Arc<dyn MetricsRecorder>>,
+    metrics_recorder: Arc<dyn MetricsRecorder>,
 }
 
 impl<P: Into<Path>> DbBuilder<P> {
@@ -198,7 +199,7 @@ impl<P: Into<Path>> DbBuilder<P> {
             sst_block_size: None,
             merge_operator: None,
             block_transformer: None,
-            metrics_recorder: None,
+            metrics_recorder: Arc::new(NoopMetricsRecorder::new()),
         }
     }
 
@@ -260,10 +261,9 @@ impl<P: Into<Path>> DbBuilder<P> {
         self
     }
 
-    /// Sets a user-provided metrics recorder. The recorder will receive all
-    /// metric events alongside the built-in default recorder.
+    /// Sets the metrics recorder to use for the database.
     pub fn with_metrics_recorder(mut self, recorder: Arc<dyn MetricsRecorder>) -> Self {
-        self.metrics_recorder = Some(recorder);
+        self.metrics_recorder = recorder;
         self
     }
 
@@ -378,10 +378,7 @@ impl<P: Into<Path>> DbBuilder<P> {
 
         // Setup the components
         // Setup metrics recorder
-        let recorder = match self.metrics_recorder {
-            Some(r) => MetricsRecorderHelper::new(r, MetricLevel::default()),
-            None => MetricsRecorderHelper::noop(),
-        };
+        let recorder = MetricsRecorderHelper::new(self.metrics_recorder, MetricLevel::default());
         let block_format = {
             #[cfg(test)]
             {

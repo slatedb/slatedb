@@ -1115,7 +1115,7 @@ mod tests {
     use object_store::path::Path;
     use object_store::{memory::InMemory, ObjectStore};
     use slatedb_common::metrics::{
-        DefaultMetricsRecorder, MetricLevel, MetricValue, MetricsRecorderHelper,
+        lookup_metric, DefaultMetricsRecorder, MetricLevel, MetricsRecorderHelper,
     };
     use std::sync::Arc;
 
@@ -1230,30 +1230,10 @@ mod tests {
             ValueDeletable::Value(value) => assert_eq!(value.as_ref(), b"v_k1"),
             other => panic!("expected value, found {other:?}"),
         }
-        let snap = recorder.snapshot();
+        assert_eq!(lookup_metric(&recorder, "db/sst_filter_positives"), Some(1));
         assert_eq!(
-            match &snap
-                .by_name("db/sst_filter_positives")
-                .first()
-                .unwrap()
-                .value
-            {
-                MetricValue::Counter(v) => *v,
-                other => panic!("expected counter, got {:?}", other),
-            },
-            1
-        );
-        assert_eq!(
-            match &snap
-                .by_name("db/sst_filter_false_positives")
-                .first()
-                .unwrap()
-                .value
-            {
-                MetricValue::Counter(v) => *v,
-                other => panic!("expected counter, got {:?}", other),
-            },
-            0
+            lookup_metric(&recorder, "db/sst_filter_false_positives"),
+            Some(0)
         );
     }
 
@@ -1279,30 +1259,10 @@ mod tests {
 
         // then
         assert!(iter.is_none(), "negative bloom result should skip iterator");
-        let snap = recorder.snapshot();
+        assert_eq!(lookup_metric(&recorder, "db/sst_filter_negatives"), Some(1));
         assert_eq!(
-            match &snap
-                .by_name("db/sst_filter_negatives")
-                .first()
-                .unwrap()
-                .value
-            {
-                MetricValue::Counter(v) => *v,
-                other => panic!("expected counter, got {:?}", other),
-            },
-            1
-        );
-        assert_eq!(
-            match &snap
-                .by_name("db/sst_filter_false_positives")
-                .first()
-                .unwrap()
-                .value
-            {
-                MetricValue::Counter(v) => *v,
-                other => panic!("expected counter, got {:?}", other),
-            },
-            0
+            lookup_metric(&recorder, "db/sst_filter_false_positives"),
+            Some(0)
         );
     }
 
@@ -1348,43 +1308,12 @@ mod tests {
 
         // then
         assert!(entry.is_none(), "false positive must return no entry");
-        let snap = recorder.snapshot();
+        assert_eq!(lookup_metric(&recorder, "db/sst_filter_positives"), Some(1));
         assert_eq!(
-            match &snap
-                .by_name("db/sst_filter_positives")
-                .first()
-                .unwrap()
-                .value
-            {
-                MetricValue::Counter(v) => *v,
-                other => panic!("expected counter, got {:?}", other),
-            },
-            1
+            lookup_metric(&recorder, "db/sst_filter_false_positives"),
+            Some(1)
         );
-        assert_eq!(
-            match &snap
-                .by_name("db/sst_filter_false_positives")
-                .first()
-                .unwrap()
-                .value
-            {
-                MetricValue::Counter(v) => *v,
-                other => panic!("expected counter, got {:?}", other),
-            },
-            1
-        );
-        assert_eq!(
-            match &snap
-                .by_name("db/sst_filter_negatives")
-                .first()
-                .unwrap()
-                .value
-            {
-                MetricValue::Counter(v) => *v,
-                other => panic!("expected counter, got {:?}", other),
-            },
-            0
-        );
+        assert_eq!(lookup_metric(&recorder, "db/sst_filter_negatives"), Some(0));
     }
 
     #[tokio::test]

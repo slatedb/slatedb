@@ -2616,25 +2616,18 @@ mod tests {
 
         fixture.handler.handle_log_ticker();
 
-        let snap = fixture.test_recorder.snapshot();
-        let total_bytes = snap
-            .by_name(TOTAL_BYTES_BEING_COMPACTED)
-            .first()
-            .map(|m| match &m.value {
-                slatedb_common::metrics::MetricValue::Gauge(v) => *v,
-                other => panic!("unexpected metric type: {:?}", other),
-            })
-            .expect("metric not found");
+        let total_bytes = slatedb_common::metrics::lookup_metric(
+            &fixture.test_recorder,
+            TOTAL_BYTES_BEING_COMPACTED,
+        )
+        .expect("metric not found");
         assert_eq!(total_bytes, 0);
 
-        let throughput = snap
-            .by_name(TOTAL_THROUGHPUT_BYTES_PER_SEC)
-            .first()
-            .map(|m| match &m.value {
-                slatedb_common::metrics::MetricValue::Gauge(v) => *v,
-                other => panic!("unexpected metric type: {:?}", other),
-            })
-            .expect("metric not found");
+        let throughput = slatedb_common::metrics::lookup_metric(
+            &fixture.test_recorder,
+            TOTAL_THROUGHPUT_BYTES_PER_SEC,
+        )
+        .expect("metric not found");
         assert!(
             throughput > 0,
             "Expected throughput > 0, got {}",
@@ -2675,15 +2668,9 @@ mod tests {
 
         let mut fixture = CompactorEventHandlerTestFixture::new().await;
 
-        let snap = fixture.test_recorder.snapshot();
-        let running = snap
-            .by_name(RUNNING_COMPACTIONS)
-            .first()
-            .map(|m| match &m.value {
-                slatedb_common::metrics::MetricValue::UpDownCounter(v) => *v,
-                other => panic!("unexpected metric type: {:?}", other),
-            })
-            .expect("metric not found");
+        let running =
+            slatedb_common::metrics::lookup_metric(&fixture.test_recorder, RUNNING_COMPACTIONS)
+                .expect("metric not found");
         assert_eq!(running, 0);
 
         let compaction = Compaction::new(Ulid::new(), CompactionSpec::new(vec![], 10));
@@ -3069,15 +3056,9 @@ mod tests {
         })
         .await
         .expect("timeout waiting for CompactionJobAttemptFinished");
-        let snap = fixture.test_recorder.snapshot();
-        let starting_last_ts = snap
-            .by_name(LAST_COMPACTION_TS_SEC)
-            .first()
-            .map(|m| match &m.value {
-                slatedb_common::metrics::MetricValue::Gauge(v) => *v,
-                other => panic!("unexpected metric type: {:?}", other),
-            })
-            .expect("metric not found");
+        let starting_last_ts =
+            slatedb_common::metrics::lookup_metric(&fixture.test_recorder, LAST_COMPACTION_TS_SEC)
+                .expect("metric not found");
 
         // when:
         fixture
@@ -3087,15 +3068,9 @@ mod tests {
             .expect("fatal error handling compaction message");
 
         // then:
-        let snap = fixture.test_recorder.snapshot();
-        let last_ts = snap
-            .by_name(LAST_COMPACTION_TS_SEC)
-            .first()
-            .map(|m| match &m.value {
-                slatedb_common::metrics::MetricValue::Gauge(v) => *v,
-                other => panic!("unexpected metric type: {:?}", other),
-            })
-            .expect("metric not found");
+        let last_ts =
+            slatedb_common::metrics::lookup_metric(&fixture.test_recorder, LAST_COMPACTION_TS_SEC)
+                .expect("metric not found");
         assert!(last_ts > starting_last_ts);
     }
 
