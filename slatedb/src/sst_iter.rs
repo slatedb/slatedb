@@ -545,13 +545,20 @@ impl<'a> InternalSstIterator<'a> {
                 }
             } else {
                 assert!(self.fetch_tasks.is_empty());
-                // For descending order, check that we've gone back to start
-                match self.options.order {
-                    IterationOrder::Ascending => {
-                        assert_eq!(self.next_block_idx_to_fetch, self.block_idx_range.end);
-                    }
-                    IterationOrder::Descending => {
-                        assert_eq!(self.next_block_idx_to_fetch, self.block_idx_range.start);
+                // When spawn_fetches is true (normal iteration), all blocks
+                // must have been scheduled by this point. When false (called
+                // from seek's already_fetched path), the fetch cursor may
+                // not have reached the end because the seek drained buffered
+                // tasks without scheduling new ones and the caller handles
+                // resetting the cursor afterward.
+                if spawn_fetches {
+                    match self.options.order {
+                        IterationOrder::Ascending => {
+                            assert_eq!(self.next_block_idx_to_fetch, self.block_idx_range.end);
+                        }
+                        IterationOrder::Descending => {
+                            assert_eq!(self.next_block_idx_to_fetch, self.block_idx_range.start);
+                        }
                     }
                 }
                 return Ok(None);
@@ -2593,5 +2600,73 @@ mod tests {
 
         let entry = iter.next().await.expect("iteration should succeed");
         assert!(entry.is_none(), "expected end of iteration");
+    }
+
+    #[tokio::test]
+    async fn test_seek_forward_after_scan_already_fetched_block_consumed() {
+        let root_path = Path::from("");
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        // Small block_size so we get ~2 keys per block.
+        let format = SsTableFormat {
+            block_size: 64,
+            min_filter_keys: 1,
+            ..SsTableFormat::default()
+        };
+        let table_store = Arc::new(TableStore::new(
+            ObjectStores::new(object_store, None),
+            format,
+            root_path.clone(),
+            None,
+        ));
+
+        // Keys spaced by 10: key_000, key_010, key_020, ..., key_190.
+        // Gaps like key_035 don't exist.
+        let mut writer = table_store.table_writer(SsTableId::Wal(0));
+        for i in 0..20 {
+            let key = format!("key_{:03}", i * 10);
+            let val = format!("val_{:03}", i * 10);
+            writer
+                .add(RowEntry::new_value(key.as_bytes(), val.as_bytes(), 0))
+                .await
+                .unwrap();
+        }
+        let sst_handle = writer.close().await.unwrap();
+        let sst = SsTableView::identity(sst_handle);
+
+        // Minimal prefetch: 1 block at a time, 1 task max.
+        let mut iter = SstIterator::new_borrowed_initialized(
+            ..,
+            &sst,
+            table_store.clone(),
+            SstIteratorOptions {
+                max_fetch_tasks: 1,
+                blocks_to_fetch: 1,
+                cache_blocks: true,
+                eager_spawn: false,
+                order: IterationOrder::Ascending,
+            },
+        )
+        .await
+        .unwrap()
+        .expect("Expected Some(iter) but got None");
+
+        // Scan 3 entries: key_000, key_010, key_020.
+        // After this, current block has key_020, key_030. fetch_tasks is empty.
+        // next_block_idx_to_fetch = 2.
+        for _ in 0..3 {
+            iter.next().await.unwrap().expect("should have entries");
+        }
+
+        // Seek to key_035 (doesn't exist). The index maps it to block 1
+        // (which contains key_020, key_030). block_idx=1 < next_block_idx=2,
+        // so already_fetched=true. But fetch_tasks is empty (consumed during
+        // scan). The already_fetched loop immediately calls next_iter(false)
+        // on empty tasks, hitting the assertion.
+        iter.seek(b"key_035").await.unwrap();
+
+        // Should find key_040 (first key >= key_035).
+        let entry = iter.next().await.unwrap().expect("should find key_040");
+        let kv: KeyValue = entry.into();
+        assert_eq!(kv.key.as_ref(), b"key_040");
     }
 }
