@@ -18,24 +18,24 @@ Authors:
 
 <!-- Briefly explain what this RFC changes and why. Prefer 3–6 sentences. -->
 
-Currently, throughput is limited by both the DbWriter and the compaction process. Compaction can either be run statefully (e.g.) inside of the main SlateDB process, or as a standalone process. Allowing for multiple compactors that pick up compaction jobs as they come in should theoretically increase throughput since compaction is more of a bottleneck than the db writer itself. This RFC proposes a design to allow users the ability to run distributed compaction instead of regular stand-alone compaction.
+This RFC proposes a design to allow users the ability to run distributed compaction instead of regular stand-alone compaction.
 
 ## Motivation
 
 <!-- What problem are we solving? What user or system pain exists today? Include concrete examples and why “do nothing” is insufficient. -->
 
+Currently, throughput is limited by both the DbWriter and the compaction process. Compaction can either be run statefully (e.g.) inside of the main SlateDB process, or as a standalone process. Allowing for multiple compactors that pick up compaction jobs as they come in should theoretically increase throughput since compaction is more of a bottleneck than the db writer itself. 
+
+
 ## Goals
 
-- Goal 1
-Increase throughput to SlateDB by distributing the compaction process. Allow users to run any number of compactors as well as a standalone compactor and stateful compactor which were present before this proposal.
+- Increase throughput to SlateDB by distributing the compaction process. Allow users to run any number of compactors as well as a standalone compactor and stateful compactor which were present before this proposal.
 
-- Goal 2
-Keep distributed compaction isolated and avoid making changes to the current compaction protocol.
+- Keep distributed compaction isolated and avoid making changes to the current compaction protocol. Keep the RFC relatively thin and implement this incrementally.
 
 ## Non-Goals
 
-- Non-goal 1
-- Non-goal 2
+Making any major changes to the current compaction protocol.
 
 ## Design
 
@@ -156,8 +156,8 @@ List the serious alternatives and why they were rejected (including “status qu
 
 <!-- Bullet list of related issues, PRs, RFCs, papers, docs, discord discussions, etc. -->
 
-- Reference 1
-- Reference 2
+[SlateDB Compaction documentation](https://slatedb.io/docs/design/compaction/)  
+[chitchat documentation](https://docs.rs/chitchat/0.10.0/chitchat/)
 
 ## Updates
 
