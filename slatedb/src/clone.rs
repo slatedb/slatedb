@@ -19,6 +19,7 @@ pub(crate) async fn create_clone<P: Into<Path>>(
     clone_path: P,
     parent_path: P,
     object_store: Arc<dyn ObjectStore>,
+    wal_object_store: Arc<dyn ObjectStore>,
     parent_checkpoint: Option<Uuid>,
     fp_registry: Arc<FailPointRegistry>,
     system_clock: Arc<dyn SystemClock>,
@@ -33,9 +34,6 @@ pub(crate) async fn create_clone<P: Into<Path>>(
 
     let clone_manifest_store = Arc::new(ManifestStore::new(&clone_path, object_store.clone()));
     let parent_manifest_store = Arc::new(ManifestStore::new(&parent_path, object_store.clone()));
-    parent_manifest_store
-        .validate_no_wal_object_store_configured()
-        .await?;
 
     let mut clone_manifest = create_clone_manifest(
         clone_manifest_store,
@@ -51,7 +49,7 @@ pub(crate) async fn create_clone<P: Into<Path>>(
 
     if !clone_manifest.db_state().initialized {
         copy_wal_ssts(
-            object_store,
+            wal_object_store,
             clone_manifest.db_state(),
             &parent_path,
             &clone_path,
@@ -352,6 +350,7 @@ mod tests {
             clone_path.clone(),
             parent_path.clone(),
             object_store.clone(),
+            object_store.clone(),
             None,
             Arc::new(FailPointRegistry::new()),
             Arc::new(DefaultSystemClock::new()),
@@ -417,6 +416,7 @@ mod tests {
             clone_path,
             parent_path,
             object_store.clone(),
+            object_store.clone(),
             Some(checkpoint.id),
             Arc::new(FailPointRegistry::new()),
             Arc::new(DefaultSystemClock::new()),
@@ -467,6 +467,7 @@ mod tests {
         let err = create_clone(
             clone_path.clone(),
             parent_path.clone(),
+            object_store.clone(),
             object_store.clone(),
             None,
             Arc::new(FailPointRegistry::new()),
@@ -528,6 +529,7 @@ mod tests {
             clone_path.clone(),
             parent_path.clone(),
             object_store.clone(),
+            object_store.clone(),
             Some(checkpoint_2.id),
             Arc::new(FailPointRegistry::new()),
             system_clock.clone(),
@@ -576,6 +578,7 @@ mod tests {
             clone_path.clone(),
             updated_parent_path.clone(),
             object_store.clone(),
+            object_store.clone(),
             None,
             Arc::new(FailPointRegistry::new()),
             system_clock.clone(),
@@ -605,6 +608,7 @@ mod tests {
             clone_path,
             parent_path,
             object_store.clone(),
+            object_store.clone(),
             None,
             Arc::new(FailPointRegistry::new()),
             system_clock.clone(),
@@ -620,6 +624,7 @@ mod tests {
         create_clone(
             clone_path,
             parent_path,
+            object_store.clone(),
             object_store.clone(),
             None,
             Arc::new(FailPointRegistry::new()),
@@ -671,6 +676,7 @@ mod tests {
             clone_path.clone(),
             parent_path.clone(),
             object_store.clone(),
+            object_store.clone(),
             None,
             Arc::clone(&fp_registry),
             system_clock.clone(),
@@ -684,6 +690,7 @@ mod tests {
         create_clone(
             clone_path.clone(),
             parent_path.clone(),
+            object_store.clone(),
             object_store.clone(),
             None,
             Arc::clone(&fp_registry),
@@ -722,6 +729,7 @@ mod tests {
             clone_path.clone(),
             parent_path.clone(),
             object_store.clone(),
+            object_store.clone(),
             Some(checkpoint.id),
             Arc::clone(&fp_registry),
             system_clock.clone(),
@@ -750,6 +758,7 @@ mod tests {
             clone_path.clone(),
             parent_path.clone(),
             object_store.clone(),
+            object_store.clone(),
             Some(checkpoint.id),
             Arc::clone(&fp_registry),
             system_clock.clone(),
@@ -763,7 +772,44 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn clone_should_fail_if_wal_object_is_configured() {
+    async fn clone_should_succeed_when_wal_object_store_is_provided() {
+        let object_store = Arc::new(InMemory::new());
+        let wal_object_store = Arc::new(InMemory::new());
+        let parent_path = "/tmp/test_parent";
+        let clone_path = "/tmp/test_clone";
+
+        let parent_db = Db::builder(parent_path, object_store.clone())
+            .with_wal_object_store(wal_object_store.clone())
+            .build()
+            .await
+            .unwrap();
+        parent_db.close().await.unwrap();
+
+        create_clone(
+            clone_path,
+            parent_path,
+            object_store.clone(),
+            wal_object_store.clone(),
+            None,
+            Arc::new(FailPointRegistry::new()),
+            Arc::new(DefaultSystemClock::new()),
+            Arc::new(DbRand::default()),
+        )
+        .await
+        .unwrap();
+
+        // Clone can be opened with its own WAL object store
+        let clone_wal = Arc::new(InMemory::new());
+        let clone_db = Db::builder(clone_path, object_store.clone())
+            .with_wal_object_store(clone_wal)
+            .build()
+            .await
+            .unwrap();
+        clone_db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn clone_should_fail_when_wal_store_is_not_provided() {
         let object_store = Arc::new(InMemory::new());
         let wal_object_store = Arc::new(InMemory::new());
         let parent_path = "/tmp/test_parent";
@@ -776,9 +822,11 @@ mod tests {
             .unwrap();
         parent_db.close().await.unwrap();
 
+        // Pass main store as WAL store — WAL SSTs won't be found there
         let result = create_clone(
             clone_path,
             parent_path,
+            object_store.clone(),
             object_store.clone(),
             None,
             Arc::new(FailPointRegistry::new()),
@@ -786,9 +834,6 @@ mod tests {
             Arc::new(DbRand::default()),
         )
         .await;
-        assert!(matches!(
-            result,
-            Err(SlateDBError::WalStoreReconfigurationError)
-        ));
+        assert!(result.is_err());
     }
 }

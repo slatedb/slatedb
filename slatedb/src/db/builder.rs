@@ -174,6 +174,7 @@ pub struct DbBuilder<P: Into<Path>> {
     system_clock: Option<Arc<dyn SystemClock>>,
     gc_runtime: Option<Handle>,
     compactor_builder: Option<CompactorBuilder<Path>>,
+    gc_builder: Option<GarbageCollectorBuilder<Path>>,
     fp_registry: Arc<FailPointRegistry>,
     seed: Option<u64>,
     sst_block_size: Option<SstBlockSize>,
@@ -194,6 +195,7 @@ impl<P: Into<Path>> DbBuilder<P> {
             system_clock: None,
             gc_runtime: None,
             compactor_builder: None,
+            gc_builder: None,
             fp_registry: Arc::new(FailPointRegistry::new()),
             seed: None,
             sst_block_size: None,
@@ -207,6 +209,9 @@ impl<P: Into<Path>> DbBuilder<P> {
     pub fn with_settings(mut self, settings: Settings) -> Self {
         if self.compactor_builder.is_some() && settings.compactor_options.is_some() {
             warn!("compactor_builder and settings.compactor_options both set; compactor_builder will take precedence");
+        }
+        if self.gc_builder.is_some() && settings.garbage_collector_options.is_some() {
+            warn!("gc_builder and settings.garbage_collector_options both set; gc_builder will take precedence");
         }
         self.settings = settings;
         self
@@ -258,6 +263,17 @@ impl<P: Into<Path>> DbBuilder<P> {
     /// configuration.
     pub fn with_compactor_builder(mut self, compactor_builder: CompactorBuilder<P>) -> Self {
         self.compactor_builder = Some(compactor_builder.into_path_builder());
+        self
+    }
+
+    /// Sets a custom GarbageCollectorBuilder for garbage collection.
+    ///
+    /// Setting a [`GarbageCollectorBuilder`] will ignore any previous
+    /// [`Settings::garbage_collector_options`] configuration passed in through
+    /// [`DbBuilder::with_settings`] since the [`GarbageCollectorBuilder`] provides
+    /// its own configuration.
+    pub fn with_gc_builder(mut self, gc_builder: GarbageCollectorBuilder<P>) -> Self {
+        self.gc_builder = Some(gc_builder.into_path_builder());
         self
     }
 
@@ -574,19 +590,26 @@ impl<P: Into<Path>> DbBuilder<P> {
             )?;
         }
 
-        if let Some(gc_options) = self
-            .settings
-            .garbage_collector_options
-            .filter(|opts| !opts.is_empty())
-        {
-            let gc = GarbageCollector::new(
-                manifest_store.clone(),
-                compactions_store.clone(),
-                uncached_table_store.clone(),
-                gc_options,
-                &recorder,
-                system_clock.clone(),
-            );
+        let gc_builder = self.gc_builder.or_else(|| {
+            self.settings
+                .garbage_collector_options
+                .filter(|opts| !opts.is_empty())
+                .map(|opts| {
+                    GarbageCollectorBuilder::new(path.clone(), retrying_main_object_store.clone())
+                        .with_options(opts)
+                })
+        });
+
+        if let Some(gc_builder) = gc_builder {
+            let gc = gc_builder
+                .with_system_clock(system_clock.clone())
+                .with_recorder(recorder.clone())
+                .with_seed(rand.rng().next_u64())
+                .build_collector(
+                    uncached_table_store.clone(),
+                    manifest_store.clone(),
+                    compactions_store.clone(),
+                );
             // Garbage collector only uses tickers, so pass in a dummy rx channel
             let (_, rx) = mpsc::unbounded_channel();
             let gc_handle = self.gc_runtime.as_ref().unwrap_or(&tokio_handle);
@@ -716,6 +739,19 @@ impl<P: Into<Path>> GarbageCollectorBuilder<P> {
         }
     }
 
+    /// Converts this builder into one with a concrete `Path` type.
+    pub fn into_path_builder(self) -> GarbageCollectorBuilder<Path> {
+        GarbageCollectorBuilder {
+            path: self.path.into(),
+            main_object_store: self.main_object_store,
+            wal_object_store: self.wal_object_store,
+            options: self.options,
+            recorder: self.recorder,
+            system_clock: self.system_clock,
+            rand: self.rand,
+        }
+    }
+
     /// Sets the options to use for the garbage collector.
     pub fn with_options(mut self, options: GarbageCollectorOptions) -> Self {
         self.options = options;
@@ -729,7 +765,6 @@ impl<P: Into<Path>> GarbageCollectorBuilder<P> {
     }
 
     /// Sets the internal recorder (used when GC is created via DbBuilder).
-    #[allow(unused)]
     pub(crate) fn with_recorder(mut self, recorder: MetricsRecorderHelper) -> Self {
         self.recorder = recorder;
         self
@@ -748,10 +783,26 @@ impl<P: Into<Path>> GarbageCollectorBuilder<P> {
     }
 
     /// Sets the WAL object store to use for the garbage collector.
-    #[allow(unused)]
     pub fn with_wal_object_store(mut self, wal_object_store: Arc<dyn ObjectStore>) -> Self {
         self.wal_object_store = Some(wal_object_store);
         self
+    }
+
+    /// Builds a GarbageCollector using pre-existing stores (used by DbBuilder).
+    pub(crate) fn build_collector(
+        self,
+        table_store: Arc<TableStore>,
+        manifest_store: Arc<ManifestStore>,
+        compactions_store: Arc<CompactionsStore>,
+    ) -> GarbageCollector {
+        GarbageCollector::new(
+            manifest_store,
+            compactions_store,
+            table_store,
+            self.options,
+            &self.recorder,
+            self.system_clock,
+        )
     }
 
     /// Builds and returns a GarbageCollector instance.
