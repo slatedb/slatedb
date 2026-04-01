@@ -597,7 +597,7 @@ mod tests {
         let bad_job = UploadJob::new(FlushEpoch(1), imm_memtable, sst_id);
 
         let (tracker_tx, tracker_rx) = safe_async_channel::unbounded_channel();
-        let mut uploader = Uploader::start(
+        let uploader = Uploader::start(
             Arc::clone(&db),
             1,
             Duration::from_millis(1),

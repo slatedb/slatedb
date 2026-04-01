@@ -1006,7 +1006,7 @@ mod tests {
         let before =
             latest_manifest_checkpoint_count(&harness.path, Arc::clone(&harness.object_store))
                 .await;
-        let (tracker_tx, tracker_rx) = safe_async_channel::unbounded_channel();
+        let (tracker_tx, _) = safe_async_channel::unbounded_channel();
         let mut manifest_writer = ManifestWriter::start(
             Arc::clone(&harness.inner),
             harness.manifest,
