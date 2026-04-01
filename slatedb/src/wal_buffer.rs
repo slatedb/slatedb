@@ -1016,12 +1016,12 @@ mod tests {
         }
 
         let size_triggered_requests =
-            lookup_metric(&recorder, "db/wal_buffer_flush_requests").unwrap();
+            lookup_metric(&recorder, crate::db_stats::WAL_BUFFER_FLUSH_REQUESTS).unwrap();
 
         // Explicitly flush to drain everything, including any partial current WAL.
         wal_buffer.flush().await.unwrap();
 
-        let actual_flushes = lookup_metric(&recorder, "db/wal_buffer_flushes").unwrap();
+        let actual_flushes = lookup_metric(&recorder, crate::db_stats::WAL_BUFFER_FLUSHES).unwrap();
 
         // With the flush_requested flag, the number of size-triggered requests
         // should be bounded by the number of WALs, not by the number of writes.

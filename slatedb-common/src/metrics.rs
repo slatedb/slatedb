@@ -996,6 +996,25 @@ pub fn lookup_metric(recorder: &DefaultMetricsRecorder, name: &str) -> Option<i6
     })
 }
 
+/// Like [`lookup_metric`] but selects the metric matching both `name` and
+/// the given label set (order-independent).
+#[cfg(any(test, feature = "test-util"))]
+#[allow(clippy::panic)]
+pub fn lookup_metric_with_labels(
+    recorder: &DefaultMetricsRecorder,
+    name: &str,
+    labels: &[(&str, &str)],
+) -> Option<i64> {
+    let snap = recorder.snapshot();
+    snap.by_name_and_labels(name, labels)
+        .map(|m| match &m.value {
+            MetricValue::Counter(v) => *v as i64,
+            MetricValue::Gauge(v) => *v,
+            MetricValue::UpDownCounter(v) => *v,
+            MetricValue::Histogram { .. } => panic!("unexpected histogram metric"),
+        })
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------

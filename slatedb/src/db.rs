@@ -1693,9 +1693,7 @@ impl WriteHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cached_object_store::stats::{
-        OBJECT_STORE_CACHE_PART_ACCESS, OBJECT_STORE_CACHE_PART_HITS,
-    };
+    use crate::cached_object_store::stats::{PART_ACCESS_COUNT, PART_HIT_COUNT};
     use crate::cached_object_store::{CachedObjectStore, FsCacheStorage};
     use crate::cached_object_store_stats::CachedObjectStoreStats;
     use crate::config::DurabilityLevel::{Memory, Remote};
@@ -1732,7 +1730,9 @@ mod tests {
     use proptest::test_runner::{TestRng, TestRunner};
     use slatedb_common::clock::DefaultSystemClock;
     use slatedb_common::clock::MockSystemClock;
-    use slatedb_common::metrics::{lookup_metric, DefaultMetricsRecorder, MetricsRecorderHelper};
+    use slatedb_common::metrics::{
+        lookup_metric, lookup_metric_with_labels, DefaultMetricsRecorder, MetricsRecorderHelper,
+    };
     use std::collections::BTreeMap;
     use std::collections::Bound::Included;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -2321,20 +2321,18 @@ mod tests {
         .await
         .unwrap();
 
-        let access_count0 =
-            lookup_metric(&metrics_recorder, OBJECT_STORE_CACHE_PART_ACCESS).unwrap();
+        let access_count0 = lookup_metric(&metrics_recorder, PART_ACCESS_COUNT).unwrap();
         let key = b"test_key";
         let value = b"test_value";
         kv_store.put(key, value).await.unwrap();
         kv_store.flush().await.unwrap();
 
         let got = kv_store.get(key).await.unwrap();
-        let access_count1 =
-            lookup_metric(&metrics_recorder, OBJECT_STORE_CACHE_PART_ACCESS).unwrap();
+        let access_count1 = lookup_metric(&metrics_recorder, PART_ACCESS_COUNT).unwrap();
         assert_eq!(got, Some(Bytes::from_static(value)));
         assert!(access_count1 > 0);
         assert!(access_count1 >= access_count0);
-        assert!(lookup_metric(&metrics_recorder, OBJECT_STORE_CACHE_PART_HITS).unwrap() >= 1);
+        assert!(lookup_metric(&metrics_recorder, PART_HIT_COUNT).unwrap() >= 1);
     }
 
     async fn test_object_store_cache_helper(
@@ -3786,12 +3784,16 @@ mod tests {
         let this_recorder = metrics_recorder_clone.clone();
         // Wait up to 30s for backpressure to be applied to the second write.
         wait_for(Box::new(move || {
-            lookup_metric(&this_recorder, "db/backpressure_count").is_some_and(|v| v > 0)
+            lookup_metric(&this_recorder, crate::db_stats::BACKPRESSURE_COUNT)
+                .is_some_and(|v| v > 0)
         }))
         .await;
 
         // Verify that backpressure is applied.
-        assert!(lookup_metric(&metrics_recorder_clone, "db/backpressure_count").unwrap() >= 1);
+        assert!(
+            lookup_metric(&metrics_recorder_clone, crate::db_stats::BACKPRESSURE_COUNT).unwrap()
+                >= 1
+        );
 
         // Unblock so put_with_options in join_handle can complete and join_handle.await returns
         fail_parallel::cfg(fp_registry.clone(), "write-wal-sst-io-error", "off").unwrap();
@@ -6728,5 +6730,213 @@ mod tests {
         let kv2 = db.get_key_value(b"key2").await.unwrap().unwrap();
         assert_eq!(kv2.expire_ts, Some(500));
         assert_eq!(kv2.create_ts, 200);
+    }
+
+    #[tokio::test]
+    async fn test_should_record_scan_request_count() {
+        // given:
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let metrics_recorder = Arc::new(DefaultMetricsRecorder::new());
+        let db = Db::builder("/tmp/test_should_record_scan_request_count", object_store)
+            .with_metrics_recorder(metrics_recorder.clone())
+            .build()
+            .await
+            .unwrap();
+        db.put(b"k1", b"v1").await.unwrap();
+
+        // when:
+        let mut iter = db.scan::<&[u8], _>(..).await.unwrap();
+        let _ = iter.next().await;
+
+        // then:
+        assert_eq!(
+            lookup_metric_with_labels(
+                &metrics_recorder,
+                crate::db_stats::REQUEST_COUNT,
+                &[("op", "scan")]
+            ),
+            Some(1)
+        );
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_should_record_flush_request_count() {
+        // given:
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let metrics_recorder = Arc::new(DefaultMetricsRecorder::new());
+        let db = Db::builder("/tmp/test_should_record_flush_request_count", object_store)
+            .with_metrics_recorder(metrics_recorder.clone())
+            .build()
+            .await
+            .unwrap();
+        db.put(b"k1", b"v1").await.unwrap();
+
+        // when:
+        db.flush().await.unwrap();
+
+        // then:
+        assert_eq!(
+            lookup_metric_with_labels(
+                &metrics_recorder,
+                crate::db_stats::REQUEST_COUNT,
+                &[("op", "flush")]
+            ),
+            Some(1)
+        );
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_should_record_write_ops_and_batch_count() {
+        // given:
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let metrics_recorder = Arc::new(DefaultMetricsRecorder::new());
+        let db = Db::builder(
+            "/tmp/test_should_record_write_ops_and_batch_count",
+            object_store,
+        )
+        .with_metrics_recorder(metrics_recorder.clone())
+        .build()
+        .await
+        .unwrap();
+
+        // when:
+        db.put(b"k1", b"v1").await.unwrap();
+        db.put(b"k2", b"v2").await.unwrap();
+
+        // then:
+        assert_eq!(
+            lookup_metric(&metrics_recorder, crate::db_stats::WRITE_OPS),
+            Some(2)
+        );
+        assert_eq!(
+            lookup_metric(&metrics_recorder, crate::db_stats::WRITE_BATCH_COUNT),
+            Some(2)
+        );
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_should_record_total_mem_size_bytes() {
+        // given:
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let metrics_recorder = Arc::new(DefaultMetricsRecorder::new());
+        let mut opts = test_db_options(0, 1024, None);
+        opts.flush_interval = None;
+        opts.max_unflushed_bytes = 1024 * 1024;
+        let db = Db::builder("/tmp/test_should_record_total_mem_size_bytes", object_store)
+            .with_settings(opts)
+            .with_metrics_recorder(metrics_recorder.clone())
+            .build()
+            .await
+            .unwrap();
+
+        // when: write without awaiting durability so data stays in WAL buffer
+        db.put_with_options(
+            b"k1",
+            b"v1",
+            &PutOptions::default(),
+            &WriteOptions {
+                await_durable: false,
+            },
+        )
+        .await
+        .unwrap();
+        // Second write so maybe_apply_backpressure sees the first write's bytes
+        db.put_with_options(
+            b"k2",
+            b"v2",
+            &PutOptions::default(),
+            &WriteOptions {
+                await_durable: false,
+            },
+        )
+        .await
+        .unwrap();
+
+        // then: total_mem_size_bytes is updated via maybe_apply_backpressure
+        let mem_size = lookup_metric(&metrics_recorder, crate::db_stats::TOTAL_MEM_SIZE_BYTES);
+        assert!(
+            mem_size.is_some_and(|v| v > 0),
+            "expected total_mem_size_bytes > 0, got {:?}",
+            mem_size
+        );
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_should_record_wal_buffer_estimated_bytes() {
+        // given:
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let metrics_recorder = Arc::new(DefaultMetricsRecorder::new());
+        let mut opts = test_db_options(0, 1024, None);
+        opts.flush_interval = None;
+        let db = Db::builder(
+            "/tmp/test_should_record_wal_buffer_estimated_bytes",
+            object_store,
+        )
+        .with_settings(opts)
+        .with_metrics_recorder(metrics_recorder.clone())
+        .build()
+        .await
+        .unwrap();
+
+        // when:
+        db.put_with_options(
+            b"k1",
+            b"v1",
+            &PutOptions::default(),
+            &WriteOptions {
+                await_durable: false,
+            },
+        )
+        .await
+        .unwrap();
+
+        // then:
+        let estimated = lookup_metric(
+            &metrics_recorder,
+            crate::db_stats::WAL_BUFFER_ESTIMATED_BYTES,
+        );
+        assert!(
+            estimated.is_some_and(|v| v > 0),
+            "expected wal_buffer_estimated_bytes > 0, got {:?}",
+            estimated
+        );
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_should_record_l0_sst_count() {
+        // given:
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let metrics_recorder = Arc::new(DefaultMetricsRecorder::new());
+        let db = Db::builder("/tmp/test_should_record_l0_sst_count", object_store)
+            .with_settings(test_db_options(0, 1024, None))
+            .with_metrics_recorder(metrics_recorder.clone())
+            .build()
+            .await
+            .unwrap();
+
+        // when: write data and flush memtable to L0
+        db.put(b"k1", b"v1").await.unwrap();
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::MemTable,
+        })
+        .await
+        .unwrap();
+
+        // Wait for manifest poll to update l0_sst_count (poll interval is 100ms)
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        // then:
+        let l0_count = lookup_metric(&metrics_recorder, crate::db_stats::L0_SST_COUNT);
+        assert!(
+            l0_count.is_some_and(|v| v > 0),
+            "expected l0_sst_count > 0, got {:?}",
+            l0_count
+        );
+        db.close().await.unwrap();
     }
 }

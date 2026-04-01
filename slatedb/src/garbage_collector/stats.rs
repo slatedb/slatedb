@@ -3,14 +3,11 @@ use std::sync::Arc;
 
 macro_rules! gc_stat_name {
     ($suffix:expr) => {
-        concat!("gc", "/", $suffix)
+        concat!("slatedb.gc.", $suffix)
     };
 }
 
-pub const GC_MANIFEST_COUNT: &str = gc_stat_name!("manifest_count");
-pub const GC_WAL_COUNT: &str = gc_stat_name!("wal_count");
-pub const GC_COMPACTED_COUNT: &str = gc_stat_name!("compacted_count");
-pub const GC_COMPACTIONS_COUNT: &str = gc_stat_name!("compactions_count");
+pub const DELETED_COUNT: &str = gc_stat_name!("deleted_count");
 pub const GC_COUNT: &str = gc_stat_name!("count");
 
 /// Stats for the garbage collector.
@@ -25,10 +22,22 @@ pub struct GcStats {
 impl GcStats {
     pub(crate) fn new(recorder: &MetricsRecorderHelper) -> Self {
         Self {
-            gc_manifest_count: recorder.counter(GC_MANIFEST_COUNT).register(),
-            gc_wal_count: recorder.counter(GC_WAL_COUNT).register(),
-            gc_compacted_count: recorder.counter(GC_COMPACTED_COUNT).register(),
-            gc_compactions_count: recorder.counter(GC_COMPACTIONS_COUNT).register(),
+            gc_manifest_count: recorder
+                .counter(DELETED_COUNT)
+                .labels(&[("resource", "manifest")])
+                .register(),
+            gc_wal_count: recorder
+                .counter(DELETED_COUNT)
+                .labels(&[("resource", "wal")])
+                .register(),
+            gc_compacted_count: recorder
+                .counter(DELETED_COUNT)
+                .labels(&[("resource", "compacted")])
+                .register(),
+            gc_compactions_count: recorder
+                .counter(DELETED_COUNT)
+                .labels(&[("resource", "compactions")])
+                .register(),
             gc_count: recorder.counter(GC_COUNT).register(),
         }
     }
