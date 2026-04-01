@@ -605,10 +605,10 @@ impl<P: Into<Path>> DbBuilder<P> {
                 .with_system_clock(system_clock.clone())
                 .with_recorder(recorder.clone())
                 .with_seed(rand.rng().next_u64())
-                .build_from_stores(
+                .build_collector(
+                    uncached_table_store.clone(),
                     manifest_store.clone(),
                     compactions_store.clone(),
-                    uncached_table_store.clone(),
                 );
             // Garbage collector only uses tickers, so pass in a dummy rx channel
             let (_, rx) = mpsc::unbounded_channel();
@@ -789,11 +789,11 @@ impl<P: Into<Path>> GarbageCollectorBuilder<P> {
     }
 
     /// Builds a GarbageCollector using pre-existing stores (used by DbBuilder).
-    pub(crate) fn build_from_stores(
+    pub(crate) fn build_collector(
         self,
+        table_store: Arc<TableStore>,
         manifest_store: Arc<ManifestStore>,
         compactions_store: Arc<CompactionsStore>,
-        table_store: Arc<TableStore>,
     ) -> GarbageCollector {
         GarbageCollector::new(
             manifest_store,
