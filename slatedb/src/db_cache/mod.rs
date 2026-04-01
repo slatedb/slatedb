@@ -564,19 +564,12 @@ pub mod stats {
 
     macro_rules! dbcache_stat_name {
         ($suffix:expr) => {
-            concat!("dbcache", "/", $suffix)
+            concat!("slatedb.db_cache.", $suffix)
         };
     }
 
-    pub const DB_CACHE_FILTER_HIT: &str = dbcache_stat_name!("filter_hit");
-    pub const DB_CACHE_FILTER_MISS: &str = dbcache_stat_name!("filter_miss");
-    pub const DB_CACHE_INDEX_HIT: &str = dbcache_stat_name!("index_hit");
-    pub const DB_CACHE_INDEX_MISS: &str = dbcache_stat_name!("index_miss");
-    pub const DB_CACHE_DATA_BLOCK_HIT: &str = dbcache_stat_name!("data_block_hit");
-    pub const DB_CACHE_DATA_BLOCK_MISS: &str = dbcache_stat_name!("data_block_miss");
-    pub const DB_CACHE_STATS_HIT: &str = dbcache_stat_name!("stats_hit");
-    pub const DB_CACHE_STATS_MISS: &str = dbcache_stat_name!("stats_miss");
-    pub const DB_CACHE_GET_ERROR: &str = dbcache_stat_name!("get_error");
+    pub const ACCESS_COUNT: &str = dbcache_stat_name!("access_count");
+    pub const ERROR_COUNT: &str = dbcache_stat_name!("error_count");
 
     pub(super) struct DbCacheStats {
         pub(super) filter_hit: Arc<dyn CounterFn>,
@@ -593,15 +586,39 @@ pub mod stats {
     impl DbCacheStats {
         pub(super) fn new(recorder: &MetricsRecorderHelper) -> Self {
             Self {
-                filter_hit: recorder.counter(DB_CACHE_FILTER_HIT).register(),
-                filter_miss: recorder.counter(DB_CACHE_FILTER_MISS).register(),
-                index_hit: recorder.counter(DB_CACHE_INDEX_HIT).register(),
-                index_miss: recorder.counter(DB_CACHE_INDEX_MISS).register(),
-                data_block_hit: recorder.counter(DB_CACHE_DATA_BLOCK_HIT).register(),
-                data_block_miss: recorder.counter(DB_CACHE_DATA_BLOCK_MISS).register(),
-                stats_hit: recorder.counter(DB_CACHE_STATS_HIT).register(),
-                stats_miss: recorder.counter(DB_CACHE_STATS_MISS).register(),
-                get_error: recorder.counter(DB_CACHE_GET_ERROR).register(),
+                filter_hit: recorder
+                    .counter(ACCESS_COUNT)
+                    .labels(&[("entry_kind", "filter"), ("result", "hit")])
+                    .register(),
+                filter_miss: recorder
+                    .counter(ACCESS_COUNT)
+                    .labels(&[("entry_kind", "filter"), ("result", "miss")])
+                    .register(),
+                index_hit: recorder
+                    .counter(ACCESS_COUNT)
+                    .labels(&[("entry_kind", "index"), ("result", "hit")])
+                    .register(),
+                index_miss: recorder
+                    .counter(ACCESS_COUNT)
+                    .labels(&[("entry_kind", "index"), ("result", "miss")])
+                    .register(),
+                data_block_hit: recorder
+                    .counter(ACCESS_COUNT)
+                    .labels(&[("entry_kind", "data_block"), ("result", "hit")])
+                    .register(),
+                data_block_miss: recorder
+                    .counter(ACCESS_COUNT)
+                    .labels(&[("entry_kind", "data_block"), ("result", "miss")])
+                    .register(),
+                stats_hit: recorder
+                    .counter(ACCESS_COUNT)
+                    .labels(&[("entry_kind", "stats"), ("result", "hit")])
+                    .register(),
+                stats_miss: recorder
+                    .counter(ACCESS_COUNT)
+                    .labels(&[("entry_kind", "stats"), ("result", "miss")])
+                    .register(),
+                get_error: recorder.counter(ERROR_COUNT).register(),
             }
         }
     }
@@ -682,7 +699,7 @@ mod tests {
     use crate::types::RowEntry;
     use rstest::{fixture, rstest};
     use slatedb_common::metrics::{
-        lookup_metric, DefaultMetricsRecorder, MetricLevel, MetricsRecorderHelper,
+        lookup_metric_with_labels, DefaultMetricsRecorder, MetricLevel, MetricsRecorderHelper,
     };
     use std::sync::Arc;
     use ulid::Ulid;
@@ -710,10 +727,21 @@ mod tests {
             let _ = cache.get_filter(&key).await;
 
             // then:
-            assert_eq!(Some(0), lookup_metric(&registry, "dbcache/filter_miss"));
+            assert_eq!(
+                Some(0),
+                lookup_metric_with_labels(
+                    &registry,
+                    super::stats::ACCESS_COUNT,
+                    &[("entry_kind", "filter"), ("result", "miss")]
+                )
+            );
             assert_eq!(
                 Some(i as i64),
-                lookup_metric(&registry, "dbcache/filter_hit")
+                lookup_metric_with_labels(
+                    &registry,
+                    super::stats::ACCESS_COUNT,
+                    &[("entry_kind", "filter"), ("result", "hit")]
+                )
             );
         }
     }
@@ -732,9 +760,20 @@ mod tests {
             // then:
             assert_eq!(
                 Some(i as i64),
-                lookup_metric(&registry, "dbcache/filter_miss")
+                lookup_metric_with_labels(
+                    &registry,
+                    super::stats::ACCESS_COUNT,
+                    &[("entry_kind", "filter"), ("result", "miss")]
+                )
             );
-            assert_eq!(Some(0), lookup_metric(&registry, "dbcache/filter_hit"));
+            assert_eq!(
+                Some(0),
+                lookup_metric_with_labels(
+                    &registry,
+                    super::stats::ACCESS_COUNT,
+                    &[("entry_kind", "filter"), ("result", "hit")]
+                )
+            );
         }
     }
 
@@ -759,10 +798,21 @@ mod tests {
             let _ = cache.get_index(&key).await;
 
             // then:
-            assert_eq!(Some(0), lookup_metric(&registry, "dbcache/index_miss"));
+            assert_eq!(
+                Some(0),
+                lookup_metric_with_labels(
+                    &registry,
+                    super::stats::ACCESS_COUNT,
+                    &[("entry_kind", "index"), ("result", "miss")]
+                )
+            );
             assert_eq!(
                 Some(i as i64),
-                lookup_metric(&registry, "dbcache/index_hit")
+                lookup_metric_with_labels(
+                    &registry,
+                    super::stats::ACCESS_COUNT,
+                    &[("entry_kind", "index"), ("result", "hit")]
+                )
             );
         }
     }
@@ -804,9 +854,20 @@ mod tests {
             // then:
             assert_eq!(
                 Some(i as i64),
-                lookup_metric(&registry, "dbcache/index_miss")
+                lookup_metric_with_labels(
+                    &registry,
+                    super::stats::ACCESS_COUNT,
+                    &[("entry_kind", "index"), ("result", "miss")]
+                )
             );
-            assert_eq!(Some(0), lookup_metric(&registry, "dbcache/index_hit"));
+            assert_eq!(
+                Some(0),
+                lookup_metric_with_labels(
+                    &registry,
+                    super::stats::ACCESS_COUNT,
+                    &[("entry_kind", "index"), ("result", "hit")]
+                )
+            );
         }
     }
 
@@ -834,10 +895,21 @@ mod tests {
             let _ = cache.get_block(&key).await;
 
             // then:
-            assert_eq!(Some(0), lookup_metric(&registry, "dbcache/data_block_miss"));
+            assert_eq!(
+                Some(0),
+                lookup_metric_with_labels(
+                    &registry,
+                    super::stats::ACCESS_COUNT,
+                    &[("entry_kind", "data_block"), ("result", "miss")]
+                )
+            );
             assert_eq!(
                 Some(i as i64),
-                lookup_metric(&registry, "dbcache/data_block_hit")
+                lookup_metric_with_labels(
+                    &registry,
+                    super::stats::ACCESS_COUNT,
+                    &[("entry_kind", "data_block"), ("result", "hit")]
+                )
             );
         }
     }
@@ -858,9 +930,20 @@ mod tests {
             // then:
             assert_eq!(
                 Some(i as i64),
-                lookup_metric(&registry, "dbcache/data_block_miss")
+                lookup_metric_with_labels(
+                    &registry,
+                    super::stats::ACCESS_COUNT,
+                    &[("entry_kind", "data_block"), ("result", "miss")]
+                )
             );
-            assert_eq!(Some(0), lookup_metric(&registry, "dbcache/data_block_hit"));
+            assert_eq!(
+                Some(0),
+                lookup_metric_with_labels(
+                    &registry,
+                    super::stats::ACCESS_COUNT,
+                    &[("entry_kind", "data_block"), ("result", "hit")]
+                )
+            );
         }
     }
 

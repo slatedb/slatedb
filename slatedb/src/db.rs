@@ -1696,9 +1696,7 @@ impl WriteHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cached_object_store::stats::{
-        OBJECT_STORE_CACHE_PART_ACCESS, OBJECT_STORE_CACHE_PART_HITS,
-    };
+    use crate::cached_object_store::stats::{PART_ACCESS_COUNT, PART_HIT_COUNT};
     use crate::cached_object_store::{CachedObjectStore, FsCacheStorage};
     use crate::cached_object_store_stats::CachedObjectStoreStats;
     use crate::config::DurabilityLevel::{Memory, Remote};
@@ -2324,20 +2322,18 @@ mod tests {
         .await
         .unwrap();
 
-        let access_count0 =
-            lookup_metric(&metrics_recorder, OBJECT_STORE_CACHE_PART_ACCESS).unwrap();
+        let access_count0 = lookup_metric(&metrics_recorder, PART_ACCESS_COUNT).unwrap();
         let key = b"test_key";
         let value = b"test_value";
         kv_store.put(key, value).await.unwrap();
         kv_store.flush().await.unwrap();
 
         let got = kv_store.get(key).await.unwrap();
-        let access_count1 =
-            lookup_metric(&metrics_recorder, OBJECT_STORE_CACHE_PART_ACCESS).unwrap();
+        let access_count1 = lookup_metric(&metrics_recorder, PART_ACCESS_COUNT).unwrap();
         assert_eq!(got, Some(Bytes::from_static(value)));
         assert!(access_count1 > 0);
         assert!(access_count1 >= access_count0);
-        assert!(lookup_metric(&metrics_recorder, OBJECT_STORE_CACHE_PART_HITS).unwrap() >= 1);
+        assert!(lookup_metric(&metrics_recorder, PART_HIT_COUNT).unwrap() >= 1);
     }
 
     async fn test_object_store_cache_helper(
@@ -3789,12 +3785,16 @@ mod tests {
         let this_recorder = metrics_recorder_clone.clone();
         // Wait up to 30s for backpressure to be applied to the second write.
         wait_for(Box::new(move || {
-            lookup_metric(&this_recorder, "db/backpressure_count").is_some_and(|v| v > 0)
+            lookup_metric(&this_recorder, crate::db_stats::BACKPRESSURE_COUNT)
+                .is_some_and(|v| v > 0)
         }))
         .await;
 
         // Verify that backpressure is applied.
-        assert!(lookup_metric(&metrics_recorder_clone, "db/backpressure_count").unwrap() >= 1);
+        assert!(
+            lookup_metric(&metrics_recorder_clone, crate::db_stats::BACKPRESSURE_COUNT).unwrap()
+                >= 1
+        );
 
         // Unblock so put_with_options in join_handle can complete and join_handle.await returns
         fail_parallel::cfg(fp_registry.clone(), "write-wal-sst-io-error", "off").unwrap();

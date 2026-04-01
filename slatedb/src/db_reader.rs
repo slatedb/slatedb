@@ -2284,7 +2284,7 @@ mod tests {
 
     #[tokio::test]
     async fn should_record_metrics_with_recorder() {
-        use slatedb_common::metrics::{lookup_metric, DefaultMetricsRecorder};
+        use slatedb_common::metrics::{lookup_metric_with_labels, DefaultMetricsRecorder};
 
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/tmp/test_db_reader_metrics");
@@ -2311,7 +2311,11 @@ mod tests {
         let val = reader.get(b"key1").await.unwrap();
         assert_eq!(val, Some(Bytes::from_static(b"value1")));
         assert_eq!(
-            lookup_metric(&metrics_recorder, crate::db_stats::GET_REQUESTS),
+            lookup_metric_with_labels(
+                &metrics_recorder,
+                crate::db_stats::REQUEST_COUNT,
+                &[("op", "get")]
+            ),
             Some(1)
         );
     }
