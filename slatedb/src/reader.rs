@@ -279,6 +279,7 @@ impl Reader {
         write_batch: Option<WriteBatch>,
         max_seq: Option<u64>,
     ) -> Result<Option<KeyValue>, SlateDBError> {
+        self.db_stats.get_requests.increment(1);
         let max_seq = self.prepare_max_seq(max_seq, options.durability_filter, options.dirty);
         let key_slice = key.as_ref();
         let range = BytesRange::from_slice(key_slice..=key_slice);
@@ -357,6 +358,7 @@ impl Reader {
         max_seq: Option<u64>,
         range_tracker: Option<Arc<DbIteratorRangeTracker>>,
     ) -> Result<DbIterator, SlateDBError> {
+        self.db_stats.scan_requests.increment(1);
         let max_seq = self.prepare_max_seq(max_seq, options.durability_filter, options.dirty);
         let read_ahead_blocks = self.table_store.bytes_to_blocks(options.read_ahead_bytes);
 

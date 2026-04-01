@@ -92,6 +92,7 @@ pub(crate) struct DbInner {
     pub(crate) db_stats: DbStats,
     /// Kept alive so the underlying `MetricsRecorder` is not dropped while
     /// metric handles in `DbStats` (and other stats structs) are still in use.
+    /// See: https://github.com/slatedb/slatedb/issues/1469
     #[allow(dead_code)]
     pub(crate) recorder: MetricsRecorderHelper,
     #[allow(dead_code)]
@@ -209,7 +210,6 @@ impl DbInner {
         key: K,
         options: &ReadOptions,
     ) -> Result<Option<KeyValue>, SlateDBError> {
-        self.db_stats.get_requests.increment(1);
         self.status()?;
         let db_state = self.state.read().view();
         self.reader
@@ -222,7 +222,6 @@ impl DbInner {
         range: BytesRange,
         options: &ScanOptions,
     ) -> Result<DbIterator, SlateDBError> {
-        self.db_stats.scan_requests.increment(1);
         self.status()?;
         let db_state = self.state.read().view();
         self.reader
