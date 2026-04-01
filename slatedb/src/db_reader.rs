@@ -62,6 +62,11 @@ struct DbReaderInner {
     closed_result_watcher: ClosedResultWriter,
     status_reporter: DbStatusReporter,
     rand: Arc<DbRand>,
+    /// Kept alive so the underlying `MetricsRecorder` is not dropped while
+    /// metric handles in `DbStats` (and other stats structs) are still in use.
+    /// See: https://github.com/slatedb/slatedb/issues/1469
+    #[allow(dead_code)]
+    recorder: slatedb_common::metrics::MetricsRecorderHelper,
 }
 
 #[derive(Debug)]
@@ -105,6 +110,7 @@ impl DbReaderInner {
         system_clock: Arc<dyn SystemClock>,
         rand: Arc<DbRand>,
         status_reporter: DbStatusReporter,
+        recorder: slatedb_common::metrics::MetricsRecorderHelper,
     ) -> Result<Self, SlateDBError> {
         let mut manifest =
             StoredManifest::load(Arc::clone(&manifest_store), system_clock.clone()).await?;
@@ -144,7 +150,6 @@ impl DbReaderInner {
             status_reporter.clone(),
         ));
 
-        let recorder = slatedb_common::metrics::MetricsRecorderHelper::noop();
         let db_stats = DbStats::new(&recorder);
 
         let state = RwLock::new(initial_state);
@@ -168,6 +173,7 @@ impl DbReaderInner {
             closed_result_watcher,
             status_reporter,
             rand,
+            recorder,
         })
     }
 
@@ -681,6 +687,7 @@ impl DbReader {
         options: DbReaderOptions,
         system_clock: Arc<dyn SystemClock>,
         rand: Arc<DbRand>,
+        recorder: slatedb_common::metrics::MetricsRecorderHelper,
     ) -> Result<Self, SlateDBError> {
         Self::validate_options(&options)?;
 
@@ -705,6 +712,7 @@ impl DbReader {
                 system_clock,
                 rand,
                 status_reporter,
+                recorder,
             )
             .await?,
         );
@@ -1192,6 +1200,7 @@ mod tests {
             DbReaderOptions::default(),
             test_provider.system_clock.clone(),
             test_provider.rand.clone(),
+            slatedb_common::metrics::MetricsRecorderHelper::noop(),
         )
         .await
         .unwrap();
@@ -1939,6 +1948,7 @@ mod tests {
                 options,
                 self.system_clock.clone(),
                 self.rand.clone(),
+                slatedb_common::metrics::MetricsRecorderHelper::noop(),
             )
             .await
         }
@@ -2129,6 +2139,7 @@ mod tests {
             closed_result_watcher: ClosedResultWriter::new(WatchableOnceCell::new()),
             status_reporter: DbStatusReporter::new(0),
             rand: test_provider.rand.clone(),
+            recorder,
         };
 
         let rebuilt_state = inner
@@ -2218,6 +2229,7 @@ mod tests {
             closed_result_watcher: ClosedResultWriter::new(WatchableOnceCell::new()),
             status_reporter: DbStatusReporter::new(0),
             rand: test_provider.rand.clone(),
+            recorder,
         };
 
         assert!(!inner.should_reestablish_checkpoint(&current_core));
@@ -2267,6 +2279,40 @@ mod tests {
         assert!(
             !entries.is_empty(),
             "Expected disk cache directory to be populated after read"
+        );
+    }
+
+    #[tokio::test]
+    async fn should_record_metrics_with_recorder() {
+        use slatedb_common::metrics::{lookup_metric, DefaultMetricsRecorder};
+
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_db_reader_metrics");
+
+        // Write data via Db so there's an SST to read from
+        let db = Db::builder(path.clone(), Arc::clone(&object_store))
+            .with_settings(Settings::default())
+            .build()
+            .await
+            .unwrap();
+        db.put(b"key1", b"value1").await.unwrap();
+        db.flush().await.unwrap();
+        db.close().await.unwrap();
+
+        // Open a DbReader with a metrics recorder
+        let metrics_recorder = Arc::new(DefaultMetricsRecorder::new());
+        let reader = DbReader::builder(path, object_store)
+            .with_metrics_recorder(metrics_recorder.clone())
+            .build()
+            .await
+            .unwrap();
+
+        // Verify that get_requests metric is incremented
+        let val = reader.get(b"key1").await.unwrap();
+        assert_eq!(val, Some(Bytes::from_static(b"value1")));
+        assert_eq!(
+            lookup_metric(&metrics_recorder, crate::db_stats::GET_REQUESTS),
+            Some(1)
         );
     }
 

@@ -1233,10 +1233,9 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
         self
     }
 
-    /// Sets the recorder to use for the reader.
-    #[allow(unused)]
-    pub(crate) fn with_recorder(mut self, recorder: MetricsRecorderHelper) -> Self {
-        self.recorder = recorder;
+    /// Sets the metrics recorder to use for the reader.
+    pub fn with_metrics_recorder(mut self, recorder: Arc<dyn MetricsRecorder>) -> Self {
+        self.recorder = MetricsRecorderHelper::new(recorder, MetricLevel::default());
         self
     }
 
@@ -1319,6 +1318,7 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
             self.options,
             self.system_clock,
             self.rand,
+            self.recorder,
         )
         .await
         .map_err(crate::Error::from)?;
