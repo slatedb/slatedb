@@ -279,6 +279,7 @@ impl Reader {
         write_batch: Option<WriteBatch>,
         max_seq: Option<u64>,
     ) -> Result<Option<KeyValue>, SlateDBError> {
+        self.db_stats.get_requests.increment(1);
         let max_seq = self.prepare_max_seq(max_seq, options.durability_filter, options.dirty);
         let key_slice = key.as_ref();
         let range = BytesRange::from_slice(key_slice..=key_slice);
@@ -357,6 +358,7 @@ impl Reader {
         max_seq: Option<u64>,
         range_tracker: Option<Arc<DbIteratorRangeTracker>>,
     ) -> Result<DbIterator, SlateDBError> {
+        self.db_stats.scan_requests.increment(1);
         let max_seq = self.prepare_max_seq(max_seq, options.durability_filter, options.dirty);
         let read_ahead_blocks = self.table_store.bytes_to_blocks(options.read_ahead_bytes);
 
@@ -1190,8 +1192,8 @@ mod tests {
         let write_batch = populate_db_state(&mut test_db_state, test_case.entries).await?;
 
         // Create Reader with test clock
-        let db_metrics = crate::db_metrics::DbMetrics::new(None);
-        let db_stats = DbStats::new(&db_metrics);
+        let recorder = slatedb_common::metrics::MetricsRecorderHelper::noop();
+        let db_stats = DbStats::new(&recorder);
         let test_clock = Arc::new(MockSystemClock::new());
         let mono_clock = Arc::new(MonotonicClock::new(test_clock as Arc<dyn SystemClock>, 0));
 
@@ -1620,8 +1622,8 @@ mod tests {
         let write_batch = populate_db_state(&mut test_db_state, test_case.entries).await?;
 
         // Create Reader with test clock
-        let db_metrics = crate::db_metrics::DbMetrics::new(None);
-        let db_stats = DbStats::new(&db_metrics);
+        let recorder = slatedb_common::metrics::MetricsRecorderHelper::noop();
+        let db_stats = DbStats::new(&recorder);
         let test_clock = Arc::new(MockSystemClock::new());
         let mono_clock = Arc::new(MonotonicClock::new(test_clock as Arc<dyn SystemClock>, 0));
 
@@ -1740,8 +1742,8 @@ mod tests {
         let mut test_db_state = TestDbState::new().await;
         let write_batch = populate_db_state(&mut test_db_state, entries).await?;
 
-        let db_metrics = crate::db_metrics::DbMetrics::new(None);
-        let db_stats = DbStats::new(&db_metrics);
+        let recorder = slatedb_common::metrics::MetricsRecorderHelper::noop();
+        let db_stats = DbStats::new(&recorder);
         let reader = build_reader(&test_db_state, db_stats, false).await;
 
         // when/then: get key1 should have expire_ts
@@ -1787,8 +1789,8 @@ mod tests {
         let mut test_db_state = TestDbState::new().await;
         let write_batch = populate_db_state(&mut test_db_state, entries).await?;
 
-        let db_metrics = crate::db_metrics::DbMetrics::new(None);
-        let db_stats = DbStats::new(&db_metrics);
+        let recorder = slatedb_common::metrics::MetricsRecorderHelper::noop();
+        let db_stats = DbStats::new(&recorder);
         let reader = build_reader(&test_db_state, db_stats, false).await;
 
         // when: scanning all keys
@@ -1850,8 +1852,8 @@ mod tests {
         let mut test_db_state = TestDbState::new().await;
         let write_batch = populate_db_state(&mut test_db_state, entries).await?;
 
-        let db_metrics = crate::db_metrics::DbMetrics::new(None);
-        let db_stats = DbStats::new(&db_metrics);
+        let recorder = slatedb_common::metrics::MetricsRecorderHelper::noop();
+        let db_stats = DbStats::new(&recorder);
         let reader = build_reader(&test_db_state, db_stats, true).await;
 
         // when: reading the merged key
@@ -1890,8 +1892,8 @@ mod tests {
         let mut test_db_state = TestDbState::new().await;
         let write_batch = populate_db_state(&mut test_db_state, entries).await?;
 
-        let db_metrics = crate::db_metrics::DbMetrics::new(None);
-        let db_stats = DbStats::new(&db_metrics);
+        let recorder = slatedb_common::metrics::MetricsRecorderHelper::noop();
+        let db_stats = DbStats::new(&recorder);
         let reader = build_reader(&test_db_state, db_stats, true).await;
 
         // when: reading the merged key

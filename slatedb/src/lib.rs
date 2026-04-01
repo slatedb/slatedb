@@ -77,7 +77,6 @@ pub mod db_stats;
 pub mod manifest;
 pub mod seq_tracker;
 pub mod size_tiered_compaction;
-pub mod stats;
 
 mod batch;
 mod batch_write;
@@ -102,7 +101,6 @@ mod comparable_range;
 mod db;
 mod db_common;
 mod db_iter;
-mod db_metrics;
 mod db_read;
 mod db_reader;
 mod db_snapshot;

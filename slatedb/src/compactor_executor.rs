@@ -273,7 +273,7 @@ impl TokioCompactionExecutorInner {
             None => None,
         };
         let sst_iter_options = SstIteratorOptions {
-            max_fetch_tasks: 4,
+            max_fetch_tasks: self.options.max_fetch_tasks,
             blocks_to_fetch: 256,
             cache_blocks: false, // don't clobber the cache
             eager_spawn: true,
@@ -1007,8 +1007,8 @@ mod tests {
             table_store: table_store.clone(),
             rand: Arc::new(DbRand::new(100u64)),
             stats: {
-                let db_metrics = crate::db_metrics::DbMetrics::new(None);
-                Arc::new(CompactionStats::new(&db_metrics))
+                let recorder = slatedb_common::metrics::MetricsRecorderHelper::noop();
+                Arc::new(CompactionStats::new(&recorder))
             },
             clock,
             manifest_store,
@@ -1214,8 +1214,8 @@ mod tests {
                     table_store: table_store.clone(),
                     rand: Arc::new(DbRand::new(100u64)),
                     stats: {
-                        let db_metrics = crate::db_metrics::DbMetrics::new(None);
-                        Arc::new(CompactionStats::new(&db_metrics))
+                        let recorder = slatedb_common::metrics::MetricsRecorderHelper::noop();
+                        Arc::new(CompactionStats::new(&recorder))
                     },
                     clock,
                     manifest_store,
@@ -1377,8 +1377,8 @@ mod tests {
                 table_store: table_store.clone(),
                 rand: Arc::new(DbRand::new(100u64)),
                 stats: {
-                    let db_metrics = crate::db_metrics::DbMetrics::new(None);
-                    Arc::new(CompactionStats::new(&db_metrics))
+                    let recorder = slatedb_common::metrics::MetricsRecorderHelper::noop();
+                    Arc::new(CompactionStats::new(&recorder))
                 },
                 clock,
                 manifest_store,

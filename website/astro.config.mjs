@@ -71,6 +71,10 @@ export default defineConfig({
 							link: '/docs/get-started/quickstart/',
 						},
 						{
+							label: 'Node.js Quickstart',
+							link: 'https://github.com/slatedb/slatedb/blob/main/bindings/node/README.md',
+						},
+						{
 							label: 'FAQ',
 							link: '/docs/get-started/faq/',
 						}
@@ -227,6 +231,16 @@ export default defineConfig({
 						{
 							label: 'Go',
 							link: 'https://pkg.go.dev/slatedb.io/slatedb-go/uniffi',
+							attrs: { target: '_blank' }
+						},
+						{
+							label: 'Java',
+							link: 'https://javadoc.io/doc/io.slatedb/slatedb-uniffi',
+							attrs: { target: '_blank' }
+						},
+						{
+							label: 'Node',
+							link: 'https://www.jsdocs.io/package/@slatedb/uniffi',
 							attrs: { target: '_blank' }
 						},
 						{

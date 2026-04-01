@@ -1014,6 +1014,11 @@ pub struct CompactorOptions {
     /// The maximum number of concurrent compactions to execute at once
     pub max_concurrent_compactions: usize,
 
+    /// The maximum number of concurrent tasks for fetching blocks during
+    /// compaction. Higher values can improve compaction throughput but use
+    /// more resources. The default is 4.
+    pub max_fetch_tasks: usize,
+
     /// Scheduler-specific options expressed as string key/value pairs.
     #[serde(default)]
     pub scheduler_options: HashMap<String, String>,
@@ -1030,6 +1035,7 @@ impl Default for CompactorOptions {
             manifest_update_timeout: Duration::from_secs(300),
             max_sst_size: 256 * 1024 * 1024,
             max_concurrent_compactions: 4,
+            max_fetch_tasks: 4,
             scheduler_options: HashMap::new(),
         }
     }
@@ -1046,6 +1052,7 @@ impl std::fmt::Debug for CompactorOptions {
                 "max_concurrent_compactions",
                 &self.max_concurrent_compactions,
             )
+            .field("max_fetch_tasks", &self.max_fetch_tasks)
             .field("scheduler_options", &self.scheduler_options)
             .finish()
     }

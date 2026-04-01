@@ -236,6 +236,57 @@ jobs:
       - name: Ensure Java generation does not modify tracked files
         run: git diff --exit-code -- bindings/java
 
+  bindings-node:
+    runs-on: ubuntu-latest
+    needs: tests
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Set up Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install Node package dependencies
+        run: npm --prefix bindings/node ci
+
+      - name: Install uniffi-bindgen-node-js
+        env:
+          RUSTFLAGS: ""
+        run: cargo install uniffi-bindgen-node-js
+
+      - name: Build Node package (bindings/node)
+        run: npm --prefix bindings/node run build
+
+      - name: Run Node tests (bindings/node)
+        working-directory: ./bindings/node
+        run: node --test
+
+      - name: Verify tracked Node package files are unchanged
+        run: git diff --exit-code -- bindings/node
+
+      - name: Pack Node package
+        working-directory: ./bindings/node
+        run: |
+          mkdir -p /tmp/slatedb-node-pack
+          npm pack --pack-destination /tmp/slatedb-node-pack
+
+      - name: Verify packed Node artifact layout
+        run: |
+          TARBALL="$(find /tmp/slatedb-node-pack -maxdepth 1 -name '*.tgz' | head -n 1)"
+          test -n "${TARBALL}"
+          tar -tf "${TARBALL}" | grep -Fx 'package/index.js'
+          tar -tf "${TARBALL}" | grep -Fx 'package/index.d.ts'
+          tar -tf "${TARBALL}" | grep -Fx 'package/slatedb.js'
+          tar -tf "${TARBALL}" | grep -Fx 'package/slatedb.d.ts'
+          tar -tf "${TARBALL}" | grep -Fx 'package/slatedb-ffi.js'
+          tar -tf "${TARBALL}" | grep -Fx 'package/slatedb-ffi.d.ts'
+          tar -tf "${TARBALL}" | grep -Fx 'package/runtime/ffi-types.js'
+          tar -tf "${TARBALL}" | grep -Fx 'package/prebuilds/linux-x64-gnu/libslatedb_uniffi.so'
+
   microbenchmarks:
     runs-on: ubuntu-latest
     needs: tests

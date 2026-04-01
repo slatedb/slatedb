@@ -950,7 +950,7 @@ mod tests {
             ..SsTableFormat::default()
         };
 
-        let db_metrics = crate::db_metrics::DbMetrics::new(None);
+        let recorder = slatedb_common::metrics::MetricsRecorderHelper::noop();
         let block_cache = Arc::new(MokaCache::new());
         let meta_cache = Arc::new(MokaCache::new());
 
@@ -963,7 +963,7 @@ mod tests {
 
         let wrapper = Arc::new(DbCacheWrapper::new(
             split_cache,
-            &db_metrics,
+            &recorder,
             Arc::new(DefaultSystemClock::default()),
         ));
         let ts = Arc::new(TableStore::new(
@@ -1206,7 +1206,7 @@ mod tests {
     #[tokio::test]
     async fn test_write_sst_should_write_cache() {
         let os = Arc::new(InMemory::new());
-        let db_metrics = crate::db_metrics::DbMetrics::new(None);
+        let recorder = slatedb_common::metrics::MetricsRecorderHelper::noop();
 
         let block_cache = Arc::new(TestCache::new());
         let meta_cache = Arc::new(TestCache::new());
@@ -1219,7 +1219,7 @@ mod tests {
 
         let wrapper = Arc::new(DbCacheWrapper::new(
             split_cache,
-            &db_metrics,
+            &recorder,
             Arc::new(DefaultSystemClock::default()),
         ));
         let ts = Arc::new(TableStore::new(
@@ -1260,11 +1260,11 @@ mod tests {
     #[tokio::test]
     async fn test_write_sst_should_not_write_cache() {
         let os = Arc::new(InMemory::new());
-        let db_metrics = crate::db_metrics::DbMetrics::new(None);
+        let recorder = slatedb_common::metrics::MetricsRecorderHelper::noop();
         let cache = Arc::new(TestCache::new());
         let wrapper = Arc::new(DbCacheWrapper::new(
             cache.clone(),
-            &db_metrics,
+            &recorder,
             Arc::new(DefaultSystemClock::default()),
         ));
         let ts = Arc::new(TableStore::new(
