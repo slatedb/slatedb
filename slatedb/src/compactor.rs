@@ -972,7 +972,7 @@ pub mod stats {
 
     macro_rules! compactor_stat_name {
         ($suffix:expr) => {
-            concat!("compactor", "/", $suffix)
+            concat!("slatedb.compactor.", $suffix)
         };
     }
 
