@@ -14,6 +14,7 @@
 
 use log::debug;
 
+use super::tracker::TrackerMessage;
 use super::uploader::UploadedMemtable;
 use super::FlushEpoch;
 use crate::checkpoint::CheckpointCreateResult;
@@ -22,6 +23,7 @@ use crate::db::DbInner;
 use crate::db_state::SsTableView;
 use crate::error::SlateDBError;
 use crate::manifest::store::FenceableManifest;
+use crate::utils::safe_async_channel;
 use crate::utils::safe_mpsc;
 use crate::utils::IdGenerator;
 use std::cmp;
@@ -58,19 +60,8 @@ enum ManifestWriterCommand {
     },
 }
 
-/// Event emitted by the manifest_writer.
-#[derive(Clone, Debug)]
-pub(crate) enum ManifestWriterEvent {
-    /// Durable progress advanced through a new contiguous flush frontier.
-    Flushed {
-        /// Highest contiguous flush epoch durably reflected in the manifest.
-        through_epoch: FlushEpoch,
-    },
-    /// Remote manifest changes were merged into local state.
-    ManifestRefreshed,
-}
-
 /// Result of closing the manifest writer.
+#[derive(Clone)]
 pub(crate) enum ManifestWriterCloseResult {
     /// Clean shutdown.
     Ok {
@@ -99,7 +90,6 @@ impl ManifestWriterCloseResult {
 /// Ordered L0 retirement and manifest update subsystem.
 pub(crate) struct ManifestWriter {
     commands_tx: safe_mpsc::SafeSender<ManifestWriterCommand>,
-    events_rx: safe_mpsc::SafeReceiver<ManifestWriterEvent>,
     task: Option<JoinHandle<ManifestWriterCloseResult>>,
 }
 
@@ -110,17 +100,22 @@ impl ManifestWriter {
         manifest: FenceableManifest,
         manifest_poll_interval: Duration,
         handle: &Handle,
+        tracker_tx: safe_async_channel::SafeSender<TrackerMessage>,
     ) -> Self {
         let (commands_tx, commands_rx) = safe_mpsc::unbounded_channel();
-        let (events_tx, events_rx) = safe_mpsc::unbounded_channel();
         let task = handle.spawn(
-            ManifestWriterTask::new(db, manifest, manifest_poll_interval, commands_rx, events_tx)
-                .run(),
+            ManifestWriterTask::new(
+                db,
+                manifest,
+                manifest_poll_interval,
+                commands_rx,
+                tracker_tx,
+            )
+            .run(),
         );
 
         Self {
             commands_tx,
-            events_rx,
             task: Some(task),
         }
     }
@@ -164,11 +159,6 @@ impl ManifestWriter {
             })
     }
 
-    /// Returns the shared manifest_writer event receiver.
-    pub(crate) fn events(&mut self) -> &mut safe_mpsc::SafeReceiver<ManifestWriterEvent> {
-        &mut self.events_rx
-    }
-
     /// Closes the manifest_writer.
     pub(crate) async fn close(&mut self) -> ManifestWriterCloseResult {
         self.commands_tx.close();
@@ -198,7 +188,7 @@ struct ManifestWriterTask {
     manifest: FenceableManifest,
     manifest_poll_interval: Duration,
     commands_rx: safe_mpsc::SafeReceiver<ManifestWriterCommand>,
-    events_tx: safe_mpsc::SafeSender<ManifestWriterEvent>,
+    tracker_tx: safe_async_channel::SafeSender<TrackerMessage>,
     ready: BTreeMap<FlushEpoch, UploadedMemtable>,
     next_epoch: FlushEpoch,
     durable_through: Option<(FlushEpoch, u64)>,
@@ -213,14 +203,14 @@ impl ManifestWriterTask {
         manifest: FenceableManifest,
         manifest_poll_interval: Duration,
         commands_rx: safe_mpsc::SafeReceiver<ManifestWriterCommand>,
-        events_tx: safe_mpsc::SafeSender<ManifestWriterEvent>,
+        tracker_tx: safe_async_channel::SafeSender<TrackerMessage>,
     ) -> Self {
         Self {
             db,
             manifest,
             manifest_poll_interval,
             commands_rx,
-            events_tx,
+            tracker_tx,
             durable_wal_id: None,
             pending_flushes: Vec::new(),
             ready: BTreeMap::new(),
@@ -255,11 +245,15 @@ impl ManifestWriterTask {
         let last_durable_epoch = self.durable_through.map(|(epoch, _)| epoch);
         self.fail_pending_flushes(&result, last_durable_epoch);
         self.fail_pending_checkpoints(&result);
-        match result {
+        let close_result = match result {
             Ok(()) => ManifestWriterCloseResult::Ok { last_durable_epoch },
             Err(SlateDBError::Fenced) => ManifestWriterCloseResult::Fenced { last_durable_epoch },
             Err(err) => ManifestWriterCloseResult::Err(err),
-        }
+        };
+        let _ = self
+            .tracker_tx
+            .send(TrackerMessage::ManifestWriterShutdown(close_result.clone()));
+        close_result
     }
 
     fn drain_ready_commands(
@@ -597,7 +591,7 @@ impl ManifestWriterTask {
         self.manifest.refresh().await?;
         let remote_dirty = self.manifest.prepare_dirty()?;
         self.merge_remote_manifest(remote_dirty);
-        let _ = self.events_tx.send(ManifestWriterEvent::ManifestRefreshed);
+        let _ = self.tracker_tx.send(TrackerMessage::ManifestRefreshed);
         Ok(())
     }
 
@@ -653,8 +647,8 @@ impl ManifestWriterTask {
             let _ = checkpoint.sender.send(Ok(result));
         }
         let _ = self
-            .events_tx
-            .send(ManifestWriterEvent::Flushed { through_epoch });
+            .tracker_tx
+            .send(TrackerMessage::FlushComplete { through_epoch });
         Ok(())
     }
 
@@ -744,7 +738,7 @@ struct PendingCheckpoint {
 mod tests {
     use super::{
         FlushEpoch, ManifestWriter, ManifestWriterCloseResult, ManifestWriterCommand,
-        ManifestWriterEvent,
+        TrackerMessage,
     };
     use crate::config::{CheckpointOptions, Settings};
     use crate::db::DbInner;
@@ -757,6 +751,7 @@ mod tests {
     use crate::rand::DbRand;
     use crate::tablestore::TableStore;
     use crate::types::RowEntry;
+    use crate::utils::safe_async_channel;
     use crate::utils::IdGenerator;
     use fail_parallel::FailPointRegistry;
     use object_store::memory::InMemory;
@@ -772,34 +767,35 @@ mod tests {
     use tokio::sync::oneshot;
     use tokio::time::timeout;
 
-    async fn assert_no_flush_event(manifest_writer: &mut ManifestWriter, duration: Duration) {
+    async fn assert_no_flush_event(
+        tracker_rx: &safe_async_channel::SafeReceiver<TrackerMessage>,
+        duration: Duration,
+    ) {
         let deadline = tokio::time::Instant::now() + duration;
         loop {
-            match timeout(
-                deadline - tokio::time::Instant::now(),
-                manifest_writer.events().recv(),
-            )
-            .await
-            {
+            match timeout(deadline - tokio::time::Instant::now(), tracker_rx.recv()).await {
                 Err(_) => return, // timed out — no flush event, as expected
-                Ok(Some(ManifestWriterEvent::ManifestRefreshed)) => continue,
-                Ok(Some(ManifestWriterEvent::Flushed { .. })) => {
+                Ok(Some(TrackerMessage::ManifestRefreshed)) => continue,
+                Ok(Some(TrackerMessage::FlushComplete { .. })) => {
                     panic!("unexpected flushed event")
                 }
-                Ok(None) => panic!("manifest_writer event channel closed"),
+                Ok(None) => panic!("tracker channel closed"),
+                Ok(Some(_)) => continue,
             }
         }
     }
 
-    async fn expect_flushed(manifest_writer: &mut ManifestWriter) -> FlushEpoch {
+    async fn expect_flushed(
+        tracker_rx: &safe_async_channel::SafeReceiver<TrackerMessage>,
+    ) -> FlushEpoch {
         loop {
-            let event = timeout(Duration::from_secs(5), manifest_writer.events().recv())
+            let msg = timeout(Duration::from_secs(5), tracker_rx.recv())
                 .await
                 .expect("timed out waiting for flushed event")
-                .expect("manifest_writer event channel closed");
-            match event {
-                ManifestWriterEvent::Flushed { through_epoch } => return through_epoch,
-                ManifestWriterEvent::ManifestRefreshed => continue,
+                .expect("tracker channel closed");
+            match msg {
+                TrackerMessage::FlushComplete { through_epoch } => return through_epoch,
+                _ => continue,
             }
         }
     }
@@ -950,15 +946,17 @@ mod tests {
         .await;
         let uploaded = next_uploaded_memtable(&harness, 1, b"k1", b"v1", 1).await;
 
+        let (tracker_tx, tracker_rx) = safe_async_channel::unbounded_channel();
         let mut manifest_writer = ManifestWriter::start(
             Arc::clone(&harness.inner),
             harness.manifest,
             Duration::from_secs(3600),
             &Handle::current(),
+            tracker_tx,
         );
         manifest_writer.notify_uploaded(uploaded).await.unwrap();
 
-        let through_epoch = expect_flushed(&mut manifest_writer).await;
+        let through_epoch = expect_flushed(&tracker_rx).await;
         assert_eq!(through_epoch, FlushEpoch(1));
 
         assert!(matches!(
@@ -977,17 +975,19 @@ mod tests {
         let uploaded1 = next_uploaded_memtable(&harness, 1, b"k1", b"v1", 1).await;
         let uploaded2 = next_uploaded_memtable(&harness, 2, b"k2", b"v2", 2).await;
 
+        let (tracker_tx, tracker_rx) = safe_async_channel::unbounded_channel();
         let mut manifest_writer = ManifestWriter::start(
             Arc::clone(&harness.inner),
             harness.manifest,
             Duration::from_secs(3600),
             &Handle::current(),
+            tracker_tx,
         );
         manifest_writer.notify_uploaded(uploaded2).await.unwrap();
-        assert_no_flush_event(&mut manifest_writer, Duration::from_millis(100)).await;
+        assert_no_flush_event(&tracker_rx, Duration::from_millis(100)).await;
 
         manifest_writer.notify_uploaded(uploaded1).await.unwrap();
-        let through_epoch = expect_flushed(&mut manifest_writer).await;
+        let through_epoch = expect_flushed(&tracker_rx).await;
         assert_eq!(through_epoch, FlushEpoch(2));
 
         assert!(matches!(
@@ -1006,11 +1006,13 @@ mod tests {
         let before =
             latest_manifest_checkpoint_count(&harness.path, Arc::clone(&harness.object_store))
                 .await;
+        let (tracker_tx, tracker_rx) = safe_async_channel::unbounded_channel();
         let mut manifest_writer = ManifestWriter::start(
             Arc::clone(&harness.inner),
             harness.manifest,
             Duration::from_secs(3600),
             &Handle::current(),
+            tracker_tx,
         );
 
         let (tx, rx) = tokio::sync::oneshot::channel();
@@ -1047,11 +1049,13 @@ mod tests {
         let before =
             latest_manifest_checkpoint_count(&harness.path, Arc::clone(&harness.object_store))
                 .await;
+        let (tracker_tx, tracker_rx) = safe_async_channel::unbounded_channel();
         let mut manifest_writer = ManifestWriter::start(
             Arc::clone(&harness.inner),
             harness.manifest,
             Duration::from_secs(3600),
             &Handle::current(),
+            tracker_tx,
         );
 
         let (tx, rx) = oneshot::channel();
@@ -1065,11 +1069,11 @@ mod tests {
             .unwrap();
 
         tokio::task::yield_now().await;
-        assert_no_flush_event(&mut manifest_writer, Duration::from_millis(100)).await;
+        assert_no_flush_event(&tracker_rx, Duration::from_millis(100)).await;
 
         manifest_writer.notify_uploaded(uploaded).await.unwrap();
 
-        let through_epoch = expect_flushed(&mut manifest_writer).await;
+        let through_epoch = expect_flushed(&tracker_rx).await;
         assert_eq!(through_epoch, FlushEpoch(1));
 
         let checkpoint = rx.await.unwrap().unwrap();
@@ -1094,21 +1098,27 @@ mod tests {
         .await;
         let uploaded = next_uploaded_memtable(&harness, 1, b"k1", b"v1", 1).await;
 
+        let (tracker_tx, tracker_rx) = safe_async_channel::unbounded_channel();
         let mut manifest_writer = ManifestWriter::start(
             Arc::clone(&harness.inner),
             harness.manifest,
             Duration::from_secs(3600),
             &Handle::current(),
+            tracker_tx,
         );
 
         let _fence = load_writer_manifest(&harness.path, Arc::clone(&harness.object_store)).await;
         manifest_writer.notify_uploaded(uploaded).await.unwrap();
 
-        // The manifest writer exits on fence — events channel closes.
-        let event = timeout(Duration::from_secs(5), manifest_writer.events().recv())
+        // The manifest writer exits on fence — sends shutdown.
+        let msg = timeout(Duration::from_secs(5), tracker_rx.recv())
             .await
+            .unwrap()
             .unwrap();
-        assert!(event.is_none());
+        assert!(matches!(
+            msg,
+            TrackerMessage::ManifestWriterShutdown(ManifestWriterCloseResult::Fenced { .. })
+        ));
 
         // close() returns Fenced.
         assert!(matches!(

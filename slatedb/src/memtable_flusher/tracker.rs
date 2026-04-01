@@ -19,10 +19,10 @@ use crate::config::CheckpointOptions;
 use crate::db::DbInner;
 use crate::error::SlateDBError;
 use crate::memtable_flusher::manifest_writer::{
-    FlushResult, ManifestWriter, ManifestWriterCloseResult, ManifestWriterEvent,
+    FlushResult, ManifestWriter, ManifestWriterCloseResult,
 };
 use crate::memtable_flusher::uploader::{UploadJob, UploadedMemtable, Uploader};
-use crate::memtable_flusher::{FlushCommand, FlushTarget};
+use crate::memtable_flusher::FlushTarget;
 use crate::oracle::Oracle;
 use crate::utils::safe_async_channel;
 use crate::utils::IdGenerator;
@@ -30,12 +30,39 @@ use fail_parallel::fail_point;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use tokio::sync::oneshot;
+use tokio_util::sync::CancellationToken;
+
+/// Unified message type for the flush tracker's event loop.
+pub(super) enum TrackerMessage {
+    /// Flush request from an external caller.
+    FlushRequest {
+        target: FlushTarget,
+        sender: Option<oneshot::Sender<Result<FlushResult, SlateDBError>>>,
+    },
+    /// Checkpoint creation request from an external caller.
+    CheckpointRequest {
+        target: FlushTarget,
+        options: CheckpointOptions,
+        sender: oneshot::Sender<Result<CheckpointCreateResult, SlateDBError>>,
+    },
+    /// An upload worker completed successfully.
+    UploadComplete(UploadedMemtable),
+    /// The uploader subsystem exited.
+    UploaderShutdown(Result<(), SlateDBError>),
+    /// Durable progress advanced through a new contiguous flush frontier.
+    FlushComplete { through_epoch: FlushEpoch },
+    /// Remote manifest changes were merged into local state.
+    ManifestRefreshed,
+    /// The manifest writer subsystem exited.
+    ManifestWriterShutdown(ManifestWriterCloseResult),
+}
 
 pub(super) struct FlushTracker {
     inner: Arc<DbInner>,
     uploader: Uploader,
     manifest_writer: ManifestWriter,
-    commands: safe_async_channel::SafeReceiver<FlushCommand>,
+    messages: safe_async_channel::SafeReceiver<TrackerMessage>,
+    cancellation_token: CancellationToken,
     next_epoch: FlushEpoch,
     tracked_imms: VecDeque<TrackedImm>,
 }
@@ -45,13 +72,15 @@ impl FlushTracker {
         inner: Arc<DbInner>,
         uploader: Uploader,
         manifest_writer: ManifestWriter,
-        commands: safe_async_channel::SafeReceiver<FlushCommand>,
+        messages: safe_async_channel::SafeReceiver<TrackerMessage>,
+        cancellation_token: CancellationToken,
     ) -> Self {
         Self {
             inner,
             uploader,
             manifest_writer,
-            commands,
+            messages,
+            cancellation_token,
             next_epoch: FlushEpoch(1),
             tracked_imms: VecDeque::new(),
         }
@@ -69,84 +98,78 @@ impl FlushTracker {
 
     async fn run_once(&mut self) -> Result<bool, SlateDBError> {
         tokio::select! {
-            maybe_command = self.commands.recv() => {
-                if let Some(command) = maybe_command {
-                    self.handle_command(command).await
+            _ = self.cancellation_token.cancelled() => {
+                Ok(false)
+            }
+            maybe_message = self.messages.recv() => {
+                if let Some(message) = maybe_message {
+                    self.handle_message(message).await?;
+                    Ok(true)
                 } else {
                     Ok(false)
                 }
             }
-            maybe_uploaded = self.uploader.events().recv() => {
-                if let Some(uploaded) = maybe_uploaded {
-                    self.handle_uploaded(uploaded).await?;
-                    Ok(true)
-                } else {
-                    Err(SlateDBError::Closed)
-                }
-            }
-            maybe_event = self.manifest_writer.events().recv() => {
-                if let Some(event) = maybe_event {
-                    self.handle_manifest_writer_event(event).await?;
-                    Ok(true)
-                } else {
-                    Err(SlateDBError::Closed)
-                }
-            }
         }
     }
 
-    async fn handle_command(&mut self, command: FlushCommand) -> Result<bool, SlateDBError> {
-        match command {
-            FlushCommand::Flush { target, sender } => {
-                fail_point!(
-                    Arc::clone(&self.inner.fp_registry),
-                    "flush-memtable-to-l0",
-                    |_| { Ok(true) }
-                );
-                self.register_new_imm_memtables();
-                self.handle_flush_request(target, sender)?;
-                self.reconcile_and_dispatch().await?;
-                Ok(true)
+    async fn handle_message(&mut self, message: TrackerMessage) -> Result<(), SlateDBError> {
+        match message {
+            TrackerMessage::FlushRequest { target, sender } => {
+                self.handle_flush_request(target, sender).await
             }
-            FlushCommand::CreateCheckpoint {
+            TrackerMessage::CheckpointRequest {
                 target,
                 options,
                 sender,
             } => {
-                self.handle_checkpoint_request(target, options, sender)?;
-                self.reconcile_and_dispatch().await?;
-                Ok(true)
+                self.handle_checkpoint_request(target, options, sender)
+                    .await
             }
+            TrackerMessage::UploadComplete(uploaded) => self.handle_uploaded(uploaded).await,
+            TrackerMessage::UploaderShutdown(_result) => Err(SlateDBError::Closed),
+            TrackerMessage::FlushComplete { through_epoch } => {
+                self.retire_through(through_epoch);
+                self.reconcile_and_dispatch().await
+            }
+            TrackerMessage::ManifestRefreshed => self.reconcile_and_dispatch().await,
+            TrackerMessage::ManifestWriterShutdown(_result) => Err(SlateDBError::Closed),
         }
     }
 
-    fn handle_flush_request(
+    async fn handle_flush_request(
         &mut self,
         target: FlushTarget,
         sender: Option<oneshot::Sender<Result<FlushResult, SlateDBError>>>,
     ) -> Result<(), SlateDBError> {
+        fail_point!(
+            Arc::clone(&self.inner.fp_registry),
+            "flush-memtable-to-l0",
+            |_| { Ok(()) }
+        );
+        self.register_new_imm_memtables();
         if let Some(sender) = sender {
             let through_epoch = self.resolve_target(target);
             self.manifest_writer.send_flush(through_epoch, sender)?;
         }
-        Ok(())
+        self.dispatch_ready_memtables().await
     }
 
-    fn handle_checkpoint_request(
+    async fn handle_checkpoint_request(
         &mut self,
         target: FlushTarget,
         options: CheckpointOptions,
         sender: oneshot::Sender<Result<CheckpointCreateResult, SlateDBError>>,
     ) -> Result<(), SlateDBError> {
+        self.register_new_imm_memtables();
         let through_epoch = self.resolve_target(target);
         self.manifest_writer
-            .send_checkpoint(through_epoch, options, sender)
+            .send_checkpoint(through_epoch, options, sender)?;
+        self.dispatch_ready_memtables().await
     }
 
     /// Resolves a flush target to the epoch that must become durable,
     /// or `None` for immediate resolution.
-    fn resolve_target(&mut self, target: FlushTarget) -> Option<FlushEpoch> {
-        self.register_new_imm_memtables();
+    fn resolve_target(&self, target: FlushTarget) -> Option<FlushEpoch> {
         match target {
             FlushTarget::CurrentDurable => None,
             FlushTarget::BestEffort => self
@@ -168,19 +191,6 @@ impl FlushTracker {
         self.set_tracked_state(uploaded.epoch, TrackedImmState::WritingManifest);
         self.manifest_writer.notify_uploaded(uploaded).await?;
         Ok(())
-    }
-
-    async fn handle_manifest_writer_event(
-        &mut self,
-        event: ManifestWriterEvent,
-    ) -> Result<(), SlateDBError> {
-        match event {
-            ManifestWriterEvent::Flushed { through_epoch } => {
-                self.retire_through(through_epoch);
-                self.reconcile_and_dispatch().await
-            }
-            ManifestWriterEvent::ManifestRefreshed => self.reconcile_and_dispatch().await,
-        }
     }
 
     /// Check for newly frozen immutable memtables and dispatch any that are ready.
@@ -297,9 +307,7 @@ impl FlushTracker {
         let uploader_err = self.uploader.close(false).await.err();
         let writer_close = self.manifest_writer.close().await;
         self.cleanup_orphaned_uploads(&writer_close).await;
-        let err = Self::refined_error([err, writer_close.err(), uploader_err].into_iter());
-        self.commands.close(err.clone());
-        err
+        Self::refined_error([err, writer_close.err(), uploader_err].into_iter())
     }
 
     /// Pick the most informative error from multiple shutdown sources.

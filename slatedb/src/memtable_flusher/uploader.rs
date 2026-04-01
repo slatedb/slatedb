@@ -11,13 +11,14 @@
 //! - flush waiter bookkeeping
 //! - timeout enforcement
 
+use super::tracker::TrackerMessage;
 use super::FlushEpoch;
 use crate::db::DbInner;
 use crate::db_state::{SsTableHandle, SsTableId};
 use crate::error::SlateDBError;
 use crate::format::sst::EncodedSsTable;
 use crate::mem_table::ImmutableMemtable;
-use crate::utils::{safe_async_channel, safe_mpsc};
+use crate::utils::safe_async_channel;
 use log::{error, info};
 use std::sync::Arc;
 use std::time::Duration;
@@ -82,7 +83,6 @@ impl UploadedMemtable {
 
 pub(crate) struct Uploader {
     jobs_tx: safe_async_channel::SafeSender<UploadJob>,
-    events_rx: safe_mpsc::SafeReceiver<UploadedMemtable>,
     aborted: CancellationToken,
     supervisor: Option<JoinHandle<Result<(), SlateDBError>>>,
 }
@@ -98,25 +98,28 @@ impl Uploader {
         worker_count: usize,
         retry_backoff: Duration,
         handle: &Handle,
+        tracker_tx: safe_async_channel::SafeSender<TrackerMessage>,
     ) -> Self {
         let (jobs_tx, jobs_rx) = safe_async_channel::unbounded_channel();
-        let (events_tx, events_rx) = safe_mpsc::unbounded_channel::<UploadedMemtable>();
         let aborted = CancellationToken::new();
         let mut workers = JoinSet::new();
 
         for worker_id in 0..worker_count {
             let worker = UploadWorker::new(Arc::clone(&db), aborted.clone(), retry_backoff);
             let jobs = jobs_rx.clone();
-            let events = events_tx.clone();
-            workers.spawn(async move { worker.run(worker_id, jobs, events).await });
+            let tracker = tracker_tx.clone();
+            workers.spawn(async move { worker.run(worker_id, jobs, tracker).await });
         }
 
-        drop(events_tx);
-        let supervisor = handle.spawn(Self::run_supervisor(workers, jobs_rx, aborted.clone()));
+        let supervisor = handle.spawn(Self::run_supervisor(
+            workers,
+            jobs_rx,
+            aborted.clone(),
+            tracker_tx,
+        ));
 
         Self {
             jobs_tx,
-            events_rx,
             aborted,
             supervisor: Some(supervisor),
         }
@@ -128,15 +131,6 @@ impl Uploader {
     /// channel has been closed.
     pub(crate) async fn submit(&self, job: UploadJob) -> Result<(), SlateDBError> {
         self.jobs_tx.send(job)
-    }
-
-    /// Returns the shared uploader event receiver.
-    ///
-    /// The caller is expected to drive progress by consuming events until
-    /// aborted. This returns a mutable receiver because Tokio's unbounded
-    /// receiver is single-consumer.
-    pub(crate) fn events(&mut self) -> &mut safe_mpsc::SafeReceiver<UploadedMemtable> {
-        &mut self.events_rx
     }
 
     /// Closes the uploader.
@@ -169,20 +163,23 @@ impl Uploader {
         mut workers: JoinSet<Result<(), SlateDBError>>,
         jobs_rx: safe_async_channel::SafeReceiver<UploadJob>,
         aborted: CancellationToken,
+        tracker_tx: safe_async_channel::SafeSender<TrackerMessage>,
     ) -> Result<(), SlateDBError> {
-        loop {
+        let result = loop {
             tokio::select! {
                 _ = aborted.cancelled() => {
-                    return Self::drain_workers(workers, jobs_rx, Ok(())).await;
+                    break Self::drain_workers(workers, jobs_rx, Ok(())).await;
                 }
                 maybe_result = workers.join_next() => {
                     if let Some(result) = maybe_result {
                         let resolved_result = Self::resolve(result);
-                        return Self::drain_workers(workers, jobs_rx, resolved_result).await;
+                        break Self::drain_workers(workers, jobs_rx, resolved_result).await;
                     }
                 }
             }
-        }
+        };
+        let _ = tracker_tx.send(TrackerMessage::UploaderShutdown(result.clone()));
+        result
     }
 
     fn resolve(result: Result<Result<(), SlateDBError>, JoinError>) -> Result<(), SlateDBError> {
@@ -235,10 +232,10 @@ impl UploadWorker {
         self,
         worker_id: usize,
         jobs: safe_async_channel::SafeReceiver<UploadJob>,
-        events: safe_mpsc::SafeSender<UploadedMemtable>,
+        tracker_tx: safe_async_channel::SafeSender<TrackerMessage>,
     ) -> Result<(), SlateDBError> {
         info!("l0 uploader worker started [worker_id={}]", worker_id);
-        let result = self.recv_loop(jobs, events).await;
+        let result = self.recv_loop(jobs, tracker_tx).await;
         match &result {
             Ok(()) => info!("l0 uploader worker stopped [worker_id={}]", worker_id),
             Err(err) => error!(
@@ -252,7 +249,7 @@ impl UploadWorker {
     async fn recv_loop(
         &self,
         jobs: safe_async_channel::SafeReceiver<UploadJob>,
-        events: safe_mpsc::SafeSender<UploadedMemtable>,
+        tracker_tx: safe_async_channel::SafeSender<TrackerMessage>,
     ) -> Result<(), SlateDBError> {
         loop {
             let idle_start = self.db.system_clock.now();
@@ -277,9 +274,7 @@ impl UploadWorker {
                         .map(|d| d.as_millis() as u64)
                         .unwrap_or(0);
                     self.db.db_stats.l0_upload_busy_millis.increment(busy_elapsed);
-                    if events.send(success).is_err() {
-                        return Ok(());
-                    }
+                    let _ = tracker_tx.send(TrackerMessage::UploadComplete(success));
                 }
             }
         }
@@ -333,7 +328,7 @@ impl UploadWorker {
 
 #[cfg(test)]
 mod tests {
-    use super::{FlushEpoch, UploadJob, Uploader};
+    use super::{FlushEpoch, TrackerMessage, UploadJob, Uploader};
     use crate::config::Settings;
     use crate::db::DbInner;
     use crate::db_state::{ManifestCore, SsTableId};
@@ -344,6 +339,7 @@ mod tests {
     use crate::rand::DbRand;
     use crate::tablestore::TableStore;
     use crate::types::RowEntry;
+    use crate::utils::safe_async_channel;
     use crate::utils::IdGenerator;
     use fail_parallel::FailPointRegistry;
     use object_store::memory::InMemory;
@@ -426,18 +422,23 @@ mod tests {
         .await;
         let job = next_upload_job(&db, 1, b"key", b"value", 1);
 
+        let (tracker_tx, tracker_rx) = safe_async_channel::unbounded_channel();
         let mut uploader = Uploader::start(
             Arc::clone(&db),
             1,
             Duration::from_millis(1),
             &Handle::current(),
+            tracker_tx,
         );
         uploader.submit(job).await.unwrap();
 
-        let event = timeout(Duration::from_secs(5), uploader.events().recv())
+        let msg = timeout(Duration::from_secs(5), tracker_rx.recv())
             .await
             .unwrap()
             .unwrap();
+        let TrackerMessage::UploadComplete(event) = msg else {
+            panic!("expected UploadComplete");
+        };
         assert_eq!(event.epoch, FlushEpoch(1));
         assert_eq!(event.last_seq, 1);
 
@@ -456,18 +457,23 @@ mod tests {
         let db = setup_db("/tmp/test_parallel_l0_flush_uploader_retry", fp_registry).await;
         let job = next_upload_job(&db, 7, b"key", b"value", 1);
 
+        let (tracker_tx, tracker_rx) = safe_async_channel::unbounded_channel();
         let mut uploader = Uploader::start(
             Arc::clone(&db),
             1,
             Duration::from_millis(1),
             &Handle::current(),
+            tracker_tx,
         );
         uploader.submit(job).await.unwrap();
 
-        let event = timeout(Duration::from_secs(5), uploader.events().recv())
+        let msg = timeout(Duration::from_secs(5), tracker_rx.recv())
             .await
             .unwrap()
             .unwrap();
+        let TrackerMessage::UploadComplete(event) = msg else {
+            panic!("expected UploadComplete");
+        };
         assert_eq!(event.epoch, FlushEpoch(7));
 
         uploader.close(true).await.unwrap();
@@ -500,19 +506,22 @@ mod tests {
         let sst_id = SsTableId::Compacted(db.rand.rng().gen_ulid(db.system_clock.as_ref()));
         let job = UploadJob::new(FlushEpoch(3), imm_memtable, sst_id);
 
+        let (tracker_tx, tracker_rx) = safe_async_channel::unbounded_channel();
         let mut uploader = Uploader::start(
             Arc::clone(&db),
             1,
             Duration::from_millis(1),
             &Handle::current(),
+            tracker_tx,
         );
         uploader.submit(job).await.unwrap();
 
-        // The worker fails and the events channel closes (recv returns None).
-        let event = timeout(Duration::from_secs(5), uploader.events().recv())
+        // The worker fails and sends UploaderShutdown.
+        let msg = timeout(Duration::from_secs(5), tracker_rx.recv())
             .await
+            .unwrap()
             .unwrap();
-        assert!(event.is_none());
+        assert!(matches!(msg, TrackerMessage::UploaderShutdown(Err(_))));
 
         // close() returns the worker's specific error.
         let close_result = uploader.close(false).await;
@@ -530,11 +539,13 @@ mod tests {
         let job1 = next_upload_job(&db, 1, b"key1", b"value1", 1);
         let job2 = next_upload_job(&db, 2, b"key2", b"value2", 2);
 
+        let (tracker_tx, tracker_rx) = safe_async_channel::unbounded_channel();
         let mut uploader = Uploader::start(
             Arc::clone(&db),
             1,
             Duration::from_millis(1),
             &Handle::current(),
+            tracker_tx,
         );
         uploader.submit(job1).await.unwrap();
         uploader.submit(job2).await.unwrap();
@@ -542,8 +553,16 @@ mod tests {
         uploader.close(true).await.unwrap();
 
         let mut uploaded_epochs = Vec::new();
-        while let Some(success) = uploader.events().recv().await {
-            uploaded_epochs.push(success.epoch);
+        // Drain all upload completions. After graceful close, the UploaderShutdown
+        // message marks the end of upload events.
+        while let Some(msg) = tracker_rx.recv().await {
+            match msg {
+                TrackerMessage::UploadComplete(uploaded) => {
+                    uploaded_epochs.push(uploaded.epoch);
+                }
+                TrackerMessage::UploaderShutdown(_) => break,
+                _ => {}
+            }
         }
 
         assert_eq!(uploaded_epochs, vec![FlushEpoch(1), FlushEpoch(2)]);
@@ -577,19 +596,22 @@ mod tests {
         let sst_id = SsTableId::Compacted(db.rand.rng().gen_ulid(db.system_clock.as_ref()));
         let bad_job = UploadJob::new(FlushEpoch(1), imm_memtable, sst_id);
 
+        let (tracker_tx, tracker_rx) = safe_async_channel::unbounded_channel();
         let mut uploader = Uploader::start(
             Arc::clone(&db),
             1,
             Duration::from_millis(1),
             &Handle::current(),
+            tracker_tx,
         );
         uploader.submit(bad_job).await.unwrap();
 
-        // The worker fails and the events channel closes.
-        let event = timeout(Duration::from_secs(5), uploader.events().recv())
+        // The worker fails and sends UploaderShutdown.
+        let msg = timeout(Duration::from_secs(5), tracker_rx.recv())
             .await
+            .unwrap()
             .unwrap();
-        assert!(event.is_none());
+        assert!(matches!(msg, TrackerMessage::UploaderShutdown(Err(_))));
 
         // A subsequent submit should fail with the worker's error, not a
         // generic Closed error.

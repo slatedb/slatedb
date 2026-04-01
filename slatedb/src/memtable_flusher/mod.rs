@@ -26,6 +26,7 @@ use std::sync::Arc;
 use tokio::runtime::Handle;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 
 /// Monotonic ordering token assigned by the parallel L0 memtable flusher.
 ///
@@ -51,44 +52,30 @@ pub(crate) enum FlushTarget {
     All,
 }
 
-pub(crate) enum FlushCommand {
-    Flush {
-        target: FlushTarget,
-        sender: Option<oneshot::Sender<Result<FlushResult, SlateDBError>>>,
-    },
-    CreateCheckpoint {
-        target: FlushTarget,
-        options: CheckpointOptions,
-        sender: oneshot::Sender<Result<CheckpointCreateResult, SlateDBError>>,
-    },
-}
-
 /// Parallel L0 memtable flusher subsystem.
-///
-/// Uses `safe_async_channel` for commands because its `close()` takes `&self`,
-/// avoiding a circular dependency with `DbInner` (which holds the flusher
-/// behind `Arc`).
 pub(crate) struct MemtableFlusher {
-    commands_tx: safe_async_channel::SafeSender<FlushCommand>,
-    commands_rx: Mutex<Option<safe_async_channel::SafeReceiver<FlushCommand>>>,
+    messages_tx: safe_async_channel::SafeSender<tracker::TrackerMessage>,
+    messages_rx: Mutex<Option<safe_async_channel::SafeReceiver<tracker::TrackerMessage>>>,
     tracker_handle: Mutex<Option<JoinHandle<Result<(), SlateDBError>>>>,
+    cancellation_token: CancellationToken,
 }
 
 impl MemtableFlusher {
     /// Creates a new memtable flusher.
     /// Call [`start`](Self::start) to spawn the background task.
     pub(crate) fn new() -> Self {
-        let (commands_tx, commands_rx) = safe_async_channel::unbounded_channel();
+        let (messages_tx, messages_rx) = safe_async_channel::unbounded_channel();
         Self {
-            commands_tx,
-            commands_rx: Mutex::new(Some(commands_rx)),
+            messages_tx,
+            messages_rx: Mutex::new(Some(messages_rx)),
             tracker_handle: Mutex::new(None),
+            cancellation_token: CancellationToken::new(),
         }
     }
 
     pub(crate) fn start(&self, inner: Arc<DbInner>, manifest: FenceableManifest, handle: &Handle) {
-        let commands_rx = self
-            .commands_rx
+        let messages_rx = self
+            .messages_rx
             .lock()
             .take()
             .expect("start called more than once");
@@ -97,15 +84,25 @@ impl MemtableFlusher {
             inner.settings.l0_flush_parallelism,
             inner.settings.manifest_poll_interval,
             handle,
+            self.messages_tx.clone(),
         );
         let manifest_writer = ManifestWriter::start(
             Arc::clone(&inner),
             manifest,
             inner.settings.manifest_poll_interval,
             handle,
+            self.messages_tx.clone(),
         );
-        let tracker_handle =
-            handle.spawn(FlushTracker::new(inner, uploader, manifest_writer, commands_rx).run());
+        let tracker_handle = handle.spawn(
+            FlushTracker::new(
+                inner,
+                uploader,
+                manifest_writer,
+                messages_rx,
+                self.cancellation_token.clone(),
+            )
+            .run(),
+        );
         *self.tracker_handle.lock() = Some(tracker_handle);
     }
 
@@ -126,7 +123,8 @@ impl MemtableFlusher {
         target: FlushTarget,
         sender: Option<oneshot::Sender<Result<FlushResult, SlateDBError>>>,
     ) -> Result<(), SlateDBError> {
-        self.send_command(FlushCommand::Flush { target, sender })
+        self.messages_tx
+            .send(tracker::TrackerMessage::FlushRequest { target, sender })
     }
 
     /// Creates a checkpoint using the memtable flusher's flush semantics.
@@ -136,22 +134,18 @@ impl MemtableFlusher {
         options: CheckpointOptions,
     ) -> Result<CheckpointCreateResult, SlateDBError> {
         let (tx, rx) = oneshot::channel();
-        self.send_command(FlushCommand::CreateCheckpoint {
-            target,
-            options,
-            sender: tx,
-        })?;
+        self.messages_tx
+            .send(tracker::TrackerMessage::CheckpointRequest {
+                target,
+                options,
+                sender: tx,
+            })?;
         rx.await.map_err(SlateDBError::ReadChannelError)?
-    }
-
-    fn send_command(&self, command: FlushCommand) -> Result<(), SlateDBError> {
-        self.commands_tx.send(command)
     }
 
     /// Closes the flusher and any owned subsystems.
     pub(crate) async fn close(&self) -> Result<(), SlateDBError> {
-        // Ignore send errors — the tracker may already be gone.
-        self.commands_tx.close();
+        self.cancellation_token.cancel();
         let tracker_handle = self.tracker_handle.lock().take();
         if let Some(tracker_handle) = tracker_handle {
             match tracker_handle.await {
