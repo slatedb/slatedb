@@ -791,6 +791,71 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn uploader_shutdown_propagates_to_flush_waiter() {
+        let harness = setup_harness(
+            "/tmp/test_parallel_l0_flush_flusher_uploader_shutdown",
+            Settings::default(),
+            Arc::new(FailPointRegistry::new()),
+        )
+        .await;
+        // freeze a merge entry with no merge operator → fatal build error
+        freeze_merge_imm(&harness, b"k1", b"merge", 1, 31);
+        let flusher = start_flusher(harness);
+
+        // The flush should fail because the uploader shuts down.
+        let flush_result = timeout(Duration::from_secs(5), flusher.flush(FlushTarget::All))
+            .await
+            .unwrap();
+        assert!(flush_result.is_err());
+
+        // close() surfaces the underlying error.
+        let close_result = flusher.close().await;
+        assert!(close_result.is_err());
+    }
+
+    #[tokio::test]
+    async fn manifest_writer_fencing_propagates_to_flush_waiter() {
+        let harness = setup_harness(
+            "/tmp/test_parallel_l0_flush_flusher_manifest_fenced",
+            Settings::default(),
+            Arc::new(FailPointRegistry::new()),
+        )
+        .await;
+        freeze_value_imm(&harness, b"k1", b"v1", 1, 11);
+
+        // Fence the manifest before starting the flusher's manifest writer.
+        let _fence = {
+            let manifest_store = Arc::new(ManifestStore::new(
+                &Path::from(harness.path.clone()),
+                Arc::clone(&harness.object_store),
+            ));
+            let stored_manifest =
+                StoredManifest::load(manifest_store, Arc::new(DefaultSystemClock::new()))
+                    .await
+                    .unwrap();
+            FenceableManifest::init_writer(
+                stored_manifest,
+                Duration::from_secs(300),
+                Arc::new(DefaultSystemClock::new()),
+            )
+            .await
+            .unwrap()
+        };
+
+        let flusher = start_flusher(harness);
+
+        // The flush should fail because the manifest writer is fenced.
+        let flush_result = timeout(Duration::from_secs(5), flusher.flush(FlushTarget::All))
+            .await
+            .unwrap();
+        assert!(flush_result.is_err());
+
+        // close() surfaces the fencing error.
+        let close_result = flusher.close().await;
+        assert!(close_result.is_err());
+    }
+
+    #[tokio::test]
     async fn should_wait_for_manifest_refresh_before_dispatching_when_l0_is_full() {
         let settings = Settings {
             l0_max_ssts: 1,
