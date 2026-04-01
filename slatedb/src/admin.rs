@@ -569,6 +569,7 @@ impl Admin {
             self.path.clone(),
             parent_path.into(),
             self.object_stores.store_of(ObjectStoreType::Main).clone(),
+            self.object_stores.store_of(ObjectStoreType::Wal).clone(),
             parent_checkpoint,
             Arc::new(FailPointRegistry::new()),
             self.system_clock.clone(),
