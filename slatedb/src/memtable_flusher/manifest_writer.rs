@@ -748,7 +748,6 @@ mod tests {
     };
     use crate::config::{CheckpointOptions, Settings};
     use crate::db::DbInner;
-    use crate::db_metrics::DbMetrics;
     use crate::db_state::{ManifestCore, SsTableId};
     use crate::format::sst::SsTableFormat;
     use crate::manifest::store::{FenceableManifest, ManifestStore, StoredManifest};
@@ -765,6 +764,7 @@ mod tests {
     use object_store::ObjectStore;
     use slatedb_common::clock::DefaultSystemClock;
     use slatedb_common::clock::SystemClock;
+    use slatedb_common::metrics::MetricsRecorderHelper;
     use std::sync::Arc;
     use std::time::Duration;
     use tokio::runtime::Handle;
@@ -817,7 +817,7 @@ mod tests {
         let settings = Settings::default();
         let system_clock: Arc<dyn SystemClock> = Arc::new(DefaultSystemClock::new());
         let rand = Arc::new(DbRand::new(42));
-        let db_metrics = DbMetrics::new(None);
+        let db_metrics = MetricsRecorderHelper::noop();
         let manifest_store = Arc::new(ManifestStore::new(
             &Path::from(path.clone()),
             Arc::clone(&object_store),

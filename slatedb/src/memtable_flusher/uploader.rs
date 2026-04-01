@@ -336,7 +336,6 @@ mod tests {
     use super::{FlushEpoch, UploadJob, Uploader};
     use crate::config::Settings;
     use crate::db::DbInner;
-    use crate::db_metrics::DbMetrics;
     use crate::db_state::{ManifestCore, SsTableId};
     use crate::error::SlateDBError;
     use crate::format::sst::SsTableFormat;
@@ -351,6 +350,7 @@ mod tests {
     use object_store::path::Path;
     use object_store::ObjectStore;
     use slatedb_common::clock::{DefaultSystemClock, SystemClock};
+    use slatedb_common::metrics::MetricsRecorderHelper;
     use std::sync::Arc;
     use std::time::Duration;
     use tokio::runtime::Handle;
@@ -361,7 +361,7 @@ mod tests {
         let settings = Settings::default();
         let system_clock: Arc<dyn SystemClock> = Arc::new(DefaultSystemClock::new());
         let rand = Arc::new(DbRand::new(42));
-        let db_metrics = DbMetrics::new(None);
+        let db_metrics = MetricsRecorderHelper::noop();
         let manifest_store = Arc::new(crate::manifest::store::ManifestStore::new(
             &Path::from(path),
             Arc::clone(&object_store),
