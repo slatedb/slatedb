@@ -279,6 +279,7 @@ impl Reader {
         write_batch: Option<WriteBatch>,
         max_seq: Option<u64>,
     ) -> Result<Option<KeyValue>, SlateDBError> {
+        self.db_stats.get_requests.increment(1);
         let max_seq = self.prepare_max_seq(max_seq, options.durability_filter, options.dirty);
         let key_slice = key.as_ref();
         let range = BytesRange::from_slice(key_slice..=key_slice);
@@ -357,6 +358,7 @@ impl Reader {
         max_seq: Option<u64>,
         range_tracker: Option<Arc<DbIteratorRangeTracker>>,
     ) -> Result<DbIterator, SlateDBError> {
+        self.db_stats.scan_requests.increment(1);
         let max_seq = self.prepare_max_seq(max_seq, options.durability_filter, options.dirty);
         let read_ahead_blocks = self.table_store.bytes_to_blocks(options.read_ahead_bytes);
 
@@ -402,11 +404,11 @@ mod tests {
     use crate::batch::WriteBatch;
     use crate::clock::MonotonicClock;
     use crate::db_state::{SortedRun, SsTableHandle, SsTableId};
+    use crate::db_status::DbStatusReporter;
     use crate::format::sst::SsTableFormat;
     use crate::manifest::SsTableView;
     use crate::object_stores::ObjectStores;
     use crate::oracle::DbReaderOracle;
-    use crate::stats::StatRegistry;
     use crate::tablestore::TableStore;
     use object_store::{memory::InMemory, path::Path, ObjectStore};
     use std::collections::HashMap;
@@ -1190,14 +1192,17 @@ mod tests {
         let write_batch = populate_db_state(&mut test_db_state, test_case.entries).await?;
 
         // Create Reader with test clock
-        let stat_registry = StatRegistry::new();
-        let db_stats = DbStats::new(&stat_registry);
+        let recorder = slatedb_common::metrics::MetricsRecorderHelper::noop();
+        let db_stats = DbStats::new(&recorder);
         let test_clock = Arc::new(MockSystemClock::new());
         let mono_clock = Arc::new(MonotonicClock::new(test_clock as Arc<dyn SystemClock>, 0));
 
         // Create Oracle with appropriate last_committed_seq
         let last_committed_seq = test_case.last_committed_seq.unwrap_or(u64::MAX);
-        let oracle = Arc::new(DbReaderOracle::new(last_committed_seq));
+        let oracle = Arc::new(DbReaderOracle::new(
+            last_committed_seq,
+            DbStatusReporter::new(0),
+        ));
 
         // Enable merge operator if the test description contains "[MERGE]"
         let merge_operator = if test_case.description.contains("[MERGE]") {
@@ -1617,14 +1622,17 @@ mod tests {
         let write_batch = populate_db_state(&mut test_db_state, test_case.entries).await?;
 
         // Create Reader with test clock
-        let stat_registry = StatRegistry::new();
-        let db_stats = DbStats::new(&stat_registry);
+        let recorder = slatedb_common::metrics::MetricsRecorderHelper::noop();
+        let db_stats = DbStats::new(&recorder);
         let test_clock = Arc::new(MockSystemClock::new());
         let mono_clock = Arc::new(MonotonicClock::new(test_clock as Arc<dyn SystemClock>, 0));
 
         // Create Oracle with appropriate last_committed_seq
         let last_committed_seq = test_case.last_committed_seq.unwrap_or(u64::MAX);
-        let oracle = Arc::new(DbReaderOracle::new(last_committed_seq));
+        let oracle = Arc::new(DbReaderOracle::new(
+            last_committed_seq,
+            DbStatusReporter::new(0),
+        ));
 
         // Enable merge operator if the test description contains "[MERGE"
         let merge_operator = if test_case.description.contains("[MERGE") {
@@ -1708,7 +1716,7 @@ mod tests {
     ) -> Reader {
         let test_clock = Arc::new(MockSystemClock::new());
         let mono_clock = Arc::new(MonotonicClock::new(test_clock as Arc<dyn SystemClock>, 0));
-        let oracle = Arc::new(DbReaderOracle::new(u64::MAX));
+        let oracle = Arc::new(DbReaderOracle::new(u64::MAX, DbStatusReporter::new(0)));
         let merge_operator = if with_merge {
             Some(Arc::new(StringConcatMergeOperator) as Arc<dyn MergeOperator + Send + Sync>)
         } else {
@@ -1734,8 +1742,8 @@ mod tests {
         let mut test_db_state = TestDbState::new().await;
         let write_batch = populate_db_state(&mut test_db_state, entries).await?;
 
-        let stat_registry = StatRegistry::new();
-        let db_stats = DbStats::new(&stat_registry);
+        let recorder = slatedb_common::metrics::MetricsRecorderHelper::noop();
+        let db_stats = DbStats::new(&recorder);
         let reader = build_reader(&test_db_state, db_stats, false).await;
 
         // when/then: get key1 should have expire_ts
@@ -1781,8 +1789,8 @@ mod tests {
         let mut test_db_state = TestDbState::new().await;
         let write_batch = populate_db_state(&mut test_db_state, entries).await?;
 
-        let stat_registry = StatRegistry::new();
-        let db_stats = DbStats::new(&stat_registry);
+        let recorder = slatedb_common::metrics::MetricsRecorderHelper::noop();
+        let db_stats = DbStats::new(&recorder);
         let reader = build_reader(&test_db_state, db_stats, false).await;
 
         // when: scanning all keys
@@ -1844,8 +1852,8 @@ mod tests {
         let mut test_db_state = TestDbState::new().await;
         let write_batch = populate_db_state(&mut test_db_state, entries).await?;
 
-        let stat_registry = StatRegistry::new();
-        let db_stats = DbStats::new(&stat_registry);
+        let recorder = slatedb_common::metrics::MetricsRecorderHelper::noop();
+        let db_stats = DbStats::new(&recorder);
         let reader = build_reader(&test_db_state, db_stats, true).await;
 
         // when: reading the merged key
@@ -1884,8 +1892,8 @@ mod tests {
         let mut test_db_state = TestDbState::new().await;
         let write_batch = populate_db_state(&mut test_db_state, entries).await?;
 
-        let stat_registry = StatRegistry::new();
-        let db_stats = DbStats::new(&stat_registry);
+        let recorder = slatedb_common::metrics::MetricsRecorderHelper::noop();
+        let db_stats = DbStats::new(&recorder);
         let reader = build_reader(&test_db_state, db_stats, true).await;
 
         // when: reading the merged key

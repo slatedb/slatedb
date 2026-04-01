@@ -311,7 +311,7 @@ impl WalBufferManager {
         &self,
         result_tx: Option<oneshot::Sender<Result<(), SlateDBError>>>,
     ) -> Result<(), SlateDBError> {
-        self.db_stats.wal_buffer_flush_requests.inc();
+        self.db_stats.wal_buffer_flush_requests.increment(1);
         let flush_tx = self
             .inner
             .read()
@@ -385,7 +385,7 @@ impl WalBufferManager {
     }
 
     async fn do_flush_one_wal(&self, wal_id: u64, wal: Arc<WalBuffer>) -> Result<(), SlateDBError> {
-        self.db_stats.wal_buffer_flushes.inc();
+        self.db_stats.wal_buffer_flushes.increment(1);
 
         let mut sst_builder = self.table_store.wal_table_builder();
         let (mut iter, last_tick) = (wal.iter(), wal.last_tick());
@@ -638,12 +638,14 @@ mod tests {
     use crate::manifest::SsTableView;
     use crate::object_stores::ObjectStores;
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
-    use crate::stats::{ReadableStat, StatRegistry};
     use crate::tablestore::TableStore;
     use crate::types::{RowEntry, ValueDeletable};
     use bytes::Bytes;
     use object_store::{memory::InMemory, path::Path, ObjectStore};
     use slatedb_common::clock::DefaultSystemClock;
+    use slatedb_common::metrics::{
+        lookup_metric, DefaultMetricsRecorder, MetricLevel, MetricsRecorderHelper,
+    };
     use slatedb_common::MockSystemClock;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
@@ -838,6 +840,7 @@ mod tests {
         Arc<TableStore>,
         Arc<MockSystemClock>,
         DbStats,
+        Arc<DefaultMetricsRecorder>,
     ) {
         setup_wal_buffer_with_flush_interval(Duration::from_millis(10)).await
     }
@@ -849,6 +852,7 @@ mod tests {
         Arc<TableStore>,
         Arc<MockSystemClock>,
         DbStats,
+        Arc<DefaultMetricsRecorder>,
     ) {
         let wal_id_store: Arc<dyn WalIdStore + Send + Sync> = Arc::new(MockWalIdStore {
             next_id: AtomicU64::new(1),
@@ -869,7 +873,9 @@ mod tests {
             new_dirty_manifest(),
             DbStatusReporter::new(0),
         )));
-        let db_stats = DbStats::new(&StatRegistry::new());
+        let recorder = Arc::new(DefaultMetricsRecorder::new());
+        let helper = MetricsRecorderHelper::new(recorder.clone(), MetricLevel::default());
+        let db_stats = DbStats::new(&helper);
         let wal_buffer = Arc::new(WalBufferManager::new(
             wal_id_store,
             db_state.clone(),
@@ -889,12 +895,12 @@ mod tests {
         task_executor
             .monitor_on(&Handle::current())
             .expect("failed to monitor executor");
-        (wal_buffer, table_store, test_clock, db_stats)
+        (wal_buffer, table_store, test_clock, db_stats, recorder)
     }
 
     #[tokio::test]
     async fn test_basic_append_and_flush_operations() {
-        let (wal_buffer, table_store, _, _) = setup_wal_buffer().await;
+        let (wal_buffer, table_store, _, _, _) = setup_wal_buffer().await;
 
         // Append some entries
         let entry1 = make_entry("key1", "value1", 1, None);
@@ -936,7 +942,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_size_based_flush_triggering() {
-        let (wal_buffer, _, _, _) = setup_wal_buffer_with_flush_interval(Duration::MAX).await;
+        let (wal_buffer, _, _, _, _) = setup_wal_buffer_with_flush_interval(Duration::MAX).await;
 
         // Append entries until we exceed the size threshold
         let mut seq = 1;
@@ -953,7 +959,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_immutable_wal_reclaim() {
-        let (wal_buffer, _, _, _) = setup_wal_buffer().await;
+        let (wal_buffer, _, _, _, _) = setup_wal_buffer().await;
 
         // Append entries to create multiple WALs
         for i in 0..100 {
@@ -971,7 +977,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_immutable_wal_reclaim_with_flush_check() {
-        let (wal_buffer, _, _, _) = setup_wal_buffer().await;
+        let (wal_buffer, _, _, _, _) = setup_wal_buffer().await;
 
         // Append entries to create multiple WALs
         for i in 0..100 {
@@ -995,7 +1001,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_maybe_trigger_flush_spams_flush_requests() {
-        let (wal_buffer, _, _, db_stats) =
+        let (wal_buffer, _, _, _db_stats, recorder) =
             setup_wal_buffer_with_flush_interval(Duration::MAX).await;
 
         // Simulate many writers each appending a small entry and calling
@@ -1009,12 +1015,13 @@ mod tests {
             wal_buffer.maybe_trigger_flush().unwrap();
         }
 
-        let size_triggered_requests = db_stats.wal_buffer_flush_requests.get();
+        let size_triggered_requests =
+            lookup_metric(&recorder, crate::db_stats::WAL_BUFFER_FLUSH_REQUESTS).unwrap();
 
         // Explicitly flush to drain everything, including any partial current WAL.
         wal_buffer.flush().await.unwrap();
 
-        let actual_flushes = db_stats.wal_buffer_flushes.get();
+        let actual_flushes = lookup_metric(&recorder, crate::db_stats::WAL_BUFFER_FLUSHES).unwrap();
 
         // With the flush_requested flag, the number of size-triggered requests
         // should be bounded by the number of WALs, not by the number of writes.

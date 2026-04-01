@@ -27,7 +27,7 @@ RocksDB-cloud does not write its write-ahead log (WAL) to object storage. Instea
 
 SlateDB, by contrast, writes everything (including the WAL) to object storage. This offers a simpler architecture, better durability, and potentially better availability at the cost of increased write latency (compared to local).
 
-RocksDB-cloud also does not cache writes, so recently written data must be read from object storage even if reads occur immediately after writes. SlateDB, by contrast, caches recent writes in memory. Eventually, we will also add on-disk caching as well.
+RocksDB-cloud also does not cache writes, so recently written data must be read from object storage even if reads occur immediately after writes. SlateDB, by contrast, caches recent writes in memory and also supports optional local-disk caching of object-store data.
 
 Finally, it's unclear how open RocksDB-cloud is to outside contributors. The code is available, but there is very little documentation or community.
 

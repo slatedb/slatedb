@@ -211,7 +211,10 @@ impl MemtableFlusher {
                 })?;
             }
             imm_memtable.notify_flush_to_l0(Ok(()));
-            self.db_inner.db_stats.immutable_memtable_flushes.inc();
+            self.db_inner
+                .db_stats
+                .immutable_memtable_flushes
+                .increment(1);
             match self.write_manifest_safely().await {
                 Ok(_) => {
                     // at this point we know the data in the memtable is durably stored

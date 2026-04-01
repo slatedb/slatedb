@@ -14,5 +14,16 @@ tmp
 bindings/python/dist
 bindings/python/slatedb/uniffi/_slatedb_uniffi/
 bindings/python/slatedb/_slatedb_uniffi/
+bindings/node/node_modules/
+bindings/node/*.tgz
+bindings/node/index.js
+bindings/node/index.d.ts
+bindings/node/slatedb.js
+bindings/node/slatedb.d.ts
+bindings/node/slatedb-ffi.js
+bindings/node/slatedb-ffi.d.ts
+bindings/node/runtime/
+bindings/node/prebuilds/
 .claude/
 CLAUDE.md
+website/src/content/docs/rfcs/*.md

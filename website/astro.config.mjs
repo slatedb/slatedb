@@ -71,6 +71,10 @@ export default defineConfig({
 							link: '/docs/get-started/quickstart/',
 						},
 						{
+							label: 'Node.js Quickstart',
+							link: 'https://github.com/slatedb/slatedb/blob/main/bindings/node/README.md',
+						},
+						{
 							label: 'FAQ',
 							link: '/docs/get-started/faq/',
 						}
@@ -89,6 +93,10 @@ export default defineConfig({
 							link: '/docs/design/files/',
 						},
 						{
+							label: 'SSTs',
+							link: '/docs/design/sorted-string-table/',
+						},
+						{
 							label: 'Writes',
 							link: '/docs/design/writes/',
 						},
@@ -97,8 +105,16 @@ export default defineConfig({
 							link: '/docs/design/reads/',
 						},
 						{
+							label: 'Readers',
+							link: '/docs/design/readers/',
+						},
+						{
 							label: 'Compaction',
 							link: '/docs/design/compaction/',
+						},
+						{
+							label: 'Merge Operators',
+							link: '/docs/design/merge-operators/',
 						},
 						{
 							label: 'Garbage Collection',
@@ -107,7 +123,7 @@ export default defineConfig({
 						{
 							label: 'Change Data Capture',
 							link: '/docs/design/change-data-capture/',
-						}/*,
+						},
 						{
 							label: 'Caching',
 							link: '/docs/design/caching/',
@@ -121,6 +137,10 @@ export default defineConfig({
 							link: '/docs/design/compression/',
 						},
 						{
+							label: 'Block Transforms',
+							link: '/docs/design/block-transformer/',
+						},
+						{
 							label: 'Clones',
 							link: '/docs/design/clones/',
 						},
@@ -132,7 +152,6 @@ export default defineConfig({
 							label: 'Consistency',
 							link: '/docs/design/consistency/',
 						}
-						*/
 					]
 				},
 				{
@@ -143,7 +162,6 @@ export default defineConfig({
 							label: 'CLI',
 							link: '/docs/operations/cli/',
 						},
-						/*
 						{
 							label: 'Compatibility',
 							link: '/docs/operations/compatibility/',
@@ -152,22 +170,14 @@ export default defineConfig({
 							label: 'Configuration',
 							link: '/docs/operations/configuration/',
 						},
-						*/
-						{
-							label: 'Configuration',
-							link: 'https://docs.rs/slatedb/latest/slatedb/config',
-							attrs: { target: '_blank' }
-						},
 						{
 							label: 'Data Modeling',
 							link: '/docs/operations/data-modeling/',
 						},
-						/*
 						{
 							label: 'Errors',
 							link: '/docs/operations/errors/',
 						},
-						*/
 						{
 							label: 'Logging',
 							link: '/docs/operations/logging/',
@@ -221,6 +231,16 @@ export default defineConfig({
 						{
 							label: 'Go',
 							link: 'https://pkg.go.dev/slatedb.io/slatedb-go/uniffi',
+							attrs: { target: '_blank' }
+						},
+						{
+							label: 'Java',
+							link: 'https://javadoc.io/doc/io.slatedb/slatedb-uniffi',
+							attrs: { target: '_blank' }
+						},
+						{
+							label: 'Node',
+							link: 'https://www.jsdocs.io/package/@slatedb/uniffi',
 							attrs: { target: '_blank' }
 						},
 						{

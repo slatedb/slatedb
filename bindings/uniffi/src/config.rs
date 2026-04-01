@@ -103,6 +103,8 @@ pub enum Ttl {
     NoExpiry,
     /// Expire the value after the given number of clock ticks.
     ExpireAfterTicks(u64),
+    /// Expire the value at the given absolute timestamp (clock ticks).
+    ExpireAt(i64),
 }
 
 impl From<Ttl> for slatedb::config::Ttl {
@@ -111,6 +113,7 @@ impl From<Ttl> for slatedb::config::Ttl {
             Ttl::Default => Self::Default,
             Ttl::NoExpiry => Self::NoExpiry,
             Ttl::ExpireAfterTicks(ttl) => Self::ExpireAfter(ttl),
+            Ttl::ExpireAt(ts) => Self::ExpireAt(ts),
         }
     }
 }

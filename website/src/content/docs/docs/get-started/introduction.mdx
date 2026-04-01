@@ -17,7 +17,7 @@ We believe that the future of object storage are multi-region, low latency bucke
 
 ## Features
 
-* **Zero-Disk architecture**: SlateDB is easy to operate. It runs as an in-process storage engine with no local state, no control plane, and no replication protocol.
+* **Zero-Disk architecture**: SlateDB is easy to operate. It can run as an in-process storage engine with no local state, no control plane, and no replication protocol.
 * **Single-writer**: SlateDB is designed for a single writer. Partitioning can easily be built on top of SlateDB since fencing is supported.
 * **Multiple-readers**: Multiple readers on different nodes can all read the same SlateDB database.
 * **Read caching**: SlateDB supports in-memory and (optional) on-disk read caching to reduce latency and API cost.

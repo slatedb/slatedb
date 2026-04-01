@@ -59,6 +59,7 @@ import timesIcon from '@hackernoon/pixel-icon-library/icons/SVG/regular/times.sv
                         <div class="terminal-tabs">
                             <button class="terminal-tab active" data-tab="rust">rust</button>
                             <button class="terminal-tab" data-tab="golang">golang</button>
+                            <button class="terminal-tab" data-tab="node">node</button>
                             <button class="terminal-tab" data-tab="python">python</button>
                         </div>
                     </div>
@@ -73,6 +74,11 @@ import timesIcon from '@hackernoon/pixel-icon-library/icons/SVG/regular/times.sv
                             language="golang"
                             command="go get slatedb.io/slatedb-go"
                             docsUrl="/docs/get-started/introduction/"
+                        />
+                        <TerminalContent
+                            language="node"
+                            command="npm install @slatedb/uniffi"
+                            docsUrl="https://github.com/slatedb/slatedb/blob/main/bindings/node/README.md"
                         />
                         <TerminalContent
                             language="python"
@@ -702,4 +708,3 @@ import timesIcon from '@hackernoon/pixel-icon-library/icons/SVG/regular/times.sv
 		}
 	});
 </script>
-

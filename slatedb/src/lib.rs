@@ -77,7 +77,6 @@ pub mod db_stats;
 pub mod manifest;
 pub mod seq_tracker;
 pub mod size_tiered_compaction;
-pub mod stats;
 
 mod batch;
 mod batch_write;

@@ -29,12 +29,12 @@ use crate::format::sst::SsTableFormat;
 use crate::manifest::store::{ManifestStore, StoredManifest};
 use crate::object_stores::ObjectStores;
 use crate::rand::DbRand;
-use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
 use crate::types::RowEntry;
 use crate::types::ValueDeletable;
 use crate::utils::IdGenerator;
 use slatedb_common::clock::{DefaultSystemClock, SystemClock};
+use slatedb_common::metrics::MetricsRecorderHelper;
 
 pub struct CompactionExecuteBench {
     path: Path,
@@ -325,8 +325,8 @@ impl CompactionExecuteBench {
         ));
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let compactor_options = CompactorOptions::default();
-        let registry = Arc::new(StatRegistry::new());
-        let stats = Arc::new(CompactionStats::new(registry.clone()));
+        let recorder = MetricsRecorderHelper::noop();
+        let stats = Arc::new(CompactionStats::new(&recorder));
         let os = self.object_store.clone();
 
         let manifest_store = Arc::new(ManifestStore::new(&self.path, os.clone()));

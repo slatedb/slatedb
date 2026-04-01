@@ -1,4 +1,23 @@
 ---
 title: Compression
+description: How SlateDB compresses SST data and metadata
 ---
 
+SlateDB compresses SST data in two different ways. One is built into the row format and is always on. The other is an optional codec you choose for WAL SSTs and regular SSTs.
+
+- Prefix compression happens inside each SST data block. [`SstRowCodecV2`](https://github.com/slatedb/slatedb/blob/main/slatedb/src/format/row_codec_v2.rs) encodes each key relative to the previous key, with restart points that store full keys so readers can still seek within the block. This reduces repeated key bytes even when block compression is disabled. [Data Modeling](/docs/operations/data-modeling#prefix-compression) covers the effect on key layout.
+- Block compression is controlled by [`Settings::compression_codec`](https://docs.rs/slatedb/latest/slatedb/config/struct.Settings.html#structfield.compression_codec) and [`CompressionCodec`](https://docs.rs/slatedb/latest/slatedb/config/enum.CompressionCodec.html). This applies to all blocks (data, indexes, filters, and stats).
+
+## Codecs
+
+The available codecs are a build-time choice. The `slatedb` crate exposes Snappy, Zlib, LZ4, and Zstd behind Cargo features. The `compression` feature enables Snappy. The `zlib`, `lz4`, and `zstd` features enable those codecs directly.
+
+The selected codec is stored in each SST's metadata. Changing `compression_codec` only affects new WAL and SST files. Existing files keep the codec they were written with, so a database can temporarily contain a mix of uncompressed files and files written with different codecs while flush and compaction rewrite older data.
+
+## Tradeoffs
+
+Compression reduces object-store bytes, network transfer, and cache footprint. That usually helps storage cost and scan-heavy workloads. The cost is CPU on both write and read.
+
+Block size changes the tradeoff. Larger blocks usually compress better. Smaller blocks reduce over-read on point lookups. The [Tuning](/docs/operations/tuning) page covers the operational knobs.
+
+Prefix compression has its own tradeoff. It helps most when adjacent sorted keys share long prefixes, because that reduces repeated key bytes inside a block. The cost is extra decode work within each restart region: after seeking to a restart point, SlateDB might need to reconstruct several keys before it reaches the target entry.

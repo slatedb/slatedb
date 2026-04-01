@@ -230,12 +230,12 @@ impl BloomFilterEvaluator {
             Some(filter) => {
                 if filter.might_contain(key_hash) {
                     if let Some(stats) = &self.db_stats {
-                        stats.sst_filter_positives.inc();
+                        stats.sst_filter_positives.increment(1);
                     }
                     self.state = FilterState::Positive;
                 } else {
                     if let Some(stats) = &self.db_stats {
-                        stats.sst_filter_negatives.inc();
+                        stats.sst_filter_negatives.increment(1);
                     }
                     self.state = FilterState::Negative;
                 }
@@ -259,7 +259,7 @@ impl BloomFilterEvaluator {
     fn notify_finished_iteration(&mut self) {
         if self.state == FilterState::Positive && !self.found_key && !self.false_positive_recorded {
             if let Some(stats) = &self.db_stats {
-                stats.sst_filter_false_positives.inc();
+                stats.sst_filter_false_positives.increment(1);
             }
             self.false_positive_recorded = true;
         }
@@ -545,13 +545,20 @@ impl<'a> InternalSstIterator<'a> {
                 }
             } else {
                 assert!(self.fetch_tasks.is_empty());
-                // For descending order, check that we've gone back to start
-                match self.options.order {
-                    IterationOrder::Ascending => {
-                        assert_eq!(self.next_block_idx_to_fetch, self.block_idx_range.end);
-                    }
-                    IterationOrder::Descending => {
-                        assert_eq!(self.next_block_idx_to_fetch, self.block_idx_range.start);
+                // With spawn_fetches=true, running out of tasks means we've
+                // exhausted the entire range.
+                // With spawn_fetches=false, it only means the prefetch buffer
+                // is drained, but there may still be blocks in the range, and
+                // the caller is responsible for scheduling more fetches if
+                // needed.
+                if spawn_fetches {
+                    match self.options.order {
+                        IterationOrder::Ascending => {
+                            assert_eq!(self.next_block_idx_to_fetch, self.block_idx_range.end);
+                        }
+                        IterationOrder::Descending => {
+                            assert_eq!(self.next_block_idx_to_fetch, self.block_idx_range.start);
+                        }
                     }
                 }
                 return Ok(None);
@@ -897,6 +904,7 @@ impl RowEntryIterator for BloomFilterIterator<'_> {
     }
 }
 
+#[allow(clippy::large_enum_variant)]
 enum SstIteratorDelegate<'a> {
     Direct(InternalSstIterator<'a>),
     Bloom(BloomFilterIterator<'a>),
@@ -1109,11 +1117,13 @@ mod tests {
     use crate::format::sst::SsTableFormat;
     use crate::object_stores::ObjectStores;
     use crate::sst_builder::BlockFormat;
-    use crate::stats::{ReadableStat, StatRegistry};
     use crate::test_utils::assert_kv;
     use crate::types::{KeyValue, ValueDeletable};
     use object_store::path::Path;
     use object_store::{memory::InMemory, ObjectStore};
+    use slatedb_common::metrics::{
+        lookup_metric, DefaultMetricsRecorder, MetricLevel, MetricsRecorderHelper,
+    };
     use std::sync::Arc;
 
     #[tokio::test]
@@ -1198,8 +1208,9 @@ mod tests {
     #[tokio::test]
     async fn should_record_bloom_filter_positive_for_single_key() {
         // given
-        let registry = StatRegistry::new();
-        let db_stats = DbStats::new(&registry);
+        let recorder = Arc::new(DefaultMetricsRecorder::new());
+        let helper = MetricsRecorderHelper::new(recorder.clone(), MetricLevel::default());
+        let db_stats = DbStats::new(&helper);
         let table_store = bloom_filter_enabled_table_store(10);
         let sst_handle = build_single_block_sst(&table_store, &[b"k1", b"k2"]).await;
 
@@ -1226,15 +1237,22 @@ mod tests {
             ValueDeletable::Value(value) => assert_eq!(value.as_ref(), b"v_k1"),
             other => panic!("expected value, found {other:?}"),
         }
-        assert_eq!(db_stats.sst_filter_positives.get(), 1);
-        assert_eq!(db_stats.sst_filter_false_positives.get(), 0);
+        assert_eq!(
+            lookup_metric(&recorder, crate::db_stats::SST_FILTER_POSITIVE_COUNT),
+            Some(1)
+        );
+        assert_eq!(
+            lookup_metric(&recorder, crate::db_stats::SST_FILTER_FALSE_POSITIVE_COUNT),
+            Some(0)
+        );
     }
 
     #[tokio::test]
     async fn should_record_bloom_filter_negative_for_missing_key() {
         // given
-        let registry = StatRegistry::new();
-        let db_stats = DbStats::new(&registry);
+        let recorder = Arc::new(DefaultMetricsRecorder::new());
+        let helper = MetricsRecorderHelper::new(recorder.clone(), MetricLevel::default());
+        let db_stats = DbStats::new(&helper);
         let table_store = bloom_filter_enabled_table_store(10);
         let sst_handle = build_single_block_sst(&table_store, &[b"k1", b"k3"]).await;
 
@@ -1251,15 +1269,22 @@ mod tests {
 
         // then
         assert!(iter.is_none(), "negative bloom result should skip iterator");
-        assert_eq!(db_stats.sst_filter_negatives.get(), 1);
-        assert_eq!(db_stats.sst_filter_false_positives.get(), 0);
+        assert_eq!(
+            lookup_metric(&recorder, crate::db_stats::SST_FILTER_NEGATIVE_COUNT),
+            Some(1)
+        );
+        assert_eq!(
+            lookup_metric(&recorder, crate::db_stats::SST_FILTER_FALSE_POSITIVE_COUNT),
+            Some(0)
+        );
     }
 
     #[tokio::test]
     async fn should_record_bloom_filter_false_positive_for_single_key() {
         // given
-        let registry = StatRegistry::new();
-        let db_stats = DbStats::new(&registry);
+        let recorder = Arc::new(DefaultMetricsRecorder::new());
+        let helper = MetricsRecorderHelper::new(recorder.clone(), MetricLevel::default());
+        let db_stats = DbStats::new(&helper);
         let table_store = bloom_filter_enabled_table_store(2);
         // these keys share the same bucket in the bloom filter (hard coded)
         // after testing with the SIP13 algorithm. The collision key must be
@@ -1296,9 +1321,18 @@ mod tests {
 
         // then
         assert!(entry.is_none(), "false positive must return no entry");
-        assert_eq!(db_stats.sst_filter_positives.get(), 1);
-        assert_eq!(db_stats.sst_filter_false_positives.get(), 1);
-        assert_eq!(db_stats.sst_filter_negatives.get(), 0);
+        assert_eq!(
+            lookup_metric(&recorder, crate::db_stats::SST_FILTER_POSITIVE_COUNT),
+            Some(1)
+        );
+        assert_eq!(
+            lookup_metric(&recorder, crate::db_stats::SST_FILTER_FALSE_POSITIVE_COUNT),
+            Some(1)
+        );
+        assert_eq!(
+            lookup_metric(&recorder, crate::db_stats::SST_FILTER_NEGATIVE_COUNT),
+            Some(0)
+        );
     }
 
     #[tokio::test]
@@ -2572,5 +2606,73 @@ mod tests {
 
         let entry = iter.next().await.expect("iteration should succeed");
         assert!(entry.is_none(), "expected end of iteration");
+    }
+
+    #[tokio::test]
+    async fn test_seek_forward_after_scan_already_fetched_block_consumed() {
+        let root_path = Path::from("");
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        // Small block_size so we get ~2 keys per block.
+        let format = SsTableFormat {
+            block_size: 64,
+            min_filter_keys: 1,
+            ..SsTableFormat::default()
+        };
+        let table_store = Arc::new(TableStore::new(
+            ObjectStores::new(object_store, None),
+            format,
+            root_path.clone(),
+            None,
+        ));
+
+        // Keys spaced by 10: key_000, key_010, key_020, ..., key_190.
+        // Gaps like key_035 don't exist.
+        let mut writer = table_store.table_writer(SsTableId::Wal(0));
+        for i in 0..20 {
+            let key = format!("key_{:03}", i * 10);
+            let val = format!("val_{:03}", i * 10);
+            writer
+                .add(RowEntry::new_value(key.as_bytes(), val.as_bytes(), 0))
+                .await
+                .unwrap();
+        }
+        let sst_handle = writer.close().await.unwrap();
+        let sst = SsTableView::identity(sst_handle);
+
+        // Minimal prefetch: 1 block at a time, 1 task max.
+        let mut iter = SstIterator::new_borrowed_initialized(
+            ..,
+            &sst,
+            table_store.clone(),
+            SstIteratorOptions {
+                max_fetch_tasks: 1,
+                blocks_to_fetch: 1,
+                cache_blocks: true,
+                eager_spawn: false,
+                order: IterationOrder::Ascending,
+            },
+        )
+        .await
+        .unwrap()
+        .expect("Expected Some(iter) but got None");
+
+        // Scan 3 entries: key_000, key_010, key_020.
+        // After this, current block has key_020, key_030. fetch_tasks is empty.
+        // next_block_idx_to_fetch = 2.
+        for _ in 0..3 {
+            iter.next().await.unwrap().expect("should have entries");
+        }
+
+        // Seek to key_035 (doesn't exist). The index maps it to block 1
+        // (which contains key_020, key_030). block_idx=1 < next_block_idx=2,
+        // so already_fetched=true. But fetch_tasks is empty (consumed during
+        // scan). The already_fetched loop immediately calls next_iter(false)
+        // on empty tasks, hitting the assertion.
+        iter.seek(b"key_035").await.unwrap();
+
+        // Should find key_040 (first key >= key_035).
+        let entry = iter.next().await.unwrap().expect("should find key_040");
+        let kv: KeyValue = entry.into();
+        assert_eq!(kv.key.as_ref(), b"key_040");
     }
 }

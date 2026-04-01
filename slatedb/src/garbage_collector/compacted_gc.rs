@@ -211,7 +211,7 @@ impl GcTask for CompactedGcTask {
             if let Err(e) = self.table_store.delete_sst(&id).await {
                 error!("error deleting SST [id={:?}, error={}]", id, e);
             } else {
-                self.stats.gc_compacted_count.inc();
+                self.stats.gc_compacted_count.increment(1);
             }
         }
 
@@ -234,7 +234,6 @@ mod tests {
     use crate::format::sst::SsTableFormat;
     use crate::manifest::store::StoredManifest;
     use crate::object_stores::ObjectStores;
-    use crate::stats::StatRegistry;
     use crate::test_utils::build_test_sst;
     use object_store::{memory::InMemory, path::Path};
     use slatedb_common::clock::DefaultSystemClock;
@@ -312,7 +311,7 @@ mod tests {
             .push_back(SsTableView::identity(active_handle));
         stored_manifest.update(dirty).await.unwrap();
 
-        let stat_registry = Arc::new(StatRegistry::new());
+        let recorder = slatedb_common::metrics::MetricsRecorderHelper::noop();
 
         // GC task with min_age = 5 seconds. Using utc_now at 10 seconds after the epoch
         // yields a configured_min_age_dt of 5 seconds.
@@ -320,7 +319,7 @@ mod tests {
             interval: None,
             min_age: Duration::from_secs(5),
         };
-        let stats = Arc::new(GcStats::new(stat_registry.clone()));
+        let stats = Arc::new(GcStats::new(&recorder));
         let task = CompactedGcTask::new(
             manifest_store.clone(),
             compactions_store.clone(),
@@ -417,7 +416,7 @@ mod tests {
             .push_back(SsTableView::identity(manifest_handle));
         stored_manifest.update(dirty).await.unwrap();
 
-        let stat_registry = Arc::new(StatRegistry::new());
+        let recorder = slatedb_common::metrics::MetricsRecorderHelper::noop();
 
         // min_age = 0, so configured_min_age_dt == utc_now (10 seconds after epoch).
         // The manifest's most recent SST (3 seconds) is the smallest cutoff, so only
@@ -426,7 +425,7 @@ mod tests {
             interval: None,
             min_age: Duration::from_secs(0),
         };
-        let stats = Arc::new(GcStats::new(stat_registry.clone()));
+        let stats = Arc::new(GcStats::new(&recorder));
         let task = CompactedGcTask::new(
             manifest_store.clone(),
             compactions_store.clone(),
@@ -527,8 +526,8 @@ mod tests {
             interval: None,
             min_age: Duration::from_secs(0),
         };
-        let stat_registry = Arc::new(StatRegistry::new());
-        let stats = Arc::new(GcStats::new(stat_registry.clone()));
+        let recorder = slatedb_common::metrics::MetricsRecorderHelper::noop();
+        let stats = Arc::new(GcStats::new(&recorder));
         let task = CompactedGcTask::new(
             manifest_store.clone(),
             compactions_store.clone(),
@@ -621,7 +620,8 @@ mod tests {
             interval: None,
             min_age: Duration::from_secs(2),
         };
-        let stats = Arc::new(GcStats::new(Arc::new(StatRegistry::new())));
+        let recorder = slatedb_common::metrics::MetricsRecorderHelper::noop();
+        let stats = Arc::new(GcStats::new(&recorder));
         let task = CompactedGcTask::new(
             manifest_store.clone(),
             compactions_store.clone(),

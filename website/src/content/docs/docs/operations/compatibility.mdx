@@ -1,4 +1,14 @@
 ---
 title: Compatibility
+description: What SlateDB currently guarantees across releases, storage formats, object stores, and tested targets
 ---
 
+SlateDB follows Semantic Versioning and guarantees forward and backward compatibility for storage formats between adjacent releases. **We do not currently guarantee compile-time API compatibility.**
+
+Shared deployments should move one release at a time. If several processes read and write the same database path, keep them within one release step of each other until the rollout is complete.
+
+## Stored Data
+
+A single database can contain a mix of older and newer SST files during normal operation. Readers and compactors must understand every format already present in the bucket. SlateDB version-checks its persistent formats and fails fast when it sees a version it does not understand.
+
+Compression is part of compatibility too. A process can only read compressed SSTs for codecs that were compiled into that binary. If one deployment writes Zstd-compressed SSTs, every reader and compactor that touches that database needs the `zstd` feature enabled. [Compression](/docs/design/compression) covers the codec feature flags.

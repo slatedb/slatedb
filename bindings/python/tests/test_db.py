@@ -191,7 +191,7 @@ async def test_db_batch_write_and_consumption() -> None:
 
 
 @pytest.mark.asyncio
-async def test_db_flush_and_metrics() -> None:
+async def test_db_flush() -> None:
     store = new_memory_store()
 
     async with open_db(store) as db:
@@ -199,9 +199,6 @@ async def test_db_flush_and_metrics() -> None:
         await db.flush()
         await db.flush_with_options(FlushOptions(flush_type=FlushType.WAL))
         await db.flush_with_options(FlushOptions(flush_type=FlushType.MEM_TABLE))
-
-        metrics = db.metrics()
-        assert isinstance(metrics, dict)
 
 
 @pytest.mark.asyncio

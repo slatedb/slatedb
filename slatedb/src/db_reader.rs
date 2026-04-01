@@ -5,7 +5,7 @@ use crate::config::{CheckpointOptions, DbReaderOptions, ReadOptions, ScanOptions
 use crate::db_read::DbRead;
 use crate::db_state::ManifestCore;
 use crate::db_stats::DbStats;
-use crate::db_status::ClosedResultWriter;
+use crate::db_status::{ClosedResultWriter, DbStatus, DbStatusReporter};
 use crate::dispatcher::{MessageFactory, MessageHandler, MessageHandlerExecutor};
 use crate::error::SlateDBError;
 use crate::iter::IterationOrder;
@@ -18,7 +18,6 @@ use crate::paths::PathResolver;
 use crate::rand::DbRand;
 use crate::reader::{DbStateReader, Reader};
 use crate::sst_iter::SstIteratorOptions;
-use crate::stats::StatRegistry;
 use crate::store_provider::StoreProvider;
 use crate::tablestore::TableStore;
 use crate::types::KeyValue;
@@ -61,7 +60,13 @@ struct DbReaderInner {
     oracle: Arc<DbReaderOracle>,
     reader: Reader,
     closed_result_watcher: ClosedResultWriter,
+    status_reporter: DbStatusReporter,
     rand: Arc<DbRand>,
+    /// Kept alive so the underlying `MetricsRecorder` is not dropped while
+    /// metric handles in `DbStats` (and other stats structs) are still in use.
+    /// See: https://github.com/slatedb/slatedb/issues/1469
+    #[allow(dead_code)]
+    recorder: slatedb_common::metrics::MetricsRecorderHelper,
 }
 
 #[derive(Debug)]
@@ -104,6 +109,8 @@ impl DbReaderInner {
         closed_result_watcher: ClosedResultWriter,
         system_clock: Arc<dyn SystemClock>,
         rand: Arc<DbRand>,
+        status_reporter: DbStatusReporter,
+        recorder: slatedb_common::metrics::MetricsRecorderHelper,
     ) -> Result<Self, SlateDBError> {
         let mut manifest =
             StoredManifest::load(Arc::clone(&manifest_store), system_clock.clone()).await?;
@@ -137,10 +144,13 @@ impl DbReaderInner {
         let initial_durable_seq = initial_state
             .last_remote_persisted_seq
             .max(initial_state.core().last_l0_seq);
-        let oracle = Arc::new(DbReaderOracle::new(initial_durable_seq));
+        status_reporter.report_durable_seq(initial_durable_seq);
+        let oracle = Arc::new(DbReaderOracle::new(
+            initial_durable_seq,
+            status_reporter.clone(),
+        ));
 
-        let stat_registry = Arc::new(StatRegistry::new());
-        let db_stats = DbStats::new(stat_registry.as_ref());
+        let db_stats = DbStats::new(&recorder);
 
         let state = RwLock::new(initial_state);
         let reader = Reader {
@@ -161,7 +171,9 @@ impl DbReaderInner {
             oracle,
             reader,
             closed_result_watcher,
+            status_reporter,
             rand,
+            recorder,
         })
     }
 
@@ -675,10 +687,16 @@ impl DbReader {
         options: DbReaderOptions,
         system_clock: Arc<dyn SystemClock>,
         rand: Arc<DbRand>,
+        recorder: slatedb_common::metrics::MetricsRecorderHelper,
     ) -> Result<Self, SlateDBError> {
         Self::validate_options(&options)?;
 
-        let closed_result_watcher = ClosedResultWriter::new(WatchableOnceCell::new());
+        let status_reporter = DbStatusReporter::new(0);
+        let closed_result_watcher = ClosedResultWriter::new(WatchableOnceCell::new())
+            .with_on_close(Arc::new({
+                let reporter = status_reporter.clone();
+                move |reason| reporter.report_closed(reason)
+            }));
         let task_executor =
             MessageHandlerExecutor::new(closed_result_watcher.clone(), system_clock.clone());
         let manifest_store = store_provider.manifest_store();
@@ -693,6 +711,8 @@ impl DbReader {
                 closed_result_watcher,
                 system_clock,
                 rand,
+                status_reporter,
+                recorder,
             )
             .await?,
         );
@@ -1016,6 +1036,22 @@ impl DbReader {
             .await
             .map_err(Into::into)
     }
+
+    /// Subscribe to database status changes.
+    ///
+    /// See [`Db::subscribe`](crate::Db::subscribe) for full semantics and
+    /// deadlock warnings. The `durable_seq` field is updated whenever the
+    /// manifest poller discovers new data written by a remote writer.
+    pub fn subscribe(&self) -> tokio::sync::watch::Receiver<DbStatus> {
+        self.inner.status_reporter.subscribe()
+    }
+
+    /// Check the reader status.
+    ///
+    /// See [`Db::status`](crate::Db::status) for full semantics.
+    pub fn status(&self) -> Result<(), crate::Error> {
+        self.inner.check_closed().map_err(Into::into)
+    }
 }
 
 #[async_trait::async_trait]
@@ -1078,7 +1114,7 @@ mod tests {
     use crate::db_reader::{DbReader, DbReaderInner, DbReaderOptions};
     use crate::db_state::{ManifestCore, SsTableId};
     use crate::db_stats::DbStats;
-    use crate::db_status::ClosedResultWriter;
+    use crate::db_status::{ClosedResultWriter, DbStatusReporter};
     use crate::format::sst::SsTableFormat;
     use crate::manifest::store::{ManifestStore, StoredManifest};
     use crate::manifest::Manifest;
@@ -1091,7 +1127,6 @@ mod tests {
     use crate::proptest_util::sample;
     use crate::rand::DbRand;
     use crate::reader::Reader;
-    use crate::stats::StatRegistry;
     use crate::store_provider::StoreProvider;
     use crate::tablestore::TableStore;
     use crate::types::RowEntry;
@@ -1165,6 +1200,7 @@ mod tests {
             DbReaderOptions::default(),
             test_provider.system_clock.clone(),
             test_provider.rand.clone(),
+            slatedb_common::metrics::MetricsRecorderHelper::noop(),
         )
         .await
         .unwrap();
@@ -1912,6 +1948,7 @@ mod tests {
                 options,
                 self.system_clock.clone(),
                 self.rand.clone(),
+                slatedb_common::metrics::MetricsRecorderHelper::noop(),
             )
             .await
         }
@@ -2075,11 +2112,11 @@ mod tests {
 
         // Construct just enough DbReaderInner state to call rebuild_checkpoint_state()
         // directly. skip_wal_replay keeps the test scoped to the IMM retention logic.
-        let oracle = Arc::new(DbReaderOracle::new(0));
-        let stat_registry = Arc::new(StatRegistry::new());
+        let oracle = Arc::new(DbReaderOracle::new(0, DbStatusReporter::new(0)));
+        let recorder = slatedb_common::metrics::MetricsRecorderHelper::noop();
         let reader = Reader {
             table_store: Arc::clone(&table_store),
-            db_stats: DbStats::new(stat_registry.as_ref()),
+            db_stats: DbStats::new(&recorder),
             mono_clock: Arc::new(MonotonicClock::new(
                 test_provider.system_clock.clone(),
                 i64::MIN,
@@ -2100,7 +2137,9 @@ mod tests {
             oracle,
             reader,
             closed_result_watcher: ClosedResultWriter::new(WatchableOnceCell::new()),
+            status_reporter: DbStatusReporter::new(0),
             rand: test_provider.rand.clone(),
+            recorder,
         };
 
         let rebuilt_state = inner
@@ -2166,11 +2205,11 @@ mod tests {
             last_remote_persisted_seq: 10,
         };
 
-        let oracle = Arc::new(DbReaderOracle::new(0));
-        let stat_registry = Arc::new(StatRegistry::new());
+        let oracle = Arc::new(DbReaderOracle::new(0, DbStatusReporter::new(0)));
+        let recorder = slatedb_common::metrics::MetricsRecorderHelper::noop();
         let reader = Reader {
             table_store: Arc::clone(&table_store),
-            db_stats: DbStats::new(stat_registry.as_ref()),
+            db_stats: DbStats::new(&recorder),
             mono_clock: Arc::new(MonotonicClock::new(
                 test_provider.system_clock.clone(),
                 i64::MIN,
@@ -2188,7 +2227,9 @@ mod tests {
             oracle,
             reader,
             closed_result_watcher: ClosedResultWriter::new(WatchableOnceCell::new()),
+            status_reporter: DbStatusReporter::new(0),
             rand: test_provider.rand.clone(),
+            recorder,
         };
 
         assert!(!inner.should_reestablish_checkpoint(&current_core));
@@ -2238,6 +2279,44 @@ mod tests {
         assert!(
             !entries.is_empty(),
             "Expected disk cache directory to be populated after read"
+        );
+    }
+
+    #[tokio::test]
+    async fn should_record_metrics_with_recorder() {
+        use slatedb_common::metrics::{lookup_metric_with_labels, DefaultMetricsRecorder};
+
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_db_reader_metrics");
+
+        // Write data via Db so there's an SST to read from
+        let db = Db::builder(path.clone(), Arc::clone(&object_store))
+            .with_settings(Settings::default())
+            .build()
+            .await
+            .unwrap();
+        db.put(b"key1", b"value1").await.unwrap();
+        db.flush().await.unwrap();
+        db.close().await.unwrap();
+
+        // Open a DbReader with a metrics recorder
+        let metrics_recorder = Arc::new(DefaultMetricsRecorder::new());
+        let reader = DbReader::builder(path, object_store)
+            .with_metrics_recorder(metrics_recorder.clone())
+            .build()
+            .await
+            .unwrap();
+
+        // Verify that get_requests metric is incremented
+        let val = reader.get(b"key1").await.unwrap();
+        assert_eq!(val, Some(Bytes::from_static(b"value1")));
+        assert_eq!(
+            lookup_metric_with_labels(
+                &metrics_recorder,
+                crate::db_stats::REQUEST_COUNT,
+                &[("op", "get")]
+            ),
+            Some(1)
         );
     }
 
@@ -2385,17 +2464,18 @@ mod tests {
             tokio::task::yield_now().await;
         }
 
-        // Drive the reader poller with the shared mock clock so it reestablishes
-        // from the new manifest that now includes the L0.
-        clock.advance(Duration::from_millis(100)).await;
-
+        let timeout = Duration::from_secs(30);
         let start = tokio::time::Instant::now();
         loop {
             if reader.inner.state.read().manifest.core.l0.len() == 1 {
                 break;
             }
+            // The reader poller may observe the pre-flush manifest on one tick and
+            // only see the new L0 on a later poll. Keep advancing the mock clock
+            // until the reader reestablishes from the updated manifest.
+            clock.advance(Duration::from_millis(100)).await;
             assert!(
-                start.elapsed() < Duration::from_secs(30),
+                start.elapsed() < timeout,
                 "timed out waiting for reader to reestablish from the new manifest"
             );
             tokio::task::yield_now().await;
@@ -2408,6 +2488,117 @@ mod tests {
         );
 
         reader.close().await.unwrap();
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn should_subscribe_to_durable_seq_updates() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_kv_store");
+        let test_provider = TestProvider::new(path.clone(), Arc::clone(&object_store));
+
+        let db = test_provider
+            .new_db(Settings {
+                l0_sst_size_bytes: 256,
+                ..Settings::default()
+            })
+            .await
+            .unwrap();
+
+        // Write initial data and flush so reader can see it.
+        db.put(b"k1", b"v1").await.unwrap();
+        db.flush().await.unwrap();
+
+        let reader_options = DbReaderOptions {
+            manifest_poll_interval: Duration::from_millis(10),
+            ..DbReaderOptions::default()
+        };
+        let reader = test_provider
+            .new_db_reader(reader_options, None, None)
+            .await
+            .unwrap();
+
+        let mut rx = reader.subscribe();
+        let initial_seq = rx.borrow().durable_seq;
+        assert!(initial_seq > 0);
+
+        // Write more data and flush.
+        db.put(b"k2", b"v2").await.unwrap();
+        db.flush().await.unwrap();
+
+        // Wait for the reader's manifest poll to pick up the new data.
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        rx.changed().await.unwrap();
+        let updated_seq = rx.borrow().durable_seq;
+        assert!(
+            updated_seq > initial_seq,
+            "durable_seq should advance: {} > {}",
+            updated_seq,
+            initial_seq
+        );
+
+        reader.close().await.unwrap();
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn should_return_ok_status_when_open() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_kv_store");
+        let test_provider = TestProvider::new(path.clone(), Arc::clone(&object_store));
+
+        let db = test_provider.new_db(Settings::default()).await.unwrap();
+        let reader = test_provider
+            .new_db_reader(DbReaderOptions::default(), None, None)
+            .await
+            .unwrap();
+
+        assert!(reader.status().is_ok());
+
+        reader.close().await.unwrap();
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn should_return_err_status_when_closed() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_kv_store");
+        let test_provider = TestProvider::new(path.clone(), Arc::clone(&object_store));
+
+        let db = test_provider.new_db(Settings::default()).await.unwrap();
+        let reader = test_provider
+            .new_db_reader(DbReaderOptions::default(), None, None)
+            .await
+            .unwrap();
+
+        reader.close().await.unwrap();
+        assert!(reader.status().is_err());
+
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn should_report_close_via_subscribe() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_kv_store");
+        let test_provider = TestProvider::new(path.clone(), Arc::clone(&object_store));
+
+        let db = test_provider.new_db(Settings::default()).await.unwrap();
+        let reader = test_provider
+            .new_db_reader(DbReaderOptions::default(), None, None)
+            .await
+            .unwrap();
+
+        let mut rx = reader.subscribe();
+        assert!(rx.borrow().close_reason.is_none());
+
+        reader.close().await.unwrap();
+
+        // The watch channel should report the close.
+        rx.changed().await.unwrap();
+        assert!(rx.borrow().close_reason.is_some());
+
         db.close().await.unwrap();
     }
 }

@@ -1,54 +1,44 @@
-use crate::stats::{Counter, StatRegistry};
+use slatedb_common::metrics::{CounterFn, MetricsRecorderHelper};
 use std::sync::Arc;
 
 macro_rules! gc_stat_name {
     ($suffix:expr) => {
-        crate::stat_name!("gc", $suffix)
+        concat!("slatedb.gc.", $suffix)
     };
 }
 
-pub const GC_MANIFEST_COUNT: &str = gc_stat_name!("manifest_count");
-pub const GC_WAL_COUNT: &str = gc_stat_name!("wal_count");
-pub const GC_COMPACTED_COUNT: &str = gc_stat_name!("compacted_count");
-pub const GC_COMPACTIONS_COUNT: &str = gc_stat_name!("compactions_count");
+pub const DELETED_COUNT: &str = gc_stat_name!("deleted_count");
 pub const GC_COUNT: &str = gc_stat_name!("count");
 
 /// Stats for the garbage collector.
-///
-/// This struct is used to collect stats for the garbage collector.
 pub struct GcStats {
-    pub gc_manifest_count: Arc<Counter>,
-    pub gc_wal_count: Arc<Counter>,
-    pub gc_compacted_count: Arc<Counter>,
-    pub gc_compactions_count: Arc<Counter>,
-    pub gc_count: Arc<Counter>,
+    pub gc_manifest_count: Arc<dyn CounterFn>,
+    pub gc_wal_count: Arc<dyn CounterFn>,
+    pub gc_compacted_count: Arc<dyn CounterFn>,
+    pub gc_compactions_count: Arc<dyn CounterFn>,
+    pub gc_count: Arc<dyn CounterFn>,
 }
 
 impl GcStats {
-    /// Create a new GcStats instance.
-    ///
-    /// This function creates a new GcStats instance and registers the stats with the given registry.
-    ///
-    /// ## Arguments
-    ///
-    /// * `registry`: The `StatRegistry` to register the stats with.
-    ///
-    /// ## Returns
-    ///
-    /// * `Self`: The new GcStats instance.
-    pub fn new(registry: Arc<StatRegistry>) -> Self {
-        let stats = Self {
-            gc_manifest_count: Arc::new(Counter::default()),
-            gc_wal_count: Arc::new(Counter::default()),
-            gc_compacted_count: Arc::new(Counter::default()),
-            gc_compactions_count: Arc::new(Counter::default()),
-            gc_count: Arc::new(Counter::default()),
-        };
-        registry.register(GC_MANIFEST_COUNT, stats.gc_manifest_count.clone());
-        registry.register(GC_WAL_COUNT, stats.gc_wal_count.clone());
-        registry.register(GC_COMPACTED_COUNT, stats.gc_compacted_count.clone());
-        registry.register(GC_COMPACTIONS_COUNT, stats.gc_compactions_count.clone());
-        registry.register(GC_COUNT, stats.gc_count.clone());
-        stats
+    pub(crate) fn new(recorder: &MetricsRecorderHelper) -> Self {
+        Self {
+            gc_manifest_count: recorder
+                .counter(DELETED_COUNT)
+                .labels(&[("resource", "manifest")])
+                .register(),
+            gc_wal_count: recorder
+                .counter(DELETED_COUNT)
+                .labels(&[("resource", "wal")])
+                .register(),
+            gc_compacted_count: recorder
+                .counter(DELETED_COUNT)
+                .labels(&[("resource", "compacted")])
+                .register(),
+            gc_compactions_count: recorder
+                .counter(DELETED_COUNT)
+                .labels(&[("resource", "compactions")])
+                .register(),
+            gc_count: recorder.counter(GC_COUNT).register(),
+        }
     }
 }
