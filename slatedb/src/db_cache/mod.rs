@@ -629,7 +629,43 @@ pub(crate) mod test_utils {
     use crate::db_cache::{CachedEntry, CachedKey, DbCache};
     use async_trait::async_trait;
     use std::collections::HashMap;
-    use std::sync::Mutex;
+    use std::sync::{Arc, Mutex};
+
+    /// A cache that always returns an error from get operations.
+    pub(crate) struct FailingCache;
+
+    #[async_trait]
+    impl DbCache for FailingCache {
+        async fn get_block(&self, _: &CachedKey) -> Result<Option<CachedEntry>, crate::Error> {
+            Err(
+                crate::error::SlateDBError::from(Arc::new(std::io::Error::other("injected error")))
+                    .into(),
+            )
+        }
+        async fn get_index(&self, _: &CachedKey) -> Result<Option<CachedEntry>, crate::Error> {
+            Err(
+                crate::error::SlateDBError::from(Arc::new(std::io::Error::other("injected error")))
+                    .into(),
+            )
+        }
+        async fn get_filter(&self, _: &CachedKey) -> Result<Option<CachedEntry>, crate::Error> {
+            Err(
+                crate::error::SlateDBError::from(Arc::new(std::io::Error::other("injected error")))
+                    .into(),
+            )
+        }
+        async fn get_stats(&self, _: &CachedKey) -> Result<Option<CachedEntry>, crate::Error> {
+            Err(
+                crate::error::SlateDBError::from(Arc::new(std::io::Error::other("injected error")))
+                    .into(),
+            )
+        }
+        async fn insert(&self, _: CachedKey, _: CachedEntry) {}
+        async fn remove(&self, _: &CachedKey) {}
+        fn entry_count(&self) -> u64 {
+            0
+        }
+    }
 
     pub(crate) struct TestCache {
         items: Mutex<HashMap<CachedKey, CachedEntry>>,
@@ -945,6 +981,98 @@ mod tests {
                 )
             );
         }
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_should_count_stats_hits(cache: (DbCacheWrapper, Arc<DefaultMetricsRecorder>)) {
+        let (cache, registry) = cache;
+        // given:
+        let key = CachedKey::from((SST_ID, 12345u64));
+        let stats = crate::sst_stats::SstStats::default();
+        cache
+            .insert(key.clone(), CachedEntry::with_sst_stats(Arc::new(stats)))
+            .await;
+
+        for i in 1..4 {
+            // when:
+            let _ = cache.get_stats(&key).await;
+
+            // then:
+            assert_eq!(
+                Some(0),
+                lookup_metric_with_labels(
+                    &registry,
+                    super::stats::ACCESS_COUNT,
+                    &[("entry_kind", "stats"), ("result", "miss")]
+                )
+            );
+            assert_eq!(
+                Some(i as i64),
+                lookup_metric_with_labels(
+                    &registry,
+                    super::stats::ACCESS_COUNT,
+                    &[("entry_kind", "stats"), ("result", "hit")]
+                )
+            );
+        }
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_should_count_stats_misses(cache: (DbCacheWrapper, Arc<DefaultMetricsRecorder>)) {
+        let (cache, registry) = cache;
+        // given:
+        let key = CachedKey::from((SST_ID, 12345u64));
+
+        for i in 1..4 {
+            // when:
+            let _ = cache.get_stats(&key).await;
+
+            // then:
+            assert_eq!(
+                Some(i as i64),
+                lookup_metric_with_labels(
+                    &registry,
+                    super::stats::ACCESS_COUNT,
+                    &[("entry_kind", "stats"), ("result", "miss")]
+                )
+            );
+            assert_eq!(
+                Some(0),
+                lookup_metric_with_labels(
+                    &registry,
+                    super::stats::ACCESS_COUNT,
+                    &[("entry_kind", "stats"), ("result", "hit")]
+                )
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_should_count_get_errors() {
+        // given: a cache that always returns errors
+        let recorder = Arc::new(DefaultMetricsRecorder::new());
+        let helper = MetricsRecorderHelper::new(recorder.clone(), MetricLevel::default());
+        let failing_cache: Arc<dyn super::DbCache> = Arc::new(super::test_utils::FailingCache);
+        let cache = super::DbCacheWrapper::new(
+            failing_cache,
+            &helper,
+            Arc::new(slatedb_common::clock::DefaultSystemClock::default()),
+        );
+        let key = CachedKey::from((SST_ID, 12345u64));
+
+        // when: each get method returns an error
+        let _ = cache.get_block(&key).await;
+        let _ = cache.get_index(&key).await;
+        let _ = cache.get_filter(&key).await;
+        let _ = cache.get_stats(&key).await;
+
+        // then:
+        assert_eq!(
+            slatedb_common::metrics::lookup_metric(&recorder, super::stats::ERROR_COUNT),
+            Some(4)
+        );
     }
 
     #[tokio::test]
