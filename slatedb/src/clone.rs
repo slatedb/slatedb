@@ -791,7 +791,6 @@ mod tests {
             .unwrap();
         let write_options = WriteOptions {
             await_durable: false,
-            ..WriteOptions::default()
         };
         let put_options = PutOptions::default();
         let l0_and_wal_data = [
@@ -880,7 +879,6 @@ mod tests {
             .unwrap();
         let write_options = WriteOptions {
             await_durable: false,
-            ..WriteOptions::default()
         };
         let put_options = PutOptions::default();
         let l0_and_wal_data = [
