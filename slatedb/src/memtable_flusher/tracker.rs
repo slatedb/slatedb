@@ -65,8 +65,7 @@ pub(super) struct FlushTracker {
     manifest_writer: ManifestWriter,
     messages: safe_async_channel::SafeReceiver<TrackerMessage>,
     cancellation_token: CancellationToken,
-    next_epoch: FlushEpoch,
-    tracked_imms: VecDeque<TrackedImm>,
+    frontier: TrackedImmFrontier,
 }
 
 impl FlushTracker {
@@ -83,8 +82,7 @@ impl FlushTracker {
             manifest_writer,
             messages,
             cancellation_token,
-            next_epoch: FlushEpoch(1),
-            tracked_imms: VecDeque::new(),
+            frontier: TrackedImmFrontier::new(),
         }
     }
 
@@ -131,7 +129,7 @@ impl FlushTracker {
             TrackerMessage::UploadComplete(uploaded) => self.handle_uploaded(uploaded).await,
             TrackerMessage::UploaderShutdown(_result) => Err(SlateDBError::Closed),
             TrackerMessage::FlushComplete { through_epoch } => {
-                self.retire_through(through_epoch);
+                self.frontier.retire_through(through_epoch);
                 self.reconcile_and_dispatch().await
             }
             TrackerMessage::ManifestRefreshed => self.reconcile_and_dispatch().await,
@@ -149,10 +147,10 @@ impl FlushTracker {
             "flush-memtable-to-l0",
             |_| { Ok(()) }
         );
-        self.register_new_imm_memtables();
-        let through_epoch = self.resolve_target(target);
+        self.reconcile_and_dispatch().await?;
+        let through_epoch = self.frontier.resolve_target(target);
         self.manifest_writer.send_flush(through_epoch, sender)?;
-        self.dispatch_ready_memtables().await
+        Ok(())
     }
 
     async fn handle_checkpoint_request(
@@ -161,20 +159,11 @@ impl FlushTracker {
         options: CheckpointOptions,
         sender: oneshot::Sender<Result<CheckpointCreateResult, SlateDBError>>,
     ) -> Result<(), SlateDBError> {
-        self.register_new_imm_memtables();
-        let through_epoch = self.resolve_target(target);
+        self.reconcile_and_dispatch().await?;
+        let through_epoch = self.frontier.resolve_target(target);
         self.manifest_writer
             .send_checkpoint(through_epoch, options, sender)?;
         self.dispatch_ready_memtables().await
-    }
-
-    /// Resolves a flush target to the epoch that must become durable,
-    /// or `None` for immediate resolution.
-    fn resolve_target(&self, target: FlushTarget) -> Option<FlushEpoch> {
-        match target {
-            FlushTarget::CurrentDurable => None,
-            FlushTarget::All => self.tracked_imms.back().map(|tracked| tracked.epoch),
-        }
     }
 
     async fn handle_uploaded(&mut self, uploaded: UploadedMemtable) -> Result<(), SlateDBError> {
@@ -182,7 +171,8 @@ impl FlushTracker {
             "l0 upload completed [epoch={:?}, sst_id={:?}]",
             uploaded.epoch, uploaded.sst_handle.id
         );
-        self.set_tracked_state(uploaded.epoch, TrackedImmState::WritingManifest);
+        self.frontier
+            .set_state(uploaded.epoch, TrackedImmState::WritingManifest);
         self.manifest_writer.notify_uploaded(uploaded).await?;
         Ok(())
     }
@@ -192,51 +182,17 @@ impl FlushTracker {
     /// path), but we re-check on every event to also pick up L0 slots freed by
     /// compaction via manifest refresh.
     async fn reconcile_and_dispatch(&mut self) -> Result<(), SlateDBError> {
-        self.register_new_imm_memtables();
+        let imm_memtables: Vec<_> = {
+            let guard = self.inner.state.read();
+            guard.state().imm_memtable.iter().rev().cloned().collect()
+        };
+        let inner = &self.inner;
+        self.frontier.register(imm_memtables.into_iter(), &mut || {
+            crate::db_state::SsTableId::Compacted(
+                inner.rand.rng().gen_ulid(inner.system_clock.as_ref()),
+            )
+        });
         self.dispatch_ready_memtables().await
-    }
-
-    fn register_new_imm_memtables(&mut self) {
-        let guard = self.inner.state.read();
-        for imm_memtable in guard.state().imm_memtable.iter().rev() {
-            let last_seq = imm_memtable
-                .table()
-                .last_seq()
-                .expect("immutable memtable has no entries");
-            if self
-                .tracked_imms
-                .iter()
-                .any(|tracked| tracked.last_seq == last_seq)
-            {
-                continue;
-            }
-            let sst_id = crate::db_state::SsTableId::Compacted(
-                self.inner
-                    .rand
-                    .rng()
-                    .gen_ulid(self.inner.system_clock.as_ref()),
-            );
-            self.tracked_imms.push_back(TrackedImm {
-                epoch: self.next_epoch,
-                last_seq,
-                sst_id,
-                imm_memtable: Arc::clone(imm_memtable),
-                state: TrackedImmState::PendingDispatch,
-            });
-            self.next_epoch = FlushEpoch(self.next_epoch.0 + 1);
-        }
-    }
-
-    fn reserved_l0_slots(&self) -> usize {
-        self.tracked_imms
-            .iter()
-            .filter(|tracked| {
-                matches!(
-                    tracked.state,
-                    TrackedImmState::Uploading | TrackedImmState::WritingManifest
-                )
-            })
-            .count()
     }
 
     fn available_l0_slots(&self) -> usize {
@@ -244,12 +200,12 @@ impl FlushTracker {
         self.inner
             .settings
             .l0_max_ssts
-            .saturating_sub(l0_len + self.reserved_l0_slots())
+            .saturating_sub(l0_len + self.frontier.reserved_l0_slots())
     }
 
     async fn dispatch_ready_memtables(&mut self) -> Result<(), SlateDBError> {
         while self.available_l0_slots() > 0 {
-            let Some(tracked) = self.prepare_next_upload() else {
+            let Some(tracked) = self.frontier.prepare_next_upload() else {
                 return Ok(());
             };
             let epoch = tracked.epoch;
@@ -270,35 +226,6 @@ impl FlushTracker {
                 .await?;
         }
         Ok(())
-    }
-
-    fn prepare_next_upload(&mut self) -> Option<&TrackedImm> {
-        let index = self
-            .tracked_imms
-            .iter()
-            .position(|tracked| matches!(tracked.state, TrackedImmState::PendingDispatch))?;
-        self.tracked_imms[index].state = TrackedImmState::Uploading;
-        Some(&self.tracked_imms[index])
-    }
-
-    fn set_tracked_state(&mut self, epoch: FlushEpoch, state: TrackedImmState) {
-        let tracked = self
-            .tracked_imms
-            .iter_mut()
-            .find(|tracked| tracked.epoch == epoch)
-            .expect("tracked imm not found for epoch");
-        tracked.state = state;
-    }
-
-    /// Remove tracked imms through the given epoch.
-    fn retire_through(&mut self, through_epoch: FlushEpoch) {
-        while self
-            .tracked_imms
-            .front()
-            .is_some_and(|tracked| tracked.epoch <= through_epoch)
-        {
-            self.tracked_imms.pop_front().expect("checked above");
-        }
     }
 
     async fn shutdown(&mut self, err: Option<SlateDBError>) -> Result<(), SlateDBError> {
@@ -339,7 +266,7 @@ impl FlushTracker {
             ManifestWriterCloseResult::Fenced { last_durable_epoch } => (true, *last_durable_epoch),
             ManifestWriterCloseResult::Err(_) => (false, None),
         };
-        for tracked in &self.tracked_imms {
+        for tracked in self.frontier.iter() {
             let beyond_durable = last_durable_epoch.is_none_or(|epoch| tracked.epoch > epoch);
             let should_clean = beyond_durable
                 && match tracked.state {
@@ -367,6 +294,105 @@ struct TrackedImm {
     sst_id: crate::db_state::SsTableId,
     imm_memtable: Arc<crate::mem_table::ImmutableMemtable>,
     state: TrackedImmState,
+}
+
+/// Tracks the frontier of immutable memtables being flushed to L0.
+///
+/// Encapsulates epoch assignment, dedup, state transitions, and target resolution.
+struct TrackedImmFrontier {
+    next_epoch: FlushEpoch,
+    tracked: VecDeque<TrackedImm>,
+}
+
+impl TrackedImmFrontier {
+    fn new() -> Self {
+        Self {
+            next_epoch: FlushEpoch(1),
+            tracked: VecDeque::new(),
+        }
+    }
+
+    /// Register newly frozen immutable memtables, deduplicating by `last_seq`.
+    fn register(
+        &mut self,
+        imm_memtables: impl Iterator<Item = Arc<crate::mem_table::ImmutableMemtable>>,
+        gen_sst_id: &mut impl FnMut() -> crate::db_state::SsTableId,
+    ) {
+        for imm_memtable in imm_memtables {
+            let last_seq = imm_memtable
+                .table()
+                .last_seq()
+                .expect("immutable memtable has no entries");
+            if self.tracked.iter().any(|t| t.last_seq == last_seq) {
+                continue;
+            }
+            self.tracked.push_back(TrackedImm {
+                epoch: self.next_epoch,
+                last_seq,
+                sst_id: gen_sst_id(),
+                imm_memtable,
+                state: TrackedImmState::PendingDispatch,
+            });
+            self.next_epoch = FlushEpoch(self.next_epoch.0 + 1);
+        }
+    }
+
+    /// Resolves a flush target to the epoch that must become durable.
+    fn resolve_target(&self, target: FlushTarget) -> Option<FlushEpoch> {
+        match target {
+            FlushTarget::CurrentDurable => None,
+            FlushTarget::All => self.tracked.back().map(|t| t.epoch),
+        }
+    }
+
+    /// Number of in-flight slots (uploading or writing manifest).
+    fn reserved_l0_slots(&self) -> usize {
+        self.tracked
+            .iter()
+            .filter(|t| {
+                matches!(
+                    t.state,
+                    TrackedImmState::Uploading | TrackedImmState::WritingManifest
+                )
+            })
+            .count()
+    }
+
+    /// Transition the next `PendingDispatch` entry to `Uploading` and return it.
+    fn prepare_next_upload(&mut self) -> Option<&TrackedImm> {
+        let index = self
+            .tracked
+            .iter()
+            .position(|t| matches!(t.state, TrackedImmState::PendingDispatch))?;
+        self.tracked[index].state = TrackedImmState::Uploading;
+        Some(&self.tracked[index])
+    }
+
+    /// Transition a tracked entry to the given state.
+    fn set_state(&mut self, epoch: FlushEpoch, state: TrackedImmState) {
+        let tracked = self
+            .tracked
+            .iter_mut()
+            .find(|t| t.epoch == epoch)
+            .expect("tracked imm not found for epoch");
+        tracked.state = state;
+    }
+
+    /// Remove tracked entries through the given epoch.
+    fn retire_through(&mut self, through_epoch: FlushEpoch) {
+        while self
+            .tracked
+            .front()
+            .is_some_and(|t| t.epoch <= through_epoch)
+        {
+            self.tracked.pop_front().expect("checked above");
+        }
+    }
+
+    /// Iterate over tracked entries (for orphan cleanup).
+    fn iter(&self) -> impl Iterator<Item = &TrackedImm> {
+        self.tracked.iter()
+    }
 }
 
 enum TrackedImmState {
@@ -894,5 +920,120 @@ mod tests {
         }
 
         flusher.close().await.unwrap();
+    }
+
+    mod frontier_tests {
+        use crate::db_state::SsTableId;
+        use crate::mem_table::{ImmutableMemtable, WritableKVTable};
+        use crate::memtable_flusher::tracker::{FlushEpoch, TrackedImmFrontier, TrackedImmState};
+        use crate::memtable_flusher::FlushTarget;
+        use crate::types::RowEntry;
+        use std::sync::Arc;
+
+        fn make_imm(seq: u64) -> Arc<ImmutableMemtable> {
+            let table = WritableKVTable::new();
+            table.put(RowEntry::new_value(
+                &format!("k{seq}").into_bytes(),
+                b"v",
+                seq,
+            ));
+            Arc::new(ImmutableMemtable::new(table, 0))
+        }
+
+        fn next_sst_id() -> SsTableId {
+            SsTableId::Compacted(ulid::Ulid::new())
+        }
+
+        #[test]
+        fn register_deduplicates_by_last_seq() {
+            let mut frontier = TrackedImmFrontier::new();
+            let imm = make_imm(1);
+            frontier.register(std::iter::once(Arc::clone(&imm)), &mut next_sst_id);
+            frontier.register(std::iter::once(imm), &mut next_sst_id);
+            assert_eq!(frontier.tracked.len(), 1);
+        }
+
+        #[test]
+        fn register_assigns_sequential_epochs() {
+            let mut frontier = TrackedImmFrontier::new();
+            frontier.register([make_imm(1), make_imm(2)].into_iter(), &mut next_sst_id);
+            assert_eq!(frontier.tracked[0].epoch, FlushEpoch(1));
+            assert_eq!(frontier.tracked[1].epoch, FlushEpoch(2));
+        }
+
+        #[test]
+        fn resolve_target_all_returns_last_epoch() {
+            let mut frontier = TrackedImmFrontier::new();
+            assert_eq!(frontier.resolve_target(FlushTarget::All), None);
+            frontier.register([make_imm(1), make_imm(2)].into_iter(), &mut next_sst_id);
+            assert_eq!(
+                frontier.resolve_target(FlushTarget::All),
+                Some(FlushEpoch(2))
+            );
+        }
+
+        #[test]
+        fn resolve_target_current_durable_returns_none() {
+            let mut frontier = TrackedImmFrontier::new();
+            frontier.register(std::iter::once(make_imm(1)), &mut next_sst_id);
+            assert_eq!(frontier.resolve_target(FlushTarget::CurrentDurable), None);
+        }
+
+        #[test]
+        fn prepare_next_upload_transitions_to_uploading() {
+            let mut frontier = TrackedImmFrontier::new();
+            frontier.register(std::iter::once(make_imm(1)), &mut next_sst_id);
+            let tracked = frontier.prepare_next_upload().unwrap();
+            assert_eq!(tracked.epoch, FlushEpoch(1));
+            assert!(matches!(tracked.state, TrackedImmState::Uploading));
+            // No more pending
+            assert!(frontier.prepare_next_upload().is_none());
+        }
+
+        #[test]
+        fn set_state_updates_tracked_entry() {
+            let mut frontier = TrackedImmFrontier::new();
+            frontier.register(std::iter::once(make_imm(1)), &mut next_sst_id);
+            frontier.set_state(FlushEpoch(1), TrackedImmState::WritingManifest);
+            assert!(matches!(
+                frontier.tracked[0].state,
+                TrackedImmState::WritingManifest
+            ));
+        }
+
+        #[test]
+        #[should_panic(expected = "tracked imm not found for epoch")]
+        fn set_state_panics_for_unknown_epoch() {
+            let mut frontier = TrackedImmFrontier::new();
+            frontier.set_state(FlushEpoch(99), TrackedImmState::Uploading);
+        }
+
+        #[test]
+        fn retire_through_removes_entries() {
+            let mut frontier = TrackedImmFrontier::new();
+            frontier.register(
+                [make_imm(1), make_imm(2), make_imm(3)].into_iter(),
+                &mut next_sst_id,
+            );
+            frontier.retire_through(FlushEpoch(2));
+            assert_eq!(frontier.tracked.len(), 1);
+            assert_eq!(frontier.tracked[0].epoch, FlushEpoch(3));
+        }
+
+        #[test]
+        fn reserved_l0_slots_counts_in_flight() {
+            let mut frontier = TrackedImmFrontier::new();
+            frontier.register(
+                [make_imm(1), make_imm(2), make_imm(3)].into_iter(),
+                &mut next_sst_id,
+            );
+            assert_eq!(frontier.reserved_l0_slots(), 0);
+            frontier.prepare_next_upload(); // epoch 1 -> Uploading
+            assert_eq!(frontier.reserved_l0_slots(), 1);
+            frontier.set_state(FlushEpoch(1), TrackedImmState::WritingManifest);
+            assert_eq!(frontier.reserved_l0_slots(), 1);
+            frontier.retire_through(FlushEpoch(1));
+            assert_eq!(frontier.reserved_l0_slots(), 0);
+        }
     }
 }
