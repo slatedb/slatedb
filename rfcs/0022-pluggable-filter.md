@@ -38,7 +38,7 @@ Table of Contents:
 
 <!-- TOC end -->
 
-Status: Draft
+Status: Accepted
 
 Authors:
 
@@ -172,23 +172,108 @@ pub trait Filter {
     fn size(&self) -> usize;
 }
 
-/// Extractor for a prefix from a key for use in prefix-based filtering.
+/// A membership query passed to [`Filter::might_match`].
+pub struct FilterQuery {
+    /// The target of this query (a specific key or a prefix).
+    pub target: FilterTarget,
+    /// Opaque, caller-supplied context for custom filters.
+    ///
+    /// Custom filters downcast this to their expected type. For example,
+    /// a min/max version filter expects `Arc<VersionBounds>` and ignores
+    /// the query if the downcast fails. The built-in bloom filter ignores
+    /// this field entirely.
+    pub context: Option<Arc<dyn Any + Send + Sync>>,
+}
+
+/// The target of a filter query.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FilterTarget {
+    /// Used to test whether a specific key might exist in the SST.
+    Point(Bytes),
+    /// Used to test whether any key with the given prefix might exist in the SST.
+    Prefix(Bytes),
+}
+```
+
+Key design decisions:
+
+1. **`FilterQuery` with opaque context**: `FilterQuery` is a struct rather than
+   a plain enum so it can carry caller-supplied context alongside the query kind.
+   The `context` field is an `Option<Arc<dyn Any + Send + Sync>>` cloned from
+   `ScanOptions::filter_context`. Custom filters downcast it to their expected
+   type — e.g., a min/max version filter downcasts to `VersionBounds`. If the
+   downcast fails or context is `None`, the filter returns `true` (cannot
+   answer). The `Arc` clone is cheap (reference count bump) and the object can
+   be reused across concurrent scans without per-call allocation. The built-in
+   bloom filter ignores context entirely.
+
+2. **Filter applicability is expressed through `might_match` returning `true`**:
+   Rather than adding a separate `applies_to` or `can_answer` method, filters
+   express inapplicability by returning `true` from `might_match` — meaning
+   "I cannot rule this out." This keeps the trait surface minimal and works
+   uniformly for all filter types:
+
+   - **Build time**: `FilterBuilder::add_entry` receives the full `RowEntry`.
+     Builders that don't care about certain entries simply ignore them (e.g.,
+     a timestamp-range filter ignores entries without timestamps, a prefix
+     bloom filter ignores entries whose key doesn't match the extractor).
+   - **Read time (`get`)**: `might_match` receives `FilterTarget::Point`
+     with the full key. Filters that can't answer point queries return `true`.
+   - **Read time (`scan_prefix`)**: `might_match` receives
+     `FilterTarget::Prefix` with only the prefix. Filters that can't answer
+     prefix queries return `true`. For bloom filters with a `PrefixExtractor`,
+     the `in_domain` check is performed *inside* `might_match` — if the prefix
+     is not in domain, the filter returns `true` rather than risk a false
+     negative.
+
+   This means the engine never needs to know which filters apply to which
+   queries. It always evaluates all filters with AND logic and trusts each
+   filter to return `true` when it cannot answer.
+
+3. **`name()` for safety**: Each policy's name is stored alongside its filter
+   data in the composite filter block. When reading an SST, if a stored name
+   doesn't match any configured policy, that sub-filter is skipped rather than
+   misinterpreted. This allows safe policy migration without manifest-level
+   validation (same pattern as LevelDB's `FilterPolicy::Name()`).
+
+4. **`FilterTarget` enum**: Instead of just accepting a hash, the `might_match`
+   method takes a `FilterQuery` whose `target` field distinguishes point lookups
+   and prefix lookups. Filters that only support point lookups can conservatively
+   return `true` for prefix queries.
+
+5. **`encode` on `Filter`, `decode` on `FilterPolicy`**: Encoding is on the
+   `Filter` instance because it knows its own internal representation.
+   Decoding is on the `FilterPolicy` because the caller needs the policy
+   (which knows the format) to reconstruct a `Filter` from raw bytes.
+
+### Built-in Implementation: `BloomFilterPolicy`
+
+A single `BloomFilterPolicy` handles both full-key and prefix filtering using
+one bloom filter per SST. Both full-key hashes and prefix hashes are added to
+the same bit array.
+
+#### `PrefixExtractor`
+
+`PrefixExtractor` is specific to `BloomFilterPolicy` — it is not part of the
+core `FilterPolicy`/`FilterBuilder`/`Filter` traits. Custom filter policies
+that need prefix-based filtering can implement their own selection logic
+directly in `add_entry`/`might_match`.
+
+```rust
+/// Extractor for a prefix from a key for use in prefix-based bloom filtering.
 ///
-/// Used on the write path to hash prefixes into the filter during SST
+/// Used on the write path to hash prefixes into the bloom filter during SST
 /// construction.
 pub trait PrefixExtractor {
     /// A unique name identifying this extractor's configuration.
     ///
     /// Changing the extractor (e.g. switching from a 4-byte fixed prefix
     /// to a delimiter-based one) changes which hashes are stored in the
-    /// filter, so existing filters become invalid. The built-in
-    /// `BloomFilterPolicy` includes this name in the policy name it
-    /// writes to SST metadata (e.g. `"slatedb.BloomFilter:prefix=fixed3"`),
-    /// which lets the reader detect the mismatch and skip the filter
-    /// instead of returning wrong results.
-    ///
-    /// Custom filter policies that use a `PrefixExtractor` should do
-    /// the same.
+    /// filter, so existing filters become invalid. `BloomFilterPolicy`
+    /// includes this name in the policy name it writes to SST metadata
+    /// (e.g. `"slatedb.BloomFilter:prefix=fixed3"`), which lets the reader
+    /// detect the mismatch and skip the filter instead of returning wrong
+    /// results.
     fn name(&self) -> &str;
 
     /// Returns whether the given prefix is a valid output of `extract()`.
@@ -219,86 +304,9 @@ pub trait PrefixExtractor {
     /// for the key).
     fn extract<'a>(&self, key: &'a [u8]) -> Option<&'a [u8]>;
 }
-
-/// A membership query passed to [`Filter::might_match`].
-pub struct FilterQuery {
-    /// The kind of query (point or prefix).
-    pub kind: FilterQueryKind,
-    /// Opaque, caller-supplied context for custom filters.
-    ///
-    /// Custom filters downcast this to their expected type. For example,
-    /// a min/max version filter expects `Arc<VersionBounds>` and ignores
-    /// the query if the downcast fails. The built-in bloom filter ignores
-    /// this field entirely.
-    pub context: Option<Arc<dyn Any + Send + Sync>>,
-}
-
-/// The kind of filter query.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum FilterQueryKind {
-    /// Used to test whether a specific key might exist in the SST.
-    Point(Bytes),
-    /// Used to test whether any key with the given prefix might exist in the SST.
-    Prefix(Bytes),
-}
 ```
 
-Key design decisions:
-
-1. **`FilterQuery` with opaque context**: `FilterQuery` is a struct rather than
-   a plain enum so it can carry caller-supplied context alongside the query kind.
-   The `context` field is an `Option<Arc<dyn Any + Send + Sync>>` cloned from
-   `ScanOptions::filter_context`. Custom filters downcast it to their expected
-   type — e.g., a min/max version filter downcasts to `VersionBounds`. If the
-   downcast fails or context is `None`, the filter returns `true` (cannot
-   answer). The `Arc` clone is cheap (reference count bump) and the object can
-   be reused across concurrent scans without per-call allocation. The built-in
-   bloom filter ignores context entirely.
-
-2. **Filter applicability is expressed through `might_match` returning `true`**:
-   Rather than adding a separate `applies_to` or `can_answer` method, filters
-   express inapplicability by returning `true` from `might_match` — meaning
-   "I cannot rule this out." This keeps the trait surface minimal and works
-   uniformly for all filter types:
-
-   - **Build time**: `FilterBuilder::add_entry` receives the full `RowEntry`.
-     Builders that don't care about certain entries simply ignore them (e.g.,
-     a timestamp-range filter ignores entries without timestamps, a prefix
-     bloom filter ignores entries whose key doesn't match the extractor).
-   - **Read time (`get`)**: `might_match` receives `FilterQueryKind::Point`
-     with the full key. Filters that can't answer point queries return `true`.
-   - **Read time (`scan_prefix`)**: `might_match` receives
-     `FilterQueryKind::Prefix` with only the prefix. Filters that can't answer
-     prefix queries return `true`. For bloom filters with a `PrefixExtractor`,
-     the `in_domain` check is performed *inside* `might_match` — if the prefix
-     is not in domain, the filter returns `true` rather than risk a false
-     negative.
-
-   This means the engine never needs to know which filters apply to which
-   queries. It always evaluates all filters with AND logic and trusts each
-   filter to return `true` when it cannot answer.
-
-3. **`name()` for safety**: Each policy's name is stored alongside its filter
-   data in the composite filter block. When reading an SST, if a stored name
-   doesn't match any configured policy, that sub-filter is skipped rather than
-   misinterpreted. This allows safe policy migration without manifest-level
-   validation (same pattern as LevelDB's `FilterPolicy::Name()`).
-
-4. **`FilterQueryKind` enum**: Instead of just accepting a hash, the `might_match`
-   method takes a `FilterQuery` whose `kind` field distinguishes point lookups
-   and prefix lookups. Filters that only support point lookups can conservatively
-   return `true` for prefix queries.
-
-5. **`encode` on `Filter`, `decode` on `FilterPolicy`**: Encoding is on the
-   `Filter` instance because it knows its own internal representation.
-   Decoding is on the `FilterPolicy` because the caller needs the policy
-   (which knows the format) to reconstruct a `Filter` from raw bytes.
-
-### Built-in Implementation: `BloomFilterPolicy`
-
-A single `BloomFilterPolicy` handles both full-key and prefix filtering using
-one bloom filter per SST. Both full-key hashes and prefix hashes are added to
-the same bit array. The policy would look like:
+The policy would look like:
 ```rust
 #[derive(Debug)]
 pub struct BloomFilterPolicy {
@@ -504,14 +512,14 @@ The same filter is probed with different hashes depending on the query type:
 ```rust
 impl Filter for BloomFilter {
     fn might_match(&self, query: &FilterQuery) -> bool {
-        match &query.kind {
-            FilterQueryKind::Point(key) => {
+        match &query.target {
+            FilterTarget::Point(key) => {
                 if !self.whole_key_filtering {
                     return true; // Cannot answer point queries
                 }
                 self.might_contain(filter_hash(key.as_ref()))
             }
-            FilterQueryKind::Prefix(prefix) => {
+            FilterTarget::Prefix(prefix) => {
                 // No PrefixExtractor → cannot answer prefix queries
                 let Some(ref extractor) = self.prefix_extractor else {
                     return true;
@@ -787,7 +795,7 @@ and reset per block in `finish_block()` instead of once at SST completion.
 On the read path, per-block filter data stored in `BlockMeta` is checked
 before loading a data block, using the same `might_match` interface.
 
-### Key Selection via `KeyFilter`
+### Key Selection via `KeySelector`
 
 The current `BloomFilterPolicy` applies to all keys in an SST. Some workloads
 need different filter strategies for different key subsets — e.g., a full-key
@@ -795,17 +803,17 @@ bloom for keys starting with `user::` and a prefix bloom for keys starting
 with `post::`. With the current design, this requires implementing a custom `FilterPolicy` that
 hard-codes the selection logic in `add_entry` and `might_match`.
 
-A `KeyFilter` trait would make this composable without custom policies:
+A `KeySelector` trait would make this composable without custom policies:
 
 ```rust
-pub trait KeyFilter: Send + Sync {
+pub trait KeySelector: Send + Sync {
     fn name(&self) -> &str;
     fn includes(&self, key: &[u8]) -> bool;
 }
 ```
 
-`BloomFilterPolicy` would gain an optional `with_key_filter(Arc<dyn KeyFilter>)`
-method. On the write path, `KeyFilter::includes` gates entry inclusion — if
+`BloomFilterPolicy` would gain an optional `with_key_selector(Arc<dyn KeySelector>)`
+method. On the write path, `KeySelector::includes` gates entry inclusion — if
 `false`, the entry is skipped entirely (no full-key hash, no prefix hash). On
 the read path for Point queries, excluded keys return `true` (inapplicable).
 
@@ -818,17 +826,17 @@ let db = Db::builder("path", object_store)
     .with_filter_policies(vec![
         // Full-key bloom, only for "user::" keys
         Arc::new(BloomFilterPolicy::new(10)
-            .with_key_filter(Arc::new(StartsWithFilter::new("user::")))),
+            .with_key_selector(Arc::new(StartsWithSelector::new("user::")))),
         // Prefix bloom, only for "post::" keys
         Arc::new(BloomFilterPolicy::new(10)
-            .with_key_filter(Arc::new(StartsWithFilter::new("post::")))
+            .with_key_selector(Arc::new(StartsWithSelector::new("post::")))
             .with_prefix_extractor(Arc::new(FixedPrefixExtractor::new(6)))
             .with_whole_key_filtering(false)),
     ])
     .build().await?;
 ```
 
-`KeyFilter` would be `BloomFilterPolicy`-specific, not part of the core
+`KeySelector` would be `BloomFilterPolicy`-specific, not part of the core
 `FilterPolicy`/`FilterBuilder`/`Filter` traits. Custom filter policies can
 implement their own selection logic directly in `add_entry`/`might_match`.
 
@@ -855,48 +863,20 @@ impact is significant and the fix is well-understood.
 
 ### Should `scan` / `scan_with_options` also support prefix filtering?
 
-Currently, prefix filtering is only available through `scan_prefix` /
-`scan_prefix_with_options`, which accept an explicit prefix. For plain
-`scan` / `scan_with_options` calls (which accept a `BytesRange`), the engine
-could infer the prefix using the `PrefixExtractor`:
-
-**Option A: No inference — prefix filtering only via `scan_prefix`.**
-`scan` / `scan_with_options` never use prefix filters. Users who want prefix
-filtering use the dedicated `scan_prefix` methods.
-
-- Pro: Simple, no ambiguity about when filtering is active.
-- Con: Users who build their own prefix ranges don't get filtering.
-
-**Option B: Engine infers using the `PrefixExtractor`.**
-The engine calls `extract()` on the start and end bounds of the range. If both
-yield the same prefix, that prefix is used for filter evaluation.
-
-- Pro: Prefix filtering works transparently for any range that happens to be a prefix range.
-- Con: Implicit behavior — the caller has no control over whether the filter is used.
+**Resolved: Option A — No inference.** Prefix filtering only via `scan_prefix` /
+`scan_prefix_with_options`. `scan` / `scan_with_options` never use prefix
+filters. This keeps behavior explicit and avoids ambiguity about when filtering
+is active.
 
 ### Should `filter_policies` be an array or a single policy?
 
-This RFC proposes `filter_policies: Vec<Arc<dyn FilterPolicy>>` (an array of
-policies with a composite filter block and AND-logic evaluation). The
-alternative is a simpler `filter_policy: Option<Arc<dyn FilterPolicy>>`
-(singular), where each SST has exactly one filter.
-
-**Why array is chosen:**
-
-- **Migration**: The old policy stays in the array alongside the new one, so
-  existing SSTs' filters remain usable during the transition. A singular slot
-  forces an all-or-nothing switch where old filters are disabled until
-  compaction rewrites all SSTs.
-- **Multi-filter composition**: Users can combine complementary filter types
-  (e.g., bloom + min/max) as separate policies without implementing a custom
-  composite `FilterPolicy`.
-- **API stability**: Starting with a singular slot and migrating to an array
-  later would be a breaking API change. Starting with the array avoids this.
-
-**Tradeoff**: The array adds complexity like composite filter block encoding, the
-write path iterates over policies instead of calling one, and the read path
-evaluates multiple filters in sequence. The trait interfaces themselves are
-unchanged.
+**Resolved: Array.** Both reviewers approved the array approach. The array
+enables migration (old policy stays alongside the new one), multi-filter
+composition (e.g., bloom + min/max), and avoids a future breaking API change.
+A "compound filter" that looks like a single filter to SlateDB but internally
+contains multiple sub-filters (e.g., `filter_2_start_idx, filter_1_bytes,
+filter_2_bytes`) was also discussed as a complementary approach for cases like
+different filter strategies per key subset — to be explored further in code.
 
 ### Should range scan filtering be added?
 
@@ -918,4 +898,3 @@ instead of just a prefix.
 - [SuRF: Succinct Range Filters (SIGMOD 2018)](https://dl.acm.org/doi/fullHtml/10.1145/3375660)
 
 ## Updates
-
