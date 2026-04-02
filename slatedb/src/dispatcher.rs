@@ -616,6 +616,7 @@ impl MessageHandlerExecutor {
         rx: async_channel::Receiver<T>,
         handle: &Handle,
     ) -> Result<(), SlateDBError> {
+        assert!(!handlers.is_empty(), "handlers must not be empty");
         let token = CancellationToken::new();
         let mut futures = Vec::with_capacity(handlers.len());
 
