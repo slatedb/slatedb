@@ -3051,7 +3051,7 @@ mod tests {
                     .recv()
                     .await
                     .expect("channel closed before CompactionJobAttemptFinished"),
-                Err(_) => panic!("channel closed before receiving any message"),
+                Err(e) => panic!("channel closed before receiving any message: {e}"),
             }
         })
         .await
@@ -3091,7 +3091,7 @@ mod tests {
                     .recv()
                     .await
                     .expect("channel closed before CompactionJobAttemptFinished"),
-                Err(_) => panic!("channel closed before receiving any message"),
+                Err(e) => panic!("channel closed before receiving any message: {e}"),
             }
         })
         .await
@@ -3203,7 +3203,7 @@ mod tests {
                     .recv()
                     .await
                     .expect("channel closed before CompactionJobAttemptFinished"),
-                Err(_) => panic!("channel closed before receiving any message"),
+                Err(e) => panic!("channel closed before receiving any message: {e}"),
             }
         })
         .await
@@ -3679,7 +3679,7 @@ mod tests {
                     .recv()
                     .await
                     .expect("channel closed before CompactionJobAttemptFinished"),
-                Err(_) => panic!("channel closed before receiving any message"),
+                Err(e) => panic!("channel closed before receiving any message: {e}"),
             }
         })
         .await
@@ -3818,7 +3818,7 @@ mod tests {
                     .recv()
                     .await
                     .expect("channel closed before CompactionJobAttemptFinished"),
-                Err(_) => panic!("channel closed before receiving any message"),
+                Err(e) => panic!("channel closed before receiving any message: {e}"),
             }
         })
         .await
@@ -3850,7 +3850,7 @@ mod tests {
                     .recv()
                     .await
                     .expect("channel closed before CompactionJobAttemptFinished"),
-                Err(_) => panic!("channel closed before receiving any message"),
+                Err(e) => panic!("channel closed before receiving any message: {e}"),
             }
         })
         .await

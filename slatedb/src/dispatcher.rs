@@ -24,6 +24,14 @@
 //! [MessageHandlerExecutor::monitor_on] to start the event loop and monitor tasks until
 //! shutdown.
 //!
+//! Handlers can also be grouped for parallel processing using
+//! [MessageHandlerExecutor::add_handlers]. All handlers in a group share a single
+//! [async_channel::Receiver], enabling multi-consumer message distribution. Each handler
+//! runs its own [MessageDispatcher] event loop with independent tickers, but the group
+//! shares a single [tokio_util::sync::CancellationToken] and result cell. This is useful
+//! for tasks like parallel L0 uploading where multiple handlers can process messages from
+//! the same channel concurrently.
+//!
 //! ## Example
 //!
 //! ```ignore
@@ -239,18 +247,6 @@ impl<T: Send + std::fmt::Debug> MessageDispatcher<T> {
         Ok(())
     }
 
-    /// Tells the handler to clean up any resources.
-    ///
-    /// If cleanup fails, the error is returned.
-    ///
-    /// ## Arguments
-    ///
-    /// * `result`: The value of [crate::db_state::DbState::closed_result] when
-    ///   [MessageDispatcher::run] returns.
-    ///
-    /// ## Returns
-    ///
-    /// The [Result] after cleaning up resources.
     /// Runs the full dispatcher lifecycle: [run] with panic catching, write to
     /// `closed_result`, then [cleanup]. Returns the run result.
     #[allow(clippy::panic)] // for failpoint
@@ -260,6 +256,7 @@ impl<T: Send + std::fmt::Debug> MessageDispatcher<T> {
         closed_result: ClosedResultWriter,
         #[allow(unused_variables)] fp_registry: Arc<FailPointRegistry>,
     ) -> Result<(), SlateDBError> {
+        // catch dispatcher panics using catch_unwind
         let run_unwind_result = AssertUnwindSafe(self.run()).catch_unwind().await;
         let (run_result, run_maybe_panic) = split_unwind_result(name.clone(), run_unwind_result);
         if let Err(ref err) = run_result {
@@ -273,7 +270,9 @@ impl<T: Send + std::fmt::Debug> MessageDispatcher<T> {
         fail_point!(fp_registry.clone(), "executor-wrapper-before-write", |_| {
             panic!("failpoint: executor-wrapper-before-write");
         });
+        // set result in db state (first writer wins)
         closed_result.write(run_result.clone());
+        // re-read the result since it might have already been set by another task
         let final_result = closed_result
             .reader()
             .read()
@@ -294,6 +293,18 @@ impl<T: Send + std::fmt::Debug> MessageDispatcher<T> {
         run_result
     }
 
+    /// Tells the handler to clean up any resources.
+    ///
+    /// If cleanup fails, the error is returned.
+    ///
+    /// ## Arguments
+    ///
+    /// * `result`: The value of [crate::db_state::DbState::closed_result] when
+    ///   [MessageDispatcher::run] returns.
+    ///
+    /// ## Returns
+    ///
+    /// The [Result] after cleaning up resources.
     async fn cleanup(&mut self, result: Result<(), SlateDBError>) -> Result<(), SlateDBError> {
         fail_point!(Arc::clone(&self.fp_registry), "dispatcher-cleanup", |_| {
             Err(SlateDBError::Fenced)
@@ -492,7 +503,6 @@ impl TaskMonitor {
                         .remove(&group_name)
                         .expect("group tracking entry missing on final member")
                         .result;
-                    self.closed_result.write(group_result.clone());
                     self.results
                         .get(&group_name)
                         .expect("result cell isn't set when expected")
