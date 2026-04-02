@@ -24,7 +24,6 @@ use crate::db_state::SsTableView;
 use crate::error::SlateDBError;
 use crate::manifest::store::FenceableManifest;
 use crate::utils::safe_async_channel;
-use crate::utils::safe_mpsc;
 use crate::utils::IdGenerator;
 use std::cmp;
 use std::collections::BTreeMap;
@@ -89,7 +88,7 @@ impl ManifestWriterCloseResult {
 
 /// Ordered L0 retirement and manifest update subsystem.
 pub(crate) struct ManifestWriter {
-    commands_tx: safe_mpsc::SafeSender<ManifestWriterCommand>,
+    commands_tx: safe_async_channel::SafeSender<ManifestWriterCommand>,
     task: Option<JoinHandle<ManifestWriterCloseResult>>,
 }
 
@@ -102,7 +101,7 @@ impl ManifestWriter {
         handle: &Handle,
         tracker_tx: safe_async_channel::SafeSender<TrackerMessage>,
     ) -> Self {
-        let (commands_tx, commands_rx) = safe_mpsc::unbounded_channel();
+        let (commands_tx, commands_rx) = safe_async_channel::unbounded_channel();
         let task = handle.spawn(
             ManifestWriterTask::new(
                 db,
@@ -187,7 +186,7 @@ struct ManifestWriterTask {
     db: Arc<DbInner>,
     manifest: FenceableManifest,
     manifest_poll_interval: Duration,
-    commands_rx: safe_mpsc::SafeReceiver<ManifestWriterCommand>,
+    commands_rx: safe_async_channel::SafeReceiver<ManifestWriterCommand>,
     tracker_tx: safe_async_channel::SafeSender<TrackerMessage>,
     ready: BTreeMap<FlushEpoch, UploadedMemtable>,
     next_epoch: FlushEpoch,
@@ -202,7 +201,7 @@ impl ManifestWriterTask {
         db: Arc<DbInner>,
         manifest: FenceableManifest,
         manifest_poll_interval: Duration,
-        commands_rx: safe_mpsc::SafeReceiver<ManifestWriterCommand>,
+        commands_rx: safe_async_channel::SafeReceiver<ManifestWriterCommand>,
         tracker_tx: safe_async_channel::SafeSender<TrackerMessage>,
     ) -> Self {
         Self {
@@ -838,7 +837,7 @@ mod tests {
             Arc::clone(&fp_registry),
             None,
         ));
-        let (write_tx, _) = mpsc::unbounded_channel();
+        let (write_tx, _) = async_channel::unbounded();
         let inner = Arc::new(
             DbInner::new(
                 settings.clone(),

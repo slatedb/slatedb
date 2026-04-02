@@ -464,7 +464,7 @@ mod tests {
             Arc::clone(&fp_registry),
             None,
         ));
-        let (write_tx, _) = tokio::sync::mpsc::unbounded_channel();
+        let (write_tx, _) = async_channel::unbounded();
         let inner = Arc::new(
             DbInner::new(
                 settings,

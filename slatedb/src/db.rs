@@ -37,10 +37,10 @@ use crate::dispatcher::MessageHandlerExecutor;
 use crate::garbage_collector::GC_TASK_NAME;
 use crate::transaction_manager::IsolationLevel;
 use crate::CloseReason;
+use async_channel::Sender;
 use log::{info, trace, warn};
 use parking_lot::RwLock;
 use std::time::Duration;
-use tokio::sync::mpsc::UnboundedSender;
 
 use crate::batch::WriteBatch;
 use crate::batch_write::{WriteBatchMessage, WRITE_BATCH_TASK_NAME};
@@ -88,7 +88,7 @@ pub(crate) struct DbInner {
     pub(crate) settings: Settings,
     pub(crate) table_store: Arc<TableStore>,
     pub(crate) memtable_flusher: Arc<MemtableFlusher>,
-    pub(crate) write_notifier: UnboundedSender<WriteBatchMessage>,
+    pub(crate) write_notifier: Sender<WriteBatchMessage>,
     pub(crate) db_stats: DbStats,
     /// Kept alive so the underlying `MetricsRecorder` is not dropped while
     /// metric handles in `DbStats` (and other stats structs) are still in use.
@@ -121,7 +121,7 @@ impl DbInner {
         table_store: Arc<TableStore>,
         manifest: DirtyObject<Manifest>,
         memtable_flusher: Arc<MemtableFlusher>,
-        write_notifier: UnboundedSender<WriteBatchMessage>,
+        write_notifier: Sender<WriteBatchMessage>,
         recorder: MetricsRecorderHelper,
         fp_registry: Arc<FailPointRegistry>,
         merge_operator: Option<crate::merge_operator::MergeOperatorType>,
@@ -1704,6 +1704,10 @@ mod tests {
     use crate::db_state::ManifestCore;
     use crate::db_stats::IMMUTABLE_MEMTABLE_FLUSHES;
     use crate::format::sst::SsTableFormat;
+    use crate::instrumented_object_store::stats::{
+        REQUEST_COUNT as OBJECT_STORE_REQUEST_COUNT,
+        REQUEST_DURATION_SECONDS as OBJECT_STORE_REQUEST_DURATION_SECONDS,
+    };
     use crate::iter::RowEntryIterator;
     use crate::manifest::store::{ManifestStore, StoredManifest};
     use crate::object_stores::ObjectStores;
@@ -1729,7 +1733,8 @@ mod tests {
     use slatedb_common::clock::DefaultSystemClock;
     use slatedb_common::clock::MockSystemClock;
     use slatedb_common::metrics::{
-        lookup_metric, lookup_metric_with_labels, DefaultMetricsRecorder, MetricsRecorderHelper,
+        lookup_metric, lookup_metric_with_labels, DefaultMetricsRecorder, MetricValue,
+        MetricsRecorderHelper,
     };
     use std::collections::BTreeMap;
     use std::collections::Bound::Included;
@@ -1737,6 +1742,92 @@ mod tests {
     use std::time::Duration;
     use tokio::runtime::Runtime;
     use tracing::info;
+
+    fn object_store_labels(
+        component: &'static str,
+        store_type: &'static str,
+        op: &'static str,
+        api: &'static str,
+    ) -> [(&'static str, &'static str); 4] {
+        [
+            ("component", component),
+            ("store_type", store_type),
+            ("op", op),
+            ("api", api),
+        ]
+    }
+
+    fn lookup_object_store_histogram_count(
+        recorder: &DefaultMetricsRecorder,
+        labels: &[(&str, &str)],
+    ) -> Option<u64> {
+        recorder
+            .snapshot()
+            .by_name_and_labels(OBJECT_STORE_REQUEST_DURATION_SECONDS, labels)
+            .map(|metric| match &metric.value {
+                MetricValue::Histogram { count, .. } => *count,
+                other => panic!("expected histogram metric, got {other:?}"),
+            })
+    }
+
+    fn lookup_object_store_op_request_count(
+        recorder: &DefaultMetricsRecorder,
+        component: &'static str,
+        store_type: &'static str,
+        op: &'static str,
+    ) -> i64 {
+        let apis = match op {
+            "get" => &["get", "get_range", "get_ranges", "head"][..],
+            "put" => &[
+                "put",
+                "multipart_init",
+                "multipart_part",
+                "multipart_complete",
+            ][..],
+            "delete" => &["delete"][..],
+            _ => panic!("unexpected op {op}"),
+        };
+
+        apis.iter()
+            .map(|api| {
+                lookup_metric_with_labels(
+                    recorder,
+                    OBJECT_STORE_REQUEST_COUNT,
+                    &object_store_labels(component, store_type, op, api),
+                )
+                .unwrap_or(0)
+            })
+            .sum()
+    }
+
+    fn lookup_object_store_op_histogram_count(
+        recorder: &DefaultMetricsRecorder,
+        component: &'static str,
+        store_type: &'static str,
+        op: &'static str,
+    ) -> u64 {
+        let apis = match op {
+            "get" => &["get", "get_range", "get_ranges", "head"][..],
+            "put" => &[
+                "put",
+                "multipart_init",
+                "multipart_part",
+                "multipart_complete",
+            ][..],
+            "delete" => &["delete"][..],
+            _ => panic!("unexpected op {op}"),
+        };
+
+        apis.iter()
+            .map(|api| {
+                lookup_object_store_histogram_count(
+                    recorder,
+                    &object_store_labels(component, store_type, op, api),
+                )
+                .unwrap_or(0)
+            })
+            .sum()
+    }
 
     #[tokio::test]
     async fn test_put_get_delete() {
@@ -2331,6 +2422,121 @@ mod tests {
         assert!(access_count1 > 0);
         assert!(access_count1 >= access_count0);
         assert!(lookup_metric(&metrics_recorder, PART_HIT_COUNT).unwrap() >= 1);
+    }
+
+    #[tokio::test]
+    async fn test_db_records_remote_object_store_reads_but_not_cache_hits() {
+        // given:
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let mut opts = test_db_options(0, 1024, None);
+        let temp_dir = tempfile::Builder::new()
+            .prefix("objstore_metrics_test_")
+            .tempdir()
+            .unwrap();
+
+        opts.object_store_cache_options.root_folder = Some(temp_dir.keep());
+        opts.object_store_cache_options.part_size_bytes = 1024;
+        let path = "/tmp/test_db_records_remote_object_store_reads_but_not_cache_hits";
+        let kv_store = Db::builder(path, object_store.clone())
+            .with_settings(opts)
+            .build()
+            .await
+            .unwrap();
+
+        kv_store.put(b"test_key", b"test_value").await.unwrap();
+        kv_store.flush().await.unwrap();
+        kv_store
+            .flush_with_options(FlushOptions {
+                flush_type: FlushType::MemTable,
+            })
+            .await
+            .unwrap();
+        kv_store.close().await.unwrap();
+
+        let mut reopen_opts = test_db_options(0, 1024, None);
+        let reopen_temp_dir = tempfile::Builder::new()
+            .prefix("objstore_metrics_reopen_")
+            .tempdir()
+            .unwrap();
+        reopen_opts.object_store_cache_options.root_folder = Some(reopen_temp_dir.keep());
+        reopen_opts.object_store_cache_options.part_size_bytes = 1024;
+        let metrics_recorder = Arc::new(DefaultMetricsRecorder::new());
+        let reopened = Db::builder(path, object_store)
+            .with_settings(reopen_opts)
+            .with_metrics_recorder(metrics_recorder.clone())
+            .build()
+            .await
+            .unwrap();
+
+        let requests_before =
+            lookup_object_store_op_request_count(&metrics_recorder, "db", "main", "get");
+
+        // when:
+        let _got = reopened.get(b"test_key").await.unwrap();
+        let requests_after_first =
+            lookup_object_store_op_request_count(&metrics_recorder, "db", "main", "get");
+        let got = reopened.get(b"test_key").await.unwrap();
+        let requests_after_second =
+            lookup_object_store_op_request_count(&metrics_recorder, "db", "main", "get");
+
+        // then:
+        assert!(requests_after_first > requests_before);
+        assert_eq!(got, Some(Bytes::from_static(b"test_value")));
+        assert_eq!(requests_after_second, requests_after_first);
+        assert_eq!(
+            lookup_object_store_op_histogram_count(&metrics_recorder, "db", "main", "get"),
+            requests_after_first as u64
+        );
+        reopened.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_db_records_main_and_wal_object_store_requests_separately() {
+        // given:
+        let main_object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let wal_object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let metrics_recorder = Arc::new(DefaultMetricsRecorder::new());
+        let path = "/tmp/test_db_records_main_and_wal_object_store_requests_separately";
+        let db = Db::builder(path, main_object_store)
+            .with_settings(test_db_options(0, 1024, None))
+            .with_wal_object_store(wal_object_store)
+            .with_metrics_recorder(metrics_recorder.clone())
+            .build()
+            .await
+            .unwrap();
+
+        let wal_before =
+            lookup_object_store_op_request_count(&metrics_recorder, "db", "wal", "put");
+        let main_before =
+            lookup_object_store_op_request_count(&metrics_recorder, "db", "main", "put");
+        let wal_hist_before =
+            lookup_object_store_op_histogram_count(&metrics_recorder, "db", "wal", "put");
+        let main_hist_before =
+            lookup_object_store_op_histogram_count(&metrics_recorder, "db", "main", "put");
+
+        // when:
+        db.put(b"key", b"value").await.unwrap();
+        db.flush().await.unwrap();
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::MemTable,
+        })
+        .await
+        .unwrap();
+
+        let wal_after = lookup_object_store_op_request_count(&metrics_recorder, "db", "wal", "put");
+        let main_after =
+            lookup_object_store_op_request_count(&metrics_recorder, "db", "main", "put");
+        let wal_hist_after =
+            lookup_object_store_op_histogram_count(&metrics_recorder, "db", "wal", "put");
+        let main_hist_after =
+            lookup_object_store_op_histogram_count(&metrics_recorder, "db", "main", "put");
+
+        // then:
+        assert!(wal_after > wal_before);
+        assert!(main_after > main_before);
+        assert!(wal_hist_after > wal_hist_before);
+        assert!(main_hist_after > main_hist_before);
+        db.close().await.unwrap();
     }
 
     async fn test_object_store_cache_helper(

@@ -19,7 +19,6 @@ use std::any::Any;
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
-use tokio::sync::mpsc::UnboundedSender;
 use ulid::Ulid;
 use uuid::Uuid;
 
@@ -224,13 +223,13 @@ fn compute_lower_bound(prev_block_last_key: &Bytes, this_block_first_key: &Bytes
     this_block_first_key.slice(..prev_block_last_key.len() + 1)
 }
 
-/// An extension trait that adds a `.send_safely(...)` method to tokio's `UnboundedSender<T>`.
+/// An extension trait that adds a `.send_safely(...)` method to `async_channel::Sender<T>`.
 pub(crate) trait SendSafely<T> {
     /// Attempts to send a message to the channel, and if the channel is closed, returns the error
     /// in `error_reader` if it is set, otherwise panics.
     ///
     /// This is useful for handling shutdown race conditions where the receiver's channel is dropped
-    /// before the sender is shut down.`
+    /// before the sender is shut down.
     fn send_safely(
         &self,
         closed_result_reader: WatchableOnceCellReader<Result<(), SlateDBError>>,
@@ -239,14 +238,14 @@ pub(crate) trait SendSafely<T> {
 }
 
 #[allow(clippy::panic, clippy::disallowed_methods)]
-impl<T> SendSafely<T> for UnboundedSender<T> {
+impl<T> SendSafely<T> for async_channel::Sender<T> {
     #[inline]
     fn send_safely(
         &self,
         closed_result_reader: WatchableOnceCellReader<Result<(), SlateDBError>>,
         message: T,
     ) -> Result<(), SlateDBError> {
-        match self.send(message) {
+        match self.try_send(message) {
             Ok(_) => Ok(()),
             Err(e) => {
                 if let Some(result) = closed_result_reader.read() {
@@ -258,90 +257,6 @@ impl<T> SendSafely<T> for UnboundedSender<T> {
                     panic!("Failed to send message to unbounded channel: {}", e);
                 }
             }
-        }
-    }
-}
-
-/// Safe channel wrappers that tie a [`WatchableOnceCell`] to a channel so
-/// that the receiver can signal *why* it closed and the sender can surface
-/// that reason instead of panicking.
-pub(crate) mod safe_mpsc {
-    use super::{SendSafely, WatchableOnceCell, WatchableOnceCellReader};
-    use crate::error::SlateDBError;
-    use tokio::sync::mpsc;
-
-    pub(crate) struct SafeSender<T> {
-        tx: Option<mpsc::UnboundedSender<T>>,
-        closed: WatchableOnceCellReader<Result<(), SlateDBError>>,
-    }
-
-    pub(crate) struct SafeReceiver<T> {
-        rx: Option<mpsc::UnboundedReceiver<T>>,
-        closed: WatchableOnceCell<Result<(), SlateDBError>>,
-    }
-
-    pub(crate) fn unbounded_channel<T>() -> (SafeSender<T>, SafeReceiver<T>) {
-        let (tx, rx) = mpsc::unbounded_channel();
-        let closed = WatchableOnceCell::new();
-        let sender = SafeSender {
-            tx: Some(tx),
-            closed: closed.reader(),
-        };
-        let receiver = SafeReceiver {
-            rx: Some(rx),
-            closed,
-        };
-        (sender, receiver)
-    }
-
-    impl<T> SafeSender<T> {
-        pub(crate) fn send(&self, message: T) -> Result<(), SlateDBError> {
-            self.tx
-                .as_ref()
-                .ok_or(SlateDBError::Closed)?
-                .send_safely(self.closed.clone(), message)
-        }
-
-        /// Close the sender, dropping the underlying channel so the
-        /// receiver sees `None`. Subsequent sends return `SlateDBError::Closed`.
-        pub(crate) fn close(&mut self) {
-            self.tx.take();
-        }
-    }
-
-    impl<T> Clone for SafeSender<T> {
-        fn clone(&self) -> Self {
-            Self {
-                tx: self.tx.clone(),
-                closed: self.closed.clone(),
-            }
-        }
-    }
-
-    impl<T> SafeReceiver<T> {
-        pub(crate) async fn recv(&mut self) -> Option<T> {
-            let rx = self.rx.as_mut()?;
-            rx.recv().await
-        }
-
-        /// Non-blocking receive. Returns `None` if the channel is empty
-        /// *or* closed — use [`recv`](Self::recv) to distinguish closure.
-        pub(crate) fn try_recv(&mut self) -> Option<T> {
-            self.rx.as_mut()?.try_recv().ok()
-        }
-
-        /// Close the channel with the given result. The underlying
-        /// receiver is dropped so senders see a closed channel.
-        /// Future `send` calls return the provided error.
-        pub(crate) fn close(&mut self, result: Result<(), SlateDBError>) {
-            self.closed.write(result);
-            self.rx.take();
-        }
-    }
-
-    impl<T> Drop for SafeReceiver<T> {
-        fn drop(&mut self) {
-            self.close(Err(SlateDBError::Closed));
         }
     }
 }
@@ -408,6 +323,12 @@ pub(crate) mod safe_async_channel {
         /// Receive the next message, or `None` if the channel is closed.
         pub(crate) async fn recv(&self) -> Option<T> {
             self.rx.recv().await.ok()
+        }
+
+        /// Try to receive a message without blocking. Returns `Some` if a
+        /// message was available, `None` otherwise.
+        pub(crate) fn try_recv(&self) -> Option<T> {
+            self.rx.try_recv().ok()
         }
 
         /// Close the channel with the given result. All blocked `recv`
