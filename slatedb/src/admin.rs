@@ -28,7 +28,6 @@ use std::ops::RangeBounds;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::runtime::Handle;
-use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use ulid::Ulid;
 use uuid::Uuid;
@@ -276,7 +275,7 @@ impl Admin {
         .with_seed(self.rand.rng().next_u64())
         .build();
 
-        let (_, rx) = mpsc::unbounded_channel();
+        let (_, rx) = async_channel::unbounded();
         let closed_result = ClosedResultWriter::new(WatchableOnceCell::new());
         let task_executor = MessageHandlerExecutor::new(closed_result, self.system_clock.clone());
 

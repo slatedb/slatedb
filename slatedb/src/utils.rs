@@ -19,7 +19,6 @@ use std::any::Any;
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
-use tokio::sync::mpsc::UnboundedSender;
 use ulid::Ulid;
 use uuid::Uuid;
 
@@ -224,13 +223,13 @@ fn compute_lower_bound(prev_block_last_key: &Bytes, this_block_first_key: &Bytes
     this_block_first_key.slice(..prev_block_last_key.len() + 1)
 }
 
-/// An extension trait that adds a `.send_safely(...)` method to tokio's `UnboundedSender<T>`.
+/// An extension trait that adds a `.send_safely(...)` method to `async_channel::Sender<T>`.
 pub(crate) trait SendSafely<T> {
     /// Attempts to send a message to the channel, and if the channel is closed, returns the error
     /// in `error_reader` if it is set, otherwise panics.
     ///
     /// This is useful for handling shutdown race conditions where the receiver's channel is dropped
-    /// before the sender is shut down.`
+    /// before the sender is shut down.
     fn send_safely(
         &self,
         closed_result_reader: WatchableOnceCellReader<Result<(), SlateDBError>>,
@@ -239,14 +238,14 @@ pub(crate) trait SendSafely<T> {
 }
 
 #[allow(clippy::panic, clippy::disallowed_methods)]
-impl<T> SendSafely<T> for UnboundedSender<T> {
+impl<T> SendSafely<T> for async_channel::Sender<T> {
     #[inline]
     fn send_safely(
         &self,
         closed_result_reader: WatchableOnceCellReader<Result<(), SlateDBError>>,
         message: T,
     ) -> Result<(), SlateDBError> {
-        match self.send(message) {
+        match self.try_send(message) {
             Ok(_) => Ok(()),
             Err(e) => {
                 if let Some(result) = closed_result_reader.read() {

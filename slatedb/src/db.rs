@@ -37,10 +37,10 @@ use crate::dispatcher::MessageHandlerExecutor;
 use crate::garbage_collector::GC_TASK_NAME;
 use crate::transaction_manager::IsolationLevel;
 use crate::CloseReason;
+use async_channel::Sender;
 use log::{info, trace, warn};
 use parking_lot::RwLock;
 use std::time::Duration;
-use tokio::sync::mpsc::UnboundedSender;
 
 use crate::batch::WriteBatch;
 use crate::batch_write::{WriteBatchMessage, WRITE_BATCH_TASK_NAME};
@@ -88,8 +88,8 @@ pub(crate) struct DbInner {
     pub(crate) state: Arc<RwLock<DbState>>,
     pub(crate) settings: Settings,
     pub(crate) table_store: Arc<TableStore>,
-    pub(crate) memtable_flush_notifier: UnboundedSender<MemtableFlushMsg>,
-    pub(crate) write_notifier: UnboundedSender<WriteBatchMessage>,
+    pub(crate) memtable_flush_notifier: Sender<MemtableFlushMsg>,
+    pub(crate) write_notifier: Sender<WriteBatchMessage>,
     pub(crate) db_stats: DbStats,
     /// Kept alive so the underlying `MetricsRecorder` is not dropped while
     /// metric handles in `DbStats` (and other stats structs) are still in use.
@@ -122,8 +122,8 @@ impl DbInner {
         rand: Arc<DbRand>,
         table_store: Arc<TableStore>,
         manifest: DirtyObject<Manifest>,
-        memtable_flush_notifier: UnboundedSender<MemtableFlushMsg>,
-        write_notifier: UnboundedSender<WriteBatchMessage>,
+        memtable_flush_notifier: Sender<MemtableFlushMsg>,
+        write_notifier: Sender<WriteBatchMessage>,
         recorder: MetricsRecorderHelper,
         fp_registry: Arc<FailPointRegistry>,
         merge_operator: Option<crate::merge_operator::MergeOperatorType>,
