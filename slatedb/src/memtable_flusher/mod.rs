@@ -38,17 +38,13 @@ pub(crate) struct FlushEpoch(pub(crate) u64);
 /// Flush request target exposed by the memtable flusher.
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum FlushTarget {
-    /// Flush as many pending immutable memtables as L0 capacity allows. Used for
-    /// writer backpressure relief and WAL-enabled checkpoint creation, where making
-    /// some progress is sufficient.
-    BestEffort,
     /// Return the current durability frontier without initiating new flush work.
     /// Used for `CheckpointScope::Durable` when the caller just needs a consistent
     /// snapshot of what is already durable.
     CurrentDurable,
     /// Wait until all currently known immutable memtables are durably flushed. Used
-    /// for explicit `flush()` calls and WAL-disabled checkpoint creation, where full
-    /// durability is required before proceeding.
+    /// for explicit `flush()` calls and checkpoint creation, where full durability
+    /// is required before proceeding.
     All,
 }
 
@@ -109,22 +105,16 @@ impl MemtableFlusher {
     /// Processes one flush request using the requested target.
     pub(crate) async fn flush(&self, target: FlushTarget) -> Result<FlushResult, SlateDBError> {
         let (tx, rx) = oneshot::channel();
-        self.send_flush_command(target, Some(tx))?;
+        self.messages_tx
+            .send(tracker::TrackerMessage::FlushRequest { target, sender: tx })?;
         rx.await.map_err(SlateDBError::ReadChannelError)?
     }
 
-    /// Sends a flush request without awaiting its result.
-    pub(crate) fn request_flush(&self, target: FlushTarget) -> Result<(), SlateDBError> {
-        self.send_flush_command(target, None)
-    }
-
-    fn send_flush_command(
-        &self,
-        target: FlushTarget,
-        sender: Option<oneshot::Sender<Result<FlushResult, SlateDBError>>>,
-    ) -> Result<(), SlateDBError> {
+    /// Notifies the flusher that a memtable may have been frozen.
+    /// Triggers reconcile and dispatch without waiting for a result.
+    pub(crate) fn notify_memtable_frozen(&self) -> Result<(), SlateDBError> {
         self.messages_tx
-            .send(tracker::TrackerMessage::FlushRequest { target, sender })
+            .send(tracker::TrackerMessage::MemtableFrozen)
     }
 
     /// Creates a checkpoint using the memtable flusher's flush semantics.

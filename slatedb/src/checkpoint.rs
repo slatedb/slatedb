@@ -35,15 +35,10 @@ impl Db {
         let target = match scope {
             CheckpointScope::All => {
                 if self.inner.wal_enabled {
-                    // WAL flush guarantees durability. Memtable flush is best-effort
-                    // to reduce the amount of WAL replay readers need on restore.
                     self.inner.flush_wals().await?;
-                    self.inner.freeze_current_memtable()?;
-                    FlushTarget::BestEffort
-                } else {
-                    self.inner.freeze_current_memtable()?;
-                    FlushTarget::All
                 }
+                self.inner.freeze_current_memtable()?;
+                FlushTarget::All
             }
             CheckpointScope::Durable => FlushTarget::CurrentDurable,
         };

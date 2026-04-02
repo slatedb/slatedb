@@ -3,7 +3,6 @@ use parking_lot::RwLockWriteGuard;
 use crate::db::DbInner;
 use crate::db_state::DbState;
 use crate::error::SlateDBError;
-use crate::memtable_flusher::FlushTarget;
 use crate::oracle::Oracle;
 use crate::wal_replay::ReplayedMemtable;
 
@@ -55,6 +54,7 @@ impl DbInner {
         }
 
         guard.freeze_memtable(wal_id)?;
+        let _ = self.memtable_flusher().notify_memtable_frozen();
         Ok(())
     }
 
@@ -77,9 +77,6 @@ impl DbInner {
         self.wal_buffer
             .advance_recent_flushed_wal_id(recent_flushed_wal_id);
         self.freeze_memtable(&mut guard, recent_flushed_wal_id)?;
-        let _ = self
-            .memtable_flusher()
-            .request_flush(FlushTarget::BestEffort);
 
         let last_wal = replayed_memtable.last_wal_id;
         guard.modify(|modifier| modifier.state.manifest.value.core.next_wal_sst_id = last_wal + 1);

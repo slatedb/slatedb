@@ -34,10 +34,12 @@ use tokio_util::sync::CancellationToken;
 
 /// Unified message type for the flush tracker's event loop.
 pub(super) enum TrackerMessage {
-    /// Flush request from an external caller.
+    /// A memtable may have been frozen. Triggers reconcile and dispatch.
+    MemtableFrozen,
+    /// Flush request from an external caller waiting for a result.
     FlushRequest {
         target: FlushTarget,
-        sender: Option<oneshot::Sender<Result<FlushResult, SlateDBError>>>,
+        sender: oneshot::Sender<Result<FlushResult, SlateDBError>>,
     },
     /// Checkpoint creation request from an external caller.
     CheckpointRequest {
@@ -114,6 +116,7 @@ impl FlushTracker {
 
     async fn handle_message(&mut self, message: TrackerMessage) -> Result<(), SlateDBError> {
         match message {
+            TrackerMessage::MemtableFrozen => self.reconcile_and_dispatch().await,
             TrackerMessage::FlushRequest { target, sender } => {
                 self.handle_flush_request(target, sender).await
             }
@@ -139,7 +142,7 @@ impl FlushTracker {
     async fn handle_flush_request(
         &mut self,
         target: FlushTarget,
-        sender: Option<oneshot::Sender<Result<FlushResult, SlateDBError>>>,
+        sender: oneshot::Sender<Result<FlushResult, SlateDBError>>,
     ) -> Result<(), SlateDBError> {
         fail_point!(
             Arc::clone(&self.inner.fp_registry),
@@ -147,10 +150,8 @@ impl FlushTracker {
             |_| { Ok(()) }
         );
         self.register_new_imm_memtables();
-        if let Some(sender) = sender {
-            let through_epoch = self.resolve_target(target);
-            self.manifest_writer.send_flush(through_epoch, sender)?;
-        }
+        let through_epoch = self.resolve_target(target);
+        self.manifest_writer.send_flush(through_epoch, sender)?;
         self.dispatch_ready_memtables().await
     }
 
@@ -172,13 +173,6 @@ impl FlushTracker {
     fn resolve_target(&self, target: FlushTarget) -> Option<FlushEpoch> {
         match target {
             FlushTarget::CurrentDurable => None,
-            FlushTarget::BestEffort => self
-                .tracked_imms
-                .iter()
-                .filter(|tracked| matches!(tracked.state, TrackedImmState::PendingDispatch))
-                .take(self.available_l0_slots())
-                .last()
-                .map(|tracked| tracked.epoch),
             FlushTarget::All => self.tracked_imms.back().map(|tracked| tracked.epoch),
         }
     }
@@ -581,13 +575,10 @@ mod tests {
         freeze_value_imm(&harness, b"k1", b"v1", 1, 11);
         let flusher = start_flusher(harness);
 
-        let result = timeout(
-            Duration::from_secs(5),
-            flusher.flush(FlushTarget::BestEffort),
-        )
-        .await
-        .unwrap()
-        .unwrap();
+        let result = timeout(Duration::from_secs(5), flusher.flush(FlushTarget::All))
+            .await
+            .unwrap()
+            .unwrap();
 
         assert_eq!(result.durable_through_wal_id, Some(11));
         assert_eq!(result.durable_through_seq, Some(1));

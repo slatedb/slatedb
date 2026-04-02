@@ -25,7 +25,6 @@
 //! _Note: The `write_batch` loop still holds a lock on the db_state. There can still
 //! be contention between `get`s, which holds a lock, and the write loop._
 
-use crate::memtable_flusher::FlushTarget;
 use async_trait::async_trait;
 use fail_parallel::fail_point;
 use futures::stream::BoxStream;
@@ -203,9 +202,6 @@ impl DbInner {
 
         // maybe freeze the memtable.
         self.maybe_freeze_current_memtable()?;
-        let _ = self
-            .memtable_flusher()
-            .request_flush(FlushTarget::BestEffort);
 
         let write_handle = WriteHandle::new(commit_seq, now);
 

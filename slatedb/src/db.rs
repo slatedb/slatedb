@@ -388,8 +388,6 @@ impl DbInner {
                     }
                 };
 
-                self.flush_imm_memtables(FlushTarget::BestEffort).await?;
-
                 let timeout_fut = self.system_clock.sleep(Duration::from_secs(30));
 
                 tokio::select! {
