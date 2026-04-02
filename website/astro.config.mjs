@@ -182,12 +182,10 @@ export default defineConfig({
 							label: 'Logging',
 							link: '/docs/operations/logging/',
 						},
-						/*
 						{
 							label: 'Metrics',
 							link: '/docs/operations/metrics/',
 						},
-						*/
 						{
 							label: 'Tuning',
 							link: '/docs/operations/tuning/',
