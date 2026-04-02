@@ -19,9 +19,17 @@ use crate::error::SlateDBError;
 use crate::format::sst::EncodedSsTable;
 use crate::mem_table::ImmutableMemtable;
 use crate::utils::safe_async_channel;
+use chrono::{DateTime, Utc};
 use log::{error, info};
 use std::sync::Arc;
 use std::time::Duration;
+
+fn elapsed_millis(start: DateTime<Utc>, end: DateTime<Utc>) -> u64 {
+    end.signed_duration_since(start)
+        .to_std()
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
 use tokio::runtime::Handle;
 use tokio::task::{JoinError, JoinHandle, JoinSet};
 use tokio_util::sync::CancellationToken;
@@ -256,24 +264,16 @@ impl UploadWorker {
             tokio::select! {
                 _ = self.aborted.cancelled() => return Ok(()),
                 recv_result = jobs.recv() => {
-                    let idle_elapsed = self.db.system_clock.now()
-                        .signed_duration_since(idle_start)
-                        .to_std()
-                        .map(|d| d.as_millis() as u64)
-                        .unwrap_or(0);
-                    self.db.db_stats.l0_upload_idle_millis.increment(idle_elapsed);
+                    self.db.db_stats.l0_upload_idle_millis
+                        .increment(elapsed_millis(idle_start, self.db.system_clock.now()));
                     let Some(job) = recv_result else {
                         return Ok(());
                     };
 
                     let busy_start = self.db.system_clock.now();
                     let success = self.upload_with_retry(job).await?;
-                    let busy_elapsed = self.db.system_clock.now()
-                        .signed_duration_since(busy_start)
-                        .to_std()
-                        .map(|d| d.as_millis() as u64)
-                        .unwrap_or(0);
-                    self.db.db_stats.l0_upload_busy_millis.increment(busy_elapsed);
+                    self.db.db_stats.l0_upload_busy_millis
+                        .increment(elapsed_millis(busy_start, self.db.system_clock.now()));
                     let _ = tracker_tx.send(TrackerMessage::UploadComplete(success));
                 }
             }
