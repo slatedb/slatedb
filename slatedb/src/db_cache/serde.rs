@@ -7,7 +7,7 @@
 use crate::db_cache::{CachedEntry, CachedItem, CachedKey};
 use crate::db_state::SsTableId;
 use crate::error::SlateDBError;
-use crate::filter_policy::{BloomFilterPolicy, FilterPolicy};
+use crate::filter_policy::{BloomFilterPolicy, NamedFilter};
 use crate::flatbuffer_types::SsTableIndexOwned;
 use crate::format::block::Block;
 use crate::sst_stats::SstStats;
@@ -110,9 +110,12 @@ impl SerializedCachedEntryV1 {
                 CachedItem::SsTableIndex(Arc::new(index))
             }
             SerializedCachedEntryV1::BloomFilter(encoded) => {
-                // Use default BloomFilterPolicy to decode legacy cached filters
-                let policy = BloomFilterPolicy::new(10);
-                CachedItem::Filters(vec![policy.decode(encoded.as_ref())])
+                // Produce a raw NamedFilter; decoding is deferred until TableStore
+                // resolves it against the configured filter policies.
+                CachedItem::Filters(vec![NamedFilter::raw(
+                    BloomFilterPolicy::NAME.to_string(),
+                    encoded,
+                )])
             }
             SerializedCachedEntryV1::SstStats(encoded) => {
                 let stats = SstStats::decode(encoded)?;
@@ -145,14 +148,12 @@ impl SerializedCachedEntry {
             SerializedCachedEntry::V1(entry) => entry.into_cached_entry(),
             SerializedCachedEntry::V2(entry) => match entry {
                 SerializedCachedEntryV2::Filters(composite) => {
-                    // Decode each filter using BloomFilterPolicy as default.
-                    // In a full implementation, the name would be matched against
-                    // configured policies. For now, we decode all as bloom.
-                    let policy = BloomFilterPolicy::new(10);
+                    // Produce raw NamedFilters; decoding is deferred until TableStore
+                    // resolves them against the configured filter policies.
                     let filters = composite
                         .0
                         .into_iter()
-                        .map(|(_name, data)| policy.decode(data.as_ref()))
+                        .map(|(name, data)| NamedFilter::raw(name, data))
                         .collect();
                     Ok(CachedEntry {
                         item: CachedItem::Filters(filters),
@@ -175,30 +176,13 @@ impl From<CachedEntry> for SerializedCachedEntry {
                 SerializedCachedEntry::V1(SerializedCachedEntryV1::SsTableIndex(encoded))
             }
             CachedItem::Filters(filters) => {
-                if filters.len() == 1 {
-                    // Single filter: use V1 BloomFilter for backwards compatibility
-                    let mut encoded = Vec::new();
-                    filters[0].encode(&mut encoded);
-                    SerializedCachedEntry::V1(SerializedCachedEntryV1::BloomFilter(
-                        Bytes::from(encoded),
-                    ))
-                } else {
-                    // Multiple filters: use V2 composite format
-                    let pairs = filters
-                        .iter()
-                        .map(|f| {
-                            let mut encoded = Vec::new();
-                            f.encode(&mut encoded);
-                            // We don't have the policy name in the filter trait,
-                            // so we use a default name. The name is used for matching
-                            // during decode.
-                            ("slatedb.BloomFilter".to_string(), Bytes::from(encoded))
-                        })
-                        .collect();
-                    SerializedCachedEntry::V2(SerializedCachedEntryV2::Filters(
-                        SerializedCompositeFilters(pairs),
-                    ))
-                }
+                let pairs = filters
+                    .iter()
+                    .map(|nf| (nf.name().to_string(), nf.encode_data()))
+                    .collect();
+                SerializedCachedEntry::V2(SerializedCachedEntryV2::Filters(
+                    SerializedCompositeFilters(pairs),
+                ))
             }
             CachedItem::SstStats(stats) => {
                 let encoded = stats.encode();
@@ -236,8 +220,7 @@ mod tests {
     use crate::block_iterator::BlockIteratorLatest;
     use crate::db_cache::{CachedEntry, CachedItem, CachedKey};
     use crate::db_state::SsTableId;
-    use crate::filter::BloomFilterBuilder;
-    use crate::filter_policy::Filter;
+    use crate::filter_policy::{BloomFilterPolicy, Filter, FilterPolicy, NamedFilter};
     use crate::flatbuffer_types::{
         BlockMeta, BlockMetaArgs, SsTableIndex, SsTableIndexArgs, SsTableIndexOwned,
     };
@@ -320,14 +303,21 @@ mod tests {
 
     #[test]
     fn test_should_serialize_deserialize_filter() {
-        let keys = vec![b"foo", b"bar", b"baz"];
-        let mut builder = BloomFilterBuilder::new(10);
-        for k in keys {
-            builder.add_key(k);
+        let policy = BloomFilterPolicy::new(10);
+        let mut builder = policy.builder();
+        for k in [b"foo", b"bar", b"baz"] {
+            builder.add_entry(&crate::types::RowEntry::new(
+                bytes::Bytes::copy_from_slice(k),
+                crate::types::ValueDeletable::Value(bytes::Bytes::new()),
+                0,
+                None,
+                None,
+            ));
         }
-        let filter: Arc<dyn Filter> = Arc::new(builder.build());
+        let filter = builder.build();
+        let named = NamedFilter::new(BloomFilterPolicy::NAME.to_string(), filter.clone());
         let entry = CachedEntry {
-            item: CachedItem::Filters(vec![filter.clone()]),
+            item: CachedItem::Filters(vec![named]),
         };
 
         let encoded = bincode::serialize(&entry).unwrap();
@@ -335,14 +325,14 @@ mod tests {
 
         let decoded_filters = decoded.filters().unwrap();
         assert_eq!(1, decoded_filters.len());
-        let decoded_filter = &decoded_filters[0];
-        assert_eq!(filter.size(), decoded_filter.size());
-        // Verify encode produces the same bytes
+        let decoded_nf = &decoded_filters[0];
+        assert_eq!(decoded_nf.name(), "slatedb.BloomFilter");
+        // Deserialized from disk cache, so it should be raw (not yet decoded)
+        assert!(!decoded_nf.is_decoded());
+        // Verify encode_data produces the same bytes as the original
         let mut original_bytes = Vec::new();
         filter.encode(&mut original_bytes);
-        let mut decoded_bytes = Vec::new();
-        decoded_filter.encode(&mut decoded_bytes);
-        assert_eq!(original_bytes, decoded_bytes);
+        assert_eq!(Bytes::from(original_bytes), decoded_nf.encode_data());
     }
 
     #[test]

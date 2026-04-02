@@ -59,7 +59,7 @@ use std::sync::Arc;
 use crate::config::CompressionCodec;
 use crate::db_state::{SsTableInfoCodec, SstType};
 use crate::error::SlateDBError;
-use crate::filter_policy::{Filter, FilterBuilder, FilterPolicy};
+use crate::filter_policy::{FilterBuilder, FilterPolicy, NamedFilter};
 use crate::flatbuffer_types::{BlockMeta, BlockMetaArgs};
 use crate::format::sst::{
     BlockBuilder, BlockBuilderWithStats, EncodedSsTable, EncodedSsTableBlock,
@@ -375,10 +375,10 @@ impl EncodedSsTableBuilder<'_> {
         if self.stats.num_rows() >= self.min_filter_keys as u64
             && !self.filter_builders.is_empty()
         {
-            let filters: Vec<(String, Arc<dyn Filter>)> = self
+            let filters: Vec<NamedFilter> = self
                 .filter_builders
                 .iter()
-                .map(|(name, fb)| (name.clone(), fb.build()))
+                .map(|(name, fb)| NamedFilter::new(name.clone(), fb.build()))
                 .collect();
             footer_builder = footer_builder.with_filters(filters);
         }
@@ -645,11 +645,10 @@ mod tests {
         let encoded = builder.build().await.unwrap();
         let encoded_info = encoded.info.clone();
 
-        for filter in &encoded.filters {
-            let mut encoded_filter = Vec::new();
-            filter.encode(&mut encoded_filter);
-            // bloom filter encoding: 2-byte num_probes header + filter data bytes
-            assert_eq!(encoded_filter.len(), 2 + filter.size());
+        for nf in &encoded.filters {
+            let encoded_filter = nf.encode_data();
+            // encoded data includes the 2-byte num_probes header
+            assert_eq!(encoded_filter.len(), 2 + nf.size());
         }
 
         // write sst and validate that the handle returned has the correct content.

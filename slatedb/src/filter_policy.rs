@@ -119,6 +119,121 @@ pub enum FilterTarget {
 }
 
 // ---------------------------------------------------------------------------
+// NamedFilter — a filter paired with its policy name
+// ---------------------------------------------------------------------------
+
+/// A filter paired with the name of the policy that produced it.
+///
+/// Internally, a `NamedFilter` is either **decoded** (holding an `Arc<dyn Filter>`)
+/// or **raw** (holding opaque bytes). Raw filters arise from disk-cache
+/// deserialization where the policy list is not available; they are resolved to
+/// decoded filters on first access by [`crate::tablestore::TableStore`].
+#[derive(Clone)]
+pub(crate) struct NamedFilter {
+    name: String,
+    inner: NamedFilterInner,
+}
+
+impl std::fmt::Debug for NamedFilter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let state = match &self.inner {
+            NamedFilterInner::Decoded(_) => "decoded",
+            NamedFilterInner::Raw(b) => return write!(f, "NamedFilter({}, raw {} bytes)", self.name, b.len()),
+        };
+        write!(f, "NamedFilter({}, {})", self.name, state)
+    }
+}
+
+#[derive(Clone)]
+enum NamedFilterInner {
+    /// Fully decoded, ready for evaluation.
+    Decoded(Arc<dyn Filter>),
+    /// Raw encoded bytes from disk-cache deserialization, awaiting policy-based decode.
+    Raw(Bytes),
+}
+
+impl NamedFilter {
+    /// Creates a decoded `NamedFilter`.
+    pub(crate) fn new(name: String, filter: Arc<dyn Filter>) -> Self {
+        Self {
+            name,
+            inner: NamedFilterInner::Decoded(filter),
+        }
+    }
+
+    /// Creates a raw (not yet decoded) `NamedFilter`.
+    pub(crate) fn raw(name: String, data: Bytes) -> Self {
+        Self {
+            name,
+            inner: NamedFilterInner::Raw(data),
+        }
+    }
+
+    /// Returns the policy name.
+    pub(crate) fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Returns the decoded filter, or `None` if this is a raw filter.
+    pub(crate) fn filter(&self) -> Option<&Arc<dyn Filter>> {
+        match &self.inner {
+            NamedFilterInner::Decoded(f) => Some(f),
+            NamedFilterInner::Raw(_) => None,
+        }
+    }
+
+    /// Returns the raw bytes, or `None` if this is a decoded filter.
+    pub(crate) fn raw_data(&self) -> Option<&Bytes> {
+        match &self.inner {
+            NamedFilterInner::Raw(b) => Some(b),
+            NamedFilterInner::Decoded(_) => None,
+        }
+    }
+
+    /// Returns `true` if this filter has been decoded.
+    pub(crate) fn is_decoded(&self) -> bool {
+        matches!(self.inner, NamedFilterInner::Decoded(_))
+    }
+
+    /// Returns the size of the filter data in bytes.
+    pub(crate) fn size(&self) -> usize {
+        match &self.inner {
+            NamedFilterInner::Decoded(f) => f.size(),
+            NamedFilterInner::Raw(b) => b.len(),
+        }
+    }
+
+    /// Encodes the filter into a `Bytes` buffer.
+    ///
+    /// For decoded filters, calls `filter.encode()`. For raw filters,
+    /// returns the stored bytes directly.
+    pub(crate) fn encode_data(&self) -> Bytes {
+        match &self.inner {
+            NamedFilterInner::Decoded(f) => {
+                let mut buf = Vec::new();
+                f.encode(&mut buf);
+                Bytes::from(buf)
+            }
+            NamedFilterInner::Raw(b) => b.clone(),
+        }
+    }
+
+    /// Returns a copy with over-allocated memory reclaimed.
+    pub(crate) fn clamp_allocated_size(&self) -> Self {
+        match &self.inner {
+            NamedFilterInner::Decoded(f) => Self {
+                name: self.name.clone(),
+                inner: NamedFilterInner::Decoded(f.clamp_allocated_size()),
+            },
+            NamedFilterInner::Raw(b) => Self {
+                name: self.name.clone(),
+                inner: NamedFilterInner::Raw(crate::utils::clamp_allocated_size_bytes(b)),
+            },
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Built-in implementation: BloomFilterPolicy
 // ---------------------------------------------------------------------------
 

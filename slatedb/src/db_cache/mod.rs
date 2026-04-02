@@ -20,9 +20,9 @@ use log::{debug, error, trace};
 use parking_lot::Mutex;
 
 use crate::db_cache::stats::DbCacheStats;
+use crate::filter_policy::NamedFilter;
 use crate::format::block::Block;
 use crate::sst_stats::SstStats;
-use crate::filter_policy::Filter;
 use crate::{db_state::SsTableId, flatbuffer_types::SsTableIndexOwned};
 use slatedb_common::clock::SystemClock;
 use slatedb_common::metrics::MetricsRecorderHelper;
@@ -191,7 +191,7 @@ impl From<(SsTableId, u64)> for CachedKey {
 enum CachedItem {
     Block(Arc<Block>),
     SsTableIndex(Arc<SsTableIndexOwned>),
-    Filters(Vec<Arc<dyn Filter>>),
+    Filters(Vec<NamedFilter>),
     SstStats(Arc<SstStats>),
 }
 
@@ -221,7 +221,7 @@ impl CachedEntry {
     }
 
     /// Create a new `CachedEntry` with the given filters.
-    pub(crate) fn with_filters(filters: Vec<Arc<dyn Filter>>) -> Self {
+    pub(crate) fn with_filters(filters: Vec<NamedFilter>) -> Self {
         Self {
             item: CachedItem::Filters(filters),
         }
@@ -248,7 +248,7 @@ impl CachedEntry {
         }
     }
 
-    pub(crate) fn filters(&self) -> Option<Vec<Arc<dyn Filter>>> {
+    pub(crate) fn filters(&self) -> Option<Vec<NamedFilter>> {
         match &self.item {
             CachedItem::Filters(filters) => Some(filters.clone()),
             _ => None,
@@ -270,7 +270,7 @@ impl CachedEntry {
         match &self.item {
             CachedItem::Block(block) => block.size(),
             CachedItem::SsTableIndex(sst_index) => sst_index.size(),
-            CachedItem::Filters(filters) => filters.iter().map(|f| f.size()).sum(),
+            CachedItem::Filters(filters) => filters.iter().map(|nf| nf.size()).sum(),
             CachedItem::SstStats(stats) => stats.size(),
         }
     }
@@ -282,7 +282,7 @@ impl CachedEntry {
                 Self::with_sst_index(Arc::new(sst_index.clamp_allocated_size()))
             }
             CachedItem::Filters(filters) => Self::with_filters(
-                filters.iter().map(|f| f.clamp_allocated_size()).collect(),
+                filters.iter().map(|nf| nf.clamp_allocated_size()).collect(),
             ),
             CachedItem::SstStats(stats) => {
                 Self::with_sst_stats(Arc::new(stats.clamp_allocated_size()))
@@ -724,8 +724,7 @@ mod tests {
 
     use crate::db_cache::{CachedEntry, CachedKey, DbCache, DbCacheWrapper, SplitCache};
     use crate::db_state::SsTableId;
-    use crate::filter::BloomFilterBuilder;
-    use crate::filter_policy::Filter;
+    use crate::filter_policy::{BloomFilterPolicy, Filter, FilterPolicy, NamedFilter};
     use crate::format::sst::BlockBuilder;
     use slatedb_common::clock::DefaultSystemClock;
 
@@ -754,10 +753,7 @@ mod tests {
         // given:
         let key = CachedKey::from((SST_ID, 12345u64));
         cache
-            .insert(
-                key.clone(),
-                CachedEntry::with_filters(sst.filters),
-            )
+            .insert(key.clone(), CachedEntry::with_filters(sst.filters))
             .await;
 
         for i in 1..4 {
@@ -1087,20 +1083,31 @@ mod tests {
         let cache_b = DbCacheWrapper::new(shared_cache.clone(), &recorder_b, system_clock);
         assert_ne!(cache_a.scope_id, cache_b.scope_id);
 
-        let mut builder = BloomFilterBuilder::new(1);
-        builder.add_key(b"a");
-        let filter: Arc<dyn Filter> = Arc::new(builder.build());
+        let policy = BloomFilterPolicy::new(1);
+        let mut builder = policy.builder();
+        builder.add_entry(&crate::types::RowEntry::new(
+            bytes::Bytes::from_static(b"a"),
+            crate::types::ValueDeletable::Value(bytes::Bytes::new()),
+            0,
+            None,
+            None,
+        ));
+        let filter = builder.build();
+        let named = NamedFilter::new(BloomFilterPolicy::NAME.to_string(), filter);
         let key = CachedKey::from((SST_ID, 1u64));
 
         cache_a
-            .insert(key.clone(), CachedEntry::with_filters(vec![filter.clone()]))
+            .insert(
+                key.clone(),
+                CachedEntry::with_filters(vec![named.clone()]),
+            )
             .await;
 
         assert!(cache_a.get_filter(&key).await.unwrap().is_some());
         assert!(cache_b.get_filter(&key).await.unwrap().is_none());
 
         cache_b
-            .insert(key.clone(), CachedEntry::with_filters(vec![filter]))
+            .insert(key.clone(), CachedEntry::with_filters(vec![named]))
             .await;
 
         assert_eq!(2, shared_cache.entry_count());

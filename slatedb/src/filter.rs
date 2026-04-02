@@ -304,7 +304,6 @@ mod tests {
             "Bloom filter size should be greater than zero"
         );
 
-        // We can also check if the size matches the buffer length
         assert_eq!(
             filter.size(),
             filter.buffer.len(),
