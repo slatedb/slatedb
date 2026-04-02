@@ -1750,13 +1750,13 @@ mod tests {
 
     fn object_store_labels(
         component: &'static str,
-        store_role: &'static str,
+        store_target: &'static str,
         op: &'static str,
         api: &'static str,
     ) -> [(&'static str, &'static str); 4] {
         [
             ("component", component),
-            ("store_role", store_role),
+            ("store_target", store_target),
             ("op", op),
             ("api", api),
         ]
@@ -1778,7 +1778,7 @@ mod tests {
     fn lookup_object_store_op_request_count(
         recorder: &DefaultMetricsRecorder,
         component: &'static str,
-        store_role: &'static str,
+        store_target: &'static str,
         op: &'static str,
     ) -> i64 {
         let apis = match op {
@@ -1798,7 +1798,7 @@ mod tests {
                 lookup_metric_with_labels(
                     recorder,
                     OBJECT_STORE_REQUEST_COUNT,
-                    &object_store_labels(component, store_role, op, api),
+                    &object_store_labels(component, store_target, op, api),
                 )
                 .unwrap_or(0)
             })
@@ -1808,7 +1808,7 @@ mod tests {
     fn lookup_object_store_op_histogram_count(
         recorder: &DefaultMetricsRecorder,
         component: &'static str,
-        store_role: &'static str,
+        store_target: &'static str,
         op: &'static str,
     ) -> u64 {
         let apis = match op {
@@ -1827,7 +1827,7 @@ mod tests {
             .map(|api| {
                 lookup_object_store_histogram_count(
                     recorder,
-                    &object_store_labels(component, store_role, op, api),
+                    &object_store_labels(component, store_target, op, api),
                 )
                 .unwrap_or(0)
             })

@@ -144,7 +144,7 @@ use crate::format::sst::{BlockTransformer, SsTableFormat};
 use crate::garbage_collector::GarbageCollector;
 use crate::garbage_collector::GC_TASK_NAME;
 use crate::instrumented_object_store::{
-    InstrumentedObjectStore, ObjectStoreComponent, ObjectStoreRole,
+    InstrumentedObjectStore, ObjectStoreComponent, ObjectStoreTarget,
 };
 use crate::manifest::store::{FenceableManifest, ManifestStore, StoredManifest};
 use crate::mem_table_flush::MemtableFlusher;
@@ -168,7 +168,7 @@ fn instrumented_retrying_object_store(
     object_store: Arc<dyn ObjectStore>,
     recorder: &MetricsRecorderHelper,
     component: ObjectStoreComponent,
-    store_role: ObjectStoreRole,
+    store_target: ObjectStoreTarget,
     rand: Arc<DbRand>,
     system_clock: Arc<dyn SystemClock>,
 ) -> Arc<dyn ObjectStore> {
@@ -176,7 +176,7 @@ fn instrumented_retrying_object_store(
         object_store,
         recorder,
         component,
-        store_role,
+        store_target,
     ));
     Arc::new(RetryingObjectStore::new(instrumented, rand, system_clock))
 }
@@ -390,7 +390,7 @@ impl<P: Into<Path>> DbBuilder<P> {
             self.main_object_store,
             &recorder,
             ObjectStoreComponent::Db,
-            ObjectStoreRole::Main,
+            ObjectStoreTarget::Main,
             rand.clone(),
             system_clock.clone(),
         );
@@ -400,7 +400,7 @@ impl<P: Into<Path>> DbBuilder<P> {
                     s,
                     &recorder,
                     ObjectStoreComponent::Db,
-                    ObjectStoreRole::Wal,
+                    ObjectStoreTarget::Wal,
                     rand.clone(),
                     system_clock.clone(),
                 )
@@ -837,7 +837,7 @@ impl<P: Into<Path>> GarbageCollectorBuilder<P> {
             self.main_object_store,
             &self.recorder,
             ObjectStoreComponent::Gc,
-            ObjectStoreRole::Main,
+            ObjectStoreTarget::Main,
             self.rand.clone(),
             self.system_clock.clone(),
         );
@@ -846,7 +846,7 @@ impl<P: Into<Path>> GarbageCollectorBuilder<P> {
                 s,
                 &self.recorder,
                 ObjectStoreComponent::Gc,
-                ObjectStoreRole::Wal,
+                ObjectStoreTarget::Wal,
                 self.rand.clone(),
                 self.system_clock.clone(),
             )
@@ -1027,7 +1027,7 @@ impl<P: Into<Path>> CompactorBuilder<P> {
             self.main_object_store,
             &self.recorder,
             ObjectStoreComponent::Compactor,
-            ObjectStoreRole::Main,
+            ObjectStoreTarget::Main,
             self.rand.clone(),
             self.system_clock.clone(),
         );
@@ -1301,7 +1301,7 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
             self.object_store,
             &self.recorder,
             ObjectStoreComponent::Reader,
-            ObjectStoreRole::Main,
+            ObjectStoreTarget::Main,
             self.rand.clone(),
             self.system_clock.clone(),
         );
@@ -1312,7 +1312,7 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
                     s,
                     &self.recorder,
                     ObjectStoreComponent::Reader,
-                    ObjectStoreRole::Wal,
+                    ObjectStoreTarget::Wal,
                     self.rand.clone(),
                     self.system_clock.clone(),
                 )
@@ -1443,13 +1443,13 @@ mod tests {
 
     fn object_store_labels(
         component: &'static str,
-        store_role: &'static str,
+        store_target: &'static str,
         op: &'static str,
         api: &'static str,
     ) -> [(&'static str, &'static str); 4] {
         [
             ("component", component),
-            ("store_role", store_role),
+            ("store_target", store_target),
             ("op", op),
             ("api", api),
         ]
