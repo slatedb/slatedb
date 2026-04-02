@@ -852,9 +852,11 @@ fn wrap_io_err(err: impl std::error::Error + Send + Sync + 'static) -> object_st
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cached_object_store::stats::{CACHE_BYTES, CACHE_KEYS, EVICTED_BYTES, EVICTED_KEYS};
     use crate::test_utils::gen_rand_bytes;
     use filetime::FileTime;
     use slatedb_common::clock::DefaultSystemClock;
+    use slatedb_common::metrics::{lookup_metric, DefaultMetricsRecorder, MetricsRecorderHelper};
     use std::{io::Write, sync::atomic::Ordering, time::SystemTime};
 
     fn gen_rand_file(
@@ -1065,5 +1067,60 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[tokio::test]
+    async fn test_should_record_cache_and_eviction_metrics() {
+        // given:
+        let temp_dir = tempfile::Builder::new()
+            .prefix("objstore_cache_test_metrics_")
+            .tempdir()
+            .unwrap();
+        let recorder = Arc::new(DefaultMetricsRecorder::new());
+        let helper = MetricsRecorderHelper::new(recorder.clone(), Default::default());
+
+        let evictor = FsCacheEvictorInner::new(
+            temp_dir.path().to_path_buf(),
+            1024 * 2,
+            Arc::new(CachedObjectStoreStats::new(&helper)),
+            Arc::new(DbRand::default()),
+        );
+
+        // when: add two entries (within capacity)
+        let path0 = gen_rand_file(temp_dir.path(), "file0", 1024);
+        evictor
+            .track_entry_accessed(path0, 1024, DefaultSystemClock::default().now(), true)
+            .await;
+
+        let path1 = gen_rand_file(temp_dir.path(), "file1", 1024);
+        evictor
+            .track_entry_accessed(path1, 1024, DefaultSystemClock::default().now(), true)
+            .await;
+
+        // then: cache_keys and cache_bytes are set
+        assert_eq!(lookup_metric(&recorder, CACHE_KEYS), Some(2));
+        assert_eq!(lookup_metric(&recorder, CACHE_BYTES), Some(2048));
+
+        // when: add a third entry that triggers eviction
+        let path2 = gen_rand_file(temp_dir.path(), "file2", 1024);
+        evictor
+            .track_entry_accessed(path2, 1024, DefaultSystemClock::default().now(), true)
+            .await;
+
+        // then: evicted_keys and evicted_bytes are recorded
+        let evicted_keys = lookup_metric(&recorder, EVICTED_KEYS).unwrap();
+        let evicted_bytes = lookup_metric(&recorder, EVICTED_BYTES).unwrap();
+        assert!(
+            evicted_keys >= 1,
+            "expected evicted_keys >= 1, got {evicted_keys}"
+        );
+        assert!(
+            evicted_bytes >= 1024,
+            "expected evicted_bytes >= 1024, got {evicted_bytes}"
+        );
+
+        // cache_keys should be updated after eviction
+        let keys = lookup_metric(&recorder, CACHE_KEYS).unwrap();
+        assert!(keys >= 1, "expected cache_keys >= 1, got {keys}");
     }
 }

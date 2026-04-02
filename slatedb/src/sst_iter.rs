@@ -1237,9 +1237,12 @@ mod tests {
             ValueDeletable::Value(value) => assert_eq!(value.as_ref(), b"v_k1"),
             other => panic!("expected value, found {other:?}"),
         }
-        assert_eq!(lookup_metric(&recorder, "db/sst_filter_positives"), Some(1));
         assert_eq!(
-            lookup_metric(&recorder, "db/sst_filter_false_positives"),
+            lookup_metric(&recorder, crate::db_stats::SST_FILTER_POSITIVE_COUNT),
+            Some(1)
+        );
+        assert_eq!(
+            lookup_metric(&recorder, crate::db_stats::SST_FILTER_FALSE_POSITIVE_COUNT),
             Some(0)
         );
     }
@@ -1266,9 +1269,12 @@ mod tests {
 
         // then
         assert!(iter.is_none(), "negative bloom result should skip iterator");
-        assert_eq!(lookup_metric(&recorder, "db/sst_filter_negatives"), Some(1));
         assert_eq!(
-            lookup_metric(&recorder, "db/sst_filter_false_positives"),
+            lookup_metric(&recorder, crate::db_stats::SST_FILTER_NEGATIVE_COUNT),
+            Some(1)
+        );
+        assert_eq!(
+            lookup_metric(&recorder, crate::db_stats::SST_FILTER_FALSE_POSITIVE_COUNT),
             Some(0)
         );
     }
@@ -1315,12 +1321,18 @@ mod tests {
 
         // then
         assert!(entry.is_none(), "false positive must return no entry");
-        assert_eq!(lookup_metric(&recorder, "db/sst_filter_positives"), Some(1));
         assert_eq!(
-            lookup_metric(&recorder, "db/sst_filter_false_positives"),
+            lookup_metric(&recorder, crate::db_stats::SST_FILTER_POSITIVE_COUNT),
             Some(1)
         );
-        assert_eq!(lookup_metric(&recorder, "db/sst_filter_negatives"), Some(0));
+        assert_eq!(
+            lookup_metric(&recorder, crate::db_stats::SST_FILTER_FALSE_POSITIVE_COUNT),
+            Some(1)
+        );
+        assert_eq!(
+            lookup_metric(&recorder, crate::db_stats::SST_FILTER_NEGATIVE_COUNT),
+            Some(0)
+        );
     }
 
     #[tokio::test]
