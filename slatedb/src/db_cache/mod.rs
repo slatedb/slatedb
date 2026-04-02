@@ -1,7 +1,7 @@
 //! # DB Cache
 //!
 //! This module provides a pluggable caching solution for storing and retrieving
-//! cached blocks, index and bloom filters associated with SSTable IDs.
+//! cached blocks, index and filters associated with SSTable IDs.
 //!
 //! There are currently two built-in cache implementations:
 //! - [Foyer](crate::db_cache::foyer::FoyerCache): Requires the `foyer` feature flag. (Enabled by default)
@@ -22,7 +22,8 @@ use parking_lot::Mutex;
 use crate::db_cache::stats::DbCacheStats;
 use crate::format::block::Block;
 use crate::sst_stats::SstStats;
-use crate::{db_state::SsTableId, filter::BloomFilter, flatbuffer_types::SsTableIndexOwned};
+use crate::filter_policy::Filter;
+use crate::{db_state::SsTableId, flatbuffer_types::SsTableIndexOwned};
 use slatedb_common::clock::SystemClock;
 use slatedb_common::metrics::MetricsRecorderHelper;
 
@@ -190,7 +191,7 @@ impl From<(SsTableId, u64)> for CachedKey {
 enum CachedItem {
     Block(Arc<Block>),
     SsTableIndex(Arc<SsTableIndexOwned>),
-    BloomFilter(Arc<BloomFilter>),
+    Filters(Vec<Arc<dyn Filter>>),
     SstStats(Arc<SstStats>),
 }
 
@@ -219,10 +220,10 @@ impl CachedEntry {
         }
     }
 
-    /// Create a new `CachedEntry` with the given bloom filter.
-    pub(crate) fn with_bloom_filter(bloom_filter: Arc<BloomFilter>) -> Self {
+    /// Create a new `CachedEntry` with the given filters.
+    pub(crate) fn with_filters(filters: Vec<Arc<dyn Filter>>) -> Self {
         Self {
-            item: CachedItem::BloomFilter(bloom_filter),
+            item: CachedItem::Filters(filters),
         }
     }
 
@@ -247,9 +248,9 @@ impl CachedEntry {
         }
     }
 
-    pub(crate) fn bloom_filter(&self) -> Option<Arc<BloomFilter>> {
+    pub(crate) fn filters(&self) -> Option<Vec<Arc<dyn Filter>>> {
         match &self.item {
-            CachedItem::BloomFilter(bloom_filter) => Some(bloom_filter.clone()),
+            CachedItem::Filters(filters) => Some(filters.clone()),
             _ => None,
         }
     }
@@ -269,7 +270,7 @@ impl CachedEntry {
         match &self.item {
             CachedItem::Block(block) => block.size(),
             CachedItem::SsTableIndex(sst_index) => sst_index.size(),
-            CachedItem::BloomFilter(bloom_filter) => bloom_filter.size(),
+            CachedItem::Filters(filters) => filters.iter().map(|f| f.size()).sum(),
             CachedItem::SstStats(stats) => stats.size(),
         }
     }
@@ -280,9 +281,9 @@ impl CachedEntry {
             CachedItem::SsTableIndex(sst_index) => {
                 Self::with_sst_index(Arc::new(sst_index.clamp_allocated_size()))
             }
-            CachedItem::BloomFilter(bloom_filter) => {
-                Self::with_bloom_filter(Arc::new(bloom_filter.clamp_allocated_size()))
-            }
+            CachedItem::Filters(filters) => Self::with_filters(
+                filters.iter().map(|f| f.clamp_allocated_size()).collect(),
+            ),
             CachedItem::SstStats(stats) => {
                 Self::with_sst_stats(Arc::new(stats.clamp_allocated_size()))
             }
@@ -369,7 +370,7 @@ impl DbCache for SplitCache {
                     trace!("no block cache available for insertion");
                 }
             }
-            CachedItem::SsTableIndex(_) | CachedItem::BloomFilter(_) | CachedItem::SstStats(_) => {
+            CachedItem::SsTableIndex(_) | CachedItem::Filters(_) | CachedItem::SstStats(_) => {
                 if let Some(ref cache) = self.meta_cache {
                     cache.insert(key, value.clamp_allocated_size()).await;
                 } else {
@@ -724,6 +725,7 @@ mod tests {
     use crate::db_cache::{CachedEntry, CachedKey, DbCache, DbCacheWrapper, SplitCache};
     use crate::db_state::SsTableId;
     use crate::filter::BloomFilterBuilder;
+    use crate::filter_policy::Filter;
     use crate::format::sst::BlockBuilder;
     use slatedb_common::clock::DefaultSystemClock;
 
@@ -754,7 +756,7 @@ mod tests {
         cache
             .insert(
                 key.clone(),
-                CachedEntry::with_bloom_filter(sst.filter.unwrap()),
+                CachedEntry::with_filters(sst.filters),
             )
             .await;
 
@@ -1087,18 +1089,18 @@ mod tests {
 
         let mut builder = BloomFilterBuilder::new(1);
         builder.add_key(b"a");
-        let filter = Arc::new(builder.build());
+        let filter: Arc<dyn Filter> = Arc::new(builder.build());
         let key = CachedKey::from((SST_ID, 1u64));
 
         cache_a
-            .insert(key.clone(), CachedEntry::with_bloom_filter(filter.clone()))
+            .insert(key.clone(), CachedEntry::with_filters(vec![filter.clone()]))
             .await;
 
         assert!(cache_a.get_filter(&key).await.unwrap().is_some());
         assert!(cache_b.get_filter(&key).await.unwrap().is_none());
 
         cache_b
-            .insert(key.clone(), CachedEntry::with_bloom_filter(filter))
+            .insert(key.clone(), CachedEntry::with_filters(vec![filter]))
             .await;
 
         assert_eq!(2, shared_cache.entry_count());

@@ -7,7 +7,7 @@
 //!
 //! | Feature | Regular SSTable | WAL SSTable |
 //! |---------|-----------------|-------------|
-//! | Bloom filter | Yes (optional) | No |
+//! | Filter | Yes (optional) | No |
 //! | Index key | First key per block | First sequence number per block |
 //! | Key ordering | Sorted by key | Insertion order (by sequence number) |
 //! | First key field in SST info  | First key | First sequence number |
@@ -37,11 +37,11 @@
 //! - [`EncodedSsTableFooterBuilder`]: For encoding the footer
 //! - [`BlockTransformer`]: Trait for custom block transformations (e.g., encryption)
 //!
-//! # Why No Bloom Filter?
+//! # Why No Filter?
 //!
 //! WAL SSTables are designed for sequential replay during recovery, not random
-//! key lookups. Since entries are read sequentially by sequence number, a bloom
-//! filter would provide no benefit.
+//! key lookups. Since entries are read sequentially by sequence number, a filter
+//! would provide no benefit.
 //!
 //! # Sequence Number Index
 //!
@@ -82,7 +82,7 @@ impl SsTableFormat {
 ///
 /// This builder differs from the regular EncodedSsTableBuilder in that:
 /// - It is assumed that the entries are added ordered by sequence number instead of key
-/// - No bloom filter is created
+/// - No filter is created
 /// - The index tracks sequence number ranges per block instead of first keys
 #[allow(unused)]
 pub(crate) struct EncodedWalSsTableBuilder {
@@ -238,7 +238,7 @@ impl EncodedWalSsTableBuilder {
     /// |                 2-byte Version                    |
     /// +---------------------------------------------------+
     ///
-    /// Note: Unlike regular SSTs, WAL SSTs have no bloom filter.
+    /// Note: Unlike regular SSTs, WAL SSTs have no filter.
     /// The index first_key field contains the min sequence number (as bytes) for each block.
     /// SST info contains the first sequence number of the SST instead of the first key.
     pub(crate) async fn build(mut self) -> Result<EncodedSsTable, SlateDBError> {
@@ -267,7 +267,7 @@ impl EncodedWalSsTableBuilder {
             format_version,
             info: footer.info,
             index: footer.index,
-            filter: None,
+            filters: Vec::new(),
             stats: None,
             unconsumed_blocks: self.blocks,
             footer: footer.encoded_bytes,
@@ -365,7 +365,7 @@ mod tests {
         let encoded = builder.build().await.unwrap();
 
         // Then
-        assert!(encoded.filter.is_none());
+        assert!(encoded.filters.is_empty());
         assert_eq!(encoded.info.filter_len, 0);
     }
 
@@ -509,7 +509,7 @@ mod tests {
         // Then
         assert!(encoded.unconsumed_blocks.is_empty());
         assert!(encoded.info.first_entry.is_none());
-        assert!(encoded.filter.is_none());
+        assert!(encoded.filters.is_empty());
     }
 
     #[tokio::test]

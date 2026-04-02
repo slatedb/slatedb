@@ -1,10 +1,9 @@
-use std::mem::size_of;
 use std::sync::Arc;
 
 use crate::filter_policy::{Filter, FilterBuilder, FilterQuery, FilterTarget};
 use crate::types::RowEntry;
 use crate::utils::clamp_allocated_size_bytes;
-use bytes::{Buf, BufMut, Bytes, BytesMut};
+use bytes::{Buf, BufMut, Bytes};
 use siphasher::sip::SipHasher13;
 
 pub struct BloomFilterBuilder {
@@ -65,13 +64,6 @@ impl BloomFilter {
         }
     }
 
-    pub fn encode_to_bytes(&self) -> Bytes {
-        let mut encoded = BytesMut::with_capacity(size_of::<u16>() + self.buffer.len());
-        encoded.put_u16(self.num_probes);
-        encoded.put(self.buffer.slice(..));
-        encoded.freeze()
-    }
-
     /// estimate the size of BloomFilter encoded in SST
     pub fn estimate_encoded_size(num_keys: u32, filter_bits_per_key: u32) -> usize {
         let filter_bytes = BloomFilterBuilder::filter_size_bytes(num_keys, filter_bits_per_key);
@@ -93,17 +85,6 @@ impl BloomFilter {
         true
     }
 
-    pub fn clamp_allocated_size(&self) -> Self {
-        Self {
-            num_probes: self.num_probes,
-            buffer: clamp_allocated_size_bytes(&self.buffer),
-        }
-    }
-
-    /// Returns the size of the bloom filter in bytes.
-    pub fn size(&self) -> usize {
-        self.buffer.len()
-    }
 }
 
 impl FilterBuilder for BloomFilterBuilder {
@@ -135,7 +116,10 @@ impl Filter for BloomFilter {
     }
 
     fn clamp_allocated_size(&self) -> Arc<dyn Filter> {
-        Arc::new(BloomFilter::clamp_allocated_size(self))
+        Arc::new(BloomFilter {
+            num_probes: self.num_probes,
+            buffer: clamp_allocated_size_bytes(&self.buffer),
+        })
     }
 }
 
@@ -187,6 +171,7 @@ fn optimal_num_probes(bits_per_key: u32) -> u16 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytes::BytesMut;
 
     #[test]
     fn test_set_specified_bit_only() {
@@ -334,7 +319,8 @@ mod tests {
             builder.add_key(format!("{}", i).as_bytes());
         }
         let filter = builder.build_filter();
-        let mut extended_buf = BytesMut::with_capacity(filter.size() + 100);
+        let original_size = Filter::size(&filter);
+        let mut extended_buf = BytesMut::with_capacity(original_size + 100);
         extended_buf.put(filter.buffer.as_ref());
         extended_buf.put_bytes(0u8, 100);
         let filter = BloomFilter {
@@ -342,11 +328,15 @@ mod tests {
             ..filter
         };
 
-        let clamped = filter.clamp_allocated_size();
+        let clamped = Filter::clamp_allocated_size(&filter);
 
-        assert_eq!(clamped.buffer, filter.buffer);
-        assert_eq!(clamped.num_probes, filter.num_probes);
-        assert_ne!(clamped.buffer.as_ptr(), filter.buffer.as_ptr());
+        assert_eq!(clamped.size(), Filter::size(&filter));
+        // Encode both and verify they produce the same bytes
+        let mut original_bytes = Vec::new();
+        Filter::encode(&filter, &mut original_bytes);
+        let mut clamped_bytes = Vec::new();
+        clamped.encode(&mut clamped_bytes);
+        assert_eq!(original_bytes, clamped_bytes);
     }
 
     #[test]

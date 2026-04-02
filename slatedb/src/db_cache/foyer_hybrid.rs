@@ -1,7 +1,7 @@
 //! # Foyer Hybrid Cache
 //!
 //! This module provides an implementation of a hybrid (in-memory + on-disk) cache using the Foyer
-//! library. The cache is designed to store and retrieve cached blocks, indexes, and bloom filters
+//! library. The cache is designed to store and retrieve cached blocks, indexes, and filters
 //! associated with SSTable IDs.
 //!
 //! ## Features

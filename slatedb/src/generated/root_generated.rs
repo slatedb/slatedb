@@ -285,6 +285,91 @@ impl<'a> flatbuffers::Verifiable for SstType {
 
 impl flatbuffers::SimpleToVerifyInSlice for SstType {}
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
+pub const ENUM_MIN_FILTER_FORMAT: i8 = 0;
+#[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
+pub const ENUM_MAX_FILTER_FORMAT: i8 = 1;
+#[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
+#[allow(non_camel_case_types)]
+pub const ENUM_VALUES_FILTER_FORMAT: [FilterFormat; 2] = [
+  FilterFormat::Legacy,
+  FilterFormat::Composite,
+];
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+#[repr(transparent)]
+pub struct FilterFormat(pub i8);
+#[allow(non_upper_case_globals)]
+impl FilterFormat {
+  pub const Legacy: Self = Self(0);
+  pub const Composite: Self = Self(1);
+
+  pub const ENUM_MIN: i8 = 0;
+  pub const ENUM_MAX: i8 = 1;
+  pub const ENUM_VALUES: &'static [Self] = &[
+    Self::Legacy,
+    Self::Composite,
+  ];
+  /// Returns the variant's name or "" if unknown.
+  pub fn variant_name(self) -> Option<&'static str> {
+    match self {
+      Self::Legacy => Some("Legacy"),
+      Self::Composite => Some("Composite"),
+      _ => None,
+    }
+  }
+}
+impl core::fmt::Debug for FilterFormat {
+  fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
+    if let Some(name) = self.variant_name() {
+      f.write_str(name)
+    } else {
+      f.write_fmt(format_args!("<UNKNOWN {:?}>", self.0))
+    }
+  }
+}
+impl<'a> flatbuffers::Follow<'a> for FilterFormat {
+  type Inner = Self;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    let b = flatbuffers::read_scalar_at::<i8>(buf, loc);
+    Self(b)
+  }
+}
+
+impl flatbuffers::Push for FilterFormat {
+    type Output = FilterFormat;
+    #[inline]
+    unsafe fn push(&self, dst: &mut [u8], _written_len: usize) {
+        flatbuffers::emplace_scalar::<i8>(dst, self.0);
+    }
+}
+
+impl flatbuffers::EndianScalar for FilterFormat {
+  type Scalar = i8;
+  #[inline]
+  fn to_little_endian(self) -> i8 {
+    self.0.to_le()
+  }
+  #[inline]
+  #[allow(clippy::wrong_self_convention)]
+  fn from_little_endian(v: i8) -> Self {
+    let b = i8::from_le(v);
+    Self(b)
+  }
+}
+
+impl<'a> flatbuffers::Verifiable for FilterFormat {
+  #[inline]
+  fn run_verifier(
+    v: &mut flatbuffers::Verifier, pos: usize
+  ) -> Result<(), flatbuffers::InvalidFlatbuffer> {
+    use self::flatbuffers::Verifiable;
+    i8::run_verifier(v, pos)
+  }
+}
+
+impl flatbuffers::SimpleToVerifyInSlice for FilterFormat {}
+#[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
 pub const ENUM_MIN_COMPACTION_SPEC: u8 = 0;
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
 pub const ENUM_MAX_COMPACTION_SPEC: u8 = 1;
@@ -1039,6 +1124,7 @@ impl<'a> SsTableInfo<'a> {
   pub const VT_LAST_ENTRY: flatbuffers::VOffsetT = 18;
   pub const VT_STATS_OFFSET: flatbuffers::VOffsetT = 20;
   pub const VT_STATS_LEN: flatbuffers::VOffsetT = 22;
+  pub const VT_FILTER_FORMAT: flatbuffers::VOffsetT = 24;
 
   #[inline]
   pub unsafe fn init_from_table(table: flatbuffers::Table<'a>) -> Self {
@@ -1058,6 +1144,7 @@ impl<'a> SsTableInfo<'a> {
     builder.add_index_offset(args.index_offset);
     if let Some(x) = args.last_entry { builder.add_last_entry(x); }
     if let Some(x) = args.first_entry { builder.add_first_entry(x); }
+    builder.add_filter_format(args.filter_format);
     builder.add_sst_type(args.sst_type);
     builder.add_compression_format(args.compression_format);
     builder.finish()
@@ -1134,6 +1221,13 @@ impl<'a> SsTableInfo<'a> {
     // which contains a valid value in this slot
     unsafe { self._tab.get::<u64>(SsTableInfo::VT_STATS_LEN, Some(0)).unwrap()}
   }
+  #[inline]
+  pub fn filter_format(&self) -> FilterFormat {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<FilterFormat>(SsTableInfo::VT_FILTER_FORMAT, Some(FilterFormat::Legacy)).unwrap()}
+  }
 }
 
 impl flatbuffers::Verifiable for SsTableInfo<'_> {
@@ -1153,6 +1247,7 @@ impl flatbuffers::Verifiable for SsTableInfo<'_> {
      .visit_field::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'_, u8>>>("last_entry", Self::VT_LAST_ENTRY, false)?
      .visit_field::<u64>("stats_offset", Self::VT_STATS_OFFSET, false)?
      .visit_field::<u64>("stats_len", Self::VT_STATS_LEN, false)?
+     .visit_field::<FilterFormat>("filter_format", Self::VT_FILTER_FORMAT, false)?
      .finish();
     Ok(())
   }
@@ -1168,6 +1263,7 @@ pub struct SsTableInfoArgs<'a> {
     pub last_entry: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, u8>>>,
     pub stats_offset: u64,
     pub stats_len: u64,
+    pub filter_format: FilterFormat,
 }
 impl<'a> Default for SsTableInfoArgs<'a> {
   #[inline]
@@ -1183,6 +1279,7 @@ impl<'a> Default for SsTableInfoArgs<'a> {
       last_entry: None,
       stats_offset: 0,
       stats_len: 0,
+      filter_format: FilterFormat::Legacy,
     }
   }
 }
@@ -1233,6 +1330,10 @@ impl<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> SsTableInfoBuilder<'a, 'b, A> {
     self.fbb_.push_slot::<u64>(SsTableInfo::VT_STATS_LEN, stats_len, 0);
   }
   #[inline]
+  pub fn add_filter_format(&mut self, filter_format: FilterFormat) {
+    self.fbb_.push_slot::<FilterFormat>(SsTableInfo::VT_FILTER_FORMAT, filter_format, FilterFormat::Legacy);
+  }
+  #[inline]
   pub fn new(_fbb: &'b mut flatbuffers::FlatBufferBuilder<'a, A>) -> SsTableInfoBuilder<'a, 'b, A> {
     let start = _fbb.start_table();
     SsTableInfoBuilder {
@@ -1260,6 +1361,7 @@ impl core::fmt::Debug for SsTableInfo<'_> {
       ds.field("last_entry", &self.last_entry());
       ds.field("stats_offset", &self.stats_offset());
       ds.field("stats_len", &self.stats_len());
+      ds.field("filter_format", &self.filter_format());
       ds.finish()
   }
 }

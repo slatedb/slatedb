@@ -15,6 +15,15 @@ enum SstType: byte {
     Wal
 }
 
+// Filter block format. The default value (Legacy = 0) is not serialized by
+// FlatBuffers, so existing SSTs without this field are treated as Legacy.
+enum FilterFormat: byte {
+    // Single raw bloom filter bytes (pre-composite format).
+    Legacy,
+    // Self-describing composite block with named filters.
+    Composite
+}
+
 // Has metadata about a SST file.
 table SsTableInfo {
     // First entry in the SST file.
@@ -49,6 +58,9 @@ table SsTableInfo {
 
     // Length of the stats block. Length will be zero if stats are not present.
     stats_len: ulong;
+
+    // Filter block format. Defaults to Legacy for backwards compatibility.
+    filter_format: FilterFormat;
 }
 
 // Per-block statistics.

@@ -140,6 +140,7 @@ use crate::db_state::ManifestCore;
 use crate::db_status::ClosedResultWriter;
 use crate::dispatcher::MessageHandlerExecutor;
 use crate::error::SlateDBError;
+use crate::filter_policy::BloomFilterPolicy;
 use crate::format::sst::{BlockTransformer, SsTableFormat};
 use crate::garbage_collector::GarbageCollector;
 use crate::garbage_collector::GC_TASK_NAME;
@@ -407,7 +408,9 @@ impl<P: Into<Path>> DbBuilder<P> {
         };
         let sst_format = SsTableFormat {
             min_filter_keys: self.settings.min_filter_keys,
-            filter_bits_per_key: self.settings.filter_bits_per_key,
+            filter_policies: vec![Arc::new(BloomFilterPolicy::new(
+                self.settings.filter_bits_per_key,
+            ))],
             compression_codec: self.settings.compression_codec,
             block_size: self.sst_block_size.unwrap_or_default().as_bytes(),
             block_transformer: self.block_transformer.clone(),
