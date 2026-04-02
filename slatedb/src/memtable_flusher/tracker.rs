@@ -199,11 +199,15 @@ impl FlushTracker {
     fn register_new_imm_memtables(&mut self) {
         let guard = self.inner.state.read();
         for imm_memtable in guard.state().imm_memtable.iter().rev() {
-            // TODO: Arc::as_ptr identity is fragile — it assumes the same Arc is never
-            // re-inserted after removal. Assigning an SsTableId at memtable freeze would
-            // give us a stable identifier to dedup against.
-            let ptr = Arc::as_ptr(imm_memtable) as usize;
-            if self.tracked_imms.iter().any(|tracked| tracked.ptr == ptr) {
+            let last_seq = imm_memtable
+                .table()
+                .last_seq()
+                .expect("immutable memtable has no entries");
+            if self
+                .tracked_imms
+                .iter()
+                .any(|tracked| tracked.last_seq == last_seq)
+            {
                 continue;
             }
             let sst_id = crate::db_state::SsTableId::Compacted(
@@ -214,7 +218,7 @@ impl FlushTracker {
             );
             self.tracked_imms.push_back(TrackedImm {
                 epoch: self.next_epoch,
-                ptr,
+                last_seq,
                 sst_id,
                 imm_memtable: Arc::clone(imm_memtable),
                 state: TrackedImmState::PendingDispatch,
@@ -359,7 +363,7 @@ impl FlushTracker {
 
 struct TrackedImm {
     epoch: FlushEpoch,
-    ptr: usize,
+    last_seq: u64,
     sst_id: crate::db_state::SsTableId,
     imm_memtable: Arc<crate::mem_table::ImmutableMemtable>,
     state: TrackedImmState,
