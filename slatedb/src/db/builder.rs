@@ -164,23 +164,6 @@ use slatedb_common::metrics::MetricsRecorder;
 use slatedb_common::metrics::MetricsRecorderHelper;
 use slatedb_common::metrics::NoopMetricsRecorder;
 
-fn instrumented_retrying_object_store(
-    object_store: Arc<dyn ObjectStore>,
-    recorder: &MetricsRecorderHelper,
-    component: ObjectStoreComponent,
-    store_target: ObjectStoreTarget,
-    rand: Arc<DbRand>,
-    system_clock: Arc<dyn SystemClock>,
-) -> Arc<dyn ObjectStore> {
-    let instrumented: Arc<dyn ObjectStore> = Arc::new(InstrumentedObjectStore::new(
-        object_store,
-        recorder,
-        component,
-        store_target,
-    ));
-    Arc::new(RetryingObjectStore::new(instrumented, rand, system_clock))
-}
-
 /// A builder for creating a new Db instance.
 ///
 /// This builder provides a fluent API for configuring and opening a SlateDB database.
@@ -1380,6 +1363,23 @@ fn default_db_cache() -> Option<Arc<dyn DbCache>> {
             .with_meta_cache(meta_cache)
             .build(),
     ) as Arc<dyn DbCache>)
+}
+
+fn instrumented_retrying_object_store(
+    object_store: Arc<dyn ObjectStore>,
+    recorder: &MetricsRecorderHelper,
+    component: ObjectStoreComponent,
+    store_target: ObjectStoreTarget,
+    rand: Arc<DbRand>,
+    system_clock: Arc<dyn SystemClock>,
+) -> Arc<dyn ObjectStore> {
+    let instrumented: Arc<dyn ObjectStore> = Arc::new(InstrumentedObjectStore::new(
+        object_store,
+        recorder,
+        component,
+        store_target,
+    ));
+    Arc::new(RetryingObjectStore::new(instrumented, rand, system_clock))
 }
 
 #[allow(unreachable_code)]
