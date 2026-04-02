@@ -8,12 +8,12 @@
 //!
 //! - [`ObjectStoreComponent`] — *who* is making the request (db, reader,
 //!   gc, compactor).
-//! - [`ObjectStoreTarget`] — *which* store the request targets (main vs wal).
+//! - [`ObjectStoreType`] — *which* store the request targets (main vs wal).
 //!
 //! A single component may interact with both stores (e.g. the `Db`
 //! component writes to both the main store and a separate WAL store),
 //! so each `InstrumentedObjectStore` instance is constructed with one
-//! specific (component, target) pair. The cross-product of these two
+//! specific (component, type) pair. The cross-product of these two
 //! dimensions lets operators slice metrics by either axis.
 // `Instant` is intentionally used here for monotonic elapsed-time measurement.
 // SlateDB's clock abstraction is for wall-clock timestamps, not request timing.
@@ -34,6 +34,8 @@ use object_store::{
 };
 use slatedb_common::metrics::MetricsRecorderHelper;
 
+use crate::object_stores::ObjectStoreType;
+
 /// Which SlateDB component is issuing object store requests.
 ///
 /// Used as a metric label to attribute storage I/O to the responsible
@@ -51,34 +53,12 @@ pub(crate) enum ObjectStoreComponent {
 }
 
 impl ObjectStoreComponent {
-    fn as_label_value(self) -> &'static str {
+    fn as_str(self) -> &'static str {
         match self {
             Self::Db => "db",
             Self::Reader => "reader",
             Self::Gc => "gc",
             Self::Compactor => "compactor",
-        }
-    }
-}
-
-/// Whether the object store holds the main data path or the WAL.
-///
-/// A single component may interact with both stores (e.g. when the WAL
-/// is on a separate object store). This label distinguishes the two in
-/// metrics.
-#[derive(Debug, Clone, Copy)]
-pub(crate) enum ObjectStoreTarget {
-    /// The primary object store (SSTs, manifests, compacted data).
-    Main,
-    /// The dedicated WAL object store, when configured separately.
-    Wal,
-}
-
-impl ObjectStoreTarget {
-    fn as_label_value(self) -> &'static str {
-        match self {
-            Self::Main => "main",
-            Self::Wal => "wal",
         }
     }
 }
@@ -94,19 +74,17 @@ impl InstrumentedObjectStore {
     ///
     /// Every request through the returned store increments counters and
     /// records latency histograms, tagged with the given `component` and
-    /// `store_target` labels.
+    /// `store_type` labels.
     pub(crate) fn new(
         inner: Arc<dyn ObjectStore>,
         recorder: &MetricsRecorderHelper,
         component: ObjectStoreComponent,
-        store_target: ObjectStoreTarget,
+        store_type: ObjectStoreType,
     ) -> Self {
         Self {
             inner,
             stats: Arc::new(stats::ObjectStoreStats::new(
-                recorder,
-                component,
-                store_target,
+                recorder, component, store_type,
             )),
         }
     }
@@ -289,7 +267,8 @@ pub(crate) mod stats {
         CounterFn, HistogramFn, MetricsRecorderHelper, LATENCY_BOUNDARIES,
     };
 
-    use crate::instrumented_object_store::{ObjectStoreComponent, ObjectStoreTarget};
+    use crate::instrumented_object_store::ObjectStoreComponent;
+    use crate::object_stores::ObjectStoreType;
 
     macro_rules! object_store_stat_name {
         ($suffix:expr) => {
@@ -325,48 +304,42 @@ pub(crate) mod stats {
         pub(crate) fn new(
             recorder: &MetricsRecorderHelper,
             component: ObjectStoreComponent,
-            store_target: ObjectStoreTarget,
+            store_type: ObjectStoreType,
         ) -> Self {
             Self {
-                get: RequestMetrics::new(recorder, component, store_target, "get", "get"),
-                get_range: RequestMetrics::new(
-                    recorder,
-                    component,
-                    store_target,
-                    "get",
-                    "get_range",
-                ),
+                get: RequestMetrics::new(recorder, component, store_type, "get", "get"),
+                get_range: RequestMetrics::new(recorder, component, store_type, "get", "get_range"),
                 get_ranges: RequestMetrics::new(
                     recorder,
                     component,
-                    store_target,
+                    store_type,
                     "get",
                     "get_ranges",
                 ),
-                head: RequestMetrics::new(recorder, component, store_target, "get", "head"),
-                put: RequestMetrics::new(recorder, component, store_target, "put", "put"),
+                head: RequestMetrics::new(recorder, component, store_type, "get", "head"),
+                put: RequestMetrics::new(recorder, component, store_type, "put", "put"),
                 multipart_init: RequestMetrics::new(
                     recorder,
                     component,
-                    store_target,
+                    store_type,
                     "put",
                     "multipart_init",
                 ),
                 multipart_part: RequestMetrics::new(
                     recorder,
                     component,
-                    store_target,
+                    store_type,
                     "put",
                     "multipart_part",
                 ),
                 multipart_complete: RequestMetrics::new(
                     recorder,
                     component,
-                    store_target,
+                    store_type,
                     "put",
                     "multipart_complete",
                 ),
-                delete: RequestMetrics::new(recorder, component, store_target, "delete", "delete"),
+                delete: RequestMetrics::new(recorder, component, store_type, "delete", "delete"),
             }
         }
     }
@@ -391,13 +364,13 @@ pub(crate) mod stats {
         fn new(
             recorder: &MetricsRecorderHelper,
             component: ObjectStoreComponent,
-            store_target: ObjectStoreTarget,
+            store_type: ObjectStoreType,
             op: &'static str,
             api: &'static str,
         ) -> Self {
             let labels = [
-                ("component", component.as_label_value()),
-                ("store_target", store_target.as_label_value()),
+                ("component", component.as_str()),
+                ("store_type", store_type.as_str()),
                 ("op", op),
                 ("api", api),
             ];
@@ -446,22 +419,21 @@ mod tests {
     use crate::instrumented_object_store::stats::{
         ERROR_COUNT, REQUEST_COUNT, REQUEST_DURATION_SECONDS,
     };
-    use crate::instrumented_object_store::{
-        InstrumentedObjectStore, ObjectStoreComponent, ObjectStoreTarget,
-    };
+    use crate::instrumented_object_store::{InstrumentedObjectStore, ObjectStoreComponent};
+    use crate::object_stores::ObjectStoreType;
     use crate::rand::DbRand;
     use crate::retrying_object_store::RetryingObjectStore;
     use crate::test_utils::FlakyObjectStore;
 
     fn labels(
         component: &'static str,
-        store_target: &'static str,
+        store_type: &'static str,
         op: &'static str,
         api: &'static str,
     ) -> [(&'static str, &'static str); 4] {
         [
             ("component", component),
-            ("store_target", store_target),
+            ("store_type", store_type),
             ("op", op),
             ("api", api),
         ]
@@ -489,7 +461,7 @@ mod tests {
             inner,
             &helper,
             ObjectStoreComponent::Db,
-            ObjectStoreTarget::Main,
+            ObjectStoreType::Main,
         );
         let path = Path::from("a");
 
@@ -547,7 +519,7 @@ mod tests {
             flaky,
             &helper,
             ObjectStoreComponent::Db,
-            ObjectStoreTarget::Main,
+            ObjectStoreType::Main,
         );
 
         // when:
@@ -578,7 +550,7 @@ mod tests {
             flaky.clone(),
             &helper,
             ObjectStoreComponent::Db,
-            ObjectStoreTarget::Main,
+            ObjectStoreType::Main,
         ));
         let retrying = RetryingObjectStore::new(
             instrumented,
@@ -613,7 +585,7 @@ mod tests {
             inner,
             &helper,
             ObjectStoreComponent::Db,
-            ObjectStoreTarget::Main,
+            ObjectStoreType::Main,
         );
         let path = Path::from("multipart");
 
@@ -650,18 +622,18 @@ mod tests {
     }
 
     #[test]
-    fn test_distinguishes_series_by_component_and_store_target() {
+    fn test_distinguishes_series_by_component_and_store_type() {
         // given:
         let (recorder, helper) = test_recorder_helper();
         let db_main = crate::instrumented_object_store::stats::ObjectStoreStats::new(
             &helper,
             ObjectStoreComponent::Db,
-            ObjectStoreTarget::Main,
+            ObjectStoreType::Main,
         );
         let gc_wal = crate::instrumented_object_store::stats::ObjectStoreStats::new(
             &helper,
             ObjectStoreComponent::Gc,
-            ObjectStoreTarget::Wal,
+            ObjectStoreType::Wal,
         );
 
         // when:

@@ -143,13 +143,12 @@ use crate::error::SlateDBError;
 use crate::format::sst::{BlockTransformer, SsTableFormat};
 use crate::garbage_collector::GarbageCollector;
 use crate::garbage_collector::GC_TASK_NAME;
-use crate::instrumented_object_store::{
-    InstrumentedObjectStore, ObjectStoreComponent, ObjectStoreTarget,
-};
+use crate::instrumented_object_store::{InstrumentedObjectStore, ObjectStoreComponent};
 use crate::manifest::store::{FenceableManifest, ManifestStore, StoredManifest};
 use crate::mem_table_flush::MemtableFlusher;
 use crate::mem_table_flush::MEMTABLE_FLUSHER_TASK_NAME;
 use crate::merge_operator::MergeOperatorType;
+use crate::object_stores::ObjectStoreType;
 use crate::object_stores::ObjectStores;
 use crate::paths::PathResolver;
 use crate::rand::DbRand;
@@ -373,7 +372,7 @@ impl<P: Into<Path>> DbBuilder<P> {
             self.main_object_store,
             &recorder,
             ObjectStoreComponent::Db,
-            ObjectStoreTarget::Main,
+            ObjectStoreType::Main,
             rand.clone(),
             system_clock.clone(),
         );
@@ -383,7 +382,7 @@ impl<P: Into<Path>> DbBuilder<P> {
                     s,
                     &recorder,
                     ObjectStoreComponent::Db,
-                    ObjectStoreTarget::Wal,
+                    ObjectStoreType::Wal,
                     rand.clone(),
                     system_clock.clone(),
                 )
@@ -820,7 +819,7 @@ impl<P: Into<Path>> GarbageCollectorBuilder<P> {
             self.main_object_store,
             &self.recorder,
             ObjectStoreComponent::Gc,
-            ObjectStoreTarget::Main,
+            ObjectStoreType::Main,
             self.rand.clone(),
             self.system_clock.clone(),
         );
@@ -829,7 +828,7 @@ impl<P: Into<Path>> GarbageCollectorBuilder<P> {
                 s,
                 &self.recorder,
                 ObjectStoreComponent::Gc,
-                ObjectStoreTarget::Wal,
+                ObjectStoreType::Wal,
                 self.rand.clone(),
                 self.system_clock.clone(),
             )
@@ -1010,7 +1009,7 @@ impl<P: Into<Path>> CompactorBuilder<P> {
             self.main_object_store,
             &self.recorder,
             ObjectStoreComponent::Compactor,
-            ObjectStoreTarget::Main,
+            ObjectStoreType::Main,
             self.rand.clone(),
             self.system_clock.clone(),
         );
@@ -1284,7 +1283,7 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
             self.object_store,
             &self.recorder,
             ObjectStoreComponent::Reader,
-            ObjectStoreTarget::Main,
+            ObjectStoreType::Main,
             self.rand.clone(),
             self.system_clock.clone(),
         );
@@ -1295,7 +1294,7 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
                     s,
                     &self.recorder,
                     ObjectStoreComponent::Reader,
-                    ObjectStoreTarget::Wal,
+                    ObjectStoreType::Wal,
                     self.rand.clone(),
                     self.system_clock.clone(),
                 )
@@ -1369,7 +1368,7 @@ fn instrumented_retrying_object_store(
     object_store: Arc<dyn ObjectStore>,
     recorder: &MetricsRecorderHelper,
     component: ObjectStoreComponent,
-    store_target: ObjectStoreTarget,
+    store_type: ObjectStoreType,
     rand: Arc<DbRand>,
     system_clock: Arc<dyn SystemClock>,
 ) -> Arc<dyn ObjectStore> {
@@ -1377,7 +1376,7 @@ fn instrumented_retrying_object_store(
         object_store,
         recorder,
         component,
-        store_target,
+        store_type,
     ));
     Arc::new(RetryingObjectStore::new(instrumented, rand, system_clock))
 }
@@ -1443,13 +1442,13 @@ mod tests {
 
     fn object_store_labels(
         component: &'static str,
-        store_target: &'static str,
+        store_type: &'static str,
         op: &'static str,
         api: &'static str,
     ) -> [(&'static str, &'static str); 4] {
         [
             ("component", component),
-            ("store_target", store_target),
+            ("store_type", store_type),
             ("op", op),
             ("api", api),
         ]
