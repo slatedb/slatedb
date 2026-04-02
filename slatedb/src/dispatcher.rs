@@ -251,6 +251,49 @@ impl<T: Send + std::fmt::Debug> MessageDispatcher<T> {
     /// ## Returns
     ///
     /// The [Result] after cleaning up resources.
+    /// Runs the full dispatcher lifecycle: [run] with panic catching, write to
+    /// `closed_result`, then [cleanup]. Returns the run result.
+    #[allow(clippy::panic)] // for failpoint
+    async fn run_lifecycle(
+        mut self,
+        name: String,
+        closed_result: ClosedResultWriter,
+        #[allow(unused_variables)] fp_registry: Arc<FailPointRegistry>,
+    ) -> Result<(), SlateDBError> {
+        let run_unwind_result = AssertUnwindSafe(self.run()).catch_unwind().await;
+        let (run_result, run_maybe_panic) = split_unwind_result(name.clone(), run_unwind_result);
+        if let Err(ref err) = run_result {
+            error!(
+                "background task panicked unexpectedly. [task_name={}, error={:?}, panic={:?}]",
+                name,
+                err,
+                run_maybe_panic.map(|p| panic_string(&p))
+            );
+        }
+        fail_point!(fp_registry.clone(), "executor-wrapper-before-write", |_| {
+            panic!("failpoint: executor-wrapper-before-write");
+        });
+        closed_result.write(run_result.clone());
+        let final_result = closed_result
+            .reader()
+            .read()
+            .expect("error state was unexpectedly empty");
+        let cleanup_unwind_result = AssertUnwindSafe(self.cleanup(final_result))
+            .catch_unwind()
+            .await;
+        let (cleanup_result, cleanup_maybe_panic) =
+            split_unwind_result(name.clone(), cleanup_unwind_result);
+        if let Err(err) = cleanup_result {
+            error!(
+                "background task failed to clean up on shutdown [name={}, error={:?}, panic={:?}]",
+                name,
+                err,
+                cleanup_maybe_panic.map(|p| panic_string(&p))
+            );
+        }
+        run_result
+    }
+
     async fn cleanup(&mut self, result: Result<(), SlateDBError>) -> Result<(), SlateDBError> {
         fail_point!(Arc::clone(&self.fp_registry), "dispatcher-cleanup", |_| {
             Err(SlateDBError::Fenced)
@@ -390,6 +433,77 @@ struct TaskGroup {
     result: Result<(), SlateDBError>,
 }
 
+impl TaskGroup {
+    fn new(count: usize) -> Self {
+        Self {
+            remaining: count,
+            result: Ok(()),
+        }
+    }
+
+    /// Merge a member result. First error wins. Returns `true` when this
+    /// was the last member (i.e. the group is now complete).
+    fn member_completed(&mut self, result: Result<(), SlateDBError>) -> bool {
+        if self.result.is_ok() {
+            self.result = result;
+        }
+        self.remaining -= 1;
+        self.remaining == 0
+    }
+}
+
+/// Owns the state needed by the monitor loop and provides a single
+/// `run` method that drives it.
+struct TaskMonitor {
+    tasks: JoinMap<(String, usize), Result<(), SlateDBError>>,
+    groups: HashMap<String, TaskGroup>,
+    closed_result: ClosedResultWriter,
+    results: Arc<SkipMap<String, WatchableOnceCell<Result<(), SlateDBError>>>>,
+    tokens: Vec<CancellationToken>,
+}
+
+impl TaskMonitor {
+    /// Run the monitor loop until all tasks complete.
+    async fn run(mut self) {
+        while !self.tasks.is_empty() {
+            if let Some(((group_name, _), join_result)) = self.tasks.join_next().await {
+                let (task_result, task_maybe_panic) =
+                    split_join_result(group_name.clone(), join_result);
+
+                if let Err(ref err) = task_result {
+                    error!(
+                        "background task failed [name={}, error={:?}, panic={:?}]",
+                        group_name,
+                        err,
+                        task_maybe_panic.map(|p| panic_string(&p))
+                    );
+                    self.closed_result.write(task_result.clone());
+                    self.tokens.iter().for_each(|t| t.cancel());
+                }
+
+                let group = self
+                    .groups
+                    .get_mut(&group_name)
+                    .expect("group tracking entry missing");
+
+                if group.member_completed(task_result) {
+                    let group_result = self
+                        .groups
+                        .remove(&group_name)
+                        .expect("group tracking entry missing on final member")
+                        .result;
+                    self.closed_result.write(group_result.clone());
+                    self.results
+                        .get(&group_name)
+                        .expect("result cell isn't set when expected")
+                        .value()
+                        .write(group_result);
+                }
+            }
+        }
+    }
+}
+
 impl std::fmt::Debug for MessageHandlerFuture {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("MessageHandlerFuture")
@@ -495,7 +609,6 @@ impl MessageHandlerExecutor {
     /// - `Ok(())` if the group was successfully added.
     /// - Err([SlateDBError::BackgroundTaskExists]) if a group with the same name already exists.
     /// - Err([SlateDBError::BackgroundTaskExecutorStarted]) if the executor is already started.
-    #[allow(clippy::panic)] // for failpoint
     pub(crate) fn add_handlers<T: Send + std::fmt::Debug + 'static>(
         &self,
         name: String,
@@ -507,62 +620,18 @@ impl MessageHandlerExecutor {
         let mut futures = Vec::with_capacity(handlers.len());
 
         for (group_index, handler) in handlers.into_iter().enumerate() {
-            let rx = rx.clone();
-            let token = token.clone();
-            let mut dispatcher =
-                MessageDispatcher::new(handler, rx, self.clock.clone(), token.clone())
+            let dispatcher =
+                MessageDispatcher::new(handler, rx.clone(), self.clock.clone(), token.clone())
                     .with_fp_registry(self.fp_registry.clone());
-            let this_closed_result = self.closed_result.clone();
-            let this_name = name.clone();
-            #[allow(unused_variables)]
-            let this_fp_registry = self.fp_registry.clone();
-            // future that runs the dispatcher and handles cleanup
-            let task_future = async move {
-                // catch dispatcher panics using catch_unwind
-                let run_unwind_result = AssertUnwindSafe(dispatcher.run()).catch_unwind().await;
-                let (run_result, run_maybe_panic) =
-                    split_unwind_result(this_name.clone(), run_unwind_result);
-                if let Err(ref err) = run_result {
-                    error!(
-                        "background task panicked unexpectedly. [task_name={}, error={:?}, panic={:?}]",
-                        this_name,
-                        err,
-                        run_maybe_panic.map(|p| panic_string(&p))
-                    );
-                }
-                fail_point!(
-                    this_fp_registry.clone(),
-                    "executor-wrapper-before-write",
-                    |_| {
-                        panic!("failpoint: executor-wrapper-before-write");
-                    }
-                );
-                // set result in db state (first writer wins)
-                this_closed_result.write(run_result.clone());
-                // re-read the result since it might have already been set by another task
-                let final_result = this_closed_result
-                    .reader()
-                    .read()
-                    .expect("error state was unexpectedly empty");
-                let cleanup_unwind_result = AssertUnwindSafe(dispatcher.cleanup(final_result))
-                    .catch_unwind()
-                    .await;
-                let (cleanup_result, cleanup_maybe_panic) =
-                    split_unwind_result(this_name.clone(), cleanup_unwind_result);
-                if let Err(err) = cleanup_result {
-                    error!(
-                        "background task failed to clean up on shutdown [name={}, error={:?}, panic={:?}]",
-                        this_name.clone(),
-                        err,
-                        cleanup_maybe_panic.map(|p| panic_string(&p))
-                    );
-                }
-                run_result
-            };
+            let future = dispatcher.run_lifecycle(
+                name.clone(),
+                self.closed_result.clone(),
+                self.fp_registry.clone(),
+            );
             futures.push(MessageHandlerFuture {
                 name: name.clone(),
                 group_index,
-                future: Box::pin(task_future),
+                future: Box::pin(future),
                 token: token.clone(),
                 handle: handle.clone(),
             });
@@ -603,7 +672,7 @@ impl MessageHandlerExecutor {
             }
         };
         let mut tasks = JoinMap::new();
-        let mut group_counts: HashMap<String, usize> = HashMap::new();
+        let mut groups: HashMap<String, TaskGroup> = HashMap::new();
         for task_definition in task_definitions.drain(..) {
             // Only insert token and result cell once per group name
             if !self.tokens.contains_key(&task_definition.name) {
@@ -612,79 +681,24 @@ impl MessageHandlerExecutor {
                 self.results
                     .insert(task_definition.name.clone(), WatchableOnceCell::new());
             }
-            *group_counts
+            groups
                 .entry(task_definition.name.clone())
-                .or_insert(0) += 1;
+                .or_insert_with(|| TaskGroup::new(0))
+                .remaining += 1;
             tasks.spawn_on(
                 (task_definition.name.clone(), task_definition.group_index),
                 task_definition.future,
                 &task_definition.handle,
             );
         }
-        let this_closed_result = self.closed_result.clone();
-        let this_results = self.results.clone();
-        let this_tokens = self
-            .tokens
-            .iter()
-            .map(|e| e.value().clone())
-            .collect::<Vec<_>>();
-        // future that runs until all tasks are completed
-        let monitor_future = async move {
-            let mut groups: HashMap<String, TaskGroup> = group_counts
-                .into_iter()
-                .map(|(name, count)| {
-                    (
-                        name,
-                        TaskGroup {
-                            remaining: count,
-                            result: Ok(()),
-                        },
-                    )
-                })
-                .collect();
-
-            while !tasks.is_empty() {
-                if let Some(((group_name, _group_index), join_result)) = tasks.join_next().await {
-                    let (task_result, task_maybe_panic) =
-                        split_join_result(group_name.clone(), join_result);
-                    if let Err(ref err) = task_result {
-                        error!(
-                            "background task failed [name={}, error={:?}, panic={:?}]",
-                            group_name,
-                            err,
-                            task_maybe_panic.map(|p| panic_string(&p))
-                        );
-                        // Write to closed_result immediately on error (first writer wins)
-                        this_closed_result.write(task_result.clone());
-                        // Cancel all tasks on error
-                        this_tokens.iter().for_each(|t| t.cancel());
-                    }
-
-                    let group = groups
-                        .get_mut(&group_name)
-                        .expect("group tracking entry missing");
-                    // Merge result: first error wins
-                    if group.result.is_ok() {
-                        group.result = task_result;
-                    }
-                    group.remaining -= 1;
-
-                    if group.remaining == 0 {
-                        let group_result = groups
-                            .remove(&group_name)
-                            .expect("group tracking entry missing on final member")
-                            .result;
-                        // For successful groups, write to closed_result (first writer wins)
-                        this_closed_result.write(group_result.clone());
-                        let entry = this_results
-                            .get(&group_name)
-                            .expect("result cell isn't set when expected");
-                        entry.value().write(group_result);
-                    }
-                }
-            }
+        let monitor = TaskMonitor {
+            tasks,
+            groups,
+            closed_result: self.closed_result.clone(),
+            results: self.results.clone(),
+            tokens: self.tokens.iter().map(|e| e.value().clone()).collect(),
         };
-        Ok(handle.spawn(monitor_future))
+        Ok(handle.spawn(monitor.run()))
     }
 
     /// Cancels a task by name.
