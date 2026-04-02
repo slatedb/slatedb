@@ -232,7 +232,6 @@ impl ManifestWriterTask {
                 }
                 maybe_command = self.commands_rx.recv() => {
                     let Some(command) = maybe_command else {
-                        let _ = self.write_current_manifest_safely().await;
                         break Ok(());
                     };
                     let commands = self.drain_ready_commands(command);
@@ -242,6 +241,12 @@ impl ManifestWriterTask {
                 }
             }
         };
+        // Persist the local manifest on shutdown to advance next_wal_sst_id
+        // and any other locally updated fields. Skip if fenced since another
+        // writer owns the manifest.
+        if !matches!(result, Err(SlateDBError::Fenced)) {
+            let _ = self.write_current_manifest_safely().await;
+        }
         let last_durable_epoch = self.durable_through.map(|(epoch, _)| epoch);
         self.fail_pending_flushes(&result, last_durable_epoch);
         self.fail_pending_checkpoints(&result);
