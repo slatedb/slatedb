@@ -323,7 +323,7 @@ impl CompactionExecuteBench {
             self.path.clone(),
             None,
         ));
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, rx) = async_channel::unbounded();
         let compactor_options = CompactorOptions::default();
         let recorder = MetricsRecorderHelper::noop();
         let stats = Arc::new(CompactionStats::new(&recorder));
@@ -388,7 +388,7 @@ impl CompactionExecuteBench {
         info!("start compaction job");
         #[allow(clippy::disallowed_methods)]
         tokio::task::spawn_blocking(move || executor.start_compaction_job(job));
-        while let Some(msg) = rx.recv().await {
+        while let Ok(msg) = rx.recv().await {
             if let CompactorMessage::CompactionJobFinished { id: _, result } = msg {
                 match result {
                     Ok(_) => {

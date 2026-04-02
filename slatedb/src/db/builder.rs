@@ -111,7 +111,6 @@ use object_store::path::Path;
 use object_store::ObjectStore;
 use rand::RngCore;
 use tokio::runtime::Handle;
-use tokio::sync::mpsc;
 
 use crate::admin::Admin;
 use crate::batch_write::WriteBatchEventHandler;
@@ -506,8 +505,8 @@ impl<P: Into<Path>> DbBuilder<P> {
         .await?;
 
         // Setup communication channels
-        let (memtable_flush_tx, memtable_flush_rx) = tokio::sync::mpsc::unbounded_channel();
-        let (write_tx, write_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (memtable_flush_tx, memtable_flush_rx) = async_channel::unbounded();
+        let (write_tx, write_rx) = async_channel::unbounded();
 
         // Create the database inner state
         let inner = Arc::new(
@@ -618,7 +617,7 @@ impl<P: Into<Path>> DbBuilder<P> {
                     compactions_store.clone(),
                 );
             // Garbage collector only uses tickers, so pass in a dummy rx channel
-            let (_, rx) = mpsc::unbounded_channel();
+            let (_, rx) = async_channel::unbounded();
             let gc_handle = self.gc_runtime.as_ref().unwrap_or(&tokio_handle);
             task_executor.add_handler(GC_TASK_NAME.to_string(), Box::new(gc), rx, gc_handle)?;
         }
@@ -1066,7 +1065,7 @@ impl<P: Into<Path>> CompactorBuilder<P> {
     ) -> Result<
         (
             CompactorEventHandler,
-            mpsc::UnboundedReceiver<CompactorMessage>,
+            async_channel::Receiver<CompactorMessage>,
         ),
         SlateDBError,
     > {
@@ -1075,7 +1074,7 @@ impl<P: Into<Path>> CompactorBuilder<P> {
         let scheduler_supplier = self
             .scheduler_supplier
             .unwrap_or(Arc::new(SizeTieredCompactionSchedulerSupplier));
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, rx) = async_channel::unbounded();
         let scheduler = Arc::from(scheduler_supplier.compaction_scheduler(&options));
         let stats = Arc::new(CompactionStats::new(&self.recorder));
         let executor = Arc::new(TokioCompactionExecutor::new(

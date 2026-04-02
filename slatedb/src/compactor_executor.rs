@@ -188,7 +188,7 @@ pub(crate) trait CompactionExecutor {
 pub(crate) struct TokioCompactionExecutorOptions {
     pub handle: tokio::runtime::Handle,
     pub options: Arc<CompactorOptions>,
-    pub worker_tx: tokio::sync::mpsc::UnboundedSender<CompactorMessage>,
+    pub worker_tx: async_channel::Sender<CompactorMessage>,
     pub table_store: Arc<TableStore>,
     pub rand: Arc<DbRand>,
     pub stats: Arc<CompactionStats>,
@@ -246,7 +246,7 @@ struct TokioCompactionTask {
 pub(crate) struct TokioCompactionExecutorInner {
     options: Arc<CompactorOptions>,
     handle: tokio::runtime::Handle,
-    worker_tx: tokio::sync::mpsc::UnboundedSender<CompactorMessage>,
+    worker_tx: async_channel::Sender<CompactorMessage>,
     table_store: Arc<TableStore>,
     tasks: Arc<Mutex<HashMap<u32, TokioCompactionTask>>>,
     rand: Arc<DbRand>,
@@ -362,7 +362,7 @@ impl TokioCompactionExecutorInner {
         #[allow(clippy::disallowed_methods)]
         if let Err(e) = self
             .worker_tx
-            .send(CompactorMessage::CompactionJobProgress {
+            .try_send(CompactorMessage::CompactionJobProgress {
                 id,
                 bytes_processed,
                 output_ssts: output_ssts.to_vec(),
@@ -494,7 +494,7 @@ impl TokioCompactionExecutorInner {
                 #[allow(clippy::disallowed_methods)]
                 if let Err(e) = this_cleanup
                     .worker_tx
-                    .send(CompactionJobFinished { id, result })
+                    .try_send(CompactionJobFinished { id, result })
                 {
                     debug!(
                         "failed to send compaction finished msg (likely DB shutdown) [error={:?}]",
@@ -978,7 +978,7 @@ mod tests {
     ) {
         let handle = tokio::runtime::Handle::current();
         let options = Arc::new(CompactorOptions::default());
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, _rx) = async_channel::unbounded();
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let root_path = Path::from("testdb-load-iterators");
         let clock = Arc::new(DefaultSystemClock::new());
@@ -1185,7 +1185,7 @@ mod tests {
                     ..Default::default()
                 };
                 let options = Arc::new(options);
-                let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+                let (tx, _rx) = async_channel::unbounded();
                 let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
                 let root_path = Path::from("testdb-exec-resume");
                 let clock = Arc::new(DefaultSystemClock::new());
@@ -1318,7 +1318,7 @@ mod tests {
     struct TestContext {
         executor: TokioCompactionExecutor,
         table_store: Arc<TableStore>,
-        rx: tokio::sync::mpsc::UnboundedReceiver<CompactorMessage>,
+        rx: async_channel::Receiver<CompactorMessage>,
     }
 
     /// Builder for creating test context with configurable options.
@@ -1356,7 +1356,7 @@ mod tests {
         async fn build(self) -> TestContext {
             let handle = tokio::runtime::Handle::current();
             let options = Arc::new(CompactorOptions::default());
-            let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+            let (tx, rx) = async_channel::unbounded();
             let os = Arc::new(InMemory::new());
             let clock = Arc::new(DefaultSystemClock::new());
             let db = Db::builder(self.path.clone(), os.clone())
@@ -1398,7 +1398,7 @@ mod tests {
     impl TestContext {
         /// Runs a compaction job and waits for the result.
         async fn run_compaction(
-            mut self,
+            self,
             ssts: Vec<SsTableHandle>,
             is_dest_last_run: bool,
             retention_min_seq: Option<u64>,

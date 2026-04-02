@@ -7,11 +7,7 @@ use async_trait::async_trait;
 use futures::{stream::BoxStream, StreamExt};
 use log::{error, trace};
 use parking_lot::RwLock;
-use tokio::{
-    runtime::Handle,
-    select,
-    sync::{mpsc, oneshot},
-};
+use tokio::{runtime::Handle, select, sync::oneshot};
 use tracing::instrument;
 
 use crate::clock::MonotonicClock;
@@ -71,7 +67,7 @@ struct WalBufferManagerInner {
     /// The flusher will try flush all the immutable wals to remote storage.
     immutable_wals: VecDeque<(u64, Arc<WalBuffer>)>,
     /// The channel to send the flush work to the background worker.
-    flush_tx: Option<mpsc::UnboundedSender<WalFlushWork>>,
+    flush_tx: Option<async_channel::Sender<WalFlushWork>>,
     /// task executor for the background worker.
     task_executor: Option<Arc<MessageHandlerExecutor>>,
     /// Whenever a WAL is applied to Memtable and successfully flushed to remote storage,
@@ -156,7 +152,7 @@ impl WalBufferManager {
         self: &Arc<Self>,
         task_executor: Arc<MessageHandlerExecutor>,
     ) -> Result<(), SlateDBError> {
-        let (flush_tx, flush_rx) = mpsc::unbounded_channel();
+        let (flush_tx, flush_rx) = async_channel::unbounded();
         {
             let mut inner = self.inner.write();
             inner.flush_tx = Some(flush_tx);
