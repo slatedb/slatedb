@@ -38,7 +38,6 @@ use std::ops::{RangeBounds, Sub};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::runtime::Handle;
-use tokio::sync::mpsc;
 use uuid::Uuid;
 
 pub(crate) const DB_READER_TASK_NAME: &str = "manifest_poller";
@@ -420,7 +419,7 @@ impl DbReaderInner {
         let poller = ManifestPoller {
             inner: Arc::clone(self),
         };
-        let (_tx, rx) = mpsc::unbounded_channel();
+        let (_tx, rx) = async_channel::unbounded();
         let result = task_executor.add_handler(
             DB_READER_TASK_NAME.to_string(),
             Box::new(poller),

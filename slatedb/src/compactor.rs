@@ -318,7 +318,7 @@ impl Compactor {
     /// ## Returns
     /// - `Ok(())` when the compactor task exits cleanly, or [`SlateDBError`] on failure.
     pub async fn run(&self) -> Result<(), crate::Error> {
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, rx) = async_channel::unbounded();
         let scheduler = Arc::from(self.scheduler_supplier.compaction_scheduler(&self.options));
         let executor = Arc::new(TokioCompactionExecutor::new(
             TokioCompactionExecutorOptions {
@@ -2916,7 +2916,7 @@ mod tests {
         scheduler: Arc<MockScheduler>,
         executor: Arc<MockExecutor>,
         real_executor: Arc<dyn CompactionExecutor>,
-        real_executor_rx: tokio::sync::mpsc::UnboundedReceiver<CompactorMessage>,
+        real_executor_rx: async_channel::Receiver<CompactorMessage>,
         test_recorder: Arc<slatedb_common::metrics::DefaultMetricsRecorder>,
         handler: CompactorEventHandler,
     }
@@ -2936,7 +2936,7 @@ mod tests {
 
             let scheduler = Arc::new(MockScheduler::new());
             let executor = Arc::new(MockExecutor::new());
-            let (real_executor_tx, real_executor_rx) = tokio::sync::mpsc::unbounded_channel();
+            let (real_executor_tx, real_executor_rx) = async_channel::unbounded();
             let rand = Arc::new(DbRand::default());
             let test_recorder = Arc::new(slatedb_common::metrics::DefaultMetricsRecorder::new());
             let recorder = MetricsRecorderHelper::new(
@@ -3045,13 +3045,13 @@ mod tests {
         fixture.assert_and_forward_compactions(1);
         let msg = tokio::time::timeout(Duration::from_millis(10), async {
             match fixture.real_executor_rx.recv().await {
-                Some(m @ CompactorMessage::CompactionJobFinished { .. }) => m,
-                Some(_) => fixture
+                Ok(m @ CompactorMessage::CompactionJobFinished { .. }) => m,
+                Ok(_) => fixture
                     .real_executor_rx
                     .recv()
                     .await
                     .expect("channel closed before CompactionJobAttemptFinished"),
-                None => panic!("channel closed before receiving any message"),
+                Err(_) => panic!("channel closed before receiving any message"),
             }
         })
         .await
@@ -3085,13 +3085,13 @@ mod tests {
         fixture.assert_and_forward_compactions(1);
         let msg = tokio::time::timeout(Duration::from_millis(10), async {
             match fixture.real_executor_rx.recv().await {
-                Some(m @ CompactorMessage::CompactionJobFinished { .. }) => m,
-                Some(_) => fixture
+                Ok(m @ CompactorMessage::CompactionJobFinished { .. }) => m,
+                Ok(_) => fixture
                     .real_executor_rx
                     .recv()
                     .await
                     .expect("channel closed before CompactionJobAttemptFinished"),
-                None => panic!("channel closed before receiving any message"),
+                Err(_) => panic!("channel closed before receiving any message"),
             }
         })
         .await
@@ -3197,13 +3197,13 @@ mod tests {
         fixture.assert_and_forward_compactions(1);
         let msg = tokio::time::timeout(Duration::from_millis(10), async {
             match fixture.real_executor_rx.recv().await {
-                Some(m @ CompactorMessage::CompactionJobFinished { .. }) => m,
-                Some(_) => fixture
+                Ok(m @ CompactorMessage::CompactionJobFinished { .. }) => m,
+                Ok(_) => fixture
                     .real_executor_rx
                     .recv()
                     .await
                     .expect("channel closed before CompactionJobAttemptFinished"),
-                None => panic!("channel closed before receiving any message"),
+                Err(_) => panic!("channel closed before receiving any message"),
             }
         })
         .await
@@ -3673,13 +3673,13 @@ mod tests {
         fixture.assert_and_forward_compactions(1);
         let msg = tokio::time::timeout(Duration::from_millis(10), async {
             match fixture.real_executor_rx.recv().await {
-                Some(m @ CompactorMessage::CompactionJobFinished { .. }) => m,
-                Some(_) => fixture
+                Ok(m @ CompactorMessage::CompactionJobFinished { .. }) => m,
+                Ok(_) => fixture
                     .real_executor_rx
                     .recv()
                     .await
                     .expect("channel closed before CompactionJobAttemptFinished"),
-                None => panic!("channel closed before receiving any message"),
+                Err(_) => panic!("channel closed before receiving any message"),
             }
         })
         .await
@@ -3812,13 +3812,13 @@ mod tests {
         fixture.assert_and_forward_compactions(1);
         let msg = tokio::time::timeout(Duration::from_millis(10), async {
             match fixture.real_executor_rx.recv().await {
-                Some(m @ CompactorMessage::CompactionJobFinished { .. }) => m,
-                Some(_) => fixture
+                Ok(m @ CompactorMessage::CompactionJobFinished { .. }) => m,
+                Ok(_) => fixture
                     .real_executor_rx
                     .recv()
                     .await
                     .expect("channel closed before CompactionJobAttemptFinished"),
-                None => panic!("channel closed before receiving any message"),
+                Err(_) => panic!("channel closed before receiving any message"),
             }
         })
         .await
@@ -3844,13 +3844,13 @@ mod tests {
         fixture.assert_and_forward_compactions(1);
         let msg = tokio::time::timeout(Duration::from_millis(10), async {
             match fixture.real_executor_rx.recv().await {
-                Some(m @ CompactorMessage::CompactionJobFinished { .. }) => m,
-                Some(_) => fixture
+                Ok(m @ CompactorMessage::CompactionJobFinished { .. }) => m,
+                Ok(_) => fixture
                     .real_executor_rx
                     .recv()
                     .await
                     .expect("channel closed before CompactionJobAttemptFinished"),
-                None => panic!("channel closed before receiving any message"),
+                Err(_) => panic!("channel closed before receiving any message"),
             }
         })
         .await
