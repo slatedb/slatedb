@@ -51,7 +51,7 @@
 //! filter_bits_per_key = 10
 //! l0_sst_size_bytes = 67108864
 //! l0_max_ssts = 8
-//! l0_flush_parallelism = 1
+//! l0_flush_parallelism = 4
 //! max_unflushed_bytes = 536870912
 //!
 //! [compactor_options]
@@ -99,7 +99,7 @@
 //!  "filter_bits_per_key": 10,
 //!  "l0_sst_size_bytes": 67108864,
 //!  "l0_max_ssts": 8,
-//!  "l0_flush_parallelism": 1,
+//!  "l0_flush_parallelism": 4,
 //!  "max_unflushed_bytes": 536870912,
 //!  "compactor_options": {
 //!    "poll_interval": "5s",
@@ -894,7 +894,7 @@ impl Default for Settings {
             max_unflushed_bytes: 1_073_741_824,
             l0_sst_size_bytes: 64 * 1024 * 1024,
             l0_max_ssts: 8,
-            l0_flush_parallelism: 1,
+            l0_flush_parallelism: 4,
             compactor_options: Some(CompactorOptions::default()),
             compression_codec: None,
             object_store_cache_options: ObjectStoreCacheOptions::default(),
