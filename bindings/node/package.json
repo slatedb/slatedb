@@ -1,0 +1,47 @@
+{
+  "name": "@slatedb/uniffi",
+  "version": "0.11.1",
+  "description": "Node.js bindings for SlateDB generated from UniFFI and packaged with native libraries.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "types": "./index.d.ts",
+  "engines": {
+    "node": ">=20"
+  },
+  "files": [
+    "README.md",
+    "index.js",
+    "index.d.ts",
+    "slatedb.js",
+    "slatedb.d.ts",
+    "slatedb-ffi.js",
+    "slatedb-ffi.d.ts",
+    "runtime/",
+    "prebuilds/"
+  ],
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "import": "./index.js"
+    }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/slatedb/slatedb.git",
+    "directory": "bindings/node"
+  },
+  "homepage": "https://slatedb.io",
+  "bugs": {
+    "url": "https://github.com/slatedb/slatedb/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "node ./build.mjs",
+    "test": "npm run build && node --test"
+  },
+  "dependencies": {
+    "koffi": "^2.0.0"
+  }
+}

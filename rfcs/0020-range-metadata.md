@@ -13,6 +13,7 @@ Table of Contents:
       + [`Db::manifest()`](#dbmanifest)
       + [`SstReader` and `SstFile`](#sstreader-and-sstfile)
       + [Visibility changes to existing types](#visibility-changes-to-existing-types)
+      + [Interaction with `SsTableView`](#interaction-with-sstableview)
       + [Memtable stats via `StatRegistry`](#memtable-stats-via-statregistry)
    * [Size and Cardinality Estimation](#size-and-cardinality-estimation)
       + [Coarse estimate — SST-level, no I/O beyond `manifest()`](#coarse-estimate-sst-level-no-io-beyond-manifest)
@@ -72,7 +73,7 @@ Currently there is no better way than to scan the whole range to get an estimate
 
 Beyond size estimation, some workloads need to count records in a key range efficiently — for example, append-only logs computing consumption lag, query planners estimating `records_in_range()`, or systems deciding where to split data. Today this requires a full scan. Adding per-block record counts to the stats block enables block-level counting with at most two data block reads per boundary SST.
 
-An earlier revision of this RFC proposed high-level functions (`estimate_size_with_options` and `estimate_key_count`) with configuration options like `error_margin`, `include_memtables`, and `include_files`. However, different use cases demand different knobs — compressed vs uncompressed sizes, varying accuracy vs I/O tradeoffs, inclusion or exclusion of memtables, etc. Baking all of these into the API through configuration options risks making the interface rigid and opinionated. Instead, we expose lower-level building blocks so users can compute whatever they need. For example, a user interested in key counts can derive `num_puts + num_merges - num_deletes` from per-SST stats, while a user interested in on-disk size can sum `SsTableHandle::estimate_size()` across covering SSTs, and one needing finer accuracy can use `SstFile::index()` to estimate at block granularity.
+An earlier revision of this RFC proposed high-level functions (`estimate_size_with_options` and `estimate_key_count`) with configuration options like `error_margin`, `include_memtables`, and `include_files`. However, different use cases demand different knobs — compressed vs uncompressed sizes, varying accuracy vs I/O tradeoffs, inclusion or exclusion of memtables, etc. Baking all of these into the API through configuration options risks making the interface rigid and opinionated. Instead, we expose lower-level building blocks so users can compute whatever they need. For example, a user interested in key counts can derive `num_puts + num_merges - num_deletes` from per-SST stats, while a user interested in on-disk size can sum `SsTableView::estimate_size()` across covering SSTs, and one needing finer accuracy can use `SstFile::index()` to estimate at block granularity.
 
 ## Goals
 
@@ -186,9 +187,18 @@ The existing `SstFileMetadata` struct in `tablestore.rs` (currently `pub(crate)`
 
 #### Visibility changes to existing types
 
-- **`SortedRun::tables_covering_range()`**: Change from `pub(crate)` to `pub`. Lets users find which SSTs in a sorted run overlap a given key range.
-- **`SsTableHandle::estimate_size()`**: Change from `pub(crate)` to `pub`. Enables quick no-I/O size estimates.
-- **`SsTableHandle::visible_range()`**: Transforming the `visible_range` of `SsTableHandle` from the internal `BytesRange` to a `RangeBounds<Bytes>`.
+- **`SortedRun::tables_covering_range()`**: Change from `pub(crate)` to `pub`. Lets users find which `SsTableView`s in a sorted run overlap a given key range. Returns `VecDeque<&SsTableView>`.
+- **`SsTableView::estimate_size()`**: Change from `pub(crate)` to `pub`. Enables quick no-I/O size estimates. Delegates to the underlying `SsTableHandle::estimate_size()`.
+
+#### Interaction with `SsTableView`
+
+Since [#1362](https://github.com/slatedb/slatedb/pull/1362), `ManifestCore` and `SortedRun` contain `SsTableView` references rather than raw `SsTableHandle`s. An `SsTableView` wraps an `SsTableHandle` with an optional `visible_range` projection, allowing multiple views per physical SST.
+
+For the APIs in this RFC:
+- Users walking the manifest get `SsTableView` references. The underlying `SsTableHandle` is accessible via `view.sst`.
+- `SstReader::open_with_handle()` accepts an `SsTableHandle`. Users with an `SsTableView` pass `view.sst`.
+- `SsTableView::visible_range()` returns `Option<impl RangeBounds<Bytes>>` — `Some` if a projection is applied, `None` if the entire SST is visible.
+- Size estimation should account for the view's `visible_range` when computing boundary SST coverage (see "Refined estimate" section).
 
 #### Memtable stats via `StatRegistry`
 
@@ -237,13 +247,13 @@ This section describes how to use the above APIs for common estimation tasks, at
 
 #### Coarse estimate — SST-level, no I/O beyond `manifest()`
 
-Call `db.manifest()`. For each sorted run, use `tables_covering_range(range)` to find the intersecting SSTs. For L0, iterate all handles (L0 SSTs can overlap arbitrarily). Sum `estimate_size()` across all covering SSTs. This gives an upper-bound stored-bytes estimate. No `SstReader` needed. Overestimates because boundary SSTs are counted in full even if the range only touches a small portion.
+Call `db.manifest()`. For each sorted run, use `tables_covering_range(range)` to find the intersecting `SsTableView`s. For L0, iterate all views (L0 SSTs can overlap arbitrarily). Sum `estimate_size()` across all covering views. This gives an upper-bound stored-bytes estimate. No `SstReader` needed. Overestimates because boundary SSTs are counted in full even if the range only touches a small portion.
 
-For cardinality: open each covering SST with `SstReader` and call `SstFile::stats()` to get `SstStats`. Sum `num_puts + num_merges - num_deletes` across all sorted runs. This overestimates because the same key may appear in multiple sorted runs (L0 overlaps, and compaction hasn't merged them yet). The overestimation factor is roughly proportional to the number of sorted runs containing the key.
+For cardinality: open each covering SST with `SstReader` (via `view.sst`) and call `SstFile::stats()` to get `SstStats`. Sum `num_puts + num_merges - num_deletes` across all sorted runs. This overestimates because the same key may appear in multiple sorted runs (L0 overlaps, and compaction hasn't merged them yet). The overestimation factor is roughly proportional to the number of sorted runs containing the key.
 
 #### Refined estimate — block-level for boundary SSTs
 
-Most SSTs returned by `tables_covering_range()` are fully contained within the query range — their stats apply directly. Only the first and last SST in each sorted run partially overlap. For these two boundary SSTs, call `sst_file.index()` to get the index `[(offset, first_key), ...]`. Binary search for the range start key in the first boundary SST to find where the range begins; binary search for the range end key in the last boundary SST to find where it ends.
+Most `SsTableView`s returned by `tables_covering_range()` are fully contained within the query range — their stats apply directly. Only the first and last view in each sorted run partially overlap. For these two boundary SSTs, call `sst_file.index()` to get the index `[(offset, first_key), ...]`. Binary search for the range start key in the first boundary SST to find where the range begins; binary search for the range end key in the last boundary SST to find where it ends. Note that an `SsTableView` may have a `visible_range()` projection that further restricts the effective key range — the query range should be intersected with the view's visible range before performing the binary search.
 
 These offsets are compressed/stored sizes since the block index tracks on-disk offsets.
 
@@ -259,7 +269,7 @@ Summing across SSTs may count duplicate keys across levels. This is exact for ap
 
 #### L0 handling
 
-L0 SSTs are not sorted relative to each other and can all overlap with the query range. Every L0 SST must be checked. For each, the same refinement as above applies: if the SST's `first_key` and key range suggest partial overlap, use `index()` to refine. Since L0 SSTs tend to be smaller (pre-compaction), the coarse estimate is often sufficient.
+L0 `SsTableView`s are not sorted relative to each other and can all overlap with the query range. Every L0 view must be checked. For each, the same refinement as above applies: if the view's key range suggests partial overlap, use `index()` to refine. Since L0 SSTs tend to be smaller (pre-compaction), the coarse estimate is often sufficient.
 
 #### Staleness and GC
 
@@ -309,8 +319,8 @@ This approach keeps `SsTableInfo` (and therefore the manifest) lean — only 16 
 - **`SstReader`**: New public struct wrapping object store access for SSTs. Internally reuses `SsTableFormat::read_info` and `SsTableFormat::read_index`.
 - **`SstFile`**: New public struct returned by `SstReader::open()` or `SstReader::open_with_handle()`. Provides `info()` (returning `SsTableInfo`), `stats()` (reading the stats block with aggregate and per-block stats), and `index()` (block offset/key pairs).
 - **`SstFileMetadata`**: Change existing struct in `tablestore.rs` from `pub(crate)` to `pub`. Returned by `SstFile::metadata()`.
-- **`SortedRun::tables_covering_range()`**: Make `pub` (currently `pub(crate)`).
-- **`SsTableHandle::estimate_size()`**: Make `pub` (currently `pub(crate)`).
+- **`SortedRun::tables_covering_range()`**: Make `pub` (currently `pub(crate)`). Returns `VecDeque<&SsTableView>`.
+- **`SsTableView::estimate_size()`**: Make `pub` (currently `pub(crate)`).
 - **Memtable metrics**: Add per-type counters to `KVTable` and register corresponding gauges in `StatRegistry`.
 
 ## Impact Analysis
@@ -319,7 +329,7 @@ SlateDB features and components that this RFC interacts with. Check all that app
 
 ### Core API & Query Semantics
 
-- [x] Basic KV API (`get`/`put`/`delete`) - Adds `Db::manifest()` and new `SstReader`/`SstFile` types
+- [x] Basic KV API (`get`/`put`/`delete`) - Adds `Db::manifest()` and new `SstReader`/`SstFile` types. Users access SSTs via `SsTableView` from the manifest.
 - [ ] Range queries, iterators, seek semantics
 - [ ] Range deletions
 - [ ] Error model, API errors
@@ -492,3 +502,4 @@ Another alternative not explored is sample-based estimation: sample N random blo
 - **2026-02-16**: Stats fields moved into `SsTableInfo` (in `sst.fbs`) instead of a separate footer block. Removed `SstStats` struct — `SstFile::info()` returns `SsTableInfo` directly. `SstFile` now holds `SsTableHandle` + `Arc<TableStore>`. Added `object_store_cache_options` parameter to `SstReader::new()`. (PR #1220 review feedback from @criccomini).
 - **2026-02-19**: Reverted to separate stats block approach. Stats fields moved back out of `SsTableInfo` into a dedicated stats block within the SST file, referenced by `stats_offset`/`stats_len` in `SsTableInfo`. Reintroduced `SstStats` struct and `SstFile::stats()` method. This keeps `SsTableInfo` (and the manifest) lean — 16 bytes per SST vs 40 bytes — which matters for large DBs. Added `SstReader::open_with_handle()` for zero-I/O construction from an existing `SsTableHandle`. (PR #1220 review feedback from @rodesai and @criccomini).
 - **2026-02-25**: Added per-block record counts as `block_stats: [BlockStats]` in `SstStats` (stats block). `BlockStats` contains `num_puts`/`num_deletes`/`num_merges`, mirroring the SST-level aggregate fields. `BlockStats` uses a FlatBuffers `table` for future extensibility.
+- **2026-03-19**: Updated RFC to reflect `SsTableView` indirection introduced in [#1362](https://github.com/slatedb/slatedb/pull/1362). `ManifestCore` and `SortedRun` now contain `SsTableView` references instead of raw `SsTableHandle`s. Updated `tables_covering_range()` return type to `VecDeque<&SsTableView>`, replaced `SsTableHandle::estimate_size()`/`visible_range()` references with `SsTableView` equivalents, and added "Interaction with `SsTableView`" section noting that `SstReader::open_with_handle()` accepts `SsTableHandle` via `view.sst`. Refined estimate section updated to account for view-level `visible_range` projections on boundary SSTs.

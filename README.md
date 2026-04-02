@@ -82,23 +82,20 @@ async fn main() -> Result<(), Error> {
 
     // Scan over bound range
     let mut iter = kv_store.scan("test_key1"..="test_key2").await?;
-    assert_eq!(
-        iter.next().await?,
-        Some((b"test_key1", b"test_value1").into())
-    );
-    assert_eq!(
-        iter.next().await?,
-        Some((b"test_key2", b"test_value2").into())
-    );
+    let item = iter.next().await?.expect("missing test_key1");
+    assert_eq!(item.key.as_ref(), b"test_key1");
+    assert_eq!(item.value.as_ref(), b"test_value1");
+    let item = iter.next().await?.expect("missing test_key2");
+    assert_eq!(item.key.as_ref(), b"test_key2");
+    assert_eq!(item.value.as_ref(), b"test_value2");
 
     // Seek ahead to next key
     let mut iter = kv_store.scan::<Vec<u8>, _>(..).await?;
     let next_key = b"test_key4";
     iter.seek(next_key).await?;
-    assert_eq!(
-        iter.next().await?,
-        Some((b"test_key4", b"test_value4").into())
-    );
+    let item = iter.next().await?.expect("missing test_key4");
+    assert_eq!(item.key.as_ref(), b"test_key4");
+    assert_eq!(item.value.as_ref(), b"test_value4");
     assert_eq!(iter.next().await?, None);
 
     // Close
@@ -116,10 +113,11 @@ Visit [slatedb.io](https://slatedb.io) to learn more.
 
 ## Bindings
 
-- [Go](https://github.com/slatedb/slatedb/tree/main/slatedb-go) (official)
-- [Java](https://github.com/slatedb/slatedb/tree/main/slatedb-java) (official)
+- [Go](https://github.com/slatedb/slatedb/tree/main/bindings/go) (official)
+- [Java](https://github.com/slatedb/slatedb/tree/main/bindings/java) (official)
+- [Node.js / TypeScript](https://github.com/slatedb/slatedb/tree/main/bindings/node) (official)
 - [.NET](https://github.com/Pulsy-Global/slatedb-dotnet)
-- [Python](https://github.com/slatedb/slatedb/tree/main/slatedb-py) (official)
+- [Python](https://github.com/slatedb/slatedb/tree/main/bindings/python) (official)
 - [Ruby](https://github.com/catkins/slatedb-rb)
 - [TypeScript](https://github.com/gadget-inc/slatedb-node)
 
@@ -156,14 +154,18 @@ See who's using SlateDB.
 
 - [Embucket](https://www.embucket.com)
 - [Gadget](https://gadget.dev)
+- [Goldsky](https://goldsky.com)
+- [HelixDB](https://github.com/HelixDB/helix-db)
 - [Malstrom](https://github.com/MalstromDevelopers/malstrom)
 - [Massive](https://massive.com)
 - [Merklemap](https://merklemap.com)
+- [OpenData](https://www.opendata.dev)
 - [Responsive](https://responsive.dev)
 - [s2-lite](https://github.com/s2-streamstore/s2)
 - [SQLync](https://sqlync.com)
 - [Storrito](https://storrito.com)
 - [Tensorlake](https://www.tensorlake.ai)
+- [Volga](https://github.com/volga-project/volga)
 - [ZeroFS](https://zerofs.net)
 
 ## Talks

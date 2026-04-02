@@ -16,7 +16,7 @@ use crate::compaction_filter_iterator::CompactionFilterIterator;
 use crate::compactor::CompactorMessage;
 use crate::compactor::CompactorMessage::CompactionJobFinished;
 use crate::config::CompactorOptions;
-use crate::db_state::{SortedRun, SsTableHandle, SsTableId};
+use crate::db_state::{SortedRun, SsTableHandle, SsTableId, SsTableView};
 use crate::error::SlateDBError;
 use crate::iter::{IterationOrder, RowEntryIterator, TrackedRowEntryIterator};
 use crate::manifest::store::{ManifestStore, StoredManifest};
@@ -59,7 +59,7 @@ pub(crate) struct StartCompactionJobArgs {
     /// Destination sorted run id to be produced by this job.
     pub(crate) destination: u32,
     /// Input L0 SSTs for this job.
-    pub(crate) ssts: Vec<SsTableHandle>,
+    pub(crate) sst_views: Vec<SsTableView>,
     /// Input existing sorted runs for this job.
     pub(crate) sorted_runs: Vec<SortedRun>,
     /// Output SSTs already written for this compaction when resuming.
@@ -79,7 +79,7 @@ impl std::fmt::Debug for StartCompactionJobArgs {
             .field("id", &self.id)
             .field("job_id", &self.compaction_id)
             .field("destination", &self.destination)
-            .field("ssts", &self.ssts)
+            .field("ssts", &self.sst_views)
             .field("sorted_runs", &self.sorted_runs)
             .field("output_ssts", &self.output_ssts)
             .field("compaction_clock_tick", &self.compaction_clock_tick)
@@ -273,16 +273,16 @@ impl TokioCompactionExecutorInner {
             None => None,
         };
         let sst_iter_options = SstIteratorOptions {
-            max_fetch_tasks: 4,
+            max_fetch_tasks: self.options.max_fetch_tasks,
             blocks_to_fetch: 256,
             cache_blocks: false, // don't clobber the cache
             eager_spawn: true,
             order: IterationOrder::Ascending,
         };
 
-        let max_parallel = compute_max_parallel(job_args.ssts.len(), &job_args.sorted_runs, 4);
+        let max_parallel = compute_max_parallel(job_args.sst_views.len(), &job_args.sorted_runs, 4);
         // L0 (borrowed)
-        let l0_iters_futures = build_concurrent(job_args.ssts.iter(), max_parallel, |h| {
+        let l0_iters_futures = build_concurrent(job_args.sst_views.iter(), max_parallel, |h| {
             SstIterator::new_borrowed_initialized(.., h, self.table_store.clone(), sst_iter_options)
         });
 
@@ -308,7 +308,6 @@ impl TokioCompactionExecutorInner {
                     merge_operator,
                     merge_iter,
                     false,
-                    job_args.compaction_clock_tick,
                     job_args.retention_min_seq,
                 ))
             } else {
@@ -435,7 +434,7 @@ impl TokioCompactionExecutorInner {
                     );
                     let sst = finished_writer.close().await?;
 
-                    self.stats.bytes_compacted.add(sst.info.filter_offset);
+                    self.stats.bytes_compacted.increment(sst.info.filter_offset);
                     output_ssts.push(sst);
                     bytes_written = 0;
                     let total_bytes = start_bytes_processed + all_iter.bytes_processed();
@@ -448,13 +447,19 @@ impl TokioCompactionExecutorInner {
         if !current_writer.is_drained() {
             let sst = current_writer.close().await?;
 
-            self.stats.bytes_compacted.add(sst.info.filter_offset);
+            self.stats.bytes_compacted.increment(sst.info.filter_offset);
             output_ssts.push(sst);
         }
 
         Ok(SortedRun {
             id: args.destination,
-            ssts: output_ssts,
+            sst_views: output_ssts
+                .into_iter()
+                .map(|sst| {
+                    let id = self.rand.rng().gen_ulid(self.clock.as_ref());
+                    SsTableView::new(id, sst)
+                })
+                .collect(),
         })
     }
 
@@ -465,7 +470,7 @@ impl TokioCompactionExecutorInner {
             return;
         }
         let dst = args.destination;
-        self.stats.running_compactions.inc();
+        self.stats.running_compactions.increment(1);
         assert!(!tasks.contains_key(&dst));
 
         let id = args.id;
@@ -496,7 +501,7 @@ impl TokioCompactionExecutorInner {
                         e
                     );
                 }
-                this_cleanup.stats.running_compactions.dec();
+                this_cleanup.stats.running_compactions.increment(-1);
             },
             async move { this.execute_compaction_job(args).await },
         );
@@ -546,7 +551,6 @@ mod tests {
     use crate::object_stores::ObjectStores;
     use crate::proptest_util::arbitrary;
     use crate::sst_iter::SstView;
-    use crate::stats::StatRegistry;
     use crate::test_utils::StringConcatMergeOperator;
     use crate::test_utils::{build_row_entries, build_sorted_runs, write_ssts};
     use crate::types::{RowEntry, ValueDeletable};
@@ -1002,7 +1006,10 @@ mod tests {
             worker_tx: tx,
             table_store: table_store.clone(),
             rand: Arc::new(DbRand::new(100u64)),
-            stats: Arc::new(CompactionStats::new(Arc::new(StatRegistry::new()))),
+            stats: {
+                let recorder = slatedb_common::metrics::MetricsRecorderHelper::noop();
+                Arc::new(CompactionStats::new(&recorder))
+            },
             clock,
             manifest_store,
             merge_operator,
@@ -1012,13 +1019,13 @@ mod tests {
 
         // Materialize L0 SSTs from the provided entry sets. Use a huge max size so
         // each entry set stays in a single SST, keeping the inputs predictable.
-        let mut l0_ssts = Vec::new();
+        let mut l0_sst_views = Vec::new();
         let mut sorted_runs = Vec::new();
         let mut all_entries = Vec::new();
 
         for entries in &l0_entry_sets {
             let ssts = write_sst(&table_store, entries, usize::MAX).await;
-            l0_ssts.extend(ssts);
+            l0_sst_views.extend(ssts.into_iter().map(SsTableView::identity));
             all_entries.extend(entries.iter().cloned());
         }
 
@@ -1034,7 +1041,7 @@ mod tests {
                 }
                 sorted_runs.push(SortedRun {
                     id: sr_id as u32,
-                    ssts: sr_ssts,
+                    sst_views: sr_ssts.into_iter().map(SsTableView::identity).collect(),
                 });
             }
         }
@@ -1064,7 +1071,7 @@ mod tests {
             id: Ulid::new(),
             compaction_id: Ulid::new(),
             destination: 0,
-            ssts: l0_ssts,
+            sst_views: l0_sst_views,
             sorted_runs,
             output_ssts,
             compaction_clock_tick: 0,
@@ -1206,7 +1213,10 @@ mod tests {
                     worker_tx: tx,
                     table_store: table_store.clone(),
                     rand: Arc::new(DbRand::new(100u64)),
-                    stats: Arc::new(CompactionStats::new(Arc::new(StatRegistry::new()))),
+                    stats: {
+                        let recorder = slatedb_common::metrics::MetricsRecorderHelper::noop();
+                        Arc::new(CompactionStats::new(&recorder))
+                    },
                     clock,
                     manifest_store,
                     merge_operator,
@@ -1217,7 +1227,7 @@ mod tests {
                 let mut l0_ssts = Vec::new();
                 for entries in &l0_entry_sets {
                     let ssts = write_ssts(&table_store, entries, usize::MAX).await;
-                    l0_ssts.extend(ssts);
+                    l0_ssts.extend(ssts.into_iter().map(SsTableView::identity));
                 }
 
                 let sorted_runs = build_sorted_runs(&table_store, &sr_entry_sets, usize::MAX).await;
@@ -1228,7 +1238,7 @@ mod tests {
                         id: Ulid::new(),
                         compaction_id: Ulid::new(),
                         destination: 0,
-                        ssts: l0_ssts.clone(),
+                        sst_views: l0_ssts.clone(),
                         sorted_runs: sorted_runs.clone(),
                         output_ssts: Vec::new(),
                         compaction_clock_tick: 0,
@@ -1239,7 +1249,7 @@ mod tests {
                     .unwrap();
 
                 let mut expected_entries = Vec::new();
-                for sst in &full_run.ssts {
+                for sst in &full_run.sst_views {
                     let mut iter = SstIterator::new(
                         SstView::Borrowed(sst, BytesRange::from(..)),
                         table_store.clone(),
@@ -1273,7 +1283,7 @@ mod tests {
                             id: Ulid::new(),
                             compaction_id: Ulid::new(),
                             destination: 0,
-                            ssts: l0_ssts.clone(),
+                            sst_views: l0_ssts.clone(),
                             sorted_runs: sorted_runs.clone(),
                             output_ssts,
                             compaction_clock_tick: 0,
@@ -1284,7 +1294,7 @@ mod tests {
                         .unwrap();
 
                     let mut resumed_entries = Vec::new();
-                    for sst in &resumed_run.ssts {
+                    for sst in &resumed_run.sst_views {
                         let mut iter = SstIterator::new(
                             SstView::Borrowed(sst, BytesRange::from(..)),
                             table_store.clone(),
@@ -1366,7 +1376,10 @@ mod tests {
                 worker_tx: tx,
                 table_store: table_store.clone(),
                 rand: Arc::new(DbRand::new(100u64)),
-                stats: Arc::new(CompactionStats::new(Arc::new(StatRegistry::new()))),
+                stats: {
+                    let recorder = slatedb_common::metrics::MetricsRecorderHelper::noop();
+                    Arc::new(CompactionStats::new(&recorder))
+                },
                 clock,
                 manifest_store,
                 merge_operator: self.merge_operator,
@@ -1394,7 +1407,7 @@ mod tests {
                 id: Ulid::new(),
                 compaction_id: Ulid::new(),
                 destination: 0,
-                ssts,
+                sst_views: ssts.into_iter().map(SsTableView::identity).collect(),
                 sorted_runs: vec![],
                 output_ssts: vec![],
                 compaction_clock_tick: 0,
@@ -1455,8 +1468,8 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(1, result.ssts.len());
-        let sst = result.ssts[0].clone();
+        assert_eq!(1, result.sst_views.len());
+        let sst = result.sst_views[0].clone();
         let mut iter = SstIterator::new(
             SstView::Borrowed(&sst, BytesRange::from(..)),
             table_store.clone(),
@@ -1597,8 +1610,8 @@ mod tests {
         let result = ctx.run_compaction(vec![l0], true, None).await.unwrap();
 
         // Verify the output SST
-        assert_eq!(1, result.ssts.len());
-        let sst = result.ssts[0].clone();
+        assert_eq!(1, result.sst_views.len());
+        let sst = result.sst_views[0].clone();
         let mut iter = SstIterator::new(
             SstView::Borrowed(&sst, BytesRange::from(..)),
             table_store.clone(),

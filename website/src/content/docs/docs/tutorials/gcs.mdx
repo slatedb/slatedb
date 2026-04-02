@@ -83,15 +83,17 @@ import gcsExample from '/../examples/src/google_cloud_storage.rs?raw'
 ```bash
 gcloud storage ls gs://$BucketName/tmp/slatedb_google_cloud_storage/
 
+gs://$BucketName/tmp/slatedb_google_cloud_storage/compactions/
 gs://$BucketName/tmp/slatedb_google_cloud_storage/manifest/
 gs://$BucketName/tmp/slatedb_google_cloud_storage/wal/
 ```
 
-There are three folders:
+SlateDB uses four top-level directories over time:
 
 - `manifest`: Contains the manifest files. Manifest files define the state of the DB, including the set of SSTs that are part of the DB.
 - `wal`: Contains the write-ahead log files.
 - `compacted`: Contains the compacted SST files (may not appear in short examples).
+- `compactions`: Contains the compaction-state snapshots.
 
 Let's check the `wal` folder:
 
@@ -106,4 +108,4 @@ gcloud storage ls -l gs://$BucketName/tmp/slatedb_google_cloud_storage/wal/
         74  2025-10-05T15:42:19Z  gs://sibasishtest/tmp/slatedb_google_cloud_storage/wal/00000000000000000006.sst
 ```
 
-Each of these SST files is a write-ahead log (WAL) entry. They get flushed based on the `flush_interval` config or when `flush` is called explicitly.
+Each of these SST files is a write-ahead log (WAL) file, and each WAL file can contain many `RowEntry` values. They get flushed based on the `flush_interval` config or when `flush` is called explicitly.

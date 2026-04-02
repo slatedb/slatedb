@@ -40,7 +40,7 @@ jobs:
         run: rustup target add x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu
 
       - name: Build x86_64 Linux library
-        run: cargo build -p slatedb-c --release --target x86_64-unknown-linux-gnu
+        run: cargo build -p slatedb-uniffi --release --target x86_64-unknown-linux-gnu
 
       - name: Build aarch64 Linux library
         env:
@@ -48,13 +48,13 @@ jobs:
           CXX_aarch64_unknown_linux_gnu: aarch64-linux-gnu-g++
           AR_aarch64_unknown_linux_gnu: aarch64-linux-gnu-ar
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
-        run: cargo build -p slatedb-c --release --target aarch64-unknown-linux-gnu
+        run: cargo build -p slatedb-uniffi --release --target aarch64-unknown-linux-gnu
 
       - name: Stage Linux native artifacts
         run: |
-          mkdir -p artifacts/linux-x86_64 artifacts/linux-aarch64
-          cp target/x86_64-unknown-linux-gnu/release/libslatedb_c.so artifacts/linux-x86_64/
-          cp target/aarch64-unknown-linux-gnu/release/libslatedb_c.so artifacts/linux-aarch64/
+          mkdir -p artifacts/linux-x86-64 artifacts/linux-aarch64
+          cp target/x86_64-unknown-linux-gnu/release/libslatedb_uniffi.so artifacts/linux-x86-64/
+          cp target/aarch64-unknown-linux-gnu/release/libslatedb_uniffi.so artifacts/linux-aarch64/
 
       - name: Upload Linux native artifacts
         uses: actions/upload-artifact@v4
@@ -78,16 +78,16 @@ jobs:
         run: rustup target add x86_64-apple-darwin aarch64-apple-darwin
 
       - name: Build x86_64 macOS library
-        run: cargo build -p slatedb-c --release --target x86_64-apple-darwin
+        run: cargo build -p slatedb-uniffi --release --target x86_64-apple-darwin
 
       - name: Build aarch64 macOS library
-        run: cargo build -p slatedb-c --release --target aarch64-apple-darwin
+        run: cargo build -p slatedb-uniffi --release --target aarch64-apple-darwin
 
       - name: Stage macOS native artifacts
         run: |
-          mkdir -p artifacts/macos-x86_64 artifacts/macos-aarch64
-          cp target/x86_64-apple-darwin/release/libslatedb_c.dylib artifacts/macos-x86_64/
-          cp target/aarch64-apple-darwin/release/libslatedb_c.dylib artifacts/macos-aarch64/
+          mkdir -p artifacts/darwin-x86-64 artifacts/darwin-aarch64
+          cp target/x86_64-apple-darwin/release/libslatedb_uniffi.dylib artifacts/darwin-x86-64/
+          cp target/aarch64-apple-darwin/release/libslatedb_uniffi.dylib artifacts/darwin-aarch64/
 
       - name: Upload macOS native artifacts
         uses: actions/upload-artifact@v4
@@ -111,18 +111,18 @@ jobs:
         run: rustup target add x86_64-pc-windows-msvc aarch64-pc-windows-msvc
 
       - name: Build x86_64 Windows library
-        run: cargo build -p slatedb-c --release --target x86_64-pc-windows-msvc
+        run: cargo build -p slatedb-uniffi --release --target x86_64-pc-windows-msvc
 
       - name: Build aarch64 Windows library
-        run: cargo build -p slatedb-c --release --target aarch64-pc-windows-msvc
+        run: cargo build -p slatedb-uniffi --release --target aarch64-pc-windows-msvc
 
       - name: Stage Windows native artifacts
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force -Path artifacts/windows-x86_64 | Out-Null
-          New-Item -ItemType Directory -Force -Path artifacts/windows-aarch64 | Out-Null
-          Copy-Item target/x86_64-pc-windows-msvc/release/slatedb_c.dll artifacts/windows-x86_64/
-          Copy-Item target/aarch64-pc-windows-msvc/release/slatedb_c.dll artifacts/windows-aarch64/
+          New-Item -ItemType Directory -Force -Path artifacts/win32-x86-64 | Out-Null
+          New-Item -ItemType Directory -Force -Path artifacts/win32-aarch64 | Out-Null
+          Copy-Item target/x86_64-pc-windows-msvc/release/slatedb_uniffi.dll artifacts/win32-x86-64/
+          Copy-Item target/aarch64-pc-windows-msvc/release/slatedb_uniffi.dll artifacts/win32-aarch64/
 
       - name: Upload Windows native artifacts
         uses: actions/upload-artifact@v4
@@ -139,11 +139,19 @@ jobs:
         with:
           ref: ${{ github.ref }}
 
-      - name: Set up Java 24
+      - name: Set up Java 21
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: "24"
+          java-version: "21"
+
+      - name: Setup Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install uniffi-bindgen-java
+        env:
+          RUSTFLAGS: ""
+        run: cargo install uniffi-bindgen-java --git https://github.com/IronCoreLabs/uniffi-bindgen-java.git --rev 265d9b93645ce50307449bea2489b2b748fb67ee
 
       - name: Download Linux artifacts
         uses: actions/download-artifact@v4
@@ -165,28 +173,28 @@ jobs:
 
       - name: Assemble universal native directory
         run: |
-          mkdir -p native-libs/merged/native/linux-x86_64
-          mkdir -p native-libs/merged/native/linux-aarch64
-          mkdir -p native-libs/merged/native/macos-x86_64
-          mkdir -p native-libs/merged/native/macos-aarch64
-          mkdir -p native-libs/merged/native/windows-x86_64
-          mkdir -p native-libs/merged/native/windows-aarch64
+          mkdir -p native-libs/merged/linux-x86-64
+          mkdir -p native-libs/merged/linux-aarch64
+          mkdir -p native-libs/merged/darwin-x86-64
+          mkdir -p native-libs/merged/darwin-aarch64
+          mkdir -p native-libs/merged/win32-x86-64
+          mkdir -p native-libs/merged/win32-aarch64
 
-          cp native-libs/linux/linux-x86_64/libslatedb_c.so native-libs/merged/native/linux-x86_64/
-          cp native-libs/linux/linux-aarch64/libslatedb_c.so native-libs/merged/native/linux-aarch64/
-          cp native-libs/macos/macos-x86_64/libslatedb_c.dylib native-libs/merged/native/macos-x86_64/
-          cp native-libs/macos/macos-aarch64/libslatedb_c.dylib native-libs/merged/native/macos-aarch64/
-          cp native-libs/windows/windows-x86_64/slatedb_c.dll native-libs/merged/native/windows-x86_64/
-          cp native-libs/windows/windows-aarch64/slatedb_c.dll native-libs/merged/native/windows-aarch64/
+          cp native-libs/linux/linux-x86-64/libslatedb_uniffi.so native-libs/merged/linux-x86-64/
+          cp native-libs/linux/linux-aarch64/libslatedb_uniffi.so native-libs/merged/linux-aarch64/
+          cp native-libs/macos/darwin-x86-64/libslatedb_uniffi.dylib native-libs/merged/darwin-x86-64/
+          cp native-libs/macos/darwin-aarch64/libslatedb_uniffi.dylib native-libs/merged/darwin-aarch64/
+          cp native-libs/windows/win32-x86-64/slatedb_uniffi.dll native-libs/merged/win32-x86-64/
+          cp native-libs/windows/win32-aarch64/slatedb_uniffi.dll native-libs/merged/win32-aarch64/
 
       - name: Verify native artifact layout
         run: |
-          test -f native-libs/merged/native/linux-x86_64/libslatedb_c.so
-          test -f native-libs/merged/native/linux-aarch64/libslatedb_c.so
-          test -f native-libs/merged/native/macos-x86_64/libslatedb_c.dylib
-          test -f native-libs/merged/native/macos-aarch64/libslatedb_c.dylib
-          test -f native-libs/merged/native/windows-x86_64/slatedb_c.dll
-          test -f native-libs/merged/native/windows-aarch64/slatedb_c.dll
+          test -f native-libs/merged/linux-x86-64/libslatedb_uniffi.so
+          test -f native-libs/merged/linux-aarch64/libslatedb_uniffi.so
+          test -f native-libs/merged/darwin-x86-64/libslatedb_uniffi.dylib
+          test -f native-libs/merged/darwin-aarch64/libslatedb_uniffi.dylib
+          test -f native-libs/merged/win32-x86-64/slatedb_uniffi.dll
+          test -f native-libs/merged/win32-aarch64/slatedb_uniffi.dll
 
       - name: Publish to Maven Central
         env:
@@ -195,6 +203,6 @@ jobs:
           ORG_GRADLE_PROJECT_signingInMemoryKey: ${{ secrets.MAVEN_CENTRAL_SIGNING_KEY }}
           ORG_GRADLE_PROJECT_signingInMemoryKeyPassword: ${{ secrets.MAVEN_CENTRAL_SIGNING_KEY_PASSWORD }}
         run: |
-          ./slatedb-java/gradlew -p slatedb-java check publishAndReleaseToMavenCentral \
+          ./bindings/java/gradlew -p bindings/java :slatedb-uniffi:check publishAndReleaseToMavenCentral \
             -Pslatedb.version=${{ github.event.inputs.version }} \
             -Pslatedb.native.prebuiltDir="${{ github.workspace }}/native-libs/merged"

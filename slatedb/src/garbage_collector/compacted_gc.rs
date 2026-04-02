@@ -68,12 +68,12 @@ impl CompactedGcTask {
         let mut active_ssts = HashSet::new();
         for manifest in active_manifests.values() {
             for sr in manifest.core.compacted.iter() {
-                for sst in sr.ssts.iter() {
-                    active_ssts.insert(sst.id);
+                for view in sr.sst_views.iter() {
+                    active_ssts.insert(view.sst.id);
                 }
             }
-            for sst in manifest.core.l0.iter() {
-                active_ssts.insert(sst.id);
+            for view in manifest.core.l0.iter() {
+                active_ssts.insert(view.sst.id);
             }
         }
         Ok(active_ssts)
@@ -103,9 +103,9 @@ impl CompactedGcTask {
                 .core
                 .l0
                 .iter()
-                .map(|sst| DateTime::<Utc>::from(sst.id.unwrap_compacted_id().datetime()))
+                .map(|view| DateTime::<Utc>::from(view.sst.id.unwrap_compacted_id().datetime()))
                 .collect::<Vec<_>>()
-        } else if let Some(l0_last_compacted) = manifest.core.l0_last_compacted {
+        } else if let Some(l0_last_compacted) = manifest.core.last_compacted_l0_sst_view_id {
             // Else fall back to the last compacted L0, which can serve as a conservative barrier
             vec![DateTime::<Utc>::from(l0_last_compacted.datetime())]
         } else {
@@ -211,7 +211,7 @@ impl GcTask for CompactedGcTask {
             if let Err(e) = self.table_store.delete_sst(&id).await {
                 error!("error deleting SST [id={:?}, error={}]", id, e);
             } else {
-                self.stats.gc_compacted_count.inc();
+                self.stats.gc_compacted_count.increment(1);
             }
         }
 
@@ -230,11 +230,10 @@ mod tests {
     use super::*;
     use crate::compactions_store::{CompactionsStore, StoredCompactions};
     use crate::compactor_state::{Compaction, CompactionSpec, SourceId};
-    use crate::db_state::{ManifestCore, SsTableId};
+    use crate::db_state::{ManifestCore, SsTableId, SsTableView};
     use crate::format::sst::SsTableFormat;
     use crate::manifest::store::StoredManifest;
     use crate::object_stores::ObjectStores;
-    use crate::stats::StatRegistry;
     use crate::test_utils::build_test_sst;
     use object_store::{memory::InMemory, path::Path};
     use slatedb_common::clock::DefaultSystemClock;
@@ -305,10 +304,14 @@ mod tests {
         // Mark one SST as active in the manifest so that most_recent_sst_dt
         // is newer than the configured minimum-age cutoff.
         let mut dirty = stored_manifest.prepare_dirty().unwrap();
-        dirty.value.core.l0.push_back(active_handle);
+        dirty
+            .value
+            .core
+            .l0
+            .push_back(SsTableView::identity(active_handle));
         stored_manifest.update(dirty).await.unwrap();
 
-        let stat_registry = Arc::new(StatRegistry::new());
+        let recorder = slatedb_common::metrics::MetricsRecorderHelper::noop();
 
         // GC task with min_age = 5 seconds. Using utc_now at 10 seconds after the epoch
         // yields a configured_min_age_dt of 5 seconds.
@@ -316,7 +319,7 @@ mod tests {
             interval: None,
             min_age: Duration::from_secs(5),
         };
-        let stats = Arc::new(GcStats::new(stat_registry.clone()));
+        let stats = Arc::new(GcStats::new(&recorder));
         let task = CompactedGcTask::new(
             manifest_store.clone(),
             compactions_store.clone(),
@@ -406,10 +409,14 @@ mod tests {
         // Mark id_manifest as the only active SST in the manifest so that
         // most_recent_sst_dt is 3_000ms, which becomes the cutoff.
         let mut dirty = stored_manifest.prepare_dirty().unwrap();
-        dirty.value.core.l0.push_back(manifest_handle);
+        dirty
+            .value
+            .core
+            .l0
+            .push_back(SsTableView::identity(manifest_handle));
         stored_manifest.update(dirty).await.unwrap();
 
-        let stat_registry = Arc::new(StatRegistry::new());
+        let recorder = slatedb_common::metrics::MetricsRecorderHelper::noop();
 
         // min_age = 0, so configured_min_age_dt == utc_now (10 seconds after epoch).
         // The manifest's most recent SST (3 seconds) is the smallest cutoff, so only
@@ -418,7 +425,7 @@ mod tests {
             interval: None,
             min_age: Duration::from_secs(0),
         };
-        let stats = Arc::new(GcStats::new(stat_registry.clone()));
+        let stats = Arc::new(GcStats::new(&recorder));
         let task = CompactedGcTask::new(
             manifest_store.clone(),
             compactions_store.clone(),
@@ -495,7 +502,11 @@ mod tests {
         // most_recent_sst_dt boundary is 3_000ms and the compaction
         // low watermark (2_000ms) becomes the effective cutoff (see below).
         let mut dirty = stored_manifest.prepare_dirty().unwrap();
-        dirty.value.core.l0.push_back(active_handle);
+        dirty
+            .value
+            .core
+            .l0
+            .push_back(SsTableView::identity(active_handle));
         stored_manifest.update(dirty).await.unwrap();
 
         // Persist a running compaction with a start time at 2_000ms to act as the GC barrier.
@@ -515,8 +526,8 @@ mod tests {
             interval: None,
             min_age: Duration::from_secs(0),
         };
-        let stat_registry = Arc::new(StatRegistry::new());
-        let stats = Arc::new(GcStats::new(stat_registry.clone()));
+        let recorder = slatedb_common::metrics::MetricsRecorderHelper::noop();
+        let stats = Arc::new(GcStats::new(&recorder));
         let task = CompactedGcTask::new(
             manifest_store.clone(),
             compactions_store.clone(),
@@ -584,7 +595,11 @@ mod tests {
             .await
             .unwrap();
         let mut dirty_manifest = stored_manifest.prepare_dirty().unwrap();
-        dirty_manifest.value.core.l0.push_back(l0_handle);
+        dirty_manifest
+            .value
+            .core
+            .l0
+            .push_back(SsTableView::identity(l0_handle));
         stored_manifest.update(dirty_manifest).await.unwrap();
 
         // Simulate a compaction that starts after GC reads compaction state, writes an
@@ -605,7 +620,8 @@ mod tests {
             interval: None,
             min_age: Duration::from_secs(2),
         };
-        let stats = Arc::new(GcStats::new(Arc::new(StatRegistry::new())));
+        let recorder = slatedb_common::metrics::MetricsRecorderHelper::noop();
+        let stats = Arc::new(GcStats::new(&recorder));
         let task = CompactedGcTask::new(
             manifest_store.clone(),
             compactions_store.clone(),

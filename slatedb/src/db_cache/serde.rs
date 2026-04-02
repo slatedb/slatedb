@@ -294,6 +294,7 @@ mod tests {
             num_merges: 5,
             raw_key_size: 2048,
             raw_val_size: 8192,
+            block_stats: vec![],
         });
         let entry = CachedEntry {
             item: CachedItem::SstStats(stats.clone()),

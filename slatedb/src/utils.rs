@@ -1,9 +1,6 @@
 use crate::block_iterator::BlockIterator;
 use crate::block_iterator_v2::BlockIteratorV2;
 use crate::cached_object_store::CachedObjectStore;
-use crate::clock::MonotonicClock;
-use crate::config::DurabilityLevel;
-use crate::config::DurabilityLevel::{Memory, Remote};
 use crate::config::PreloadLevel;
 use crate::db_state::ManifestCore;
 use crate::db_state::SortedRun;
@@ -13,7 +10,6 @@ use crate::format::sst::{SST_FORMAT_VERSION, SST_FORMAT_VERSION_V2};
 use crate::iter::{IterationOrder, RowEntryIterator};
 use crate::paths::PathResolver;
 use crate::tablestore::TableStore;
-use crate::types::RowEntry;
 use bytes::{BufMut, Bytes};
 use futures::FutureExt;
 use log::{error, warn};
@@ -117,41 +113,6 @@ where
         result
     });
     handle.spawn(wrapped)
-}
-
-#[allow(dead_code)] // unused during DST
-pub(crate) async fn get_now_for_read(
-    mono_clock: Arc<MonotonicClock>,
-    durability_level: DurabilityLevel,
-) -> Result<i64, SlateDBError> {
-    /*
-     Note: the semantics of filtering expired records on read differ slightly depending on
-     the configured ReadLevel. For Uncommitted we can just use the actual clock's "now"
-     as this corresponds to the current time seen by uncommitted writes but is not persisted
-     and only enforces monotonicity via the local in-memory MonotonicClock. This means it's
-     possible for the mono_clock.now() to go "backwards" following a crash and recovery, which
-     could result in records that were filtered out before the crash coming back to life and being
-     returned after the crash.
-     If the read level is instead set to Committed, we only use the last_tick of the monotonic
-     clock to filter out expired records, since this corresponds to the highest time of any
-     persisted batch and is thus recoverable following a crash. Since the last tick is the
-     last persisted time we are guaranteed monotonicity of the #get_last_tick function and
-     thus will not see this "time travel" phenomenon -- with Committed, once a record is
-     filtered out due to ttl expiry, it is guaranteed not to be seen again by future Committed
-     reads.
-    */
-    match durability_level {
-        Remote => Ok(mono_clock.get_last_durable_tick()),
-        Memory => mono_clock.now().await,
-    }
-}
-
-pub(crate) fn is_not_expired(entry: &RowEntry, now: i64) -> bool {
-    if let Some(expire_ts) = entry.expire_ts {
-        expire_ts > now
-    } else {
-        true
-    }
 }
 
 /// Merge two options using the provided function.
@@ -466,7 +427,7 @@ pub(crate) fn sign_extend(val: u32, bits: u8) -> i32 {
 /// Returns:
 /// - The effective max parallelism.
 pub(crate) fn compute_max_parallel(l0_count: usize, srs: &[SortedRun], cap: usize) -> usize {
-    let total_ssts = l0_count + srs.iter().map(|sr| sr.ssts.len()).sum::<usize>();
+    let total_ssts = l0_count + srs.iter().map(|sr| sr.sst_views.len()).sum::<usize>();
     total_ssts.min(cap).max(1)
 }
 
@@ -492,7 +453,7 @@ pub(crate) fn estimate_bytes_before_key(sorted_runs: &[SortedRun], key: &Bytes) 
                 return 0;
             };
             sorted_run
-                .ssts
+                .sst_views
                 .iter()
                 .take(idx)
                 .map(|sst| sst.estimate_size())
@@ -738,14 +699,23 @@ pub(crate) async fn preload_cache_from_manifest(
     match preload_level {
         Some(PreloadLevel::AllSst) => {
             let mut all_sst_paths: Vec<object_store::path::Path> = Vec::with_capacity(
-                core.l0.len() + core.compacted.iter().map(|sr| sr.ssts.len()).sum::<usize>(),
+                core.l0.len()
+                    + core
+                        .compacted
+                        .iter()
+                        .map(|sr| sr.sst_views.len())
+                        .sum::<usize>(),
             );
-            all_sst_paths.extend(core.l0.iter().map(|sst| path_resolver.table_path(&sst.id)));
+            all_sst_paths.extend(
+                core.l0
+                    .iter()
+                    .map(|view| path_resolver.table_path(&view.sst.id)),
+            );
             all_sst_paths.extend(
                 core.compacted
                     .iter()
-                    .flat_map(|sr| &sr.ssts)
-                    .map(|sst| path_resolver.table_path(&sst.id)),
+                    .flat_map(|sr| &sr.sst_views)
+                    .map(|view| path_resolver.table_path(&view.sst.id)),
             );
             if !all_sst_paths.is_empty() {
                 if let Err(e) = cached_obj_store
@@ -760,7 +730,7 @@ pub(crate) async fn preload_cache_from_manifest(
             let l0_sst_paths: Vec<object_store::path::Path> = core
                 .l0
                 .iter()
-                .map(|sst| path_resolver.table_path(&sst.id))
+                .map(|view| path_resolver.table_path(&view.sst.id))
                 .collect();
             if !l0_sst_paths.is_empty() {
                 if let Err(e) = cached_obj_store
@@ -784,7 +754,7 @@ mod tests {
     use slatedb_common::MockSystemClock;
 
     use crate::clock::MonotonicClock;
-    use crate::db_state::{SortedRun, SsTableHandle, SsTableId, SsTableInfo};
+    use crate::db_state::{SortedRun, SsTableHandle, SsTableId, SsTableInfo, SsTableView};
     use crate::error::SlateDBError;
     use crate::format::sst::SST_FORMAT_VERSION_LATEST;
     use crate::sst_builder::BlockFormat;
@@ -827,19 +797,18 @@ mod tests {
         }
     }
 
-    fn make_compacted_sst(start_key: &str, size: u64) -> SsTableHandle {
+    fn make_sst_view(start_key: &str, size: u64) -> SsTableView {
         let info = SsTableInfo {
             first_entry: Some(Bytes::from(start_key.as_bytes().to_vec())),
             index_offset: size.saturating_sub(1),
             index_len: 1,
             ..Default::default()
         };
-        SsTableHandle::new_compacted(
+        SsTableView::identity(SsTableHandle::new(
             SsTableId::Compacted(Ulid::new()),
             SST_FORMAT_VERSION_LATEST,
             info,
-            None,
-        )
+        ))
     }
 
     #[test]
@@ -1323,16 +1292,16 @@ mod tests {
     fn test_estimate_bytes_before_key() {
         let run1 = SortedRun {
             id: 1,
-            ssts: vec![
-                make_compacted_sst("a", 10),
-                make_compacted_sst("k", 20), // k < m < z, so only "a" counts
-                make_compacted_sst("z", 30),
+            sst_views: vec![
+                make_sst_view("a", 10),
+                make_sst_view("k", 20), // k < m < z, so only "a" counts
+                make_sst_view("z", 30),
             ],
         };
         let run2 = SortedRun {
             id: 2,
             // f < m < ..., so only "b" counts
-            ssts: vec![make_compacted_sst("b", 40), make_compacted_sst("f", 50)],
+            sst_views: vec![make_sst_view("b", 40), make_sst_view("f", 50)],
         };
 
         let key = Bytes::from("m");

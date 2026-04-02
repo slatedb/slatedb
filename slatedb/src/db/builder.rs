@@ -127,8 +127,6 @@ use crate::compactor::SizeTieredCompactionSchedulerSupplier;
 use crate::compactor::COMPACTOR_TASK_NAME;
 use crate::compactor::{CompactionSchedulerSupplier, Compactor};
 use crate::compactor_executor::{TokioCompactionExecutor, TokioCompactionExecutorOptions};
-use crate::config::default_block_cache;
-use crate::config::default_meta_cache;
 use crate::config::CompactorOptions;
 use crate::config::DbReaderOptions;
 use crate::config::GarbageCollectorOptions;
@@ -153,12 +151,15 @@ use crate::object_stores::ObjectStores;
 use crate::paths::PathResolver;
 use crate::rand::DbRand;
 use crate::retrying_object_store::RetryingObjectStore;
-use crate::stats::StatRegistry;
 use crate::store_provider::DefaultStoreProvider;
 use crate::tablestore::TableStore;
 use crate::utils::WatchableOnceCell;
 use slatedb_common::clock::DefaultSystemClock;
 use slatedb_common::clock::SystemClock;
+use slatedb_common::metrics::MetricLevel;
+use slatedb_common::metrics::MetricsRecorder;
+use slatedb_common::metrics::MetricsRecorderHelper;
+use slatedb_common::metrics::NoopMetricsRecorder;
 
 /// A builder for creating a new Db instance.
 ///
@@ -173,11 +174,13 @@ pub struct DbBuilder<P: Into<Path>> {
     system_clock: Option<Arc<dyn SystemClock>>,
     gc_runtime: Option<Handle>,
     compactor_builder: Option<CompactorBuilder<Path>>,
+    gc_builder: Option<GarbageCollectorBuilder<Path>>,
     fp_registry: Arc<FailPointRegistry>,
     seed: Option<u64>,
     sst_block_size: Option<SstBlockSize>,
     merge_operator: Option<MergeOperatorType>,
     block_transformer: Option<Arc<dyn BlockTransformer>>,
+    metrics_recorder: Arc<dyn MetricsRecorder>,
 }
 
 impl<P: Into<Path>> DbBuilder<P> {
@@ -192,11 +195,13 @@ impl<P: Into<Path>> DbBuilder<P> {
             system_clock: None,
             gc_runtime: None,
             compactor_builder: None,
+            gc_builder: None,
             fp_registry: Arc::new(FailPointRegistry::new()),
             seed: None,
             sst_block_size: None,
             merge_operator: None,
             block_transformer: None,
+            metrics_recorder: Arc::new(NoopMetricsRecorder::new()),
         }
     }
 
@@ -204,6 +209,9 @@ impl<P: Into<Path>> DbBuilder<P> {
     pub fn with_settings(mut self, settings: Settings) -> Self {
         if self.compactor_builder.is_some() && settings.compactor_options.is_some() {
             warn!("compactor_builder and settings.compactor_options both set; compactor_builder will take precedence");
+        }
+        if self.gc_builder.is_some() && settings.garbage_collector_options.is_some() {
+            warn!("gc_builder and settings.garbage_collector_options both set; gc_builder will take precedence");
         }
         self.settings = settings;
         self
@@ -255,6 +263,23 @@ impl<P: Into<Path>> DbBuilder<P> {
     /// configuration.
     pub fn with_compactor_builder(mut self, compactor_builder: CompactorBuilder<P>) -> Self {
         self.compactor_builder = Some(compactor_builder.into_path_builder());
+        self
+    }
+
+    /// Sets a custom GarbageCollectorBuilder for garbage collection.
+    ///
+    /// Setting a [`GarbageCollectorBuilder`] will ignore any previous
+    /// [`Settings::garbage_collector_options`] configuration passed in through
+    /// [`DbBuilder::with_settings`] since the [`GarbageCollectorBuilder`] provides
+    /// its own configuration.
+    pub fn with_gc_builder(mut self, gc_builder: GarbageCollectorBuilder<P>) -> Self {
+        self.gc_builder = Some(gc_builder.into_path_builder());
+        self
+    }
+
+    /// Sets the metrics recorder to use for the database.
+    pub fn with_metrics_recorder(mut self, recorder: Arc<dyn MetricsRecorder>) -> Self {
+        self.metrics_recorder = recorder;
         self
     }
 
@@ -367,10 +392,9 @@ impl<P: Into<Path>> DbBuilder<P> {
             );
         }
 
-        let merge_operator = self.merge_operator.or(self.settings.merge_operator.clone());
-
         // Setup the components
-        let stat_registry = Arc::new(StatRegistry::new());
+        // Setup metrics recorder
+        let recorder = MetricsRecorderHelper::new(self.metrics_recorder, MetricLevel::default());
         let block_format = {
             #[cfg(test)]
             {
@@ -395,7 +419,7 @@ impl<P: Into<Path>> DbBuilder<P> {
         let cached_object_store = CachedObjectStore::from_config(
             retrying_main_object_store.clone(),
             &self.settings.object_store_cache_options,
-            stat_registry.as_ref(),
+            &recorder,
             system_clock.clone(),
             rand.clone(),
         )
@@ -444,7 +468,7 @@ impl<P: Into<Path>> DbBuilder<P> {
             self.db_cache.as_ref().map(|c| {
                 Arc::new(DbCacheWrapper::new(
                     c.clone(),
-                    stat_registry.as_ref(),
+                    &recorder,
                     system_clock.clone(),
                 )) as Arc<dyn DbCache>
             }),
@@ -479,20 +503,18 @@ impl<P: Into<Path>> DbBuilder<P> {
         let (write_tx, write_rx) = tokio::sync::mpsc::unbounded_channel();
 
         // Create the database inner state
-        let mut settings = self.settings.clone();
-        settings.merge_operator = merge_operator.clone();
         let inner = Arc::new(
             DbInner::new(
-                settings,
+                self.settings.clone(),
                 system_clock.clone(),
                 rand.clone(),
                 table_store.clone(),
                 manifest.prepare_dirty()?,
                 memtable_flush_tx,
                 write_tx,
-                stat_registry,
+                recorder.clone(),
                 self.fp_registry.clone(),
-                merge_operator.clone(),
+                self.merge_operator.clone(),
             )
             .await?,
         );
@@ -546,10 +568,10 @@ impl<P: Into<Path>> DbBuilder<P> {
         if let Some(compactor_builder) = compactor_builder {
             let mut builder = compactor_builder
                 .with_system_clock(system_clock.clone())
-                .with_stat_registry(inner.stat_registry.clone())
+                .with_recorder(recorder.clone())
                 .with_seed(rand.rng().next_u64());
 
-            if let Some(operator) = merge_operator {
+            if let Some(operator) = self.merge_operator {
                 builder = builder.with_merge_operator(operator);
             }
 
@@ -568,19 +590,26 @@ impl<P: Into<Path>> DbBuilder<P> {
             )?;
         }
 
-        if let Some(gc_options) = self
-            .settings
-            .garbage_collector_options
-            .filter(|opts| !opts.is_empty())
-        {
-            let gc = GarbageCollector::new(
-                manifest_store.clone(),
-                compactions_store.clone(),
-                uncached_table_store.clone(),
-                gc_options,
-                inner.stat_registry.clone(),
-                system_clock.clone(),
-            );
+        let gc_builder = self.gc_builder.or_else(|| {
+            self.settings
+                .garbage_collector_options
+                .filter(|opts| !opts.is_empty())
+                .map(|opts| {
+                    GarbageCollectorBuilder::new(path.clone(), retrying_main_object_store.clone())
+                        .with_options(opts)
+                })
+        });
+
+        if let Some(gc_builder) = gc_builder {
+            let gc = gc_builder
+                .with_system_clock(system_clock.clone())
+                .with_recorder(recorder.clone())
+                .with_seed(rand.rng().next_u64())
+                .build_collector(
+                    uncached_table_store.clone(),
+                    manifest_store.clone(),
+                    compactions_store.clone(),
+                );
             // Garbage collector only uses tickers, so pass in a dummy rx channel
             let (_, rx) = mpsc::unbounded_channel();
             let gc_handle = self.gc_runtime.as_ref().unwrap_or(&tokio_handle);
@@ -692,7 +721,7 @@ pub struct GarbageCollectorBuilder<P: Into<Path>> {
     main_object_store: Arc<dyn ObjectStore>,
     wal_object_store: Option<Arc<dyn ObjectStore>>,
     options: GarbageCollectorOptions,
-    stat_registry: Arc<StatRegistry>,
+    recorder: MetricsRecorderHelper,
     system_clock: Arc<dyn SystemClock>,
     rand: Arc<DbRand>,
 }
@@ -704,9 +733,22 @@ impl<P: Into<Path>> GarbageCollectorBuilder<P> {
             main_object_store,
             wal_object_store: None,
             options: GarbageCollectorOptions::default(),
-            stat_registry: Arc::new(StatRegistry::new()),
+            recorder: MetricsRecorderHelper::noop(),
             system_clock: Arc::new(DefaultSystemClock::default()),
             rand: Arc::new(DbRand::default()),
+        }
+    }
+
+    /// Converts this builder into one with a concrete `Path` type.
+    pub fn into_path_builder(self) -> GarbageCollectorBuilder<Path> {
+        GarbageCollectorBuilder {
+            path: self.path.into(),
+            main_object_store: self.main_object_store,
+            wal_object_store: self.wal_object_store,
+            options: self.options,
+            recorder: self.recorder,
+            system_clock: self.system_clock,
+            rand: self.rand,
         }
     }
 
@@ -716,10 +758,15 @@ impl<P: Into<Path>> GarbageCollectorBuilder<P> {
         self
     }
 
-    /// Sets the stats registry to use for the garbage collector.
-    #[allow(unused)]
-    pub fn with_stat_registry(mut self, stat_registry: Arc<StatRegistry>) -> Self {
-        self.stat_registry = stat_registry;
+    /// Sets a user-provided metrics recorder for the garbage collector.
+    pub fn with_metrics_recorder(mut self, recorder: Arc<dyn MetricsRecorder>) -> Self {
+        self.recorder = MetricsRecorderHelper::new(recorder, MetricLevel::default());
+        self
+    }
+
+    /// Sets the internal recorder (used when GC is created via DbBuilder).
+    pub(crate) fn with_recorder(mut self, recorder: MetricsRecorderHelper) -> Self {
+        self.recorder = recorder;
         self
     }
 
@@ -736,10 +783,26 @@ impl<P: Into<Path>> GarbageCollectorBuilder<P> {
     }
 
     /// Sets the WAL object store to use for the garbage collector.
-    #[allow(unused)]
     pub fn with_wal_object_store(mut self, wal_object_store: Arc<dyn ObjectStore>) -> Self {
         self.wal_object_store = Some(wal_object_store);
         self
+    }
+
+    /// Builds a GarbageCollector using pre-existing stores (used by DbBuilder).
+    pub(crate) fn build_collector(
+        self,
+        table_store: Arc<TableStore>,
+        manifest_store: Arc<ManifestStore>,
+        compactions_store: Arc<CompactionsStore>,
+    ) -> GarbageCollector {
+        GarbageCollector::new(
+            manifest_store,
+            compactions_store,
+            table_store,
+            self.options,
+            &self.recorder,
+            self.system_clock,
+        )
     }
 
     /// Builds and returns a GarbageCollector instance.
@@ -779,7 +842,7 @@ impl<P: Into<Path>> GarbageCollectorBuilder<P> {
             compactions_store,
             table_store,
             self.options,
-            self.stat_registry,
+            &self.recorder,
             self.system_clock,
         )
     }
@@ -795,7 +858,7 @@ pub struct CompactorBuilder<P: Into<Path>> {
     options: CompactorOptions,
     scheduler_supplier: Option<Arc<dyn CompactionSchedulerSupplier>>,
     rand: Arc<DbRand>,
-    stat_registry: Arc<StatRegistry>,
+    recorder: MetricsRecorderHelper,
     system_clock: Arc<dyn SystemClock>,
     closed_result: ClosedResultWriter,
     merge_operator: Option<MergeOperatorType>,
@@ -814,7 +877,7 @@ impl<P: Into<Path>> CompactorBuilder<P> {
             options: CompactorOptions::default(),
             scheduler_supplier: None,
             rand: Arc::new(DbRand::default()),
-            stat_registry: Arc::new(StatRegistry::new()),
+            recorder: MetricsRecorderHelper::noop(),
             system_clock: Arc::new(DefaultSystemClock::default()),
             closed_result: ClosedResultWriter::new(WatchableOnceCell::new()),
             merge_operator: None,
@@ -832,7 +895,7 @@ impl<P: Into<Path>> CompactorBuilder<P> {
             options: self.options,
             scheduler_supplier: self.scheduler_supplier,
             rand: self.rand,
-            stat_registry: self.stat_registry,
+            recorder: self.recorder,
             system_clock: self.system_clock,
             closed_result: self.closed_result,
             merge_operator: self.merge_operator,
@@ -855,10 +918,15 @@ impl<P: Into<Path>> CompactorBuilder<P> {
         self
     }
 
-    /// Sets the stats registry to use for the compactor.
-    #[allow(unused)]
-    pub fn with_stat_registry(mut self, stat_registry: Arc<StatRegistry>) -> Self {
-        self.stat_registry = stat_registry;
+    /// Sets a user-provided metrics recorder for the compactor.
+    pub fn with_metrics_recorder(mut self, recorder: Arc<dyn MetricsRecorder>) -> Self {
+        self.recorder = MetricsRecorderHelper::new(recorder, MetricLevel::default());
+        self
+    }
+
+    /// Sets the internal recorder (used when compactor is created via DbBuilder).
+    pub(crate) fn with_recorder(mut self, recorder: MetricsRecorderHelper) -> Self {
+        self.recorder = recorder;
         self
     }
 
@@ -960,7 +1028,7 @@ impl<P: Into<Path>> CompactorBuilder<P> {
             scheduler_supplier,
             self.compaction_runtime,
             self.rand,
-            self.stat_registry,
+            &self.recorder,
             self.system_clock,
             self.closed_result,
             self.merge_operator,
@@ -993,7 +1061,7 @@ impl<P: Into<Path>> CompactorBuilder<P> {
             .unwrap_or(Arc::new(SizeTieredCompactionSchedulerSupplier));
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let scheduler = Arc::from(scheduler_supplier.compaction_scheduler(&options));
-        let stats = Arc::new(CompactionStats::new(self.stat_registry));
+        let stats = Arc::new(CompactionStats::new(&self.recorder));
         let executor = Arc::new(TokioCompactionExecutor::new(
             TokioCompactionExecutorOptions {
                 handle,
@@ -1080,11 +1148,14 @@ pub struct DbReaderBuilder<P: Into<Path>> {
     path: P,
     object_store: Arc<dyn ObjectStore>,
     wal_object_store: Option<Arc<dyn ObjectStore>>,
+    db_cache: Option<Arc<dyn DbCache>>,
     checkpoint_id: Option<uuid::Uuid>,
+    merge_operator: Option<MergeOperatorType>,
+    block_transformer: Option<Arc<dyn BlockTransformer>>,
     options: DbReaderOptions,
     system_clock: Arc<dyn SystemClock>,
     rand: Arc<DbRand>,
-    stat_registry: Arc<StatRegistry>,
+    recorder: MetricsRecorderHelper,
 }
 
 impl<P: Into<Path>> DbReaderBuilder<P> {
@@ -1094,11 +1165,14 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
             path,
             object_store,
             wal_object_store: None,
+            db_cache: default_db_cache(),
             checkpoint_id: None,
+            merge_operator: None,
+            block_transformer: None,
             options: DbReaderOptions::default(),
             system_clock: Arc::new(DefaultSystemClock::default()),
             rand: Arc::new(DbRand::default()),
-            stat_registry: Arc::new(StatRegistry::new()),
+            recorder: MetricsRecorderHelper::noop(),
         }
     }
 
@@ -1116,9 +1190,30 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
         self
     }
 
+    /// Sets the merge operator to use when reading merge operands.
+    pub fn with_merge_operator(mut self, merge_operator: MergeOperatorType) -> Self {
+        self.merge_operator = Some(merge_operator);
+        self
+    }
+
     /// Sets the options to use for the reader.
     pub fn with_options(mut self, options: DbReaderOptions) -> Self {
         self.options = options;
+        self
+    }
+
+    /// Sets the cache to use for the database for caching sst blocks
+    ///
+    /// SlateDB uses a cache to efficiently store and retrieve blocks and SST metadata locally.
+    /// [`slatedb::db_cache::SplitCache`] is used by default.
+    pub fn with_db_cache(mut self, db_cache: Arc<dyn DbCache>) -> Self {
+        self.db_cache = Some(db_cache);
+        self
+    }
+
+    /// Disables the sst block/metadata cache
+    pub fn with_db_cache_disabled(mut self) -> Self {
+        self.db_cache = None;
         self
     }
 
@@ -1138,9 +1233,28 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
         self
     }
 
-    /// Sets the stats registry to use for the reader.
-    pub fn with_stat_registry(mut self, stat_registry: Arc<StatRegistry>) -> Self {
-        self.stat_registry = stat_registry;
+    /// Sets the metrics recorder to use for the reader.
+    pub fn with_metrics_recorder(mut self, recorder: Arc<dyn MetricsRecorder>) -> Self {
+        self.recorder = MetricsRecorderHelper::new(recorder, MetricLevel::default());
+        self
+    }
+
+    /// Sets the block transformer to use for the database. The block transformer
+    /// allows custom encoding/decoding of block data before storage and after
+    /// retrieval. This can be used for encryption or other transformations.
+    ///
+    /// The transformer is applied after compression on write and before
+    /// decompression on read. The checksum is calculated on the transformed data.
+    ///
+    /// # Arguments
+    ///
+    /// * `block_transformer` - An Arc-wrapped block transformer implementation.
+    ///
+    /// # Returns
+    ///
+    /// The builder instance for chaining.
+    pub fn with_block_transformer(mut self, block_transformer: Arc<dyn BlockTransformer>) -> Self {
+        self.block_transformer = Some(block_transformer);
         self
     }
 
@@ -1168,7 +1282,7 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
         let maybe_cached = CachedObjectStore::from_config(
             retrying_object_store.clone(),
             &self.options.object_store_cache_options,
-            self.stat_registry.as_ref(),
+            &self.recorder,
             self.system_clock.clone(),
             self.rand.clone(),
         )
@@ -1193,16 +1307,18 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
             path: path.clone(),
             object_store,
             wal_object_store: retrying_wal_object_store,
-            block_cache: self.options.block_cache.clone(),
-            block_transformer: self.options.block_transformer.clone(),
+            block_cache: self.db_cache.clone(),
+            block_transformer: self.block_transformer.clone(),
         };
 
         let reader = DbReader::open_internal(
             &store_provider,
             self.checkpoint_id,
+            self.merge_operator,
             self.options,
             self.system_clock,
             self.rand,
+            self.recorder,
         )
         .await
         .map_err(crate::Error::from)?;
@@ -1226,25 +1342,76 @@ fn default_db_cache() -> Option<Arc<dyn DbCache>> {
     ) as Arc<dyn DbCache>)
 }
 
+#[allow(unreachable_code)]
+pub(crate) fn default_block_cache() -> Option<Arc<dyn DbCache>> {
+    #[cfg(feature = "foyer")]
+    {
+        return Some(Arc::new(crate::db_cache::foyer::FoyerCache::new_with_opts(
+            crate::db_cache::foyer::FoyerCacheOptions {
+                max_capacity: crate::db_cache::DEFAULT_BLOCK_CACHE_CAPACITY,
+                ..Default::default()
+            },
+        )));
+    }
+    #[cfg(feature = "moka")]
+    {
+        return Some(Arc::new(crate::db_cache::moka::MokaCache::new_with_opts(
+            crate::db_cache::moka::MokaCacheOptions {
+                max_capacity: crate::db_cache::DEFAULT_BLOCK_CACHE_CAPACITY,
+                time_to_live: None,
+                time_to_idle: None,
+            },
+        )));
+    }
+    None
+}
+
+#[allow(unreachable_code)]
+pub(crate) fn default_meta_cache() -> Option<Arc<dyn DbCache>> {
+    #[cfg(feature = "foyer")]
+    {
+        return Some(Arc::new(crate::db_cache::foyer::FoyerCache::new_with_opts(
+            crate::db_cache::foyer::FoyerCacheOptions {
+                max_capacity: crate::db_cache::DEFAULT_META_CACHE_CAPACITY,
+                ..Default::default()
+            },
+        )));
+    }
+    #[cfg(feature = "moka")]
+    {
+        return Some(Arc::new(crate::db_cache::moka::MokaCache::new_with_opts(
+            crate::db_cache::moka::MokaCacheOptions {
+                max_capacity: crate::db_cache::DEFAULT_META_CACHE_CAPACITY,
+                time_to_live: None,
+                time_to_idle: None,
+            },
+        )));
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use crate::config::Settings;
     use crate::garbage_collector::stats::GC_COUNT;
     use object_store::memory::InMemory;
+    use slatedb_common::metrics::{lookup_metric, DefaultMetricsRecorder};
     use std::sync::Arc;
 
     #[tokio::test]
     async fn test_db_builder_starts_gc_by_default() {
+        let metrics_recorder = Arc::new(DefaultMetricsRecorder::new());
         let db = crate::Db::builder(
             "test_db_builder_starts_gc_by_default",
             Arc::new(InMemory::new()),
         )
+        .with_metrics_recorder(metrics_recorder.clone())
         .build()
         .await
         .expect("failed to build db");
 
         assert!(
-            db.metrics().lookup(GC_COUNT).is_some(),
+            lookup_metric(&metrics_recorder, GC_COUNT).is_some(),
             "GC should be initialized by default"
         );
 
@@ -1253,6 +1420,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_db_builder_disables_gc_when_gc_options_are_none() {
+        let metrics_recorder = Arc::new(DefaultMetricsRecorder::new());
         let db = crate::Db::builder(
             "test_db_builder_disables_gc_when_gc_options_are_none",
             Arc::new(InMemory::new()),
@@ -1261,12 +1429,13 @@ mod tests {
             garbage_collector_options: None,
             ..Settings::default()
         })
+        .with_metrics_recorder(metrics_recorder.clone())
         .build()
         .await
         .expect("failed to build db");
 
         assert!(
-            db.metrics().lookup(GC_COUNT).is_none(),
+            lookup_metric(&metrics_recorder, GC_COUNT).is_none(),
             "GC should not be initialized when options are None"
         );
 

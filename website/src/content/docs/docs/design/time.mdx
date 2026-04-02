@@ -1,4 +1,56 @@
 ---
 title: Time
+description: How SlateDB records wall-clock timestamps and expiration metadata
 ---
 
+SlateDB separates ordering from time. Sequence numbers decide visibility. Wall-clock timestamps are metadata recorded in milliseconds since the Unix epoch and used for TTL, checkpoint lifetime, and background scheduling.
+
+## Ordering
+
+Every committed write batch gets a sequence number and a creation timestamp. The sequence number is the authoritative ordering key. The timestamp is descriptive metadata.
+
+This matters when multiple writes land in the same millisecond. Two versions of a key can share the same timestamp and still be ordered correctly because SlateDB compares sequence numbers first.
+
+SlateDB stamps the committed batch once. Every row produced by that batch inherits the same `create_ts`, while per-row TTL can still produce different `expire_ts` values. The batch timestamp is exposed through [`WriteHandle::create_ts()`](https://docs.rs/slatedb/latest/slatedb/db/struct.WriteHandle.html#method.create_ts).
+
+## Clock
+
+SlateDB gets wall-clock time from [`SystemClock`](https://docs.rs/slatedb-common/latest/slatedb_common/clock/trait.SystemClock.html). The default implementation uses the process wall clock. [`DbBuilder::with_system_clock()`](https://docs.rs/slatedb/latest/slatedb/db/struct.DbBuilder.html#method.with_system_clock) lets tests and specialized environments replace it.
+
+Internally, SlateDB wraps that clock in a monotonic clock. If the underlying clock moves backwards, SlateDB waits briefly for it to catch up. If it is still behind, the operation fails instead of writing timestamps that move backwards.
+
+When an immutable memtable is flushed to L0, SlateDB persists the newest flushed clock tick in the manifest as `last_l0_clock_tick`. On restart it seeds the monotonic clock from that value so new timestamps stay ahead of data that is already durable in L0 or lower levels.
+
+The same clock is also used for checkpoint expiry and background tasks such as compaction and garbage collection.
+
+## Row Metadata
+
+Metadata-aware reads expose the stored timestamps. [`Db::get_key_value()`](https://docs.rs/slatedb/latest/slatedb/struct.Db.html#method.get_key_value) and [`DbIterator::next()`](https://docs.rs/slatedb/latest/slatedb/struct.DbIterator.html#method.next) return [`KeyValue`](https://docs.rs/slatedb/latest/slatedb/struct.KeyValue.html), which includes `seq`, `create_ts`, and `expire_ts`.
+
+[`Db::get()`](https://docs.rs/slatedb/latest/slatedb/struct.Db.html#method.get) returns only value bytes. If you need timestamp metadata, use `get_key_value()` or iterate `KeyValue` results from a scan.
+
+SlateDB also preserves the same metadata in the WAL path, which is why [Change Data Capture](/docs/design/change-data-capture) can expose `create_ts` and `expire_ts` for downstream consumers.
+
+## Expiration
+
+TTL is stored as an absolute expiration timestamp, not a relative duration. On commit, SlateDB computes `expire_ts = create_ts + ttl`.
+
+[`Settings::default_ttl`](https://docs.rs/slatedb/latest/slatedb/config/struct.Settings.html#structfield.default_ttl) sets a default TTL for puts and merges. [`PutOptions`](https://docs.rs/slatedb/latest/slatedb/config/struct.PutOptions.html) and [`MergeOptions`](https://docs.rs/slatedb/latest/slatedb/config/struct.MergeOptions.html) can override that per operation:
+
+- [`Ttl::NoExpiry`](https://docs.rs/slatedb/latest/slatedb/config/enum.Ttl.html#variant.NoExpiry) — store the value without expiration
+- [`Ttl::ExpireAfter(u64)`](https://docs.rs/slatedb/latest/slatedb/config/enum.Ttl.html#variant.ExpireAfter) — expire after a relative duration (clock ticks)
+- [`Ttl::ExpireAt(i64)`](https://docs.rs/slatedb/latest/slatedb/config/enum.Ttl.html#variant.ExpireAt) — expire at a fixed absolute timestamp (clock ticks)
+
+Deletes write tombstones and do not carry TTL.
+
+:::note
+When SlateDB materializes a value from merge operands, the resulting row reports the earliest `expire_ts` across the merged operands and any base value. A later merge with a longer TTL does not extend the lifetime of older merged data.
+:::
+
+The current read path does not consult wall-clock time to hide expired rows. Instead, SlateDB returns the recorded `expire_ts` to metadata-aware callers and uses `expire_ts` during compaction. Applications that need strict read-time TTL enforcement should compare `expire_ts` with their current time.
+
+Compaction is what turns expiration into deletion. Ordinary values may be rewritten to tombstones so older versions in lower levels do not become visible again. Expired merge operands are dropped instead of converted to tombstones because a tombstone would also erase older merge history. Physical removal still depends on later compaction and [garbage collection](/docs/design/gc).
+
+## Mapping Between Timestamps and Sequence Numbers
+
+For approximate conversion between sequence numbers and wall-clock time, the manifest stores a bounded sequence tracker. [`Admin::get_timestamp_for_sequence()`](https://docs.rs/slatedb/latest/slatedb/admin/struct.Admin.html#method.get_timestamp_for_sequence) and [`Admin::get_sequence_for_timestamp()`](https://docs.rs/slatedb/latest/slatedb/admin/struct.Admin.html#method.get_sequence_for_timestamp) query that tracker, and `slatedb-cli` exposes the same conversion. The mapping is lossy by design: recent history has finer granularity, and older history is downsampled to keep manifest state bounded. See [RFC-0012](/rfcs/0012-sequence-tracker/) for its design.

@@ -9,7 +9,7 @@ use crate::flatbuffer_types::{
 use crate::format::block::{Block, BlockBuilderV1};
 use crate::format::block_v2::BlockBuilderV2;
 use crate::format::row;
-use crate::sst_stats::SstStats;
+use crate::sst_stats::{BlockStats, SstStats};
 use async_trait::async_trait;
 use bytes::{Buf, BufMut, Bytes};
 use flatbuffers::DefaultAllocator;
@@ -105,6 +105,45 @@ impl BlockBuilder {
         }
     }
 }
+
+pub(crate) struct BlockBuilderWithStats {
+    builder: BlockBuilder,
+    stats: BlockStats,
+}
+
+impl BlockBuilderWithStats {
+    pub(crate) fn new(builder: BlockBuilder) -> Self {
+        Self {
+            builder,
+            stats: BlockStats::default(),
+        }
+    }
+
+    pub(crate) fn would_fit(&self, entry: &crate::types::RowEntry) -> bool {
+        self.builder.would_fit(entry)
+    }
+
+    pub(crate) fn add(
+        &mut self,
+        entry: crate::types::RowEntry,
+    ) -> Result<bool, crate::error::SlateDBError> {
+        match &entry.value {
+            crate::types::ValueDeletable::Value(_) => self.stats.num_puts += 1,
+            crate::types::ValueDeletable::Merge(_) => self.stats.num_merges += 1,
+            crate::types::ValueDeletable::Tombstone => self.stats.num_deletes += 1,
+        }
+        self.builder.add(entry)
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.builder.is_empty()
+    }
+
+    pub(crate) fn into_parts(self) -> (BlockBuilder, BlockStats) {
+        (self.builder, self.stats)
+    }
+}
+
 pub(crate) const SIZEOF_U16: usize = size_of::<u16>();
 pub(crate) const SIZEOF_U32: usize = size_of::<u32>();
 pub(crate) const SIZEOF_U64: usize = size_of::<u64>();
@@ -529,7 +568,9 @@ pub(crate) async fn transform(
     Ok(transformed)
 }
 
-pub(crate) type OffsetAndVersion = (u64, u16);
+pub(crate) type LengthOffsetAndVersion = (u64, u64, u16);
+
+pub(crate) type TableInfoAndVersion = (SsTableInfo, u16);
 
 #[derive(Clone)]
 pub(crate) struct SsTableFormat {
@@ -557,10 +598,10 @@ impl Default for SsTableFormat {
 }
 
 impl SsTableFormat {
-    async fn read_metadata_offset_and_version(
+    async fn read_length_and_metadata_offset_and_version(
         &self,
         obj: &impl ReadOnlyBlob,
-    ) -> Result<OffsetAndVersion, SlateDBError> {
+    ) -> Result<LengthOffsetAndVersion, SlateDBError> {
         let obj_len = obj.len().await?;
         if obj_len <= NUM_FOOTER_BYTES_LONG {
             return Err(SlateDBError::EmptySSTable);
@@ -572,7 +613,7 @@ impl SsTableFormat {
 
         let version = header.slice(8..NUM_FOOTER_BYTES).get_u16();
         let sst_metadata_offset = header.slice(0..8).get_u64();
-        Ok((sst_metadata_offset, version))
+        Ok((obj_len, sst_metadata_offset, version))
     }
 
     fn validate_version(&self, version: u16) -> Result<(), SlateDBError> {
@@ -586,23 +627,18 @@ impl SsTableFormat {
         Ok(())
     }
 
-    pub(crate) async fn read_version(&self, obj: &impl ReadOnlyBlob) -> Result<u16, SlateDBError> {
-        let (_, version) = self.read_metadata_offset_and_version(obj).await?;
-        self.validate_version(version)?;
-        Ok(version)
-    }
-
-    pub(crate) async fn read_info(
+    pub(crate) async fn read_info_and_version(
         &self,
         obj: &impl ReadOnlyBlob,
-    ) -> Result<SsTableInfo, SlateDBError> {
-        let (sst_metadata_offset, version) = self.read_metadata_offset_and_version(obj).await?;
+    ) -> Result<TableInfoAndVersion, SlateDBError> {
+        let (obj_len, sst_metadata_offset, version) = self
+            .read_length_and_metadata_offset_and_version(obj)
+            .await?;
         self.validate_version(version)?;
-        let obj_len = obj.len().await?;
         let sst_metadata_bytes = obj
             .read_range(sst_metadata_offset..obj_len - NUM_FOOTER_BYTES_LONG)
             .await?;
-        SsTableInfo::decode(sst_metadata_bytes, &*self.sst_codec)
+        SsTableInfo::decode(sst_metadata_bytes, &*self.sst_codec).map(|info| (info, version))
     }
 
     pub(crate) async fn read_filter(
@@ -710,8 +746,6 @@ impl SsTableFormat {
         Ok(SsTableIndexOwned::new(decompressed_bytes)?)
     }
 
-    // Used by TableStore::read_stats (RFC 0020 Phase 2)
-    #[allow(dead_code)]
     pub(crate) async fn read_stats(
         &self,
         info: &SsTableInfo,

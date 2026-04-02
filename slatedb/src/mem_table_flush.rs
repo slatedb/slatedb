@@ -1,7 +1,7 @@
 use crate::checkpoint::CheckpointCreateResult;
 use crate::config::CheckpointOptions;
 use crate::db::DbInner;
-use crate::db_state::SsTableId;
+use crate::db_state::{SsTableId, SsTableView};
 use crate::dispatcher::{MessageFactory, MessageHandler};
 use crate::error::SlateDBError;
 use crate::manifest::store::FenceableManifest;
@@ -159,7 +159,19 @@ impl MemtableFlusher {
                         .pop_back()
                         .expect("expected imm memtable");
                     assert!(Arc::ptr_eq(&popped, &imm_memtable));
-                    modifier.state.manifest.value.core.l0.push_front(sst_handle);
+                    modifier
+                        .state
+                        .manifest
+                        .value
+                        .core
+                        .l0
+                        .push_front(SsTableView::new(
+                            self.db_inner
+                                .rand
+                                .rng()
+                                .gen_ulid(self.db_inner.system_clock.as_ref()),
+                            sst_handle,
+                        ));
                     modifier.state.manifest.value.core.replay_after_wal_id =
                         imm_memtable.recent_flushed_wal_id();
 
@@ -199,7 +211,10 @@ impl MemtableFlusher {
                 })?;
             }
             imm_memtable.notify_flush_to_l0(Ok(()));
-            self.db_inner.db_stats.immutable_memtable_flushes.inc();
+            self.db_inner
+                .db_stats
+                .immutable_memtable_flushes
+                .increment(1);
             match self.write_manifest_safely().await {
                 Ok(_) => {
                     // at this point we know the data in the memtable is durably stored
@@ -229,7 +244,8 @@ impl MemtableFlusher {
     async fn flush_and_record(&mut self) -> Result<(), SlateDBError> {
         fail_point!(
             Arc::clone(&self.db_inner.fp_registry),
-            "flush-memtable-to-l0"
+            "flush-memtable-to-l0",
+            |_| { Ok(()) }
         );
         let result = self.flush_imm_memtables_to_l0().await;
         if let Err(err) = &result {

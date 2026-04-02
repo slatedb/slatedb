@@ -23,18 +23,18 @@ use crate::compactor_executor::{
 };
 use crate::compactor_state::{Compaction, CompactionSpec, SourceId};
 use crate::config::{CompactorOptions, CompressionCodec};
-use crate::db_state::{SsTableHandle, SsTableId};
+use crate::db_state::{SsTableHandle, SsTableId, SsTableView};
 use crate::error::SlateDBError;
 use crate::format::sst::SsTableFormat;
 use crate::manifest::store::{ManifestStore, StoredManifest};
 use crate::object_stores::ObjectStores;
 use crate::rand::DbRand;
-use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
 use crate::types::RowEntry;
 use crate::types::ValueDeletable;
 use crate::utils::IdGenerator;
 use slatedb_common::clock::{DefaultSystemClock, SystemClock};
+use slatedb_common::metrics::MetricsRecorderHelper;
 
 pub struct CompactionExecuteBench {
     path: Path,
@@ -245,15 +245,20 @@ impl CompactionExecuteBench {
             ssts_by_id.insert(id, handle);
         }
         info!("finished loading");
-        let ssts: Vec<SsTableHandle> = sst_ids
+        let sst_views: Vec<SsTableView> = sst_ids
             .into_iter()
-            .map(|id| ssts_by_id.get(&id).expect("expected sst").clone())
+            .map(|id| {
+                SsTableView::new(
+                    rand.rng().gen_ulid(system_clock.as_ref()),
+                    ssts_by_id.get(&id).expect("expected sst").clone(),
+                )
+            })
             .collect();
         Ok(StartCompactionJobArgs {
             id: rand.rng().gen_ulid(system_clock.as_ref()),
             compaction_id: rand.rng().gen_ulid(system_clock.as_ref()),
             destination: 0,
-            ssts,
+            sst_views,
             sorted_runs: vec![],
             output_ssts: vec![],
             compaction_clock_tick: manifest.db_state().last_l0_clock_tick,
@@ -292,7 +297,7 @@ impl CompactionExecuteBench {
             id: rand.rng().gen_ulid(system_clock.as_ref()),
             compaction_id: job.id(),
             destination: 0,
-            ssts: vec![],
+            sst_views: vec![],
             sorted_runs: srs,
             output_ssts: vec![],
             compaction_clock_tick: state.last_l0_clock_tick,
@@ -320,8 +325,8 @@ impl CompactionExecuteBench {
         ));
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let compactor_options = CompactorOptions::default();
-        let registry = Arc::new(StatRegistry::new());
-        let stats = Arc::new(CompactionStats::new(registry.clone()));
+        let recorder = MetricsRecorderHelper::noop();
+        let stats = Arc::new(CompactionStats::new(&recorder));
         let os = self.object_store.clone();
 
         let manifest_store = Arc::new(ManifestStore::new(&self.path, os.clone()));

@@ -24,7 +24,8 @@ Before diving into encoding patterns, be aware of SlateDB's key and value limits
 
 ## How Keys Are Used
 
-Understanding how SlateDB uses keys internally helps explain why key design matters for performance.
+Understanding how SlateDB uses keys internally helps explain why key design matters
+for performance.
 
 ### Sorted Storage
 
@@ -39,9 +40,9 @@ within blocks. This sorted structure enables:
 
 ### Prefix Compression
 
-Within each SST block, SlateDB uses prefix compression: keys that share a common
-prefix with the first key in the block store only their unique suffix. For
-example, if a block contains:
+Within each SST block, SlateDB uses prefix compression. Each key is encoded relative
+to the previous key in the block, and restart points store a full key. For example,
+if a block contains:
 
 ```
 user:123:profile
@@ -282,4 +283,3 @@ For more detailed encoding algorithms and patterns:
 
 - [FoundationDB Data Modeling](https://apple.github.io/foundationdb/data-modeling.html) - Comprehensive guide covering tuple encoding, integers, floats, and composite types
 - [DynamoDB Sort Key Best Practices](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/bp-sort-keys.html) - Hierarchical key patterns and version control
-

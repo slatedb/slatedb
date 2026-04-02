@@ -1,14 +1,16 @@
 services:
   localstack:
-    image: localstack/localstack:latest
+    # Pin LocalStack so CI is not broken by `latest` drifting to auth-gated builds.
+    image: localstack/localstack:4.14.0
     container_name: localstack
     environment:
       - SERVICES=s3
-      - DEFAULT_REGION=us-east-1
     ports:
       - "4566:4566"
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:4566/health || exit 1"]
+      test:
+        - CMD-SHELL
+        - curl -sf http://localhost:4566/_localstack/health || exit 1
       interval: 5s
       timeout: 3s
       retries: 20
@@ -42,7 +44,7 @@ services:
     depends_on:
       - localstack
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:9001/health >/dev/null 2>&1 || exit 1"]
+      test: ["CMD", "/toxiproxy-cli", "list"]
       interval: 2s
       timeout: 2s
       retries: 15

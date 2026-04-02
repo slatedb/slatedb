@@ -2,7 +2,7 @@
 title: Writes
 ---
 
-Writes are moved to a background task as quickly as possible to prevent blocking the client. By default, a write operation will return before the write is durable. If you want to ensure durability, you can set `await_durable` to `true` or call `flush()`. The synchronous flow is as follows:
+Writes are moved to a background task as quickly as possible to prevent blocking the client. By default, `put()`, `write()`, and `delete()` use `WriteOptions::default()`, so calls wait for the write to become durable before returning. If you want lower latency and can tolerate losing in-flight data, set `await_durable` to `false`. You can also call `flush()` explicitly. The synchronous flow is as follows:
 
 1. A `put()`, `write()`, or `delete()` call is made on the client.
 2. The key/value pair is written to the mutable, in-memory WAL table.
