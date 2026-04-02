@@ -147,7 +147,7 @@ impl From<CachedEntry> for SerializedCachedEntry {
                 SerializedCachedEntry::V1(SerializedCachedEntryV1::SsTableIndex(encoded))
             }
             CachedItem::BloomFilter(filter) => {
-                let encoded = filter.encode();
+                let encoded = filter.encode_to_bytes();
                 SerializedCachedEntry::V1(SerializedCachedEntryV1::BloomFilter(encoded))
             }
             CachedItem::SstStats(stats) => {

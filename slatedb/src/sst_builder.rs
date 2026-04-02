@@ -368,7 +368,7 @@ impl EncodedSsTableBuilder<'_> {
         // Add filter if enough keys
         if self.stats.num_rows() >= self.min_filter_keys as u64 {
             let filter = Arc::new(self.filter_builder.build());
-            let encoded_filter = filter.encode();
+            let encoded_filter = filter.encode_to_bytes();
             footer_builder = footer_builder.with_filter(filter, encoded_filter);
         }
         footer_builder = footer_builder.with_stats(self.stats);
@@ -635,7 +635,7 @@ mod tests {
         let encoded_info = encoded.info.clone();
 
         if let Some(filter) = encoded.filter.clone() {
-            let bytes = filter.encode();
+            let bytes = filter.encode_to_bytes();
             // filters are encoded as a 16-bit number of probes followed by the filter
             assert_eq!(bytes.len() as u32, 2 + format.filter_bits_per_key);
         }
