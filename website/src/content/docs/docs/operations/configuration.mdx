@@ -60,3 +60,23 @@ async fn main() -> Result<(), Error> {
     Ok(())
 }
 ```
+
+## Reconfiguring Object Stores
+
+Reconfiguring an object store only changes how SlateDB reaches storage. It does not migrate data between stores for you. The new `ObjectStore` must still have the existing database contents for the database path.
+
+For the regular/main object store, pass the replacement store as the primary store to `Db::builder`, `DbReader::builder`, or `AdminBuilder::new`. Changing credentials, endpoints, or client implementations is fine as long as the new store still points at the same underlying bucket and prefix.
+
+:::caution
+If you point the main store at a different location without first copying the manifest and SST data, SlateDB will treat that location as a different database root rather than migrating the existing database.
+:::
+
+If you're using a separate WAL object store, make the same kind of change through `.with_wal_object_store(...)`. If you need to move the WAL data, copy the existing WAL objects first and then reopen with `.with_wal_object_store(...)` pointing at the replacement store.
+
+To migrate the data manually:
+
+1. Stop writers, readers that replay WAL, compactor processes, garbage collection, and any admin jobs that can update the database state.
+2. Copy the main database directories from the old main store and database path to the replacement main store and database path: `manifest/`, `compactions/`, and `compacted/`. If the database does not use a separate WAL store, copy `wal/` there too.
+3. If the database uses a separate WAL object store, copy the old WAL store's `wal/` directory to the replacement WAL store under the same database path. Do not move `manifest/`, `compactions/`, or `compacted/` into the WAL store; those remain in the main store.
+4. Copy whole directory contents, not only the files referenced by the latest manifest. Older manifests, WAL SSTs, and compacted SSTs can still be needed until checkpoints and garbage collection release them.
+5. Reopen SlateDB with the replacement store configuration.
