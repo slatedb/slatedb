@@ -359,8 +359,13 @@ func readFloat64(reader io.Reader) float64 {
 
 func init() {
 
+	FfiConverterCounterINSTANCE.register()
+	FfiConverterGaugeINSTANCE.register()
+	FfiConverterHistogramINSTANCE.register()
 	FfiConverterLogCallbackINSTANCE.register()
 	FfiConverterMergeOperatorINSTANCE.register()
+	FfiConverterMetricsRecorderINSTANCE.register()
+	FfiConverterUpDownCounterINSTANCE.register()
 	uniffiCheckChecksums()
 }
 
@@ -409,6 +414,15 @@ func uniffiCheckChecksums() {
 		if checksum != 5839 {
 			// If this happens try cleaning and rebuilding your project
 			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_merge_operator: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_metrics_recorder()
+		})
+		if checksum != 18128 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_metrics_recorder: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -472,6 +486,15 @@ func uniffiCheckChecksums() {
 		if checksum != 63455 {
 			// If this happens try cleaning and rebuilding your project
 			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbreaderbuilder_with_merge_operator: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_dbreaderbuilder_with_metrics_recorder()
+		})
+		if checksum != 20032 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbreaderbuilder_with_metrics_recorder: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -1043,6 +1066,141 @@ func uniffiCheckChecksums() {
 	}
 	{
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_counter_increment()
+		})
+		if checksum != 45426 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_counter_increment: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_defaultmetricsrecorder_metric_by_name_and_labels()
+		})
+		if checksum != 45073 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_defaultmetricsrecorder_metric_by_name_and_labels: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_defaultmetricsrecorder_metrics_by_name()
+		})
+		if checksum != 7602 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_defaultmetricsrecorder_metrics_by_name: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_defaultmetricsrecorder_register_counter()
+		})
+		if checksum != 51600 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_defaultmetricsrecorder_register_counter: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_defaultmetricsrecorder_register_gauge()
+		})
+		if checksum != 34281 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_defaultmetricsrecorder_register_gauge: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_defaultmetricsrecorder_register_histogram()
+		})
+		if checksum != 4383 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_defaultmetricsrecorder_register_histogram: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_defaultmetricsrecorder_register_up_down_counter()
+		})
+		if checksum != 19270 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_defaultmetricsrecorder_register_up_down_counter: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_defaultmetricsrecorder_snapshot()
+		})
+		if checksum != 39221 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_defaultmetricsrecorder_snapshot: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_gauge_set()
+		})
+		if checksum != 19642 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_gauge_set: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_histogram_record()
+		})
+		if checksum != 17863 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_histogram_record: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_metricsrecorder_register_counter()
+		})
+		if checksum != 40366 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_metricsrecorder_register_counter: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_metricsrecorder_register_gauge()
+		})
+		if checksum != 30425 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_metricsrecorder_register_gauge: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_metricsrecorder_register_up_down_counter()
+		})
+		if checksum != 64639 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_metricsrecorder_register_up_down_counter: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_metricsrecorder_register_histogram()
+		})
+		if checksum != 26503 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_metricsrecorder_register_histogram: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_updowncounter_increment()
+		})
+		if checksum != 34440 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_updowncounter_increment: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_slatedb_uniffi_checksum_method_settings_set()
 		})
 		if checksum != 34344 {
@@ -1192,6 +1350,15 @@ func uniffiCheckChecksums() {
 		if checksum != 20397 {
 			// If this happens try cleaning and rebuilding your project
 			panic("slatedb: uniffi_slatedb_uniffi_checksum_constructor_dbreaderbuilder_new: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_constructor_defaultmetricsrecorder_new()
+		})
+		if checksum != 31165 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_constructor_defaultmetricsrecorder_new: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -1357,6 +1524,30 @@ func (FfiConverterInt64) Read(reader io.Reader) int64 {
 type FfiDestroyerInt64 struct{}
 
 func (FfiDestroyerInt64) Destroy(_ int64) {}
+
+type FfiConverterFloat64 struct{}
+
+var FfiConverterFloat64INSTANCE = FfiConverterFloat64{}
+
+func (FfiConverterFloat64) Lower(value float64) C.double {
+	return C.double(value)
+}
+
+func (FfiConverterFloat64) Write(writer io.Writer, value float64) {
+	writeFloat64(writer, value)
+}
+
+func (FfiConverterFloat64) Lift(value C.double) float64 {
+	return float64(value)
+}
+
+func (FfiConverterFloat64) Read(reader io.Reader) float64 {
+	return readFloat64(reader)
+}
+
+type FfiDestroyerFloat64 struct{}
+
+func (FfiDestroyerFloat64) Destroy(_ float64) {}
 
 type FfiConverterBool struct{}
 
@@ -1555,6 +1746,192 @@ func (ffiObject *FfiObject) freeRustArcPtr() {
 		ffiObject.freeFunction(ffiObject.handle, status)
 		return 0
 	})
+}
+
+// Handle for a monotonic counter metric.
+type Counter interface {
+	// Adds `value` to the counter.
+	Increment(value uint64)
+}
+
+// Handle for a monotonic counter metric.
+type CounterImpl struct {
+	ffiObject FfiObject
+}
+
+// Adds `value` to the counter.
+func (_self *CounterImpl) Increment(value uint64) {
+	_pointer := _self.ffiObject.incrementPointer("Counter")
+	defer _self.ffiObject.decrementPointer()
+	rustCall(func(_uniffiStatus *C.RustCallStatus) bool {
+		C.uniffi_slatedb_uniffi_fn_method_counter_increment(
+			_pointer, FfiConverterUint64INSTANCE.Lower(value), _uniffiStatus)
+		return false
+	})
+}
+func (object *CounterImpl) Destroy() {
+	runtime.SetFinalizer(object, nil)
+	object.ffiObject.destroy()
+}
+
+type FfiConverterCounter struct {
+	handleMap *concurrentHandleMap[Counter]
+}
+
+var FfiConverterCounterINSTANCE = FfiConverterCounter{
+	handleMap: newConcurrentHandleMap[Counter](),
+}
+
+func (c FfiConverterCounter) Lift(handle C.uint64_t) Counter {
+	if uint64(handle)&1 == 0 {
+		// Rust-generated handle (even), construct a new object wrapping the handle
+		result := &CounterImpl{
+			newFfiObject(
+				handle,
+				func(handle C.uint64_t, status *C.RustCallStatus) C.uint64_t {
+					return C.uniffi_slatedb_uniffi_fn_clone_counter(handle, status)
+				},
+				func(handle C.uint64_t, status *C.RustCallStatus) {
+					C.uniffi_slatedb_uniffi_fn_free_counter(handle, status)
+				},
+			),
+		}
+		runtime.SetFinalizer(result, (*CounterImpl).Destroy)
+		return result
+	} else {
+		// Go-generated handle (odd), retrieve from the handle map
+		val, ok := c.handleMap.tryGet(uint64(handle))
+		if !ok {
+			panic(fmt.Errorf("no callback in handle map: %d", handle))
+		}
+		c.handleMap.remove(uint64(handle))
+		return val
+	}
+}
+
+func (c FfiConverterCounter) Read(reader io.Reader) Counter {
+	return c.Lift(C.uint64_t(readUint64(reader)))
+}
+
+func (c FfiConverterCounter) Lower(value Counter) C.uint64_t {
+	// TODO: this is bad - all synchronization from ObjectRuntime.go is discarded here,
+	// because the handle will be decremented immediately after this function returns,
+	// and someone will be left holding onto a non-locked handle.
+	if val, ok := value.(*CounterImpl); ok {
+		// Rust-backed object, clone the handle
+		handle := val.ffiObject.incrementPointer("Counter")
+		defer val.ffiObject.decrementPointer()
+		return handle
+	} else {
+		// Go-backed object, insert into handle map
+		return C.uint64_t(c.handleMap.insert(value))
+	}
+}
+
+func (c FfiConverterCounter) Write(writer io.Writer, value Counter) {
+	writeUint64(writer, uint64(c.Lower(value)))
+}
+
+func LiftFromExternalCounter(handle uint64) Counter {
+	return FfiConverterCounterINSTANCE.Lift(C.uint64_t(handle))
+}
+
+func LowerToExternalCounter(value Counter) uint64 {
+	return uint64(FfiConverterCounterINSTANCE.Lower(value))
+}
+
+type FfiDestroyerCounter struct{}
+
+func (_ FfiDestroyerCounter) Destroy(value Counter) {
+	if val, ok := value.(*CounterImpl); ok {
+		val.Destroy()
+	}
+}
+
+type uniffiCallbackResult C.int8_t
+
+const (
+	uniffiIdxCallbackFree               uniffiCallbackResult = 0
+	uniffiCallbackResultSuccess         uniffiCallbackResult = 0
+	uniffiCallbackResultError           uniffiCallbackResult = 1
+	uniffiCallbackUnexpectedResultError uniffiCallbackResult = 2
+	uniffiCallbackCancelled             uniffiCallbackResult = 3
+)
+
+type concurrentHandleMap[T any] struct {
+	handles       map[uint64]T
+	currentHandle uint64
+	lock          sync.RWMutex
+}
+
+func newConcurrentHandleMap[T any]() *concurrentHandleMap[T] {
+	return &concurrentHandleMap[T]{
+		handles:       map[uint64]T{},
+		currentHandle: 1,
+	}
+}
+
+func (cm *concurrentHandleMap[T]) insert(obj T) uint64 {
+	cm.lock.Lock()
+	defer cm.lock.Unlock()
+
+	handle := cm.currentHandle
+	cm.currentHandle = cm.currentHandle + 2
+	cm.handles[handle] = obj
+	return handle
+}
+
+func (cm *concurrentHandleMap[T]) remove(handle uint64) {
+	cm.lock.Lock()
+	defer cm.lock.Unlock()
+
+	delete(cm.handles, handle)
+}
+
+func (cm *concurrentHandleMap[T]) tryGet(handle uint64) (T, bool) {
+	cm.lock.RLock()
+	defer cm.lock.RUnlock()
+
+	val, ok := cm.handles[handle]
+	return val, ok
+}
+
+//export slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceCounterMethod0
+func slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceCounterMethod0(uniffiHandle C.uint64_t, value C.uint64_t, uniffiOutReturn *C.void, callStatus *C.RustCallStatus) {
+	handle := uint64(uniffiHandle)
+	uniffiObj, ok := FfiConverterCounterINSTANCE.handleMap.tryGet(handle)
+	if !ok {
+		panic(fmt.Errorf("no callback in handle map: %d", handle))
+	}
+
+	uniffiObj.Increment(
+		FfiConverterUint64INSTANCE.Lift(value),
+	)
+
+}
+
+var UniffiVTableCallbackInterfaceCounterINSTANCE = C.UniffiVTableCallbackInterfaceCounter{
+	uniffiFree:  (C.UniffiCallbackInterfaceFree)(C.slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceCounterFree),
+	uniffiClone: (C.UniffiCallbackInterfaceClone)(C.slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceCounterClone),
+	increment:   (C.UniffiCallbackInterfaceCounterMethod0)(C.slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceCounterMethod0),
+}
+
+//export slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceCounterFree
+func slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceCounterFree(handle C.uint64_t) {
+	FfiConverterCounterINSTANCE.handleMap.remove(uint64(handle))
+}
+
+//export slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceCounterClone
+func slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceCounterClone(handle C.uint64_t) C.uint64_t {
+	val, ok := FfiConverterCounterINSTANCE.handleMap.tryGet(uint64(handle))
+	if !ok {
+		panic(fmt.Errorf("no callback in handle map: %d", handle))
+	}
+	return C.uint64_t(FfiConverterCounterINSTANCE.handleMap.insert(val))
+}
+
+func (c FfiConverterCounter) register() {
+	C.uniffi_slatedb_uniffi_fn_init_callback_vtable_counter(&UniffiVTableCallbackInterfaceCounterINSTANCE)
 }
 
 // A writable SlateDB handle.
@@ -2433,6 +2810,8 @@ type DbBuilderInterface interface {
 	WithDbCacheDisabled() error
 	// Installs an application-defined merge operator.
 	WithMergeOperator(mergeOperator MergeOperator) error
+	// Installs an application-defined metrics recorder.
+	WithMetricsRecorder(metricsRecorder MetricsRecorder) error
 	// Sets the seed used for SlateDB's internal random number generation.
 	WithSeed(seed uint64) error
 	// Applies a [`crate::Settings`] object to the builder.
@@ -2510,6 +2889,18 @@ func (_self *DbBuilder) WithMergeOperator(mergeOperator MergeOperator) error {
 	_, _uniffiErr := rustCallWithError[*Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) bool {
 		C.uniffi_slatedb_uniffi_fn_method_dbbuilder_with_merge_operator(
 			_pointer, FfiConverterMergeOperatorINSTANCE.Lower(mergeOperator), _uniffiStatus)
+		return false
+	})
+	return _uniffiErr.AsError()
+}
+
+// Installs an application-defined metrics recorder.
+func (_self *DbBuilder) WithMetricsRecorder(metricsRecorder MetricsRecorder) error {
+	_pointer := _self.ffiObject.incrementPointer("*DbBuilder")
+	defer _self.ffiObject.decrementPointer()
+	_, _uniffiErr := rustCallWithError[*Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) bool {
+		C.uniffi_slatedb_uniffi_fn_method_dbbuilder_with_metrics_recorder(
+			_pointer, FfiConverterMetricsRecorderINSTANCE.Lower(metricsRecorder), _uniffiStatus)
 		return false
 	})
 	return _uniffiErr.AsError()
@@ -3082,6 +3473,8 @@ type DbReaderBuilderInterface interface {
 	WithCheckpointId(checkpointId string) error
 	// Installs an application-defined merge operator used while reading merge rows.
 	WithMergeOperator(mergeOperator MergeOperator) error
+	// Installs an application-defined metrics recorder.
+	WithMetricsRecorder(metricsRecorder MetricsRecorder) error
 	// Applies custom reader options.
 	WithOptions(options ReaderOptions) error
 	// Uses a separate object store for WAL files.
@@ -3155,6 +3548,18 @@ func (_self *DbReaderBuilder) WithMergeOperator(mergeOperator MergeOperator) err
 	_, _uniffiErr := rustCallWithError[*Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) bool {
 		C.uniffi_slatedb_uniffi_fn_method_dbreaderbuilder_with_merge_operator(
 			_pointer, FfiConverterMergeOperatorINSTANCE.Lower(mergeOperator), _uniffiStatus)
+		return false
+	})
+	return _uniffiErr.AsError()
+}
+
+// Installs an application-defined metrics recorder.
+func (_self *DbReaderBuilder) WithMetricsRecorder(metricsRecorder MetricsRecorder) error {
+	_pointer := _self.ffiObject.incrementPointer("*DbReaderBuilder")
+	defer _self.ffiObject.decrementPointer()
+	_, _uniffiErr := rustCallWithError[*Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) bool {
+		C.uniffi_slatedb_uniffi_fn_method_dbreaderbuilder_with_metrics_recorder(
+			_pointer, FfiConverterMetricsRecorderINSTANCE.Lower(metricsRecorder), _uniffiStatus)
 		return false
 	})
 	return _uniffiErr.AsError()
@@ -4347,6 +4752,435 @@ func (_ FfiDestroyerDbTransaction) Destroy(value *DbTransaction) {
 	value.Destroy()
 }
 
+// Built-in atomic-backed metrics recorder with snapshot access.
+type DefaultMetricsRecorderInterface interface {
+	// Returns the metric matching `name` and the exact label set, if present.
+	MetricByNameAndLabels(name string, labels []MetricLabel) *Metric
+	// Returns every metric with the requested name.
+	MetricsByName(name string) []Metric
+	RegisterCounter(name string, description string, labels []MetricLabel) Counter
+	RegisterGauge(name string, description string, labels []MetricLabel) Gauge
+	RegisterHistogram(name string, description string, labels []MetricLabel, boundaries []float64) Histogram
+	RegisterUpDownCounter(name string, description string, labels []MetricLabel) UpDownCounter
+	// Returns a point-in-time snapshot of every registered metric.
+	Snapshot() []Metric
+}
+
+// Built-in atomic-backed metrics recorder with snapshot access.
+type DefaultMetricsRecorder struct {
+	ffiObject FfiObject
+}
+
+// Creates an empty default metrics recorder.
+func NewDefaultMetricsRecorder() *DefaultMetricsRecorder {
+	return FfiConverterDefaultMetricsRecorderINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint64_t {
+		return C.uniffi_slatedb_uniffi_fn_constructor_defaultmetricsrecorder_new(_uniffiStatus)
+	}))
+}
+
+// Returns the metric matching `name` and the exact label set, if present.
+func (_self *DefaultMetricsRecorder) MetricByNameAndLabels(name string, labels []MetricLabel) *Metric {
+	_pointer := _self.ffiObject.incrementPointer("*DefaultMetricsRecorder")
+	defer _self.ffiObject.decrementPointer()
+	return FfiConverterOptionalMetricINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) RustBufferI {
+		return GoRustBuffer{
+			inner: C.uniffi_slatedb_uniffi_fn_method_defaultmetricsrecorder_metric_by_name_and_labels(
+				_pointer, FfiConverterStringINSTANCE.Lower(name), FfiConverterSequenceMetricLabelINSTANCE.Lower(labels), _uniffiStatus),
+		}
+	}))
+}
+
+// Returns every metric with the requested name.
+func (_self *DefaultMetricsRecorder) MetricsByName(name string) []Metric {
+	_pointer := _self.ffiObject.incrementPointer("*DefaultMetricsRecorder")
+	defer _self.ffiObject.decrementPointer()
+	return FfiConverterSequenceMetricINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) RustBufferI {
+		return GoRustBuffer{
+			inner: C.uniffi_slatedb_uniffi_fn_method_defaultmetricsrecorder_metrics_by_name(
+				_pointer, FfiConverterStringINSTANCE.Lower(name), _uniffiStatus),
+		}
+	}))
+}
+
+func (_self *DefaultMetricsRecorder) RegisterCounter(name string, description string, labels []MetricLabel) Counter {
+	_pointer := _self.ffiObject.incrementPointer("*DefaultMetricsRecorder")
+	defer _self.ffiObject.decrementPointer()
+	return FfiConverterCounterINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint64_t {
+		return C.uniffi_slatedb_uniffi_fn_method_defaultmetricsrecorder_register_counter(
+			_pointer, FfiConverterStringINSTANCE.Lower(name), FfiConverterStringINSTANCE.Lower(description), FfiConverterSequenceMetricLabelINSTANCE.Lower(labels), _uniffiStatus)
+	}))
+}
+
+func (_self *DefaultMetricsRecorder) RegisterGauge(name string, description string, labels []MetricLabel) Gauge {
+	_pointer := _self.ffiObject.incrementPointer("*DefaultMetricsRecorder")
+	defer _self.ffiObject.decrementPointer()
+	return FfiConverterGaugeINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint64_t {
+		return C.uniffi_slatedb_uniffi_fn_method_defaultmetricsrecorder_register_gauge(
+			_pointer, FfiConverterStringINSTANCE.Lower(name), FfiConverterStringINSTANCE.Lower(description), FfiConverterSequenceMetricLabelINSTANCE.Lower(labels), _uniffiStatus)
+	}))
+}
+
+func (_self *DefaultMetricsRecorder) RegisterHistogram(name string, description string, labels []MetricLabel, boundaries []float64) Histogram {
+	_pointer := _self.ffiObject.incrementPointer("*DefaultMetricsRecorder")
+	defer _self.ffiObject.decrementPointer()
+	return FfiConverterHistogramINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint64_t {
+		return C.uniffi_slatedb_uniffi_fn_method_defaultmetricsrecorder_register_histogram(
+			_pointer, FfiConverterStringINSTANCE.Lower(name), FfiConverterStringINSTANCE.Lower(description), FfiConverterSequenceMetricLabelINSTANCE.Lower(labels), FfiConverterSequenceFloat64INSTANCE.Lower(boundaries), _uniffiStatus)
+	}))
+}
+
+func (_self *DefaultMetricsRecorder) RegisterUpDownCounter(name string, description string, labels []MetricLabel) UpDownCounter {
+	_pointer := _self.ffiObject.incrementPointer("*DefaultMetricsRecorder")
+	defer _self.ffiObject.decrementPointer()
+	return FfiConverterUpDownCounterINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint64_t {
+		return C.uniffi_slatedb_uniffi_fn_method_defaultmetricsrecorder_register_up_down_counter(
+			_pointer, FfiConverterStringINSTANCE.Lower(name), FfiConverterStringINSTANCE.Lower(description), FfiConverterSequenceMetricLabelINSTANCE.Lower(labels), _uniffiStatus)
+	}))
+}
+
+// Returns a point-in-time snapshot of every registered metric.
+func (_self *DefaultMetricsRecorder) Snapshot() []Metric {
+	_pointer := _self.ffiObject.incrementPointer("*DefaultMetricsRecorder")
+	defer _self.ffiObject.decrementPointer()
+	return FfiConverterSequenceMetricINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) RustBufferI {
+		return GoRustBuffer{
+			inner: C.uniffi_slatedb_uniffi_fn_method_defaultmetricsrecorder_snapshot(
+				_pointer, _uniffiStatus),
+		}
+	}))
+}
+func (object *DefaultMetricsRecorder) Destroy() {
+	runtime.SetFinalizer(object, nil)
+	object.ffiObject.destroy()
+}
+
+type FfiConverterDefaultMetricsRecorder struct{}
+
+var FfiConverterDefaultMetricsRecorderINSTANCE = FfiConverterDefaultMetricsRecorder{}
+
+func (c FfiConverterDefaultMetricsRecorder) Lift(handle C.uint64_t) *DefaultMetricsRecorder {
+	result := &DefaultMetricsRecorder{
+		newFfiObject(
+			handle,
+			func(handle C.uint64_t, status *C.RustCallStatus) C.uint64_t {
+				return C.uniffi_slatedb_uniffi_fn_clone_defaultmetricsrecorder(handle, status)
+			},
+			func(handle C.uint64_t, status *C.RustCallStatus) {
+				C.uniffi_slatedb_uniffi_fn_free_defaultmetricsrecorder(handle, status)
+			},
+		),
+	}
+	runtime.SetFinalizer(result, (*DefaultMetricsRecorder).Destroy)
+	return result
+}
+
+func (c FfiConverterDefaultMetricsRecorder) Read(reader io.Reader) *DefaultMetricsRecorder {
+	return c.Lift(C.uint64_t(readUint64(reader)))
+}
+
+func (c FfiConverterDefaultMetricsRecorder) Lower(value *DefaultMetricsRecorder) C.uint64_t {
+	// TODO: this is bad - all synchronization from ObjectRuntime.go is discarded here,
+	// because the handle will be decremented immediately after this function returns,
+	// and someone will be left holding onto a non-locked handle.
+	handle := value.ffiObject.incrementPointer("*DefaultMetricsRecorder")
+	defer value.ffiObject.decrementPointer()
+	return handle
+}
+
+func (c FfiConverterDefaultMetricsRecorder) Write(writer io.Writer, value *DefaultMetricsRecorder) {
+	writeUint64(writer, uint64(c.Lower(value)))
+}
+
+func LiftFromExternalDefaultMetricsRecorder(handle uint64) *DefaultMetricsRecorder {
+	return FfiConverterDefaultMetricsRecorderINSTANCE.Lift(C.uint64_t(handle))
+}
+
+func LowerToExternalDefaultMetricsRecorder(value *DefaultMetricsRecorder) uint64 {
+	return uint64(FfiConverterDefaultMetricsRecorderINSTANCE.Lower(value))
+}
+
+type FfiDestroyerDefaultMetricsRecorder struct{}
+
+func (_ FfiDestroyerDefaultMetricsRecorder) Destroy(value *DefaultMetricsRecorder) {
+	value.Destroy()
+}
+
+// Handle for a gauge metric.
+type Gauge interface {
+	// Sets the gauge to `value`.
+	Set(value int64)
+}
+
+// Handle for a gauge metric.
+type GaugeImpl struct {
+	ffiObject FfiObject
+}
+
+// Sets the gauge to `value`.
+func (_self *GaugeImpl) Set(value int64) {
+	_pointer := _self.ffiObject.incrementPointer("Gauge")
+	defer _self.ffiObject.decrementPointer()
+	rustCall(func(_uniffiStatus *C.RustCallStatus) bool {
+		C.uniffi_slatedb_uniffi_fn_method_gauge_set(
+			_pointer, FfiConverterInt64INSTANCE.Lower(value), _uniffiStatus)
+		return false
+	})
+}
+func (object *GaugeImpl) Destroy() {
+	runtime.SetFinalizer(object, nil)
+	object.ffiObject.destroy()
+}
+
+type FfiConverterGauge struct {
+	handleMap *concurrentHandleMap[Gauge]
+}
+
+var FfiConverterGaugeINSTANCE = FfiConverterGauge{
+	handleMap: newConcurrentHandleMap[Gauge](),
+}
+
+func (c FfiConverterGauge) Lift(handle C.uint64_t) Gauge {
+	if uint64(handle)&1 == 0 {
+		// Rust-generated handle (even), construct a new object wrapping the handle
+		result := &GaugeImpl{
+			newFfiObject(
+				handle,
+				func(handle C.uint64_t, status *C.RustCallStatus) C.uint64_t {
+					return C.uniffi_slatedb_uniffi_fn_clone_gauge(handle, status)
+				},
+				func(handle C.uint64_t, status *C.RustCallStatus) {
+					C.uniffi_slatedb_uniffi_fn_free_gauge(handle, status)
+				},
+			),
+		}
+		runtime.SetFinalizer(result, (*GaugeImpl).Destroy)
+		return result
+	} else {
+		// Go-generated handle (odd), retrieve from the handle map
+		val, ok := c.handleMap.tryGet(uint64(handle))
+		if !ok {
+			panic(fmt.Errorf("no callback in handle map: %d", handle))
+		}
+		c.handleMap.remove(uint64(handle))
+		return val
+	}
+}
+
+func (c FfiConverterGauge) Read(reader io.Reader) Gauge {
+	return c.Lift(C.uint64_t(readUint64(reader)))
+}
+
+func (c FfiConverterGauge) Lower(value Gauge) C.uint64_t {
+	// TODO: this is bad - all synchronization from ObjectRuntime.go is discarded here,
+	// because the handle will be decremented immediately after this function returns,
+	// and someone will be left holding onto a non-locked handle.
+	if val, ok := value.(*GaugeImpl); ok {
+		// Rust-backed object, clone the handle
+		handle := val.ffiObject.incrementPointer("Gauge")
+		defer val.ffiObject.decrementPointer()
+		return handle
+	} else {
+		// Go-backed object, insert into handle map
+		return C.uint64_t(c.handleMap.insert(value))
+	}
+}
+
+func (c FfiConverterGauge) Write(writer io.Writer, value Gauge) {
+	writeUint64(writer, uint64(c.Lower(value)))
+}
+
+func LiftFromExternalGauge(handle uint64) Gauge {
+	return FfiConverterGaugeINSTANCE.Lift(C.uint64_t(handle))
+}
+
+func LowerToExternalGauge(value Gauge) uint64 {
+	return uint64(FfiConverterGaugeINSTANCE.Lower(value))
+}
+
+type FfiDestroyerGauge struct{}
+
+func (_ FfiDestroyerGauge) Destroy(value Gauge) {
+	if val, ok := value.(*GaugeImpl); ok {
+		val.Destroy()
+	}
+}
+
+//export slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceGaugeMethod0
+func slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceGaugeMethod0(uniffiHandle C.uint64_t, value C.int64_t, uniffiOutReturn *C.void, callStatus *C.RustCallStatus) {
+	handle := uint64(uniffiHandle)
+	uniffiObj, ok := FfiConverterGaugeINSTANCE.handleMap.tryGet(handle)
+	if !ok {
+		panic(fmt.Errorf("no callback in handle map: %d", handle))
+	}
+
+	uniffiObj.Set(
+		FfiConverterInt64INSTANCE.Lift(value),
+	)
+
+}
+
+var UniffiVTableCallbackInterfaceGaugeINSTANCE = C.UniffiVTableCallbackInterfaceGauge{
+	uniffiFree:  (C.UniffiCallbackInterfaceFree)(C.slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceGaugeFree),
+	uniffiClone: (C.UniffiCallbackInterfaceClone)(C.slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceGaugeClone),
+	set:         (C.UniffiCallbackInterfaceGaugeMethod0)(C.slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceGaugeMethod0),
+}
+
+//export slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceGaugeFree
+func slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceGaugeFree(handle C.uint64_t) {
+	FfiConverterGaugeINSTANCE.handleMap.remove(uint64(handle))
+}
+
+//export slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceGaugeClone
+func slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceGaugeClone(handle C.uint64_t) C.uint64_t {
+	val, ok := FfiConverterGaugeINSTANCE.handleMap.tryGet(uint64(handle))
+	if !ok {
+		panic(fmt.Errorf("no callback in handle map: %d", handle))
+	}
+	return C.uint64_t(FfiConverterGaugeINSTANCE.handleMap.insert(val))
+}
+
+func (c FfiConverterGauge) register() {
+	C.uniffi_slatedb_uniffi_fn_init_callback_vtable_gauge(&UniffiVTableCallbackInterfaceGaugeINSTANCE)
+}
+
+// Handle for a histogram metric.
+type Histogram interface {
+	// Records `value` in the histogram.
+	Record(value float64)
+}
+
+// Handle for a histogram metric.
+type HistogramImpl struct {
+	ffiObject FfiObject
+}
+
+// Records `value` in the histogram.
+func (_self *HistogramImpl) Record(value float64) {
+	_pointer := _self.ffiObject.incrementPointer("Histogram")
+	defer _self.ffiObject.decrementPointer()
+	rustCall(func(_uniffiStatus *C.RustCallStatus) bool {
+		C.uniffi_slatedb_uniffi_fn_method_histogram_record(
+			_pointer, FfiConverterFloat64INSTANCE.Lower(value), _uniffiStatus)
+		return false
+	})
+}
+func (object *HistogramImpl) Destroy() {
+	runtime.SetFinalizer(object, nil)
+	object.ffiObject.destroy()
+}
+
+type FfiConverterHistogram struct {
+	handleMap *concurrentHandleMap[Histogram]
+}
+
+var FfiConverterHistogramINSTANCE = FfiConverterHistogram{
+	handleMap: newConcurrentHandleMap[Histogram](),
+}
+
+func (c FfiConverterHistogram) Lift(handle C.uint64_t) Histogram {
+	if uint64(handle)&1 == 0 {
+		// Rust-generated handle (even), construct a new object wrapping the handle
+		result := &HistogramImpl{
+			newFfiObject(
+				handle,
+				func(handle C.uint64_t, status *C.RustCallStatus) C.uint64_t {
+					return C.uniffi_slatedb_uniffi_fn_clone_histogram(handle, status)
+				},
+				func(handle C.uint64_t, status *C.RustCallStatus) {
+					C.uniffi_slatedb_uniffi_fn_free_histogram(handle, status)
+				},
+			),
+		}
+		runtime.SetFinalizer(result, (*HistogramImpl).Destroy)
+		return result
+	} else {
+		// Go-generated handle (odd), retrieve from the handle map
+		val, ok := c.handleMap.tryGet(uint64(handle))
+		if !ok {
+			panic(fmt.Errorf("no callback in handle map: %d", handle))
+		}
+		c.handleMap.remove(uint64(handle))
+		return val
+	}
+}
+
+func (c FfiConverterHistogram) Read(reader io.Reader) Histogram {
+	return c.Lift(C.uint64_t(readUint64(reader)))
+}
+
+func (c FfiConverterHistogram) Lower(value Histogram) C.uint64_t {
+	// TODO: this is bad - all synchronization from ObjectRuntime.go is discarded here,
+	// because the handle will be decremented immediately after this function returns,
+	// and someone will be left holding onto a non-locked handle.
+	if val, ok := value.(*HistogramImpl); ok {
+		// Rust-backed object, clone the handle
+		handle := val.ffiObject.incrementPointer("Histogram")
+		defer val.ffiObject.decrementPointer()
+		return handle
+	} else {
+		// Go-backed object, insert into handle map
+		return C.uint64_t(c.handleMap.insert(value))
+	}
+}
+
+func (c FfiConverterHistogram) Write(writer io.Writer, value Histogram) {
+	writeUint64(writer, uint64(c.Lower(value)))
+}
+
+func LiftFromExternalHistogram(handle uint64) Histogram {
+	return FfiConverterHistogramINSTANCE.Lift(C.uint64_t(handle))
+}
+
+func LowerToExternalHistogram(value Histogram) uint64 {
+	return uint64(FfiConverterHistogramINSTANCE.Lower(value))
+}
+
+type FfiDestroyerHistogram struct{}
+
+func (_ FfiDestroyerHistogram) Destroy(value Histogram) {
+	if val, ok := value.(*HistogramImpl); ok {
+		val.Destroy()
+	}
+}
+
+//export slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceHistogramMethod0
+func slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceHistogramMethod0(uniffiHandle C.uint64_t, value C.double, uniffiOutReturn *C.void, callStatus *C.RustCallStatus) {
+	handle := uint64(uniffiHandle)
+	uniffiObj, ok := FfiConverterHistogramINSTANCE.handleMap.tryGet(handle)
+	if !ok {
+		panic(fmt.Errorf("no callback in handle map: %d", handle))
+	}
+
+	uniffiObj.Record(
+		FfiConverterFloat64INSTANCE.Lift(value),
+	)
+
+}
+
+var UniffiVTableCallbackInterfaceHistogramINSTANCE = C.UniffiVTableCallbackInterfaceHistogram{
+	uniffiFree:  (C.UniffiCallbackInterfaceFree)(C.slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceHistogramFree),
+	uniffiClone: (C.UniffiCallbackInterfaceClone)(C.slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceHistogramClone),
+	record:      (C.UniffiCallbackInterfaceHistogramMethod0)(C.slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceHistogramMethod0),
+}
+
+//export slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceHistogramFree
+func slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceHistogramFree(handle C.uint64_t) {
+	FfiConverterHistogramINSTANCE.handleMap.remove(uint64(handle))
+}
+
+//export slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceHistogramClone
+func slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceHistogramClone(handle C.uint64_t) C.uint64_t {
+	val, ok := FfiConverterHistogramINSTANCE.handleMap.tryGet(uint64(handle))
+	if !ok {
+		panic(fmt.Errorf("no callback in handle map: %d", handle))
+	}
+	return C.uint64_t(FfiConverterHistogramINSTANCE.handleMap.insert(val))
+}
+
+func (c FfiConverterHistogram) register() {
+	C.uniffi_slatedb_uniffi_fn_init_callback_vtable_histogram(&UniffiVTableCallbackInterfaceHistogramINSTANCE)
+}
+
 // Callback invoked for each emitted log record.
 type LogCallback interface {
 	// Handles one log record.
@@ -4445,54 +5279,6 @@ func (_ FfiDestroyerLogCallback) Destroy(value LogCallback) {
 	if val, ok := value.(*LogCallbackImpl); ok {
 		val.Destroy()
 	}
-}
-
-type uniffiCallbackResult C.int8_t
-
-const (
-	uniffiIdxCallbackFree               uniffiCallbackResult = 0
-	uniffiCallbackResultSuccess         uniffiCallbackResult = 0
-	uniffiCallbackResultError           uniffiCallbackResult = 1
-	uniffiCallbackUnexpectedResultError uniffiCallbackResult = 2
-	uniffiCallbackCancelled             uniffiCallbackResult = 3
-)
-
-type concurrentHandleMap[T any] struct {
-	handles       map[uint64]T
-	currentHandle uint64
-	lock          sync.RWMutex
-}
-
-func newConcurrentHandleMap[T any]() *concurrentHandleMap[T] {
-	return &concurrentHandleMap[T]{
-		handles:       map[uint64]T{},
-		currentHandle: 1,
-	}
-}
-
-func (cm *concurrentHandleMap[T]) insert(obj T) uint64 {
-	cm.lock.Lock()
-	defer cm.lock.Unlock()
-
-	handle := cm.currentHandle
-	cm.currentHandle = cm.currentHandle + 2
-	cm.handles[handle] = obj
-	return handle
-}
-
-func (cm *concurrentHandleMap[T]) remove(handle uint64) {
-	cm.lock.Lock()
-	defer cm.lock.Unlock()
-
-	delete(cm.handles, handle)
-}
-
-func (cm *concurrentHandleMap[T]) tryGet(handle uint64) (T, bool) {
-	cm.lock.RLock()
-	defer cm.lock.RUnlock()
-
-	val, ok := cm.handles[handle]
-	return val, ok
 }
 
 //export slatedb_uniffi_logging_cgo_dispatchCallbackInterfaceLogCallbackMethod0
@@ -4707,6 +5493,267 @@ func slatedb_uniffi_merge_operator_cgo_dispatchCallbackInterfaceMergeOperatorClo
 
 func (c FfiConverterMergeOperator) register() {
 	C.uniffi_slatedb_uniffi_fn_init_callback_vtable_mergeoperator(&UniffiVTableCallbackInterfaceMergeOperatorINSTANCE)
+}
+
+// Application-defined metrics recorder used to publish SlateDB metrics.
+type MetricsRecorder interface {
+	// Registers a monotonically increasing counter.
+	RegisterCounter(name string, description string, labels []MetricLabel) Counter
+	// Registers a gauge.
+	RegisterGauge(name string, description string, labels []MetricLabel) Gauge
+	// Registers an up/down counter.
+	RegisterUpDownCounter(name string, description string, labels []MetricLabel) UpDownCounter
+	// Registers a histogram with explicit bucket boundaries.
+	RegisterHistogram(name string, description string, labels []MetricLabel, boundaries []float64) Histogram
+}
+
+// Application-defined metrics recorder used to publish SlateDB metrics.
+type MetricsRecorderImpl struct {
+	ffiObject FfiObject
+}
+
+// Registers a monotonically increasing counter.
+func (_self *MetricsRecorderImpl) RegisterCounter(name string, description string, labels []MetricLabel) Counter {
+	_pointer := _self.ffiObject.incrementPointer("MetricsRecorder")
+	defer _self.ffiObject.decrementPointer()
+	return FfiConverterCounterINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint64_t {
+		return C.uniffi_slatedb_uniffi_fn_method_metricsrecorder_register_counter(
+			_pointer, FfiConverterStringINSTANCE.Lower(name), FfiConverterStringINSTANCE.Lower(description), FfiConverterSequenceMetricLabelINSTANCE.Lower(labels), _uniffiStatus)
+	}))
+}
+
+// Registers a gauge.
+func (_self *MetricsRecorderImpl) RegisterGauge(name string, description string, labels []MetricLabel) Gauge {
+	_pointer := _self.ffiObject.incrementPointer("MetricsRecorder")
+	defer _self.ffiObject.decrementPointer()
+	return FfiConverterGaugeINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint64_t {
+		return C.uniffi_slatedb_uniffi_fn_method_metricsrecorder_register_gauge(
+			_pointer, FfiConverterStringINSTANCE.Lower(name), FfiConverterStringINSTANCE.Lower(description), FfiConverterSequenceMetricLabelINSTANCE.Lower(labels), _uniffiStatus)
+	}))
+}
+
+// Registers an up/down counter.
+func (_self *MetricsRecorderImpl) RegisterUpDownCounter(name string, description string, labels []MetricLabel) UpDownCounter {
+	_pointer := _self.ffiObject.incrementPointer("MetricsRecorder")
+	defer _self.ffiObject.decrementPointer()
+	return FfiConverterUpDownCounterINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint64_t {
+		return C.uniffi_slatedb_uniffi_fn_method_metricsrecorder_register_up_down_counter(
+			_pointer, FfiConverterStringINSTANCE.Lower(name), FfiConverterStringINSTANCE.Lower(description), FfiConverterSequenceMetricLabelINSTANCE.Lower(labels), _uniffiStatus)
+	}))
+}
+
+// Registers a histogram with explicit bucket boundaries.
+func (_self *MetricsRecorderImpl) RegisterHistogram(name string, description string, labels []MetricLabel, boundaries []float64) Histogram {
+	_pointer := _self.ffiObject.incrementPointer("MetricsRecorder")
+	defer _self.ffiObject.decrementPointer()
+	return FfiConverterHistogramINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint64_t {
+		return C.uniffi_slatedb_uniffi_fn_method_metricsrecorder_register_histogram(
+			_pointer, FfiConverterStringINSTANCE.Lower(name), FfiConverterStringINSTANCE.Lower(description), FfiConverterSequenceMetricLabelINSTANCE.Lower(labels), FfiConverterSequenceFloat64INSTANCE.Lower(boundaries), _uniffiStatus)
+	}))
+}
+func (object *MetricsRecorderImpl) Destroy() {
+	runtime.SetFinalizer(object, nil)
+	object.ffiObject.destroy()
+}
+
+type FfiConverterMetricsRecorder struct {
+	handleMap *concurrentHandleMap[MetricsRecorder]
+}
+
+var FfiConverterMetricsRecorderINSTANCE = FfiConverterMetricsRecorder{
+	handleMap: newConcurrentHandleMap[MetricsRecorder](),
+}
+
+func (c FfiConverterMetricsRecorder) Lift(handle C.uint64_t) MetricsRecorder {
+	if uint64(handle)&1 == 0 {
+		// Rust-generated handle (even), construct a new object wrapping the handle
+		result := &MetricsRecorderImpl{
+			newFfiObject(
+				handle,
+				func(handle C.uint64_t, status *C.RustCallStatus) C.uint64_t {
+					return C.uniffi_slatedb_uniffi_fn_clone_metricsrecorder(handle, status)
+				},
+				func(handle C.uint64_t, status *C.RustCallStatus) {
+					C.uniffi_slatedb_uniffi_fn_free_metricsrecorder(handle, status)
+				},
+			),
+		}
+		runtime.SetFinalizer(result, (*MetricsRecorderImpl).Destroy)
+		return result
+	} else {
+		// Go-generated handle (odd), retrieve from the handle map
+		val, ok := c.handleMap.tryGet(uint64(handle))
+		if !ok {
+			panic(fmt.Errorf("no callback in handle map: %d", handle))
+		}
+		c.handleMap.remove(uint64(handle))
+		return val
+	}
+}
+
+func (c FfiConverterMetricsRecorder) Read(reader io.Reader) MetricsRecorder {
+	return c.Lift(C.uint64_t(readUint64(reader)))
+}
+
+func (c FfiConverterMetricsRecorder) Lower(value MetricsRecorder) C.uint64_t {
+	// TODO: this is bad - all synchronization from ObjectRuntime.go is discarded here,
+	// because the handle will be decremented immediately after this function returns,
+	// and someone will be left holding onto a non-locked handle.
+	if val, ok := value.(*MetricsRecorderImpl); ok {
+		// Rust-backed object, clone the handle
+		handle := val.ffiObject.incrementPointer("MetricsRecorder")
+		defer val.ffiObject.decrementPointer()
+		return handle
+	} else {
+		// Go-backed object, insert into handle map
+		return C.uint64_t(c.handleMap.insert(value))
+	}
+}
+
+func (c FfiConverterMetricsRecorder) Write(writer io.Writer, value MetricsRecorder) {
+	writeUint64(writer, uint64(c.Lower(value)))
+}
+
+func LiftFromExternalMetricsRecorder(handle uint64) MetricsRecorder {
+	return FfiConverterMetricsRecorderINSTANCE.Lift(C.uint64_t(handle))
+}
+
+func LowerToExternalMetricsRecorder(value MetricsRecorder) uint64 {
+	return uint64(FfiConverterMetricsRecorderINSTANCE.Lower(value))
+}
+
+type FfiDestroyerMetricsRecorder struct{}
+
+func (_ FfiDestroyerMetricsRecorder) Destroy(value MetricsRecorder) {
+	if val, ok := value.(*MetricsRecorderImpl); ok {
+		val.Destroy()
+	}
+}
+
+//export slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceMetricsRecorderMethod0
+func slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceMetricsRecorderMethod0(uniffiHandle C.uint64_t, name C.RustBuffer, description C.RustBuffer, labels C.RustBuffer, uniffiOutReturn *C.uint64_t, callStatus *C.RustCallStatus) {
+	handle := uint64(uniffiHandle)
+	uniffiObj, ok := FfiConverterMetricsRecorderINSTANCE.handleMap.tryGet(handle)
+	if !ok {
+		panic(fmt.Errorf("no callback in handle map: %d", handle))
+	}
+
+	res :=
+		uniffiObj.RegisterCounter(
+			FfiConverterStringINSTANCE.Lift(GoRustBuffer{
+				inner: name,
+			}),
+			FfiConverterStringINSTANCE.Lift(GoRustBuffer{
+				inner: description,
+			}),
+			FfiConverterSequenceMetricLabelINSTANCE.Lift(GoRustBuffer{
+				inner: labels,
+			}),
+		)
+
+	*uniffiOutReturn = FfiConverterCounterINSTANCE.Lower(res)
+}
+
+//export slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceMetricsRecorderMethod1
+func slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceMetricsRecorderMethod1(uniffiHandle C.uint64_t, name C.RustBuffer, description C.RustBuffer, labels C.RustBuffer, uniffiOutReturn *C.uint64_t, callStatus *C.RustCallStatus) {
+	handle := uint64(uniffiHandle)
+	uniffiObj, ok := FfiConverterMetricsRecorderINSTANCE.handleMap.tryGet(handle)
+	if !ok {
+		panic(fmt.Errorf("no callback in handle map: %d", handle))
+	}
+
+	res :=
+		uniffiObj.RegisterGauge(
+			FfiConverterStringINSTANCE.Lift(GoRustBuffer{
+				inner: name,
+			}),
+			FfiConverterStringINSTANCE.Lift(GoRustBuffer{
+				inner: description,
+			}),
+			FfiConverterSequenceMetricLabelINSTANCE.Lift(GoRustBuffer{
+				inner: labels,
+			}),
+		)
+
+	*uniffiOutReturn = FfiConverterGaugeINSTANCE.Lower(res)
+}
+
+//export slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceMetricsRecorderMethod2
+func slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceMetricsRecorderMethod2(uniffiHandle C.uint64_t, name C.RustBuffer, description C.RustBuffer, labels C.RustBuffer, uniffiOutReturn *C.uint64_t, callStatus *C.RustCallStatus) {
+	handle := uint64(uniffiHandle)
+	uniffiObj, ok := FfiConverterMetricsRecorderINSTANCE.handleMap.tryGet(handle)
+	if !ok {
+		panic(fmt.Errorf("no callback in handle map: %d", handle))
+	}
+
+	res :=
+		uniffiObj.RegisterUpDownCounter(
+			FfiConverterStringINSTANCE.Lift(GoRustBuffer{
+				inner: name,
+			}),
+			FfiConverterStringINSTANCE.Lift(GoRustBuffer{
+				inner: description,
+			}),
+			FfiConverterSequenceMetricLabelINSTANCE.Lift(GoRustBuffer{
+				inner: labels,
+			}),
+		)
+
+	*uniffiOutReturn = FfiConverterUpDownCounterINSTANCE.Lower(res)
+}
+
+//export slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceMetricsRecorderMethod3
+func slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceMetricsRecorderMethod3(uniffiHandle C.uint64_t, name C.RustBuffer, description C.RustBuffer, labels C.RustBuffer, boundaries C.RustBuffer, uniffiOutReturn *C.uint64_t, callStatus *C.RustCallStatus) {
+	handle := uint64(uniffiHandle)
+	uniffiObj, ok := FfiConverterMetricsRecorderINSTANCE.handleMap.tryGet(handle)
+	if !ok {
+		panic(fmt.Errorf("no callback in handle map: %d", handle))
+	}
+
+	res :=
+		uniffiObj.RegisterHistogram(
+			FfiConverterStringINSTANCE.Lift(GoRustBuffer{
+				inner: name,
+			}),
+			FfiConverterStringINSTANCE.Lift(GoRustBuffer{
+				inner: description,
+			}),
+			FfiConverterSequenceMetricLabelINSTANCE.Lift(GoRustBuffer{
+				inner: labels,
+			}),
+			FfiConverterSequenceFloat64INSTANCE.Lift(GoRustBuffer{
+				inner: boundaries,
+			}),
+		)
+
+	*uniffiOutReturn = FfiConverterHistogramINSTANCE.Lower(res)
+}
+
+var UniffiVTableCallbackInterfaceMetricsRecorderINSTANCE = C.UniffiVTableCallbackInterfaceMetricsRecorder{
+	uniffiFree:            (C.UniffiCallbackInterfaceFree)(C.slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceMetricsRecorderFree),
+	uniffiClone:           (C.UniffiCallbackInterfaceClone)(C.slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceMetricsRecorderClone),
+	registerCounter:       (C.UniffiCallbackInterfaceMetricsRecorderMethod0)(C.slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceMetricsRecorderMethod0),
+	registerGauge:         (C.UniffiCallbackInterfaceMetricsRecorderMethod1)(C.slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceMetricsRecorderMethod1),
+	registerUpDownCounter: (C.UniffiCallbackInterfaceMetricsRecorderMethod2)(C.slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceMetricsRecorderMethod2),
+	registerHistogram:     (C.UniffiCallbackInterfaceMetricsRecorderMethod3)(C.slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceMetricsRecorderMethod3),
+}
+
+//export slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceMetricsRecorderFree
+func slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceMetricsRecorderFree(handle C.uint64_t) {
+	FfiConverterMetricsRecorderINSTANCE.handleMap.remove(uint64(handle))
+}
+
+//export slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceMetricsRecorderClone
+func slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceMetricsRecorderClone(handle C.uint64_t) C.uint64_t {
+	val, ok := FfiConverterMetricsRecorderINSTANCE.handleMap.tryGet(uint64(handle))
+	if !ok {
+		panic(fmt.Errorf("no callback in handle map: %d", handle))
+	}
+	return C.uint64_t(FfiConverterMetricsRecorderINSTANCE.handleMap.insert(val))
+}
+
+func (c FfiConverterMetricsRecorder) register() {
+	C.uniffi_slatedb_uniffi_fn_init_callback_vtable_metricsrecorder(&UniffiVTableCallbackInterfaceMetricsRecorderINSTANCE)
 }
 
 // Object store handle used when opening databases, readers, and WAL readers.
@@ -5015,6 +6062,144 @@ type FfiDestroyerSettings struct{}
 
 func (_ FfiDestroyerSettings) Destroy(value *Settings) {
 	value.Destroy()
+}
+
+// Handle for an up/down counter metric.
+type UpDownCounter interface {
+	// Adds `value` to the counter.
+	Increment(value int64)
+}
+
+// Handle for an up/down counter metric.
+type UpDownCounterImpl struct {
+	ffiObject FfiObject
+}
+
+// Adds `value` to the counter.
+func (_self *UpDownCounterImpl) Increment(value int64) {
+	_pointer := _self.ffiObject.incrementPointer("UpDownCounter")
+	defer _self.ffiObject.decrementPointer()
+	rustCall(func(_uniffiStatus *C.RustCallStatus) bool {
+		C.uniffi_slatedb_uniffi_fn_method_updowncounter_increment(
+			_pointer, FfiConverterInt64INSTANCE.Lower(value), _uniffiStatus)
+		return false
+	})
+}
+func (object *UpDownCounterImpl) Destroy() {
+	runtime.SetFinalizer(object, nil)
+	object.ffiObject.destroy()
+}
+
+type FfiConverterUpDownCounter struct {
+	handleMap *concurrentHandleMap[UpDownCounter]
+}
+
+var FfiConverterUpDownCounterINSTANCE = FfiConverterUpDownCounter{
+	handleMap: newConcurrentHandleMap[UpDownCounter](),
+}
+
+func (c FfiConverterUpDownCounter) Lift(handle C.uint64_t) UpDownCounter {
+	if uint64(handle)&1 == 0 {
+		// Rust-generated handle (even), construct a new object wrapping the handle
+		result := &UpDownCounterImpl{
+			newFfiObject(
+				handle,
+				func(handle C.uint64_t, status *C.RustCallStatus) C.uint64_t {
+					return C.uniffi_slatedb_uniffi_fn_clone_updowncounter(handle, status)
+				},
+				func(handle C.uint64_t, status *C.RustCallStatus) {
+					C.uniffi_slatedb_uniffi_fn_free_updowncounter(handle, status)
+				},
+			),
+		}
+		runtime.SetFinalizer(result, (*UpDownCounterImpl).Destroy)
+		return result
+	} else {
+		// Go-generated handle (odd), retrieve from the handle map
+		val, ok := c.handleMap.tryGet(uint64(handle))
+		if !ok {
+			panic(fmt.Errorf("no callback in handle map: %d", handle))
+		}
+		c.handleMap.remove(uint64(handle))
+		return val
+	}
+}
+
+func (c FfiConverterUpDownCounter) Read(reader io.Reader) UpDownCounter {
+	return c.Lift(C.uint64_t(readUint64(reader)))
+}
+
+func (c FfiConverterUpDownCounter) Lower(value UpDownCounter) C.uint64_t {
+	// TODO: this is bad - all synchronization from ObjectRuntime.go is discarded here,
+	// because the handle will be decremented immediately after this function returns,
+	// and someone will be left holding onto a non-locked handle.
+	if val, ok := value.(*UpDownCounterImpl); ok {
+		// Rust-backed object, clone the handle
+		handle := val.ffiObject.incrementPointer("UpDownCounter")
+		defer val.ffiObject.decrementPointer()
+		return handle
+	} else {
+		// Go-backed object, insert into handle map
+		return C.uint64_t(c.handleMap.insert(value))
+	}
+}
+
+func (c FfiConverterUpDownCounter) Write(writer io.Writer, value UpDownCounter) {
+	writeUint64(writer, uint64(c.Lower(value)))
+}
+
+func LiftFromExternalUpDownCounter(handle uint64) UpDownCounter {
+	return FfiConverterUpDownCounterINSTANCE.Lift(C.uint64_t(handle))
+}
+
+func LowerToExternalUpDownCounter(value UpDownCounter) uint64 {
+	return uint64(FfiConverterUpDownCounterINSTANCE.Lower(value))
+}
+
+type FfiDestroyerUpDownCounter struct{}
+
+func (_ FfiDestroyerUpDownCounter) Destroy(value UpDownCounter) {
+	if val, ok := value.(*UpDownCounterImpl); ok {
+		val.Destroy()
+	}
+}
+
+//export slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceUpDownCounterMethod0
+func slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceUpDownCounterMethod0(uniffiHandle C.uint64_t, value C.int64_t, uniffiOutReturn *C.void, callStatus *C.RustCallStatus) {
+	handle := uint64(uniffiHandle)
+	uniffiObj, ok := FfiConverterUpDownCounterINSTANCE.handleMap.tryGet(handle)
+	if !ok {
+		panic(fmt.Errorf("no callback in handle map: %d", handle))
+	}
+
+	uniffiObj.Increment(
+		FfiConverterInt64INSTANCE.Lift(value),
+	)
+
+}
+
+var UniffiVTableCallbackInterfaceUpDownCounterINSTANCE = C.UniffiVTableCallbackInterfaceUpDownCounter{
+	uniffiFree:  (C.UniffiCallbackInterfaceFree)(C.slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceUpDownCounterFree),
+	uniffiClone: (C.UniffiCallbackInterfaceClone)(C.slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceUpDownCounterClone),
+	increment:   (C.UniffiCallbackInterfaceUpDownCounterMethod0)(C.slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceUpDownCounterMethod0),
+}
+
+//export slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceUpDownCounterFree
+func slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceUpDownCounterFree(handle C.uint64_t) {
+	FfiConverterUpDownCounterINSTANCE.handleMap.remove(uint64(handle))
+}
+
+//export slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceUpDownCounterClone
+func slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceUpDownCounterClone(handle C.uint64_t) C.uint64_t {
+	val, ok := FfiConverterUpDownCounterINSTANCE.handleMap.tryGet(uint64(handle))
+	if !ok {
+		panic(fmt.Errorf("no callback in handle map: %d", handle))
+	}
+	return C.uint64_t(FfiConverterUpDownCounterINSTANCE.handleMap.insert(val))
+}
+
+func (c FfiConverterUpDownCounter) register() {
+	C.uniffi_slatedb_uniffi_fn_init_callback_vtable_updowncounter(&UniffiVTableCallbackInterfaceUpDownCounterINSTANCE)
 }
 
 // Handle for a single WAL file.
@@ -5605,6 +6790,73 @@ func (_ FfiDestroyerFlushOptions) Destroy(value FlushOptions) {
 	value.Destroy()
 }
 
+// Histogram payload captured in a metric snapshot.
+type HistogramMetricValue struct {
+	// Total number of recorded observations.
+	Count uint64
+	// Sum of all observed values.
+	Sum float64
+	// Minimum observed value.
+	Min float64
+	// Maximum observed value.
+	Max float64
+	// Histogram bucket boundaries.
+	Boundaries []float64
+	// Number of observations in each bucket.
+	BucketCounts []uint64
+}
+
+func (r *HistogramMetricValue) Destroy() {
+	FfiDestroyerUint64{}.Destroy(r.Count)
+	FfiDestroyerFloat64{}.Destroy(r.Sum)
+	FfiDestroyerFloat64{}.Destroy(r.Min)
+	FfiDestroyerFloat64{}.Destroy(r.Max)
+	FfiDestroyerSequenceFloat64{}.Destroy(r.Boundaries)
+	FfiDestroyerSequenceUint64{}.Destroy(r.BucketCounts)
+}
+
+type FfiConverterHistogramMetricValue struct{}
+
+var FfiConverterHistogramMetricValueINSTANCE = FfiConverterHistogramMetricValue{}
+
+func (c FfiConverterHistogramMetricValue) Lift(rb RustBufferI) HistogramMetricValue {
+	return LiftFromRustBuffer[HistogramMetricValue](c, rb)
+}
+
+func (c FfiConverterHistogramMetricValue) Read(reader io.Reader) HistogramMetricValue {
+	return HistogramMetricValue{
+		FfiConverterUint64INSTANCE.Read(reader),
+		FfiConverterFloat64INSTANCE.Read(reader),
+		FfiConverterFloat64INSTANCE.Read(reader),
+		FfiConverterFloat64INSTANCE.Read(reader),
+		FfiConverterSequenceFloat64INSTANCE.Read(reader),
+		FfiConverterSequenceUint64INSTANCE.Read(reader),
+	}
+}
+
+func (c FfiConverterHistogramMetricValue) Lower(value HistogramMetricValue) C.RustBuffer {
+	return LowerIntoRustBuffer[HistogramMetricValue](c, value)
+}
+
+func (c FfiConverterHistogramMetricValue) LowerExternal(value HistogramMetricValue) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[HistogramMetricValue](c, value))
+}
+
+func (c FfiConverterHistogramMetricValue) Write(writer io.Writer, value HistogramMetricValue) {
+	FfiConverterUint64INSTANCE.Write(writer, value.Count)
+	FfiConverterFloat64INSTANCE.Write(writer, value.Sum)
+	FfiConverterFloat64INSTANCE.Write(writer, value.Min)
+	FfiConverterFloat64INSTANCE.Write(writer, value.Max)
+	FfiConverterSequenceFloat64INSTANCE.Write(writer, value.Boundaries)
+	FfiConverterSequenceUint64INSTANCE.Write(writer, value.BucketCounts)
+}
+
+type FfiDestroyerHistogramMetricValue struct{}
+
+func (_ FfiDestroyerHistogramMetricValue) Destroy(value HistogramMetricValue) {
+	value.Destroy()
+}
+
 // A half-open or closed byte-key range used by scan APIs.
 type KeyRange struct {
 	// Inclusive or exclusive lower bound. `None` means unbounded.
@@ -5830,6 +7082,110 @@ func (c FfiConverterMergeOptions) Write(writer io.Writer, value MergeOptions) {
 type FfiDestroyerMergeOptions struct{}
 
 func (_ FfiDestroyerMergeOptions) Destroy(value MergeOptions) {
+	value.Destroy()
+}
+
+// One metric from a [`DefaultMetricsRecorder`] snapshot.
+type Metric struct {
+	// Dotted metric name.
+	Name string
+	// Canonical label set for the metric instance.
+	Labels []MetricLabel
+	// Human-readable description.
+	Description string
+	// Current metric value.
+	Value MetricValue
+}
+
+func (r *Metric) Destroy() {
+	FfiDestroyerString{}.Destroy(r.Name)
+	FfiDestroyerSequenceMetricLabel{}.Destroy(r.Labels)
+	FfiDestroyerString{}.Destroy(r.Description)
+	FfiDestroyerMetricValue{}.Destroy(r.Value)
+}
+
+type FfiConverterMetric struct{}
+
+var FfiConverterMetricINSTANCE = FfiConverterMetric{}
+
+func (c FfiConverterMetric) Lift(rb RustBufferI) Metric {
+	return LiftFromRustBuffer[Metric](c, rb)
+}
+
+func (c FfiConverterMetric) Read(reader io.Reader) Metric {
+	return Metric{
+		FfiConverterStringINSTANCE.Read(reader),
+		FfiConverterSequenceMetricLabelINSTANCE.Read(reader),
+		FfiConverterStringINSTANCE.Read(reader),
+		FfiConverterMetricValueINSTANCE.Read(reader),
+	}
+}
+
+func (c FfiConverterMetric) Lower(value Metric) C.RustBuffer {
+	return LowerIntoRustBuffer[Metric](c, value)
+}
+
+func (c FfiConverterMetric) LowerExternal(value Metric) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[Metric](c, value))
+}
+
+func (c FfiConverterMetric) Write(writer io.Writer, value Metric) {
+	FfiConverterStringINSTANCE.Write(writer, value.Name)
+	FfiConverterSequenceMetricLabelINSTANCE.Write(writer, value.Labels)
+	FfiConverterStringINSTANCE.Write(writer, value.Description)
+	FfiConverterMetricValueINSTANCE.Write(writer, value.Value)
+}
+
+type FfiDestroyerMetric struct{}
+
+func (_ FfiDestroyerMetric) Destroy(value Metric) {
+	value.Destroy()
+}
+
+// Key-value label attached to a metric.
+type MetricLabel struct {
+	// Label key.
+	Key string
+	// Label value.
+	Value string
+}
+
+func (r *MetricLabel) Destroy() {
+	FfiDestroyerString{}.Destroy(r.Key)
+	FfiDestroyerString{}.Destroy(r.Value)
+}
+
+type FfiConverterMetricLabel struct{}
+
+var FfiConverterMetricLabelINSTANCE = FfiConverterMetricLabel{}
+
+func (c FfiConverterMetricLabel) Lift(rb RustBufferI) MetricLabel {
+	return LiftFromRustBuffer[MetricLabel](c, rb)
+}
+
+func (c FfiConverterMetricLabel) Read(reader io.Reader) MetricLabel {
+	return MetricLabel{
+		FfiConverterStringINSTANCE.Read(reader),
+		FfiConverterStringINSTANCE.Read(reader),
+	}
+}
+
+func (c FfiConverterMetricLabel) Lower(value MetricLabel) C.RustBuffer {
+	return LowerIntoRustBuffer[MetricLabel](c, value)
+}
+
+func (c FfiConverterMetricLabel) LowerExternal(value MetricLabel) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[MetricLabel](c, value))
+}
+
+func (c FfiConverterMetricLabel) Write(writer io.Writer, value MetricLabel) {
+	FfiConverterStringINSTANCE.Write(writer, value.Key)
+	FfiConverterStringINSTANCE.Write(writer, value.Value)
+}
+
+type FfiDestroyerMetricLabel struct{}
+
+func (_ FfiDestroyerMetricLabel) Destroy(value MetricLabel) {
 	value.Destroy()
 }
 
@@ -6893,6 +8249,112 @@ func (_ FfiDestroyerMergeOperatorCallbackError) Destroy(value *MergeOperatorCall
 	}
 }
 
+// Value stored in a metric snapshot.
+type MetricValue interface {
+	Destroy()
+}
+
+// Monotonic counter value.
+type MetricValueCounter struct {
+	Field0 uint64
+}
+
+func (e MetricValueCounter) Destroy() {
+	FfiDestroyerUint64{}.Destroy(e.Field0)
+}
+
+// Gauge value.
+type MetricValueGauge struct {
+	Field0 int64
+}
+
+func (e MetricValueGauge) Destroy() {
+	FfiDestroyerInt64{}.Destroy(e.Field0)
+}
+
+// Up/down counter value.
+type MetricValueUpDownCounter struct {
+	Field0 int64
+}
+
+func (e MetricValueUpDownCounter) Destroy() {
+	FfiDestroyerInt64{}.Destroy(e.Field0)
+}
+
+// Histogram summary and buckets.
+type MetricValueHistogram struct {
+	Field0 HistogramMetricValue
+}
+
+func (e MetricValueHistogram) Destroy() {
+	FfiDestroyerHistogramMetricValue{}.Destroy(e.Field0)
+}
+
+type FfiConverterMetricValue struct{}
+
+var FfiConverterMetricValueINSTANCE = FfiConverterMetricValue{}
+
+func (c FfiConverterMetricValue) Lift(rb RustBufferI) MetricValue {
+	return LiftFromRustBuffer[MetricValue](c, rb)
+}
+
+func (c FfiConverterMetricValue) Lower(value MetricValue) C.RustBuffer {
+	return LowerIntoRustBuffer[MetricValue](c, value)
+}
+
+func (c FfiConverterMetricValue) LowerExternal(value MetricValue) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[MetricValue](c, value))
+}
+func (FfiConverterMetricValue) Read(reader io.Reader) MetricValue {
+	id := readInt32(reader)
+	switch id {
+	case 1:
+		return MetricValueCounter{
+			FfiConverterUint64INSTANCE.Read(reader),
+		}
+	case 2:
+		return MetricValueGauge{
+			FfiConverterInt64INSTANCE.Read(reader),
+		}
+	case 3:
+		return MetricValueUpDownCounter{
+			FfiConverterInt64INSTANCE.Read(reader),
+		}
+	case 4:
+		return MetricValueHistogram{
+			FfiConverterHistogramMetricValueINSTANCE.Read(reader),
+		}
+	default:
+		panic(fmt.Sprintf("invalid enum value %v in FfiConverterMetricValue.Read()", id))
+	}
+}
+
+func (FfiConverterMetricValue) Write(writer io.Writer, value MetricValue) {
+	switch variant_value := value.(type) {
+	case MetricValueCounter:
+		writeInt32(writer, 1)
+		FfiConverterUint64INSTANCE.Write(writer, variant_value.Field0)
+	case MetricValueGauge:
+		writeInt32(writer, 2)
+		FfiConverterInt64INSTANCE.Write(writer, variant_value.Field0)
+	case MetricValueUpDownCounter:
+		writeInt32(writer, 3)
+		FfiConverterInt64INSTANCE.Write(writer, variant_value.Field0)
+	case MetricValueHistogram:
+		writeInt32(writer, 4)
+		FfiConverterHistogramMetricValueINSTANCE.Write(writer, variant_value.Field0)
+	default:
+		_ = variant_value
+		panic(fmt.Sprintf("invalid enum value `%v` in FfiConverterMetricValue.Write", value))
+	}
+}
+
+type FfiDestroyerMetricValue struct{}
+
+func (_ FfiDestroyerMetricValue) Destroy(value MetricValue) {
+	value.Destroy()
+}
+
 // Kind of row entry stored in WAL iteration results.
 type RowEntryKind uint
 
@@ -7366,6 +8828,47 @@ func (_ FfiDestroyerOptionalKeyValue) Destroy(value *KeyValue) {
 	}
 }
 
+type FfiConverterOptionalMetric struct{}
+
+var FfiConverterOptionalMetricINSTANCE = FfiConverterOptionalMetric{}
+
+func (c FfiConverterOptionalMetric) Lift(rb RustBufferI) *Metric {
+	return LiftFromRustBuffer[*Metric](c, rb)
+}
+
+func (_ FfiConverterOptionalMetric) Read(reader io.Reader) *Metric {
+	if readInt8(reader) == 0 {
+		return nil
+	}
+	temp := FfiConverterMetricINSTANCE.Read(reader)
+	return &temp
+}
+
+func (c FfiConverterOptionalMetric) Lower(value *Metric) C.RustBuffer {
+	return LowerIntoRustBuffer[*Metric](c, value)
+}
+
+func (c FfiConverterOptionalMetric) LowerExternal(value *Metric) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[*Metric](c, value))
+}
+
+func (_ FfiConverterOptionalMetric) Write(writer io.Writer, value *Metric) {
+	if value == nil {
+		writeInt8(writer, 0)
+	} else {
+		writeInt8(writer, 1)
+		FfiConverterMetricINSTANCE.Write(writer, *value)
+	}
+}
+
+type FfiDestroyerOptionalMetric struct{}
+
+func (_ FfiDestroyerOptionalMetric) Destroy(value *Metric) {
+	if value != nil {
+		FfiDestroyerMetric{}.Destroy(*value)
+	}
+}
+
 type FfiConverterOptionalRowEntry struct{}
 
 var FfiConverterOptionalRowEntryINSTANCE = FfiConverterOptionalRowEntry{}
@@ -7445,6 +8948,100 @@ type FfiDestroyerOptionalWriteHandle struct{}
 func (_ FfiDestroyerOptionalWriteHandle) Destroy(value *WriteHandle) {
 	if value != nil {
 		FfiDestroyerWriteHandle{}.Destroy(*value)
+	}
+}
+
+type FfiConverterSequenceUint64 struct{}
+
+var FfiConverterSequenceUint64INSTANCE = FfiConverterSequenceUint64{}
+
+func (c FfiConverterSequenceUint64) Lift(rb RustBufferI) []uint64 {
+	return LiftFromRustBuffer[[]uint64](c, rb)
+}
+
+func (c FfiConverterSequenceUint64) Read(reader io.Reader) []uint64 {
+	length := readInt32(reader)
+	if length == 0 {
+		return nil
+	}
+	result := make([]uint64, 0, length)
+	for i := int32(0); i < length; i++ {
+		result = append(result, FfiConverterUint64INSTANCE.Read(reader))
+	}
+	return result
+}
+
+func (c FfiConverterSequenceUint64) Lower(value []uint64) C.RustBuffer {
+	return LowerIntoRustBuffer[[]uint64](c, value)
+}
+
+func (c FfiConverterSequenceUint64) LowerExternal(value []uint64) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[[]uint64](c, value))
+}
+
+func (c FfiConverterSequenceUint64) Write(writer io.Writer, value []uint64) {
+	if len(value) > math.MaxInt32 {
+		panic("[]uint64 is too large to fit into Int32")
+	}
+
+	writeInt32(writer, int32(len(value)))
+	for _, item := range value {
+		FfiConverterUint64INSTANCE.Write(writer, item)
+	}
+}
+
+type FfiDestroyerSequenceUint64 struct{}
+
+func (FfiDestroyerSequenceUint64) Destroy(sequence []uint64) {
+	for _, value := range sequence {
+		FfiDestroyerUint64{}.Destroy(value)
+	}
+}
+
+type FfiConverterSequenceFloat64 struct{}
+
+var FfiConverterSequenceFloat64INSTANCE = FfiConverterSequenceFloat64{}
+
+func (c FfiConverterSequenceFloat64) Lift(rb RustBufferI) []float64 {
+	return LiftFromRustBuffer[[]float64](c, rb)
+}
+
+func (c FfiConverterSequenceFloat64) Read(reader io.Reader) []float64 {
+	length := readInt32(reader)
+	if length == 0 {
+		return nil
+	}
+	result := make([]float64, 0, length)
+	for i := int32(0); i < length; i++ {
+		result = append(result, FfiConverterFloat64INSTANCE.Read(reader))
+	}
+	return result
+}
+
+func (c FfiConverterSequenceFloat64) Lower(value []float64) C.RustBuffer {
+	return LowerIntoRustBuffer[[]float64](c, value)
+}
+
+func (c FfiConverterSequenceFloat64) LowerExternal(value []float64) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[[]float64](c, value))
+}
+
+func (c FfiConverterSequenceFloat64) Write(writer io.Writer, value []float64) {
+	if len(value) > math.MaxInt32 {
+		panic("[]float64 is too large to fit into Int32")
+	}
+
+	writeInt32(writer, int32(len(value)))
+	for _, item := range value {
+		FfiConverterFloat64INSTANCE.Write(writer, item)
+	}
+}
+
+type FfiDestroyerSequenceFloat64 struct{}
+
+func (FfiDestroyerSequenceFloat64) Destroy(sequence []float64) {
+	for _, value := range sequence {
+		FfiDestroyerFloat64{}.Destroy(value)
 	}
 }
 
@@ -7539,6 +9136,100 @@ type FfiDestroyerSequenceWalFile struct{}
 func (FfiDestroyerSequenceWalFile) Destroy(sequence []*WalFile) {
 	for _, value := range sequence {
 		FfiDestroyerWalFile{}.Destroy(value)
+	}
+}
+
+type FfiConverterSequenceMetric struct{}
+
+var FfiConverterSequenceMetricINSTANCE = FfiConverterSequenceMetric{}
+
+func (c FfiConverterSequenceMetric) Lift(rb RustBufferI) []Metric {
+	return LiftFromRustBuffer[[]Metric](c, rb)
+}
+
+func (c FfiConverterSequenceMetric) Read(reader io.Reader) []Metric {
+	length := readInt32(reader)
+	if length == 0 {
+		return nil
+	}
+	result := make([]Metric, 0, length)
+	for i := int32(0); i < length; i++ {
+		result = append(result, FfiConverterMetricINSTANCE.Read(reader))
+	}
+	return result
+}
+
+func (c FfiConverterSequenceMetric) Lower(value []Metric) C.RustBuffer {
+	return LowerIntoRustBuffer[[]Metric](c, value)
+}
+
+func (c FfiConverterSequenceMetric) LowerExternal(value []Metric) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[[]Metric](c, value))
+}
+
+func (c FfiConverterSequenceMetric) Write(writer io.Writer, value []Metric) {
+	if len(value) > math.MaxInt32 {
+		panic("[]Metric is too large to fit into Int32")
+	}
+
+	writeInt32(writer, int32(len(value)))
+	for _, item := range value {
+		FfiConverterMetricINSTANCE.Write(writer, item)
+	}
+}
+
+type FfiDestroyerSequenceMetric struct{}
+
+func (FfiDestroyerSequenceMetric) Destroy(sequence []Metric) {
+	for _, value := range sequence {
+		FfiDestroyerMetric{}.Destroy(value)
+	}
+}
+
+type FfiConverterSequenceMetricLabel struct{}
+
+var FfiConverterSequenceMetricLabelINSTANCE = FfiConverterSequenceMetricLabel{}
+
+func (c FfiConverterSequenceMetricLabel) Lift(rb RustBufferI) []MetricLabel {
+	return LiftFromRustBuffer[[]MetricLabel](c, rb)
+}
+
+func (c FfiConverterSequenceMetricLabel) Read(reader io.Reader) []MetricLabel {
+	length := readInt32(reader)
+	if length == 0 {
+		return nil
+	}
+	result := make([]MetricLabel, 0, length)
+	for i := int32(0); i < length; i++ {
+		result = append(result, FfiConverterMetricLabelINSTANCE.Read(reader))
+	}
+	return result
+}
+
+func (c FfiConverterSequenceMetricLabel) Lower(value []MetricLabel) C.RustBuffer {
+	return LowerIntoRustBuffer[[]MetricLabel](c, value)
+}
+
+func (c FfiConverterSequenceMetricLabel) LowerExternal(value []MetricLabel) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[[]MetricLabel](c, value))
+}
+
+func (c FfiConverterSequenceMetricLabel) Write(writer io.Writer, value []MetricLabel) {
+	if len(value) > math.MaxInt32 {
+		panic("[]MetricLabel is too large to fit into Int32")
+	}
+
+	writeInt32(writer, int32(len(value)))
+	for _, item := range value {
+		FfiConverterMetricLabelINSTANCE.Write(writer, item)
+	}
+}
+
+type FfiDestroyerSequenceMetricLabel struct{}
+
+func (FfiDestroyerSequenceMetricLabel) Destroy(sequence []MetricLabel) {
+	for _, value := range sequence {
+		FfiDestroyerMetricLabel{}.Destroy(value)
 	}
 }
 
