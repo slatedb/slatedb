@@ -390,105 +390,101 @@ mod tests {
             .unwrap();
     }
 
-    #[tokio::test]
-    async fn should_retain_versions_up_to_durable_boundary_when_no_active_txn() {
-        // Given: DB with no active transactions, but durable watermark at seq=2.
-        // This can happen when the WAL has flushed up to seq=2, but newer writes
-        // (seq=3) are still in the memtable and not yet durable.
-        let db = setup_test_db_with_merge_operator().await;
-        db.inner.oracle.advance_durable_seq(2);
-        // No active transaction created - min_active_seq() will return None
-
-        let table = WritableKVTable::new();
-        // Add versions: seq=1 (durable), seq=2 (durable), seq=3 (not durable)
-        table.put(RowEntry::new_value(&Bytes::from("key"), b"value1", 1));
-        table.put(RowEntry::new_value(&Bytes::from("key"), b"value2", 2));
-        table.put(RowEntry::new_value(&Bytes::from("key"), b"value3", 3));
-        let id = SsTableId::Compacted(Ulid::new());
-
-        // When: Flush the table
-        let sst_handle = db
-            .inner
-            .flush_imm_table(&id, table.table().clone(), false)
-            .await
-            .unwrap();
-
-        // Then: Should retain seq=3 (latest) and seq=2 (boundary at durable watermark)
-        // seq=1 can be dropped because seq=2 is the boundary value for remote readers
-        verify_sst(
-            &db,
-            &sst_handle,
-            &[
-                (
-                    Bytes::from("key"),
-                    3,
-                    ValueDeletable::Value(Bytes::from("value3")),
-                ),
-                (
-                    Bytes::from("key"),
-                    2,
-                    ValueDeletable::Value(Bytes::from("value2")),
-                ),
-            ],
-        )
-        .await;
-
-        db.close().await.unwrap();
+    struct RetentionBoundaryTestCase {
+        durable_seq: u64,
+        snapshot_seq: Option<u64>,
+        txn_seq: Option<u64>,
+        expected_entries: Vec<(Bytes, u64, ValueDeletable)>,
     }
 
+    #[rstest]
+    #[case::durable_is_min(RetentionBoundaryTestCase {
+        durable_seq: 1,
+        snapshot_seq: Some(3),
+        txn_seq: Some(2),
+        expected_entries: vec![
+            (Bytes::from("key"), 4, ValueDeletable::Value(Bytes::from("value4"))),
+            (Bytes::from("key"), 3, ValueDeletable::Value(Bytes::from("value3"))),
+            (Bytes::from("key"), 2, ValueDeletable::Value(Bytes::from("value2"))),
+            (Bytes::from("key"), 1, ValueDeletable::Value(Bytes::from("value1"))),
+        ],
+    })]
+    #[case::snapshot_is_min(RetentionBoundaryTestCase {
+        durable_seq: 4,
+        snapshot_seq: Some(2),
+        txn_seq: Some(3),
+        expected_entries: vec![
+            (Bytes::from("key"), 4, ValueDeletable::Value(Bytes::from("value4"))),
+            (Bytes::from("key"), 3, ValueDeletable::Value(Bytes::from("value3"))),
+            (Bytes::from("key"), 2, ValueDeletable::Value(Bytes::from("value2"))),
+        ],
+    })]
+    #[case::txn_is_min(RetentionBoundaryTestCase {
+        durable_seq: 4,
+        snapshot_seq: Some(3),
+        txn_seq: Some(2),
+        expected_entries: vec![
+            (Bytes::from("key"), 4, ValueDeletable::Value(Bytes::from("value4"))),
+            (Bytes::from("key"), 3, ValueDeletable::Value(Bytes::from("value3"))),
+            (Bytes::from("key"), 2, ValueDeletable::Value(Bytes::from("value2"))),
+        ],
+    })]
+    #[case::snapshot_is_none(RetentionBoundaryTestCase {
+        durable_seq: 4,
+        snapshot_seq: None,
+        txn_seq: Some(2),
+        expected_entries: vec![
+            (Bytes::from("key"), 4, ValueDeletable::Value(Bytes::from("value4"))),
+            (Bytes::from("key"), 3, ValueDeletable::Value(Bytes::from("value3"))),
+            (Bytes::from("key"), 2, ValueDeletable::Value(Bytes::from("value2"))),
+        ],
+    })]
+    #[case::txn_is_none(RetentionBoundaryTestCase {
+        durable_seq: 4,
+        snapshot_seq: Some(3),
+        txn_seq: None,
+        expected_entries: vec![
+            (Bytes::from("key"), 4, ValueDeletable::Value(Bytes::from("value4"))),
+            (Bytes::from("key"), 3, ValueDeletable::Value(Bytes::from("value3"))),
+        ],
+    })]
+    #[case::snapshot_and_txn_are_none(RetentionBoundaryTestCase {
+        durable_seq: 4,
+        snapshot_seq: None,
+        txn_seq: None,
+        expected_entries: vec![
+            (Bytes::from("key"), 4, ValueDeletable::Value(Bytes::from("value4"))),
+        ],
+    })]
     #[tokio::test]
-    async fn should_use_min_of_active_seq_and_durable_boundary() {
-        // Given: DB with active transaction at seq=3, durable watermark at seq=1
+    async fn should_use_min_of_retention_sources(#[case] test_case: RetentionBoundaryTestCase) {
         let db = setup_test_db_with_merge_operator().await;
-        db.inner.oracle.advance_durable_seq(1);
-        db.inner.snapshot_manager.register(Some(3));
+        db.inner.oracle.advance_durable_seq(test_case.durable_seq);
+
+        if let Some(snapshot_seq) = test_case.snapshot_seq {
+            db.inner.snapshot_manager.register(Some(snapshot_seq));
+        }
+
+        if let Some(txn_seq) = test_case.txn_seq {
+            db.inner.oracle.advance_committed_seq(txn_seq);
+            let (_, started_seq) = db.inner.txn_manager.new_transaction();
+            assert_eq!(started_seq, txn_seq);
+        }
 
         let table = WritableKVTable::new();
-        // Add versions: seq=1, seq=2, seq=3, seq=4
         table.put(RowEntry::new_value(&Bytes::from("key"), b"value1", 1));
         table.put(RowEntry::new_value(&Bytes::from("key"), b"value2", 2));
         table.put(RowEntry::new_value(&Bytes::from("key"), b"value3", 3));
         table.put(RowEntry::new_value(&Bytes::from("key"), b"value4", 4));
         let id = SsTableId::Compacted(Ulid::new());
 
-        // When: Flush the table
         let sst_handle = db
             .inner
             .flush_imm_table(&id, table.table().clone(), false)
             .await
             .unwrap();
 
-        // Then: Should use min(3, 1) = 1 as boundary
-        // Retains seq=4 (latest), seq=3, seq=2, and seq=1 (boundary)
-        // Without the fix, would use active_seq=3, retaining only seq=4 and seq=3
-        verify_sst(
-            &db,
-            &sst_handle,
-            &[
-                (
-                    Bytes::from("key"),
-                    4,
-                    ValueDeletable::Value(Bytes::from("value4")),
-                ),
-                (
-                    Bytes::from("key"),
-                    3,
-                    ValueDeletable::Value(Bytes::from("value3")),
-                ),
-                (
-                    Bytes::from("key"),
-                    2,
-                    ValueDeletable::Value(Bytes::from("value2")),
-                ),
-                (
-                    Bytes::from("key"),
-                    1,
-                    ValueDeletable::Value(Bytes::from("value1")),
-                ),
-            ],
-        )
-        .await;
-
+        verify_sst(&db, &sst_handle, &test_case.expected_entries).await;
         db.close().await.unwrap();
     }
 }

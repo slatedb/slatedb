@@ -5661,6 +5661,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_recent_snapshot_min_seq_uses_transaction_seq() {
+        let path = "/tmp/test_recent_snapshot_min_seq_uses_transaction_seq";
+        let object_store = Arc::new(InMemory::new());
+        let db = Db::builder(path, object_store).build().await.unwrap();
+
+        {
+            let state = db.inner.state.read();
+            assert_eq!(state.state().core().recent_snapshot_min_seq, 0);
+        }
+
+        db.put(b"key1", b"value1").await.unwrap();
+        db.inner.flush_memtables().await.unwrap();
+
+        let txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
+        let txn_seq = txn.seqnum();
+
+        db.put(b"key2", b"value2").await.unwrap();
+        db.inner.flush_memtables().await.unwrap();
+
+        let min_active_seq = db.inner.txn_manager.min_active_seq();
+        assert_eq!(min_active_seq, Some(txn_seq));
+
+        {
+            let state = db.inner.state.read();
+            let recent_min_seq = state.state().core().recent_snapshot_min_seq;
+            assert_eq!(
+                recent_min_seq, txn_seq,
+                "recent_snapshot_min_seq should equal txn_manager.min_active_seq() after flush"
+            );
+        }
+
+        drop(txn);
+
+        db.put(b"key3", b"value3").await.unwrap();
+        db.inner.flush_memtables().await.unwrap();
+
+        {
+            let state = db.inner.state.read();
+            let recent_min_seq = state.state().core().recent_snapshot_min_seq;
+            let last_l0_seq = state.state().core().last_l0_seq;
+            assert_eq!(
+                recent_min_seq, last_l0_seq,
+                "recent_snapshot_min_seq should equal last_l0_seq when no active transactions"
+            );
+            assert!(recent_min_seq > txn_seq);
+        }
+    }
+
+    #[tokio::test]
     async fn test_memtable_flush_updates_last_remote_persisted_seq() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = "/tmp/test";
