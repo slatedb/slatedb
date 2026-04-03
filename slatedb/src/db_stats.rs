@@ -1,4 +1,4 @@
-use slatedb_common::metrics::{CounterFn, GaugeFn, MetricsRecorderHelper};
+use slatedb_common::metrics::{CounterFn, GaugeFn, HistogramFn, MetricsRecorderHelper};
 use std::sync::Arc;
 
 macro_rules! db_stat_name {
@@ -21,6 +21,11 @@ pub const L0_FLUSH_BYTES: &str = db_stat_name!("l0_flush_bytes");
 pub const SST_FILTER_FALSE_POSITIVE_COUNT: &str = db_stat_name!("sst_filter_false_positive_count");
 pub const SST_FILTER_POSITIVE_COUNT: &str = db_stat_name!("sst_filter_positive_count");
 pub const SST_FILTER_NEGATIVE_COUNT: &str = db_stat_name!("sst_filter_negative_count");
+pub const MERGE_OPERATOR_READ_OPERANDS: &str = db_stat_name!("merge_operator_read_operands");
+
+const MERGE_OPERATOR_READ_OPERAND_BOUNDARIES: &[f64] = &[
+    1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0, 512.0, 1024.0, 2048.0, 4096.0,
+];
 
 #[non_exhaustive]
 #[derive(Clone)]
@@ -41,6 +46,7 @@ pub(crate) struct DbStats {
     pub(crate) total_mem_size_bytes: Arc<dyn GaugeFn>,
     pub(crate) l0_sst_count: Arc<dyn GaugeFn>,
     pub(crate) l0_flush_bytes: Arc<dyn CounterFn>,
+    pub(crate) merge_operator_read_operands: Arc<dyn HistogramFn>,
 }
 
 impl DbStats {
@@ -73,6 +79,15 @@ impl DbStats {
             total_mem_size_bytes: recorder.gauge(TOTAL_MEM_SIZE_BYTES).register(),
             l0_sst_count: recorder.gauge(L0_SST_COUNT).register(),
             l0_flush_bytes: recorder.counter(L0_FLUSH_BYTES).register(),
+            merge_operator_read_operands: recorder
+                .histogram(
+                    MERGE_OPERATOR_READ_OPERANDS,
+                    MERGE_OPERATOR_READ_OPERAND_BOUNDARIES,
+                )
+                .description(
+                    "Number of unresolved merge operands resolved for one key during a read.",
+                )
+                .register(),
         }
     }
 }

@@ -12,6 +12,7 @@ use crate::types::{KeyValue, RowEntry, ValueDeletable};
 use async_trait::async_trait;
 use bytes::Bytes;
 use parking_lot::Mutex;
+use slatedb_common::metrics::HistogramFn;
 use std::ops::RangeBounds;
 use std::sync::Arc;
 
@@ -221,6 +222,7 @@ impl DbIterator {
         max_seq: Option<u64>,
         range_tracker: Option<Arc<DbIteratorRangeTracker>>,
         merge_operator: Option<MergeOperatorType>,
+        merge_operator_read_operands: Option<Arc<dyn HistogramFn>>,
         order: IterationOrder,
     ) -> Result<Self, SlateDBError> {
         // The write_batch iterator is provided only when operating within a Transaction. It represents the uncommitted
@@ -261,7 +263,7 @@ impl DbIterator {
         };
 
         if let Some(merge_operator) = merge_operator {
-            iter = Box::new(MergeOperatorIterator::new(
+            let merge_iterator = MergeOperatorIterator::new(
                 merge_operator,
                 iter,
                 true,
@@ -269,7 +271,13 @@ impl DbIterator {
                 // The entries in the write batch iterator have seq num u64::MAX and any merges
                 // there need to be merged with the entries from the other iterators.
                 None,
-            ));
+            );
+            iter = match merge_operator_read_operands {
+                Some(histogram) => {
+                    Box::new(merge_iterator.with_read_merge_operands_histogram(histogram))
+                }
+                None => Box::new(merge_iterator),
+            };
         } else {
             // When no merge operator is configured, wrap with iterator that errors on merge operands
             iter = Box::new(MergeOperatorRequiredIterator::new(iter));
@@ -421,6 +429,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             IterationOrder::Ascending,
         )
         .await
@@ -463,6 +472,7 @@ mod tests {
             Some(100),
             None,
             None,
+            None,
             IterationOrder::Ascending,
         )
         .await
@@ -492,6 +502,7 @@ mod tests {
             vec![Box::new(mem_iter) as Box<dyn RowEntryIterator + 'static>],
             VecDeque::new(),
             VecDeque::new(),
+            None,
             None,
             None,
             None,
@@ -542,6 +553,7 @@ mod tests {
             mem_iters,
             VecDeque::new(),
             VecDeque::new(),
+            None,
             None,
             None,
             None,

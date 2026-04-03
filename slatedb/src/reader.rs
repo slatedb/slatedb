@@ -305,6 +305,11 @@ impl Reader {
             )
             .await?;
 
+        let merge_operator = self.merge_operator.clone();
+        let merge_operator_read_operands = merge_operator
+            .as_ref()
+            .map(|_| self.db_stats.merge_operator_read_operands.clone());
+
         let mut iterator = DbIterator::new(
             range,
             write_batch_iter,
@@ -314,6 +319,7 @@ impl Reader {
             max_seq,
             None,
             self.merge_operator.clone(),
+            merge_operator_read_operands,
             sst_iter_options.order,
         )
         .await?;
@@ -380,6 +386,11 @@ impl Reader {
             .build_iterator_sources(&range, db_state, write_batch, sst_iter_options, None)
             .await?;
 
+        let merge_operator = self.merge_operator.clone();
+        let merge_operator_read_operands = merge_operator
+            .as_ref()
+            .map(|_| self.db_stats.merge_operator_read_operands.clone());
+
         DbIterator::new(
             range,
             write_batch_iter,
@@ -389,6 +400,7 @@ impl Reader {
             max_seq,
             range_tracker,
             self.merge_operator.clone(),
+            merge_operator_read_operands,
             options.order,
         )
         .await

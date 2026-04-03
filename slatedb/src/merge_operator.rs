@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use bytes::Bytes;
+use slatedb_common::metrics::HistogramFn;
 use thiserror::Error;
 
 use crate::{
@@ -190,6 +191,8 @@ pub(crate) struct MergeOperatorIterator<T: RowEntryIterator> {
     /// A barrier sequence number that supports snapshot reads using this iterator. If not None,
     /// the iterator will not merge entries with sequence number greater than this value.
     snapshot_barrier_seq: Option<u64>,
+    /// Histogram for tracking merge operand counts resolved by read operations.
+    read_merge_operands: Option<Arc<dyn HistogramFn>>,
 }
 
 /// Tracks metadata across multiple entries during merge operations.
@@ -258,11 +261,30 @@ impl<T: RowEntryIterator> MergeOperatorIterator<T> {
             buffered_entry: None,
             merge_different_expire_ts,
             snapshot_barrier_seq,
+            read_merge_operands: None,
         }
+    }
+
+    pub(crate) fn with_read_merge_operands_histogram(
+        mut self,
+        histogram: Arc<dyn HistogramFn>,
+    ) -> Self {
+        self.read_merge_operands = Some(histogram);
+        self
     }
 }
 
 impl<T: RowEntryIterator> MergeOperatorIterator<T> {
+    fn record_read_merge_operands(&self, merge_operand_count: usize) {
+        if merge_operand_count == 0 {
+            return;
+        }
+
+        if let Some(histogram) = &self.read_merge_operands {
+            histogram.record(merge_operand_count as f64);
+        }
+    }
+
     /// Checks if an entry matches the current key and expiration timestamp.
     /// Returns true if keys match and either `merge_different_expire_ts` is enabled
     /// or the expire_ts matches.
@@ -322,6 +344,7 @@ impl<T: RowEntryIterator> MergeOperatorIterator<T> {
 
         let mut results = Vec::new();
         let mut batch = Vec::with_capacity(MERGE_BATCH_SIZE);
+        let mut merge_operand_count = 0;
 
         let mut next = Some(first_entry);
 
@@ -335,6 +358,7 @@ impl<T: RowEntryIterator> MergeOperatorIterator<T> {
                     // found a Value or Tombstone, this is the base value
                     break Some(entry);
                 } else {
+                    merge_operand_count += 1;
                     batch.push(entry);
                 }
 
@@ -372,6 +396,7 @@ impl<T: RowEntryIterator> MergeOperatorIterator<T> {
         let final_result = self
             .merge_operator
             .merge_batch(&key, base_value, &results)?;
+        self.record_read_merge_operands(merge_operand_count);
 
         Ok(Some(RowEntry {
             key: key.clone(),
@@ -431,7 +456,7 @@ impl<T: TrackedRowEntryIterator> TrackedRowEntryIterator for MergeOperatorIterat
 
 #[cfg(test)]
 mod tests {
-    use std::{cmp::Ordering, collections::VecDeque, fmt::Debug};
+    use std::{cmp::Ordering, collections::VecDeque, fmt::Debug, sync::Mutex};
 
     use rstest::rstest;
 
@@ -473,6 +498,57 @@ mod tests {
                 },
                 counter,
             )
+        }
+    }
+
+    #[derive(Debug, Clone, Default)]
+    struct MockHistogram {
+        values: Arc<Mutex<Vec<f64>>>,
+    }
+
+    impl MockHistogram {
+        fn values(&self) -> Vec<f64> {
+            self.values.lock().unwrap().clone()
+        }
+    }
+
+    impl HistogramFn for MockHistogram {
+        fn record(&self, value: f64) {
+            self.values.lock().unwrap().push(value);
+        }
+    }
+
+    struct FinalMergeFailsOperator;
+
+    impl MergeOperator for FinalMergeFailsOperator {
+        fn merge(
+            &self,
+            _key: &Bytes,
+            existing_value: Option<Bytes>,
+            operand: Bytes,
+        ) -> Result<Bytes, MergeOperatorError> {
+            let mut merged = existing_value.unwrap_or_default().to_vec();
+            merged.extend_from_slice(&operand);
+            Ok(Bytes::from(merged))
+        }
+
+        fn merge_batch(
+            &self,
+            key: &Bytes,
+            existing_value: Option<Bytes>,
+            operands: &[Bytes],
+        ) -> Result<Bytes, MergeOperatorError> {
+            if operands.len() == 1 && existing_value.is_none() {
+                return Err(MergeOperatorError::Callback {
+                    message: format!("final merge failed for key {key:?}"),
+                });
+            }
+
+            let mut merged = existing_value.unwrap_or_default().to_vec();
+            for operand in operands {
+                merged.extend_from_slice(operand);
+            }
+            Ok(Bytes::from(merged))
         }
     }
 
@@ -944,6 +1020,54 @@ mod tests {
             "Expected merge_batch to be called 3 times for 150 operands (2 batches + 1 final merge), but was called {} times",
             actual_calls
         );
+    }
+
+    #[tokio::test]
+    async fn test_merge_operator_read_operands_records_operand_count() {
+        let (merge_operator, _call_count) = MockBatchedMergeOperator::new();
+        let merge_operator = Arc::new(merge_operator);
+        let histogram = MockHistogram::default();
+
+        let mut data = vec![];
+        for i in 1..=250 {
+            data.push(RowEntry::new_merge(b"key1", &[i as u8], i));
+        }
+
+        let mut iterator = MergeOperatorIterator::<MockRowEntryIterator>::new(
+            merge_operator,
+            data.into(),
+            true,
+            None,
+        )
+        .with_read_merge_operands_histogram(Arc::new(histogram.clone()));
+
+        let expected_bytes: Vec<u8> = (1..=250).map(|i| i as u8).collect();
+        let expected = vec![RowEntry::new_merge(b"key1", &expected_bytes, 250)];
+        assert_iterator(&mut iterator, expected).await;
+
+        assert_eq!(histogram.values(), vec![250.0]);
+    }
+
+    #[tokio::test]
+    async fn test_merge_operator_read_operands_not_recorded_when_merge_fails() {
+        let merge_operator = Arc::new(FinalMergeFailsOperator);
+        let histogram = MockHistogram::default();
+
+        let data = vec![
+            RowEntry::new_merge(b"key1", b"a", 2),
+            RowEntry::new_merge(b"key1", b"b", 1),
+        ];
+
+        let mut iterator = MergeOperatorIterator::<MockRowEntryIterator>::new(
+            merge_operator,
+            data.into(),
+            true,
+            None,
+        )
+        .with_read_merge_operands_histogram(Arc::new(histogram.clone()));
+
+        assert!(iterator.next().await.is_err());
+        assert!(histogram.values().is_empty());
     }
 
     #[tokio::test]
