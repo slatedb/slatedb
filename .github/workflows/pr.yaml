@@ -155,7 +155,7 @@ jobs:
         run: |
           source .venv/bin/activate
           pip install --upgrade pip
-          pip install maturin "uniffi-bindgen==0.29.5" ruff
+          pip install maturin "uniffi-bindgen==0.31.0" ruff
 
       - name: Build editable package with test deps
         working-directory: ./bindings/python
@@ -192,7 +192,7 @@ jobs:
           sudo apt-get install -y build-essential pkg-config
 
       - name: Install uniffi-bindgen-go
-        run: cargo install uniffi-bindgen-go --git https://github.com/NordSecurity/uniffi-bindgen-go --tag v0.5.0+v0.29.5
+        run: cargo install uniffi-bindgen-go --git https://github.com/NordSecurity/uniffi-bindgen-go --tag v0.7.0+v0.31.0
 
       - name: Generate Go bindings
         run: ./scripts/generate-go-uniffi.sh
@@ -228,7 +228,7 @@ jobs:
           # uniffi-bindgen-java has some warnings that we don't want to fail the build, so we
           # override RUSTFLAGS here to avoid the -Dwarnings from the global env.
           RUSTFLAGS: ""
-        run: cargo install uniffi-bindgen-java --git https://github.com/IronCoreLabs/uniffi-bindgen-java.git --rev 265d9b93645ce50307449bea2489b2b748fb67ee
+        run: cargo install uniffi-bindgen-java --version 0.3.1
 
       - name: Run Java tests (bindings/java)
         run: ./bindings/java/gradlew -p bindings/java :slatedb-uniffi:check
@@ -256,7 +256,7 @@ jobs:
       - name: Install uniffi-bindgen-node-js
         env:
           RUSTFLAGS: ""
-        run: cargo install uniffi-bindgen-node-js
+        run: cargo install uniffi-bindgen-node-js --version 0.0.7
 
       - name: Build Node package (bindings/node)
         run: npm --prefix bindings/node run build
