@@ -47,7 +47,7 @@ impl DbInner {
         // Otherwise, if we only keep a newer non-durable version, remote readers would skip
         // it and incorrectly fall back to an even older value.
         let durable_seq = self.oracle.last_remote_persisted_seq();
-        let min_retention_seq = match self.snapshot_manager.min_seq() {
+        let min_retention_seq = match self.active_seq_tracker.read().min_seq() {
             Some(active_seq) => Some(active_seq.min(durable_seq)),
             None => Some(durable_seq),
         };
@@ -319,8 +319,10 @@ mod tests {
     async fn test_flush(#[case] test_case: FlushImmTableTestCase) {
         // Given
         let db = setup_test_db_with_merge_operator().await;
-        db.inner
-            .snapshot_manager
+        let registered_seq = db
+            .inner
+            .active_seq_tracker
+            .write()
             .register(Some(test_case.min_active_seq));
         // Set durable watermark high so it doesn't interfere with transaction-based retention tests
         db.inner.oracle.advance_durable_seq(u64::MAX);
@@ -341,6 +343,10 @@ mod tests {
 
         // Then
         verify_sst(&db, &sst_handle, &test_case.expected_entries).await;
+        db.inner
+            .active_seq_tracker
+            .write()
+            .unregister(registered_seq);
 
         db.close().await.unwrap();
     }
@@ -349,7 +355,7 @@ mod tests {
     async fn test_err_when_merge_operator_not_set_and_merges_exist() {
         // Given
         let db = setup_test_db_without_merge_operator().await;
-        db.inner.snapshot_manager.register(Some(0));
+        let seq = db.inner.active_seq_tracker.write().register(Some(0));
         let table = WritableKVTable::new();
         table.put(RowEntry::new_value(&Bytes::from("key"), b"value1", 1));
         table.put(RowEntry::new_merge(&Bytes::from("key"), b"value2", 2));
@@ -367,13 +373,14 @@ mod tests {
                 |_| panic!("Should return MergeOperatorMissing error"),
             )
             .unwrap();
+        db.inner.active_seq_tracker.write().unregister(seq);
     }
 
     #[tokio::test]
     async fn test_no_err_merge_operator_not_set_and_no_merges() {
         // Given
         let db = setup_test_db_without_merge_operator().await;
-        db.inner.snapshot_manager.register(Some(0));
+        let seq = db.inner.active_seq_tracker.write().register(Some(0));
         let table = WritableKVTable::new();
         table.put(RowEntry::new_value(&Bytes::from("key1"), b"value1", 1));
         table.put(RowEntry::new_tombstone(&Bytes::from("key2"), 2));
@@ -384,6 +391,7 @@ mod tests {
             .flush_imm_table(&id, table.table().clone(), false)
             .await
             .unwrap();
+        db.inner.active_seq_tracker.write().unregister(seq);
     }
 
     #[tokio::test]
@@ -437,7 +445,7 @@ mod tests {
         // Given: DB with active transaction at seq=3, durable watermark at seq=1
         let db = setup_test_db_with_merge_operator().await;
         db.inner.oracle.advance_durable_seq(1);
-        db.inner.snapshot_manager.register(Some(3));
+        let seq = db.inner.active_seq_tracker.write().register(Some(3));
 
         let table = WritableKVTable::new();
         // Add versions: seq=1, seq=2, seq=3, seq=4
@@ -484,6 +492,8 @@ mod tests {
             ],
         )
         .await;
+
+        db.inner.active_seq_tracker.write().unregister(seq);
 
         db.close().await.unwrap();
     }

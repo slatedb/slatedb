@@ -42,6 +42,7 @@ use parking_lot::RwLock;
 use std::time::Duration;
 use tokio::sync::mpsc::UnboundedSender;
 
+use crate::active_seq_tracker::ActiveSeqTracker;
 use crate::batch::WriteBatch;
 use crate::batch_write::{WriteBatchMessage, WRITE_BATCH_TASK_NAME};
 use crate::bytes_range::BytesRange;
@@ -66,7 +67,6 @@ use crate::oracle::{DbOracle, Oracle};
 use crate::paths::PathResolver;
 use crate::rand::DbRand;
 use crate::reader::Reader;
-use crate::snapshot_manager::SnapshotManager;
 use crate::sst_iter::SstIteratorOptions;
 use crate::tablestore::TableStore;
 use crate::transaction_manager::TransactionManager;
@@ -111,7 +111,7 @@ pub(crate) struct DbInner {
     pub(crate) wal_enabled: bool,
     /// [`txn_manager`] tracks all the live transactions and related metadata.
     pub(crate) txn_manager: Arc<TransactionManager>,
-    pub(crate) snapshot_manager: Arc<SnapshotManager>,
+    pub(crate) active_seq_tracker: Arc<RwLock<ActiveSeqTracker>>,
     pub(crate) status_reporter: DbStatusReporter,
 }
 
@@ -171,8 +171,12 @@ impl DbInner {
             settings.flush_interval,
         ));
 
-        let txn_manager = Arc::new(TransactionManager::new(oracle.clone(), rand.clone()));
-        let snapshot_manager = Arc::new(SnapshotManager::new(oracle.clone()));
+        let active_seq_tracker = Arc::new(RwLock::new(ActiveSeqTracker::new(oracle.clone())));
+        let txn_manager = Arc::new(TransactionManager::new(
+            oracle.clone(),
+            rand.clone(),
+            active_seq_tracker.clone(),
+        ));
 
         let db_inner = Self {
             state,
@@ -191,7 +195,7 @@ impl DbInner {
             fp_registry,
             reader,
             txn_manager,
-            snapshot_manager,
+            active_seq_tracker,
             status_reporter,
         };
         Ok(db_inner)
@@ -3550,7 +3554,11 @@ mod tests {
 
         fail_parallel::cfg(fp_registry.clone(), "flush-memtable-to-l0", "off").unwrap();
 
-        flush_handle.await.unwrap().unwrap();
+        tokio::time::timeout(Duration::from_secs(5), flush_handle)
+            .await
+            .expect("timed out waiting for paused flush to finish")
+            .unwrap()
+            .unwrap();
 
         {
             let guard = db.inner.state.read();
@@ -5418,7 +5426,7 @@ mod tests {
         db.put(b"key2", b"value2").await.unwrap();
         db.inner.flush_memtables().await.unwrap();
 
-        let min_active_seq = db.inner.snapshot_manager.min_seq();
+        let min_active_seq = db.inner.active_seq_tracker.read().min_seq();
         assert!(min_active_seq.is_some());
         assert_eq!(min_active_seq.unwrap(), snapshot_seq);
 
@@ -5428,7 +5436,7 @@ mod tests {
             assert_eq!(
                 recent_min_seq,
                 min_active_seq.unwrap(),
-                "recent_snapshot_min_seq should equal snapshot_manager.min_seq() after flush"
+                "recent_snapshot_min_seq should equal active_seq_tracker.min_seq() after flush"
             );
         }
 
@@ -6071,6 +6079,113 @@ mod tests {
         );
 
         db.close().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_begin_during_paused_flush_updates_recent_snapshot_min_seq() {
+        async fn wait_for_compacted_sst(db: &Db) -> bool {
+            for _ in 0..200 {
+                let ssts = db
+                    .inner
+                    .table_store
+                    .list_compacted_ssts(..)
+                    .await
+                    .expect("failed to list compacted ssts");
+                if !ssts.is_empty() {
+                    return true;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            false
+        }
+
+        let fp_registry = Arc::new(FailPointRegistry::new());
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_begin_during_paused_flush_updates_recent_snapshot_min_seq");
+        let mut settings = test_db_options(0, 2048, None);
+        settings.flush_interval = None;
+
+        let db = Arc::new(
+            Db::builder(path.clone(), object_store.clone())
+                .with_settings(settings)
+                .with_fp_registry(fp_registry.clone())
+                .build()
+                .await
+                .unwrap(),
+        );
+
+        db.put_with_options(
+            b"k1",
+            b"v1",
+            &PutOptions::default(),
+            &WriteOptions {
+                await_durable: false,
+            },
+        )
+        .await
+        .unwrap();
+
+        fail_parallel::cfg(
+            fp_registry.clone(),
+            "after-flush-imm-to-l0-before-manifest",
+            "pause",
+        )
+        .unwrap();
+
+        let flush_handle = {
+            let db = Arc::clone(&db);
+            tokio::spawn(async move {
+                db.flush_with_options(FlushOptions {
+                    flush_type: FlushType::MemTable,
+                })
+                .await
+            })
+        };
+
+        if !wait_for_compacted_sst(&db).await {
+            fail_parallel::cfg(
+                fp_registry.clone(),
+                "after-flush-imm-to-l0-before-manifest",
+                "off",
+            )
+            .unwrap();
+            let _ = tokio::time::timeout(Duration::from_secs(5), flush_handle).await;
+            panic!("flush did not reach the failpoint before manifest update");
+        }
+
+        let txn = db
+            .begin(IsolationLevel::SerializableSnapshot)
+            .await
+            .unwrap();
+        let txn_seq = txn.seqnum();
+
+        fail_parallel::cfg(
+            fp_registry.clone(),
+            "after-flush-imm-to-l0-before-manifest",
+            "off",
+        )
+        .unwrap();
+
+        tokio::time::timeout(Duration::from_secs(5), flush_handle)
+            .await
+            .expect("timed out waiting for paused flush to finish")
+            .unwrap()
+            .unwrap();
+
+        let manifest_store = ManifestStore::new(&path, object_store.clone());
+        let (_, manifest) = manifest_store.read_latest_manifest().await.unwrap();
+        let recent_snapshot_min_seq = manifest.core.recent_snapshot_min_seq;
+        assert_eq!(
+            recent_snapshot_min_seq, txn_seq,
+            "flush must persist the transaction snapshot seq once begin() returns"
+        );
+
+        assert_eq!(
+            txn.get(b"k1").await.unwrap(),
+            Some(Bytes::from_static(b"v1"))
+        );
+
+        db.close().await.unwrap()
     }
 
     #[tokio::test]

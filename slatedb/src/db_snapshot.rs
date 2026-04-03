@@ -10,7 +10,6 @@ use crate::types::KeyValue;
 use crate::db::DbInner;
 use crate::DbRead;
 
-#[derive(Clone)]
 pub struct DbSnapshot {
     started_seq: u64,
     db_inner: Arc<DbInner>,
@@ -18,7 +17,7 @@ pub struct DbSnapshot {
 
 impl DbSnapshot {
     pub(crate) fn new(db_inner: Arc<DbInner>, seq: Option<u64>) -> Arc<Self> {
-        let started_seq = db_inner.snapshot_manager.register(seq);
+        let started_seq = db_inner.active_seq_tracker.write().register(seq);
 
         Arc::new(Self {
             started_seq,
@@ -212,7 +211,10 @@ impl DbRead for DbSnapshot {
 
 impl Drop for DbSnapshot {
     fn drop(&mut self) {
-        self.db_inner.snapshot_manager.unregister(self.started_seq);
+        self.db_inner
+            .active_seq_tracker
+            .write()
+            .unregister(self.started_seq);
     }
 }
 

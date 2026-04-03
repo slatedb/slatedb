@@ -78,6 +78,7 @@ pub mod manifest;
 pub mod seq_tracker;
 pub mod size_tiered_compaction;
 
+mod active_seq_tracker;
 mod batch;
 mod batch_write;
 mod blob;
@@ -131,7 +132,6 @@ mod rand;
 mod reader;
 mod retention_iterator;
 mod retrying_object_store;
-mod snapshot_manager;
 mod sorted_run_iterator;
 mod sst_builder;
 mod sst_iter;

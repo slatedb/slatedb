@@ -1,5 +1,6 @@
+use crate::active_seq_tracker::ActiveSeqTracker;
 use crate::bytes_range::BytesRange;
-use crate::oracle::{DbOracle, Oracle};
+use crate::oracle::DbOracle;
 use crate::rand::DbRand;
 use crate::utils::IdGenerator;
 use bytes::Bytes;
@@ -74,6 +75,7 @@ impl TransactionState {
 /// TODO: have a quota for max active transactions.
 pub(crate) struct TransactionManager {
     inner: Arc<RwLock<TransactionManagerInner>>,
+    active_seq_tracker: Arc<RwLock<ActiveSeqTracker>>,
     /// Random number generator for generating transaction IDs
     db_rand: Arc<DbRand>,
 }
@@ -95,37 +97,44 @@ struct TransactionManagerInner {
 }
 
 impl TransactionManager {
-    pub(crate) fn new(oracle: Arc<DbOracle>, db_rand: Arc<DbRand>) -> Self {
+    pub(crate) fn new(
+        oracle: Arc<DbOracle>,
+        db_rand: Arc<DbRand>,
+        active_seq_tracker: Arc<RwLock<ActiveSeqTracker>>,
+    ) -> Self {
         Self {
             inner: Arc::new(RwLock::new(TransactionManagerInner {
                 active_txns: HashMap::new(),
                 recent_committed_txns: VecDeque::new(),
                 oracle,
             })),
+            active_seq_tracker,
             db_rand,
         }
     }
 
     /// Register a read-write transaction state.
     ///
-    /// The started sequence is captured from the oracle while the transaction manager lock
-    /// is held, so registration and sequence assignment happen atomically from the manager's
-    /// perspective.
+    /// The started sequence is returned from the active_seq_tracker while the transaction manager lock
+    /// is held, so registration and sequence assignment happen atomically from the manager's and
+    /// active_seq_tracker's perspective.
     pub(crate) fn new_transaction(&self) -> (Uuid, u64) {
         let txn_id = self.db_rand.rng().gen_uuid();
+        let mut active_seq_tracker = self.active_seq_tracker.write();
         let mut inner = self.inner.write();
-        let seq = inner.oracle.last_committed_seq();
+        let started_seq = active_seq_tracker.register(None);
         inner.active_txns.insert(
             txn_id,
             TransactionState {
-                started_seq: seq,
+                started_seq,
                 committed_seq: None,
                 write_keys: HashSet::new(),
                 read_keys: HashSet::new(),
                 read_ranges: Vec::new(),
             },
         );
-        (txn_id, seq)
+
+        (txn_id, started_seq)
     }
 
     #[cfg(test)]
@@ -139,7 +148,9 @@ impl TransactionManager {
         };
 
         {
+            let mut active_seq_tracker = self.active_seq_tracker.write();
             let mut inner = self.inner.write();
+            active_seq_tracker.register(Some(seq));
             inner.active_txns.insert(txn_id, txn_state);
         }
 
@@ -152,8 +163,14 @@ impl TransactionManager {
     /// method does nothing on such case.
     /// Here's a chance to recycle the recent committed txns.
     pub(crate) fn drop_txn(&self, txn_id: &Uuid) {
+        // Keep the same lock ordering as `new_transaction`: active-seq tracker
+        // before transaction manager. Using a consistent order avoids deadlocks,
+        // and holding both locks would ensure atomicity on operations.
+        let mut active_seq_tracker = self.active_seq_tracker.write();
         let mut inner = self.inner.write();
-        inner.active_txns.remove(txn_id);
+        if let Some(txn_state) = inner.active_txns.remove(txn_id) {
+            active_seq_tracker.unregister(txn_state.started_seq);
+        }
         inner.recycle_recent_committed_txns();
     }
 
@@ -218,11 +235,12 @@ impl TransactionManager {
     /// Record a recent committed transaction for conflict detection.
     /// This method should be called after confirming no conflicts exist.
     pub(crate) fn track_recent_committed_txn(&self, txn_id: &Uuid, committed_seq: u64) {
-        // remove the transaction from active_txns, and add it to recent_committed_txns
+        let mut active_seq_tracker = self.active_seq_tracker.write();
         let mut inner = self.inner.write();
 
         // remove the txn from active txns and append it to recent_committed_txns.
         if let Some(mut txn_state) = inner.active_txns.remove(txn_id) {
+            active_seq_tracker.unregister(txn_state.started_seq);
             txn_state.mark_as_committed(committed_seq);
             inner.track_recent_committed_state(txn_state);
         }
@@ -378,6 +396,7 @@ impl TransactionManagerInner {
 mod tests {
     use super::*;
     use crate::db_status::DbStatusReporter;
+    use crate::oracle::Oracle;
     use crate::rand::DbRand;
     use bytes::Bytes;
     use parking_lot::Mutex;
@@ -396,7 +415,8 @@ mod tests {
         let db_rand = Arc::new(DbRand::new(0));
         let status_reporter = DbStatusReporter::new(0);
         let oracle = Arc::new(DbOracle::new(0, 0, 0, status_reporter));
-        TransactionManager::new(oracle, db_rand)
+        let active_seq_tracker = Arc::new(RwLock::new(ActiveSeqTracker::new(oracle.clone())));
+        TransactionManager::new(oracle, db_rand, active_seq_tracker)
     }
 
     #[test]
@@ -404,14 +424,15 @@ mod tests {
         let db_rand = Arc::new(DbRand::new(0));
         let status_reporter = DbStatusReporter::new(123);
         let oracle = Arc::new(DbOracle::new(123, 123, 123, status_reporter));
-        let txn_manager = TransactionManager::new(oracle, db_rand);
-
+        let active_seq_tracker = Arc::new(RwLock::new(ActiveSeqTracker::new(oracle.clone())));
+        let txn_manager = TransactionManager::new(oracle, db_rand, active_seq_tracker.clone());
         let (txn_id, seq) = txn_manager.new_transaction();
 
         assert_eq!(seq, 123);
         let inner = txn_manager.inner.read();
         let state = inner.active_txns.get(&txn_id).unwrap();
         assert_eq!(state.started_seq, 123);
+        assert_eq!(active_seq_tracker.read().min_seq(), Some(123));
     }
 
     #[test]
@@ -429,6 +450,7 @@ mod tests {
 
         // Verify it's removed
         assert!(!txn_manager.inner.read().active_txns.contains_key(&txn_id));
+        assert_eq!(txn_manager.active_seq_tracker.read().min_seq(), None);
     }
 
     #[test]
@@ -1222,8 +1244,8 @@ mod tests {
             for op in ops {
                 exec_state.execute_operation(&txn_manager, &op);
 
-                // Verify that active_txns.keys() and committed transaction IDs are disjoint
                 let inner = txn_manager.inner.read();
+                let tracker = txn_manager.active_seq_tracker.read();
                 let active_ids: HashSet<Uuid> = inner.active_txns.keys().cloned().collect();
 
                 for active_id in &active_ids {
@@ -1238,6 +1260,21 @@ mod tests {
                 prop_assert!(
                     inner.recent_committed_txns.iter().all(|_committed_txn| true),
                     "No committed transaction should have an active counterpart"
+                );
+
+                let tracked_txn_count: usize =
+                    tracker.active_seqs.values().map(|count| *count as usize).sum();
+                let min_started_seq = inner.active_txns.values().map(|txn| txn.started_seq).min();
+
+                prop_assert_eq!(
+                    tracked_txn_count,
+                    inner.active_txns.len(),
+                    "active_seq_tracker refcount should match active_txns len"
+                );
+                prop_assert_eq!(
+                    tracker.min_seq(),
+                    min_started_seq,
+                    "active_seq_tracker min seq should match active_txns min started_seq"
                 );
             }
         }
@@ -1267,6 +1304,7 @@ mod tests {
                     // Garbage collection correctness invariant
                     // recent_committed_txns.is_empty() OR (there exists an active transaction in active_txns.values() that is not read-only)
                     let inner = txn_manager.inner.read();
+                    let tracker = txn_manager.active_seq_tracker.read();
 
                     // if the recent_committed_txns queue is not empty, there must be at least one non-readonly active transaction
                     if !inner.recent_committed_txns.is_empty() {
@@ -1282,6 +1320,21 @@ mod tests {
                     if inner.active_txns.is_empty() {
                         prop_assert!(inner.recent_committed_txns.is_empty(), "If there are no active transactions, recent_committed_txns should be empty");
                     }
+
+                    let tracked_txn_count: usize =
+                        tracker.active_seqs.values().map(|count| *count as usize).sum();
+                    let min_started_seq = inner.active_txns.values().map(|txn| txn.started_seq).min();
+
+                    prop_assert_eq!(
+                        tracked_txn_count,
+                        inner.active_txns.len(),
+                        "active_seq_tracker refcount should match active_txns len after recycle"
+                    );
+                    prop_assert_eq!(
+                        tracker.min_seq(),
+                        min_started_seq,
+                        "active_seq_tracker min seq should match active_txns min started_seq after recycle"
+                    );
                 }
             }
         }
