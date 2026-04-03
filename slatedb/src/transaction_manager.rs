@@ -261,6 +261,22 @@ impl TransactionManager {
     pub(crate) fn has_active_txns(&self) -> bool {
         !self.inner.read().active_txns.is_empty()
     }
+
+    /// The min started_seq of all active transactions, including snapshots. This value
+    /// is useful to inform the compactor about the min seq of data still needed to be
+    /// retained for active transactions, so that the compactor can avoid deleting the
+    /// data that is still needed.
+    ///
+    /// min_active_seq will be persisted to the `recent_snapshot_min_seq` in the manifest
+    /// when a new L0 is flushed.
+    pub(crate) fn min_active_seq(&self) -> Option<u64> {
+        let inner = self.inner.read();
+        inner
+            .active_txns
+            .values()
+            .map(|state| state.started_seq)
+            .min()
+    }
 }
 
 impl TransactionManagerInner {
@@ -605,6 +621,45 @@ mod tests {
         );
     }
 
+    #[derive(Debug)]
+    struct MinActiveSeqTestCase {
+        name: &'static str,
+        txn_seqs: Vec<u64>,
+        expected_min_seq: Option<u64>,
+    }
+
+    #[rstest]
+    #[case::no_transactions_returns_none(MinActiveSeqTestCase {
+        name: "no transactions returns none",
+        txn_seqs: vec![],
+        expected_min_seq: None,
+    })]
+    #[case::single_transaction(MinActiveSeqTestCase {
+        name: "single transaction",
+        txn_seqs: vec![(100)],
+        expected_min_seq: Some(100),
+    })]
+    #[case::multiple_transactions_returns_minimum(MinActiveSeqTestCase {
+        name: "multiple transactions returns minimum",
+        txn_seqs: vec![(200), (100), (150)],
+        expected_min_seq: Some(100),
+    })]
+    fn test_min_active_seq_table_driven(#[case] case: MinActiveSeqTestCase) {
+        let txn_manager = create_transaction_manager();
+
+        // Create transactions according to the test case
+        for seq_no in case.txn_seqs {
+            let _txn_id = txn_manager.new_txn_with_id(seq_no, Uuid::new_v4());
+        }
+
+        assert_eq!(
+            txn_manager.min_active_seq(),
+            case.expected_min_seq,
+            "Test case '{}' failed",
+            case.name
+        );
+    }
+
     struct TrackRecentCommittedTxnTestCase {
         name: &'static str,
         setup: Box<dyn Fn(&mut TransactionManager)>,
@@ -899,6 +954,7 @@ mod tests {
 
         // Step 1: Create a transaction
         let txn_id = txn_manager.new_txn_with_id(100, Uuid::new_v4());
+        assert_eq!(txn_manager.min_active_seq(), Some(100));
 
         // Step 2: Simulate conflict detection during transaction
         let write_keys: HashSet<Bytes> = ["key1", "key2"].into_iter().map(Bytes::from).collect();
@@ -1252,6 +1308,37 @@ mod tests {
 
                 if let TxnOperation::Commit { txn_id: None, keys: _, } = &op {
                     prop_assert!(effect == ExecutionEffect::CommitSuccess, "If the commit is successful, the transaction should have conflict");
+                }
+            }
+        }
+
+      #[test]
+        fn prop_inv_min_active_seq_correctness(ops in operation_sequence_strategy()) {
+            let txn_manager = create_transaction_manager();
+            let mut exec_state = ExecutionState::new();
+
+            for op in ops {
+                exec_state.execute_operation(&txn_manager, &op);
+
+                // Verify min_active_seq correctness
+                let min_active_seq = txn_manager.min_active_seq();
+                let inner = txn_manager.inner.read();
+
+                if inner.active_txns.is_empty() {
+                    prop_assert!(
+                        min_active_seq.is_none(),
+                        "min_active_seq should be None when no active transactions exist"
+                    );
+                } else {
+                    let expected_min = inner.active_txns.values()
+                        .map(|txn| txn.started_seq)
+                        .min();
+
+                    prop_assert_eq!(
+                        min_active_seq,
+                        expected_min,
+                        "min_active_seq should equal the minimum started_seq of all active transactions"
+                    );
                 }
             }
         }

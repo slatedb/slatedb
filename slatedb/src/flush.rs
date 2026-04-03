@@ -47,10 +47,14 @@ impl DbInner {
         // Otherwise, if we only keep a newer non-durable version, remote readers would skip
         // it and incorrectly fall back to an even older value.
         let durable_seq = self.oracle.last_remote_persisted_seq();
-        let min_retention_seq = match self.snapshot_manager.min_seq() {
-            Some(active_seq) => Some(active_seq.min(durable_seq)),
-            None => Some(durable_seq),
-        };
+        let min_retention_seq = [
+            Some(durable_seq),
+            self.snapshot_manager.min_seq(),
+            self.txn_manager.min_active_seq(),
+        ]
+        .into_iter()
+        .flatten()
+        .min();
 
         let merge_iter = if let Some(merge_operator) = self.reader.merge_operator.clone() {
             Box::new(MergeOperatorIterator::new(
