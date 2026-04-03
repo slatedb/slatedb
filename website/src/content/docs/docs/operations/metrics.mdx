@@ -149,9 +149,11 @@ counted.
 
 These are passed to `register_histogram` as the `boundaries` parameter.
 
-## Testing with DefaultMetricsRecorder
+## Using DefaultMetricsRecorder
 
-`slatedb-common` ships a `DefaultMetricsRecorder` backed by atomics for use in tests:
+`slatedb-common` ships a `DefaultMetricsRecorder` backed by atomics. It's useful
+in tests and in some production scenarios that don't have a dedicated metrics
+backend (e.g. periodic logging):
 
 ```rust
 use slatedb_common::metrics::DefaultMetricsRecorder;
@@ -257,7 +259,7 @@ impl MetricsRecorder for PrometheusRecorder {
 
 ## Implementing an OpenTelemetry recorder
 
-An OTel recorder maps directly to OTel SDK instruments:
+A recorder that maps directly to the OpenTelemetry SDK instruments:
 
 ```rust
 use opentelemetry::metrics::MeterProvider;
