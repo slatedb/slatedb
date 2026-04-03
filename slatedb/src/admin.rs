@@ -276,7 +276,7 @@ impl Admin {
         .build();
 
         let (_, rx) = async_channel::unbounded();
-        let closed_result = ClosedResultWriter::new(WatchableOnceCell::new());
+        let closed_result = ClosedResultWriter::new();
         let task_executor = MessageHandlerExecutor::new(closed_result, self.system_clock.clone());
 
         task_executor

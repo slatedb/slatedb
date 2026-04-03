@@ -293,6 +293,13 @@ pub(crate) mod safe_async_channel {
     }
 
     impl<T> SafeSender<T> {
+        pub(crate) fn new(
+            tx: async_channel::Sender<T>,
+            closed: WatchableOnceCellReader<Result<(), SlateDBError>>,
+        ) -> Self {
+            Self { tx, closed }
+        }
+
         /// Send a message, returning the receiver's close reason if the
         /// channel has been closed.
         pub(crate) fn send(&self, message: T) -> Result<(), SlateDBError> {

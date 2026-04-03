@@ -509,6 +509,10 @@ impl<P: Into<Path>> DbBuilder<P> {
         )
         .await?;
 
+        // Shared lifecycle state — created before DbInner so it can be shared
+        // with the executor and channel construction.
+        let closed_result = ClosedResultWriter::new();
+
         // Setup communication channels
         let (write_tx, write_rx) = async_channel::unbounded();
 
@@ -526,6 +530,7 @@ impl<P: Into<Path>> DbBuilder<P> {
                 recorder.clone(),
                 self.fp_registry.clone(),
                 self.merge_operator.clone(),
+                closed_result.clone(),
             )
             .await?,
         );
@@ -538,7 +543,7 @@ impl<P: Into<Path>> DbBuilder<P> {
         // Setup background tasks
         let tokio_handle = Handle::current();
         let task_executor = Arc::new(MessageHandlerExecutor::new(
-            inner.clone().state.read().closed_result(),
+            closed_result,
             system_clock.clone(),
         ));
         if inner.wal_enabled {
@@ -893,7 +898,7 @@ impl<P: Into<Path>> CompactorBuilder<P> {
             rand: Arc::new(DbRand::default()),
             recorder: MetricsRecorderHelper::noop(),
             system_clock: Arc::new(DefaultSystemClock::default()),
-            closed_result: ClosedResultWriter::new(WatchableOnceCell::new()),
+            closed_result: ClosedResultWriter::new(),
             merge_operator: None,
             block_transformer: None,
             #[cfg(feature = "compaction_filters")]

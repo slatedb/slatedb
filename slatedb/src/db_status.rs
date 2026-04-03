@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use tokio::sync::watch;
 
 use crate::error::SlateDBError;
@@ -63,48 +61,49 @@ impl DbStatusReporter {
     }
 }
 
-type OnCloseCallback = Arc<dyn Fn(CloseReason) + Send + Sync>;
-
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(crate) struct ClosedResultWriter {
     cell: WatchableOnceCell<Result<(), SlateDBError>>,
-    on_close: Option<OnCloseCallback>,
-}
-
-impl std::fmt::Debug for ClosedResultWriter {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ClosedResultWriter")
-            .field("cell", &self.cell)
-            .field("on_close", &self.on_close.as_ref().map(|_| "..."))
-            .finish()
-    }
 }
 
 impl ClosedResultWriter {
-    pub(crate) fn new(cell: WatchableOnceCell<Result<(), SlateDBError>>) -> Self {
+    pub(crate) fn new() -> Self {
         Self {
-            cell,
-            on_close: None,
+            cell: WatchableOnceCell::new(),
         }
-    }
-
-    pub(crate) fn with_on_close(mut self, callback: OnCloseCallback) -> Self {
-        self.on_close = Some(callback);
-        self
     }
 
     pub(crate) fn write(&self, result: Result<(), SlateDBError>) {
-        let reason = match &result {
-            Ok(()) => CloseReason::Clean,
-            Err(err) => CloseReason::from(crate::Error::from(err.clone()).kind()),
-        };
         self.cell.write(result);
-        if let Some(on_close) = &self.on_close {
-            on_close(reason);
-        }
     }
 
     pub(crate) fn reader(&self) -> crate::utils::WatchableOnceCellReader<Result<(), SlateDBError>> {
         self.cell.reader()
+    }
+
+    /// Create a safe sender + raw receiver pair wired to this closed state.
+    pub(crate) fn channel<T>(
+        &self,
+    ) -> (
+        crate::utils::safe_async_channel::SafeSender<T>,
+        async_channel::Receiver<T>,
+    ) {
+        let (tx, rx) = async_channel::unbounded();
+        let safe_tx = crate::utils::safe_async_channel::SafeSender::new(tx, self.reader());
+        (safe_tx, rx)
+    }
+
+    /// Spawn a background task that watches for the closed result and reports
+    /// the close reason to the status reporter.
+    pub(crate) fn spawn_close_watcher(&self, reporter: DbStatusReporter) {
+        let mut reader = self.reader();
+        tokio::spawn(async move {
+            let result = reader.await_value().await;
+            let reason = match &result {
+                Ok(()) => CloseReason::Clean,
+                Err(err) => CloseReason::from(crate::Error::from(err.clone()).kind()),
+            };
+            reporter.report_closed(reason);
+        });
     }
 }

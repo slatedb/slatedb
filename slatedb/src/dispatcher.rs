@@ -932,7 +932,7 @@ mod test {
         let (tx, rx) = async_channel::unbounded();
         let clock = Arc::new(MockSystemClock::new());
         let handler = TestHandler::new(log.clone(), cleanup_called.clone(), clock.clone());
-        let closed_result = ClosedResultWriter::new(WatchableOnceCell::new());
+        let closed_result = ClosedResultWriter::new();
         let fp_registry = Arc::new(FailPointRegistry::default());
         let task_executor = MessageHandlerExecutor::new(closed_result.clone(), clock.clone())
             .with_fp_registry(fp_registry.clone());
@@ -1299,7 +1299,7 @@ mod test {
         let (tx, rx) = async_channel::unbounded::<u8>();
         let clock = Arc::new(DefaultSystemClock::new());
         let handler = PanicHandler { cleanup_called };
-        let closed_result = ClosedResultWriter::new(WatchableOnceCell::new());
+        let closed_result = ClosedResultWriter::new();
         let task_executor = MessageHandlerExecutor::new(closed_result.clone(), clock.clone());
 
         // Spawn the panic task
@@ -1351,7 +1351,7 @@ mod test {
         drop(tx); // no messages needed
         let clock = Arc::new(DefaultSystemClock::new());
         let handler = TestHandler::new(log.clone(), cleanup_called.clone(), clock.clone());
-        let closed_result = ClosedResultWriter::new(WatchableOnceCell::new());
+        let closed_result = ClosedResultWriter::new();
         let fp_registry = Arc::new(FailPointRegistry::default());
         let task_executor = MessageHandlerExecutor::new(closed_result.clone(), clock.clone())
             .with_fp_registry(fp_registry.clone());
@@ -1500,7 +1500,7 @@ mod test {
         let handler2 = ParallelTestHandler::new(2, log.clone(), WatchableOnceCell::new())
             .with_block_on(block2.clone());
 
-        let closed_result = ClosedResultWriter::new(WatchableOnceCell::new());
+        let closed_result = ClosedResultWriter::new();
         let task_executor = MessageHandlerExecutor::new(closed_result, clock);
         task_executor
             .add_handlers(
@@ -1545,7 +1545,7 @@ mod test {
         let handler2 = ParallelTestHandler::new(2, log.clone(), WatchableOnceCell::new())
             .add_ticker(Duration::from_millis(1), 20);
 
-        let closed_result = ClosedResultWriter::new(WatchableOnceCell::new());
+        let closed_result = ClosedResultWriter::new();
         let task_executor = MessageHandlerExecutor::new(closed_result, clock);
         task_executor
             .add_handlers(
@@ -1610,7 +1610,7 @@ mod test {
         let handler2 =
             ParallelTestHandler::new(2, log.clone(), cleanup2).with_block_on(block2.clone());
 
-        let closed_result = ClosedResultWriter::new(WatchableOnceCell::new());
+        let closed_result = ClosedResultWriter::new();
         let task_executor = MessageHandlerExecutor::new(closed_result.clone(), clock)
             .with_fp_registry(fp_registry.clone());
         // After one successful handle(), the next loop iteration triggers a fenced error
@@ -1672,7 +1672,7 @@ mod test {
         let handler2 = ParallelTestHandler::new(2, log.clone(), WatchableOnceCell::new())
             .with_block_on(block2.clone());
 
-        let closed_result = ClosedResultWriter::new(WatchableOnceCell::new());
+        let closed_result = ClosedResultWriter::new();
         let task_executor = Arc::new(MessageHandlerExecutor::new(closed_result, clock));
         task_executor
             .add_handlers(
@@ -1724,7 +1724,7 @@ mod test {
         let handler1 = ParallelTestHandler::new(1, log.clone(), WatchableOnceCell::new());
         let handler2 = ParallelTestHandler::new(2, log.clone(), WatchableOnceCell::new());
 
-        let closed_result = ClosedResultWriter::new(WatchableOnceCell::new());
+        let closed_result = ClosedResultWriter::new();
         let task_executor =
             MessageHandlerExecutor::new(closed_result, clock).with_fp_registry(fp_registry.clone());
         // Pause the run loop so messages queue up
@@ -1784,7 +1784,7 @@ mod test {
             clock.clone(),
         );
 
-        let closed_result = ClosedResultWriter::new(WatchableOnceCell::new());
+        let closed_result = ClosedResultWriter::new();
         let task_executor = MessageHandlerExecutor::new(closed_result, clock);
         task_executor
             .add_handlers(

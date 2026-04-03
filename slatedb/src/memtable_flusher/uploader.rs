@@ -332,6 +332,7 @@ mod tests {
     use crate::config::Settings;
     use crate::db::DbInner;
     use crate::db_state::{ManifestCore, SsTableId};
+    use crate::db_status::ClosedResultWriter;
     use crate::error::SlateDBError;
     use crate::format::sst::SsTableFormat;
     use crate::object_stores::ObjectStores;
@@ -389,6 +390,7 @@ mod tests {
                 db_metrics,
                 fp_registry,
                 None,
+                ClosedResultWriter::new(),
             )
             .await
             .unwrap(),

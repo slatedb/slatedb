@@ -747,6 +747,7 @@ mod tests {
     use crate::config::{CheckpointOptions, Settings};
     use crate::db::DbInner;
     use crate::db_state::{ManifestCore, SsTableId};
+    use crate::db_status::ClosedResultWriter;
     use crate::format::sst::SsTableFormat;
     use crate::manifest::store::{FenceableManifest, ManifestStore, StoredManifest};
     use crate::memtable_flusher::uploader::UploadedMemtable;
@@ -850,6 +851,7 @@ mod tests {
                 db_metrics,
                 fp_registry,
                 None,
+                ClosedResultWriter::new(),
             )
             .await
             .unwrap(),

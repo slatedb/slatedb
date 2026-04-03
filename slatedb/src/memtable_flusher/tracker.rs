@@ -408,6 +408,7 @@ mod tests {
     use crate::db_state::{
         ManifestCore, SsTableHandle, SsTableId, SsTableInfo, SsTableView, SstType,
     };
+    use crate::db_status::ClosedResultWriter;
     use crate::error::SlateDBError;
     use crate::format::sst::{SsTableFormat, SST_FORMAT_VERSION_LATEST};
     use crate::manifest::store::{FenceableManifest, ManifestStore, StoredManifest};
@@ -477,6 +478,7 @@ mod tests {
                 db_metrics,
                 fp_registry,
                 None,
+                ClosedResultWriter::new(),
             )
             .await
             .unwrap(),

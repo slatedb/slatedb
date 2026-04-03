@@ -77,7 +77,7 @@ use slatedb_common::clock::SystemClock;
 use slatedb_common::metrics::MetricsRecorderHelper;
 use slatedb_txn_obj::DirtyObject;
 
-use crate::db_status::DbStatusReporter;
+use crate::db_status::{ClosedResultWriter, DbStatusReporter};
 pub use builder::DbBuilder;
 pub use builder::DbReaderBuilder;
 
@@ -125,6 +125,7 @@ impl DbInner {
         recorder: MetricsRecorderHelper,
         fp_registry: Arc<FailPointRegistry>,
         merge_operator: Option<crate::merge_operator::MergeOperatorType>,
+        closed_result: ClosedResultWriter,
     ) -> Result<Self, SlateDBError> {
         // both last_seq and last_committed_seq will be updated after WAL replay.
         let last_l0_seq = manifest.value.core.last_l0_seq;
@@ -142,8 +143,13 @@ impl DbInner {
         ));
 
         // state are mostly manifest, including IMM, L0, etc.
-        let db_state = DbState::new(manifest, status_reporter.clone());
+        let db_state = DbState::new(manifest, closed_result);
         let state = Arc::new(RwLock::new(db_state));
+        // Watch for closed result and report status to subscribers.
+        state
+            .read()
+            .closed_result()
+            .spawn_close_watcher(status_reporter.clone());
 
         let db_stats = DbStats::new(&recorder);
         let wal_enabled = DbInner::wal_enabled_in_options(&settings);
