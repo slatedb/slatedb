@@ -13,6 +13,7 @@ import { spawnSync } from "node:child_process";
 
 const PACKAGE_DIR = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(PACKAGE_DIR, "..", "..");
+const UNIFFI_MANIFEST_PATH = join(REPO_ROOT, "bindings", "uniffi", "Cargo.toml");
 const NAMESPACE = "slatedb";
 const CRATE_NAME = "slatedb-uniffi";
 const CDYLIB_NAME = "slatedb_uniffi";
@@ -155,6 +156,8 @@ function generateBindings(libraryPath, tempOutputDir) {
   run("uniffi-bindgen-node-js", [
     "generate",
     libraryPath,
+    "--manifest-path",
+    UNIFFI_MANIFEST_PATH,
     "--crate-name",
     CRATE_NAME,
     "--out-dir",

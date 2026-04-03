@@ -159,7 +159,7 @@ def generateJavaBindings = tasks.register("generateJavaBindings") { task ->
         } catch (Exception ex) {
             throw new GradleException(
                 "uniffi-bindgen-java is required on PATH. Install it with: " +
-                    "cargo install uniffi-bindgen-java --git https://github.com/IronCoreLabs/uniffi-bindgen-java.git. " +
+                    "cargo install uniffi-bindgen-java --version 0.3.1. " +
                     "If Gradle cannot find it, set UNIFFI_BINDGEN_JAVA or -Pslatedb.uniffi.bindgen to the executable path.",
                 ex
             )
@@ -173,7 +173,6 @@ def generateJavaBindings = tasks.register("generateJavaBindings") { task ->
 
         execOperations.exec {
             commandLine uniffiBindgenBinary, "generate",
-                "--library",
                 "--config", uniffiConfigFile.absolutePath,
                 "--out-dir", tempOutputDir.absolutePath,
                 hostNativeLibraryForGeneration.absolutePath

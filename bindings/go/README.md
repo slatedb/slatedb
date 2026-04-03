@@ -24,12 +24,12 @@ There is no handwritten Go wrapper layer yet.
 - Go 1.25.0 or newer
 - CGO enabled
 - A working C toolchain
-- `uniffi-bindgen-go` `0.5.0+v0.29.5`
+- `uniffi-bindgen-go` `0.7.0+v0.31.0`
 
 Install the generator with:
 
 ```bash
-cargo install uniffi-bindgen-go --git https://github.com/NordSecurity/uniffi-bindgen-go --tag v0.5.0+v0.29.5
+cargo install uniffi-bindgen-go --git https://github.com/NordSecurity/uniffi-bindgen-go --tag v0.7.0+v0.31.0
 ```
 
 ## Regenerate

@@ -2,4 +2,4 @@ sphinx>=7.4
 sphinx-rtd-theme>=3.0
 sphinx-autoapi>=3.0
 maturin>=1.10,<2.0
-uniffi-bindgen==0.29.5
+uniffi-bindgen==0.31.0

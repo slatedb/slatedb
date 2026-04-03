@@ -12,10 +12,25 @@ cleanup() {
 }
 trap cleanup EXIT
 
+apply_async_error_workaround() {
+  local generated_file="$1"
+
+  # uniffi-bindgen-go v0.7.0+v0.31.0 does not include PR #91 yet.
+  # Patch the generated async helper so RustBuffer-backed error returns
+  # propagate the original UniFFI error instead of panicking on an empty buffer.
+  perl -0pi -e 's/"math"\n\t"runtime"/"math"\n\t"reflect"\n\t"runtime"/' "${generated_file}"
+  perl -0pi -e 's/\tffiValue, err := rustCallWithError\(errConverter, func\(status \*C\.RustCallStatus\) F \{\n\t\treturn completeFunc\(rustFuture, status\)\n\t\}\)\n\treturn liftFunc\(ffiValue\), err/\tvar goValue T\n\tffiValue, err := rustCallWithError(errConverter, func(status *C.RustCallStatus) F {\n\t\treturn completeFunc(rustFuture, status)\n\t})\n\tif value := reflect.ValueOf(err); value.IsValid() && !value.IsZero() {\n\t\treturn goValue, err\n\t}\n\treturn liftFunc(ffiValue), err/' "${generated_file}"
+
+  if ! grep -q '"reflect"' "${generated_file}" || ! grep -q 'return goValue, err' "${generated_file}"; then
+    echo "failed to apply async error workaround to ${generated_file}" >&2
+    exit 1
+  fi
+}
+
 if ! command -v uniffi-bindgen-go >/dev/null 2>&1; then
   echo "uniffi-bindgen-go is required on PATH" >&2
   echo "Install it with:" >&2
-  echo "  cargo install uniffi-bindgen-go --git https://github.com/NordSecurity/uniffi-bindgen-go --tag v0.5.0+v0.29.5" >&2
+  echo "  cargo install uniffi-bindgen-go --git https://github.com/NordSecurity/uniffi-bindgen-go --tag v0.7.0+v0.31.0" >&2
   exit 1
 fi
 
@@ -59,4 +74,5 @@ rm -f \
   "${GO_PKG_DIR}/slatedb.h"
 cp "${GENERATED_GO_FILE}" "${GO_PKG_DIR}/$(basename "${GENERATED_GO_FILE}")"
 cp "${GENERATED_H_FILE}" "${GO_PKG_DIR}/$(basename "${GENERATED_H_FILE}")"
+apply_async_error_workaround "${GO_PKG_DIR}/$(basename "${GENERATED_GO_FILE}")"
 go -C "${GO_PKG_DIR}" fmt ./...
