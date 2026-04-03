@@ -3,6 +3,8 @@ use std::sync::Arc;
 use slatedb_common::metrics as core_metrics;
 use slatedb_common::metrics::MetricsRecorder as _;
 
+use crate::MetricsRecorder;
+
 /// Key-value label attached to a metric.
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct MetricLabel {
@@ -81,43 +83,6 @@ pub trait UpDownCounter: Send + Sync {
 pub trait Histogram: Send + Sync {
     /// Records `value` in the histogram.
     fn record(&self, value: f64);
-}
-
-/// Application-defined metrics recorder used to publish SlateDB metrics.
-#[uniffi::export(with_foreign)]
-pub trait MetricsRecorder: Send + Sync {
-    /// Registers a monotonically increasing counter.
-    fn register_counter(
-        &self,
-        name: String,
-        description: String,
-        labels: Vec<MetricLabel>,
-    ) -> Arc<dyn Counter>;
-
-    /// Registers a gauge.
-    fn register_gauge(
-        &self,
-        name: String,
-        description: String,
-        labels: Vec<MetricLabel>,
-    ) -> Arc<dyn Gauge>;
-
-    /// Registers an up/down counter.
-    fn register_up_down_counter(
-        &self,
-        name: String,
-        description: String,
-        labels: Vec<MetricLabel>,
-    ) -> Arc<dyn UpDownCounter>;
-
-    /// Registers a histogram with explicit bucket boundaries.
-    fn register_histogram(
-        &self,
-        name: String,
-        description: String,
-        labels: Vec<MetricLabel>,
-        boundaries: Vec<f64>,
-    ) -> Arc<dyn Histogram>;
 }
 
 /// Built-in atomic-backed metrics recorder with snapshot access.
@@ -456,10 +421,9 @@ mod tests {
     use slatedb::object_store::memory::InMemory;
 
     use super::{
-        Counter, DefaultMetricsRecorder, Gauge, Histogram, MetricLabel, MetricValue,
-        MetricsRecorder, UpDownCounter,
+        Counter, DefaultMetricsRecorder, Gauge, Histogram, MetricLabel, MetricValue, UpDownCounter,
     };
-    use crate::{DbBuilder, DbReaderBuilder, ObjectStore};
+    use crate::{DbBuilder, DbReaderBuilder, MetricsRecorder, ObjectStore};
 
     #[derive(Default)]
     struct RecorderState {

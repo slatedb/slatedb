@@ -46,8 +46,41 @@ Maven:
 
 - `ObjectStore.resolve(...)` resolves an object store from a URL such as `memory:///` or `file:///...`
 - `DbBuilder` opens a writable database and `DbReaderBuilder` opens a read-only reader
+- `DbBuilder.withMetricsRecorder(...)` and `DbReaderBuilder.withMetricsRecorder(...)` install a custom metrics sink
+- `DefaultMetricsRecorder` provides an in-process recorder with snapshot and lookup helpers
 - most database operations return `CompletableFuture`
 - native-backed handles implement `AutoCloseable` and should be closed
+
+## Metrics
+
+Use `DefaultMetricsRecorder` when you want to observe SlateDB metrics from Java without wiring a
+custom callback implementation:
+
+```java
+import io.slatedb.uniffi.Db;
+import io.slatedb.uniffi.DbBuilder;
+import io.slatedb.uniffi.DefaultMetricsRecorder;
+import io.slatedb.uniffi.Metric;
+import io.slatedb.uniffi.ObjectStore;
+
+try (ObjectStore store = ObjectStore.resolve("memory:///");
+        DefaultMetricsRecorder recorder = new DefaultMetricsRecorder();
+        DbBuilder builder = new DbBuilder("metrics-demo", store)) {
+    builder.withMetricsRecorder(recorder);
+
+    Db db = await(builder.build());
+    try (db) {
+        await(db.put("hello".getBytes(), "world".getBytes()));
+        await(db.shutdown());
+    }
+
+    Metric writes = recorder.metricByNameAndLabels("slatedb.db.write_ops", java.util.List.of());
+    System.out.println(writes.value());
+}
+```
+
+For custom integrations, implement `MetricsRecorder` and return `Counter`, `Gauge`,
+`UpDownCounter`, and `Histogram` handles from the registration methods.
 
 ## Basic Example
 

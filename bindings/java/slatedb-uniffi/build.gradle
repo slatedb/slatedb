@@ -100,6 +100,21 @@ def nativeSourceFileForPlatform = { platform ->
 }
 
 def hostNativeLibraryForGeneration = nativeSourceFileForPlatform(hostPlatform)
+def patchGeneratedJavaKeywordConflicts = { File outputDir ->
+    File histogramCallback = new File(outputDir, "io/slatedb/uniffi/UniffiCallbackInterfaceHistogram.java")
+    if (!histogramCallback.isFile()) {
+        return
+    }
+
+    String source = histogramCallback.getText("UTF-8")
+    source = source
+        .replace("record.INSTANCE", "RecordCallback.INSTANCE")
+        .replace("public static class record implements", "public static final class RecordCallback implements")
+        .replace("public static final record INSTANCE = new record();",
+            "public static final RecordCallback INSTANCE = new RecordCallback();")
+        .replace("private record() {}", "private RecordCallback() {}")
+    histogramCallback.setText(source, "UTF-8")
+}
 def resolveUniffiBindgenBinary = {
     if (!configuredUniffiBindgenBinary.isEmpty()) {
         return configuredUniffiBindgenBinary
@@ -186,6 +201,10 @@ def generateJavaBindings = tasks.register("generateJavaBindings") { task ->
             from tempOutputDir
             into outputDir
         }
+
+        // uniffi-bindgen-java 0.3.1 emits an illegal helper type named `record`
+        // for the Histogram callback interface when targeting modern Java.
+        patchGeneratedJavaKeywordConflicts(outputDir)
     }
 }
 

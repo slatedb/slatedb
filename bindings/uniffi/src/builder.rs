@@ -8,9 +8,10 @@ use crate::db::Db;
 use crate::db_reader::DbReader;
 use crate::error::{Error, SlateDbError};
 use crate::merge_operator::{adapt_merge_operator, MergeOperator};
-use crate::metrics::{adapt_metrics_recorder, MetricsRecorder};
+use crate::metrics::adapt_metrics_recorder;
 use crate::object_store::ObjectStore;
 use crate::settings::Settings;
+use crate::MetricsRecorder;
 
 /// Builder for opening a writable [`crate::Db`].
 ///
