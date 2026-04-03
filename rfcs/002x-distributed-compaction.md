@@ -373,6 +373,7 @@ Use gossip to distribute jobs directly. Rejected: couples correctness to gossip 
 - [RFC-0013: Compaction State Persistence](0013-compaction-state-persistence.md): `.compactions` file design, external process integration, resume support
 - [RFC-0017: Compaction Filters](0017-compaction-filters.md): compaction filter integration that workers must support
 - [RFC-0001: Manifest](0001-manifest.md): manifest format and create-if-not-exists protocol
+- [Github Issue](https://github.com/slatedb/slatedb/issues/1165)
 
 ## Updates
 
