@@ -8,6 +8,7 @@ use crate::db::Db;
 use crate::db_reader::DbReader;
 use crate::error::{Error, SlateDbError};
 use crate::merge_operator::{adapt_merge_operator, MergeOperator};
+use crate::metrics::{adapt_metrics_recorder, MetricsRecorder};
 use crate::object_store::ObjectStore;
 use crate::settings::Settings;
 
@@ -82,6 +83,17 @@ impl DbBuilder {
     pub fn with_merge_operator(&self, merge_operator: Arc<dyn MergeOperator>) -> Result<(), Error> {
         self.update_builder(|builder| {
             builder.with_merge_operator(adapt_merge_operator(merge_operator))
+        })
+        .map_err(Into::into)
+    }
+
+    /// Installs an application-defined metrics recorder.
+    pub fn with_metrics_recorder(
+        &self,
+        metrics_recorder: Arc<dyn MetricsRecorder>,
+    ) -> Result<(), Error> {
+        self.update_builder(|builder| {
+            builder.with_metrics_recorder(adapt_metrics_recorder(metrics_recorder))
         })
         .map_err(Into::into)
     }
@@ -162,6 +174,17 @@ impl DbReaderBuilder {
         let options = options.into();
         self.update_builder(|builder| builder.with_options(options))
             .map_err(Into::into)
+    }
+
+    /// Installs an application-defined metrics recorder.
+    pub fn with_metrics_recorder(
+        &self,
+        metrics_recorder: Arc<dyn MetricsRecorder>,
+    ) -> Result<(), Error> {
+        self.update_builder(|builder| {
+            builder.with_metrics_recorder(adapt_metrics_recorder(metrics_recorder))
+        })
+        .map_err(Into::into)
     }
 }
 

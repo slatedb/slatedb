@@ -3430,6 +3430,7 @@ dependencies = [
  "parking_lot",
  "serde_json",
  "slatedb",
+ "slatedb-common",
  "tempfile",
  "thiserror 1.0.69",
  "tokio",

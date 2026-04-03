@@ -8,6 +8,7 @@ mod error;
 mod iterator;
 mod logging;
 mod merge_operator;
+mod metrics;
 mod object_store;
 mod settings;
 mod types;
@@ -28,6 +29,10 @@ pub use error::{CloseReason, Error, MergeOperatorCallbackError};
 pub use iterator::DbIterator;
 pub use logging::{init_logging, LogCallback, LogLevel, LogRecord};
 pub use merge_operator::MergeOperator;
+pub use metrics::{
+    Counter, DefaultMetricsRecorder, Gauge, Histogram, HistogramMetricValue, Metric, MetricLabel,
+    MetricValue, MetricsRecorder, UpDownCounter,
+};
 pub use object_store::ObjectStore;
 pub use settings::Settings;
 pub use types::{KeyRange, KeyValue, RowEntry, RowEntryKind, WriteHandle};
