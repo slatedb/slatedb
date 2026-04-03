@@ -102,7 +102,7 @@ You only need these if you are regenerating bindings or building from source in 
 Install the generator with:
 
 ```bash
-cargo install uniffi-bindgen-java --git https://github.com/IronCoreLabs/uniffi-bindgen-java.git
+cargo install uniffi-bindgen-java --version 0.3.1
 ```
 
 ## Regenerate
