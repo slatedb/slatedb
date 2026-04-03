@@ -57,14 +57,14 @@ static void call_UniffiRustFutureContinuationCallback(
 
 
 #endif
-#ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE_FREE
-#define UNIFFI_FFIDEF_FOREIGN_FUTURE_FREE
-typedef void (*UniffiForeignFutureFree)(uint64_t handle);
+#ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE_DROPPED_CALLBACK
+#define UNIFFI_FFIDEF_FOREIGN_FUTURE_DROPPED_CALLBACK
+typedef void (*UniffiForeignFutureDroppedCallback)(uint64_t handle);
 
 // Making function static works arround:
 // https://github.com/golang/go/issues/11263
-static void call_UniffiForeignFutureFree(
-				UniffiForeignFutureFree cb, uint64_t handle)
+static void call_UniffiForeignFutureDroppedCallback(
+				UniffiForeignFutureDroppedCallback cb, uint64_t handle)
 {
 	return cb(handle);
 }
@@ -85,293 +85,285 @@ static void call_UniffiCallbackInterfaceFree(
 
 
 #endif
-#ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE
-#define UNIFFI_FFIDEF_FOREIGN_FUTURE
-typedef struct UniffiForeignFuture {
-    uint64_t handle;
-    UniffiForeignFutureFree free;
-} UniffiForeignFuture;
+#ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_CLONE
+#define UNIFFI_FFIDEF_CALLBACK_INTERFACE_CLONE
+typedef uint64_t (*UniffiCallbackInterfaceClone)(uint64_t handle);
+
+// Making function static works arround:
+// https://github.com/golang/go/issues/11263
+static uint64_t call_UniffiCallbackInterfaceClone(
+				UniffiCallbackInterfaceClone cb, uint64_t handle)
+{
+	return cb(handle);
+}
+
 
 #endif
-#ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE_STRUCT_U8
-#define UNIFFI_FFIDEF_FOREIGN_FUTURE_STRUCT_U8
-typedef struct UniffiForeignFutureStructU8 {
+#ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE_DROPPED_CALLBACK_STRUCT
+#define UNIFFI_FFIDEF_FOREIGN_FUTURE_DROPPED_CALLBACK_STRUCT
+typedef struct UniffiForeignFutureDroppedCallbackStruct {
+    uint64_t handle;
+    UniffiForeignFutureDroppedCallback free;
+} UniffiForeignFutureDroppedCallbackStruct;
+
+#endif
+#ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE_RESULT_U8
+#define UNIFFI_FFIDEF_FOREIGN_FUTURE_RESULT_U8
+typedef struct UniffiForeignFutureResultU8 {
     uint8_t returnValue;
     RustCallStatus callStatus;
-} UniffiForeignFutureStructU8;
+} UniffiForeignFutureResultU8;
 
 #endif
 #ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE_COMPLETE_U8
 #define UNIFFI_FFIDEF_FOREIGN_FUTURE_COMPLETE_U8
-typedef void (*UniffiForeignFutureCompleteU8)(uint64_t callback_data, UniffiForeignFutureStructU8 result);
+typedef void (*UniffiForeignFutureCompleteU8)(uint64_t callback_data, UniffiForeignFutureResultU8 result);
 
 // Making function static works arround:
 // https://github.com/golang/go/issues/11263
 static void call_UniffiForeignFutureCompleteU8(
-				UniffiForeignFutureCompleteU8 cb, uint64_t callback_data, UniffiForeignFutureStructU8 result)
+				UniffiForeignFutureCompleteU8 cb, uint64_t callback_data, UniffiForeignFutureResultU8 result)
 {
 	return cb(callback_data, result);
 }
 
 
 #endif
-#ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE_STRUCT_I8
-#define UNIFFI_FFIDEF_FOREIGN_FUTURE_STRUCT_I8
-typedef struct UniffiForeignFutureStructI8 {
+#ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE_RESULT_I8
+#define UNIFFI_FFIDEF_FOREIGN_FUTURE_RESULT_I8
+typedef struct UniffiForeignFutureResultI8 {
     int8_t returnValue;
     RustCallStatus callStatus;
-} UniffiForeignFutureStructI8;
+} UniffiForeignFutureResultI8;
 
 #endif
 #ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE_COMPLETE_I8
 #define UNIFFI_FFIDEF_FOREIGN_FUTURE_COMPLETE_I8
-typedef void (*UniffiForeignFutureCompleteI8)(uint64_t callback_data, UniffiForeignFutureStructI8 result);
+typedef void (*UniffiForeignFutureCompleteI8)(uint64_t callback_data, UniffiForeignFutureResultI8 result);
 
 // Making function static works arround:
 // https://github.com/golang/go/issues/11263
 static void call_UniffiForeignFutureCompleteI8(
-				UniffiForeignFutureCompleteI8 cb, uint64_t callback_data, UniffiForeignFutureStructI8 result)
+				UniffiForeignFutureCompleteI8 cb, uint64_t callback_data, UniffiForeignFutureResultI8 result)
 {
 	return cb(callback_data, result);
 }
 
 
 #endif
-#ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE_STRUCT_U16
-#define UNIFFI_FFIDEF_FOREIGN_FUTURE_STRUCT_U16
-typedef struct UniffiForeignFutureStructU16 {
+#ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE_RESULT_U16
+#define UNIFFI_FFIDEF_FOREIGN_FUTURE_RESULT_U16
+typedef struct UniffiForeignFutureResultU16 {
     uint16_t returnValue;
     RustCallStatus callStatus;
-} UniffiForeignFutureStructU16;
+} UniffiForeignFutureResultU16;
 
 #endif
 #ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE_COMPLETE_U16
 #define UNIFFI_FFIDEF_FOREIGN_FUTURE_COMPLETE_U16
-typedef void (*UniffiForeignFutureCompleteU16)(uint64_t callback_data, UniffiForeignFutureStructU16 result);
+typedef void (*UniffiForeignFutureCompleteU16)(uint64_t callback_data, UniffiForeignFutureResultU16 result);
 
 // Making function static works arround:
 // https://github.com/golang/go/issues/11263
 static void call_UniffiForeignFutureCompleteU16(
-				UniffiForeignFutureCompleteU16 cb, uint64_t callback_data, UniffiForeignFutureStructU16 result)
+				UniffiForeignFutureCompleteU16 cb, uint64_t callback_data, UniffiForeignFutureResultU16 result)
 {
 	return cb(callback_data, result);
 }
 
 
 #endif
-#ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE_STRUCT_I16
-#define UNIFFI_FFIDEF_FOREIGN_FUTURE_STRUCT_I16
-typedef struct UniffiForeignFutureStructI16 {
+#ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE_RESULT_I16
+#define UNIFFI_FFIDEF_FOREIGN_FUTURE_RESULT_I16
+typedef struct UniffiForeignFutureResultI16 {
     int16_t returnValue;
     RustCallStatus callStatus;
-} UniffiForeignFutureStructI16;
+} UniffiForeignFutureResultI16;
 
 #endif
 #ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE_COMPLETE_I16
 #define UNIFFI_FFIDEF_FOREIGN_FUTURE_COMPLETE_I16
-typedef void (*UniffiForeignFutureCompleteI16)(uint64_t callback_data, UniffiForeignFutureStructI16 result);
+typedef void (*UniffiForeignFutureCompleteI16)(uint64_t callback_data, UniffiForeignFutureResultI16 result);
 
 // Making function static works arround:
 // https://github.com/golang/go/issues/11263
 static void call_UniffiForeignFutureCompleteI16(
-				UniffiForeignFutureCompleteI16 cb, uint64_t callback_data, UniffiForeignFutureStructI16 result)
+				UniffiForeignFutureCompleteI16 cb, uint64_t callback_data, UniffiForeignFutureResultI16 result)
 {
 	return cb(callback_data, result);
 }
 
 
 #endif
-#ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE_STRUCT_U32
-#define UNIFFI_FFIDEF_FOREIGN_FUTURE_STRUCT_U32
-typedef struct UniffiForeignFutureStructU32 {
+#ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE_RESULT_U32
+#define UNIFFI_FFIDEF_FOREIGN_FUTURE_RESULT_U32
+typedef struct UniffiForeignFutureResultU32 {
     uint32_t returnValue;
     RustCallStatus callStatus;
-} UniffiForeignFutureStructU32;
+} UniffiForeignFutureResultU32;
 
 #endif
 #ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE_COMPLETE_U32
 #define UNIFFI_FFIDEF_FOREIGN_FUTURE_COMPLETE_U32
-typedef void (*UniffiForeignFutureCompleteU32)(uint64_t callback_data, UniffiForeignFutureStructU32 result);
+typedef void (*UniffiForeignFutureCompleteU32)(uint64_t callback_data, UniffiForeignFutureResultU32 result);
 
 // Making function static works arround:
 // https://github.com/golang/go/issues/11263
 static void call_UniffiForeignFutureCompleteU32(
-				UniffiForeignFutureCompleteU32 cb, uint64_t callback_data, UniffiForeignFutureStructU32 result)
+				UniffiForeignFutureCompleteU32 cb, uint64_t callback_data, UniffiForeignFutureResultU32 result)
 {
 	return cb(callback_data, result);
 }
 
 
 #endif
-#ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE_STRUCT_I32
-#define UNIFFI_FFIDEF_FOREIGN_FUTURE_STRUCT_I32
-typedef struct UniffiForeignFutureStructI32 {
+#ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE_RESULT_I32
+#define UNIFFI_FFIDEF_FOREIGN_FUTURE_RESULT_I32
+typedef struct UniffiForeignFutureResultI32 {
     int32_t returnValue;
     RustCallStatus callStatus;
-} UniffiForeignFutureStructI32;
+} UniffiForeignFutureResultI32;
 
 #endif
 #ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE_COMPLETE_I32
 #define UNIFFI_FFIDEF_FOREIGN_FUTURE_COMPLETE_I32
-typedef void (*UniffiForeignFutureCompleteI32)(uint64_t callback_data, UniffiForeignFutureStructI32 result);
+typedef void (*UniffiForeignFutureCompleteI32)(uint64_t callback_data, UniffiForeignFutureResultI32 result);
 
 // Making function static works arround:
 // https://github.com/golang/go/issues/11263
 static void call_UniffiForeignFutureCompleteI32(
-				UniffiForeignFutureCompleteI32 cb, uint64_t callback_data, UniffiForeignFutureStructI32 result)
+				UniffiForeignFutureCompleteI32 cb, uint64_t callback_data, UniffiForeignFutureResultI32 result)
 {
 	return cb(callback_data, result);
 }
 
 
 #endif
-#ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE_STRUCT_U64
-#define UNIFFI_FFIDEF_FOREIGN_FUTURE_STRUCT_U64
-typedef struct UniffiForeignFutureStructU64 {
+#ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE_RESULT_U64
+#define UNIFFI_FFIDEF_FOREIGN_FUTURE_RESULT_U64
+typedef struct UniffiForeignFutureResultU64 {
     uint64_t returnValue;
     RustCallStatus callStatus;
-} UniffiForeignFutureStructU64;
+} UniffiForeignFutureResultU64;
 
 #endif
 #ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE_COMPLETE_U64
 #define UNIFFI_FFIDEF_FOREIGN_FUTURE_COMPLETE_U64
-typedef void (*UniffiForeignFutureCompleteU64)(uint64_t callback_data, UniffiForeignFutureStructU64 result);
+typedef void (*UniffiForeignFutureCompleteU64)(uint64_t callback_data, UniffiForeignFutureResultU64 result);
 
 // Making function static works arround:
 // https://github.com/golang/go/issues/11263
 static void call_UniffiForeignFutureCompleteU64(
-				UniffiForeignFutureCompleteU64 cb, uint64_t callback_data, UniffiForeignFutureStructU64 result)
+				UniffiForeignFutureCompleteU64 cb, uint64_t callback_data, UniffiForeignFutureResultU64 result)
 {
 	return cb(callback_data, result);
 }
 
 
 #endif
-#ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE_STRUCT_I64
-#define UNIFFI_FFIDEF_FOREIGN_FUTURE_STRUCT_I64
-typedef struct UniffiForeignFutureStructI64 {
+#ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE_RESULT_I64
+#define UNIFFI_FFIDEF_FOREIGN_FUTURE_RESULT_I64
+typedef struct UniffiForeignFutureResultI64 {
     int64_t returnValue;
     RustCallStatus callStatus;
-} UniffiForeignFutureStructI64;
+} UniffiForeignFutureResultI64;
 
 #endif
 #ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE_COMPLETE_I64
 #define UNIFFI_FFIDEF_FOREIGN_FUTURE_COMPLETE_I64
-typedef void (*UniffiForeignFutureCompleteI64)(uint64_t callback_data, UniffiForeignFutureStructI64 result);
+typedef void (*UniffiForeignFutureCompleteI64)(uint64_t callback_data, UniffiForeignFutureResultI64 result);
 
 // Making function static works arround:
 // https://github.com/golang/go/issues/11263
 static void call_UniffiForeignFutureCompleteI64(
-				UniffiForeignFutureCompleteI64 cb, uint64_t callback_data, UniffiForeignFutureStructI64 result)
+				UniffiForeignFutureCompleteI64 cb, uint64_t callback_data, UniffiForeignFutureResultI64 result)
 {
 	return cb(callback_data, result);
 }
 
 
 #endif
-#ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE_STRUCT_F32
-#define UNIFFI_FFIDEF_FOREIGN_FUTURE_STRUCT_F32
-typedef struct UniffiForeignFutureStructF32 {
+#ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE_RESULT_F32
+#define UNIFFI_FFIDEF_FOREIGN_FUTURE_RESULT_F32
+typedef struct UniffiForeignFutureResultF32 {
     float returnValue;
     RustCallStatus callStatus;
-} UniffiForeignFutureStructF32;
+} UniffiForeignFutureResultF32;
 
 #endif
 #ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE_COMPLETE_F32
 #define UNIFFI_FFIDEF_FOREIGN_FUTURE_COMPLETE_F32
-typedef void (*UniffiForeignFutureCompleteF32)(uint64_t callback_data, UniffiForeignFutureStructF32 result);
+typedef void (*UniffiForeignFutureCompleteF32)(uint64_t callback_data, UniffiForeignFutureResultF32 result);
 
 // Making function static works arround:
 // https://github.com/golang/go/issues/11263
 static void call_UniffiForeignFutureCompleteF32(
-				UniffiForeignFutureCompleteF32 cb, uint64_t callback_data, UniffiForeignFutureStructF32 result)
+				UniffiForeignFutureCompleteF32 cb, uint64_t callback_data, UniffiForeignFutureResultF32 result)
 {
 	return cb(callback_data, result);
 }
 
 
 #endif
-#ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE_STRUCT_F64
-#define UNIFFI_FFIDEF_FOREIGN_FUTURE_STRUCT_F64
-typedef struct UniffiForeignFutureStructF64 {
+#ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE_RESULT_F64
+#define UNIFFI_FFIDEF_FOREIGN_FUTURE_RESULT_F64
+typedef struct UniffiForeignFutureResultF64 {
     double returnValue;
     RustCallStatus callStatus;
-} UniffiForeignFutureStructF64;
+} UniffiForeignFutureResultF64;
 
 #endif
 #ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE_COMPLETE_F64
 #define UNIFFI_FFIDEF_FOREIGN_FUTURE_COMPLETE_F64
-typedef void (*UniffiForeignFutureCompleteF64)(uint64_t callback_data, UniffiForeignFutureStructF64 result);
+typedef void (*UniffiForeignFutureCompleteF64)(uint64_t callback_data, UniffiForeignFutureResultF64 result);
 
 // Making function static works arround:
 // https://github.com/golang/go/issues/11263
 static void call_UniffiForeignFutureCompleteF64(
-				UniffiForeignFutureCompleteF64 cb, uint64_t callback_data, UniffiForeignFutureStructF64 result)
+				UniffiForeignFutureCompleteF64 cb, uint64_t callback_data, UniffiForeignFutureResultF64 result)
 {
 	return cb(callback_data, result);
 }
 
 
 #endif
-#ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE_STRUCT_POINTER
-#define UNIFFI_FFIDEF_FOREIGN_FUTURE_STRUCT_POINTER
-typedef struct UniffiForeignFutureStructPointer {
-    void* returnValue;
-    RustCallStatus callStatus;
-} UniffiForeignFutureStructPointer;
-
-#endif
-#ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE_COMPLETE_POINTER
-#define UNIFFI_FFIDEF_FOREIGN_FUTURE_COMPLETE_POINTER
-typedef void (*UniffiForeignFutureCompletePointer)(uint64_t callback_data, UniffiForeignFutureStructPointer result);
-
-// Making function static works arround:
-// https://github.com/golang/go/issues/11263
-static void call_UniffiForeignFutureCompletePointer(
-				UniffiForeignFutureCompletePointer cb, uint64_t callback_data, UniffiForeignFutureStructPointer result)
-{
-	return cb(callback_data, result);
-}
-
-
-#endif
-#ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE_STRUCT_RUST_BUFFER
-#define UNIFFI_FFIDEF_FOREIGN_FUTURE_STRUCT_RUST_BUFFER
-typedef struct UniffiForeignFutureStructRustBuffer {
+#ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE_RESULT_RUST_BUFFER
+#define UNIFFI_FFIDEF_FOREIGN_FUTURE_RESULT_RUST_BUFFER
+typedef struct UniffiForeignFutureResultRustBuffer {
     RustBuffer returnValue;
     RustCallStatus callStatus;
-} UniffiForeignFutureStructRustBuffer;
+} UniffiForeignFutureResultRustBuffer;
 
 #endif
 #ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE_COMPLETE_RUST_BUFFER
 #define UNIFFI_FFIDEF_FOREIGN_FUTURE_COMPLETE_RUST_BUFFER
-typedef void (*UniffiForeignFutureCompleteRustBuffer)(uint64_t callback_data, UniffiForeignFutureStructRustBuffer result);
+typedef void (*UniffiForeignFutureCompleteRustBuffer)(uint64_t callback_data, UniffiForeignFutureResultRustBuffer result);
 
 // Making function static works arround:
 // https://github.com/golang/go/issues/11263
 static void call_UniffiForeignFutureCompleteRustBuffer(
-				UniffiForeignFutureCompleteRustBuffer cb, uint64_t callback_data, UniffiForeignFutureStructRustBuffer result)
+				UniffiForeignFutureCompleteRustBuffer cb, uint64_t callback_data, UniffiForeignFutureResultRustBuffer result)
 {
 	return cb(callback_data, result);
 }
 
 
 #endif
-#ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE_STRUCT_VOID
-#define UNIFFI_FFIDEF_FOREIGN_FUTURE_STRUCT_VOID
-typedef struct UniffiForeignFutureStructVoid {
+#ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE_RESULT_VOID
+#define UNIFFI_FFIDEF_FOREIGN_FUTURE_RESULT_VOID
+typedef struct UniffiForeignFutureResultVoid {
     RustCallStatus callStatus;
-} UniffiForeignFutureStructVoid;
+} UniffiForeignFutureResultVoid;
 
 #endif
 #ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE_COMPLETE_VOID
 #define UNIFFI_FFIDEF_FOREIGN_FUTURE_COMPLETE_VOID
-typedef void (*UniffiForeignFutureCompleteVoid)(uint64_t callback_data, UniffiForeignFutureStructVoid result);
+typedef void (*UniffiForeignFutureCompleteVoid)(uint64_t callback_data, UniffiForeignFutureResultVoid result);
 
 // Making function static works arround:
 // https://github.com/golang/go/issues/11263
 static void call_UniffiForeignFutureCompleteVoid(
-				UniffiForeignFutureCompleteVoid cb, uint64_t callback_data, UniffiForeignFutureStructVoid result)
+				UniffiForeignFutureCompleteVoid cb, uint64_t callback_data, UniffiForeignFutureResultVoid result)
 {
 	return cb(callback_data, result);
 }
@@ -409,462 +401,464 @@ static void call_UniffiCallbackInterfaceMergeOperatorMethod0(
 #ifndef UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_LOG_CALLBACK
 #define UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_LOG_CALLBACK
 typedef struct UniffiVTableCallbackInterfaceLogCallback {
-    UniffiCallbackInterfaceLogCallbackMethod0 log;
     UniffiCallbackInterfaceFree uniffiFree;
+    UniffiCallbackInterfaceClone uniffiClone;
+    UniffiCallbackInterfaceLogCallbackMethod0 log;
 } UniffiVTableCallbackInterfaceLogCallback;
 
 #endif
 #ifndef UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_MERGE_OPERATOR
 #define UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_MERGE_OPERATOR
 typedef struct UniffiVTableCallbackInterfaceMergeOperator {
-    UniffiCallbackInterfaceMergeOperatorMethod0 merge;
     UniffiCallbackInterfaceFree uniffiFree;
+    UniffiCallbackInterfaceClone uniffiClone;
+    UniffiCallbackInterfaceMergeOperatorMethod0 merge;
 } UniffiVTableCallbackInterfaceMergeOperator;
 
 #endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_CLONE_DB
-#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_CLONE_DB
-void* uniffi_slatedb_uniffi_fn_clone_db(void* ptr, RustCallStatus *out_status
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_FREE_DB
-#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_FREE_DB
-void uniffi_slatedb_uniffi_fn_free_db(void* ptr, RustCallStatus *out_status
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DB_BEGIN
-#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DB_BEGIN
-uint64_t uniffi_slatedb_uniffi_fn_method_db_begin(void* ptr, RustBuffer isolation_level
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DB_DELETE
-#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DB_DELETE
-uint64_t uniffi_slatedb_uniffi_fn_method_db_delete(void* ptr, RustBuffer key
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DB_DELETE_WITH_OPTIONS
-#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DB_DELETE_WITH_OPTIONS
-uint64_t uniffi_slatedb_uniffi_fn_method_db_delete_with_options(void* ptr, RustBuffer key, RustBuffer options
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DB_FLUSH
-#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DB_FLUSH
-uint64_t uniffi_slatedb_uniffi_fn_method_db_flush(void* ptr
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DB_FLUSH_WITH_OPTIONS
-#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DB_FLUSH_WITH_OPTIONS
-uint64_t uniffi_slatedb_uniffi_fn_method_db_flush_with_options(void* ptr, RustBuffer options
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DB_GET
-#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DB_GET
-uint64_t uniffi_slatedb_uniffi_fn_method_db_get(void* ptr, RustBuffer key
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DB_GET_KEY_VALUE
-#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DB_GET_KEY_VALUE
-uint64_t uniffi_slatedb_uniffi_fn_method_db_get_key_value(void* ptr, RustBuffer key
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DB_GET_KEY_VALUE_WITH_OPTIONS
-#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DB_GET_KEY_VALUE_WITH_OPTIONS
-uint64_t uniffi_slatedb_uniffi_fn_method_db_get_key_value_with_options(void* ptr, RustBuffer key, RustBuffer options
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DB_GET_WITH_OPTIONS
-#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DB_GET_WITH_OPTIONS
-uint64_t uniffi_slatedb_uniffi_fn_method_db_get_with_options(void* ptr, RustBuffer key, RustBuffer options
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DB_MERGE
-#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DB_MERGE
-uint64_t uniffi_slatedb_uniffi_fn_method_db_merge(void* ptr, RustBuffer key, RustBuffer operand
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DB_MERGE_WITH_OPTIONS
-#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DB_MERGE_WITH_OPTIONS
-uint64_t uniffi_slatedb_uniffi_fn_method_db_merge_with_options(void* ptr, RustBuffer key, RustBuffer operand, RustBuffer merge_options, RustBuffer write_options
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DB_PUT
-#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DB_PUT
-uint64_t uniffi_slatedb_uniffi_fn_method_db_put(void* ptr, RustBuffer key, RustBuffer value
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DB_PUT_WITH_OPTIONS
-#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DB_PUT_WITH_OPTIONS
-uint64_t uniffi_slatedb_uniffi_fn_method_db_put_with_options(void* ptr, RustBuffer key, RustBuffer value, RustBuffer put_options, RustBuffer write_options
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DB_SCAN
-#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DB_SCAN
-uint64_t uniffi_slatedb_uniffi_fn_method_db_scan(void* ptr, RustBuffer range
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DB_SCAN_PREFIX
-#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DB_SCAN_PREFIX
-uint64_t uniffi_slatedb_uniffi_fn_method_db_scan_prefix(void* ptr, RustBuffer prefix
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DB_SCAN_PREFIX_WITH_OPTIONS
-#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DB_SCAN_PREFIX_WITH_OPTIONS
-uint64_t uniffi_slatedb_uniffi_fn_method_db_scan_prefix_with_options(void* ptr, RustBuffer prefix, RustBuffer options
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DB_SCAN_WITH_OPTIONS
-#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DB_SCAN_WITH_OPTIONS
-uint64_t uniffi_slatedb_uniffi_fn_method_db_scan_with_options(void* ptr, RustBuffer range, RustBuffer options
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DB_SHUTDOWN
-#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DB_SHUTDOWN
-uint64_t uniffi_slatedb_uniffi_fn_method_db_shutdown(void* ptr
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DB_SNAPSHOT
-#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DB_SNAPSHOT
-uint64_t uniffi_slatedb_uniffi_fn_method_db_snapshot(void* ptr
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DB_STATUS
-#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DB_STATUS
-void uniffi_slatedb_uniffi_fn_method_db_status(void* ptr, RustCallStatus *out_status
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DB_WRITE
-#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DB_WRITE
-uint64_t uniffi_slatedb_uniffi_fn_method_db_write(void* ptr, void* batch
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DB_WRITE_WITH_OPTIONS
-#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DB_WRITE_WITH_OPTIONS
-uint64_t uniffi_slatedb_uniffi_fn_method_db_write_with_options(void* ptr, void* batch, RustBuffer options
-);
-#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_CLONE_DBBUILDER
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_CLONE_DBBUILDER
-void* uniffi_slatedb_uniffi_fn_clone_dbbuilder(void* ptr, RustCallStatus *out_status
+uint64_t uniffi_slatedb_uniffi_fn_clone_dbbuilder(uint64_t handle, RustCallStatus *out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_FREE_DBBUILDER
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_FREE_DBBUILDER
-void uniffi_slatedb_uniffi_fn_free_dbbuilder(void* ptr, RustCallStatus *out_status
+void uniffi_slatedb_uniffi_fn_free_dbbuilder(uint64_t handle, RustCallStatus *out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_CONSTRUCTOR_DBBUILDER_NEW
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_CONSTRUCTOR_DBBUILDER_NEW
-void* uniffi_slatedb_uniffi_fn_constructor_dbbuilder_new(RustBuffer path, void* object_store, RustCallStatus *out_status
+uint64_t uniffi_slatedb_uniffi_fn_constructor_dbbuilder_new(RustBuffer path, uint64_t object_store, RustCallStatus *out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBBUILDER_BUILD
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBBUILDER_BUILD
-uint64_t uniffi_slatedb_uniffi_fn_method_dbbuilder_build(void* ptr
+uint64_t uniffi_slatedb_uniffi_fn_method_dbbuilder_build(uint64_t ptr
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBBUILDER_WITH_DB_CACHE_DISABLED
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBBUILDER_WITH_DB_CACHE_DISABLED
-void uniffi_slatedb_uniffi_fn_method_dbbuilder_with_db_cache_disabled(void* ptr, RustCallStatus *out_status
+void uniffi_slatedb_uniffi_fn_method_dbbuilder_with_db_cache_disabled(uint64_t ptr, RustCallStatus *out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBBUILDER_WITH_MERGE_OPERATOR
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBBUILDER_WITH_MERGE_OPERATOR
-void uniffi_slatedb_uniffi_fn_method_dbbuilder_with_merge_operator(void* ptr, void* merge_operator, RustCallStatus *out_status
+void uniffi_slatedb_uniffi_fn_method_dbbuilder_with_merge_operator(uint64_t ptr, uint64_t merge_operator, RustCallStatus *out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBBUILDER_WITH_SEED
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBBUILDER_WITH_SEED
-void uniffi_slatedb_uniffi_fn_method_dbbuilder_with_seed(void* ptr, uint64_t seed, RustCallStatus *out_status
+void uniffi_slatedb_uniffi_fn_method_dbbuilder_with_seed(uint64_t ptr, uint64_t seed, RustCallStatus *out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBBUILDER_WITH_SETTINGS
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBBUILDER_WITH_SETTINGS
-void uniffi_slatedb_uniffi_fn_method_dbbuilder_with_settings(void* ptr, void* settings, RustCallStatus *out_status
+void uniffi_slatedb_uniffi_fn_method_dbbuilder_with_settings(uint64_t ptr, uint64_t settings, RustCallStatus *out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBBUILDER_WITH_SST_BLOCK_SIZE
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBBUILDER_WITH_SST_BLOCK_SIZE
-void uniffi_slatedb_uniffi_fn_method_dbbuilder_with_sst_block_size(void* ptr, RustBuffer sst_block_size, RustCallStatus *out_status
+void uniffi_slatedb_uniffi_fn_method_dbbuilder_with_sst_block_size(uint64_t ptr, RustBuffer sst_block_size, RustCallStatus *out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBBUILDER_WITH_WAL_OBJECT_STORE
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBBUILDER_WITH_WAL_OBJECT_STORE
-void uniffi_slatedb_uniffi_fn_method_dbbuilder_with_wal_object_store(void* ptr, void* wal_object_store, RustCallStatus *out_status
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_CLONE_DBITERATOR
-#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_CLONE_DBITERATOR
-void* uniffi_slatedb_uniffi_fn_clone_dbiterator(void* ptr, RustCallStatus *out_status
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_FREE_DBITERATOR
-#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_FREE_DBITERATOR
-void uniffi_slatedb_uniffi_fn_free_dbiterator(void* ptr, RustCallStatus *out_status
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBITERATOR_NEXT
-#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBITERATOR_NEXT
-uint64_t uniffi_slatedb_uniffi_fn_method_dbiterator_next(void* ptr
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBITERATOR_SEEK
-#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBITERATOR_SEEK
-uint64_t uniffi_slatedb_uniffi_fn_method_dbiterator_seek(void* ptr, RustBuffer key
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_CLONE_DBREADER
-#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_CLONE_DBREADER
-void* uniffi_slatedb_uniffi_fn_clone_dbreader(void* ptr, RustCallStatus *out_status
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_FREE_DBREADER
-#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_FREE_DBREADER
-void uniffi_slatedb_uniffi_fn_free_dbreader(void* ptr, RustCallStatus *out_status
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBREADER_GET
-#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBREADER_GET
-uint64_t uniffi_slatedb_uniffi_fn_method_dbreader_get(void* ptr, RustBuffer key
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBREADER_GET_WITH_OPTIONS
-#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBREADER_GET_WITH_OPTIONS
-uint64_t uniffi_slatedb_uniffi_fn_method_dbreader_get_with_options(void* ptr, RustBuffer key, RustBuffer options
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBREADER_SCAN
-#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBREADER_SCAN
-uint64_t uniffi_slatedb_uniffi_fn_method_dbreader_scan(void* ptr, RustBuffer range
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBREADER_SCAN_PREFIX
-#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBREADER_SCAN_PREFIX
-uint64_t uniffi_slatedb_uniffi_fn_method_dbreader_scan_prefix(void* ptr, RustBuffer prefix
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBREADER_SCAN_PREFIX_WITH_OPTIONS
-#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBREADER_SCAN_PREFIX_WITH_OPTIONS
-uint64_t uniffi_slatedb_uniffi_fn_method_dbreader_scan_prefix_with_options(void* ptr, RustBuffer prefix, RustBuffer options
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBREADER_SCAN_WITH_OPTIONS
-#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBREADER_SCAN_WITH_OPTIONS
-uint64_t uniffi_slatedb_uniffi_fn_method_dbreader_scan_with_options(void* ptr, RustBuffer range, RustBuffer options
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBREADER_SHUTDOWN
-#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBREADER_SHUTDOWN
-uint64_t uniffi_slatedb_uniffi_fn_method_dbreader_shutdown(void* ptr
+void uniffi_slatedb_uniffi_fn_method_dbbuilder_with_wal_object_store(uint64_t ptr, uint64_t wal_object_store, RustCallStatus *out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_CLONE_DBREADERBUILDER
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_CLONE_DBREADERBUILDER
-void* uniffi_slatedb_uniffi_fn_clone_dbreaderbuilder(void* ptr, RustCallStatus *out_status
+uint64_t uniffi_slatedb_uniffi_fn_clone_dbreaderbuilder(uint64_t handle, RustCallStatus *out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_FREE_DBREADERBUILDER
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_FREE_DBREADERBUILDER
-void uniffi_slatedb_uniffi_fn_free_dbreaderbuilder(void* ptr, RustCallStatus *out_status
+void uniffi_slatedb_uniffi_fn_free_dbreaderbuilder(uint64_t handle, RustCallStatus *out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_CONSTRUCTOR_DBREADERBUILDER_NEW
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_CONSTRUCTOR_DBREADERBUILDER_NEW
-void* uniffi_slatedb_uniffi_fn_constructor_dbreaderbuilder_new(RustBuffer path, void* object_store, RustCallStatus *out_status
+uint64_t uniffi_slatedb_uniffi_fn_constructor_dbreaderbuilder_new(RustBuffer path, uint64_t object_store, RustCallStatus *out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBREADERBUILDER_BUILD
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBREADERBUILDER_BUILD
-uint64_t uniffi_slatedb_uniffi_fn_method_dbreaderbuilder_build(void* ptr
+uint64_t uniffi_slatedb_uniffi_fn_method_dbreaderbuilder_build(uint64_t ptr
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBREADERBUILDER_WITH_CHECKPOINT_ID
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBREADERBUILDER_WITH_CHECKPOINT_ID
-void uniffi_slatedb_uniffi_fn_method_dbreaderbuilder_with_checkpoint_id(void* ptr, RustBuffer checkpoint_id, RustCallStatus *out_status
+void uniffi_slatedb_uniffi_fn_method_dbreaderbuilder_with_checkpoint_id(uint64_t ptr, RustBuffer checkpoint_id, RustCallStatus *out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBREADERBUILDER_WITH_MERGE_OPERATOR
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBREADERBUILDER_WITH_MERGE_OPERATOR
-void uniffi_slatedb_uniffi_fn_method_dbreaderbuilder_with_merge_operator(void* ptr, void* merge_operator, RustCallStatus *out_status
+void uniffi_slatedb_uniffi_fn_method_dbreaderbuilder_with_merge_operator(uint64_t ptr, uint64_t merge_operator, RustCallStatus *out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBREADERBUILDER_WITH_OPTIONS
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBREADERBUILDER_WITH_OPTIONS
-void uniffi_slatedb_uniffi_fn_method_dbreaderbuilder_with_options(void* ptr, RustBuffer options, RustCallStatus *out_status
+void uniffi_slatedb_uniffi_fn_method_dbreaderbuilder_with_options(uint64_t ptr, RustBuffer options, RustCallStatus *out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBREADERBUILDER_WITH_WAL_OBJECT_STORE
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBREADERBUILDER_WITH_WAL_OBJECT_STORE
-void uniffi_slatedb_uniffi_fn_method_dbreaderbuilder_with_wal_object_store(void* ptr, void* wal_object_store, RustCallStatus *out_status
+void uniffi_slatedb_uniffi_fn_method_dbreaderbuilder_with_wal_object_store(uint64_t ptr, uint64_t wal_object_store, RustCallStatus *out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_CLONE_DB
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_CLONE_DB
+uint64_t uniffi_slatedb_uniffi_fn_clone_db(uint64_t handle, RustCallStatus *out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_FREE_DB
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_FREE_DB
+void uniffi_slatedb_uniffi_fn_free_db(uint64_t handle, RustCallStatus *out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DB_BEGIN
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DB_BEGIN
+uint64_t uniffi_slatedb_uniffi_fn_method_db_begin(uint64_t ptr, RustBuffer isolation_level
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DB_DELETE
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DB_DELETE
+uint64_t uniffi_slatedb_uniffi_fn_method_db_delete(uint64_t ptr, RustBuffer key
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DB_DELETE_WITH_OPTIONS
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DB_DELETE_WITH_OPTIONS
+uint64_t uniffi_slatedb_uniffi_fn_method_db_delete_with_options(uint64_t ptr, RustBuffer key, RustBuffer options
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DB_FLUSH
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DB_FLUSH
+uint64_t uniffi_slatedb_uniffi_fn_method_db_flush(uint64_t ptr
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DB_FLUSH_WITH_OPTIONS
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DB_FLUSH_WITH_OPTIONS
+uint64_t uniffi_slatedb_uniffi_fn_method_db_flush_with_options(uint64_t ptr, RustBuffer options
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DB_GET
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DB_GET
+uint64_t uniffi_slatedb_uniffi_fn_method_db_get(uint64_t ptr, RustBuffer key
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DB_GET_KEY_VALUE
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DB_GET_KEY_VALUE
+uint64_t uniffi_slatedb_uniffi_fn_method_db_get_key_value(uint64_t ptr, RustBuffer key
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DB_GET_KEY_VALUE_WITH_OPTIONS
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DB_GET_KEY_VALUE_WITH_OPTIONS
+uint64_t uniffi_slatedb_uniffi_fn_method_db_get_key_value_with_options(uint64_t ptr, RustBuffer key, RustBuffer options
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DB_GET_WITH_OPTIONS
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DB_GET_WITH_OPTIONS
+uint64_t uniffi_slatedb_uniffi_fn_method_db_get_with_options(uint64_t ptr, RustBuffer key, RustBuffer options
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DB_MERGE
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DB_MERGE
+uint64_t uniffi_slatedb_uniffi_fn_method_db_merge(uint64_t ptr, RustBuffer key, RustBuffer operand
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DB_MERGE_WITH_OPTIONS
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DB_MERGE_WITH_OPTIONS
+uint64_t uniffi_slatedb_uniffi_fn_method_db_merge_with_options(uint64_t ptr, RustBuffer key, RustBuffer operand, RustBuffer merge_options, RustBuffer write_options
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DB_PUT
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DB_PUT
+uint64_t uniffi_slatedb_uniffi_fn_method_db_put(uint64_t ptr, RustBuffer key, RustBuffer value
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DB_PUT_WITH_OPTIONS
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DB_PUT_WITH_OPTIONS
+uint64_t uniffi_slatedb_uniffi_fn_method_db_put_with_options(uint64_t ptr, RustBuffer key, RustBuffer value, RustBuffer put_options, RustBuffer write_options
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DB_SCAN
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DB_SCAN
+uint64_t uniffi_slatedb_uniffi_fn_method_db_scan(uint64_t ptr, RustBuffer range
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DB_SCAN_PREFIX
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DB_SCAN_PREFIX
+uint64_t uniffi_slatedb_uniffi_fn_method_db_scan_prefix(uint64_t ptr, RustBuffer prefix
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DB_SCAN_PREFIX_WITH_OPTIONS
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DB_SCAN_PREFIX_WITH_OPTIONS
+uint64_t uniffi_slatedb_uniffi_fn_method_db_scan_prefix_with_options(uint64_t ptr, RustBuffer prefix, RustBuffer options
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DB_SCAN_WITH_OPTIONS
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DB_SCAN_WITH_OPTIONS
+uint64_t uniffi_slatedb_uniffi_fn_method_db_scan_with_options(uint64_t ptr, RustBuffer range, RustBuffer options
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DB_SHUTDOWN
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DB_SHUTDOWN
+uint64_t uniffi_slatedb_uniffi_fn_method_db_shutdown(uint64_t ptr
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DB_SNAPSHOT
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DB_SNAPSHOT
+uint64_t uniffi_slatedb_uniffi_fn_method_db_snapshot(uint64_t ptr
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DB_STATUS
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DB_STATUS
+void uniffi_slatedb_uniffi_fn_method_db_status(uint64_t ptr, RustCallStatus *out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DB_WRITE
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DB_WRITE
+uint64_t uniffi_slatedb_uniffi_fn_method_db_write(uint64_t ptr, uint64_t batch
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DB_WRITE_WITH_OPTIONS
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DB_WRITE_WITH_OPTIONS
+uint64_t uniffi_slatedb_uniffi_fn_method_db_write_with_options(uint64_t ptr, uint64_t batch, RustBuffer options
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_CLONE_DBREADER
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_CLONE_DBREADER
+uint64_t uniffi_slatedb_uniffi_fn_clone_dbreader(uint64_t handle, RustCallStatus *out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_FREE_DBREADER
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_FREE_DBREADER
+void uniffi_slatedb_uniffi_fn_free_dbreader(uint64_t handle, RustCallStatus *out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBREADER_GET
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBREADER_GET
+uint64_t uniffi_slatedb_uniffi_fn_method_dbreader_get(uint64_t ptr, RustBuffer key
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBREADER_GET_WITH_OPTIONS
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBREADER_GET_WITH_OPTIONS
+uint64_t uniffi_slatedb_uniffi_fn_method_dbreader_get_with_options(uint64_t ptr, RustBuffer key, RustBuffer options
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBREADER_SCAN
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBREADER_SCAN
+uint64_t uniffi_slatedb_uniffi_fn_method_dbreader_scan(uint64_t ptr, RustBuffer range
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBREADER_SCAN_PREFIX
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBREADER_SCAN_PREFIX
+uint64_t uniffi_slatedb_uniffi_fn_method_dbreader_scan_prefix(uint64_t ptr, RustBuffer prefix
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBREADER_SCAN_PREFIX_WITH_OPTIONS
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBREADER_SCAN_PREFIX_WITH_OPTIONS
+uint64_t uniffi_slatedb_uniffi_fn_method_dbreader_scan_prefix_with_options(uint64_t ptr, RustBuffer prefix, RustBuffer options
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBREADER_SCAN_WITH_OPTIONS
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBREADER_SCAN_WITH_OPTIONS
+uint64_t uniffi_slatedb_uniffi_fn_method_dbreader_scan_with_options(uint64_t ptr, RustBuffer range, RustBuffer options
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBREADER_SHUTDOWN
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBREADER_SHUTDOWN
+uint64_t uniffi_slatedb_uniffi_fn_method_dbreader_shutdown(uint64_t ptr
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_CLONE_DBSNAPSHOT
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_CLONE_DBSNAPSHOT
-void* uniffi_slatedb_uniffi_fn_clone_dbsnapshot(void* ptr, RustCallStatus *out_status
+uint64_t uniffi_slatedb_uniffi_fn_clone_dbsnapshot(uint64_t handle, RustCallStatus *out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_FREE_DBSNAPSHOT
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_FREE_DBSNAPSHOT
-void uniffi_slatedb_uniffi_fn_free_dbsnapshot(void* ptr, RustCallStatus *out_status
+void uniffi_slatedb_uniffi_fn_free_dbsnapshot(uint64_t handle, RustCallStatus *out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBSNAPSHOT_GET
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBSNAPSHOT_GET
-uint64_t uniffi_slatedb_uniffi_fn_method_dbsnapshot_get(void* ptr, RustBuffer key
+uint64_t uniffi_slatedb_uniffi_fn_method_dbsnapshot_get(uint64_t ptr, RustBuffer key
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBSNAPSHOT_GET_KEY_VALUE
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBSNAPSHOT_GET_KEY_VALUE
-uint64_t uniffi_slatedb_uniffi_fn_method_dbsnapshot_get_key_value(void* ptr, RustBuffer key
+uint64_t uniffi_slatedb_uniffi_fn_method_dbsnapshot_get_key_value(uint64_t ptr, RustBuffer key
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBSNAPSHOT_GET_KEY_VALUE_WITH_OPTIONS
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBSNAPSHOT_GET_KEY_VALUE_WITH_OPTIONS
-uint64_t uniffi_slatedb_uniffi_fn_method_dbsnapshot_get_key_value_with_options(void* ptr, RustBuffer key, RustBuffer options
+uint64_t uniffi_slatedb_uniffi_fn_method_dbsnapshot_get_key_value_with_options(uint64_t ptr, RustBuffer key, RustBuffer options
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBSNAPSHOT_GET_WITH_OPTIONS
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBSNAPSHOT_GET_WITH_OPTIONS
-uint64_t uniffi_slatedb_uniffi_fn_method_dbsnapshot_get_with_options(void* ptr, RustBuffer key, RustBuffer options
+uint64_t uniffi_slatedb_uniffi_fn_method_dbsnapshot_get_with_options(uint64_t ptr, RustBuffer key, RustBuffer options
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBSNAPSHOT_SCAN
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBSNAPSHOT_SCAN
-uint64_t uniffi_slatedb_uniffi_fn_method_dbsnapshot_scan(void* ptr, RustBuffer range
+uint64_t uniffi_slatedb_uniffi_fn_method_dbsnapshot_scan(uint64_t ptr, RustBuffer range
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBSNAPSHOT_SCAN_PREFIX
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBSNAPSHOT_SCAN_PREFIX
-uint64_t uniffi_slatedb_uniffi_fn_method_dbsnapshot_scan_prefix(void* ptr, RustBuffer prefix
+uint64_t uniffi_slatedb_uniffi_fn_method_dbsnapshot_scan_prefix(uint64_t ptr, RustBuffer prefix
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBSNAPSHOT_SCAN_PREFIX_WITH_OPTIONS
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBSNAPSHOT_SCAN_PREFIX_WITH_OPTIONS
-uint64_t uniffi_slatedb_uniffi_fn_method_dbsnapshot_scan_prefix_with_options(void* ptr, RustBuffer prefix, RustBuffer options
+uint64_t uniffi_slatedb_uniffi_fn_method_dbsnapshot_scan_prefix_with_options(uint64_t ptr, RustBuffer prefix, RustBuffer options
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBSNAPSHOT_SCAN_WITH_OPTIONS
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBSNAPSHOT_SCAN_WITH_OPTIONS
-uint64_t uniffi_slatedb_uniffi_fn_method_dbsnapshot_scan_with_options(void* ptr, RustBuffer range, RustBuffer options
+uint64_t uniffi_slatedb_uniffi_fn_method_dbsnapshot_scan_with_options(uint64_t ptr, RustBuffer range, RustBuffer options
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_CLONE_DBTRANSACTION
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_CLONE_DBTRANSACTION
-void* uniffi_slatedb_uniffi_fn_clone_dbtransaction(void* ptr, RustCallStatus *out_status
+uint64_t uniffi_slatedb_uniffi_fn_clone_dbtransaction(uint64_t handle, RustCallStatus *out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_FREE_DBTRANSACTION
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_FREE_DBTRANSACTION
-void uniffi_slatedb_uniffi_fn_free_dbtransaction(void* ptr, RustCallStatus *out_status
+void uniffi_slatedb_uniffi_fn_free_dbtransaction(uint64_t handle, RustCallStatus *out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBTRANSACTION_COMMIT
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBTRANSACTION_COMMIT
-uint64_t uniffi_slatedb_uniffi_fn_method_dbtransaction_commit(void* ptr
+uint64_t uniffi_slatedb_uniffi_fn_method_dbtransaction_commit(uint64_t ptr
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBTRANSACTION_COMMIT_WITH_OPTIONS
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBTRANSACTION_COMMIT_WITH_OPTIONS
-uint64_t uniffi_slatedb_uniffi_fn_method_dbtransaction_commit_with_options(void* ptr, RustBuffer options
+uint64_t uniffi_slatedb_uniffi_fn_method_dbtransaction_commit_with_options(uint64_t ptr, RustBuffer options
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBTRANSACTION_DELETE
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBTRANSACTION_DELETE
-uint64_t uniffi_slatedb_uniffi_fn_method_dbtransaction_delete(void* ptr, RustBuffer key
+uint64_t uniffi_slatedb_uniffi_fn_method_dbtransaction_delete(uint64_t ptr, RustBuffer key
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBTRANSACTION_GET
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBTRANSACTION_GET
-uint64_t uniffi_slatedb_uniffi_fn_method_dbtransaction_get(void* ptr, RustBuffer key
+uint64_t uniffi_slatedb_uniffi_fn_method_dbtransaction_get(uint64_t ptr, RustBuffer key
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBTRANSACTION_GET_KEY_VALUE
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBTRANSACTION_GET_KEY_VALUE
-uint64_t uniffi_slatedb_uniffi_fn_method_dbtransaction_get_key_value(void* ptr, RustBuffer key
+uint64_t uniffi_slatedb_uniffi_fn_method_dbtransaction_get_key_value(uint64_t ptr, RustBuffer key
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBTRANSACTION_GET_KEY_VALUE_WITH_OPTIONS
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBTRANSACTION_GET_KEY_VALUE_WITH_OPTIONS
-uint64_t uniffi_slatedb_uniffi_fn_method_dbtransaction_get_key_value_with_options(void* ptr, RustBuffer key, RustBuffer options
+uint64_t uniffi_slatedb_uniffi_fn_method_dbtransaction_get_key_value_with_options(uint64_t ptr, RustBuffer key, RustBuffer options
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBTRANSACTION_GET_WITH_OPTIONS
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBTRANSACTION_GET_WITH_OPTIONS
-uint64_t uniffi_slatedb_uniffi_fn_method_dbtransaction_get_with_options(void* ptr, RustBuffer key, RustBuffer options
+uint64_t uniffi_slatedb_uniffi_fn_method_dbtransaction_get_with_options(uint64_t ptr, RustBuffer key, RustBuffer options
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBTRANSACTION_ID
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBTRANSACTION_ID
-RustBuffer uniffi_slatedb_uniffi_fn_method_dbtransaction_id(void* ptr, RustCallStatus *out_status
+RustBuffer uniffi_slatedb_uniffi_fn_method_dbtransaction_id(uint64_t ptr, RustCallStatus *out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBTRANSACTION_MARK_READ
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBTRANSACTION_MARK_READ
-uint64_t uniffi_slatedb_uniffi_fn_method_dbtransaction_mark_read(void* ptr, RustBuffer keys
+uint64_t uniffi_slatedb_uniffi_fn_method_dbtransaction_mark_read(uint64_t ptr, RustBuffer keys
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBTRANSACTION_MERGE
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBTRANSACTION_MERGE
-uint64_t uniffi_slatedb_uniffi_fn_method_dbtransaction_merge(void* ptr, RustBuffer key, RustBuffer operand
+uint64_t uniffi_slatedb_uniffi_fn_method_dbtransaction_merge(uint64_t ptr, RustBuffer key, RustBuffer operand
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBTRANSACTION_MERGE_WITH_OPTIONS
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBTRANSACTION_MERGE_WITH_OPTIONS
-uint64_t uniffi_slatedb_uniffi_fn_method_dbtransaction_merge_with_options(void* ptr, RustBuffer key, RustBuffer operand, RustBuffer options
+uint64_t uniffi_slatedb_uniffi_fn_method_dbtransaction_merge_with_options(uint64_t ptr, RustBuffer key, RustBuffer operand, RustBuffer options
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBTRANSACTION_PUT
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBTRANSACTION_PUT
-uint64_t uniffi_slatedb_uniffi_fn_method_dbtransaction_put(void* ptr, RustBuffer key, RustBuffer value
+uint64_t uniffi_slatedb_uniffi_fn_method_dbtransaction_put(uint64_t ptr, RustBuffer key, RustBuffer value
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBTRANSACTION_PUT_WITH_OPTIONS
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBTRANSACTION_PUT_WITH_OPTIONS
-uint64_t uniffi_slatedb_uniffi_fn_method_dbtransaction_put_with_options(void* ptr, RustBuffer key, RustBuffer value, RustBuffer options
+uint64_t uniffi_slatedb_uniffi_fn_method_dbtransaction_put_with_options(uint64_t ptr, RustBuffer key, RustBuffer value, RustBuffer options
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBTRANSACTION_ROLLBACK
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBTRANSACTION_ROLLBACK
-uint64_t uniffi_slatedb_uniffi_fn_method_dbtransaction_rollback(void* ptr
+uint64_t uniffi_slatedb_uniffi_fn_method_dbtransaction_rollback(uint64_t ptr
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBTRANSACTION_SCAN
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBTRANSACTION_SCAN
-uint64_t uniffi_slatedb_uniffi_fn_method_dbtransaction_scan(void* ptr, RustBuffer range
+uint64_t uniffi_slatedb_uniffi_fn_method_dbtransaction_scan(uint64_t ptr, RustBuffer range
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBTRANSACTION_SCAN_PREFIX
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBTRANSACTION_SCAN_PREFIX
-uint64_t uniffi_slatedb_uniffi_fn_method_dbtransaction_scan_prefix(void* ptr, RustBuffer prefix
+uint64_t uniffi_slatedb_uniffi_fn_method_dbtransaction_scan_prefix(uint64_t ptr, RustBuffer prefix
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBTRANSACTION_SCAN_PREFIX_WITH_OPTIONS
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBTRANSACTION_SCAN_PREFIX_WITH_OPTIONS
-uint64_t uniffi_slatedb_uniffi_fn_method_dbtransaction_scan_prefix_with_options(void* ptr, RustBuffer prefix, RustBuffer options
+uint64_t uniffi_slatedb_uniffi_fn_method_dbtransaction_scan_prefix_with_options(uint64_t ptr, RustBuffer prefix, RustBuffer options
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBTRANSACTION_SCAN_WITH_OPTIONS
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBTRANSACTION_SCAN_WITH_OPTIONS
-uint64_t uniffi_slatedb_uniffi_fn_method_dbtransaction_scan_with_options(void* ptr, RustBuffer range, RustBuffer options
+uint64_t uniffi_slatedb_uniffi_fn_method_dbtransaction_scan_with_options(uint64_t ptr, RustBuffer range, RustBuffer options
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBTRANSACTION_SEQNUM
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBTRANSACTION_SEQNUM
-uint64_t uniffi_slatedb_uniffi_fn_method_dbtransaction_seqnum(void* ptr, RustCallStatus *out_status
+uint64_t uniffi_slatedb_uniffi_fn_method_dbtransaction_seqnum(uint64_t ptr, RustCallStatus *out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBTRANSACTION_UNMARK_WRITE
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBTRANSACTION_UNMARK_WRITE
-uint64_t uniffi_slatedb_uniffi_fn_method_dbtransaction_unmark_write(void* ptr, RustBuffer keys
+uint64_t uniffi_slatedb_uniffi_fn_method_dbtransaction_unmark_write(uint64_t ptr, RustBuffer keys
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_CLONE_DBITERATOR
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_CLONE_DBITERATOR
+uint64_t uniffi_slatedb_uniffi_fn_clone_dbiterator(uint64_t handle, RustCallStatus *out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_FREE_DBITERATOR
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_FREE_DBITERATOR
+void uniffi_slatedb_uniffi_fn_free_dbiterator(uint64_t handle, RustCallStatus *out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBITERATOR_NEXT
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBITERATOR_NEXT
+uint64_t uniffi_slatedb_uniffi_fn_method_dbiterator_next(uint64_t ptr
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBITERATOR_SEEK
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBITERATOR_SEEK
+uint64_t uniffi_slatedb_uniffi_fn_method_dbiterator_seek(uint64_t ptr, RustBuffer key
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_CLONE_LOGCALLBACK
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_CLONE_LOGCALLBACK
-void* uniffi_slatedb_uniffi_fn_clone_logcallback(void* ptr, RustCallStatus *out_status
+uint64_t uniffi_slatedb_uniffi_fn_clone_logcallback(uint64_t handle, RustCallStatus *out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_FREE_LOGCALLBACK
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_FREE_LOGCALLBACK
-void uniffi_slatedb_uniffi_fn_free_logcallback(void* ptr, RustCallStatus *out_status
+void uniffi_slatedb_uniffi_fn_free_logcallback(uint64_t handle, RustCallStatus *out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_INIT_CALLBACK_VTABLE_LOGCALLBACK
@@ -874,17 +868,17 @@ void uniffi_slatedb_uniffi_fn_init_callback_vtable_logcallback(UniffiVTableCallb
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_LOGCALLBACK_LOG
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_LOGCALLBACK_LOG
-void uniffi_slatedb_uniffi_fn_method_logcallback_log(void* ptr, RustBuffer record, RustCallStatus *out_status
+void uniffi_slatedb_uniffi_fn_method_logcallback_log(uint64_t ptr, RustBuffer record, RustCallStatus *out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_CLONE_MERGEOPERATOR
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_CLONE_MERGEOPERATOR
-void* uniffi_slatedb_uniffi_fn_clone_mergeoperator(void* ptr, RustCallStatus *out_status
+uint64_t uniffi_slatedb_uniffi_fn_clone_mergeoperator(uint64_t handle, RustCallStatus *out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_FREE_MERGEOPERATOR
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_FREE_MERGEOPERATOR
-void uniffi_slatedb_uniffi_fn_free_mergeoperator(void* ptr, RustCallStatus *out_status
+void uniffi_slatedb_uniffi_fn_free_mergeoperator(uint64_t handle, RustCallStatus *out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_INIT_CALLBACK_VTABLE_MERGEOPERATOR
@@ -894,195 +888,195 @@ void uniffi_slatedb_uniffi_fn_init_callback_vtable_mergeoperator(UniffiVTableCal
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_MERGEOPERATOR_MERGE
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_MERGEOPERATOR_MERGE
-RustBuffer uniffi_slatedb_uniffi_fn_method_mergeoperator_merge(void* ptr, RustBuffer key, RustBuffer existing_value, RustBuffer operand, RustCallStatus *out_status
+RustBuffer uniffi_slatedb_uniffi_fn_method_mergeoperator_merge(uint64_t ptr, RustBuffer key, RustBuffer existing_value, RustBuffer operand, RustCallStatus *out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_CLONE_OBJECTSTORE
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_CLONE_OBJECTSTORE
-void* uniffi_slatedb_uniffi_fn_clone_objectstore(void* ptr, RustCallStatus *out_status
+uint64_t uniffi_slatedb_uniffi_fn_clone_objectstore(uint64_t handle, RustCallStatus *out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_FREE_OBJECTSTORE
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_FREE_OBJECTSTORE
-void uniffi_slatedb_uniffi_fn_free_objectstore(void* ptr, RustCallStatus *out_status
+void uniffi_slatedb_uniffi_fn_free_objectstore(uint64_t handle, RustCallStatus *out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_CONSTRUCTOR_OBJECTSTORE_FROM_ENV
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_CONSTRUCTOR_OBJECTSTORE_FROM_ENV
-void* uniffi_slatedb_uniffi_fn_constructor_objectstore_from_env(RustBuffer env_file, RustCallStatus *out_status
+uint64_t uniffi_slatedb_uniffi_fn_constructor_objectstore_from_env(RustBuffer env_file, RustCallStatus *out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_CONSTRUCTOR_OBJECTSTORE_RESOLVE
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_CONSTRUCTOR_OBJECTSTORE_RESOLVE
-void* uniffi_slatedb_uniffi_fn_constructor_objectstore_resolve(RustBuffer url, RustCallStatus *out_status
+uint64_t uniffi_slatedb_uniffi_fn_constructor_objectstore_resolve(RustBuffer url, RustCallStatus *out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_CLONE_SETTINGS
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_CLONE_SETTINGS
-void* uniffi_slatedb_uniffi_fn_clone_settings(void* ptr, RustCallStatus *out_status
+uint64_t uniffi_slatedb_uniffi_fn_clone_settings(uint64_t handle, RustCallStatus *out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_FREE_SETTINGS
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_FREE_SETTINGS
-void uniffi_slatedb_uniffi_fn_free_settings(void* ptr, RustCallStatus *out_status
+void uniffi_slatedb_uniffi_fn_free_settings(uint64_t handle, RustCallStatus *out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_CONSTRUCTOR_SETTINGS_DEFAULT
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_CONSTRUCTOR_SETTINGS_DEFAULT
-void* uniffi_slatedb_uniffi_fn_constructor_settings_default(RustCallStatus *out_status
+uint64_t uniffi_slatedb_uniffi_fn_constructor_settings_default(RustCallStatus *out_status
     
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_CONSTRUCTOR_SETTINGS_FROM_ENV
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_CONSTRUCTOR_SETTINGS_FROM_ENV
-void* uniffi_slatedb_uniffi_fn_constructor_settings_from_env(RustBuffer prefix, RustCallStatus *out_status
+uint64_t uniffi_slatedb_uniffi_fn_constructor_settings_from_env(RustBuffer prefix, RustCallStatus *out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_CONSTRUCTOR_SETTINGS_FROM_ENV_WITH_DEFAULT
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_CONSTRUCTOR_SETTINGS_FROM_ENV_WITH_DEFAULT
-void* uniffi_slatedb_uniffi_fn_constructor_settings_from_env_with_default(RustBuffer prefix, void* default_settings, RustCallStatus *out_status
+uint64_t uniffi_slatedb_uniffi_fn_constructor_settings_from_env_with_default(RustBuffer prefix, uint64_t default_settings, RustCallStatus *out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_CONSTRUCTOR_SETTINGS_FROM_FILE
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_CONSTRUCTOR_SETTINGS_FROM_FILE
-void* uniffi_slatedb_uniffi_fn_constructor_settings_from_file(RustBuffer path, RustCallStatus *out_status
+uint64_t uniffi_slatedb_uniffi_fn_constructor_settings_from_file(RustBuffer path, RustCallStatus *out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_CONSTRUCTOR_SETTINGS_FROM_JSON_STRING
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_CONSTRUCTOR_SETTINGS_FROM_JSON_STRING
-void* uniffi_slatedb_uniffi_fn_constructor_settings_from_json_string(RustBuffer json, RustCallStatus *out_status
+uint64_t uniffi_slatedb_uniffi_fn_constructor_settings_from_json_string(RustBuffer json, RustCallStatus *out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_CONSTRUCTOR_SETTINGS_LOAD
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_CONSTRUCTOR_SETTINGS_LOAD
-void* uniffi_slatedb_uniffi_fn_constructor_settings_load(RustCallStatus *out_status
+uint64_t uniffi_slatedb_uniffi_fn_constructor_settings_load(RustCallStatus *out_status
     
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_SETTINGS_SET
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_SETTINGS_SET
-void uniffi_slatedb_uniffi_fn_method_settings_set(void* ptr, RustBuffer key, RustBuffer value_json, RustCallStatus *out_status
+void uniffi_slatedb_uniffi_fn_method_settings_set(uint64_t ptr, RustBuffer key, RustBuffer value_json, RustCallStatus *out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_SETTINGS_TO_JSON_STRING
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_SETTINGS_TO_JSON_STRING
-RustBuffer uniffi_slatedb_uniffi_fn_method_settings_to_json_string(void* ptr, RustCallStatus *out_status
+RustBuffer uniffi_slatedb_uniffi_fn_method_settings_to_json_string(uint64_t ptr, RustCallStatus *out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_CLONE_WALFILE
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_CLONE_WALFILE
-void* uniffi_slatedb_uniffi_fn_clone_walfile(void* ptr, RustCallStatus *out_status
+uint64_t uniffi_slatedb_uniffi_fn_clone_walfile(uint64_t handle, RustCallStatus *out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_FREE_WALFILE
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_FREE_WALFILE
-void uniffi_slatedb_uniffi_fn_free_walfile(void* ptr, RustCallStatus *out_status
+void uniffi_slatedb_uniffi_fn_free_walfile(uint64_t handle, RustCallStatus *out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_WALFILE_ID
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_WALFILE_ID
-uint64_t uniffi_slatedb_uniffi_fn_method_walfile_id(void* ptr, RustCallStatus *out_status
+uint64_t uniffi_slatedb_uniffi_fn_method_walfile_id(uint64_t ptr, RustCallStatus *out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_WALFILE_ITERATOR
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_WALFILE_ITERATOR
-uint64_t uniffi_slatedb_uniffi_fn_method_walfile_iterator(void* ptr
+uint64_t uniffi_slatedb_uniffi_fn_method_walfile_iterator(uint64_t ptr
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_WALFILE_METADATA
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_WALFILE_METADATA
-uint64_t uniffi_slatedb_uniffi_fn_method_walfile_metadata(void* ptr
+uint64_t uniffi_slatedb_uniffi_fn_method_walfile_metadata(uint64_t ptr
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_WALFILE_NEXT_FILE
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_WALFILE_NEXT_FILE
-void* uniffi_slatedb_uniffi_fn_method_walfile_next_file(void* ptr, RustCallStatus *out_status
+uint64_t uniffi_slatedb_uniffi_fn_method_walfile_next_file(uint64_t ptr, RustCallStatus *out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_WALFILE_NEXT_ID
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_WALFILE_NEXT_ID
-uint64_t uniffi_slatedb_uniffi_fn_method_walfile_next_id(void* ptr, RustCallStatus *out_status
+uint64_t uniffi_slatedb_uniffi_fn_method_walfile_next_id(uint64_t ptr, RustCallStatus *out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_CLONE_WALFILEITERATOR
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_CLONE_WALFILEITERATOR
-void* uniffi_slatedb_uniffi_fn_clone_walfileiterator(void* ptr, RustCallStatus *out_status
+uint64_t uniffi_slatedb_uniffi_fn_clone_walfileiterator(uint64_t handle, RustCallStatus *out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_FREE_WALFILEITERATOR
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_FREE_WALFILEITERATOR
-void uniffi_slatedb_uniffi_fn_free_walfileiterator(void* ptr, RustCallStatus *out_status
+void uniffi_slatedb_uniffi_fn_free_walfileiterator(uint64_t handle, RustCallStatus *out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_WALFILEITERATOR_NEXT
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_WALFILEITERATOR_NEXT
-uint64_t uniffi_slatedb_uniffi_fn_method_walfileiterator_next(void* ptr
+uint64_t uniffi_slatedb_uniffi_fn_method_walfileiterator_next(uint64_t ptr
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_CLONE_WALREADER
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_CLONE_WALREADER
-void* uniffi_slatedb_uniffi_fn_clone_walreader(void* ptr, RustCallStatus *out_status
+uint64_t uniffi_slatedb_uniffi_fn_clone_walreader(uint64_t handle, RustCallStatus *out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_FREE_WALREADER
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_FREE_WALREADER
-void uniffi_slatedb_uniffi_fn_free_walreader(void* ptr, RustCallStatus *out_status
+void uniffi_slatedb_uniffi_fn_free_walreader(uint64_t handle, RustCallStatus *out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_CONSTRUCTOR_WALREADER_NEW
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_CONSTRUCTOR_WALREADER_NEW
-void* uniffi_slatedb_uniffi_fn_constructor_walreader_new(RustBuffer path, void* object_store, RustCallStatus *out_status
+uint64_t uniffi_slatedb_uniffi_fn_constructor_walreader_new(RustBuffer path, uint64_t object_store, RustCallStatus *out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_WALREADER_GET
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_WALREADER_GET
-void* uniffi_slatedb_uniffi_fn_method_walreader_get(void* ptr, uint64_t id, RustCallStatus *out_status
+uint64_t uniffi_slatedb_uniffi_fn_method_walreader_get(uint64_t ptr, uint64_t id, RustCallStatus *out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_WALREADER_LIST
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_WALREADER_LIST
-uint64_t uniffi_slatedb_uniffi_fn_method_walreader_list(void* ptr, RustBuffer start_id, RustBuffer end_id
+uint64_t uniffi_slatedb_uniffi_fn_method_walreader_list(uint64_t ptr, RustBuffer start_id, RustBuffer end_id
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_CLONE_WRITEBATCH
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_CLONE_WRITEBATCH
-void* uniffi_slatedb_uniffi_fn_clone_writebatch(void* ptr, RustCallStatus *out_status
+uint64_t uniffi_slatedb_uniffi_fn_clone_writebatch(uint64_t handle, RustCallStatus *out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_FREE_WRITEBATCH
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_FREE_WRITEBATCH
-void uniffi_slatedb_uniffi_fn_free_writebatch(void* ptr, RustCallStatus *out_status
+void uniffi_slatedb_uniffi_fn_free_writebatch(uint64_t handle, RustCallStatus *out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_CONSTRUCTOR_WRITEBATCH_NEW
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_CONSTRUCTOR_WRITEBATCH_NEW
-void* uniffi_slatedb_uniffi_fn_constructor_writebatch_new(RustCallStatus *out_status
+uint64_t uniffi_slatedb_uniffi_fn_constructor_writebatch_new(RustCallStatus *out_status
     
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_WRITEBATCH_DELETE
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_WRITEBATCH_DELETE
-void uniffi_slatedb_uniffi_fn_method_writebatch_delete(void* ptr, RustBuffer key, RustCallStatus *out_status
+void uniffi_slatedb_uniffi_fn_method_writebatch_delete(uint64_t ptr, RustBuffer key, RustCallStatus *out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_WRITEBATCH_MERGE
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_WRITEBATCH_MERGE
-void uniffi_slatedb_uniffi_fn_method_writebatch_merge(void* ptr, RustBuffer key, RustBuffer operand, RustCallStatus *out_status
+void uniffi_slatedb_uniffi_fn_method_writebatch_merge(uint64_t ptr, RustBuffer key, RustBuffer operand, RustCallStatus *out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_WRITEBATCH_MERGE_WITH_OPTIONS
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_WRITEBATCH_MERGE_WITH_OPTIONS
-void uniffi_slatedb_uniffi_fn_method_writebatch_merge_with_options(void* ptr, RustBuffer key, RustBuffer operand, RustBuffer options, RustCallStatus *out_status
+void uniffi_slatedb_uniffi_fn_method_writebatch_merge_with_options(uint64_t ptr, RustBuffer key, RustBuffer operand, RustBuffer options, RustCallStatus *out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_WRITEBATCH_PUT
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_WRITEBATCH_PUT
-void uniffi_slatedb_uniffi_fn_method_writebatch_put(void* ptr, RustBuffer key, RustBuffer value, RustCallStatus *out_status
+void uniffi_slatedb_uniffi_fn_method_writebatch_put(uint64_t ptr, RustBuffer key, RustBuffer value, RustCallStatus *out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_WRITEBATCH_PUT_WITH_OPTIONS
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_WRITEBATCH_PUT_WITH_OPTIONS
-void uniffi_slatedb_uniffi_fn_method_writebatch_put_with_options(void* ptr, RustBuffer key, RustBuffer value, RustBuffer options, RustCallStatus *out_status
+void uniffi_slatedb_uniffi_fn_method_writebatch_put_with_options(uint64_t ptr, RustBuffer key, RustBuffer value, RustBuffer options, RustCallStatus *out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_FUNC_INIT_LOGGING
@@ -1310,26 +1304,6 @@ void ffi_slatedb_uniffi_rust_future_free_f64(uint64_t handle
 double ffi_slatedb_uniffi_rust_future_complete_f64(uint64_t handle, RustCallStatus *out_status
 );
 #endif
-#ifndef UNIFFI_FFIDEF_FFI_SLATEDB_UNIFFI_RUST_FUTURE_POLL_POINTER
-#define UNIFFI_FFIDEF_FFI_SLATEDB_UNIFFI_RUST_FUTURE_POLL_POINTER
-void ffi_slatedb_uniffi_rust_future_poll_pointer(uint64_t handle, UniffiRustFutureContinuationCallback callback, uint64_t callback_data
-);
-#endif
-#ifndef UNIFFI_FFIDEF_FFI_SLATEDB_UNIFFI_RUST_FUTURE_CANCEL_POINTER
-#define UNIFFI_FFIDEF_FFI_SLATEDB_UNIFFI_RUST_FUTURE_CANCEL_POINTER
-void ffi_slatedb_uniffi_rust_future_cancel_pointer(uint64_t handle
-);
-#endif
-#ifndef UNIFFI_FFIDEF_FFI_SLATEDB_UNIFFI_RUST_FUTURE_FREE_POINTER
-#define UNIFFI_FFIDEF_FFI_SLATEDB_UNIFFI_RUST_FUTURE_FREE_POINTER
-void ffi_slatedb_uniffi_rust_future_free_pointer(uint64_t handle
-);
-#endif
-#ifndef UNIFFI_FFIDEF_FFI_SLATEDB_UNIFFI_RUST_FUTURE_COMPLETE_POINTER
-#define UNIFFI_FFIDEF_FFI_SLATEDB_UNIFFI_RUST_FUTURE_COMPLETE_POINTER
-void* ffi_slatedb_uniffi_rust_future_complete_pointer(uint64_t handle, RustCallStatus *out_status
-);
-#endif
 #ifndef UNIFFI_FFIDEF_FFI_SLATEDB_UNIFFI_RUST_FUTURE_POLL_RUST_BUFFER
 #define UNIFFI_FFIDEF_FFI_SLATEDB_UNIFFI_RUST_FUTURE_POLL_RUST_BUFFER
 void ffi_slatedb_uniffi_rust_future_poll_rust_buffer(uint64_t handle, UniffiRustFutureContinuationCallback callback, uint64_t callback_data
@@ -1373,6 +1347,78 @@ void ffi_slatedb_uniffi_rust_future_complete_void(uint64_t handle, RustCallStatu
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_FUNC_INIT_LOGGING
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_FUNC_INIT_LOGGING
 uint16_t uniffi_slatedb_uniffi_checksum_func_init_logging(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBBUILDER_BUILD
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBBUILDER_BUILD
+uint16_t uniffi_slatedb_uniffi_checksum_method_dbbuilder_build(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBBUILDER_WITH_DB_CACHE_DISABLED
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBBUILDER_WITH_DB_CACHE_DISABLED
+uint16_t uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_db_cache_disabled(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBBUILDER_WITH_MERGE_OPERATOR
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBBUILDER_WITH_MERGE_OPERATOR
+uint16_t uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_merge_operator(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBBUILDER_WITH_SEED
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBBUILDER_WITH_SEED
+uint16_t uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_seed(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBBUILDER_WITH_SETTINGS
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBBUILDER_WITH_SETTINGS
+uint16_t uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_settings(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBBUILDER_WITH_SST_BLOCK_SIZE
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBBUILDER_WITH_SST_BLOCK_SIZE
+uint16_t uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_sst_block_size(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBBUILDER_WITH_WAL_OBJECT_STORE
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBBUILDER_WITH_WAL_OBJECT_STORE
+uint16_t uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_wal_object_store(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBREADERBUILDER_BUILD
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBREADERBUILDER_BUILD
+uint16_t uniffi_slatedb_uniffi_checksum_method_dbreaderbuilder_build(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBREADERBUILDER_WITH_CHECKPOINT_ID
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBREADERBUILDER_WITH_CHECKPOINT_ID
+uint16_t uniffi_slatedb_uniffi_checksum_method_dbreaderbuilder_with_checkpoint_id(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBREADERBUILDER_WITH_MERGE_OPERATOR
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBREADERBUILDER_WITH_MERGE_OPERATOR
+uint16_t uniffi_slatedb_uniffi_checksum_method_dbreaderbuilder_with_merge_operator(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBREADERBUILDER_WITH_OPTIONS
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBREADERBUILDER_WITH_OPTIONS
+uint16_t uniffi_slatedb_uniffi_checksum_method_dbreaderbuilder_with_options(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBREADERBUILDER_WITH_WAL_OBJECT_STORE
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBREADERBUILDER_WITH_WAL_OBJECT_STORE
+uint16_t uniffi_slatedb_uniffi_checksum_method_dbreaderbuilder_with_wal_object_store(void
     
 );
 #endif
@@ -1508,60 +1554,6 @@ uint16_t uniffi_slatedb_uniffi_checksum_method_db_write_with_options(void
     
 );
 #endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBBUILDER_BUILD
-#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBBUILDER_BUILD
-uint16_t uniffi_slatedb_uniffi_checksum_method_dbbuilder_build(void
-    
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBBUILDER_WITH_DB_CACHE_DISABLED
-#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBBUILDER_WITH_DB_CACHE_DISABLED
-uint16_t uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_db_cache_disabled(void
-    
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBBUILDER_WITH_MERGE_OPERATOR
-#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBBUILDER_WITH_MERGE_OPERATOR
-uint16_t uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_merge_operator(void
-    
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBBUILDER_WITH_SEED
-#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBBUILDER_WITH_SEED
-uint16_t uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_seed(void
-    
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBBUILDER_WITH_SETTINGS
-#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBBUILDER_WITH_SETTINGS
-uint16_t uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_settings(void
-    
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBBUILDER_WITH_SST_BLOCK_SIZE
-#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBBUILDER_WITH_SST_BLOCK_SIZE
-uint16_t uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_sst_block_size(void
-    
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBBUILDER_WITH_WAL_OBJECT_STORE
-#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBBUILDER_WITH_WAL_OBJECT_STORE
-uint16_t uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_wal_object_store(void
-    
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBITERATOR_NEXT
-#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBITERATOR_NEXT
-uint16_t uniffi_slatedb_uniffi_checksum_method_dbiterator_next(void
-    
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBITERATOR_SEEK
-#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBITERATOR_SEEK
-uint16_t uniffi_slatedb_uniffi_checksum_method_dbiterator_seek(void
-    
-);
-#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBREADER_GET
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBREADER_GET
 uint16_t uniffi_slatedb_uniffi_checksum_method_dbreader_get(void
@@ -1601,36 +1593,6 @@ uint16_t uniffi_slatedb_uniffi_checksum_method_dbreader_scan_with_options(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBREADER_SHUTDOWN
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBREADER_SHUTDOWN
 uint16_t uniffi_slatedb_uniffi_checksum_method_dbreader_shutdown(void
-    
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBREADERBUILDER_BUILD
-#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBREADERBUILDER_BUILD
-uint16_t uniffi_slatedb_uniffi_checksum_method_dbreaderbuilder_build(void
-    
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBREADERBUILDER_WITH_CHECKPOINT_ID
-#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBREADERBUILDER_WITH_CHECKPOINT_ID
-uint16_t uniffi_slatedb_uniffi_checksum_method_dbreaderbuilder_with_checkpoint_id(void
-    
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBREADERBUILDER_WITH_MERGE_OPERATOR
-#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBREADERBUILDER_WITH_MERGE_OPERATOR
-uint16_t uniffi_slatedb_uniffi_checksum_method_dbreaderbuilder_with_merge_operator(void
-    
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBREADERBUILDER_WITH_OPTIONS
-#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBREADERBUILDER_WITH_OPTIONS
-uint16_t uniffi_slatedb_uniffi_checksum_method_dbreaderbuilder_with_options(void
-    
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBREADERBUILDER_WITH_WAL_OBJECT_STORE
-#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBREADERBUILDER_WITH_WAL_OBJECT_STORE
-uint16_t uniffi_slatedb_uniffi_checksum_method_dbreaderbuilder_with_wal_object_store(void
     
 );
 #endif
@@ -1799,6 +1761,18 @@ uint16_t uniffi_slatedb_uniffi_checksum_method_dbtransaction_seqnum(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBTRANSACTION_UNMARK_WRITE
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBTRANSACTION_UNMARK_WRITE
 uint16_t uniffi_slatedb_uniffi_checksum_method_dbtransaction_unmark_write(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBITERATOR_NEXT
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBITERATOR_NEXT
+uint16_t uniffi_slatedb_uniffi_checksum_method_dbiterator_next(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBITERATOR_SEEK
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBITERATOR_SEEK
+uint16_t uniffi_slatedb_uniffi_checksum_method_dbiterator_seek(void
     
 );
 #endif
@@ -1983,10 +1957,12 @@ uint32_t ffi_slatedb_uniffi_uniffi_contract_version(void
 );
 #endif
 
- void slatedb_uniffi_cgo_dispatchCallbackInterfaceLogCallbackMethod0(uint64_t uniffi_handle, RustBuffer record, void* uniffi_out_return, RustCallStatus* callStatus );
- void slatedb_uniffi_cgo_dispatchCallbackInterfaceLogCallbackFree(uint64_t handle);
- void slatedb_uniffi_cgo_dispatchCallbackInterfaceMergeOperatorMethod0(uint64_t uniffi_handle, RustBuffer key, RustBuffer existing_value, RustBuffer operand, RustBuffer* uniffi_out_return, RustCallStatus* callStatus );
- void slatedb_uniffi_cgo_dispatchCallbackInterfaceMergeOperatorFree(uint64_t handle);
+ void slatedb_uniffi_logging_cgo_dispatchCallbackInterfaceLogCallbackMethod0(uint64_t uniffi_handle, RustBuffer record, void* uniffi_out_return, RustCallStatus* callStatus );
+ void slatedb_uniffi_logging_cgo_dispatchCallbackInterfaceLogCallbackFree(uint64_t handle);
+uint64_t slatedb_uniffi_logging_cgo_dispatchCallbackInterfaceLogCallbackClone(uint64_t handle);
+ void slatedb_uniffi_merge_operator_cgo_dispatchCallbackInterfaceMergeOperatorMethod0(uint64_t uniffi_handle, RustBuffer key, RustBuffer existing_value, RustBuffer operand, RustBuffer* uniffi_out_return, RustCallStatus* callStatus );
+ void slatedb_uniffi_merge_operator_cgo_dispatchCallbackInterfaceMergeOperatorFree(uint64_t handle);
+uint64_t slatedb_uniffi_merge_operator_cgo_dispatchCallbackInterfaceMergeOperatorClone(uint64_t handle);
 
 void slatedb_uniffiFutureContinuationCallback(uint64_t, int8_t);
 void slatedb_uniffiFreeGorutine(uint64_t);
