@@ -1,5 +1,4 @@
 use std::cell::Cell;
-use std::collections::VecDeque;
 use std::ops::{Bound, RangeBounds};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -177,11 +176,11 @@ pub(crate) struct MemTableIteratorInner<T: RangeBounds<SequencedKey>> {
     inner: Range<'this, SequencedKey, T, SequencedKey, RowEntry>,
     ordering: IterationOrder,
     item: Option<RowEntry>,
-    /// Buffer used in descending mode to re-order entries within a key group.
+    /// Stack used in descending mode to re-order entries within a key group.
     /// When iterating descending, `next_back()` yields entries for the same key
-    /// in seq-ascending order, but we need seq-descending. This buffer collects
-    /// all entries for the current key and drains them in the correct order.
-    descending_buffer: VecDeque<RowEntry>,
+    /// in seq-ascending order. Pushing them onto this stack and popping gives
+    /// seq-descending order, which is what the merge iterator needs for dedup.
+    descending_stack: Vec<RowEntry>,
 }
 pub(crate) type MemTableIterator = MemTableIteratorInner<KVTableInternalKeyRange>;
 
@@ -224,26 +223,26 @@ impl MemTableIterator {
     }
 
     fn next_descending(&mut self) -> Option<RowEntry> {
-        // If the buffer has entries, drain from it.
-        let buffered = self.with_descending_buffer_mut(|buf| buf.pop_front());
-        if buffered.is_some() {
-            return buffered;
+        // If the stack has entries, pop from it (LIFO gives seq-descending).
+        let top = self.with_descending_stack_mut(|stack| stack.pop());
+        if top.is_some() {
+            return top;
         }
 
-        // Buffer is empty. The current `item` (if any) is the start of a new
+        // Stack is empty. The current `item` (if any) is the start of a new
         // key group. Collect all entries for this key from the SkipMap.
         let first = self.borrow_item().clone();
         match first {
             Some(first) => {
                 let current_key = first.key.clone();
 
-                // Collect remaining entries with the same key. next_back() yields
-                // them in seq-ascending order, so we push to the front of the
-                // buffer to reverse them into seq-descending order.
-                self.with_descending_buffer_mut(|buf| buf.push_front(first));
-                self.fill_descending_buffer(&current_key);
+                // Collect remaining entries with the same key. next_back()
+                // yields them in seq-ascending order. Pushing onto the stack
+                // and popping gives seq-descending order.
+                self.with_descending_stack_mut(|stack| stack.push(first));
+                self.fill_descending_stack(&current_key);
 
-                self.with_descending_buffer_mut(|buf| buf.pop_front())
+                self.with_descending_stack_mut(|stack| stack.pop())
             }
             None => {
                 // item is None — either iterator is exhausted, or this is the
@@ -257,7 +256,7 @@ impl MemTableIterator {
         }
     }
 
-    fn fill_descending_buffer(&mut self, current_key: &Bytes) {
+    fn fill_descending_stack(&mut self, current_key: &Bytes) {
         loop {
             let next = self.with_inner_mut(|inner| {
                 inner
@@ -266,7 +265,7 @@ impl MemTableIterator {
             });
             match next {
                 Some((key, row)) if key == *current_key => {
-                    self.with_descending_buffer_mut(|buf| buf.push_front(row));
+                    self.with_descending_stack_mut(|stack| stack.push(row));
                 }
                 other => {
                     self.with_item_mut(|item| *item = other.map(|(_, row)| row));
@@ -396,7 +395,7 @@ impl KVTable {
             inner_builder: |map| map.range(internal_range),
             ordering,
             item: None,
-            descending_buffer: VecDeque::new(),
+            descending_stack: Vec::new(),
         }
         .build();
         iterator.next_sync();
