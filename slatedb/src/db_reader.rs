@@ -1126,7 +1126,6 @@ mod tests {
     use crate::store_provider::StoreProvider;
     use crate::tablestore::TableStore;
     use crate::types::RowEntry;
-    use crate::utils::WatchableOnceCell;
     use crate::{error::SlateDBError, test_utils, Db};
     use bytes::Bytes;
     use fail_parallel::FailPointRegistry;

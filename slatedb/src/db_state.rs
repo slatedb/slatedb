@@ -1,7 +1,9 @@
 use crate::bytes_range::BytesRange;
 use crate::checkpoint::Checkpoint;
 use crate::config::CompressionCodec;
-use crate::db_status::{ClosedResultWriter, DbStatusReporter};
+use crate::db_status::ClosedResultWriter;
+#[cfg(test)]
+use crate::db_status::DbStatusReporter;
 use crate::error::SlateDBError;
 use crate::manifest::Manifest;
 use crate::mem_table::{ImmutableMemtable, KVTable, WritableKVTable};
@@ -575,6 +577,7 @@ impl DbStateReader for DbStateView {
 }
 
 impl DbState {
+    #[cfg(test)]
     pub(crate) fn new(manifest: DirtyObject<Manifest>, _status_reporter: DbStatusReporter) -> Self {
         Self::new_with_closed_result(manifest, ClosedResultWriter::new())
     }

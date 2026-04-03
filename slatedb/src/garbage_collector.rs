@@ -326,7 +326,6 @@ mod tests {
 
     use crate::db_status::ClosedResultWriter;
     use crate::format::sst::SsTableFormat;
-    use crate::utils::WatchableOnceCell;
     use crate::{
         db_state::{ManifestCore, SortedRun, SsTableHandle, SsTableId, SsTableView},
         manifest::store::{ManifestStore, StoredManifest},

@@ -774,6 +774,7 @@ pub(crate) mod safe_async_channel {
             self.tx.send_safely(self.closed.clone(), message)
         }
 
+        #[allow(dead_code)]
         pub(crate) fn close(&self) {
             let _ = self.tx.close();
         }
