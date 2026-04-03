@@ -6307,7 +6307,8 @@ mod tests {
 
         let fp_registry = Arc::new(FailPointRegistry::new());
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let path = Path::from("/tmp/test_begin_during_paused_flush_updates_recent_snapshot_min_seq");
+        let path =
+            Path::from("/tmp/test_begin_during_paused_flush_updates_recent_snapshot_min_seq");
         let mut settings = test_db_options(0, 2048, None);
         settings.flush_interval = None;
 
