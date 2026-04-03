@@ -37,6 +37,7 @@ impl SnapshotManager {
         seq
     }
 
+    #[allow(clippy::panic)]
     pub(crate) fn unregister(&self, seq: u64) {
         let mut inner = self.inner.write();
         if let Some(count) = inner.active_snapshots.get_mut(&seq) {
@@ -44,6 +45,8 @@ impl SnapshotManager {
             if *count == 0 {
                 inner.active_snapshots.remove(&seq);
             }
+        } else {
+            panic!("unregister called on seq that is not tracked")
         }
     }
 
@@ -122,9 +125,9 @@ mod tests {
     }
 
     #[test]
-    fn test_unregister_nonexistent_is_noop() {
+    #[should_panic]
+    fn test_unregister_nonexistent_panics() {
         let mgr = SnapshotManager::new(Arc::new(DbOracle::new(0, 0, 0, DbStatusReporter::new(0))));
         mgr.unregister(999);
-        assert_eq!(mgr.min_seq(), None);
     }
 }

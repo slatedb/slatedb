@@ -10,7 +10,6 @@ use crate::types::KeyValue;
 use crate::db::DbInner;
 use crate::DbRead;
 
-#[derive(Clone)]
 pub struct DbSnapshot {
     started_seq: u64,
     db_inner: Arc<DbInner>,
