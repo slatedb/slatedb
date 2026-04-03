@@ -21,7 +21,7 @@ use crate::sst_iter::SstIteratorOptions;
 use crate::store_provider::StoreProvider;
 use crate::tablestore::TableStore;
 use crate::types::KeyValue;
-use crate::utils::{IdGenerator, WatchableOnceCell};
+use crate::utils::IdGenerator;
 use crate::wal_replay::{WalReplayIterator, WalReplayOptions};
 use crate::{Checkpoint, DbIterator};
 use async_trait::async_trait;
@@ -691,11 +691,8 @@ impl DbReader {
         Self::validate_options(&options)?;
 
         let status_reporter = DbStatusReporter::new(0);
-        let closed_result_watcher = ClosedResultWriter::new(WatchableOnceCell::new())
-            .with_on_close(Arc::new({
-                let reporter = status_reporter.clone();
-                move |reason| reporter.report_closed(reason)
-            }));
+        let closed_result_watcher = ClosedResultWriter::new();
+        closed_result_watcher.spawn_close_watcher(status_reporter.clone());
         let task_executor =
             MessageHandlerExecutor::new(closed_result_watcher.clone(), system_clock.clone());
         let manifest_store = store_provider.manifest_store();
@@ -2135,7 +2132,7 @@ mod tests {
             user_checkpoint_id: None,
             oracle,
             reader,
-            closed_result_watcher: ClosedResultWriter::new(WatchableOnceCell::new()),
+            closed_result_watcher: ClosedResultWriter::new(),
             status_reporter: DbStatusReporter::new(0),
             rand: test_provider.rand.clone(),
             recorder,
@@ -2225,7 +2222,7 @@ mod tests {
             user_checkpoint_id: None,
             oracle,
             reader,
-            closed_result_watcher: ClosedResultWriter::new(WatchableOnceCell::new()),
+            closed_result_watcher: ClosedResultWriter::new(),
             status_reporter: DbStatusReporter::new(0),
             rand: test_provider.rand.clone(),
             recorder,

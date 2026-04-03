@@ -18,7 +18,7 @@ use crate::error::SlateDBError;
 use crate::oracle::{DbOracle, Oracle};
 use crate::tablestore::TableStore;
 use crate::types::RowEntry;
-use crate::utils::{format_bytes_si, SendSafely, WatchableOnceCell, WatchableOnceCellReader};
+use crate::utils::{format_bytes_si, WatchableOnceCell, WatchableOnceCellReader};
 use crate::wal_id::WalIdStore;
 
 pub(crate) const WAL_BUFFER_TASK_NAME: &str = "wal_writer";
@@ -67,7 +67,7 @@ struct WalBufferManagerInner {
     /// The flusher will try flush all the immutable wals to remote storage.
     immutable_wals: VecDeque<(u64, Arc<WalBuffer>)>,
     /// The channel to send the flush work to the background worker.
-    flush_tx: Option<async_channel::Sender<WalFlushWork>>,
+    flush_tx: Option<crate::utils::safe_async_channel::SafeSender<WalFlushWork>>,
     /// task executor for the background worker.
     task_executor: Option<Arc<MessageHandlerExecutor>>,
     /// Whenever a WAL is applied to Memtable and successfully flushed to remote storage,
@@ -152,7 +152,7 @@ impl WalBufferManager {
         self: &Arc<Self>,
         task_executor: Arc<MessageHandlerExecutor>,
     ) -> Result<(), SlateDBError> {
-        let (flush_tx, flush_rx) = async_channel::unbounded();
+        let (flush_tx, flush_rx) = self.db_state.read().closed_result().channel();
         {
             let mut inner = self.inner.write();
             inner.flush_tx = Some(flush_tx);
@@ -314,10 +314,7 @@ impl WalBufferManager {
             .flush_tx
             .clone()
             .expect("flush_tx not initialized, please call init first.");
-        flush_tx.send_safely(
-            self.db_state.read().closed_result_reader(),
-            WalFlushWork { result_tx },
-        )
+        flush_tx.send(WalFlushWork { result_tx })
     }
 
     #[instrument(level = "trace", skip_all, err(level = tracing::Level::DEBUG))]

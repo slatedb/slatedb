@@ -747,6 +747,48 @@ pub(crate) async fn preload_cache_from_manifest(
     Ok(())
 }
 
+/// Safe MPMC channel wrappers backed by [`async_channel`].
+///
+/// The sender uses a [`WatchableOnceCellReader`] to report shutdown errors
+/// via [`SendSafely`] when the channel is closed. Construct channels with
+/// [`ClosedResultWriter::channel`] to wire them to the shared DB lifecycle
+/// state.
+pub(crate) mod safe_async_channel {
+    use super::{SendSafely, WatchableOnceCellReader};
+    use crate::error::SlateDBError;
+
+    pub(crate) struct SafeSender<T> {
+        tx: async_channel::Sender<T>,
+        closed: WatchableOnceCellReader<Result<(), SlateDBError>>,
+    }
+
+    impl<T> SafeSender<T> {
+        pub(crate) fn new(
+            tx: async_channel::Sender<T>,
+            closed: WatchableOnceCellReader<Result<(), SlateDBError>>,
+        ) -> Self {
+            Self { tx, closed }
+        }
+
+        pub(crate) fn send(&self, message: T) -> Result<(), SlateDBError> {
+            self.tx.send_safely(self.closed.clone(), message)
+        }
+
+        pub(crate) fn close(&self) {
+            let _ = self.tx.close();
+        }
+    }
+
+    impl<T> Clone for SafeSender<T> {
+        fn clone(&self) -> Self {
+            Self {
+                tx: self.tx.clone(),
+                closed: self.closed.clone(),
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use rstest::rstest;

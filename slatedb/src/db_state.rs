@@ -7,7 +7,7 @@ use crate::manifest::Manifest;
 use crate::mem_table::{ImmutableMemtable, KVTable, WritableKVTable};
 use crate::reader::DbStateReader;
 use crate::seq_tracker::SequenceTracker;
-use crate::utils::{WatchableOnceCell, WatchableOnceCellReader};
+use crate::utils::WatchableOnceCellReader;
 use crate::wal_id::WalIdStore;
 use bytes::Bytes;
 use log::debug;
@@ -575,10 +575,14 @@ impl DbStateReader for DbStateView {
 }
 
 impl DbState {
-    pub(crate) fn new(manifest: DirtyObject<Manifest>, status_reporter: DbStatusReporter) -> Self {
-        let closed_result = ClosedResultWriter::new(WatchableOnceCell::new()).with_on_close(
-            Arc::new(move |reason| status_reporter.report_closed(reason)),
-        );
+    pub(crate) fn new(manifest: DirtyObject<Manifest>, _status_reporter: DbStatusReporter) -> Self {
+        Self::new_with_closed_result(manifest, ClosedResultWriter::new())
+    }
+
+    pub(crate) fn new_with_closed_result(
+        manifest: DirtyObject<Manifest>,
+        closed_result: ClosedResultWriter,
+    ) -> Self {
         Self {
             memtable: WritableKVTable::new(),
             state: Arc::new(COWDbState {

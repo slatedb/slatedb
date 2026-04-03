@@ -2,7 +2,6 @@ use crate::config::{CheckpointOptions, CheckpointScope};
 use crate::db::Db;
 use crate::error::SlateDBError;
 use crate::mem_table_flush::MemtableFlushMsg;
-use crate::utils::SendSafely;
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use uuid::Uuid;
@@ -43,13 +42,12 @@ impl Db {
         }
 
         let (tx, rx) = tokio::sync::oneshot::channel();
-        self.inner.memtable_flush_notifier.send_safely(
-            self.inner.state.read().closed_result_reader(),
-            MemtableFlushMsg::CreateCheckpoint {
+        self.inner
+            .memtable_flush_notifier
+            .send(MemtableFlushMsg::CreateCheckpoint {
                 options: options.clone(),
                 sender: tx,
-            },
-        )?;
+            })?;
 
         let result = rx.await.map_err(SlateDBError::ReadChannelError)?;
         result.map_err(Into::into)

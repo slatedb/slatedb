@@ -37,7 +37,6 @@ use crate::dispatcher::MessageHandlerExecutor;
 use crate::garbage_collector::GC_TASK_NAME;
 use crate::transaction_manager::IsolationLevel;
 use crate::CloseReason;
-use async_channel::Sender;
 use log::{info, trace, warn};
 use parking_lot::RwLock;
 use std::time::Duration;
@@ -70,14 +69,14 @@ use crate::sst_iter::SstIteratorOptions;
 use crate::tablestore::TableStore;
 use crate::transaction_manager::TransactionManager;
 use crate::types::KeyValue;
-use crate::utils::{format_bytes_si, SendSafely};
+use crate::utils::{format_bytes_si, safe_async_channel};
 use crate::wal_buffer::{WalBufferManager, WAL_BUFFER_TASK_NAME};
 use crate::wal_replay::{WalReplayIterator, WalReplayOptions};
 use slatedb_common::clock::SystemClock;
 use slatedb_common::metrics::MetricsRecorderHelper;
 use slatedb_txn_obj::DirtyObject;
 
-use crate::db_status::DbStatusReporter;
+use crate::db_status::{ClosedResultWriter, DbStatusReporter};
 pub use builder::DbBuilder;
 pub use builder::DbReaderBuilder;
 
@@ -87,8 +86,8 @@ pub(crate) struct DbInner {
     pub(crate) state: Arc<RwLock<DbState>>,
     pub(crate) settings: Settings,
     pub(crate) table_store: Arc<TableStore>,
-    pub(crate) memtable_flush_notifier: Sender<MemtableFlushMsg>,
-    pub(crate) write_notifier: Sender<WriteBatchMessage>,
+    pub(crate) memtable_flush_notifier: safe_async_channel::SafeSender<MemtableFlushMsg>,
+    pub(crate) write_notifier: safe_async_channel::SafeSender<WriteBatchMessage>,
     pub(crate) db_stats: DbStats,
     /// Kept alive so the underlying `MetricsRecorder` is not dropped while
     /// metric handles in `DbStats` (and other stats structs) are still in use.
@@ -120,11 +119,12 @@ impl DbInner {
         rand: Arc<DbRand>,
         table_store: Arc<TableStore>,
         manifest: DirtyObject<Manifest>,
-        memtable_flush_notifier: Sender<MemtableFlushMsg>,
-        write_notifier: Sender<WriteBatchMessage>,
+        memtable_flush_notifier: safe_async_channel::SafeSender<MemtableFlushMsg>,
+        write_notifier: safe_async_channel::SafeSender<WriteBatchMessage>,
         recorder: MetricsRecorderHelper,
         fp_registry: Arc<FailPointRegistry>,
         merge_operator: Option<crate::merge_operator::MergeOperatorType>,
+        closed_result: ClosedResultWriter,
     ) -> Result<Self, SlateDBError> {
         // both last_seq and last_committed_seq will be updated after WAL replay.
         let last_l0_seq = manifest.value.core.last_l0_seq;
@@ -142,8 +142,13 @@ impl DbInner {
         ));
 
         // state are mostly manifest, including IMM, L0, etc.
-        let db_state = DbState::new(manifest, status_reporter.clone());
+        let db_state = DbState::new_with_closed_result(manifest, closed_result);
         let state = Arc::new(RwLock::new(db_state));
+        // Watch for closed result and report status to subscribers.
+        state
+            .read()
+            .closed_result()
+            .spawn_close_watcher(status_reporter.clone());
 
         let db_stats = DbStats::new(&recorder);
         let wal_enabled = DbInner::wal_enabled_in_options(&settings);
@@ -294,8 +299,7 @@ impl DbInner {
         };
 
         self.maybe_apply_backpressure().await?;
-        self.write_notifier
-            .send_safely(self.state.read().closed_result_reader(), batch_msg)?;
+        self.write_notifier.send(batch_msg)?;
 
         // TODO: this can be modified as awaiting the last_durable_seq watermark & fatal error.
 
@@ -413,10 +417,8 @@ impl DbInner {
     // use to manually flush memtables
     async fn flush_immutable_memtables(&self) -> Result<(), SlateDBError> {
         let (tx, rx) = tokio::sync::oneshot::channel();
-        self.memtable_flush_notifier.send_safely(
-            self.state.read().closed_result_reader(),
-            MemtableFlushMsg::FlushImmutableMemtables { sender: Some(tx) },
-        )?;
+        self.memtable_flush_notifier
+            .send(MemtableFlushMsg::FlushImmutableMemtables { sender: Some(tx) })?;
         rx.await?
     }
 

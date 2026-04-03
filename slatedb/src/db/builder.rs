@@ -154,7 +154,6 @@ use crate::rand::DbRand;
 use crate::retrying_object_store::RetryingObjectStore;
 use crate::store_provider::DefaultStoreProvider;
 use crate::tablestore::TableStore;
-use crate::utils::WatchableOnceCell;
 use slatedb_common::clock::DefaultSystemClock;
 use slatedb_common::clock::SystemClock;
 use slatedb_common::metrics::MetricLevel;
@@ -504,9 +503,13 @@ impl<P: Into<Path>> DbBuilder<P> {
         )
         .await?;
 
-        // Setup communication channels
-        let (memtable_flush_tx, memtable_flush_rx) = async_channel::unbounded();
-        let (write_tx, write_rx) = async_channel::unbounded();
+        // Shared lifecycle state — created before DbInner so it can be shared
+        // with the executor and future channel construction.
+        let closed_result = ClosedResultWriter::new();
+
+        // Setup communication channels wired to the shared closed state.
+        let (memtable_flush_tx, memtable_flush_rx) = closed_result.channel();
+        let (write_tx, write_rx) = closed_result.channel();
 
         // Create the database inner state
         let inner = Arc::new(
@@ -521,6 +524,7 @@ impl<P: Into<Path>> DbBuilder<P> {
                 recorder.clone(),
                 self.fp_registry.clone(),
                 self.merge_operator.clone(),
+                closed_result.clone(),
             )
             .await?,
         );
@@ -533,7 +537,7 @@ impl<P: Into<Path>> DbBuilder<P> {
         // Setup background tasks
         let tokio_handle = Handle::current();
         let task_executor = Arc::new(MessageHandlerExecutor::new(
-            inner.clone().state.read().closed_result(),
+            closed_result,
             system_clock.clone(),
         ));
         if inner.wal_enabled {
@@ -891,7 +895,7 @@ impl<P: Into<Path>> CompactorBuilder<P> {
             rand: Arc::new(DbRand::default()),
             recorder: MetricsRecorderHelper::noop(),
             system_clock: Arc::new(DefaultSystemClock::default()),
-            closed_result: ClosedResultWriter::new(WatchableOnceCell::new()),
+            closed_result: ClosedResultWriter::new(),
             merge_operator: None,
             block_transformer: None,
             #[cfg(feature = "compaction_filters")]
