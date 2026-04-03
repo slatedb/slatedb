@@ -75,7 +75,7 @@ cd bindings/python
 python3 -m venv .venv
 source .venv/bin/activate
 pip install --upgrade pip
-pip install maturin "uniffi-bindgen==0.29.5" ruff
+pip install maturin "uniffi-bindgen==0.31.0" ruff
 maturin develop
 ruff check .
 python -c "import slatedb; import slatedb.uniffi; from slatedb.uniffi import *"
