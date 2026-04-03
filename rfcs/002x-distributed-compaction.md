@@ -16,7 +16,7 @@ Authors:
 
 <!-- Briefly explain what this RFC changes and why. Prefer 3–6 sentences. -->
 
-SlateDB currently runs compaction on a single process. Compaction is either embedded in the DB writer or as a standalone daemon. This caps compaction throughput at one node's network bandwidth and CPU. This RFC extends the existing `.compactions` coordination file (RFC-0013) to separate a **Compaction Coordinator** (scheduler and manifest committer) from one or more **Compaction Workers** (stateless job executors). Workers poll `.compactions` for submitted jobs, claim them via CAS, execute the existing compaction code path, and report results back; the coordinator alone commits manifest updates, preserving the single-writer invariant. The design is backward-compatible with existing stateful and standalone compaction modes and adds no external dependencies beyond the object store.
+SlateDB currently runs compaction on a single process. Compaction is either embedded in the DB writer or as a standalone daemon. This caps compaction throughput at one node's network bandwidth and CPU. This RFC extends the existing `.compactions` coordination file (RFC-0013) to separate a **Compaction Coordinator** (scheduler and manifest committer) from one or more **Compaction Workers** (stateless job executors). Workers poll `.compactions` for submitted jobs, claim them via optimistic concurrency (create-if-not-exists on numbered files), execute the existing compaction code path, and report results back; the coordinator alone commits manifest updates, preserving the single-writer invariant. The design is backward-compatible with existing stateful and standalone compaction modes and adds no external dependencies beyond the object store.
 
 ## Motivation
 
@@ -40,7 +40,7 @@ Both existing compaction modes share the same single-node ceiling: in-process co
 - **Changing the compaction scheduling strategy.** The scheduler logic is unchanged; only execution is distributed.
 - **Peer-to-peer or leaderless compaction.** A dedicated coordinator is required; no peer election mechanism is introduced (see Alternatives).
 - **Dynamic worker discovery.** Workers are registered by starting them; chitchat-based auto-discovery is deferred (see Rollout phase 4).
-- **Sharding `.compactions` across multiple files.** CAS contention at very high worker counts (50+) is an open question, but multi-file sharding is out of scope for this RFC.
+- **Sharding `.compactions` across multiple files.** Write contention at very high worker counts (50+) is an open question, but multi-file sharding is out of scope for this RFC.
 - **Multi-coordinator support.** The single-coordinator invariant is preserved; leader election across coordinators is a future concern.
 - **Changes to the public read/write API.** Distributed compaction is transparent to DB clients.
 
@@ -48,7 +48,7 @@ Both existing compaction modes share the same single-node ceiling: in-process co
 
 ### Architecture Overview
 
-Separates the **Compaction Coordinator** (scheduler + manifest committer) from one or more **Compaction Workers** (stateless executors). The `.compactions` file from [RFC-0013](0013-compaction-state-persistence.md) is the coordination primitive. Primary additions: worker identity, a CAS-based claim protocol, and heartbeat-based failure detection.
+Separates the **Compaction Coordinator** (scheduler + manifest committer) from one or more **Compaction Workers** (stateless executors). The `.compactions` file from [RFC-0013](0013-compaction-state-persistence.md) is the coordination primitive. Primary additions: worker identity, an optimistic claim protocol, and heartbeat-based failure detection.
 
 ```
 +----------------------------------+
@@ -78,7 +78,35 @@ Separates the **Compaction Coordinator** (scheduler + manifest committer) from o
 ```
 
 - **Coordinator** — owns `compactor_epoch`, runs the scheduler, writes `CompactionSpec`s to `.compactions`, commits manifest updates. Scheduler logic is unchanged.
-- **Workers** — poll `.compactions`, claim `Submitted` jobs via CAS, execute using the existing `execute_compaction_job` path, report completion. Workers do not touch the manifest or run the scheduler.
+- **Workers** — poll `.compactions`, claim `Submitted` jobs via optimistic concurrency, execute using the existing `execute_compaction_job` path, report completion. Workers do not touch the manifest or run the scheduler.
+
+### Configuration
+
+The distributed compaction fields are added directly to `CompactorOptions` on the coordinator:
+
+```rust
+pub struct CompactorOptions {
+    // ... existing fields unchanged ...
+
+    /// How often workers poll `.compactions` for new jobs.
+    pub worker_poll_interval_ms: u64,
+    /// How long before a worker with no heartbeat is considered stale and its job reclaimed.
+    pub worker_heartbeat_timeout_ms: u64,
+    /// Maximum number of concurrent workers. None means unlimited.
+    pub max_workers: Option<u32>,
+}
+```
+
+New `CompactorWorkerBuilder` entrypoint for worker processes:
+
+```rust
+let worker = CompactorWorkerBuilder::new("/path/to/db", object_store.clone())
+    .with_poll_interval_ms(5000)
+    .build()
+    .await?;
+
+worker.run().await?;
+```
 
 ### Schema Changes
 
@@ -102,12 +130,12 @@ Both fields are optional (default: `""`, `0`); existing `.compactions` files req
 
 ### Work Claim Protocol
 
-Workers use optimistic concurrency (CAS) on `.compactions`:
+Workers use optimistic concurrency on `.compactions`. SlateDB implements this uniformly across all object stores, including those with native CAS support, using create-if-not-exists on sequentially-numbered files (e.g. `00000000000000000003.compactions`). Writing a new version means writing the next numbered file; if another writer got there first the write fails with `AlreadyExists` and the worker retries. See [RFC-0001](0001-manifest.md) for the full protocol.
 
 1. Poll `.compactions` every `worker_poll_interval_ms`.
 2. Find a `Compaction` with `status == Submitted` and empty `worker_id`.
-3. CAS-write: `status = Running`, `worker_id = <self>`, `last_heartbeat_ms = now()`.
-4. On CAS success: begin execution. On CAS failure: re-read and retry from step 2.
+3. Write the full updated state with `status = Running`, `worker_id = <self>`, `last_heartbeat_ms = now()` to the next sequence number.
+4. On success: begin execution. On `AlreadyExists`: re-read latest and retry from step 2.
 
 Workers claim one job at a time to minimize contention.
 
@@ -121,7 +149,7 @@ The coordinator detects stale workers during its periodic poll: for each `Runnin
 
 1. **Start** — generate a ULID `worker_id`, load config.
 2. **Poll** — read `.compactions` for `Submitted` work.
-3. **Claim** — CAS transition to `Running` (see claim protocol).
+3. **Claim** — optimistic transition to `Running` (see claim protocol).
 4. **Execute** — run `execute_compaction_job`: build iterators from `CompactionSpec`, apply filters/merge ops, write output SSTs to `compacted/`, persist progress at each SST boundary.
 5. **Complete** — write `status = Completed` with final `output_ssts` to `.compactions`.
 6. **Loop** — return to step 2.
@@ -148,27 +176,6 @@ The existing compaction modes continue to work unchanged:
 | **Distributed** | Coordinator + N workers as separate processes |  Coordinator delegates execution to remote workers |
 
 The coordinator can optionally execute compactions itself (acting as both coordinator and worker), so a single-node deployment has zero overhead.
-
-### Configuration
-
-```rust
-pub struct DistributedCompactionOptions {
-    pub worker_poll_interval_ms: u64,
-    pub worker_heartbeat_timeout_ms: u64,
-    pub max_workers: Option<u32>,
-}
-```
-
-New `CompactorWorkerBuilder` entrypoint for worker processes:
-
-```rust
-let worker = CompactorWorkerBuilder::new("/path/to/db", object_store.clone())
-    .with_poll_interval_ms(5000)
-    .build()
-    .await?;
-
-worker.run().await?;
-```
 
 ## Impact Analysis
 
@@ -240,9 +247,9 @@ New metrics:
 - `slatedb_compaction_workers_active` — active worker gauge (coordinator)
 - `slatedb_compaction_jobs_claimed_total` — per-worker counter
 - `slatedb_compaction_jobs_reclaimed_total` — stale worker reclaims (coordinator)
-- `slatedb_compaction_claim_conflicts_total` — CAS failures (worker)
+- `slatedb_compaction_claim_conflicts_total` — claim conflicts (worker)
 
-Existing `bytes_processed`, `ssts_written`, `job_duration_seconds` metrics apply per-worker unchanged. Worker lifecycle events logged at INFO; CAS conflicts at DEBUG.
+Existing `bytes_processed`, `ssts_written`, `job_duration_seconds` metrics apply per-worker unchanged. Worker lifecycle events logged at INFO; claim conflicts at DEBUG.
 
 ### Compatibility
 
@@ -252,11 +259,11 @@ Existing `bytes_processed`, `ssts_written`, `job_duration_seconds` metrics apply
 
 ## Testing
 
-- **Unit**: CAS claim (success/conflict/retry), heartbeat timeout and reclamation, manifest commit, simultaneous claims from N workers.
+- **Unit**: Claim (success/conflict/retry), heartbeat timeout and reclamation, manifest commit, simultaneous claims from N workers.
 - **Integration**: Coordinator + N workers against in-memory object store; data integrity with compaction filters.
-- **Fault-injection**: Worker crash mid-compaction (timeout → reclaim → resume), coordinator crash, object store failures during CAS.
+- **Fault-injection**: Worker crash mid-compaction (timeout → reclaim → resume), coordinator crash, object store failures during claim writes.
 - **Simulation**: N workers + 1 coordinator with injected latency/failures; verify no lost compactions, no duplicate manifest commits.
-- **Performance**: Throughput scaling 1→N workers; CAS contention at high worker counts; end-to-end write throughput comparison.
+- **Performance**: Throughput scaling 1→N workers; claim contention at high worker counts; end-to-end write throughput comparison.
 
 ## Rollout
 
@@ -266,7 +273,7 @@ Phases:
 3. **Failure detection** — heartbeat timeout and reclamation on the coordinator; resume via `ResumingIterator`.
 4. **Discovery (optional)** — chitchat integration for dynamic worker discovery (Kubernetes etc.); deferrable.
 
-Distributed mode is opt-in: users explicitly start worker processes. No feature flag needed — the presence of workers is the signal. Docs needed: deployment guide (K8s, docker-compose, bare metal) and API docs for `CompactorWorkerBuilder`/`DistributedCompactionOptions`.
+Distributed mode is opt-in: users explicitly start worker processes. No feature flag needed — the presence of workers is the signal. Docs needed: deployment guide (K8s, docker-compose, bare metal) and API docs for `CompactorWorkerBuilder` and the new `CompactorOptions` fields.
 
 ## Alternatives
 
@@ -276,7 +283,7 @@ Compaction throughput stays bounded by one node. Rejected — can't meet the sca
 
 ### Peer-to-peer leader election via object store
 
-All compactors are peers; CAS elects a leader to run the scheduler. Adds complexity around leader transitions and scheduler handoff. Could be a future evolution.
+All compactors are peers; optimistic concurrency on a numbered file elects a leader to run the scheduler. Adds complexity around leader transitions and scheduler handoff. Could be a future evolution.
 
 ### chitchat for work distribution/discovery
 
@@ -288,7 +295,8 @@ Use gossip to distribute jobs directly. Rejected — couples correctness to goss
 - What is the right default for `worker_poll_interval_ms`? Should it be adaptive (e.g. exponential backoff when no work is available)?
 - How should GC handle the window between a worker writing output SSTs and the coordinator committing the manifest? GC must not delete SSTs that are not yet manifest-referenced.
 - Should workers validate their `CompactionSpec` against the current manifest before executing? Validating catches stale specs but adds a manifest read per claim.
-- Is CAS-based claiming sufficient at high worker counts (50+), or will contention require sharding across multiple `.compactions` files?
+- Is optimistic claiming sufficient at high worker counts (50+), or will contention require sharding across multiple `.compactions` files?
+- What happens when a worker is reclaimed due to a missed heartbeat but is still executing (zombie worker)? Open questions: do the zombie and the new worker write to the same output SST paths? Does the zombie detect it has been evicted when it tries to write `status = Completed` and fails with `AlreadyExists`? How does GC handle orphaned output SSTs the zombie wrote before being reclaimed?
 - Should chitchat discovery be part of the initial implementation or deferred?
 
 ## References
@@ -300,7 +308,7 @@ Use gossip to distribute jobs directly. Rejected — couples correctness to goss
 - [RFC-0002: SlateDB Compaction](0002-compaction.md) — original compaction design, includes "Looking Ahead" section on distributed compaction
 - [RFC-0013: Compaction State Persistence](0013-compaction-state-persistence.md) — `.compactions` file design, external process integration, resume support
 - [RFC-0017: Compaction Filters](0017-compaction-filters.md) — compaction filter integration that workers must support
-- [RFC-0001: Manifest](0001-manifest.md) — manifest format and CAS protocol
+- [RFC-0001: Manifest](0001-manifest.md) — manifest format and create-if-not-exists protocol
 
 ## Updates
 
