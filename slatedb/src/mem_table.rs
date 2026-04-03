@@ -247,9 +247,8 @@ impl MemTableIterator {
             None => {
                 // item is None — either iterator is exhausted, or this is the
                 // priming call. Advance inner to populate item for the next call.
-                let next = self.with_inner_mut(|inner| {
-                    inner.next_back().map(|entry| entry.value().clone())
-                });
+                let next = self
+                    .with_inner_mut(|inner| inner.next_back().map(|entry| entry.value().clone()));
                 self.with_item_mut(|item| *item = next);
                 None
             }
