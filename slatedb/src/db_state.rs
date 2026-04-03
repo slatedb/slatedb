@@ -2,8 +2,6 @@ use crate::bytes_range::BytesRange;
 use crate::checkpoint::Checkpoint;
 use crate::config::CompressionCodec;
 use crate::db_status::ClosedResultWriter;
-#[cfg(test)]
-use crate::db_status::DbStatusReporter;
 use crate::error::SlateDBError;
 use crate::manifest::Manifest;
 use crate::mem_table::{ImmutableMemtable, KVTable, WritableKVTable};
@@ -577,15 +575,7 @@ impl DbStateReader for DbStateView {
 }
 
 impl DbState {
-    #[cfg(test)]
-    pub(crate) fn new(manifest: DirtyObject<Manifest>, _status_reporter: DbStatusReporter) -> Self {
-        Self::new_with_closed_result(manifest, ClosedResultWriter::new())
-    }
-
-    pub(crate) fn new_with_closed_result(
-        manifest: DirtyObject<Manifest>,
-        closed_result: ClosedResultWriter,
-    ) -> Self {
+    pub(crate) fn new(manifest: DirtyObject<Manifest>, closed_result: ClosedResultWriter) -> Self {
         Self {
             memtable: WritableKVTable::new(),
             state: Arc::new(COWDbState {
@@ -762,7 +752,7 @@ mod tests {
     use crate::db_state::{
         DbState, SortedRun, SsTableHandle, SsTableId, SsTableInfo, SsTableView, SstType,
     };
-    use crate::db_status::DbStatusReporter;
+    use crate::db_status::ClosedResultWriter;
     use crate::format::sst::SST_FORMAT_VERSION_LATEST;
     use crate::manifest::store::test_utils::new_dirty_manifest;
     use crate::proptest_util::arbitrary;
@@ -780,7 +770,7 @@ mod tests {
     #[test]
     fn test_should_merge_db_state_with_new_checkpoints() {
         // given:
-        let mut db_state = DbState::new(new_dirty_manifest(), DbStatusReporter::new(0));
+        let mut db_state = DbState::new(new_dirty_manifest(), ClosedResultWriter::new());
         // mimic an externally added checkpoint
         let mut updated_state = new_dirty_manifest();
         updated_state.value.core = db_state.state.core().clone();
@@ -807,7 +797,7 @@ mod tests {
     #[test]
     fn test_should_merge_db_state_with_l0s_up_to_last_compacted() {
         // given:
-        let mut db_state = DbState::new(new_dirty_manifest(), DbStatusReporter::new(0));
+        let mut db_state = DbState::new(new_dirty_manifest(), ClosedResultWriter::new());
         add_l0s_to_dbstate(&mut db_state, 4);
         // mimic the compactor popping off l0s
         let mut compactor_state = new_dirty_manifest();
@@ -839,7 +829,7 @@ mod tests {
     #[test]
     fn test_should_merge_db_state_with_all_l0s_if_none_compacted() {
         // given:
-        let mut db_state = DbState::new(new_dirty_manifest(), DbStatusReporter::new(0));
+        let mut db_state = DbState::new(new_dirty_manifest(), ClosedResultWriter::new());
         add_l0s_to_dbstate(&mut db_state, 4);
         let l0s = db_state.state.core().l0.clone();
 
@@ -860,7 +850,7 @@ mod tests {
 
     #[test]
     fn test_should_keep_local_sequence_tracker_on_merge() {
-        let mut db_state = DbState::new(new_dirty_manifest(), DbStatusReporter::new(0));
+        let mut db_state = DbState::new(new_dirty_manifest(), ClosedResultWriter::new());
         db_state.modify(|modifier| {
             let core = &mut modifier.state.manifest.value.core;
             core.last_l0_seq = 3;

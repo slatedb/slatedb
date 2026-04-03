@@ -624,7 +624,7 @@ impl MessageHandler<WalFlushWork> for WalFlushHandler {
 mod tests {
     use super::*;
     use crate::clock::MonotonicClock;
-    use crate::db_status::DbStatusReporter;
+    use crate::db_status::ClosedResultWriter;
     use crate::format::sst::SsTableFormat;
     use crate::iter::RowEntryIterator;
     use crate::manifest::store::test_utils::new_dirty_manifest;
@@ -864,7 +864,7 @@ mod tests {
         let oracle = Arc::new(DbOracle::new(0, 0, 0, status_reporter));
         let db_state = Arc::new(RwLock::new(DbState::new(
             new_dirty_manifest(),
-            DbStatusReporter::new(0),
+            ClosedResultWriter::new(),
         )));
         let recorder = Arc::new(DefaultMetricsRecorder::new());
         let helper = MetricsRecorderHelper::new(recorder.clone(), MetricLevel::default());

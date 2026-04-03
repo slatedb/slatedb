@@ -142,7 +142,7 @@ impl DbInner {
         ));
 
         // state are mostly manifest, including IMM, L0, etc.
-        let db_state = DbState::new_with_closed_result(manifest, closed_result);
+        let db_state = DbState::new(manifest, closed_result);
         let state = Arc::new(RwLock::new(db_state));
         // Watch for closed result and report status to subscribers.
         state
