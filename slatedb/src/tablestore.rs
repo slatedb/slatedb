@@ -271,10 +271,7 @@ impl TableStore {
                         ),
                     )),
                     None => {
-                        warn!(
-                            "unknown filter policy '{}' in cache, dropping",
-                            nf.name()
-                        );
+                        warn!("unknown filter policy '{}' in cache, dropping", nf.name());
                         None
                     }
                 }
@@ -404,10 +401,7 @@ impl TableStore {
                     let resolved = self.resolve_filters(&named_filters);
                     // Re-cache as fully decoded
                     cache
-                        .insert(
-                            cache_key,
-                            CachedEntry::with_filters(resolved.clone()),
-                        )
+                        .insert(cache_key, CachedEntry::with_filters(resolved.clone()))
                         .await;
                     return Ok(Self::extract_decoded_filters(&resolved));
                 }

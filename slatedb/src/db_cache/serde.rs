@@ -220,7 +220,7 @@ mod tests {
     use crate::block_iterator::BlockIteratorLatest;
     use crate::db_cache::{CachedEntry, CachedItem, CachedKey};
     use crate::db_state::SsTableId;
-    use crate::filter_policy::{BloomFilterPolicy, Filter, FilterPolicy, NamedFilter};
+    use crate::filter_policy::{BloomFilterPolicy, FilterPolicy, NamedFilter};
     use crate::flatbuffer_types::{
         BlockMeta, BlockMetaArgs, SsTableIndex, SsTableIndexArgs, SsTableIndexOwned,
     };

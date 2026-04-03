@@ -709,9 +709,7 @@ impl SsTableFormat {
                     None => Ok(Vec::new()),
                 }
             }
-            FilterFormat::Composite => {
-                self.decode_composite_filter_block(&decompressed_bytes)
-            }
+            FilterFormat::Composite => self.decode_composite_filter_block(&decompressed_bytes),
         }
     }
 
@@ -721,16 +719,10 @@ impl SsTableFormat {
     ///
     /// Each filter's name is matched against the configured `filter_policies`.
     /// Filters whose policy is not found are silently skipped.
-    fn decode_composite_filter_block(
-        &self,
-        data: &[u8],
-    ) -> Result<Vec<NamedFilter>, SlateDBError> {
+    fn decode_composite_filter_block(&self, data: &[u8]) -> Result<Vec<NamedFilter>, SlateDBError> {
         // Build a lookup from policy name to policy
-        let policy_map: std::collections::HashMap<&str, &Arc<dyn FilterPolicy>> = self
-            .filter_policies
-            .iter()
-            .map(|p| (p.name(), p))
-            .collect();
+        let policy_map: std::collections::HashMap<&str, &Arc<dyn FilterPolicy>> =
+            self.filter_policies.iter().map(|p| (p.name(), p)).collect();
 
         let mut cursor = data;
         if cursor.len() < 4 {
@@ -767,7 +759,10 @@ impl SsTableFormat {
                     policy.decode(filter_data),
                 ));
             } else {
-                warn!("unknown filter policy '{}' in composite block, skipping", name);
+                warn!(
+                    "unknown filter policy '{}' in composite block, skipping",
+                    name
+                );
             }
         }
 

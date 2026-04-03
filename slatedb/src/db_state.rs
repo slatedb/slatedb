@@ -766,9 +766,7 @@ impl WalIdStore for parking_lot::RwLock<DbState> {
 #[cfg(test)]
 mod tests {
     use crate::checkpoint::Checkpoint;
-    use crate::db_state::{
-        DbState, SortedRun, SsTableHandle, SsTableId, SsTableInfo, SsTableView,
-    };
+    use crate::db_state::{DbState, SortedRun, SsTableHandle, SsTableId, SsTableInfo, SsTableView};
     use crate::db_status::DbStatusReporter;
     use crate::format::sst::SST_FORMAT_VERSION_LATEST;
     use crate::manifest::store::test_utils::new_dirty_manifest;

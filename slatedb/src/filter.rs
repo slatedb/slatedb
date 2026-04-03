@@ -84,7 +84,6 @@ impl BloomFilter {
         }
         true
     }
-
 }
 
 impl FilterBuilder for BloomFilterBuilder {

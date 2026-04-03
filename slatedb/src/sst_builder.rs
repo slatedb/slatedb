@@ -372,8 +372,7 @@ impl EncodedSsTableBuilder<'_> {
             footer_builder = footer_builder.with_block_transformer(transformer);
         }
         // Build all filters if enough keys
-        if self.stats.num_rows() >= self.min_filter_keys as u64
-            && !self.filter_builders.is_empty()
+        if self.stats.num_rows() >= self.min_filter_keys as u64 && !self.filter_builders.is_empty()
         {
             let filters: Vec<NamedFilter> = self
                 .filter_builders
@@ -730,10 +729,7 @@ mod tests {
             .unwrap();
         let sst_handle = table_store.open_sst(&SsTableId::Wal(0)).await.unwrap();
         let index = table_store.read_index(&sst_handle, true).await.unwrap();
-        let filters = table_store
-            .read_filters(&sst_handle, true)
-            .await
-            .unwrap();
+        let filters = table_store.read_filters(&sst_handle, true).await.unwrap();
         assert!(!filters.is_empty());
         let filter = &filters[0];
 
@@ -812,10 +808,7 @@ mod tests {
         );
         let sst_handle = table_store.open_sst(&SsTableId::Wal(0)).await.unwrap();
         let index = table_store.read_index(&sst_handle, true).await.unwrap();
-        let filters = table_store
-            .read_filters(&sst_handle, true)
-            .await
-            .unwrap();
+        let filters = table_store.read_filters(&sst_handle, true).await.unwrap();
         assert!(!filters.is_empty());
         let filter = &filters[0];
 
@@ -1184,10 +1177,7 @@ mod tests {
 
         let sst_handle = table_store.open_sst(&SsTableId::Wal(0)).await.unwrap();
         let index = table_store.read_index(&sst_handle, true).await.unwrap();
-        let filters = table_store
-            .read_filters(&sst_handle, true)
-            .await
-            .unwrap();
+        let filters = table_store.read_filters(&sst_handle, true).await.unwrap();
         assert!(!filters.is_empty());
         let filter = &filters[0];
 

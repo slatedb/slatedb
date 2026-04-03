@@ -281,9 +281,9 @@ impl CachedEntry {
             CachedItem::SsTableIndex(sst_index) => {
                 Self::with_sst_index(Arc::new(sst_index.clamp_allocated_size()))
             }
-            CachedItem::Filters(filters) => Self::with_filters(
-                filters.iter().map(|nf| nf.clamp_allocated_size()).collect(),
-            ),
+            CachedItem::Filters(filters) => {
+                Self::with_filters(filters.iter().map(|nf| nf.clamp_allocated_size()).collect())
+            }
             CachedItem::SstStats(stats) => {
                 Self::with_sst_stats(Arc::new(stats.clamp_allocated_size()))
             }
@@ -724,7 +724,7 @@ mod tests {
 
     use crate::db_cache::{CachedEntry, CachedKey, DbCache, DbCacheWrapper, SplitCache};
     use crate::db_state::SsTableId;
-    use crate::filter_policy::{BloomFilterPolicy, Filter, FilterPolicy, NamedFilter};
+    use crate::filter_policy::{BloomFilterPolicy, FilterPolicy, NamedFilter};
     use crate::format::sst::BlockBuilder;
     use slatedb_common::clock::DefaultSystemClock;
 
@@ -1097,10 +1097,7 @@ mod tests {
         let key = CachedKey::from((SST_ID, 1u64));
 
         cache_a
-            .insert(
-                key.clone(),
-                CachedEntry::with_filters(vec![named.clone()]),
-            )
+            .insert(key.clone(), CachedEntry::with_filters(vec![named.clone()]))
             .await;
 
         assert!(cache_a.get_filter(&key).await.unwrap().is_some());

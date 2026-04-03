@@ -138,7 +138,9 @@ impl std::fmt::Debug for NamedFilter {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let state = match &self.inner {
             NamedFilterInner::Decoded(_) => "decoded",
-            NamedFilterInner::Raw(b) => return write!(f, "NamedFilter({}, raw {} bytes)", self.name, b.len()),
+            NamedFilterInner::Raw(b) => {
+                return write!(f, "NamedFilter({}, raw {} bytes)", self.name, b.len())
+            }
         };
         write!(f, "NamedFilter({}, {})", self.name, state)
     }
