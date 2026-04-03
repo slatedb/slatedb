@@ -1405,6 +1405,9 @@ mod test {
         cleanup_called: WatchableOnceCell<Result<(), SlateDBError>>,
         /// If set, the handler waits on this Notify for every message.
         block_on: Option<Arc<tokio::sync::Notify>>,
+        /// If set, the handler returns an error after handling this many messages.
+        error_after: Option<usize>,
+        handled_count: usize,
         tickers: Vec<(Duration, u8)>,
     }
 
@@ -1419,12 +1422,19 @@ mod test {
                 log,
                 cleanup_called,
                 block_on: None,
+                error_after: None,
+                handled_count: 0,
                 tickers: vec![],
             }
         }
 
         fn with_block_on(mut self, notify: Arc<tokio::sync::Notify>) -> Self {
             self.block_on = Some(notify);
+            self
+        }
+
+        fn with_error_after(mut self, n: usize) -> Self {
+            self.error_after = Some(n);
             self
         }
 
@@ -1453,6 +1463,12 @@ mod test {
             self.log.lock().unwrap().push((self.handler_id, message));
             if let Some(notify) = &self.block_on {
                 notify.notified().await;
+            }
+            self.handled_count += 1;
+            if let Some(n) = self.error_after {
+                if self.handled_count > n {
+                    return Err(SlateDBError::Fenced);
+                }
             }
             Ok(())
         }
@@ -1589,32 +1605,20 @@ mod test {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn test_parallel_handlers_error_cancels_sibling_and_runs_cleanup() {
-        // Both handlers block after receiving a message. Once both are blocked
-        // (proving both are active), unblock them. The failpoint is set to
-        // error on the second loop iteration, so at least one handler will error.
-        // Verify: group result is error, closed_result is set, both ran cleanup.
         let log = Arc::new(Mutex::new(Vec::<(u8, TestMessage)>::new()));
         let (tx, rx) = async_channel::unbounded::<TestMessage>();
         let clock = Arc::new(DefaultSystemClock::new());
-        let fp_registry = Arc::new(FailPointRegistry::default());
-        let block1 = Arc::new(tokio::sync::Notify::new());
-        let block2 = Arc::new(tokio::sync::Notify::new());
 
         let cleanup1 = WatchableOnceCell::new();
         let cleanup2 = WatchableOnceCell::new();
         let mut cleanup1_reader = cleanup1.reader();
         let mut cleanup2_reader = cleanup2.reader();
 
-        let handler1 =
-            ParallelTestHandler::new(1, log.clone(), cleanup1).with_block_on(block1.clone());
-        let handler2 =
-            ParallelTestHandler::new(2, log.clone(), cleanup2).with_block_on(block2.clone());
+        let handler1 = ParallelTestHandler::new(1, log.clone(), cleanup1).with_error_after(1);
+        let handler2 = ParallelTestHandler::new(2, log.clone(), cleanup2).with_error_after(1);
 
         let closed_result = ClosedResultWriter::new();
-        let task_executor = MessageHandlerExecutor::new(closed_result.clone(), clock)
-            .with_fp_registry(fp_registry.clone());
-        // After one successful handle(), the next loop iteration triggers a fenced error
-        fail_parallel::cfg(fp_registry.clone(), "dispatcher-run-loop", "1*off->return").unwrap();
+        let task_executor = MessageHandlerExecutor::new(closed_result.clone(), clock);
         task_executor
             .add_handlers(
                 "parallel".to_string(),
@@ -1625,14 +1629,11 @@ mod test {
             .expect("failed to add handlers");
         task_executor.monitor_on(&Handle::current()).unwrap();
 
-        // Send two messages — both handlers grab one and block
+        // Send 3 messages so that one of the handlers will see 2 messages and
+        // trigger the expected error.
         tx.try_send(TestMessage::Channel(1)).unwrap();
         tx.try_send(TestMessage::Channel(2)).unwrap();
-        wait_for_parallel_log_count(log.clone(), 2).await;
-
-        // Unblock both — they'll loop back and at least one hits the failpoint error
-        block1.notify_waiters();
-        block2.notify_waiters();
+        tx.try_send(TestMessage::Channel(3)).unwrap();
 
         // Wait for both cleanups
         let _ = timeout(Duration::from_secs(5), cleanup1_reader.await_value())
