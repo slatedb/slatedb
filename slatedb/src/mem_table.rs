@@ -1,4 +1,5 @@
 use std::cell::Cell;
+use std::collections::VecDeque;
 use std::ops::{Bound, RangeBounds};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -176,6 +177,11 @@ pub(crate) struct MemTableIteratorInner<T: RangeBounds<SequencedKey>> {
     inner: Range<'this, SequencedKey, T, SequencedKey, RowEntry>,
     ordering: IterationOrder,
     item: Option<RowEntry>,
+    /// Buffer used in descending mode to re-order entries within a key group.
+    /// When iterating descending, `next_back()` yields entries for the same key
+    /// in seq-ascending order, but we need seq-descending. This buffer collects
+    /// all entries for the current key and drains them in the correct order.
+    descending_buffer: VecDeque<RowEntry>,
 }
 pub(crate) type MemTableIterator = MemTableIteratorInner<KVTableInternalKeyRange>;
 
@@ -203,16 +209,71 @@ impl RowEntryIterator for MemTableIterator {
 
 impl MemTableIterator {
     pub(crate) fn next_sync(&mut self) -> Option<RowEntry> {
-        let ans = self.borrow_item().clone();
-        let next_entry = match self.borrow_ordering() {
-            IterationOrder::Ascending => self.with_inner_mut(|inner| inner.next()),
-            IterationOrder::Descending => self.with_inner_mut(|inner| inner.next_back()),
-        };
+        match self.borrow_ordering() {
+            IterationOrder::Ascending => self.next_ascending(),
+            IterationOrder::Descending => self.next_descending(),
+        }
+    }
 
+    fn next_ascending(&mut self) -> Option<RowEntry> {
+        let ans = self.borrow_item().clone();
+        let next_entry = self.with_inner_mut(|inner| inner.next());
         let cloned_next = next_entry.map(|entry| entry.value().clone());
         self.with_item_mut(|item| *item = cloned_next);
-
         ans
+    }
+
+    fn next_descending(&mut self) -> Option<RowEntry> {
+        // If the buffer has entries, drain from it.
+        let buffered = self.with_descending_buffer_mut(|buf| buf.pop_front());
+        if buffered.is_some() {
+            return buffered;
+        }
+
+        // Buffer is empty. The current `item` (if any) is the start of a new
+        // key group. Collect all entries for this key from the SkipMap.
+        let first = self.borrow_item().clone();
+        match first {
+            Some(first) => {
+                let current_key = first.key.clone();
+
+                // Collect remaining entries with the same key. next_back() yields
+                // them in seq-ascending order, so we push to the front of the
+                // buffer to reverse them into seq-descending order.
+                self.with_descending_buffer_mut(|buf| buf.push_front(first));
+                self.fill_descending_buffer(&current_key);
+
+                self.with_descending_buffer_mut(|buf| buf.pop_front())
+            }
+            None => {
+                // item is None — either iterator is exhausted, or this is the
+                // priming call. Advance inner to populate item for the next call.
+                let next = self.with_inner_mut(|inner| {
+                    inner.next_back().map(|entry| entry.value().clone())
+                });
+                self.with_item_mut(|item| *item = next);
+                None
+            }
+        }
+    }
+
+    fn fill_descending_buffer(&mut self, current_key: &Bytes) {
+        loop {
+            let next = self.with_inner_mut(|inner| {
+                inner
+                    .next_back()
+                    .map(|entry| (entry.key().user_key.clone(), entry.value().clone()))
+            });
+            match next {
+                Some((key, row)) if key == *current_key => {
+                    self.with_descending_buffer_mut(|buf| buf.push_front(row));
+                }
+                other => {
+                    self.with_item_mut(|item| *item = other.map(|(_, row)| row));
+                    break;
+                }
+            }
+        }
     }
 }
 
@@ -335,6 +396,7 @@ impl KVTable {
             inner_builder: |map| map.range(internal_range),
             ordering,
             item: None,
+            descending_buffer: VecDeque::new(),
         }
         .build();
         iterator.next_sync();
@@ -692,5 +754,29 @@ mod tests {
                 },
             )
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_memtable_descending_returns_highest_seq_first_for_same_key() {
+        let table = WritableKVTable::new();
+        table.put(RowEntry::new_value(b"aaaa", b"v1", 0));
+        table.put(RowEntry::new_value(b"bbbb", b"old", 1));
+        table.put(RowEntry::new_value(b"bbbb", b"new", 2));
+        table.put(RowEntry::new_value(b"cccc", b"v3", 3));
+
+        let mut iter = table.table().range(.., IterationOrder::Descending);
+
+        // In descending order, for key "bbbb" the newest version (seq 2) must
+        // come before the older version (seq 1) so that dedup works correctly.
+        assert_iterator(
+            &mut iter,
+            vec![
+                RowEntry::new_value(b"cccc", b"v3", 3),
+                RowEntry::new_value(b"bbbb", b"new", 2),
+                RowEntry::new_value(b"bbbb", b"old", 1),
+                RowEntry::new_value(b"aaaa", b"v1", 0),
+            ],
+        )
+        .await;
     }
 }
