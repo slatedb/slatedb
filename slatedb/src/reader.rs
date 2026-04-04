@@ -14,7 +14,6 @@ use crate::types::KeyValue;
 use crate::utils::{build_concurrent, compute_max_parallel};
 use crate::{db_iter::DbIteratorRangeTracker, error::SlateDBError, DbIterator};
 
-use bytes::Bytes;
 use futures::future::join;
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -109,7 +108,7 @@ impl Reader {
         let max_parallel =
             compute_max_parallel(db_state.core().l0.len(), &db_state.core().compacted, 4);
 
-        let (l0_iters, sr_iters) = if let Some(point_key) = range.as_point().cloned() {
+        let (l0_iters, sr_iters) = if let Some(point_key) = range.as_point() {
             let l0 = self.build_point_l0_iters(
                 range,
                 db_state,
@@ -118,7 +117,7 @@ impl Reader {
             )?;
             let sr = self.build_point_sr_iters(
                 range,
-                &point_key,
+                point_key.as_ref(),
                 db_state,
                 sst_iter_options,
                 point_lookup_stats,
@@ -167,14 +166,14 @@ impl Reader {
     fn build_point_sr_iters<'a>(
         &self,
         range: &BytesRange,
-        key: &Bytes,
+        key: &[u8],
         db_state: &(dyn DbStateReader + Sync),
         sst_iter_options: SstIteratorOptions,
         db_stats: Option<DbStats>,
     ) -> Result<VecDeque<Box<dyn RowEntryIterator + 'a>>, SlateDBError> {
         let mut iters = VecDeque::new();
         for sr in &db_state.core().compacted {
-            if let Some(handle) = sr.find_sst_with_range_covering_key(key.as_ref()) {
+            for handle in sr.tables_covering_point_key(key) {
                 let iterator = SstIterator::new_owned_with_stats(
                     range.clone(),
                     handle.clone(),
@@ -243,6 +242,7 @@ impl Reader {
                         sr,
                         table_store,
                         sst_iter_options,
+                        Some(self.db_stats.clone()),
                     )
                     .await
                     .map(|iter| Some(Box::new(iter) as Box<dyn RowEntryIterator + 'a>))
@@ -398,8 +398,12 @@ mod tests {
     use super::*;
     use crate::merge_operator::{MergeOperator, MergeOperatorError};
     use crate::types::{RowEntry, ValueDeletable};
+    use bytes::Bytes;
     use rstest::rstest;
     use slatedb_common::clock::{MockSystemClock, SystemClock};
+    use slatedb_common::metrics::{
+        lookup_metric, DefaultMetricsRecorder, MetricLevel, MetricsRecorderHelper,
+    };
 
     use crate::batch::WriteBatch;
     use crate::clock::MonotonicClock;
@@ -1729,6 +1733,49 @@ mod tests {
             oracle,
             merge_operator,
         }
+    }
+
+    #[tokio::test]
+    async fn should_record_bloom_filter_negative_for_sorted_run_point_lookup(
+    ) -> Result<(), SlateDBError> {
+        let entries = vec![
+            TestEntry::value(b"key1", b"value1", 50).with_location(LayerLocation::SortedRun(0)),
+            TestEntry::value(b"key3", b"value3", 40).with_location(LayerLocation::SortedRun(0)),
+        ];
+
+        let mut test_db_state = TestDbState::new().await;
+        let write_batch = populate_db_state(&mut test_db_state, entries).await?;
+
+        let recorder = Arc::new(DefaultMetricsRecorder::new());
+        let helper = MetricsRecorderHelper::new(recorder.clone(), MetricLevel::default());
+        let db_stats = DbStats::new(&helper);
+        let reader = build_reader(&test_db_state, db_stats, false).await;
+
+        let result = reader
+            .get_key_value_with_options(
+                b"key2",
+                &ReadOptions::default().with_dirty(true),
+                &test_db_state,
+                write_batch,
+                None,
+            )
+            .await?;
+
+        assert!(result.is_none());
+        assert_eq!(
+            lookup_metric(&recorder, crate::db_stats::SST_FILTER_NEGATIVE_COUNT),
+            Some(1)
+        );
+        assert_eq!(
+            lookup_metric(&recorder, crate::db_stats::SST_FILTER_POSITIVE_COUNT),
+            Some(0)
+        );
+        assert_eq!(
+            lookup_metric(&recorder, crate::db_stats::SST_FILTER_FALSE_POSITIVE_COUNT),
+            Some(0)
+        );
+
+        Ok(())
     }
 
     #[tokio::test]

@@ -931,9 +931,10 @@ impl<'a> SstIterator<'a> {
         view: SstView<'a>,
         table_store: Arc<TableStore>,
         options: SstIteratorOptions,
+        db_stats: Option<DbStats>,
     ) -> Result<Self, SlateDBError> {
         let internal = InternalSstIterator::new(view, table_store, options)?;
-        Ok(Self::from_internal(internal, None))
+        Ok(Self::from_internal(internal, db_stats))
     }
 
     #[allow(dead_code)]

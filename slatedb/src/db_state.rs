@@ -367,9 +367,50 @@ impl SortedRun {
         None
     }
 
-    pub(crate) fn find_sst_with_range_covering_key(&self, key: &[u8]) -> Option<&SsTableView> {
-        self.find_sst_with_range_covering_key_idx(key)
-            .map(|idx| &self.sst_views[idx])
+    /// Returns the logical end bound for the SST view at `idx`.
+    ///
+    /// The bound is normally the next view's start key, but becomes inclusive
+    /// when adjacent views overlap on that boundary key.
+    fn table_end_bound(&self, idx: usize) -> Bound<Bytes> {
+        let current_sst = &self.sst_views[idx];
+        if idx + 1 < self.sst_views.len() {
+            let next_sst = &self.sst_views[idx + 1];
+            if current_sst
+                .compacted_effective_range()
+                .contains(next_sst.compacted_effective_start_key())
+            {
+                Included(next_sst.compacted_effective_start_key().clone())
+            } else {
+                Excluded(next_sst.compacted_effective_start_key().clone())
+            }
+        } else {
+            Unbounded
+        }
+    }
+
+    /// Returns the contiguous range of SST view indices that can contribute to a
+    /// point read for `key`.
+    ///
+    /// This uses the binary-search candidate as the upper bound, then walks
+    /// backward only across immediately overlapping views.
+    fn point_table_idx_covering_key(&self, key: &[u8]) -> Range<usize> {
+        let Some(max_idx) = self.find_sst_with_range_covering_key_idx(key) else {
+            return 0..0;
+        };
+        let point_range = BytesRange::from_slice(key..=key);
+        if !self.sst_views[max_idx].intersects_range(self.table_end_bound(max_idx), &point_range) {
+            return 0..0;
+        }
+
+        let mut min_idx = max_idx;
+        while min_idx > 0
+            && self.sst_views[min_idx - 1]
+                .intersects_range(self.table_end_bound(min_idx - 1), &point_range)
+        {
+            min_idx -= 1;
+        }
+
+        min_idx..(max_idx + 1)
     }
 
     fn table_idx_covering_range(&self, range: &BytesRange) -> Range<usize> {
@@ -378,15 +419,7 @@ impl SortedRun {
 
         for idx in 0..self.sst_views.len() {
             let current_sst = &self.sst_views[idx];
-
-            let upper_bound = if idx + 1 < self.sst_views.len() {
-                let next_sst = &self.sst_views[idx + 1];
-                Excluded(next_sst.compacted_effective_start_key().clone())
-            } else {
-                Unbounded
-            };
-
-            if current_sst.intersects_range(upper_bound, range) {
+            if current_sst.intersects_range(self.table_end_bound(idx), range) {
                 if min_idx.is_none() {
                     min_idx = Some(idx);
                 }
@@ -406,6 +439,12 @@ impl SortedRun {
         let bytes_range = BytesRange::new(range.start_bound().cloned(), range.end_bound().cloned());
         let matching_range = self.table_idx_covering_range(&bytes_range);
         self.sst_views[matching_range].iter().collect()
+    }
+
+    /// Returns the SST views that may contain entries for the point key `key`.
+    pub(crate) fn tables_covering_point_key(&self, key: &[u8]) -> &[SsTableView] {
+        let matching_range = self.point_table_idx_covering_key(key);
+        &self.sst_views[matching_range]
     }
 
     pub(crate) fn into_tables_covering_range(
@@ -957,6 +996,36 @@ mod tests {
         });
     }
 
+    #[test]
+    fn test_sorted_run_collect_tables_for_point_key() {
+        let sorted_run = SortedRun {
+            id: 0,
+            sst_views: vec![
+                create_compacted_sst_view_with_bounds(b"a", Some(b"k")),
+                create_compacted_sst_view_with_bounds(b"k", Some(b"k")),
+                create_compacted_sst_view_with_bounds(b"k", Some(b"m")),
+                create_compacted_sst_view_with_bounds(b"z", Some(b"z")),
+            ],
+        };
+
+        let covering_tables = sorted_run.tables_covering_point_key(b"k");
+        assert_eq!(covering_tables.len(), 3);
+        assert_eq!(
+            covering_tables[0].compacted_effective_start_key().as_ref(),
+            b"a"
+        );
+        assert_eq!(
+            covering_tables[1].compacted_effective_start_key().as_ref(),
+            b"k"
+        );
+        assert_eq!(
+            covering_tables[2].compacted_effective_start_key().as_ref(),
+            b"k"
+        );
+
+        assert!(sorted_run.tables_covering_point_key(b"0").is_empty());
+    }
+
     fn create_sorted_run(id: u32, first_keys: &BTreeSet<Bytes>) -> SortedRun {
         let mut ssts = Vec::new();
         for first_key in first_keys {
@@ -971,6 +1040,27 @@ mod tests {
     fn create_compacted_sst_view(first_entry: Option<Bytes>) -> SsTableView {
         let sst_info = create_sst_info(first_entry);
         let sst_id = SsTableId::Compacted(ulid::Ulid::from_parts(0, 0));
+        let handle = SsTableHandle::new(sst_id, SST_FORMAT_VERSION_LATEST, sst_info);
+        SsTableView::identity(handle)
+    }
+
+    fn create_compacted_sst_view_with_bounds(
+        first_entry: &[u8],
+        last_entry: Option<&[u8]>,
+    ) -> SsTableView {
+        let sst_info = SsTableInfo {
+            first_entry: Some(Bytes::copy_from_slice(first_entry)),
+            last_entry: last_entry.map(Bytes::copy_from_slice),
+            index_offset: 0,
+            index_len: 0,
+            filter_offset: 0,
+            filter_len: 0,
+            compression_codec: None,
+            sst_type: SstType::default(),
+            stats_offset: 0,
+            stats_len: 0,
+        };
+        let sst_id = SsTableId::Compacted(ulid::Ulid::new());
         let handle = SsTableHandle::new(sst_id, SST_FORMAT_VERSION_LATEST, sst_info);
         SsTableView::identity(handle)
     }
