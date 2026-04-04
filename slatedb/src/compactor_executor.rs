@@ -284,15 +284,9 @@ impl TokioCompactionExecutorInner {
         // SR (borrowed)
         let sr_iters_futures =
             build_concurrent(job_args.sorted_runs.iter(), max_parallel, |sr| async {
-                SortedRunIterator::new_borrowed(
-                    ..,
-                    sr,
-                    self.table_store.clone(),
-                    sst_iter_options,
-                    None,
-                )
-                .await
-                .map(Some)
+                SortedRunIterator::new_borrowed(.., sr, self.table_store.clone(), sst_iter_options)
+                    .await
+                    .map(Some)
             });
 
         let (l0_iters_res, sr_iters_res) = join(l0_iters_futures, sr_iters_futures).await;

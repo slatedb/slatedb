@@ -142,6 +142,15 @@ impl<'a> SortedRunIterator<'a> {
         sorted_run: &'a SortedRun,
         table_store: Arc<TableStore>,
         sst_iter_options: SstIteratorOptions,
+    ) -> Result<Self, SlateDBError> {
+        Self::new_borrowed_with_stats(range, sorted_run, table_store, sst_iter_options, None).await
+    }
+
+    pub(crate) async fn new_borrowed_with_stats<T: RangeBounds<&'a [u8]>>(
+        range: T,
+        sorted_run: &'a SortedRun,
+        table_store: Arc<TableStore>,
+        sst_iter_options: SstIteratorOptions,
         db_stats: Option<DbStats>,
     ) -> Result<Self, SlateDBError> {
         let range = (range.start_bound().cloned(), range.end_bound().cloned());
@@ -158,7 +167,7 @@ impl<'a> SortedRunIterator<'a> {
         sst_iter_options: SstIteratorOptions,
     ) -> Result<Self, SlateDBError> {
         let mut iter =
-            SortedRunIterator::new_borrowed(range, sorted_run, table_store, sst_iter_options, None)
+            SortedRunIterator::new_borrowed(range, sorted_run, table_store, sst_iter_options)
                 .await?;
         iter.init().await?;
         Ok(iter)
