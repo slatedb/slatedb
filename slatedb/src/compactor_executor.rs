@@ -1606,7 +1606,6 @@ mod tests {
             SstView::Borrowed(&sst, BytesRange::from(..)),
             table_store.clone(),
             SstIteratorOptions::default(),
-            None,
         )
         .unwrap();
         iter.init().await.unwrap();

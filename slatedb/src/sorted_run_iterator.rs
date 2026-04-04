@@ -101,12 +101,13 @@ impl<'a> SortedRunIterator<'a> {
         SortedRunIterator::new(view, table_store, sst_iter_options, db_stats).await
     }
 
+    #[allow(dead_code)]
     pub(crate) async fn new_owned_initialized<T: RangeBounds<Bytes>>(
         range: T,
         sorted_run: SortedRun,
         table_store: Arc<TableStore>,
         sst_iter_options: SstIteratorOptions,
-     ) -> Result<Self, SlateDBError> {
+    ) -> Result<Self, SlateDBError> {
         SortedRunIterator::new_owned_initialized_with_stats(
             range,
             sorted_run,
