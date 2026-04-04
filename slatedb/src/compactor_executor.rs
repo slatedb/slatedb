@@ -144,7 +144,6 @@ impl<T: RowEntryIterator> ResumingIterator<T> {
     fn start(&self) -> Option<&(Bytes, u64)> {
         self.start.as_ref()
     }
-
 }
 
 #[async_trait::async_trait]
