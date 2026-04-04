@@ -135,7 +135,7 @@ You only need these if you are regenerating bindings or building from source in 
 Install the generator with:
 
 ```bash
-cargo install uniffi-bindgen-java --git git@github.com:criccomini/uniffi-bindgen-java.git --branch fix-histo-bug
+cargo install uniffi-bindgen-java --git https://github.com/criccomini/uniffi-bindgen-java.git --branch fix-histo-bug
 ```
 
 ## Regenerate

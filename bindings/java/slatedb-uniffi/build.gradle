@@ -163,7 +163,7 @@ def generateJavaBindings = tasks.register("generateJavaBindings") { task ->
         } catch (Exception ex) {
             throw new GradleException(
                 "uniffi-bindgen-java is required on PATH. Install it with: " +
-                    "cargo install uniffi-bindgen-java --git git@github.com:criccomini/uniffi-bindgen-java.git --branch fix-histo-bug. " +
+                    "cargo install uniffi-bindgen-java --git https://github.com/criccomini/uniffi-bindgen-java.git --branch fix-histo-bug. " +
                     "If Gradle cannot find it, set UNIFFI_BINDGEN_JAVA or -Pslatedb.uniffi.bindgen to the executable path.",
                 ex
             )
