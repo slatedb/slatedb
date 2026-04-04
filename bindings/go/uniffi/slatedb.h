@@ -398,6 +398,118 @@ static void call_UniffiCallbackInterfaceMergeOperatorMethod0(
 
 
 #endif
+#ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_COUNTER_METHOD0
+#define UNIFFI_FFIDEF_CALLBACK_INTERFACE_COUNTER_METHOD0
+typedef void (*UniffiCallbackInterfaceCounterMethod0)(uint64_t uniffi_handle, uint64_t value, void* uniffi_out_return, RustCallStatus* callStatus );
+
+// Making function static works arround:
+// https://github.com/golang/go/issues/11263
+static void call_UniffiCallbackInterfaceCounterMethod0(
+				UniffiCallbackInterfaceCounterMethod0 cb, uint64_t uniffi_handle, uint64_t value, void* uniffi_out_return, RustCallStatus* callStatus )
+{
+	return cb(uniffi_handle, value, uniffi_out_return, callStatus );
+}
+
+
+#endif
+#ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_GAUGE_METHOD0
+#define UNIFFI_FFIDEF_CALLBACK_INTERFACE_GAUGE_METHOD0
+typedef void (*UniffiCallbackInterfaceGaugeMethod0)(uint64_t uniffi_handle, int64_t value, void* uniffi_out_return, RustCallStatus* callStatus );
+
+// Making function static works arround:
+// https://github.com/golang/go/issues/11263
+static void call_UniffiCallbackInterfaceGaugeMethod0(
+				UniffiCallbackInterfaceGaugeMethod0 cb, uint64_t uniffi_handle, int64_t value, void* uniffi_out_return, RustCallStatus* callStatus )
+{
+	return cb(uniffi_handle, value, uniffi_out_return, callStatus );
+}
+
+
+#endif
+#ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_HISTOGRAM_METHOD0
+#define UNIFFI_FFIDEF_CALLBACK_INTERFACE_HISTOGRAM_METHOD0
+typedef void (*UniffiCallbackInterfaceHistogramMethod0)(uint64_t uniffi_handle, double value, void* uniffi_out_return, RustCallStatus* callStatus );
+
+// Making function static works arround:
+// https://github.com/golang/go/issues/11263
+static void call_UniffiCallbackInterfaceHistogramMethod0(
+				UniffiCallbackInterfaceHistogramMethod0 cb, uint64_t uniffi_handle, double value, void* uniffi_out_return, RustCallStatus* callStatus )
+{
+	return cb(uniffi_handle, value, uniffi_out_return, callStatus );
+}
+
+
+#endif
+#ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_METRICS_RECORDER_METHOD0
+#define UNIFFI_FFIDEF_CALLBACK_INTERFACE_METRICS_RECORDER_METHOD0
+typedef void (*UniffiCallbackInterfaceMetricsRecorderMethod0)(uint64_t uniffi_handle, RustBuffer name, RustBuffer description, RustBuffer labels, uint64_t* uniffi_out_return, RustCallStatus* callStatus );
+
+// Making function static works arround:
+// https://github.com/golang/go/issues/11263
+static void call_UniffiCallbackInterfaceMetricsRecorderMethod0(
+				UniffiCallbackInterfaceMetricsRecorderMethod0 cb, uint64_t uniffi_handle, RustBuffer name, RustBuffer description, RustBuffer labels, uint64_t* uniffi_out_return, RustCallStatus* callStatus )
+{
+	return cb(uniffi_handle, name, description, labels, uniffi_out_return, callStatus );
+}
+
+
+#endif
+#ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_METRICS_RECORDER_METHOD1
+#define UNIFFI_FFIDEF_CALLBACK_INTERFACE_METRICS_RECORDER_METHOD1
+typedef void (*UniffiCallbackInterfaceMetricsRecorderMethod1)(uint64_t uniffi_handle, RustBuffer name, RustBuffer description, RustBuffer labels, uint64_t* uniffi_out_return, RustCallStatus* callStatus );
+
+// Making function static works arround:
+// https://github.com/golang/go/issues/11263
+static void call_UniffiCallbackInterfaceMetricsRecorderMethod1(
+				UniffiCallbackInterfaceMetricsRecorderMethod1 cb, uint64_t uniffi_handle, RustBuffer name, RustBuffer description, RustBuffer labels, uint64_t* uniffi_out_return, RustCallStatus* callStatus )
+{
+	return cb(uniffi_handle, name, description, labels, uniffi_out_return, callStatus );
+}
+
+
+#endif
+#ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_METRICS_RECORDER_METHOD2
+#define UNIFFI_FFIDEF_CALLBACK_INTERFACE_METRICS_RECORDER_METHOD2
+typedef void (*UniffiCallbackInterfaceMetricsRecorderMethod2)(uint64_t uniffi_handle, RustBuffer name, RustBuffer description, RustBuffer labels, uint64_t* uniffi_out_return, RustCallStatus* callStatus );
+
+// Making function static works arround:
+// https://github.com/golang/go/issues/11263
+static void call_UniffiCallbackInterfaceMetricsRecorderMethod2(
+				UniffiCallbackInterfaceMetricsRecorderMethod2 cb, uint64_t uniffi_handle, RustBuffer name, RustBuffer description, RustBuffer labels, uint64_t* uniffi_out_return, RustCallStatus* callStatus )
+{
+	return cb(uniffi_handle, name, description, labels, uniffi_out_return, callStatus );
+}
+
+
+#endif
+#ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_METRICS_RECORDER_METHOD3
+#define UNIFFI_FFIDEF_CALLBACK_INTERFACE_METRICS_RECORDER_METHOD3
+typedef void (*UniffiCallbackInterfaceMetricsRecorderMethod3)(uint64_t uniffi_handle, RustBuffer name, RustBuffer description, RustBuffer labels, RustBuffer boundaries, uint64_t* uniffi_out_return, RustCallStatus* callStatus );
+
+// Making function static works arround:
+// https://github.com/golang/go/issues/11263
+static void call_UniffiCallbackInterfaceMetricsRecorderMethod3(
+				UniffiCallbackInterfaceMetricsRecorderMethod3 cb, uint64_t uniffi_handle, RustBuffer name, RustBuffer description, RustBuffer labels, RustBuffer boundaries, uint64_t* uniffi_out_return, RustCallStatus* callStatus )
+{
+	return cb(uniffi_handle, name, description, labels, boundaries, uniffi_out_return, callStatus );
+}
+
+
+#endif
+#ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_UP_DOWN_COUNTER_METHOD0
+#define UNIFFI_FFIDEF_CALLBACK_INTERFACE_UP_DOWN_COUNTER_METHOD0
+typedef void (*UniffiCallbackInterfaceUpDownCounterMethod0)(uint64_t uniffi_handle, int64_t value, void* uniffi_out_return, RustCallStatus* callStatus );
+
+// Making function static works arround:
+// https://github.com/golang/go/issues/11263
+static void call_UniffiCallbackInterfaceUpDownCounterMethod0(
+				UniffiCallbackInterfaceUpDownCounterMethod0 cb, uint64_t uniffi_handle, int64_t value, void* uniffi_out_return, RustCallStatus* callStatus )
+{
+	return cb(uniffi_handle, value, uniffi_out_return, callStatus );
+}
+
+
+#endif
 #ifndef UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_LOG_CALLBACK
 #define UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_LOG_CALLBACK
 typedef struct UniffiVTableCallbackInterfaceLogCallback {
@@ -414,6 +526,54 @@ typedef struct UniffiVTableCallbackInterfaceMergeOperator {
     UniffiCallbackInterfaceClone uniffiClone;
     UniffiCallbackInterfaceMergeOperatorMethod0 merge;
 } UniffiVTableCallbackInterfaceMergeOperator;
+
+#endif
+#ifndef UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_COUNTER
+#define UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_COUNTER
+typedef struct UniffiVTableCallbackInterfaceCounter {
+    UniffiCallbackInterfaceFree uniffiFree;
+    UniffiCallbackInterfaceClone uniffiClone;
+    UniffiCallbackInterfaceCounterMethod0 increment;
+} UniffiVTableCallbackInterfaceCounter;
+
+#endif
+#ifndef UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_GAUGE
+#define UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_GAUGE
+typedef struct UniffiVTableCallbackInterfaceGauge {
+    UniffiCallbackInterfaceFree uniffiFree;
+    UniffiCallbackInterfaceClone uniffiClone;
+    UniffiCallbackInterfaceGaugeMethod0 set;
+} UniffiVTableCallbackInterfaceGauge;
+
+#endif
+#ifndef UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_HISTOGRAM
+#define UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_HISTOGRAM
+typedef struct UniffiVTableCallbackInterfaceHistogram {
+    UniffiCallbackInterfaceFree uniffiFree;
+    UniffiCallbackInterfaceClone uniffiClone;
+    UniffiCallbackInterfaceHistogramMethod0 record;
+} UniffiVTableCallbackInterfaceHistogram;
+
+#endif
+#ifndef UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_METRICS_RECORDER
+#define UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_METRICS_RECORDER
+typedef struct UniffiVTableCallbackInterfaceMetricsRecorder {
+    UniffiCallbackInterfaceFree uniffiFree;
+    UniffiCallbackInterfaceClone uniffiClone;
+    UniffiCallbackInterfaceMetricsRecorderMethod0 registerCounter;
+    UniffiCallbackInterfaceMetricsRecorderMethod1 registerGauge;
+    UniffiCallbackInterfaceMetricsRecorderMethod2 registerUpDownCounter;
+    UniffiCallbackInterfaceMetricsRecorderMethod3 registerHistogram;
+} UniffiVTableCallbackInterfaceMetricsRecorder;
+
+#endif
+#ifndef UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_UP_DOWN_COUNTER
+#define UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_UP_DOWN_COUNTER
+typedef struct UniffiVTableCallbackInterfaceUpDownCounter {
+    UniffiCallbackInterfaceFree uniffiFree;
+    UniffiCallbackInterfaceClone uniffiClone;
+    UniffiCallbackInterfaceUpDownCounterMethod0 increment;
+} UniffiVTableCallbackInterfaceUpDownCounter;
 
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_CLONE_DBBUILDER
@@ -444,6 +604,11 @@ void uniffi_slatedb_uniffi_fn_method_dbbuilder_with_db_cache_disabled(uint64_t p
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBBUILDER_WITH_MERGE_OPERATOR
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBBUILDER_WITH_MERGE_OPERATOR
 void uniffi_slatedb_uniffi_fn_method_dbbuilder_with_merge_operator(uint64_t ptr, uint64_t merge_operator, RustCallStatus *out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBBUILDER_WITH_METRICS_RECORDER
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBBUILDER_WITH_METRICS_RECORDER
+void uniffi_slatedb_uniffi_fn_method_dbbuilder_with_metrics_recorder(uint64_t ptr, uint64_t metrics_recorder, RustCallStatus *out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBBUILDER_WITH_SEED
@@ -494,6 +659,11 @@ void uniffi_slatedb_uniffi_fn_method_dbreaderbuilder_with_checkpoint_id(uint64_t
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBREADERBUILDER_WITH_MERGE_OPERATOR
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBREADERBUILDER_WITH_MERGE_OPERATOR
 void uniffi_slatedb_uniffi_fn_method_dbreaderbuilder_with_merge_operator(uint64_t ptr, uint64_t merge_operator, RustCallStatus *out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBREADERBUILDER_WITH_METRICS_RECORDER
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBREADERBUILDER_WITH_METRICS_RECORDER
+void uniffi_slatedb_uniffi_fn_method_dbreaderbuilder_with_metrics_recorder(uint64_t ptr, uint64_t metrics_recorder, RustCallStatus *out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBREADERBUILDER_WITH_OPTIONS
@@ -889,6 +1059,172 @@ void uniffi_slatedb_uniffi_fn_init_callback_vtable_mergeoperator(UniffiVTableCal
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_MERGEOPERATOR_MERGE
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_MERGEOPERATOR_MERGE
 RustBuffer uniffi_slatedb_uniffi_fn_method_mergeoperator_merge(uint64_t ptr, RustBuffer key, RustBuffer existing_value, RustBuffer operand, RustCallStatus *out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_CLONE_COUNTER
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_CLONE_COUNTER
+uint64_t uniffi_slatedb_uniffi_fn_clone_counter(uint64_t handle, RustCallStatus *out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_FREE_COUNTER
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_FREE_COUNTER
+void uniffi_slatedb_uniffi_fn_free_counter(uint64_t handle, RustCallStatus *out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_INIT_CALLBACK_VTABLE_COUNTER
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_INIT_CALLBACK_VTABLE_COUNTER
+void uniffi_slatedb_uniffi_fn_init_callback_vtable_counter(UniffiVTableCallbackInterfaceCounter* vtable
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_COUNTER_INCREMENT
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_COUNTER_INCREMENT
+void uniffi_slatedb_uniffi_fn_method_counter_increment(uint64_t ptr, uint64_t value, RustCallStatus *out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_CLONE_DEFAULTMETRICSRECORDER
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_CLONE_DEFAULTMETRICSRECORDER
+uint64_t uniffi_slatedb_uniffi_fn_clone_defaultmetricsrecorder(uint64_t handle, RustCallStatus *out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_FREE_DEFAULTMETRICSRECORDER
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_FREE_DEFAULTMETRICSRECORDER
+void uniffi_slatedb_uniffi_fn_free_defaultmetricsrecorder(uint64_t handle, RustCallStatus *out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_CONSTRUCTOR_DEFAULTMETRICSRECORDER_NEW
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_CONSTRUCTOR_DEFAULTMETRICSRECORDER_NEW
+uint64_t uniffi_slatedb_uniffi_fn_constructor_defaultmetricsrecorder_new(RustCallStatus *out_status
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DEFAULTMETRICSRECORDER_METRIC_BY_NAME_AND_LABELS
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DEFAULTMETRICSRECORDER_METRIC_BY_NAME_AND_LABELS
+RustBuffer uniffi_slatedb_uniffi_fn_method_defaultmetricsrecorder_metric_by_name_and_labels(uint64_t ptr, RustBuffer name, RustBuffer labels, RustCallStatus *out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DEFAULTMETRICSRECORDER_METRICS_BY_NAME
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DEFAULTMETRICSRECORDER_METRICS_BY_NAME
+RustBuffer uniffi_slatedb_uniffi_fn_method_defaultmetricsrecorder_metrics_by_name(uint64_t ptr, RustBuffer name, RustCallStatus *out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DEFAULTMETRICSRECORDER_REGISTER_COUNTER
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DEFAULTMETRICSRECORDER_REGISTER_COUNTER
+uint64_t uniffi_slatedb_uniffi_fn_method_defaultmetricsrecorder_register_counter(uint64_t ptr, RustBuffer name, RustBuffer description, RustBuffer labels, RustCallStatus *out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DEFAULTMETRICSRECORDER_REGISTER_GAUGE
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DEFAULTMETRICSRECORDER_REGISTER_GAUGE
+uint64_t uniffi_slatedb_uniffi_fn_method_defaultmetricsrecorder_register_gauge(uint64_t ptr, RustBuffer name, RustBuffer description, RustBuffer labels, RustCallStatus *out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DEFAULTMETRICSRECORDER_REGISTER_HISTOGRAM
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DEFAULTMETRICSRECORDER_REGISTER_HISTOGRAM
+uint64_t uniffi_slatedb_uniffi_fn_method_defaultmetricsrecorder_register_histogram(uint64_t ptr, RustBuffer name, RustBuffer description, RustBuffer labels, RustBuffer boundaries, RustCallStatus *out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DEFAULTMETRICSRECORDER_REGISTER_UP_DOWN_COUNTER
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DEFAULTMETRICSRECORDER_REGISTER_UP_DOWN_COUNTER
+uint64_t uniffi_slatedb_uniffi_fn_method_defaultmetricsrecorder_register_up_down_counter(uint64_t ptr, RustBuffer name, RustBuffer description, RustBuffer labels, RustCallStatus *out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DEFAULTMETRICSRECORDER_SNAPSHOT
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DEFAULTMETRICSRECORDER_SNAPSHOT
+RustBuffer uniffi_slatedb_uniffi_fn_method_defaultmetricsrecorder_snapshot(uint64_t ptr, RustCallStatus *out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_CLONE_GAUGE
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_CLONE_GAUGE
+uint64_t uniffi_slatedb_uniffi_fn_clone_gauge(uint64_t handle, RustCallStatus *out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_FREE_GAUGE
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_FREE_GAUGE
+void uniffi_slatedb_uniffi_fn_free_gauge(uint64_t handle, RustCallStatus *out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_INIT_CALLBACK_VTABLE_GAUGE
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_INIT_CALLBACK_VTABLE_GAUGE
+void uniffi_slatedb_uniffi_fn_init_callback_vtable_gauge(UniffiVTableCallbackInterfaceGauge* vtable
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_GAUGE_SET
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_GAUGE_SET
+void uniffi_slatedb_uniffi_fn_method_gauge_set(uint64_t ptr, int64_t value, RustCallStatus *out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_CLONE_HISTOGRAM
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_CLONE_HISTOGRAM
+uint64_t uniffi_slatedb_uniffi_fn_clone_histogram(uint64_t handle, RustCallStatus *out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_FREE_HISTOGRAM
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_FREE_HISTOGRAM
+void uniffi_slatedb_uniffi_fn_free_histogram(uint64_t handle, RustCallStatus *out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_INIT_CALLBACK_VTABLE_HISTOGRAM
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_INIT_CALLBACK_VTABLE_HISTOGRAM
+void uniffi_slatedb_uniffi_fn_init_callback_vtable_histogram(UniffiVTableCallbackInterfaceHistogram* vtable
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_HISTOGRAM_RECORD
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_HISTOGRAM_RECORD
+void uniffi_slatedb_uniffi_fn_method_histogram_record(uint64_t ptr, double value, RustCallStatus *out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_CLONE_METRICSRECORDER
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_CLONE_METRICSRECORDER
+uint64_t uniffi_slatedb_uniffi_fn_clone_metricsrecorder(uint64_t handle, RustCallStatus *out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_FREE_METRICSRECORDER
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_FREE_METRICSRECORDER
+void uniffi_slatedb_uniffi_fn_free_metricsrecorder(uint64_t handle, RustCallStatus *out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_INIT_CALLBACK_VTABLE_METRICSRECORDER
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_INIT_CALLBACK_VTABLE_METRICSRECORDER
+void uniffi_slatedb_uniffi_fn_init_callback_vtable_metricsrecorder(UniffiVTableCallbackInterfaceMetricsRecorder* vtable
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_METRICSRECORDER_REGISTER_COUNTER
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_METRICSRECORDER_REGISTER_COUNTER
+uint64_t uniffi_slatedb_uniffi_fn_method_metricsrecorder_register_counter(uint64_t ptr, RustBuffer name, RustBuffer description, RustBuffer labels, RustCallStatus *out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_METRICSRECORDER_REGISTER_GAUGE
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_METRICSRECORDER_REGISTER_GAUGE
+uint64_t uniffi_slatedb_uniffi_fn_method_metricsrecorder_register_gauge(uint64_t ptr, RustBuffer name, RustBuffer description, RustBuffer labels, RustCallStatus *out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_METRICSRECORDER_REGISTER_UP_DOWN_COUNTER
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_METRICSRECORDER_REGISTER_UP_DOWN_COUNTER
+uint64_t uniffi_slatedb_uniffi_fn_method_metricsrecorder_register_up_down_counter(uint64_t ptr, RustBuffer name, RustBuffer description, RustBuffer labels, RustCallStatus *out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_METRICSRECORDER_REGISTER_HISTOGRAM
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_METRICSRECORDER_REGISTER_HISTOGRAM
+uint64_t uniffi_slatedb_uniffi_fn_method_metricsrecorder_register_histogram(uint64_t ptr, RustBuffer name, RustBuffer description, RustBuffer labels, RustBuffer boundaries, RustCallStatus *out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_CLONE_UPDOWNCOUNTER
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_CLONE_UPDOWNCOUNTER
+uint64_t uniffi_slatedb_uniffi_fn_clone_updowncounter(uint64_t handle, RustCallStatus *out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_FREE_UPDOWNCOUNTER
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_FREE_UPDOWNCOUNTER
+void uniffi_slatedb_uniffi_fn_free_updowncounter(uint64_t handle, RustCallStatus *out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_INIT_CALLBACK_VTABLE_UPDOWNCOUNTER
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_INIT_CALLBACK_VTABLE_UPDOWNCOUNTER
+void uniffi_slatedb_uniffi_fn_init_callback_vtable_updowncounter(UniffiVTableCallbackInterfaceUpDownCounter* vtable
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_UPDOWNCOUNTER_INCREMENT
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_UPDOWNCOUNTER_INCREMENT
+void uniffi_slatedb_uniffi_fn_method_updowncounter_increment(uint64_t ptr, int64_t value, RustCallStatus *out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_CLONE_OBJECTSTORE
@@ -1368,6 +1704,12 @@ uint16_t uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_merge_operator(voi
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBBUILDER_WITH_METRICS_RECORDER
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBBUILDER_WITH_METRICS_RECORDER
+uint16_t uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_metrics_recorder(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBBUILDER_WITH_SEED
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBBUILDER_WITH_SEED
 uint16_t uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_seed(void
@@ -1407,6 +1749,12 @@ uint16_t uniffi_slatedb_uniffi_checksum_method_dbreaderbuilder_with_checkpoint_i
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBREADERBUILDER_WITH_MERGE_OPERATOR
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBREADERBUILDER_WITH_MERGE_OPERATOR
 uint16_t uniffi_slatedb_uniffi_checksum_method_dbreaderbuilder_with_merge_operator(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBREADERBUILDER_WITH_METRICS_RECORDER
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBREADERBUILDER_WITH_METRICS_RECORDER
+uint16_t uniffi_slatedb_uniffi_checksum_method_dbreaderbuilder_with_metrics_recorder(void
     
 );
 #endif
@@ -1788,6 +2136,96 @@ uint16_t uniffi_slatedb_uniffi_checksum_method_mergeoperator_merge(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_COUNTER_INCREMENT
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_COUNTER_INCREMENT
+uint16_t uniffi_slatedb_uniffi_checksum_method_counter_increment(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DEFAULTMETRICSRECORDER_METRIC_BY_NAME_AND_LABELS
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DEFAULTMETRICSRECORDER_METRIC_BY_NAME_AND_LABELS
+uint16_t uniffi_slatedb_uniffi_checksum_method_defaultmetricsrecorder_metric_by_name_and_labels(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DEFAULTMETRICSRECORDER_METRICS_BY_NAME
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DEFAULTMETRICSRECORDER_METRICS_BY_NAME
+uint16_t uniffi_slatedb_uniffi_checksum_method_defaultmetricsrecorder_metrics_by_name(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DEFAULTMETRICSRECORDER_REGISTER_COUNTER
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DEFAULTMETRICSRECORDER_REGISTER_COUNTER
+uint16_t uniffi_slatedb_uniffi_checksum_method_defaultmetricsrecorder_register_counter(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DEFAULTMETRICSRECORDER_REGISTER_GAUGE
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DEFAULTMETRICSRECORDER_REGISTER_GAUGE
+uint16_t uniffi_slatedb_uniffi_checksum_method_defaultmetricsrecorder_register_gauge(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DEFAULTMETRICSRECORDER_REGISTER_HISTOGRAM
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DEFAULTMETRICSRECORDER_REGISTER_HISTOGRAM
+uint16_t uniffi_slatedb_uniffi_checksum_method_defaultmetricsrecorder_register_histogram(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DEFAULTMETRICSRECORDER_REGISTER_UP_DOWN_COUNTER
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DEFAULTMETRICSRECORDER_REGISTER_UP_DOWN_COUNTER
+uint16_t uniffi_slatedb_uniffi_checksum_method_defaultmetricsrecorder_register_up_down_counter(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DEFAULTMETRICSRECORDER_SNAPSHOT
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DEFAULTMETRICSRECORDER_SNAPSHOT
+uint16_t uniffi_slatedb_uniffi_checksum_method_defaultmetricsrecorder_snapshot(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_GAUGE_SET
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_GAUGE_SET
+uint16_t uniffi_slatedb_uniffi_checksum_method_gauge_set(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_HISTOGRAM_RECORD
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_HISTOGRAM_RECORD
+uint16_t uniffi_slatedb_uniffi_checksum_method_histogram_record(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_METRICSRECORDER_REGISTER_COUNTER
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_METRICSRECORDER_REGISTER_COUNTER
+uint16_t uniffi_slatedb_uniffi_checksum_method_metricsrecorder_register_counter(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_METRICSRECORDER_REGISTER_GAUGE
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_METRICSRECORDER_REGISTER_GAUGE
+uint16_t uniffi_slatedb_uniffi_checksum_method_metricsrecorder_register_gauge(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_METRICSRECORDER_REGISTER_UP_DOWN_COUNTER
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_METRICSRECORDER_REGISTER_UP_DOWN_COUNTER
+uint16_t uniffi_slatedb_uniffi_checksum_method_metricsrecorder_register_up_down_counter(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_METRICSRECORDER_REGISTER_HISTOGRAM
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_METRICSRECORDER_REGISTER_HISTOGRAM
+uint16_t uniffi_slatedb_uniffi_checksum_method_metricsrecorder_register_histogram(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_UPDOWNCOUNTER_INCREMENT
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_UPDOWNCOUNTER_INCREMENT
+uint16_t uniffi_slatedb_uniffi_checksum_method_updowncounter_increment(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_SETTINGS_SET
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_SETTINGS_SET
 uint16_t uniffi_slatedb_uniffi_checksum_method_settings_set(void
@@ -1890,6 +2328,12 @@ uint16_t uniffi_slatedb_uniffi_checksum_constructor_dbreaderbuilder_new(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_CONSTRUCTOR_DEFAULTMETRICSRECORDER_NEW
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_CONSTRUCTOR_DEFAULTMETRICSRECORDER_NEW
+uint16_t uniffi_slatedb_uniffi_checksum_constructor_defaultmetricsrecorder_new(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_CONSTRUCTOR_OBJECTSTORE_FROM_ENV
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_CONSTRUCTOR_OBJECTSTORE_FROM_ENV
 uint16_t uniffi_slatedb_uniffi_checksum_constructor_objectstore_from_env(void
@@ -1963,6 +2407,24 @@ uint64_t slatedb_uniffi_logging_cgo_dispatchCallbackInterfaceLogCallbackClone(ui
  void slatedb_uniffi_merge_operator_cgo_dispatchCallbackInterfaceMergeOperatorMethod0(uint64_t uniffi_handle, RustBuffer key, RustBuffer existing_value, RustBuffer operand, RustBuffer* uniffi_out_return, RustCallStatus* callStatus );
  void slatedb_uniffi_merge_operator_cgo_dispatchCallbackInterfaceMergeOperatorFree(uint64_t handle);
 uint64_t slatedb_uniffi_merge_operator_cgo_dispatchCallbackInterfaceMergeOperatorClone(uint64_t handle);
+ void slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceCounterMethod0(uint64_t uniffi_handle, uint64_t value, void* uniffi_out_return, RustCallStatus* callStatus );
+ void slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceCounterFree(uint64_t handle);
+uint64_t slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceCounterClone(uint64_t handle);
+ void slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceGaugeMethod0(uint64_t uniffi_handle, int64_t value, void* uniffi_out_return, RustCallStatus* callStatus );
+ void slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceGaugeFree(uint64_t handle);
+uint64_t slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceGaugeClone(uint64_t handle);
+ void slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceHistogramMethod0(uint64_t uniffi_handle, double value, void* uniffi_out_return, RustCallStatus* callStatus );
+ void slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceHistogramFree(uint64_t handle);
+uint64_t slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceHistogramClone(uint64_t handle);
+ void slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceMetricsRecorderMethod0(uint64_t uniffi_handle, RustBuffer name, RustBuffer description, RustBuffer labels, uint64_t* uniffi_out_return, RustCallStatus* callStatus );
+ void slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceMetricsRecorderMethod1(uint64_t uniffi_handle, RustBuffer name, RustBuffer description, RustBuffer labels, uint64_t* uniffi_out_return, RustCallStatus* callStatus );
+ void slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceMetricsRecorderMethod2(uint64_t uniffi_handle, RustBuffer name, RustBuffer description, RustBuffer labels, uint64_t* uniffi_out_return, RustCallStatus* callStatus );
+ void slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceMetricsRecorderMethod3(uint64_t uniffi_handle, RustBuffer name, RustBuffer description, RustBuffer labels, RustBuffer boundaries, uint64_t* uniffi_out_return, RustCallStatus* callStatus );
+ void slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceMetricsRecorderFree(uint64_t handle);
+uint64_t slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceMetricsRecorderClone(uint64_t handle);
+ void slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceUpDownCounterMethod0(uint64_t uniffi_handle, int64_t value, void* uniffi_out_return, RustCallStatus* callStatus );
+ void slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceUpDownCounterFree(uint64_t handle);
+uint64_t slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceUpDownCounterClone(uint64_t handle);
 
 void slatedb_uniffiFutureContinuationCallback(uint64_t, int8_t);
 void slatedb_uniffiFreeGorutine(uint64_t);
