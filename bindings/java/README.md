@@ -46,8 +46,41 @@ Maven:
 
 - `ObjectStore.resolve(...)` resolves an object store from a URL such as `memory:///` or `file:///...`
 - `DbBuilder` opens a writable database and `DbReaderBuilder` opens a read-only reader
+- `DbBuilder.withMetricsRecorder(...)` and `DbReaderBuilder.withMetricsRecorder(...)` install a custom metrics sink
+- `DefaultMetricsRecorder` provides an in-process recorder with snapshot and lookup helpers
 - most database operations return `CompletableFuture`
 - native-backed handles implement `AutoCloseable` and should be closed
+
+## Metrics
+
+Use `DefaultMetricsRecorder` when you want to observe SlateDB metrics from Java without wiring a
+custom callback implementation:
+
+```java
+import io.slatedb.uniffi.Db;
+import io.slatedb.uniffi.DbBuilder;
+import io.slatedb.uniffi.DefaultMetricsRecorder;
+import io.slatedb.uniffi.Metric;
+import io.slatedb.uniffi.ObjectStore;
+
+try (ObjectStore store = ObjectStore.resolve("memory:///");
+        DefaultMetricsRecorder recorder = new DefaultMetricsRecorder();
+        DbBuilder builder = new DbBuilder("metrics-demo", store)) {
+    builder.withMetricsRecorder(recorder);
+
+    Db db = await(builder.build());
+    try (db) {
+        await(db.put("hello".getBytes(), "world".getBytes()));
+        await(db.shutdown());
+    }
+
+    Metric writes = recorder.metricByNameAndLabels("slatedb.db.write_ops", java.util.List.of());
+    System.out.println(writes.value());
+}
+```
+
+For custom integrations, implement `MetricsRecorder` and return `Counter`, `Gauge`,
+`UpDownCounter`, and `Histogram` handles from the registration methods.
 
 ## Basic Example
 
@@ -95,14 +128,14 @@ Replace `memory:///` with [any object store URL](https://docs.rs/object_store/la
 
 You only need these if you are regenerating bindings or building from source in this repository:
 
-- Java 21 or newer
+- Java 22 or newer
 - Rust toolchain for this repository
 - `uniffi-bindgen-java`
 
 Install the generator with:
 
 ```bash
-cargo install uniffi-bindgen-java --version 0.3.1
+cargo install uniffi-bindgen-java --git https://github.com/criccomini/uniffi-bindgen-java.git --branch fix-histo-bug
 ```
 
 ## Regenerate
@@ -127,7 +160,7 @@ From the repository root:
 
 `check` generates Java bindings on demand before compiling and testing.
 
-Local builds package the host `slatedb_uniffi` native library as a JNA resource on the classpath. Tests set `jna.nosys=true` so they exercise the bundled native library rather than a system installation.
+Local builds stage the host `slatedb_uniffi` native library as a classpath resource. Tests also add the host native output directory to `java.library.path`, because the current generated Java loader resolves the library via `System.loadLibrary(...)`.
 
 ## Release Packaging
 
