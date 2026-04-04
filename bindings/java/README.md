@@ -160,7 +160,7 @@ From the repository root:
 
 `check` generates Java bindings on demand before compiling and testing.
 
-Local builds package the host `slatedb_uniffi` native library as a JNA resource on the classpath. Tests set `jna.nosys=true` so they exercise the bundled native library rather than a system installation.
+Local builds stage the host `slatedb_uniffi` native library as a classpath resource. Tests also add the host native output directory to `java.library.path`, because the current generated Java loader resolves the library via `System.loadLibrary(...)`.
 
 ## Release Packaging
 
