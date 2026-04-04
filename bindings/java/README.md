@@ -128,7 +128,7 @@ Replace `memory:///` with [any object store URL](https://docs.rs/object_store/la
 
 You only need these if you are regenerating bindings or building from source in this repository:
 
-- Java 21 or newer
+- Java 22 or newer
 - Rust toolchain for this repository
 - `uniffi-bindgen-java`
 

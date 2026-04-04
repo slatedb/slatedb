@@ -5,7 +5,7 @@ plugins {
 def repoRoot = layout.projectDirectory.dir("../..").asFile.absoluteFile
 def configuredVersion = (findProperty("slatedb.version") ?: "").toString().trim()
 def defaultVersion = project.version.toString()
-def minimumJava = 21
+def minimumJava = 22
 def currentJava = JavaVersion.current()
 def toolchainVersion = currentJava.isCompatibleWith(JavaVersion.toVersion(minimumJava))
     ? Integer.parseInt(currentJava.majorVersion)
