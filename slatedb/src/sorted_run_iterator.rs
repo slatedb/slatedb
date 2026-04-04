@@ -40,7 +40,7 @@ impl<'a> SortedRunView<'a> {
         db_stats: Option<DbStats>,
     ) -> Result<Option<SstIterator<'a>>, SlateDBError> {
         let next_iter = if let Some(view) = self.pop_sst() {
-            Some(SstIterator::new(
+            Some(SstIterator::new_with_stats(
                 view,
                 table_store,
                 sst_iterator_options,

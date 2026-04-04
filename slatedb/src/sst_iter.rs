@@ -927,7 +927,16 @@ impl<'a> SstIterator<'a> {
         Self { delegate }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn new(
+        view: SstView<'a>,
+        table_store: Arc<TableStore>,
+        options: SstIteratorOptions,
+    ) -> Result<Self, SlateDBError> {
+        Self::new_with_stats(view, table_store, options, None)
+    }
+
+    pub(crate) fn new_with_stats(
         view: SstView<'a>,
         table_store: Arc<TableStore>,
         options: SstIteratorOptions,

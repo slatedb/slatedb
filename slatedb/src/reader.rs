@@ -149,7 +149,7 @@ impl Reader {
     ) -> Result<VecDeque<Box<dyn RowEntryIterator + 'a>>, SlateDBError> {
         let mut iters = VecDeque::new();
         for sst in &db_state.core().l0 {
-            let iterator = SstIterator::new_owned(
+            let iterator = SstIterator::new_owned_with_stats(
                 range.clone(),
                 sst.clone(),
                 self.table_store.clone(),
@@ -174,7 +174,7 @@ impl Reader {
         let mut iters = VecDeque::new();
         for sr in &db_state.core().compacted {
             for handle in sr.tables_covering_point_key(key) {
-                let iterator = SstIterator::new_owned(
+                let iterator = SstIterator::new_owned_with_stats(
                     range.clone(),
                     handle.clone(),
                     self.table_store.clone(),
