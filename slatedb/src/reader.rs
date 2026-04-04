@@ -237,7 +237,7 @@ impl Reader {
                 let table_store = table_store.clone();
                 let range = range_clone.clone();
                 async move {
-                    SortedRunIterator::new_owned_initialized(
+                    SortedRunIterator::new_owned_initialized_with_stats(
                         range.clone(),
                         sr,
                         table_store,

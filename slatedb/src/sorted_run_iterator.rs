@@ -106,6 +106,22 @@ impl<'a> SortedRunIterator<'a> {
         sorted_run: SortedRun,
         table_store: Arc<TableStore>,
         sst_iter_options: SstIteratorOptions,
+     ) -> Result<Self, SlateDBError> {
+        SortedRunIterator::new_owned_initialized_with_stats(
+            range,
+            sorted_run,
+            table_store,
+            sst_iter_options,
+            None,
+        )
+        .await
+    }
+
+    pub(crate) async fn new_owned_initialized_with_stats<T: RangeBounds<Bytes>>(
+        range: T,
+        sorted_run: SortedRun,
+        table_store: Arc<TableStore>,
+        sst_iter_options: SstIteratorOptions,
         db_stats: Option<DbStats>,
     ) -> Result<Self, SlateDBError> {
         let mut iter = SortedRunIterator::new_owned(
@@ -270,7 +286,6 @@ mod tests {
             sr,
             table_store,
             SstIteratorOptions::default(),
-            None,
         )
         .await
         .unwrap();
@@ -335,7 +350,6 @@ mod tests {
             sr,
             table_store.clone(),
             SstIteratorOptions::default(),
-            None,
         )
         .await
         .unwrap();
@@ -488,7 +502,6 @@ mod tests {
             sr,
             table_store.clone(),
             SstIteratorOptions::default(),
-            None,
         )
         .await
         .unwrap();
@@ -661,7 +674,6 @@ mod tests {
                 sorted_run,
                 table_store.clone(),
                 SstIteratorOptions::default(),
-                None,
             )
             .await
             .unwrap();
@@ -732,7 +744,6 @@ mod tests {
                 sorted_run,
                 table_store.clone(),
                 SstIteratorOptions::default(),
-                None,
             )
             .await
             .unwrap();
