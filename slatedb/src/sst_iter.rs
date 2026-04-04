@@ -937,8 +937,7 @@ impl<'a> SstIterator<'a> {
         Ok(Self::from_internal(internal, db_stats))
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn new_owned_with_stats<T: RangeBounds<Bytes>>(
+    pub(crate) fn new_owned<T: RangeBounds<Bytes>>(
         range: T,
         table: SsTableView,
         table_store: Arc<TableStore>,
@@ -947,16 +946,6 @@ impl<'a> SstIterator<'a> {
     ) -> Result<Option<Self>, SlateDBError> {
         let internal = InternalSstIterator::new_owned(range, table, table_store, options)?;
         Ok(internal.map(|iter| Self::from_internal(iter, db_stats.clone())))
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn new_owned<T: RangeBounds<Bytes>>(
-        range: T,
-        table: SsTableView,
-        table_store: Arc<TableStore>,
-        options: SstIteratorOptions,
-    ) -> Result<Option<Self>, SlateDBError> {
-        Self::new_owned_with_stats(range, table, table_store, options, None)
     }
 
     pub(crate) async fn new_owned_initialized<T: RangeBounds<Bytes>>(
