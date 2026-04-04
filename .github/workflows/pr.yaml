@@ -217,18 +217,18 @@ jobs:
       - name: Setup Rust stable
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Set up Java 21
+      - name: Set up Java 22
         uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
-          java-version: '21'
+          java-version: '22'
 
       - name: Install uniffi-bindgen-java
         env:
           # uniffi-bindgen-java has some warnings that we don't want to fail the build, so we
           # override RUSTFLAGS here to avoid the -Dwarnings from the global env.
           RUSTFLAGS: ""
-        run: cargo install uniffi-bindgen-java --version 0.3.1
+        run: cargo install uniffi-bindgen-java --git https://github.com/criccomini/uniffi-bindgen-java.git --branch fix-histo-bug
 
       - name: Run Java tests (bindings/java)
         run: ./bindings/java/gradlew -p bindings/java :slatedb-uniffi:check

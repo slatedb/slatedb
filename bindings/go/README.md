@@ -90,6 +90,44 @@ func main() {
 }
 ```
 
+## Metrics
+
+The Go binding exposes the UniFFI metrics surface directly:
+
+- `DbBuilder.WithMetricsRecorder(...)` and `DbReaderBuilder.WithMetricsRecorder(...)`
+- `NewDefaultMetricsRecorder()` for an in-process recorder with snapshot access
+- `Metric`, `MetricLabel`, `MetricValue*`, `Counter`, `Gauge`, `UpDownCounter`, and `Histogram`
+
+Example:
+
+```go
+recorder := slatedb.NewDefaultMetricsRecorder()
+defer recorder.Destroy()
+
+builder := slatedb.NewDbBuilder("metrics-demo", store)
+defer builder.Destroy()
+if err := builder.WithMetricsRecorder(recorder); err != nil {
+	panic(err)
+}
+
+db, err := builder.Build()
+if err != nil {
+	panic(err)
+}
+defer db.Destroy()
+
+if _, err := db.Put([]byte("hello"), []byte("world")); err != nil {
+	panic(err)
+}
+
+metric := recorder.MetricByNameAndLabels("slatedb.db.write_ops", nil)
+if metric != nil {
+	if value, ok := metric.Value.(slatedb.MetricValueCounter); ok {
+		fmt.Println("write_ops =", value.Field0)
+	}
+}
+```
+
 ## Build And Test
 
 From the repository root:
