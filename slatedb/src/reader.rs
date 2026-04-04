@@ -6,6 +6,7 @@ use crate::db_state::ManifestCore;
 use crate::db_stats::DbStats;
 use crate::iter::RowEntryIterator;
 use crate::mem_table::{ImmutableMemtable, KVTable};
+use crate::merge_operator::{instrument_merge_operator, MergeOperatorType};
 use crate::oracle::Oracle;
 use crate::sorted_run_iterator::SortedRunIterator;
 use crate::sst_iter::{SstIterator, SstIteratorOptions};
@@ -37,10 +38,35 @@ pub(crate) struct Reader {
     #[allow(dead_code)] // unused during DST
     pub(crate) mono_clock: Arc<MonotonicClock>,
     pub(crate) oracle: Arc<dyn Oracle>,
-    pub(crate) merge_operator: Option<crate::merge_operator::MergeOperatorType>,
+    pub(crate) merge_operator: Option<MergeOperatorType>,
 }
 
 impl Reader {
+    pub(crate) fn new(
+        table_store: Arc<TableStore>,
+        db_stats: DbStats,
+        mono_clock: Arc<MonotonicClock>,
+        oracle: Arc<dyn Oracle>,
+        merge_operator: Option<MergeOperatorType>,
+    ) -> Self {
+        Self {
+            table_store,
+            db_stats,
+            mono_clock,
+            oracle,
+            merge_operator,
+        }
+    }
+
+    fn merge_operator_for_read(&self) -> Option<MergeOperatorType> {
+        self.merge_operator.clone().map(|merge_operator| {
+            instrument_merge_operator(
+                merge_operator,
+                self.db_stats.merge_operator_read_operands.clone(),
+            )
+        })
+    }
+
     /// Determines the maximum sequence number for read operations (get and scan). Read operations will filter
     /// out entries with sequence numbers greater than the returned value.
     ///
@@ -305,10 +331,7 @@ impl Reader {
             )
             .await?;
 
-        let merge_operator = self.merge_operator.clone();
-        let merge_operator_read_operands = merge_operator
-            .as_ref()
-            .map(|_| self.db_stats.merge_operator_read_operands.clone());
+        let merge_operator = self.merge_operator_for_read();
 
         let mut iterator = DbIterator::new(
             range,
@@ -319,7 +342,6 @@ impl Reader {
             max_seq,
             None,
             self.merge_operator.clone(),
-            merge_operator_read_operands,
             sst_iter_options.order,
         )
         .await?;
@@ -386,10 +408,7 @@ impl Reader {
             .build_iterator_sources(&range, db_state, write_batch, sst_iter_options, None)
             .await?;
 
-        let merge_operator = self.merge_operator.clone();
-        let merge_operator_read_operands = merge_operator
-            .as_ref()
-            .map(|_| self.db_stats.merge_operator_read_operands.clone());
+        let merge_operator = self.merge_operator_for_read();
 
         DbIterator::new(
             range,
@@ -400,7 +419,6 @@ impl Reader {
             max_seq,
             range_tracker,
             self.merge_operator.clone(),
-            merge_operator_read_operands,
             options.order,
         )
         .await
@@ -410,6 +428,7 @@ impl Reader {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db_stats::MERGE_OPERATOR_READ_OPERANDS;
     use crate::merge_operator::{MergeOperator, MergeOperatorError};
     use crate::types::{RowEntry, ValueDeletable};
     use bytes::Bytes;
@@ -429,7 +448,11 @@ mod tests {
     use crate::oracle::DbReaderOracle;
     use crate::tablestore::TableStore;
     use object_store::{memory::InMemory, path::Path, ObjectStore};
+    use slatedb_common::metrics::{
+        lookup_metric, DefaultMetricsRecorder, MetricLevel, MetricsRecorder, MetricsRecorderHelper,
+    };
     use std::collections::HashMap;
+    use std::sync::Arc;
     use ulid::Ulid;
 
     /// A simple merge operator for testing that concatenates byte strings
@@ -1229,13 +1252,13 @@ mod tests {
             None
         };
 
-        let reader = Reader {
-            table_store: test_db_state.table_store.clone(),
+        let reader = Reader::new(
+            test_db_state.table_store.clone(),
             db_stats,
             mono_clock,
             oracle,
             merge_operator,
-        };
+        );
 
         // Call the actual get_key_value_with_options method
         let read_options = ReadOptions::default().with_dirty(test_case.dirty);
@@ -1659,13 +1682,13 @@ mod tests {
             None
         };
 
-        let reader = Reader {
-            table_store: test_db_state.table_store.clone(),
+        let reader = Reader::new(
+            test_db_state.table_store.clone(),
             db_stats,
             mono_clock,
             oracle,
             merge_operator,
-        };
+        );
 
         // Create range
         let range = BytesRange::from_slice(test_case.range_start..test_case.range_end);
@@ -1740,13 +1763,94 @@ mod tests {
         } else {
             None
         };
-        Reader {
-            table_store: test_db_state.table_store.clone(),
+        Reader::new(
+            test_db_state.table_store.clone(),
             db_stats,
             mono_clock,
             oracle,
             merge_operator,
-        }
+        )
+    }
+
+    #[tokio::test]
+    async fn should_record_merge_operator_read_operands_for_reader_reads(
+    ) -> Result<(), SlateDBError> {
+        let entries = vec![
+            TestEntry::merge(b"key1", b"b", 2),
+            TestEntry::merge(b"key1", b"a", 1),
+            TestEntry::value(b"key2", b"value2", 1),
+        ];
+
+        let mut test_db_state = TestDbState::new().await;
+        let write_batch = populate_db_state(&mut test_db_state, entries).await?;
+
+        let metrics_recorder = Arc::new(DefaultMetricsRecorder::new());
+        let recorder = MetricsRecorderHelper::new(
+            metrics_recorder.clone() as Arc<dyn MetricsRecorder>,
+            MetricLevel::default(),
+        );
+        let db_stats = DbStats::new(&recorder);
+        let reader = build_reader(&test_db_state, db_stats, true).await;
+
+        assert_eq!(
+            lookup_metric(metrics_recorder.as_ref(), MERGE_OPERATOR_READ_OPERANDS),
+            Some(0)
+        );
+
+        let result = reader
+            .get_key_value_with_options(
+                b"key1",
+                &ReadOptions::default().with_dirty(true),
+                &test_db_state,
+                write_batch.clone(),
+                None,
+            )
+            .await?;
+        assert_eq!(result.unwrap().value, Bytes::from_static(b"ab"));
+        assert_eq!(
+            lookup_metric(metrics_recorder.as_ref(), MERGE_OPERATOR_READ_OPERANDS),
+            Some(3)
+        );
+
+        let mut iter = reader
+            .scan_with_options(
+                BytesRange::from_slice(b"key1".as_ref()..b"key3".as_ref()),
+                &ScanOptions::default().with_dirty(true),
+                &test_db_state,
+                write_batch,
+                None,
+                None,
+            )
+            .await?;
+
+        let first = iter
+            .next()
+            .await
+            .map_err(|e| SlateDBError::IoError(Arc::new(std::io::Error::other(e))))?
+            .expect("should have key1");
+        assert_eq!(first.key.as_ref(), b"key1");
+        assert_eq!(first.value.as_ref(), b"ab");
+
+        let second = iter
+            .next()
+            .await
+            .map_err(|e| SlateDBError::IoError(Arc::new(std::io::Error::other(e))))?
+            .expect("should have key2");
+        assert_eq!(second.key.as_ref(), b"key2");
+        assert_eq!(second.value.as_ref(), b"value2");
+
+        assert!(iter
+            .next()
+            .await
+            .map_err(|e| SlateDBError::IoError(Arc::new(std::io::Error::other(e))))?
+            .is_none());
+
+        assert_eq!(
+            lookup_metric(metrics_recorder.as_ref(), MERGE_OPERATOR_READ_OPERANDS),
+            Some(6)
+        );
+
+        Ok(())
     }
 
     #[tokio::test]

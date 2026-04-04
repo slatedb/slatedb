@@ -149,13 +149,13 @@ impl DbInner {
         let db_stats = DbStats::new(&recorder);
         let wal_enabled = DbInner::wal_enabled_in_options(&settings);
 
-        let reader = Reader {
-            table_store: table_store.clone(),
-            db_stats: db_stats.clone(),
-            mono_clock: mono_clock.clone(),
-            oracle: oracle.clone(),
+        let reader = Reader::new(
+            table_store.clone(),
+            db_stats.clone(),
+            mono_clock.clone(),
+            oracle.clone(),
             merge_operator,
-        };
+        );
 
         let recent_flushed_wal_id = state.read().state().core().replay_after_wal_id;
         let wal_buffer = Arc::new(WalBufferManager::new(
@@ -5989,79 +5989,12 @@ mod tests {
         assert_eq!(result, Some(Bytes::from("value1")));
     }
 
-    fn merge_operator_read_operands_histogram(
-        recorder: &DefaultMetricsRecorder,
-    ) -> (u64, f64, f64, f64) {
-        let snapshot = recorder.snapshot();
-        let metric = snapshot
-            .by_name(MERGE_OPERATOR_READ_OPERANDS)
-            .into_iter()
-            .next()
-            .unwrap();
-
-        match &metric.value {
-            MetricValue::Histogram {
-                count,
-                sum,
-                min,
-                max,
-                ..
-            } => (*count, *sum, *min, *max),
-            other => panic!("expected histogram metric, got {other:?}"),
-        }
-    }
-
     #[tokio::test]
-    async fn should_record_merge_operator_read_operands_for_get_and_scan() {
-        let recorder = Arc::new(DefaultMetricsRecorder::new());
-        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let db = Db::builder("/tmp/test_merge_read_metric_get_scan", object_store.clone())
-            .with_settings(test_db_options(0, 1024, None))
-            .with_metrics_recorder(recorder.clone())
-            .with_merge_operator(Arc::new(StringConcatMergeOperator))
-            .build()
-            .await
-            .unwrap();
-
-        db.merge(b"key1", b"a").await.unwrap();
-        db.merge(b"key1", b"b").await.unwrap();
-        db.merge(b"key1", b"c").await.unwrap();
-        db.put(b"key2", b"value2").await.unwrap();
-
-        assert_eq!(
-            merge_operator_read_operands_histogram(recorder.as_ref()),
-            (0, 0.0, f64::INFINITY, f64::NEG_INFINITY)
-        );
-
-        let result = db.get(b"key1").await.unwrap();
-        assert_eq!(result, Some(Bytes::from_static(b"abc")));
-        assert_eq!(
-            merge_operator_read_operands_histogram(recorder.as_ref()),
-            (1, 3.0, 3.0, 3.0)
-        );
-
-        let mut iter = db.scan::<&[u8], _>(..).await.unwrap();
-        let first = iter.next().await.unwrap().unwrap();
-        assert_eq!(first.key, Bytes::from_static(b"key1"));
-        assert_eq!(first.value, Bytes::from_static(b"abc"));
-
-        let second = iter.next().await.unwrap().unwrap();
-        assert_eq!(second.key, Bytes::from_static(b"key2"));
-        assert_eq!(second.value, Bytes::from_static(b"value2"));
-        assert!(iter.next().await.unwrap().is_none());
-
-        assert_eq!(
-            merge_operator_read_operands_histogram(recorder.as_ref()),
-            (2, 6.0, 3.0, 3.0)
-        );
-    }
-
-    #[tokio::test]
-    async fn should_only_record_merge_operator_read_operands_on_reads() {
+    async fn should_not_record_merge_operator_read_operands_during_write_or_flush() {
         let recorder = Arc::new(DefaultMetricsRecorder::new());
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let db = Db::builder(
-            "/tmp/test_merge_read_metric_read_only",
+            "/tmp/test_merge_read_metric_write_and_flush",
             object_store.clone(),
         )
         .with_settings(test_db_options(0, 1024, None))
@@ -6076,15 +6009,8 @@ mod tests {
         db.flush().await.unwrap();
 
         assert_eq!(
-            merge_operator_read_operands_histogram(recorder.as_ref()),
-            (0, 0.0, f64::INFINITY, f64::NEG_INFINITY)
-        );
-
-        let result = db.get(b"key1").await.unwrap();
-        assert_eq!(result, Some(Bytes::from_static(b"ab")));
-        assert_eq!(
-            merge_operator_read_operands_histogram(recorder.as_ref()),
-            (1, 2.0, 2.0, 2.0)
+            lookup_metric(recorder.as_ref(), MERGE_OPERATOR_READ_OPERANDS),
+            Some(0)
         );
     }
 

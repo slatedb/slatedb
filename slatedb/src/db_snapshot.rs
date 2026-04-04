@@ -226,15 +226,12 @@ mod tests {
 
     use super::*;
     use crate::config::{CompactorOptions, PutOptions, Settings, WriteOptions};
-    use crate::db_stats::MERGE_OPERATOR_READ_OPERANDS;
     use crate::object_store::memory::InMemory;
     use crate::object_store::ObjectStore;
     use crate::oracle::Oracle;
-    use crate::test_utils::StringConcatMergeOperator;
     use crate::{Db, Error};
     use bytes::Bytes;
     use fail_parallel::FailPointRegistry;
-    use slatedb_common::metrics::{DefaultMetricsRecorder, MetricValue};
     use std::future::Future;
     use std::pin::Pin;
     use std::sync::Arc;
@@ -280,96 +277,6 @@ mod tests {
             .build()
             .await
             .expect("Failed to create test database")
-    }
-
-    fn merge_operator_read_operands_histogram(
-        recorder: &DefaultMetricsRecorder,
-    ) -> (u64, f64, f64, f64) {
-        let snapshot = recorder.snapshot();
-        let metric = snapshot
-            .by_name(MERGE_OPERATOR_READ_OPERANDS)
-            .into_iter()
-            .next()
-            .unwrap();
-
-        match &metric.value {
-            MetricValue::Histogram {
-                count,
-                sum,
-                min,
-                max,
-                ..
-            } => (*count, *sum, *min, *max),
-            other => panic!("expected histogram metric, got {other:?}"),
-        }
-    }
-
-    async fn create_test_db_with_merge_operator(recorder: Arc<DefaultMetricsRecorder>) -> Db {
-        let object_store = Arc::new(InMemory::new());
-        let config = Settings {
-            flush_interval: Some(Duration::from_millis(100)),
-            manifest_poll_interval: Duration::from_millis(100),
-            manifest_update_timeout: Duration::from_secs(300),
-            compactor_options: Some(CompactorOptions {
-                poll_interval: Duration::from_millis(100),
-                scheduler_options: Default::default(),
-                ..Default::default()
-            }),
-            max_unflushed_bytes: 16 * 1024,
-            min_filter_keys: 0,
-            l0_sst_size_bytes: 4 * 4096,
-            ..Default::default()
-        };
-
-        Db::builder("/tmp/snapshot_merge_metric_test", object_store)
-            .with_settings(config)
-            .with_metrics_recorder(recorder)
-            .with_merge_operator(Arc::new(StringConcatMergeOperator))
-            .build()
-            .await
-            .expect("Failed to create test database")
-    }
-
-    #[tokio::test]
-    async fn should_record_merge_operator_read_operands_for_snapshot_reads() {
-        let recorder = Arc::new(DefaultMetricsRecorder::new());
-        let db = create_test_db_with_merge_operator(recorder.clone()).await;
-
-        db.merge(b"key1", b"a").await.unwrap();
-        db.merge(b"key1", b"b").await.unwrap();
-        db.put(b"key2", b"value2").await.unwrap();
-
-        let snapshot = db.snapshot().await.unwrap();
-
-        assert_eq!(
-            merge_operator_read_operands_histogram(recorder.as_ref()),
-            (0, 0.0, f64::INFINITY, f64::NEG_INFINITY)
-        );
-
-        assert_eq!(
-            snapshot.get(b"key1").await.unwrap(),
-            Some(Bytes::from_static(b"ab"))
-        );
-
-        assert_eq!(
-            merge_operator_read_operands_histogram(recorder.as_ref()),
-            (1, 2.0, 2.0, 2.0)
-        );
-
-        let mut iter = snapshot.scan::<&[u8], _>(..).await.unwrap();
-        let first = iter.next().await.unwrap().unwrap();
-        assert_eq!(first.key, Bytes::from_static(b"key1"));
-        assert_eq!(first.value, Bytes::from_static(b"ab"));
-
-        let second = iter.next().await.unwrap().unwrap();
-        assert_eq!(second.key, Bytes::from_static(b"key2"));
-        assert_eq!(second.value, Bytes::from_static(b"value2"));
-        assert!(iter.next().await.unwrap().is_none());
-
-        assert_eq!(
-            merge_operator_read_operands_histogram(recorder.as_ref()),
-            (2, 4.0, 2.0, 2.0)
-        );
     }
 
     #[rstest]
