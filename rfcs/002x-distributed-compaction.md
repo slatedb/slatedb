@@ -53,7 +53,7 @@ Authors:
 
 ## Summary
 
-SlateDB currently runs compaction on a single process. Compaction is either embedded in the DB writer or as a standalone daemon. This caps compaction throughput at one node's network bandwidth and CPU. This RFC extends the existing `.compactions` coordination file (RFC-0013) to separate a **Compaction Coordinator** (scheduler and manifest committer) from one or more **Compaction Workers** (stateless job executors). Workers poll `.compactions` for submitted jobs, claim them via optimistic concurrency (create-if-not-exists on numbered files), execute the existing compaction code path, and report results back; the coordinator alone commits manifest updates, preserving the single-writer invariant. The design is backward-compatible with existing stateful and standalone compaction modes and adds no external dependencies beyond the object store.
+SlateDB currently runs compaction on a single process. Compaction is either embedded in the DB writer or run as a standalone process. This caps compaction throughput at one node's network bandwidth and CPU. This RFC extends the existing `.compactions` coordination file (RFC-0013) to separate a **Compaction Coordinator** (scheduler and manifest committer) from one or more **Compaction Workers** (stateless job executors). Workers poll `.compactions` for submitted jobs, claim them via optimistic concurrency (create-if-not-exists on numbered files), execute the existing compaction code path, and report results back; the coordinator alone commits manifest updates, preserving the single-writer invariant. The design is backward-compatible with existing stateful and standalone compaction modes and adds no external dependencies beyond the object store.
 
 ## Motivation
 
