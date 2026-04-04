@@ -517,7 +517,7 @@ impl<P: Into<Path>> DbBuilder<P> {
         let (write_tx, write_rx) = async_channel::unbounded();
 
         // Create the database inner state
-        let memtable_flusher = Arc::new(MemtableFlusher::new());
+        let memtable_flusher = Arc::new(MemtableFlusher::new(&closed_result));
         let inner = Arc::new(
             DbInner::new(
                 self.settings.clone(),
@@ -543,7 +543,7 @@ impl<P: Into<Path>> DbBuilder<P> {
         // Setup background tasks
         let tokio_handle = Handle::current();
         let task_executor = Arc::new(MessageHandlerExecutor::new(
-            closed_result,
+            closed_result.clone(),
             system_clock.clone(),
         ));
         if inner.wal_enabled {
@@ -625,12 +625,18 @@ impl<P: Into<Path>> DbBuilder<P> {
             task_executor.add_handler(GC_TASK_NAME.to_string(), Box::new(gc), rx, gc_handle)?;
         }
 
-        // Monitor background tasks
-        task_executor.monitor_on(&tokio_handle)?;
-
         // Start the memtable flusher before WAL replay so that
         // replayed immutable memtables can be flushed concurrently.
-        memtable_flusher.start(inner.clone(), manifest, &tokio_handle);
+        memtable_flusher.start(
+            inner.clone(),
+            manifest,
+            &tokio_handle,
+            &task_executor,
+            &closed_result,
+        )?;
+
+        // Monitor background tasks
+        task_executor.monitor_on(&tokio_handle)?;
 
         // Replay WAL
         inner.replay_wal().await?;

@@ -11,29 +11,29 @@
 //! - manifest mutation
 //! - manifest durability sequencing
 
+use async_trait::async_trait;
+use futures::stream::BoxStream;
+use futures::StreamExt;
 use log::debug;
 
 use super::FlushEpoch;
 use crate::checkpoint::CheckpointCreateResult;
 use crate::config::CheckpointOptions;
 use crate::db::DbInner;
+use crate::dispatcher::MessageHandler;
 use crate::error::SlateDBError;
-use crate::memtable_flusher::manifest_writer::{
-    FlushResult, ManifestWriter, ManifestWriterCloseResult,
-};
+use crate::memtable_flusher::manifest_writer::{FlushResult, ManifestWriter};
 use crate::memtable_flusher::uploader::{UploadJob, UploadedMemtable, Uploader};
 use crate::memtable_flusher::FlushTarget;
 use crate::oracle::Oracle;
-use crate::utils::safe_async_channel;
 use crate::utils::IdGenerator;
 use fail_parallel::fail_point;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use tokio::sync::oneshot;
-use tokio_util::sync::CancellationToken;
 
 /// Unified message type for the flush tracker's event loop.
-pub(super) enum TrackerMessage {
+pub(crate) enum TrackerMessage {
     /// A memtable may have been frozen. Triggers reconcile and dispatch.
     MemtableFrozen,
     /// Flush request from an external caller waiting for a result.
@@ -49,22 +49,31 @@ pub(super) enum TrackerMessage {
     },
     /// An upload worker completed successfully.
     UploadComplete(UploadedMemtable),
-    /// The uploader subsystem exited.
-    UploaderShutdown(Result<(), SlateDBError>),
     /// Durable progress advanced through a new contiguous flush frontier.
     FlushComplete { through_epoch: FlushEpoch },
     /// Remote manifest changes were merged into local state.
     ManifestRefreshed,
-    /// The manifest writer subsystem exited.
-    ManifestWriterShutdown(ManifestWriterCloseResult),
+}
+
+impl std::fmt::Debug for TrackerMessage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MemtableFrozen => write!(f, "MemtableFrozen"),
+            Self::FlushRequest { .. } => write!(f, "FlushRequest"),
+            Self::CheckpointRequest { .. } => write!(f, "CheckpointRequest"),
+            Self::UploadComplete(u) => write!(f, "UploadComplete(epoch={:?})", u.epoch),
+            Self::FlushComplete { through_epoch } => {
+                write!(f, "FlushComplete({through_epoch:?})")
+            }
+            Self::ManifestRefreshed => write!(f, "ManifestRefreshed"),
+        }
+    }
 }
 
 pub(super) struct FlushTracker {
     inner: Arc<DbInner>,
     uploader: Uploader,
     manifest_writer: ManifestWriter,
-    messages: safe_async_channel::SafeReceiver<TrackerMessage>,
-    cancellation_token: CancellationToken,
     frontier: TrackedImmFrontier,
 }
 
@@ -73,46 +82,19 @@ impl FlushTracker {
         inner: Arc<DbInner>,
         uploader: Uploader,
         manifest_writer: ManifestWriter,
-        messages: safe_async_channel::SafeReceiver<TrackerMessage>,
-        cancellation_token: CancellationToken,
     ) -> Self {
         Self {
             inner,
             uploader,
             manifest_writer,
-            messages,
-            cancellation_token,
             frontier: TrackedImmFrontier::new(),
         }
     }
+}
 
-    pub(super) async fn run(mut self) -> Result<(), SlateDBError> {
-        loop {
-            match self.run_once().await {
-                Ok(true) => continue,
-                Ok(false) => return self.shutdown(None).await,
-                Err(err) => return self.shutdown(Some(err)).await,
-            }
-        }
-    }
-
-    async fn run_once(&mut self) -> Result<bool, SlateDBError> {
-        tokio::select! {
-            _ = self.cancellation_token.cancelled() => {
-                Ok(false)
-            }
-            maybe_message = self.messages.recv() => {
-                if let Some(message) = maybe_message {
-                    self.handle_message(message).await?;
-                    Ok(true)
-                } else {
-                    Ok(false)
-                }
-            }
-        }
-    }
-
-    async fn handle_message(&mut self, message: TrackerMessage) -> Result<(), SlateDBError> {
+#[async_trait]
+impl MessageHandler<TrackerMessage> for FlushTracker {
+    async fn handle(&mut self, message: TrackerMessage) -> Result<(), SlateDBError> {
         match message {
             TrackerMessage::MemtableFrozen => self.reconcile_and_dispatch().await,
             TrackerMessage::FlushRequest { target, sender } => {
@@ -127,16 +109,30 @@ impl FlushTracker {
                     .await
             }
             TrackerMessage::UploadComplete(uploaded) => self.handle_uploaded(uploaded).await,
-            TrackerMessage::UploaderShutdown(_result) => Err(SlateDBError::Closed),
             TrackerMessage::FlushComplete { through_epoch } => {
                 self.frontier.retire_through(through_epoch);
                 self.reconcile_and_dispatch().await
             }
             TrackerMessage::ManifestRefreshed => self.reconcile_and_dispatch().await,
-            TrackerMessage::ManifestWriterShutdown(_result) => Err(SlateDBError::Closed),
         }
     }
 
+    async fn cleanup(
+        &mut self,
+        mut messages: BoxStream<'async_trait, TrackerMessage>,
+        result: Result<(), SlateDBError>,
+    ) -> Result<(), SlateDBError> {
+        if result.is_ok() {
+            while let Some(message) = messages.next().await {
+                self.handle(message).await?;
+            }
+        }
+        self.cleanup_orphaned_uploads().await;
+        Ok(())
+    }
+}
+
+impl FlushTracker {
     async fn handle_flush_request(
         &mut self,
         target: FlushTarget,
@@ -222,59 +218,17 @@ impl FlushTracker {
                 self.inner.flush_wals().await?;
             }
             self.uploader
-                .submit(UploadJob::new(epoch, imm_memtable, sst_id))
-                .await?;
+                .submit(UploadJob::new(epoch, imm_memtable, sst_id))?;
         }
         Ok(())
     }
 
-    async fn shutdown(&mut self, err: Option<SlateDBError>) -> Result<(), SlateDBError> {
-        let uploader_err = self.uploader.close(false).await.err();
-        let writer_close = self.manifest_writer.close().await;
-        self.cleanup_orphaned_uploads(&writer_close).await;
-        Self::refined_error([err, writer_close.err(), uploader_err].into_iter())
-    }
-
-    /// Pick the most informative error from multiple shutdown sources.
-    /// Starts with `Ok`. `Closed` refines `Ok`. Any other error refines both.
-    fn refined_error(
-        errors: impl IntoIterator<Item = Option<SlateDBError>>,
-    ) -> Result<(), SlateDBError> {
-        let mut refined_err: Option<SlateDBError> = None;
-        for err in errors.into_iter().flatten() {
-            refined_err = match (refined_err, err) {
-                (None, err) => Some(err),
-                (Some(SlateDBError::Closed), err) => Some(err),
-                (err, _) => err,
-            }
-        }
-        if let Some(err) = refined_err {
-            Err(err)
-        } else {
-            Ok(())
-        }
-    }
-
-    /// Delete orphaned SSTs that were never durably written to the manifest.
-    ///
-    /// Tables still in `Uploading` state are always cleaned up. Tables in
-    /// `WritingManifest` state are only cleaned up when the manifest writer
-    /// was fenced, since other errors may have silently succeeded.
-    async fn cleanup_orphaned_uploads(&mut self, writer_close: &ManifestWriterCloseResult) {
-        let (cleanup_writing, last_durable_epoch) = match writer_close {
-            ManifestWriterCloseResult::Ok { last_durable_epoch } => (false, *last_durable_epoch),
-            ManifestWriterCloseResult::Fenced { last_durable_epoch } => (true, *last_durable_epoch),
-            ManifestWriterCloseResult::Err(_) => (false, None),
-        };
+    /// Delete orphaned SSTs that were uploaded but never passed to the
+    /// manifest writer. Tables already in `WritingManifest` state are left
+    /// for GC since we cannot know whether the manifest write succeeded.
+    async fn cleanup_orphaned_uploads(&mut self) {
         for tracked in self.frontier.iter() {
-            let beyond_durable = last_durable_epoch.is_none_or(|epoch| tracked.epoch > epoch);
-            let should_clean = beyond_durable
-                && match tracked.state {
-                    TrackedImmState::Uploading => true,
-                    TrackedImmState::WritingManifest => cleanup_writing,
-                    TrackedImmState::PendingDispatch => false,
-                };
-            if should_clean {
+            if matches!(tracked.state, TrackedImmState::Uploading) {
                 if let Err(delete_err) = self.inner.table_store.delete_sst(&tracked.sst_id).await {
                     log::warn!(
                         "failed to delete orphaned SST [epoch={:?}, id={:?}, error={:?}]",
@@ -409,7 +363,6 @@ mod tests {
         ManifestCore, SsTableHandle, SsTableId, SsTableInfo, SsTableView, SstType,
     };
     use crate::db_status::ClosedResultWriter;
-    use crate::error::SlateDBError;
     use crate::format::sst::{SsTableFormat, SST_FORMAT_VERSION_LATEST};
     use crate::manifest::store::{FenceableManifest, ManifestStore, StoredManifest};
     use crate::memtable_flusher::{FlushTarget, MemtableFlusher};
@@ -473,7 +426,7 @@ mod tests {
                 Arc::clone(&rand),
                 Arc::clone(&table_store),
                 stored_manifest.prepare_dirty().unwrap(),
-                Arc::new(MemtableFlusher::new()),
+                Arc::new(MemtableFlusher::new(&ClosedResultWriter::new())),
                 write_tx,
                 db_metrics,
                 fp_registry,
@@ -586,14 +539,41 @@ mod tests {
         });
     }
 
-    fn start_flusher(harness: TestHarness) -> MemtableFlusher {
-        let flusher = MemtableFlusher::new();
-        flusher.start(
-            Arc::clone(&harness.inner),
-            harness.manifest,
-            &Handle::current(),
-        );
+    struct StartedFlusher {
+        flusher: MemtableFlusher,
+        executor: crate::dispatcher::MessageHandlerExecutor,
+    }
+
+    impl StartedFlusher {
+        async fn shutdown(&self) {
+            MemtableFlusher::shutdown(&self.executor).await;
+        }
+    }
+
+    impl std::ops::Deref for StartedFlusher {
+        type Target = MemtableFlusher;
+        fn deref(&self) -> &Self::Target {
+            &self.flusher
+        }
+    }
+
+    fn start_flusher(harness: TestHarness) -> StartedFlusher {
+        let closed_result = ClosedResultWriter::new();
+        let system_clock: Arc<dyn SystemClock> = Arc::new(DefaultSystemClock::new());
+        let executor =
+            crate::dispatcher::MessageHandlerExecutor::new(closed_result.clone(), system_clock);
+        let flusher = MemtableFlusher::new(&closed_result);
         flusher
+            .start(
+                Arc::clone(&harness.inner),
+                harness.manifest,
+                &Handle::current(),
+                &executor,
+                &closed_result,
+            )
+            .unwrap();
+        executor.monitor_on(&Handle::current()).unwrap();
+        StartedFlusher { flusher, executor }
     }
 
     #[tokio::test]
@@ -615,7 +595,7 @@ mod tests {
         assert_eq!(result.durable_through_wal_id, Some(11));
         assert_eq!(result.durable_through_seq, Some(1));
 
-        flusher.close().await.unwrap();
+        flusher.shutdown().await;
     }
 
     #[tokio::test]
@@ -637,7 +617,7 @@ mod tests {
         assert_eq!(result.durable_through_wal_id, Some(11));
         assert_eq!(result.durable_through_seq, Some(1));
 
-        flusher.close().await.unwrap();
+        flusher.shutdown().await;
     }
 
     #[tokio::test]
@@ -660,7 +640,7 @@ mod tests {
         assert_eq!(result.durable_through_wal_id, Some(0));
         assert_eq!(result.durable_through_seq, Some(2));
 
-        flusher.close().await.unwrap();
+        flusher.shutdown().await;
     }
 
     #[tokio::test]
@@ -685,7 +665,7 @@ mod tests {
         assert_eq!(first.durable_through_seq, Some(1));
         assert_eq!(second, first);
 
-        flusher.close().await.unwrap();
+        flusher.shutdown().await;
     }
 
     #[tokio::test]
@@ -716,7 +696,7 @@ mod tests {
         assert!(checkpoint.manifest_id > 0);
         assert_eq!(after, before + 1);
 
-        flusher.close().await.unwrap();
+        flusher.shutdown().await;
     }
 
     #[tokio::test]
@@ -747,7 +727,7 @@ mod tests {
         assert!(checkpoint.manifest_id > 0);
         assert_eq!(after, before + 1);
 
-        flusher.close().await.unwrap();
+        flusher.shutdown().await;
     }
 
     #[tokio::test]
@@ -786,7 +766,7 @@ mod tests {
         assert!(checkpoint.manifest_id > 0);
         assert_eq!(after, before + 1);
 
-        flusher.close().await.unwrap();
+        flusher.shutdown().await;
     }
 
     #[tokio::test]
@@ -807,10 +787,7 @@ mod tests {
             .unwrap();
         assert!(flush_result.is_err());
 
-        // The specific upload error surfaces through close().
-        let close_result = flusher.close().await;
-        assert!(close_result.is_err());
-        assert!(!matches!(close_result, Err(SlateDBError::Closed)));
+        flusher.shutdown().await;
     }
 
     #[tokio::test]
@@ -831,9 +808,7 @@ mod tests {
             .unwrap();
         assert!(flush_result.is_err());
 
-        // close() surfaces the underlying error.
-        let close_result = flusher.close().await;
-        assert!(close_result.is_err());
+        flusher.shutdown().await;
     }
 
     #[tokio::test]
@@ -873,9 +848,7 @@ mod tests {
             .unwrap();
         assert!(flush_result.is_err());
 
-        // close() surfaces the fencing error.
-        let close_result = flusher.close().await;
-        assert!(close_result.is_err());
+        flusher.shutdown().await;
     }
 
     #[tokio::test]
@@ -921,7 +894,7 @@ mod tests {
             assert_eq!(result.durable_through_seq, Some(1));
         }
 
-        flusher.close().await.unwrap();
+        flusher.shutdown().await;
     }
 
     mod frontier_tests {

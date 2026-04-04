@@ -15,18 +15,20 @@ pub(crate) use manifest_writer::FlushResult;
 use crate::checkpoint::CheckpointCreateResult;
 use crate::config::CheckpointOptions;
 use crate::db::DbInner;
+use crate::db_status::ClosedResultWriter;
+use crate::dispatcher::MessageHandlerExecutor;
 use crate::error::SlateDBError;
 use crate::manifest::store::FenceableManifest;
 use crate::memtable_flusher::manifest_writer::ManifestWriter;
 use crate::memtable_flusher::tracker::FlushTracker;
 use crate::memtable_flusher::uploader::Uploader;
 use crate::utils::safe_async_channel;
-use parking_lot::Mutex;
+use log::warn;
 use std::sync::Arc;
 use tokio::runtime::Handle;
 use tokio::sync::oneshot;
-use tokio::task::JoinHandle;
-use tokio_util::sync::CancellationToken;
+
+const TRACKER_TASK_NAME: &str = "l0_flush_tracker";
 
 /// Monotonic ordering token assigned by the parallel L0 memtable flusher.
 ///
@@ -51,55 +53,55 @@ pub(crate) enum FlushTarget {
 /// Parallel L0 memtable flusher subsystem.
 pub(crate) struct MemtableFlusher {
     messages_tx: safe_async_channel::SafeSender<tracker::TrackerMessage>,
-    messages_rx: Mutex<Option<safe_async_channel::SafeReceiver<tracker::TrackerMessage>>>,
-    tracker_handle: Mutex<Option<JoinHandle<Result<(), SlateDBError>>>>,
-    cancellation_token: CancellationToken,
+    messages_rx: async_channel::Receiver<tracker::TrackerMessage>,
 }
 
 impl MemtableFlusher {
     /// Creates a new memtable flusher.
-    /// Call [`start`](Self::start) to spawn the background task.
-    pub(crate) fn new() -> Self {
-        let (messages_tx, messages_rx) = safe_async_channel::unbounded_channel();
+    /// Call [`start`](Self::start) to register background tasks with the executor.
+    pub(crate) fn new(closed_result: &ClosedResultWriter) -> Self {
+        let (messages_tx, messages_rx) = closed_result.channel();
         Self {
             messages_tx,
-            messages_rx: Mutex::new(Some(messages_rx)),
-            tracker_handle: Mutex::new(None),
-            cancellation_token: CancellationToken::new(),
+            messages_rx,
         }
     }
 
-    pub(crate) fn start(&self, inner: Arc<DbInner>, manifest: FenceableManifest, handle: &Handle) {
-        let messages_rx = self
-            .messages_rx
-            .lock()
-            .take()
-            .expect("start called more than once");
+    pub(crate) fn start(
+        &self,
+        inner: Arc<DbInner>,
+        manifest: FenceableManifest,
+        tokio_handle: &Handle,
+        executor: &MessageHandlerExecutor,
+        closed_result: &ClosedResultWriter,
+    ) -> Result<(), SlateDBError> {
         let uploader = Uploader::start(
             Arc::clone(&inner),
-            inner.settings.l0_flush_parallelism,
-            inner.settings.manifest_poll_interval,
-            handle,
+            closed_result,
             self.messages_tx.clone(),
-        );
+            executor,
+            tokio_handle,
+        )?;
+
         let manifest_writer = ManifestWriter::start(
             Arc::clone(&inner),
             manifest,
             inner.settings.manifest_poll_interval,
-            handle,
+            closed_result,
+            executor,
+            tokio_handle,
             self.messages_tx.clone(),
-        );
-        let tracker_handle = handle.spawn(
-            FlushTracker::new(
-                inner,
-                uploader,
-                manifest_writer,
-                messages_rx,
-                self.cancellation_token.clone(),
-            )
-            .run(),
-        );
-        *self.tracker_handle.lock() = Some(tracker_handle);
+        )?;
+
+        let tracker = FlushTracker::new(inner, uploader, manifest_writer);
+        executor.add_handler(
+            TRACKER_TASK_NAME.to_string(),
+            Box::new(tracker),
+            self.messages_rx.clone(),
+            tokio_handle,
+        )?;
+
+        Ok(())
     }
 
     /// Processes one flush request using the requested target.
@@ -133,23 +135,12 @@ impl MemtableFlusher {
         rx.await.map_err(SlateDBError::ReadChannelError)?
     }
 
-    /// Closes the flusher and any owned subsystems.
-    pub(crate) async fn close(&self) -> Result<(), SlateDBError> {
-        self.cancellation_token.cancel();
-        let tracker_handle = self.tracker_handle.lock().take();
-        if let Some(tracker_handle) = tracker_handle {
-            match tracker_handle.await {
-                Ok(result) => result,
-                Err(join_err) if join_err.is_cancelled() => Ok(()),
-                Err(join_err) if join_err.is_panic() => {
-                    Err(SlateDBError::BackgroundTaskPanic("memtable_flusher".into()))
-                }
-                Err(_) => Err(SlateDBError::BackgroundTaskCancelled(
-                    "memtable_flusher".into(),
-                )),
-            }
-        } else {
-            Ok(())
+    /// Closes the flusher and its subsystems via the executor.
+    pub(crate) async fn shutdown(executor: &MessageHandlerExecutor) {
+        if let Err(e) = executor.shutdown_task(TRACKER_TASK_NAME).await {
+            warn!("failed to shutdown l0 flush tracker [error={:?}]", e);
         }
+        Uploader::shutdown(executor).await;
+        ManifestWriter::shutdown(executor).await;
     }
 }

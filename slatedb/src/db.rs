@@ -431,11 +431,7 @@ impl DbInner {
         &self.memtable_flusher
     }
 
-    pub(crate) async fn close(&self) {
-        if let Err(e) = self.memtable_flusher.close().await {
-            warn!("failed to shutdown memtable flusher [error={:?}]", e);
-        }
-    }
+
 
     /// Flush in-memory writes to disk. See [`Db::flush`] for details.
     ///
@@ -705,7 +701,7 @@ impl Db {
             }
         }
 
-        self.inner.close().await;
+        MemtableFlusher::shutdown(&self.task_executor).await;
 
         if let Err(e) = self.task_executor.shutdown_task(COMPACTOR_TASK_NAME).await {
             warn!("failed to shutdown compactor task [error={:?}]", e);

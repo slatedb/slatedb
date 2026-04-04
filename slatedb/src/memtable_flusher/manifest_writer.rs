@@ -29,9 +29,12 @@ use std::cmp;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
+use async_trait::async_trait;
+use futures::stream::BoxStream;
+use futures::StreamExt;
 use tokio::runtime::Handle;
 use tokio::sync::oneshot;
-use tokio::task::JoinHandle;
+use crate::dispatcher::MessageHandler;
 
 /// Result reported for a completed flush request.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -57,66 +60,57 @@ enum ManifestWriterCommand {
         options: CheckpointOptions,
         sender: oneshot::Sender<Result<CheckpointCreateResult, SlateDBError>>,
     },
+    /// Periodic manifest poll to pick up remote changes (e.g. compaction).
+    PollManifest,
 }
 
-/// Result of closing the manifest writer.
-#[derive(Clone)]
-pub(crate) enum ManifestWriterCloseResult {
-    /// Clean shutdown.
-    Ok {
-        last_durable_epoch: Option<FlushEpoch>,
-    },
-    /// Fenced by another writer.
-    Fenced {
-        last_durable_epoch: Option<FlushEpoch>,
-    },
-    /// Unexpected error. The durable frontier is unknown because the
-    /// failed manifest write may have silently succeeded.
-    Err(SlateDBError),
-}
-
-impl ManifestWriterCloseResult {
-    /// Returns the error if the close was not clean.
-    pub(crate) fn err(&self) -> Option<SlateDBError> {
+impl std::fmt::Debug for ManifestWriterCommand {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ManifestWriterCloseResult::Ok { .. } => None,
-            ManifestWriterCloseResult::Fenced { .. } => Some(SlateDBError::Fenced),
-            ManifestWriterCloseResult::Err(err) => Some(err.clone()),
+            Self::Uploaded(u) => write!(f, "Uploaded(epoch={:?})", u.epoch),
+            Self::AwaitFlush { through_epoch, .. } => {
+                write!(f, "AwaitFlush({through_epoch:?})")
+            }
+            Self::CreateCheckpoint { through_epoch, .. } => {
+                write!(f, "CreateCheckpoint({through_epoch:?})")
+            }
+            Self::PollManifest => write!(f, "PollManifest"),
         }
     }
 }
 
+pub(super) const MANIFEST_WRITER_TASK_NAME: &str = "l0_manifest_writer";
+
 /// Ordered L0 retirement and manifest update subsystem.
 pub(crate) struct ManifestWriter {
     commands_tx: safe_async_channel::SafeSender<ManifestWriterCommand>,
-    task: Option<JoinHandle<ManifestWriterCloseResult>>,
 }
 
 impl ManifestWriter {
-    /// Starts the manifest_writer subsystem.
+    /// Starts the manifest_writer subsystem by registering with the executor.
     pub(crate) fn start(
         db: Arc<DbInner>,
         manifest: FenceableManifest,
         manifest_poll_interval: Duration,
-        handle: &Handle,
+        closed_result: &crate::db_status::ClosedResultWriter,
+        executor: &crate::dispatcher::MessageHandlerExecutor,
+        tokio_handle: &Handle,
         tracker_tx: safe_async_channel::SafeSender<TrackerMessage>,
-    ) -> Self {
-        let (commands_tx, commands_rx) = safe_async_channel::unbounded_channel();
-        let task = handle.spawn(
-            ManifestWriterTask::new(
-                db,
-                manifest,
-                manifest_poll_interval,
-                commands_rx,
-                tracker_tx,
-            )
-            .run(),
+    ) -> Result<Self, SlateDBError> {
+        let (commands_tx, commands_rx) = closed_result.channel();
+        let handler = ManifestWriterHandler::new(
+            db,
+            manifest,
+            manifest_poll_interval,
+            tracker_tx,
         );
-
-        Self {
-            commands_tx,
-            task: Some(task),
-        }
+        executor.add_handler(
+            MANIFEST_WRITER_TASK_NAME.to_string(),
+            Box::new(handler),
+            commands_rx,
+            tokio_handle,
+        )?;
+        Ok(Self { commands_tx })
     }
 
     /// Notifies the manifest_writer that one uploaded table is ready for ordered retirement.
@@ -158,35 +152,17 @@ impl ManifestWriter {
             })
     }
 
-    /// Closes the manifest_writer.
-    pub(crate) async fn close(&mut self) -> ManifestWriterCloseResult {
-        self.commands_tx.close();
-        if let Some(task) = self.task.take() {
-            match task.await {
-                Ok(result) => result,
-                Err(join_err) if join_err.is_cancelled() => ManifestWriterCloseResult::Ok {
-                    last_durable_epoch: None,
-                },
-                Err(join_err) if join_err.is_panic() => ManifestWriterCloseResult::Err(
-                    SlateDBError::BackgroundTaskPanic("parallel_l0_flush_manifest_writer".into()),
-                ),
-                Err(_) => ManifestWriterCloseResult::Err(SlateDBError::BackgroundTaskCancelled(
-                    "parallel_l0_flush_manifest_writer".into(),
-                )),
-            }
-        } else {
-            ManifestWriterCloseResult::Ok {
-                last_durable_epoch: None,
-            }
+    pub(crate) async fn shutdown(executor: &crate::dispatcher::MessageHandlerExecutor) {
+        if let Err(e) = executor.shutdown_task(MANIFEST_WRITER_TASK_NAME).await {
+            log::warn!("failed to shutdown l0 manifest writer [error={:?}]", e);
         }
     }
 }
 
-struct ManifestWriterTask {
+struct ManifestWriterHandler {
     db: Arc<DbInner>,
     manifest: FenceableManifest,
     manifest_poll_interval: Duration,
-    commands_rx: safe_async_channel::SafeReceiver<ManifestWriterCommand>,
     tracker_tx: safe_async_channel::SafeSender<TrackerMessage>,
     ready: BTreeMap<FlushEpoch, UploadedMemtable>,
     next_epoch: FlushEpoch,
@@ -196,19 +172,75 @@ struct ManifestWriterTask {
     pending_checkpoints: Vec<PendingCheckpoint>,
 }
 
-impl ManifestWriterTask {
+#[async_trait]
+impl MessageHandler<ManifestWriterCommand> for ManifestWriterHandler {
+    fn tickers(
+        &mut self,
+    ) -> Vec<(
+        Duration,
+        Box<crate::dispatcher::MessageFactory<ManifestWriterCommand>>,
+    )> {
+        vec![(
+            self.manifest_poll_interval,
+            Box::new(|| ManifestWriterCommand::PollManifest),
+        )]
+    }
+
+    async fn handle(&mut self, command: ManifestWriterCommand) -> Result<(), SlateDBError> {
+        match command {
+            ManifestWriterCommand::Uploaded(uploaded_memtable) => {
+                self.handle_uploaded(*uploaded_memtable).await
+            }
+            ManifestWriterCommand::AwaitFlush {
+                through_epoch,
+                sender,
+            } => {
+                self.handle_flush(through_epoch, sender);
+                Ok(())
+            }
+            ManifestWriterCommand::CreateCheckpoint {
+                through_epoch,
+                options,
+                sender,
+            } => {
+                self.handle_create_checkpoint(through_epoch, options, sender)
+                    .await
+            }
+            ManifestWriterCommand::PollManifest => self.refresh_manifest_progress().await,
+        }
+    }
+
+    async fn cleanup(
+        &mut self,
+        commands: BoxStream<'async_trait, ManifestWriterCommand>,
+        result: Result<(), SlateDBError>,
+    ) -> Result<(), SlateDBError> {
+        let mut commands = commands.fuse();
+        let close_result = self.try_graceful_cleanup(&mut commands, &result).await;
+        // Drain any commands not consumed by graceful cleanup, collecting
+        // flush/checkpoint waiters so they receive a proper error.
+        while let Some(command) = commands.next().await {
+            self.collect_pending_waiter(command);
+        }
+        // Any remaining pending waiters must fail with a concrete error.
+        let error = result.and(close_result.clone()).err().unwrap_or(SlateDBError::Closed);
+        self.fail_pending_flushes(&error);
+        self.fail_pending_checkpoints(&error);
+        close_result
+    }
+}
+
+impl ManifestWriterHandler {
     fn new(
         db: Arc<DbInner>,
         manifest: FenceableManifest,
         manifest_poll_interval: Duration,
-        commands_rx: safe_async_channel::SafeReceiver<ManifestWriterCommand>,
         tracker_tx: safe_async_channel::SafeSender<TrackerMessage>,
     ) -> Self {
         Self {
             db,
             manifest,
             manifest_poll_interval,
-            commands_rx,
             tracker_tx,
             durable_wal_id: None,
             pending_flushes: Vec::new(),
@@ -217,86 +249,6 @@ impl ManifestWriterTask {
             durable_through: None,
             pending_checkpoints: Vec::new(),
         }
-    }
-
-    async fn run(mut self) -> ManifestWriterCloseResult {
-        let clock = Arc::clone(&self.db.system_clock);
-        let mut poll = clock.ticker(self.manifest_poll_interval);
-        let result = loop {
-            tokio::select! {
-                _ = poll.tick() => {
-                    if let Err(err) = self.refresh_manifest_progress().await {
-                        break Err(err);
-                    }
-                }
-                maybe_command = self.commands_rx.recv() => {
-                    let Some(command) = maybe_command else {
-                        break Ok(());
-                    };
-                    let commands = self.drain_ready_commands(command);
-                    if let Err(err) = self.handle_commands(commands).await {
-                        break Err(err);
-                    }
-                }
-            }
-        };
-        // Persist the local manifest on shutdown to advance next_wal_sst_id
-        // and any other locally updated fields. Skip if fenced since another
-        // writer owns the manifest.
-        if !matches!(result, Err(SlateDBError::Fenced)) {
-            let _ = self.write_current_manifest_safely().await;
-        }
-        let last_durable_epoch = self.durable_through.map(|(epoch, _)| epoch);
-        self.fail_pending_flushes(&result, last_durable_epoch);
-        self.fail_pending_checkpoints(&result);
-        let close_result = match result {
-            Ok(()) => ManifestWriterCloseResult::Ok { last_durable_epoch },
-            Err(SlateDBError::Fenced) => ManifestWriterCloseResult::Fenced { last_durable_epoch },
-            Err(err) => ManifestWriterCloseResult::Err(err),
-        };
-        let _ = self
-            .tracker_tx
-            .send(TrackerMessage::ManifestWriterShutdown(close_result.clone()));
-        close_result
-    }
-
-    fn drain_ready_commands(
-        &mut self,
-        first_command: ManifestWriterCommand,
-    ) -> Vec<ManifestWriterCommand> {
-        let mut commands = vec![first_command];
-        while let Some(command) = self.commands_rx.try_recv() {
-            commands.push(command);
-        }
-        commands
-    }
-
-    async fn handle_commands(
-        &mut self,
-        commands: Vec<ManifestWriterCommand>,
-    ) -> Result<(), SlateDBError> {
-        for command in commands {
-            match command {
-                ManifestWriterCommand::Uploaded(uploaded_memtable) => {
-                    self.handle_uploaded(*uploaded_memtable).await?;
-                }
-                ManifestWriterCommand::AwaitFlush {
-                    through_epoch,
-                    sender,
-                } => {
-                    self.handle_flush(through_epoch, sender);
-                }
-                ManifestWriterCommand::CreateCheckpoint {
-                    through_epoch,
-                    options,
-                    sender,
-                } => {
-                    self.handle_create_checkpoint(through_epoch, options, sender)
-                        .await?;
-                }
-            }
-        }
-        Ok(())
     }
 
     async fn handle_uploaded(
@@ -688,43 +640,72 @@ impl ManifestWriterTask {
         Ok(())
     }
 
-    /// Resolve pending flush waiters on exit. Flushes whose target epoch was
-    /// reached get `Ok`; others get `Closed` (clean exit) or the specific error.
-    fn fail_pending_flushes(
-        &mut self,
-        result: &Result<(), SlateDBError>,
-        last_durable_epoch: Option<FlushEpoch>,
-    ) {
-        let flush_result = self.flush_result();
+    /// Fail remaining flush waiters on exit. Any waiter still pending at
+    /// shutdown was never satisfied by a durable epoch advance, so it
+    /// always receives an error.
+    fn fail_pending_flushes(&mut self, err: &SlateDBError) {
         for flush in self.pending_flushes.drain(..) {
-            let response = match result {
-                Ok(()) => {
-                    let reached = flush
-                        .through_epoch
-                        .is_none_or(|epoch| last_durable_epoch.is_some_and(|d| d >= epoch));
-                    if reached {
-                        Ok(flush_result.clone())
-                    } else {
-                        Err(SlateDBError::Closed)
-                    }
-                }
-                Err(err) => Err(err.clone()),
-            };
-            let _ = flush.sender.send(response);
+            let _ = flush.sender.send(Err(err.clone()));
         }
     }
 
-    /// Fail pending checkpoint waiters on exit. Checkpoints require a manifest
-    /// write which cannot happen during shutdown, so they always fail.
-    fn fail_pending_checkpoints(&mut self, result: &Result<(), SlateDBError>) {
+    /// Fail remaining checkpoint waiters on exit. Any waiter still pending
+    /// at shutdown was never satisfied, so it always receives an error.
+    fn fail_pending_checkpoints(&mut self, err: &SlateDBError) {
         for checkpoint in self.pending_checkpoints.drain(..) {
-            let err = match result {
-                Ok(()) => SlateDBError::Closed,
-                Err(err) => err.clone(),
-            };
-            let _ = checkpoint.sender.send(Err(err));
+            let _ = checkpoint.sender.send(Err(err.clone()));
         }
     }
+
+    /// Extract flush/checkpoint waiters from a command without processing
+    /// uploads. Used during error shutdown to ensure waiters get a proper error.
+    fn collect_pending_waiter(&mut self, command: ManifestWriterCommand) {
+        match command {
+            ManifestWriterCommand::AwaitFlush {
+                through_epoch,
+                sender,
+            } => {
+                self.pending_flushes.push(PendingFlush {
+                    through_epoch,
+                    sender,
+                });
+            }
+            ManifestWriterCommand::CreateCheckpoint {
+                through_epoch,
+                options,
+                sender,
+            } => {
+                self.pending_checkpoints.push(PendingCheckpoint {
+                    through_epoch,
+                    options,
+                    sender,
+                });
+            }
+            _ => {}
+        }
+    }
+
+    async fn try_graceful_cleanup(
+        &mut self,
+        commands: &mut (impl futures::Stream<Item = ManifestWriterCommand> + Unpin),
+        result: &Result<(), SlateDBError>,
+    ) -> Result<(), SlateDBError> {
+        if result.is_ok() {
+            while let Some(message) = commands.next().await {
+                self.handle(message).await?;
+            }
+        }
+
+        // Persist the local manifest on shutdown to advance next_wal_sst_id
+        // and any other locally updated fields. Skip if fenced since another
+        // writer owns the manifest.
+        if !matches!(result, Err(SlateDBError::Fenced)) {
+            self.write_current_manifest_safely().await?;
+        }
+
+        Ok(())
+    }
+
 }
 
 struct PendingFlush {
@@ -740,14 +721,12 @@ struct PendingCheckpoint {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        FlushEpoch, ManifestWriter, ManifestWriterCloseResult, ManifestWriterCommand,
-        TrackerMessage,
-    };
+    use super::{FlushEpoch, ManifestWriter, TrackerMessage};
     use crate::config::{CheckpointOptions, Settings};
     use crate::db::DbInner;
     use crate::db_state::{ManifestCore, SsTableId};
     use crate::db_status::ClosedResultWriter;
+    use crate::error::SlateDBError;
     use crate::format::sst::SsTableFormat;
     use crate::manifest::store::{FenceableManifest, ManifestStore, StoredManifest};
     use crate::memtable_flusher::uploader::UploadedMemtable;
@@ -756,7 +735,6 @@ mod tests {
     use crate::rand::DbRand;
     use crate::tablestore::TableStore;
     use crate::types::RowEntry;
-    use crate::utils::safe_async_channel;
     use crate::utils::IdGenerator;
     use fail_parallel::FailPointRegistry;
     use object_store::memory::InMemory;
@@ -767,31 +745,85 @@ mod tests {
     use slatedb_common::metrics::MetricsRecorderHelper;
     use std::sync::Arc;
     use std::time::Duration;
+    use rstest::timeout::execute_with_timeout_async;
     use tokio::runtime::Handle;
-    use tokio::sync::mpsc;
     use tokio::sync::oneshot;
     use tokio::time::timeout;
 
+    struct StartedManifestWriter {
+        writer: ManifestWriter,
+        executor: crate::dispatcher::MessageHandlerExecutor,
+        tracker_rx: async_channel::Receiver<TrackerMessage>,
+        closed_result: ClosedResultWriter,
+    }
+
+    impl StartedManifestWriter {
+        async fn shutdown(&self) {
+            ManifestWriter::shutdown(&self.executor).await;
+        }
+
+        /// Wait for the executor to report a closed result (error or clean shutdown).
+        async fn await_closed(&self) -> Result<(), SlateDBError> {
+            self.closed_result.reader().await_value().await
+        }
+    }
+
+    impl std::ops::Deref for StartedManifestWriter {
+        type Target = ManifestWriter;
+        fn deref(&self) -> &Self::Target {
+            &self.writer
+        }
+    }
+
+    fn start_manifest_writer(
+        inner: Arc<DbInner>,
+        manifest: FenceableManifest,
+        poll_interval: Duration,
+    ) -> StartedManifestWriter {
+        let closed_result = ClosedResultWriter::new();
+        let system_clock: Arc<dyn SystemClock> = Arc::new(DefaultSystemClock::new());
+        let executor =
+            crate::dispatcher::MessageHandlerExecutor::new(closed_result.clone(), system_clock);
+        let (tracker_tx, tracker_rx) = closed_result.channel();
+        let writer = ManifestWriter::start(
+            inner,
+            manifest,
+            poll_interval,
+            &closed_result,
+            &executor,
+            &Handle::current(),
+            tracker_tx,
+        )
+        .unwrap();
+        executor.monitor_on(&Handle::current()).unwrap();
+        StartedManifestWriter {
+            writer,
+            executor,
+            tracker_rx,
+            closed_result,
+        }
+    }
+
     async fn assert_no_flush_event(
-        tracker_rx: &safe_async_channel::SafeReceiver<TrackerMessage>,
+        tracker_rx: &async_channel::Receiver<TrackerMessage>,
         duration: Duration,
     ) {
         let deadline = tokio::time::Instant::now() + duration;
         loop {
             match timeout(deadline - tokio::time::Instant::now(), tracker_rx.recv()).await {
                 Err(_) => return, // timed out — no flush event, as expected
-                Ok(Some(TrackerMessage::ManifestRefreshed)) => continue,
-                Ok(Some(TrackerMessage::FlushComplete { .. })) => {
+                Ok(Ok(TrackerMessage::ManifestRefreshed)) => continue,
+                Ok(Ok(TrackerMessage::FlushComplete { .. })) => {
                     panic!("unexpected flushed event")
                 }
-                Ok(None) => panic!("tracker channel closed"),
-                Ok(Some(_)) => continue,
+                Ok(Err(_)) => panic!("tracker channel closed"),
+                Ok(Ok(_)) => continue,
             }
         }
     }
 
     async fn expect_flushed(
-        tracker_rx: &safe_async_channel::SafeReceiver<TrackerMessage>,
+        tracker_rx: &async_channel::Receiver<TrackerMessage>,
     ) -> FlushEpoch {
         loop {
             let msg = timeout(Duration::from_secs(5), tracker_rx.recv())
@@ -846,7 +878,9 @@ mod tests {
                 Arc::clone(&rand),
                 Arc::clone(&table_store),
                 manifest_dirty,
-                Arc::new(crate::memtable_flusher::MemtableFlusher::new()),
+                Arc::new(crate::memtable_flusher::MemtableFlusher::new(
+                    &ClosedResultWriter::new(),
+                )),
                 write_tx,
                 db_metrics,
                 fp_registry,
@@ -952,23 +986,17 @@ mod tests {
         .await;
         let uploaded = next_uploaded_memtable(&harness, 1, b"k1", b"v1", 1).await;
 
-        let (tracker_tx, tracker_rx) = safe_async_channel::unbounded_channel();
-        let mut manifest_writer = ManifestWriter::start(
+        let started = start_manifest_writer(
             Arc::clone(&harness.inner),
             harness.manifest,
             Duration::from_secs(3600),
-            &Handle::current(),
-            tracker_tx,
         );
-        manifest_writer.notify_uploaded(uploaded).await.unwrap();
+        started.notify_uploaded(uploaded).await.unwrap();
 
-        let through_epoch = expect_flushed(&tracker_rx).await;
+        let through_epoch = expect_flushed(&started.tracker_rx).await;
         assert_eq!(through_epoch, FlushEpoch(1));
 
-        assert!(matches!(
-            manifest_writer.close().await,
-            ManifestWriterCloseResult::Ok { .. }
-        ));
+        started.shutdown().await;
     }
 
     #[tokio::test]
@@ -981,25 +1009,19 @@ mod tests {
         let uploaded1 = next_uploaded_memtable(&harness, 1, b"k1", b"v1", 1).await;
         let uploaded2 = next_uploaded_memtable(&harness, 2, b"k2", b"v2", 2).await;
 
-        let (tracker_tx, tracker_rx) = safe_async_channel::unbounded_channel();
-        let mut manifest_writer = ManifestWriter::start(
+        let started = start_manifest_writer(
             Arc::clone(&harness.inner),
             harness.manifest,
             Duration::from_secs(3600),
-            &Handle::current(),
-            tracker_tx,
         );
-        manifest_writer.notify_uploaded(uploaded2).await.unwrap();
-        assert_no_flush_event(&tracker_rx, Duration::from_millis(100)).await;
+        started.notify_uploaded(uploaded2).await.unwrap();
+        assert_no_flush_event(&started.tracker_rx, Duration::from_millis(100)).await;
 
-        manifest_writer.notify_uploaded(uploaded1).await.unwrap();
-        let through_epoch = expect_flushed(&tracker_rx).await;
+        started.notify_uploaded(uploaded1).await.unwrap();
+        let through_epoch = expect_flushed(&started.tracker_rx).await;
         assert_eq!(through_epoch, FlushEpoch(2));
 
-        assert!(matches!(
-            manifest_writer.close().await,
-            ManifestWriterCloseResult::Ok { .. }
-        ));
+        started.shutdown().await;
     }
 
     #[tokio::test]
@@ -1012,17 +1034,15 @@ mod tests {
         let before =
             latest_manifest_checkpoint_count(&harness.path, Arc::clone(&harness.object_store))
                 .await;
-        let (tracker_tx, _) = safe_async_channel::unbounded_channel();
-        let mut manifest_writer = ManifestWriter::start(
+
+        let started = start_manifest_writer(
             Arc::clone(&harness.inner),
             harness.manifest,
             Duration::from_secs(3600),
-            &Handle::current(),
-            tracker_tx,
         );
 
         let (tx, rx) = tokio::sync::oneshot::channel();
-        manifest_writer
+        started
             .send_checkpoint(None, CheckpointOptions::default(), tx)
             .unwrap();
         let checkpoint = timeout(Duration::from_secs(5), rx)
@@ -1037,10 +1057,7 @@ mod tests {
         assert_eq!(after, before + 1);
         assert!(checkpoint.manifest_id > 0);
 
-        assert!(matches!(
-            manifest_writer.close().await,
-            ManifestWriterCloseResult::Ok { .. }
-        ));
+        started.shutdown().await;
     }
 
     #[tokio::test]
@@ -1055,31 +1072,24 @@ mod tests {
         let before =
             latest_manifest_checkpoint_count(&harness.path, Arc::clone(&harness.object_store))
                 .await;
-        let (tracker_tx, tracker_rx) = safe_async_channel::unbounded_channel();
-        let mut manifest_writer = ManifestWriter::start(
+
+        let started = start_manifest_writer(
             Arc::clone(&harness.inner),
             harness.manifest,
             Duration::from_secs(3600),
-            &Handle::current(),
-            tracker_tx,
         );
 
         let (tx, rx) = oneshot::channel();
-        manifest_writer
-            .commands_tx
-            .send(ManifestWriterCommand::CreateCheckpoint {
-                through_epoch: Some(FlushEpoch(1)),
-                options: CheckpointOptions::default(),
-                sender: tx,
-            })
+        started
+            .send_checkpoint(Some(FlushEpoch(1)), CheckpointOptions::default(), tx)
             .unwrap();
 
         tokio::task::yield_now().await;
-        assert_no_flush_event(&tracker_rx, Duration::from_millis(100)).await;
+        assert_no_flush_event(&started.tracker_rx, Duration::from_millis(100)).await;
 
-        manifest_writer.notify_uploaded(uploaded).await.unwrap();
+        started.notify_uploaded(uploaded).await.unwrap();
 
-        let through_epoch = expect_flushed(&tracker_rx).await;
+        let through_epoch = expect_flushed(&started.tracker_rx).await;
         assert_eq!(through_epoch, FlushEpoch(1));
 
         let checkpoint = rx.await.unwrap().unwrap();
@@ -1089,10 +1099,7 @@ mod tests {
         assert_eq!(after, before + 1);
         assert!(checkpoint.manifest_id > 0);
 
-        assert!(matches!(
-            manifest_writer.close().await,
-            ManifestWriterCloseResult::Ok { .. }
-        ));
+        started.shutdown().await;
     }
 
     #[tokio::test]
@@ -1104,32 +1111,139 @@ mod tests {
         .await;
         let uploaded = next_uploaded_memtable(&harness, 1, b"k1", b"v1", 1).await;
 
-        let (tracker_tx, tracker_rx) = safe_async_channel::unbounded_channel();
-        let mut manifest_writer = ManifestWriter::start(
+        let started = start_manifest_writer(
             Arc::clone(&harness.inner),
             harness.manifest,
             Duration::from_secs(3600),
-            &Handle::current(),
-            tracker_tx,
         );
 
         let _fence = load_writer_manifest(&harness.path, Arc::clone(&harness.object_store)).await;
-        manifest_writer.notify_uploaded(uploaded).await.unwrap();
+        started.notify_uploaded(uploaded).await.unwrap();
 
-        // The manifest writer exits on fence — sends shutdown.
-        let msg = timeout(Duration::from_secs(5), tracker_rx.recv())
+        // The manifest writer detects the fence and writes the error to closed_result.
+        let result = timeout(Duration::from_secs(5), started.await_closed())
             .await
-            .unwrap()
-            .unwrap();
-        assert!(matches!(
-            msg,
-            TrackerMessage::ManifestWriterShutdown(ManifestWriterCloseResult::Fenced { .. })
-        ));
+            .expect("timed out waiting for fenced error");
+        assert!(
+            matches!(result, Err(SlateDBError::Fenced)),
+            "expected Fenced, got {:?}",
+            result
+        );
 
-        // close() returns Fenced.
-        assert!(matches!(
-            manifest_writer.close().await,
-            ManifestWriterCloseResult::Fenced { .. }
-        ));
+        started.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn pending_flush_waiter_receives_error_on_fenced_shutdown() {
+        let harness = setup_harness(
+            "/tmp/test_parallel_l0_flush_manifest_writer_pending_flush_fenced",
+            Arc::new(FailPointRegistry::new()),
+        )
+        .await;
+        let uploaded = next_uploaded_memtable(&harness, 1, b"k1", b"v1", 1).await;
+
+        let started = start_manifest_writer(
+            Arc::clone(&harness.inner),
+            harness.manifest,
+            Duration::from_secs(3600),
+        );
+
+        // Send a flush request for epoch 1, which hasn't been uploaded yet.
+        let (tx, rx) = oneshot::channel();
+        started
+            .send_flush(Some(FlushEpoch(1)), tx)
+            .unwrap();
+
+        // Fence the manifest so the next write fails.
+        let _fence = load_writer_manifest(&harness.path, Arc::clone(&harness.object_store)).await;
+
+        // Trigger a manifest write by uploading — this discovers the fence.
+        started.notify_uploaded(uploaded).await.unwrap();
+
+        // The pending flush waiter should receive the fencing error.
+        let result = timeout(Duration::from_secs(5), rx)
+            .await
+            .expect("timed out")
+            .expect("channel dropped");
+        assert!(
+            matches!(result, Err(SlateDBError::Fenced)),
+            "expected Fenced, got {:?}",
+            result
+        );
+
+        started.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn pending_checkpoint_waiter_receives_error_on_fenced_shutdown() {
+        let harness = setup_harness(
+            "/tmp/test_parallel_l0_flush_manifest_writer_pending_checkpoint_fenced",
+            Arc::new(FailPointRegistry::new()),
+        )
+        .await;
+        let uploaded = next_uploaded_memtable(&harness, 1, b"k1", b"v1", 1).await;
+
+        let started = start_manifest_writer(
+            Arc::clone(&harness.inner),
+            harness.manifest,
+            Duration::from_secs(3600),
+        );
+
+        // Send a checkpoint request for epoch 1, which hasn't been uploaded yet.
+        let (tx, rx) = oneshot::channel();
+        started
+            .send_checkpoint(Some(FlushEpoch(1)), CheckpointOptions::default(), tx)
+            .unwrap();
+
+        // Fence and trigger a manifest write.
+        let _fence = load_writer_manifest(&harness.path, Arc::clone(&harness.object_store)).await;
+        started.notify_uploaded(uploaded).await.unwrap();
+
+        // The pending checkpoint waiter should receive the fencing error.
+        let result = timeout(Duration::from_secs(5), rx)
+            .await
+            .expect("timed out")
+            .expect("channel dropped");
+        assert!(
+            matches!(result, Err(SlateDBError::Fenced)),
+            "expected Fenced, got {:?}",
+            result
+        );
+
+        started.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn flush_waiter_in_channel_receives_error_on_clean_shutdown() {
+        let harness = setup_harness(
+            "/tmp/test_parallel_l0_flush_manifest_writer_channel_flush_clean",
+            Arc::new(FailPointRegistry::new()),
+        )
+        .await;
+
+        let started = start_manifest_writer(
+            Arc::clone(&harness.inner),
+            harness.manifest,
+            Duration::from_secs(3600),
+        );
+
+        // Send a flush request for an epoch that will never be uploaded.
+        let (tx, rx) = oneshot::channel();
+        started
+            .send_flush(Some(FlushEpoch(1)), tx)
+            .unwrap();
+
+        // Shut down cleanly — the flush waiter should get Closed.
+        started.shutdown().await;
+
+        let result = timeout(Duration::from_secs(5), rx)
+            .await
+            .expect("timed out")
+            .expect("channel dropped");
+        assert!(
+            matches!(result, Err(SlateDBError::Closed)),
+            "expected Closed, got {:?}",
+            result
+        );
     }
 }
