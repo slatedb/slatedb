@@ -281,7 +281,7 @@ pub struct BloomFilterPolicy {
 
 impl BloomFilterPolicy {
     /// The canonical name for bloom filter policies.
-    pub const NAME: &'static str = "slatedb.BloomFilter";
+    pub const NAME: &'static str = "_bf";
 
     /// Creates a new bloom filter policy with the given bits per key.
     pub fn new(bits_per_key: u32) -> Self {

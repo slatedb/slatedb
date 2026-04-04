@@ -326,7 +326,7 @@ mod tests {
         let decoded_filters = decoded.filters().unwrap();
         assert_eq!(1, decoded_filters.len());
         let decoded_nf = &decoded_filters[0];
-        assert_eq!(decoded_nf.name(), "slatedb.BloomFilter");
+        assert_eq!(decoded_nf.name(), BloomFilterPolicy::NAME);
         // Deserialized from disk cache, so it should be raw (not yet decoded)
         assert!(!decoded_nf.is_decoded());
         // Verify encode_data produces the same bytes as the original
