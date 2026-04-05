@@ -57,7 +57,7 @@ SlateDB currently runs compaction on a single process. Compaction is either embe
 
 ## Motivation
 
-In write-heavy workloads, compaction can fall behind the rate of SST flushes. When this happens, the L0 file count grows unbounded. Because reads must check every L0 file, read latency degrades proportionally to L0 depth. SlateDB's back-pressure mechanism stalls writes on unflushed memtable/WAL size — not L0 depth — so a lagging compactor does not directly stall writes, but it does cause read performance to collapse under sustained write load.
+In write-heavy workloads, compaction can fall behind the rate of SST flushes. When this happens, the L0 file count grows toward `l0_max_ssts`. Once that limit is reached, the flusher stops writing immutable memtables to L0. Immutable memtables then accumulate in memory until `max_unflushed_bytes` is exceeded, at which point SlateDB applies back-pressure that stalls writes. A lagging compactor therefore degrades the entire system: first read latency (more L0 files to scan), then write throughput.
 
 Both existing compaction modes share the same single-node ceiling: in-process compaction competes with the write path for CPU and I/O, and the standalone compactor offloads compute but still cannot scale horizontally. The only way to raise this ceiling is to distribute compaction execution across multiple workers. Since SlateDB already uses the object store as its sole coordination primitive, the `.compactions` file provides everything needed to schedule and claim work across processes.
 
