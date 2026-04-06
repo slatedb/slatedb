@@ -1,13 +1,13 @@
 use crate::bytes_range::BytesRange;
 use crate::checkpoint::Checkpoint;
 use crate::config::CompressionCodec;
-use crate::db_status::{ClosedResultWriter, DbStatusReporter};
+use crate::db_status::ClosedResultWriter;
 use crate::error::SlateDBError;
 use crate::manifest::Manifest;
 use crate::mem_table::{ImmutableMemtable, KVTable, WritableKVTable};
 use crate::reader::DbStateReader;
 use crate::seq_tracker::SequenceTracker;
-use crate::utils::{WatchableOnceCell, WatchableOnceCellReader};
+use crate::utils::WatchableOnceCellReader;
 use crate::wal_id::WalIdStore;
 use bytes::Bytes;
 use log::debug;

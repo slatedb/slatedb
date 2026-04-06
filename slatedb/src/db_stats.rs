@@ -18,8 +18,6 @@ pub const WAL_BUFFER_ESTIMATED_BYTES: &str = db_stat_name!("wal_buffer_estimated
 pub const TOTAL_MEM_SIZE_BYTES: &str = db_stat_name!("total_mem_size_bytes");
 pub const L0_SST_COUNT: &str = db_stat_name!("l0_sst_count");
 pub const L0_FLUSH_BYTES: &str = db_stat_name!("l0_flush_bytes");
-pub const L0_UPLOAD_BUSY_MILLIS: &str = db_stat_name!("l0_upload_busy_millis");
-pub const L0_UPLOAD_IDLE_MILLIS: &str = db_stat_name!("l0_upload_idle_millis");
 pub const SST_FILTER_FALSE_POSITIVE_COUNT: &str = db_stat_name!("sst_filter_false_positive_count");
 pub const SST_FILTER_POSITIVE_COUNT: &str = db_stat_name!("sst_filter_positive_count");
 pub const SST_FILTER_NEGATIVE_COUNT: &str = db_stat_name!("sst_filter_negative_count");
@@ -43,8 +41,6 @@ pub(crate) struct DbStats {
     pub(crate) total_mem_size_bytes: Arc<dyn GaugeFn>,
     pub(crate) l0_sst_count: Arc<dyn GaugeFn>,
     pub(crate) l0_flush_bytes: Arc<dyn CounterFn>,
-    pub(crate) l0_upload_busy_millis: Arc<dyn CounterFn>,
-    pub(crate) l0_upload_idle_millis: Arc<dyn CounterFn>,
 }
 
 impl DbStats {
@@ -77,8 +73,6 @@ impl DbStats {
             total_mem_size_bytes: recorder.gauge(TOTAL_MEM_SIZE_BYTES).register(),
             l0_sst_count: recorder.gauge(L0_SST_COUNT).register(),
             l0_flush_bytes: recorder.counter(L0_FLUSH_BYTES).register(),
-            l0_upload_busy_millis: recorder.counter(L0_UPLOAD_BUSY_MILLIS).register(),
-            l0_upload_idle_millis: recorder.counter(L0_UPLOAD_IDLE_MILLIS).register(),
         }
     }
 }

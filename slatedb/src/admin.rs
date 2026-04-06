@@ -15,7 +15,7 @@ use crate::db_status::ClosedResultWriter;
 use crate::object_stores::{ObjectStoreType, ObjectStores};
 use crate::rand::DbRand;
 use crate::seq_tracker::FindOption;
-use crate::utils::{IdGenerator, WatchableOnceCell};
+use crate::utils::IdGenerator;
 use chrono::{DateTime, Utc};
 use fail_parallel::FailPointRegistry;
 use object_store::path::Path;
