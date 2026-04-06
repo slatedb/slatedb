@@ -136,11 +136,16 @@ impl MemtableFlusher {
     }
 
     /// Closes the flusher and its subsystems via the executor.
+    /// On clean shutdown, the caller is expected to have already flushed
+    /// (via `Db::flush`), so the pipeline should be idle. The ordering
+    /// here matters mainly for error shutdown: shutting down the uploader
+    /// and manifest writer first ensures their final completion messages
+    /// reach the tracker before it drains.
     pub(crate) async fn shutdown(executor: &MessageHandlerExecutor) {
+        Uploader::shutdown(executor).await;
+        ManifestWriter::shutdown(executor).await;
         if let Err(e) = executor.shutdown_task(TRACKER_TASK_NAME).await {
             warn!("failed to shutdown l0 flush tracker [error={:?}]", e);
         }
-        Uploader::shutdown(executor).await;
-        ManifestWriter::shutdown(executor).await;
     }
 }

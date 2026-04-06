@@ -122,11 +122,8 @@ impl MessageHandler<TrackerMessage> for FlushTracker {
         mut messages: BoxStream<'async_trait, TrackerMessage>,
         result: Result<(), SlateDBError>,
     ) -> Result<(), SlateDBError> {
-        if result.is_ok() {
-            while let Some(message) = messages.next().await {
-                self.handle(message).await?;
-            }
-        }
+        let err = result.err().unwrap_or(SlateDBError::Closed);
+        self.drain_with_error(&mut messages, &err).await;
         self.cleanup_orphaned_uploads().await;
         Ok(())
     }
@@ -221,6 +218,29 @@ impl FlushTracker {
                 .submit(UploadJob::new(epoch, imm_memtable, sst_id))?;
         }
         Ok(())
+    }
+
+    /// Drain remaining messages during shutdown. Process completions so
+    /// durable progress advances as far as possible. Reject new flush and
+    /// checkpoint requests with the given error.
+    async fn drain_with_error(
+        &mut self,
+        messages: &mut (impl futures::Stream<Item = TrackerMessage> + Unpin),
+        err: &SlateDBError,
+    ) {
+        while let Some(message) = messages.next().await {
+            match message {
+                TrackerMessage::FlushRequest { sender, .. } => {
+                    let _ = sender.send(Err(err.clone()));
+                }
+                TrackerMessage::CheckpointRequest { sender, .. } => {
+                    let _ = sender.send(Err(err.clone()));
+                }
+                other => {
+                    let _ = self.handle(other).await;
+                }
+            }
+        }
     }
 
     /// Delete orphaned SSTs that were uploaded but never passed to the
@@ -846,6 +866,40 @@ mod tests {
         }
 
         flusher.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn inflight_flush_waiter_resolves_on_shutdown() {
+        let harness = setup_harness(
+            "/tmp/test_parallel_l0_flush_flusher_clean_shutdown",
+            Settings::default(),
+            Arc::new(FailPointRegistry::new()),
+        )
+        .await;
+        freeze_value_imm(&harness, b"k1", b"v1", 1, 11);
+        freeze_value_imm(&harness, b"k2", b"v2", 2, 12);
+        let flusher = start_flusher(harness);
+
+        // Start a flush that requires both epochs to become durable.
+        let flush = flusher.flush(FlushTarget::All);
+        tokio::pin!(flush);
+
+        // Give the pipeline a moment to start processing.
+        tokio::task::yield_now().await;
+
+        // Shut down. The uploader and manifest writer drain first, so
+        // in-flight uploads complete. The tracker drains last and
+        // processes the completion messages.
+        flusher.shutdown().await;
+
+        // The flush should either succeed (uploads completed during drain)
+        // or fail with Closed (uploads didn't finish in time). Either is
+        // acceptable — the key invariant is that the waiter always receives
+        // a response rather than a dropped channel.
+        let result = timeout(Duration::from_secs(5), flush)
+            .await
+            .expect("timed out waiting for flush result");
+        assert!(result.is_ok() || result.is_err());
     }
 
     mod frontier_tests {
