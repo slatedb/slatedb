@@ -6,12 +6,11 @@ use std::time::Duration;
 use async_trait::async_trait;
 use futures::{stream::BoxStream, StreamExt};
 use log::{error, trace};
-use parking_lot::RwLock;
 use tokio::{runtime::Handle, select, sync::oneshot};
 use tracing::instrument;
 
 use crate::clock::MonotonicClock;
-use crate::db_state::{DbState, SsTableId};
+use crate::db_state::SsTableId;
 use crate::db_stats::DbStats;
 use crate::dispatcher::{MessageFactory, MessageHandler, MessageHandlerExecutor};
 use crate::error::SlateDBError;
@@ -114,7 +113,6 @@ struct WalBufferIterator {
 impl WalBufferManager {
     pub(crate) fn new(
         wal_id_incrementor: Arc<dyn WalIdStore + Send + Sync>,
-        _db_state: Arc<RwLock<DbState>>,
         status_manager: crate::db_status::DbStatusManager,
         db_stats: DbStats,
         recent_flushed_wal_id: u64,
@@ -628,7 +626,6 @@ mod tests {
     use crate::db_status::DbStatusManager;
     use crate::format::sst::SsTableFormat;
     use crate::iter::RowEntryIterator;
-    use crate::manifest::store::test_utils::new_dirty_manifest;
     use crate::manifest::SsTableView;
     use crate::object_stores::ObjectStores;
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
@@ -863,13 +860,11 @@ mod tests {
         let system_clock = Arc::new(DefaultSystemClock::new());
         let status_manager = DbStatusManager::new(0);
         let oracle = Arc::new(DbOracle::new(0, 0, 0, status_manager.clone()));
-        let db_state = Arc::new(RwLock::new(DbState::new(new_dirty_manifest())));
         let recorder = Arc::new(DefaultMetricsRecorder::new());
         let helper = MetricsRecorderHelper::new(recorder.clone(), MetricLevel::default());
         let db_stats = DbStats::new(&helper);
         let wal_buffer = Arc::new(WalBufferManager::new(
             wal_id_store,
-            db_state.clone(),
             status_manager.clone(),
             db_stats.clone(),
             0, // recent_flushed_wal_id

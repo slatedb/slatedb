@@ -158,7 +158,6 @@ impl DbInner {
         let recent_flushed_wal_id = state.read().state().core().replay_after_wal_id;
         let wal_buffer = Arc::new(WalBufferManager::new(
             state.clone(),
-            state.clone(),
             status_manager.clone(),
             db_stats.clone(),
             recent_flushed_wal_id,

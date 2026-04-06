@@ -755,11 +755,6 @@ pub(crate) mod safe_async_channel {
                 }
             }
         }
-
-        #[allow(dead_code)]
-        pub(crate) fn close(&self) {
-            let _ = self.tx.close();
-        }
     }
 
     impl<T> Clone for SafeSender<T> {
