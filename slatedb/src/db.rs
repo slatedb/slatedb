@@ -6707,9 +6707,9 @@ mod tests {
         expected.put(b"base".as_slice());
         let _snapshot = db.snapshot().await.unwrap();
 
-        // Write many merge operands for the same key, each forced into L0.
-        for _ in 0..16u16 {
-            let operand = vec![b'a'; 32];
+        // Write distinct merge operands so the final value also verifies operand ordering.
+        for i in 0..16u8 {
+            let operand = vec![b'a' + i; 32];
             expected.put(operand.as_slice());
             db.merge_with_options(
                 b"k",
