@@ -50,7 +50,8 @@ impl DbInner {
             return Ok(());
         }
 
-        guard.freeze_memtable(wal_id)?;
+        self.status()?;
+        guard.freeze_memtable(wal_id);
         self.memtable_flush_notifier
             .send(MemtableFlushMsg::FlushImmutableMemtables { sender: None })?;
         Ok(())
@@ -91,6 +92,7 @@ impl DbInner {
         self.mono_clock.set_last_tick(replayed_memtable.last_tick)?;
 
         // replace the memtable
-        guard.replace_memtable(replayed_memtable.table)
+        guard.replace_memtable(replayed_memtable.table);
+        Ok(())
     }
 }

@@ -76,7 +76,7 @@ use crate::compactor_executor::{
 use crate::compactor_state_protocols::CompactorStateWriter;
 use crate::config::CompactorOptions;
 use crate::db_state::SortedRun;
-use crate::db_status::ClosedResultWriter;
+use crate::db_status::DbStatusManager;
 use crate::dispatcher::{MessageFactory, MessageHandler, MessageHandlerExecutor};
 use crate::error::{Error, SlateDBError};
 use crate::manifest::store::ManifestStore;
@@ -281,7 +281,7 @@ impl Compactor {
         rand: Arc<DbRand>,
         recorder: &MetricsRecorderHelper,
         system_clock: Arc<dyn SystemClock>,
-        closed_result: ClosedResultWriter,
+        status_manager: DbStatusManager,
         merge_operator: Option<MergeOperatorType>,
         #[cfg(feature = "compaction_filters")] compaction_filter_supplier: Option<
             Arc<dyn CompactionFilterSupplier>,
@@ -289,7 +289,7 @@ impl Compactor {
     ) -> Self {
         let stats = Arc::new(CompactionStats::new(recorder));
         let task_executor = Arc::new(MessageHandlerExecutor::new(
-            closed_result,
+            status_manager,
             system_clock.clone(),
         ));
         Self {

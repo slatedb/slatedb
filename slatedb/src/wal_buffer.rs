@@ -49,7 +49,7 @@ pub(crate) const WAL_BUFFER_TASK_NAME: &str = "wal_writer";
 pub(crate) struct WalBufferManager {
     inner: Arc<parking_lot::RwLock<WalBufferManagerInner>>,
     wal_id_incrementor: Arc<dyn WalIdStore + Send + Sync>,
-    db_state: Arc<RwLock<DbState>>,
+    status_manager: crate::db_status::DbStatusManager,
     db_stats: DbStats,
     mono_clock: Arc<MonotonicClock>,
     table_store: Arc<TableStore>,
@@ -114,7 +114,8 @@ struct WalBufferIterator {
 impl WalBufferManager {
     pub(crate) fn new(
         wal_id_incrementor: Arc<dyn WalIdStore + Send + Sync>,
-        db_state: Arc<RwLock<DbState>>,
+        _db_state: Arc<RwLock<DbState>>,
+        status_manager: crate::db_status::DbStatusManager,
         db_stats: DbStats,
         recent_flushed_wal_id: u64,
         oracle: Arc<DbOracle>,
@@ -138,7 +139,7 @@ impl WalBufferManager {
         Self {
             inner: Arc::new(parking_lot::RwLock::new(inner)),
             wal_id_incrementor,
-            db_state,
+            status_manager,
             db_stats,
             table_store,
             mono_clock,
@@ -152,7 +153,7 @@ impl WalBufferManager {
         self: &Arc<Self>,
         task_executor: Arc<MessageHandlerExecutor>,
     ) -> Result<(), SlateDBError> {
-        let (flush_tx, flush_rx) = self.db_state.read().closed_result().channel();
+        let (flush_tx, flush_rx) = self.status_manager.create_safe_channel();
         {
             let mut inner = self.inner.write();
             inner.flush_tx = Some(flush_tx);
@@ -624,7 +625,7 @@ impl MessageHandler<WalFlushWork> for WalFlushHandler {
 mod tests {
     use super::*;
     use crate::clock::MonotonicClock;
-    use crate::db_status::ClosedResultWriter;
+    use crate::db_status::DbStatusManager;
     use crate::format::sst::SsTableFormat;
     use crate::iter::RowEntryIterator;
     use crate::manifest::store::test_utils::new_dirty_manifest;
@@ -860,18 +861,16 @@ mod tests {
         let test_clock = Arc::new(MockSystemClock::new());
         let mono_clock = Arc::new(MonotonicClock::new(test_clock.clone(), 0));
         let system_clock = Arc::new(DefaultSystemClock::new());
-        let status_reporter = crate::db_status::DbStatusReporter::new(0);
-        let oracle = Arc::new(DbOracle::new(0, 0, 0, status_reporter));
-        let db_state = Arc::new(RwLock::new(DbState::new(
-            new_dirty_manifest(),
-            ClosedResultWriter::new(),
-        )));
+        let status_manager = DbStatusManager::new(0);
+        let oracle = Arc::new(DbOracle::new(0, 0, 0, status_manager.clone()));
+        let db_state = Arc::new(RwLock::new(DbState::new(new_dirty_manifest())));
         let recorder = Arc::new(DefaultMetricsRecorder::new());
         let helper = MetricsRecorderHelper::new(recorder.clone(), MetricLevel::default());
         let db_stats = DbStats::new(&helper);
         let wal_buffer = Arc::new(WalBufferManager::new(
             wal_id_store,
             db_state.clone(),
+            status_manager.clone(),
             db_stats.clone(),
             0, // recent_flushed_wal_id
             oracle,
@@ -881,7 +880,7 @@ mod tests {
             Some(flush_interval), // max_flush_interval
         ));
         let task_executor = Arc::new(MessageHandlerExecutor::new(
-            db_state.read().closed_result(),
+            status_manager,
             system_clock.clone(),
         ));
         wal_buffer.init(task_executor.clone()).await.unwrap();

@@ -44,14 +44,16 @@ impl<T: Clone> WatchableOnceCell<T> {
         Self { rx, tx }
     }
 
-    pub(crate) fn write(&self, val: T) {
+    /// Writes the value if not already set. Returns `true` if the value was
+    /// written, `false` if a value was already present.
+    pub(crate) fn write(&self, val: T) -> bool {
         self.tx.send_if_modified(|v| {
             if v.is_some() {
                 return false;
             }
             v.replace(val);
             true
-        });
+        })
     }
 
     pub(crate) fn reader(&self) -> WatchableOnceCellReader<T> {
@@ -221,44 +223,6 @@ fn compute_lower_bound(prev_block_last_key: &Bytes, this_block_first_key: &Bytes
     // if we didn't find a mismatch yet then the prev block's key must be shorter,
     // so just use the common prefix plus the next byte in this block's key
     this_block_first_key.slice(..prev_block_last_key.len() + 1)
-}
-
-/// An extension trait that adds a `.send_safely(...)` method to `async_channel::Sender<T>`.
-pub(crate) trait SendSafely<T> {
-    /// Attempts to send a message to the channel, and if the channel is closed, returns the error
-    /// in `error_reader` if it is set, otherwise panics.
-    ///
-    /// This is useful for handling shutdown race conditions where the receiver's channel is dropped
-    /// before the sender is shut down.
-    fn send_safely(
-        &self,
-        closed_result_reader: WatchableOnceCellReader<Result<(), SlateDBError>>,
-        message: T,
-    ) -> Result<(), SlateDBError>;
-}
-
-#[allow(clippy::panic, clippy::disallowed_methods)]
-impl<T> SendSafely<T> for async_channel::Sender<T> {
-    #[inline]
-    fn send_safely(
-        &self,
-        closed_result_reader: WatchableOnceCellReader<Result<(), SlateDBError>>,
-        message: T,
-    ) -> Result<(), SlateDBError> {
-        match self.try_send(message) {
-            Ok(_) => Ok(()),
-            Err(e) => {
-                if let Some(result) = closed_result_reader.read() {
-                    match result {
-                        Ok(()) => Err(SlateDBError::Closed),
-                        Err(err) => Err(err),
-                    }
-                } else {
-                    panic!("Failed to send message to unbounded channel: {}", e);
-                }
-            }
-        }
-    }
 }
 
 /// Trait for generating UUIDs and ULIDs from a random number generator.
@@ -749,12 +713,12 @@ pub(crate) async fn preload_cache_from_manifest(
 
 /// Safe MPMC channel wrappers backed by [`async_channel`].
 ///
-/// The sender uses a [`WatchableOnceCellReader`] to report shutdown errors
-/// via [`SendSafely`] when the channel is closed. Construct channels with
-/// [`ClosedResultWriter::channel`] to wire them to the shared DB lifecycle
-/// state.
+/// The sender checks the DB's closed result when the channel is closed,
+/// converting the raw channel error into the appropriate [`SlateDBError`].
+/// Construct channels with [`crate::db_status::DbStatusManager::create_safe_channel`] to
+/// wire them to the shared DB lifecycle state.
 pub(crate) mod safe_async_channel {
-    use super::{SendSafely, WatchableOnceCellReader};
+    use super::WatchableOnceCellReader;
     use crate::error::SlateDBError;
 
     pub(crate) struct SafeSender<T> {
@@ -770,8 +734,26 @@ pub(crate) mod safe_async_channel {
             Self { tx, closed }
         }
 
+        /// Attempts to send a message. If the channel is closed, returns the
+        /// DB's closed result error, or [`SlateDBError::Closed`] if it was a
+        /// clean shutdown. Panics if the channel is closed but no closed result
+        /// has been set (indicates a bug).
+        #[inline]
+        #[allow(clippy::panic, clippy::disallowed_methods)]
         pub(crate) fn send(&self, message: T) -> Result<(), SlateDBError> {
-            self.tx.send_safely(self.closed.clone(), message)
+            match self.tx.try_send(message) {
+                Ok(_) => Ok(()),
+                Err(e) => {
+                    if let Some(result) = self.closed.read() {
+                        match result {
+                            Ok(()) => Err(SlateDBError::Closed),
+                            Err(err) => Err(err),
+                        }
+                    } else {
+                        panic!("Failed to send message to unbounded channel: {}", e);
+                    }
+                }
+            }
         }
 
         #[allow(dead_code)]

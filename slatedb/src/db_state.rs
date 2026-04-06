@@ -1,13 +1,11 @@
 use crate::bytes_range::BytesRange;
 use crate::checkpoint::Checkpoint;
 use crate::config::CompressionCodec;
-use crate::db_status::ClosedResultWriter;
 use crate::error::SlateDBError;
 use crate::manifest::Manifest;
 use crate::mem_table::{ImmutableMemtable, KVTable, WritableKVTable};
 use crate::reader::DbStateReader;
 use crate::seq_tracker::SequenceTracker;
-use crate::utils::WatchableOnceCellReader;
 use crate::wal_id::WalIdStore;
 use bytes::Bytes;
 use log::debug;
@@ -420,13 +418,6 @@ impl SortedRun {
 pub(crate) struct DbState {
     memtable: WritableKVTable,
     state: Arc<COWDbState>,
-
-    /// If the database is closed, this will contain the result of the close operation.
-    /// Otherwise, it will be None.
-    ///
-    /// - `Ok(())` if the database was closed successfully.
-    /// - `Err(e)` if the database was closed with an error.
-    closed_result: ClosedResultWriter,
 }
 
 // represents the state that is mutated by creating a new copy with the mutations
@@ -575,14 +566,13 @@ impl DbStateReader for DbStateView {
 }
 
 impl DbState {
-    pub(crate) fn new(manifest: DirtyObject<Manifest>, closed_result: ClosedResultWriter) -> Self {
+    pub(crate) fn new(manifest: DirtyObject<Manifest>) -> Self {
         Self {
             memtable: WritableKVTable::new(),
             state: Arc::new(COWDbState {
                 imm_memtable: VecDeque::new(),
                 manifest,
             }),
-            closed_result,
         }
     }
 
@@ -597,28 +587,11 @@ impl DbState {
         }
     }
 
-    pub(crate) fn closed_result_reader(&self) -> WatchableOnceCellReader<Result<(), SlateDBError>> {
-        self.closed_result.reader()
-    }
-
-    pub(crate) fn closed_result(&self) -> ClosedResultWriter {
-        self.closed_result.clone()
-    }
-
     pub(crate) fn memtable(&self) -> &WritableKVTable {
         &self.memtable
     }
 
-    pub(crate) fn freeze_memtable(
-        &mut self,
-        recent_flushed_wal_id: u64,
-    ) -> Result<(), SlateDBError> {
-        if let Some(result) = self.closed_result.reader().read() {
-            return match result {
-                Ok(()) => Err(SlateDBError::Closed),
-                Err(e) => Err(e),
-            };
-        }
+    pub(crate) fn freeze_memtable(&mut self, recent_flushed_wal_id: u64) {
         let old_memtable = std::mem::replace(&mut self.memtable, WritableKVTable::new());
         self.modify(|modifier| {
             modifier
@@ -629,22 +602,11 @@ impl DbState {
                     recent_flushed_wal_id,
                 )))
         });
-        Ok(())
     }
 
-    pub(crate) fn replace_memtable(
-        &mut self,
-        memtable: WritableKVTable,
-    ) -> Result<(), SlateDBError> {
-        if let Some(result) = self.closed_result.reader().read() {
-            return match result {
-                Ok(()) => Err(SlateDBError::Closed),
-                Err(e) => Err(e),
-            };
-        }
+    pub(crate) fn replace_memtable(&mut self, memtable: WritableKVTable) {
         assert!(self.memtable.is_empty());
         let _ = std::mem::replace(&mut self.memtable, memtable);
-        Ok(())
     }
 
     pub(crate) fn merge_remote_manifest(&mut self, remote_manifest: DirtyObject<Manifest>) {
@@ -752,7 +714,6 @@ mod tests {
     use crate::db_state::{
         DbState, SortedRun, SsTableHandle, SsTableId, SsTableInfo, SsTableView, SstType,
     };
-    use crate::db_status::ClosedResultWriter;
     use crate::format::sst::SST_FORMAT_VERSION_LATEST;
     use crate::manifest::store::test_utils::new_dirty_manifest;
     use crate::proptest_util::arbitrary;
@@ -770,7 +731,7 @@ mod tests {
     #[test]
     fn test_should_merge_db_state_with_new_checkpoints() {
         // given:
-        let mut db_state = DbState::new(new_dirty_manifest(), ClosedResultWriter::new());
+        let mut db_state = DbState::new(new_dirty_manifest());
         // mimic an externally added checkpoint
         let mut updated_state = new_dirty_manifest();
         updated_state.value.core = db_state.state.core().clone();
@@ -797,7 +758,7 @@ mod tests {
     #[test]
     fn test_should_merge_db_state_with_l0s_up_to_last_compacted() {
         // given:
-        let mut db_state = DbState::new(new_dirty_manifest(), ClosedResultWriter::new());
+        let mut db_state = DbState::new(new_dirty_manifest());
         add_l0s_to_dbstate(&mut db_state, 4);
         // mimic the compactor popping off l0s
         let mut compactor_state = new_dirty_manifest();
@@ -829,7 +790,7 @@ mod tests {
     #[test]
     fn test_should_merge_db_state_with_all_l0s_if_none_compacted() {
         // given:
-        let mut db_state = DbState::new(new_dirty_manifest(), ClosedResultWriter::new());
+        let mut db_state = DbState::new(new_dirty_manifest());
         add_l0s_to_dbstate(&mut db_state, 4);
         let l0s = db_state.state.core().l0.clone();
 
@@ -850,7 +811,7 @@ mod tests {
 
     #[test]
     fn test_should_keep_local_sequence_tracker_on_merge() {
-        let mut db_state = DbState::new(new_dirty_manifest(), ClosedResultWriter::new());
+        let mut db_state = DbState::new(new_dirty_manifest());
         db_state.modify(|modifier| {
             let core = &mut modifier.state.manifest.value.core;
             core.last_l0_seq = 3;
@@ -894,9 +855,7 @@ mod tests {
     fn add_l0s_to_dbstate(db_state: &mut DbState, n: u32) {
         let dummy_info = create_sst_info(None);
         for i in 0..n {
-            db_state
-                .freeze_memtable(i as u64)
-                .expect("db in error state");
+            db_state.freeze_memtable(i as u64);
             let imm = db_state.state.imm_memtable.back().unwrap().clone();
             let handle = SsTableHandle::new(
                 SsTableId::Compacted(ulid::Ulid::from_parts(i as u64, 0)),

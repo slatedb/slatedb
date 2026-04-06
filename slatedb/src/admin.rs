@@ -11,7 +11,7 @@ use crate::manifest::store::{ManifestStore, StoredManifest};
 use slatedb_common::clock::SystemClock;
 
 use crate::clone;
-use crate::db_status::ClosedResultWriter;
+use crate::db_status::DbStatusManager;
 use crate::object_stores::{ObjectStoreType, ObjectStores};
 use crate::rand::DbRand;
 use crate::seq_tracker::FindOption;
@@ -276,8 +276,8 @@ impl Admin {
         .build();
 
         let (_, rx) = async_channel::unbounded();
-        let closed_result = ClosedResultWriter::new();
-        let task_executor = MessageHandlerExecutor::new(closed_result, self.system_clock.clone());
+        let status_manager = DbStatusManager::new(0);
+        let task_executor = MessageHandlerExecutor::new(status_manager, self.system_clock.clone());
 
         task_executor
             .add_handler(

@@ -324,7 +324,7 @@ mod tests {
         lookup_metric_with_labels, DefaultMetricsRecorder, MetricsRecorderHelper,
     };
 
-    use crate::db_status::ClosedResultWriter;
+    use crate::db_status::DbStatusManager;
     use crate::format::sst::SsTableFormat;
     use crate::{
         db_state::{ManifestCore, SortedRun, SsTableHandle, SsTableId, SsTableView},
@@ -1599,7 +1599,7 @@ mod tests {
         );
         let (_, rx) = async_channel::unbounded();
         let clock = Arc::new(DefaultSystemClock::default());
-        let executor = MessageHandlerExecutor::new(ClosedResultWriter::new(), clock);
+        let executor = MessageHandlerExecutor::new(DbStatusManager::new(0), clock);
         executor
             .add_handler(
                 "garbage_collector".to_string(),
