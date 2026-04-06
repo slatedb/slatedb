@@ -6,9 +6,9 @@ use crate::oracle::{DbOracle, Oracle};
 
 /// Tracks active snapshot registrations by sequence number.
 ///
-/// Both `DbSnapshot` and `DbTransaction` (via its internal snapshot) register
-/// here so the flusher/compactor knows the oldest seq that must be retained.
-/// The BTreeMap provides an efficient min lookup via `first_key_value()`.
+/// `DbSnapshot` instances register here so the flusher/compactor knows the
+/// oldest seq that must be retained. The BTreeMap provides an efficient min
+/// lookup via `first_key_value()`.
 pub(crate) struct SnapshotManager {
     inner: RwLock<SnapshotManagerInner>,
 }
@@ -37,7 +37,6 @@ impl SnapshotManager {
         seq
     }
 
-    #[allow(clippy::panic)]
     pub(crate) fn unregister(&self, seq: u64) {
         let mut inner = self.inner.write();
         if let Some(count) = inner.active_snapshots.get_mut(&seq) {
@@ -46,7 +45,7 @@ impl SnapshotManager {
                 inner.active_snapshots.remove(&seq);
             }
         } else {
-            panic!("unregister called on seq that is not tracked")
+            unreachable!("unregister called on seq that is not tracked")
         }
     }
 
@@ -55,9 +54,9 @@ impl SnapshotManager {
     /// retained for active snapshots, so that the compactor can avoid deleting the
     /// data that is still needed.
     ///
-    /// min_seq will be persisted to the `recent_snapshot_min_seq` in the manifest
-    /// when a new L0 is flushed.
-    pub(crate) fn min_seq(&self) -> Option<u64> {
+    /// min_active_seq will be persisted to the `recent_snapshot_min_seq` in the
+    /// manifest when a new L0 is flushed.
+    pub(crate) fn min_active_seq(&self) -> Option<u64> {
         let inner = self.inner.read();
         inner.active_snapshots.first_key_value().map(|(&k, _)| k)
     }
@@ -81,16 +80,16 @@ mod tests {
     #[test]
     fn test_register_and_min_seq() {
         let mgr = SnapshotManager::new(Arc::new(DbOracle::new(0, 0, 0, DbStatusReporter::new(0))));
-        assert_eq!(mgr.min_seq(), None);
+        assert_eq!(mgr.min_active_seq(), None);
 
         mgr.register(Some(10));
-        assert_eq!(mgr.min_seq(), Some(10));
+        assert_eq!(mgr.min_active_seq(), Some(10));
 
         mgr.register(Some(5));
-        assert_eq!(mgr.min_seq(), Some(5));
+        assert_eq!(mgr.min_active_seq(), Some(5));
 
         mgr.register(Some(20));
-        assert_eq!(mgr.min_seq(), Some(5));
+        assert_eq!(mgr.min_active_seq(), Some(5));
     }
 
     #[test]
@@ -98,30 +97,30 @@ mod tests {
         let mgr = SnapshotManager::new(Arc::new(DbOracle::new(0, 0, 0, DbStatusReporter::new(0))));
         mgr.register(Some(10));
         mgr.register(Some(20));
-        assert_eq!(mgr.min_seq(), Some(10));
+        assert_eq!(mgr.min_active_seq(), Some(10));
 
         mgr.unregister(10);
-        assert_eq!(mgr.min_seq(), Some(20));
+        assert_eq!(mgr.min_active_seq(), Some(20));
 
         mgr.unregister(20);
-        assert_eq!(mgr.min_seq(), None);
+        assert_eq!(mgr.min_active_seq(), None);
     }
 
     #[test]
-    fn test_refcount_for_same_seq() {
+    fn test_multiple_snapshots_with_same_seq() {
         let mgr = SnapshotManager::new(Arc::new(DbOracle::new(0, 0, 0, DbStatusReporter::new(0))));
         mgr.register(Some(10));
         mgr.register(Some(10));
         mgr.register(Some(10));
 
         mgr.unregister(10);
-        assert_eq!(mgr.min_seq(), Some(10));
+        assert_eq!(mgr.min_active_seq(), Some(10));
 
         mgr.unregister(10);
-        assert_eq!(mgr.min_seq(), Some(10));
+        assert_eq!(mgr.min_active_seq(), Some(10));
 
         mgr.unregister(10);
-        assert_eq!(mgr.min_seq(), None);
+        assert_eq!(mgr.min_active_seq(), None);
     }
 
     #[test]

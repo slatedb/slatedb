@@ -49,7 +49,7 @@ impl DbInner {
         let durable_seq = self.oracle.last_remote_persisted_seq();
         let min_retention_seq = [
             Some(durable_seq),
-            self.snapshot_manager.min_seq(),
+            self.snapshot_manager.min_active_seq(),
             self.txn_manager.min_active_seq(),
         ]
         .into_iter()
@@ -462,7 +462,8 @@ mod tests {
         db.inner.oracle.advance_durable_seq(test_case.durable_seq);
 
         if let Some(snapshot_seq) = test_case.snapshot_seq {
-            db.inner.snapshot_manager.register(Some(snapshot_seq));
+            let started_seq = db.inner.snapshot_manager.register(Some(snapshot_seq));
+            assert_eq!(started_seq, snapshot_seq)
         }
 
         if let Some(txn_seq) = test_case.txn_seq {

@@ -150,7 +150,7 @@ impl MemtableFlusher {
                 .expect("flush of l0 with no entries");
             {
                 let min_active_snapshot_seq = [
-                    self.db_inner.snapshot_manager.min_seq(),
+                    self.db_inner.snapshot_manager.min_active_seq(),
                     self.db_inner.txn_manager.min_active_seq(),
                 ]
                 .into_iter()

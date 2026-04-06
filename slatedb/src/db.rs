@@ -5624,7 +5624,8 @@ mod tests {
         db.put(b"key2", b"value2").await.unwrap();
         db.inner.flush_memtables().await.unwrap();
 
-        let min_active_seq = db.inner.snapshot_manager.min_seq();
+        // Verify that snapshot_manager.min_active_seq() returns the snapshot seq
+        let min_active_seq = db.inner.snapshot_manager.min_active_seq();
         assert!(min_active_seq.is_some());
         assert_eq!(min_active_seq.unwrap(), snapshot_seq);
 
@@ -5634,7 +5635,7 @@ mod tests {
             assert_eq!(
                 recent_min_seq,
                 min_active_seq.unwrap(),
-                "recent_snapshot_min_seq should equal snapshot_manager.min_seq() after flush"
+                "recent_snapshot_min_seq should equal snapshot_manager.min_active_seq() after flush"
             );
         }
 
@@ -6263,7 +6264,7 @@ mod tests {
         // - txn1 is no longer active in txn_manager
         let pause_reached = tokio::time::timeout(Duration::from_secs(5), async {
             loop {
-                let txn1_removed_from_active = !db.inner.txn_manager.has_active_txns();
+                let txn1_removed_from_active = db.inner.txn_manager.min_active_seq().is_none();
                 if txn1_removed_from_active {
                     break;
                 }

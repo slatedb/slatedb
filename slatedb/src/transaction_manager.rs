@@ -128,6 +128,7 @@ impl TransactionManager {
         (txn_id, seq)
     }
 
+    /// Register a transaction state with a specific txn id (for testing only)
     #[cfg(test)]
     fn new_txn_with_id(&self, seq: u64, txn_id: Uuid) -> Uuid {
         let txn_state = TransactionState {
@@ -257,12 +258,7 @@ impl TransactionManager {
         inner.oracle.advance_committed_seq(committed_seq);
     }
 
-    #[cfg(test)]
-    pub(crate) fn has_active_txns(&self) -> bool {
-        !self.inner.read().active_txns.is_empty()
-    }
-
-    /// The min started_seq of all active transactions, including snapshots. This value
+    /// The min started_seq of all active transactions. This value
     /// is useful to inform the compactor about the min seq of data still needed to be
     /// retained for active transactions, so that the compactor can avoid deleting the
     /// data that is still needed.
@@ -329,6 +325,7 @@ impl TransactionManagerInner {
             return false;
         }
 
+        // All the recent committed txn should have committed_seq set.
         for committed_txn in &self.recent_committed_txns {
             let other_committed_seq = committed_txn.committed_seq.expect(
                 "all txns in recent_committed_txns should be committed with committed_seq set",
@@ -361,6 +358,7 @@ impl TransactionManagerInner {
         }
 
         for committed_txn in &self.recent_committed_txns {
+            // All the recent committed txn should have committed_seq set.
             let other_committed_seq = committed_txn.committed_seq.expect(
                 "all txns in recent_committed_txns should be committed with committed_seq set",
             );
@@ -368,12 +366,14 @@ impl TransactionManagerInner {
             // if another transaction committed after the current transaction started,
             // and they have read-write conflicts, then there's a conflict.
             if other_committed_seq > started_seq {
-                // Check if any of the current transaction's read keys were written by the committed transaction
+                // Check if any of the current transaction's read keys were written by
+                // the committed transaction.
                 if !read_keys.is_disjoint(&committed_txn.write_keys) {
                     return true;
                 }
 
-                // Check if any of the current transaction's read ranges overlap with committed transaction's write keys
+                // Check if any of the current transaction's read ranges overlap with
+                // committed transaction write keys.
                 for read_range in &read_ranges {
                     if committed_txn
                         .write_keys
@@ -981,6 +981,9 @@ mod tests {
         // Step 7: Verify final state
         assert!(txn_manager.inner.read().active_txns.is_empty());
         assert!(txn_manager.inner.read().recent_committed_txns.is_empty());
+
+        // Step 8: Verify min_active_seq is now None
+        assert_eq!(txn_manager.min_active_seq(), None);
     }
 
     #[test]
@@ -1066,13 +1069,13 @@ mod tests {
     fn test_ssi_phantom_read_conflict_on_range() {
         let txn_manager = create_transaction_manager();
 
-        // Reader transaction under SSI that scans a key range
+        // Reader transaction under SSI that scans a key range.
         let reader_txn = txn_manager.new_txn_with_id(100, Uuid::new_v4());
 
-        // Keep a dummy write txn active so commits are tracked in recent_committed_txns
+        // Keep a dummy transaction active so commits are tracked in recent_committed_txns.
         let _active_writer_guard = txn_manager.new_txn_with_id(200, Uuid::new_v4());
 
-        // A separate writer that will commit a key inside the reader's scanned range
+        // A separate writer commits a key inside the reader's scanned range.
         let writer_txn = txn_manager.new_txn_with_id(60, Uuid::new_v4());
         let writer_keys: HashSet<Bytes> = ["foo5"].into_iter().map(Bytes::from).collect();
         txn_manager.track_write_keys(&writer_txn, &writer_keys);
