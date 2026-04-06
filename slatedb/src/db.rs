@@ -172,7 +172,7 @@ impl DbInner {
         ));
 
         let txn_manager = Arc::new(TransactionManager::new(oracle.clone(), rand.clone()));
-        let snapshot_manager = Arc::new(SnapshotManager::new(oracle.clone()));
+        let snapshot_manager = Arc::new(SnapshotManager::new(oracle.clone(), rand.clone()));
 
         let db_inner = Self {
             state,

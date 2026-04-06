@@ -1,6 +1,7 @@
 use bytes::Bytes;
 use std::ops::RangeBounds;
 use std::sync::Arc;
+use uuid::Uuid;
 
 use crate::bytes_range::BytesRange;
 use crate::config::{ReadOptions, ScanOptions};
@@ -11,15 +12,17 @@ use crate::db::DbInner;
 use crate::DbRead;
 
 pub struct DbSnapshot {
+    snapshot_id: Uuid,
     started_seq: u64,
     db_inner: Arc<DbInner>,
 }
 
 impl DbSnapshot {
     pub(crate) fn new(db_inner: Arc<DbInner>, seq: Option<u64>) -> Arc<Self> {
-        let started_seq = db_inner.snapshot_manager.register(seq);
+        let (snapshot_id, started_seq) = db_inner.snapshot_manager.new_snapshot(seq);
 
         Arc::new(Self {
+            snapshot_id,
             started_seq,
             db_inner,
         })
@@ -211,7 +214,9 @@ impl DbRead for DbSnapshot {
 
 impl Drop for DbSnapshot {
     fn drop(&mut self) {
-        self.db_inner.snapshot_manager.unregister(self.started_seq);
+        self.db_inner
+            .snapshot_manager
+            .drop_snapshot(&self.snapshot_id);
     }
 }
 

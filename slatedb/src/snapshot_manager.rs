@@ -1,52 +1,54 @@
 use parking_lot::RwLock;
-use std::collections::BTreeMap;
+use std::collections::HashMap;
 use std::sync::Arc;
+use uuid::Uuid;
 
 use crate::oracle::{DbOracle, Oracle};
+use crate::rand::DbRand;
+use crate::utils::IdGenerator;
 
 /// Tracks active snapshot registrations by sequence number.
 ///
 /// `DbSnapshot` instances register here so the flusher/compactor knows the
-/// oldest seq that must be retained. The BTreeMap provides an efficient min
-/// lookup via `first_key_value()`.
+/// oldest seq that must be retained.
 pub(crate) struct SnapshotManager {
     inner: RwLock<SnapshotManagerInner>,
+    db_rand: Arc<DbRand>,
 }
 
 struct SnapshotManagerInner {
-    /// Map of sequence number to reference count.
-    active_snapshots: BTreeMap<u64, u32>,
+    /// Map of snapshot id to sequence number.
+    active_snapshots: HashMap<Uuid, u64>,
     /// The oracle for tracking the last committed sequence number.
     oracle: Arc<DbOracle>,
 }
 
 impl SnapshotManager {
-    pub(crate) fn new(oracle: Arc<DbOracle>) -> Self {
+    pub(crate) fn new(oracle: Arc<DbOracle>, db_rand: Arc<DbRand>) -> Self {
         Self {
             inner: RwLock::new(SnapshotManagerInner {
-                active_snapshots: BTreeMap::new(),
+                active_snapshots: HashMap::new(),
                 oracle,
             }),
+            db_rand,
         }
     }
 
-    pub(crate) fn register(&self, seq: Option<u64>) -> u64 {
+    pub(crate) fn new_snapshot(&self, seq: Option<u64>) -> (Uuid, u64) {
+        let snapshot_id = self.db_rand.rng().gen_uuid();
         let mut inner = self.inner.write();
         let seq = seq.unwrap_or_else(|| inner.oracle.last_committed_seq());
-        *inner.active_snapshots.entry(seq).or_insert(0) += 1;
-        seq
+        inner.active_snapshots.insert(snapshot_id, seq);
+        (snapshot_id, seq)
     }
 
-    pub(crate) fn unregister(&self, seq: u64) {
+    pub(crate) fn drop_snapshot(&self, snapshot_id: &Uuid) {
         let mut inner = self.inner.write();
-        if let Some(count) = inner.active_snapshots.get_mut(&seq) {
-            *count -= 1;
-            if *count == 0 {
-                inner.active_snapshots.remove(&seq);
-            }
-        } else {
-            unreachable!("unregister called on seq that is not tracked")
-        }
+        let removed = inner.active_snapshots.remove(snapshot_id);
+        assert!(
+            removed.is_some(),
+            "drop_snapshot called on snapshot_id that is not tracked"
+        );
     }
 
     /// The min started_seq of all active snapshots. This value
@@ -58,7 +60,7 @@ impl SnapshotManager {
     /// manifest when a new L0 is flushed.
     pub(crate) fn min_active_seq(&self) -> Option<u64> {
         let inner = self.inner.read();
-        inner.active_snapshots.first_key_value().map(|(&k, _)| k)
+        inner.active_snapshots.values().copied().min()
     }
 }
 
@@ -67,66 +69,71 @@ mod tests {
     use super::*;
     use crate::db_status::DbStatusReporter;
 
+    fn new_snapshot_manager(seq: u64) -> SnapshotManager {
+        SnapshotManager::new(
+            Arc::new(DbOracle::new(seq, seq, seq, DbStatusReporter::new(seq))),
+            Arc::new(DbRand::new(0)),
+        )
+    }
+
     #[test]
     fn test_resgister_uses_oracle_seq() {
-        let status_reporter = DbStatusReporter::new(123);
-        let oracle = Arc::new(DbOracle::new(123, 123, 123, status_reporter));
-        let mgr = SnapshotManager::new(oracle);
+        let mgr = new_snapshot_manager(123);
 
-        let seq = mgr.register(None);
+        let (_, seq) = mgr.new_snapshot(None);
         assert_eq!(seq, 123);
     }
 
     #[test]
     fn test_register_and_min_seq() {
-        let mgr = SnapshotManager::new(Arc::new(DbOracle::new(0, 0, 0, DbStatusReporter::new(0))));
+        let mgr = new_snapshot_manager(0);
         assert_eq!(mgr.min_active_seq(), None);
 
-        mgr.register(Some(10));
+        mgr.new_snapshot(Some(10));
         assert_eq!(mgr.min_active_seq(), Some(10));
 
-        mgr.register(Some(5));
+        mgr.new_snapshot(Some(5));
         assert_eq!(mgr.min_active_seq(), Some(5));
 
-        mgr.register(Some(20));
+        mgr.new_snapshot(Some(20));
         assert_eq!(mgr.min_active_seq(), Some(5));
     }
 
     #[test]
     fn test_unregister_removes_entry() {
-        let mgr = SnapshotManager::new(Arc::new(DbOracle::new(0, 0, 0, DbStatusReporter::new(0))));
-        mgr.register(Some(10));
-        mgr.register(Some(20));
+        let mgr = new_snapshot_manager(0);
+        let (snapshot_10, _) = mgr.new_snapshot(Some(10));
+        let (snapshot_20, _) = mgr.new_snapshot(Some(20));
         assert_eq!(mgr.min_active_seq(), Some(10));
 
-        mgr.unregister(10);
+        mgr.drop_snapshot(&snapshot_10);
         assert_eq!(mgr.min_active_seq(), Some(20));
 
-        mgr.unregister(20);
+        mgr.drop_snapshot(&snapshot_20);
         assert_eq!(mgr.min_active_seq(), None);
     }
 
     #[test]
     fn test_multiple_snapshots_with_same_seq() {
-        let mgr = SnapshotManager::new(Arc::new(DbOracle::new(0, 0, 0, DbStatusReporter::new(0))));
-        mgr.register(Some(10));
-        mgr.register(Some(10));
-        mgr.register(Some(10));
+        let mgr = new_snapshot_manager(0);
+        let (snapshot_1, _) = mgr.new_snapshot(Some(10));
+        let (snapshot_2, _) = mgr.new_snapshot(Some(10));
+        let (snapshot_3, _) = mgr.new_snapshot(Some(10));
 
-        mgr.unregister(10);
+        mgr.drop_snapshot(&snapshot_1);
         assert_eq!(mgr.min_active_seq(), Some(10));
 
-        mgr.unregister(10);
+        mgr.drop_snapshot(&snapshot_2);
         assert_eq!(mgr.min_active_seq(), Some(10));
 
-        mgr.unregister(10);
+        mgr.drop_snapshot(&snapshot_3);
         assert_eq!(mgr.min_active_seq(), None);
     }
 
     #[test]
     #[should_panic]
     fn test_unregister_nonexistent_panics() {
-        let mgr = SnapshotManager::new(Arc::new(DbOracle::new(0, 0, 0, DbStatusReporter::new(0))));
-        mgr.unregister(999);
+        let mgr = new_snapshot_manager(0);
+        mgr.drop_snapshot(&Uuid::nil());
     }
 }
