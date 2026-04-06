@@ -1069,8 +1069,8 @@ mod tests {
     fn test_ssi_phantom_read_conflict_on_range() {
         let txn_manager = create_transaction_manager();
 
-        // Reader transaction under SSI that scans a key range.
-        let reader_txn = txn_manager.new_txn_with_id(100, Uuid::new_v4());
+        // A transaction under SSI that scans a key range.
+        let txn_ssi = txn_manager.new_txn_with_id(100, Uuid::new_v4());
 
         // Keep a dummy transaction active so commits are tracked in recent_committed_txns.
         let _active_writer_guard = txn_manager.new_txn_with_id(200, Uuid::new_v4());
@@ -1081,12 +1081,12 @@ mod tests {
         txn_manager.track_write_keys(&writer_txn, &writer_keys);
         txn_manager.track_recent_committed_txn(&writer_txn, 120);
 
-        // Reader scans a range that should include "foo5"
+        // The transaction under SSI scans a range that should include "foo5"
         let range = BytesRange::from(Bytes::from("foo0")..=Bytes::from("foo9"));
-        txn_manager.track_read_range(&reader_txn, range);
+        txn_manager.track_read_range(&txn_ssi, range);
 
         // Under SSI, this should be detected as a phantom read (read-write) conflict
-        assert!(txn_manager.check_has_conflict(&reader_txn));
+        assert!(txn_manager.check_has_conflict(&txn_ssi));
     }
 
     // Property-based tests using proptest for invariant verification
