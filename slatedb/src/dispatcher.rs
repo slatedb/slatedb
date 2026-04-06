@@ -1617,7 +1617,7 @@ mod test {
         let handler1 = ParallelTestHandler::new(1, log.clone(), cleanup1).with_error_after(1);
         let handler2 = ParallelTestHandler::new(2, log.clone(), cleanup2).with_error_after(1);
 
-        let closed_result = ClosedResultWriter::new(WatchableOnceCell::new());
+        let closed_result = ClosedResultWriter::new();
         let task_executor = MessageHandlerExecutor::new(closed_result.clone(), clock);
         task_executor
             .add_handlers(
