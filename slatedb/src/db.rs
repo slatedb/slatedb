@@ -2055,7 +2055,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "descending merge iterator does not correctly resolve duplicate keys (put + delete)"]
     async fn test_scan_descending_skips_deleted_keys() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let kv_store = Db::builder("/tmp/test_scan_descending_deletes", object_store)
