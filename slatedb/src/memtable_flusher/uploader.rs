@@ -15,6 +15,7 @@ use super::tracker::TrackerMessage;
 use super::FlushEpoch;
 use crate::db::DbInner;
 use crate::db_state::{SsTableHandle, SsTableId};
+use crate::db_status::ClosedResultWriter;
 use crate::dispatcher::{MessageHandler, MessageHandlerExecutor};
 use crate::error::SlateDBError;
 use crate::format::sst::EncodedSsTable;
@@ -23,14 +24,12 @@ use crate::utils::safe_async_channel;
 use async_trait::async_trait;
 use futures::stream::BoxStream;
 use futures::StreamExt;
+use log::warn;
 use std::sync::Arc;
 use std::time::Duration;
-use log::warn;
 use tokio::runtime::Handle;
-use crate::db_status::ClosedResultWriter;
 
 const UPLOADER_TASK_NAME: &str = "l0_sst_uploader";
-
 
 /// One immutable-memtable upload request submitted to the uploader.
 pub(crate) struct UploadJob {
@@ -63,7 +62,6 @@ impl UploadJob {
             imm_memtable,
             sst_id,
         }
-
     }
 }
 
@@ -105,7 +103,6 @@ pub(crate) struct Uploader {
 }
 
 impl Uploader {
-
     pub(crate) fn start(
         db: Arc<DbInner>,
         closed_result: &ClosedResultWriter,
@@ -152,7 +149,6 @@ impl Uploader {
             warn!("failed to shutdown l0 sst uploader [error={:?}]", e);
         }
     }
-
 }
 
 /// MessageHandler that builds and uploads one SST per job.
@@ -255,7 +251,6 @@ mod tests {
     use crate::rand::DbRand;
     use crate::tablestore::TableStore;
     use crate::types::RowEntry;
-    use crate::utils::safe_async_channel;
     use crate::utils::IdGenerator;
     use fail_parallel::FailPointRegistry;
     use object_store::memory::InMemory;
@@ -335,8 +330,26 @@ mod tests {
     struct TestUploader {
         uploader: Uploader,
         tracker_rx: async_channel::Receiver<TrackerMessage>,
-        // Hold the executor to keep workers alive.
-        _executor: Arc<crate::dispatcher::MessageHandlerExecutor>,
+        executor: Arc<crate::dispatcher::MessageHandlerExecutor>,
+        closed_result: ClosedResultWriter,
+    }
+
+    impl TestUploader {
+        /// Wait for the executor to report a closed result (error or clean shutdown).
+        async fn await_closed(&self) -> Result<(), SlateDBError> {
+            self.closed_result.reader().await_value().await
+        }
+
+        async fn shutdown(&self) {
+            Uploader::shutdown(&self.executor).await;
+        }
+    }
+
+    impl std::ops::Deref for TestUploader {
+        type Target = Uploader;
+        fn deref(&self) -> &Self::Target {
+            &self.uploader
+        }
     }
 
     fn start_test_uploader(db: &Arc<DbInner>) -> TestUploader {
@@ -359,7 +372,8 @@ mod tests {
         TestUploader {
             uploader,
             tracker_rx,
-            _executor: executor,
+            executor,
+            closed_result,
         }
     }
 
@@ -373,7 +387,7 @@ mod tests {
         let job = next_upload_job(&db, 1, b"key", b"value", 1);
 
         let test = start_test_uploader(&db);
-        test.uploader.submit(job).unwrap();
+        test.submit(job).unwrap();
 
         let msg = timeout(Duration::from_secs(5), test.tracker_rx.recv())
             .await
@@ -384,6 +398,8 @@ mod tests {
         };
         assert_eq!(event.epoch, FlushEpoch(1));
         assert_eq!(event.last_seq, 1);
+
+        test.shutdown().await;
     }
 
     #[tokio::test]
@@ -399,7 +415,7 @@ mod tests {
         let job = next_upload_job(&db, 7, b"key", b"value", 1);
 
         let test = start_test_uploader(&db);
-        test.uploader.submit(job).unwrap();
+        test.submit(job).unwrap();
 
         let msg = timeout(Duration::from_secs(5), test.tracker_rx.recv())
             .await
@@ -409,6 +425,8 @@ mod tests {
             panic!("expected UploadComplete");
         };
         assert_eq!(event.epoch, FlushEpoch(7));
+
+        test.shutdown().await;
     }
 
     #[tokio::test]
@@ -439,19 +457,24 @@ mod tests {
         let job = UploadJob::new(FlushEpoch(3), imm_memtable, sst_id);
 
         let test = start_test_uploader(&db);
-        test.uploader.submit(job).unwrap();
+        test.submit(job).unwrap();
 
-        // The executor detects the worker failure via the handler returning
-        // an error. The tracker_rx won't receive an UploadComplete — the
-        // channel closes when the executor shuts down.
-        let result = timeout(Duration::from_secs(5), test.tracker_rx.recv()).await;
-        assert!(result.is_err() || matches!(result.unwrap(), Err(_)));
+        // The worker returns a fatal error. Wait for the executor to
+        // propagate it to closed_result.
+        let result = timeout(Duration::from_secs(5), test.await_closed())
+            .await
+            .expect("timed out waiting for fatal error");
+        assert!(result.is_err());
+        assert!(
+            !matches!(result, Err(SlateDBError::Closed)),
+            "expected specific error, got Closed"
+        );
     }
 
     #[tokio::test]
-    async fn should_drain_queued_jobs() {
+    async fn should_process_multiple_jobs() {
         let db = setup_db(
-            "/tmp/test_parallel_l0_flush_uploader_close_drains",
+            "/tmp/test_parallel_l0_flush_uploader_multiple",
             Arc::new(FailPointRegistry::new()),
         )
         .await;
@@ -459,8 +482,8 @@ mod tests {
         let job2 = next_upload_job(&db, 2, b"key2", b"value2", 2);
 
         let test = start_test_uploader(&db);
-        test.uploader.submit(job1).unwrap();
-        test.uploader.submit(job2).unwrap();
+        test.submit(job1).unwrap();
+        test.submit(job2).unwrap();
 
         // Collect both upload completions.
         let mut uploaded_epochs = Vec::new();
@@ -473,8 +496,10 @@ mod tests {
                 uploaded_epochs.push(uploaded.epoch);
             }
         }
-
+        uploaded_epochs.sort();
         assert_eq!(uploaded_epochs, vec![FlushEpoch(1), FlushEpoch(2)]);
+
+        test.shutdown().await;
     }
 
     #[tokio::test]
@@ -506,19 +531,16 @@ mod tests {
         let bad_job = UploadJob::new(FlushEpoch(1), imm_memtable, sst_id);
 
         let test = start_test_uploader(&db);
-        test.uploader.submit(bad_job).unwrap();
+        test.submit(bad_job).unwrap();
 
-        // The executor detects the worker failure. Wait for the channel to
-        // indicate shutdown (recv returns Err when channel closes).
-        let result = timeout(Duration::from_secs(5), test.tracker_rx.recv()).await;
-        assert!(result.is_err() || matches!(result.unwrap(), Err(_)));
+        // Wait for the executor to propagate the error to closed_result.
+        let result = timeout(Duration::from_secs(5), test.await_closed())
+            .await
+            .expect("timed out waiting for fatal error");
+        assert!(result.is_err());
 
-        // After the worker fails, the executor writes the error to
-        // closed_result, so subsequent submits should fail.
-        // Give the executor a moment to propagate the error.
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        // Subsequent submits should fail with the specific error.
         let err = test
-            .uploader
             .submit(next_upload_job(&db, 2, b"key2", b"value2", 2))
             .unwrap_err();
         assert!(

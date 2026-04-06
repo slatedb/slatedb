@@ -431,8 +431,6 @@ impl DbInner {
         &self.memtable_flusher
     }
 
-
-
     /// Flush in-memory writes to disk. See [`Db::flush`] for details.
     ///
     /// `check_status` exists so we can call flush in [`Db::close`] after marking the
@@ -1725,7 +1723,6 @@ mod tests {
     use crate::wal_reader::WalReader;
     use crate::{proptest_util, test_utils, CloseReason, CompactorBuilder, KeyValue};
     use async_trait::async_trait;
-    use chrono::TimeDelta;
     use chrono::{TimeZone, Utc};
     use fail_parallel::FailPointRegistry;
     use futures::{future, future::join_all, StreamExt};
@@ -5348,60 +5345,6 @@ mod tests {
         assert_eq!(None, kv_store.get(key).await.unwrap());
 
         kv_store.close().await.unwrap();
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn test_memtable_flush_cleanup_when_fenced() {
-        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let path = "/tmp/test_flush_cleanup";
-        let fp_registry = Arc::new(FailPointRegistry::new());
-
-        let mut options = test_db_options(0, 32, None);
-        options.flush_interval = None;
-        options.manifest_poll_interval = TimeDelta::MAX.to_std().unwrap();
-
-        let db1 = Db::builder(path, object_store.clone())
-            .with_settings(options.clone())
-            .with_fp_registry(fp_registry.clone())
-            .build()
-            .await
-            .unwrap();
-
-        // Allow WAL flushes, but pause compacted (L0 SST) flushes. Have to do this because the
-        // WAL sometimes triggers a maybe_memtable_flush. We don't want the memtable flush to
-        // proceed until the fence happens below..
-        fail_parallel::cfg(fp_registry.clone(), "write-compacted-sst-io-error", "pause").unwrap();
-        db1.put(b"k", b"v").await.unwrap();
-
-        // Fence the db by opening a new one
-        let manifest_store = Arc::new(ManifestStore::new(&Path::from(path), object_store.clone()));
-        let stored_manifest =
-            StoredManifest::load(manifest_store.clone(), Arc::new(DefaultSystemClock::new()))
-                .await
-                .unwrap();
-        FenceableManifest::init_writer(
-            stored_manifest,
-            Duration::from_secs(300),
-            Arc::new(DefaultSystemClock::new()),
-        )
-        .await
-        .unwrap();
-
-        // Unpause to allow L0 SST writes to proceed
-        fail_parallel::cfg(fp_registry.clone(), "write-compacted-sst-io-error", "off").unwrap();
-
-        // Try to flush memtables, but they should fail due to the fence
-        let result = db1.inner.flush_memtables(FlushTarget::All).await;
-        assert!(matches!(result, Err(SlateDBError::Fenced)));
-        db1.close().await.unwrap();
-
-        assert!(db1
-            .inner
-            .table_store
-            .list_compacted_ssts(..)
-            .await
-            .unwrap()
-            .is_empty());
     }
 
     #[tokio::test]

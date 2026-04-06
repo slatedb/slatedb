@@ -363,6 +363,7 @@ mod tests {
         ManifestCore, SsTableHandle, SsTableId, SsTableInfo, SsTableView, SstType,
     };
     use crate::db_status::ClosedResultWriter;
+    use crate::error::SlateDBError;
     use crate::format::sst::{SsTableFormat, SST_FORMAT_VERSION_LATEST};
     use crate::manifest::store::{FenceableManifest, ManifestStore, StoredManifest};
     use crate::memtable_flusher::{FlushTarget, MemtableFlusher};
@@ -542,11 +543,18 @@ mod tests {
     struct StartedFlusher {
         flusher: MemtableFlusher,
         executor: crate::dispatcher::MessageHandlerExecutor,
+        #[allow(dead_code)]
+        closed_result: ClosedResultWriter,
     }
 
     impl StartedFlusher {
         async fn shutdown(&self) {
             MemtableFlusher::shutdown(&self.executor).await;
+        }
+
+        #[allow(dead_code)]
+        async fn await_closed(&self) -> Result<(), SlateDBError> {
+            self.closed_result.reader().await_value().await
         }
     }
 
@@ -573,13 +581,17 @@ mod tests {
             )
             .unwrap();
         executor.monitor_on(&Handle::current()).unwrap();
-        StartedFlusher { flusher, executor }
+        StartedFlusher {
+            flusher,
+            executor,
+            closed_result,
+        }
     }
 
     #[tokio::test]
-    async fn best_effort_flushes_within_l0_budget() {
+    async fn flush_all_waits_for_durable_upload() {
         let harness = setup_harness(
-            "/tmp/test_parallel_l0_flush_flusher_best_effort",
+            "/tmp/test_parallel_l0_flush_flusher_flush_all",
             Settings::default(),
             Arc::new(FailPointRegistry::new()),
         )
@@ -599,31 +611,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn through_wal_id_waits_for_durable_upload() {
+    async fn flush_all_waits_for_multiple_imms() {
         let harness = setup_harness(
-            "/tmp/test_parallel_l0_flush_flusher_through_wal_id",
-            Settings::default(),
-            Arc::new(FailPointRegistry::new()),
-        )
-        .await;
-        freeze_value_imm(&harness, b"k1", b"v1", 1, 11);
-        let flusher = start_flusher(harness);
-
-        let result = timeout(Duration::from_secs(5), flusher.flush(FlushTarget::All))
-            .await
-            .unwrap()
-            .unwrap();
-
-        assert_eq!(result.durable_through_wal_id, Some(11));
-        assert_eq!(result.durable_through_seq, Some(1));
-
-        flusher.shutdown().await;
-    }
-
-    #[tokio::test]
-    async fn through_current_imm_waits_for_durable_upload() {
-        let harness = setup_harness(
-            "/tmp/test_parallel_l0_flush_flusher_through_current_imm",
+            "/tmp/test_parallel_l0_flush_flusher_flush_multiple",
             Settings::default(),
             Arc::new(FailPointRegistry::new()),
         )
@@ -669,40 +659,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn checkpoint_current_imm_waits_for_flush_barrier() {
+    async fn checkpoint_waits_for_flush_barrier() {
         let harness = setup_harness(
-            "/tmp/test_parallel_l0_flush_flusher_checkpoint_current_imm",
-            Settings::default(),
-            Arc::new(FailPointRegistry::new()),
-        )
-        .await;
-        freeze_value_imm(&harness, b"k1", b"v1", 1, 0);
-        let before =
-            latest_manifest_checkpoint_count(&harness.path, Arc::clone(&harness.object_store))
-                .await;
-        let path = harness.path.clone();
-        let object_store = Arc::clone(&harness.object_store);
-        let flusher = start_flusher(harness);
-
-        let checkpoint = timeout(
-            Duration::from_secs(5),
-            flusher.create_checkpoint(FlushTarget::All, CheckpointOptions::default()),
-        )
-        .await
-        .unwrap()
-        .unwrap();
-
-        let after = latest_manifest_checkpoint_count(&path, object_store).await;
-        assert!(checkpoint.manifest_id > 0);
-        assert_eq!(after, before + 1);
-
-        flusher.shutdown().await;
-    }
-
-    #[tokio::test]
-    async fn checkpoint_all_waits_for_flush_barrier() {
-        let harness = setup_harness(
-            "/tmp/test_parallel_l0_flush_flusher_checkpoint_all",
+            "/tmp/test_parallel_l0_flush_flusher_checkpoint",
             Settings::default(),
             Arc::new(FailPointRegistry::new()),
         )
@@ -777,36 +736,24 @@ mod tests {
             Arc::new(FailPointRegistry::new()),
         )
         .await;
-        freeze_merge_imm(&harness, b"k1", b"merge", 1, 31);
-        let flusher = start_flusher(harness);
-
-        // The flush fails because the pipeline shuts down before the
-        // epoch becomes durable.
-        let flush_result = timeout(Duration::from_secs(5), flusher.flush(FlushTarget::All))
-            .await
-            .unwrap();
-        assert!(flush_result.is_err());
-
-        flusher.shutdown().await;
-    }
-
-    #[tokio::test]
-    async fn uploader_shutdown_propagates_to_flush_waiter() {
-        let harness = setup_harness(
-            "/tmp/test_parallel_l0_flush_flusher_uploader_shutdown",
-            Settings::default(),
-            Arc::new(FailPointRegistry::new()),
-        )
-        .await;
         // freeze a merge entry with no merge operator → fatal build error
         freeze_merge_imm(&harness, b"k1", b"merge", 1, 31);
         let flusher = start_flusher(harness);
 
-        // The flush should fail because the uploader shuts down.
+        // The flush fails because the upload error propagates through
+        // the executor's closed_result to the flush waiter.
         let flush_result = timeout(Duration::from_secs(5), flusher.flush(FlushTarget::All))
             .await
             .unwrap();
-        assert!(flush_result.is_err());
+        assert!(
+            flush_result.is_err(),
+            "expected error, got {:?}",
+            flush_result
+        );
+        assert!(
+            !matches!(flush_result, Err(SlateDBError::Closed)),
+            "expected specific error, got Closed"
+        );
 
         flusher.shutdown().await;
     }
@@ -842,11 +789,15 @@ mod tests {
 
         let flusher = start_flusher(harness);
 
-        // The flush should fail because the manifest writer is fenced.
+        // The flush should fail with a fencing error.
         let flush_result = timeout(Duration::from_secs(5), flusher.flush(FlushTarget::All))
             .await
             .unwrap();
-        assert!(flush_result.is_err());
+        assert!(
+            matches!(flush_result, Err(SlateDBError::Fenced)),
+            "expected Fenced, got {:?}",
+            flush_result
+        );
 
         flusher.shutdown().await;
     }

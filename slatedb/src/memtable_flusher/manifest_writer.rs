@@ -21,20 +21,20 @@ use crate::checkpoint::CheckpointCreateResult;
 use crate::config::CheckpointOptions;
 use crate::db::DbInner;
 use crate::db_state::SsTableView;
+use crate::dispatcher::MessageHandler;
 use crate::error::SlateDBError;
 use crate::manifest::store::FenceableManifest;
 use crate::utils::safe_async_channel;
 use crate::utils::IdGenerator;
+use async_trait::async_trait;
+use futures::stream::BoxStream;
+use futures::StreamExt;
 use std::cmp;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
-use async_trait::async_trait;
-use futures::stream::BoxStream;
-use futures::StreamExt;
 use tokio::runtime::Handle;
 use tokio::sync::oneshot;
-use crate::dispatcher::MessageHandler;
 
 /// Result reported for a completed flush request.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -98,12 +98,7 @@ impl ManifestWriter {
         tracker_tx: safe_async_channel::SafeSender<TrackerMessage>,
     ) -> Result<Self, SlateDBError> {
         let (commands_tx, commands_rx) = closed_result.channel();
-        let handler = ManifestWriterHandler::new(
-            db,
-            manifest,
-            manifest_poll_interval,
-            tracker_tx,
-        );
+        let handler = ManifestWriterHandler::new(db, manifest, manifest_poll_interval, tracker_tx);
         executor.add_handler(
             MANIFEST_WRITER_TASK_NAME.to_string(),
             Box::new(handler),
@@ -223,7 +218,10 @@ impl MessageHandler<ManifestWriterCommand> for ManifestWriterHandler {
             self.collect_pending_waiter(command);
         }
         // Any remaining pending waiters must fail with a concrete error.
-        let error = result.and(close_result.clone()).err().unwrap_or(SlateDBError::Closed);
+        let error = result
+            .and(close_result.clone())
+            .err()
+            .unwrap_or(SlateDBError::Closed);
         self.fail_pending_flushes(&error);
         self.fail_pending_checkpoints(&error);
         close_result
@@ -270,7 +268,7 @@ impl ManifestWriterHandler {
         through_epoch: Option<FlushEpoch>,
         sender: oneshot::Sender<Result<FlushResult, SlateDBError>>,
     ) {
-        if self.flush_requirement_satisfied(through_epoch) {
+        if self.epoch_is_durable(through_epoch) {
             let _ = sender.send(Ok(self.flush_result()));
         } else {
             self.pending_flushes.push(PendingFlush {
@@ -280,7 +278,7 @@ impl ManifestWriterHandler {
         }
     }
 
-    fn flush_requirement_satisfied(&self, through_epoch: Option<FlushEpoch>) -> bool {
+    fn epoch_is_durable(&self, through_epoch: Option<FlushEpoch>) -> bool {
         match through_epoch {
             None => true,
             Some(epoch) => self
@@ -302,7 +300,7 @@ impl ManifestWriterHandler {
         options: CheckpointOptions,
         sender: oneshot::Sender<Result<CheckpointCreateResult, SlateDBError>>,
     ) -> Result<(), SlateDBError> {
-        if self.checkpoint_requirement_satisfied(through_epoch) {
+        if self.epoch_is_durable(through_epoch) {
             let result = self.write_checkpoint_safely(&options).await;
             let _ = sender.send(result.clone());
             return result.map(|_| ());
@@ -370,15 +368,6 @@ impl ManifestWriterHandler {
         }
         self.pending_checkpoints = pending;
         satisfied
-    }
-
-    fn checkpoint_requirement_satisfied(&self, through_epoch: Option<FlushEpoch>) -> bool {
-        match through_epoch {
-            None => true,
-            Some(required_epoch) => self
-                .durable_through
-                .is_some_and(|(durable_epoch, _)| durable_epoch >= required_epoch),
-        }
     }
 
     async fn apply_ready_batch(
@@ -613,7 +602,7 @@ impl ManifestWriterHandler {
         let pending = std::mem::take(&mut self.pending_flushes);
         let mut still_pending = Vec::with_capacity(pending.len());
         for flush in pending {
-            if self.flush_requirement_satisfied(flush.through_epoch) {
+            if self.epoch_is_durable(flush.through_epoch) {
                 let _ = flush.sender.send(Ok(flush_result.clone()));
             } else {
                 still_pending.push(flush);
@@ -705,7 +694,6 @@ impl ManifestWriterHandler {
 
         Ok(())
     }
-
 }
 
 struct PendingFlush {
@@ -745,7 +733,6 @@ mod tests {
     use slatedb_common::metrics::MetricsRecorderHelper;
     use std::sync::Arc;
     use std::time::Duration;
-    use rstest::timeout::execute_with_timeout_async;
     use tokio::runtime::Handle;
     use tokio::sync::oneshot;
     use tokio::time::timeout;
@@ -822,9 +809,7 @@ mod tests {
         }
     }
 
-    async fn expect_flushed(
-        tracker_rx: &async_channel::Receiver<TrackerMessage>,
-    ) -> FlushEpoch {
+    async fn expect_flushed(tracker_rx: &async_channel::Receiver<TrackerMessage>) -> FlushEpoch {
         loop {
             let msg = timeout(Duration::from_secs(5), tracker_rx.recv())
                 .await
@@ -1150,9 +1135,7 @@ mod tests {
 
         // Send a flush request for epoch 1, which hasn't been uploaded yet.
         let (tx, rx) = oneshot::channel();
-        started
-            .send_flush(Some(FlushEpoch(1)), tx)
-            .unwrap();
+        started.send_flush(Some(FlushEpoch(1)), tx).unwrap();
 
         // Fence the manifest so the next write fails.
         let _fence = load_writer_manifest(&harness.path, Arc::clone(&harness.object_store)).await;
@@ -1229,9 +1212,7 @@ mod tests {
 
         // Send a flush request for an epoch that will never be uploaded.
         let (tx, rx) = oneshot::channel();
-        started
-            .send_flush(Some(FlushEpoch(1)), tx)
-            .unwrap();
+        started.send_flush(Some(FlushEpoch(1)), tx).unwrap();
 
         // Shut down cleanly — the flush waiter should get Closed.
         started.shutdown().await;

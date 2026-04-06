@@ -262,34 +262,13 @@ impl<T> SendSafely<T> for async_channel::Sender<T> {
 }
 
 /// Safe MPMC channel wrappers backed by [`async_channel`].
-///
-/// Both sender and receiver are cloneable. The receiver's [`SafeReceiver::close`]
-/// writes the close reason *and* closes the underlying channel atomically,
-/// so blocked `recv` calls wake immediately and future `send` calls return
-/// the specific error.
 pub(crate) mod safe_async_channel {
-    use super::{WatchableOnceCell, WatchableOnceCellReader};
+    use super::WatchableOnceCellReader;
     use crate::error::SlateDBError;
 
     pub(crate) struct SafeSender<T> {
         tx: async_channel::Sender<T>,
         closed: WatchableOnceCellReader<Result<(), SlateDBError>>,
-    }
-
-    pub(crate) struct SafeReceiver<T> {
-        rx: async_channel::Receiver<T>,
-        closed: WatchableOnceCell<Result<(), SlateDBError>>,
-    }
-
-    pub(crate) fn unbounded_channel<T>() -> (SafeSender<T>, SafeReceiver<T>) {
-        let (tx, rx) = async_channel::unbounded();
-        let closed = WatchableOnceCell::new();
-        let sender = SafeSender {
-            tx,
-            closed: closed.reader(),
-        };
-        let receiver = SafeReceiver { rx, closed };
-        (sender, receiver)
     }
 
     impl<T> SafeSender<T> {
@@ -312,6 +291,7 @@ pub(crate) mod safe_async_channel {
                 })
         }
 
+        #[allow(dead_code)]
         pub(crate) fn close(&self) {
             let _ = self.tx.close();
         }
@@ -321,36 +301,6 @@ pub(crate) mod safe_async_channel {
         fn clone(&self) -> Self {
             Self {
                 tx: self.tx.clone(),
-                closed: self.closed.clone(),
-            }
-        }
-    }
-
-    impl<T> SafeReceiver<T> {
-        /// Receive the next message, or `None` if the channel is closed.
-        pub(crate) async fn recv(&self) -> Option<T> {
-            self.rx.recv().await.ok()
-        }
-
-        /// Try to receive a message without blocking. Returns `Some` if a
-        /// message was available, `None` otherwise.
-        pub(crate) fn try_recv(&self) -> Option<T> {
-            self.rx.try_recv().ok()
-        }
-
-        /// Close the channel with the given result. All blocked `recv`
-        /// calls wake and return `None`. Future `send` calls return
-        /// the provided error.
-        pub(crate) fn close(&self, result: Result<(), SlateDBError>) {
-            self.closed.write(result);
-            self.rx.close();
-        }
-    }
-
-    impl<T> Clone for SafeReceiver<T> {
-        fn clone(&self) -> Self {
-            Self {
-                rx: self.rx.clone(),
                 closed: self.closed.clone(),
             }
         }
