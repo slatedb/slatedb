@@ -242,16 +242,19 @@ mod tests {
     use super::{FlushEpoch, TrackerMessage, UploadJob, Uploader};
     use crate::config::Settings;
     use crate::db::DbInner;
-    use crate::db_state::{ManifestCore, SsTableId};
+    use crate::db_state::{ManifestCore, SsTableId, SsTableView};
     use crate::db_status::ClosedResultWriter;
     use crate::error::SlateDBError;
     use crate::format::sst::SsTableFormat;
+    use crate::iter::RowEntryIterator;
     use crate::object_stores::ObjectStores;
     use crate::paths::PathResolver;
     use crate::rand::DbRand;
+    use crate::sst_iter::{SstIterator, SstIteratorOptions};
     use crate::tablestore::TableStore;
-    use crate::types::RowEntry;
+    use crate::types::{RowEntry, ValueDeletable};
     use crate::utils::IdGenerator;
+    use bytes::Bytes;
     use fail_parallel::FailPointRegistry;
     use object_store::memory::InMemory;
     use object_store::path::Path;
@@ -398,6 +401,31 @@ mod tests {
         };
         assert_eq!(event.epoch, FlushEpoch(1));
         assert_eq!(event.last_seq, 1);
+
+        // Verify the uploaded SST contains the expected key-value entry.
+        let sst_view =
+            SsTableView::identity(db.table_store.open_sst(&event.sst_handle.id).await.unwrap());
+        let mut iter = SstIterator::new_owned_initialized(
+            ..,
+            sst_view,
+            Arc::clone(&db.table_store),
+            SstIteratorOptions::default(),
+        )
+        .await
+        .unwrap()
+        .expect("expected non-empty SST");
+        let entry = iter
+            .next()
+            .await
+            .unwrap()
+            .expect("expected at least one entry");
+        assert_eq!(entry.key.as_ref(), b"key");
+        assert_eq!(entry.value, ValueDeletable::Value(Bytes::from("value")));
+        assert_eq!(entry.seq, 1);
+        assert!(
+            iter.next().await.unwrap().is_none(),
+            "expected exactly one entry"
+        );
 
         test.shutdown().await;
     }
