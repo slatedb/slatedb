@@ -355,7 +355,7 @@ impl SortedRun {
         self.sst_views.iter().map(|sst| sst.estimate_size()).sum()
     }
 
-    pub(crate) fn find_sst_with_range_covering_key_idx(&self, key: &[u8]) -> Option<usize> {
+    pub(crate) fn find_last_sst_with_range_covering_key(&self, key: &[u8]) -> Option<usize> {
         // returns the sst after the one whose range includes the key
         let first_sst = self
             .sst_views
@@ -394,7 +394,7 @@ impl SortedRun {
     /// This uses the binary-search candidate as the upper bound, then walks
     /// backward only across immediately overlapping views.
     fn point_table_idx_covering_key(&self, key: &[u8]) -> Range<usize> {
-        let Some(max_idx) = self.find_sst_with_range_covering_key_idx(key) else {
+        let Some(max_idx) = self.find_last_sst_with_range_covering_key(key) else {
             return 0..0;
         };
         let point_range = BytesRange::from_slice(key..=key);
