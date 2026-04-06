@@ -494,7 +494,7 @@ pub(crate) fn estimate_bytes_before_key(sorted_runs: &[SortedRun], key: &Bytes) 
     sorted_runs
         .iter()
         .map(|sorted_run| {
-            let Some(idx) = sorted_run.find_sst_with_range_covering_key_idx(key) else {
+            let Some(idx) = sorted_run.find_last_sst_with_range_covering_key(key) else {
                 return 0;
             };
             sorted_run

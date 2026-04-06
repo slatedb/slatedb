@@ -1,4 +1,293 @@
 ---
 title: Metrics
+description: How to collect and export SlateDB metrics using the MetricsRecorder trait
 ---
+
+{/* Metric reference tables have long names; horizontal scroll avoids wrapping. */}
+<style>{`
+  .sl-markdown-content table {
+    display: block;
+    overflow-x: auto;
+    white-space: nowrap;
+  }
+`}</style>
+
+SlateDB uses a recorder-based metrics system. You provide an implementation of the
+`MetricsRecorder` trait and SlateDB pushes metrics to it. If no recorder is configured,
+all metric operations are silently discarded with nearly no overhead.
+
+## Configuring a recorder
+
+Pass your recorder to `DbBuilder`:
+
+```rust
+use slatedb::Db;
+use slatedb::object_store::memory::InMemory;
+use slatedb_common::metrics::MetricsRecorder;
+use std::sync::Arc;
+
+let recorder: Arc<dyn MetricsRecorder> = /* your implementation */;
+
+let db = Db::builder("my_db", Arc::new(InMemory::new()))
+    .with_metrics_recorder(recorder)
+    .build()
+    .await
+    .unwrap();
+```
+
+## The MetricsRecorder trait
+
+`MetricsRecorder` has four registration methods, one per metric type:
+
+```rust
+pub trait MetricsRecorder: Send + Sync {
+    fn register_counter(&self, name: &str, description: &str, labels: &[(&str, &str)])
+        -> Arc<dyn CounterFn>;
+    fn register_gauge(&self, name: &str, description: &str, labels: &[(&str, &str)])
+        -> Arc<dyn GaugeFn>;
+    fn register_up_down_counter(&self, name: &str, description: &str, labels: &[(&str, &str)])
+        -> Arc<dyn UpDownCounterFn>;
+    fn register_histogram(&self, name: &str, description: &str, labels: &[(&str, &str)], boundaries: &[f64])
+        -> Arc<dyn HistogramFn>;
+}
+```
+
+Each method returns a handle that SlateDB calls on the hot path:
+
+| Trait | Method | Value type | Use case |
+|-------|--------|------------|----------|
+| `CounterFn` | `increment(u64)` | Monotonic | Request counts, bytes written |
+| `GaugeFn` | `set(i64)` | Absolute | Memory usage, queue depth |
+| `UpDownCounterFn` | `increment(i64)` | Additive (positive or negative) | In-flight compactions |
+| `HistogramFn` | `record(f64)` | Distribution | Latency, I/O sizes |
+
+`GaugeFn` and `UpDownCounterFn` are separate following OpenTelemetry semantics:
+gauges represent point-in-time snapshots (`set`), while up-down counters track
+additive changes (`increment` with positive or negative values).
+
+Labels are fixed at registration time as `&[(&str, &str)]` key-value pairs. SlateDB
+uses labels to collapse related metrics into a single name (e.g. `slatedb.db.request_count`
+with an `op` label instead of separate counters per operation).
+
+## Available metrics
+
+All metric names use dot-separated notation: `slatedb.<subsystem>.<metric>`.
+
+### Database (`slatedb.db.*`)
+
+| Name | Type | Labels | Description |
+|------|------|--------|-------------|
+| `slatedb.db.request_count` | counter | `op`: get, scan, flush | Number of DB requests |
+| `slatedb.db.write_ops` | counter | | Write operations |
+| `slatedb.db.write_batch_count` | counter | | Write batches |
+| `slatedb.db.backpressure_count` | counter | | Backpressure events |
+| `slatedb.db.immutable_memtable_flushes` | counter | | Immutable memtable flushes |
+| `slatedb.db.wal_buffer_flushes` | counter | | WAL buffer flushes |
+| `slatedb.db.wal_buffer_flush_requests` | counter | | WAL buffer flush requests |
+| `slatedb.db.wal_buffer_estimated_bytes` | gauge | | Estimated WAL buffer size |
+| `slatedb.db.total_mem_size_bytes` | gauge | | Total memory usage |
+| `slatedb.db.l0_sst_count` | gauge | | L0 SST count |
+| `slatedb.db.sst_filter_false_positive_count` | counter | | Bloom filter false positives |
+| `slatedb.db.sst_filter_positive_count` | counter | | Bloom filter positives |
+| `slatedb.db.sst_filter_negative_count` | counter | | Bloom filter negatives |
+
+### Block cache (`slatedb.db_cache.*`)
+
+| Name | Type | Labels | Description |
+|------|------|--------|-------------|
+| `slatedb.db_cache.access_count` | counter | `entry_kind`: filter, index, data_block, stats; `result`: hit, miss | Cache accesses |
+| `slatedb.db_cache.error_count` | counter | | Cache errors |
+
+### Compactor (`slatedb.compactor.*`)
+
+| Name | Type | Labels | Description |
+|------|------|--------|-------------|
+| `slatedb.compactor.bytes_compacted` | counter | | Total bytes compacted |
+| `slatedb.compactor.last_compaction_timestamp_sec` | gauge | | Last compaction time (epoch seconds) |
+| `slatedb.compactor.running_compactions` | up_down_counter | | Currently running compactions |
+| `slatedb.compactor.total_bytes_being_compacted` | gauge | | Bytes in active compactions |
+| `slatedb.compactor.total_throughput_bytes_per_sec` | gauge | | Compaction throughput |
+
+### Garbage collector (`slatedb.gc.*`)
+
+| Name | Type | Labels | Description |
+|------|------|--------|-------------|
+| `slatedb.gc.deleted_count` | counter | `resource`: manifest, wal, compacted, compactions | Deleted resources |
+| `slatedb.gc.count` | counter | | GC runs |
+
+### Object store (`slatedb.object_store.*`)
+
+All object store metrics carry four labels:
+
+| Label | Values |
+|-------|--------|
+| `component` | db, reader, gc, compactor |
+| `store_type` | main, wal |
+| `op` | get, put, delete |
+| `api` | get, get_range, get_ranges, head, put, multipart_init, multipart_part, multipart_complete, delete |
+
+| Name | Type | Description |
+|------|------|-------------|
+| `slatedb.object_store.request_count` | counter | Total API calls (success and error) |
+| `slatedb.object_store.error_count` | counter | Failed API calls |
+| `slatedb.object_store.request_duration_seconds` | histogram | Per-request latency |
+
+The instrumented store sits beneath the retrying layer, so each retry attempt
+is counted separately. Cache hits that never reach the remote store are not
+counted.
+
+### Object store cache (`slatedb.object_store_cache.*`)
+
+| Name | Type | Labels | Description |
+|------|------|--------|-------------|
+| `slatedb.object_store_cache.part_hit_count` | counter | | Cache part hits |
+| `slatedb.object_store_cache.part_access_count` | counter | | Cache part accesses |
+| `slatedb.object_store_cache.cache_keys` | gauge | | Cached keys |
+| `slatedb.object_store_cache.cache_bytes` | gauge | | Cached bytes |
+| `slatedb.object_store_cache.evicted_keys` | counter | | Evicted keys |
+| `slatedb.object_store_cache.evicted_bytes` | counter | | Evicted bytes |
+
+These are passed to `register_histogram` as the `boundaries` parameter.
+
+## Using DefaultMetricsRecorder
+
+`slatedb-common` ships a `DefaultMetricsRecorder` backed by atomics. It's useful
+in tests and in some production scenarios that don't have a dedicated metrics
+backend (e.g. periodic logging):
+
+```rust
+use slatedb_common::metrics::DefaultMetricsRecorder;
+use std::sync::Arc;
+
+let recorder = Arc::new(DefaultMetricsRecorder::new());
+let db = Db::builder("test_db", object_store)
+    .with_metrics_recorder(recorder.clone())
+    .build()
+    .await
+    .unwrap();
+
+// ... perform operations ...
+
+let snapshot = recorder.snapshot();
+for metric in snapshot.all() {
+    println!("{}: {:?} {:?}", metric.name, metric.labels, metric.value);
+}
+```
+
+## Using the metrics-rs facade
+
+The [`metrics`](https://crates.io/crates/metrics) crate is a lightweight facade
+(similar to `log` for logging). Install any compatible exporter
+(e.g. `metrics-exporter-prometheus`) and wire it up with a thin adapter:
+
+```rust
+use metrics::{counter, describe_counter, describe_gauge, describe_histogram, gauge, histogram};
+
+struct MetricsRsCounter(metrics::Counter);
+
+impl CounterFn for MetricsRsCounter {
+    fn increment(&self, value: u64) {
+        self.0.increment(value);
+    }
+}
+
+// Gauge, UpDownCounter, and Histogram wrappers follow the same pattern.
+
+pub struct MetricsRsRecorder;
+
+impl MetricsRecorder for MetricsRsRecorder {
+    fn register_counter(
+        &self, name: &str, desc: &str, labels: &[(&str, &str)]
+    ) -> Arc<dyn CounterFn> {
+        let labels: Vec<(String, String)> = labels.iter()
+            .map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        describe_counter!(name.to_string(), desc.to_string());
+        Arc::new(MetricsRsCounter(counter!(name.to_string(), &labels)))
+    }
+    // ... other methods follow the same pattern
+}
+```
+
+`MetricsRsRecorder` is stateless since the `metrics` facade manages all state
+globally. 
+
+## Implementing a Prometheus recorder
+
+A Prometheus recorder maps each `register_*` call to a labeled time series
+within a `Family`:
+
+```rust
+use prometheus_client::metrics::counter::Counter as PromCounter;
+use prometheus_client::metrics::family::Family;
+use prometheus_client::registry::Registry;
+
+type Labels = Vec<(String, String)>;
+
+// Thin wrapper that bridges prometheus-client's Counter to SlateDB's CounterFn.
+struct PromCounterHandle(PromCounter);
+
+impl CounterFn for PromCounterHandle {
+    fn increment(&self, value: u64) {
+        self.0.inc_by(value);
+    }
+}
+
+struct PrometheusRecorder {
+    registry: Mutex<Registry>,
+    counters: Mutex<HashMap<String, Family<Labels, PromCounter>>>,
+    // ... gauges, histograms
+}
+
+impl MetricsRecorder for PrometheusRecorder {
+    fn register_counter(
+        &self, name: &str, desc: &str, labels: &[(&str, &str)]
+    ) -> Arc<dyn CounterFn> {
+        let mut families = self.counters.lock().unwrap();
+        let family = families.entry(name.to_string()).or_insert_with(|| {
+            let f = Family::<Labels, PromCounter>::default();
+            self.registry.lock().unwrap().register(name, desc, f.clone());
+            f
+        });
+        let labels: Labels = labels.iter()
+            .map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        let counter = family.get_or_create(&labels).clone();
+        Arc::new(PromCounterHandle(counter))
+    }
+    // ... other methods follow the same pattern
+}
+```
+
+## Implementing an OpenTelemetry recorder
+
+A recorder that maps directly to the OpenTelemetry SDK instruments:
+
+```rust
+use opentelemetry::metrics::MeterProvider;
+use opentelemetry::KeyValue;
+use opentelemetry_sdk::metrics::SdkMeterProvider;
+
+struct OtelRecorder {
+    meter: opentelemetry::metrics::Meter,
+}
+
+impl OtelRecorder {
+    fn new(provider: &SdkMeterProvider) -> Self {
+        Self { meter: provider.meter("slatedb") }
+    }
+}
+
+impl MetricsRecorder for OtelRecorder {
+    fn register_counter(
+        &self, name: &str, desc: &str, labels: &[(&str, &str)]
+    ) -> Arc<dyn CounterFn> {
+        let attrs: Vec<KeyValue> = labels.iter()
+            .map(|(k, v)| KeyValue::new(k.to_string(), v.to_string()))
+            .collect();
+        let counter = self.meter.u64_counter(name.to_string())
+            .with_description(desc.to_string()).build();
+        Arc::new(OtelCounter { counter, attrs })
+    }
+    // ... other methods follow the same pattern
+}
+```
 

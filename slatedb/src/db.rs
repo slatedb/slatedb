@@ -6432,7 +6432,7 @@ mod tests {
 
     #[cfg(feature = "wal_disable")]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn repro_get_fails_when_compacted_sr_splits_same_key_across_ssts() {
+    async fn reads_succeed_when_compacted_sr_splits_same_key_across_ssts() {
         use crate::SstBlockSize;
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = "/tmp/test_merge_split_sr_repro";
@@ -6522,7 +6522,7 @@ mod tests {
 
         info!("GOT MANIFEST WITH 3 L0s");
 
-        // Compact until we observe a sorted run with more than one SST.
+        // Compact until we observe a sorted run where a single logical key spans SST boundaries.
         should_compact.store(true, Ordering::SeqCst);
         tokio::time::timeout(Duration::from_secs(60), async {
             loop {
@@ -6548,7 +6548,13 @@ mod tests {
                             .map(|t| t.estimate_size())
                             .collect::<Vec<_>>()
                     );
-                    if !state.state().core().compacted.is_empty() {
+                    if state
+                        .state()
+                        .core()
+                        .compacted
+                        .first()
+                        .is_some_and(|sr| sr.sst_views.len() > 1)
+                    {
                         break;
                     }
                 }
@@ -6556,7 +6562,7 @@ mod tests {
             }
         })
         .await
-        .expect("timed out waiting for compacted SR with >1 SST");
+        .expect("timed out waiting for compacted SR where one key spans multiple SSTs");
 
         let data = db.get(b"k").await.unwrap().unwrap();
         let expected = Bytes::from(b"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa16".as_ref());
@@ -6576,7 +6582,7 @@ mod tests {
 
     #[cfg(feature = "wal_disable")]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn repro_get_fails_when_compacted_sr_splits_same_merge_key_across_ssts() {
+    async fn reads_succeed_when_compacted_sr_splits_same_merge_key_across_ssts() {
         use crate::SstBlockSize;
         use bytes::{BufMut as _, BytesMut};
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
@@ -6640,9 +6646,9 @@ mod tests {
         expected.put(b"base".as_slice());
         let _snapshot = db.snapshot().await.unwrap();
 
-        // Write many merge operands for the same key, each forced into L0.
-        for _ in 0..16u16 {
-            let operand = vec![b'a'; 32];
+        // Write distinct merge operands so the final value also verifies operand ordering.
+        for i in 0..16u8 {
+            let operand = vec![b'a' + i; 32];
             expected.put(operand.as_slice());
             db.merge_with_options(
                 b"k",
@@ -6670,7 +6676,7 @@ mod tests {
 
         info!("GOT MANIFEST WITH 3 L0s");
 
-        // Compact until we observe a sorted run with more than one SST.
+        // Compact until we observe a sorted run where a single logical key spans SST boundaries.
         should_compact.store(true, Ordering::SeqCst);
         tokio::time::timeout(Duration::from_secs(60), async {
             loop {
@@ -6696,7 +6702,13 @@ mod tests {
                             .map(|t| t.estimate_size())
                             .collect::<Vec<_>>()
                     );
-                    if !state.state().core().compacted.is_empty() {
+                    if state
+                        .state()
+                        .core()
+                        .compacted
+                        .first()
+                        .is_some_and(|sr| sr.sst_views.len() > 1)
+                    {
                         break;
                     }
                 }
@@ -6704,7 +6716,7 @@ mod tests {
             }
         })
         .await
-        .expect("timed out waiting for compacted SR with >1 SST");
+        .expect("timed out waiting for compacted SR where one key spans multiple SSTs");
 
         let data = db.get(b"k").await.unwrap().unwrap();
         let expected = expected.freeze();
