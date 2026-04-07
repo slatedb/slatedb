@@ -5,7 +5,6 @@ use crate::db_state::DbState;
 use crate::error::SlateDBError;
 use crate::mem_table_flush::MemtableFlushMsg;
 use crate::oracle::Oracle;
-use crate::utils::SendSafely;
 use crate::wal_replay::ReplayedMemtable;
 
 pub(crate) const MAX_WAL_FLUSHES_BEFORE_L0_FLUSH: u64 = 4096;
@@ -51,11 +50,9 @@ impl DbInner {
             return Ok(());
         }
 
-        guard.freeze_memtable(wal_id)?;
-        self.memtable_flush_notifier.send_safely(
-            guard.closed_result_reader(),
-            MemtableFlushMsg::FlushImmutableMemtables { sender: None },
-        )?;
+        guard.freeze_memtable(wal_id);
+        self.memtable_flush_notifier
+            .send(MemtableFlushMsg::FlushImmutableMemtables { sender: None })?;
         Ok(())
     }
 
@@ -94,6 +91,7 @@ impl DbInner {
         self.mono_clock.set_last_tick(replayed_memtable.last_tick)?;
 
         // replace the memtable
-        guard.replace_memtable(replayed_memtable.table)
+        guard.replace_memtable(replayed_memtable.table);
+        Ok(())
     }
 }

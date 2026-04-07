@@ -37,7 +37,6 @@ use crate::dispatcher::MessageHandlerExecutor;
 use crate::garbage_collector::GC_TASK_NAME;
 use crate::transaction_manager::IsolationLevel;
 use crate::CloseReason;
-use async_channel::Sender;
 use log::{info, trace, warn};
 use parking_lot::RwLock;
 use std::time::Duration;
@@ -71,14 +70,14 @@ use crate::sst_iter::SstIteratorOptions;
 use crate::tablestore::TableStore;
 use crate::transaction_manager::TransactionManager;
 use crate::types::KeyValue;
-use crate::utils::{format_bytes_si, SendSafely};
+use crate::utils::{format_bytes_si, SafeSender};
 use crate::wal_buffer::{WalBufferManager, WAL_BUFFER_TASK_NAME};
 use crate::wal_replay::{WalReplayIterator, WalReplayOptions};
 use slatedb_common::clock::SystemClock;
 use slatedb_common::metrics::MetricsRecorderHelper;
 use slatedb_txn_obj::DirtyObject;
 
-use crate::db_status::DbStatusReporter;
+use crate::db_status::{ClosedResultWriter, DbStatusManager};
 pub use builder::DbBuilder;
 pub use builder::DbReaderBuilder;
 
@@ -88,8 +87,8 @@ pub(crate) struct DbInner {
     pub(crate) state: Arc<RwLock<DbState>>,
     pub(crate) settings: Settings,
     pub(crate) table_store: Arc<TableStore>,
-    pub(crate) memtable_flush_notifier: Sender<MemtableFlushMsg>,
-    pub(crate) write_notifier: Sender<WriteBatchMessage>,
+    pub(crate) memtable_flush_notifier: SafeSender<MemtableFlushMsg>,
+    pub(crate) write_notifier: SafeSender<WriteBatchMessage>,
     pub(crate) db_stats: DbStats,
     /// Kept alive so the underlying `MetricsRecorder` is not dropped while
     /// metric handles in `DbStats` (and other stats structs) are still in use.
@@ -112,7 +111,7 @@ pub(crate) struct DbInner {
     /// [`txn_manager`] tracks all the live transactions and related metadata.
     pub(crate) txn_manager: Arc<TransactionManager>,
     pub(crate) snapshot_manager: Arc<SnapshotManager>,
-    pub(crate) status_reporter: DbStatusReporter,
+    pub(crate) status_manager: DbStatusManager,
 }
 
 impl DbInner {
@@ -122,20 +121,20 @@ impl DbInner {
         rand: Arc<DbRand>,
         table_store: Arc<TableStore>,
         manifest: DirtyObject<Manifest>,
-        memtable_flush_notifier: Sender<MemtableFlushMsg>,
-        write_notifier: Sender<WriteBatchMessage>,
+        memtable_flush_notifier: SafeSender<MemtableFlushMsg>,
+        write_notifier: SafeSender<WriteBatchMessage>,
         recorder: MetricsRecorderHelper,
         fp_registry: Arc<FailPointRegistry>,
         merge_operator: Option<crate::merge_operator::MergeOperatorType>,
+        status_manager: DbStatusManager,
     ) -> Result<Self, SlateDBError> {
         // both last_seq and last_committed_seq will be updated after WAL replay.
         let last_l0_seq = manifest.value.core.last_l0_seq;
-        let status_reporter = DbStatusReporter::new(last_l0_seq);
         let oracle = Arc::new(DbOracle::new(
             last_l0_seq,
             last_l0_seq,
             last_l0_seq,
-            status_reporter.clone(),
+            status_manager.clone(),
         ));
 
         let mono_clock = Arc::new(MonotonicClock::new(
@@ -144,7 +143,7 @@ impl DbInner {
         ));
 
         // state are mostly manifest, including IMM, L0, etc.
-        let db_state = DbState::new(manifest, status_reporter.clone());
+        let db_state = DbState::new(manifest);
         let state = Arc::new(RwLock::new(db_state));
 
         let db_stats = DbStats::new(&recorder);
@@ -161,7 +160,7 @@ impl DbInner {
         let recent_flushed_wal_id = state.read().state().core().replay_after_wal_id;
         let wal_buffer = Arc::new(WalBufferManager::new(
             state.clone(),
-            state.clone(),
+            status_manager.clone(),
             db_stats.clone(),
             recent_flushed_wal_id,
             oracle.clone(),
@@ -192,7 +191,7 @@ impl DbInner {
             reader,
             txn_manager,
             snapshot_manager,
-            status_reporter,
+            status_manager,
         };
         Ok(db_inner)
     }
@@ -298,8 +297,7 @@ impl DbInner {
         };
 
         self.maybe_apply_backpressure().await?;
-        self.write_notifier
-            .send_safely(self.state.read().closed_result_reader(), batch_msg)?;
+        self.write_notifier.send(batch_msg)?;
 
         // TODO: this can be modified as awaiting the last_durable_seq watermark & fatal error.
 
@@ -417,10 +415,8 @@ impl DbInner {
     // use to manually flush memtables
     async fn flush_immutable_memtables(&self) -> Result<(), SlateDBError> {
         let (tx, rx) = tokio::sync::oneshot::channel();
-        self.memtable_flush_notifier.send_safely(
-            self.state.read().closed_result_reader(),
-            MemtableFlushMsg::FlushImmutableMemtables { sender: Some(tx) },
-        )?;
+        self.memtable_flush_notifier
+            .send(MemtableFlushMsg::FlushImmutableMemtables { sender: Some(tx) })?;
         rx.await?
     }
 
@@ -429,7 +425,7 @@ impl DbInner {
             let last_flushed_wal_id = self.wal_buffer.recent_flushed_wal_id();
             let mut guard = self.state.write();
             if !guard.memtable().is_empty() {
-                guard.freeze_memtable(last_flushed_wal_id)?;
+                guard.freeze_memtable(last_flushed_wal_id);
                 true
             } else {
                 false
@@ -570,15 +566,11 @@ impl DbInner {
     /// ## Returns
     /// - `Ok(())` if the DB is still open.
     /// - `Err(SlateDBError::Closed)` if the DB was closed successfully
-    ///   (state.closed_result_reader() returns Ok(())).
+    ///   (state.result_reader() returns Ok(())).
     /// - `Err(e)` if the DB was closed with an error, where `e` is the error
-    ///   (state.closed_result_reader() returns Err(e)).
+    ///   (state.result_reader() returns Err(e)).
     pub(crate) fn status(&self) -> Result<(), SlateDBError> {
-        let closed_result_reader = {
-            let state = self.state.read();
-            state.closed_result_reader()
-        };
-        if let Some(result) = closed_result_reader.read() {
+        if let Some(result) = self.status_manager.result_reader().read() {
             return match result {
                 Ok(()) => Err(SlateDBError::Closed),
                 Err(e) => Err(e),
@@ -694,7 +686,7 @@ impl Db {
         };
 
         // Mark the database as closed before flushing.
-        self.inner.state.write().closed_result().write(Ok(()));
+        self.inner.status_manager.write_result(Ok(()));
 
         if should_flush {
             if let Err(e) = self.inner.flush(false).await {
@@ -1561,7 +1553,7 @@ impl Db {
     /// some_async_fn(status.durable_seq).await; // deadlock!
     /// ```
     pub fn subscribe(&self) -> tokio::sync::watch::Receiver<DbStatus> {
-        self.inner.status_reporter.subscribe()
+        self.inner.status_manager.subscribe()
     }
 
     /// Begin a new transaction with the specified isolation level.
@@ -2215,10 +2207,8 @@ mod tests {
 
         // Simulate a failed state (e.g. fenced).
         db.inner
-            .state
-            .write()
-            .closed_result()
-            .write(Err(crate::error::SlateDBError::Fenced));
+            .status_manager
+            .write_result(Err(crate::error::SlateDBError::Fenced));
 
         // close() should succeed but not flush when failed.
         db.close().await.unwrap();
@@ -6585,10 +6575,8 @@ mod tests {
 
         // When: the DB is fenced (simulated via closed_result)
         db.inner
-            .state
-            .write()
-            .closed_result()
-            .write(Err(crate::error::SlateDBError::Fenced));
+            .status_manager
+            .write_result(Err(crate::error::SlateDBError::Fenced));
 
         // Then: the watcher should report close_reason = Fenced
         let status = tokio::time::timeout(

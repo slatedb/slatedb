@@ -136,7 +136,7 @@ use crate::db_cache::SplitCache;
 use crate::db_cache::{DbCache, DbCacheWrapper};
 use crate::db_reader::DbReader;
 use crate::db_state::ManifestCore;
-use crate::db_status::ClosedResultWriter;
+use crate::db_status::{ClosedResultWriter, DbStatusManager};
 use crate::dispatcher::MessageHandlerExecutor;
 use crate::error::SlateDBError;
 use crate::format::sst::{BlockTransformer, SsTableFormat};
@@ -154,6 +154,7 @@ use crate::rand::DbRand;
 use crate::retrying_object_store::RetryingObjectStore;
 use crate::store_provider::DefaultStoreProvider;
 use crate::tablestore::TableStore;
+use crate::utils::SafeSender;
 use crate::utils::WatchableOnceCell;
 use slatedb_common::clock::DefaultSystemClock;
 use slatedb_common::clock::SystemClock;
@@ -504,9 +505,15 @@ impl<P: Into<Path>> DbBuilder<P> {
         )
         .await?;
 
-        // Setup communication channels
-        let (memtable_flush_tx, memtable_flush_rx) = async_channel::unbounded();
-        let (write_tx, write_rx) = async_channel::unbounded();
+        // Shared lifecycle state — created before DbInner so it can be shared
+        // with the executor and future channel construction.
+        let manifest_dirty = manifest.prepare_dirty()?;
+        let status_manager = DbStatusManager::new(manifest_dirty.value.core.last_l0_seq);
+
+        // Setup communication channels wired to the shared closed state.
+        let reader = status_manager.result_reader();
+        let (memtable_flush_tx, memtable_flush_rx) = SafeSender::unbounded_channel(reader.clone());
+        let (write_tx, write_rx) = SafeSender::unbounded_channel(reader);
 
         // Create the database inner state
         let inner = Arc::new(
@@ -515,12 +522,13 @@ impl<P: Into<Path>> DbBuilder<P> {
                 system_clock.clone(),
                 rand.clone(),
                 table_store.clone(),
-                manifest.prepare_dirty()?,
+                manifest_dirty,
                 memtable_flush_tx,
                 write_tx,
                 recorder.clone(),
                 self.fp_registry.clone(),
                 self.merge_operator.clone(),
+                status_manager.clone(),
             )
             .await?,
         );
@@ -533,7 +541,7 @@ impl<P: Into<Path>> DbBuilder<P> {
         // Setup background tasks
         let tokio_handle = Handle::current();
         let task_executor = Arc::new(MessageHandlerExecutor::new(
-            inner.clone().state.read().closed_result(),
+            Arc::new(status_manager),
             system_clock.clone(),
         ));
         if inner.wal_enabled {
@@ -872,7 +880,7 @@ pub struct CompactorBuilder<P: Into<Path>> {
     rand: Arc<DbRand>,
     recorder: MetricsRecorderHelper,
     system_clock: Arc<dyn SystemClock>,
-    closed_result: ClosedResultWriter,
+    closed_result: Arc<dyn ClosedResultWriter>,
     merge_operator: Option<MergeOperatorType>,
     block_transformer: Option<Arc<dyn BlockTransformer>>,
     #[cfg(feature = "compaction_filters")]
@@ -891,7 +899,7 @@ impl<P: Into<Path>> CompactorBuilder<P> {
             rand: Arc::new(DbRand::default()),
             recorder: MetricsRecorderHelper::noop(),
             system_clock: Arc::new(DefaultSystemClock::default()),
-            closed_result: ClosedResultWriter::new(WatchableOnceCell::new()),
+            closed_result: Arc::new(WatchableOnceCell::new()),
             merge_operator: None,
             block_transformer: None,
             #[cfg(feature = "compaction_filters")]

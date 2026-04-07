@@ -1600,8 +1600,8 @@ mod tests {
         );
         let (_, rx) = async_channel::unbounded();
         let clock = Arc::new(DefaultSystemClock::default());
-        let executor =
-            MessageHandlerExecutor::new(ClosedResultWriter::new(WatchableOnceCell::new()), clock);
+        let closed_result: Arc<dyn ClosedResultWriter> = Arc::new(WatchableOnceCell::new());
+        let executor = MessageHandlerExecutor::new(closed_result, clock);
         executor
             .add_handler(
                 "garbage_collector".to_string(),

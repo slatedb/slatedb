@@ -67,11 +67,11 @@ impl SnapshotManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db_status::DbStatusReporter;
+    use crate::db_status::DbStatusManager;
 
     fn new_snapshot_manager(seq: u64) -> SnapshotManager {
         SnapshotManager::new(
-            Arc::new(DbOracle::new(seq, seq, seq, DbStatusReporter::new(seq))),
+            Arc::new(DbOracle::new(seq, seq, seq, DbStatusManager::new(seq))),
             Arc::new(DbRand::new(0)),
         )
     }

@@ -393,7 +393,7 @@ impl TransactionManagerInner {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db_status::DbStatusReporter;
+    use crate::db_status::DbStatusManager;
     use crate::rand::DbRand;
     use bytes::Bytes;
     use parking_lot::Mutex;
@@ -410,7 +410,7 @@ mod tests {
 
     fn create_transaction_manager() -> TransactionManager {
         let db_rand = Arc::new(DbRand::new(0));
-        let status_reporter = DbStatusReporter::new(0);
+        let status_reporter = DbStatusManager::new(0);
         let oracle = Arc::new(DbOracle::new(0, 0, 0, status_reporter));
         TransactionManager::new(oracle, db_rand)
     }
@@ -418,7 +418,7 @@ mod tests {
     #[test]
     fn test_new_transaction_uses_oracle_seq() {
         let db_rand = Arc::new(DbRand::new(0));
-        let status_reporter = DbStatusReporter::new(123);
+        let status_reporter = DbStatusManager::new(123);
         let oracle = Arc::new(DbOracle::new(123, 123, 123, status_reporter));
         let txn_manager = TransactionManager::new(oracle, db_rand);
 
