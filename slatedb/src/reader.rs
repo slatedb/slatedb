@@ -90,9 +90,8 @@ impl Reader {
         sst_iter_options: SstIteratorOptions,
         point_lookup_stats: Option<DbStats>,
     ) -> Result<IteratorSources, SlateDBError> {
-        let write_batch_iter = write_batch.map(|batch| {
-            WriteBatchIterator::new(batch, range.clone(), sst_iter_options.order)
-        });
+        let write_batch_iter = write_batch
+            .map(|batch| WriteBatchIterator::new(batch, range.clone(), sst_iter_options.order));
 
         let mut memtables = VecDeque::new();
         memtables.push_back(db_state.memtable());

@@ -2073,9 +2073,18 @@ mod tests {
             .scan_prefix_with_options(b"prefix/", &scan_options)
             .await
             .unwrap();
-        assert_eq!(iter.next().await.unwrap().unwrap().key.as_ref(), b"prefix/c");
-        assert_eq!(iter.next().await.unwrap().unwrap().key.as_ref(), b"prefix/b");
-        assert_eq!(iter.next().await.unwrap().unwrap().key.as_ref(), b"prefix/a");
+        assert_eq!(
+            iter.next().await.unwrap().unwrap().key.as_ref(),
+            b"prefix/c"
+        );
+        assert_eq!(
+            iter.next().await.unwrap().unwrap().key.as_ref(),
+            b"prefix/b"
+        );
+        assert_eq!(
+            iter.next().await.unwrap().unwrap().key.as_ref(),
+            b"prefix/a"
+        );
         assert_eq!(iter.next().await.unwrap(), None);
 
         kv_store.close().await.unwrap();
