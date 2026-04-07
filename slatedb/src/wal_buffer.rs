@@ -18,7 +18,7 @@ use crate::error::SlateDBError;
 use crate::oracle::{DbOracle, Oracle};
 use crate::tablestore::TableStore;
 use crate::types::RowEntry;
-use crate::utils::safe_async_channel::SafeSender;
+use crate::utils::SafeSender;
 use crate::utils::{format_bytes_si, WatchableOnceCell, WatchableOnceCellReader};
 use crate::wal_id::WalIdStore;
 
@@ -68,7 +68,7 @@ struct WalBufferManagerInner {
     /// The flusher will try flush all the immutable wals to remote storage.
     immutable_wals: VecDeque<(u64, Arc<WalBuffer>)>,
     /// The channel to send the flush work to the background worker.
-    flush_tx: Option<crate::utils::safe_async_channel::SafeSender<WalFlushWork>>,
+    flush_tx: Option<SafeSender<WalFlushWork>>,
     /// task executor for the background worker.
     task_executor: Option<Arc<MessageHandlerExecutor>>,
     /// Whenever a WAL is applied to Memtable and successfully flushed to remote storage,

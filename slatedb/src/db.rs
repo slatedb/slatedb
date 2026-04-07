@@ -70,7 +70,7 @@ use crate::sst_iter::SstIteratorOptions;
 use crate::tablestore::TableStore;
 use crate::transaction_manager::TransactionManager;
 use crate::types::KeyValue;
-use crate::utils::{format_bytes_si, safe_async_channel};
+use crate::utils::{format_bytes_si, SafeSender};
 use crate::wal_buffer::{WalBufferManager, WAL_BUFFER_TASK_NAME};
 use crate::wal_replay::{WalReplayIterator, WalReplayOptions};
 use slatedb_common::clock::SystemClock;
@@ -87,8 +87,8 @@ pub(crate) struct DbInner {
     pub(crate) state: Arc<RwLock<DbState>>,
     pub(crate) settings: Settings,
     pub(crate) table_store: Arc<TableStore>,
-    pub(crate) memtable_flush_notifier: safe_async_channel::SafeSender<MemtableFlushMsg>,
-    pub(crate) write_notifier: safe_async_channel::SafeSender<WriteBatchMessage>,
+    pub(crate) memtable_flush_notifier: SafeSender<MemtableFlushMsg>,
+    pub(crate) write_notifier: SafeSender<WriteBatchMessage>,
     pub(crate) db_stats: DbStats,
     /// Kept alive so the underlying `MetricsRecorder` is not dropped while
     /// metric handles in `DbStats` (and other stats structs) are still in use.
@@ -121,8 +121,8 @@ impl DbInner {
         rand: Arc<DbRand>,
         table_store: Arc<TableStore>,
         manifest: DirtyObject<Manifest>,
-        memtable_flush_notifier: safe_async_channel::SafeSender<MemtableFlushMsg>,
-        write_notifier: safe_async_channel::SafeSender<WriteBatchMessage>,
+        memtable_flush_notifier: SafeSender<MemtableFlushMsg>,
+        write_notifier: SafeSender<WriteBatchMessage>,
         recorder: MetricsRecorderHelper,
         fp_registry: Arc<FailPointRegistry>,
         merge_operator: Option<crate::merge_operator::MergeOperatorType>,

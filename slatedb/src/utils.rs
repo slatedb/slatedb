@@ -711,65 +711,60 @@ pub(crate) async fn preload_cache_from_manifest(
     Ok(())
 }
 
-/// Safe MPMC channel wrappers backed by [`async_channel`].
+/// A channel sender that checks the DB's closed result when the underlying
+/// channel is closed, converting the raw channel error into the appropriate
+/// [`SlateDBError`].
 ///
-/// The sender checks the DB's closed result when the channel is closed,
-/// converting the raw channel error into the appropriate [`SlateDBError`].
 /// Use [`SafeSender::unbounded_channel`] to construct a channel wired to a
 /// [`crate::db_status::ClosedResultWriter::result_reader`].
-pub(crate) mod safe_async_channel {
-    use super::WatchableOnceCellReader;
-    use crate::error::SlateDBError;
+pub(crate) struct SafeSender<T> {
+    tx: async_channel::Sender<T>,
+    closed: WatchableOnceCellReader<Result<(), SlateDBError>>,
+}
 
-    pub(crate) struct SafeSender<T> {
+impl<T> SafeSender<T> {
+    pub(crate) fn new(
         tx: async_channel::Sender<T>,
         closed: WatchableOnceCellReader<Result<(), SlateDBError>>,
+    ) -> Self {
+        Self { tx, closed }
     }
 
-    impl<T> SafeSender<T> {
-        pub(crate) fn new(
-            tx: async_channel::Sender<T>,
-            closed: WatchableOnceCellReader<Result<(), SlateDBError>>,
-        ) -> Self {
-            Self { tx, closed }
-        }
+    pub(crate) fn unbounded_channel(
+        closed: WatchableOnceCellReader<Result<(), SlateDBError>>,
+    ) -> (Self, async_channel::Receiver<T>) {
+        let (tx, rx) = async_channel::unbounded();
+        (Self::new(tx, closed), rx)
+    }
 
-        pub(crate) fn unbounded_channel(
-            closed: WatchableOnceCellReader<Result<(), SlateDBError>>,
-        ) -> (Self, async_channel::Receiver<T>) {
-            let (tx, rx) = async_channel::unbounded();
-            (Self::new(tx, closed), rx)
-        }
-
-        /// Attempts to send a message. If the channel is closed, returns the
-        /// DB's closed result error, or [`SlateDBError::Closed`] if it was a
-        /// clean shutdown. Panics if the channel is closed but no closed result
-        /// has been set (indicates a bug).
-        #[inline]
-        #[allow(clippy::panic, clippy::disallowed_methods)]
-        pub(crate) fn send(&self, message: T) -> Result<(), SlateDBError> {
-            match self.tx.try_send(message) {
-                Ok(_) => Ok(()),
-                Err(e) => {
-                    if let Some(result) = self.closed.read() {
-                        match result {
-                            Ok(()) => Err(SlateDBError::Closed),
-                            Err(err) => Err(err),
-                        }
-                    } else {
-                        panic!("Failed to send message to unbounded channel: {}", e);
+    /// Attempts to send a message. If the channel is closed, returns the
+    /// DB's closed result error, or [`SlateDBError::Closed`] if it was a
+    /// clean shutdown. Panics if the channel is closed but no closed result
+    /// has been set (indicates a bug).
+    #[inline]
+    #[allow(clippy::panic, clippy::disallowed_methods)]
+    pub(crate) fn send(&self, message: T) -> Result<(), SlateDBError> {
+        match self.tx.try_send(message) {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                if let Some(result) = self.closed.read() {
+                    match result {
+                        Ok(()) => Err(SlateDBError::Closed),
+                        Err(err) => Err(err),
                     }
+                } else {
+                    panic!("Failed to send message to unbounded channel: {}", e);
                 }
             }
         }
     }
+}
 
-    impl<T> Clone for SafeSender<T> {
-        fn clone(&self) -> Self {
-            Self {
-                tx: self.tx.clone(),
-                closed: self.closed.clone(),
-            }
+impl<T> Clone for SafeSender<T> {
+    fn clone(&self) -> Self {
+        Self {
+            tx: self.tx.clone(),
+            closed: self.closed.clone(),
         }
     }
 }
