@@ -4,12 +4,11 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::bytes_range::BytesRange;
-use crate::config::{ReadOptions, ScanOptions};
+use crate::config::{DurabilityLevel, ViewReadOptions, ViewScanOptions};
 use crate::db_iter::DbIterator;
 use crate::types::KeyValue;
 
 use crate::db::DbInner;
-use crate::DbRead;
 
 pub struct DbSnapshot {
     snapshot_id: Uuid,
@@ -42,21 +41,22 @@ impl DbSnapshot {
     /// ## Returns
     /// - `Result<Option<Bytes>, SlateDBError>`: the value if it exists, None otherwise
     pub async fn get<K: AsRef<[u8]> + Send>(&self, key: K) -> Result<Option<Bytes>, crate::Error> {
-        self.get_with_options(key, &ReadOptions::default()).await
+        self.get_with_options(key, &ViewReadOptions::default())
+            .await
     }
 
     /// Get a value from the snapshot with custom read options.
     ///
     /// ## Arguments
     /// - `key`: the key to get
-    /// - `options`: the read options to use
+    /// - `options`: the per-read options to use
     ///
     /// ## Returns
     /// - `Result<Option<Bytes>, SlateDBError>`: the value if it exists, None otherwise
     pub async fn get_with_options<K: AsRef<[u8]> + Send>(
         &self,
         key: K,
-        options: &ReadOptions,
+        options: &ViewReadOptions,
     ) -> Result<Option<Bytes>, crate::Error> {
         self.get_key_value_with_options(key, options)
             .await
@@ -68,7 +68,7 @@ impl DbSnapshot {
         &self,
         key: K,
     ) -> Result<Option<KeyValue>, crate::Error> {
-        self.get_key_value_with_options(key, &ReadOptions::default())
+        self.get_key_value_with_options(key, &ViewReadOptions::default())
             .await
     }
 
@@ -76,14 +76,20 @@ impl DbSnapshot {
     pub async fn get_key_value_with_options<K: AsRef<[u8]> + Send>(
         &self,
         key: K,
-        options: &ReadOptions,
+        options: &ViewReadOptions,
     ) -> Result<Option<KeyValue>, crate::Error> {
         self.db_inner.check_closed()?;
         let db_state = self.db_inner.state.read().view();
         let kv = self
             .db_inner
             .reader
-            .get_key_value_with_options(key, options, &db_state, None, Some(self.started_seq))
+            .get_key_value_with_options(
+                key,
+                &options.to_read_options(DurabilityLevel::Memory),
+                &db_state,
+                None,
+                Some(self.started_seq),
+            )
             .await
             .map_err(crate::Error::from)?;
         Ok(kv)
@@ -101,21 +107,22 @@ impl DbSnapshot {
         K: AsRef<[u8]> + Send,
         T: RangeBounds<K> + Send,
     {
-        self.scan_with_options(range, &ScanOptions::default()).await
+        self.scan_with_options(range, &ViewScanOptions::default())
+            .await
     }
 
     /// Scan a range of keys with the provided options.
     ///
     /// ## Arguments
     /// - `range`: the range of keys to scan
-    /// - `options`: the scan options to use
+    /// - `options`: the per-scan options to use
     ///
     /// ## Returns
     /// - `Result<DbIterator, SlateDBError>`: An iterator with the results of the scan
     pub async fn scan_with_options<K, T>(
         &self,
         range: T,
-        options: &ScanOptions,
+        options: &ViewScanOptions,
     ) -> Result<DbIterator, crate::Error>
     where
         K: AsRef<[u8]> + Send,
@@ -135,7 +142,7 @@ impl DbSnapshot {
             .reader
             .scan_with_options(
                 BytesRange::from(range),
-                options,
+                &options.to_scan_options(DurabilityLevel::Memory),
                 &db_state,
                 None,
                 Some(self.started_seq),
@@ -156,7 +163,7 @@ impl DbSnapshot {
     where
         P: AsRef<[u8]> + Send,
     {
-        self.scan_prefix_with_options(prefix, &ScanOptions::default())
+        self.scan_prefix_with_options(prefix, &ViewScanOptions::default())
             .await
     }
 
@@ -171,44 +178,13 @@ impl DbSnapshot {
     pub async fn scan_prefix_with_options<P>(
         &self,
         prefix: P,
-        options: &ScanOptions,
+        options: &ViewScanOptions,
     ) -> Result<DbIterator, crate::Error>
     where
         P: AsRef<[u8]> + Send,
     {
         self.scan_with_options(BytesRange::from_prefix(prefix.as_ref()), options)
             .await
-    }
-}
-
-#[async_trait::async_trait]
-impl DbRead for DbSnapshot {
-    async fn get_with_options<K: AsRef<[u8]> + Send>(
-        &self,
-        key: K,
-        options: &ReadOptions,
-    ) -> Result<Option<Bytes>, crate::Error> {
-        self.get_with_options(key, options).await
-    }
-
-    async fn get_key_value_with_options<K: AsRef<[u8]> + Send>(
-        &self,
-        key: K,
-        options: &ReadOptions,
-    ) -> Result<Option<KeyValue>, crate::Error> {
-        self.get_key_value_with_options(key, options).await
-    }
-
-    async fn scan_with_options<K, T>(
-        &self,
-        range: T,
-        options: &ScanOptions,
-    ) -> Result<DbIterator, crate::Error>
-    where
-        K: AsRef<[u8]> + Send,
-        T: RangeBounds<K> + Send,
-    {
-        self.scan_with_options(range, options).await
     }
 }
 
@@ -759,6 +735,45 @@ mod tests {
 
         let db_result = db.get(b"key1").await?;
         assert_eq!(db_result, Some(Bytes::from("value2")));
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_snapshot_reads_in_memory_visibility() -> Result<(), Error> {
+        use crate::config::{DurabilityLevel::Remote, ReadOptions};
+
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let fp_registry = Arc::new(FailPointRegistry::new());
+        let db = Db::builder(
+            "/tmp/test_snapshot_reads_in_memory_visibility",
+            object_store,
+        )
+        .with_fp_registry(fp_registry.clone())
+        .build()
+        .await?;
+
+        fail_parallel::cfg(fp_registry.clone(), "write-wal-sst-io-error", "pause").unwrap();
+
+        db.put_with_options(
+            b"k",
+            b"v",
+            &PutOptions::default(),
+            &WriteOptions {
+                await_durable: false,
+            },
+        )
+        .await?;
+
+        let snapshot = db.snapshot().await?;
+        assert_eq!(snapshot.get(b"k").await?, Some(Bytes::from_static(b"v")));
+
+        let remote_value = db
+            .get_with_options(b"k", &ReadOptions::new().with_durability_filter(Remote))
+            .await?;
+        assert_eq!(remote_value, None);
+
+        fail_parallel::cfg(fp_registry.clone(), "write-wal-sst-io-error", "off").unwrap();
+        db.close().await?;
         Ok(())
     }
 }

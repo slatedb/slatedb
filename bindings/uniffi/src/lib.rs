@@ -19,7 +19,8 @@ mod write_batch;
 pub use builder::{DbBuilder, DbReaderBuilder};
 pub use config::{
     DurabilityLevel, FlushOptions, FlushType, IsolationLevel, IterationOrder, MergeOptions,
-    PutOptions, ReadOptions, ReaderOptions, ScanOptions, SstBlockSize, Ttl, WriteOptions,
+    ReadOptions, ReaderOptions, ScanOptions, SstBlockSize, Ttl, ViewReadOptions, ViewScanOptions,
+    WriteOptions,
 };
 pub use db::Db;
 pub use db_reader::DbReader;

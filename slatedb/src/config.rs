@@ -51,7 +51,6 @@
 //! filter_bits_per_key = 10
 //! l0_sst_size_bytes = 67108864
 //! l0_max_ssts = 8
-//! l0_flush_parallelism = 4
 //! max_unflushed_bytes = 536870912
 //!
 //! [compactor_options]
@@ -99,7 +98,6 @@
 //!  "filter_bits_per_key": 10,
 //!  "l0_sst_size_bytes": 67108864,
 //!  "l0_max_ssts": 8,
-//!  "l0_flush_parallelism": 4,
 //!  "max_unflushed_bytes": 536870912,
 //!  "compactor_options": {
 //!    "poll_interval": "5s",
@@ -150,7 +148,6 @@
 //! filter_bits_per_key: 10
 //! l0_sst_size_bytes: 67108864
 //! l0_max_ssts: 8
-//! l0_flush_parallelism: 1
 //! max_unflushed_bytes: 536870912
 //! compactor_options:
 //!   poll_interval: '5s'
@@ -260,8 +257,7 @@ pub enum DurabilityLevel {
     Memory,
 }
 
-/// Configuration for client read operations. `ReadOptions` is supplied for each
-/// read call and controls the behavior of the read.
+/// Configuration for point reads on [`crate::Db`].
 #[derive(Clone, Debug)]
 pub struct ReadOptions {
     /// Specifies the minimum durability level for data returned by this read. For example,
@@ -308,6 +304,56 @@ impl ReadOptions {
         }
     }
 }
+
+/// Per-read options for handles whose visibility is fixed when they are
+/// created, such as [`crate::DbSnapshot`], [`crate::DbTransaction`], and
+/// [`crate::DbReader`].
+#[derive(Clone, Debug)]
+pub struct ViewReadOptions {
+    /// Whether to include dirty data in the read. "dirty" means that the data
+    /// is not considered as "committed" yet, whose seq number is greater than
+    /// the last committed seq number.
+    pub dirty: bool,
+    /// Whether or not fetched blocks should be cached.
+    pub cache_blocks: bool,
+}
+
+impl Default for ViewReadOptions {
+    fn default() -> Self {
+        Self {
+            dirty: false,
+            cache_blocks: true,
+        }
+    }
+}
+
+impl ViewReadOptions {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_dirty(self, dirty: bool) -> Self {
+        Self { dirty, ..self }
+    }
+
+    pub fn with_cache_blocks(self, cache_blocks: bool) -> Self {
+        Self {
+            cache_blocks,
+            ..self
+        }
+    }
+
+    /// Build a [`ReadOptions`] by combining these fields with a fixed durability.
+    pub(crate) fn to_read_options(&self, durability_filter: DurabilityLevel) -> ReadOptions {
+        ReadOptions {
+            durability_filter,
+            dirty: self.dirty,
+            cache_blocks: self.cache_blocks,
+        }
+    }
+}
+
+/// Configuration for scans on [`crate::Db`].
 #[derive(Clone, Debug)]
 pub struct ScanOptions {
     /// Specifies the minimum durability level for data returned by this scan. For example,
@@ -331,7 +377,7 @@ pub struct ScanOptions {
 }
 
 impl Default for ScanOptions {
-    /// Create a new ScanOptions with `read_level` set to [`DurabilityLevel::Memory`].
+    /// Create a new ScanOptions with `durability_filter` set to [`DurabilityLevel::Memory`].
     fn default() -> Self {
         Self {
             durability_filter: DurabilityLevel::default(),
@@ -383,6 +429,79 @@ impl ScanOptions {
 
     pub fn with_order(self, order: IterationOrder) -> Self {
         Self { order, ..self }
+    }
+}
+
+/// Per-scan options for handles whose visibility is fixed when they are
+/// created, such as [`crate::DbSnapshot`], [`crate::DbTransaction`], and
+/// [`crate::DbReader`].
+#[derive(Clone, Debug)]
+pub struct ViewScanOptions {
+    /// Whether to include dirty data in the scan. "dirty" means that the data
+    /// is not considered as "committed" yet, whose seq number is greater than
+    /// the last committed seq number.
+    pub dirty: bool,
+    /// The number of bytes to read ahead. The value is rounded up to the nearest
+    /// block size when fetching from object storage. The default is 1, which
+    /// rounds up to one block.
+    pub read_ahead_bytes: usize,
+    /// Whether or not fetched blocks should be cached.
+    pub cache_blocks: bool,
+    /// The maximum number of concurrent tasks for fetching blocks during scans.
+    /// Higher values can improve throughput but use more resources. The default is 1.
+    pub max_fetch_tasks: usize,
+}
+
+impl Default for ViewScanOptions {
+    fn default() -> Self {
+        Self {
+            dirty: false,
+            read_ahead_bytes: 1,
+            cache_blocks: false,
+            max_fetch_tasks: 1,
+        }
+    }
+}
+
+impl ViewScanOptions {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_dirty(self, dirty: bool) -> Self {
+        Self { dirty, ..self }
+    }
+
+    pub fn with_read_ahead_bytes(self, read_ahead_bytes: usize) -> Self {
+        Self {
+            read_ahead_bytes,
+            ..self
+        }
+    }
+
+    pub fn with_cache_blocks(self, cache_blocks: bool) -> Self {
+        Self {
+            cache_blocks,
+            ..self
+        }
+    }
+
+    pub fn with_max_fetch_tasks(self, max_fetch_tasks: usize) -> Self {
+        Self {
+            max_fetch_tasks,
+            ..self
+        }
+    }
+
+    /// Build a [`ScanOptions`] by combining these fields with a fixed durability.
+    pub(crate) fn to_scan_options(&self, durability_filter: DurabilityLevel) -> ScanOptions {
+        ScanOptions {
+            durability_filter,
+            dirty: self.dirty,
+            read_ahead_bytes: self.read_ahead_bytes,
+            cache_blocks: self.cache_blocks,
+            max_fetch_tasks: self.max_fetch_tasks,
+        }
     }
 }
 
@@ -648,13 +767,6 @@ pub struct Settings {
     /// l0 ssts than this value, until compaction can compact the ssts into compacted.
     pub l0_max_ssts: usize,
 
-    /// Number of parallel workers for flushing immutable memtables to L0 SSTs.
-    /// Higher values increase L0 flush throughput at the cost of more concurrent
-    /// object store uploads. Increasing parallelism may require a higher `l0_max_ssts`
-    /// to avoid backpressure from compaction not keeping up with the higher steady-state
-    /// flush rate.
-    pub l0_flush_parallelism: usize,
-
     /// Defines the max number of unflushed key/value pair bytes that should reside in memory
     /// before applying backpressure to writers. This includes key/value pairs in both the
     /// immutable WAL flush queue and the immutable memtable flush queue. Writes will be
@@ -704,7 +816,6 @@ impl std::fmt::Debug for Settings {
             .field("max_unflushed_bytes", &self.max_unflushed_bytes)
             .field("l0_sst_size_bytes", &self.l0_sst_size_bytes)
             .field("l0_max_ssts", &self.l0_max_ssts)
-            .field("l0_flush_parallelism", &self.l0_flush_parallelism)
             .field("compactor_options", &self.compactor_options)
             .field("compression_codec", &self.compression_codec)
             .field(
@@ -902,7 +1013,6 @@ impl Default for Settings {
             max_unflushed_bytes: 1_073_741_824,
             l0_sst_size_bytes: 64 * 1024 * 1024,
             l0_max_ssts: 8,
-            l0_flush_parallelism: 4,
             compactor_options: Some(CompactorOptions::default()),
             compression_codec: None,
             object_store_cache_options: ObjectStoreCacheOptions::default(),
@@ -1482,8 +1592,18 @@ object_store_cache_options:
         assert!(!options.dirty);
         assert!(options.cache_blocks);
 
+        let options = ViewReadOptions::default();
+        assert!(!options.dirty);
+        assert!(options.cache_blocks);
+
         let options = ScanOptions::default();
         assert_eq!(options.durability_filter, DurabilityLevel::Memory);
+        assert!(!options.dirty);
+        assert_eq!(options.read_ahead_bytes, 1);
+        assert!(!options.cache_blocks);
+        assert_eq!(options.max_fetch_tasks, 1);
+
+        let options = ViewScanOptions::default();
         assert!(!options.dirty);
         assert_eq!(options.read_ahead_bytes, 1);
         assert!(!options.cache_blocks);

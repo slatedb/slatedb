@@ -41,7 +41,7 @@ pub use compaction_filter::{
     CompactionJobContext,
 };
 pub use compactor::CompactorBuilder;
-pub use config::{Settings, SstBlockSize};
+pub use config::{Settings, SstBlockSize, ViewReadOptions, ViewScanOptions};
 pub use db::{Db, DbBuilder, DbReaderBuilder, DbStatus, WriteHandle};
 pub use db_cache::stats as db_cache_stats;
 pub use db_iter::DbIterator;
@@ -119,7 +119,7 @@ mod garbage_collector;
 mod instrumented_object_store;
 mod iter;
 mod mem_table;
-mod memtable_flusher;
+mod mem_table_flush;
 mod merge_iterator;
 mod merge_operator;
 mod object_stores;
@@ -133,7 +133,6 @@ mod rand;
 mod reader;
 mod retention_iterator;
 mod retrying_object_store;
-mod snapshot_manager;
 mod sorted_run_iterator;
 mod sst_builder;
 mod sst_iter;

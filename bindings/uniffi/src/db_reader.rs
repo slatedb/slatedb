@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::config::{ReadOptions, ScanOptions};
+use crate::config::{ViewReadOptions, ViewScanOptions};
 use crate::error::Error;
 use crate::iterator::DbIterator;
 use crate::types::{DbStatus, KeyRange};
@@ -38,7 +38,7 @@ impl DbReader {
     pub async fn get_with_options(
         &self,
         key: Vec<u8>,
-        options: ReadOptions,
+        options: ViewReadOptions,
     ) -> Result<Option<Vec<u8>>, Error> {
         validate_key(&key)?;
         let options = options.into();
@@ -60,7 +60,7 @@ impl DbReader {
     pub async fn scan_with_options(
         &self,
         range: KeyRange,
-        options: ScanOptions,
+        options: ViewScanOptions,
     ) -> Result<Arc<DbIterator>, Error> {
         let range = range.into_bounds()?;
         let options = options.try_into()?;
@@ -81,7 +81,7 @@ impl DbReader {
     pub async fn scan_prefix_with_options(
         &self,
         prefix: Vec<u8>,
-        options: ScanOptions,
+        options: ViewScanOptions,
     ) -> Result<Arc<DbIterator>, Error> {
         let options = options.try_into()?;
         let iter = self
