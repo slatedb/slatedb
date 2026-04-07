@@ -3752,7 +3752,6 @@ mod tests {
 
         let mut wrote_l0_sst = false;
         for _ in 0..6000 {
-
             // Waiting for the SST itself is more precise than watching imm_memtable state. We only
             // continue once the flusher has definitely crossed the "write SST, not manifest" boundary.
             let ssts = db.inner.table_store.list_compacted_ssts(..).await.unwrap();
