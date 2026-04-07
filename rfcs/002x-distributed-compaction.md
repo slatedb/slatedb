@@ -90,7 +90,7 @@ Separates the **Compaction Coordinator** (scheduler + manifest committer) from o
 |                                  |
 |  +-------------+  +------------+ |
 |  |  Scheduler  |  | State Mgmt | |
-|  | (unchanged) |  |            | |
+|  | (unchanged) |  | (unchanged)| |
 |  +------+------+  +------+-----+ |
 +---------|----------------|------ +
           |                |
@@ -199,7 +199,7 @@ Workers use optimistic concurrency on `.compactions`. SlateDB implements this un
 3. Write the full updated state with `status = Running`, `worker_id = <self>`, `last_heartbeat_ms = now()` to the next sequence number.
 4. On success: begin execution. On `AlreadyExists`: re-read latest and retry from step 2.
 
-Workers claim one job at a time to minimize contention.
+Workers claim one job at a time to limit the number of compactions affected by a worker crash and to distribute work evenly.
 
 ### Heartbeat and Failure Detection
 
@@ -221,11 +221,10 @@ The coordinator detects stale workers during its periodic poll: for each `Runnin
 Only the coordinator commits manifest updates (preserves single-writer invariant):
 
 1. Observe a `Completed` compaction in `.compactions`.
-2. Validate all output SSTs exist in the object store.
-3. Update the manifest: remove source SRs/SSTs, insert output SR, update `l0_last_compacted`.
-4. Trim the finished compaction from `.compactions` (per RFC-0013 GC conventions).
+2. Update the manifest: remove source SRs/SSTs, insert output SR, update `l0_last_compacted`.
+3. Trim the finished compaction from `.compactions` (per RFC-0013 GC conventions).
 
-If the coordinator crashes between steps 3 and 4, the `Completed` entry is trimmed on the next cycle with no further action needed.
+If the coordinator crashes between steps 2 and 3, the `Completed` entry is trimmed on the next cycle with no further action needed.
 
 ### Backward Compatibility: Existing Modes
 
