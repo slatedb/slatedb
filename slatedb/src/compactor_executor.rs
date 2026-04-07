@@ -144,11 +144,6 @@ impl<T: RowEntryIterator> ResumingIterator<T> {
     fn start(&self) -> Option<&(Bytes, u64)> {
         self.start.as_ref()
     }
-
-    /// Peeks at the next row without advancing the iterator.
-    async fn peek(&mut self) -> Result<Option<&crate::types::RowEntry>, SlateDBError> {
-        self.iterator.peek().await
-    }
 }
 
 #[async_trait::async_trait]
@@ -411,36 +406,25 @@ impl TokioCompactionExecutorInner {
                 last_progress_report = self.clock.now();
             }
 
-            let current_key = kv.key.clone();
             if let Some(block_size) = current_writer.add(kv).await? {
                 bytes_written += block_size;
             }
 
             if bytes_written > self.options.max_sst_size {
-                // Prevent a single key from spanning multiple SSTs in an SR.
-                // The current read logic expects this. See #1367.
-                // This is a temporary fix until we implement #1371.
-                let should_rollover = match all_iter.peek().await? {
-                    Some(next_kv) => next_kv.key != current_key,
-                    None => true,
-                };
+                let finished_writer = mem::replace(
+                    &mut current_writer,
+                    self.table_store.table_writer(SsTableId::Compacted(
+                        self.rand.rng().gen_ulid(self.clock.as_ref()),
+                    )),
+                );
+                let sst = finished_writer.close().await?;
 
-                if should_rollover {
-                    let finished_writer = mem::replace(
-                        &mut current_writer,
-                        self.table_store.table_writer(SsTableId::Compacted(
-                            self.rand.rng().gen_ulid(self.clock.as_ref()),
-                        )),
-                    );
-                    let sst = finished_writer.close().await?;
-
-                    self.stats.bytes_compacted.increment(sst.info.filter_offset);
-                    output_ssts.push(sst);
-                    bytes_written = 0;
-                    let total_bytes = start_bytes_processed + all_iter.bytes_processed();
-                    self.send_compaction_progress(args.id, total_bytes, &output_ssts);
-                    last_progress_report = self.clock.now();
-                }
+                self.stats.bytes_compacted.increment(sst.info.filter_offset);
+                output_ssts.push(sst);
+                bytes_written = 0;
+                let total_bytes = start_bytes_processed + all_iter.bytes_processed();
+                self.send_compaction_progress(args.id, total_bytes, &output_ssts);
+                last_progress_report = self.clock.now();
             }
         }
 

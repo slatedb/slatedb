@@ -1,5 +1,6 @@
 use crate::bytes_range::BytesRange;
 use crate::db_state::{SortedRun, SsTableView};
+use crate::db_stats::DbStats;
 use crate::error::SlateDBError;
 use crate::iter::RowEntryIterator;
 use crate::sst_iter::{SstIterator, SstIteratorOptions, SstView};
@@ -36,9 +37,15 @@ impl<'a> SortedRunView<'a> {
         &mut self,
         table_store: Arc<TableStore>,
         sst_iterator_options: SstIteratorOptions,
+        db_stats: Option<DbStats>,
     ) -> Result<Option<SstIterator<'a>>, SlateDBError> {
         let next_iter = if let Some(view) = self.pop_sst() {
-            Some(SstIterator::new(view, table_store, sst_iterator_options)?)
+            Some(SstIterator::new_with_stats(
+                view,
+                table_store,
+                sst_iterator_options,
+                db_stats,
+            )?)
         } else {
             None
         };
@@ -56,6 +63,7 @@ impl<'a> SortedRunView<'a> {
 pub(crate) struct SortedRunIterator<'a> {
     table_store: Arc<TableStore>,
     sst_iter_options: SstIteratorOptions,
+    db_stats: Option<DbStats>,
     view: SortedRunView<'a>,
     current_iter: Option<SstIterator<'a>>,
     initialized: bool,
@@ -66,10 +74,12 @@ impl<'a> SortedRunIterator<'a> {
         view: SortedRunView<'a>,
         table_store: Arc<TableStore>,
         sst_iter_options: SstIteratorOptions,
+        db_stats: Option<DbStats>,
     ) -> Result<Self, SlateDBError> {
         let mut res = Self {
             table_store,
             sst_iter_options,
+            db_stats,
             view,
             current_iter: None,
             initialized: false,
@@ -83,21 +93,46 @@ impl<'a> SortedRunIterator<'a> {
         sorted_run: SortedRun,
         table_store: Arc<TableStore>,
         sst_iter_options: SstIteratorOptions,
+        db_stats: Option<DbStats>,
     ) -> Result<Self, SlateDBError> {
         let range = BytesRange::from(range);
         let tables = sorted_run.into_tables_covering_range(&range);
         let view = SortedRunView::Owned(tables, range);
-        SortedRunIterator::new(view, table_store, sst_iter_options).await
+        SortedRunIterator::new(view, table_store, sst_iter_options, db_stats).await
     }
 
+    #[allow(dead_code)]
     pub(crate) async fn new_owned_initialized<T: RangeBounds<Bytes>>(
         range: T,
         sorted_run: SortedRun,
         table_store: Arc<TableStore>,
         sst_iter_options: SstIteratorOptions,
     ) -> Result<Self, SlateDBError> {
-        let mut iter =
-            SortedRunIterator::new_owned(range, sorted_run, table_store, sst_iter_options).await?;
+        SortedRunIterator::new_owned_initialized_with_stats(
+            range,
+            sorted_run,
+            table_store,
+            sst_iter_options,
+            None,
+        )
+        .await
+    }
+
+    pub(crate) async fn new_owned_initialized_with_stats<T: RangeBounds<Bytes>>(
+        range: T,
+        sorted_run: SortedRun,
+        table_store: Arc<TableStore>,
+        sst_iter_options: SstIteratorOptions,
+        db_stats: Option<DbStats>,
+    ) -> Result<Self, SlateDBError> {
+        let mut iter = SortedRunIterator::new_owned(
+            range,
+            sorted_run,
+            table_store,
+            sst_iter_options,
+            db_stats,
+        )
+        .await?;
         iter.init().await?;
         Ok(iter)
     }
@@ -108,10 +143,20 @@ impl<'a> SortedRunIterator<'a> {
         table_store: Arc<TableStore>,
         sst_iter_options: SstIteratorOptions,
     ) -> Result<Self, SlateDBError> {
+        Self::new_borrowed_with_stats(range, sorted_run, table_store, sst_iter_options, None).await
+    }
+
+    pub(crate) async fn new_borrowed_with_stats<T: RangeBounds<&'a [u8]>>(
+        range: T,
+        sorted_run: &'a SortedRun,
+        table_store: Arc<TableStore>,
+        sst_iter_options: SstIteratorOptions,
+        db_stats: Option<DbStats>,
+    ) -> Result<Self, SlateDBError> {
         let range = (range.start_bound().cloned(), range.end_bound().cloned());
         let tables = sorted_run.tables_covering_range(BytesRange::from_slice(range));
         let view = SortedRunView::Borrowed(tables, range);
-        SortedRunIterator::new(view, table_store, sst_iter_options).await
+        SortedRunIterator::new(view, table_store, sst_iter_options, db_stats).await
     }
 
     #[cfg(test)]
@@ -131,7 +176,11 @@ impl<'a> SortedRunIterator<'a> {
     async fn advance_table(&mut self) -> Result<(), SlateDBError> {
         self.current_iter = self
             .view
-            .build_next_iter(self.table_store.clone(), self.sst_iter_options)
+            .build_next_iter(
+                self.table_store.clone(),
+                self.sst_iter_options,
+                self.db_stats.clone(),
+            )
             .await?;
         if self.initialized {
             if let Some(iter) = self.current_iter.as_mut() {
