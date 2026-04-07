@@ -77,7 +77,7 @@ mod tests {
     }
 
     #[test]
-    fn test_resgister_uses_oracle_seq() {
+    fn test_new_snapshot_uses_oracle_seq() {
         let mgr = new_snapshot_manager(123);
 
         let (_, seq) = mgr.new_snapshot(None);
@@ -85,7 +85,7 @@ mod tests {
     }
 
     #[test]
-    fn test_register_and_min_seq() {
+    fn test_new_snapshot_and_min_seq() {
         let mgr = new_snapshot_manager(0);
         assert_eq!(mgr.min_active_seq(), None);
 
@@ -100,7 +100,7 @@ mod tests {
     }
 
     #[test]
-    fn test_unregister_removes_entry() {
+    fn test_drop_snapshot_removes_entry() {
         let mgr = new_snapshot_manager(0);
         let (snapshot_10, _) = mgr.new_snapshot(Some(10));
         let (snapshot_20, _) = mgr.new_snapshot(Some(20));
@@ -132,7 +132,7 @@ mod tests {
 
     #[test]
     #[should_panic]
-    fn test_unregister_nonexistent_panics() {
+    fn test_drop_snapshot_nonexistent_panics() {
         let mgr = new_snapshot_manager(0);
         mgr.drop_snapshot(&Uuid::nil());
     }

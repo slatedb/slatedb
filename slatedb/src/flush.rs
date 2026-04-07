@@ -41,7 +41,12 @@ impl DbInner {
     ) -> Result<RetentionIterator<Box<dyn RowEntryIterator>>, SlateDBError> {
         let state = self.state.read().view();
 
-        // Compute retention boundary using both active snapshots AND durable watermark.
+        // Compute retention boundary using the minimum active sequences from active snapshots AND
+        // active transactions AND durable watermark. This does not need to be atomic as even if a
+        // new snapshot is created/dropped or a new transaction is created/dropped between reading
+        // both snapshot_manager and txn_manager we will always have the min so any race here is
+        // acceptable.
+        //
         // Remote readers (DurabilityLevel::Remote) cap visibility at last_remote_persisted_seq,
         // so we must retain at least one version at or below that boundary for each key.
         // Otherwise, if we only keep a newer non-durable version, remote readers would skip

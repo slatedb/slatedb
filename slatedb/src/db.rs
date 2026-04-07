@@ -5711,6 +5711,124 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_recent_snapshot_min_seq_prefers_snapshot_when_snapshot_seq_is_lower() {
+        let path = "/tmp/test_recent_snapshot_min_seq_prefers_snapshot_when_snapshot_seq_is_lower";
+        let object_store = Arc::new(InMemory::new());
+        let db = Db::builder(path, object_store).build().await.unwrap();
+
+        db.put(b"key1", b"value1").await.unwrap();
+        db.inner.flush_memtables().await.unwrap();
+
+        let snapshot = db.snapshot().await.unwrap();
+        let snapshot_seq = snapshot.seq();
+
+        db.put(b"key2", b"value2").await.unwrap();
+        db.inner.flush_memtables().await.unwrap();
+
+        let txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
+        let txn_seq = txn.seqnum();
+
+        assert_eq!(
+            db.inner.snapshot_manager.min_active_seq(),
+            Some(snapshot_seq)
+        );
+        assert_eq!(db.inner.txn_manager.min_active_seq(), Some(txn_seq));
+        assert!(snapshot_seq < txn_seq);
+
+        db.put(b"key3", b"value3").await.unwrap();
+        db.inner.flush_memtables().await.unwrap();
+
+        {
+            let state = db.inner.state.read();
+            let recent_min_seq = state.state().core().recent_snapshot_min_seq;
+            assert_eq!(
+                recent_min_seq,
+                snapshot_seq,
+                "recent_snapshot_min_seq should use the snapshot seq when it is smaller than the transaction seq"
+            );
+        }
+
+        drop(snapshot);
+
+        db.put(b"key4", b"value4").await.unwrap();
+        db.inner.flush_memtables().await.unwrap();
+
+        assert_eq!(db.inner.snapshot_manager.min_active_seq(), None);
+        assert_eq!(db.inner.txn_manager.min_active_seq(), Some(txn_seq));
+
+        {
+            let state = db.inner.state.read();
+            let recent_min_seq = state.state().core().recent_snapshot_min_seq;
+            assert_eq!(
+                recent_min_seq,
+                txn_seq,
+                "recent_snapshot_min_seq should move to the transaction seq after the snapshot is dropped"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_recent_snapshot_min_seq_prefers_transaction_when_transaction_seq_is_lower() {
+        let path =
+            "/tmp/test_recent_snapshot_min_seq_prefers_transaction_when_transaction_seq_is_lower";
+        let object_store = Arc::new(InMemory::new());
+        let db = Db::builder(path, object_store).build().await.unwrap();
+
+        db.put(b"key1", b"value1").await.unwrap();
+        db.inner.flush_memtables().await.unwrap();
+
+        let txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
+        let txn_seq = txn.seqnum();
+
+        db.put(b"key2", b"value2").await.unwrap();
+        db.inner.flush_memtables().await.unwrap();
+
+        let snapshot = db.snapshot().await.unwrap();
+        let snapshot_seq = snapshot.seq();
+
+        assert_eq!(db.inner.txn_manager.min_active_seq(), Some(txn_seq));
+        assert_eq!(
+            db.inner.snapshot_manager.min_active_seq(),
+            Some(snapshot_seq)
+        );
+        assert!(txn_seq < snapshot_seq);
+
+        db.put(b"key3", b"value3").await.unwrap();
+        db.inner.flush_memtables().await.unwrap();
+
+        {
+            let state = db.inner.state.read();
+            let recent_min_seq = state.state().core().recent_snapshot_min_seq;
+            assert_eq!(
+                recent_min_seq,
+                txn_seq,
+                "recent_snapshot_min_seq should use the transaction seq when it is smaller than the snapshot seq"
+            );
+        }
+
+        drop(txn);
+
+        db.put(b"key4", b"value4").await.unwrap();
+        db.inner.flush_memtables().await.unwrap();
+
+        assert_eq!(db.inner.txn_manager.min_active_seq(), None);
+        assert_eq!(
+            db.inner.snapshot_manager.min_active_seq(),
+            Some(snapshot_seq)
+        );
+
+        {
+            let state = db.inner.state.read();
+            let recent_min_seq = state.state().core().recent_snapshot_min_seq;
+            assert_eq!(
+                recent_min_seq,
+                snapshot_seq,
+                "recent_snapshot_min_seq should move to the snapshot seq after the transaction is dropped"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn test_memtable_flush_updates_last_remote_persisted_seq() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = "/tmp/test";
