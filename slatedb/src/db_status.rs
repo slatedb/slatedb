@@ -20,6 +20,11 @@ pub struct DbStatus {
     pub close_reason: Option<CloseReason>,
 }
 
+pub(crate) trait ClosedResultWriter: std::fmt::Debug + Send + Sync + 'static {
+    fn write_result(&self, result: Result<(), SlateDBError>);
+    fn result_reader(&self) -> crate::utils::WatchableOnceCellReader<Result<(), SlateDBError>>;
+}
+
 /// Manages database lifecycle status, including the close result and
 /// status subscriptions.
 #[derive(Clone, Debug)]
@@ -38,39 +43,6 @@ impl DbStatusManager {
             cell: WatchableOnceCell::new(),
             tx,
         }
-    }
-
-    pub(crate) fn write_close_result(&self, result: Result<(), SlateDBError>) {
-        let reason = match &result {
-            Ok(()) => CloseReason::Clean,
-            Err(err) => CloseReason::from(crate::Error::from(err.clone()).kind()),
-        };
-        if self.cell.write(result) {
-            self.report_closed(reason);
-        }
-    }
-
-    pub(crate) fn closed_result_reader(
-        &self,
-    ) -> crate::utils::WatchableOnceCellReader<Result<(), SlateDBError>> {
-        self.cell.reader()
-    }
-
-    /// Create a safe sender + raw receiver pair wired to this closed state.
-    ///
-    /// The sender uses this state's closed result for shutdown-aware error
-    /// propagation. The receiver is a raw `async_channel::Receiver` suitable
-    /// for use with `MessageHandlerExecutor::add_handler`.
-    pub(crate) fn create_safe_channel<T>(
-        &self,
-    ) -> (
-        crate::utils::safe_async_channel::SafeSender<T>,
-        async_channel::Receiver<T>,
-    ) {
-        let (tx, rx) = async_channel::unbounded();
-        let safe_tx =
-            crate::utils::safe_async_channel::SafeSender::new(tx, self.closed_result_reader());
-        (safe_tx, rx)
     }
 
     pub(crate) fn report_durable_seq(&self, seq: u64) {
@@ -97,5 +69,31 @@ impl DbStatusManager {
 
     pub(crate) fn subscribe(&self) -> watch::Receiver<DbStatus> {
         self.tx.subscribe()
+    }
+}
+
+impl ClosedResultWriter for WatchableOnceCell<Result<(), SlateDBError>> {
+    fn write_result(&self, result: Result<(), SlateDBError>) {
+        self.write(result);
+    }
+
+    fn result_reader(&self) -> crate::utils::WatchableOnceCellReader<Result<(), SlateDBError>> {
+        self.reader()
+    }
+}
+
+impl ClosedResultWriter for DbStatusManager {
+    fn write_result(&self, result: Result<(), SlateDBError>) {
+        let reason = match &result {
+            Ok(()) => CloseReason::Clean,
+            Err(err) => CloseReason::from(crate::Error::from(err.clone()).kind()),
+        };
+        if self.cell.write(result) {
+            self.report_closed(reason);
+        }
+    }
+
+    fn result_reader(&self) -> crate::utils::WatchableOnceCellReader<Result<(), SlateDBError>> {
+        self.cell.reader()
     }
 }

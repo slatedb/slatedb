@@ -11,11 +11,12 @@ use crate::manifest::store::{ManifestStore, StoredManifest};
 use slatedb_common::clock::SystemClock;
 
 use crate::clone;
-use crate::db_status::DbStatusManager;
+use crate::db_status::ClosedResultWriter;
 use crate::object_stores::{ObjectStoreType, ObjectStores};
 use crate::rand::DbRand;
 use crate::seq_tracker::FindOption;
 use crate::utils::IdGenerator;
+use crate::utils::WatchableOnceCell;
 use chrono::{DateTime, Utc};
 use fail_parallel::FailPointRegistry;
 use object_store::path::Path;
@@ -276,8 +277,8 @@ impl Admin {
         .build();
 
         let (_, rx) = async_channel::unbounded();
-        let status_manager = DbStatusManager::new(0);
-        let task_executor = MessageHandlerExecutor::new(status_manager, self.system_clock.clone());
+        let closed_result: Arc<dyn ClosedResultWriter> = Arc::new(WatchableOnceCell::new());
+        let task_executor = MessageHandlerExecutor::new(closed_result, self.system_clock.clone());
 
         task_executor
             .add_handler(

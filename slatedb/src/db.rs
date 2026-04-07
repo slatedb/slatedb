@@ -77,7 +77,7 @@ use slatedb_common::clock::SystemClock;
 use slatedb_common::metrics::MetricsRecorderHelper;
 use slatedb_txn_obj::DirtyObject;
 
-use crate::db_status::DbStatusManager;
+use crate::db_status::{ClosedResultWriter, DbStatusManager};
 pub use builder::DbBuilder;
 pub use builder::DbReaderBuilder;
 
@@ -566,11 +566,11 @@ impl DbInner {
     /// ## Returns
     /// - `Ok(())` if the DB is still open.
     /// - `Err(SlateDBError::Closed)` if the DB was closed successfully
-    ///   (state.closed_result_reader() returns Ok(())).
+    ///   (state.result_reader() returns Ok(())).
     /// - `Err(e)` if the DB was closed with an error, where `e` is the error
-    ///   (state.closed_result_reader() returns Err(e)).
+    ///   (state.result_reader() returns Err(e)).
     pub(crate) fn status(&self) -> Result<(), SlateDBError> {
-        if let Some(result) = self.status_manager.closed_result_reader().read() {
+        if let Some(result) = self.status_manager.result_reader().read() {
             return match result {
                 Ok(()) => Err(SlateDBError::Closed),
                 Err(e) => Err(e),
@@ -686,7 +686,7 @@ impl Db {
         };
 
         // Mark the database as closed before flushing.
-        self.inner.status_manager.write_close_result(Ok(()));
+        self.inner.status_manager.write_result(Ok(()));
 
         if should_flush {
             if let Err(e) = self.inner.flush(false).await {
@@ -2208,7 +2208,7 @@ mod tests {
         // Simulate a failed state (e.g. fenced).
         db.inner
             .status_manager
-            .write_close_result(Err(crate::error::SlateDBError::Fenced));
+            .write_result(Err(crate::error::SlateDBError::Fenced));
 
         // close() should succeed but not flush when failed.
         db.close().await.unwrap();
@@ -6576,7 +6576,7 @@ mod tests {
         // When: the DB is fenced (simulated via closed_result)
         db.inner
             .status_manager
-            .write_close_result(Err(crate::error::SlateDBError::Fenced));
+            .write_result(Err(crate::error::SlateDBError::Fenced));
 
         // Then: the watcher should report close_reason = Fenced
         let status = tokio::time::timeout(

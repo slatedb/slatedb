@@ -5,7 +5,7 @@ use crate::config::{CheckpointOptions, DbReaderOptions, ReadOptions, ScanOptions
 use crate::db_read::DbRead;
 use crate::db_state::ManifestCore;
 use crate::db_stats::DbStats;
-use crate::db_status::{DbStatus, DbStatusManager};
+use crate::db_status::{ClosedResultWriter, DbStatus, DbStatusManager};
 use crate::dispatcher::{MessageFactory, MessageHandler, MessageHandlerExecutor};
 use crate::error::SlateDBError;
 use crate::iter::IterationOrder;
@@ -506,11 +506,11 @@ impl DbReaderInner {
     /// ## Returns
     /// - `Ok(())` if the reader is still open.
     /// - `Err(SlateDBError::Closed)` if the reader was closed successfully
-    ///   (state.closed_result_reader() returns Ok(())).
+    ///   (state.result_reader() returns Ok(())).
     /// - `Err(e)` if the reader was closed with an error, where `e` is the error
-    ///   (state.closed_result_reader() returns Err(e)).
+    ///   (state.result_reader() returns Err(e)).
     pub(crate) fn check_closed(&self) -> Result<(), SlateDBError> {
-        let closed_result_reader = self.status_manager.closed_result_reader();
+        let closed_result_reader = self.status_manager.result_reader();
         if let Some(result) = closed_result_reader.read() {
             return match result {
                 Ok(()) => Err(SlateDBError::Closed),
@@ -689,7 +689,7 @@ impl DbReader {
 
         let status_manager = DbStatusManager::new(0);
         let task_executor =
-            MessageHandlerExecutor::new(status_manager.clone(), system_clock.clone());
+            MessageHandlerExecutor::new(Arc::new(status_manager.clone()), system_clock.clone());
         let manifest_store = store_provider.manifest_store();
         let table_store = store_provider.table_store();
         let inner = Arc::new(

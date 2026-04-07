@@ -715,8 +715,8 @@ pub(crate) async fn preload_cache_from_manifest(
 ///
 /// The sender checks the DB's closed result when the channel is closed,
 /// converting the raw channel error into the appropriate [`SlateDBError`].
-/// Construct channels with [`crate::db_status::DbStatusManager::create_safe_channel`] to
-/// wire them to the shared DB lifecycle state.
+/// Use [`SafeSender::unbounded_channel`] to construct a channel wired to a
+/// [`crate::db_status::ClosedResultWriter::result_reader`].
 pub(crate) mod safe_async_channel {
     use super::WatchableOnceCellReader;
     use crate::error::SlateDBError;
@@ -732,6 +732,13 @@ pub(crate) mod safe_async_channel {
             closed: WatchableOnceCellReader<Result<(), SlateDBError>>,
         ) -> Self {
             Self { tx, closed }
+        }
+
+        pub(crate) fn unbounded_channel(
+            closed: WatchableOnceCellReader<Result<(), SlateDBError>>,
+        ) -> (Self, async_channel::Receiver<T>) {
+            let (tx, rx) = async_channel::unbounded();
+            (Self::new(tx, closed), rx)
         }
 
         /// Attempts to send a message. If the channel is closed, returns the

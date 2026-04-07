@@ -136,7 +136,7 @@ use crate::db_cache::SplitCache;
 use crate::db_cache::{DbCache, DbCacheWrapper};
 use crate::db_reader::DbReader;
 use crate::db_state::ManifestCore;
-use crate::db_status::DbStatusManager;
+use crate::db_status::{ClosedResultWriter, DbStatusManager};
 use crate::dispatcher::MessageHandlerExecutor;
 use crate::error::SlateDBError;
 use crate::format::sst::{BlockTransformer, SsTableFormat};
@@ -154,6 +154,8 @@ use crate::rand::DbRand;
 use crate::retrying_object_store::RetryingObjectStore;
 use crate::store_provider::DefaultStoreProvider;
 use crate::tablestore::TableStore;
+use crate::utils::safe_async_channel::SafeSender;
+use crate::utils::WatchableOnceCell;
 use slatedb_common::clock::DefaultSystemClock;
 use slatedb_common::clock::SystemClock;
 use slatedb_common::metrics::MetricLevel;
@@ -509,8 +511,9 @@ impl<P: Into<Path>> DbBuilder<P> {
         let status_manager = DbStatusManager::new(manifest_dirty.value.core.last_l0_seq);
 
         // Setup communication channels wired to the shared closed state.
-        let (memtable_flush_tx, memtable_flush_rx) = status_manager.create_safe_channel();
-        let (write_tx, write_rx) = status_manager.create_safe_channel();
+        let reader = status_manager.result_reader();
+        let (memtable_flush_tx, memtable_flush_rx) = SafeSender::unbounded_channel(reader.clone());
+        let (write_tx, write_rx) = SafeSender::unbounded_channel(reader);
 
         // Create the database inner state
         let inner = Arc::new(
@@ -538,7 +541,7 @@ impl<P: Into<Path>> DbBuilder<P> {
         // Setup background tasks
         let tokio_handle = Handle::current();
         let task_executor = Arc::new(MessageHandlerExecutor::new(
-            status_manager,
+            Arc::new(status_manager),
             system_clock.clone(),
         ));
         if inner.wal_enabled {
@@ -877,7 +880,7 @@ pub struct CompactorBuilder<P: Into<Path>> {
     rand: Arc<DbRand>,
     recorder: MetricsRecorderHelper,
     system_clock: Arc<dyn SystemClock>,
-    status_manager: DbStatusManager,
+    closed_result: Arc<dyn ClosedResultWriter>,
     merge_operator: Option<MergeOperatorType>,
     block_transformer: Option<Arc<dyn BlockTransformer>>,
     #[cfg(feature = "compaction_filters")]
@@ -896,7 +899,7 @@ impl<P: Into<Path>> CompactorBuilder<P> {
             rand: Arc::new(DbRand::default()),
             recorder: MetricsRecorderHelper::noop(),
             system_clock: Arc::new(DefaultSystemClock::default()),
-            status_manager: DbStatusManager::new(0),
+            closed_result: Arc::new(WatchableOnceCell::new()),
             merge_operator: None,
             block_transformer: None,
             #[cfg(feature = "compaction_filters")]
@@ -914,7 +917,7 @@ impl<P: Into<Path>> CompactorBuilder<P> {
             rand: self.rand,
             recorder: self.recorder,
             system_clock: self.system_clock,
-            status_manager: self.status_manager,
+            closed_result: self.closed_result,
             merge_operator: self.merge_operator,
             block_transformer: self.block_transformer,
             #[cfg(feature = "compaction_filters")]
@@ -1050,7 +1053,7 @@ impl<P: Into<Path>> CompactorBuilder<P> {
             self.rand,
             &self.recorder,
             self.system_clock,
-            self.status_manager,
+            self.closed_result,
             self.merge_operator,
             #[cfg(feature = "compaction_filters")]
             self.compaction_filter_supplier,

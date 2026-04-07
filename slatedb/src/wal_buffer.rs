@@ -12,11 +12,13 @@ use tracing::instrument;
 use crate::clock::MonotonicClock;
 use crate::db_state::SsTableId;
 use crate::db_stats::DbStats;
+use crate::db_status::ClosedResultWriter;
 use crate::dispatcher::{MessageFactory, MessageHandler, MessageHandlerExecutor};
 use crate::error::SlateDBError;
 use crate::oracle::{DbOracle, Oracle};
 use crate::tablestore::TableStore;
 use crate::types::RowEntry;
+use crate::utils::safe_async_channel::SafeSender;
 use crate::utils::{format_bytes_si, WatchableOnceCell, WatchableOnceCellReader};
 use crate::wal_id::WalIdStore;
 
@@ -151,7 +153,8 @@ impl WalBufferManager {
         self: &Arc<Self>,
         task_executor: Arc<MessageHandlerExecutor>,
     ) -> Result<(), SlateDBError> {
-        let (flush_tx, flush_rx) = self.status_manager.create_safe_channel();
+        let (flush_tx, flush_rx) =
+            SafeSender::unbounded_channel(self.status_manager.result_reader());
         {
             let mut inner = self.inner.write();
             inner.flush_tx = Some(flush_tx);
@@ -875,7 +878,7 @@ mod tests {
             Some(flush_interval), // max_flush_interval
         ));
         let task_executor = Arc::new(MessageHandlerExecutor::new(
-            status_manager,
+            Arc::new(status_manager),
             system_clock.clone(),
         ));
         wal_buffer.init(task_executor.clone()).await.unwrap();
