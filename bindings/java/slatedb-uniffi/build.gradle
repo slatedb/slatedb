@@ -100,6 +100,10 @@ def nativeSourceFileForPlatform = { platform ->
 }
 
 def hostNativeLibraryForGeneration = nativeSourceFileForPlatform(hostPlatform)
+def testJavaLibraryPath = [
+    hostNativeLibraryForGeneration.parentFile.absolutePath,
+    System.getProperty("java.library.path", ""),
+].findAll { !it.isEmpty() }.join(File.pathSeparator)
 def resolveUniffiBindgenBinary = {
     if (!configuredUniffiBindgenBinary.isEmpty()) {
         return configuredUniffiBindgenBinary
@@ -159,7 +163,7 @@ def generateJavaBindings = tasks.register("generateJavaBindings") { task ->
         } catch (Exception ex) {
             throw new GradleException(
                 "uniffi-bindgen-java is required on PATH. Install it with: " +
-                    "cargo install uniffi-bindgen-java --version 0.3.1. " +
+                    "cargo install uniffi-bindgen-java --git https://github.com/IronCoreLabs/uniffi-bindgen-java.git --tag 0.4.1. " +
                     "If Gradle cannot find it, set UNIFFI_BINDGEN_JAVA or -Pslatedb.uniffi.bindgen to the executable path.",
                 ex
             )
@@ -262,6 +266,12 @@ tasks.named("javadoc") {
 tasks.named("processResources") {
     dependsOn tasks.named("prepareNativeLibraries")
     from(nativeResourceStagingDir)
+}
+
+tasks.withType(Test).configureEach {
+    // The current Java bindings generator emits System.loadLibrary(...), so tests
+    // must expose the host native build output via java.library.path.
+    systemProperty "java.library.path", testJavaLibraryPath
 }
 
 tasks.register("verifyJarNativeLayout") {

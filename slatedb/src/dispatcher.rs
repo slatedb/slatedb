@@ -1633,7 +1633,9 @@ mod test {
         // trigger the expected error.
         tx.try_send(TestMessage::Channel(1)).unwrap();
         tx.try_send(TestMessage::Channel(2)).unwrap();
-        tx.try_send(TestMessage::Channel(3)).unwrap();
+        // The third send is needed to guarantee that at least one channel sees
+        // two messages, but it may fail if the same channel handled both messages above.
+        let _ = tx.try_send(TestMessage::Channel(3));
 
         // Wait for both cleanups
         let _ = timeout(Duration::from_secs(5), cleanup1_reader.await_value())
