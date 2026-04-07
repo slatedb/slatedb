@@ -21,7 +21,13 @@ pub const L0_FLUSH_BYTES: &str = db_stat_name!("l0_flush_bytes");
 pub const SST_FILTER_FALSE_POSITIVE_COUNT: &str = db_stat_name!("sst_filter_false_positive_count");
 pub const SST_FILTER_POSITIVE_COUNT: &str = db_stat_name!("sst_filter_positive_count");
 pub const SST_FILTER_NEGATIVE_COUNT: &str = db_stat_name!("sst_filter_negative_count");
-pub const MERGE_OPERATOR_READ_OPERANDS: &str = db_stat_name!("merge_operator_read_operands");
+pub const MERGE_OPERATOR_OPERANDS: &str = db_stat_name!("merge_operator_operands");
+pub(crate) const MERGE_OPERATOR_PATH_LABEL: &str = "path";
+pub(crate) const MERGE_OPERATOR_READ_PATH: &str = "read";
+pub(crate) const MERGE_OPERATOR_WRITE_PATH: &str = "write";
+
+const MERGE_OPERATOR_OPERANDS_DESCRIPTION: &str =
+    "Total number of operands passed to merge_batch. Labels: path=read|write.";
 
 #[non_exhaustive]
 #[derive(Clone)]
@@ -43,6 +49,7 @@ pub(crate) struct DbStats {
     pub(crate) l0_sst_count: Arc<dyn GaugeFn>,
     pub(crate) l0_flush_bytes: Arc<dyn CounterFn>,
     pub(crate) merge_operator_read_operands: Arc<dyn CounterFn>,
+    pub(crate) merge_operator_write_operands: Arc<dyn CounterFn>,
 }
 
 impl DbStats {
@@ -76,8 +83,14 @@ impl DbStats {
             l0_sst_count: recorder.gauge(L0_SST_COUNT).register(),
             l0_flush_bytes: recorder.counter(L0_FLUSH_BYTES).register(),
             merge_operator_read_operands: recorder
-                .counter(MERGE_OPERATOR_READ_OPERANDS)
-                .description("Total number of operands passed to merge_batch while serving reads.")
+                .counter(MERGE_OPERATOR_OPERANDS)
+                .labels(&[(MERGE_OPERATOR_PATH_LABEL, MERGE_OPERATOR_READ_PATH)])
+                .description(MERGE_OPERATOR_OPERANDS_DESCRIPTION)
+                .register(),
+            merge_operator_write_operands: recorder
+                .counter(MERGE_OPERATOR_OPERANDS)
+                .labels(&[(MERGE_OPERATOR_PATH_LABEL, MERGE_OPERATOR_WRITE_PATH)])
+                .description(MERGE_OPERATOR_OPERANDS_DESCRIPTION)
                 .register(),
         }
     }

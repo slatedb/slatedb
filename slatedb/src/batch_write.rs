@@ -144,7 +144,7 @@ impl DbInner {
                 commit_seq,
                 now,
                 self.settings.default_ttl,
-                self.reader.merge_operator.clone(),
+                self.reader.write_merge_operator.clone(),
             )
             .await?;
 

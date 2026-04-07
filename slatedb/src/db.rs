@@ -1694,7 +1694,10 @@ mod tests {
     use crate::db::builder::GarbageCollectorBuilder;
     use crate::db_common::MAX_WAL_FLUSHES_BEFORE_L0_FLUSH;
     use crate::db_state::ManifestCore;
-    use crate::db_stats::{IMMUTABLE_MEMTABLE_FLUSHES, MERGE_OPERATOR_READ_OPERANDS};
+    use crate::db_stats::{
+        IMMUTABLE_MEMTABLE_FLUSHES, MERGE_OPERATOR_OPERANDS, MERGE_OPERATOR_PATH_LABEL,
+        MERGE_OPERATOR_READ_PATH, MERGE_OPERATOR_WRITE_PATH,
+    };
     use crate::format::sst::SsTableFormat;
     use crate::instrumented_object_store::stats::{
         REQUEST_COUNT as OBJECT_STORE_REQUEST_COUNT,
@@ -5990,7 +5993,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn should_not_record_merge_operator_read_operands_during_write_or_flush() {
+    async fn should_record_merge_operator_operands_on_write_path() {
         let recorder = Arc::new(DefaultMetricsRecorder::new());
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let db = Db::builder(
@@ -6009,9 +6012,19 @@ mod tests {
         db.flush().await.unwrap();
 
         assert_eq!(
-            lookup_metric(recorder.as_ref(), MERGE_OPERATOR_READ_OPERANDS),
+            lookup_metric_with_labels(
+                recorder.as_ref(),
+                MERGE_OPERATOR_OPERANDS,
+                &[(MERGE_OPERATOR_PATH_LABEL, MERGE_OPERATOR_READ_PATH)],
+            ),
             Some(0)
         );
+        assert!(lookup_metric_with_labels(
+            recorder.as_ref(),
+            MERGE_OPERATOR_OPERANDS,
+            &[(MERGE_OPERATOR_PATH_LABEL, MERGE_OPERATOR_WRITE_PATH)],
+        )
+        .is_some_and(|value| value > 0));
     }
 
     #[tokio::test]

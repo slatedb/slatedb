@@ -6,7 +6,7 @@ use crate::db_state::ManifestCore;
 use crate::db_stats::DbStats;
 use crate::iter::RowEntryIterator;
 use crate::mem_table::{ImmutableMemtable, KVTable};
-use crate::merge_operator::{instrument_merge_operator, MergeOperatorType};
+use crate::merge_operator::{instrument_merge_operator, MergeOperatorPath, MergeOperatorType};
 use crate::oracle::Oracle;
 use crate::sorted_run_iterator::SortedRunIterator;
 use crate::sst_iter::{SstIterator, SstIteratorOptions};
@@ -38,7 +38,8 @@ pub(crate) struct Reader {
     #[allow(dead_code)] // unused during DST
     pub(crate) mono_clock: Arc<MonotonicClock>,
     pub(crate) oracle: Arc<dyn Oracle>,
-    pub(crate) merge_operator: Option<MergeOperatorType>,
+    pub(crate) read_merge_operator: Option<MergeOperatorType>,
+    pub(crate) write_merge_operator: Option<MergeOperatorType>,
 }
 
 impl Reader {
@@ -49,22 +50,21 @@ impl Reader {
         oracle: Arc<dyn Oracle>,
         merge_operator: Option<MergeOperatorType>,
     ) -> Self {
+        let read_merge_operator = merge_operator.clone().map(|merge_operator| {
+            instrument_merge_operator(merge_operator, db_stats.clone(), MergeOperatorPath::Read)
+        });
+        let write_merge_operator = merge_operator.map(|merge_operator| {
+            instrument_merge_operator(merge_operator, db_stats.clone(), MergeOperatorPath::Write)
+        });
+
         Self {
             table_store,
             db_stats,
             mono_clock,
             oracle,
-            merge_operator,
+            read_merge_operator,
+            write_merge_operator,
         }
-    }
-
-    fn merge_operator_for_read(&self) -> Option<MergeOperatorType> {
-        self.merge_operator.clone().map(|merge_operator| {
-            instrument_merge_operator(
-                merge_operator,
-                self.db_stats.merge_operator_read_operands.clone(),
-            )
-        })
     }
 
     /// Determines the maximum sequence number for read operations (get and scan). Read operations will filter
@@ -331,8 +331,6 @@ impl Reader {
             )
             .await?;
 
-        let merge_operator = self.merge_operator_for_read();
-
         let mut iterator = DbIterator::new(
             range,
             write_batch_iter,
@@ -341,7 +339,7 @@ impl Reader {
             sr_iters,
             max_seq,
             None,
-            self.merge_operator.clone(),
+            self.read_merge_operator.clone(),
             sst_iter_options.order,
         )
         .await?;
@@ -408,8 +406,6 @@ impl Reader {
             .build_iterator_sources(&range, db_state, write_batch, sst_iter_options, None)
             .await?;
 
-        let merge_operator = self.merge_operator_for_read();
-
         DbIterator::new(
             range,
             write_batch_iter,
@@ -418,7 +414,7 @@ impl Reader {
             sr_iters,
             max_seq,
             range_tracker,
-            self.merge_operator.clone(),
+            self.read_merge_operator.clone(),
             options.order,
         )
         .await
@@ -428,7 +424,10 @@ impl Reader {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db_stats::MERGE_OPERATOR_READ_OPERANDS;
+    use crate::db_stats::{
+        MERGE_OPERATOR_OPERANDS, MERGE_OPERATOR_PATH_LABEL, MERGE_OPERATOR_READ_PATH,
+        MERGE_OPERATOR_WRITE_PATH,
+    };
     use crate::merge_operator::{MergeOperator, MergeOperatorError};
     use crate::types::{RowEntry, ValueDeletable};
     use bytes::Bytes;
@@ -449,7 +448,8 @@ mod tests {
     use crate::tablestore::TableStore;
     use object_store::{memory::InMemory, path::Path, ObjectStore};
     use slatedb_common::metrics::{
-        lookup_metric, DefaultMetricsRecorder, MetricLevel, MetricsRecorder, MetricsRecorderHelper,
+        lookup_metric_with_labels, DefaultMetricsRecorder, MetricLevel, MetricsRecorder,
+        MetricsRecorderHelper,
     };
     use std::collections::HashMap;
     use std::sync::Arc;
@@ -1772,9 +1772,19 @@ mod tests {
         )
     }
 
+    fn merge_operator_operands(
+        recorder: &DefaultMetricsRecorder,
+        path: &'static str,
+    ) -> Option<i64> {
+        lookup_metric_with_labels(
+            recorder,
+            MERGE_OPERATOR_OPERANDS,
+            &[(MERGE_OPERATOR_PATH_LABEL, path)],
+        )
+    }
+
     #[tokio::test]
-    async fn should_record_merge_operator_read_operands_for_reader_reads(
-    ) -> Result<(), SlateDBError> {
+    async fn should_record_merge_operator_operands_on_read_path() -> Result<(), SlateDBError> {
         let entries = vec![
             TestEntry::merge(b"key1", b"b", 2),
             TestEntry::merge(b"key1", b"a", 1),
@@ -1793,7 +1803,11 @@ mod tests {
         let reader = build_reader(&test_db_state, db_stats, true).await;
 
         assert_eq!(
-            lookup_metric(metrics_recorder.as_ref(), MERGE_OPERATOR_READ_OPERANDS),
+            merge_operator_operands(metrics_recorder.as_ref(), MERGE_OPERATOR_READ_PATH),
+            Some(0)
+        );
+        assert_eq!(
+            merge_operator_operands(metrics_recorder.as_ref(), MERGE_OPERATOR_WRITE_PATH),
             Some(0)
         );
 
@@ -1808,8 +1822,12 @@ mod tests {
             .await?;
         assert_eq!(result.unwrap().value, Bytes::from_static(b"ab"));
         assert_eq!(
-            lookup_metric(metrics_recorder.as_ref(), MERGE_OPERATOR_READ_OPERANDS),
+            merge_operator_operands(metrics_recorder.as_ref(), MERGE_OPERATOR_READ_PATH),
             Some(3)
+        );
+        assert_eq!(
+            merge_operator_operands(metrics_recorder.as_ref(), MERGE_OPERATOR_WRITE_PATH),
+            Some(0)
         );
 
         let mut iter = reader
@@ -1846,8 +1864,12 @@ mod tests {
             .is_none());
 
         assert_eq!(
-            lookup_metric(metrics_recorder.as_ref(), MERGE_OPERATOR_READ_OPERANDS),
+            merge_operator_operands(metrics_recorder.as_ref(), MERGE_OPERATOR_READ_PATH),
             Some(6)
+        );
+        assert_eq!(
+            merge_operator_operands(metrics_recorder.as_ref(), MERGE_OPERATOR_WRITE_PATH),
+            Some(0)
         );
 
         Ok(())

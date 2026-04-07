@@ -80,7 +80,7 @@ impl DbInner {
         .flatten()
         .min();
 
-        let merge_iter = if let Some(merge_operator) = self.reader.merge_operator.clone() {
+        let merge_iter = if let Some(merge_operator) = self.reader.write_merge_operator.clone() {
             Box::new(MergeOperatorIterator::new(
                 merge_operator,
                 imm_table.iter(),
