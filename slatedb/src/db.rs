@@ -66,6 +66,7 @@ use crate::oracle::{DbOracle, Oracle};
 use crate::paths::PathResolver;
 use crate::rand::DbRand;
 use crate::reader::Reader;
+use crate::snapshot_manager::SnapshotManager;
 use crate::sst_iter::SstIteratorOptions;
 use crate::tablestore::TableStore;
 use crate::transaction_manager::TransactionManager;
@@ -110,6 +111,7 @@ pub(crate) struct DbInner {
     pub(crate) wal_enabled: bool,
     /// [`txn_manager`] tracks all the live transactions and related metadata.
     pub(crate) txn_manager: Arc<TransactionManager>,
+    pub(crate) snapshot_manager: Arc<SnapshotManager>,
     pub(crate) status_reporter: DbStatusReporter,
 }
 
@@ -170,6 +172,7 @@ impl DbInner {
         ));
 
         let txn_manager = Arc::new(TransactionManager::new(oracle.clone(), rand.clone()));
+        let snapshot_manager = Arc::new(SnapshotManager::new(oracle.clone(), rand.clone()));
 
         let db_inner = Self {
             state,
@@ -188,6 +191,7 @@ impl DbInner {
             fp_registry,
             reader,
             txn_manager,
+            snapshot_manager,
             status_reporter,
         };
         Ok(db_inner)
@@ -769,7 +773,7 @@ impl Db {
     /// ```
     pub async fn snapshot(&self) -> Result<Arc<DbSnapshot>, crate::Error> {
         self.inner.status()?;
-        let snapshot = DbSnapshot::new(self.inner.clone(), self.inner.txn_manager.clone(), None);
+        let snapshot = DbSnapshot::new(self.inner.clone(), None);
         Ok(snapshot)
     }
 
@@ -5620,19 +5624,18 @@ mod tests {
         db.put(b"key2", b"value2").await.unwrap();
         db.inner.flush_memtables().await.unwrap();
 
-        // Verify that txn_manager.min_active_seq() returns the snapshot seq
-        let min_active_seq = db.inner.txn_manager.min_active_seq();
+        // Verify that snapshot_manager.min_active_seq() returns the snapshot seq
+        let min_active_seq = db.inner.snapshot_manager.min_active_seq();
         assert!(min_active_seq.is_some());
         assert_eq!(min_active_seq.unwrap(), snapshot_seq);
 
-        // Verify recent_snapshot_min_seq should be the minimum active seq after flush
         {
             let state = db.inner.state.read();
             let recent_min_seq = state.state().core().recent_snapshot_min_seq;
             assert_eq!(
                 recent_min_seq,
                 min_active_seq.unwrap(),
-                "recent_snapshot_min_seq should equal min_active_seq after flush"
+                "recent_snapshot_min_seq should equal snapshot_manager.min_active_seq() after flush"
             );
         }
 
@@ -5655,6 +5658,173 @@ mod tests {
                 "recent_snapshot_min_seq should equal last_l0_seq when no active snapshots"
             );
             assert!(recent_min_seq > snapshot_seq);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_recent_snapshot_min_seq_uses_transaction_seq() {
+        let path = "/tmp/test_recent_snapshot_min_seq_uses_transaction_seq";
+        let object_store = Arc::new(InMemory::new());
+        let db = Db::builder(path, object_store).build().await.unwrap();
+
+        {
+            let state = db.inner.state.read();
+            assert_eq!(state.state().core().recent_snapshot_min_seq, 0);
+        }
+
+        db.put(b"key1", b"value1").await.unwrap();
+        db.inner.flush_memtables().await.unwrap();
+
+        let txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
+        let txn_seq = txn.seqnum();
+
+        db.put(b"key2", b"value2").await.unwrap();
+        db.inner.flush_memtables().await.unwrap();
+
+        let min_active_seq = db.inner.txn_manager.min_active_seq();
+        assert_eq!(min_active_seq, Some(txn_seq));
+
+        {
+            let state = db.inner.state.read();
+            let recent_min_seq = state.state().core().recent_snapshot_min_seq;
+            assert_eq!(
+                recent_min_seq, txn_seq,
+                "recent_snapshot_min_seq should equal txn_manager.min_active_seq() after flush"
+            );
+        }
+
+        drop(txn);
+
+        db.put(b"key3", b"value3").await.unwrap();
+        db.inner.flush_memtables().await.unwrap();
+
+        {
+            let state = db.inner.state.read();
+            let recent_min_seq = state.state().core().recent_snapshot_min_seq;
+            let last_l0_seq = state.state().core().last_l0_seq;
+            assert_eq!(
+                recent_min_seq, last_l0_seq,
+                "recent_snapshot_min_seq should equal last_l0_seq when no active transactions"
+            );
+            assert!(recent_min_seq > txn_seq);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_recent_snapshot_min_seq_prefers_snapshot_when_snapshot_seq_is_lower() {
+        let path = "/tmp/test_recent_snapshot_min_seq_prefers_snapshot_when_snapshot_seq_is_lower";
+        let object_store = Arc::new(InMemory::new());
+        let db = Db::builder(path, object_store).build().await.unwrap();
+
+        db.put(b"key1", b"value1").await.unwrap();
+        db.inner.flush_memtables().await.unwrap();
+
+        let snapshot = db.snapshot().await.unwrap();
+        let snapshot_seq = snapshot.seq();
+
+        db.put(b"key2", b"value2").await.unwrap();
+        db.inner.flush_memtables().await.unwrap();
+
+        let txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
+        let txn_seq = txn.seqnum();
+
+        assert_eq!(
+            db.inner.snapshot_manager.min_active_seq(),
+            Some(snapshot_seq)
+        );
+        assert_eq!(db.inner.txn_manager.min_active_seq(), Some(txn_seq));
+        assert!(snapshot_seq < txn_seq);
+
+        db.put(b"key3", b"value3").await.unwrap();
+        db.inner.flush_memtables().await.unwrap();
+
+        {
+            let state = db.inner.state.read();
+            let recent_min_seq = state.state().core().recent_snapshot_min_seq;
+            assert_eq!(
+                recent_min_seq,
+                snapshot_seq,
+                "recent_snapshot_min_seq should use the snapshot seq when it is smaller than the transaction seq"
+            );
+        }
+
+        drop(snapshot);
+
+        db.put(b"key4", b"value4").await.unwrap();
+        db.inner.flush_memtables().await.unwrap();
+
+        assert_eq!(db.inner.snapshot_manager.min_active_seq(), None);
+        assert_eq!(db.inner.txn_manager.min_active_seq(), Some(txn_seq));
+
+        {
+            let state = db.inner.state.read();
+            let recent_min_seq = state.state().core().recent_snapshot_min_seq;
+            assert_eq!(
+                recent_min_seq,
+                txn_seq,
+                "recent_snapshot_min_seq should move to the transaction seq after the snapshot is dropped"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_recent_snapshot_min_seq_prefers_transaction_when_transaction_seq_is_lower() {
+        let path =
+            "/tmp/test_recent_snapshot_min_seq_prefers_transaction_when_transaction_seq_is_lower";
+        let object_store = Arc::new(InMemory::new());
+        let db = Db::builder(path, object_store).build().await.unwrap();
+
+        db.put(b"key1", b"value1").await.unwrap();
+        db.inner.flush_memtables().await.unwrap();
+
+        let txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
+        let txn_seq = txn.seqnum();
+
+        db.put(b"key2", b"value2").await.unwrap();
+        db.inner.flush_memtables().await.unwrap();
+
+        let snapshot = db.snapshot().await.unwrap();
+        let snapshot_seq = snapshot.seq();
+
+        assert_eq!(db.inner.txn_manager.min_active_seq(), Some(txn_seq));
+        assert_eq!(
+            db.inner.snapshot_manager.min_active_seq(),
+            Some(snapshot_seq)
+        );
+        assert!(txn_seq < snapshot_seq);
+
+        db.put(b"key3", b"value3").await.unwrap();
+        db.inner.flush_memtables().await.unwrap();
+
+        {
+            let state = db.inner.state.read();
+            let recent_min_seq = state.state().core().recent_snapshot_min_seq;
+            assert_eq!(
+                recent_min_seq,
+                txn_seq,
+                "recent_snapshot_min_seq should use the transaction seq when it is smaller than the snapshot seq"
+            );
+        }
+
+        drop(txn);
+
+        db.put(b"key4", b"value4").await.unwrap();
+        db.inner.flush_memtables().await.unwrap();
+
+        assert_eq!(db.inner.txn_manager.min_active_seq(), None);
+        assert_eq!(
+            db.inner.snapshot_manager.min_active_seq(),
+            Some(snapshot_seq)
+        );
+
+        {
+            let state = db.inner.state.read();
+            let recent_min_seq = state.state().core().recent_snapshot_min_seq;
+            assert_eq!(
+                recent_min_seq,
+                snapshot_seq,
+                "recent_snapshot_min_seq should move to the snapshot seq after the transaction is dropped"
+            );
         }
     }
 
