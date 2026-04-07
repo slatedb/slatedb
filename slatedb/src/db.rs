@@ -3687,6 +3687,8 @@ mod tests {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let mut settings = test_db_options(0, 2048, None);
         settings.flush_interval = None;
+        // Don't trigger `flush_and_record` unless we explicitly ask for it.
+        settings.manifest_poll_interval = Duration::from_secs(60 * 60);
 
         let system_clock = Arc::new(MockSystemClock::new());
         let db = Db::builder(
@@ -3718,38 +3720,60 @@ mod tests {
                 .unwrap();
         }
 
+        // These are the entries that should make it into the first L0 flush.
         put_with_timestamp(&db, &system_clock, 0, &write_options).await;
         put_with_timestamp(&db, &system_clock, 1, &write_options).await;
 
-        fail_parallel::cfg(fp_registry.clone(), "flush-memtable-to-l0", "pause").unwrap();
+        // Pause after the immutable memtable has been written to an L0 SST but before the manifest
+        // is updated. That gives us a precise window where later writes can race with manifest state.
+        fail_parallel::cfg(
+            fp_registry.clone(),
+            "after-flush-imm-to-l0-before-manifest",
+            "pause",
+        )
+        .unwrap();
 
+        // Kick off the flush in the background so the test can interleave more writes while the
+        // flusher is paused at the failpoint above.
         let flush_handle = {
             let inner = Arc::clone(&db.inner);
             tokio::spawn(async move { inner.flush_memtables().await })
         };
 
-        let mut froze_memtable = false;
+        let mut wrote_l0_sst = false;
         for _ in 0..6000 {
-            {
-                let guard = db.inner.state.read();
-                if !guard.state().imm_memtable.is_empty() {
-                    froze_memtable = true;
-                    break;
-                }
+            // Waiting for the SST itself is more precise than watching imm_memtable state. We only
+            // continue once the flusher has definitely crossed the "write SST, not manifest" boundary.
+            let ssts = db.inner.table_store.list_compacted_ssts(..).await.unwrap();
+            if !ssts.is_empty() {
+                wrote_l0_sst = true;
+                break;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        assert!(froze_memtable, "memtable was not frozen before flush");
+        assert!(
+            wrote_l0_sst,
+            "L0 SST was not written before manifest update pause"
+        );
 
+        // These writes land in the new active memtable while the first flush is paused.
+        // They should not leak into the persisted sequence tracker state for the earlier flush.
         put_with_timestamp(&db, &system_clock, 2, &write_options).await;
         put_with_timestamp(&db, &system_clock, 3, &write_options).await;
 
-        fail_parallel::cfg(fp_registry.clone(), "flush-memtable-to-l0", "off").unwrap();
+        // Let the original flush finish publishing its manifest update.
+        fail_parallel::cfg(
+            fp_registry.clone(),
+            "after-flush-imm-to-l0-before-manifest",
+            "off",
+        )
+        .unwrap();
 
         flush_handle.await.unwrap().unwrap();
 
         {
             let guard = db.inner.state.read();
+            // The background flush should have drained the single immutable memtable we created.
             assert!(guard.state().imm_memtable.is_empty());
         }
 
@@ -3763,6 +3787,8 @@ mod tests {
             "expected flushed memtable to advance last_l0_seq"
         );
 
+        // The core invariant: once the first flush publishes last_l0_seq, the persisted tracker
+        // must not contain timestamps for later sequence numbers from the second memtable.
         assert!(
             manifest_state
                 .sequence_tracker
