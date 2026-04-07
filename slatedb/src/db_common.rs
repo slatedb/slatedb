@@ -53,7 +53,7 @@ impl DbInner {
             return Ok(());
         }
 
-        guard.freeze_memtable(wal_id)?;
+        guard.freeze_memtable(wal_id);
         let _ = self.memtable_flusher().notify_memtable_frozen();
         Ok(())
     }
@@ -93,6 +93,7 @@ impl DbInner {
         self.mono_clock.set_last_tick(replayed_memtable.last_tick)?;
 
         // replace the memtable
-        guard.replace_memtable(replayed_memtable.table)
+        guard.replace_memtable(replayed_memtable.table);
+        Ok(())
     }
 }

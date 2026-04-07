@@ -20,7 +20,7 @@ use crate::dispatcher::{MessageHandler, MessageHandlerExecutor};
 use crate::error::SlateDBError;
 use crate::format::sst::EncodedSsTable;
 use crate::mem_table::ImmutableMemtable;
-use crate::utils::safe_async_channel;
+use crate::utils::SafeSender;
 use async_trait::async_trait;
 use futures::stream::BoxStream;
 use futures::StreamExt;
@@ -99,18 +99,18 @@ impl UploadedMemtable {
 /// workers with the executor on [`start`](Self::start).
 #[derive(Clone)]
 pub(crate) struct Uploader {
-    jobs_tx: safe_async_channel::SafeSender<UploadJob>,
+    jobs_tx: SafeSender<UploadJob>,
 }
 
 impl Uploader {
     pub(crate) fn start(
         db: Arc<DbInner>,
-        closed_result: &ClosedResultWriter,
-        tracker_tx: safe_async_channel::SafeSender<TrackerMessage>,
+        closed_result: &dyn ClosedResultWriter,
+        tracker_tx: SafeSender<TrackerMessage>,
         executor: &MessageHandlerExecutor,
         tokio_handle: &Handle,
     ) -> Result<Self, SlateDBError> {
-        let (jobs_tx, jobs_rx) = closed_result.channel();
+        let (jobs_tx, jobs_rx) = SafeSender::unbounded_channel(closed_result.result_reader());
         let uploader = Uploader { jobs_tx };
         let handlers = Self::build_handlers(db, tracker_tx);
         executor.add_handlers(
@@ -124,7 +124,7 @@ impl Uploader {
 
     pub(crate) fn build_handlers(
         db: Arc<DbInner>,
-        tracker_tx: safe_async_channel::SafeSender<TrackerMessage>,
+        tracker_tx: SafeSender<TrackerMessage>,
     ) -> Vec<Box<dyn MessageHandler<UploadJob>>> {
         let parallelism = db.settings.l0_flush_parallelism;
         let retry_backoff = db.settings.manifest_poll_interval;
@@ -154,14 +154,14 @@ impl Uploader {
 /// MessageHandler that builds and uploads one SST per job.
 pub(crate) struct UploadHandler {
     db: Arc<DbInner>,
-    tracker_tx: safe_async_channel::SafeSender<TrackerMessage>,
+    tracker_tx: SafeSender<TrackerMessage>,
     retry_backoff: Duration,
 }
 
 impl UploadHandler {
     pub(crate) fn new(
         db: Arc<DbInner>,
-        tracker_tx: safe_async_channel::SafeSender<TrackerMessage>,
+        tracker_tx: SafeSender<TrackerMessage>,
         retry_backoff: Duration,
     ) -> Self {
         Self {
@@ -243,7 +243,7 @@ mod tests {
     use crate::config::Settings;
     use crate::db::DbInner;
     use crate::db_state::{ManifestCore, SsTableId, SsTableView};
-    use crate::db_status::ClosedResultWriter;
+    use crate::db_status::{ClosedResultWriter, DbStatusManager};
     use crate::error::SlateDBError;
     use crate::format::sst::SsTableFormat;
     use crate::iter::RowEntryIterator;
@@ -254,6 +254,7 @@ mod tests {
     use crate::tablestore::TableStore;
     use crate::types::{RowEntry, ValueDeletable};
     use crate::utils::IdGenerator;
+    use crate::utils::WatchableOnceCell;
     use bytes::Bytes;
     use fail_parallel::FailPointRegistry;
     use object_store::memory::InMemory;
@@ -290,7 +291,9 @@ mod tests {
             fp_registry.clone(),
             None,
         ));
-        let (write_tx, _) = async_channel::unbounded();
+        let status_manager = DbStatusManager::new(0);
+        let (write_tx, _) =
+            crate::utils::SafeSender::unbounded_channel(status_manager.result_reader());
         Arc::new(
             DbInner::new(
                 settings,
@@ -299,13 +302,13 @@ mod tests {
                 Arc::clone(&table_store),
                 stored_manifest.prepare_dirty().unwrap(),
                 Arc::new(crate::memtable_flusher::MemtableFlusher::new(
-                    &ClosedResultWriter::new(),
+                    &status_manager,
                 )),
                 write_tx,
                 db_metrics,
                 fp_registry,
                 None,
-                ClosedResultWriter::new(),
+                status_manager,
             )
             .await
             .unwrap(),
@@ -320,7 +323,7 @@ mod tests {
     ) -> Arc<crate::mem_table::ImmutableMemtable> {
         let mut guard = db.state.write();
         guard.memtable().put(RowEntry::new_value(key, value, seq));
-        guard.freeze_memtable(0).unwrap();
+        guard.freeze_memtable(0);
         guard.state().imm_memtable.front().cloned().unwrap()
     }
 
@@ -334,7 +337,7 @@ mod tests {
         uploader: Uploader,
         tracker_rx: async_channel::Receiver<TrackerMessage>,
         executor: Arc<crate::dispatcher::MessageHandlerExecutor>,
-        closed_result: ClosedResultWriter,
+        closed_result: WatchableOnceCell<Result<(), SlateDBError>>,
     }
 
     impl TestUploader {
@@ -356,11 +359,12 @@ mod tests {
     }
 
     fn start_test_uploader(db: &Arc<DbInner>) -> TestUploader {
-        let closed_result = ClosedResultWriter::new();
+        let closed_result: WatchableOnceCell<Result<(), SlateDBError>> = WatchableOnceCell::new();
         let system_clock: Arc<dyn SystemClock> = Arc::new(DefaultSystemClock::new());
-        let (tracker_tx, tracker_rx) = closed_result.channel();
+        let (tracker_tx, tracker_rx) =
+            crate::utils::SafeSender::unbounded_channel(closed_result.result_reader());
         let executor = Arc::new(crate::dispatcher::MessageHandlerExecutor::new(
-            closed_result.clone(),
+            Arc::new(closed_result.clone()),
             system_clock,
         ));
         let uploader = Uploader::start(
@@ -471,7 +475,7 @@ mod tests {
                 b"merge_operand",
                 1,
             ));
-            guard.freeze_memtable(0).unwrap();
+            guard.freeze_memtable(0);
         }
         let imm_memtable = db
             .state
@@ -545,7 +549,7 @@ mod tests {
             guard
                 .memtable()
                 .put(crate::types::RowEntry::new_merge(b"key", b"operand", 1));
-            guard.freeze_memtable(0).unwrap();
+            guard.freeze_memtable(0);
         }
         let imm_memtable = db
             .state

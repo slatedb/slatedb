@@ -37,7 +37,6 @@ use crate::dispatcher::MessageHandlerExecutor;
 use crate::garbage_collector::GC_TASK_NAME;
 use crate::transaction_manager::IsolationLevel;
 use crate::CloseReason;
-use async_channel::Sender;
 use log::{info, trace, warn};
 use parking_lot::RwLock;
 use std::time::Duration;
@@ -66,18 +65,19 @@ use crate::oracle::{DbOracle, Oracle};
 use crate::paths::PathResolver;
 use crate::rand::DbRand;
 use crate::reader::Reader;
+use crate::snapshot_manager::SnapshotManager;
 use crate::sst_iter::SstIteratorOptions;
 use crate::tablestore::TableStore;
 use crate::transaction_manager::TransactionManager;
 use crate::types::KeyValue;
-use crate::utils::{format_bytes_si, SendSafely};
+use crate::utils::{format_bytes_si, SafeSender};
 use crate::wal_buffer::{WalBufferManager, WAL_BUFFER_TASK_NAME};
 use crate::wal_replay::{WalReplayIterator, WalReplayOptions};
 use slatedb_common::clock::SystemClock;
 use slatedb_common::metrics::MetricsRecorderHelper;
 use slatedb_txn_obj::DirtyObject;
 
-use crate::db_status::{ClosedResultWriter, DbStatusReporter};
+use crate::db_status::{ClosedResultWriter, DbStatusManager};
 pub use builder::DbBuilder;
 pub use builder::DbReaderBuilder;
 
@@ -88,7 +88,7 @@ pub(crate) struct DbInner {
     pub(crate) settings: Settings,
     pub(crate) table_store: Arc<TableStore>,
     pub(crate) memtable_flusher: Arc<MemtableFlusher>,
-    pub(crate) write_notifier: Sender<WriteBatchMessage>,
+    pub(crate) write_notifier: SafeSender<WriteBatchMessage>,
     pub(crate) db_stats: DbStats,
     /// Kept alive so the underlying `MetricsRecorder` is not dropped while
     /// metric handles in `DbStats` (and other stats structs) are still in use.
@@ -110,7 +110,8 @@ pub(crate) struct DbInner {
     pub(crate) wal_enabled: bool,
     /// [`txn_manager`] tracks all the live transactions and related metadata.
     pub(crate) txn_manager: Arc<TransactionManager>,
-    pub(crate) status_reporter: DbStatusReporter,
+    pub(crate) snapshot_manager: Arc<SnapshotManager>,
+    pub(crate) status_manager: DbStatusManager,
 }
 
 impl DbInner {
@@ -121,20 +122,19 @@ impl DbInner {
         table_store: Arc<TableStore>,
         manifest: DirtyObject<Manifest>,
         memtable_flusher: Arc<MemtableFlusher>,
-        write_notifier: Sender<WriteBatchMessage>,
+        write_notifier: SafeSender<WriteBatchMessage>,
         recorder: MetricsRecorderHelper,
         fp_registry: Arc<FailPointRegistry>,
         merge_operator: Option<crate::merge_operator::MergeOperatorType>,
-        closed_result: ClosedResultWriter,
+        status_manager: DbStatusManager,
     ) -> Result<Self, SlateDBError> {
         // both last_seq and last_committed_seq will be updated after WAL replay.
         let last_l0_seq = manifest.value.core.last_l0_seq;
-        let status_reporter = DbStatusReporter::new(last_l0_seq);
         let oracle = Arc::new(DbOracle::new(
             last_l0_seq,
             last_l0_seq,
             last_l0_seq,
-            status_reporter.clone(),
+            status_manager.clone(),
         ));
 
         let mono_clock = Arc::new(MonotonicClock::new(
@@ -143,13 +143,8 @@ impl DbInner {
         ));
 
         // state are mostly manifest, including IMM, L0, etc.
-        let db_state = DbState::new(manifest, closed_result);
+        let db_state = DbState::new(manifest);
         let state = Arc::new(RwLock::new(db_state));
-        // Watch for closed result and report status to subscribers.
-        state
-            .read()
-            .closed_result()
-            .spawn_close_watcher(status_reporter.clone());
 
         let db_stats = DbStats::new(&recorder);
         let wal_enabled = DbInner::wal_enabled_in_options(&settings);
@@ -165,7 +160,7 @@ impl DbInner {
         let recent_flushed_wal_id = state.read().state().core().replay_after_wal_id;
         let wal_buffer = Arc::new(WalBufferManager::new(
             state.clone(),
-            state.clone(),
+            status_manager.clone(),
             db_stats.clone(),
             recent_flushed_wal_id,
             oracle.clone(),
@@ -176,6 +171,7 @@ impl DbInner {
         ));
 
         let txn_manager = Arc::new(TransactionManager::new(oracle.clone(), rand.clone()));
+        let snapshot_manager = Arc::new(SnapshotManager::new(oracle.clone(), rand.clone()));
 
         let db_inner = Self {
             state,
@@ -194,7 +190,8 @@ impl DbInner {
             fp_registry,
             reader,
             txn_manager,
-            status_reporter,
+            snapshot_manager,
+            status_manager,
         };
         Ok(db_inner)
     }
@@ -300,8 +297,7 @@ impl DbInner {
         };
 
         self.maybe_apply_backpressure().await?;
-        self.write_notifier
-            .send_safely(self.state.read().closed_result_reader(), batch_msg)?;
+        self.write_notifier.send(batch_msg)?;
 
         // TODO: this can be modified as awaiting the last_durable_seq watermark & fatal error.
 
@@ -567,15 +563,11 @@ impl DbInner {
     /// ## Returns
     /// - `Ok(())` if the DB is still open.
     /// - `Err(SlateDBError::Closed)` if the DB was closed successfully
-    ///   (state.closed_result_reader() returns Ok(())).
+    ///   (state.result_reader() returns Ok(())).
     /// - `Err(e)` if the DB was closed with an error, where `e` is the error
-    ///   (state.closed_result_reader() returns Err(e)).
+    ///   (state.result_reader() returns Err(e)).
     pub(crate) fn status(&self) -> Result<(), SlateDBError> {
-        let closed_result_reader = {
-            let state = self.state.read();
-            state.closed_result_reader()
-        };
-        if let Some(result) = closed_result_reader.read() {
+        if let Some(result) = self.status_manager.result_reader().read() {
             return match result {
                 Ok(()) => Err(SlateDBError::Closed),
                 Err(e) => Err(e),
@@ -691,7 +683,7 @@ impl Db {
         };
 
         // Mark the database as closed before flushing.
-        self.inner.state.write().closed_result().write(Ok(()));
+        self.inner.status_manager.write_result(Ok(()));
 
         if should_flush {
             if let Err(e) = self.inner.flush(false).await {
@@ -764,7 +756,7 @@ impl Db {
     /// ```
     pub async fn snapshot(&self) -> Result<Arc<DbSnapshot>, crate::Error> {
         self.inner.status()?;
-        let snapshot = DbSnapshot::new(self.inner.clone(), self.inner.txn_manager.clone(), None);
+        let snapshot = DbSnapshot::new(self.inner.clone(), None);
         Ok(snapshot)
     }
 
@@ -1552,7 +1544,7 @@ impl Db {
     /// some_async_fn(status.durable_seq).await; // deadlock!
     /// ```
     pub fn subscribe(&self) -> tokio::sync::watch::Receiver<DbStatus> {
-        self.inner.status_reporter.subscribe()
+        self.inner.status_manager.subscribe()
     }
 
     /// Begin a new transaction with the specified isolation level.
@@ -2205,10 +2197,8 @@ mod tests {
 
         // Simulate a failed state (e.g. fenced).
         db.inner
-            .state
-            .write()
-            .closed_result()
-            .write(Err(crate::error::SlateDBError::Fenced));
+            .status_manager
+            .write_result(Err(crate::error::SlateDBError::Fenced));
 
         // close() should succeed but not flush when failed.
         db.close().await.unwrap();
@@ -5559,19 +5549,18 @@ mod tests {
         db.put(b"key2", b"value2").await.unwrap();
         db.inner.flush_memtables(FlushTarget::All).await.unwrap();
 
-        // Verify that txn_manager.min_active_seq() returns the snapshot seq
-        let min_active_seq = db.inner.txn_manager.min_active_seq();
+        // Verify that snapshot_manager.min_active_seq() returns the snapshot seq
+        let min_active_seq = db.inner.snapshot_manager.min_active_seq();
         assert!(min_active_seq.is_some());
         assert_eq!(min_active_seq.unwrap(), snapshot_seq);
 
-        // Verify recent_snapshot_min_seq should be the minimum active seq after flush
         {
             let state = db.inner.state.read();
             let recent_min_seq = state.state().core().recent_snapshot_min_seq;
             assert_eq!(
                 recent_min_seq,
                 min_active_seq.unwrap(),
-                "recent_snapshot_min_seq should equal min_active_seq after flush"
+                "recent_snapshot_min_seq should equal snapshot_manager.min_active_seq() after flush"
             );
         }
 
@@ -5594,6 +5583,206 @@ mod tests {
                 "recent_snapshot_min_seq should equal last_l0_seq when no active snapshots"
             );
             assert!(recent_min_seq > snapshot_seq);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_recent_snapshot_min_seq_uses_transaction_seq() {
+        let path = "/tmp/test_recent_snapshot_min_seq_uses_transaction_seq";
+        let object_store = Arc::new(InMemory::new());
+        let db = Db::builder(path, object_store).build().await.unwrap();
+
+        {
+            let state = db.inner.state.read();
+            assert_eq!(state.state().core().recent_snapshot_min_seq, 0);
+        }
+
+        db.put(b"key1", b"value1").await.unwrap();
+        db.inner
+            .flush_memtables(crate::memtable_flusher::FlushTarget::All)
+            .await
+            .unwrap();
+
+        let txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
+        let txn_seq = txn.seqnum();
+
+        db.put(b"key2", b"value2").await.unwrap();
+        db.inner
+            .flush_memtables(crate::memtable_flusher::FlushTarget::All)
+            .await
+            .unwrap();
+
+        let min_active_seq = db.inner.txn_manager.min_active_seq();
+        assert_eq!(min_active_seq, Some(txn_seq));
+
+        {
+            let state = db.inner.state.read();
+            let recent_min_seq = state.state().core().recent_snapshot_min_seq;
+            assert_eq!(
+                recent_min_seq, txn_seq,
+                "recent_snapshot_min_seq should equal txn_manager.min_active_seq() after flush"
+            );
+        }
+
+        drop(txn);
+
+        db.put(b"key3", b"value3").await.unwrap();
+        db.inner
+            .flush_memtables(crate::memtable_flusher::FlushTarget::All)
+            .await
+            .unwrap();
+
+        {
+            let state = db.inner.state.read();
+            let recent_min_seq = state.state().core().recent_snapshot_min_seq;
+            let last_l0_seq = state.state().core().last_l0_seq;
+            assert_eq!(
+                recent_min_seq, last_l0_seq,
+                "recent_snapshot_min_seq should equal last_l0_seq when no active transactions"
+            );
+            assert!(recent_min_seq > txn_seq);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_recent_snapshot_min_seq_prefers_snapshot_when_snapshot_seq_is_lower() {
+        let path = "/tmp/test_recent_snapshot_min_seq_prefers_snapshot_when_snapshot_seq_is_lower";
+        let object_store = Arc::new(InMemory::new());
+        let db = Db::builder(path, object_store).build().await.unwrap();
+
+        db.put(b"key1", b"value1").await.unwrap();
+        db.inner
+            .flush_memtables(crate::memtable_flusher::FlushTarget::All)
+            .await
+            .unwrap();
+
+        let snapshot = db.snapshot().await.unwrap();
+        let snapshot_seq = snapshot.seq();
+
+        db.put(b"key2", b"value2").await.unwrap();
+        db.inner
+            .flush_memtables(crate::memtable_flusher::FlushTarget::All)
+            .await
+            .unwrap();
+
+        let txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
+        let txn_seq = txn.seqnum();
+
+        assert_eq!(
+            db.inner.snapshot_manager.min_active_seq(),
+            Some(snapshot_seq)
+        );
+        assert_eq!(db.inner.txn_manager.min_active_seq(), Some(txn_seq));
+        assert!(snapshot_seq < txn_seq);
+
+        db.put(b"key3", b"value3").await.unwrap();
+        db.inner
+            .flush_memtables(crate::memtable_flusher::FlushTarget::All)
+            .await
+            .unwrap();
+
+        {
+            let state = db.inner.state.read();
+            let recent_min_seq = state.state().core().recent_snapshot_min_seq;
+            assert_eq!(
+                recent_min_seq,
+                snapshot_seq,
+                "recent_snapshot_min_seq should use the snapshot seq when it is smaller than the transaction seq"
+            );
+        }
+
+        drop(snapshot);
+
+        db.put(b"key4", b"value4").await.unwrap();
+        db.inner
+            .flush_memtables(crate::memtable_flusher::FlushTarget::All)
+            .await
+            .unwrap();
+
+        assert_eq!(db.inner.snapshot_manager.min_active_seq(), None);
+        assert_eq!(db.inner.txn_manager.min_active_seq(), Some(txn_seq));
+
+        {
+            let state = db.inner.state.read();
+            let recent_min_seq = state.state().core().recent_snapshot_min_seq;
+            assert_eq!(
+                recent_min_seq,
+                txn_seq,
+                "recent_snapshot_min_seq should move to the transaction seq after the snapshot is dropped"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_recent_snapshot_min_seq_prefers_transaction_when_transaction_seq_is_lower() {
+        let path =
+            "/tmp/test_recent_snapshot_min_seq_prefers_transaction_when_transaction_seq_is_lower";
+        let object_store = Arc::new(InMemory::new());
+        let db = Db::builder(path, object_store).build().await.unwrap();
+
+        db.put(b"key1", b"value1").await.unwrap();
+        db.inner
+            .flush_memtables(crate::memtable_flusher::FlushTarget::All)
+            .await
+            .unwrap();
+
+        let txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
+        let txn_seq = txn.seqnum();
+
+        db.put(b"key2", b"value2").await.unwrap();
+        db.inner
+            .flush_memtables(crate::memtable_flusher::FlushTarget::All)
+            .await
+            .unwrap();
+
+        let snapshot = db.snapshot().await.unwrap();
+        let snapshot_seq = snapshot.seq();
+
+        assert_eq!(db.inner.txn_manager.min_active_seq(), Some(txn_seq));
+        assert_eq!(
+            db.inner.snapshot_manager.min_active_seq(),
+            Some(snapshot_seq)
+        );
+        assert!(txn_seq < snapshot_seq);
+
+        db.put(b"key3", b"value3").await.unwrap();
+        db.inner
+            .flush_memtables(crate::memtable_flusher::FlushTarget::All)
+            .await
+            .unwrap();
+
+        {
+            let state = db.inner.state.read();
+            let recent_min_seq = state.state().core().recent_snapshot_min_seq;
+            assert_eq!(
+                recent_min_seq,
+                txn_seq,
+                "recent_snapshot_min_seq should use the transaction seq when it is smaller than the snapshot seq"
+            );
+        }
+
+        drop(txn);
+
+        db.put(b"key4", b"value4").await.unwrap();
+        db.inner
+            .flush_memtables(crate::memtable_flusher::FlushTarget::All)
+            .await
+            .unwrap();
+
+        assert_eq!(db.inner.txn_manager.min_active_seq(), None);
+        assert_eq!(
+            db.inner.snapshot_manager.min_active_seq(),
+            Some(snapshot_seq)
+        );
+
+        {
+            let state = db.inner.state.read();
+            let recent_min_seq = state.state().core().recent_snapshot_min_seq;
+            assert_eq!(
+                recent_min_seq,
+                snapshot_seq,
+                "recent_snapshot_min_seq should move to the snapshot seq after the transaction is dropped"
+            );
         }
     }
 
@@ -6354,10 +6543,8 @@ mod tests {
 
         // When: the DB is fenced (simulated via closed_result)
         db.inner
-            .state
-            .write()
-            .closed_result()
-            .write(Err(crate::error::SlateDBError::Fenced));
+            .status_manager
+            .write_result(Err(crate::error::SlateDBError::Fenced));
 
         // Then: the watcher should report close_reason = Fenced
         let status = tokio::time::timeout(

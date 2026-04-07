@@ -16,6 +16,7 @@ use crate::object_stores::{ObjectStoreType, ObjectStores};
 use crate::rand::DbRand;
 use crate::seq_tracker::FindOption;
 use crate::utils::IdGenerator;
+use crate::utils::WatchableOnceCell;
 use chrono::{DateTime, Utc};
 use fail_parallel::FailPointRegistry;
 use object_store::path::Path;
@@ -276,7 +277,7 @@ impl Admin {
         .build();
 
         let (_, rx) = async_channel::unbounded();
-        let closed_result = ClosedResultWriter::new();
+        let closed_result: Arc<dyn ClosedResultWriter> = Arc::new(WatchableOnceCell::new());
         let task_executor = MessageHandlerExecutor::new(closed_result, self.system_clock.clone());
 
         task_executor

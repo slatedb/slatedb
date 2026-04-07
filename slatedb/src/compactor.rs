@@ -281,7 +281,7 @@ impl Compactor {
         rand: Arc<DbRand>,
         recorder: &MetricsRecorderHelper,
         system_clock: Arc<dyn SystemClock>,
-        closed_result: ClosedResultWriter,
+        closed_result: Arc<dyn ClosedResultWriter>,
         merge_operator: Option<MergeOperatorType>,
         #[cfg(feature = "compaction_filters")] compaction_filter_supplier: Option<
             Arc<dyn CompactionFilterSupplier>,

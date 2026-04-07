@@ -377,12 +377,13 @@ enum TrackedImmState {
 
 #[cfg(test)]
 mod tests {
+    use crate::batch_write::WriteBatchMessage;
     use crate::config::{CheckpointOptions, Settings};
     use crate::db::DbInner;
     use crate::db_state::{
         ManifestCore, SsTableHandle, SsTableId, SsTableInfo, SsTableView, SstType,
     };
-    use crate::db_status::ClosedResultWriter;
+    use crate::db_status::{ClosedResultWriter, DbStatusManager};
     use crate::error::SlateDBError;
     use crate::format::sst::{SsTableFormat, SST_FORMAT_VERSION_LATEST};
     use crate::manifest::store::{FenceableManifest, ManifestStore, StoredManifest};
@@ -392,6 +393,7 @@ mod tests {
     use crate::rand::DbRand;
     use crate::tablestore::TableStore;
     use crate::types::RowEntry;
+    use crate::utils::{SafeSender, WatchableOnceCell};
     use bytes::Bytes;
     use fail_parallel::FailPointRegistry;
     use object_store::memory::InMemory;
@@ -439,7 +441,9 @@ mod tests {
             Arc::clone(&fp_registry),
             None,
         ));
-        let (write_tx, _) = async_channel::unbounded();
+        let status_manager = DbStatusManager::new(0);
+        let (write_tx, _) =
+            SafeSender::<WriteBatchMessage>::unbounded_channel(status_manager.result_reader());
         let inner = Arc::new(
             DbInner::new(
                 settings,
@@ -447,12 +451,12 @@ mod tests {
                 Arc::clone(&rand),
                 Arc::clone(&table_store),
                 stored_manifest.prepare_dirty().unwrap(),
-                Arc::new(MemtableFlusher::new(&ClosedResultWriter::new())),
+                Arc::new(MemtableFlusher::new(&status_manager)),
                 write_tx,
                 db_metrics,
                 fp_registry,
                 None,
-                ClosedResultWriter::new(),
+                status_manager,
             )
             .await
             .unwrap(),
@@ -481,7 +485,7 @@ mod tests {
     ) {
         let mut guard = harness.inner.state.write();
         guard.memtable().put(RowEntry::new_value(key, value, seq));
-        guard.freeze_memtable(recent_flushed_wal_id).unwrap();
+        guard.freeze_memtable(recent_flushed_wal_id);
     }
 
     fn freeze_merge_imm(
@@ -493,7 +497,7 @@ mod tests {
     ) {
         let mut guard = harness.inner.state.write();
         guard.memtable().put(RowEntry::new_merge(key, value, seq));
-        guard.freeze_memtable(recent_flushed_wal_id).unwrap();
+        guard.freeze_memtable(recent_flushed_wal_id);
     }
 
     async fn latest_manifest_checkpoint_count(
@@ -564,7 +568,7 @@ mod tests {
         flusher: MemtableFlusher,
         executor: crate::dispatcher::MessageHandlerExecutor,
         #[allow(dead_code)]
-        closed_result: ClosedResultWriter,
+        closed_result: WatchableOnceCell<Result<(), SlateDBError>>,
     }
 
     impl StartedFlusher {
@@ -586,10 +590,12 @@ mod tests {
     }
 
     fn start_flusher(harness: TestHarness) -> StartedFlusher {
-        let closed_result = ClosedResultWriter::new();
+        let closed_result = WatchableOnceCell::new();
         let system_clock: Arc<dyn SystemClock> = Arc::new(DefaultSystemClock::new());
-        let executor =
-            crate::dispatcher::MessageHandlerExecutor::new(closed_result.clone(), system_clock);
+        let executor = crate::dispatcher::MessageHandlerExecutor::new(
+            Arc::new(closed_result.clone()) as Arc<dyn ClosedResultWriter>,
+            system_clock,
+        );
         let flusher = MemtableFlusher::new(&closed_result);
         flusher
             .start(

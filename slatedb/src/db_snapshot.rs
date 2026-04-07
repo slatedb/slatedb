@@ -9,32 +9,21 @@ use crate::db_iter::DbIterator;
 use crate::types::KeyValue;
 
 use crate::db::DbInner;
-use crate::transaction_manager::TransactionManager;
 use crate::DbRead;
 
 pub struct DbSnapshot {
-    /// txn_id is the id of the transaction that created this snapshot
-    txn_id: Uuid,
-    /// txn_seq is the sequence number of the transaction that created this snapshot
+    snapshot_id: Uuid,
     started_seq: u64,
-    /// Reference to the transaction manager that created this snapshot
-    txn_manager: Arc<TransactionManager>,
-    /// Reference to the database
     db_inner: Arc<DbInner>,
 }
 
 impl DbSnapshot {
-    pub(crate) fn new(
-        db_inner: Arc<DbInner>,
-        txn_manager: Arc<TransactionManager>,
-        seq: Option<u64>,
-    ) -> Arc<Self> {
-        let (txn_id, seq) = txn_manager.new_snapshot(seq);
+    pub(crate) fn new(db_inner: Arc<DbInner>, seq: Option<u64>) -> Arc<Self> {
+        let (snapshot_id, started_seq) = db_inner.snapshot_manager.new_snapshot(seq);
 
         Arc::new(Self {
-            txn_id,
-            started_seq: seq,
-            txn_manager,
+            snapshot_id,
+            started_seq,
             db_inner,
         })
     }
@@ -223,10 +212,11 @@ impl DbRead for DbSnapshot {
     }
 }
 
-/// Unregister from transaction manager when dropped.
 impl Drop for DbSnapshot {
     fn drop(&mut self) {
-        self.txn_manager.drop_txn(&self.txn_id);
+        self.db_inner
+            .snapshot_manager
+            .drop_snapshot(&self.snapshot_id);
     }
 }
 

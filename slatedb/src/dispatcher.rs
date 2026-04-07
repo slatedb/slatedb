@@ -1,5 +1,5 @@
 //! SlateDB makes use of [async_channel] to offload work to background tasks when
-//! possible. Examples of these tasks include [crate::memtable_flusher],
+//! possible. Examples of these tasks include [crate::mem_table_flush],
 //! [crate::checkpoint], and [crate::compactor]. Each task's lifecycle is fairly
 //! similar; they:
 //!
@@ -253,7 +253,7 @@ impl<T: Send + std::fmt::Debug> MessageDispatcher<T> {
     async fn run_lifecycle(
         mut self,
         name: String,
-        closed_result: ClosedResultWriter,
+        closed_result: Arc<dyn ClosedResultWriter>,
         #[allow(unused_variables)] fp_registry: Arc<FailPointRegistry>,
     ) -> Result<(), SlateDBError> {
         // catch dispatcher panics using catch_unwind
@@ -271,10 +271,10 @@ impl<T: Send + std::fmt::Debug> MessageDispatcher<T> {
             panic!("failpoint: executor-wrapper-before-write");
         });
         // set result in db state (first writer wins)
-        closed_result.write(run_result.clone());
+        closed_result.write_result(run_result.clone());
         // re-read the result since it might have already been set by another task
         let final_result = closed_result
-            .reader()
+            .result_reader()
             .read()
             .expect("error state was unexpectedly empty");
         let cleanup_unwind_result = AssertUnwindSafe(self.cleanup(final_result))
@@ -468,7 +468,7 @@ impl TaskGroup {
 struct TaskMonitor {
     tasks: JoinMap<(String, usize), Result<(), SlateDBError>>,
     groups: HashMap<String, TaskGroup>,
-    closed_result: ClosedResultWriter,
+    closed_result: Arc<dyn ClosedResultWriter>,
     results: Arc<SkipMap<String, WatchableOnceCell<Result<(), SlateDBError>>>>,
     tokens: Vec<CancellationToken>,
 }
@@ -488,7 +488,7 @@ impl TaskMonitor {
                         err,
                         task_maybe_panic.map(|p| panic_string(&p))
                     );
-                    self.closed_result.write(task_result.clone());
+                    self.closed_result.write_result(task_result.clone());
                     self.tokens.iter().for_each(|t| t.cancel());
                 }
 
@@ -543,7 +543,7 @@ pub(crate) struct MessageHandlerExecutor {
     /// A wrapper that stores the final result of the database lifecycle and
     /// auto-reports the close reason. Ok(()) indicates a clean shutdown; Err(e)
     /// indicates an error.
-    closed_result: ClosedResultWriter,
+    closed_result: Arc<dyn ClosedResultWriter>,
     /// A system clock for time keeping.
     clock: Arc<dyn SystemClock>,
     /// A fail point registry for fail points.
@@ -556,14 +556,16 @@ impl MessageHandlerExecutor {
     ///
     /// ## Arguments
     ///
-    /// * `closed_result`: A [ClosedResultWriter] that stores the database close result
-    ///   and auto-reports the close reason.
+    /// * `closed_result`: A [ClosedResultWriter] that stores the database close result.
     /// * `clock`: A [SystemClock] to use for tickers and timekeeping.
     ///
     /// ## Returns
     ///
     /// The new [MessageHandlerExecutor].
-    pub(crate) fn new(closed_result: ClosedResultWriter, clock: Arc<dyn SystemClock>) -> Self {
+    pub(crate) fn new(
+        closed_result: Arc<dyn ClosedResultWriter>,
+        clock: Arc<dyn SystemClock>,
+    ) -> Self {
         Self {
             futures: Mutex::new(Some(vec![])),
             closed_result,
@@ -932,7 +934,7 @@ mod test {
         let (tx, rx) = async_channel::unbounded();
         let clock = Arc::new(MockSystemClock::new());
         let handler = TestHandler::new(log.clone(), cleanup_called.clone(), clock.clone());
-        let closed_result = ClosedResultWriter::new();
+        let closed_result = Arc::new(WatchableOnceCell::new());
         let fp_registry = Arc::new(FailPointRegistry::default());
         let task_executor = MessageHandlerExecutor::new(closed_result.clone(), clock.clone())
             .with_fp_registry(fp_registry.clone());
@@ -973,7 +975,7 @@ mod test {
         // Verify final state
         assert!(matches!(result, Err(SlateDBError::Fenced)));
         assert!(matches!(
-            closed_result.reader().read(),
+            closed_result.result_reader().read(),
             Some(Err(SlateDBError::Fenced))
         ));
         assert!(matches!(
@@ -1299,7 +1301,7 @@ mod test {
         let (tx, rx) = async_channel::unbounded::<u8>();
         let clock = Arc::new(DefaultSystemClock::new());
         let handler = PanicHandler { cleanup_called };
-        let closed_result = ClosedResultWriter::new();
+        let closed_result = Arc::new(WatchableOnceCell::new());
         let task_executor = MessageHandlerExecutor::new(closed_result.clone(), clock.clone());
 
         // Spawn the panic task
@@ -1333,7 +1335,7 @@ mod test {
         // Check final state
         assert!(matches!(result, Err(SlateDBError::BackgroundTaskPanic(_))));
         assert!(matches!(
-            closed_result.reader().read(),
+            closed_result.result_reader().read(),
             Some(Err(SlateDBError::BackgroundTaskPanic(_)))
         ));
         assert!(matches!(
@@ -1351,7 +1353,7 @@ mod test {
         drop(tx); // no messages needed
         let clock = Arc::new(DefaultSystemClock::new());
         let handler = TestHandler::new(log.clone(), cleanup_called.clone(), clock.clone());
-        let closed_result = ClosedResultWriter::new();
+        let closed_result = Arc::new(WatchableOnceCell::new());
         let fp_registry = Arc::new(FailPointRegistry::default());
         let task_executor = MessageHandlerExecutor::new(closed_result.clone(), clock.clone())
             .with_fp_registry(fp_registry.clone());
@@ -1387,7 +1389,7 @@ mod test {
         // Assertions: panic result, closed_result set to panic, cleanup not called
         assert!(matches!(result, Err(SlateDBError::BackgroundTaskPanic(_))));
         assert!(matches!(
-            closed_result.reader().read(),
+            closed_result.result_reader().read(),
             Some(Err(SlateDBError::BackgroundTaskPanic(_)))
         ));
         assert!(cleanup_reader.read().is_none());
@@ -1516,7 +1518,7 @@ mod test {
         let handler2 = ParallelTestHandler::new(2, log.clone(), WatchableOnceCell::new())
             .with_block_on(block2.clone());
 
-        let closed_result = ClosedResultWriter::new();
+        let closed_result = Arc::new(WatchableOnceCell::new());
         let task_executor = MessageHandlerExecutor::new(closed_result, clock);
         task_executor
             .add_handlers(
@@ -1561,7 +1563,7 @@ mod test {
         let handler2 = ParallelTestHandler::new(2, log.clone(), WatchableOnceCell::new())
             .add_ticker(Duration::from_millis(1), 20);
 
-        let closed_result = ClosedResultWriter::new();
+        let closed_result = Arc::new(WatchableOnceCell::new());
         let task_executor = MessageHandlerExecutor::new(closed_result, clock);
         task_executor
             .add_handlers(
@@ -1617,7 +1619,7 @@ mod test {
         let handler1 = ParallelTestHandler::new(1, log.clone(), cleanup1).with_error_after(1);
         let handler2 = ParallelTestHandler::new(2, log.clone(), cleanup2).with_error_after(1);
 
-        let closed_result = ClosedResultWriter::new();
+        let closed_result = Arc::new(WatchableOnceCell::new());
         let task_executor = MessageHandlerExecutor::new(closed_result.clone(), clock);
         task_executor
             .add_handlers(
@@ -1633,7 +1635,9 @@ mod test {
         // trigger the expected error.
         tx.try_send(TestMessage::Channel(1)).unwrap();
         tx.try_send(TestMessage::Channel(2)).unwrap();
-        tx.try_send(TestMessage::Channel(3)).unwrap();
+        // The third send is needed to guarantee that at least one channel sees
+        // two messages, but it may fail if the same channel handled both messages above.
+        let _ = tx.try_send(TestMessage::Channel(3));
 
         // Wait for both cleanups
         let _ = timeout(Duration::from_secs(5), cleanup1_reader.await_value())
@@ -1649,7 +1653,7 @@ mod test {
 
         assert!(matches!(result, Err(SlateDBError::Fenced)));
         assert!(matches!(
-            closed_result.reader().read(),
+            closed_result.result_reader().read(),
             Some(Err(SlateDBError::Fenced))
         ));
         // Both handlers ran cleanup
@@ -1673,7 +1677,7 @@ mod test {
         let handler2 = ParallelTestHandler::new(2, log.clone(), WatchableOnceCell::new())
             .with_block_on(block2.clone());
 
-        let closed_result = ClosedResultWriter::new();
+        let closed_result = Arc::new(WatchableOnceCell::new());
         let task_executor = Arc::new(MessageHandlerExecutor::new(closed_result, clock));
         task_executor
             .add_handlers(
@@ -1725,7 +1729,7 @@ mod test {
         let handler1 = ParallelTestHandler::new(1, log.clone(), WatchableOnceCell::new());
         let handler2 = ParallelTestHandler::new(2, log.clone(), WatchableOnceCell::new());
 
-        let closed_result = ClosedResultWriter::new();
+        let closed_result = Arc::new(WatchableOnceCell::new());
         let task_executor =
             MessageHandlerExecutor::new(closed_result, clock).with_fp_registry(fp_registry.clone());
         // Pause the run loop so messages queue up
@@ -1785,7 +1789,7 @@ mod test {
             clock.clone(),
         );
 
-        let closed_result = ClosedResultWriter::new();
+        let closed_result = Arc::new(WatchableOnceCell::new());
         let task_executor = MessageHandlerExecutor::new(closed_result, clock);
         task_executor
             .add_handlers(

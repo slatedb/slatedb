@@ -22,7 +22,7 @@ use crate::manifest::store::FenceableManifest;
 use crate::memtable_flusher::manifest_writer::ManifestWriter;
 use crate::memtable_flusher::tracker::FlushTracker;
 use crate::memtable_flusher::uploader::Uploader;
-use crate::utils::safe_async_channel;
+use crate::utils::SafeSender;
 use log::warn;
 use std::sync::Arc;
 use tokio::runtime::Handle;
@@ -52,15 +52,16 @@ pub(crate) enum FlushTarget {
 
 /// Parallel L0 memtable flusher subsystem.
 pub(crate) struct MemtableFlusher {
-    messages_tx: safe_async_channel::SafeSender<tracker::TrackerMessage>,
+    messages_tx: SafeSender<tracker::TrackerMessage>,
     messages_rx: async_channel::Receiver<tracker::TrackerMessage>,
 }
 
 impl MemtableFlusher {
     /// Creates a new memtable flusher.
     /// Call [`start`](Self::start) to register background tasks with the executor.
-    pub(crate) fn new(closed_result: &ClosedResultWriter) -> Self {
-        let (messages_tx, messages_rx) = closed_result.channel();
+    pub(crate) fn new(closed_result: &dyn ClosedResultWriter) -> Self {
+        let (messages_tx, messages_rx) =
+            SafeSender::unbounded_channel(closed_result.result_reader());
         Self {
             messages_tx,
             messages_rx,
@@ -73,7 +74,7 @@ impl MemtableFlusher {
         manifest: FenceableManifest,
         tokio_handle: &Handle,
         executor: &MessageHandlerExecutor,
-        closed_result: &ClosedResultWriter,
+        closed_result: &dyn ClosedResultWriter,
     ) -> Result<(), SlateDBError> {
         let uploader = Uploader::start(
             Arc::clone(&inner),

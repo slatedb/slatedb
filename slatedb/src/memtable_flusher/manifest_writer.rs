@@ -24,8 +24,8 @@ use crate::db_state::SsTableView;
 use crate::dispatcher::MessageHandler;
 use crate::error::SlateDBError;
 use crate::manifest::store::FenceableManifest;
-use crate::utils::safe_async_channel;
 use crate::utils::IdGenerator;
+use crate::utils::SafeSender;
 use async_trait::async_trait;
 use futures::stream::BoxStream;
 use futures::StreamExt;
@@ -83,7 +83,7 @@ pub(super) const MANIFEST_WRITER_TASK_NAME: &str = "l0_manifest_writer";
 
 /// Ordered L0 retirement and manifest update subsystem.
 pub(crate) struct ManifestWriter {
-    commands_tx: safe_async_channel::SafeSender<ManifestWriterCommand>,
+    commands_tx: SafeSender<ManifestWriterCommand>,
 }
 
 impl ManifestWriter {
@@ -92,12 +92,13 @@ impl ManifestWriter {
         db: Arc<DbInner>,
         manifest: FenceableManifest,
         manifest_poll_interval: Duration,
-        closed_result: &crate::db_status::ClosedResultWriter,
+        closed_result: &dyn crate::db_status::ClosedResultWriter,
         executor: &crate::dispatcher::MessageHandlerExecutor,
         tokio_handle: &Handle,
-        tracker_tx: safe_async_channel::SafeSender<TrackerMessage>,
+        tracker_tx: SafeSender<TrackerMessage>,
     ) -> Result<Self, SlateDBError> {
-        let (commands_tx, commands_rx) = closed_result.channel();
+        let (commands_tx, commands_rx) =
+            SafeSender::unbounded_channel(closed_result.result_reader());
         let handler = ManifestWriterHandler::new(db, manifest, manifest_poll_interval, tracker_tx);
         executor.add_handler(
             MANIFEST_WRITER_TASK_NAME.to_string(),
@@ -158,7 +159,7 @@ struct ManifestWriterHandler {
     db: Arc<DbInner>,
     manifest: FenceableManifest,
     manifest_poll_interval: Duration,
-    tracker_tx: safe_async_channel::SafeSender<TrackerMessage>,
+    tracker_tx: SafeSender<TrackerMessage>,
     ready: BTreeMap<FlushEpoch, UploadedMemtable>,
     next_epoch: FlushEpoch,
     durable_through: Option<(FlushEpoch, u64)>,
@@ -233,7 +234,7 @@ impl ManifestWriterHandler {
         db: Arc<DbInner>,
         manifest: FenceableManifest,
         manifest_poll_interval: Duration,
-        tracker_tx: safe_async_channel::SafeSender<TrackerMessage>,
+        tracker_tx: SafeSender<TrackerMessage>,
     ) -> Self {
         Self {
             db,
@@ -415,7 +416,13 @@ impl ManifestWriterHandler {
     }
 
     fn apply_uploaded_state(&self, staged_batch: &[UploadedMemtable]) -> Result<(), SlateDBError> {
-        let min_active_snapshot_seq = self.db.txn_manager.min_active_seq();
+        let min_active_snapshot_seq = [
+            self.db.snapshot_manager.min_active_seq(),
+            self.db.txn_manager.min_active_seq(),
+        ]
+        .into_iter()
+        .flatten()
+        .min();
         let mut guard = self.db.state.write();
         guard.modify(|modifier| {
             for uploaded in staged_batch {
@@ -713,7 +720,7 @@ mod tests {
     use crate::config::{CheckpointOptions, Settings};
     use crate::db::DbInner;
     use crate::db_state::{ManifestCore, SsTableId};
-    use crate::db_status::ClosedResultWriter;
+    use crate::db_status::{ClosedResultWriter, DbStatusManager};
     use crate::error::SlateDBError;
     use crate::format::sst::SsTableFormat;
     use crate::manifest::store::{FenceableManifest, ManifestStore, StoredManifest};
@@ -723,7 +730,7 @@ mod tests {
     use crate::rand::DbRand;
     use crate::tablestore::TableStore;
     use crate::types::RowEntry;
-    use crate::utils::IdGenerator;
+    use crate::utils::{IdGenerator, WatchableOnceCell};
     use fail_parallel::FailPointRegistry;
     use object_store::memory::InMemory;
     use object_store::path::Path;
@@ -741,7 +748,7 @@ mod tests {
         writer: ManifestWriter,
         executor: crate::dispatcher::MessageHandlerExecutor,
         tracker_rx: async_channel::Receiver<TrackerMessage>,
-        closed_result: ClosedResultWriter,
+        closed_result: WatchableOnceCell<Result<(), SlateDBError>>,
     }
 
     impl StartedManifestWriter {
@@ -767,11 +774,14 @@ mod tests {
         manifest: FenceableManifest,
         poll_interval: Duration,
     ) -> StartedManifestWriter {
-        let closed_result = ClosedResultWriter::new();
+        let closed_result = WatchableOnceCell::new();
         let system_clock: Arc<dyn SystemClock> = Arc::new(DefaultSystemClock::new());
-        let executor =
-            crate::dispatcher::MessageHandlerExecutor::new(closed_result.clone(), system_clock);
-        let (tracker_tx, tracker_rx) = closed_result.channel();
+        let executor = crate::dispatcher::MessageHandlerExecutor::new(
+            Arc::new(closed_result.clone()),
+            system_clock,
+        );
+        let (tracker_tx, tracker_rx) =
+            crate::utils::SafeSender::unbounded_channel(closed_result.result_reader());
         let writer = ManifestWriter::start(
             inner,
             manifest,
@@ -855,7 +865,9 @@ mod tests {
             Arc::clone(&fp_registry),
             None,
         ));
-        let (write_tx, _) = async_channel::unbounded();
+        let status_manager = DbStatusManager::new(0);
+        let (write_tx, _) =
+            crate::utils::SafeSender::unbounded_channel(status_manager.result_reader());
         let inner = Arc::new(
             DbInner::new(
                 settings.clone(),
@@ -864,13 +876,13 @@ mod tests {
                 Arc::clone(&table_store),
                 manifest_dirty,
                 Arc::new(crate::memtable_flusher::MemtableFlusher::new(
-                    &ClosedResultWriter::new(),
+                    &WatchableOnceCell::new(),
                 )),
                 write_tx,
                 db_metrics,
                 fp_registry,
                 None,
-                ClosedResultWriter::new(),
+                status_manager,
             )
             .await
             .unwrap(),
@@ -934,7 +946,7 @@ mod tests {
     ) -> Arc<crate::mem_table::ImmutableMemtable> {
         let mut guard = harness.inner.state.write();
         guard.memtable().put(RowEntry::new_value(key, value, seq));
-        guard.freeze_memtable(0).unwrap();
+        guard.freeze_memtable(0);
         guard.state().imm_memtable.front().cloned().unwrap()
     }
 
