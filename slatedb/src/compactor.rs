@@ -183,10 +183,12 @@ pub trait CompactionScheduler: Send + Sync {
                     .map(|sr| SourceId::SortedRun(sr.id))
                     .collect::<Vec<_>>();
                 if sources.is_empty() {
-                    return Err(crate::Error::invalid(
-                        "full compaction requires at least one sorted run; L0 SSTs are excluded"
-                            .to_string(),
-                    ));
+                    if !manifest.l0.is_empty() {
+                        error!(
+                            "rejected full compaction: L0-only input is invalid because Full excludes L0 SSTs"
+                        );
+                    }
+                    return Err(crate::Error::from(SlateDBError::InvalidCompaction));
                 }
                 let destination = manifest
                     .compacted
@@ -2933,14 +2935,11 @@ mod tests {
         let err = scheduler
             .generate(&state, &CompactionRequest::Full)
             .expect_err(
-            "full compaction should reject empty or L0-only inputs because L0 SSTs are excluded",
-        );
+                "full compaction should reject empty or L0-only inputs because L0 SSTs are excluded",
+            );
 
         assert_eq!(err.kind(), crate::ErrorKind::Invalid);
-        assert_eq!(
-            err.to_string(),
-            "Invalid error: full compaction requires at least one sorted run; L0 SSTs are excluded"
-        );
+        assert_eq!(err.to_string(), "Invalid error: invalid compaction");
     }
 
     struct CompactorEventHandlerTestFixture {
