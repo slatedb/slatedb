@@ -425,7 +425,6 @@ impl DbInner {
             let last_flushed_wal_id = self.wal_buffer.recent_flushed_wal_id();
             let mut guard = self.state.write();
             if !guard.memtable().is_empty() {
-                self.status()?;
                 guard.freeze_memtable(last_flushed_wal_id);
                 true
             } else {
