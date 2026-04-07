@@ -2935,8 +2935,8 @@ mod tests {
         let err = scheduler
             .generate(&state, &CompactionRequest::Full)
             .expect_err(
-                "full compaction should reject empty or L0-only inputs because L0 SSTs are excluded",
-            );
+            "full compaction should reject empty or L0-only inputs because L0 SSTs are excluded",
+        );
 
         assert_eq!(err.kind(), crate::ErrorKind::Invalid);
         assert_eq!(err.to_string(), "Invalid error: invalid compaction");
