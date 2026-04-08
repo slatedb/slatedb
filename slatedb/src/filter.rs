@@ -18,16 +18,11 @@ pub struct BloomFilter {
 }
 
 impl BloomFilterBuilder {
-    pub fn new(bits_per_key: u32) -> Self {
+    pub(crate) fn new(bits_per_key: u32) -> Self {
         Self {
             bits_per_key,
             key_hashes: Vec::new(),
         }
-    }
-
-    #[cfg(test)]
-    fn add_key(&mut self, key: &[u8]) {
-        self.key_hashes.push(filter_hash(key))
     }
 
     fn filter_size_bytes(num_keys: u32, bits_per_key: u32) -> usize {
@@ -53,10 +48,15 @@ impl BloomFilterBuilder {
             buffer: Bytes::from(buffer),
         }
     }
+
+    #[cfg(test)]
+    fn add_key(&mut self, key: &[u8]) {
+        self.key_hashes.push(filter_hash(key))
+    }
 }
 
 impl BloomFilter {
-    pub fn decode(mut buf: &[u8]) -> BloomFilter {
+    pub(crate) fn decode(mut buf: &[u8]) -> BloomFilter {
         let num_probes = buf.get_u16();
         BloomFilter {
             num_probes,
@@ -65,7 +65,7 @@ impl BloomFilter {
     }
 
     /// estimate the size of BloomFilter encoded in SST
-    pub fn estimate_encoded_size(num_keys: u32, filter_bits_per_key: u32) -> usize {
+    pub(crate) fn estimate_encoded_size(num_keys: u32, filter_bits_per_key: u32) -> usize {
         let filter_bytes = BloomFilterBuilder::filter_size_bytes(num_keys, filter_bits_per_key);
         let num_probes_size = std::mem::size_of::<u16>();
         let checksum_len = std::mem::size_of::<u32>();
@@ -76,7 +76,7 @@ impl BloomFilter {
         (self.buffer.len() * 8) as u32
     }
 
-    pub fn might_contain(&self, hash: u64) -> bool {
+    fn might_contain(&self, hash: u64) -> bool {
         for p in probes_for_key(hash, self.num_probes, self.filter_bits()) {
             if !check_bit(p as usize, &self.buffer) {
                 return false;
@@ -122,7 +122,7 @@ impl Filter for BloomFilter {
     }
 }
 
-pub fn filter_hash(key: &[u8]) -> u64 {
+fn filter_hash(key: &[u8]) -> u64 {
     // sip hash is the default rust hash function, however its only
     // accessible by creating DefaultHasher. Direct use of SipHasher13 in
     // std is deprecated. We don't want to use DefaultHasher because the
