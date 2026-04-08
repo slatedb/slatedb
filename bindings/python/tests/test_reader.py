@@ -287,3 +287,9 @@ async def test_reader_invalid_ranges_raise_invalid_errors() -> None:
                     )
                 )
             assert exc.value.message == "range must be non-empty"
+
+            # Scan with empty start bound should succeed and be treated as unbounded start.
+            scan = await reader.scan(
+                KeyRange(start=b"", start_inclusive=True, end=None, end_inclusive=False)
+            )
+            require_rows(await drain_iterator(scan), ["seed"], ["value"])

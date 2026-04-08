@@ -305,6 +305,16 @@ class SlateDbDbTest {
                                     TestSupport.bytes("a"),
                                     true)));
 
+            // Scan with empty start bound should succeed and be treated as unbounded start.
+            TestSupport.await(db.put(TestSupport.bytes("seed"), TestSupport.bytes("value")));
+            try (DbIterator iterator =
+                    TestSupport.await(db.scan(new KeyRange(new byte[0], true, null, false)))) {
+                TestSupport.assertRows(
+                        TestSupport.drainIterator(iterator),
+                        new String[] {"seed"},
+                        new String[] {"value"});
+            }
+
             try (WriteBatch batch = new WriteBatch()) {
                 batch.put(TestSupport.bytes("batch"), TestSupport.bytes("value"));
                 TestSupport.await(db.write(batch));

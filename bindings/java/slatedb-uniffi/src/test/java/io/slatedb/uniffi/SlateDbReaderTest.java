@@ -297,6 +297,15 @@ class SlateDbReaderTest {
                                         true,
                                         TestSupport.bytes("a"),
                                         true)));
+
+                // Scan with empty start bound should succeed and be treated as unbounded start.
+                try (DbIterator iterator =
+                        TestSupport.await(reader.scan(new KeyRange(new byte[0], true, null, false)))) {
+                    TestSupport.assertRows(
+                            TestSupport.drainIterator(iterator),
+                            new String[] {"seed"},
+                            new String[] {"value"});
+                }
             }
         }
     }

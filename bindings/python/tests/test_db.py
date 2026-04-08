@@ -294,6 +294,13 @@ async def test_db_invalid_inputs_map_to_typed_errors() -> None:
             )
         assert exc.value.message == "range must be non-empty"
 
+        # Scan with empty start bound should succeed and be treated as unbounded start.
+        await db.put(b"seed", b"value")
+        scan = await db.scan(
+            KeyRange(start=b"", start_inclusive=True, end=None, end_inclusive=False)
+        )
+        require_rows(await drain_iterator(scan), ["seed"], ["value"])
+
 
 @pytest.mark.asyncio
 async def test_db_writer_fencing_reports_closed_reason() -> None:

@@ -934,6 +934,20 @@ func TestDbInvalidInputsAndErrorMapping(t *testing.T) {
 			t.Fatalf("Scan(start > end): got %v, want invalid error", err)
 		}
 
+		// Scan with empty start bound should succeed and be treated as unbounded start.
+		if _, err := handle.db.Put([]byte("seed"), []byte("value")); err != nil {
+			t.Fatalf("Put(seed): %v", err)
+		}
+		iter, err := handle.db.Scan(slatedb.KeyRange{
+			Start:          bytesPtr([]byte{}),
+			StartInclusive: true,
+		})
+		if err != nil {
+			t.Fatalf("Scan(empty start): %v", err)
+		}
+		t.Cleanup(iter.Destroy)
+		requireRows(t, drainIterator(t, iter), []string{"seed"}, []string{"value"})
+
 		batch := slatedb.NewWriteBatch()
 		t.Cleanup(batch.Destroy)
 		if err := batch.Put([]byte("batch"), []byte("value")); err != nil {
@@ -1431,6 +1445,17 @@ func TestDbReaderBuilderValidationAndErrors(t *testing.T) {
 		}); !errors.Is(err, slatedb.ErrErrorInvalid) {
 			t.Fatalf("DbReader.Scan(start > end): got %v, want invalid error", err)
 		}
+
+		// Scan with empty start bound should succeed and be treated as unbounded start.
+		readerIter, err := readerHandle.reader.Scan(slatedb.KeyRange{
+			Start:          bytesPtr([]byte{}),
+			StartInclusive: true,
+		})
+		if err != nil {
+			t.Fatalf("DbReader.Scan(empty start): %v", err)
+		}
+		t.Cleanup(readerIter.Destroy)
+		requireRows(t, drainIterator(t, readerIter), []string{"seed"}, []string{"value"})
 	})
 }
 
