@@ -5,7 +5,7 @@ use crate::config::{CheckpointOptions, DbReaderOptions, ReadOptions, ScanOptions
 use crate::db_read::DbRead;
 use crate::db_state::ManifestCore;
 use crate::db_stats::DbStats;
-use crate::db_status::{ClosedResultWriter, DbStatus, DbStatusReporter};
+use crate::db_status::{ClosedResultWriter, DbStatus, DbStatusManager};
 use crate::dispatcher::{MessageFactory, MessageHandler, MessageHandlerExecutor};
 use crate::error::SlateDBError;
 use crate::iter::IterationOrder;
@@ -21,7 +21,7 @@ use crate::sst_iter::SstIteratorOptions;
 use crate::store_provider::StoreProvider;
 use crate::tablestore::TableStore;
 use crate::types::KeyValue;
-use crate::utils::{IdGenerator, WatchableOnceCell};
+use crate::utils::IdGenerator;
 use crate::wal_replay::{WalReplayIterator, WalReplayOptions};
 use crate::{Checkpoint, DbIterator};
 use async_trait::async_trait;
@@ -38,7 +38,6 @@ use std::ops::{RangeBounds, Sub};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::runtime::Handle;
-use tokio::sync::mpsc;
 use uuid::Uuid;
 
 pub(crate) const DB_READER_TASK_NAME: &str = "manifest_poller";
@@ -59,8 +58,7 @@ struct DbReaderInner {
     user_checkpoint_id: Option<Uuid>,
     oracle: Arc<DbReaderOracle>,
     reader: Reader,
-    closed_result_watcher: ClosedResultWriter,
-    status_reporter: DbStatusReporter,
+    status_manager: DbStatusManager,
     rand: Arc<DbRand>,
     /// Kept alive so the underlying `MetricsRecorder` is not dropped while
     /// metric handles in `DbStats` (and other stats structs) are still in use.
@@ -106,10 +104,9 @@ impl DbReaderInner {
         options: DbReaderOptions,
         checkpoint_id: Option<Uuid>,
         merge_operator: Option<MergeOperatorType>,
-        closed_result_watcher: ClosedResultWriter,
+        status_manager: DbStatusManager,
         system_clock: Arc<dyn SystemClock>,
         rand: Arc<DbRand>,
-        status_reporter: DbStatusReporter,
         recorder: slatedb_common::metrics::MetricsRecorderHelper,
     ) -> Result<Self, SlateDBError> {
         let mut manifest =
@@ -144,10 +141,10 @@ impl DbReaderInner {
         let initial_durable_seq = initial_state
             .last_remote_persisted_seq
             .max(initial_state.core().last_l0_seq);
-        status_reporter.report_durable_seq(initial_durable_seq);
+        status_manager.report_durable_seq(initial_durable_seq);
         let oracle = Arc::new(DbReaderOracle::new(
             initial_durable_seq,
-            status_reporter.clone(),
+            status_manager.clone(),
         ));
 
         let db_stats = DbStats::new(&recorder);
@@ -170,8 +167,7 @@ impl DbReaderInner {
             user_checkpoint_id: checkpoint_id,
             oracle,
             reader,
-            closed_result_watcher,
-            status_reporter,
+            status_manager,
             rand,
             recorder,
         })
@@ -420,7 +416,7 @@ impl DbReaderInner {
         let poller = ManifestPoller {
             inner: Arc::clone(self),
         };
-        let (_tx, rx) = mpsc::unbounded_channel();
+        let (_tx, rx) = async_channel::unbounded();
         let result = task_executor.add_handler(
             DB_READER_TASK_NAME.to_string(),
             Box::new(poller),
@@ -510,11 +506,11 @@ impl DbReaderInner {
     /// ## Returns
     /// - `Ok(())` if the reader is still open.
     /// - `Err(SlateDBError::Closed)` if the reader was closed successfully
-    ///   (state.closed_result_reader() returns Ok(())).
+    ///   (state.result_reader() returns Ok(())).
     /// - `Err(e)` if the reader was closed with an error, where `e` is the error
-    ///   (state.closed_result_reader() returns Err(e)).
+    ///   (state.result_reader() returns Err(e)).
     pub(crate) fn check_closed(&self) -> Result<(), SlateDBError> {
-        let closed_result_reader = self.closed_result_watcher.reader();
+        let closed_result_reader = self.status_manager.result_reader();
         if let Some(result) = closed_result_reader.read() {
             return match result {
                 Ok(()) => Err(SlateDBError::Closed),
@@ -691,14 +687,9 @@ impl DbReader {
     ) -> Result<Self, SlateDBError> {
         Self::validate_options(&options)?;
 
-        let status_reporter = DbStatusReporter::new(0);
-        let closed_result_watcher = ClosedResultWriter::new(WatchableOnceCell::new())
-            .with_on_close(Arc::new({
-                let reporter = status_reporter.clone();
-                move |reason| reporter.report_closed(reason)
-            }));
+        let status_manager = DbStatusManager::new(0);
         let task_executor =
-            MessageHandlerExecutor::new(closed_result_watcher.clone(), system_clock.clone());
+            MessageHandlerExecutor::new(Arc::new(status_manager.clone()), system_clock.clone());
         let manifest_store = store_provider.manifest_store();
         let table_store = store_provider.table_store();
         let inner = Arc::new(
@@ -708,10 +699,9 @@ impl DbReader {
                 options,
                 checkpoint_id,
                 merge_operator,
-                closed_result_watcher,
+                status_manager,
                 system_clock,
                 rand,
-                status_reporter,
                 recorder,
             )
             .await?,
@@ -1043,7 +1033,7 @@ impl DbReader {
     /// deadlock warnings. The `durable_seq` field is updated whenever the
     /// manifest poller discovers new data written by a remote writer.
     pub fn subscribe(&self) -> tokio::sync::watch::Receiver<DbStatus> {
-        self.inner.status_reporter.subscribe()
+        self.inner.status_manager.subscribe()
     }
 
     /// Check the reader status.
@@ -1114,7 +1104,7 @@ mod tests {
     use crate::db_reader::{DbReader, DbReaderInner, DbReaderOptions};
     use crate::db_state::{ManifestCore, SsTableId};
     use crate::db_stats::DbStats;
-    use crate::db_status::{ClosedResultWriter, DbStatusReporter};
+    use crate::db_status::DbStatusManager;
     use crate::format::sst::SsTableFormat;
     use crate::manifest::store::{ManifestStore, StoredManifest};
     use crate::manifest::Manifest;
@@ -1130,7 +1120,6 @@ mod tests {
     use crate::store_provider::StoreProvider;
     use crate::tablestore::TableStore;
     use crate::types::RowEntry;
-    use crate::utils::WatchableOnceCell;
     use crate::{error::SlateDBError, test_utils, Db};
     use bytes::Bytes;
     use fail_parallel::FailPointRegistry;
@@ -2112,7 +2101,7 @@ mod tests {
 
         // Construct just enough DbReaderInner state to call rebuild_checkpoint_state()
         // directly. skip_wal_replay keeps the test scoped to the IMM retention logic.
-        let oracle = Arc::new(DbReaderOracle::new(0, DbStatusReporter::new(0)));
+        let oracle = Arc::new(DbReaderOracle::new(0, DbStatusManager::new(0)));
         let recorder = slatedb_common::metrics::MetricsRecorderHelper::noop();
         let reader = Reader {
             table_store: Arc::clone(&table_store),
@@ -2136,8 +2125,7 @@ mod tests {
             user_checkpoint_id: None,
             oracle,
             reader,
-            closed_result_watcher: ClosedResultWriter::new(WatchableOnceCell::new()),
-            status_reporter: DbStatusReporter::new(0),
+            status_manager: DbStatusManager::new(0),
             rand: test_provider.rand.clone(),
             recorder,
         };
@@ -2205,7 +2193,7 @@ mod tests {
             last_remote_persisted_seq: 10,
         };
 
-        let oracle = Arc::new(DbReaderOracle::new(0, DbStatusReporter::new(0)));
+        let oracle = Arc::new(DbReaderOracle::new(0, DbStatusManager::new(0)));
         let recorder = slatedb_common::metrics::MetricsRecorderHelper::noop();
         let reader = Reader {
             table_store: Arc::clone(&table_store),
@@ -2226,8 +2214,7 @@ mod tests {
             user_checkpoint_id: None,
             oracle,
             reader,
-            closed_result_watcher: ClosedResultWriter::new(WatchableOnceCell::new()),
-            status_reporter: DbStatusReporter::new(0),
+            status_manager: DbStatusManager::new(0),
             rand: test_provider.rand.clone(),
             recorder,
         };

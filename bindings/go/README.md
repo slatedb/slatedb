@@ -24,12 +24,12 @@ There is no handwritten Go wrapper layer yet.
 - Go 1.25.0 or newer
 - CGO enabled
 - A working C toolchain
-- `uniffi-bindgen-go` `0.5.0+v0.29.5`
+- `uniffi-bindgen-go` `0.7.0+v0.31.0`
 
 Install the generator with:
 
 ```bash
-cargo install uniffi-bindgen-go --git https://github.com/NordSecurity/uniffi-bindgen-go --tag v0.5.0+v0.29.5
+cargo install uniffi-bindgen-go --git https://github.com/NordSecurity/uniffi-bindgen-go --tag v0.7.0+v0.31.0
 ```
 
 ## Regenerate
@@ -86,6 +86,44 @@ func main() {
 
 	if err := db.Shutdown(); err != nil {
 		panic(err)
+	}
+}
+```
+
+## Metrics
+
+The Go binding exposes the UniFFI metrics surface directly:
+
+- `DbBuilder.WithMetricsRecorder(...)` and `DbReaderBuilder.WithMetricsRecorder(...)`
+- `NewDefaultMetricsRecorder()` for an in-process recorder with snapshot access
+- `Metric`, `MetricLabel`, `MetricValue*`, `Counter`, `Gauge`, `UpDownCounter`, and `Histogram`
+
+Example:
+
+```go
+recorder := slatedb.NewDefaultMetricsRecorder()
+defer recorder.Destroy()
+
+builder := slatedb.NewDbBuilder("metrics-demo", store)
+defer builder.Destroy()
+if err := builder.WithMetricsRecorder(recorder); err != nil {
+	panic(err)
+}
+
+db, err := builder.Build()
+if err != nil {
+	panic(err)
+}
+defer db.Destroy()
+
+if _, err := db.Put([]byte("hello"), []byte("world")); err != nil {
+	panic(err)
+}
+
+metric := recorder.MetricByNameAndLabels("slatedb.db.write_ops", nil)
+if metric != nil {
+	if value, ok := metric.Value.(slatedb.MetricValueCounter); ok {
+		fmt.Println("write_ops =", value.Field0)
 	}
 }
 ```

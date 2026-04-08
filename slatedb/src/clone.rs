@@ -311,19 +311,25 @@ async fn copy_wal_ssts(
 #[cfg(test)]
 mod tests {
     use crate::clone::create_clone;
-    use crate::config::{CheckpointOptions, CheckpointScope, Settings};
+    use crate::config::{
+        CheckpointOptions, CheckpointScope, FlushOptions, FlushType, PutOptions, Settings,
+        WriteOptions,
+    };
     use crate::db::Db;
-    use crate::db_state::ManifestCore;
+    use crate::db_state::{ManifestCore, SsTableId};
     use crate::error::SlateDBError;
     use crate::manifest::store::{ManifestStore, StoredManifest};
     use crate::manifest::Manifest;
+    use crate::paths::PathResolver;
     use crate::proptest_util::{rng, sample};
     use crate::rand::DbRand;
     use crate::test_utils;
     use crate::utils::IdGenerator;
+    use bytes::Bytes;
     use fail_parallel::FailPointRegistry;
     use object_store::memory::InMemory;
     use object_store::path::Path;
+    use object_store::Error as ObjectStoreError;
     use slatedb_common::clock::DefaultSystemClock;
     use std::ops::RangeFull;
     use std::sync::Arc;
@@ -783,6 +789,47 @@ mod tests {
             .build()
             .await
             .unwrap();
+        let write_options = WriteOptions {
+            await_durable: false,
+        };
+        let put_options = PutOptions::default();
+        let l0_and_wal_data = [
+            (b"l0-key-1".as_slice(), b"l0-value-1".as_slice()),
+            (b"l0-key-2".as_slice(), b"l0-value-2".as_slice()),
+        ];
+        let wal_only_data = [
+            (b"wal-only-key-1".as_slice(), b"wal-only-value-1".as_slice()),
+            (b"wal-only-key-2".as_slice(), b"wal-only-value-2".as_slice()),
+        ];
+        for &(key, value) in &l0_and_wal_data {
+            parent_db
+                .put_with_options(key, value, &put_options, &write_options)
+                .await
+                .unwrap();
+        }
+        parent_db.flush().await.unwrap();
+        parent_db
+            .flush_with_options(FlushOptions {
+                flush_type: FlushType::MemTable,
+            })
+            .await
+            .unwrap();
+        for &(key, value) in &wal_only_data {
+            parent_db
+                .put_with_options(key, value, &put_options, &write_options)
+                .await
+                .unwrap();
+        }
+        parent_db.flush().await.unwrap();
+        let manifest = parent_db.manifest();
+        assert!(
+            !manifest.l0.is_empty(),
+            "expected cloned state to include L0 data"
+        );
+        assert!(
+            manifest.replay_after_wal_id + 1 < manifest.next_wal_sst_id,
+            "expected cloned state to retain WAL-only SSTs"
+        );
         parent_db.close().await.unwrap();
 
         create_clone(
@@ -798,13 +845,23 @@ mod tests {
         .await
         .unwrap();
 
-        // Clone can be opened with its own WAL object store
-        let clone_wal = Arc::new(InMemory::new());
         let clone_db = Db::builder(clone_path, object_store.clone())
-            .with_wal_object_store(clone_wal)
+            .with_wal_object_store(wal_object_store.clone())
             .build()
             .await
             .unwrap();
+        for &(key, value) in &l0_and_wal_data {
+            assert_eq!(
+                clone_db.get(key).await.unwrap(),
+                Some(Bytes::copy_from_slice(value))
+            );
+        }
+        for &(key, value) in &wal_only_data {
+            assert_eq!(
+                clone_db.get(key).await.unwrap(),
+                Some(Bytes::copy_from_slice(value))
+            );
+        }
         clone_db.close().await.unwrap();
     }
 
@@ -816,14 +873,58 @@ mod tests {
         let clone_path = "/tmp/test_clone";
 
         let parent_db = Db::builder(parent_path, object_store.clone())
-            .with_wal_object_store(wal_object_store)
+            .with_wal_object_store(wal_object_store.clone())
             .build()
             .await
             .unwrap();
+        let write_options = WriteOptions {
+            await_durable: false,
+        };
+        let put_options = PutOptions::default();
+        let l0_and_wal_data = [
+            (b"l0-key-1".as_slice(), b"l0-value-1".as_slice()),
+            (b"l0-key-2".as_slice(), b"l0-value-2".as_slice()),
+        ];
+        let wal_only_data = [
+            (b"wal-only-key-1".as_slice(), b"wal-only-value-1".as_slice()),
+            (b"wal-only-key-2".as_slice(), b"wal-only-value-2".as_slice()),
+        ];
+        for &(key, value) in &l0_and_wal_data {
+            parent_db
+                .put_with_options(key, value, &put_options, &write_options)
+                .await
+                .unwrap();
+        }
+        parent_db.flush().await.unwrap();
+        parent_db
+            .flush_with_options(FlushOptions {
+                flush_type: FlushType::MemTable,
+            })
+            .await
+            .unwrap();
+        for &(key, value) in &wal_only_data {
+            parent_db
+                .put_with_options(key, value, &put_options, &write_options)
+                .await
+                .unwrap();
+        }
+        parent_db.flush().await.unwrap();
+        let manifest = parent_db.manifest();
+        assert!(
+            !manifest.l0.is_empty(),
+            "expected cloned state to include L0 data"
+        );
+        assert!(
+            manifest.replay_after_wal_id + 1 < manifest.next_wal_sst_id,
+            "expected cloned state to retain WAL-only SSTs"
+        );
+        let expected_missing_wal_path = PathResolver::new(Path::from(parent_path))
+            .table_path(&SsTableId::Wal(manifest.replay_after_wal_id + 1))
+            .to_string();
         parent_db.close().await.unwrap();
 
         // Pass main store as WAL store — WAL SSTs won't be found there
-        let result = create_clone(
+        let err = create_clone(
             clone_path,
             parent_path,
             object_store.clone(),
@@ -833,7 +934,15 @@ mod tests {
             Arc::new(DefaultSystemClock::new()),
             Arc::new(DbRand::default()),
         )
-        .await;
-        assert!(result.is_err());
+        .await
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            SlateDBError::ObjectStoreError(ref source)
+                if matches!(
+                    source.as_ref(),
+                    ObjectStoreError::NotFound { path, .. } if path == &expected_missing_wal_path
+                )
+        ));
     }
 }

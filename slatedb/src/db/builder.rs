@@ -111,7 +111,6 @@ use object_store::path::Path;
 use object_store::ObjectStore;
 use rand::RngCore;
 use tokio::runtime::Handle;
-use tokio::sync::mpsc;
 
 use crate::admin::Admin;
 use crate::batch_write::WriteBatchEventHandler;
@@ -137,23 +136,26 @@ use crate::db_cache::SplitCache;
 use crate::db_cache::{DbCache, DbCacheWrapper};
 use crate::db_reader::DbReader;
 use crate::db_state::ManifestCore;
-use crate::db_status::ClosedResultWriter;
+use crate::db_status::{ClosedResultWriter, DbStatusManager};
 use crate::dispatcher::MessageHandlerExecutor;
 use crate::error::SlateDBError;
 use crate::filter_policy::BloomFilterPolicy;
 use crate::format::sst::{BlockTransformer, SsTableFormat};
 use crate::garbage_collector::GarbageCollector;
 use crate::garbage_collector::GC_TASK_NAME;
+use crate::instrumented_object_store::{InstrumentedObjectStore, ObjectStoreComponent};
 use crate::manifest::store::{FenceableManifest, ManifestStore, StoredManifest};
 use crate::mem_table_flush::MemtableFlusher;
 use crate::mem_table_flush::MEMTABLE_FLUSHER_TASK_NAME;
 use crate::merge_operator::MergeOperatorType;
+use crate::object_stores::ObjectStoreType;
 use crate::object_stores::ObjectStores;
 use crate::paths::PathResolver;
 use crate::rand::DbRand;
 use crate::retrying_object_store::RetryingObjectStore;
 use crate::store_provider::DefaultStoreProvider;
 use crate::tablestore::TableStore;
+use crate::utils::SafeSender;
 use crate::utils::WatchableOnceCell;
 use slatedb_common::clock::DefaultSystemClock;
 use slatedb_common::clock::SystemClock;
@@ -366,18 +368,25 @@ impl<P: Into<Path>> DbBuilder<P> {
             .system_clock
             .unwrap_or_else(|| Arc::new(DefaultSystemClock::new()));
 
-        let retrying_main_object_store = Arc::new(RetryingObjectStore::new(
+        let recorder = MetricsRecorderHelper::new(self.metrics_recorder, MetricLevel::default());
+        let retrying_main_object_store = instrumented_retrying_object_store(
             self.main_object_store,
+            &recorder,
+            ObjectStoreComponent::Db,
+            ObjectStoreType::Main,
             rand.clone(),
             system_clock.clone(),
-        ));
+        );
         let retrying_wal_object_store: Option<Arc<dyn ObjectStore>> =
             self.wal_object_store.map(|s| {
-                Arc::new(RetryingObjectStore::new(
+                instrumented_retrying_object_store(
                     s,
+                    &recorder,
+                    ObjectStoreComponent::Db,
+                    ObjectStoreType::Wal,
                     rand.clone(),
                     system_clock.clone(),
-                )) as Arc<dyn ObjectStore>
+                )
             });
 
         // Log the database opening
@@ -394,8 +403,6 @@ impl<P: Into<Path>> DbBuilder<P> {
         }
 
         // Setup the components
-        // Setup metrics recorder
-        let recorder = MetricsRecorderHelper::new(self.metrics_recorder, MetricLevel::default());
         let block_format = {
             #[cfg(test)]
             {
@@ -501,9 +508,15 @@ impl<P: Into<Path>> DbBuilder<P> {
         )
         .await?;
 
-        // Setup communication channels
-        let (memtable_flush_tx, memtable_flush_rx) = tokio::sync::mpsc::unbounded_channel();
-        let (write_tx, write_rx) = tokio::sync::mpsc::unbounded_channel();
+        // Shared lifecycle state — created before DbInner so it can be shared
+        // with the executor and future channel construction.
+        let manifest_dirty = manifest.prepare_dirty()?;
+        let status_manager = DbStatusManager::new(manifest_dirty.value.core.last_l0_seq);
+
+        // Setup communication channels wired to the shared closed state.
+        let reader = status_manager.result_reader();
+        let (memtable_flush_tx, memtable_flush_rx) = SafeSender::unbounded_channel(reader.clone());
+        let (write_tx, write_rx) = SafeSender::unbounded_channel(reader);
 
         // Create the database inner state
         let inner = Arc::new(
@@ -512,12 +525,13 @@ impl<P: Into<Path>> DbBuilder<P> {
                 system_clock.clone(),
                 rand.clone(),
                 table_store.clone(),
-                manifest.prepare_dirty()?,
+                manifest_dirty,
                 memtable_flush_tx,
                 write_tx,
                 recorder.clone(),
                 self.fp_registry.clone(),
                 self.merge_operator.clone(),
+                status_manager.clone(),
             )
             .await?,
         );
@@ -530,7 +544,7 @@ impl<P: Into<Path>> DbBuilder<P> {
         // Setup background tasks
         let tokio_handle = Handle::current();
         let task_executor = Arc::new(MessageHandlerExecutor::new(
-            inner.clone().state.read().closed_result(),
+            Arc::new(status_manager),
             system_clock.clone(),
         ));
         if inner.wal_enabled {
@@ -614,7 +628,7 @@ impl<P: Into<Path>> DbBuilder<P> {
                     compactions_store.clone(),
                 );
             // Garbage collector only uses tickers, so pass in a dummy rx channel
-            let (_, rx) = mpsc::unbounded_channel();
+            let (_, rx) = async_channel::unbounded();
             let gc_handle = self.gc_runtime.as_ref().unwrap_or(&tokio_handle);
             task_executor.add_handler(GC_TASK_NAME.to_string(), Box::new(gc), rx, gc_handle)?;
         }
@@ -811,17 +825,23 @@ impl<P: Into<Path>> GarbageCollectorBuilder<P> {
     /// Builds and returns a GarbageCollector instance.
     pub fn build(self) -> GarbageCollector {
         let path: Path = self.path.into();
-        let retrying_main_object_store = Arc::new(RetryingObjectStore::new(
+        let retrying_main_object_store = instrumented_retrying_object_store(
             self.main_object_store,
+            &self.recorder,
+            ObjectStoreComponent::Gc,
+            ObjectStoreType::Main,
             self.rand.clone(),
             self.system_clock.clone(),
-        ));
+        );
         let retrying_wal_object_store = self.wal_object_store.map(|s| {
-            Arc::new(RetryingObjectStore::new(
+            instrumented_retrying_object_store(
                 s,
+                &self.recorder,
+                ObjectStoreComponent::Gc,
+                ObjectStoreType::Wal,
                 self.rand.clone(),
                 self.system_clock.clone(),
-            )) as Arc<dyn ObjectStore>
+            )
         });
         let manifest_store = Arc::new(ManifestStore::new(
             &path,
@@ -863,7 +883,7 @@ pub struct CompactorBuilder<P: Into<Path>> {
     rand: Arc<DbRand>,
     recorder: MetricsRecorderHelper,
     system_clock: Arc<dyn SystemClock>,
-    closed_result: ClosedResultWriter,
+    closed_result: Arc<dyn ClosedResultWriter>,
     merge_operator: Option<MergeOperatorType>,
     block_transformer: Option<Arc<dyn BlockTransformer>>,
     #[cfg(feature = "compaction_filters")]
@@ -882,7 +902,7 @@ impl<P: Into<Path>> CompactorBuilder<P> {
             rand: Arc::new(DbRand::default()),
             recorder: MetricsRecorderHelper::noop(),
             system_clock: Arc::new(DefaultSystemClock::default()),
-            closed_result: ClosedResultWriter::new(WatchableOnceCell::new()),
+            closed_result: Arc::new(WatchableOnceCell::new()),
             merge_operator: None,
             block_transformer: None,
             #[cfg(feature = "compaction_filters")]
@@ -995,11 +1015,14 @@ impl<P: Into<Path>> CompactorBuilder<P> {
     /// Builds and returns a Compactor instance.
     pub fn build(self) -> Compactor {
         let path: Path = self.path.into();
-        let retrying_main_object_store = Arc::new(RetryingObjectStore::new(
+        let retrying_main_object_store = instrumented_retrying_object_store(
             self.main_object_store,
+            &self.recorder,
+            ObjectStoreComponent::Compactor,
+            ObjectStoreType::Main,
             self.rand.clone(),
             self.system_clock.clone(),
-        ));
+        );
         let manifest_store = Arc::new(ManifestStore::new(
             &path,
             retrying_main_object_store.clone(),
@@ -1053,7 +1076,7 @@ impl<P: Into<Path>> CompactorBuilder<P> {
     ) -> Result<
         (
             CompactorEventHandler,
-            mpsc::UnboundedReceiver<CompactorMessage>,
+            async_channel::Receiver<CompactorMessage>,
         ),
         SlateDBError,
     > {
@@ -1062,7 +1085,7 @@ impl<P: Into<Path>> CompactorBuilder<P> {
         let scheduler_supplier = self
             .scheduler_supplier
             .unwrap_or(Arc::new(SizeTieredCompactionSchedulerSupplier));
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, rx) = async_channel::unbounded();
         let scheduler = Arc::from(scheduler_supplier.compaction_scheduler(&options));
         let stats = Arc::new(CompactionStats::new(&self.recorder));
         let executor = Arc::new(TokioCompactionExecutor::new(
@@ -1266,19 +1289,25 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
         let path = self.path.into();
         // TODO: proper URI generation, for now it works just as a flag
         let wal_object_store_uri = self.wal_object_store.as_ref().map(|_| String::new());
-        let retrying_object_store = Arc::new(RetryingObjectStore::new(
+        let retrying_object_store = instrumented_retrying_object_store(
             self.object_store,
+            &self.recorder,
+            ObjectStoreComponent::Reader,
+            ObjectStoreType::Main,
             self.rand.clone(),
             self.system_clock.clone(),
-        ));
+        );
 
         let retrying_wal_object_store: Option<Arc<dyn ObjectStore>> =
             self.wal_object_store.map(|s| {
-                Arc::new(RetryingObjectStore::new(
+                instrumented_retrying_object_store(
                     s,
+                    &self.recorder,
+                    ObjectStoreComponent::Reader,
+                    ObjectStoreType::Wal,
                     self.rand.clone(),
                     self.system_clock.clone(),
-                )) as Arc<dyn ObjectStore>
+                )
             });
 
         // Setup object store with optional caching
@@ -1345,6 +1374,23 @@ fn default_db_cache() -> Option<Arc<dyn DbCache>> {
     ) as Arc<dyn DbCache>)
 }
 
+fn instrumented_retrying_object_store(
+    object_store: Arc<dyn ObjectStore>,
+    recorder: &MetricsRecorderHelper,
+    component: ObjectStoreComponent,
+    store_type: ObjectStoreType,
+    rand: Arc<DbRand>,
+    system_clock: Arc<dyn SystemClock>,
+) -> Arc<dyn ObjectStore> {
+    let instrumented: Arc<dyn ObjectStore> = Arc::new(InstrumentedObjectStore::new(
+        object_store,
+        recorder,
+        component,
+        store_type,
+    ));
+    Arc::new(RetryingObjectStore::new(instrumented, rand, system_clock))
+}
+
 #[allow(unreachable_code)]
 pub(crate) fn default_block_cache() -> Option<Arc<dyn DbCache>> {
     #[cfg(feature = "foyer")]
@@ -1397,9 +1443,26 @@ pub(crate) fn default_meta_cache() -> Option<Arc<dyn DbCache>> {
 mod tests {
     use crate::config::Settings;
     use crate::garbage_collector::stats::GC_COUNT;
+    use crate::instrumented_object_store::stats::REQUEST_COUNT as OBJECT_STORE_REQUEST_COUNT;
     use object_store::memory::InMemory;
-    use slatedb_common::metrics::{lookup_metric, DefaultMetricsRecorder};
+    use slatedb_common::metrics::{
+        lookup_metric, lookup_metric_with_labels, DefaultMetricsRecorder,
+    };
     use std::sync::Arc;
+
+    fn object_store_labels(
+        component: &'static str,
+        store_type: &'static str,
+        op: &'static str,
+        api: &'static str,
+    ) -> [(&'static str, &'static str); 4] {
+        [
+            ("component", component),
+            ("store_type", store_type),
+            ("op", op),
+            ("api", api),
+        ]
+    }
 
     #[tokio::test]
     async fn test_db_builder_starts_gc_by_default() {
@@ -1440,6 +1503,63 @@ mod tests {
         assert!(
             lookup_metric(&metrics_recorder, GC_COUNT).is_none(),
             "GC should not be initialized when options are None"
+        );
+
+        db.close().await.expect("failed to close db");
+    }
+
+    #[tokio::test]
+    async fn test_shared_recorder_registers_object_store_metrics_for_db_gc_and_compactor() {
+        // given:
+        let metrics_recorder = Arc::new(DefaultMetricsRecorder::new());
+        let path = "test_shared_recorder_registers_object_store_metrics_for_db_gc_and_compactor";
+        let object_store = Arc::new(InMemory::new());
+        let db = crate::Db::builder(path, object_store.clone())
+            .with_settings(Settings {
+                compactor_options: None,
+                garbage_collector_options: None,
+                ..Settings::default()
+            })
+            .with_metrics_recorder(metrics_recorder.clone())
+            .build()
+            .await
+            .expect("failed to build db");
+        let gc = crate::GarbageCollectorBuilder::new(path, object_store.clone())
+            .with_metrics_recorder(metrics_recorder.clone())
+            .build();
+        let _compactor = crate::CompactorBuilder::new(path, object_store)
+            .with_metrics_recorder(metrics_recorder.clone())
+            .build();
+
+        // when:
+        db.put(b"k1", b"v1")
+            .await
+            .expect("failed to write db value");
+        db.flush().await.expect("failed to flush db");
+        gc.run_gc_once().await;
+
+        // then:
+        assert!(lookup_metric_with_labels(
+            &metrics_recorder,
+            OBJECT_STORE_REQUEST_COUNT,
+            &object_store_labels("db", "main", "put", "put"),
+        )
+        .is_some_and(|count| count > 0));
+        assert_eq!(
+            lookup_metric_with_labels(
+                &metrics_recorder,
+                OBJECT_STORE_REQUEST_COUNT,
+                &object_store_labels("gc", "main", "put", "put"),
+            ),
+            Some(0)
+        );
+        assert_eq!(
+            lookup_metric_with_labels(
+                &metrics_recorder,
+                OBJECT_STORE_REQUEST_COUNT,
+                &object_store_labels("compactor", "main", "put", "put"),
+            ),
+            Some(0)
         );
 
         db.close().await.expect("failed to close db");

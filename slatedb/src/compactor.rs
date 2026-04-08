@@ -153,8 +153,13 @@ pub trait CompactionScheduler: Send + Sync {
     ///
     /// - If the request is a `CompactionRequest::Spec`, it simply returns the provided spec.
     /// - If the request is a `CompactionRequest::Full`, it generates a compaction spec that
-    ///   includes all current L0 SSTs and sorted runs as sources, and selects the lowest
-    ///   existing sorted run ID as the destination.
+    ///   includes all current sorted runs as sources, excluding L0 SSTs, and selects the
+    ///   lowest existing sorted run ID as the destination.
+    ///
+    /// Full compactions intentionally skip L0 so the size-tiered scheduler can continue
+    /// compacting new flush output in parallel. Including L0 would mark those SSTs as
+    /// in-use for the duration of the full compaction, eventually stalling writers once
+    /// L0 reaches `l0_max_ssts`.
     ///
     /// ## Arguments
     /// - `state`: Process-local view of the DB's manifest and compactions.
@@ -173,20 +178,24 @@ pub trait CompactionScheduler: Send + Sync {
             CompactionRequest::Full => {
                 let manifest = state.manifest();
                 let sources = manifest
-                    .l0
+                    .compacted
                     .iter()
-                    .map(|view| SourceId::SstView(view.id))
-                    .chain(
-                        manifest
-                            .compacted
-                            .iter()
-                            .map(|sr| SourceId::SortedRun(sr.id)),
-                    )
+                    .map(|sr| SourceId::SortedRun(sr.id))
                     .collect::<Vec<_>>();
                 if sources.is_empty() {
+                    if !manifest.l0.is_empty() {
+                        error!(
+                            "rejected full compaction: L0-only input is invalid because Full excludes L0 SSTs"
+                        );
+                    }
                     return Err(crate::Error::from(SlateDBError::InvalidCompaction));
                 }
-                let destination = manifest.compacted.iter().map(|sr| sr.id).min().unwrap_or(0);
+                let destination = manifest
+                    .compacted
+                    .iter()
+                    .map(|sr| sr.id)
+                    .min()
+                    .expect("full compaction requires at least one sorted run");
                 Ok(vec![CompactionSpec::new(sources, destination)])
             }
         }
@@ -196,7 +205,12 @@ pub trait CompactionScheduler: Send + Sync {
 /// Request to submit a compaction for execution.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum CompactionRequest {
-    /// Compact all current L0 SSTs and sorted runs.
+    /// Compact all current sorted runs, excluding L0 SSTs.
+    ///
+    /// L0 SSTs are left to regular size-tiered compaction so memtable flushes can continue
+    /// producing new sorted runs while the full compaction is in flight. Pulling L0 into the
+    /// full compaction would block parallel L0 work and can back pressure writes once
+    /// `l0_max_ssts` is reached.
     Full,
     /// Use a caller-provided compaction spec.
     Spec(CompactionSpec),
@@ -281,7 +295,7 @@ impl Compactor {
         rand: Arc<DbRand>,
         recorder: &MetricsRecorderHelper,
         system_clock: Arc<dyn SystemClock>,
-        closed_result: ClosedResultWriter,
+        closed_result: Arc<dyn ClosedResultWriter>,
         merge_operator: Option<MergeOperatorType>,
         #[cfg(feature = "compaction_filters")] compaction_filter_supplier: Option<
             Arc<dyn CompactionFilterSupplier>,
@@ -318,7 +332,7 @@ impl Compactor {
     /// ## Returns
     /// - `Ok(())` when the compactor task exits cleanly, or [`SlateDBError`] on failure.
     pub async fn run(&self) -> Result<(), crate::Error> {
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, rx) = async_channel::unbounded();
         let scheduler = Arc::from(self.scheduler_supplier.compaction_scheduler(&self.options));
         let executor = Arc::new(TokioCompactionExecutor::new(
             TokioCompactionExecutorOptions {
@@ -377,7 +391,7 @@ impl Compactor {
     /// ## Returns
     /// - `Ok(Ulid)` with the submitted compaction id.
     /// - `SlateDBError::InvalidDBState` if the compactions file doesn't exist.
-    /// - `SlateDBError::InvalidCompaction` if a full compaction has no sources.
+    /// - `SlateDBError::InvalidCompaction` if a full compaction has no sorted run sources.
     /// - `SlateDBError` if the compaction could not be persisted.
     pub(crate) async fn submit(
         spec: CompactionSpec,
@@ -2726,7 +2740,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_submit_full_compaction_uses_all_sources() {
+    async fn test_submit_full_compaction_uses_sorted_run_sources_only() {
         let os = Arc::new(InMemory::new());
         let (manifest_store, compactions_store, _table_store) = build_test_stores(os.clone());
         let system_clock: Arc<dyn SystemClock> = Arc::new(DefaultSystemClock::new());
@@ -2762,8 +2776,6 @@ mod tests {
             SST_FORMAT_VERSION_LATEST,
             l0_info.clone(),
         ));
-        let l0_newest = l0_view_newest.id;
-        let l0_oldest = l0_view_oldest.id;
         dirty.value.core.l0 = VecDeque::from(vec![l0_view_newest, l0_view_oldest]);
         dirty.value.core.compacted = vec![
             SortedRun {
@@ -2816,12 +2828,7 @@ mod tests {
         let stored = compactions
             .get(&compaction_id)
             .expect("missing submitted compaction");
-        let expected_sources = vec![
-            SourceId::SstView(l0_newest),
-            SourceId::SstView(l0_oldest),
-            SourceId::SortedRun(2),
-            SourceId::SortedRun(1),
-        ];
+        let expected_sources = vec![SourceId::SortedRun(2), SourceId::SortedRun(1)];
 
         assert_eq!(stored.spec().sources(), &expected_sources);
         assert_eq!(stored.spec().destination(), 1);
@@ -2845,7 +2852,7 @@ mod tests {
     }
 
     #[test]
-    fn test_plan_full_uses_all_sources_and_min_destination() {
+    fn test_plan_full_uses_sorted_runs_and_min_destination() {
         let scheduler = MockScheduler::new();
         let mut core = ManifestCore::new();
         let l0_info = SsTableInfo {
@@ -2866,8 +2873,6 @@ mod tests {
             SST_FORMAT_VERSION_LATEST,
             l0_info,
         ));
-        let l0_first = l0_view_first.id;
-        let l0_second = l0_view_second.id;
         core.l0 = VecDeque::from(vec![l0_view_first, l0_view_second]);
         core.compacted = vec![
             SortedRun {
@@ -2896,15 +2901,45 @@ mod tests {
             .generate(&state, &CompactionRequest::Full)
             .unwrap();
 
-        let expected_sources = vec![
-            SourceId::SstView(l0_first),
-            SourceId::SstView(l0_second),
-            SourceId::SortedRun(5),
-            SourceId::SortedRun(2),
-        ];
+        let expected_sources = vec![SourceId::SortedRun(5), SourceId::SortedRun(2)];
         assert_eq!(planned.len(), 1);
         assert_eq!(planned[0].sources(), &expected_sources);
         assert_eq!(planned[0].destination(), 2);
+    }
+
+    #[test]
+    fn test_plan_full_without_sorted_runs_is_invalid() {
+        let scheduler = MockScheduler::new();
+        let mut core = ManifestCore::new();
+        let l0_info = SsTableInfo {
+            first_entry: Some(Bytes::from_static(b"a")),
+            ..SsTableInfo::default()
+        };
+        core.l0 = VecDeque::from(vec![
+            SsTableView::identity(SsTableHandle::new(
+                SsTableId::Compacted(Ulid::from_parts(1, 0)),
+                SST_FORMAT_VERSION_LATEST,
+                l0_info.clone(),
+            )),
+            SsTableView::identity(SsTableHandle::new(
+                SsTableId::Compacted(Ulid::from_parts(2, 0)),
+                SST_FORMAT_VERSION_LATEST,
+                l0_info,
+            )),
+        ]);
+        let state = CompactorStateView {
+            compactions: None,
+            manifest: (0, Manifest::initial(core)),
+        };
+
+        let err = scheduler
+            .generate(&state, &CompactionRequest::Full)
+            .expect_err(
+            "full compaction should reject empty or L0-only inputs because L0 SSTs are excluded",
+        );
+
+        assert_eq!(err.kind(), crate::ErrorKind::Invalid);
+        assert_eq!(err.to_string(), "Invalid error: invalid compaction");
     }
 
     struct CompactorEventHandlerTestFixture {
@@ -2916,7 +2951,7 @@ mod tests {
         scheduler: Arc<MockScheduler>,
         executor: Arc<MockExecutor>,
         real_executor: Arc<dyn CompactionExecutor>,
-        real_executor_rx: tokio::sync::mpsc::UnboundedReceiver<CompactorMessage>,
+        real_executor_rx: async_channel::Receiver<CompactorMessage>,
         test_recorder: Arc<slatedb_common::metrics::DefaultMetricsRecorder>,
         handler: CompactorEventHandler,
     }
@@ -2936,7 +2971,7 @@ mod tests {
 
             let scheduler = Arc::new(MockScheduler::new());
             let executor = Arc::new(MockExecutor::new());
-            let (real_executor_tx, real_executor_rx) = tokio::sync::mpsc::unbounded_channel();
+            let (real_executor_tx, real_executor_rx) = async_channel::unbounded();
             let rand = Arc::new(DbRand::default());
             let test_recorder = Arc::new(slatedb_common::metrics::DefaultMetricsRecorder::new());
             let recorder = MetricsRecorderHelper::new(
@@ -3045,13 +3080,13 @@ mod tests {
         fixture.assert_and_forward_compactions(1);
         let msg = tokio::time::timeout(Duration::from_millis(10), async {
             match fixture.real_executor_rx.recv().await {
-                Some(m @ CompactorMessage::CompactionJobFinished { .. }) => m,
-                Some(_) => fixture
+                Ok(m @ CompactorMessage::CompactionJobFinished { .. }) => m,
+                Ok(_) => fixture
                     .real_executor_rx
                     .recv()
                     .await
                     .expect("channel closed before CompactionJobAttemptFinished"),
-                None => panic!("channel closed before receiving any message"),
+                Err(e) => panic!("channel closed before receiving any message: {e}"),
             }
         })
         .await
@@ -3085,13 +3120,13 @@ mod tests {
         fixture.assert_and_forward_compactions(1);
         let msg = tokio::time::timeout(Duration::from_millis(10), async {
             match fixture.real_executor_rx.recv().await {
-                Some(m @ CompactorMessage::CompactionJobFinished { .. }) => m,
-                Some(_) => fixture
+                Ok(m @ CompactorMessage::CompactionJobFinished { .. }) => m,
+                Ok(_) => fixture
                     .real_executor_rx
                     .recv()
                     .await
                     .expect("channel closed before CompactionJobAttemptFinished"),
-                None => panic!("channel closed before receiving any message"),
+                Err(e) => panic!("channel closed before receiving any message: {e}"),
             }
         })
         .await
@@ -3197,13 +3232,13 @@ mod tests {
         fixture.assert_and_forward_compactions(1);
         let msg = tokio::time::timeout(Duration::from_millis(10), async {
             match fixture.real_executor_rx.recv().await {
-                Some(m @ CompactorMessage::CompactionJobFinished { .. }) => m,
-                Some(_) => fixture
+                Ok(m @ CompactorMessage::CompactionJobFinished { .. }) => m,
+                Ok(_) => fixture
                     .real_executor_rx
                     .recv()
                     .await
                     .expect("channel closed before CompactionJobAttemptFinished"),
-                None => panic!("channel closed before receiving any message"),
+                Err(e) => panic!("channel closed before receiving any message: {e}"),
             }
         })
         .await
@@ -3673,13 +3708,13 @@ mod tests {
         fixture.assert_and_forward_compactions(1);
         let msg = tokio::time::timeout(Duration::from_millis(10), async {
             match fixture.real_executor_rx.recv().await {
-                Some(m @ CompactorMessage::CompactionJobFinished { .. }) => m,
-                Some(_) => fixture
+                Ok(m @ CompactorMessage::CompactionJobFinished { .. }) => m,
+                Ok(_) => fixture
                     .real_executor_rx
                     .recv()
                     .await
                     .expect("channel closed before CompactionJobAttemptFinished"),
-                None => panic!("channel closed before receiving any message"),
+                Err(e) => panic!("channel closed before receiving any message: {e}"),
             }
         })
         .await
@@ -3812,13 +3847,13 @@ mod tests {
         fixture.assert_and_forward_compactions(1);
         let msg = tokio::time::timeout(Duration::from_millis(10), async {
             match fixture.real_executor_rx.recv().await {
-                Some(m @ CompactorMessage::CompactionJobFinished { .. }) => m,
-                Some(_) => fixture
+                Ok(m @ CompactorMessage::CompactionJobFinished { .. }) => m,
+                Ok(_) => fixture
                     .real_executor_rx
                     .recv()
                     .await
                     .expect("channel closed before CompactionJobAttemptFinished"),
-                None => panic!("channel closed before receiving any message"),
+                Err(e) => panic!("channel closed before receiving any message: {e}"),
             }
         })
         .await
@@ -3844,13 +3879,13 @@ mod tests {
         fixture.assert_and_forward_compactions(1);
         let msg = tokio::time::timeout(Duration::from_millis(10), async {
             match fixture.real_executor_rx.recv().await {
-                Some(m @ CompactorMessage::CompactionJobFinished { .. }) => m,
-                Some(_) => fixture
+                Ok(m @ CompactorMessage::CompactionJobFinished { .. }) => m,
+                Ok(_) => fixture
                     .real_executor_rx
                     .recv()
                     .await
                     .expect("channel closed before CompactionJobAttemptFinished"),
-                None => panic!("channel closed before receiving any message"),
+                Err(e) => panic!("channel closed before receiving any message: {e}"),
             }
         })
         .await

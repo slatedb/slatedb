@@ -752,19 +752,15 @@ The union process works as follows:
      IDs are regenerated to maintain uniqueness. As an optimization, similarly sized SRs can be merged together to 
      reduce LSM height and metadata size; only SRs from different manifests can be merged because they are guaranteed to
      be non-overlapping.
-4. Sorted run IDs are preserved from the source manifests. The compactor does not assume contiguous IDs, so
-   gaps left by projection (where empty sorted runs were removed) are acceptable. Preserving original IDs
-   maintains tier identity across projection and union. The descending order is preserved to maintain compactor 
-   invariant.
-5. `last_l0_seq` is set to the maximum of `last_l0_seq` across all input manifests. This ensures that the
+4. `last_l0_seq` is set to the maximum of `last_l0_seq` across all input manifests. This ensures that the
    new database's writer assigns sequence numbers higher than any existing data. Without this, new writes
    could receive sequence numbers that collide with those in the carried-over SSTs, breaking snapshot
    isolation and MVCC ordering. Note that existing SSTs from independent sources may have overlapping
    sequence numbers, but this is safe because the non-overlapping key range validation (step 2) guarantees
    that no two entries for the same key can have conflicting sequence numbers.
-6. The resulting manifest has `initialized` set to `false`. The caller must complete setup (e.g., creating
+5. The resulting manifest has `initialized` set to `false`. The caller must complete setup (e.g., creating
    final checkpoints in source databases) before setting `initialized` to `true`.
-7. Each source database is added as an `external_dbs` entry in the resulting manifest, with a new
+6. Each source database is added as an `external_dbs` entry in the resulting manifest, with a new
    `final_checkpoint_id` and its owned SST IDs recorded so that the new database can resolve SST paths
    and maintain checkpoints on the source databases to prevent their SSTs from being garbage collected.
    Owned SST IDs are those in the source manifest that are not already tracked by its own `external_dbs`

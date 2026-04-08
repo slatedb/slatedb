@@ -413,7 +413,7 @@ impl FlatBufferManifestCodec {
             last_l0_seq: manifest.last_l0_seq(),
             last_l0_clock_tick: manifest.last_l0_clock_tick(),
             checkpoints,
-            wal_object_store_uri: manifest.wal_object_store_uri().map(|uri| uri.to_string()),
+            wal_object_store_uri: None,
             recent_snapshot_min_seq: manifest.recent_snapshot_min_seq(),
             sequence_tracker,
         };
@@ -1000,10 +1000,6 @@ impl<'b> DbFlatBufferBuilder<'b> {
             Some(self.builder.create_vector(external_dbs.as_ref()))
         };
 
-        let wal_object_store_uri = core
-            .wal_object_store_uri
-            .as_ref()
-            .map(|uri| self.builder.create_string(uri));
         let sequence_tracker_data = core.sequence_tracker.to_bytes();
         let sequence_tracker = self.builder.create_vector(sequence_tracker_data.as_slice());
 
@@ -1024,7 +1020,6 @@ impl<'b> DbFlatBufferBuilder<'b> {
                 last_l0_clock_tick: core.last_l0_clock_tick,
                 checkpoints: Some(checkpoints),
                 last_l0_seq: core.last_l0_seq,
-                wal_object_store_uri,
                 recent_snapshot_min_seq: core.recent_snapshot_min_seq,
                 sequence_tracker: Some(sequence_tracker),
             },
@@ -1463,15 +1458,34 @@ mod tests {
     }
 
     #[test]
-    fn test_should_encode_decode_wal_object_store_uri() {
+    fn test_should_encode_decode_wal_object_store_uri_in_v1() {
         let mut manifest = Manifest::initial(ManifestCore::new());
         manifest.core.wal_object_store_uri = Some("s3://bucket/path".to_string());
 
         let codec = FlatBufferManifestCodec {};
-        let bytes = codec.encode(&manifest);
+        let bytes = FlatBufferManifestCodec::create_from_manifest_v1(&manifest);
         let decoded = codec.decode(&bytes).unwrap();
 
         assert_eq!(manifest, decoded);
+    }
+
+    #[test]
+    fn test_should_not_encode_wal_object_store_uri_in_v2() {
+        let mut manifest = Manifest::initial(ManifestCore::new());
+        manifest.core.wal_object_store_uri = Some("s3://bucket/path".to_string());
+
+        let codec = FlatBufferManifestCodec {};
+        let bytes = FlatBufferManifestCodec::create_from_manifest(&manifest);
+        let decoded = codec.decode(&bytes).unwrap();
+
+        assert_eq!(
+            u16::from_be_bytes([bytes[0], bytes[1]]),
+            MANIFEST_FORMAT_VERSION
+        );
+
+        let mut expected = manifest.clone();
+        expected.core.wal_object_store_uri = None;
+        assert_eq!(expected, decoded);
     }
 
     #[test]
@@ -2084,7 +2098,7 @@ mod tests {
 
         let codec = FlatBufferManifestCodec {};
         let v1_bytes = FlatBufferManifestCodec::create_from_manifest_v1(&manifest);
-        let v2_bytes = codec.encode(&manifest);
+        let v2_bytes = FlatBufferManifestCodec::create_from_manifest(&manifest);
 
         let decoded_v1 = codec.decode(&v1_bytes).expect("failed to decode V1");
         let decoded_v2 = codec.decode(&v2_bytes).expect("failed to decode V2");

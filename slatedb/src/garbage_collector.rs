@@ -308,7 +308,6 @@ mod tests {
     use chrono::{DateTime, Days, TimeDelta, Utc};
     use object_store::{local::LocalFileSystem, path::Path};
     use tokio::runtime::Handle;
-    use tokio::sync::mpsc;
     use uuid::Uuid;
 
     use crate::checkpoint::Checkpoint;
@@ -1599,10 +1598,10 @@ mod tests {
             &recorder,
             Arc::new(DefaultSystemClock::default()),
         );
-        let (_, rx) = mpsc::unbounded_channel();
+        let (_, rx) = async_channel::unbounded();
         let clock = Arc::new(DefaultSystemClock::default());
-        let executor =
-            MessageHandlerExecutor::new(ClosedResultWriter::new(WatchableOnceCell::new()), clock);
+        let closed_result: Arc<dyn ClosedResultWriter> = Arc::new(WatchableOnceCell::new());
+        let executor = MessageHandlerExecutor::new(closed_result, clock);
         executor
             .add_handler(
                 "garbage_collector".to_string(),

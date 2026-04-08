@@ -1,4 +1,4 @@
-//! SlateDB makes use of [mpsc::channel] to offload work to background tasks when
+//! SlateDB makes use of [async_channel] to offload work to background tasks when
 //! possible. Examples of these tasks include [crate::mem_table_flush],
 //! [crate::checkpoint], and [crate::compactor]. Each task's lifecycle is fairly
 //! similar; they:
@@ -24,6 +24,14 @@
 //! [MessageHandlerExecutor::monitor_on] to start the event loop and monitor tasks until
 //! shutdown.
 //!
+//! Handlers can also be grouped for parallel processing using
+//! [MessageHandlerExecutor::add_handlers]. All handlers in a group share a single
+//! [async_channel::Receiver], enabling multi-consumer message distribution. Each handler
+//! runs its own [MessageDispatcher] event loop with independent tickers, but the group
+//! shares a single [tokio_util::sync::CancellationToken] and result cell. This is useful
+//! for tasks like parallel L0 uploading where multiple handlers can process messages from
+//! the same channel concurrently.
+//!
 //! ## Example
 //!
 //! ```ignore
@@ -33,7 +41,7 @@
 //! # use slatedb::utils::WatchableOnceCell;
 //! # use std::sync::Arc;
 //! # use std::time::Duration;
-//! # use tokio::sync::mpsc;
+//! # use async_channel;
 //! # use tokio::runtime::Handle;
 //! # use futures::stream::BoxStream;
 //! # use futures::StreamExt;
@@ -82,7 +90,7 @@
 //! }
 //!
 //! let clock = Arc::new(DefaultSystemClock::default());
-//! let (tx, rx) = mpsc::unbounded_channel();
+//! let (tx, rx) = async_channel::unbounded();
 //! let closed_result = WatchableOnceCell::new();
 //! let handle = Handle::current();
 //! let task_executor = MessageHandlerExecutor::new(
@@ -97,13 +105,16 @@
 //! ).expect("failed to add handler");
 //! let join_handle = task_executor.monitor_on(&handle)
 //!     .expect("failed to start monitoring");
-//! tx.send(Message::Say("hello".to_string())).unwrap();
+//! tx.try_send(Message::Say("hello".to_string())).unwrap();
 //! task_executor.shutdown_task("print_message_handler").await.ok();
 //! join_handle.await.ok();
 //! # }
 //! ```
 
-use std::{future::Future, panic::AssertUnwindSafe, pin::Pin, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap, future::Future, panic::AssertUnwindSafe, pin::Pin, sync::Arc,
+    time::Duration,
+};
 
 use async_trait::async_trait;
 use crossbeam_skiplist::SkipMap;
@@ -115,7 +126,7 @@ use futures::{
 };
 use log::error;
 use parking_lot::Mutex;
-use tokio::{runtime::Handle, sync::mpsc, task::JoinHandle};
+use tokio::{runtime::Handle, task::JoinHandle};
 use tokio_util::{sync::CancellationToken, task::JoinMap};
 
 use crate::{
@@ -130,16 +141,16 @@ pub(crate) type MessageFactory<T> = dyn Fn() -> T + Send;
 
 /// A dispatcher that invokes [MessageHandler] callbacks when events occur.
 ///
-/// [MessageDispatcher] receives a [MessageHandler] and [mpsc::UnboundedReceiver<T>].
+/// [MessageDispatcher] receives a [MessageHandler] and [async_channel::Receiver<T>].
 /// Messages sent to the receiver are passed to the [MessageHandler] for processing.
 ///
 /// [MessageDispatcher::run] is the primary entry point for running the dispatcher;
 /// it is responsible for running the main event loop. The function receives messages
-/// from the [mpsc::UnboundedReceiver<T>] and from any [MessageDispatcherTicker]s, and
+/// from the [async_channel::Receiver<T>] and from any [MessageDispatcherTicker]s, and
 /// passes them to the [MessageHandler] for processing.
 struct MessageDispatcher<T: Send + std::fmt::Debug> {
     handler: Box<dyn MessageHandler<T>>,
-    rx: mpsc::UnboundedReceiver<T>,
+    rx: async_channel::Receiver<T>,
     clock: Arc<dyn SystemClock>,
     cancellation_token: CancellationToken,
     #[allow(dead_code)]
@@ -153,13 +164,13 @@ impl<T: Send + std::fmt::Debug> MessageDispatcher<T> {
     /// ## Arguments
     ///
     /// * `handler`: The [MessageHandler] to use for processing messages.
-    /// * `rx`: The [mpsc::UnboundedReceiver<T>] to use for receiving messages.
+    /// * `rx`: The [async_channel::Receiver<T>] to use for receiving messages.
     /// * `clock`: The [SystemClock] to use for time.
     /// * `cancellation_token`: The [CancellationToken] to use for shutdown.
     #[allow(dead_code)]
     fn new(
         handler: Box<dyn MessageHandler<T>>,
-        rx: mpsc::UnboundedReceiver<T>,
+        rx: async_channel::Receiver<T>,
         clock: Arc<dyn SystemClock>,
         cancellation_token: CancellationToken,
     ) -> Self {
@@ -179,7 +190,7 @@ impl<T: Send + std::fmt::Debug> MessageDispatcher<T> {
     /// ## Arguments
     ///
     /// * `handler`: The [MessageHandler] to use for processing messages.
-    /// * `rx`: The [mpsc::UnboundedReceiver<T>] to use for receiving messages.
+    /// * `rx`: The [async_channel::Receiver<T>] to use for receiving messages.
     /// * `clock`: The [SystemClock] to use for time.
     /// * `cancellation_token`: The [CancellationToken] to use for shutdown.
     /// * `fp_registry`: The [FailPointRegistry] to use for fail points.
@@ -223,7 +234,7 @@ impl<T: Send + std::fmt::Debug> MessageDispatcher<T> {
                     break;
                 }
                 // if no errors, prioritize messages
-                Some(message) = self.rx.recv() => {
+                Ok(message) = self.rx.recv() => {
                     self.handler.handle(message).await?;
                 },
                 // if no messages, check tickers
@@ -234,6 +245,52 @@ impl<T: Send + std::fmt::Debug> MessageDispatcher<T> {
             }
         }
         Ok(())
+    }
+
+    /// Runs the full dispatcher lifecycle: [run] with panic catching, write to
+    /// `closed_result`, then [cleanup]. Returns the run result.
+    #[allow(clippy::panic)] // for failpoint
+    async fn run_lifecycle(
+        mut self,
+        name: String,
+        closed_result: Arc<dyn ClosedResultWriter>,
+        #[allow(unused_variables)] fp_registry: Arc<FailPointRegistry>,
+    ) -> Result<(), SlateDBError> {
+        // catch dispatcher panics using catch_unwind
+        let run_unwind_result = AssertUnwindSafe(self.run()).catch_unwind().await;
+        let (run_result, run_maybe_panic) = split_unwind_result(name.clone(), run_unwind_result);
+        if let Err(ref err) = run_result {
+            error!(
+                "background task panicked unexpectedly. [task_name={}, error={:?}, panic={:?}]",
+                name,
+                err,
+                run_maybe_panic.map(|p| panic_string(&p))
+            );
+        }
+        fail_point!(fp_registry.clone(), "executor-wrapper-before-write", |_| {
+            panic!("failpoint: executor-wrapper-before-write");
+        });
+        // set result in db state (first writer wins)
+        closed_result.write_result(run_result.clone());
+        // re-read the result since it might have already been set by another task
+        let final_result = closed_result
+            .result_reader()
+            .read()
+            .expect("error state was unexpectedly empty");
+        let cleanup_unwind_result = AssertUnwindSafe(self.cleanup(final_result))
+            .catch_unwind()
+            .await;
+        let (cleanup_result, cleanup_maybe_panic) =
+            split_unwind_result(name.clone(), cleanup_unwind_result);
+        if let Err(err) = cleanup_result {
+            error!(
+                "background task failed to clean up on shutdown [name={}, error={:?}, panic={:?}]",
+                name,
+                err,
+                cleanup_maybe_panic.map(|p| panic_string(&p))
+            );
+        }
+        run_result
     }
 
     /// Tells the handler to clean up any resources.
@@ -254,7 +311,7 @@ impl<T: Send + std::fmt::Debug> MessageDispatcher<T> {
         });
         self.rx.close();
         let messages = futures::stream::unfold(&mut self.rx, |rx| async move {
-            rx.recv().await.map(|message| (message, rx))
+            rx.recv().await.ok().map(|message| (message, rx))
         });
         self.handler.cleanup(Box::pin(messages), result).await
     }
@@ -368,14 +425,93 @@ pub(crate) trait MessageHandler<T: Send>: Send {
 /// dispatcher ([MessageDispatcher::run]) and handle cleanup
 /// ([MessageDispatcher::cleanup]).
 struct MessageHandlerFuture {
-    /// The name of the task.
+    /// The name of the task group.
     name: String,
+    /// The index of this handler within its group.
+    group_index: usize,
     /// A future that runs the handler's dispatcher and handles cleanup.
     future: BoxFuture<'static, Result<(), SlateDBError>>,
     /// A cancellation token used to cancel the handler's dispatcher.
     token: CancellationToken,
     /// A runtime handle used to spawn the future.
     handle: Handle,
+}
+
+/// Tracks per-group state in the monitor loop: how many members remain
+/// and the aggregate result (first error wins).
+struct TaskGroup {
+    remaining: usize,
+    result: Result<(), SlateDBError>,
+}
+
+impl TaskGroup {
+    fn new(count: usize) -> Self {
+        Self {
+            remaining: count,
+            result: Ok(()),
+        }
+    }
+
+    /// Merge a member result. First error wins. Returns `true` when this
+    /// was the last member (i.e. the group is now complete).
+    fn member_completed(&mut self, result: Result<(), SlateDBError>) -> bool {
+        if self.result.is_ok() {
+            self.result = result;
+        }
+        self.remaining -= 1;
+        self.remaining == 0
+    }
+}
+
+/// Owns the state needed by the monitor loop and provides a single
+/// `run` method that drives it.
+struct TaskMonitor {
+    tasks: JoinMap<(String, usize), Result<(), SlateDBError>>,
+    groups: HashMap<String, TaskGroup>,
+    closed_result: Arc<dyn ClosedResultWriter>,
+    results: Arc<SkipMap<String, WatchableOnceCell<Result<(), SlateDBError>>>>,
+    tokens: Vec<CancellationToken>,
+}
+
+impl TaskMonitor {
+    /// Run the monitor loop until all tasks complete.
+    async fn run(mut self) {
+        while !self.tasks.is_empty() {
+            if let Some(((group_name, _), join_result)) = self.tasks.join_next().await {
+                let (task_result, task_maybe_panic) =
+                    split_join_result(group_name.clone(), join_result);
+
+                if let Err(ref err) = task_result {
+                    error!(
+                        "background task failed [name={}, error={:?}, panic={:?}]",
+                        group_name,
+                        err,
+                        task_maybe_panic.map(|p| panic_string(&p))
+                    );
+                    self.closed_result.write_result(task_result.clone());
+                    self.tokens.iter().for_each(|t| t.cancel());
+                }
+
+                let group = self
+                    .groups
+                    .get_mut(&group_name)
+                    .expect("group tracking entry missing");
+
+                if group.member_completed(task_result) {
+                    let group_result = self
+                        .groups
+                        .remove(&group_name)
+                        .expect("group tracking entry missing on final member")
+                        .result;
+                    self.results
+                        .get(&group_name)
+                        .expect("result cell isn't set when expected")
+                        .value()
+                        .write(group_result);
+                }
+            }
+        }
+    }
 }
 
 impl std::fmt::Debug for MessageHandlerFuture {
@@ -407,7 +543,7 @@ pub(crate) struct MessageHandlerExecutor {
     /// A wrapper that stores the final result of the database lifecycle and
     /// auto-reports the close reason. Ok(()) indicates a clean shutdown; Err(e)
     /// indicates an error.
-    closed_result: ClosedResultWriter,
+    closed_result: Arc<dyn ClosedResultWriter>,
     /// A system clock for time keeping.
     clock: Arc<dyn SystemClock>,
     /// A fail point registry for fail points.
@@ -420,14 +556,16 @@ impl MessageHandlerExecutor {
     ///
     /// ## Arguments
     ///
-    /// * `closed_result`: A [ClosedResultWriter] that stores the database close result
-    ///   and auto-reports the close reason.
+    /// * `closed_result`: A [ClosedResultWriter] that stores the database close result.
     /// * `clock`: A [SystemClock] to use for tickers and timekeeping.
     ///
     /// ## Returns
     ///
     /// The new [MessageHandlerExecutor].
-    pub(crate) fn new(closed_result: ClosedResultWriter, clock: Arc<dyn SystemClock>) -> Self {
+    pub(crate) fn new(
+        closed_result: Arc<dyn ClosedResultWriter>,
+        clock: Arc<dyn SystemClock>,
+    ) -> Self {
         Self {
             futures: Mutex::new(Some(vec![])),
             closed_result,
@@ -453,97 +591,71 @@ impl MessageHandlerExecutor {
         self
     }
 
-    /// Adds a new [MessageHandlerFuture] for the provided [MessageHandler] on the given
-    /// [Handle]. The future calls [MessageDispatcher::run] on the dispatcher. When
-    /// [MessageDispatcher::run] returns, [MessageDispatcher::cleanup] is called. The
-    /// future is _not_ spawned in this method. Instead, it is added to the executor's
-    /// `futures` list and will be spawned when [MessageHandlerExecutor::monitor_on] is
-    /// called.
-    ///
-    /// ## Arguments
-    ///
-    /// * `name`: The name of the dispatcher.
-    /// * `handler`: The [MessageHandler] to use for handling messages.
-    /// * `rx`: The [mpsc::UnboundedReceiver] to use for receiving messages on the
-    ///   handler's behalf.
-    /// * `handle`: The [Handle] to use for spawning the dispatcher.
-    ///
-    /// ## Returns
-    ///
-    /// - `Ok(())` if the dispatcher was successfully spawned.
-    /// - Err([SlateDBError::BackgroundTaskExists]) if a dispatcher with the same name is
-    ///   already added.
-    /// - Err([SlateDBError::BackgroundTaskExecutorStarted]) if the executor is already
-    ///   started.
-    #[allow(clippy::panic)] // for failpoint
+    /// Adds a single [MessageHandler] as a group of one. See [MessageHandlerExecutor::add_handlers].
     pub(crate) fn add_handler<T: Send + std::fmt::Debug + 'static>(
         &self,
         name: String,
         handler: Box<dyn MessageHandler<T>>,
-        rx: mpsc::UnboundedReceiver<T>,
+        rx: async_channel::Receiver<T>,
         handle: &Handle,
     ) -> Result<(), SlateDBError> {
+        self.add_handlers(name, vec![handler], rx, handle)
+    }
+
+    /// Adds a group of [MessageHandler]s that share a single [async_channel::Receiver].
+    /// Each handler runs its own [MessageDispatcher] event loop independently, enabling
+    /// parallel message processing across the group.
+    ///
+    /// All handlers in the group share one [CancellationToken] and one result cell.
+    /// A sequential handler is simply a group of size 1 (see [MessageHandlerExecutor::add_handler]).
+    ///
+    /// ## Arguments
+    ///
+    /// * `name`: The name of the handler group.
+    /// * `handlers`: The [MessageHandler]s to run in parallel.
+    /// * `rx`: The shared [async_channel::Receiver] for receiving messages.
+    /// * `handle`: The [Handle] to use for spawning the dispatchers.
+    ///
+    /// ## Returns
+    ///
+    /// - `Ok(())` if the group was successfully added.
+    /// - Err([SlateDBError::BackgroundTaskExists]) if a group with the same name already exists.
+    /// - Err([SlateDBError::BackgroundTaskExecutorStarted]) if the executor is already started.
+    pub(crate) fn add_handlers<T: Send + std::fmt::Debug + 'static>(
+        &self,
+        name: String,
+        handlers: Vec<Box<dyn MessageHandler<T>>>,
+        rx: async_channel::Receiver<T>,
+        handle: &Handle,
+    ) -> Result<(), SlateDBError> {
+        assert!(!handlers.is_empty(), "handlers must not be empty");
         let token = CancellationToken::new();
-        let mut dispatcher = MessageDispatcher::new(handler, rx, self.clock.clone(), token.clone())
-            .with_fp_registry(self.fp_registry.clone());
-        let this_closed_result = self.closed_result.clone();
-        let this_name = name.clone();
-        #[allow(unused_variables)]
-        let this_fp_registry = self.fp_registry.clone();
-        // future that runs the dispatcher and handles cleanup
-        let task_future = async move {
-            // catch dispatcher panics using catch_unwind
-            let run_unwind_result = AssertUnwindSafe(dispatcher.run()).catch_unwind().await;
-            let (run_result, run_maybe_panic) =
-                split_unwind_result(this_name.clone(), run_unwind_result);
-            if let Err(ref err) = run_result {
-                error!(
-                    "background task panicked unexpectedly. [task_name={}, error={:?}, panic={:?}]",
-                    this_name,
-                    err,
-                    run_maybe_panic.map(|p| panic_string(&p))
-                );
-            }
-            fail_point!(
-                this_fp_registry.clone(),
-                "executor-wrapper-before-write",
-                |_| {
-                    panic!("failpoint: executor-wrapper-before-write");
-                }
+        let mut futures = Vec::with_capacity(handlers.len());
+
+        for (group_index, handler) in handlers.into_iter().enumerate() {
+            let dispatcher =
+                MessageDispatcher::new(handler, rx.clone(), self.clock.clone(), token.clone())
+                    .with_fp_registry(self.fp_registry.clone());
+            let future = dispatcher.run_lifecycle(
+                name.clone(),
+                self.closed_result.clone(),
+                self.fp_registry.clone(),
             );
-            // set result in db state (first writer wins)
-            this_closed_result.write(run_result.clone());
-            // re-read the result since it might have already been set by another task
-            let final_result = this_closed_result
-                .reader()
-                .read()
-                .expect("error state was unexpectedly empty");
-            let cleanup_unwind_result = AssertUnwindSafe(dispatcher.cleanup(final_result))
-                .catch_unwind()
-                .await;
-            let (cleanup_result, cleanup_maybe_panic) =
-                split_unwind_result(this_name.clone(), cleanup_unwind_result);
-            if let Err(err) = cleanup_result {
-                error!(
-                    "background task failed to clean up on shutdown [name={}, error={:?}, panic={:?}]",
-                    this_name.clone(),
-                    err,
-                    cleanup_maybe_panic.map(|p| panic_string(&p))
-                );
-            }
-            run_result
-        };
+            futures.push(MessageHandlerFuture {
+                name: name.clone(),
+                group_index,
+                future: Box::pin(future),
+                token: token.clone(),
+                handle: handle.clone(),
+            });
+        }
+
         let mut guard = self.futures.lock();
         if let Some(task_definitions) = guard.as_mut() {
             if task_definitions.iter().any(|t| t.name == name) {
                 return Err(SlateDBError::BackgroundTaskExists(name));
             }
-            task_definitions.push(MessageHandlerFuture {
-                name,
-                future: Box::pin(task_future),
-                token,
-                handle: handle.clone(),
-            });
+            task_definitions.extend(futures);
             Ok(())
         } else {
             Err(SlateDBError::BackgroundTaskExecutorStarted)
@@ -573,52 +685,33 @@ impl MessageHandlerExecutor {
             }
         };
         let mut tasks = JoinMap::new();
+        let mut groups: HashMap<String, TaskGroup> = HashMap::new();
         for task_definition in task_definitions.drain(..) {
-            self.tokens
-                .insert(task_definition.name.clone(), task_definition.token.clone());
-            self.results
-                .insert(task_definition.name.clone(), WatchableOnceCell::new());
+            // Only insert token and result cell once per group name
+            if !self.tokens.contains_key(&task_definition.name) {
+                self.tokens
+                    .insert(task_definition.name.clone(), task_definition.token.clone());
+                self.results
+                    .insert(task_definition.name.clone(), WatchableOnceCell::new());
+            }
+            groups
+                .entry(task_definition.name.clone())
+                .or_insert_with(|| TaskGroup::new(0))
+                .remaining += 1;
             tasks.spawn_on(
-                task_definition.name.clone(),
+                (task_definition.name.clone(), task_definition.group_index),
                 task_definition.future,
                 &task_definition.handle,
             );
         }
-        let this_closed_result = self.closed_result.clone();
-        let this_results = self.results.clone();
-        let this_tokens = self
-            .tokens
-            .iter()
-            .map(|e| e.value().clone())
-            .collect::<Vec<_>>();
-        // future that runs until all tasks are completed
-        let monitor_future = async move {
-            while !tasks.is_empty() {
-                if let Some((name, join_result)) = tasks.join_next().await {
-                    let (task_result, task_maybe_panic) =
-                        split_join_result(name.clone(), join_result);
-                    if let Err(ref err) = task_result {
-                        error!(
-                            "background task failed [name={}, error={:?}, panic={:?}]",
-                            name,
-                            err,
-                            task_maybe_panic.map(|p| panic_string(&p))
-                        );
-                    }
-                    this_closed_result.write(task_result.clone());
-                    let entry = this_results
-                        .get(&name)
-                        .expect("result cell isn't set when expected");
-                    let result_cell = entry.value();
-                    result_cell.write(task_result.clone());
-                    if task_result.is_err() {
-                        // db is in an error state, so cancel all other tasks
-                        this_tokens.iter().for_each(|t| t.cancel());
-                    }
-                }
-            }
+        let monitor = TaskMonitor {
+            tasks,
+            groups,
+            closed_result: self.closed_result.clone(),
+            results: self.results.clone(),
+            tokens: self.tokens.iter().map(|e| e.value().clone()).collect(),
         };
-        Ok(handle.spawn(monitor_future))
+        Ok(handle.spawn(monitor.run()))
     }
 
     /// Cancels a task by name.
@@ -674,11 +767,10 @@ mod test {
     use futures::stream::BoxStream;
     use futures::StreamExt;
     use slatedb_common::clock::{DefaultSystemClock, MockSystemClock, SystemClock};
-    use std::collections::VecDeque;
+    use std::collections::{HashSet, VecDeque};
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
     use tokio::runtime::Handle;
-    use tokio::sync::mpsc;
     use tokio::task::yield_now;
     use tokio::time::timeout;
     use tokio_util::sync::CancellationToken;
@@ -777,7 +869,7 @@ mod test {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_dispatcher_run_happy_path() {
         let log = Arc::new(Mutex::new(Vec::<(Phase, TestMessage)>::new()));
-        let (tx, rx) = mpsc::unbounded_channel();
+        let (tx, rx) = async_channel::unbounded();
         let clock = Arc::new(MockSystemClock::new());
         let handler = TestHandler::new(log.clone(), WatchableOnceCell::new(), clock.clone())
             .add_ticker(Duration::from_millis(5), 1)
@@ -799,7 +891,7 @@ mod test {
         let join = tokio::spawn(async move { dispatcher.run().await });
 
         // Send a message successfully, then trigger a tick before processing the next message
-        tx.send(TestMessage::Channel(10)).unwrap();
+        tx.try_send(TestMessage::Channel(10)).unwrap();
 
         // Enable run loop to process first message, then the tick
         fail_parallel::cfg(fp.clone(), "dispatcher-run-loop", "off").unwrap();
@@ -808,7 +900,7 @@ mod test {
         wait_for_message_count(log.clone(), 2).await;
 
         // Send another message successfully
-        tx.send(TestMessage::Channel(20)).unwrap();
+        tx.try_send(TestMessage::Channel(20)).unwrap();
         wait_for_message_count(log.clone(), 3).await;
 
         // Cancel and wait for cleanup to start
@@ -839,10 +931,10 @@ mod test {
         let log = Arc::new(Mutex::new(Vec::<(Phase, TestMessage)>::new()));
         let cleanup_called = WatchableOnceCell::new();
         let mut cleanup_reader = cleanup_called.reader();
-        let (tx, rx) = mpsc::unbounded_channel();
+        let (tx, rx) = async_channel::unbounded();
         let clock = Arc::new(MockSystemClock::new());
         let handler = TestHandler::new(log.clone(), cleanup_called.clone(), clock.clone());
-        let closed_result = ClosedResultWriter::new(WatchableOnceCell::new());
+        let closed_result = Arc::new(WatchableOnceCell::new());
         let fp_registry = Arc::new(FailPointRegistry::default());
         let task_executor = MessageHandlerExecutor::new(closed_result.clone(), clock.clone())
             .with_fp_registry(fp_registry.clone());
@@ -861,14 +953,14 @@ mod test {
             .expect("failed to monitor executor");
 
         // Send a message successfully.
-        tx.send(TestMessage::Channel(42)).unwrap();
+        tx.try_send(TestMessage::Channel(42)).unwrap();
         // Wait for the first message to be processed.
         wait_for_message_count(log.clone(), 1).await;
         // Send another message. The panic is guaranteed to be triggered before this
         // message is processed since the `dispatcher-run-loop` failpoint is set to
         // `1*off->return`, one message has been processed, and the point is hit before
         // the message selector.
-        tx.send(TestMessage::Channel(77)).unwrap();
+        tx.try_send(TestMessage::Channel(77)).unwrap();
         // Now allow cleanup to proceed.
         fail_parallel::cfg(fp_registry.clone(), "dispatcher-cleanup", "off").unwrap();
 
@@ -883,7 +975,7 @@ mod test {
         // Verify final state
         assert!(matches!(result, Err(SlateDBError::Fenced)));
         assert!(matches!(
-            closed_result.reader().read(),
+            closed_result.result_reader().read(),
             Some(Err(SlateDBError::Fenced))
         ));
         assert!(matches!(
@@ -903,7 +995,7 @@ mod test {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_dispatcher_prioritizes_messages_over_tickers() {
         let log = Arc::new(Mutex::new(Vec::<(Phase, TestMessage)>::new()));
-        let (tx, rx) = mpsc::unbounded_channel();
+        let (tx, rx) = async_channel::unbounded();
         let clock = Arc::new(MockSystemClock::new());
         let handler = TestHandler::new(log.clone(), WatchableOnceCell::new(), clock.clone())
             .add_ticker(Duration::from_millis(5), 1);
@@ -921,7 +1013,7 @@ mod test {
 
         // Trigger a tick and a message
         clock.advance(Duration::from_millis(5)).await;
-        tx.send(TestMessage::Channel(99)).unwrap();
+        tx.try_send(TestMessage::Channel(99)).unwrap();
         fail_parallel::cfg(fp_registry.clone(), "dispatcher-run-loop", "off").unwrap();
         wait_for_message_count(log.clone(), 2).await;
 
@@ -965,7 +1057,7 @@ mod test {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_dispatcher_supports_multiple_tickers() {
         let log = Arc::new(Mutex::new(Vec::<(Phase, TestMessage)>::new()));
-        let (_tx, rx) = mpsc::unbounded_channel::<TestMessage>();
+        let (_tx, rx) = async_channel::unbounded::<TestMessage>();
         let clock = Arc::new(MockSystemClock::new());
         let handler = TestHandler::new(log.clone(), WatchableOnceCell::new(), clock.clone())
             .add_ticker(Duration::from_millis(5), 1)
@@ -1040,7 +1132,7 @@ mod test {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_dispatcher_supports_overlapping_tickers() {
         let log = Arc::new(Mutex::new(Vec::<(Phase, TestMessage)>::new()));
-        let (_tx, rx) = mpsc::unbounded_channel::<TestMessage>();
+        let (_tx, rx) = async_channel::unbounded::<TestMessage>();
         let clock = Arc::new(MockSystemClock::new());
         let handler = TestHandler::new(log.clone(), WatchableOnceCell::new(), clock.clone())
             .add_ticker(Duration::from_millis(3), 3)
@@ -1108,7 +1200,7 @@ mod test {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_dispatcher_supports_identical_tickers() {
         let log = Arc::new(Mutex::new(Vec::<(Phase, TestMessage)>::new()));
-        let (_tx, rx) = mpsc::unbounded_channel::<TestMessage>();
+        let (_tx, rx) = async_channel::unbounded::<TestMessage>();
         let clock = Arc::new(MockSystemClock::new());
         let handler = TestHandler::new(log.clone(), WatchableOnceCell::new(), clock.clone())
             .add_ticker(Duration::from_millis(3), 1)
@@ -1206,10 +1298,10 @@ mod test {
 
         let cleanup_called = WatchableOnceCell::new();
         let mut cleanup_reader = cleanup_called.reader();
-        let (tx, rx) = mpsc::unbounded_channel::<u8>();
+        let (tx, rx) = async_channel::unbounded::<u8>();
         let clock = Arc::new(DefaultSystemClock::new());
         let handler = PanicHandler { cleanup_called };
-        let closed_result = ClosedResultWriter::new(WatchableOnceCell::new());
+        let closed_result = Arc::new(WatchableOnceCell::new());
         let task_executor = MessageHandlerExecutor::new(closed_result.clone(), clock.clone());
 
         // Spawn the panic task
@@ -1228,7 +1320,7 @@ mod test {
             .expect("failed to monitor executor");
 
         // Trigger panic inside the run loop via handle()
-        tx.send(1u8).unwrap();
+        tx.try_send(1u8).unwrap();
 
         // Wait for cleanup to observe the panic result
         let _ = timeout(Duration::from_secs(30), cleanup_reader.await_value())
@@ -1243,7 +1335,7 @@ mod test {
         // Check final state
         assert!(matches!(result, Err(SlateDBError::BackgroundTaskPanic(_))));
         assert!(matches!(
-            closed_result.reader().read(),
+            closed_result.result_reader().read(),
             Some(Err(SlateDBError::BackgroundTaskPanic(_)))
         ));
         assert!(matches!(
@@ -1257,11 +1349,11 @@ mod test {
         let log = Arc::new(Mutex::new(Vec::<(Phase, TestMessage)>::new()));
         let cleanup_called = WatchableOnceCell::new();
         let cleanup_reader = cleanup_called.reader();
-        let (tx, rx) = mpsc::unbounded_channel::<TestMessage>();
+        let (tx, rx) = async_channel::unbounded::<TestMessage>();
         drop(tx); // no messages needed
         let clock = Arc::new(DefaultSystemClock::new());
         let handler = TestHandler::new(log.clone(), cleanup_called.clone(), clock.clone());
-        let closed_result = ClosedResultWriter::new(WatchableOnceCell::new());
+        let closed_result = Arc::new(WatchableOnceCell::new());
         let fp_registry = Arc::new(FailPointRegistry::default());
         let task_executor = MessageHandlerExecutor::new(closed_result.clone(), clock.clone())
             .with_fp_registry(fp_registry.clone());
@@ -1297,9 +1389,452 @@ mod test {
         // Assertions: panic result, closed_result set to panic, cleanup not called
         assert!(matches!(result, Err(SlateDBError::BackgroundTaskPanic(_))));
         assert!(matches!(
-            closed_result.reader().read(),
+            closed_result.result_reader().read(),
             Some(Err(SlateDBError::BackgroundTaskPanic(_)))
         ));
         assert!(cleanup_reader.read().is_none());
+    }
+
+    // -- Parallel handler test infrastructure --
+
+    /// A handler that records which handler_id processed each message.
+    /// Optionally blocks in handle() until a Notify is signaled, which lets
+    /// tests force messages to go to the *other* handler.
+    struct ParallelTestHandler {
+        handler_id: u8,
+        /// (handler_id, message) log shared across all handlers in the group.
+        log: Arc<Mutex<Vec<(u8, TestMessage)>>>,
+        cleanup_called: WatchableOnceCell<Result<(), SlateDBError>>,
+        /// If set, the handler waits on this Notify for every message.
+        block_on: Option<Arc<tokio::sync::Notify>>,
+        /// If set, the handler returns an error after handling this many messages.
+        error_after: Option<usize>,
+        handled_count: usize,
+        tickers: Vec<(Duration, u8)>,
+    }
+
+    impl ParallelTestHandler {
+        fn new(
+            handler_id: u8,
+            log: Arc<Mutex<Vec<(u8, TestMessage)>>>,
+            cleanup_called: WatchableOnceCell<Result<(), SlateDBError>>,
+        ) -> Self {
+            Self {
+                handler_id,
+                log,
+                cleanup_called,
+                block_on: None,
+                error_after: None,
+                handled_count: 0,
+                tickers: vec![],
+            }
+        }
+
+        fn with_block_on(mut self, notify: Arc<tokio::sync::Notify>) -> Self {
+            self.block_on = Some(notify);
+            self
+        }
+
+        fn with_error_after(mut self, n: usize) -> Self {
+            self.error_after = Some(n);
+            self
+        }
+
+        fn add_ticker(mut self, d: Duration, id: u8) -> Self {
+            self.tickers.push((d, id));
+            self
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl MessageHandler<TestMessage> for ParallelTestHandler {
+        fn tickers(&mut self) -> Vec<(Duration, Box<MessageFactory<TestMessage>>)> {
+            self.tickers
+                .iter()
+                .map(|(interval, id)| {
+                    let id = *id as i32;
+                    (
+                        *interval,
+                        Box::new(move || TestMessage::Tick(id)) as Box<MessageFactory<TestMessage>>,
+                    )
+                })
+                .collect()
+        }
+
+        async fn handle(&mut self, message: TestMessage) -> Result<(), SlateDBError> {
+            self.log.lock().unwrap().push((self.handler_id, message));
+            if let Some(notify) = &self.block_on {
+                notify.notified().await;
+            }
+            self.handled_count += 1;
+            if let Some(n) = self.error_after {
+                if self.handled_count > n {
+                    return Err(SlateDBError::Fenced);
+                }
+            }
+            Ok(())
+        }
+
+        async fn cleanup(
+            &mut self,
+            mut messages: BoxStream<'async_trait, TestMessage>,
+            result: Result<(), SlateDBError>,
+        ) -> Result<(), SlateDBError> {
+            self.cleanup_called.write(result);
+            while let Some(m) = messages.next().await {
+                self.log.lock().unwrap().push((self.handler_id, m));
+            }
+            Ok(())
+        }
+    }
+
+    /// Wait until the parallel log has at least `count` entries.
+    async fn wait_for_parallel_log_count(log: Arc<Mutex<Vec<(u8, TestMessage)>>>, count: usize) {
+        timeout(Duration::from_secs(30), async move {
+            while log.lock().unwrap().len() < count {
+                yield_now().await;
+            }
+        })
+        .await
+        .expect("timeout waiting for parallel log count");
+    }
+
+    // -- Parallel handler tests --
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_parallel_handlers_both_members_process_messages() {
+        // Strategy: both handlers block after receiving a message. Send two
+        // messages and wait for both to appear in the log. Since each handler
+        // blocks after its first message, both must be occupied — proving the
+        // channel delivered to two distinct handlers.
+        let log = Arc::new(Mutex::new(Vec::<(u8, TestMessage)>::new()));
+        let (tx, rx) = async_channel::unbounded();
+        let clock = Arc::new(DefaultSystemClock::new());
+        let block1 = Arc::new(tokio::sync::Notify::new());
+        let block2 = Arc::new(tokio::sync::Notify::new());
+
+        let handler1 = ParallelTestHandler::new(1, log.clone(), WatchableOnceCell::new())
+            .with_block_on(block1.clone());
+        let handler2 = ParallelTestHandler::new(2, log.clone(), WatchableOnceCell::new())
+            .with_block_on(block2.clone());
+
+        let closed_result = Arc::new(WatchableOnceCell::new());
+        let task_executor = MessageHandlerExecutor::new(closed_result, clock);
+        task_executor
+            .add_handlers(
+                "parallel".to_string(),
+                vec![Box::new(handler1), Box::new(handler2)],
+                rx,
+                &Handle::current(),
+            )
+            .expect("failed to add handlers");
+        task_executor.monitor_on(&Handle::current()).unwrap();
+
+        // Send two messages. Both handlers will each grab one and block.
+        tx.try_send(TestMessage::Channel(1)).unwrap();
+        tx.try_send(TestMessage::Channel(2)).unwrap();
+        wait_for_parallel_log_count(log.clone(), 2).await;
+
+        // Verify both handlers processed a message
+        let entries = log.lock().unwrap().clone();
+        let handler_ids: HashSet<u8> = entries.iter().map(|(id, _)| *id).collect();
+        assert!(
+            handler_ids.contains(&1) && handler_ids.contains(&2),
+            "expected both handlers to process messages, got: {:?}",
+            entries,
+        );
+
+        // Unblock both and shut down
+        block1.notify_waiters();
+        block2.notify_waiters();
+        task_executor.shutdown_task("parallel").await.ok();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_parallel_handlers_independent_tickers() {
+        // Each handler has its own ticker. Verify both fire.
+        let log = Arc::new(Mutex::new(Vec::<(u8, TestMessage)>::new()));
+        let (_tx, rx) = async_channel::unbounded::<TestMessage>();
+        let clock = Arc::new(DefaultSystemClock::new());
+
+        // Handler 1 ticks with id=10, handler 2 ticks with id=20
+        let handler1 = ParallelTestHandler::new(1, log.clone(), WatchableOnceCell::new())
+            .add_ticker(Duration::from_millis(1), 10);
+        let handler2 = ParallelTestHandler::new(2, log.clone(), WatchableOnceCell::new())
+            .add_ticker(Duration::from_millis(1), 20);
+
+        let closed_result = Arc::new(WatchableOnceCell::new());
+        let task_executor = MessageHandlerExecutor::new(closed_result, clock);
+        task_executor
+            .add_handlers(
+                "parallel".to_string(),
+                vec![Box::new(handler1), Box::new(handler2)],
+                rx,
+                &Handle::current(),
+            )
+            .expect("failed to add handlers");
+        task_executor.monitor_on(&Handle::current()).unwrap();
+
+        // Wait for at least 4 ticks (2 initial immediate ticks + 2 more)
+        wait_for_parallel_log_count(log.clone(), 4).await;
+
+        let entries = log.lock().unwrap().clone();
+        let h1_ticks: Vec<_> = entries
+            .iter()
+            .filter(|(id, _)| *id == 1)
+            .map(|(_, m)| m.clone())
+            .collect();
+        let h2_ticks: Vec<_> = entries
+            .iter()
+            .filter(|(id, _)| *id == 2)
+            .map(|(_, m)| m.clone())
+            .collect();
+        assert!(
+            h1_ticks.iter().all(|m| *m == TestMessage::Tick(10)),
+            "handler 1 should only see tick(10), got: {:?}",
+            h1_ticks,
+        );
+        assert!(
+            h2_ticks.iter().all(|m| *m == TestMessage::Tick(20)),
+            "handler 2 should only see tick(20), got: {:?}",
+            h2_ticks,
+        );
+        assert!(!h1_ticks.is_empty(), "handler 1 should have ticked");
+        assert!(!h2_ticks.is_empty(), "handler 2 should have ticked");
+
+        task_executor.shutdown_task("parallel").await.ok();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_parallel_handlers_error_cancels_sibling_and_runs_cleanup() {
+        let log = Arc::new(Mutex::new(Vec::<(u8, TestMessage)>::new()));
+        let (tx, rx) = async_channel::unbounded::<TestMessage>();
+        let clock = Arc::new(DefaultSystemClock::new());
+
+        let cleanup1 = WatchableOnceCell::new();
+        let cleanup2 = WatchableOnceCell::new();
+        let mut cleanup1_reader = cleanup1.reader();
+        let mut cleanup2_reader = cleanup2.reader();
+
+        let handler1 = ParallelTestHandler::new(1, log.clone(), cleanup1).with_error_after(1);
+        let handler2 = ParallelTestHandler::new(2, log.clone(), cleanup2).with_error_after(1);
+
+        let closed_result = Arc::new(WatchableOnceCell::new());
+        let task_executor = MessageHandlerExecutor::new(closed_result.clone(), clock);
+        task_executor
+            .add_handlers(
+                "parallel".to_string(),
+                vec![Box::new(handler1), Box::new(handler2)],
+                rx,
+                &Handle::current(),
+            )
+            .expect("failed to add handlers");
+        task_executor.monitor_on(&Handle::current()).unwrap();
+
+        // Send 3 messages so that one of the handlers will see 2 messages and
+        // trigger the expected error.
+        tx.try_send(TestMessage::Channel(1)).unwrap();
+        tx.try_send(TestMessage::Channel(2)).unwrap();
+        // The third send is needed to guarantee that at least one channel sees
+        // two messages, but it may fail if the same channel handled both messages above.
+        let _ = tx.try_send(TestMessage::Channel(3));
+
+        // Wait for both cleanups
+        let _ = timeout(Duration::from_secs(5), cleanup1_reader.await_value())
+            .await
+            .expect("timeout waiting for handler 1 cleanup");
+        let _ = timeout(Duration::from_secs(5), cleanup2_reader.await_value())
+            .await
+            .expect("timeout waiting for handler 2 cleanup");
+
+        let result = timeout(Duration::from_secs(5), task_executor.join_task("parallel"))
+            .await
+            .expect("timeout waiting for join");
+
+        assert!(matches!(result, Err(SlateDBError::Fenced)));
+        assert!(matches!(
+            closed_result.result_reader().read(),
+            Some(Err(SlateDBError::Fenced))
+        ));
+        // Both handlers ran cleanup
+        assert!(cleanup1_reader.read().is_some());
+        assert!(cleanup2_reader.read().is_some());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_parallel_handlers_join_waits_for_all_members() {
+        // Both handlers block. Send two messages so each grabs one. Cancel the
+        // group. Verify join_task does NOT resolve while handlers are blocked.
+        // Then unblock and verify it resolves.
+        let log = Arc::new(Mutex::new(Vec::<(u8, TestMessage)>::new()));
+        let (tx, rx) = async_channel::unbounded();
+        let clock = Arc::new(DefaultSystemClock::new());
+        let block1 = Arc::new(tokio::sync::Notify::new());
+        let block2 = Arc::new(tokio::sync::Notify::new());
+
+        let handler1 = ParallelTestHandler::new(1, log.clone(), WatchableOnceCell::new())
+            .with_block_on(block1.clone());
+        let handler2 = ParallelTestHandler::new(2, log.clone(), WatchableOnceCell::new())
+            .with_block_on(block2.clone());
+
+        let closed_result = Arc::new(WatchableOnceCell::new());
+        let task_executor = Arc::new(MessageHandlerExecutor::new(closed_result, clock));
+        task_executor
+            .add_handlers(
+                "parallel".to_string(),
+                vec![Box::new(handler1), Box::new(handler2)],
+                rx,
+                &Handle::current(),
+            )
+            .expect("failed to add handlers");
+        task_executor.monitor_on(&Handle::current()).unwrap();
+
+        // Send two messages so both handlers each grab one and block
+        tx.try_send(TestMessage::Channel(1)).unwrap();
+        tx.try_send(TestMessage::Channel(2)).unwrap();
+        wait_for_parallel_log_count(log.clone(), 2).await;
+
+        // Cancel the group
+        task_executor.cancel_task("parallel");
+
+        // join_task should NOT resolve yet because both handlers are blocked
+        let join_result = timeout(
+            Duration::from_millis(100),
+            task_executor.join_task("parallel"),
+        )
+        .await;
+        assert!(
+            join_result.is_err(),
+            "join_task should not resolve while members are still blocked"
+        );
+
+        // Unblock both — now join should resolve
+        block1.notify_waiters();
+        block2.notify_waiters();
+        let result = timeout(Duration::from_secs(5), task_executor.join_task("parallel"))
+            .await
+            .expect("timeout waiting for join after unblock");
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_parallel_handlers_cleanup_drains_messages() {
+        // Pause both handlers so messages queue up, then cancel and verify
+        // all messages are drained during cleanup across the two handlers.
+        let log = Arc::new(Mutex::new(Vec::<(u8, TestMessage)>::new()));
+        let (tx, rx) = async_channel::unbounded();
+        let clock = Arc::new(DefaultSystemClock::new());
+        let fp_registry = Arc::new(FailPointRegistry::default());
+
+        let handler1 = ParallelTestHandler::new(1, log.clone(), WatchableOnceCell::new());
+        let handler2 = ParallelTestHandler::new(2, log.clone(), WatchableOnceCell::new());
+
+        let closed_result = Arc::new(WatchableOnceCell::new());
+        let task_executor =
+            MessageHandlerExecutor::new(closed_result, clock).with_fp_registry(fp_registry.clone());
+        // Pause the run loop so messages queue up
+        fail_parallel::cfg(fp_registry.clone(), "dispatcher-run-loop", "pause").unwrap();
+        task_executor
+            .add_handlers(
+                "parallel".to_string(),
+                vec![Box::new(handler1), Box::new(handler2)],
+                rx,
+                &Handle::current(),
+            )
+            .expect("failed to add handlers");
+        task_executor.monitor_on(&Handle::current()).unwrap();
+
+        // Queue up messages while paused
+        for i in 1..=5 {
+            tx.try_send(TestMessage::Channel(i)).unwrap();
+        }
+
+        // Unpause and cancel — messages should be drained during cleanup
+        fail_parallel::cfg(fp_registry.clone(), "dispatcher-run-loop", "off").unwrap();
+        task_executor.cancel_task("parallel");
+
+        let result = timeout(Duration::from_secs(5), task_executor.join_task("parallel"))
+            .await
+            .expect("timeout waiting for join");
+        assert!(result.is_ok());
+
+        // All 5 messages should have been processed (some in Pre, some in Cleanup)
+        let entries = log.lock().unwrap().clone();
+        let mut values: Vec<i32> = entries
+            .iter()
+            .map(|(_, m)| match m {
+                TestMessage::Channel(v) => *v,
+                _ => panic!("unexpected tick"),
+            })
+            .collect();
+        values.sort();
+        assert_eq!(values, vec![1, 2, 3, 4, 5]);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_parallel_group_coexists_with_sequential_task() {
+        // A parallel group ("parallel") and a sequential task ("sequential")
+        // in the same executor. Both should function independently.
+        let parallel_log = Arc::new(Mutex::new(Vec::<(u8, TestMessage)>::new()));
+        let sequential_log = Arc::new(Mutex::new(Vec::<(Phase, TestMessage)>::new()));
+        let (par_tx, par_rx) = async_channel::unbounded();
+        let (seq_tx, seq_rx) = async_channel::unbounded();
+        let clock = Arc::new(DefaultSystemClock::new());
+
+        let handler1 = ParallelTestHandler::new(1, parallel_log.clone(), WatchableOnceCell::new());
+        let handler2 = ParallelTestHandler::new(2, parallel_log.clone(), WatchableOnceCell::new());
+        let seq_handler = TestHandler::new(
+            sequential_log.clone(),
+            WatchableOnceCell::new(),
+            clock.clone(),
+        );
+
+        let closed_result = Arc::new(WatchableOnceCell::new());
+        let task_executor = MessageHandlerExecutor::new(closed_result, clock);
+        task_executor
+            .add_handlers(
+                "parallel".to_string(),
+                vec![Box::new(handler1), Box::new(handler2)],
+                par_rx,
+                &Handle::current(),
+            )
+            .expect("failed to add parallel handlers");
+        task_executor
+            .add_handler(
+                "sequential".to_string(),
+                Box::new(seq_handler),
+                seq_rx,
+                &Handle::current(),
+            )
+            .expect("failed to add sequential handler");
+        task_executor.monitor_on(&Handle::current()).unwrap();
+
+        // Send messages to both task types concurrently
+        par_tx.try_send(TestMessage::Channel(1)).unwrap();
+        par_tx.try_send(TestMessage::Channel(2)).unwrap();
+        seq_tx.try_send(TestMessage::Channel(100)).unwrap();
+
+        wait_for_parallel_log_count(parallel_log.clone(), 2).await;
+        wait_for_message_count(sequential_log.clone(), 1).await;
+
+        // Verify parallel group processed both messages (order and handler don't matter)
+        let par_entries = parallel_log.lock().unwrap().clone();
+        let mut par_values: Vec<i32> = par_entries
+            .iter()
+            .map(|(_, m)| match m {
+                TestMessage::Channel(v) => *v,
+                _ => panic!("unexpected tick"),
+            })
+            .collect();
+        par_values.sort();
+        assert_eq!(par_values, vec![1, 2]);
+
+        // Verify sequential task processed its message
+        let seq_entries = sequential_log.lock().unwrap().clone();
+        assert_eq!(seq_entries.len(), 1);
+        assert_eq!(seq_entries[0], (Phase::Pre, TestMessage::Channel(100)));
+
+        task_executor.shutdown_task("parallel").await.ok();
+        task_executor.shutdown_task("sequential").await.ok();
     }
 }

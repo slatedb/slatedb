@@ -3516,9 +3516,8 @@ impl<'a> ManifestV2<'a> {
   pub const VT_LAST_L0_CLOCK_TICK: flatbuffers::VOffsetT = 26;
   pub const VT_CHECKPOINTS: flatbuffers::VOffsetT = 28;
   pub const VT_LAST_L0_SEQ: flatbuffers::VOffsetT = 30;
-  pub const VT_WAL_OBJECT_STORE_URI: flatbuffers::VOffsetT = 32;
-  pub const VT_RECENT_SNAPSHOT_MIN_SEQ: flatbuffers::VOffsetT = 34;
-  pub const VT_SEQUENCE_TRACKER: flatbuffers::VOffsetT = 36;
+  pub const VT_RECENT_SNAPSHOT_MIN_SEQ: flatbuffers::VOffsetT = 32;
+  pub const VT_SEQUENCE_TRACKER: flatbuffers::VOffsetT = 34;
 
   #[inline]
   pub unsafe fn init_from_table(table: flatbuffers::Table<'a>) -> Self {
@@ -3539,7 +3538,6 @@ impl<'a> ManifestV2<'a> {
     builder.add_writer_epoch(args.writer_epoch);
     builder.add_manifest_id(args.manifest_id);
     if let Some(x) = args.sequence_tracker { builder.add_sequence_tracker(x); }
-    if let Some(x) = args.wal_object_store_uri { builder.add_wal_object_store_uri(x); }
     if let Some(x) = args.checkpoints { builder.add_checkpoints(x); }
     if let Some(x) = args.compacted { builder.add_compacted(x); }
     if let Some(x) = args.l0 { builder.add_l0(x); }
@@ -3650,13 +3648,6 @@ impl<'a> ManifestV2<'a> {
     unsafe { self._tab.get::<u64>(ManifestV2::VT_LAST_L0_SEQ, Some(0)).unwrap()}
   }
   #[inline]
-  pub fn wal_object_store_uri(&self) -> Option<&'a str> {
-    // Safety:
-    // Created from valid Table for this object
-    // which contains a valid value in this slot
-    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<&str>>(ManifestV2::VT_WAL_OBJECT_STORE_URI, None)}
-  }
-  #[inline]
   pub fn recent_snapshot_min_seq(&self) -> u64 {
     // Safety:
     // Created from valid Table for this object
@@ -3693,7 +3684,6 @@ impl flatbuffers::Verifiable for ManifestV2<'_> {
      .visit_field::<i64>("last_l0_clock_tick", Self::VT_LAST_L0_CLOCK_TICK, false)?
      .visit_field::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'_, flatbuffers::ForwardsUOffset<Checkpoint>>>>("checkpoints", Self::VT_CHECKPOINTS, true)?
      .visit_field::<u64>("last_l0_seq", Self::VT_LAST_L0_SEQ, false)?
-     .visit_field::<flatbuffers::ForwardsUOffset<&str>>("wal_object_store_uri", Self::VT_WAL_OBJECT_STORE_URI, false)?
      .visit_field::<u64>("recent_snapshot_min_seq", Self::VT_RECENT_SNAPSHOT_MIN_SEQ, false)?
      .visit_field::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'_, u8>>>("sequence_tracker", Self::VT_SEQUENCE_TRACKER, false)?
      .finish();
@@ -3715,7 +3705,6 @@ pub struct ManifestV2Args<'a> {
     pub last_l0_clock_tick: i64,
     pub checkpoints: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<Checkpoint<'a>>>>>,
     pub last_l0_seq: u64,
-    pub wal_object_store_uri: Option<flatbuffers::WIPOffset<&'a str>>,
     pub recent_snapshot_min_seq: u64,
     pub sequence_tracker: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, u8>>>,
 }
@@ -3737,7 +3726,6 @@ impl<'a> Default for ManifestV2Args<'a> {
       last_l0_clock_tick: 0,
       checkpoints: None, // required field
       last_l0_seq: 0,
-      wal_object_store_uri: None,
       recent_snapshot_min_seq: 0,
       sequence_tracker: None,
     }
@@ -3806,10 +3794,6 @@ impl<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> ManifestV2Builder<'a, 'b, A> {
     self.fbb_.push_slot::<u64>(ManifestV2::VT_LAST_L0_SEQ, last_l0_seq, 0);
   }
   #[inline]
-  pub fn add_wal_object_store_uri(&mut self, wal_object_store_uri: flatbuffers::WIPOffset<&'b  str>) {
-    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(ManifestV2::VT_WAL_OBJECT_STORE_URI, wal_object_store_uri);
-  }
-  #[inline]
   pub fn add_recent_snapshot_min_seq(&mut self, recent_snapshot_min_seq: u64) {
     self.fbb_.push_slot::<u64>(ManifestV2::VT_RECENT_SNAPSHOT_MIN_SEQ, recent_snapshot_min_seq, 0);
   }
@@ -3853,7 +3837,6 @@ impl core::fmt::Debug for ManifestV2<'_> {
       ds.field("last_l0_clock_tick", &self.last_l0_clock_tick());
       ds.field("checkpoints", &self.checkpoints());
       ds.field("last_l0_seq", &self.last_l0_seq());
-      ds.field("wal_object_store_uri", &self.wal_object_store_uri());
       ds.field("recent_snapshot_min_seq", &self.recent_snapshot_min_seq());
       ds.field("sequence_tracker", &self.sequence_tracker());
       ds.finish()

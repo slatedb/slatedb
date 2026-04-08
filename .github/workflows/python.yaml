@@ -36,7 +36,7 @@ jobs:
         with:
           python-version: 3.x
       - name: Install uniffi-bindgen
-        run: pip install "uniffi-bindgen==0.29.5"
+        run: pip install "uniffi-bindgen==0.31.0"
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         env:
@@ -79,7 +79,7 @@ jobs:
         with:
           python-version: 3.x
       - name: Install uniffi-bindgen
-        run: pip install "uniffi-bindgen==0.29.5"
+        run: pip install "uniffi-bindgen==0.31.0"
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
@@ -112,7 +112,7 @@ jobs:
           python-version: 3.x
           architecture: ${{ matrix.platform.target }}
       - name: Install uniffi-bindgen
-        run: pip install "uniffi-bindgen==0.29.5"
+        run: pip install "uniffi-bindgen==0.31.0"
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
@@ -141,7 +141,7 @@ jobs:
         with:
           python-version: 3.x
       - name: Install uniffi-bindgen
-        run: pip install "uniffi-bindgen==0.29.5"
+        run: pip install "uniffi-bindgen==0.31.0"
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
@@ -165,7 +165,7 @@ jobs:
         with:
           python-version: 3.x
       - name: Install uniffi-bindgen
-        run: pip install "uniffi-bindgen==0.29.5"
+        run: pip install "uniffi-bindgen==0.31.0"
       - name: Build sdist
         uses: PyO3/maturin-action@v1
         with:

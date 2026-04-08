@@ -40,7 +40,6 @@ use crate::CloseReason;
 use log::{info, trace, warn};
 use parking_lot::RwLock;
 use std::time::Duration;
-use tokio::sync::mpsc::UnboundedSender;
 
 use crate::batch::WriteBatch;
 use crate::batch_write::{WriteBatchMessage, WRITE_BATCH_TASK_NAME};
@@ -66,18 +65,19 @@ use crate::oracle::{DbOracle, Oracle};
 use crate::paths::PathResolver;
 use crate::rand::DbRand;
 use crate::reader::Reader;
+use crate::snapshot_manager::SnapshotManager;
 use crate::sst_iter::SstIteratorOptions;
 use crate::tablestore::TableStore;
 use crate::transaction_manager::TransactionManager;
 use crate::types::KeyValue;
-use crate::utils::{format_bytes_si, SendSafely};
+use crate::utils::{format_bytes_si, SafeSender};
 use crate::wal_buffer::{WalBufferManager, WAL_BUFFER_TASK_NAME};
 use crate::wal_replay::{WalReplayIterator, WalReplayOptions};
 use slatedb_common::clock::SystemClock;
 use slatedb_common::metrics::MetricsRecorderHelper;
 use slatedb_txn_obj::DirtyObject;
 
-use crate::db_status::DbStatusReporter;
+use crate::db_status::{ClosedResultWriter, DbStatusManager};
 pub use builder::DbBuilder;
 pub use builder::DbReaderBuilder;
 
@@ -87,8 +87,8 @@ pub(crate) struct DbInner {
     pub(crate) state: Arc<RwLock<DbState>>,
     pub(crate) settings: Settings,
     pub(crate) table_store: Arc<TableStore>,
-    pub(crate) memtable_flush_notifier: UnboundedSender<MemtableFlushMsg>,
-    pub(crate) write_notifier: UnboundedSender<WriteBatchMessage>,
+    pub(crate) memtable_flush_notifier: SafeSender<MemtableFlushMsg>,
+    pub(crate) write_notifier: SafeSender<WriteBatchMessage>,
     pub(crate) db_stats: DbStats,
     /// Kept alive so the underlying `MetricsRecorder` is not dropped while
     /// metric handles in `DbStats` (and other stats structs) are still in use.
@@ -110,7 +110,8 @@ pub(crate) struct DbInner {
     pub(crate) wal_enabled: bool,
     /// [`txn_manager`] tracks all the live transactions and related metadata.
     pub(crate) txn_manager: Arc<TransactionManager>,
-    pub(crate) status_reporter: DbStatusReporter,
+    pub(crate) snapshot_manager: Arc<SnapshotManager>,
+    pub(crate) status_manager: DbStatusManager,
 }
 
 impl DbInner {
@@ -120,20 +121,20 @@ impl DbInner {
         rand: Arc<DbRand>,
         table_store: Arc<TableStore>,
         manifest: DirtyObject<Manifest>,
-        memtable_flush_notifier: UnboundedSender<MemtableFlushMsg>,
-        write_notifier: UnboundedSender<WriteBatchMessage>,
+        memtable_flush_notifier: SafeSender<MemtableFlushMsg>,
+        write_notifier: SafeSender<WriteBatchMessage>,
         recorder: MetricsRecorderHelper,
         fp_registry: Arc<FailPointRegistry>,
         merge_operator: Option<crate::merge_operator::MergeOperatorType>,
+        status_manager: DbStatusManager,
     ) -> Result<Self, SlateDBError> {
         // both last_seq and last_committed_seq will be updated after WAL replay.
         let last_l0_seq = manifest.value.core.last_l0_seq;
-        let status_reporter = DbStatusReporter::new(last_l0_seq);
         let oracle = Arc::new(DbOracle::new(
             last_l0_seq,
             last_l0_seq,
             last_l0_seq,
-            status_reporter.clone(),
+            status_manager.clone(),
         ));
 
         let mono_clock = Arc::new(MonotonicClock::new(
@@ -142,7 +143,7 @@ impl DbInner {
         ));
 
         // state are mostly manifest, including IMM, L0, etc.
-        let db_state = DbState::new(manifest, status_reporter.clone());
+        let db_state = DbState::new(manifest);
         let state = Arc::new(RwLock::new(db_state));
 
         let db_stats = DbStats::new(&recorder);
@@ -159,7 +160,7 @@ impl DbInner {
         let recent_flushed_wal_id = state.read().state().core().replay_after_wal_id;
         let wal_buffer = Arc::new(WalBufferManager::new(
             state.clone(),
-            state.clone(),
+            status_manager.clone(),
             db_stats.clone(),
             recent_flushed_wal_id,
             oracle.clone(),
@@ -170,6 +171,7 @@ impl DbInner {
         ));
 
         let txn_manager = Arc::new(TransactionManager::new(oracle.clone(), rand.clone()));
+        let snapshot_manager = Arc::new(SnapshotManager::new(oracle.clone(), rand.clone()));
 
         let db_inner = Self {
             state,
@@ -188,7 +190,8 @@ impl DbInner {
             fp_registry,
             reader,
             txn_manager,
-            status_reporter,
+            snapshot_manager,
+            status_manager,
         };
         Ok(db_inner)
     }
@@ -294,8 +297,7 @@ impl DbInner {
         };
 
         self.maybe_apply_backpressure().await?;
-        self.write_notifier
-            .send_safely(self.state.read().closed_result_reader(), batch_msg)?;
+        self.write_notifier.send(batch_msg)?;
 
         // TODO: this can be modified as awaiting the last_durable_seq watermark & fatal error.
 
@@ -413,10 +415,8 @@ impl DbInner {
     // use to manually flush memtables
     async fn flush_immutable_memtables(&self) -> Result<(), SlateDBError> {
         let (tx, rx) = tokio::sync::oneshot::channel();
-        self.memtable_flush_notifier.send_safely(
-            self.state.read().closed_result_reader(),
-            MemtableFlushMsg::FlushImmutableMemtables { sender: Some(tx) },
-        )?;
+        self.memtable_flush_notifier
+            .send(MemtableFlushMsg::FlushImmutableMemtables { sender: Some(tx) })?;
         rx.await?
     }
 
@@ -425,7 +425,7 @@ impl DbInner {
             let last_flushed_wal_id = self.wal_buffer.recent_flushed_wal_id();
             let mut guard = self.state.write();
             if !guard.memtable().is_empty() {
-                guard.freeze_memtable(last_flushed_wal_id)?;
+                guard.freeze_memtable(last_flushed_wal_id);
                 true
             } else {
                 false
@@ -566,15 +566,11 @@ impl DbInner {
     /// ## Returns
     /// - `Ok(())` if the DB is still open.
     /// - `Err(SlateDBError::Closed)` if the DB was closed successfully
-    ///   (state.closed_result_reader() returns Ok(())).
+    ///   (state.result_reader() returns Ok(())).
     /// - `Err(e)` if the DB was closed with an error, where `e` is the error
-    ///   (state.closed_result_reader() returns Err(e)).
+    ///   (state.result_reader() returns Err(e)).
     pub(crate) fn status(&self) -> Result<(), SlateDBError> {
-        let closed_result_reader = {
-            let state = self.state.read();
-            state.closed_result_reader()
-        };
-        if let Some(result) = closed_result_reader.read() {
+        if let Some(result) = self.status_manager.result_reader().read() {
             return match result {
                 Ok(()) => Err(SlateDBError::Closed),
                 Err(e) => Err(e),
@@ -690,7 +686,7 @@ impl Db {
         };
 
         // Mark the database as closed before flushing.
-        self.inner.state.write().closed_result().write(Ok(()));
+        self.inner.status_manager.write_result(Ok(()));
 
         if should_flush {
             if let Err(e) = self.inner.flush(false).await {
@@ -769,7 +765,7 @@ impl Db {
     /// ```
     pub async fn snapshot(&self) -> Result<Arc<DbSnapshot>, crate::Error> {
         self.inner.status()?;
-        let snapshot = DbSnapshot::new(self.inner.clone(), self.inner.txn_manager.clone(), None);
+        let snapshot = DbSnapshot::new(self.inner.clone(), None);
         Ok(snapshot)
     }
 
@@ -1557,7 +1553,7 @@ impl Db {
     /// some_async_fn(status.durable_seq).await; // deadlock!
     /// ```
     pub fn subscribe(&self) -> tokio::sync::watch::Receiver<DbStatus> {
-        self.inner.status_reporter.subscribe()
+        self.inner.status_manager.subscribe()
     }
 
     /// Begin a new transaction with the specified isolation level.
@@ -1709,6 +1705,10 @@ mod tests {
     use crate::db_state::ManifestCore;
     use crate::db_stats::IMMUTABLE_MEMTABLE_FLUSHES;
     use crate::format::sst::SsTableFormat;
+    use crate::instrumented_object_store::stats::{
+        REQUEST_COUNT as OBJECT_STORE_REQUEST_COUNT,
+        REQUEST_DURATION_SECONDS as OBJECT_STORE_REQUEST_DURATION_SECONDS,
+    };
     use crate::iter::RowEntryIterator;
     use crate::manifest::store::{ManifestStore, StoredManifest};
     use crate::object_stores::ObjectStores;
@@ -1734,7 +1734,8 @@ mod tests {
     use slatedb_common::clock::DefaultSystemClock;
     use slatedb_common::clock::MockSystemClock;
     use slatedb_common::metrics::{
-        lookup_metric, lookup_metric_with_labels, DefaultMetricsRecorder, MetricsRecorderHelper,
+        lookup_metric, lookup_metric_with_labels, DefaultMetricsRecorder, MetricValue,
+        MetricsRecorderHelper,
     };
     use std::collections::BTreeMap;
     use std::collections::Bound::Included;
@@ -1742,6 +1743,92 @@ mod tests {
     use std::time::Duration;
     use tokio::runtime::Runtime;
     use tracing::info;
+
+    fn object_store_labels(
+        component: &'static str,
+        store_type: &'static str,
+        op: &'static str,
+        api: &'static str,
+    ) -> [(&'static str, &'static str); 4] {
+        [
+            ("component", component),
+            ("store_type", store_type),
+            ("op", op),
+            ("api", api),
+        ]
+    }
+
+    fn lookup_object_store_histogram_count(
+        recorder: &DefaultMetricsRecorder,
+        labels: &[(&str, &str)],
+    ) -> Option<u64> {
+        recorder
+            .snapshot()
+            .by_name_and_labels(OBJECT_STORE_REQUEST_DURATION_SECONDS, labels)
+            .map(|metric| match &metric.value {
+                MetricValue::Histogram { count, .. } => *count,
+                other => panic!("expected histogram metric, got {other:?}"),
+            })
+    }
+
+    fn lookup_object_store_op_request_count(
+        recorder: &DefaultMetricsRecorder,
+        component: &'static str,
+        store_type: &'static str,
+        op: &'static str,
+    ) -> i64 {
+        let apis = match op {
+            "get" => &["get", "get_range", "get_ranges", "head"][..],
+            "put" => &[
+                "put",
+                "multipart_init",
+                "multipart_part",
+                "multipart_complete",
+            ][..],
+            "delete" => &["delete"][..],
+            _ => panic!("unexpected op {op}"),
+        };
+
+        apis.iter()
+            .map(|api| {
+                lookup_metric_with_labels(
+                    recorder,
+                    OBJECT_STORE_REQUEST_COUNT,
+                    &object_store_labels(component, store_type, op, api),
+                )
+                .unwrap_or(0)
+            })
+            .sum()
+    }
+
+    fn lookup_object_store_op_histogram_count(
+        recorder: &DefaultMetricsRecorder,
+        component: &'static str,
+        store_type: &'static str,
+        op: &'static str,
+    ) -> u64 {
+        let apis = match op {
+            "get" => &["get", "get_range", "get_ranges", "head"][..],
+            "put" => &[
+                "put",
+                "multipart_init",
+                "multipart_part",
+                "multipart_complete",
+            ][..],
+            "delete" => &["delete"][..],
+            _ => panic!("unexpected op {op}"),
+        };
+
+        apis.iter()
+            .map(|api| {
+                lookup_object_store_histogram_count(
+                    recorder,
+                    &object_store_labels(component, store_type, op, api),
+                )
+                .unwrap_or(0)
+            })
+            .sum()
+    }
 
     #[tokio::test]
     async fn test_put_get_delete() {
@@ -2120,10 +2207,8 @@ mod tests {
 
         // Simulate a failed state (e.g. fenced).
         db.inner
-            .state
-            .write()
-            .closed_result()
-            .write(Err(crate::error::SlateDBError::Fenced));
+            .status_manager
+            .write_result(Err(crate::error::SlateDBError::Fenced));
 
         // close() should succeed but not flush when failed.
         db.close().await.unwrap();
@@ -2336,6 +2421,121 @@ mod tests {
         assert!(access_count1 > 0);
         assert!(access_count1 >= access_count0);
         assert!(lookup_metric(&metrics_recorder, PART_HIT_COUNT).unwrap() >= 1);
+    }
+
+    #[tokio::test]
+    async fn test_db_records_remote_object_store_reads_but_not_cache_hits() {
+        // given:
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let mut opts = test_db_options(0, 1024, None);
+        let temp_dir = tempfile::Builder::new()
+            .prefix("objstore_metrics_test_")
+            .tempdir()
+            .unwrap();
+
+        opts.object_store_cache_options.root_folder = Some(temp_dir.keep());
+        opts.object_store_cache_options.part_size_bytes = 1024;
+        let path = "/tmp/test_db_records_remote_object_store_reads_but_not_cache_hits";
+        let kv_store = Db::builder(path, object_store.clone())
+            .with_settings(opts)
+            .build()
+            .await
+            .unwrap();
+
+        kv_store.put(b"test_key", b"test_value").await.unwrap();
+        kv_store.flush().await.unwrap();
+        kv_store
+            .flush_with_options(FlushOptions {
+                flush_type: FlushType::MemTable,
+            })
+            .await
+            .unwrap();
+        kv_store.close().await.unwrap();
+
+        let mut reopen_opts = test_db_options(0, 1024, None);
+        let reopen_temp_dir = tempfile::Builder::new()
+            .prefix("objstore_metrics_reopen_")
+            .tempdir()
+            .unwrap();
+        reopen_opts.object_store_cache_options.root_folder = Some(reopen_temp_dir.keep());
+        reopen_opts.object_store_cache_options.part_size_bytes = 1024;
+        let metrics_recorder = Arc::new(DefaultMetricsRecorder::new());
+        let reopened = Db::builder(path, object_store)
+            .with_settings(reopen_opts)
+            .with_metrics_recorder(metrics_recorder.clone())
+            .build()
+            .await
+            .unwrap();
+
+        let requests_before =
+            lookup_object_store_op_request_count(&metrics_recorder, "db", "main", "get");
+
+        // when:
+        let _got = reopened.get(b"test_key").await.unwrap();
+        let requests_after_first =
+            lookup_object_store_op_request_count(&metrics_recorder, "db", "main", "get");
+        let got = reopened.get(b"test_key").await.unwrap();
+        let requests_after_second =
+            lookup_object_store_op_request_count(&metrics_recorder, "db", "main", "get");
+
+        // then:
+        assert!(requests_after_first > requests_before);
+        assert_eq!(got, Some(Bytes::from_static(b"test_value")));
+        assert_eq!(requests_after_second, requests_after_first);
+        assert_eq!(
+            lookup_object_store_op_histogram_count(&metrics_recorder, "db", "main", "get"),
+            requests_after_first as u64
+        );
+        reopened.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_db_records_main_and_wal_object_store_requests_separately() {
+        // given:
+        let main_object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let wal_object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let metrics_recorder = Arc::new(DefaultMetricsRecorder::new());
+        let path = "/tmp/test_db_records_main_and_wal_object_store_requests_separately";
+        let db = Db::builder(path, main_object_store)
+            .with_settings(test_db_options(0, 1024, None))
+            .with_wal_object_store(wal_object_store)
+            .with_metrics_recorder(metrics_recorder.clone())
+            .build()
+            .await
+            .unwrap();
+
+        let wal_before =
+            lookup_object_store_op_request_count(&metrics_recorder, "db", "wal", "put");
+        let main_before =
+            lookup_object_store_op_request_count(&metrics_recorder, "db", "main", "put");
+        let wal_hist_before =
+            lookup_object_store_op_histogram_count(&metrics_recorder, "db", "wal", "put");
+        let main_hist_before =
+            lookup_object_store_op_histogram_count(&metrics_recorder, "db", "main", "put");
+
+        // when:
+        db.put(b"key", b"value").await.unwrap();
+        db.flush().await.unwrap();
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::MemTable,
+        })
+        .await
+        .unwrap();
+
+        let wal_after = lookup_object_store_op_request_count(&metrics_recorder, "db", "wal", "put");
+        let main_after =
+            lookup_object_store_op_request_count(&metrics_recorder, "db", "main", "put");
+        let wal_hist_after =
+            lookup_object_store_op_histogram_count(&metrics_recorder, "db", "wal", "put");
+        let main_hist_after =
+            lookup_object_store_op_histogram_count(&metrics_recorder, "db", "main", "put");
+
+        // then:
+        assert!(wal_after > wal_before);
+        assert!(main_after > main_before);
+        assert!(wal_hist_after > wal_hist_before);
+        assert!(main_hist_after > main_hist_before);
+        db.close().await.unwrap();
     }
 
     async fn test_object_store_cache_helper(
@@ -3487,6 +3687,8 @@ mod tests {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let mut settings = test_db_options(0, 2048, None);
         settings.flush_interval = None;
+        // Don't trigger `flush_and_record` unless we explicitly ask for it.
+        settings.manifest_poll_interval = Duration::from_secs(60 * 60);
 
         let system_clock = Arc::new(MockSystemClock::new());
         let db = Db::builder(
@@ -3518,38 +3720,60 @@ mod tests {
                 .unwrap();
         }
 
+        // These are the entries that should make it into the first L0 flush.
         put_with_timestamp(&db, &system_clock, 0, &write_options).await;
         put_with_timestamp(&db, &system_clock, 1, &write_options).await;
 
-        fail_parallel::cfg(fp_registry.clone(), "flush-memtable-to-l0", "pause").unwrap();
+        // Pause after the immutable memtable has been written to an L0 SST but before the manifest
+        // is updated. That gives us a precise window where later writes can race with manifest state.
+        fail_parallel::cfg(
+            fp_registry.clone(),
+            "after-flush-imm-to-l0-before-manifest",
+            "pause",
+        )
+        .unwrap();
 
+        // Kick off the flush in the background so the test can interleave more writes while the
+        // flusher is paused at the failpoint above.
         let flush_handle = {
             let inner = Arc::clone(&db.inner);
             tokio::spawn(async move { inner.flush_memtables().await })
         };
 
-        let mut froze_memtable = false;
+        let mut wrote_l0_sst = false;
         for _ in 0..6000 {
-            {
-                let guard = db.inner.state.read();
-                if !guard.state().imm_memtable.is_empty() {
-                    froze_memtable = true;
-                    break;
-                }
+            // Waiting for the SST itself is more precise than watching imm_memtable state. We only
+            // continue once the flusher has definitely crossed the "write SST, not manifest" boundary.
+            let ssts = db.inner.table_store.list_compacted_ssts(..).await.unwrap();
+            if !ssts.is_empty() {
+                wrote_l0_sst = true;
+                break;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        assert!(froze_memtable, "memtable was not frozen before flush");
+        assert!(
+            wrote_l0_sst,
+            "L0 SST was not written before manifest update pause"
+        );
 
+        // These writes land in the new active memtable while the first flush is paused.
+        // They should not leak into the persisted sequence tracker state for the earlier flush.
         put_with_timestamp(&db, &system_clock, 2, &write_options).await;
         put_with_timestamp(&db, &system_clock, 3, &write_options).await;
 
-        fail_parallel::cfg(fp_registry.clone(), "flush-memtable-to-l0", "off").unwrap();
+        // Let the original flush finish publishing its manifest update.
+        fail_parallel::cfg(
+            fp_registry.clone(),
+            "after-flush-imm-to-l0-before-manifest",
+            "off",
+        )
+        .unwrap();
 
         flush_handle.await.unwrap().unwrap();
 
         {
             let guard = db.inner.state.read();
+            // The background flush should have drained the single immutable memtable we created.
             assert!(guard.state().imm_memtable.is_empty());
         }
 
@@ -3563,6 +3787,8 @@ mod tests {
             "expected flushed memtable to advance last_l0_seq"
         );
 
+        // The core invariant: once the first flush publishes last_l0_seq, the persisted tracker
+        // must not contain timestamps for later sequence numbers from the second memtable.
         assert!(
             manifest_state
                 .sequence_tracker
@@ -5414,19 +5640,18 @@ mod tests {
         db.put(b"key2", b"value2").await.unwrap();
         db.inner.flush_memtables().await.unwrap();
 
-        // Verify that txn_manager.min_active_seq() returns the snapshot seq
-        let min_active_seq = db.inner.txn_manager.min_active_seq();
+        // Verify that snapshot_manager.min_active_seq() returns the snapshot seq
+        let min_active_seq = db.inner.snapshot_manager.min_active_seq();
         assert!(min_active_seq.is_some());
         assert_eq!(min_active_seq.unwrap(), snapshot_seq);
 
-        // Verify recent_snapshot_min_seq should be the minimum active seq after flush
         {
             let state = db.inner.state.read();
             let recent_min_seq = state.state().core().recent_snapshot_min_seq;
             assert_eq!(
                 recent_min_seq,
                 min_active_seq.unwrap(),
-                "recent_snapshot_min_seq should equal min_active_seq after flush"
+                "recent_snapshot_min_seq should equal snapshot_manager.min_active_seq() after flush"
             );
         }
 
@@ -5449,6 +5674,173 @@ mod tests {
                 "recent_snapshot_min_seq should equal last_l0_seq when no active snapshots"
             );
             assert!(recent_min_seq > snapshot_seq);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_recent_snapshot_min_seq_uses_transaction_seq() {
+        let path = "/tmp/test_recent_snapshot_min_seq_uses_transaction_seq";
+        let object_store = Arc::new(InMemory::new());
+        let db = Db::builder(path, object_store).build().await.unwrap();
+
+        {
+            let state = db.inner.state.read();
+            assert_eq!(state.state().core().recent_snapshot_min_seq, 0);
+        }
+
+        db.put(b"key1", b"value1").await.unwrap();
+        db.inner.flush_memtables().await.unwrap();
+
+        let txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
+        let txn_seq = txn.seqnum();
+
+        db.put(b"key2", b"value2").await.unwrap();
+        db.inner.flush_memtables().await.unwrap();
+
+        let min_active_seq = db.inner.txn_manager.min_active_seq();
+        assert_eq!(min_active_seq, Some(txn_seq));
+
+        {
+            let state = db.inner.state.read();
+            let recent_min_seq = state.state().core().recent_snapshot_min_seq;
+            assert_eq!(
+                recent_min_seq, txn_seq,
+                "recent_snapshot_min_seq should equal txn_manager.min_active_seq() after flush"
+            );
+        }
+
+        drop(txn);
+
+        db.put(b"key3", b"value3").await.unwrap();
+        db.inner.flush_memtables().await.unwrap();
+
+        {
+            let state = db.inner.state.read();
+            let recent_min_seq = state.state().core().recent_snapshot_min_seq;
+            let last_l0_seq = state.state().core().last_l0_seq;
+            assert_eq!(
+                recent_min_seq, last_l0_seq,
+                "recent_snapshot_min_seq should equal last_l0_seq when no active transactions"
+            );
+            assert!(recent_min_seq > txn_seq);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_recent_snapshot_min_seq_prefers_snapshot_when_snapshot_seq_is_lower() {
+        let path = "/tmp/test_recent_snapshot_min_seq_prefers_snapshot_when_snapshot_seq_is_lower";
+        let object_store = Arc::new(InMemory::new());
+        let db = Db::builder(path, object_store).build().await.unwrap();
+
+        db.put(b"key1", b"value1").await.unwrap();
+        db.inner.flush_memtables().await.unwrap();
+
+        let snapshot = db.snapshot().await.unwrap();
+        let snapshot_seq = snapshot.seq();
+
+        db.put(b"key2", b"value2").await.unwrap();
+        db.inner.flush_memtables().await.unwrap();
+
+        let txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
+        let txn_seq = txn.seqnum();
+
+        assert_eq!(
+            db.inner.snapshot_manager.min_active_seq(),
+            Some(snapshot_seq)
+        );
+        assert_eq!(db.inner.txn_manager.min_active_seq(), Some(txn_seq));
+        assert!(snapshot_seq < txn_seq);
+
+        db.put(b"key3", b"value3").await.unwrap();
+        db.inner.flush_memtables().await.unwrap();
+
+        {
+            let state = db.inner.state.read();
+            let recent_min_seq = state.state().core().recent_snapshot_min_seq;
+            assert_eq!(
+                recent_min_seq,
+                snapshot_seq,
+                "recent_snapshot_min_seq should use the snapshot seq when it is smaller than the transaction seq"
+            );
+        }
+
+        drop(snapshot);
+
+        db.put(b"key4", b"value4").await.unwrap();
+        db.inner.flush_memtables().await.unwrap();
+
+        assert_eq!(db.inner.snapshot_manager.min_active_seq(), None);
+        assert_eq!(db.inner.txn_manager.min_active_seq(), Some(txn_seq));
+
+        {
+            let state = db.inner.state.read();
+            let recent_min_seq = state.state().core().recent_snapshot_min_seq;
+            assert_eq!(
+                recent_min_seq,
+                txn_seq,
+                "recent_snapshot_min_seq should move to the transaction seq after the snapshot is dropped"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_recent_snapshot_min_seq_prefers_transaction_when_transaction_seq_is_lower() {
+        let path =
+            "/tmp/test_recent_snapshot_min_seq_prefers_transaction_when_transaction_seq_is_lower";
+        let object_store = Arc::new(InMemory::new());
+        let db = Db::builder(path, object_store).build().await.unwrap();
+
+        db.put(b"key1", b"value1").await.unwrap();
+        db.inner.flush_memtables().await.unwrap();
+
+        let txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
+        let txn_seq = txn.seqnum();
+
+        db.put(b"key2", b"value2").await.unwrap();
+        db.inner.flush_memtables().await.unwrap();
+
+        let snapshot = db.snapshot().await.unwrap();
+        let snapshot_seq = snapshot.seq();
+
+        assert_eq!(db.inner.txn_manager.min_active_seq(), Some(txn_seq));
+        assert_eq!(
+            db.inner.snapshot_manager.min_active_seq(),
+            Some(snapshot_seq)
+        );
+        assert!(txn_seq < snapshot_seq);
+
+        db.put(b"key3", b"value3").await.unwrap();
+        db.inner.flush_memtables().await.unwrap();
+
+        {
+            let state = db.inner.state.read();
+            let recent_min_seq = state.state().core().recent_snapshot_min_seq;
+            assert_eq!(
+                recent_min_seq,
+                txn_seq,
+                "recent_snapshot_min_seq should use the transaction seq when it is smaller than the snapshot seq"
+            );
+        }
+
+        drop(txn);
+
+        db.put(b"key4", b"value4").await.unwrap();
+        db.inner.flush_memtables().await.unwrap();
+
+        assert_eq!(db.inner.txn_manager.min_active_seq(), None);
+        assert_eq!(
+            db.inner.snapshot_manager.min_active_seq(),
+            Some(snapshot_seq)
+        );
+
+        {
+            let state = db.inner.state.read();
+            let recent_min_seq = state.state().core().recent_snapshot_min_seq;
+            assert_eq!(
+                recent_min_seq,
+                snapshot_seq,
+                "recent_snapshot_min_seq should move to the snapshot seq after the transaction is dropped"
+            );
         }
     }
 
@@ -6209,10 +6601,8 @@ mod tests {
 
         // When: the DB is fenced (simulated via closed_result)
         db.inner
-            .state
-            .write()
-            .closed_result()
-            .write(Err(crate::error::SlateDBError::Fenced));
+            .status_manager
+            .write_result(Err(crate::error::SlateDBError::Fenced));
 
         // Then: the watcher should report close_reason = Fenced
         let status = tokio::time::timeout(
@@ -6287,7 +6677,7 @@ mod tests {
 
     #[cfg(feature = "wal_disable")]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn repro_get_fails_when_compacted_sr_splits_same_key_across_ssts() {
+    async fn reads_succeed_when_compacted_sr_splits_same_key_across_ssts() {
         use crate::SstBlockSize;
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = "/tmp/test_merge_split_sr_repro";
@@ -6377,7 +6767,7 @@ mod tests {
 
         info!("GOT MANIFEST WITH 3 L0s");
 
-        // Compact until we observe a sorted run with more than one SST.
+        // Compact until we observe a sorted run where a single logical key spans SST boundaries.
         should_compact.store(true, Ordering::SeqCst);
         tokio::time::timeout(Duration::from_secs(60), async {
             loop {
@@ -6403,7 +6793,13 @@ mod tests {
                             .map(|t| t.estimate_size())
                             .collect::<Vec<_>>()
                     );
-                    if !state.state().core().compacted.is_empty() {
+                    if state
+                        .state()
+                        .core()
+                        .compacted
+                        .first()
+                        .is_some_and(|sr| sr.sst_views.len() > 1)
+                    {
                         break;
                     }
                 }
@@ -6411,7 +6807,7 @@ mod tests {
             }
         })
         .await
-        .expect("timed out waiting for compacted SR with >1 SST");
+        .expect("timed out waiting for compacted SR where one key spans multiple SSTs");
 
         let data = db.get(b"k").await.unwrap().unwrap();
         let expected = Bytes::from(b"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa16".as_ref());
@@ -6431,7 +6827,7 @@ mod tests {
 
     #[cfg(feature = "wal_disable")]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn repro_get_fails_when_compacted_sr_splits_same_merge_key_across_ssts() {
+    async fn reads_succeed_when_compacted_sr_splits_same_merge_key_across_ssts() {
         use crate::SstBlockSize;
         use bytes::{BufMut as _, BytesMut};
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
@@ -6495,9 +6891,9 @@ mod tests {
         expected.put(b"base".as_slice());
         let _snapshot = db.snapshot().await.unwrap();
 
-        // Write many merge operands for the same key, each forced into L0.
-        for _ in 0..16u16 {
-            let operand = vec![b'a'; 32];
+        // Write distinct merge operands so the final value also verifies operand ordering.
+        for i in 0..16u8 {
+            let operand = vec![b'a' + i; 32];
             expected.put(operand.as_slice());
             db.merge_with_options(
                 b"k",
@@ -6525,7 +6921,7 @@ mod tests {
 
         info!("GOT MANIFEST WITH 3 L0s");
 
-        // Compact until we observe a sorted run with more than one SST.
+        // Compact until we observe a sorted run where a single logical key spans SST boundaries.
         should_compact.store(true, Ordering::SeqCst);
         tokio::time::timeout(Duration::from_secs(60), async {
             loop {
@@ -6551,7 +6947,13 @@ mod tests {
                             .map(|t| t.estimate_size())
                             .collect::<Vec<_>>()
                     );
-                    if !state.state().core().compacted.is_empty() {
+                    if state
+                        .state()
+                        .core()
+                        .compacted
+                        .first()
+                        .is_some_and(|sr| sr.sst_views.len() > 1)
+                    {
                         break;
                     }
                 }
@@ -6559,7 +6961,7 @@ mod tests {
             }
         })
         .await
-        .expect("timed out waiting for compacted SR with >1 SST");
+        .expect("timed out waiting for compacted SR where one key spans multiple SSTs");
 
         let data = db.get(b"k").await.unwrap().unwrap();
         let expected = expected.freeze();

@@ -15,7 +15,8 @@ use crate::db_status::ClosedResultWriter;
 use crate::object_stores::{ObjectStoreType, ObjectStores};
 use crate::rand::DbRand;
 use crate::seq_tracker::FindOption;
-use crate::utils::{IdGenerator, WatchableOnceCell};
+use crate::utils::IdGenerator;
+use crate::utils::WatchableOnceCell;
 use chrono::{DateTime, Utc};
 use fail_parallel::FailPointRegistry;
 use object_store::path::Path;
@@ -28,7 +29,6 @@ use std::ops::RangeBounds;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::runtime::Handle;
-use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use ulid::Ulid;
 use uuid::Uuid;
@@ -276,8 +276,8 @@ impl Admin {
         .with_seed(self.rand.rng().next_u64())
         .build();
 
-        let (_, rx) = mpsc::unbounded_channel();
-        let closed_result = ClosedResultWriter::new(WatchableOnceCell::new());
+        let (_, rx) = async_channel::unbounded();
+        let closed_result: Arc<dyn ClosedResultWriter> = Arc::new(WatchableOnceCell::new());
         let task_executor = MessageHandlerExecutor::new(closed_result, self.system_clock.clone());
 
         task_executor
