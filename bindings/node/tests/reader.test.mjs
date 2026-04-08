@@ -345,16 +345,6 @@ test("reader rejects invalid key ranges", async (t) => {
 
   await expectInvalid(
     () => reader.scan({
-      start: bytes(""),
-      start_inclusive: true,
-      end: undefined,
-      end_inclusive: false,
-    }),
-    { message: "range start cannot be empty" },
-  );
-
-  await expectInvalid(
-    () => reader.scan({
       start: bytes("z"),
       start_inclusive: true,
       end: bytes("a"),

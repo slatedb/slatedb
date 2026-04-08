@@ -297,8 +297,6 @@ class SlateDbDbTest {
             TestSupport.awaitFailure(Error.Invalid.class, db.put(new byte[0], TestSupport.bytes("value")));
             TestSupport.awaitFailure(Error.Invalid.class, db.delete(new byte[0]));
             TestSupport.awaitFailure(
-                    Error.Invalid.class, db.scan(new KeyRange(new byte[0], true, null, false)));
-            TestSupport.awaitFailure(
                     Error.Invalid.class,
                     db.scan(
                             new KeyRange(

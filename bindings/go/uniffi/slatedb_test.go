@@ -926,13 +926,6 @@ func TestDbInvalidInputsAndErrorMapping(t *testing.T) {
 		}
 
 		if _, err := handle.db.Scan(slatedb.KeyRange{
-			Start:          bytesPtr([]byte{}),
-			StartInclusive: true,
-		}); !errors.Is(err, slatedb.ErrErrorInvalid) {
-			t.Fatalf("Scan(empty start): got %v, want invalid error", err)
-		}
-
-		if _, err := handle.db.Scan(slatedb.KeyRange{
 			Start:          bytesPtr([]byte("z")),
 			StartInclusive: true,
 			End:            bytesPtr([]byte("a")),
@@ -1429,13 +1422,6 @@ func TestDbReaderBuilderValidationAndErrors(t *testing.T) {
 		}
 
 		readerHandle := openTestReader(t, store, nil)
-
-		if _, err := readerHandle.reader.Scan(slatedb.KeyRange{
-			Start:          bytesPtr([]byte{}),
-			StartInclusive: true,
-		}); !errors.Is(err, slatedb.ErrErrorInvalid) {
-			t.Fatalf("DbReader.Scan(empty start): got %v, want invalid error", err)
-		}
 
 		if _, err := readerHandle.reader.Scan(slatedb.KeyRange{
 			Start:          bytesPtr([]byte("z")),

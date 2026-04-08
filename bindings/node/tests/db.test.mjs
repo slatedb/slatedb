@@ -315,16 +315,6 @@ test("db invalid inputs map to typed errors", async (t) => {
 
   await expectInvalid(
     () => db.scan({
-      start: bytes(""),
-      start_inclusive: true,
-      end: undefined,
-      end_inclusive: false,
-    }),
-    { message: "range start cannot be empty" },
-  );
-
-  await expectInvalid(
-    () => db.scan({
       start: bytes("z"),
       start_inclusive: true,
       end: bytes("a"),

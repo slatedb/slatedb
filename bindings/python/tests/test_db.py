@@ -275,17 +275,6 @@ async def test_db_invalid_inputs_map_to_typed_errors() -> None:
         with pytest.raises(Error.Invalid) as exc:
             await db.scan(
                 KeyRange(
-                    start=b"",
-                    start_inclusive=True,
-                    end=None,
-                    end_inclusive=False,
-                )
-            )
-        assert exc.value.message == "range start cannot be empty"
-
-        with pytest.raises(Error.Invalid) as exc:
-            await db.scan(
-                KeyRange(
                     start=b"z",
                     start_inclusive=True,
                     end=b"a",

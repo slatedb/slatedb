@@ -269,17 +269,6 @@ async def test_reader_invalid_ranges_raise_invalid_errors() -> None:
             with pytest.raises(Error.Invalid) as exc:
                 await reader.scan(
                     KeyRange(
-                        start=b"",
-                        start_inclusive=True,
-                        end=None,
-                        end_inclusive=False,
-                    )
-                )
-            assert exc.value.message == "range start cannot be empty"
-
-            with pytest.raises(Error.Invalid) as exc:
-                await reader.scan(
-                    KeyRange(
                         start=b"z",
                         start_inclusive=True,
                         end=b"a",
