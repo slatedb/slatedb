@@ -171,7 +171,7 @@ struct ManifestWriterHandler {
     /// The first_seq we expect for the next memtable to process.
     next_seq: u64,
     /// Highest last_seq that has been durably written to the manifest (inclusive).
-    durable_through: Option<u64>,
+    durable_seq: Option<u64>,
     durable_wal_id: Option<u64>,
     pending_flushes: Vec<PendingFlush>,
     pending_checkpoints: Vec<PendingCheckpoint>,
@@ -255,7 +255,7 @@ impl ManifestWriterHandler {
             pending_flushes: Vec::new(),
             ready: BTreeMap::new(),
             next_seq,
-            durable_through: None,
+            durable_seq: None,
             pending_checkpoints: Vec::new(),
         }
     }
@@ -299,7 +299,7 @@ impl ManifestWriterHandler {
         match through_seq {
             None => true,
             Some(seq) => self
-                .durable_through
+                .durable_seq
                 .is_some_and(|durable_seq| durable_seq >= seq),
         }
     }
@@ -307,7 +307,7 @@ impl ManifestWriterHandler {
     fn flush_result(&self) -> FlushResult {
         FlushResult {
             durable_through_wal_id: self.durable_wal_id,
-            durable_through_seq: self.durable_through,
+            durable_through_seq: self.durable_seq,
         }
     }
 
@@ -588,7 +588,7 @@ impl ManifestWriterHandler {
             staged_batch.len(),
             through_seq,
         );
-        self.durable_through = Some(through_seq);
+        self.durable_seq = Some(through_seq);
         for uploaded in &staged_batch {
             self.durable_wal_id = Some(uploaded.imm_memtable.recent_flushed_wal_id());
             uploaded.imm_memtable.table().notify_durable(Ok(()));
