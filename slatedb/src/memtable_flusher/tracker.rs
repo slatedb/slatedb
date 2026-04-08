@@ -16,7 +16,6 @@ use futures::stream::BoxStream;
 use futures::StreamExt;
 use log::debug;
 
-use super::FlushEpoch;
 use crate::checkpoint::CheckpointCreateResult;
 use crate::config::CheckpointOptions;
 use crate::db::DbInner;
@@ -49,8 +48,8 @@ pub(crate) enum TrackerMessage {
     },
     /// An upload worker completed successfully.
     UploadComplete(UploadedMemtable),
-    /// Durable progress advanced through a new contiguous flush frontier.
-    FlushComplete { through_epoch: FlushEpoch },
+    /// Durable progress advanced through a new contiguous flush frontier (inclusive).
+    FlushComplete { through_seq: u64 },
     /// Remote manifest changes were merged into local state.
     ManifestRefreshed,
 }
@@ -61,9 +60,15 @@ impl std::fmt::Debug for TrackerMessage {
             Self::MemtableFrozen => write!(f, "MemtableFrozen"),
             Self::FlushRequest { .. } => write!(f, "FlushRequest"),
             Self::CheckpointRequest { .. } => write!(f, "CheckpointRequest"),
-            Self::UploadComplete(u) => write!(f, "UploadComplete(epoch={:?})", u.epoch),
-            Self::FlushComplete { through_epoch } => {
-                write!(f, "FlushComplete({through_epoch:?})")
+            Self::UploadComplete(u) => {
+                write!(
+                    f,
+                    "UploadComplete(first_seq={}, last_seq={})",
+                    u.first_seq, u.last_seq
+                )
+            }
+            Self::FlushComplete { through_seq } => {
+                write!(f, "FlushComplete(through_seq={through_seq})")
             }
             Self::ManifestRefreshed => write!(f, "ManifestRefreshed"),
         }
@@ -109,8 +114,8 @@ impl MessageHandler<TrackerMessage> for FlushTracker {
                     .await
             }
             TrackerMessage::UploadComplete(uploaded) => self.handle_uploaded(uploaded).await,
-            TrackerMessage::FlushComplete { through_epoch } => {
-                self.frontier.retire_through(through_epoch);
+            TrackerMessage::FlushComplete { through_seq } => {
+                self.frontier.retire_through(through_seq);
                 self.reconcile_and_dispatch().await
             }
             TrackerMessage::ManifestRefreshed => self.reconcile_and_dispatch().await,
@@ -141,8 +146,8 @@ impl FlushTracker {
             |_| { Ok(()) }
         );
         self.reconcile_and_dispatch().await?;
-        let through_epoch = self.frontier.resolve_target(target);
-        self.manifest_writer.send_flush(through_epoch, sender)?;
+        let through_seq = self.frontier.resolve_target(target);
+        self.manifest_writer.send_flush(through_seq, sender)?;
         Ok(())
     }
 
@@ -153,19 +158,19 @@ impl FlushTracker {
         sender: oneshot::Sender<Result<CheckpointCreateResult, SlateDBError>>,
     ) -> Result<(), SlateDBError> {
         self.reconcile_and_dispatch().await?;
-        let through_epoch = self.frontier.resolve_target(target);
+        let through_seq = self.frontier.resolve_target(target);
         self.manifest_writer
-            .send_checkpoint(through_epoch, options, sender)?;
+            .send_checkpoint(through_seq, options, sender)?;
         self.dispatch_ready_memtables().await
     }
 
     async fn handle_uploaded(&mut self, uploaded: UploadedMemtable) -> Result<(), SlateDBError> {
         debug!(
-            "l0 upload completed [epoch={:?}, sst_id={:?}]",
-            uploaded.epoch, uploaded.sst_handle.id
+            "l0 upload completed [first_seq={}, last_seq={}, sst_id={:?}]",
+            uploaded.first_seq, uploaded.last_seq, uploaded.sst_handle.id
         );
         self.frontier
-            .set_state(uploaded.epoch, TrackedImmState::WritingManifest);
+            .set_state(uploaded.last_seq, TrackedImmState::WritingManifest);
         self.manifest_writer.notify_uploaded(uploaded).await?;
         Ok(())
     }
@@ -201,21 +206,19 @@ impl FlushTracker {
             let Some(tracked) = self.frontier.prepare_next_upload() else {
                 return Ok(());
             };
-            let epoch = tracked.epoch;
             let sst_id = tracked.sst_id;
             let imm_memtable = Arc::clone(&tracked.imm_memtable);
-            let last_seq = tracked.imm_memtable.table().last_seq().unwrap_or(0);
+            let last_seq = tracked.last_seq;
             debug!(
-                "dispatching l0 upload [epoch={:?}, sst_id={:?}]",
-                epoch, sst_id
+                "dispatching l0 upload [first_seq={}, last_seq={}, sst_id={:?}]",
+                tracked.first_seq, last_seq, sst_id
             );
 
             // WAL SSTs must be durable before the L0 is uploaded (see #1255).
             if self.inner.wal_enabled && self.inner.oracle.last_remote_persisted_seq() < last_seq {
                 self.inner.flush_wals().await?;
             }
-            self.uploader
-                .submit(UploadJob::new(epoch, imm_memtable, sst_id))?;
+            self.uploader.submit(UploadJob::new(imm_memtable, sst_id))?;
         }
         Ok(())
     }
@@ -251,8 +254,8 @@ impl FlushTracker {
             if matches!(tracked.state, TrackedImmState::Uploading) {
                 if let Err(delete_err) = self.inner.table_store.delete_sst(&tracked.sst_id).await {
                     log::warn!(
-                        "failed to delete orphaned SST [epoch={:?}, id={:?}, error={:?}]",
-                        tracked.epoch,
+                        "failed to delete orphaned SST [last_seq={}, id={:?}, error={:?}]",
+                        tracked.last_seq,
                         tracked.sst_id,
                         delete_err
                     );
@@ -263,7 +266,7 @@ impl FlushTracker {
 }
 
 struct TrackedImm {
-    epoch: FlushEpoch,
+    first_seq: u64,
     last_seq: u64,
     sst_id: crate::db_state::SsTableId,
     imm_memtable: Arc<crate::mem_table::ImmutableMemtable>,
@@ -272,16 +275,14 @@ struct TrackedImm {
 
 /// Tracks the frontier of immutable memtables being flushed to L0.
 ///
-/// Encapsulates epoch assignment, dedup, state transitions, and target resolution.
+/// Encapsulates dedup, state transitions, and target resolution.
 struct TrackedImmFrontier {
-    next_epoch: FlushEpoch,
     tracked: VecDeque<TrackedImm>,
 }
 
 impl TrackedImmFrontier {
     fn new() -> Self {
         Self {
-            next_epoch: FlushEpoch(1),
             tracked: VecDeque::new(),
         }
     }
@@ -293,6 +294,10 @@ impl TrackedImmFrontier {
         gen_sst_id: &mut impl FnMut() -> crate::db_state::SsTableId,
     ) {
         for imm_memtable in imm_memtables {
+            let first_seq = imm_memtable
+                .table()
+                .first_seq()
+                .expect("immutable memtable has no entries");
             let last_seq = imm_memtable
                 .table()
                 .last_seq()
@@ -301,21 +306,20 @@ impl TrackedImmFrontier {
                 continue;
             }
             self.tracked.push_back(TrackedImm {
-                epoch: self.next_epoch,
+                first_seq,
                 last_seq,
                 sst_id: gen_sst_id(),
                 imm_memtable,
                 state: TrackedImmState::PendingDispatch,
             });
-            self.next_epoch = FlushEpoch(self.next_epoch.0 + 1);
         }
     }
 
-    /// Resolves a flush target to the epoch that must become durable.
-    fn resolve_target(&self, target: FlushTarget) -> Option<FlushEpoch> {
+    /// Resolves a flush target to the sequence that must become durable.
+    fn resolve_target(&self, target: FlushTarget) -> Option<u64> {
         match target {
             FlushTarget::CurrentDurable => None,
-            FlushTarget::All => self.tracked.back().map(|t| t.epoch),
+            FlushTarget::All => self.tracked.back().map(|t| t.last_seq),
         }
     }
 
@@ -343,21 +347,21 @@ impl TrackedImmFrontier {
     }
 
     /// Transition a tracked entry to the given state.
-    fn set_state(&mut self, epoch: FlushEpoch, state: TrackedImmState) {
+    fn set_state(&mut self, last_seq: u64, state: TrackedImmState) {
         let tracked = self
             .tracked
             .iter_mut()
-            .find(|t| t.epoch == epoch)
-            .expect("tracked imm not found for epoch");
+            .find(|t| t.last_seq == last_seq)
+            .expect("tracked imm not found for last_seq");
         tracked.state = state;
     }
 
-    /// Remove tracked entries through the given epoch.
-    fn retire_through(&mut self, through_epoch: FlushEpoch) {
+    /// Remove tracked entries through the given sequence (inclusive).
+    fn retire_through(&mut self, through_seq: u64) {
         while self
             .tracked
             .front()
-            .is_some_and(|t| t.epoch <= through_epoch)
+            .is_some_and(|t| t.last_seq <= through_seq)
         {
             self.tracked.pop_front().expect("checked above");
         }
@@ -911,7 +915,7 @@ mod tests {
     mod frontier_tests {
         use crate::db_state::SsTableId;
         use crate::mem_table::{ImmutableMemtable, WritableKVTable};
-        use crate::memtable_flusher::tracker::{FlushEpoch, TrackedImmFrontier, TrackedImmState};
+        use crate::memtable_flusher::tracker::{TrackedImmFrontier, TrackedImmState};
         use crate::memtable_flusher::FlushTarget;
         use crate::types::RowEntry;
         use std::sync::Arc;
@@ -940,22 +944,21 @@ mod tests {
         }
 
         #[test]
-        fn register_assigns_sequential_epochs() {
+        fn register_assigns_sequential_sequences() {
             let mut frontier = TrackedImmFrontier::new();
             frontier.register([make_imm(1), make_imm(2)].into_iter(), &mut next_sst_id);
-            assert_eq!(frontier.tracked[0].epoch, FlushEpoch(1));
-            assert_eq!(frontier.tracked[1].epoch, FlushEpoch(2));
+            assert_eq!(frontier.tracked[0].first_seq, 1);
+            assert_eq!(frontier.tracked[0].last_seq, 1);
+            assert_eq!(frontier.tracked[1].first_seq, 2);
+            assert_eq!(frontier.tracked[1].last_seq, 2);
         }
 
         #[test]
-        fn resolve_target_all_returns_last_epoch() {
+        fn resolve_target_all_returns_last_seq() {
             let mut frontier = TrackedImmFrontier::new();
             assert_eq!(frontier.resolve_target(FlushTarget::All), None);
             frontier.register([make_imm(1), make_imm(2)].into_iter(), &mut next_sst_id);
-            assert_eq!(
-                frontier.resolve_target(FlushTarget::All),
-                Some(FlushEpoch(2))
-            );
+            assert_eq!(frontier.resolve_target(FlushTarget::All), Some(2));
         }
 
         #[test]
@@ -970,7 +973,7 @@ mod tests {
             let mut frontier = TrackedImmFrontier::new();
             frontier.register(std::iter::once(make_imm(1)), &mut next_sst_id);
             let tracked = frontier.prepare_next_upload().unwrap();
-            assert_eq!(tracked.epoch, FlushEpoch(1));
+            assert_eq!(tracked.last_seq, 1);
             assert!(matches!(tracked.state, TrackedImmState::Uploading));
             // No more pending
             assert!(frontier.prepare_next_upload().is_none());
@@ -980,7 +983,7 @@ mod tests {
         fn set_state_updates_tracked_entry() {
             let mut frontier = TrackedImmFrontier::new();
             frontier.register(std::iter::once(make_imm(1)), &mut next_sst_id);
-            frontier.set_state(FlushEpoch(1), TrackedImmState::WritingManifest);
+            frontier.set_state(1, TrackedImmState::WritingManifest);
             assert!(matches!(
                 frontier.tracked[0].state,
                 TrackedImmState::WritingManifest
@@ -988,10 +991,10 @@ mod tests {
         }
 
         #[test]
-        #[should_panic(expected = "tracked imm not found for epoch")]
-        fn set_state_panics_for_unknown_epoch() {
+        #[should_panic(expected = "tracked imm not found for last_seq")]
+        fn set_state_panics_for_unknown_seq() {
             let mut frontier = TrackedImmFrontier::new();
-            frontier.set_state(FlushEpoch(99), TrackedImmState::Uploading);
+            frontier.set_state(99, TrackedImmState::Uploading);
         }
 
         #[test]
@@ -1001,9 +1004,9 @@ mod tests {
                 [make_imm(1), make_imm(2), make_imm(3)].into_iter(),
                 &mut next_sst_id,
             );
-            frontier.retire_through(FlushEpoch(2));
+            frontier.retire_through(2);
             assert_eq!(frontier.tracked.len(), 1);
-            assert_eq!(frontier.tracked[0].epoch, FlushEpoch(3));
+            assert_eq!(frontier.tracked[0].last_seq, 3);
         }
 
         #[test]
@@ -1014,11 +1017,11 @@ mod tests {
                 &mut next_sst_id,
             );
             assert_eq!(frontier.reserved_l0_slots(), 0);
-            frontier.prepare_next_upload(); // epoch 1 -> Uploading
+            frontier.prepare_next_upload(); // seq 1 -> Uploading
             assert_eq!(frontier.reserved_l0_slots(), 1);
-            frontier.set_state(FlushEpoch(1), TrackedImmState::WritingManifest);
+            frontier.set_state(1, TrackedImmState::WritingManifest);
             assert_eq!(frontier.reserved_l0_slots(), 1);
-            frontier.retire_through(FlushEpoch(1));
+            frontier.retire_through(1);
             assert_eq!(frontier.reserved_l0_slots(), 0);
         }
     }

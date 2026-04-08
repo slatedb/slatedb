@@ -1,7 +1,7 @@
 //! Parallel L0 flush manifest manifest_writer.
 //!
 //! The manifest_writer owns ordered retirement of uploaded L0 tables:
-//! - restore flush order using [`FlushEpoch`]
+//! - restore flush order using sequence ranges
 //! - apply ordered in-memory manifest state transitions
 //! - persist manifest updates
 //! - report durable progress
@@ -16,7 +16,6 @@ use log::debug;
 
 use super::tracker::TrackerMessage;
 use super::uploader::UploadedMemtable;
-use super::FlushEpoch;
 use crate::checkpoint::CheckpointCreateResult;
 use crate::config::CheckpointOptions;
 use crate::db::DbInner;
@@ -39,9 +38,9 @@ use tokio::sync::oneshot;
 /// Result reported for a completed flush request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct FlushResult {
-    /// Highest durable WAL id covered by the completed flush.
+    /// Highest durable WAL id covered by the completed flush (inclusive).
     pub(crate) durable_through_wal_id: Option<u64>,
-    /// Highest durable sequence number covered by the completed flush.
+    /// Highest durable sequence number covered by the completed flush (inclusive).
     pub(crate) durable_through_seq: Option<u64>,
 }
 
@@ -49,14 +48,14 @@ pub(crate) struct FlushResult {
 enum ManifestWriterCommand {
     /// One uploaded table is ready for ordered retirement.
     Uploaded(Box<UploadedMemtable>),
-    /// Wait for an epoch to become durable, then respond with FlushResult.
+    /// Wait for a sequence to become durable, then respond with FlushResult.
     AwaitFlush {
-        through_epoch: Option<FlushEpoch>,
+        through_seq: Option<u64>,
         sender: oneshot::Sender<Result<FlushResult, SlateDBError>>,
     },
     /// Create a checkpoint against the current durable manifest state.
     CreateCheckpoint {
-        through_epoch: Option<FlushEpoch>,
+        through_seq: Option<u64>,
         options: CheckpointOptions,
         sender: oneshot::Sender<Result<CheckpointCreateResult, SlateDBError>>,
     },
@@ -67,12 +66,18 @@ enum ManifestWriterCommand {
 impl std::fmt::Debug for ManifestWriterCommand {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Uploaded(u) => write!(f, "Uploaded(epoch={:?})", u.epoch),
-            Self::AwaitFlush { through_epoch, .. } => {
-                write!(f, "AwaitFlush({through_epoch:?})")
+            Self::Uploaded(u) => {
+                write!(
+                    f,
+                    "Uploaded(first_seq={}, last_seq={})",
+                    u.first_seq, u.last_seq
+                )
             }
-            Self::CreateCheckpoint { through_epoch, .. } => {
-                write!(f, "CreateCheckpoint({through_epoch:?})")
+            Self::AwaitFlush { through_seq, .. } => {
+                write!(f, "AwaitFlush({through_seq:?})")
+            }
+            Self::CreateCheckpoint { through_seq, .. } => {
+                write!(f, "CreateCheckpoint({through_seq:?})")
             }
             Self::PollManifest => write!(f, "PollManifest"),
         }
@@ -119,30 +124,31 @@ impl ManifestWriter {
     }
 
     /// Sends a flush request to the manifest_writer. The manifest_writer will respond
-    /// once `through_epoch` is durable (or immediately if `None`).
+    /// once all sequences up to and including `through_seq` are durable (or
+    /// immediately if `None`).
     pub(crate) fn send_flush(
         &self,
-        through_epoch: Option<FlushEpoch>,
+        through_seq: Option<u64>,
         sender: oneshot::Sender<Result<FlushResult, SlateDBError>>,
     ) -> Result<(), SlateDBError> {
         self.commands_tx.send(ManifestWriterCommand::AwaitFlush {
-            through_epoch,
+            through_seq,
             sender,
         })
     }
 
     /// Sends a checkpoint request to the manifest_writer. The manifest_writer will write
-    /// the checkpoint once `through_epoch` is durable (or immediately if
-    /// `None`) and respond via `sender`.
+    /// the checkpoint once all sequences up to and including `through_seq` are
+    /// durable (or immediately if `None`) and respond via `sender`.
     pub(crate) fn send_checkpoint(
         &self,
-        through_epoch: Option<FlushEpoch>,
+        through_seq: Option<u64>,
         options: CheckpointOptions,
         sender: oneshot::Sender<Result<CheckpointCreateResult, SlateDBError>>,
     ) -> Result<(), SlateDBError> {
         self.commands_tx
             .send(ManifestWriterCommand::CreateCheckpoint {
-                through_epoch,
+                through_seq,
                 options,
                 sender,
             })
@@ -160,9 +166,12 @@ struct ManifestWriterHandler {
     manifest: FenceableManifest,
     manifest_poll_interval: Duration,
     tracker_tx: SafeSender<TrackerMessage>,
-    ready: BTreeMap<FlushEpoch, UploadedMemtable>,
-    next_epoch: FlushEpoch,
-    durable_through: Option<(FlushEpoch, u64)>,
+    /// Uploaded memtables waiting for contiguous ordering, keyed by first_seq.
+    ready: BTreeMap<u64, UploadedMemtable>,
+    /// The first_seq we expect for the next memtable to process.
+    next_seq: u64,
+    /// Highest last_seq that has been durably written to the manifest (inclusive).
+    durable_through: Option<u64>,
     durable_wal_id: Option<u64>,
     pending_flushes: Vec<PendingFlush>,
     pending_checkpoints: Vec<PendingCheckpoint>,
@@ -188,18 +197,18 @@ impl MessageHandler<ManifestWriterCommand> for ManifestWriterHandler {
                 self.handle_uploaded(*uploaded_memtable).await
             }
             ManifestWriterCommand::AwaitFlush {
-                through_epoch,
+                through_seq,
                 sender,
             } => {
-                self.handle_flush(through_epoch, sender);
+                self.handle_flush(through_seq, sender);
                 Ok(())
             }
             ManifestWriterCommand::CreateCheckpoint {
-                through_epoch,
+                through_seq,
                 options,
                 sender,
             } => {
-                self.handle_create_checkpoint(through_epoch, options, sender)
+                self.handle_create_checkpoint(through_seq, options, sender)
                     .await
             }
             ManifestWriterCommand::PollManifest => self.refresh_manifest_progress().await,
@@ -236,6 +245,7 @@ impl ManifestWriterHandler {
         manifest_poll_interval: Duration,
         tracker_tx: SafeSender<TrackerMessage>,
     ) -> Self {
+        let next_seq = db.state.read().state().core().last_l0_seq + 1;
         Self {
             db,
             manifest,
@@ -244,7 +254,7 @@ impl ManifestWriterHandler {
             durable_wal_id: None,
             pending_flushes: Vec::new(),
             ready: BTreeMap::new(),
-            next_epoch: FlushEpoch(1),
+            next_seq,
             durable_through: None,
             pending_checkpoints: Vec::new(),
         }
@@ -254,9 +264,15 @@ impl ManifestWriterHandler {
         &mut self,
         uploaded_memtable: UploadedMemtable,
     ) -> Result<(), SlateDBError> {
+        assert!(
+            uploaded_memtable.first_seq >= self.next_seq,
+            "uploaded memtable first_seq ({}) is behind next_seq ({})",
+            uploaded_memtable.first_seq,
+            self.next_seq,
+        );
         if self
             .ready
-            .insert(uploaded_memtable.epoch, uploaded_memtable)
+            .insert(uploaded_memtable.first_seq, uploaded_memtable)
             .is_some()
         {
             return Err(SlateDBError::InvalidDBState);
@@ -266,49 +282,49 @@ impl ManifestWriterHandler {
 
     fn handle_flush(
         &mut self,
-        through_epoch: Option<FlushEpoch>,
+        through_seq: Option<u64>,
         sender: oneshot::Sender<Result<FlushResult, SlateDBError>>,
     ) {
-        if self.epoch_is_durable(through_epoch) {
+        if self.is_durable(through_seq) {
             let _ = sender.send(Ok(self.flush_result()));
         } else {
             self.pending_flushes.push(PendingFlush {
-                through_epoch,
+                through_seq,
                 sender,
             });
         }
     }
 
-    fn epoch_is_durable(&self, through_epoch: Option<FlushEpoch>) -> bool {
-        match through_epoch {
+    fn is_durable(&self, through_seq: Option<u64>) -> bool {
+        match through_seq {
             None => true,
-            Some(epoch) => self
+            Some(seq) => self
                 .durable_through
-                .is_some_and(|(durable_epoch, _)| durable_epoch >= epoch),
+                .is_some_and(|durable_seq| durable_seq >= seq),
         }
     }
 
     fn flush_result(&self) -> FlushResult {
         FlushResult {
             durable_through_wal_id: self.durable_wal_id,
-            durable_through_seq: self.durable_through.map(|(_, seq)| seq),
+            durable_through_seq: self.durable_through,
         }
     }
 
     async fn handle_create_checkpoint(
         &mut self,
-        through_epoch: Option<FlushEpoch>,
+        through_seq: Option<u64>,
         options: CheckpointOptions,
         sender: oneshot::Sender<Result<CheckpointCreateResult, SlateDBError>>,
     ) -> Result<(), SlateDBError> {
-        if self.epoch_is_durable(through_epoch) {
+        if self.is_durable(through_seq) {
             let result = self.write_checkpoint_safely(&options).await;
             let _ = sender.send(result.clone());
             return result.map(|_| ());
         }
 
         self.pending_checkpoints.push(PendingCheckpoint {
-            through_epoch,
+            through_seq,
             options,
             sender,
         });
@@ -320,47 +336,39 @@ impl ManifestWriterHandler {
             let Some(staged_batch) = self.take_next_ready_batch() else {
                 return Ok(());
             };
-            let (through_epoch, through_seq) = staged_batch
+            let through_seq = staged_batch
                 .last()
-                .map(|uploaded| (uploaded.epoch, uploaded.last_seq))
+                .map(|uploaded| uploaded.last_seq)
                 .expect("staged batch should not be empty");
-            let attached_checkpoints = self.take_satisfied_pending_checkpoints(through_epoch);
-            self.apply_ready_batch(
-                staged_batch,
-                attached_checkpoints,
-                through_epoch,
-                through_seq,
-            )
-            .await?;
+            let attached_checkpoints = self.take_satisfied_pending_checkpoints(through_seq);
+            self.apply_ready_batch(staged_batch, attached_checkpoints, through_seq)
+                .await?;
         }
     }
 
     fn take_next_ready_batch(&mut self) -> Option<Vec<UploadedMemtable>> {
-        let mut epoch = self.next_epoch;
+        let mut next_seq = self.next_seq;
         let mut batch = Vec::new();
-        while let Some(uploaded) = self.ready.remove(&epoch) {
+        while let Some(uploaded) = self.ready.remove(&next_seq) {
+            next_seq = uploaded.last_seq + 1;
             batch.push(uploaded);
-            epoch = FlushEpoch(epoch.0 + 1);
         }
 
         if batch.is_empty() {
             None
         } else {
-            self.next_epoch = epoch;
+            self.next_seq = next_seq;
             Some(batch)
         }
     }
 
-    fn take_satisfied_pending_checkpoints(
-        &mut self,
-        through_epoch: FlushEpoch,
-    ) -> Vec<PendingCheckpoint> {
+    fn take_satisfied_pending_checkpoints(&mut self, through_seq: u64) -> Vec<PendingCheckpoint> {
         let mut satisfied = Vec::new();
         let mut pending = Vec::with_capacity(self.pending_checkpoints.len());
         for checkpoint in self.pending_checkpoints.drain(..) {
             if checkpoint
-                .through_epoch
-                .is_none_or(|required_epoch| required_epoch <= through_epoch)
+                .through_seq
+                .is_none_or(|required_seq| required_seq <= through_seq)
             {
                 satisfied.push(checkpoint);
             } else {
@@ -375,7 +383,6 @@ impl ManifestWriterHandler {
         &mut self,
         staged_batch: Vec<UploadedMemtable>,
         attached_checkpoints: Vec<PendingCheckpoint>,
-        through_epoch: FlushEpoch,
         through_seq: u64,
     ) -> Result<(), SlateDBError> {
         self.apply_uploaded_state(&staged_batch)?;
@@ -402,7 +409,6 @@ impl ManifestWriterHandler {
                     staged_batch,
                     attached_checkpoints,
                     checkpoint_results,
-                    through_epoch,
                     through_seq,
                 )
                 .await
@@ -575,16 +581,14 @@ impl ManifestWriterHandler {
         staged_batch: Vec<UploadedMemtable>,
         attached_checkpoints: Vec<PendingCheckpoint>,
         checkpoint_results: Vec<CheckpointCreateResult>,
-        through_epoch: FlushEpoch,
         through_seq: u64,
     ) -> Result<(), SlateDBError> {
         debug!(
-            "l0 flush batch written to manifest [through_epoch={:?}, batch_size={}, through_seq={}]",
-            through_epoch,
+            "l0 flush batch written to manifest [batch_size={}, through_seq={}]",
             staged_batch.len(),
             through_seq,
         );
-        self.durable_through = Some((through_epoch, through_seq));
+        self.durable_through = Some(through_seq);
         for uploaded in &staged_batch {
             self.durable_wal_id = Some(uploaded.imm_memtable.recent_flushed_wal_id());
             uploaded.imm_memtable.table().notify_durable(Ok(()));
@@ -600,7 +604,7 @@ impl ManifestWriterHandler {
         }
         let _ = self
             .tracker_tx
-            .send(TrackerMessage::FlushComplete { through_epoch });
+            .send(TrackerMessage::FlushComplete { through_seq });
         Ok(())
     }
 
@@ -609,7 +613,7 @@ impl ManifestWriterHandler {
         let pending = std::mem::take(&mut self.pending_flushes);
         let mut still_pending = Vec::with_capacity(pending.len());
         for flush in pending {
-            if self.epoch_is_durable(flush.through_epoch) {
+            if self.is_durable(flush.through_seq) {
                 let _ = flush.sender.send(Ok(flush_result.clone()));
             } else {
                 still_pending.push(flush);
@@ -658,21 +662,21 @@ impl ManifestWriterHandler {
     fn collect_pending_waiter(&mut self, command: ManifestWriterCommand) {
         match command {
             ManifestWriterCommand::AwaitFlush {
-                through_epoch,
+                through_seq,
                 sender,
             } => {
                 self.pending_flushes.push(PendingFlush {
-                    through_epoch,
+                    through_seq,
                     sender,
                 });
             }
             ManifestWriterCommand::CreateCheckpoint {
-                through_epoch,
+                through_seq,
                 options,
                 sender,
             } => {
                 self.pending_checkpoints.push(PendingCheckpoint {
-                    through_epoch,
+                    through_seq,
                     options,
                     sender,
                 });
@@ -704,19 +708,19 @@ impl ManifestWriterHandler {
 }
 
 struct PendingFlush {
-    through_epoch: Option<FlushEpoch>,
+    through_seq: Option<u64>,
     sender: oneshot::Sender<Result<FlushResult, SlateDBError>>,
 }
 
 struct PendingCheckpoint {
-    through_epoch: Option<FlushEpoch>,
+    through_seq: Option<u64>,
     options: CheckpointOptions,
     sender: oneshot::Sender<Result<CheckpointCreateResult, SlateDBError>>,
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{FlushEpoch, ManifestWriter, TrackerMessage};
+    use super::{ManifestWriter, TrackerMessage};
     use crate::config::{CheckpointOptions, Settings};
     use crate::db::DbInner;
     use crate::db_state::{ManifestCore, SsTableId};
@@ -819,14 +823,14 @@ mod tests {
         }
     }
 
-    async fn expect_flushed(tracker_rx: &async_channel::Receiver<TrackerMessage>) -> FlushEpoch {
+    async fn expect_flushed(tracker_rx: &async_channel::Receiver<TrackerMessage>) -> u64 {
         loop {
             let msg = timeout(Duration::from_secs(5), tracker_rx.recv())
                 .await
                 .expect("timed out waiting for flushed event")
                 .expect("tracker channel closed");
             match msg {
-                TrackerMessage::FlushComplete { through_epoch } => return through_epoch,
+                TrackerMessage::FlushComplete { through_seq } => return through_seq,
                 _ => continue,
             }
         }
@@ -952,7 +956,6 @@ mod tests {
 
     async fn next_uploaded_memtable(
         harness: &TestHarness,
-        epoch: u64,
         key: &[u8],
         value: &[u8],
         seq: u64,
@@ -970,8 +973,9 @@ mod tests {
             .flush_imm_table(&sst_id, imm_memtable.table(), true)
             .await
             .unwrap();
+        let first_seq = imm_memtable.table().first_seq().unwrap();
         let last_seq = imm_memtable.table().last_seq().unwrap();
-        UploadedMemtable::new(FlushEpoch(epoch), imm_memtable, sst_handle, last_seq)
+        UploadedMemtable::new(imm_memtable, sst_handle, first_seq, last_seq)
     }
 
     #[tokio::test]
@@ -981,7 +985,7 @@ mod tests {
             Arc::new(FailPointRegistry::new()),
         )
         .await;
-        let uploaded = next_uploaded_memtable(&harness, 1, b"k1", b"v1", 1).await;
+        let uploaded = next_uploaded_memtable(&harness, b"k1", b"v1", 1).await;
 
         let started = start_manifest_writer(
             Arc::clone(&harness.inner),
@@ -990,21 +994,21 @@ mod tests {
         );
         started.notify_uploaded(uploaded).await.unwrap();
 
-        let through_epoch = expect_flushed(&started.tracker_rx).await;
-        assert_eq!(through_epoch, FlushEpoch(1));
+        let through_seq = expect_flushed(&started.tracker_rx).await;
+        assert_eq!(through_seq, 1);
 
         started.shutdown().await;
     }
 
     #[tokio::test]
-    async fn should_wait_for_missing_epoch_before_flushing() {
+    async fn should_wait_for_missing_seq_before_flushing() {
         let harness = setup_harness(
             "/tmp/test_parallel_l0_flush_manifest_writer_gap",
             Arc::new(FailPointRegistry::new()),
         )
         .await;
-        let uploaded1 = next_uploaded_memtable(&harness, 1, b"k1", b"v1", 1).await;
-        let uploaded2 = next_uploaded_memtable(&harness, 2, b"k2", b"v2", 2).await;
+        let uploaded1 = next_uploaded_memtable(&harness, b"k1", b"v1", 1).await;
+        let uploaded2 = next_uploaded_memtable(&harness, b"k2", b"v2", 2).await;
 
         let started = start_manifest_writer(
             Arc::clone(&harness.inner),
@@ -1015,8 +1019,8 @@ mod tests {
         assert_no_flush_event(&started.tracker_rx, Duration::from_millis(100)).await;
 
         started.notify_uploaded(uploaded1).await.unwrap();
-        let through_epoch = expect_flushed(&started.tracker_rx).await;
-        assert_eq!(through_epoch, FlushEpoch(2));
+        let through_seq = expect_flushed(&started.tracker_rx).await;
+        assert_eq!(through_seq, 2);
 
         started.shutdown().await;
     }
@@ -1064,7 +1068,7 @@ mod tests {
             Arc::new(FailPointRegistry::new()),
         )
         .await;
-        let uploaded = next_uploaded_memtable(&harness, 1, b"k1", b"v1", 1).await;
+        let uploaded = next_uploaded_memtable(&harness, b"k1", b"v1", 1).await;
 
         let before =
             latest_manifest_checkpoint_count(&harness.path, Arc::clone(&harness.object_store))
@@ -1078,7 +1082,7 @@ mod tests {
 
         let (tx, rx) = oneshot::channel();
         started
-            .send_checkpoint(Some(FlushEpoch(1)), CheckpointOptions::default(), tx)
+            .send_checkpoint(Some(1), CheckpointOptions::default(), tx)
             .unwrap();
 
         tokio::task::yield_now().await;
@@ -1086,8 +1090,8 @@ mod tests {
 
         started.notify_uploaded(uploaded).await.unwrap();
 
-        let through_epoch = expect_flushed(&started.tracker_rx).await;
-        assert_eq!(through_epoch, FlushEpoch(1));
+        let through_seq = expect_flushed(&started.tracker_rx).await;
+        assert_eq!(through_seq, 1);
 
         let checkpoint = rx.await.unwrap().unwrap();
         let after =
@@ -1106,7 +1110,7 @@ mod tests {
             Arc::new(FailPointRegistry::new()),
         )
         .await;
-        let uploaded = next_uploaded_memtable(&harness, 1, b"k1", b"v1", 1).await;
+        let uploaded = next_uploaded_memtable(&harness, b"k1", b"v1", 1).await;
 
         let started = start_manifest_writer(
             Arc::clone(&harness.inner),
@@ -1137,7 +1141,7 @@ mod tests {
             Arc::new(FailPointRegistry::new()),
         )
         .await;
-        let uploaded = next_uploaded_memtable(&harness, 1, b"k1", b"v1", 1).await;
+        let uploaded = next_uploaded_memtable(&harness, b"k1", b"v1", 1).await;
 
         let started = start_manifest_writer(
             Arc::clone(&harness.inner),
@@ -1147,7 +1151,7 @@ mod tests {
 
         // Send a flush request for epoch 1, which hasn't been uploaded yet.
         let (tx, rx) = oneshot::channel();
-        started.send_flush(Some(FlushEpoch(1)), tx).unwrap();
+        started.send_flush(Some(1), tx).unwrap();
 
         // Fence the manifest so the next write fails.
         let _fence = load_writer_manifest(&harness.path, Arc::clone(&harness.object_store)).await;
@@ -1176,7 +1180,7 @@ mod tests {
             Arc::new(FailPointRegistry::new()),
         )
         .await;
-        let uploaded = next_uploaded_memtable(&harness, 1, b"k1", b"v1", 1).await;
+        let uploaded = next_uploaded_memtable(&harness, b"k1", b"v1", 1).await;
 
         let started = start_manifest_writer(
             Arc::clone(&harness.inner),
@@ -1187,7 +1191,7 @@ mod tests {
         // Send a checkpoint request for epoch 1, which hasn't been uploaded yet.
         let (tx, rx) = oneshot::channel();
         started
-            .send_checkpoint(Some(FlushEpoch(1)), CheckpointOptions::default(), tx)
+            .send_checkpoint(Some(1), CheckpointOptions::default(), tx)
             .unwrap();
 
         // Fence and trigger a manifest write.
@@ -1224,7 +1228,7 @@ mod tests {
 
         // Send a flush request for an epoch that will never be uploaded.
         let (tx, rx) = oneshot::channel();
-        started.send_flush(Some(FlushEpoch(1)), tx).unwrap();
+        started.send_flush(Some(1), tx).unwrap();
 
         // Shut down cleanly — the flush waiter should get Closed.
         started.shutdown().await;
