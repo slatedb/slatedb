@@ -215,9 +215,9 @@ pub struct ScanOptions {
     pub cache_blocks: bool,
     /// Maximum number of concurrent fetch tasks used by the scan.
     pub max_fetch_tasks: u64,
-    /// The iteration order for the scan.
-    #[uniffi(default = "Ascending")]
-    pub order: IterationOrder,
+    /// The iteration order for the scan. Defaults to ascending when not set.
+    #[uniffi(default = None)]
+    pub order: Option<IterationOrder>,
 }
 
 impl Default for ScanOptions {
@@ -228,7 +228,7 @@ impl Default for ScanOptions {
             read_ahead_bytes: 1,
             cache_blocks: false,
             max_fetch_tasks: 1,
-            order: IterationOrder::default(),
+            order: None,
         }
     }
 }
@@ -251,7 +251,7 @@ impl TryFrom<ScanOptions> for slatedb::config::ScanOptions {
                     field: "max_fetch_tasks",
                 })
             })?,
-            order: value.order.into(),
+            order: value.order.unwrap_or_default().into(),
         })
     }
 }
