@@ -216,6 +216,7 @@ pub struct ScanOptions {
     /// Maximum number of concurrent fetch tasks used by the scan.
     pub max_fetch_tasks: u64,
     /// The iteration order for the scan.
+    #[uniffi(default = "Ascending")]
     pub order: IterationOrder,
 }
 
