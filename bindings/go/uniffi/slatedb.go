@@ -7419,6 +7419,8 @@ type ScanOptions struct {
 	CacheBlocks bool
 	// Maximum number of concurrent fetch tasks used by the scan.
 	MaxFetchTasks uint64
+	// The iteration order for the scan. Defaults to ascending when not set.
+	Order *IterationOrder
 }
 
 func (r *ScanOptions) Destroy() {
@@ -7427,6 +7429,7 @@ func (r *ScanOptions) Destroy() {
 	FfiDestroyerUint64{}.Destroy(r.ReadAheadBytes)
 	FfiDestroyerBool{}.Destroy(r.CacheBlocks)
 	FfiDestroyerUint64{}.Destroy(r.MaxFetchTasks)
+	FfiDestroyerOptionalIterationOrder{}.Destroy(r.Order)
 }
 
 type FfiConverterScanOptions struct{}
@@ -7444,6 +7447,7 @@ func (c FfiConverterScanOptions) Read(reader io.Reader) ScanOptions {
 		FfiConverterUint64INSTANCE.Read(reader),
 		FfiConverterBoolINSTANCE.Read(reader),
 		FfiConverterUint64INSTANCE.Read(reader),
+		FfiConverterOptionalIterationOrderINSTANCE.Read(reader),
 	}
 }
 
@@ -7461,6 +7465,7 @@ func (c FfiConverterScanOptions) Write(writer io.Writer, value ScanOptions) {
 	FfiConverterUint64INSTANCE.Write(writer, value.ReadAheadBytes)
 	FfiConverterBoolINSTANCE.Write(writer, value.CacheBlocks)
 	FfiConverterUint64INSTANCE.Write(writer, value.MaxFetchTasks)
+	FfiConverterOptionalIterationOrderINSTANCE.Write(writer, value.Order)
 }
 
 type FfiDestroyerScanOptions struct{}
@@ -8091,6 +8096,43 @@ func (FfiConverterIsolationLevel) Write(writer io.Writer, value IsolationLevel) 
 type FfiDestroyerIsolationLevel struct{}
 
 func (_ FfiDestroyerIsolationLevel) Destroy(value IsolationLevel) {
+}
+
+// The iteration order for a scan.
+type IterationOrder uint
+
+const (
+	IterationOrderAscending  IterationOrder = 1
+	IterationOrderDescending IterationOrder = 2
+)
+
+type FfiConverterIterationOrder struct{}
+
+var FfiConverterIterationOrderINSTANCE = FfiConverterIterationOrder{}
+
+func (c FfiConverterIterationOrder) Lift(rb RustBufferI) IterationOrder {
+	return LiftFromRustBuffer[IterationOrder](c, rb)
+}
+
+func (c FfiConverterIterationOrder) Lower(value IterationOrder) C.RustBuffer {
+	return LowerIntoRustBuffer[IterationOrder](c, value)
+}
+
+func (c FfiConverterIterationOrder) LowerExternal(value IterationOrder) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[IterationOrder](c, value))
+}
+func (FfiConverterIterationOrder) Read(reader io.Reader) IterationOrder {
+	id := readInt32(reader)
+	return IterationOrder(id)
+}
+
+func (FfiConverterIterationOrder) Write(writer io.Writer, value IterationOrder) {
+	writeInt32(writer, int32(value))
+}
+
+type FfiDestroyerIterationOrder struct{}
+
+func (_ FfiDestroyerIterationOrder) Destroy(value IterationOrder) {
 }
 
 // Log level used by [`init_logging`].
@@ -8948,6 +8990,47 @@ type FfiDestroyerOptionalWriteHandle struct{}
 func (_ FfiDestroyerOptionalWriteHandle) Destroy(value *WriteHandle) {
 	if value != nil {
 		FfiDestroyerWriteHandle{}.Destroy(*value)
+	}
+}
+
+type FfiConverterOptionalIterationOrder struct{}
+
+var FfiConverterOptionalIterationOrderINSTANCE = FfiConverterOptionalIterationOrder{}
+
+func (c FfiConverterOptionalIterationOrder) Lift(rb RustBufferI) *IterationOrder {
+	return LiftFromRustBuffer[*IterationOrder](c, rb)
+}
+
+func (_ FfiConverterOptionalIterationOrder) Read(reader io.Reader) *IterationOrder {
+	if readInt8(reader) == 0 {
+		return nil
+	}
+	temp := FfiConverterIterationOrderINSTANCE.Read(reader)
+	return &temp
+}
+
+func (c FfiConverterOptionalIterationOrder) Lower(value *IterationOrder) C.RustBuffer {
+	return LowerIntoRustBuffer[*IterationOrder](c, value)
+}
+
+func (c FfiConverterOptionalIterationOrder) LowerExternal(value *IterationOrder) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[*IterationOrder](c, value))
+}
+
+func (_ FfiConverterOptionalIterationOrder) Write(writer io.Writer, value *IterationOrder) {
+	if value == nil {
+		writeInt8(writer, 0)
+	} else {
+		writeInt8(writer, 1)
+		FfiConverterIterationOrderINSTANCE.Write(writer, *value)
+	}
+}
+
+type FfiDestroyerOptionalIterationOrder struct{}
+
+func (_ FfiDestroyerOptionalIterationOrder) Destroy(value *IterationOrder) {
+	if value != nil {
+		FfiDestroyerIterationOrder{}.Destroy(*value)
 	}
 }
 
