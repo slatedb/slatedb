@@ -7239,12 +7239,15 @@ type ReadOptions struct {
 	Dirty bool
 	// Whether fetched blocks should be inserted into the block cache.
 	CacheBlocks bool
+	// Sources consulted by this read. An empty list means "all sources".
+	ReadSources ReadSources
 }
 
 func (r *ReadOptions) Destroy() {
 	FfiDestroyerDurabilityLevel{}.Destroy(r.DurabilityFilter)
 	FfiDestroyerBool{}.Destroy(r.Dirty)
 	FfiDestroyerBool{}.Destroy(r.CacheBlocks)
+	FfiDestroyerReadSources{}.Destroy(r.ReadSources)
 }
 
 type FfiConverterReadOptions struct{}
@@ -7260,6 +7263,7 @@ func (c FfiConverterReadOptions) Read(reader io.Reader) ReadOptions {
 		FfiConverterDurabilityLevelINSTANCE.Read(reader),
 		FfiConverterBoolINSTANCE.Read(reader),
 		FfiConverterBoolINSTANCE.Read(reader),
+		FfiConverterReadSourcesINSTANCE.Read(reader),
 	}
 }
 
@@ -7275,11 +7279,54 @@ func (c FfiConverterReadOptions) Write(writer io.Writer, value ReadOptions) {
 	FfiConverterDurabilityLevelINSTANCE.Write(writer, value.DurabilityFilter)
 	FfiConverterBoolINSTANCE.Write(writer, value.Dirty)
 	FfiConverterBoolINSTANCE.Write(writer, value.CacheBlocks)
+	FfiConverterReadSourcesINSTANCE.Write(writer, value.ReadSources)
 }
 
 type FfiDestroyerReadOptions struct{}
 
 func (_ FfiDestroyerReadOptions) Destroy(value ReadOptions) {
+	value.Destroy()
+}
+
+// Source set consulted by point reads and scans.
+type ReadSources struct {
+	// Sources that should be included. An empty list means "all sources".
+	Sources []ReadSource
+}
+
+func (r *ReadSources) Destroy() {
+	FfiDestroyerSequenceReadSource{}.Destroy(r.Sources)
+}
+
+type FfiConverterReadSources struct{}
+
+var FfiConverterReadSourcesINSTANCE = FfiConverterReadSources{}
+
+func (c FfiConverterReadSources) Lift(rb RustBufferI) ReadSources {
+	return LiftFromRustBuffer[ReadSources](c, rb)
+}
+
+func (c FfiConverterReadSources) Read(reader io.Reader) ReadSources {
+	return ReadSources{
+		FfiConverterSequenceReadSourceINSTANCE.Read(reader),
+	}
+}
+
+func (c FfiConverterReadSources) Lower(value ReadSources) C.RustBuffer {
+	return LowerIntoRustBuffer[ReadSources](c, value)
+}
+
+func (c FfiConverterReadSources) LowerExternal(value ReadSources) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[ReadSources](c, value))
+}
+
+func (c FfiConverterReadSources) Write(writer io.Writer, value ReadSources) {
+	FfiConverterSequenceReadSourceINSTANCE.Write(writer, value.Sources)
+}
+
+type FfiDestroyerReadSources struct{}
+
+func (_ FfiDestroyerReadSources) Destroy(value ReadSources) {
 	value.Destroy()
 }
 
@@ -7419,6 +7466,8 @@ type ScanOptions struct {
 	CacheBlocks bool
 	// Maximum number of concurrent fetch tasks used by the scan.
 	MaxFetchTasks uint64
+	// Sources consulted by this scan. An empty list means "all sources".
+	ReadSources ReadSources
 }
 
 func (r *ScanOptions) Destroy() {
@@ -7427,6 +7476,7 @@ func (r *ScanOptions) Destroy() {
 	FfiDestroyerUint64{}.Destroy(r.ReadAheadBytes)
 	FfiDestroyerBool{}.Destroy(r.CacheBlocks)
 	FfiDestroyerUint64{}.Destroy(r.MaxFetchTasks)
+	FfiDestroyerReadSources{}.Destroy(r.ReadSources)
 }
 
 type FfiConverterScanOptions struct{}
@@ -7444,6 +7494,7 @@ func (c FfiConverterScanOptions) Read(reader io.Reader) ScanOptions {
 		FfiConverterUint64INSTANCE.Read(reader),
 		FfiConverterBoolINSTANCE.Read(reader),
 		FfiConverterUint64INSTANCE.Read(reader),
+		FfiConverterReadSourcesINSTANCE.Read(reader),
 	}
 }
 
@@ -7461,6 +7512,7 @@ func (c FfiConverterScanOptions) Write(writer io.Writer, value ScanOptions) {
 	FfiConverterUint64INSTANCE.Write(writer, value.ReadAheadBytes)
 	FfiConverterBoolINSTANCE.Write(writer, value.CacheBlocks)
 	FfiConverterUint64INSTANCE.Write(writer, value.MaxFetchTasks)
+	FfiConverterReadSourcesINSTANCE.Write(writer, value.ReadSources)
 }
 
 type FfiDestroyerScanOptions struct{}
@@ -8355,6 +8407,91 @@ func (_ FfiDestroyerMetricValue) Destroy(value MetricValue) {
 	value.Destroy()
 }
 
+// Options that control a point read.
+type ReadSource interface {
+	Destroy()
+}
+
+// Read from in-memory memtables.
+type ReadSourceMemtable struct {
+}
+
+func (e ReadSourceMemtable) Destroy() {
+}
+
+// Read from the L0 SST with this ULID.
+type ReadSourceL0 struct {
+	Field0 string
+}
+
+func (e ReadSourceL0) Destroy() {
+	FfiDestroyerString{}.Destroy(e.Field0)
+}
+
+// Read from the sorted run with this manifest id.
+type ReadSourceSortedRun struct {
+	Field0 uint32
+}
+
+func (e ReadSourceSortedRun) Destroy() {
+	FfiDestroyerUint32{}.Destroy(e.Field0)
+}
+
+type FfiConverterReadSource struct{}
+
+var FfiConverterReadSourceINSTANCE = FfiConverterReadSource{}
+
+func (c FfiConverterReadSource) Lift(rb RustBufferI) ReadSource {
+	return LiftFromRustBuffer[ReadSource](c, rb)
+}
+
+func (c FfiConverterReadSource) Lower(value ReadSource) C.RustBuffer {
+	return LowerIntoRustBuffer[ReadSource](c, value)
+}
+
+func (c FfiConverterReadSource) LowerExternal(value ReadSource) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[ReadSource](c, value))
+}
+func (FfiConverterReadSource) Read(reader io.Reader) ReadSource {
+	id := readInt32(reader)
+	switch id {
+	case 1:
+		return ReadSourceMemtable{}
+	case 2:
+		return ReadSourceL0{
+			FfiConverterStringINSTANCE.Read(reader),
+		}
+	case 3:
+		return ReadSourceSortedRun{
+			FfiConverterUint32INSTANCE.Read(reader),
+		}
+	default:
+		panic(fmt.Sprintf("invalid enum value %v in FfiConverterReadSource.Read()", id))
+	}
+}
+
+func (FfiConverterReadSource) Write(writer io.Writer, value ReadSource) {
+	switch variant_value := value.(type) {
+	case ReadSourceMemtable:
+		writeInt32(writer, 1)
+	case ReadSourceL0:
+		writeInt32(writer, 2)
+		FfiConverterStringINSTANCE.Write(writer, variant_value.Field0)
+	case ReadSourceSortedRun:
+		writeInt32(writer, 3)
+		FfiConverterUint32INSTANCE.Write(writer, variant_value.Field0)
+	default:
+		_ = variant_value
+		panic(fmt.Sprintf("invalid enum value `%v` in FfiConverterReadSource.Write", value))
+	}
+}
+
+type FfiDestroyerReadSource struct{}
+
+func (_ FfiDestroyerReadSource) Destroy(value ReadSource) {
+	value.Destroy()
+}
+
 // Kind of row entry stored in WAL iteration results.
 type RowEntryKind uint
 
@@ -9230,6 +9367,53 @@ type FfiDestroyerSequenceMetricLabel struct{}
 func (FfiDestroyerSequenceMetricLabel) Destroy(sequence []MetricLabel) {
 	for _, value := range sequence {
 		FfiDestroyerMetricLabel{}.Destroy(value)
+	}
+}
+
+type FfiConverterSequenceReadSource struct{}
+
+var FfiConverterSequenceReadSourceINSTANCE = FfiConverterSequenceReadSource{}
+
+func (c FfiConverterSequenceReadSource) Lift(rb RustBufferI) []ReadSource {
+	return LiftFromRustBuffer[[]ReadSource](c, rb)
+}
+
+func (c FfiConverterSequenceReadSource) Read(reader io.Reader) []ReadSource {
+	length := readInt32(reader)
+	if length == 0 {
+		return nil
+	}
+	result := make([]ReadSource, 0, length)
+	for i := int32(0); i < length; i++ {
+		result = append(result, FfiConverterReadSourceINSTANCE.Read(reader))
+	}
+	return result
+}
+
+func (c FfiConverterSequenceReadSource) Lower(value []ReadSource) C.RustBuffer {
+	return LowerIntoRustBuffer[[]ReadSource](c, value)
+}
+
+func (c FfiConverterSequenceReadSource) LowerExternal(value []ReadSource) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[[]ReadSource](c, value))
+}
+
+func (c FfiConverterSequenceReadSource) Write(writer io.Writer, value []ReadSource) {
+	if len(value) > math.MaxInt32 {
+		panic("[]ReadSource is too large to fit into Int32")
+	}
+
+	writeInt32(writer, int32(len(value)))
+	for _, item := range value {
+		FfiConverterReadSourceINSTANCE.Write(writer, item)
+	}
+}
+
+type FfiDestroyerSequenceReadSource struct{}
+
+func (FfiDestroyerSequenceReadSource) Destroy(sequence []ReadSource) {
+	for _, value := range sequence {
+		FfiDestroyerReadSource{}.Destroy(value)
 	}
 }
 
