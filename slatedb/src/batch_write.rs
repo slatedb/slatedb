@@ -139,12 +139,14 @@ impl DbInner {
             }
         }
 
+        // Batch-local merge folding is part of write assembly, not persisted-state
+        // resolution, so it is intentionally excluded from merge_operator_operands.
         let entries = batch
             .extract_entries(
                 commit_seq,
                 now,
                 self.settings.default_ttl,
-                self.reader.write_merge_operator.clone(),
+                self.merge_operator.clone(),
             )
             .await?;
 

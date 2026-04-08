@@ -6,7 +6,7 @@ use crate::db_state::ManifestCore;
 use crate::db_stats::DbStats;
 use crate::iter::RowEntryIterator;
 use crate::mem_table::{ImmutableMemtable, KVTable};
-use crate::merge_operator::{instrument_merge_operator, MergeOperatorPath, MergeOperatorType};
+use crate::merge_operator::{instrument_merge_operator, MergeOperatorType};
 use crate::oracle::Oracle;
 use crate::sorted_run_iterator::SortedRunIterator;
 use crate::sst_iter::{SstIterator, SstIteratorOptions};
@@ -39,7 +39,6 @@ pub(crate) struct Reader {
     pub(crate) mono_clock: Arc<MonotonicClock>,
     pub(crate) oracle: Arc<dyn Oracle>,
     pub(crate) read_merge_operator: Option<MergeOperatorType>,
-    pub(crate) write_merge_operator: Option<MergeOperatorType>,
 }
 
 impl Reader {
@@ -50,11 +49,11 @@ impl Reader {
         oracle: Arc<dyn Oracle>,
         merge_operator: Option<MergeOperatorType>,
     ) -> Self {
-        let read_merge_operator = merge_operator.clone().map(|merge_operator| {
-            instrument_merge_operator(merge_operator, db_stats.clone(), MergeOperatorPath::Read)
-        });
-        let write_merge_operator = merge_operator.map(|merge_operator| {
-            instrument_merge_operator(merge_operator, db_stats.clone(), MergeOperatorPath::Write)
+        let read_merge_operator = merge_operator.map(|merge_operator| {
+            instrument_merge_operator(
+                merge_operator,
+                db_stats.merge_operator_read_operands.clone(),
+            )
         });
 
         Self {
@@ -63,7 +62,6 @@ impl Reader {
             mono_clock,
             oracle,
             read_merge_operator,
-            write_merge_operator,
         }
     }
 
@@ -424,18 +422,15 @@ impl Reader {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db_stats::{
-        MERGE_OPERATOR_OPERANDS, MERGE_OPERATOR_PATH_LABEL, MERGE_OPERATOR_READ_PATH,
-        MERGE_OPERATOR_WRITE_PATH,
+    use crate::merge_operator::{
+        MergeOperator, MergeOperatorError, MERGE_OPERATOR_MEMTABLE_FLUSH_PATH,
+        MERGE_OPERATOR_READ_PATH,
     };
-    use crate::merge_operator::{MergeOperator, MergeOperatorError};
+    use crate::test_utils::lookup_merge_operator_operands;
     use crate::types::{RowEntry, ValueDeletable};
     use bytes::Bytes;
     use rstest::rstest;
     use slatedb_common::clock::{MockSystemClock, SystemClock};
-    use slatedb_common::metrics::{
-        lookup_metric, DefaultMetricsRecorder, MetricLevel, MetricsRecorderHelper,
-    };
 
     use crate::batch::WriteBatch;
     use crate::clock::MonotonicClock;
@@ -448,8 +443,7 @@ mod tests {
     use crate::tablestore::TableStore;
     use object_store::{memory::InMemory, path::Path, ObjectStore};
     use slatedb_common::metrics::{
-        lookup_metric_with_labels, DefaultMetricsRecorder, MetricLevel, MetricsRecorder,
-        MetricsRecorderHelper,
+        lookup_metric, DefaultMetricsRecorder, MetricLevel, MetricsRecorder, MetricsRecorderHelper,
     };
     use std::collections::HashMap;
     use std::sync::Arc;
@@ -1772,17 +1766,6 @@ mod tests {
         )
     }
 
-    fn merge_operator_operands(
-        recorder: &DefaultMetricsRecorder,
-        path: &'static str,
-    ) -> Option<i64> {
-        lookup_metric_with_labels(
-            recorder,
-            MERGE_OPERATOR_OPERANDS,
-            &[(MERGE_OPERATOR_PATH_LABEL, path)],
-        )
-    }
-
     #[tokio::test]
     async fn should_record_merge_operator_operands_on_read_path() -> Result<(), SlateDBError> {
         let entries = vec![
@@ -1803,11 +1786,14 @@ mod tests {
         let reader = build_reader(&test_db_state, db_stats, true).await;
 
         assert_eq!(
-            merge_operator_operands(metrics_recorder.as_ref(), MERGE_OPERATOR_READ_PATH),
+            lookup_merge_operator_operands(metrics_recorder.as_ref(), MERGE_OPERATOR_READ_PATH),
             Some(0)
         );
         assert_eq!(
-            merge_operator_operands(metrics_recorder.as_ref(), MERGE_OPERATOR_WRITE_PATH),
+            lookup_merge_operator_operands(
+                metrics_recorder.as_ref(),
+                MERGE_OPERATOR_MEMTABLE_FLUSH_PATH,
+            ),
             Some(0)
         );
 
@@ -1822,11 +1808,14 @@ mod tests {
             .await?;
         assert_eq!(result.unwrap().value, Bytes::from_static(b"ab"));
         assert_eq!(
-            merge_operator_operands(metrics_recorder.as_ref(), MERGE_OPERATOR_READ_PATH),
+            lookup_merge_operator_operands(metrics_recorder.as_ref(), MERGE_OPERATOR_READ_PATH),
             Some(3)
         );
         assert_eq!(
-            merge_operator_operands(metrics_recorder.as_ref(), MERGE_OPERATOR_WRITE_PATH),
+            lookup_merge_operator_operands(
+                metrics_recorder.as_ref(),
+                MERGE_OPERATOR_MEMTABLE_FLUSH_PATH,
+            ),
             Some(0)
         );
 
@@ -1864,11 +1853,14 @@ mod tests {
             .is_none());
 
         assert_eq!(
-            merge_operator_operands(metrics_recorder.as_ref(), MERGE_OPERATOR_READ_PATH),
+            lookup_merge_operator_operands(metrics_recorder.as_ref(), MERGE_OPERATOR_READ_PATH),
             Some(6)
         );
         assert_eq!(
-            merge_operator_operands(metrics_recorder.as_ref(), MERGE_OPERATOR_WRITE_PATH),
+            lookup_merge_operator_operands(
+                metrics_recorder.as_ref(),
+                MERGE_OPERATOR_MEMTABLE_FLUSH_PATH,
+            ),
             Some(0)
         );
 

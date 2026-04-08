@@ -984,6 +984,12 @@ pub mod stats {
     use slatedb_common::metrics::{CounterFn, GaugeFn, MetricsRecorderHelper, UpDownCounterFn};
     use std::sync::Arc;
 
+    pub use crate::merge_operator::MERGE_OPERATOR_OPERANDS;
+
+    use crate::merge_operator::{
+        MERGE_OPERATOR_COMPACT_PATH, MERGE_OPERATOR_OPERANDS_DESCRIPTION, MERGE_OPERATOR_PATH_LABEL,
+    };
+
     macro_rules! compactor_stat_name {
         ($suffix:expr) => {
             concat!("slatedb.compactor.", $suffix)
@@ -1004,6 +1010,7 @@ pub mod stats {
         pub(crate) bytes_compacted: Arc<dyn CounterFn>,
         pub(crate) total_bytes_being_compacted: Arc<dyn GaugeFn>,
         pub(crate) total_throughput: Arc<dyn GaugeFn>,
+        pub(crate) merge_operator_compact_operands: Arc<dyn CounterFn>,
     }
 
     impl CompactionStats {
@@ -1014,6 +1021,11 @@ pub mod stats {
                 bytes_compacted: recorder.counter(BYTES_COMPACTED).register(),
                 total_bytes_being_compacted: recorder.gauge(TOTAL_BYTES_BEING_COMPACTED).register(),
                 total_throughput: recorder.gauge(TOTAL_THROUGHPUT_BYTES_PER_SEC).register(),
+                merge_operator_compact_operands: recorder
+                    .counter(MERGE_OPERATOR_OPERANDS)
+                    .labels(&[(MERGE_OPERATOR_PATH_LABEL, MERGE_OPERATOR_COMPACT_PATH)])
+                    .description(MERGE_OPERATOR_OPERANDS_DESCRIPTION)
+                    .register(),
             }
         }
     }
@@ -1529,6 +1541,82 @@ mod tests {
         assert_eq!(result, Some(Bytes::from("abc")));
         let result = db.get(b"key2").await.unwrap();
         assert_eq!(result, Some(Bytes::from("x")));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn should_record_merge_operator_operands_on_compact_path() {
+        use crate::merge_operator::MERGE_OPERATOR_COMPACT_PATH;
+        use crate::test_utils::{
+            lookup_merge_operator_operands, OnDemandCompactionSchedulerSupplier,
+        };
+        use slatedb_common::metrics::DefaultMetricsRecorder;
+
+        let os = Arc::new(InMemory::new());
+        let system_clock = Arc::new(MockSystemClock::new());
+        let compaction_scheduler = Arc::new(OnDemandCompactionSchedulerSupplier::new(Arc::new(
+            |state| state.manifest().l0.len() >= 2,
+        )));
+        let metrics_recorder = Arc::new(DefaultMetricsRecorder::new());
+
+        let db = Db::builder(PATH, os.clone())
+            .with_settings(db_options(None))
+            .with_system_clock(system_clock.clone())
+            .with_metrics_recorder(metrics_recorder.clone())
+            .with_compactor_builder(compactor_builder_with_scheduler(
+                os.clone(),
+                compaction_scheduler,
+                system_clock.clone(),
+            ))
+            .with_merge_operator(Arc::new(StringConcatMergeOperator))
+            .build()
+            .await
+            .unwrap();
+
+        assert_eq!(
+            lookup_merge_operator_operands(&metrics_recorder, MERGE_OPERATOR_COMPACT_PATH),
+            Some(0)
+        );
+
+        db.merge_with_options(
+            b"key1",
+            b"a",
+            &MergeOptions::default(),
+            &WriteOptions {
+                await_durable: false,
+            },
+        )
+        .await
+        .unwrap();
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::MemTable,
+        })
+        .await
+        .unwrap();
+
+        db.merge_with_options(
+            b"key1",
+            b"b",
+            &MergeOptions::default(),
+            &WriteOptions {
+                await_durable: false,
+            },
+        )
+        .await
+        .unwrap();
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::MemTable,
+        })
+        .await
+        .unwrap();
+
+        let db_state = await_compaction(&db, Some(system_clock)).await;
+        assert!(db_state.is_some(), "db was not compacted");
+        assert!(
+            lookup_merge_operator_operands(&metrics_recorder, MERGE_OPERATOR_COMPACT_PATH)
+                .is_some_and(|value| value > 0)
+        );
+
+        db.close().await.unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
