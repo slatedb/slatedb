@@ -28,6 +28,9 @@ pub(crate) enum SlateDbError {
     #[error("invalid checkpoint_id UUID: {source}")]
     InvalidCheckpointId { source: uuid::Error },
 
+    #[error("invalid L0 SST ULID: {source}")]
+    InvalidL0SstId { source: ulid::DecodeError },
+
     #[error("range start cannot be empty")]
     EmptyRangeStart,
 

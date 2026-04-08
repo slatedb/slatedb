@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use crate::error::{Error, SlateDbError};
+use ulid::Ulid;
 
 /// Minimum durability level required for data returned by reads and scans.
 #[derive(Clone, Copy, Debug, Default, uniffi::Enum)]
@@ -119,6 +120,52 @@ impl From<Ttl> for slatedb::config::Ttl {
 }
 
 /// Options that control a point read.
+#[derive(Clone, Debug, uniffi::Enum)]
+pub enum ReadSource {
+    /// Read from in-memory memtables.
+    Memtable,
+    /// Read from the L0 SST with this ULID.
+    L0(String),
+    /// Read from the sorted run with this manifest id.
+    SortedRun(u32),
+}
+
+impl TryFrom<ReadSource> for slatedb::config::ReadSource {
+    type Error = Error;
+
+    fn try_from(value: ReadSource) -> Result<Self, Self::Error> {
+        match value {
+            ReadSource::Memtable => Ok(Self::Memtable),
+            ReadSource::L0(id) => {
+                let id = Ulid::from_string(&id)
+                    .map_err(|source| Error::from(SlateDbError::InvalidL0SstId { source }))?;
+                Ok(Self::L0(id))
+            }
+            ReadSource::SortedRun(id) => Ok(Self::SortedRun(id)),
+        }
+    }
+}
+
+/// Source set consulted by point reads and scans.
+#[derive(Clone, Debug, Default, uniffi::Record)]
+pub struct ReadSources {
+    /// Sources that should be included. An empty list means "all sources".
+    pub sources: Vec<ReadSource>,
+}
+
+impl TryFrom<ReadSources> for slatedb::config::ReadSources {
+    type Error = Error;
+
+    fn try_from(value: ReadSources) -> Result<Self, Self::Error> {
+        let mut read_sources = slatedb::config::ReadSources::new(Vec::new());
+        for source in value.sources {
+            read_sources = read_sources.with_source(source.try_into()?);
+        }
+        Ok(read_sources)
+    }
+}
+
+/// Options that control a point read.
 #[derive(Clone, Debug, uniffi::Record)]
 pub struct ReadOptions {
     /// Minimum durability level a returned row must satisfy.
@@ -127,6 +174,8 @@ pub struct ReadOptions {
     pub dirty: bool,
     /// Whether fetched blocks should be inserted into the block cache.
     pub cache_blocks: bool,
+    /// Sources consulted by this read. An empty list means "all sources".
+    pub read_sources: ReadSources,
 }
 
 impl Default for ReadOptions {
@@ -135,17 +184,21 @@ impl Default for ReadOptions {
             durability_filter: DurabilityLevel::default(),
             dirty: false,
             cache_blocks: true,
+            read_sources: ReadSources::default(),
         }
     }
 }
 
-impl From<ReadOptions> for slatedb::config::ReadOptions {
-    fn from(value: ReadOptions) -> Self {
-        slatedb::config::ReadOptions {
+impl TryFrom<ReadOptions> for slatedb::config::ReadOptions {
+    type Error = Error;
+
+    fn try_from(value: ReadOptions) -> Result<Self, Self::Error> {
+        Ok(slatedb::config::ReadOptions {
             durability_filter: value.durability_filter.into(),
             dirty: value.dirty,
             cache_blocks: value.cache_blocks,
-        }
+            read_sources: value.read_sources.try_into()?,
+        })
     }
 }
 
@@ -198,6 +251,8 @@ pub struct ScanOptions {
     pub cache_blocks: bool,
     /// Maximum number of concurrent fetch tasks used by the scan.
     pub max_fetch_tasks: u64,
+    /// Sources consulted by this scan. An empty list means "all sources".
+    pub read_sources: ReadSources,
 }
 
 impl Default for ScanOptions {
@@ -208,6 +263,7 @@ impl Default for ScanOptions {
             read_ahead_bytes: 1,
             cache_blocks: false,
             max_fetch_tasks: 1,
+            read_sources: ReadSources::default(),
         }
     }
 }
@@ -230,6 +286,7 @@ impl TryFrom<ScanOptions> for slatedb::config::ScanOptions {
                     field: "max_fetch_tasks",
                 })
             })?,
+            read_sources: value.read_sources.try_into()?,
         })
     }
 }
