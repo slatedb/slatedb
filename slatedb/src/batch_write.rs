@@ -201,11 +201,7 @@ impl DbInner {
         self.record_memtable_sequence(commit_seq);
 
         // maybe freeze the memtable.
-        {
-            let last_flushed_wal_id = self.wal_buffer.recent_flushed_wal_id();
-            let mut guard = self.state.write();
-            self.maybe_freeze_memtable(&mut guard, last_flushed_wal_id)?;
-        }
+        self.maybe_freeze_current_memtable()?;
 
         let write_handle = WriteHandle::new(commit_seq, now);
 

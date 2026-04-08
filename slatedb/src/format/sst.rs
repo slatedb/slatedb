@@ -473,6 +473,14 @@ pub(crate) struct EncodedSsTable {
 }
 
 impl EncodedSsTable {
+    pub(crate) fn remaining_len(&self) -> usize {
+        self.unconsumed_blocks
+            .iter()
+            .map(|chunk| chunk.encoded_bytes.len())
+            .sum::<usize>()
+            + self.footer.len()
+    }
+
     pub(crate) fn put_remaining<T: BufMut>(&self, buf: &mut T) {
         for chunk in self.unconsumed_blocks.iter() {
             buf.put_slice(chunk.encoded_bytes.as_ref())
@@ -481,12 +489,7 @@ impl EncodedSsTable {
     }
 
     pub(crate) fn remaining_as_bytes(&self) -> Bytes {
-        let total_size = self
-            .unconsumed_blocks
-            .iter()
-            .map(|chunk| chunk.encoded_bytes.len())
-            .sum::<usize>()
-            + self.footer.len();
+        let total_size = self.remaining_len();
         let mut data = Vec::<u8>::with_capacity(total_size);
         self.put_remaining(&mut data);
         Bytes::from(data)

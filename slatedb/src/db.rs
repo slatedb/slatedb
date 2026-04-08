@@ -60,7 +60,7 @@ use crate::iter::IterationOrder;
 use crate::manifest::store::FenceableManifest;
 use crate::manifest::{Manifest, ManifestCore};
 use crate::mem_table::WritableKVTable;
-use crate::mem_table_flush::{MemtableFlushMsg, MEMTABLE_FLUSHER_TASK_NAME};
+use crate::memtable_flusher::{FlushResult, FlushTarget, MemtableFlusher};
 use crate::oracle::{DbOracle, Oracle};
 use crate::paths::PathResolver;
 use crate::rand::DbRand;
@@ -87,7 +87,7 @@ pub(crate) struct DbInner {
     pub(crate) state: Arc<RwLock<DbState>>,
     pub(crate) settings: Settings,
     pub(crate) table_store: Arc<TableStore>,
-    pub(crate) memtable_flush_notifier: SafeSender<MemtableFlushMsg>,
+    pub(crate) memtable_flusher: Arc<MemtableFlusher>,
     pub(crate) write_notifier: SafeSender<WriteBatchMessage>,
     pub(crate) db_stats: DbStats,
     /// Kept alive so the underlying `MetricsRecorder` is not dropped while
@@ -121,7 +121,7 @@ impl DbInner {
         rand: Arc<DbRand>,
         table_store: Arc<TableStore>,
         manifest: DirtyObject<Manifest>,
-        memtable_flush_notifier: SafeSender<MemtableFlushMsg>,
+        memtable_flusher: Arc<MemtableFlusher>,
         write_notifier: SafeSender<WriteBatchMessage>,
         recorder: MetricsRecorderHelper,
         fp_registry: Arc<FailPointRegistry>,
@@ -176,10 +176,10 @@ impl DbInner {
         let db_inner = Self {
             state,
             settings,
+            memtable_flusher,
             oracle,
             wal_enabled,
             table_store,
-            memtable_flush_notifier,
             wal_buffer,
             write_notifier,
             db_stats,
@@ -390,8 +390,6 @@ impl DbInner {
                     }
                 };
 
-                self.flush_immutable_memtables().await?;
-
                 let timeout_fut = self.system_clock.sleep(Duration::from_secs(30));
 
                 tokio::select! {
@@ -408,31 +406,25 @@ impl DbInner {
         Ok(())
     }
 
-    pub(crate) async fn flush_wals(&self) -> Result<(), SlateDBError> {
-        self.wal_buffer.flush().await
+    pub(crate) async fn flush_wals(&self) -> Result<u64, SlateDBError> {
+        self.wal_buffer.flush().await?;
+        Ok(self.wal_buffer.recent_flushed_wal_id())
     }
 
-    // use to manually flush memtables
-    async fn flush_immutable_memtables(&self) -> Result<(), SlateDBError> {
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        self.memtable_flush_notifier
-            .send(MemtableFlushMsg::FlushImmutableMemtables { sender: Some(tx) })?;
-        rx.await?
+    async fn flush_imm_memtables(&self, target: FlushTarget) -> Result<FlushResult, SlateDBError> {
+        self.memtable_flusher().flush(target).await
     }
 
-    pub(crate) async fn flush_memtables(&self) -> Result<(), SlateDBError> {
-        {
-            let last_flushed_wal_id = self.wal_buffer.recent_flushed_wal_id();
-            let mut guard = self.state.write();
-            if !guard.memtable().is_empty() {
-                guard.freeze_memtable(last_flushed_wal_id);
-                true
-            } else {
-                false
-            }
-        };
+    pub(crate) async fn flush_memtables(
+        &self,
+        target: FlushTarget,
+    ) -> Result<FlushResult, SlateDBError> {
+        self.freeze_current_memtable()?;
+        self.flush_imm_memtables(target).await
+    }
 
-        self.flush_immutable_memtables().await
+    pub(crate) fn memtable_flusher(&self) -> &MemtableFlusher {
+        &self.memtable_flusher
     }
 
     /// Flush in-memory writes to disk. See [`Db::flush`] for details.
@@ -495,12 +487,17 @@ impl DbInner {
         match options.flush_type {
             FlushType::Wal => {
                 if self.wal_enabled {
-                    self.flush_wals().await
+                    self.flush_wals().await.map(|_| ())
                 } else {
                     Err(SlateDBError::WalDisabled)
                 }
             }
-            FlushType::MemTable => self.flush_memtables().await,
+            FlushType::MemTable => {
+                if self.wal_enabled {
+                    self.flush_wals().await?;
+                }
+                self.flush_memtables(FlushTarget::All).await.map(|_| ())
+            }
         }
     }
 
@@ -694,6 +691,8 @@ impl Db {
             }
         }
 
+        MemtableFlusher::shutdown(&self.task_executor).await;
+
         if let Err(e) = self.task_executor.shutdown_task(COMPACTOR_TASK_NAME).await {
             warn!("failed to shutdown compactor task [error={:?}]", e);
         }
@@ -712,14 +711,6 @@ impl Db {
 
         if let Err(e) = self.task_executor.shutdown_task(WAL_BUFFER_TASK_NAME).await {
             warn!("failed to shutdown wal writer task [error={:?}]", e);
-        }
-
-        if let Err(e) = self
-            .task_executor
-            .shutdown_task(MEMTABLE_FLUSHER_TASK_NAME)
-            .await
-        {
-            warn!("failed to shutdown memtable writer task [error={:?}]", e);
         }
 
         info!("db closed");
@@ -1724,7 +1715,6 @@ mod tests {
     use crate::wal_reader::WalReader;
     use crate::{proptest_util, test_utils, CloseReason, CompactorBuilder, KeyValue};
     use async_trait::async_trait;
-    use chrono::TimeDelta;
     use chrono::{TimeZone, Utc};
     use fail_parallel::FailPointRegistry;
     use futures::{future, future::join_all, StreamExt};
@@ -3737,7 +3727,7 @@ mod tests {
         // flusher is paused at the failpoint above.
         let flush_handle = {
             let inner = Arc::clone(&db.inner);
-            tokio::spawn(async move { inner.flush_memtables().await })
+            tokio::spawn(async move { inner.flush_memtables(FlushTarget::All).await })
         };
 
         let mut wrote_l0_sst = false;
@@ -4702,9 +4692,7 @@ mod tests {
         assert!(result.is_ok(), "Failed to write key1");
         assert_eq!(db.inner.wal_buffer.recent_flushed_wal_id(), 2);
 
-        // force a flush (even if the memtable is not full)
-        let flush_result = db.inner.flush_memtables().await;
-        assert!(flush_result.is_err());
+        // Let background flush attempts fail while WAL durability preserves recovery.
         db.close().await.unwrap();
 
         // pause write-compacted-sst-io-error to prevent immutable tables
@@ -5375,60 +5363,6 @@ mod tests {
         kv_store.close().await.unwrap();
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn test_memtable_flush_cleanup_when_fenced() {
-        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let path = "/tmp/test_flush_cleanup";
-        let fp_registry = Arc::new(FailPointRegistry::new());
-
-        let mut options = test_db_options(0, 32, None);
-        options.flush_interval = None;
-        options.manifest_poll_interval = TimeDelta::MAX.to_std().unwrap();
-
-        let db1 = Db::builder(path, object_store.clone())
-            .with_settings(options.clone())
-            .with_fp_registry(fp_registry.clone())
-            .build()
-            .await
-            .unwrap();
-
-        // Allow WAL flushes, but pause compacted (L0 SST) flushes. Have to do this because the
-        // WAL sometimes triggers a maybe_memtable_flush. We don't want the memtable flush to
-        // proceed until the fence happens below..
-        fail_parallel::cfg(fp_registry.clone(), "write-compacted-sst-io-error", "pause").unwrap();
-        db1.put(b"k", b"v").await.unwrap();
-
-        // Fence the db by opening a new one
-        let manifest_store = Arc::new(ManifestStore::new(&Path::from(path), object_store.clone()));
-        let stored_manifest =
-            StoredManifest::load(manifest_store.clone(), Arc::new(DefaultSystemClock::new()))
-                .await
-                .unwrap();
-        FenceableManifest::init_writer(
-            stored_manifest,
-            Duration::from_secs(300),
-            Arc::new(DefaultSystemClock::new()),
-        )
-        .await
-        .unwrap();
-
-        // Unpause to allow L0 SST writes to proceed
-        fail_parallel::cfg(fp_registry.clone(), "write-compacted-sst-io-error", "off").unwrap();
-
-        // Try to flush memtables, but they should fail due to the fence
-        let result = db1.inner.flush_memtables().await;
-        assert!(matches!(result, Err(SlateDBError::Fenced)));
-        assert!(db1
-            .inner
-            .table_store
-            .list_compacted_ssts(..)
-            .await
-            .unwrap()
-            .is_empty());
-
-        db1.close().await.unwrap();
-    }
-
     #[tokio::test]
     async fn test_wal_store_reconfiguration_fails() {
         let object_store = Arc::new(InMemory::new());
@@ -5545,6 +5479,7 @@ mod tests {
             manifest_update_timeout: Duration::from_secs(300),
             max_unflushed_bytes: 134_217_728,
             l0_max_ssts: 8,
+            l0_flush_parallelism: 1,
             min_filter_keys,
             filter_bits_per_key: 10,
             l0_sst_size_bytes,
@@ -5620,7 +5555,7 @@ mod tests {
 
         // Test 1: Force memtable flush to update recent_snapshot_min_seq
         db.put(b"key1", b"value1").await.unwrap();
-        db.inner.flush_memtables().await.unwrap();
+        db.inner.flush_memtables(FlushTarget::All).await.unwrap();
 
         {
             let state = db.inner.state.read();
@@ -5638,7 +5573,7 @@ mod tests {
 
         // Write more data and force flush
         db.put(b"key2", b"value2").await.unwrap();
-        db.inner.flush_memtables().await.unwrap();
+        db.inner.flush_memtables(FlushTarget::All).await.unwrap();
 
         // Verify that snapshot_manager.min_active_seq() returns the snapshot seq
         let min_active_seq = db.inner.snapshot_manager.min_active_seq();
@@ -5660,7 +5595,7 @@ mod tests {
 
         // Write more data and flush to trigger update
         db.put(b"key3", b"value3").await.unwrap();
-        db.inner.flush_memtables().await.unwrap();
+        db.inner.flush_memtables(FlushTarget::All).await.unwrap();
 
         // Now recent_snapshot_min_seq should be updated to higher value (no active snapshots)
         {
@@ -5689,13 +5624,19 @@ mod tests {
         }
 
         db.put(b"key1", b"value1").await.unwrap();
-        db.inner.flush_memtables().await.unwrap();
+        db.inner
+            .flush_memtables(crate::memtable_flusher::FlushTarget::All)
+            .await
+            .unwrap();
 
         let txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
         let txn_seq = txn.seqnum();
 
         db.put(b"key2", b"value2").await.unwrap();
-        db.inner.flush_memtables().await.unwrap();
+        db.inner
+            .flush_memtables(crate::memtable_flusher::FlushTarget::All)
+            .await
+            .unwrap();
 
         let min_active_seq = db.inner.txn_manager.min_active_seq();
         assert_eq!(min_active_seq, Some(txn_seq));
@@ -5712,7 +5653,10 @@ mod tests {
         drop(txn);
 
         db.put(b"key3", b"value3").await.unwrap();
-        db.inner.flush_memtables().await.unwrap();
+        db.inner
+            .flush_memtables(crate::memtable_flusher::FlushTarget::All)
+            .await
+            .unwrap();
 
         {
             let state = db.inner.state.read();
@@ -5733,13 +5677,19 @@ mod tests {
         let db = Db::builder(path, object_store).build().await.unwrap();
 
         db.put(b"key1", b"value1").await.unwrap();
-        db.inner.flush_memtables().await.unwrap();
+        db.inner
+            .flush_memtables(crate::memtable_flusher::FlushTarget::All)
+            .await
+            .unwrap();
 
         let snapshot = db.snapshot().await.unwrap();
         let snapshot_seq = snapshot.seq();
 
         db.put(b"key2", b"value2").await.unwrap();
-        db.inner.flush_memtables().await.unwrap();
+        db.inner
+            .flush_memtables(crate::memtable_flusher::FlushTarget::All)
+            .await
+            .unwrap();
 
         let txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
         let txn_seq = txn.seqnum();
@@ -5752,7 +5702,10 @@ mod tests {
         assert!(snapshot_seq < txn_seq);
 
         db.put(b"key3", b"value3").await.unwrap();
-        db.inner.flush_memtables().await.unwrap();
+        db.inner
+            .flush_memtables(crate::memtable_flusher::FlushTarget::All)
+            .await
+            .unwrap();
 
         {
             let state = db.inner.state.read();
@@ -5767,7 +5720,10 @@ mod tests {
         drop(snapshot);
 
         db.put(b"key4", b"value4").await.unwrap();
-        db.inner.flush_memtables().await.unwrap();
+        db.inner
+            .flush_memtables(crate::memtable_flusher::FlushTarget::All)
+            .await
+            .unwrap();
 
         assert_eq!(db.inner.snapshot_manager.min_active_seq(), None);
         assert_eq!(db.inner.txn_manager.min_active_seq(), Some(txn_seq));
@@ -5791,13 +5747,19 @@ mod tests {
         let db = Db::builder(path, object_store).build().await.unwrap();
 
         db.put(b"key1", b"value1").await.unwrap();
-        db.inner.flush_memtables().await.unwrap();
+        db.inner
+            .flush_memtables(crate::memtable_flusher::FlushTarget::All)
+            .await
+            .unwrap();
 
         let txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
         let txn_seq = txn.seqnum();
 
         db.put(b"key2", b"value2").await.unwrap();
-        db.inner.flush_memtables().await.unwrap();
+        db.inner
+            .flush_memtables(crate::memtable_flusher::FlushTarget::All)
+            .await
+            .unwrap();
 
         let snapshot = db.snapshot().await.unwrap();
         let snapshot_seq = snapshot.seq();
@@ -5810,7 +5772,10 @@ mod tests {
         assert!(txn_seq < snapshot_seq);
 
         db.put(b"key3", b"value3").await.unwrap();
-        db.inner.flush_memtables().await.unwrap();
+        db.inner
+            .flush_memtables(crate::memtable_flusher::FlushTarget::All)
+            .await
+            .unwrap();
 
         {
             let state = db.inner.state.read();
@@ -5825,7 +5790,10 @@ mod tests {
         drop(txn);
 
         db.put(b"key4", b"value4").await.unwrap();
-        db.inner.flush_memtables().await.unwrap();
+        db.inner
+            .flush_memtables(crate::memtable_flusher::FlushTarget::All)
+            .await
+            .unwrap();
 
         assert_eq!(db.inner.txn_manager.min_active_seq(), None);
         assert_eq!(

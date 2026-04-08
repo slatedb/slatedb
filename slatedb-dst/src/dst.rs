@@ -550,8 +550,7 @@ impl Dst {
             step_count += 1;
         }
         self.run_flush().await?;
-        self.db.close().await?;
-        Ok(())
+        self.run_close().await
     }
 
     async fn run_write(
@@ -578,14 +577,14 @@ impl Dst {
         } else {
             0f64
         };
-        self.poll_await(future, flush_probability).await?;
+        self.poll_await_write(future, flush_probability).await?;
         self.state.write_batch(write_ops, write_options.now)?;
         Ok(())
     }
 
     async fn run_get(&mut self, key: &Vec<u8>, read_options: &ReadOptions) -> Result<(), Error> {
         let future = self.db.get_with_options(key, read_options);
-        let result = self.poll_await(future, 0f64).await?;
+        let result = self.poll_await(future).await?;
         let expected_val = self.state.get(key)?;
         let actual_val = result.map(|b| b.to_vec());
         assert_eq!(expected_val, actual_val);
@@ -604,7 +603,7 @@ impl Dst {
             return Ok(());
         }
         let future = self.db.scan_with_options(start_key..end_key, scan_options);
-        let mut actual_itr = self.poll_await(future, 0f64).await?;
+        let mut actual_itr = self.poll_await(future).await?;
         let expected_itr = self.state.scan(start_key, end_key)?;
 
         for (expected_key, expected_val) in expected_itr {
@@ -621,7 +620,12 @@ impl Dst {
 
     async fn run_flush(&self) -> Result<(), Error> {
         debug!("run_flush");
-        self.db.flush().await
+        self.poll_await(self.db.flush()).await
+    }
+
+    async fn run_close(&self) -> Result<(), Error> {
+        debug!("run_close");
+        self.poll_await(self.db.close()).await
     }
 
     async fn advance_system_time(&self, duration: Duration) {
@@ -629,7 +633,7 @@ impl Dst {
         self.system_clock.clone().advance(duration).await;
     }
 
-    /// Polls a future until it is ready, advancing time if it is not ready.
+    /// Polls a write future until it is ready, advancing time if it is not ready.
     ///
     /// If `flush_probability` is non-zero, a flush will be executed with the
     /// defined probability. This is to unblock `await_durable: true` writes
@@ -637,7 +641,7 @@ impl Dst {
     /// `l0_max_size_bytes` is exceeded, which never happens since we're single
     /// threaded and the first write waits for a flush. See #680 for more
     /// details.
-    async fn poll_await<T>(
+    async fn poll_await_write<T>(
         &self,
         future: impl Future<Output = Result<T, Error>>,
         flush_probability: f64,
@@ -659,8 +663,37 @@ impl Dst {
                     self.advance_system_time(Duration::from_millis(sleep_ms))
                         .await;
                     if self.rand.rng().random_bool(flush_probability) {
-                        self.db.flush().await?;
+                        self.run_flush().await?;
                     }
+                }
+            }
+        }
+    }
+
+    /// Polls a write future until it is ready, advancing time if it is not ready.
+    ///
+    /// NOTE: We duplicate the logic from `poll_await_write` so that the nested call
+    /// to `run_flush` does not recur.
+    async fn poll_await<T>(
+        &self,
+        future: impl Future<Output = Result<T, Error>>,
+    ) -> Result<T, Error> {
+        use futures::task::noop_waker_ref;
+        use std::task::Context;
+        use std::task::Poll;
+
+        let mut fut = Box::pin(future);
+        let mut cx = Context::from_waker(noop_waker_ref());
+
+        loop {
+            match fut.as_mut().poll(&mut cx) {
+                Poll::Ready(res) => {
+                    return res;
+                }
+                Poll::Pending => {
+                    let sleep_ms = self.rand.rng().random_range(0..10);
+                    self.advance_system_time(Duration::from_millis(sleep_ms))
+                        .await;
                 }
             }
         }

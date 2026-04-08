@@ -2,6 +2,7 @@ use crate::db::DbInner;
 use crate::db_state;
 use crate::db_state::SsTableHandle;
 use crate::error::SlateDBError;
+use crate::format::sst::EncodedSsTable;
 use crate::iter::RowEntryIterator;
 use crate::mem_table::KVTable;
 use crate::merge_operator::{MergeOperatorIterator, MergeOperatorRequiredIterator};
@@ -11,19 +12,26 @@ use crate::retention_iterator::RetentionIterator;
 use std::sync::Arc;
 
 impl DbInner {
-    pub(crate) async fn flush_imm_table(
+    pub(crate) async fn build_imm_sst(
         &self,
-        id: &db_state::SsTableId,
         imm_table: Arc<KVTable>,
-        write_cache: bool,
-    ) -> Result<SsTableHandle, SlateDBError> {
+    ) -> Result<EncodedSsTable, SlateDBError> {
         let mut sst_builder = self.table_store.table_builder();
-        let mut iter = self.iter_imm_table(imm_table.clone()).await?;
+        let mut iter = self.iter_imm_table(imm_table).await?;
         while let Some(entry) = iter.next().await? {
             sst_builder.add(entry).await?;
         }
 
-        let encoded_sst = sst_builder.build().await?;
+        sst_builder.build().await
+    }
+
+    pub(crate) async fn upload_compacted_sst(
+        &self,
+        id: &db_state::SsTableId,
+        imm_table: Arc<KVTable>,
+        encoded_sst: EncodedSsTable,
+        write_cache: bool,
+    ) -> Result<SsTableHandle, SlateDBError> {
         let handle = self
             .table_store
             .write_sst(id, encoded_sst, write_cache)
@@ -33,6 +41,17 @@ impl DbInner {
             .fetch_max_last_durable_tick(imm_table.last_tick());
 
         Ok(handle)
+    }
+
+    pub(crate) async fn flush_imm_table(
+        &self,
+        id: &db_state::SsTableId,
+        imm_table: Arc<KVTable>,
+        write_cache: bool,
+    ) -> Result<SsTableHandle, SlateDBError> {
+        let encoded_sst = self.build_imm_sst(imm_table.clone()).await?;
+        self.upload_compacted_sst(id, imm_table, encoded_sst, write_cache)
+            .await
     }
 
     async fn iter_imm_table(
