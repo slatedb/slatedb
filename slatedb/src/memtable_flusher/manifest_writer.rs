@@ -381,7 +381,7 @@ impl ManifestWriterHandler {
         self.apply_uploaded_state(&staged_batch)?;
 
         for uploaded in &staged_batch {
-            uploaded.imm_memtable.notify_flush_to_l0(Ok(()));
+            uploaded.imm_memtable.notify_uploaded(Ok(()));
         }
         self.db
             .db_stats

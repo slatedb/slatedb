@@ -374,9 +374,9 @@ impl DbInner {
                     continue;
                 }
 
-                let await_flush_memtable = async {
+                let await_memtable_uploaded = async {
                     if let Some(oldest_unflushed_memtable) = maybe_oldest_unflushed_memtable {
-                        oldest_unflushed_memtable.await_flush_to_l0().await
+                        oldest_unflushed_memtable.await_uploaded().await
                     } else {
                         std::future::pending().await
                     }
@@ -393,7 +393,7 @@ impl DbInner {
                 let timeout_fut = self.system_clock.sleep(Duration::from_secs(30));
 
                 tokio::select! {
-                    result = await_flush_memtable => result?,
+                    result = await_memtable_uploaded => result?,
                     result = await_flush_wal => result?,
                     _ = timeout_fut => {
                         warn!("backpressure timeout: waited 30s, no memtable/WAL flushed yet");
