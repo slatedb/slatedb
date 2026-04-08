@@ -150,8 +150,11 @@ Via settings:
 [compactor_options]
 mode = "distributed"
 worker_heartbeat_timeout_ms = 30000
-max_workers = 10
+max_workers = 4
+max_concurrent_compactions = 2
 ```
+
+`max_workers` caps the number of distinct active workers the coordinator will allow. `max_concurrent_compactions` controls how many jobs a single worker may hold simultaneously.
 
 When `mode = "distributed"`, the coordinator uses `RemoteCompactionExecutor` instead of `TokioCompactionExecutor`. Both implement the `CompactionExecutor` trait and the coordinator calls `executor.start_compaction_job()` the same way regardless of mode. `RemoteCompactionExecutor` writes a `Submitted` job to `.compactions` and polls for `Completed` rather than spawning a local task.
 
@@ -195,15 +198,18 @@ Both fields are optional (default: `""`, `0`); existing `.compactions` files req
 Workers use optimistic concurrency on `.compactions`. SlateDB implements this uniformly across all object stores, including those with native CAS support, using create-if-not-exists on sequentially-numbered files (e.g. `00000000000000000003.compactions`). Writing a new version means writing the next numbered file; if another writer got there first the write fails with `AlreadyExists` and the worker retries. See [RFC-0001](0001-manifest.md) for the full protocol.
 
 1. Poll `.compactions` every `worker_poll_interval_ms`.
-2. Find a `Compaction` with `status == Submitted` and empty `worker_id`.
+2. Find up to `max_concurrent_compactions` `Compaction` entries with `status == Submitted` and empty `worker_id`.
 3. Write the full updated state with `status = Running`, `worker_id = <self>`, `last_heartbeat_ms = now()` to the next sequence number.
 4. On success: begin execution. On `AlreadyExists`: re-read latest and retry from step 2.
 
-Workers claim one job at a time to limit the number of compactions affected by a worker crash and to distribute work evenly.
+Workers claim up to `max_concurrent_compactions` jobs at a time, limiting the number of compactions affected by a worker crash and distributing work evenly across workers.
 
 ### Heartbeat and Failure Detection
 
-Workers update `last_heartbeat_ms` each time an output SST is written (piggy-backing on the RFC-0013 progress-persistence writes, roughly every ~256MB).
+Workers update `last_heartbeat_ms` in two ways:
+
+1. **On SST flush** — piggybacked on the RFC-0013 progress-persistence write each time an output SST is written (~256MB boundaries).
+2. **Periodically in the write loop** — every `worker_heartbeat_timeout_ms / 2` wall-clock milliseconds, a worker writes a `.compactions` update with the current `last_heartbeat_ms` even if no SST has been flushed since the last write. This ensures liveness when SST output is slow (e.g. low-throughput or large single-SST jobs that take longer than the timeout to produce their first output).
 
 The coordinator detects stale workers during its periodic poll: for each `Running` compaction where `now() - last_heartbeat_ms > worker_heartbeat_timeout_ms`, reset `status = Submitted` and clear `worker_id`. The reclaimed compaction retains its `output_ssts`, so the next worker resumes from the last checkpoint via `ResumingIterator` (seeks input iterators past the last written key, avoiding re-processing already compacted data).
 
