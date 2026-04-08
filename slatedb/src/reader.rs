@@ -239,26 +239,22 @@ impl Reader {
             })
             .cloned()
             .collect();
-        build_concurrent(
-            selected_l0.into_iter(),
-            max_parallel,
-            move |sst| {
-                let table_store = table_store.clone();
-                let range = range_clone.clone();
-                async move {
-                    SstIterator::new_owned_initialized(
-                        range.clone(),
-                        sst,
-                        table_store,
-                        sst_iter_options,
-                    )
-                    .await
-                    .map(|maybe_iter| {
-                        maybe_iter.map(|iter| Box::new(iter) as Box<dyn RowEntryIterator + 'a>)
-                    })
-                }
-            },
-        )
+        build_concurrent(selected_l0.into_iter(), max_parallel, move |sst| {
+            let table_store = table_store.clone();
+            let range = range_clone.clone();
+            async move {
+                SstIterator::new_owned_initialized(
+                    range.clone(),
+                    sst,
+                    table_store,
+                    sst_iter_options,
+                )
+                .await
+                .map(|maybe_iter| {
+                    maybe_iter.map(|iter| Box::new(iter) as Box<dyn RowEntryIterator + 'a>)
+                })
+            }
+        })
         .await
     }
 
@@ -282,25 +278,21 @@ impl Reader {
         } else {
             let range_clone = range.clone();
             let table_store = self.table_store.clone();
-            build_concurrent(
-                selected_sorted_runs.into_iter(),
-                max_parallel,
-                move |sr| {
-                    let table_store = table_store.clone();
-                    let range = range_clone.clone();
-                    async move {
-                        SortedRunIterator::new_owned_initialized_with_stats(
-                            range.clone(),
-                            sr,
-                            table_store,
-                            sst_iter_options,
-                            Some(self.db_stats.clone()),
-                        )
-                        .await
-                        .map(|iter| Some(Box::new(iter) as Box<dyn RowEntryIterator + 'a>))
-                    }
-                },
-            )
+            build_concurrent(selected_sorted_runs.into_iter(), max_parallel, move |sr| {
+                let table_store = table_store.clone();
+                let range = range_clone.clone();
+                async move {
+                    SortedRunIterator::new_owned_initialized_with_stats(
+                        range.clone(),
+                        sr,
+                        table_store,
+                        sst_iter_options,
+                        Some(self.db_stats.clone()),
+                    )
+                    .await
+                    .map(|iter| Some(Box::new(iter) as Box<dyn RowEntryIterator + 'a>))
+                }
+            })
             .await
         }
     }
@@ -1838,7 +1830,14 @@ mod tests {
             .with_read_source(ReadSource::L0(selected_l0_id))
             .with_read_source(ReadSource::SortedRun(1));
         let mut iter = reader
-            .scan_with_options(range, &scan_options, &test_db_state, write_batch, None, None)
+            .scan_with_options(
+                range,
+                &scan_options,
+                &test_db_state,
+                write_batch,
+                None,
+                None,
+            )
             .await?;
 
         let mut actual = Vec::new();

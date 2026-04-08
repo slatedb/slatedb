@@ -290,7 +290,9 @@ impl ReadSources {
     ///
     /// This is represented as an empty source list.
     pub fn all() -> Self {
-        Self { sources: Vec::new() }
+        Self {
+            sources: Vec::new(),
+        }
     }
 
     /// Creates a read view from the provided sources.
