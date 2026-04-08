@@ -186,6 +186,7 @@ use serde::{Deserialize, Serialize, Serializer};
 use std::collections::HashMap;
 use std::path::Path;
 use std::{str::FromStr, time::Duration};
+use ulid::Ulid;
 use uuid::Uuid;
 
 use crate::error::SlateDBError;
@@ -256,6 +257,72 @@ pub enum DurabilityLevel {
     Memory,
 }
 
+/// A source that may be included in an explicit read view.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReadSource {
+    /// Read from in-memory memtables.
+    ///
+    /// This includes the active memtable and immutable memtables.
+    Memtable,
+    /// Read from the L0 SST with this physical id.
+    L0(Ulid),
+    /// Read only from the sorted run with this manifest id.
+    SortedRun(u32),
+}
+
+/// A normalized read view used by point reads and scans.
+///
+/// An empty source list means "include everything", which is the default
+/// behavior and is equivalent to the normal merged read path.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReadSources {
+    sources: Vec<ReadSource>,
+}
+
+impl Default for ReadSources {
+    fn default() -> Self {
+        Self::all()
+    }
+}
+
+impl ReadSources {
+    /// Returns a read view that includes every source.
+    ///
+    /// This is represented as an empty source list.
+    pub fn all() -> Self {
+        Self { sources: Vec::new() }
+    }
+
+    /// Creates a read view from the provided sources.
+    ///
+    /// An empty vector means "include everything".
+    pub fn new(sources: Vec<ReadSource>) -> Self {
+        Self { sources }
+    }
+
+    /// Adds one source to the read view.
+    pub fn with_source(mut self, source: ReadSource) -> Self {
+        if !self.sources.contains(&source) {
+            self.sources.push(source);
+        }
+        self
+    }
+
+    /// Returns whether `target` is included in this read view.
+    ///
+    /// If `self` was created with an empty source list, this returns `true` for
+    /// every target.
+    pub fn is_included(&self, target: ReadSource) -> bool {
+        self.sources.is_empty()
+            || self.sources.iter().any(|source| match (*source, target) {
+                (ReadSource::Memtable, ReadSource::Memtable) => true,
+                (ReadSource::SortedRun(id), ReadSource::SortedRun(target_id)) => id == target_id,
+                (ReadSource::L0(id), ReadSource::L0(target_id)) => id == target_id,
+                _ => false,
+            })
+    }
+}
+
 /// Configuration for client read operations. `ReadOptions` is supplied for each
 /// read call and controls the behavior of the read.
 #[derive(Clone, Debug)]
@@ -269,6 +336,9 @@ pub struct ReadOptions {
     pub dirty: bool,
     /// Whether or not fetched blocks should be cached
     pub cache_blocks: bool,
+    /// Restrict the read to an explicit source set instead of consulting the
+    /// full merged read stack.
+    pub read_sources: ReadSources,
 }
 
 impl Default for ReadOptions {
@@ -277,6 +347,7 @@ impl Default for ReadOptions {
             durability_filter: DurabilityLevel::default(),
             dirty: false,
             cache_blocks: true,
+            read_sources: ReadSources::default(),
         }
     }
 }
@@ -303,6 +374,20 @@ impl ReadOptions {
             ..self
         }
     }
+
+    pub fn with_read_source(self, read_source: ReadSource) -> Self {
+        Self {
+            read_sources: self.read_sources.with_source(read_source),
+            ..self
+        }
+    }
+
+    pub fn with_read_sources(self, read_sources: ReadSources) -> Self {
+        Self {
+            read_sources,
+            ..self
+        }
+    }
 }
 #[derive(Clone, Debug)]
 pub struct ScanOptions {
@@ -322,6 +407,9 @@ pub struct ScanOptions {
     /// The maximum number of concurrent tasks for fetching blocks during scans.
     /// Higher values can improve throughput but use more resources. The default is 1.
     pub max_fetch_tasks: usize,
+    /// Restrict the scan to an explicit source set instead of consulting the
+    /// full merged read stack.
+    pub read_sources: ReadSources,
 }
 
 impl Default for ScanOptions {
@@ -333,6 +421,7 @@ impl Default for ScanOptions {
             read_ahead_bytes: 1,
             cache_blocks: false,
             max_fetch_tasks: 1,
+            read_sources: ReadSources::default(),
         }
     }
 }
@@ -363,6 +452,20 @@ impl ScanOptions {
     pub fn with_cache_blocks(self, cache_blocks: bool) -> Self {
         Self {
             cache_blocks,
+            ..self
+        }
+    }
+
+    pub fn with_read_source(self, read_source: ReadSource) -> Self {
+        Self {
+            read_sources: self.read_sources.with_source(read_source),
+            ..self
+        }
+    }
+
+    pub fn with_read_sources(self, read_sources: ReadSources) -> Self {
+        Self {
+            read_sources,
             ..self
         }
     }
@@ -1461,6 +1564,8 @@ object_store_cache_options:
         assert_eq!(options.durability_filter, DurabilityLevel::Memory);
         assert!(!options.dirty);
         assert!(options.cache_blocks);
+        assert!(options.read_sources.is_included(ReadSource::Memtable));
+        assert!(options.read_sources.is_included(ReadSource::SortedRun(7)));
 
         let options = ScanOptions::default();
         assert_eq!(options.durability_filter, DurabilityLevel::Memory);
@@ -1468,6 +1573,8 @@ object_store_cache_options:
         assert_eq!(options.read_ahead_bytes, 1);
         assert!(!options.cache_blocks);
         assert_eq!(options.max_fetch_tasks, 1);
+        assert!(options.read_sources.is_included(ReadSource::Memtable));
+        assert!(options.read_sources.is_included(ReadSource::SortedRun(7)));
     }
 
     #[test]

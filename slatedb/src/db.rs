@@ -2063,6 +2063,7 @@ mod tests {
                                         durability_filter: Memory,
                                         dirty: false,
                                         cache_blocks: true,
+                                        read_sources: crate::config::ReadSources::default(),
                                     }
                                 )
                                 .await

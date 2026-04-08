@@ -1,7 +1,7 @@
 use crate::batch::{WriteBatch, WriteBatchIterator};
 use crate::bytes_range::BytesRange;
 use crate::clock::MonotonicClock;
-use crate::config::{DurabilityLevel, ReadOptions, ScanOptions};
+use crate::config::{DurabilityLevel, ReadOptions, ReadSource, ReadSources, ScanOptions};
 use crate::db_state::ManifestCore;
 use crate::db_stats::DbStats;
 use crate::iter::{IterationOrder, RowEntryIterator};
@@ -86,24 +86,34 @@ impl Reader {
         range: &BytesRange,
         db_state: &(dyn DbStateReader + Sync),
         write_batch: Option<WriteBatch>,
+        read_sources: ReadSources,
         sst_iter_options: SstIteratorOptions,
         point_lookup_stats: Option<DbStats>,
     ) -> Result<IteratorSources, SlateDBError> {
-        let write_batch_iter = write_batch
-            .map(|batch| WriteBatchIterator::new(batch, range.clone(), IterationOrder::Ascending));
-
-        let mut memtables = VecDeque::new();
-        memtables.push_back(db_state.memtable());
-        for memtable in db_state.imm_memtable() {
-            memtables.push_back(memtable.table());
-        }
-        let mem_iters = memtables
-            .iter()
-            .map(|table| {
-                Box::new(table.range_ascending(range.clone()))
-                    as Box<dyn RowEntryIterator + 'static>
+        let write_batch_iter = if read_sources.is_included(ReadSource::Memtable) {
+            write_batch.map(|batch| {
+                WriteBatchIterator::new(batch, range.clone(), IterationOrder::Ascending)
             })
-            .collect::<Vec<_>>();
+        } else {
+            None
+        };
+
+        let mem_iters = if read_sources.is_included(ReadSource::Memtable) {
+            let mut memtables = VecDeque::new();
+            memtables.push_back(db_state.memtable());
+            for memtable in db_state.imm_memtable() {
+                memtables.push_back(memtable.table());
+            }
+            memtables
+                .iter()
+                .map(|table| {
+                    Box::new(table.range_ascending(range.clone()))
+                        as Box<dyn RowEntryIterator + 'static>
+                })
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
 
         let max_parallel =
             compute_max_parallel(db_state.core().l0.len(), &db_state.core().compacted, 4);
@@ -112,6 +122,7 @@ impl Reader {
             let l0 = self.build_point_l0_iters(
                 range,
                 db_state,
+                read_sources.clone(),
                 sst_iter_options,
                 point_lookup_stats.clone(),
             )?;
@@ -119,15 +130,26 @@ impl Reader {
                 range,
                 point_key.as_ref(),
                 db_state,
+                read_sources.clone(),
                 sst_iter_options,
                 point_lookup_stats,
             )?;
             (l0, sr)
         } else {
-            let l0_future =
-                self.build_range_l0_iters(range, db_state, sst_iter_options, max_parallel);
-            let sr_future =
-                self.build_range_sr_iters(range, db_state, sst_iter_options, max_parallel);
+            let l0_future = self.build_range_l0_iters(
+                range,
+                db_state,
+                read_sources.clone(),
+                sst_iter_options,
+                max_parallel,
+            );
+            let sr_future = self.build_range_sr_iters(
+                range,
+                db_state,
+                read_sources,
+                sst_iter_options,
+                max_parallel,
+            );
             let (l0_res, sr_res) = join(l0_future, sr_future).await;
             (l0_res?, sr_res?)
         };
@@ -144,11 +166,15 @@ impl Reader {
         &self,
         range: &BytesRange,
         db_state: &(dyn DbStateReader + Sync),
+        read_sources: ReadSources,
         sst_iter_options: SstIteratorOptions,
         db_stats: Option<DbStats>,
     ) -> Result<VecDeque<Box<dyn RowEntryIterator + 'a>>, SlateDBError> {
         let mut iters = VecDeque::new();
         for sst in &db_state.core().l0 {
+            if !read_sources.is_included(ReadSource::L0(sst.sst.id.unwrap_compacted_id())) {
+                continue;
+            }
             let iterator = SstIterator::new_owned_with_stats(
                 range.clone(),
                 sst.clone(),
@@ -168,12 +194,17 @@ impl Reader {
         range: &BytesRange,
         key: &[u8],
         db_state: &(dyn DbStateReader + Sync),
+        read_sources: ReadSources,
         sst_iter_options: SstIteratorOptions,
         db_stats: Option<DbStats>,
     ) -> Result<VecDeque<Box<dyn RowEntryIterator + 'a>>, SlateDBError> {
         let mut iters = VecDeque::new();
         for sr in &db_state.core().compacted {
+            let include_sorted_run = read_sources.is_included(ReadSource::SortedRun(sr.id));
             for handle in sr.tables_covering_point_key(key) {
+                if !include_sorted_run {
+                    continue;
+                }
                 let iterator = SstIterator::new_owned_with_stats(
                     range.clone(),
                     handle.clone(),
@@ -193,13 +224,23 @@ impl Reader {
         &self,
         range: &BytesRange,
         db_state: &(dyn DbStateReader + Sync),
+        read_sources: ReadSources,
         sst_iter_options: SstIteratorOptions,
         max_parallel: usize,
     ) -> Result<VecDeque<Box<dyn RowEntryIterator + 'a>>, SlateDBError> {
         let range_clone = range.clone();
         let table_store = self.table_store.clone();
+        let selected_l0: Vec<_> = db_state
+            .core()
+            .l0
+            .iter()
+            .filter(|sst| {
+                read_sources.is_included(ReadSource::L0(sst.sst.id.unwrap_compacted_id()))
+            })
+            .cloned()
+            .collect();
         build_concurrent(
-            db_state.core().l0.iter().cloned(),
+            selected_l0.into_iter(),
             max_parallel,
             move |sst| {
                 let table_store = table_store.clone();
@@ -225,31 +266,43 @@ impl Reader {
         &self,
         range: &BytesRange,
         db_state: &(dyn DbStateReader + Sync),
+        read_sources: ReadSources,
         sst_iter_options: SstIteratorOptions,
         max_parallel: usize,
     ) -> Result<VecDeque<Box<dyn RowEntryIterator + 'a>>, SlateDBError> {
-        let range_clone = range.clone();
-        let table_store = self.table_store.clone();
-        build_concurrent(
-            db_state.core().compacted.iter().cloned(),
-            max_parallel,
-            move |sr| {
-                let table_store = table_store.clone();
-                let range = range_clone.clone();
-                async move {
-                    SortedRunIterator::new_owned_initialized_with_stats(
-                        range.clone(),
-                        sr,
-                        table_store,
-                        sst_iter_options,
-                        Some(self.db_stats.clone()),
-                    )
-                    .await
-                    .map(|iter| Some(Box::new(iter) as Box<dyn RowEntryIterator + 'a>))
-                }
-            },
-        )
-        .await
+        let selected_sorted_runs: Vec<_> = db_state
+            .core()
+            .compacted
+            .iter()
+            .filter(|sr| read_sources.is_included(ReadSource::SortedRun(sr.id)))
+            .cloned()
+            .collect();
+        if selected_sorted_runs.is_empty() {
+            Ok(VecDeque::new())
+        } else {
+            let range_clone = range.clone();
+            let table_store = self.table_store.clone();
+            build_concurrent(
+                selected_sorted_runs.into_iter(),
+                max_parallel,
+                move |sr| {
+                    let table_store = table_store.clone();
+                    let range = range_clone.clone();
+                    async move {
+                        SortedRunIterator::new_owned_initialized_with_stats(
+                            range.clone(),
+                            sr,
+                            table_store,
+                            sst_iter_options,
+                            Some(self.db_stats.clone()),
+                        )
+                        .await
+                        .map(|iter| Some(Box::new(iter) as Box<dyn RowEntryIterator + 'a>))
+                    }
+                },
+            )
+            .await
+        }
     }
 
     /// Get the full row entry for the given key.
@@ -300,6 +353,7 @@ impl Reader {
                 &range,
                 db_state,
                 write_batch,
+                options.read_sources.clone(),
                 sst_iter_options,
                 Some(self.db_stats.clone()),
             )
@@ -376,7 +430,14 @@ impl Reader {
             l0_iters,
             sr_iters,
         } = self
-            .build_iterator_sources(&range, db_state, write_batch, sst_iter_options, None)
+            .build_iterator_sources(
+                &range,
+                db_state,
+                write_batch,
+                options.read_sources.clone(),
+                sst_iter_options,
+                None,
+            )
             .await?;
 
         DbIterator::new(
@@ -1709,6 +1770,93 @@ mod tests {
                 .collect::<Vec<_>>()
         );
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn should_support_memtable_only_read_view() -> Result<(), SlateDBError> {
+        let entries = vec![
+            TestEntry::value(b"key1", b"mem", 50),
+            TestEntry::value(b"key1", b"l0", 40).with_location(LayerLocation::L0Sst(0)),
+            TestEntry::value(b"key1", b"sr", 30).with_location(LayerLocation::SortedRun(0)),
+        ];
+
+        let mut test_db_state = TestDbState::new().await;
+        let write_batch = populate_db_state(&mut test_db_state, entries).await?;
+
+        let recorder = slatedb_common::metrics::MetricsRecorderHelper::noop();
+        let db_stats = DbStats::new(&recorder);
+        let reader = build_reader(&test_db_state, db_stats, false).await;
+
+        let result = reader
+            .get_key_value_with_options(
+                b"key1",
+                &ReadOptions::default()
+                    .with_dirty(true)
+                    .with_read_source(ReadSource::Memtable),
+                &test_db_state,
+                write_batch,
+                None,
+            )
+            .await?;
+
+        let kv = result.expect("should return memtable value");
+        assert_eq!(kv.value.as_ref(), b"mem");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn should_support_multi_source_scan_view() -> Result<(), SlateDBError> {
+        let entries = vec![
+            TestEntry::value(b"key1", b"mem", 50).with_location(LayerLocation::Memtable),
+            TestEntry::value(b"key2", b"l0_keep", 40).with_location(LayerLocation::L0Sst(0)),
+            TestEntry::value(b"key3", b"l0_skip", 40).with_location(LayerLocation::L0Sst(1)),
+            TestEntry::value(b"key4", b"sr_skip", 30).with_location(LayerLocation::SortedRun(0)),
+            TestEntry::value(b"key5", b"sr_keep", 30).with_location(LayerLocation::SortedRun(1)),
+        ];
+
+        let mut test_db_state = TestDbState::new().await;
+        let write_batch = populate_db_state(&mut test_db_state, entries).await?;
+
+        let selected_l0_id = test_db_state
+            .core
+            .l0
+            .iter()
+            .find(|sst| sst.sst.info.first_entry.as_deref() == Some(&b"key2"[..]))
+            .expect("missing selected l0 sst")
+            .sst
+            .id
+            .unwrap_compacted_id();
+
+        let recorder = slatedb_common::metrics::MetricsRecorderHelper::noop();
+        let db_stats = DbStats::new(&recorder);
+        let reader = build_reader(&test_db_state, db_stats, false).await;
+
+        let range = BytesRange::from_slice(b"key1".as_ref()..b"key6".as_ref());
+        let scan_options = ScanOptions::default()
+            .with_dirty(true)
+            .with_read_source(ReadSource::L0(selected_l0_id))
+            .with_read_source(ReadSource::SortedRun(1));
+        let mut iter = reader
+            .scan_with_options(range, &scan_options, &test_db_state, write_batch, None, None)
+            .await?;
+
+        let mut actual = Vec::new();
+        while let Some(kv) = iter
+            .next()
+            .await
+            .map_err(|e| SlateDBError::IoError(Arc::new(std::io::Error::other(e))))?
+        {
+            actual.push((kv.key.to_vec(), kv.value.to_vec()));
+        }
+
+        assert_eq!(
+            actual,
+            vec![
+                (b"key2".to_vec(), b"l0_keep".to_vec()),
+                (b"key5".to_vec(), b"sr_keep".to_vec()),
+            ]
+        );
         Ok(())
     }
 
