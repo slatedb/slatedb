@@ -25,8 +25,11 @@
 pub mod clock;
 pub mod metrics;
 pub mod utils;
+pub mod system_monitor;
 
 #[cfg(feature = "test-util")]
 pub use clock::MockSystemClock;
 pub use clock::{DefaultSystemClock, SystemClock, SystemClockTicker};
 pub use utils::timeout;
+#[cfg(feature = "test-util")]
+pub use system_monitor::SystemMonitor;

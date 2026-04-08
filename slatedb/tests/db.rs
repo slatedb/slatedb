@@ -150,6 +150,10 @@ async fn test_concurrent_writers_and_readers() {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(256);
+    let max_memory_usage: usize = std::env::var("SLATEDB_TEST_MAX_MEMORY_USAGE")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(256);
 
     // Pad keys to allow us to control how many blocks we take up
     // Since block size is not configurable

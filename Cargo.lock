@@ -3348,7 +3348,7 @@ dependencies = [
  "rand 0.9.2",
  "rand_xorshift",
  "slatedb",
- "sysinfo",
+ "slatedb-common",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -3380,7 +3380,9 @@ dependencies = [
  "chrono",
  "log",
  "serde",
+ "sysinfo",
  "tokio",
+ "tracing",
 ]
 
 [[package]]

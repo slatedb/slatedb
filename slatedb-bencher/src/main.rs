@@ -19,6 +19,7 @@ use slatedb::admin;
 use slatedb::compaction_execute_bench::CompactionExecuteBench;
 use slatedb::config::WriteOptions;
 use slatedb::Db;
+use slatedb_common::SystemMonitor;
 use std::error::Error;
 use std::sync::Arc;
 use std::time::Duration;
@@ -30,7 +31,6 @@ use transactions::TransactionBench;
 mod args;
 pub mod db;
 pub mod stats;
-pub mod system_monitor;
 pub mod transactions;
 
 const CLEANUP_NAME: &str = ".clean_benchmark_data";
@@ -49,7 +49,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let object_store = admin::load_object_store_from_env(args.env_file)?;
 
     // Start system monitoring in background
-    let mut monitor = system_monitor::SystemMonitor::new(Some(tokio::runtime::Handle::current()));
+    let mut monitor = SystemMonitor::new(Some(tokio::runtime::Handle::current()));
     monitor.start();
 
     if args.clean {
