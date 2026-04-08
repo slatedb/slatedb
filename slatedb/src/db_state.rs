@@ -300,7 +300,8 @@ pub enum SstType {
 pub enum FilterFormat {
     /// Single raw bloom filter bytes (pre-composite format).
     Legacy,
-    /// Self-describing composite block with named filters.
+    /// Block containing one or more named filters, each prefixed with its name
+    ///  and length.
     #[default]
     Composite,
 }

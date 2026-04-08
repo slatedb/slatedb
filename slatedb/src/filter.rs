@@ -303,6 +303,7 @@ mod tests {
             "Bloom filter size should be greater than zero"
         );
 
+        // We can also check if the size matches the buffer length
         assert_eq!(
             filter.size(),
             filter.buffer.len(),
@@ -317,7 +318,7 @@ mod tests {
             builder.add_key(format!("{}", i).as_bytes());
         }
         let filter = builder.build_filter();
-        let original_size = Filter::size(&filter);
+        let original_size = filter.size();
         let mut extended_buf = BytesMut::with_capacity(original_size + 100);
         extended_buf.put(filter.buffer.as_ref());
         extended_buf.put_bytes(0u8, 100);

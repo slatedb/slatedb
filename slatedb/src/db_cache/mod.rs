@@ -20,10 +20,11 @@ use log::{debug, error, trace};
 use parking_lot::Mutex;
 
 use crate::db_cache::stats::DbCacheStats;
+use crate::db_state::SsTableId;
 use crate::filter_policy::NamedFilter;
+use crate::flatbuffer_types::SsTableIndexOwned;
 use crate::format::block::Block;
 use crate::sst_stats::SstStats;
-use crate::{db_state::SsTableId, flatbuffer_types::SsTableIndexOwned};
 use slatedb_common::clock::SystemClock;
 use slatedb_common::metrics::MetricsRecorderHelper;
 
@@ -733,7 +734,7 @@ mod tests {
     use crate::db_cache::test_utils::TestCache;
     use crate::format::sst::{EncodedSsTable, SsTableFormat};
     use crate::test_utils::build_test_sst;
-    use crate::types::RowEntry;
+    use crate::types::{RowEntry, ValueDeletable};
     use rstest::{fixture, rstest};
     use slatedb_common::metrics::{
         lookup_metric_with_labels, DefaultMetricsRecorder, MetricLevel, MetricsRecorderHelper,
@@ -1085,9 +1086,9 @@ mod tests {
 
         let policy = BloomFilterPolicy::new(1);
         let mut builder = policy.builder();
-        builder.add_entry(&crate::types::RowEntry::new(
+        builder.add_entry(&RowEntry::new(
             bytes::Bytes::from_static(b"a"),
-            crate::types::ValueDeletable::Value(bytes::Bytes::new()),
+            ValueDeletable::Value(bytes::Bytes::new()),
             0,
             None,
             None,
