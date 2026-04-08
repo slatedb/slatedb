@@ -6754,19 +6754,11 @@ mod tests {
             .unwrap();
         }
 
-        let manifest_store = Arc::new(ManifestStore::new(&Path::from(path), object_store.clone()));
-        let mut stored_manifest =
-            StoredManifest::load(manifest_store.clone(), Arc::new(DefaultSystemClock::new()))
-                .await
-                .unwrap();
-        wait_for_manifest_condition(
-            &mut stored_manifest,
-            |m| m.l0.len() > 2,
-            Duration::from_secs(30),
-        )
-        .await;
-
-        info!("GOT MANIFEST WITH 3 L0s");
+        // Flush all pending writes to L0 before triggering compaction.
+        // Without this, the compactor can race the flusher and compact only a
+        // partial set of L0s, producing too few SSTs to satisfy the multi-SST
+        // sorted-run condition below.
+        db.flush().await.unwrap();
 
         // Compact until we observe a sorted run where a single logical key spans SST boundaries.
         should_compact.store(true, Ordering::SeqCst);
@@ -6908,19 +6900,11 @@ mod tests {
             .unwrap();
         }
 
-        let manifest_store = Arc::new(ManifestStore::new(&Path::from(path), object_store.clone()));
-        let mut stored_manifest =
-            StoredManifest::load(manifest_store.clone(), Arc::new(DefaultSystemClock::new()))
-                .await
-                .unwrap();
-        wait_for_manifest_condition(
-            &mut stored_manifest,
-            |m| m.l0.len() > 2,
-            Duration::from_secs(30),
-        )
-        .await;
-
-        info!("GOT MANIFEST WITH 3 L0s");
+        // Flush all pending writes to L0 before triggering compaction.
+        // Without this, the compactor can race the flusher and compact only a
+        // partial set of L0s, producing too few SSTs to satisfy the multi-SST
+        // sorted-run condition below.
+        db.flush().await.unwrap();
 
         // Compact until we observe a sorted run where a single logical key spans SST boundaries.
         should_compact.store(true, Ordering::SeqCst);

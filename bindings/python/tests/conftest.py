@@ -22,6 +22,7 @@ from slatedb.uniffi import (
     ObjectStore,
     PutOptions,
     ReadOptions,
+    ReadSources,
     ReaderOptions,
     RowEntry,
     RowEntryKind,
@@ -49,6 +50,7 @@ def read_options() -> ReadOptions:
         durability_filter=DurabilityLevel.MEMORY,
         dirty=False,
         cache_blocks=True,
+        read_sources=ReadSources(sources=[]),
     )
 
 
@@ -59,6 +61,7 @@ def scan_options(read_ahead_bytes: int, cache_blocks: bool, max_fetch_tasks: int
         read_ahead_bytes=read_ahead_bytes,
         cache_blocks=cache_blocks,
         max_fetch_tasks=max_fetch_tasks,
+        read_sources=ReadSources(sources=[]),
     )
 
 

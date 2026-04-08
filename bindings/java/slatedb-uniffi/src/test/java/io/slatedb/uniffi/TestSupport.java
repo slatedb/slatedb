@@ -9,6 +9,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
@@ -318,12 +319,18 @@ final class TestSupport {
     }
 
     static ReadOptions readOptions() {
-        return new ReadOptions(DurabilityLevel.MEMORY, false, true);
+        return new ReadOptions(
+                DurabilityLevel.MEMORY, false, true, new ReadSources(Collections.emptyList()));
     }
 
     static ScanOptions scanOptions(long readAheadBytes, boolean cacheBlocks, long maxFetchTasks) {
         return new ScanOptions(
-                DurabilityLevel.MEMORY, false, readAheadBytes, cacheBlocks, maxFetchTasks);
+                DurabilityLevel.MEMORY,
+                false,
+                readAheadBytes,
+                cacheBlocks,
+                maxFetchTasks,
+                new ReadSources(Collections.emptyList()));
     }
 
     static ReaderOptions readerOptions(boolean skipWalReplay) {

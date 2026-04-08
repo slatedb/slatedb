@@ -47,6 +47,7 @@ export function readOptions() {
     durability_filter: "Memory",
     dirty: false,
     cache_blocks: true,
+    read_sources: { sources: [] },
   };
 }
 
@@ -57,6 +58,7 @@ export function scanOptions(readAheadBytes, cacheBlocks, maxFetchTasks) {
     read_ahead_bytes: readAheadBytes,
     cache_blocks: cacheBlocks,
     max_fetch_tasks: maxFetchTasks,
+    read_sources: { sources: [] },
   };
 }
 
