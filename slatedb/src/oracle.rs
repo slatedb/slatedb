@@ -45,6 +45,10 @@ impl DbOracle {
         self.last_seq.fetch_add(1, SeqCst) + 1
     }
 
+    pub(crate) fn peek_next_seq(&self) -> u64 {
+        self.last_seq.load(SeqCst) + 1
+    }
+
     pub(crate) fn last_seq(&self) -> u64 {
         self.last_seq.load(SeqCst)
     }
