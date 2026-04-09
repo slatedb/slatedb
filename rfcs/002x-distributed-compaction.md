@@ -113,34 +113,21 @@ Separates the **Compaction Coordinator** (scheduler + manifest committer) from o
   +--------+ +--------+ +--------+
 ```
 
-- **Coordinator** — owns `compactor_epoch`, runs the scheduler, writes `CompactionSpec`s to `.compactions`, commits manifest updates. Scheduler logic is unchanged.
+- **Coordinator** (`CompactorEventHandler`) — always runs embedded in the DB process. Polls the manifest, asks the scheduler for `CompactionSpec` proposals, creates `Compaction` entities, calls `executor.start_compaction_job()`, and commits completed results to the manifest. Scheduler logic is unchanged.
 - **Workers** — poll `.compactions`, claim `Submitted` jobs via optimistic concurrency, execute using the existing `execute_compaction_job` path, report completion. Workers do not touch the manifest or run the scheduler.
 
 ### Configuration
 
 #### Coordinator
 
-Distributed mode is opt-in via a `mode` field on `CompactorOptions`, configurable via `CompactorBuilder` or settings (TOML/JSON/YAML):
+Distributed mode becomes a new default allowing additional compactors to be added as needed:
 
 ```rust
-pub enum CompactorMode {
-    /// Default. Coordinator executes jobs locally via TokioCompactionExecutor.
-    Local,
-    /// Coordinator writes Submitted jobs to `.compactions` and waits for remote workers
-    /// to claim and execute them via RemoteCompactionExecutor.
-    Distributed,
-}
-
 pub struct CompactorOptions {
     // ... existing fields unchanged ...
 
-    pub mode: CompactorMode,
     /// How long before a worker with no heartbeat is considered stale and its job reclaimed.
-    /// Only used in Distributed mode.
     pub worker_heartbeat_timeout_ms: u64,
-    /// Maximum number of concurrent workers. None means unlimited.
-    /// Only used in Distributed mode.
-    pub max_workers: Option<u32>,
 }
 ```
 
@@ -148,15 +135,18 @@ Via settings:
 
 ```toml
 [compactor_options]
-mode = "distributed"
 worker_heartbeat_timeout_ms = 30000
-max_workers = 4
 max_concurrent_compactions = 2
 ```
 
-`max_workers` caps the number of distinct active workers the coordinator will allow. `max_concurrent_compactions` controls how many jobs a single worker may hold simultaneously.
+`max_concurrent_compactions` controls how many jobs a single worker may hold simultaneously.
 
-When `mode = "distributed"`, the coordinator uses `RemoteCompactionExecutor` instead of `TokioCompactionExecutor`. Both implement the `CompactionExecutor` trait and the coordinator calls `executor.start_compaction_job()` the same way regardless of mode. `RemoteCompactionExecutor` writes a `Submitted` job to `.compactions` and polls for `Completed` rather than spawning a local task.
+The coordinator (`CompactorEventHandler`) always runs embedded in the DB process and behaves identically in both cases. The only difference is which `CompactionExecutor` it uses:
+
+- `compactor_options = Some(options)` — uses `TokioCompactionExecutor`, which spawns in-process Tokio tasks to execute compaction jobs. This is the existing single-node behavior, unchanged.
+- `compactor_options = None` — uses `RemoteCompactionExecutor`, which writes `Submitted` jobs to `.compactions` and polls for `Completed` rather than spawning local tasks. Execution is handled entirely by external `CompactorWorkerBuilder` processes.
+
+Both implement the `CompactionExecutor` trait; the coordinator calls `executor.start_compaction_job()` the same way regardless.
 
 #### Workers
 
@@ -234,13 +224,12 @@ If the coordinator crashes between steps 2 and 3, the `Completed` entry is trimm
 
 ### Backward Compatibility: Existing Modes
 
-The existing compaction modes continue to work unchanged:
+The coordinator always runs embedded in the DB process. The two deployment shapes map onto `compactor_options` and determine whether the compaction worker is also embedded in the DB process:
 
-| Mode | Description | Changes |
-|------|-------------|---------|
-| **Stateful** (in-process) | Coordinator + single worker in the same process as the DB writer | None |
-| **Standalone** | Coordinator + single worker as a separate process | None |
-| **Distributed** | Coordinator + N workers as separate processes | Coordinator delegates execution to remote workers |
+| Deployment | `compactor_options` | Executor | Changes |
+|------------|---------------------|----------|---------|
+| **Embedded** | `Some(options)` | `TokioCompactionExecutor` | None — existing behavior |
+| **Stand-Alone** | `None` | `RemoteCompactionExecutor` | Coordinator delegates to external `CompactorWorkerBuilder` processes |
 
 ## Impact Analysis
 
@@ -335,10 +324,8 @@ Worker lifecycle events logged at INFO.
 
 Phases:
 1. **Schema extension** — add `worker_id` and `last_heartbeat_ms` to `compactor.fbs`; no behavior change.
-2. **Worker implementation** — implement `CompactorWorkerBuilder` and `RemoteCompactionExecutor`; coordinator uses `RemoteCompactionExecutor` when `mode = "distributed"`.
+2. **Worker implementation** — implement `CompactorWorkerBuilder` and `RemoteCompactionExecutor`; coordinator uses `RemoteCompactionExecutor` when `compactor_options` is `None`.
 3. **Failure detection** — heartbeat timeout and reclamation on the coordinator; resume via `ResumingIterator`.
-
-Distributed mode is opt-in via `mode = "distributed"` in `CompactorOptions`.
 
 ### Docs Updates
 
@@ -361,7 +348,6 @@ Use gossip to distribute jobs directly. Rejected: couples correctness to gossip 
 
 ## Open Questions
 
-- Should the coordinator also act as a worker by default, or be a pure scheduler? Acting as a worker simplifies single-node deployments but adds load to the coordinator process.
 - What is the right default for `worker_poll_interval_ms`? Should it be adaptive (e.g. exponential backoff when no work is available)?
 - How should GC handle the window between a worker writing output SSTs and the coordinator committing the manifest? GC must not delete SSTs that are not yet manifest-referenced.
 - Should workers validate their `CompactionSpec` against the current manifest before executing? Validating catches stale specs but adds a manifest read per claim.
