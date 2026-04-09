@@ -51,6 +51,7 @@
 //! filter_bits_per_key = 10
 //! l0_sst_size_bytes = 67108864
 //! l0_max_ssts = 8
+//! l0_flush_parallelism = 4
 //! max_unflushed_bytes = 536870912
 //!
 //! [compactor_options]
@@ -98,6 +99,7 @@
 //!  "filter_bits_per_key": 10,
 //!  "l0_sst_size_bytes": 67108864,
 //!  "l0_max_ssts": 8,
+//!  "l0_flush_parallelism": 4,
 //!  "max_unflushed_bytes": 536870912,
 //!  "compactor_options": {
 //!    "poll_interval": "5s",
@@ -148,6 +150,7 @@
 //! filter_bits_per_key: 10
 //! l0_sst_size_bytes: 67108864
 //! l0_max_ssts: 8
+//! l0_flush_parallelism: 1
 //! max_unflushed_bytes: 536870912
 //! compactor_options:
 //!   poll_interval: '5s'
@@ -767,6 +770,13 @@ pub struct Settings {
     /// l0 ssts than this value, until compaction can compact the ssts into compacted.
     pub l0_max_ssts: usize,
 
+    /// Number of parallel workers for flushing immutable memtables to L0 SSTs.
+    /// Higher values increase L0 flush throughput at the cost of more concurrent
+    /// object store uploads. Increasing parallelism may require a higher `l0_max_ssts`
+    /// to avoid backpressure from compaction not keeping up with the higher steady-state
+    /// flush rate.
+    pub l0_flush_parallelism: usize,
+
     /// Defines the max number of unflushed key/value pair bytes that should reside in memory
     /// before applying backpressure to writers. This includes key/value pairs in both the
     /// immutable WAL flush queue and the immutable memtable flush queue. Writes will be
@@ -816,6 +826,7 @@ impl std::fmt::Debug for Settings {
             .field("max_unflushed_bytes", &self.max_unflushed_bytes)
             .field("l0_sst_size_bytes", &self.l0_sst_size_bytes)
             .field("l0_max_ssts", &self.l0_max_ssts)
+            .field("l0_flush_parallelism", &self.l0_flush_parallelism)
             .field("compactor_options", &self.compactor_options)
             .field("compression_codec", &self.compression_codec)
             .field(
@@ -1013,6 +1024,7 @@ impl Default for Settings {
             max_unflushed_bytes: 1_073_741_824,
             l0_sst_size_bytes: 64 * 1024 * 1024,
             l0_max_ssts: 8,
+            l0_flush_parallelism: 4,
             compactor_options: Some(CompactorOptions::default()),
             compression_codec: None,
             object_store_cache_options: ObjectStoreCacheOptions::default(),
