@@ -1,171 +1,49 @@
-//! This module contains helper functions to simplify deterministic simulation (DST).
+//! Helpers for scenario-driven deterministic simulation testing.
 
-use log::{error, info};
-use rand::Rng;
-use slatedb::config::CompactorOptions;
-use slatedb::config::CompressionCodec;
-use slatedb::config::GarbageCollectorDirectoryOptions;
-use slatedb::config::GarbageCollectorOptions;
-use slatedb::config::SizeTieredCompactionSchedulerOptions;
-use slatedb::object_store::ObjectStore;
-use slatedb::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier;
-use slatedb::CompactorBuilder;
-use slatedb::Db;
-use slatedb::DbBuilder;
-use slatedb::DbRand;
-use slatedb::Error;
-use slatedb::Settings;
-use slatedb_common::clock::SystemClock;
-use std::rc::Rc;
-use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::Once;
-use std::time::Duration;
+
+use log::info;
+use object_store::ObjectStore;
+use slatedb::{Db, DbBuilder, Error, Settings};
+use slatedb_common::clock::MockSystemClock;
 use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_subscriber::EnvFilter;
 
-use crate::dst::DstDuration;
 use crate::object_store::ClockedObjectStore;
-use crate::DefaultDstDistribution;
-use crate::Dst;
-use crate::DstOptions;
+use crate::{Dst, Scenario};
 
-const MIB_1: usize = 1024 * 1024;
-const MIB_500: usize = 500 * MIB_1;
-const GIB_2: usize = 2048 * MIB_1;
-
-const COMPRESSION_CODECS: [Option<&str>; 5] = [
-    Some("snappy"),
-    Some("zlib"),
-    Some("lz4"),
-    Some("zstd"),
-    None,
-];
-
-/// Builds a [Dst] instance (including its [Db]) with [Settings] that are selected
-/// at random.
-///
-/// All arguments are expected to be deterministic.
-pub async fn build_dst(
+/// Builds a scenario DB with explicit settings and a deterministic seed.
+pub async fn build_scenario_db(
     object_store: Arc<dyn ObjectStore>,
-    system_clock: Arc<dyn SystemClock>,
-    rand: Rc<DbRand>,
-    dst_opts: DstOptions,
-) -> Result<Dst, Error> {
-    let db = build_db(object_store, system_clock.clone(), &rand).await;
-
-    Dst::new(
-        db,
-        system_clock.clone(),
-        rand.clone(),
-        Box::new(DefaultDstDistribution::new(
-            dst_opts.clone(),
-            system_clock,
-            rand,
-        )),
-        dst_opts,
-    )
-}
-
-/// Builds a DB instance with [Settings] that are selected at random.
-///
-/// All arguments are expected to be deterministic.
-pub async fn build_db(
-    object_store: Arc<dyn ObjectStore>,
-    system_clock: Arc<dyn SystemClock>,
-    rand: &DbRand,
-) -> Db {
+    system_clock: Arc<MockSystemClock>,
+    seed: u64,
+    settings: Settings,
+) -> Result<Db, Error> {
     let object_store = Arc::new(ClockedObjectStore::new(object_store, system_clock.clone()));
-    let settings = build_settings(rand).await;
-    // Prevent scheduler from having a higher min compaction sources than L0 max SSTS.
-    // Otherwise, the compactor never runs and writers get blocked permanently.
-    let min_compaction_sources = rand.rng().random_range(4..10).min(settings.l0_max_ssts);
-    // Prevent scheduler from having a higher min compaction sources than max compaction sources.
-    let max_compaction_sources = 8.max(min_compaction_sources);
-    let scheduler_options = SizeTieredCompactionSchedulerOptions {
-        min_compaction_sources,
-        max_compaction_sources,
-        ..Default::default()
-    }
-    .into();
-    let compactor_options = CompactorOptions {
-        scheduler_options,
-        ..Default::default()
-    };
-    let compaction_scheduler_supplier = Arc::new(SizeTieredCompactionSchedulerSupplier::new());
-    let mut builder = DbBuilder::new("test_db", object_store.clone());
-    builder = builder.with_settings(settings);
-    builder = builder.with_seed(rand.rng().random_range(0..u64::MAX));
-    builder = builder.with_system_clock(system_clock.clone());
-    builder = builder.with_compactor_builder(
-        CompactorBuilder::new("test_db", object_store)
-            .with_options(compactor_options)
-            .with_scheduler_supplier(compaction_scheduler_supplier),
-    );
-    builder.build().await.unwrap()
+    info!("building scenario db [seed={}]", seed);
+    DbBuilder::new("test_db", object_store)
+        .with_settings(settings)
+        .with_seed(seed)
+        .with_system_clock(system_clock)
+        .build()
+        .await
 }
 
-/// Builds a Settings instance with random values.
-///
-/// All arguments are expected to be deterministic.
-pub async fn build_settings(rand: &DbRand) -> Settings {
-    let mut rng = rand.rng();
-    let flush_interval = rng.random_range(Duration::from_millis(1)..Duration::from_secs(60));
-    let manifest_poll_interval = rng.random_range(Duration::from_secs(1)..Duration::from_secs(60));
-    let manifest_update_timeout = rng.random_range(Duration::from_secs(1)..Duration::from_secs(60));
-    let min_filter_keys = rng.random_range(100..1000);
-    let filter_bits_per_key = rng.random_range(1..20);
-    let l0_sst_size_bytes = rng.random_range(MIB_1..MIB_500);
-    let l0_max_ssts = rng.random_range(4..8); // max L0 size of 4GiB (8 * 500MiB l0 sst size)
-    let max_unflushed_bytes = rng.random_range(MIB_1..GIB_2);
-    let compression_codec_idx = rng.random_range(0..COMPRESSION_CODECS.len());
-    let compression_codec =
-        if let Some(compression_codec) = COMPRESSION_CODECS[compression_codec_idx] {
-            CompressionCodec::from_str(compression_codec).ok()
-        } else {
-            None
-        };
-
-    Settings {
-        flush_interval: Some(flush_interval),
-        manifest_poll_interval,
-        manifest_update_timeout,
-        min_filter_keys,
-        filter_bits_per_key,
-        l0_sst_size_bytes,
-        l0_max_ssts,
-        max_unflushed_bytes,
-        compression_codec,
-        garbage_collector_options: Some(GarbageCollectorOptions {
-            manifest_options: Some(GarbageCollectorDirectoryOptions {
-                interval: Some(
-                    rng.random_range(Duration::from_millis(1)..Duration::from_secs(600)),
-                ),
-                min_age: rng.random_range(Duration::from_millis(20)..Duration::from_secs(900)),
-            }),
-            wal_options: Some(GarbageCollectorDirectoryOptions {
-                interval: Some(
-                    rng.random_range(Duration::from_millis(1)..Duration::from_secs(600)),
-                ),
-                min_age: rng.random_range(Duration::from_millis(20)..Duration::from_secs(900)),
-            }),
-            compacted_options: Some(GarbageCollectorDirectoryOptions {
-                interval: Some(
-                    rng.random_range(Duration::from_millis(1)..Duration::from_secs(600)),
-                ),
-                min_age: rng.random_range(Duration::from_millis(20)..Duration::from_secs(900)),
-            }),
-            compactions_options: Some(GarbageCollectorDirectoryOptions {
-                interval: Some(
-                    rng.random_range(Duration::from_millis(1)..Duration::from_secs(600)),
-                ),
-                min_age: rng.random_range(Duration::from_millis(20)..Duration::from_secs(900)),
-            }),
-        }),
-        compactor_options: None,
-        wal_enabled: rng.random_bool(0.5),
-        ..Default::default()
-    }
+/// Builds a [`Dst`], runs the supplied scenarios, and returns the runner for
+/// follow-up inspection and verification.
+pub async fn run_scenarios<I>(
+    db: Db,
+    system_clock: Arc<MockSystemClock>,
+    settings: Settings,
+    scenarios: I,
+) -> Result<Dst, Error>
+where
+    I: IntoIterator<Item = Box<dyn Scenario>>,
+{
+    let dst = Dst::new(db, system_clock, settings)?;
+    dst.run_scenarios(scenarios).await?;
+    Ok(dst)
 }
 
 /// Tokio's default Runtime is non-deterministic even if a single thread is used.
@@ -181,41 +59,15 @@ pub async fn build_settings(rand: &DbRand) -> Settings {
 pub fn build_runtime(seed: u64) -> tokio::runtime::LocalRuntime {
     use tokio::runtime::RngSeed;
 
-    // https://pierrezemb.fr/posts/tokio-hidden-gems/
     tokio::runtime::Builder::new_current_thread()
+        .enable_time()
         .rng_seed(RngSeed::from_bytes(&seed.to_le_bytes()))
         .build_local(Default::default())
         .unwrap()
 }
 
-/// Builds a [Dst] instance (including its [Db]) with [Settings] that are selected
-/// at random. Then runs a simulation for the given number of iterations.
-///
-/// All arguments are expected to be deterministic.
-pub async fn run_simulation(
-    object_store: Arc<dyn ObjectStore>,
-    system_clock: Arc<dyn SystemClock>,
-    rand: Rc<DbRand>,
-    dst_duration: DstDuration,
-    dst_opts: DstOptions,
-) -> Result<(), Error> {
-    let seed = rand.seed();
-    info!("running simulation [seed={}]", seed);
-    let mut dst = build_dst(object_store, system_clock.clone(), rand.clone(), dst_opts).await?;
-    match dst.run_simulation(dst_duration).await {
-        Ok(_) => Ok(()),
-        Err(e) => {
-            error!("simulation failed [seed={}, error={}]", seed, e);
-            Err(e)
-        }
-    }
-}
-
-// A flag so we only initialize logging once.
 static INIT_LOGGING: Once = Once::new();
 
-/// Initialize logging for tests so we get log output. Uses `RUST_LOG` environment
-/// variable to set the log level, or defaults to `info` if not set.
 #[ctor::ctor]
 fn init_tracing() {
     INIT_LOGGING.call_once(|| {
@@ -226,11 +78,4 @@ fn init_tracing() {
             .with_test_writer()
             .init();
     });
-}
-
-pub(crate) fn truncate_bytes(bytes: &[u8]) -> &[u8] {
-    if bytes.len() < 8 {
-        return bytes;
-    }
-    &bytes[..8]
 }
