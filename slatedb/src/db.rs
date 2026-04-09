@@ -6854,24 +6854,19 @@ mod tests {
             .unwrap();
         }
 
-        let manifest_store = Arc::new(ManifestStore::new(&Path::from(path), object_store.clone()));
-        let mut stored_manifest =
-            StoredManifest::load(manifest_store.clone(), Arc::new(DefaultSystemClock::new()))
-                .await
-                .unwrap();
-        wait_for_manifest_condition(
-            &mut stored_manifest,
-            |m| m.l0.len() > 2,
-            Duration::from_secs(30),
-        )
-        .await;
+        // Flush all pending writes to L0 before triggering compaction.
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::MemTable,
+        })
+        .await
+        .unwrap();
 
-        info!("GOT MANIFEST WITH 3 L0s");
-
-        // Compact until we observe a sorted run where a single logical key spans SST boundaries.
-        should_compact.store(true, Ordering::SeqCst);
+        // Compact until we observe a sorted run where a single logical key spans
+        // multiple SSTs. Re-arm should_compact each iteration so partial compactions
+        // can be followed by additional rounds.
         tokio::time::timeout(Duration::from_secs(60), async {
             loop {
+                should_compact.store(true, Ordering::SeqCst);
                 {
                     let state = db.inner.state.read();
                     info!(
@@ -7008,24 +7003,19 @@ mod tests {
             .unwrap();
         }
 
-        let manifest_store = Arc::new(ManifestStore::new(&Path::from(path), object_store.clone()));
-        let mut stored_manifest =
-            StoredManifest::load(manifest_store.clone(), Arc::new(DefaultSystemClock::new()))
-                .await
-                .unwrap();
-        wait_for_manifest_condition(
-            &mut stored_manifest,
-            |m| m.l0.len() > 2,
-            Duration::from_secs(30),
-        )
-        .await;
+        // Flush all pending writes to L0 before triggering compaction.
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::MemTable,
+        })
+        .await
+        .unwrap();
 
-        info!("GOT MANIFEST WITH 3 L0s");
-
-        // Compact until we observe a sorted run where a single logical key spans SST boundaries.
-        should_compact.store(true, Ordering::SeqCst);
+        // Compact until we observe a sorted run where a single logical key spans
+        // multiple SSTs. Re-arm should_compact each iteration so partial compactions
+        // can be followed by additional rounds.
         tokio::time::timeout(Duration::from_secs(60), async {
             loop {
+                should_compact.store(true, Ordering::SeqCst);
                 {
                     let state = db.inner.state.read();
                     info!(
