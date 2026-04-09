@@ -1526,6 +1526,22 @@ impl Db {
         self.inner.manifest()
     }
 
+    /// Enqueue a manifest poll immediately and wait for it to complete.
+    ///
+    /// A `PollManifest` command is enqueued immediately, bypassing the regular
+    /// [`Settings::manifest_poll_interval`] timer.
+    ///
+    /// ## Errors
+    /// - Returns [`Error`] if the database is closed before the next poll completes.
+    pub async fn manifest_poll(&self) -> Result<(), crate::Error> {
+        self.inner.check_closed()?;
+        self.inner
+            .memtable_flusher
+            .poll_manifest()
+            .await
+            .map_err(Into::into)
+    }
+
     /// Subscribe to database state changes.
     ///
     /// Returns a [`tokio::sync::watch::Receiver<DbStatus>`] that always
