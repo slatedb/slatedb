@@ -917,6 +917,7 @@ mod tests {
             wal_object_store_uri: None,
             recent_snapshot_min_seq: 0,
             sequence_tracker: SequenceTracker::new(),
+            manifest_id: 0,
         }
     }
 

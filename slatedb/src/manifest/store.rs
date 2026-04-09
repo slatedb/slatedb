@@ -254,7 +254,9 @@ impl StoredManifest {
     }
 
     pub(crate) fn prepare_dirty(&self) -> Result<DirtyObject<Manifest>, SlateDBError> {
-        Ok(self.inner.prepare_dirty()?)
+        let mut dirty = self.inner.prepare_dirty()?;
+        dirty.value.core.manifest_id = u64::from(dirty.id) + 1;
+        Ok(dirty)
     }
 
     pub(crate) fn db_state(&self) -> &ManifestCore {
@@ -1433,5 +1435,33 @@ mod tests {
             Some(SlateDBError::Fenced)
         ));
         assert!(fm_a.refresh().await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_should_set_manifest_id_on_prepare_dirty() {
+        // given:
+        let ms = new_memory_manifest_store();
+        let mut sm = StoredManifest::create_new_db(
+            ms.clone(),
+            ManifestCore::new(),
+            Arc::new(DefaultSystemClock::new()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(sm.id(), 1);
+
+        // when:
+        let dirty = sm.prepare_dirty().unwrap();
+
+        // then: manifest_id should be stored_id + 1
+        assert_eq!(dirty.value.core.manifest_id, 2);
+
+        // when: write and prepare again
+        sm.update(dirty).await.unwrap();
+        assert_eq!(sm.id(), 2);
+        let dirty = sm.prepare_dirty().unwrap();
+
+        // then: manifest_id advances
+        assert_eq!(dirty.value.core.manifest_id, 3);
     }
 }

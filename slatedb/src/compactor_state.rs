@@ -570,6 +570,7 @@ impl CompactorState {
             wal_object_store_uri: my_db_state.wal_object_store_uri.clone(),
             recent_snapshot_min_seq: remote_manifest.value.core.recent_snapshot_min_seq,
             sequence_tracker: remote_manifest.value.core.sequence_tracker,
+            manifest_id: u64::from(remote_manifest.id) + 1,
         };
         remote_manifest.value.core = merged;
         self.manifest = remote_manifest;
@@ -1144,6 +1145,25 @@ mod tests {
 
         // then:
         assert_eq!(vec![checkpoint], state.db_state().checkpoints);
+    }
+
+    #[test]
+    fn test_should_set_manifest_id_on_compactor_merge() {
+        // given:
+        let manifest = new_dirty_manifest();
+        let compactions = new_dirty_compactions(manifest.value.compactor_epoch);
+        let mut state = CompactorState::new(manifest, compactions);
+        let remote_id = 7u64;
+        let remote = slatedb_txn_obj::test_utils::new_dirty_object(
+            remote_id,
+            Manifest::initial(state.db_state().clone()),
+        );
+
+        // when:
+        state.merge_remote_manifest(remote);
+
+        // then:
+        assert_eq!(state.db_state().manifest_id, remote_id + 1);
     }
 
     #[test]

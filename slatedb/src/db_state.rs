@@ -530,6 +530,10 @@ pub struct ManifestCore {
 
     /// The URI of the object store dedicated specifically for WAL, if any.
     pub wal_object_store_uri: Option<String>,
+
+    /// The manifest ID that will be used when this manifest is next persisted.
+    /// Always equals `stored_manifest_id + 1` after loading or merging.
+    pub manifest_id: u64,
 }
 
 impl ManifestCore {
@@ -548,6 +552,7 @@ impl ManifestCore {
             wal_object_store_uri: None,
             recent_snapshot_min_seq: 0,
             sequence_tracker: SequenceTracker::new(),
+            manifest_id: 0,
         }
     }
 
@@ -722,6 +727,7 @@ impl<'a> StateModifier<'a> {
             sequence_tracker: my_db_state.sequence_tracker.clone(),
             checkpoints: remote_manifest.value.core.checkpoints,
             wal_object_store_uri: my_db_state.wal_object_store_uri.clone(),
+            manifest_id: u64::from(remote_manifest.id) + 1,
         };
         self.state.manifest = remote_manifest;
     }
@@ -1019,6 +1025,24 @@ mod tests {
         let sst_id = SsTableId::Compacted(ulid::Ulid::new());
         let handle = SsTableHandle::new(sst_id, SST_FORMAT_VERSION_LATEST, sst_info);
         SsTableView::identity(handle)
+    }
+
+    #[test]
+    fn test_should_set_manifest_id_on_writer_merge() {
+        // given:
+        let mut db_state = DbState::new(new_dirty_manifest());
+        let remote_id = 5u64;
+        let mut remote = slatedb_txn_obj::test_utils::new_dirty_object(
+            remote_id,
+            db_state.state.manifest.value.clone(),
+        );
+        remote.value.core = db_state.state.core().clone();
+
+        // when:
+        db_state.merge_remote_manifest(remote);
+
+        // then:
+        assert_eq!(db_state.state.core().manifest_id, remote_id + 1);
     }
 
     fn create_sst_info(first_entry: Option<Bytes>) -> SsTableInfo {

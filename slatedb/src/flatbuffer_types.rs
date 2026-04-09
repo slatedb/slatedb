@@ -301,6 +301,7 @@ impl FlatBufferManifestCodec {
             wal_object_store_uri: manifest.wal_object_store_uri().map(|uri| uri.to_string()),
             recent_snapshot_min_seq: manifest.recent_snapshot_min_seq(),
             sequence_tracker,
+            manifest_id: manifest.manifest_id(),
         };
         let external_dbs = manifest.external_dbs().map(|external_dbs| {
             external_dbs
@@ -415,6 +416,7 @@ impl FlatBufferManifestCodec {
             wal_object_store_uri: None,
             recent_snapshot_min_seq: manifest.recent_snapshot_min_seq(),
             sequence_tracker,
+            manifest_id: manifest.manifest_id(),
         };
         let external_dbs = manifest.external_dbs().map(|external_dbs| {
             external_dbs
@@ -1005,7 +1007,7 @@ impl<'b> DbFlatBufferBuilder<'b> {
         let manifest = ManifestV2::create(
             &mut self.builder,
             &ManifestV2Args {
-                manifest_id: 0, // todo: get rid of me
+                manifest_id: 0,
                 external_dbs,
                 initialized: core.initialized,
                 writer_epoch: manifest.writer_epoch,
