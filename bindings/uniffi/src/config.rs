@@ -185,6 +185,23 @@ impl From<ReaderOptions> for slatedb::config::DbReaderOptions {
     }
 }
 
+/// The iteration order for a scan.
+#[derive(Clone, Debug, Default, uniffi::Enum)]
+pub enum IterationOrder {
+    #[default]
+    Ascending,
+    Descending,
+}
+
+impl From<IterationOrder> for slatedb::IterationOrder {
+    fn from(value: IterationOrder) -> Self {
+        match value {
+            IterationOrder::Ascending => slatedb::IterationOrder::Ascending,
+            IterationOrder::Descending => slatedb::IterationOrder::Descending,
+        }
+    }
+}
+
 /// Options that control range scans and prefix scans.
 #[derive(Clone, Debug, uniffi::Record)]
 pub struct ScanOptions {
@@ -198,6 +215,9 @@ pub struct ScanOptions {
     pub cache_blocks: bool,
     /// Maximum number of concurrent fetch tasks used by the scan.
     pub max_fetch_tasks: u64,
+    /// The iteration order for the scan. Defaults to ascending when not set.
+    #[uniffi(default = None)]
+    pub order: Option<IterationOrder>,
 }
 
 impl Default for ScanOptions {
@@ -208,6 +228,7 @@ impl Default for ScanOptions {
             read_ahead_bytes: 1,
             cache_blocks: false,
             max_fetch_tasks: 1,
+            order: None,
         }
     }
 }
@@ -230,6 +251,7 @@ impl TryFrom<ScanOptions> for slatedb::config::ScanOptions {
                     field: "max_fetch_tasks",
                 })
             })?,
+            order: value.order.unwrap_or_default().into(),
         })
     }
 }

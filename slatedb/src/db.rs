@@ -1957,6 +1957,126 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_scan_descending_returns_records_in_reverse_order() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let kv_store = Db::builder("/tmp/test_scan_descending", object_store)
+            .with_settings(test_db_options(0, 1024, None))
+            .build()
+            .await
+            .unwrap();
+
+        kv_store.put(b"a", b"v0").await.unwrap();
+        kv_store.put(b"b", b"v1").await.unwrap();
+        kv_store.flush().await.unwrap();
+        kv_store.put(b"c", b"v2").await.unwrap();
+        kv_store.put(b"d", b"v3").await.unwrap();
+
+        let scan_options = ScanOptions::default().with_order(IterationOrder::Descending);
+        let mut iter = kv_store
+            .scan_with_options::<Vec<u8>, _>(.., &scan_options)
+            .await
+            .unwrap();
+        assert_eq!(iter.next().await.unwrap().unwrap().key.as_ref(), b"d");
+        assert_eq!(iter.next().await.unwrap().unwrap().key.as_ref(), b"c");
+        assert_eq!(iter.next().await.unwrap().unwrap().key.as_ref(), b"b");
+        assert_eq!(iter.next().await.unwrap().unwrap().key.as_ref(), b"a");
+        assert_eq!(iter.next().await.unwrap(), None);
+
+        kv_store.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_scan_descending_bounded_range() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let kv_store = Db::builder("/tmp/test_scan_descending_bounded", object_store)
+            .with_settings(test_db_options(0, 1024, None))
+            .build()
+            .await
+            .unwrap();
+
+        kv_store.put(b"a", b"v0").await.unwrap();
+        kv_store.put(b"b", b"v1").await.unwrap();
+        kv_store.put(b"c", b"v2").await.unwrap();
+        kv_store.put(b"d", b"v3").await.unwrap();
+        kv_store.put(b"e", b"v4").await.unwrap();
+
+        let scan_options = ScanOptions::default().with_order(IterationOrder::Descending);
+        let mut iter = kv_store
+            .scan_with_options::<Vec<u8>, _>(b"b".to_vec()..b"d".to_vec(), &scan_options)
+            .await
+            .unwrap();
+        assert_eq!(iter.next().await.unwrap().unwrap().key.as_ref(), b"c");
+        assert_eq!(iter.next().await.unwrap().unwrap().key.as_ref(), b"b");
+        assert_eq!(iter.next().await.unwrap(), None);
+
+        kv_store.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_scan_descending_skips_deleted_keys() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let kv_store = Db::builder("/tmp/test_scan_descending_deletes", object_store)
+            .with_settings(test_db_options(0, 1024, None))
+            .build()
+            .await
+            .unwrap();
+
+        kv_store.put(b"a", b"v0").await.unwrap();
+        kv_store.put(b"b", b"v1").await.unwrap();
+        kv_store.put(b"c", b"v2").await.unwrap();
+        kv_store.put(b"d", b"v3").await.unwrap();
+        kv_store.delete(b"b").await.unwrap();
+        kv_store.delete(b"d").await.unwrap();
+
+        let scan_options = ScanOptions::default().with_order(IterationOrder::Descending);
+        let mut iter = kv_store
+            .scan_with_options::<Vec<u8>, _>(.., &scan_options)
+            .await
+            .unwrap();
+        assert_eq!(iter.next().await.unwrap().unwrap().key.as_ref(), b"c");
+        assert_eq!(iter.next().await.unwrap().unwrap().key.as_ref(), b"a");
+        assert_eq!(iter.next().await.unwrap(), None);
+
+        kv_store.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_scan_prefix_descending() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let kv_store = Db::builder("/tmp/test_scan_prefix_descending", object_store)
+            .with_settings(test_db_options(0, 1024, None))
+            .build()
+            .await
+            .unwrap();
+
+        kv_store.put(b"prefix/a", b"v0").await.unwrap();
+        kv_store.put(b"prefix/b", b"v1").await.unwrap();
+        kv_store.put(b"prefix/c", b"v2").await.unwrap();
+        kv_store.put(b"other/a", b"v3").await.unwrap();
+
+        let scan_options = ScanOptions::default().with_order(IterationOrder::Descending);
+        let mut iter = kv_store
+            .scan_prefix_with_options(b"prefix/", &scan_options)
+            .await
+            .unwrap();
+        assert_eq!(
+            iter.next().await.unwrap().unwrap().key.as_ref(),
+            b"prefix/c"
+        );
+        assert_eq!(
+            iter.next().await.unwrap().unwrap().key.as_ref(),
+            b"prefix/b"
+        );
+        assert_eq!(
+            iter.next().await.unwrap().unwrap().key.as_ref(),
+            b"prefix/a"
+        );
+        assert_eq!(iter.next().await.unwrap(), None);
+
+        kv_store.close().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn test_scan_prefix_with_options_handles_unbounded_end() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let kv_store = Db::builder("/tmp/test_scan_prefix_unbounded", object_store)

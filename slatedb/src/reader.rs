@@ -4,7 +4,7 @@ use crate::clock::MonotonicClock;
 use crate::config::{DurabilityLevel, ReadOptions, ScanOptions};
 use crate::db_state::ManifestCore;
 use crate::db_stats::DbStats;
-use crate::iter::{IterationOrder, RowEntryIterator};
+use crate::iter::RowEntryIterator;
 use crate::mem_table::{ImmutableMemtable, KVTable};
 use crate::oracle::Oracle;
 use crate::sorted_run_iterator::SortedRunIterator;
@@ -90,7 +90,7 @@ impl Reader {
         point_lookup_stats: Option<DbStats>,
     ) -> Result<IteratorSources, SlateDBError> {
         let write_batch_iter = write_batch
-            .map(|batch| WriteBatchIterator::new(batch, range.clone(), IterationOrder::Ascending));
+            .map(|batch| WriteBatchIterator::new(batch, range.clone(), sst_iter_options.order));
 
         let mut memtables = VecDeque::new();
         memtables.push_back(db_state.memtable());
@@ -100,7 +100,7 @@ impl Reader {
         let mem_iters = memtables
             .iter()
             .map(|table| {
-                Box::new(table.range_ascending(range.clone()))
+                Box::new(table.range(range.clone(), sst_iter_options.order))
                     as Box<dyn RowEntryIterator + 'static>
             })
             .collect::<Vec<_>>();
@@ -314,6 +314,7 @@ impl Reader {
             max_seq,
             None,
             self.merge_operator.clone(),
+            sst_iter_options.order,
         )
         .await?;
 
@@ -367,7 +368,7 @@ impl Reader {
             blocks_to_fetch: read_ahead_blocks,
             cache_blocks: options.cache_blocks,
             eager_spawn: true,
-            order: IterationOrder::Ascending,
+            order: options.order,
         };
 
         let IteratorSources {
@@ -388,6 +389,7 @@ impl Reader {
             max_seq,
             range_tracker,
             self.merge_operator.clone(),
+            options.order,
         )
         .await
     }
