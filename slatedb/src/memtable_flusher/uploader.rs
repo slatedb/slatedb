@@ -77,6 +77,7 @@ impl UploadedMemtable {
         first_seq: u64,
         last_seq: u64,
     ) -> Self {
+        assert!(first_seq <= last_seq);
         Self {
             imm_memtable,
             sst_handle,

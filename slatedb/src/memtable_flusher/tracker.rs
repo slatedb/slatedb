@@ -465,9 +465,6 @@ mod tests {
             .await
             .unwrap(),
         );
-        // These tests freeze immutable memtables directly instead of flowing through the WAL
-        // pipeline, so treat all sequences as already remotely durable.
-        inner.oracle.advance_durable_seq(u64::MAX);
         let manifest =
             FenceableManifest::init_writer(stored_manifest, Duration::from_secs(300), system_clock)
                 .await
@@ -481,27 +478,33 @@ mod tests {
     }
 
     fn freeze_value_imm(
-        harness: &TestHarness,
+        inner: &Arc<DbInner>,
         key: &[u8],
         value: &[u8],
-        seq: u64,
         recent_flushed_wal_id: u64,
     ) {
-        let mut guard = harness.inner.state.write();
+        let seq = inner.oracle.next_seq();
+        let mut guard = inner.state.write();
         guard.memtable().put(RowEntry::new_value(key, value, seq));
+        let last_seq = guard.memtable().table().last_seq().unwrap();
         guard.freeze_memtable(recent_flushed_wal_id);
+        // Advance the durable seq to simulate a wal flush
+        inner.oracle.advance_durable_seq(last_seq);
     }
 
     fn freeze_merge_imm(
-        harness: &TestHarness,
+        inner: &Arc<DbInner>,
         key: &[u8],
         value: &[u8],
-        seq: u64,
         recent_flushed_wal_id: u64,
     ) {
-        let mut guard = harness.inner.state.write();
+        let seq = inner.oracle.next_seq();
+        let mut guard = inner.state.write();
         guard.memtable().put(RowEntry::new_merge(key, value, seq));
+        let last_seq = guard.memtable().table().last_seq().unwrap();
         guard.freeze_memtable(recent_flushed_wal_id);
+        // Advance the durable seq to simulate a wal flush
+        inner.oracle.advance_durable_seq(last_seq);
     }
 
     async fn latest_manifest_checkpoint_count(
@@ -569,20 +572,14 @@ mod tests {
     }
 
     struct StartedFlusher {
+        inner: Arc<DbInner>,
         flusher: MemtableFlusher,
         executor: crate::dispatcher::MessageHandlerExecutor,
-        #[allow(dead_code)]
-        closed_result: WatchableOnceCell<Result<(), SlateDBError>>,
     }
 
     impl StartedFlusher {
         async fn shutdown(&self) {
             MemtableFlusher::shutdown(&self.executor).await;
-        }
-
-        #[allow(dead_code)]
-        async fn await_closed(&self) -> Result<(), SlateDBError> {
-            self.closed_result.reader().await_value().await
         }
     }
 
@@ -594,6 +591,7 @@ mod tests {
     }
 
     fn start_flusher(harness: TestHarness) -> StartedFlusher {
+        let inner = Arc::clone(&harness.inner);
         let closed_result = WatchableOnceCell::new();
         let system_clock: Arc<dyn SystemClock> = Arc::new(DefaultSystemClock::new());
         let executor = crate::dispatcher::MessageHandlerExecutor::new(
@@ -612,9 +610,9 @@ mod tests {
             .unwrap();
         executor.monitor_on(&Handle::current()).unwrap();
         StartedFlusher {
+            inner,
             flusher,
             executor,
-            closed_result,
         }
     }
 
@@ -626,16 +624,15 @@ mod tests {
             Arc::new(FailPointRegistry::new()),
         )
         .await;
-        freeze_value_imm(&harness, b"k1", b"v1", 1, 11);
         let flusher = start_flusher(harness);
+        freeze_value_imm(&flusher.inner, b"k1", b"v1", 11);
 
         let result = timeout(Duration::from_secs(5), flusher.flush(FlushTarget::All))
             .await
             .unwrap()
             .unwrap();
 
-        assert_eq!(result.durable_through_wal_id, Some(11));
-        assert_eq!(result.durable_through_seq, Some(1));
+        assert_eq!(result.durable_seq, 1);
 
         flusher.shutdown().await;
     }
@@ -648,17 +645,16 @@ mod tests {
             Arc::new(FailPointRegistry::new()),
         )
         .await;
-        freeze_value_imm(&harness, b"k1", b"v1", 1, 0);
-        freeze_value_imm(&harness, b"k2", b"v2", 2, 0);
         let flusher = start_flusher(harness);
+        freeze_value_imm(&flusher.inner, b"k1", b"v1", 0);
+        freeze_value_imm(&flusher.inner, b"k2", b"v2", 0);
 
         let result = timeout(Duration::from_secs(5), flusher.flush(FlushTarget::All))
             .await
             .unwrap()
             .unwrap();
 
-        assert_eq!(result.durable_through_wal_id, Some(0));
-        assert_eq!(result.durable_through_seq, Some(2));
+        assert_eq!(result.durable_seq, 2);
 
         flusher.shutdown().await;
     }
@@ -671,8 +667,8 @@ mod tests {
             Arc::new(FailPointRegistry::new()),
         )
         .await;
-        freeze_value_imm(&harness, b"k1", b"v1", 1, 15);
         let flusher = start_flusher(harness);
+        freeze_value_imm(&flusher.inner, b"k1", b"v1", 15);
 
         let (first, second) = tokio::join!(
             timeout(Duration::from_secs(5), flusher.flush(FlushTarget::All)),
@@ -681,8 +677,7 @@ mod tests {
 
         let first = first.unwrap().unwrap();
         let second = second.unwrap().unwrap();
-        assert_eq!(first.durable_through_wal_id, Some(15));
-        assert_eq!(first.durable_through_seq, Some(1));
+        assert_eq!(first.durable_seq, 1);
         assert_eq!(second, first);
 
         flusher.shutdown().await;
@@ -696,13 +691,13 @@ mod tests {
             Arc::new(FailPointRegistry::new()),
         )
         .await;
-        freeze_value_imm(&harness, b"k1", b"v1", 1, 21);
         let before =
             latest_manifest_checkpoint_count(&harness.path, Arc::clone(&harness.object_store))
                 .await;
         let path = harness.path.clone();
         let object_store = Arc::clone(&harness.object_store);
         let flusher = start_flusher(harness);
+        freeze_value_imm(&flusher.inner, b"k1", b"v1", 21);
 
         let checkpoint = timeout(
             Duration::from_secs(5),
@@ -733,13 +728,13 @@ mod tests {
         )
         .await;
         set_remote_l0_len(&harness.path, Arc::clone(&harness.object_store), 1).await;
-        freeze_value_imm(&harness, b"k1", b"v1", 1, 61);
         let before =
             latest_manifest_checkpoint_count(&harness.path, Arc::clone(&harness.object_store))
                 .await;
         let path = harness.path.clone();
         let object_store = Arc::clone(&harness.object_store);
         let flusher = start_flusher(harness);
+        freeze_value_imm(&flusher.inner, b"k1", b"v1", 61);
 
         // A CurrentDurable checkpoint should complete promptly even when L0 is
         // full — it captures whatever is already durable without waiting for
@@ -767,8 +762,8 @@ mod tests {
         )
         .await;
         // freeze a merge entry with no merge operator → fatal build error
-        freeze_merge_imm(&harness, b"k1", b"merge", 1, 31);
         let flusher = start_flusher(harness);
+        freeze_merge_imm(&flusher.inner, b"k1", b"merge", 31);
 
         // The flush fails because the upload error propagates through
         // the executor's closed_result to the flush waiter.
@@ -796,8 +791,6 @@ mod tests {
             Arc::new(FailPointRegistry::new()),
         )
         .await;
-        freeze_value_imm(&harness, b"k1", b"v1", 1, 11);
-
         // Fence the manifest before starting the flusher's manifest writer.
         let _fence = {
             let manifest_store = Arc::new(ManifestStore::new(
@@ -818,6 +811,7 @@ mod tests {
         };
 
         let flusher = start_flusher(harness);
+        freeze_value_imm(&flusher.inner, b"k1", b"v1", 11);
 
         // The flush should fail with a fencing error.
         let flush_result = timeout(Duration::from_secs(5), flusher.flush(FlushTarget::All))
@@ -847,11 +841,10 @@ mod tests {
         .await;
         set_local_l0_len(&harness, 1);
         set_remote_l0_len(&harness.path, Arc::clone(&harness.object_store), 1).await;
-        freeze_value_imm(&harness, b"k1", b"v1", 1, 41);
-        let inner = Arc::clone(&harness.inner);
         let path = harness.path.clone();
         let object_store = Arc::clone(&harness.object_store);
         let flusher = start_flusher(harness);
+        freeze_value_imm(&flusher.inner, b"k1", b"v1", 41);
 
         {
             let flush = flusher.flush(FlushTarget::All);
@@ -862,7 +855,7 @@ mod tests {
 
             // Clear both local and remote L0 so the flusher can make progress.
             {
-                let mut guard = inner.state.write();
+                let mut guard = flusher.inner.state.write();
                 guard.modify(|modifier| modifier.state.manifest.value.core.l0.clear());
             }
             set_remote_l0_len(&path, object_store, 0).await;
@@ -871,8 +864,7 @@ mod tests {
                 .await
                 .unwrap()
                 .unwrap();
-            assert_eq!(result.durable_through_wal_id, Some(41));
-            assert_eq!(result.durable_through_seq, Some(1));
+            assert_eq!(result.durable_seq, 1);
         }
 
         flusher.shutdown().await;
@@ -886,9 +878,9 @@ mod tests {
             Arc::new(FailPointRegistry::new()),
         )
         .await;
-        freeze_value_imm(&harness, b"k1", b"v1", 1, 11);
-        freeze_value_imm(&harness, b"k2", b"v2", 2, 12);
         let flusher = start_flusher(harness);
+        freeze_value_imm(&flusher.inner, b"k1", b"v1", 11);
+        freeze_value_imm(&flusher.inner, b"k2", b"v2", 12);
 
         // Start a flush that requires both epochs to become durable.
         let flush = flusher.flush(FlushTarget::All);

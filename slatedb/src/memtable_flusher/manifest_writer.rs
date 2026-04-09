@@ -23,6 +23,7 @@ use crate::db_state::SsTableView;
 use crate::dispatcher::MessageHandler;
 use crate::error::SlateDBError;
 use crate::manifest::store::FenceableManifest;
+use crate::oracle::Oracle;
 use crate::utils::IdGenerator;
 use crate::utils::SafeSender;
 use async_trait::async_trait;
@@ -38,10 +39,8 @@ use tokio::sync::oneshot;
 /// Result reported for a completed flush request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct FlushResult {
-    /// Highest durable WAL id covered by the completed flush (inclusive).
-    pub(crate) durable_through_wal_id: Option<u64>,
     /// Highest durable sequence number covered by the completed flush (inclusive).
-    pub(crate) durable_through_seq: Option<u64>,
+    pub(crate) durable_seq: u64,
 }
 
 /// Command submitted to the manifest_writer.
@@ -171,8 +170,7 @@ struct ManifestWriterHandler {
     /// The first_seq we expect for the next memtable to process.
     next_seq: u64,
     /// Highest last_seq that has been durably written to the manifest (inclusive).
-    durable_seq: Option<u64>,
-    durable_wal_id: Option<u64>,
+    durable_seq: u64,
     pending_flushes: Vec<PendingFlush>,
     pending_checkpoints: Vec<PendingCheckpoint>,
 }
@@ -245,17 +243,17 @@ impl ManifestWriterHandler {
         manifest_poll_interval: Duration,
         tracker_tx: SafeSender<TrackerMessage>,
     ) -> Self {
-        let next_seq = db.state.read().state().core().last_l0_seq + 1;
+        let durable_seq = db.oracle.last_remote_persisted_seq();
+        let next_seq = db.oracle.peek_next_seq();
         Self {
             db,
             manifest,
             manifest_poll_interval,
             tracker_tx,
-            durable_wal_id: None,
             pending_flushes: Vec::new(),
             ready: BTreeMap::new(),
             next_seq,
-            durable_seq: None,
+            durable_seq,
             pending_checkpoints: Vec::new(),
         }
     }
@@ -298,16 +296,13 @@ impl ManifestWriterHandler {
     fn is_durable(&self, through_seq: Option<u64>) -> bool {
         match through_seq {
             None => true,
-            Some(seq) => self
-                .durable_seq
-                .is_some_and(|durable_seq| durable_seq >= seq),
+            Some(seq) => self.durable_seq >= seq,
         }
     }
 
     fn flush_result(&self) -> FlushResult {
         FlushResult {
-            durable_through_wal_id: self.durable_wal_id,
-            durable_through_seq: self.durable_seq,
+            durable_seq: self.durable_seq,
         }
     }
 
@@ -588,9 +583,8 @@ impl ManifestWriterHandler {
             staged_batch.len(),
             through_seq,
         );
-        self.durable_seq = Some(through_seq);
+        self.durable_seq = through_seq;
         for uploaded in &staged_batch {
-            self.durable_wal_id = Some(uploaded.imm_memtable.recent_flushed_wal_id());
             uploaded.imm_memtable.table().notify_durable(Ok(()));
             self.db.oracle.advance_durable_seq(uploaded.last_seq);
         }
@@ -943,33 +937,25 @@ mod tests {
     }
 
     fn freeze_imm(
-        harness: &TestHarness,
+        inner: &Arc<DbInner>,
         key: &[u8],
         value: &[u8],
-        seq: u64,
     ) -> Arc<crate::mem_table::ImmutableMemtable> {
-        let mut guard = harness.inner.state.write();
+        let seq = inner.oracle.next_seq();
+        let mut guard = inner.state.write();
         guard.memtable().put(RowEntry::new_value(key, value, seq));
         guard.freeze_memtable(0);
         guard.state().imm_memtable.front().cloned().unwrap()
     }
 
     async fn next_uploaded_memtable(
-        harness: &TestHarness,
+        inner: &Arc<DbInner>,
         key: &[u8],
         value: &[u8],
-        seq: u64,
     ) -> UploadedMemtable {
-        let imm_memtable = freeze_imm(harness, key, value, seq);
-        let sst_id = SsTableId::Compacted(
-            harness
-                .inner
-                .rand
-                .rng()
-                .gen_ulid(harness.inner.system_clock.as_ref()),
-        );
-        let sst_handle = harness
-            .inner
+        let imm_memtable = freeze_imm(inner, key, value);
+        let sst_id = SsTableId::Compacted(inner.rand.rng().gen_ulid(inner.system_clock.as_ref()));
+        let sst_handle = inner
             .flush_imm_table(&sst_id, imm_memtable.table(), true)
             .await
             .unwrap();
@@ -985,13 +971,13 @@ mod tests {
             Arc::new(FailPointRegistry::new()),
         )
         .await;
-        let uploaded = next_uploaded_memtable(&harness, b"k1", b"v1", 1).await;
-
+        let inner = Arc::clone(&harness.inner);
         let started = start_manifest_writer(
-            Arc::clone(&harness.inner),
+            Arc::clone(&inner),
             harness.manifest,
             Duration::from_secs(3600),
         );
+        let uploaded = next_uploaded_memtable(&inner, b"k1", b"v1").await;
         started.notify_uploaded(uploaded).await.unwrap();
 
         let through_seq = expect_flushed(&started.tracker_rx).await;
@@ -1007,14 +993,14 @@ mod tests {
             Arc::new(FailPointRegistry::new()),
         )
         .await;
-        let uploaded1 = next_uploaded_memtable(&harness, b"k1", b"v1", 1).await;
-        let uploaded2 = next_uploaded_memtable(&harness, b"k2", b"v2", 2).await;
-
+        let inner = Arc::clone(&harness.inner);
         let started = start_manifest_writer(
-            Arc::clone(&harness.inner),
+            Arc::clone(&inner),
             harness.manifest,
             Duration::from_secs(3600),
         );
+        let uploaded1 = next_uploaded_memtable(&inner, b"k1", b"v1").await;
+        let uploaded2 = next_uploaded_memtable(&inner, b"k2", b"v2").await;
         started.notify_uploaded(uploaded2).await.unwrap();
         assert_no_flush_event(&started.tracker_rx, Duration::from_millis(100)).await;
 
@@ -1036,8 +1022,9 @@ mod tests {
             latest_manifest_checkpoint_count(&harness.path, Arc::clone(&harness.object_store))
                 .await;
 
+        let inner = Arc::clone(&harness.inner);
         let started = start_manifest_writer(
-            Arc::clone(&harness.inner),
+            Arc::clone(&inner),
             harness.manifest,
             Duration::from_secs(3600),
         );
@@ -1068,17 +1055,17 @@ mod tests {
             Arc::new(FailPointRegistry::new()),
         )
         .await;
-        let uploaded = next_uploaded_memtable(&harness, b"k1", b"v1", 1).await;
-
         let before =
             latest_manifest_checkpoint_count(&harness.path, Arc::clone(&harness.object_store))
                 .await;
 
+        let inner = Arc::clone(&harness.inner);
         let started = start_manifest_writer(
-            Arc::clone(&harness.inner),
+            Arc::clone(&inner),
             harness.manifest,
             Duration::from_secs(3600),
         );
+        let uploaded = next_uploaded_memtable(&inner, b"k1", b"v1").await;
 
         let (tx, rx) = oneshot::channel();
         started
@@ -1110,15 +1097,17 @@ mod tests {
             Arc::new(FailPointRegistry::new()),
         )
         .await;
-        let uploaded = next_uploaded_memtable(&harness, b"k1", b"v1", 1).await;
-
+        let path = harness.path.clone();
+        let object_store = Arc::clone(&harness.object_store);
+        let inner = Arc::clone(&harness.inner);
         let started = start_manifest_writer(
-            Arc::clone(&harness.inner),
+            Arc::clone(&inner),
             harness.manifest,
             Duration::from_secs(3600),
         );
+        let uploaded = next_uploaded_memtable(&inner, b"k1", b"v1").await;
 
-        let _fence = load_writer_manifest(&harness.path, Arc::clone(&harness.object_store)).await;
+        let _fence = load_writer_manifest(&path, object_store).await;
         started.notify_uploaded(uploaded).await.unwrap();
 
         // The manifest writer detects the fence and writes the error to closed_result.
@@ -1141,20 +1130,22 @@ mod tests {
             Arc::new(FailPointRegistry::new()),
         )
         .await;
-        let uploaded = next_uploaded_memtable(&harness, b"k1", b"v1", 1).await;
-
+        let path = harness.path.clone();
+        let object_store = Arc::clone(&harness.object_store);
+        let inner = Arc::clone(&harness.inner);
         let started = start_manifest_writer(
-            Arc::clone(&harness.inner),
+            Arc::clone(&inner),
             harness.manifest,
             Duration::from_secs(3600),
         );
+        let uploaded = next_uploaded_memtable(&inner, b"k1", b"v1").await;
 
         // Send a flush request for epoch 1, which hasn't been uploaded yet.
         let (tx, rx) = oneshot::channel();
         started.send_flush(Some(1), tx).unwrap();
 
         // Fence the manifest so the next write fails.
-        let _fence = load_writer_manifest(&harness.path, Arc::clone(&harness.object_store)).await;
+        let _fence = load_writer_manifest(&path, object_store).await;
 
         // Trigger a manifest write by uploading — this discovers the fence.
         started.notify_uploaded(uploaded).await.unwrap();
@@ -1180,13 +1171,15 @@ mod tests {
             Arc::new(FailPointRegistry::new()),
         )
         .await;
-        let uploaded = next_uploaded_memtable(&harness, b"k1", b"v1", 1).await;
-
+        let path = harness.path.clone();
+        let object_store = Arc::clone(&harness.object_store);
+        let inner = Arc::clone(&harness.inner);
         let started = start_manifest_writer(
-            Arc::clone(&harness.inner),
+            Arc::clone(&inner),
             harness.manifest,
             Duration::from_secs(3600),
         );
+        let uploaded = next_uploaded_memtable(&inner, b"k1", b"v1").await;
 
         // Send a checkpoint request for epoch 1, which hasn't been uploaded yet.
         let (tx, rx) = oneshot::channel();
@@ -1195,7 +1188,7 @@ mod tests {
             .unwrap();
 
         // Fence and trigger a manifest write.
-        let _fence = load_writer_manifest(&harness.path, Arc::clone(&harness.object_store)).await;
+        let _fence = load_writer_manifest(&path, object_store).await;
         started.notify_uploaded(uploaded).await.unwrap();
 
         // The pending checkpoint waiter should receive the fencing error.
@@ -1220,8 +1213,9 @@ mod tests {
         )
         .await;
 
+        let inner = Arc::clone(&harness.inner);
         let started = start_manifest_writer(
-            Arc::clone(&harness.inner),
+            Arc::clone(&inner),
             harness.manifest,
             Duration::from_secs(3600),
         );
