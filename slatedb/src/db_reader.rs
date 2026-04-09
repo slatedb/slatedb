@@ -150,13 +150,13 @@ impl DbReaderInner {
         let db_stats = DbStats::new(&recorder);
 
         let state = RwLock::new(initial_state);
-        let reader = Reader {
-            table_store: Arc::clone(&table_store),
+        let reader = Reader::new(
+            Arc::clone(&table_store),
             db_stats,
-            mono_clock: Arc::clone(&mono_clock),
-            oracle: oracle.clone(),
+            Arc::clone(&mono_clock),
+            oracle.clone(),
             merge_operator,
-        };
+        );
 
         Ok(Self {
             manifest_store,
@@ -2103,16 +2103,16 @@ mod tests {
         // directly. skip_wal_replay keeps the test scoped to the IMM retention logic.
         let oracle = Arc::new(DbReaderOracle::new(0, DbStatusManager::new(0)));
         let recorder = slatedb_common::metrics::MetricsRecorderHelper::noop();
-        let reader = Reader {
-            table_store: Arc::clone(&table_store),
-            db_stats: DbStats::new(&recorder),
-            mono_clock: Arc::new(MonotonicClock::new(
+        let reader = Reader::new(
+            Arc::clone(&table_store),
+            DbStats::new(&recorder),
+            Arc::new(MonotonicClock::new(
                 test_provider.system_clock.clone(),
                 i64::MIN,
             )),
-            oracle: oracle.clone(),
-            merge_operator: None,
-        };
+            oracle.clone(),
+            None,
+        );
         let inner = DbReaderInner {
             manifest_store,
             table_store,
@@ -2195,16 +2195,16 @@ mod tests {
 
         let oracle = Arc::new(DbReaderOracle::new(0, DbStatusManager::new(0)));
         let recorder = slatedb_common::metrics::MetricsRecorderHelper::noop();
-        let reader = Reader {
-            table_store: Arc::clone(&table_store),
-            db_stats: DbStats::new(&recorder),
-            mono_clock: Arc::new(MonotonicClock::new(
+        let reader = Reader::new(
+            Arc::clone(&table_store),
+            DbStats::new(&recorder),
+            Arc::new(MonotonicClock::new(
                 test_provider.system_clock.clone(),
                 i64::MIN,
             )),
-            oracle: oracle.clone(),
-            merge_operator: None,
-        };
+            oracle.clone(),
+            None,
+        );
         let inner = DbReaderInner {
             manifest_store,
             table_store,

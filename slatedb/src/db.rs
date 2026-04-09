@@ -61,6 +61,7 @@ use crate::manifest::store::FenceableManifest;
 use crate::manifest::{Manifest, ManifestCore};
 use crate::mem_table::WritableKVTable;
 use crate::memtable_flusher::{FlushResult, FlushTarget, MemtableFlusher};
+use crate::merge_operator::{instrument_merge_operator, MergeOperatorType};
 use crate::oracle::{DbOracle, Oracle};
 use crate::paths::PathResolver;
 use crate::rand::DbRand;
@@ -103,6 +104,7 @@ pub(crate) struct DbInner {
     pub(crate) system_clock: Arc<dyn SystemClock>,
     pub(crate) rand: Arc<DbRand>,
     pub(crate) oracle: Arc<DbOracle>,
+    pub(crate) flush_merge_operator: Option<MergeOperatorType>,
     pub(crate) reader: Reader,
     /// [`wal_buffer`] manages the in-memory WAL buffer, it manages the flushing
     /// of the WAL buffer to the remote storage.
@@ -148,14 +150,20 @@ impl DbInner {
 
         let db_stats = DbStats::new(&recorder);
         let wal_enabled = DbInner::wal_enabled_in_options(&settings);
+        let flush_merge_operator = merge_operator.clone().map(|merge_operator| {
+            instrument_merge_operator(
+                merge_operator,
+                db_stats.merge_operator_flush_operands.clone(),
+            )
+        });
 
-        let reader = Reader {
-            table_store: table_store.clone(),
-            db_stats: db_stats.clone(),
-            mono_clock: mono_clock.clone(),
-            oracle: oracle.clone(),
-            merge_operator,
-        };
+        let reader = Reader::new(
+            table_store.clone(),
+            db_stats.clone(),
+            mono_clock.clone(),
+            oracle.clone(),
+            merge_operator.clone(),
+        );
 
         let recent_flushed_wal_id = state.read().state().core().replay_after_wal_id;
         let wal_buffer = Arc::new(WalBufferManager::new(
@@ -186,6 +194,7 @@ impl DbInner {
             mono_clock,
             system_clock,
             rand,
+            flush_merge_operator,
             recorder,
             fp_registry,
             reader,
@@ -1702,6 +1711,9 @@ mod tests {
     };
     use crate::iter::RowEntryIterator;
     use crate::manifest::store::{ManifestStore, StoredManifest};
+    use crate::merge_operator::{
+        MERGE_OPERATOR_COMPACT_PATH, MERGE_OPERATOR_FLUSH_PATH, MERGE_OPERATOR_READ_PATH,
+    };
     use crate::object_stores::ObjectStores;
     use crate::proptest_util::arbitrary;
     use crate::proptest_util::sample;
@@ -1709,7 +1721,8 @@ mod tests {
     use crate::seq_tracker::FindOption;
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
     use crate::test_utils::{
-        assert_iterator, OnDemandCompactionSchedulerSupplier, StringConcatMergeOperator,
+        assert_iterator, lookup_merge_operator_operands, OnDemandCompactionSchedulerSupplier,
+        StringConcatMergeOperator,
     };
     use crate::types::RowEntry;
     use crate::wal_reader::WalReader;
@@ -7308,6 +7321,51 @@ mod tests {
             lookup_metric(&metrics_recorder, crate::db_stats::WRITE_BATCH_COUNT),
             Some(2)
         );
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_should_record_merge_operator_operands_on_flush_path_during_batch_write() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let metrics_recorder = Arc::new(DefaultMetricsRecorder::new());
+        let path =
+            "/tmp/test_should_record_merge_operator_operands_on_flush_path_during_batch_write";
+        let mut options = test_db_options(0, 1024, None);
+        options.flush_interval = None;
+        options.max_unflushed_bytes = 1024 * 1024;
+        let db = Db::builder(path, object_store.clone())
+            .with_settings(options)
+            .with_metrics_recorder(metrics_recorder.clone())
+            .with_merge_operator(Arc::new(StringConcatMergeOperator))
+            .build()
+            .await
+            .unwrap();
+
+        let mut batch = WriteBatch::new();
+        batch.merge(b"key1", b"a");
+        batch.merge(b"key1", b"b");
+        db.write_with_options(
+            batch,
+            &WriteOptions {
+                await_durable: false,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            lookup_merge_operator_operands(&metrics_recorder, MERGE_OPERATOR_READ_PATH),
+            Some(0)
+        );
+        assert_eq!(
+            lookup_merge_operator_operands(&metrics_recorder, MERGE_OPERATOR_FLUSH_PATH),
+            Some(3)
+        );
+        assert!(
+            lookup_merge_operator_operands(&metrics_recorder, MERGE_OPERATOR_COMPACT_PATH)
+                .is_none_or(|value| value == 0)
+        );
+
         db.close().await.unwrap();
     }
 

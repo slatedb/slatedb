@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use bytes::Bytes;
+use slatedb_common::metrics::CounterFn;
 use thiserror::Error;
 
 use crate::{
@@ -114,6 +115,64 @@ pub trait MergeOperator {
 }
 
 pub(crate) type MergeOperatorType = Arc<dyn MergeOperator + Send + Sync>;
+
+/// Counter for merge operands resolved across all paths.
+///
+/// Incremented on each successful `merge_batch` call by the number of
+/// operands in that call. Because merge resolution batches operands and then
+/// re-merges intermediate results, the counter can exceed the number of raw
+/// user-written merge operands.
+pub const MERGE_OPERATOR_OPERANDS: &str = "slatedb.merge_operator_operands";
+pub(crate) const MERGE_OPERATOR_OPERANDS_DESCRIPTION: &str = "Merge operator operands resolved";
+pub(crate) const MERGE_OPERATOR_PATH_LABEL: &str = "path";
+pub(crate) const MERGE_OPERATOR_READ_PATH: &str = "read";
+pub(crate) const MERGE_OPERATOR_FLUSH_PATH: &str = "flush";
+pub(crate) const MERGE_OPERATOR_COMPACT_PATH: &str = "compact";
+
+pub(crate) fn instrument_merge_operator(
+    merge_operator: MergeOperatorType,
+    merge_batch_operands: Arc<dyn CounterFn>,
+) -> MergeOperatorType {
+    Arc::new(InstrumentedMergeOperator {
+        merge_operator,
+        merge_batch_operands,
+    })
+}
+
+struct InstrumentedMergeOperator {
+    merge_operator: MergeOperatorType,
+    merge_batch_operands: Arc<dyn CounterFn>,
+}
+
+impl MergeOperator for InstrumentedMergeOperator {
+    fn merge(
+        &self,
+        key: &Bytes,
+        existing_value: Option<Bytes>,
+        value: Bytes,
+    ) -> Result<Bytes, MergeOperatorError> {
+        // We count operands in `merge_batch` because that is the production API.
+        // The default `merge_batch` implementation already calls `merge` once per
+        // operand, so counting here would double-count the default path.
+        self.merge_operator.merge(key, existing_value, value)
+    }
+
+    fn merge_batch(
+        &self,
+        key: &Bytes,
+        existing_value: Option<Bytes>,
+        operands: &[Bytes],
+    ) -> Result<Bytes, MergeOperatorError> {
+        let result = self
+            .merge_operator
+            .merge_batch(key, existing_value, operands)?;
+        // This counts the exact operand slices that successfully reach
+        // `merge_batch`, including intermediate results produced by batched
+        // merge resolution.
+        self.merge_batch_operands.increment(operands.len() as u64);
+        Ok(result)
+    }
+}
 
 /// Maximum number of merge operands to collect before calling `merge_batch`.
 ///
@@ -434,6 +493,7 @@ mod tests {
     use std::{cmp::Ordering, collections::VecDeque, fmt::Debug};
 
     use rstest::rstest;
+    use slatedb_common::metrics::{lookup_metric, test_recorder_helper};
 
     use crate::test_utils::assert_iterator;
 
@@ -511,6 +571,75 @@ mod tests {
             }
             Ok(Bytes::from(result))
         }
+    }
+
+    struct FailingMergeBatchOperator;
+
+    impl MergeOperator for FailingMergeBatchOperator {
+        fn merge(
+            &self,
+            _key: &Bytes,
+            _existing_value: Option<Bytes>,
+            value: Bytes,
+        ) -> Result<Bytes, MergeOperatorError> {
+            Ok(value)
+        }
+
+        fn merge_batch(
+            &self,
+            key: &Bytes,
+            _existing_value: Option<Bytes>,
+            _operands: &[Bytes],
+        ) -> Result<Bytes, MergeOperatorError> {
+            Err(MergeOperatorError::Callback {
+                message: format!("failed to merge {key:?}"),
+            })
+        }
+    }
+
+    #[test]
+    fn test_instrumented_merge_operator_counts_successful_batch_operands() {
+        const TEST_COUNTER: &str = "test.merge_operator.operands";
+
+        let (metrics_recorder, recorder) = test_recorder_helper();
+        let counter = recorder.counter(TEST_COUNTER).register();
+        let merge_operator = instrument_merge_operator(Arc::new(MockMergeOperator), counter);
+
+        let result = merge_operator
+            .merge_batch(
+                &Bytes::from_static(b"key1"),
+                None,
+                &[Bytes::from_static(b"a"), Bytes::from_static(b"b")],
+            )
+            .unwrap();
+
+        assert_eq!(result, Bytes::from_static(b"ab"));
+        assert_eq!(
+            lookup_metric(metrics_recorder.as_ref(), TEST_COUNTER),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn test_instrumented_merge_operator_does_not_count_failed_batch_operands() {
+        const TEST_COUNTER: &str = "test.merge_operator.operands";
+
+        let (metrics_recorder, recorder) = test_recorder_helper();
+        let counter = recorder.counter(TEST_COUNTER).register();
+        let merge_operator =
+            instrument_merge_operator(Arc::new(FailingMergeBatchOperator), counter);
+
+        let result = merge_operator.merge_batch(
+            &Bytes::from_static(b"key1"),
+            None,
+            &[Bytes::from_static(b"a"), Bytes::from_static(b"b")],
+        );
+
+        assert!(result.is_err());
+        assert_eq!(
+            lookup_metric(metrics_recorder.as_ref(), TEST_COUNTER),
+            Some(0)
+        );
     }
 
     #[tokio::test]

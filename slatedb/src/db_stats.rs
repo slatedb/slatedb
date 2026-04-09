@@ -1,6 +1,13 @@
 use slatedb_common::metrics::{CounterFn, GaugeFn, MetricsRecorderHelper};
 use std::sync::Arc;
 
+pub use crate::merge_operator::MERGE_OPERATOR_OPERANDS;
+
+use crate::merge_operator::{
+    MERGE_OPERATOR_FLUSH_PATH, MERGE_OPERATOR_OPERANDS_DESCRIPTION, MERGE_OPERATOR_PATH_LABEL,
+    MERGE_OPERATOR_READ_PATH,
+};
+
 macro_rules! db_stat_name {
     ($suffix:expr) => {
         concat!("slatedb.db.", $suffix)
@@ -41,6 +48,8 @@ pub(crate) struct DbStats {
     pub(crate) total_mem_size_bytes: Arc<dyn GaugeFn>,
     pub(crate) l0_sst_count: Arc<dyn GaugeFn>,
     pub(crate) l0_flush_bytes: Arc<dyn CounterFn>,
+    pub(crate) merge_operator_read_operands: Arc<dyn CounterFn>,
+    pub(crate) merge_operator_flush_operands: Arc<dyn CounterFn>,
 }
 
 impl DbStats {
@@ -73,6 +82,16 @@ impl DbStats {
             total_mem_size_bytes: recorder.gauge(TOTAL_MEM_SIZE_BYTES).register(),
             l0_sst_count: recorder.gauge(L0_SST_COUNT).register(),
             l0_flush_bytes: recorder.counter(L0_FLUSH_BYTES).register(),
+            merge_operator_read_operands: recorder
+                .counter(MERGE_OPERATOR_OPERANDS)
+                .labels(&[(MERGE_OPERATOR_PATH_LABEL, MERGE_OPERATOR_READ_PATH)])
+                .description(MERGE_OPERATOR_OPERANDS_DESCRIPTION)
+                .register(),
+            merge_operator_flush_operands: recorder
+                .counter(MERGE_OPERATOR_OPERANDS)
+                .labels(&[(MERGE_OPERATOR_PATH_LABEL, MERGE_OPERATOR_FLUSH_PATH)])
+                .description(MERGE_OPERATOR_OPERANDS_DESCRIPTION)
+                .register(),
         }
     }
 }
