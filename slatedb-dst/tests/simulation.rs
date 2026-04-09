@@ -82,7 +82,9 @@ async fn run_simulation(
         flush_interval: None,
         compactor_options: None,
         garbage_collector_options: None,
-        default_ttl: Some(25),
+        // The bundled DST simulation avoids TTL writes until the oracle models
+        // flush-time TTL tombstoning.
+        default_ttl: None,
         ..Default::default()
     };
     let db_seed = rand.rng().random::<u64>();

@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use rand::Rng;
-use slatedb::config::{DurabilityLevel, PutOptions, ReadOptions, ScanOptions, Ttl};
+use slatedb::config::{DurabilityLevel, PutOptions, ReadOptions, ScanOptions};
 use slatedb::{DbRand, Error, IterationOrder};
 use slatedb_dst::{Scenario, ScenarioContext, ScenarioWriteBatch};
 use tracing::info;
@@ -26,11 +26,12 @@ const KEY_SPACE: u64 = 8;
 /// Issues the mutating side of the simulation workload.
 ///
 /// `WriterScenario` is responsible for creating churn in the database state. On
-/// each iteration it randomly chooses between plain puts, TTL writes, deletes,
+/// each iteration it randomly chooses between two plain put variants, deletes,
 /// batched writes, and explicit flushes over a deliberately small key space.
 /// That combination creates frequent overwrites and visibility changes, which
 /// makes it more likely that the simulation will exercise edge cases in oracle
-/// tracking and durability transitions.
+/// tracking and durability transitions without depending on TTL semantics the
+/// current oracle does not fully model.
 ///
 /// When `iterations` is `Some`, the scenario performs exactly that many write
 /// steps unless shutdown happens first. When it is `None`, the scenario keeps
@@ -85,17 +86,9 @@ impl Scenario for WriterScenario {
                 1 => {
                     let key_suffix = rand.rng().random::<u64>() % KEY_SPACE;
                     let value_suffix = rand.rng().random::<u64>();
-                    let ttl = 1 + (rand.rng().random::<u64>() % 17);
                     let key = format!("key-{key_suffix}").into_bytes();
-                    let value = format!("ttl-{value_suffix}").into_bytes();
-                    ctx.put(
-                        &key,
-                        &value,
-                        &PutOptions {
-                            ttl: Ttl::ExpireAfter(ttl),
-                        },
-                    )
-                    .await?;
+                    let value = format!("put-alt-{value_suffix}").into_bytes();
+                    ctx.put(&key, &value, &PutOptions::default()).await?;
                 }
                 2 => {
                     let key_suffix = rand.rng().random::<u64>() % KEY_SPACE;
@@ -147,7 +140,7 @@ impl Scenario for WriterScenario {
 ///
 /// By running concurrently with writers, clock advancement, and background
 /// flushes, this scenario helps catch mismatches in read visibility, scan
-/// ordering, durability filtering, and TTL handling under interleaved load.
+/// ordering, and durability filtering under interleaved load.
 pub(super) struct ReaderScenario {
     pub(super) name: &'static str,
     pub(super) rand: Rc<DbRand>,
@@ -236,10 +229,9 @@ impl Scenario for ReaderScenario {
 /// the mocked clock by small random increments so timestamps continue moving
 /// forward while reads and writes are in flight.
 ///
-/// This is what allows the test harness to exercise TTL expiration and other
-/// time-sensitive state transitions deterministically without waiting on real
-/// wall-clock time. The scenario runs until the shared shutdown token is
-/// cancelled.
+/// This keeps timestamp-bearing writes and read metadata evolving
+/// deterministically without waiting on real wall-clock time. The scenario runs
+/// until the shared shutdown token is cancelled.
 pub(super) struct ClockScenario {
     pub(super) name: &'static str,
     pub(super) rand: Rc<DbRand>,

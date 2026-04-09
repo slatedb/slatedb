@@ -17,8 +17,10 @@ cloneable `ScenarioContext`, which provides:
   cancel, to shut down the entire active `run_scenarios()` invocation
 - a raw `db()` escape hatch for unchecked operations outside the oracle contract
 
-The SQLite oracle tracks committed visibility, remote durability, TTL,
-tombstones, and exact read metadata. Checked reads run only at explicit
+The SQLite oracle tracks committed visibility, remote durability, tombstones,
+and exact read metadata. It preserves `expire_ts` metadata on reads, but it
+does not yet model flush-time TTL-to-tombstone rewrites, so the bundled DST
+simulation avoids TTL writes for now. Checked reads run only at explicit
 quiescent barriers, so mutating operations can still overlap while the harness
 compares deterministic snapshots.
 

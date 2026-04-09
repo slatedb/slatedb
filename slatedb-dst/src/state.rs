@@ -26,6 +26,9 @@
 //! - tombstone suppression for deleted keys;
 //! - newest-version-wins semantics for scans.
 //!
+//! The oracle does not currently synthesize the extra tombstones that mainline
+//! SlateDB can create when expired values are rewritten during memtable flush.
+//!
 //! Public snapshot types such as [`OracleSnapshot`] expose the raw persisted
 //! oracle state for inspection. Internal helper types model the intermediate
 //! forms used while recording writes and resolving visibility.
@@ -99,7 +102,8 @@ pub struct OracleVersion {
     /// Logical expiration timestamp, if the value is subject to TTL.
     ///
     /// Checked reads on this branch surface the metadata but do not currently
-    /// hide rows whose expiration time is in the past.
+    /// hide rows whose expiration time is in the past, and the oracle does not
+    /// currently synthesize flush-time TTL tombstones.
     pub expire_ts: Option<i64>,
 }
 
@@ -171,7 +175,7 @@ pub(crate) struct ExpectedKeyValue {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum OracleVersionKind {
     /// A live value row that may be returned by checked reads if it survives
-    /// sequence and TTL filtering.
+    /// sequence filtering and is not shadowed by a tombstone.
     Value,
     /// A delete marker that suppresses the key at this sequence number and
     /// hides older value rows until a newer value row appears.
@@ -225,7 +229,7 @@ pub(crate) struct OracleReadContext {
     /// This matters when the requested durability filter only exposes durable
     /// data.
     pub durable_seq: u64,
-    /// Logical wall-clock time used for TTL evaluation.
+    /// Logical wall-clock time carried alongside checked reads.
     pub now: i64,
     /// Durability filter requested by the checked read.
     pub durability_filter: DurabilityLevel,
@@ -366,7 +370,7 @@ impl SQLiteOracle {
     /// context.
     ///
     /// Tombstones and versions above the visible sequence watermark are
-    /// filtered out.
+    /// filtered out. `expire_ts` is preserved as metadata only.
     pub(crate) fn expected_get(
         &self,
         key: &[u8],
@@ -405,7 +409,7 @@ impl SQLiteOracle {
     /// supplied read context.
     ///
     /// At most one version per key is returned, after applying sequence and
-    /// tombstone filtering.
+    /// tombstone filtering. `expire_ts` is preserved as metadata only.
     pub(crate) fn expected_scan(
         &self,
         start: Bound<Vec<u8>>,
