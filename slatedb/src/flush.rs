@@ -80,7 +80,7 @@ impl DbInner {
         .flatten()
         .min();
 
-        let merge_iter = if let Some(merge_operator) = self.memtable_flush_merge_operator.clone() {
+        let merge_iter = if let Some(merge_operator) = self.flush_merge_operator.clone() {
             Box::new(MergeOperatorIterator::new(
                 merge_operator,
                 imm_table.iter(),
@@ -115,7 +115,7 @@ mod tests {
     use crate::error::SlateDBError::MergeOperatorMissing;
     use crate::iter::RowEntryIterator;
     use crate::mem_table::WritableKVTable;
-    use crate::merge_operator::{MERGE_OPERATOR_MEMTABLE_FLUSH_PATH, MERGE_OPERATOR_READ_PATH};
+    use crate::merge_operator::{MERGE_OPERATOR_FLUSH_PATH, MERGE_OPERATOR_READ_PATH};
     use crate::object_store::memory::InMemory;
     use crate::test_utils::{lookup_merge_operator_operands, StringConcatMergeOperator};
     use crate::types::{RowEntry, ValueDeletable};
@@ -376,7 +376,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn should_record_merge_operator_operands_on_memtable_flush_path() {
+    async fn should_record_merge_operator_operands_on_flush_path() {
         let (metrics_recorder, _) = test_recorder_helper();
         let object_store: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
         let db = Db::builder("/tmp/test_merge_operands_flush", object_store)
@@ -397,10 +397,7 @@ mod tests {
             Some(0)
         );
         assert_eq!(
-            lookup_merge_operator_operands(
-                metrics_recorder.as_ref(),
-                MERGE_OPERATOR_MEMTABLE_FLUSH_PATH,
-            ),
+            lookup_merge_operator_operands(metrics_recorder.as_ref(), MERGE_OPERATOR_FLUSH_PATH,),
             Some(0)
         );
 
@@ -418,10 +415,7 @@ mod tests {
             Some(0)
         );
         assert_eq!(
-            lookup_merge_operator_operands(
-                metrics_recorder.as_ref(),
-                MERGE_OPERATOR_MEMTABLE_FLUSH_PATH,
-            ),
+            lookup_merge_operator_operands(metrics_recorder.as_ref(), MERGE_OPERATOR_FLUSH_PATH,),
             // Two raw merge rows produce one intermediate batch result and one
             // final merge_batch call over that result.
             Some(3)

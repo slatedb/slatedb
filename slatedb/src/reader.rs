@@ -423,8 +423,7 @@ impl Reader {
 mod tests {
     use super::*;
     use crate::merge_operator::{
-        MergeOperator, MergeOperatorError, MERGE_OPERATOR_MEMTABLE_FLUSH_PATH,
-        MERGE_OPERATOR_READ_PATH,
+        MergeOperator, MergeOperatorError, MERGE_OPERATOR_FLUSH_PATH, MERGE_OPERATOR_READ_PATH,
     };
     use crate::test_utils::lookup_merge_operator_operands;
     use crate::types::{RowEntry, ValueDeletable};
@@ -1790,10 +1789,7 @@ mod tests {
             Some(0)
         );
         assert_eq!(
-            lookup_merge_operator_operands(
-                metrics_recorder.as_ref(),
-                MERGE_OPERATOR_MEMTABLE_FLUSH_PATH,
-            ),
+            lookup_merge_operator_operands(metrics_recorder.as_ref(), MERGE_OPERATOR_FLUSH_PATH,),
             Some(0)
         );
 
@@ -1812,10 +1808,7 @@ mod tests {
             Some(3)
         );
         assert_eq!(
-            lookup_merge_operator_operands(
-                metrics_recorder.as_ref(),
-                MERGE_OPERATOR_MEMTABLE_FLUSH_PATH,
-            ),
+            lookup_merge_operator_operands(metrics_recorder.as_ref(), MERGE_OPERATOR_FLUSH_PATH,),
             Some(0)
         );
 
@@ -1857,10 +1850,7 @@ mod tests {
             Some(6)
         );
         assert_eq!(
-            lookup_merge_operator_operands(
-                metrics_recorder.as_ref(),
-                MERGE_OPERATOR_MEMTABLE_FLUSH_PATH,
-            ),
+            lookup_merge_operator_operands(metrics_recorder.as_ref(), MERGE_OPERATOR_FLUSH_PATH,),
             Some(0)
         );
 

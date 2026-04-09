@@ -139,14 +139,14 @@ impl DbInner {
             }
         }
 
-        // Batch-local merge folding is part of write assembly, not persisted-state
-        // resolution, so it is intentionally excluded from merge_operator_operands.
+        // Count batch-local merge folding on the flush path so DB-side merge
+        // resolution uses one metric for both write batches and memtable flushes.
         let entries = batch
             .extract_entries(
                 commit_seq,
                 now,
                 self.settings.default_ttl,
-                self.merge_operator.clone(),
+                self.flush_merge_operator.clone(),
             )
             .await?;
 

@@ -126,7 +126,7 @@ pub const MERGE_OPERATOR_OPERANDS: &str = "slatedb.merge_operator_operands";
 pub(crate) const MERGE_OPERATOR_OPERANDS_DESCRIPTION: &str = "Merge operator operands resolved";
 pub(crate) const MERGE_OPERATOR_PATH_LABEL: &str = "path";
 pub(crate) const MERGE_OPERATOR_READ_PATH: &str = "read";
-pub(crate) const MERGE_OPERATOR_MEMTABLE_FLUSH_PATH: &str = "memtable_flush";
+pub(crate) const MERGE_OPERATOR_FLUSH_PATH: &str = "flush";
 pub(crate) const MERGE_OPERATOR_COMPACT_PATH: &str = "compact";
 
 pub(crate) fn instrument_merge_operator(
