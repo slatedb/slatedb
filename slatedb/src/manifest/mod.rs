@@ -172,6 +172,11 @@ impl Manifest {
                 }
             }
 
+            // Renumber sorted runs to ensure sequential IDs without duplicates
+            for (idx, sorted_run) in core.compacted.iter_mut().enumerate() {
+                sorted_run.id = idx as u32;
+            }
+
             Self {
                 external_dbs,
                 core,
@@ -184,7 +189,13 @@ impl Manifest {
     fn range(&self) -> Option<BytesRange> {
         let mut start_bound = None;
         let mut end_bound = None;
-        for sst in &self.core.l0 {
+        let all_views = self.core.l0.iter().chain(
+            self.core
+                .compacted
+                .iter()
+                .flat_map(|sr| sr.sst_views.iter()),
+        );
+        for sst in all_views {
             let range = sst.compacted_effective_range();
             start_bound = start_bound
                 .map(|b| min(b, range.comparable_start_bound()))
@@ -369,6 +380,15 @@ mod tests {
     struct SimpleManifest {
         l0: Vec<SstEntry>,
         sorted_runs: Vec<Vec<SstEntry>>,
+    }
+
+    impl SimpleManifest {
+        fn new(l0: Vec<SstEntry>, sorted_runs: Vec<(u32, Vec<SstEntry>)>) -> Self {
+            Self {
+                l0,
+                sorted_runs: sorted_runs.into_iter().map(|(_, ssts)| ssts).collect(),
+            }
+        }
     }
 
     struct ProjectionTestCase {
@@ -586,6 +606,70 @@ mod tests {
         let union = Manifest::union(manifests);
 
         assert_manifest_equal(&union, &expected_manifest, &sst_ids);
+    }
+
+    #[test]
+    fn test_union_renumbers_sr_ids() {
+        // Create manifest 1 with 2 sorted runs covering "a".."m"
+        let manifest1 = build_manifest(
+            &SimpleManifest {
+                l0: vec![],
+                sorted_runs: vec![
+                    vec![SstEntry::projected("sr1_0_sst0", "a", "a".."g")],
+                    vec![SstEntry::projected("sr1_1_sst0", "g", "g".."m")],
+                ],
+            },
+            |_| SsTableId::Compacted(Ulid::new()),
+        );
+
+        // Create manifest 2 with 3 sorted runs covering "m"..∞
+        let manifest2 = build_manifest(
+            &SimpleManifest {
+                l0: vec![],
+                sorted_runs: vec![
+                    vec![SstEntry::projected("sr2_0_sst0", "m", "m".."s")],
+                    vec![SstEntry::projected("sr2_1_sst0", "s", "s".."t")],
+                    vec![SstEntry::projected("sr2_2_sst0", "t", "t"..)],
+                ],
+            },
+            |_| SsTableId::Compacted(Ulid::new()),
+        );
+
+        let union = Manifest::union(vec![manifest1, manifest2]);
+
+        // After union, we should have 5 SRs with IDs 0, 1, 2, 3, 4
+        assert_eq!(union.core.compacted.len(), 5);
+
+        let sr_ids: Vec<u32> = union.core.compacted.iter().map(|sr| sr.id).collect();
+        assert_eq!(sr_ids, vec![0, 1, 2, 3, 4], "SR IDs should be sequential");
+
+        // Verify no duplicates
+        let mut seen = std::collections::HashSet::new();
+        for id in &sr_ids {
+            assert!(seen.insert(id), "Duplicate SR ID: {}", id);
+        }
+    }
+
+    #[test]
+    fn test_range_includes_compacted_ssts() {
+        let manifest = build_manifest(
+            &SimpleManifest::new(
+                vec![],
+                vec![(
+                    0,
+                    vec![
+                        SstEntry::projected("sr_a", "a", "a".."m"),
+                        SstEntry::projected("sr_n", "n", "m"..),
+                    ],
+                )],
+            ),
+            |_| SsTableId::Compacted(Ulid::new()),
+        );
+        let range = manifest
+            .range()
+            .expect("range should be Some for manifest with sorted runs");
+        assert_eq!(range.start_bound(), Bound::Included(&Bytes::from("a")));
+        assert_eq!(range.end_bound(), Bound::Unbounded);
     }
 
     fn build_manifest<F>(manifest: &SimpleManifest, mut sst_id_fn: F) -> Manifest
