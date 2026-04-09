@@ -381,6 +381,9 @@ impl ManifestWriterHandler {
         through_seq: u64,
     ) -> Result<(), SlateDBError> {
         self.apply_uploaded_state(&staged_batch)?;
+        self.db
+            .status_manager
+            .report_manifest(self.db.current_manifest());
 
         for uploaded in &staged_batch {
             uploaded.imm_memtable.notify_uploaded(Ok(()));
@@ -520,7 +523,11 @@ impl ManifestWriterHandler {
 
     async fn write_current_manifest(&mut self) -> Result<(), SlateDBError> {
         let dirty = self.clone_local_manifest_for_write();
-        self.manifest.update(dirty).await
+        self.manifest.update(dirty).await?;
+        self.db
+            .status_manager
+            .report_manifest(self.db.current_manifest());
+        Ok(())
     }
 
     fn clone_local_manifest_for_write(
@@ -552,12 +559,16 @@ impl ManifestWriterHandler {
         &self,
         remote_dirty: slatedb_txn_obj::DirtyObject<crate::manifest::Manifest>,
     ) {
-        let mut wguard_state = self.db.state.write();
-        wguard_state.merge_remote_manifest(remote_dirty);
-        self.db
-            .db_stats
-            .l0_sst_count
-            .set(wguard_state.state().core().l0.len() as i64);
+        let current_manifest = {
+            let mut wguard_state = self.db.state.write();
+            wguard_state.merge_remote_manifest(remote_dirty);
+            self.db
+                .db_stats
+                .l0_sst_count
+                .set(wguard_state.state().core().l0.len() as i64);
+            wguard_state.state().core().clone()
+        };
+        self.db.status_manager.report_manifest(current_manifest);
     }
 
     async fn write_checkpoint_safely(
@@ -586,8 +597,11 @@ impl ManifestWriterHandler {
         self.durable_seq = through_seq;
         for uploaded in &staged_batch {
             uploaded.imm_memtable.table().notify_durable(Ok(()));
-            self.db.oracle.advance_durable_seq(uploaded.last_seq);
+            self.db.oracle.advance_durable_seq_silent(uploaded.last_seq);
         }
+        self.db
+            .status_manager
+            .report_durable_state(through_seq, self.db.current_manifest());
         self.resolve_pending_flushes();
         for (checkpoint, result) in attached_checkpoints
             .into_iter()

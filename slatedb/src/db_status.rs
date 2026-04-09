@@ -1,5 +1,6 @@
 use tokio::sync::watch;
 
+use crate::db_state::ManifestCore;
 use crate::error::SlateDBError;
 use crate::utils::WatchableOnceCell;
 use crate::CloseReason;
@@ -10,14 +11,29 @@ use crate::CloseReason;
 /// always reflects the latest state. When the database is dropped the watch
 /// channel closes and [`changed()`](tokio::sync::watch::Receiver::changed)
 /// returns an error.
-#[derive(Clone, Debug, PartialEq, Default)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct DbStatus {
     /// The durable sequence number. All writes with a sequence number less
     /// than or equal to this value are durably persisted to object storage
     /// and will survive process restarts.
     pub durable_seq: u64,
+    /// The current in-memory manifest snapshot observed by this handle.
+    ///
+    /// This matches the manifest returned by [`crate::Db::manifest`] for the
+    /// same handle.
+    pub current_manifest: ManifestCore,
     /// Set once the database has been closed, indicating the reason.
     pub close_reason: Option<CloseReason>,
+}
+
+impl Default for DbStatus {
+    fn default() -> Self {
+        Self {
+            durable_seq: 0,
+            current_manifest: ManifestCore::new(),
+            close_reason: None,
+        }
+    }
 }
 
 pub(crate) trait ClosedResultWriter: std::fmt::Debug + Send + Sync + 'static {
@@ -35,8 +51,16 @@ pub(crate) struct DbStatusManager {
 
 impl DbStatusManager {
     pub(crate) fn new(initial_durable_seq: u64) -> Self {
+        Self::new_with_manifest(initial_durable_seq, ManifestCore::new())
+    }
+
+    pub(crate) fn new_with_manifest(
+        initial_durable_seq: u64,
+        initial_manifest: ManifestCore,
+    ) -> Self {
         let (tx, _) = watch::channel(DbStatus {
             durable_seq: initial_durable_seq,
+            current_manifest: initial_manifest,
             close_reason: None,
         });
         Self {
@@ -53,6 +77,32 @@ impl DbStatusManager {
             } else {
                 false
             }
+        });
+    }
+
+    pub(crate) fn report_manifest(&self, manifest: ManifestCore) {
+        self.tx.send_if_modified(|s| {
+            if s.current_manifest != manifest {
+                s.current_manifest = manifest;
+                true
+            } else {
+                false
+            }
+        });
+    }
+
+    pub(crate) fn report_durable_state(&self, seq: u64, manifest: ManifestCore) {
+        self.tx.send_if_modified(|s| {
+            let mut changed = false;
+            if seq > s.durable_seq {
+                s.durable_seq = seq;
+                changed = true;
+            }
+            if s.current_manifest != manifest {
+                s.current_manifest = manifest;
+                changed = true;
+            }
+            changed
         });
     }
 

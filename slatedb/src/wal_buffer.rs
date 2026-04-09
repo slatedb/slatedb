@@ -410,6 +410,11 @@ impl WalBufferManager {
         inner
             .immutable_wals
             .push_back((next_wal_id, Arc::new(current_wal)));
+        // Intentionally do not publish this via `db.subscribe()`. Freezing the
+        // WAL only bumps `next_wal_sst_id`, which is not very useful to
+        // subscribers. `db.subscribe()` already emits on meaningful changes
+        // like `durable_seq`; reporting here would add extra low-signal
+        // updates.
         Ok(())
     }
 

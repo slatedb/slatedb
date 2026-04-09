@@ -94,6 +94,9 @@ impl DbInner {
 
         // replace the memtable
         guard.replace_memtable(replayed_memtable.table);
+        let current_manifest = guard.state().core().clone();
+        drop(guard);
+        self.status_manager.report_manifest(current_manifest);
         Ok(())
     }
 }

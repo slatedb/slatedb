@@ -513,7 +513,10 @@ impl<P: Into<Path>> DbBuilder<P> {
         // Shared lifecycle state — created before DbInner so it can be shared
         // with the executor and future channel construction.
         let manifest_dirty = manifest.prepare_dirty()?;
-        let status_manager = DbStatusManager::new(manifest_dirty.value.core.last_l0_seq);
+        let status_manager = DbStatusManager::new_with_manifest(
+            manifest_dirty.value.core.last_l0_seq,
+            manifest_dirty.value.core.clone(),
+        );
 
         // Setup communication channels wired to the shared closed state.
         let reader = status_manager.result_reader();
@@ -542,6 +545,9 @@ impl<P: Into<Path>> DbBuilder<P> {
         if inner.wal_enabled {
             inner.fence_writers(&mut manifest, next_wal_id).await?;
         }
+        inner
+            .status_manager
+            .report_manifest(inner.current_manifest());
 
         // Setup background tasks
         let tokio_handle = Handle::current();

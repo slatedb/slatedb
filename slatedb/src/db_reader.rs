@@ -141,7 +141,7 @@ impl DbReaderInner {
         let initial_durable_seq = initial_state
             .last_remote_persisted_seq
             .max(initial_state.core().last_l0_seq);
-        status_manager.report_durable_seq(initial_durable_seq);
+        status_manager.report_durable_state(initial_durable_seq, initial_state.core().clone());
         let oracle = Arc::new(DbReaderOracle::new(
             initial_durable_seq,
             status_manager.clone(),
@@ -255,10 +255,14 @@ impl DbReaderInner {
 
     async fn reestablish_checkpoint(&self, checkpoint: Checkpoint) -> Result<(), SlateDBError> {
         let new_checkpoint_state = self.rebuild_checkpoint_state(checkpoint).await?;
-        self.oracle
-            .advance_durable_seq(new_checkpoint_state.last_remote_persisted_seq);
+        let durable_seq = new_checkpoint_state.last_remote_persisted_seq;
+        let durable_manifest = new_checkpoint_state.manifest.core.clone();
+        self.oracle.advance_durable_seq_silent(durable_seq);
         let mut write_guard = self.state.write();
         *write_guard = Arc::new(new_checkpoint_state);
+        drop(write_guard);
+        self.status_manager
+            .report_durable_state(durable_seq, durable_manifest);
         Ok(())
     }
 
@@ -1030,8 +1034,9 @@ impl DbReader {
     /// Subscribe to database status changes.
     ///
     /// See [`Db::subscribe`](crate::Db::subscribe) for full semantics and
-    /// deadlock warnings. The `durable_seq` field is updated whenever the
-    /// manifest poller discovers new data written by a remote writer.
+    /// deadlock warnings. The `durable_seq` and `current_manifest` fields are
+    /// updated whenever the reader's current checkpoint/manifest view changes
+    /// or it replays additional durable WAL data.
     pub fn subscribe(&self) -> tokio::sync::watch::Receiver<DbStatus> {
         self.inner.status_manager.subscribe()
     }
