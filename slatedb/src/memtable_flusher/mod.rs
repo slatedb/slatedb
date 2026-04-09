@@ -113,6 +113,12 @@ impl MemtableFlusher {
             .send(tracker::TrackerMessage::MemtableFrozen)
     }
 
+    /// Notifies the flusher that the remote manifest has changed.
+    pub(crate) fn notify_manifest_changed(&self) -> Result<(), SlateDBError> {
+        self.messages_tx
+            .send(tracker::TrackerMessage::NotifyManifestChanged)
+    }
+
     /// Creates a checkpoint using the memtable flusher's flush semantics.
     pub(crate) async fn create_checkpoint(
         &self,

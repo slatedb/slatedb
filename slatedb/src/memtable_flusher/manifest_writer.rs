@@ -153,6 +153,12 @@ impl ManifestWriter {
             })
     }
 
+    /// Requests an immediate manifest poll instead of waiting for the
+    /// internal `manifest_poll_interval` ticker.
+    pub(crate) fn poll_manifest_now(&self) -> Result<(), SlateDBError> {
+        self.commands_tx.send(ManifestWriterCommand::PollManifest)
+    }
+
     pub(crate) async fn shutdown(executor: &crate::dispatcher::MessageHandlerExecutor) {
         if let Err(e) = executor.shutdown_task(MANIFEST_WRITER_TASK_NAME).await {
             log::warn!("failed to shutdown l0 manifest writer [error={:?}]", e);

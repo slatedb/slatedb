@@ -52,6 +52,9 @@ pub(crate) enum TrackerMessage {
     FlushComplete { through_seq: u64 },
     /// Remote manifest changes were merged into local state.
     ManifestRefreshed,
+    /// Tell the flusher that the remote manifest has changed and a poll
+    /// should happen now instead of on the next `manifest_poll_interval` tick.
+    NotifyManifestChanged,
 }
 
 impl std::fmt::Debug for TrackerMessage {
@@ -71,6 +74,7 @@ impl std::fmt::Debug for TrackerMessage {
                 write!(f, "FlushComplete(through_seq={through_seq})")
             }
             Self::ManifestRefreshed => write!(f, "ManifestRefreshed"),
+            Self::NotifyManifestChanged => write!(f, "NotifyManifestChanged"),
         }
     }
 }
@@ -119,6 +123,7 @@ impl MessageHandler<TrackerMessage> for FlushTracker {
                 self.reconcile_and_dispatch().await
             }
             TrackerMessage::ManifestRefreshed => self.reconcile_and_dispatch().await,
+            TrackerMessage::NotifyManifestChanged => self.manifest_writer.poll_manifest_now(),
         }
     }
 

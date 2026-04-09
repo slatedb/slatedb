@@ -81,6 +81,7 @@ use crate::dispatcher::{MessageFactory, MessageHandler, MessageHandlerExecutor};
 use crate::error::{Error, SlateDBError};
 use crate::manifest::store::ManifestStore;
 use crate::manifest::SsTableHandle;
+use crate::memtable_flusher::MemtableFlusher;
 use crate::merge_operator::MergeOperatorType;
 use crate::rand::DbRand;
 use crate::tablestore::TableStore;
@@ -358,6 +359,8 @@ impl Compactor {
             self.rand.clone(),
             self.stats.clone(),
             self.system_clock.clone(),
+            // Standalone compactor: no in-process writer to notify.
+            None,
         )
         .await?;
         self.task_executor
@@ -434,6 +437,11 @@ pub(crate) struct CompactorEventHandler {
     rand: Arc<DbRand>,
     stats: Arc<CompactionStats>,
     system_clock: Arc<dyn SystemClock>,
+    /// When the compactor is embedded in the same process as a writer,
+    /// this is a clone of the writer's [`MemtableFlusher`] used to nudge
+    /// the writer after a manifest update. `None` for standalone
+    /// compactors.
+    memtable_flusher: Option<Arc<MemtableFlusher>>,
 }
 
 #[async_trait]
@@ -511,6 +519,7 @@ impl CompactorEventHandler {
         rand: Arc<DbRand>,
         stats: Arc<CompactionStats>,
         system_clock: Arc<dyn SystemClock>,
+        memtable_flusher: Option<Arc<MemtableFlusher>>,
     ) -> Result<Self, SlateDBError> {
         let state_writer = CompactorStateWriter::new(
             manifest_store,
@@ -528,7 +537,23 @@ impl CompactorEventHandler {
             rand,
             stats,
             system_clock,
+            memtable_flusher,
         })
+    }
+
+    /// If the compactor is embedded in the same process as a writer, nudge
+    /// the writer's memtable flusher so it refreshes the manifest and merges
+    /// the post-compaction state into `DbInner::state` without waiting for
+    /// the flusher's next `manifest_poll_interval` tick.
+    fn notify_writer_manifest_changed(&self) {
+        if let Some(flusher) = &self.memtable_flusher {
+            if let Err(err) = flusher.notify_manifest_changed() {
+                debug!(
+                    "could not notify writer of manifest update [error={:?}]",
+                    err
+                );
+            }
+        }
     }
 
     fn state(&self) -> &CompactorState {
@@ -951,6 +976,10 @@ impl CompactorEventHandler {
         self.state_mut().finish_compaction(id, output_sr);
         self.log_compaction_state();
         self.state_writer.write_state_safely().await?;
+        // Nudge the writer's memtable flusher (if embedded) so reads in
+        // the same process observe the post-compaction manifest without
+        // waiting for the writer's next `manifest_poll_interval` tick.
+        self.notify_writer_manifest_changed();
         self.maybe_schedule_compactions().await?;
         self.maybe_start_compactions().await?;
         self.stats
@@ -1190,6 +1219,99 @@ mod tests {
             }
         }
         assert!(expected.is_empty());
+    }
+
+    /// Regression test for the embedded compactor -> memtable flusher poke.
+    ///
+    /// When the compactor runs in the same process as the writer, the writer
+    /// must observe a completed compaction without having to wait for its
+    /// own `manifest_poll_interval` ticker to fire. This test sets
+    /// `manifest_poll_interval` to an absurdly large value (100 days) so the
+    /// writer's flusher ticker fires once immediately on startup (standard
+    /// `SystemClockTicker` first-tick semantics) and then is effectively
+    /// parked for the rest of the test. The only remaining mechanism that
+    /// can refresh `DbInner::state` with the post-compaction manifest is the
+    /// direct nudge that `CompactorEventHandler::finish_compaction` sends
+    /// via `notify_writer_manifest_changed`, which ultimately calls
+    /// `MemtableFlusher::notify_manifest_changed` and forwards the poll
+    /// through the tracker to the manifest_writer.
+    ///
+    /// Without the fix, `await_compaction` — which reads the writer's
+    /// `DbInner::state` — would hang until its 10-second real-time budget
+    /// elapses, because the writer never sees the compactor's updated
+    /// manifest in the 100-day window.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_embedded_compactor_notifies_writer_immediately() {
+        // given: a DB with an embedded compactor and a manifest_poll_interval
+        // so large that the writer's flusher ticker can't possibly fire a
+        // second time within the test's real-time budget.
+        let os = Arc::new(InMemory::new());
+        let system_clock = Arc::new(MockSystemClock::new());
+        let mut options = db_options(Some(compactor_options()));
+        options.manifest_poll_interval = Duration::from_secs(100 * 24 * 60 * 60);
+        options.l0_sst_size_bytes = 512;
+        let scheduler_options = SizeTieredCompactionSchedulerOptions {
+            min_compaction_sources: 1,
+            max_compaction_sources: 999,
+            include_size_threshold: 4.0,
+        }
+        .into();
+        options
+            .compactor_options
+            .as_mut()
+            .expect("compactor options must be set")
+            .scheduler_options = scheduler_options;
+
+        let db = Db::builder(PATH, os.clone())
+            .with_settings(options)
+            .with_system_clock(system_clock.clone())
+            .build()
+            .await
+            .unwrap();
+
+        // Write a handful of keys and force them into an L0 SST.
+        for i in 0..4u8 {
+            let k = vec![b'a' + i; 16];
+            let v = vec![b'b' + i; 48];
+            db.put_with_options(
+                &k,
+                &v,
+                &PutOptions::default(),
+                &WriteOptions {
+                    await_durable: false,
+                },
+            )
+            .await
+            .unwrap();
+        }
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::MemTable,
+        })
+        .await
+        .unwrap();
+
+        // when: drive the embedded compactor via clock advances. Each
+        // `await_compaction` iteration advances the mock clock by 60s.
+        // Even in a pathological case where the loop runs thousands of
+        // iterations within the 10s real-time budget, the total clock
+        // advance stays well under 100 days, so the writer's flusher
+        // ticker never naturally fires again.
+        let db_state = await_compaction(&db, Some(system_clock.clone())).await;
+
+        // then: the writer's in-memory state reflects the post-compaction
+        // layout, proving the compactor's direct nudge propagated to the
+        // flusher.
+        let db_state = db_state
+            .expect("writer did not observe compaction; compactor->flusher poke is not working");
+        assert!(
+            db_state.l0.is_empty(),
+            "expected empty L0 after compaction, got {} L0 SSTs",
+            db_state.l0.len()
+        );
+        assert!(
+            !db_state.compacted.is_empty(),
+            "expected at least one compacted sorted run"
+        );
     }
 
     #[cfg(feature = "wal_disable")]
@@ -3091,6 +3213,7 @@ mod tests {
                 rand.clone(),
                 compactor_stats.clone(),
                 Arc::new(DefaultSystemClock::new()),
+                None,
             )
             .await
             .unwrap();
@@ -3624,6 +3747,7 @@ mod tests {
             rand,
             compactor_stats,
             system_clock,
+            None,
         )
         .await
         .unwrap();

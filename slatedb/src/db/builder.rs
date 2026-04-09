@@ -592,6 +592,11 @@ impl<P: Into<Path>> DbBuilder<P> {
                     uncached_table_store.clone(),
                     manifest_store.clone(),
                     compactions_store.clone(),
+                    // Pass a clone of the writer's memtable flusher so the
+                    // embedded compactor can wake the writer immediately
+                    // after each manifest update instead of waiting for
+                    // the next `manifest_poll_interval` tick.
+                    Some(Arc::clone(&memtable_flusher)),
                 )
                 .await?;
             task_executor.add_handler(
@@ -1073,11 +1078,20 @@ impl<P: Into<Path>> CompactorBuilder<P> {
     /// Constructs the compaction scheduler, executor, and stats, then
     /// returns the handler and its message receiver, which are needed
     /// to register the compactor with the task executor in DbBuilder::build
+    ///
+    /// `memtable_flusher`, when `Some`, is a clone of the writer's
+    /// `MemtableFlusher`. The compactor uses it to nudge the writer after
+    /// each successful manifest update so reads in the same process
+    /// observe post-compaction state without waiting for the writer's next
+    /// `manifest_poll_interval` tick. This is always passed through from
+    /// `DbBuilder::build` because the compactor built there is by
+    /// construction embedded alongside the writer.
     pub(crate) async fn build_handler(
         self,
         table_store: Arc<TableStore>,
         manifest_store: Arc<ManifestStore>,
         compactions_store: Arc<CompactionsStore>,
+        memtable_flusher: Option<Arc<MemtableFlusher>>,
     ) -> Result<
         (
             CompactorEventHandler,
@@ -1117,6 +1131,7 @@ impl<P: Into<Path>> CompactorBuilder<P> {
             self.rand,
             stats,
             self.system_clock,
+            memtable_flusher,
         )
         .await?;
         Ok((handler, rx))
