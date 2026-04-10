@@ -35,8 +35,6 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: 3.x
-      - name: Install uniffi-bindgen
-        run: pip install "uniffi-bindgen==0.31.0"
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         env:
@@ -50,6 +48,7 @@ jobs:
           working-directory: ./bindings/python
           target: ${{ matrix.platform.target }}
           args: --release --out dist --find-interpreter
+          before-script-linux: pip install "uniffi-bindgen==0.31.0"
           sccache: ${{ !startsWith(github.ref, 'refs/tags/') }}
           manylinux: auto
       - name: Upload wheels
@@ -78,14 +77,13 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: 3.x
-      - name: Install uniffi-bindgen
-        run: pip install "uniffi-bindgen==0.31.0"
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
           working-directory: ./bindings/python
           target: ${{ matrix.platform.target }}
           args: --release --out dist --find-interpreter
+          before-script-linux: pip install "uniffi-bindgen==0.31.0"
           sccache: ${{ !startsWith(github.ref, 'refs/tags/') }}
           manylinux: musllinux_1_2
       - name: Upload wheels
