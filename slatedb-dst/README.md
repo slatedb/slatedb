@@ -10,19 +10,20 @@ cloneable `ScenarioContext`, which provides:
 
 - checked mutating helpers for `put`, `delete`, `write_batch`, `flush`, and
   explicit clock advancement
-- barrier-checked `get` and `scan` helpers that compare SlateDB results against
-  a SQLite oracle
-- scan validation that honors `ScanOptions.order`, including descending scans
+- `as_of(seq)` snapshots over the recorded SQLite state, with `Db`-like
+  `get_with_options`, `get_key_value_with_options`, `scan_with_options`, and
+  prefix scan methods
 - a run-scoped `shutdown_token()` that long-lived scenarios can observe, and
   cancel, to shut down the entire active `run_scenarios()` invocation
-- a raw `db()` escape hatch for unchecked operations outside the oracle contract
+- a raw `db()` escape hatch for unchecked operations outside the recorded-state
+  contract
 
-The SQLite oracle tracks committed visibility, remote durability, tombstones,
-and exact read metadata. It preserves `expire_ts` metadata on reads, but it
-does not yet model flush-time TTL-to-tombstone rewrites, so the bundled DST
-simulation avoids TTL writes for now. Checked reads run only at explicit
-quiescent barriers, so mutating operations can still overlap while the harness
-compares deterministic snapshots.
+The SQLite state tracks append-only writes, tombstones, and exact read
+metadata. It preserves `expire_ts` metadata on reads, but it does not yet
+model flush-time TTL-to-tombstone rewrites, so the bundled DST simulation
+avoids TTL writes for now. Reader scenarios choose the validation sequence
+frontier themselves, typically from `Db::snapshot()` and `Db::status()`, and
+compare live SlateDB results against `ctx.as_of(seq)`.
 
 Everything in DST is deterministic, including the system clock, the runtime,
 and any explicit database seed used by the caller. This means a failed test can
@@ -64,7 +65,7 @@ $ RUSTFLAGS="--cfg dst --cfg tokio_unstable" \
 use std::sync::Arc;
 
 use object_store::memory::InMemory;
-use slatedb::config::Settings;
+use slatedb::config::{ReadOptions, Settings};
 use slatedb_common::clock::MockSystemClock;
 use slatedb_dst::utils::{build_runtime, build_scenario_db};
 use slatedb_dst::{Dst, Scenario, ScenarioContext};
@@ -77,7 +78,14 @@ impl Scenario for MyScenario {
 
     async fn run(&self, ctx: ScenarioContext) -> Result<(), slatedb::Error> {
         ctx.put(b"key", b"value", &Default::default()).await?;
-        let _ = ctx.checked_get(b"key", &Default::default()).await?;
+        let snapshot = ctx.db().snapshot().await?;
+        let actual = snapshot
+            .get_key_value_with_options(b"key", &ReadOptions::default())
+            .await?;
+        let expected = ctx
+            .as_of(snapshot.seq())
+            .get_key_value_with_options(b"key", &ReadOptions::default())?;
+        assert_eq!(actual, expected);
         Ok(())
     }
 }

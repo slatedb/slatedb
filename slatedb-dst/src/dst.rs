@@ -1,7 +1,6 @@
 //! Scenario-driven deterministic simulation testing for SlateDB.
 
 use std::collections::BTreeMap;
-use std::ops::{Bound, RangeBounds};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
@@ -12,15 +11,13 @@ use futures::{
     FutureExt,
 };
 use parking_lot::Mutex;
-use slatedb::config::{PutOptions, ReadOptions, ScanOptions, Settings, Ttl, WriteOptions};
-use slatedb::{Db, DbStatus, Error, KeyValue, WriteBatch, WriteHandle};
+use slatedb::config::{PutOptions, Settings, Ttl, WriteOptions};
+use slatedb::{Db, Error, WriteBatch, WriteHandle};
 use slatedb_common::clock::{MockSystemClock, SystemClock};
-use tokio::sync::{watch, RwLock};
 use tokio_util::sync::CancellationToken;
 
 use crate::state::{
-    ExpectedKeyValue, OracleReadContext, OracleSnapshot, OracleVersionKind, PendingVersion,
-    SQLiteOracle,
+    PendingVersion, RecordedSnapshot, RecordedVersionKind, SQLiteState, StateSnapshot,
 };
 
 /// A workload definition executed by [`Dst::run_scenarios`].
@@ -36,8 +33,9 @@ use crate::state::{
 pub trait Scenario {
     /// Returns a stable name for this scenario.
     ///
-    /// The name is recorded in oracle rows and included in mismatch errors, so
-    /// it should identify the workload instance clearly enough to debug failures.
+    /// The name is recorded in SQLite state rows and included in mismatch
+    /// errors, so it should identify the workload instance clearly enough to
+    /// debug failures.
     fn name(&self) -> &'static str;
 
     /// Returns whether this scenario is intended to run until the shared
@@ -54,9 +52,10 @@ pub trait Scenario {
 
     /// Runs this scenario to completion.
     ///
-    /// The provided [`ScenarioContext`] exposes checked read/write helpers,
-    /// access to the shared mock clock, and a run-scoped shutdown token. Return
-    /// an [`Error`] to fail the entire `run_scenarios()` invocation.
+    /// The provided [`ScenarioContext`] exposes checked mutating helpers,
+    /// point-in-time access to the recorded SQLite state, the shared mock
+    /// clock, and a run-scoped shutdown token. Return an [`Error`] to fail the
+    /// entire `run_scenarios()` invocation.
     async fn run(&self, ctx: ScenarioContext) -> Result<(), Error>;
 }
 
@@ -104,7 +103,7 @@ impl ScenarioWriteBatch {
     /// Stages a `put` with explicit [`PutOptions`].
     ///
     /// This records the exact TTL metadata that will later be written to
-    /// SlateDB and to the DST oracle.
+    /// SlateDB and to the DST SQLite state.
     pub fn put_with_options<K, V>(&mut self, key: K, value: V, options: &PutOptions)
     where
         K: AsRef<[u8]>,
@@ -166,25 +165,23 @@ struct ScenarioShared {
     db: Db,
     settings: Settings,
     clock: Arc<MockSystemClock>,
-    oracle: Mutex<SQLiteOracle>,
-    status_rx_template: watch::Receiver<DbStatus>,
-    observation_gate: RwLock<()>,
+    state: Arc<Mutex<SQLiteState>>,
 }
 
 /// A cloneable handle passed to each running [`Scenario`].
 ///
 /// `ScenarioContext` is the main user-facing API for scenario code. It exposes:
 ///
-/// - checked write helpers that apply the operation to SlateDB and record the
-///   same transition in the SQLite oracle;
-/// - checked read helpers that compare SlateDB results against oracle-derived
-///   expectations at a deterministic barrier;
+/// - checked mutating helpers that apply the operation to SlateDB and record
+///   the same transition in SQLite;
+/// - [`as_of`](Self::as_of), which opens a point-in-time snapshot of the
+///   recorded SQLite state chosen by the caller;
 /// - access to the shared [`MockSystemClock`];
 /// - a raw [`Db`] reference for unchecked experiments outside the DST contract.
 ///
 /// Any unchecked operation performed through [`ScenarioContext::db`] is not
-/// reflected in the DST oracle automatically. If unchecked operations mutate
-/// state, later checked reads may fail by design.
+/// reflected in the recorded SQLite state automatically. If unchecked
+/// operations mutate state, later validations may fail by design.
 #[derive(Clone)]
 pub struct ScenarioContext {
     shared: Rc<ScenarioShared>,
@@ -196,8 +193,8 @@ impl ScenarioContext {
     /// Returns the shared underlying [`Db`].
     ///
     /// This is an escape hatch for experiments that are outside the checked DST
-    /// API surface. Operations performed directly on the returned database are
-    /// not recorded in the oracle.
+    /// mutation API surface. Operations performed directly on the returned
+    /// database are not recorded in SQLite state.
     pub fn db(&self) -> &Db {
         &self.shared.db
     }
@@ -205,8 +202,7 @@ impl ScenarioContext {
     /// Returns the shared mock clock used by this DST run.
     ///
     /// Checked writes stamp SlateDB operations with timestamps derived from
-    /// this clock, and checked reads use the same logical time when querying
-    /// the oracle.
+    /// this clock.
     pub fn clock(&self) -> Arc<MockSystemClock> {
         self.shared.clock.clone()
     }
@@ -224,10 +220,18 @@ impl ScenarioContext {
         self.shutdown_token.clone()
     }
 
+    /// Returns a point-in-time snapshot of the recorded SQLite state.
+    ///
+    /// The caller is responsible for choosing the appropriate sequence
+    /// frontier, typically from a [`slatedb::DbSnapshot`] or [`slatedb::DbStatus`].
+    pub fn as_of(&self, seq: u64) -> StateSnapshot {
+        StateSnapshot::new(self.shared.state.clone(), seq)
+    }
+
     /// Performs a checked single-key put.
     ///
     /// The write is issued against SlateDB with deterministic DST
-    /// [`WriteOptions`] and then recorded in the oracle using the returned
+    /// [`WriteOptions`] and then recorded in SQLite state using the returned
     /// sequence number and timestamp.
     ///
     /// Returns the underlying SlateDB [`WriteHandle`] for callers that need the
@@ -244,7 +248,6 @@ impl ScenarioContext {
     {
         let key = key.as_ref().to_vec();
         let value = value.as_ref().to_vec();
-        let _guard = self.shared.observation_gate.read().await;
         let write_options = self.checked_write_options();
         let handle = self
             .shared
@@ -257,28 +260,27 @@ impl ScenarioContext {
         let version = PendingVersion {
             seq: handle.seqnum(),
             key: key.clone(),
-            kind: OracleVersionKind::Value,
+            kind: RecordedVersionKind::Value,
             value: Some(value.clone()),
             create_ts,
             expire_ts,
         };
         self.shared
-            .oracle
+            .state
             .lock()
-            .record_write(&[version], handle.seqnum(), self.scenario)?;
+            .record_write(&[version], self.scenario)?;
         Ok(handle)
     }
 
     /// Performs a checked delete.
     ///
     /// The delete is written to SlateDB and recorded as a tombstone in the
-    /// oracle using the returned write metadata.
+    /// SQLite state using the returned write metadata.
     pub async fn delete<K>(&self, key: K) -> Result<WriteHandle, Error>
     where
         K: AsRef<[u8]>,
     {
         let key = key.as_ref().to_vec();
-        let _guard = self.shared.observation_gate.read().await;
         let write_options = self.checked_write_options();
         let handle = self
             .shared
@@ -289,22 +291,22 @@ impl ScenarioContext {
         let version = PendingVersion {
             seq: handle.seqnum(),
             key: key.clone(),
-            kind: OracleVersionKind::Tombstone,
+            kind: RecordedVersionKind::Tombstone,
             value: None,
             create_ts: handle.create_ts(),
             expire_ts: None,
         };
         self.shared
-            .oracle
+            .state
             .lock()
-            .record_write(&[version], handle.seqnum(), self.scenario)?;
+            .record_write(&[version], self.scenario)?;
         Ok(handle)
     }
 
     /// Performs a checked batched write.
     ///
     /// All staged operations are written atomically through SlateDB and then
-    /// recorded atomically in the oracle under the single sequence number
+    /// recorded atomically in SQLite state under the single sequence number
     /// returned by SlateDB.
     ///
     /// Returns an error if `batch` is empty.
@@ -316,7 +318,6 @@ impl ScenarioContext {
         }
 
         let entries = batch.materialized_entries();
-        let _guard = self.shared.observation_gate.read().await;
         let write_options = self.checked_write_options();
         let handle = self
             .shared
@@ -335,7 +336,7 @@ impl ScenarioContext {
                 } => versions.push(PendingVersion {
                     seq: handle.seqnum(),
                     key,
-                    kind: OracleVersionKind::Value,
+                    kind: RecordedVersionKind::Value,
                     value: Some(value),
                     create_ts,
                     expire_ts: resolve_expire_ts(
@@ -347,7 +348,7 @@ impl ScenarioContext {
                 ScenarioWriteEntry::Delete { key } => versions.push(PendingVersion {
                     seq: handle.seqnum(),
                     key,
-                    kind: OracleVersionKind::Tombstone,
+                    kind: RecordedVersionKind::Tombstone,
                     value: None,
                     create_ts,
                     expire_ts: None,
@@ -356,24 +357,15 @@ impl ScenarioContext {
         }
 
         self.shared
-            .oracle
+            .state
             .lock()
-            .record_write(&versions, handle.seqnum(), self.scenario)?;
+            .record_write(&versions, self.scenario)?;
         Ok(handle)
     }
 
-    /// Flushes the shared database and advances the oracle's durable watermark.
-    ///
-    /// Durability is taken from the shared [`Db::subscribe`] status stream so
-    /// remote-visibility checks are based on the database's actual durable
-    /// sequence number rather than on an inferred watermark.
+    /// Flushes the shared database.
     pub async fn flush(&self) -> Result<(), Error> {
-        let _guard = self.shared.observation_gate.read().await;
-        let status_rx = self.shared.status_rx_template.clone();
-        self.shared.db.flush().await?;
-        let durable_seq = status_rx.borrow().durable_seq;
-        self.shared.oracle.lock().record_flush(durable_seq)?;
-        Ok(())
+        self.shared.db.flush().await
     }
 
     /// Advances the shared mock clock by `duration`.
@@ -381,113 +373,8 @@ impl ScenarioContext {
     /// This affects later checked writes and reads for all scenarios in the
     /// active DST run.
     pub async fn advance_clock(&self, duration: Duration) -> Result<(), Error> {
-        let _guard = self.shared.observation_gate.read().await;
         self.shared.clock.advance(duration).await;
         Ok(())
-    }
-
-    /// Performs a checked point read.
-    ///
-    /// This method runs the read against SlateDB, queries the oracle for the
-    /// expected visible value at the same logical time and durability level,
-    /// and returns an error if they differ.
-    ///
-    /// Checked reads currently reject `dirty=true`.
-    pub async fn checked_get<K>(
-        &self,
-        key: K,
-        options: &ReadOptions,
-    ) -> Result<Option<KeyValue>, Error>
-    where
-        K: AsRef<[u8]> + Send,
-    {
-        ensure_supported_checked_read(options.dirty)?;
-
-        let key = key.as_ref().to_vec();
-        let _guard = self.shared.observation_gate.write().await;
-        let status_rx = self.shared.status_rx_template.clone();
-        let durable_seq = status_rx.borrow().durable_seq;
-        let now = self.shared.clock.now().timestamp_millis();
-        let actual = self
-            .shared
-            .db
-            .get_key_value_with_options(&key, options)
-            .await?;
-        let watermarks = self.shared.oracle.lock().watermarks()?;
-        let expected = self.shared.oracle.lock().expected_get(
-            &key,
-            OracleReadContext {
-                committed_seq: watermarks.committed_seq,
-                durable_seq,
-                now,
-                durability_filter: options.durability_filter,
-            },
-        )?;
-
-        if !key_value_matches(actual.as_ref(), expected.as_ref()) {
-            return Err(mismatch_error(
-                "checked_get",
-                format!(
-                    "scenario={} key={:?} durable_seq={} now={} actual={:?} expected={:?}",
-                    self.scenario, key, durable_seq, now, actual, expected
-                ),
-            ));
-        }
-        Ok(actual)
-    }
-
-    /// Performs a checked range scan and returns the fully materialized result.
-    ///
-    /// The scan is executed against SlateDB, drained into memory, and compared
-    /// against oracle expectations using the same durability filter and
-    /// [`ScanOptions::order`]. Descending scans are validated explicitly.
-    ///
-    /// Checked reads currently reject `dirty=true`.
-    pub async fn checked_scan<K, T>(
-        &self,
-        range: T,
-        options: &ScanOptions,
-    ) -> Result<Vec<KeyValue>, Error>
-    where
-        K: AsRef<[u8]> + Send,
-        T: RangeBounds<K> + Send + Clone,
-    {
-        ensure_supported_checked_read(options.dirty)?;
-
-        let (start, end) = owned_bounds(&range);
-        let _guard = self.shared.observation_gate.write().await;
-        let status_rx = self.shared.status_rx_template.clone();
-        let durable_seq = status_rx.borrow().durable_seq;
-        let now = self.shared.clock.now().timestamp_millis();
-        let mut actual_iter = self.shared.db.scan_with_options(range, options).await?;
-        let mut actual = Vec::new();
-        while let Some(kv) = actual_iter.next().await? {
-            actual.push(kv);
-        }
-
-        let watermarks = self.shared.oracle.lock().watermarks()?;
-        let expected = self.shared.oracle.lock().expected_scan(
-            start.clone(),
-            end.clone(),
-            OracleReadContext {
-                committed_seq: watermarks.committed_seq,
-                durable_seq,
-                now,
-                durability_filter: options.durability_filter,
-            },
-            options.order,
-        )?;
-
-        if !key_value_vec_matches(&actual, &expected) {
-            return Err(mismatch_error(
-                "checked_scan",
-                format!(
-                    "scenario={} start={:?} end={:?} order={:?} durable_seq={} now={} actual={:?} expected={:?}",
-                    self.scenario, start, end, options.order, durable_seq, now, actual, expected
-                ),
-            ));
-        }
-        Ok(actual)
     }
 
     fn checked_write_options(&self) -> WriteOptions {
@@ -505,8 +392,8 @@ impl ScenarioContext {
 ///
 /// - the SlateDB [`Db`] under test;
 /// - the shared [`MockSystemClock`];
-/// - the SQLite oracle used for checked reads and post-run inspection;
-/// - a template [`DbStatus`] subscription used to observe durability changes.
+/// - the SQLite recorded state used for point-in-time validation and post-run
+///   inspection.
 ///
 /// Scenarios are run as Tokio local tasks, so callers should execute
 /// [`Dst::run_scenarios`] on a current-thread runtime or within a `LocalSet`.
@@ -515,33 +402,31 @@ pub struct Dst {
 }
 
 impl Dst {
-    /// Creates a DST runner backed by an in-memory SQLite oracle.
+    /// Creates a DST runner backed by an in-memory SQLite state database.
     ///
     /// The supplied `db`, `clock`, and `settings` must all describe the same
     /// SlateDB instance under test.
     pub fn new(db: Db, clock: Arc<MockSystemClock>, settings: Settings) -> Result<Self, Error> {
-        Self::new_with_oracle_path(db, clock, settings, None)
+        Self::new_with_state_path(db, clock, settings, None)
     }
 
-    /// Creates a DST runner with an optional on-disk SQLite oracle.
+    /// Creates a DST runner with an optional on-disk SQLite state database.
     ///
-    /// When `oracle_path` is `None`, the oracle lives in memory. Supplying a
-    /// path is useful when you want to inspect the oracle database after a
+    /// When `state_path` is `None`, the state lives in memory. Supplying a
+    /// path is useful when you want to inspect the SQLite database after a
     /// failed run.
-    pub fn new_with_oracle_path(
+    pub fn new_with_state_path(
         db: Db,
         clock: Arc<MockSystemClock>,
         settings: Settings,
-        oracle_path: Option<&'static str>,
+        state_path: Option<&'static str>,
     ) -> Result<Self, Error> {
-        let oracle = SQLiteOracle::new(oracle_path)?;
+        let state = Arc::new(Mutex::new(SQLiteState::new(state_path)?));
         let shared = ScenarioShared {
-            status_rx_template: db.subscribe(),
             db,
             settings,
             clock,
-            oracle: Mutex::new(oracle),
-            observation_gate: RwLock::new(()),
+            state,
         };
         Ok(Self {
             shared: Rc::new(shared),
@@ -551,7 +436,7 @@ impl Dst {
     /// Creates a standalone [`ScenarioContext`] with the given scenario name.
     ///
     /// This is mainly useful for ad hoc follow-up verification after a scenario
-    /// run, such as a final checked read or flush.
+    /// run, such as a final snapshot-based validation or flush.
     pub fn context(&self, scenario: &'static str) -> ScenarioContext {
         self.context_with_shutdown_token(scenario, CancellationToken::new())
     }
@@ -573,12 +458,16 @@ impl Dst {
         self.shared.clock.clone()
     }
 
-    /// Returns a snapshot of the oracle's persisted state.
+    /// Returns a point-in-time snapshot of the recorded SQLite state.
+    pub fn as_of(&self, seq: u64) -> StateSnapshot {
+        StateSnapshot::new(self.shared.state.clone(), seq)
+    }
+
+    /// Returns a snapshot of the raw persisted SQLite state.
     ///
-    /// This includes every recorded version row and the final committed and
-    /// durable sequence watermarks.
-    pub fn oracle_snapshot(&self) -> Result<OracleSnapshot, Error> {
-        self.shared.oracle.lock().snapshot()
+    /// This includes every recorded version row.
+    pub fn recorded_snapshot(&self) -> Result<RecordedSnapshot, Error> {
+        self.shared.state.lock().snapshot()
     }
 
     /// Runs the provided scenarios concurrently to completion.
@@ -648,7 +537,7 @@ impl Dst {
     /// Closes the underlying SlateDB instance.
     ///
     /// This is typically called after a simulation completes and any follow-up
-    /// oracle inspection has already been performed.
+    /// SQLite state inspection has already been performed.
     pub async fn close(&self) -> Result<(), Error> {
         self.shared.db.close().await
     }
@@ -677,57 +566,4 @@ fn checked_expire_ts(now: i64, ttl: u64) -> Option<i64> {
         return None;
     }
     Some(expire_ts)
-}
-
-fn ensure_supported_checked_read(dirty: bool) -> Result<(), Error> {
-    if dirty {
-        return Err(Error::internal(
-            "checked DST reads do not support dirty=true in v1".to_string(),
-        ));
-    }
-    Ok(())
-}
-
-fn mismatch_error(op: &str, detail: String) -> Error {
-    Error::internal(format!("{} mismatch: {}", op, detail))
-}
-
-fn owned_bounds<K, T>(range: &T) -> (Bound<Vec<u8>>, Bound<Vec<u8>>)
-where
-    K: AsRef<[u8]>,
-    T: RangeBounds<K>,
-{
-    let start = match range.start_bound() {
-        Bound::Included(key) => Bound::Included(key.as_ref().to_vec()),
-        Bound::Excluded(key) => Bound::Excluded(key.as_ref().to_vec()),
-        Bound::Unbounded => Bound::Unbounded,
-    };
-    let end = match range.end_bound() {
-        Bound::Included(key) => Bound::Included(key.as_ref().to_vec()),
-        Bound::Excluded(key) => Bound::Excluded(key.as_ref().to_vec()),
-        Bound::Unbounded => Bound::Unbounded,
-    };
-    (start, end)
-}
-
-fn key_value_matches(actual: Option<&KeyValue>, expected: Option<&ExpectedKeyValue>) -> bool {
-    match (actual, expected) {
-        (None, None) => true,
-        (Some(actual), Some(expected)) => {
-            actual.key.as_ref() == expected.key.as_slice()
-                && actual.value.as_ref() == expected.value.as_slice()
-                && actual.seq == expected.seq
-                && actual.create_ts == expected.create_ts
-                && actual.expire_ts == expected.expire_ts
-        }
-        _ => false,
-    }
-}
-
-fn key_value_vec_matches(actual: &[KeyValue], expected: &[ExpectedKeyValue]) -> bool {
-    actual.len() == expected.len()
-        && actual
-            .iter()
-            .zip(expected.iter())
-            .all(|(actual, expected)| key_value_matches(Some(actual), Some(expected)))
 }

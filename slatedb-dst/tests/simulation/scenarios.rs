@@ -3,25 +3,191 @@
 //! The simulation is built by composing several independently scheduled
 //! workloads against a shared [`ScenarioContext`]. Together they create a
 //! randomized but reproducible mix of mutations, reads, clock movement, and
-//! shutdown conditions that stress the database and the DST oracle at the same
-//! time.
+//! shutdown conditions that stress the database and the DST recorded-state
+//! model at the same time.
 //!
 //! Each scenario uses [`DbRand`] for deterministic pseudo-random choices, so a
 //! failing run can be reproduced from the same seed. Some scenarios accept an
 //! iteration limit and stop on their own, while others run until the shared
 //! shutdown token is cancelled by another scenario.
 
+use std::ops::{Bound, RangeBounds};
 use std::rc::Rc;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use rand::Rng;
 use slatedb::config::{DurabilityLevel, PutOptions, ReadOptions, ScanOptions};
-use slatedb::{DbRand, Error, IterationOrder};
+use slatedb::{DbRand, DbStatus, Error, IterationOrder, KeyValue};
 use slatedb_dst::{Scenario, ScenarioContext, ScenarioWriteBatch};
 use tracing::info;
 
 const KEY_SPACE: u64 = 8;
+const REMOTE_VALIDATION_RETRY_LIMIT: usize = 128;
+
+fn ensure_supported_validation_read(dirty: bool) -> Result<(), Error> {
+    if dirty {
+        return Err(Error::internal(
+            "DST reader validation does not support dirty=true in v1".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn format_status(status: &DbStatus) -> String {
+    format!(
+        "durable_seq={} manifest_id={} last_l0_seq={} close_reason={:?}",
+        status.durable_seq,
+        status.current_manifest.id,
+        status.current_manifest.manifest.last_l0_seq,
+        status.close_reason,
+    )
+}
+
+fn owned_bounds<K, T>(range: &T) -> (Bound<Vec<u8>>, Bound<Vec<u8>>)
+where
+    K: AsRef<[u8]>,
+    T: RangeBounds<K>,
+{
+    let start = match range.start_bound() {
+        Bound::Included(key) => Bound::Included(key.as_ref().to_vec()),
+        Bound::Excluded(key) => Bound::Excluded(key.as_ref().to_vec()),
+        Bound::Unbounded => Bound::Unbounded,
+    };
+    let end = match range.end_bound() {
+        Bound::Included(key) => Bound::Included(key.as_ref().to_vec()),
+        Bound::Excluded(key) => Bound::Excluded(key.as_ref().to_vec()),
+        Bound::Unbounded => Bound::Unbounded,
+    };
+    (start, end)
+}
+
+pub(crate) async fn validate_get<K>(
+    ctx: &ScenarioContext,
+    key: K,
+    options: &ReadOptions,
+) -> Result<Option<KeyValue>, Error>
+where
+    K: AsRef<[u8]> + Send,
+{
+    ensure_supported_validation_read(options.dirty)?;
+
+    let key = key.as_ref().to_vec();
+    for _attempt in 0..REMOTE_VALIDATION_RETRY_LIMIT {
+        let snapshot = ctx.db().snapshot().await?;
+        let snapshot_seq = snapshot.seq();
+        let before_status =
+            matches!(options.durability_filter, DurabilityLevel::Remote).then(|| ctx.db().status());
+        let actual = snapshot.get_key_value_with_options(&key, options).await?;
+        let after_status = ctx.db().status();
+
+        if let Some(before_status) = before_status.as_ref() {
+            if before_status.durable_seq != after_status.durable_seq {
+                tokio::task::yield_now().await;
+                continue;
+            }
+        }
+
+        let visible_seq = match options.durability_filter {
+            DurabilityLevel::Remote => snapshot_seq.min(after_status.durable_seq),
+            DurabilityLevel::Memory => snapshot_seq,
+            _ => snapshot_seq,
+        };
+        let expected = ctx
+            .as_of(visible_seq)
+            .get_key_value_with_options(&key, options)?;
+
+        if actual != expected {
+            return Err(Error::internal(format!(
+                "validate_get mismatch: scenario={} key={:?} options={:?} snapshot_seq={} visible_seq={} status={} actual={:?} expected={:?}",
+                ctx.scenario(),
+                key,
+                options,
+                snapshot_seq,
+                visible_seq,
+                format_status(&after_status),
+                actual,
+                expected
+            )));
+        }
+
+        return Ok(actual);
+    }
+
+    Err(Error::internal(format!(
+        "validate_get could not obtain a stable remote durable frontier: scenario={} key={:?} options={:?}",
+        ctx.scenario(),
+        key,
+        options
+    )))
+}
+
+pub(crate) async fn validate_scan<K, T>(
+    ctx: &ScenarioContext,
+    range: T,
+    options: &ScanOptions,
+) -> Result<Vec<KeyValue>, Error>
+where
+    K: AsRef<[u8]> + Send,
+    T: RangeBounds<K> + Send + Clone,
+{
+    ensure_supported_validation_read(options.dirty)?;
+
+    let (start, end) = owned_bounds(&range);
+    for _attempt in 0..REMOTE_VALIDATION_RETRY_LIMIT {
+        let snapshot = ctx.db().snapshot().await?;
+        let snapshot_seq = snapshot.seq();
+        let before_status =
+            matches!(options.durability_filter, DurabilityLevel::Remote).then(|| ctx.db().status());
+        let mut actual_iter = snapshot.scan_with_options(range.clone(), options).await?;
+        let mut actual = Vec::new();
+        while let Some(kv) = actual_iter.next().await? {
+            actual.push(kv);
+        }
+        let after_status = ctx.db().status();
+
+        if let Some(before_status) = before_status.as_ref() {
+            if before_status.durable_seq != after_status.durable_seq {
+                tokio::task::yield_now().await;
+                continue;
+            }
+        }
+
+        let visible_seq = match options.durability_filter {
+            DurabilityLevel::Remote => snapshot_seq.min(after_status.durable_seq),
+            DurabilityLevel::Memory => snapshot_seq,
+            _ => snapshot_seq,
+        };
+        let expected = ctx
+            .as_of(visible_seq)
+            .scan_with_options::<K, _>(range.clone(), options)?;
+
+        if actual != expected {
+            return Err(Error::internal(format!(
+                "validate_scan mismatch: scenario={} start={:?} end={:?} options={:?} snapshot_seq={} visible_seq={} status={} actual={:?} expected={:?}",
+                ctx.scenario(),
+                start,
+                end,
+                options,
+                snapshot_seq,
+                visible_seq,
+                format_status(&after_status),
+                actual,
+                expected
+            )));
+        }
+
+        return Ok(actual);
+    }
+
+    Err(Error::internal(format!(
+        "validate_scan could not obtain a stable remote durable frontier: scenario={} start={:?} end={:?} options={:?}",
+        ctx.scenario(),
+        start,
+        end,
+        options
+    )))
+}
 
 /// Issues the mutating side of the simulation workload.
 ///
@@ -29,9 +195,9 @@ const KEY_SPACE: u64 = 8;
 /// each iteration it randomly chooses between two plain put variants, deletes,
 /// batched writes, and explicit flushes over a deliberately small key space.
 /// That combination creates frequent overwrites and visibility changes, which
-/// makes it more likely that the simulation will exercise edge cases in oracle
+/// makes it more likely that the simulation will exercise edge cases in state
 /// tracking and durability transitions without depending on TTL semantics the
-/// current oracle does not fully model.
+/// current SQLite model does not fully model.
 ///
 /// When `iterations` is `Some`, the scenario performs exactly that many write
 /// steps unless shutdown happens first. When it is `None`, the scenario keeps
@@ -134,9 +300,10 @@ impl Scenario for WriterScenario {
 /// Issues checked reads against both memory-visible and remotely durable state.
 ///
 /// `ReaderScenario` continuously validates observable behavior against the DST
-/// oracle while the other scenarios are mutating state. It randomly alternates
-/// between point reads and full-range scans, and for each operation it may read
-/// either the memory-visible view or the remotely durable view of the data.
+/// recorded SQLite state while the other scenarios are mutating SlateDB. It
+/// randomly alternates between point reads and full-range scans, and for each
+/// operation it may read either the memory-visible view or the remotely durable
+/// view of the data.
 ///
 /// By running concurrently with writers, clock advancement, and background
 /// flushes, this scenario helps catch mismatches in read visibility, scan
@@ -185,14 +352,14 @@ impl Scenario for ReaderScenario {
                 let key = format!("key-{key_suffix}").into_bytes();
                 let read_memory = rand.rng().random::<u64>() & 1 == 0;
                 if read_memory {
-                    let _ = ctx.checked_get(&key, &ReadOptions::default()).await?;
+                    let _ = validate_get(&ctx, &key, &ReadOptions::default()).await?;
                 } else {
-                    let _ = ctx
-                        .checked_get(
-                            &key,
-                            &ReadOptions::default().with_durability_filter(DurabilityLevel::Remote),
-                        )
-                        .await?;
+                    let _ = validate_get(
+                        &ctx,
+                        &key,
+                        &ReadOptions::default().with_durability_filter(DurabilityLevel::Remote),
+                    )
+                    .await?;
                 }
             } else {
                 let scan_memory = rand.rng().random::<u64>() & 1 == 0;
@@ -203,16 +370,15 @@ impl Scenario for ReaderScenario {
                 };
                 let options = ScanOptions::default().with_order(order);
                 if scan_memory {
-                    let _ = ctx
-                        .checked_scan::<Vec<u8>, _>(vec![0x00]..vec![0xff], &options)
-                        .await?;
+                    let _ =
+                        validate_scan::<Vec<u8>, _>(&ctx, vec![0x00]..vec![0xff], &options).await?;
                 } else {
-                    let _ = ctx
-                        .checked_scan::<Vec<u8>, _>(
-                            vec![0x00]..vec![0xff],
-                            &options.with_durability_filter(DurabilityLevel::Remote),
-                        )
-                        .await?;
+                    let _ = validate_scan::<Vec<u8>, _>(
+                        &ctx,
+                        vec![0x00]..vec![0xff],
+                        &options.with_durability_filter(DurabilityLevel::Remote),
+                    )
+                    .await?;
                 }
             }
 

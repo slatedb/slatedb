@@ -9,4 +9,4 @@ pub mod utils;
 
 #[allow(unused_imports)]
 pub use dst::{Dst, Scenario, ScenarioContext, ScenarioWriteBatch};
-pub use state::{OracleSnapshot, OracleVersion, OracleWatermarks};
+pub use state::{RecordedSnapshot, RecordedVersion, StateSnapshot};

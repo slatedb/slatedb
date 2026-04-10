@@ -28,7 +28,7 @@ use slatedb::config::{DurabilityLevel, ScanOptions, Settings};
 use slatedb::{DbRand, Error, IterationOrder};
 use slatedb_common::clock::{MockSystemClock, SystemClock};
 use slatedb_dst::utils::{build_runtime, build_scenario_db};
-use slatedb_dst::{Dst, OracleSnapshot, Scenario};
+use slatedb_dst::{Dst, RecordedSnapshot, Scenario};
 #[cfg(slow)]
 use tracing::info_span;
 use tracing::{error, info};
@@ -38,7 +38,7 @@ const NIGHTLY_WALL_CLOCK: Duration = Duration::from_secs(12 * 60);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SimulationResult {
-    snapshot: OracleSnapshot,
+    snapshot: RecordedSnapshot,
     next_u64: u64,
     next_time: DateTime<Utc>,
 }
@@ -47,25 +47,25 @@ async fn verify_scan_orders(ctx: &slatedb_dst::ScenarioContext) -> Result<(), Er
     let full_range = vec![0x00]..vec![0xff];
 
     for order in [IterationOrder::Ascending, IterationOrder::Descending] {
-        let _ = ctx
-            .checked_scan::<Vec<u8>, _>(
-                full_range.clone(),
-                &ScanOptions::default().with_order(order),
-            )
-            .await?;
+        let _ = scenarios::validate_scan::<Vec<u8>, _>(
+            ctx,
+            full_range.clone(),
+            &ScanOptions::default().with_order(order),
+        )
+        .await?;
     }
 
     ctx.flush().await?;
 
     for order in [IterationOrder::Ascending, IterationOrder::Descending] {
-        let _ = ctx
-            .checked_scan::<Vec<u8>, _>(
-                full_range.clone(),
-                &ScanOptions::default()
-                    .with_order(order)
-                    .with_durability_filter(DurabilityLevel::Remote),
-            )
-            .await?;
+        let _ = scenarios::validate_scan::<Vec<u8>, _>(
+            ctx,
+            full_range.clone(),
+            &ScanOptions::default()
+                .with_order(order)
+                .with_durability_filter(DurabilityLevel::Remote),
+        )
+        .await?;
     }
 
     Ok(())
@@ -82,7 +82,7 @@ async fn run_simulation(
         flush_interval: None,
         compactor_options: None,
         garbage_collector_options: None,
-        // The bundled DST simulation avoids TTL writes until the oracle models
+        // The bundled DST simulation avoids TTL writes until the SQLite state model
         // flush-time TTL tombstoning.
         default_ttl: None,
         ..Default::default()
@@ -109,7 +109,7 @@ async fn run_simulation(
     let verifier = dst.context("verifier");
     verify_scan_orders(&verifier).await?;
 
-    let snapshot = dst.oracle_snapshot()?;
+    let snapshot = dst.recorded_snapshot()?;
     let next_u64 = rand.rng().random::<u64>();
     let next_time = system_clock.now();
 
