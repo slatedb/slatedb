@@ -149,3 +149,44 @@ impl ClosedResultWriter for DbStatusManager {
         self.cell.reader()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn versioned_manifest(id: u64) -> VersionedManifest {
+        VersionedManifest {
+            id,
+            manifest: ManifestCore::new(),
+        }
+    }
+
+    #[test]
+    fn should_not_notify_on_same_manifest() {
+        // given
+        let initial = versioned_manifest(1);
+        let mgr = DbStatusManager::new_with_manifest(0, initial.clone());
+        let mut rx = mgr.subscribe();
+        rx.borrow_and_update();
+
+        // when
+        mgr.report_manifest(initial);
+
+        // then
+        assert!(!rx.has_changed().unwrap());
+    }
+
+    #[test]
+    fn should_not_notify_on_older_manifest() {
+        // given
+        let mgr = DbStatusManager::new_with_manifest(0, versioned_manifest(5));
+        let mut rx = mgr.subscribe();
+        rx.borrow_and_update();
+
+        // when
+        mgr.report_manifest(versioned_manifest(3));
+
+        // then
+        assert!(!rx.has_changed().unwrap());
+    }
+}
