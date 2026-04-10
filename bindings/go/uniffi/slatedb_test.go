@@ -820,6 +820,31 @@ func TestDbTransactionGetWithTimeout(t *testing.T) {
 	}
 }
 
+func TestDbPutWithTimeout(t *testing.T) {
+	store := newMemoryStore(t)
+	handle := openTestDB(t, store, nil)
+
+	wh, err := handle.db.PutWithOptions(
+		[]byte("k1"), []byte("v1"),
+		slatedb.PutOptions{Ttl: slatedb.TtlDefault{}},
+		slatedb.WriteOptions{AwaitDurable: true, TimeoutMs: uint64Ptr(30000)},
+	)
+	if err != nil {
+		t.Fatalf("PutWithOptions(timeout=30s): %v", err)
+	}
+	if wh.Seqnum == 0 {
+		t.Fatal("PutWithOptions(timeout=30s): Seqnum = 0")
+	}
+
+	value, err := handle.db.Get([]byte("k1"))
+	if err != nil {
+		t.Fatalf("Get(k1): %v", err)
+	}
+	if value == nil || !bytes.Equal(*value, []byte("v1")) {
+		t.Fatalf("Get(k1): got %v, want %q", value, "v1")
+	}
+}
+
 func TestDbBatchWriteAndConsumption(t *testing.T) {
 	store := newMemoryStore(t)
 	handle := openTestDB(t, store, nil)

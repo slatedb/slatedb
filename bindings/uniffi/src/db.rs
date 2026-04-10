@@ -155,13 +155,21 @@ impl Db {
         write_options: WriteOptions,
     ) -> Result<WriteHandle, Error> {
         validate_key_value(&key, &value)?;
+        let timeout_ms = write_options.timeout_ms;
         let put_options = put_options.into();
         let write_options = write_options.into();
-        Ok(self
+        let fut = self
             .inner
-            .put_with_options(key, value, &put_options, &write_options)
-            .await?
-            .into())
+            .put_with_options(key, value, &put_options, &write_options);
+        let result = match timeout_ms {
+            Some(ms) => tokio::time::timeout(Duration::from_millis(ms), fut)
+                .await
+                .map_err(|_| Error::Timeout {
+                    message: format!("put timed out after {}ms", ms),
+                })?,
+            None => fut.await,
+        }?;
+        Ok(result.into())
     }
 
     /// Deletes `key` and returns metadata for the write.

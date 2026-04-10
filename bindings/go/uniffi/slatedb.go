@@ -7587,10 +7587,13 @@ func (_ FfiDestroyerWriteHandle) Destroy(value WriteHandle) {
 type WriteOptions struct {
 	// Whether the call waits for the write to become durable before returning.
 	AwaitDurable bool
+	// Timeout in milliseconds for the write. Defaults to no timeout.
+	TimeoutMs *uint64
 }
 
 func (r *WriteOptions) Destroy() {
 	FfiDestroyerBool{}.Destroy(r.AwaitDurable)
+	FfiDestroyerOptionalUint64{}.Destroy(r.TimeoutMs)
 }
 
 type FfiConverterWriteOptions struct{}
@@ -7604,6 +7607,7 @@ func (c FfiConverterWriteOptions) Lift(rb RustBufferI) WriteOptions {
 func (c FfiConverterWriteOptions) Read(reader io.Reader) WriteOptions {
 	return WriteOptions{
 		FfiConverterBoolINSTANCE.Read(reader),
+		FfiConverterOptionalUint64INSTANCE.Read(reader),
 	}
 }
 
@@ -7617,6 +7621,7 @@ func (c FfiConverterWriteOptions) LowerExternal(value WriteOptions) ExternalCRus
 
 func (c FfiConverterWriteOptions) Write(writer io.Writer, value WriteOptions) {
 	FfiConverterBoolINSTANCE.Write(writer, value.AwaitDurable)
+	FfiConverterOptionalUint64INSTANCE.Write(writer, value.TimeoutMs)
 }
 
 type FfiDestroyerWriteOptions struct{}

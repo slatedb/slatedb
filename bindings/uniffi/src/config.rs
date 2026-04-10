@@ -265,12 +265,16 @@ impl TryFrom<ScanOptions> for slatedb::config::ScanOptions {
 pub struct WriteOptions {
     /// Whether the call waits for the write to become durable before returning.
     pub await_durable: bool,
+    /// Timeout in milliseconds for the write. Defaults to no timeout.
+    #[uniffi(default = None)]
+    pub timeout_ms: Option<u64>,
 }
 
 impl Default for WriteOptions {
     fn default() -> Self {
         Self {
             await_durable: true,
+            timeout_ms: None,
         }
     }
 }
