@@ -545,9 +545,7 @@ impl<P: Into<Path>> DbBuilder<P> {
         if inner.wal_enabled {
             inner.fence_writers(&mut manifest, next_wal_id).await?;
         }
-        inner
-            .status_manager
-            .report_manifest(inner.current_manifest());
+        inner.status_manager.report_manifest(inner.manifest());
 
         // Setup background tasks
         let tokio_handle = Handle::current();

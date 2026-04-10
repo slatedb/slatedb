@@ -62,12 +62,8 @@ impl DbOracle {
     }
 
     pub(crate) fn advance_durable_seq(&self, seq: u64) {
-        self.advance_durable_seq_silent(seq);
-        self.status_reporter.report_durable_seq(seq);
-    }
-
-    pub(crate) fn advance_durable_seq_silent(&self, seq: u64) {
         self.last_durable_seq.fetch_max(seq, SeqCst);
+        self.status_reporter.report_durable_seq(seq);
     }
 
     #[cfg(test)]
@@ -104,12 +100,8 @@ impl DbReaderOracle {
     }
 
     pub(crate) fn advance_durable_seq(&self, seq: u64) {
-        self.advance_durable_seq_silent(seq);
-        self.status_reporter.report_durable_seq(seq);
-    }
-
-    pub(crate) fn advance_durable_seq_silent(&self, seq: u64) {
         self.last_remote_persisted_seq.fetch_max(seq, SeqCst);
+        self.status_reporter.report_durable_seq(seq);
     }
 }
 

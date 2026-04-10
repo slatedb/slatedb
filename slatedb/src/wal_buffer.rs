@@ -10,7 +10,7 @@ use tokio::{runtime::Handle, select, sync::oneshot};
 use tracing::instrument;
 
 use crate::clock::MonotonicClock;
-use crate::db_state::SsTableId;
+use crate::db_state::{DbState, SsTableId};
 use crate::db_stats::DbStats;
 use crate::db_status::ClosedResultWriter;
 use crate::dispatcher::{MessageFactory, MessageHandler, MessageHandlerExecutor};
@@ -20,7 +20,6 @@ use crate::tablestore::TableStore;
 use crate::types::RowEntry;
 use crate::utils::SafeSender;
 use crate::utils::{format_bytes_si, WatchableOnceCell, WatchableOnceCellReader};
-use crate::wal_id::WalIdStore;
 
 pub(crate) const WAL_BUFFER_TASK_NAME: &str = "wal_writer";
 
@@ -49,7 +48,7 @@ pub(crate) const WAL_BUFFER_TASK_NAME: &str = "wal_writer";
 ///   operations. The manager becomes unusable after encountering a fatal error.
 pub(crate) struct WalBufferManager {
     inner: Arc<parking_lot::RwLock<WalBufferManagerInner>>,
-    wal_id_incrementor: Arc<dyn WalIdStore + Send + Sync>,
+    db_state: Arc<parking_lot::RwLock<DbState>>,
     status_manager: crate::db_status::DbStatusManager,
     db_stats: DbStats,
     mono_clock: Arc<MonotonicClock>,
@@ -114,7 +113,7 @@ struct WalBufferIterator {
 
 impl WalBufferManager {
     pub(crate) fn new(
-        wal_id_incrementor: Arc<dyn WalIdStore + Send + Sync>,
+        db_state: Arc<parking_lot::RwLock<DbState>>,
         status_manager: crate::db_status::DbStatusManager,
         db_stats: DbStats,
         recent_flushed_wal_id: u64,
@@ -138,7 +137,7 @@ impl WalBufferManager {
         };
         Self {
             inner: Arc::new(parking_lot::RwLock::new(inner)),
-            wal_id_incrementor,
+            db_state,
             status_manager,
             db_stats,
             table_store,
@@ -403,18 +402,18 @@ impl WalBufferManager {
             return Ok(());
         }
 
-        let next_wal_id = self.wal_id_incrementor.next_wal_id();
+        let mut state = self.db_state.write();
+        let next_wal_id = state.next_wal_id();
+        let manifest = state.state().core().clone();
+        drop(state);
+
         let mut inner = self.inner.write();
         let current_wal = std::mem::replace(&mut inner.current_wal, WalBuffer::new());
         inner.flush_epoch += 1;
         inner
             .immutable_wals
             .push_back((next_wal_id, Arc::new(current_wal)));
-        // Intentionally do not publish this via `db.subscribe()`. Freezing the
-        // WAL only bumps `next_wal_sst_id`, which is not very useful to
-        // subscribers. `db.subscribe()` already emits on meaningful changes
-        // like `durable_seq`; reporting here would add extra low-signal
-        // updates.
+        self.status_manager.report_manifest(manifest);
         Ok(())
     }
 
@@ -646,7 +645,6 @@ mod tests {
         lookup_metric, DefaultMetricsRecorder, MetricLevel, MetricsRecorderHelper,
     };
     use slatedb_common::MockSystemClock;
-    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -824,16 +822,6 @@ mod tests {
         assert!(buffer.size() > 100_000);
     }
 
-    struct MockWalIdStore {
-        next_id: AtomicU64,
-    }
-
-    impl WalIdStore for MockWalIdStore {
-        fn next_wal_id(&self) -> u64 {
-            self.next_id.fetch_add(1, Ordering::SeqCst)
-        }
-    }
-
     async fn setup_wal_buffer() -> (
         Arc<WalBufferManager>,
         Arc<TableStore>,
@@ -853,9 +841,9 @@ mod tests {
         DbStats,
         Arc<DefaultMetricsRecorder>,
     ) {
-        let wal_id_store: Arc<dyn WalIdStore + Send + Sync> = Arc::new(MockWalIdStore {
-            next_id: AtomicU64::new(1),
-        });
+        let db_state = Arc::new(parking_lot::RwLock::new(DbState::new(
+            crate::manifest::store::test_utils::new_dirty_manifest(),
+        )));
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let table_store = Arc::new(TableStore::new(
             ObjectStores::new(object_store, None),
@@ -872,7 +860,7 @@ mod tests {
         let helper = MetricsRecorderHelper::new(recorder.clone(), MetricLevel::default());
         let db_stats = DbStats::new(&helper);
         let wal_buffer = Arc::new(WalBufferManager::new(
-            wal_id_store,
+            db_state,
             status_manager.clone(),
             db_stats.clone(),
             0, // recent_flushed_wal_id

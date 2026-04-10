@@ -6,7 +6,6 @@ use crate::manifest::Manifest;
 use crate::mem_table::{ImmutableMemtable, KVTable, WritableKVTable};
 use crate::reader::DbStateReader;
 use crate::seq_tracker::SequenceTracker;
-use crate::wal_id::WalIdStore;
 use bytes::Bytes;
 use log::debug;
 use serde::Serialize;
@@ -652,6 +651,15 @@ impl DbState {
         self.modify(|modifier| modifier.merge_remote_manifest(remote_manifest));
     }
 
+    /// Increment the next WAL ID and return the previous value.
+    pub(crate) fn next_wal_id(&mut self) -> u64 {
+        self.modify(|modifier| {
+            let next_wal_id = modifier.state.manifest.value.core.next_wal_sst_id;
+            modifier.state.manifest.value.core.next_wal_sst_id += 1;
+            next_wal_id
+        })
+    }
+
     pub(crate) fn modify<F, R>(&mut self, fun: F) -> R
     where
         F: FnOnce(&mut StateModifier<'_>) -> R,
@@ -728,22 +736,6 @@ impl<'a> StateModifier<'a> {
 
     fn finish(self) {
         self.db_state.state = Arc::new(self.state);
-    }
-}
-
-impl WalIdStore for parking_lot::RwLock<DbState> {
-    /// increment the next wal id, and return the previous value.
-    fn next_wal_id(&self) -> u64 {
-        let mut state = self.write();
-
-        // not sure why, but it doesn't compile without the return
-        // statement -- probably some generic inference bug
-        #[allow(clippy::needless_return)]
-        return state.modify(|modifier| {
-            let next_wal_id = modifier.state.manifest.value.core.next_wal_sst_id;
-            modifier.state.manifest.value.core.next_wal_sst_id += 1;
-            next_wal_id
-        });
     }
 }
 

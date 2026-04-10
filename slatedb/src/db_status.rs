@@ -50,6 +50,7 @@ pub(crate) struct DbStatusManager {
 }
 
 impl DbStatusManager {
+    #[cfg(test)]
     pub(crate) fn new(initial_durable_seq: u64) -> Self {
         Self::new_with_manifest(initial_durable_seq, ManifestCore::new())
     }
@@ -88,21 +89,6 @@ impl DbStatusManager {
             } else {
                 false
             }
-        });
-    }
-
-    pub(crate) fn report_durable_state(&self, seq: u64, manifest: ManifestCore) {
-        self.tx.send_if_modified(|s| {
-            let mut changed = false;
-            if seq > s.durable_seq {
-                s.durable_seq = seq;
-                changed = true;
-            }
-            if s.current_manifest != manifest {
-                s.current_manifest = manifest;
-                changed = true;
-            }
-            changed
         });
     }
 

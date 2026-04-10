@@ -589,7 +589,7 @@ impl DbInner {
         Ok(())
     }
 
-    pub(crate) fn current_manifest(&self) -> ManifestCore {
+    pub(crate) fn manifest(&self) -> ManifestCore {
         self.state.read().state().core().clone()
     }
 }
@@ -1520,7 +1520,7 @@ impl Db {
     ///
     /// This returns the in-memory manifest snapshot currently held by the `Db`.
     pub fn manifest(&self) -> ManifestCore {
-        self.inner.current_manifest()
+        self.inner.manifest()
     }
 
     /// Subscribe to database state changes.

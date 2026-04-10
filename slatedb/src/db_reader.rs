@@ -108,13 +108,8 @@ impl DbReaderInner {
         system_clock: Arc<dyn SystemClock>,
         rand: Arc<DbRand>,
         recorder: slatedb_common::metrics::MetricsRecorderHelper,
+        mut manifest: StoredManifest,
     ) -> Result<Self, SlateDBError> {
-        let mut manifest =
-            StoredManifest::load(Arc::clone(&manifest_store), system_clock.clone()).await?;
-        if !manifest.db_state().initialized {
-            return Err(SlateDBError::InvalidDBState);
-        }
-
         let checkpoint =
             Self::get_or_create_checkpoint(&mut manifest, checkpoint_id, &options, rand.clone())
                 .await?;
@@ -141,7 +136,8 @@ impl DbReaderInner {
         let initial_durable_seq = initial_state
             .last_remote_persisted_seq
             .max(initial_state.core().last_l0_seq);
-        status_manager.report_durable_state(initial_durable_seq, initial_state.core().clone());
+        status_manager.report_durable_seq(initial_durable_seq);
+        status_manager.report_manifest(initial_state.core().clone());
         let oracle = Arc::new(DbReaderOracle::new(
             initial_durable_seq,
             status_manager.clone(),
@@ -257,12 +253,11 @@ impl DbReaderInner {
         let new_checkpoint_state = self.rebuild_checkpoint_state(checkpoint).await?;
         let durable_seq = new_checkpoint_state.last_remote_persisted_seq;
         let durable_manifest = new_checkpoint_state.manifest.core.clone();
-        self.oracle.advance_durable_seq_silent(durable_seq);
+        self.oracle.advance_durable_seq(durable_seq);
         let mut write_guard = self.state.write();
         *write_guard = Arc::new(new_checkpoint_state);
         drop(write_guard);
-        self.status_manager
-            .report_durable_state(durable_seq, durable_manifest);
+        self.status_manager.report_manifest(durable_manifest);
         Ok(())
     }
 
@@ -691,11 +686,21 @@ impl DbReader {
     ) -> Result<Self, SlateDBError> {
         Self::validate_options(&options)?;
 
-        let status_manager = DbStatusManager::new(0);
-        let task_executor =
-            MessageHandlerExecutor::new(Arc::new(status_manager.clone()), system_clock.clone());
         let manifest_store = store_provider.manifest_store();
         let table_store = store_provider.table_store();
+
+        let manifest =
+            StoredManifest::load(Arc::clone(&manifest_store), system_clock.clone()).await?;
+        if !manifest.db_state().initialized {
+            return Err(SlateDBError::InvalidDBState);
+        }
+
+        let status_manager = DbStatusManager::new_with_manifest(
+            manifest.db_state().last_l0_seq,
+            manifest.db_state().clone(),
+        );
+        let task_executor =
+            MessageHandlerExecutor::new(Arc::new(status_manager.clone()), system_clock.clone());
         let inner = Arc::new(
             DbReaderInner::new(
                 manifest_store,
@@ -707,6 +712,7 @@ impl DbReader {
                 system_clock,
                 rand,
                 recorder,
+                manifest,
             )
             .await?,
         );

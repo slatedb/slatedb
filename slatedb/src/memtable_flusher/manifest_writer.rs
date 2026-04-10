@@ -381,9 +381,6 @@ impl ManifestWriterHandler {
         through_seq: u64,
     ) -> Result<(), SlateDBError> {
         self.apply_uploaded_state(&staged_batch)?;
-        self.db
-            .status_manager
-            .report_manifest(self.db.current_manifest());
 
         for uploaded in &staged_batch {
             uploaded.imm_memtable.notify_uploaded(Ok(()));
@@ -476,7 +473,10 @@ impl ManifestWriterHandler {
                     .extend_from(uploaded_tracker);
             }
             Ok(())
-        })
+        })?;
+
+        self.db.status_manager.report_manifest(self.db.manifest());
+        Ok(())
     }
 
     async fn write_manifest_update_safely(
@@ -524,9 +524,7 @@ impl ManifestWriterHandler {
     async fn write_current_manifest(&mut self) -> Result<(), SlateDBError> {
         let dirty = self.clone_local_manifest_for_write();
         self.manifest.update(dirty).await?;
-        self.db
-            .status_manager
-            .report_manifest(self.db.current_manifest());
+        self.db.status_manager.report_manifest(self.db.manifest());
         Ok(())
     }
 
@@ -597,11 +595,9 @@ impl ManifestWriterHandler {
         self.durable_seq = through_seq;
         for uploaded in &staged_batch {
             uploaded.imm_memtable.table().notify_durable(Ok(()));
-            self.db.oracle.advance_durable_seq_silent(uploaded.last_seq);
+            self.db.oracle.advance_durable_seq(uploaded.last_seq);
         }
-        self.db
-            .status_manager
-            .report_durable_state(through_seq, self.db.current_manifest());
+        self.db.status_manager.report_manifest(self.db.manifest());
         self.resolve_pending_flushes();
         for (checkpoint, result) in attached_checkpoints
             .into_iter()
