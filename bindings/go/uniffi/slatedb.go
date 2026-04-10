@@ -690,7 +690,7 @@ func uniffiCheckChecksums() {
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_slatedb_uniffi_checksum_method_db_status()
 		})
-		if checksum != 26 {
+		if checksum != 33776 {
 			// If this happens try cleaning and rebuilding your project
 			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_db_status: UniFFI API checksum mismatch")
 		}
@@ -774,6 +774,15 @@ func uniffiCheckChecksums() {
 		if checksum != 34395 {
 			// If this happens try cleaning and rebuilding your project
 			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbreader_shutdown: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_dbreader_status()
+		})
+		if checksum != 4488 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbreader_status: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -1977,8 +1986,8 @@ type DbInterface interface {
 	Shutdown() error
 	// Creates a read-only snapshot representing a consistent point in time.
 	Snapshot() (*DbSnapshot, error)
-	// Returns an error if the database is not currently healthy and open.
-	Status() error
+	// Returns the latest database status snapshot.
+	Status() DbStatus
 	// Applies all operations in `batch` atomically.
 	//
 	// The provided batch is consumed and cannot be reused afterwards.
@@ -2657,16 +2666,16 @@ func (_self *Db) Snapshot() (*DbSnapshot, error) {
 	return res, err
 }
 
-// Returns an error if the database is not currently healthy and open.
-func (_self *Db) Status() error {
+// Returns the latest database status snapshot.
+func (_self *Db) Status() DbStatus {
 	_pointer := _self.ffiObject.incrementPointer("*Db")
 	defer _self.ffiObject.decrementPointer()
-	_, _uniffiErr := rustCallWithError[*Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) bool {
-		C.uniffi_slatedb_uniffi_fn_method_db_status(
-			_pointer, _uniffiStatus)
-		return false
-	})
-	return _uniffiErr.AsError()
+	return FfiConverterDbStatusINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) RustBufferI {
+		return GoRustBuffer{
+			inner: C.uniffi_slatedb_uniffi_fn_method_db_status(
+				_pointer, _uniffiStatus),
+		}
+	}))
 }
 
 // Applies all operations in `batch` atomically.
@@ -3161,6 +3170,8 @@ type DbReaderInterface interface {
 	ScanWithOptions(varRange KeyRange, options ScanOptions) (*DbIterator, error)
 	// Closes the reader.
 	Shutdown() error
+	// Returns the latest reader status snapshot.
+	Status() DbStatus
 }
 
 // Read-only database handle opened by [`crate::DbReaderBuilder`].
@@ -3406,6 +3417,18 @@ func (_self *DbReader) Shutdown() error {
 	}
 
 	return err
+}
+
+// Returns the latest reader status snapshot.
+func (_self *DbReader) Status() DbStatus {
+	_pointer := _self.ffiObject.incrementPointer("*DbReader")
+	defer _self.ffiObject.decrementPointer()
+	return FfiConverterDbStatusINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) RustBufferI {
+		return GoRustBuffer{
+			inner: C.uniffi_slatedb_uniffi_fn_method_dbreader_status(
+				_pointer, _uniffiStatus),
+		}
+	}))
 }
 func (object *DbReader) Destroy() {
 	runtime.SetFinalizer(object, nil)
@@ -6748,6 +6771,53 @@ func (_ FfiDestroyerWriteBatch) Destroy(value *WriteBatch) {
 	value.Destroy()
 }
 
+// Snapshot of the current database lifecycle and durability state.
+type DbStatus struct {
+	// Highest durable sequence number observed by this handle.
+	DurableSeq uint64
+	// Present once the handle has been closed.
+	CloseReason *CloseReason
+}
+
+func (r *DbStatus) Destroy() {
+	FfiDestroyerUint64{}.Destroy(r.DurableSeq)
+	FfiDestroyerOptionalCloseReason{}.Destroy(r.CloseReason)
+}
+
+type FfiConverterDbStatus struct{}
+
+var FfiConverterDbStatusINSTANCE = FfiConverterDbStatus{}
+
+func (c FfiConverterDbStatus) Lift(rb RustBufferI) DbStatus {
+	return LiftFromRustBuffer[DbStatus](c, rb)
+}
+
+func (c FfiConverterDbStatus) Read(reader io.Reader) DbStatus {
+	return DbStatus{
+		FfiConverterUint64INSTANCE.Read(reader),
+		FfiConverterOptionalCloseReasonINSTANCE.Read(reader),
+	}
+}
+
+func (c FfiConverterDbStatus) Lower(value DbStatus) C.RustBuffer {
+	return LowerIntoRustBuffer[DbStatus](c, value)
+}
+
+func (c FfiConverterDbStatus) LowerExternal(value DbStatus) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[DbStatus](c, value))
+}
+
+func (c FfiConverterDbStatus) Write(writer io.Writer, value DbStatus) {
+	FfiConverterUint64INSTANCE.Write(writer, value.DurableSeq)
+	FfiConverterOptionalCloseReasonINSTANCE.Write(writer, value.CloseReason)
+}
+
+type FfiDestroyerDbStatus struct{}
+
+func (_ FfiDestroyerDbStatus) Destroy(value DbStatus) {
+	value.Destroy()
+}
+
 // Options for an explicit flush request.
 type FlushOptions struct {
 	// Which storage layer should be flushed.
@@ -8990,6 +9060,47 @@ type FfiDestroyerOptionalWriteHandle struct{}
 func (_ FfiDestroyerOptionalWriteHandle) Destroy(value *WriteHandle) {
 	if value != nil {
 		FfiDestroyerWriteHandle{}.Destroy(*value)
+	}
+}
+
+type FfiConverterOptionalCloseReason struct{}
+
+var FfiConverterOptionalCloseReasonINSTANCE = FfiConverterOptionalCloseReason{}
+
+func (c FfiConverterOptionalCloseReason) Lift(rb RustBufferI) *CloseReason {
+	return LiftFromRustBuffer[*CloseReason](c, rb)
+}
+
+func (_ FfiConverterOptionalCloseReason) Read(reader io.Reader) *CloseReason {
+	if readInt8(reader) == 0 {
+		return nil
+	}
+	temp := FfiConverterCloseReasonINSTANCE.Read(reader)
+	return &temp
+}
+
+func (c FfiConverterOptionalCloseReason) Lower(value *CloseReason) C.RustBuffer {
+	return LowerIntoRustBuffer[*CloseReason](c, value)
+}
+
+func (c FfiConverterOptionalCloseReason) LowerExternal(value *CloseReason) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[*CloseReason](c, value))
+}
+
+func (_ FfiConverterOptionalCloseReason) Write(writer io.Writer, value *CloseReason) {
+	if value == nil {
+		writeInt8(writer, 0)
+	} else {
+		writeInt8(writer, 1)
+		FfiConverterCloseReasonINSTANCE.Write(writer, *value)
+	}
+}
+
+type FfiDestroyerOptionalCloseReason struct{}
+
+func (_ FfiDestroyerOptionalCloseReason) Destroy(value *CloseReason) {
+	if value != nil {
+		FfiDestroyerCloseReason{}.Destroy(*value)
 	}
 }
 
