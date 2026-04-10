@@ -124,9 +124,7 @@ impl DbStatusManager {
     }
 
     pub(crate) fn status(&self) -> DbStatus {
-        let rx = self.subscribe();
-        let status = rx.borrow().clone();
-        status
+        self.tx.borrow().clone()
     }
 }
 
