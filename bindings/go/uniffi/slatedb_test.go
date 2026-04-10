@@ -845,6 +845,34 @@ func TestDbPutWithTimeout(t *testing.T) {
 	}
 }
 
+func TestDbDeleteWithTimeout(t *testing.T) {
+	store := newMemoryStore(t)
+	handle := openTestDB(t, store, nil)
+
+	if _, err := handle.db.Put([]byte("k1"), []byte("v1")); err != nil {
+		t.Fatalf("Put(k1): %v", err)
+	}
+
+	wh, err := handle.db.DeleteWithOptions(
+		[]byte("k1"),
+		slatedb.WriteOptions{AwaitDurable: true, TimeoutMs: uint64Ptr(30000)},
+	)
+	if err != nil {
+		t.Fatalf("DeleteWithOptions(timeout=30s): %v", err)
+	}
+	if wh.Seqnum == 0 {
+		t.Fatal("DeleteWithOptions(timeout=30s): Seqnum = 0")
+	}
+
+	value, err := handle.db.Get([]byte("k1"))
+	if err != nil {
+		t.Fatalf("Get(k1): %v", err)
+	}
+	if value != nil {
+		t.Fatalf("Get(k1) after delete: got %q, want nil", *value)
+	}
+}
+
 func TestDbBatchWriteAndConsumption(t *testing.T) {
 	store := newMemoryStore(t)
 	handle := openTestDB(t, store, nil)

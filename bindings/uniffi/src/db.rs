@@ -185,8 +185,18 @@ impl Db {
         options: WriteOptions,
     ) -> Result<WriteHandle, Error> {
         validate_key(&key)?;
-        let options = options.into();
-        Ok(self.inner.delete_with_options(key, &options).await?.into())
+        let timeout_ms = options.timeout_ms;
+        let write_options = options.into();
+        let fut = self.inner.delete_with_options(key, &write_options);
+        let result = match timeout_ms {
+            Some(ms) => tokio::time::timeout(Duration::from_millis(ms), fut)
+                .await
+                .map_err(|_| Error::Timeout {
+                    message: format!("delete timed out after {}ms", ms),
+                })?,
+            None => fut.await,
+        }?;
+        Ok(result.into())
     }
 
     /// Appends a merge operand for `key` and returns metadata for the write.
