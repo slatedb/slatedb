@@ -1629,14 +1629,10 @@ impl Db {
         Ok(object_store)
     }
 
-    /// Returns the latest in-memory database status snapshot.
+    /// Returns the latest database status.
     ///
-    /// This is a passive check that does not perform any I/O. The snapshot is updated at
-    /// least every [`Settings::manifest_poll_interval`], but might also be refreshed by
-    /// other internal events or user-facing operations.
-    ///
-    /// Once a database is closed, either normally or due to an error, it can't be reopened.
-    /// A new `Db` instance must be created to access the database again.
+    /// This is a snapshot of the current state and will not update automatically.
+    /// Use [`subscribe`](Db::subscribe) to receive real-time updates.
     pub fn status(&self) -> DbStatus {
         self.inner.status()
     }

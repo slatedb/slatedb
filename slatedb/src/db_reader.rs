@@ -509,6 +509,10 @@ impl DbReaderInner {
         Ok((replay_after_wal_id, last_committed_seq))
     }
 
+    /// Returns the latest database status.
+    ///
+    /// This is a snapshot of the current state and will not update automatically.
+    /// Use [`subscribe`](DbReader::subscribe) to receive real-time updates.
     pub(crate) fn status(&self) -> DbStatus {
         self.status_manager.status()
     }
