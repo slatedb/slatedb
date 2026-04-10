@@ -127,6 +127,9 @@ pub struct ReadOptions {
     pub dirty: bool,
     /// Whether fetched blocks should be inserted into the block cache.
     pub cache_blocks: bool,
+    /// Timeout in milliseconds for the read. Defaults to no timeout.
+    #[uniffi(default = None)]
+    pub timeout_ms: Option<u64>,
 }
 
 impl Default for ReadOptions {
@@ -135,6 +138,7 @@ impl Default for ReadOptions {
             durability_filter: DurabilityLevel::default(),
             dirty: false,
             cache_blocks: true,
+            timeout_ms: None,
         }
     }
 }

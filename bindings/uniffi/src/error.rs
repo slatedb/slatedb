@@ -128,6 +128,10 @@ pub enum Error {
     /// Internal failure inside SlateDB or the binding layer.
     #[error("{message}")]
     Internal { message: String },
+
+    /// The operation exceeded the configured timeout.
+    #[error("{message}")]
+    Timeout { message: String },
 }
 
 impl From<SlateDbError> for Error {

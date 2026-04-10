@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::config::{
     FlushOptions, IsolationLevel, MergeOptions, PutOptions, ReadOptions, ScanOptions, WriteOptions,
@@ -53,12 +54,18 @@ impl Db {
         options: ReadOptions,
     ) -> Result<Option<Vec<u8>>, Error> {
         validate_key(&key)?;
-        let options = options.into();
-        Ok(self
-            .inner
-            .get_with_options(key, &options)
-            .await?
-            .map(|value| value.to_vec()))
+        let timeout_ms = options.timeout_ms;
+        let read_options = options.into();
+        let fut = self.inner.get_with_options(key, &read_options);
+        let result = match timeout_ms {
+            Some(ms) => tokio::time::timeout(Duration::from_millis(ms), fut)
+                .await
+                .map_err(|_| Error::Timeout {
+                    message: format!("get timed out after {}ms", ms),
+                })?,
+            None => fut.await,
+        }?;
+        Ok(result.map(|value| value.to_vec()))
     }
 
     /// Reads the current row version for `key`, including metadata.
@@ -74,12 +81,18 @@ impl Db {
         options: ReadOptions,
     ) -> Result<Option<KeyValue>, Error> {
         validate_key(&key)?;
-        let options = options.into();
-        Ok(self
-            .inner
-            .get_key_value_with_options(key, &options)
-            .await?
-            .map(KeyValue::from))
+        let timeout_ms = options.timeout_ms;
+        let read_options = options.into();
+        let fut = self.inner.get_key_value_with_options(key, &read_options);
+        let result = match timeout_ms {
+            Some(ms) => tokio::time::timeout(Duration::from_millis(ms), fut)
+                .await
+                .map_err(|_| Error::Timeout {
+                    message: format!("get_key_value timed out after {}ms", ms),
+                })?,
+            None => fut.await,
+        }?;
+        Ok(result.map(KeyValue::from))
     }
 
     /// Scans rows inside `range`.

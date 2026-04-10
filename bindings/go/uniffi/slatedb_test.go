@@ -674,6 +674,152 @@ func TestDbScanVariants(t *testing.T) {
 	requireRows(t, drainIterator(t, iter), []string{"item:01", "item:02", "item:03"}, []string{"first", "second", "third"})
 }
 
+func uint64Ptr(v uint64) *uint64 { return &v }
+
+func TestDbGetWithTimeout(t *testing.T) {
+	store := newMemoryStore(t)
+	handle := openTestDB(t, store, nil)
+
+	if _, err := handle.db.Put([]byte("k1"), []byte("v1")); err != nil {
+		t.Fatalf("Put(k1): %v", err)
+	}
+
+	value, err := handle.db.GetWithOptions([]byte("k1"), slatedb.ReadOptions{
+		DurabilityFilter: slatedb.DurabilityLevelMemory,
+		Dirty:            false,
+		CacheBlocks:      true,
+		TimeoutMs:        uint64Ptr(30000),
+	})
+	if err != nil {
+		t.Fatalf("GetWithOptions(timeout=30s): %v", err)
+	}
+	if value == nil || !bytes.Equal(*value, []byte("v1")) {
+		t.Fatalf("GetWithOptions(timeout=30s): got %v, want %q", value, "v1")
+	}
+
+	kv, err := handle.db.GetKeyValueWithOptions([]byte("k1"), slatedb.ReadOptions{
+		DurabilityFilter: slatedb.DurabilityLevelMemory,
+		Dirty:            false,
+		CacheBlocks:      true,
+		TimeoutMs:        uint64Ptr(30000),
+	})
+	if err != nil {
+		t.Fatalf("GetKeyValueWithOptions(timeout=30s): %v", err)
+	}
+	if kv == nil || !bytes.Equal(kv.Value, []byte("v1")) {
+		t.Fatalf("GetKeyValueWithOptions(timeout=30s): got %v, want value %q", kv, "v1")
+	}
+}
+
+func TestDbReaderGetWithTimeout(t *testing.T) {
+	store := newMemoryStore(t)
+	dbHandle := openTestDB(t, store, nil)
+
+	if _, err := dbHandle.db.Put([]byte("k1"), []byte("v1")); err != nil {
+		t.Fatalf("Put(k1): %v", err)
+	}
+	if err := dbHandle.db.FlushWithOptions(slatedb.FlushOptions{FlushType: slatedb.FlushTypeMemTable}); err != nil {
+		t.Fatalf("FlushWithOptions(MemTable): %v", err)
+	}
+
+	readerHandle := openTestReader(t, store, nil)
+
+	value, err := readerHandle.reader.GetWithOptions([]byte("k1"), slatedb.ReadOptions{
+		DurabilityFilter: slatedb.DurabilityLevelMemory,
+		Dirty:            false,
+		CacheBlocks:      true,
+		TimeoutMs:        uint64Ptr(30000),
+	})
+	if err != nil {
+		t.Fatalf("DbReader.GetWithOptions(timeout=30s): %v", err)
+	}
+	if value == nil || !bytes.Equal(*value, []byte("v1")) {
+		t.Fatalf("DbReader.GetWithOptions(timeout=30s): got %v, want %q", value, "v1")
+	}
+}
+
+func TestDbSnapshotGetWithTimeout(t *testing.T) {
+	store := newMemoryStore(t)
+	handle := openTestDB(t, store, nil)
+
+	if _, err := handle.db.Put([]byte("k1"), []byte("v1")); err != nil {
+		t.Fatalf("Put(k1): %v", err)
+	}
+
+	snapshot, err := handle.db.Snapshot()
+	if err != nil {
+		t.Fatalf("Snapshot(): %v", err)
+	}
+	t.Cleanup(snapshot.Destroy)
+
+	value, err := snapshot.GetWithOptions([]byte("k1"), slatedb.ReadOptions{
+		DurabilityFilter: slatedb.DurabilityLevelMemory,
+		Dirty:            false,
+		CacheBlocks:      true,
+		TimeoutMs:        uint64Ptr(30000),
+	})
+	if err != nil {
+		t.Fatalf("DbSnapshot.GetWithOptions(timeout=30s): %v", err)
+	}
+	if value == nil || !bytes.Equal(*value, []byte("v1")) {
+		t.Fatalf("DbSnapshot.GetWithOptions(timeout=30s): got %v, want %q", value, "v1")
+	}
+
+	kv, err := snapshot.GetKeyValueWithOptions([]byte("k1"), slatedb.ReadOptions{
+		DurabilityFilter: slatedb.DurabilityLevelMemory,
+		Dirty:            false,
+		CacheBlocks:      true,
+		TimeoutMs:        uint64Ptr(30000),
+	})
+	if err != nil {
+		t.Fatalf("DbSnapshot.GetKeyValueWithOptions(timeout=30s): %v", err)
+	}
+	if kv == nil || !bytes.Equal(kv.Value, []byte("v1")) {
+		t.Fatalf("DbSnapshot.GetKeyValueWithOptions(timeout=30s): got %v, want value %q", kv, "v1")
+	}
+}
+
+func TestDbTransactionGetWithTimeout(t *testing.T) {
+	store := newMemoryStore(t)
+	handle := openTestDB(t, store, nil)
+
+	tx, err := handle.db.Begin(slatedb.IsolationLevelSnapshot)
+	if err != nil {
+		t.Fatalf("Begin(): %v", err)
+	}
+	t.Cleanup(tx.Destroy)
+
+	if err := tx.Put([]byte("k1"), []byte("v1")); err != nil {
+		t.Fatalf("tx.Put(k1): %v", err)
+	}
+
+	value, err := tx.GetWithOptions([]byte("k1"), slatedb.ReadOptions{
+		DurabilityFilter: slatedb.DurabilityLevelMemory,
+		Dirty:            true,
+		CacheBlocks:      true,
+		TimeoutMs:        uint64Ptr(30000),
+	})
+	if err != nil {
+		t.Fatalf("DbTransaction.GetWithOptions(timeout=30s): %v", err)
+	}
+	if value == nil || !bytes.Equal(*value, []byte("v1")) {
+		t.Fatalf("DbTransaction.GetWithOptions(timeout=30s): got %v, want %q", value, "v1")
+	}
+
+	kv, err := tx.GetKeyValueWithOptions([]byte("k1"), slatedb.ReadOptions{
+		DurabilityFilter: slatedb.DurabilityLevelMemory,
+		Dirty:            true,
+		CacheBlocks:      true,
+		TimeoutMs:        uint64Ptr(30000),
+	})
+	if err != nil {
+		t.Fatalf("DbTransaction.GetKeyValueWithOptions(timeout=30s): %v", err)
+	}
+	if kv == nil || !bytes.Equal(kv.Value, []byte("v1")) {
+		t.Fatalf("DbTransaction.GetKeyValueWithOptions(timeout=30s): got %v, want value %q", kv, "v1")
+	}
+}
+
 func TestDbBatchWriteAndConsumption(t *testing.T) {
 	store := newMemoryStore(t)
 	handle := openTestDB(t, store, nil)
