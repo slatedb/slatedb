@@ -214,13 +214,21 @@ impl Db {
         write_options: WriteOptions,
     ) -> Result<WriteHandle, Error> {
         validate_key_value(&key, &operand)?;
+        let timeout_ms = write_options.timeout_ms;
         let merge_options = merge_options.into();
         let write_options = write_options.into();
-        Ok(self
+        let fut = self
             .inner
-            .merge_with_options(key, operand, &merge_options, &write_options)
-            .await?
-            .into())
+            .merge_with_options(key, operand, &merge_options, &write_options);
+        let result = match timeout_ms {
+            Some(ms) => tokio::time::timeout(Duration::from_millis(ms), fut)
+                .await
+                .map_err(|_| Error::Timeout {
+                    message: format!("merge timed out after {}ms", ms),
+                })?,
+            None => fut.await,
+        }?;
+        Ok(result.into())
     }
 
     /// Applies all operations in `batch` atomically.

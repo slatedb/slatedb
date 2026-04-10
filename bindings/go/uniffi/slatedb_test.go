@@ -873,6 +873,40 @@ func TestDbDeleteWithTimeout(t *testing.T) {
 	}
 }
 
+func TestDbMergeWithTimeout(t *testing.T) {
+	store := newMemoryStore(t)
+	handle := openTestDB(t, store, func(t *testing.T, builder *slatedb.DbBuilder) {
+		t.Helper()
+		if err := builder.WithMergeOperator(concatMergeOperator{}); err != nil {
+			t.Fatalf("WithMergeOperator(): %v", err)
+		}
+	})
+
+	if _, err := handle.db.Put([]byte("k1"), []byte("base")); err != nil {
+		t.Fatalf("Put(k1): %v", err)
+	}
+
+	wh, err := handle.db.MergeWithOptions(
+		[]byte("k1"), []byte(":ext"),
+		slatedb.MergeOptions{Ttl: slatedb.TtlDefault{}},
+		slatedb.WriteOptions{AwaitDurable: true, TimeoutMs: uint64Ptr(30000)},
+	)
+	if err != nil {
+		t.Fatalf("MergeWithOptions(timeout=30s): %v", err)
+	}
+	if wh.Seqnum == 0 {
+		t.Fatal("MergeWithOptions(timeout=30s): Seqnum = 0")
+	}
+
+	value, err := handle.db.Get([]byte("k1"))
+	if err != nil {
+		t.Fatalf("Get(k1): %v", err)
+	}
+	if value == nil || !bytes.Equal(*value, []byte("base:ext")) {
+		t.Fatalf("Get(k1): got %v, want %q", value, "base:ext")
+	}
+}
+
 func TestDbBatchWriteAndConsumption(t *testing.T) {
 	store := newMemoryStore(t)
 	handle := openTestDB(t, store, nil)
