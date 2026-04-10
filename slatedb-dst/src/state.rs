@@ -55,34 +55,19 @@ CREATE TABLE rows (
 /// visibility rules are applied. Consumers inspecting a [`RecordedRow`]
 /// should treat it as historical state, not necessarily the value a point-in-
 /// time snapshot would observe.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct RecordedRow {
-    /// Sequence number assigned to the write that produced this row.
-    pub seq: u64,
-    /// User key for the recorded entry.
-    pub key: Vec<u8>,
     /// Scenario name that generated the write.
     pub scenario: String,
-    /// Encoded row kind stored in SQLite.
-    ///
-    /// `0` means a value row and `1` means a tombstone row.
-    pub kind: i64,
-    /// Value payload for live rows.
-    ///
-    /// Tombstones store `None`.
-    pub value: Option<Vec<u8>>,
-    /// Logical creation timestamp captured from the mock clock when the write
-    /// was issued.
-    pub create_ts: i64,
-    /// Logical expiration timestamp, if the value is subject to TTL.
-    pub expire_ts: Option<i64>,
+    /// SlateDB row contents captured for this historical row.
+    pub entry: RowEntry,
 }
 
 /// A full snapshot of the raw persisted SQLite state.
 ///
 /// This is useful for post-run determinism checks and debugging because it
 /// exposes the append-only row history exactly as recorded.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct RecordedSnapshot {
     /// All recorded rows in `(seq, key)` order.
     pub rows: Vec<RecordedRow>,
@@ -355,13 +340,15 @@ impl SQLiteState {
         let rows = rows_stmt
             .query_map((), |row| {
                 Ok(RecordedRow {
-                    seq: row.get::<_, i64>(0)? as u64,
-                    key: row.get(1)?,
                     scenario: row.get(2)?,
-                    kind: row.get(3)?,
-                    value: row.get(4)?,
-                    create_ts: row.get(5)?,
-                    expire_ts: row.get(6)?,
+                    entry: row_entry_from_sql_parts(
+                        row.get::<_, i64>(0)? as u64,
+                        row.get(1)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                    ),
                 })
             })
             .map_err(DstError::SQLiteStateError)?
@@ -447,20 +434,42 @@ fn ensure_supported_snapshot_read(dirty: bool) -> Result<(), Error> {
     Ok(())
 }
 
+fn row_entry_from_sql_parts(
+    seq: u64,
+    key: Vec<u8>,
+    kind: i64,
+    value: Option<Vec<u8>>,
+    create_ts: i64,
+    expire_ts: Option<i64>,
+) -> RowEntry {
+    let value = if kind == ROW_KIND_TOMBSTONE {
+        ValueDeletable::Tombstone
+    } else {
+        ValueDeletable::Value(Bytes::from(value.expect("value rows must include a value")))
+    };
+
+    RowEntry {
+        key: Bytes::from(key),
+        value,
+        seq,
+        create_ts: Some(create_ts),
+        expire_ts,
+    }
+}
+
 fn visible_row_to_key_value(row: VisibilityRow) -> Option<KeyValue> {
     if row.kind == ROW_KIND_TOMBSTONE {
         return None;
     }
 
-    Some(KeyValue::from(RowEntry {
-        key: Bytes::from(row.key),
-        value: ValueDeletable::Value(Bytes::from(
-            row.value.expect("value rows must include a value"),
-        )),
-        seq: row.seq,
-        create_ts: Some(row.create_ts),
-        expire_ts: row.expire_ts,
-    }))
+    Some(KeyValue::from(row_entry_from_sql_parts(
+        row.seq,
+        row.key,
+        row.kind,
+        row.value,
+        row.create_ts,
+        row.expire_ts,
+    )))
 }
 
 fn scan_filter_contains(key: &[u8], filter: &ScanFilter) -> bool {

@@ -36,7 +36,7 @@ use tracing::{error, info};
 #[cfg(slow)]
 const NIGHTLY_WALL_CLOCK: Duration = Duration::from_secs(12 * 60);
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 struct SimulationResult {
     snapshot: RecordedSnapshot,
     next_u64: u64,
