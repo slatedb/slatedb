@@ -7,7 +7,7 @@ use crate::db_snapshot::DbSnapshot;
 use crate::db_transaction::DbTransaction;
 use crate::error::Error;
 use crate::iterator::DbIterator;
-use crate::types::{KeyRange, KeyValue, WriteHandle};
+use crate::types::{DbStatus, KeyRange, KeyValue, WriteHandle};
 use crate::validation::{validate_key, validate_key_value};
 use crate::write_batch::WriteBatch;
 
@@ -25,9 +25,9 @@ impl Db {
 
 #[uniffi::export]
 impl Db {
-    /// Returns an error if the database is not currently healthy and open.
-    pub fn status(&self) -> Result<(), Error> {
-        self.inner.status().map_err(Into::into)
+    /// Returns the latest database status snapshot.
+    pub fn status(&self) -> DbStatus {
+        self.inner.status().into()
     }
 }
 

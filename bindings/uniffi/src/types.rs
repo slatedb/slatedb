@@ -2,7 +2,7 @@ use std::ops::Bound;
 
 use slatedb::ValueDeletable;
 
-use crate::error::SlateDbError;
+use crate::error::{CloseReason, SlateDbError};
 
 type KeyBound = Bound<Vec<u8>>;
 type KeyBounds = (KeyBound, KeyBound);
@@ -70,6 +70,24 @@ impl From<slatedb::WriteHandle> for WriteHandle {
         Self {
             seqnum: value.seqnum(),
             create_ts: value.create_ts(),
+        }
+    }
+}
+
+/// Snapshot of the current database lifecycle and durability state.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct DbStatus {
+    /// Highest durable sequence number observed by this handle.
+    pub durable_seq: u64,
+    /// Present once the handle has been closed.
+    pub close_reason: Option<CloseReason>,
+}
+
+impl From<slatedb::DbStatus> for DbStatus {
+    fn from(value: slatedb::DbStatus) -> Self {
+        Self {
+            durable_seq: value.durable_seq,
+            close_reason: value.close_reason.map(Into::into),
         }
     }
 }

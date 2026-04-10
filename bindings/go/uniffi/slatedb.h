@@ -783,7 +783,7 @@ uint64_t uniffi_slatedb_uniffi_fn_method_db_snapshot(uint64_t ptr
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DB_STATUS
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DB_STATUS
-void uniffi_slatedb_uniffi_fn_method_db_status(uint64_t ptr, RustCallStatus *out_status
+RustBuffer uniffi_slatedb_uniffi_fn_method_db_status(uint64_t ptr, RustCallStatus *out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DB_WRITE
@@ -839,6 +839,11 @@ uint64_t uniffi_slatedb_uniffi_fn_method_dbreader_scan_with_options(uint64_t ptr
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBREADER_SHUTDOWN
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBREADER_SHUTDOWN
 uint64_t uniffi_slatedb_uniffi_fn_method_dbreader_shutdown(uint64_t ptr
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBREADER_STATUS
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBREADER_STATUS
+RustBuffer uniffi_slatedb_uniffi_fn_method_dbreader_status(uint64_t ptr, RustCallStatus *out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_CLONE_DBSNAPSHOT
@@ -1941,6 +1946,12 @@ uint16_t uniffi_slatedb_uniffi_checksum_method_dbreader_scan_with_options(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBREADER_SHUTDOWN
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBREADER_SHUTDOWN
 uint16_t uniffi_slatedb_uniffi_checksum_method_dbreader_shutdown(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBREADER_STATUS
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBREADER_STATUS
+uint16_t uniffi_slatedb_uniffi_checksum_method_dbreader_status(void
     
 );
 #endif

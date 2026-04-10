@@ -35,7 +35,7 @@ pub use metrics::{
 };
 pub use object_store::ObjectStore;
 pub use settings::Settings;
-pub use types::{KeyRange, KeyValue, RowEntry, RowEntryKind, WriteHandle};
+pub use types::{DbStatus, KeyRange, KeyValue, RowEntry, RowEntryKind, WriteHandle};
 pub use wal_reader::{WalFile, WalFileIterator, WalFileMetadata, WalReader};
 pub use write_batch::WriteBatch;
 
