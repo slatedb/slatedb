@@ -245,14 +245,21 @@ impl DbTransaction {
         &self,
         options: WriteOptions,
     ) -> Result<Option<WriteHandle>, Error> {
-        let options = options.into();
+        let timeout_ms = options.timeout_ms;
+        let write_options = options.into();
         let tx = {
             let mut guard = self.inner.lock().await;
             guard.take().ok_or(SlateDbError::TransactionCompleted)?
         };
-        Ok(tx
-            .commit_with_options(&options)
-            .await?
-            .map(WriteHandle::from))
+        let fut = tx.commit_with_options(&write_options);
+        let result = match timeout_ms {
+            Some(ms) => tokio::time::timeout(Duration::from_millis(ms), fut)
+                .await
+                .map_err(|_| Error::Timeout {
+                    message: format!("commit timed out after {}ms", ms),
+                })?,
+            None => fut.await,
+        }?;
+        Ok(result.map(WriteHandle::from))
     }
 }

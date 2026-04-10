@@ -907,6 +907,70 @@ func TestDbMergeWithTimeout(t *testing.T) {
 	}
 }
 
+func TestDbWriteWithTimeout(t *testing.T) {
+	store := newMemoryStore(t)
+	handle := openTestDB(t, store, nil)
+
+	batch := slatedb.NewWriteBatch()
+	t.Cleanup(batch.Destroy)
+
+	if err := batch.Put([]byte("wk1"), []byte("wv1")); err != nil {
+		t.Fatalf("WriteBatch.Put(): %v", err)
+	}
+
+	wh, err := handle.db.WriteWithOptions(
+		batch,
+		slatedb.WriteOptions{AwaitDurable: true, TimeoutMs: uint64Ptr(30000)},
+	)
+	if err != nil {
+		t.Fatalf("WriteWithOptions(timeout=30s): %v", err)
+	}
+	if wh.Seqnum == 0 {
+		t.Fatal("WriteWithOptions(timeout=30s): Seqnum = 0")
+	}
+
+	value, err := handle.db.Get([]byte("wk1"))
+	if err != nil {
+		t.Fatalf("Get(wk1): %v", err)
+	}
+	if value == nil || !bytes.Equal(*value, []byte("wv1")) {
+		t.Fatalf("Get(wk1): got %v, want %q", value, "wv1")
+	}
+}
+
+func TestDbTransactionCommitWithTimeout(t *testing.T) {
+	store := newMemoryStore(t)
+	handle := openTestDB(t, store, nil)
+
+	tx, err := handle.db.Begin(slatedb.IsolationLevelSnapshot)
+	if err != nil {
+		t.Fatalf("Begin(): %v", err)
+	}
+	t.Cleanup(tx.Destroy)
+
+	if err := tx.Put([]byte("ck1"), []byte("cv1")); err != nil {
+		t.Fatalf("tx.Put(ck1): %v", err)
+	}
+
+	wh, err := tx.CommitWithOptions(
+		slatedb.WriteOptions{AwaitDurable: true, TimeoutMs: uint64Ptr(30000)},
+	)
+	if err != nil {
+		t.Fatalf("CommitWithOptions(timeout=30s): %v", err)
+	}
+	if wh == nil || wh.Seqnum == 0 {
+		t.Fatal("CommitWithOptions(timeout=30s): got nil or zero seqnum")
+	}
+
+	value, err := handle.db.Get([]byte("ck1"))
+	if err != nil {
+		t.Fatalf("Get(ck1): %v", err)
+	}
+	if value == nil || !bytes.Equal(*value, []byte("cv1")) {
+		t.Fatalf("Get(ck1): got %v, want %q", value, "cv1")
+	}
+}
+
 func TestDbBatchWriteAndConsumption(t *testing.T) {
 	store := newMemoryStore(t)
 	handle := openTestDB(t, store, nil)

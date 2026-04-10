@@ -248,8 +248,18 @@ impl Db {
         options: WriteOptions,
     ) -> Result<WriteHandle, Error> {
         let batch = batch.take_for_write()?;
-        let options = options.into();
-        Ok(self.inner.write_with_options(batch, &options).await?.into())
+        let timeout_ms = options.timeout_ms;
+        let write_options = options.into();
+        let fut = self.inner.write_with_options(batch, &write_options);
+        let result = match timeout_ms {
+            Some(ms) => tokio::time::timeout(Duration::from_millis(ms), fut)
+                .await
+                .map_err(|_| Error::Timeout {
+                    message: format!("write timed out after {}ms", ms),
+                })?,
+            None => fut.await,
+        }?;
+        Ok(result.into())
     }
 
     /// Flushes the default storage layer.
