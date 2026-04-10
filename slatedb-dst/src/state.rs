@@ -195,47 +195,6 @@ impl StateSnapshot {
     }
 }
 
-/// The persisted kind of a recorded row.
-///
-/// The discriminant values for this enum are encoded explicitly in SQLite and
-/// should remain stable so snapshots and debug output stay interpretable.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RecordedRowKind {
-    /// A live value row that may be returned by point-in-time snapshots.
-    Value,
-    /// A delete marker that hides older value rows for the same key.
-    Tombstone,
-}
-
-impl RecordedRowKind {
-    fn to_sql(self) -> i64 {
-        match self {
-            Self::Value => ROW_KIND_VALUE,
-            Self::Tombstone => ROW_KIND_TOMBSTONE,
-        }
-    }
-}
-
-/// A row staged by a scenario write before it is recorded in SQLite.
-///
-/// This is the in-memory write representation used by [`crate::Dst`] before a
-/// write is atomically inserted into the recorded-state database.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct PendingRow {
-    /// Sequence number assigned by the underlying SlateDB write.
-    pub seq: u64,
-    /// User key affected by the write.
-    pub key: Vec<u8>,
-    /// Whether this staged row is a value or tombstone.
-    pub kind: RecordedRowKind,
-    /// Value payload for live rows, or `None` for tombstones.
-    pub value: Option<Vec<u8>>,
-    /// Logical creation timestamp captured for the write.
-    pub create_ts: i64,
-    /// Logical expiration timestamp derived from TTL, if any.
-    pub expire_ts: Option<i64>,
-}
-
 #[derive(Debug)]
 struct VisibilityRow {
     seq: u64,
@@ -297,27 +256,24 @@ impl SQLiteState {
 
     /// Records one logical write operation atomically.
     ///
-    /// This inserts the supplied rows in a single SQLite transaction.
-    pub(crate) fn record_write(
-        &mut self,
-        rows: &[PendingRow],
-        scenario: &str,
-    ) -> Result<(), Error> {
+    /// This inserts the supplied row entries in a single SQLite transaction.
+    pub(crate) fn record_write(&mut self, rows: &[RowEntry], scenario: &str) -> Result<(), Error> {
         let tx = self
             .conn
             .transaction()
             .map_err(DstError::SQLiteStateError)?;
         for row in rows {
+            let (kind, value, create_ts) = row_entry_to_sql_parts(row)?;
             tx.execute(
                 "INSERT INTO rows (seq, key, scenario, kind, value, create_ts, expire_ts)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 params![
                     row.seq as i64,
-                    row.key,
+                    row.key.to_vec(),
                     scenario,
-                    row.kind.to_sql(),
-                    row.value,
-                    row.create_ts,
+                    kind,
+                    value,
+                    create_ts,
                     row.expire_ts
                 ],
             )
@@ -434,6 +390,24 @@ fn ensure_supported_snapshot_read(dirty: bool) -> Result<(), Error> {
     Ok(())
 }
 
+fn row_entry_to_sql_parts(entry: &RowEntry) -> Result<(i64, Option<Vec<u8>>, i64), Error> {
+    let create_ts = entry.create_ts.ok_or_else(|| {
+        Error::internal("DST recorded state requires RowEntry.create_ts".to_string())
+    })?;
+
+    let (kind, value) = match &entry.value {
+        ValueDeletable::Value(value) => (ROW_KIND_VALUE, Some(value.to_vec())),
+        ValueDeletable::Tombstone => (ROW_KIND_TOMBSTONE, None),
+        ValueDeletable::Merge(_) => {
+            return Err(Error::internal(
+                "DST recorded state does not support merge rows".to_string(),
+            ));
+        }
+    };
+
+    Ok((kind, value, create_ts))
+}
+
 fn row_entry_from_sql_parts(
     seq: u64,
     key: Vec<u8>,
@@ -515,24 +489,22 @@ where
 mod tests {
     use super::*;
 
-    fn put(seq: u64, key: &[u8], value: &[u8]) -> PendingRow {
-        PendingRow {
+    fn put(seq: u64, key: &[u8], value: &[u8]) -> RowEntry {
+        RowEntry {
+            key: Bytes::copy_from_slice(key),
+            value: ValueDeletable::Value(Bytes::copy_from_slice(value)),
             seq,
-            key: key.to_vec(),
-            kind: RecordedRowKind::Value,
-            value: Some(value.to_vec()),
-            create_ts: seq as i64,
+            create_ts: Some(seq as i64),
             expire_ts: None,
         }
     }
 
-    fn tombstone(seq: u64, key: &[u8]) -> PendingRow {
-        PendingRow {
+    fn tombstone(seq: u64, key: &[u8]) -> RowEntry {
+        RowEntry {
+            key: Bytes::copy_from_slice(key),
+            value: ValueDeletable::Tombstone,
             seq,
-            key: key.to_vec(),
-            kind: RecordedRowKind::Tombstone,
-            value: None,
-            create_ts: seq as i64,
+            create_ts: Some(seq as i64),
             expire_ts: None,
         }
     }

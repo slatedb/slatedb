@@ -11,12 +11,13 @@ use futures::{
     FutureExt,
 };
 use parking_lot::Mutex;
+use slatedb::bytes::Bytes;
 use slatedb::config::{PutOptions, Settings, Ttl, WriteOptions};
-use slatedb::{Db, Error, WriteBatch, WriteHandle};
+use slatedb::{Db, Error, RowEntry, ValueDeletable, WriteBatch, WriteHandle};
 use slatedb_common::clock::{MockSystemClock, SystemClock};
 use tokio_util::sync::CancellationToken;
 
-use crate::state::{PendingRow, RecordedRowKind, RecordedSnapshot, SQLiteState, StateSnapshot};
+use crate::state::{RecordedSnapshot, SQLiteState, StateSnapshot};
 
 /// A workload definition executed by [`Dst::run_scenarios`].
 ///
@@ -255,12 +256,11 @@ impl ScenarioContext {
         let create_ts = handle.create_ts();
 
         let expire_ts = resolve_expire_ts(put_options, self.shared.settings.default_ttl, create_ts);
-        let row = PendingRow {
+        let row = RowEntry {
+            key: Bytes::from(key),
+            value: ValueDeletable::Value(Bytes::from(value)),
             seq: handle.seqnum(),
-            key: key.clone(),
-            kind: RecordedRowKind::Value,
-            value: Some(value.clone()),
-            create_ts,
+            create_ts: Some(create_ts),
             expire_ts,
         };
         self.shared
@@ -286,12 +286,11 @@ impl ScenarioContext {
             .delete_with_options(&key, &write_options)
             .await?;
 
-        let row = PendingRow {
+        let row = RowEntry {
+            key: Bytes::from(key),
+            value: ValueDeletable::Tombstone,
             seq: handle.seqnum(),
-            key: key.clone(),
-            kind: RecordedRowKind::Tombstone,
-            value: None,
-            create_ts: handle.create_ts(),
+            create_ts: Some(handle.create_ts()),
             expire_ts: None,
         };
         self.shared
@@ -323,6 +322,7 @@ impl ScenarioContext {
             .write_with_options(batch.into_write_batch(), &write_options)
             .await?;
         let create_ts = handle.create_ts();
+        let seq = handle.seqnum();
 
         let mut rows = Vec::with_capacity(entries.len());
         for entry in entries {
@@ -331,24 +331,22 @@ impl ScenarioContext {
                     key,
                     value,
                     options,
-                } => rows.push(PendingRow {
-                    seq: handle.seqnum(),
-                    key,
-                    kind: RecordedRowKind::Value,
-                    value: Some(value),
-                    create_ts,
+                } => rows.push(RowEntry {
+                    key: Bytes::from(key),
+                    value: ValueDeletable::Value(Bytes::from(value)),
+                    seq,
+                    create_ts: Some(create_ts),
                     expire_ts: resolve_expire_ts(
                         &options,
                         self.shared.settings.default_ttl,
                         create_ts,
                     ),
                 }),
-                ScenarioWriteEntry::Delete { key } => rows.push(PendingRow {
-                    seq: handle.seqnum(),
-                    key,
-                    kind: RecordedRowKind::Tombstone,
-                    value: None,
-                    create_ts,
+                ScenarioWriteEntry::Delete { key } => rows.push(RowEntry {
+                    key: Bytes::from(key),
+                    value: ValueDeletable::Tombstone,
+                    seq,
+                    create_ts: Some(create_ts),
                     expire_ts: None,
                 }),
             }
