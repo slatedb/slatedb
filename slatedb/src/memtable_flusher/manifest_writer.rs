@@ -425,7 +425,7 @@ impl ManifestWriterHandler {
         .flatten()
         .min();
         let mut guard = self.db.state.write();
-        guard.modify(|modifier| {
+        let manifest = guard.modify(|modifier| {
             for uploaded in staged_batch {
                 let uploaded_tracker = uploaded.imm_memtable.sequence_tracker();
                 let popped = modifier
@@ -472,8 +472,12 @@ impl ManifestWriterHandler {
                     .sequence_tracker
                     .extend_from(uploaded_tracker);
             }
-            Ok(())
-        })
+            Ok(modifier.state.manifest.clone())
+        })?;
+
+        drop(guard);
+        self.db.status_manager.report_manifest(manifest.into());
+        Ok(())
     }
 
     async fn write_manifest_update_safely(
@@ -520,7 +524,9 @@ impl ManifestWriterHandler {
 
     async fn write_current_manifest(&mut self) -> Result<(), SlateDBError> {
         let dirty = self.clone_local_manifest_for_write();
-        self.manifest.update(dirty).await
+        self.manifest.update(dirty.clone()).await?;
+        self.db.status_manager.report_manifest(dirty.into());
+        Ok(())
     }
 
     fn clone_local_manifest_for_write(
@@ -552,12 +558,19 @@ impl ManifestWriterHandler {
         &self,
         remote_dirty: slatedb_txn_obj::DirtyObject<crate::manifest::Manifest>,
     ) {
-        let mut wguard_state = self.db.state.write();
-        wguard_state.merge_remote_manifest(remote_dirty);
+        let dirty_manifest = {
+            let mut wguard_state = self.db.state.write();
+            wguard_state.merge_remote_manifest(remote_dirty);
+            let cow = wguard_state.state();
+            self.db
+                .db_stats
+                .l0_sst_count
+                .set(cow.core().l0.len() as i64);
+            cow.manifest.clone()
+        };
         self.db
-            .db_stats
-            .l0_sst_count
-            .set(wguard_state.state().core().l0.len() as i64);
+            .status_manager
+            .report_manifest(dirty_manifest.into());
     }
 
     async fn write_checkpoint_safely(

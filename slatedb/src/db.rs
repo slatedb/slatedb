@@ -266,9 +266,13 @@ impl DbInner {
                 }
                 Err(SlateDBError::Fenced) => {
                     manifest.refresh().await?;
-                    self.state
-                        .write()
-                        .merge_remote_manifest(manifest.prepare_dirty()?);
+                    let remote_dirty = manifest.prepare_dirty()?;
+                    let dirty_manifest = {
+                        let mut state = self.state.write();
+                        state.merge_remote_manifest(remote_dirty);
+                        state.state().manifest.clone()
+                    };
+                    self.status_manager.report_manifest(dirty_manifest.into());
                     empty_wal_id += 1;
                 }
                 Err(e) => {
@@ -583,6 +587,10 @@ impl DbInner {
             };
         }
         Ok(())
+    }
+
+    pub(crate) fn manifest(&self) -> ManifestCore {
+        self.state.read().state().manifest.value.core.clone()
     }
 }
 
@@ -1512,14 +1520,16 @@ impl Db {
     ///
     /// This returns the in-memory manifest snapshot currently held by the `Db`.
     pub fn manifest(&self) -> ManifestCore {
-        self.inner.state.read().state().core().clone()
+        self.inner.manifest()
     }
 
     /// Subscribe to database state changes.
     ///
     /// Returns a [`tokio::sync::watch::Receiver<DbStatus>`] that always
-    /// reflects the latest database status. For example, you can wait for a
-    /// specific sequence number to become durable:
+    /// reflects the latest database status. The status includes the latest
+    /// durable sequence number and the current in-memory manifest snapshot
+    /// observed by this handle. For example, you can wait for a specific
+    /// sequence number to become durable:
     ///
     /// ```ignore
     /// let seq = 42; // sequence number from a write operation
@@ -1543,6 +1553,7 @@ impl Db {
     /// // Good: clone the status and release the lock immediately.
     /// let status = rx.borrow().clone();
     /// some_async_fn(status.durable_seq).await;
+    /// some_other_async_fn(status.current_manifest.clone()).await;
     ///
     /// // Good: copy the durable seq and releate the lock immediately.
     /// let durable_seq = rx.borrow().durable_seq; // uses Copy trait
@@ -1697,8 +1708,8 @@ mod tests {
     use crate::cached_object_store_stats::CachedObjectStoreStats;
     use crate::config::DurabilityLevel::{Memory, Remote};
     use crate::config::{
-        CompactorOptions, GarbageCollectorDirectoryOptions, GarbageCollectorOptions,
-        ObjectStoreCacheOptions, PutOptions, Settings, Ttl, WriteOptions,
+        CheckpointOptions, CompactorOptions, GarbageCollectorDirectoryOptions,
+        GarbageCollectorOptions, ObjectStoreCacheOptions, PutOptions, Settings, Ttl, WriteOptions,
     };
     use crate::db::builder::GarbageCollectorBuilder;
     use crate::db_common::MAX_WAL_FLUSHES_BEFORE_L0_FLUSH;
@@ -6597,6 +6608,106 @@ mod tests {
             status.durable_seq >= 3,
             "expected durable seq >= 3, got {}",
             status.durable_seq
+        );
+
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn should_subscribe_to_current_manifest_updates_after_flush() {
+        // Given: a DB with a watcher and manifest access
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_watch_current_manifest");
+        let db = Db::builder(path.clone(), object_store.clone())
+            .with_settings(test_db_options(0, 1024, None))
+            .build()
+            .await
+            .unwrap();
+        let mut watcher = db.subscribe();
+        let manifest_store = Arc::new(ManifestStore::new(&path, object_store));
+        let mut stored_manifest =
+            StoredManifest::load(manifest_store, Arc::new(DefaultSystemClock::new()))
+                .await
+                .unwrap();
+
+        assert_eq!(watcher.borrow().current_manifest.manifest, db.manifest());
+
+        // When: writes are flushed to an L0 and the manifest is updated
+        db.put(b"key1", b"value1").await.unwrap();
+        db.put(b"key2", b"value2").await.unwrap();
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::MemTable,
+        })
+        .await
+        .unwrap();
+        wait_for_manifest_condition(
+            &mut stored_manifest,
+            |manifest| manifest.last_l0_seq >= 2,
+            Duration::from_secs(10),
+        )
+        .await;
+
+        // Then: subscribe reports the updated manifest and durability frontier
+        let status = tokio::time::timeout(
+            Duration::from_secs(10),
+            watcher
+                .wait_for(|s| s.current_manifest.manifest.last_l0_seq >= 2 && s.durable_seq >= 2),
+        )
+        .await
+        .expect("timed out waiting for manifest update")
+        .expect("watch channel closed")
+        .clone();
+        assert!(status.durable_seq >= 2);
+        assert_eq!(status.current_manifest.manifest.last_l0_seq, 2);
+
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn should_publish_remote_manifest_updates_via_poll() {
+        // Given: a DB with a watcher
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_watch_remote_manifest");
+        let db = Db::builder(path.clone(), object_store.clone())
+            .with_settings(test_db_options(0, 1024, None))
+            .build()
+            .await
+            .unwrap();
+        let mut watcher = db.subscribe();
+        let initial_checkpoint_count = watcher.borrow().current_manifest.manifest.checkpoints.len();
+
+        let manifest_store = Arc::new(ManifestStore::new(&path, object_store));
+        let mut stored_manifest =
+            StoredManifest::load(manifest_store, Arc::new(DefaultSystemClock::new()))
+                .await
+                .unwrap();
+
+        // When: another writer updates the manifest
+        stored_manifest
+            .write_checkpoint(uuid::Uuid::new_v4(), &CheckpointOptions::default())
+            .await
+            .unwrap();
+        wait_for_manifest_condition(
+            &mut stored_manifest,
+            |manifest| manifest.checkpoints.len() > initial_checkpoint_count,
+            Duration::from_secs(10),
+        )
+        .await;
+
+        // Then: subscribe eventually reports the merged manifest
+        let status = tokio::time::timeout(
+            Duration::from_secs(10),
+            watcher.wait_for(|s| {
+                s.current_manifest.manifest.checkpoints.len() > initial_checkpoint_count
+            }),
+        )
+        .await
+        .expect("timed out waiting for remote manifest update")
+        .expect("watch channel closed")
+        .clone();
+        assert_eq!(
+            status.current_manifest.manifest.checkpoints.len(),
+            initial_checkpoint_count + 1
         );
 
         db.close().await.unwrap();

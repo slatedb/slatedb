@@ -513,7 +513,10 @@ impl<P: Into<Path>> DbBuilder<P> {
         // Shared lifecycle state — created before DbInner so it can be shared
         // with the executor and future channel construction.
         let manifest_dirty = manifest.prepare_dirty()?;
-        let status_manager = DbStatusManager::new(manifest_dirty.value.core.last_l0_seq);
+        let status_manager = DbStatusManager::new_with_manifest(
+            manifest_dirty.value.core.last_l0_seq,
+            manifest_dirty.clone().into(),
+        );
 
         // Setup communication channels wired to the shared closed state.
         let reader = status_manager.result_reader();

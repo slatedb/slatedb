@@ -5,7 +5,7 @@ use crate::config::{CheckpointOptions, DbReaderOptions, ReadOptions, ScanOptions
 use crate::db_read::DbRead;
 use crate::db_state::ManifestCore;
 use crate::db_stats::DbStats;
-use crate::db_status::{ClosedResultWriter, DbStatus, DbStatusManager};
+use crate::db_status::{ClosedResultWriter, DbStatus, DbStatusManager, VersionedManifest};
 use crate::dispatcher::{MessageFactory, MessageHandler, MessageHandlerExecutor};
 use crate::error::SlateDBError;
 use crate::iter::IterationOrder;
@@ -97,6 +97,15 @@ impl DbStateReader for CheckpointState {
     }
 }
 
+impl From<&CheckpointState> for VersionedManifest {
+    fn from(state: &CheckpointState) -> Self {
+        Self {
+            id: state.checkpoint.manifest_id,
+            manifest: state.manifest.core.clone(),
+        }
+    }
+}
+
 impl DbReaderInner {
     async fn new(
         manifest_store: Arc<ManifestStore>,
@@ -108,13 +117,8 @@ impl DbReaderInner {
         system_clock: Arc<dyn SystemClock>,
         rand: Arc<DbRand>,
         recorder: slatedb_common::metrics::MetricsRecorderHelper,
+        mut manifest: StoredManifest,
     ) -> Result<Self, SlateDBError> {
-        let mut manifest =
-            StoredManifest::load(Arc::clone(&manifest_store), system_clock.clone()).await?;
-        if !manifest.db_state().initialized {
-            return Err(SlateDBError::InvalidDBState);
-        }
-
         let checkpoint =
             Self::get_or_create_checkpoint(&mut manifest, checkpoint_id, &options, rand.clone())
                 .await?;
@@ -142,6 +146,7 @@ impl DbReaderInner {
             .last_remote_persisted_seq
             .max(initial_state.core().last_l0_seq);
         status_manager.report_durable_seq(initial_durable_seq);
+        status_manager.report_manifest(VersionedManifest::from(initial_state.as_ref()));
         let oracle = Arc::new(DbReaderOracle::new(
             initial_durable_seq,
             status_manager.clone(),
@@ -255,10 +260,13 @@ impl DbReaderInner {
 
     async fn reestablish_checkpoint(&self, checkpoint: Checkpoint) -> Result<(), SlateDBError> {
         let new_checkpoint_state = self.rebuild_checkpoint_state(checkpoint).await?;
-        self.oracle
-            .advance_durable_seq(new_checkpoint_state.last_remote_persisted_seq);
+        let durable_seq = new_checkpoint_state.last_remote_persisted_seq;
+        let versioned_manifest = VersionedManifest::from(&new_checkpoint_state);
+        self.oracle.advance_durable_seq(durable_seq);
         let mut write_guard = self.state.write();
         *write_guard = Arc::new(new_checkpoint_state);
+        drop(write_guard);
+        self.status_manager.report_manifest(versioned_manifest);
         Ok(())
     }
 
@@ -687,11 +695,24 @@ impl DbReader {
     ) -> Result<Self, SlateDBError> {
         Self::validate_options(&options)?;
 
-        let status_manager = DbStatusManager::new(0);
-        let task_executor =
-            MessageHandlerExecutor::new(Arc::new(status_manager.clone()), system_clock.clone());
         let manifest_store = store_provider.manifest_store();
         let table_store = store_provider.table_store();
+
+        let manifest =
+            StoredManifest::load(Arc::clone(&manifest_store), system_clock.clone()).await?;
+        if !manifest.db_state().initialized {
+            return Err(SlateDBError::InvalidDBState);
+        }
+
+        let status_manager = DbStatusManager::new_with_manifest(
+            manifest.db_state().last_l0_seq,
+            VersionedManifest {
+                id: manifest.id(),
+                manifest: manifest.db_state().clone(),
+            },
+        );
+        let task_executor =
+            MessageHandlerExecutor::new(Arc::new(status_manager.clone()), system_clock.clone());
         let inner = Arc::new(
             DbReaderInner::new(
                 manifest_store,
@@ -703,6 +724,7 @@ impl DbReader {
                 system_clock,
                 rand,
                 recorder,
+                manifest,
             )
             .await?,
         );
@@ -1030,8 +1052,9 @@ impl DbReader {
     /// Subscribe to database status changes.
     ///
     /// See [`Db::subscribe`](crate::Db::subscribe) for full semantics and
-    /// deadlock warnings. The `durable_seq` field is updated whenever the
-    /// manifest poller discovers new data written by a remote writer.
+    /// deadlock warnings. The `durable_seq` and `current_manifest` fields are
+    /// updated whenever the reader's current checkpoint/manifest view changes
+    /// or it replays additional durable WAL data.
     pub fn subscribe(&self) -> tokio::sync::watch::Receiver<DbStatus> {
         self.inner.status_manager.subscribe()
     }
