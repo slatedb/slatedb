@@ -97,6 +97,15 @@ impl DbStateReader for CheckpointState {
     }
 }
 
+impl From<&CheckpointState> for VersionedManifest {
+    fn from(state: &CheckpointState) -> Self {
+        Self {
+            id: state.checkpoint.manifest_id,
+            manifest: state.manifest.core.clone(),
+        }
+    }
+}
+
 impl DbReaderInner {
     async fn new(
         manifest_store: Arc<ManifestStore>,
@@ -114,7 +123,6 @@ impl DbReaderInner {
             Self::get_or_create_checkpoint(&mut manifest, checkpoint_id, &options, rand.clone())
                 .await?;
 
-        let manifest_id = manifest.id();
         let replay_new_wals = checkpoint_id.is_none() && !options.skip_wal_replay;
         let initial_state = Arc::new(
             Self::build_initial_checkpoint_state(
@@ -138,10 +146,7 @@ impl DbReaderInner {
             .last_remote_persisted_seq
             .max(initial_state.core().last_l0_seq);
         status_manager.report_durable_seq(initial_durable_seq);
-        status_manager.report_manifest(VersionedManifest {
-            id: manifest_id,
-            manifest: initial_state.core().clone(),
-        });
+        status_manager.report_manifest(VersionedManifest::from(initial_state.as_ref()));
         let oracle = Arc::new(DbReaderOracle::new(
             initial_durable_seq,
             status_manager.clone(),
@@ -253,22 +258,15 @@ impl DbReaderInner {
             .await
     }
 
-    async fn reestablish_checkpoint(
-        &self,
-        checkpoint: Checkpoint,
-        manifest_id: u64,
-    ) -> Result<(), SlateDBError> {
+    async fn reestablish_checkpoint(&self, checkpoint: Checkpoint) -> Result<(), SlateDBError> {
         let new_checkpoint_state = self.rebuild_checkpoint_state(checkpoint).await?;
         let durable_seq = new_checkpoint_state.last_remote_persisted_seq;
-        let durable_manifest = new_checkpoint_state.manifest.core.clone();
+        let versioned_manifest = VersionedManifest::from(&new_checkpoint_state);
         self.oracle.advance_durable_seq(durable_seq);
         let mut write_guard = self.state.write();
         *write_guard = Arc::new(new_checkpoint_state);
         drop(write_guard);
-        self.status_manager.report_manifest(VersionedManifest {
-            id: manifest_id,
-            manifest: durable_manifest,
-        });
+        self.status_manager.report_manifest(versioned_manifest);
         Ok(())
     }
 
@@ -558,10 +556,7 @@ impl MessageHandler<DbReaderMessage> for ManifestPoller {
             .should_reestablish_checkpoint(&latest_manifest.core)
         {
             let checkpoint = self.inner.replace_checkpoint(&mut manifest).await?;
-            let manifest_id = manifest.id();
-            self.inner
-                .reestablish_checkpoint(checkpoint, manifest_id)
-                .await?;
+            self.inner.reestablish_checkpoint(checkpoint).await?;
         } else {
             self.inner.maybe_replay_new_wals().await?;
         }
