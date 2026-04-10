@@ -24,7 +24,6 @@ use crate::error::SlateDBError;
 use crate::memtable_flusher::manifest_writer::{FlushResult, ManifestWriter};
 use crate::memtable_flusher::uploader::{UploadJob, UploadedMemtable, Uploader};
 use crate::memtable_flusher::FlushTarget;
-use crate::oracle::Oracle;
 use crate::utils::IdGenerator;
 use fail_parallel::fail_point;
 use std::collections::VecDeque;
@@ -161,7 +160,7 @@ impl FlushTracker {
         let through_seq = self.frontier.resolve_target(target);
         self.manifest_writer
             .send_checkpoint(through_seq, options, sender)?;
-        self.dispatch_ready_memtables().await
+        self.dispatch_ready_memtables()
     }
 
     async fn handle_uploaded(&mut self, uploaded: UploadedMemtable) -> Result<(), SlateDBError> {
@@ -190,7 +189,7 @@ impl FlushTracker {
                 inner.rand.rng().gen_ulid(inner.system_clock.as_ref()),
             )
         });
-        self.dispatch_ready_memtables().await
+        self.dispatch_ready_memtables()
     }
 
     fn available_l0_slots(&self) -> usize {
@@ -201,7 +200,7 @@ impl FlushTracker {
             .saturating_sub(l0_len + self.frontier.reserved_l0_slots())
     }
 
-    async fn dispatch_ready_memtables(&mut self) -> Result<(), SlateDBError> {
+    fn dispatch_ready_memtables(&mut self) -> Result<(), SlateDBError> {
         while self.available_l0_slots() > 0 {
             let Some(tracked) = self.frontier.prepare_next_upload() else {
                 return Ok(());
@@ -214,10 +213,6 @@ impl FlushTracker {
                 tracked.first_seq, last_seq, sst_id
             );
 
-            // WAL SSTs must be durable before the L0 is uploaded (see #1255).
-            if self.inner.wal_enabled && self.inner.oracle.last_remote_persisted_seq() < last_seq {
-                self.inner.flush_wals().await?;
-            }
             self.uploader.submit(UploadJob::new(imm_memtable, sst_id))?;
         }
         Ok(())

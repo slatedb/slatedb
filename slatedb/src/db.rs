@@ -3449,6 +3449,9 @@ mod tests {
             .put_with_options(key.as_bytes(), b"v", &put_options, &write_options)
             .await
             .unwrap();
+        // Flush the WAL so the manifest writer can proceed (flush_interval is
+        // disabled in this test, so there is no periodic WAL flush).
+        kv_store.flush().await.unwrap();
 
         // Verify that the WAL count threshold triggered a memtable freeze and L0 flush.
         // replay_after_wal_id should have advanced to the threshold, and there should
@@ -3484,6 +3487,7 @@ mod tests {
             .put_with_options(key.as_bytes(), b"v", &put_options, &write_options)
             .await
             .unwrap();
+        kv_store.flush().await.unwrap();
 
         // Wait for the flush to happen.
         let db_state = wait_for_manifest_condition(
@@ -3860,7 +3864,10 @@ mod tests {
         // flusher is paused at the failpoint above.
         let flush_handle = {
             let inner = Arc::clone(&db.inner);
-            tokio::spawn(async move { inner.flush_memtables(FlushTarget::All).await })
+            tokio::spawn(async move {
+                inner.flush_wals().await?;
+                inner.flush_memtables(FlushTarget::All).await
+            })
         };
 
         let mut wrote_l0_sst = false;

@@ -2,6 +2,7 @@ use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering::SeqCst;
 
 use crate::db_status::DbStatusManager;
+use tokio::sync::watch;
 
 /// Oracle is a trait that centralizes the generation & maintenance of various
 /// sequence numbers. These sequence numbers are mostly related to the lifecycle
@@ -22,7 +23,7 @@ pub(crate) struct DbOracle {
     // on this struct.
     last_seq: AtomicU64,
     last_committed_seq: AtomicU64,
-    last_durable_seq: AtomicU64,
+    durable_seq_tx: watch::Sender<u64>,
     status_reporter: DbStatusManager,
 }
 
@@ -33,10 +34,11 @@ impl DbOracle {
         last_durable_seq: u64,
         status_reporter: DbStatusManager,
     ) -> Self {
+        let (durable_seq_tx, _) = watch::channel(last_durable_seq);
         Self {
             last_seq: AtomicU64::new(last_seq),
             last_committed_seq: AtomicU64::new(last_committed_seq),
-            last_durable_seq: AtomicU64::new(last_durable_seq),
+            durable_seq_tx,
             status_reporter,
         }
     }
@@ -62,13 +64,26 @@ impl DbOracle {
     }
 
     pub(crate) fn advance_durable_seq(&self, seq: u64) {
-        self.last_durable_seq.fetch_max(seq, SeqCst);
+        self.durable_seq_tx.send_if_modified(|current| {
+            if seq > *current {
+                *current = seq;
+                true
+            } else {
+                false
+            }
+        });
         self.status_reporter.report_durable_seq(seq);
+    }
+
+    pub(crate) fn watch_durable_seq(&self) -> watch::Receiver<u64> {
+        self.durable_seq_tx.subscribe()
     }
 
     #[cfg(test)]
     pub(crate) fn set_durable_seq_unsafe(&self, value: u64) {
-        self.last_durable_seq.store(value, SeqCst);
+        self.durable_seq_tx.send_modify(|current| {
+            *current = value;
+        });
         self.status_reporter.report_durable_seq(value);
     }
 }
@@ -79,7 +94,7 @@ impl Oracle for DbOracle {
     }
 
     fn last_remote_persisted_seq(&self) -> u64 {
-        self.last_durable_seq.load(SeqCst)
+        *self.durable_seq_tx.borrow()
     }
 }
 

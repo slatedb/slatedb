@@ -35,6 +35,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::runtime::Handle;
 use tokio::sync::oneshot;
+use tokio::sync::watch;
 
 /// Result reported for a completed flush request.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -60,6 +61,8 @@ enum ManifestWriterCommand {
     },
     /// Periodic manifest poll to pick up remote changes (e.g. compaction).
     PollManifest,
+    /// The WAL durable sequence advanced; retry any batch blocked on WAL durability.
+    WalDurableAdvanced,
 }
 
 impl std::fmt::Debug for ManifestWriterCommand {
@@ -79,6 +82,7 @@ impl std::fmt::Debug for ManifestWriterCommand {
                 write!(f, "CreateCheckpoint({through_seq:?})")
             }
             Self::PollManifest => write!(f, "PollManifest"),
+            Self::WalDurableAdvanced => write!(f, "WalDurableAdvanced"),
         }
     }
 }
@@ -171,6 +175,9 @@ struct ManifestWriterHandler {
     next_seq: u64,
     /// Highest last_seq that has been durably written to the manifest (inclusive).
     durable_seq: u64,
+    /// Watches the WAL durable sequence so the manifest write can wait for
+    /// WAL durability without blocking uploads.
+    wal_durable_seq_rx: watch::Receiver<u64>,
     pending_flushes: Vec<PendingFlush>,
     pending_checkpoints: Vec<PendingCheckpoint>,
 }
@@ -189,17 +196,22 @@ impl MessageHandler<ManifestWriterCommand> for ManifestWriterHandler {
         )]
     }
 
+    fn notifiers(&mut self) -> Vec<Box<dyn crate::dispatcher::Notifier<ManifestWriterCommand>>> {
+        vec![Box::new(WalDurableNotifier {
+            rx: self.wal_durable_seq_rx.clone(),
+        })]
+    }
+
     async fn handle(&mut self, command: ManifestWriterCommand) -> Result<(), SlateDBError> {
         match command {
             ManifestWriterCommand::Uploaded(uploaded_memtable) => {
-                self.handle_uploaded(*uploaded_memtable).await
+                self.handle_uploaded(*uploaded_memtable).await?;
             }
             ManifestWriterCommand::AwaitFlush {
                 through_seq,
                 sender,
             } => {
                 self.handle_flush(through_seq, sender);
-                Ok(())
             }
             ManifestWriterCommand::CreateCheckpoint {
                 through_seq,
@@ -207,10 +219,14 @@ impl MessageHandler<ManifestWriterCommand> for ManifestWriterHandler {
                 sender,
             } => {
                 self.handle_create_checkpoint(through_seq, options, sender)
-                    .await
+                    .await?;
             }
-            ManifestWriterCommand::PollManifest => self.refresh_manifest_progress().await,
+            ManifestWriterCommand::PollManifest => {
+                self.refresh_manifest_progress().await?;
+            }
+            ManifestWriterCommand::WalDurableAdvanced => {}
         }
+        self.process_ready_work().await
     }
 
     async fn cleanup(
@@ -245,6 +261,7 @@ impl ManifestWriterHandler {
     ) -> Self {
         let durable_seq = db.oracle.last_remote_persisted_seq();
         let next_seq = db.oracle.peek_next_seq();
+        let wal_durable_seq_rx = db.oracle.watch_durable_seq();
         Self {
             db,
             manifest,
@@ -254,6 +271,7 @@ impl ManifestWriterHandler {
             ready: BTreeMap::new(),
             next_seq,
             durable_seq,
+            wal_durable_seq_rx,
             pending_checkpoints: Vec::new(),
         }
     }
@@ -275,7 +293,7 @@ impl ManifestWriterHandler {
         {
             return Err(SlateDBError::InvalidDBState);
         }
-        self.process_ready_work().await
+        Ok(())
     }
 
     fn handle_flush(
@@ -323,7 +341,7 @@ impl ManifestWriterHandler {
             options,
             sender,
         });
-        self.process_ready_work().await
+        Ok(())
     }
 
     async fn process_ready_work(&mut self) -> Result<(), SlateDBError> {
@@ -342,9 +360,17 @@ impl ManifestWriterHandler {
     }
 
     fn take_next_ready_batch(&mut self) -> Option<Vec<UploadedMemtable>> {
+        let durable_seq = *self.wal_durable_seq_rx.borrow();
         let mut next_seq = self.next_seq;
         let mut batch = Vec::new();
-        while let Some(uploaded) = self.ready.remove(&next_seq) {
+        // WAL SSTs must be durable before the manifest is updated (see #1255).
+        while self
+            .ready
+            .get(&next_seq)
+            .filter(|u| !self.db.wal_enabled || u.last_seq <= durable_seq)
+            .is_some()
+        {
+            let uploaded = self.ready.remove(&next_seq).expect("peeked entry missing");
             next_seq = uploaded.last_seq + 1;
             batch.push(uploaded);
         }
@@ -712,6 +738,26 @@ struct PendingCheckpoint {
     sender: oneshot::Sender<Result<CheckpointCreateResult, SlateDBError>>,
 }
 
+/// Adapts a `watch::Receiver<u64>` into a [Notifier] that produces
+/// [ManifestWriterCommand::WalDurableAdvanced] whenever the WAL durable
+/// sequence advances.
+struct WalDurableNotifier {
+    rx: watch::Receiver<u64>,
+}
+
+#[async_trait]
+impl crate::dispatcher::Notifier<ManifestWriterCommand> for WalDurableNotifier {
+    async fn notify(&mut self) -> ManifestWriterCommand {
+        // changed() returns Err only when the sender is dropped. In that case
+        // the database is shutting down and the dispatcher's cancellation token
+        // will break the select loop, so we can just block forever.
+        if self.rx.changed().await.is_err() {
+            std::future::pending::<()>().await;
+        }
+        ManifestWriterCommand::WalDurableAdvanced
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{ManifestWriter, TrackerMessage};
@@ -948,7 +994,8 @@ mod tests {
         guard.state().imm_memtable.front().cloned().unwrap()
     }
 
-    async fn next_uploaded_memtable(
+    /// Build an uploaded memtable without advancing the WAL durable sequence.
+    async fn next_uploaded_memtable_no_wal(
         inner: &Arc<DbInner>,
         key: &[u8],
         value: &[u8],
@@ -962,6 +1009,17 @@ mod tests {
         let first_seq = imm_memtable.table().first_seq().unwrap();
         let last_seq = imm_memtable.table().last_seq().unwrap();
         UploadedMemtable::new(imm_memtable, sst_handle, first_seq, last_seq)
+    }
+
+    /// Build an uploaded memtable and simulate WAL flush completing.
+    async fn next_uploaded_memtable(
+        inner: &Arc<DbInner>,
+        key: &[u8],
+        value: &[u8],
+    ) -> UploadedMemtable {
+        let uploaded = next_uploaded_memtable_no_wal(inner, key, value).await;
+        inner.oracle.advance_durable_seq(uploaded.last_seq);
+        uploaded
     }
 
     #[tokio::test]
@@ -1236,5 +1294,78 @@ mod tests {
             "expected Closed, got {:?}",
             result
         );
+    }
+
+    #[tokio::test]
+    async fn should_wait_for_wal_durable_seq_before_writing_manifest() {
+        let harness = setup_harness(
+            "/tmp/test_manifest_writer_wal_durable_barrier",
+            Arc::new(FailPointRegistry::new()),
+        )
+        .await;
+        let inner = Arc::clone(&harness.inner);
+        let started = start_manifest_writer(
+            Arc::clone(&inner),
+            harness.manifest,
+            Duration::from_secs(3600),
+        );
+
+        // Upload a memtable without advancing the WAL durable sequence.
+        let uploaded = next_uploaded_memtable_no_wal(&inner, b"k1", b"v1").await;
+        let last_seq = uploaded.last_seq;
+        started.notify_uploaded(uploaded).await.unwrap();
+
+        // The manifest should NOT be written yet — WAL is not durable.
+        assert_no_flush_event(&started.tracker_rx, Duration::from_millis(100)).await;
+
+        // Now simulate the WAL flush completing.
+        inner.oracle.advance_durable_seq(last_seq);
+
+        // The manifest writer should now process the batch.
+        let through_seq = expect_flushed(&started.tracker_rx).await;
+        assert_eq!(through_seq, last_seq);
+
+        started.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn should_flush_partial_batch_up_to_durable_seq() {
+        let harness = setup_harness(
+            "/tmp/test_manifest_writer_partial_durable_batch",
+            Arc::new(FailPointRegistry::new()),
+        )
+        .await;
+        let inner = Arc::clone(&harness.inner);
+        let started = start_manifest_writer(
+            Arc::clone(&inner),
+            harness.manifest,
+            Duration::from_secs(3600),
+        );
+
+        // Upload two memtables without advancing WAL durable seq.
+        let uploaded1 = next_uploaded_memtable_no_wal(&inner, b"k1", b"v1").await;
+        let last_seq1 = uploaded1.last_seq;
+        let uploaded2 = next_uploaded_memtable_no_wal(&inner, b"k2", b"v2").await;
+        let last_seq2 = uploaded2.last_seq;
+        started.notify_uploaded(uploaded1).await.unwrap();
+        started.notify_uploaded(uploaded2).await.unwrap();
+
+        // Advance durable seq to cover only the first memtable.
+        inner.oracle.advance_durable_seq(last_seq1);
+
+        // Only the first memtable should be flushed.
+        let through_seq = expect_flushed(&started.tracker_rx).await;
+        assert_eq!(through_seq, last_seq1);
+
+        // The second memtable is still blocked.
+        assert_no_flush_event(&started.tracker_rx, Duration::from_millis(100)).await;
+
+        // Advance durable seq to cover the second memtable.
+        inner.oracle.advance_durable_seq(last_seq2);
+
+        let through_seq = expect_flushed(&started.tracker_rx).await;
+        assert_eq!(through_seq, last_seq2);
+
+        started.shutdown().await;
     }
 }
