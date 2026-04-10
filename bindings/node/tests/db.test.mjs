@@ -30,7 +30,7 @@ test("db lifecycle and status", async (t) => {
   const store = cleanup.track(newMemoryStore());
   const db = await openDb(store, { cleanup });
 
-  assert.equal(db.status().close_reason, null);
+  assert.equal(db.status().close_reason, undefined);
   await db.put(bytes("lifecycle"), bytes("value"));
   await db.shutdown();
 
