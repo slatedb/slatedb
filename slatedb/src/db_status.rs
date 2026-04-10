@@ -1,4 +1,4 @@
-use slatedb_txn_obj::{DirtyObject, MonotonicId};
+use slatedb_txn_obj::DirtyObject;
 use tokio::sync::watch;
 
 use crate::db_state::ManifestCore;
@@ -11,7 +11,7 @@ use crate::CloseReason;
 #[derive(Clone, Debug, PartialEq)]
 pub struct VersionedManifest {
     /// The version ID of the manifest.
-    pub id: MonotonicId,
+    pub id: u64,
     /// The manifest state at this version.
     pub manifest: ManifestCore,
 }
@@ -19,7 +19,7 @@ pub struct VersionedManifest {
 impl From<DirtyObject<Manifest>> for VersionedManifest {
     fn from(dirty: DirtyObject<Manifest>) -> Self {
         Self {
-            id: dirty.id,
+            id: dirty.id.id(),
             manifest: dirty.value.core,
         }
     }
@@ -65,7 +65,7 @@ impl DbStatusManager {
         Self::new_with_manifest(
             initial_durable_seq,
             VersionedManifest {
-                id: MonotonicId::initial(),
+                id: 1,
                 manifest: ManifestCore::new(),
             },
         )

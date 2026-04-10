@@ -406,6 +406,7 @@ impl WalBufferManager {
         let next_wal_id = state.next_wal_id();
         let dirty_manifest = state.state().manifest.clone();
         drop(state);
+        self.status_manager.report_manifest(dirty_manifest.into());
 
         let mut inner = self.inner.write();
         let current_wal = std::mem::replace(&mut inner.current_wal, WalBuffer::new());
@@ -413,7 +414,6 @@ impl WalBufferManager {
         inner
             .immutable_wals
             .push_back((next_wal_id, Arc::new(current_wal)));
-        self.status_manager.report_manifest(dirty_manifest.into());
         Ok(())
     }
 

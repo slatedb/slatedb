@@ -425,7 +425,7 @@ impl ManifestWriterHandler {
         .flatten()
         .min();
         let mut guard = self.db.state.write();
-        guard.modify(|modifier| {
+        let manifest = guard.modify(|modifier| {
             for uploaded in staged_batch {
                 let uploaded_tracker = uploaded.imm_memtable.sequence_tracker();
                 let popped = modifier
@@ -472,13 +472,11 @@ impl ManifestWriterHandler {
                     .sequence_tracker
                     .extend_from(uploaded_tracker);
             }
-            Ok(())
+            Ok(modifier.state.manifest.clone())
         })?;
 
         drop(guard);
-        self.db
-            .status_manager
-            .report_manifest(self.db.manifest().into());
+        self.db.status_manager.report_manifest(manifest.into());
         Ok(())
     }
 
@@ -526,10 +524,8 @@ impl ManifestWriterHandler {
 
     async fn write_current_manifest(&mut self) -> Result<(), SlateDBError> {
         let dirty = self.clone_local_manifest_for_write();
-        self.manifest.update(dirty).await?;
-        self.db
-            .status_manager
-            .report_manifest(self.db.manifest().into());
+        self.manifest.update(dirty.clone()).await?;
+        self.db.status_manager.report_manifest(dirty.into());
         Ok(())
     }
 
@@ -605,9 +601,6 @@ impl ManifestWriterHandler {
             uploaded.imm_memtable.table().notify_durable(Ok(()));
             self.db.oracle.advance_durable_seq(uploaded.last_seq);
         }
-        self.db
-            .status_manager
-            .report_manifest(self.db.manifest().into());
         self.resolve_pending_flushes();
         for (checkpoint, result) in attached_checkpoints
             .into_iter()

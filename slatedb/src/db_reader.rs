@@ -1,5 +1,3 @@
-use slatedb_txn_obj::MonotonicId;
-
 use crate::bytes_range::BytesRange;
 use crate::cached_object_store::CachedObjectStore;
 use crate::clock::MonotonicClock;
@@ -116,7 +114,7 @@ impl DbReaderInner {
             Self::get_or_create_checkpoint(&mut manifest, checkpoint_id, &options, rand.clone())
                 .await?;
 
-        let manifest_id = MonotonicId::from(manifest.id());
+        let manifest_id = manifest.id();
         let replay_new_wals = checkpoint_id.is_none() && !options.skip_wal_replay;
         let initial_state = Arc::new(
             Self::build_initial_checkpoint_state(
@@ -258,7 +256,7 @@ impl DbReaderInner {
     async fn reestablish_checkpoint(
         &self,
         checkpoint: Checkpoint,
-        manifest_id: MonotonicId,
+        manifest_id: u64,
     ) -> Result<(), SlateDBError> {
         let new_checkpoint_state = self.rebuild_checkpoint_state(checkpoint).await?;
         let durable_seq = new_checkpoint_state.last_remote_persisted_seq;
@@ -560,7 +558,7 @@ impl MessageHandler<DbReaderMessage> for ManifestPoller {
             .should_reestablish_checkpoint(&latest_manifest.core)
         {
             let checkpoint = self.inner.replace_checkpoint(&mut manifest).await?;
-            let manifest_id = MonotonicId::from(manifest.id());
+            let manifest_id = manifest.id();
             self.inner
                 .reestablish_checkpoint(checkpoint, manifest_id)
                 .await?;
@@ -714,7 +712,7 @@ impl DbReader {
         let status_manager = DbStatusManager::new_with_manifest(
             manifest.db_state().last_l0_seq,
             VersionedManifest {
-                id: MonotonicId::from(manifest.id()),
+                id: manifest.id(),
                 manifest: manifest.db_state().clone(),
             },
         );
