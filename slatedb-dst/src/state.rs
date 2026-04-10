@@ -195,29 +195,6 @@ impl StateSnapshot {
     }
 }
 
-#[derive(Debug)]
-struct VisibilityRow {
-    seq: u64,
-    key: Vec<u8>,
-    kind: i64,
-    value: Option<Vec<u8>>,
-    create_ts: i64,
-    expire_ts: Option<i64>,
-}
-
-impl VisibilityRow {
-    fn from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Self> {
-        Ok(Self {
-            seq: row.get::<_, i64>(0)? as u64,
-            key: row.get(1)?,
-            kind: row.get(2)?,
-            value: row.get(3)?,
-            create_ts: row.get(4)?,
-            expire_ts: row.get(5)?,
-        })
-    }
-}
-
 #[derive(Debug, Clone)]
 enum ScanFilter {
     Range {
@@ -329,8 +306,8 @@ impl SQLiteState {
             .map_err(DstError::SQLiteStateError)?;
 
         if let Some(row) = rows.next().map_err(DstError::SQLiteStateError)? {
-            let visible = VisibilityRow::from_row(row).map_err(DstError::SQLiteStateError)?;
-            return Ok(visible_row_to_key_value(visible));
+            let entry = row_entry_from_read_row(row).map_err(DstError::SQLiteStateError)?;
+            return Ok(row_entry_to_key_value(entry));
         }
 
         Ok(None)
@@ -356,19 +333,19 @@ impl SQLiteState {
             .map_err(DstError::SQLiteStateError)?;
 
         let mut results = Vec::new();
-        let mut current_key: Option<Vec<u8>> = None;
+        let mut current_key: Option<Bytes> = None;
 
         while let Some(row) = rows.next().map_err(DstError::SQLiteStateError)? {
-            let visible = VisibilityRow::from_row(row).map_err(DstError::SQLiteStateError)?;
-            if !scan_filter_contains(&visible.key, &filter) {
+            let entry = row_entry_from_read_row(row).map_err(DstError::SQLiteStateError)?;
+            if !scan_filter_contains(entry.key.as_ref(), &filter) {
                 continue;
             }
-            if current_key.as_ref() == Some(&visible.key) {
+            if current_key.as_ref() == Some(&entry.key) {
                 continue;
             }
-            current_key = Some(visible.key.clone());
+            current_key = Some(entry.key.clone());
 
-            if let Some(kv) = visible_row_to_key_value(visible) {
+            if let Some(kv) = row_entry_to_key_value(entry) {
                 results.push(kv);
             }
         }
@@ -431,19 +408,23 @@ fn row_entry_from_sql_parts(
     }
 }
 
-fn visible_row_to_key_value(row: VisibilityRow) -> Option<KeyValue> {
-    if row.kind == ROW_KIND_TOMBSTONE {
+fn row_entry_from_read_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RowEntry> {
+    Ok(row_entry_from_sql_parts(
+        row.get::<_, i64>(0)? as u64,
+        row.get(1)?,
+        row.get(2)?,
+        row.get(3)?,
+        row.get(4)?,
+        row.get(5)?,
+    ))
+}
+
+fn row_entry_to_key_value(row: RowEntry) -> Option<KeyValue> {
+    if row.value.is_tombstone() {
         return None;
     }
 
-    Some(KeyValue::from(row_entry_from_sql_parts(
-        row.seq,
-        row.key,
-        row.kind,
-        row.value,
-        row.create_ts,
-        row.expire_ts,
-    )))
+    Some(KeyValue::from(row))
 }
 
 fn scan_filter_contains(key: &[u8], filter: &ScanFilter) -> bool {
