@@ -267,12 +267,12 @@ impl DbInner {
                 Err(SlateDBError::Fenced) => {
                     manifest.refresh().await?;
                     let remote_dirty = manifest.prepare_dirty()?;
-                    let current_manifest = {
+                    let dirty_manifest = {
                         let mut state = self.state.write();
                         state.merge_remote_manifest(remote_dirty);
-                        state.state().core().clone()
+                        state.state().manifest.clone()
                     };
-                    self.status_manager.report_manifest(current_manifest);
+                    self.status_manager.report_manifest(dirty_manifest.into());
                     empty_wal_id += 1;
                 }
                 Err(e) => {
@@ -589,8 +589,8 @@ impl DbInner {
         Ok(())
     }
 
-    pub(crate) fn manifest(&self) -> ManifestCore {
-        self.state.read().state().core().clone()
+    pub(crate) fn manifest(&self) -> DirtyObject<Manifest> {
+        self.state.read().state().manifest.clone()
     }
 }
 
@@ -1520,7 +1520,7 @@ impl Db {
     ///
     /// This returns the in-memory manifest snapshot currently held by the `Db`.
     pub fn manifest(&self) -> ManifestCore {
-        self.inner.manifest()
+        self.inner.manifest().value.core
     }
 
     /// Subscribe to database state changes.
@@ -6630,7 +6630,7 @@ mod tests {
                 .await
                 .unwrap();
 
-        assert_eq!(watcher.borrow().current_manifest, db.manifest());
+        assert_eq!(watcher.borrow().current_manifest.manifest, db.manifest());
 
         // When: writes are flushed to an L0 and the manifest is updated
         db.put(b"key1", b"value1").await.unwrap();
@@ -6650,14 +6650,15 @@ mod tests {
         // Then: subscribe reports the updated manifest and durability frontier
         let status = tokio::time::timeout(
             Duration::from_secs(10),
-            watcher.wait_for(|s| s.current_manifest.last_l0_seq >= 2 && s.durable_seq >= 2),
+            watcher
+                .wait_for(|s| s.current_manifest.manifest.last_l0_seq >= 2 && s.durable_seq >= 2),
         )
         .await
         .expect("timed out waiting for manifest update")
         .expect("watch channel closed")
         .clone();
         assert!(status.durable_seq >= 2);
-        assert_eq!(status.current_manifest.last_l0_seq, 2);
+        assert_eq!(status.current_manifest.manifest.last_l0_seq, 2);
 
         db.close().await.unwrap();
     }
@@ -6673,7 +6674,7 @@ mod tests {
             .await
             .unwrap();
         let mut watcher = db.subscribe();
-        let initial_checkpoint_count = watcher.borrow().current_manifest.checkpoints.len();
+        let initial_checkpoint_count = watcher.borrow().current_manifest.manifest.checkpoints.len();
 
         let manifest_store = Arc::new(ManifestStore::new(&path, object_store));
         let mut stored_manifest =
@@ -6696,14 +6697,16 @@ mod tests {
         // Then: subscribe eventually reports the merged manifest
         let status = tokio::time::timeout(
             Duration::from_secs(10),
-            watcher.wait_for(|s| s.current_manifest.checkpoints.len() > initial_checkpoint_count),
+            watcher.wait_for(|s| {
+                s.current_manifest.manifest.checkpoints.len() > initial_checkpoint_count
+            }),
         )
         .await
         .expect("timed out waiting for remote manifest update")
         .expect("watch channel closed")
         .clone();
         assert_eq!(
-            status.current_manifest.checkpoints.len(),
+            status.current_manifest.manifest.checkpoints.len(),
             initial_checkpoint_count + 1
         );
 

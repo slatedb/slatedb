@@ -515,7 +515,7 @@ impl<P: Into<Path>> DbBuilder<P> {
         let manifest_dirty = manifest.prepare_dirty()?;
         let status_manager = DbStatusManager::new_with_manifest(
             manifest_dirty.value.core.last_l0_seq,
-            manifest_dirty.value.core.clone(),
+            manifest_dirty.clone().into(),
         );
 
         // Setup communication channels wired to the shared closed state.
@@ -545,7 +545,9 @@ impl<P: Into<Path>> DbBuilder<P> {
         if inner.wal_enabled {
             inner.fence_writers(&mut manifest, next_wal_id).await?;
         }
-        inner.status_manager.report_manifest(inner.manifest());
+        inner
+            .status_manager
+            .report_manifest(inner.manifest().into());
 
         // Setup background tasks
         let tokio_handle = Handle::current();

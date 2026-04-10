@@ -404,7 +404,7 @@ impl WalBufferManager {
 
         let mut state = self.db_state.write();
         let next_wal_id = state.next_wal_id();
-        let manifest = state.state().core().clone();
+        let dirty_manifest = state.state().manifest.clone();
         drop(state);
 
         let mut inner = self.inner.write();
@@ -413,7 +413,7 @@ impl WalBufferManager {
         inner
             .immutable_wals
             .push_back((next_wal_id, Arc::new(current_wal)));
-        self.status_manager.report_manifest(manifest);
+        self.status_manager.report_manifest(dirty_manifest.into());
         Ok(())
     }
 

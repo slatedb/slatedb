@@ -476,7 +476,9 @@ impl ManifestWriterHandler {
         })?;
 
         drop(guard);
-        self.db.status_manager.report_manifest(self.db.manifest());
+        self.db
+            .status_manager
+            .report_manifest(self.db.manifest().into());
         Ok(())
     }
 
@@ -525,7 +527,9 @@ impl ManifestWriterHandler {
     async fn write_current_manifest(&mut self) -> Result<(), SlateDBError> {
         let dirty = self.clone_local_manifest_for_write();
         self.manifest.update(dirty).await?;
-        self.db.status_manager.report_manifest(self.db.manifest());
+        self.db
+            .status_manager
+            .report_manifest(self.db.manifest().into());
         Ok(())
     }
 
@@ -558,16 +562,19 @@ impl ManifestWriterHandler {
         &self,
         remote_dirty: slatedb_txn_obj::DirtyObject<crate::manifest::Manifest>,
     ) {
-        let current_manifest = {
+        let dirty_manifest = {
             let mut wguard_state = self.db.state.write();
             wguard_state.merge_remote_manifest(remote_dirty);
+            let cow = wguard_state.state();
             self.db
                 .db_stats
                 .l0_sst_count
-                .set(wguard_state.state().core().l0.len() as i64);
-            wguard_state.state().core().clone()
+                .set(cow.core().l0.len() as i64);
+            cow.manifest.clone()
         };
-        self.db.status_manager.report_manifest(current_manifest);
+        self.db
+            .status_manager
+            .report_manifest(dirty_manifest.into());
     }
 
     async fn write_checkpoint_safely(
@@ -598,7 +605,9 @@ impl ManifestWriterHandler {
             uploaded.imm_memtable.table().notify_durable(Ok(()));
             self.db.oracle.advance_durable_seq(uploaded.last_seq);
         }
-        self.db.status_manager.report_manifest(self.db.manifest());
+        self.db
+            .status_manager
+            .report_manifest(self.db.manifest().into());
         self.resolve_pending_flushes();
         for (checkpoint, result) in attached_checkpoints
             .into_iter()

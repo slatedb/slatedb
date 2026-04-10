@@ -1,9 +1,29 @@
+use slatedb_txn_obj::{DirtyObject, MonotonicId};
 use tokio::sync::watch;
 
 use crate::db_state::ManifestCore;
 use crate::error::SlateDBError;
+use crate::manifest::Manifest;
 use crate::utils::WatchableOnceCell;
 use crate::CloseReason;
+
+/// A manifest snapshot paired with its version ID for monotonic ordering.
+#[derive(Clone, Debug, PartialEq)]
+pub struct VersionedManifest {
+    /// The version ID of the manifest.
+    pub id: MonotonicId,
+    /// The manifest state at this version.
+    pub manifest: ManifestCore,
+}
+
+impl From<DirtyObject<Manifest>> for VersionedManifest {
+    fn from(dirty: DirtyObject<Manifest>) -> Self {
+        Self {
+            id: dirty.id,
+            manifest: dirty.value.core,
+        }
+    }
+}
 
 /// Current status of the database, exposed via [`crate::Db::subscribe`].
 ///
@@ -21,19 +41,9 @@ pub struct DbStatus {
     ///
     /// This matches the manifest returned by [`crate::Db::manifest`] for the
     /// same handle.
-    pub current_manifest: ManifestCore,
+    pub current_manifest: VersionedManifest,
     /// Set once the database has been closed, indicating the reason.
     pub close_reason: Option<CloseReason>,
-}
-
-impl Default for DbStatus {
-    fn default() -> Self {
-        Self {
-            durable_seq: 0,
-            current_manifest: ManifestCore::new(),
-            close_reason: None,
-        }
-    }
 }
 
 pub(crate) trait ClosedResultWriter: std::fmt::Debug + Send + Sync + 'static {
@@ -52,12 +62,18 @@ pub(crate) struct DbStatusManager {
 impl DbStatusManager {
     #[cfg(test)]
     pub(crate) fn new(initial_durable_seq: u64) -> Self {
-        Self::new_with_manifest(initial_durable_seq, ManifestCore::new())
+        Self::new_with_manifest(
+            initial_durable_seq,
+            VersionedManifest {
+                id: MonotonicId::initial(),
+                manifest: ManifestCore::new(),
+            },
+        )
     }
 
     pub(crate) fn new_with_manifest(
         initial_durable_seq: u64,
-        initial_manifest: ManifestCore,
+        initial_manifest: VersionedManifest,
     ) -> Self {
         let (tx, _) = watch::channel(DbStatus {
             durable_seq: initial_durable_seq,
@@ -81,10 +97,10 @@ impl DbStatusManager {
         });
     }
 
-    pub(crate) fn report_manifest(&self, manifest: ManifestCore) {
+    pub(crate) fn report_manifest(&self, versioned: VersionedManifest) {
         self.tx.send_if_modified(|s| {
-            if s.current_manifest != manifest {
-                s.current_manifest = manifest;
+            if versioned.id >= s.current_manifest.id && s.current_manifest != versioned {
+                s.current_manifest = versioned;
                 true
             } else {
                 false

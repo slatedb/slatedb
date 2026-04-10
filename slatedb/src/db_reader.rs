@@ -1,3 +1,5 @@
+use slatedb_txn_obj::MonotonicId;
+
 use crate::bytes_range::BytesRange;
 use crate::cached_object_store::CachedObjectStore;
 use crate::clock::MonotonicClock;
@@ -5,7 +7,7 @@ use crate::config::{CheckpointOptions, DbReaderOptions, ReadOptions, ScanOptions
 use crate::db_read::DbRead;
 use crate::db_state::ManifestCore;
 use crate::db_stats::DbStats;
-use crate::db_status::{ClosedResultWriter, DbStatus, DbStatusManager};
+use crate::db_status::{ClosedResultWriter, DbStatus, DbStatusManager, VersionedManifest};
 use crate::dispatcher::{MessageFactory, MessageHandler, MessageHandlerExecutor};
 use crate::error::SlateDBError;
 use crate::iter::IterationOrder;
@@ -114,6 +116,7 @@ impl DbReaderInner {
             Self::get_or_create_checkpoint(&mut manifest, checkpoint_id, &options, rand.clone())
                 .await?;
 
+        let manifest_id = MonotonicId::from(manifest.id());
         let replay_new_wals = checkpoint_id.is_none() && !options.skip_wal_replay;
         let initial_state = Arc::new(
             Self::build_initial_checkpoint_state(
@@ -137,7 +140,10 @@ impl DbReaderInner {
             .last_remote_persisted_seq
             .max(initial_state.core().last_l0_seq);
         status_manager.report_durable_seq(initial_durable_seq);
-        status_manager.report_manifest(initial_state.core().clone());
+        status_manager.report_manifest(VersionedManifest {
+            id: manifest_id,
+            manifest: initial_state.core().clone(),
+        });
         let oracle = Arc::new(DbReaderOracle::new(
             initial_durable_seq,
             status_manager.clone(),
@@ -249,7 +255,11 @@ impl DbReaderInner {
             .await
     }
 
-    async fn reestablish_checkpoint(&self, checkpoint: Checkpoint) -> Result<(), SlateDBError> {
+    async fn reestablish_checkpoint(
+        &self,
+        checkpoint: Checkpoint,
+        manifest_id: MonotonicId,
+    ) -> Result<(), SlateDBError> {
         let new_checkpoint_state = self.rebuild_checkpoint_state(checkpoint).await?;
         let durable_seq = new_checkpoint_state.last_remote_persisted_seq;
         let durable_manifest = new_checkpoint_state.manifest.core.clone();
@@ -257,7 +267,10 @@ impl DbReaderInner {
         let mut write_guard = self.state.write();
         *write_guard = Arc::new(new_checkpoint_state);
         drop(write_guard);
-        self.status_manager.report_manifest(durable_manifest);
+        self.status_manager.report_manifest(VersionedManifest {
+            id: manifest_id,
+            manifest: durable_manifest,
+        });
         Ok(())
     }
 
@@ -547,7 +560,10 @@ impl MessageHandler<DbReaderMessage> for ManifestPoller {
             .should_reestablish_checkpoint(&latest_manifest.core)
         {
             let checkpoint = self.inner.replace_checkpoint(&mut manifest).await?;
-            self.inner.reestablish_checkpoint(checkpoint).await?;
+            let manifest_id = MonotonicId::from(manifest.id());
+            self.inner
+                .reestablish_checkpoint(checkpoint, manifest_id)
+                .await?;
         } else {
             self.inner.maybe_replay_new_wals().await?;
         }
@@ -697,7 +713,10 @@ impl DbReader {
 
         let status_manager = DbStatusManager::new_with_manifest(
             manifest.db_state().last_l0_seq,
-            manifest.db_state().clone(),
+            VersionedManifest {
+                id: MonotonicId::from(manifest.id()),
+                manifest: manifest.db_state().clone(),
+            },
         );
         let task_executor =
             MessageHandlerExecutor::new(Arc::new(status_manager.clone()), system_clock.clone());
