@@ -12,7 +12,7 @@
 //! - record writes atomically;
 //! - reconstruct the latest visible row for a key or key range at a fixed
 //!   sequence number;
-//! - persist the raw recorded history for post-run inspection.
+//! - persist the recorded history that backs point-in-time reads.
 //!
 //! The schema is intentionally small:
 //!
@@ -47,31 +47,6 @@ CREATE TABLE rows (
     PRIMARY KEY (seq, key)
 );
 ";
-
-/// A raw row captured in the recorded state's `rows` table.
-///
-/// Each logical write performed by a scenario contributes one or more rows to
-/// the append-only row history. These rows are intentionally stored before
-/// visibility rules are applied. Consumers inspecting a [`RecordedRow`]
-/// should treat it as historical state, not necessarily the value a point-in-
-/// time snapshot would observe.
-#[derive(Debug, Clone, PartialEq)]
-pub struct RecordedRow {
-    /// Scenario name that generated the write.
-    pub scenario: String,
-    /// SlateDB row contents captured for this historical row.
-    pub entry: RowEntry,
-}
-
-/// A full snapshot of the raw persisted SQLite state.
-///
-/// This is useful for post-run determinism checks and debugging because it
-/// exposes the append-only row history exactly as recorded.
-#[derive(Debug, Clone, PartialEq)]
-pub struct RecordedSnapshot {
-    /// All recorded rows in `(seq, key)` order.
-    pub rows: Vec<RecordedRow>,
-}
 
 /// A point-in-time view of the recorded SQLite state.
 ///
@@ -258,37 +233,6 @@ impl SQLiteState {
         }
         tx.commit().map_err(DstError::SQLiteStateError)?;
         Ok(())
-    }
-
-    /// Returns a complete snapshot of the persisted SQLite state.
-    pub(crate) fn snapshot(&self) -> Result<RecordedSnapshot, Error> {
-        let mut rows_stmt = self
-            .conn
-            .prepare(
-                "SELECT seq, key, scenario, kind, value, create_ts, expire_ts
-                 FROM rows
-                 ORDER BY seq ASC, key ASC",
-            )
-            .map_err(DstError::SQLiteStateError)?;
-        let rows = rows_stmt
-            .query_map((), |row| {
-                Ok(RecordedRow {
-                    scenario: row.get(2)?,
-                    entry: row_entry_from_sql_parts(
-                        row.get::<_, i64>(0)? as u64,
-                        row.get(1)?,
-                        row.get(3)?,
-                        row.get(4)?,
-                        row.get(5)?,
-                        row.get(6)?,
-                    ),
-                })
-            })
-            .map_err(DstError::SQLiteStateError)?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(DstError::SQLiteStateError)?;
-
-        Ok(RecordedSnapshot { rows })
     }
 
     fn get_key_value_at_seq(&self, key: &[u8], seq: u64) -> Result<Option<KeyValue>, Error> {

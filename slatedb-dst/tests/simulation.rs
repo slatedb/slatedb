@@ -25,10 +25,10 @@ use object_store::ObjectStore;
 use rand::Rng;
 use rstest::rstest;
 use slatedb::config::{DurabilityLevel, ScanOptions, Settings};
-use slatedb::{DbRand, Error, IterationOrder};
+use slatedb::{DbRand, Error, IterationOrder, KeyValue};
 use slatedb_common::clock::{MockSystemClock, SystemClock};
 use slatedb_dst::utils::{build_runtime, build_scenario_db};
-use slatedb_dst::{Dst, RecordedSnapshot, Scenario};
+use slatedb_dst::{Dst, Scenario};
 #[cfg(slow)]
 use tracing::info_span;
 use tracing::{error, info};
@@ -36,9 +36,10 @@ use tracing::{error, info};
 #[cfg(slow)]
 const NIGHTLY_WALL_CLOCK: Duration = Duration::from_secs(12 * 60);
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct SimulationResult {
-    snapshot: RecordedSnapshot,
+    final_seq: u64,
+    final_rows: Vec<KeyValue>,
     next_u64: u64,
     next_time: DateTime<Utc>,
 }
@@ -69,6 +70,24 @@ async fn verify_scan_orders(ctx: &slatedb_dst::ScenarioContext) -> Result<(), Er
     }
 
     Ok(())
+}
+
+async fn read_final_state(
+    ctx: &slatedb_dst::ScenarioContext,
+) -> Result<(u64, Vec<KeyValue>), Error> {
+    let snapshot = ctx.db().snapshot().await?;
+    let seq = snapshot.seq();
+    let mut iter = snapshot
+        .scan_with_options(
+            vec![0x00]..vec![0xff],
+            &ScanOptions::default().with_order(IterationOrder::Ascending),
+        )
+        .await?;
+    let mut rows = Vec::new();
+    while let Some(kv) = iter.next().await? {
+        rows.push(kv);
+    }
+    Ok((seq, rows))
 }
 
 async fn run_simulation(
@@ -108,15 +127,16 @@ async fn run_simulation(
 
     let verifier = dst.context("verifier");
     verify_scan_orders(&verifier).await?;
+    let (final_seq, final_rows) = read_final_state(&verifier).await?;
 
-    let snapshot = dst.recorded_snapshot()?;
     let next_u64 = rand.rng().random::<u64>();
     let next_time = system_clock.now();
 
     dst.close().await?;
 
     Ok(SimulationResult {
-        snapshot,
+        final_seq,
+        final_rows,
         next_u64,
         next_time,
     })
@@ -221,7 +241,12 @@ fn test_dst_is_deterministic(
                 seed, simulation_count, result.next_time, expected_result.next_time
             );
             assert_eq!(
-                result.snapshot, expected_result.snapshot,
+                result.final_seq, expected_result.final_seq,
+                "non-determinism detected [seed={}, simulation_count={}, final_seq={}, expected_seq={}]",
+                seed, simulation_count, result.final_seq, expected_result.final_seq
+            );
+            assert_eq!(
+                result.final_rows, expected_result.final_rows,
                 "non-determinism detected [seed={}, simulation_count={}]",
                 seed, simulation_count
             );

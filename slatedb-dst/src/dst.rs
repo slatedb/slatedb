@@ -17,7 +17,7 @@ use slatedb::{Db, Error, RowEntry, ValueDeletable, WriteBatch, WriteHandle};
 use slatedb_common::clock::{MockSystemClock, SystemClock};
 use tokio_util::sync::CancellationToken;
 
-use crate::state::{RecordedSnapshot, SQLiteState, StateSnapshot};
+use crate::state::{SQLiteState, StateSnapshot};
 
 /// A workload definition executed by [`Dst::run_scenarios`].
 ///
@@ -457,13 +457,6 @@ impl Dst {
     /// Returns a point-in-time snapshot of the recorded SQLite state.
     pub fn as_of(&self, seq: u64) -> StateSnapshot {
         StateSnapshot::new(self.shared.state.clone(), seq)
-    }
-
-    /// Returns a snapshot of the raw persisted SQLite state.
-    ///
-    /// This includes every recorded row.
-    pub fn recorded_snapshot(&self) -> Result<RecordedSnapshot, Error> {
-        self.shared.state.lock().snapshot()
     }
 
     /// Runs the provided scenarios concurrently to completion.
