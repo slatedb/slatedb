@@ -10,13 +10,13 @@
 //! easy to:
 //!
 //! - record writes atomically;
-//! - reconstruct the latest visible version for a key or key range at a fixed
+//! - reconstruct the latest visible row for a key or key range at a fixed
 //!   sequence number;
 //! - persist the raw recorded history for post-run inspection.
 //!
 //! The schema is intentionally small:
 //!
-//! - `versions` stores append-only value and tombstone rows.
+//! - `rows` stores append-only value and tombstone rows.
 
 use std::ops::{Bound, RangeBounds};
 use std::sync::Arc;
@@ -29,14 +29,14 @@ use slatedb::{Error, IterationOrder, KeyValue, RowEntry, ValueDeletable};
 
 use crate::error::DstError;
 
-const VERSION_KIND_VALUE: i64 = 0;
-const VERSION_KIND_TOMBSTONE: i64 = 1;
+const ROW_KIND_VALUE: i64 = 0;
+const ROW_KIND_TOMBSTONE: i64 = 1;
 
 const RESET_SCHEMA_SQL: &str = "
-DROP TABLE IF EXISTS versions;
+DROP TABLE IF EXISTS rows;
 DROP TABLE IF EXISTS watermarks;
 PRAGMA user_version = 0;
-CREATE TABLE versions (
+CREATE TABLE rows (
     seq INTEGER NOT NULL,
     key BLOB NOT NULL,
     scenario TEXT NOT NULL,
@@ -48,18 +48,18 @@ CREATE TABLE versions (
 );
 ";
 
-/// A raw version row captured in the recorded state's `versions` table.
+/// A raw row captured in the recorded state's `rows` table.
 ///
 /// Each logical write performed by a scenario contributes one or more rows to
-/// the append-only version history. These rows are intentionally stored before
-/// visibility rules are applied. Consumers inspecting a [`RecordedVersion`]
+/// the append-only row history. These rows are intentionally stored before
+/// visibility rules are applied. Consumers inspecting a [`RecordedRow`]
 /// should treat it as historical state, not necessarily the value a point-in-
 /// time snapshot would observe.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RecordedVersion {
+pub struct RecordedRow {
     /// Sequence number assigned to the write that produced this row.
     pub seq: u64,
-    /// User key for the versioned entry.
+    /// User key for the recorded entry.
     pub key: Vec<u8>,
     /// Scenario name that generated the write.
     pub scenario: String,
@@ -81,18 +81,18 @@ pub struct RecordedVersion {
 /// A full snapshot of the raw persisted SQLite state.
 ///
 /// This is useful for post-run determinism checks and debugging because it
-/// exposes the append-only version history exactly as recorded.
+/// exposes the append-only row history exactly as recorded.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecordedSnapshot {
-    /// All recorded version rows in `(seq, key)` order.
-    pub versions: Vec<RecordedVersion>,
+    /// All recorded rows in `(seq, key)` order.
+    pub rows: Vec<RecordedRow>,
 }
 
 /// A point-in-time view of the recorded SQLite state.
 ///
 /// The caller chooses the visibility frontier up front via [`seq`](Self::seq).
 /// Read methods then resolve keys exactly as SlateDB would at that sequence
-/// number: newest visible version wins, tombstones hide older values, and
+/// number: newest visible row wins, tombstones hide older rows, and
 /// scans return at most one visible row per key.
 ///
 /// Methods intentionally mirror the `Db` read surface, but only
@@ -210,39 +210,39 @@ impl StateSnapshot {
     }
 }
 
-/// The persisted kind of a recorded version row.
+/// The persisted kind of a recorded row.
 ///
 /// The discriminant values for this enum are encoded explicitly in SQLite and
 /// should remain stable so snapshots and debug output stay interpretable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RecordedVersionKind {
+pub(crate) enum RecordedRowKind {
     /// A live value row that may be returned by point-in-time snapshots.
     Value,
     /// A delete marker that hides older value rows for the same key.
     Tombstone,
 }
 
-impl RecordedVersionKind {
+impl RecordedRowKind {
     fn to_sql(self) -> i64 {
         match self {
-            Self::Value => VERSION_KIND_VALUE,
-            Self::Tombstone => VERSION_KIND_TOMBSTONE,
+            Self::Value => ROW_KIND_VALUE,
+            Self::Tombstone => ROW_KIND_TOMBSTONE,
         }
     }
 }
 
-/// A version staged by a scenario write before it is recorded in SQLite.
+/// A row staged by a scenario write before it is recorded in SQLite.
 ///
 /// This is the in-memory write representation used by [`crate::Dst`] before a
 /// write is atomically inserted into the recorded-state database.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct PendingVersion {
+pub(crate) struct PendingRow {
     /// Sequence number assigned by the underlying SlateDB write.
     pub seq: u64,
     /// User key affected by the write.
     pub key: Vec<u8>,
     /// Whether this staged row is a value or tombstone.
-    pub kind: RecordedVersionKind,
+    pub kind: RecordedRowKind,
     /// Value payload for live rows, or `None` for tombstones.
     pub value: Option<Vec<u8>>,
     /// Logical creation timestamp captured for the write.
@@ -312,28 +312,28 @@ impl SQLiteState {
 
     /// Records one logical write operation atomically.
     ///
-    /// This inserts the supplied versions in a single SQLite transaction.
+    /// This inserts the supplied rows in a single SQLite transaction.
     pub(crate) fn record_write(
         &mut self,
-        versions: &[PendingVersion],
+        rows: &[PendingRow],
         scenario: &str,
     ) -> Result<(), Error> {
         let tx = self
             .conn
             .transaction()
             .map_err(DstError::SQLiteStateError)?;
-        for version in versions {
+        for row in rows {
             tx.execute(
-                "INSERT INTO versions (seq, key, scenario, kind, value, create_ts, expire_ts)
+                "INSERT INTO rows (seq, key, scenario, kind, value, create_ts, expire_ts)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 params![
-                    version.seq as i64,
-                    version.key,
+                    row.seq as i64,
+                    row.key,
                     scenario,
-                    version.kind.to_sql(),
-                    version.value,
-                    version.create_ts,
-                    version.expire_ts
+                    row.kind.to_sql(),
+                    row.value,
+                    row.create_ts,
+                    row.expire_ts
                 ],
             )
             .map_err(DstError::SQLiteStateError)?;
@@ -344,17 +344,17 @@ impl SQLiteState {
 
     /// Returns a complete snapshot of the persisted SQLite state.
     pub(crate) fn snapshot(&self) -> Result<RecordedSnapshot, Error> {
-        let mut versions_stmt = self
+        let mut rows_stmt = self
             .conn
             .prepare(
                 "SELECT seq, key, scenario, kind, value, create_ts, expire_ts
-                 FROM versions
+                 FROM rows
                  ORDER BY seq ASC, key ASC",
             )
             .map_err(DstError::SQLiteStateError)?;
-        let versions = versions_stmt
+        let rows = rows_stmt
             .query_map((), |row| {
-                Ok(RecordedVersion {
+                Ok(RecordedRow {
                     seq: row.get::<_, i64>(0)? as u64,
                     key: row.get(1)?,
                     scenario: row.get(2)?,
@@ -368,7 +368,7 @@ impl SQLiteState {
             .collect::<Result<Vec<_>, _>>()
             .map_err(DstError::SQLiteStateError)?;
 
-        Ok(RecordedSnapshot { versions })
+        Ok(RecordedSnapshot { rows })
     }
 
     fn get_key_value_at_seq(&self, key: &[u8], seq: u64) -> Result<Option<KeyValue>, Error> {
@@ -376,7 +376,7 @@ impl SQLiteState {
             .conn
             .prepare(
                 "SELECT seq, key, kind, value, create_ts, expire_ts
-                 FROM versions
+                 FROM rows
                  WHERE key = ?1 AND seq <= ?2
                  ORDER BY seq DESC",
             )
@@ -403,7 +403,7 @@ impl SQLiteState {
             .conn
             .prepare(
                 "SELECT seq, key, kind, value, create_ts, expire_ts
-                 FROM versions
+                 FROM rows
                  WHERE seq <= ?1
                  ORDER BY key ASC, seq DESC",
             )
@@ -448,7 +448,7 @@ fn ensure_supported_snapshot_read(dirty: bool) -> Result<(), Error> {
 }
 
 fn visible_row_to_key_value(row: VisibilityRow) -> Option<KeyValue> {
-    if row.kind == VERSION_KIND_TOMBSTONE {
+    if row.kind == ROW_KIND_TOMBSTONE {
         return None;
     }
 
@@ -506,22 +506,22 @@ where
 mod tests {
     use super::*;
 
-    fn put(seq: u64, key: &[u8], value: &[u8]) -> PendingVersion {
-        PendingVersion {
+    fn put(seq: u64, key: &[u8], value: &[u8]) -> PendingRow {
+        PendingRow {
             seq,
             key: key.to_vec(),
-            kind: RecordedVersionKind::Value,
+            kind: RecordedRowKind::Value,
             value: Some(value.to_vec()),
             create_ts: seq as i64,
             expire_ts: None,
         }
     }
 
-    fn tombstone(seq: u64, key: &[u8]) -> PendingVersion {
-        PendingVersion {
+    fn tombstone(seq: u64, key: &[u8]) -> PendingRow {
+        PendingRow {
             seq,
             key: key.to_vec(),
-            kind: RecordedVersionKind::Tombstone,
+            kind: RecordedRowKind::Tombstone,
             value: None,
             create_ts: seq as i64,
             expire_ts: None,

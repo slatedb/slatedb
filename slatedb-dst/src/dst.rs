@@ -16,9 +16,7 @@ use slatedb::{Db, Error, WriteBatch, WriteHandle};
 use slatedb_common::clock::{MockSystemClock, SystemClock};
 use tokio_util::sync::CancellationToken;
 
-use crate::state::{
-    PendingVersion, RecordedSnapshot, RecordedVersionKind, SQLiteState, StateSnapshot,
-};
+use crate::state::{PendingRow, RecordedRowKind, RecordedSnapshot, SQLiteState, StateSnapshot};
 
 /// A workload definition executed by [`Dst::run_scenarios`].
 ///
@@ -257,10 +255,10 @@ impl ScenarioContext {
         let create_ts = handle.create_ts();
 
         let expire_ts = resolve_expire_ts(put_options, self.shared.settings.default_ttl, create_ts);
-        let version = PendingVersion {
+        let row = PendingRow {
             seq: handle.seqnum(),
             key: key.clone(),
-            kind: RecordedVersionKind::Value,
+            kind: RecordedRowKind::Value,
             value: Some(value.clone()),
             create_ts,
             expire_ts,
@@ -268,7 +266,7 @@ impl ScenarioContext {
         self.shared
             .state
             .lock()
-            .record_write(&[version], self.scenario)?;
+            .record_write(&[row], self.scenario)?;
         Ok(handle)
     }
 
@@ -288,10 +286,10 @@ impl ScenarioContext {
             .delete_with_options(&key, &write_options)
             .await?;
 
-        let version = PendingVersion {
+        let row = PendingRow {
             seq: handle.seqnum(),
             key: key.clone(),
-            kind: RecordedVersionKind::Tombstone,
+            kind: RecordedRowKind::Tombstone,
             value: None,
             create_ts: handle.create_ts(),
             expire_ts: None,
@@ -299,7 +297,7 @@ impl ScenarioContext {
         self.shared
             .state
             .lock()
-            .record_write(&[version], self.scenario)?;
+            .record_write(&[row], self.scenario)?;
         Ok(handle)
     }
 
@@ -326,17 +324,17 @@ impl ScenarioContext {
             .await?;
         let create_ts = handle.create_ts();
 
-        let mut versions = Vec::with_capacity(entries.len());
+        let mut rows = Vec::with_capacity(entries.len());
         for entry in entries {
             match entry {
                 ScenarioWriteEntry::Put {
                     key,
                     value,
                     options,
-                } => versions.push(PendingVersion {
+                } => rows.push(PendingRow {
                     seq: handle.seqnum(),
                     key,
-                    kind: RecordedVersionKind::Value,
+                    kind: RecordedRowKind::Value,
                     value: Some(value),
                     create_ts,
                     expire_ts: resolve_expire_ts(
@@ -345,10 +343,10 @@ impl ScenarioContext {
                         create_ts,
                     ),
                 }),
-                ScenarioWriteEntry::Delete { key } => versions.push(PendingVersion {
+                ScenarioWriteEntry::Delete { key } => rows.push(PendingRow {
                     seq: handle.seqnum(),
                     key,
-                    kind: RecordedVersionKind::Tombstone,
+                    kind: RecordedRowKind::Tombstone,
                     value: None,
                     create_ts,
                     expire_ts: None,
@@ -359,7 +357,7 @@ impl ScenarioContext {
         self.shared
             .state
             .lock()
-            .record_write(&versions, self.scenario)?;
+            .record_write(&rows, self.scenario)?;
         Ok(handle)
     }
 
@@ -465,7 +463,7 @@ impl Dst {
 
     /// Returns a snapshot of the raw persisted SQLite state.
     ///
-    /// This includes every recorded version row.
+    /// This includes every recorded row.
     pub fn recorded_snapshot(&self) -> Result<RecordedSnapshot, Error> {
         self.shared.state.lock().snapshot()
     }
