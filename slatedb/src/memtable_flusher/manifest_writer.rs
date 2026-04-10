@@ -475,6 +475,7 @@ impl ManifestWriterHandler {
             Ok(())
         })?;
 
+        drop(guard);
         self.db.status_manager.report_manifest(self.db.manifest());
         Ok(())
     }
