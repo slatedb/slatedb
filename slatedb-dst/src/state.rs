@@ -135,7 +135,16 @@ impl StateSnapshot {
         T: RangeBounds<K>,
     {
         ensure_supported_snapshot_read(options.dirty)?;
-        let (start, end) = owned_bounds(&range);
+        let start = match range.start_bound() {
+            Bound::Included(key) => Bound::Included(key.as_ref().to_vec()),
+            Bound::Excluded(key) => Bound::Excluded(key.as_ref().to_vec()),
+            Bound::Unbounded => Bound::Unbounded,
+        };
+        let end = match range.end_bound() {
+            Bound::Included(key) => Bound::Included(key.as_ref().to_vec()),
+            Bound::Excluded(key) => Bound::Excluded(key.as_ref().to_vec()),
+            Bound::Unbounded => Bound::Unbounded,
+        };
         self.state.lock().scan_key_values_at_seq(
             self.seq,
             ScanFilter::Range { start, end },
@@ -215,7 +224,18 @@ impl SQLiteState {
             .transaction()
             .map_err(DstError::SQLiteStateError)?;
         for row in rows {
-            let (kind, value, create_ts) = row_entry_to_sql_parts(row)?;
+            let create_ts = row.create_ts.ok_or_else(|| {
+                Error::internal("DST recorded state requires RowEntry.create_ts".to_string())
+            })?;
+            let (kind, value) = match &row.value {
+                ValueDeletable::Value(value) => (ROW_KIND_VALUE, Some(value.to_vec())),
+                ValueDeletable::Tombstone => (ROW_KIND_TOMBSTONE, None),
+                ValueDeletable::Merge(_) => {
+                    return Err(Error::internal(
+                        "DST recorded state does not support merge rows".to_string(),
+                    ));
+                }
+            };
             tx.execute(
                 "INSERT INTO rows (seq, key, scenario, kind, value, create_ts, expire_ts)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
@@ -281,7 +301,23 @@ impl SQLiteState {
 
         while let Some(row) = rows.next().map_err(DstError::SQLiteStateError)? {
             let entry = row_entry_from_read_row(row).map_err(DstError::SQLiteStateError)?;
-            if !scan_filter_contains(entry.key.as_ref(), &filter) {
+            let matches_filter = match &filter {
+                ScanFilter::Range { start, end } => {
+                    let start_ok = match start {
+                        Bound::Included(bound) => entry.key.as_ref() >= bound.as_slice(),
+                        Bound::Excluded(bound) => entry.key.as_ref() > bound.as_slice(),
+                        Bound::Unbounded => true,
+                    };
+                    let end_ok = match end {
+                        Bound::Included(bound) => entry.key.as_ref() <= bound.as_slice(),
+                        Bound::Excluded(bound) => entry.key.as_ref() < bound.as_slice(),
+                        Bound::Unbounded => true,
+                    };
+                    start_ok && end_ok
+                }
+                ScanFilter::Prefix(prefix) => entry.key.starts_with(prefix),
+            };
+            if !matches_filter {
                 continue;
             }
             if current_key.as_ref() == Some(&entry.key) {
@@ -311,56 +347,24 @@ fn ensure_supported_snapshot_read(dirty: bool) -> Result<(), Error> {
     Ok(())
 }
 
-fn row_entry_to_sql_parts(entry: &RowEntry) -> Result<(i64, Option<Vec<u8>>, i64), Error> {
-    let create_ts = entry.create_ts.ok_or_else(|| {
-        Error::internal("DST recorded state requires RowEntry.create_ts".to_string())
-    })?;
-
-    let (kind, value) = match &entry.value {
-        ValueDeletable::Value(value) => (ROW_KIND_VALUE, Some(value.to_vec())),
-        ValueDeletable::Tombstone => (ROW_KIND_TOMBSTONE, None),
-        ValueDeletable::Merge(_) => {
-            return Err(Error::internal(
-                "DST recorded state does not support merge rows".to_string(),
-            ));
-        }
-    };
-
-    Ok((kind, value, create_ts))
-}
-
-fn row_entry_from_sql_parts(
-    seq: u64,
-    key: Vec<u8>,
-    kind: i64,
-    value: Option<Vec<u8>>,
-    create_ts: i64,
-    expire_ts: Option<i64>,
-) -> RowEntry {
+fn row_entry_from_read_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RowEntry> {
+    let kind = row.get::<_, i64>(2)?;
     let value = if kind == ROW_KIND_TOMBSTONE {
         ValueDeletable::Tombstone
     } else {
-        ValueDeletable::Value(Bytes::from(value.expect("value rows must include a value")))
+        ValueDeletable::Value(Bytes::from(
+            row.get::<_, Option<Vec<u8>>>(3)?
+                .expect("value rows must include a value"),
+        ))
     };
 
-    RowEntry {
-        key: Bytes::from(key),
+    Ok(RowEntry {
+        key: Bytes::from(row.get::<_, Vec<u8>>(1)?),
         value,
-        seq,
-        create_ts: Some(create_ts),
-        expire_ts,
-    }
-}
-
-fn row_entry_from_read_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RowEntry> {
-    Ok(row_entry_from_sql_parts(
-        row.get::<_, i64>(0)? as u64,
-        row.get(1)?,
-        row.get(2)?,
-        row.get(3)?,
-        row.get(4)?,
-        row.get(5)?,
-    ))
+        seq: row.get::<_, i64>(0)? as u64,
+        create_ts: Some(row.get(4)?),
+        expire_ts: row.get(5)?,
+    })
 }
 
 fn row_entry_to_key_value(row: RowEntry) -> Option<KeyValue> {
@@ -369,43 +373,4 @@ fn row_entry_to_key_value(row: RowEntry) -> Option<KeyValue> {
     }
 
     Some(KeyValue::from(row))
-}
-
-fn scan_filter_contains(key: &[u8], filter: &ScanFilter) -> bool {
-    match filter {
-        ScanFilter::Range { start, end } => range_contains(key, start, end),
-        ScanFilter::Prefix(prefix) => key.starts_with(prefix),
-    }
-}
-
-fn range_contains(key: &[u8], start: &Bound<Vec<u8>>, end: &Bound<Vec<u8>>) -> bool {
-    let start_ok = match start {
-        Bound::Included(bound) => key >= bound.as_slice(),
-        Bound::Excluded(bound) => key > bound.as_slice(),
-        Bound::Unbounded => true,
-    };
-    let end_ok = match end {
-        Bound::Included(bound) => key <= bound.as_slice(),
-        Bound::Excluded(bound) => key < bound.as_slice(),
-        Bound::Unbounded => true,
-    };
-    start_ok && end_ok
-}
-
-fn owned_bounds<K, T>(range: &T) -> (Bound<Vec<u8>>, Bound<Vec<u8>>)
-where
-    K: AsRef<[u8]>,
-    T: RangeBounds<K>,
-{
-    let start = match range.start_bound() {
-        Bound::Included(key) => Bound::Included(key.as_ref().to_vec()),
-        Bound::Excluded(key) => Bound::Excluded(key.as_ref().to_vec()),
-        Bound::Unbounded => Bound::Unbounded,
-    };
-    let end = match range.end_bound() {
-        Bound::Included(key) => Bound::Included(key.as_ref().to_vec()),
-        Bound::Excluded(key) => Bound::Excluded(key.as_ref().to_vec()),
-        Bound::Unbounded => Bound::Unbounded,
-    };
-    (start, end)
 }
