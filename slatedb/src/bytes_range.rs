@@ -307,4 +307,20 @@ pub(crate) mod tests {
         let end = Bound::Included(Bytes::from("a"));
         BytesRange::new(start, end);
     }
+
+    #[test]
+    fn test_empty_included_start_bound_is_valid_and_contains_all_keys() {
+        let range = BytesRange::new(Bound::Included(Bytes::new()), Bound::Unbounded);
+        assert!(range.contains(&Bytes::new())); // b"" <= b"" holds for Included
+        assert!(range.contains(&Bytes::from("a")));
+        assert!(range.contains(&Bytes::from("z")));
+    }
+
+    #[test]
+    fn test_empty_excluded_start_bound_is_valid_and_contains_all_keys() {
+        let range = BytesRange::new(Bound::Excluded(Bytes::new()), Bound::Unbounded);
+        assert!(!range.contains(&Bytes::new())); // b"" < b"" is false for Excluded
+        assert!(range.contains(&Bytes::from("a")));
+        assert!(range.contains(&Bytes::from("z")));
+    }
 }
