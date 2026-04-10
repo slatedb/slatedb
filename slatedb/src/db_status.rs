@@ -122,6 +122,12 @@ impl DbStatusManager {
     pub(crate) fn subscribe(&self) -> watch::Receiver<DbStatus> {
         self.tx.subscribe()
     }
+
+    pub(crate) fn status(&self) -> DbStatus {
+        let rx = self.subscribe();
+        let status = rx.borrow().clone();
+        status
+    }
 }
 
 impl ClosedResultWriter for WatchableOnceCell<Result<(), SlateDBError>> {

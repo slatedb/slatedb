@@ -509,6 +509,10 @@ impl DbReaderInner {
         Ok((replay_after_wal_id, last_committed_seq))
     }
 
+    pub(crate) fn status(&self) -> DbStatus {
+        self.status_manager.status()
+    }
+
     /// Returns an error if the reader has been closed.
     ///
     /// ## Returns
@@ -1059,11 +1063,11 @@ impl DbReader {
         self.inner.status_manager.subscribe()
     }
 
-    /// Check the reader status.
+    /// Returns the latest reader status snapshot.
     ///
     /// See [`Db::status`](crate::Db::status) for full semantics.
-    pub fn status(&self) -> Result<(), crate::Error> {
-        self.inner.check_closed().map_err(Into::into)
+    pub fn status(&self) -> DbStatus {
+        self.inner.status()
     }
 }
 
@@ -1143,7 +1147,7 @@ mod tests {
     use crate::store_provider::StoreProvider;
     use crate::tablestore::TableStore;
     use crate::types::RowEntry;
-    use crate::{error::SlateDBError, test_utils, Db};
+    use crate::{error::SlateDBError, test_utils, CloseReason, Db};
     use bytes::Bytes;
     use fail_parallel::FailPointRegistry;
     use object_store::memory::InMemory;
@@ -2553,7 +2557,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn should_return_ok_status_when_open() {
+    async fn should_report_open_status() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/tmp/test_kv_store");
         let test_provider = TestProvider::new(path.clone(), Arc::clone(&object_store));
@@ -2564,14 +2568,14 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(reader.status().is_ok());
+        assert_eq!(reader.status().close_reason, None);
 
         reader.close().await.unwrap();
         db.close().await.unwrap();
     }
 
     #[tokio::test]
-    async fn should_return_err_status_when_closed() {
+    async fn should_report_closed_status() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/tmp/test_kv_store");
         let test_provider = TestProvider::new(path.clone(), Arc::clone(&object_store));
@@ -2583,7 +2587,7 @@ mod tests {
             .unwrap();
 
         reader.close().await.unwrap();
-        assert!(reader.status().is_err());
+        assert_eq!(reader.status().close_reason, Some(CloseReason::Clean));
 
         db.close().await.unwrap();
     }

@@ -30,17 +30,11 @@ test("db lifecycle and status", async (t) => {
   const store = cleanup.track(newMemoryStore());
   const db = await openDb(store, { cleanup });
 
-  db.status();
+  assert.equal(db.status().close_reason, null);
   await db.put(bytes("lifecycle"), bytes("value"));
   await db.shutdown();
 
-  await expectClosed(
-    () => db.status(),
-    {
-      reason: CloseReason.Clean,
-      message: "Closed error: db is closed",
-    },
-  );
+  assert.equal(db.status().close_reason, CloseReason.Clean);
 
   await expectClosed(
     () => db.put(bytes("after-shutdown"), bytes("value")),

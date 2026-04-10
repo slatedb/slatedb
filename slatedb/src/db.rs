@@ -222,7 +222,7 @@ impl DbInner {
         key: K,
         options: &ReadOptions,
     ) -> Result<Option<KeyValue>, SlateDBError> {
-        self.status()?;
+        self.check_closed()?;
         let db_state = self.state.read().view();
         self.reader
             .get_key_value_with_options(key, options, &db_state, None, None)
@@ -234,7 +234,7 @@ impl DbInner {
         range: BytesRange,
         options: &ScanOptions,
     ) -> Result<DbIterator, SlateDBError> {
-        self.status()?;
+        self.check_closed()?;
         let db_state = self.state.read().view();
         self.reader
             .scan_with_options(range, options, &db_state, None, None, None)
@@ -297,7 +297,7 @@ impl DbInner {
     ) -> Result<WriteHandle, SlateDBError> {
         self.db_stats.write_batch_count.increment(1);
         self.db_stats.write_ops.increment(batch.ops.len() as u64);
-        self.status()?;
+        self.check_closed()?;
         if batch.ops.is_empty() {
             return Err(SlateDBError::EmptyBatch);
         }
@@ -495,7 +495,7 @@ impl DbInner {
     ) -> Result<(), SlateDBError> {
         self.db_stats.flush_requests.increment(1);
         if check_status {
-            self.status()?;
+            self.check_closed()?;
         }
         match options.flush_type {
             FlushType::Wal => {
@@ -571,6 +571,11 @@ impl DbInner {
         .await
     }
 
+    /// Returns the latest database status snapshot.
+    pub(crate) fn status(&self) -> DbStatus {
+        self.status_manager.status()
+    }
+
     /// Returns an error if the database has been closed.
     ///
     /// ## Returns
@@ -579,7 +584,7 @@ impl DbInner {
     ///   (state.result_reader() returns Ok(())).
     /// - `Err(e)` if the DB was closed with an error, where `e` is the error
     ///   (state.result_reader() returns Err(e)).
-    pub(crate) fn status(&self) -> Result<(), SlateDBError> {
+    pub(crate) fn check_closed(&self) -> Result<(), SlateDBError> {
         if let Some(result) = self.status_manager.result_reader().read() {
             return match result {
                 Ok(()) => Err(SlateDBError::Closed),
@@ -685,18 +690,16 @@ impl Db {
     /// }
     /// ```
     pub async fn close(&self) -> Result<(), crate::Error> {
-        let should_flush = match self.status() {
+        let should_flush = match self.status().close_reason {
             // If already closed, don't close again.
-            Err(e) if matches!(e.kind(), crate::ErrorKind::Closed(CloseReason::Clean)) => {
-                return Err(e);
-            }
+            Some(CloseReason::Clean) => return Err(SlateDBError::Closed.into()),
             // If in failed state, allow close, but don't flush since the database
             // might be in a bad state. Note that multiple close() calls will always
             // run when in a failed state (vs. a clean closure, which will return
             // Error::Closed(CloseReason::Clean) on subsequent calls).
-            Err(_) => false,
+            Some(_) => false,
             // Flush outstanding writes if the database is still open.
-            Ok(_) => true,
+            None => true,
         };
 
         // Mark the database as closed before flushing.
@@ -772,7 +775,7 @@ impl Db {
     /// }
     /// ```
     pub async fn snapshot(&self) -> Result<Arc<DbSnapshot>, crate::Error> {
-        self.inner.status()?;
+        self.inner.check_closed()?;
         let snapshot = DbSnapshot::new(self.inner.clone(), None);
         Ok(snapshot)
     }
@@ -1594,7 +1597,7 @@ impl Db {
         &self,
         isolation_level: IsolationLevel,
     ) -> Result<DbTransaction, crate::Error> {
-        self.inner.status()?;
+        self.inner.check_closed()?;
         let txn = DbTransaction::new(
             self.inner.clone(),
             self.inner.txn_manager.clone(),
@@ -1626,22 +1629,16 @@ impl Db {
         Ok(object_store)
     }
 
-    /// Check the database status.
+    /// Returns the latest in-memory database status snapshot.
     ///
-    /// This is a passive check that does not perform any I/O. The status is checked at
-    /// least every [`Settings::manifest_poll_interval`], but might also be updated based
-    /// on other internal events or user-facing operations.
+    /// This is a passive check that does not perform any I/O. The snapshot is updated at
+    /// least every [`Settings::manifest_poll_interval`], but might also be refreshed by
+    /// other internal events or user-facing operations.
     ///
     /// Once a database is closed, either normally or due to an error, it can't be reopened.
     /// A new `Db` instance must be created to access the database again.
-    ///
-    /// ## Returns
-    /// - `Ok(())` if the DB is still open.
-    /// - `Err(ErrorKind::Closed)` if the DB was closed normally.
-    /// - `Err(e)` if the DB was closed with an error, where `e` is the error that caused
-    ///   the closure.
-    pub fn status(&self) -> Result<(), crate::Error> {
-        self.inner.status().map_err(|e| e.into())
+    pub fn status(&self) -> DbStatus {
+        self.inner.status()
     }
 }
 
@@ -2352,11 +2349,8 @@ mod tests {
             lookup_metric(&metrics_recorder, crate::db_stats::WAL_BUFFER_FLUSHES).unwrap(),
             0
         );
-        let status_err = db.status().unwrap_err();
-        assert_eq!(
-            status_err.kind(),
-            crate::ErrorKind::Closed(CloseReason::Fenced)
-        );
+        let status = db.status();
+        assert_eq!(status.close_reason, Some(CloseReason::Fenced));
     }
 
     #[tokio::test]
@@ -2399,11 +2393,8 @@ mod tests {
             lookup_metric(&metrics_recorder, crate::db_stats::WAL_BUFFER_FLUSHES).unwrap(),
             1
         );
-        let status_err = db.status().unwrap_err();
-        assert_eq!(
-            status_err.kind(),
-            crate::ErrorKind::Closed(CloseReason::Clean)
-        );
+        let status = db.status();
+        assert_eq!(status.close_reason, Some(CloseReason::Clean));
     }
 
     #[tokio::test]
@@ -4017,7 +4008,7 @@ mod tests {
 
         // Verify that the memtable has not been flushed by checking the db for error state
         assert!(
-            kv_store.inner.status().is_ok(),
+            kv_store.inner.status().close_reason.is_none(),
             "DB should not have an error state"
         );
     }
