@@ -28,7 +28,7 @@ use slatedb::config::Settings;
 use slatedb::{DbRand, Error};
 use slatedb_common::clock::{MockSystemClock, SystemClock};
 use slatedb_dst::utils::{build_runtime, build_scenario_db};
-use slatedb_dst::{Dst, Scenario};
+use slatedb_dst::{Dst, Scenario, ScenarioContext};
 #[cfg(slow)]
 use tracing::info_span;
 use tracing::{error, info};
@@ -93,7 +93,7 @@ async fn run_simulation(
     })
 }
 
-async fn verify_final_state(ctx: &slatedb_dst::ScenarioContext) -> Result<u64, Error> {
+async fn verify_final_state(ctx: &ScenarioContext) -> Result<u64, Error> {
     let full_range = ..;
     let snapshot = ctx.db().snapshot().await?;
     let final_seq = snapshot.seq();
