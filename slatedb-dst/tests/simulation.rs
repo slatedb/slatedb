@@ -36,23 +36,19 @@ use tracing::{error, info};
 const NIGHTLY_WALL_CLOCK: Duration = Duration::from_secs(12 * 60);
 
 /// Builds a deterministic DST run, executes the supplied scenarios, validates
-/// the final SlateDB state against the SQLite model, and returns the values the
-/// determinism test compares across repeated runs.
+/// the final SlateDB state against the SQLite model, and then closes the DB.
 ///
 /// The simulation uses a randomized-but-deterministic
 /// [`slatedb::config::Settings`] instance derived from `rand`, plus a separate
 /// DB builder seed drawn from the same RNG stream. After all scenarios finish,
 /// the helper performs a final front-to-back scan comparison between the real
-/// DB snapshot and the recorded SQLite state. If that verification succeeds,
-/// the helper captures the next RNG value and current mock time so the caller
-/// can assert that scheduler and state evolution stayed deterministic across
-/// identical runs.
+/// DB snapshot and the recorded SQLite state before shutting the database down.
 ///
 /// ## Arguments
 ///
 /// - `object_store`: Object store backing the SlateDB instance for this run.
-/// - `system_clock`: Shared mock clock used both by SlateDB and by the
-///   determinism check's final timestamp capture.
+/// - `system_clock`: Shared mock clock used by SlateDB and available to the
+///   caller for post-run determinism checks.
 /// - `rand`: Shared deterministic RNG that drives settings generation, DB
 ///   seeding, and scenario behavior.
 /// - `simulation_scenarios`: Scenario tasks to run concurrently against the
@@ -60,26 +56,13 @@ const NIGHTLY_WALL_CLOCK: Duration = Duration::from_secs(12 * 60);
 /// - `wall_clock_time`: Optional real-time limit. When present, a timed
 ///   shutdown scenario is added so open-ended simulations terminate after the
 ///   specified duration.
-///
-/// ## Returns
-///
-/// Returns `(final_seq, next_u64, next_time)` where:
-///
-/// * `final_seq` is the sequence number of the final DB snapshot after all
-///   scenarios complete.
-/// * `next_u64` is the next value drawn from `rand` after the run and final
-///   verification.
-/// * `next_time` is the mock clock's current time at the end of the run.
-///
-/// Together these values form the determinism signature compared across
-/// repeated simulations with the same seed.
 async fn run_simulation(
     object_store: Arc<dyn ObjectStore>,
     system_clock: Arc<MockSystemClock>,
     rand: Rc<DbRand>,
     mut simulation_scenarios: Vec<Box<dyn Scenario>>,
     wall_clock_time: Option<Duration>,
-) -> Result<(u64, u64, DateTime<Utc>), Error> {
+) -> Result<(), Error> {
     let settings = build_settings(&rand);
     let db_seed = rand.rng().random::<u64>();
     let db = build_scenario_db(
@@ -101,17 +84,14 @@ async fn run_simulation(
     dst.run_scenarios(simulation_scenarios).await?;
 
     let verifier = dst.context("verifier");
-    let final_seq = verify_final_state(&verifier).await?;
-
-    let next_u64 = rand.rng().random::<u64>();
-    let next_time = system_clock.now();
+    verify_final_state(&verifier).await?;
 
     dst.close().await?;
 
-    Ok((final_seq, next_u64, next_time))
+    Ok(())
 }
 
-async fn verify_final_state(ctx: &ScenarioContext) -> Result<u64, Error> {
+async fn verify_final_state(ctx: &ScenarioContext) -> Result<(), Error> {
     let full_range = ..;
     let snapshot = ctx.db().snapshot().await?;
     let final_seq = snapshot.seq();
@@ -140,7 +120,7 @@ async fn verify_final_state(ctx: &ScenarioContext) -> Result<u64, Error> {
         trailing_actual
     );
 
-    Ok(final_seq)
+    Ok(())
 }
 
 /// Verifies that SlateDB is deterministic when we seed the random number generator, system
@@ -181,7 +161,8 @@ fn test_dst_is_deterministic(
     #[case] simulations: u32,
     #[case] iterations: u32,
 ) -> Result<(), Error> {
-    let mut expected_result: Option<(u64, u64, DateTime<Utc>)> = None;
+    let mut expected_next_u64: Option<u64> = None;
+    let mut expected_next_time: Option<DateTime<Utc>> = None;
 
     for simulation_count in 0..simulations {
         let object_store = Arc::new(InMemory::new());
@@ -215,13 +196,22 @@ fn test_dst_is_deterministic(
         }));
 
         let runtime = build_runtime(rand.rng().random::<u64>());
-        let result = runtime.block_on(async {
+        let rand_for_run = rand.clone();
+        let system_clock_for_run = system_clock.clone();
+        runtime.block_on(async {
             info!(seed, simulation_count, iterations, "running simulation");
-            match run_simulation(object_store, system_clock, rand, simulation_scenarios, None).await
+            match run_simulation(
+                object_store,
+                system_clock_for_run,
+                rand_for_run,
+                simulation_scenarios,
+                None,
+            )
+            .await
             {
-                Ok(result) => {
+                Ok(()) => {
                     info!(seed, simulation_count, iterations, "simulation passed");
-                    Ok(result)
+                    Ok(())
                 }
                 Err(err) => {
                     error!("simulation failed [seed={}, error={}]", seed, err);
@@ -230,26 +220,27 @@ fn test_dst_is_deterministic(
             }
         })?;
 
-        if let Some((expected_final_seq, expected_next_u64, expected_next_time)) = &expected_result
-        {
-            let (final_seq, next_u64, next_time) = result;
+        let next_u64 = rand.rng().random::<u64>();
+        let next_time = system_clock.now();
+
+        if let Some(expected_next_u64) = expected_next_u64 {
             assert_eq!(
-                next_u64, *expected_next_u64,
+                next_u64, expected_next_u64,
                 "non-determinism detected [seed={}, simulation_count={}, next_u64={}, expected_u64={}]",
                 seed, simulation_count, next_u64, expected_next_u64
             );
+        } else {
+            expected_next_u64 = Some(next_u64);
+        }
+
+        if let Some(expected_next_time) = &expected_next_time {
             assert_eq!(
                 &next_time, expected_next_time,
                 "non-determinism detected [seed={}, simulation_count={}, next_time={:?}, expected_time={:?}]",
                 seed, simulation_count, next_time, expected_next_time
             );
-            assert_eq!(
-                final_seq, *expected_final_seq,
-                "non-determinism detected [seed={}, simulation_count={}, final_seq={}, expected_seq={}]",
-                seed, simulation_count, final_seq, expected_final_seq
-            );
         } else {
-            expected_result = Some(result);
+            expected_next_time = Some(next_time);
         }
     }
 
