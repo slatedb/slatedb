@@ -1,0 +1,31 @@
+services:
+  localstack:
+    image: localstack/localstack:4.14.0
+    container_name: go-timeout-localstack
+    environment:
+      - SERVICES=s3
+    ports:
+      - "14566:4566"
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - curl -sf http://localhost:4566/_localstack/health || exit 1
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+
+  toxiproxy:
+    image: ghcr.io/shopify/toxiproxy:latest
+    container_name: go-timeout-toxiproxy
+    depends_on:
+      - localstack
+    healthcheck:
+      test: ["CMD", "/toxiproxy-cli", "list"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+      start_period: 5s
+    ports:
+      - "18474:8474"
+      - "19001:9001"
