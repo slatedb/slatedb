@@ -14,12 +14,12 @@
 use std::rc::Rc;
 use std::time::Duration;
 
+use crate::utils::{validate_get, validate_scan};
+use crate::{Scenario, ScenarioContext, ScenarioWriteBatch};
 use async_trait::async_trait;
 use rand::Rng;
 use slatedb::config::{DurabilityLevel, PutOptions, ReadOptions, ScanOptions};
 use slatedb::{DbRand, Error, IterationOrder};
-use slatedb_dst::utils::{validate_get, validate_scan};
-use slatedb_dst::{Scenario, ScenarioContext, ScenarioWriteBatch};
 use tracing::info;
 
 const KEY_SPACE: u64 = 8;
@@ -37,10 +37,10 @@ const KEY_SPACE: u64 = 8;
 /// When `iterations` is `Some`, the scenario performs exactly that many write
 /// steps unless shutdown happens first. When it is `None`, the scenario keeps
 /// generating mutations until another scenario cancels the run.
-pub(super) struct WriterScenario {
-    pub(super) name: &'static str,
-    pub(super) rand: Rc<DbRand>,
-    pub(super) iterations: Option<u32>,
+pub struct WriterScenario {
+    pub name: &'static str,
+    pub rand: Rc<DbRand>,
+    pub iterations: Option<u32>,
 }
 
 #[async_trait(?Send)]
@@ -143,10 +143,10 @@ impl Scenario for WriterScenario {
 /// By running concurrently with writers, clock advancement, and background
 /// flushes, this scenario helps catch mismatches in read visibility, scan
 /// ordering, and durability filtering under interleaved load.
-pub(super) struct ReaderScenario {
-    pub(super) name: &'static str,
-    pub(super) rand: Rc<DbRand>,
-    pub(super) iterations: Option<u32>,
+pub struct ReaderScenario {
+    pub name: &'static str,
+    pub rand: Rc<DbRand>,
+    pub iterations: Option<u32>,
 }
 
 #[async_trait(?Send)]
@@ -232,9 +232,9 @@ impl Scenario for ReaderScenario {
 /// This keeps timestamp-bearing writes and read metadata evolving
 /// deterministically without waiting on real wall-clock time. The scenario runs
 /// until the shared shutdown token is cancelled.
-pub(super) struct ClockScenario {
-    pub(super) name: &'static str,
-    pub(super) rand: Rc<DbRand>,
+pub struct ClockScenario {
+    pub name: &'static str,
+    pub rand: Rc<DbRand>,
 }
 
 #[async_trait(?Send)]
@@ -277,9 +277,9 @@ impl Scenario for ClockScenario {
 /// to be cancelled by some other task or for `duration` to elapse. If the time
 /// limit wins, it logs the timeout and cancels the shared token to stop the
 /// rest of the simulation.
-pub(super) struct TimedShutdownScenario {
-    pub(super) name: &'static str,
-    pub(super) duration: Duration,
+pub struct TimedShutdownScenario {
+    pub name: &'static str,
+    pub duration: Duration,
 }
 
 #[async_trait(?Send)]
@@ -315,10 +315,10 @@ impl Scenario for TimedShutdownScenario {
 /// that would be less common if flushing only happened as a side effect of
 /// writer activity. Like the writer and reader scenarios, it can run for a
 /// fixed number of iterations or continue until shutdown.
-pub(super) struct FlusherScenario {
-    pub(super) name: &'static str,
-    pub(super) rand: Rc<DbRand>,
-    pub(super) iterations: Option<u32>,
+pub struct FlusherScenario {
+    pub name: &'static str,
+    pub rand: Rc<DbRand>,
+    pub iterations: Option<u32>,
 }
 
 #[async_trait(?Send)]

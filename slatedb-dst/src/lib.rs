@@ -3,6 +3,7 @@
 
 mod dst;
 pub mod object_store;
+pub mod scenarios;
 mod state;
 pub mod utils;
 
