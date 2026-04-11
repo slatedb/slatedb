@@ -174,7 +174,7 @@ impl<T: Send> DispatcherNotifier<T> {
 /// it is responsible for running the main event loop. The function receives messages
 /// from the [async_channel::Receiver<T>] and from any [MessageDispatcherTicker]s, and
 /// passes them to the [MessageHandler] for processing.
-struct MessageDispatcher<T: Send + std::fmt::Debug + 'static> {
+struct MessageDispatcher<T: Send + std::fmt::Debug> {
     handler: Box<dyn MessageHandler<T>>,
     rx: async_channel::Receiver<T>,
     clock: Arc<dyn SystemClock>,
@@ -183,7 +183,7 @@ struct MessageDispatcher<T: Send + std::fmt::Debug + 'static> {
     fp_registry: Arc<FailPointRegistry>,
 }
 
-impl<T: Send + std::fmt::Debug + 'static> MessageDispatcher<T> {
+impl<T: Send + std::fmt::Debug> MessageDispatcher<T> {
     /// Creates a new [MessageDispatcher]. Messages sent to the channel are passed to
     /// the [MessageHandler] for processing.
     ///
@@ -408,7 +408,7 @@ impl<'a, T: Send> MessageDispatcherTicker<'a, T> {
 /// It is safe to return errors on failure or panic; the [MessageDispatcher] and
 /// [MessageHandlerExecutor] will handle them appropriately.
 #[async_trait]
-pub(crate) trait MessageHandler<T: Send + 'static>: Send {
+pub(crate) trait MessageHandler<T: Send>: Send {
     /// Defines message ticker schedules. [MessageDispatcher::run] instantiates a
     /// [MessageDispatcherTicker] for each ticker defined here. Whenever each ticker
     /// ticks, the message factory generates a message, and [MessageDispatcher] sends the

@@ -175,9 +175,9 @@ struct ManifestWriterHandler {
     next_seq: u64,
     /// Highest last_seq that has been durably written to the manifest (inclusive).
     durable_seq: u64,
-    /// Watches the WAL durable sequence so the manifest write can wait for
+    /// Watches the database status so the manifest write can wait for
     /// WAL durability without blocking uploads.
-    wal_durable_seq_rx: watch::Receiver<u64>,
+    db_status_rx: watch::Receiver<crate::db_status::DbStatus>,
     pending_flushes: Vec<PendingFlush>,
     pending_checkpoints: Vec<PendingCheckpoint>,
 }
@@ -198,7 +198,7 @@ impl MessageHandler<ManifestWriterCommand> for ManifestWriterHandler {
 
     fn notifiers(&mut self) -> Vec<Box<dyn crate::dispatcher::Notifier<ManifestWriterCommand>>> {
         vec![Box::new(WalDurableNotifier {
-            rx: self.wal_durable_seq_rx.clone(),
+            rx: self.db_status_rx.clone(),
         })]
     }
 
@@ -261,7 +261,7 @@ impl ManifestWriterHandler {
     ) -> Self {
         let durable_seq = db.oracle.last_remote_persisted_seq();
         let next_seq = db.oracle.peek_next_seq();
-        let wal_durable_seq_rx = db.oracle.watch_durable_seq();
+        let db_status_rx = db.status_manager.subscribe();
         Self {
             db,
             manifest,
@@ -271,7 +271,7 @@ impl ManifestWriterHandler {
             ready: BTreeMap::new(),
             next_seq,
             durable_seq,
-            wal_durable_seq_rx,
+            db_status_rx,
             pending_checkpoints: Vec::new(),
         }
     }
@@ -360,7 +360,7 @@ impl ManifestWriterHandler {
     }
 
     fn take_next_ready_batch(&mut self) -> Option<Vec<UploadedMemtable>> {
-        let durable_seq = *self.wal_durable_seq_rx.borrow();
+        let durable_seq = self.db_status_rx.borrow().durable_seq;
         let mut next_seq = self.next_seq;
         let mut batch = Vec::new();
         // WAL SSTs must be durable before the manifest is updated (see #1255).
@@ -738,11 +738,11 @@ struct PendingCheckpoint {
     sender: oneshot::Sender<Result<CheckpointCreateResult, SlateDBError>>,
 }
 
-/// Adapts a `watch::Receiver<u64>` into a [Notifier] that produces
-/// [ManifestWriterCommand::WalDurableAdvanced] whenever the WAL durable
-/// sequence advances.
+/// Adapts a [`DbStatus`](crate::db_status::DbStatus) watch into a [Notifier]
+/// that produces [ManifestWriterCommand::WalDurableAdvanced] whenever the
+/// database status changes (which includes WAL durable sequence advances).
 struct WalDurableNotifier {
-    rx: watch::Receiver<u64>,
+    rx: watch::Receiver<crate::db_status::DbStatus>,
 }
 
 #[async_trait]
