@@ -11,7 +11,8 @@
 //! iteration limit and stop on their own, while others run until the shared
 //! shutdown token is cancelled by another scenario.
 
-use std::ops::{Bound, RangeBounds};
+use std::fmt::Debug;
+use std::ops::RangeBounds;
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -32,24 +33,6 @@ fn ensure_supported_validation_read(dirty: bool) -> Result<(), Error> {
         ));
     }
     Ok(())
-}
-
-fn owned_bounds<K, T>(range: &T) -> (Bound<Vec<u8>>, Bound<Vec<u8>>)
-where
-    K: AsRef<[u8]>,
-    T: RangeBounds<K>,
-{
-    let start = match range.start_bound() {
-        Bound::Included(key) => Bound::Included(key.as_ref().to_vec()),
-        Bound::Excluded(key) => Bound::Excluded(key.as_ref().to_vec()),
-        Bound::Unbounded => Bound::Unbounded,
-    };
-    let end = match range.end_bound() {
-        Bound::Included(key) => Bound::Included(key.as_ref().to_vec()),
-        Bound::Excluded(key) => Bound::Excluded(key.as_ref().to_vec()),
-        Bound::Unbounded => Bound::Unbounded,
-    };
-    (start, end)
 }
 
 pub(crate) async fn validate_get<K>(
@@ -119,11 +102,10 @@ pub(crate) async fn validate_scan<K, T>(
 ) -> Result<Vec<KeyValue>, Error>
 where
     K: AsRef<[u8]> + Send,
-    T: RangeBounds<K> + Send + Clone,
+    T: RangeBounds<K> + Send + Clone + Debug,
 {
     ensure_supported_validation_read(options.dirty)?;
 
-    let (start, end) = owned_bounds(&range);
     for _attempt in 0..REMOTE_VALIDATION_RETRY_LIMIT {
         let snapshot = ctx.db().snapshot().await?;
         let snapshot_seq = snapshot.seq();
@@ -154,10 +136,9 @@ where
 
         if actual != expected {
             return Err(Error::internal(format!(
-                "validate_scan mismatch: scenario={} start={:?} end={:?} options={:?} snapshot_seq={} visible_seq={} status={:?} actual={:?} expected={:?}",
+                "validate_scan mismatch: scenario={} range={:?} options={:?} snapshot_seq={} visible_seq={} status={:?} actual={:?} expected={:?}",
                 ctx.scenario(),
-                start,
-                end,
+                range,
                 options,
                 snapshot_seq,
                 visible_seq,
@@ -171,10 +152,9 @@ where
     }
 
     Err(Error::internal(format!(
-        "validate_scan could not obtain a stable remote durable frontier: scenario={} start={:?} end={:?} options={:?}",
+        "validate_scan could not obtain a stable remote durable frontier: scenario={} range={:?} options={:?}",
         ctx.scenario(),
-        start,
-        end,
+        range,
         options
     )))
 }
