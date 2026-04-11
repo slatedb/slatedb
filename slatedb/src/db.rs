@@ -222,7 +222,7 @@ impl DbInner {
         key: K,
         options: &ReadOptions,
     ) -> Result<Option<KeyValue>, SlateDBError> {
-        self.status()?;
+        self.check_closed()?;
         let db_state = self.state.read().view();
         self.reader
             .get_key_value_with_options(key, options, &db_state, None, None)
@@ -234,7 +234,7 @@ impl DbInner {
         range: BytesRange,
         options: &ScanOptions,
     ) -> Result<DbIterator, SlateDBError> {
-        self.status()?;
+        self.check_closed()?;
         let db_state = self.state.read().view();
         self.reader
             .scan_with_options(range, options, &db_state, None, None, None)
@@ -266,9 +266,13 @@ impl DbInner {
                 }
                 Err(SlateDBError::Fenced) => {
                     manifest.refresh().await?;
-                    self.state
-                        .write()
-                        .merge_remote_manifest(manifest.prepare_dirty()?);
+                    let remote_dirty = manifest.prepare_dirty()?;
+                    let dirty_manifest = {
+                        let mut state = self.state.write();
+                        state.merge_remote_manifest(remote_dirty);
+                        state.state().manifest.clone()
+                    };
+                    self.status_manager.report_manifest(dirty_manifest.into());
                     empty_wal_id += 1;
                 }
                 Err(e) => {
@@ -293,7 +297,7 @@ impl DbInner {
     ) -> Result<WriteHandle, SlateDBError> {
         self.db_stats.write_batch_count.increment(1);
         self.db_stats.write_ops.increment(batch.ops.len() as u64);
-        self.status()?;
+        self.check_closed()?;
         if batch.ops.is_empty() {
             return Err(SlateDBError::EmptyBatch);
         }
@@ -491,7 +495,7 @@ impl DbInner {
     ) -> Result<(), SlateDBError> {
         self.db_stats.flush_requests.increment(1);
         if check_status {
-            self.status()?;
+            self.check_closed()?;
         }
         match options.flush_type {
             FlushType::Wal => {
@@ -567,6 +571,11 @@ impl DbInner {
         .await
     }
 
+    /// Returns the latest database status snapshot.
+    pub(crate) fn status(&self) -> DbStatus {
+        self.status_manager.status()
+    }
+
     /// Returns an error if the database has been closed.
     ///
     /// ## Returns
@@ -575,7 +584,7 @@ impl DbInner {
     ///   (state.result_reader() returns Ok(())).
     /// - `Err(e)` if the DB was closed with an error, where `e` is the error
     ///   (state.result_reader() returns Err(e)).
-    pub(crate) fn status(&self) -> Result<(), SlateDBError> {
+    pub(crate) fn check_closed(&self) -> Result<(), SlateDBError> {
         if let Some(result) = self.status_manager.result_reader().read() {
             return match result {
                 Ok(()) => Err(SlateDBError::Closed),
@@ -583,6 +592,10 @@ impl DbInner {
             };
         }
         Ok(())
+    }
+
+    pub(crate) fn manifest(&self) -> ManifestCore {
+        self.state.read().state().manifest.value.core.clone()
     }
 }
 
@@ -677,18 +690,16 @@ impl Db {
     /// }
     /// ```
     pub async fn close(&self) -> Result<(), crate::Error> {
-        let should_flush = match self.status() {
+        let should_flush = match self.status().close_reason {
             // If already closed, don't close again.
-            Err(e) if matches!(e.kind(), crate::ErrorKind::Closed(CloseReason::Clean)) => {
-                return Err(e);
-            }
+            Some(CloseReason::Clean) => return Err(SlateDBError::Closed.into()),
             // If in failed state, allow close, but don't flush since the database
             // might be in a bad state. Note that multiple close() calls will always
             // run when in a failed state (vs. a clean closure, which will return
             // Error::Closed(CloseReason::Clean) on subsequent calls).
-            Err(_) => false,
+            Some(_) => false,
             // Flush outstanding writes if the database is still open.
-            Ok(_) => true,
+            None => true,
         };
 
         // Mark the database as closed before flushing.
@@ -764,7 +775,7 @@ impl Db {
     /// }
     /// ```
     pub async fn snapshot(&self) -> Result<Arc<DbSnapshot>, crate::Error> {
-        self.inner.status()?;
+        self.inner.check_closed()?;
         let snapshot = DbSnapshot::new(self.inner.clone(), None);
         Ok(snapshot)
     }
@@ -1512,14 +1523,16 @@ impl Db {
     ///
     /// This returns the in-memory manifest snapshot currently held by the `Db`.
     pub fn manifest(&self) -> ManifestCore {
-        self.inner.state.read().state().core().clone()
+        self.inner.manifest()
     }
 
     /// Subscribe to database state changes.
     ///
     /// Returns a [`tokio::sync::watch::Receiver<DbStatus>`] that always
-    /// reflects the latest database status. For example, you can wait for a
-    /// specific sequence number to become durable:
+    /// reflects the latest database status. The status includes the latest
+    /// durable sequence number and the current in-memory manifest snapshot
+    /// observed by this handle. For example, you can wait for a specific
+    /// sequence number to become durable:
     ///
     /// ```ignore
     /// let seq = 42; // sequence number from a write operation
@@ -1543,6 +1556,7 @@ impl Db {
     /// // Good: clone the status and release the lock immediately.
     /// let status = rx.borrow().clone();
     /// some_async_fn(status.durable_seq).await;
+    /// some_other_async_fn(status.current_manifest.clone()).await;
     ///
     /// // Good: copy the durable seq and releate the lock immediately.
     /// let durable_seq = rx.borrow().durable_seq; // uses Copy trait
@@ -1583,7 +1597,7 @@ impl Db {
         &self,
         isolation_level: IsolationLevel,
     ) -> Result<DbTransaction, crate::Error> {
-        self.inner.status()?;
+        self.inner.check_closed()?;
         let txn = DbTransaction::new(
             self.inner.clone(),
             self.inner.txn_manager.clone(),
@@ -1615,22 +1629,12 @@ impl Db {
         Ok(object_store)
     }
 
-    /// Check the database status.
+    /// Returns the latest database status.
     ///
-    /// This is a passive check that does not perform any I/O. The status is checked at
-    /// least every [`Settings::manifest_poll_interval`], but might also be updated based
-    /// on other internal events or user-facing operations.
-    ///
-    /// Once a database is closed, either normally or due to an error, it can't be reopened.
-    /// A new `Db` instance must be created to access the database again.
-    ///
-    /// ## Returns
-    /// - `Ok(())` if the DB is still open.
-    /// - `Err(ErrorKind::Closed)` if the DB was closed normally.
-    /// - `Err(e)` if the DB was closed with an error, where `e` is the error that caused
-    ///   the closure.
-    pub fn status(&self) -> Result<(), crate::Error> {
-        self.inner.status().map_err(|e| e.into())
+    /// This is a snapshot of the current state and will not update automatically.
+    /// Use [`subscribe`](Db::subscribe) to receive real-time updates.
+    pub fn status(&self) -> DbStatus {
+        self.inner.status()
     }
 }
 
@@ -1697,8 +1701,8 @@ mod tests {
     use crate::cached_object_store_stats::CachedObjectStoreStats;
     use crate::config::DurabilityLevel::{Memory, Remote};
     use crate::config::{
-        CompactorOptions, GarbageCollectorDirectoryOptions, GarbageCollectorOptions,
-        ObjectStoreCacheOptions, PutOptions, Settings, Ttl, WriteOptions,
+        CheckpointOptions, CompactorOptions, GarbageCollectorDirectoryOptions,
+        GarbageCollectorOptions, ObjectStoreCacheOptions, PutOptions, Settings, Ttl, WriteOptions,
     };
     use crate::db::builder::GarbageCollectorBuilder;
     use crate::db_common::MAX_WAL_FLUSHES_BEFORE_L0_FLUSH;
@@ -2341,11 +2345,8 @@ mod tests {
             lookup_metric(&metrics_recorder, crate::db_stats::WAL_BUFFER_FLUSHES).unwrap(),
             0
         );
-        let status_err = db.status().unwrap_err();
-        assert_eq!(
-            status_err.kind(),
-            crate::ErrorKind::Closed(CloseReason::Fenced)
-        );
+        let status = db.status();
+        assert_eq!(status.close_reason, Some(CloseReason::Fenced));
     }
 
     #[tokio::test]
@@ -2388,11 +2389,8 @@ mod tests {
             lookup_metric(&metrics_recorder, crate::db_stats::WAL_BUFFER_FLUSHES).unwrap(),
             1
         );
-        let status_err = db.status().unwrap_err();
-        assert_eq!(
-            status_err.kind(),
-            crate::ErrorKind::Closed(CloseReason::Clean)
-        );
+        let status = db.status();
+        assert_eq!(status.close_reason, Some(CloseReason::Clean));
     }
 
     #[tokio::test]
@@ -4013,7 +4011,7 @@ mod tests {
 
         // Verify that the memtable has not been flushed by checking the db for error state
         assert!(
-            kv_store.inner.status().is_ok(),
+            kv_store.inner.status().close_reason.is_none(),
             "DB should not have an error state"
         );
     }
@@ -6604,6 +6602,106 @@ mod tests {
             status.durable_seq >= 3,
             "expected durable seq >= 3, got {}",
             status.durable_seq
+        );
+
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn should_subscribe_to_current_manifest_updates_after_flush() {
+        // Given: a DB with a watcher and manifest access
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_watch_current_manifest");
+        let db = Db::builder(path.clone(), object_store.clone())
+            .with_settings(test_db_options(0, 1024, None))
+            .build()
+            .await
+            .unwrap();
+        let mut watcher = db.subscribe();
+        let manifest_store = Arc::new(ManifestStore::new(&path, object_store));
+        let mut stored_manifest =
+            StoredManifest::load(manifest_store, Arc::new(DefaultSystemClock::new()))
+                .await
+                .unwrap();
+
+        assert_eq!(watcher.borrow().current_manifest.manifest, db.manifest());
+
+        // When: writes are flushed to an L0 and the manifest is updated
+        db.put(b"key1", b"value1").await.unwrap();
+        db.put(b"key2", b"value2").await.unwrap();
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::MemTable,
+        })
+        .await
+        .unwrap();
+        wait_for_manifest_condition(
+            &mut stored_manifest,
+            |manifest| manifest.last_l0_seq >= 2,
+            Duration::from_secs(10),
+        )
+        .await;
+
+        // Then: subscribe reports the updated manifest and durability frontier
+        let status = tokio::time::timeout(
+            Duration::from_secs(10),
+            watcher
+                .wait_for(|s| s.current_manifest.manifest.last_l0_seq >= 2 && s.durable_seq >= 2),
+        )
+        .await
+        .expect("timed out waiting for manifest update")
+        .expect("watch channel closed")
+        .clone();
+        assert!(status.durable_seq >= 2);
+        assert_eq!(status.current_manifest.manifest.last_l0_seq, 2);
+
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn should_publish_remote_manifest_updates_via_poll() {
+        // Given: a DB with a watcher
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_watch_remote_manifest");
+        let db = Db::builder(path.clone(), object_store.clone())
+            .with_settings(test_db_options(0, 1024, None))
+            .build()
+            .await
+            .unwrap();
+        let mut watcher = db.subscribe();
+        let initial_checkpoint_count = watcher.borrow().current_manifest.manifest.checkpoints.len();
+
+        let manifest_store = Arc::new(ManifestStore::new(&path, object_store));
+        let mut stored_manifest =
+            StoredManifest::load(manifest_store, Arc::new(DefaultSystemClock::new()))
+                .await
+                .unwrap();
+
+        // When: another writer updates the manifest
+        stored_manifest
+            .write_checkpoint(uuid::Uuid::new_v4(), &CheckpointOptions::default())
+            .await
+            .unwrap();
+        wait_for_manifest_condition(
+            &mut stored_manifest,
+            |manifest| manifest.checkpoints.len() > initial_checkpoint_count,
+            Duration::from_secs(10),
+        )
+        .await;
+
+        // Then: subscribe eventually reports the merged manifest
+        let status = tokio::time::timeout(
+            Duration::from_secs(10),
+            watcher.wait_for(|s| {
+                s.current_manifest.manifest.checkpoints.len() > initial_checkpoint_count
+            }),
+        )
+        .await
+        .expect("timed out waiting for remote manifest update")
+        .expect("watch channel closed")
+        .clone();
+        assert_eq!(
+            status.current_manifest.manifest.checkpoints.len(),
+            initial_checkpoint_count + 1
         );
 
         db.close().await.unwrap();

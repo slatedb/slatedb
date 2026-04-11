@@ -5,7 +5,7 @@ use crate::config::{CheckpointOptions, DbReaderOptions, ReadOptions, ScanOptions
 use crate::db_read::DbRead;
 use crate::db_state::ManifestCore;
 use crate::db_stats::DbStats;
-use crate::db_status::{ClosedResultWriter, DbStatus, DbStatusManager};
+use crate::db_status::{ClosedResultWriter, DbStatus, DbStatusManager, VersionedManifest};
 use crate::dispatcher::{MessageFactory, MessageHandler, MessageHandlerExecutor};
 use crate::error::SlateDBError;
 use crate::iter::IterationOrder;
@@ -97,6 +97,15 @@ impl DbStateReader for CheckpointState {
     }
 }
 
+impl From<&CheckpointState> for VersionedManifest {
+    fn from(state: &CheckpointState) -> Self {
+        Self {
+            id: state.checkpoint.manifest_id,
+            manifest: state.manifest.core.clone(),
+        }
+    }
+}
+
 impl DbReaderInner {
     async fn new(
         manifest_store: Arc<ManifestStore>,
@@ -108,13 +117,8 @@ impl DbReaderInner {
         system_clock: Arc<dyn SystemClock>,
         rand: Arc<DbRand>,
         recorder: slatedb_common::metrics::MetricsRecorderHelper,
+        mut manifest: StoredManifest,
     ) -> Result<Self, SlateDBError> {
-        let mut manifest =
-            StoredManifest::load(Arc::clone(&manifest_store), system_clock.clone()).await?;
-        if !manifest.db_state().initialized {
-            return Err(SlateDBError::InvalidDBState);
-        }
-
         let checkpoint =
             Self::get_or_create_checkpoint(&mut manifest, checkpoint_id, &options, rand.clone())
                 .await?;
@@ -142,6 +146,7 @@ impl DbReaderInner {
             .last_remote_persisted_seq
             .max(initial_state.core().last_l0_seq);
         status_manager.report_durable_seq(initial_durable_seq);
+        status_manager.report_manifest(VersionedManifest::from(initial_state.as_ref()));
         let oracle = Arc::new(DbReaderOracle::new(
             initial_durable_seq,
             status_manager.clone(),
@@ -255,10 +260,13 @@ impl DbReaderInner {
 
     async fn reestablish_checkpoint(&self, checkpoint: Checkpoint) -> Result<(), SlateDBError> {
         let new_checkpoint_state = self.rebuild_checkpoint_state(checkpoint).await?;
-        self.oracle
-            .advance_durable_seq(new_checkpoint_state.last_remote_persisted_seq);
+        let durable_seq = new_checkpoint_state.last_remote_persisted_seq;
+        let versioned_manifest = VersionedManifest::from(&new_checkpoint_state);
+        self.oracle.advance_durable_seq(durable_seq);
         let mut write_guard = self.state.write();
         *write_guard = Arc::new(new_checkpoint_state);
+        drop(write_guard);
+        self.status_manager.report_manifest(versioned_manifest);
         Ok(())
     }
 
@@ -501,6 +509,14 @@ impl DbReaderInner {
         Ok((replay_after_wal_id, last_committed_seq))
     }
 
+    /// Returns the latest database status.
+    ///
+    /// This is a snapshot of the current state and will not update automatically.
+    /// Use [`subscribe`](DbReader::subscribe) to receive real-time updates.
+    pub(crate) fn status(&self) -> DbStatus {
+        self.status_manager.status()
+    }
+
     /// Returns an error if the reader has been closed.
     ///
     /// ## Returns
@@ -687,11 +703,24 @@ impl DbReader {
     ) -> Result<Self, SlateDBError> {
         Self::validate_options(&options)?;
 
-        let status_manager = DbStatusManager::new(0);
-        let task_executor =
-            MessageHandlerExecutor::new(Arc::new(status_manager.clone()), system_clock.clone());
         let manifest_store = store_provider.manifest_store();
         let table_store = store_provider.table_store();
+
+        let manifest =
+            StoredManifest::load(Arc::clone(&manifest_store), system_clock.clone()).await?;
+        if !manifest.db_state().initialized {
+            return Err(SlateDBError::InvalidDBState);
+        }
+
+        let status_manager = DbStatusManager::new_with_manifest(
+            manifest.db_state().last_l0_seq,
+            VersionedManifest {
+                id: manifest.id(),
+                manifest: manifest.db_state().clone(),
+            },
+        );
+        let task_executor =
+            MessageHandlerExecutor::new(Arc::new(status_manager.clone()), system_clock.clone());
         let inner = Arc::new(
             DbReaderInner::new(
                 manifest_store,
@@ -703,6 +732,7 @@ impl DbReader {
                 system_clock,
                 rand,
                 recorder,
+                manifest,
             )
             .await?,
         );
@@ -1030,17 +1060,18 @@ impl DbReader {
     /// Subscribe to database status changes.
     ///
     /// See [`Db::subscribe`](crate::Db::subscribe) for full semantics and
-    /// deadlock warnings. The `durable_seq` field is updated whenever the
-    /// manifest poller discovers new data written by a remote writer.
+    /// deadlock warnings. The `durable_seq` and `current_manifest` fields are
+    /// updated whenever the reader's current checkpoint/manifest view changes
+    /// or it replays additional durable WAL data.
     pub fn subscribe(&self) -> tokio::sync::watch::Receiver<DbStatus> {
         self.inner.status_manager.subscribe()
     }
 
-    /// Check the reader status.
+    /// Returns the latest reader status snapshot.
     ///
     /// See [`Db::status`](crate::Db::status) for full semantics.
-    pub fn status(&self) -> Result<(), crate::Error> {
-        self.inner.check_closed().map_err(Into::into)
+    pub fn status(&self) -> DbStatus {
+        self.inner.status()
     }
 }
 
@@ -1120,7 +1151,7 @@ mod tests {
     use crate::store_provider::StoreProvider;
     use crate::tablestore::TableStore;
     use crate::types::RowEntry;
-    use crate::{error::SlateDBError, test_utils, Db};
+    use crate::{error::SlateDBError, test_utils, CloseReason, Db};
     use bytes::Bytes;
     use fail_parallel::FailPointRegistry;
     use object_store::memory::InMemory;
@@ -2530,7 +2561,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn should_return_ok_status_when_open() {
+    async fn should_report_open_status() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/tmp/test_kv_store");
         let test_provider = TestProvider::new(path.clone(), Arc::clone(&object_store));
@@ -2541,14 +2572,14 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(reader.status().is_ok());
+        assert_eq!(reader.status().close_reason, None);
 
         reader.close().await.unwrap();
         db.close().await.unwrap();
     }
 
     #[tokio::test]
-    async fn should_return_err_status_when_closed() {
+    async fn should_report_closed_status() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/tmp/test_kv_store");
         let test_provider = TestProvider::new(path.clone(), Arc::clone(&object_store));
@@ -2560,7 +2591,7 @@ mod tests {
             .unwrap();
 
         reader.close().await.unwrap();
-        assert!(reader.status().is_err());
+        assert_eq!(reader.status().close_reason, Some(CloseReason::Clean));
 
         db.close().await.unwrap();
     }
