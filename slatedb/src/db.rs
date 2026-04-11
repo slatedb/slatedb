@@ -6815,6 +6815,113 @@ mod tests {
         assert_eq!(status.close_reason, Some(CloseReason::Fenced));
     }
 
+    #[tokio::test]
+    async fn should_keep_db_open_when_standalone_compactor_takes_over() {
+        // Given: a DB with an embedded compactor and a watcher
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_standalone_compactor_takeover");
+        let embedded_compactor_options = CompactorOptions {
+            poll_interval: Duration::from_millis(20),
+            ..Default::default()
+        };
+        let mut settings = test_db_options(0, 1024, Some(embedded_compactor_options));
+        settings.flush_interval = None;
+        let db = Db::builder(path.clone(), object_store.clone())
+            .with_settings(settings)
+            .build()
+            .await
+            .unwrap();
+        let manifest_store = Arc::new(ManifestStore::new(&path, object_store.clone()));
+        let mut stored_manifest =
+            StoredManifest::load(manifest_store, Arc::new(DefaultSystemClock::new()))
+                .await
+                .unwrap();
+        let should_compact = Arc::new(AtomicBool::new(true));
+
+        // When: a standalone compactor starts for the same DB
+        let standalone_compactor = CompactorBuilder::new(path.clone(), object_store.clone())
+            .with_options(CompactorOptions {
+                poll_interval: Duration::from_millis(20),
+                ..Default::default()
+            })
+            .with_scheduler_supplier(Arc::new(OnDemandCompactionSchedulerSupplier::new(
+                Arc::new({
+                    let should_compact = should_compact.clone();
+                    move |state| {
+                        !state.manifest().l0.is_empty()
+                            && should_compact.swap(false, Ordering::SeqCst)
+                    }
+                }),
+            )))
+            .build();
+        let standalone_task = tokio::spawn({
+            let standalone_compactor = standalone_compactor.clone();
+            async move { standalone_compactor.run().await }
+        });
+
+        // Then: the embedded compactor should not close the DB after takeover.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(db.status().close_reason.is_none());
+
+        // And: the standalone compactor should compact new L0 output after takeover.
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            db.put_with_options(
+                b"key-after-takeover",
+                b"value-after-takeover",
+                &PutOptions::default(),
+                &WriteOptions {
+                    await_durable: false,
+                },
+            ),
+        )
+        .await
+        .expect("timed out writing after standalone compactor takeover")
+        .unwrap();
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            db.flush_with_options(FlushOptions {
+                flush_type: FlushType::MemTable,
+            }),
+        )
+        .await
+        .expect("timed out flushing memtable after standalone compactor takeover")
+        .unwrap();
+
+        let manifest = tokio::time::timeout(
+            Duration::from_secs(10),
+            wait_for_manifest_condition(
+                &mut stored_manifest,
+                |state| {
+                    state.last_compacted_l0_sst_view_id.is_some()
+                        && state.l0.is_empty()
+                        && !state.compacted.is_empty()
+                },
+                Duration::from_secs(10),
+            ),
+        )
+        .await
+        .expect("timed out waiting for standalone compactor to compact takeover writes");
+        assert!(
+            !manifest.compacted.is_empty(),
+            "standalone compactor should compact flushed L0 tables after takeover"
+        );
+
+        // Reads and writes should still work.
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(5), db.get(b"key-after-takeover"),)
+                .await
+                .expect("timed out reading after standalone compactor takeover")
+                .unwrap(),
+            Some(Bytes::from_static(b"value-after-takeover"))
+        );
+        assert!(db.status().close_reason.is_none());
+
+        standalone_task.abort();
+        let _ = standalone_task.await;
+        db.close().await.unwrap();
+    }
+
     #[cfg(feature = "wal_disable")]
     #[tokio::test]
     async fn should_notify_seq_watcher_on_l0_flush_when_wal_disabled() {

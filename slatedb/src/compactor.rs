@@ -358,6 +358,7 @@ impl Compactor {
             self.rand.clone(),
             self.stats.clone(),
             self.system_clock.clone(),
+            false,
         )
         .await?;
         self.task_executor
@@ -434,6 +435,8 @@ pub(crate) struct CompactorEventHandler {
     rand: Arc<DbRand>,
     stats: Arc<CompactionStats>,
     system_clock: Arc<dyn SystemClock>,
+    degrade_on_fence: bool,
+    fenced: bool,
 }
 
 #[async_trait]
@@ -452,19 +455,32 @@ impl MessageHandler<CompactorMessage> for CompactorEventHandler {
     }
 
     async fn handle(&mut self, message: CompactorMessage) -> Result<(), SlateDBError> {
-        match message {
-            CompactorMessage::LogStats => self.handle_log_ticker(),
-            CompactorMessage::PollManifest => self.handle_ticker().await?,
+        if self.fenced {
+            return Ok(());
+        }
+
+        let result = match message {
+            CompactorMessage::LogStats => {
+                self.handle_log_ticker();
+                Ok(())
+            }
+            CompactorMessage::PollManifest => self.handle_ticker().await,
             CompactorMessage::CompactionJobFinished { id, result } => {
-                match result {
-                    Ok(sr) => self.finish_compaction(id, sr).await?,
+                let finish_result = match result {
+                    Ok(sr) => self.finish_compaction(id, sr).await,
                     Err(err) => {
                         error!("error executing compaction [error={:#?}]", err);
-                        self.finish_failed_compaction(id).await?;
+                        self.finish_failed_compaction(id).await
                     }
+                };
+
+                match finish_result {
+                    Ok(()) => match self.maybe_schedule_compactions().await {
+                        Ok(()) => self.maybe_start_compactions().await,
+                        Err(err) => Err(err),
+                    },
+                    Err(err) => Err(err),
                 }
-                self.maybe_schedule_compactions().await?;
-                self.maybe_start_compactions().await?;
             }
             CompactorMessage::CompactionJobProgress {
                 id,
@@ -482,11 +498,20 @@ impl MessageHandler<CompactorMessage> for CompactorEventHandler {
                 });
                 // To prevent excessive writes, only persist if output SSTs changed.
                 if update_output_ssts {
-                    self.state_writer.write_compactions_safely().await?;
+                    self.state_writer.write_compactions_safely().await
+                } else {
+                    Ok(())
                 }
             }
+        };
+
+        match result {
+            Err(SlateDBError::Fenced) if self.degrade_on_fence => {
+                self.handle_fence().await?;
+                Ok(())
+            }
+            other => other,
         }
-        Ok(())
     }
 
     async fn cleanup(
@@ -511,6 +536,7 @@ impl CompactorEventHandler {
         rand: Arc<DbRand>,
         stats: Arc<CompactionStats>,
         system_clock: Arc<dyn SystemClock>,
+        degrade_on_fence: bool,
     ) -> Result<Self, SlateDBError> {
         let state_writer = CompactorStateWriter::new(
             manifest_store,
@@ -528,6 +554,8 @@ impl CompactorEventHandler {
             rand,
             stats,
             system_clock,
+            degrade_on_fence,
+            fenced: false,
         })
     }
 
@@ -537,6 +565,18 @@ impl CompactorEventHandler {
 
     fn state_mut(&mut self) -> &mut CompactorState {
         &mut self.state_writer.state
+    }
+
+    async fn handle_fence(&mut self) -> Result<(), SlateDBError> {
+        if self.fenced {
+            return Ok(());
+        }
+        self.fenced = true;
+        warn!("embedded compactor fenced; stopping compactor without closing db");
+        if !self.is_executor_stopped() {
+            self.stop_executor().await?;
+        }
+        Ok(())
     }
 
     /// Emits the current compaction state and per-job progress.
@@ -3046,6 +3086,14 @@ mod tests {
 
     impl CompactorEventHandlerTestFixture {
         async fn new() -> Self {
+            Self::new_with_fence_policy(false).await
+        }
+
+        async fn new_embedded() -> Self {
+            Self::new_with_fence_policy(true).await
+        }
+
+        async fn new_with_fence_policy(degrade_on_fence: bool) -> Self {
             let compactor_options = Arc::new(compactor_options());
             let options = db_options(None);
 
@@ -3091,6 +3139,7 @@ mod tests {
                 rand.clone(),
                 compactor_stats.clone(),
                 Arc::new(DefaultSystemClock::new()),
+                degrade_on_fence,
             )
             .await
             .unwrap();
@@ -3624,6 +3673,7 @@ mod tests {
             rand,
             compactor_stats,
             system_clock,
+            false,
         )
         .await
         .unwrap();
@@ -3685,6 +3735,83 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_standalone_compactor_should_return_fenced_when_replaced() {
+        // given: an existing DB and a standalone compactor
+        let os = Arc::new(InMemory::new());
+        let _db = Db::builder(PATH, os.clone())
+            .with_settings(db_options(None))
+            .build()
+            .await
+            .unwrap();
+        let compactor1 = CompactorBuilder::new(PATH, os.clone())
+            .with_options(CompactorOptions {
+                poll_interval: Duration::from_millis(20),
+                ..Default::default()
+            })
+            .build();
+        let compactor2 = CompactorBuilder::new(PATH, os)
+            .with_options(CompactorOptions {
+                poll_interval: Duration::from_millis(20),
+                ..Default::default()
+            })
+            .build();
+        let compactor1_task = tokio::spawn({
+            let compactor1 = compactor1.clone();
+            async move { compactor1.run().await }
+        });
+
+        // when: another standalone compactor takes ownership
+        let compactor2_task = tokio::spawn({
+            let compactor2 = compactor2.clone();
+            async move { compactor2.run().await }
+        });
+        let fenced_result = tokio::time::timeout(Duration::from_secs(2), async {
+            compactor1_task.await.unwrap()
+        })
+        .await
+        .expect("timed out waiting for standalone compactor to be fenced")
+        .expect_err("standalone compactor should return fenced when replaced");
+
+        // then:
+        assert_eq!(
+            fenced_result.kind(),
+            crate::ErrorKind::Closed(crate::CloseReason::Fenced)
+        );
+
+        compactor2.stop().await.unwrap();
+        compactor2_task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_should_stop_embedded_compactor_when_polling_if_fenced() {
+        // given:
+        let mut fixture = CompactorEventHandlerTestFixture::new_embedded().await;
+
+        // fence the handler by bumping the compactions epoch elsewhere
+        let stored_compactions = StoredCompactions::load(fixture.compactions_store.clone())
+            .await
+            .unwrap();
+        FenceableCompactions::init(
+            stored_compactions,
+            fixture.handler.options.manifest_update_timeout,
+            fixture.handler.system_clock.clone(),
+        )
+        .await
+        .unwrap();
+
+        // when:
+        fixture
+            .handler
+            .handle(CompactorMessage::PollManifest)
+            .await
+            .unwrap();
+
+        // then:
+        assert!(fixture.handler.fenced);
+        assert!(fixture.executor.is_stopped());
+    }
+
+    #[tokio::test]
     async fn test_should_update_failed_compaction_status() {
         // given:
         let mut fixture = CompactorEventHandlerTestFixture::new().await;
@@ -3727,9 +3854,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_should_error_when_finishing_if_compactions_fenced() {
+    async fn test_should_stop_embedded_compactor_when_finishing_if_compactions_fenced() {
         // given:
-        let mut fixture = CompactorEventHandlerTestFixture::new().await;
+        let mut fixture = CompactorEventHandlerTestFixture::new_embedded().await;
         fixture.write_l0().await;
         let compaction = fixture.build_l0_compaction().await;
         fixture.scheduler.inject_compaction(compaction.clone());
@@ -3760,10 +3887,11 @@ mod tests {
         };
 
         // when:
-        let result = fixture.handler.handle(msg).await;
+        fixture.handler.handle(msg).await.unwrap();
 
         // then:
-        assert!(matches!(result, Err(SlateDBError::Fenced)));
+        assert!(fixture.handler.fenced);
+        assert!(fixture.executor.is_stopped());
     }
 
     #[tokio::test]
@@ -4180,6 +4308,7 @@ mod tests {
 
     struct MockExecutorInner {
         jobs: Vec<StartCompactionJobArgs>,
+        stopped: bool,
     }
 
     #[derive(Clone)]
@@ -4190,7 +4319,10 @@ mod tests {
     impl MockExecutor {
         fn new() -> Self {
             Self {
-                inner: Arc::new(Mutex::new(MockExecutorInner { jobs: vec![] })),
+                inner: Arc::new(Mutex::new(MockExecutorInner {
+                    jobs: vec![],
+                    stopped: false,
+                })),
             }
         }
 
@@ -4206,10 +4338,13 @@ mod tests {
             guard.jobs.push(compaction);
         }
 
-        fn stop(&self) {}
+        fn stop(&self) {
+            let mut guard = self.inner.lock();
+            guard.stopped = true;
+        }
 
         fn is_stopped(&self) -> bool {
-            false
+            self.inner.lock().stopped
         }
     }
 }
