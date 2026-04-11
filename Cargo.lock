@@ -3400,7 +3400,6 @@ dependencies = [
  "slatedb",
  "slatedb-common",
  "sysinfo",
- "thiserror 1.0.69",
  "tokio",
  "tokio-util",
  "tracing",

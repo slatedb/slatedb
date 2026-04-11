@@ -67,7 +67,7 @@ async fn run_simulation(
         settings.clone(),
     )
     .await?;
-    let dst = Dst::new(db, system_clock.clone(), settings)?;
+    let dst = Dst::new(db, system_clock.clone(), settings);
 
     if let Some(duration) = wall_clock_time {
         simulation_scenarios.push(Box::new(scenarios::TimedShutdownScenario {

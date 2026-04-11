@@ -402,7 +402,7 @@ impl Dst {
     ///
     /// The supplied `db`, `clock`, and `settings` must all describe the same
     /// SlateDB instance under test.
-    pub fn new(db: Db, clock: Arc<MockSystemClock>, settings: Settings) -> Result<Self, Error> {
+    pub fn new(db: Db, clock: Arc<MockSystemClock>, settings: Settings) -> Self {
         Self::new_with_state_path(db, clock, settings, None)
     }
 
@@ -416,17 +416,17 @@ impl Dst {
         clock: Arc<MockSystemClock>,
         settings: Settings,
         state_path: Option<&'static str>,
-    ) -> Result<Self, Error> {
-        let state = Arc::new(Mutex::new(SQLiteState::new(state_path)?));
+    ) -> Self {
+        let state = Arc::new(Mutex::new(SQLiteState::new(state_path)));
         let shared = ScenarioShared {
             db,
             settings,
             clock,
             state,
         };
-        Ok(Self {
+        Self {
             shared: Rc::new(shared),
-        })
+        }
     }
 
     /// Creates a standalone [`ScenarioContext`] with the given scenario name.

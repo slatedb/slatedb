@@ -27,8 +27,6 @@ use slatedb::bytes::Bytes;
 use slatedb::config::{ReadOptions, ScanOptions};
 use slatedb::{Error, IterationOrder, KeyValue, RowEntry, ValueDeletable};
 
-use crate::error::DstError;
-
 const ROW_KIND_VALUE: i64 = 0;
 const ROW_KIND_TOMBSTONE: i64 = 1;
 
@@ -110,9 +108,10 @@ impl StateSnapshot {
         K: AsRef<[u8]>,
     {
         ensure_supported_snapshot_read(options.dirty)?;
-        self.state
+        Ok(self
+            .state
             .lock()
-            .get_key_value_at_seq(key.as_ref(), self.seq)
+            .get_key_value_at_seq(key.as_ref(), self.seq))
     }
 
     /// Returns the visible rows in `range` with default scan options.
@@ -145,11 +144,11 @@ impl StateSnapshot {
             Bound::Excluded(key) => Bound::Excluded(key.as_ref().to_vec()),
             Bound::Unbounded => Bound::Unbounded,
         };
-        self.state.lock().scan_key_values_at_seq(
+        Ok(self.state.lock().scan_key_values_at_seq(
             self.seq,
             ScanFilter::Range { start, end },
             options.order,
-        )
+        ))
     }
 
     /// Returns all visible rows whose keys begin with `prefix`.
@@ -171,11 +170,11 @@ impl StateSnapshot {
         P: AsRef<[u8]>,
     {
         ensure_supported_snapshot_read(options.dirty)?;
-        self.state.lock().scan_key_values_at_seq(
+        Ok(self.state.lock().scan_key_values_at_seq(
             self.seq,
             ScanFilter::Prefix(prefix.as_ref().to_vec()),
             options.order,
-        )
+        ))
     }
 }
 
@@ -200,19 +199,18 @@ pub(crate) struct SQLiteState {
 impl SQLiteState {
     /// Opens the SQLite database, falling back to an in-memory database when
     /// `path` is `None`, and resets the schema to a known empty state.
-    pub(crate) fn new(path: Option<&'static str>) -> Result<Self, Error> {
+    pub(crate) fn new(path: Option<&'static str>) -> Self {
         let path = path.unwrap_or(":memory:");
-        let conn = Connection::open(path).map_err(DstError::SQLiteStateError)?;
+        let conn = Connection::open(path).expect("DST failed to open SQLite state database");
         let mut state = Self { conn };
-        state.init_schema()?;
-        Ok(state)
+        state.init_schema();
+        state
     }
 
-    fn init_schema(&mut self) -> Result<(), Error> {
+    fn init_schema(&mut self) {
         self.conn
             .execute_batch(RESET_SCHEMA_SQL)
-            .map_err(DstError::SQLiteStateError)?;
-        Ok(())
+            .expect("DST failed to initialize SQLite state schema");
     }
 
     /// Records one logical write operation atomically.
@@ -222,7 +220,7 @@ impl SQLiteState {
         let tx = self
             .conn
             .transaction()
-            .map_err(DstError::SQLiteStateError)?;
+            .expect("DST failed to start SQLite state transaction");
         for row in rows {
             let create_ts = row.create_ts.ok_or_else(|| {
                 Error::internal("DST recorded state requires RowEntry.create_ts".to_string())
@@ -249,13 +247,14 @@ impl SQLiteState {
                     row.expire_ts
                 ],
             )
-            .map_err(DstError::SQLiteStateError)?;
+            .expect("DST failed to record row in SQLite state");
         }
-        tx.commit().map_err(DstError::SQLiteStateError)?;
+        tx.commit()
+            .expect("DST failed to commit SQLite state transaction");
         Ok(())
     }
 
-    fn get_key_value_at_seq(&self, key: &[u8], seq: u64) -> Result<Option<KeyValue>, Error> {
+    fn get_key_value_at_seq(&self, key: &[u8], seq: u64) -> Option<KeyValue> {
         let mut stmt = self
             .conn
             .prepare(
@@ -264,17 +263,21 @@ impl SQLiteState {
                  WHERE key = ?1 AND seq <= ?2
                  ORDER BY seq DESC",
             )
-            .map_err(DstError::SQLiteStateError)?;
+            .expect("DST failed to prepare SQLite point lookup");
         let mut rows = stmt
             .query(params![key, seq as i64])
-            .map_err(DstError::SQLiteStateError)?;
+            .expect("DST failed to execute SQLite point lookup");
 
-        if let Some(row) = rows.next().map_err(DstError::SQLiteStateError)? {
-            let entry = row_entry_from_read_row(row).map_err(DstError::SQLiteStateError)?;
-            return Ok(row_entry_to_key_value(entry));
+        if let Some(row) = rows
+            .next()
+            .expect("DST failed to advance SQLite point lookup")
+        {
+            let entry =
+                row_entry_from_read_row(row).expect("DST failed to decode SQLite point lookup row");
+            return row_entry_to_key_value(entry);
         }
 
-        Ok(None)
+        None
     }
 
     fn scan_key_values_at_seq(
@@ -282,7 +285,7 @@ impl SQLiteState {
         seq: u64,
         filter: ScanFilter,
         order: IterationOrder,
-    ) -> Result<Vec<KeyValue>, Error> {
+    ) -> Vec<KeyValue> {
         let mut stmt = self
             .conn
             .prepare(
@@ -291,16 +294,16 @@ impl SQLiteState {
                  WHERE seq <= ?1
                  ORDER BY key ASC, seq DESC",
             )
-            .map_err(DstError::SQLiteStateError)?;
+            .expect("DST failed to prepare SQLite scan");
         let mut rows = stmt
             .query(params![seq as i64])
-            .map_err(DstError::SQLiteStateError)?;
+            .expect("DST failed to execute SQLite scan");
 
         let mut results = Vec::new();
         let mut current_key: Option<Bytes> = None;
 
-        while let Some(row) = rows.next().map_err(DstError::SQLiteStateError)? {
-            let entry = row_entry_from_read_row(row).map_err(DstError::SQLiteStateError)?;
+        while let Some(row) = rows.next().expect("DST failed to advance SQLite scan") {
+            let entry = row_entry_from_read_row(row).expect("DST failed to decode SQLite scan row");
             let matches_filter = match &filter {
                 ScanFilter::Range { start, end } => {
                     let start_ok = match start {
@@ -334,7 +337,7 @@ impl SQLiteState {
             results.reverse();
         }
 
-        Ok(results)
+        results
     }
 }
 

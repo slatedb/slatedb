@@ -27,7 +27,6 @@ rand = { workspace = true }
 rusqlite = { version = "0.37.0", features = ["bundled"] }
 slatedb = { workspace = true, features = ["lz4", "snappy", "test-util", "wal_disable", "zlib", "zstd"] }
 slatedb-common = { workspace = true, features = ["test-util"] }
-thiserror.workspace = true
 tokio = { workspace = true, features = ["macros", "test-util", "rt"] }
 tokio-util = { workspace = true, default-features = false, features = ["rt"] }
 tracing = { workspace = true }

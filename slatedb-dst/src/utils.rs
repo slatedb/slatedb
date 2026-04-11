@@ -41,7 +41,7 @@ pub async fn run_scenarios<I>(
 where
     I: IntoIterator<Item = Box<dyn Scenario>>,
 {
-    let dst = Dst::new(db, system_clock, settings)?;
+    let dst = Dst::new(db, system_clock, settings);
     dst.run_scenarios(scenarios).await?;
     Ok(dst)
 }
