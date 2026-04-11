@@ -26,15 +26,6 @@ use tracing::info;
 const KEY_SPACE: u64 = 8;
 const REMOTE_VALIDATION_RETRY_LIMIT: usize = 128;
 
-fn ensure_supported_validation_read(dirty: bool) -> Result<(), Error> {
-    if dirty {
-        return Err(Error::internal(
-            "DST reader validation does not support dirty=true in v1".to_string(),
-        ));
-    }
-    Ok(())
-}
-
 pub(crate) async fn validate_get<K>(
     ctx: &ScenarioContext,
     key: K,
@@ -43,8 +34,6 @@ pub(crate) async fn validate_get<K>(
 where
     K: AsRef<[u8]> + Send,
 {
-    ensure_supported_validation_read(options.dirty)?;
-
     let key = key.as_ref().to_vec();
     for _attempt in 0..REMOTE_VALIDATION_RETRY_LIMIT {
         let snapshot = ctx.db().snapshot().await?;
@@ -104,8 +93,6 @@ where
     K: AsRef<[u8]> + Send,
     T: RangeBounds<K> + Send + Clone + Debug,
 {
-    ensure_supported_validation_read(options.dirty)?;
-
     for _attempt in 0..REMOTE_VALIDATION_RETRY_LIMIT {
         let snapshot = ctx.db().snapshot().await?;
         let snapshot_seq = snapshot.seq();
