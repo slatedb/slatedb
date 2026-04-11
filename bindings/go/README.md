@@ -2,10 +2,6 @@
 
 Official Go binding for SlateDB.
 
-- Module path: `slatedb.io/slatedb-go`
-- Import path: `slatedb.io/slatedb-go/uniffi`
-- Package name: `slatedb`
-
 ## Install
 
 ```bash
