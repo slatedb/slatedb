@@ -169,6 +169,8 @@ fn test_dst_is_deterministic(
         let rand = Rc::new(DbRand::new(seed));
         let system_clock = Arc::new(MockSystemClock::new());
         let mut simulation_scenarios: Vec<Box<dyn Scenario>> = Vec::with_capacity(11);
+
+        // Add scenarios.
         for name in ["writer-0", "writer-1", "writer-2", "writer-3"] {
             simulation_scenarios.push(Box::new(scenarios::WriterScenario {
                 name,
@@ -195,6 +197,7 @@ fn test_dst_is_deterministic(
             rand: rand.clone(),
         }));
 
+        // Run the simulation.
         let runtime = build_runtime(rand.rng().random::<u64>());
         let rand_for_run = rand.clone();
         let system_clock_for_run = system_clock.clone();
@@ -220,6 +223,7 @@ fn test_dst_is_deterministic(
             }
         })?;
 
+        // Verify the RNG/clock always match on each run.
         let next_u64 = Some(rand.rng().random::<u64>());
         let next_time = Some(system_clock.now());
 
