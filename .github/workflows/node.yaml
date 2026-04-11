@@ -142,10 +142,10 @@ jobs:
         with:
           ref: "v${{ github.event.inputs.version }}"
 
-      - name: Set up Node 22
+      - name: Set up Node 24.14.1
         uses: actions/setup-node@v4
         with:
-          node-version: "22"
+          node-version: "24.14.1"
           registry-url: "https://registry.npmjs.org"
 
       - name: Setup Rust stable
@@ -219,6 +219,13 @@ jobs:
           tar -tf "${TARBALL}" | grep -Fx 'package/prebuilds/win32-x64/slatedb_uniffi.dll'
           tar -tf "${TARBALL}" | grep -Fx 'package/prebuilds/win32-arm64/slatedb_uniffi.dll'
 
+      - name: Verify Node and npm versions for trusted publishing
+        run: |
+          node --version
+          npm --version
+
       - name: Publish to npm
         working-directory: ./bindings/node
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NODE_AUTH_TOKEN }}
         run: npm publish --provenance --access public
