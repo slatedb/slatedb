@@ -18,7 +18,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use rand::Rng;
 use slatedb::config::{DurabilityLevel, PutOptions, ReadOptions, ScanOptions};
-use slatedb::{DbRand, DbStatus, Error, IterationOrder, KeyValue};
+use slatedb::{DbRand, Error, IterationOrder, KeyValue};
 use slatedb_dst::{Scenario, ScenarioContext, ScenarioWriteBatch};
 use tracing::info;
 
@@ -32,16 +32,6 @@ fn ensure_supported_validation_read(dirty: bool) -> Result<(), Error> {
         ));
     }
     Ok(())
-}
-
-fn format_status(status: &DbStatus) -> String {
-    format!(
-        "durable_seq={} manifest_id={} last_l0_seq={} close_reason={:?}",
-        status.durable_seq,
-        status.current_manifest.id,
-        status.current_manifest.manifest.last_l0_seq,
-        status.close_reason,
-    )
 }
 
 fn owned_bounds<K, T>(range: &T) -> (Bound<Vec<u8>>, Bound<Vec<u8>>)
@@ -99,13 +89,13 @@ where
 
         if actual != expected {
             return Err(Error::internal(format!(
-                "validate_get mismatch: scenario={} key={:?} options={:?} snapshot_seq={} visible_seq={} status={} actual={:?} expected={:?}",
+                "validate_get mismatch: scenario={} key={:?} options={:?} snapshot_seq={} visible_seq={} status={:?} actual={:?} expected={:?}",
                 ctx.scenario(),
                 key,
                 options,
                 snapshot_seq,
                 visible_seq,
-                format_status(&after_status),
+                after_status,
                 actual,
                 expected
             )));
@@ -164,14 +154,14 @@ where
 
         if actual != expected {
             return Err(Error::internal(format!(
-                "validate_scan mismatch: scenario={} start={:?} end={:?} options={:?} snapshot_seq={} visible_seq={} status={} actual={:?} expected={:?}",
+                "validate_scan mismatch: scenario={} start={:?} end={:?} options={:?} snapshot_seq={} visible_seq={} status={:?} actual={:?} expected={:?}",
                 ctx.scenario(),
                 start,
                 end,
                 options,
                 snapshot_seq,
                 visible_seq,
-                format_status(&after_status),
+                after_status,
                 actual,
                 expected
             )));
