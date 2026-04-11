@@ -152,6 +152,124 @@ pub fn build_runtime(seed: u64) -> tokio::runtime::LocalRuntime {
         .unwrap()
 }
 
+const REMOTE_VALIDATION_RETRY_LIMIT: usize = 128;
+
+pub(crate) async fn validate_get<K>(
+    ctx: &ScenarioContext,
+    key: K,
+    options: &ReadOptions,
+) -> Result<Option<KeyValue>, Error>
+where
+    K: AsRef<[u8]> + Send,
+{
+    let key = key.as_ref().to_vec();
+    for _attempt in 0..REMOTE_VALIDATION_RETRY_LIMIT {
+        let snapshot = ctx.db().snapshot().await?;
+        let snapshot_seq = snapshot.seq();
+        let before_status =
+            matches!(options.durability_filter, DurabilityLevel::Remote).then(|| ctx.db().status());
+        let actual = snapshot.get_key_value_with_options(&key, options).await?;
+        let after_status = ctx.db().status();
+
+        if let Some(before_status) = before_status.as_ref() {
+            if before_status.durable_seq != after_status.durable_seq {
+                tokio::task::yield_now().await;
+                continue;
+            }
+        }
+
+        let visible_seq = match options.durability_filter {
+            DurabilityLevel::Remote => snapshot_seq.min(after_status.durable_seq),
+            DurabilityLevel::Memory => snapshot_seq,
+            _ => snapshot_seq,
+        };
+        let expected = ctx
+            .as_of(visible_seq)
+            .get_key_value_with_options(&key, options)?;
+
+        assert_eq!(
+            actual,
+            expected,
+            "validate_get mismatch: scenario={} key={:?} options={:?} snapshot_seq={} visible_seq={} status={:?}",
+            ctx.scenario(),
+            key,
+            options,
+            snapshot_seq,
+            visible_seq,
+            after_status
+        );
+
+        return Ok(actual);
+    }
+
+    panic!(
+        "validate_get could not obtain a stable remote durable frontier: scenario={} key={:?} options={:?}",
+        ctx.scenario(),
+        key,
+        options
+    )
+}
+
+pub(crate) async fn validate_scan<K, T>(
+    ctx: &ScenarioContext,
+    range: T,
+    options: &ScanOptions,
+) -> Result<Vec<KeyValue>, Error>
+where
+    K: AsRef<[u8]> + Send,
+    T: RangeBounds<K> + Send + Clone + Debug,
+{
+    for _attempt in 0..REMOTE_VALIDATION_RETRY_LIMIT {
+        let snapshot = ctx.db().snapshot().await?;
+        let snapshot_seq = snapshot.seq();
+        let before_status =
+            matches!(options.durability_filter, DurabilityLevel::Remote).then(|| ctx.db().status());
+        let mut actual_iter = snapshot.scan_with_options(range.clone(), options).await?;
+        let mut actual = Vec::new();
+        while let Some(kv) = actual_iter.next().await? {
+            actual.push(kv);
+        }
+        let after_status = ctx.db().status();
+
+        if let Some(before_status) = before_status.as_ref() {
+            if before_status.durable_seq != after_status.durable_seq {
+                tokio::task::yield_now().await;
+                continue;
+            }
+        }
+
+        let visible_seq = match options.durability_filter {
+            DurabilityLevel::Remote => snapshot_seq.min(after_status.durable_seq),
+            DurabilityLevel::Memory => snapshot_seq,
+            _ => snapshot_seq,
+        };
+        let expected = ctx
+            .as_of(visible_seq)
+            .scan_with_options::<K, _>(range.clone(), options)?;
+
+        assert_eq!(
+            actual,
+            expected,
+            "validate_scan mismatch: scenario={} range={:?} options={:?} snapshot_seq={} visible_seq={} status={:?}",
+            ctx.scenario(),
+            range,
+            options,
+            snapshot_seq,
+            visible_seq,
+            after_status
+        );
+
+        return Ok(actual);
+    }
+
+    panic!(
+        "validate_scan could not obtain a stable remote durable frontier: scenario={} range={:?} options={:?}",
+        ctx.scenario(),
+        range,
+        options
+    )
+}
+
 static INIT_LOGGING: Once = Once::new();
 
 #[ctor::ctor]
