@@ -20,7 +20,8 @@ build and run code that imports it you need:
 
 If you are working from this repository, that usually means building
 `slatedb-uniffi` and pointing `LD_LIBRARY_PATH` or `DYLD_LIBRARY_PATH` at
-`target/debug` or `target/release`.
+`target/debug` or `target/release`. See [DEVELOPMENT.md](DEVELOPMENT.md) for
+more details.
 
 ## Quick Start
 
