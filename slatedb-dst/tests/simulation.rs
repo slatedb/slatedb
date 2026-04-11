@@ -24,10 +24,9 @@ use object_store::memory::InMemory;
 use object_store::ObjectStore;
 use rand::Rng;
 use rstest::rstest;
-use slatedb::config::Settings;
 use slatedb::{DbRand, Error};
 use slatedb_common::clock::{MockSystemClock, SystemClock};
-use slatedb_dst::utils::{build_runtime, build_scenario_db};
+use slatedb_dst::utils::{build_runtime, build_scenario_db, build_settings};
 use slatedb_dst::{Dst, Scenario, ScenarioContext};
 #[cfg(slow)]
 use tracing::info_span;
@@ -50,15 +49,7 @@ async fn run_simulation(
     mut simulation_scenarios: Vec<Box<dyn Scenario>>,
     wall_clock_time: Option<Duration>,
 ) -> Result<SimulationResult, Error> {
-    let settings = Settings {
-        flush_interval: None,
-        compactor_options: None,
-        garbage_collector_options: None,
-        // The bundled DST simulation avoids TTL writes until the SQLite state model
-        // flush-time TTL tombstoning.
-        default_ttl: None,
-        ..Default::default()
-    };
+    let settings = build_settings(&rand);
     let db_seed = rand.rng().random::<u64>();
     let db = build_scenario_db(
         object_store,
