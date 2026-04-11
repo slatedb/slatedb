@@ -220,28 +220,24 @@ fn test_dst_is_deterministic(
             }
         })?;
 
-        let next_u64 = rand.rng().random::<u64>();
-        let next_time = system_clock.now();
+        let next_u64 = Some(rand.rng().random::<u64>());
+        let next_time = Some(system_clock.now());
 
-        if let Some(expected_next_u64) = expected_next_u64 {
-            assert_eq!(
-                next_u64, expected_next_u64,
-                "non-determinism detected [seed={}, simulation_count={}, next_u64={}, expected_u64={}]",
-                seed, simulation_count, next_u64, expected_next_u64
-            );
-        } else {
-            expected_next_u64 = Some(next_u64);
+        if expected_next_time.is_none() && expected_next_u64.is_none() {
+            expected_next_time = next_time;
+            expected_next_u64 = next_u64;
         }
 
-        if let Some(expected_next_time) = &expected_next_time {
-            assert_eq!(
-                &next_time, expected_next_time,
-                "non-determinism detected [seed={}, simulation_count={}, next_time={:?}, expected_time={:?}]",
-                seed, simulation_count, next_time, expected_next_time
-            );
-        } else {
-            expected_next_time = Some(next_time);
-        }
+        assert_eq!(
+            next_time, expected_next_time,
+            "non-determinism detected [seed={}, simulation_count={}, next_time={:?}, expected_time={:?}]",
+            seed, simulation_count, next_time, expected_next_time
+        );
+        assert_eq!(
+            next_u64, expected_next_u64,
+            "non-determinism detected [seed={}, simulation_count={}, next_u64={:?}, expected_u64={:?}]",
+            seed, simulation_count, next_u64, expected_next_u64
+        );
     }
 
     Ok(())
