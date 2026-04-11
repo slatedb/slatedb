@@ -1,5 +1,7 @@
 //! Helpers for scenario-driven deterministic simulation testing.
 
+use std::fmt::Debug;
+use std::ops::RangeBounds;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::Once;
@@ -11,12 +13,14 @@ use rand::Rng;
 use slatedb::config::{
     CompressionCodec, GarbageCollectorDirectoryOptions, GarbageCollectorOptions,
 };
-use slatedb::{Db, DbBuilder, DbRand, Error, Settings};
+use slatedb::config::{DurabilityLevel, ReadOptions, ScanOptions};
+use slatedb::{Db, DbBuilder, DbRand, Error, KeyValue, Settings};
 use slatedb_common::clock::MockSystemClock;
 use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_subscriber::EnvFilter;
 
 use crate::object_store::ClockedObjectStore;
+use crate::ScenarioContext;
 use crate::{Dst, Scenario};
 
 const MIB_1: usize = 1024 * 1024;
@@ -152,9 +156,14 @@ pub fn build_runtime(seed: u64) -> tokio::runtime::LocalRuntime {
         .unwrap()
 }
 
+/// Number of attempts to retry remote durability validation in `validate_get`
+/// and `validate_scan` before panicking. This is needed to account for the
+/// fact that the remote durable frontier may advance while we're trying to
+/// validate against it, which can cause transient validation failures that
+/// require retrying.
 const REMOTE_VALIDATION_RETRY_LIMIT: usize = 128;
 
-pub(crate) async fn validate_get<K>(
+pub async fn validate_get<K>(
     ctx: &ScenarioContext,
     key: K,
     options: &ReadOptions,
@@ -210,7 +219,7 @@ where
     )
 }
 
-pub(crate) async fn validate_scan<K, T>(
+pub async fn validate_scan<K, T>(
     ctx: &ScenarioContext,
     range: T,
     options: &ScanOptions,

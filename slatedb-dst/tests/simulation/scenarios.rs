@@ -11,15 +11,14 @@
 //! iteration limit and stop on their own, while others run until the shared
 //! shutdown token is cancelled by another scenario.
 
-use std::fmt::Debug;
-use std::ops::RangeBounds;
 use std::rc::Rc;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use rand::Rng;
 use slatedb::config::{DurabilityLevel, PutOptions, ReadOptions, ScanOptions};
-use slatedb::{DbRand, Error, IterationOrder, KeyValue};
+use slatedb::{DbRand, Error, IterationOrder};
+use slatedb_dst::utils::{validate_get, validate_scan};
 use slatedb_dst::{Scenario, ScenarioContext, ScenarioWriteBatch};
 use tracing::info;
 
