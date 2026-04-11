@@ -511,6 +511,14 @@ pub(crate) async fn compress_and_transform(
     let transformed = transform(compressed, block_transformer).await?;
     let checksum = crc32fast::hash(&transformed);
     let len = transformed.len() + CHECKSUM_SIZE;
+    // Reserve the exact number of bytes we are about to append. Without this,
+    // callers that pass an empty or undersized `Vec` (e.g.
+    // `EncodedSsTableBlockBuilder::build`, or the footer builder which calls
+    // this function multiple times on a shared `Vec`) pay `~log2(len)`
+    // reallocs per invocation as the backing buffer geometrically doubles.
+    // For workloads that build many blocks per SST (every write burst), those
+    // transient over-provisioned buffers dominate peak `inuse_space`.
+    buf.reserve(len);
     buf.put(transformed);
     buf.put_u32(checksum);
     Ok(len)
