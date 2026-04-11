@@ -226,4 +226,6 @@ jobs:
 
       - name: Publish to npm
         working-directory: ./bindings/node
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NODE_AUTH_TOKEN }}
         run: npm publish --provenance --access public
