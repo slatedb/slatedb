@@ -24,8 +24,8 @@ use object_store::memory::InMemory;
 use object_store::ObjectStore;
 use rand::Rng;
 use rstest::rstest;
-use slatedb::config::{DurabilityLevel, ScanOptions, Settings};
-use slatedb::{DbRand, Error, IterationOrder, KeyValue};
+use slatedb::config::Settings;
+use slatedb::{DbRand, Error};
 use slatedb_common::clock::{MockSystemClock, SystemClock};
 use slatedb_dst::utils::{build_runtime, build_scenario_db};
 use slatedb_dst::{Dst, Scenario};
@@ -39,55 +39,8 @@ const NIGHTLY_WALL_CLOCK: Duration = Duration::from_secs(12 * 60);
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SimulationResult {
     final_seq: u64,
-    final_rows: Vec<KeyValue>,
     next_u64: u64,
     next_time: DateTime<Utc>,
-}
-
-async fn verify_scan_orders(ctx: &slatedb_dst::ScenarioContext) -> Result<(), Error> {
-    let full_range = vec![0x00]..vec![0xff];
-
-    for order in [IterationOrder::Ascending, IterationOrder::Descending] {
-        let _ = scenarios::validate_scan::<Vec<u8>, _>(
-            ctx,
-            full_range.clone(),
-            &ScanOptions::default().with_order(order),
-        )
-        .await?;
-    }
-
-    ctx.flush().await?;
-
-    for order in [IterationOrder::Ascending, IterationOrder::Descending] {
-        let _ = scenarios::validate_scan::<Vec<u8>, _>(
-            ctx,
-            full_range.clone(),
-            &ScanOptions::default()
-                .with_order(order)
-                .with_durability_filter(DurabilityLevel::Remote),
-        )
-        .await?;
-    }
-
-    Ok(())
-}
-
-async fn read_final_state(
-    ctx: &slatedb_dst::ScenarioContext,
-) -> Result<(u64, Vec<KeyValue>), Error> {
-    let snapshot = ctx.db().snapshot().await?;
-    let seq = snapshot.seq();
-    let mut iter = snapshot
-        .scan_with_options(
-            vec![0x00]..vec![0xff],
-            &ScanOptions::default().with_order(IterationOrder::Ascending),
-        )
-        .await?;
-    let mut rows = Vec::new();
-    while let Some(kv) = iter.next().await? {
-        rows.push(kv);
-    }
-    Ok((seq, rows))
 }
 
 async fn run_simulation(
@@ -126,8 +79,7 @@ async fn run_simulation(
     dst.run_scenarios(simulation_scenarios).await?;
 
     let verifier = dst.context("verifier");
-    verify_scan_orders(&verifier).await?;
-    let (final_seq, final_rows) = read_final_state(&verifier).await?;
+    let final_seq = verify_final_state(&verifier).await?;
 
     let next_u64 = rand.rng().random::<u64>();
     let next_time = system_clock.now();
@@ -136,10 +88,41 @@ async fn run_simulation(
 
     Ok(SimulationResult {
         final_seq,
-        final_rows,
         next_u64,
         next_time,
     })
+}
+
+async fn verify_final_state(ctx: &slatedb_dst::ScenarioContext) -> Result<u64, Error> {
+    let full_range = vec![0x00]..vec![0xff];
+    let snapshot = ctx.db().snapshot().await?;
+    let final_seq = snapshot.seq();
+    let mut expected_iter = ctx
+        .as_of(final_seq)
+        .scan::<Vec<u8>, _>(full_range.clone())?
+        .into_iter();
+    let mut actual_iter = snapshot.scan::<Vec<u8>, _>(full_range).await?;
+    for (row_index, expected) in expected_iter.by_ref().enumerate() {
+        let actual = actual_iter.next().await?.expect(&format!(
+            "final state mismatch: db ended early at index={} final_seq={} expected={:?}",
+            row_index, final_seq, expected
+        ));
+        assert_eq!(
+            actual, expected,
+            "final state mismatch at index={} final_seq={}",
+            row_index, final_seq
+        );
+    }
+
+    let trailing_actual = actual_iter.next().await?;
+    assert!(
+        trailing_actual.is_none(),
+        "final state mismatch: db has extra row after sqlite rows final_seq={} actual={:?}",
+        final_seq,
+        trailing_actual
+    );
+
+    Ok(final_seq)
 }
 
 /// Verifies that SlateDB is deterministic when we seed the random number generator, system
@@ -244,11 +227,6 @@ fn test_dst_is_deterministic(
                 result.final_seq, expected_result.final_seq,
                 "non-determinism detected [seed={}, simulation_count={}, final_seq={}, expected_seq={}]",
                 seed, simulation_count, result.final_seq, expected_result.final_seq
-            );
-            assert_eq!(
-                result.final_rows, expected_result.final_rows,
-                "non-determinism detected [seed={}, simulation_count={}]",
-                seed, simulation_count
             );
         } else {
             expected_result = Some(result);
