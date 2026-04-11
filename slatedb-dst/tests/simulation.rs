@@ -94,7 +94,7 @@ async fn run_simulation(
 }
 
 async fn verify_final_state(ctx: &slatedb_dst::ScenarioContext) -> Result<u64, Error> {
-    let full_range = vec![0x00]..vec![0xff];
+    let full_range = ..;
     let snapshot = ctx.db().snapshot().await?;
     let final_seq = snapshot.seq();
     let mut expected_iter = ctx

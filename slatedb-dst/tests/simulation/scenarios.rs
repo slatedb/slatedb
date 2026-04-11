@@ -370,12 +370,11 @@ impl Scenario for ReaderScenario {
                 };
                 let options = ScanOptions::default().with_order(order);
                 if scan_memory {
-                    let _ =
-                        validate_scan::<Vec<u8>, _>(&ctx, vec![0x00]..vec![0xff], &options).await?;
+                    let _ = validate_scan::<Vec<u8>, _>(&ctx, .., &options).await?;
                 } else {
                     let _ = validate_scan::<Vec<u8>, _>(
                         &ctx,
-                        vec![0x00]..vec![0xff],
+                        ..,
                         &options.with_durability_filter(DurabilityLevel::Remote),
                     )
                     .await?;
