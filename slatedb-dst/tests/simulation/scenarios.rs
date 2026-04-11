@@ -59,29 +59,27 @@ where
             .as_of(visible_seq)
             .get_key_value_with_options(&key, options)?;
 
-        if actual != expected {
-            return Err(Error::internal(format!(
-                "validate_get mismatch: scenario={} key={:?} options={:?} snapshot_seq={} visible_seq={} status={:?} actual={:?} expected={:?}",
-                ctx.scenario(),
-                key,
-                options,
-                snapshot_seq,
-                visible_seq,
-                after_status,
-                actual,
-                expected
-            )));
-        }
+        assert_eq!(
+            actual,
+            expected,
+            "validate_get mismatch: scenario={} key={:?} options={:?} snapshot_seq={} visible_seq={} status={:?}",
+            ctx.scenario(),
+            key,
+            options,
+            snapshot_seq,
+            visible_seq,
+            after_status
+        );
 
         return Ok(actual);
     }
 
-    Err(Error::internal(format!(
+    panic!(
         "validate_get could not obtain a stable remote durable frontier: scenario={} key={:?} options={:?}",
         ctx.scenario(),
         key,
         options
-    )))
+    )
 }
 
 pub(crate) async fn validate_scan<K, T>(
@@ -121,29 +119,27 @@ where
             .as_of(visible_seq)
             .scan_with_options::<K, _>(range.clone(), options)?;
 
-        if actual != expected {
-            return Err(Error::internal(format!(
-                "validate_scan mismatch: scenario={} range={:?} options={:?} snapshot_seq={} visible_seq={} status={:?} actual={:?} expected={:?}",
-                ctx.scenario(),
-                range,
-                options,
-                snapshot_seq,
-                visible_seq,
-                after_status,
-                actual,
-                expected
-            )));
-        }
+        assert_eq!(
+            actual,
+            expected,
+            "validate_scan mismatch: scenario={} range={:?} options={:?} snapshot_seq={} visible_seq={} status={:?}",
+            ctx.scenario(),
+            range,
+            options,
+            snapshot_seq,
+            visible_seq,
+            after_status
+        );
 
         return Ok(actual);
     }
 
-    Err(Error::internal(format!(
+    panic!(
         "validate_scan could not obtain a stable remote durable frontier: scenario={} range={:?} options={:?}",
         ctx.scenario(),
         range,
         options
-    )))
+    )
 }
 
 /// Issues the mutating side of the simulation workload.
