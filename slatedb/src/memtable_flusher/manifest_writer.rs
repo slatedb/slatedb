@@ -62,7 +62,7 @@ enum ManifestWriterCommand {
     /// Periodic manifest poll to pick up remote changes (e.g. compaction).
     PollManifest,
     /// The WAL durable sequence advanced; retry any batch blocked on WAL durability.
-    WalDurableAdvanced,
+    DurableSeqAdvanced,
 }
 
 impl std::fmt::Debug for ManifestWriterCommand {
@@ -82,7 +82,7 @@ impl std::fmt::Debug for ManifestWriterCommand {
                 write!(f, "CreateCheckpoint({through_seq:?})")
             }
             Self::PollManifest => write!(f, "PollManifest"),
-            Self::WalDurableAdvanced => write!(f, "WalDurableAdvanced"),
+            Self::DurableSeqAdvanced => write!(f, "DurableSeqAdvanced"),
         }
     }
 }
@@ -197,7 +197,7 @@ impl MessageHandler<ManifestWriterCommand> for ManifestWriterHandler {
     }
 
     fn notifiers(&mut self) -> Vec<Box<dyn crate::dispatcher::Notifier<ManifestWriterCommand>>> {
-        vec![Box::new(WalDurableNotifier {
+        vec![Box::new(DurableSeqNotifier {
             rx: self.db_status_rx.clone(),
         })]
     }
@@ -224,7 +224,7 @@ impl MessageHandler<ManifestWriterCommand> for ManifestWriterHandler {
             ManifestWriterCommand::PollManifest => {
                 self.refresh_manifest_progress().await?;
             }
-            ManifestWriterCommand::WalDurableAdvanced => {}
+            ManifestWriterCommand::DurableSeqAdvanced => {}
         }
         self.process_ready_work().await
     }
@@ -752,14 +752,14 @@ struct PendingCheckpoint {
 }
 
 /// Adapts a [`DbStatus`](crate::db_status::DbStatus) watch into a [Notifier]
-/// that produces [ManifestWriterCommand::WalDurableAdvanced] whenever the
+/// that produces [ManifestWriterCommand::DurableSeqAdvanced] whenever the
 /// database status changes (which includes WAL durable sequence advances).
-struct WalDurableNotifier {
+struct DurableSeqNotifier {
     rx: watch::Receiver<crate::db_status::DbStatus>,
 }
 
 #[async_trait]
-impl crate::dispatcher::Notifier<ManifestWriterCommand> for WalDurableNotifier {
+impl crate::dispatcher::Notifier<ManifestWriterCommand> for DurableSeqNotifier {
     async fn notify(&mut self) -> ManifestWriterCommand {
         // changed() returns Err only when the sender is dropped. In that case
         // the database is shutting down and the dispatcher's cancellation token
@@ -767,7 +767,7 @@ impl crate::dispatcher::Notifier<ManifestWriterCommand> for WalDurableNotifier {
         if self.rx.changed().await.is_err() {
             std::future::pending::<()>().await;
         }
-        ManifestWriterCommand::WalDurableAdvanced
+        ManifestWriterCommand::DurableSeqAdvanced
     }
 }
 
