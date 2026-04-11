@@ -31,7 +31,6 @@ use std::{
 
 /// SlateDB uses MonotonicClock internally so that it can enforce that clock ticks
 /// from the underlying implementation are monotonically increasing.
-#[allow(dead_code)] // unused during DST
 pub(crate) struct MonotonicClock {
     pub(crate) last_tick: AtomicI64,
     pub(crate) last_durable_tick: AtomicI64,
@@ -55,6 +54,7 @@ impl MonotonicClock {
         self.last_durable_tick.fetch_max(tick, Ordering::SeqCst)
     }
 
+    #[cfg_attr(dst, allow(dead_code))] // unused during DST
     pub(crate) async fn now(&self) -> Result<i64, SlateDBError> {
         let tick = self.delegate.now().timestamp_millis();
         match self.enforce_monotonic(tick) {
