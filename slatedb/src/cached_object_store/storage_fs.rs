@@ -130,7 +130,6 @@ impl FsCacheEntry {
                 .open(tmp_path)
                 .map_err(wrap_io_err)?;
             file.write_all(&buf).map_err(wrap_io_err)?;
-            file.sync_all().map_err(wrap_io_err)?;
             std::fs::rename(tmp_path, path).map_err(wrap_io_err)
         })
         .await?
