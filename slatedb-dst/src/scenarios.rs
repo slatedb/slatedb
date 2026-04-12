@@ -105,7 +105,7 @@ impl Scenario for WriterScenario {
 
                     let second_key_suffix = rand.rng().random::<u64>() % self.key_space;
                     let second_key = format!("key-{second_key_suffix}").into_bytes();
-                    let should_put_second = rand.rng().random::<u64>() & 1 == 0;
+                    let should_put_second = rand.rng().random::<bool>();
                     if should_put_second {
                         let second_value_suffix = rand.rng().random::<u64>();
                         let second_value = format!("batch-{second_value_suffix}").into_bytes();
@@ -121,7 +121,7 @@ impl Scenario for WriterScenario {
                 }
             }
 
-            let should_yield = rand.rng().random::<u64>() & 1 == 0;
+            let should_yield = rand.rng().random::<bool>();
             if should_yield {
                 tokio::task::yield_now().await;
             }
@@ -181,13 +181,13 @@ impl Scenario for ReaderScenario {
                 info!(iteration, total_iterations = ?self.iterations, "scenario iteration");
             }
 
-            let do_get = rand.rng().random::<u64>() & 1 == 0;
+            let do_get = rand.rng().random::<bool>();
             if do_get {
                 let key_suffix = rand.rng().random::<u64>() % self.key_space;
                 let key = format!("key-{key_suffix}").into_bytes();
                 let _ = validate_get(&ctx, &key, &ReadOptions::default()).await?;
             } else {
-                let order = if rand.rng().random::<u64>() & 1 == 0 {
+                let order = if rand.rng().random::<bool>() {
                     IterationOrder::Ascending
                 } else {
                     IterationOrder::Descending
@@ -239,7 +239,7 @@ impl Scenario for ClockScenario {
                 info!(iteration = iterations, "scenario iteration");
             }
             let advance_ms = 1 + (rand.rng().random::<u64>() % 7);
-            let should_yield = rand.rng().random::<u64>() & 1 == 0;
+            let should_yield = rand.rng().random::<bool>();
             ctx.advance_clock(Duration::from_millis(advance_ms)).await?;
             if should_yield {
                 tokio::task::yield_now().await;
@@ -333,7 +333,7 @@ impl Scenario for FlusherScenario {
                 info!(iteration, total_iterations = ?self.iterations, "scenario iteration");
             }
 
-            let should_flush = rand.rng().random::<u64>() & 1 == 0;
+            let should_flush = rand.rng().random::<bool>();
             if should_flush {
                 ctx.flush().await?;
             }
