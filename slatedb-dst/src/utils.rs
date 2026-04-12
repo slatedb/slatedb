@@ -143,7 +143,7 @@ pub fn build_settings(rand: &DbRand) -> Settings {
     let compression_codec = COMPRESSION_CODECS[compression_codec_idx]
         .and_then(|name| CompressionCodec::from_str(name).ok());
     // Otherwise, the compactor never runs and writers get blocked permanently.
-    let min_compaction_sources = rand.rng().random_range(4..10).min(settings.l0_max_ssts);
+    let min_compaction_sources = rand.rng().random_range(4..10).min(l0_max_ssts);
     // Prevent scheduler from having a higher min compaction sources than max compaction sources.
     let max_compaction_sources = 8.max(min_compaction_sources);
     let compactor_options = Some(CompactorOptions {
