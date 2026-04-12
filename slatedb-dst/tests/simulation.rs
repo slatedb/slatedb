@@ -171,6 +171,8 @@ fn test_dst_is_deterministic(
 ///
 /// - `RUSTFLAGS="--cfg dst --cfg slow --cfg tokio_unstable"`
 /// - `SLATEDB_DST_ROOT` must be set to a directory to store test data.
+/// - `SLATEDB_DST_START_SEED` optionally sets the root seed for the entire test. Useful for
+///   reproducing a specific nightly run. If not set, a random seed will be used.
 #[test]
 #[cfg(slow)]
 fn test_dst_nightly() -> Result<(), Error> {
@@ -185,7 +187,18 @@ fn test_dst_nightly() -> Result<(), Error> {
     let mut system = System::new();
     system.refresh_cpu_all();
     let num_cores = system.cpus().len();
-    info!("running nightly [num_cores={}]", num_cores);
+    let starting_seed = std::env::var("SLATEDB_DST_START_SEED")
+        .ok()
+        .map(|value| {
+            value
+                .parse::<u64>()
+                .expect("SLATEDB_DST_START_SEED must be a valid u64")
+        })
+        .unwrap_or_else(|| rand::rng().random::<u64>());
+    info!(
+        "running nightly [num_cores={}, starting_seed={:?}]",
+        num_cores, starting_seed
+    );
 
     for core in 0..num_cores {
         let test_dir = test_root.join(format!("core-{}", core));
@@ -199,7 +212,7 @@ fn test_dst_nightly() -> Result<(), Error> {
                     .expect("failed to create object store")
                     .with_automatic_cleanup(true),
             );
-            let seed = rand::rng().random::<u64>();
+            let seed = starting_seed.wrapping_add(core as u64);
             let rand = Rc::new(DbRand::new(seed));
             let runtime = build_runtime(rand.seed());
             let system_clock = Arc::new(MockSystemClock::new());
