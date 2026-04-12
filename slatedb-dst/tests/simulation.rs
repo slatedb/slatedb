@@ -32,7 +32,7 @@ use tracing::{error, info};
 
 #[cfg(slow)]
 const NIGHTLY_WALL_CLOCK: Duration = Duration::from_secs(12 * 60);
-const MAX_KEY_SPACE: u64 = 16;
+const MAX_KEY_SPACE: u64 = 1024;
 
 /// Verifies that SlateDB is deterministic when we seed the random number generator, system
 /// clock, and runtime appropriately.
