@@ -11,7 +11,8 @@ use log::info;
 use object_store::ObjectStore;
 use rand::Rng;
 use slatedb::config::{
-    CompressionCodec, GarbageCollectorDirectoryOptions, GarbageCollectorOptions,
+    CompactorOptions, CompressionCodec, GarbageCollectorDirectoryOptions, GarbageCollectorOptions,
+    SizeTieredCompactionSchedulerOptions,
 };
 use slatedb::config::{ReadOptions, ScanOptions};
 use slatedb::{Db, DbBuilder, DbRand, Error, KeyValue, Settings};
@@ -141,6 +142,19 @@ pub fn build_settings(rand: &DbRand) -> Settings {
     let compression_codec_idx = rng.random_range(0..COMPRESSION_CODECS.len());
     let compression_codec = COMPRESSION_CODECS[compression_codec_idx]
         .and_then(|name| CompressionCodec::from_str(name).ok());
+    // Otherwise, the compactor never runs and writers get blocked permanently.
+    let min_compaction_sources = rand.rng().random_range(4..10).min(settings.l0_max_ssts);
+    // Prevent scheduler from having a higher min compaction sources than max compaction sources.
+    let max_compaction_sources = 8.max(min_compaction_sources);
+    let compactor_options = Some(CompactorOptions {
+        scheduler_options: SizeTieredCompactionSchedulerOptions {
+            min_compaction_sources,
+            max_compaction_sources,
+            ..Default::default()
+        }
+        .into(),
+        ..Default::default()
+    });
 
     let settings = Settings {
         flush_interval: Some(flush_interval),
@@ -152,6 +166,7 @@ pub fn build_settings(rand: &DbRand) -> Settings {
         l0_max_ssts,
         max_unflushed_bytes,
         compression_codec,
+        compactor_options,
         garbage_collector_options: Some(GarbageCollectorOptions {
             manifest_options: Some(GarbageCollectorDirectoryOptions {
                 interval: Some(
@@ -178,7 +193,6 @@ pub fn build_settings(rand: &DbRand) -> Settings {
                 min_age: rng.random_range(Duration::from_millis(20)..Duration::from_secs(900)),
             }),
         }),
-        compactor_options: None,
         default_ttl: None,
         ..Default::default()
     };
