@@ -22,8 +22,6 @@ use slatedb::config::{DurabilityLevel, PutOptions, ReadOptions, ScanOptions};
 use slatedb::{DbRand, Error, IterationOrder};
 use tracing::info;
 
-const KEY_SPACE: u64 = 8;
-
 /// Issues the mutating side of the simulation workload.
 ///
 /// `WriterScenario` is responsible for creating churn in the database state. On
@@ -40,6 +38,7 @@ const KEY_SPACE: u64 = 8;
 pub struct WriterScenario {
     pub name: &'static str,
     pub rand: Rc<DbRand>,
+    pub key_space: u64,
     pub iterations: Option<u32>,
 }
 
@@ -78,33 +77,33 @@ impl Scenario for WriterScenario {
             let op = rand.rng().random::<u64>() % 5;
             match op {
                 0 => {
-                    let key_suffix = rand.rng().random::<u64>() % KEY_SPACE;
+                    let key_suffix = rand.rng().random::<u64>() % self.key_space;
                     let value_suffix = rand.rng().random::<u64>();
                     let key = format!("key-{key_suffix}").into_bytes();
                     let value = format!("put-{value_suffix}").into_bytes();
                     ctx.put(&key, &value, &PutOptions::default()).await?;
                 }
                 1 => {
-                    let key_suffix = rand.rng().random::<u64>() % KEY_SPACE;
+                    let key_suffix = rand.rng().random::<u64>() % self.key_space;
                     let value_suffix = rand.rng().random::<u64>();
                     let key = format!("key-{key_suffix}").into_bytes();
                     let value = format!("put-alt-{value_suffix}").into_bytes();
                     ctx.put(&key, &value, &PutOptions::default()).await?;
                 }
                 2 => {
-                    let key_suffix = rand.rng().random::<u64>() % KEY_SPACE;
+                    let key_suffix = rand.rng().random::<u64>() % self.key_space;
                     let key = format!("key-{key_suffix}").into_bytes();
                     ctx.delete(&key).await?;
                 }
                 3 => {
                     let mut batch = ScenarioWriteBatch::new();
-                    let key_suffix = rand.rng().random::<u64>() % KEY_SPACE;
+                    let key_suffix = rand.rng().random::<u64>() % self.key_space;
                     let value_suffix = rand.rng().random::<u64>();
                     let key = format!("key-{key_suffix}").into_bytes();
                     let value = format!("batch-{value_suffix}").into_bytes();
                     batch.put(&key, &value);
 
-                    let second_key_suffix = rand.rng().random::<u64>() % KEY_SPACE;
+                    let second_key_suffix = rand.rng().random::<u64>() % self.key_space;
                     let second_key = format!("key-{second_key_suffix}").into_bytes();
                     let should_put_second = rand.rng().random::<u64>() & 1 == 0;
                     if should_put_second {
@@ -146,6 +145,7 @@ impl Scenario for WriterScenario {
 pub struct ReaderScenario {
     pub name: &'static str,
     pub rand: Rc<DbRand>,
+    pub key_space: u64,
     pub iterations: Option<u32>,
 }
 
@@ -183,7 +183,7 @@ impl Scenario for ReaderScenario {
 
             let do_get = rand.rng().random::<u64>() & 1 == 0;
             if do_get {
-                let key_suffix = rand.rng().random::<u64>() % KEY_SPACE;
+                let key_suffix = rand.rng().random::<u64>() % self.key_space;
                 let key = format!("key-{key_suffix}").into_bytes();
                 let read_memory = rand.rng().random::<u64>() & 1 == 0;
                 if read_memory {

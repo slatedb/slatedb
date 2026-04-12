@@ -32,6 +32,7 @@ use tracing::{error, info};
 
 #[cfg(slow)]
 const NIGHTLY_WALL_CLOCK: Duration = Duration::from_secs(12 * 60);
+const MAX_KEY_SPACE: u64 = 16;
 
 /// Verifies that SlateDB is deterministic when we seed the random number generator, system
 /// clock, and runtime appropriately.
@@ -78,6 +79,8 @@ fn test_dst_is_deterministic(
         let object_store = Arc::new(InMemory::new());
         let rand = Rc::new(DbRand::new(seed));
         let system_clock = Arc::new(MockSystemClock::new());
+        let writer_key_space = rand.rng().random_range(1..(MAX_KEY_SPACE + 1));
+        let reader_key_space = rand.rng().random_range(1..(MAX_KEY_SPACE + 1));
         let mut simulation_scenarios: Vec<Box<dyn Scenario>> = Vec::with_capacity(11);
 
         // Add scenarios.
@@ -85,6 +88,7 @@ fn test_dst_is_deterministic(
             simulation_scenarios.push(Box::new(WriterScenario {
                 name,
                 rand: rand.clone(),
+                key_space: writer_key_space,
                 iterations: Some(iterations),
             }));
         }
@@ -92,6 +96,7 @@ fn test_dst_is_deterministic(
             simulation_scenarios.push(Box::new(ReaderScenario {
                 name,
                 rand: rand.clone(),
+                key_space: reader_key_space,
                 iterations: Some(iterations),
             }));
         }
@@ -198,11 +203,14 @@ fn test_dst_nightly() -> Result<(), Error> {
             let rand = Rc::new(DbRand::new(seed));
             let runtime = build_runtime(rand.seed());
             let system_clock = Arc::new(MockSystemClock::new());
+            let writer_key_space = rand.rng().random_range(1..(MAX_KEY_SPACE + 1));
+            let reader_key_space = rand.rng().random_range(1..(MAX_KEY_SPACE + 1));
             let mut simulation_scenarios: Vec<Box<dyn Scenario>> = Vec::with_capacity(11);
             for name in ["writer-0", "writer-1", "writer-2", "writer-3"] {
                 simulation_scenarios.push(Box::new(WriterScenario {
                     name,
                     rand: rand.clone(),
+                    key_space: writer_key_space,
                     iterations: None,
                 }));
             }
@@ -210,6 +218,7 @@ fn test_dst_nightly() -> Result<(), Error> {
                 simulation_scenarios.push(Box::new(ReaderScenario {
                     name,
                     rand: rand.clone(),
+                    key_space: reader_key_space,
                     iterations: None,
                 }));
             }
