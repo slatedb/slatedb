@@ -171,6 +171,8 @@ fn test_dst_is_deterministic(
 ///
 /// - `RUSTFLAGS="--cfg dst --cfg slow --cfg tokio_unstable"`
 /// - `SLATEDB_DST_ROOT` must be set to a directory to store test data.
+/// - `SLATEDB_DST_CORES` optionally sets the number of DSTs to run in parallel. If not set, all
+///   available cores will be used.
 /// - `SLATEDB_DST_START_SEED` optionally sets the root seed for the entire test. Useful for
 ///   reproducing a specific nightly run. If not set, a random seed will be used.
 #[test]
@@ -186,7 +188,14 @@ fn test_dst_nightly() -> Result<(), Error> {
     let mut handles = Vec::new();
     let mut system = System::new();
     system.refresh_cpu_all();
-    let num_cores = system.cpus().len();
+    let num_cores = std::env::var("SLATEDB_DST_CORES")
+        .ok()
+        .map(|value| {
+            value
+                .parse::<usize>()
+                .expect("SLATEDB_DST_CORES must be a valid usize")
+        })
+        .unwrap_or(system.cpus().len());
     let starting_seed = std::env::var("SLATEDB_DST_START_SEED")
         .ok()
         .map(|value| {
