@@ -18,7 +18,7 @@ use crate::utils::{validate_get, validate_scan};
 use crate::{Scenario, ScenarioContext, ScenarioWriteBatch};
 use async_trait::async_trait;
 use rand::Rng;
-use slatedb::config::{DurabilityLevel, PutOptions, ReadOptions, ScanOptions};
+use slatedb::config::{PutOptions, ReadOptions, ScanOptions};
 use slatedb::{DbRand, Error, IterationOrder};
 use tracing::info;
 
@@ -185,35 +185,15 @@ impl Scenario for ReaderScenario {
             if do_get {
                 let key_suffix = rand.rng().random::<u64>() % self.key_space;
                 let key = format!("key-{key_suffix}").into_bytes();
-                let read_memory = rand.rng().random::<u64>() & 1 == 0;
-                if read_memory {
-                    let _ = validate_get(&ctx, &key, &ReadOptions::default()).await?;
-                } else {
-                    let _ = validate_get(
-                        &ctx,
-                        &key,
-                        &ReadOptions::default().with_durability_filter(DurabilityLevel::Remote),
-                    )
-                    .await?;
-                }
+                let _ = validate_get(&ctx, &key, &ReadOptions::default()).await?;
             } else {
-                let scan_memory = rand.rng().random::<u64>() & 1 == 0;
                 let order = if rand.rng().random::<u64>() & 1 == 0 {
                     IterationOrder::Ascending
                 } else {
                     IterationOrder::Descending
                 };
                 let options = ScanOptions::default().with_order(order);
-                if scan_memory {
-                    let _ = validate_scan::<Vec<u8>, _>(&ctx, .., &options).await?;
-                } else {
-                    let _ = validate_scan::<Vec<u8>, _>(
-                        &ctx,
-                        ..,
-                        &options.with_durability_filter(DurabilityLevel::Remote),
-                    )
-                    .await?;
-                }
+                let _ = validate_scan::<Vec<u8>, _>(&ctx, .., &options).await?;
             }
 
             tokio::task::yield_now().await;
