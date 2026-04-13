@@ -220,7 +220,6 @@ impl WriteBatch {
         K: AsRef<[u8]>,
         V: AsRef<[u8]>,
     {
-        self.assert_kv(&key, &value);
         self.put_bytes_with_options(
             Bytes::copy_from_slice(key.as_ref()),
             Bytes::copy_from_slice(value.as_ref()),
