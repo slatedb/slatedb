@@ -477,16 +477,28 @@ impl COWDbState {
 pub struct VersionedManifest {
     /// The version ID of the manifest.
     pub id: u64,
+    /// The persisted writer epoch for this manifest version.
+    pub writer_epoch: u64,
+    /// The persisted compactor epoch for this manifest version.
+    pub compactor_epoch: u64,
     /// The manifest state at this version.
     pub manifest: ManifestCore,
 }
 
+impl VersionedManifest {
+    pub(crate) fn from_manifest(id: u64, manifest: Manifest) -> Self {
+        Self {
+            id,
+            writer_epoch: manifest.writer_epoch,
+            compactor_epoch: manifest.compactor_epoch,
+            manifest: manifest.core,
+        }
+    }
+}
+
 impl From<DirtyObject<Manifest>> for VersionedManifest {
     fn from(dirty: DirtyObject<Manifest>) -> Self {
-        Self {
-            id: dirty.id.id(),
-            manifest: dirty.value.core,
-        }
+        Self::from_manifest(dirty.id.id(), dirty.value)
     }
 }
 

@@ -48,6 +48,8 @@ impl DbStatusManager {
             initial_durable_seq,
             VersionedManifest {
                 id: 1,
+                writer_epoch: 0,
+                compactor_epoch: 0,
                 manifest: ManifestCore::new(),
             },
         )
@@ -143,6 +145,8 @@ mod tests {
     fn versioned_manifest(id: u64) -> VersionedManifest {
         VersionedManifest {
             id,
+            writer_epoch: 0,
+            compactor_epoch: 0,
             manifest: ManifestCore::new(),
         }
     }

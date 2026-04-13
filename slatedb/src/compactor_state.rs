@@ -340,8 +340,20 @@ impl CompactionsCore {
 pub struct VersionedCompactions {
     /// The version ID of the compactions file.
     pub id: u64,
+    /// The persisted compactor epoch for this compactions version.
+    pub compactor_epoch: u64,
     /// The compactions state at this version.
     pub compactions: CompactionsCore,
+}
+
+impl VersionedCompactions {
+    pub(crate) fn from_compactions(id: u64, compactions: Compactions) -> Self {
+        Self {
+            id,
+            compactor_epoch: compactions.compactor_epoch,
+            compactions: compactions.core,
+        }
+    }
 }
 
 /// Container for compactions tracked by the compactor alongside its epoch.

@@ -99,10 +99,7 @@ impl DbStateReader for CheckpointState {
 
 impl From<&CheckpointState> for VersionedManifest {
     fn from(state: &CheckpointState) -> Self {
-        Self {
-            id: state.checkpoint.manifest_id,
-            manifest: state.manifest.core.clone(),
-        }
+        Self::from_manifest(state.checkpoint.manifest_id, state.manifest.clone())
     }
 }
 
@@ -714,10 +711,7 @@ impl DbReader {
 
         let status_manager = DbStatusManager::new_with_manifest(
             manifest.db_state().last_l0_seq,
-            VersionedManifest {
-                id: manifest.id(),
-                manifest: manifest.db_state().clone(),
-            },
+            VersionedManifest::from_manifest(manifest.id(), manifest.manifest().clone()),
         );
         let task_executor =
             MessageHandlerExecutor::new(Arc::new(status_manager.clone()), system_clock.clone());

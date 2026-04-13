@@ -78,18 +78,12 @@ impl Admin {
             manifest_store
                 .try_read_manifest(id)
                 .await?
-                .map(|manifest| VersionedManifest {
-                    id,
-                    manifest: manifest.core,
-                })
+                .map(|manifest| VersionedManifest::from_manifest(id, manifest))
         } else {
             manifest_store
                 .try_read_latest_manifest()
                 .await?
-                .map(|(id, manifest)| VersionedManifest {
-                    id,
-                    manifest: manifest.core,
-                })
+                .map(|(id, manifest)| VersionedManifest::from_manifest(id, manifest))
         };
 
         Ok(manifest)
@@ -111,10 +105,7 @@ impl Admin {
         let mut manifests = Vec::with_capacity(manifest_metadata.len());
         for metadata in manifest_metadata {
             let manifest = manifest_store.read_manifest(metadata.id).await?;
-            manifests.push(VersionedManifest {
-                id: metadata.id,
-                manifest: manifest.core,
-            });
+            manifests.push(VersionedManifest::from_manifest(metadata.id, manifest));
         }
         Ok(manifests)
     }
@@ -136,18 +127,12 @@ impl Admin {
             compactions_store
                 .try_read_compactions(id)
                 .await?
-                .map(|compactions| VersionedCompactions {
-                    id,
-                    compactions: compactions.core,
-                })
+                .map(|compactions| VersionedCompactions::from_compactions(id, compactions))
         } else {
             compactions_store
                 .try_read_latest_compactions()
                 .await?
-                .map(|(id, compactions)| VersionedCompactions {
-                    id,
-                    compactions: compactions.core,
-                })
+                .map(|(id, compactions)| VersionedCompactions::from_compactions(id, compactions))
         };
 
         Ok(compactions)
@@ -232,10 +217,10 @@ impl Admin {
         let mut compactions = Vec::with_capacity(compactions_metadata.len());
         for metadata in compactions_metadata {
             let stored_compactions = compactions_store.read_compactions(metadata.id).await?;
-            compactions.push(VersionedCompactions {
-                id: metadata.id,
-                compactions: stored_compactions.core,
-            });
+            compactions.push(VersionedCompactions::from_compactions(
+                metadata.id,
+                stored_compactions,
+            ));
         }
         Ok(compactions)
     }
@@ -842,6 +827,8 @@ mod tests {
         let mut dirty = stored.prepare_dirty().unwrap();
         dirty.value.core.next_wal_sst_id = 17;
         dirty.value.core.last_l0_seq = 9;
+        dirty.value.writer_epoch = 3;
+        dirty.value.compactor_epoch = 5;
         stored.update(dirty).await.unwrap();
 
         let admin = AdminBuilder::new(path.clone(), object_store).build();
@@ -852,6 +839,8 @@ mod tests {
             .unwrap()
             .expect("expected manifest");
         assert_eq!(latest.id, 2);
+        assert_eq!(latest.writer_epoch, 3);
+        assert_eq!(latest.compactor_epoch, 5);
         assert_eq!(latest.manifest.next_wal_sst_id, 17);
         assert_eq!(latest.manifest.last_l0_seq, 9);
 
@@ -861,6 +850,8 @@ mod tests {
             .unwrap()
             .expect("expected manifest");
         assert_eq!(first.id, 1);
+        assert_eq!(first.writer_epoch, 0);
+        assert_eq!(first.compactor_epoch, 0);
         assert_eq!(first.manifest.next_wal_sst_id, 1);
         assert_eq!(first.manifest.last_l0_seq, 0);
     }
@@ -881,11 +872,15 @@ mod tests {
         let mut dirty = stored.prepare_dirty().unwrap();
         dirty.value.core.next_wal_sst_id = 5;
         dirty.value.core.last_l0_seq = 10;
+        dirty.value.writer_epoch = 2;
+        dirty.value.compactor_epoch = 4;
         stored.update(dirty).await.unwrap();
 
         let mut dirty = stored.prepare_dirty().unwrap();
         dirty.value.core.next_wal_sst_id = 8;
         dirty.value.core.last_l0_seq = 20;
+        dirty.value.writer_epoch = 3;
+        dirty.value.compactor_epoch = 6;
         stored.update(dirty).await.unwrap();
 
         let admin = AdminBuilder::new(path.clone(), object_store).build();
@@ -900,6 +895,18 @@ mod tests {
                 .map(|manifest| manifest.manifest.last_l0_seq)
                 .collect::<Vec<_>>(),
             vec![0, 10, 20]
+        );
+        assert_eq!(
+            all.iter()
+                .map(|manifest| manifest.writer_epoch)
+                .collect::<Vec<_>>(),
+            vec![0, 2, 3]
+        );
+        assert_eq!(
+            all.iter()
+                .map(|manifest| manifest.compactor_epoch)
+                .collect::<Vec<_>>(),
+            vec![0, 4, 6]
         );
 
         let bounded = admin.list_manifests(2..3).await.unwrap();
@@ -946,6 +953,7 @@ mod tests {
         );
         let mut dirty = stored.prepare_dirty().unwrap();
         dirty.value.insert(compaction);
+        dirty.value.compactor_epoch = 9;
         stored.update(dirty).await.unwrap();
 
         let admin = AdminBuilder::new(path.clone(), object_store).build();
@@ -957,6 +965,7 @@ mod tests {
             .expect("expected compactions");
         let expected_latest = compactions_store.read_compactions(2).await.unwrap();
         assert_eq!(latest.id, 2);
+        assert_eq!(latest.compactor_epoch, 9);
         assert_eq!(latest.compactions, expected_latest.core);
 
         let first = admin
@@ -966,6 +975,7 @@ mod tests {
             .expect("expected compactions");
         let expected_first = compactions_store.read_compactions(1).await.unwrap();
         assert_eq!(first.id, 1);
+        assert_eq!(first.compactor_epoch, 7);
         assert_eq!(first.compactions, expected_first.core);
     }
 
@@ -974,7 +984,7 @@ mod tests {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/tmp/test_admin_list_compactions");
         let compactions_store = Arc::new(CompactionsStore::new(&path, object_store.clone()));
-        let mut stored = StoredCompactions::create(compactions_store.clone(), 0)
+        let mut stored = StoredCompactions::create(compactions_store.clone(), 2)
             .await
             .unwrap();
 
@@ -983,6 +993,7 @@ mod tests {
             Ulid::new(),
             CompactionSpec::new(vec![SourceId::SortedRun(3)], 7),
         ));
+        dirty.value.compactor_epoch = 4;
         stored.update(dirty).await.unwrap();
 
         let mut dirty = stored.prepare_dirty().unwrap();
@@ -990,6 +1001,7 @@ mod tests {
             Ulid::new(),
             CompactionSpec::new(vec![SourceId::SortedRun(5)], 9),
         ));
+        dirty.value.compactor_epoch = 6;
         stored.update(dirty).await.unwrap();
 
         let admin = AdminBuilder::new(path.clone(), object_store).build();
@@ -1002,6 +1014,13 @@ mod tests {
                 .map(|compactions| compactions.compactions.recent_compactions().count())
                 .collect::<Vec<_>>(),
             vec![0, 1, 2]
+        );
+        assert_eq!(
+            listed
+                .iter()
+                .map(|compactions| compactions.compactor_epoch)
+                .collect::<Vec<_>>(),
+            vec![2, 4, 6]
         );
 
         let bounded = admin.list_compactions(2..3).await.unwrap();
