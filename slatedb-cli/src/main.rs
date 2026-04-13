@@ -126,7 +126,10 @@ async fn exec_list_manifest(
         _ => u64::MIN..u64::MAX,
     };
 
-    println!("{}", serde_json::to_string(&admin.list_manifests(range).await?)?);
+    println!(
+        "{}",
+        serde_json::to_string(&admin.list_manifests(range).await?)?
+    );
     Ok(())
 }
 

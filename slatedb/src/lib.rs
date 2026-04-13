@@ -41,6 +41,7 @@ pub use compaction_filter::{
     CompactionJobContext,
 };
 pub use compactor::CompactorBuilder;
+pub use compactor_state::VersionedCompactions;
 pub use config::{Settings, SstBlockSize};
 pub use db::{Db, DbBuilder, DbReaderBuilder, DbStatus, WriteHandle};
 pub use db_cache::stats as db_cache_stats;
@@ -57,7 +58,6 @@ pub use garbage_collector::GarbageCollectorBuilder;
 pub use iter::IterationOrder;
 pub use merge_operator::{MergeOperator, MergeOperatorError};
 pub use rand::DbRand;
-pub use compactor_state::VersionedCompactions;
 #[cfg(test)]
 pub use sst_builder::BlockFormat;
 pub use sst_reader::{SstFile, SstReader};

@@ -904,7 +904,10 @@ mod tests {
 
         let bounded = admin.list_manifests(2..3).await.unwrap();
         assert_eq!(
-            bounded.iter().map(|manifest| manifest.id).collect::<Vec<_>>(),
+            bounded
+                .iter()
+                .map(|manifest| manifest.id)
+                .collect::<Vec<_>>(),
             vec![2]
         );
 
@@ -996,10 +999,7 @@ mod tests {
 
         let admin = AdminBuilder::new(path.clone(), object_store).build();
         let listed = admin.list_compactions(..).await.unwrap();
-        let ids: Vec<u64> = listed
-            .iter()
-            .map(|compactions| compactions.id)
-            .collect();
+        let ids: Vec<u64> = listed.iter().map(|compactions| compactions.id).collect();
         assert_eq!(ids, vec![1, 2, 3]);
         assert_eq!(
             listed
