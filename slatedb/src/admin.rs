@@ -1,6 +1,7 @@
 use crate::checkpoint::{Checkpoint, CheckpointCreateResult};
 use crate::compactions_store::CompactionsStore;
 use crate::compactor::{Compaction, CompactionSpec, Compactor, CompactorStateView};
+use crate::compactor_state::VersionedCompactions;
 use crate::compactor_state_protocols::CompactorStateReader;
 use crate::config::{CheckpointOptions, GarbageCollectorOptions};
 use crate::db::builder::GarbageCollectorBuilder;
@@ -124,26 +125,32 @@ impl Admin {
     /// - `maybe_id`: Optional ID of the compactions file to read. If None, reads from the latest.
     ///
     /// ## Returns
-    /// - `Ok(Some(String))`: The compactions as a JSON string if found.
+    /// - `Ok(Some(VersionedCompactions))`: The compactions if found.
     /// - `Ok(None)`: If the compactions file does not exist.
     pub async fn read_compactions(
         &self,
         maybe_id: Option<u64>,
-    ) -> Result<Option<String>, Box<dyn Error>> {
+    ) -> Result<Option<VersionedCompactions>, Box<dyn Error>> {
         let compactions_store = self.compactions_store();
-        let id_compactions = if let Some(id) = maybe_id {
+        let compactions = if let Some(id) = maybe_id {
             compactions_store
                 .try_read_compactions(id)
                 .await?
-                .map(|compactions| (id, compactions))
+                .map(|compactions| VersionedCompactions {
+                    id,
+                    compactions: compactions.core,
+                })
         } else {
-            compactions_store.try_read_latest_compactions().await?
+            compactions_store
+                .try_read_latest_compactions()
+                .await?
+                .map(|(id, compactions)| VersionedCompactions {
+                    id,
+                    compactions: compactions.core,
+                })
         };
 
-        match id_compactions {
-            None => Ok(None),
-            Some(result) => Ok(Some(serde_json::to_string(&result)?)),
-        }
+        Ok(compactions)
     }
 
     /// Read-only access to a compaction by id from a specific or latest compactions file.
