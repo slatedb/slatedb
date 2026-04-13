@@ -4,6 +4,7 @@ use crate::compactor::{Compaction, CompactionSpec, Compactor, CompactorStateView
 use crate::compactor_state_protocols::CompactorStateReader;
 use crate::config::{CheckpointOptions, GarbageCollectorOptions};
 use crate::db::builder::GarbageCollectorBuilder;
+use crate::db_state::VersionedManifest;
 use crate::dispatcher::MessageHandlerExecutor;
 use crate::error::SlateDBError;
 use crate::garbage_collector::GC_TASK_NAME;
@@ -56,28 +57,41 @@ pub struct Admin {
 }
 
 impl Admin {
-    /// Read-only access to the latest manifest file
+    /// Read-only access to a specific or the latest manifest file.
+    ///
+    /// ## Arguments
+    /// - `maybe_id`: Optional ID of the manifest file to read. If `None`, reads the latest.
+    ///
+    /// ## Returns
+    /// - `Ok(Some(VersionedManifest))`: The manifest if found.
+    /// - `Ok(None)`: If the manifest file does not exist.
     pub async fn read_manifest(
         &self,
         maybe_id: Option<u64>,
-    ) -> Result<Option<String>, Box<dyn Error>> {
+    ) -> Result<Option<VersionedManifest>, Box<dyn Error>> {
         let manifest_store = ManifestStore::new(
             &self.path,
             self.object_stores.store_of(ObjectStoreType::Main).clone(),
         );
-        let id_manifest = if let Some(id) = maybe_id {
+        let manifest = if let Some(id) = maybe_id {
             manifest_store
                 .try_read_manifest(id)
                 .await?
-                .map(|manifest| (id, manifest))
+                .map(|manifest| VersionedManifest {
+                    id,
+                    manifest: manifest.core,
+                })
         } else {
-            manifest_store.try_read_latest_manifest().await?
+            manifest_store
+                .try_read_latest_manifest()
+                .await?
+                .map(|(id, manifest)| VersionedManifest {
+                    id,
+                    manifest: manifest.core,
+                })
         };
 
-        match id_manifest {
-            None => Ok(None),
-            Some(result) => Ok(Some(serde_json::to_string(&result)?)),
-        }
+        Ok(manifest)
     }
 
     /// List manifests within a range
