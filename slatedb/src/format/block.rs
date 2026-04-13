@@ -132,6 +132,24 @@ impl BlockBuilderV1 {
         }
 
         let key_prefix_len = compute_prefix(&self.first_key, &entry.key);
+
+        // Preallocate the data buffer on the first entry, sized to the larger
+        // of the block target and the first entry's encoded size. The block's
+        // final `data` length is bounded above by `max(block_size,
+        // first_entry_encoded_size)` because:
+        //   - If the first entry is smaller than `block_size`, `would_fit`
+        //     caps subsequent entries at `block_size`.
+        //   - If the first entry is >= `block_size` (oversized-entry path,
+        //     e.g., large filesystem chunk values), the block accepts it on
+        //     the empty-block rule, and any subsequent entry is rejected
+        //     because `self.size() > block_size` already.
+        // Reserving upfront avoids the ~log2(final_size) reallocs that
+        // geometric Vec growth would otherwise perform per block.
+        if self.data.is_empty() {
+            let first_entry_size = entry.encoded_size(key_prefix_len);
+            self.data.reserve(first_entry_size.max(self.block_size));
+        }
+
         let key_suffix = entry.key.slice(key_prefix_len..);
 
         let sst_row_entry = SstRowEntry::new(
