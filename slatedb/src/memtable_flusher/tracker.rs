@@ -52,6 +52,10 @@ pub(crate) enum TrackerMessage {
     FlushComplete { through_seq: u64 },
     /// Remote manifest changes were merged into local state.
     ManifestRefreshed,
+    /// Poll the remote manifest and signal the caller when complete.
+    PollManifest {
+        sender: oneshot::Sender<Result<(), SlateDBError>>,
+    },
 }
 
 impl std::fmt::Debug for TrackerMessage {
@@ -71,6 +75,7 @@ impl std::fmt::Debug for TrackerMessage {
                 write!(f, "FlushComplete(through_seq={through_seq})")
             }
             Self::ManifestRefreshed => write!(f, "ManifestRefreshed"),
+            Self::PollManifest { .. } => write!(f, "PollManifest"),
         }
     }
 }
@@ -119,6 +124,7 @@ impl MessageHandler<TrackerMessage> for FlushTracker {
                 self.reconcile_and_dispatch().await
             }
             TrackerMessage::ManifestRefreshed => self.reconcile_and_dispatch().await,
+            TrackerMessage::PollManifest { sender } => self.manifest_writer.send_poll(sender),
         }
     }
 
@@ -237,6 +243,9 @@ impl FlushTracker {
                     let _ = sender.send(Err(err.clone()));
                 }
                 TrackerMessage::CheckpointRequest { sender, .. } => {
+                    let _ = sender.send(Err(err.clone()));
+                }
+                TrackerMessage::PollManifest { sender } => {
                     let _ = sender.send(Err(err.clone()));
                 }
                 other => {

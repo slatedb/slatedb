@@ -350,3 +350,32 @@ async fn test_concurrent_writers_and_readers() {
         .await
         .expect("Failed to close DB after retries");
 }
+
+/// Verify that manifest_poll enqueues a poll and returns once it completes,
+/// and returns an error once the DB is closed.
+#[tokio::test]
+async fn test_manifest_poll() {
+    let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    let db = Db::builder("test_manifest_poll", object_store.clone())
+        .with_settings(Settings {
+            manifest_poll_interval: Duration::from_secs(60 * 60),
+            ..Default::default()
+        })
+        .build()
+        .await
+        .expect("failed to open db");
+
+    // Should return once the enqueued poll completes.
+    db.manifest_poll()
+        .await
+        .expect("manifest_poll returned error");
+
+    // After close, manifest_poll should return an error.
+    db.close().await.expect("failed to close db");
+    let result = db.manifest_poll().await;
+    assert!(
+        result.is_err(),
+        "expected error after close, got {:?}",
+        result
+    );
+}
