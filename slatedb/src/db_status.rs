@@ -1,6 +1,8 @@
 use tokio::sync::watch;
 
 use crate::db_state::VersionedManifest;
+#[cfg(test)]
+use crate::db_state::ManifestCore;
 use crate::error::SlateDBError;
 use crate::utils::WatchableOnceCell;
 use crate::CloseReason;
@@ -137,7 +139,6 @@ impl ClosedResultWriter for DbStatusManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db_state::ManifestCore;
 
     fn versioned_manifest(id: u64) -> VersionedManifest {
         VersionedManifest {
