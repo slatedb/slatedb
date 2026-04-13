@@ -48,6 +48,7 @@ pub use db_iter::DbIterator;
 pub use db_read::DbRead;
 pub use db_reader::DbReader;
 pub use db_snapshot::DbSnapshot;
+pub use db_state::VersionedManifest;
 pub use db_transaction::DbTransaction;
 pub use error::{CloseReason, Error, ErrorKind};
 pub use format::sst::BlockTransformer;
@@ -56,6 +57,7 @@ pub use garbage_collector::GarbageCollectorBuilder;
 pub use iter::IterationOrder;
 pub use merge_operator::{MergeOperator, MergeOperatorError};
 pub use rand::DbRand;
+pub use compactor_state::VersionedCompactions;
 #[cfg(test)]
 pub use sst_builder::BlockFormat;
 pub use sst_reader::{SstFile, SstReader};
