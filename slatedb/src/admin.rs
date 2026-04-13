@@ -955,23 +955,18 @@ mod tests {
             .await
             .unwrap()
             .expect("expected compactions");
+        let expected_latest = compactions_store.read_compactions(2).await.unwrap();
         assert_eq!(latest.id, 2);
-        assert_eq!(
-            latest
-                .compactions
-                .recent_compactions()
-                .map(|compaction| compaction.id())
-                .collect::<Vec<_>>(),
-            vec![compaction_id]
-        );
+        assert_eq!(latest.compactions, expected_latest.core);
 
         let first = admin
             .read_compactions(Some(1))
             .await
             .unwrap()
             .expect("expected compactions");
+        let expected_first = compactions_store.read_compactions(1).await.unwrap();
         assert_eq!(first.id, 1);
-        assert_eq!(first.compactions.recent_compactions().count(), 0);
+        assert_eq!(first.compactions, expected_first.core);
     }
 
     #[tokio::test]
