@@ -219,14 +219,25 @@ impl Admin {
         Ok(compaction)
     }
 
-    /// List compactions files within a range
+    /// List compactions files within a range.
+    ///
+    /// ## Returns
+    /// - `Ok(Vec<VersionedCompactions>)`: The compactions files in ascending ID order.
     pub async fn list_compactions<R: RangeBounds<u64>>(
         &self,
         range: R,
-    ) -> Result<String, Box<dyn Error>> {
+    ) -> Result<Vec<VersionedCompactions>, Box<dyn Error>> {
         let compactions_store = self.compactions_store();
-        let compactions = compactions_store.list_compactions(range).await?;
-        Ok(serde_json::to_string(&compactions)?)
+        let compactions_metadata = compactions_store.list_compactions(range).await?;
+        let mut compactions = Vec::with_capacity(compactions_metadata.len());
+        for metadata in compactions_metadata {
+            let stored_compactions = compactions_store.read_compactions(metadata.id).await?;
+            compactions.push(VersionedCompactions {
+                id: metadata.id,
+                compactions: stored_compactions.core,
+            });
+        }
+        Ok(compactions)
     }
 
     /// List checkpoints, optionally filtering by name. When name is provided, only checkpoints
