@@ -60,7 +60,9 @@ enum ManifestWriterCommand {
         sender: oneshot::Sender<Result<CheckpointCreateResult, SlateDBError>>,
     },
     /// Periodic manifest poll to pick up remote changes (e.g. compaction).
-    PollManifest,
+    PollManifest {
+        done: Option<oneshot::Sender<Result<(), SlateDBError>>>,
+    },
     /// The WAL durable sequence advanced; retry any batch blocked on WAL durability.
     DurableSeqAdvanced,
 }
@@ -81,7 +83,7 @@ impl std::fmt::Debug for ManifestWriterCommand {
             Self::CreateCheckpoint { through_seq, .. } => {
                 write!(f, "CreateCheckpoint({through_seq:?})")
             }
-            Self::PollManifest => write!(f, "PollManifest"),
+            Self::PollManifest { .. } => write!(f, "PollManifest"),
             Self::DurableSeqAdvanced => write!(f, "DurableSeqAdvanced"),
         }
     }
@@ -157,6 +159,15 @@ impl ManifestWriter {
             })
     }
 
+    /// Enqueues a manifest poll; the result is delivered to `sender` on completion.
+    pub(crate) fn send_poll(
+        &self,
+        sender: oneshot::Sender<Result<(), SlateDBError>>,
+    ) -> Result<(), SlateDBError> {
+        self.commands_tx
+            .send(ManifestWriterCommand::PollManifest { done: Some(sender) })
+    }
+
     pub(crate) async fn shutdown(executor: &crate::dispatcher::MessageHandlerExecutor) {
         if let Err(e) = executor.shutdown_task(MANIFEST_WRITER_TASK_NAME).await {
             log::warn!("failed to shutdown l0 manifest writer [error={:?}]", e);
@@ -192,7 +203,7 @@ impl MessageHandler<ManifestWriterCommand> for ManifestWriterHandler {
     )> {
         vec![(
             self.manifest_poll_interval,
-            Box::new(|| ManifestWriterCommand::PollManifest),
+            Box::new(|| ManifestWriterCommand::PollManifest { done: None }),
         )]
     }
 
@@ -221,8 +232,8 @@ impl MessageHandler<ManifestWriterCommand> for ManifestWriterHandler {
                 self.handle_create_checkpoint(through_seq, options, sender)
                     .await?;
             }
-            ManifestWriterCommand::PollManifest => {
-                self.refresh_manifest_progress().await?;
+            ManifestWriterCommand::PollManifest { done } => {
+                self.refresh_manifest_progress(done).await?;
             }
             ManifestWriterCommand::DurableSeqAdvanced => {}
         }
@@ -572,10 +583,16 @@ impl ManifestWriterHandler {
         Ok(())
     }
 
-    async fn refresh_manifest_progress(&mut self) -> Result<(), SlateDBError> {
+    async fn refresh_manifest_progress(
+        &mut self,
+        done: Option<oneshot::Sender<Result<(), SlateDBError>>>,
+    ) -> Result<(), SlateDBError> {
         self.manifest.refresh().await?;
         let remote_dirty = self.manifest.prepare_dirty()?;
         self.merge_remote_manifest(remote_dirty);
+        if let Some(tx) = done {
+            let _ = tx.send(Ok(()));
+        }
         let _ = self.tracker_tx.send(TrackerMessage::ManifestRefreshed);
         Ok(())
     }

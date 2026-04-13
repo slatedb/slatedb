@@ -20,7 +20,7 @@ use crate::dispatcher::MessageHandlerExecutor;
 use crate::error::SlateDBError;
 use crate::manifest::store::FenceableManifest;
 use crate::memtable_flusher::manifest_writer::ManifestWriter;
-use crate::memtable_flusher::tracker::FlushTracker;
+use crate::memtable_flusher::tracker::{FlushTracker, TrackerMessage};
 use crate::memtable_flusher::uploader::Uploader;
 use crate::utils::SafeSender;
 use log::warn;
@@ -96,6 +96,14 @@ impl MemtableFlusher {
         )?;
 
         Ok(())
+    }
+
+    /// Enqueues a manifest poll and waits until it completes.
+    pub(crate) async fn poll_manifest(&self) -> Result<(), SlateDBError> {
+        let (tx, rx) = oneshot::channel();
+        self.messages_tx
+            .send(TrackerMessage::PollManifest { sender: tx })?;
+        rx.await.map_err(SlateDBError::ReadChannelError)?
     }
 
     /// Processes one flush request using the requested target.
