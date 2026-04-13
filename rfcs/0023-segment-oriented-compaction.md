@@ -272,7 +272,7 @@ New compactions always produce runs without a `legacy_id`. Over time, as legacy 
 
 With the write API, WAL, and manifest changes in place, the write path works as follows. The segment tag from `WriteOptions` is carried through the WAL (at the block level) and the memtable entry. At memtable flush time, entries are grouped by segment and one L0 SST is produced per segment. Each L0 SST is recorded in the manifest with its segment annotation.
 
-When the WAL is enabled, transaction atomicity is inherited — a write batch spans all segments in a single WAL entry, and the segment split at flush is an internal concern. When the WAL is disabled, all L0 SSTs from a single flush must be uploaded and then added to the manifest in a single atomic update. Partial visibility of a multi-segment flush would break transaction semantics.
+Each write batch targets a single segment (since `WriteOptions` is per-batch), but a memtable accumulates batches from multiple segments before it is flushed. When the WAL is enabled, each batch is individually durable in the WAL, and the multi-segment split at flush time is an internal concern. When the WAL is disabled, all L0 SSTs from a single flush must be uploaded and then added to the manifest in a single atomic update. Partial visibility of a multi-segment flush would break durability semantics for batches that have not yet been persisted to L0.
 
 ### Read Path
 
@@ -420,6 +420,14 @@ This RFC opts for a more general approach: opaque segment metadata defined by th
 ### Unifying L0 and sorted runs
 
 With the move to sequence-based ordering and bag semantics, the structural distinction between L0 SSTs and sorted runs becomes less meaningful. An L0 SST is semantically equivalent to a sorted run containing a single SST — both carry a segment annotation and a sequence range, and the read path treats them uniformly when building the merge DAG. Collapsing the two into a single abstraction would simplify the manifest schema and the read/compaction paths. This RFC preserves the existing L0/SR distinction to limit scope, but unification is a natural follow-on.
+
+### Deterministic segment mapper instead of WriteOptions
+
+An alternative to specifying the segment tag in `WriteOptions` is to configure a deterministic segment mapper — a function `key -> Option<Bytes>` — at database open time. The mapper derives the segment from the key itself rather than relying on the caller to provide it.
+
+This approach has several advantages. Because the mapping is deterministic, the system can guarantee that the same key always belongs to the same segment. This eliminates the possibility of the same key appearing in multiple segments, which in turn makes segment retention safe unconditionally: dropping a segment cannot resurface a shadowed key in another segment, because no key can span segments. It also means tombstones can be elided more aggressively — a tombstone in a segment can be dropped as soon as no older entry for that key exists in the same segment, with no concern about cross-segment shadowing.
+
+The tradeoff is reduced flexibility. The caller can no longer assign arbitrary segment metadata per write — the mapping is fixed for the lifetime of the database (or at least requires careful migration to change). It also means the segment must be derivable from the key, which may not suit all use cases.
 
 ### Default segment-aware scheduler
 
