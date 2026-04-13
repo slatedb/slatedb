@@ -53,6 +53,7 @@ pub use error::{CloseReason, Error, ErrorKind};
 pub use format::sst::BlockTransformer;
 pub use garbage_collector::stats as garbage_collector_stats;
 pub use garbage_collector::GarbageCollectorBuilder;
+pub use iter::IterationOrder;
 pub use merge_operator::{MergeOperator, MergeOperatorError};
 pub use rand::DbRand;
 #[cfg(test)]

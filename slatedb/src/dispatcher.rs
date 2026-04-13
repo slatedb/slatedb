@@ -139,6 +139,32 @@ use slatedb_common::clock::{SystemClock, SystemClockTicker};
 /// A factory for creating messages when a [MessageDispatcherTicker] ticks.
 pub(crate) type MessageFactory<T> = dyn Fn() -> T + Send;
 
+/// An async event source that produces messages for the dispatcher.
+/// Each call to [`notify`](Notifier::notify) waits for the next event and
+/// returns the corresponding message. Pending notifications are dropped on
+/// shutdown; handlers should check notification sources explicitly in
+/// [`cleanup`](MessageHandler::cleanup) if needed.
+#[async_trait]
+pub(crate) trait Notifier<T: Send>: Send {
+    async fn notify(&mut self) -> T;
+}
+
+/// Wraps a [Notifier] so its futures can be collected into a
+/// [FuturesUnordered], returning `&mut self` alongside the message so the
+/// caller can push the next future back in.
+struct DispatcherNotifier<T: Send> {
+    inner: Box<dyn Notifier<T>>,
+}
+
+impl<T: Send> DispatcherNotifier<T> {
+    fn next(&mut self) -> Pin<Box<dyn Future<Output = (T, &mut Self)> + Send + '_>> {
+        Box::pin(async move {
+            let msg = self.inner.notify().await;
+            (msg, self)
+        })
+    }
+}
+
 /// A dispatcher that invokes [MessageHandler] callbacks when events occur.
 ///
 /// [MessageDispatcher] receives a [MessageHandler] and [async_channel::Receiver<T>].
@@ -223,6 +249,14 @@ impl<T: Send + std::fmt::Debug> MessageDispatcher<T> {
             .collect::<Vec<_>>();
         let mut ticker_futures: FuturesUnordered<_> =
             tickers.iter_mut().map(|t| t.tick()).collect();
+        let mut notifiers = self
+            .handler
+            .notifiers()
+            .into_iter()
+            .map(|n| DispatcherNotifier { inner: n })
+            .collect::<Vec<_>>();
+        let mut notifier_futures: FuturesUnordered<_> =
+            notifiers.iter_mut().map(|n| n.next()).collect();
         loop {
             fail_point!(Arc::clone(&self.fp_registry), "dispatcher-run-loop", |_| {
                 Err(SlateDBError::Fenced)
@@ -241,6 +275,11 @@ impl<T: Send + std::fmt::Debug> MessageDispatcher<T> {
                 Some((message, ticker)) = ticker_futures.next() => {
                     self.handler.handle(message).await?;
                     ticker_futures.push(ticker.tick());
+                },
+                // if no messages or tickers, check notifiers
+                Some((message, notifier)) = notifier_futures.next() => {
+                    self.handler.handle(message).await?;
+                    notifier_futures.push(notifier.next());
                 },
             }
         }
@@ -380,6 +419,15 @@ pub(crate) trait MessageHandler<T: Send>: Send {
     /// A vector of tuples containing the duration when a message should be sent to the
     /// [MessageDispatcher], and a message factory to generate a new message on each tick.
     fn tickers(&mut self) -> Vec<(Duration, Box<MessageFactory<T>>)> {
+        vec![]
+    }
+
+    /// Returns async event sources that produce messages for the dispatcher.
+    /// Each [Notifier] is polled alongside messages and tickers. When a
+    /// notifier's [`notify`](Notifier::notify) resolves, the produced message
+    /// is passed to [`handle`](Self::handle). Called once before the dispatcher
+    /// loop starts.
+    fn notifiers(&mut self) -> Vec<Box<dyn Notifier<T>>> {
         vec![]
     }
 
@@ -1836,5 +1884,130 @@ mod test {
 
         task_executor.shutdown_task("parallel").await.ok();
         task_executor.shutdown_task("sequential").await.ok();
+    }
+
+    /// Adapts a `watch::Receiver<u64>` into a [Notifier] that produces
+    /// `WatchMessage::WatermarkAdvanced` on each change.
+    struct WatermarkNotifier {
+        rx: tokio::sync::watch::Receiver<u64>,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    enum WatchMessage {
+        Work(u64),
+        WatermarkAdvanced,
+    }
+
+    #[async_trait::async_trait]
+    impl super::Notifier<WatchMessage> for WatermarkNotifier {
+        async fn notify(&mut self) -> WatchMessage {
+            if self.rx.changed().await.is_err() {
+                std::future::pending::<()>().await;
+            }
+            WatchMessage::WatermarkAdvanced
+        }
+    }
+
+    /// A handler that uses a notifier to react to watermark changes,
+    /// similar to how the manifest writer waits for the WAL durable sequence.
+    struct WatchHandler {
+        log: Arc<Mutex<Vec<(Phase, TestMessage)>>>,
+        cleanup_called: WatchableOnceCell<Result<(), SlateDBError>>,
+        watermark_rx: tokio::sync::watch::Receiver<u64>,
+        /// Pending work waiting for the watermark to catch up.
+        blocked_seq: Option<u64>,
+    }
+
+    #[async_trait::async_trait]
+    impl MessageHandler<WatchMessage> for WatchHandler {
+        fn notifiers(&mut self) -> Vec<Box<dyn super::Notifier<WatchMessage>>> {
+            vec![Box::new(WatermarkNotifier {
+                rx: self.watermark_rx.clone(),
+            })]
+        }
+
+        async fn handle(&mut self, message: WatchMessage) -> Result<(), SlateDBError> {
+            match message {
+                WatchMessage::Work(seq) => {
+                    self.blocked_seq = Some(seq);
+                }
+                WatchMessage::WatermarkAdvanced => {}
+            }
+            // After any event, try to process blocked work.
+            if let Some(seq) = self.blocked_seq {
+                if *self.watermark_rx.borrow() >= seq {
+                    self.blocked_seq = None;
+                    self.log
+                        .lock()
+                        .unwrap()
+                        .push((Phase::Pre, TestMessage::Channel(seq as i32)));
+                }
+            }
+            Ok(())
+        }
+
+        async fn cleanup(
+            &mut self,
+            _messages: BoxStream<'async_trait, WatchMessage>,
+            result: Result<(), SlateDBError>,
+        ) -> Result<(), SlateDBError> {
+            self.cleanup_called.write(result);
+            Ok(())
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_notifier_dispatches_when_watermark_advances() {
+        let log = Arc::new(Mutex::new(Vec::<(Phase, TestMessage)>::new()));
+        let (watermark_tx, watermark_rx) = tokio::sync::watch::channel(0u64);
+        let (tx, rx) = async_channel::unbounded();
+        let clock: Arc<dyn SystemClock> = Arc::new(DefaultSystemClock::new());
+        let handler = WatchHandler {
+            log: log.clone(),
+            cleanup_called: WatchableOnceCell::new(),
+            watermark_rx,
+            blocked_seq: None,
+        };
+
+        let cancellation_token = CancellationToken::new();
+        let mut dispatcher =
+            MessageDispatcher::new(Box::new(handler), rx, clock, cancellation_token.clone());
+        let join = tokio::spawn(async move { dispatcher.run().await });
+
+        // Send work that requires watermark >= 5.
+        tx.try_send(WatchMessage::Work(5)).unwrap();
+        // Give the handler a chance to process the Work message.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        // Work should NOT be logged yet — watermark is still 0.
+        assert!(log.lock().unwrap().is_empty(), "work logged too early");
+
+        // Advance the watermark. This should trigger WatermarkAdvanced via notifier.
+        watermark_tx.send(5).unwrap();
+        wait_for_message_count(log.clone(), 1).await;
+
+        assert_eq!(
+            log.lock().unwrap().clone(),
+            vec![(Phase::Pre, TestMessage::Channel(5))]
+        );
+
+        // Now send work where the watermark is already caught up — should process
+        // immediately since handle() always checks after any event.
+        tx.try_send(WatchMessage::Work(3)).unwrap();
+        wait_for_message_count(log.clone(), 2).await;
+
+        assert_eq!(
+            log.lock().unwrap().clone(),
+            vec![
+                (Phase::Pre, TestMessage::Channel(5)),
+                (Phase::Pre, TestMessage::Channel(3)),
+            ]
+        );
+
+        cancellation_token.cancel();
+        let result = timeout(Duration::from_secs(5), join)
+            .await
+            .expect("dispatcher did not stop in time")
+            .expect("join failed");
+        assert!(matches!(result, Ok(())));
     }
 }

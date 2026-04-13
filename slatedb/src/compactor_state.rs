@@ -720,7 +720,7 @@ mod tests {
     use super::*;
     use crate::checkpoint::Checkpoint;
     use crate::compactor_state::SourceId::SstView;
-    use crate::config::Settings;
+    use crate::config::{FlushOptions, FlushType, Settings};
     use crate::db::Db;
     use crate::db_state::SsTableId;
     use crate::manifest::store::test_utils::new_dirty_manifest;
@@ -1308,7 +1308,16 @@ mod tests {
                 .block_on(db.put(&[b'j' + i as u8; 16], &[b'k' + i as u8; 48]))
                 .unwrap();
         }
-        tokio_handle.block_on(db.close()).unwrap();
+        tokio_handle.block_on(async {
+            // Persist the seeded L0s into the manifest before close so reopen
+            // doesn't reconstruct them from WAL replay on a slow shutdown.
+            db.flush_with_options(FlushOptions {
+                flush_type: FlushType::MemTable,
+            })
+            .await
+            .unwrap();
+            db.close().await.unwrap();
+        });
         let system_clock: Arc<dyn SystemClock> = Arc::new(DefaultSystemClock::new());
         let rand: Arc<DbRand> = Arc::new(DbRand::default());
 

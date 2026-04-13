@@ -12,7 +12,6 @@
 //! - timeout enforcement
 
 use super::tracker::TrackerMessage;
-use super::FlushEpoch;
 use crate::db::DbInner;
 use crate::db_state::{SsTableHandle, SsTableId};
 use crate::db_status::ClosedResultWriter;
@@ -33,8 +32,6 @@ const UPLOADER_TASK_NAME: &str = "l0_sst_uploader";
 
 /// One immutable-memtable upload request submitted to the uploader.
 pub(crate) struct UploadJob {
-    /// Ordering token assigned by the memtable flusher.
-    pub(crate) epoch: FlushEpoch,
     /// Immutable memtable to build into an SST.
     pub(crate) imm_memtable: Arc<ImmutableMemtable>,
     /// Preallocated SST id to use for the uploaded table.
@@ -44,7 +41,6 @@ pub(crate) struct UploadJob {
 impl std::fmt::Debug for UploadJob {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("UploadJob")
-            .field("epoch", &self.epoch)
             .field("sst_id", &self.sst_id)
             .finish()
     }
@@ -52,13 +48,8 @@ impl std::fmt::Debug for UploadJob {
 
 impl UploadJob {
     /// Creates a new upload job.
-    pub(crate) fn new(
-        epoch: FlushEpoch,
-        imm_memtable: Arc<ImmutableMemtable>,
-        sst_id: SsTableId,
-    ) -> Self {
+    pub(crate) fn new(imm_memtable: Arc<ImmutableMemtable>, sst_id: SsTableId) -> Self {
         Self {
-            epoch,
             imm_memtable,
             sst_id,
         }
@@ -68,12 +59,12 @@ impl UploadJob {
 #[derive(Clone)]
 /// Result of a successfully uploaded immutable memtable.
 pub(crate) struct UploadedMemtable {
-    /// Ordering token assigned by the memtable flusher.
-    pub(crate) epoch: FlushEpoch,
     /// Same immutable memtable that was uploaded.
     pub(crate) imm_memtable: Arc<ImmutableMemtable>,
     /// Handle for the uploaded SST in object storage.
     pub(crate) sst_handle: SsTableHandle,
+    /// Lowest sequence number present in the immutable memtable.
+    pub(crate) first_seq: u64,
     /// Highest sequence number present in the immutable memtable.
     pub(crate) last_seq: u64,
 }
@@ -81,15 +72,16 @@ pub(crate) struct UploadedMemtable {
 impl UploadedMemtable {
     #[cfg(test)]
     pub(crate) fn new(
-        epoch: FlushEpoch,
         imm_memtable: Arc<ImmutableMemtable>,
         sst_handle: SsTableHandle,
+        first_seq: u64,
         last_seq: u64,
     ) -> Self {
+        assert!(first_seq <= last_seq);
         Self {
-            epoch,
             imm_memtable,
             sst_handle,
+            first_seq,
             last_seq,
         }
     }
@@ -191,6 +183,11 @@ impl UploadHandler {
         // TODO: consider changing the low-level upload path so failed uploads
         // return ownership of the built SST. That would let the worker build
         // once and retry uploads without rebuilding.
+        let first_seq = job
+            .imm_memtable
+            .table()
+            .first_seq()
+            .expect("flush of l0 with no entries");
         let last_seq = job
             .imm_memtable
             .table()
@@ -203,9 +200,9 @@ impl UploadHandler {
             .await?;
         self.db.db_stats.l0_flush_bytes.increment(written_bytes);
         Ok(UploadedMemtable {
-            epoch: job.epoch,
             imm_memtable: Arc::clone(&job.imm_memtable),
             sst_handle,
+            first_seq,
             last_seq,
         })
     }
@@ -239,7 +236,7 @@ impl MessageHandler<UploadJob> for UploadHandler {
 
 #[cfg(test)]
 mod tests {
-    use super::{FlushEpoch, TrackerMessage, UploadJob, Uploader};
+    use super::{TrackerMessage, UploadJob, Uploader};
     use crate::config::Settings;
     use crate::db::DbInner;
     use crate::db_state::{ManifestCore, SsTableId, SsTableView};
@@ -327,10 +324,10 @@ mod tests {
         guard.state().imm_memtable.front().cloned().unwrap()
     }
 
-    fn next_upload_job(db: &DbInner, epoch: u64, key: &[u8], value: &[u8], seq: u64) -> UploadJob {
+    fn next_upload_job(db: &DbInner, key: &[u8], value: &[u8], seq: u64) -> UploadJob {
         let imm_memtable = freeze_imm(db, key, value, seq);
         let sst_id = SsTableId::Compacted(db.rand.rng().gen_ulid(db.system_clock.as_ref()));
-        UploadJob::new(FlushEpoch(epoch), imm_memtable, sst_id)
+        UploadJob::new(imm_memtable, sst_id)
     }
 
     struct TestUploader {
@@ -391,7 +388,7 @@ mod tests {
             Arc::new(FailPointRegistry::new()),
         )
         .await;
-        let job = next_upload_job(&db, 1, b"key", b"value", 1);
+        let job = next_upload_job(&db, b"key", b"value", 1);
 
         let test = start_test_uploader(&db);
         test.submit(job).unwrap();
@@ -403,7 +400,7 @@ mod tests {
         let TrackerMessage::UploadComplete(event) = msg else {
             panic!("expected UploadComplete");
         };
-        assert_eq!(event.epoch, FlushEpoch(1));
+        assert_eq!(event.first_seq, 1);
         assert_eq!(event.last_seq, 1);
 
         // Verify the uploaded SST contains the expected key-value entry.
@@ -444,7 +441,7 @@ mod tests {
         )
         .unwrap();
         let db = setup_db("/tmp/test_parallel_l0_flush_uploader_retry", fp_registry).await;
-        let job = next_upload_job(&db, 7, b"key", b"value", 1);
+        let job = next_upload_job(&db, b"key", b"value", 1);
 
         let test = start_test_uploader(&db);
         test.submit(job).unwrap();
@@ -456,7 +453,8 @@ mod tests {
         let TrackerMessage::UploadComplete(event) = msg else {
             panic!("expected UploadComplete");
         };
-        assert_eq!(event.epoch, FlushEpoch(7));
+        assert_eq!(event.first_seq, 1);
+        assert_eq!(event.last_seq, 1);
 
         test.shutdown().await;
     }
@@ -486,7 +484,7 @@ mod tests {
             .cloned()
             .unwrap();
         let sst_id = SsTableId::Compacted(db.rand.rng().gen_ulid(db.system_clock.as_ref()));
-        let job = UploadJob::new(FlushEpoch(3), imm_memtable, sst_id);
+        let job = UploadJob::new(imm_memtable, sst_id);
 
         let test = start_test_uploader(&db);
         test.submit(job).unwrap();
@@ -510,26 +508,26 @@ mod tests {
             Arc::new(FailPointRegistry::new()),
         )
         .await;
-        let job1 = next_upload_job(&db, 1, b"key1", b"value1", 1);
-        let job2 = next_upload_job(&db, 2, b"key2", b"value2", 2);
+        let job1 = next_upload_job(&db, b"key1", b"value1", 1);
+        let job2 = next_upload_job(&db, b"key2", b"value2", 2);
 
         let test = start_test_uploader(&db);
         test.submit(job1).unwrap();
         test.submit(job2).unwrap();
 
         // Collect both upload completions.
-        let mut uploaded_epochs = Vec::new();
+        let mut uploaded_seqs = Vec::new();
         for _ in 0..2 {
             let msg = timeout(Duration::from_secs(5), test.tracker_rx.recv())
                 .await
                 .unwrap()
                 .unwrap();
             if let TrackerMessage::UploadComplete(uploaded) = msg {
-                uploaded_epochs.push(uploaded.epoch);
+                uploaded_seqs.push(uploaded.last_seq);
             }
         }
-        uploaded_epochs.sort();
-        assert_eq!(uploaded_epochs, vec![FlushEpoch(1), FlushEpoch(2)]);
+        uploaded_seqs.sort();
+        assert_eq!(uploaded_seqs, vec![1, 2]);
 
         test.shutdown().await;
     }
@@ -560,7 +558,7 @@ mod tests {
             .cloned()
             .unwrap();
         let sst_id = SsTableId::Compacted(db.rand.rng().gen_ulid(db.system_clock.as_ref()));
-        let bad_job = UploadJob::new(FlushEpoch(1), imm_memtable, sst_id);
+        let bad_job = UploadJob::new(imm_memtable, sst_id);
 
         let test = start_test_uploader(&db);
         test.submit(bad_job).unwrap();
@@ -573,7 +571,7 @@ mod tests {
 
         // Subsequent submits should fail with the specific error.
         let err = test
-            .submit(next_upload_job(&db, 2, b"key2", b"value2", 2))
+            .submit(next_upload_job(&db, b"key2", b"value2", 2))
             .unwrap_err();
         assert!(
             !matches!(err, SlateDBError::Closed),

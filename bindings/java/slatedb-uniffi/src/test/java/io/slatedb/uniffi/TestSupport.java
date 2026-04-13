@@ -323,7 +323,7 @@ final class TestSupport {
 
     static ScanOptions scanOptions(long readAheadBytes, boolean cacheBlocks, long maxFetchTasks) {
         return new ScanOptions(
-                DurabilityLevel.MEMORY, false, readAheadBytes, cacheBlocks, maxFetchTasks);
+                DurabilityLevel.MEMORY, false, readAheadBytes, cacheBlocks, maxFetchTasks, null);
     }
 
     static ReaderOptions readerOptions(boolean skipWalReplay) {

@@ -181,6 +181,7 @@
 //!     min_age: '86400s'
 //! ```
 //!
+use crate::iter::IterationOrder;
 use duration_str::{deserialize_duration, deserialize_option_duration};
 use figment::providers::{Env, Format, Json, Toml, Yaml};
 use figment::{Figment, Metadata, Provider};
@@ -325,6 +326,8 @@ pub struct ScanOptions {
     /// The maximum number of concurrent tasks for fetching blocks during scans.
     /// Higher values can improve throughput but use more resources. The default is 1.
     pub max_fetch_tasks: usize,
+    /// The iteration order for the scan. Defaults to [`IterationOrder::Ascending`].
+    pub order: IterationOrder,
 }
 
 impl Default for ScanOptions {
@@ -336,6 +339,7 @@ impl Default for ScanOptions {
             read_ahead_bytes: 1,
             cache_blocks: false,
             max_fetch_tasks: 1,
+            order: IterationOrder::Ascending,
         }
     }
 }
@@ -375,6 +379,10 @@ impl ScanOptions {
             max_fetch_tasks,
             ..self
         }
+    }
+
+    pub fn with_order(self, order: IterationOrder) -> Self {
+        Self { order, ..self }
     }
 }
 

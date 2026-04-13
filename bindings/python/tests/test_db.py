@@ -32,14 +32,13 @@ async def test_db_lifecycle_and_status() -> None:
     store = new_memory_store()
     db = await DbBuilder(TEST_DB_PATH, store).build()
 
-    db.status()
+    status = db.status()
+    assert status.close_reason is None
     await db.put(b"lifecycle", b"value")
     await db.shutdown()
 
-    with pytest.raises(Error.Closed) as exc:
-        db.status()
-    assert exc.value.reason == CloseReason.CLEAN
-    assert exc.value.message == "Closed error: db is closed"
+    status = db.status()
+    assert status.close_reason == CloseReason.CLEAN
 
     with pytest.raises(Error.Closed) as exc:
         await db.put(b"after-shutdown", b"value")

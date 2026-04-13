@@ -21,7 +21,7 @@ jobs:
 
   native-linux:
     name: Build native libraries (Linux)
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-22.04
     needs: verify-version
     steps:
       - uses: actions/checkout@v4
@@ -142,10 +142,10 @@ jobs:
         with:
           ref: "v${{ github.event.inputs.version }}"
 
-      - name: Set up Node 22
+      - name: Set up Node 24.14.1
         uses: actions/setup-node@v4
         with:
-          node-version: "22"
+          node-version: "24.14.1"
           registry-url: "https://registry.npmjs.org"
 
       - name: Setup Rust stable
@@ -154,7 +154,7 @@ jobs:
       - name: Install uniffi-bindgen-node-js
         env:
           RUSTFLAGS: ""
-        run: cargo install uniffi-bindgen-node-js --version 0.0.7
+        run: cargo install uniffi-bindgen-node-js --version 0.0.12
 
       - name: Download Linux artifacts
         uses: actions/download-artifact@v4
@@ -219,6 +219,11 @@ jobs:
           tar -tf "${TARBALL}" | grep -Fx 'package/prebuilds/win32-x64/slatedb_uniffi.dll'
           tar -tf "${TARBALL}" | grep -Fx 'package/prebuilds/win32-arm64/slatedb_uniffi.dll'
 
-      - name: Publish to npm
+      - name: Verify Node and npm versions for trusted publishing
+        run: |
+          node --version
+          npm --version
+
+      - name: Publish to npm via trusted publishing
         working-directory: ./bindings/node
-        run: npm publish --provenance --access public
+        run: npm publish

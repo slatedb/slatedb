@@ -418,8 +418,9 @@ func TestDbLifecycleAndStatus(t *testing.T) {
 	store := newMemoryStore(t)
 	handle := openTestDB(t, store, nil)
 
-	if err := handle.db.Status(); err != nil {
-		t.Fatalf("Status(): %v", err)
+	status := handle.db.Status()
+	if status.CloseReason != nil {
+		t.Fatalf("Status() on open db: got close reason %v, want nil", *status.CloseReason)
 	}
 
 	if _, err := handle.db.Put([]byte("lifecycle"), []byte("value")); err != nil {
@@ -431,17 +432,12 @@ func TestDbLifecycleAndStatus(t *testing.T) {
 	}
 	handle.open = false
 
-	err := handle.db.Status()
-	if !errors.Is(err, slatedb.ErrErrorClosed) {
-		t.Fatalf("Status() after Shutdown(): got %v, want closed error", err)
+	status = handle.db.Status()
+	if status.CloseReason == nil {
+		t.Fatalf("Status() after Shutdown(): got nil close reason, want %v", slatedb.CloseReasonClean)
 	}
-
-	var closedErr *slatedb.ErrorClosed
-	if !errors.As(err, &closedErr) {
-		t.Fatalf("Status() after Shutdown(): expected *ErrorClosed, got %T", err)
-	}
-	if closedErr.Reason != slatedb.CloseReasonClean {
-		t.Fatalf("Status() after Shutdown(): got close reason %v, want %v", closedErr.Reason, slatedb.CloseReasonClean)
+	if *status.CloseReason != slatedb.CloseReasonClean {
+		t.Fatalf("Status() after Shutdown(): got close reason %v, want %v", *status.CloseReason, slatedb.CloseReasonClean)
 	}
 
 	if _, err := handle.db.Put([]byte("after-shutdown"), []byte("value")); !errors.Is(err, slatedb.ErrErrorClosed) {

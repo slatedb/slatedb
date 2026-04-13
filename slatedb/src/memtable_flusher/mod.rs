@@ -20,7 +20,7 @@ use crate::dispatcher::MessageHandlerExecutor;
 use crate::error::SlateDBError;
 use crate::manifest::store::FenceableManifest;
 use crate::memtable_flusher::manifest_writer::ManifestWriter;
-use crate::memtable_flusher::tracker::FlushTracker;
+use crate::memtable_flusher::tracker::{FlushTracker, TrackerMessage};
 use crate::memtable_flusher::uploader::Uploader;
 use crate::utils::SafeSender;
 use log::warn;
@@ -29,13 +29,6 @@ use tokio::runtime::Handle;
 use tokio::sync::oneshot;
 
 const TRACKER_TASK_NAME: &str = "l0_flush_tracker";
-
-/// Monotonic ordering token assigned by the parallel L0 memtable flusher.
-///
-/// Workers carry this through upload completion so the manifest writer can restore
-/// the original immutable-memtable retirement order.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(crate) struct FlushEpoch(pub(crate) u64);
 
 /// Flush request target exposed by the memtable flusher.
 #[derive(Clone, Copy, Debug)]
@@ -103,6 +96,14 @@ impl MemtableFlusher {
         )?;
 
         Ok(())
+    }
+
+    /// Enqueues a manifest refresh and waits until it completes.
+    pub(crate) async fn refresh_manifest(&self) -> Result<(), SlateDBError> {
+        let (tx, rx) = oneshot::channel();
+        self.messages_tx
+            .send(TrackerMessage::PollManifest { sender: tx })?;
+        rx.await.map_err(SlateDBError::ReadChannelError)?
     }
 
     /// Processes one flush request using the requested target.

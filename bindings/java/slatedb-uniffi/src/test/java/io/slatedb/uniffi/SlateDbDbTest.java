@@ -16,14 +16,13 @@ class SlateDbDbTest {
                 TestSupport.ManagedDb handle = TestSupport.openDb(store)) {
             Db db = handle.db();
 
-            db.status();
+            assertNull(db.status().closeReason());
             TestSupport.await(db.put(TestSupport.bytes("lifecycle"), TestSupport.bytes("value")));
 
             TestSupport.await(db.shutdown());
             handle.markClosed();
 
-            Error.Closed statusError = TestSupport.expectFailure(Error.Closed.class, db::status);
-            assertEquals(CloseReason.CLEAN, statusError.reason());
+            assertEquals(CloseReason.CLEAN, db.status().closeReason());
 
             TestSupport.awaitFailure(
                     Error.Closed.class,

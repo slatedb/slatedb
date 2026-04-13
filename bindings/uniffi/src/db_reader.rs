@@ -3,7 +3,7 @@ use std::sync::Arc;
 use crate::config::{ReadOptions, ScanOptions};
 use crate::error::Error;
 use crate::iterator::DbIterator;
-use crate::types::KeyRange;
+use crate::types::{DbStatus, KeyRange};
 use crate::validation::validate_key;
 
 /// Read-only database handle opened by [`crate::DbReaderBuilder`].
@@ -15,6 +15,14 @@ pub struct DbReader {
 impl DbReader {
     pub(crate) fn new(inner: slatedb::DbReader) -> Self {
         Self { inner }
+    }
+}
+
+#[uniffi::export]
+impl DbReader {
+    /// Returns the latest reader status snapshot.
+    pub fn status(&self) -> DbStatus {
+        self.inner.status().into()
     }
 }
 

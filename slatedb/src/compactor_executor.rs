@@ -22,7 +22,8 @@ use crate::iter::{IterationOrder, RowEntryIterator, TrackedRowEntryIterator};
 use crate::manifest::store::{ManifestStore, StoredManifest};
 use crate::merge_iterator::MergeIterator;
 use crate::merge_operator::{
-    MergeOperatorIterator, MergeOperatorRequiredIterator, MergeOperatorType,
+    instrument_merge_operator, MergeOperatorIterator, MergeOperatorRequiredIterator,
+    MergeOperatorType,
 };
 use crate::peeking_iterator::PeekingIterator;
 use crate::rand::DbRand;
@@ -200,6 +201,14 @@ pub(crate) struct TokioCompactionExecutor {
 
 impl TokioCompactionExecutor {
     pub(crate) fn new(opts: TokioCompactionExecutorOptions) -> Self {
+        let stats = opts.stats;
+        let merge_operator = opts.merge_operator.map(|merge_operator| {
+            instrument_merge_operator(
+                merge_operator,
+                stats.merge_operator_compact_operands.clone(),
+            )
+        });
+
         Self {
             inner: Arc::new(TokioCompactionExecutorInner {
                 options: opts.options,
@@ -208,11 +217,11 @@ impl TokioCompactionExecutor {
                 table_store: opts.table_store,
                 rand: opts.rand,
                 tasks: Arc::new(Mutex::new(HashMap::new())),
-                stats: opts.stats,
+                stats,
                 clock: opts.clock,
                 is_stopped: AtomicBool::new(false),
                 manifest_store: opts.manifest_store,
-                merge_operator: opts.merge_operator,
+                merge_operator,
                 #[cfg(feature = "compaction_filters")]
                 compaction_filter_supplier: opts.compaction_filter_supplier,
             }),
