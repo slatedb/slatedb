@@ -224,8 +224,6 @@ jobs:
           node --version
           npm --version
 
-      - name: Publish to npm
+      - name: Publish to npm via trusted publishing
         working-directory: ./bindings/node
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NODE_AUTH_TOKEN }}
-        run: npm publish --provenance --access public
+        run: npm publish
