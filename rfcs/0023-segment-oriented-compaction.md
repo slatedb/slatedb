@@ -42,7 +42,7 @@ This RFC aims to let compaction operate on those append-ordered boundaries direc
 ## Non-Goals
 
 - Defining timestamp-native TWCS semantics (event-time watermarks, lateness contracts, clock policy).
-- Supporting segment remapping/key-rewriting transforms in this first cut.
+- Supporting segment remapping/key-rewriting transforms (deferred to future work)
 
 ## Target LSM Shape
 
@@ -159,7 +159,7 @@ hour=11    L0{seq=300..400}, L0{seq=400..500}, L0{seq=500..600}
 
 This RFC introduces segment metadata as an opaque `Option<Bytes>` annotation that flows from the write API through the WAL, memtable, L0, and sorted runs. All segments share a common WAL, but each segment is effectively a complete LSM tree in its own right, with its own L0 and sorted runs. This structure is logical and maintained by the shared manifest.
 
-Entries written without segment metadata belong to a default segment. When no segment metadata is used, the system behaves identically to today — the default segment is a degenerate case of the general model.
+Entries written without segment metadata are unsegmented. When no segment metadata is used, the system behaves identically to today — all data is unsegmented and the existing compaction path applies unchanged.
 
 ### Write API
 
@@ -172,7 +172,7 @@ pub struct WriteOptions {
 }
 ```
 
-The segment tag is an opaque byte sequence whose semantics are defined by the application. For a timeseries database, it might encode a time bucket; for a log, it might encode a segment identifier based on size or time. SlateDB does not interpret the value — it propagates, stores, and filters on it.
+The segment tag is an opaque byte sequence whose semantics are defined by the application. For a timeseries database, it might encode a time bucket; for a log, it might encode a segment identifier based on size or time. SlateDB does not interpret the value — it propagates, stores, and filters on it. Consequently, any ordering, age, or expiry semantics on segments are the application's responsibility. The application (via its custom compaction scheduler) defines what "oldest" or "expired" means for its segments and constructs appropriate compaction specs accordingly.
 
 ### WAL
 
@@ -182,7 +182,9 @@ To address this, the WAL block format is extended to carry a segment tag. The WA
 
 In the common case — all writes targeting the current segment — this adds minimal overhead since blocks are naturally single-segment. When writes interleave segments (e.g. backfill mixed with current data), block boundaries are inserted at segment transitions. This may produce smaller blocks with reduced compression efficiency.
 
-On WAL replay, the block-level segment tag is restored into each memtable entry so that flush can group by segment correctly. A single WAL SST may contain blocks for multiple segments. Segmentation only takes effect at memtable flush time.
+Since `WriteOptions` (and therefore the segment tag) is specified per write batch, all entries in a batch belong to the same segment. Cross-segment batches are not supported. This means segment-driven block splitting never occurs within a single batch, and write batch atomicity is unaffected.
+
+On WAL replay, the block-level segment tag is restored into each memtable entry so that flush can group by segment correctly. A single WAL SST may contain blocks for multiple segments (from different batches). Segmentation only takes effect at memtable flush time.
 
 ### Manifest
 
@@ -206,7 +208,7 @@ Both L0 SSTs and sorted runs gain two new fields: an explicit sequence range and
 
 The sequence range (`min_seq`, `max_seq`) records the minimum and maximum sequence numbers across all entries in the L0 SST or sorted run. This allows the reader to determine merge precedence directly from the manifest without loading SST index metadata. Combined with key ranges (already available from SST metadata in the manifest), the reader has everything it needs to build the merge DAG.
 
-The segment annotation (`segment: [ubyte]`) is an optional field matching the write-time tag. L0 SSTs and sorted runs without a segment annotation belong to the default segment.
+The segment annotation (`segment: [ubyte]`) is an optional field matching the write-time tag. L0 SSTs and sorted runs without a segment annotation are unsegmented and are handled by the existing compaction path.
 
 Every sorted run has a `Ulid` identifier. Legacy sorted runs migrated from `ManifestV2` also retain their original `u32` ID so that the read path can fall back to list-position ordering for those runs. The FlatBuffer schema introduces `SortedRunV3`:
 
@@ -258,11 +260,11 @@ The migration is performed in two phases: first the decoder is updated to unders
 - Assigning a Ulid to each existing `u32`-identified sorted run and L0 SST view.
 - Retaining the original `u32` in the `legacy_id` field for each sorted run.
 - Computing the sequence range (`min_seq`, `max_seq`) for each sorted run and L0 SST. This requires reading SST index metadata from object storage to determine the first and last sequence numbers. This is the most expensive part of the migration — for a database with many sorted runs, it involves one read per SST. However, it is a one-time cost.
-- Applying a default segment annotation (no segment) to all existing runs and L0 SSTs.
+- Leaving all existing runs and L0 SSTs unsegmented (no segment annotation).
 
 The standalone compactor must not upgrade the manifest version on its own. If it encounters a V2 manifest, it continues operating in V2 mode. This prevents a compactor from writing a V3 manifest that the writer does not yet understand. The compactor only begins writing V3 after it reads a V3 manifest that the writer has already produced.
 
-After the upgrade, the read path handles both run types: runs with a `legacy_id` use their list position for precedence (as today), while runs without one use their explicit sequence ranges. The compaction scheduler and `CompactionSpec` reference sorted runs through the opaque `SortedRunId` type — the scheduler is unaware of the legacy distinction.
+After the upgrade, the read path handles both run types: runs with a `legacy_id` use their list position for precedence (as today), while runs without one use their explicit sequence ranges. The compaction scheduler and `CompactionSpec` reference sorted runs through the opaque `SortedRunId` type — the scheduler is unaware of the legacy distinction. Because every sorted run has a Ulid after migration (including legacy ones), the post-upgrade `CompactionSpecV2` can reference all runs uniformly by Ulid. The compactor resolves each Ulid through the manifest, which knows whether the underlying run has a `legacy_id` and handles the indirection.
 
 New compactions always produce runs without a `legacy_id`. Over time, as legacy runs are compacted into newer ones, the `legacy_id` field is no longer present on any run and the database is fully migrated.
 
@@ -283,7 +285,7 @@ pub struct ReadOptions {
 }
 ```
 
-The predicate receives `None` for the default segment and `Some(&bytes)` for tagged segments. When set, the reader prunes L0 SSTs and sorted runs that do not match before building the merge iterator.
+The predicate receives `None` for unsegmented data and `Some(&bytes)` for tagged segments. When set, the reader prunes L0 SSTs and sorted runs that do not match before building the merge iterator.
 
 After filtering, the reader builds a merge iterator from the remaining L0 SSTs and sorted runs. For runs with explicit sequence ranges (`Sequenced` runs), entries are ordered by sequence number (higher wins). Legacy runs (those with a `legacy_id` from the V2 migration) continue to use their list position for precedence until they are compacted into newer runs. Across segments, per-segment streams are merged by key, again with sequence number precedence. The reader does not interpret segment metadata beyond filtering — all merge ordering is derived from key ranges, sequence numbers, and (for legacy runs) list position.
 
@@ -309,7 +311,7 @@ pub enum SourceId {
     SstView(Ulid),
 }
 
-pub enum CompactionOutput {
+pub enum Action {
     /// Merge sources into a new sorted run with the given ID.
     Merge(SortedRunId),
     /// Drop sources without producing output (retention).
@@ -318,7 +320,7 @@ pub enum CompactionOutput {
 
 pub struct CompactionSpec {
     sources: Vec<SourceId>,
-    output: CompactionOutput,
+    action: Action,
 }
 ```
 
@@ -336,7 +338,7 @@ This keeps the scheduler version-agnostic. It never constructs or inspects `Sort
 
 All sources in a single compaction must share the same segment annotation. A `CompactionSpec` with sources from different segments is invalid and will be rejected during validation. This invariant ensures that compaction remains segment-scoped — each compaction reads and writes within a single segment's logical LSM tree.
 
-For `Merge`, the executor merges inputs and produces one output sorted run, annotated with the same segment. For `Drop`, the sources are removed from the manifest with no output — this is how segment retention is expressed.
+For `Merge`, the executor merges inputs and produces one output sorted run, annotated with the same segment. For `Drop`, the sources are removed from the current manifest with no output — this is how segment retention is expressed. Note that `Drop` only removes references from the latest manifest; the underlying SST files are not deleted immediately. The garbage collector is responsible for cleaning up SST files once no remaining manifest versions (including those pinned by snapshots or checkpoints) reference them.
 
 To support segment-aware scheduling, `ManifestCore` exposes a segment index:
 
@@ -348,14 +350,16 @@ pub struct SegmentView {
 
 impl ManifestCore {
     /// Returns a map from segment tag to the L0 SSTs and sorted runs
-    /// belonging to that segment. Only non-default segments are included.
-    /// Default-segment data is accessible through the existing l0 and
-    /// compacted fields.
+    /// belonging to that segment. Unsegmented data is not included.
+    /// Unsegmented L0 SSTs and sorted runs are accessible through the
+    /// existing l0 and compacted fields.
     pub fn segments(&self) -> HashMap<Bytes, SegmentView> { ... }
 }
 ```
 
 The scheduler uses this index to plan work: selecting segments with many L0s, merging sorted runs within a segment, or identifying expired segments for retention.
+
+Segmented and unsegmented data may coexist in the same database. For example, a TSDB might use segments for time-bucketed metric data while keeping permanent configuration state as unsegmented. Migration from an unsegmented to a segmented layout is another scenario. When both are present, the scheduler is responsible for handling both: using `segments()` to plan segment-scoped compactions and the existing `l0`/`compacted` fields for unsegmented data.
 
 The `.compactions` file schema is updated to match. Before the V3 upgrade, the existing `TieredCompactionSpec` continues to be used. After the upgrade, a new `CompactionSpecV2` is used with Ulid-based sorted run references:
 
@@ -365,7 +369,7 @@ union CompactionSpecUnion {
     CompactionSpecV2,
 }
 
-enum CompactionOutputType : byte {
+enum CompactionActionType : byte {
     Merge = 0,
     Drop,
 }
@@ -374,7 +378,7 @@ table CompactionSpecV2 {
     l0_view_ids: [Ulid];
     sorted_runs: [Ulid];
     destination: Ulid;
-    output: CompactionOutputType;
+    output: CompactionActionType;
 }
 ```
 
@@ -392,42 +396,6 @@ Within a segment, tombstone elision during compaction follows existing rules: a 
 
 The resume mechanism is unchanged: the executor reads the last output SST to compute a resume cursor. Since each compaction produces a single sorted run, the existing single-destination progress model applies without modification. The compactor epoch and fencing protocol are unaffected.
 
-### End-to-End Flows
-
-#### Write Flow
-
-1. Client calls `put(key, value, WriteOptions { segment: Some(b"hour=14") })`.
-2. The entry is appended to the WAL buffer. If the segment differs from the current WAL block's segment, the block is flushed and a new block is started with the new segment tag.
-3. The entry is inserted into the memtable with its segment tag.
-4. When the memtable is frozen and flushed, entries are grouped by segment. One L0 SST is built per segment and uploaded to object storage.
-5. A single manifest update atomically adds all new L0 SSTs.
-
-#### Read Flow
-
-1. Client calls `get(key, ReadOptions { segment_filter: Some(|s| s == Some(b"hour=14")) })`.
-2. The reader loads the current manifest snapshot.
-3. L0 SSTs and sorted runs are filtered by the segment predicate — only those matching `hour=14` are retained.
-4. The reader searches the filtered set by key, resolving duplicates by sequence number (highest wins).
-
-#### Compaction Flow
-
-1. The scheduler inspects manifest state and identifies `hour=12` as having three L0 SSTs ready for compaction.
-2. It calls `manifest.next_sorted_run_id()` to generate a destination ID.
-3. It constructs a `CompactionSpec` with the three L0 SST view IDs as sources and `CompactionOutput::Merge(destination)`.
-4. The executor merges the three L0 SSTs, producing a single sorted run annotated with `segment = hour=12`.
-5. The manifest is updated: the three L0 SSTs are removed and the new sorted run is added.
-
-#### Retention Flow
-
-1. The scheduler determines that `hour=10` has expired based on retention policy.
-2. It constructs a `CompactionSpec` listing all L0 SSTs and sorted runs with `segment = hour=10` as sources, with `CompactionOutput::Drop`.
-3. The manifest is updated: all sources are removed. Garbage collection cleans up the underlying SST files.
-
-## Open Questions
-
-- Should segment-oriented compaction require a custom scheduler, or should SlateDB provide a default segment-aware scheduler?
-- How should segment retention interact with snapshots and tombstone semantics?
-
 ## Future Work
 
 This RFC focuses on segment-oriented planning and explicit drop semantics. Natural next steps include key-rewriting transforms and multi-stage timeseries rollups built on top of these primitives.
@@ -443,9 +411,19 @@ This staged model gives a clean source-selection boundary for day rollups and av
 
 ## Alternatives
 
+### Time-Window Compaction Strategy (TWCS)
+
+A more traditional approach would implement TWCS directly: the system defines time windows (e.g. 1 hour), routes data by event or ingestion time, and manages window lifecycle automatically — closing windows after a threshold, never merging across windows, and dropping expired windows based on a configured retention period. This provides good out-of-the-box behavior for timeseries workloads with minimal application involvement.
+
+This RFC opts for a more general approach: opaque segment metadata defined by the application rather than time windows defined by the system. This is more flexible — segments can represent time buckets, log partitions, or any other application-defined scope — but requires a custom compaction scheduler and shifts more responsibility to the application. The generality also paves the way for key-rewriting transforms (e.g. rolling hourly buckets into daily ones), which would be difficult to retrofit into a TWCS model where window identity is system-managed.
+
 ### Unifying L0 and sorted runs
 
 With the move to sequence-based ordering and bag semantics, the structural distinction between L0 SSTs and sorted runs becomes less meaningful. An L0 SST is semantically equivalent to a sorted run containing a single SST — both carry a segment annotation and a sequence range, and the read path treats them uniformly when building the merge DAG. Collapsing the two into a single abstraction would simplify the manifest schema and the read/compaction paths. This RFC preserves the existing L0/SR distinction to limit scope, but unification is a natural follow-on.
+
+### Default segment-aware scheduler
+
+This RFC requires a custom compaction scheduler when segments are in use. A natural question is whether SlateDB should provide a default segment-aware scheduler. Efficient retention enforcement is a primary motivation for this feature, but retention policy depends on application-level durability guarantees — for example, time-based retention for a TSDB differs from consumption-based retention for a log. A default scheduler may be introduced in the future once common patterns emerge, but initially the application is responsible for providing a scheduler that understands its own segment and retention semantics.
 
 ## Appendix A: OpenData Timeseries Usage
 
