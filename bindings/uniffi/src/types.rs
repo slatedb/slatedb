@@ -22,13 +22,6 @@ pub struct KeyRange {
 
 impl KeyRange {
     pub(crate) fn into_bounds(self) -> Result<KeyBounds, SlateDbError> {
-        if self.start.as_ref().is_some_and(|start| start.is_empty()) {
-            return Err(SlateDbError::EmptyRangeStart);
-        }
-        if self.end.as_ref().is_some_and(|end| end.is_empty()) {
-            return Err(SlateDbError::EmptyRangeEnd);
-        }
-
         if let (Some(start), Some(end)) = (&self.start, &self.end) {
             match start.cmp(end) {
                 std::cmp::Ordering::Greater => {

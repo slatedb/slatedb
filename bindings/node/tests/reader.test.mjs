@@ -345,16 +345,6 @@ test("reader rejects invalid key ranges", async (t) => {
 
   await expectInvalid(
     () => reader.scan({
-      start: bytes(""),
-      start_inclusive: true,
-      end: undefined,
-      end_inclusive: false,
-    }),
-    { message: "range start cannot be empty" },
-  );
-
-  await expectInvalid(
-    () => reader.scan({
       start: bytes("z"),
       start_inclusive: true,
       end: bytes("a"),
@@ -372,4 +362,13 @@ test("reader rejects invalid key ranges", async (t) => {
     }),
     { message: "range must be non-empty" },
   );
+
+  // Scan with empty start bound should succeed and be treated as unbounded start.
+  const emptyStartScan = cleanup.track(await reader.scan({
+    start: bytes(""),
+    start_inclusive: true,
+    end: undefined,
+    end_inclusive: false,
+  }));
+  requireRows(await drainIterator(emptyStartScan), ["seed"], ["value"]);
 });
