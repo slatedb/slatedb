@@ -5,6 +5,7 @@ build-backend = "maturin"
 [project]
 name = "slatedb"
 description = "A cloud native embedded storage engine built on object storage."
+readme = "README.md"
 dynamic = ["version"]
 requires-python = ">=3.10"
 
