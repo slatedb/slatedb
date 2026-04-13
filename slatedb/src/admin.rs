@@ -119,7 +119,7 @@ impl Admin {
         Ok(manifests)
     }
 
-    /// Read-only access to the latest compactions file
+    /// Read-only access to a specific or the latest compactions file.
     ///
     /// ## Arguments
     /// - `maybe_id`: Optional ID of the compactions file to read. If None, reads from the latest.
