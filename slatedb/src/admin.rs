@@ -94,17 +94,28 @@ impl Admin {
         Ok(manifest)
     }
 
-    /// List manifests within a range
+    /// List manifests within a range.
+    ///
+    /// ## Returns
+    /// - `Ok(Vec<VersionedManifest>)`: The manifests in ascending ID order.
     pub async fn list_manifests<R: RangeBounds<u64>>(
         &self,
         range: R,
-    ) -> Result<String, Box<dyn Error>> {
+    ) -> Result<Vec<VersionedManifest>, Box<dyn Error>> {
         let manifest_store = ManifestStore::new(
             &self.path,
             self.object_stores.store_of(ObjectStoreType::Main).clone(),
         );
-        let manifests = manifest_store.list_manifests(range).await?;
-        Ok(serde_json::to_string(&manifests)?)
+        let manifest_metadata = manifest_store.list_manifests(range).await?;
+        let mut manifests = Vec::with_capacity(manifest_metadata.len());
+        for metadata in manifest_metadata {
+            let manifest = manifest_store.read_manifest(metadata.id).await?;
+            manifests.push(VersionedManifest {
+                id: metadata.id,
+                manifest: manifest.core,
+            });
+        }
+        Ok(manifests)
     }
 
     /// Read-only access to the latest compactions file
