@@ -1,29 +1,11 @@
-use slatedb_txn_obj::DirtyObject;
 use tokio::sync::watch;
 
 use crate::db_state::ManifestCore;
 use crate::error::SlateDBError;
-use crate::manifest::Manifest;
 use crate::utils::WatchableOnceCell;
 use crate::CloseReason;
 
-/// A manifest snapshot paired with its version ID for monotonic ordering.
-#[derive(Clone, Debug, PartialEq)]
-pub struct VersionedManifest {
-    /// The version ID of the manifest.
-    pub id: u64,
-    /// The manifest state at this version.
-    pub manifest: ManifestCore,
-}
-
-impl From<DirtyObject<Manifest>> for VersionedManifest {
-    fn from(dirty: DirtyObject<Manifest>) -> Self {
-        Self {
-            id: dirty.id.id(),
-            manifest: dirty.value.core,
-        }
-    }
-}
+pub use crate::db_state::VersionedManifest;
 
 /// Current status of the database, exposed via [`crate::Db::subscribe`].
 ///

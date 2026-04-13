@@ -472,6 +472,24 @@ impl COWDbState {
     }
 }
 
+/// A manifest snapshot paired with its version ID for monotonic ordering.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct VersionedManifest {
+    /// The version ID of the manifest.
+    pub id: u64,
+    /// The manifest state at this version.
+    pub manifest: ManifestCore,
+}
+
+impl From<DirtyObject<Manifest>> for VersionedManifest {
+    fn from(dirty: DirtyObject<Manifest>) -> Self {
+        Self {
+            id: dirty.id.id(),
+            manifest: dirty.value.core,
+        }
+    }
+}
+
 /// Represents an immutable in-memory view of .manifest file that is suitable
 /// to expose to end-users.
 #[derive(Clone, PartialEq, Serialize, Debug)]
