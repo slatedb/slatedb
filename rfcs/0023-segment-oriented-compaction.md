@@ -32,7 +32,7 @@ This RFC aims to let compaction operate on those append-ordered boundaries direc
 
 ## Goals
 
-- Introduce opaque segment metadata (`Option<Bytes>`) at write time, propagated through L0 and sorted runs.
+- Introduce a deterministic segment mapper (`key -> Option<Bytes>`) that derives segment metadata from keys, propagated through L0 and sorted runs.
 - Enable segment-aware compaction scheduling based on manifest-visible segment annotations.
 - Support explicit segment-level deletion as part of compaction lifecycle and retention.
 - Replace ordered sorted run lists with unordered (bag) semantics, using sequence number ranges for read-path correctness.
@@ -48,10 +48,10 @@ This RFC aims to let compaction operate on those append-ordered boundaries direc
 
 This section describes the intuitive LSM shape this RFC is trying to enable.
 
-A segment is a scope for compaction and retention. Each L0 SST and sorted run belongs to exactly one segment. The writer tags entries at write time, and the memtable flusher produces one L0 SST per segment. Sorted runs are managed as an unordered bag — there is no global ordering between them. The read path resolves precedence using key ranges and sequence numbers. It does not use segments for ordering, but can filter on them to prune irrelevant data before building the merge iterator.
+A segment is a scope for compaction and retention. Each L0 SST and sorted run belongs to exactly one segment. A deterministic segment mapper derives the segment from each key at memtable flush time, producing one L0 SST per segment. Sorted runs are managed as an unordered bag — there is no global ordering between them. The read path resolves precedence using key ranges and sequence numbers. It does not use segments for ordering, but can filter on them to prune irrelevant data before building the merge iterator.
 
 ```text
-writes arrive with segment tags in WriteOptions
+segment mapper derives segments from keys at flush time
                      |
                      v
 
@@ -141,7 +141,7 @@ hour=11    L0{seq=300..400}, L0{seq=400..500}, L0{seq=500..600}
 hour=10    SR{seq=1..900}
 ```
 
-The `hour=10` SR now spans a wider sequence range that overlaps with other segments. This is fine — their key ranges are disjoint, so no ordering relationship is needed between them.
+The `hour=10` SR now spans a wider sequence range that overlaps with other segments. This is fine — the deterministic mapper guarantees that key ranges across segments do not overlap, so no ordering relationship is needed between them.
 
 #### Example 5: Segment retention
 
@@ -157,34 +157,30 @@ hour=11    L0{seq=300..400}, L0{seq=400..500}, L0{seq=500..600}
 
 ### Overview
 
-This RFC introduces segment metadata as an opaque `Option<Bytes>` annotation that flows from the write API through the WAL, memtable, L0, and sorted runs. All segments share a common WAL, but each segment is effectively a complete LSM tree in its own right, with its own L0 and sorted runs. This structure is logical and maintained by the shared manifest.
+This RFC introduces a deterministic segment mapper that derives segment metadata from keys. The mapper is configured at database open time as a function `key -> Option<Bytes>`. Because the mapping is deterministic, the system guarantees that a given key always belongs to the same segment. All segments share a common WAL, but each segment is effectively a complete LSM tree in its own right, with its own L0 and sorted runs. This structure is logical and maintained by the shared manifest.
 
-Entries written without segment metadata are unsegmented. When no segment metadata is used, the system behaves identically to today — all data is unsegmented and the existing compaction path applies unchanged.
+When no segment mapper is configured, all data is unsegmented and the system behaves identically to today.
 
-### Write API
+### Segment Mapper
 
-The entry point for segment metadata is `WriteOptions`, which gains a segment tag:
+The segment mapper is configured at database open time:
 
 ```rust
-pub struct WriteOptions {
-    pub segment: Option<Bytes>,
+pub struct DbOptions {
+    pub segment_mapper: Option<Arc<dyn Fn(&[u8]) -> Option<Bytes> + Send + Sync>>,
     // ... existing fields
 }
 ```
 
-The segment tag is an opaque byte sequence whose semantics are defined by the application. For a timeseries database, it might encode a time bucket; for a log, it might encode a segment identifier based on size or time. SlateDB does not interpret the value — it propagates, stores, and filters on it. Consequently, any ordering, age, or expiry semantics on segments are the application's responsibility. The application (via its custom compaction scheduler) defines what "oldest" or "expired" means for its segments and constructs appropriate compaction specs accordingly.
+The mapper receives a key and returns an optional segment tag. Keys for which the mapper returns `None` are unsegmented. The segment tag is an opaque byte sequence whose semantics are defined by the application — for a timeseries database, it might encode a time bucket; for a log, a segment identifier based on size or time. Ordering, age, and expiry semantics on segments are the application's responsibility. The application (via its custom compaction scheduler) defines what "oldest" or "expired" means for its segments.
+
+Because the mapping is deterministic, a given key always maps to the same segment. This guarantees disjoint key spaces across segments, which makes segment retention unconditionally safe — dropping a segment cannot affect keys in other segments.
 
 ### WAL
 
-The segment tag from `WriteOptions` is transient — it exists only in the in-memory memtable entry. If the process restarts before the memtable is flushed, the WAL is replayed to reconstruct the memtable. Without persisting the segment tag in the WAL, the recovered memtable entries would lose their segment association, and the subsequent flush would be unable to group entries by segment correctly.
+The WAL requires no format changes to support segments. Because the segment mapper is deterministic and configured at database open time, segment membership can be recomputed from keys during WAL replay. The mapper is applied at memtable flush time to group entries by segment — there is no need to persist segment information in the WAL.
 
-To address this, the WAL block format is extended to carry a segment tag. The WAL uses the SST block format for encoding entries, and the segment is stored at the block level rather than per row. Each WAL block carries an optional `segment: [ubyte]` in its metadata, and all rows within a block share the same segment. The WAL writer flushes the current block and starts a new one when the segment tag changes between consecutive writes.
-
-In the common case — all writes targeting the current segment — this adds minimal overhead since blocks are naturally single-segment. When writes interleave segments (e.g. backfill mixed with current data), block boundaries are inserted at segment transitions. This may produce smaller blocks with reduced compression efficiency.
-
-Since `WriteOptions` (and therefore the segment tag) is specified per write batch, all entries in a batch belong to the same segment. Cross-segment batches are not supported. This means segment-driven block splitting never occurs within a single batch, and write batch atomicity is unaffected.
-
-On WAL replay, the block-level segment tag is restored into each memtable entry so that flush can group by segment correctly. A single WAL SST may contain blocks for multiple segments (from different batches). Segmentation only takes effect at memtable flush time.
+The segment mapper must be configured consistently across restarts. If the mapper changes between the time data was written and when the WAL is replayed, entries may be assigned to different segments than intended. The mapper should be treated as a fixed property of the database.
 
 ### Manifest
 
@@ -208,7 +204,7 @@ Both L0 SSTs and sorted runs gain two new fields: an explicit sequence range and
 
 The sequence range (`min_seq`, `max_seq`) records the minimum and maximum sequence numbers across all entries in the L0 SST or sorted run. This allows the reader to determine merge precedence directly from the manifest without loading SST index metadata. Combined with key ranges (already available from SST metadata in the manifest), the reader has everything it needs to build the merge DAG.
 
-The segment annotation (`segment: [ubyte]`) is an optional field matching the write-time tag. L0 SSTs and sorted runs without a segment annotation are unsegmented and are handled by the existing compaction path.
+The segment annotation (`segment: [ubyte]`) is an optional field recording the segment derived from the mapper at flush time. L0 SSTs and sorted runs without a segment annotation are unsegmented and are handled by the existing compaction path.
 
 Every sorted run has a `Ulid` identifier. Legacy sorted runs migrated from `ManifestV2` also retain their original `u32` ID so that the read path can fall back to list-position ordering for those runs. The FlatBuffer schema introduces `SortedRunV3`:
 
@@ -270,9 +266,9 @@ New compactions always produce runs without a `legacy_id`. Over time, as legacy 
 
 ### Write Path
 
-With the write API, WAL, and manifest changes in place, the write path works as follows. The segment tag from `WriteOptions` is carried through the WAL (at the block level) and the memtable entry. At memtable flush time, entries are grouped by segment and one L0 SST is produced per segment. Each L0 SST is recorded in the manifest with its segment annotation.
+The write path is unchanged up to memtable flush. Writes go through the WAL and memtable as today — the segment mapper is not involved until flush time. When a memtable is frozen and flushed, the mapper is applied to each entry's key to determine its segment. Entries are grouped by segment and one L0 SST is produced per segment. Each L0 SST is recorded in the manifest with its segment annotation.
 
-Each write batch targets a single segment (since `WriteOptions` is per-batch), but a memtable accumulates batches from multiple segments before it is flushed. When the WAL is enabled, each batch is individually durable in the WAL, and the multi-segment split at flush time is an internal concern. When the WAL is disabled, all L0 SSTs from a single flush must be uploaded and then added to the manifest in a single atomic update. Partial visibility of a multi-segment flush would break durability semantics for batches that have not yet been persisted to L0.
+When the WAL is enabled, each batch is individually durable in the WAL, and the multi-segment split at flush time is an internal concern. When the WAL is disabled, all L0 SSTs from a single flush must be uploaded and then added to the manifest in a single atomic update. Partial visibility of a multi-segment flush would break durability semantics for batches that have not yet been persisted to L0.
 
 ### Read Path
 
@@ -382,16 +378,6 @@ table CompactionSpecV2 {
 }
 ```
 
-### Tombstones and Deletions
-
-Segments do not require disjoint key spaces, but there are consequences when keys overlap across segments. Because compactions are local to each segment, a deletion (tombstone) also resides in a specific segment. This has two main implications:
-
-1. **A deletion in one segment does not affect other segments.** If the same key exists in segments A and B, and a tombstone is written to segment A, the key in segment B remains live. Compaction within segment A cannot observe or remove keys in segment B. For an unfiltered query (no segment filter), the read path resolves by sequence number — the tombstone in A takes precedence if it has a higher sequence number. But the key in B remains in storage and will be returned if queried with a segment filter that excludes A.
-
-2. **A segment-filtered query may not see a deletion.** If a tombstone resides in segment A but the query filters to segment B only, the tombstone is not visible. The reader returns the live key from segment B. This is correct behavior given the filter, but applications must be aware that segment-scoped deletes are not global.
-
-Within a segment, tombstone elision during compaction follows existing rules: a tombstone can be dropped when no older entry for the same key exists in the segment. Across segments, tombstones must be retained conservatively — a tombstone in one segment cannot be elided based on the absence of the key in that segment alone, since the key may exist in another segment with a lower sequence number. A conservative default is to retain tombstones until the segment is dropped by retention.
-
 ### Recovery and Progress Tracking
 
 The resume mechanism is unchanged: the executor reads the last output SST to compute a resume cursor. Since each compaction produces a single sorted run, the existing single-destination progress model applies without modification. The compactor epoch and fencing protocol are unaffected.
@@ -421,13 +407,17 @@ This RFC opts for a more general approach: opaque segment metadata defined by th
 
 With the move to sequence-based ordering and bag semantics, the structural distinction between L0 SSTs and sorted runs becomes less meaningful. An L0 SST is semantically equivalent to a sorted run containing a single SST — both carry a segment annotation and a sequence range, and the read path treats them uniformly when building the merge DAG. Collapsing the two into a single abstraction would simplify the manifest schema and the read/compaction paths. This RFC preserves the existing L0/SR distinction to limit scope, but unification is a natural follow-on.
 
-### Deterministic segment mapper instead of WriteOptions
+### Segment tag in WriteOptions instead of a mapper
 
-An alternative to specifying the segment tag in `WriteOptions` is to configure a deterministic segment mapper — a function `key -> Option<Bytes>` — at database open time. The mapper derives the segment from the key itself rather than relying on the caller to provide it.
+An alternative to the deterministic mapper is to specify the segment tag directly in `WriteOptions` as `segment: Option<Bytes>`. This gives the caller full control over segment assignment per write batch, without requiring the segment to be derivable from the key.
 
-This approach has several advantages. Because the mapping is deterministic, the system can guarantee that the same key always belongs to the same segment. This eliminates the possibility of the same key appearing in multiple segments, which in turn makes segment retention safe unconditionally: dropping a segment cannot resurface a shadowed key in another segment, because no key can span segments. It also means tombstones can be elided more aggressively — a tombstone in a segment can be dropped as soon as no older entry for that key exists in the same segment, with no concern about cross-segment shadowing.
+This approach is more flexible — the caller can assign segments based on external context, not just key structure. However, it introduces significant complexity:
 
-The tradeoff is reduced flexibility. The caller can no longer assign arbitrary segment metadata per write — the mapping is fixed for the lifetime of the database (or at least requires careful migration to change). It also means the segment must be derivable from the key, which may not suit all use cases.
+- **WAL format changes required.** Because the segment tag is transient (it exists only in `WriteOptions`), the WAL must persist it so that WAL replay can reconstruct segment groupings. This requires extending the WAL block format with a segment field and splitting blocks on segment transitions.
+- **Cross-segment tombstone issues.** Without a deterministic mapping, the same key can appear in multiple segments. This makes segment retention unsafe: dropping a segment can resurface a shadowed key in another segment. Tombstone elision also becomes conservative — tombstones must be retained until the segment is dropped, since a key may exist in another segment with a lower sequence number.
+- **Batch atomicity constraints.** Since `WriteOptions` is per-batch, all entries in a batch must belong to the same segment. Cross-segment batches are not supported.
+
+This RFC uses the deterministic mapper approach because it avoids WAL changes, provides unconditionally safe retention, and simplifies tombstone handling. The `WriteOptions` approach could be revisited if use cases emerge that require segment assignment independent of key structure.
 
 ### Default segment-aware scheduler
 
