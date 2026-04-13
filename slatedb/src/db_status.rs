@@ -1,11 +1,9 @@
 use tokio::sync::watch;
 
-use crate::db_state::ManifestCore;
+use crate::db_state::{ManifestCore, VersionedManifest};
 use crate::error::SlateDBError;
 use crate::utils::WatchableOnceCell;
 use crate::CloseReason;
-
-pub use crate::db_state::VersionedManifest;
 
 /// Current status of the database, exposed via [`crate::Db::subscribe`].
 ///
