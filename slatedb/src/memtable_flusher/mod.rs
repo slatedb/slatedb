@@ -98,8 +98,8 @@ impl MemtableFlusher {
         Ok(())
     }
 
-    /// Enqueues a manifest poll and waits until it completes.
-    pub(crate) async fn poll_manifest(&self) -> Result<(), SlateDBError> {
+    /// Enqueues a manifest refresh and waits until it completes.
+    pub(crate) async fn refresh_manifest(&self) -> Result<(), SlateDBError> {
         let (tx, rx) = oneshot::channel();
         self.messages_tx
             .send(TrackerMessage::PollManifest { sender: tx })?;

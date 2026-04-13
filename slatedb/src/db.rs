@@ -1551,18 +1551,26 @@ impl Db {
         self.inner.manifest()
     }
 
-    /// Enqueue a manifest poll immediately and wait for it to complete.
+    /// Refresh the manifest immediately and wait for it to complete.
     ///
-    /// A `PollManifest` command is enqueued immediately, bypassing the regular
-    /// [`Settings::manifest_poll_interval`] timer.
+    /// The database normally refreshes its manifest on a background timer
+    /// controlled by [`Settings::manifest_poll_interval`]. This method
+    /// bypasses that timer, triggering an immediate refresh and waiting
+    /// for it to finish.
+    ///
+    /// Use this when you know the manifest has changed externally and
+    /// want to ensure the database has observed the update before
+    /// proceeding — for example, after a compaction completes and you
+    /// need to confirm that a compaction filter has been applied.
     ///
     /// ## Errors
-    /// - Returns [`Error`] if the database is closed before the next poll completes.
-    pub async fn manifest_poll(&self) -> Result<(), crate::Error> {
+    /// - Returns [`Error`] if the database is closed before the refresh
+    ///   completes.
+    pub async fn refresh_manifest(&self) -> Result<(), crate::Error> {
         self.inner.check_closed()?;
         self.inner
             .memtable_flusher
-            .poll_manifest()
+            .refresh_manifest()
             .await
             .map_err(Into::into)
     }
