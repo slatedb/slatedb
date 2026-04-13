@@ -1187,6 +1187,31 @@ impl Db {
         self.write_with_options(batch, write_opts).await
     }
 
+    /// Write a value into the database using owned [`Bytes`], avoiding the
+    /// copies that [`Db::put`] performs via `Bytes::copy_from_slice`. Prefer
+    /// this form when the caller already holds the data as [`Bytes`] (e.g.
+    /// from a prior read, a zero-copy buffer pool, or a client that produces
+    /// [`Bytes`] directly).
+    pub async fn put_bytes(&self, key: Bytes, value: Bytes) -> Result<WriteHandle, crate::Error> {
+        self.put_bytes_with_options(key, value, &PutOptions::default(), &WriteOptions::default())
+            .await
+    }
+
+    /// Write a value into the database using owned [`Bytes`] with custom
+    /// `PutOptions` and `WriteOptions`. See [`Db::put_bytes`] for why this
+    /// form exists.
+    pub async fn put_bytes_with_options(
+        &self,
+        key: Bytes,
+        value: Bytes,
+        put_opts: &PutOptions,
+        write_opts: &WriteOptions,
+    ) -> Result<WriteHandle, crate::Error> {
+        let mut batch = WriteBatch::new();
+        batch.put_bytes_with_options(key, value, put_opts);
+        self.write_with_options(batch, write_opts).await
+    }
+
     /// Delete a key from the database with default `WriteOptions`.
     ///
     /// ## Arguments
