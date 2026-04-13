@@ -3388,6 +3388,7 @@ name = "slatedb-dst"
 version = "0.12.0"
 dependencies = [
  "async-trait",
+ "bytes",
  "chrono",
  "ctor",
  "futures",
@@ -3400,6 +3401,7 @@ dependencies = [
  "slatedb",
  "slatedb-common",
  "sysinfo",
+ "tempfile",
  "tokio",
  "tokio-util",
  "tracing",

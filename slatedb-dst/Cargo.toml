@@ -17,6 +17,7 @@ bench = false
 
 [dependencies]
 async-trait = { workspace = true }
+bytes = { workspace = true }
 chrono = { workspace = true }
 ctor = { workspace = true }
 futures = { workspace = true }
@@ -35,6 +36,7 @@ tracing-subscriber = { workspace = true, features = ["fmt", "env-filter"] }
 [dev-dependencies]
 rstest = { workspace = true }
 sysinfo = { workspace = true }
+tempfile = { workspace = true }
 
 [lints]
 workspace = true

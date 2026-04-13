@@ -178,7 +178,7 @@ fn test_dst_is_deterministic(
 #[test]
 #[cfg(slow)]
 fn test_dst_nightly() -> Result<(), Error> {
-    use object_store::local::LocalFileSystem;
+    use slatedb_dst::object_store::DstLocalFileSystem;
     use std::path::PathBuf;
     use sysinfo::System;
 
@@ -217,9 +217,8 @@ fn test_dst_nightly() -> Result<(), Error> {
         std::fs::create_dir_all(&test_dir).expect("failed to create test root");
         let handle = std::thread::spawn(move || -> Result<(), String> {
             let object_store = Arc::new(
-                LocalFileSystem::new_with_prefix(test_dir)
-                    .expect("failed to create object store")
-                    .with_automatic_cleanup(true),
+                DstLocalFileSystem::new_with_prefix_and_cleanup(test_dir, true)
+                    .expect("failed to create dst local object store"),
             );
             let seed = starting_seed.wrapping_add(core as u64);
             let rand = Rc::new(DbRand::new(seed));
