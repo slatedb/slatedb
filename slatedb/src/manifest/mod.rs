@@ -20,7 +20,7 @@ pub use crate::db_state::{
 };
 
 #[derive(Clone, Serialize, PartialEq, Debug)]
-pub(crate) struct Manifest {
+pub struct Manifest {
     // todo: try to make this writable only from module
     pub(crate) external_dbs: Vec<ExternalDb>,
     pub(crate) core: ManifestCore,

@@ -358,7 +358,7 @@ impl VersionedCompactions {
 
 /// Container for compactions tracked by the compactor alongside its epoch.
 #[derive(Clone, Debug, Serialize)]
-pub(crate) struct Compactions {
+pub struct Compactions {
     // The current compactor's epoch.
     pub(crate) compactor_epoch: u64,
     pub(crate) core: CompactionsCore,
