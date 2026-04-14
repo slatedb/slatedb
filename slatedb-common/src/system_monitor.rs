@@ -1,13 +1,14 @@
+use chrono::{DateTime, Utc};
+use log::info;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc, RwLock,
 };
-use std::thread::{self, JoinHandle};
 use std::time::Duration;
 use sysinfo::{Disks, Networks, ProcessRefreshKind, ProcessesToUpdate, System};
-use tokio::time::Instant;
-use tracing::info;
+use tokio::task::JoinHandle;
 
+use crate::clock::{DefaultSystemClock, SystemClock};
 use crate::SystemParameters;
 
 /// A system monitor that tracks CPU, memory, disk, and network usage.
@@ -35,7 +36,10 @@ impl SystemMonitor {
 
     /// Returns a snapshot of the current system parameters.
     pub fn parameters(&self) -> SystemParameters {
-        self.parameters.read().unwrap().clone()
+        self.parameters
+            .read()
+            .expect("parameters lock poisoned")
+            .clone()
     }
 
     /// Starts the system monitoring in a background thread.
@@ -51,37 +55,38 @@ impl SystemMonitor {
 
         let runtime_handle = self.runtime_handle.clone();
         let parameters = Arc::clone(&self.parameters);
-        self.handle = Some(thread::spawn(move || {
+        self.handle = Some(tokio::task::spawn(async move {
             let mut system = System::new();
-            let bencher_pid = sysinfo::get_current_pid().unwrap();
+            let bencher_pid = sysinfo::get_current_pid().expect("failed to get current pid");
             let mut disks = Disks::new_with_refreshed_list();
             let mut networks = Networks::new_with_refreshed_list();
-            let mut last_disk_refresh = Instant::now();
-            let mut last_network_refresh = Instant::now();
+            let clock = DefaultSystemClock::new();
+            let mut last_disk_refresh: DateTime<Utc> = clock.now();
+            let mut last_network_refresh: DateTime<Utc> = clock.now();
 
             while running.load(Ordering::SeqCst) {
                 for _ in 0..10 {
                     if !running.load(Ordering::SeqCst) {
                         break;
                     }
-                    thread::sleep(Duration::from_secs(1));
+                    clock.sleep(Duration::from_secs(1)).await;
                 }
 
-                let mut system_parameters = parameters.write().unwrap();
+                let mut system_parameters = parameters.write().expect("parameters lock poisoned");
 
                 system.refresh_cpu_usage();
 
                 // CPU
-                system_parameters.global_cpu_usage = f32::trunc(system.global_cpu_usage() * 10.0) / 10.0;
+                system_parameters.global_cpu_usage =
+                    f32::trunc(system.global_cpu_usage() * 10.0) / 10.0;
                 system_parameters.cpu_core_usage = system
                     .cpus()
                     .iter()
                     .map(|cpu| f32::trunc(cpu.cpu_usage() * 10.0) / 10.0)
                     .collect::<Vec<_>>();
                 info!(
-                    system_parameters.global_cpu_usage,
-                    ?system_parameters.cpu_core_usage,
-                    "cpu usage"
+                    "cpu usage: global={}, cores={:?}",
+                    system_parameters.global_cpu_usage, system_parameters.cpu_core_usage,
                 );
 
                 // Memory
@@ -104,6 +109,7 @@ impl SystemMonitor {
                     .map(|p| p.memory() / 1024 / 1024)
                     .unwrap_or(0);
                 info!(
+                    "memory usage (MiB): bencher={}, total={}, used={}, free={}, available={}, swap_total={}, swap_free={}, swap_used={}",
                     system_parameters.bencher_memory_mb,
                     system_parameters.total_memory_mb,
                     system_parameters.used_memory_mb,
@@ -112,13 +118,15 @@ impl SystemMonitor {
                     system_parameters.total_swap_mb,
                     system_parameters.free_swap_mb,
                     system_parameters.used_swap_mb,
-                    "memory usage (MiB)"
                 );
 
                 // Disk
                 disks.refresh(true);
-                let now = Instant::now();
-                let elapsed = now.duration_since(last_disk_refresh);
+                let now = clock.now();
+                let elapsed = now
+                    .signed_duration_since(last_disk_refresh)
+                    .to_std()
+                    .expect("elapsed time is negative");
                 last_disk_refresh = now;
 
                 system_parameters.read_throughput_mb_per_disk.clear();
@@ -131,19 +139,26 @@ impl SystemMonitor {
                         read_mb_since_last_refresh as f64 / elapsed.as_secs_f64();
                     let write_mb_per_second =
                         write_mb_since_last_refresh as f64 / elapsed.as_secs_f64();
-                    let disk_name = disk.name().to_str().unwrap().to_string();
+                    let disk_name = disk.name().to_str().expect("").to_string();
                     info!(
-                        disk_name,
-                        read_mb_per_second, write_mb_per_second, "disk usage (MiB/s)",
+                        "disk usage (MiB/s): disk={}, read={}, write={}",
+                        disk_name, read_mb_per_second, write_mb_per_second,
                     );
-                    system_parameters.read_throughput_mb_per_disk.insert(disk_name.clone(), read_mb_per_second);
-                    system_parameters.write_throughput_mb_per_disk.insert(disk_name, write_mb_per_second);
+                    system_parameters
+                        .read_throughput_mb_per_disk
+                        .insert(disk_name.clone(), read_mb_per_second);
+                    system_parameters
+                        .write_throughput_mb_per_disk
+                        .insert(disk_name, write_mb_per_second);
                 }
 
                 // Network
                 networks.refresh(true);
-                let now = Instant::now();
-                let elapsed = now.duration_since(last_network_refresh);
+                let now = clock.now();
+                let elapsed = now
+                    .signed_duration_since(last_network_refresh)
+                    .to_std()
+                    .expect("elapsed time is negative");
                 last_network_refresh = now;
 
                 system_parameters.recv_mb_per_interface.clear();
@@ -161,11 +176,15 @@ impl SystemMonitor {
                         transmitted_mb_since_last_refresh as f64 / elapsed.as_secs_f64();
 
                     info!(
-                        interface_name,
-                        received_mb_per_second, transmitted_mb_per_second, "network usage (MiB/s)",
+                        "network usage (MiB/s): interface={}, recv={}, transmit={}",
+                        interface_name, received_mb_per_second, transmitted_mb_per_second,
                     );
-                    system_parameters.recv_mb_per_interface.insert(interface_name.clone(), received_mb_per_second);
-                    system_parameters.write_mb_per_interface.insert(interface_name.clone(), transmitted_mb_per_second);
+                    system_parameters
+                        .recv_mb_per_interface
+                        .insert(interface_name.clone(), received_mb_per_second);
+                    system_parameters
+                        .write_mb_per_interface
+                        .insert(interface_name.clone(), transmitted_mb_per_second);
                 }
 
                 // drop the write lock before logging tokio metrics
@@ -177,8 +196,8 @@ impl SystemMonitor {
                     let num_alive_tasks = metrics.num_alive_tasks();
                     let global_queue_depth = metrics.global_queue_depth();
                     info!(
-                        num_workers,
-                        num_alive_tasks, global_queue_depth, "tokio runtime metrics",
+                        "tokio runtime metrics: workers={}, alive_tasks={}, global_queue_depth={}",
+                        num_workers, num_alive_tasks, global_queue_depth,
                     );
                 }
             }
@@ -192,9 +211,7 @@ impl SystemMonitor {
         if let Some(handle) = self.handle.take() {
             info!("stopping system resource monitoring");
             self.running.store(false, Ordering::SeqCst);
-            if let Err(e) = handle.join() {
-                info!("error joining system monitor thread [error={:?}]", e);
-            }
+            handle.abort();
         } else {
             info!("system monitoring is not running");
         }

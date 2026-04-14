@@ -163,7 +163,10 @@ async fn test_concurrent_writers_and_readers() {
             loop {
                 tokio::time::sleep(Duration::from_secs(5)).await;
                 let memory_mb = monitor.parameters().bencher_memory_mb;
-                info!("memory watchdog: current usage {} MiB, limit {} MiB", memory_mb, max_memory_mb);
+                info!(
+                    "memory watchdog: current usage {} MiB, limit {} MiB",
+                    memory_mb, max_memory_mb
+                );
                 if memory_mb > max_memory_mb as u64 {
                     eprintln!(
                         "memory usage {} MiB exceeds limit of {} MiB",
