@@ -1454,7 +1454,11 @@ mod tests {
             "/tmp/test_reader_only_sees_remote_visibility",
             object_store,
             None,
-            DbReaderOptions::default(),
+            DbReaderOptions {
+                manifest_poll_interval: Duration::from_millis(10),
+                checkpoint_lifetime: Duration::from_secs(1),
+                ..DbReaderOptions::default()
+            },
         )
         .await
         .unwrap();
@@ -1467,11 +1471,19 @@ mod tests {
         })
         .await
         .unwrap();
-        tokio::time::sleep(Duration::from_millis(500)).await;
-        assert_eq!(
-            reader.get(b"k").await.unwrap(),
-            Some(Bytes::from_static(b"v"))
-        );
+
+        let timeout = Duration::from_secs(5);
+        let start = tokio::time::Instant::now();
+        loop {
+            if reader.get(b"k").await.unwrap() == Some(Bytes::from_static(b"v")) {
+                break;
+            }
+            assert!(
+                start.elapsed() < timeout,
+                "timed out waiting for reader to observe remote visibility"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
 
         reader.close().await.unwrap();
         db.close().await.unwrap();
