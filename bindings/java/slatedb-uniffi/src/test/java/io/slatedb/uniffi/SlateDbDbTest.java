@@ -296,8 +296,6 @@ class SlateDbDbTest {
             TestSupport.awaitFailure(Error.Invalid.class, db.put(new byte[0], TestSupport.bytes("value")));
             TestSupport.awaitFailure(Error.Invalid.class, db.delete(new byte[0]));
             TestSupport.awaitFailure(
-                    Error.Invalid.class, db.scan(new KeyRange(new byte[0], true, null, false)));
-            TestSupport.awaitFailure(
                     Error.Invalid.class,
                     db.scan(
                             new KeyRange(
@@ -305,6 +303,16 @@ class SlateDbDbTest {
                                     true,
                                     TestSupport.bytes("a"),
                                     true)));
+
+            // Scan with empty start bound should succeed and be treated as unbounded start.
+            TestSupport.await(db.put(TestSupport.bytes("seed"), TestSupport.bytes("value")));
+            try (DbIterator iterator =
+                    TestSupport.await(db.scan(new KeyRange(new byte[0], true, null, false)))) {
+                TestSupport.assertRows(
+                        TestSupport.drainIterator(iterator),
+                        new String[] {"seed"},
+                        new String[] {"value"});
+            }
 
             try (WriteBatch batch = new WriteBatch()) {
                 batch.put(TestSupport.bytes("batch"), TestSupport.bytes("value"));

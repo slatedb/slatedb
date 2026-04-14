@@ -100,6 +100,17 @@ impl Manifest {
         }
         projected.core.l0 = Self::filter_view_handles(&projected.core.l0, true, &range).into();
         projected.core.compacted = sorter_runs_filtered;
+        // drop unused external_dbs
+        let used_sst_ids: HashSet<SsTableId> = projected
+            .core
+            .compacted
+            .iter()
+            .flat_map(|sr| sr.sst_views.iter().map(|v| v.sst.id))
+            .chain(projected.core.l0.iter().map(|v| v.sst.id))
+            .collect();
+        projected
+            .external_dbs
+            .retain(|e| e.sst_ids.iter().any(|id| used_sst_ids.contains(id)));
         projected
     }
 
@@ -246,7 +257,7 @@ mod tests {
     use crate::manifest::store::{ManifestStore, StoredManifest};
     use slatedb_common::clock::{DefaultSystemClock, SystemClock};
 
-    use super::Manifest;
+    use super::{ExternalDb, Manifest};
     use crate::config::CheckpointOptions;
     use crate::db_state::{
         ManifestCore, SortedRun, SsTableHandle, SsTableId, SsTableInfo, SsTableView,
@@ -262,6 +273,7 @@ mod tests {
     use std::ops::{Bound, Range, RangeBounds};
     use std::sync::Arc;
     use ulid::Ulid;
+    use uuid::Uuid;
 
     #[tokio::test]
     async fn test_init_clone_manifest() {
@@ -818,5 +830,61 @@ mod tests {
             Bound::Unbounded => "".to_string(),
         };
         format!("{}..{}", start, end)
+    }
+
+    #[test]
+    fn test_projected_drops_unused_external_dbs() {
+        let projection_range = BytesRange::from_ref("a".."b");
+
+        let sst_id_1 = SsTableId::Compacted(Ulid::new());
+        let sst_id_2 = SsTableId::Compacted(Ulid::new());
+        let sst_id_3 = SsTableId::Compacted(Ulid::new());
+        let sst_id_4 = SsTableId::Compacted(Ulid::new());
+
+        let mut core = ManifestCore::new();
+
+        core.l0.push_back(create_sst_view(sst_id_1, b"a")); // inside projection_range
+        core.l0.push_back(create_sst_view(sst_id_2, b"c")); // outside projection_range
+        core.l0.push_back(create_sst_view(sst_id_3, b"d")); // outside projection_range
+        core.l0.push_back(create_sst_view(sst_id_4, b"e")); // outside projection_range
+
+        let mut manifest = Manifest::initial(core);
+
+        manifest.external_dbs = vec![
+            ExternalDb {
+                path: "/path/to/db1".to_string(),
+                source_checkpoint_id: Uuid::new_v4(),
+                final_checkpoint_id: None,
+                sst_ids: vec![sst_id_1, sst_id_2],
+            },
+            ExternalDb {
+                path: "/path/to/db2".to_string(),
+                source_checkpoint_id: Uuid::new_v4(),
+                final_checkpoint_id: None,
+                sst_ids: vec![sst_id_3, sst_id_4],
+            },
+        ];
+
+        assert_eq!(manifest.external_dbs.len(), 2);
+
+        let projected = Manifest::projected(&manifest, projection_range);
+
+        assert_eq!(projected.external_dbs.len(), 1);
+        assert_eq!(projected.external_dbs[0].path, "/path/to/db1");
+    }
+
+    fn create_sst_view(sst_id: SsTableId, first_entry_bytes: &'static [u8; 1]) -> SsTableView {
+        SsTableView::new_projected(
+            sst_id.unwrap_compacted_id(),
+            SsTableHandle::new(
+                sst_id,
+                SST_FORMAT_VERSION_LATEST,
+                SsTableInfo {
+                    first_entry: Some(Bytes::from_static(first_entry_bytes)),
+                    ..SsTableInfo::default()
+                },
+            ),
+            None,
+        )
     }
 }
