@@ -42,7 +42,6 @@ pub(crate) struct DbStatusManager {
 impl DbStatusManager {
     #[cfg(test)]
     pub(crate) fn new(initial_durable_seq: u64) -> Self {
-        #[cfg(test)]
         use crate::db_state::ManifestCore;
         Self::new_with_manifest(
             initial_durable_seq,
@@ -141,6 +140,7 @@ impl ClosedResultWriter for DbStatusManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db_state::ManifestCore;
 
     fn versioned_manifest(id: u64) -> VersionedManifest {
         VersionedManifest {
