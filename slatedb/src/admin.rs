@@ -839,10 +839,10 @@ mod tests {
             .unwrap()
             .expect("expected manifest");
         assert_eq!(latest.id, 2);
-        assert_eq!(latest.writer_epoch, 3);
-        assert_eq!(latest.compactor_epoch, 5);
-        assert_eq!(latest.manifest.next_wal_sst_id, 17);
-        assert_eq!(latest.manifest.last_l0_seq, 9);
+        assert_eq!(latest.manifest.writer_epoch, 3);
+        assert_eq!(latest.manifest.compactor_epoch, 5);
+        assert_eq!(latest.manifest.core.next_wal_sst_id, 17);
+        assert_eq!(latest.manifest.core.last_l0_seq, 9);
 
         let first = admin
             .read_manifest(Some(1))
@@ -850,10 +850,10 @@ mod tests {
             .unwrap()
             .expect("expected manifest");
         assert_eq!(first.id, 1);
-        assert_eq!(first.writer_epoch, 0);
-        assert_eq!(first.compactor_epoch, 0);
-        assert_eq!(first.manifest.next_wal_sst_id, 1);
-        assert_eq!(first.manifest.last_l0_seq, 0);
+        assert_eq!(first.manifest.writer_epoch, 0);
+        assert_eq!(first.manifest.compactor_epoch, 0);
+        assert_eq!(first.manifest.core.next_wal_sst_id, 1);
+        assert_eq!(first.manifest.core.last_l0_seq, 0);
     }
 
     #[tokio::test]
@@ -892,19 +892,19 @@ mod tests {
         );
         assert_eq!(
             all.iter()
-                .map(|manifest| manifest.manifest.last_l0_seq)
+                .map(|manifest| manifest.manifest.core.last_l0_seq)
                 .collect::<Vec<_>>(),
             vec![0, 10, 20]
         );
         assert_eq!(
             all.iter()
-                .map(|manifest| manifest.writer_epoch)
+                .map(|manifest| manifest.manifest.writer_epoch)
                 .collect::<Vec<_>>(),
             vec![0, 2, 3]
         );
         assert_eq!(
             all.iter()
-                .map(|manifest| manifest.compactor_epoch)
+                .map(|manifest| manifest.manifest.compactor_epoch)
                 .collect::<Vec<_>>(),
             vec![0, 4, 6]
         );

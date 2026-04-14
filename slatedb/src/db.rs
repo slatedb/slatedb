@@ -6673,7 +6673,10 @@ mod tests {
                 .await
                 .unwrap();
 
-        assert_eq!(watcher.borrow().current_manifest.manifest, db.manifest());
+        assert_eq!(
+            watcher.borrow().current_manifest.manifest.core,
+            db.manifest()
+        );
 
         // When: writes are flushed to an L0 and the manifest is updated
         db.put(b"key1", b"value1").await.unwrap();
@@ -6693,15 +6696,16 @@ mod tests {
         // Then: subscribe reports the updated manifest and durability frontier
         let status = tokio::time::timeout(
             Duration::from_secs(10),
-            watcher
-                .wait_for(|s| s.current_manifest.manifest.last_l0_seq >= 2 && s.durable_seq >= 2),
+            watcher.wait_for(|s| {
+                s.current_manifest.manifest.core.last_l0_seq >= 2 && s.durable_seq >= 2
+            }),
         )
         .await
         .expect("timed out waiting for manifest update")
         .expect("watch channel closed")
         .clone();
         assert!(status.durable_seq >= 2);
-        assert_eq!(status.current_manifest.manifest.last_l0_seq, 2);
+        assert_eq!(status.current_manifest.manifest.core.last_l0_seq, 2);
 
         db.close().await.unwrap();
     }
@@ -6717,7 +6721,13 @@ mod tests {
             .await
             .unwrap();
         let mut watcher = db.subscribe();
-        let initial_checkpoint_count = watcher.borrow().current_manifest.manifest.checkpoints.len();
+        let initial_checkpoint_count = watcher
+            .borrow()
+            .current_manifest
+            .manifest
+            .core
+            .checkpoints
+            .len();
 
         let manifest_store = Arc::new(ManifestStore::new(&path, object_store));
         let mut stored_manifest =
@@ -6741,7 +6751,7 @@ mod tests {
         let status = tokio::time::timeout(
             Duration::from_secs(10),
             watcher.wait_for(|s| {
-                s.current_manifest.manifest.checkpoints.len() > initial_checkpoint_count
+                s.current_manifest.manifest.core.checkpoints.len() > initial_checkpoint_count
             }),
         )
         .await
@@ -6749,7 +6759,7 @@ mod tests {
         .expect("watch channel closed")
         .clone();
         assert_eq!(
-            status.current_manifest.manifest.checkpoints.len(),
+            status.current_manifest.manifest.core.checkpoints.len(),
             initial_checkpoint_count + 1
         );
 

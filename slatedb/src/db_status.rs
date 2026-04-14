@@ -17,10 +17,8 @@ pub struct DbStatus {
     /// than or equal to this value are durably persisted to object storage
     /// and will survive process restarts.
     pub durable_seq: u64,
-    /// The current in-memory manifest snapshot observed by this handle.
-    ///
-    /// This matches the manifest returned by [`crate::Db::manifest`] for the
-    /// same handle.
+    /// The current in-memory manifest snapshot observed by this handle,
+    /// paired with its manifest version ID.
     pub current_manifest: VersionedManifest,
     /// Set once the database has been closed, indicating the reason.
     pub close_reason: Option<CloseReason>,
@@ -43,13 +41,12 @@ impl DbStatusManager {
     #[cfg(test)]
     pub(crate) fn new(initial_durable_seq: u64) -> Self {
         use crate::db_state::ManifestCore;
+        use crate::manifest::Manifest;
         Self::new_with_manifest(
             initial_durable_seq,
             VersionedManifest {
                 id: 1,
-                writer_epoch: 0,
-                compactor_epoch: 0,
-                manifest: ManifestCore::new(),
+                manifest: Manifest::initial(ManifestCore::new()),
             },
         )
     }
@@ -141,13 +138,12 @@ impl ClosedResultWriter for DbStatusManager {
 mod tests {
     use super::*;
     use crate::db_state::ManifestCore;
+    use crate::manifest::Manifest;
 
     fn versioned_manifest(id: u64) -> VersionedManifest {
         VersionedManifest {
             id,
-            writer_epoch: 0,
-            compactor_epoch: 0,
-            manifest: ManifestCore::new(),
+            manifest: Manifest::initial(ManifestCore::new()),
         }
     }
 
