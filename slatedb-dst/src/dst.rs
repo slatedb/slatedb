@@ -483,26 +483,6 @@ impl ScenarioRunner {
         }
     }
 
-    /// Creates a standalone [`ScenarioContext`] with the given scenario name.
-    ///
-    /// This is mainly useful for ad hoc follow-up verification after a scenario
-    /// run, such as a final snapshot-based validation or flush.
-    pub fn context(&self, scenario: &'static str) -> ScenarioContext {
-        self.context_with_shutdown_token(scenario, CancellationToken::new())
-    }
-
-    fn context_with_shutdown_token(
-        &self,
-        scenario: &'static str,
-        shutdown_token: CancellationToken,
-    ) -> ScenarioContext {
-        ScenarioContext {
-            shared: self.shared.clone(),
-            scenario,
-            shutdown_token,
-        }
-    }
-
     /// Runs the provided scenarios concurrently to completion.
     ///
     /// Finite scenarios are allowed to finish normally. Once all finite
@@ -525,7 +505,11 @@ impl ScenarioRunner {
         for scenario in scenarios {
             let name = scenario.name();
             let runs_forever = scenario.runs_forever();
-            let ctx = self.context_with_shutdown_token(name, shutdown_token.clone());
+            let ctx = ScenarioContext {
+                shared: self.shared.clone(),
+                scenario: name,
+                shutdown_token: shutdown_token.clone(),
+            };
             handles.push(
                 tokio::task::spawn_local(async move { scenario.run(ctx).await })
                     .map(move |result| (name, runs_forever, result)),
