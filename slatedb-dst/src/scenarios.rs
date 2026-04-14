@@ -1,9 +1,9 @@
-//! Scenario implementations for the DST simulation test harness.
+//! Scenario implementations for the deterministic simulation harness.
 //!
 //! The simulation is built by composing several independently scheduled
 //! workloads against a shared [`ScenarioContext`]. Together they create a
 //! randomized but reproducible mix of mutations, reads, clock movement, and
-//! shutdown conditions that stress the database and the DST recorded-state
+//! shutdown conditions that stress the database and the recorded-history
 //! model at the same time.
 //!
 //! Each scenario uses [`DbRand`] for deterministic pseudo-random choices, so a
@@ -15,8 +15,8 @@ use std::ops::RangeInclusive;
 use std::rc::Rc;
 use std::time::Duration;
 
+use crate::runner::{Scenario, ScenarioContext, ScenarioWriteBatch};
 use crate::utils::{random_key_bytes, random_value_bytes};
-use crate::{Scenario, ScenarioContext, ScenarioWriteBatch};
 use async_trait::async_trait;
 use rand::Rng;
 use slatedb::config::{DurabilityLevel, PutOptions, ReadOptions, ScanOptions};
@@ -218,7 +218,7 @@ impl Scenario for BatchWriteScenario {
 /// Issues checked point reads against both memory-visible and remotely durable state.
 ///
 /// `GetScenario` validates one random-key point read per iteration against the
-/// DST recorded SQLite state. Keys are drawn from the same logical `key_space`
+/// recorded SQLite history. Keys are drawn from the same logical `key_space`
 /// and concrete `key_size_range` as the write scenarios. Each read randomly
 /// targets either the committed memory-visible view or the remote-durable view
 /// while other scenarios mutate SlateDB concurrently.
@@ -356,8 +356,8 @@ impl GetScenario {
 
 /// Issues checked full-range scans against both memory-visible and remotely durable state.
 ///
-/// `ScanScenario` validates one full-range scan per iteration against the DST
-/// recorded SQLite state. Each scan randomly chooses both durability
+/// `ScanScenario` validates one full-range scan per iteration against the
+/// recorded SQLite history. Each scan randomly chooses both durability
 /// (`Memory` or `Remote`) and iteration order (`Ascending` or `Descending`)
 /// while other scenarios mutate SlateDB concurrently.
 pub struct ScanScenario {

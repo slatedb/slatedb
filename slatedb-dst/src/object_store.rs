@@ -19,25 +19,25 @@ use object_store::{
 use parking_lot::{Mutex, RwLock};
 use slatedb_common::clock::SystemClock;
 
-const DST_LOCAL_STORE_NAME: &str = "DstLocalFileSystem";
+const DETERMINISTIC_LOCAL_STORE_NAME: &str = "DeterministicLocalFileSystem";
 
-/// A deterministic on-disk object store for DST.
+/// A deterministic on-disk object store for the simulation harness.
 ///
-/// All filesystem operations run inline on the current thread. This keeps DST
-/// replay single-threaded even when the backing store is disk-backed.
+/// All filesystem operations run inline on the current thread. This keeps the
+/// harness replay single-threaded even when the backing store is disk-backed.
 #[derive(Clone)]
-pub struct DstLocalFileSystem {
-    state: Arc<DstLocalState>,
+pub struct DeterministicLocalFileSystem {
+    state: Arc<DeterministicLocalState>,
 }
 
 #[derive(Debug)]
-struct DstLocalState {
+struct DeterministicLocalState {
     root: PathBuf,
     automatic_cleanup: bool,
     attributes: RwLock<HashMap<Path, Attributes>>,
 }
 
-impl DstLocalFileSystem {
+impl DeterministicLocalFileSystem {
     pub fn new_with_prefix(prefix: impl AsRef<FsPath>) -> object_store::Result<Self> {
         Self::new_with_prefix_and_cleanup(prefix, false)
     }
@@ -46,9 +46,10 @@ impl DstLocalFileSystem {
         prefix: impl AsRef<FsPath>,
         automatic_cleanup: bool,
     ) -> object_store::Result<Self> {
-        let root = fs::canonicalize(prefix.as_ref()).expect("failed to canonicalize DST root");
+        let root =
+            fs::canonicalize(prefix.as_ref()).expect("failed to canonicalize deterministic root");
         Ok(Self {
-            state: Arc::new(DstLocalState {
+            state: Arc::new(DeterministicLocalState {
                 root,
                 automatic_cleanup,
                 attributes: RwLock::new(HashMap::new()),
@@ -354,20 +355,30 @@ impl DstLocalFileSystem {
     }
 }
 
-impl fmt::Debug for DstLocalFileSystem {
+impl fmt::Debug for DeterministicLocalFileSystem {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}({})", DST_LOCAL_STORE_NAME, self.state.root.display())
+        write!(
+            f,
+            "{}({})",
+            DETERMINISTIC_LOCAL_STORE_NAME,
+            self.state.root.display()
+        )
     }
 }
 
-impl fmt::Display for DstLocalFileSystem {
+impl fmt::Display for DeterministicLocalFileSystem {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}({})", DST_LOCAL_STORE_NAME, self.state.root.display())
+        write!(
+            f,
+            "{}({})",
+            DETERMINISTIC_LOCAL_STORE_NAME,
+            self.state.root.display()
+        )
     }
 }
 
 #[async_trait]
-impl ObjectStore for DstLocalFileSystem {
+impl ObjectStore for DeterministicLocalFileSystem {
     async fn put_opts(
         &self,
         location: &Path,
@@ -384,7 +395,7 @@ impl ObjectStore for DstLocalFileSystem {
     ) -> object_store::Result<Box<dyn MultipartUpload>> {
         let path = self.path_to_filesystem(location)?;
         let (file, staging_path) = new_staged_upload(&path)?;
-        Ok(Box::new(DstMultipartUpload::new(
+        Ok(Box::new(DeterministicMultipartUpload::new(
             Arc::clone(&self.state),
             location.clone(),
             path,
@@ -537,8 +548,8 @@ impl ObjectStore for DstLocalFileSystem {
 }
 
 #[derive(Debug)]
-struct DstMultipartUpload {
-    state: Arc<DstLocalState>,
+struct DeterministicMultipartUpload {
+    state: Arc<DeterministicLocalState>,
     location: Path,
     staged_path: Option<PathBuf>,
     dest_path: PathBuf,
@@ -547,9 +558,9 @@ struct DstMultipartUpload {
     file: Arc<Mutex<File>>,
 }
 
-impl DstMultipartUpload {
+impl DeterministicMultipartUpload {
     fn new(
-        state: Arc<DstLocalState>,
+        state: Arc<DeterministicLocalState>,
         location: Path,
         dest_path: PathBuf,
         staged_path: PathBuf,
@@ -569,7 +580,7 @@ impl DstMultipartUpload {
 }
 
 #[async_trait]
-impl MultipartUpload for DstMultipartUpload {
+impl MultipartUpload for DeterministicMultipartUpload {
     fn put_part(&mut self, data: PutPayload) -> UploadPart {
         let offset = self.offset;
         self.offset += data.content_length() as u64;
@@ -620,7 +631,7 @@ impl MultipartUpload for DstMultipartUpload {
     }
 }
 
-impl Drop for DstMultipartUpload {
+impl Drop for DeterministicMultipartUpload {
     fn drop(&mut self) {
         if let Some(staged_path) = self.staged_path.take() {
             let _ = fs::remove_file(staged_path);
@@ -951,7 +962,8 @@ mod tests {
     #[tokio::test]
     async fn test_dst_local_file_system_smoke() {
         let dir = TempDir::new().unwrap();
-        let store = DstLocalFileSystem::new_with_prefix_and_cleanup(dir.path(), true).unwrap();
+        let store =
+            DeterministicLocalFileSystem::new_with_prefix_and_cleanup(dir.path(), true).unwrap();
 
         store
             .put(&p("dir/a"), PutPayload::from_static(b"abc"))
@@ -978,7 +990,7 @@ mod tests {
     #[tokio::test]
     async fn test_dst_local_file_system_supports_multipart() {
         let dir = TempDir::new().unwrap();
-        let store = DstLocalFileSystem::new_with_prefix(dir.path()).unwrap();
+        let store = DeterministicLocalFileSystem::new_with_prefix(dir.path()).unwrap();
 
         let mut upload = store.put_multipart(&p("large")).await.unwrap();
         upload
@@ -998,7 +1010,7 @@ mod tests {
     #[tokio::test]
     async fn test_dst_local_file_system_round_trips_attributes() {
         let dir = TempDir::new().unwrap();
-        let store = DstLocalFileSystem::new_with_prefix(dir.path()).unwrap();
+        let store = DeterministicLocalFileSystem::new_with_prefix(dir.path()).unwrap();
         let key = object_store::Attribute::Metadata(Cow::Borrowed("slatedbputid"));
         let mut attributes = Attributes::new();
         attributes.insert(key.clone(), "ulid-123".into());

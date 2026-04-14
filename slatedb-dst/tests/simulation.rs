@@ -23,12 +23,12 @@ use rand::Rng;
 use rstest::rstest;
 use slatedb::{DbRand, Error};
 use slatedb_common::clock::{MockSystemClock, SystemClock};
+use slatedb_dst::runner::Scenario;
 use slatedb_dst::scenarios::{
     BatchWriteScenario, ClockScenario, DeleteScenario, FlusherScenario, GetScenario, PutScenario,
     ScanScenario,
 };
 use slatedb_dst::utils::{build_runtime, run_simulation};
-use slatedb_dst::Scenario;
 #[cfg(slow)]
 use tracing::info_span;
 use tracing::{error, info};
@@ -211,7 +211,7 @@ fn test_dst_is_deterministic(
 #[test]
 #[cfg(slow)]
 fn test_dst_nightly() -> Result<(), Error> {
-    use slatedb_dst::object_store::DstLocalFileSystem;
+    use slatedb_dst::object_store::DeterministicLocalFileSystem;
     use std::path::PathBuf;
     use sysinfo::System;
 
@@ -250,7 +250,7 @@ fn test_dst_nightly() -> Result<(), Error> {
         std::fs::create_dir_all(&test_dir).expect("failed to create test root");
         let handle = std::thread::spawn(move || -> Result<(), String> {
             let object_store = Arc::new(
-                DstLocalFileSystem::new_with_prefix_and_cleanup(test_dir, true)
+                DeterministicLocalFileSystem::new_with_prefix_and_cleanup(test_dir, true)
                     .expect("failed to create dst local object store"),
             );
             let seed = starting_seed.wrapping_add(core as u64);

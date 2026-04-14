@@ -1,4 +1,4 @@
-//! Helpers for scenario-driven deterministic simulation testing.
+//! Helpers for deterministic scenario-runner setup and execution.
 
 use std::ops::RangeInclusive;
 use std::str::FromStr;
@@ -20,8 +20,8 @@ use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_subscriber::EnvFilter;
 
 use crate::object_store::ClockedObjectStore;
+use crate::runner::{Scenario, ScenarioRunner};
 use crate::scenarios::TimedShutdownScenario;
-use crate::{Scenario, ScenarioRunner};
 
 pub(crate) fn random_key_bytes(
     rand: &DbRand,
@@ -56,14 +56,14 @@ pub(crate) fn random_value_bytes(
     value
 }
 
-/// Builds a deterministic DST run, executes the supplied scenarios, validates
+/// Builds a deterministic simulation run, executes the supplied scenarios, validates
 /// the final SlateDB state against the SQLite model, and then closes the DB.
 ///
 /// The simulation uses a randomized-but-deterministic
 /// [`slatedb::config::Settings`] instance derived from `rand`, plus a separate
 /// DB builder seed drawn from the same RNG stream. After all scenarios finish,
 /// the helper performs a final front-to-back scan comparison between the real
-/// DB snapshot and the recorded SQLite state before shutting the database down.
+/// DB snapshot and the recorded SQLite history before shutting the database down.
 ///
 /// ## Arguments
 ///
@@ -73,7 +73,7 @@ pub(crate) fn random_value_bytes(
 /// - `rand`: Shared deterministic RNG that drives settings generation, DB
 ///   seeding, and scenario behavior.
 /// - `simulation_scenarios`: Scenario tasks to run concurrently against the
-///   shared DST instance.
+///   shared scenario-runner instance.
 /// - `wall_clock_time`: Optional real-time limit. When present, a timed
 ///   shutdown scenario is added so open-ended simulations terminate after the
 ///   specified duration.

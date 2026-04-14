@@ -1,6 +1,6 @@
-# Deterministic Simulation Testing (DST)
+# Deterministic Scenario Runner
 
-This crate provides deterministic simulation tools and tests for SlateDB.
+This crate provides a deterministic scenario runner and simulation harness for SlateDB.
 
 ## Design
 
@@ -10,7 +10,7 @@ cloneable `ScenarioContext`, which provides:
 
 - checked mutating helpers for `put`, `delete`, `write_batch`, `flush`, and
   explicit clock advancement
-- `as_of(seq)` snapshots over the recorded SQLite state, with `Db`-like
+- `as_of(seq)` snapshots over the recorded SQLite history, with `Db`-like
   `get_with_options`, `get_key_value_with_options`, `scan_with_options`, and
   prefix scan methods
 - a run-scoped `shutdown_token()` that long-lived scenarios can observe, and
@@ -18,18 +18,18 @@ cloneable `ScenarioContext`, which provides:
 - a raw `db()` escape hatch for unchecked operations outside the recorded-state
   contract
 
-The SQLite state tracks append-only writes, tombstones, and exact read
+The SQLite history tracks append-only writes, tombstones, and exact read
 metadata. It preserves `expire_ts` metadata on reads, but it does not yet
-model flush-time TTL-to-tombstone rewrites, so the bundled DST simulation
+model flush-time TTL-to-tombstone rewrites, so the bundled simulation harness
 avoids TTL writes for now. Reader scenarios choose the validation sequence
 frontier themselves, typically from `Db::snapshot()` and `Db::status()`, and
 compare live SlateDB results against `ctx.as_of(seq)`.
 
-Everything in DST is deterministic, including the system clock, the runtime,
+Everything in this harness is deterministic, including the system clock, the runtime,
 and any explicit database seed used by the caller. This means a failed test can
 be re-run with the same seed to reproduce the failure.
 
-See the crate API for `Scenario`, `ScenarioContext`, `ScenarioRunner`, and
+See the crate API for `runner::{Scenario, ScenarioContext, ScenarioRunner}` and
 `utils::build_scenario_db`.
 
 Scenarios may override `Scenario::runs_forever()` to indicate that they should
@@ -67,8 +67,8 @@ use std::sync::Arc;
 use object_store::memory::InMemory;
 use slatedb::config::{ReadOptions, Settings};
 use slatedb_common::clock::MockSystemClock;
+use slatedb_dst::runner::{Scenario, ScenarioContext, ScenarioRunner};
 use slatedb_dst::utils::{build_runtime, build_scenario_db};
-use slatedb_dst::{Scenario, ScenarioContext, ScenarioRunner};
 
 #[async_trait::async_trait(?Send)]
 impl Scenario for MyScenario {
@@ -102,7 +102,7 @@ runtime.block_on(async {
     let db = build_scenario_db(Arc::new(InMemory::new()), clock.clone(), 42, settings.clone())
         .await
         .unwrap();
-    let runner = ScenarioRunner::new(db, clock, settings);
+    let runner = ScenarioRunner::new(db, clock, settings, None);
     runner.run_scenarios(vec![Box::new(MyScenario)]).await.unwrap();
 });
 ```
