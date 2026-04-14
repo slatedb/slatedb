@@ -57,7 +57,7 @@ impl Scenario for PutScenario {
 
     #[tracing::instrument(skip_all, fields(scenario = self.name()))]
     async fn run(&self, ctx: ScenarioContext) -> Result<(), Error> {
-        let mut iteration = 0u32;
+        let mut iteration = 0u64;
 
         while !ctx.shutdown_token().is_cancelled()
             && self.iterations.is_none_or(|limit| iteration < limit)
@@ -113,7 +113,7 @@ impl Scenario for DeleteScenario {
 
     #[tracing::instrument(skip_all, fields(scenario = self.name()))]
     async fn run(&self, ctx: ScenarioContext) -> Result<(), Error> {
-        let mut iteration = 0u32;
+        let mut iteration = 0u64;
 
         while !ctx.shutdown_token().is_cancelled()
             && self.iterations.is_none_or(|limit| iteration < limit)
@@ -181,7 +181,7 @@ impl Scenario for BatchWriteScenario {
 
     #[tracing::instrument(skip_all, fields(scenario = self.name()))]
     async fn run(&self, ctx: ScenarioContext) -> Result<(), Error> {
-        let mut iteration = 0u32;
+        let mut iteration = 0u64;
 
         while !ctx.shutdown_token().is_cancelled()
             && self.iterations.is_none_or(|limit| iteration < limit)
@@ -249,7 +249,7 @@ impl Scenario for GetScenario {
 
     #[tracing::instrument(skip_all, fields(scenario = self.name()))]
     async fn run(&self, ctx: ScenarioContext) -> Result<(), Error> {
-        let mut iteration = 0u32;
+        let mut iteration = 0u64;
 
         while !ctx.shutdown_token().is_cancelled()
             && self.iterations.is_none_or(|limit| iteration < limit)
@@ -381,7 +381,7 @@ impl Scenario for ScanScenario {
 
     #[tracing::instrument(skip_all, fields(scenario = self.name()))]
     async fn run(&self, ctx: ScenarioContext) -> Result<(), Error> {
-        let mut iteration = 0u32;
+        let mut iteration = 0u64;
 
         while !ctx.shutdown_token().is_cancelled()
             && self.iterations.is_none_or(|limit| iteration < limit)
@@ -615,7 +615,7 @@ impl Scenario for FlusherScenario {
 
     #[tracing::instrument(skip_all, fields(scenario = self.name()))]
     async fn run(&self, ctx: ScenarioContext) -> Result<(), Error> {
-        let mut iteration = 0u32;
+        let mut iteration = 0u64;
 
         while !ctx.shutdown_token().is_cancelled()
             && self.iterations.is_none_or(|limit| iteration < limit)
