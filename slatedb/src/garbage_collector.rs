@@ -328,8 +328,11 @@ mod tests {
     use crate::format::sst::SsTableFormat;
     use crate::utils::WatchableOnceCell;
     use crate::{
-        db_state::{ManifestCore, SortedRun, SsTableHandle, SsTableId, SsTableView},
-        manifest::store::{ManifestStore, StoredManifest},
+        db_state::{SortedRun, SsTableHandle, SsTableId, SsTableView},
+        manifest::{
+            store::{ManifestStore, StoredManifest},
+            ManifestCore,
+        },
         tablestore::TableStore,
     };
 

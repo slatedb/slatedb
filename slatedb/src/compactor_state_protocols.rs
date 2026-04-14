@@ -18,10 +18,10 @@ use crate::compactions_store::{CompactionsStore, FenceableCompactions, StoredCom
 use crate::compactor::CompactionsCore;
 use crate::compactor_state::{CompactionStatus, Compactions, CompactorState};
 use crate::config::{CheckpointOptions, CompactorOptions};
-use crate::db_state::ManifestCore;
 use crate::error::SlateDBError;
 use crate::manifest::store::{FenceableManifest, ManifestStore, StoredManifest};
 use crate::manifest::Manifest;
+use crate::manifest::ManifestCore;
 use crate::utils::IdGenerator;
 use crate::DbRand;
 use slatedb_common::clock::SystemClock;
@@ -325,11 +325,12 @@ mod tests {
     use crate::compactor_state::{
         Compaction, CompactionSpec, CompactionStatus, Compactions, CompactorState,
     };
-    use crate::db_state::{ManifestCore, SsTableHandle, SsTableId, SsTableInfo};
+    use crate::db_state::{SsTableHandle, SsTableId, SsTableInfo};
     use crate::error::SlateDBError;
     use crate::format::sst::SST_FORMAT_VERSION_LATEST;
     use crate::manifest::store::{ManifestStore, StoredManifest};
     use crate::manifest::Manifest;
+    use crate::manifest::ManifestCore;
     use bytes::Bytes;
     use object_store::memory::InMemory;
     use object_store::path::Path;

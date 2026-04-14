@@ -769,8 +769,8 @@ mod tests {
     use crate::admin::{load_object_store_from_env, AdminBuilder};
     use crate::compactions_store::{CompactionsStore, StoredCompactions};
     use crate::compactor_state::{Compaction, CompactionSpec, CompactionStatus, SourceId};
-    use crate::db_state::ManifestCore;
     use crate::manifest::store::{ManifestStore, StoredManifest};
+    use crate::manifest::ManifestCore;
     use object_store::memory::InMemory;
     use object_store::path::Path;
     use object_store::ObjectStore;

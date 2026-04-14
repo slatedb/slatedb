@@ -5,9 +5,8 @@ use crate::compactor::{CompactionScheduler, CompactionSchedulerSupplier};
 use crate::compactor_state::{CompactionSpec, SourceId};
 use crate::compactor_state_protocols::CompactorStateView;
 use crate::config::{CompactorOptions, SizeTieredCompactionSchedulerOptions};
-use crate::db_state::ManifestCore;
-
 use crate::error::Error;
+use crate::manifest::ManifestCore;
 use log::warn;
 
 const DEFAULT_MAX_CONCURRENT_COMPACTIONS: usize = 4;
@@ -429,11 +428,10 @@ mod tests {
         Compaction, CompactionSpec, Compactions, CompactorState, SourceId,
     };
     use crate::config::{CompactorOptions, SizeTieredCompactionSchedulerOptions};
-    use crate::db_state::{
-        ManifestCore, SortedRun, SsTableHandle, SsTableId, SsTableInfo, SsTableView,
-    };
+    use crate::db_state::{SortedRun, SsTableHandle, SsTableId, SsTableInfo, SsTableView};
     use crate::format::sst::SST_FORMAT_VERSION_LATEST;
     use crate::manifest::store::test_utils::new_dirty_manifest;
+    use crate::manifest::ManifestCore;
     use crate::seq_tracker::SequenceTracker;
     use crate::size_tiered_compaction::{
         SizeTieredCompactionScheduler, SizeTieredCompactionSchedulerSupplier,

@@ -1,7 +1,7 @@
 use crate::bytes_range::BytesRange;
 use crate::config::CompressionCodec;
 use crate::error::SlateDBError;
-use crate::manifest::Manifest;
+use crate::manifest::{Manifest, ManifestCore};
 use crate::mem_table::{ImmutableMemtable, KVTable, WritableKVTable};
 use crate::reader::DbStateReader;
 use crate::wal_id::WalIdStore;
@@ -15,8 +15,6 @@ use std::ops::{Bound, Range, RangeBounds};
 use std::sync::Arc;
 use ulid::Ulid;
 use SsTableId::{Compacted, Wal};
-
-pub(crate) use crate::manifest::ManifestCore;
 
 /// A handle to an SSTable — the physical SST on storage.
 #[derive(Clone, PartialEq, Serialize)]

@@ -388,13 +388,12 @@ mod tests {
     use crate::batch_write::WriteBatchMessage;
     use crate::config::{CheckpointOptions, Settings};
     use crate::db::DbInner;
-    use crate::db_state::{
-        ManifestCore, SsTableHandle, SsTableId, SsTableInfo, SsTableView, SstType,
-    };
+    use crate::db_state::{SsTableHandle, SsTableId, SsTableInfo, SsTableView, SstType};
     use crate::db_status::{ClosedResultWriter, DbStatusManager};
     use crate::error::SlateDBError;
     use crate::format::sst::{SsTableFormat, SST_FORMAT_VERSION_LATEST};
     use crate::manifest::store::{FenceableManifest, ManifestStore, StoredManifest};
+    use crate::manifest::ManifestCore;
     use crate::memtable_flusher::{FlushTarget, MemtableFlusher};
     use crate::object_stores::ObjectStores;
     use crate::paths::PathResolver;

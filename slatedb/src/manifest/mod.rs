@@ -394,10 +394,9 @@ mod tests {
 
     use super::{ExternalDb, Manifest};
     use crate::config::CheckpointOptions;
-    use crate::db_state::{
-        ManifestCore, SortedRun, SsTableHandle, SsTableId, SsTableInfo, SsTableView,
-    };
+    use crate::db_state::{SortedRun, SsTableHandle, SsTableId, SsTableInfo, SsTableView};
     use crate::format::sst::SST_FORMAT_VERSION_LATEST;
+    use crate::manifest::ManifestCore;
     use crate::rand::DbRand;
     use bytes::Bytes;
     use object_store::memory::InMemory;

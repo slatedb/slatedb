@@ -612,7 +612,7 @@ impl CompactorEventHandler {
     /// Calculates the estimated total source bytes for a compaction.
     fn calculate_estimated_source_bytes(
         compaction: &Compaction,
-        db_state: &crate::db_state::ManifestCore,
+        db_state: &crate::manifest::ManifestCore,
     ) -> u64 {
         use crate::db_state::{SortedRun, SsTableView};
         use std::collections::HashMap;
@@ -1060,14 +1060,13 @@ mod tests {
         SizeTieredCompactionSchedulerOptions, Ttl, WriteOptions,
     };
     use crate::db::Db;
-    use crate::db_state::{
-        ManifestCore, SortedRun, SsTableHandle, SsTableId, SsTableInfo, SsTableView,
-    };
+    use crate::db_state::{SortedRun, SsTableHandle, SsTableId, SsTableInfo, SsTableView};
     use crate::error::SlateDBError;
     use crate::format::sst::{SsTableFormat, SST_FORMAT_VERSION_LATEST};
     use crate::iter::RowEntryIterator;
     use crate::manifest::store::{ManifestStore, StoredManifest};
     use crate::manifest::Manifest;
+    use crate::manifest::ManifestCore;
     use crate::merge_operator::{MergeOperator, MergeOperatorError};
     use crate::object_stores::ObjectStores;
     use crate::proptest_util::rng;

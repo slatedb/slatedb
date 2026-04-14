@@ -1,9 +1,10 @@
 use crate::checkpoint::Checkpoint;
 use crate::config::CheckpointOptions;
-use crate::db_state::{ManifestCore, SsTableId};
+use crate::db_state::SsTableId;
 use crate::error::SlateDBError;
 use crate::error::SlateDBError::CheckpointMissing;
 use crate::manifest::store::{ManifestStore, StoredManifest};
+use crate::manifest::ManifestCore;
 use crate::paths::PathResolver;
 use crate::rand::DbRand;
 use crate::utils::IdGenerator;
@@ -316,10 +317,11 @@ mod tests {
         WriteOptions,
     };
     use crate::db::Db;
-    use crate::db_state::{ManifestCore, SsTableId};
+    use crate::db_state::SsTableId;
     use crate::error::SlateDBError;
     use crate::manifest::store::{ManifestStore, StoredManifest};
     use crate::manifest::Manifest;
+    use crate::manifest::ManifestCore;
     use crate::paths::PathResolver;
     use crate::proptest_util::{rng, sample};
     use crate::rand::DbRand;

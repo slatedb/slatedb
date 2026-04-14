@@ -230,9 +230,10 @@ mod tests {
     use super::*;
     use crate::compactions_store::{CompactionsStore, StoredCompactions};
     use crate::compactor_state::{Compaction, CompactionSpec, SourceId};
-    use crate::db_state::{ManifestCore, SsTableId, SsTableView};
+    use crate::db_state::{SsTableId, SsTableView};
     use crate::format::sst::SsTableFormat;
     use crate::manifest::store::StoredManifest;
+    use crate::manifest::ManifestCore;
     use crate::object_stores::ObjectStores;
     use crate::test_utils::build_test_sst;
     use object_store::{memory::InMemory, path::Path};

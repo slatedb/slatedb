@@ -6,9 +6,9 @@ use log::{error, info};
 use serde::{Deserialize, Serialize};
 use ulid::Ulid;
 
-use crate::db_state::{ManifestCore, SortedRun, SsTableHandle, SsTableView};
+use crate::db_state::{SortedRun, SsTableHandle, SsTableView};
 use crate::error::SlateDBError;
-use crate::manifest::Manifest;
+use crate::manifest::{Manifest, ManifestCore};
 use slatedb_txn_obj::DirtyObject;
 
 /// Identifier for a compaction input source.

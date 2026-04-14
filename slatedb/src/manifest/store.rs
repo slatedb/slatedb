@@ -1,12 +1,11 @@
 use crate::checkpoint::Checkpoint;
 use crate::config::CheckpointOptions;
-use crate::db_state::ManifestCore;
 use crate::error::SlateDBError;
 use crate::error::SlateDBError::{
     CheckpointMissing, InvalidDBState, LatestTransactionalObjectVersionMissing, ManifestMissing,
 };
 use crate::flatbuffer_types::FlatBufferManifestCodec;
-use crate::manifest::Manifest;
+use crate::manifest::{Manifest, ManifestCore};
 use crate::rand::DbRand;
 use chrono::Utc;
 use log::debug;
@@ -584,8 +583,8 @@ impl ManifestStore {
 
 #[cfg(test)]
 pub(crate) mod test_utils {
-    use crate::db_state::ManifestCore;
     use crate::manifest::Manifest;
+    use crate::manifest::ManifestCore;
     use slatedb_txn_obj::test_utils::new_dirty_object;
     use slatedb_txn_obj::DirtyObject;
 
@@ -598,10 +597,10 @@ pub(crate) mod test_utils {
 mod tests {
     use crate::checkpoint::Checkpoint;
     use crate::config::CheckpointOptions;
-    use crate::db_state::ManifestCore;
     use crate::error;
     use crate::error::SlateDBError;
     use crate::manifest::store::{FenceableManifest, ManifestStore, StoredManifest};
+    use crate::manifest::ManifestCore;
     use crate::rand::DbRand;
     use crate::retrying_object_store::RetryingObjectStore;
     use crate::test_utils::FlakyObjectStore;

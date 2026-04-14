@@ -793,11 +793,12 @@ mod tests {
     use super::{ManifestWriter, TrackerMessage};
     use crate::config::{CheckpointOptions, Settings};
     use crate::db::DbInner;
-    use crate::db_state::{ManifestCore, SsTableId};
+    use crate::db_state::SsTableId;
     use crate::db_status::{ClosedResultWriter, DbStatusManager};
     use crate::error::SlateDBError;
     use crate::format::sst::SsTableFormat;
     use crate::manifest::store::{FenceableManifest, ManifestStore, StoredManifest};
+    use crate::manifest::ManifestCore;
     use crate::memtable_flusher::uploader::UploadedMemtable;
     use crate::object_stores::ObjectStores;
     use crate::paths::PathResolver;

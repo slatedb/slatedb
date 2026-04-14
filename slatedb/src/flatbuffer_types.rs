@@ -15,7 +15,7 @@ use crate::compactor_state::{
     Compactions as CompactorCompactions, SourceId,
 };
 use crate::db_state::{self, SsTableInfo, SsTableInfoCodec, SstType};
-use crate::db_state::{ManifestCore, SsTableHandle, SsTableView};
+use crate::db_state::{SsTableHandle, SsTableView};
 
 #[path = "./generated/root_generated.rs"]
 #[allow(warnings, clippy::disallowed_macros, clippy::disallowed_types, clippy::disallowed_methods, unreachable_pub)]
@@ -43,7 +43,7 @@ use crate::flatbuffer_types::root_generated::{
     UuidArgs,
 };
 use crate::format::sst::SST_FORMAT_VERSION;
-use crate::manifest::{ExternalDb, Manifest};
+use crate::manifest::{ExternalDb, Manifest, ManifestCore};
 use crate::partitioned_keyspace::RangePartitionedKeySpace;
 use crate::seq_tracker::SequenceTracker;
 use crate::utils::clamp_allocated_size_bytes;
@@ -1212,13 +1212,11 @@ mod tests {
     use crate::compactor_state::{
         Compaction, CompactionSpec, CompactionStatus, Compactions, SourceId,
     };
-    use crate::db_state::{
-        ManifestCore, SortedRun, SsTableHandle, SsTableId, SsTableInfo, SsTableView, SstType,
-    };
+    use crate::db_state::{SortedRun, SsTableHandle, SsTableId, SsTableInfo, SsTableView, SstType};
     use crate::flatbuffer_types::{
         FlatBufferCompactionsCodec, FlatBufferManifestCodec, SsTableIndexOwned,
     };
-    use crate::manifest::{ExternalDb, Manifest};
+    use crate::manifest::{ExternalDb, Manifest, ManifestCore};
     use crate::{checkpoint, error::SlateDBError};
     use slatedb_txn_obj::ObjectCodec;
     use std::collections::VecDeque;
