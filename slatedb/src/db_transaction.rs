@@ -7,14 +7,15 @@ use uuid::Uuid;
 
 use crate::batch::WriteBatch;
 use crate::bytes_range::BytesRange;
-use crate::config::{MergeOptions, PutOptions, ReadOptions, ScanOptions, WriteOptions};
+use crate::config::{
+    DurabilityLevel, MergeOptions, PutOptions, ViewReadOptions, ViewScanOptions, WriteOptions,
+};
 use crate::db::DbInner;
 use crate::db::WriteHandle;
 use crate::db_iter::{DbIterator, DbIteratorRangeTracker};
 use crate::error::SlateDBError;
 use crate::transaction_manager::{IsolationLevel, TransactionManager};
 use crate::types::KeyValue;
-use crate::DbRead;
 
 /// A database transaction that provides atomic read-write operations with
 /// configurable isolation levels. This is the main interface for transactional
@@ -58,8 +59,8 @@ pub struct DbTransaction {
     ///
     /// DbTransaction is not intended for concurrent use; we use `RwLock` (not `RefCell`) for
     /// interior mutability to preserve `Sync` in async contexts. `RefCell` is `!Sync` and would
-    /// make `DbTransaction` `!Sync`, which is incompatible with async code using the `DbRead`
-    /// trait.
+    /// make `DbTransaction` `!Sync`, which is awkward for async code that holds shared
+    /// references across await points.
     write_batch: RwLock<WriteBatch>,
     /// Reference to the database
     db_inner: Arc<DbInner>,
@@ -101,7 +102,8 @@ impl DbTransaction {
     /// ## Returns
     /// - `Result<Option<Bytes>, SlateDBError>`: the value if it exists, None otherwise
     pub async fn get<K: AsRef<[u8]> + Send>(&self, key: K) -> Result<Option<Bytes>, crate::Error> {
-        self.get_with_options(key, &ReadOptions::default()).await
+        self.get_with_options(key, &ViewReadOptions::default())
+            .await
     }
 
     /// Get a value from the transaction with custom read options.
@@ -109,14 +111,14 @@ impl DbTransaction {
     ///
     /// ## Arguments
     /// - `key`: the key to get
-    /// - `options`: the read options to use
+    /// - `options`: the per-read options to use
     ///
     /// ## Returns
     /// - `Result<Option<Bytes>, SlateDBError>`: the value if it exists, None otherwise
     pub async fn get_with_options<K: AsRef<[u8]> + Send>(
         &self,
         key: K,
-        options: &ReadOptions,
+        options: &ViewReadOptions,
     ) -> Result<Option<Bytes>, crate::Error> {
         self.get_key_value_with_options(key, options)
             .await
@@ -128,7 +130,7 @@ impl DbTransaction {
         &self,
         key: K,
     ) -> Result<Option<KeyValue>, crate::Error> {
-        self.get_key_value_with_options(key, &ReadOptions::default())
+        self.get_key_value_with_options(key, &ViewReadOptions::default())
             .await
     }
 
@@ -136,7 +138,7 @@ impl DbTransaction {
     pub async fn get_key_value_with_options<K: AsRef<[u8]> + Send>(
         &self,
         key: K,
-        options: &ReadOptions,
+        options: &ViewReadOptions,
     ) -> Result<Option<KeyValue>, crate::Error> {
         self.db_inner.check_closed()?;
 
@@ -159,7 +161,7 @@ impl DbTransaction {
             .reader
             .get_key_value_with_options(
                 key,
-                options,
+                &options.to_read_options(DurabilityLevel::Memory),
                 &db_state,
                 Some(write_batch_cloned),
                 Some(self.started_seq),
@@ -182,7 +184,8 @@ impl DbTransaction {
         K: AsRef<[u8]> + Send,
         T: RangeBounds<K> + Send,
     {
-        self.scan_with_options(range, &ScanOptions::default()).await
+        self.scan_with_options(range, &ViewScanOptions::default())
+            .await
     }
 
     /// Scan a range of keys with the provided options.
@@ -190,14 +193,14 @@ impl DbTransaction {
     ///
     /// ## Arguments
     /// - `range`: the range of keys to scan
-    /// - `options`: the scan options to use
+    /// - `options`: the per-scan options to use
     ///
     /// ## Returns
     /// - `Result<DbIterator, SlateDBError>`: An iterator with the results of the scan
     pub async fn scan_with_options<K, T>(
         &self,
         range: T,
-        options: &ScanOptions,
+        options: &ViewScanOptions,
     ) -> Result<DbIterator, crate::Error>
     where
         K: AsRef<[u8]> + Send,
@@ -233,7 +236,7 @@ impl DbTransaction {
             .reader
             .scan_with_options(
                 BytesRange::from(range),
-                options,
+                &options.to_scan_options(DurabilityLevel::Memory),
                 &db_state,
                 Some(write_batch_cloned),
                 Some(self.started_seq),
@@ -255,7 +258,7 @@ impl DbTransaction {
     where
         P: AsRef<[u8]> + Send,
     {
-        self.scan_prefix_with_options(prefix, &ScanOptions::default())
+        self.scan_prefix_with_options(prefix, &ViewScanOptions::default())
             .await
     }
 
@@ -271,7 +274,7 @@ impl DbTransaction {
     pub async fn scan_prefix_with_options<P>(
         &self,
         prefix: P,
-        options: &ScanOptions,
+        options: &ViewScanOptions,
     ) -> Result<DbIterator, crate::Error>
     where
         P: AsRef<[u8]> + Send,
@@ -565,37 +568,6 @@ impl DbTransaction {
     }
 }
 
-#[async_trait::async_trait]
-impl DbRead for DbTransaction {
-    async fn get_with_options<K: AsRef<[u8]> + Send>(
-        &self,
-        key: K,
-        options: &ReadOptions,
-    ) -> Result<Option<Bytes>, crate::Error> {
-        self.get_with_options(key, options).await
-    }
-
-    async fn get_key_value_with_options<K: AsRef<[u8]> + Send>(
-        &self,
-        key: K,
-        options: &ReadOptions,
-    ) -> Result<Option<KeyValue>, crate::Error> {
-        self.get_key_value_with_options(key, options).await
-    }
-
-    async fn scan_with_options<K, T>(
-        &self,
-        range: T,
-        options: &ScanOptions,
-    ) -> Result<DbIterator, crate::Error>
-    where
-        K: AsRef<[u8]> + Send,
-        T: RangeBounds<K> + Send,
-    {
-        self.scan_with_options(range, options).await
-    }
-}
-
 /// Unregister from transaction manager when dropped.
 /// If the transaction hasn't been committed, it's considered rolled back.
 impl Drop for DbTransaction {
@@ -861,6 +833,45 @@ mod tests {
         assert_eq!(val, None);
 
         // Clean up
+        fail_parallel::cfg(fp_registry.clone(), "write-wal-sst-io-error", "off").unwrap();
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_txn_reads_in_memory_visibility() {
+        use crate::config::{DurabilityLevel::Remote, PutOptions, ReadOptions, WriteOptions};
+        use fail_parallel::FailPointRegistry;
+
+        let fp_registry = Arc::new(FailPointRegistry::new());
+        let object_store: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
+        let db = crate::Db::builder("/tmp/test_txn_reads_in_memory_visibility", object_store)
+            .with_fp_registry(fp_registry.clone())
+            .build()
+            .await
+            .unwrap();
+
+        fail_parallel::cfg(fp_registry.clone(), "write-wal-sst-io-error", "pause").unwrap();
+
+        db.put_with_options(
+            b"k",
+            b"v",
+            &PutOptions::default(),
+            &WriteOptions {
+                await_durable: false,
+            },
+        )
+        .await
+        .unwrap();
+
+        let txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
+        assert_eq!(txn.get(b"k").await.unwrap(), Some(Bytes::from_static(b"v")));
+
+        let remote_value = db
+            .get_with_options(b"k", &ReadOptions::new().with_durability_filter(Remote))
+            .await
+            .unwrap();
+        assert_eq!(remote_value, None);
+
         fail_parallel::cfg(fp_registry.clone(), "write-wal-sst-io-error", "off").unwrap();
         db.close().await.unwrap();
     }
@@ -1672,7 +1683,7 @@ mod tests {
             manifest_update_timeout: std::time::Duration::from_secs(300),
             max_unflushed_bytes: 134_217_728,
             l0_max_ssts: 8,
-            l0_flush_parallelism: 1,
+            l0_flush_parallelism: 4,
             min_filter_keys,
             filter_bits_per_key: 10,
             l0_sst_size_bytes,

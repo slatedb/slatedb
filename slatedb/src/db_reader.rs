@@ -1,8 +1,9 @@
 use crate::bytes_range::BytesRange;
 use crate::cached_object_store::CachedObjectStore;
 use crate::clock::MonotonicClock;
-use crate::config::{CheckpointOptions, DbReaderOptions, ReadOptions, ScanOptions};
-use crate::db_read::DbRead;
+use crate::config::{
+    CheckpointOptions, DbReaderOptions, DurabilityLevel, ViewReadOptions, ViewScanOptions,
+};
 use crate::db_state::ManifestCore;
 use crate::db_stats::DbStats;
 use crate::db_status::{ClosedResultWriter, DbStatus, DbStatusManager, VersionedManifest};
@@ -204,7 +205,7 @@ impl DbReaderInner {
     async fn get_with_options<K: AsRef<[u8]> + Send>(
         &self,
         key: K,
-        options: &ReadOptions,
+        options: &ViewReadOptions,
     ) -> Result<Option<Bytes>, SlateDBError> {
         self.get_key_value_with_options(key, options)
             .await
@@ -214,24 +215,37 @@ impl DbReaderInner {
     async fn get_key_value_with_options<K: AsRef<[u8]> + Send>(
         &self,
         key: K,
-        options: &ReadOptions,
+        options: &ViewReadOptions,
     ) -> Result<Option<KeyValue>, SlateDBError> {
         self.check_closed()?;
         let db_state = Arc::clone(&self.state.read());
         self.reader
-            .get_key_value_with_options(key, options, db_state.as_ref(), None, None)
+            .get_key_value_with_options(
+                key,
+                &options.to_read_options(DurabilityLevel::Remote),
+                db_state.as_ref(),
+                None,
+                None,
+            )
             .await
     }
 
     async fn scan_with_options(
         &self,
         range: BytesRange,
-        options: &ScanOptions,
+        options: &ViewScanOptions,
     ) -> Result<DbIterator, SlateDBError> {
         self.check_closed()?;
         let db_state = Arc::clone(&self.state.read());
         self.reader
-            .scan_with_options(range, options, db_state.as_ref(), None, None, None)
+            .scan_with_options(
+                range,
+                &options.to_scan_options(DurabilityLevel::Remote),
+                db_state.as_ref(),
+                None,
+                None,
+                None,
+            )
             .await
     }
 
@@ -793,7 +807,8 @@ impl DbReader {
     /// }
     /// ```
     pub async fn get<K: AsRef<[u8]> + Send>(&self, key: K) -> Result<Option<Bytes>, crate::Error> {
-        self.get_with_options(key, &ReadOptions::default()).await
+        self.get_with_options(key, &ViewReadOptions::default())
+            .await
     }
 
     /// Get a value from the database with custom read options.
@@ -805,8 +820,8 @@ impl DbReader {
     ///
     /// ## Arguments
     /// - `key`: the key to get
-    /// - `options`: the read options to use (Note that [`ReadOptions::read_level`] has no effect
-    ///   for readers, which can only observe committed state).
+    /// - `options`: the per-read options to use. Reader durability is always fixed
+    ///   to [`DurabilityLevel::Remote`](crate::config::DurabilityLevel::Remote).
     ///
     /// ## Returns
     /// - `Result<Option<Bytes>, Error>`:
@@ -819,7 +834,7 @@ impl DbReader {
     /// ## Examples
     ///
     /// ```
-    /// use slatedb::{Db, DbReader, config::DbReaderOptions, config::ReadOptions, Error};
+    /// use slatedb::{Db, DbReader, config::DbReaderOptions, config::ViewReadOptions, Error};
     /// use slatedb::object_store::{ObjectStore, memory::InMemory};
     /// use std::sync::Arc;
     ///
@@ -836,14 +851,17 @@ impl DbReader {
     ///       None,
     ///       DbReaderOptions::default(),
     ///     ).await?;
-    ///     assert_eq!(db.get_with_options(b"key", &ReadOptions::default()).await?, Some("value".into()));
+    ///     assert_eq!(
+    ///         reader.get_with_options(b"key", &ViewReadOptions::default()).await?,
+    ///         Some("value".into())
+    ///     );
     ///     Ok(())
     /// }
     /// ```
     pub async fn get_with_options<K: AsRef<[u8]> + Send>(
         &self,
         key: K,
-        options: &ReadOptions,
+        options: &ViewReadOptions,
     ) -> Result<Option<Bytes>, crate::Error> {
         self.inner
             .get_with_options(key, options)
@@ -856,7 +874,7 @@ impl DbReader {
         &self,
         key: K,
     ) -> Result<Option<KeyValue>, crate::Error> {
-        self.get_key_value_with_options(key, &ReadOptions::default())
+        self.get_key_value_with_options(key, &ViewReadOptions::default())
             .await
     }
 
@@ -864,7 +882,7 @@ impl DbReader {
     pub async fn get_key_value_with_options<K: AsRef<[u8]> + Send>(
         &self,
         key: K,
-        options: &ReadOptions,
+        options: &ViewReadOptions,
     ) -> Result<Option<KeyValue>, crate::Error> {
         let kv = self
             .inner
@@ -921,7 +939,8 @@ impl DbReader {
         K: AsRef<[u8]> + Send,
         T: RangeBounds<K> + Send,
     {
-        self.scan_with_options(range, &ScanOptions::default()).await
+        self.scan_with_options(range, &ViewScanOptions::default())
+            .await
     }
 
     /// Scan a range of keys with the provided options.
@@ -930,8 +949,8 @@ impl DbReader {
     ///
     /// ## Arguments
     /// - `range`: the range of keys to scan
-    /// - `options`: the read options to use (Note that [`ReadOptions::read_level`] has no effect
-    ///   for readers, which can only observe committed state).
+    /// - `options`: the per-scan options to use. Reader durability is always fixed
+    ///   to [`DurabilityLevel::Remote`](crate::config::DurabilityLevel::Remote).
     ///
     /// ## Errors
     /// - `Error`: if there was an error scanning the range of keys
@@ -942,7 +961,7 @@ impl DbReader {
     /// ## Examples
     ///
     /// ```
-    /// use slatedb::{Db, DbReader, config::DbReaderOptions, config::ScanOptions, config::DurabilityLevel, Error};
+    /// use slatedb::{Db, DbReader, config::DbReaderOptions, config::ViewScanOptions, Error};
     /// use slatedb::object_store::{ObjectStore, memory::InMemory};
     /// use std::sync::Arc;
     ///
@@ -960,9 +979,9 @@ impl DbReader {
     ///       None,
     ///       DbReaderOptions::default(),
     ///     ).await?;
-    ///     let mut iter = reader.scan_with_options("a".."b", &ScanOptions {
+    ///     let mut iter = reader.scan_with_options("a".."b", &ViewScanOptions {
     ///         read_ahead_bytes: 1024 * 1024,
-    ///         ..ScanOptions::default()
+    ///         ..ViewScanOptions::default()
     ///     }).await?;
     ///     let kv = iter.next().await?.unwrap();
     ///     assert_eq!(kv.key.as_ref(), b"a");
@@ -973,7 +992,7 @@ impl DbReader {
     pub async fn scan_with_options<K, T>(
         &self,
         range: T,
-        options: &ScanOptions,
+        options: &ViewScanOptions,
     ) -> Result<DbIterator, crate::Error>
     where
         K: AsRef<[u8]> + Send,
@@ -1003,7 +1022,7 @@ impl DbReader {
     where
         P: AsRef<[u8]> + Send,
     {
-        self.scan_prefix_with_options(prefix, &ScanOptions::default())
+        self.scan_prefix_with_options(prefix, &ViewScanOptions::default())
             .await
     }
 
@@ -1018,7 +1037,7 @@ impl DbReader {
     pub async fn scan_prefix_with_options<P>(
         &self,
         prefix: P,
-        options: &ScanOptions,
+        options: &ViewScanOptions,
     ) -> Result<DbIterator, crate::Error>
     where
         P: AsRef<[u8]> + Send,
@@ -1072,37 +1091,6 @@ impl DbReader {
     /// See [`Db::status`](crate::Db::status) for full semantics.
     pub fn status(&self) -> DbStatus {
         self.inner.status()
-    }
-}
-
-#[async_trait::async_trait]
-impl DbRead for DbReader {
-    async fn get_with_options<K: AsRef<[u8]> + Send>(
-        &self,
-        key: K,
-        options: &ReadOptions,
-    ) -> Result<Option<Bytes>, crate::Error> {
-        self.get_with_options(key, options).await
-    }
-
-    async fn get_key_value_with_options<K: AsRef<[u8]> + Send>(
-        &self,
-        key: K,
-        options: &ReadOptions,
-    ) -> Result<Option<KeyValue>, crate::Error> {
-        self.get_key_value_with_options(key, options).await
-    }
-
-    async fn scan_with_options<K, T>(
-        &self,
-        range: T,
-        options: &ScanOptions,
-    ) -> Result<DbIterator, crate::Error>
-    where
-        K: AsRef<[u8]> + Send,
-        T: RangeBounds<K> + Send,
-    {
-        self.scan_with_options(range, options).await
     }
 }
 
@@ -1432,6 +1420,73 @@ mod tests {
             reader.get(key).await.unwrap(),
             Some(Bytes::from_static(value))
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn reader_only_sees_remote_visibility() {
+        use crate::config::{FlushOptions, FlushType, PutOptions, WriteOptions};
+
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let fp_registry = Arc::new(FailPointRegistry::new());
+        let db = Db::builder(
+            "/tmp/test_reader_only_sees_remote_visibility",
+            Arc::clone(&object_store),
+        )
+        .with_fp_registry(fp_registry.clone())
+        .build()
+        .await
+        .unwrap();
+
+        fail_parallel::cfg(fp_registry.clone(), "write-wal-sst-io-error", "pause").unwrap();
+
+        db.put_with_options(
+            b"k",
+            b"v",
+            &PutOptions::default(),
+            &WriteOptions {
+                await_durable: false,
+            },
+        )
+        .await
+        .unwrap();
+
+        let reader = DbReader::open(
+            "/tmp/test_reader_only_sees_remote_visibility",
+            object_store,
+            None,
+            DbReaderOptions {
+                manifest_poll_interval: Duration::from_millis(10),
+                checkpoint_lifetime: Duration::from_secs(1),
+                ..DbReaderOptions::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(reader.get(b"k").await.unwrap(), None);
+
+        fail_parallel::cfg(fp_registry.clone(), "write-wal-sst-io-error", "off").unwrap();
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::Wal,
+        })
+        .await
+        .unwrap();
+
+        let timeout = Duration::from_secs(5);
+        let start = tokio::time::Instant::now();
+        loop {
+            if reader.get(b"k").await.unwrap() == Some(Bytes::from_static(b"v")) {
+                break;
+            }
+            assert!(
+                start.elapsed() < timeout,
+                "timed out waiting for reader to observe remote visibility"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        reader.close().await.unwrap();
+        db.close().await.unwrap();
     }
 
     #[tokio::test]

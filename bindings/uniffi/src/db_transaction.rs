@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use tokio::sync::Mutex;
 
-use crate::config::{MergeOptions, PutOptions, ReadOptions, ScanOptions, WriteOptions};
+use crate::config::{MergeOptions, PutOptions, ViewReadOptions, ViewScanOptions, WriteOptions};
 use crate::error::{Error, SlateDbError};
 use crate::iterator::DbIterator;
 use crate::types::{KeyRange, KeyValue, WriteHandle};
@@ -132,7 +132,7 @@ impl DbTransaction {
     pub async fn get_with_options(
         &self,
         key: Vec<u8>,
-        options: ReadOptions,
+        options: ViewReadOptions,
     ) -> Result<Option<Vec<u8>>, Error> {
         validate_key(&key)?;
         let options = options.into();
@@ -156,7 +156,7 @@ impl DbTransaction {
     pub async fn get_key_value_with_options(
         &self,
         key: Vec<u8>,
-        options: ReadOptions,
+        options: ViewReadOptions,
     ) -> Result<Option<KeyValue>, Error> {
         validate_key(&key)?;
         let options = options.into();
@@ -181,7 +181,7 @@ impl DbTransaction {
     pub async fn scan_with_options(
         &self,
         range: KeyRange,
-        options: ScanOptions,
+        options: ViewScanOptions,
     ) -> Result<Arc<DbIterator>, Error> {
         let range = range.into_bounds()?;
         let options = options.try_into()?;
@@ -203,7 +203,7 @@ impl DbTransaction {
     pub async fn scan_prefix_with_options(
         &self,
         prefix: Vec<u8>,
-        options: ScanOptions,
+        options: ViewScanOptions,
     ) -> Result<Arc<DbIterator>, Error> {
         let options = options.try_into()?;
         let guard = self.inner.lock().await;

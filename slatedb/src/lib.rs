@@ -41,7 +41,7 @@ pub use compaction_filter::{
     CompactionJobContext,
 };
 pub use compactor::CompactorBuilder;
-pub use config::{Settings, SstBlockSize};
+pub use config::{Settings, SstBlockSize, ViewReadOptions, ViewScanOptions};
 pub use db::{Db, DbBuilder, DbReaderBuilder, DbStatus, WriteHandle};
 pub use db_cache::stats as db_cache_stats;
 pub use db_iter::DbIterator;

@@ -118,7 +118,7 @@ impl From<Ttl> for slatedb::config::Ttl {
     }
 }
 
-/// Options that control a point read.
+/// Options that control a point read on [`crate::Db`].
 #[derive(Clone, Debug, uniffi::Record)]
 pub struct ReadOptions {
     /// Minimum durability level a returned row must satisfy.
@@ -143,6 +143,33 @@ impl From<ReadOptions> for slatedb::config::ReadOptions {
     fn from(value: ReadOptions) -> Self {
         slatedb::config::ReadOptions {
             durability_filter: value.durability_filter.into(),
+            dirty: value.dirty,
+            cache_blocks: value.cache_blocks,
+        }
+    }
+}
+
+/// Options that control a point read on a handle with fixed visibility.
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct ViewReadOptions {
+    /// Whether uncommitted dirty data may be returned.
+    pub dirty: bool,
+    /// Whether fetched blocks should be inserted into the block cache.
+    pub cache_blocks: bool,
+}
+
+impl Default for ViewReadOptions {
+    fn default() -> Self {
+        Self {
+            dirty: false,
+            cache_blocks: true,
+        }
+    }
+}
+
+impl From<ViewReadOptions> for slatedb::config::ViewReadOptions {
+    fn from(value: ViewReadOptions) -> Self {
+        slatedb::config::ViewReadOptions {
             dirty: value.dirty,
             cache_blocks: value.cache_blocks,
         }
@@ -202,7 +229,7 @@ impl From<IterationOrder> for slatedb::IterationOrder {
     }
 }
 
-/// Options that control range scans and prefix scans.
+/// Options that control range scans and prefix scans on [`crate::Db`].
 #[derive(Clone, Debug, uniffi::Record)]
 pub struct ScanOptions {
     /// Minimum durability level a returned row must satisfy.
@@ -252,6 +279,51 @@ impl TryFrom<ScanOptions> for slatedb::config::ScanOptions {
                 })
             })?,
             order: value.order.unwrap_or_default().into(),
+        })
+    }
+}
+
+/// Options that control scans on a handle with fixed visibility.
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct ViewScanOptions {
+    /// Whether uncommitted dirty data may be returned.
+    pub dirty: bool,
+    /// Number of bytes to read ahead while scanning.
+    pub read_ahead_bytes: u64,
+    /// Whether fetched blocks should be inserted into the block cache.
+    pub cache_blocks: bool,
+    /// Maximum number of concurrent fetch tasks used by the scan.
+    pub max_fetch_tasks: u64,
+}
+
+impl Default for ViewScanOptions {
+    fn default() -> Self {
+        Self {
+            dirty: false,
+            read_ahead_bytes: 1,
+            cache_blocks: false,
+            max_fetch_tasks: 1,
+        }
+    }
+}
+
+impl TryFrom<ViewScanOptions> for slatedb::config::ViewScanOptions {
+    type Error = Error;
+
+    fn try_from(value: ViewScanOptions) -> Result<Self, Self::Error> {
+        Ok(slatedb::config::ViewScanOptions {
+            dirty: value.dirty,
+            read_ahead_bytes: usize::try_from(value.read_ahead_bytes).map_err(|_| {
+                Error::from(SlateDbError::ValueTooLargeForUsize {
+                    field: "read_ahead_bytes",
+                })
+            })?,
+            cache_blocks: value.cache_blocks,
+            max_fetch_tasks: usize::try_from(value.max_fetch_tasks).map_err(|_| {
+                Error::from(SlateDbError::ValueTooLargeForUsize {
+                    field: "max_fetch_tasks",
+                })
+            })?,
         })
     }
 }
