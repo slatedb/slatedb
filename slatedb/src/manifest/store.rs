@@ -5,7 +5,7 @@ use crate::error::SlateDBError::{
     CheckpointMissing, InvalidDBState, LatestTransactionalObjectVersionMissing, ManifestMissing,
 };
 use crate::flatbuffer_types::FlatBufferManifestCodec;
-use crate::manifest::{Manifest, ManifestCore};
+use crate::manifest::{Manifest, ManifestCore, VersionedManifest};
 use crate::rand::DbRand;
 use chrono::Utc;
 use log::debug;
@@ -482,12 +482,13 @@ impl ManifestStore {
 
     /// Delete a manifest from the object store.
     pub(crate) async fn delete_manifest(&self, id: u64) -> Result<(), SlateDBError> {
-        let (active_id, manifest) = self.read_latest_manifest().await?;
-        if active_id == id {
+        let latest_manifest = self.read_latest_manifest().await?;
+        if latest_manifest.id == id {
             return Err(SlateDBError::InvalidDeletion);
         }
 
-        if manifest
+        if latest_manifest
+            .manifest
             .core
             .checkpoints
             .iter()
@@ -555,15 +556,13 @@ impl ManifestStore {
 
     pub(crate) async fn try_read_latest_manifest(
         &self,
-    ) -> Result<Option<(u64, Manifest)>, SlateDBError> {
-        Ok(self
-            .inner
-            .try_read_latest()
-            .await
-            .map(|opt| opt.map(|(id, manifest)| (id.into(), manifest)))?)
+    ) -> Result<Option<VersionedManifest>, SlateDBError> {
+        Ok(self.inner.try_read_latest().await.map(|opt| {
+            opt.map(|(id, manifest)| VersionedManifest::from_manifest(id.into(), manifest))
+        })?)
     }
 
-    pub(crate) async fn read_latest_manifest(&self) -> Result<(u64, Manifest), SlateDBError> {
+    pub(crate) async fn read_latest_manifest(&self) -> Result<VersionedManifest, SlateDBError> {
         self.try_read_latest_manifest()
             .await?
             .ok_or(LatestTransactionalObjectVersionMissing)
@@ -651,7 +650,7 @@ mod tests {
         .unwrap();
         sm.update(sm.prepare_dirty().unwrap()).await.unwrap();
 
-        let (version, _) = ms.read_latest_manifest().await.unwrap();
+        let version = ms.read_latest_manifest().await.unwrap().id;
 
         assert_eq!(version, 2);
     }
@@ -715,8 +714,8 @@ mod tests {
             FenceableManifest::init_writer(sm, timeout, Arc::new(DefaultSystemClock::new()))
                 .await
                 .unwrap();
-            let (_, manifest) = ms.read_latest_manifest().await.unwrap();
-            assert_eq!(manifest.writer_epoch, i);
+            let manifest = ms.read_latest_manifest().await.unwrap();
+            assert_eq!(manifest.manifest.writer_epoch, i);
         }
     }
 
@@ -767,8 +766,8 @@ mod tests {
             FenceableManifest::init_compactor(sm, timeout, Arc::new(DefaultSystemClock::new()))
                 .await
                 .unwrap();
-            let (_, manifest) = ms.read_latest_manifest().await.unwrap();
-            assert_eq!(manifest.compactor_epoch, i);
+            let manifest = ms.read_latest_manifest().await.unwrap();
+            assert_eq!(manifest.manifest.compactor_epoch, i);
         }
     }
 
@@ -1066,9 +1065,9 @@ mod tests {
         let initial_manifest_id = sm.id();
 
         // Baseline: with no checkpoints, only the latest manifest is referenced.
-        let (latest_manifest_id, latest_manifest) = ms.read_latest_manifest().await.unwrap();
+        let latest_manifest = ms.read_latest_manifest().await.unwrap();
         let referenced = ms
-            .read_referenced_manifests(latest_manifest_id, &latest_manifest)
+            .read_referenced_manifests(latest_manifest.id, &latest_manifest.manifest)
             .await
             .unwrap();
 
@@ -1087,9 +1086,9 @@ mod tests {
             .push(new_checkpoint(initial_manifest_id));
         sm.update(dirty).await.unwrap();
 
-        let (latest_manifest_id, latest_manifest) = ms.read_latest_manifest().await.unwrap();
+        let latest_manifest = ms.read_latest_manifest().await.unwrap();
         let referenced = ms
-            .read_referenced_manifests(latest_manifest_id, &latest_manifest)
+            .read_referenced_manifests(latest_manifest.id, &latest_manifest.manifest)
             .await
             .unwrap();
 
@@ -1098,21 +1097,27 @@ mod tests {
             Some(&initial_manifest),
             referenced.get(&initial_manifest_id)
         );
-        assert_eq!(Some(&latest_manifest), referenced.get(&latest_manifest_id));
+        assert_eq!(
+            Some(&latest_manifest.manifest),
+            referenced.get(&latest_manifest.id)
+        );
 
         // Remove checkpoints to ensure only the latest manifest remains referenced.
         let mut dirty = sm.prepare_dirty().unwrap();
         dirty.value.core.checkpoints.clear();
         sm.update(dirty).await.unwrap();
 
-        let (latest_manifest_id, latest_manifest) = ms.read_latest_manifest().await.unwrap();
+        let latest_manifest = ms.read_latest_manifest().await.unwrap();
         let referenced = ms
-            .read_referenced_manifests(latest_manifest_id, &latest_manifest)
+            .read_referenced_manifests(latest_manifest.id, &latest_manifest.manifest)
             .await
             .unwrap();
 
         assert_eq!(1, referenced.len());
-        assert_eq!(Some(&latest_manifest), referenced.get(&latest_manifest_id));
+        assert_eq!(
+            Some(&latest_manifest.manifest),
+            referenced.get(&latest_manifest.id)
+        );
     }
 
     #[tokio::test]
@@ -1141,9 +1146,9 @@ mod tests {
             .push(new_checkpoint(checkpoint_manifest_id));
         sm.update(dirty).await.unwrap();
 
-        let (latest_manifest_id, latest_manifest) = ms.read_latest_manifest().await.unwrap();
+        let latest_manifest = ms.read_latest_manifest().await.unwrap();
         let referenced = ms
-            .read_referenced_manifests(latest_manifest_id, &latest_manifest)
+            .read_referenced_manifests(latest_manifest.id, &latest_manifest.manifest)
             .await
             .unwrap();
 
@@ -1172,9 +1177,9 @@ mod tests {
             .push(new_checkpoint(missing_manifest_id));
         sm.update(dirty).await.unwrap();
 
-        let (latest_manifest_id, latest_manifest) = ms.read_latest_manifest().await.unwrap();
+        let latest_manifest = ms.read_latest_manifest().await.unwrap();
         let result = ms
-            .read_referenced_manifests(latest_manifest_id, &latest_manifest)
+            .read_referenced_manifests(latest_manifest.id, &latest_manifest.manifest)
             .await;
 
         assert!(matches!(

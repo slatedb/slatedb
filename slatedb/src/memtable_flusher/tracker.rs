@@ -515,8 +515,8 @@ mod tests {
         object_store: Arc<dyn ObjectStore>,
     ) -> usize {
         let manifest_store = ManifestStore::new(&Path::from(path), object_store);
-        let (_, manifest) = manifest_store.read_latest_manifest().await.unwrap();
-        manifest.core.checkpoints.len()
+        let manifest = manifest_store.read_latest_manifest().await.unwrap();
+        manifest.manifest.core.checkpoints.len()
     }
 
     fn seeded_l0_handle(first_key: &[u8]) -> SsTableHandle {

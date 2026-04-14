@@ -80,10 +80,7 @@ impl Admin {
                 .await?
                 .map(|manifest| VersionedManifest::from_manifest(id, manifest))
         } else {
-            manifest_store
-                .try_read_latest_manifest()
-                .await?
-                .map(|(id, manifest)| VersionedManifest::from_manifest(id, manifest))
+            manifest_store.try_read_latest_manifest().await?
         };
 
         Ok(manifest)
@@ -129,10 +126,7 @@ impl Admin {
                 .await?
                 .map(|compactions| VersionedCompactions::from_compactions(id, compactions))
         } else {
-            compactions_store
-                .try_read_latest_compactions()
-                .await?
-                .map(|(id, compactions)| VersionedCompactions::from_compactions(id, compactions))
+            compactions_store.try_read_latest_compactions().await?
         };
 
         Ok(compactions)
@@ -161,7 +155,7 @@ impl Admin {
             compactions_store
                 .try_read_latest_compactions()
                 .await?
-                .map(|(_id, compactions)| compactions)
+                .map(|compactions| compactions.compactions)
         };
         let Some(compactions) = compactions else {
             return Ok(None);
@@ -239,7 +233,7 @@ impl Admin {
             &self.path,
             self.object_stores.store_of(ObjectStoreType::Main).clone(),
         );
-        let (_, manifest) = manifest_store.read_latest_manifest().await?;
+        let manifest = manifest_store.read_latest_manifest().await?.manifest;
 
         let checkpoints = match name_filter {
             Some("") => manifest
@@ -502,7 +496,7 @@ impl Admin {
         let manifest_store = self.manifest_store();
 
         let id_manifest = manifest_store.try_read_latest_manifest().await?;
-        let Some((_id, manifest)) = id_manifest else {
+        let Some(manifest) = id_manifest else {
             return Ok(None);
         };
 
@@ -511,7 +505,7 @@ impl Admin {
         } else {
             FindOption::RoundDown
         };
-        Ok(manifest.core.sequence_tracker.find_ts(seq, opt))
+        Ok(manifest.core().sequence_tracker.find_ts(seq, opt))
     }
 
     /// Returns the sequence for a given timestamp from the latest manifest's sequence tracker.
@@ -524,7 +518,7 @@ impl Admin {
         let manifest_store = self.manifest_store();
 
         let id_manifest = manifest_store.try_read_latest_manifest().await?;
-        let Some((_id, manifest)) = id_manifest else {
+        let Some(manifest) = id_manifest else {
             return Ok(None);
         };
 
@@ -533,7 +527,7 @@ impl Admin {
         } else {
             FindOption::RoundDown
         };
-        Ok(manifest.core.sequence_tracker.find_seq(ts, opt))
+        Ok(manifest.core().sequence_tracker.find_seq(ts, opt))
     }
 
     fn manifest_store(&self) -> ManifestStore {

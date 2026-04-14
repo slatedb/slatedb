@@ -4987,12 +4987,12 @@ mod tests {
         let next_wal_sst_id = table_store.next_wal_sst_id(0).await.unwrap();
 
         // Get the latest manifest
-        let (_, manifest) = manifest_store.read_latest_manifest().await.unwrap();
+        let manifest = manifest_store.read_latest_manifest().await.unwrap();
 
         // It's possible that there exists buffered multiple wals in memory, so the next_wal_sst_id
         // in manifest is greater than the next_wal_sst_id based on what's currently in the object
         // store unless ALL the wals are flushed.
-        assert!(manifest.core.next_wal_sst_id > next_wal_sst_id);
+        assert!(manifest.manifest.core.next_wal_sst_id > next_wal_sst_id);
     }
 
     async fn do_test_should_read_compacted_db(mut options: Settings) {
@@ -6328,16 +6328,16 @@ mod tests {
 
         // Read the latest manifest and verify it references the L0 SST.
         let manifest_store = ManifestStore::new(&path, object_store.clone());
-        let (_, manifest) = manifest_store
+        let manifest = manifest_store
             .read_latest_manifest()
             .await
             .expect("failed to read latest manifest");
         assert_eq!(
-            manifest.core.l0.len(),
+            manifest.manifest.core.l0.len(),
             1,
             "expected exactly one L0 SST in manifest"
         );
-        let l0_id = manifest.core.l0[0].sst.id;
+        let l0_id = manifest.manifest.core.l0[0].sst.id;
         assert_eq!(
             l0_id, ssts[0].id,
             "expected SST {:?} but found SST {:?}",

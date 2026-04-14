@@ -507,7 +507,7 @@ mod tests {
             .await
             .unwrap();
 
-        let latest_manifest_id = manifest_store.read_latest_manifest().await.unwrap().0;
+        let latest_manifest_id = manifest_store.read_latest_manifest().await.unwrap().id;
         assert_eq!(latest_manifest_id, checkpoint.manifest_id);
         assert_eq!(None, checkpoint.expire_time);
     }

@@ -69,13 +69,12 @@ impl GcTask for WalGcTask {
     ///  - older than the minimum age specified in the options
     ///  - older than the last compacted WAL SST.
     async fn collect(&self, utc_now: DateTime<Utc>) -> Result<(), SlateDBError> {
-        let (latest_manifest_id, latest_manifest) =
-            self.manifest_store.read_latest_manifest().await?;
+        let latest_manifest = self.manifest_store.read_latest_manifest().await?;
         let active_manifests = self
             .manifest_store
-            .read_referenced_manifests(latest_manifest_id, &latest_manifest)
+            .read_referenced_manifests(latest_manifest.id, &latest_manifest.manifest)
             .await?;
-        let last_compacted_wal_sst_id = latest_manifest.core.replay_after_wal_id;
+        let last_compacted_wal_sst_id = latest_manifest.manifest.core.replay_after_wal_id;
         let min_age = self.wal_sst_min_age();
         let sst_ids_to_delete = self
             .table_store

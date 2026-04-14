@@ -96,9 +96,8 @@ impl CompactorStateReader {
         let compactions = self.compactions_store.try_read_latest_compactions().await?;
         let manifest = self.manifest_store.read_latest_manifest().await?;
         Ok(CompactorStateView {
-            compactions: compactions
-                .map(|(id, compactions)| VersionedCompactions::from_compactions(id, compactions)),
-            manifest: VersionedManifest::from_manifest(manifest.0, manifest.1),
+            compactions,
+            manifest,
         })
     }
 }
@@ -486,10 +485,13 @@ mod tests {
         .await
         .unwrap();
 
-        let (_, manifest) = manifest_store.read_latest_manifest().await.unwrap();
-        let (_, compactions) = compactions_store.read_latest_compactions().await.unwrap();
-        assert_eq!(manifest.compactor_epoch, 9);
-        assert_eq!(manifest.compactor_epoch, compactions.compactor_epoch);
+        let manifest = manifest_store.read_latest_manifest().await.unwrap();
+        let compactions = compactions_store.read_latest_compactions().await.unwrap();
+        assert_eq!(manifest.manifest.compactor_epoch, 9);
+        assert_eq!(
+            manifest.manifest.compactor_epoch,
+            compactions.compactions.compactor_epoch
+        );
     }
 
     #[tokio::test]
@@ -738,7 +740,11 @@ mod tests {
         .unwrap();
 
         // Record the version after fencing.
-        let (start_id, _) = compactions_store.read_latest_compactions().await.unwrap();
+        let start_id = compactions_store
+            .read_latest_compactions()
+            .await
+            .unwrap()
+            .id;
 
         // Simulate an external writer racing and creating the next version.
         let mut external = StoredCompactions::load(compactions_store.clone())
@@ -749,13 +755,21 @@ mod tests {
             .await
             .unwrap();
 
-        let (conflicting_id, _) = compactions_store.read_latest_compactions().await.unwrap();
+        let conflicting_id = compactions_store
+            .read_latest_compactions()
+            .await
+            .unwrap()
+            .id;
         assert_eq!(conflicting_id, start_id + 1);
 
         // This should retry on conflict and succeed with a new version.
         writer.write_compactions_safely().await.unwrap();
 
-        let (final_id, _) = compactions_store.read_latest_compactions().await.unwrap();
+        let final_id = compactions_store
+            .read_latest_compactions()
+            .await
+            .unwrap()
+            .id;
         assert_eq!(final_id, start_id + 2);
     }
 
@@ -794,7 +808,7 @@ mod tests {
         .unwrap();
 
         // Record the version after fencing.
-        let (start_id, _) = manifest_store.read_latest_manifest().await.unwrap();
+        let start_id = manifest_store.read_latest_manifest().await.unwrap().id;
 
         // Simulate an external writer creating a checkpoint of the manifest and updating it.
         let admin = AdminBuilder::new(ROOT, object_store.clone()).build();
@@ -803,13 +817,13 @@ mod tests {
             .await
             .expect("create checkpoint failed");
 
-        let (conflicting_id, _) = manifest_store.read_latest_manifest().await.unwrap();
+        let conflicting_id = manifest_store.read_latest_manifest().await.unwrap().id;
         assert_eq!(conflicting_id, start_id + 1);
 
         // This should retry on conflict and succeed with a new version.
         writer.write_manifest_safely().await.unwrap();
 
-        let (final_id, _) = manifest_store.read_latest_manifest().await.unwrap();
+        let final_id = manifest_store.read_latest_manifest().await.unwrap().id;
         // write_manifest_safely now bumps the manifest twice per successful call because write_manifest
         // writes a checkpoint first:
         // - write_manifest() calls self.manifest.write_checkpoint(...) to create the checkpoint, then

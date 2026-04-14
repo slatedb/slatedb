@@ -2818,8 +2818,9 @@ mod tests {
         .await
         .unwrap();
 
-        let (_, compactions) = compactions_store.read_latest_compactions().await.unwrap();
+        let compactions = compactions_store.read_latest_compactions().await.unwrap();
         let stored = compactions
+            .compactions
             .get(&compaction_id)
             .expect("missing submitted compaction");
 
@@ -2915,8 +2916,9 @@ mod tests {
         .await
         .unwrap();
 
-        let (_, compactions) = compactions_store.read_latest_compactions().await.unwrap();
+        let compactions = compactions_store.read_latest_compactions().await.unwrap();
         let stored = compactions
+            .compactions
             .get(&compaction_id)
             .expect("missing submitted compaction");
         let expected_sources = vec![SourceId::SortedRun(2), SourceId::SortedRun(1)];
@@ -3294,11 +3296,12 @@ mod tests {
         // when: schedule compaction -> compactions are persisted
         fixture.handler.handle_ticker().await.unwrap();
 
-        let (_, stored_compactions) = fixture
+        let stored_compactions = fixture
             .compactions_store
             .read_latest_compactions()
             .await
-            .unwrap();
+            .unwrap()
+            .compactions;
         assert_eq!(
             stored_compactions
                 .iter()
@@ -3337,11 +3340,12 @@ mod tests {
 
         // then: finishing compaction clears persisted state
         fixture.handler.handle(msg).await.unwrap();
-        let (_, stored_compactions) = fixture
+        let stored_compactions = fixture
             .compactions_store
             .read_latest_compactions()
             .await
-            .unwrap();
+            .unwrap()
+            .compactions;
         let mut stored_compactions_iter = stored_compactions.iter();
         assert_eq!(
             stored_compactions_iter
@@ -3392,11 +3396,12 @@ mod tests {
             .await
             .expect("fatal error handling progress message");
 
-        let (_, stored_compactions) = fixture
+        let stored_compactions = fixture
             .compactions_store
             .read_latest_compactions()
             .await
-            .unwrap();
+            .unwrap()
+            .compactions;
         let stored = stored_compactions
             .get(&compaction_id)
             .expect("missing stored compaction");
@@ -3426,11 +3431,12 @@ mod tests {
         assert_eq!(scheduled.status(), CompactionStatus::Submitted);
         assert!(compactions.next().is_none());
 
-        let (_, stored_compactions) = fixture
+        let stored_compactions = fixture
             .compactions_store
             .read_latest_compactions()
             .await
-            .unwrap();
+            .unwrap()
+            .compactions;
         let stored = stored_compactions
             .iter()
             .next()
@@ -3464,11 +3470,12 @@ mod tests {
                 .status(),
             CompactionStatus::Running
         );
-        let (_, stored_compactions) = fixture
+        let stored_compactions = fixture
             .compactions_store
             .read_latest_compactions()
             .await
-            .unwrap();
+            .unwrap()
+            .compactions;
         assert_eq!(
             stored_compactions
                 .get(&compaction_id)
@@ -3543,11 +3550,12 @@ mod tests {
                 .status(),
             CompactionStatus::Failed
         );
-        let (_, stored_compactions) = fixture
+        let stored_compactions = fixture
             .compactions_store
             .read_latest_compactions()
             .await
-            .unwrap();
+            .unwrap()
+            .compactions;
         assert_eq!(
             stored_compactions
                 .get(&compaction_id)
@@ -3650,7 +3658,11 @@ mod tests {
         };
         handler.handle(msg).await.unwrap();
 
-        let (_, stored_compactions) = compactions_store.read_latest_compactions().await.unwrap();
+        let stored_compactions = compactions_store
+            .read_latest_compactions()
+            .await
+            .unwrap()
+            .compactions;
         assert_eq!(
             stored_compactions
                 .get(&compaction_id)
@@ -3698,11 +3710,12 @@ mod tests {
         let job = fixture.assert_started_compaction(1).pop().unwrap();
 
         // sanity: compaction persisted
-        let (_, stored) = fixture
+        let stored = fixture
             .compactions_store
             .read_latest_compactions()
             .await
-            .unwrap();
+            .unwrap()
+            .compactions;
         assert_eq!(stored.iter().collect::<Vec<&Compaction>>().len(), 1);
 
         // when: job fails
@@ -3713,11 +3726,12 @@ mod tests {
         fixture.handler.handle(msg).await.unwrap();
 
         // then: compaction marked failed in store
-        let (_, stored_after) = fixture
+        let stored_after = fixture
             .compactions_store
             .read_latest_compactions()
             .await
-            .unwrap();
+            .unwrap()
+            .compactions;
         assert_eq!(
             stored_after
                 .iter()

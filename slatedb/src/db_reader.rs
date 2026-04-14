@@ -1368,8 +1368,8 @@ mod tests {
             .await
             .unwrap();
         let manifest_store = test_provider.manifest_store();
-        let manifest = manifest_store.read_latest_manifest().await.unwrap().1;
-        let initial_checkpoint_id = manifest.core.checkpoints.first().unwrap().id;
+        let manifest = manifest_store.read_latest_manifest().await.unwrap();
+        let initial_checkpoint_id = manifest.manifest.core.checkpoints.first().unwrap().id;
 
         let mut rng = new_test_rng(None);
         let table = sample::table(&mut rng, 256, 10);
@@ -1382,9 +1382,15 @@ mod tests {
         let mut db_iter = reader.scan::<Vec<u8>, _>(..).await.unwrap();
         test_utils::assert_ranged_db_scan(&table, .., &mut db_iter).await;
 
-        let manifest = manifest_store.read_latest_manifest().await.unwrap().1;
-        assert!(!manifest.core.checkpoints.is_empty());
-        assert_eq!(None, manifest.core.find_checkpoint(initial_checkpoint_id));
+        let manifest = manifest_store.read_latest_manifest().await.unwrap();
+        assert!(!manifest.manifest.core.checkpoints.is_empty());
+        assert_eq!(
+            None,
+            manifest
+                .manifest
+                .core
+                .find_checkpoint(initial_checkpoint_id)
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -1406,15 +1412,27 @@ mod tests {
             .await
             .unwrap();
 
-        let initial_manifest = manifest_store.read_latest_manifest().await.unwrap().1;
-        assert_eq!(1, initial_manifest.core.checkpoints.len());
-        let initial_reader_checkpoint = initial_manifest.core.checkpoints.first().unwrap().clone();
+        let initial_manifest = manifest_store.read_latest_manifest().await.unwrap();
+        assert_eq!(1, initial_manifest.manifest.core.checkpoints.len());
+        let initial_reader_checkpoint = initial_manifest
+            .manifest
+            .core
+            .checkpoints
+            .first()
+            .unwrap()
+            .clone();
 
         tokio::time::sleep(Duration::from_millis(5000)).await;
 
-        let updated_manifest = manifest_store.read_latest_manifest().await.unwrap().1;
-        assert_eq!(1, updated_manifest.core.checkpoints.len());
-        let updated_reader_checkpoint = updated_manifest.core.checkpoints.first().unwrap().clone();
+        let updated_manifest = manifest_store.read_latest_manifest().await.unwrap();
+        assert_eq!(1, updated_manifest.manifest.core.checkpoints.len());
+        let updated_reader_checkpoint = updated_manifest
+            .manifest
+            .core
+            .checkpoints
+            .first()
+            .unwrap()
+            .clone();
         assert_eq!(initial_reader_checkpoint.id, updated_reader_checkpoint.id);
         assert!(
             updated_reader_checkpoint.expire_time.unwrap()
@@ -1423,8 +1441,8 @@ mod tests {
 
         // The checkpoint is removed on shutdown
         reader.close().await.unwrap();
-        let updated_manifest = manifest_store.read_latest_manifest().await.unwrap().1;
-        assert_eq!(0, updated_manifest.core.checkpoints.len());
+        let updated_manifest = manifest_store.read_latest_manifest().await.unwrap();
+        assert_eq!(0, updated_manifest.manifest.core.checkpoints.len());
     }
 
     #[tokio::test(start_paused = true)]

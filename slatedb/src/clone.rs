@@ -248,7 +248,10 @@ async fn validate_external_dbs_contain_final_checkpoint(
                 object_store.clone(),
             ))
         };
-        let external_manifest = external_manifest_store.read_latest_manifest().await?.1;
+        let external_manifest = external_manifest_store
+            .read_latest_manifest()
+            .await?
+            .manifest;
         if external_manifest
             .core
             .find_checkpoint(final_checkpoint_id)
@@ -627,7 +630,11 @@ mod tests {
 
         let clone_manifest_store =
             ManifestStore::new(&Path::from(clone_path), object_store.clone());
-        let (manifest_id, _) = clone_manifest_store.read_latest_manifest().await.unwrap();
+        let manifest_id = clone_manifest_store
+            .read_latest_manifest()
+            .await
+            .unwrap()
+            .id;
 
         create_clone(
             clone_path,
@@ -643,7 +650,11 @@ mod tests {
 
         assert_eq!(
             manifest_id,
-            clone_manifest_store.read_latest_manifest().await.unwrap().0
+            clone_manifest_store
+                .read_latest_manifest()
+                .await
+                .unwrap()
+                .id
         );
 
         Ok(())
