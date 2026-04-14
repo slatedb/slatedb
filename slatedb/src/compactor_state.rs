@@ -371,6 +371,11 @@ impl Compactions {
         }
     }
 
+    /// Returns the compactor epoch recorded in this compactions snapshot.
+    pub fn compactor_epoch(&self) -> u64 {
+        self.compactor_epoch
+    }
+
     pub(crate) fn with_compactions(mut self, compactions: Vec<Compaction>) -> Self {
         let recent_compactions = compactions
             .into_iter()

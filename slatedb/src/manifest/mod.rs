@@ -178,6 +178,16 @@ impl Manifest {
         }
     }
 
+    /// Returns the writer epoch recorded in this manifest snapshot.
+    pub fn writer_epoch(&self) -> u64 {
+        self.writer_epoch
+    }
+
+    /// Returns the compactor epoch recorded in this manifest snapshot.
+    pub fn compactor_epoch(&self) -> u64 {
+        self.compactor_epoch
+    }
+
     /// Create an initial manifest for a new clone. The returned
     /// manifest will set `initialized=false` to allow for additional
     /// initialization (such as copying wals).
