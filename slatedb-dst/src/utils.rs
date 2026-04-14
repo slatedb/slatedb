@@ -1,7 +1,5 @@
 //! Helpers for scenario-driven deterministic simulation testing.
 
-use std::fmt::Debug;
-use std::ops::RangeBounds;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::Once;
@@ -10,19 +8,19 @@ use std::time::Duration;
 use log::info;
 use object_store::ObjectStore;
 use rand::Rng;
+use slatedb::config::ScanOptions;
 use slatedb::config::{
     CompactorOptions, CompressionCodec, DurabilityLevel, GarbageCollectorDirectoryOptions,
     GarbageCollectorOptions, SizeTieredCompactionSchedulerOptions,
 };
-use slatedb::config::{ReadOptions, ScanOptions};
-use slatedb::{Db, DbBuilder, DbRand, Error, KeyValue, Settings};
+use slatedb::{Db, DbBuilder, DbRand, Error, Settings};
 use slatedb_common::clock::MockSystemClock;
 use std::rc::Rc;
 use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_subscriber::EnvFilter;
 
 use crate::object_store::ClockedObjectStore;
-use crate::scenarios::TimedShutdownScenario;
+use crate::scenarios::{ScanScenario, TimedShutdownScenario};
 use crate::ScenarioContext;
 use crate::{Dst, Scenario};
 
@@ -83,10 +81,9 @@ pub async fn run_simulation(
 }
 
 async fn verify_final_state(ctx: &ScenarioContext) -> Result<(), Error> {
-    validate_scan::<Vec<u8>, _>(ctx, .., &ScanOptions::default()).await?;
-    validate_scan::<Vec<u8>, _>(
+    ScanScenario::validate_full_range(ctx, &ScanOptions::default()).await?;
+    ScanScenario::validate_full_range(
         ctx,
-        ..,
         &ScanOptions::default().with_durability_filter(DurabilityLevel::Remote),
     )
     .await?;
@@ -236,142 +233,6 @@ pub fn build_runtime(seed: u64) -> tokio::runtime::LocalRuntime {
         .rng_seed(RngSeed::from_bytes(&seed.to_le_bytes()))
         .build_local(Default::default())
         .unwrap()
-}
-
-pub async fn validate_get<K>(
-    ctx: &ScenarioContext,
-    key: K,
-    options: &ReadOptions,
-) -> Result<Option<KeyValue>, Error>
-where
-    K: AsRef<[u8]> + Send,
-{
-    let key = key.as_ref().to_vec();
-    let snapshot = ctx.db().snapshot().await?;
-    let snapshot_seq = snapshot.seq();
-    if matches!(options.durability_filter, DurabilityLevel::Remote) {
-        loop {
-            let frontier_before = snapshot_seq.min(ctx.db().status().durable_seq);
-            let actual = snapshot.get_key_value_with_options(&key, options).await?;
-            let frontier_after = snapshot_seq.min(ctx.db().status().durable_seq);
-            if frontier_before != frontier_after {
-                tokio::task::yield_now().await;
-                continue;
-            }
-
-            if !ctx.wait_until_committed(frontier_after).await? {
-                return Ok(actual);
-            }
-
-            let expected = ctx
-                .as_of(frontier_after)
-                .get_key_value_with_options(&key, options)?;
-            assert_eq!(
-                actual,
-                expected,
-                "validate_get mismatch: scenario={} key={:?} options={:?} snapshot_seq={} frontier={}",
-                ctx.scenario(),
-                key,
-                options,
-                snapshot_seq,
-                frontier_after
-            );
-            return Ok(actual);
-        }
-    }
-
-    let actual = snapshot.get_key_value_with_options(&key, options).await?;
-    if !ctx.wait_until_committed(snapshot_seq).await? {
-        return Ok(actual);
-    }
-
-    let expected = ctx
-        .as_of(snapshot_seq)
-        .get_key_value_with_options(&key, options)?;
-
-    assert_eq!(
-        actual,
-        expected,
-        "validate_get mismatch: scenario={} key={:?} options={:?} snapshot_seq={}",
-        ctx.scenario(),
-        key,
-        options,
-        snapshot_seq
-    );
-
-    Ok(actual)
-}
-
-pub async fn validate_scan<K, T>(
-    ctx: &ScenarioContext,
-    range: T,
-    options: &ScanOptions,
-) -> Result<Vec<KeyValue>, Error>
-where
-    K: AsRef<[u8]> + Send,
-    T: RangeBounds<K> + Send + Clone + Debug,
-{
-    let snapshot = ctx.db().snapshot().await?;
-    let snapshot_seq = snapshot.seq();
-    if matches!(options.durability_filter, DurabilityLevel::Remote) {
-        loop {
-            let frontier_before = snapshot_seq.min(ctx.db().status().durable_seq);
-            let mut actual_iter = snapshot.scan_with_options(range.clone(), options).await?;
-            let mut actual = Vec::new();
-            while let Some(kv) = actual_iter.next().await? {
-                actual.push(kv);
-            }
-            let frontier_after = snapshot_seq.min(ctx.db().status().durable_seq);
-            if frontier_before != frontier_after {
-                tokio::task::yield_now().await;
-                continue;
-            }
-
-            if !ctx.wait_until_committed(frontier_after).await? {
-                return Ok(actual);
-            }
-
-            let expected = ctx
-                .as_of(frontier_after)
-                .scan_with_options::<K, _>(range.clone(), options)?;
-            assert_eq!(
-                actual,
-                expected,
-                "validate_scan mismatch: scenario={} range={:?} options={:?} snapshot_seq={} frontier={}",
-                ctx.scenario(),
-                range,
-                options,
-                snapshot_seq,
-                frontier_after
-            );
-            return Ok(actual);
-        }
-    }
-
-    let mut actual_iter = snapshot.scan_with_options(range.clone(), options).await?;
-    let mut actual = Vec::new();
-    while let Some(kv) = actual_iter.next().await? {
-        actual.push(kv);
-    }
-    if !ctx.wait_until_committed(snapshot_seq).await? {
-        return Ok(actual);
-    }
-
-    let expected = ctx
-        .as_of(snapshot_seq)
-        .scan_with_options::<K, _>(range.clone(), options)?;
-
-    assert_eq!(
-        actual,
-        expected,
-        "validate_scan mismatch: scenario={} range={:?} options={:?} snapshot_seq={}",
-        ctx.scenario(),
-        range,
-        options,
-        snapshot_seq
-    );
-
-    Ok(actual)
 }
 
 static INIT_LOGGING: Once = Once::new();

@@ -23,7 +23,10 @@ use rand::Rng;
 use rstest::rstest;
 use slatedb::{DbRand, Error};
 use slatedb_common::clock::{MockSystemClock, SystemClock};
-use slatedb_dst::scenarios::{ClockScenario, FlusherScenario, ReaderScenario, WriterScenario};
+use slatedb_dst::scenarios::{
+    BatchWriteScenario, ClockScenario, DeleteScenario, FlusherScenario, GetScenario, PutScenario,
+    ScanScenario,
+};
 use slatedb_dst::utils::{build_runtime, run_simulation};
 use slatedb_dst::Scenario;
 #[cfg(slow)]
@@ -84,19 +87,38 @@ fn test_dst_is_deterministic(
         let mut simulation_scenarios: Vec<Box<dyn Scenario>> = Vec::with_capacity(11);
 
         // Add scenarios.
-        for name in ["writer-0", "writer-1", "writer-2", "writer-3"] {
-            simulation_scenarios.push(Box::new(WriterScenario {
+        for name in ["put-0", "put-1"] {
+            simulation_scenarios.push(Box::new(PutScenario {
                 name,
                 rand: rand.clone(),
                 key_space: writer_key_space,
                 iterations: Some(iterations),
             }));
         }
-        for name in ["reader-0", "reader-1", "reader-2", "reader-3"] {
-            simulation_scenarios.push(Box::new(ReaderScenario {
+        simulation_scenarios.push(Box::new(DeleteScenario {
+            name: "delete-0",
+            rand: rand.clone(),
+            key_space: writer_key_space,
+            iterations: Some(iterations),
+        }));
+        simulation_scenarios.push(Box::new(BatchWriteScenario {
+            name: "batch-0",
+            rand: rand.clone(),
+            key_space: writer_key_space,
+            iterations: Some(iterations),
+        }));
+        for name in ["get-0", "get-1"] {
+            simulation_scenarios.push(Box::new(GetScenario {
                 name,
                 rand: rand.clone(),
                 key_space: reader_key_space,
+                iterations: Some(iterations),
+            }));
+        }
+        for name in ["scan-0", "scan-1"] {
+            simulation_scenarios.push(Box::new(ScanScenario {
+                name,
+                rand: rand.clone(),
                 iterations: Some(iterations),
             }));
         }
@@ -227,19 +249,38 @@ fn test_dst_nightly() -> Result<(), Error> {
             let writer_key_space = rand.rng().random_range(1..(MAX_KEY_SPACE + 1));
             let reader_key_space = rand.rng().random_range(1..(MAX_KEY_SPACE + 1));
             let mut simulation_scenarios: Vec<Box<dyn Scenario>> = Vec::with_capacity(11);
-            for name in ["writer-0", "writer-1", "writer-2", "writer-3"] {
-                simulation_scenarios.push(Box::new(WriterScenario {
+            for name in ["put-0", "put-1"] {
+                simulation_scenarios.push(Box::new(PutScenario {
                     name,
                     rand: rand.clone(),
                     key_space: writer_key_space,
                     iterations: None,
                 }));
             }
-            for name in ["reader-0", "reader-1", "reader-2", "reader-3"] {
-                simulation_scenarios.push(Box::new(ReaderScenario {
+            simulation_scenarios.push(Box::new(DeleteScenario {
+                name: "delete-0",
+                rand: rand.clone(),
+                key_space: writer_key_space,
+                iterations: None,
+            }));
+            simulation_scenarios.push(Box::new(BatchWriteScenario {
+                name: "batch-0",
+                rand: rand.clone(),
+                key_space: writer_key_space,
+                iterations: None,
+            }));
+            for name in ["get-0", "get-1"] {
+                simulation_scenarios.push(Box::new(GetScenario {
                     name,
                     rand: rand.clone(),
                     key_space: reader_key_space,
+                    iterations: None,
+                }));
+            }
+            for name in ["scan-0", "scan-1"] {
+                simulation_scenarios.push(Box::new(ScanScenario {
+                    name,
+                    rand: rand.clone(),
                     iterations: None,
                 }));
             }

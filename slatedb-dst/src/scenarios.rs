@@ -14,7 +14,6 @@
 use std::rc::Rc;
 use std::time::Duration;
 
-use crate::utils::{validate_get, validate_scan};
 use crate::{Scenario, ScenarioContext, ScenarioWriteBatch};
 use async_trait::async_trait;
 use rand::Rng;
@@ -22,20 +21,13 @@ use slatedb::config::{DurabilityLevel, PutOptions, ReadOptions, ScanOptions};
 use slatedb::{DbRand, Error, IterationOrder};
 use tracing::info;
 
-/// Issues the mutating side of the simulation workload.
+/// Issues checked single-key puts against a small key space.
 ///
-/// `WriterScenario` is responsible for creating churn in the database state. On
-/// each iteration it randomly chooses between two plain put variants, deletes,
-/// batched writes, and explicit flushes over a deliberately small key space.
-/// That combination creates frequent overwrites and visibility changes, which
-/// makes it more likely that the simulation will exercise edge cases in state
-/// tracking and durability transitions without depending on TTL semantics the
-/// current SQLite model does not fully model.
-///
-/// When `iterations` is `Some`, the scenario performs exactly that many write
-/// steps unless shutdown happens first. When it is `None`, the scenario keeps
-/// generating mutations until another scenario cancels the run.
-pub struct WriterScenario {
+/// `PutScenario` creates overwrite-heavy write traffic without mixing in other
+/// operation types. Running it as a dedicated scenario makes put interleavings
+/// explicit in the simulation schedule instead of hiding them behind an
+/// internal random branch.
+pub struct PutScenario {
     pub name: &'static str,
     pub rand: Rc<DbRand>,
     pub key_space: u64,
@@ -43,7 +35,7 @@ pub struct WriterScenario {
 }
 
 #[async_trait(?Send)]
-impl Scenario for WriterScenario {
+impl Scenario for PutScenario {
     fn name(&self) -> &'static str {
         self.name
     }
@@ -74,52 +66,11 @@ impl Scenario for WriterScenario {
                 info!(iteration, total_iterations = ?self.iterations, "scenario iteration");
             }
 
-            let op = rand.rng().random::<u64>() % 5;
-            match op {
-                0 => {
-                    let key_suffix = rand.rng().random::<u64>() % self.key_space;
-                    let value_suffix = rand.rng().random::<u64>();
-                    let key = format!("key-{key_suffix}").into_bytes();
-                    let value = format!("put-{value_suffix}").into_bytes();
-                    ctx.put(&key, &value, &PutOptions::default()).await?;
-                }
-                1 => {
-                    let key_suffix = rand.rng().random::<u64>() % self.key_space;
-                    let value_suffix = rand.rng().random::<u64>();
-                    let key = format!("key-{key_suffix}").into_bytes();
-                    let value = format!("put-alt-{value_suffix}").into_bytes();
-                    ctx.put(&key, &value, &PutOptions::default()).await?;
-                }
-                2 => {
-                    let key_suffix = rand.rng().random::<u64>() % self.key_space;
-                    let key = format!("key-{key_suffix}").into_bytes();
-                    ctx.delete(&key).await?;
-                }
-                3 => {
-                    let mut batch = ScenarioWriteBatch::new();
-                    let key_suffix = rand.rng().random::<u64>() % self.key_space;
-                    let value_suffix = rand.rng().random::<u64>();
-                    let key = format!("key-{key_suffix}").into_bytes();
-                    let value = format!("batch-{value_suffix}").into_bytes();
-                    batch.put(&key, &value);
-
-                    let second_key_suffix = rand.rng().random::<u64>() % self.key_space;
-                    let second_key = format!("key-{second_key_suffix}").into_bytes();
-                    let should_put_second = rand.rng().random::<bool>();
-                    if should_put_second {
-                        let second_value_suffix = rand.rng().random::<u64>();
-                        let second_value = format!("batch-{second_value_suffix}").into_bytes();
-                        batch.put(&second_key, &second_value);
-                    } else {
-                        batch.delete(&second_key);
-                    }
-
-                    ctx.write_batch(batch).await?;
-                }
-                _ => {
-                    ctx.flush().await?;
-                }
-            }
+            let key_suffix = rand.rng().random::<u64>() % self.key_space;
+            let value_suffix = rand.rng().random::<u64>();
+            let key = format!("key-{key_suffix}").into_bytes();
+            let value = format!("put-{value_suffix}").into_bytes();
+            ctx.put(&key, &value, &PutOptions::default()).await?;
 
             let should_yield = rand.rng().random::<bool>();
             if should_yield {
@@ -131,18 +82,11 @@ impl Scenario for WriterScenario {
     }
 }
 
-/// Issues checked reads against both memory-visible and remotely durable state.
+/// Issues checked deletes against a small key space.
 ///
-/// `ReaderScenario` continuously validates observable behavior against the DST
-/// recorded SQLite state while the other scenarios are mutating SlateDB. It
-/// randomly alternates between point reads and full-range scans, and for each
-/// operation it may read either the memory-visible view or the remotely durable
-/// view of the data.
-///
-/// By running concurrently with writers, clock advancement, and background
-/// flushes, this scenario helps catch mismatches in read visibility, scan
-/// ordering, and durability filtering under interleaved load.
-pub struct ReaderScenario {
+/// `DeleteScenario` exists separately from puts and batch writes so delete
+/// traffic can be scheduled independently by the harness.
+pub struct DeleteScenario {
     pub name: &'static str,
     pub rand: Rc<DbRand>,
     pub key_space: u64,
@@ -150,7 +94,7 @@ pub struct ReaderScenario {
 }
 
 #[async_trait(?Send)]
-impl Scenario for ReaderScenario {
+impl Scenario for DeleteScenario {
     fn name(&self) -> &'static str {
         self.name
     }
@@ -181,31 +125,348 @@ impl Scenario for ReaderScenario {
                 info!(iteration, total_iterations = ?self.iterations, "scenario iteration");
             }
 
-            let do_get = rand.rng().random::<bool>();
+            let key_suffix = rand.rng().random::<u64>() % self.key_space;
+            let key = format!("key-{key_suffix}").into_bytes();
+            ctx.delete(&key).await?;
+
+            let should_yield = rand.rng().random::<bool>();
+            if should_yield {
+                tokio::task::yield_now().await;
+            }
+        }
+
+        Ok(())
+    }
+}
+
+/// Issues checked batched writes against a small key space.
+///
+/// `BatchWriteScenario` keeps the multi-key atomic write path hot without
+/// entangling it with single-key mutations.
+pub struct BatchWriteScenario {
+    pub name: &'static str,
+    pub rand: Rc<DbRand>,
+    pub key_space: u64,
+    pub iterations: Option<u32>,
+}
+
+#[async_trait(?Send)]
+impl Scenario for BatchWriteScenario {
+    fn name(&self) -> &'static str {
+        self.name
+    }
+
+    fn runs_forever(&self) -> bool {
+        self.iterations.is_none()
+    }
+
+    #[tracing::instrument(skip_all, fields(scenario = self.name()))]
+    async fn run(&self, ctx: ScenarioContext) -> Result<(), Error> {
+        let rand = &self.rand;
+        let shutdown_token = ctx.shutdown_token();
+        let mut iteration = 0u32;
+
+        loop {
+            if shutdown_token.is_cancelled() {
+                break;
+            }
+
+            if let Some(total_iterations) = self.iterations {
+                if iteration >= total_iterations {
+                    break;
+                }
+            }
+
+            iteration += 1;
+            if iteration % 100 == 0 {
+                info!(iteration, total_iterations = ?self.iterations, "scenario iteration");
+            }
+
+            let mut batch = ScenarioWriteBatch::new();
+            let key_suffix = rand.rng().random::<u64>() % self.key_space;
+            let value_suffix = rand.rng().random::<u64>();
+            let key = format!("key-{key_suffix}").into_bytes();
+            let value = format!("batch-{value_suffix}").into_bytes();
+            batch.put(&key, &value);
+
+            let second_key_suffix = rand.rng().random::<u64>() % self.key_space;
+            let second_key = format!("key-{second_key_suffix}").into_bytes();
+            let should_put_second = rand.rng().random::<bool>();
+            if should_put_second {
+                let second_value_suffix = rand.rng().random::<u64>();
+                let second_value = format!("batch-{second_value_suffix}").into_bytes();
+                batch.put(&second_key, &second_value);
+            } else {
+                batch.delete(&second_key);
+            }
+
+            ctx.write_batch(batch).await?;
+
+            let should_yield = rand.rng().random::<bool>();
+            if should_yield {
+                tokio::task::yield_now().await;
+            }
+        }
+
+        Ok(())
+    }
+}
+
+/// Issues checked point reads against both memory-visible and remotely durable state.
+///
+/// `GetScenario` continuously validates single-key reads against the DST
+/// recorded SQLite state while the other scenarios are mutating SlateDB.
+pub struct GetScenario {
+    pub name: &'static str,
+    pub rand: Rc<DbRand>,
+    pub key_space: u64,
+    pub iterations: Option<u32>,
+}
+
+#[async_trait(?Send)]
+impl Scenario for GetScenario {
+    fn name(&self) -> &'static str {
+        self.name
+    }
+
+    fn runs_forever(&self) -> bool {
+        self.iterations.is_none()
+    }
+
+    #[tracing::instrument(skip_all, fields(scenario = self.name()))]
+    async fn run(&self, ctx: ScenarioContext) -> Result<(), Error> {
+        let rand = &self.rand;
+        let shutdown_token = ctx.shutdown_token();
+        let mut iteration = 0u32;
+
+        loop {
+            if shutdown_token.is_cancelled() {
+                break;
+            }
+
+            if let Some(total_iterations) = self.iterations {
+                if iteration >= total_iterations {
+                    break;
+                }
+            }
+
+            iteration += 1;
+            if iteration % 100 == 0 {
+                info!(iteration, total_iterations = ?self.iterations, "scenario iteration");
+            }
+
             let durability_filter = if rand.rng().random::<bool>() {
                 DurabilityLevel::Remote
             } else {
                 DurabilityLevel::Memory
             };
-            if do_get {
-                let key_suffix = rand.rng().random::<u64>() % self.key_space;
-                let key = format!("key-{key_suffix}").into_bytes();
-                let options = ReadOptions::default().with_durability_filter(durability_filter);
-                let _ = validate_get(&ctx, &key, &options).await?;
-            } else {
-                let order = if rand.rng().random::<bool>() {
-                    IterationOrder::Ascending
-                } else {
-                    IterationOrder::Descending
-                };
-                let options = ScanOptions::default()
-                    .with_durability_filter(durability_filter)
-                    .with_order(order);
-                let _ = validate_scan::<Vec<u8>, _>(&ctx, .., &options).await?;
-            }
+            let key_suffix = rand.rng().random::<u64>() % self.key_space;
+            let key = format!("key-{key_suffix}").into_bytes();
+            let options = ReadOptions::default().with_durability_filter(durability_filter);
+            Self::validate_key(&ctx, &key, &options).await?;
 
             tokio::task::yield_now().await;
         }
+
+        Ok(())
+    }
+}
+
+impl GetScenario {
+    async fn validate_key(
+        ctx: &ScenarioContext,
+        key: &[u8],
+        options: &ReadOptions,
+    ) -> Result<(), Error> {
+        let key = key.to_vec();
+        let snapshot = ctx.db().snapshot().await?;
+        let snapshot_seq = snapshot.seq();
+
+        if matches!(options.durability_filter, DurabilityLevel::Remote) {
+            loop {
+                let frontier_before = snapshot_seq.min(ctx.db().status().durable_seq);
+                let actual = snapshot.get_key_value_with_options(&key, options).await?;
+                let frontier_after = snapshot_seq.min(ctx.db().status().durable_seq);
+                if frontier_before != frontier_after {
+                    tokio::task::yield_now().await;
+                    continue;
+                }
+
+                if !ctx.wait_until_committed(frontier_after).await? {
+                    return Ok(());
+                }
+
+                let expected = ctx
+                    .as_of(frontier_after)
+                    .get_key_value_with_options(&key, options)?;
+                assert_eq!(
+                    actual,
+                    expected,
+                    "validate_get mismatch: scenario={} key={:?} options={:?} snapshot_seq={} frontier={}",
+                    ctx.scenario(),
+                    key,
+                    options,
+                    snapshot_seq,
+                    frontier_after
+                );
+                return Ok(());
+            }
+        }
+
+        let actual = snapshot.get_key_value_with_options(&key, options).await?;
+        if !ctx.wait_until_committed(snapshot_seq).await? {
+            return Ok(());
+        }
+
+        let expected = ctx
+            .as_of(snapshot_seq)
+            .get_key_value_with_options(&key, options)?;
+
+        assert_eq!(
+            actual,
+            expected,
+            "validate_get mismatch: scenario={} key={:?} options={:?} snapshot_seq={}",
+            ctx.scenario(),
+            key,
+            options,
+            snapshot_seq
+        );
+
+        Ok(())
+    }
+}
+
+/// Issues checked full-range scans against both memory-visible and remotely durable state.
+///
+/// `ScanScenario` continuously validates scan behavior against the DST
+/// recorded SQLite state while the other scenarios are mutating SlateDB.
+pub struct ScanScenario {
+    pub name: &'static str,
+    pub rand: Rc<DbRand>,
+    pub iterations: Option<u32>,
+}
+
+#[async_trait(?Send)]
+impl Scenario for ScanScenario {
+    fn name(&self) -> &'static str {
+        self.name
+    }
+
+    fn runs_forever(&self) -> bool {
+        self.iterations.is_none()
+    }
+
+    #[tracing::instrument(skip_all, fields(scenario = self.name()))]
+    async fn run(&self, ctx: ScenarioContext) -> Result<(), Error> {
+        let rand = &self.rand;
+        let shutdown_token = ctx.shutdown_token();
+        let mut iteration = 0u32;
+
+        loop {
+            if shutdown_token.is_cancelled() {
+                break;
+            }
+
+            if let Some(total_iterations) = self.iterations {
+                if iteration >= total_iterations {
+                    break;
+                }
+            }
+
+            iteration += 1;
+            if iteration % 100 == 0 {
+                info!(iteration, total_iterations = ?self.iterations, "scenario iteration");
+            }
+
+            let durability_filter = if rand.rng().random::<bool>() {
+                DurabilityLevel::Remote
+            } else {
+                DurabilityLevel::Memory
+            };
+            let order = if rand.rng().random::<bool>() {
+                IterationOrder::Ascending
+            } else {
+                IterationOrder::Descending
+            };
+            let options = ScanOptions::default()
+                .with_durability_filter(durability_filter)
+                .with_order(order);
+            Self::validate_full_range(&ctx, &options).await?;
+
+            tokio::task::yield_now().await;
+        }
+
+        Ok(())
+    }
+}
+
+impl ScanScenario {
+    pub(crate) async fn validate_full_range(
+        ctx: &ScenarioContext,
+        options: &ScanOptions,
+    ) -> Result<(), Error> {
+        let snapshot = ctx.db().snapshot().await?;
+        let snapshot_seq = snapshot.seq();
+
+        if matches!(options.durability_filter, DurabilityLevel::Remote) {
+            loop {
+                let frontier_before = snapshot_seq.min(ctx.db().status().durable_seq);
+                let mut actual_iter = snapshot
+                    .scan_with_options::<Vec<u8>, _>(.., options)
+                    .await?;
+                let mut actual = Vec::new();
+                while let Some(kv) = actual_iter.next().await? {
+                    actual.push(kv);
+                }
+                let frontier_after = snapshot_seq.min(ctx.db().status().durable_seq);
+                if frontier_before != frontier_after {
+                    tokio::task::yield_now().await;
+                    continue;
+                }
+
+                if !ctx.wait_until_committed(frontier_after).await? {
+                    return Ok(());
+                }
+
+                let expected = ctx
+                    .as_of(frontier_after)
+                    .scan_with_options::<Vec<u8>, _>(.., options)?;
+                assert_eq!(
+                    actual,
+                    expected,
+                    "validate_scan mismatch: scenario={} range=.. options={:?} snapshot_seq={} frontier={}",
+                    ctx.scenario(),
+                    options,
+                    snapshot_seq,
+                    frontier_after
+                );
+                return Ok(());
+            }
+        }
+
+        let mut actual_iter = snapshot
+            .scan_with_options::<Vec<u8>, _>(.., options)
+            .await?;
+        let mut actual = Vec::new();
+        while let Some(kv) = actual_iter.next().await? {
+            actual.push(kv);
+        }
+        if !ctx.wait_until_committed(snapshot_seq).await? {
+            return Ok(());
+        }
+
+        let expected = ctx
+            .as_of(snapshot_seq)
+            .scan_with_options::<Vec<u8>, _>(.., options)?;
+
+        assert_eq!(
+            actual,
+            expected,
+            "validate_scan mismatch: scenario={} range=.. options={:?} snapshot_seq={}",
+            ctx.scenario(),
+            options,
+            snapshot_seq
+        );
 
         Ok(())
     }
@@ -246,7 +507,7 @@ impl Scenario for ClockScenario {
             if iterations % 100 == 0 {
                 info!(iteration = iterations, "scenario iteration");
             }
-            let advance_ms = 1 + (rand.rng().random::<u64>() % 7);
+            let advance_ms = 1 + (rand.rng().random::<u64>() % 100);
             let should_yield = rand.rng().random::<bool>();
             ctx.advance_clock(Duration::from_millis(advance_ms)).await?;
             if should_yield {
@@ -292,7 +553,7 @@ impl Scenario for TimedShutdownScenario {
     }
 }
 
-/// Performs extra flushes independently of the writer scenario.
+/// Performs extra flushes independently of the mutation scenarios.
 ///
 /// `FlusherScenario` adds durability pressure that is decoupled from the normal
 /// write path. On each iteration it randomly decides whether to flush, which
@@ -301,8 +562,8 @@ impl Scenario for TimedShutdownScenario {
 ///
 /// Running flushes in a separate scenario makes the simulation explore states
 /// that would be less common if flushing only happened as a side effect of
-/// writer activity. Like the writer and reader scenarios, it can run for a
-/// fixed number of iterations or continue until shutdown.
+/// mutation traffic. Like the other scenarios, it can run for a fixed number
+/// of iterations or continue until shutdown.
 pub struct FlusherScenario {
     pub name: &'static str,
     pub rand: Rc<DbRand>,
