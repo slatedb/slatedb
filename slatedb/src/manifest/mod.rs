@@ -359,11 +359,11 @@ impl Manifest {
 }
 
 #[derive(Clone, Serialize, PartialEq, Debug)]
-pub(crate) struct ExternalDb {
-    pub(crate) path: String,
-    pub(crate) source_checkpoint_id: Uuid,
-    pub(crate) final_checkpoint_id: Option<Uuid>,
-    pub(crate) sst_ids: Vec<SsTableId>,
+pub struct ExternalDb {
+    pub path: String,
+    pub source_checkpoint_id: Uuid,
+    pub final_checkpoint_id: Option<Uuid>,
+    pub sst_ids: Vec<SsTableId>,
 }
 
 impl Manifest {
