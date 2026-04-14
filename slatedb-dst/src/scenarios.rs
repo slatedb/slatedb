@@ -28,9 +28,13 @@ use tracing::info;
 /// traffic explicit in the simulation schedule instead of hiding it behind a
 /// mixed writer branch.
 pub struct PutScenario {
+    /// Stable scenario name used in logs and mismatch reports.
     pub name: &'static str,
+    /// Shared deterministic RNG for reproducible operation choices.
     pub rand: Rc<DbRand>,
+    /// Exclusive upper bound for randomly chosen key suffixes.
     pub key_space: u64,
+    /// Number of iterations to run, or `None` to continue until shutdown.
     pub iterations: Option<u32>,
 }
 
@@ -88,9 +92,13 @@ impl Scenario for PutScenario {
 /// their own scenario lets the harness interleave tombstone traffic
 /// independently from puts and batch writes.
 pub struct DeleteScenario {
+    /// Stable scenario name used in logs and mismatch reports.
     pub name: &'static str,
+    /// Shared deterministic RNG for reproducible operation choices.
     pub rand: Rc<DbRand>,
+    /// Exclusive upper bound for randomly chosen key suffixes.
     pub key_space: u64,
+    /// Number of iterations to run, or `None` to continue until shutdown.
     pub iterations: Option<u32>,
 }
 
@@ -147,9 +155,13 @@ impl Scenario for DeleteScenario {
 /// `delete` to another key, which keeps the multi-key write path hot without
 /// entangling it with single-key scenarios.
 pub struct BatchWriteScenario {
+    /// Stable scenario name used in logs and mismatch reports.
     pub name: &'static str,
+    /// Shared deterministic RNG for reproducible operation choices.
     pub rand: Rc<DbRand>,
+    /// Exclusive upper bound for randomly chosen key suffixes.
     pub key_space: u64,
+    /// Number of iterations to run, or `None` to continue until shutdown.
     pub iterations: Option<u32>,
 }
 
@@ -222,9 +234,13 @@ impl Scenario for BatchWriteScenario {
 /// memory-visible view or the remote-durable view while other scenarios mutate
 /// SlateDB concurrently.
 pub struct GetScenario {
+    /// Stable scenario name used in logs and mismatch reports.
     pub name: &'static str,
+    /// Shared deterministic RNG for reproducible operation choices.
     pub rand: Rc<DbRand>,
+    /// Exclusive upper bound for randomly chosen key suffixes.
     pub key_space: u64,
+    /// Number of iterations to run, or `None` to continue until shutdown.
     pub iterations: Option<u32>,
 }
 
@@ -363,8 +379,11 @@ impl GetScenario {
 /// (`Memory` or `Remote`) and iteration order (`Ascending` or `Descending`)
 /// while other scenarios mutate SlateDB concurrently.
 pub struct ScanScenario {
+    /// Stable scenario name used in logs and mismatch reports.
     pub name: &'static str,
+    /// Shared deterministic RNG for reproducible operation choices.
     pub rand: Rc<DbRand>,
+    /// Number of iterations to run, or `None` to continue until shutdown.
     pub iterations: Option<u32>,
 }
 
@@ -519,7 +538,9 @@ impl ScanScenario {
 /// deterministically without waiting on real wall-clock time. The scenario runs
 /// until the shared shutdown token is cancelled.
 pub struct ClockScenario {
+    /// Stable scenario name used in logs and mismatch reports.
     pub name: &'static str,
+    /// Shared deterministic RNG for reproducible operation choices.
     pub rand: Rc<DbRand>,
 }
 
@@ -564,7 +585,9 @@ impl Scenario for ClockScenario {
 /// limit wins, it logs the timeout and cancels the shared token to stop the
 /// rest of the simulation.
 pub struct TimedShutdownScenario {
+    /// Stable scenario name used in logs and mismatch reports.
     pub name: &'static str,
+    /// Wall-clock timeout before the scenario cancels the shared shutdown token.
     pub duration: Duration,
 }
 
@@ -602,8 +625,11 @@ impl Scenario for TimedShutdownScenario {
 /// mutation traffic. Like the other scenarios, it can run for a fixed number
 /// of iterations or continue until shutdown.
 pub struct FlusherScenario {
+    /// Stable scenario name used in logs and mismatch reports.
     pub name: &'static str,
+    /// Shared deterministic RNG for reproducible flush decisions.
     pub rand: Rc<DbRand>,
+    /// Number of iterations to run, or `None` to continue until shutdown.
     pub iterations: Option<u32>,
 }
 
