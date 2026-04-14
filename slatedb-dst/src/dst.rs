@@ -1,4 +1,4 @@
-//! Scenario-driven deterministic simulation testing for SlateDB.
+//! Scenario-driven testing harness for SlateDB.
 
 use std::collections::BTreeMap;
 use std::rc::Rc;
@@ -44,9 +44,9 @@ pub trait Scenario {
     /// By default, scenarios are treated as finite.
     /// [`ScenarioRunner::run_scenarios`]
     /// cancels the shared shutdown token after all finite scenarios complete,
-    /// which gives any `runs_forever()` scenarios a deterministic signal to
-    /// stop. Override this to `true` for background workloads such as clock
-    /// tickers or wall-clock shutdown sentinels.
+    /// which gives any `runs_forever()` scenarios a signal to stop. Override
+    /// this to `true` for background workloads such as clock tickers or
+    /// wall-clock shutdown sentinels.
     fn runs_forever(&self) -> bool {
         false
     }
@@ -433,7 +433,7 @@ impl ScenarioContext {
     }
 }
 
-/// A scenario runner for deterministic simulation testing.
+/// A scenario runner that executes one or more scenarios concurrently.
 ///
 /// `ScenarioRunner` owns the shared resources for one simulation run:
 ///
