@@ -18,7 +18,7 @@ use crate::utils::{validate_get, validate_scan};
 use crate::{Scenario, ScenarioContext, ScenarioWriteBatch};
 use async_trait::async_trait;
 use rand::Rng;
-use slatedb::config::{PutOptions, ReadOptions, ScanOptions};
+use slatedb::config::{DurabilityLevel, PutOptions, ReadOptions, ScanOptions};
 use slatedb::{DbRand, Error, IterationOrder};
 use tracing::info;
 
@@ -182,17 +182,25 @@ impl Scenario for ReaderScenario {
             }
 
             let do_get = rand.rng().random::<bool>();
+            let durability_filter = if rand.rng().random::<bool>() {
+                DurabilityLevel::Remote
+            } else {
+                DurabilityLevel::Memory
+            };
             if do_get {
                 let key_suffix = rand.rng().random::<u64>() % self.key_space;
                 let key = format!("key-{key_suffix}").into_bytes();
-                let _ = validate_get(&ctx, &key, &ReadOptions::default()).await?;
+                let options = ReadOptions::default().with_durability_filter(durability_filter);
+                let _ = validate_get(&ctx, &key, &options).await?;
             } else {
                 let order = if rand.rng().random::<bool>() {
                     IterationOrder::Ascending
                 } else {
                     IterationOrder::Descending
                 };
-                let options = ScanOptions::default().with_order(order);
+                let options = ScanOptions::default()
+                    .with_durability_filter(durability_filter)
+                    .with_order(order);
                 let _ = validate_scan::<Vec<u8>, _>(&ctx, .., &options).await?;
             }
 

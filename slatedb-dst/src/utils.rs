@@ -11,8 +11,8 @@ use log::info;
 use object_store::ObjectStore;
 use rand::Rng;
 use slatedb::config::{
-    CompactorOptions, CompressionCodec, GarbageCollectorDirectoryOptions, GarbageCollectorOptions,
-    SizeTieredCompactionSchedulerOptions,
+    CompactorOptions, CompressionCodec, DurabilityLevel, GarbageCollectorDirectoryOptions,
+    GarbageCollectorOptions, SizeTieredCompactionSchedulerOptions,
 };
 use slatedb::config::{ReadOptions, ScanOptions};
 use slatedb::{Db, DbBuilder, DbRand, Error, KeyValue, Settings};
@@ -83,34 +83,13 @@ pub async fn run_simulation(
 }
 
 async fn verify_final_state(ctx: &ScenarioContext) -> Result<(), Error> {
-    let full_range = ..;
-    let snapshot = ctx.db().snapshot().await?;
-    let final_seq = snapshot.seq();
-    let mut expected_iter = ctx
-        .as_of(final_seq)
-        .scan::<Vec<u8>, _>(full_range.clone())?
-        .into_iter();
-    let mut actual_iter = snapshot.scan::<Vec<u8>, _>(full_range).await?;
-    for (row_index, expected) in expected_iter.by_ref().enumerate() {
-        let actual = actual_iter.next().await?.expect(&format!(
-            "final state mismatch: db ended early at index={} final_seq={} expected={:?}",
-            row_index, final_seq, expected
-        ));
-        assert_eq!(
-            actual, expected,
-            "final state mismatch at index={} final_seq={}",
-            row_index, final_seq
-        );
-    }
-
-    let trailing_actual = actual_iter.next().await?;
-    assert!(
-        trailing_actual.is_none(),
-        "final state mismatch: db has extra row after sqlite rows final_seq={} actual={:?}",
-        final_seq,
-        trailing_actual
-    );
-
+    validate_scan::<Vec<u8>, _>(ctx, .., &ScanOptions::default()).await?;
+    validate_scan::<Vec<u8>, _>(
+        ctx,
+        ..,
+        &ScanOptions::default().with_durability_filter(DurabilityLevel::Remote),
+    )
+    .await?;
     Ok(())
 }
 
@@ -270,7 +249,42 @@ where
     let key = key.as_ref().to_vec();
     let snapshot = ctx.db().snapshot().await?;
     let snapshot_seq = snapshot.seq();
+    if matches!(options.durability_filter, DurabilityLevel::Remote) {
+        loop {
+            let frontier_before = snapshot_seq.min(ctx.db().status().durable_seq);
+            let actual = snapshot.get_key_value_with_options(&key, options).await?;
+            let frontier_after = snapshot_seq.min(ctx.db().status().durable_seq);
+            if frontier_before != frontier_after {
+                tokio::task::yield_now().await;
+                continue;
+            }
+
+            if !ctx.wait_until_committed(frontier_after).await? {
+                return Ok(actual);
+            }
+
+            let expected = ctx
+                .as_of(frontier_after)
+                .get_key_value_with_options(&key, options)?;
+            assert_eq!(
+                actual,
+                expected,
+                "validate_get mismatch: scenario={} key={:?} options={:?} snapshot_seq={} frontier={}",
+                ctx.scenario(),
+                key,
+                options,
+                snapshot_seq,
+                frontier_after
+            );
+            return Ok(actual);
+        }
+    }
+
     let actual = snapshot.get_key_value_with_options(&key, options).await?;
+    if !ctx.wait_until_committed(snapshot_seq).await? {
+        return Ok(actual);
+    }
+
     let expected = ctx
         .as_of(snapshot_seq)
         .get_key_value_with_options(&key, options)?;
@@ -299,11 +313,50 @@ where
 {
     let snapshot = ctx.db().snapshot().await?;
     let snapshot_seq = snapshot.seq();
+    if matches!(options.durability_filter, DurabilityLevel::Remote) {
+        loop {
+            let frontier_before = snapshot_seq.min(ctx.db().status().durable_seq);
+            let mut actual_iter = snapshot.scan_with_options(range.clone(), options).await?;
+            let mut actual = Vec::new();
+            while let Some(kv) = actual_iter.next().await? {
+                actual.push(kv);
+            }
+            let frontier_after = snapshot_seq.min(ctx.db().status().durable_seq);
+            if frontier_before != frontier_after {
+                tokio::task::yield_now().await;
+                continue;
+            }
+
+            if !ctx.wait_until_committed(frontier_after).await? {
+                return Ok(actual);
+            }
+
+            let expected = ctx
+                .as_of(frontier_after)
+                .scan_with_options::<K, _>(range.clone(), options)?;
+            assert_eq!(
+                actual,
+                expected,
+                "validate_scan mismatch: scenario={} range={:?} options={:?} snapshot_seq={} frontier={}",
+                ctx.scenario(),
+                range,
+                options,
+                snapshot_seq,
+                frontier_after
+            );
+            return Ok(actual);
+        }
+    }
+
     let mut actual_iter = snapshot.scan_with_options(range.clone(), options).await?;
     let mut actual = Vec::new();
     while let Some(kv) = actual_iter.next().await? {
         actual.push(kv);
     }
+    if !ctx.wait_until_committed(snapshot_seq).await? {
+        return Ok(actual);
+    }
+
     let expected = ctx
         .as_of(snapshot_seq)
         .scan_with_options::<K, _>(range.clone(), options)?;

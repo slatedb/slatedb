@@ -15,6 +15,7 @@ use slatedb::bytes::Bytes;
 use slatedb::config::{PutOptions, Settings, Ttl, WriteOptions};
 use slatedb::{Db, Error, RowEntry, ValueDeletable, WriteBatch, WriteHandle};
 use slatedb_common::clock::{MockSystemClock, SystemClock};
+use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 use crate::state::{SQLiteState, StateSnapshot};
@@ -165,6 +166,24 @@ struct ScenarioShared {
     settings: Settings,
     clock: Arc<MockSystemClock>,
     state: Arc<Mutex<SQLiteState>>,
+    recorded_committed_tx: watch::Sender<u64>,
+}
+
+impl ScenarioShared {
+    fn publish_recorded_committed_seq(&self, seq: u64) {
+        self.recorded_committed_tx.send_if_modified(|recorded| {
+            if seq > *recorded {
+                *recorded = seq;
+                true
+            } else {
+                false
+            }
+        });
+    }
+
+    fn recorded_committed_seq(&self) -> u64 {
+        *self.recorded_committed_tx.borrow()
+    }
 }
 
 /// A cloneable handle passed to each running [`Scenario`].
@@ -227,6 +246,38 @@ impl ScenarioContext {
         StateSnapshot::new(self.shared.state.clone(), seq)
     }
 
+    /// Waits for DST's recorded SQLite state to include all writes through
+    /// `seq`.
+    ///
+    /// Returns `Ok(false)` if the active run is shutting down before the
+    /// recorded state catches up, which allows long-lived reader scenarios to
+    /// exit without turning a normal shutdown into a failure.
+    pub async fn wait_until_committed(&self, seq: u64) -> Result<bool, Error> {
+        if self.shared.recorded_committed_seq() >= seq {
+            return Ok(true);
+        }
+
+        let mut rx = self.shared.recorded_committed_tx.subscribe();
+        loop {
+            if *rx.borrow() >= seq {
+                return Ok(true);
+            }
+
+            tokio::select! {
+                _ = self.shutdown_token.cancelled() => {
+                    return Ok(self.shared.recorded_committed_seq() >= seq);
+                }
+                changed = rx.changed() => {
+                    if changed.is_err() {
+                        return Err(Error::internal(
+                            "DST recorded committed frontier channel closed".to_string(),
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
     /// Performs a checked single-key put.
     ///
     /// The write is issued against SlateDB with deterministic DST
@@ -263,10 +314,7 @@ impl ScenarioContext {
             create_ts: Some(create_ts),
             expire_ts,
         };
-        self.shared
-            .state
-            .lock()
-            .record_write(&[row], self.scenario)?;
+        self.record_write_rows(&[row])?;
         Ok(handle)
     }
 
@@ -293,10 +341,7 @@ impl ScenarioContext {
             create_ts: Some(handle.create_ts()),
             expire_ts: None,
         };
-        self.shared
-            .state
-            .lock()
-            .record_write(&[row], self.scenario)?;
+        self.record_write_rows(&[row])?;
         Ok(handle)
     }
 
@@ -352,10 +397,7 @@ impl ScenarioContext {
             }
         }
 
-        self.shared
-            .state
-            .lock()
-            .record_write(&rows, self.scenario)?;
+        self.record_write_rows(&rows)?;
         Ok(handle)
     }
 
@@ -379,6 +421,14 @@ impl ScenarioContext {
             now: self.shared.clock.now().timestamp_millis(),
             ..Default::default()
         }
+    }
+
+    pub(crate) fn record_write_rows(&self, rows: &[RowEntry]) -> Result<(), Error> {
+        self.shared.state.lock().record_write(rows, self.scenario)?;
+        if let Some(max_seq) = rows.iter().map(|row| row.seq).max() {
+            self.shared.publish_recorded_committed_seq(max_seq);
+        }
+        Ok(())
     }
 }
 
@@ -418,11 +468,13 @@ impl Dst {
         state_path: Option<&'static str>,
     ) -> Self {
         let state = Arc::new(Mutex::new(SQLiteState::new(state_path)));
+        let (recorded_committed_tx, _) = watch::channel(0);
         let shared = ScenarioShared {
             db,
             settings,
             clock,
             state,
+            recorded_committed_tx,
         };
         Self {
             shared: Rc::new(shared),
