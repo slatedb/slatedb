@@ -406,7 +406,16 @@ impl Scenario for ScanScenario {
             let options = ScanOptions::default()
                 .with_durability_filter(durability_filter)
                 .with_order(order);
-            Self::validate_full_range(&ctx, &options).await?;
+            let snapshot = ctx.db().snapshot().await?;
+            let snapshot_seq = snapshot.seq();
+            match options.durability_filter {
+                DurabilityLevel::Remote => {
+                    Self::validate_remote_read(&ctx, &snapshot, snapshot_seq, &options).await?;
+                }
+                _ => {
+                    Self::validate_committed_read(&ctx, &snapshot, snapshot_seq, &options).await?;
+                }
+            }
 
             tokio::task::yield_now().await;
         }
@@ -416,23 +425,6 @@ impl Scenario for ScanScenario {
 }
 
 impl ScanScenario {
-    pub(crate) async fn validate_full_range(
-        ctx: &ScenarioContext,
-        options: &ScanOptions,
-    ) -> Result<(), Error> {
-        let snapshot = ctx.db().snapshot().await?;
-        let snapshot_seq = snapshot.seq();
-
-        match options.durability_filter {
-            DurabilityLevel::Remote => {
-                return Self::validate_remote_read(ctx, &snapshot, snapshot_seq, options).await;
-            }
-            _ => {}
-        }
-
-        Self::validate_committed_read(ctx, &snapshot, snapshot_seq, options).await
-    }
-
     async fn validate_committed_read(
         ctx: &ScenarioContext,
         snapshot: &DbSnapshot,

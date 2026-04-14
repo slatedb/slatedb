@@ -12,13 +12,12 @@ use futures::{
 };
 use parking_lot::Mutex;
 use slatedb::bytes::Bytes;
-use slatedb::config::{DurabilityLevel, PutOptions, ScanOptions, Settings, Ttl, WriteOptions};
+use slatedb::config::{PutOptions, Settings, Ttl, WriteOptions};
 use slatedb::{Db, Error, RowEntry, ValueDeletable, WriteBatch, WriteHandle};
 use slatedb_common::clock::{MockSystemClock, SystemClock};
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
-use crate::scenarios::ScanScenario;
 use crate::state::{SQLiteState, StateSnapshot};
 
 /// A workload definition executed by [`Dst::run_scenarios`].
