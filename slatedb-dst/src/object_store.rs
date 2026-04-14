@@ -19,8 +19,6 @@ use object_store::{
 use parking_lot::{Mutex, RwLock};
 use slatedb_common::clock::SystemClock;
 
-const DETERMINISTIC_LOCAL_STORE_NAME: &str = "DeterministicLocalFileSystem";
-
 /// A deterministic on-disk object store for the simulation harness.
 ///
 /// All filesystem operations run inline on the current thread. This keeps the
@@ -359,8 +357,7 @@ impl fmt::Debug for DeterministicLocalFileSystem {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "{}({})",
-            DETERMINISTIC_LOCAL_STORE_NAME,
+            "DeterministicLocalFileSystem({})",
             self.state.root.display()
         )
     }
@@ -370,8 +367,7 @@ impl fmt::Display for DeterministicLocalFileSystem {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "{}({})",
-            DETERMINISTIC_LOCAL_STORE_NAME,
+            "DeterministicLocalFileSystem({})",
             self.state.root.display()
         )
     }
