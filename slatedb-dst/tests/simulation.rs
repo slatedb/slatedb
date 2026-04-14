@@ -75,7 +75,7 @@ const DEFAULT_VALUE_SIZE_RANGE: std::ops::RangeInclusive<usize> = 0..=4097; // e
 fn test_dst_is_deterministic(
     #[case] seed: u64,
     #[case] simulations: u32,
-    #[case] iterations: u32,
+    #[case] iterations: u64,
 ) -> Result<(), Error> {
     let mut expected_next_u64: Option<u64> = None;
     let mut expected_next_time: Option<DateTime<Utc>> = None;

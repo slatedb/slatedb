@@ -42,7 +42,7 @@ pub struct PutScenario {
     /// Inclusive range for generated value sizes in bytes.
     pub value_size_range: RangeInclusive<usize>,
     /// Number of iterations to run, or `None` to continue until shutdown.
-    pub iterations: Option<u32>,
+    pub iterations: Option<u64>,
 }
 
 #[async_trait(?Send)]
@@ -98,7 +98,7 @@ pub struct DeleteScenario {
     /// The lower bound must be at least `1`.
     pub key_size_range: RangeInclusive<usize>,
     /// Number of iterations to run, or `None` to continue until shutdown.
-    pub iterations: Option<u32>,
+    pub iterations: Option<u64>,
 }
 
 #[async_trait(?Send)]
@@ -166,7 +166,7 @@ pub struct BatchWriteScenario {
     /// Must be in the inclusive range `0.0..=1.0`.
     pub delete_probability: f64,
     /// Number of iterations to run, or `None` to continue until shutdown.
-    pub iterations: Option<u32>,
+    pub iterations: Option<u64>,
 }
 
 #[async_trait(?Send)]
@@ -234,7 +234,7 @@ pub struct GetScenario {
     /// The lower bound must be at least `1`.
     pub key_size_range: RangeInclusive<usize>,
     /// Number of iterations to run, or `None` to continue until shutdown.
-    pub iterations: Option<u32>,
+    pub iterations: Option<u64>,
 }
 
 #[async_trait(?Send)]
@@ -366,7 +366,7 @@ pub struct ScanScenario {
     /// Shared deterministic RNG for reproducible operation choices.
     pub rand: Rc<DbRand>,
     /// Number of iterations to run, or `None` to continue until shutdown.
-    pub iterations: Option<u32>,
+    pub iterations: Option<u64>,
 }
 
 #[async_trait(?Send)]
@@ -600,7 +600,7 @@ pub struct FlusherScenario {
     /// Shared deterministic RNG for reproducible flush decisions.
     pub rand: Rc<DbRand>,
     /// Number of iterations to run, or `None` to continue until shutdown.
-    pub iterations: Option<u32>,
+    pub iterations: Option<u64>,
 }
 
 #[async_trait(?Send)]
