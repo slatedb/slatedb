@@ -10,6 +10,7 @@ use crate::utils::IdGenerator;
 use bytes::Bytes;
 use log::warn;
 use serde::Serialize;
+use slatedb_txn_obj::DirtyObject;
 use uuid::Uuid;
 
 pub(crate) mod store;
@@ -27,6 +28,27 @@ pub struct Manifest {
     // todo: try to make this writable only from module
     pub(crate) writer_epoch: u64,
     pub(crate) compactor_epoch: u64,
+}
+
+/// A manifest snapshot paired with its version ID for monotonic ordering.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct VersionedManifest {
+    /// The version ID of the manifest.
+    pub id: u64,
+    /// The manifest state at this version.
+    pub manifest: Manifest,
+}
+
+impl VersionedManifest {
+    pub(crate) fn from_manifest(id: u64, manifest: Manifest) -> Self {
+        Self { id, manifest }
+    }
+}
+
+impl From<DirtyObject<Manifest>> for VersionedManifest {
+    fn from(dirty: DirtyObject<Manifest>) -> Self {
+        Self::from_manifest(dirty.id.id(), dirty.value)
+    }
 }
 
 impl Manifest {

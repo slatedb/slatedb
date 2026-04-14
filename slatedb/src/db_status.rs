@@ -1,7 +1,7 @@
 use tokio::sync::watch;
 
-use crate::db_state::VersionedManifest;
 use crate::error::SlateDBError;
+use crate::manifest::VersionedManifest;
 use crate::utils::WatchableOnceCell;
 use crate::CloseReason;
 
