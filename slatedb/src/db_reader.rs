@@ -1066,6 +1066,15 @@ impl DbReader {
     pub fn status(&self) -> DbStatus {
         self.inner.status()
     }
+
+    /// Get the current manifest state.
+    ///
+    /// This returns the reader's current manifest snapshot, paired with its
+    /// manifest version ID.
+    pub fn manifest(&self) -> VersionedManifest {
+        let state = Arc::clone(&self.inner.state.read());
+        VersionedManifest::from(state.as_ref())
+    }
 }
 
 #[async_trait::async_trait]
@@ -1131,8 +1140,7 @@ mod tests {
     use crate::db_status::DbStatusManager;
     use crate::format::sst::SsTableFormat;
     use crate::manifest::store::{ManifestStore, StoredManifest};
-    use crate::manifest::Manifest;
-    use crate::manifest::ManifestCore;
+    use crate::manifest::{Manifest, ManifestCore, VersionedManifest};
     use crate::mem_table::{ImmutableMemtable, WritableKVTable};
     use crate::merge_operator::MergeOperatorType;
     use crate::object_stores::ObjectStores;
@@ -1186,6 +1194,26 @@ mod tests {
             reader.get(key).await.unwrap(),
             Some(Bytes::from_static(value))
         );
+    }
+
+    #[tokio::test]
+    async fn should_return_current_versioned_manifest() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_reader_manifest_accessor");
+        let test_provider = TestProvider::new(path.clone(), Arc::clone(&object_store));
+
+        let db = test_provider.new_db(Settings::default()).await.unwrap();
+        db.put(b"test_key", b"test_value").await.unwrap();
+        db.flush().await.unwrap();
+
+        let reader = DbReader::open(path, object_store, None, DbReaderOptions::default())
+            .await
+            .unwrap();
+
+        let manifest = reader.manifest();
+        let expected: VersionedManifest =
+            VersionedManifest::from(reader.inner.state.read().as_ref());
+        assert_eq!(manifest, expected);
     }
 
     #[tokio::test]

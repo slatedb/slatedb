@@ -156,6 +156,11 @@ impl VersionedManifest {
     pub(crate) fn from_manifest(id: u64, manifest: Manifest) -> Self {
         Self { id, manifest }
     }
+
+    /// Returns the manifest contents at this version.
+    pub fn core(&self) -> &ManifestCore {
+        &self.manifest.core
+    }
 }
 
 impl From<DirtyObject<Manifest>> for VersionedManifest {

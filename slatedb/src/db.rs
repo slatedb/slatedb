@@ -58,7 +58,7 @@ use crate::db_stats::DbStats;
 use crate::error::SlateDBError;
 use crate::iter::IterationOrder;
 use crate::manifest::store::FenceableManifest;
-use crate::manifest::{Manifest, ManifestCore};
+use crate::manifest::{Manifest, VersionedManifest};
 use crate::mem_table::WritableKVTable;
 use crate::memtable_flusher::{FlushResult, FlushTarget, MemtableFlusher};
 use crate::merge_operator::{instrument_merge_operator, MergeOperatorType};
@@ -594,8 +594,8 @@ impl DbInner {
         Ok(())
     }
 
-    pub(crate) fn manifest(&self) -> ManifestCore {
-        self.state.read().state().manifest.value.core.clone()
+    pub(crate) fn manifest(&self) -> VersionedManifest {
+        self.state.read().state().manifest.clone().into()
     }
 }
 
@@ -1546,8 +1546,9 @@ impl Db {
 
     /// Get the current manifest state.
     ///
-    /// This returns the in-memory manifest snapshot currently held by the `Db`.
-    pub fn manifest(&self) -> ManifestCore {
+    /// This returns the in-memory manifest snapshot currently held by the `Db`,
+    /// paired with its manifest version ID.
+    pub fn manifest(&self) -> VersionedManifest {
         self.inner.manifest()
     }
 
@@ -1763,7 +1764,7 @@ mod tests {
     };
     use crate::iter::RowEntryIterator;
     use crate::manifest::store::{ManifestStore, StoredManifest};
-    use crate::manifest::ManifestCore;
+    use crate::manifest::{ManifestCore, VersionedManifest};
     use crate::merge_operator::{
         MERGE_OPERATOR_COMPACT_PATH, MERGE_OPERATOR_FLUSH_PATH, MERGE_OPERATOR_READ_PATH,
     };
@@ -1910,7 +1911,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_manifest_returns_current_manifest_core() {
+    async fn test_manifest_returns_current_versioned_manifest() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let db = Db::builder("/tmp/test_manifest_accessor", object_store)
             .with_settings(test_db_options(0, 1024, None))
@@ -1921,7 +1922,7 @@ mod tests {
         db.put(b"test_key", b"test_value").await.unwrap();
 
         let manifest = db.manifest();
-        let expected = db.inner.state.read().state().core().clone();
+        let expected: VersionedManifest = db.inner.state.read().state().manifest.clone().into();
         assert_eq!(manifest, expected);
 
         db.close().await.unwrap();
@@ -1956,8 +1957,8 @@ mod tests {
 
         // estimate_size on L0 views should return non-zero
         let manifest = db.manifest();
-        assert!(!manifest.l0.is_empty());
-        for view in &manifest.l0 {
+        assert!(!manifest.manifest.core.l0.is_empty());
+        for view in &manifest.manifest.core.l0 {
             assert!(view.estimate_size() > 0);
         }
 
@@ -1979,9 +1980,9 @@ mod tests {
         .unwrap();
 
         let manifest = db.manifest();
-        assert!(!manifest.compacted.is_empty());
+        assert!(!manifest.manifest.core.compacted.is_empty());
 
-        for sr in &manifest.compacted {
+        for sr in &manifest.manifest.core.compacted {
             // A range covering all keys returns results
             let covering = sr
                 .tables_covering_range(Bytes::from_static(b"k0000")..Bytes::from_static(b"k0100"));
@@ -5039,7 +5040,11 @@ mod tests {
         )
         .await;
         let manifest = db.manifest();
-        info!("1 l0: {} {}", manifest.l0.len(), manifest.compacted.len());
+        info!(
+            "1 l0: {} {}",
+            manifest.manifest.core.l0.len(),
+            manifest.manifest.core.compacted.len()
+        );
 
         // write more l0s and wait for compaction
         for i in 0..4 {
@@ -5061,7 +5066,11 @@ mod tests {
         )
         .await;
         let manifest = db.manifest();
-        info!("2 l0: {} {}", manifest.l0.len(), manifest.compacted.len());
+        info!(
+            "2 l0: {} {}",
+            manifest.manifest.core.l0.len(),
+            manifest.manifest.core.compacted.len()
+        );
         // write another l0
         db.put(&[b'a'; 32], &[128u8; 32]).await.unwrap();
         db.put(&[b'm'; 32], &[129u8; 32]).await.unwrap();
@@ -5072,7 +5081,11 @@ mod tests {
         assert_eq!(val, Some(Bytes::copy_from_slice(&[129u8; 32])));
         for i in 1..4 {
             let manifest = db.manifest();
-            info!("3 l0: {} {}", manifest.l0.len(), manifest.compacted.len());
+            info!(
+                "3 l0: {} {}",
+                manifest.manifest.core.l0.len(),
+                manifest.manifest.core.compacted.len()
+            );
             let val = db.get([b'a' + i; 32]).await.unwrap();
             assert_eq!(val, Some(Bytes::copy_from_slice(&[1u8 + i; 32])));
             let val = db.get([b'm' + i; 32]).await.unwrap();
@@ -6673,10 +6686,7 @@ mod tests {
                 .await
                 .unwrap();
 
-        assert_eq!(
-            watcher.borrow().current_manifest.manifest.core,
-            db.manifest()
-        );
+        assert_eq!(watcher.borrow().current_manifest, db.manifest());
 
         // When: writes are flushed to an L0 and the manifest is updated
         db.put(b"key1", b"value1").await.unwrap();

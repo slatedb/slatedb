@@ -825,11 +825,11 @@ mod tests {
         parent_db.flush().await.unwrap();
         let manifest = parent_db.manifest();
         assert!(
-            !manifest.l0.is_empty(),
+            !manifest.manifest.core.l0.is_empty(),
             "expected cloned state to include L0 data"
         );
         assert!(
-            manifest.replay_after_wal_id + 1 < manifest.next_wal_sst_id,
+            manifest.manifest.core.replay_after_wal_id + 1 < manifest.manifest.core.next_wal_sst_id,
             "expected cloned state to retain WAL-only SSTs"
         );
         parent_db.close().await.unwrap();
@@ -913,15 +913,17 @@ mod tests {
         parent_db.flush().await.unwrap();
         let manifest = parent_db.manifest();
         assert!(
-            !manifest.l0.is_empty(),
+            !manifest.manifest.core.l0.is_empty(),
             "expected cloned state to include L0 data"
         );
         assert!(
-            manifest.replay_after_wal_id + 1 < manifest.next_wal_sst_id,
+            manifest.manifest.core.replay_after_wal_id + 1 < manifest.manifest.core.next_wal_sst_id,
             "expected cloned state to retain WAL-only SSTs"
         );
         let expected_missing_wal_path = PathResolver::new(Path::from(parent_path))
-            .table_path(&SsTableId::Wal(manifest.replay_after_wal_id + 1))
+            .table_path(&SsTableId::Wal(
+                manifest.manifest.core.replay_after_wal_id + 1,
+            ))
             .to_string();
         parent_db.close().await.unwrap();
 
