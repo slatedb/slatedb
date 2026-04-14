@@ -105,6 +105,8 @@ fn test_dst_is_deterministic(
             name: "batch-0",
             rand: rand.clone(),
             key_space: writer_key_space,
+            batch_size_range: 1..=50,
+            delete_probability: 0.01,
             iterations: Some(iterations),
         }));
         for name in ["get-0", "get-1"] {
@@ -267,6 +269,8 @@ fn test_dst_nightly() -> Result<(), Error> {
                 name: "batch-0",
                 rand: rand.clone(),
                 key_space: writer_key_space,
+                batch_size_range: 1..=50,
+                delete_probability: 0.01,
                 iterations: None,
             }));
             for name in ["get-0", "get-1"] {

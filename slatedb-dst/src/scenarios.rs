@@ -11,6 +11,7 @@
 //! iteration limit and stop on their own, while others run until the shared
 //! shutdown token is cancelled by another scenario.
 
+use std::ops::RangeInclusive;
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -150,10 +151,10 @@ impl Scenario for DeleteScenario {
 
 /// Issues checked batched writes against a small key space.
 ///
-/// `BatchWriteScenario` emits one atomic batch per iteration. Each batch always
-/// includes one `put` and then randomly applies either a second `put` or a
-/// `delete` to another key, which keeps the multi-key write path hot without
-/// entangling it with single-key scenarios.
+/// `BatchWriteScenario` emits one atomic batch per iteration. Each batch stages
+/// a random number of operations drawn from `batch_size_range`, and each staged
+/// operation independently becomes a `delete` with probability
+/// `delete_probability` or a `put` otherwise.
 pub struct BatchWriteScenario {
     /// Stable scenario name used in logs and mismatch reports.
     pub name: &'static str,
@@ -161,6 +162,15 @@ pub struct BatchWriteScenario {
     pub rand: Rc<DbRand>,
     /// Exclusive upper bound for randomly chosen key suffixes.
     pub key_space: u64,
+    /// Inclusive range for the total number of staged operations per batch.
+    ///
+    /// The lower bound must be at least `1`. This counts both `put`s and
+    /// `delete`s before any per-key deduplication inside [`ScenarioWriteBatch`].
+    pub batch_size_range: RangeInclusive<usize>,
+    /// Probability that a staged batch operation is a `delete` instead of a `put`.
+    ///
+    /// Must be in the inclusive range `0.0..=1.0`.
+    pub delete_probability: f64,
     /// Number of iterations to run, or `None` to continue until shutdown.
     pub iterations: Option<u32>,
 }
@@ -198,21 +208,17 @@ impl Scenario for BatchWriteScenario {
             }
 
             let mut batch = ScenarioWriteBatch::new();
-            let key_suffix = rand.rng().random::<u64>() % self.key_space;
-            let value_suffix = rand.rng().random::<u64>();
-            let key = format!("key-{key_suffix}").into_bytes();
-            let value = format!("batch-{value_suffix}").into_bytes();
-            batch.put(&key, &value);
-
-            let second_key_suffix = rand.rng().random::<u64>() % self.key_space;
-            let second_key = format!("key-{second_key_suffix}").into_bytes();
-            let should_put_second = rand.rng().random::<bool>();
-            if should_put_second {
-                let second_value_suffix = rand.rng().random::<u64>();
-                let second_value = format!("batch-{second_value_suffix}").into_bytes();
-                batch.put(&second_key, &second_value);
-            } else {
-                batch.delete(&second_key);
+            let operation_count = rand.rng().random_range(self.batch_size_range.clone());
+            for _ in 0..operation_count {
+                let key_suffix = rand.rng().random::<u64>() % self.key_space;
+                let key = format!("key-{key_suffix}").into_bytes();
+                if rand.rng().random_bool(self.delete_probability) {
+                    batch.delete(&key);
+                } else {
+                    let value_suffix = rand.rng().random::<u64>();
+                    let value = format!("batch-{value_suffix}").into_bytes();
+                    batch.put(&key, &value);
+                }
             }
 
             ctx.write_batch(batch).await?;
