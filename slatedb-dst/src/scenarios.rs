@@ -15,6 +15,7 @@ use std::ops::RangeInclusive;
 use std::rc::Rc;
 use std::time::Duration;
 
+use crate::utils::{random_key_bytes, random_value_bytes};
 use crate::{Scenario, ScenarioContext, ScenarioWriteBatch};
 use async_trait::async_trait;
 use rand::Rng;
@@ -248,34 +249,6 @@ impl Scenario for BatchWriteScenario {
 
         Ok(())
     }
-}
-
-fn random_key_bytes(
-    rand: &DbRand,
-    key_space: u64,
-    key_size_range: &RangeInclusive<usize>,
-) -> Vec<u8> {
-    let key_id = rand.rng().random::<u64>() % key_space;
-    let key_len = rand.rng().random_range(key_size_range.clone());
-    let mut bytes = Vec::with_capacity(key_len);
-    let mut seed = key_id;
-    while bytes.len() < key_len {
-        seed = seed
-            .wrapping_mul(6364136223846793005)
-            .wrapping_add(1442695040888963407);
-        bytes.extend_from_slice(&seed.to_le_bytes());
-    }
-    bytes.truncate(key_len);
-    bytes
-}
-
-fn random_value_bytes(rand: &DbRand, value_size_range: &RangeInclusive<usize>) -> Vec<u8> {
-    let value_len = rand.rng().random_range(value_size_range.clone());
-    let mut value = vec![0; value_len];
-    for byte in &mut value {
-        *byte = rand.rng().random();
-    }
-    value
 }
 
 /// Issues checked point reads against both memory-visible and remotely durable state.

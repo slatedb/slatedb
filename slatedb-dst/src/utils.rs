@@ -1,5 +1,6 @@
 //! Helpers for scenario-driven deterministic simulation testing.
 
+use std::ops::RangeInclusive;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::Once;
@@ -21,6 +22,39 @@ use tracing_subscriber::EnvFilter;
 use crate::object_store::ClockedObjectStore;
 use crate::scenarios::TimedShutdownScenario;
 use crate::{Dst, Scenario};
+
+pub(crate) fn random_key_bytes(
+    rand: &DbRand,
+    key_space: u64,
+    key_size_range: &RangeInclusive<usize>,
+) -> Vec<u8> {
+    let key_id = rand.rng().random_range(0..key_space);
+    let min_len = *key_size_range.start();
+    let len_span = key_size_range.end() - key_size_range.start() + 1;
+    let mut seed = key_id;
+    let key_len = min_len + (seed as usize % len_span);
+    let mut bytes = Vec::with_capacity(key_len);
+    while bytes.len() < key_len {
+        seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        bytes.extend_from_slice(&seed.to_le_bytes());
+    }
+    bytes.truncate(key_len);
+    bytes
+}
+
+pub(crate) fn random_value_bytes(
+    rand: &DbRand,
+    value_size_range: &RangeInclusive<usize>,
+) -> Vec<u8> {
+    let value_len = rand.rng().random_range(value_size_range.clone());
+    let mut value = vec![0; value_len];
+    for byte in &mut value {
+        *byte = rand.rng().random();
+    }
+    value
+}
 
 /// Builds a deterministic DST run, executes the supplied scenarios, validates
 /// the final SlateDB state against the SQLite model, and then closes the DB.
