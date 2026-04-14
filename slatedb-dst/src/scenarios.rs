@@ -57,31 +57,21 @@ impl Scenario for PutScenario {
 
     #[tracing::instrument(skip_all, fields(scenario = self.name()))]
     async fn run(&self, ctx: ScenarioContext) -> Result<(), Error> {
-        let rand = &self.rand;
-        let shutdown_token = ctx.shutdown_token();
         let mut iteration = 0u32;
 
-        loop {
-            if shutdown_token.is_cancelled() {
-                break;
-            }
-
-            if let Some(total_iterations) = self.iterations {
-                if iteration >= total_iterations {
-                    break;
-                }
-            }
-
+        while !ctx.shutdown_token().is_cancelled()
+            && self.iterations.is_none_or(|limit| iteration < limit)
+        {
             iteration += 1;
             if iteration % 100 == 0 {
                 info!(iteration, total_iterations = ?self.iterations, "scenario iteration");
             }
 
-            let key = random_key_bytes(rand, self.key_space, &self.key_size_range);
-            let value = random_value_bytes(rand, &self.value_size_range);
+            let key = random_key_bytes(&self.rand, self.key_space, &self.key_size_range);
+            let value = random_value_bytes(&self.rand, &self.value_size_range);
             ctx.put(&key, &value, &PutOptions::default()).await?;
 
-            let should_yield = rand.rng().random::<bool>();
+            let should_yield = self.rand.rng().random::<bool>();
             if should_yield {
                 tokio::task::yield_now().await;
             }
@@ -123,30 +113,20 @@ impl Scenario for DeleteScenario {
 
     #[tracing::instrument(skip_all, fields(scenario = self.name()))]
     async fn run(&self, ctx: ScenarioContext) -> Result<(), Error> {
-        let rand = &self.rand;
-        let shutdown_token = ctx.shutdown_token();
         let mut iteration = 0u32;
 
-        loop {
-            if shutdown_token.is_cancelled() {
-                break;
-            }
-
-            if let Some(total_iterations) = self.iterations {
-                if iteration >= total_iterations {
-                    break;
-                }
-            }
-
+        while !ctx.shutdown_token().is_cancelled()
+            && self.iterations.is_none_or(|limit| iteration < limit)
+        {
             iteration += 1;
             if iteration % 100 == 0 {
                 info!(iteration, total_iterations = ?self.iterations, "scenario iteration");
             }
 
-            let key = random_key_bytes(rand, self.key_space, &self.key_size_range);
+            let key = random_key_bytes(&self.rand, self.key_space, &self.key_size_range);
             ctx.delete(&key).await?;
 
-            let should_yield = rand.rng().random::<bool>();
+            let should_yield = self.rand.rng().random::<bool>();
             if should_yield {
                 tokio::task::yield_now().await;
             }
@@ -201,47 +181,31 @@ impl Scenario for BatchWriteScenario {
 
     #[tracing::instrument(skip_all, fields(scenario = self.name()))]
     async fn run(&self, ctx: ScenarioContext) -> Result<(), Error> {
-        let rand = &self.rand;
-        let shutdown_token = ctx.shutdown_token();
         let mut iteration = 0u32;
-        if !(0.0..=1.0).contains(&self.delete_probability) {
-            return Err(Error::internal(format!(
-                "delete_probability must be in 0.0..=1.0: {}",
-                self.delete_probability
-            )));
-        }
 
-        loop {
-            if shutdown_token.is_cancelled() {
-                break;
-            }
-
-            if let Some(total_iterations) = self.iterations {
-                if iteration >= total_iterations {
-                    break;
-                }
-            }
-
+        while !ctx.shutdown_token().is_cancelled()
+            && self.iterations.is_none_or(|limit| iteration < limit)
+        {
             iteration += 1;
             if iteration % 100 == 0 {
                 info!(iteration, total_iterations = ?self.iterations, "scenario iteration");
             }
 
             let mut batch = ScenarioWriteBatch::new();
-            let operation_count = rand.rng().random_range(self.batch_size_range.clone());
+            let operation_count = self.rand.rng().random_range(self.batch_size_range.clone());
             for _ in 0..operation_count {
-                let key = random_key_bytes(rand, self.key_space, &self.key_size_range);
-                if rand.rng().random_bool(self.delete_probability) {
+                let key = random_key_bytes(&self.rand, self.key_space, &self.key_size_range);
+                if self.rand.rng().random_bool(self.delete_probability) {
                     batch.delete(&key);
                 } else {
-                    let value = random_value_bytes(rand, &self.value_size_range);
+                    let value = random_value_bytes(&self.rand, &self.value_size_range);
                     batch.put(&key, &value);
                 }
             }
 
             ctx.write_batch(batch).await?;
 
-            let should_yield = rand.rng().random::<bool>();
+            let should_yield = self.rand.rng().random::<bool>();
             if should_yield {
                 tokio::task::yield_now().await;
             }
@@ -285,32 +249,22 @@ impl Scenario for GetScenario {
 
     #[tracing::instrument(skip_all, fields(scenario = self.name()))]
     async fn run(&self, ctx: ScenarioContext) -> Result<(), Error> {
-        let rand = &self.rand;
-        let shutdown_token = ctx.shutdown_token();
         let mut iteration = 0u32;
 
-        loop {
-            if shutdown_token.is_cancelled() {
-                break;
-            }
-
-            if let Some(total_iterations) = self.iterations {
-                if iteration >= total_iterations {
-                    break;
-                }
-            }
-
+        while !ctx.shutdown_token().is_cancelled()
+            && self.iterations.is_none_or(|limit| iteration < limit)
+        {
             iteration += 1;
             if iteration % 100 == 0 {
                 info!(iteration, total_iterations = ?self.iterations, "scenario iteration");
             }
 
-            let durability_filter = if rand.rng().random::<bool>() {
+            let durability_filter = if self.rand.rng().random::<bool>() {
                 DurabilityLevel::Remote
             } else {
                 DurabilityLevel::Memory
             };
-            let key = random_key_bytes(rand, self.key_space, &self.key_size_range);
+            let key = random_key_bytes(&self.rand, self.key_space, &self.key_size_range);
             let options = ReadOptions::default().with_durability_filter(durability_filter);
             let snapshot = ctx.db().snapshot().await?;
             let snapshot_seq = snapshot.seq();
@@ -427,32 +381,22 @@ impl Scenario for ScanScenario {
 
     #[tracing::instrument(skip_all, fields(scenario = self.name()))]
     async fn run(&self, ctx: ScenarioContext) -> Result<(), Error> {
-        let rand = &self.rand;
-        let shutdown_token = ctx.shutdown_token();
         let mut iteration = 0u32;
 
-        loop {
-            if shutdown_token.is_cancelled() {
-                break;
-            }
-
-            if let Some(total_iterations) = self.iterations {
-                if iteration >= total_iterations {
-                    break;
-                }
-            }
-
+        while !ctx.shutdown_token().is_cancelled()
+            && self.iterations.is_none_or(|limit| iteration < limit)
+        {
             iteration += 1;
             if iteration % 100 == 0 {
                 info!(iteration, total_iterations = ?self.iterations, "scenario iteration");
             }
 
-            let durability_filter = if rand.rng().random::<bool>() {
+            let durability_filter = if self.rand.rng().random::<bool>() {
                 DurabilityLevel::Remote
             } else {
                 DurabilityLevel::Memory
             };
-            let order = if rand.rng().random::<bool>() {
+            let order = if self.rand.rng().random::<bool>() {
                 IterationOrder::Ascending
             } else {
                 IterationOrder::Descending
@@ -584,17 +528,15 @@ impl Scenario for ClockScenario {
 
     #[tracing::instrument(skip_all, fields(scenario = self.name()))]
     async fn run(&self, ctx: ScenarioContext) -> Result<(), Error> {
-        let rand = &self.rand;
-        let shutdown_token = ctx.shutdown_token();
         let mut iterations = 0;
 
-        while !shutdown_token.is_cancelled() {
+        while !ctx.shutdown_token().is_cancelled() {
             iterations += 1;
             if iterations % 100 == 0 {
                 info!(iteration = iterations, "scenario iteration");
             }
-            let advance_ms = 1 + (rand.rng().random::<u64>() % 100);
-            let should_yield = rand.rng().random::<bool>();
+            let advance_ms = 1 + (self.rand.rng().random::<u64>() % 100);
+            let should_yield = self.rand.rng().random::<bool>();
             ctx.advance_clock(Duration::from_millis(advance_ms)).await?;
             if should_yield {
                 tokio::task::yield_now().await;
@@ -673,27 +615,17 @@ impl Scenario for FlusherScenario {
 
     #[tracing::instrument(skip_all, fields(scenario = self.name()))]
     async fn run(&self, ctx: ScenarioContext) -> Result<(), Error> {
-        let rand = &self.rand;
-        let shutdown_token = ctx.shutdown_token();
         let mut iteration = 0u32;
 
-        loop {
-            if shutdown_token.is_cancelled() {
-                break;
-            }
-
-            if let Some(total_iterations) = self.iterations {
-                if iteration >= total_iterations {
-                    break;
-                }
-            }
-
+        while !ctx.shutdown_token().is_cancelled()
+            && self.iterations.is_none_or(|limit| iteration < limit)
+        {
             iteration += 1;
             if iteration % 100 == 0 {
                 info!(iteration, total_iterations = ?self.iterations, "scenario iteration");
             }
 
-            let should_flush = rand.rng().random::<bool>();
+            let should_flush = self.rand.rng().random::<bool>();
             if should_flush {
                 ctx.flush().await?;
             }
