@@ -1,12 +1,14 @@
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    Arc,
+    Arc, RwLock,
 };
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 use sysinfo::{Disks, Networks, ProcessRefreshKind, ProcessesToUpdate, System};
 use tokio::time::Instant;
 use tracing::info;
+
+use crate::SystemParameters;
 
 /// A system monitor that tracks CPU, memory, disk, and network usage.
 pub struct SystemMonitor {
@@ -16,6 +18,8 @@ pub struct SystemMonitor {
     runtime_handle: Option<tokio::runtime::Handle>,
     /// Flag to signal the monitoring thread to stop
     running: Arc<AtomicBool>,
+    /// Shared system parameters updated by the monitoring thread
+    parameters: Arc<RwLock<SystemParameters>>,
 }
 
 impl SystemMonitor {
@@ -25,7 +29,13 @@ impl SystemMonitor {
             handle: None,
             running: Arc::new(AtomicBool::new(false)),
             runtime_handle,
+            parameters: Arc::new(RwLock::new(SystemParameters::default())),
         }
+    }
+
+    /// Returns a snapshot of the current system parameters.
+    pub fn parameters(&self) -> SystemParameters {
+        self.parameters.read().unwrap().clone()
     }
 
     /// Starts the system monitoring in a background thread.
@@ -40,6 +50,7 @@ impl SystemMonitor {
         let running = Arc::clone(&self.running);
 
         let runtime_handle = self.runtime_handle.clone();
+        let parameters = Arc::clone(&self.parameters);
         self.handle = Some(thread::spawn(move || {
             let mut system = System::new();
             let bencher_pid = sysinfo::get_current_pid().unwrap();
@@ -56,16 +67,24 @@ impl SystemMonitor {
                     thread::sleep(Duration::from_secs(1));
                 }
 
+                let mut system_parameters = parameters.write().unwrap();
+
                 system.refresh_cpu_usage();
 
-                let global_cpu_usage = f32::trunc(system.global_cpu_usage() * 10.0) / 10.0;
-                let cpu_core_usage = system
+                // CPU
+                system_parameters.global_cpu_usage = f32::trunc(system.global_cpu_usage() * 10.0) / 10.0;
+                system_parameters.cpu_core_usage = system
                     .cpus()
                     .iter()
                     .map(|cpu| f32::trunc(cpu.cpu_usage() * 10.0) / 10.0)
                     .collect::<Vec<_>>();
-                info!(global_cpu_usage, ?cpu_core_usage, "cpu usage");
+                info!(
+                    system_parameters.global_cpu_usage,
+                    ?system_parameters.cpu_core_usage,
+                    "cpu usage"
+                );
 
+                // Memory
                 system.refresh_memory();
                 system.refresh_processes_specifics(
                     ProcessesToUpdate::Some(&[bencher_pid]),
@@ -73,34 +92,37 @@ impl SystemMonitor {
                     ProcessRefreshKind::nothing().with_memory(),
                 );
 
-                let total_memory_mb = system.total_memory() / 1024 / 1024;
-                let used_memory_mb = system.used_memory() / 1024 / 1024;
-                let free_memory_mb = system.free_memory() / 1024 / 1024;
-                let available_memory_mb = system.available_memory() / 1024 / 1024;
-                let total_swap_mb = system.total_swap() / 1024 / 1024;
-                let free_swap_mb = system.free_swap() / 1024 / 1024;
-                let used_swap_mb = system.used_swap() / 1024 / 1024;
-                let bencher_memory_mb = system
+                system_parameters.total_memory_mb = system.total_memory() / 1024 / 1024;
+                system_parameters.used_memory_mb = system.used_memory() / 1024 / 1024;
+                system_parameters.free_memory_mb = system.free_memory() / 1024 / 1024;
+                system_parameters.available_memory_mb = system.available_memory() / 1024 / 1024;
+                system_parameters.total_swap_mb = system.total_swap() / 1024 / 1024;
+                system_parameters.free_swap_mb = system.free_swap() / 1024 / 1024;
+                system_parameters.used_swap_mb = system.used_swap() / 1024 / 1024;
+                system_parameters.bencher_memory_mb = system
                     .process(bencher_pid)
                     .map(|p| p.memory() / 1024 / 1024)
                     .unwrap_or(0);
                 info!(
-                    bencher_memory_mb,
-                    total_memory_mb,
-                    used_memory_mb,
-                    free_memory_mb,
-                    available_memory_mb,
-                    total_swap_mb,
-                    free_swap_mb,
-                    used_swap_mb,
+                    system_parameters.bencher_memory_mb,
+                    system_parameters.total_memory_mb,
+                    system_parameters.used_memory_mb,
+                    system_parameters.free_memory_mb,
+                    system_parameters.available_memory_mb,
+                    system_parameters.total_swap_mb,
+                    system_parameters.free_swap_mb,
+                    system_parameters.used_swap_mb,
                     "memory usage (MiB)"
                 );
 
+                // Disk
                 disks.refresh(true);
                 let now = Instant::now();
                 let elapsed = now.duration_since(last_disk_refresh);
                 last_disk_refresh = now;
 
+                system_parameters.read_throughput_mb_per_disk.clear();
+                system_parameters.write_throughput_mb_per_disk.clear();
                 for disk in disks.list() {
                     let usage = disk.usage();
                     let read_mb_since_last_refresh = usage.read_bytes / 1024 / 1024;
@@ -109,18 +131,23 @@ impl SystemMonitor {
                         read_mb_since_last_refresh as f64 / elapsed.as_secs_f64();
                     let write_mb_per_second =
                         write_mb_since_last_refresh as f64 / elapsed.as_secs_f64();
-                    let disk_name = disk.name().to_str().unwrap();
+                    let disk_name = disk.name().to_str().unwrap().to_string();
                     info!(
                         disk_name,
                         read_mb_per_second, write_mb_per_second, "disk usage (MiB/s)",
                     );
+                    system_parameters.read_throughput_mb_per_disk.insert(disk_name.clone(), read_mb_per_second);
+                    system_parameters.write_throughput_mb_per_disk.insert(disk_name, write_mb_per_second);
                 }
 
+                // Network
                 networks.refresh(true);
                 let now = Instant::now();
                 let elapsed = now.duration_since(last_network_refresh);
                 last_network_refresh = now;
 
+                system_parameters.recv_mb_per_interface.clear();
+                system_parameters.write_mb_per_interface.clear();
                 for (interface_name, data) in networks.list() {
                     let received_mb_since_last_refresh = data.received() / 1024 / 1024;
                     let transmitted_mb_since_last_refresh = data.transmitted() / 1024 / 1024;
@@ -137,7 +164,12 @@ impl SystemMonitor {
                         interface_name,
                         received_mb_per_second, transmitted_mb_per_second, "network usage (MiB/s)",
                     );
+                    system_parameters.recv_mb_per_interface.insert(interface_name.clone(), received_mb_per_second);
+                    system_parameters.write_mb_per_interface.insert(interface_name.clone(), transmitted_mb_per_second);
                 }
+
+                // drop the write lock before logging tokio metrics
+                drop(system_parameters);
 
                 if let Some(handle) = &runtime_handle {
                     let metrics = handle.metrics();
