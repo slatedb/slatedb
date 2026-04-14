@@ -357,14 +357,9 @@ The scheduler uses this index to plan work: selecting segments with many L0s, me
 
 Segmented and unsegmented data may coexist in the same database. For example, a TSDB might use segments for time-bucketed metric data while keeping permanent configuration state as unsegmented. Migration from an unsegmented to a segmented layout is another scenario. When both are present, the scheduler is responsible for handling both: using `segments()` to plan segment-scoped compactions and the existing `l0`/`compacted` fields for unsegmented data.
 
-The `.compactions` file schema is updated to match. Before the V3 upgrade, the existing `TieredCompactionSpec` continues to be used. After the upgrade, a new `CompactionSpecV2` is used with Ulid-based sorted run references:
+The `.compactions` file schema is updated to match. Before the V3 manifest upgrade, the existing `TieredCompactionSpec` continues to be used. After the upgrade, a new `CompactionSpecV2` replaces it:
 
 ```flatbuffer
-union CompactionSpecUnion {
-    TieredCompactionSpec,
-    CompactionSpecV2,
-}
-
 enum CompactionActionType : byte {
     Merge = 0,
     Drop,
@@ -374,7 +369,7 @@ table CompactionSpecV2 {
     l0_view_ids: [Ulid];
     sorted_runs: [Ulid];
     destination: Ulid;
-    output: CompactionActionType;
+    action: CompactionActionType;
 }
 ```
 
