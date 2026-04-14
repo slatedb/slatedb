@@ -20,7 +20,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::state::{SQLiteState, StateSnapshot};
 
-/// A workload definition executed by [`Dst::run_scenarios`].
+/// A workload definition executed by [`ScenarioRunner::run_scenarios`].
 ///
 /// A scenario is a named async task that runs against a shared SlateDB instance
 /// through a [`ScenarioContext`]. Scenarios are allowed to be `!Send`, so they
@@ -28,7 +28,7 @@ use crate::state::{SQLiteState, StateSnapshot};
 ///
 /// Implementations typically model one independent actor in a simulation, such
 /// as a writer, reader, flusher, or shutdown controller. Multiple scenarios may
-/// run concurrently against the same [`Dst`] instance.
+/// run concurrently against the same [`ScenarioRunner`] instance.
 #[async_trait(?Send)]
 pub trait Scenario {
     /// Returns a stable name for this scenario.
@@ -41,7 +41,8 @@ pub trait Scenario {
     /// Returns whether this scenario is intended to run until the shared
     /// shutdown token is cancelled.
     ///
-    /// By default, scenarios are treated as finite. [`Dst::run_scenarios`]
+    /// By default, scenarios are treated as finite.
+    /// [`ScenarioRunner::run_scenarios`]
     /// cancels the shared shutdown token after all finite scenarios complete,
     /// which gives any `runs_forever()` scenarios a deterministic signal to
     /// stop. Override this to `true` for background workloads such as clock
@@ -434,7 +435,7 @@ impl ScenarioContext {
 
 /// A scenario runner for deterministic simulation testing.
 ///
-/// `Dst` owns the shared resources for one simulation run:
+/// `ScenarioRunner` owns the shared resources for one simulation run:
 ///
 /// - the SlateDB [`Db`] under test;
 /// - the shared [`MockSystemClock`];
@@ -442,12 +443,13 @@ impl ScenarioContext {
 ///   inspection.
 ///
 /// Scenarios are run as Tokio local tasks, so callers should execute
-/// [`Dst::run_scenarios`] on a current-thread runtime or within a `LocalSet`.
-pub struct Dst {
+/// [`ScenarioRunner::run_scenarios`] on a current-thread runtime or within a
+/// `LocalSet`.
+pub struct ScenarioRunner {
     shared: Rc<ScenarioShared>,
 }
 
-impl Dst {
+impl ScenarioRunner {
     /// Creates a DST runner backed by an in-memory SQLite state database.
     ///
     /// The supplied `db`, `clock`, and `settings` must all describe the same

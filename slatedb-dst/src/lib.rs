@@ -8,5 +8,5 @@ mod state;
 pub mod utils;
 
 #[allow(unused_imports)]
-pub use dst::{Dst, Scenario, ScenarioContext, ScenarioWriteBatch};
+pub use dst::{Scenario, ScenarioContext, ScenarioRunner, ScenarioWriteBatch};
 pub use state::StateSnapshot;

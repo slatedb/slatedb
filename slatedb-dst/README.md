@@ -4,7 +4,7 @@ This crate provides deterministic simulation tools and tests for SlateDB.
 
 ## Design
 
-SlateDB's `Dst` struct is a scenario runner that executes multiple named
+SlateDB's `ScenarioRunner` struct is a scenario runner that executes multiple named
 `!Send` async local tasks against one shared `Db`. Scenarios interact through a
 cloneable `ScenarioContext`, which provides:
 
@@ -29,7 +29,7 @@ Everything in DST is deterministic, including the system clock, the runtime,
 and any explicit database seed used by the caller. This means a failed test can
 be re-run with the same seed to reproduce the failure.
 
-See the crate API for `Scenario`, `ScenarioContext`, `Dst`, and
+See the crate API for `Scenario`, `ScenarioContext`, `ScenarioRunner`, and
 `utils::build_scenario_db`.
 
 Scenarios may override `Scenario::runs_forever()` to indicate that they should
@@ -68,7 +68,7 @@ use object_store::memory::InMemory;
 use slatedb::config::{ReadOptions, Settings};
 use slatedb_common::clock::MockSystemClock;
 use slatedb_dst::utils::{build_runtime, build_scenario_db};
-use slatedb_dst::{Dst, Scenario, ScenarioContext};
+use slatedb_dst::{Scenario, ScenarioContext, ScenarioRunner};
 
 #[async_trait::async_trait(?Send)]
 impl Scenario for MyScenario {
@@ -102,7 +102,7 @@ runtime.block_on(async {
     let db = build_scenario_db(Arc::new(InMemory::new()), clock.clone(), 42, settings.clone())
         .await
         .unwrap();
-    let dst = Dst::new(db, clock, settings).unwrap();
-    dst.run_scenarios(vec![Box::new(MyScenario)]).await.unwrap();
+    let runner = ScenarioRunner::new(db, clock, settings);
+    runner.run_scenarios(vec![Box::new(MyScenario)]).await.unwrap();
 });
 ```

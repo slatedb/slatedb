@@ -21,7 +21,7 @@ use tracing_subscriber::EnvFilter;
 
 use crate::object_store::ClockedObjectStore;
 use crate::scenarios::TimedShutdownScenario;
-use crate::{Dst, Scenario};
+use crate::{Scenario, ScenarioRunner};
 
 pub(crate) fn random_key_bytes(
     rand: &DbRand,
@@ -93,7 +93,7 @@ pub async fn run_simulation(
         settings.clone(),
     )
     .await?;
-    let dst = Dst::new(db, system_clock.clone(), settings);
+    let runner = ScenarioRunner::new(db, system_clock.clone(), settings);
 
     if let Some(duration) = wall_clock_time {
         simulation_scenarios.push(Box::new(TimedShutdownScenario {
@@ -102,9 +102,9 @@ pub async fn run_simulation(
         }));
     }
 
-    dst.run_scenarios(simulation_scenarios).await?;
+    runner.run_scenarios(simulation_scenarios).await?;
 
-    dst.close().await?;
+    runner.close().await?;
 
     Ok(())
 }
@@ -218,20 +218,21 @@ pub async fn build_scenario_db(
         .await
 }
 
-/// Builds a [`Dst`], runs the supplied scenarios, and returns the runner for
+/// Builds a [`ScenarioRunner`], runs the supplied scenarios, and returns the
+/// runner for
 /// follow-up inspection and verification.
 pub async fn run_scenarios<I>(
     db: Db,
     system_clock: Arc<MockSystemClock>,
     settings: Settings,
     scenarios: I,
-) -> Result<Dst, Error>
+) -> Result<ScenarioRunner, Error>
 where
     I: IntoIterator<Item = Box<dyn Scenario>>,
 {
-    let dst = Dst::new(db, system_clock, settings);
-    dst.run_scenarios(scenarios).await?;
-    Ok(dst)
+    let runner = ScenarioRunner::new(db, system_clock, settings);
+    runner.run_scenarios(scenarios).await?;
+    Ok(runner)
 }
 
 /// Tokio's default Runtime is non-deterministic even if a single thread is used.
