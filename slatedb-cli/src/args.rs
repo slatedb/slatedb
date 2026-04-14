@@ -29,16 +29,14 @@ pub(crate) struct CliArgs {
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum CliCommands {
-    /// Reads the latest manifest file and outputs a readable
-    /// String representation
+    /// Reads the latest manifest file and outputs JSON serialized from a typed manifest.
     ReadManifest {
-        /// Specify a specific manifest ULID to read, if this is
-        /// not specified the latest manifest will be returned
+        /// Specify a specific manifest id to read. If omitted, the latest manifest is returned.
         #[arg(short, long)]
         id: Option<u64>,
     },
 
-    /// Lists all available manifests
+    /// Lists manifests in a range and outputs JSON serialized from typed manifest payloads.
     ListManifests {
         /// Optionally specify a start id for the range of manifests to lookup
         #[arg(short, long)]
@@ -49,16 +47,14 @@ pub(crate) enum CliCommands {
         end: Option<u64>,
     },
 
-    /// Reads the latest compactions file and outputs a readable
-    /// String representation
+    /// Reads the latest compactions file and outputs JSON serialized from typed compactions.
     ReadCompactions {
-        /// Specify a specific compactions id to read, if this is
-        /// not specified the latest compactions will be returned
+        /// Specify a specific compactions id to read. If omitted, the latest compactions are returned.
         #[arg(short, long)]
         id: Option<u64>,
     },
 
-    /// Lists all available compactions files
+    /// Lists compactions files in a range and outputs JSON serialized from typed payloads.
     ListCompactions {
         /// Optionally specify a start id for the range of compactions to lookup
         #[arg(short, long)]

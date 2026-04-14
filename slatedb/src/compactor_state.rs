@@ -307,7 +307,7 @@ impl Display for Compaction {
 
 /// Represents an immutable in-memory view of .compactions file that is suitable
 /// to expose to end-users.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct CompactionsCore {
     /// The set of recent compactions tracked by this compactor. These may
     /// be pending, in progress, or recently completed (either with success
@@ -332,6 +332,27 @@ impl CompactionsCore {
     /// compaction (failed or completed).
     pub fn recent_compactions(&self) -> impl Iterator<Item = &Compaction> {
         self.recent_compactions.values()
+    }
+}
+
+/// A compactions snapshot paired with its version ID for monotonic ordering.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct VersionedCompactions {
+    /// The version ID of the compactions file.
+    pub id: u64,
+    /// The persisted compactor epoch for this compactions version.
+    pub compactor_epoch: u64,
+    /// The compactions state at this version.
+    pub compactions: CompactionsCore,
+}
+
+impl VersionedCompactions {
+    pub(crate) fn from_compactions(id: u64, compactions: Compactions) -> Self {
+        Self {
+            id,
+            compactor_epoch: compactions.compactor_epoch,
+            compactions: compactions.core,
+        }
     }
 }
 
