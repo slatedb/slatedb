@@ -36,6 +36,8 @@ use tracing::{error, info};
 #[cfg(slow)]
 const NIGHTLY_WALL_CLOCK: Duration = Duration::from_secs(12 * 60);
 const MAX_KEY_SPACE: u64 = 1024;
+const DEFAULT_KEY_SIZE_RANGE: std::ops::RangeInclusive<usize> = 8..=512;
+const DEFAULT_VALUE_SIZE_RANGE: std::ops::RangeInclusive<usize> = 0..=4097; // exceed block size
 
 /// Verifies that SlateDB is deterministic when we seed the random number generator, system
 /// clock, and runtime appropriately.
@@ -92,6 +94,8 @@ fn test_dst_is_deterministic(
                 name,
                 rand: rand.clone(),
                 key_space: writer_key_space,
+                key_size_range: DEFAULT_KEY_SIZE_RANGE.clone(),
+                value_size_range: DEFAULT_VALUE_SIZE_RANGE.clone(),
                 iterations: Some(iterations),
             }));
         }
@@ -99,12 +103,15 @@ fn test_dst_is_deterministic(
             name: "delete-0",
             rand: rand.clone(),
             key_space: writer_key_space,
+            key_size_range: DEFAULT_KEY_SIZE_RANGE.clone(),
             iterations: Some(iterations),
         }));
         simulation_scenarios.push(Box::new(BatchWriteScenario {
             name: "batch-0",
             rand: rand.clone(),
             key_space: writer_key_space,
+            key_size_range: DEFAULT_KEY_SIZE_RANGE.clone(),
+            value_size_range: DEFAULT_VALUE_SIZE_RANGE.clone(),
             batch_size_range: 1..=50,
             delete_probability: 0.01,
             iterations: Some(iterations),
@@ -114,6 +121,7 @@ fn test_dst_is_deterministic(
                 name,
                 rand: rand.clone(),
                 key_space: reader_key_space,
+                key_size_range: DEFAULT_KEY_SIZE_RANGE.clone(),
                 iterations: Some(iterations),
             }));
         }
@@ -256,6 +264,8 @@ fn test_dst_nightly() -> Result<(), Error> {
                     name,
                     rand: rand.clone(),
                     key_space: writer_key_space,
+                    key_size_range: DEFAULT_KEY_SIZE_RANGE.clone(),
+                    value_size_range: DEFAULT_VALUE_SIZE_RANGE.clone(),
                     iterations: None,
                 }));
             }
@@ -263,12 +273,15 @@ fn test_dst_nightly() -> Result<(), Error> {
                 name: "delete-0",
                 rand: rand.clone(),
                 key_space: writer_key_space,
+                key_size_range: DEFAULT_KEY_SIZE_RANGE.clone(),
                 iterations: None,
             }));
             simulation_scenarios.push(Box::new(BatchWriteScenario {
                 name: "batch-0",
                 rand: rand.clone(),
                 key_space: writer_key_space,
+                key_size_range: DEFAULT_KEY_SIZE_RANGE.clone(),
+                value_size_range: DEFAULT_VALUE_SIZE_RANGE.clone(),
                 batch_size_range: 1..=50,
                 delete_probability: 0.01,
                 iterations: None,
@@ -278,6 +291,7 @@ fn test_dst_nightly() -> Result<(), Error> {
                     name,
                     rand: rand.clone(),
                     key_space: reader_key_space,
+                    key_size_range: DEFAULT_KEY_SIZE_RANGE.clone(),
                     iterations: None,
                 }));
             }

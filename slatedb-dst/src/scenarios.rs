@@ -24,10 +24,9 @@ use tracing::info;
 
 /// Issues checked single-key puts against a small key space.
 ///
-/// `PutScenario` writes one default-options `put` per iteration to a random key
-/// in `key_space`. Running puts as a dedicated scenario keeps overwrite-heavy
-/// traffic explicit in the simulation schedule instead of hiding it behind a
-/// mixed writer branch.
+/// `PutScenario` writes one default-options `put` per iteration. Each write
+/// chooses a logical key ID from `key_space`, then chooses concrete key and
+/// value sizes from `key_size_range` and `value_size_range`.
 pub struct PutScenario {
     /// Stable scenario name used in logs and mismatch reports.
     pub name: &'static str,
@@ -35,6 +34,12 @@ pub struct PutScenario {
     pub rand: Rc<DbRand>,
     /// Exclusive upper bound for randomly chosen key suffixes.
     pub key_space: u64,
+    /// Inclusive range for generated key sizes in bytes.
+    ///
+    /// The lower bound must be at least `1`.
+    pub key_size_range: RangeInclusive<usize>,
+    /// Inclusive range for generated value sizes in bytes.
+    pub value_size_range: RangeInclusive<usize>,
     /// Number of iterations to run, or `None` to continue until shutdown.
     pub iterations: Option<u32>,
 }
@@ -71,10 +76,8 @@ impl Scenario for PutScenario {
                 info!(iteration, total_iterations = ?self.iterations, "scenario iteration");
             }
 
-            let key_suffix = rand.rng().random::<u64>() % self.key_space;
-            let value_suffix = rand.rng().random::<u64>();
-            let key = format!("key-{key_suffix}").into_bytes();
-            let value = format!("put-{value_suffix}").into_bytes();
+            let key = random_key_bytes(rand, self.key_space, &self.key_size_range);
+            let value = random_value_bytes(rand, &self.value_size_range);
             ctx.put(&key, &value, &PutOptions::default()).await?;
 
             let should_yield = rand.rng().random::<bool>();
@@ -89,9 +92,9 @@ impl Scenario for PutScenario {
 
 /// Issues checked single-key deletes against a small key space.
 ///
-/// `DeleteScenario` deletes one random key per iteration. Keeping deletes in
-/// their own scenario lets the harness interleave tombstone traffic
-/// independently from puts and batch writes.
+/// `DeleteScenario` deletes one random key per iteration. The key is chosen
+/// from the same logical `key_space` and concrete `key_size_range` used by the
+/// write scenarios so tombstones can target the same generated key population.
 pub struct DeleteScenario {
     /// Stable scenario name used in logs and mismatch reports.
     pub name: &'static str,
@@ -99,6 +102,10 @@ pub struct DeleteScenario {
     pub rand: Rc<DbRand>,
     /// Exclusive upper bound for randomly chosen key suffixes.
     pub key_space: u64,
+    /// Inclusive range for generated key sizes in bytes.
+    ///
+    /// The lower bound must be at least `1`.
+    pub key_size_range: RangeInclusive<usize>,
     /// Number of iterations to run, or `None` to continue until shutdown.
     pub iterations: Option<u32>,
 }
@@ -135,8 +142,7 @@ impl Scenario for DeleteScenario {
                 info!(iteration, total_iterations = ?self.iterations, "scenario iteration");
             }
 
-            let key_suffix = rand.rng().random::<u64>() % self.key_space;
-            let key = format!("key-{key_suffix}").into_bytes();
+            let key = random_key_bytes(rand, self.key_space, &self.key_size_range);
             ctx.delete(&key).await?;
 
             let should_yield = rand.rng().random::<bool>();
@@ -152,9 +158,10 @@ impl Scenario for DeleteScenario {
 /// Issues checked batched writes against a small key space.
 ///
 /// `BatchWriteScenario` emits one atomic batch per iteration. Each batch stages
-/// a random number of operations drawn from `batch_size_range`, and each staged
-/// operation independently becomes a `delete` with probability
-/// `delete_probability` or a `put` otherwise.
+/// a random number of operations drawn from `batch_size_range`. Every staged
+/// operation chooses a logical key ID from `key_space`, then chooses a concrete
+/// key size from `key_size_range`. `put`s also choose a value size from
+/// `value_size_range`.
 pub struct BatchWriteScenario {
     /// Stable scenario name used in logs and mismatch reports.
     pub name: &'static str,
@@ -162,6 +169,12 @@ pub struct BatchWriteScenario {
     pub rand: Rc<DbRand>,
     /// Exclusive upper bound for randomly chosen key suffixes.
     pub key_space: u64,
+    /// Inclusive range for generated key sizes in bytes.
+    ///
+    /// The lower bound must be at least `1`.
+    pub key_size_range: RangeInclusive<usize>,
+    /// Inclusive range for generated value sizes in bytes.
+    pub value_size_range: RangeInclusive<usize>,
     /// Inclusive range for the total number of staged operations per batch.
     ///
     /// The lower bound must be at least `1`. This counts both `put`s and
@@ -190,6 +203,12 @@ impl Scenario for BatchWriteScenario {
         let rand = &self.rand;
         let shutdown_token = ctx.shutdown_token();
         let mut iteration = 0u32;
+        if !(0.0..=1.0).contains(&self.delete_probability) {
+            return Err(Error::internal(format!(
+                "delete_probability must be in 0.0..=1.0: {}",
+                self.delete_probability
+            )));
+        }
 
         loop {
             if shutdown_token.is_cancelled() {
@@ -210,13 +229,11 @@ impl Scenario for BatchWriteScenario {
             let mut batch = ScenarioWriteBatch::new();
             let operation_count = rand.rng().random_range(self.batch_size_range.clone());
             for _ in 0..operation_count {
-                let key_suffix = rand.rng().random::<u64>() % self.key_space;
-                let key = format!("key-{key_suffix}").into_bytes();
+                let key = random_key_bytes(rand, self.key_space, &self.key_size_range);
                 if rand.rng().random_bool(self.delete_probability) {
                     batch.delete(&key);
                 } else {
-                    let value_suffix = rand.rng().random::<u64>();
-                    let value = format!("batch-{value_suffix}").into_bytes();
+                    let value = random_value_bytes(rand, &self.value_size_range);
                     batch.put(&key, &value);
                 }
             }
@@ -233,12 +250,41 @@ impl Scenario for BatchWriteScenario {
     }
 }
 
+fn random_key_bytes(
+    rand: &DbRand,
+    key_space: u64,
+    key_size_range: &RangeInclusive<usize>,
+) -> Vec<u8> {
+    let key_id = rand.rng().random::<u64>() % key_space;
+    let key_len = rand.rng().random_range(key_size_range.clone());
+    let mut bytes = Vec::with_capacity(key_len);
+    let mut seed = key_id;
+    while bytes.len() < key_len {
+        seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        bytes.extend_from_slice(&seed.to_le_bytes());
+    }
+    bytes.truncate(key_len);
+    bytes
+}
+
+fn random_value_bytes(rand: &DbRand, value_size_range: &RangeInclusive<usize>) -> Vec<u8> {
+    let value_len = rand.rng().random_range(value_size_range.clone());
+    let mut value = vec![0; value_len];
+    for byte in &mut value {
+        *byte = rand.rng().random();
+    }
+    value
+}
+
 /// Issues checked point reads against both memory-visible and remotely durable state.
 ///
 /// `GetScenario` validates one random-key point read per iteration against the
-/// DST recorded SQLite state. Each read randomly targets either the committed
-/// memory-visible view or the remote-durable view while other scenarios mutate
-/// SlateDB concurrently.
+/// DST recorded SQLite state. Keys are drawn from the same logical `key_space`
+/// and concrete `key_size_range` as the write scenarios. Each read randomly
+/// targets either the committed memory-visible view or the remote-durable view
+/// while other scenarios mutate SlateDB concurrently.
 pub struct GetScenario {
     /// Stable scenario name used in logs and mismatch reports.
     pub name: &'static str,
@@ -246,6 +292,10 @@ pub struct GetScenario {
     pub rand: Rc<DbRand>,
     /// Exclusive upper bound for randomly chosen key suffixes.
     pub key_space: u64,
+    /// Inclusive range for generated key sizes in bytes.
+    ///
+    /// The lower bound must be at least `1`.
+    pub key_size_range: RangeInclusive<usize>,
     /// Number of iterations to run, or `None` to continue until shutdown.
     pub iterations: Option<u32>,
 }
@@ -287,8 +337,7 @@ impl Scenario for GetScenario {
             } else {
                 DurabilityLevel::Memory
             };
-            let key_suffix = rand.rng().random::<u64>() % self.key_space;
-            let key = format!("key-{key_suffix}").into_bytes();
+            let key = random_key_bytes(rand, self.key_space, &self.key_size_range);
             let options = ReadOptions::default().with_durability_filter(durability_filter);
             let snapshot = ctx.db().snapshot().await?;
             let snapshot_seq = snapshot.seq();
