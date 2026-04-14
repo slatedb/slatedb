@@ -177,12 +177,12 @@ impl Default for SizeTieredCompactionScheduler {
 impl CompactionScheduler for SizeTieredCompactionScheduler {
     fn propose(&self, state: &CompactorStateView) -> Vec<CompactionSpec> {
         let mut compactions = Vec::new();
-        let db_state = state.manifest();
+        let db_state = state.manifest().core();
         let (l0, srs) = self.compaction_sources(db_state);
         let active_compactions = state
             .compactions()
             .into_iter()
-            .flat_map(|c| c.recent_compactions())
+            .flat_map(|c| c.core().recent_compactions())
             .filter(|c| c.active())
             .collect::<Vec<_>>();
         let conflict_checker = ConflictChecker::new(active_compactions.iter().map(|j| j.spec()));
@@ -212,12 +212,14 @@ impl CompactionScheduler for SizeTieredCompactionScheduler {
         // Logical order of sources: [L0 (newest → oldest), then SRs (highest id → 0)]
         let sources_logical_order: Vec<SourceId> = state
             .manifest()
+            .core()
             .l0
             .iter()
             .map(|view| SourceId::SstView(view.id))
             .chain(
                 state
                     .manifest()
+                    .core()
                     .compacted
                     .iter()
                     .map(|sr| SourceId::SortedRun(sr.id)),

@@ -15,12 +15,11 @@ use std::time::Duration;
 use log::{debug, info};
 
 use crate::compactions_store::{CompactionsStore, FenceableCompactions, StoredCompactions};
-use crate::compactor::CompactionsCore;
 use crate::compactor_state::{CompactionStatus, CompactorState, VersionedCompactions};
 use crate::config::{CheckpointOptions, CompactorOptions};
 use crate::error::SlateDBError;
 use crate::manifest::store::{FenceableManifest, ManifestStore, StoredManifest};
-use crate::manifest::{ManifestCore, VersionedManifest};
+use crate::manifest::VersionedManifest;
 use crate::utils::IdGenerator;
 use crate::DbRand;
 use slatedb_common::clock::SystemClock;
@@ -38,13 +37,13 @@ pub struct CompactorStateView {
 
 impl CompactorStateView {
     /// Returns a read-only view of the .compactions file if present.
-    pub fn compactions(&self) -> Option<&CompactionsCore> {
-        self.compactions.as_ref().map(|c| &c.compactions.core)
+    pub fn compactions(&self) -> Option<&VersionedCompactions> {
+        self.compactions.as_ref()
     }
 
     /// Returns a read-only view of the .manifest file.
-    pub fn manifest(&self) -> &ManifestCore {
-        self.manifest.core()
+    pub fn manifest(&self) -> &VersionedManifest {
+        &self.manifest
     }
 }
 

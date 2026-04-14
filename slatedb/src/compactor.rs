@@ -176,7 +176,7 @@ pub trait CompactionScheduler: Send + Sync {
         match request {
             CompactionRequest::Spec(spec) => Ok(vec![spec.clone()]),
             CompactionRequest::Full => {
-                let manifest = state.manifest();
+                let manifest = state.manifest().core();
                 let sources = manifest
                     .compacted
                     .iter()
@@ -1201,9 +1201,10 @@ mod tests {
         let scheduler = Arc::new(OnDemandCompactionSchedulerSupplier::new(Arc::new(
             |state| {
                 // compact when there are at least 2 SSTs in L0 (one for key 'a' and one for key 'b')
-                state.manifest().l0.len() == 2 ||
+                state.manifest().core().l0.len() == 2 ||
                 // or when there is one SST in L0 and one in L1 (one for delete key 'a' and one for compacted key 'a'+'b')
-                (state.manifest().l0.len() == 1 && state.manifest().compacted.len() == 1)
+                (state.manifest().core().l0.len() == 1
+                    && state.manifest().core().compacted.len() == 1)
             },
         )));
 
@@ -1309,9 +1310,10 @@ mod tests {
         let scheduler = Arc::new(OnDemandCompactionSchedulerSupplier::new(Arc::new(
             |state| {
                 // compact when there are at least 2 SSTs in L0
-                state.manifest().l0.len() == 2 ||
+                state.manifest().core().l0.len() == 2 ||
                 // or when there is one SST in L0 and one in L1
-                (state.manifest().l0.len() == 1 && state.manifest().compacted.len() == 1)
+                (state.manifest().core().l0.len() == 1
+                    && state.manifest().core().compacted.len() == 1)
             },
         )));
 
@@ -1419,7 +1421,7 @@ mod tests {
         let os = Arc::new(InMemory::new());
         let system_clock = Arc::new(MockSystemClock::new());
         let compaction_scheduler = Arc::new(OnDemandCompactionSchedulerSupplier::new(Arc::new(
-            |state| state.manifest().l0.len() >= 2,
+            |state| state.manifest().core().l0.len() >= 2,
         )));
         let options = db_options(None);
 
@@ -1552,7 +1554,7 @@ mod tests {
         let os = Arc::new(InMemory::new());
         let system_clock = Arc::new(MockSystemClock::new());
         let compaction_scheduler = Arc::new(OnDemandCompactionSchedulerSupplier::new(Arc::new(
-            |state| state.manifest().l0.len() >= 2,
+            |state| state.manifest().core().l0.len() >= 2,
         )));
         let metrics_recorder = Arc::new(DefaultMetricsRecorder::new());
 
@@ -1625,7 +1627,7 @@ mod tests {
         let os = Arc::new(InMemory::new());
         let system_clock = Arc::new(MockSystemClock::new());
         let compaction_scheduler = Arc::new(OnDemandCompactionSchedulerSupplier::new(Arc::new(
-            |state| !state.manifest().l0.is_empty(),
+            |state| !state.manifest().core().l0.is_empty(),
         )));
         let options = db_options(None);
 
@@ -1760,7 +1762,7 @@ mod tests {
         let os = Arc::new(InMemory::new());
         let system_clock = Arc::new(MockSystemClock::new());
         let compaction_scheduler = Arc::new(OnDemandCompactionSchedulerSupplier::new(Arc::new(
-            |state| state.manifest().l0.len() >= 2,
+            |state| state.manifest().core().l0.len() >= 2,
         )));
         let options = db_options(None);
 
@@ -1877,7 +1879,7 @@ mod tests {
         let os = Arc::new(InMemory::new());
         let system_clock = Arc::new(MockSystemClock::new());
         let compaction_scheduler = Arc::new(OnDemandCompactionSchedulerSupplier::new(Arc::new(
-            |state| state.manifest().l0.len() >= 3,
+            |state| state.manifest().core().l0.len() >= 3,
         )));
         let options = db_options(None);
 
@@ -2010,7 +2012,7 @@ mod tests {
         let insert_clock = Arc::new(MockSystemClock::new());
 
         let scheduler = Arc::new(OnDemandCompactionSchedulerSupplier::new(Arc::new(
-            |state| state.manifest().l0.len() >= 2,
+            |state| state.manifest().core().l0.len() >= 2,
         )));
 
         let mut options = db_options(None);
@@ -2097,7 +2099,7 @@ mod tests {
         let os = Arc::new(InMemory::new());
         let system_clock = Arc::new(MockSystemClock::new());
         let compaction_scheduler = Arc::new(OnDemandCompactionSchedulerSupplier::new(Arc::new(
-            |state| state.manifest().l0.len() >= 2,
+            |state| state.manifest().core().l0.len() >= 2,
         )));
         let options = db_options(None);
 
@@ -2199,7 +2201,7 @@ mod tests {
         let os = Arc::new(InMemory::new());
         let system_clock = Arc::new(MockSystemClock::new());
         let compaction_scheduler = Arc::new(OnDemandCompactionSchedulerSupplier::new(Arc::new(
-            |state| state.manifest().l0.len() >= 2,
+            |state| state.manifest().core().l0.len() >= 2,
         )));
         let options = db_options(None);
 
@@ -2331,7 +2333,7 @@ mod tests {
         let os = Arc::new(InMemory::new());
         let system_clock = Arc::new(MockSystemClock::new());
         let compaction_scheduler = Arc::new(OnDemandCompactionSchedulerSupplier::new(Arc::new(
-            |state| state.manifest().l0.len() >= 2,
+            |state| state.manifest().core().l0.len() >= 2,
         )));
         let options = db_options(None);
 

@@ -348,6 +348,11 @@ impl VersionedCompactions {
     pub(crate) fn from_compactions(id: u64, compactions: Compactions) -> Self {
         Self { id, compactions }
     }
+
+    /// Returns the compactions contents at this version.
+    pub fn core(&self) -> &CompactionsCore {
+        &self.compactions.core
+    }
 }
 
 /// Container for compactions tracked by the compactor alongside its epoch.
