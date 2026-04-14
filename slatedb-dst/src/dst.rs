@@ -501,16 +501,6 @@ impl Dst {
         }
     }
 
-    /// Returns the shared mock clock for this DST runner.
-    pub fn clock(&self) -> Arc<MockSystemClock> {
-        self.shared.clock.clone()
-    }
-
-    /// Returns a point-in-time snapshot of the recorded SQLite state.
-    pub fn as_of(&self, seq: u64) -> StateSnapshot {
-        StateSnapshot::new(self.shared.state.clone(), seq)
-    }
-
     /// Runs the provided scenarios concurrently to completion.
     ///
     /// Finite scenarios are allowed to finish normally. Once all finite
