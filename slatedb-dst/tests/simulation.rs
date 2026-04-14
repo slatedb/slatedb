@@ -156,6 +156,7 @@ fn test_dst_is_deterministic(
                 rand_for_run,
                 simulation_scenarios,
                 None,
+                None,
             )
             .await
             {
@@ -322,6 +323,7 @@ fn test_dst_nightly() -> Result<(), Error> {
                     rand,
                     simulation_scenarios,
                     Some(NIGHTLY_WALL_CLOCK),
+                    None,
                 )
                 .await
                 .map(|_| ())

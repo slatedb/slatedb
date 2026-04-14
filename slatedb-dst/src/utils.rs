@@ -83,6 +83,7 @@ pub async fn run_simulation(
     rand: Rc<DbRand>,
     mut simulation_scenarios: Vec<Box<dyn Scenario>>,
     wall_clock_time: Option<Duration>,
+    sqlite_path: Option<&'static str>,
 ) -> Result<(), Error> {
     let settings = build_settings(&rand);
     let db_seed = rand.rng().random::<u64>();
@@ -93,7 +94,7 @@ pub async fn run_simulation(
         settings.clone(),
     )
     .await?;
-    let runner = ScenarioRunner::new(db, system_clock.clone(), settings);
+    let runner = ScenarioRunner::new(db, system_clock.clone(), settings, sqlite_path);
 
     if let Some(duration) = wall_clock_time {
         simulation_scenarios.push(Box::new(TimedShutdownScenario {

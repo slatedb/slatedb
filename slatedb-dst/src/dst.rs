@@ -450,26 +450,18 @@ pub struct ScenarioRunner {
 }
 
 impl ScenarioRunner {
-    /// Creates a DST runner backed by an in-memory SQLite state database.
-    ///
-    /// The supplied `db`, `clock`, and `settings` must all describe the same
-    /// SlateDB instance under test.
-    pub fn new(db: Db, clock: Arc<MockSystemClock>, settings: Settings) -> Self {
-        Self::new_with_state_path(db, clock, settings, None)
-    }
-
     /// Creates a DST runner with an optional on-disk SQLite state database.
     ///
     /// When `state_path` is `None`, the state lives in memory. Supplying a
     /// path is useful when you want to inspect the SQLite database after a
     /// failed run.
-    pub fn new_with_state_path(
+    pub fn new(
         db: Db,
         clock: Arc<MockSystemClock>,
         settings: Settings,
-        state_path: Option<&'static str>,
+        sqlite_path: Option<&'static str>,
     ) -> Self {
-        let state = Arc::new(Mutex::new(SQLiteState::new(state_path)));
+        let state = Arc::new(Mutex::new(SQLiteState::new(sqlite_path)));
         let (recorded_committed_tx, _) = watch::channel(0);
         let shared = ScenarioShared {
             db,
