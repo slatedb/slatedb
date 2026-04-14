@@ -504,6 +504,7 @@ impl ViewScanOptions {
             read_ahead_bytes: self.read_ahead_bytes,
             cache_blocks: self.cache_blocks,
             max_fetch_tasks: self.max_fetch_tasks,
+            order: IterationOrder::Ascending,
         }
     }
 }
