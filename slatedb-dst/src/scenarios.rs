@@ -567,6 +567,10 @@ impl Scenario for TimedShutdownScenario {
         self.name
     }
 
+    fn runs_forever(&self) -> bool {
+        true
+    }
+
     #[tracing::instrument(skip_all, fields(scenario = self.name()))]
     async fn run(&self, ctx: ScenarioContext) -> Result<(), Error> {
         let shutdown_token = ctx.shutdown_token();
