@@ -965,8 +965,8 @@ mod tests {
             .expect("expected compactions");
         let expected_latest = compactions_store.read_compactions(2).await.unwrap();
         assert_eq!(latest.id, 2);
-        assert_eq!(latest.compactor_epoch, 9);
-        assert_eq!(latest.compactions, expected_latest.core);
+        assert_eq!(latest.compactions.compactor_epoch, 9);
+        assert_eq!(latest.compactions, expected_latest);
 
         let first = admin
             .read_compactions(Some(1))
@@ -975,8 +975,8 @@ mod tests {
             .expect("expected compactions");
         let expected_first = compactions_store.read_compactions(1).await.unwrap();
         assert_eq!(first.id, 1);
-        assert_eq!(first.compactor_epoch, 7);
-        assert_eq!(first.compactions, expected_first.core);
+        assert_eq!(first.compactions.compactor_epoch, 7);
+        assert_eq!(first.compactions, expected_first);
     }
 
     #[tokio::test]
@@ -1011,14 +1011,14 @@ mod tests {
         assert_eq!(
             listed
                 .iter()
-                .map(|compactions| compactions.compactions.recent_compactions().count())
+                .map(|compactions| compactions.compactions.core.recent_compactions().count())
                 .collect::<Vec<_>>(),
             vec![0, 1, 2]
         );
         assert_eq!(
             listed
                 .iter()
-                .map(|compactions| compactions.compactor_epoch)
+                .map(|compactions| compactions.compactions.compactor_epoch)
                 .collect::<Vec<_>>(),
             vec![2, 4, 6]
         );
