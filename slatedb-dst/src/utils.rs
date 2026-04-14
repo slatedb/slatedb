@@ -218,23 +218,6 @@ pub async fn build_scenario_db(
         .await
 }
 
-/// Builds a [`ScenarioRunner`], runs the supplied scenarios, and returns the
-/// runner for
-/// follow-up inspection and verification.
-pub async fn run_scenarios<I>(
-    db: Db,
-    system_clock: Arc<MockSystemClock>,
-    settings: Settings,
-    scenarios: I,
-) -> Result<ScenarioRunner, Error>
-where
-    I: IntoIterator<Item = Box<dyn Scenario>>,
-{
-    let runner = ScenarioRunner::new(db, system_clock, settings);
-    runner.run_scenarios(scenarios).await?;
-    Ok(runner)
-}
-
 /// Tokio's default Runtime is non-deterministic even if a single thread is used.
 /// Certain methods such as [tokio::select] pick a branch to poll at random (see
 /// [tokio::select!](https://docs.rs/tokio/latest/tokio/macro.select.html#fairness)).
