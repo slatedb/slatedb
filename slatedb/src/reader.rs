@@ -1,4 +1,4 @@
-use crate::batch::{WriteBatch, WriteBatchIterator};
+use crate::batch::WriteBatchIterator;
 use crate::bytes_range::BytesRange;
 use crate::clock::MonotonicClock;
 use crate::config::{DurabilityLevel, ReadOptions, ScanOptions};
@@ -109,13 +109,10 @@ impl Reader {
         &self,
         range: &BytesRange,
         db_state: &(dyn DbStateReader + Sync),
-        write_batch: Option<WriteBatch>,
+        write_batch_iter: Option<WriteBatchIterator>,
         sst_iter_options: SstIteratorOptions,
         point_lookup_stats: Option<DbStats>,
     ) -> Result<IteratorSources, SlateDBError> {
-        let write_batch_iter = write_batch
-            .map(|batch| WriteBatchIterator::new(batch, range.clone(), sst_iter_options.order));
-
         let mut memtables = VecDeque::new();
         memtables.push_back(db_state.memtable());
         for memtable in db_state.imm_memtable() {
@@ -300,7 +297,7 @@ impl Reader {
         key: K,
         options: &ReadOptions,
         db_state: &(dyn DbStateReader + Sync + Send),
-        write_batch: Option<WriteBatch>,
+        write_batch_iter: Option<WriteBatchIterator>,
         max_seq: Option<u64>,
     ) -> Result<Option<KeyValue>, SlateDBError> {
         self.db_stats.get_requests.increment(1);
@@ -323,7 +320,7 @@ impl Reader {
             .build_iterator_sources(
                 &range,
                 db_state,
-                write_batch,
+                write_batch_iter,
                 sst_iter_options,
                 Some(self.db_stats.clone()),
             )
@@ -379,7 +376,7 @@ impl Reader {
         range: BytesRange,
         options: &ScanOptions,
         db_state: &(dyn DbStateReader + Sync),
-        write_batch: Option<WriteBatch>,
+        write_batch_iter: Option<WriteBatchIterator>,
         max_seq: Option<u64>,
         range_tracker: Option<Arc<DbIteratorRangeTracker>>,
     ) -> Result<DbIterator, SlateDBError> {
@@ -401,7 +398,7 @@ impl Reader {
             l0_iters,
             sr_iters,
         } = self
-            .build_iterator_sources(&range, db_state, write_batch, sst_iter_options, None)
+            .build_iterator_sources(&range, db_state, write_batch_iter, sst_iter_options, None)
             .await?;
 
         DbIterator::new(

@@ -356,7 +356,7 @@ pub(crate) struct WriteBatchIterator {
 
 impl WriteBatchIterator {
     pub(crate) fn new(
-        batch: WriteBatch,
+        batch: &WriteBatch,
         range: impl RangeBounds<Bytes>,
         ordering: IterationOrder,
     ) -> Self {
