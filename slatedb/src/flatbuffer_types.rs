@@ -286,6 +286,22 @@ impl FlatBufferManifestCodec {
                 .expect("Invalid encoding of sequence tracker in manifest."),
             None => SequenceTracker::new(),
         };
+        let external_dbs = manifest
+            .external_dbs()
+            .map(|external_dbs| {
+                external_dbs
+                    .iter()
+                    .map(|db| ExternalDb {
+                        path: db.path().to_string(),
+                        source_checkpoint_id: Self::decode_uuid(db.source_checkpoint_id()),
+                        final_checkpoint_id: db
+                            .final_checkpoint_id()
+                            .map(|id| Self::decode_uuid(id)),
+                        sst_ids: db.sst_ids().iter().map(|id| Compacted(id.ulid())).collect(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         let core = ManifestCore {
             initialized: manifest.initialized(),
             // In V1, view IDs are SST IDs, so both fields are the same.
@@ -293,6 +309,7 @@ impl FlatBufferManifestCodec {
             last_compacted_l0_sst_id: l0_last_compacted,
             l0,
             compacted,
+            external_dbs,
             next_wal_sst_id: manifest.wal_id_last_seen() + 1,
             replay_after_wal_id: manifest.replay_after_wal_id(),
             last_l0_seq: manifest.last_l0_seq(),
@@ -302,20 +319,7 @@ impl FlatBufferManifestCodec {
             recent_snapshot_min_seq: manifest.recent_snapshot_min_seq(),
             sequence_tracker,
         };
-        let external_dbs = manifest.external_dbs().map(|external_dbs| {
-            external_dbs
-                .iter()
-                .map(|db| ExternalDb {
-                    path: db.path().to_string(),
-                    source_checkpoint_id: Self::decode_uuid(db.source_checkpoint_id()),
-                    final_checkpoint_id: db.final_checkpoint_id().map(|id| Self::decode_uuid(id)),
-                    sst_ids: db.sst_ids().iter().map(|id| Compacted(id.ulid())).collect(),
-                })
-                .collect()
-        });
-
         Ok(Manifest {
-            external_dbs: external_dbs.unwrap_or_default(),
             core,
             writer_epoch: manifest.writer_epoch(),
             compactor_epoch: manifest.compactor_epoch(),
@@ -400,6 +404,22 @@ impl FlatBufferManifestCodec {
                 .expect("Invalid encoding of sequence tracker in manifest."),
             None => SequenceTracker::new(),
         };
+        let external_dbs = manifest
+            .external_dbs()
+            .map(|external_dbs| {
+                external_dbs
+                    .iter()
+                    .map(|db| ExternalDb {
+                        path: db.path().to_string(),
+                        source_checkpoint_id: Self::decode_uuid(db.source_checkpoint_id()),
+                        final_checkpoint_id: db
+                            .final_checkpoint_id()
+                            .map(|id| Self::decode_uuid(id)),
+                        sst_ids: db.sst_ids().iter().map(|id| Compacted(id.ulid())).collect(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         let core = ManifestCore {
             initialized: manifest.initialized(),
             last_compacted_l0_sst_view_id: l0_last_compacted,
@@ -407,6 +427,7 @@ impl FlatBufferManifestCodec {
             last_compacted_l0_sst_id: None,
             l0,
             compacted,
+            external_dbs,
             next_wal_sst_id: manifest.wal_id_last_seen() + 1,
             replay_after_wal_id: manifest.replay_after_wal_id(),
             last_l0_seq: manifest.last_l0_seq(),
@@ -416,20 +437,7 @@ impl FlatBufferManifestCodec {
             recent_snapshot_min_seq: manifest.recent_snapshot_min_seq(),
             sequence_tracker,
         };
-        let external_dbs = manifest.external_dbs().map(|external_dbs| {
-            external_dbs
-                .iter()
-                .map(|db| ExternalDb {
-                    path: db.path().to_string(),
-                    source_checkpoint_id: Self::decode_uuid(db.source_checkpoint_id()),
-                    final_checkpoint_id: db.final_checkpoint_id().map(|id| Self::decode_uuid(id)),
-                    sst_ids: db.sst_ids().iter().map(|id| Compacted(id.ulid())).collect(),
-                })
-                .collect()
-        });
-
         Ok(Manifest {
-            external_dbs: external_dbs.unwrap_or_default(),
             core,
             writer_epoch: manifest.writer_epoch(),
             compactor_epoch: manifest.compactor_epoch(),
@@ -978,10 +986,11 @@ impl<'b> DbFlatBufferBuilder<'b> {
         }
         let compacted = self.add_sorted_runs_v2(&core.compacted);
         let checkpoints = self.add_checkpoints(&core.checkpoints);
-        let external_dbs = if manifest.external_dbs.is_empty() {
+        let external_dbs = if core.external_dbs.is_empty() {
             None
         } else {
             let external_dbs: Vec<WIPOffset<root_generated::ExternalDb>> = manifest
+                .core
                 .external_dbs
                 .iter()
                 .map(|external_db| {
@@ -1047,10 +1056,11 @@ impl<'b> DbFlatBufferBuilder<'b> {
         }
         let compacted = self.add_sorted_runs_v1(&core.compacted);
         let checkpoints = self.add_checkpoints(&core.checkpoints);
-        let external_dbs = if manifest.external_dbs.is_empty() {
+        let external_dbs = if core.external_dbs.is_empty() {
             None
         } else {
             let external_dbs: Vec<WIPOffset<root_generated::ExternalDb>> = manifest
+                .core
                 .external_dbs
                 .iter()
                 .map(|external_db| {
@@ -1258,7 +1268,7 @@ mod tests {
     fn test_should_encode_decode_external_dbs() {
         // given:
         let mut manifest = Manifest::initial(ManifestCore::new());
-        manifest.external_dbs = vec![
+        manifest.core.external_dbs = vec![
             ExternalDb {
                 path: "/path/to/external/first".to_string(),
                 source_checkpoint_id: uuid::Uuid::new_v4(),
@@ -1993,7 +2003,7 @@ mod tests {
     #[test]
     fn test_should_roundtrip_v1_write_with_external_dbs() {
         let mut manifest = Manifest::initial(ManifestCore::new());
-        manifest.external_dbs = vec![ExternalDb {
+        manifest.core.external_dbs = vec![ExternalDb {
             path: "/path/to/external".to_string(),
             source_checkpoint_id: uuid::Uuid::new_v4(),
             final_checkpoint_id: Some(uuid::Uuid::new_v4()),

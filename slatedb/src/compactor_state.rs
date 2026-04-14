@@ -577,6 +577,7 @@ impl CompactorState {
             last_compacted_l0_sst_id: my_db_state.last_compacted_l0_sst_id,
             l0: merged_l0s,
             compacted: my_db_state.compacted.clone(),
+            external_dbs: remote_manifest.value.core.external_dbs.clone(),
             next_wal_sst_id: remote_manifest.value.core.next_wal_sst_id,
             replay_after_wal_id: remote_manifest.value.core.replay_after_wal_id,
             last_l0_clock_tick: remote_manifest.value.core.last_l0_clock_tick,

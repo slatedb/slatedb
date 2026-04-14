@@ -601,6 +601,7 @@ impl<'a> StateModifier<'a> {
             last_compacted_l0_sst_id: remote_manifest.value.core.last_compacted_l0_sst_id,
             l0: new_l0,
             compacted: remote_manifest.value.core.compacted,
+            external_dbs: remote_manifest.value.core.external_dbs,
             next_wal_sst_id: my_db_state.next_wal_sst_id,
             replay_after_wal_id: my_db_state.replay_after_wal_id,
             last_l0_clock_tick: my_db_state.last_l0_clock_tick,

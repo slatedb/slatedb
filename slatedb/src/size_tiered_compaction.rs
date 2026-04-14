@@ -909,6 +909,7 @@ mod tests {
             last_compacted_l0_sst_id: None,
             l0,
             compacted: srs,
+            external_dbs: vec![],
             next_wal_sst_id: 0,
             replay_after_wal_id: 0,
             last_l0_seq: 0,

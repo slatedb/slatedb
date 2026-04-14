@@ -43,6 +43,9 @@ pub struct ManifestCore {
     /// A list of the sorted runs that are valid to read in the `compacted` folder.
     pub compacted: Vec<SortedRun>,
 
+    /// A list of external databases that own SSTs referenced by this manifest.
+    pub external_dbs: Vec<ExternalDb>,
+
     /// The next WAL SST ID to be assigned when creating a new WAL SST. The manifest FlatBuffer
     /// contains `wal_id_last_seen`, which is always one less than this value.
     pub next_wal_sst_id: u64,
@@ -87,6 +90,7 @@ impl ManifestCore {
             last_compacted_l0_sst_id: None,
             l0: VecDeque::new(),
             compacted: vec![],
+            external_dbs: vec![],
             next_wal_sst_id: 1,
             replay_after_wal_id: 0,
             last_l0_clock_tick: i64::MIN,
@@ -107,6 +111,7 @@ impl ManifestCore {
     pub(crate) fn init_clone_db(&self) -> ManifestCore {
         let mut clone = self.clone();
         clone.initialized = false;
+        clone.external_dbs.clear();
         clone.checkpoints.clear();
         clone
     }
@@ -132,8 +137,6 @@ impl ManifestCore {
 
 #[derive(Clone, Serialize, PartialEq, Debug)]
 pub struct Manifest {
-    // todo: try to make this writable only from module
-    pub(crate) external_dbs: Vec<ExternalDb>,
     pub(crate) core: ManifestCore,
     // todo: try to make this writable only from module
     pub(crate) writer_epoch: u64,
@@ -164,7 +167,6 @@ impl From<DirtyObject<Manifest>> for VersionedManifest {
 impl Manifest {
     pub(crate) fn initial(core: ManifestCore) -> Self {
         Self {
-            external_dbs: vec![],
             core,
             writer_epoch: 0,
             compactor_epoch: 0,
@@ -183,7 +185,7 @@ impl Manifest {
         let mut parent_external_sst_ids = HashSet::<SsTableId>::new();
         let mut clone_external_dbs = vec![];
 
-        for parent_external_db in &parent_manifest.external_dbs {
+        for parent_external_db in &parent_manifest.core.external_dbs {
             parent_external_sst_ids.extend(&parent_external_db.sst_ids);
             clone_external_dbs.push(ExternalDb {
                 path: parent_external_db.path.clone(),
@@ -208,10 +210,11 @@ impl Manifest {
             final_checkpoint_id: Some(rand.rng().gen_uuid()),
             sst_ids: parent_owned_sst_ids,
         });
+        let mut core = parent_manifest.core.init_clone_db();
+        core.external_dbs = clone_external_dbs;
 
         Self {
-            external_dbs: clone_external_dbs,
-            core: parent_manifest.core.init_clone_db(),
+            core,
             writer_epoch: parent_manifest.writer_epoch,
             compactor_epoch: parent_manifest.compactor_epoch,
         }
@@ -241,6 +244,7 @@ impl Manifest {
             .chain(projected.core.l0.iter().map(|v| v.sst.id))
             .collect();
         projected
+            .core
             .external_dbs
             .retain(|e| e.sst_ids.iter().any(|id| used_sst_ids.contains(id)));
         projected
@@ -299,12 +303,12 @@ impl Manifest {
             }
 
             // Now we can zip the manifests together
-            let mut external_dbs = vec![];
             let mut core = ManifestCore::new();
 
             for (manifest, _) in ranges {
                 // First, we need to add all the external dbs
-                external_dbs.extend_from_slice(&manifest.external_dbs);
+                core.external_dbs
+                    .extend_from_slice(&manifest.core.external_dbs);
                 // Then, we can add all the l0 ssts
                 for sst in &manifest.core.l0 {
                     core.l0.push_back(sst.clone());
@@ -321,7 +325,6 @@ impl Manifest {
             }
 
             Self {
-                external_dbs,
                 core,
                 writer_epoch: 0,
                 compactor_epoch: 0,
@@ -370,7 +373,7 @@ impl Manifest {
     /// Returns a map from SST ID to the external DB path for all external SSTs.
     pub(crate) fn external_ssts(&self) -> HashMap<SsTableId, object_store::path::Path> {
         let mut external_ssts = HashMap::new();
-        for external_db in &self.external_dbs {
+        for external_db in &self.core.external_dbs {
             for id in &external_db.sst_ids {
                 external_ssts.insert(*id, external_db.path.clone().into());
             }
@@ -443,13 +446,18 @@ mod tests {
         let clone_manifest = clone_stored_manifest.manifest();
 
         // There should be single external db, since parent is not deeply nested.
-        assert_eq!(clone_manifest.external_dbs.len(), 1);
-        assert_eq!(clone_manifest.external_dbs[0].path, parent_path.to_string());
+        assert_eq!(clone_manifest.core.external_dbs.len(), 1);
         assert_eq!(
-            clone_manifest.external_dbs[0].source_checkpoint_id,
+            clone_manifest.core.external_dbs[0].path,
+            parent_path.to_string()
+        );
+        assert_eq!(
+            clone_manifest.core.external_dbs[0].source_checkpoint_id,
             checkpoint.id
         );
-        assert!(clone_manifest.external_dbs[0].final_checkpoint_id.is_some());
+        assert!(clone_manifest.core.external_dbs[0]
+            .final_checkpoint_id
+            .is_some());
 
         // The clone manifest should not be initialized
         assert!(!clone_manifest.core.initialized);
@@ -982,7 +990,7 @@ mod tests {
 
         let mut manifest = Manifest::initial(core);
 
-        manifest.external_dbs = vec![
+        manifest.core.external_dbs = vec![
             ExternalDb {
                 path: "/path/to/db1".to_string(),
                 source_checkpoint_id: Uuid::new_v4(),
@@ -997,12 +1005,12 @@ mod tests {
             },
         ];
 
-        assert_eq!(manifest.external_dbs.len(), 2);
+        assert_eq!(manifest.core.external_dbs.len(), 2);
 
         let projected = Manifest::projected(&manifest, projection_range);
 
-        assert_eq!(projected.external_dbs.len(), 1);
-        assert_eq!(projected.external_dbs[0].path, "/path/to/db1");
+        assert_eq!(projected.core.external_dbs.len(), 1);
+        assert_eq!(projected.core.external_dbs[0].path, "/path/to/db1");
     }
 
     fn create_sst_view(sst_id: SsTableId, first_entry_bytes: &'static [u8; 1]) -> SsTableView {
