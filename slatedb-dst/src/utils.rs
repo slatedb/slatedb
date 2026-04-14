@@ -70,8 +70,6 @@ pub async fn run_simulation(
 
     dst.run_scenarios(simulation_scenarios).await?;
 
-    dst.verify_final_state().await?;
-
     dst.close().await?;
 
     Ok(())

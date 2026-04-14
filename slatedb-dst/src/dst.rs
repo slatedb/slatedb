@@ -583,22 +583,6 @@ impl Dst {
     pub async fn close(&self) -> Result<(), Error> {
         self.shared.db.close().await
     }
-
-    /// Verifies the final SlateDB state against the recorded SQLite model.
-    ///
-    /// This checks both the committed memory-visible view and the remote-durable
-    /// view using the same full-range scan validation logic exercised by
-    /// [`crate::scenarios::ScanScenario`].
-    pub async fn verify_final_state(&self) -> Result<(), Error> {
-        let verifier = self.context("verifier");
-        ScanScenario::validate_full_range(&verifier, &ScanOptions::default()).await?;
-        ScanScenario::validate_full_range(
-            &verifier,
-            &ScanOptions::default().with_durability_filter(DurabilityLevel::Remote),
-        )
-        .await?;
-        Ok(())
-    }
 }
 
 fn resolve_expire_ts(

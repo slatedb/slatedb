@@ -18,7 +18,7 @@ use crate::{Scenario, ScenarioContext, ScenarioWriteBatch};
 use async_trait::async_trait;
 use rand::Rng;
 use slatedb::config::{DurabilityLevel, PutOptions, ReadOptions, ScanOptions};
-use slatedb::{DbRand, Error, IterationOrder};
+use slatedb::{DbRand, DbSnapshot, Error, IterationOrder, KeyValue};
 use tracing::info;
 
 /// Issues checked single-key puts against a small key space.
@@ -263,7 +263,18 @@ impl Scenario for GetScenario {
             let key_suffix = rand.rng().random::<u64>() % self.key_space;
             let key = format!("key-{key_suffix}").into_bytes();
             let options = ReadOptions::default().with_durability_filter(durability_filter);
-            Self::validate_key(&ctx, &key, &options).await?;
+            let snapshot = ctx.db().snapshot().await?;
+            let snapshot_seq = snapshot.seq();
+            match options.durability_filter {
+                DurabilityLevel::Remote => {
+                    Self::validate_remote_read(&ctx, &snapshot, snapshot_seq, &key, &options)
+                        .await?;
+                }
+                _ => {
+                    Self::validate_committed_read(&ctx, &snapshot, snapshot_seq, &key, &options)
+                        .await?;
+                }
+            }
 
             tokio::task::yield_now().await;
         }
@@ -273,46 +284,13 @@ impl Scenario for GetScenario {
 }
 
 impl GetScenario {
-    async fn validate_key(
+    async fn validate_committed_read(
         ctx: &ScenarioContext,
+        snapshot: &DbSnapshot,
+        snapshot_seq: u64,
         key: &[u8],
         options: &ReadOptions,
     ) -> Result<(), Error> {
-        let key = key.to_vec();
-        let snapshot = ctx.db().snapshot().await?;
-        let snapshot_seq = snapshot.seq();
-
-        if matches!(options.durability_filter, DurabilityLevel::Remote) {
-            loop {
-                let frontier_before = snapshot_seq.min(ctx.db().status().durable_seq);
-                let actual = snapshot.get_key_value_with_options(&key, options).await?;
-                let frontier_after = snapshot_seq.min(ctx.db().status().durable_seq);
-                if frontier_before != frontier_after {
-                    tokio::task::yield_now().await;
-                    continue;
-                }
-
-                if !ctx.wait_until_committed(frontier_after).await? {
-                    return Ok(());
-                }
-
-                let expected = ctx
-                    .as_of(frontier_after)
-                    .get_key_value_with_options(&key, options)?;
-                assert_eq!(
-                    actual,
-                    expected,
-                    "validate_get mismatch: scenario={} key={:?} options={:?} snapshot_seq={} frontier={}",
-                    ctx.scenario(),
-                    key,
-                    options,
-                    snapshot_seq,
-                    frontier_after
-                );
-                return Ok(());
-            }
-        }
-
         let actual = snapshot.get_key_value_with_options(&key, options).await?;
         if !ctx.wait_until_committed(snapshot_seq).await? {
             return Ok(());
@@ -333,6 +311,43 @@ impl GetScenario {
         );
 
         Ok(())
+    }
+
+    async fn validate_remote_read(
+        ctx: &ScenarioContext,
+        snapshot: &DbSnapshot,
+        snapshot_seq: u64,
+        key: &[u8],
+        options: &ReadOptions,
+    ) -> Result<(), Error> {
+        loop {
+            let frontier_before = snapshot_seq.min(ctx.db().status().durable_seq);
+            let actual = snapshot.get_key_value_with_options(key, options).await?;
+            let frontier_after = snapshot_seq.min(ctx.db().status().durable_seq);
+            if frontier_before != frontier_after {
+                tokio::task::yield_now().await;
+                continue;
+            }
+
+            if !ctx.wait_until_committed(frontier_after).await? {
+                return Ok(());
+            }
+
+            let expected = ctx
+                .as_of(frontier_after)
+                .get_key_value_with_options(key, options)?;
+            assert_eq!(
+                actual,
+                expected,
+                "validate_get mismatch: scenario={} key={:?} options={:?} snapshot_seq={} frontier={}",
+                ctx.scenario(),
+                key,
+                options,
+                snapshot_seq,
+                frontier_after
+            );
+            return Ok(());
+        }
     }
 }
 
@@ -408,49 +423,23 @@ impl ScanScenario {
         let snapshot = ctx.db().snapshot().await?;
         let snapshot_seq = snapshot.seq();
 
-        if matches!(options.durability_filter, DurabilityLevel::Remote) {
-            loop {
-                let frontier_before = snapshot_seq.min(ctx.db().status().durable_seq);
-                let mut actual_iter = snapshot
-                    .scan_with_options::<Vec<u8>, _>(.., options)
-                    .await?;
-                let mut actual = Vec::new();
-                while let Some(kv) = actual_iter.next().await? {
-                    actual.push(kv);
-                }
-                let frontier_after = snapshot_seq.min(ctx.db().status().durable_seq);
-                if frontier_before != frontier_after {
-                    tokio::task::yield_now().await;
-                    continue;
-                }
-
-                if !ctx.wait_until_committed(frontier_after).await? {
-                    return Ok(());
-                }
-
-                let expected = ctx
-                    .as_of(frontier_after)
-                    .scan_with_options::<Vec<u8>, _>(.., options)?;
-                assert_eq!(
-                    actual,
-                    expected,
-                    "validate_scan mismatch: scenario={} range=.. options={:?} snapshot_seq={} frontier={}",
-                    ctx.scenario(),
-                    options,
-                    snapshot_seq,
-                    frontier_after
-                );
-                return Ok(());
+        match options.durability_filter {
+            DurabilityLevel::Remote => {
+                return Self::validate_remote_read(ctx, &snapshot, snapshot_seq, options).await;
             }
+            _ => {}
         }
 
-        let mut actual_iter = snapshot
-            .scan_with_options::<Vec<u8>, _>(.., options)
-            .await?;
-        let mut actual = Vec::new();
-        while let Some(kv) = actual_iter.next().await? {
-            actual.push(kv);
-        }
+        Self::validate_committed_read(ctx, &snapshot, snapshot_seq, options).await
+    }
+
+    async fn validate_committed_read(
+        ctx: &ScenarioContext,
+        snapshot: &DbSnapshot,
+        snapshot_seq: u64,
+        options: &ScanOptions,
+    ) -> Result<(), Error> {
+        let actual = Self::collect_full_range_scan(snapshot, options).await?;
         if !ctx.wait_until_committed(snapshot_seq).await? {
             return Ok(());
         }
@@ -469,6 +458,55 @@ impl ScanScenario {
         );
 
         Ok(())
+    }
+
+    async fn validate_remote_read(
+        ctx: &ScenarioContext,
+        snapshot: &DbSnapshot,
+        snapshot_seq: u64,
+        options: &ScanOptions,
+    ) -> Result<(), Error> {
+        loop {
+            let frontier_before = snapshot_seq.min(ctx.db().status().durable_seq);
+            let actual = Self::collect_full_range_scan(snapshot, options).await?;
+            let frontier_after = snapshot_seq.min(ctx.db().status().durable_seq);
+            if frontier_before != frontier_after {
+                tokio::task::yield_now().await;
+                continue;
+            }
+
+            if !ctx.wait_until_committed(frontier_after).await? {
+                return Ok(());
+            }
+
+            let expected = ctx
+                .as_of(frontier_after)
+                .scan_with_options::<Vec<u8>, _>(.., options)?;
+            assert_eq!(
+                actual,
+                expected,
+                "validate_scan mismatch: scenario={} range=.. options={:?} snapshot_seq={} frontier={}",
+                ctx.scenario(),
+                options,
+                snapshot_seq,
+                frontier_after
+            );
+            return Ok(());
+        }
+    }
+
+    async fn collect_full_range_scan(
+        snapshot: &DbSnapshot,
+        options: &ScanOptions,
+    ) -> Result<Vec<KeyValue>, Error> {
+        let mut actual_iter = snapshot
+            .scan_with_options::<Vec<u8>, _>(.., options)
+            .await?;
+        let mut actual = Vec::new();
+        while let Some(kv) = actual_iter.next().await? {
+            actual.push(kv);
+        }
+        Ok(actual)
     }
 }
 
