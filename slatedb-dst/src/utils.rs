@@ -8,10 +8,9 @@ use std::time::Duration;
 use log::info;
 use object_store::ObjectStore;
 use rand::Rng;
-use slatedb::config::ScanOptions;
 use slatedb::config::{
-    CompactorOptions, CompressionCodec, DurabilityLevel, GarbageCollectorDirectoryOptions,
-    GarbageCollectorOptions, SizeTieredCompactionSchedulerOptions,
+    CompactorOptions, CompressionCodec, GarbageCollectorDirectoryOptions, GarbageCollectorOptions,
+    SizeTieredCompactionSchedulerOptions,
 };
 use slatedb::{Db, DbBuilder, DbRand, Error, Settings};
 use slatedb_common::clock::MockSystemClock;
@@ -20,8 +19,7 @@ use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_subscriber::EnvFilter;
 
 use crate::object_store::ClockedObjectStore;
-use crate::scenarios::{ScanScenario, TimedShutdownScenario};
-use crate::ScenarioContext;
+use crate::scenarios::TimedShutdownScenario;
 use crate::{Dst, Scenario};
 
 /// Builds a deterministic DST run, executes the supplied scenarios, validates
@@ -72,21 +70,10 @@ pub async fn run_simulation(
 
     dst.run_scenarios(simulation_scenarios).await?;
 
-    let verifier = dst.context("verifier");
-    verify_final_state(&verifier).await?;
+    dst.verify_final_state().await?;
 
     dst.close().await?;
 
-    Ok(())
-}
-
-async fn verify_final_state(ctx: &ScenarioContext) -> Result<(), Error> {
-    ScanScenario::validate_full_range(ctx, &ScanOptions::default()).await?;
-    ScanScenario::validate_full_range(
-        ctx,
-        &ScanOptions::default().with_durability_filter(DurabilityLevel::Remote),
-    )
-    .await?;
     Ok(())
 }
 
