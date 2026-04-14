@@ -120,7 +120,7 @@ Separates the **Compaction Coordinator** (scheduler + manifest committer) from o
 
 #### Coordinator
 
-Distributed mode becomes a new default allowing additional compactors to be added as needed:
+Compaction is always distributed allowing additional compactors to be added as needed:
 
 ```rust
 pub struct CompactorOptions {
@@ -139,14 +139,14 @@ worker_heartbeat_timeout_ms = 30000
 max_concurrent_compactions = 2
 ```
 
-`max_concurrent_compactions` controls how many jobs a single worker may hold simultaneously.
-
 The coordinator (`CompactorEventHandler`) always runs embedded in the DB process and behaves identically in both cases. The only difference is which `CompactionExecutor` it uses:
 
 - `compactor_options = Some(options)` — uses `TokioCompactionExecutor`, which spawns in-process Tokio tasks to execute compaction jobs. This is the existing single-node behavior, unchanged.
 - `compactor_options = None` — uses `RemoteCompactionExecutor`, which writes `Submitted` jobs to `.compactions` and polls for `Completed` rather than spawning local tasks. Execution is handled entirely by external `CompactorWorkerBuilder` processes.
 
 Both implement the `CompactionExecutor` trait; the coordinator calls `executor.start_compaction_job()` the same way regardless.
+
+`max_concurrent_compactions` controls how many jobs a single worker may hold simultaneously.
 
 #### Workers
 
