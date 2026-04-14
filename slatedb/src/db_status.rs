@@ -1,7 +1,5 @@
 use tokio::sync::watch;
 
-#[cfg(test)]
-use crate::db_state::ManifestCore;
 use crate::db_state::VersionedManifest;
 use crate::error::SlateDBError;
 use crate::utils::WatchableOnceCell;
@@ -44,6 +42,8 @@ pub(crate) struct DbStatusManager {
 impl DbStatusManager {
     #[cfg(test)]
     pub(crate) fn new(initial_durable_seq: u64) -> Self {
+        #[cfg(test)]
+        use crate::db_state::ManifestCore;
         Self::new_with_manifest(
             initial_durable_seq,
             VersionedManifest {
