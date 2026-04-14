@@ -16,12 +16,11 @@ use log::{debug, info};
 
 use crate::compactions_store::{CompactionsStore, FenceableCompactions, StoredCompactions};
 use crate::compactor::CompactionsCore;
-use crate::compactor_state::{CompactionStatus, Compactions, CompactorState};
+use crate::compactor_state::{CompactionStatus, CompactorState, VersionedCompactions};
 use crate::config::{CheckpointOptions, CompactorOptions};
 use crate::error::SlateDBError;
 use crate::manifest::store::{FenceableManifest, ManifestStore, StoredManifest};
-use crate::manifest::Manifest;
-use crate::manifest::ManifestCore;
+use crate::manifest::{ManifestCore, VersionedManifest};
 use crate::utils::IdGenerator;
 use crate::DbRand;
 use slatedb_common::clock::SystemClock;
@@ -31,21 +30,21 @@ use slatedb_common::clock::SystemClock;
 /// This view intentionally avoids `DirtyObject` because reads should not create or mutate
 /// remote state (e.g., a missing `.compactions` file on a fresh DB).
 pub struct CompactorStateView {
-    /// The latest compactions state if present. The u64 is the compactions file version.
-    pub(crate) compactions: Option<(u64, Compactions)>,
-    /// The latest manifest. The u64 is the manifest file version.
-    pub(crate) manifest: (u64, Manifest),
+    /// The latest compactions state if present, paired with its file version.
+    pub(crate) compactions: Option<VersionedCompactions>,
+    /// The latest manifest paired with its file version.
+    pub(crate) manifest: VersionedManifest,
 }
 
 impl CompactorStateView {
     /// Returns a read-only view of the .compactions file if present.
     pub fn compactions(&self) -> Option<&CompactionsCore> {
-        self.compactions.as_ref().map(|(_, c)| &c.core)
+        self.compactions.as_ref().map(|c| &c.compactions.core)
     }
 
     /// Returns a read-only view of the .manifest file.
     pub fn manifest(&self) -> &ManifestCore {
-        &self.manifest.1.core
+        self.manifest.core()
     }
 }
 
@@ -53,11 +52,14 @@ impl CompactorStateView {
 impl From<&CompactorState> for CompactorStateView {
     fn from(state: &CompactorState) -> Self {
         CompactorStateView {
-            compactions: Some((
+            compactions: Some(VersionedCompactions::from_compactions(
                 state.compactions().id.into(),
                 state.compactions().value.clone(),
             )),
-            manifest: (state.manifest().id.into(), state.manifest().value.clone()),
+            manifest: VersionedManifest::from_manifest(
+                state.manifest().id.into(),
+                state.manifest().value.clone(),
+            ),
         }
     }
 }
@@ -95,8 +97,9 @@ impl CompactorStateReader {
         let compactions = self.compactions_store.try_read_latest_compactions().await?;
         let manifest = self.manifest_store.read_latest_manifest().await?;
         Ok(CompactorStateView {
-            compactions,
-            manifest,
+            compactions: compactions
+                .map(|(id, compactions)| VersionedCompactions::from_compactions(id, compactions)),
+            manifest: VersionedManifest::from_manifest(manifest.0, manifest.1),
         })
     }
 }
@@ -324,13 +327,13 @@ mod tests {
     use crate::compactions_store::{CompactionsStore, StoredCompactions};
     use crate::compactor_state::{
         Compaction, CompactionSpec, CompactionStatus, Compactions, CompactorState,
+        VersionedCompactions,
     };
     use crate::db_state::{SsTableHandle, SsTableId, SsTableInfo};
     use crate::error::SlateDBError;
     use crate::format::sst::SST_FORMAT_VERSION_LATEST;
     use crate::manifest::store::{ManifestStore, StoredManifest};
-    use crate::manifest::Manifest;
-    use crate::manifest::ManifestCore;
+    use crate::manifest::{Manifest, ManifestCore, VersionedManifest};
     use bytes::Bytes;
     use object_store::memory::InMemory;
     use object_store::path::Path;
@@ -415,18 +418,23 @@ mod tests {
 
         let view = CompactorStateView::from(&state);
 
-        assert_eq!(view.manifest.0, manifest_id);
-        assert_eq!(view.manifest.1, manifest);
-
-        let (view_compactions_id, view_compactions) =
-            view.compactions.expect("missing compactions");
-        assert_eq!(view_compactions_id, compactions_id);
         assert_eq!(
-            view_compactions.compactor_epoch,
+            view.manifest,
+            VersionedManifest::from_manifest(manifest_id, manifest)
+        );
+
+        let view_compactions = view.compactions.expect("missing compactions");
+        assert_eq!(
+            view_compactions,
+            VersionedCompactions::from_compactions(compactions_id, compactions.clone())
+        );
+        assert_eq!(
+            view_compactions.compactions.compactor_epoch,
             compactions.compactor_epoch
         );
 
         let view_compaction = view_compactions
+            .compactions
             .get(&compaction_id)
             .expect("missing compaction");
         assert_eq!(view_compaction.status(), CompactionStatus::Running);

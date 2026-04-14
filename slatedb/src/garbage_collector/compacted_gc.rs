@@ -1,7 +1,11 @@
 use crate::{
-    compactions_store::CompactionsStore, compactor_state::Compactions,
-    compactor_state_protocols::CompactorStateReader, config::GarbageCollectorDirectoryOptions,
-    db_state::SsTableId, error::SlateDBError, manifest::store::ManifestStore, manifest::Manifest,
+    compactions_store::CompactionsStore,
+    compactor_state::VersionedCompactions,
+    compactor_state_protocols::CompactorStateReader,
+    config::GarbageCollectorDirectoryOptions,
+    db_state::SsTableId,
+    error::SlateDBError,
+    manifest::{store::ManifestStore, Manifest, VersionedManifest},
     tablestore::TableStore,
 };
 use chrono::{DateTime, Utc};
@@ -141,9 +145,10 @@ impl CompactedGcTask {
     /// In all of these cases, we want to be conservative and avoid deleting any SSTs that
     /// might be in use by a running compaction, so we return the Unix epoch to effectively
     /// disable deletion based on compaction state.
-    fn compaction_low_watermark_dt(compactions: &Option<(u64, Compactions)>) -> DateTime<Utc> {
+    fn compaction_low_watermark_dt(compactions: &Option<VersionedCompactions>) -> DateTime<Utc> {
         match compactions {
-            Some((_, compactions)) => compactions
+            Some(compactions) => compactions
+                .compactions
                 .iter()
                 .map(|c| DateTime::<Utc>::from(c.id().datetime()))
                 .min()
@@ -170,7 +175,10 @@ impl GcTask for CompactedGcTask {
         let state_reader = CompactorStateReader::new(&self.manifest_store, &self.compactions_store);
         let view = state_reader.read_view().await?;
         let compactions = view.compactions;
-        let (manifest_id, manifest) = view.manifest;
+        let VersionedManifest {
+            id: manifest_id,
+            manifest,
+        } = view.manifest;
         let compaction_low_watermark_dt = Self::compaction_low_watermark_dt(&compactions);
         let active_ssts = self
             .list_active_l0_and_compacted_ssts(manifest_id, &manifest)

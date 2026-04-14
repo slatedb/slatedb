@@ -1065,8 +1065,7 @@ mod tests {
     use crate::format::sst::{SsTableFormat, SST_FORMAT_VERSION_LATEST};
     use crate::iter::RowEntryIterator;
     use crate::manifest::store::{ManifestStore, StoredManifest};
-    use crate::manifest::Manifest;
-    use crate::manifest::ManifestCore;
+    use crate::manifest::{Manifest, ManifestCore, VersionedManifest};
     use crate::merge_operator::{MergeOperator, MergeOperatorError};
     use crate::object_stores::ObjectStores;
     use crate::proptest_util::rng;
@@ -2896,7 +2895,10 @@ mod tests {
             .generate(
                 &CompactorStateView {
                     compactions: None,
-                    manifest: (0, stored_manifest.manifest().clone()),
+                    manifest: VersionedManifest::from_manifest(
+                        0,
+                        stored_manifest.manifest().clone(),
+                    ),
                 },
                 &CompactionRequest::Full,
             )
@@ -2927,7 +2929,7 @@ mod tests {
         let scheduler = MockScheduler::new();
         let state = CompactorStateView {
             compactions: None,
-            manifest: (0, Manifest::initial(ManifestCore::new())),
+            manifest: VersionedManifest::from_manifest(0, Manifest::initial(ManifestCore::new())),
         };
         let spec = CompactionSpec::new(vec![SourceId::SortedRun(7)], 7);
 
@@ -2981,7 +2983,7 @@ mod tests {
         ];
         let state = CompactorStateView {
             compactions: None,
-            manifest: (0, Manifest::initial(core)),
+            manifest: VersionedManifest::from_manifest(0, Manifest::initial(core)),
         };
 
         let planned = scheduler
@@ -3016,7 +3018,7 @@ mod tests {
         ]);
         let state = CompactorStateView {
             compactions: None,
-            manifest: (0, Manifest::initial(core)),
+            manifest: VersionedManifest::from_manifest(0, Manifest::initial(core)),
         };
 
         let err = scheduler
