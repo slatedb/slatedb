@@ -1699,6 +1699,7 @@ mod tests {
     use crate::cached_object_store::stats::{PART_ACCESS_COUNT, PART_HIT_COUNT};
     use crate::cached_object_store::{CachedObjectStore, FsCacheStorage};
     use crate::cached_object_store_stats::CachedObjectStoreStats;
+    use crate::compactions_store::{CompactionsStore, StoredCompactions};
     use crate::config::DurabilityLevel::{Memory, Remote};
     use crate::config::{
         CheckpointOptions, CompactorOptions, GarbageCollectorDirectoryOptions,
@@ -5588,6 +5589,42 @@ mod tests {
         panic!("manifest condition took longer than timeout")
     }
 
+    async fn wait_for_compactor_takeover(
+        watcher: &mut tokio::sync::watch::Receiver<DbStatus>,
+        manifest: &mut StoredManifest,
+        compactions: &mut StoredCompactions,
+        initial_manifest_id: u64,
+        initial_epoch: u64,
+        timeout: Duration,
+    ) -> u64 {
+        let status = tokio::time::timeout(
+            timeout,
+            watcher.wait_for(|status| status.current_manifest.id > initial_manifest_id),
+        )
+        .await
+        .expect("timed out waiting for DB manifest refresh after compactor takeover")
+        .expect("watch channel closed")
+        .clone();
+        let refreshed_manifest_id = status.current_manifest.id;
+
+        let start = tokio::time::Instant::now();
+        while start.elapsed() < timeout {
+            let refreshed_manifest = manifest.refresh().await.unwrap();
+            let manifest_epoch = refreshed_manifest.compactor_epoch;
+            let manifest_id = manifest.id();
+            let compactions_epoch = compactions.refresh().await.unwrap().compactor_epoch;
+            if manifest_id >= refreshed_manifest_id
+                && manifest_epoch > initial_epoch
+                && compactions_epoch == manifest_epoch
+            {
+                return manifest_epoch;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        panic!("compactor takeover condition took longer than timeout")
+    }
+
     fn test_db_options(
         min_filter_keys: u32,
         l0_sst_size_bytes: usize,
@@ -6831,11 +6868,20 @@ mod tests {
             .build()
             .await
             .unwrap();
+        let mut watcher = db.subscribe();
         let manifest_store = Arc::new(ManifestStore::new(&path, object_store.clone()));
+        let compactions_store = Arc::new(CompactionsStore::new(&path, object_store.clone()));
         let mut stored_manifest =
             StoredManifest::load(manifest_store, Arc::new(DefaultSystemClock::new()))
                 .await
                 .unwrap();
+        let mut stored_compactions = StoredCompactions::load(compactions_store).await.unwrap();
+        let initial_manifest_id = stored_manifest.id();
+        let initial_compactor_epoch = stored_manifest.manifest().compactor_epoch;
+        assert_eq!(
+            initial_compactor_epoch,
+            stored_compactions.compactions().compactor_epoch
+        );
         let should_compact = Arc::new(AtomicBool::new(true));
 
         // When: a standalone compactor starts for the same DB
@@ -6859,8 +6905,17 @@ mod tests {
             async move { standalone_compactor.run().await }
         });
 
-        // Then: the embedded compactor should not close the DB after takeover.
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        // Then: the takeover should bump compactor epochs and refresh the DB manifest.
+        let takeover_epoch = wait_for_compactor_takeover(
+            &mut watcher,
+            &mut stored_manifest,
+            &mut stored_compactions,
+            initial_manifest_id,
+            initial_compactor_epoch,
+            Duration::from_secs(10),
+        )
+        .await;
+        assert!(takeover_epoch > initial_compactor_epoch);
         assert!(db.status().close_reason.is_none());
 
         // And: the standalone compactor should compact new L0 output after takeover.

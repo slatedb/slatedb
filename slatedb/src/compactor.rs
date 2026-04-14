@@ -507,7 +507,7 @@ impl MessageHandler<CompactorMessage> for CompactorEventHandler {
 
         match result {
             Err(SlateDBError::Fenced) if self.degrade_on_fence => {
-                self.handle_fence().await?;
+                self.degrade_fence().await?;
                 Ok(())
             }
             other => other,
@@ -567,7 +567,7 @@ impl CompactorEventHandler {
         &mut self.state_writer.state
     }
 
-    async fn handle_fence(&mut self) -> Result<(), SlateDBError> {
+    async fn degrade_fence(&mut self) -> Result<(), SlateDBError> {
         if self.fenced {
             return Ok(());
         }
