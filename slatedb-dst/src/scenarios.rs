@@ -23,10 +23,10 @@ use tracing::info;
 
 /// Issues checked single-key puts against a small key space.
 ///
-/// `PutScenario` creates overwrite-heavy write traffic without mixing in other
-/// operation types. Running it as a dedicated scenario makes put interleavings
-/// explicit in the simulation schedule instead of hiding them behind an
-/// internal random branch.
+/// `PutScenario` writes one default-options `put` per iteration to a random key
+/// in `key_space`. Running puts as a dedicated scenario keeps overwrite-heavy
+/// traffic explicit in the simulation schedule instead of hiding it behind a
+/// mixed writer branch.
 pub struct PutScenario {
     pub name: &'static str,
     pub rand: Rc<DbRand>,
@@ -82,10 +82,11 @@ impl Scenario for PutScenario {
     }
 }
 
-/// Issues checked deletes against a small key space.
+/// Issues checked single-key deletes against a small key space.
 ///
-/// `DeleteScenario` exists separately from puts and batch writes so delete
-/// traffic can be scheduled independently by the harness.
+/// `DeleteScenario` deletes one random key per iteration. Keeping deletes in
+/// their own scenario lets the harness interleave tombstone traffic
+/// independently from puts and batch writes.
 pub struct DeleteScenario {
     pub name: &'static str,
     pub rand: Rc<DbRand>,
@@ -141,8 +142,10 @@ impl Scenario for DeleteScenario {
 
 /// Issues checked batched writes against a small key space.
 ///
-/// `BatchWriteScenario` keeps the multi-key atomic write path hot without
-/// entangling it with single-key mutations.
+/// `BatchWriteScenario` emits one atomic batch per iteration. Each batch always
+/// includes one `put` and then randomly applies either a second `put` or a
+/// `delete` to another key, which keeps the multi-key write path hot without
+/// entangling it with single-key scenarios.
 pub struct BatchWriteScenario {
     pub name: &'static str,
     pub rand: Rc<DbRand>,
@@ -214,8 +217,10 @@ impl Scenario for BatchWriteScenario {
 
 /// Issues checked point reads against both memory-visible and remotely durable state.
 ///
-/// `GetScenario` continuously validates single-key reads against the DST
-/// recorded SQLite state while the other scenarios are mutating SlateDB.
+/// `GetScenario` validates one random-key point read per iteration against the
+/// DST recorded SQLite state. Each read randomly targets either the committed
+/// memory-visible view or the remote-durable view while other scenarios mutate
+/// SlateDB concurrently.
 pub struct GetScenario {
     pub name: &'static str,
     pub rand: Rc<DbRand>,
@@ -353,8 +358,10 @@ impl GetScenario {
 
 /// Issues checked full-range scans against both memory-visible and remotely durable state.
 ///
-/// `ScanScenario` continuously validates scan behavior against the DST
-/// recorded SQLite state while the other scenarios are mutating SlateDB.
+/// `ScanScenario` validates one full-range scan per iteration against the DST
+/// recorded SQLite state. Each scan randomly chooses both durability
+/// (`Memory` or `Remote`) and iteration order (`Ascending` or `Descending`)
+/// while other scenarios mutate SlateDB concurrently.
 pub struct ScanScenario {
     pub name: &'static str,
     pub rand: Rc<DbRand>,
@@ -583,7 +590,7 @@ impl Scenario for TimedShutdownScenario {
     }
 }
 
-/// Performs extra flushes independently of the mutation scenarios.
+/// Performs explicit flushes independently of the mutation scenarios.
 ///
 /// `FlusherScenario` adds durability pressure that is decoupled from the normal
 /// write path. On each iteration it randomly decides whether to flush, which
