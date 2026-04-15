@@ -23,7 +23,7 @@ The admission picker decides *whether* the flusher accepts a submitted entry. `A
 
 These two checks run in series. Under the defaults, entries only reach the flusher when
 memory pressure forces an eviction. If the memory tier is large enough to hold the working
-set, nothing is ever evicted, and nothing reaches disk.
+set, nothing is ever evicted, and nothing reaches disk until the db is closed.
 
 ### Flusher pipeline tuning
 
@@ -38,7 +38,8 @@ If this happens, you will notice the `storage_queue_channel_overflow` /
 foyer's internal metrics and accessible via `with_metrics_registry()` when you
 construct your cache.
 
-If you need the disk tier to hold data across restarts, increase the flusher capacity:
+Ensure that your flusher and buffer pools are configured to large enough to avoid the
+backpressure mechanism (see section on Monitoring below for sizing guidance):
 
 ```rust
 use foyer::{
