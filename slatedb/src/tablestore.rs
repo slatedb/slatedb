@@ -117,6 +117,14 @@ impl TableStore {
         Ok(last_wal_id.unwrap_or(0))
     }
 
+    /// Gracefully close the block cache, flushing in-memory entries to disk.
+    pub(crate) async fn close_cache(&self) -> Result<(), crate::Error> {
+        if let Some(ref cache) = self.cache {
+            cache.close().await?;
+        }
+        Ok(())
+    }
+
     pub(crate) async fn list_wal_ssts<R: RangeBounds<u64>>(
         &self,
         id_range: R,

@@ -146,6 +146,15 @@ pub trait DbCache: Send + Sync {
     async fn remove(&self, key: &CachedKey);
     #[allow(dead_code)]
     fn entry_count(&self) -> u64;
+
+    /// Gracefully close the cache, flushing any in-memory state to disk.
+    ///
+    /// Implementations backed by hybrid (memory + disk) caches should use
+    /// this to ensure cached entries survive process restarts. The default
+    /// implementation is a no-op.
+    async fn close(&self) -> Result<(), crate::Error> {
+        Ok(())
+    }
 }
 
 /// A key used to identify a cached entry.
@@ -396,6 +405,16 @@ impl DbCache for SplitCache {
         self.block_cache.as_ref().map_or(0, |c| c.entry_count())
             + self.meta_cache.as_ref().map_or(0, |c| c.entry_count())
     }
+
+    async fn close(&self) -> Result<(), crate::Error> {
+        if let Some(ref cache) = self.block_cache {
+            cache.close().await?;
+        }
+        if let Some(ref cache) = self.meta_cache {
+            cache.close().await?;
+        }
+        Ok(())
+    }
 }
 
 /// Wraps a [`DbCache`] to add statistics, error logging, and cache scoping.
@@ -555,6 +574,10 @@ impl DbCache for DbCacheWrapper {
 
     fn entry_count(&self) -> u64 {
         self.cache.entry_count()
+    }
+
+    async fn close(&self) -> Result<(), crate::Error> {
+        self.cache.close().await
     }
 }
 

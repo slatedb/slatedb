@@ -27,7 +27,7 @@ use crate::{Checkpoint, DbIterator};
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::BoxStream;
-use log::info;
+use log::{info, warn};
 use object_store::path::Path;
 use object_store::ObjectStore;
 use once_cell::sync::Lazy;
@@ -1048,7 +1048,13 @@ impl DbReader {
         self.task_executor
             .shutdown_task(DB_READER_TASK_NAME)
             .await
-            .map_err(Into::into)
+            .map_err(Into::<crate::Error>::into)?;
+
+        if let Err(e) = self.inner.table_store.close_cache().await {
+            warn!("failed to close block cache [error={:?}]", e);
+        }
+
+        Ok(())
     }
 
     /// Subscribe to database status changes.
