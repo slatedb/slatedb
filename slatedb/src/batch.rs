@@ -220,19 +220,44 @@ impl WriteBatch {
         K: AsRef<[u8]>,
         V: AsRef<[u8]>,
     {
+        self.put_bytes_with_options(
+            Bytes::copy_from_slice(key.as_ref()),
+            Bytes::copy_from_slice(value.as_ref()),
+            options,
+        )
+    }
+
+    /// Put a key-value pair into the batch using owned [`Bytes`], avoiding
+    /// the copies that [`WriteBatch::put`] performs via
+    /// `Bytes::copy_from_slice`. Prefer this form when the caller already
+    /// holds the data as [`Bytes`] (e.g. from a prior read, a zero-copy
+    /// buffer pool, or a client that produces [`Bytes`] directly). Keys must
+    /// not be empty.
+    ///
+    /// # Panics
+    /// - if the key is empty
+    /// - if the key size is larger than u16::MAX
+    /// - if the value size is larger than u32::MAX
+    pub fn put_bytes(&mut self, key: Bytes, value: Bytes) {
+        self.put_bytes_with_options(key, value, &PutOptions::default())
+    }
+
+    /// Put a key-value pair into the batch using owned [`Bytes`] with custom
+    /// options. See [`WriteBatch::put_bytes`] for why this form exists.
+    ///
+    /// # Panics
+    /// - if the key is empty
+    /// - if the key size is larger than u16::MAX
+    /// - if the value size is larger than u32::MAX
+    pub fn put_bytes_with_options(&mut self, key: Bytes, value: Bytes, options: &PutOptions) {
         self.assert_kv(&key, &value);
 
-        let key = Bytes::copy_from_slice(key.as_ref());
         // put will overwrite the existing key so we can safely
         // remove all previous entries.
         self.remove_ops_by_key(&key);
         self.ops.insert(
             SequencedKey::new(key.clone(), self.write_idx),
-            WriteOp::Put(
-                key.clone(),
-                Bytes::copy_from_slice(value.as_ref()),
-                options.clone(),
-            ),
+            WriteOp::Put(key, value, options.clone()),
         );
 
         self.write_idx += 1;

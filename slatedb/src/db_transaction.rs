@@ -138,7 +138,7 @@ impl DbTransaction {
         key: K,
         options: &ReadOptions,
     ) -> Result<Option<KeyValue>, crate::Error> {
-        self.db_inner.status()?;
+        self.db_inner.check_closed()?;
 
         // Track read key for SSI conflict detection if needed
         if self.isolation_level == IsolationLevel::SerializableSnapshot {
@@ -221,7 +221,7 @@ impl DbTransaction {
             None
         };
 
-        self.db_inner.status()?;
+        self.db_inner.check_closed()?;
         let db_state = self.db_inner.state.read().view();
 
         // Clone the WriteBatch for the scan to ensure that the scan within a transaction
@@ -1672,6 +1672,7 @@ mod tests {
             manifest_update_timeout: std::time::Duration::from_secs(300),
             max_unflushed_bytes: 134_217_728,
             l0_max_ssts: 8,
+            l0_flush_parallelism: 1,
             min_filter_keys,
             filter_bits_per_key: 10,
             l0_sst_size_bytes,

@@ -78,7 +78,7 @@ impl DbSnapshot {
         key: K,
         options: &ReadOptions,
     ) -> Result<Option<KeyValue>, crate::Error> {
-        self.db_inner.status()?;
+        self.db_inner.check_closed()?;
         let db_state = self.db_inner.state.read().view();
         let kv = self
             .db_inner
@@ -129,7 +129,7 @@ impl DbSnapshot {
             .end_bound()
             .map(|b| Bytes::copy_from_slice(b.as_ref()));
         let range = (start, end);
-        self.db_inner.status()?;
+        self.db_inner.check_closed()?;
         let db_state = self.db_inner.state.read().view();
         self.db_inner
             .reader

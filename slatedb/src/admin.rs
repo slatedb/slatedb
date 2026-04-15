@@ -1,9 +1,11 @@
 use crate::checkpoint::{Checkpoint, CheckpointCreateResult};
 use crate::compactions_store::CompactionsStore;
 use crate::compactor::{Compaction, CompactionSpec, Compactor, CompactorStateView};
+use crate::compactor_state::VersionedCompactions;
 use crate::compactor_state_protocols::CompactorStateReader;
 use crate::config::{CheckpointOptions, GarbageCollectorOptions};
 use crate::db::builder::GarbageCollectorBuilder;
+use crate::db_state::VersionedManifest;
 use crate::dispatcher::MessageHandlerExecutor;
 use crate::error::SlateDBError;
 use crate::garbage_collector::GC_TASK_NAME;
@@ -56,69 +58,84 @@ pub struct Admin {
 }
 
 impl Admin {
-    /// Read-only access to the latest manifest file
+    /// Read-only access to a specific or the latest manifest file.
+    ///
+    /// ## Arguments
+    /// - `maybe_id`: Optional ID of the manifest file to read. If `None`, reads the latest.
+    ///
+    /// ## Returns
+    /// - `Ok(Some(VersionedManifest))`: The manifest if found.
+    /// - `Ok(None)`: If the manifest file does not exist.
     pub async fn read_manifest(
         &self,
         maybe_id: Option<u64>,
-    ) -> Result<Option<String>, Box<dyn Error>> {
+    ) -> Result<Option<VersionedManifest>, Box<dyn Error>> {
         let manifest_store = ManifestStore::new(
             &self.path,
             self.object_stores.store_of(ObjectStoreType::Main).clone(),
         );
-        let id_manifest = if let Some(id) = maybe_id {
+        let manifest = if let Some(id) = maybe_id {
             manifest_store
                 .try_read_manifest(id)
                 .await?
-                .map(|manifest| (id, manifest))
+                .map(|manifest| VersionedManifest::from_manifest(id, manifest))
         } else {
-            manifest_store.try_read_latest_manifest().await?
+            manifest_store
+                .try_read_latest_manifest()
+                .await?
+                .map(|(id, manifest)| VersionedManifest::from_manifest(id, manifest))
         };
 
-        match id_manifest {
-            None => Ok(None),
-            Some(result) => Ok(Some(serde_json::to_string(&result)?)),
-        }
+        Ok(manifest)
     }
 
-    /// List manifests within a range
+    /// List manifests within a range.
+    ///
+    /// ## Returns
+    /// - `Ok(Vec<VersionedManifest>)`: The manifests in ascending ID order.
     pub async fn list_manifests<R: RangeBounds<u64>>(
         &self,
         range: R,
-    ) -> Result<String, Box<dyn Error>> {
+    ) -> Result<Vec<VersionedManifest>, Box<dyn Error>> {
         let manifest_store = ManifestStore::new(
             &self.path,
             self.object_stores.store_of(ObjectStoreType::Main).clone(),
         );
-        let manifests = manifest_store.list_manifests(range).await?;
-        Ok(serde_json::to_string(&manifests)?)
+        let manifest_metadata = manifest_store.list_manifests(range).await?;
+        let mut manifests = Vec::with_capacity(manifest_metadata.len());
+        for metadata in manifest_metadata {
+            let manifest = manifest_store.read_manifest(metadata.id).await?;
+            manifests.push(VersionedManifest::from_manifest(metadata.id, manifest));
+        }
+        Ok(manifests)
     }
 
-    /// Read-only access to the latest compactions file
+    /// Read-only access to a specific or the latest compactions file.
     ///
     /// ## Arguments
     /// - `maybe_id`: Optional ID of the compactions file to read. If None, reads from the latest.
     ///
     /// ## Returns
-    /// - `Ok(Some(String))`: The compactions as a JSON string if found.
+    /// - `Ok(Some(VersionedCompactions))`: The compactions if found.
     /// - `Ok(None)`: If the compactions file does not exist.
     pub async fn read_compactions(
         &self,
         maybe_id: Option<u64>,
-    ) -> Result<Option<String>, Box<dyn Error>> {
+    ) -> Result<Option<VersionedCompactions>, Box<dyn Error>> {
         let compactions_store = self.compactions_store();
-        let id_compactions = if let Some(id) = maybe_id {
+        let compactions = if let Some(id) = maybe_id {
             compactions_store
                 .try_read_compactions(id)
                 .await?
-                .map(|compactions| (id, compactions))
+                .map(|compactions| VersionedCompactions::from_compactions(id, compactions))
         } else {
-            compactions_store.try_read_latest_compactions().await?
+            compactions_store
+                .try_read_latest_compactions()
+                .await?
+                .map(|(id, compactions)| VersionedCompactions::from_compactions(id, compactions))
         };
 
-        match id_compactions {
-            None => Ok(None),
-            Some(result) => Ok(Some(serde_json::to_string(&result)?)),
-        }
+        Ok(compactions)
     }
 
     /// Read-only access to a compaction by id from a specific or latest compactions file.
@@ -187,14 +204,25 @@ impl Admin {
         Ok(compaction)
     }
 
-    /// List compactions files within a range
+    /// List compactions files within a range.
+    ///
+    /// ## Returns
+    /// - `Ok(Vec<VersionedCompactions>)`: The compactions files in ascending ID order.
     pub async fn list_compactions<R: RangeBounds<u64>>(
         &self,
         range: R,
-    ) -> Result<String, Box<dyn Error>> {
+    ) -> Result<Vec<VersionedCompactions>, Box<dyn Error>> {
         let compactions_store = self.compactions_store();
-        let compactions = compactions_store.list_compactions(range).await?;
-        Ok(serde_json::to_string(&compactions)?)
+        let compactions_metadata = compactions_store.list_compactions(range).await?;
+        let mut compactions = Vec::with_capacity(compactions_metadata.len());
+        for metadata in compactions_metadata {
+            let stored_compactions = compactions_store.read_compactions(metadata.id).await?;
+            compactions.push(VersionedCompactions::from_compactions(
+                metadata.id,
+                stored_compactions,
+            ));
+        }
+        Ok(compactions)
     }
 
     /// List checkpoints, optionally filtering by name. When name is provided, only checkpoints
@@ -741,9 +769,12 @@ mod tests {
     use crate::admin::{load_object_store_from_env, AdminBuilder};
     use crate::compactions_store::{CompactionsStore, StoredCompactions};
     use crate::compactor_state::{Compaction, CompactionSpec, CompactionStatus, SourceId};
+    use crate::db_state::ManifestCore;
+    use crate::manifest::store::{ManifestStore, StoredManifest};
     use object_store::memory::InMemory;
     use object_store::path::Path;
     use object_store::ObjectStore;
+    use slatedb_common::clock::DefaultSystemClock;
     use std::sync::Arc;
     use ulid::Ulid;
 
@@ -781,6 +812,132 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_admin_read_manifest() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_admin_read_manifest");
+        let manifest_store = Arc::new(ManifestStore::new(&path, object_store.clone()));
+        let mut stored = StoredManifest::create_new_db(
+            manifest_store,
+            ManifestCore::new(),
+            Arc::new(DefaultSystemClock::new()),
+        )
+        .await
+        .unwrap();
+
+        let mut dirty = stored.prepare_dirty().unwrap();
+        dirty.value.core.next_wal_sst_id = 17;
+        dirty.value.core.last_l0_seq = 9;
+        dirty.value.writer_epoch = 3;
+        dirty.value.compactor_epoch = 5;
+        stored.update(dirty).await.unwrap();
+
+        let admin = AdminBuilder::new(path.clone(), object_store).build();
+
+        let latest = admin
+            .read_manifest(None)
+            .await
+            .unwrap()
+            .expect("expected manifest");
+        assert_eq!(latest.id, 2);
+        assert_eq!(latest.writer_epoch, 3);
+        assert_eq!(latest.compactor_epoch, 5);
+        assert_eq!(latest.manifest.next_wal_sst_id, 17);
+        assert_eq!(latest.manifest.last_l0_seq, 9);
+
+        let first = admin
+            .read_manifest(Some(1))
+            .await
+            .unwrap()
+            .expect("expected manifest");
+        assert_eq!(first.id, 1);
+        assert_eq!(first.writer_epoch, 0);
+        assert_eq!(first.compactor_epoch, 0);
+        assert_eq!(first.manifest.next_wal_sst_id, 1);
+        assert_eq!(first.manifest.last_l0_seq, 0);
+    }
+
+    #[tokio::test]
+    async fn test_admin_list_manifests() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_admin_list_manifests");
+        let manifest_store = Arc::new(ManifestStore::new(&path, object_store.clone()));
+        let mut stored = StoredManifest::create_new_db(
+            manifest_store,
+            ManifestCore::new(),
+            Arc::new(DefaultSystemClock::new()),
+        )
+        .await
+        .unwrap();
+
+        let mut dirty = stored.prepare_dirty().unwrap();
+        dirty.value.core.next_wal_sst_id = 5;
+        dirty.value.core.last_l0_seq = 10;
+        dirty.value.writer_epoch = 2;
+        dirty.value.compactor_epoch = 4;
+        stored.update(dirty).await.unwrap();
+
+        let mut dirty = stored.prepare_dirty().unwrap();
+        dirty.value.core.next_wal_sst_id = 8;
+        dirty.value.core.last_l0_seq = 20;
+        dirty.value.writer_epoch = 3;
+        dirty.value.compactor_epoch = 6;
+        stored.update(dirty).await.unwrap();
+
+        let admin = AdminBuilder::new(path.clone(), object_store).build();
+
+        let all = admin.list_manifests(..).await.unwrap();
+        assert_eq!(
+            all.iter().map(|manifest| manifest.id).collect::<Vec<_>>(),
+            vec![1, 2, 3]
+        );
+        assert_eq!(
+            all.iter()
+                .map(|manifest| manifest.manifest.last_l0_seq)
+                .collect::<Vec<_>>(),
+            vec![0, 10, 20]
+        );
+        assert_eq!(
+            all.iter()
+                .map(|manifest| manifest.writer_epoch)
+                .collect::<Vec<_>>(),
+            vec![0, 2, 3]
+        );
+        assert_eq!(
+            all.iter()
+                .map(|manifest| manifest.compactor_epoch)
+                .collect::<Vec<_>>(),
+            vec![0, 4, 6]
+        );
+
+        let bounded = admin.list_manifests(2..3).await.unwrap();
+        assert_eq!(
+            bounded
+                .iter()
+                .map(|manifest| manifest.id)
+                .collect::<Vec<_>>(),
+            vec![2]
+        );
+
+        let left_bounded = admin.list_manifests(2..).await.unwrap();
+        assert_eq!(
+            left_bounded
+                .iter()
+                .map(|manifest| manifest.id)
+                .collect::<Vec<_>>(),
+            vec![2, 3]
+        );
+
+        let right_bounded = admin.list_manifests(..3).await.unwrap();
+        assert_eq!(
+            right_bounded
+                .iter()
+                .map(|manifest| manifest.id)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+    }
+
+    #[tokio::test]
     async fn test_admin_read_compactions() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/tmp/test_admin_read_compactions");
@@ -796,6 +953,7 @@ mod tests {
         );
         let mut dirty = stored.prepare_dirty().unwrap();
         dirty.value.insert(compaction);
+        dirty.value.compactor_epoch = 9;
         stored.update(dirty).await.unwrap();
 
         let admin = AdminBuilder::new(path.clone(), object_store).build();
@@ -805,53 +963,20 @@ mod tests {
             .await
             .unwrap()
             .expect("expected compactions");
-        let latest_value: serde_json::Value = serde_json::from_str(&latest).unwrap();
-        let latest_pair = latest_value.as_array().expect("expected [id, compactions]");
-        assert_eq!(latest_pair[0].as_u64().unwrap(), 2);
-
-        let latest_compactions = latest_pair[1].as_object().unwrap();
-        assert_eq!(
-            latest_compactions
-                .get("compactor_epoch")
-                .and_then(|v| v.as_u64())
-                .unwrap(),
-            7
-        );
-        let recent = latest_compactions
-            .get("core")
-            .expect("expected core")
-            .get("recent_compactions")
-            .and_then(|v| v.as_object())
-            .unwrap();
-        assert_eq!(recent.len(), 1);
-        let compaction_id_str = compaction_id.to_string();
-        let stored_compaction = recent
-            .get(compaction_id_str.as_str())
-            .expect("expected compaction entry");
-        assert_eq!(
-            stored_compaction
-                .get("id")
-                .and_then(|v| v.as_str())
-                .unwrap(),
-            compaction_id_str
-        );
+        let expected_latest = compactions_store.read_compactions(2).await.unwrap();
+        assert_eq!(latest.id, 2);
+        assert_eq!(latest.compactor_epoch, 9);
+        assert_eq!(latest.compactions, expected_latest.core);
 
         let first = admin
             .read_compactions(Some(1))
             .await
             .unwrap()
             .expect("expected compactions");
-        let first_value: serde_json::Value = serde_json::from_str(&first).unwrap();
-        let first_pair = first_value.as_array().expect("expected [id, compactions]");
-        assert_eq!(first_pair[0].as_u64().unwrap(), 1);
-        let first_compactions = first_pair[1].as_object().unwrap();
-        let first_recent = first_compactions
-            .get("core")
-            .expect("expected core")
-            .get("recent_compactions")
-            .and_then(|v| v.as_object())
-            .unwrap();
-        assert_eq!(first_recent.len(), 0);
+        let expected_first = compactions_store.read_compactions(1).await.unwrap();
+        assert_eq!(first.id, 1);
+        assert_eq!(first.compactor_epoch, 7);
+        assert_eq!(first.compactions, expected_first.core);
     }
 
     #[tokio::test]
@@ -859,23 +984,71 @@ mod tests {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/tmp/test_admin_list_compactions");
         let compactions_store = Arc::new(CompactionsStore::new(&path, object_store.clone()));
-        let mut stored = StoredCompactions::create(compactions_store.clone(), 0)
+        let mut stored = StoredCompactions::create(compactions_store.clone(), 2)
             .await
             .unwrap();
-        stored
-            .update(stored.prepare_dirty().unwrap())
-            .await
-            .unwrap();
+
+        let mut dirty = stored.prepare_dirty().unwrap();
+        dirty.value.insert(Compaction::new(
+            Ulid::new(),
+            CompactionSpec::new(vec![SourceId::SortedRun(3)], 7),
+        ));
+        dirty.value.compactor_epoch = 4;
+        stored.update(dirty).await.unwrap();
+
+        let mut dirty = stored.prepare_dirty().unwrap();
+        dirty.value.insert(Compaction::new(
+            Ulid::new(),
+            CompactionSpec::new(vec![SourceId::SortedRun(5)], 9),
+        ));
+        dirty.value.compactor_epoch = 6;
+        stored.update(dirty).await.unwrap();
 
         let admin = AdminBuilder::new(path.clone(), object_store).build();
         let listed = admin.list_compactions(..).await.unwrap();
-        let listed_value: Vec<serde_json::Value> = serde_json::from_str(&listed).unwrap();
-        let ids: Vec<u64> = listed_value
-            .iter()
-            .filter_map(|item| item.get("id").and_then(|id| id.as_u64()))
-            .collect();
+        let ids: Vec<u64> = listed.iter().map(|compactions| compactions.id).collect();
+        assert_eq!(ids, vec![1, 2, 3]);
+        assert_eq!(
+            listed
+                .iter()
+                .map(|compactions| compactions.compactions.recent_compactions().count())
+                .collect::<Vec<_>>(),
+            vec![0, 1, 2]
+        );
+        assert_eq!(
+            listed
+                .iter()
+                .map(|compactions| compactions.compactor_epoch)
+                .collect::<Vec<_>>(),
+            vec![2, 4, 6]
+        );
 
-        assert_eq!(ids, vec![1, 2]);
+        let bounded = admin.list_compactions(2..3).await.unwrap();
+        assert_eq!(
+            bounded
+                .iter()
+                .map(|compactions| compactions.id)
+                .collect::<Vec<_>>(),
+            vec![2]
+        );
+
+        let left_bounded = admin.list_compactions(2..).await.unwrap();
+        assert_eq!(
+            left_bounded
+                .iter()
+                .map(|compactions| compactions.id)
+                .collect::<Vec<_>>(),
+            vec![2, 3]
+        );
+
+        let right_bounded = admin.list_compactions(..3).await.unwrap();
+        assert_eq!(
+            right_bounded
+                .iter()
+                .map(|compactions| compactions.id)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
     }
 
     #[tokio::test]

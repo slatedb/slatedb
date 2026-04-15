@@ -2,7 +2,7 @@ use std::ops::Bound;
 
 use slatedb::ValueDeletable;
 
-use crate::error::SlateDbError;
+use crate::error::{CloseReason, SlateDbError};
 
 type KeyBound = Bound<Vec<u8>>;
 type KeyBounds = (KeyBound, KeyBound);
@@ -22,13 +22,6 @@ pub struct KeyRange {
 
 impl KeyRange {
     pub(crate) fn into_bounds(self) -> Result<KeyBounds, SlateDbError> {
-        if self.start.as_ref().is_some_and(|start| start.is_empty()) {
-            return Err(SlateDbError::EmptyRangeStart);
-        }
-        if self.end.as_ref().is_some_and(|end| end.is_empty()) {
-            return Err(SlateDbError::EmptyRangeEnd);
-        }
-
         if let (Some(start), Some(end)) = (&self.start, &self.end) {
             match start.cmp(end) {
                 std::cmp::Ordering::Greater => {
@@ -70,6 +63,24 @@ impl From<slatedb::WriteHandle> for WriteHandle {
         Self {
             seqnum: value.seqnum(),
             create_ts: value.create_ts(),
+        }
+    }
+}
+
+/// Snapshot of the current database lifecycle and durability state.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct DbStatus {
+    /// Highest durable sequence number observed by this handle.
+    pub durable_seq: u64,
+    /// Present once the handle has been closed.
+    pub close_reason: Option<CloseReason>,
+}
+
+impl From<slatedb::DbStatus> for DbStatus {
+    fn from(value: slatedb::DbStatus) -> Self {
+        Self {
+            durable_seq: value.durable_seq,
+            close_reason: value.close_reason.map(Into::into),
         }
     }
 }

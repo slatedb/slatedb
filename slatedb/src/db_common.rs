@@ -3,18 +3,15 @@ use parking_lot::RwLockWriteGuard;
 use crate::db::DbInner;
 use crate::db_state::DbState;
 use crate::error::SlateDBError;
-use crate::mem_table_flush::MemtableFlushMsg;
 use crate::oracle::Oracle;
 use crate::wal_replay::ReplayedMemtable;
 
 pub(crate) const MAX_WAL_FLUSHES_BEFORE_L0_FLUSH: u64 = 4096;
 
 impl DbInner {
-    pub(crate) fn maybe_freeze_memtable(
-        &self,
-        guard: &mut RwLockWriteGuard<'_, DbState>,
-        wal_id: u64,
-    ) -> Result<(), SlateDBError> {
+    pub(crate) fn maybe_freeze_current_memtable(&self) -> Result<(), SlateDBError> {
+        let wal_id = self.wal_buffer.recent_flushed_wal_id();
+        let mut guard = self.state.write();
         let meta = guard.memtable().metadata();
 
         let last_freeze_wal_id = guard
@@ -37,8 +34,14 @@ impl DbInner {
         {
             Ok(())
         } else {
-            self.freeze_memtable(guard, wal_id)
+            self.freeze_memtable(&mut guard, wal_id)
         }
+    }
+
+    pub(crate) fn freeze_current_memtable(&self) -> Result<(), SlateDBError> {
+        let wal_id = self.wal_buffer.recent_flushed_wal_id();
+        let mut guard = self.state.write();
+        self.freeze_memtable(&mut guard, wal_id)
     }
 
     pub(crate) fn freeze_memtable(
@@ -51,8 +54,7 @@ impl DbInner {
         }
 
         guard.freeze_memtable(wal_id);
-        self.memtable_flush_notifier
-            .send(MemtableFlushMsg::FlushImmutableMemtables { sender: None })?;
+        let _ = self.memtable_flusher().notify_memtable_frozen();
         Ok(())
     }
 
@@ -92,6 +94,9 @@ impl DbInner {
 
         // replace the memtable
         guard.replace_memtable(replayed_memtable.table);
+        let dirty_manifest = guard.state().manifest.clone();
+        drop(guard);
+        self.status_manager.report_manifest(dirty_manifest.into());
         Ok(())
     }
 }

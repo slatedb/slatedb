@@ -145,8 +145,7 @@ use crate::garbage_collector::GarbageCollector;
 use crate::garbage_collector::GC_TASK_NAME;
 use crate::instrumented_object_store::{InstrumentedObjectStore, ObjectStoreComponent};
 use crate::manifest::store::{FenceableManifest, ManifestStore, StoredManifest};
-use crate::mem_table_flush::MemtableFlusher;
-use crate::mem_table_flush::MEMTABLE_FLUSHER_TASK_NAME;
+use crate::memtable_flusher::MemtableFlusher;
 use crate::merge_operator::MergeOperatorType;
 use crate::object_stores::ObjectStoreType;
 use crate::object_stores::ObjectStores;
@@ -359,6 +358,12 @@ impl<P: Into<Path>> DbBuilder<P> {
 
     /// Builds and opens the database.
     pub async fn build(self) -> Result<Db, crate::Error> {
+        if self.settings.l0_flush_parallelism == 0 {
+            return Err(crate::Error::invalid(
+                "invalid configuration: l0_flush_parallelism must be at least 1".into(),
+            ));
+        }
+
         let path = self.path.into();
         // TODO: proper URI generation, for now it works just as a flag
         let wal_object_store_uri = self.wal_object_store.as_ref().map(|_| String::new());
@@ -511,14 +516,17 @@ impl<P: Into<Path>> DbBuilder<P> {
         // Shared lifecycle state — created before DbInner so it can be shared
         // with the executor and future channel construction.
         let manifest_dirty = manifest.prepare_dirty()?;
-        let status_manager = DbStatusManager::new(manifest_dirty.value.core.last_l0_seq);
+        let status_manager = DbStatusManager::new_with_manifest(
+            manifest_dirty.value.core.last_l0_seq,
+            manifest_dirty.clone().into(),
+        );
 
         // Setup communication channels wired to the shared closed state.
         let reader = status_manager.result_reader();
-        let (memtable_flush_tx, memtable_flush_rx) = SafeSender::unbounded_channel(reader.clone());
         let (write_tx, write_rx) = SafeSender::unbounded_channel(reader);
 
         // Create the database inner state
+        let memtable_flusher = Arc::new(MemtableFlusher::new(&status_manager));
         let inner = Arc::new(
             DbInner::new(
                 self.settings.clone(),
@@ -526,7 +534,7 @@ impl<P: Into<Path>> DbBuilder<P> {
                 rand.clone(),
                 table_store.clone(),
                 manifest_dirty,
-                memtable_flush_tx,
+                Arc::clone(&memtable_flusher),
                 write_tx,
                 recorder.clone(),
                 self.fp_registry.clone(),
@@ -551,18 +559,11 @@ impl<P: Into<Path>> DbBuilder<P> {
             inner.wal_buffer.init(task_executor.clone()).await?;
         };
         task_executor.add_handler(
-            MEMTABLE_FLUSHER_TASK_NAME.to_string(),
-            Box::new(MemtableFlusher::new(inner.clone(), manifest)),
-            memtable_flush_rx,
-            &tokio_handle,
-        )?;
-        task_executor.add_handler(
             WRITE_BATCH_TASK_NAME.to_string(),
             Box::new(WriteBatchEventHandler::new(inner.clone())),
             write_rx,
             &tokio_handle,
         )?;
-
         // Not to pollute the cache during compaction or GC
         let uncached_table_store = Arc::new(TableStore::new_with_fp_registry(
             ObjectStores::new(
@@ -632,6 +633,16 @@ impl<P: Into<Path>> DbBuilder<P> {
             let gc_handle = self.gc_runtime.as_ref().unwrap_or(&tokio_handle);
             task_executor.add_handler(GC_TASK_NAME.to_string(), Box::new(gc), rx, gc_handle)?;
         }
+
+        // Start the memtable flusher before WAL replay so that
+        // replayed immutable memtables can be flushed concurrently.
+        memtable_flusher.start(
+            inner.clone(),
+            manifest,
+            &tokio_handle,
+            &task_executor,
+            &inner.status_manager,
+        )?;
 
         // Monitor background tasks
         task_executor.monitor_on(&tokio_handle)?;
@@ -1442,6 +1453,7 @@ pub(crate) fn default_meta_cache() -> Option<Arc<dyn DbCache>> {
 #[cfg(test)]
 mod tests {
     use crate::config::Settings;
+    use crate::error::ErrorKind;
     use crate::garbage_collector::stats::GC_COUNT;
     use crate::instrumented_object_store::stats::REQUEST_COUNT as OBJECT_STORE_REQUEST_COUNT;
     use object_store::memory::InMemory;
@@ -1506,6 +1518,32 @@ mod tests {
         );
 
         db.close().await.expect("failed to close db");
+    }
+
+    #[tokio::test]
+    async fn test_db_builder_rejects_zero_l0_flush_parallelism() {
+        let result = crate::Db::builder(
+            "test_db_builder_rejects_zero_l0_flush_parallelism",
+            Arc::new(InMemory::new()),
+        )
+        .with_settings(Settings {
+            l0_flush_parallelism: 0,
+            ..Settings::default()
+        })
+        .build()
+        .await;
+
+        let err = match result {
+            Ok(_) => panic!("expected invalid l0_flush_parallelism to fail"),
+            Err(err) => err,
+        };
+
+        assert!(matches!(err.kind(), ErrorKind::Invalid));
+        assert!(
+            err.to_string()
+                .contains("l0_flush_parallelism must be at least 1"),
+            "unexpected error: {err}"
+        );
     }
 
     #[tokio::test]

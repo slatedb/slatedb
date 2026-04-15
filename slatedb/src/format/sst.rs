@@ -489,6 +489,14 @@ pub(crate) struct EncodedSsTable {
 }
 
 impl EncodedSsTable {
+    pub(crate) fn remaining_len(&self) -> usize {
+        self.unconsumed_blocks
+            .iter()
+            .map(|chunk| chunk.encoded_bytes.len())
+            .sum::<usize>()
+            + self.footer.len()
+    }
+
     pub(crate) fn put_remaining<T: BufMut>(&self, buf: &mut T) {
         for chunk in self.unconsumed_blocks.iter() {
             buf.put_slice(chunk.encoded_bytes.as_ref())
@@ -497,12 +505,7 @@ impl EncodedSsTable {
     }
 
     pub(crate) fn remaining_as_bytes(&self) -> Bytes {
-        let total_size = self
-            .unconsumed_blocks
-            .iter()
-            .map(|chunk| chunk.encoded_bytes.len())
-            .sum::<usize>()
-            + self.footer.len();
+        let total_size = self.remaining_len();
         let mut data = Vec::<u8>::with_capacity(total_size);
         self.put_remaining(&mut data);
         Bytes::from(data)
@@ -524,6 +527,14 @@ pub(crate) async fn compress_and_transform(
     let transformed = transform(compressed, block_transformer).await?;
     let checksum = crc32fast::hash(&transformed);
     let len = transformed.len() + CHECKSUM_SIZE;
+    // Reserve the exact number of bytes we are about to append. Without this,
+    // callers that pass an empty or undersized `Vec` (e.g.
+    // `EncodedSsTableBlockBuilder::build`, or the footer builder which calls
+    // this function multiple times on a shared `Vec`) pay `~log2(len)`
+    // reallocs per invocation as the backing buffer geometrically doubles.
+    // For workloads that build many blocks per SST (every write burst), those
+    // transient over-provisioned buffers dominate peak `inuse_space`.
+    buf.reserve(len);
     buf.put(transformed);
     buf.put_u32(checksum);
     Ok(len)

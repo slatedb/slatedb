@@ -32,14 +32,13 @@ async def test_db_lifecycle_and_status() -> None:
     store = new_memory_store()
     db = await DbBuilder(TEST_DB_PATH, store).build()
 
-    db.status()
+    status = db.status()
+    assert status.close_reason is None
     await db.put(b"lifecycle", b"value")
     await db.shutdown()
 
-    with pytest.raises(Error.Closed) as exc:
-        db.status()
-    assert exc.value.reason == CloseReason.CLEAN
-    assert exc.value.message == "Closed error: db is closed"
+    status = db.status()
+    assert status.close_reason == CloseReason.CLEAN
 
     with pytest.raises(Error.Closed) as exc:
         await db.put(b"after-shutdown", b"value")
@@ -275,17 +274,6 @@ async def test_db_invalid_inputs_map_to_typed_errors() -> None:
         with pytest.raises(Error.Invalid) as exc:
             await db.scan(
                 KeyRange(
-                    start=b"",
-                    start_inclusive=True,
-                    end=None,
-                    end_inclusive=False,
-                )
-            )
-        assert exc.value.message == "range start cannot be empty"
-
-        with pytest.raises(Error.Invalid) as exc:
-            await db.scan(
-                KeyRange(
                     start=b"z",
                     start_inclusive=True,
                     end=b"a",
@@ -304,6 +292,13 @@ async def test_db_invalid_inputs_map_to_typed_errors() -> None:
                 )
             )
         assert exc.value.message == "range must be non-empty"
+
+        # Scan with empty start bound should succeed and be treated as unbounded start.
+        await db.put(b"seed", b"value")
+        scan = await db.scan(
+            KeyRange(start=b"", start_inclusive=True, end=None, end_inclusive=False)
+        )
+        require_rows(await drain_iterator(scan), ["seed"], ["value"])
 
 
 @pytest.mark.asyncio

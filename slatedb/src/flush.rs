@@ -2,6 +2,7 @@ use crate::db::DbInner;
 use crate::db_state;
 use crate::db_state::SsTableHandle;
 use crate::error::SlateDBError;
+use crate::format::sst::EncodedSsTable;
 use crate::iter::RowEntryIterator;
 use crate::mem_table::KVTable;
 use crate::merge_operator::{MergeOperatorIterator, MergeOperatorRequiredIterator};
@@ -11,19 +12,26 @@ use crate::retention_iterator::RetentionIterator;
 use std::sync::Arc;
 
 impl DbInner {
-    pub(crate) async fn flush_imm_table(
+    pub(crate) async fn build_imm_sst(
         &self,
-        id: &db_state::SsTableId,
         imm_table: Arc<KVTable>,
-        write_cache: bool,
-    ) -> Result<SsTableHandle, SlateDBError> {
+    ) -> Result<EncodedSsTable, SlateDBError> {
         let mut sst_builder = self.table_store.table_builder();
-        let mut iter = self.iter_imm_table(imm_table.clone()).await?;
+        let mut iter = self.iter_imm_table(imm_table).await?;
         while let Some(entry) = iter.next().await? {
             sst_builder.add(entry).await?;
         }
 
-        let encoded_sst = sst_builder.build().await?;
+        sst_builder.build().await
+    }
+
+    pub(crate) async fn upload_compacted_sst(
+        &self,
+        id: &db_state::SsTableId,
+        imm_table: Arc<KVTable>,
+        encoded_sst: EncodedSsTable,
+        write_cache: bool,
+    ) -> Result<SsTableHandle, SlateDBError> {
         let handle = self
             .table_store
             .write_sst(id, encoded_sst, write_cache)
@@ -33,6 +41,17 @@ impl DbInner {
             .fetch_max_last_durable_tick(imm_table.last_tick());
 
         Ok(handle)
+    }
+
+    pub(crate) async fn flush_imm_table(
+        &self,
+        id: &db_state::SsTableId,
+        imm_table: Arc<KVTable>,
+        write_cache: bool,
+    ) -> Result<SsTableHandle, SlateDBError> {
+        let encoded_sst = self.build_imm_sst(imm_table.clone()).await?;
+        self.upload_compacted_sst(id, imm_table, encoded_sst, write_cache)
+            .await
     }
 
     async fn iter_imm_table(
@@ -61,7 +80,7 @@ impl DbInner {
         .flatten()
         .min();
 
-        let merge_iter = if let Some(merge_operator) = self.reader.merge_operator.clone() {
+        let merge_iter = if let Some(merge_operator) = self.flush_merge_operator.clone() {
             Box::new(MergeOperatorIterator::new(
                 merge_operator,
                 imm_table.iter(),
@@ -96,11 +115,13 @@ mod tests {
     use crate::error::SlateDBError::MergeOperatorMissing;
     use crate::iter::RowEntryIterator;
     use crate::mem_table::WritableKVTable;
+    use crate::merge_operator::{MERGE_OPERATOR_FLUSH_PATH, MERGE_OPERATOR_READ_PATH};
     use crate::object_store::memory::InMemory;
-    use crate::test_utils::StringConcatMergeOperator;
+    use crate::test_utils::{lookup_merge_operator_operands, StringConcatMergeOperator};
     use crate::types::{RowEntry, ValueDeletable};
     use bytes::Bytes;
     use rstest::rstest;
+    use slatedb_common::metrics::test_recorder_helper;
     use std::sync::Arc;
     use ulid::Ulid;
 
@@ -350,6 +371,55 @@ mod tests {
 
         // Then
         verify_sst(&db, &sst_handle, &test_case.expected_entries).await;
+
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn should_record_merge_operator_operands_on_flush_path() {
+        let (metrics_recorder, _) = test_recorder_helper();
+        let object_store: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
+        let db = Db::builder("/tmp/test_merge_operands_flush", object_store)
+            .with_metrics_recorder(metrics_recorder.clone())
+            .with_merge_operator(Arc::new(StringConcatMergeOperator))
+            .build()
+            .await
+            .unwrap();
+
+        db.inner.oracle.advance_durable_seq(u64::MAX);
+
+        let table = WritableKVTable::new();
+        table.put(RowEntry::new_merge(&Bytes::from("key1"), b"a", 1));
+        table.put(RowEntry::new_merge(&Bytes::from("key1"), b"b", 2));
+
+        assert_eq!(
+            lookup_merge_operator_operands(metrics_recorder.as_ref(), MERGE_OPERATOR_READ_PATH),
+            Some(0)
+        );
+        assert_eq!(
+            lookup_merge_operator_operands(metrics_recorder.as_ref(), MERGE_OPERATOR_FLUSH_PATH,),
+            Some(0)
+        );
+
+        db.inner
+            .flush_imm_table(
+                &SsTableId::Compacted(Ulid::new()),
+                table.table().clone(),
+                false,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            lookup_merge_operator_operands(metrics_recorder.as_ref(), MERGE_OPERATOR_READ_PATH),
+            Some(0)
+        );
+        assert_eq!(
+            lookup_merge_operator_operands(metrics_recorder.as_ref(), MERGE_OPERATOR_FLUSH_PATH,),
+            // Two raw merge rows produce one intermediate batch result and one
+            // final merge_batch call over that result.
+            Some(3)
+        );
 
         db.close().await.unwrap();
     }

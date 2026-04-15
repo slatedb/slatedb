@@ -96,7 +96,7 @@ async fn exec_read_manifest(admin: &Admin, id: Option<u64>) -> Result<(), Box<dy
             println!("no manifest file found")
         }
         Some(manifest) => {
-            println!("{}", manifest);
+            println!("{}", serde_json::to_string(&manifest)?);
         }
     }
     Ok(())
@@ -108,7 +108,7 @@ async fn exec_read_compactions(admin: &Admin, id: Option<u64>) -> Result<(), Box
             println!("no compactions file found")
         }
         Some(compactions) => {
-            println!("{}", compactions);
+            println!("{}", serde_json::to_string(&compactions)?);
         }
     }
     Ok(())
@@ -126,7 +126,10 @@ async fn exec_list_manifest(
         _ => u64::MIN..u64::MAX,
     };
 
-    println!("{}", admin.list_manifests(range).await?);
+    println!(
+        "{}",
+        serde_json::to_string(&admin.list_manifests(range).await?)?
+    );
     Ok(())
 }
 
@@ -142,7 +145,10 @@ async fn exec_list_compactions(
         _ => u64::MIN..u64::MAX,
     };
 
-    println!("{}", admin.list_compactions(range).await?);
+    println!(
+        "{}",
+        serde_json::to_string(&admin.list_compactions(range).await?)?
+    );
     Ok(())
 }
 

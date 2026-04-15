@@ -139,12 +139,14 @@ impl DbInner {
             }
         }
 
+        // Count batch-local merge folding on the flush path so DB-side merge
+        // resolution uses one metric for both write batches and memtable flushes.
         let entries = batch
             .extract_entries(
                 commit_seq,
                 now,
                 self.settings.default_ttl,
-                self.reader.merge_operator.clone(),
+                self.flush_merge_operator.clone(),
             )
             .await?;
 
@@ -201,11 +203,7 @@ impl DbInner {
         self.record_memtable_sequence(commit_seq);
 
         // maybe freeze the memtable.
-        {
-            let last_flushed_wal_id = self.wal_buffer.recent_flushed_wal_id();
-            let mut guard = self.state.write();
-            self.maybe_freeze_memtable(&mut guard, last_flushed_wal_id)?;
-        }
+        self.maybe_freeze_current_memtable()?;
 
         let write_handle = WriteHandle::new(commit_seq, now);
 

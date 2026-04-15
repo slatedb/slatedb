@@ -41,6 +41,7 @@ pub use compaction_filter::{
     CompactionJobContext,
 };
 pub use compactor::CompactorBuilder;
+pub use compactor_state::VersionedCompactions;
 pub use config::{Settings, SstBlockSize};
 pub use db::{Db, DbBuilder, DbReaderBuilder, DbStatus, WriteHandle};
 pub use db_cache::stats as db_cache_stats;
@@ -48,6 +49,7 @@ pub use db_iter::DbIterator;
 pub use db_read::DbRead;
 pub use db_reader::DbReader;
 pub use db_snapshot::DbSnapshot;
+pub use db_state::VersionedManifest;
 pub use db_transaction::DbTransaction;
 pub use error::{CloseReason, Error, ErrorKind};
 pub use filter::BloomFilter;
@@ -58,6 +60,7 @@ pub use filter_policy::{
 pub use format::sst::BlockTransformer;
 pub use garbage_collector::stats as garbage_collector_stats;
 pub use garbage_collector::GarbageCollectorBuilder;
+pub use iter::IterationOrder;
 pub use merge_operator::{MergeOperator, MergeOperatorError};
 pub use rand::DbRand;
 #[cfg(test)]
@@ -124,7 +127,7 @@ mod garbage_collector;
 mod instrumented_object_store;
 mod iter;
 mod mem_table;
-mod mem_table_flush;
+mod memtable_flusher;
 mod merge_iterator;
 mod merge_operator;
 mod object_stores;

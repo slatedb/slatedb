@@ -160,8 +160,9 @@ pub(crate) struct ImmutableMemtable {
     /// that already contained in the last L0 SST.
     recent_flushed_wal_id: u64,
     table: Arc<KVTable>,
-    /// This flushed watchable cell is useful for users who enable `await_durable` on the writes.
-    flushed: WatchableOnceCell<Result<(), SlateDBError>>,
+    /// Notified when the memtable's SST has been uploaded to object storage.
+    /// Used to release backpressure on writers when unflushed bytes are too high.
+    uploaded: WatchableOnceCell<Result<(), SlateDBError>>,
     /// A snapshot of the sequence tracker taken when this immutable memtable was created.
     /// This avoids needing to access the sequence tracker through a mutex on the underlying table.
     sequence_tracker: SequenceTracker,
@@ -281,7 +282,7 @@ impl ImmutableMemtable {
         Self {
             table: table.table,
             recent_flushed_wal_id,
-            flushed: WatchableOnceCell::new(),
+            uploaded: WatchableOnceCell::new(),
             sequence_tracker,
         }
     }
@@ -294,12 +295,12 @@ impl ImmutableMemtable {
         self.recent_flushed_wal_id
     }
 
-    pub(crate) async fn await_flush_to_l0(&self) -> Result<(), SlateDBError> {
-        self.flushed.reader().await_value().await
+    pub(crate) async fn await_uploaded(&self) -> Result<(), SlateDBError> {
+        self.uploaded.reader().await_value().await
     }
 
-    pub(crate) fn notify_flush_to_l0(&self, result: Result<(), SlateDBError>) {
-        self.flushed.write(result);
+    pub(crate) fn notify_uploaded(&self, result: Result<(), SlateDBError>) {
+        self.uploaded.write(result);
     }
 
     pub(crate) fn sequence_tracker(&self) -> &SequenceTracker {
