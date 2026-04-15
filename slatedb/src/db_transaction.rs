@@ -160,7 +160,7 @@ impl DbTransaction {
         let write_batch_iter = {
             let guard = self.write_batch.read();
             Some(WriteBatchIterator::new(
-                &*guard,
+                &guard,
                 range,
                 IterationOrder::Ascending,
             ))
@@ -243,7 +243,7 @@ impl DbTransaction {
         let write_batch_iter = {
             let guard = self.write_batch.read();
             Some(WriteBatchIterator::new(
-                &*guard,
+                &guard,
                 range.clone(),
                 options.order,
             ))
