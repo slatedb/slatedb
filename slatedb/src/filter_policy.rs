@@ -54,7 +54,7 @@ pub trait FilterBuilder: Send {
     fn add_entry(&mut self, entry: &RowEntry);
 
     /// Finalizes and returns the completed filter.
-    fn build(&self) -> Arc<dyn Filter>;
+    fn build(&mut self) -> Arc<dyn Filter>;
 }
 
 /// A read-only filter that answers membership queries.
@@ -148,17 +148,38 @@ pub trait PrefixExtractor: Send + Sync {
     /// includes this name in the policy name it writes to SST metadata.
     fn name(&self) -> &str;
 
-    /// Returns whether the given prefix is a valid output of `extract()`.
+    /// Returns whether `prefix` is a valid output of [`prefix_len`]
     ///
-    /// This is used on the read path to verify that a scan prefix provided
-    /// by the user matches the prefix format indexed in the filter. If this
-    /// returns `false`, the filter must NOT be consulted; doing so can
-    /// produce false negatives.
+    /// Used on the read path to decide whether a user-provided scan prefix
+    /// can be answered by the filter. If this returns `false`, the filter
+    /// must NOT be consulted; doing so can produce false negatives.
+    ///
+    /// **Consistency with `prefix_len`:** implementors must ensure that
+    /// `in_domain` agrees with what `prefix_len` would produce. In
+    /// particular, if `prefix_len(key)` returns `None` for every key that
+    /// begins with some byte string `p`, then `in_domain(p)` must return
+    /// `false`, otherwise the read path will consult the filter for a
+    /// prefix that was never hashed into it and silently miss real data.
     fn in_domain(&self, prefix: &[u8]) -> bool;
 
-    /// Extracts the prefix from a key. Returns `None` if the key does not
-    /// contain a recognizable prefix.
-    fn extract<'a>(&self, key: &'a [u8]) -> Option<&'a [u8]>;
+    /// Returns the length of the prefix this extractor produces from `key`,
+    /// or `None` if `key` has no extractable prefix. The caller interprets
+    /// the returned length as `&key[..len]`.
+    ///
+    /// For example, an extractor that selectively indexes keys matching
+    /// `"user:"` (so that `scan_prefix("user:")` can use the filter) but
+    /// ignores all other keys would return:
+    /// - `prefix_len(b"user:alice")` → `Some(5)` (hash `"user:"` into the filter)
+    /// - `prefix_len(b"user:bob")`   → `Some(5)` (same)
+    /// - `prefix_len(b"post:42")`    → `None`    (don't index this key's prefix)
+    /// - `prefix_len(b"session:x")`  → `None`    (don't index this key's prefix)
+    ///
+    /// When `None` is returned, the caller skips adding a prefix for this
+    /// key into the filter. A prefix scan over this key's prefix cannot
+    /// use the filter and must fall back to scanning the SST directly
+    /// which requires that [`in_domain`] also return `false` for such prefixes
+    /// (see the note on `in_domain`).
+    fn prefix_len(&self, key: &[u8]) -> Option<usize>;
 }
 
 /// A filter policy backed by the existing bloom filter implementation.

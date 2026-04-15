@@ -376,7 +376,7 @@ impl EncodedSsTableBuilder<'_> {
         {
             let filters: Arc<[NamedFilter]> = self
                 .filter_builders
-                .iter()
+                .iter_mut()
                 .map(|(name, fb)| NamedFilter {
                     name: name.clone(),
                     filter: fb.build(),

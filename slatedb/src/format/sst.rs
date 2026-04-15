@@ -385,30 +385,30 @@ impl<'a, 'b> EncodedSsTableFooterBuilder<'a, 'b> {
         // Write composite filter block if any filters are present
         let filter_offset = self.blocks_size + buf.len() as u64;
         let filters = std::mem::take(&mut self.filters);
-        let (filter_len, decoded_filters) = if filters.is_empty() {
-            (0u64, Arc::from([]))
+        let filter_len = if filters.is_empty() {
+            0u64
         } else {
             // Encode composite filter block:
-            // [num_filters: u32][name_len: u32][name_bytes...][data_len: u32][data_bytes...]...
+            // [num_filters: u16][name_len: u16][name_bytes...][data_len: u64][data_bytes...]...
             let mut composite = Vec::new();
-            composite.put_u32(filters.len() as u32);
+            composite.put_u16(u16::try_from(filters.len()).expect("too many filters"));
             for nf in filters.iter() {
                 let name_bytes = nf.name.as_bytes();
-                composite.put_u32(name_bytes.len() as u32);
+                composite
+                    .put_u16(u16::try_from(name_bytes.len()).expect("filter policy name too long"));
                 composite.put_slice(name_bytes);
                 let mut encoded_data = Vec::new();
                 nf.filter.encode(&mut encoded_data);
-                composite.put_u32(encoded_data.len() as u32);
+                composite.put_u64(encoded_data.len() as u64);
                 composite.put_slice(&encoded_data);
             }
-            let len = compress_and_transform(
+            compress_and_transform(
                 &mut buf,
                 Bytes::from(composite),
                 self.compression_codec,
                 self.block_transformer.as_ref(),
             )
-            .await?;
-            (len as u64, filters)
+            .await? as u64
         };
 
         let vector = self.index_builder.create_vector(&self.block_meta);
@@ -470,7 +470,7 @@ impl<'a, 'b> EncodedSsTableFooterBuilder<'a, 'b> {
         Ok(EncodedSsTableFooter {
             info,
             index,
-            filters: decoded_filters,
+            filters,
             stats: maybe_stats,
             encoded_bytes: Bytes::from(buf),
         })
@@ -726,7 +726,7 @@ impl SsTableFormat {
 
     /// Decodes a composite filter block.
     ///
-    /// Format: `[num_filters: u32][name_len: u32][name_bytes...][data_len: u32][data_bytes...]...`
+    /// Format: `[num_filters: u16][name_len: u16][name_bytes...][data_len: u64][data_bytes...]...`
     ///
     /// Each filter's name is matched against the configured `filter_policies`.
     /// Filters whose policy is not found are dropped to support filter migration.
@@ -735,17 +735,17 @@ impl SsTableFormat {
         data: &[u8],
     ) -> Result<Arc<[NamedFilter]>, SlateDBError> {
         let mut cursor = data;
-        if cursor.len() < 4 {
+        if cursor.len() < 2 {
             return Err(SlateDBError::InvalidFilterBlock);
         }
-        let num_filters = cursor.get_u32() as usize;
+        let num_filters = cursor.get_u16() as usize;
         let mut filters: Vec<NamedFilter> = Vec::with_capacity(num_filters);
 
         for _ in 0..num_filters {
-            if cursor.len() < 4 {
+            if cursor.len() < 2 {
                 return Err(SlateDBError::InvalidFilterBlock);
             }
-            let name_len = cursor.get_u32() as usize;
+            let name_len = cursor.get_u16() as usize;
             if cursor.len() < name_len {
                 return Err(SlateDBError::InvalidFilterBlock);
             }
@@ -753,10 +753,11 @@ impl SsTableFormat {
                 .map_err(|_| SlateDBError::InvalidFilterBlock)?;
             cursor.advance(name_len);
 
-            if cursor.len() < 4 {
+            if cursor.len() < 8 {
                 return Err(SlateDBError::InvalidFilterBlock);
             }
-            let data_len = cursor.get_u32() as usize;
+            let data_len =
+                usize::try_from(cursor.get_u64()).map_err(|_| SlateDBError::InvalidFilterBlock)?;
             if cursor.len() < data_len {
                 return Err(SlateDBError::InvalidFilterBlock);
             }
@@ -1077,11 +1078,11 @@ impl SsTableFormat {
 
     fn estimate_encoded_size_filter(&self, entry_num: usize) -> usize {
         if entry_num >= self.min_filter_keys as usize && !self.filter_policies.is_empty() {
-            // Composite block framing: [num_filters: u32]
-            let mut size = 4;
+            // Composite block framing: [num_filters: u16]
+            let mut size = 2;
             for p in &self.filter_policies {
-                // Per-filter framing: [name_len: u32][name_bytes][data_len: u32]
-                size += 4 + p.name().len() + 4;
+                // Per-filter framing: [name_len: u16][name_bytes][data_len: u64]
+                size += 2 + p.name().len() + 8;
                 size += p.estimate_size(entry_num);
             }
             size

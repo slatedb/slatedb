@@ -147,8 +147,8 @@ pub trait FilterBuilder {
     /// whichever fields they need.
     fn add_entry(&mut self, entry: &RowEntry);
 
-    /// Finalizes and return the completed filter.
-    fn build(&self) -> Arc<dyn Filter>;
+    /// Finalizes and returns the completed filter.
+    fn build(&mut self) -> Arc<dyn Filter>;
 }
 
 /// A read-only filter that answers membership queries.
@@ -304,10 +304,11 @@ pub trait PrefixExtractor {
     /// falls back to scanning the SST directly.
     fn in_domain(&self, prefix: &[u8]) -> bool;
 
-    /// Extracts the prefix from a key. Returns `None` if the key does not
-    /// contain a recognizable prefix (i.e., `in_domain` would return `false`
-    /// for the key).
-    fn extract<'a>(&self, key: &'a [u8]) -> Option<&'a [u8]>;
+    /// Returns the length of the prefix this extractor produces from `key`,
+    /// or `None` if the key does not contain a recognizable prefix (i.e.,
+    /// `in_domain` would return `false` for any prefix of the key). The
+    /// caller interprets the returned length as `&key[..len]`.
+    fn prefix_len(&self, key: &[u8]) -> Option<usize>;
 }
 ```
 
@@ -571,9 +572,9 @@ When `filter_format` is `Composite`, the filter block at
 `filter_offset`/`filter_len` contains a list of named filters:
 
 ```
-[num_filters: u32]
-[name_len: u32][name: bytes][data_len: u32][data: bytes]   // filter 0
-[name_len: u32][name: bytes][data_len: u32][data: bytes]   // filter 1
+[num_filters: u16]
+[name_len: u16][name: bytes][data_len: u64][data: bytes]   // filter 0
+[name_len: u16][name: bytes][data_len: u64][data: bytes]   // filter 1
 ...
 ```
 

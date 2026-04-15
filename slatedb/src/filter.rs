@@ -31,14 +31,15 @@ impl BloomFilterBuilder {
         filter_bits.div_ceil(8) as usize
     }
 
-    fn build_filter(&self) -> BloomFilter {
+    fn build_filter(&mut self) -> BloomFilter {
         let num_probes = optimal_num_probes(self.bits_per_key);
+        let key_hashes = std::mem::take(&mut self.key_hashes);
         let filter_bytes =
-            BloomFilterBuilder::filter_size_bytes(self.key_hashes.len() as u32, self.bits_per_key);
+            BloomFilterBuilder::filter_size_bytes(key_hashes.len() as u32, self.bits_per_key);
         let filter_bits = (filter_bytes * 8) as u32;
         let mut buffer = vec![0x00; filter_bytes];
-        for k in self.key_hashes.iter() {
-            let probes = probes_for_key(*k, num_probes, filter_bits);
+        for k in key_hashes {
+            let probes = probes_for_key(k, num_probes, filter_bits);
             for p in probes {
                 set_bit(p as usize, &mut buffer)
             }
@@ -49,7 +50,6 @@ impl BloomFilterBuilder {
         }
     }
 
-    #[cfg(test)]
     fn add_key(&mut self, key: &[u8]) {
         self.key_hashes.push(filter_hash(key))
     }
@@ -88,10 +88,10 @@ impl BloomFilter {
 
 impl FilterBuilder for BloomFilterBuilder {
     fn add_entry(&mut self, entry: &RowEntry) {
-        self.key_hashes.push(filter_hash(&entry.key));
+        self.add_key(&entry.key);
     }
 
-    fn build(&self) -> Arc<dyn Filter> {
+    fn build(&mut self) -> Arc<dyn Filter> {
         Arc::new(self.build_filter())
     }
 }
