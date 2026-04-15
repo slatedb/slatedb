@@ -377,7 +377,10 @@ impl EncodedSsTableBuilder<'_> {
             let filters: Arc<[NamedFilter]> = self
                 .filter_builders
                 .iter()
-                .map(|(name, fb)| NamedFilter::new(name.clone(), fb.build()))
+                .map(|(name, fb)| NamedFilter {
+                    name: name.clone(),
+                    filter: fb.build(),
+                })
                 .collect::<Vec<_>>()
                 .into();
             footer_builder = footer_builder.with_filters(filters);
@@ -646,9 +649,10 @@ mod tests {
         let encoded_info = encoded.info.clone();
 
         for nf in encoded.filters.iter() {
-            let encoded_filter = nf.encode_data();
+            let mut encoded_filter = Vec::new();
+            nf.filter.encode(&mut encoded_filter);
             // encoded data includes the 2-byte num_probes header
-            assert_eq!(encoded_filter.len(), 2 + nf.size());
+            assert_eq!(encoded_filter.len(), 2 + nf.filter.size());
         }
 
         // write sst and validate that the handle returned has the correct content.
@@ -732,7 +736,7 @@ mod tests {
         let index = table_store.read_index(&sst_handle, true).await.unwrap();
         let filters = table_store.read_filters(&sst_handle, true).await.unwrap();
         assert!(!filters.is_empty());
-        let filter = filters[0].unwrap_filter();
+        let filter = &filters[0].filter;
 
         assert!(filter.might_match(&FilterQuery::point(Bytes::from_static(b"key1"))));
         assert!(filter.might_match(&FilterQuery::point(Bytes::from_static(b"key2"))));
@@ -811,7 +815,7 @@ mod tests {
         let index = table_store.read_index(&sst_handle, true).await.unwrap();
         let filters = table_store.read_filters(&sst_handle, true).await.unwrap();
         assert!(!filters.is_empty());
-        let filter = filters[0].unwrap_filter();
+        let filter = &filters[0].filter;
 
         assert!(filter.might_match(&FilterQuery::point(Bytes::from_static(b"key1"))));
         assert!(filter.might_match(&FilterQuery::point(Bytes::from_static(b"key2"))));
@@ -1180,7 +1184,7 @@ mod tests {
         let index = table_store.read_index(&sst_handle, true).await.unwrap();
         let filters = table_store.read_filters(&sst_handle, true).await.unwrap();
         assert!(!filters.is_empty());
-        let filter = filters[0].unwrap_filter();
+        let filter = &filters[0].filter;
 
         assert!(filter.might_match(&FilterQuery::point(Bytes::from_static(b"key1"))));
         assert!(filter.might_match(&FilterQuery::point(Bytes::from_static(b"key2"))));

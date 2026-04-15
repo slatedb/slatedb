@@ -13,6 +13,7 @@ use crate::sst_stats::{BlockStats, SstStats};
 use async_trait::async_trait;
 use bytes::{Buf, BufMut, Bytes};
 use flatbuffers::DefaultAllocator;
+use log::warn;
 use std::collections::VecDeque;
 #[cfg(feature = "zlib")]
 use std::io::Read;
@@ -392,10 +393,11 @@ impl<'a, 'b> EncodedSsTableFooterBuilder<'a, 'b> {
             let mut composite = Vec::new();
             composite.put_u32(filters.len() as u32);
             for nf in filters.iter() {
-                let name_bytes = nf.name().as_bytes();
+                let name_bytes = nf.name.as_bytes();
                 composite.put_u32(name_bytes.len() as u32);
                 composite.put_slice(name_bytes);
-                let encoded_data = nf.encode_data();
+                let mut encoded_data = Vec::new();
+                nf.filter.encode(&mut encoded_data);
                 composite.put_u32(encoded_data.len() as u32);
                 composite.put_slice(&encoded_data);
             }
@@ -693,15 +695,18 @@ impl SsTableFormat {
 
         match info.filter_format {
             FilterFormat::Legacy => {
-                // Legacy pre-composite SST: raw filter bytes are decoded to
-                // a bloom filter policy.
-                let legacy: Vec<NamedFilter> = NamedFilter::decode_raw(
-                    BloomFilterPolicy::NAME,
-                    &decompressed_bytes,
-                    &self.filter_policies,
-                )
-                .into_iter()
-                .collect();
+                // Legacy pre-composite SST: raw filter bytes are decoded
+                // against the bloom filter policy if one is configured.
+                let legacy: Vec<NamedFilter> = self
+                    .filter_policies
+                    .iter()
+                    .find(|p| p.name() == BloomFilterPolicy::NAME)
+                    .map(|policy| NamedFilter {
+                        name: policy.name().to_string(),
+                        filter: policy.decode(&decompressed_bytes),
+                    })
+                    .into_iter()
+                    .collect();
                 Ok(legacy.into())
             }
             FilterFormat::Composite => self.decode_composite_filter_block(&decompressed_bytes),
@@ -747,8 +752,14 @@ impl SsTableFormat {
             let filter_data = &cursor[..data_len];
             cursor.advance(data_len);
 
-            if let Some(nf) = NamedFilter::decode_raw(name, filter_data, &self.filter_policies) {
-                filters.push(nf);
+            match self.filter_policies.iter().find(|p| p.name() == name) {
+                Some(policy) => filters.push(NamedFilter {
+                    name: policy.name().to_string(),
+                    filter: policy.decode(filter_data),
+                }),
+                None => {
+                    warn!("unknown filter policy '{}' in SST, skipping", name);
+                }
             }
         }
 

@@ -14,7 +14,7 @@ use tokio::io::AsyncWriteExt;
 use ulid::Ulid;
 
 use crate::blob::ReadOnlyBlob;
-use crate::db_cache::{CachedEntry, CachedKey, DbCache};
+use crate::db_cache::{CachedEntry, CachedKey, DbCache, EncodedCachedFilter};
 use crate::db_state::{SsTableHandle, SsTableId};
 use crate::error::SlateDBError;
 use crate::filter_policy::NamedFilter;
@@ -247,33 +247,32 @@ impl TableStore {
         }
     }
 
-    /// Returns a fully-decoded view of `named_filters`.
-    ///
-    /// Fast path: if every entry is already decoded, returns the input
-    /// unchanged. Slow path (any entry raw, only possible right after a
-    /// disk-cache deserialize): decodes raw entries via [`NamedFilter::resolve`],
-    /// drops entries with unknown policies, and re-inserts the decoded slice
-    /// into the cache so subsequent hits take the fast path.
-    async fn resolve_and_refresh_cache(
+    /// Decodes an `EncodedCachedFilter` slice into a fully-decoded
+    /// `Arc<[NamedFilter]>` and overwrites the cache entry under `cache_key`
+    /// with the decoded form so subsequent hits bypass the decode step.
+    /// Entries whose policy name has no match in the configured policies are
+    /// dropped.
+    async fn decode_and_refresh(
         &self,
         cache: &Arc<dyn DbCache>,
         cache_key: CachedKey,
-        named_filters: Arc<[NamedFilter]>,
+        encoded: &[EncodedCachedFilter],
     ) -> Arc<[NamedFilter]> {
-        if named_filters.iter().all(|nf| nf.is_decoded()) {
-            return named_filters;
-        }
-
         let policies = &self.sst_format.filter_policies;
-        let decoded: Arc<[NamedFilter]> = named_filters
+        let decoded: Arc<[NamedFilter]> = encoded
             .iter()
-            .filter_map(|nf| {
-                let filter = nf.resolve(policies)?;
-                Some(if nf.is_decoded() {
-                    nf.clone()
-                } else {
-                    NamedFilter::new(nf.name().to_string(), filter)
-                })
+            .filter_map(|ef| match policies.iter().find(|p| p.name() == ef.name) {
+                Some(policy) => Some(NamedFilter {
+                    name: ef.name.clone(),
+                    filter: policy.decode(&ef.data),
+                }),
+                None => {
+                    warn!(
+                        "unknown filter policy '{}' in cached filter, skipping",
+                        ef.name
+                    );
+                    None
+                }
             })
             .collect::<Vec<_>>()
             .into();
@@ -395,15 +394,18 @@ impl TableStore {
     ) -> Result<Arc<[NamedFilter]>, SlateDBError> {
         let cache_key = (handle.id, handle.info.filter_offset).into();
         if let Some(ref cache) = self.cache {
-            if let Some(named_filters) = cache
-                .get_filter(&cache_key)
-                .await
-                .unwrap_or(None)
-                .and_then(|e| e.filters())
-            {
-                return Ok(self
-                    .resolve_and_refresh_cache(cache, cache_key, named_filters)
-                    .await);
+            let entry = cache.get_filter(&cache_key).await.unwrap_or(None);
+            if let Some(entry) = entry {
+                // Already decoded.
+                if let Some(filters) = entry.filters() {
+                    return Ok(filters);
+                }
+
+                // Encoded form from disk-cache deserialize. Decode
+                // and overwrite the cache entry with the decoded form.
+                if let Some(encoded) = entry.encoded_filters() {
+                    return Ok(self.decode_and_refresh(cache, cache_key, &encoded).await);
+                }
             }
         }
         let object_store = self.object_stores.store_for(&handle.id);

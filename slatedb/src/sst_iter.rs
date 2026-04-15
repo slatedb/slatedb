@@ -232,9 +232,7 @@ impl FilterEvaluator {
         // AND logic: if any filter says the key is NOT present, filter it out.
         // All filters reaching here are decoded — TableStore::read_filters
         // resolves any raw cache entries before returning.
-        let might_match = filters
-            .iter()
-            .all(|nf| nf.unwrap_filter().might_match(&query));
+        let might_match = filters.iter().all(|nf| nf.filter.might_match(&query));
 
         if might_match {
             if let Some(stats) = &self.db_stats {
@@ -1314,7 +1312,7 @@ mod tests {
         let collision_key = b"k12";
         assert!(
             filters[0]
-                .unwrap_filter()
+                .filter
                 .might_match(&FilterQuery::point(Bytes::from_static(collision_key))),
             "bloom filter should report collision for hard-coded key"
         );

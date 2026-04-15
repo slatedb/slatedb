@@ -187,12 +187,24 @@ impl From<(SsTableId, u64)> for CachedKey {
     }
 }
 
+/// A filter cached in its on-disk byte form, paired with the name of the
+/// policy that produced it. Only produced by disk-cache deserialization
+/// (`db_cache::serde`), which has no access to the configured filter
+/// policies; converted to a [`NamedFilter`] by `TableStore::read_filters`
+/// on the first hit after deserialization.
+#[derive(Clone)]
+pub(crate) struct EncodedCachedFilter {
+    pub(crate) name: String,
+    pub(crate) data: bytes::Bytes,
+}
+
 #[non_exhaustive]
 #[derive(Clone)]
 enum CachedItem {
     Block(Arc<Block>),
     SsTableIndex(Arc<SsTableIndexOwned>),
     Filters(Arc<[NamedFilter]>),
+    EncodedFilters(Arc<[EncodedCachedFilter]>),
     SstStats(Arc<SstStats>),
 }
 
@@ -221,10 +233,18 @@ impl CachedEntry {
         }
     }
 
-    /// Create a new `CachedEntry` with the given filters.
+    /// Create a new `CachedEntry` with the given decoded filters.
     pub(crate) fn with_filters(filters: Arc<[NamedFilter]>) -> Self {
         Self {
             item: CachedItem::Filters(filters),
+        }
+    }
+
+    /// Create a new `CachedEntry` with the given encoded filters (produced
+    /// by disk-cache deserialization).
+    pub(crate) fn with_encoded_filters(filters: Arc<[EncodedCachedFilter]>) -> Self {
+        Self {
+            item: CachedItem::EncodedFilters(filters),
         }
     }
 
@@ -256,6 +276,13 @@ impl CachedEntry {
         }
     }
 
+    pub(crate) fn encoded_filters(&self) -> Option<Arc<[EncodedCachedFilter]>> {
+        match &self.item {
+            CachedItem::EncodedFilters(filters) => Some(filters.clone()),
+            _ => None,
+        }
+    }
+
     pub(crate) fn sst_stats(&self) -> Option<Arc<SstStats>> {
         match &self.item {
             CachedItem::SstStats(stats) => Some(stats.clone()),
@@ -271,7 +298,8 @@ impl CachedEntry {
         match &self.item {
             CachedItem::Block(block) => block.size(),
             CachedItem::SsTableIndex(sst_index) => sst_index.size(),
-            CachedItem::Filters(filters) => filters.iter().map(|nf| nf.size()).sum(),
+            CachedItem::Filters(filters) => filters.iter().map(|nf| nf.filter.size()).sum(),
+            CachedItem::EncodedFilters(filters) => filters.iter().map(|ef| ef.data.len()).sum(),
             CachedItem::SstStats(stats) => stats.size(),
         }
     }
@@ -285,10 +313,14 @@ impl CachedEntry {
             CachedItem::Filters(filters) => Self::with_filters(
                 filters
                     .iter()
-                    .map(|nf| nf.clamp_allocated_size())
+                    .map(|nf| NamedFilter {
+                        name: nf.name.clone(),
+                        filter: nf.filter.clamp_allocated_size(),
+                    })
                     .collect::<Vec<_>>()
                     .into(),
             ),
+            CachedItem::EncodedFilters(filters) => Self::with_encoded_filters(filters.clone()),
             CachedItem::SstStats(stats) => {
                 Self::with_sst_stats(Arc::new(stats.clamp_allocated_size()))
             }
@@ -375,7 +407,10 @@ impl DbCache for SplitCache {
                     trace!("no block cache available for insertion");
                 }
             }
-            CachedItem::SsTableIndex(_) | CachedItem::Filters(_) | CachedItem::SstStats(_) => {
+            CachedItem::SsTableIndex(_)
+            | CachedItem::Filters(_)
+            | CachedItem::EncodedFilters(_)
+            | CachedItem::SstStats(_) => {
                 if let Some(ref cache) = self.meta_cache {
                     cache.insert(key, value.clamp_allocated_size()).await;
                 } else {
@@ -1098,7 +1133,10 @@ mod tests {
             None,
         ));
         let filter = builder.build();
-        let named = NamedFilter::new(BloomFilterPolicy::NAME.to_string(), filter);
+        let named = NamedFilter {
+            name: BloomFilterPolicy::NAME.to_string(),
+            filter,
+        };
         let key = CachedKey::from((SST_ID, 1u64));
 
         cache_a
