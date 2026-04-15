@@ -1,4 +1,4 @@
-use crate::batch::{WriteBatch, WriteBatchIterator};
+use crate::batch::WriteBatchIterator;
 use crate::bytes_range::BytesRange;
 use crate::clock::MonotonicClock;
 use crate::config::{DurabilityLevel, ReadOptions, ScanOptions};
@@ -109,13 +109,10 @@ impl Reader {
         &self,
         range: &BytesRange,
         db_state: &(dyn DbStateReader + Sync),
-        write_batch: Option<WriteBatch>,
+        write_batch_iter: Option<WriteBatchIterator>,
         sst_iter_options: SstIteratorOptions,
         point_lookup_stats: Option<DbStats>,
     ) -> Result<IteratorSources, SlateDBError> {
-        let write_batch_iter = write_batch
-            .map(|batch| WriteBatchIterator::new(batch, range.clone(), sst_iter_options.order));
-
         let mut memtables = VecDeque::new();
         memtables.push_back(db_state.memtable());
         for memtable in db_state.imm_memtable() {
@@ -300,7 +297,7 @@ impl Reader {
         key: K,
         options: &ReadOptions,
         db_state: &(dyn DbStateReader + Sync + Send),
-        write_batch: Option<WriteBatch>,
+        write_batch_iter: Option<WriteBatchIterator>,
         max_seq: Option<u64>,
     ) -> Result<Option<KeyValue>, SlateDBError> {
         self.db_stats.get_requests.increment(1);
@@ -323,7 +320,7 @@ impl Reader {
             .build_iterator_sources(
                 &range,
                 db_state,
-                write_batch,
+                write_batch_iter,
                 sst_iter_options,
                 Some(self.db_stats.clone()),
             )
@@ -379,7 +376,7 @@ impl Reader {
         range: BytesRange,
         options: &ScanOptions,
         db_state: &(dyn DbStateReader + Sync),
-        write_batch: Option<WriteBatch>,
+        write_batch_iter: Option<WriteBatchIterator>,
         max_seq: Option<u64>,
         range_tracker: Option<Arc<DbIteratorRangeTracker>>,
     ) -> Result<DbIterator, SlateDBError> {
@@ -401,7 +398,7 @@ impl Reader {
             l0_iters,
             sr_iters,
         } = self
-            .build_iterator_sources(&range, db_state, write_batch, sst_iter_options, None)
+            .build_iterator_sources(&range, db_state, write_batch_iter, sst_iter_options, None)
             .await?;
 
         DbIterator::new(
@@ -433,6 +430,27 @@ mod tests {
 
     use crate::batch::WriteBatch;
     use crate::clock::MonotonicClock;
+    use crate::iter::IterationOrder;
+
+    fn wb_point_iter(write_batch: &Option<WriteBatch>, key: &[u8]) -> Option<WriteBatchIterator> {
+        write_batch.as_ref().map(|wb| {
+            WriteBatchIterator::new(
+                wb,
+                BytesRange::from_slice(key..=key),
+                IterationOrder::Ascending,
+            )
+        })
+    }
+
+    fn wb_range_iter(
+        write_batch: &Option<WriteBatch>,
+        range: &BytesRange,
+        order: IterationOrder,
+    ) -> Option<WriteBatchIterator> {
+        write_batch
+            .as_ref()
+            .map(|wb| WriteBatchIterator::new(wb, range.clone(), order))
+    }
     use crate::db_state::{SortedRun, SsTableHandle, SsTableId};
     use crate::db_status::DbStatusManager;
     use crate::format::sst::SsTableFormat;
@@ -1260,7 +1278,7 @@ mod tests {
                 test_case.query_key,
                 &read_options,
                 &test_db_state,
-                write_batch,
+                wb_point_iter(&write_batch, test_case.query_key),
                 test_case.max_seq,
             )
             .await?;
@@ -1688,12 +1706,13 @@ mod tests {
 
         // Call the actual scan_with_options method
         let scan_options = ScanOptions::default().with_dirty(test_case.dirty);
+        let wb_iter = wb_range_iter(&write_batch, &range, scan_options.order);
         let mut iter = reader
             .scan_with_options(
                 range,
                 &scan_options,
                 &test_db_state,
-                write_batch,
+                wb_iter,
                 test_case.max_seq,
                 None,
             )
@@ -1798,7 +1817,7 @@ mod tests {
                 b"key1",
                 &ReadOptions::default().with_dirty(true),
                 &test_db_state,
-                write_batch.clone(),
+                wb_point_iter(&write_batch, b"key1"),
                 None,
             )
             .await?;
@@ -1812,12 +1831,15 @@ mod tests {
             Some(0)
         );
 
+        let scan_range = BytesRange::from_slice(b"key1".as_ref()..b"key3".as_ref());
+        let scan_options = ScanOptions::default().with_dirty(true);
+        let wb_iter = wb_range_iter(&write_batch, &scan_range, scan_options.order);
         let mut iter = reader
             .scan_with_options(
-                BytesRange::from_slice(b"key1".as_ref()..b"key3".as_ref()),
-                &ScanOptions::default().with_dirty(true),
+                scan_range,
+                &scan_options,
                 &test_db_state,
-                write_batch,
+                wb_iter,
                 None,
                 None,
             )
@@ -1878,7 +1900,7 @@ mod tests {
                 b"key2",
                 &ReadOptions::default().with_dirty(true),
                 &test_db_state,
-                write_batch,
+                wb_point_iter(&write_batch, b"key2"),
                 None,
             )
             .await?;
@@ -1921,7 +1943,7 @@ mod tests {
                 b"key1",
                 &ReadOptions::default().with_dirty(true),
                 &test_db_state,
-                write_batch.clone(),
+                wb_point_iter(&write_batch, b"key1"),
                 None,
             )
             .await?;
@@ -1935,7 +1957,7 @@ mod tests {
                 b"key2",
                 &ReadOptions::default().with_dirty(true),
                 &test_db_state,
-                write_batch,
+                wb_point_iter(&write_batch, b"key2"),
                 None,
             )
             .await?;
@@ -1965,15 +1987,9 @@ mod tests {
         // when: scanning all keys
         let range = BytesRange::from_slice(b"key1".as_ref()..b"key4".as_ref());
         let scan_options = ScanOptions::default().with_dirty(true);
+        let wb_iter = wb_range_iter(&write_batch, &range, scan_options.order);
         let mut iter = reader
-            .scan_with_options(
-                range,
-                &scan_options,
-                &test_db_state,
-                write_batch,
-                None,
-                None,
-            )
+            .scan_with_options(range, &scan_options, &test_db_state, wb_iter, None, None)
             .await?;
 
         // then: each result should carry its expire_ts
@@ -2031,7 +2047,7 @@ mod tests {
                 b"key1",
                 &ReadOptions::default().with_dirty(true),
                 &test_db_state,
-                write_batch,
+                wb_point_iter(&write_batch, b"key1"),
                 None,
             )
             .await?;
@@ -2071,7 +2087,7 @@ mod tests {
                 b"key1",
                 &ReadOptions::default().with_dirty(true),
                 &test_db_state,
-                write_batch,
+                wb_point_iter(&write_batch, b"key1"),
                 None,
             )
             .await?;
