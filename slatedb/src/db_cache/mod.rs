@@ -240,14 +240,6 @@ impl CachedEntry {
         }
     }
 
-    /// Create a new `CachedEntry` with the given encoded filters (produced
-    /// by disk-cache deserialization).
-    pub(crate) fn with_encoded_filters(filters: Arc<[EncodedCachedFilter]>) -> Self {
-        Self {
-            item: CachedItem::EncodedFilters(filters),
-        }
-    }
-
     /// Create a new `CachedEntry` with the given SST stats.
     pub(crate) fn with_sst_stats(stats: Arc<SstStats>) -> Self {
         Self {
@@ -320,7 +312,9 @@ impl CachedEntry {
                     .collect::<Vec<_>>()
                     .into(),
             ),
-            CachedItem::EncodedFilters(filters) => Self::with_encoded_filters(filters.clone()),
+            CachedItem::EncodedFilters(filters) => Self {
+                item: CachedItem::EncodedFilters(filters.clone()),
+            },
             CachedItem::SstStats(stats) => {
                 Self::with_sst_stats(Arc::new(stats.clamp_allocated_size()))
             }
@@ -407,15 +401,24 @@ impl DbCache for SplitCache {
                     trace!("no block cache available for insertion");
                 }
             }
-            CachedItem::SsTableIndex(_)
-            | CachedItem::Filters(_)
-            | CachedItem::EncodedFilters(_)
-            | CachedItem::SstStats(_) => {
+            CachedItem::SsTableIndex(_) | CachedItem::Filters(_) | CachedItem::SstStats(_) => {
                 if let Some(ref cache) = self.meta_cache {
                     cache.insert(key, value.clamp_allocated_size()).await;
                 } else {
                     trace!("no meta cache available for insertion");
                 }
+            }
+            // EncodedFilters only exist as the transient output of
+            // disk-cache deserialization, which happens inside the
+            // underlying cache impl (foyer) and never flows back through
+            // `SplitCache::insert`. A direct insert of an encoded entry
+            // would indicate the invariant was bypassed.
+            CachedItem::EncodedFilters(_) => {
+                error!(
+                    "SplitCache::insert called with EncodedFilters; encoded \
+                     entries only exist inside foyer's deserialization path"
+                );
+                debug_assert!(false, "EncodedFilters in SplitCache::insert");
             }
         }
     }
