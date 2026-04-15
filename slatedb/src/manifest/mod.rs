@@ -361,63 +361,58 @@ impl Manifest {
     }
 
     pub(crate) fn cloned_from_union(manifests: Vec<Manifest>) -> Manifest {
-        if manifests.len() == 1 {
-            manifests[0].clone()
-        } else {
-            let mut ranges = vec![];
-            for manifest in &manifests {
-                let range = manifest.range();
-                if let Some(range) = range {
-                    ranges.push((manifest, range));
-                } else {
-                    warn!("manifest has no SST files [manifest={:?}]", manifest);
+        let mut ranges = vec![];
+        for manifest in &manifests {
+            let range = manifest.range();
+            if let Some(range) = range {
+                ranges.push((manifest, range));
+            } else {
+                warn!("manifest has no SST files [manifest={:?}]", manifest);
+            }
+        }
+        ranges.sort_by_key(|(_, range)| range.comparable_start_bound().cloned());
+
+        // Ensure manifests are non-overlapping
+        let mut previous_range = None;
+        for (_, range) in ranges.iter() {
+            if let Some(previous_range) = previous_range {
+                if range.intersect(previous_range).is_some() {
+                    unreachable!("overlapping ranges found");
                 }
             }
-            ranges.sort_by_key(|(_, range)| range.comparable_start_bound().cloned());
+            previous_range = Some(range);
+        }
 
-            // Ensure manifests are non-overlapping
-            let mut previous_range = None;
-            for (_, range) in ranges.iter() {
-                if let Some(previous_range) = previous_range {
-                    if range.intersect(previous_range).is_some() {
-                        unreachable!("overlapping ranges found");
-                    }
-                }
-                previous_range = Some(range);
+        // Now we can zip the manifests together
+        let mut external_dbs = vec![];
+        let mut core = ManifestCore::new();
+
+        for (manifest, _) in ranges {
+            // First, we need to add all the external dbs
+            external_dbs.extend_from_slice(&manifest.external_dbs);
+            // Then, we can add all the l0 ssts
+            for sst in &manifest.core.l0 {
+                core.l0.push_back(sst.clone());
             }
-
-            // Now we can zip the manifests together
-            let mut external_dbs = vec![];
-            let mut core = ManifestCore::new();
-
-            for (manifest, _) in ranges {
-                // First, we need to add all the external dbs
-                external_dbs.extend_from_slice(&manifest.external_dbs);
-                // Then, we can add all the l0 ssts
-                for sst in &manifest.core.l0 {
-                    core.l0.push_back(sst.clone());
-                }
-                // Finally, we can add all the sorted runs
-                for sorted_run in &manifest.core.compacted {
-                    core.compacted.push(sorted_run.clone());
-                }
+            // Finally, we can add all the sorted runs
+            for sorted_run in &manifest.core.compacted {
+                core.compacted.push(sorted_run.clone());
             }
+        }
 
-            // Renumber sorted runs to ensure sequential IDs without duplicates
-            for (idx, sorted_run) in core.compacted.iter_mut().enumerate() {
-                sorted_run.id = idx as u32;
-            }
+        // Renumber sorted runs to ensure sequential IDs without duplicates
+        for (idx, sorted_run) in core.compacted.iter_mut().enumerate() {
+            sorted_run.id = idx as u32;
+        }
 
-            for manifest in &manifests {
-                core.last_l0_seq = max(core.last_l0_seq, manifest.core.last_l0_seq);
-            }
-
-            Self {
-                external_dbs,
-                core,
-                writer_epoch: 0,
-                compactor_epoch: 0,
-            }
+        for manifest in &manifests {
+            core.last_l0_seq = max(core.last_l0_seq, manifest.core.last_l0_seq);
+        }
+        Self {
+            external_dbs,
+            core,
+            writer_epoch: 0,
+            compactor_epoch: 0,
         }
     }
 
