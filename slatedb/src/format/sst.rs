@@ -1,5 +1,3 @@
-use log::warn;
-
 use crate::blob::ReadOnlyBlob;
 use crate::config::CompressionCodec;
 use crate::db_state::{FilterFormat, SsTableInfo, SsTableInfoCodec, SstType};
@@ -294,7 +292,7 @@ impl EncodedSsTableBlockBuilder {
 pub(crate) struct EncodedSsTableFooter {
     pub(crate) info: SsTableInfo,
     pub(crate) index: SsTableIndexOwned,
-    pub(crate) filters: Vec<NamedFilter>,
+    pub(crate) filters: Arc<[NamedFilter]>,
     #[allow(dead_code)]
     pub(crate) stats: Option<SstStats>,
     pub(crate) encoded_bytes: Bytes,
@@ -319,7 +317,7 @@ pub(crate) struct EncodedSsTableFooterBuilder<'a, 'b> {
     /// metadata block
     block_meta: Vec<flatbuffers::WIPOffset<BlockMeta<'b>>>,
     /// filter blocks
-    filters: Vec<NamedFilter>,
+    filters: Arc<[NamedFilter]>,
     /// stats block
     stats: Option<SstStats>,
     /// SST format version
@@ -348,7 +346,7 @@ impl<'a, 'b> EncodedSsTableFooterBuilder<'a, 'b> {
             sst_info_codec: sst_codec,
             index_builder,
             block_meta,
-            filters: Vec::new(),
+            filters: Arc::from([]),
             stats: None,
             sst_format_version,
             sst_type,
@@ -374,7 +372,7 @@ impl<'a, 'b> EncodedSsTableFooterBuilder<'a, 'b> {
     }
 
     /// Adds filters to the footer as a composite block.
-    pub(crate) fn with_filters(mut self, filters: Vec<NamedFilter>) -> Self {
+    pub(crate) fn with_filters(mut self, filters: Arc<[NamedFilter]>) -> Self {
         self.filters = filters;
         self
     }
@@ -387,13 +385,13 @@ impl<'a, 'b> EncodedSsTableFooterBuilder<'a, 'b> {
         let filter_offset = self.blocks_size + buf.len() as u64;
         let filters = std::mem::take(&mut self.filters);
         let (filter_len, decoded_filters) = if filters.is_empty() {
-            (0u64, Vec::new())
+            (0u64, Arc::from([]))
         } else {
             // Encode composite filter block:
             // [num_filters: u32][name_len: u32][name_bytes...][data_len: u32][data_bytes...]...
             let mut composite = Vec::new();
             composite.put_u32(filters.len() as u32);
-            for nf in &filters {
+            for nf in filters.iter() {
                 let name_bytes = nf.name().as_bytes();
                 composite.put_u32(name_bytes.len() as u32);
                 composite.put_slice(name_bytes);
@@ -481,7 +479,7 @@ pub(crate) struct EncodedSsTable {
     pub(crate) format_version: u16,
     pub(crate) info: SsTableInfo,
     pub(crate) index: SsTableIndexOwned,
-    pub(crate) filters: Vec<NamedFilter>,
+    pub(crate) filters: Arc<[NamedFilter]>,
     #[allow(dead_code)]
     pub(crate) stats: Option<SstStats>,
     pub(crate) unconsumed_blocks: VecDeque<EncodedSsTableBlock>,
@@ -661,9 +659,9 @@ impl SsTableFormat {
         &self,
         info: &SsTableInfo,
         obj: &impl ReadOnlyBlob,
-    ) -> Result<Vec<NamedFilter>, SlateDBError> {
+    ) -> Result<Arc<[NamedFilter]>, SlateDBError> {
         if self.filter_policies.is_empty() || info.filter_len == 0 {
-            return Ok(Vec::new());
+            return Ok(Arc::from([]));
         }
         let filter_end = info.filter_offset + info.filter_len;
         let filter_offset_range = info.filter_offset..filter_end;
@@ -678,7 +676,7 @@ impl SsTableFormat {
         info: &SsTableInfo,
         bytes: Bytes,
         compression_codec: Option<CompressionCodec>,
-    ) -> Result<Vec<NamedFilter>, SlateDBError> {
+    ) -> Result<Arc<[NamedFilter]>, SlateDBError> {
         let filter_bytes = self.validate_checksum(bytes)?;
 
         let untransformed_bytes = match &self.block_transformer {
@@ -695,19 +693,16 @@ impl SsTableFormat {
 
         match info.filter_format {
             FilterFormat::Legacy => {
-                // Legacy pre-composite SST: raw filter bytes, decode with first
-                // matching bloom policy
-                let legacy_policy = self
-                    .filter_policies
-                    .iter()
-                    .find(|p| p.name() == BloomFilterPolicy::NAME);
-                match legacy_policy {
-                    Some(policy) => Ok(vec![NamedFilter::new(
-                        policy.name().to_string(),
-                        policy.decode(&decompressed_bytes),
-                    )]),
-                    None => Ok(Vec::new()),
-                }
+                // Legacy pre-composite SST: raw filter bytes are decoded to
+                // a bloom filter policy.
+                let legacy: Vec<NamedFilter> = NamedFilter::decode_raw(
+                    BloomFilterPolicy::NAME,
+                    &decompressed_bytes,
+                    &self.filter_policies,
+                )
+                .into_iter()
+                .collect();
+                Ok(legacy.into())
             }
             FilterFormat::Composite => self.decode_composite_filter_block(&decompressed_bytes),
         }
@@ -718,18 +713,17 @@ impl SsTableFormat {
     /// Format: `[num_filters: u32][name_len: u32][name_bytes...][data_len: u32][data_bytes...]...`
     ///
     /// Each filter's name is matched against the configured `filter_policies`.
-    /// Filters whose policy is not found are silently skipped.
-    fn decode_composite_filter_block(&self, data: &[u8]) -> Result<Vec<NamedFilter>, SlateDBError> {
-        // Build a lookup from policy name to policy
-        let policy_map: std::collections::HashMap<&str, &Arc<dyn FilterPolicy>> =
-            self.filter_policies.iter().map(|p| (p.name(), p)).collect();
-
+    /// Filters whose policy is not found are dropped to support filter migration.
+    fn decode_composite_filter_block(
+        &self,
+        data: &[u8],
+    ) -> Result<Arc<[NamedFilter]>, SlateDBError> {
         let mut cursor = data;
         if cursor.len() < 4 {
             return Err(SlateDBError::InvalidFilterBlock);
         }
         let num_filters = cursor.get_u32() as usize;
-        let mut filters = Vec::with_capacity(num_filters);
+        let mut filters: Vec<NamedFilter> = Vec::with_capacity(num_filters);
 
         for _ in 0..num_filters {
             if cursor.len() < 4 {
@@ -753,20 +747,12 @@ impl SsTableFormat {
             let filter_data = &cursor[..data_len];
             cursor.advance(data_len);
 
-            if let Some(policy) = policy_map.get(name) {
-                filters.push(NamedFilter::new(
-                    name.to_string(),
-                    policy.decode(filter_data),
-                ));
-            } else {
-                warn!(
-                    "unknown filter policy '{}' in composite block, skipping",
-                    name
-                );
+            if let Some(nf) = NamedFilter::decode_raw(name, filter_data, &self.filter_policies) {
+                filters.push(nf);
             }
         }
 
-        Ok(filters)
+        Ok(filters.into())
     }
 
     pub(crate) async fn read_index(

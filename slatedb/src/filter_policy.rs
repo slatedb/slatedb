@@ -1,4 +1,3 @@
-use std::any::Any;
 use std::sync::Arc;
 
 use bytes::{BufMut, Bytes};
@@ -84,11 +83,6 @@ pub trait Filter: Send + Sync {
 pub struct FilterQuery {
     /// The target of this query (a specific key or a prefix).
     pub target: FilterTarget,
-    /// Opaque, caller-supplied context for custom filters.
-    ///
-    /// Custom filters downcast this to their expected type. The built-in
-    /// bloom filter ignores this field entirely.
-    pub context: Option<Arc<dyn Any + Send + Sync>>,
 }
 
 impl FilterQuery {
@@ -96,7 +90,6 @@ impl FilterQuery {
     pub fn point(key: Bytes) -> Self {
         Self {
             target: FilterTarget::Point(key),
-            context: None,
         }
     }
 
@@ -104,7 +97,6 @@ impl FilterQuery {
     pub fn prefix(prefix: Bytes) -> Self {
         Self {
             target: FilterTarget::Prefix(prefix),
-            context: None,
         }
     }
 }
@@ -176,25 +168,68 @@ impl NamedFilter {
         &self.name
     }
 
-    /// Returns the decoded filter, or `None` if this is a raw filter.
-    pub(crate) fn filter(&self) -> Option<&Arc<dyn Filter>> {
-        match &self.inner {
-            NamedFilterInner::Decoded(f) => Some(f),
-            NamedFilterInner::Raw(_) => None,
-        }
-    }
-
-    /// Returns the raw bytes, or `None` if this is a decoded filter.
-    pub(crate) fn raw_data(&self) -> Option<&Bytes> {
-        match &self.inner {
-            NamedFilterInner::Raw(b) => Some(b),
-            NamedFilterInner::Decoded(_) => None,
-        }
-    }
-
     /// Returns `true` if this filter has been decoded.
     pub(crate) fn is_decoded(&self) -> bool {
         matches!(self.inner, NamedFilterInner::Decoded(_))
+    }
+
+    /// Returns a reference to the inner decoded filter.
+    ///
+    /// # Panics
+    ///
+    /// Panics if this `NamedFilter` is still in raw form. Callers that hold
+    /// a `NamedFilter` not in the cache layer are guaranteed a decoded entry:
+    /// raw entries only exist inside the cache between disk-cache
+    /// deserialization and the next `read_filters` call, which
+    /// resolves them. A raw entry here would indicate the invariant was
+    /// bypassed.
+    #[allow(clippy::panic)]
+    pub(crate) fn unwrap_filter(&self) -> &Arc<dyn Filter> {
+        match &self.inner {
+            NamedFilterInner::Decoded(f) => f,
+            NamedFilterInner::Raw(_) => {
+                panic!("found raw NamedFilter when unwrapping decoded filter")
+            }
+        }
+    }
+
+    /// Returns the decoded filter, decoding against `policies` if raw.
+    ///
+    /// If the filter is already decoded, returns the inner `Arc<dyn Filter>`.
+    /// If raw, looks up the policy by name and decodes the stored bytes.
+    /// Returns `None` if no configured policy matches.
+    pub(crate) fn resolve(&self, policies: &[Arc<dyn FilterPolicy>]) -> Option<Arc<dyn Filter>> {
+        match &self.inner {
+            NamedFilterInner::Decoded(f) => Some(f.clone()),
+            NamedFilterInner::Raw(bytes) => match policies.iter().find(|p| p.name() == self.name) {
+                Some(p) => Some(p.decode(bytes)),
+                None => {
+                    log::warn!(
+                        "unknown filter policy '{}' in cached filter, skipping",
+                        self.name
+                    );
+                    None
+                }
+            },
+        }
+    }
+
+    /// Decodes raw filter bytes against the matching policy in `policies`,
+    /// returning a fully-decoded `NamedFilter`.
+    ///
+    /// Returns `None` if no configured policy matches `name`.
+    pub(crate) fn decode_raw(
+        name: &str,
+        data: &[u8],
+        policies: &[Arc<dyn FilterPolicy>],
+    ) -> Option<Self> {
+        match policies.iter().find(|p| p.name() == name) {
+            Some(policy) => Some(Self::new(policy.name().to_string(), policy.decode(data))),
+            None => {
+                log::warn!("unknown filter policy '{}' in SST, skipping", name);
+                None
+            }
+        }
     }
 
     /// Returns the size of the filter data in bytes.

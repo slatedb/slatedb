@@ -192,7 +192,7 @@ impl From<(SsTableId, u64)> for CachedKey {
 enum CachedItem {
     Block(Arc<Block>),
     SsTableIndex(Arc<SsTableIndexOwned>),
-    Filters(Vec<NamedFilter>),
+    Filters(Arc<[NamedFilter]>),
     SstStats(Arc<SstStats>),
 }
 
@@ -222,7 +222,7 @@ impl CachedEntry {
     }
 
     /// Create a new `CachedEntry` with the given filters.
-    pub(crate) fn with_filters(filters: Vec<NamedFilter>) -> Self {
+    pub(crate) fn with_filters(filters: Arc<[NamedFilter]>) -> Self {
         Self {
             item: CachedItem::Filters(filters),
         }
@@ -249,7 +249,7 @@ impl CachedEntry {
         }
     }
 
-    pub(crate) fn filters(&self) -> Option<Vec<NamedFilter>> {
+    pub(crate) fn filters(&self) -> Option<Arc<[NamedFilter]>> {
         match &self.item {
             CachedItem::Filters(filters) => Some(filters.clone()),
             _ => None,
@@ -282,9 +282,13 @@ impl CachedEntry {
             CachedItem::SsTableIndex(sst_index) => {
                 Self::with_sst_index(Arc::new(sst_index.clamp_allocated_size()))
             }
-            CachedItem::Filters(filters) => {
-                Self::with_filters(filters.iter().map(|nf| nf.clamp_allocated_size()).collect())
-            }
+            CachedItem::Filters(filters) => Self::with_filters(
+                filters
+                    .iter()
+                    .map(|nf| nf.clamp_allocated_size())
+                    .collect::<Vec<_>>()
+                    .into(),
+            ),
             CachedItem::SstStats(stats) => {
                 Self::with_sst_stats(Arc::new(stats.clamp_allocated_size()))
             }
@@ -1098,14 +1102,17 @@ mod tests {
         let key = CachedKey::from((SST_ID, 1u64));
 
         cache_a
-            .insert(key.clone(), CachedEntry::with_filters(vec![named.clone()]))
+            .insert(
+                key.clone(),
+                CachedEntry::with_filters(Arc::from([named.clone()])),
+            )
             .await;
 
         assert!(cache_a.get_filter(&key).await.unwrap().is_some());
         assert!(cache_b.get_filter(&key).await.unwrap().is_none());
 
         cache_b
-            .insert(key.clone(), CachedEntry::with_filters(vec![named]))
+            .insert(key.clone(), CachedEntry::with_filters(Arc::from([named])))
             .await;
 
         assert_eq!(2, shared_cache.entry_count());

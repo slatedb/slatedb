@@ -14,10 +14,10 @@ use tokio::io::AsyncWriteExt;
 use ulid::Ulid;
 
 use crate::blob::ReadOnlyBlob;
-use crate::db_cache::{CachedEntry, DbCache};
+use crate::db_cache::{CachedEntry, CachedKey, DbCache};
 use crate::db_state::{SsTableHandle, SsTableId};
 use crate::error::SlateDBError;
-use crate::filter_policy::{Filter, NamedFilter};
+use crate::filter_policy::NamedFilter;
 use crate::flatbuffer_types::SsTableIndexOwned;
 use crate::format::block::Block;
 use crate::format::sst::{EncodedSsTable, SsTableFormat};
@@ -236,7 +236,7 @@ impl TableStore {
         ))
     }
 
-    async fn cache_filters(&self, sst: SsTableId, id: u64, filters: Vec<NamedFilter>) {
+    async fn cache_filters(&self, sst: SsTableId, id: u64, filters: Arc<[NamedFilter]>) {
         let Some(ref cache) = self.cache else {
             return;
         };
@@ -247,36 +247,41 @@ impl TableStore {
         }
     }
 
-    /// Resolves any `Raw` NamedFilters to `Decoded` using the configured filter policies.
-    /// Filters with unknown policy names are dropped.
-    fn resolve_filters(&self, named_filters: &[NamedFilter]) -> Vec<NamedFilter> {
-        named_filters
+    /// Returns a fully-decoded view of `named_filters`.
+    ///
+    /// Fast path: if every entry is already decoded, returns the input
+    /// unchanged. Slow path (any entry raw, only possible right after a
+    /// disk-cache deserialize): decodes raw entries via [`NamedFilter::resolve`],
+    /// drops entries with unknown policies, and re-inserts the decoded slice
+    /// into the cache so subsequent hits take the fast path.
+    async fn resolve_and_refresh_cache(
+        &self,
+        cache: &Arc<dyn DbCache>,
+        cache_key: CachedKey,
+        named_filters: Arc<[NamedFilter]>,
+    ) -> Arc<[NamedFilter]> {
+        if named_filters.iter().all(|nf| nf.is_decoded()) {
+            return named_filters;
+        }
+
+        let policies = &self.sst_format.filter_policies;
+        let decoded: Arc<[NamedFilter]> = named_filters
             .iter()
             .filter_map(|nf| {
-                if nf.is_decoded() {
-                    return Some(nf.clone());
-                }
-                // Look up the policy by name to decode the raw bytes
-                let policy = self
-                    .sst_format
-                    .filter_policies
-                    .iter()
-                    .find(|p| p.name() == nf.name());
-                match policy {
-                    Some(policy) => Some(NamedFilter::new(
-                        nf.name().to_string(),
-                        policy.decode(
-                            nf.raw_data()
-                                .expect("raw filter data must be present for undecoded filter"),
-                        ),
-                    )),
-                    None => {
-                        warn!("unknown filter policy '{}' in cache, dropping", nf.name());
-                        None
-                    }
-                }
+                let filter = nf.resolve(policies)?;
+                Some(if nf.is_decoded() {
+                    nf.clone()
+                } else {
+                    NamedFilter::new(nf.name().to_string(), filter)
+                })
             })
-            .collect()
+            .collect::<Vec<_>>()
+            .into();
+
+        cache
+            .insert(cache_key, CachedEntry::with_filters(decoded.clone()))
+            .await;
+        decoded
     }
 
     /// Delete an SSTable from the object store.
@@ -378,7 +383,7 @@ impl TableStore {
         Ok(version)
     }
 
-    /// Reads the filters of an SSTable.
+    /// Reads the filters of an SSTable. Every returned entry is decoded.
     ///
     /// ## Arguments
     /// - `handle`: The handle of the SSTable to read the filters from.
@@ -387,7 +392,7 @@ impl TableStore {
         &self,
         handle: &SsTableHandle,
         cache_blocks: bool,
-    ) -> Result<Vec<Arc<dyn Filter>>, SlateDBError> {
+    ) -> Result<Arc<[NamedFilter]>, SlateDBError> {
         let cache_key = (handle.id, handle.info.filter_offset).into();
         if let Some(ref cache) = self.cache {
             if let Some(named_filters) = cache
@@ -396,16 +401,9 @@ impl TableStore {
                 .unwrap_or(None)
                 .and_then(|e| e.filters())
             {
-                // Check if any filters need resolving (Raw from disk cache)
-                if named_filters.iter().any(|nf| !nf.is_decoded()) {
-                    let resolved = self.resolve_filters(&named_filters);
-                    // Re-cache as fully decoded
-                    cache
-                        .insert(cache_key, CachedEntry::with_filters(resolved.clone()))
-                        .await;
-                    return Ok(Self::extract_decoded_filters(&resolved));
-                }
-                return Ok(Self::extract_decoded_filters(&named_filters));
+                return Ok(self
+                    .resolve_and_refresh_cache(cache, cache_key, named_filters)
+                    .await);
             }
         }
         let object_store = self.object_stores.store_for(&handle.id);
@@ -415,31 +413,11 @@ impl TableStore {
         if cache_blocks && !named_filters.is_empty() {
             if let Some(ref cache) = self.cache {
                 cache
-                    .insert(
-                        (handle.id, handle.info.filter_offset).into(),
-                        CachedEntry::with_filters(named_filters.clone()),
-                    )
+                    .insert(cache_key, CachedEntry::with_filters(named_filters.clone()))
                     .await;
             }
         }
-        Ok(Self::extract_decoded_filters(&named_filters))
-    }
-
-    /// Extracts `Arc<dyn Filter>` from decoded NamedFilters.
-    ///
-    /// All filters should be decoded at this point — either they came from
-    /// `decode_composite_filter_block` (which decodes inline) or from
-    /// `resolve_filters` (which drops unknown policies).
-    fn extract_decoded_filters(named_filters: &[NamedFilter]) -> Vec<Arc<dyn Filter>> {
-        named_filters
-            .iter()
-            .map(|nf| {
-                debug_assert!(nf.is_decoded(), "unexpected raw filter: {:?}", nf);
-                nf.filter()
-                    .expect("all filters should be decoded before extraction")
-                    .clone()
-            })
-            .collect()
+        Ok(named_filters)
     }
 
     /// Reads the stats block of an SSTable.

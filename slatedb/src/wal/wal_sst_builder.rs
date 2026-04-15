@@ -267,7 +267,7 @@ impl EncodedWalSsTableBuilder {
             format_version,
             info: footer.info,
             index: footer.index,
-            filters: Vec::new(),
+            filters: Arc::from([]),
             stats: None,
             unconsumed_blocks: self.blocks,
             footer: footer.encoded_bytes,

@@ -13,7 +13,7 @@ use crate::bytes_range::BytesRange;
 use crate::db_state::{SsTableId, SsTableView};
 use crate::db_stats::DbStats;
 use crate::error::SlateDBError;
-use crate::filter_policy::{Filter, FilterQuery};
+use crate::filter_policy::{FilterQuery, NamedFilter};
 use crate::flatbuffer_types::{SsTableIndex, SsTableIndexOwned};
 use crate::format::block::Block;
 use crate::format::sst::{SST_FORMAT_VERSION, SST_FORMAT_VERSION_V2};
@@ -217,7 +217,7 @@ impl FilterEvaluator {
     ///
     /// If any filter returns `false` for `might_match`, the key is filtered out.
     /// If no filters are provided, the state is set to `NoFilter`.
-    async fn evaluate(&mut self, filters: &[Arc<dyn Filter>]) {
+    async fn evaluate(&mut self, filters: &[NamedFilter]) {
         if self.state != FilterState::NotChecked {
             return;
         }
@@ -229,8 +229,12 @@ impl FilterEvaluator {
 
         let query = FilterQuery::point(self.key.clone());
 
-        // AND logic: if any filter says the key is NOT present, filter it out
-        let might_match = filters.iter().all(|f| f.might_match(&query));
+        // AND logic: if any filter says the key is NOT present, filter it out.
+        // All filters reaching here are decoded — TableStore::read_filters
+        // resolves any raw cache entries before returning.
+        let might_match = filters
+            .iter()
+            .all(|nf| nf.unwrap_filter().might_match(&query));
 
         if might_match {
             if let Some(stats) = &self.db_stats {
@@ -1309,7 +1313,9 @@ mod tests {
 
         let collision_key = b"k12";
         assert!(
-            filters[0].might_match(&FilterQuery::point(Bytes::from_static(collision_key))),
+            filters[0]
+                .unwrap_filter()
+                .might_match(&FilterQuery::point(Bytes::from_static(collision_key))),
             "bloom filter should report collision for hard-coded key"
         );
 
