@@ -351,12 +351,12 @@ async fn test_concurrent_writers_and_readers() {
         .expect("Failed to close DB after retries");
 }
 
-/// Verify that manifest_poll enqueues a poll and returns once it completes,
+/// Verify that refresh_manifest enqueues a poll and returns once it completes,
 /// and returns an error once the DB is closed.
 #[tokio::test]
-async fn test_manifest_poll() {
+async fn test_refresh_manifest() {
     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-    let db = Db::builder("test_manifest_poll", object_store.clone())
+    let db = Db::builder("test_refresh_manifest", object_store.clone())
         .with_settings(Settings {
             manifest_poll_interval: Duration::from_secs(60 * 60),
             ..Default::default()
@@ -366,13 +366,13 @@ async fn test_manifest_poll() {
         .expect("failed to open db");
 
     // Should return once the enqueued poll completes.
-    db.manifest_poll()
+    db.refresh_manifest()
         .await
-        .expect("manifest_poll returned error");
+        .expect("refresh_manifest returned error");
 
-    // After close, manifest_poll should return an error.
+    // After close, refresh_manifest should return an error.
     db.close().await.expect("failed to close db");
-    let result = db.manifest_poll().await;
+    let result = db.refresh_manifest().await;
     assert!(
         result.is_err(),
         "expected error after close, got {:?}",

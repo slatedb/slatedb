@@ -1555,18 +1555,26 @@ impl Db {
         self.inner.manifest()
     }
 
-    /// Enqueue a manifest poll immediately and wait for it to complete.
+    /// Refresh the manifest immediately and wait for it to complete.
     ///
-    /// A `PollManifest` command is enqueued immediately, bypassing the regular
-    /// [`Settings::manifest_poll_interval`] timer.
+    /// The database normally refreshes its manifest on a background timer
+    /// controlled by [`Settings::manifest_poll_interval`]. This method
+    /// bypasses that timer, triggering an immediate refresh and waiting
+    /// for it to finish.
+    ///
+    /// Use this when you know the manifest has changed externally and
+    /// want to ensure the database has observed the update before
+    /// proceeding — for example, after a compaction completes and you
+    /// need to confirm that a compaction filter has been applied.
     ///
     /// ## Errors
-    /// - Returns [`Error`] if the database is closed before the next poll completes.
-    pub async fn manifest_poll(&self) -> Result<(), crate::Error> {
+    /// - Returns [`Error`] if the database is closed before the refresh
+    ///   completes.
+    pub async fn refresh_manifest(&self) -> Result<(), crate::Error> {
         self.inner.check_closed()?;
         self.inner
             .memtable_flusher
-            .poll_manifest()
+            .refresh_manifest()
             .await
             .map_err(Into::into)
     }
@@ -3492,6 +3500,9 @@ mod tests {
             .put_with_options(key.as_bytes(), b"v", &put_options, &write_options)
             .await
             .unwrap();
+        // Flush the WAL so the manifest writer can proceed (flush_interval is
+        // disabled in this test, so there is no periodic WAL flush).
+        kv_store.flush().await.unwrap();
 
         // Verify that the WAL count threshold triggered a memtable freeze and L0 flush.
         // replay_after_wal_id should have advanced to the threshold, and there should
@@ -3527,6 +3538,7 @@ mod tests {
             .put_with_options(key.as_bytes(), b"v", &put_options, &write_options)
             .await
             .unwrap();
+        kv_store.flush().await.unwrap();
 
         // Wait for the flush to happen.
         let db_state = wait_for_manifest_condition(
@@ -3903,7 +3915,10 @@ mod tests {
         // flusher is paused at the failpoint above.
         let flush_handle = {
             let inner = Arc::clone(&db.inner);
-            tokio::spawn(async move { inner.flush_memtables(FlushTarget::All).await })
+            tokio::spawn(async move {
+                inner.flush_wals().await?;
+                inner.flush_memtables(FlushTarget::All).await
+            })
         };
 
         let mut wrote_l0_sst = false;
