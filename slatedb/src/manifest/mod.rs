@@ -19,10 +19,9 @@ pub(crate) mod store;
 
 pub use crate::db_state::{SortedRun, SsTableHandle, SsTableId, SsTableInfo, SsTableView};
 
-/// Represents an immutable in-memory view of `.manifest` file that is suitable
-/// to expose to end-users.
+/// Internal immutable in-memory view of a `.manifest` file.
 #[derive(Clone, PartialEq, Serialize, Debug)]
-pub struct ManifestCore {
+pub(crate) struct ManifestCore {
     /// Flag to indicate whether initialization has finished. When creating the initial manifest for
     /// a root db (one that is not a clone), this flag will be set to true. When creating the initial
     /// manifest for a clone db, this flag will be set to false and then updated to true once clone
@@ -131,9 +130,10 @@ impl ManifestCore {
 }
 
 #[derive(Clone, Serialize, PartialEq, Debug)]
-pub struct Manifest {
+pub(crate) struct Manifest {
     // todo: try to make this writable only from module
     pub(crate) external_dbs: Vec<ExternalDb>,
+    #[serde(flatten)]
     pub(crate) core: ManifestCore,
     // todo: try to make this writable only from module
     pub(crate) writer_epoch: u64,
@@ -144,9 +144,10 @@ pub struct Manifest {
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct VersionedManifest {
     /// The version ID of the manifest.
-    pub id: u64,
-    /// The manifest state at this version.
-    pub manifest: Manifest,
+    pub(crate) id: u64,
+    /// The flattened manifest state at this version.
+    #[serde(flatten)]
+    pub(crate) manifest: Manifest,
 }
 
 impl VersionedManifest {
@@ -154,8 +155,92 @@ impl VersionedManifest {
         Self { id, manifest }
     }
 
-    /// Returns the manifest contents at this version.
-    pub fn core(&self) -> &ManifestCore {
+    /// Returns the manifest version ID.
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+
+    /// Returns the writer epoch recorded in this manifest snapshot.
+    pub fn writer_epoch(&self) -> u64 {
+        self.manifest.writer_epoch
+    }
+
+    /// Returns the compactor epoch recorded in this manifest snapshot.
+    pub fn compactor_epoch(&self) -> u64 {
+        self.manifest.compactor_epoch
+    }
+
+    /// Returns the external DB references recorded in this manifest snapshot.
+    pub fn external_dbs(&self) -> &Vec<ExternalDb> {
+        &self.manifest.external_dbs
+    }
+
+    /// Returns whether initialization has completed.
+    pub fn initialized(&self) -> bool {
+        self.manifest.core.initialized
+    }
+
+    /// Returns the last compacted L0 SST view ID, if any.
+    pub fn last_compacted_l0_sst_view_id(&self) -> Option<ulid::Ulid> {
+        self.manifest.core.last_compacted_l0_sst_view_id
+    }
+
+    /// Returns the last compacted L0 SST ID, if any.
+    pub fn last_compacted_l0_sst_id(&self) -> Option<ulid::Ulid> {
+        self.manifest.core.last_compacted_l0_sst_id
+    }
+
+    /// Returns the current L0 SST views.
+    pub fn l0(&self) -> &VecDeque<SsTableView> {
+        &self.manifest.core.l0
+    }
+
+    /// Returns the current compacted sorted runs.
+    pub fn compacted(&self) -> &Vec<SortedRun> {
+        &self.manifest.core.compacted
+    }
+
+    /// Returns the next WAL SST ID to assign.
+    pub fn next_wal_sst_id(&self) -> u64 {
+        self.manifest.core.next_wal_sst_id
+    }
+
+    /// Returns the WAL replay watermark.
+    pub fn replay_after_wal_id(&self) -> u64 {
+        self.manifest.core.replay_after_wal_id
+    }
+
+    /// Returns the last persisted L0 clock tick.
+    pub fn last_l0_clock_tick(&self) -> i64 {
+        self.manifest.core.last_l0_clock_tick
+    }
+
+    /// Returns the last persisted L0 sequence number.
+    pub fn last_l0_seq(&self) -> u64 {
+        self.manifest.core.last_l0_seq
+    }
+
+    /// Returns the minimum sequence number still visible to recent snapshots.
+    pub fn recent_snapshot_min_seq(&self) -> u64 {
+        self.manifest.core.recent_snapshot_min_seq
+    }
+
+    /// Returns the persisted sequence tracker.
+    pub fn sequence_tracker(&self) -> &SequenceTracker {
+        &self.manifest.core.sequence_tracker
+    }
+
+    /// Returns the checkpoints tracked by this manifest snapshot.
+    pub fn checkpoints(&self) -> &Vec<Checkpoint> {
+        &self.manifest.core.checkpoints
+    }
+
+    /// Returns the dedicated WAL object store URI, if any.
+    pub fn wal_object_store_uri(&self) -> Option<&str> {
+        self.manifest.core.wal_object_store_uri.as_deref()
+    }
+
+    pub(crate) fn core(&self) -> &ManifestCore {
         &self.manifest.core
     }
 }
@@ -174,16 +259,6 @@ impl Manifest {
             writer_epoch: 0,
             compactor_epoch: 0,
         }
-    }
-
-    /// Returns the writer epoch recorded in this manifest snapshot.
-    pub fn writer_epoch(&self) -> u64 {
-        self.writer_epoch
-    }
-
-    /// Returns the compactor epoch recorded in this manifest snapshot.
-    pub fn compactor_epoch(&self) -> u64 {
-        self.compactor_epoch
     }
 
     /// Create an initial manifest for a new clone. The returned

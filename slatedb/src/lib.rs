@@ -41,7 +41,6 @@ pub use compaction_filter::{
     CompactionJobContext,
 };
 pub use compactor::CompactorBuilder;
-pub use compactor_state::Compactions;
 pub use compactor_state::VersionedCompactions;
 pub use config::{Settings, SstBlockSize};
 pub use db::{Db, DbBuilder, DbReaderBuilder, DbStatus, WriteHandle};
@@ -61,7 +60,6 @@ pub use format::sst::BlockTransformer;
 pub use garbage_collector::stats as garbage_collector_stats;
 pub use garbage_collector::GarbageCollectorBuilder;
 pub use iter::IterationOrder;
-pub use manifest::Manifest;
 pub use manifest::VersionedManifest;
 pub use merge_operator::{MergeOperator, MergeOperatorError};
 pub use rand::DbRand;

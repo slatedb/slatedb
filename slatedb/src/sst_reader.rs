@@ -35,7 +35,7 @@
 //!     let reader = SstReader::new(path, object_store, None, None);
 //!
 //!     // Inspect L0 SSTs
-//!     for view in &manifest.core().l0 {
+//!     for view in manifest.l0() {
 //!         let sst_file = reader.open_with_handle(view.sst.clone())?;
 //!         if let Some(stats) = sst_file.stats().await? {
 //!             let _ = stats.num_puts;

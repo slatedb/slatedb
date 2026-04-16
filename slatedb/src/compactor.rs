@@ -89,7 +89,7 @@ use slatedb_common::clock::SystemClock;
 use slatedb_common::metrics::MetricsRecorderHelper;
 
 pub use crate::compactor_state::{
-    Compaction, CompactionSpec, CompactionStatus, CompactionsCore, CompactorState, SourceId,
+    Compaction, CompactionSpec, CompactionStatus, CompactorState, SourceId,
 };
 pub use crate::compactor_state_protocols::CompactorStateView;
 pub use crate::db::builder::CompactorBuilder;

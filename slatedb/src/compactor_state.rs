@@ -305,10 +305,9 @@ impl Display for Compaction {
     }
 }
 
-/// Represents an immutable in-memory view of .compactions file that is suitable
-/// to expose to end-users.
+/// Internal immutable in-memory view of a `.compactions` file.
 #[derive(Clone, Debug, PartialEq, Serialize)]
-pub struct CompactionsCore {
+pub(crate) struct CompactionsCore {
     /// The set of recent compactions tracked by this compactor. These may
     /// be pending, in progress, or recently completed (either with success
     /// or failure).
@@ -330,7 +329,7 @@ impl CompactionsCore {
     /// Returns an iterator over all recent compactions. Recent compactions include all
     /// active (submitted or running) compactions as well as the most recently finished
     /// compaction (failed or completed).
-    pub fn recent_compactions(&self) -> impl Iterator<Item = &Compaction> {
+    pub(crate) fn recent_compactions(&self) -> impl Iterator<Item = &Compaction> {
         self.recent_compactions.values()
     }
 }
@@ -339,9 +338,10 @@ impl CompactionsCore {
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct VersionedCompactions {
     /// The version ID of the compactions file.
-    pub id: u64,
-    /// The compactions state at this version.
-    pub compactions: Compactions,
+    pub(crate) id: u64,
+    /// The flattened compactions state at this version.
+    #[serde(flatten)]
+    pub(crate) compactions: Compactions,
 }
 
 impl VersionedCompactions {
@@ -349,17 +349,32 @@ impl VersionedCompactions {
         Self { id, compactions }
     }
 
-    /// Returns the compactions contents at this version.
-    pub fn core(&self) -> &CompactionsCore {
+    /// Returns the compactions file version ID.
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+
+    /// Returns the compactor epoch recorded in this compactions snapshot.
+    pub fn compactor_epoch(&self) -> u64 {
+        self.compactions.compactor_epoch
+    }
+
+    /// Returns an iterator over the recent compactions tracked in this snapshot.
+    pub fn recent_compactions(&self) -> impl Iterator<Item = &Compaction> {
+        self.compactions.core.recent_compactions()
+    }
+
+    pub(crate) fn core(&self) -> &CompactionsCore {
         &self.compactions.core
     }
 }
 
 /// Container for compactions tracked by the compactor alongside its epoch.
 #[derive(Clone, Debug, PartialEq, Serialize)]
-pub struct Compactions {
+pub(crate) struct Compactions {
     // The current compactor's epoch.
     pub(crate) compactor_epoch: u64,
+    #[serde(flatten)]
     pub(crate) core: CompactionsCore,
 }
 
@@ -369,11 +384,6 @@ impl Compactions {
             compactor_epoch,
             core: CompactionsCore::new(),
         }
-    }
-
-    /// Returns the compactor epoch recorded in this compactions snapshot.
-    pub fn compactor_epoch(&self) -> u64 {
-        self.compactor_epoch
     }
 
     pub(crate) fn with_compactions(mut self, compactions: Vec<Compaction>) -> Self {
