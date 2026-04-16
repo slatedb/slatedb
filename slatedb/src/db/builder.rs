@@ -1441,9 +1441,9 @@ pub struct CloneBuilder<R: RangeBounds<Bytes> + Clone = (Bound<Bytes>, Bound<Byt
     clone_path: Path,
     source: CloneSourceSpec<R>,
     object_store: Arc<dyn ObjectStore>,
-    wal_object_store: Arc<dyn ObjectStore>,
-    system_clock: Arc<dyn SystemClock>,
-    rand: Arc<DbRand>,
+    wal_object_store: Option<Arc<dyn ObjectStore>>,
+    system_clock: Option<Arc<dyn SystemClock>>,
+    rand: Option<Arc<DbRand>>,
     projection_range: Option<R>,
 }
 
@@ -1452,17 +1452,14 @@ impl<R: RangeBounds<Bytes> + Clone> CloneBuilder<R> {
         clone_path: Path,
         source: CloneSourceSpec<R>,
         object_store: Arc<dyn ObjectStore>,
-        wal_object_store: Arc<dyn ObjectStore>,
-        system_clock: Arc<dyn SystemClock>,
-        rand: Arc<DbRand>,
     ) -> Self {
         CloneBuilder {
             clone_path,
             source,
             object_store,
-            wal_object_store,
-            system_clock,
-            rand,
+            wal_object_store: None,
+            system_clock: None,
+            rand: None,
             projection_range: None,
         }
     }
@@ -1483,7 +1480,7 @@ impl<R: RangeBounds<Bytes> + Clone> CloneBuilder<R> {
     }
 
     pub fn with_wal_object_store(mut self, wal_object_store: Arc<dyn ObjectStore>) -> Self {
-        self.wal_object_store = wal_object_store;
+        self.wal_object_store = Some(wal_object_store);
         self
     }
 
@@ -1493,12 +1490,12 @@ impl<R: RangeBounds<Bytes> + Clone> CloneBuilder<R> {
     }
 
     pub fn with_system_clock(mut self, system_clock: Arc<dyn SystemClock>) -> Self {
-        self.system_clock = system_clock;
+        self.system_clock = Some(system_clock);
         self
     }
 
     pub fn with_seed(mut self, seed: u64) -> Self {
-        self.rand = Arc::new(DbRand::new(seed));
+        self.rand = Some(Arc::new(DbRand::new(seed)));
         self
     }
 
@@ -1507,11 +1504,11 @@ impl<R: RangeBounds<Bytes> + Clone> CloneBuilder<R> {
         crate::clone::create_clone(
             self.source,
             self.clone_path,
-            self.object_store,
-            self.wal_object_store,
+            ObjectStores::new(self.object_store, self.wal_object_store),
             Arc::new(FailPointRegistry::new()),
-            self.system_clock,
-            self.rand,
+            self.system_clock
+                .unwrap_or_else(|| Arc::new(DefaultSystemClock::new())),
+            self.rand.unwrap_or_else(|| Arc::new(Default::default())),
             self.projection_range,
         )
         .await?;

@@ -7,6 +7,8 @@ use crate::error::SlateDBError;
 use crate::error::SlateDBError::CheckpointMissing;
 use crate::manifest::store::{ManifestStore, StoredManifest};
 use crate::manifest::Manifest;
+use crate::object_stores::ObjectStoreType::{Main, Wal};
+use crate::object_stores::ObjectStores;
 use crate::paths::PathResolver;
 use crate::rand::DbRand;
 use crate::utils::IdGenerator;
@@ -20,11 +22,10 @@ use std::sync::Arc;
 use std::time::Duration;
 use uuid::Uuid;
 
-pub(crate) async fn create_clone<P: Into<Path>>(
-    clone_source: CloneSourceSpec,
+pub(crate) async fn create_clone<P: Into<Path>, R: RangeBounds<Bytes> + Clone>(
+    clone_source: CloneSourceSpec<R>,
     clone_path: P,
-    object_store: Arc<dyn ObjectStore>,
-    wal_object_store: Arc<dyn ObjectStore>,
+    object_stores: ObjectStores,
     fp_registry: Arc<FailPointRegistry>,
     system_clock: Arc<dyn SystemClock>,
     rand: Arc<DbRand>,
@@ -40,7 +41,7 @@ pub(crate) async fn create_clone<P: Into<Path>>(
     let mut clone_manifest = create_clone_manifest(
         clone_path.clone(),
         clone_source.clone(),
-        object_store.clone(),
+        object_stores.store_of(Main).clone(),
         system_clock.clone(),
         rand,
         fp_registry.clone(),
@@ -50,7 +51,7 @@ pub(crate) async fn create_clone<P: Into<Path>>(
 
     if !clone_manifest.db_state().initialized {
         copy_wal_ssts(
-            wal_object_store,
+            object_stores.store_of(Wal).clone(),
             clone_manifest.db_state(),
             &parent_path,
             &clone_path,
@@ -342,6 +343,7 @@ mod tests {
     use crate::error::SlateDBError;
     use crate::manifest::store::{ManifestStore, StoredManifest};
     use crate::manifest::Manifest;
+    use crate::object_stores::ObjectStores;
     use crate::paths::PathResolver;
     use crate::proptest_util::{rng, sample};
     use crate::rand::DbRand;
@@ -377,8 +379,7 @@ mod tests {
         crate::clone::create_clone(
             source,
             clone_path,
-            object_store,
-            wal_object_store,
+            ObjectStores::new(object_store, Some(wal_object_store)),
             fp_registry,
             system_clock,
             rand,

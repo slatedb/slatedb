@@ -595,10 +595,8 @@ impl Admin {
             self.path.clone(),
             source,
             self.object_stores.store_of(ObjectStoreType::Main).clone(),
-            self.object_stores.store_of(ObjectStoreType::Wal).clone(),
-            self.system_clock.clone(),
-            self.rand.clone(),
         )
+        .with_wal_object_store(self.object_stores.store_of(ObjectStoreType::Wal).clone())
     }
 
     /// Creates a new builder for an admin client at the given path.
