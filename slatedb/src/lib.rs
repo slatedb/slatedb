@@ -52,6 +52,11 @@ pub use db_snapshot::DbSnapshot;
 pub use db_state::VersionedManifest;
 pub use db_transaction::DbTransaction;
 pub use error::{CloseReason, Error, ErrorKind};
+pub use filter::BloomFilter;
+pub use filter_policy::{
+    BloomFilterPolicy, Filter, FilterBuilder, FilterPolicy, FilterQuery, FilterTarget,
+    PrefixExtractor,
+};
 pub use format::sst::BlockTransformer;
 pub use garbage_collector::stats as garbage_collector_stats;
 pub use garbage_collector::GarbageCollectorBuilder;
@@ -112,8 +117,9 @@ mod db_status;
 mod db_transaction;
 mod dispatcher;
 mod error;
-mod filter;
+pub mod filter;
 mod filter_iterator;
+pub mod filter_policy;
 mod flatbuffer_types;
 mod flush;
 mod format;

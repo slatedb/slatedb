@@ -13,7 +13,7 @@ use crate::bytes_range::BytesRange;
 use crate::db_state::{SsTableId, SsTableView};
 use crate::db_stats::DbStats;
 use crate::error::SlateDBError;
-use crate::filter::{self, BloomFilter};
+use crate::filter_policy::{FilterQuery, NamedFilter};
 use crate::flatbuffer_types::{SsTableIndex, SsTableIndexOwned};
 use crate::format::block::Block;
 use crate::format::sst::{SST_FORMAT_VERSION, SST_FORMAT_VERSION_V2};
@@ -194,7 +194,7 @@ enum FilterState {
     Negative,
 }
 
-struct BloomFilterEvaluator {
+struct FilterEvaluator {
     key: Bytes,
     db_stats: Option<DbStats>,
     state: FilterState,
@@ -202,7 +202,7 @@ struct BloomFilterEvaluator {
     false_positive_recorded: bool,
 }
 
-impl BloomFilterEvaluator {
+impl FilterEvaluator {
     fn new(key: Bytes, db_stats: Option<DbStats>) -> Self {
         Self {
             key,
@@ -212,37 +212,38 @@ impl BloomFilterEvaluator {
             false_positive_recorded: false,
         }
     }
-}
 
-impl BloomFilterEvaluator {
-    /// Evaluate the bloom filter against the key.
+    /// Evaluate the filters against the key using AND logic.
     ///
-    /// ## Arguments
-    /// - `maybe_filter`: An optional bloom filter to evaluate against.
-    async fn evaluate(&mut self, maybe_filter: Option<Arc<BloomFilter>>) {
+    /// If any filter returns `false` for `might_match`, the key is filtered out.
+    /// If no filters are provided, the state is set to `NoFilter`.
+    async fn evaluate(&mut self, filters: &[NamedFilter]) {
         if self.state != FilterState::NotChecked {
             return;
         }
 
-        let key_hash = filter::filter_hash(self.key.as_ref());
+        if filters.is_empty() {
+            self.state = FilterState::NoFilter;
+            return;
+        }
 
-        match maybe_filter {
-            Some(filter) => {
-                if filter.might_contain(key_hash) {
-                    if let Some(stats) = &self.db_stats {
-                        stats.sst_filter_positives.increment(1);
-                    }
-                    self.state = FilterState::Positive;
-                } else {
-                    if let Some(stats) = &self.db_stats {
-                        stats.sst_filter_negatives.increment(1);
-                    }
-                    self.state = FilterState::Negative;
-                }
+        let query = FilterQuery::point(self.key.clone());
+
+        // AND logic: if any filter says the key is NOT present, filter it out.
+        // All filters reaching here are decoded — TableStore::read_filters
+        // resolves any raw cache entries before returning.
+        let might_match = filters.iter().all(|nf| nf.filter.might_match(&query));
+
+        if might_match {
+            if let Some(stats) = &self.db_stats {
+                stats.sst_filter_positives.increment(1);
             }
-            None => {
-                self.state = FilterState::NoFilter;
+            self.state = FilterState::Positive;
+        } else {
+            if let Some(stats) = &self.db_stats {
+                stats.sst_filter_negatives.increment(1);
             }
+            self.state = FilterState::Negative;
         }
     }
 
@@ -828,14 +829,14 @@ impl RowEntryIterator for InternalSstIterator<'_> {
     }
 }
 
-struct BloomFilterIterator<'a> {
+struct FilterIterator<'a> {
     inner: InternalSstIterator<'a>,
-    filter: BloomFilterEvaluator,
+    filter: FilterEvaluator,
     initialized: bool,
 }
 
-impl<'a> BloomFilterIterator<'a> {
-    fn new(inner: InternalSstIterator<'a>, filter: BloomFilterEvaluator) -> Self {
+impl<'a> FilterIterator<'a> {
+    fn new(inner: InternalSstIterator<'a>, filter: FilterEvaluator) -> Self {
         Self {
             inner,
             filter,
@@ -853,18 +854,18 @@ impl<'a> BloomFilterIterator<'a> {
 }
 
 #[async_trait]
-impl RowEntryIterator for BloomFilterIterator<'_> {
+impl RowEntryIterator for FilterIterator<'_> {
     async fn init(&mut self) -> Result<(), SlateDBError> {
         if !self.initialized {
-            let maybe_filter = self
+            let filters = self
                 .inner
                 .table_store()
-                .read_filter(
+                .read_filters(
                     &self.inner.view().table_as_ref().sst,
                     self.inner.options.cache_blocks,
                 )
                 .await?;
-            self.filter.evaluate(maybe_filter).await;
+            self.filter.evaluate(&filters).await;
 
             if self.is_filtered_out() {
                 return Ok(());
@@ -907,7 +908,7 @@ impl RowEntryIterator for BloomFilterIterator<'_> {
 #[allow(clippy::large_enum_variant)]
 enum SstIteratorDelegate<'a> {
     Direct(InternalSstIterator<'a>),
-    Bloom(BloomFilterIterator<'a>),
+    Filter(FilterIterator<'a>),
 }
 
 pub(crate) struct SstIterator<'a> {
@@ -919,8 +920,8 @@ impl<'a> SstIterator<'a> {
         let point_key = internal.view().point_key().map(Bytes::copy_from_slice);
         let delegate = match point_key {
             Some(key) => {
-                let filter = BloomFilterEvaluator::new(key, db_stats);
-                SstIteratorDelegate::Bloom(BloomFilterIterator::new(internal, filter))
+                let filter = FilterEvaluator::new(key, db_stats);
+                SstIteratorDelegate::Filter(FilterIterator::new(internal, filter))
             }
             None => SstIteratorDelegate::Direct(internal),
         };
@@ -979,7 +980,7 @@ impl<'a> SstIterator<'a> {
         match internal {
             Some(inner) => {
                 let mut iterator = Self::from_internal(inner, None);
-                if let SstIteratorDelegate::Bloom(inner) = &mut iterator.delegate {
+                if let SstIteratorDelegate::Filter(inner) = &mut iterator.delegate {
                     inner.init().await?;
                     if inner.is_filtered_out() {
                         return Ok(None);
@@ -1025,7 +1026,7 @@ impl<'a> SstIterator<'a> {
         match internal {
             Some(inner) => {
                 let mut iterator = Self::from_internal(inner, None);
-                if let SstIteratorDelegate::Bloom(inner) = &mut iterator.delegate {
+                if let SstIteratorDelegate::Filter(inner) = &mut iterator.delegate {
                     inner.init().await?;
                     if inner.is_filtered_out() {
                         return Ok(None);
@@ -1062,7 +1063,7 @@ impl<'a> SstIterator<'a> {
         match internal {
             Some(inner) => {
                 let mut iterator = Self::from_internal(inner, db_stats);
-                if let SstIteratorDelegate::Bloom(inner) = &mut iterator.delegate {
+                if let SstIteratorDelegate::Filter(inner) = &mut iterator.delegate {
                     inner.init().await?;
                     if inner.is_filtered_out() {
                         return Ok(None);
@@ -1077,15 +1078,7 @@ impl<'a> SstIterator<'a> {
     pub(crate) fn table_id(&self) -> SsTableId {
         match &self.delegate {
             SstIteratorDelegate::Direct(inner) => inner.table_id(),
-            SstIteratorDelegate::Bloom(inner) => inner.table_id(),
-        }
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn is_filtered_out(&self) -> bool {
-        match &self.delegate {
-            SstIteratorDelegate::Direct(_) => false,
-            SstIteratorDelegate::Bloom(inner) => inner.is_filtered_out(),
+            SstIteratorDelegate::Filter(inner) => inner.table_id(),
         }
     }
 }
@@ -1095,21 +1088,21 @@ impl RowEntryIterator for SstIterator<'_> {
     async fn init(&mut self) -> Result<(), SlateDBError> {
         match &mut self.delegate {
             SstIteratorDelegate::Direct(inner) => inner.init().await,
-            SstIteratorDelegate::Bloom(inner) => inner.init().await,
+            SstIteratorDelegate::Filter(inner) => inner.init().await,
         }
     }
 
     async fn next(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
         match &mut self.delegate {
             SstIteratorDelegate::Direct(inner) => inner.next().await,
-            SstIteratorDelegate::Bloom(inner) => inner.next().await,
+            SstIteratorDelegate::Filter(inner) => inner.next().await,
         }
     }
 
     async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
         match &mut self.delegate {
             SstIteratorDelegate::Direct(inner) => inner.seek(next_key).await,
-            SstIteratorDelegate::Bloom(inner) => inner.seek(next_key).await,
+            SstIteratorDelegate::Filter(inner) => inner.seek(next_key).await,
         }
     }
 }
@@ -1123,7 +1116,7 @@ mod tests {
     use crate::db_cache::SplitCache;
     use crate::db_state::{SsTableId, SsTableView};
     use crate::db_stats::DbStats;
-    use crate::filter;
+    use crate::filter_policy::{BloomFilterPolicy, FilterQuery};
     use crate::format::sst::SsTableFormat;
     use crate::object_stores::ObjectStores;
     use crate::sst_builder::BlockFormat;
@@ -1302,16 +1295,17 @@ mod tests {
         let existing_keys = [b"k1".as_slice(), b"k3".as_slice()];
         let sst_handle = build_single_block_sst(&table_store, &existing_keys).await;
 
-        let filter = table_store
-            .read_filter(&sst_handle.sst, true)
+        let filters = table_store
+            .read_filters(&sst_handle.sst, true)
             .await
-            .expect("filter read should succeed")
-            .expect("filter should exist");
+            .expect("filter read should succeed");
+        assert!(!filters.is_empty(), "filter should exist");
 
         let collision_key = b"k12";
-        let hash = filter::filter_hash(collision_key);
         assert!(
-            filter.might_contain(hash),
+            filters[0]
+                .filter
+                .might_match(&FilterQuery::point(Bytes::from_static(collision_key))),
             "bloom filter should report collision for hard-coded key"
         );
 
@@ -1441,7 +1435,7 @@ mod tests {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let format = SsTableFormat {
             min_filter_keys: 1,
-            filter_bits_per_key,
+            filter_policies: vec![Arc::new(BloomFilterPolicy::new(filter_bits_per_key))],
             ..SsTableFormat::default()
         };
         Arc::new(TableStore::new(

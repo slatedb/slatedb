@@ -291,9 +291,22 @@ pub enum SstType {
     Wal,
 }
 
+/// Filter block format stored in SsTableInfo.
+/// Default is `Composite` (the current format). `Legacy` is only set when
+/// decoding old SSTs via FlatBuffers (where the field is absent and maps to 0).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize)]
+pub enum FilterFormat {
+    /// Single raw bloom filter bytes (pre-composite format).
+    Legacy,
+    /// Block containing one or more named filters, each prefixed with its name
+    ///  and length.
+    #[default]
+    Composite,
+}
+
 /// Metadata information about an SSTable. See [`crate::sst_builder::EncodedSsTableBuilder`] for
 /// more information on the format of the SSTable and its metadata.
-#[derive(Clone, Debug, PartialEq, Serialize, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
 pub struct SsTableInfo {
     /// The first entry in the SSTable, if any.
     /// The first entry is a key in an SST for compacted data
@@ -319,6 +332,8 @@ pub struct SsTableInfo {
     pub stats_offset: u64,
     /// The length of the stats block within the SSTable file.
     pub stats_len: u64,
+    /// Filter block format.
+    pub filter_format: FilterFormat,
 }
 
 pub(crate) trait SsTableInfoCodec: Send + Sync {
@@ -780,9 +795,7 @@ impl WalIdStore for parking_lot::RwLock<DbState> {
 #[cfg(test)]
 mod tests {
     use crate::checkpoint::Checkpoint;
-    use crate::db_state::{
-        DbState, SortedRun, SsTableHandle, SsTableId, SsTableInfo, SsTableView, SstType,
-    };
+    use crate::db_state::{DbState, SortedRun, SsTableHandle, SsTableId, SsTableInfo, SsTableView};
     use crate::format::sst::SST_FORMAT_VERSION_LATEST;
     use crate::manifest::store::test_utils::new_dirty_manifest;
     use crate::proptest_util::arbitrary;
@@ -1037,14 +1050,7 @@ mod tests {
         let sst_info = SsTableInfo {
             first_entry: Some(Bytes::copy_from_slice(first_entry)),
             last_entry: last_entry.map(Bytes::copy_from_slice),
-            index_offset: 0,
-            index_len: 0,
-            filter_offset: 0,
-            filter_len: 0,
-            compression_codec: None,
-            sst_type: SstType::default(),
-            stats_offset: 0,
-            stats_len: 0,
+            ..Default::default()
         };
         let sst_id = SsTableId::Compacted(ulid::Ulid::new());
         let handle = SsTableHandle::new(sst_id, SST_FORMAT_VERSION_LATEST, sst_info);
@@ -1054,15 +1060,7 @@ mod tests {
     fn create_sst_info(first_entry: Option<Bytes>) -> SsTableInfo {
         SsTableInfo {
             first_entry,
-            last_entry: None,
-            index_offset: 0,
-            index_len: 0,
-            filter_offset: 0,
-            filter_len: 0,
-            compression_codec: None,
-            sst_type: SstType::default(),
-            stats_offset: 0,
-            stats_len: 0,
+            ..Default::default()
         }
     }
 }

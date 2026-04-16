@@ -14,10 +14,10 @@ use tokio::io::AsyncWriteExt;
 use ulid::Ulid;
 
 use crate::blob::ReadOnlyBlob;
-use crate::db_cache::{CachedEntry, DbCache};
+use crate::db_cache::{CachedEntry, CachedKey, DbCache, EncodedCachedFilter};
 use crate::db_state::{SsTableHandle, SsTableId};
 use crate::error::SlateDBError;
-use crate::filter::BloomFilter;
+use crate::filter_policy::NamedFilter;
 use crate::flatbuffer_types::SsTableIndexOwned;
 use crate::format::block::Block;
 use crate::format::sst::{EncodedSsTable, SsTableFormat};
@@ -235,7 +235,7 @@ impl TableStore {
                     .await;
             }
         }
-        self.cache_filter(*id, encoded_sst.info.filter_offset, encoded_sst.filter)
+        self.cache_filters(*id, encoded_sst.info.filter_offset, encoded_sst.filters)
             .await;
         Ok(SsTableHandle::new(
             *id,
@@ -244,15 +244,51 @@ impl TableStore {
         ))
     }
 
-    async fn cache_filter(&self, sst: SsTableId, id: u64, filter: Option<Arc<BloomFilter>>) {
+    async fn cache_filters(&self, sst: SsTableId, id: u64, filters: Arc<[NamedFilter]>) {
         let Some(ref cache) = self.cache else {
             return;
         };
-        if let Some(filter) = filter {
+        if !filters.is_empty() {
             cache
-                .insert((sst, id).into(), CachedEntry::with_bloom_filter(filter))
+                .insert((sst, id).into(), CachedEntry::with_filters(filters))
                 .await;
         }
+    }
+
+    /// Decodes an `EncodedCachedFilter` slice into a fully-decoded
+    /// `Arc<[NamedFilter]>` and overwrites the cache entry under `cache_key`
+    /// with the decoded form so subsequent hits bypass the decode step.
+    /// Entries whose policy name has no match in the configured policies are
+    /// dropped.
+    async fn decode_and_refresh(
+        &self,
+        cache: &Arc<dyn DbCache>,
+        cache_key: CachedKey,
+        encoded: &[EncodedCachedFilter],
+    ) -> Arc<[NamedFilter]> {
+        let policies = &self.sst_format.filter_policies;
+        let decoded: Arc<[NamedFilter]> = encoded
+            .iter()
+            .filter_map(|ef| match policies.iter().find(|p| p.name() == ef.name) {
+                Some(policy) => Some(NamedFilter {
+                    name: ef.name.clone(),
+                    filter: policy.decode(&ef.data),
+                }),
+                None => {
+                    warn!(
+                        "unknown filter policy '{}' in cached filter, skipping",
+                        ef.name
+                    );
+                    None
+                }
+            })
+            .collect::<Vec<_>>()
+            .into();
+
+        cache
+            .insert(cache_key, CachedEntry::with_filters(decoded.clone()))
+            .await;
+        decoded
     }
 
     /// Delete an SSTable from the object store.
@@ -354,43 +390,44 @@ impl TableStore {
         Ok(version)
     }
 
-    /// Reads the Bloom filter of an SSTable.
+    /// Reads the filters of an SSTable. Every returned entry is decoded.
     ///
     /// ## Arguments
-    /// - `handle`: The handle of the SSTable to read the filter from.
-    /// - `cache_blocks`: Whether to cache the filter after reading it.
-    pub(crate) async fn read_filter(
+    /// - `handle`: The handle of the SSTable to read the filters from.
+    /// - `cache_blocks`: Whether to cache the filters after reading them.
+    pub(crate) async fn read_filters(
         &self,
         handle: &SsTableHandle,
         cache_blocks: bool,
-    ) -> Result<Option<Arc<BloomFilter>>, SlateDBError> {
+    ) -> Result<Arc<[NamedFilter]>, SlateDBError> {
+        let cache_key = (handle.id, handle.info.filter_offset).into();
         if let Some(ref cache) = self.cache {
-            if let Some(filter) = cache
-                .get_filter(&(handle.id, handle.info.filter_offset).into())
-                .await
-                .unwrap_or(None)
-                .and_then(|e| e.bloom_filter())
-            {
-                return Ok(Some(filter));
+            let entry = cache.get_filter(&cache_key).await.unwrap_or(None);
+            if let Some(entry) = entry {
+                // Already decoded.
+                if let Some(filters) = entry.filters() {
+                    return Ok(filters);
+                }
+
+                // Encoded form from disk-cache deserialize. Decode
+                // and overwrite the cache entry with the decoded form.
+                if let Some(encoded) = entry.encoded_filters() {
+                    return Ok(self.decode_and_refresh(cache, cache_key, &encoded).await);
+                }
             }
         }
         let object_store = self.object_stores.store_for(&handle.id);
         let path = self.path(&handle.id);
         let obj = ReadOnlyObject { object_store, path };
-        let filter = self.sst_format.read_filter(&handle.info, &obj).await?;
-        if cache_blocks {
+        let named_filters = self.sst_format.read_filters(&handle.info, &obj).await?;
+        if cache_blocks && !named_filters.is_empty() {
             if let Some(ref cache) = self.cache {
-                if let Some(filter) = filter.as_ref() {
-                    cache
-                        .insert(
-                            (handle.id, handle.info.filter_offset).into(),
-                            CachedEntry::with_bloom_filter(filter.clone()),
-                        )
-                        .await;
-                }
+                cache
+                    .insert(cache_key, CachedEntry::with_filters(named_filters.clone()))
+                    .await;
             }
         }
-        Ok(filter)
+        Ok(named_filters)
     }
 
     /// Reads the stats block of an SSTable.
@@ -673,7 +710,7 @@ impl EncodedSsTableWriter<'_> {
         self.writer.write_all(encoded_sst.footer.as_ref()).await?;
         self.writer.shutdown().await?;
         self.table_store
-            .cache_filter(self.id, encoded_sst.info.filter_offset, encoded_sst.filter)
+            .cache_filters(self.id, encoded_sst.info.filter_offset, encoded_sst.filters)
             .await;
         Ok(SsTableHandle::new(
             self.id,
@@ -1195,15 +1232,15 @@ mod tests {
         );
         assert_eq!(meta_cache.entry_count(), 0);
 
-        let filter = reader.read_filter(&handle, false).await.unwrap();
-        assert!(filter.is_some());
+        let filters = reader.read_filters(&handle, false).await.unwrap();
+        assert!(!filters.is_empty());
         assert!(meta_cache
             .get_filter(&(handle.id, handle.info.filter_offset).into())
             .await
             .unwrap()
             .is_none());
 
-        let _ = reader.read_filter(&handle, true).await.unwrap();
+        let _ = reader.read_filters(&handle, true).await.unwrap();
         assert!(meta_cache
             .get_filter(&(handle.id, handle.info.filter_offset).into())
             .await

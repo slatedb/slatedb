@@ -1,7 +1,7 @@
 //! # Moka Cache
 //!
 //! This module provides an implementation of an in-memory cache using the Moka library.
-//! The cache is designed to store and retrieve cached blocks, indexes, and bloom filters
+//! The cache is designed to store and retrieve cached blocks, indexes, and filters
 //! associated with SSTable IDs.
 //!
 //! ## Features
