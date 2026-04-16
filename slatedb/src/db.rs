@@ -440,41 +440,7 @@ impl DbInner {
         &self.memtable_flusher
     }
 
-    /// Flush in-memory writes to disk. See [`Db::flush`] for details.
-    ///
-    /// `check_status` exists so we can call flush in [`Db::close`] after marking the
-    /// database as closed.
-    ///
-    /// ## Arguments
-    /// - `check_status`: if true, checks the database status before flushing.
-    ///
-    /// ## Returns
-    /// - `Ok(())` if the flush was successful.
-    /// - `Err(SlateDBError)` if there was an error flushing the database. If
-    ///   `check_status` is true, this may return `SlateDBError::Closed` if the database
-    ///   has already been closed.
-    pub(crate) async fn flush(&self, check_status: bool) -> Result<(), SlateDBError> {
-        if self.wal_enabled {
-            self.flush_with_options(
-                FlushOptions {
-                    flush_type: FlushType::Wal,
-                },
-                check_status,
-            )
-            .await
-        } else {
-            self.flush_with_options(
-                FlushOptions {
-                    flush_type: FlushType::MemTable,
-                },
-                check_status,
-            )
-            .await
-        }
-    }
-
-    /// Flush in-memory writes to disk with custom options. See [`Db::flush_with_options`]
-    /// for details.
+    /// Flush in-memory writes to disk. See [`Db::flush_with_options`] for details.
     ///
     /// `check_status` exists so we can call flush in [`Db::close`] after marking the
     /// database as closed.
@@ -488,7 +454,7 @@ impl DbInner {
     /// - `Err(SlateDBError)` if there was an error flushing the database. If
     ///   `check_status` is true, this may return `SlateDBError::Closed` if the database
     ///   has already been closed.
-    pub(crate) async fn flush_with_options(
+    pub(crate) async fn flush(
         &self,
         options: FlushOptions,
         check_status: bool,
@@ -706,7 +672,18 @@ impl Db {
         self.inner.status_manager.write_result(Ok(()));
 
         if should_flush {
-            if let Err(e) = self.inner.flush(false).await {
+            // Flush memtables to L0 so that the WAL does not need to be
+            // replayed on the next startup.
+            if let Err(e) = self
+                .inner
+                .flush(
+                    FlushOptions {
+                        flush_type: FlushType::MemTable,
+                    },
+                    false,
+                )
+                .await
+            {
                 warn!("failed to flush db during close [error={:?}]", e);
             }
         }
@@ -1503,7 +1480,15 @@ impl Db {
     /// }
     /// ```
     pub async fn flush(&self) -> Result<(), crate::Error> {
-        self.inner.flush(true).await.map_err(Into::into)
+        let flush_type = if self.inner.wal_enabled {
+            FlushType::Wal
+        } else {
+            FlushType::MemTable
+        };
+        self.inner
+            .flush(FlushOptions { flush_type }, true)
+            .await
+            .map_err(Into::into)
     }
 
     /// Flush in-memory writes to disk with custom options.
@@ -1542,10 +1527,7 @@ impl Db {
     /// }
     /// ```
     pub async fn flush_with_options(&self, options: FlushOptions) -> Result<(), crate::Error> {
-        self.inner
-            .flush_with_options(options, true)
-            .await
-            .map_err(Into::into)
+        self.inner.flush(options, true).await.map_err(Into::into)
     }
 
     /// Get the current manifest state.
@@ -2444,6 +2426,48 @@ mod tests {
         );
         let status = db.status();
         assert_eq!(status.close_reason, Some(CloseReason::Clean));
+    }
+
+    #[tokio::test]
+    async fn test_close_flushes_memtables_to_l0() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let db_options = {
+            let mut db_options = test_db_options(0, 1024, None);
+            db_options.flush_interval = None;
+            db_options
+        };
+        let metrics_recorder = Arc::new(DefaultMetricsRecorder::new());
+        let db = Db::builder("/tmp/test_close_flushes_memtables_to_l0", object_store)
+            .with_settings(db_options)
+            .with_metrics_recorder(metrics_recorder.clone())
+            .build()
+            .await
+            .unwrap();
+
+        db.put_with_options(
+            b"test_key",
+            b"test_value",
+            &PutOptions::default(),
+            &WriteOptions {
+                await_durable: false,
+            },
+        )
+        .await
+        .unwrap();
+
+        // No L0 flushes should have happened yet.
+        assert_eq!(
+            lookup_metric(&metrics_recorder, crate::db_stats::L0_FLUSH_BYTES).unwrap_or(0),
+            0
+        );
+
+        db.close().await.unwrap();
+
+        // close() should have flushed memtables to L0.
+        assert!(
+            lookup_metric(&metrics_recorder, crate::db_stats::L0_FLUSH_BYTES).unwrap() > 0,
+            "expected L0 flush during close"
+        );
     }
 
     #[tokio::test]
@@ -4387,11 +4411,22 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn test_restore_seq_number() {
+        let fp_registry = Arc::new(FailPointRegistry::new());
+        // Block L0 uploads so the data remains only in the WAL. The
+        // uploader gives up on shutdown when the WAL is enabled, so
+        // close() will complete without flushing memtables to L0.
+        fail_parallel::cfg(
+            fp_registry.clone(),
+            "write-compacted-sst-io-error",
+            "return",
+        )
+        .unwrap();
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = "/tmp/test_kv_store";
         let db = Db::builder(path, object_store.clone())
             .with_settings(test_db_options(0, 256, None))
             .with_system_clock(Arc::new(MockSystemClock::new()))
+            .with_fp_registry(fp_registry.clone())
             .build()
             .await
             .unwrap();
@@ -4429,9 +4464,13 @@ mod tests {
         db.flush().await.unwrap();
         db.close().await.unwrap();
 
+        // Disable the failpoint so the restored DB can flush normally.
+        fail_parallel::cfg(fp_registry.clone(), "write-compacted-sst-io-error", "off").unwrap();
+
         let db_restored = Db::builder(path, object_store.clone())
             .with_settings(test_db_options(0, 256, None))
             .with_system_clock(Arc::new(MockSystemClock::new()))
+            .with_fp_registry(fp_registry.clone())
             .build()
             .await
             .unwrap();
@@ -5327,6 +5366,16 @@ mod tests {
 
     #[tokio::test]
     async fn test_recover_clock_tick_from_wal() {
+        let fp_registry = Arc::new(FailPointRegistry::new());
+        // Block L0 uploads so the data remains only in the WAL. The
+        // uploader gives up on shutdown when the WAL is enabled, so
+        // close() will complete without flushing memtables to L0.
+        fail_parallel::cfg(
+            fp_registry.clone(),
+            "write-compacted-sst-io-error",
+            "return",
+        )
+        .unwrap();
         let clock = Arc::new(MockSystemClock::new());
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = "/tmp/test_kv_store";
@@ -5334,6 +5383,7 @@ mod tests {
         let db = Db::builder(path, object_store.clone())
             .with_settings(test_db_options(0, 1024, None))
             .with_system_clock(clock.clone())
+            .with_fp_registry(fp_registry.clone())
             .build()
             .await
             .unwrap();
@@ -5376,10 +5426,14 @@ mod tests {
         let last_clock_tick = db_state.last_l0_clock_tick;
         assert_eq!(last_clock_tick, i64::MIN);
 
+        // Disable the failpoint so the restored DB can flush normally.
+        fail_parallel::cfg(fp_registry.clone(), "write-compacted-sst-io-error", "off").unwrap();
+
         let clock = Arc::new(MockSystemClock::new());
         let db = Db::builder(path, object_store.clone())
             .with_settings(test_db_options(0, 1024, None))
             .with_system_clock(clock.clone())
+            .with_fp_registry(fp_registry.clone())
             .build()
             .await
             .unwrap();
