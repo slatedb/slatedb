@@ -102,8 +102,10 @@
 //! ```
 //!
 use std::collections::HashMap;
+use std::ops::{Bound, RangeBounds};
 use std::sync::Arc;
 
+use bytes::Bytes;
 use fail_parallel::FailPointRegistry;
 use log::info;
 use log::warn;
@@ -162,6 +164,7 @@ use slatedb_common::metrics::MetricLevel;
 use slatedb_common::metrics::MetricsRecorder;
 use slatedb_common::metrics::MetricsRecorderHelper;
 use slatedb_common::metrics::NoopMetricsRecorder;
+use uuid::Uuid;
 
 /// A builder for creating a new Db instance.
 ///
@@ -1383,6 +1386,134 @@ fn default_db_cache() -> Option<Arc<dyn DbCache>> {
             .with_meta_cache(meta_cache)
             .build(),
     ) as Arc<dyn DbCache>)
+}
+
+/// Specifies the source database and checkpoint for a clone operation.
+pub struct CloneSourceSpec<R: RangeBounds<Bytes> + Clone = (Bound<Bytes>, Bound<Bytes>)> {
+    /// Path to the parent/source database.
+    pub path: Path,
+    /// Optional checkpoint ID to clone from. If None, the latest state is used.
+    pub checkpoint: Option<Uuid>,
+    /// Optional range to limit the visible keys in the source database.
+    pub projection_range: Option<R>,
+}
+
+impl<R: RangeBounds<Bytes> + Clone> Clone for CloneSourceSpec<R> {
+    fn clone(&self) -> Self {
+        CloneSourceSpec {
+            path: self.path.clone(),
+            checkpoint: self.checkpoint,
+            projection_range: self.projection_range.clone(),
+        }
+    }
+}
+
+impl<R: RangeBounds<Bytes> + Clone> CloneSourceSpec<R> {
+    /// Set the visible range to limit the keys visible in the source database.
+    pub fn with_projection_range(mut self, range: R) -> Self {
+        self.projection_range = Some(range);
+        self
+    }
+}
+
+impl CloneSourceSpec<(Bound<Bytes>, Bound<Bytes>)> {
+    /// Create a new clone source pointing to the latest state of a database.
+    pub fn new<P: Into<Path>>(path: P) -> Self {
+        CloneSourceSpec {
+            path: path.into(),
+            checkpoint: None,
+            projection_range: None,
+        }
+    }
+
+    /// Create a new clone source pointing to a specific checkpoint.
+    pub fn with_checkpoint<P: Into<Path>>(path: P, checkpoint: Uuid) -> Self {
+        CloneSourceSpec {
+            path: path.into(),
+            checkpoint: Some(checkpoint),
+            projection_range: None,
+        }
+    }
+}
+
+/// A builder for configuring database clone operations.
+pub struct CloneBuilder<R: RangeBounds<Bytes> + Clone = (Bound<Bytes>, Bound<Bytes>)> {
+    clone_path: Path,
+    source: CloneSourceSpec<R>,
+    object_store: Arc<dyn ObjectStore>,
+    wal_object_store: Option<Arc<dyn ObjectStore>>,
+    system_clock: Option<Arc<dyn SystemClock>>,
+    rand: Option<Arc<DbRand>>,
+    projection_range: Option<R>,
+}
+
+impl<R: RangeBounds<Bytes> + Clone> CloneBuilder<R> {
+    pub(crate) fn new(
+        clone_path: Path,
+        source: CloneSourceSpec<R>,
+        object_store: Arc<dyn ObjectStore>,
+    ) -> Self {
+        CloneBuilder {
+            clone_path,
+            source,
+            object_store,
+            wal_object_store: None,
+            system_clock: None,
+            rand: None,
+            projection_range: None,
+        }
+    }
+
+    pub fn with_clone_path(mut self, clone_path: Path) -> Self {
+        self.clone_path = clone_path;
+        self
+    }
+
+    pub fn with_source(mut self, source: CloneSourceSpec<R>) -> Self {
+        self.source = source;
+        self
+    }
+
+    pub fn with_object_store(mut self, object_store: Arc<dyn ObjectStore>) -> Self {
+        self.object_store = object_store;
+        self
+    }
+
+    pub fn with_wal_object_store(mut self, wal_object_store: Arc<dyn ObjectStore>) -> Self {
+        self.wal_object_store = Some(wal_object_store);
+        self
+    }
+
+    pub fn with_projection_range(mut self, projection_range: Option<R>) -> Self {
+        self.projection_range = projection_range;
+        self
+    }
+
+    pub fn with_system_clock(mut self, system_clock: Arc<dyn SystemClock>) -> Self {
+        self.system_clock = Some(system_clock);
+        self
+    }
+
+    pub fn with_seed(mut self, seed: u64) -> Self {
+        self.rand = Some(Arc::new(DbRand::new(seed)));
+        self
+    }
+
+    /// Build and execute the clone operation.
+    pub async fn build(self) -> Result<(), Box<dyn std::error::Error>> {
+        crate::clone::create_clone(
+            self.source,
+            self.clone_path,
+            ObjectStores::new(self.object_store, self.wal_object_store),
+            Arc::new(FailPointRegistry::new()),
+            self.system_clock
+                .unwrap_or_else(|| Arc::new(DefaultSystemClock::new())),
+            self.rand.unwrap_or_else(|| Arc::new(Default::default())),
+            self.projection_range,
+        )
+        .await?;
+        Ok(())
+    }
 }
 
 fn instrumented_retrying_object_store(
