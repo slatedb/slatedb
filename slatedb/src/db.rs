@@ -65,7 +65,7 @@ use crate::merge_operator::{instrument_merge_operator, MergeOperatorType};
 use crate::oracle::{DbOracle, Oracle};
 use crate::paths::PathResolver;
 use crate::rand::DbRand;
-use crate::reader::Reader;
+use crate::reader::{Reader, ScanContext};
 use crate::snapshot_manager::SnapshotManager;
 use crate::sst_iter::SstIteratorOptions;
 use crate::tablestore::TableStore;
@@ -233,11 +233,22 @@ impl DbInner {
         &self,
         range: BytesRange,
         options: &ScanOptions,
+        prefix: Option<Bytes>,
     ) -> Result<DbIterator, SlateDBError> {
         self.check_closed()?;
         let db_state = self.state.read().view();
         self.reader
-            .scan_with_options(range, options, &db_state, None, None, None)
+            .scan_with_options(
+                range,
+                options,
+                ScanContext {
+                    db_state: &db_state,
+                    write_batch_iter: None,
+                    max_seq: None,
+                    range_tracker: None,
+                    prefix,
+                },
+            )
             .await
     }
 
@@ -521,6 +532,7 @@ impl DbInner {
             cache_blocks: false,
             eager_spawn: true,
             order: IterationOrder::Ascending,
+            prefix: None,
         };
 
         let replay_options = WalReplayOptions {
@@ -1013,7 +1025,7 @@ impl Db {
             .map(|b| Bytes::copy_from_slice(b.as_ref()));
         let range = (start, end);
         self.inner
-            .scan_with_options(BytesRange::from(range), options)
+            .scan_with_options(BytesRange::from(range), options, None)
             .await
             .map_err(Into::into)
     }
@@ -1108,9 +1120,10 @@ impl Db {
     where
         P: AsRef<[u8]> + Send,
     {
+        let prefix = Bytes::copy_from_slice(prefix.as_ref());
         let range = BytesRange::from_prefix(prefix.as_ref());
         self.inner
-            .scan_with_options(range, options)
+            .scan_with_options(range, options, Some(prefix))
             .await
             .map_err(Into::into)
     }
@@ -1719,6 +1732,17 @@ impl DbRead for Db {
         T: RangeBounds<K> + Send,
     {
         self.scan_with_options(range, options).await
+    }
+
+    async fn scan_prefix_with_options<P>(
+        &self,
+        prefix: P,
+        options: &ScanOptions,
+    ) -> Result<DbIterator, crate::Error>
+    where
+        P: AsRef<[u8]> + Send,
+    {
+        self.scan_prefix_with_options(prefix, options).await
     }
 }
 
@@ -2870,7 +2894,7 @@ mod tests {
                 let iter = self
                     .db
                     .inner
-                    .scan_with_options(range, &ScanOptions::default())
+                    .scan_with_options(range, &ScanOptions::default(), None)
                     .await
                     .unwrap();
                 Box::new(iter)
@@ -2910,7 +2934,7 @@ mod tests {
     ) {
         let mut iter = db
             .inner
-            .scan_with_options(range.clone(), scan_options)
+            .scan_with_options(range.clone(), scan_options, None)
             .await
             .unwrap();
         test_utils::assert_ranged_db_scan(table, range, &mut iter).await;
@@ -3053,7 +3077,7 @@ mod tests {
         ) {
             let mut iter = db
                 .inner
-                .scan_with_options(scan_range.clone(), &ScanOptions::default())
+                .scan_with_options(scan_range.clone(), &ScanOptions::default(), None)
                 .await
                 .unwrap();
 
@@ -3432,7 +3456,7 @@ mod tests {
                 ..,
                 sst1,
                 table_store.clone(),
-                sst_iter_options,
+                sst_iter_options.clone(),
             )
             .await
             .unwrap()

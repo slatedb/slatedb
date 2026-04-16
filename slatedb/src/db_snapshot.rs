@@ -9,6 +9,7 @@ use crate::db_iter::DbIterator;
 use crate::types::KeyValue;
 
 use crate::db::DbInner;
+use crate::reader::ScanContext;
 use crate::DbRead;
 
 pub struct DbSnapshot {
@@ -129,20 +130,8 @@ impl DbSnapshot {
             .end_bound()
             .map(|b| Bytes::copy_from_slice(b.as_ref()));
         let range = (start, end);
-        self.db_inner.check_closed()?;
-        let db_state = self.db_inner.state.read().view();
-        self.db_inner
-            .reader
-            .scan_with_options(
-                BytesRange::from(range),
-                options,
-                &db_state,
-                None,
-                Some(self.started_seq),
-                None,
-            )
+        self.scan_inner(BytesRange::from(range), options, None)
             .await
-            .map_err(Into::into)
     }
 
     /// Scan all keys that share the provided prefix using the default scan options.
@@ -176,8 +165,34 @@ impl DbSnapshot {
     where
         P: AsRef<[u8]> + Send,
     {
-        self.scan_with_options(BytesRange::from_prefix(prefix.as_ref()), options)
+        let prefix = Bytes::copy_from_slice(prefix.as_ref());
+        let range = BytesRange::from_prefix(prefix.as_ref());
+        self.scan_inner(range, options, Some(prefix)).await
+    }
+
+    async fn scan_inner(
+        &self,
+        range: BytesRange,
+        options: &ScanOptions,
+        prefix: Option<Bytes>,
+    ) -> Result<DbIterator, crate::Error> {
+        self.db_inner.check_closed()?;
+        let db_state = self.db_inner.state.read().view();
+        self.db_inner
+            .reader
+            .scan_with_options(
+                range,
+                options,
+                ScanContext {
+                    db_state: &db_state,
+                    write_batch_iter: None,
+                    max_seq: Some(self.started_seq),
+                    range_tracker: None,
+                    prefix,
+                },
+            )
             .await
+            .map_err(Into::into)
     }
 }
 
@@ -209,6 +224,17 @@ impl DbRead for DbSnapshot {
         T: RangeBounds<K> + Send,
     {
         self.scan_with_options(range, options).await
+    }
+
+    async fn scan_prefix_with_options<P>(
+        &self,
+        prefix: P,
+        options: &ScanOptions,
+    ) -> Result<DbIterator, crate::Error>
+    where
+        P: AsRef<[u8]> + Send,
+    {
+        self.scan_prefix_with_options(prefix, options).await
     }
 }
 
@@ -290,7 +316,7 @@ mod tests {
         expected_db_results: None,
     })]
     #[case(SnapshotGetTestCase {
-        name: "snapshot_after_delete", 
+        name: "snapshot_after_delete",
         setup: |db| Box::pin(async move {
             db.put(b"key1", b"value1").await?;
             db.delete(b"key1").await?;

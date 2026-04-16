@@ -13,6 +13,7 @@ use crate::db::WriteHandle;
 use crate::db_iter::{DbIterator, DbIteratorRangeTracker};
 use crate::error::SlateDBError;
 use crate::iter::IterationOrder;
+use crate::reader::ScanContext;
 use crate::transaction_manager::{IsolationLevel, TransactionManager};
 use crate::types::KeyValue;
 use crate::DbRead;
@@ -223,44 +224,8 @@ impl DbTransaction {
             .end_bound()
             .map(|b| Bytes::copy_from_slice(b.as_ref()));
         let range = (start, end);
-
-        // Track read range for SSI conflict detection if needed
-        let range_tracker = if self.isolation_level == IsolationLevel::SerializableSnapshot {
-            let tracker = Arc::new(DbIteratorRangeTracker::new());
-            self.range_trackers.lock().push(tracker.clone());
-            Some(tracker)
-        } else {
-            None
-        };
-
-        self.db_inner.check_closed()?;
-        let db_state = self.db_inner.state.read().view();
-
-        // Build the write batch iterator synchronously while holding the read
-        // guard, avoiding a clone of the full batch. The iterator materializes
-        // only the entries in the scan range.
-        let range = BytesRange::from(range);
-        let write_batch_iter = {
-            let guard = self.write_batch.read();
-            Some(WriteBatchIterator::new(
-                &guard,
-                range.clone(),
-                options.order,
-            ))
-        };
-
-        self.db_inner
-            .reader
-            .scan_with_options(
-                range,
-                options,
-                &db_state,
-                write_batch_iter,
-                Some(self.started_seq),
-                range_tracker,
-            )
+        self.scan_inner(BytesRange::from(range), options, None)
             .await
-            .map_err(Into::into)
     }
 
     /// Scan all keys that share the provided prefix using the default scan options.
@@ -296,8 +261,56 @@ impl DbTransaction {
     where
         P: AsRef<[u8]> + Send,
     {
-        self.scan_with_options(BytesRange::from_prefix(prefix.as_ref()), options)
+        let prefix = Bytes::copy_from_slice(prefix.as_ref());
+        let range = BytesRange::from_prefix(prefix.as_ref());
+        self.scan_inner(range, options, Some(prefix)).await
+    }
+
+    async fn scan_inner(
+        &self,
+        range: BytesRange,
+        options: &ScanOptions,
+        prefix: Option<Bytes>,
+    ) -> Result<DbIterator, crate::Error> {
+        // Track read range for SSI conflict detection if needed
+        let range_tracker = if self.isolation_level == IsolationLevel::SerializableSnapshot {
+            let tracker = Arc::new(DbIteratorRangeTracker::new());
+            self.range_trackers.lock().push(tracker.clone());
+            Some(tracker)
+        } else {
+            None
+        };
+
+        self.db_inner.check_closed()?;
+        let db_state = self.db_inner.state.read().view();
+
+        // Build the write batch iterator synchronously while holding the read
+        // guard, avoiding a clone of the full batch. The iterator materializes
+        // only the entries in the scan range.
+        let write_batch_iter = {
+            let guard = self.write_batch.read();
+            Some(WriteBatchIterator::new(
+                &guard,
+                range.clone(),
+                options.order,
+            ))
+        };
+
+        self.db_inner
+            .reader
+            .scan_with_options(
+                range,
+                options,
+                ScanContext {
+                    db_state: &db_state,
+                    write_batch_iter,
+                    max_seq: Some(self.started_seq),
+                    range_tracker,
+                    prefix,
+                },
+            )
             .await
+            .map_err(Into::into)
     }
 
     /// Put a key-value pair into the transaction.
@@ -613,6 +626,17 @@ impl DbRead for DbTransaction {
         T: RangeBounds<K> + Send,
     {
         self.scan_with_options(range, options).await
+    }
+
+    async fn scan_prefix_with_options<P>(
+        &self,
+        prefix: P,
+        options: &ScanOptions,
+    ) -> Result<DbIterator, crate::Error>
+    where
+        P: AsRef<[u8]> + Send,
+    {
+        self.scan_prefix_with_options(prefix, options).await
     }
 }
 

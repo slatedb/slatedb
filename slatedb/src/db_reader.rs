@@ -16,7 +16,7 @@ use crate::merge_operator::MergeOperatorType;
 use crate::oracle::DbReaderOracle;
 use crate::paths::PathResolver;
 use crate::rand::DbRand;
-use crate::reader::{DbStateReader, Reader};
+use crate::reader::{DbStateReader, Reader, ScanContext};
 use crate::sst_iter::SstIteratorOptions;
 use crate::store_provider::StoreProvider;
 use crate::tablestore::TableStore;
@@ -224,11 +224,22 @@ impl DbReaderInner {
         &self,
         range: BytesRange,
         options: &ScanOptions,
+        prefix: Option<Bytes>,
     ) -> Result<DbIterator, SlateDBError> {
         self.check_closed()?;
         let db_state = Arc::clone(&self.state.read());
         self.reader
-            .scan_with_options(range, options, db_state.as_ref(), None, None, None)
+            .scan_with_options(
+                range,
+                options,
+                ScanContext {
+                    db_state: db_state.as_ref(),
+                    write_batch_iter: None,
+                    max_seq: None,
+                    range_tracker: None,
+                    prefix,
+                },
+            )
             .await
     }
 
@@ -445,6 +456,7 @@ impl DbReaderInner {
             cache_blocks: true,
             eager_spawn: true,
             order: IterationOrder::Ascending,
+            prefix: None,
         };
 
         let (mut replay_after_wal_id, mut last_committed_seq) =
@@ -981,7 +993,7 @@ impl DbReader {
             .map(|b| Bytes::copy_from_slice(b.as_ref()));
         let range = BytesRange::from((start, end));
         self.inner
-            .scan_with_options(range, options)
+            .scan_with_options(range, options, None)
             .await
             .map_err(Into::into)
     }
@@ -1017,8 +1029,12 @@ impl DbReader {
     where
         P: AsRef<[u8]> + Send,
     {
-        self.scan_with_options(BytesRange::from_prefix(prefix.as_ref()), options)
+        let prefix = Bytes::copy_from_slice(prefix.as_ref());
+        let range = BytesRange::from_prefix(prefix.as_ref());
+        self.inner
+            .scan_with_options(range, options, Some(prefix))
             .await
+            .map_err(Into::into)
     }
 
     /// Close the database reader.
@@ -1103,6 +1119,17 @@ impl DbRead for DbReader {
         T: RangeBounds<K> + Send,
     {
         self.scan_with_options(range, options).await
+    }
+
+    async fn scan_prefix_with_options<P>(
+        &self,
+        prefix: P,
+        options: &ScanOptions,
+    ) -> Result<DbIterator, crate::Error>
+    where
+        P: AsRef<[u8]> + Send,
+    {
+        self.scan_prefix_with_options(prefix, options).await
     }
 }
 
