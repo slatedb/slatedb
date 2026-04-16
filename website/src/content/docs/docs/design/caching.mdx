@@ -13,7 +13,7 @@ The block cache sits in the SST reader. It stores decoded data blocks, index blo
 
 You can replace the cache with [`DbBuilder::with_db_cache`](https://docs.rs/slatedb/latest/slatedb/db/struct.DbBuilder.html#method.with_db_cache), or disable it with [`DbBuilder::with_db_cache_disabled`](https://docs.rs/slatedb/latest/slatedb/db/struct.DbBuilder.html#method.with_db_cache_disabled). If you want to plug in your own implementation, use the [`DbCache`](https://docs.rs/slatedb/latest/slatedb/db_cache/trait.DbCache.html) trait.
 
-[`FoyerHybridCache`](https://docs.rs/slatedb/latest/slatedb/db_cache/foyer_hybrid/struct.FoyerHybridCache.html) also belongs in this layer. It is a `DbCache` implementation, so it caches decoded SST entries, not raw object-store bytes. Its memory tier works like any other database cache. Its disk tier can still avoid remote I/O and decode work, but it adds a local disk read on a miss in memory.
+[`FoyerHybridCache`](https://docs.rs/slatedb/latest/slatedb/db_cache/foyer_hybrid/struct.FoyerHybridCache.html) also belongs in this layer. It is a `DbCache` implementation, so it caches decoded SST entries, not raw object-store bytes. Its memory tier works like any other database cache. Its disk tier can still avoid remote I/O and decode work, but it adds a local disk read on a miss in memory. See [Configuring Foyer Cache](/docs/operations/foyer-cache) for tuning guidance.
 
 ## Object-Store Cache
 
