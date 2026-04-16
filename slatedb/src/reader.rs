@@ -488,7 +488,8 @@ mod tests {
     use crate::tablestore::TableStore;
     use object_store::{memory::InMemory, path::Path, ObjectStore};
     use slatedb_common::metrics::{
-        lookup_metric, DefaultMetricsRecorder, MetricLevel, MetricsRecorder, MetricsRecorderHelper,
+        lookup_metric_with_labels, DefaultMetricsRecorder, MetricLevel, MetricsRecorder,
+        MetricsRecorderHelper,
     };
     use std::collections::HashMap;
     use std::sync::Arc;
@@ -1940,16 +1941,32 @@ mod tests {
             .await?;
 
         assert!(result.is_none());
+        let point_labels = &[(
+            crate::db_stats::FILTER_KIND_LABEL,
+            crate::db_stats::FILTER_KIND_POINT,
+        )];
         assert_eq!(
-            lookup_metric(&recorder, crate::db_stats::SST_FILTER_NEGATIVE_COUNT),
+            lookup_metric_with_labels(
+                &recorder,
+                crate::db_stats::SST_FILTER_NEGATIVE_COUNT,
+                point_labels,
+            ),
             Some(1)
         );
         assert_eq!(
-            lookup_metric(&recorder, crate::db_stats::SST_FILTER_POSITIVE_COUNT),
+            lookup_metric_with_labels(
+                &recorder,
+                crate::db_stats::SST_FILTER_POSITIVE_COUNT,
+                point_labels,
+            ),
             Some(0)
         );
         assert_eq!(
-            lookup_metric(&recorder, crate::db_stats::SST_FILTER_FALSE_POSITIVE_COUNT),
+            lookup_metric_with_labels(
+                &recorder,
+                crate::db_stats::SST_FILTER_FALSE_POSITIVE_COUNT,
+                point_labels,
+            ),
             Some(0)
         );
 

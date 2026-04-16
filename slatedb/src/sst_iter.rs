@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use bytes::Bytes;
+use slatedb_common::metrics::CounterFn;
 use std::cmp::min;
 use std::collections::VecDeque;
 use std::ops::Bound::{Excluded, Included, Unbounded};
@@ -241,20 +242,41 @@ impl FilterEvaluator {
         }
 
         // AND logic: if any filter says the key is NOT present, filter it out.
-        // All filters reaching here are decoded — TableStore::read_filters
+        // All filters reaching here are decoded. TableStore::read_filters
         // resolves any raw cache entries before returning.
         let might_match = filters.iter().all(|nf| nf.filter.might_match(&self.query));
 
         if might_match {
             if let Some(stats) = &self.db_stats {
-                stats.sst_filter_positives.increment(1);
+                self.positives_counter(stats).increment(1);
             }
             self.state = FilterState::Positive;
         } else {
             if let Some(stats) = &self.db_stats {
-                stats.sst_filter_negatives.increment(1);
+                self.negatives_counter(stats).increment(1);
             }
             self.state = FilterState::Negative;
+        }
+    }
+
+    fn positives_counter<'a>(&self, stats: &'a DbStats) -> &'a Arc<dyn CounterFn> {
+        match &self.query.target {
+            FilterTarget::Point(_) => &stats.sst_filter_point_positives,
+            FilterTarget::Prefix(_) => &stats.sst_filter_prefix_positives,
+        }
+    }
+
+    fn negatives_counter<'a>(&self, stats: &'a DbStats) -> &'a Arc<dyn CounterFn> {
+        match &self.query.target {
+            FilterTarget::Point(_) => &stats.sst_filter_point_negatives,
+            FilterTarget::Prefix(_) => &stats.sst_filter_prefix_negatives,
+        }
+    }
+
+    fn false_positives_counter<'a>(&self, stats: &'a DbStats) -> &'a Arc<dyn CounterFn> {
+        match &self.query.target {
+            FilterTarget::Point(_) => &stats.sst_filter_point_false_positives,
+            FilterTarget::Prefix(_) => &stats.sst_filter_prefix_false_positives,
         }
     }
 
@@ -273,7 +295,7 @@ impl FilterEvaluator {
     fn notify_finished_iteration(&mut self) {
         if self.state == FilterState::Positive && !self.found_key && !self.false_positive_recorded {
             if let Some(stats) = &self.db_stats {
-                stats.sst_filter_false_positives.increment(1);
+                self.false_positives_counter(stats).increment(1);
             }
             self.false_positive_recorded = true;
         }
@@ -1139,7 +1161,7 @@ mod tests {
     use object_store::path::Path;
     use object_store::{memory::InMemory, ObjectStore};
     use slatedb_common::metrics::{
-        lookup_metric, DefaultMetricsRecorder, MetricLevel, MetricsRecorderHelper,
+        lookup_metric_with_labels, DefaultMetricsRecorder, MetricLevel, MetricsRecorderHelper,
     };
     use std::sync::Arc;
 
@@ -1255,11 +1277,25 @@ mod tests {
             other => panic!("expected value, found {other:?}"),
         }
         assert_eq!(
-            lookup_metric(&recorder, crate::db_stats::SST_FILTER_POSITIVE_COUNT),
+            lookup_metric_with_labels(
+                &recorder,
+                crate::db_stats::SST_FILTER_POSITIVE_COUNT,
+                &[(
+                    crate::db_stats::FILTER_KIND_LABEL,
+                    crate::db_stats::FILTER_KIND_POINT,
+                )],
+            ),
             Some(1)
         );
         assert_eq!(
-            lookup_metric(&recorder, crate::db_stats::SST_FILTER_FALSE_POSITIVE_COUNT),
+            lookup_metric_with_labels(
+                &recorder,
+                crate::db_stats::SST_FILTER_FALSE_POSITIVE_COUNT,
+                &[(
+                    crate::db_stats::FILTER_KIND_LABEL,
+                    crate::db_stats::FILTER_KIND_POINT,
+                )],
+            ),
             Some(0)
         );
     }
@@ -1287,11 +1323,25 @@ mod tests {
         // then
         assert!(iter.is_none(), "negative bloom result should skip iterator");
         assert_eq!(
-            lookup_metric(&recorder, crate::db_stats::SST_FILTER_NEGATIVE_COUNT),
+            lookup_metric_with_labels(
+                &recorder,
+                crate::db_stats::SST_FILTER_NEGATIVE_COUNT,
+                &[(
+                    crate::db_stats::FILTER_KIND_LABEL,
+                    crate::db_stats::FILTER_KIND_POINT,
+                )],
+            ),
             Some(1)
         );
         assert_eq!(
-            lookup_metric(&recorder, crate::db_stats::SST_FILTER_FALSE_POSITIVE_COUNT),
+            lookup_metric_with_labels(
+                &recorder,
+                crate::db_stats::SST_FILTER_FALSE_POSITIVE_COUNT,
+                &[(
+                    crate::db_stats::FILTER_KIND_LABEL,
+                    crate::db_stats::FILTER_KIND_POINT,
+                )],
+            ),
             Some(0)
         );
     }
@@ -1339,16 +1389,32 @@ mod tests {
 
         // then
         assert!(entry.is_none(), "false positive must return no entry");
+        let point_labels = &[(
+            crate::db_stats::FILTER_KIND_LABEL,
+            crate::db_stats::FILTER_KIND_POINT,
+        )];
         assert_eq!(
-            lookup_metric(&recorder, crate::db_stats::SST_FILTER_POSITIVE_COUNT),
+            lookup_metric_with_labels(
+                &recorder,
+                crate::db_stats::SST_FILTER_POSITIVE_COUNT,
+                point_labels,
+            ),
             Some(1)
         );
         assert_eq!(
-            lookup_metric(&recorder, crate::db_stats::SST_FILTER_FALSE_POSITIVE_COUNT),
+            lookup_metric_with_labels(
+                &recorder,
+                crate::db_stats::SST_FILTER_FALSE_POSITIVE_COUNT,
+                point_labels,
+            ),
             Some(1)
         );
         assert_eq!(
-            lookup_metric(&recorder, crate::db_stats::SST_FILTER_NEGATIVE_COUNT),
+            lookup_metric_with_labels(
+                &recorder,
+                crate::db_stats::SST_FILTER_NEGATIVE_COUNT,
+                point_labels,
+            ),
             Some(0)
         );
     }

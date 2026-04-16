@@ -717,8 +717,11 @@ SlateDB features and components that this RFC interacts with. Check all that app
 - **Configuration**: New `with_filter_policies` on `DbBuilder` /
   `CompactorBuilder` (programmatic only; not serializable to TOML/JSON).
   `filter_bits_per_key` has been removed from `Settings`.
-- **Metrics**: Existing `sst_filter_positives`, `sst_filter_negatives`,
-  `sst_filter_false_positives` metrics are preserved.
+- **Metrics**: Existing `sst_filter_positive_count`, `sst_filter_negative_count`,
+  `sst_filter_false_positive_count` counters are preserved. Each gains a
+  `kind` label with values `point` or `prefix` so point-lookup filtering and
+  prefix-scan filtering can be tracked independently (mirrors RocksDB's
+  separation of `BLOOM_FILTER_FULL_*` and `BLOOM_FILTER_PREFIX_*` tickers).
 
 ### Compatibility
 
