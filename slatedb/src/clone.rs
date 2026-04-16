@@ -134,7 +134,7 @@ async fn create_clone_manifest(
     ));
 
     // Ensure all external databases contain the final checkpoint.
-    for external_db in &clone_manifest.manifest().core.external_dbs {
+    for external_db in &clone_manifest.manifest().external_dbs {
         let Some(final_checkpoint_id) = external_db.final_checkpoint_id else {
             // If the final checkpoint id is not set, we can skip this check
             continue;
@@ -210,7 +210,7 @@ fn validate_attached_to_external_db(
     checkpoint_id: Option<Uuid>,
     clone_manifest: &StoredManifest,
 ) -> Result<(), SlateDBError> {
-    let external_dbs = &clone_manifest.manifest().core.external_dbs;
+    let external_dbs = &clone_manifest.manifest().external_dbs;
     if external_dbs.is_empty() {
         return Err(SlateDBError::CloneExternalDbMissing);
     }
@@ -235,7 +235,7 @@ async fn validate_external_dbs_contain_final_checkpoint(
     object_store: Arc<dyn ObjectStore>,
 ) -> Result<(), SlateDBError> {
     // Validate external dbs all contain the final checkpoint
-    for external_db in &clone_manifest.manifest().core.external_dbs {
+    for external_db in &clone_manifest.manifest().external_dbs {
         let Some(final_checkpoint_id) = external_db.final_checkpoint_id else {
             // If the final checkpoint id is not set, we can skip this check
             continue;
