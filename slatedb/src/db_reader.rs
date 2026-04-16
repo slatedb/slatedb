@@ -3,9 +3,9 @@ use crate::cached_object_store::CachedObjectStore;
 use crate::clock::MonotonicClock;
 use crate::config::{CheckpointOptions, DbReaderOptions, ReadOptions, ScanOptions};
 use crate::db_read::DbRead;
-use crate::db_state::ManifestCore;
+use crate::db_state::{ManifestCore, VersionedManifest};
 use crate::db_stats::DbStats;
-use crate::db_status::{ClosedResultWriter, DbStatus, DbStatusManager, VersionedManifest};
+use crate::db_status::{ClosedResultWriter, DbStatus, DbStatusManager};
 use crate::dispatcher::{MessageFactory, MessageHandler, MessageHandlerExecutor};
 use crate::error::SlateDBError;
 use crate::iter::IterationOrder;
@@ -27,7 +27,7 @@ use crate::{Checkpoint, DbIterator};
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::BoxStream;
-use log::info;
+use log::{info, warn};
 use object_store::path::Path;
 use object_store::ObjectStore;
 use once_cell::sync::Lazy;
@@ -99,10 +99,7 @@ impl DbStateReader for CheckpointState {
 
 impl From<&CheckpointState> for VersionedManifest {
     fn from(state: &CheckpointState) -> Self {
-        Self {
-            id: state.checkpoint.manifest_id,
-            manifest: state.manifest.core.clone(),
-        }
+        Self::from_manifest(state.checkpoint.manifest_id, state.manifest.clone())
     }
 }
 
@@ -714,10 +711,7 @@ impl DbReader {
 
         let status_manager = DbStatusManager::new_with_manifest(
             manifest.db_state().last_l0_seq,
-            VersionedManifest {
-                id: manifest.id(),
-                manifest: manifest.db_state().clone(),
-            },
+            VersionedManifest::from_manifest(manifest.id(), manifest.manifest().clone()),
         );
         let task_executor =
             MessageHandlerExecutor::new(Arc::new(status_manager.clone()), system_clock.clone());
@@ -1054,7 +1048,13 @@ impl DbReader {
         self.task_executor
             .shutdown_task(DB_READER_TASK_NAME)
             .await
-            .map_err(Into::into)
+            .map_err(Into::<crate::Error>::into)?;
+
+        if let Err(e) = self.inner.table_store.close_cache().await {
+            warn!("failed to close block cache [error={:?}]", e);
+        }
+
+        Ok(())
     }
 
     /// Subscribe to database status changes.

@@ -1,29 +1,9 @@
-use slatedb_txn_obj::DirtyObject;
 use tokio::sync::watch;
 
-use crate::db_state::ManifestCore;
+use crate::db_state::VersionedManifest;
 use crate::error::SlateDBError;
-use crate::manifest::Manifest;
 use crate::utils::WatchableOnceCell;
 use crate::CloseReason;
-
-/// A manifest snapshot paired with its version ID for monotonic ordering.
-#[derive(Clone, Debug, PartialEq)]
-pub struct VersionedManifest {
-    /// The version ID of the manifest.
-    pub id: u64,
-    /// The manifest state at this version.
-    pub manifest: ManifestCore,
-}
-
-impl From<DirtyObject<Manifest>> for VersionedManifest {
-    fn from(dirty: DirtyObject<Manifest>) -> Self {
-        Self {
-            id: dirty.id.id(),
-            manifest: dirty.value.core,
-        }
-    }
-}
 
 /// Current status of the database, exposed via [`crate::Db::subscribe`].
 ///
@@ -62,10 +42,13 @@ pub(crate) struct DbStatusManager {
 impl DbStatusManager {
     #[cfg(test)]
     pub(crate) fn new(initial_durable_seq: u64) -> Self {
+        use crate::db_state::ManifestCore;
         Self::new_with_manifest(
             initial_durable_seq,
             VersionedManifest {
                 id: 1,
+                writer_epoch: 0,
+                compactor_epoch: 0,
                 manifest: ManifestCore::new(),
             },
         )
@@ -157,10 +140,13 @@ impl ClosedResultWriter for DbStatusManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db_state::ManifestCore;
 
     fn versioned_manifest(id: u64) -> VersionedManifest {
         VersionedManifest {
             id,
+            writer_epoch: 0,
+            compactor_epoch: 0,
             manifest: ManifestCore::new(),
         }
     }

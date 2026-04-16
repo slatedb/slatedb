@@ -356,7 +356,7 @@ pub(crate) struct WriteBatchIterator {
 
 impl WriteBatchIterator {
     pub(crate) fn new(
-        batch: WriteBatch,
+        batch: &WriteBatch,
         range: impl RangeBounds<Bytes>,
         ordering: IterationOrder,
     ) -> Self {
@@ -547,7 +547,7 @@ mod tests {
         batch.put(b"key2", b"value2");
         batch.delete(b"key4");
 
-        let mut iter = WriteBatchIterator::new(batch.clone(), .., IterationOrder::Ascending);
+        let mut iter = WriteBatchIterator::new(&batch, .., IterationOrder::Ascending);
 
         let expected = vec![
             RowEntry::new_value(b"key1", b"value1", u64::MAX),
@@ -574,7 +574,7 @@ mod tests {
 
         // Test range [key2, key4)
         let mut iter = WriteBatchIterator::new(
-            batch.clone(),
+            &batch,
             BytesRange::from(Bytes::from_static(b"key2")..Bytes::from_static(b"key4")),
             IterationOrder::Ascending,
         );
@@ -591,7 +591,7 @@ mod tests {
         batch.put(b"key3", b"value3");
         batch.put(b"key2", b"value2");
 
-        let mut iter = WriteBatchIterator::new(batch.clone(), .., IterationOrder::Descending);
+        let mut iter = WriteBatchIterator::new(&batch, .., IterationOrder::Descending);
 
         let expected = vec![
             RowEntry::new_value(b"key3", b"value3", u64::MAX),
@@ -609,7 +609,7 @@ mod tests {
         batch.put(b"key3", b"value3");
         batch.put(b"key5", b"value5");
 
-        let mut iter = WriteBatchIterator::new(batch.clone(), .., IterationOrder::Ascending);
+        let mut iter = WriteBatchIterator::new(&batch, .., IterationOrder::Ascending);
 
         // Seek to key3
         iter.seek(b"key3").await.unwrap();
@@ -630,7 +630,7 @@ mod tests {
         batch.put(b"key3", b"value3");
         batch.put(b"key5", b"value5");
 
-        let mut iter = WriteBatchIterator::new(batch.clone(), .., IterationOrder::Descending);
+        let mut iter = WriteBatchIterator::new(&batch, .., IterationOrder::Descending);
 
         // Seek to key3 (in descending, we want keys <= key3)
         iter.seek(b"key3").await.unwrap();
@@ -647,7 +647,7 @@ mod tests {
     #[tokio::test]
     async fn test_writebatch_iterator_empty_batch() {
         let batch = WriteBatch::new();
-        let mut iter = WriteBatchIterator::new(batch.clone(), .., IterationOrder::Ascending);
+        let mut iter = WriteBatchIterator::new(&batch, .., IterationOrder::Ascending);
 
         let result = iter.next().await.unwrap();
         assert!(result.is_none());
@@ -659,7 +659,7 @@ mod tests {
         batch.put(b"key1", b"value1");
         batch.put(b"key3", b"value3");
 
-        let mut iter = WriteBatchIterator::new(batch.clone(), .., IterationOrder::Ascending);
+        let mut iter = WriteBatchIterator::new(&batch, .., IterationOrder::Ascending);
 
         // Seek to key2 (doesn't exist)
         iter.seek(b"key2").await.unwrap();
@@ -681,7 +681,7 @@ mod tests {
         batch.put(b"key1", b"value1");
         batch.put(b"key3", b"value3");
 
-        let mut iter = WriteBatchIterator::new(batch.clone(), .., IterationOrder::Ascending);
+        let mut iter = WriteBatchIterator::new(&batch, .., IterationOrder::Ascending);
 
         // Seek beyond maximum key
         iter.seek(b"key9").await.unwrap();
@@ -699,7 +699,7 @@ mod tests {
         batch.put(b"key3", b"value3");
         batch.delete(b"key4");
 
-        let mut iter = WriteBatchIterator::new(batch.clone(), .., IterationOrder::Ascending);
+        let mut iter = WriteBatchIterator::new(&batch, .., IterationOrder::Ascending);
 
         let expected = vec![
             RowEntry::new_value(b"key1", b"value1", u64::MAX),
@@ -729,7 +729,7 @@ mod tests {
         batch.put(b"key2", b"value2");
         batch.put(b"key3", b"value3");
 
-        let mut iter = WriteBatchIterator::new(batch.clone(), .., IterationOrder::Ascending);
+        let mut iter = WriteBatchIterator::new(&batch, .., IterationOrder::Ascending);
 
         // Seek before first key
         iter.seek(b"key1").await.unwrap();
@@ -752,7 +752,7 @@ mod tests {
 
         // Range [key2, key4) should include tombstones
         let mut iter = WriteBatchIterator::new(
-            batch.clone(),
+            &batch,
             BytesRange::from(Bytes::from_static(b"key2")..Bytes::from_static(b"key4")),
             IterationOrder::Ascending,
         );
@@ -1020,7 +1020,7 @@ mod tests {
         batch.delete(b"key3");
 
         // When: creating an iterator
-        let mut iter = WriteBatchIterator::new(batch.clone(), .., IterationOrder::Ascending);
+        let mut iter = WriteBatchIterator::new(&batch, .., IterationOrder::Ascending);
 
         // Then: the iterator should return all operations in order
         let expected = vec![
@@ -1060,7 +1060,7 @@ mod tests {
         batch.merge(b"key1", b"merge3");
 
         // When: creating an iterator
-        let mut iter = WriteBatchIterator::new(batch.clone(), .., IterationOrder::Ascending);
+        let mut iter = WriteBatchIterator::new(&batch, .., IterationOrder::Ascending);
 
         // Then: the iterator should return all merge operations
         let expected = vec![
@@ -1099,7 +1099,7 @@ mod tests {
         batch.merge(b"key1", b"merge3");
 
         // When: creating a descending iterator
-        let mut iter = WriteBatchIterator::new(batch.clone(), .., IterationOrder::Descending);
+        let mut iter = WriteBatchIterator::new(&batch, .., IterationOrder::Descending);
 
         // Then: the iterator should return operations in descending order
         let expected = vec![
@@ -1139,7 +1139,7 @@ mod tests {
 
         // When: creating an iterator with a range filter
         let mut iter = WriteBatchIterator::new(
-            batch.clone(),
+            &batch,
             BytesRange::from(Bytes::from_static(b"key2")..Bytes::from_static(b"key4")),
             IterationOrder::Ascending,
         );
@@ -1165,7 +1165,7 @@ mod tests {
         batch.merge(b"key5", b"merge5");
 
         // When: creating an iterator and seeking to key3
-        let mut iter = WriteBatchIterator::new(batch.clone(), .., IterationOrder::Ascending);
+        let mut iter = WriteBatchIterator::new(&batch, .., IterationOrder::Ascending);
         iter.seek(b"key3").await.unwrap();
 
         // Then: the iterator should return key3 and key5
