@@ -309,16 +309,6 @@ test("db invalid inputs map to typed errors", async (t) => {
 
   await expectInvalid(
     () => db.scan({
-      start: bytes(""),
-      start_inclusive: true,
-      end: undefined,
-      end_inclusive: false,
-    }),
-    { message: "range start cannot be empty" },
-  );
-
-  await expectInvalid(
-    () => db.scan({
       start: bytes("z"),
       start_inclusive: true,
       end: bytes("a"),
@@ -336,6 +326,16 @@ test("db invalid inputs map to typed errors", async (t) => {
     }),
     { message: "range must be non-empty" },
   );
+
+  // Scan with empty start bound should succeed and be treated as unbounded start.
+  await db.put(bytes("seed"), bytes("value"));
+  const emptyStartScan = cleanup.track(await db.scan({
+    start: bytes(""),
+    start_inclusive: true,
+    end: undefined,
+    end_inclusive: false,
+  }));
+  requireRows(await drainIterator(emptyStartScan), ["seed"], ["value"]);
 });
 
 test("db writer fencing reports closed reason", async (t) => {
