@@ -281,40 +281,49 @@ pub trait PrefixExtractor {
     /// results.
     fn name(&self) -> &str;
 
-    /// Returns whether the given prefix is a valid output of `extract()`.
+    /// Returns whether `prefix` is a valid output of [`prefix_len`]
     ///
-    /// This is used on the read path to verify that a scan prefix provided
-    /// by the user matches the prefix format indexed in the filter. If this
-    /// returns `false`, the filter must NOT be consulted; doing so can
-    /// produce false negatives (the filter says "not present" for data that
-    /// actually exists).
+    /// Used on the read path to decide whether a user-provided scan prefix
+    /// can be answered by the filter. If this returns `false`, the filter
+    /// must NOT be consulted; doing so can produce false negatives.
     ///
-    /// **Example of incorrect behavior without this check:**
-    /// Assume a prefix extractor that extracts the first 3 bytes of a
-    /// key and an SST contains keys `abc_1`, `abc_2`, `abx_1`.
-    /// During SST construction, the filter indexes the extracted prefixes:
-    /// `abc` and `abx`.
-    /// At read time, a user calls `scan_prefix("ab")`. The 2-byte prefix
-    /// `"ab"` was never inserted into the filter, so `might_match("ab")`
-    /// returns `false`. The SST is skipped even though all three keys match
-    /// the scan prefix `"ab"`. This is a false negative.
-    ///
-    /// With `in_domain`: `in_domain("ab")` returns `false` (`"ab"` is not
-    /// a valid 3-byte prefix), so the engine skips the filter check and
-    /// falls back to scanning the SST directly.
+    /// **Consistency with `prefix_len`:** implementors must ensure that
+    /// `in_domain` agrees with what `prefix_len` would produce. In
+    /// particular, if `prefix_len(key)` returns `None` for every key that
+    /// begins with some byte string `p`, then `in_domain(p)` must return
+    /// `false`, otherwise the read path will consult the filter for a
+    /// prefix that was never hashed into it and silently miss real data.
     fn in_domain(&self, prefix: &[u8]) -> bool;
 
     /// Returns the length of the prefix this extractor produces from `key`,
-    /// or `None` if the key does not contain a recognizable prefix (i.e.,
-    /// `in_domain` would return `false` for any prefix of the key). The
-    /// caller interprets the returned length as `&key[..len]`.
+    /// or `None` if `key` has no extractable prefix. The caller interprets
+    /// the returned length as `&key[..len]`.
+    ///
+    /// For example, an extractor that selectively indexes keys matching
+    /// `"user:"` (so that `scan_prefix("user:")` can use the filter) but
+    /// ignores all other keys would return:
+    /// - `prefix_len(b"user:alice")` -> `Some(5)` (hash `"user:"` into the filter)
+    /// - `prefix_len(b"user:bob")`   -> `Some(5)` (same)
+    /// - `prefix_len(b"post:42")`    -> `None`    (don't index this key's prefix)
+    /// - `prefix_len(b"session:x")`  -> `None`    (don't index this key's prefix)
+    ///
+    /// When `None` is returned, the caller skips adding a prefix for this
+    /// key into the filter. A prefix scan over this key's prefix cannot
+    /// use the filter and must fall back to scanning the SST directly,
+    /// which requires that [`in_domain`] also return `false` for such
+    /// prefixes (see the note on `in_domain`).
+    ///
+    /// # Panics
+    ///
+    /// The returned length must be <= `key.len()`. Returning a longer value
+    /// is a contract violation and will panic when the length is used to
+    /// slice the key.
     fn prefix_len(&self, key: &[u8]) -> Option<usize>;
 }
 ```
 
 The policy would look like:
 ```rust
-#[derive(Debug)]
 pub struct BloomFilterPolicy {
     bits_per_key: u32,
 
@@ -331,6 +340,10 @@ pub struct BloomFilterPolicy {
     name: String,
 }
 
+// `BloomFilterPolicy` has a manual `Debug` impl (not derived) because
+// `dyn PrefixExtractor` does not implement `Debug`; the manual impl surfaces
+// the extractor's name instead.
+
 impl BloomFilterPolicy {
     pub const NAME: &'static str = "_bf";
 
@@ -339,16 +352,29 @@ impl BloomFilterPolicy {
             bits_per_key,
             whole_key_filtering: true,
             prefix_extractor: None,
-            name: Self::NAME,
+            name: Self::NAME.to_string(),
         }
     }
 
+    /// Configures a prefix extractor for prefix-based bloom filtering.
+    ///
+    /// When set, the bloom filter hashes both extracted prefixes and (if
+    /// `whole_key_filtering` is enabled) full keys. Prefix scans can then
+    /// probe the filter to skip SSTs that contain no matching prefixes.
+    ///
+    /// The extractor's name is included in the policy name to ensure that
+    /// filters built with different extractors are not mismatched.
     pub fn with_prefix_extractor(mut self, extractor: Arc<dyn PrefixExtractor>) -> Self {
-        self.name = format!("_bf:prefix={}", extractor.name());
+        self.name = format!("{}:prefix={}", Self::NAME, extractor.name());
         self.prefix_extractor = Some(extractor);
         self
     }
 
+    /// Controls whether full keys are hashed into the bloom filter.
+    ///
+    /// When `true` (the default), point lookups can use the filter. Set
+    /// to `false` if only prefix scans are needed and you want to reduce
+    /// filter size.
     pub fn with_whole_key_filtering(mut self, enabled: bool) -> Self {
         self.whole_key_filtering = enabled;
         self
@@ -370,7 +396,7 @@ impl FilterPolicy for BloomFilterPolicy {
         Arc::new(BloomFilter::decode(
             data,
             self.whole_key_filtering,
-            self.prefix_extractor.is_some(),
+            self.prefix_extractor.clone(),
         ))
     }
 
@@ -730,9 +756,10 @@ SlateDB features and components that this RFC interacts with. Check all that app
   Old SSTs without this field default to `Legacy` (FlatBuffers absent-field
   semantics map to `0`). See [SST Format Changes](#sst-format-changes).
 - **Public API**: `filter_bits_per_key` is removed from `Settings`.
-  `DbBuilder` and `CompactorBuilder` gain `with_filter_policies`. `ScanOptions`
-  gains a `filter_context: Option<Arc<dyn Any + Send + Sync>>` field. See
-  [Configuration](#configuration) for migration examples.
+  `DbBuilder` and `CompactorBuilder` gain `with_filter_policies`. See
+  [Configuration](#configuration) for migration examples. The
+  `ScanOptions::filter_context` field is deferred and not added in the
+  initial implementation.
 - **Rolling upgrades**: Old readers that don't understand the `filter_format`
   field will ignore it (FlatBuffers forward compatibility). They will continue
   to decode filters as bloom filters, which is correct as long as the bloom
