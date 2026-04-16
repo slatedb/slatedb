@@ -99,6 +99,7 @@ aws = ["object_store/aws"]
 azure = ["object_store/azure"]
 bencher = ["aws", "azure", "wal_disable", "foyer"]
 compression = ["snappy"]
+gcp = ["object_store/gcp"]
 opendal = ["dep:opendal", "dep:object_store_opendal"]
 snappy = ["dep:snap"]
 zlib = ["dep:flate2"]
@@ -116,6 +117,7 @@ all = [
     "aws",
     "azure",
     "compression",
+    "gcp",
     "opendal",
     "snappy",
     "zlib",
