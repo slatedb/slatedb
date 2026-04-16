@@ -256,7 +256,7 @@ jobs:
       - name: Install uniffi-bindgen-node-js
         env:
           RUSTFLAGS: ""
-        run: cargo install uniffi-bindgen-node-js --version 0.0.12
+        run: cargo install uniffi-bindgen-node-js --version 0.0.13
 
       - name: Build Node package (bindings/node)
         run: npm --prefix bindings/node run build
