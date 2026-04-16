@@ -409,6 +409,10 @@ impl Manifest {
                 sorted_run.id = idx as u32;
             }
 
+            for manifest in &manifests {
+                core.last_l0_seq = max(core.last_l0_seq, manifest.core.last_l0_seq);
+            }
+
             Self {
                 external_dbs,
                 core,
@@ -880,6 +884,31 @@ mod tests {
         for id in &sr_ids {
             assert!(seen.insert(id), "Duplicate SR ID: {}", id);
         }
+    }
+
+    #[test]
+    fn test_union_propagates_last_l0_seq() {
+        let mut manifest1 = build_manifest(
+            &SimpleManifest {
+                l0: vec![],
+                sorted_runs: vec![vec![SstEntry::projected("sr1", "a", "a".."m")]],
+            },
+            |_| SsTableId::Compacted(Ulid::new()),
+        );
+        manifest1.core.last_l0_seq = 100;
+
+        let mut manifest2 = build_manifest(
+            &SimpleManifest {
+                l0: vec![],
+                sorted_runs: vec![vec![SstEntry::projected("sr2", "m", "m"..)]],
+            },
+            |_| SsTableId::Compacted(Ulid::new()),
+        );
+        manifest2.core.last_l0_seq = 200;
+
+        let union = Manifest::union(vec![manifest1, manifest2]);
+
+        assert_eq!(union.core.last_l0_seq, 200);
     }
 
     #[test]
