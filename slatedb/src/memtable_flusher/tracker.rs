@@ -388,7 +388,9 @@ mod tests {
     use crate::batch_write::WriteBatchMessage;
     use crate::config::{CheckpointOptions, Settings};
     use crate::db::DbInner;
-    use crate::db_state::{SsTableHandle, SsTableId, SsTableInfo, SsTableView, SstType};
+    use crate::db_state::{
+        FilterFormat, SsTableHandle, SsTableId, SsTableInfo, SsTableView, SstType,
+    };
     use crate::db_status::{ClosedResultWriter, DbStatusManager};
     use crate::error::SlateDBError;
     use crate::format::sst::{SsTableFormat, SST_FORMAT_VERSION_LATEST};
@@ -534,6 +536,7 @@ mod tests {
                 sst_type: SstType::Compacted,
                 stats_offset: 0,
                 stats_len: 0,
+                filter_format: FilterFormat::default(),
             },
         )
     }

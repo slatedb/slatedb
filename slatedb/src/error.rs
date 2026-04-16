@@ -27,6 +27,9 @@ pub(crate) enum SlateDBError {
     #[error("empty block metadata")]
     EmptyBlockMeta,
 
+    #[error("invalid composite filter block")]
+    InvalidFilterBlock,
+
     #[error("empty block")]
     EmptyBlock,
 
@@ -547,6 +550,7 @@ impl From<SlateDBError> for Error {
             SlateDBError::EmptyBlock => Error::data(msg),
             SlateDBError::EmptyKey => Error::data(msg),
             SlateDBError::EmptyBlockMeta => Error::data(msg),
+            SlateDBError::InvalidFilterBlock => Error::data(msg),
             SlateDBError::EmptySSTable => Error::data(msg),
             SlateDBError::ChecksumMismatch => Error::data(msg),
             SlateDBError::CloneExternalDbMissing => Error::data(msg),

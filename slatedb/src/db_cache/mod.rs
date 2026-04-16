@@ -1,7 +1,7 @@
 //! # DB Cache
 //!
 //! This module provides a pluggable caching solution for storing and retrieving
-//! cached blocks, index and bloom filters associated with SSTable IDs.
+//! cached blocks, index and filters associated with SSTable IDs.
 //!
 //! There are currently two built-in cache implementations:
 //! - [Foyer](crate::db_cache::foyer::FoyerCache): Requires the `foyer` feature flag. (Enabled by default)
@@ -20,9 +20,11 @@ use log::{debug, error, trace};
 use parking_lot::Mutex;
 
 use crate::db_cache::stats::DbCacheStats;
+use crate::db_state::SsTableId;
+use crate::filter_policy::NamedFilter;
+use crate::flatbuffer_types::SsTableIndexOwned;
 use crate::format::block::Block;
 use crate::sst_stats::SstStats;
-use crate::{db_state::SsTableId, filter::BloomFilter, flatbuffer_types::SsTableIndexOwned};
 use slatedb_common::clock::SystemClock;
 use slatedb_common::metrics::MetricsRecorderHelper;
 
@@ -146,6 +148,15 @@ pub trait DbCache: Send + Sync {
     async fn remove(&self, key: &CachedKey);
     #[allow(dead_code)]
     fn entry_count(&self) -> u64;
+
+    /// Gracefully close the cache, flushing any in-memory state to disk.
+    ///
+    /// Implementations backed by hybrid (memory + disk) caches should use
+    /// this to ensure cached entries survive process restarts. The default
+    /// implementation is a no-op.
+    async fn close(&self) -> Result<(), crate::Error> {
+        Ok(())
+    }
 }
 
 /// A key used to identify a cached entry.
@@ -185,12 +196,24 @@ impl From<(SsTableId, u64)> for CachedKey {
     }
 }
 
+/// A filter cached in its on-disk byte form, paired with the name of the
+/// policy that produced it. Only produced by disk-cache deserialization
+/// (`db_cache::serde`), which has no access to the configured filter
+/// policies; converted to a [`NamedFilter`] by `TableStore::read_filters`
+/// on the first hit after deserialization.
+#[derive(Clone)]
+pub(crate) struct EncodedCachedFilter {
+    pub(crate) name: String,
+    pub(crate) data: bytes::Bytes,
+}
+
 #[non_exhaustive]
 #[derive(Clone)]
 enum CachedItem {
     Block(Arc<Block>),
     SsTableIndex(Arc<SsTableIndexOwned>),
-    BloomFilter(Arc<BloomFilter>),
+    Filters(Arc<[NamedFilter]>),
+    EncodedFilters(Arc<[EncodedCachedFilter]>),
     SstStats(Arc<SstStats>),
 }
 
@@ -219,10 +242,10 @@ impl CachedEntry {
         }
     }
 
-    /// Create a new `CachedEntry` with the given bloom filter.
-    pub(crate) fn with_bloom_filter(bloom_filter: Arc<BloomFilter>) -> Self {
+    /// Create a new `CachedEntry` with the given decoded filters.
+    pub(crate) fn with_filters(filters: Arc<[NamedFilter]>) -> Self {
         Self {
-            item: CachedItem::BloomFilter(bloom_filter),
+            item: CachedItem::Filters(filters),
         }
     }
 
@@ -247,9 +270,16 @@ impl CachedEntry {
         }
     }
 
-    pub(crate) fn bloom_filter(&self) -> Option<Arc<BloomFilter>> {
+    pub(crate) fn filters(&self) -> Option<Arc<[NamedFilter]>> {
         match &self.item {
-            CachedItem::BloomFilter(bloom_filter) => Some(bloom_filter.clone()),
+            CachedItem::Filters(filters) => Some(filters.clone()),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn encoded_filters(&self) -> Option<Arc<[EncodedCachedFilter]>> {
+        match &self.item {
+            CachedItem::EncodedFilters(filters) => Some(filters.clone()),
             _ => None,
         }
     }
@@ -269,7 +299,8 @@ impl CachedEntry {
         match &self.item {
             CachedItem::Block(block) => block.size(),
             CachedItem::SsTableIndex(sst_index) => sst_index.size(),
-            CachedItem::BloomFilter(bloom_filter) => bloom_filter.size(),
+            CachedItem::Filters(filters) => filters.iter().map(|nf| nf.filter.size()).sum(),
+            CachedItem::EncodedFilters(filters) => filters.iter().map(|ef| ef.data.len()).sum(),
             CachedItem::SstStats(stats) => stats.size(),
         }
     }
@@ -280,9 +311,19 @@ impl CachedEntry {
             CachedItem::SsTableIndex(sst_index) => {
                 Self::with_sst_index(Arc::new(sst_index.clamp_allocated_size()))
             }
-            CachedItem::BloomFilter(bloom_filter) => {
-                Self::with_bloom_filter(Arc::new(bloom_filter.clamp_allocated_size()))
-            }
+            CachedItem::Filters(filters) => Self::with_filters(
+                filters
+                    .iter()
+                    .map(|nf| NamedFilter {
+                        name: nf.name.clone(),
+                        filter: nf.filter.clamp_allocated_size(),
+                    })
+                    .collect::<Vec<_>>()
+                    .into(),
+            ),
+            CachedItem::EncodedFilters(filters) => Self {
+                item: CachedItem::EncodedFilters(filters.clone()),
+            },
             CachedItem::SstStats(stats) => {
                 Self::with_sst_stats(Arc::new(stats.clamp_allocated_size()))
             }
@@ -369,12 +410,24 @@ impl DbCache for SplitCache {
                     trace!("no block cache available for insertion");
                 }
             }
-            CachedItem::SsTableIndex(_) | CachedItem::BloomFilter(_) | CachedItem::SstStats(_) => {
+            CachedItem::SsTableIndex(_) | CachedItem::Filters(_) | CachedItem::SstStats(_) => {
                 if let Some(ref cache) = self.meta_cache {
                     cache.insert(key, value.clamp_allocated_size()).await;
                 } else {
                     trace!("no meta cache available for insertion");
                 }
+            }
+            // EncodedFilters only exist as the transient output of
+            // disk-cache deserialization, which happens inside the
+            // underlying cache impl (foyer) and never flows back through
+            // `SplitCache::insert`. A direct insert of an encoded entry
+            // would indicate the invariant was bypassed.
+            CachedItem::EncodedFilters(_) => {
+                error!(
+                    "SplitCache::insert called with EncodedFilters; encoded \
+                     entries only exist inside foyer's deserialization path"
+                );
+                debug_assert!(false, "EncodedFilters in SplitCache::insert");
             }
         }
     }
@@ -395,6 +448,16 @@ impl DbCache for SplitCache {
     fn entry_count(&self) -> u64 {
         self.block_cache.as_ref().map_or(0, |c| c.entry_count())
             + self.meta_cache.as_ref().map_or(0, |c| c.entry_count())
+    }
+
+    async fn close(&self) -> Result<(), crate::Error> {
+        if let Some(ref cache) = self.block_cache {
+            cache.close().await?;
+        }
+        if let Some(ref cache) = self.meta_cache {
+            cache.close().await?;
+        }
+        Ok(())
     }
 }
 
@@ -555,6 +618,10 @@ impl DbCache for DbCacheWrapper {
 
     fn entry_count(&self) -> u64 {
         self.cache.entry_count()
+    }
+
+    async fn close(&self) -> Result<(), crate::Error> {
+        self.cache.close().await
     }
 }
 
@@ -723,7 +790,7 @@ mod tests {
 
     use crate::db_cache::{CachedEntry, CachedKey, DbCache, DbCacheWrapper, SplitCache};
     use crate::db_state::SsTableId;
-    use crate::filter::BloomFilterBuilder;
+    use crate::filter_policy::{BloomFilterPolicy, FilterPolicy, NamedFilter};
     use crate::format::sst::BlockBuilder;
     use slatedb_common::clock::DefaultSystemClock;
 
@@ -732,7 +799,7 @@ mod tests {
     use crate::db_cache::test_utils::TestCache;
     use crate::format::sst::{EncodedSsTable, SsTableFormat};
     use crate::test_utils::build_test_sst;
-    use crate::types::RowEntry;
+    use crate::types::{RowEntry, ValueDeletable};
     use rstest::{fixture, rstest};
     use slatedb_common::metrics::{
         lookup_metric_with_labels, DefaultMetricsRecorder, MetricLevel, MetricsRecorderHelper,
@@ -752,10 +819,7 @@ mod tests {
         // given:
         let key = CachedKey::from((SST_ID, 12345u64));
         cache
-            .insert(
-                key.clone(),
-                CachedEntry::with_bloom_filter(sst.filter.unwrap()),
-            )
+            .insert(key.clone(), CachedEntry::with_filters(sst.filters))
             .await;
 
         for i in 1..4 {
@@ -1085,20 +1149,34 @@ mod tests {
         let cache_b = DbCacheWrapper::new(shared_cache.clone(), &recorder_b, system_clock);
         assert_ne!(cache_a.scope_id, cache_b.scope_id);
 
-        let mut builder = BloomFilterBuilder::new(1);
-        builder.add_key(b"a");
-        let filter = Arc::new(builder.build());
+        let policy = BloomFilterPolicy::new(1);
+        let mut builder = policy.builder();
+        builder.add_entry(&RowEntry::new(
+            bytes::Bytes::from_static(b"a"),
+            ValueDeletable::Value(bytes::Bytes::new()),
+            0,
+            None,
+            None,
+        ));
+        let filter = builder.build();
+        let named = NamedFilter {
+            name: BloomFilterPolicy::NAME.to_string(),
+            filter,
+        };
         let key = CachedKey::from((SST_ID, 1u64));
 
         cache_a
-            .insert(key.clone(), CachedEntry::with_bloom_filter(filter.clone()))
+            .insert(
+                key.clone(),
+                CachedEntry::with_filters(Arc::from([named.clone()])),
+            )
             .await;
 
         assert!(cache_a.get_filter(&key).await.unwrap().is_some());
         assert!(cache_b.get_filter(&key).await.unwrap().is_none());
 
         cache_b
-            .insert(key.clone(), CachedEntry::with_bloom_filter(filter))
+            .insert(key.clone(), CachedEntry::with_filters(Arc::from([named])))
             .await;
 
         assert_eq!(2, shared_cache.entry_count());

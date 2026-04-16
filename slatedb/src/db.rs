@@ -733,6 +733,10 @@ impl Db {
             warn!("failed to shutdown wal writer task [error={:?}]", e);
         }
 
+        if let Err(e) = self.inner.table_store.close_cache().await {
+            warn!("failed to close block cache [error={:?}]", e);
+        }
+
         info!("db closed");
         Ok(())
     }

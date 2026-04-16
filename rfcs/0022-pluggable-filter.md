@@ -110,8 +110,7 @@ pub trait FilterPolicy {
     ///   stored, so querying with a different extractor produces false
     ///   negatives.
     ///
-    /// Examples: `"slatedb.BloomFilter"`,
-    /// `"slatedb.BloomFilter:prefix=fixed3"`.
+    /// Examples: `"_bf"`, `"_bf:prefix=fixed3"`.
     fn name(&self) -> &str;
 
     /// Creates a new builder for constructing a filter.
@@ -148,8 +147,8 @@ pub trait FilterBuilder {
     /// whichever fields they need.
     fn add_entry(&mut self, entry: &RowEntry);
 
-    /// Finalizes and return the completed filter.
-    fn build(&self) -> Arc<dyn Filter>;
+    /// Finalizes and returns the completed filter.
+    fn build(&mut self) -> Arc<dyn Filter>;
 }
 
 /// A read-only filter that answers membership queries.
@@ -162,7 +161,7 @@ pub trait Filter {
     fn might_match(&self, query: &FilterQuery) -> bool;
 
     /// Serializes the filter into the provided buffer.
-    fn encode(&self, writer: &mut impl BufMut);
+    fn encode(&self, writer: &mut dyn BufMut);
 
     /// Returns the size of the filter's data in bytes.
     ///
@@ -170,6 +169,12 @@ pub trait Filter {
     /// bit array length for a bloom filter). Can be used for memory
     /// tracking, cache accounting, etc.
     fn size(&self) -> usize;
+
+    /// Returns a copy with over-allocated memory reclaimed.
+    ///
+    /// Used by the block cache to reduce memory waste from `Bytes` slices
+    /// that reference larger underlying buffers.
+    fn clamp_allocated_size(&self) -> Arc<dyn Filter>;
 }
 
 /// A membership query passed to [`Filter::might_match`].
@@ -271,7 +276,7 @@ pub trait PrefixExtractor {
     /// to a delimiter-based one) changes which hashes are stored in the
     /// filter, so existing filters become invalid. `BloomFilterPolicy`
     /// includes this name in the policy name it writes to SST metadata
-    /// (e.g. `"slatedb.BloomFilter:prefix=fixed3"`), which lets the reader
+    /// (e.g. `"_bf:prefix=fixed3"`), which lets the reader
     /// detect the mismatch and skip the filter instead of returning wrong
     /// results.
     fn name(&self) -> &str;
@@ -299,10 +304,11 @@ pub trait PrefixExtractor {
     /// falls back to scanning the SST directly.
     fn in_domain(&self, prefix: &[u8]) -> bool;
 
-    /// Extracts the prefix from a key. Returns `None` if the key does not
-    /// contain a recognizable prefix (i.e., `in_domain` would return `false`
-    /// for the key).
-    fn extract<'a>(&self, key: &'a [u8]) -> Option<&'a [u8]>;
+    /// Returns the length of the prefix this extractor produces from `key`,
+    /// or `None` if the key does not contain a recognizable prefix (i.e.,
+    /// `in_domain` would return `false` for any prefix of the key). The
+    /// caller interprets the returned length as `&key[..len]`.
+    fn prefix_len(&self, key: &[u8]) -> Option<usize>;
 }
 ```
 
@@ -326,17 +332,19 @@ pub struct BloomFilterPolicy {
 }
 
 impl BloomFilterPolicy {
+    pub const NAME: &'static str = "_bf";
+
     pub fn new(bits_per_key: u32) -> Self {
         Self {
             bits_per_key,
             whole_key_filtering: true,
             prefix_extractor: None,
-            name: "slatedb.BloomFilter".to_string(),
+            name: Self::NAME,
         }
     }
 
     pub fn with_prefix_extractor(mut self, extractor: Arc<dyn PrefixExtractor>) -> Self {
-        self.name = format!("slatedb.BloomFilter:prefix={}", extractor.name());
+        self.name = format!("_bf:prefix={}", extractor.name());
         self.prefix_extractor = Some(extractor);
         self
     }
@@ -538,29 +546,35 @@ impl Filter for BloomFilter {
 
 ### SST Format Changes
 
-The SST gains a `filter_version` field to distinguish the new composite block
-format from the legacy single-bloom format:
+The SST gains a `filter_format` enum field to distinguish the new composite
+block format from the legacy single-bloom format:
 
 ```fbs
+enum FilterFormat: byte {
+    // Single raw bloom filter bytes (pre-composite format).
+    Legacy,
+    // Block containing one or more named filters, each prefixed with its
+    // name and length.
+    Composite
+}
+
 table SsTableInfo {
     // ... existing fields (filter_offset, filter_len, etc.) ...
 
-    // Version of the filter block format.
-    // Absent or 1: legacy single bloom filter (raw bytes).
-    // 2: composite block list of named filters.
-    filter_version: uint16;
+    // Filter block format. Defaults to Legacy for backwards compatibility.
+    filter_format: FilterFormat;
 }
 ```
 
 #### Composite filter block encoding
 
-When `filter_version` is `2`, the filter block at
-`filter_offset`/`filter_len` contains a self-describing list of named filters:
+When `filter_format` is `Composite`, the filter block at
+`filter_offset`/`filter_len` contains a list of named filters:
 
 ```
-[num_filters: u32]
-[name_len: u32][name: bytes][data_len: u32][data: bytes]   // filter 0
-[name_len: u32][name: bytes][data_len: u32][data: bytes]   // filter 1
+[num_filters: u16]
+[name_len: u16][name: bytes][data_len: u64][data: bytes]   // filter 0
+[name_len: u16][name: bytes][data_len: u64][data: bytes]   // filter 1
 ...
 ```
 
@@ -571,13 +585,13 @@ policy, the block uses this format (a list of one).
 
 When reading an SST's filter block:
 
-- **`filter_version` absent or `1`**: Legacy pre-RFC SST. The raw bytes are
-  decoded using the built-in `BloomFilterPolicy`. If no matching bloom policy
-  is configured, the filter is skipped.
-- **`filter_version` = `2`**: Parse the composite block. For each
-  `(name, data)` entry, find a matching policy in the configured `filter_policies`
-  by `name()` and call `policy.decode(data)`. Unknown names are skipped
-  (reduces filtering power but never produces incorrect results).
+- **`FilterFormat::Legacy`**: The filter block contains raw bloom filter bytes. This is the FlatBuffer default, so SSTs written by older versions are
+  automatically treated as Legacy. The bytes are decoded via the configured
+  `BloomFilterPolicy`. If no bloom policy is configured, the filter is skipped.
+- **`FilterFormat::Composite`**: The filter block is a composite containing
+  one or more named sub-filters. Each `(name, data)` entry is matched against
+  the configured `filter_policies` by `name()` and decoded via
+  `policy.decode(data)`. Unrecognized names are skipped.
 
 ### Write Path Integration
 
@@ -585,7 +599,7 @@ The SST builder receives the `filter_policies` array. For each policy, it calls
 `builder()` to obtain a `FilterBuilder`. Each key is fed to all builders via
 `add_entry()`. On finalization, each builder produces a filter via `build()`, and
 all filters are encoded into a composite filter block. The SST info's
-`filter_version` is set to `2`.
+`filter_format` is set to `Composite`.
 
 ### Read Path Integration
 
@@ -709,20 +723,20 @@ SlateDB features and components that this RFC interacts with. Check all that app
 ### Compatibility
 
 - **On-disk format**: The filter block encoding is policy-specific but the SST
-  envelope is unchanged. A new `filter_version` field is added to SST info.
-  Old SSTs without this field are assumed to use the legacy single-bloom format
-  (see [SST Format Changes](#sst-format-changes)).
+  envelope is unchanged. A new `filter_format` enum field is added to SST info.
+  Old SSTs without this field default to `Legacy` (FlatBuffers absent-field
+  semantics map to `0`). See [SST Format Changes](#sst-format-changes).
 - **Public API**: `filter_bits_per_key` is removed from `Settings`.
   `DbBuilder` and `CompactorBuilder` gain `with_filter_policies`. `ScanOptions`
   gains a `filter_context: Option<Arc<dyn Any + Send + Sync>>` field. See
   [Configuration](#configuration) for migration examples.
-- **Rolling upgrades**: Old readers that don't understand the `filter_version`
+- **Rolling upgrades**: Old readers that don't understand the `filter_format`
   field will ignore it (FlatBuffers forward compatibility). They will continue
   to decode filters as bloom filters, which is correct as long as the bloom
   filter policy is still in use.
 - **Prefix extractor changes**: Changing the prefix extractor changes the policy
-  name (e.g., `"slatedb.BloomFilter:prefix=fixed3"` →
-  `"slatedb.BloomFilter:prefix=delim:"`). With the array design, the old
+  name (e.g., `"_bf:prefix=fixed3"` →
+  `"_bf:prefix=delim:"`). With the array design, the old
   policy can remain in `filter_policies` alongside the new one, so existing
   SSTs' filters remain usable while new SSTs are written with both. After
   compaction rewrites all SSTs, the old policy can be removed.
@@ -748,7 +762,7 @@ Implementation will be in two phases:
 1. **Pluggable filter abstraction**: Trait definitions (`FilterPolicy`,
    `FilterBuilder`, `Filter`, `PrefixExtractor`), refactor the existing bloom
    filter as the default `BloomFilterPolicy`, SST format changes
-   (`filter_version`, composite filter block), and refactoring the write/read
+   (`filter_format` enum, composite filter block), and refactoring the write/read
    paths to use the pluggable filter policies with AND-logic evaluation.
    Breaking config change: `filter_bits_per_key` removed from `Settings`;
    `with_filter_policies` added to `DbBuilder` / `CompactorBuilder`.
