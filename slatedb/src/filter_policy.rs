@@ -179,17 +179,40 @@ pub trait PrefixExtractor: Send + Sync {
     /// use the filter and must fall back to scanning the SST directly
     /// which requires that [`in_domain`] also return `false` for such prefixes
     /// (see the note on `in_domain`).
+    ///
+    /// # Panics
+    ///
+    /// The returned length must be ≤ `key.len()`. Returning a longer value
+    /// is a contract violation and will panic when the length is used to
+    /// slice the key.
     fn prefix_len(&self, key: &[u8]) -> Option<usize>;
 }
 
 /// A filter policy backed by the existing bloom filter implementation.
 ///
-/// Supports full-key filtering (point lookups). Prefix filtering requires
-/// a `PrefixExtractor` (added in a later phase).
-#[derive(Debug)]
+/// Supports full-key filtering (point lookups) and optional prefix filtering
+/// when a [`PrefixExtractor`] is configured.
 pub struct BloomFilterPolicy {
     bits_per_key: u32,
-    name: &'static str,
+    whole_key_filtering: bool,
+    prefix_extractor: Option<Arc<dyn PrefixExtractor>>,
+    name: String,
+}
+
+// Manual Debug impl because `dyn PrefixExtractor` doesn't implement Debug,
+// so #[derive(Debug)] won't compile. We surface the extractor's name instead.
+impl std::fmt::Debug for BloomFilterPolicy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BloomFilterPolicy")
+            .field("bits_per_key", &self.bits_per_key)
+            .field("whole_key_filtering", &self.whole_key_filtering)
+            .field("name", &self.name)
+            .field(
+                "prefix_extractor",
+                &self.prefix_extractor.as_ref().map(|e| e.name()),
+            )
+            .finish()
+    }
 }
 
 impl BloomFilterPolicy {
@@ -197,11 +220,40 @@ impl BloomFilterPolicy {
     pub const NAME: &'static str = "_bf";
 
     /// Creates a new bloom filter policy with the given bits per key.
+    ///
+    /// By default, whole-key filtering is enabled and no prefix extractor
+    /// is configured.
     pub fn new(bits_per_key: u32) -> Self {
         Self {
             bits_per_key,
-            name: Self::NAME,
+            whole_key_filtering: true,
+            prefix_extractor: None,
+            name: Self::NAME.to_string(),
         }
+    }
+
+    /// Configures a prefix extractor for prefix-based bloom filtering.
+    ///
+    /// When set, the bloom filter hashes both extracted prefixes and (if
+    /// `whole_key_filtering` is enabled) full keys. Prefix scans can then
+    /// probe the filter to skip SSTs that contain no matching prefixes.
+    ///
+    /// The extractor's name is included in the policy name to ensure that
+    /// filters built with different extractors are not mismatched.
+    pub fn with_prefix_extractor(mut self, extractor: Arc<dyn PrefixExtractor>) -> Self {
+        self.name = format!("{}:prefix={}", Self::NAME, extractor.name());
+        self.prefix_extractor = Some(extractor);
+        self
+    }
+
+    /// Controls whether full keys are hashed into the bloom filter.
+    ///
+    /// When `true` (the default), point lookups can use the filter. Set
+    /// to `false` if only prefix scans are needed and you want to reduce
+    /// filter size.
+    pub fn with_whole_key_filtering(mut self, enabled: bool) -> Self {
+        self.whole_key_filtering = enabled;
+        self
     }
 
     /// Returns the bits per key setting.
@@ -212,15 +264,23 @@ impl BloomFilterPolicy {
 
 impl FilterPolicy for BloomFilterPolicy {
     fn name(&self) -> &str {
-        self.name
+        &self.name
     }
 
     fn builder(&self) -> Box<dyn FilterBuilder> {
-        Box::new(BloomFilterBuilder::new(self.bits_per_key))
+        Box::new(BloomFilterBuilder::new_with_options(
+            self.bits_per_key,
+            self.whole_key_filtering,
+            self.prefix_extractor.clone(),
+        ))
     }
 
     fn decode(&self, data: &[u8]) -> Arc<dyn Filter> {
-        Arc::new(BloomFilter::decode(data))
+        Arc::new(BloomFilter::decode(
+            data,
+            self.whole_key_filtering,
+            self.prefix_extractor.clone(),
+        ))
     }
 
     fn estimate_size(&self, num_keys: usize) -> usize {
@@ -311,5 +371,166 @@ mod tests {
         let filter = builder.build();
         let clamped = filter.clamp_allocated_size();
         assert_eq!(filter.size(), clamped.size());
+    }
+
+    /// A fixed-length prefix extractor for testing.
+    struct FixedPrefixExtractor {
+        len: usize,
+        name: String,
+    }
+
+    impl FixedPrefixExtractor {
+        fn new(len: usize) -> Self {
+            Self {
+                len,
+                name: format!("fixed{}", len),
+            }
+        }
+    }
+
+    impl PrefixExtractor for FixedPrefixExtractor {
+        fn name(&self) -> &str {
+            &self.name
+        }
+
+        fn in_domain(&self, prefix: &[u8]) -> bool {
+            prefix.len() == self.len
+        }
+
+        fn prefix_len(&self, key: &[u8]) -> Option<usize> {
+            if key.len() >= self.len {
+                Some(self.len)
+            } else {
+                None
+            }
+        }
+    }
+
+    #[test]
+    fn test_prefix_bloom_filter_policy_name() {
+        let extractor = Arc::new(FixedPrefixExtractor::new(3));
+        let policy = BloomFilterPolicy::new(10).with_prefix_extractor(extractor);
+        assert_eq!(policy.name(), "_bf:prefix=fixed3");
+    }
+
+    #[test]
+    fn test_prefix_bloom_filter_round_trip() {
+        let extractor = Arc::new(FixedPrefixExtractor::new(3));
+        let policy = BloomFilterPolicy::new(10).with_prefix_extractor(extractor);
+
+        // Build a filter with keys sharing prefixes "aaa" and "bbb"
+        let mut builder = policy.builder();
+        for i in 0u32..100 {
+            let key = format!("aaa{:04}", i);
+            builder.add_entry(&make_entry(key.as_bytes()));
+        }
+        for i in 0u32..100 {
+            let key = format!("bbb{:04}", i);
+            builder.add_entry(&make_entry(key.as_bytes()));
+        }
+        let filter = builder.build();
+
+        // Encode and decode
+        let mut buf = Vec::new();
+        filter.encode(&mut buf);
+        let decoded = policy.decode(&buf);
+
+        // Point queries should still work
+        let query = FilterQuery::point(Bytes::from_static(b"aaa0050"));
+        assert!(decoded.might_match(&query));
+
+        // Prefix query for "aaa" should match
+        let query = FilterQuery::prefix(Bytes::from_static(b"aaa"));
+        assert!(decoded.might_match(&query));
+
+        // Prefix query for "bbb" should match
+        let query = FilterQuery::prefix(Bytes::from_static(b"bbb"));
+        assert!(decoded.might_match(&query));
+
+        // Prefix query for "ccc" (not inserted) should have low FP rate
+        // (can't guarantee false for a single query, but it shouldn't be true
+        // for ALL non-existent prefixes)
+        let mut fp = 0;
+        for c in b'c'..=b'z' {
+            let prefix = vec![c, c, c];
+            let query = FilterQuery::prefix(Bytes::from(prefix));
+            if decoded.might_match(&query) {
+                fp += 1;
+            }
+        }
+        // With 10 bits per key and only ~2 prefix hashes, FP rate should be very low
+        assert!(
+            fp < 10,
+            "too many false positives for prefix queries: {}",
+            fp
+        );
+    }
+
+    #[test]
+    fn test_prefix_bloom_out_of_domain_returns_true() {
+        let extractor = Arc::new(FixedPrefixExtractor::new(3));
+        let policy = BloomFilterPolicy::new(10).with_prefix_extractor(extractor);
+
+        let mut builder = policy.builder();
+        builder.add_entry(&make_entry(b"aaa0001"));
+        let filter = builder.build();
+
+        let mut buf = Vec::new();
+        filter.encode(&mut buf);
+        let decoded = policy.decode(&buf);
+
+        // Prefix shorter than extractor length is out-of-domain, must return true
+        let query = FilterQuery::prefix(Bytes::from_static(b"aa"));
+        assert!(decoded.might_match(&query));
+    }
+
+    #[test]
+    fn test_no_prefix_extractor_returns_true_for_prefix_queries() {
+        let policy = BloomFilterPolicy::new(10);
+
+        let mut builder = policy.builder();
+        builder.add_entry(&make_entry(b"aaa0001"));
+        let filter = builder.build();
+
+        let mut buf = Vec::new();
+        filter.encode(&mut buf);
+        let decoded = policy.decode(&buf);
+
+        // Without a prefix extractor, prefix queries should always return true
+        let query = FilterQuery::prefix(Bytes::from_static(b"aaa"));
+        assert!(decoded.might_match(&query));
+    }
+
+    #[test]
+    fn test_whole_key_filtering_disabled() {
+        let extractor = Arc::new(FixedPrefixExtractor::new(3));
+        let policy = BloomFilterPolicy::new(10)
+            .with_prefix_extractor(extractor)
+            .with_whole_key_filtering(false);
+
+        let mut builder = policy.builder();
+        for i in 0u32..1000 {
+            let key = format!("aaa{:04}", i);
+            builder.add_entry(&make_entry(key.as_bytes()));
+        }
+        let filter = builder.build();
+
+        // Encode and decode so the decoded filter goes through BloomFilterPolicy::decode,
+        // which is where the whole_key_filtering flag must be propagated correctly.
+        let mut buf = Vec::new();
+        filter.encode(&mut buf);
+        let decoded = policy.decode(&buf);
+
+        // Prefix query should still work
+        let query = FilterQuery::prefix(Bytes::from_static(b"aaa"));
+        assert!(decoded.might_match(&query));
+
+        // Point queries must return true (inapplicable). No full-key hashes were stored,
+        // so probing would produce false negatives for keys that actually exist.
+        let query = FilterQuery::point(Bytes::from_static(b"aaa0001"));
+        assert!(
+            decoded.might_match(&query),
+            "point query must return true when whole_key_filtering=false to avoid false negatives"
+        );
     }
 }
