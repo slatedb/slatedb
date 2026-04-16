@@ -4919,9 +4919,7 @@ mod tests {
         assert_eq!(db.inner.wal_buffer.recent_flushed_wal_id(), 2);
 
         // Let background flush attempts fail while WAL durability preserves recovery.
-        eprintln!("begin close");
         db.close().await.unwrap();
-        eprintln!("end close");
 
         // pause write-compacted-sst-io-error to prevent immutable tables
         // from being flushed, so we can snapshot the state when there is
