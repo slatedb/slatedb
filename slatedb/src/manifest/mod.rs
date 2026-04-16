@@ -396,7 +396,7 @@ impl Manifest {
                 external_dbs.push(ExternalDb {
                     path: parent_external_db.path.clone(),
                     source_checkpoint_id: parent_external_db.source_checkpoint_id,
-                    final_checkpoint_id: Some(rand.rng().gen_uuid()),
+                    final_checkpoint_id: None, // regenerated after deduplication
                     sst_ids: parent_external_db.sst_ids.clone(),
                 });
             }
@@ -414,7 +414,7 @@ impl Manifest {
                 external_dbs.push(ExternalDb {
                     path: source.path.clone().into(),
                     source_checkpoint_id: source.checkpoint.id,
-                    final_checkpoint_id: Some(rand.rng().gen_uuid()),
+                    final_checkpoint_id: None, // regenerated after deduplication
                     sst_ids: owned_ssts,
                 });
             }
@@ -428,8 +428,28 @@ impl Manifest {
         for source in &sources {
             core.last_l0_seq = max(core.last_l0_seq, source.manifest.core.last_l0_seq);
         }
+        let external_dbs_merged = external_dbs
+            .into_iter()
+            .fold(
+                HashMap::new(),
+                |mut map: HashMap<(String, Uuid), HashSet<SsTableId>>, db| {
+                    map.entry((db.path, db.source_checkpoint_id))
+                        .or_default()
+                        .extend::<HashSet<SsTableId>>(HashSet::from_iter(db.sst_ids));
+                    map
+                },
+            )
+            .iter()
+            .map(|((path, checkpoint), sst_ids)| ExternalDb {
+                path: path.clone(),
+                source_checkpoint_id: *checkpoint,
+                final_checkpoint_id: Some(rand.rng().gen_uuid()),
+                sst_ids: sst_ids.iter().copied().collect(),
+            })
+            .collect();
+
         Self {
-            external_dbs,
+            external_dbs: external_dbs_merged,
             core,
             writer_epoch: 0,
             compactor_epoch: 0,
@@ -1064,7 +1084,6 @@ mod tests {
             .find(|e| e.path == "tmp/db1")
             .unwrap();
         assert_eq!(db1.source_checkpoint_id, cp1);
-        assert!(db1.final_checkpoint_id.is_some());
         assert_eq!(db1.sst_ids, vec![parent1_sst1]); // grandparent_sst must not leak in
 
         let db2 = union
@@ -1073,7 +1092,6 @@ mod tests {
             .find(|e| e.path == "tmp/db2")
             .unwrap();
         assert_eq!(db2.source_checkpoint_id, cp2);
-        assert!(db2.final_checkpoint_id.is_some());
         assert_eq!(db2.sst_ids, vec![parent2_sst1]);
 
         let grandparent = union
@@ -1387,5 +1405,92 @@ mod tests {
             ),
             None,
         )
+    }
+
+    fn manifest_with_one_compacted_sst(
+        sst_id: SsTableId,
+        first_entry: &'static [u8],
+        visible_range: BytesRange,
+    ) -> Manifest {
+        let mut core = ManifestCore::new();
+        core.compacted.push(SortedRun {
+            id: 0,
+            sst_views: vec![SsTableView::new_projected(
+                sst_id.unwrap_compacted_id(),
+                SsTableHandle::new(
+                    sst_id,
+                    SST_FORMAT_VERSION_LATEST,
+                    SsTableInfo {
+                        first_entry: Some(Bytes::from_static(first_entry)),
+                        ..SsTableInfo::default()
+                    },
+                ),
+                Some(visible_range),
+            )],
+        });
+        Manifest::initial(core)
+    }
+
+    #[test]
+    fn test_union_deduplicates_external_dbs() {
+        use std::collections::HashSet;
+
+        let shared_path = "shared_ancestor".to_string();
+        let shared_source_cp = Uuid::new_v4();
+        let original_final_cp = Uuid::new_v4();
+
+        let sst_a = SsTableId::Compacted(Ulid::from_parts(1000, 0));
+        let sst_b = SsTableId::Compacted(Ulid::from_parts(1001, 0));
+        let sst_c = SsTableId::Compacted(Ulid::from_parts(1002, 0));
+
+        let sst_own1 = SsTableId::Compacted(Ulid::from_parts(2000, 0));
+        let mut m1 =
+            manifest_with_one_compacted_sst(sst_own1, b"a", BytesRange::from_ref("a".."m"));
+        m1.external_dbs.push(ExternalDb {
+            path: shared_path.clone(),
+            source_checkpoint_id: shared_source_cp,
+            final_checkpoint_id: Some(original_final_cp),
+            sst_ids: vec![sst_a, sst_b],
+        });
+
+        let sst_own2 = SsTableId::Compacted(Ulid::from_parts(3000, 0));
+        let mut m2 = manifest_with_one_compacted_sst(sst_own2, b"m", BytesRange::from_ref("m"..));
+        m2.external_dbs.push(ExternalDb {
+            path: shared_path.clone(),
+            source_checkpoint_id: shared_source_cp,
+            final_checkpoint_id: Some(original_final_cp),
+            sst_ids: vec![sst_b, sst_c],
+        });
+
+        let rand = Arc::new(DbRand::default());
+        let sources = vec![
+            CloneSource {
+                manifest: m1,
+                path: Path::from("/tmp/db1"),
+                checkpoint: new_checkpoint(Uuid::new_v4()),
+            },
+            CloneSource {
+                manifest: m2,
+                path: Path::from("/tmp/db2"),
+                checkpoint: new_checkpoint(Uuid::new_v4()),
+            },
+        ];
+
+        let result = Manifest::cloned_from_union(sources, rand);
+
+        let shared_entries: Vec<_> = result
+            .external_dbs
+            .iter()
+            .filter(|db| db.path == shared_path && db.source_checkpoint_id == shared_source_cp)
+            .collect();
+        assert_eq!(
+            shared_entries.len(),
+            1,
+            "Should have exactly one entry for the shared (path, source_checkpoint_id)"
+        );
+
+        let merged_ids: HashSet<SsTableId> = shared_entries[0].sst_ids.iter().copied().collect();
+        let expected_ids: HashSet<SsTableId> = [sst_a, sst_b, sst_c].iter().copied().collect();
+        assert_eq!(merged_ids, expected_ids);
     }
 }
