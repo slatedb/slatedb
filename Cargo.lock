@@ -929,7 +929,7 @@ dependencies = [
 
 [[package]]
 name = "examples"
-version = "0.12.0"
+version = "0.12.1"
 dependencies = [
  "anyhow",
  "object_store",
@@ -3273,7 +3273,7 @@ dependencies = [
 
 [[package]]
 name = "slatedb"
-version = "0.12.0"
+version = "0.12.1"
 dependencies = [
  "anyhow",
  "async-channel",
@@ -3338,7 +3338,7 @@ dependencies = [
 
 [[package]]
 name = "slatedb-bencher"
-version = "0.12.0"
+version = "0.12.1"
 dependencies = [
  "bytes",
  "chrono",
@@ -3356,7 +3356,7 @@ dependencies = [
 
 [[package]]
 name = "slatedb-cli"
-version = "0.12.0"
+version = "0.12.1"
 dependencies = [
  "chrono",
  "clap",
@@ -3375,7 +3375,7 @@ dependencies = [
 
 [[package]]
 name = "slatedb-common"
-version = "0.12.0"
+version = "0.12.1"
 dependencies = [
  "chrono",
  "log",
@@ -3385,7 +3385,7 @@ dependencies = [
 
 [[package]]
 name = "slatedb-dst"
-version = "0.12.0"
+version = "0.12.1"
 dependencies = [
  "async-trait",
  "chrono",
@@ -3408,7 +3408,7 @@ dependencies = [
 
 [[package]]
 name = "slatedb-txn-obj"
-version = "0.12.0"
+version = "0.12.1"
 dependencies = [
  "async-trait",
  "bytes",
@@ -3423,7 +3423,7 @@ dependencies = [
 
 [[package]]
 name = "slatedb-uniffi"
-version = "0.12.0"
+version = "0.12.1"
 dependencies = [
  "figment",
  "log",
