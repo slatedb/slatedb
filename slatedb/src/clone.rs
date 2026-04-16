@@ -1,12 +1,13 @@
 use crate::bytes_range::BytesRange;
 use crate::checkpoint::Checkpoint;
 use crate::config::CheckpointOptions;
+
 use crate::db::builder::CloneSourceSpec;
-use crate::db_state::{ManifestCore, SsTableId};
+use crate::db_state::SsTableId;
 use crate::error::SlateDBError;
 use crate::error::SlateDBError::CheckpointMissing;
 use crate::manifest::store::{ManifestStore, StoredManifest};
-use crate::manifest::Manifest;
+use crate::manifest::{Manifest, ManifestCore};
 use crate::object_stores::ObjectStoreType::{Main, Wal};
 use crate::object_stores::ObjectStores;
 use crate::paths::PathResolver;
@@ -270,7 +271,10 @@ async fn validate_external_dbs_contain_final_checkpoint(
                 object_store.clone(),
             ))
         };
-        let external_manifest = external_manifest_store.read_latest_manifest().await?.1;
+        let external_manifest = external_manifest_store
+            .read_latest_manifest()
+            .await?
+            .manifest;
         if external_manifest
             .core
             .find_checkpoint(final_checkpoint_id)
@@ -339,10 +343,11 @@ mod tests {
     };
     use crate::db::builder::CloneSourceSpec;
     use crate::db::Db;
-    use crate::db_state::{ManifestCore, SsTableId};
+    use crate::db_state::SsTableId;
     use crate::error::SlateDBError;
     use crate::manifest::store::{ManifestStore, StoredManifest};
     use crate::manifest::Manifest;
+    use crate::manifest::ManifestCore;
     use crate::object_stores::ObjectStores;
     use crate::paths::PathResolver;
     use crate::proptest_util::{rng, sample};
@@ -679,7 +684,11 @@ mod tests {
 
         let clone_manifest_store =
             ManifestStore::new(&Path::from(clone_path), object_store.clone());
-        let (manifest_id, _) = clone_manifest_store.read_latest_manifest().await.unwrap();
+        let manifest_id = clone_manifest_store
+            .read_latest_manifest()
+            .await
+            .unwrap()
+            .id;
 
         create_clone(
             clone_path,
@@ -695,7 +704,11 @@ mod tests {
 
         assert_eq!(
             manifest_id,
-            clone_manifest_store.read_latest_manifest().await.unwrap().0
+            clone_manifest_store
+                .read_latest_manifest()
+                .await
+                .unwrap()
+                .id
         );
 
         Ok(())
@@ -892,11 +905,11 @@ mod tests {
         parent_db.flush().await.unwrap();
         let manifest = parent_db.manifest();
         assert!(
-            !manifest.l0.is_empty(),
+            !manifest.manifest.core.l0.is_empty(),
             "expected cloned state to include L0 data"
         );
         assert!(
-            manifest.replay_after_wal_id + 1 < manifest.next_wal_sst_id,
+            manifest.manifest.core.replay_after_wal_id + 1 < manifest.manifest.core.next_wal_sst_id,
             "expected cloned state to retain WAL-only SSTs"
         );
         parent_db.close().await.unwrap();
@@ -982,15 +995,17 @@ mod tests {
         parent_db.flush().await.unwrap();
         let manifest = parent_db.manifest();
         assert!(
-            !manifest.l0.is_empty(),
+            !manifest.manifest.core.l0.is_empty(),
             "expected cloned state to include L0 data"
         );
         assert!(
-            manifest.replay_after_wal_id + 1 < manifest.next_wal_sst_id,
+            manifest.manifest.core.replay_after_wal_id + 1 < manifest.manifest.core.next_wal_sst_id,
             "expected cloned state to retain WAL-only SSTs"
         );
         let expected_missing_wal_path = PathResolver::new(Path::from(parent_path))
-            .table_path(&SsTableId::Wal(manifest.replay_after_wal_id + 1))
+            .table_path(&SsTableId::Wal(
+                manifest.manifest.core.replay_after_wal_id + 1,
+            ))
             .to_string();
         // Block L0 uploads so the WAL-only data stays in the WAL.
         fail_parallel::cfg(

@@ -1,4 +1,4 @@
-use crate::compactor_state::Compactions;
+use crate::compactor_state::{Compactions, VersionedCompactions};
 use crate::error::SlateDBError;
 #[allow(dead_code)]
 use crate::error::SlateDBError::LatestTransactionalObjectVersionMissing;
@@ -244,16 +244,18 @@ impl CompactionsStore {
 
     pub(crate) async fn try_read_latest_compactions(
         &self,
-    ) -> Result<Option<(u64, Compactions)>, SlateDBError> {
-        Ok(self
-            .inner
-            .try_read_latest()
-            .await
-            .map(|opt| opt.map(|(id, compactions)| (id.into(), compactions)))?)
+    ) -> Result<Option<VersionedCompactions>, SlateDBError> {
+        Ok(self.inner.try_read_latest().await.map(|opt| {
+            opt.map(|(id, compactions)| {
+                VersionedCompactions::from_compactions(id.into(), compactions)
+            })
+        })?)
     }
 
     #[cfg(test)]
-    pub(crate) async fn read_latest_compactions(&self) -> Result<(u64, Compactions), SlateDBError> {
+    pub(crate) async fn read_latest_compactions(
+        &self,
+    ) -> Result<VersionedCompactions, SlateDBError> {
         self.try_read_latest_compactions()
             .await?
             .ok_or(LatestTransactionalObjectVersionMissing)
@@ -312,7 +314,7 @@ mod tests {
         let mut sc = StoredCompactions::create(store.clone(), 0).await.unwrap();
         sc.update(sc.prepare_dirty().unwrap()).await.unwrap();
 
-        let (version, _) = store.read_latest_compactions().await.unwrap();
+        let version = store.read_latest_compactions().await.unwrap().id;
 
         assert_eq!(version, 2);
     }
@@ -355,8 +357,8 @@ mod tests {
             FenceableCompactions::init(sc, timeout, Arc::new(DefaultSystemClock::new()))
                 .await
                 .unwrap();
-            let (_, compactions) = store.read_latest_compactions().await.unwrap();
-            assert_eq!(compactions.compactor_epoch, i);
+            let compactions = store.read_latest_compactions().await.unwrap();
+            assert_eq!(compactions.compactions.compactor_epoch, i);
         }
     }
 

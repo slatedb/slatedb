@@ -87,7 +87,7 @@ mod tests {
         let db = Db::open(path.clone(), object_store.clone()).await.unwrap();
         db.close().await.unwrap();
         let manifest_store = ManifestStore::new(&path, object_store.clone());
-        let (_, before_checkpoint) = manifest_store.read_latest_manifest().await.unwrap();
+        let before_checkpoint = manifest_store.read_latest_manifest().await.unwrap();
 
         let CheckpointCreateResult {
             id: checkpoint_id,
@@ -97,15 +97,15 @@ mod tests {
             .await
             .unwrap();
 
-        let (latest_manifest_id, manifest) = manifest_store.read_latest_manifest().await.unwrap();
-        assert_eq!(latest_manifest_id, checkpoint_manifest_id);
-        let checkpoints = &manifest.core.checkpoints;
+        let manifest = manifest_store.read_latest_manifest().await.unwrap();
+        assert_eq!(manifest.id, checkpoint_manifest_id);
+        let checkpoints = &manifest.manifest.core.checkpoints;
         assert_eq!(
-            before_checkpoint.core.checkpoints.len() + 1,
+            before_checkpoint.manifest.core.checkpoints.len() + 1,
             checkpoints.len()
         );
         let checkpoint = checkpoints.iter().find(|c| c.id == checkpoint_id).unwrap();
-        assert_eq!(checkpoint.manifest_id, latest_manifest_id);
+        assert_eq!(checkpoint.manifest_id, manifest.id);
         assert_eq!(checkpoint.expire_time, None);
     }
 
@@ -135,8 +135,8 @@ mod tests {
             .await
             .unwrap();
 
-        let (_, manifest) = manifest_store.read_latest_manifest().await.unwrap();
-        let checkpoints = &manifest.core.checkpoints;
+        let manifest = manifest_store.read_latest_manifest().await.unwrap();
+        let checkpoints = &manifest.manifest.core.checkpoints;
         let checkpoint = checkpoints.iter().find(|c| c.id == checkpoint_id).unwrap();
         assert!(checkpoint.expire_time.is_some());
         let expire_time = checkpoint.expire_time.unwrap();
@@ -246,8 +246,9 @@ mod tests {
             .await
             .unwrap();
         let manifest_store = ManifestStore::new(&path, object_store.clone());
-        let (_, manifest) = manifest_store.read_latest_manifest().await.unwrap();
+        let manifest = manifest_store.read_latest_manifest().await.unwrap();
         let checkpoint = manifest
+            .manifest
             .core
             .checkpoints
             .iter()
@@ -260,8 +261,9 @@ mod tests {
             .await
             .unwrap();
 
-        let (_, manifest) = manifest_store.read_latest_manifest().await.unwrap();
+        let manifest = manifest_store.read_latest_manifest().await.unwrap();
         let found: Vec<&Checkpoint> = manifest
+            .manifest
             .core
             .checkpoints
             .iter()
@@ -309,8 +311,13 @@ mod tests {
         admin.delete_checkpoint(id).await.unwrap();
 
         let manifest_store = ManifestStore::new(&path, object_store.clone());
-        let (_, manifest) = manifest_store.read_latest_manifest().await.unwrap();
-        assert!(!manifest.core.checkpoints.iter().any(|c| c.id == id));
+        let manifest = manifest_store.read_latest_manifest().await.unwrap();
+        assert!(!manifest
+            .manifest
+            .core
+            .checkpoints
+            .iter()
+            .any(|c| c.id == id));
     }
 
     #[tokio::test]
@@ -347,21 +354,20 @@ mod tests {
             .unwrap();
 
         let manifest_store = ManifestStore::new(&path, object_store.clone());
-        let (latest_manifest_id, latest_manifest) =
-            manifest_store.read_latest_manifest().await.unwrap();
+        let latest_manifest = manifest_store.read_latest_manifest().await.unwrap();
 
-        assert_eq!(latest_manifest_id, checkpoint.manifest_id);
-        assert_eq!(latest_manifest.core.l0.len(), 1);
+        assert_eq!(latest_manifest.id, checkpoint.manifest_id);
+        assert_eq!(latest_manifest.manifest.core.l0.len(), 1);
         assert!(
-            latest_manifest.core.last_l0_seq >= 2,
+            latest_manifest.manifest.core.last_l0_seq >= 2,
             "expected checkpoint flush to advance last_l0_seq, got {}",
-            latest_manifest.core.last_l0_seq
+            latest_manifest.manifest.core.last_l0_seq
         );
 
         assert_flushed_entry(
             Arc::clone(&object_store),
             path,
-            &latest_manifest.core.l0.front().unwrap().sst.id,
+            &latest_manifest.manifest.core.l0.front().unwrap().sst.id,
             (&Bytes::from_static(b"k2"), &Bytes::from_static(b"v2")),
         )
         .await;
@@ -475,8 +481,9 @@ mod tests {
             .await
             .unwrap();
 
-        let (_, manifest) = manifest_store.read_latest_manifest().await.unwrap();
+        let manifest = manifest_store.read_latest_manifest().await.unwrap();
         let checkpoint = manifest
+            .manifest
             .core
             .checkpoints
             .iter()
@@ -511,8 +518,9 @@ mod tests {
             .await
             .unwrap();
 
-        let (_, manifest) = manifest_store.read_latest_manifest().await.unwrap();
+        let manifest = manifest_store.read_latest_manifest().await.unwrap();
         let unnamed_checkpoints: Vec<_> = manifest
+            .manifest
             .core
             .checkpoints
             .iter()

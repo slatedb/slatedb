@@ -8,11 +8,11 @@ use crate::compactor_state::VersionedCompactions;
 use crate::compactor_state_protocols::CompactorStateReader;
 use crate::config::{CheckpointOptions, GarbageCollectorOptions};
 use crate::db::builder::GarbageCollectorBuilder;
-use crate::db_state::VersionedManifest;
 use crate::dispatcher::MessageHandlerExecutor;
 use crate::error::SlateDBError;
 use crate::garbage_collector::GC_TASK_NAME;
 use crate::manifest::store::{ManifestStore, StoredManifest};
+use crate::manifest::VersionedManifest;
 use slatedb_common::clock::SystemClock;
 
 use crate::db_status::ClosedResultWriter;
@@ -82,10 +82,7 @@ impl Admin {
                 .await?
                 .map(|manifest| VersionedManifest::from_manifest(id, manifest))
         } else {
-            manifest_store
-                .try_read_latest_manifest()
-                .await?
-                .map(|(id, manifest)| VersionedManifest::from_manifest(id, manifest))
+            manifest_store.try_read_latest_manifest().await?
         };
 
         Ok(manifest)
@@ -131,10 +128,7 @@ impl Admin {
                 .await?
                 .map(|compactions| VersionedCompactions::from_compactions(id, compactions))
         } else {
-            compactions_store
-                .try_read_latest_compactions()
-                .await?
-                .map(|(id, compactions)| VersionedCompactions::from_compactions(id, compactions))
+            compactions_store.try_read_latest_compactions().await?
         };
 
         Ok(compactions)
@@ -163,7 +157,7 @@ impl Admin {
             compactions_store
                 .try_read_latest_compactions()
                 .await?
-                .map(|(_id, compactions)| compactions)
+                .map(|compactions| compactions.compactions)
         };
         let Some(compactions) = compactions else {
             return Ok(None);
@@ -241,7 +235,7 @@ impl Admin {
             &self.path,
             self.object_stores.store_of(ObjectStoreType::Main).clone(),
         );
-        let (_, manifest) = manifest_store.read_latest_manifest().await?;
+        let manifest = manifest_store.read_latest_manifest().await?.manifest;
 
         let checkpoints = match name_filter {
             Some("") => manifest
@@ -504,7 +498,7 @@ impl Admin {
         let manifest_store = self.manifest_store();
 
         let id_manifest = manifest_store.try_read_latest_manifest().await?;
-        let Some((_id, manifest)) = id_manifest else {
+        let Some(manifest) = id_manifest else {
             return Ok(None);
         };
 
@@ -513,7 +507,7 @@ impl Admin {
         } else {
             FindOption::RoundDown
         };
-        Ok(manifest.core.sequence_tracker.find_ts(seq, opt))
+        Ok(manifest.core().sequence_tracker.find_ts(seq, opt))
     }
 
     /// Returns the sequence for a given timestamp from the latest manifest's sequence tracker.
@@ -526,7 +520,7 @@ impl Admin {
         let manifest_store = self.manifest_store();
 
         let id_manifest = manifest_store.try_read_latest_manifest().await?;
-        let Some((_id, manifest)) = id_manifest else {
+        let Some(manifest) = id_manifest else {
             return Ok(None);
         };
 
@@ -535,7 +529,7 @@ impl Admin {
         } else {
             FindOption::RoundDown
         };
-        Ok(manifest.core.sequence_tracker.find_seq(ts, opt))
+        Ok(manifest.core().sequence_tracker.find_seq(ts, opt))
     }
 
     fn manifest_store(&self) -> ManifestStore {
@@ -761,8 +755,8 @@ mod tests {
     use crate::admin::{load_object_store_from_env, AdminBuilder};
     use crate::compactions_store::{CompactionsStore, StoredCompactions};
     use crate::compactor_state::{Compaction, CompactionSpec, CompactionStatus, SourceId};
-    use crate::db_state::ManifestCore;
     use crate::manifest::store::{ManifestStore, StoredManifest};
+    use crate::manifest::ManifestCore;
     use object_store::memory::InMemory;
     use object_store::path::Path;
     use object_store::ObjectStore;
@@ -831,10 +825,10 @@ mod tests {
             .unwrap()
             .expect("expected manifest");
         assert_eq!(latest.id, 2);
-        assert_eq!(latest.writer_epoch, 3);
-        assert_eq!(latest.compactor_epoch, 5);
-        assert_eq!(latest.manifest.next_wal_sst_id, 17);
-        assert_eq!(latest.manifest.last_l0_seq, 9);
+        assert_eq!(latest.manifest.writer_epoch, 3);
+        assert_eq!(latest.manifest.compactor_epoch, 5);
+        assert_eq!(latest.manifest.core.next_wal_sst_id, 17);
+        assert_eq!(latest.manifest.core.last_l0_seq, 9);
 
         let first = admin
             .read_manifest(Some(1))
@@ -842,10 +836,10 @@ mod tests {
             .unwrap()
             .expect("expected manifest");
         assert_eq!(first.id, 1);
-        assert_eq!(first.writer_epoch, 0);
-        assert_eq!(first.compactor_epoch, 0);
-        assert_eq!(first.manifest.next_wal_sst_id, 1);
-        assert_eq!(first.manifest.last_l0_seq, 0);
+        assert_eq!(first.manifest.writer_epoch, 0);
+        assert_eq!(first.manifest.compactor_epoch, 0);
+        assert_eq!(first.manifest.core.next_wal_sst_id, 1);
+        assert_eq!(first.manifest.core.last_l0_seq, 0);
     }
 
     #[tokio::test]
@@ -884,19 +878,19 @@ mod tests {
         );
         assert_eq!(
             all.iter()
-                .map(|manifest| manifest.manifest.last_l0_seq)
+                .map(|manifest| manifest.manifest.core.last_l0_seq)
                 .collect::<Vec<_>>(),
             vec![0, 10, 20]
         );
         assert_eq!(
             all.iter()
-                .map(|manifest| manifest.writer_epoch)
+                .map(|manifest| manifest.manifest.writer_epoch)
                 .collect::<Vec<_>>(),
             vec![0, 2, 3]
         );
         assert_eq!(
             all.iter()
-                .map(|manifest| manifest.compactor_epoch)
+                .map(|manifest| manifest.manifest.compactor_epoch)
                 .collect::<Vec<_>>(),
             vec![0, 4, 6]
         );
@@ -957,8 +951,8 @@ mod tests {
             .expect("expected compactions");
         let expected_latest = compactions_store.read_compactions(2).await.unwrap();
         assert_eq!(latest.id, 2);
-        assert_eq!(latest.compactor_epoch, 9);
-        assert_eq!(latest.compactions, expected_latest.core);
+        assert_eq!(latest.compactions.compactor_epoch, 9);
+        assert_eq!(latest.compactions, expected_latest);
 
         let first = admin
             .read_compactions(Some(1))
@@ -967,8 +961,8 @@ mod tests {
             .expect("expected compactions");
         let expected_first = compactions_store.read_compactions(1).await.unwrap();
         assert_eq!(first.id, 1);
-        assert_eq!(first.compactor_epoch, 7);
-        assert_eq!(first.compactions, expected_first.core);
+        assert_eq!(first.compactions.compactor_epoch, 7);
+        assert_eq!(first.compactions, expected_first);
     }
 
     #[tokio::test]
@@ -1003,14 +997,14 @@ mod tests {
         assert_eq!(
             listed
                 .iter()
-                .map(|compactions| compactions.compactions.recent_compactions().count())
+                .map(|compactions| compactions.compactions.core.recent_compactions().count())
                 .collect::<Vec<_>>(),
             vec![0, 1, 2]
         );
         assert_eq!(
             listed
                 .iter()
-                .map(|compactions| compactions.compactor_epoch)
+                .map(|compactions| compactions.compactions.compactor_epoch)
                 .collect::<Vec<_>>(),
             vec![2, 4, 6]
         );

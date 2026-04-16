@@ -539,8 +539,8 @@ impl TokioCompactionExecutorInner {
 mod tests {
     use super::*;
     use crate::bytes_range::BytesRange;
-    use crate::db_state::ManifestCore;
     use crate::format::sst::SsTableFormat;
+    use crate::manifest::ManifestCore;
     use crate::object_stores::ObjectStores;
     use crate::proptest_util::arbitrary;
     use crate::sst_iter::SstView;

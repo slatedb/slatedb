@@ -49,7 +49,6 @@ pub use db_iter::DbIterator;
 pub use db_read::DbRead;
 pub use db_reader::DbReader;
 pub use db_snapshot::DbSnapshot;
-pub use db_state::VersionedManifest;
 pub use db_transaction::DbTransaction;
 pub use error::{CloseReason, Error, ErrorKind};
 pub use filter::BloomFilter;
@@ -61,6 +60,7 @@ pub use format::sst::BlockTransformer;
 pub use garbage_collector::stats as garbage_collector_stats;
 pub use garbage_collector::GarbageCollectorBuilder;
 pub use iter::IterationOrder;
+pub use manifest::VersionedManifest;
 pub use merge_operator::{MergeOperator, MergeOperatorError};
 pub use rand::DbRand;
 #[cfg(test)]
