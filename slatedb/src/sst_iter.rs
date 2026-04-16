@@ -1081,14 +1081,6 @@ impl<'a> SstIterator<'a> {
             SstIteratorDelegate::Filter(inner) => inner.table_id(),
         }
     }
-
-    #[allow(dead_code)]
-    pub(crate) fn is_filtered_out(&self) -> bool {
-        match &self.delegate {
-            SstIteratorDelegate::Direct(_) => false,
-            SstIteratorDelegate::Filter(inner) => inner.is_filtered_out(),
-        }
-    }
 }
 
 #[async_trait]

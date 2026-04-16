@@ -795,10 +795,7 @@ impl WalIdStore for parking_lot::RwLock<DbState> {
 #[cfg(test)]
 mod tests {
     use crate::checkpoint::Checkpoint;
-    use crate::db_state::{
-        DbState, FilterFormat, SortedRun, SsTableHandle, SsTableId, SsTableInfo, SsTableView,
-        SstType,
-    };
+    use crate::db_state::{DbState, SortedRun, SsTableHandle, SsTableId, SsTableInfo, SsTableView};
     use crate::format::sst::SST_FORMAT_VERSION_LATEST;
     use crate::manifest::store::test_utils::new_dirty_manifest;
     use crate::proptest_util::arbitrary;
@@ -1053,15 +1050,7 @@ mod tests {
         let sst_info = SsTableInfo {
             first_entry: Some(Bytes::copy_from_slice(first_entry)),
             last_entry: last_entry.map(Bytes::copy_from_slice),
-            index_offset: 0,
-            index_len: 0,
-            filter_offset: 0,
-            filter_len: 0,
-            compression_codec: None,
-            sst_type: SstType::default(),
-            stats_offset: 0,
-            stats_len: 0,
-            filter_format: FilterFormat::default(),
+            ..Default::default()
         };
         let sst_id = SsTableId::Compacted(ulid::Ulid::new());
         let handle = SsTableHandle::new(sst_id, SST_FORMAT_VERSION_LATEST, sst_info);
