@@ -669,7 +669,9 @@ mod tests {
         let rand = Arc::new(DbRand::default());
         let system_clock = Arc::new(DefaultSystemClock::new());
 
-        let parent_db = Db::open(parent_path.clone(), object_store.clone())
+        let parent_db = Db::builder(parent_path.clone(), object_store.clone())
+            .with_fp_registry(fp_registry.clone())
+            .build()
             .await
             .unwrap();
         let mut rng = rng::new_test_rng(None);
@@ -682,7 +684,20 @@ mod tests {
             .await
             .unwrap();
         parent_db.flush().await.unwrap();
+        // Block L0 uploads so the data remains in the WAL after close.
+        fail_parallel::cfg(
+            Arc::clone(&fp_registry),
+            "write-compacted-sst-io-error",
+            "return",
+        )
+        .unwrap();
         parent_db.close().await.unwrap();
+        fail_parallel::cfg(
+            Arc::clone(&fp_registry),
+            "write-compacted-sst-io-error",
+            "off",
+        )
+        .unwrap();
 
         fail_parallel::cfg(
             Arc::clone(&fp_registry),
@@ -880,6 +895,7 @@ mod tests {
 
     #[tokio::test]
     async fn clone_should_fail_when_wal_store_is_not_provided() {
+        let fp_registry = Arc::new(FailPointRegistry::new());
         let object_store = Arc::new(InMemory::new());
         let wal_object_store = Arc::new(InMemory::new());
         let parent_path = "/tmp/test_parent";
@@ -887,6 +903,7 @@ mod tests {
 
         let parent_db = Db::builder(parent_path, object_store.clone())
             .with_wal_object_store(wal_object_store.clone())
+            .with_fp_registry(fp_registry.clone())
             .build()
             .await
             .unwrap();
@@ -936,7 +953,15 @@ mod tests {
                 manifest.manifest.core.replay_after_wal_id + 1,
             ))
             .to_string();
+        // Block L0 uploads so the WAL-only data stays in the WAL.
+        fail_parallel::cfg(
+            fp_registry.clone(),
+            "write-compacted-sst-io-error",
+            "return",
+        )
+        .unwrap();
         parent_db.close().await.unwrap();
+        fail_parallel::cfg(fp_registry.clone(), "write-compacted-sst-io-error", "off").unwrap();
 
         // Pass main store as WAL store — WAL SSTs won't be found there
         let err = create_clone(
