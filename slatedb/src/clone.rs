@@ -1,56 +1,58 @@
+use crate::bytes_range::BytesRange;
 use crate::checkpoint::Checkpoint;
 use crate::config::CheckpointOptions;
+
+use crate::db::builder::CloneSourceSpec;
 use crate::db_state::SsTableId;
 use crate::error::SlateDBError;
 use crate::error::SlateDBError::CheckpointMissing;
 use crate::manifest::store::{ManifestStore, StoredManifest};
-use crate::manifest::ManifestCore;
+use crate::manifest::{Manifest, ManifestCore};
+use crate::object_stores::ObjectStoreType::{Main, Wal};
+use crate::object_stores::ObjectStores;
 use crate::paths::PathResolver;
 use crate::rand::DbRand;
 use crate::utils::IdGenerator;
+use bytes::Bytes;
 use fail_parallel::{fail_point, FailPointRegistry};
 use object_store::path::Path;
 use object_store::ObjectStore;
 use slatedb_common::clock::SystemClock;
+use std::ops::RangeBounds;
 use std::sync::Arc;
 use std::time::Duration;
 use uuid::Uuid;
 
-pub(crate) async fn create_clone<P: Into<Path>>(
+pub(crate) async fn create_clone<P: Into<Path>, R: RangeBounds<Bytes> + Clone>(
+    clone_source: CloneSourceSpec<R>,
     clone_path: P,
-    parent_path: P,
-    object_store: Arc<dyn ObjectStore>,
-    wal_object_store: Arc<dyn ObjectStore>,
-    parent_checkpoint: Option<Uuid>,
+    object_stores: ObjectStores,
     fp_registry: Arc<FailPointRegistry>,
     system_clock: Arc<dyn SystemClock>,
     rand: Arc<DbRand>,
+    projection_range: Option<R>,
 ) -> Result<(), SlateDBError> {
     let clone_path = clone_path.into();
-    let parent_path = parent_path.into();
+    let parent_path = clone_source.path.clone();
 
     if clone_path == parent_path {
         return Err(SlateDBError::IdenticalClonePaths(parent_path));
     }
 
-    let clone_manifest_store = Arc::new(ManifestStore::new(&clone_path, object_store.clone()));
-    let parent_manifest_store = Arc::new(ManifestStore::new(&parent_path, object_store.clone()));
-
     let mut clone_manifest = create_clone_manifest(
-        clone_manifest_store,
-        parent_manifest_store,
-        parent_path.to_string(),
-        parent_checkpoint,
-        object_store.clone(),
+        clone_path.clone(),
+        clone_source.clone(),
+        object_stores.store_of(Main).clone(),
         system_clock.clone(),
         rand,
         fp_registry.clone(),
+        projection_range,
     )
     .await?;
 
     if !clone_manifest.db_state().initialized {
         copy_wal_ssts(
-            wal_object_store,
+            object_stores.store_of(Wal).clone(),
             clone_manifest.db_state(),
             &parent_path,
             &clone_path,
@@ -66,29 +68,34 @@ pub(crate) async fn create_clone<P: Into<Path>>(
     Ok(())
 }
 
-async fn create_clone_manifest(
-    clone_manifest_store: Arc<ManifestStore>,
-    parent_manifest_store: Arc<ManifestStore>,
-    parent_path: String,
-    parent_checkpoint_id: Option<Uuid>,
+async fn create_clone_manifest<R: RangeBounds<Bytes> + Clone>(
+    clone_path: Path,
+    source_spec: CloneSourceSpec<R>,
     object_store: Arc<dyn ObjectStore>,
     system_clock: Arc<dyn SystemClock>,
     rand: Arc<DbRand>,
     #[allow(unused)] fp_registry: Arc<FailPointRegistry>,
+    projection_range: Option<R>,
 ) -> Result<StoredManifest, SlateDBError> {
+    let clone_manifest_store = Arc::new(ManifestStore::new(&clone_path, object_store.clone()));
+    let parent_manifest_store =
+        Arc::new(ManifestStore::new(&source_spec.path, object_store.clone()));
+
+    let parent_checkpoint_id = source_spec.checkpoint;
+
     let clone_manifest =
         match StoredManifest::try_load(clone_manifest_store.clone(), system_clock.clone()).await? {
             Some(initialized_clone_manifest)
                 if initialized_clone_manifest.db_state().initialized =>
             {
                 validate_attached_to_external_db(
-                    parent_path.clone(),
+                    source_spec.path.to_string(),
                     parent_checkpoint_id,
                     &initialized_clone_manifest,
                 )?;
                 validate_external_dbs_contain_final_checkpoint(
                     parent_manifest_store,
-                    parent_path.clone(),
+                    source_spec.path.to_string(),
                     &initialized_clone_manifest,
                     object_store.clone(),
                 )
@@ -97,7 +104,7 @@ async fn create_clone_manifest(
             }
             Some(uninitialized_clone_manifest) => {
                 validate_attached_to_external_db(
-                    parent_path.clone(),
+                    source_spec.path.to_string(),
                     parent_checkpoint_id,
                     &uninitialized_clone_manifest,
                 )?;
@@ -113,14 +120,26 @@ async fn create_clone_manifest(
                     rand.clone(),
                 )
                 .await?;
-                let parent_manifest_at_checkpoint = parent_manifest_store
+                let mut parent_manifest_at_checkpoint = parent_manifest_store
                     .read_manifest(parent_checkpoint.manifest_id)
                     .await?;
+
+                let r = match (source_spec.projection_range.clone(), projection_range) {
+                    (Some(l), Some(r)) => to_byte_range(&l).intersect(&to_byte_range(&r)),
+                    (Some(l), None) => Some(to_byte_range(&l)),
+                    (None, Some(r)) => Some(to_byte_range(&r)),
+                    (None, None) => None,
+                };
+
+                parent_manifest_at_checkpoint = match r {
+                    Some(range) => Manifest::projected(&parent_manifest_at_checkpoint, range),
+                    None => parent_manifest_at_checkpoint,
+                };
 
                 StoredManifest::create_uninitialized_clone(
                     clone_manifest_store,
                     &parent_manifest_at_checkpoint,
-                    parent_path.clone(),
+                    source_spec.path.to_string(),
                     parent_checkpoint.id,
                     rand,
                     system_clock.clone(),
@@ -139,7 +158,7 @@ async fn create_clone_manifest(
             // If the final checkpoint id is not set, we can skip this check
             continue;
         };
-        let external_db_manifest_store = if external_db.path == parent_path {
+        let external_db_manifest_store = if external_db.path == source_spec.path.to_string() {
             parent_manifest_store.clone()
         } else {
             Arc::new(ManifestStore::new(
@@ -169,6 +188,10 @@ async fn create_clone_manifest(
     }
 
     Ok(clone_manifest)
+}
+
+fn to_byte_range<T: RangeBounds<Bytes> + Clone>(bounds: &T) -> BytesRange {
+    BytesRange::from(bounds.clone())
 }
 
 // Get a checkpoint and the corresponding manifest that will be used as the source
@@ -314,17 +337,18 @@ async fn copy_wal_ssts(
 
 #[cfg(test)]
 mod tests {
-    use crate::clone::create_clone;
     use crate::config::{
         CheckpointOptions, CheckpointScope, FlushOptions, FlushType, PutOptions, Settings,
         WriteOptions,
     };
+    use crate::db::builder::CloneSourceSpec;
     use crate::db::Db;
     use crate::db_state::SsTableId;
     use crate::error::SlateDBError;
     use crate::manifest::store::{ManifestStore, StoredManifest};
     use crate::manifest::Manifest;
     use crate::manifest::ManifestCore;
+    use crate::object_stores::ObjectStores;
     use crate::paths::PathResolver;
     use crate::proptest_util::{rng, sample};
     use crate::rand::DbRand;
@@ -335,9 +359,39 @@ mod tests {
     use object_store::memory::InMemory;
     use object_store::path::Path;
     use object_store::Error as ObjectStoreError;
+    use object_store::ObjectStore;
     use slatedb_common::clock::DefaultSystemClock;
+    use slatedb_common::SystemClock;
     use std::ops::RangeFull;
     use std::sync::Arc;
+    use uuid::Uuid;
+
+    // helper method for tests that creates CloneSourceSpec
+    async fn create_clone<P: Into<Path>>(
+        clone_path: P,
+        parent_path: P,
+        object_store: Arc<dyn ObjectStore>,
+        wal_object_store: Arc<dyn ObjectStore>,
+        parent_checkpoint: Option<Uuid>,
+        fp_registry: Arc<FailPointRegistry>,
+        system_clock: Arc<dyn SystemClock>,
+        rand: Arc<DbRand>,
+    ) -> Result<(), SlateDBError> {
+        let source: CloneSourceSpec = match parent_checkpoint {
+            Some(cp) => CloneSourceSpec::with_checkpoint(parent_path, cp),
+            None => CloneSourceSpec::new(parent_path),
+        };
+        crate::clone::create_clone(
+            source,
+            clone_path,
+            ObjectStores::new(object_store, Some(wal_object_store)),
+            fp_registry,
+            system_clock,
+            rand,
+            None,
+        )
+        .await
+    }
 
     #[tokio::test]
     async fn should_clone_latest_state_if_no_checkpoint_provided() {
