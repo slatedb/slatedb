@@ -22,7 +22,7 @@ pub struct BloomFilter {
 }
 
 impl BloomFilterBuilder {
-    pub(crate) fn new_with_options(
+    pub(crate) fn new(
         bits_per_key: u32,
         whole_key_filtering: bool,
         prefix_extractor: Option<Arc<dyn PrefixExtractor>>,
@@ -231,7 +231,7 @@ mod tests {
     use bytes::BytesMut;
 
     fn point_builder(bits_per_key: u32) -> BloomFilterBuilder {
-        BloomFilterBuilder::new_with_options(bits_per_key, true, None)
+        BloomFilterBuilder::new(bits_per_key, true, None)
     }
 
     #[test]

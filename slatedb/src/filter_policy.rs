@@ -268,7 +268,7 @@ impl FilterPolicy for BloomFilterPolicy {
     }
 
     fn builder(&self) -> Box<dyn FilterBuilder> {
-        Box::new(BloomFilterBuilder::new_with_options(
+        Box::new(BloomFilterBuilder::new(
             self.bits_per_key,
             self.whole_key_filtering,
             self.prefix_extractor.clone(),
