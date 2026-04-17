@@ -215,6 +215,13 @@ pub(crate) enum SlateDBError {
     #[error("invalid object store URL. url=`{0}`")]
     InvalidObjectStoreURL(String, #[source] url::ParseError),
 
+    #[error("failed to create {provider} object store")]
+    ObjectStoreCreationError {
+        provider: String,
+        #[source]
+        source: Arc<dyn std::error::Error + Send + Sync>,
+    },
+
     #[error("transaction conflict")]
     TransactionConflict,
 
@@ -228,11 +235,11 @@ pub(crate) enum SlateDBError {
     #[error("invalid sequence number ordering during merge. expected sequence numbers in descending order, but found {current_seq} followed by {next_seq}")]
     InvalidSequenceOrder { current_seq: u64, next_seq: u64 },
 
-    #[error("undefined environment variable {key}")]
-    UndefinedEnvironmentVariable { key: String },
-
-    #[error("invalid environment variable {key} value `{value}`")]
-    InvalidEnvironmentVariable { key: String, value: String },
+    #[error(
+        "invalid environment variable {key} value `{}`",
+        .value.as_deref().unwrap_or("null")
+    )]
+    InvalidEnvironmentVariable { key: String, value: Option<String> },
 
     #[error("unexpected tombstone encountered where a value was expected")]
     UnexpectedTombstone,
@@ -506,6 +513,9 @@ impl From<SlateDBError> for Error {
             SlateDBError::InvalidObjectStoreURL(_, err) => {
                 Error::invalid(msg).with_source(Box::new(err))
             }
+            SlateDBError::ObjectStoreCreationError { source, .. } => {
+                Error::invalid(msg).with_source(Box::new(source))
+            }
             SlateDBError::UnknownConfigurationFormat(_) => Error::invalid(msg),
             SlateDBError::InvalidSSTBatchSize(_) => Error::invalid(msg),
             SlateDBError::InvalidCheckpointLifetime(_) => Error::invalid(msg),
@@ -522,7 +532,6 @@ impl From<SlateDBError> for Error {
             SlateDBError::MergeOperatorMissing => Error::invalid(msg),
             SlateDBError::IteratorNotInitialized => Error::invalid(msg),
             SlateDBError::InvalidSequenceOrder { .. } => Error::data(msg),
-            SlateDBError::UndefinedEnvironmentVariable { .. } => Error::invalid(msg),
             SlateDBError::InvalidEnvironmentVariable { .. } => Error::invalid(msg),
             SlateDBError::EmptyBatch => Error::invalid(msg),
 

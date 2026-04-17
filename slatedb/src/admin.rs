@@ -28,7 +28,6 @@ use object_store::ObjectStore;
 use rand::RngCore;
 use std::env;
 use std::env::VarError;
-use std::error::Error as StdError;
 use std::ops::{Bound, RangeBounds};
 use std::sync::Arc;
 use std::time::Duration;
@@ -643,24 +642,16 @@ impl Admin {
     }
 }
 
-fn invalid_source_error<E>(error: E) -> crate::Error
-where
-    E: StdError + Send + Sync + 'static,
-{
-    crate::Error::invalid(error.to_string()).with_source(Box::new(error))
-}
-
-fn get_env_variable(name: &str) -> Result<String, crate::Error> {
-    env::var(name).map_err(|e| {
-        crate::Error::from(match e {
-            VarError::NotPresent => SlateDBError::UndefinedEnvironmentVariable {
-                key: name.to_string(),
-            },
-            VarError::NotUnicode(not_unicode_value) => SlateDBError::InvalidEnvironmentVariable {
-                key: name.to_string(),
-                value: format!("{:?}", not_unicode_value),
-            },
-        })
+fn get_env_variable(name: &str) -> Result<String, SlateDBError> {
+    env::var(name).map_err(|e| match e {
+        VarError::NotPresent => SlateDBError::InvalidEnvironmentVariable {
+            key: name.to_string(),
+            value: None,
+        },
+        VarError::NotUnicode(not_unicode_value) => SlateDBError::InvalidEnvironmentVariable {
+            key: name.to_string(),
+            value: Some(format!("{:?}", not_unicode_value)),
+        },
     })
 }
 
@@ -690,12 +681,11 @@ pub fn load_object_store_from_env(
         "azure" => load_azure(),
         #[cfg(feature = "opendal")]
         "opendal" => load_opendal(),
-        invalid_value => Err(crate::Error::from(
-            SlateDBError::InvalidEnvironmentVariable {
-                key: "CLOUD_PROVIDER".to_string(),
-                value: invalid_value.to_string(),
-            },
-        )),
+        invalid_value => Err(SlateDBError::InvalidEnvironmentVariable {
+            key: "CLOUD_PROVIDER".to_string(),
+            value: Some(invalid_value.to_string()),
+        }
+        .into()),
     }
 }
 
@@ -706,8 +696,13 @@ pub fn load_object_store_from_env(
 /// | LOCAL_PATH | The path to the local directory where all data will be stored | Yes |
 pub fn load_local() -> Result<Arc<dyn ObjectStore>, crate::Error> {
     let local_path = get_env_variable("LOCAL_PATH")?;
-    let lfs = object_store::local::LocalFileSystem::new_with_prefix(local_path)
-        .map_err(invalid_source_error)?;
+    let lfs =
+        object_store::local::LocalFileSystem::new_with_prefix(local_path).map_err(|error| {
+            SlateDBError::ObjectStoreCreationError {
+                provider: "local".to_string(),
+                source: Arc::new(error),
+            }
+        })?;
     Ok(Arc::new(lfs) as Arc<dyn ObjectStore>)
 }
 
@@ -727,7 +722,14 @@ pub fn load_aws() -> Result<Arc<dyn ObjectStore>, crate::Error> {
     let builder = object_store::aws::AmazonS3Builder::from_env()
         .with_conditional_put(S3ConditionalPut::ETagMatch);
 
-    Ok(Arc::new(builder.build().map_err(invalid_source_error)?) as Arc<dyn ObjectStore>)
+    Ok(Arc::new(
+        builder
+            .build()
+            .map_err(|error| SlateDBError::ObjectStoreCreationError {
+                provider: "AWS".to_string(),
+                source: Arc::new(error),
+            })?,
+    ) as Arc<dyn ObjectStore>)
 }
 
 /// Loads an Azure Object store instance. The environment variables consumed are
@@ -737,7 +739,14 @@ pub fn load_aws() -> Result<Arc<dyn ObjectStore>, crate::Error> {
 #[cfg(feature = "azure")]
 pub fn load_azure() -> Result<Arc<dyn ObjectStore>, crate::Error> {
     let builder = object_store::azure::MicrosoftAzureBuilder::from_env();
-    Ok(Arc::new(builder.build().map_err(invalid_source_error)?) as Arc<dyn ObjectStore>)
+    Ok(Arc::new(
+        builder
+            .build()
+            .map_err(|error| SlateDBError::ObjectStoreCreationError {
+                provider: "Azure".to_string(),
+                source: Arc::new(error),
+            })?,
+    ) as Arc<dyn ObjectStore>)
 }
 
 /// Loads an OpenDAL Object store instance.
@@ -774,13 +783,29 @@ pub fn load_opendal() -> Result<Arc<dyn ObjectStore>, crate::Error> {
     use std::collections::HashMap;
     use std::str::FromStr;
 
+    let scheme_value = get_env_variable("OPENDAL_SCHEME")?;
     let scheme =
-        Scheme::from_str(&get_env_variable("OPENDAL_SCHEME")?).map_err(invalid_source_error)?;
+        Scheme::from_str(&scheme_value).map_err(|_| SlateDBError::InvalidEnvironmentVariable {
+            key: "OPENDAL_SCHEME".to_string(),
+            value: Some(scheme_value.clone()),
+        })?;
+    if !Scheme::enabled().contains(&scheme) {
+        return Err(SlateDBError::InvalidEnvironmentVariable {
+            key: "OPENDAL_SCHEME".to_string(),
+            value: Some(scheme_value),
+        }
+        .into());
+    }
     let iter = env::vars()
         .filter_map(|(k, v)| k.strip_prefix("OPENDAL_").map(|k| (k.to_lowercase(), v)))
         .collect::<HashMap<String, String>>();
 
-    let op = Operator::via_iter(scheme, iter).map_err(invalid_source_error)?;
+    let op = Operator::via_iter(scheme, iter).map_err(|error| {
+        SlateDBError::ObjectStoreCreationError {
+            provider: "OpenDAL".to_string(),
+            source: Arc::new(error),
+        }
+    })?;
     Ok(Arc::new(object_store_opendal::OpendalStore::new(op)) as Arc<dyn ObjectStore>)
 }
 
@@ -808,7 +833,7 @@ mod tests {
             assert_eq!(err.kind(), ErrorKind::Invalid);
             assert_eq!(
                 err.to_string(),
-                "Invalid error: undefined environment variable CLOUD_PROVIDER"
+                "Invalid error: invalid environment variable CLOUD_PROVIDER value `null`"
             );
 
             jail.create_file("invalid.env", "CLOUD_PROVIDER=invalid")
@@ -830,6 +855,23 @@ mod tests {
             let store = r.expect("expected memory object store");
             assert_eq!(store.to_string(), "InMemory");
 
+            Ok(())
+        });
+    }
+
+    #[cfg(feature = "opendal")]
+    #[test]
+    fn test_load_opendal_invalid_scheme_maps_to_invalid_environment_variable() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("OPENDAL_SCHEME", "not-a-scheme");
+
+            let err = super::load_opendal().expect_err("expected invalid OpenDAL scheme");
+
+            assert_eq!(err.kind(), ErrorKind::Invalid);
+            assert_eq!(
+                err.to_string(),
+                "Invalid error: invalid environment variable OPENDAL_SCHEME value `not-a-scheme`"
+            );
             Ok(())
         });
     }
