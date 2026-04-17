@@ -30,7 +30,9 @@
 //! ## Examples
 //!
 //! ```
-//! use foyer::{DirectFsDeviceOptions, Engine, HybridCacheBuilder};
+//! use foyer::{
+//!     BlockEngineConfig, DeviceBuilder, FsDeviceBuilder, HybridCacheBuilder, PsyncIoEngineConfig,
+//! };
 //! use slatedb::Db;
 //! use slatedb::db_cache::CachedEntry;
 //! use slatedb::db_cache::foyer_hybrid::FoyerHybridCache;
@@ -41,20 +43,29 @@
 //! async fn main() {
 //!     let object_store = Arc::new(InMemory::new());
 //!     let cache = HybridCacheBuilder::new()
-//!             .with_name("hybrid_cache")
-//!             .memory(1024)
-//!             .with_weighter(|_, v: &CachedEntry| v.size())
-//!             .storage(Engine::large())
-//!             .with_device_options(
-//!                 DirectFsDeviceOptions::new("/tmp/slatedb-cache").with_capacity(1024 * 1024))
-//!             .build()
-//!             .await
-//!             .unwrap();
+//!         .with_name("hybrid_cache")
+//!         .memory(1024 * 1024)
+//!         .with_weighter(|_, v: &CachedEntry| v.size())
+//!         .storage()
+//!         .with_io_engine_config(PsyncIoEngineConfig::new())
+//!         .with_engine_config(
+//!             BlockEngineConfig::new(
+//!                 FsDeviceBuilder::new("/tmp/slatedb-cache")
+//!                     .with_capacity(1024 * 1024)
+//!                     .build()
+//!                     .unwrap(),
+//!             )
+//!             .with_block_size(64 * 1024),
+//!         )
+//!         .build()
+//!         .await
+//!         .unwrap();
 //!     let cache = Arc::new(FoyerHybridCache::new_with_cache(cache));
 //!     let db = Db::builder("path/to/db", object_store)
 //!         .with_db_cache(cache)
 //!         .build()
-//!         .await;
+//!         .await
+//!         .unwrap();
 //! }
 //! ```
 //!
@@ -143,7 +154,9 @@ mod tests {
     use crate::db_cache::{CachedEntry, CachedKey, DbCache};
     use crate::db_state::SsTableId;
     use crate::format::sst::BlockBuilder;
-    use foyer::{DirectFsDeviceOptions, Engine, HybridCacheBuilder};
+    use foyer::{
+        BlockEngineConfig, DeviceBuilder, FsDeviceBuilder, HybridCacheBuilder, PsyncIoEngineConfig,
+    };
     use rand::RngCore;
     use std::collections::HashMap;
     use std::sync::Arc;
@@ -203,11 +216,16 @@ mod tests {
             .with_name("hybrid_cache_test")
             .memory(1024 * 1024)
             .with_weighter(|_, v: &CachedEntry| v.size())
-            .storage(Engine::large())
-            .with_device_options(
-                DirectFsDeviceOptions::new(path)
-                    .with_capacity(4 * 1024 * 1024)
-                    .with_file_size(64 * 1024),
+            .storage()
+            .with_io_engine_config(PsyncIoEngineConfig::new())
+            .with_engine_config(
+                BlockEngineConfig::new(
+                    FsDeviceBuilder::new(path)
+                        .with_capacity(4 * 1024 * 1024)
+                        .build()
+                        .unwrap(),
+                )
+                .with_block_size(64 * 1024),
             )
             .build()
             .await
