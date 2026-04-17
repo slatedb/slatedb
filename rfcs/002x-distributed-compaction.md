@@ -338,15 +338,19 @@ Phases:
 
 ### Status quo (single compactor)
 
-Compaction throughput stays bounded by one node. Rejected: can't meet the scaling goal.
+Only run one compaction process per instance of SlateDb, either embedded or standalone.  
+**Rejected:** Can't meet the scaling goal. Introduces complexity around offloading compute from embedded to standalone-compactor at runtime (see [PR #1529](https://github.com/slatedb/slatedb/pull/1529)).
+
 
 ### Peer-to-peer leader election via object store
 
-All compactors are peers; optimistic concurrency on a numbered file elects a leader to run the scheduler. Rejected: Adds complexity around leader transitions and scheduler handoff. Could be a future evolution.
+All compactors are peers; optimistic concurrency on a numbered file elects a leader to run the scheduler.  
+**Rejected:** Adds complexity around leader transitions and scheduler handoff. Could be a future evolution.
 
 ### chitchat for work distribution/discovery
 
-Use gossip to distribute jobs directly. Rejected: couples correctness to gossip consistency; chitchat is better as an optional discovery/health layer.
+Use gossip to distribute jobs directly.  
+**Rejected:** couples correctness to gossip consistency; chitchat is better as an optional discovery/health layer.
 
 ## Open Questions
 
