@@ -1613,7 +1613,6 @@ impl Db {
         };
         Ok(object_store)
     }
-
 }
 
 #[async_trait::async_trait]

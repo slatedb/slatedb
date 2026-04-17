@@ -1056,7 +1056,6 @@ impl DbReader {
 
         Ok(())
     }
-
 }
 
 #[async_trait::async_trait]
