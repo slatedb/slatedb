@@ -1,3 +1,6 @@
+pub use crate::db::builder::CloneBuilder;
+pub use crate::db::builder::CloneSourceSpec;
+
 use crate::checkpoint::{Checkpoint, CheckpointCreateResult};
 use crate::compactions_store::CompactionsStore;
 use crate::compactor::{Compaction, CompactionSpec, Compactor, CompactorStateView};
@@ -5,29 +8,28 @@ use crate::compactor_state::VersionedCompactions;
 use crate::compactor_state_protocols::CompactorStateReader;
 use crate::config::{CheckpointOptions, GarbageCollectorOptions};
 use crate::db::builder::GarbageCollectorBuilder;
-use crate::db_state::VersionedManifest;
 use crate::dispatcher::MessageHandlerExecutor;
 use crate::error::SlateDBError;
 use crate::garbage_collector::GC_TASK_NAME;
 use crate::manifest::store::{ManifestStore, StoredManifest};
+use crate::manifest::VersionedManifest;
 use slatedb_common::clock::SystemClock;
 
-use crate::clone;
 use crate::db_status::ClosedResultWriter;
 use crate::object_stores::{ObjectStoreType, ObjectStores};
 use crate::rand::DbRand;
 use crate::seq_tracker::FindOption;
 use crate::utils::IdGenerator;
 use crate::utils::WatchableOnceCell;
+use bytes::Bytes;
 use chrono::{DateTime, Utc};
-use fail_parallel::FailPointRegistry;
 use object_store::path::Path;
 use object_store::ObjectStore;
 use rand::RngCore;
 use std::env;
 use std::env::VarError;
 use std::error::Error;
-use std::ops::RangeBounds;
+use std::ops::{Bound, RangeBounds};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::runtime::Handle;
@@ -80,10 +82,7 @@ impl Admin {
                 .await?
                 .map(|manifest| VersionedManifest::from_manifest(id, manifest))
         } else {
-            manifest_store
-                .try_read_latest_manifest()
-                .await?
-                .map(|(id, manifest)| VersionedManifest::from_manifest(id, manifest))
+            manifest_store.try_read_latest_manifest().await?
         };
 
         Ok(manifest)
@@ -129,10 +128,7 @@ impl Admin {
                 .await?
                 .map(|compactions| VersionedCompactions::from_compactions(id, compactions))
         } else {
-            compactions_store
-                .try_read_latest_compactions()
-                .await?
-                .map(|(id, compactions)| VersionedCompactions::from_compactions(id, compactions))
+            compactions_store.try_read_latest_compactions().await?
         };
 
         Ok(compactions)
@@ -161,7 +157,7 @@ impl Admin {
             compactions_store
                 .try_read_latest_compactions()
                 .await?
-                .map(|(_id, compactions)| compactions)
+                .map(|compactions| compactions.compactions)
         };
         let Some(compactions) = compactions else {
             return Ok(None);
@@ -239,7 +235,7 @@ impl Admin {
             &self.path,
             self.object_stores.store_of(ObjectStoreType::Main).clone(),
         );
-        let (_, manifest) = manifest_store.read_latest_manifest().await?;
+        let manifest = manifest_store.read_latest_manifest().await?.manifest;
 
         let checkpoints = match name_filter {
             Some("") => manifest
@@ -502,7 +498,7 @@ impl Admin {
         let manifest_store = self.manifest_store();
 
         let id_manifest = manifest_store.try_read_latest_manifest().await?;
-        let Some((_id, manifest)) = id_manifest else {
+        let Some(manifest) = id_manifest else {
             return Ok(None);
         };
 
@@ -511,7 +507,7 @@ impl Admin {
         } else {
             FindOption::RoundDown
         };
-        Ok(manifest.core.sequence_tracker.find_ts(seq, opt))
+        Ok(manifest.core().sequence_tracker.find_ts(seq, opt))
     }
 
     /// Returns the sequence for a given timestamp from the latest manifest's sequence tracker.
@@ -524,7 +520,7 @@ impl Admin {
         let manifest_store = self.manifest_store();
 
         let id_manifest = manifest_store.try_read_latest_manifest().await?;
-        let Some((_id, manifest)) = id_manifest else {
+        let Some(manifest) = id_manifest else {
             return Ok(None);
         };
 
@@ -533,7 +529,7 @@ impl Admin {
         } else {
             FindOption::RoundDown
         };
-        Ok(manifest.core.sequence_tracker.find_seq(ts, opt))
+        Ok(manifest.core().sequence_tracker.find_seq(ts, opt))
     }
 
     fn manifest_store(&self) -> ManifestStore {
@@ -550,18 +546,13 @@ impl Admin {
         )
     }
 
-    /// Clone a database. If no db already exists at the specified path, then this will create
-    /// a new db under the path that is a clone of the db at parent_path.
+    /// Clone a database using a builder pattern. If no db already exists at the specified path,
+    /// then this will create a new db under the path that is a clone of the db at parent_path.
     ///
     /// A clone is a shallow copy of the parent database - it starts with a manifest that
     /// references the same SSTs, but doesn't actually copy those SSTs, except for the WAL.
     /// New writes will be written to the newly created db and will not be reflected in the
     /// parent database.
-    ///
-    /// The clone can optionally be created from an existing checkpoint. If
-    /// `parent_checkpoint` is present, then the referenced manifest is used
-    /// as the base for the clone db's manifest. Otherwise, this method creates a new checkpoint
-    /// for the current version of the parent db.
     ///
     /// # Examples
     ///
@@ -580,31 +571,26 @@ impl Admin {
     ///    db.close().await?;
     ///
     ///    let admin = AdminBuilder::new("clone_path", object_store).build();
-    ///    admin.create_clone(
-    ///      "parent_path",
-    ///      None,
-    ///    ).await?;
+    ///    admin.create_clone_builder("parent_path", None).build().await?;
     ///
     ///    Ok(())
     /// }
     /// ```
-    pub async fn create_clone<P: Into<Path>>(
+    pub fn create_clone_builder<P: Into<Path>>(
         &self,
         parent_path: P,
         parent_checkpoint: Option<Uuid>,
-    ) -> Result<(), Box<dyn Error>> {
-        clone::create_clone(
+    ) -> CloneBuilder<(Bound<Bytes>, Bound<Bytes>)> {
+        let source = match parent_checkpoint {
+            Some(cp) => CloneSourceSpec::with_checkpoint(parent_path, cp),
+            None => CloneSourceSpec::new(parent_path),
+        };
+        CloneBuilder::new(
             self.path.clone(),
-            parent_path.into(),
+            source,
             self.object_stores.store_of(ObjectStoreType::Main).clone(),
-            self.object_stores.store_of(ObjectStoreType::Wal).clone(),
-            parent_checkpoint,
-            Arc::new(FailPointRegistry::new()),
-            self.system_clock.clone(),
-            self.rand.clone(),
         )
-        .await?;
-        Ok(())
+        .with_wal_object_store(self.object_stores.store_of(ObjectStoreType::Wal).clone())
     }
 
     /// Creates a new builder for an admin client at the given path.
@@ -769,8 +755,8 @@ mod tests {
     use crate::admin::{load_object_store_from_env, AdminBuilder};
     use crate::compactions_store::{CompactionsStore, StoredCompactions};
     use crate::compactor_state::{Compaction, CompactionSpec, CompactionStatus, SourceId};
-    use crate::db_state::ManifestCore;
     use crate::manifest::store::{ManifestStore, StoredManifest};
+    use crate::manifest::ManifestCore;
     use object_store::memory::InMemory;
     use object_store::path::Path;
     use object_store::ObjectStore;
@@ -839,10 +825,10 @@ mod tests {
             .unwrap()
             .expect("expected manifest");
         assert_eq!(latest.id, 2);
-        assert_eq!(latest.writer_epoch, 3);
-        assert_eq!(latest.compactor_epoch, 5);
-        assert_eq!(latest.manifest.next_wal_sst_id, 17);
-        assert_eq!(latest.manifest.last_l0_seq, 9);
+        assert_eq!(latest.manifest.writer_epoch, 3);
+        assert_eq!(latest.manifest.compactor_epoch, 5);
+        assert_eq!(latest.manifest.core.next_wal_sst_id, 17);
+        assert_eq!(latest.manifest.core.last_l0_seq, 9);
 
         let first = admin
             .read_manifest(Some(1))
@@ -850,10 +836,10 @@ mod tests {
             .unwrap()
             .expect("expected manifest");
         assert_eq!(first.id, 1);
-        assert_eq!(first.writer_epoch, 0);
-        assert_eq!(first.compactor_epoch, 0);
-        assert_eq!(first.manifest.next_wal_sst_id, 1);
-        assert_eq!(first.manifest.last_l0_seq, 0);
+        assert_eq!(first.manifest.writer_epoch, 0);
+        assert_eq!(first.manifest.compactor_epoch, 0);
+        assert_eq!(first.manifest.core.next_wal_sst_id, 1);
+        assert_eq!(first.manifest.core.last_l0_seq, 0);
     }
 
     #[tokio::test]
@@ -892,19 +878,19 @@ mod tests {
         );
         assert_eq!(
             all.iter()
-                .map(|manifest| manifest.manifest.last_l0_seq)
+                .map(|manifest| manifest.manifest.core.last_l0_seq)
                 .collect::<Vec<_>>(),
             vec![0, 10, 20]
         );
         assert_eq!(
             all.iter()
-                .map(|manifest| manifest.writer_epoch)
+                .map(|manifest| manifest.manifest.writer_epoch)
                 .collect::<Vec<_>>(),
             vec![0, 2, 3]
         );
         assert_eq!(
             all.iter()
-                .map(|manifest| manifest.compactor_epoch)
+                .map(|manifest| manifest.manifest.compactor_epoch)
                 .collect::<Vec<_>>(),
             vec![0, 4, 6]
         );
@@ -965,8 +951,8 @@ mod tests {
             .expect("expected compactions");
         let expected_latest = compactions_store.read_compactions(2).await.unwrap();
         assert_eq!(latest.id, 2);
-        assert_eq!(latest.compactor_epoch, 9);
-        assert_eq!(latest.compactions, expected_latest.core);
+        assert_eq!(latest.compactions.compactor_epoch, 9);
+        assert_eq!(latest.compactions, expected_latest);
 
         let first = admin
             .read_compactions(Some(1))
@@ -975,8 +961,8 @@ mod tests {
             .expect("expected compactions");
         let expected_first = compactions_store.read_compactions(1).await.unwrap();
         assert_eq!(first.id, 1);
-        assert_eq!(first.compactor_epoch, 7);
-        assert_eq!(first.compactions, expected_first.core);
+        assert_eq!(first.compactions.compactor_epoch, 7);
+        assert_eq!(first.compactions, expected_first);
     }
 
     #[tokio::test]
@@ -1011,14 +997,14 @@ mod tests {
         assert_eq!(
             listed
                 .iter()
-                .map(|compactions| compactions.compactions.recent_compactions().count())
+                .map(|compactions| compactions.compactions.core.recent_compactions().count())
                 .collect::<Vec<_>>(),
             vec![0, 1, 2]
         );
         assert_eq!(
             listed
                 .iter()
-                .map(|compactions| compactions.compactor_epoch)
+                .map(|compactions| compactions.compactions.compactor_epoch)
                 .collect::<Vec<_>>(),
             vec![2, 4, 6]
         );
@@ -1138,5 +1124,34 @@ mod tests {
             .build();
 
         assert!(admin.compaction_filter_supplier.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_create_clone_builder() {
+        use crate::manifest::store::ManifestStore;
+        use crate::Db;
+
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let parent_path = Path::from("/tmp/test_parent");
+        let clone_path = Path::from("/tmp/test_clone");
+
+        let parent_db = Db::open(parent_path.clone(), object_store.clone())
+            .await
+            .unwrap();
+        parent_db.close().await.unwrap();
+
+        let admin = AdminBuilder::new(clone_path.clone(), object_store.clone()).build();
+
+        // Test basic builder without checkpoint
+        admin
+            .create_clone_builder(parent_path.clone(), None)
+            .build()
+            .await
+            .expect("clone should succeed");
+
+        // Verify clone was created
+        let clone_manifest_store = ManifestStore::new(&clone_path, object_store.clone());
+        let manifest = clone_manifest_store.read_latest_manifest().await;
+        assert!(manifest.is_ok(), "cloned manifest should exist");
     }
 }

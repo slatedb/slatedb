@@ -5,9 +5,8 @@ use crate::compactor::{CompactionScheduler, CompactionSchedulerSupplier};
 use crate::compactor_state::{CompactionSpec, SourceId};
 use crate::compactor_state_protocols::CompactorStateView;
 use crate::config::{CompactorOptions, SizeTieredCompactionSchedulerOptions};
-use crate::db_state::ManifestCore;
-
 use crate::error::Error;
+use crate::manifest::ManifestCore;
 use log::warn;
 
 const DEFAULT_MAX_CONCURRENT_COMPACTIONS: usize = 4;
@@ -178,12 +177,12 @@ impl Default for SizeTieredCompactionScheduler {
 impl CompactionScheduler for SizeTieredCompactionScheduler {
     fn propose(&self, state: &CompactorStateView) -> Vec<CompactionSpec> {
         let mut compactions = Vec::new();
-        let db_state = state.manifest();
+        let db_state = state.manifest().core();
         let (l0, srs) = self.compaction_sources(db_state);
         let active_compactions = state
             .compactions()
             .into_iter()
-            .flat_map(|c| c.recent_compactions())
+            .flat_map(|c| c.core().recent_compactions())
             .filter(|c| c.active())
             .collect::<Vec<_>>();
         let conflict_checker = ConflictChecker::new(active_compactions.iter().map(|j| j.spec()));
@@ -213,12 +212,14 @@ impl CompactionScheduler for SizeTieredCompactionScheduler {
         // Logical order of sources: [L0 (newest → oldest), then SRs (highest id → 0)]
         let sources_logical_order: Vec<SourceId> = state
             .manifest()
+            .core()
             .l0
             .iter()
             .map(|view| SourceId::SstView(view.id))
             .chain(
                 state
                     .manifest()
+                    .core()
                     .compacted
                     .iter()
                     .map(|sr| SourceId::SortedRun(sr.id)),
@@ -429,11 +430,10 @@ mod tests {
         Compaction, CompactionSpec, Compactions, CompactorState, SourceId,
     };
     use crate::config::{CompactorOptions, SizeTieredCompactionSchedulerOptions};
-    use crate::db_state::{
-        ManifestCore, SortedRun, SsTableHandle, SsTableId, SsTableInfo, SsTableView,
-    };
+    use crate::db_state::{SortedRun, SsTableHandle, SsTableId, SsTableInfo, SsTableView};
     use crate::format::sst::SST_FORMAT_VERSION_LATEST;
     use crate::manifest::store::test_utils::new_dirty_manifest;
+    use crate::manifest::ManifestCore;
     use crate::seq_tracker::SequenceTracker;
     use crate::size_tiered_compaction::{
         SizeTieredCompactionScheduler, SizeTieredCompactionSchedulerSupplier,

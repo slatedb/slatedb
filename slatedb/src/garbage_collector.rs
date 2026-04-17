@@ -328,8 +328,11 @@ mod tests {
     use crate::format::sst::SsTableFormat;
     use crate::utils::WatchableOnceCell;
     use crate::{
-        db_state::{ManifestCore, SortedRun, SsTableHandle, SsTableId, SsTableView},
-        manifest::store::{ManifestStore, StoredManifest},
+        db_state::{SortedRun, SsTableHandle, SsTableId, SsTableView},
+        manifest::{
+            store::{ManifestStore, StoredManifest},
+            ManifestCore,
+        },
         tablestore::TableStore,
     };
 
@@ -623,15 +626,14 @@ mod tests {
 
         // The GC should create a new manifest version 4 with the expired
         // checkpoint removed.
-        let (latest_manifest_id, latest_manifest) =
-            manifest_store.read_latest_manifest().await.unwrap();
-        assert_eq!(4, latest_manifest_id);
-        assert_eq!(1, latest_manifest.core.checkpoints.len());
+        let latest_manifest = manifest_store.read_latest_manifest().await.unwrap();
+        assert_eq!(4, latest_manifest.id);
+        assert_eq!(1, latest_manifest.manifest.core.checkpoints.len());
         assert_eq!(
             unexpired_checkpoint_id,
-            latest_manifest.core.checkpoints[0].id
+            latest_manifest.manifest.core.checkpoints[0].id
         );
-        assert_eq!(2, latest_manifest.core.checkpoints[0].manifest_id);
+        assert_eq!(2, latest_manifest.manifest.core.checkpoints[0].manifest_id);
 
         // Only the latest manifest and the one referenced by the unexpired checkpoint
         // should be retained.
@@ -690,12 +692,14 @@ mod tests {
         .await;
 
         // Verify that the latest manifest version is still 4 with the active checkpoint
-        let (latest_manifest_id, latest_manifest) =
-            manifest_store.read_latest_manifest().await.unwrap();
-        assert_eq!(4, latest_manifest_id);
-        assert_eq!(1, latest_manifest.core.checkpoints.len());
-        assert_eq!(active_checkpoint_id, latest_manifest.core.checkpoints[0].id);
-        assert_eq!(1, latest_manifest.core.checkpoints[0].manifest_id);
+        let latest_manifest = manifest_store.read_latest_manifest().await.unwrap();
+        assert_eq!(4, latest_manifest.id);
+        assert_eq!(1, latest_manifest.manifest.core.checkpoints.len());
+        assert_eq!(
+            active_checkpoint_id,
+            latest_manifest.manifest.core.checkpoints[0].id
+        );
+        assert_eq!(1, latest_manifest.manifest.core.checkpoints[0].manifest_id);
 
         // The active manifest and the manifest corresponding to the active
         // checkpoint should be retained. The rest should be deleted.
@@ -808,9 +812,9 @@ mod tests {
         assert_eq!(wal_ssts[0].last_modified, now_minus_24h);
         let manifests = manifest_store.list_manifests(..).await.unwrap();
         assert_eq!(manifests.len(), 1);
-        let current_manifest = manifest_store.read_latest_manifest().await.unwrap().1;
+        let current_manifest = manifest_store.read_latest_manifest().await.unwrap();
         assert_eq!(
-            current_manifest.core.replay_after_wal_id,
+            current_manifest.manifest.core.replay_after_wal_id,
             id2.unwrap_wal_id()
         );
 
@@ -945,9 +949,9 @@ mod tests {
         assert_eq!(wal_ssts[1].last_modified, now_minus_24h_2);
         let manifests = manifest_store.list_manifests(..).await.unwrap();
         assert_eq!(manifests.len(), 1);
-        let current_manifest = manifest_store.read_latest_manifest().await.unwrap().1;
+        let current_manifest = manifest_store.read_latest_manifest().await.unwrap();
         assert_eq!(
-            current_manifest.core.replay_after_wal_id,
+            current_manifest.manifest.core.replay_after_wal_id,
             id2.unwrap_wal_id()
         );
 
@@ -1042,10 +1046,13 @@ mod tests {
         }
         let manifests = manifest_store.list_manifests(..).await.unwrap();
         assert_eq!(manifests.len(), 1);
-        let current_manifest = manifest_store.read_latest_manifest().await.unwrap().1;
-        assert_eq!(current_manifest.core.l0.len(), 2);
-        assert_eq!(current_manifest.core.compacted.len(), 1);
-        assert_eq!(current_manifest.core.compacted[0].sst_views.len(), 2);
+        let current_manifest = manifest_store.read_latest_manifest().await.unwrap();
+        assert_eq!(current_manifest.manifest.core.l0.len(), 2);
+        assert_eq!(current_manifest.manifest.core.compacted.len(), 1);
+        assert_eq!(
+            current_manifest.manifest.core.compacted[0].sst_views.len(),
+            2
+        );
 
         // Start the garbage collector
         run_gc_once(
@@ -1074,10 +1081,13 @@ mod tests {
         // Deleted SSTs
         assert!(!remaining_ids.contains(&inactive_expired_l0_sst_handle.id));
         assert!(!remaining_ids.contains(&inactive_expired_sst_handle.id));
-        let current_manifest = manifest_store.read_latest_manifest().await.unwrap().1;
-        assert_eq!(current_manifest.core.l0.len(), 2);
-        assert_eq!(current_manifest.core.compacted.len(), 1);
-        assert_eq!(current_manifest.core.compacted[0].sst_views.len(), 2);
+        let current_manifest = manifest_store.read_latest_manifest().await.unwrap();
+        assert_eq!(current_manifest.manifest.core.l0.len(), 2);
+        assert_eq!(current_manifest.manifest.core.compacted.len(), 1);
+        assert_eq!(
+            current_manifest.manifest.core.compacted[0].sst_views.len(),
+            2
+        );
     }
 
     /// This test creates six compacted SSTs:
@@ -1266,9 +1276,9 @@ mod tests {
         manifest_store: Arc<ManifestStore>,
         table_store: Arc<TableStore>,
     ) {
-        let (manifest_id, manifest) = manifest_store.read_latest_manifest().await.unwrap();
+        let manifest = manifest_store.read_latest_manifest().await.unwrap();
         let manifests = manifest_store
-            .read_referenced_manifests(manifest_id, &manifest)
+            .read_referenced_manifests(manifest.id, &manifest.manifest)
             .await
             .unwrap();
 

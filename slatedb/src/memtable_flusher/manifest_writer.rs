@@ -793,11 +793,12 @@ mod tests {
     use super::{ManifestWriter, TrackerMessage};
     use crate::config::{CheckpointOptions, Settings};
     use crate::db::DbInner;
-    use crate::db_state::{ManifestCore, SsTableId};
+    use crate::db_state::SsTableId;
     use crate::db_status::{ClosedResultWriter, DbStatusManager};
     use crate::error::SlateDBError;
     use crate::format::sst::SsTableFormat;
     use crate::manifest::store::{FenceableManifest, ManifestStore, StoredManifest};
+    use crate::manifest::ManifestCore;
     use crate::memtable_flusher::uploader::UploadedMemtable;
     use crate::object_stores::ObjectStores;
     use crate::paths::PathResolver;
@@ -1008,8 +1009,8 @@ mod tests {
         object_store: Arc<dyn ObjectStore>,
     ) -> usize {
         let manifest_store = ManifestStore::new(&Path::from(path), object_store);
-        let (_, manifest) = manifest_store.read_latest_manifest().await.unwrap();
-        manifest.core.checkpoints.len()
+        let manifest = manifest_store.read_latest_manifest().await.unwrap();
+        manifest.manifest.core.checkpoints.len()
     }
 
     fn freeze_imm(
