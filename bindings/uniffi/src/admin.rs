@@ -8,9 +8,10 @@ use crate::types::{
     Checkpoint, Compaction, CompactorStateView, VersionedCompactions, VersionedManifest,
 };
 
-type U64Bounds = (Bound<u64>, Bound<u64>);
-
-fn into_u64_bounds(from: Option<u64>, to: Option<u64>) -> Result<U64Bounds, SlateDbError> {
+fn into_u64_bounds(
+    from: Option<u64>,
+    to: Option<u64>,
+) -> Result<(Bound<u64>, Bound<u64>), SlateDbError> {
     Ok((
         from.map_or(Bound::Unbounded, Bound::Included),
         to.map_or(Bound::Unbounded, Bound::Excluded),
