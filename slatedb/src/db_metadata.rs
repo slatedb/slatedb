@@ -15,18 +15,20 @@ pub trait DbMetadataOps {
     /// with its manifest version ID.
     fn manifest(&self) -> VersionedManifest;
 
-    /// Subscribe to status changes.
+    /// Subscribe to database state changes.
     ///
     /// Returns a [`tokio::sync::watch::Receiver<DbStatus>`] that always
-    /// reflects the latest status. The status includes the latest durable
+    /// reflects the latest database status. The status includes the latest durable
     /// sequence number and the current manifest snapshot observed by this
-    /// handle. For example, you can wait for a specific sequence number to
+    /// handle. For [`Db`](crate::Db) is is the current in-memory snapshot and
+    /// for [`DbReader`](crate::DbReader) it is the latest manifest polled from object storage.
+    /// For example, you can wait for a specific sequence number to
     /// become durable:
     ///
     /// ```ignore
     /// let seq = 42; // sequence number from a write operation
-    /// let mut rx = handle.subscribe();
-    /// rx.wait_for(|s| s.durable_seq >= seq).await.expect("handle dropped");
+    /// let mut rx = db.subscribe();
+    /// rx.wait_for(|s| s.durable_seq >= seq).await.expect("db dropped");
     /// ```
     ///
     /// # Deadlock risk
@@ -35,8 +37,8 @@ pub trait DbMetadataOps {
     /// borrowed (via [`borrow`](tokio::sync::watch::Receiver::borrow),
     /// [`borrow_and_update`](tokio::sync::watch::Receiver::borrow_and_update),
     /// or the guard returned by [`wait_for`](tokio::sync::watch::Receiver::wait_for)).
-    /// A write lock must be acquired to publish new status updates.
-    /// Holding the read guard for an extended period will block all status
+    /// The database must acquire a write lock to publish new status updates.
+    /// Holding the read guard for an extended period will block all database status
     /// updates and may cause a deadlock. See the [deadlock warning in
     /// `Receiver::borrow`](https://docs.rs/tokio/latest/tokio/sync/watch/struct.Receiver.html#method.borrow)
     /// for details. Always clone or copy the data you need:
