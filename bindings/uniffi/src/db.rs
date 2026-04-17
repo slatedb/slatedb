@@ -1,5 +1,7 @@
 use std::sync::Arc;
 
+use slatedb::DbMetadataOps;
+
 use crate::config::{
     FlushOptions, IsolationLevel, MergeOptions, PutOptions, ReadOptions, ScanOptions, WriteOptions,
 };

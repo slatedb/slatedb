@@ -10,7 +10,7 @@
 //! ```
 //! use slatedb::config::{FlushOptions, FlushType, PutOptions, WriteOptions};
 //! use slatedb::object_store::memory::InMemory;
-//! use slatedb::{Db, SstReader};
+//! use slatedb::{Db, DbMetadataOps, SstReader};
 //! use std::sync::Arc;
 //!
 //! #[tokio::main]
@@ -214,7 +214,7 @@ mod tests {
     use super::*;
     use crate::config::{FlushOptions, FlushType, PutOptions, SstBlockSize, WriteOptions};
     use crate::test_utils::StringConcatMergeOperator;
-    use crate::Db;
+    use crate::{Db, DbMetadataOps};
     use object_store::memory::InMemory;
 
     /// Helper: create a DB with 10 puts, 3 deletes, and 2 merges, flush to

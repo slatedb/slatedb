@@ -435,6 +435,7 @@ mod tests {
     };
     use crate::db::builder::CloneSourceSpec;
     use crate::db::Db;
+    use crate::db_metadata::DbMetadataOps;
     use crate::db_state::SsTableId;
     use crate::error::SlateDBError;
     use crate::manifest::store::{ManifestStore, StoredManifest};

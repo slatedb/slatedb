@@ -22,6 +22,7 @@
 
 pub use crate::db_status::DbStatus;
 
+use crate::db_metadata::DbMetadataOps;
 use std::ops::RangeBounds;
 use std::sync::Arc;
 
@@ -1530,14 +1531,6 @@ impl Db {
         self.inner.flush(options, true).await.map_err(Into::into)
     }
 
-    /// Get the current manifest state.
-    ///
-    /// This returns the in-memory manifest snapshot currently held by the `Db`,
-    /// paired with its manifest version ID.
-    pub fn manifest(&self) -> VersionedManifest {
-        self.inner.manifest()
-    }
-
     /// Refresh the manifest immediately and wait for it to complete.
     ///
     /// The database normally refreshes its manifest on a background timer
@@ -1560,50 +1553,6 @@ impl Db {
             .refresh_manifest()
             .await
             .map_err(Into::into)
-    }
-
-    /// Subscribe to database state changes.
-    ///
-    /// Returns a [`tokio::sync::watch::Receiver<DbStatus>`] that always
-    /// reflects the latest database status. The status includes the latest
-    /// durable sequence number and the current in-memory manifest snapshot
-    /// observed by this handle. For example, you can wait for a specific
-    /// sequence number to become durable:
-    ///
-    /// ```ignore
-    /// let seq = 42; // sequence number from a write operation
-    /// let mut rx = db.subscribe();
-    /// rx.wait_for(|s| s.durable_seq >= seq).await.expect("db dropped");
-    /// ```
-    ///
-    /// # Deadlock risk
-    ///
-    /// The returned receiver holds a read lock on the current value while
-    /// borrowed (via [`borrow`](tokio::sync::watch::Receiver::borrow),
-    /// [`borrow_and_update`](tokio::sync::watch::Receiver::borrow_and_update),
-    /// or the guard returned by [`wait_for`](tokio::sync::watch::Receiver::wait_for)).
-    /// The database must acquire a write lock to publish new status updates.
-    /// Holding the read guard for an extended period will block all database
-    /// status updates and may cause a deadlock. See the [deadlock warning in
-    /// `Receiver::borrow`](https://docs.rs/tokio/latest/tokio/sync/watch/struct.Receiver.html#method.borrow)
-    /// for details. Always clone or copy the data you need:
-    ///
-    /// ```ignore
-    /// // Good: clone the status and release the lock immediately.
-    /// let status = rx.borrow().clone();
-    /// some_async_fn(status.durable_seq).await;
-    /// some_other_async_fn(status.current_manifest.clone()).await;
-    ///
-    /// // Good: copy the durable seq and releate the lock immediately.
-    /// let durable_seq = rx.borrow().durable_seq; // uses Copy trait
-    /// some_async_fn(durable_seq).await;
-    ///
-    /// // Bad: holding the status across an await blocks all senders.
-    /// let status = rx.borrow();
-    /// some_async_fn(status.durable_seq).await; // deadlock!
-    /// ```
-    pub fn subscribe(&self) -> tokio::sync::watch::Receiver<DbStatus> {
-        self.inner.status_manager.subscribe()
     }
 
     /// Begin a new transaction with the specified isolation level.
@@ -1665,13 +1614,6 @@ impl Db {
         Ok(object_store)
     }
 
-    /// Returns the latest database status.
-    ///
-    /// This is a snapshot of the current state and will not update automatically.
-    /// Use [`subscribe`](Db::subscribe) to receive real-time updates.
-    pub fn status(&self) -> DbStatus {
-        self.inner.status()
-    }
 }
 
 #[async_trait::async_trait]
@@ -1707,15 +1649,15 @@ impl DbRead for Db {
 
 impl crate::db_metadata::DbMetadataOps for Db {
     fn manifest(&self) -> VersionedManifest {
-        self.manifest()
+        self.inner.manifest()
     }
 
     fn subscribe(&self) -> tokio::sync::watch::Receiver<DbStatus> {
-        self.subscribe()
+        self.inner.status_manager.subscribe()
     }
 
     fn status(&self) -> DbStatus {
-        self.status()
+        self.inner.status()
     }
 }
 

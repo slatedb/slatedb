@@ -1056,31 +1056,6 @@ impl DbReader {
         Ok(())
     }
 
-    /// Subscribe to database status changes.
-    ///
-    /// See [`Db::subscribe`](crate::Db::subscribe) for full semantics and
-    /// deadlock warnings. The `durable_seq` and `current_manifest` fields are
-    /// updated whenever the reader's current checkpoint/manifest view changes
-    /// or it replays additional durable WAL data.
-    pub fn subscribe(&self) -> tokio::sync::watch::Receiver<DbStatus> {
-        self.inner.status_manager.subscribe()
-    }
-
-    /// Returns the latest reader status snapshot.
-    ///
-    /// See [`Db::status`](crate::Db::status) for full semantics.
-    pub fn status(&self) -> DbStatus {
-        self.inner.status()
-    }
-
-    /// Get the current manifest state.
-    ///
-    /// This returns the reader's current manifest snapshot, paired with its
-    /// manifest version ID.
-    pub fn manifest(&self) -> VersionedManifest {
-        let state = Arc::clone(&self.inner.state.read());
-        VersionedManifest::from(state.as_ref())
-    }
 }
 
 #[async_trait::async_trait]
@@ -1116,15 +1091,16 @@ impl DbRead for DbReader {
 
 impl crate::db_metadata::DbMetadataOps for DbReader {
     fn manifest(&self) -> VersionedManifest {
-        self.manifest()
+        let state = Arc::clone(&self.inner.state.read());
+        VersionedManifest::from(state.as_ref())
     }
 
     fn subscribe(&self) -> tokio::sync::watch::Receiver<DbStatus> {
-        self.subscribe()
+        self.inner.status_manager.subscribe()
     }
 
     fn status(&self) -> DbStatus {
-        self.status()
+        self.inner.status()
     }
 }
 
@@ -1173,7 +1149,7 @@ mod tests {
     use crate::store_provider::StoreProvider;
     use crate::tablestore::TableStore;
     use crate::types::RowEntry;
-    use crate::{error::SlateDBError, test_utils, CloseReason, Db};
+    use crate::{error::SlateDBError, test_utils, CloseReason, Db, DbMetadataOps};
     use bytes::Bytes;
     use fail_parallel::FailPointRegistry;
     use object_store::memory::InMemory;
