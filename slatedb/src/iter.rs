@@ -4,7 +4,7 @@ use crate::error::SlateDBError;
 use crate::types::RowEntry;
 
 #[derive(Clone, Copy, Debug)]
-pub(crate) enum IterationOrder {
+pub enum IterationOrder {
     Ascending,
     Descending,
 }

@@ -160,8 +160,9 @@ pub(crate) struct ImmutableMemtable {
     /// that already contained in the last L0 SST.
     recent_flushed_wal_id: u64,
     table: Arc<KVTable>,
-    /// This flushed watchable cell is useful for users who enable `await_durable` on the writes.
-    flushed: WatchableOnceCell<Result<(), SlateDBError>>,
+    /// Notified when the memtable's SST has been uploaded to object storage.
+    /// Used to release backpressure on writers when unflushed bytes are too high.
+    uploaded: WatchableOnceCell<Result<(), SlateDBError>>,
     /// A snapshot of the sequence tracker taken when this immutable memtable was created.
     /// This avoids needing to access the sequence tracker through a mutex on the underlying table.
     sequence_tracker: SequenceTracker,
@@ -176,6 +177,11 @@ pub(crate) struct MemTableIteratorInner<T: RangeBounds<SequencedKey>> {
     inner: Range<'this, SequencedKey, T, SequencedKey, RowEntry>,
     ordering: IterationOrder,
     item: Option<RowEntry>,
+    /// Stack used in descending mode to re-order entries within a key group.
+    /// When iterating descending, `next_back()` yields entries for the same key
+    /// in seq-ascending order. Pushing them onto this stack and popping gives
+    /// seq-descending order, which is what the merge iterator needs for dedup.
+    descending_stack: Vec<RowEntry>,
 }
 pub(crate) type MemTableIterator = MemTableIteratorInner<KVTableInternalKeyRange>;
 
@@ -203,16 +209,70 @@ impl RowEntryIterator for MemTableIterator {
 
 impl MemTableIterator {
     pub(crate) fn next_sync(&mut self) -> Option<RowEntry> {
-        let ans = self.borrow_item().clone();
-        let next_entry = match self.borrow_ordering() {
-            IterationOrder::Ascending => self.with_inner_mut(|inner| inner.next()),
-            IterationOrder::Descending => self.with_inner_mut(|inner| inner.next_back()),
-        };
+        match self.borrow_ordering() {
+            IterationOrder::Ascending => self.next_ascending(),
+            IterationOrder::Descending => self.next_descending(),
+        }
+    }
 
+    fn next_ascending(&mut self) -> Option<RowEntry> {
+        let ans = self.borrow_item().clone();
+        let next_entry = self.with_inner_mut(|inner| inner.next());
         let cloned_next = next_entry.map(|entry| entry.value().clone());
         self.with_item_mut(|item| *item = cloned_next);
-
         ans
+    }
+
+    fn next_descending(&mut self) -> Option<RowEntry> {
+        // If the stack has entries, pop from it (LIFO gives seq-descending).
+        let top = self.with_descending_stack_mut(|stack| stack.pop());
+        if top.is_some() {
+            return top;
+        }
+
+        // Stack is empty. The current `item` (if any) is the start of a new
+        // key group. Collect all entries for this key from the SkipMap.
+        let first = self.borrow_item().clone();
+        match first {
+            Some(first) => {
+                let current_key = first.key.clone();
+
+                // Collect remaining entries with the same key. next_back()
+                // yields them in seq-ascending order. Pushing onto the stack
+                // and popping gives seq-descending order.
+                self.with_descending_stack_mut(|stack| stack.push(first));
+                self.fill_descending_stack(&current_key);
+
+                self.with_descending_stack_mut(|stack| stack.pop())
+            }
+            None => {
+                // item is None — either iterator is exhausted, or this is the
+                // priming call. Advance inner to populate item for the next call.
+                let next = self
+                    .with_inner_mut(|inner| inner.next_back().map(|entry| entry.value().clone()));
+                self.with_item_mut(|item| *item = next);
+                None
+            }
+        }
+    }
+
+    fn fill_descending_stack(&mut self, current_key: &Bytes) {
+        loop {
+            let next = self.with_inner_mut(|inner| {
+                inner
+                    .next_back()
+                    .map(|entry| (entry.key().user_key.clone(), entry.value().clone()))
+            });
+            match next {
+                Some((key, row)) if key == *current_key => {
+                    self.with_descending_stack_mut(|stack| stack.push(row));
+                }
+                other => {
+                    self.with_item_mut(|item| *item = other.map(|(_, row)| row));
+                    break;
+                }
+            }
+        }
     }
 }
 
@@ -222,7 +282,7 @@ impl ImmutableMemtable {
         Self {
             table: table.table,
             recent_flushed_wal_id,
-            flushed: WatchableOnceCell::new(),
+            uploaded: WatchableOnceCell::new(),
             sequence_tracker,
         }
     }
@@ -235,12 +295,12 @@ impl ImmutableMemtable {
         self.recent_flushed_wal_id
     }
 
-    pub(crate) async fn await_flush_to_l0(&self) -> Result<(), SlateDBError> {
-        self.flushed.reader().await_value().await
+    pub(crate) async fn await_uploaded(&self) -> Result<(), SlateDBError> {
+        self.uploaded.reader().await_value().await
     }
 
-    pub(crate) fn notify_flush_to_l0(&self, result: Result<(), SlateDBError>) {
-        self.flushed.write(result);
+    pub(crate) fn notify_uploaded(&self, result: Result<(), SlateDBError>) {
+        self.uploaded.write(result);
     }
 
     pub(crate) fn sequence_tracker(&self) -> &SequenceTracker {
@@ -335,6 +395,7 @@ impl KVTable {
             inner_builder: |map| map.range(internal_range),
             ordering,
             item: None,
+            descending_stack: Vec::new(),
         }
         .build();
         iterator.next_sync();
@@ -692,5 +753,29 @@ mod tests {
                 },
             )
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_memtable_descending_returns_highest_seq_first_for_same_key() {
+        let table = WritableKVTable::new();
+        table.put(RowEntry::new_value(b"aaaa", b"v1", 0));
+        table.put(RowEntry::new_value(b"bbbb", b"old", 1));
+        table.put(RowEntry::new_value(b"bbbb", b"new", 2));
+        table.put(RowEntry::new_value(b"cccc", b"v3", 3));
+
+        let mut iter = table.table().range(.., IterationOrder::Descending);
+
+        // In descending order, for key "bbbb" the newest version (seq 2) must
+        // come before the older version (seq 1) so that dedup works correctly.
+        assert_iterator(
+            &mut iter,
+            vec![
+                RowEntry::new_value(b"cccc", b"v3", 3),
+                RowEntry::new_value(b"bbbb", b"new", 2),
+                RowEntry::new_value(b"bbbb", b"old", 1),
+                RowEntry::new_value(b"aaaa", b"v1", 0),
+            ],
+        )
+        .await;
     }
 }

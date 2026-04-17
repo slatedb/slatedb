@@ -2,7 +2,7 @@ use crate::batch::WriteBatchIterator;
 use crate::bytes_range::BytesRange;
 use crate::error::SlateDBError;
 use crate::filter_iterator::FilterIterator;
-use crate::iter::{EmptyIterator, RowEntryIterator};
+use crate::iter::{EmptyIterator, IterationOrder, RowEntryIterator};
 use crate::merge_iterator::MergeIterator;
 use crate::merge_operator::{
     MergeOperatorIterator, MergeOperatorRequiredIterator, MergeOperatorType,
@@ -172,17 +172,18 @@ impl ScanIterator {
         mem_iters: impl IntoIterator<Item = Box<dyn RowEntryIterator + 'static>>,
         l0_iters: impl IntoIterator<Item = Box<dyn RowEntryIterator + 'static>>,
         sr_iters: impl IntoIterator<Item = Box<dyn RowEntryIterator + 'static>>,
+        order: IterationOrder,
     ) -> Result<Self, SlateDBError> {
         // wrap each in a merge iterator
         let iters = vec![
             write_batch_iter,
-            Box::new(MergeIterator::new(mem_iters)?),
-            Box::new(MergeIterator::new(l0_iters)?),
-            Box::new(MergeIterator::new(sr_iters)?),
+            Box::new(MergeIterator::new_with_order(mem_iters, order)?),
+            Box::new(MergeIterator::new_with_order(l0_iters, order)?),
+            Box::new(MergeIterator::new_with_order(sr_iters, order)?),
         ];
 
         Ok(Self {
-            delegate: Box::new(MergeIterator::new(iters)?),
+            delegate: Box::new(MergeIterator::new_with_order(iters, order)?),
         })
     }
 }
@@ -220,6 +221,7 @@ impl DbIterator {
         max_seq: Option<u64>,
         range_tracker: Option<Arc<DbIteratorRangeTracker>>,
         merge_operator: Option<MergeOperatorType>,
+        order: IterationOrder,
     ) -> Result<Self, SlateDBError> {
         // The write_batch iterator is provided only when operating within a Transaction. It represents the uncommitted
         // writes made during the transaction. We do not need to apply the max_seq filter to them, because they do
@@ -254,6 +256,7 @@ impl DbIterator {
                 mem_iters,
                 l0_iters,
                 sr_iters,
+                order,
             )?) as Box<dyn RowEntryIterator + 'static>,
         };
 
@@ -418,6 +421,7 @@ mod tests {
             None,
             None,
             None,
+            IterationOrder::Ascending,
         )
         .await
         .unwrap();
@@ -459,6 +463,7 @@ mod tests {
             Some(100),
             None,
             None,
+            IterationOrder::Ascending,
         )
         .await
         .unwrap();
@@ -490,6 +495,7 @@ mod tests {
             None,
             None,
             None,
+            IterationOrder::Ascending,
         )
         .await
         .unwrap();
@@ -526,7 +532,7 @@ mod tests {
         batch.put(b"key3", b"value3");
 
         // Create WriteBatchIterator
-        let wb_iter = WriteBatchIterator::new(batch.clone(), .., IterationOrder::Ascending);
+        let wb_iter = WriteBatchIterator::new(&batch, .., IterationOrder::Ascending);
 
         // Create DbIterator with WriteBatch
         let mem_iters: VecDeque<Box<dyn RowEntryIterator + 'static>> = VecDeque::new();
@@ -539,6 +545,7 @@ mod tests {
             None,
             None,
             None,
+            IterationOrder::Ascending,
         )
         .await
         .unwrap();

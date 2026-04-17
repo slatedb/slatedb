@@ -5,13 +5,14 @@ use std::ops::RangeBounds;
 use std::sync::Arc;
 use uuid::Uuid;
 
-use crate::batch::WriteBatch;
+use crate::batch::{WriteBatch, WriteBatchIterator};
 use crate::bytes_range::BytesRange;
 use crate::config::{MergeOptions, PutOptions, ReadOptions, ScanOptions, WriteOptions};
 use crate::db::DbInner;
 use crate::db::WriteHandle;
 use crate::db_iter::{DbIterator, DbIteratorRangeTracker};
 use crate::error::SlateDBError;
+use crate::iter::IterationOrder;
 use crate::transaction_manager::{IsolationLevel, TransactionManager};
 use crate::types::KeyValue;
 use crate::DbRead;
@@ -138,7 +139,7 @@ impl DbTransaction {
         key: K,
         options: &ReadOptions,
     ) -> Result<Option<KeyValue>, crate::Error> {
-        self.db_inner.status()?;
+        self.db_inner.check_closed()?;
 
         // Track read key for SSI conflict detection if needed
         if self.isolation_level == IsolationLevel::SerializableSnapshot {
@@ -150,10 +151,21 @@ impl DbTransaction {
 
         let db_state = self.db_inner.state.read().view();
 
-        // Clone the WriteBatch for snapshot isolation
-        let write_batch_cloned = self.write_batch.read().clone();
+        // Build the write batch iterator synchronously while holding the read
+        // guard, avoiding a clone of the full batch. The iterator materializes
+        // only the entries overlapping the read range (a single key for a
+        // point get), so this is O(log N) instead of O(N).
+        let key_slice = key.as_ref();
+        let range = BytesRange::from_slice(key_slice..=key_slice);
+        let write_batch_iter = {
+            let guard = self.write_batch.read();
+            Some(WriteBatchIterator::new(
+                &guard,
+                range,
+                IterationOrder::Ascending,
+            ))
+        };
 
-        // For now, delegate to the underlying reader
         let kv = self
             .db_inner
             .reader
@@ -161,7 +173,7 @@ impl DbTransaction {
                 key,
                 options,
                 &db_state,
-                Some(write_batch_cloned),
+                write_batch_iter,
                 Some(self.started_seq),
             )
             .await
@@ -221,21 +233,29 @@ impl DbTransaction {
             None
         };
 
-        self.db_inner.status()?;
+        self.db_inner.check_closed()?;
         let db_state = self.db_inner.state.read().view();
 
-        // Clone the WriteBatch for the scan to ensure that the scan within a transaction
-        // sees a consistent view of the current writes.
-        let write_batch_cloned = self.write_batch.read().clone();
+        // Build the write batch iterator synchronously while holding the read
+        // guard, avoiding a clone of the full batch. The iterator materializes
+        // only the entries in the scan range.
+        let range = BytesRange::from(range);
+        let write_batch_iter = {
+            let guard = self.write_batch.read();
+            Some(WriteBatchIterator::new(
+                &guard,
+                range.clone(),
+                options.order,
+            ))
+        };
 
-        // For now, delegate to the underlying reader
         self.db_inner
             .reader
             .scan_with_options(
-                BytesRange::from(range),
+                range,
                 options,
                 &db_state,
-                Some(write_batch_cloned),
+                write_batch_iter,
                 Some(self.started_seq),
                 range_tracker,
             )
@@ -1672,6 +1692,7 @@ mod tests {
             manifest_update_timeout: std::time::Duration::from_secs(300),
             max_unflushed_bytes: 134_217_728,
             l0_max_ssts: 8,
+            l0_flush_parallelism: 1,
             min_filter_keys,
             filter_bits_per_key: 10,
             l0_sst_size_bytes,

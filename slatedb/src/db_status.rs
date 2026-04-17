@@ -1,8 +1,7 @@
-use std::sync::Arc;
-
 use tokio::sync::watch;
 
 use crate::error::SlateDBError;
+use crate::manifest::VersionedManifest;
 use crate::utils::WatchableOnceCell;
 use crate::CloseReason;
 
@@ -12,28 +11,59 @@ use crate::CloseReason;
 /// always reflects the latest state. When the database is dropped the watch
 /// channel closes and [`changed()`](tokio::sync::watch::Receiver::changed)
 /// returns an error.
-#[derive(Clone, Debug, PartialEq, Default)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct DbStatus {
     /// The durable sequence number. All writes with a sequence number less
     /// than or equal to this value are durably persisted to object storage
     /// and will survive process restarts.
     pub durable_seq: u64,
+    /// The current in-memory manifest snapshot observed by this handle,
+    /// paired with its manifest version ID.
+    pub current_manifest: VersionedManifest,
     /// Set once the database has been closed, indicating the reason.
     pub close_reason: Option<CloseReason>,
 }
 
-#[derive(Clone)]
-pub(crate) struct DbStatusReporter {
+pub(crate) trait ClosedResultWriter: std::fmt::Debug + Send + Sync + 'static {
+    fn write_result(&self, result: Result<(), SlateDBError>);
+    fn result_reader(&self) -> crate::utils::WatchableOnceCellReader<Result<(), SlateDBError>>;
+}
+
+/// Manages database lifecycle status, including the close result and
+/// status subscriptions.
+#[derive(Clone, Debug)]
+pub(crate) struct DbStatusManager {
+    cell: WatchableOnceCell<Result<(), SlateDBError>>,
     tx: watch::Sender<DbStatus>,
 }
 
-impl DbStatusReporter {
+impl DbStatusManager {
+    #[cfg(test)]
     pub(crate) fn new(initial_durable_seq: u64) -> Self {
+        use crate::manifest::Manifest;
+        use crate::manifest::ManifestCore;
+        Self::new_with_manifest(
+            initial_durable_seq,
+            VersionedManifest {
+                id: 1,
+                manifest: Manifest::initial(ManifestCore::new()),
+            },
+        )
+    }
+
+    pub(crate) fn new_with_manifest(
+        initial_durable_seq: u64,
+        initial_manifest: VersionedManifest,
+    ) -> Self {
         let (tx, _) = watch::channel(DbStatus {
             durable_seq: initial_durable_seq,
+            current_manifest: initial_manifest,
             close_reason: None,
         });
-        Self { tx }
+        Self {
+            cell: WatchableOnceCell::new(),
+            tx,
+        }
     }
 
     pub(crate) fn report_durable_seq(&self, seq: u64) {
@@ -47,7 +77,18 @@ impl DbStatusReporter {
         });
     }
 
-    pub(crate) fn report_closed(&self, reason: CloseReason) {
+    pub(crate) fn report_manifest(&self, versioned: VersionedManifest) {
+        self.tx.send_if_modified(|s| {
+            if versioned.id >= s.current_manifest.id && s.current_manifest != versioned {
+                s.current_manifest = versioned;
+                true
+            } else {
+                false
+            }
+        });
+    }
+
+    fn report_closed(&self, reason: CloseReason) {
         self.tx.send_if_modified(|s| {
             if s.close_reason.is_none() {
                 s.close_reason = Some(reason);
@@ -61,50 +102,77 @@ impl DbStatusReporter {
     pub(crate) fn subscribe(&self) -> watch::Receiver<DbStatus> {
         self.tx.subscribe()
     }
-}
 
-type OnCloseCallback = Arc<dyn Fn(CloseReason) + Send + Sync>;
-
-#[derive(Clone)]
-pub(crate) struct ClosedResultWriter {
-    cell: WatchableOnceCell<Result<(), SlateDBError>>,
-    on_close: Option<OnCloseCallback>,
-}
-
-impl std::fmt::Debug for ClosedResultWriter {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ClosedResultWriter")
-            .field("cell", &self.cell)
-            .field("on_close", &self.on_close.as_ref().map(|_| "..."))
-            .finish()
+    pub(crate) fn status(&self) -> DbStatus {
+        self.tx.borrow().clone()
     }
 }
 
-impl ClosedResultWriter {
-    pub(crate) fn new(cell: WatchableOnceCell<Result<(), SlateDBError>>) -> Self {
-        Self {
-            cell,
-            on_close: None,
-        }
+impl ClosedResultWriter for WatchableOnceCell<Result<(), SlateDBError>> {
+    fn write_result(&self, result: Result<(), SlateDBError>) {
+        self.write(result);
     }
 
-    pub(crate) fn with_on_close(mut self, callback: OnCloseCallback) -> Self {
-        self.on_close = Some(callback);
-        self
+    fn result_reader(&self) -> crate::utils::WatchableOnceCellReader<Result<(), SlateDBError>> {
+        self.reader()
     }
+}
 
-    pub(crate) fn write(&self, result: Result<(), SlateDBError>) {
+impl ClosedResultWriter for DbStatusManager {
+    fn write_result(&self, result: Result<(), SlateDBError>) {
         let reason = match &result {
             Ok(()) => CloseReason::Clean,
             Err(err) => CloseReason::from(crate::Error::from(err.clone()).kind()),
         };
-        self.cell.write(result);
-        if let Some(on_close) = &self.on_close {
-            on_close(reason);
+        if self.cell.write(result) {
+            self.report_closed(reason);
         }
     }
 
-    pub(crate) fn reader(&self) -> crate::utils::WatchableOnceCellReader<Result<(), SlateDBError>> {
+    fn result_reader(&self) -> crate::utils::WatchableOnceCellReader<Result<(), SlateDBError>> {
         self.cell.reader()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::manifest::Manifest;
+    use crate::manifest::ManifestCore;
+
+    fn versioned_manifest(id: u64) -> VersionedManifest {
+        VersionedManifest {
+            id,
+            manifest: Manifest::initial(ManifestCore::new()),
+        }
+    }
+
+    #[test]
+    fn should_not_notify_on_same_manifest() {
+        // given
+        let initial = versioned_manifest(1);
+        let mgr = DbStatusManager::new_with_manifest(0, initial.clone());
+        let mut rx = mgr.subscribe();
+        rx.borrow_and_update();
+
+        // when
+        mgr.report_manifest(initial);
+
+        // then
+        assert!(!rx.has_changed().unwrap());
+    }
+
+    #[test]
+    fn should_not_notify_on_older_manifest() {
+        // given
+        let mgr = DbStatusManager::new_with_manifest(0, versioned_manifest(5));
+        let mut rx = mgr.subscribe();
+        rx.borrow_and_update();
+
+        // when
+        mgr.report_manifest(versioned_manifest(3));
+
+        // then
+        assert!(!rx.has_changed().unwrap());
     }
 }

@@ -1,11 +1,12 @@
-use crate::batch::{WriteBatch, WriteBatchIterator};
+use crate::batch::WriteBatchIterator;
 use crate::bytes_range::BytesRange;
 use crate::clock::MonotonicClock;
 use crate::config::{DurabilityLevel, ReadOptions, ScanOptions};
-use crate::db_state::ManifestCore;
 use crate::db_stats::DbStats;
-use crate::iter::{IterationOrder, RowEntryIterator};
+use crate::iter::RowEntryIterator;
+use crate::manifest::ManifestCore;
 use crate::mem_table::{ImmutableMemtable, KVTable};
+use crate::merge_operator::{instrument_merge_operator, MergeOperatorType};
 use crate::oracle::Oracle;
 use crate::sorted_run_iterator::SortedRunIterator;
 use crate::sst_iter::{SstIterator, SstIteratorOptions};
@@ -14,7 +15,6 @@ use crate::types::KeyValue;
 use crate::utils::{build_concurrent, compute_max_parallel};
 use crate::{db_iter::DbIteratorRangeTracker, error::SlateDBError, DbIterator};
 
-use bytes::Bytes;
 use futures::future::join;
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -38,10 +38,33 @@ pub(crate) struct Reader {
     #[allow(dead_code)] // unused during DST
     pub(crate) mono_clock: Arc<MonotonicClock>,
     pub(crate) oracle: Arc<dyn Oracle>,
-    pub(crate) merge_operator: Option<crate::merge_operator::MergeOperatorType>,
+    pub(crate) read_merge_operator: Option<MergeOperatorType>,
 }
 
 impl Reader {
+    pub(crate) fn new(
+        table_store: Arc<TableStore>,
+        db_stats: DbStats,
+        mono_clock: Arc<MonotonicClock>,
+        oracle: Arc<dyn Oracle>,
+        merge_operator: Option<MergeOperatorType>,
+    ) -> Self {
+        let read_merge_operator = merge_operator.map(|merge_operator| {
+            instrument_merge_operator(
+                merge_operator,
+                db_stats.merge_operator_read_operands.clone(),
+            )
+        });
+
+        Self {
+            table_store,
+            db_stats,
+            mono_clock,
+            oracle,
+            read_merge_operator,
+        }
+    }
+
     /// Determines the maximum sequence number for read operations (get and scan). Read operations will filter
     /// out entries with sequence numbers greater than the returned value.
     ///
@@ -86,13 +109,10 @@ impl Reader {
         &self,
         range: &BytesRange,
         db_state: &(dyn DbStateReader + Sync),
-        write_batch: Option<WriteBatch>,
+        write_batch_iter: Option<WriteBatchIterator>,
         sst_iter_options: SstIteratorOptions,
         point_lookup_stats: Option<DbStats>,
     ) -> Result<IteratorSources, SlateDBError> {
-        let write_batch_iter = write_batch
-            .map(|batch| WriteBatchIterator::new(batch, range.clone(), IterationOrder::Ascending));
-
         let mut memtables = VecDeque::new();
         memtables.push_back(db_state.memtable());
         for memtable in db_state.imm_memtable() {
@@ -101,7 +121,7 @@ impl Reader {
         let mem_iters = memtables
             .iter()
             .map(|table| {
-                Box::new(table.range_ascending(range.clone()))
+                Box::new(table.range(range.clone(), sst_iter_options.order))
                     as Box<dyn RowEntryIterator + 'static>
             })
             .collect::<Vec<_>>();
@@ -109,7 +129,7 @@ impl Reader {
         let max_parallel =
             compute_max_parallel(db_state.core().l0.len(), &db_state.core().compacted, 4);
 
-        let (l0_iters, sr_iters) = if let Some(point_key) = range.as_point().cloned() {
+        let (l0_iters, sr_iters) = if let Some(point_key) = range.as_point() {
             let l0 = self.build_point_l0_iters(
                 range,
                 db_state,
@@ -118,7 +138,7 @@ impl Reader {
             )?;
             let sr = self.build_point_sr_iters(
                 range,
-                &point_key,
+                point_key.as_ref(),
                 db_state,
                 sst_iter_options,
                 point_lookup_stats,
@@ -167,14 +187,14 @@ impl Reader {
     fn build_point_sr_iters<'a>(
         &self,
         range: &BytesRange,
-        key: &Bytes,
+        key: &[u8],
         db_state: &(dyn DbStateReader + Sync),
         sst_iter_options: SstIteratorOptions,
         db_stats: Option<DbStats>,
     ) -> Result<VecDeque<Box<dyn RowEntryIterator + 'a>>, SlateDBError> {
         let mut iters = VecDeque::new();
         for sr in &db_state.core().compacted {
-            if let Some(handle) = sr.find_sst_with_range_covering_key(key.as_ref()) {
+            for handle in sr.tables_covering_point_key(key) {
                 let iterator = SstIterator::new_owned_with_stats(
                     range.clone(),
                     handle.clone(),
@@ -238,11 +258,12 @@ impl Reader {
                 let table_store = table_store.clone();
                 let range = range_clone.clone();
                 async move {
-                    SortedRunIterator::new_owned_initialized(
+                    SortedRunIterator::new_owned_initialized_with_stats(
                         range.clone(),
                         sr,
                         table_store,
                         sst_iter_options,
+                        Some(self.db_stats.clone()),
                     )
                     .await
                     .map(|iter| Some(Box::new(iter) as Box<dyn RowEntryIterator + 'a>))
@@ -276,7 +297,7 @@ impl Reader {
         key: K,
         options: &ReadOptions,
         db_state: &(dyn DbStateReader + Sync + Send),
-        write_batch: Option<WriteBatch>,
+        write_batch_iter: Option<WriteBatchIterator>,
         max_seq: Option<u64>,
     ) -> Result<Option<KeyValue>, SlateDBError> {
         self.db_stats.get_requests.increment(1);
@@ -299,7 +320,7 @@ impl Reader {
             .build_iterator_sources(
                 &range,
                 db_state,
-                write_batch,
+                write_batch_iter,
                 sst_iter_options,
                 Some(self.db_stats.clone()),
             )
@@ -313,7 +334,8 @@ impl Reader {
             sr_iters,
             max_seq,
             None,
-            self.merge_operator.clone(),
+            self.read_merge_operator.clone(),
+            sst_iter_options.order,
         )
         .await?;
 
@@ -354,7 +376,7 @@ impl Reader {
         range: BytesRange,
         options: &ScanOptions,
         db_state: &(dyn DbStateReader + Sync),
-        write_batch: Option<WriteBatch>,
+        write_batch_iter: Option<WriteBatchIterator>,
         max_seq: Option<u64>,
         range_tracker: Option<Arc<DbIteratorRangeTracker>>,
     ) -> Result<DbIterator, SlateDBError> {
@@ -367,7 +389,7 @@ impl Reader {
             blocks_to_fetch: read_ahead_blocks,
             cache_blocks: options.cache_blocks,
             eager_spawn: true,
-            order: IterationOrder::Ascending,
+            order: options.order,
         };
 
         let IteratorSources {
@@ -376,7 +398,7 @@ impl Reader {
             l0_iters,
             sr_iters,
         } = self
-            .build_iterator_sources(&range, db_state, write_batch, sst_iter_options, None)
+            .build_iterator_sources(&range, db_state, write_batch_iter, sst_iter_options, None)
             .await?;
 
         DbIterator::new(
@@ -387,7 +409,8 @@ impl Reader {
             sr_iters,
             max_seq,
             range_tracker,
-            self.merge_operator.clone(),
+            self.read_merge_operator.clone(),
+            options.order,
         )
         .await
     }
@@ -396,22 +419,51 @@ impl Reader {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::merge_operator::{MergeOperator, MergeOperatorError};
+    use crate::merge_operator::{
+        MergeOperator, MergeOperatorError, MERGE_OPERATOR_FLUSH_PATH, MERGE_OPERATOR_READ_PATH,
+    };
+    use crate::test_utils::lookup_merge_operator_operands;
     use crate::types::{RowEntry, ValueDeletable};
+    use bytes::Bytes;
     use rstest::rstest;
     use slatedb_common::clock::{MockSystemClock, SystemClock};
 
     use crate::batch::WriteBatch;
     use crate::clock::MonotonicClock;
+    use crate::iter::IterationOrder;
+
+    fn wb_point_iter(write_batch: &Option<WriteBatch>, key: &[u8]) -> Option<WriteBatchIterator> {
+        write_batch.as_ref().map(|wb| {
+            WriteBatchIterator::new(
+                wb,
+                BytesRange::from_slice(key..=key),
+                IterationOrder::Ascending,
+            )
+        })
+    }
+
+    fn wb_range_iter(
+        write_batch: &Option<WriteBatch>,
+        range: &BytesRange,
+        order: IterationOrder,
+    ) -> Option<WriteBatchIterator> {
+        write_batch
+            .as_ref()
+            .map(|wb| WriteBatchIterator::new(wb, range.clone(), order))
+    }
     use crate::db_state::{SortedRun, SsTableHandle, SsTableId};
-    use crate::db_status::DbStatusReporter;
+    use crate::db_status::DbStatusManager;
     use crate::format::sst::SsTableFormat;
     use crate::manifest::SsTableView;
     use crate::object_stores::ObjectStores;
     use crate::oracle::DbReaderOracle;
     use crate::tablestore::TableStore;
     use object_store::{memory::InMemory, path::Path, ObjectStore};
+    use slatedb_common::metrics::{
+        lookup_metric, DefaultMetricsRecorder, MetricLevel, MetricsRecorder, MetricsRecorderHelper,
+    };
     use std::collections::HashMap;
+    use std::sync::Arc;
     use ulid::Ulid;
 
     /// A simple merge operator for testing that concatenates byte strings
@@ -1201,7 +1253,7 @@ mod tests {
         let last_committed_seq = test_case.last_committed_seq.unwrap_or(u64::MAX);
         let oracle = Arc::new(DbReaderOracle::new(
             last_committed_seq,
-            DbStatusReporter::new(0),
+            DbStatusManager::new(0),
         ));
 
         // Enable merge operator if the test description contains "[MERGE]"
@@ -1211,13 +1263,13 @@ mod tests {
             None
         };
 
-        let reader = Reader {
-            table_store: test_db_state.table_store.clone(),
+        let reader = Reader::new(
+            test_db_state.table_store.clone(),
             db_stats,
             mono_clock,
             oracle,
             merge_operator,
-        };
+        );
 
         // Call the actual get_key_value_with_options method
         let read_options = ReadOptions::default().with_dirty(test_case.dirty);
@@ -1226,7 +1278,7 @@ mod tests {
                 test_case.query_key,
                 &read_options,
                 &test_db_state,
-                write_batch,
+                wb_point_iter(&write_batch, test_case.query_key),
                 test_case.max_seq,
             )
             .await?;
@@ -1631,7 +1683,7 @@ mod tests {
         let last_committed_seq = test_case.last_committed_seq.unwrap_or(u64::MAX);
         let oracle = Arc::new(DbReaderOracle::new(
             last_committed_seq,
-            DbStatusReporter::new(0),
+            DbStatusManager::new(0),
         ));
 
         // Enable merge operator if the test description contains "[MERGE"
@@ -1641,25 +1693,26 @@ mod tests {
             None
         };
 
-        let reader = Reader {
-            table_store: test_db_state.table_store.clone(),
+        let reader = Reader::new(
+            test_db_state.table_store.clone(),
             db_stats,
             mono_clock,
             oracle,
             merge_operator,
-        };
+        );
 
         // Create range
         let range = BytesRange::from_slice(test_case.range_start..test_case.range_end);
 
         // Call the actual scan_with_options method
         let scan_options = ScanOptions::default().with_dirty(test_case.dirty);
+        let wb_iter = wb_range_iter(&write_batch, &range, scan_options.order);
         let mut iter = reader
             .scan_with_options(
                 range,
                 &scan_options,
                 &test_db_state,
-                write_batch,
+                wb_iter,
                 test_case.max_seq,
                 None,
             )
@@ -1716,19 +1769,157 @@ mod tests {
     ) -> Reader {
         let test_clock = Arc::new(MockSystemClock::new());
         let mono_clock = Arc::new(MonotonicClock::new(test_clock as Arc<dyn SystemClock>, 0));
-        let oracle = Arc::new(DbReaderOracle::new(u64::MAX, DbStatusReporter::new(0)));
+        let oracle = Arc::new(DbReaderOracle::new(u64::MAX, DbStatusManager::new(0)));
         let merge_operator = if with_merge {
             Some(Arc::new(StringConcatMergeOperator) as Arc<dyn MergeOperator + Send + Sync>)
         } else {
             None
         };
-        Reader {
-            table_store: test_db_state.table_store.clone(),
+        Reader::new(
+            test_db_state.table_store.clone(),
             db_stats,
             mono_clock,
             oracle,
             merge_operator,
-        }
+        )
+    }
+
+    #[tokio::test]
+    async fn should_record_merge_operator_operands_on_read_path() -> Result<(), SlateDBError> {
+        let entries = vec![
+            TestEntry::merge(b"key1", b"b", 2),
+            TestEntry::merge(b"key1", b"a", 1),
+            TestEntry::value(b"key2", b"value2", 1),
+        ];
+
+        let mut test_db_state = TestDbState::new().await;
+        let write_batch = populate_db_state(&mut test_db_state, entries).await?;
+
+        let metrics_recorder = Arc::new(DefaultMetricsRecorder::new());
+        let recorder = MetricsRecorderHelper::new(
+            metrics_recorder.clone() as Arc<dyn MetricsRecorder>,
+            MetricLevel::default(),
+        );
+        let db_stats = DbStats::new(&recorder);
+        let reader = build_reader(&test_db_state, db_stats, true).await;
+
+        assert_eq!(
+            lookup_merge_operator_operands(metrics_recorder.as_ref(), MERGE_OPERATOR_READ_PATH),
+            Some(0)
+        );
+        assert_eq!(
+            lookup_merge_operator_operands(metrics_recorder.as_ref(), MERGE_OPERATOR_FLUSH_PATH,),
+            Some(0)
+        );
+
+        let result = reader
+            .get_key_value_with_options(
+                b"key1",
+                &ReadOptions::default().with_dirty(true),
+                &test_db_state,
+                wb_point_iter(&write_batch, b"key1"),
+                None,
+            )
+            .await?;
+        assert_eq!(result.unwrap().value, Bytes::from_static(b"ab"));
+        assert_eq!(
+            lookup_merge_operator_operands(metrics_recorder.as_ref(), MERGE_OPERATOR_READ_PATH),
+            Some(3)
+        );
+        assert_eq!(
+            lookup_merge_operator_operands(metrics_recorder.as_ref(), MERGE_OPERATOR_FLUSH_PATH,),
+            Some(0)
+        );
+
+        let scan_range = BytesRange::from_slice(b"key1".as_ref()..b"key3".as_ref());
+        let scan_options = ScanOptions::default().with_dirty(true);
+        let wb_iter = wb_range_iter(&write_batch, &scan_range, scan_options.order);
+        let mut iter = reader
+            .scan_with_options(
+                scan_range,
+                &scan_options,
+                &test_db_state,
+                wb_iter,
+                None,
+                None,
+            )
+            .await?;
+
+        let first = iter
+            .next()
+            .await
+            .map_err(|e| SlateDBError::IoError(Arc::new(std::io::Error::other(e))))?
+            .expect("should have key1");
+        assert_eq!(first.key.as_ref(), b"key1");
+        assert_eq!(first.value.as_ref(), b"ab");
+
+        let second = iter
+            .next()
+            .await
+            .map_err(|e| SlateDBError::IoError(Arc::new(std::io::Error::other(e))))?
+            .expect("should have key2");
+        assert_eq!(second.key.as_ref(), b"key2");
+        assert_eq!(second.value.as_ref(), b"value2");
+
+        assert!(iter
+            .next()
+            .await
+            .map_err(|e| SlateDBError::IoError(Arc::new(std::io::Error::other(e))))?
+            .is_none());
+
+        assert_eq!(
+            lookup_merge_operator_operands(metrics_recorder.as_ref(), MERGE_OPERATOR_READ_PATH),
+            Some(6)
+        );
+        assert_eq!(
+            lookup_merge_operator_operands(metrics_recorder.as_ref(), MERGE_OPERATOR_FLUSH_PATH,),
+            Some(0)
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn should_record_bloom_filter_negative_for_sorted_run_point_lookup(
+    ) -> Result<(), SlateDBError> {
+        let entries = vec![
+            TestEntry::value(b"key1", b"value1", 50).with_location(LayerLocation::SortedRun(0)),
+            TestEntry::value(b"key3", b"value3", 40).with_location(LayerLocation::SortedRun(0)),
+        ];
+
+        let mut test_db_state = TestDbState::new().await;
+        let write_batch = populate_db_state(&mut test_db_state, entries).await?;
+
+        let recorder = Arc::new(DefaultMetricsRecorder::new());
+        let helper = MetricsRecorderHelper::new(recorder.clone(), MetricLevel::default());
+        let db_stats = DbStats::new(&helper);
+        let reader = build_reader(&test_db_state, db_stats, false).await;
+
+        let result = reader
+            .get_key_value_with_options(
+                b"key2",
+                &ReadOptions::default().with_dirty(true),
+                &test_db_state,
+                wb_point_iter(&write_batch, b"key2"),
+                None,
+            )
+            .await?;
+
+        assert!(result.is_none());
+        assert_eq!(
+            lookup_metric(&recorder, crate::db_stats::SST_FILTER_NEGATIVE_COUNT),
+            Some(1)
+        );
+        assert_eq!(
+            lookup_metric(&recorder, crate::db_stats::SST_FILTER_POSITIVE_COUNT),
+            Some(0)
+        );
+        assert_eq!(
+            lookup_metric(&recorder, crate::db_stats::SST_FILTER_FALSE_POSITIVE_COUNT),
+            Some(0)
+        );
+
+        Ok(())
     }
 
     #[tokio::test]
@@ -1752,7 +1943,7 @@ mod tests {
                 b"key1",
                 &ReadOptions::default().with_dirty(true),
                 &test_db_state,
-                write_batch.clone(),
+                wb_point_iter(&write_batch, b"key1"),
                 None,
             )
             .await?;
@@ -1766,7 +1957,7 @@ mod tests {
                 b"key2",
                 &ReadOptions::default().with_dirty(true),
                 &test_db_state,
-                write_batch,
+                wb_point_iter(&write_batch, b"key2"),
                 None,
             )
             .await?;
@@ -1796,15 +1987,9 @@ mod tests {
         // when: scanning all keys
         let range = BytesRange::from_slice(b"key1".as_ref()..b"key4".as_ref());
         let scan_options = ScanOptions::default().with_dirty(true);
+        let wb_iter = wb_range_iter(&write_batch, &range, scan_options.order);
         let mut iter = reader
-            .scan_with_options(
-                range,
-                &scan_options,
-                &test_db_state,
-                write_batch,
-                None,
-                None,
-            )
+            .scan_with_options(range, &scan_options, &test_db_state, wb_iter, None, None)
             .await?;
 
         // then: each result should carry its expire_ts
@@ -1862,7 +2047,7 @@ mod tests {
                 b"key1",
                 &ReadOptions::default().with_dirty(true),
                 &test_db_state,
-                write_batch,
+                wb_point_iter(&write_batch, b"key1"),
                 None,
             )
             .await?;
@@ -1902,7 +2087,7 @@ mod tests {
                 b"key1",
                 &ReadOptions::default().with_dirty(true),
                 &test_db_state,
-                write_batch,
+                wb_point_iter(&write_batch, b"key1"),
                 None,
             )
             .await?;

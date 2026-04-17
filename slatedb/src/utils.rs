@@ -2,12 +2,12 @@ use crate::block_iterator::BlockIterator;
 use crate::block_iterator_v2::BlockIteratorV2;
 use crate::cached_object_store::CachedObjectStore;
 use crate::config::PreloadLevel;
-use crate::db_state::ManifestCore;
 use crate::db_state::SortedRun;
 use crate::db_state::SsTableHandle;
 use crate::error::SlateDBError;
 use crate::format::sst::{SST_FORMAT_VERSION, SST_FORMAT_VERSION_V2};
 use crate::iter::{IterationOrder, RowEntryIterator};
+use crate::manifest::ManifestCore;
 use crate::paths::PathResolver;
 use crate::tablestore::TableStore;
 use bytes::{BufMut, Bytes};
@@ -19,7 +19,6 @@ use std::any::Any;
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
-use tokio::sync::mpsc::UnboundedSender;
 use ulid::Ulid;
 use uuid::Uuid;
 
@@ -45,14 +44,16 @@ impl<T: Clone> WatchableOnceCell<T> {
         Self { rx, tx }
     }
 
-    pub(crate) fn write(&self, val: T) {
+    /// Writes the value if not already set. Returns `true` if the value was
+    /// written, `false` if a value was already present.
+    pub(crate) fn write(&self, val: T) -> bool {
         self.tx.send_if_modified(|v| {
             if v.is_some() {
                 return false;
             }
             v.replace(val);
             true
-        });
+        })
     }
 
     pub(crate) fn reader(&self) -> WatchableOnceCellReader<T> {
@@ -222,44 +223,6 @@ fn compute_lower_bound(prev_block_last_key: &Bytes, this_block_first_key: &Bytes
     // if we didn't find a mismatch yet then the prev block's key must be shorter,
     // so just use the common prefix plus the next byte in this block's key
     this_block_first_key.slice(..prev_block_last_key.len() + 1)
-}
-
-/// An extension trait that adds a `.send_safely(...)` method to tokio's `UnboundedSender<T>`.
-pub(crate) trait SendSafely<T> {
-    /// Attempts to send a message to the channel, and if the channel is closed, returns the error
-    /// in `error_reader` if it is set, otherwise panics.
-    ///
-    /// This is useful for handling shutdown race conditions where the receiver's channel is dropped
-    /// before the sender is shut down.`
-    fn send_safely(
-        &self,
-        closed_result_reader: WatchableOnceCellReader<Result<(), SlateDBError>>,
-        message: T,
-    ) -> Result<(), SlateDBError>;
-}
-
-#[allow(clippy::panic, clippy::disallowed_methods)]
-impl<T> SendSafely<T> for UnboundedSender<T> {
-    #[inline]
-    fn send_safely(
-        &self,
-        closed_result_reader: WatchableOnceCellReader<Result<(), SlateDBError>>,
-        message: T,
-    ) -> Result<(), SlateDBError> {
-        match self.send(message) {
-            Ok(_) => Ok(()),
-            Err(e) => {
-                if let Some(result) = closed_result_reader.read() {
-                    match result {
-                        Ok(()) => Err(SlateDBError::Closed),
-                        Err(err) => Err(err),
-                    }
-                } else {
-                    panic!("Failed to send message to unbounded channel: {}", e);
-                }
-            }
-        }
-    }
 }
 
 /// Trait for generating UUIDs and ULIDs from a random number generator.
@@ -449,7 +412,7 @@ pub(crate) fn estimate_bytes_before_key(sorted_runs: &[SortedRun], key: &Bytes) 
     sorted_runs
         .iter()
         .map(|sorted_run| {
-            let Some(idx) = sorted_run.find_sst_with_range_covering_key_idx(key) else {
+            let Some(idx) = sorted_run.find_last_sst_with_range_covering_key(key) else {
                 return 0;
             };
             sorted_run
@@ -746,6 +709,64 @@ pub(crate) async fn preload_cache_from_manifest(
         }
     }
     Ok(())
+}
+
+/// A channel sender that checks the DB's closed result when the underlying
+/// channel is closed, converting the raw channel error into the appropriate
+/// [`SlateDBError`].
+///
+/// Use [`SafeSender::unbounded_channel`] to construct a channel wired to a
+/// [`crate::db_status::ClosedResultWriter::result_reader`].
+pub(crate) struct SafeSender<T> {
+    tx: async_channel::Sender<T>,
+    closed: WatchableOnceCellReader<Result<(), SlateDBError>>,
+}
+
+impl<T> SafeSender<T> {
+    pub(crate) fn new(
+        tx: async_channel::Sender<T>,
+        closed: WatchableOnceCellReader<Result<(), SlateDBError>>,
+    ) -> Self {
+        Self { tx, closed }
+    }
+
+    pub(crate) fn unbounded_channel(
+        closed: WatchableOnceCellReader<Result<(), SlateDBError>>,
+    ) -> (Self, async_channel::Receiver<T>) {
+        let (tx, rx) = async_channel::unbounded();
+        (Self::new(tx, closed), rx)
+    }
+
+    /// Attempts to send a message. If the channel is closed, returns the
+    /// DB's closed result error, or [`SlateDBError::Closed`] if it was a
+    /// clean shutdown. Panics if the channel is closed but no closed result
+    /// has been set (indicates a bug).
+    #[inline]
+    #[allow(clippy::panic, clippy::disallowed_methods)]
+    pub(crate) fn send(&self, message: T) -> Result<(), SlateDBError> {
+        match self.tx.try_send(message) {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                if let Some(result) = self.closed.read() {
+                    match result {
+                        Ok(()) => Err(SlateDBError::Closed),
+                        Err(err) => Err(err),
+                    }
+                } else {
+                    panic!("Failed to send message to unbounded channel: {}", e);
+                }
+            }
+        }
+    }
+}
+
+impl<T> Clone for SafeSender<T> {
+    fn clone(&self) -> Self {
+        Self {
+            tx: self.tx.clone(),
+            closed: self.closed.clone(),
+        }
+    }
 }
 
 #[cfg(test)]

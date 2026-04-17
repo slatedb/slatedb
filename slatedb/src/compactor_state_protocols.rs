@@ -15,13 +15,11 @@ use std::time::Duration;
 use log::{debug, info};
 
 use crate::compactions_store::{CompactionsStore, FenceableCompactions, StoredCompactions};
-use crate::compactor::CompactionsCore;
-use crate::compactor_state::{CompactionStatus, Compactions, CompactorState};
+use crate::compactor_state::{CompactionStatus, CompactorState, VersionedCompactions};
 use crate::config::{CheckpointOptions, CompactorOptions};
-use crate::db_state::ManifestCore;
 use crate::error::SlateDBError;
 use crate::manifest::store::{FenceableManifest, ManifestStore, StoredManifest};
-use crate::manifest::Manifest;
+use crate::manifest::VersionedManifest;
 use crate::utils::IdGenerator;
 use crate::DbRand;
 use slatedb_common::clock::SystemClock;
@@ -31,21 +29,21 @@ use slatedb_common::clock::SystemClock;
 /// This view intentionally avoids `DirtyObject` because reads should not create or mutate
 /// remote state (e.g., a missing `.compactions` file on a fresh DB).
 pub struct CompactorStateView {
-    /// The latest compactions state if present. The u64 is the compactions file version.
-    pub(crate) compactions: Option<(u64, Compactions)>,
-    /// The latest manifest. The u64 is the manifest file version.
-    pub(crate) manifest: (u64, Manifest),
+    /// The latest compactions state if present, paired with its file version.
+    pub(crate) compactions: Option<VersionedCompactions>,
+    /// The latest manifest paired with its file version.
+    pub(crate) manifest: VersionedManifest,
 }
 
 impl CompactorStateView {
     /// Returns a read-only view of the .compactions file if present.
-    pub fn compactions(&self) -> Option<&CompactionsCore> {
-        self.compactions.as_ref().map(|(_, c)| &c.core)
+    pub fn compactions(&self) -> Option<&VersionedCompactions> {
+        self.compactions.as_ref()
     }
 
     /// Returns a read-only view of the .manifest file.
-    pub fn manifest(&self) -> &ManifestCore {
-        &self.manifest.1.core
+    pub fn manifest(&self) -> &VersionedManifest {
+        &self.manifest
     }
 }
 
@@ -53,11 +51,14 @@ impl CompactorStateView {
 impl From<&CompactorState> for CompactorStateView {
     fn from(state: &CompactorState) -> Self {
         CompactorStateView {
-            compactions: Some((
+            compactions: Some(VersionedCompactions::from_compactions(
                 state.compactions().id.into(),
                 state.compactions().value.clone(),
             )),
-            manifest: (state.manifest().id.into(), state.manifest().value.clone()),
+            manifest: VersionedManifest::from_manifest(
+                state.manifest().id.into(),
+                state.manifest().value.clone(),
+            ),
         }
     }
 }
@@ -324,12 +325,13 @@ mod tests {
     use crate::compactions_store::{CompactionsStore, StoredCompactions};
     use crate::compactor_state::{
         Compaction, CompactionSpec, CompactionStatus, Compactions, CompactorState,
+        VersionedCompactions,
     };
-    use crate::db_state::{ManifestCore, SsTableHandle, SsTableId, SsTableInfo};
+    use crate::db_state::{SsTableHandle, SsTableId, SsTableInfo};
     use crate::error::SlateDBError;
     use crate::format::sst::SST_FORMAT_VERSION_LATEST;
     use crate::manifest::store::{ManifestStore, StoredManifest};
-    use crate::manifest::Manifest;
+    use crate::manifest::{Manifest, ManifestCore, VersionedManifest};
     use bytes::Bytes;
     use object_store::memory::InMemory;
     use object_store::path::Path;
@@ -414,18 +416,23 @@ mod tests {
 
         let view = CompactorStateView::from(&state);
 
-        assert_eq!(view.manifest.0, manifest_id);
-        assert_eq!(view.manifest.1, manifest);
-
-        let (view_compactions_id, view_compactions) =
-            view.compactions.expect("missing compactions");
-        assert_eq!(view_compactions_id, compactions_id);
         assert_eq!(
-            view_compactions.compactor_epoch,
+            view.manifest,
+            VersionedManifest::from_manifest(manifest_id, manifest)
+        );
+
+        let view_compactions = view.compactions.expect("missing compactions");
+        assert_eq!(
+            view_compactions,
+            VersionedCompactions::from_compactions(compactions_id, compactions.clone())
+        );
+        assert_eq!(
+            view_compactions.compactions.compactor_epoch,
             compactions.compactor_epoch
         );
 
         let view_compaction = view_compactions
+            .compactions
             .get(&compaction_id)
             .expect("missing compaction");
         assert_eq!(view_compaction.status(), CompactionStatus::Running);
@@ -478,10 +485,13 @@ mod tests {
         .await
         .unwrap();
 
-        let (_, manifest) = manifest_store.read_latest_manifest().await.unwrap();
-        let (_, compactions) = compactions_store.read_latest_compactions().await.unwrap();
-        assert_eq!(manifest.compactor_epoch, 9);
-        assert_eq!(manifest.compactor_epoch, compactions.compactor_epoch);
+        let manifest = manifest_store.read_latest_manifest().await.unwrap();
+        let compactions = compactions_store.read_latest_compactions().await.unwrap();
+        assert_eq!(manifest.manifest.compactor_epoch, 9);
+        assert_eq!(
+            manifest.manifest.compactor_epoch,
+            compactions.compactions.compactor_epoch
+        );
     }
 
     #[tokio::test]
@@ -730,7 +740,11 @@ mod tests {
         .unwrap();
 
         // Record the version after fencing.
-        let (start_id, _) = compactions_store.read_latest_compactions().await.unwrap();
+        let start_id = compactions_store
+            .read_latest_compactions()
+            .await
+            .unwrap()
+            .id;
 
         // Simulate an external writer racing and creating the next version.
         let mut external = StoredCompactions::load(compactions_store.clone())
@@ -741,13 +755,21 @@ mod tests {
             .await
             .unwrap();
 
-        let (conflicting_id, _) = compactions_store.read_latest_compactions().await.unwrap();
+        let conflicting_id = compactions_store
+            .read_latest_compactions()
+            .await
+            .unwrap()
+            .id;
         assert_eq!(conflicting_id, start_id + 1);
 
         // This should retry on conflict and succeed with a new version.
         writer.write_compactions_safely().await.unwrap();
 
-        let (final_id, _) = compactions_store.read_latest_compactions().await.unwrap();
+        let final_id = compactions_store
+            .read_latest_compactions()
+            .await
+            .unwrap()
+            .id;
         assert_eq!(final_id, start_id + 2);
     }
 
@@ -786,7 +808,7 @@ mod tests {
         .unwrap();
 
         // Record the version after fencing.
-        let (start_id, _) = manifest_store.read_latest_manifest().await.unwrap();
+        let start_id = manifest_store.read_latest_manifest().await.unwrap().id;
 
         // Simulate an external writer creating a checkpoint of the manifest and updating it.
         let admin = AdminBuilder::new(ROOT, object_store.clone()).build();
@@ -795,13 +817,13 @@ mod tests {
             .await
             .expect("create checkpoint failed");
 
-        let (conflicting_id, _) = manifest_store.read_latest_manifest().await.unwrap();
+        let conflicting_id = manifest_store.read_latest_manifest().await.unwrap().id;
         assert_eq!(conflicting_id, start_id + 1);
 
         // This should retry on conflict and succeed with a new version.
         writer.write_manifest_safely().await.unwrap();
 
-        let (final_id, _) = manifest_store.read_latest_manifest().await.unwrap();
+        let final_id = manifest_store.read_latest_manifest().await.unwrap().id;
         // write_manifest_safely now bumps the manifest twice per successful call because write_manifest
         // writes a checkpoint first:
         // - write_manifest() calls self.manifest.write_checkpoint(...) to create the checkpoint, then

@@ -14,6 +14,11 @@ import (
 
 const testDBPath = "test-db"
 
+const (
+	dbRequestCountMetricName = "slatedb.db.request_count"
+	dbWriteOpsMetricName     = "slatedb.db.write_ops"
+)
+
 type testDB struct {
 	db   *slatedb.Db
 	open bool
@@ -241,6 +246,123 @@ func cloneUint32Ptr(value *uint32) *uint32 {
 	return &cloned
 }
 
+type testMetricsRecorder struct {
+	mu              sync.Mutex
+	counters        map[string]uint64
+	gauges          map[string]int64
+	upDownCounters  map[string]int64
+	histogramValues map[string][]float64
+}
+
+func newTestMetricsRecorder() *testMetricsRecorder {
+	return &testMetricsRecorder{
+		counters:        make(map[string]uint64),
+		gauges:          make(map[string]int64),
+		upDownCounters:  make(map[string]int64),
+		histogramValues: make(map[string][]float64),
+	}
+}
+
+func (r *testMetricsRecorder) RegisterCounter(name string, _ string, labels []slatedb.MetricLabel) slatedb.Counter {
+	key := metricKey(name, labels)
+
+	r.mu.Lock()
+	r.counters[key] = 0
+	r.mu.Unlock()
+
+	return testCounterHandle(func(value uint64) {
+		r.mu.Lock()
+		r.counters[key] += value
+		r.mu.Unlock()
+	})
+}
+
+func (r *testMetricsRecorder) RegisterGauge(name string, _ string, labels []slatedb.MetricLabel) slatedb.Gauge {
+	key := metricKey(name, labels)
+
+	r.mu.Lock()
+	r.gauges[key] = 0
+	r.mu.Unlock()
+
+	return testGaugeHandle(func(value int64) {
+		r.mu.Lock()
+		r.gauges[key] = value
+		r.mu.Unlock()
+	})
+}
+
+func (r *testMetricsRecorder) RegisterUpDownCounter(name string, _ string, labels []slatedb.MetricLabel) slatedb.UpDownCounter {
+	key := metricKey(name, labels)
+
+	r.mu.Lock()
+	r.upDownCounters[key] = 0
+	r.mu.Unlock()
+
+	return testUpDownCounterHandle(func(value int64) {
+		r.mu.Lock()
+		r.upDownCounters[key] += value
+		r.mu.Unlock()
+	})
+}
+
+func (r *testMetricsRecorder) RegisterHistogram(name string, _ string, labels []slatedb.MetricLabel, _ []float64) slatedb.Histogram {
+	key := metricKey(name, labels)
+
+	r.mu.Lock()
+	r.histogramValues[key] = nil
+	r.mu.Unlock()
+
+	return testHistogramHandle(func(value float64) {
+		r.mu.Lock()
+		r.histogramValues[key] = append(r.histogramValues[key], value)
+		r.mu.Unlock()
+	})
+}
+
+func (r *testMetricsRecorder) counterValue(name string, labels []slatedb.MetricLabel) (uint64, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	value, ok := r.counters[metricKey(name, labels)]
+	return value, ok
+}
+
+type testCounterHandle func(uint64)
+
+func (h testCounterHandle) Increment(value uint64) {
+	h(value)
+}
+
+type testGaugeHandle func(int64)
+
+func (h testGaugeHandle) Set(value int64) {
+	h(value)
+}
+
+type testUpDownCounterHandle func(int64)
+
+func (h testUpDownCounterHandle) Increment(value int64) {
+	h(value)
+}
+
+type testHistogramHandle func(float64)
+
+func (h testHistogramHandle) Record(value float64) {
+	h(value)
+}
+
+func metricKey(name string, labels []slatedb.MetricLabel) string {
+	if len(labels) == 0 {
+		return name
+	}
+
+	parts := make([]string, 0, len(labels))
+	for _, label := range labels {
+		parts = append(parts, label.Key+"="+label.Value)
+	}
+	return name + "|" + strings.Join(parts, ",")
+}
+
 type concatMergeOperator struct{}
 
 func (concatMergeOperator) Merge(_ []byte, existingValue *[]byte, operand []byte) ([]byte, error) {
@@ -296,8 +418,9 @@ func TestDbLifecycleAndStatus(t *testing.T) {
 	store := newMemoryStore(t)
 	handle := openTestDB(t, store, nil)
 
-	if err := handle.db.Status(); err != nil {
-		t.Fatalf("Status(): %v", err)
+	status := handle.db.Status()
+	if status.CloseReason != nil {
+		t.Fatalf("Status() on open db: got close reason %v, want nil", *status.CloseReason)
 	}
 
 	if _, err := handle.db.Put([]byte("lifecycle"), []byte("value")); err != nil {
@@ -309,17 +432,12 @@ func TestDbLifecycleAndStatus(t *testing.T) {
 	}
 	handle.open = false
 
-	err := handle.db.Status()
-	if !errors.Is(err, slatedb.ErrErrorClosed) {
-		t.Fatalf("Status() after Shutdown(): got %v, want closed error", err)
+	status = handle.db.Status()
+	if status.CloseReason == nil {
+		t.Fatalf("Status() after Shutdown(): got nil close reason, want %v", slatedb.CloseReasonClean)
 	}
-
-	var closedErr *slatedb.ErrorClosed
-	if !errors.As(err, &closedErr) {
-		t.Fatalf("Status() after Shutdown(): expected *ErrorClosed, got %T", err)
-	}
-	if closedErr.Reason != slatedb.CloseReasonClean {
-		t.Fatalf("Status() after Shutdown(): got close reason %v, want %v", closedErr.Reason, slatedb.CloseReasonClean)
+	if *status.CloseReason != slatedb.CloseReasonClean {
+		t.Fatalf("Status() after Shutdown(): got close reason %v, want %v", *status.CloseReason, slatedb.CloseReasonClean)
 	}
 
 	if _, err := handle.db.Put([]byte("after-shutdown"), []byte("value")); !errors.Is(err, slatedb.ErrErrorClosed) {
@@ -804,13 +922,6 @@ func TestDbInvalidInputsAndErrorMapping(t *testing.T) {
 		}
 
 		if _, err := handle.db.Scan(slatedb.KeyRange{
-			Start:          bytesPtr([]byte{}),
-			StartInclusive: true,
-		}); !errors.Is(err, slatedb.ErrErrorInvalid) {
-			t.Fatalf("Scan(empty start): got %v, want invalid error", err)
-		}
-
-		if _, err := handle.db.Scan(slatedb.KeyRange{
 			Start:          bytesPtr([]byte("z")),
 			StartInclusive: true,
 			End:            bytesPtr([]byte("a")),
@@ -818,6 +929,20 @@ func TestDbInvalidInputsAndErrorMapping(t *testing.T) {
 		}); !errors.Is(err, slatedb.ErrErrorInvalid) {
 			t.Fatalf("Scan(start > end): got %v, want invalid error", err)
 		}
+
+		// Scan with empty start bound should succeed and be treated as unbounded start.
+		if _, err := handle.db.Put([]byte("seed"), []byte("value")); err != nil {
+			t.Fatalf("Put(seed): %v", err)
+		}
+		iter, err := handle.db.Scan(slatedb.KeyRange{
+			Start:          bytesPtr([]byte{}),
+			StartInclusive: true,
+		})
+		if err != nil {
+			t.Fatalf("Scan(empty start): %v", err)
+		}
+		t.Cleanup(iter.Destroy)
+		requireRows(t, drainIterator(t, iter), []string{"seed"}, []string{"value"})
 
 		batch := slatedb.NewWriteBatch()
 		t.Cleanup(batch.Destroy)
@@ -1309,13 +1434,6 @@ func TestDbReaderBuilderValidationAndErrors(t *testing.T) {
 		readerHandle := openTestReader(t, store, nil)
 
 		if _, err := readerHandle.reader.Scan(slatedb.KeyRange{
-			Start:          bytesPtr([]byte{}),
-			StartInclusive: true,
-		}); !errors.Is(err, slatedb.ErrErrorInvalid) {
-			t.Fatalf("DbReader.Scan(empty start): got %v, want invalid error", err)
-		}
-
-		if _, err := readerHandle.reader.Scan(slatedb.KeyRange{
 			Start:          bytesPtr([]byte("z")),
 			StartInclusive: true,
 			End:            bytesPtr([]byte("a")),
@@ -1323,6 +1441,17 @@ func TestDbReaderBuilderValidationAndErrors(t *testing.T) {
 		}); !errors.Is(err, slatedb.ErrErrorInvalid) {
 			t.Fatalf("DbReader.Scan(start > end): got %v, want invalid error", err)
 		}
+
+		// Scan with empty start bound should succeed and be treated as unbounded start.
+		readerIter, err := readerHandle.reader.Scan(slatedb.KeyRange{
+			Start:          bytesPtr([]byte{}),
+			StartInclusive: true,
+		})
+		if err != nil {
+			t.Fatalf("DbReader.Scan(empty start): %v", err)
+		}
+		t.Cleanup(readerIter.Destroy)
+		requireRows(t, drainIterator(t, readerIter), []string{"seed"}, []string{"value"})
 	})
 }
 
@@ -1593,4 +1722,130 @@ func TestLoggingCallback(t *testing.T) {
 
 	db.Destroy()
 	destroyed = true
+}
+
+func TestDefaultMetricsRecorderSnapshot(t *testing.T) {
+	recorder := slatedb.NewDefaultMetricsRecorder()
+	t.Cleanup(recorder.Destroy)
+
+	counter := recorder.RegisterCounter("test.counter", "counter", nil)
+	gauge := recorder.RegisterGauge("test.gauge", "gauge", nil)
+	upDownCounter := recorder.RegisterUpDownCounter("test.up_down_counter", "up/down counter", nil)
+	histogram := recorder.RegisterHistogram("test.histogram", "histogram", nil, []float64{1.0, 2.0})
+
+	counter.Increment(3)
+	gauge.Set(-7)
+	upDownCounter.Increment(5)
+	upDownCounter.Increment(-2)
+	histogram.Record(1.5)
+	histogram.Record(3.0)
+
+	if got := recorder.MetricsByName("test.counter"); len(got) != 1 {
+		t.Fatalf("MetricsByName(test.counter): got %d metrics, want 1", len(got))
+	}
+
+	counterMetric := recorder.MetricByNameAndLabels("test.counter", nil)
+	if counterMetric == nil {
+		t.Fatal("MetricByNameAndLabels(test.counter): got nil metric")
+	}
+	counterValue, ok := counterMetric.Value.(slatedb.MetricValueCounter)
+	if !ok {
+		t.Fatalf("MetricByNameAndLabels(test.counter): got %T, want MetricValueCounter", counterMetric.Value)
+	}
+	if counterValue.Field0 != 3 {
+		t.Fatalf("counter metric value: got %d, want 3", counterValue.Field0)
+	}
+
+	histogramMetric := recorder.MetricByNameAndLabels("test.histogram", nil)
+	if histogramMetric == nil {
+		t.Fatal("MetricByNameAndLabels(test.histogram): got nil metric")
+	}
+	histogramValue, ok := histogramMetric.Value.(slatedb.MetricValueHistogram)
+	if !ok {
+		t.Fatalf("MetricByNameAndLabels(test.histogram): got %T, want MetricValueHistogram", histogramMetric.Value)
+	}
+	if histogramValue.Field0.Count != 2 {
+		t.Fatalf("histogram count: got %d, want 2", histogramValue.Field0.Count)
+	}
+	if histogramValue.Field0.Sum != 4.5 {
+		t.Fatalf("histogram sum: got %f, want 4.5", histogramValue.Field0.Sum)
+	}
+
+	if got := recorder.Snapshot(); len(got) < 4 {
+		t.Fatalf("Snapshot(): got %d metrics, want at least 4", len(got))
+	}
+}
+
+func TestDbBuilderWithCustomMetricsRecorder(t *testing.T) {
+	store := newMemoryStore(t)
+	recorder := newTestMetricsRecorder()
+	handle := openTestDB(t, store, func(t *testing.T, builder *slatedb.DbBuilder) {
+		t.Helper()
+		if err := builder.WithMetricsRecorder(recorder); err != nil {
+			t.Fatalf("WithMetricsRecorder(): %v", err)
+		}
+	})
+
+	if _, err := handle.db.Put([]byte("k1"), []byte("v1")); err != nil {
+		t.Fatalf("Put(k1): %v", err)
+	}
+	if _, err := handle.db.Put([]byte("k2"), []byte("v2")); err != nil {
+		t.Fatalf("Put(k2): %v", err)
+	}
+
+	value, ok := recorder.counterValue(dbWriteOpsMetricName, nil)
+	if !ok {
+		t.Fatalf("counter %q was never registered", dbWriteOpsMetricName)
+	}
+	if value != 2 {
+		t.Fatalf("counter %q: got %d, want 2", dbWriteOpsMetricName, value)
+	}
+}
+
+func TestDbReaderBuilderWithDefaultMetricsRecorder(t *testing.T) {
+	store := newMemoryStore(t)
+	writer := openTestDB(t, store, nil)
+
+	if _, err := writer.db.Put([]byte("key1"), []byte("value1")); err != nil {
+		t.Fatalf("Put(key1): %v", err)
+	}
+	if err := writer.db.Flush(); err != nil {
+		t.Fatalf("Flush(): %v", err)
+	}
+	if err := writer.db.Shutdown(); err != nil {
+		t.Fatalf("writer Shutdown(): %v", err)
+	}
+	writer.open = false
+
+	recorder := slatedb.NewDefaultMetricsRecorder()
+	t.Cleanup(recorder.Destroy)
+
+	reader := openTestReader(t, store, func(t *testing.T, builder *slatedb.DbReaderBuilder) {
+		t.Helper()
+		if err := builder.WithMetricsRecorder(recorder); err != nil {
+			t.Fatalf("WithMetricsRecorder(): %v", err)
+		}
+	})
+
+	value, err := reader.reader.Get([]byte("key1"))
+	if err != nil {
+		t.Fatalf("Get(key1): %v", err)
+	}
+	if value == nil || !bytes.Equal(*value, []byte("value1")) {
+		t.Fatalf("Get(key1): got %v, want value1", value)
+	}
+
+	metric := recorder.MetricByNameAndLabels(dbRequestCountMetricName, []slatedb.MetricLabel{
+		{Key: "op", Value: "get"},
+	})
+	if metric == nil {
+		t.Fatalf("MetricByNameAndLabels(%q): got nil metric", dbRequestCountMetricName)
+	}
+	counterValue, ok := metric.Value.(slatedb.MetricValueCounter)
+	if !ok {
+		t.Fatalf("MetricByNameAndLabels(%q): got %T, want MetricValueCounter", dbRequestCountMetricName, metric.Value)
+	}
+	if counterValue.Field0 != 1 {
+		t.Fatalf("counter %q: got %d, want 1", dbRequestCountMetricName, counterValue.Field0)
+	}
 }

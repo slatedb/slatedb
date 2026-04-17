@@ -30,17 +30,11 @@ test("db lifecycle and status", async (t) => {
   const store = cleanup.track(newMemoryStore());
   const db = await openDb(store, { cleanup });
 
-  db.status();
+  assert.equal(db.status().close_reason, undefined);
   await db.put(bytes("lifecycle"), bytes("value"));
   await db.shutdown();
 
-  await expectClosed(
-    () => db.status(),
-    {
-      reason: CloseReason.Clean,
-      message: "Closed error: db is closed",
-    },
-  );
+  assert.equal(db.status().close_reason, CloseReason.Clean);
 
   await expectClosed(
     () => db.put(bytes("after-shutdown"), bytes("value")),
@@ -315,16 +309,6 @@ test("db invalid inputs map to typed errors", async (t) => {
 
   await expectInvalid(
     () => db.scan({
-      start: bytes(""),
-      start_inclusive: true,
-      end: undefined,
-      end_inclusive: false,
-    }),
-    { message: "range start cannot be empty" },
-  );
-
-  await expectInvalid(
-    () => db.scan({
       start: bytes("z"),
       start_inclusive: true,
       end: bytes("a"),
@@ -342,6 +326,16 @@ test("db invalid inputs map to typed errors", async (t) => {
     }),
     { message: "range must be non-empty" },
   );
+
+  // Scan with empty start bound should succeed and be treated as unbounded start.
+  await db.put(bytes("seed"), bytes("value"));
+  const emptyStartScan = cleanup.track(await db.scan({
+    start: bytes(""),
+    start_inclusive: true,
+    end: undefined,
+    end_inclusive: false,
+  }));
+  requireRows(await drainIterator(emptyStartScan), ["seed"], ["value"]);
 });
 
 test("db writer fencing reports closed reason", async (t) => {

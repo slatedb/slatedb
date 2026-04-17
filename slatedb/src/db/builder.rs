@@ -102,8 +102,10 @@
 //! ```
 //!
 use std::collections::HashMap;
+use std::ops::{Bound, RangeBounds};
 use std::sync::Arc;
 
+use bytes::Bytes;
 use fail_parallel::FailPointRegistry;
 use log::info;
 use log::warn;
@@ -111,7 +113,6 @@ use object_store::path::Path;
 use object_store::ObjectStore;
 use rand::RngCore;
 use tokio::runtime::Handle;
-use tokio::sync::mpsc;
 
 use crate::admin::Admin;
 use crate::batch_write::WriteBatchEventHandler;
@@ -136,23 +137,26 @@ use crate::db::DbInner;
 use crate::db_cache::SplitCache;
 use crate::db_cache::{DbCache, DbCacheWrapper};
 use crate::db_reader::DbReader;
-use crate::db_state::ManifestCore;
-use crate::db_status::ClosedResultWriter;
+use crate::db_status::{ClosedResultWriter, DbStatusManager};
 use crate::dispatcher::MessageHandlerExecutor;
 use crate::error::SlateDBError;
+use crate::filter_policy::BloomFilterPolicy;
 use crate::format::sst::{BlockTransformer, SsTableFormat};
 use crate::garbage_collector::GarbageCollector;
 use crate::garbage_collector::GC_TASK_NAME;
+use crate::instrumented_object_store::{InstrumentedObjectStore, ObjectStoreComponent};
 use crate::manifest::store::{FenceableManifest, ManifestStore, StoredManifest};
-use crate::mem_table_flush::MemtableFlusher;
-use crate::mem_table_flush::MEMTABLE_FLUSHER_TASK_NAME;
+use crate::manifest::ManifestCore;
+use crate::memtable_flusher::MemtableFlusher;
 use crate::merge_operator::MergeOperatorType;
+use crate::object_stores::ObjectStoreType;
 use crate::object_stores::ObjectStores;
 use crate::paths::PathResolver;
 use crate::rand::DbRand;
 use crate::retrying_object_store::RetryingObjectStore;
 use crate::store_provider::DefaultStoreProvider;
 use crate::tablestore::TableStore;
+use crate::utils::SafeSender;
 use crate::utils::WatchableOnceCell;
 use slatedb_common::clock::DefaultSystemClock;
 use slatedb_common::clock::SystemClock;
@@ -160,6 +164,7 @@ use slatedb_common::metrics::MetricLevel;
 use slatedb_common::metrics::MetricsRecorder;
 use slatedb_common::metrics::MetricsRecorderHelper;
 use slatedb_common::metrics::NoopMetricsRecorder;
+use uuid::Uuid;
 
 /// A builder for creating a new Db instance.
 ///
@@ -356,6 +361,12 @@ impl<P: Into<Path>> DbBuilder<P> {
 
     /// Builds and opens the database.
     pub async fn build(self) -> Result<Db, crate::Error> {
+        if self.settings.l0_flush_parallelism == 0 {
+            return Err(crate::Error::invalid(
+                "invalid configuration: l0_flush_parallelism must be at least 1".into(),
+            ));
+        }
+
         let path = self.path.into();
         // TODO: proper URI generation, for now it works just as a flag
         let wal_object_store_uri = self.wal_object_store.as_ref().map(|_| String::new());
@@ -365,18 +376,25 @@ impl<P: Into<Path>> DbBuilder<P> {
             .system_clock
             .unwrap_or_else(|| Arc::new(DefaultSystemClock::new()));
 
-        let retrying_main_object_store = Arc::new(RetryingObjectStore::new(
+        let recorder = MetricsRecorderHelper::new(self.metrics_recorder, MetricLevel::default());
+        let retrying_main_object_store = instrumented_retrying_object_store(
             self.main_object_store,
+            &recorder,
+            ObjectStoreComponent::Db,
+            ObjectStoreType::Main,
             rand.clone(),
             system_clock.clone(),
-        ));
+        );
         let retrying_wal_object_store: Option<Arc<dyn ObjectStore>> =
             self.wal_object_store.map(|s| {
-                Arc::new(RetryingObjectStore::new(
+                instrumented_retrying_object_store(
                     s,
+                    &recorder,
+                    ObjectStoreComponent::Db,
+                    ObjectStoreType::Wal,
                     rand.clone(),
                     system_clock.clone(),
-                )) as Arc<dyn ObjectStore>
+                )
             });
 
         // Log the database opening
@@ -393,8 +411,6 @@ impl<P: Into<Path>> DbBuilder<P> {
         }
 
         // Setup the components
-        // Setup metrics recorder
-        let recorder = MetricsRecorderHelper::new(self.metrics_recorder, MetricLevel::default());
         let block_format = {
             #[cfg(test)]
             {
@@ -407,7 +423,9 @@ impl<P: Into<Path>> DbBuilder<P> {
         };
         let sst_format = SsTableFormat {
             min_filter_keys: self.settings.min_filter_keys,
-            filter_bits_per_key: self.settings.filter_bits_per_key,
+            filter_policies: vec![Arc::new(BloomFilterPolicy::new(
+                self.settings.filter_bits_per_key,
+            ))],
             compression_codec: self.settings.compression_codec,
             block_size: self.sst_block_size.unwrap_or_default().as_bytes(),
             block_transformer: self.block_transformer.clone(),
@@ -498,23 +516,33 @@ impl<P: Into<Path>> DbBuilder<P> {
         )
         .await?;
 
-        // Setup communication channels
-        let (memtable_flush_tx, memtable_flush_rx) = tokio::sync::mpsc::unbounded_channel();
-        let (write_tx, write_rx) = tokio::sync::mpsc::unbounded_channel();
+        // Shared lifecycle state — created before DbInner so it can be shared
+        // with the executor and future channel construction.
+        let manifest_dirty = manifest.prepare_dirty()?;
+        let status_manager = DbStatusManager::new_with_manifest(
+            manifest_dirty.value.core.last_l0_seq,
+            manifest_dirty.clone().into(),
+        );
+
+        // Setup communication channels wired to the shared closed state.
+        let reader = status_manager.result_reader();
+        let (write_tx, write_rx) = SafeSender::unbounded_channel(reader);
 
         // Create the database inner state
+        let memtable_flusher = Arc::new(MemtableFlusher::new(&status_manager));
         let inner = Arc::new(
             DbInner::new(
                 self.settings.clone(),
                 system_clock.clone(),
                 rand.clone(),
                 table_store.clone(),
-                manifest.prepare_dirty()?,
-                memtable_flush_tx,
+                manifest_dirty,
+                Arc::clone(&memtable_flusher),
                 write_tx,
                 recorder.clone(),
                 self.fp_registry.clone(),
                 self.merge_operator.clone(),
+                status_manager.clone(),
             )
             .await?,
         );
@@ -527,25 +555,18 @@ impl<P: Into<Path>> DbBuilder<P> {
         // Setup background tasks
         let tokio_handle = Handle::current();
         let task_executor = Arc::new(MessageHandlerExecutor::new(
-            inner.clone().state.read().closed_result(),
+            Arc::new(status_manager),
             system_clock.clone(),
         ));
         if inner.wal_enabled {
             inner.wal_buffer.init(task_executor.clone()).await?;
         };
         task_executor.add_handler(
-            MEMTABLE_FLUSHER_TASK_NAME.to_string(),
-            Box::new(MemtableFlusher::new(inner.clone(), manifest)),
-            memtable_flush_rx,
-            &tokio_handle,
-        )?;
-        task_executor.add_handler(
             WRITE_BATCH_TASK_NAME.to_string(),
             Box::new(WriteBatchEventHandler::new(inner.clone())),
             write_rx,
             &tokio_handle,
         )?;
-
         // Not to pollute the cache during compaction or GC
         let uncached_table_store = Arc::new(TableStore::new_with_fp_registry(
             ObjectStores::new(
@@ -611,10 +632,20 @@ impl<P: Into<Path>> DbBuilder<P> {
                     compactions_store.clone(),
                 );
             // Garbage collector only uses tickers, so pass in a dummy rx channel
-            let (_, rx) = mpsc::unbounded_channel();
+            let (_, rx) = async_channel::unbounded();
             let gc_handle = self.gc_runtime.as_ref().unwrap_or(&tokio_handle);
             task_executor.add_handler(GC_TASK_NAME.to_string(), Box::new(gc), rx, gc_handle)?;
         }
+
+        // Start the memtable flusher before WAL replay so that
+        // replayed immutable memtables can be flushed concurrently.
+        memtable_flusher.start(
+            inner.clone(),
+            manifest,
+            &tokio_handle,
+            &task_executor,
+            &inner.status_manager,
+        )?;
 
         // Monitor background tasks
         task_executor.monitor_on(&tokio_handle)?;
@@ -808,17 +839,23 @@ impl<P: Into<Path>> GarbageCollectorBuilder<P> {
     /// Builds and returns a GarbageCollector instance.
     pub fn build(self) -> GarbageCollector {
         let path: Path = self.path.into();
-        let retrying_main_object_store = Arc::new(RetryingObjectStore::new(
+        let retrying_main_object_store = instrumented_retrying_object_store(
             self.main_object_store,
+            &self.recorder,
+            ObjectStoreComponent::Gc,
+            ObjectStoreType::Main,
             self.rand.clone(),
             self.system_clock.clone(),
-        ));
+        );
         let retrying_wal_object_store = self.wal_object_store.map(|s| {
-            Arc::new(RetryingObjectStore::new(
+            instrumented_retrying_object_store(
                 s,
+                &self.recorder,
+                ObjectStoreComponent::Gc,
+                ObjectStoreType::Wal,
                 self.rand.clone(),
                 self.system_clock.clone(),
-            )) as Arc<dyn ObjectStore>
+            )
         });
         let manifest_store = Arc::new(ManifestStore::new(
             &path,
@@ -860,7 +897,7 @@ pub struct CompactorBuilder<P: Into<Path>> {
     rand: Arc<DbRand>,
     recorder: MetricsRecorderHelper,
     system_clock: Arc<dyn SystemClock>,
-    closed_result: ClosedResultWriter,
+    closed_result: Arc<dyn ClosedResultWriter>,
     merge_operator: Option<MergeOperatorType>,
     block_transformer: Option<Arc<dyn BlockTransformer>>,
     #[cfg(feature = "compaction_filters")]
@@ -879,7 +916,7 @@ impl<P: Into<Path>> CompactorBuilder<P> {
             rand: Arc::new(DbRand::default()),
             recorder: MetricsRecorderHelper::noop(),
             system_clock: Arc::new(DefaultSystemClock::default()),
-            closed_result: ClosedResultWriter::new(WatchableOnceCell::new()),
+            closed_result: Arc::new(WatchableOnceCell::new()),
             merge_operator: None,
             block_transformer: None,
             #[cfg(feature = "compaction_filters")]
@@ -992,11 +1029,14 @@ impl<P: Into<Path>> CompactorBuilder<P> {
     /// Builds and returns a Compactor instance.
     pub fn build(self) -> Compactor {
         let path: Path = self.path.into();
-        let retrying_main_object_store = Arc::new(RetryingObjectStore::new(
+        let retrying_main_object_store = instrumented_retrying_object_store(
             self.main_object_store,
+            &self.recorder,
+            ObjectStoreComponent::Compactor,
+            ObjectStoreType::Main,
             self.rand.clone(),
             self.system_clock.clone(),
-        ));
+        );
         let manifest_store = Arc::new(ManifestStore::new(
             &path,
             retrying_main_object_store.clone(),
@@ -1050,7 +1090,7 @@ impl<P: Into<Path>> CompactorBuilder<P> {
     ) -> Result<
         (
             CompactorEventHandler,
-            mpsc::UnboundedReceiver<CompactorMessage>,
+            async_channel::Receiver<CompactorMessage>,
         ),
         SlateDBError,
     > {
@@ -1059,7 +1099,7 @@ impl<P: Into<Path>> CompactorBuilder<P> {
         let scheduler_supplier = self
             .scheduler_supplier
             .unwrap_or(Arc::new(SizeTieredCompactionSchedulerSupplier));
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, rx) = async_channel::unbounded();
         let scheduler = Arc::from(scheduler_supplier.compaction_scheduler(&options));
         let stats = Arc::new(CompactionStats::new(&self.recorder));
         let executor = Arc::new(TokioCompactionExecutor::new(
@@ -1263,19 +1303,25 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
         let path = self.path.into();
         // TODO: proper URI generation, for now it works just as a flag
         let wal_object_store_uri = self.wal_object_store.as_ref().map(|_| String::new());
-        let retrying_object_store = Arc::new(RetryingObjectStore::new(
+        let retrying_object_store = instrumented_retrying_object_store(
             self.object_store,
+            &self.recorder,
+            ObjectStoreComponent::Reader,
+            ObjectStoreType::Main,
             self.rand.clone(),
             self.system_clock.clone(),
-        ));
+        );
 
         let retrying_wal_object_store: Option<Arc<dyn ObjectStore>> =
             self.wal_object_store.map(|s| {
-                Arc::new(RetryingObjectStore::new(
+                instrumented_retrying_object_store(
                     s,
+                    &self.recorder,
+                    ObjectStoreComponent::Reader,
+                    ObjectStoreType::Wal,
                     self.rand.clone(),
                     self.system_clock.clone(),
-                )) as Arc<dyn ObjectStore>
+                )
             });
 
         // Setup object store with optional caching
@@ -1342,6 +1388,151 @@ fn default_db_cache() -> Option<Arc<dyn DbCache>> {
     ) as Arc<dyn DbCache>)
 }
 
+/// Specifies the source database and checkpoint for a clone operation.
+pub struct CloneSourceSpec<R: RangeBounds<Bytes> + Clone = (Bound<Bytes>, Bound<Bytes>)> {
+    /// Path to the parent/source database.
+    pub path: Path,
+    /// Optional checkpoint ID to clone from. If None, the latest state is used.
+    pub checkpoint: Option<Uuid>,
+    /// Optional range to limit the visible keys in the source database.
+    pub projection_range: Option<R>,
+}
+
+impl<R: RangeBounds<Bytes> + Clone> Clone for CloneSourceSpec<R> {
+    fn clone(&self) -> Self {
+        CloneSourceSpec {
+            path: self.path.clone(),
+            checkpoint: self.checkpoint,
+            projection_range: self.projection_range.clone(),
+        }
+    }
+}
+
+impl<R: RangeBounds<Bytes> + Clone> CloneSourceSpec<R> {
+    /// Set the visible range to limit the keys visible in the source database.
+    pub fn with_projection_range(mut self, range: R) -> Self {
+        self.projection_range = Some(range);
+        self
+    }
+}
+
+impl CloneSourceSpec<(Bound<Bytes>, Bound<Bytes>)> {
+    /// Create a new clone source pointing to the latest state of a database.
+    pub fn new<P: Into<Path>>(path: P) -> Self {
+        CloneSourceSpec {
+            path: path.into(),
+            checkpoint: None,
+            projection_range: None,
+        }
+    }
+
+    /// Create a new clone source pointing to a specific checkpoint.
+    pub fn with_checkpoint<P: Into<Path>>(path: P, checkpoint: Uuid) -> Self {
+        CloneSourceSpec {
+            path: path.into(),
+            checkpoint: Some(checkpoint),
+            projection_range: None,
+        }
+    }
+}
+
+/// A builder for configuring database clone operations.
+pub struct CloneBuilder<R: RangeBounds<Bytes> + Clone = (Bound<Bytes>, Bound<Bytes>)> {
+    clone_path: Path,
+    source: CloneSourceSpec<R>,
+    object_store: Arc<dyn ObjectStore>,
+    wal_object_store: Option<Arc<dyn ObjectStore>>,
+    system_clock: Option<Arc<dyn SystemClock>>,
+    rand: Option<Arc<DbRand>>,
+    projection_range: Option<R>,
+}
+
+impl<R: RangeBounds<Bytes> + Clone> CloneBuilder<R> {
+    pub(crate) fn new(
+        clone_path: Path,
+        source: CloneSourceSpec<R>,
+        object_store: Arc<dyn ObjectStore>,
+    ) -> Self {
+        CloneBuilder {
+            clone_path,
+            source,
+            object_store,
+            wal_object_store: None,
+            system_clock: None,
+            rand: None,
+            projection_range: None,
+        }
+    }
+
+    pub fn with_clone_path(mut self, clone_path: Path) -> Self {
+        self.clone_path = clone_path;
+        self
+    }
+
+    pub fn with_source(mut self, source: CloneSourceSpec<R>) -> Self {
+        self.source = source;
+        self
+    }
+
+    pub fn with_object_store(mut self, object_store: Arc<dyn ObjectStore>) -> Self {
+        self.object_store = object_store;
+        self
+    }
+
+    pub fn with_wal_object_store(mut self, wal_object_store: Arc<dyn ObjectStore>) -> Self {
+        self.wal_object_store = Some(wal_object_store);
+        self
+    }
+
+    pub fn with_projection_range(mut self, projection_range: Option<R>) -> Self {
+        self.projection_range = projection_range;
+        self
+    }
+
+    pub fn with_system_clock(mut self, system_clock: Arc<dyn SystemClock>) -> Self {
+        self.system_clock = Some(system_clock);
+        self
+    }
+
+    pub fn with_seed(mut self, seed: u64) -> Self {
+        self.rand = Some(Arc::new(DbRand::new(seed)));
+        self
+    }
+
+    /// Build and execute the clone operation.
+    pub async fn build(self) -> Result<(), Box<dyn std::error::Error>> {
+        crate::clone::create_clone(
+            self.source,
+            self.clone_path,
+            ObjectStores::new(self.object_store, self.wal_object_store),
+            Arc::new(FailPointRegistry::new()),
+            self.system_clock
+                .unwrap_or_else(|| Arc::new(DefaultSystemClock::new())),
+            self.rand.unwrap_or_else(|| Arc::new(Default::default())),
+            self.projection_range,
+        )
+        .await?;
+        Ok(())
+    }
+}
+
+fn instrumented_retrying_object_store(
+    object_store: Arc<dyn ObjectStore>,
+    recorder: &MetricsRecorderHelper,
+    component: ObjectStoreComponent,
+    store_type: ObjectStoreType,
+    rand: Arc<DbRand>,
+    system_clock: Arc<dyn SystemClock>,
+) -> Arc<dyn ObjectStore> {
+    let instrumented: Arc<dyn ObjectStore> = Arc::new(InstrumentedObjectStore::new(
+        object_store,
+        recorder,
+        component,
+        store_type,
+    ));
+    Arc::new(RetryingObjectStore::new(instrumented, rand, system_clock))
+}
+
 #[allow(unreachable_code)]
 pub(crate) fn default_block_cache() -> Option<Arc<dyn DbCache>> {
     #[cfg(feature = "foyer")]
@@ -1393,10 +1584,28 @@ pub(crate) fn default_meta_cache() -> Option<Arc<dyn DbCache>> {
 #[cfg(test)]
 mod tests {
     use crate::config::Settings;
+    use crate::error::ErrorKind;
     use crate::garbage_collector::stats::GC_COUNT;
+    use crate::instrumented_object_store::stats::REQUEST_COUNT as OBJECT_STORE_REQUEST_COUNT;
     use object_store::memory::InMemory;
-    use slatedb_common::metrics::{lookup_metric, DefaultMetricsRecorder};
+    use slatedb_common::metrics::{
+        lookup_metric, lookup_metric_with_labels, DefaultMetricsRecorder,
+    };
     use std::sync::Arc;
+
+    fn object_store_labels(
+        component: &'static str,
+        store_type: &'static str,
+        op: &'static str,
+        api: &'static str,
+    ) -> [(&'static str, &'static str); 4] {
+        [
+            ("component", component),
+            ("store_type", store_type),
+            ("op", op),
+            ("api", api),
+        ]
+    }
 
     #[tokio::test]
     async fn test_db_builder_starts_gc_by_default() {
@@ -1437,6 +1646,89 @@ mod tests {
         assert!(
             lookup_metric(&metrics_recorder, GC_COUNT).is_none(),
             "GC should not be initialized when options are None"
+        );
+
+        db.close().await.expect("failed to close db");
+    }
+
+    #[tokio::test]
+    async fn test_db_builder_rejects_zero_l0_flush_parallelism() {
+        let result = crate::Db::builder(
+            "test_db_builder_rejects_zero_l0_flush_parallelism",
+            Arc::new(InMemory::new()),
+        )
+        .with_settings(Settings {
+            l0_flush_parallelism: 0,
+            ..Settings::default()
+        })
+        .build()
+        .await;
+
+        let err = match result {
+            Ok(_) => panic!("expected invalid l0_flush_parallelism to fail"),
+            Err(err) => err,
+        };
+
+        assert!(matches!(err.kind(), ErrorKind::Invalid));
+        assert!(
+            err.to_string()
+                .contains("l0_flush_parallelism must be at least 1"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_shared_recorder_registers_object_store_metrics_for_db_gc_and_compactor() {
+        // given:
+        let metrics_recorder = Arc::new(DefaultMetricsRecorder::new());
+        let path = "test_shared_recorder_registers_object_store_metrics_for_db_gc_and_compactor";
+        let object_store = Arc::new(InMemory::new());
+        let db = crate::Db::builder(path, object_store.clone())
+            .with_settings(Settings {
+                compactor_options: None,
+                garbage_collector_options: None,
+                ..Settings::default()
+            })
+            .with_metrics_recorder(metrics_recorder.clone())
+            .build()
+            .await
+            .expect("failed to build db");
+        let gc = crate::GarbageCollectorBuilder::new(path, object_store.clone())
+            .with_metrics_recorder(metrics_recorder.clone())
+            .build();
+        let _compactor = crate::CompactorBuilder::new(path, object_store)
+            .with_metrics_recorder(metrics_recorder.clone())
+            .build();
+
+        // when:
+        db.put(b"k1", b"v1")
+            .await
+            .expect("failed to write db value");
+        db.flush().await.expect("failed to flush db");
+        gc.run_gc_once().await;
+
+        // then:
+        assert!(lookup_metric_with_labels(
+            &metrics_recorder,
+            OBJECT_STORE_REQUEST_COUNT,
+            &object_store_labels("db", "main", "put", "put"),
+        )
+        .is_some_and(|count| count > 0));
+        assert_eq!(
+            lookup_metric_with_labels(
+                &metrics_recorder,
+                OBJECT_STORE_REQUEST_COUNT,
+                &object_store_labels("gc", "main", "put", "put"),
+            ),
+            Some(0)
+        );
+        assert_eq!(
+            lookup_metric_with_labels(
+                &metrics_recorder,
+                OBJECT_STORE_REQUEST_COUNT,
+                &object_store_labels("compactor", "main", "put", "put"),
+            ),
+            Some(0)
         );
 
         db.close().await.expect("failed to close db");

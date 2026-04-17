@@ -1,8 +1,8 @@
 use crate::blob::ReadOnlyBlob;
 use crate::config::CompressionCodec;
-use crate::db_state::{SsTableInfo, SsTableInfoCodec, SstType};
+use crate::db_state::{FilterFormat, SsTableInfo, SsTableInfoCodec, SstType};
 use crate::error::SlateDBError;
-use crate::filter::BloomFilter;
+use crate::filter_policy::{BloomFilterPolicy, FilterPolicy, NamedFilter};
 use crate::flatbuffer_types::{
     BlockMeta, FlatBufferSsTableInfoCodec, SsTableIndex, SsTableIndexArgs, SsTableIndexOwned,
 };
@@ -13,6 +13,7 @@ use crate::sst_stats::{BlockStats, SstStats};
 use async_trait::async_trait;
 use bytes::{Buf, BufMut, Bytes};
 use flatbuffers::DefaultAllocator;
+use log::warn;
 use std::collections::VecDeque;
 #[cfg(feature = "zlib")]
 use std::io::Read;
@@ -292,7 +293,7 @@ impl EncodedSsTableBlockBuilder {
 pub(crate) struct EncodedSsTableFooter {
     pub(crate) info: SsTableInfo,
     pub(crate) index: SsTableIndexOwned,
-    pub(crate) filter: Option<Arc<BloomFilter>>,
+    pub(crate) filters: Arc<[NamedFilter]>,
     #[allow(dead_code)]
     pub(crate) stats: Option<SstStats>,
     pub(crate) encoded_bytes: Bytes,
@@ -316,8 +317,8 @@ pub(crate) struct EncodedSsTableFooterBuilder<'a, 'b> {
     index_builder: flatbuffers::FlatBufferBuilder<'b, flatbuffers::DefaultAllocator>,
     /// metadata block
     block_meta: Vec<flatbuffers::WIPOffset<BlockMeta<'b>>>,
-    /// filter block
-    filter: Option<(Arc<BloomFilter>, Bytes)>,
+    /// filter blocks
+    filters: Arc<[NamedFilter]>,
     /// stats block
     stats: Option<SstStats>,
     /// SST format version
@@ -346,7 +347,7 @@ impl<'a, 'b> EncodedSsTableFooterBuilder<'a, 'b> {
             sst_info_codec: sst_codec,
             index_builder,
             block_meta,
-            filter: None,
+            filters: Arc::from([]),
             stats: None,
             sst_format_version,
             sst_type,
@@ -371,9 +372,9 @@ impl<'a, 'b> EncodedSsTableFooterBuilder<'a, 'b> {
         self
     }
 
-    /// Adds a bloom filter to the footer.
-    pub(crate) fn with_filter(mut self, filter: Arc<BloomFilter>, encoded_filter: Bytes) -> Self {
-        self.filter = Some((filter, encoded_filter));
+    /// Adds filters to the footer as a composite block.
+    pub(crate) fn with_filters(mut self, filters: Arc<[NamedFilter]>) -> Self {
+        self.filters = filters;
         self
     }
 
@@ -381,20 +382,33 @@ impl<'a, 'b> EncodedSsTableFooterBuilder<'a, 'b> {
     pub(crate) async fn build(mut self) -> Result<EncodedSsTableFooter, SlateDBError> {
         let mut buf = Vec::new();
 
-        // Write filter block if present
+        // Write composite filter block if any filters are present
         let filter_offset = self.blocks_size + buf.len() as u64;
-        let (filter_len, maybe_filter) = match self.filter.take() {
-            Some((filter, encoded_filter)) => {
-                let len = compress_and_transform(
-                    &mut buf,
-                    encoded_filter,
-                    self.compression_codec,
-                    self.block_transformer.as_ref(),
-                )
-                .await?;
-                (len as u64, Some(filter))
+        let filters = std::mem::take(&mut self.filters);
+        let filter_len = if filters.is_empty() {
+            0u64
+        } else {
+            // Encode composite filter block:
+            // [num_filters: u16][name_len: u16][name_bytes...][data_len: u64][data_bytes...]...
+            let mut composite = Vec::new();
+            composite.put_u16(u16::try_from(filters.len()).expect("too many filters"));
+            for nf in filters.iter() {
+                let name_bytes = nf.name.as_bytes();
+                composite
+                    .put_u16(u16::try_from(name_bytes.len()).expect("filter policy name too long"));
+                composite.put_slice(name_bytes);
+                let mut encoded_data = Vec::new();
+                nf.filter.encode(&mut encoded_data);
+                composite.put_u64(encoded_data.len() as u64);
+                composite.put_slice(&encoded_data);
             }
-            None => (0u64, None),
+            compress_and_transform(
+                &mut buf,
+                Bytes::from(composite),
+                self.compression_codec,
+                self.block_transformer.as_ref(),
+            )
+            .await? as u64
         };
 
         let vector = self.index_builder.create_vector(&self.block_meta);
@@ -434,6 +448,7 @@ impl<'a, 'b> EncodedSsTableFooterBuilder<'a, 'b> {
         };
 
         let meta_offset = self.blocks_size + buf.len() as u64;
+        let filter_format = FilterFormat::Composite;
         let info = SsTableInfo {
             first_entry: self.first_entry,
             last_entry: self.last_entry,
@@ -445,6 +460,7 @@ impl<'a, 'b> EncodedSsTableFooterBuilder<'a, 'b> {
             sst_type: self.sst_type,
             stats_offset,
             stats_len,
+            filter_format,
         };
         SsTableInfo::encode(&info, &mut buf, self.sst_info_codec);
 
@@ -454,7 +470,7 @@ impl<'a, 'b> EncodedSsTableFooterBuilder<'a, 'b> {
         Ok(EncodedSsTableFooter {
             info,
             index,
-            filter: maybe_filter,
+            filters,
             stats: maybe_stats,
             encoded_bytes: Bytes::from(buf),
         })
@@ -465,7 +481,7 @@ pub(crate) struct EncodedSsTable {
     pub(crate) format_version: u16,
     pub(crate) info: SsTableInfo,
     pub(crate) index: SsTableIndexOwned,
-    pub(crate) filter: Option<Arc<BloomFilter>>,
+    pub(crate) filters: Arc<[NamedFilter]>,
     #[allow(dead_code)]
     pub(crate) stats: Option<SstStats>,
     pub(crate) unconsumed_blocks: VecDeque<EncodedSsTableBlock>,
@@ -473,6 +489,14 @@ pub(crate) struct EncodedSsTable {
 }
 
 impl EncodedSsTable {
+    pub(crate) fn remaining_len(&self) -> usize {
+        self.unconsumed_blocks
+            .iter()
+            .map(|chunk| chunk.encoded_bytes.len())
+            .sum::<usize>()
+            + self.footer.len()
+    }
+
     pub(crate) fn put_remaining<T: BufMut>(&self, buf: &mut T) {
         for chunk in self.unconsumed_blocks.iter() {
             buf.put_slice(chunk.encoded_bytes.as_ref())
@@ -481,12 +505,7 @@ impl EncodedSsTable {
     }
 
     pub(crate) fn remaining_as_bytes(&self) -> Bytes {
-        let total_size = self
-            .unconsumed_blocks
-            .iter()
-            .map(|chunk| chunk.encoded_bytes.len())
-            .sum::<usize>()
-            + self.footer.len();
+        let total_size = self.remaining_len();
         let mut data = Vec::<u8>::with_capacity(total_size);
         self.put_remaining(&mut data);
         Bytes::from(data)
@@ -508,6 +527,14 @@ pub(crate) async fn compress_and_transform(
     let transformed = transform(compressed, block_transformer).await?;
     let checksum = crc32fast::hash(&transformed);
     let len = transformed.len() + CHECKSUM_SIZE;
+    // Reserve the exact number of bytes we are about to append. Without this,
+    // callers that pass an empty or undersized `Vec` (e.g.
+    // `EncodedSsTableBlockBuilder::build`, or the footer builder which calls
+    // this function multiple times on a shared `Vec`) pay `~log2(len)`
+    // reallocs per invocation as the backing buffer geometrically doubles.
+    // For workloads that build many blocks per SST (every write burst), those
+    // transient over-provisioned buffers dominate peak `inuse_space`.
+    buf.reserve(len);
     buf.put(transformed);
     buf.put_u32(checksum);
     Ok(len)
@@ -577,7 +604,7 @@ pub(crate) struct SsTableFormat {
     pub(crate) block_size: usize,
     pub(crate) min_filter_keys: u32,
     pub(crate) sst_codec: Box<dyn SsTableInfoCodec>,
-    pub(crate) filter_bits_per_key: u32,
+    pub(crate) filter_policies: Vec<Arc<dyn FilterPolicy>>,
     pub(crate) compression_codec: Option<CompressionCodec>,
     pub(crate) block_transformer: Option<Arc<dyn BlockTransformer>>,
     pub(crate) block_format: Option<crate::sst_builder::BlockFormat>,
@@ -589,7 +616,7 @@ impl Default for SsTableFormat {
             block_size: 4096,
             min_filter_keys: 0,
             sst_codec: Box::new(FlatBufferSsTableInfoCodec {}),
-            filter_bits_per_key: 10,
+            filter_policies: vec![Arc::new(BloomFilterPolicy::new(10))],
             compression_codec: None,
             block_transformer: None,
             block_format: None,
@@ -641,47 +668,28 @@ impl SsTableFormat {
         SsTableInfo::decode(sst_metadata_bytes, &*self.sst_codec).map(|info| (info, version))
     }
 
-    pub(crate) async fn read_filter(
+    pub(crate) async fn read_filters(
         &self,
         info: &SsTableInfo,
         obj: &impl ReadOnlyBlob,
-    ) -> Result<Option<Arc<BloomFilter>>, SlateDBError> {
-        let mut filter = None;
-        if info.filter_len > 0 {
-            let filter_end = info.filter_offset + info.filter_len;
-            let filter_offset_range = info.filter_offset..filter_end;
-            let filter_bytes = obj.read_range(filter_offset_range).await?;
-            let compression_codec = info.compression_codec;
-            filter = Some(Arc::new(
-                self.decode_filter(filter_bytes, compression_codec).await?,
-            ));
-        }
-        Ok(filter)
-    }
-
-    #[allow(dead_code)]
-    pub(crate) async fn read_filter_raw(
-        &self,
-        info: &SsTableInfo,
-        sst_bytes: &Bytes,
-    ) -> Result<Option<Arc<BloomFilter>>, SlateDBError> {
-        if info.filter_len == 0 {
-            return Ok(None);
+    ) -> Result<Arc<[NamedFilter]>, SlateDBError> {
+        if self.filter_policies.is_empty() || info.filter_len == 0 {
+            return Ok(Arc::from([]));
         }
         let filter_end = info.filter_offset + info.filter_len;
-        let filter_offset_range = info.filter_offset as usize..filter_end as usize;
-        let filter_bytes = sst_bytes.slice(filter_offset_range);
+        let filter_offset_range = info.filter_offset..filter_end;
+        let filter_bytes = obj.read_range(filter_offset_range).await?;
         let compression_codec = info.compression_codec;
-        Ok(Some(Arc::new(
-            self.decode_filter(filter_bytes, compression_codec).await?,
-        )))
+        self.decode_filters(info, filter_bytes, compression_codec)
+            .await
     }
 
-    pub(crate) async fn decode_filter(
+    async fn decode_filters(
         &self,
+        info: &SsTableInfo,
         bytes: Bytes,
         compression_codec: Option<CompressionCodec>,
-    ) -> Result<BloomFilter, SlateDBError> {
+    ) -> Result<Arc<[NamedFilter]>, SlateDBError> {
         let filter_bytes = self.validate_checksum(bytes)?;
 
         let untransformed_bytes = match &self.block_transformer {
@@ -696,7 +704,78 @@ impl SsTableFormat {
             None => untransformed_bytes,
         };
 
-        Ok(BloomFilter::decode(&decompressed_bytes))
+        match info.filter_format {
+            FilterFormat::Legacy => {
+                // Legacy pre-composite SST: raw filter bytes are decoded
+                // against the bloom filter policy if one is configured.
+                let legacy: Vec<NamedFilter> = self
+                    .filter_policies
+                    .iter()
+                    .find(|p| p.name() == BloomFilterPolicy::NAME)
+                    .map(|policy| NamedFilter {
+                        name: policy.name().to_string(),
+                        filter: policy.decode(&decompressed_bytes),
+                    })
+                    .into_iter()
+                    .collect();
+                Ok(legacy.into())
+            }
+            FilterFormat::Composite => self.decode_composite_filter_block(&decompressed_bytes),
+        }
+    }
+
+    /// Decodes a composite filter block.
+    ///
+    /// Format: `[num_filters: u16][name_len: u16][name_bytes...][data_len: u64][data_bytes...]...`
+    ///
+    /// Each filter's name is matched against the configured `filter_policies`.
+    /// Filters whose policy is not found are dropped to support filter migration.
+    fn decode_composite_filter_block(
+        &self,
+        data: &[u8],
+    ) -> Result<Arc<[NamedFilter]>, SlateDBError> {
+        let mut cursor = data;
+        if cursor.len() < 2 {
+            return Err(SlateDBError::InvalidFilterBlock);
+        }
+        let num_filters = cursor.get_u16() as usize;
+        let mut filters: Vec<NamedFilter> = Vec::with_capacity(num_filters);
+
+        for _ in 0..num_filters {
+            if cursor.len() < 2 {
+                return Err(SlateDBError::InvalidFilterBlock);
+            }
+            let name_len = cursor.get_u16() as usize;
+            if cursor.len() < name_len {
+                return Err(SlateDBError::InvalidFilterBlock);
+            }
+            let name = std::str::from_utf8(&cursor[..name_len])
+                .map_err(|_| SlateDBError::InvalidFilterBlock)?;
+            cursor.advance(name_len);
+
+            if cursor.len() < 8 {
+                return Err(SlateDBError::InvalidFilterBlock);
+            }
+            let data_len =
+                usize::try_from(cursor.get_u64()).map_err(|_| SlateDBError::InvalidFilterBlock)?;
+            if cursor.len() < data_len {
+                return Err(SlateDBError::InvalidFilterBlock);
+            }
+            let filter_data = &cursor[..data_len];
+            cursor.advance(data_len);
+
+            match self.filter_policies.iter().find(|p| p.name() == name) {
+                Some(policy) => filters.push(NamedFilter {
+                    name: policy.name().to_string(),
+                    filter: policy.decode(filter_data),
+                }),
+                None => {
+                    warn!("unknown filter policy '{}' in SST, skipping", name);
+                }
+            }
+        }
+
+        Ok(filters.into())
     }
 
     pub(crate) async fn read_index(
@@ -998,10 +1077,17 @@ impl SsTableFormat {
     }
 
     fn estimate_encoded_size_filter(&self, entry_num: usize) -> usize {
-        if entry_num >= self.min_filter_keys as usize {
-            BloomFilter::estimate_encoded_size(entry_num as u32, self.filter_bits_per_key)
+        if entry_num >= self.min_filter_keys as usize && !self.filter_policies.is_empty() {
+            // Composite block framing: [num_filters: u16]
+            let mut size = 2;
+            for p in &self.filter_policies {
+                // Per-filter framing: [name_len: u16][name_bytes][data_len: u64]
+                size += 2 + p.name().len() + 8;
+                size += p.estimate_size(entry_num);
+            }
+            size
         } else {
-            0usize
+            0
         }
     }
 }

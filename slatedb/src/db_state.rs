@@ -1,16 +1,11 @@
 use crate::bytes_range::BytesRange;
-use crate::checkpoint::Checkpoint;
 use crate::config::CompressionCodec;
-use crate::db_status::{ClosedResultWriter, DbStatusReporter};
 use crate::error::SlateDBError;
-use crate::manifest::Manifest;
+use crate::manifest::{Manifest, ManifestCore};
 use crate::mem_table::{ImmutableMemtable, KVTable, WritableKVTable};
 use crate::reader::DbStateReader;
-use crate::seq_tracker::SequenceTracker;
-use crate::utils::{WatchableOnceCell, WatchableOnceCellReader};
 use crate::wal_id::WalIdStore;
 use bytes::Bytes;
-use log::debug;
 use serde::Serialize;
 use slatedb_txn_obj::DirtyObject;
 use std::collections::VecDeque;
@@ -19,7 +14,6 @@ use std::ops::Bound::{Excluded, Included, Unbounded};
 use std::ops::{Bound, Range, RangeBounds};
 use std::sync::Arc;
 use ulid::Ulid;
-use uuid::Uuid;
 use SsTableId::{Compacted, Wal};
 
 /// A handle to an SSTable — the physical SST on storage.
@@ -293,9 +287,22 @@ pub enum SstType {
     Wal,
 }
 
+/// Filter block format stored in SsTableInfo.
+/// Default is `Composite` (the current format). `Legacy` is only set when
+/// decoding old SSTs via FlatBuffers (where the field is absent and maps to 0).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize)]
+pub enum FilterFormat {
+    /// Single raw bloom filter bytes (pre-composite format).
+    Legacy,
+    /// Block containing one or more named filters, each prefixed with its name
+    ///  and length.
+    #[default]
+    Composite,
+}
+
 /// Metadata information about an SSTable. See [`crate::sst_builder::EncodedSsTableBuilder`] for
 /// more information on the format of the SSTable and its metadata.
-#[derive(Clone, Debug, PartialEq, Serialize, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
 pub struct SsTableInfo {
     /// The first entry in the SSTable, if any.
     /// The first entry is a key in an SST for compacted data
@@ -321,6 +328,8 @@ pub struct SsTableInfo {
     pub stats_offset: u64,
     /// The length of the stats block within the SSTable file.
     pub stats_len: u64,
+    /// Filter block format.
+    pub filter_format: FilterFormat,
 }
 
 pub(crate) trait SsTableInfoCodec: Send + Sync {
@@ -355,7 +364,7 @@ impl SortedRun {
         self.sst_views.iter().map(|sst| sst.estimate_size()).sum()
     }
 
-    pub(crate) fn find_sst_with_range_covering_key_idx(&self, key: &[u8]) -> Option<usize> {
+    pub(crate) fn find_last_sst_with_range_covering_key(&self, key: &[u8]) -> Option<usize> {
         // returns the sst after the one whose range includes the key
         let first_sst = self
             .sst_views
@@ -367,9 +376,50 @@ impl SortedRun {
         None
     }
 
-    pub(crate) fn find_sst_with_range_covering_key(&self, key: &[u8]) -> Option<&SsTableView> {
-        self.find_sst_with_range_covering_key_idx(key)
-            .map(|idx| &self.sst_views[idx])
+    /// Returns the logical end bound for the SST view at `idx`.
+    ///
+    /// The bound is normally the next view's start key, but becomes inclusive
+    /// when adjacent views overlap on that boundary key.
+    fn table_end_bound(&self, idx: usize) -> Bound<Bytes> {
+        let current_sst = &self.sst_views[idx];
+        if idx + 1 < self.sst_views.len() {
+            let next_sst = &self.sst_views[idx + 1];
+            if current_sst
+                .compacted_effective_range()
+                .contains(next_sst.compacted_effective_start_key())
+            {
+                Included(next_sst.compacted_effective_start_key().clone())
+            } else {
+                Excluded(next_sst.compacted_effective_start_key().clone())
+            }
+        } else {
+            Unbounded
+        }
+    }
+
+    /// Returns the contiguous range of SST view indices that can contribute to a
+    /// point read for `key`.
+    ///
+    /// This uses the binary-search candidate as the upper bound, then walks
+    /// backward only across immediately overlapping views.
+    fn point_table_idx_covering_key(&self, key: &[u8]) -> Range<usize> {
+        let Some(max_idx) = self.find_last_sst_with_range_covering_key(key) else {
+            return 0..0;
+        };
+        let point_range = BytesRange::from_slice(key..=key);
+        if !self.sst_views[max_idx].intersects_range(self.table_end_bound(max_idx), &point_range) {
+            return 0..0;
+        }
+
+        let mut min_idx = max_idx;
+        while min_idx > 0
+            && self.sst_views[min_idx - 1]
+                .intersects_range(self.table_end_bound(min_idx - 1), &point_range)
+        {
+            min_idx -= 1;
+        }
+
+        min_idx..(max_idx + 1)
     }
 
     fn table_idx_covering_range(&self, range: &BytesRange) -> Range<usize> {
@@ -378,15 +428,7 @@ impl SortedRun {
 
         for idx in 0..self.sst_views.len() {
             let current_sst = &self.sst_views[idx];
-
-            let upper_bound = if idx + 1 < self.sst_views.len() {
-                let next_sst = &self.sst_views[idx + 1];
-                Excluded(next_sst.compacted_effective_start_key().clone())
-            } else {
-                Unbounded
-            };
-
-            if current_sst.intersects_range(upper_bound, range) {
+            if current_sst.intersects_range(self.table_end_bound(idx), range) {
                 if min_idx.is_none() {
                     min_idx = Some(idx);
                 }
@@ -408,6 +450,12 @@ impl SortedRun {
         self.sst_views[matching_range].iter().collect()
     }
 
+    /// Returns the SST views that may contain entries for the point key `key`.
+    pub(crate) fn tables_covering_point_key(&self, key: &[u8]) -> &[SsTableView] {
+        let matching_range = self.point_table_idx_covering_key(key);
+        &self.sst_views[matching_range]
+    }
+
     pub(crate) fn into_tables_covering_range(
         mut self,
         range: &BytesRange,
@@ -420,13 +468,6 @@ impl SortedRun {
 pub(crate) struct DbState {
     memtable: WritableKVTable,
     state: Arc<COWDbState>,
-
-    /// If the database is closed, this will contain the result of the close operation.
-    /// Otherwise, it will be None.
-    ///
-    /// - `Ok(())` if the database was closed successfully.
-    /// - `Err(e)` if the database was closed with an error.
-    closed_result: ClosedResultWriter,
 }
 
 // represents the state that is mutated by creating a new copy with the mutations
@@ -439,117 +480,6 @@ pub(crate) struct COWDbState {
 impl COWDbState {
     pub(crate) fn core(&self) -> &ManifestCore {
         &self.manifest.value.core
-    }
-}
-
-/// Represents an immutable in-memory view of .manifest file that is suitable
-/// to expose to end-users.
-#[derive(Clone, PartialEq, Serialize, Debug)]
-pub struct ManifestCore {
-    /// Flag to indicate whether initialization has finished. When creating the initial manifest for
-    /// a root db (one that is not a clone), this flag will be set to true. When creating the initial
-    /// manifest for a clone db, this flag will be set to false and then updated to true once clone
-    /// initialization has completed.
-    pub initialized: bool,
-
-    /// The last compacted l0 SstView ID.
-    pub last_compacted_l0_sst_view_id: Option<Ulid>,
-
-    /// The SST ID of the last compacted L0. In V2, view IDs differ from SST IDs,
-    /// but V1 only stores SST IDs. This field preserves the SST ID so that a
-    /// V1-encoded manifest can correctly reference the compacted L0.
-    pub last_compacted_l0_sst_id: Option<Ulid>,
-
-    /// A list of the L0 SST views that are valid to read in the `compacted` folder.
-    pub l0: VecDeque<SsTableView>,
-
-    /// A list of the sorted runs that are valid to read in the `compacted` folder.
-    pub compacted: Vec<SortedRun>,
-
-    /// The next WAL SST ID to be assigned when creating a new WAL SST. The manifest FlatBuffer
-    /// contains `wal_id_last_seen`, which is always one less than this value.
-    pub next_wal_sst_id: u64,
-
-    /// the WAL ID after which the WAL replay should start. Default to 0,
-    /// which means all the WAL IDs should be greater than or equal to 1.
-    /// When a new L0 is flushed, we update this field to the recent
-    /// flushed WAL ID.
-    pub replay_after_wal_id: u64,
-
-    /// the `last_l0_clock_tick` includes all data in L0 and below --
-    /// WAL entries will have their latest ticks recovered on replay
-    /// into the in-memory state.
-    pub last_l0_clock_tick: i64,
-
-    /// it's persisted in the manifest, and only updated when a new L0
-    /// SST is created in the manifest.
-    pub last_l0_seq: u64,
-
-    /// Minimum sequence number across all recent in-memory snapshots. The compactor
-    /// needs this to determine whether it's safe to drop duplicate key writes. If a
-    /// recent snapshot still references an older version of a key, it should not be
-    /// recycled. This field is updated when a new L0 is flushed.
-    pub recent_snapshot_min_seq: u64,
-
-    /// A sequence tracker that maps sequence numbers to timestamps as defined in
-    /// RFC-0012.
-    pub sequence_tracker: SequenceTracker,
-
-    /// A list of checkpoints that are currently open.
-    pub checkpoints: Vec<Checkpoint>,
-
-    /// The URI of the object store dedicated specifically for WAL, if any.
-    pub wal_object_store_uri: Option<String>,
-}
-
-impl ManifestCore {
-    pub(crate) fn new() -> Self {
-        Self {
-            initialized: true,
-            last_compacted_l0_sst_view_id: None,
-            last_compacted_l0_sst_id: None,
-            l0: VecDeque::new(),
-            compacted: vec![],
-            next_wal_sst_id: 1,
-            replay_after_wal_id: 0,
-            last_l0_clock_tick: i64::MIN,
-            last_l0_seq: 0,
-            checkpoints: vec![],
-            wal_object_store_uri: None,
-            recent_snapshot_min_seq: 0,
-            sequence_tracker: SequenceTracker::new(),
-        }
-    }
-
-    pub(crate) fn new_with_wal_object_store(wal_object_store_uri: Option<String>) -> Self {
-        let mut this = Self::new();
-        this.wal_object_store_uri = wal_object_store_uri;
-        this
-    }
-
-    pub(crate) fn init_clone_db(&self) -> ManifestCore {
-        let mut clone = self.clone();
-        clone.initialized = false;
-        clone.checkpoints.clear();
-        clone
-    }
-
-    pub(crate) fn log_db_runs(&self) {
-        let l0s: Vec<_> = self.l0.iter().map(|l0| l0.estimate_size()).collect();
-        let compacted: Vec<_> = self
-            .compacted
-            .iter()
-            .map(|sr| (sr.id, sr.estimate_size()))
-            .collect();
-        debug!("DB Levels:");
-        debug!("-----------------");
-        debug!("{:?}", l0s);
-        debug!("{:?}", compacted);
-        debug!("-----------------");
-    }
-
-    pub(crate) fn find_checkpoint(&self, checkpoint_id: Uuid) -> Option<&Checkpoint> {
-        self.checkpoints.iter().find(|c| c.id == checkpoint_id)
     }
 }
 
@@ -575,17 +505,13 @@ impl DbStateReader for DbStateView {
 }
 
 impl DbState {
-    pub(crate) fn new(manifest: DirtyObject<Manifest>, status_reporter: DbStatusReporter) -> Self {
-        let closed_result = ClosedResultWriter::new(WatchableOnceCell::new()).with_on_close(
-            Arc::new(move |reason| status_reporter.report_closed(reason)),
-        );
+    pub(crate) fn new(manifest: DirtyObject<Manifest>) -> Self {
         Self {
             memtable: WritableKVTable::new(),
             state: Arc::new(COWDbState {
                 imm_memtable: VecDeque::new(),
                 manifest,
             }),
-            closed_result,
         }
     }
 
@@ -600,28 +526,11 @@ impl DbState {
         }
     }
 
-    pub(crate) fn closed_result_reader(&self) -> WatchableOnceCellReader<Result<(), SlateDBError>> {
-        self.closed_result.reader()
-    }
-
-    pub(crate) fn closed_result(&self) -> ClosedResultWriter {
-        self.closed_result.clone()
-    }
-
     pub(crate) fn memtable(&self) -> &WritableKVTable {
         &self.memtable
     }
 
-    pub(crate) fn freeze_memtable(
-        &mut self,
-        recent_flushed_wal_id: u64,
-    ) -> Result<(), SlateDBError> {
-        if let Some(result) = self.closed_result.reader().read() {
-            return match result {
-                Ok(()) => Err(SlateDBError::Closed),
-                Err(e) => Err(e),
-            };
-        }
+    pub(crate) fn freeze_memtable(&mut self, recent_flushed_wal_id: u64) {
         let old_memtable = std::mem::replace(&mut self.memtable, WritableKVTable::new());
         self.modify(|modifier| {
             modifier
@@ -632,22 +541,11 @@ impl DbState {
                     recent_flushed_wal_id,
                 )))
         });
-        Ok(())
     }
 
-    pub(crate) fn replace_memtable(
-        &mut self,
-        memtable: WritableKVTable,
-    ) -> Result<(), SlateDBError> {
-        if let Some(result) = self.closed_result.reader().read() {
-            return match result {
-                Ok(()) => Err(SlateDBError::Closed),
-                Err(e) => Err(e),
-            };
-        }
+    pub(crate) fn replace_memtable(&mut self, memtable: WritableKVTable) {
         assert!(self.memtable.is_empty());
         let _ = std::mem::replace(&mut self.memtable, memtable);
-        Ok(())
     }
 
     pub(crate) fn merge_remote_manifest(&mut self, remote_manifest: DirtyObject<Manifest>) {
@@ -752,10 +650,7 @@ impl WalIdStore for parking_lot::RwLock<DbState> {
 #[cfg(test)]
 mod tests {
     use crate::checkpoint::Checkpoint;
-    use crate::db_state::{
-        DbState, SortedRun, SsTableHandle, SsTableId, SsTableInfo, SsTableView, SstType,
-    };
-    use crate::db_status::DbStatusReporter;
+    use crate::db_state::{DbState, SortedRun, SsTableHandle, SsTableId, SsTableInfo, SsTableView};
     use crate::format::sst::SST_FORMAT_VERSION_LATEST;
     use crate::manifest::store::test_utils::new_dirty_manifest;
     use crate::proptest_util::arbitrary;
@@ -773,7 +668,7 @@ mod tests {
     #[test]
     fn test_should_merge_db_state_with_new_checkpoints() {
         // given:
-        let mut db_state = DbState::new(new_dirty_manifest(), DbStatusReporter::new(0));
+        let mut db_state = DbState::new(new_dirty_manifest());
         // mimic an externally added checkpoint
         let mut updated_state = new_dirty_manifest();
         updated_state.value.core = db_state.state.core().clone();
@@ -800,7 +695,7 @@ mod tests {
     #[test]
     fn test_should_merge_db_state_with_l0s_up_to_last_compacted() {
         // given:
-        let mut db_state = DbState::new(new_dirty_manifest(), DbStatusReporter::new(0));
+        let mut db_state = DbState::new(new_dirty_manifest());
         add_l0s_to_dbstate(&mut db_state, 4);
         // mimic the compactor popping off l0s
         let mut compactor_state = new_dirty_manifest();
@@ -832,7 +727,7 @@ mod tests {
     #[test]
     fn test_should_merge_db_state_with_all_l0s_if_none_compacted() {
         // given:
-        let mut db_state = DbState::new(new_dirty_manifest(), DbStatusReporter::new(0));
+        let mut db_state = DbState::new(new_dirty_manifest());
         add_l0s_to_dbstate(&mut db_state, 4);
         let l0s = db_state.state.core().l0.clone();
 
@@ -853,7 +748,7 @@ mod tests {
 
     #[test]
     fn test_should_keep_local_sequence_tracker_on_merge() {
-        let mut db_state = DbState::new(new_dirty_manifest(), DbStatusReporter::new(0));
+        let mut db_state = DbState::new(new_dirty_manifest());
         db_state.modify(|modifier| {
             let core = &mut modifier.state.manifest.value.core;
             core.last_l0_seq = 3;
@@ -897,9 +792,7 @@ mod tests {
     fn add_l0s_to_dbstate(db_state: &mut DbState, n: u32) {
         let dummy_info = create_sst_info(None);
         for i in 0..n {
-            db_state
-                .freeze_memtable(i as u64)
-                .expect("db in error state");
+            db_state.freeze_memtable(i as u64);
             let imm = db_state.state.imm_memtable.back().unwrap().clone();
             let handle = SsTableHandle::new(
                 SsTableId::Compacted(ulid::Ulid::from_parts(i as u64, 0)),
@@ -957,6 +850,36 @@ mod tests {
         });
     }
 
+    #[test]
+    fn test_sorted_run_collect_tables_for_point_key() {
+        let sorted_run = SortedRun {
+            id: 0,
+            sst_views: vec![
+                create_compacted_sst_view_with_bounds(b"a", Some(b"k")),
+                create_compacted_sst_view_with_bounds(b"k", Some(b"k")),
+                create_compacted_sst_view_with_bounds(b"k", Some(b"m")),
+                create_compacted_sst_view_with_bounds(b"z", Some(b"z")),
+            ],
+        };
+
+        let covering_tables = sorted_run.tables_covering_point_key(b"k");
+        assert_eq!(covering_tables.len(), 3);
+        assert_eq!(
+            covering_tables[0].compacted_effective_start_key().as_ref(),
+            b"a"
+        );
+        assert_eq!(
+            covering_tables[1].compacted_effective_start_key().as_ref(),
+            b"k"
+        );
+        assert_eq!(
+            covering_tables[2].compacted_effective_start_key().as_ref(),
+            b"k"
+        );
+
+        assert!(sorted_run.tables_covering_point_key(b"0").is_empty());
+    }
+
     fn create_sorted_run(id: u32, first_keys: &BTreeSet<Bytes>) -> SortedRun {
         let mut ssts = Vec::new();
         for first_key in first_keys {
@@ -975,18 +898,24 @@ mod tests {
         SsTableView::identity(handle)
     }
 
+    fn create_compacted_sst_view_with_bounds(
+        first_entry: &[u8],
+        last_entry: Option<&[u8]>,
+    ) -> SsTableView {
+        let sst_info = SsTableInfo {
+            first_entry: Some(Bytes::copy_from_slice(first_entry)),
+            last_entry: last_entry.map(Bytes::copy_from_slice),
+            ..Default::default()
+        };
+        let sst_id = SsTableId::Compacted(ulid::Ulid::new());
+        let handle = SsTableHandle::new(sst_id, SST_FORMAT_VERSION_LATEST, sst_info);
+        SsTableView::identity(handle)
+    }
+
     fn create_sst_info(first_entry: Option<Bytes>) -> SsTableInfo {
         SsTableInfo {
             first_entry,
-            last_entry: None,
-            index_offset: 0,
-            index_len: 0,
-            filter_offset: 0,
-            filter_len: 0,
-            compression_codec: None,
-            sst_type: SstType::default(),
-            stats_offset: 0,
-            stats_len: 0,
+            ..Default::default()
         }
     }
 }

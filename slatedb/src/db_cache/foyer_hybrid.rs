@@ -1,7 +1,7 @@
 //! # Foyer Hybrid Cache
 //!
 //! This module provides an implementation of a hybrid (in-memory + on-disk) cache using the Foyer
-//! library. The cache is designed to store and retrieve cached blocks, indexes, and bloom filters
+//! library. The cache is designed to store and retrieve cached blocks, indexes, and filters
 //! associated with SSTable IDs.
 //!
 //! ## Features
@@ -64,6 +64,7 @@ use crate::{
     error::SlateDBError,
 };
 use async_trait::async_trait;
+use log::info;
 
 pub struct FoyerHybridCache {
     inner: foyer::HybridCache<CachedKey, CachedEntry>,
@@ -114,6 +115,25 @@ impl DbCache for FoyerHybridCache {
     fn entry_count(&self) -> u64 {
         // foyer cache doesn't support an entry count estimate
         0
+    }
+
+    async fn close(&self) -> Result<(), crate::Error> {
+        let memory_bytes = self.inner.memory().usage();
+        info!(
+            "foyer hybrid cache: closing \
+             (flushing {:.2} MB from memory to disk)",
+            memory_bytes as f64 / (1024.0 * 1024.0)
+        );
+        let result = self
+            .inner
+            .close()
+            .await
+            .map_err(|e| crate::Error::from(SlateDBError::from(e)));
+        match &result {
+            Ok(()) => info!("foyer hybrid cache: closed successfully"),
+            Err(e) => info!("foyer hybrid cache: close failed [error={e:?}]"),
+        }
+        result
     }
 }
 
@@ -174,17 +194,51 @@ mod tests {
 
     async fn setup() -> (FoyerHybridCache, TempDir) {
         let tempdir = tempdir().unwrap();
+        let cache = open_cache(tempdir.path()).await;
+        (cache, tempdir)
+    }
+
+    async fn open_cache(path: &std::path::Path) -> FoyerHybridCache {
         let cache = HybridCacheBuilder::new()
             .with_name("hybrid_cache_test")
-            .memory(1024)
+            .memory(1024 * 1024)
             .with_weighter(|_, v: &CachedEntry| v.size())
             .storage(Engine::large())
             .with_device_options(
-                DirectFsDeviceOptions::new(tempdir.path()).with_capacity(1024 * 1024),
+                DirectFsDeviceOptions::new(path)
+                    .with_capacity(4 * 1024 * 1024)
+                    .with_file_size(64 * 1024),
             )
             .build()
             .await
             .unwrap();
-        (FoyerHybridCache::new_with_cache(cache), tempdir)
+        FoyerHybridCache::new_with_cache(cache)
+    }
+
+    #[tokio::test]
+    async fn should_persist_blocks_to_disk_on_close() {
+        // given: a cache with entries
+        let dir = tempdir().unwrap();
+        let cache = open_cache(dir.path()).await;
+        let mut keys = Vec::new();
+        for b in 0u64..64 {
+            let k = CachedKey::from((SST_ID, b));
+            cache.insert(k.clone(), build_block()).await;
+            keys.push(k);
+        }
+
+        // when: close (flush to disk) and reopen
+        cache.close().await.unwrap();
+        drop(cache);
+        let cache = open_cache(dir.path()).await;
+
+        // then: all entries should be recoverable from disk
+        let mut found = 0;
+        for k in &keys {
+            if cache.get_block(k).await.unwrap().is_some() {
+                found += 1;
+            }
+        }
+        assert_eq!(found, keys.len(), "all entries should survive close+reopen");
     }
 }

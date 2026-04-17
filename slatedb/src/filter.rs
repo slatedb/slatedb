@@ -1,16 +1,18 @@
-use std::mem::size_of;
+use std::sync::Arc;
 
+use crate::filter_policy::{Filter, FilterBuilder, FilterQuery, FilterTarget};
+use crate::types::RowEntry;
 use crate::utils::clamp_allocated_size_bytes;
-use bytes::{Buf, BufMut, Bytes, BytesMut};
+use bytes::{Buf, BufMut, Bytes};
 use siphasher::sip::SipHasher13;
 
-pub(crate) struct BloomFilterBuilder {
+pub struct BloomFilterBuilder {
     bits_per_key: u32,
     key_hashes: Vec<u64>,
 }
 
 #[derive(PartialEq, Eq)]
-pub(crate) struct BloomFilter {
+pub struct BloomFilter {
     num_probes: u16,
     buffer: Bytes,
 }
@@ -23,24 +25,21 @@ impl BloomFilterBuilder {
         }
     }
 
-    pub(crate) fn add_key(&mut self, key: &[u8]) {
-        self.key_hashes.push(filter_hash(key))
-    }
-
-    pub(crate) fn filter_size_bytes(num_keys: u32, bits_per_key: u32) -> usize {
+    fn filter_size_bytes(num_keys: u32, bits_per_key: u32) -> usize {
         let filter_bits = num_keys * bits_per_key;
         // compute filter bytes rounded up to the number of bytes required to fit the filter
         filter_bits.div_ceil(8) as usize
     }
 
-    pub(crate) fn build(&self) -> BloomFilter {
+    fn build_filter(&mut self) -> BloomFilter {
         let num_probes = optimal_num_probes(self.bits_per_key);
+        let key_hashes = std::mem::take(&mut self.key_hashes);
         let filter_bytes =
-            BloomFilterBuilder::filter_size_bytes(self.key_hashes.len() as u32, self.bits_per_key);
+            BloomFilterBuilder::filter_size_bytes(key_hashes.len() as u32, self.bits_per_key);
         let filter_bits = (filter_bytes * 8) as u32;
         let mut buffer = vec![0x00; filter_bytes];
-        for k in self.key_hashes.iter() {
-            let probes = probes_for_key(*k, num_probes, filter_bits);
+        for k in key_hashes {
+            let probes = probes_for_key(k, num_probes, filter_bits);
             for p in probes {
                 set_bit(p as usize, &mut buffer)
             }
@@ -49,6 +48,10 @@ impl BloomFilterBuilder {
             num_probes,
             buffer: Bytes::from(buffer),
         }
+    }
+
+    fn add_key(&mut self, key: &[u8]) {
+        self.key_hashes.push(filter_hash(key))
     }
 }
 
@@ -59,13 +62,6 @@ impl BloomFilter {
             num_probes,
             buffer: Bytes::copy_from_slice(buf),
         }
-    }
-
-    pub(crate) fn encode(&self) -> Bytes {
-        let mut encoded = BytesMut::with_capacity(size_of::<u16>() + self.buffer.len());
-        encoded.put_u16(self.num_probes);
-        encoded.put(self.buffer.slice(..));
-        encoded.freeze()
     }
 
     /// estimate the size of BloomFilter encoded in SST
@@ -80,7 +76,7 @@ impl BloomFilter {
         (self.buffer.len() * 8) as u32
     }
 
-    pub(crate) fn might_contain(&self, hash: u64) -> bool {
+    fn might_contain(&self, hash: u64) -> bool {
         for p in probes_for_key(hash, self.num_probes, self.filter_bits()) {
             if !check_bit(p as usize, &self.buffer) {
                 return false;
@@ -88,21 +84,45 @@ impl BloomFilter {
         }
         true
     }
+}
 
-    pub(crate) fn clamp_allocated_size(&self) -> Self {
-        Self {
-            num_probes: self.num_probes,
-            buffer: clamp_allocated_size_bytes(&self.buffer),
-        }
+impl FilterBuilder for BloomFilterBuilder {
+    fn add_entry(&mut self, entry: &RowEntry) {
+        self.add_key(&entry.key);
     }
 
-    /// Returns the size of the bloom filter in bytes.
-    pub(crate) fn size(&self) -> usize {
-        self.buffer.len()
+    fn build(&mut self) -> Arc<dyn Filter> {
+        Arc::new(self.build_filter())
     }
 }
 
-pub(crate) fn filter_hash(key: &[u8]) -> u64 {
+impl Filter for BloomFilter {
+    fn might_match(&self, query: &FilterQuery) -> bool {
+        match &query.target {
+            FilterTarget::Point(key) => self.might_contain(filter_hash(key.as_ref())),
+            // No prefix extractor configured — cannot answer prefix queries
+            FilterTarget::Prefix(_) => true,
+        }
+    }
+
+    fn encode(&self, writer: &mut dyn BufMut) {
+        writer.put_u16(self.num_probes);
+        writer.put_slice(&self.buffer);
+    }
+
+    fn size(&self) -> usize {
+        self.buffer.len()
+    }
+
+    fn clamp_allocated_size(&self) -> Arc<dyn Filter> {
+        Arc::new(BloomFilter {
+            num_probes: self.num_probes,
+            buffer: clamp_allocated_size_bytes(&self.buffer),
+        })
+    }
+}
+
+fn filter_hash(key: &[u8]) -> u64 {
     // sip hash is the default rust hash function, however its only
     // accessible by creating DefaultHasher. Direct use of SipHasher13 in
     // std is deprecated. We don't want to use DefaultHasher because the
@@ -150,6 +170,7 @@ fn optimal_num_probes(bits_per_key: u32) -> u16 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytes::BytesMut;
 
     #[test]
     fn test_set_specified_bit_only() {
@@ -243,7 +264,7 @@ mod tests {
             bytes.put_u32(i);
             builder.add_key(bytes.freeze().as_ref());
         }
-        let filter = builder.build();
+        let filter = builder.build_filter();
 
         // check all entries in filter
         for i in 0..keys_to_test {
@@ -274,7 +295,7 @@ mod tests {
     fn test_bloom_filter_size() {
         let mut builder = BloomFilterBuilder::new(10);
         builder.add_key(b"test_key");
-        let filter = builder.build();
+        let filter = builder.build_filter();
 
         // The exact size may vary, so we'll check if it's greater than zero
         assert!(
@@ -296,8 +317,9 @@ mod tests {
         for i in 0..100 {
             builder.add_key(format!("{}", i).as_bytes());
         }
-        let filter = builder.build();
-        let mut extended_buf = BytesMut::with_capacity(filter.size() + 100);
+        let filter = builder.build_filter();
+        let original_size = filter.size();
+        let mut extended_buf = BytesMut::with_capacity(original_size + 100);
         extended_buf.put(filter.buffer.as_ref());
         extended_buf.put_bytes(0u8, 100);
         let filter = BloomFilter {
@@ -305,11 +327,15 @@ mod tests {
             ..filter
         };
 
-        let clamped = filter.clamp_allocated_size();
+        let clamped = Filter::clamp_allocated_size(&filter);
 
-        assert_eq!(clamped.buffer, filter.buffer);
-        assert_eq!(clamped.num_probes, filter.num_probes);
-        assert_ne!(clamped.buffer.as_ptr(), filter.buffer.as_ptr());
+        assert_eq!(clamped.size(), Filter::size(&filter));
+        // Encode both and verify they produce the same bytes
+        let mut original_bytes = Vec::new();
+        Filter::encode(&filter, &mut original_bytes);
+        let mut clamped_bytes = Vec::new();
+        clamped.encode(&mut clamped_bytes);
+        assert_eq!(original_bytes, clamped_bytes);
     }
 
     #[test]

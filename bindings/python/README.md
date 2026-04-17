@@ -62,6 +62,39 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
+## Metrics
+
+The Python binding exposes both custom metrics callbacks and the built-in
+`DefaultMetricsRecorder`:
+
+- `DbBuilder.with_metrics_recorder(...)`
+- `DbReaderBuilder.with_metrics_recorder(...)`
+- `DefaultMetricsRecorder.snapshot()`
+- `DefaultMetricsRecorder.metrics_by_name(...)`
+- `DefaultMetricsRecorder.metric_by_name_and_labels(...)`
+
+Example:
+
+```python
+from slatedb.uniffi import DbBuilder, DefaultMetricsRecorder, ObjectStore
+
+store = ObjectStore.resolve("memory:///")
+recorder = DefaultMetricsRecorder()
+builder = DbBuilder("metrics-demo", store)
+
+builder.with_metrics_recorder(recorder)
+db = await builder.build()
+
+try:
+    await db.put(b"hello", b"world")
+
+    metric = recorder.metric_by_name_and_labels("slatedb.db.write_ops", [])
+    if metric is not None and metric.value.is_counter():
+        print(metric.value[0])
+finally:
+    await db.shutdown()
+```
+
 ## Local Development
 
 This package reuses the shared Rust UniFFI crate at `../uniffi/Cargo.toml`. The generated Python module under `slatedb/uniffi/_slatedb_uniffi/` is build output and should not be edited by hand.
@@ -75,7 +108,7 @@ cd bindings/python
 python3 -m venv .venv
 source .venv/bin/activate
 pip install --upgrade pip
-pip install maturin "uniffi-bindgen==0.29.5" ruff
+pip install maturin "uniffi-bindgen==0.31.0" ruff
 maturin develop
 ruff check .
 python -c "import slatedb; import slatedb.uniffi; from slatedb.uniffi import *"

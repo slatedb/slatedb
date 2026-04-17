@@ -43,23 +43,8 @@ impl RangeBounds<Bytes> for BytesRange {
     }
 }
 
-fn is_bound_non_empty(bound: &Bound<Bytes>) -> bool {
-    match bound {
-        Included(b) | Excluded(b) => !b.is_empty(),
-        Unbounded => true,
-    }
-}
-
 impl BytesRange {
     pub(crate) fn new(start_bound: Bound<Bytes>, end_bound: Bound<Bytes>) -> Self {
-        assert!(
-            is_bound_non_empty(&start_bound),
-            "Start bound must be non-empty"
-        );
-        assert!(
-            is_bound_non_empty(&end_bound),
-            "End bound must be non-empty"
-        );
         let inner = ComparableRange::new(start_bound, end_bound);
         assert!(inner.non_empty(), "Range must be non-empty");
         Self { inner }
@@ -321,5 +306,21 @@ pub(crate) mod tests {
         let start = Bound::Included(Bytes::from("z"));
         let end = Bound::Included(Bytes::from("a"));
         BytesRange::new(start, end);
+    }
+
+    #[test]
+    fn test_empty_included_start_bound_is_valid_and_contains_all_keys() {
+        let range = BytesRange::new(Bound::Included(Bytes::new()), Bound::Unbounded);
+        assert!(range.contains(&Bytes::new())); // b"" <= b"" holds for Included
+        assert!(range.contains(&Bytes::from("a")));
+        assert!(range.contains(&Bytes::from("z")));
+    }
+
+    #[test]
+    fn test_empty_excluded_start_bound_is_valid_and_contains_all_keys() {
+        let range = BytesRange::new(Bound::Excluded(Bytes::new()), Bound::Unbounded);
+        assert!(!range.contains(&Bytes::new())); // b"" < b"" is false for Excluded
+        assert!(range.contains(&Bytes::from("a")));
+        assert!(range.contains(&Bytes::from("z")));
     }
 }

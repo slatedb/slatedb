@@ -6,9 +6,9 @@ use log::{error, info};
 use serde::{Deserialize, Serialize};
 use ulid::Ulid;
 
-use crate::db_state::{ManifestCore, SortedRun, SsTableHandle, SsTableView};
+use crate::db_state::{SortedRun, SsTableHandle, SsTableView};
 use crate::error::SlateDBError;
-use crate::manifest::Manifest;
+use crate::manifest::{Manifest, ManifestCore};
 use slatedb_txn_obj::DirtyObject;
 
 /// Identifier for a compaction input source.
@@ -305,10 +305,9 @@ impl Display for Compaction {
     }
 }
 
-/// Represents an immutable in-memory view of .compactions file that is suitable
-/// to expose to end-users.
-#[derive(Clone, Debug, Serialize)]
-pub struct CompactionsCore {
+/// Internal immutable in-memory view of a `.compactions` file.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub(crate) struct CompactionsCore {
     /// The set of recent compactions tracked by this compactor. These may
     /// be pending, in progress, or recently completed (either with success
     /// or failure).
@@ -330,16 +329,52 @@ impl CompactionsCore {
     /// Returns an iterator over all recent compactions. Recent compactions include all
     /// active (submitted or running) compactions as well as the most recently finished
     /// compaction (failed or completed).
-    pub fn recent_compactions(&self) -> impl Iterator<Item = &Compaction> {
+    pub(crate) fn recent_compactions(&self) -> impl Iterator<Item = &Compaction> {
         self.recent_compactions.values()
     }
 }
 
+/// A compactions snapshot paired with its version ID for monotonic ordering.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct VersionedCompactions {
+    /// The version ID of the compactions file.
+    pub(crate) id: u64,
+    /// The flattened compactions state at this version.
+    #[serde(flatten)]
+    pub(crate) compactions: Compactions,
+}
+
+impl VersionedCompactions {
+    pub(crate) fn from_compactions(id: u64, compactions: Compactions) -> Self {
+        Self { id, compactions }
+    }
+
+    /// Returns the compactions file version ID.
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+
+    /// Returns the compactor epoch recorded in this compactions snapshot.
+    pub fn compactor_epoch(&self) -> u64 {
+        self.compactions.compactor_epoch
+    }
+
+    /// Returns an iterator over the recent compactions tracked in this snapshot.
+    pub fn recent_compactions(&self) -> impl Iterator<Item = &Compaction> {
+        self.compactions.core.recent_compactions()
+    }
+
+    pub(crate) fn core(&self) -> &CompactionsCore {
+        &self.compactions.core
+    }
+}
+
 /// Container for compactions tracked by the compactor alongside its epoch.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub(crate) struct Compactions {
     // The current compactor's epoch.
     pub(crate) compactor_epoch: u64,
+    #[serde(flatten)]
     pub(crate) core: CompactionsCore,
 }
 
@@ -720,7 +755,7 @@ mod tests {
     use super::*;
     use crate::checkpoint::Checkpoint;
     use crate::compactor_state::SourceId::SstView;
-    use crate::config::Settings;
+    use crate::config::{FlushOptions, FlushType, Settings};
     use crate::db::Db;
     use crate::db_state::SsTableId;
     use crate::manifest::store::test_utils::new_dirty_manifest;
@@ -1308,7 +1343,16 @@ mod tests {
                 .block_on(db.put(&[b'j' + i as u8; 16], &[b'k' + i as u8; 48]))
                 .unwrap();
         }
-        tokio_handle.block_on(db.close()).unwrap();
+        tokio_handle.block_on(async {
+            // Persist the seeded L0s into the manifest before close so reopen
+            // doesn't reconstruct them from WAL replay on a slow shutdown.
+            db.flush_with_options(FlushOptions {
+                flush_type: FlushType::MemTable,
+            })
+            .await
+            .unwrap();
+            db.close().await.unwrap();
+        });
         let system_clock: Arc<dyn SystemClock> = Arc::new(DefaultSystemClock::new());
         let rand: Arc<DbRand> = Arc::new(DbRand::default());
 

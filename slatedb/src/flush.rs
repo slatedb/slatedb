@@ -2,6 +2,7 @@ use crate::db::DbInner;
 use crate::db_state;
 use crate::db_state::SsTableHandle;
 use crate::error::SlateDBError;
+use crate::format::sst::EncodedSsTable;
 use crate::iter::RowEntryIterator;
 use crate::mem_table::KVTable;
 use crate::merge_operator::{MergeOperatorIterator, MergeOperatorRequiredIterator};
@@ -11,19 +12,26 @@ use crate::retention_iterator::RetentionIterator;
 use std::sync::Arc;
 
 impl DbInner {
-    pub(crate) async fn flush_imm_table(
+    pub(crate) async fn build_imm_sst(
         &self,
-        id: &db_state::SsTableId,
         imm_table: Arc<KVTable>,
-        write_cache: bool,
-    ) -> Result<SsTableHandle, SlateDBError> {
+    ) -> Result<EncodedSsTable, SlateDBError> {
         let mut sst_builder = self.table_store.table_builder();
-        let mut iter = self.iter_imm_table(imm_table.clone()).await?;
+        let mut iter = self.iter_imm_table(imm_table).await?;
         while let Some(entry) = iter.next().await? {
             sst_builder.add(entry).await?;
         }
 
-        let encoded_sst = sst_builder.build().await?;
+        sst_builder.build().await
+    }
+
+    pub(crate) async fn upload_compacted_sst(
+        &self,
+        id: &db_state::SsTableId,
+        imm_table: Arc<KVTable>,
+        encoded_sst: EncodedSsTable,
+        write_cache: bool,
+    ) -> Result<SsTableHandle, SlateDBError> {
         let handle = self
             .table_store
             .write_sst(id, encoded_sst, write_cache)
@@ -35,24 +43,44 @@ impl DbInner {
         Ok(handle)
     }
 
+    pub(crate) async fn flush_imm_table(
+        &self,
+        id: &db_state::SsTableId,
+        imm_table: Arc<KVTable>,
+        write_cache: bool,
+    ) -> Result<SsTableHandle, SlateDBError> {
+        let encoded_sst = self.build_imm_sst(imm_table.clone()).await?;
+        self.upload_compacted_sst(id, imm_table, encoded_sst, write_cache)
+            .await
+    }
+
     async fn iter_imm_table(
         &self,
         imm_table: Arc<KVTable>,
     ) -> Result<RetentionIterator<Box<dyn RowEntryIterator>>, SlateDBError> {
         let state = self.state.read().view();
 
-        // Compute retention boundary using both active transactions AND durable watermark.
+        // Compute retention boundary using the minimum active sequences from active snapshots AND
+        // active transactions AND durable watermark. This does not need to be atomic as even if a
+        // new snapshot is created/dropped or a new transaction is created/dropped between reading
+        // both snapshot_manager and txn_manager we will always have the min so any race here is
+        // acceptable.
+        //
         // Remote readers (DurabilityLevel::Remote) cap visibility at last_remote_persisted_seq,
         // so we must retain at least one version at or below that boundary for each key.
         // Otherwise, if we only keep a newer non-durable version, remote readers would skip
         // it and incorrectly fall back to an even older value.
         let durable_seq = self.oracle.last_remote_persisted_seq();
-        let min_retention_seq = match self.txn_manager.min_active_seq() {
-            Some(active_seq) => Some(active_seq.min(durable_seq)),
-            None => Some(durable_seq),
-        };
+        let min_retention_seq = [
+            Some(durable_seq),
+            self.snapshot_manager.min_active_seq(),
+            self.txn_manager.min_active_seq(),
+        ]
+        .into_iter()
+        .flatten()
+        .min();
 
-        let merge_iter = if let Some(merge_operator) = self.reader.merge_operator.clone() {
+        let merge_iter = if let Some(merge_operator) = self.flush_merge_operator.clone() {
             Box::new(MergeOperatorIterator::new(
                 merge_operator,
                 imm_table.iter(),
@@ -87,11 +115,13 @@ mod tests {
     use crate::error::SlateDBError::MergeOperatorMissing;
     use crate::iter::RowEntryIterator;
     use crate::mem_table::WritableKVTable;
+    use crate::merge_operator::{MERGE_OPERATOR_FLUSH_PATH, MERGE_OPERATOR_READ_PATH};
     use crate::object_store::memory::InMemory;
-    use crate::test_utils::StringConcatMergeOperator;
+    use crate::test_utils::{lookup_merge_operator_operands, StringConcatMergeOperator};
     use crate::types::{RowEntry, ValueDeletable};
     use bytes::Bytes;
     use rstest::rstest;
+    use slatedb_common::metrics::test_recorder_helper;
     use std::sync::Arc;
     use ulid::Ulid;
 
@@ -320,7 +350,7 @@ mod tests {
         // Given
         let db = setup_test_db_with_merge_operator().await;
         db.inner
-            .txn_manager
+            .snapshot_manager
             .new_snapshot(Some(test_case.min_active_seq));
         // Set durable watermark high so it doesn't interfere with transaction-based retention tests
         db.inner.oracle.advance_durable_seq(u64::MAX);
@@ -346,10 +376,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn should_record_merge_operator_operands_on_flush_path() {
+        let (metrics_recorder, _) = test_recorder_helper();
+        let object_store: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
+        let db = Db::builder("/tmp/test_merge_operands_flush", object_store)
+            .with_metrics_recorder(metrics_recorder.clone())
+            .with_merge_operator(Arc::new(StringConcatMergeOperator))
+            .build()
+            .await
+            .unwrap();
+
+        db.inner.oracle.advance_durable_seq(u64::MAX);
+
+        let table = WritableKVTable::new();
+        table.put(RowEntry::new_merge(&Bytes::from("key1"), b"a", 1));
+        table.put(RowEntry::new_merge(&Bytes::from("key1"), b"b", 2));
+
+        assert_eq!(
+            lookup_merge_operator_operands(metrics_recorder.as_ref(), MERGE_OPERATOR_READ_PATH),
+            Some(0)
+        );
+        assert_eq!(
+            lookup_merge_operator_operands(metrics_recorder.as_ref(), MERGE_OPERATOR_FLUSH_PATH,),
+            Some(0)
+        );
+
+        db.inner
+            .flush_imm_table(
+                &SsTableId::Compacted(Ulid::new()),
+                table.table().clone(),
+                false,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            lookup_merge_operator_operands(metrics_recorder.as_ref(), MERGE_OPERATOR_READ_PATH),
+            Some(0)
+        );
+        assert_eq!(
+            lookup_merge_operator_operands(metrics_recorder.as_ref(), MERGE_OPERATOR_FLUSH_PATH,),
+            // Two raw merge rows produce one intermediate batch result and one
+            // final merge_batch call over that result.
+            Some(3)
+        );
+
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn test_err_when_merge_operator_not_set_and_merges_exist() {
         // Given
         let db = setup_test_db_without_merge_operator().await;
-        db.inner.txn_manager.new_snapshot(Some(0));
+        db.inner.snapshot_manager.new_snapshot(Some(0));
         let table = WritableKVTable::new();
         table.put(RowEntry::new_value(&Bytes::from("key"), b"value1", 1));
         table.put(RowEntry::new_merge(&Bytes::from("key"), b"value2", 2));
@@ -373,7 +452,7 @@ mod tests {
     async fn test_no_err_merge_operator_not_set_and_no_merges() {
         // Given
         let db = setup_test_db_without_merge_operator().await;
-        db.inner.txn_manager.new_snapshot(Some(0));
+        db.inner.snapshot_manager.new_snapshot(Some(0));
         let table = WritableKVTable::new();
         table.put(RowEntry::new_value(&Bytes::from("key1"), b"value1", 1));
         table.put(RowEntry::new_tombstone(&Bytes::from("key2"), 2));
@@ -386,105 +465,102 @@ mod tests {
             .unwrap();
     }
 
-    #[tokio::test]
-    async fn should_retain_versions_up_to_durable_boundary_when_no_active_txn() {
-        // Given: DB with no active transactions, but durable watermark at seq=2.
-        // This can happen when the WAL has flushed up to seq=2, but newer writes
-        // (seq=3) are still in the memtable and not yet durable.
-        let db = setup_test_db_with_merge_operator().await;
-        db.inner.oracle.advance_durable_seq(2);
-        // No active transaction created - min_active_seq() will return None
-
-        let table = WritableKVTable::new();
-        // Add versions: seq=1 (durable), seq=2 (durable), seq=3 (not durable)
-        table.put(RowEntry::new_value(&Bytes::from("key"), b"value1", 1));
-        table.put(RowEntry::new_value(&Bytes::from("key"), b"value2", 2));
-        table.put(RowEntry::new_value(&Bytes::from("key"), b"value3", 3));
-        let id = SsTableId::Compacted(Ulid::new());
-
-        // When: Flush the table
-        let sst_handle = db
-            .inner
-            .flush_imm_table(&id, table.table().clone(), false)
-            .await
-            .unwrap();
-
-        // Then: Should retain seq=3 (latest) and seq=2 (boundary at durable watermark)
-        // seq=1 can be dropped because seq=2 is the boundary value for remote readers
-        verify_sst(
-            &db,
-            &sst_handle,
-            &[
-                (
-                    Bytes::from("key"),
-                    3,
-                    ValueDeletable::Value(Bytes::from("value3")),
-                ),
-                (
-                    Bytes::from("key"),
-                    2,
-                    ValueDeletable::Value(Bytes::from("value2")),
-                ),
-            ],
-        )
-        .await;
-
-        db.close().await.unwrap();
+    struct RetentionBoundaryTestCase {
+        durable_seq: u64,
+        snapshot_seq: Option<u64>,
+        txn_seq: Option<u64>,
+        expected_entries: Vec<(Bytes, u64, ValueDeletable)>,
     }
 
+    #[rstest]
+    #[case::durable_is_min(RetentionBoundaryTestCase {
+        durable_seq: 1,
+        snapshot_seq: Some(3),
+        txn_seq: Some(2),
+        expected_entries: vec![
+            (Bytes::from("key"), 4, ValueDeletable::Value(Bytes::from("value4"))),
+            (Bytes::from("key"), 3, ValueDeletable::Value(Bytes::from("value3"))),
+            (Bytes::from("key"), 2, ValueDeletable::Value(Bytes::from("value2"))),
+            (Bytes::from("key"), 1, ValueDeletable::Value(Bytes::from("value1"))),
+        ],
+    })]
+    #[case::snapshot_is_min(RetentionBoundaryTestCase {
+        durable_seq: 4,
+        snapshot_seq: Some(2),
+        txn_seq: Some(3),
+        expected_entries: vec![
+            (Bytes::from("key"), 4, ValueDeletable::Value(Bytes::from("value4"))),
+            (Bytes::from("key"), 3, ValueDeletable::Value(Bytes::from("value3"))),
+            (Bytes::from("key"), 2, ValueDeletable::Value(Bytes::from("value2"))),
+        ],
+    })]
+    #[case::txn_is_min(RetentionBoundaryTestCase {
+        durable_seq: 4,
+        snapshot_seq: Some(3),
+        txn_seq: Some(2),
+        expected_entries: vec![
+            (Bytes::from("key"), 4, ValueDeletable::Value(Bytes::from("value4"))),
+            (Bytes::from("key"), 3, ValueDeletable::Value(Bytes::from("value3"))),
+            (Bytes::from("key"), 2, ValueDeletable::Value(Bytes::from("value2"))),
+        ],
+    })]
+    #[case::snapshot_is_none(RetentionBoundaryTestCase {
+        durable_seq: 4,
+        snapshot_seq: None,
+        txn_seq: Some(2),
+        expected_entries: vec![
+            (Bytes::from("key"), 4, ValueDeletable::Value(Bytes::from("value4"))),
+            (Bytes::from("key"), 3, ValueDeletable::Value(Bytes::from("value3"))),
+            (Bytes::from("key"), 2, ValueDeletable::Value(Bytes::from("value2"))),
+        ],
+    })]
+    #[case::txn_is_none(RetentionBoundaryTestCase {
+        durable_seq: 4,
+        snapshot_seq: Some(3),
+        txn_seq: None,
+        expected_entries: vec![
+            (Bytes::from("key"), 4, ValueDeletable::Value(Bytes::from("value4"))),
+            (Bytes::from("key"), 3, ValueDeletable::Value(Bytes::from("value3"))),
+        ],
+    })]
+    #[case::snapshot_and_txn_are_none(RetentionBoundaryTestCase {
+        durable_seq: 4,
+        snapshot_seq: None,
+        txn_seq: None,
+        expected_entries: vec![
+            (Bytes::from("key"), 4, ValueDeletable::Value(Bytes::from("value4"))),
+        ],
+    })]
     #[tokio::test]
-    async fn should_use_min_of_active_seq_and_durable_boundary() {
-        // Given: DB with active transaction at seq=3, durable watermark at seq=1
+    async fn should_use_min_of_retention_sources(#[case] test_case: RetentionBoundaryTestCase) {
         let db = setup_test_db_with_merge_operator().await;
-        db.inner.oracle.advance_durable_seq(1);
-        db.inner.txn_manager.new_snapshot(Some(3)); // Active txn at seq=3
+        db.inner.oracle.advance_durable_seq(test_case.durable_seq);
+
+        if let Some(snapshot_seq) = test_case.snapshot_seq {
+            let (_, started_seq) = db.inner.snapshot_manager.new_snapshot(Some(snapshot_seq));
+            assert_eq!(started_seq, snapshot_seq)
+        }
+
+        if let Some(txn_seq) = test_case.txn_seq {
+            db.inner.oracle.advance_committed_seq(txn_seq);
+            let (_, started_seq) = db.inner.txn_manager.new_transaction();
+            assert_eq!(started_seq, txn_seq);
+        }
 
         let table = WritableKVTable::new();
-        // Add versions: seq=1, seq=2, seq=3, seq=4
         table.put(RowEntry::new_value(&Bytes::from("key"), b"value1", 1));
         table.put(RowEntry::new_value(&Bytes::from("key"), b"value2", 2));
         table.put(RowEntry::new_value(&Bytes::from("key"), b"value3", 3));
         table.put(RowEntry::new_value(&Bytes::from("key"), b"value4", 4));
         let id = SsTableId::Compacted(Ulid::new());
 
-        // When: Flush the table
         let sst_handle = db
             .inner
             .flush_imm_table(&id, table.table().clone(), false)
             .await
             .unwrap();
 
-        // Then: Should use min(3, 1) = 1 as boundary
-        // Retains seq=4 (latest), seq=3, seq=2, and seq=1 (boundary)
-        // Without the fix, would use active_seq=3, retaining only seq=4 and seq=3
-        verify_sst(
-            &db,
-            &sst_handle,
-            &[
-                (
-                    Bytes::from("key"),
-                    4,
-                    ValueDeletable::Value(Bytes::from("value4")),
-                ),
-                (
-                    Bytes::from("key"),
-                    3,
-                    ValueDeletable::Value(Bytes::from("value3")),
-                ),
-                (
-                    Bytes::from("key"),
-                    2,
-                    ValueDeletable::Value(Bytes::from("value2")),
-                ),
-                (
-                    Bytes::from("key"),
-                    1,
-                    ValueDeletable::Value(Bytes::from("value1")),
-                ),
-            ],
-        )
-        .await;
-
+        verify_sst(&db, &sst_handle, &test_case.expected_entries).await;
         db.close().await.unwrap();
     }
 }

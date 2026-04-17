@@ -171,6 +171,10 @@ export default defineConfig({
 							link: '/docs/operations/configuration/',
 						},
 						{
+							label: 'Configuring Foyer Cache',
+							link: '/docs/operations/foyer-cache/',
+						},
+						{
 							label: 'Data Modeling',
 							link: '/docs/operations/data-modeling/',
 						},
@@ -182,12 +186,10 @@ export default defineConfig({
 							label: 'Logging',
 							link: '/docs/operations/logging/',
 						},
-						/*
 						{
 							label: 'Metrics',
 							link: '/docs/operations/metrics/',
 						},
-						*/
 						{
 							label: 'Tuning',
 							link: '/docs/operations/tuning/',

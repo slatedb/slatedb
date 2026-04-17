@@ -1,7 +1,7 @@
 //! # DB Cache
 //!
 //! This module provides a pluggable caching solution for storing and retrieving
-//! cached blocks, index and bloom filters associated with SSTable IDs.
+//! cached blocks, index and filters associated with SSTable IDs.
 //!
 //! There are currently two built-in cache implementations:
 //! - [Foyer](crate::db_cache::foyer::FoyerCache): Requires the `foyer` feature flag. (Enabled by default)
@@ -20,9 +20,11 @@ use log::{debug, error, trace};
 use parking_lot::Mutex;
 
 use crate::db_cache::stats::DbCacheStats;
+use crate::db_state::SsTableId;
+use crate::filter_policy::NamedFilter;
+use crate::flatbuffer_types::SsTableIndexOwned;
 use crate::format::block::Block;
 use crate::sst_stats::SstStats;
-use crate::{db_state::SsTableId, filter::BloomFilter, flatbuffer_types::SsTableIndexOwned};
 use slatedb_common::clock::SystemClock;
 use slatedb_common::metrics::MetricsRecorderHelper;
 
@@ -146,6 +148,15 @@ pub trait DbCache: Send + Sync {
     async fn remove(&self, key: &CachedKey);
     #[allow(dead_code)]
     fn entry_count(&self) -> u64;
+
+    /// Gracefully close the cache, flushing any in-memory state to disk.
+    ///
+    /// Implementations backed by hybrid (memory + disk) caches should use
+    /// this to ensure cached entries survive process restarts. The default
+    /// implementation is a no-op.
+    async fn close(&self) -> Result<(), crate::Error> {
+        Ok(())
+    }
 }
 
 /// A key used to identify a cached entry.
@@ -185,12 +196,24 @@ impl From<(SsTableId, u64)> for CachedKey {
     }
 }
 
+/// A filter cached in its on-disk byte form, paired with the name of the
+/// policy that produced it. Only produced by disk-cache deserialization
+/// (`db_cache::serde`), which has no access to the configured filter
+/// policies; converted to a [`NamedFilter`] by `TableStore::read_filters`
+/// on the first hit after deserialization.
+#[derive(Clone)]
+pub(crate) struct EncodedCachedFilter {
+    pub(crate) name: String,
+    pub(crate) data: bytes::Bytes,
+}
+
 #[non_exhaustive]
 #[derive(Clone)]
 enum CachedItem {
     Block(Arc<Block>),
     SsTableIndex(Arc<SsTableIndexOwned>),
-    BloomFilter(Arc<BloomFilter>),
+    Filters(Arc<[NamedFilter]>),
+    EncodedFilters(Arc<[EncodedCachedFilter]>),
     SstStats(Arc<SstStats>),
 }
 
@@ -219,10 +242,10 @@ impl CachedEntry {
         }
     }
 
-    /// Create a new `CachedEntry` with the given bloom filter.
-    pub(crate) fn with_bloom_filter(bloom_filter: Arc<BloomFilter>) -> Self {
+    /// Create a new `CachedEntry` with the given decoded filters.
+    pub(crate) fn with_filters(filters: Arc<[NamedFilter]>) -> Self {
         Self {
-            item: CachedItem::BloomFilter(bloom_filter),
+            item: CachedItem::Filters(filters),
         }
     }
 
@@ -247,9 +270,16 @@ impl CachedEntry {
         }
     }
 
-    pub(crate) fn bloom_filter(&self) -> Option<Arc<BloomFilter>> {
+    pub(crate) fn filters(&self) -> Option<Arc<[NamedFilter]>> {
         match &self.item {
-            CachedItem::BloomFilter(bloom_filter) => Some(bloom_filter.clone()),
+            CachedItem::Filters(filters) => Some(filters.clone()),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn encoded_filters(&self) -> Option<Arc<[EncodedCachedFilter]>> {
+        match &self.item {
+            CachedItem::EncodedFilters(filters) => Some(filters.clone()),
             _ => None,
         }
     }
@@ -269,7 +299,8 @@ impl CachedEntry {
         match &self.item {
             CachedItem::Block(block) => block.size(),
             CachedItem::SsTableIndex(sst_index) => sst_index.size(),
-            CachedItem::BloomFilter(bloom_filter) => bloom_filter.size(),
+            CachedItem::Filters(filters) => filters.iter().map(|nf| nf.filter.size()).sum(),
+            CachedItem::EncodedFilters(filters) => filters.iter().map(|ef| ef.data.len()).sum(),
             CachedItem::SstStats(stats) => stats.size(),
         }
     }
@@ -280,9 +311,19 @@ impl CachedEntry {
             CachedItem::SsTableIndex(sst_index) => {
                 Self::with_sst_index(Arc::new(sst_index.clamp_allocated_size()))
             }
-            CachedItem::BloomFilter(bloom_filter) => {
-                Self::with_bloom_filter(Arc::new(bloom_filter.clamp_allocated_size()))
-            }
+            CachedItem::Filters(filters) => Self::with_filters(
+                filters
+                    .iter()
+                    .map(|nf| NamedFilter {
+                        name: nf.name.clone(),
+                        filter: nf.filter.clamp_allocated_size(),
+                    })
+                    .collect::<Vec<_>>()
+                    .into(),
+            ),
+            CachedItem::EncodedFilters(filters) => Self {
+                item: CachedItem::EncodedFilters(filters.clone()),
+            },
             CachedItem::SstStats(stats) => {
                 Self::with_sst_stats(Arc::new(stats.clamp_allocated_size()))
             }
@@ -369,12 +410,24 @@ impl DbCache for SplitCache {
                     trace!("no block cache available for insertion");
                 }
             }
-            CachedItem::SsTableIndex(_) | CachedItem::BloomFilter(_) | CachedItem::SstStats(_) => {
+            CachedItem::SsTableIndex(_) | CachedItem::Filters(_) | CachedItem::SstStats(_) => {
                 if let Some(ref cache) = self.meta_cache {
                     cache.insert(key, value.clamp_allocated_size()).await;
                 } else {
                     trace!("no meta cache available for insertion");
                 }
+            }
+            // EncodedFilters only exist as the transient output of
+            // disk-cache deserialization, which happens inside the
+            // underlying cache impl (foyer) and never flows back through
+            // `SplitCache::insert`. A direct insert of an encoded entry
+            // would indicate the invariant was bypassed.
+            CachedItem::EncodedFilters(_) => {
+                error!(
+                    "SplitCache::insert called with EncodedFilters; encoded \
+                     entries only exist inside foyer's deserialization path"
+                );
+                debug_assert!(false, "EncodedFilters in SplitCache::insert");
             }
         }
     }
@@ -395,6 +448,16 @@ impl DbCache for SplitCache {
     fn entry_count(&self) -> u64 {
         self.block_cache.as_ref().map_or(0, |c| c.entry_count())
             + self.meta_cache.as_ref().map_or(0, |c| c.entry_count())
+    }
+
+    async fn close(&self) -> Result<(), crate::Error> {
+        if let Some(ref cache) = self.block_cache {
+            cache.close().await?;
+        }
+        if let Some(ref cache) = self.meta_cache {
+            cache.close().await?;
+        }
+        Ok(())
     }
 }
 
@@ -556,6 +619,10 @@ impl DbCache for DbCacheWrapper {
     fn entry_count(&self) -> u64 {
         self.cache.entry_count()
     }
+
+    async fn close(&self) -> Result<(), crate::Error> {
+        self.cache.close().await
+    }
 }
 
 pub mod stats {
@@ -564,19 +631,12 @@ pub mod stats {
 
     macro_rules! dbcache_stat_name {
         ($suffix:expr) => {
-            concat!("dbcache", "/", $suffix)
+            concat!("slatedb.db_cache.", $suffix)
         };
     }
 
-    pub const DB_CACHE_FILTER_HIT: &str = dbcache_stat_name!("filter_hit");
-    pub const DB_CACHE_FILTER_MISS: &str = dbcache_stat_name!("filter_miss");
-    pub const DB_CACHE_INDEX_HIT: &str = dbcache_stat_name!("index_hit");
-    pub const DB_CACHE_INDEX_MISS: &str = dbcache_stat_name!("index_miss");
-    pub const DB_CACHE_DATA_BLOCK_HIT: &str = dbcache_stat_name!("data_block_hit");
-    pub const DB_CACHE_DATA_BLOCK_MISS: &str = dbcache_stat_name!("data_block_miss");
-    pub const DB_CACHE_STATS_HIT: &str = dbcache_stat_name!("stats_hit");
-    pub const DB_CACHE_STATS_MISS: &str = dbcache_stat_name!("stats_miss");
-    pub const DB_CACHE_GET_ERROR: &str = dbcache_stat_name!("get_error");
+    pub const ACCESS_COUNT: &str = dbcache_stat_name!("access_count");
+    pub const ERROR_COUNT: &str = dbcache_stat_name!("error_count");
 
     pub(super) struct DbCacheStats {
         pub(super) filter_hit: Arc<dyn CounterFn>,
@@ -593,15 +653,39 @@ pub mod stats {
     impl DbCacheStats {
         pub(super) fn new(recorder: &MetricsRecorderHelper) -> Self {
             Self {
-                filter_hit: recorder.counter(DB_CACHE_FILTER_HIT).register(),
-                filter_miss: recorder.counter(DB_CACHE_FILTER_MISS).register(),
-                index_hit: recorder.counter(DB_CACHE_INDEX_HIT).register(),
-                index_miss: recorder.counter(DB_CACHE_INDEX_MISS).register(),
-                data_block_hit: recorder.counter(DB_CACHE_DATA_BLOCK_HIT).register(),
-                data_block_miss: recorder.counter(DB_CACHE_DATA_BLOCK_MISS).register(),
-                stats_hit: recorder.counter(DB_CACHE_STATS_HIT).register(),
-                stats_miss: recorder.counter(DB_CACHE_STATS_MISS).register(),
-                get_error: recorder.counter(DB_CACHE_GET_ERROR).register(),
+                filter_hit: recorder
+                    .counter(ACCESS_COUNT)
+                    .labels(&[("entry_kind", "filter"), ("result", "hit")])
+                    .register(),
+                filter_miss: recorder
+                    .counter(ACCESS_COUNT)
+                    .labels(&[("entry_kind", "filter"), ("result", "miss")])
+                    .register(),
+                index_hit: recorder
+                    .counter(ACCESS_COUNT)
+                    .labels(&[("entry_kind", "index"), ("result", "hit")])
+                    .register(),
+                index_miss: recorder
+                    .counter(ACCESS_COUNT)
+                    .labels(&[("entry_kind", "index"), ("result", "miss")])
+                    .register(),
+                data_block_hit: recorder
+                    .counter(ACCESS_COUNT)
+                    .labels(&[("entry_kind", "data_block"), ("result", "hit")])
+                    .register(),
+                data_block_miss: recorder
+                    .counter(ACCESS_COUNT)
+                    .labels(&[("entry_kind", "data_block"), ("result", "miss")])
+                    .register(),
+                stats_hit: recorder
+                    .counter(ACCESS_COUNT)
+                    .labels(&[("entry_kind", "stats"), ("result", "hit")])
+                    .register(),
+                stats_miss: recorder
+                    .counter(ACCESS_COUNT)
+                    .labels(&[("entry_kind", "stats"), ("result", "miss")])
+                    .register(),
+                get_error: recorder.counter(ERROR_COUNT).register(),
             }
         }
     }
@@ -612,7 +696,43 @@ pub(crate) mod test_utils {
     use crate::db_cache::{CachedEntry, CachedKey, DbCache};
     use async_trait::async_trait;
     use std::collections::HashMap;
-    use std::sync::Mutex;
+    use std::sync::{Arc, Mutex};
+
+    /// A cache that always returns an error from get operations.
+    pub(crate) struct FailingCache;
+
+    #[async_trait]
+    impl DbCache for FailingCache {
+        async fn get_block(&self, _: &CachedKey) -> Result<Option<CachedEntry>, crate::Error> {
+            Err(
+                crate::error::SlateDBError::from(Arc::new(std::io::Error::other("injected error")))
+                    .into(),
+            )
+        }
+        async fn get_index(&self, _: &CachedKey) -> Result<Option<CachedEntry>, crate::Error> {
+            Err(
+                crate::error::SlateDBError::from(Arc::new(std::io::Error::other("injected error")))
+                    .into(),
+            )
+        }
+        async fn get_filter(&self, _: &CachedKey) -> Result<Option<CachedEntry>, crate::Error> {
+            Err(
+                crate::error::SlateDBError::from(Arc::new(std::io::Error::other("injected error")))
+                    .into(),
+            )
+        }
+        async fn get_stats(&self, _: &CachedKey) -> Result<Option<CachedEntry>, crate::Error> {
+            Err(
+                crate::error::SlateDBError::from(Arc::new(std::io::Error::other("injected error")))
+                    .into(),
+            )
+        }
+        async fn insert(&self, _: CachedKey, _: CachedEntry) {}
+        async fn remove(&self, _: &CachedKey) {}
+        fn entry_count(&self) -> u64 {
+            0
+        }
+    }
 
     pub(crate) struct TestCache {
         items: Mutex<HashMap<CachedKey, CachedEntry>>,
@@ -670,7 +790,7 @@ mod tests {
 
     use crate::db_cache::{CachedEntry, CachedKey, DbCache, DbCacheWrapper, SplitCache};
     use crate::db_state::SsTableId;
-    use crate::filter::BloomFilterBuilder;
+    use crate::filter_policy::{BloomFilterPolicy, FilterPolicy, NamedFilter};
     use crate::format::sst::BlockBuilder;
     use slatedb_common::clock::DefaultSystemClock;
 
@@ -679,10 +799,10 @@ mod tests {
     use crate::db_cache::test_utils::TestCache;
     use crate::format::sst::{EncodedSsTable, SsTableFormat};
     use crate::test_utils::build_test_sst;
-    use crate::types::RowEntry;
+    use crate::types::{RowEntry, ValueDeletable};
     use rstest::{fixture, rstest};
     use slatedb_common::metrics::{
-        lookup_metric, DefaultMetricsRecorder, MetricLevel, MetricsRecorderHelper,
+        lookup_metric_with_labels, DefaultMetricsRecorder, MetricLevel, MetricsRecorderHelper,
     };
     use std::sync::Arc;
     use ulid::Ulid;
@@ -699,10 +819,7 @@ mod tests {
         // given:
         let key = CachedKey::from((SST_ID, 12345u64));
         cache
-            .insert(
-                key.clone(),
-                CachedEntry::with_bloom_filter(sst.filter.unwrap()),
-            )
+            .insert(key.clone(), CachedEntry::with_filters(sst.filters))
             .await;
 
         for i in 1..4 {
@@ -710,10 +827,21 @@ mod tests {
             let _ = cache.get_filter(&key).await;
 
             // then:
-            assert_eq!(Some(0), lookup_metric(&registry, "dbcache/filter_miss"));
+            assert_eq!(
+                Some(0),
+                lookup_metric_with_labels(
+                    &registry,
+                    super::stats::ACCESS_COUNT,
+                    &[("entry_kind", "filter"), ("result", "miss")]
+                )
+            );
             assert_eq!(
                 Some(i as i64),
-                lookup_metric(&registry, "dbcache/filter_hit")
+                lookup_metric_with_labels(
+                    &registry,
+                    super::stats::ACCESS_COUNT,
+                    &[("entry_kind", "filter"), ("result", "hit")]
+                )
             );
         }
     }
@@ -732,9 +860,20 @@ mod tests {
             // then:
             assert_eq!(
                 Some(i as i64),
-                lookup_metric(&registry, "dbcache/filter_miss")
+                lookup_metric_with_labels(
+                    &registry,
+                    super::stats::ACCESS_COUNT,
+                    &[("entry_kind", "filter"), ("result", "miss")]
+                )
             );
-            assert_eq!(Some(0), lookup_metric(&registry, "dbcache/filter_hit"));
+            assert_eq!(
+                Some(0),
+                lookup_metric_with_labels(
+                    &registry,
+                    super::stats::ACCESS_COUNT,
+                    &[("entry_kind", "filter"), ("result", "hit")]
+                )
+            );
         }
     }
 
@@ -759,10 +898,21 @@ mod tests {
             let _ = cache.get_index(&key).await;
 
             // then:
-            assert_eq!(Some(0), lookup_metric(&registry, "dbcache/index_miss"));
+            assert_eq!(
+                Some(0),
+                lookup_metric_with_labels(
+                    &registry,
+                    super::stats::ACCESS_COUNT,
+                    &[("entry_kind", "index"), ("result", "miss")]
+                )
+            );
             assert_eq!(
                 Some(i as i64),
-                lookup_metric(&registry, "dbcache/index_hit")
+                lookup_metric_with_labels(
+                    &registry,
+                    super::stats::ACCESS_COUNT,
+                    &[("entry_kind", "index"), ("result", "hit")]
+                )
             );
         }
     }
@@ -804,9 +954,20 @@ mod tests {
             // then:
             assert_eq!(
                 Some(i as i64),
-                lookup_metric(&registry, "dbcache/index_miss")
+                lookup_metric_with_labels(
+                    &registry,
+                    super::stats::ACCESS_COUNT,
+                    &[("entry_kind", "index"), ("result", "miss")]
+                )
             );
-            assert_eq!(Some(0), lookup_metric(&registry, "dbcache/index_hit"));
+            assert_eq!(
+                Some(0),
+                lookup_metric_with_labels(
+                    &registry,
+                    super::stats::ACCESS_COUNT,
+                    &[("entry_kind", "index"), ("result", "hit")]
+                )
+            );
         }
     }
 
@@ -834,10 +995,21 @@ mod tests {
             let _ = cache.get_block(&key).await;
 
             // then:
-            assert_eq!(Some(0), lookup_metric(&registry, "dbcache/data_block_miss"));
+            assert_eq!(
+                Some(0),
+                lookup_metric_with_labels(
+                    &registry,
+                    super::stats::ACCESS_COUNT,
+                    &[("entry_kind", "data_block"), ("result", "miss")]
+                )
+            );
             assert_eq!(
                 Some(i as i64),
-                lookup_metric(&registry, "dbcache/data_block_hit")
+                lookup_metric_with_labels(
+                    &registry,
+                    super::stats::ACCESS_COUNT,
+                    &[("entry_kind", "data_block"), ("result", "hit")]
+                )
             );
         }
     }
@@ -858,10 +1030,113 @@ mod tests {
             // then:
             assert_eq!(
                 Some(i as i64),
-                lookup_metric(&registry, "dbcache/data_block_miss")
+                lookup_metric_with_labels(
+                    &registry,
+                    super::stats::ACCESS_COUNT,
+                    &[("entry_kind", "data_block"), ("result", "miss")]
+                )
             );
-            assert_eq!(Some(0), lookup_metric(&registry, "dbcache/data_block_hit"));
+            assert_eq!(
+                Some(0),
+                lookup_metric_with_labels(
+                    &registry,
+                    super::stats::ACCESS_COUNT,
+                    &[("entry_kind", "data_block"), ("result", "hit")]
+                )
+            );
         }
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_should_count_stats_hits(cache: (DbCacheWrapper, Arc<DefaultMetricsRecorder>)) {
+        let (cache, registry) = cache;
+        // given:
+        let key = CachedKey::from((SST_ID, 12345u64));
+        let stats = crate::sst_stats::SstStats::default();
+        cache
+            .insert(key.clone(), CachedEntry::with_sst_stats(Arc::new(stats)))
+            .await;
+
+        for i in 1..4 {
+            // when:
+            let _ = cache.get_stats(&key).await;
+
+            // then:
+            assert_eq!(
+                Some(0),
+                lookup_metric_with_labels(
+                    &registry,
+                    super::stats::ACCESS_COUNT,
+                    &[("entry_kind", "stats"), ("result", "miss")]
+                )
+            );
+            assert_eq!(
+                Some(i as i64),
+                lookup_metric_with_labels(
+                    &registry,
+                    super::stats::ACCESS_COUNT,
+                    &[("entry_kind", "stats"), ("result", "hit")]
+                )
+            );
+        }
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_should_count_stats_misses(cache: (DbCacheWrapper, Arc<DefaultMetricsRecorder>)) {
+        let (cache, registry) = cache;
+        // given:
+        let key = CachedKey::from((SST_ID, 12345u64));
+
+        for i in 1..4 {
+            // when:
+            let _ = cache.get_stats(&key).await;
+
+            // then:
+            assert_eq!(
+                Some(i as i64),
+                lookup_metric_with_labels(
+                    &registry,
+                    super::stats::ACCESS_COUNT,
+                    &[("entry_kind", "stats"), ("result", "miss")]
+                )
+            );
+            assert_eq!(
+                Some(0),
+                lookup_metric_with_labels(
+                    &registry,
+                    super::stats::ACCESS_COUNT,
+                    &[("entry_kind", "stats"), ("result", "hit")]
+                )
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_should_count_get_errors() {
+        // given: a cache that always returns errors
+        let recorder = Arc::new(DefaultMetricsRecorder::new());
+        let helper = MetricsRecorderHelper::new(recorder.clone(), MetricLevel::default());
+        let failing_cache: Arc<dyn super::DbCache> = Arc::new(super::test_utils::FailingCache);
+        let cache = super::DbCacheWrapper::new(
+            failing_cache,
+            &helper,
+            Arc::new(slatedb_common::clock::DefaultSystemClock::default()),
+        );
+        let key = CachedKey::from((SST_ID, 12345u64));
+
+        // when: each get method returns an error
+        let _ = cache.get_block(&key).await;
+        let _ = cache.get_index(&key).await;
+        let _ = cache.get_filter(&key).await;
+        let _ = cache.get_stats(&key).await;
+
+        // then:
+        assert_eq!(
+            slatedb_common::metrics::lookup_metric(&recorder, super::stats::ERROR_COUNT),
+            Some(4)
+        );
     }
 
     #[tokio::test]
@@ -874,20 +1149,34 @@ mod tests {
         let cache_b = DbCacheWrapper::new(shared_cache.clone(), &recorder_b, system_clock);
         assert_ne!(cache_a.scope_id, cache_b.scope_id);
 
-        let mut builder = BloomFilterBuilder::new(1);
-        builder.add_key(b"a");
-        let filter = Arc::new(builder.build());
+        let policy = BloomFilterPolicy::new(1);
+        let mut builder = policy.builder();
+        builder.add_entry(&RowEntry::new(
+            bytes::Bytes::from_static(b"a"),
+            ValueDeletable::Value(bytes::Bytes::new()),
+            0,
+            None,
+            None,
+        ));
+        let filter = builder.build();
+        let named = NamedFilter {
+            name: BloomFilterPolicy::NAME.to_string(),
+            filter,
+        };
         let key = CachedKey::from((SST_ID, 1u64));
 
         cache_a
-            .insert(key.clone(), CachedEntry::with_bloom_filter(filter.clone()))
+            .insert(
+                key.clone(),
+                CachedEntry::with_filters(Arc::from([named.clone()])),
+            )
             .await;
 
         assert!(cache_a.get_filter(&key).await.unwrap().is_some());
         assert!(cache_b.get_filter(&key).await.unwrap().is_none());
 
         cache_b
-            .insert(key.clone(), CachedEntry::with_bloom_filter(filter))
+            .insert(key.clone(), CachedEntry::with_filters(Arc::from([named])))
             .await;
 
         assert_eq!(2, shared_cache.entry_count());

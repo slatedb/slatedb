@@ -308,7 +308,6 @@ mod tests {
     use chrono::{DateTime, Days, TimeDelta, Utc};
     use object_store::{local::LocalFileSystem, path::Path};
     use tokio::runtime::Handle;
-    use tokio::sync::mpsc;
     use uuid::Uuid;
 
     use crate::checkpoint::Checkpoint;
@@ -321,13 +320,19 @@ mod tests {
     use crate::paths::PathResolver;
     use crate::types::RowEntry;
     use slatedb_common::clock::DefaultSystemClock;
+    use slatedb_common::metrics::{
+        lookup_metric_with_labels, DefaultMetricsRecorder, MetricsRecorderHelper,
+    };
 
     use crate::db_status::ClosedResultWriter;
     use crate::format::sst::SsTableFormat;
     use crate::utils::WatchableOnceCell;
     use crate::{
-        db_state::{ManifestCore, SortedRun, SsTableHandle, SsTableId, SsTableView},
-        manifest::store::{ManifestStore, StoredManifest},
+        db_state::{SortedRun, SsTableHandle, SsTableId, SsTableView},
+        manifest::{
+            store::{ManifestStore, StoredManifest},
+            ManifestCore,
+        },
         tablestore::TableStore,
     };
 
@@ -621,15 +626,14 @@ mod tests {
 
         // The GC should create a new manifest version 4 with the expired
         // checkpoint removed.
-        let (latest_manifest_id, latest_manifest) =
-            manifest_store.read_latest_manifest().await.unwrap();
-        assert_eq!(4, latest_manifest_id);
-        assert_eq!(1, latest_manifest.core.checkpoints.len());
+        let latest_manifest = manifest_store.read_latest_manifest().await.unwrap();
+        assert_eq!(4, latest_manifest.id);
+        assert_eq!(1, latest_manifest.manifest.core.checkpoints.len());
         assert_eq!(
             unexpired_checkpoint_id,
-            latest_manifest.core.checkpoints[0].id
+            latest_manifest.manifest.core.checkpoints[0].id
         );
-        assert_eq!(2, latest_manifest.core.checkpoints[0].manifest_id);
+        assert_eq!(2, latest_manifest.manifest.core.checkpoints[0].manifest_id);
 
         // Only the latest manifest and the one referenced by the unexpired checkpoint
         // should be retained.
@@ -688,12 +692,14 @@ mod tests {
         .await;
 
         // Verify that the latest manifest version is still 4 with the active checkpoint
-        let (latest_manifest_id, latest_manifest) =
-            manifest_store.read_latest_manifest().await.unwrap();
-        assert_eq!(4, latest_manifest_id);
-        assert_eq!(1, latest_manifest.core.checkpoints.len());
-        assert_eq!(active_checkpoint_id, latest_manifest.core.checkpoints[0].id);
-        assert_eq!(1, latest_manifest.core.checkpoints[0].manifest_id);
+        let latest_manifest = manifest_store.read_latest_manifest().await.unwrap();
+        assert_eq!(4, latest_manifest.id);
+        assert_eq!(1, latest_manifest.manifest.core.checkpoints.len());
+        assert_eq!(
+            active_checkpoint_id,
+            latest_manifest.manifest.core.checkpoints[0].id
+        );
+        assert_eq!(1, latest_manifest.manifest.core.checkpoints[0].manifest_id);
 
         // The active manifest and the manifest corresponding to the active
         // checkpoint should be retained. The rest should be deleted.
@@ -806,9 +812,9 @@ mod tests {
         assert_eq!(wal_ssts[0].last_modified, now_minus_24h);
         let manifests = manifest_store.list_manifests(..).await.unwrap();
         assert_eq!(manifests.len(), 1);
-        let current_manifest = manifest_store.read_latest_manifest().await.unwrap().1;
+        let current_manifest = manifest_store.read_latest_manifest().await.unwrap();
         assert_eq!(
-            current_manifest.core.replay_after_wal_id,
+            current_manifest.manifest.core.replay_after_wal_id,
             id2.unwrap_wal_id()
         );
 
@@ -943,9 +949,9 @@ mod tests {
         assert_eq!(wal_ssts[1].last_modified, now_minus_24h_2);
         let manifests = manifest_store.list_manifests(..).await.unwrap();
         assert_eq!(manifests.len(), 1);
-        let current_manifest = manifest_store.read_latest_manifest().await.unwrap().1;
+        let current_manifest = manifest_store.read_latest_manifest().await.unwrap();
         assert_eq!(
-            current_manifest.core.replay_after_wal_id,
+            current_manifest.manifest.core.replay_after_wal_id,
             id2.unwrap_wal_id()
         );
 
@@ -1040,10 +1046,13 @@ mod tests {
         }
         let manifests = manifest_store.list_manifests(..).await.unwrap();
         assert_eq!(manifests.len(), 1);
-        let current_manifest = manifest_store.read_latest_manifest().await.unwrap().1;
-        assert_eq!(current_manifest.core.l0.len(), 2);
-        assert_eq!(current_manifest.core.compacted.len(), 1);
-        assert_eq!(current_manifest.core.compacted[0].sst_views.len(), 2);
+        let current_manifest = manifest_store.read_latest_manifest().await.unwrap();
+        assert_eq!(current_manifest.manifest.core.l0.len(), 2);
+        assert_eq!(current_manifest.manifest.core.compacted.len(), 1);
+        assert_eq!(
+            current_manifest.manifest.core.compacted[0].sst_views.len(),
+            2
+        );
 
         // Start the garbage collector
         run_gc_once(
@@ -1072,10 +1081,13 @@ mod tests {
         // Deleted SSTs
         assert!(!remaining_ids.contains(&inactive_expired_l0_sst_handle.id));
         assert!(!remaining_ids.contains(&inactive_expired_sst_handle.id));
-        let current_manifest = manifest_store.read_latest_manifest().await.unwrap().1;
-        assert_eq!(current_manifest.core.l0.len(), 2);
-        assert_eq!(current_manifest.core.compacted.len(), 1);
-        assert_eq!(current_manifest.core.compacted[0].sst_views.len(), 2);
+        let current_manifest = manifest_store.read_latest_manifest().await.unwrap();
+        assert_eq!(current_manifest.manifest.core.l0.len(), 2);
+        assert_eq!(current_manifest.manifest.core.compacted.len(), 1);
+        assert_eq!(
+            current_manifest.manifest.core.compacted[0].sst_views.len(),
+            2
+        );
     }
 
     /// This test creates six compacted SSTs:
@@ -1264,9 +1276,9 @@ mod tests {
         manifest_store: Arc<ManifestStore>,
         table_store: Arc<TableStore>,
     ) {
-        let (manifest_id, manifest) = manifest_store.read_latest_manifest().await.unwrap();
+        let manifest = manifest_store.read_latest_manifest().await.unwrap();
         let manifests = manifest_store
-            .read_referenced_manifests(manifest_id, &manifest)
+            .read_referenced_manifests(manifest.id, &manifest.manifest)
             .await
             .unwrap();
 
@@ -1310,9 +1322,23 @@ mod tests {
         table_store: Arc<TableStore>,
         compaction_low_watermark_dt: Option<DateTime<Utc>>,
     ) {
-        // Start the garbage collector
-        let recorder = MetricsRecorderHelper::noop();
+        run_gc_once_with_recorder(
+            manifest_store,
+            compactions_store,
+            table_store,
+            compaction_low_watermark_dt,
+            &MetricsRecorderHelper::noop(),
+        )
+        .await;
+    }
 
+    async fn run_gc_once_with_recorder(
+        manifest_store: Arc<ManifestStore>,
+        compactions_store: Arc<CompactionsStore>,
+        table_store: Arc<TableStore>,
+        compaction_low_watermark_dt: Option<DateTime<Utc>>,
+        recorder: &MetricsRecorderHelper,
+    ) {
         // Pretend a compaction job has already run with the specified start time
         if let Some(compaction_low_watermark_dt) = compaction_low_watermark_dt {
             // Start by creating an empty .compactions file if it doesn't exist
@@ -1369,7 +1395,7 @@ mod tests {
             compactions_store.clone(),
             table_store.clone(),
             gc_opts,
-            &recorder,
+            recorder,
             Arc::new(DefaultSystemClock::default()),
         );
 
@@ -1582,10 +1608,10 @@ mod tests {
             &recorder,
             Arc::new(DefaultSystemClock::default()),
         );
-        let (_, rx) = mpsc::unbounded_channel();
+        let (_, rx) = async_channel::unbounded();
         let clock = Arc::new(DefaultSystemClock::default());
-        let executor =
-            MessageHandlerExecutor::new(ClosedResultWriter::new(WatchableOnceCell::new()), clock);
+        let closed_result: Arc<dyn ClosedResultWriter> = Arc::new(WatchableOnceCell::new());
+        let executor = MessageHandlerExecutor::new(closed_result, clock);
         executor
             .add_handler(
                 "garbage_collector".to_string(),
@@ -1601,5 +1627,217 @@ mod tests {
         let result = executor.join_task(GC_TASK_NAME).await;
         assert!(matches!(result, Ok(())));
         jh.await.expect("failed to join task");
+    }
+
+    #[tokio::test]
+    async fn test_should_record_gc_manifest_deleted_count() {
+        let (manifest_store, compactions_store, table_store, local_object_store) = build_objects();
+
+        // given: two manifests, first one old enough to GC
+        let mut stored_manifest = StoredManifest::create_new_db(
+            manifest_store.clone(),
+            ManifestCore::new(),
+            Arc::new(DefaultSystemClock::new()),
+        )
+        .await
+        .unwrap();
+        stored_manifest
+            .update(stored_manifest.prepare_dirty().unwrap())
+            .await
+            .unwrap();
+        set_modified(
+            local_object_store,
+            &Path::from(format!("manifest/{:020}.manifest", 1)),
+            86400,
+        );
+
+        // when:
+        let recorder = Arc::new(DefaultMetricsRecorder::new());
+        let helper = MetricsRecorderHelper::new(recorder.clone(), Default::default());
+        run_gc_once_with_recorder(
+            manifest_store,
+            compactions_store,
+            table_store,
+            None,
+            &helper,
+        )
+        .await;
+
+        // then:
+        assert_eq!(
+            lookup_metric_with_labels(
+                &recorder,
+                crate::garbage_collector::stats::DELETED_COUNT,
+                &[("resource", "manifest")]
+            ),
+            Some(1)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_should_record_gc_wal_deleted_count() {
+        let (manifest_store, compactions_store, table_store, local_object_store) = build_objects();
+        let path_resolver = PathResolver::new("/");
+
+        // given: two WAL SSTs, first one old enough to GC
+        let id1 = SsTableId::Wal(1);
+        write_sst(table_store.clone(), &id1).await.unwrap();
+        let id2 = SsTableId::Wal(2);
+        write_sst(table_store.clone(), &id2).await.unwrap();
+        set_modified(local_object_store, &path_resolver.table_path(&id1), 86400);
+
+        let mut state = ManifestCore::new();
+        state.replay_after_wal_id = id2.unwrap_wal_id();
+        StoredManifest::create_new_db(
+            manifest_store.clone(),
+            state,
+            Arc::new(DefaultSystemClock::new()),
+        )
+        .await
+        .unwrap();
+
+        // when:
+        let recorder = Arc::new(DefaultMetricsRecorder::new());
+        let helper = MetricsRecorderHelper::new(recorder.clone(), Default::default());
+        run_gc_once_with_recorder(
+            manifest_store,
+            compactions_store,
+            table_store,
+            None,
+            &helper,
+        )
+        .await;
+
+        // then:
+        assert_eq!(
+            lookup_metric_with_labels(
+                &recorder,
+                crate::garbage_collector::stats::DELETED_COUNT,
+                &[("resource", "wal")]
+            ),
+            Some(1)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_should_record_gc_compacted_deleted_count() {
+        let (manifest_store, compactions_store, table_store, _) = build_objects();
+        let now = DefaultSystemClock::default().now();
+        let expired_ms = (now - TimeDelta::seconds(7200)).timestamp_millis() as u64;
+        let unexpired_ms = (now - TimeDelta::seconds(1800)).timestamp_millis() as u64;
+
+        // given: one active L0 SST, one active sorted-run SST, one inactive expired SST
+        let active_l0_handle = create_sst(table_store.clone(), unexpired_ms).await;
+        let active_handle = create_sst(table_store.clone(), unexpired_ms + 1).await;
+        let inactive_expired_handle = create_sst(table_store.clone(), expired_ms).await;
+
+        let mut state = ManifestCore::new();
+        state.l0.push_back(SsTableView::identity(active_l0_handle));
+        state.compacted.push(SortedRun {
+            id: 1,
+            sst_views: vec![SsTableView::identity(active_handle)],
+        });
+        // inactive_expired_handle is NOT in manifest -> eligible for GC
+        StoredManifest::create_new_db(
+            manifest_store.clone(),
+            state,
+            Arc::new(DefaultSystemClock::new()),
+        )
+        .await
+        .unwrap();
+
+        // when:
+        let recorder = Arc::new(DefaultMetricsRecorder::new());
+        let helper = MetricsRecorderHelper::new(recorder.clone(), Default::default());
+        run_gc_once_with_recorder(
+            manifest_store,
+            compactions_store,
+            table_store.clone(),
+            Some(now),
+            &helper,
+        )
+        .await;
+
+        // then: the inactive expired SST should be deleted
+        let remaining: HashSet<_> = table_store
+            .list_compacted_ssts(..)
+            .await
+            .unwrap()
+            .iter()
+            .map(|s| s.id)
+            .collect();
+        assert!(!remaining.contains(&inactive_expired_handle.id));
+        assert_eq!(
+            lookup_metric_with_labels(
+                &recorder,
+                crate::garbage_collector::stats::DELETED_COUNT,
+                &[("resource", "compacted")]
+            ),
+            Some(1)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_should_record_gc_compactions_deleted_count() {
+        let (manifest_store, compactions_store, table_store, local_object_store) = build_objects();
+
+        // given: create a manifest and three compaction files, age them all
+        StoredManifest::create_new_db(
+            manifest_store.clone(),
+            ManifestCore::new(),
+            Arc::new(DefaultSystemClock::new()),
+        )
+        .await
+        .unwrap();
+
+        let mut stored_compactions = StoredCompactions::create(compactions_store.clone(), 0)
+            .await
+            .unwrap();
+        stored_compactions
+            .update(stored_compactions.prepare_dirty().unwrap())
+            .await
+            .unwrap();
+        stored_compactions
+            .update(stored_compactions.prepare_dirty().unwrap())
+            .await
+            .unwrap();
+
+        for id in 1..=3 {
+            set_modified(
+                local_object_store.clone(),
+                &Path::from(format!("compactions/{:020}.compactions", id)),
+                86400,
+            );
+        }
+        assert_eq!(
+            compactions_store.list_compactions(..).await.unwrap().len(),
+            3
+        );
+
+        // when:
+        let recorder = Arc::new(DefaultMetricsRecorder::new());
+        let helper = MetricsRecorderHelper::new(recorder.clone(), Default::default());
+        run_gc_once_with_recorder(
+            manifest_store,
+            compactions_store.clone(),
+            table_store,
+            None,
+            &helper,
+        )
+        .await;
+
+        // then: two old compaction files deleted, latest kept
+        assert_eq!(
+            compactions_store.list_compactions(..).await.unwrap().len(),
+            1
+        );
+        assert_eq!(
+            lookup_metric_with_labels(
+                &recorder,
+                crate::garbage_collector::stats::DELETED_COUNT,
+                &[("resource", "compactions")]
+            ),
+            Some(2)
+        );
     }
 }

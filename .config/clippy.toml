@@ -66,7 +66,7 @@ disallowed-methods = [
     { path = "uuid::Uuid::new_v8", reason = "Use crate::utils::IdGenerator instead", allow-invalid = true },
     { path = "std::thread::spawn", reason = "Use tokio::task::spawn instead" },
     { path = "std::thread::sleep", reason = "Use tokio::time::sleep instead" },
-    { path = "tokio::sync::mpsc::UnboundedSender::send", reason = "Use crate::utils::SendSafely instead" },
+    { path = "tokio::sync::mpsc::UnboundedSender::send", reason = "Use DbStatusManager::create_safe_channel instead" },
     { path = "tokio::task::spawn_blocking", reason = "Use tokio::task::spawn instead" },
     { path = "tokio::time::Instant::now", reason = "Use slatedb_common::clock::SystemClock instead" },
     { path = "tokio::time::interval", reason = "Use slatedb_common::clock::SystemClock instead" },

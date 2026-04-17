@@ -4,16 +4,16 @@ use std::sync::Arc;
 
 macro_rules! oscache_stat_name {
     ($suffix:expr) => {
-        concat!("oscache", "/", $suffix)
+        concat!("slatedb.object_store_cache.", $suffix)
     };
 }
 
-pub const OBJECT_STORE_CACHE_PART_HITS: &str = oscache_stat_name!("part_hits");
-pub const OBJECT_STORE_CACHE_PART_ACCESS: &str = oscache_stat_name!("part_access");
-pub const OBJECT_STORE_CACHE_KEYS: &str = oscache_stat_name!("cache_keys");
-pub const OBJECT_STORE_CACHE_BYTES: &str = oscache_stat_name!("cache_bytes");
-pub const OBJECT_STORE_CACHE_EVICTED_KEYS: &str = oscache_stat_name!("evicted_keys");
-pub const OBJECT_STORE_CACHE_EVICTED_BYTES: &str = oscache_stat_name!("evicted_bytes");
+pub const PART_HIT_COUNT: &str = oscache_stat_name!("part_hit_count");
+pub const PART_ACCESS_COUNT: &str = oscache_stat_name!("part_access_count");
+pub const CACHE_KEYS: &str = oscache_stat_name!("cache_keys");
+pub const CACHE_BYTES: &str = oscache_stat_name!("cache_bytes");
+pub const EVICTED_KEYS: &str = oscache_stat_name!("evicted_keys");
+pub const EVICTED_BYTES: &str = oscache_stat_name!("evicted_bytes");
 
 #[derive(Clone)]
 pub struct CachedObjectStoreStats {
@@ -41,18 +41,12 @@ impl Debug for CachedObjectStoreStats {
 impl CachedObjectStoreStats {
     pub(crate) fn new(recorder: &MetricsRecorderHelper) -> Self {
         Self {
-            object_store_cache_part_hits: recorder.counter(OBJECT_STORE_CACHE_PART_HITS).register(),
-            object_store_cache_part_access: recorder
-                .counter(OBJECT_STORE_CACHE_PART_ACCESS)
-                .register(),
-            object_store_cache_keys: recorder.gauge(OBJECT_STORE_CACHE_KEYS).register(),
-            object_store_cache_bytes: recorder.gauge(OBJECT_STORE_CACHE_BYTES).register(),
-            object_store_cache_evicted_keys: recorder
-                .counter(OBJECT_STORE_CACHE_EVICTED_KEYS)
-                .register(),
-            object_store_cache_evicted_bytes: recorder
-                .counter(OBJECT_STORE_CACHE_EVICTED_BYTES)
-                .register(),
+            object_store_cache_part_hits: recorder.counter(PART_HIT_COUNT).register(),
+            object_store_cache_part_access: recorder.counter(PART_ACCESS_COUNT).register(),
+            object_store_cache_keys: recorder.gauge(CACHE_KEYS).register(),
+            object_store_cache_bytes: recorder.gauge(CACHE_BYTES).register(),
+            object_store_cache_evicted_keys: recorder.counter(EVICTED_KEYS).register(),
+            object_store_cache_evicted_bytes: recorder.counter(EVICTED_BYTES).register(),
         }
     }
 }

@@ -138,8 +138,10 @@ use crate::bytes_range::BytesRange;
 use crate::db::Db;
 use crate::db_iter::DbIterator;
 use crate::format::sst::{EncodedSsTable, SsTableFormat};
+use crate::merge_operator::{MERGE_OPERATOR_OPERANDS, MERGE_OPERATOR_PATH_LABEL};
 use crate::{MergeOperator, MergeOperatorError};
 pub(crate) use assert_debug_snapshot;
+use slatedb_common::metrics::{lookup_metric_with_labels, DefaultMetricsRecorder};
 
 pub(crate) fn decode_codec_entries(
     data: Bytes,
@@ -185,6 +187,17 @@ pub(crate) async fn assert_ranged_db_scan<T: RangeBounds<Bytes>>(
         }
         assert_next_kv(expected_next, actual_next);
     }
+}
+
+pub(crate) fn lookup_merge_operator_operands(
+    recorder: &DefaultMetricsRecorder,
+    path: &'static str,
+) -> Option<i64> {
+    lookup_metric_with_labels(
+        recorder,
+        MERGE_OPERATOR_OPERANDS,
+        &[(MERGE_OPERATOR_PATH_LABEL, path)],
+    )
 }
 
 pub(crate) async fn assert_ranged_kv_scan<T: RowEntryIterator>(
@@ -354,7 +367,7 @@ impl CompactionScheduler for OnDemandCompactionScheduler {
             return vec![];
         }
 
-        let db_state = state.manifest();
+        let db_state = state.manifest().core();
 
         // always compact into sorted run 0
         let next_sr_id = 0;

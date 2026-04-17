@@ -73,6 +73,47 @@ main().catch((error) => {
 
 Replace `memory:///` with any object store URL supported by Rust's [`object_store`](https://docs.rs/object_store/latest/object_store/fn.parse_url_opts.html) crate.
 
+## Metrics
+
+The Node binding exposes both application-provided metrics recorders and the built-in
+`DefaultMetricsRecorder`:
+
+- `DbBuilder.with_metrics_recorder(...)`
+- `DbReaderBuilder.with_metrics_recorder(...)`
+- `DefaultMetricsRecorder.snapshot()`
+- `DefaultMetricsRecorder.metrics_by_name(...)`
+- `DefaultMetricsRecorder.metric_by_name_and_labels(...)`
+
+Example:
+
+```js
+import { DbBuilder, DefaultMetricsRecorder, ObjectStore } from "@slatedb/uniffi";
+
+const store = ObjectStore.resolve("memory:///");
+const recorder = new DefaultMetricsRecorder();
+const builder = new DbBuilder("metrics-demo", store);
+
+try {
+  builder.with_metrics_recorder(recorder);
+  const db = await builder.build();
+  try {
+    await db.put(Buffer.from("hello"), Buffer.from("world"));
+
+    const metric = recorder.metric_by_name_and_labels("slatedb.db.write_ops", []);
+    if (metric?.value.tag === "Counter") {
+      console.log(metric.value[""]);
+    }
+  } finally {
+    await db.shutdown();
+    db.dispose();
+  }
+} finally {
+  builder.dispose();
+  recorder.dispose();
+  store.dispose();
+}
+```
+
 ## Local Development
 
 The package is generated from the UniFFI `slatedb-uniffi` cdylib using [`uniffi-bindgen-node-js`](https://crates.io/crates/uniffi-bindgen-node-js).
@@ -86,7 +127,7 @@ You only need these tools when regenerating bindings, running tests from this re
 Install the generator with:
 
 ```bash
-cargo install uniffi-bindgen-node-js
+cargo install uniffi-bindgen-node-js --version 0.0.13
 ```
 
 Install the package dependency used by the generated bindings with:
