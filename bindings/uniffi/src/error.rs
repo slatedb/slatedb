@@ -28,6 +28,12 @@ pub(crate) enum SlateDbError {
     #[error("invalid checkpoint_id UUID: {source}")]
     InvalidCheckpointId { source: uuid::Error },
 
+    #[error("invalid compaction_id ULID: {source}")]
+    InvalidCompactionId { source: ulid::DecodeError },
+
+    #[error("invalid timestamp seconds: {timestamp_secs}")]
+    InvalidTimestampSeconds { timestamp_secs: i64 },
+
     #[error("range start must not be greater than range end")]
     RangeStartGreaterThanEnd,
 
@@ -135,16 +141,27 @@ impl From<slatedb::Error> for Error {
     fn from(error: slatedb::Error) -> Self {
         let message = error.to_string();
         match error.kind() {
-            slatedb::ErrorKind::Transaction => Self::Transaction { message },
-            slatedb::ErrorKind::Closed(reason) => Self::Closed {
+            slatedb::ErrorKind::Transaction => Error::Transaction { message },
+            slatedb::ErrorKind::Closed(reason) => Error::Closed {
                 reason: reason.into(),
                 message,
             },
-            slatedb::ErrorKind::Unavailable => Self::Unavailable { message },
-            slatedb::ErrorKind::Invalid => Self::Invalid { message },
-            slatedb::ErrorKind::Data => Self::Data { message },
-            slatedb::ErrorKind::Internal => Self::Internal { message },
-            _ => Self::Internal { message },
+            slatedb::ErrorKind::Unavailable => Error::Unavailable { message },
+            slatedb::ErrorKind::Invalid => Error::Invalid { message },
+            slatedb::ErrorKind::Data => Error::Data { message },
+            slatedb::ErrorKind::Internal => Error::Internal { message },
+            _ => Error::Internal { message },
+        }
+    }
+}
+
+impl From<Box<dyn StdError>> for Error {
+    fn from(error: Box<dyn StdError>) -> Self {
+        match error.downcast::<slatedb::Error>() {
+            Ok(error) => Self::from(*error),
+            Err(error) => Self::Internal {
+                message: error.to_string(),
+            },
         }
     }
 }
