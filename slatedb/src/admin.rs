@@ -192,7 +192,7 @@ impl Admin {
         ));
         let compactions_store = Arc::new(self.compactions_store());
         let reader = CompactorStateReader::new(&manifest_store, &compactions_store);
-        Ok(reader.read_view().await.map_err(crate::Error::from)?)
+        reader.read_view().await.map_err(crate::Error::from)
     }
 
     /// Generate a compaction from a spec and submit it.
