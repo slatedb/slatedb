@@ -29,6 +29,25 @@ type testReader struct {
 	open   bool
 }
 
+func openTestAdmin(t *testing.T, store *slatedb.ObjectStore, configure func(*testing.T, *slatedb.AdminBuilder)) *slatedb.Admin {
+	t.Helper()
+
+	builder := slatedb.NewAdminBuilder(testDBPath, store)
+	defer builder.Destroy()
+
+	if configure != nil {
+		configure(t, builder)
+	}
+
+	admin, err := builder.Build()
+	if err != nil {
+		t.Fatalf("AdminBuilder.Build(): %v", err)
+	}
+
+	t.Cleanup(admin.Destroy)
+	return admin
+}
+
 func newMemoryStore(t *testing.T) *slatedb.ObjectStore {
 	t.Helper()
 
@@ -117,6 +136,10 @@ func openTestWalReader(t *testing.T, store *slatedb.ObjectStore) *slatedb.WalRea
 func bytesPtr(b []byte) *[]byte {
 	clone := append([]byte(nil), b...)
 	return &clone
+}
+
+func uint64Ptr(v uint64) *uint64 {
+	return &v
 }
 
 func drainIterator(t *testing.T, iter *slatedb.DbIterator) []slatedb.KeyValue {
@@ -1453,6 +1476,302 @@ func TestDbReaderBuilderValidationAndErrors(t *testing.T) {
 		t.Cleanup(readerIter.Destroy)
 		requireRows(t, drainIterator(t, readerIter), []string{"seed"}, []string{"value"})
 	})
+}
+
+func TestAdminBuilderValidationAndErrors(t *testing.T) {
+	t.Run("builder consumed after build", func(t *testing.T) {
+		store := newMemoryStore(t)
+		walStore := newMemoryStore(t)
+
+		builder := slatedb.NewAdminBuilder(testDBPath, store)
+		defer builder.Destroy()
+
+		if err := builder.WithSeed(42); err != nil {
+			t.Fatalf("AdminBuilder.WithSeed(): %v", err)
+		}
+		if err := builder.WithWalObjectStore(walStore); err != nil {
+			t.Fatalf("AdminBuilder.WithWalObjectStore(): %v", err)
+		}
+
+		admin, err := builder.Build()
+		if err != nil {
+			t.Fatalf("AdminBuilder.Build(): %v", err)
+		}
+		defer admin.Destroy()
+
+		_, err = builder.Build()
+		if !errors.Is(err, slatedb.ErrErrorInvalid) {
+			t.Fatalf("second AdminBuilder.Build(): got %v, want invalid error", err)
+		}
+
+		var invalidErr *slatedb.ErrorInvalid
+		if !errors.As(err, &invalidErr) {
+			t.Fatalf("second AdminBuilder.Build(): expected *ErrorInvalid, got %T", err)
+		}
+		if invalidErr.Message != "builder has already been consumed" {
+			t.Fatalf("second AdminBuilder.Build(): message = %q, want %q", invalidErr.Message, "builder has already been consumed")
+		}
+	})
+
+	t.Run("invalid timestamp seconds", func(t *testing.T) {
+		store := newMemoryStore(t)
+		admin := openTestAdmin(t, store, nil)
+
+		_, err := admin.GetSequenceForTimestamp(1<<62, false)
+		if !errors.Is(err, slatedb.ErrErrorInvalid) {
+			t.Fatalf("GetSequenceForTimestamp(invalid): got %v, want invalid error", err)
+		}
+
+		var invalidErr *slatedb.ErrorInvalid
+		if !errors.As(err, &invalidErr) {
+			t.Fatalf("GetSequenceForTimestamp(invalid): expected *ErrorInvalid, got %T", err)
+		}
+		if !strings.Contains(invalidErr.Message, "invalid timestamp seconds") {
+			t.Fatalf("GetSequenceForTimestamp(invalid): message = %q, want substring %q", invalidErr.Message, "invalid timestamp seconds")
+		}
+	})
+
+	t.Run("invalid compaction id", func(t *testing.T) {
+		store := newMemoryStore(t)
+		admin := openTestAdmin(t, store, nil)
+
+		_, err := admin.ReadCompaction("not-a-ulid", nil)
+		if !errors.Is(err, slatedb.ErrErrorInvalid) {
+			t.Fatalf("ReadCompaction(invalid): got %v, want invalid error", err)
+		}
+
+		var invalidErr *slatedb.ErrorInvalid
+		if !errors.As(err, &invalidErr) {
+			t.Fatalf("ReadCompaction(invalid): expected *ErrorInvalid, got %T", err)
+		}
+		if !strings.Contains(invalidErr.Message, "invalid compaction_id ULID") {
+			t.Fatalf("ReadCompaction(invalid): message = %q, want substring %q", invalidErr.Message, "invalid compaction_id ULID")
+		}
+	})
+
+	t.Run("invalid range", func(t *testing.T) {
+		store := newMemoryStore(t)
+		admin := openTestAdmin(t, store, nil)
+
+		_, err := admin.ListManifests(slatedb.U64Range{
+			Start:          uint64Ptr(2),
+			StartInclusive: true,
+			End:            uint64Ptr(1),
+			EndInclusive:   true,
+		})
+		if !errors.Is(err, slatedb.ErrErrorInvalid) {
+			t.Fatalf("ListManifests(invalid range): got %v, want invalid error", err)
+		}
+
+		var invalidErr *slatedb.ErrorInvalid
+		if !errors.As(err, &invalidErr) {
+			t.Fatalf("ListManifests(invalid range): expected *ErrorInvalid, got %T", err)
+		}
+		if invalidErr.Message != "range start must not be greater than range end" {
+			t.Fatalf("ListManifests(invalid range): message = %q, want %q", invalidErr.Message, "range start must not be greater than range end")
+		}
+	})
+}
+
+func TestAdminQueries(t *testing.T) {
+	store := newMemoryStore(t)
+	walStore := newMemoryStore(t)
+
+	dbHandle := openTestDB(t, store, func(t *testing.T, builder *slatedb.DbBuilder) {
+		t.Helper()
+		if err := builder.WithSeed(7); err != nil {
+			t.Fatalf("DbBuilder.WithSeed(): %v", err)
+		}
+		if err := builder.WithWalObjectStore(walStore); err != nil {
+			t.Fatalf("DbBuilder.WithWalObjectStore(): %v", err)
+		}
+	})
+
+	if _, err := dbHandle.db.Put([]byte("k1"), []byte("v1")); err != nil {
+		t.Fatalf("Put(k1): %v", err)
+	}
+	if _, err := dbHandle.db.Put([]byte("k2"), []byte("v2")); err != nil {
+		t.Fatalf("Put(k2): %v", err)
+	}
+	if err := dbHandle.db.FlushWithOptions(slatedb.FlushOptions{FlushType: slatedb.FlushTypeMemTable}); err != nil {
+		t.Fatalf("FlushWithOptions(MemTable #1): %v", err)
+	}
+	if _, err := dbHandle.db.Put([]byte("k3"), []byte("v3")); err != nil {
+		t.Fatalf("Put(k3): %v", err)
+	}
+	if err := dbHandle.db.FlushWithOptions(slatedb.FlushOptions{FlushType: slatedb.FlushTypeMemTable}); err != nil {
+		t.Fatalf("FlushWithOptions(MemTable #2): %v", err)
+	}
+
+	admin := openTestAdmin(t, store, func(t *testing.T, builder *slatedb.AdminBuilder) {
+		t.Helper()
+		if err := builder.WithSeed(7); err != nil {
+			t.Fatalf("AdminBuilder.WithSeed(): %v", err)
+		}
+		if err := builder.WithWalObjectStore(walStore); err != nil {
+			t.Fatalf("AdminBuilder.WithWalObjectStore(): %v", err)
+		}
+	})
+
+	var manifests []slatedb.VersionedManifest
+	waitUntil(t, 10*time.Second, 10*time.Millisecond, func() (bool, error) {
+		got, err := admin.ListManifests(slatedb.U64Range{})
+		if err != nil {
+			return false, err
+		}
+		manifests = got
+		return len(manifests) >= 3, nil
+	})
+
+	for i := 1; i < len(manifests); i++ {
+		if manifests[i-1].Id >= manifests[i].Id {
+			t.Fatalf("ListManifests(): ids not strictly ascending at %d: %d then %d", i, manifests[i-1].Id, manifests[i].Id)
+		}
+	}
+
+	latestManifest, err := admin.ReadManifest(nil)
+	if err != nil {
+		t.Fatalf("ReadManifest(nil): %v", err)
+	}
+	if latestManifest == nil {
+		t.Fatal("ReadManifest(nil): got nil manifest")
+	}
+	if latestManifest.Id != manifests[len(manifests)-1].Id {
+		t.Fatalf("ReadManifest(nil): got id %d, want latest id %d", latestManifest.Id, manifests[len(manifests)-1].Id)
+	}
+	if latestManifest.LastL0Seq < 3 {
+		t.Fatalf("ReadManifest(nil): LastL0Seq = %d, want at least 3", latestManifest.LastL0Seq)
+	}
+	if latestManifest.WalObjectStoreUri == nil {
+		t.Fatal("ReadManifest(nil): WalObjectStoreUri = nil, want value for configured WAL store")
+	}
+
+	firstManifest, err := admin.ReadManifest(uint64Ptr(manifests[0].Id))
+	if err != nil {
+		t.Fatalf("ReadManifest(first): %v", err)
+	}
+	if firstManifest == nil {
+		t.Fatal("ReadManifest(first): got nil manifest")
+	}
+	if firstManifest.Id != manifests[0].Id {
+		t.Fatalf("ReadManifest(first): got id %d, want %d", firstManifest.Id, manifests[0].Id)
+	}
+
+	boundedManifests, err := admin.ListManifests(slatedb.U64Range{
+		Start:          uint64Ptr(manifests[1].Id),
+		StartInclusive: true,
+		End:            uint64Ptr(latestManifest.Id),
+		EndInclusive:   false,
+	})
+	if err != nil {
+		t.Fatalf("ListManifests(bounded): %v", err)
+	}
+	if len(boundedManifests) == 0 {
+		t.Fatal("ListManifests(bounded): got empty result")
+	}
+	for _, manifest := range boundedManifests {
+		if manifest.Id < manifests[1].Id || manifest.Id >= latestManifest.Id {
+			t.Fatalf("ListManifests(bounded): got id %d outside [%d, %d)", manifest.Id, manifests[1].Id, latestManifest.Id)
+		}
+	}
+
+	checkpoints, err := admin.ListCheckpoints(nil)
+	if err != nil {
+		t.Fatalf("ListCheckpoints(nil): %v", err)
+	}
+	if len(checkpoints) != 0 {
+		t.Fatalf("ListCheckpoints(nil): got %d checkpoints, want 0", len(checkpoints))
+	}
+
+	checkpointName := "named-checkpoint"
+	filteredCheckpoints, err := admin.ListCheckpoints(&checkpointName)
+	if err != nil {
+		t.Fatalf("ListCheckpoints(name): %v", err)
+	}
+	if len(filteredCheckpoints) != 0 {
+		t.Fatalf("ListCheckpoints(name): got %d checkpoints, want 0", len(filteredCheckpoints))
+	}
+
+	compactions, err := admin.ListCompactions(slatedb.U64Range{})
+	if err != nil {
+		t.Fatalf("ListCompactions(): %v", err)
+	}
+	if len(compactions) == 0 {
+		t.Fatal("ListCompactions(): got empty result")
+	}
+	for i := 1; i < len(compactions); i++ {
+		if compactions[i-1].Id >= compactions[i].Id {
+			t.Fatalf("ListCompactions(): ids not strictly ascending at %d: %d then %d", i, compactions[i-1].Id, compactions[i].Id)
+		}
+	}
+
+	latestCompactions, err := admin.ReadCompactions(nil)
+	if err != nil {
+		t.Fatalf("ReadCompactions(nil): %v", err)
+	}
+	if latestCompactions == nil {
+		t.Fatal("ReadCompactions(nil): got nil compactions")
+	}
+	if latestCompactions.Id != compactions[len(compactions)-1].Id {
+		t.Fatalf("ReadCompactions(nil): got id %d, want latest id %d", latestCompactions.Id, compactions[len(compactions)-1].Id)
+	}
+
+	compaction, err := admin.ReadCompaction("01ARZ3NDEKTSV4RRFFQ69G5FAV", nil)
+	if err != nil {
+		t.Fatalf("ReadCompaction(missing): %v", err)
+	}
+	if compaction != nil {
+		t.Fatalf("ReadCompaction(missing): got %+v, want nil", compaction)
+	}
+
+	stateView, err := admin.ReadCompactorStateView()
+	if err != nil {
+		t.Fatalf("ReadCompactorStateView(): %v", err)
+	}
+	if stateView.Compactions == nil {
+		t.Fatal("ReadCompactorStateView(): got nil compactions")
+	}
+	if stateView.Compactions.Id != latestCompactions.Id {
+		t.Fatalf("ReadCompactorStateView(): compactions id = %d, want %d", stateView.Compactions.Id, latestCompactions.Id)
+	}
+	if stateView.Manifest.Id != latestManifest.Id {
+		t.Fatalf("ReadCompactorStateView(): manifest id = %d, want %d", stateView.Manifest.Id, latestManifest.Id)
+	}
+
+	firstTimestamp, err := admin.GetTimestampForSequence(0, true)
+	if err != nil {
+		t.Fatalf("GetTimestampForSequence(0, true): %v", err)
+	}
+	if firstTimestamp == nil {
+		t.Fatal("GetTimestampForSequence(0, true): got nil timestamp")
+	}
+
+	afterLastTimestamp, err := admin.GetTimestampForSequence(^uint64(0), true)
+	if err != nil {
+		t.Fatalf("GetTimestampForSequence(after last, true): %v", err)
+	}
+	if afterLastTimestamp != nil {
+		t.Fatalf("GetTimestampForSequence(after last, true): got %v, want nil", *afterLastTimestamp)
+	}
+
+	beforeFirstSequence, err := admin.GetSequenceForTimestamp(1, false)
+	if err != nil {
+		t.Fatalf("GetSequenceForTimestamp(before first, false): %v", err)
+	}
+	if beforeFirstSequence != nil {
+		t.Fatalf("GetSequenceForTimestamp(before first, false): got %v, want nil", *beforeFirstSequence)
+	}
+
+	sequenceAtFirstTimestamp, err := admin.GetSequenceForTimestamp(*firstTimestamp, true)
+	if err != nil {
+		t.Fatalf("GetSequenceForTimestamp(first timestamp, true): %v", err)
+	}
+	if sequenceAtFirstTimestamp == nil {
+		t.Fatal("GetSequenceForTimestamp(first timestamp, true): got nil sequence")
+	}
+	if *sequenceAtFirstTimestamp == 0 || *sequenceAtFirstTimestamp > latestManifest.LastL0Seq {
+		t.Fatalf("GetSequenceForTimestamp(first timestamp, true): got %d, want range [1, %d]", *sequenceAtFirstTimestamp, latestManifest.LastL0Seq)
+	}
 }
 
 func TestWalReaderEmptyStore(t *testing.T) {
