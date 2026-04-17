@@ -698,10 +698,10 @@ pub fn load_local() -> Result<Arc<dyn ObjectStore>, crate::Error> {
     let local_path = get_env_variable("LOCAL_PATH")?;
     let lfs =
         object_store::local::LocalFileSystem::new_with_prefix(local_path).map_err(|error| {
-            SlateDBError::ObjectStoreCreationError {
-                provider: "local".to_string(),
-                source: Arc::new(error),
-            }
+            SlateDBError::ObjectStoreError(Arc::new(object_store::Error::Generic {
+                store: "local",
+                source: Box::new(error),
+            }))
         })?;
     Ok(Arc::new(lfs) as Arc<dyn ObjectStore>)
 }
@@ -722,14 +722,12 @@ pub fn load_aws() -> Result<Arc<dyn ObjectStore>, crate::Error> {
     let builder = object_store::aws::AmazonS3Builder::from_env()
         .with_conditional_put(S3ConditionalPut::ETagMatch);
 
-    Ok(Arc::new(
-        builder
-            .build()
-            .map_err(|error| SlateDBError::ObjectStoreCreationError {
-                provider: "AWS".to_string(),
-                source: Arc::new(error),
-            })?,
-    ) as Arc<dyn ObjectStore>)
+    Ok(Arc::new(builder.build().map_err(|error| {
+        SlateDBError::ObjectStoreError(Arc::new(object_store::Error::Generic {
+            store: "AmazonS3",
+            source: Box::new(error),
+        }))
+    })?) as Arc<dyn ObjectStore>)
 }
 
 /// Loads an Azure Object store instance. The environment variables consumed are
@@ -739,14 +737,12 @@ pub fn load_aws() -> Result<Arc<dyn ObjectStore>, crate::Error> {
 #[cfg(feature = "azure")]
 pub fn load_azure() -> Result<Arc<dyn ObjectStore>, crate::Error> {
     let builder = object_store::azure::MicrosoftAzureBuilder::from_env();
-    Ok(Arc::new(
-        builder
-            .build()
-            .map_err(|error| SlateDBError::ObjectStoreCreationError {
-                provider: "Azure".to_string(),
-                source: Arc::new(error),
-            })?,
-    ) as Arc<dyn ObjectStore>)
+    Ok(Arc::new(builder.build().map_err(|error| {
+        SlateDBError::ObjectStoreError(Arc::new(object_store::Error::Generic {
+            store: "MicrosoftAzure",
+            source: Box::new(error),
+        }))
+    })?) as Arc<dyn ObjectStore>)
 }
 
 /// Loads an OpenDAL Object store instance.
@@ -801,10 +797,10 @@ pub fn load_opendal() -> Result<Arc<dyn ObjectStore>, crate::Error> {
         .collect::<HashMap<String, String>>();
 
     let op = Operator::via_iter(scheme, iter).map_err(|error| {
-        SlateDBError::ObjectStoreCreationError {
-            provider: "OpenDAL".to_string(),
-            source: Arc::new(error),
-        }
+        SlateDBError::ObjectStoreError(Arc::new(object_store::Error::Generic {
+            store: "OpenDAL",
+            source: Box::new(error),
+        }))
     })?;
     Ok(Arc::new(object_store_opendal::OpendalStore::new(op)) as Arc<dyn ObjectStore>)
 }
@@ -877,13 +873,13 @@ mod tests {
     }
 
     #[test]
-    fn test_load_local_invalid_path_maps_to_invalid() {
+    fn test_load_local_invalid_path_maps_to_unavailable() {
         figment::Jail::expect_with(|jail| {
             jail.set_env("LOCAL_PATH", "missing-local-path");
 
             let err = super::load_local().expect_err("expected invalid local-path error");
 
-            assert_eq!(err.kind(), ErrorKind::Invalid);
+            assert_eq!(err.kind(), ErrorKind::Unavailable);
             Ok(())
         });
     }

@@ -215,13 +215,6 @@ pub(crate) enum SlateDBError {
     #[error("invalid object store URL. url=`{0}`")]
     InvalidObjectStoreURL(String, #[source] url::ParseError),
 
-    #[error("failed to create {provider} object store")]
-    ObjectStoreCreationError {
-        provider: String,
-        #[source]
-        source: Arc<dyn std::error::Error + Send + Sync>,
-    },
-
     #[error("transaction conflict")]
     TransactionConflict,
 
@@ -512,9 +505,6 @@ impl From<SlateDBError> for Error {
             }
             SlateDBError::InvalidObjectStoreURL(_, err) => {
                 Error::invalid(msg).with_source(Box::new(err))
-            }
-            SlateDBError::ObjectStoreCreationError { source, .. } => {
-                Error::invalid(msg).with_source(Box::new(source))
             }
             SlateDBError::UnknownConfigurationFormat(_) => Error::invalid(msg),
             SlateDBError::InvalidSSTBatchSize(_) => Error::invalid(msg),
