@@ -1,5 +1,3 @@
-use std::error::Error as StdError;
-
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -57,12 +55,6 @@ pub(crate) enum SlateDbError {
 
     #[error("settings update produced invalid settings: {source}")]
     InvalidSettingsUpdate { source: serde_json::Error },
-
-    #[error("object store creation failed: {source}")]
-    ObjectStoreCreationError {
-        #[from]
-        source: Box<dyn StdError>,
-    },
 }
 
 /// Error returned by a foreign [`crate::MergeOperator`] implementation.
@@ -151,17 +143,6 @@ impl From<slatedb::Error> for Error {
             slatedb::ErrorKind::Data => Error::Data { message },
             slatedb::ErrorKind::Internal => Error::Internal { message },
             _ => Error::Internal { message },
-        }
-    }
-}
-
-impl From<Box<dyn StdError>> for Error {
-    fn from(error: Box<dyn StdError>) -> Self {
-        match error.downcast::<slatedb::Error>() {
-            Ok(error) => Self::from(*error),
-            Err(error) => Self::Internal {
-                message: error.to_string(),
-            },
         }
     }
 }

@@ -28,7 +28,7 @@ use object_store::ObjectStore;
 use rand::RngCore;
 use std::env;
 use std::env::VarError;
-use std::error::Error;
+use std::error::Error as StdError;
 use std::ops::{Bound, RangeBounds};
 use std::sync::Arc;
 use std::time::Duration;
@@ -71,7 +71,7 @@ impl Admin {
     pub async fn read_manifest(
         &self,
         maybe_id: Option<u64>,
-    ) -> Result<Option<VersionedManifest>, Box<dyn Error>> {
+    ) -> Result<Option<VersionedManifest>, crate::Error> {
         let manifest_store = ManifestStore::new(
             &self.path,
             self.object_stores.store_of(ObjectStoreType::Main).clone(),
@@ -79,10 +79,14 @@ impl Admin {
         let manifest = if let Some(id) = maybe_id {
             manifest_store
                 .try_read_manifest(id)
-                .await?
+                .await
+                .map_err(crate::Error::from)?
                 .map(|manifest| VersionedManifest::from_manifest(id, manifest))
         } else {
-            manifest_store.try_read_latest_manifest().await?
+            manifest_store
+                .try_read_latest_manifest()
+                .await
+                .map_err(crate::Error::from)?
         };
 
         Ok(manifest)
@@ -95,15 +99,21 @@ impl Admin {
     pub async fn list_manifests<R: RangeBounds<u64>>(
         &self,
         range: R,
-    ) -> Result<Vec<VersionedManifest>, Box<dyn Error>> {
+    ) -> Result<Vec<VersionedManifest>, crate::Error> {
         let manifest_store = ManifestStore::new(
             &self.path,
             self.object_stores.store_of(ObjectStoreType::Main).clone(),
         );
-        let manifest_metadata = manifest_store.list_manifests(range).await?;
+        let manifest_metadata = manifest_store
+            .list_manifests(range)
+            .await
+            .map_err(crate::Error::from)?;
         let mut manifests = Vec::with_capacity(manifest_metadata.len());
         for metadata in manifest_metadata {
-            let manifest = manifest_store.read_manifest(metadata.id).await?;
+            let manifest = manifest_store
+                .read_manifest(metadata.id)
+                .await
+                .map_err(crate::Error::from)?;
             manifests.push(VersionedManifest::from_manifest(metadata.id, manifest));
         }
         Ok(manifests)
@@ -120,15 +130,19 @@ impl Admin {
     pub async fn read_compactions(
         &self,
         maybe_id: Option<u64>,
-    ) -> Result<Option<VersionedCompactions>, Box<dyn Error>> {
+    ) -> Result<Option<VersionedCompactions>, crate::Error> {
         let compactions_store = self.compactions_store();
         let compactions = if let Some(id) = maybe_id {
             compactions_store
                 .try_read_compactions(id)
-                .await?
+                .await
+                .map_err(crate::Error::from)?
                 .map(|compactions| VersionedCompactions::from_compactions(id, compactions))
         } else {
-            compactions_store.try_read_latest_compactions().await?
+            compactions_store
+                .try_read_latest_compactions()
+                .await
+                .map_err(crate::Error::from)?
         };
 
         Ok(compactions)
@@ -147,16 +161,18 @@ impl Admin {
         &self,
         compaction_id: Ulid,
         maybe_id: Option<u64>,
-    ) -> Result<Option<Compaction>, Box<dyn Error>> {
+    ) -> Result<Option<Compaction>, crate::Error> {
         let compactions_store = self.compactions_store();
         let compactions = if let Some(compactions_id) = maybe_id {
             compactions_store
                 .try_read_compactions(compactions_id)
-                .await?
+                .await
+                .map_err(crate::Error::from)?
         } else {
             compactions_store
                 .try_read_latest_compactions()
-                .await?
+                .await
+                .map_err(crate::Error::from)?
                 .map(|compactions| compactions.compactions)
         };
         let Some(compactions) = compactions else {
@@ -170,14 +186,14 @@ impl Admin {
     }
 
     /// Returns a read-only view of the current compactor state.
-    pub async fn read_compactor_state_view(&self) -> Result<CompactorStateView, Box<dyn Error>> {
+    pub async fn read_compactor_state_view(&self) -> Result<CompactorStateView, crate::Error> {
         let manifest_store = Arc::new(ManifestStore::new(
             &self.path,
             self.object_stores.store_of(ObjectStoreType::Main).clone(),
         ));
         let compactions_store = Arc::new(self.compactions_store());
         let reader = CompactorStateReader::new(&manifest_store, &compactions_store);
-        Ok(reader.read_view().await?)
+        Ok(reader.read_view().await.map_err(crate::Error::from)?)
     }
 
     /// Generate a compaction from a spec and submit it.
@@ -188,13 +204,13 @@ impl Admin {
     pub async fn submit_compaction(
         &self,
         spec: CompactionSpec,
-    ) -> Result<Compaction, Box<dyn Error>> {
+    ) -> Result<Compaction, crate::Error> {
         let compactions_store = Arc::new(self.compactions_store());
         let rand = Arc::new(DbRand::new(self.rand.rng().next_u64()));
         let compaction_id =
             Compactor::submit(spec, compactions_store, rand, self.system_clock.clone()).await?;
         let Some(compaction) = self.read_compaction(compaction_id, None).await? else {
-            return Err(Box::new(SlateDBError::InvalidDBState));
+            return Err(crate::Error::from(SlateDBError::InvalidDBState));
         };
 
         Ok(compaction)
@@ -207,12 +223,18 @@ impl Admin {
     pub async fn list_compactions<R: RangeBounds<u64>>(
         &self,
         range: R,
-    ) -> Result<Vec<VersionedCompactions>, Box<dyn Error>> {
+    ) -> Result<Vec<VersionedCompactions>, crate::Error> {
         let compactions_store = self.compactions_store();
-        let compactions_metadata = compactions_store.list_compactions(range).await?;
+        let compactions_metadata = compactions_store
+            .list_compactions(range)
+            .await
+            .map_err(crate::Error::from)?;
         let mut compactions = Vec::with_capacity(compactions_metadata.len());
         for metadata in compactions_metadata {
-            let stored_compactions = compactions_store.read_compactions(metadata.id).await?;
+            let stored_compactions = compactions_store
+                .read_compactions(metadata.id)
+                .await
+                .map_err(crate::Error::from)?;
             compactions.push(VersionedCompactions::from_compactions(
                 metadata.id,
                 stored_compactions,
@@ -230,12 +252,16 @@ impl Admin {
     pub async fn list_checkpoints(
         &self,
         name_filter: Option<&str>,
-    ) -> Result<Vec<Checkpoint>, Box<dyn Error>> {
+    ) -> Result<Vec<Checkpoint>, crate::Error> {
         let manifest_store = ManifestStore::new(
             &self.path,
             self.object_stores.store_of(ObjectStoreType::Main).clone(),
         );
-        let manifest = manifest_store.read_latest_manifest().await?.manifest;
+        let manifest = manifest_store
+            .read_latest_manifest()
+            .await
+            .map_err(crate::Error::from)?
+            .manifest;
 
         let checkpoints = match name_filter {
             Some("") => manifest
@@ -264,10 +290,7 @@ impl Admin {
     ///
     /// * `gc_opts`: The garbage collector options.
     ///
-    pub async fn run_gc_once(
-        &self,
-        gc_opts: GarbageCollectorOptions,
-    ) -> Result<(), Box<dyn Error>> {
+    pub async fn run_gc_once(&self, gc_opts: GarbageCollectorOptions) -> Result<(), crate::Error> {
         let gc = GarbageCollectorBuilder::new(
             self.path.clone(),
             self.object_stores.store_of(ObjectStoreType::Main).clone(),
@@ -620,15 +643,24 @@ impl Admin {
     }
 }
 
-fn get_env_variable(name: &str) -> Result<String, SlateDBError> {
-    env::var(name).map_err(|e| match e {
-        VarError::NotPresent => SlateDBError::UndefinedEnvironmentVariable {
-            key: name.to_string(),
-        },
-        VarError::NotUnicode(not_unicode_value) => SlateDBError::InvalidEnvironmentVariable {
-            key: name.to_string(),
-            value: format!("{:?}", not_unicode_value),
-        },
+fn invalid_source_error<E>(error: E) -> crate::Error
+where
+    E: StdError + Send + Sync + 'static,
+{
+    crate::Error::invalid(error.to_string()).with_source(Box::new(error))
+}
+
+fn get_env_variable(name: &str) -> Result<String, crate::Error> {
+    env::var(name).map_err(|e| {
+        crate::Error::from(match e {
+            VarError::NotPresent => SlateDBError::UndefinedEnvironmentVariable {
+                key: name.to_string(),
+            },
+            VarError::NotUnicode(not_unicode_value) => SlateDBError::InvalidEnvironmentVariable {
+                key: name.to_string(),
+                value: format!("{:?}", not_unicode_value),
+            },
+        })
     })
 }
 
@@ -646,7 +678,7 @@ fn get_env_variable(name: &str) -> Result<String, SlateDBError> {
 /// | OpenDAL | `opendal` | [load_opendal] |
 pub fn load_object_store_from_env(
     env_file: Option<String>,
-) -> Result<Arc<dyn ObjectStore>, Box<dyn Error>> {
+) -> Result<Arc<dyn ObjectStore>, crate::Error> {
     dotenvy::from_filename(env_file.unwrap_or(String::from(".env"))).ok();
     let cloud_provider = get_env_variable("CLOUD_PROVIDER")?;
     match cloud_provider.to_lowercase().as_str() {
@@ -658,11 +690,12 @@ pub fn load_object_store_from_env(
         "azure" => load_azure(),
         #[cfg(feature = "opendal")]
         "opendal" => load_opendal(),
-        invalid_value => Err(SlateDBError::InvalidEnvironmentVariable {
-            key: "CLOUD_PROVIDER".to_string(),
-            value: invalid_value.to_string(),
-        }
-        .into()),
+        invalid_value => Err(crate::Error::from(
+            SlateDBError::InvalidEnvironmentVariable {
+                key: "CLOUD_PROVIDER".to_string(),
+                value: invalid_value.to_string(),
+            },
+        )),
     }
 }
 
@@ -671,14 +704,15 @@ pub fn load_object_store_from_env(
 /// | Env Variable | Doc | Required |
 /// |--------------|-----|----------|
 /// | LOCAL_PATH | The path to the local directory where all data will be stored | Yes |
-pub fn load_local() -> Result<Arc<dyn ObjectStore>, Box<dyn Error>> {
+pub fn load_local() -> Result<Arc<dyn ObjectStore>, crate::Error> {
     let local_path = get_env_variable("LOCAL_PATH")?;
-    let lfs = object_store::local::LocalFileSystem::new_with_prefix(local_path)?;
+    let lfs = object_store::local::LocalFileSystem::new_with_prefix(local_path)
+        .map_err(invalid_source_error)?;
     Ok(Arc::new(lfs) as Arc<dyn ObjectStore>)
 }
 
 /// Loads an in-memory object store instance.
-pub fn load_memory() -> Result<Arc<dyn ObjectStore>, Box<dyn Error>> {
+pub fn load_memory() -> Result<Arc<dyn ObjectStore>, crate::Error> {
     Ok(Arc::new(object_store::memory::InMemory::new()) as Arc<dyn ObjectStore>)
 }
 
@@ -687,13 +721,13 @@ pub fn load_memory() -> Result<Arc<dyn ObjectStore>, Box<dyn Error>> {
 /// builder documentation for the full list and meaning of supported variables:
 /// <https://docs.rs/object_store/latest/object_store/aws/struct.AmazonS3Builder.html#method.with_config>
 #[cfg(feature = "aws")]
-pub fn load_aws() -> Result<Arc<dyn ObjectStore>, Box<dyn Error>> {
+pub fn load_aws() -> Result<Arc<dyn ObjectStore>, crate::Error> {
     use object_store::aws::S3ConditionalPut;
 
     let builder = object_store::aws::AmazonS3Builder::from_env()
         .with_conditional_put(S3ConditionalPut::ETagMatch);
 
-    Ok(Arc::new(builder.build()?) as Arc<dyn ObjectStore>)
+    Ok(Arc::new(builder.build().map_err(invalid_source_error)?) as Arc<dyn ObjectStore>)
 }
 
 /// Loads an Azure Object store instance. The environment variables consumed are
@@ -701,9 +735,9 @@ pub fn load_aws() -> Result<Arc<dyn ObjectStore>, Box<dyn Error>> {
 /// the builder documentation for the full list and meaning of supported variables:
 /// <https://docs.rs/object_store/latest/object_store/azure/struct.MicrosoftAzureBuilder.html#method.with_config>
 #[cfg(feature = "azure")]
-pub fn load_azure() -> Result<Arc<dyn ObjectStore>, Box<dyn Error>> {
+pub fn load_azure() -> Result<Arc<dyn ObjectStore>, crate::Error> {
     let builder = object_store::azure::MicrosoftAzureBuilder::from_env();
-    Ok(Arc::new(builder.build()?) as Arc<dyn ObjectStore>)
+    Ok(Arc::new(builder.build().map_err(invalid_source_error)?) as Arc<dyn ObjectStore>)
 }
 
 /// Loads an OpenDAL Object store instance.
@@ -735,18 +769,18 @@ pub fn load_azure() -> Result<Arc<dyn ObjectStore>, Box<dyn Error>> {
 /// ```
 /// full list of config: https://docs.rs/opendal/latest/opendal/services/oss/config/struct.OssConfig.html
 #[cfg(feature = "opendal")]
-pub fn load_opendal() -> Result<Arc<dyn ObjectStore>, Box<dyn Error>> {
+pub fn load_opendal() -> Result<Arc<dyn ObjectStore>, crate::Error> {
     use opendal::{Operator, Scheme};
     use std::collections::HashMap;
     use std::str::FromStr;
 
     let scheme =
-        Scheme::from_str(&env::var("OPENDAL_SCHEME").expect("OPENDAL_SCHEME must be set"))?;
+        Scheme::from_str(&get_env_variable("OPENDAL_SCHEME")?).map_err(invalid_source_error)?;
     let iter = env::vars()
         .filter_map(|(k, v)| k.strip_prefix("OPENDAL_").map(|k| (k.to_lowercase(), v)))
         .collect::<HashMap<String, String>>();
 
-    let op = Operator::via_iter(scheme, iter)?;
+    let op = Operator::via_iter(scheme, iter).map_err(invalid_source_error)?;
     Ok(Arc::new(object_store_opendal::OpendalStore::new(op)) as Arc<dyn ObjectStore>)
 }
 
@@ -757,6 +791,8 @@ mod tests {
     use crate::compactor_state::{Compaction, CompactionSpec, CompactionStatus, SourceId};
     use crate::manifest::store::{ManifestStore, StoredManifest};
     use crate::manifest::ManifestCore;
+    use crate::test_utils::FlakyObjectStore;
+    use crate::ErrorKind;
     use object_store::memory::InMemory;
     use object_store::path::Path;
     use object_store::ObjectStore;
@@ -768,20 +804,21 @@ mod tests {
     fn test_load_object_store_from_env() {
         figment::Jail::expect_with(|jail| {
             // creating an object store without CLOUD_PROVIDER env variable
-            let r = load_object_store_from_env(None);
-            assert!(r.is_err());
+            let err = load_object_store_from_env(None).expect_err("expected invalid env error");
+            assert_eq!(err.kind(), ErrorKind::Invalid);
             assert_eq!(
-                r.unwrap_err().to_string(),
-                "undefined environment variable CLOUD_PROVIDER"
+                err.to_string(),
+                "Invalid error: undefined environment variable CLOUD_PROVIDER"
             );
 
             jail.create_file("invalid.env", "CLOUD_PROVIDER=invalid")
                 .expect("failed to create temp env file");
-            let r = load_object_store_from_env(Some("invalid.env".to_string()));
-            assert!(r.is_err());
+            let err = load_object_store_from_env(Some("invalid.env".to_string()))
+                .expect_err("expected invalid provider error");
+            assert_eq!(err.kind(), ErrorKind::Invalid);
             assert_eq!(
-                r.unwrap_err().to_string(),
-                "invalid environment variable CLOUD_PROVIDER value `invalid`"
+                err.to_string(),
+                "Invalid error: invalid environment variable CLOUD_PROVIDER value `invalid`"
             );
             // unset since the environment variable loaded in from invalid.env
             // takes precedence over the memory.env file.
@@ -793,6 +830,18 @@ mod tests {
             let store = r.expect("expected memory object store");
             assert_eq!(store.to_string(), "InMemory");
 
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn test_load_local_invalid_path_maps_to_invalid() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("LOCAL_PATH", "missing-local-path");
+
+            let err = super::load_local().expect_err("expected invalid local-path error");
+
+            assert_eq!(err.kind(), ErrorKind::Invalid);
             Ok(())
         });
     }
@@ -921,6 +970,37 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![1, 2]
         );
+    }
+
+    #[tokio::test]
+    async fn test_admin_list_manifests_list_failure_maps_to_unavailable() {
+        let inner: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let object_store: Arc<dyn ObjectStore> =
+            Arc::new(FlakyObjectStore::new(inner, 0).with_list_failures(1, 0));
+        let path = Path::from("/tmp/test_admin_list_manifests_list_failure");
+        let admin = AdminBuilder::new(path, object_store).build();
+
+        let err = admin
+            .list_manifests(..)
+            .await
+            .expect_err("expected list failure");
+
+        assert_eq!(err.kind(), ErrorKind::Unavailable);
+    }
+
+    #[tokio::test]
+    async fn test_admin_read_compactor_state_view_missing_manifest_maps_to_data() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_admin_read_compactor_state_view_missing_manifest");
+        let admin = AdminBuilder::new(path, object_store).build();
+
+        let err = admin
+            .read_compactor_state_view()
+            .await
+            .err()
+            .expect("expected missing manifest error");
+
+        assert_eq!(err.kind(), ErrorKind::Data);
     }
 
     #[tokio::test]

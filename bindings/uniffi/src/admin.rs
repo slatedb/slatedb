@@ -16,18 +16,14 @@ pub struct Admin {
 impl Admin {
     /// Reads a specific manifest by ID, or the latest when `id` is `None`.
     pub async fn read_manifest(&self, id: Option<u64>) -> Result<Option<VersionedManifest>, Error> {
-        let manifest = self.inner.read_manifest(id).await.map_err(Error::from)?;
+        let manifest = self.inner.read_manifest(id).await?;
         Ok(manifest.as_ref().map(VersionedManifest::from))
     }
 
     /// Lists manifests inside `range`.
     pub async fn list_manifests(&self, range: U64Range) -> Result<Vec<VersionedManifest>, Error> {
         let bounds = range.into_bounds()?;
-        let manifests = self
-            .inner
-            .list_manifests(bounds)
-            .await
-            .map_err(Error::from)?;
+        let manifests = self.inner.list_manifests(bounds).await?;
         Ok(manifests.iter().map(VersionedManifest::from).collect())
     }
 
@@ -36,7 +32,7 @@ impl Admin {
         &self,
         id: Option<u64>,
     ) -> Result<Option<VersionedCompactions>, Error> {
-        let compactions = self.inner.read_compactions(id).await.map_err(Error::from)?;
+        let compactions = self.inner.read_compactions(id).await?;
         Ok(compactions.as_ref().map(VersionedCompactions::from))
     }
 
@@ -51,18 +47,13 @@ impl Admin {
         let compaction = self
             .inner
             .read_compaction(compaction_id, compactions_id)
-            .await
-            .map_err(Error::from)?;
+            .await?;
         Ok(compaction.as_ref().map(Compaction::from))
     }
 
     /// Reads the latest compactor state view.
     pub async fn read_compactor_state_view(&self) -> Result<CompactorStateView, Error> {
-        let view = self
-            .inner
-            .read_compactor_state_view()
-            .await
-            .map_err(Error::from)?;
+        let view = self.inner.read_compactor_state_view().await?;
         Ok((&view).into())
     }
 
@@ -72,11 +63,7 @@ impl Admin {
         range: U64Range,
     ) -> Result<Vec<VersionedCompactions>, Error> {
         let bounds = range.into_bounds()?;
-        let compactions = self
-            .inner
-            .list_compactions(bounds)
-            .await
-            .map_err(Error::from)?;
+        let compactions = self.inner.list_compactions(bounds).await?;
         Ok(compactions.iter().map(VersionedCompactions::from).collect())
     }
 
@@ -85,11 +72,7 @@ impl Admin {
         &self,
         name_filter: Option<String>,
     ) -> Result<Vec<Checkpoint>, Error> {
-        let checkpoints = self
-            .inner
-            .list_checkpoints(name_filter.as_deref())
-            .await
-            .map_err(Error::from)?;
+        let checkpoints = self.inner.list_checkpoints(name_filter.as_deref()).await?;
         Ok(checkpoints.iter().map(Checkpoint::from).collect())
     }
 
