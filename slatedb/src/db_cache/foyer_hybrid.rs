@@ -61,7 +61,7 @@
 //!         .await
 //!         .unwrap();
 //!     let cache = Arc::new(FoyerHybridCache::new_with_cache(cache));
-//!     let _db = Db::builder("path/to/db", object_store)
+//!     let db = Db::builder("path/to/db", object_store)
 //!         .with_db_cache(cache)
 //!         .build()
 //!         .await
