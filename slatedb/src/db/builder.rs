@@ -140,7 +140,7 @@ use crate::db_reader::DbReader;
 use crate::db_status::{ClosedResultWriter, DbStatusManager};
 use crate::dispatcher::MessageHandlerExecutor;
 use crate::error::SlateDBError;
-use crate::filter_policy::BloomFilterPolicy;
+use crate::filter_policy::{BloomFilterPolicy, FilterPolicy};
 use crate::format::sst::{BlockTransformer, SsTableFormat};
 use crate::garbage_collector::GarbageCollector;
 use crate::garbage_collector::GC_TASK_NAME;
@@ -185,6 +185,7 @@ pub struct DbBuilder<P: Into<Path>> {
     sst_block_size: Option<SstBlockSize>,
     merge_operator: Option<MergeOperatorType>,
     block_transformer: Option<Arc<dyn BlockTransformer>>,
+    filter_policies: Vec<Arc<dyn FilterPolicy>>,
     metrics_recorder: Arc<dyn MetricsRecorder>,
 }
 
@@ -206,6 +207,7 @@ impl<P: Into<Path>> DbBuilder<P> {
             sst_block_size: None,
             merge_operator: None,
             block_transformer: None,
+            filter_policies: default_filter_policies(),
             metrics_recorder: Arc::new(NoopMetricsRecorder::new()),
         }
     }
@@ -359,6 +361,25 @@ impl<P: Into<Path>> DbBuilder<P> {
         self
     }
 
+    /// Sets the filter policies used for SST filter construction and evaluation.
+    ///
+    /// Each policy produces a separate filter per SST, stored in a composite
+    /// filter block. On read, all filters are evaluated with AND logic: an
+    /// SST is skipped only if every filter returns `false`.
+    ///
+    /// Defaults to `vec![Arc::new(BloomFilterPolicy::new(10))]`. Pass an
+    /// empty vec to disable filters entirely.
+    ///
+    /// A standalone compactor or a `DbReader` (distributed setup) must be
+    /// configured with the same policies, otherwise compaction will
+    /// silently drop filter sub-blocks whose policy name is not
+    /// recognized, and readers will fall back to scanning SSTs whose
+    /// filters they cannot decode.
+    pub fn with_filter_policies(mut self, policies: Vec<Arc<dyn FilterPolicy>>) -> Self {
+        self.filter_policies = policies;
+        self
+    }
+
     /// Builds and opens the database.
     pub async fn build(self) -> Result<Db, crate::Error> {
         if self.settings.l0_flush_parallelism == 0 {
@@ -423,9 +444,7 @@ impl<P: Into<Path>> DbBuilder<P> {
         };
         let sst_format = SsTableFormat {
             min_filter_keys: self.settings.min_filter_keys,
-            filter_policies: vec![Arc::new(BloomFilterPolicy::new(
-                self.settings.filter_bits_per_key,
-            ))],
+            filter_policies: self.filter_policies.clone(),
             compression_codec: self.settings.compression_codec,
             block_size: self.sst_block_size.unwrap_or_default().as_bytes(),
             block_transformer: self.block_transformer.clone(),
@@ -590,7 +609,8 @@ impl<P: Into<Path>> DbBuilder<P> {
             let mut builder = compactor_builder
                 .with_system_clock(system_clock.clone())
                 .with_recorder(recorder.clone())
-                .with_seed(rand.rng().next_u64());
+                .with_seed(rand.rng().next_u64())
+                .with_filter_policies(self.filter_policies.clone());
 
             if let Some(operator) = self.merge_operator {
                 builder = builder.with_merge_operator(operator);
@@ -904,6 +924,7 @@ pub struct CompactorBuilder<P: Into<Path>> {
     closed_result: Arc<dyn ClosedResultWriter>,
     merge_operator: Option<MergeOperatorType>,
     block_transformer: Option<Arc<dyn BlockTransformer>>,
+    filter_policies: Vec<Arc<dyn FilterPolicy>>,
     #[cfg(feature = "compaction_filters")]
     compaction_filter_supplier: Option<Arc<dyn CompactionFilterSupplier>>,
 }
@@ -923,6 +944,7 @@ impl<P: Into<Path>> CompactorBuilder<P> {
             closed_result: Arc::new(WatchableOnceCell::new()),
             merge_operator: None,
             block_transformer: None,
+            filter_policies: default_filter_policies(),
             #[cfg(feature = "compaction_filters")]
             compaction_filter_supplier: None,
         }
@@ -941,6 +963,7 @@ impl<P: Into<Path>> CompactorBuilder<P> {
             closed_result: self.closed_result,
             merge_operator: self.merge_operator,
             block_transformer: self.block_transformer,
+            filter_policies: self.filter_policies,
             #[cfg(feature = "compaction_filters")]
             compaction_filter_supplier: self.compaction_filter_supplier,
         }
@@ -1004,6 +1027,19 @@ impl<P: Into<Path>> CompactorBuilder<P> {
         self
     }
 
+    /// Sets the filter policies used when the compactor rewrites SSTs.
+    ///
+    /// Must match the writer's `DbBuilder::with_filter_policies` configuration,
+    /// otherwise compacted SSTs will be written with different (or no) filter
+    /// policies and existing filters may be silently dropped during compaction.
+    ///
+    /// Defaults to `vec![Arc::new(BloomFilterPolicy::new(10))]`. Pass an
+    /// empty vec to disable filters entirely.
+    pub fn with_filter_policies(mut self, policies: Vec<Arc<dyn FilterPolicy>>) -> Self {
+        self.filter_policies = policies;
+        self
+    }
+
     /// Sets the compaction filter supplier for the compactor. The filter supplier
     /// creates filter instances that can inspect, drop, or modify entries during
     /// compaction.
@@ -1050,6 +1086,7 @@ impl<P: Into<Path>> CompactorBuilder<P> {
             retrying_main_object_store.clone(),
         ));
         let sst_format = SsTableFormat {
+            filter_policies: self.filter_policies.clone(),
             block_transformer: self.block_transformer.clone(),
             ..SsTableFormat::default()
         };
@@ -1196,6 +1233,7 @@ pub struct DbReaderBuilder<P: Into<Path>> {
     checkpoint_id: Option<uuid::Uuid>,
     merge_operator: Option<MergeOperatorType>,
     block_transformer: Option<Arc<dyn BlockTransformer>>,
+    filter_policies: Vec<Arc<dyn FilterPolicy>>,
     options: DbReaderOptions,
     system_clock: Arc<dyn SystemClock>,
     rand: Arc<DbRand>,
@@ -1213,6 +1251,7 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
             checkpoint_id: None,
             merge_operator: None,
             block_transformer: None,
+            filter_policies: default_filter_policies(),
             options: DbReaderOptions::default(),
             system_clock: Arc::new(DefaultSystemClock::default()),
             rand: Arc::new(DbRand::default()),
@@ -1302,6 +1341,19 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
         self
     }
 
+    /// Sets the filter policies used when decoding SST filter blocks.
+    ///
+    /// Must match (or be a superset of) the writer's policies so that any
+    /// filter sub-block in an SST can be decoded. Unrecognized policy names
+    /// are silently dropped: the SST is still readable, just without the
+    /// skipped filter.
+    ///
+    /// Defaults to `vec![Arc::new(BloomFilterPolicy::new(10))]`.
+    pub fn with_filter_policies(mut self, policies: Vec<Arc<dyn FilterPolicy>>) -> Self {
+        self.filter_policies = policies;
+        self
+    }
+
     /// Builds and returns a DbReader instance.
     pub async fn build(self) -> Result<DbReader, crate::Error> {
         let path = self.path.into();
@@ -1359,6 +1411,7 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
             wal_object_store: retrying_wal_object_store,
             block_cache: self.db_cache.clone(),
             block_transformer: self.block_transformer.clone(),
+            filter_policies: self.filter_policies.clone(),
         };
 
         let reader = DbReader::open_internal(
@@ -1379,6 +1432,10 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
 
         Ok(reader)
     }
+}
+
+fn default_filter_policies() -> Vec<Arc<dyn FilterPolicy>> {
+    vec![Arc::new(BloomFilterPolicy::new(10))]
 }
 
 fn default_db_cache() -> Option<Arc<dyn DbCache>> {

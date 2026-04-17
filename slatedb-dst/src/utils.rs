@@ -115,7 +115,6 @@ pub async fn build_settings(rand: &DbRand) -> Settings {
     let manifest_poll_interval = rng.random_range(Duration::from_secs(1)..Duration::from_secs(60));
     let manifest_update_timeout = rng.random_range(Duration::from_secs(1)..Duration::from_secs(60));
     let min_filter_keys = rng.random_range(100..1000);
-    let filter_bits_per_key = rng.random_range(1..20);
     let l0_sst_size_bytes = rng.random_range(MIB_1..MIB_500);
     let l0_max_ssts = rng.random_range(4..8); // max L0 size of 4GiB (8 * 500MiB l0 sst size)
     let max_unflushed_bytes = rng.random_range(MIB_1..GIB_2);
@@ -132,7 +131,6 @@ pub async fn build_settings(rand: &DbRand) -> Settings {
         manifest_poll_interval,
         manifest_update_timeout,
         min_filter_keys,
-        filter_bits_per_key,
         l0_sst_size_bytes,
         l0_max_ssts,
         max_unflushed_bytes,

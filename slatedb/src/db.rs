@@ -5764,7 +5764,6 @@ mod tests {
             l0_max_ssts: 8,
             l0_flush_parallelism: 1,
             min_filter_keys,
-            filter_bits_per_key: 10,
             l0_sst_size_bytes,
             compactor_options,
             compression_codec: None,
