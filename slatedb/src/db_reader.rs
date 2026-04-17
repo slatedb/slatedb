@@ -1114,6 +1114,20 @@ impl DbRead for DbReader {
     }
 }
 
+impl crate::db_metadata::DbMetadataOps for DbReader {
+    fn manifest(&self) -> VersionedManifest {
+        self.manifest()
+    }
+
+    fn subscribe(&self) -> tokio::sync::watch::Receiver<DbStatus> {
+        self.subscribe()
+    }
+
+    fn status(&self) -> DbStatus {
+        self.status()
+    }
+}
+
 /// Checks if the error or any of its sources is an `object_store::Error::NotFound` error.
 fn has_not_found_object_store_error(err: &(dyn std::error::Error + 'static)) -> bool {
     let mut current = Some(err);

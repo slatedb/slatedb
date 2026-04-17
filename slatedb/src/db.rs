@@ -1705,6 +1705,20 @@ impl DbRead for Db {
     }
 }
 
+impl crate::db_metadata::DbMetadataOps for Db {
+    fn manifest(&self) -> VersionedManifest {
+        self.manifest()
+    }
+
+    fn subscribe(&self) -> tokio::sync::watch::Receiver<DbStatus> {
+        self.subscribe()
+    }
+
+    fn status(&self) -> DbStatus {
+        self.status()
+    }
+}
+
 /// Handle returned from write operations, containing metadata about the write.
 /// This structure is designed to be extensible for future enhancements.
 #[derive(Debug, Clone)]
