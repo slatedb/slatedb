@@ -19,15 +19,6 @@ const MAX_I64 = 9_223_372_036_854_775_807n;
 const MAX_U64 = 18_446_744_073_709_551_615n;
 const VALID_ULID = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
 
-function fullU64Range() {
-  return {
-    start: undefined,
-    start_inclusive: false,
-    end: undefined,
-    end_inclusive: false,
-  };
-}
-
 function openAdmin(store, { path, configure, cleanup } = {}) {
   const builder = cleanup.track(new AdminBuilder(path, store), { shutdown: false });
   if (configure != null) {
@@ -109,26 +100,16 @@ test("admin manifest read list and state view", async (t) => {
 
   assert.equal(await admin.read_manifest(99_999n), undefined);
 
-  const manifests = await admin.list_manifests(fullU64Range());
+  const manifests = await admin.list_manifests(undefined, undefined);
   assert.ok(manifests.length >= 3);
   assert.equal(BigInt(manifests[0].id), 1n);
   assert.equal(BigInt(manifests.at(-1).id), BigInt(latest.id));
 
-  const bounded = await admin.list_manifests({
-    start: 2n,
-    start_inclusive: true,
-    end: 3n,
-    end_inclusive: false,
-  });
+  const bounded = await admin.list_manifests(2n, 3n);
   assert.deepEqual(bounded.map((manifest) => BigInt(manifest.id)), [2n]);
 
   const invalidRange = await expectInvalid(
-    () => admin.list_manifests({
-      start: 3n,
-      start_inclusive: true,
-      end: 2n,
-      end_inclusive: true,
-    }),
+    () => admin.list_manifests(3n, 2n),
   );
   assert.match(invalidRange.message, /range start must not be greater than range end/);
 
@@ -147,16 +128,11 @@ test("admin compaction queries handle empty store and invalid ids", async (t) =>
   assert.equal(await admin.read_compactions(1n), undefined);
   assert.equal(await admin.read_compaction(VALID_ULID, undefined), undefined);
 
-  const compactions = await admin.list_compactions(fullU64Range());
+  const compactions = await admin.list_compactions(undefined, undefined);
   assert.deepEqual(compactions, []);
 
   const invalidRange = await expectInvalid(
-    () => admin.list_compactions({
-      start: 2n,
-      start_inclusive: false,
-      end: 2n,
-      end_inclusive: false,
-    }),
+    () => admin.list_compactions(2n, 2n),
   );
   assert.match(invalidRange.message, /range must be non-empty/);
 

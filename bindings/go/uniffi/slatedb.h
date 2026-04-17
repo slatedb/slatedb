@@ -603,12 +603,12 @@ uint64_t uniffi_slatedb_uniffi_fn_method_admin_list_checkpoints(uint64_t ptr, Ru
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_ADMIN_LIST_COMPACTIONS
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_ADMIN_LIST_COMPACTIONS
-uint64_t uniffi_slatedb_uniffi_fn_method_admin_list_compactions(uint64_t ptr, RustBuffer range
+uint64_t uniffi_slatedb_uniffi_fn_method_admin_list_compactions(uint64_t ptr, RustBuffer from, RustBuffer to
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_ADMIN_LIST_MANIFESTS
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_ADMIN_LIST_MANIFESTS
-uint64_t uniffi_slatedb_uniffi_fn_method_admin_list_manifests(uint64_t ptr, RustBuffer range
+uint64_t uniffi_slatedb_uniffi_fn_method_admin_list_manifests(uint64_t ptr, RustBuffer from, RustBuffer to
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_ADMIN_READ_COMPACTION

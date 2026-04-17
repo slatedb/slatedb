@@ -1,10 +1,21 @@
+use std::ops::Bound;
+
 use chrono::{DateTime, Utc};
 use ulid::Ulid;
 
 use crate::error::{Error, SlateDbError};
 use crate::types::{
-    Checkpoint, Compaction, CompactorStateView, U64Range, VersionedCompactions, VersionedManifest,
+    Checkpoint, Compaction, CompactorStateView, VersionedCompactions, VersionedManifest,
 };
+
+type U64Bounds = (Bound<u64>, Bound<u64>);
+
+fn into_u64_bounds(from: Option<u64>, to: Option<u64>) -> Result<U64Bounds, SlateDbError> {
+    Ok((
+        from.map_or(Bound::Unbounded, Bound::Included),
+        to.map_or(Bound::Unbounded, Bound::Excluded),
+    ))
+}
 
 /// Administrative read/query handle for SlateDB.
 #[derive(uniffi::Object)]
@@ -20,9 +31,13 @@ impl Admin {
         Ok(manifest.as_ref().map(VersionedManifest::from))
     }
 
-    /// Lists manifests inside `range`.
-    pub async fn list_manifests(&self, range: U64Range) -> Result<Vec<VersionedManifest>, Error> {
-        let bounds = range.into_bounds()?;
+    /// Lists manifests inside the half-open ID range `[from, to)`.
+    pub async fn list_manifests(
+        &self,
+        from: Option<u64>,
+        to: Option<u64>,
+    ) -> Result<Vec<VersionedManifest>, Error> {
+        let bounds = into_u64_bounds(from, to)?;
         let manifests = self.inner.list_manifests(bounds).await?;
         Ok(manifests.iter().map(VersionedManifest::from).collect())
     }
@@ -57,12 +72,13 @@ impl Admin {
         Ok((&view).into())
     }
 
-    /// Lists compactions files inside `range`.
+    /// Lists compactions files inside the half-open ID range `[from, to)`.
     pub async fn list_compactions(
         &self,
-        range: U64Range,
+        from: Option<u64>,
+        to: Option<u64>,
     ) -> Result<Vec<VersionedCompactions>, Error> {
-        let bounds = range.into_bounds()?;
+        let bounds = into_u64_bounds(from, to)?;
         let compactions = self.inner.list_compactions(bounds).await?;
         Ok(compactions.iter().map(VersionedCompactions::from).collect())
     }

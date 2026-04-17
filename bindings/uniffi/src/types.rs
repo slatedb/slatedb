@@ -19,9 +19,6 @@ use crate::error::{CloseReason, SlateDbError};
 
 type KeyBound = Bound<Vec<u8>>;
 type KeyBounds = (KeyBound, KeyBound);
-type U64Bound = Bound<u64>;
-type U64Bounds = (U64Bound, U64Bound);
-
 /// A half-open or closed byte-key range used by scan APIs.
 #[derive(Clone, Debug, Default, PartialEq, Eq, uniffi::Record)]
 pub struct KeyRange {
@@ -60,48 +57,6 @@ impl KeyRange {
     }
 
     pub(crate) fn into_bounds(self) -> Result<KeyBounds, SlateDbError> {
-        if let (Some(start), Some(end)) = (&self.start, &self.end) {
-            match start.cmp(end) {
-                std::cmp::Ordering::Greater => {
-                    return Err(SlateDbError::RangeStartGreaterThanEnd);
-                }
-                std::cmp::Ordering::Equal if !(self.start_inclusive && self.end_inclusive) => {
-                    return Err(SlateDbError::EmptyRange);
-                }
-                _ => {}
-            }
-        }
-
-        Ok((
-            match self.start {
-                Some(start) if self.start_inclusive => Bound::Included(start),
-                Some(start) => Bound::Excluded(start),
-                None => Bound::Unbounded,
-            },
-            match self.end {
-                Some(end) if self.end_inclusive => Bound::Included(end),
-                Some(end) => Bound::Excluded(end),
-                None => Bound::Unbounded,
-            },
-        ))
-    }
-}
-
-/// A half-open or closed `u64` range used by admin listing APIs.
-#[derive(Clone, Debug, Default, PartialEq, Eq, uniffi::Record)]
-pub struct U64Range {
-    /// Inclusive or exclusive lower bound. `None` means unbounded.
-    pub start: Option<u64>,
-    /// Whether `start` is inclusive when present.
-    pub start_inclusive: bool,
-    /// Inclusive or exclusive upper bound. `None` means unbounded.
-    pub end: Option<u64>,
-    /// Whether `end` is inclusive when present.
-    pub end_inclusive: bool,
-}
-
-impl U64Range {
-    pub(crate) fn into_bounds(self) -> Result<U64Bounds, SlateDbError> {
         if let (Some(start), Some(end)) = (&self.start, &self.end) {
             match start.cmp(end) {
                 std::cmp::Ordering::Greater => {

@@ -1553,12 +1553,7 @@ func TestAdminBuilderValidationAndErrors(t *testing.T) {
 		store := newMemoryStore(t)
 		admin := openTestAdmin(t, store, nil)
 
-		_, err := admin.ListManifests(slatedb.U64Range{
-			Start:          uint64Ptr(2),
-			StartInclusive: true,
-			End:            uint64Ptr(1),
-			EndInclusive:   true,
-		})
+		_, err := admin.ListManifests(uint64Ptr(2), uint64Ptr(1))
 		if !errors.Is(err, slatedb.ErrErrorInvalid) {
 			t.Fatalf("ListManifests(invalid range): got %v, want invalid error", err)
 		}
@@ -1615,7 +1610,7 @@ func TestAdminQueries(t *testing.T) {
 
 	var manifests []slatedb.VersionedManifest
 	waitUntil(t, 10*time.Second, 10*time.Millisecond, func() (bool, error) {
-		got, err := admin.ListManifests(slatedb.U64Range{})
+		got, err := admin.ListManifests(nil, nil)
 		if err != nil {
 			return false, err
 		}
@@ -1657,12 +1652,7 @@ func TestAdminQueries(t *testing.T) {
 		t.Fatalf("ReadManifest(first): got id %d, want %d", firstManifest.Id, manifests[0].Id)
 	}
 
-	boundedManifests, err := admin.ListManifests(slatedb.U64Range{
-		Start:          uint64Ptr(manifests[1].Id),
-		StartInclusive: true,
-		End:            uint64Ptr(latestManifest.Id),
-		EndInclusive:   false,
-	})
+	boundedManifests, err := admin.ListManifests(uint64Ptr(manifests[1].Id), uint64Ptr(latestManifest.Id))
 	if err != nil {
 		t.Fatalf("ListManifests(bounded): %v", err)
 	}
@@ -1692,7 +1682,7 @@ func TestAdminQueries(t *testing.T) {
 		t.Fatalf("ListCheckpoints(name): got %d checkpoints, want 0", len(filteredCheckpoints))
 	}
 
-	compactions, err := admin.ListCompactions(slatedb.U64Range{})
+	compactions, err := admin.ListCompactions(nil, nil)
 	if err != nil {
 		t.Fatalf("ListCompactions(): %v", err)
 	}

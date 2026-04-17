@@ -5,7 +5,7 @@ import time
 import pytest
 
 from conftest import new_memory_store, open_db, open_reader, unique_path, wait_until
-from slatedb.uniffi import AdminBuilder, DbBuilder, Error, FlushOptions, FlushType, U64Range
+from slatedb.uniffi import AdminBuilder, DbBuilder, Error, FlushOptions, FlushType
 
 MAX_I64 = 9_223_372_036_854_775_807
 MAX_U64 = 18_446_744_073_709_551_615
@@ -70,37 +70,16 @@ async def test_admin_manifest_read_list_and_state_view() -> None:
 
         assert await admin.read_manifest(99_999) is None
 
-        manifests = await admin.list_manifests(
-            U64Range(
-                start=None,
-                start_inclusive=False,
-                end=None,
-                end_inclusive=False,
-            )
-        )
+        manifests = await admin.list_manifests(None, None)
         assert len(manifests) >= 3
         assert manifests[0].id == 1
         assert manifests[-1].id == latest.id
 
-        bounded = await admin.list_manifests(
-            U64Range(
-                start=2,
-                start_inclusive=True,
-                end=3,
-                end_inclusive=False,
-            )
-        )
+        bounded = await admin.list_manifests(2, 3)
         assert [manifest.id for manifest in bounded] == [2]
 
         with pytest.raises(Error.Invalid) as invalid_range:
-            await admin.list_manifests(
-                U64Range(
-                    start=3,
-                    start_inclusive=True,
-                    end=2,
-                    end_inclusive=True,
-                )
-            )
+            await admin.list_manifests(3, 2)
         assert "range start must not be greater than range end" in invalid_range.value.message
 
         state_view = await admin.read_compactor_state_view()
@@ -118,25 +97,11 @@ async def test_admin_compaction_queries_handle_empty_store_and_invalid_ids() -> 
     assert await admin.read_compactions(1) is None
     assert await admin.read_compaction(VALID_ULID, None) is None
 
-    compactions = await admin.list_compactions(
-        U64Range(
-            start=None,
-            start_inclusive=False,
-            end=None,
-            end_inclusive=False,
-        )
-    )
+    compactions = await admin.list_compactions(None, None)
     assert compactions == []
 
     with pytest.raises(Error.Invalid) as invalid_range:
-        await admin.list_compactions(
-            U64Range(
-                start=2,
-                start_inclusive=False,
-                end=2,
-                end_inclusive=False,
-            )
-        )
+        await admin.list_compactions(2, 2)
     assert "range must be non-empty" in invalid_range.value.message
 
     with pytest.raises(Error.Invalid) as invalid_compaction_id:

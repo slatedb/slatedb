@@ -76,20 +76,19 @@ class SlateDbAdminTest {
             assertNull(TestSupport.await(admin.readManifest(99_999L)));
 
             List<VersionedManifest> manifests =
-                    TestSupport.await(admin.listManifests(new U64Range(null, false, null, false)));
+                    TestSupport.await(admin.listManifests(null, null));
             assertTrue(manifests.size() >= 3);
             assertEquals(1L, manifests.get(0).id());
             assertEquals(latest.id(), manifests.get(manifests.size() - 1).id());
 
-            List<VersionedManifest> bounded =
-                    TestSupport.await(admin.listManifests(new U64Range(2L, true, 3L, false)));
+            List<VersionedManifest> bounded = TestSupport.await(admin.listManifests(2L, 3L));
             assertEquals(1, bounded.size());
             assertEquals(2L, bounded.get(0).id());
 
             Error.Invalid invalidRange =
                     TestSupport.awaitFailure(
                             Error.Invalid.class,
-                            admin.listManifests(new U64Range(3L, true, 2L, true)));
+                            admin.listManifests(3L, 2L));
             assertTrue(invalidRange.getMessage().contains("range start must not be greater than range end"));
 
             CompactorStateView stateView = TestSupport.await(admin.readCompactorStateView());
@@ -111,13 +110,13 @@ class SlateDbAdminTest {
             assertNull(TestSupport.await(admin.readCompaction(VALID_ULID, null)));
 
             List<VersionedCompactions> compactions =
-                    TestSupport.await(admin.listCompactions(new U64Range(null, false, null, false)));
+                    TestSupport.await(admin.listCompactions(null, null));
             assertEquals(0, compactions.size());
 
             Error.Invalid invalidRange =
                     TestSupport.awaitFailure(
                             Error.Invalid.class,
-                            admin.listCompactions(new U64Range(2L, false, 2L, false)));
+                            admin.listCompactions(2L, 2L));
             assertTrue(invalidRange.getMessage().contains("range must be non-empty"));
 
             Error.Invalid invalidCompactionId =

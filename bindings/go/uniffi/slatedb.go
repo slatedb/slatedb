@@ -420,7 +420,7 @@ func uniffiCheckChecksums() {
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_slatedb_uniffi_checksum_method_admin_list_compactions()
 		})
-		if checksum != 1156 {
+		if checksum != 9774 {
 			// If this happens try cleaning and rebuilding your project
 			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_admin_list_compactions: UniFFI API checksum mismatch")
 		}
@@ -429,7 +429,7 @@ func uniffiCheckChecksums() {
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_slatedb_uniffi_checksum_method_admin_list_manifests()
 		})
-		if checksum != 30874 {
+		if checksum != 13737 {
 			// If this happens try cleaning and rebuilding your project
 			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_admin_list_manifests: UniFFI API checksum mismatch")
 		}
@@ -1882,10 +1882,10 @@ type AdminInterface interface {
 	GetTimestampForSequence(seq uint64, roundUp bool) (*int64, error)
 	// Lists checkpoints, optionally filtering by exact name.
 	ListCheckpoints(nameFilter *string) ([]Checkpoint, error)
-	// Lists compactions files inside `range`.
-	ListCompactions(varRange U64Range) ([]VersionedCompactions, error)
-	// Lists manifests inside `range`.
-	ListManifests(varRange U64Range) ([]VersionedManifest, error)
+	// Lists compactions files inside the half-open ID range `[from, to)`.
+	ListCompactions(from *uint64, to *uint64) ([]VersionedCompactions, error)
+	// Lists manifests inside the half-open ID range `[from, to)`.
+	ListManifests(from *uint64, to *uint64) ([]VersionedManifest, error)
 	// Reads a compaction by ULID string from a specific or latest compactions file.
 	ReadCompaction(compactionId string, compactionsId *uint64) (*Compaction, error)
 	// Reads a specific compactions file by ID, or the latest when `id` is `None`.
@@ -2009,8 +2009,8 @@ func (_self *Admin) ListCheckpoints(nameFilter *string) ([]Checkpoint, error) {
 	return res, err
 }
 
-// Lists compactions files inside `range`.
-func (_self *Admin) ListCompactions(varRange U64Range) ([]VersionedCompactions, error) {
+// Lists compactions files inside the half-open ID range `[from, to)`.
+func (_self *Admin) ListCompactions(from *uint64, to *uint64) ([]VersionedCompactions, error) {
 	_pointer := _self.ffiObject.incrementPointer("*Admin")
 	defer _self.ffiObject.decrementPointer()
 	res, err := uniffiRustCallAsync[*Error](
@@ -2027,7 +2027,7 @@ func (_self *Admin) ListCompactions(varRange U64Range) ([]VersionedCompactions, 
 			return FfiConverterSequenceVersionedCompactionsINSTANCE.Lift(ffi)
 		},
 		C.uniffi_slatedb_uniffi_fn_method_admin_list_compactions(
-			_pointer, FfiConverterU64RangeINSTANCE.Lower(varRange)),
+			_pointer, FfiConverterOptionalUint64INSTANCE.Lower(from), FfiConverterOptionalUint64INSTANCE.Lower(to)),
 		// pollFn
 		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_poll_rust_buffer(handle, continuation, data)
@@ -2045,8 +2045,8 @@ func (_self *Admin) ListCompactions(varRange U64Range) ([]VersionedCompactions, 
 	return res, err
 }
 
-// Lists manifests inside `range`.
-func (_self *Admin) ListManifests(varRange U64Range) ([]VersionedManifest, error) {
+// Lists manifests inside the half-open ID range `[from, to)`.
+func (_self *Admin) ListManifests(from *uint64, to *uint64) ([]VersionedManifest, error) {
 	_pointer := _self.ffiObject.incrementPointer("*Admin")
 	defer _self.ffiObject.decrementPointer()
 	res, err := uniffiRustCallAsync[*Error](
@@ -2063,7 +2063,7 @@ func (_self *Admin) ListManifests(varRange U64Range) ([]VersionedManifest, error
 			return FfiConverterSequenceVersionedManifestINSTANCE.Lift(ffi)
 		},
 		C.uniffi_slatedb_uniffi_fn_method_admin_list_manifests(
-			_pointer, FfiConverterU64RangeINSTANCE.Lower(varRange)),
+			_pointer, FfiConverterOptionalUint64INSTANCE.Lower(from), FfiConverterOptionalUint64INSTANCE.Lower(to)),
 		// pollFn
 		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_poll_rust_buffer(handle, continuation, data)
@@ -8728,63 +8728,6 @@ func (c FfiConverterSsTableView) Write(writer io.Writer, value SsTableView) {
 type FfiDestroyerSsTableView struct{}
 
 func (_ FfiDestroyerSsTableView) Destroy(value SsTableView) {
-	value.Destroy()
-}
-
-// A half-open or closed `u64` range used by admin listing APIs.
-type U64Range struct {
-	// Inclusive or exclusive lower bound. `None` means unbounded.
-	Start *uint64
-	// Whether `start` is inclusive when present.
-	StartInclusive bool
-	// Inclusive or exclusive upper bound. `None` means unbounded.
-	End *uint64
-	// Whether `end` is inclusive when present.
-	EndInclusive bool
-}
-
-func (r *U64Range) Destroy() {
-	FfiDestroyerOptionalUint64{}.Destroy(r.Start)
-	FfiDestroyerBool{}.Destroy(r.StartInclusive)
-	FfiDestroyerOptionalUint64{}.Destroy(r.End)
-	FfiDestroyerBool{}.Destroy(r.EndInclusive)
-}
-
-type FfiConverterU64Range struct{}
-
-var FfiConverterU64RangeINSTANCE = FfiConverterU64Range{}
-
-func (c FfiConverterU64Range) Lift(rb RustBufferI) U64Range {
-	return LiftFromRustBuffer[U64Range](c, rb)
-}
-
-func (c FfiConverterU64Range) Read(reader io.Reader) U64Range {
-	return U64Range{
-		FfiConverterOptionalUint64INSTANCE.Read(reader),
-		FfiConverterBoolINSTANCE.Read(reader),
-		FfiConverterOptionalUint64INSTANCE.Read(reader),
-		FfiConverterBoolINSTANCE.Read(reader),
-	}
-}
-
-func (c FfiConverterU64Range) Lower(value U64Range) C.RustBuffer {
-	return LowerIntoRustBuffer[U64Range](c, value)
-}
-
-func (c FfiConverterU64Range) LowerExternal(value U64Range) ExternalCRustBuffer {
-	return RustBufferFromC(LowerIntoRustBuffer[U64Range](c, value))
-}
-
-func (c FfiConverterU64Range) Write(writer io.Writer, value U64Range) {
-	FfiConverterOptionalUint64INSTANCE.Write(writer, value.Start)
-	FfiConverterBoolINSTANCE.Write(writer, value.StartInclusive)
-	FfiConverterOptionalUint64INSTANCE.Write(writer, value.End)
-	FfiConverterBoolINSTANCE.Write(writer, value.EndInclusive)
-}
-
-type FfiDestroyerU64Range struct{}
-
-func (_ FfiDestroyerU64Range) Destroy(value U64Range) {
 	value.Destroy()
 }
 
