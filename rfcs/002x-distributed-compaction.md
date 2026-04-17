@@ -201,14 +201,14 @@ Workers claim up to `max_concurrent_compactions` jobs at a time, limiting the nu
 Workers update `last_heartbeat_ms` in two ways:
 
 1. **On SST flush** — piggybacked on the RFC-0013 progress-persistence write each time an output SST is written (~256MB boundaries).
-2. **Periodically in the write loop** — every `worker_heartbeat_timeout_ms / 2` wall-clock milliseconds, a worker writes a `.compactions` update with the current `last_heartbeat_ms` even if no SST has been flushed since the last write. This ensures liveness when SST output is slow (e.g. low-throughput or large single-SST jobs that take longer than the timeout to produce their first output).
+2. **On poll** — workers continue polling `.compactions` every `worker_poll_interval_ms` even when they have active jobs (to pick up additional work up to `max_concurrent_compactions`). When a worker has at least one `Running` job, each poll write includes an updated `last_heartbeat_ms`. This ensures liveness when SST output is slow (e.g. low-throughput or large single-SST jobs that take longer than the timeout to produce their first output), without requiring a separate heartbeat config on the worker. `worker_poll_interval_ms` must be well below `worker_heartbeat_timeout_ms` for this to work; a reasonable constraint is `worker_poll_interval_ms <= worker_heartbeat_timeout_ms / 2`.
 
 The coordinator detects stale workers during its periodic poll: for each `Running` compaction where `now() - last_heartbeat_ms > worker_heartbeat_timeout_ms`, reset `status = Submitted` and clear `worker_id`. The reclaimed compaction retains its `output_ssts`, so the next worker resumes from the last checkpoint via `ResumingIterator` (seeks input iterators past the last written key, avoiding re-processing already compacted data).
 
 ### Worker Lifecycle
 
 1. **Start** — generate a ULID `worker_id`, load config.
-2. **Poll** — read `.compactions` for `Submitted` work.
+2. **Poll** — read `.compactions`. If the worker has fewer than `max_concurrent_compactions` active jobs, look for `Submitted` entries to claim. If the worker has active jobs, write an updated `last_heartbeat_ms` as part of this poll (heartbeat piggyback).
 3. **Claim** — optimistic transition to `Running` (see claim protocol).
 4. **Execute** — run `execute_compaction_job`: build iterators from `CompactionSpec`, apply filters/merge ops, write output SSTs to `compacted/`, persist progress at each SST boundary.
 5. **Complete** — write `status = Completed` with final `output_ssts` to `.compactions`.
@@ -355,7 +355,8 @@ Use gossip to distribute jobs directly. Rejected: couples correctness to gossip 
 - Should workers validate their `CompactionSpec` against the current manifest before executing? Validating catches stale specs but adds a manifest read per claim.
 - Is optimistic claiming sufficient at high worker counts (50+), or will contention require sharding across multiple `.compactions` files?
 - How should existing per-compaction metrics (`bytes_processed`, `ssts_written`, `job_duration_seconds`) work for remote workers? Workers are separate processes with no metrics infrastructure: should they be reported by the coordinator based on what it observes in `.compactions`, or does each worker need its own metrics endpoint?
-- What happens when a worker is reclaimed due to a missed heartbeat but is still executing (zombie worker)? Both the zombie and the new worker may write `Completed` to `.compactions`. Both writes can succeed as new numbered files. If the zombie finishes first, the new worker wastes its work and the coordinator may process the zombie's `Completed` entry; if the new worker finishes first, the zombie's `Completed` write becomes an orphaned entry the coordinator must ignore. The coordinator needs to be idempotent when processing `Completed` entries to handle this correctly. Additionally, do the zombie and the new worker write to conflicting output SST paths?
+- ~~What happens when a worker is reclaimed due to a missed heartbeat but is still executing (zombie worker)? Both the zombie and the new worker may write `Completed` to `.compactions`. Both writes can succeed as new numbered files. If the zombie finishes first, the new worker wastes its work and the coordinator may process the zombie's `Completed` entry; if the new worker finishes first, the zombie's `Completed` write becomes an orphaned entry the coordinator must ignore. The coordinator needs to be idempotent when processing `Completed` entries to handle this correctly.~~ **Resolved:** The operator should configure worker_poll_interval_ms <= worker_heartbeat_timeout_ms / 2. The problem is then largely sidestepped if the worker piggybacks heartbeats (updates to last_heartbeat_ms) on every poll and continues to poll regardless of how many compaction jobs are running. 
+- Should the coordinator be idempotent when committing `Completed` jobs to the Manifest to handle a zombie worker writing `Completed` to a reclaimed job? This could happen due to misconfigured `worker_poll_interval_ms` or a transient networking issue.
 
 ## References
 
