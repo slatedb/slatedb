@@ -11,8 +11,8 @@ use crate::manifest::VersionedManifest;
 pub trait DbMetadataOps {
     /// Get the current manifest state.
     ///
-    /// Returns the in-memory manifest snapshot currently held by this handle,
-    /// paired with its manifest version ID.
+    /// Returns the current manifest snapshot known to this handle, paired
+    /// with its manifest version ID.
     fn manifest(&self) -> VersionedManifest;
 
     /// Subscribe to database state changes.
