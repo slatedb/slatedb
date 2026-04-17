@@ -1647,7 +1647,7 @@ impl DbRead for Db {
     }
 }
 
-impl crate::db_metadata::DbMetadataOps for Db {
+impl DbMetadataOps for Db {
     fn manifest(&self) -> VersionedManifest {
         self.inner.manifest()
     }

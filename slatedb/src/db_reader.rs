@@ -2,6 +2,7 @@ use crate::bytes_range::BytesRange;
 use crate::cached_object_store::CachedObjectStore;
 use crate::clock::MonotonicClock;
 use crate::config::{CheckpointOptions, DbReaderOptions, ReadOptions, ScanOptions};
+use crate::db_metadata::DbMetadataOps;
 use crate::db_read::DbRead;
 use crate::db_stats::DbStats;
 use crate::db_status::{ClosedResultWriter, DbStatus, DbStatusManager};
@@ -1089,7 +1090,7 @@ impl DbRead for DbReader {
     }
 }
 
-impl crate::db_metadata::DbMetadataOps for DbReader {
+impl DbMetadataOps for DbReader {
     fn manifest(&self) -> VersionedManifest {
         let state = Arc::clone(&self.inner.state.read());
         VersionedManifest::from(state.as_ref())
