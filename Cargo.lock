@@ -3276,6 +3276,7 @@ dependencies = [
 name = "slatedb-uniffi"
 version = "0.12.0"
 dependencies = [
+ "chrono",
  "figment",
  "log",
  "parking_lot",
@@ -3288,6 +3289,7 @@ dependencies = [
  "tracing",
  "tracing-log",
  "tracing-subscriber",
+ "ulid",
  "uniffi",
  "uuid",
 ]
