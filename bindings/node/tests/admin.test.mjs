@@ -108,10 +108,8 @@ test("admin manifest read list and state view", async (t) => {
   const bounded = await admin.list_manifests(2n, 3n);
   assert.deepEqual(bounded.map((manifest) => BigInt(manifest.id)), [2n]);
 
-  const invalidRange = await expectInvalid(
-    () => admin.list_manifests(3n, 2n),
-  );
-  assert.match(invalidRange.message, /range start must not be greater than range end/);
+  const reversed = await admin.list_manifests(3n, 2n);
+  assert.deepEqual(reversed, []);
 
   const stateView = await admin.read_compactor_state_view();
   assert.equal(BigInt(stateView.manifest.id), BigInt(latest.id));
@@ -131,10 +129,8 @@ test("admin compaction queries handle empty store and invalid ids", async (t) =>
   const compactions = await admin.list_compactions(undefined, undefined);
   assert.deepEqual(compactions, []);
 
-  const invalidRange = await expectInvalid(
-    () => admin.list_compactions(2n, 2n),
-  );
-  assert.match(invalidRange.message, /range must be non-empty/);
+  const empty = await admin.list_compactions(2n, 2n);
+  assert.deepEqual(empty, []);
 
   const invalidCompactionId = await expectInvalid(
     () => admin.read_compaction("not-a-ulid", undefined),

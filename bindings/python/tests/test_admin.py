@@ -78,9 +78,8 @@ async def test_admin_manifest_read_list_and_state_view() -> None:
         bounded = await admin.list_manifests(2, 3)
         assert [manifest.id for manifest in bounded] == [2]
 
-        with pytest.raises(Error.Invalid) as invalid_range:
-            await admin.list_manifests(3, 2)
-        assert "range start must not be greater than range end" in invalid_range.value.message
+        reversed_range = await admin.list_manifests(3, 2)
+        assert reversed_range == []
 
         state_view = await admin.read_compactor_state_view()
         assert state_view.manifest.id == latest.id
@@ -100,9 +99,8 @@ async def test_admin_compaction_queries_handle_empty_store_and_invalid_ids() -> 
     compactions = await admin.list_compactions(None, None)
     assert compactions == []
 
-    with pytest.raises(Error.Invalid) as invalid_range:
-        await admin.list_compactions(2, 2)
-    assert "range must be non-empty" in invalid_range.value.message
+    empty_range = await admin.list_compactions(2, 2)
+    assert empty_range == []
 
     with pytest.raises(Error.Invalid) as invalid_compaction_id:
         await admin.read_compaction("not-a-ulid", None)

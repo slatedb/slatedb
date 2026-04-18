@@ -85,11 +85,8 @@ class SlateDbAdminTest {
             assertEquals(1, bounded.size());
             assertEquals(2L, bounded.get(0).id());
 
-            Error.Invalid invalidRange =
-                    TestSupport.awaitFailure(
-                            Error.Invalid.class,
-                            admin.listManifests(3L, 2L));
-            assertTrue(invalidRange.getMessage().contains("range start must not be greater than range end"));
+            List<VersionedManifest> reversed = TestSupport.await(admin.listManifests(3L, 2L));
+            assertEquals(0, reversed.size());
 
             CompactorStateView stateView = TestSupport.await(admin.readCompactorStateView());
             assertNotNull(stateView);
@@ -113,11 +110,8 @@ class SlateDbAdminTest {
                     TestSupport.await(admin.listCompactions(null, null));
             assertEquals(0, compactions.size());
 
-            Error.Invalid invalidRange =
-                    TestSupport.awaitFailure(
-                            Error.Invalid.class,
-                            admin.listCompactions(2L, 2L));
-            assertTrue(invalidRange.getMessage().contains("range must be non-empty"));
+            List<VersionedCompactions> empty = TestSupport.await(admin.listCompactions(2L, 2L));
+            assertEquals(0, empty.size());
 
             Error.Invalid invalidCompactionId =
                     TestSupport.awaitFailure(Error.Invalid.class, admin.readCompaction("not-a-ulid", null));

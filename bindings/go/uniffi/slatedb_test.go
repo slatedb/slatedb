@@ -1549,21 +1549,16 @@ func TestAdminBuilderValidationAndErrors(t *testing.T) {
 		}
 	})
 
-	t.Run("invalid range", func(t *testing.T) {
+	t.Run("reversed range returns empty", func(t *testing.T) {
 		store := newMemoryStore(t)
 		admin := openTestAdmin(t, store, nil)
 
-		_, err := admin.ListManifests(uint64Ptr(2), uint64Ptr(1))
-		if !errors.Is(err, slatedb.ErrErrorInvalid) {
-			t.Fatalf("ListManifests(invalid range): got %v, want invalid error", err)
+		manifests, err := admin.ListManifests(uint64Ptr(2), uint64Ptr(1))
+		if err != nil {
+			t.Fatalf("ListManifests(reversed range): %v", err)
 		}
-
-		var invalidErr *slatedb.ErrorInvalid
-		if !errors.As(err, &invalidErr) {
-			t.Fatalf("ListManifests(invalid range): expected *ErrorInvalid, got %T", err)
-		}
-		if invalidErr.Message != "range start must not be greater than range end" {
-			t.Fatalf("ListManifests(invalid range): message = %q, want %q", invalidErr.Message, "range start must not be greater than range end")
+		if len(manifests) != 0 {
+			t.Fatalf("ListManifests(reversed range): got %d manifests, want 0", len(manifests))
 		}
 	})
 }
