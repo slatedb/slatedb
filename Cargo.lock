@@ -830,8 +830,9 @@ dependencies = [
 
 [[package]]
 name = "fail-parallel"
-version = "0.5.1"
-source = "git+https://github.com/piiiico/fail-parallel?branch=bump-rand-0.9#c55eb7ac39062ecd6be8f0b2fdcdc5e0bb0bff99"
+version = "0.5.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c6f4a147ba57fcd64323c54c8f69fd4e045456a99574163010ccf5eea3168aaa"
 dependencies = [
  "log",
  "once_cell",
