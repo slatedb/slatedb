@@ -24,15 +24,7 @@ type ActorFuture = Pin<Box<dyn Future<Output = Result<(), Error>> + Send + 'stat
 type StartupFactory = Box<dyn FnOnce(StartupCtx) -> DbFactoryFuture + Send + 'static>;
 type ActorFn = Arc<dyn Fn(ActorCtx) -> ActorFuture + Send + Sync + 'static>;
 
-pub struct Harness;
-
-impl Harness {
-    pub fn builder(name: impl Into<String>, seed: u64) -> HarnessBuilder {
-        HarnessBuilder::new(name, seed)
-    }
-}
-
-pub struct HarnessBuilder {
+pub struct Harness {
     name: String,
     rand: Arc<DbRand>,
     path: Option<Path>,
@@ -154,8 +146,8 @@ impl ActorCtx {
     }
 }
 
-impl HarnessBuilder {
-    fn new(name: impl Into<String>, seed: u64) -> Self {
+impl Harness {
+    pub fn new(name: impl Into<String>, seed: u64) -> Self {
         Self {
             name: name.into(),
             rand: Arc::new(DbRand::new(seed)),
@@ -241,7 +233,7 @@ impl HarnessBuilder {
     }
 
     async fn run_inner(self) -> Result<(), Error> {
-        let HarnessBuilder {
+        let Harness {
             name,
             rand,
             path,
