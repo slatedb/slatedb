@@ -396,10 +396,7 @@ impl CachedObjectStore {
         let location_owned = location.clone();
         let result = cell
             .get_or_try_init(|| async {
-                let get_result = this
-                    .object_store
-                    .get_opts(&location_owned, opts)
-                    .await?;
+                let get_result = this.object_store.get_opts(&location_owned, opts).await?;
                 let result_meta = get_result.meta.clone();
                 let result_attrs = get_result.attributes.clone();
                 // swallow the error on saving to disk here (the disk might be already full),
@@ -1688,11 +1685,7 @@ mod tests {
                 self.inner.rename(from, to).await
             }
 
-            async fn copy_if_not_exists(
-                &self,
-                from: &Path,
-                to: &Path,
-            ) -> object_store::Result<()> {
+            async fn copy_if_not_exists(&self, from: &Path, to: &Path) -> object_store::Result<()> {
                 self.inner.copy_if_not_exists(from, to).await
             }
 
