@@ -8,6 +8,7 @@ use object_store::memory::InMemory;
 use object_store::path::Path;
 use object_store::ObjectStore;
 use parking_lot::RwLock;
+use rand::RngCore;
 use tokio::runtime::RngSeed;
 use tokio::task::JoinSet;
 
@@ -229,10 +230,9 @@ impl HarnessBuilder {
 
     pub async fn run(self) -> Result<(), Error> {
         assert!(
-            !self.startup_factory.is_none(),
+            self.startup_factory.is_none(),
             "dst harness requires with_db(...) before run()"
         );
-
         let (tx, rx) = oneshot::channel();
         std::thread::Builder::new()
             .name("slatedb-dst-harness".to_string())
@@ -257,21 +257,32 @@ impl HarnessBuilder {
     }
 
     async fn run_inner(self) -> Result<(), Error> {
-        let seed = self.rand.seed();
-        let path = self.path.unwrap_or_else(|| default_path(&self.name, seed));
+        let HarnessBuilder {
+            name,
+            rand,
+            path,
+            main_object_store,
+            wal_object_store,
+            startup_factory,
+            actors,
+        } = self;
+
+        let seed = rand.seed();
+        let path = path.unwrap_or_else(|| default_path(&name, seed));
         let system_clock: Arc<dyn SystemClock> = Arc::new(MockSystemClock::new());
         let fp_registry = Arc::new(FailPointRegistry::new());
+        let startup_seed = rand.rng().next_u64();
+        let failures_seed = rand.rng().next_u64();
         let failures = Arc::new(FailingObjectStoreController::new(Arc::new(DbRand::new(
-            derive_seed(seed, "failures", "", 0),
+            failures_seed,
         ))));
 
         let main_object_store = wrap_store(
-            self.main_object_store,
+            main_object_store,
             Arc::clone(&system_clock),
             failures.as_ref().clone(),
         );
-        let wal_object_store = self
-            .wal_object_store
+        let wal_object_store = wal_object_store
             .map(|store| wrap_store(store, Arc::clone(&system_clock), failures.as_ref().clone()));
 
         let startup_ctx = StartupCtx {
@@ -280,13 +291,10 @@ impl HarnessBuilder {
             wal_object_store: wal_object_store.clone(),
             system_clock: Arc::clone(&system_clock),
             fp_registry: Arc::clone(&fp_registry),
-            rand: Arc::new(DbRand::new(derive_seed(seed, "startup", "", 0))),
+            rand: Arc::new(DbRand::new(startup_seed)),
         };
 
-        let db = self
-            .startup_factory
-            .expect("validated before runtime startup")(startup_ctx)
-        .await?;
+        let db = startup_factory.expect("validated before runtime startup")(startup_ctx).await?;
 
         let shared = SharedHarness {
             path,
@@ -299,19 +307,15 @@ impl HarnessBuilder {
         };
 
         let mut join_set = JoinSet::new();
-        for registration in self.actors {
+        for registration in actors {
             for instance in 0..registration.count {
+                let actor_seed = rand.rng().next_u64();
                 let role = registration.role.clone();
                 let actor = Arc::clone(&registration.actor);
                 let ctx = ActorCtx {
                     role: role.clone(),
                     instance,
-                    rand: Arc::new(DbRand::new(derive_seed(
-                        seed,
-                        "actor",
-                        &role,
-                        instance as u64,
-                    ))),
+                    rand: Arc::new(DbRand::new(actor_seed)),
                     shared: shared.clone(),
                 };
                 join_set.spawn(async move { actor(ctx).await });
@@ -347,31 +351,5 @@ fn wrap_store(
 }
 
 fn default_path(name: &str, seed: u64) -> Path {
-    Path::from(format!(
-        "dst/{}/seed-{:016x}",
-        name,
-        derive_seed(seed, "path", "", 0)
-    ))
-}
-
-fn derive_seed(root: u64, namespace: &str, role: &str, instance: u64) -> u64 {
-    let mut state = root ^ 0x9e37_79b9_7f4a_7c15;
-    for byte in namespace
-        .bytes()
-        .chain(std::iter::once(0xff))
-        .chain(role.bytes())
-        .chain(std::iter::once(0xfe))
-        .chain(instance.to_le_bytes())
-    {
-        state = splitmix64(state ^ u64::from(byte));
-    }
-    splitmix64(state)
-}
-
-fn splitmix64(mut value: u64) -> u64 {
-    value = value.wrapping_add(0x9e37_79b9_7f4a_7c15);
-    let mut z = value;
-    z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-    z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-    z ^ (z >> 31)
+    Path::from(format!("dst/{}/seed-{:016x}", name, seed))
 }
