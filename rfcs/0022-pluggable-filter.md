@@ -227,9 +227,9 @@ Key design decisions:
    - **Read time (`scan_prefix`)**: `might_match` receives
      `FilterTarget::Prefix` with only the prefix. Filters that can't answer
      prefix queries return `true`. For bloom filters with a `PrefixExtractor`,
-     the `in_domain` check is performed *inside* `might_match` — if the prefix
-     is not in domain, the filter returns `true` rather than risk a false
-     negative.
+     the extractor is consulted *inside* `might_match` — if the scan prefix
+     has no extractable prefix, the filter returns `true` rather than risk a
+     false negative.
 
    This means the engine never needs to know which filters apply to which
    queries. It always evaluates all filters with AND logic and trusts each
@@ -265,10 +265,20 @@ that need prefix-based filtering can implement their own selection logic
 directly in `add_entry`/`might_match`.
 
 ```rust
-/// Extractor for a prefix from a key for use in prefix-based bloom filtering.
+/// Extractor for a prefix from a byte string, used to build and probe
+/// prefix-based bloom filters.
 ///
-/// Used on the write path to hash prefixes into the bloom filter during SST
-/// construction.
+/// An extractor must produce a *prefix* of its input — i.e., if
+/// `prefix_len(input)` returns `Some(n)`, then `input[..n]` is the extracted
+/// prefix. This is required for the filter to be safe: at build time each
+/// stored key contributes `hash(key[..prefix_len(key)])`, and at read time
+/// the same rule is applied uniformly to the queried key (for point
+/// lookups) or to the scan prefix (for prefix scans).
+///
+/// The invariant: for any byte string `p` with `prefix_len(p) = Some(n)`,
+/// every longer byte string `q` beginning with `p` must also satisfy
+/// `prefix_len(q) = Some(m)` with `m >= n` and `q[..n] == p[..n]`.
+/// Extractors that violate this will produce false negatives.
 pub trait PrefixExtractor {
     /// A unique name identifying this extractor's configuration.
     ///
@@ -281,34 +291,29 @@ pub trait PrefixExtractor {
     /// results.
     fn name(&self) -> &str;
 
-    /// Returns whether the given prefix is a valid output of `extract()`.
+    /// Returns the length `n` such that `input[..n]` is this extractor's
+    /// prefix for `input`, or `None` if `input` has no extractable prefix.
     ///
-    /// This is used on the read path to verify that a scan prefix provided
-    /// by the user matches the prefix format indexed in the filter. If this
-    /// returns `false`, the filter must NOT be consulted; doing so can
-    /// produce false negatives (the filter says "not present" for data that
-    /// actually exists).
+    /// Applied uniformly on both the build and read paths:
+    /// - **Build time** — for each stored key `k`, `hash(k[..prefix_len(k)])`
+    ///   is inserted into the filter.
+    /// - **Point reads** — for a queried key `k`, the filter is probed
+    ///   with `hash(k[..prefix_len(k)])`.
+    /// - **Prefix reads** — for a scan prefix `p`, the filter is probed
+    ///   with `hash(p[..prefix_len(p)])`. This handles scan prefixes both
+    ///   shorter and longer than the extractor's output: shorter prefixes
+    ///   return `None` (the filter must be skipped to avoid false
+    ///   negatives), longer prefixes are truncated to the extractable
+    ///   prefix length and probed.
     ///
-    /// **Example of incorrect behavior without this check:**
-    /// Assume a prefix extractor that extracts the first 3 bytes of a
-    /// key and an SST contains keys `abc_1`, `abc_2`, `abx_1`.
-    /// During SST construction, the filter indexes the extracted prefixes:
-    /// `abc` and `abx`.
-    /// At read time, a user calls `scan_prefix("ab")`. The 2-byte prefix
-    /// `"ab"` was never inserted into the filter, so `might_match("ab")`
-    /// returns `false`. The SST is skipped even though all three keys match
-    /// the scan prefix `"ab"`. This is a false negative.
-    ///
-    /// With `in_domain`: `in_domain("ab")` returns `false` (`"ab"` is not
-    /// a valid 3-byte prefix), so the engine skips the filter check and
-    /// falls back to scanning the SST directly.
-    fn in_domain(&self, prefix: &[u8]) -> bool;
-
-    /// Returns the length of the prefix this extractor produces from `key`,
-    /// or `None` if the key does not contain a recognizable prefix (i.e.,
-    /// `in_domain` would return `false` for any prefix of the key). The
-    /// caller interprets the returned length as `&key[..len]`.
-    fn prefix_len(&self, key: &[u8]) -> Option<usize>;
+    /// **Example.** A 3-byte fixed extractor with an SST containing keys
+    /// `abc_1`, `abc_2`, `abx_1` stores hashes of `abc` and `abx`. Then:
+    /// - `scan_prefix("ab")` → `prefix_len = None` → filter skipped
+    ///   (safe: `"ab"` was never hashed, probing would false-negative).
+    /// - `scan_prefix("abc")` → `prefix_len = Some(3)` → probe `hash("abc")`.
+    /// - `scan_prefix("abcd")` → `prefix_len = Some(3)` → probe
+    ///   `hash("abc")` (truncation is safe by the invariant above).
+    fn prefix_len(&self, input: &[u8]) -> Option<usize>;
 }
 ```
 
@@ -458,11 +463,20 @@ pub struct ScanOptions {
 
 **Configuration modes (for BloomFilterPolicy):**
 
-| `whole_key_filtering` | `prefix_extractor` | Behavior                                                   |
-|-----------------------|--------------------|------------------------------------------------------------|
-| `true` (default)      | `None`             | Full-key bloom only, today's default, backwards compatible |
-| `true`                | `Some(...)`        | Both point lookups and prefix scans are filtered           |
-| `false`               | `Some(...)`        | Prefix-only — smaller filter, no point-lookup filtering    |
+| `whole_key_filtering` | `prefix_extractor` | Hashes stored       | `get`                   | `scan_prefix`            |
+|-----------------------|--------------------|---------------------|-------------------------|--------------------------|
+| `true` (default)      | `None`             | full-key            | full-key hash           | not filtered             |
+| `true`                | `Some(...)`        | full-key + prefix   | full-key hash (tighter) | extracted prefix hash    |
+| `false`               | `Some(...)`        | prefix only         | extracted prefix hash   | extracted prefix hash    |
+
+The third row — prefix-only storage with point lookups also probing the
+extracted prefix — fits workloads whose keys follow a
+`GroupId ‖ Suffix` pattern, where every query (scan or point) is
+answered by matching on the group id. The filter is sized against the
+number of distinct group ids (small), and point lookups reuse those
+same hashes instead of paying to store a full-key hash per row. If the
+extracted prefix is not in the filter, the full key cannot be in the
+SST either, so the probe is safe.
 
 Usage:
 
@@ -477,7 +491,9 @@ let db = Db::builder("path", object_store)
     .build()
     .await?;
 
-// Prefix-only bloom filter (no point-lookup filtering)
+// Prefix-only bloom filter. Point lookups probe the filter with the
+// extracted prefix of the queried key; scan_prefix probes with the
+// extracted prefix of the scan target. No full-key hashes are stored.
 let db = Db::builder("path", object_store)
     .with_filter_policies(vec![Arc::new(BloomFilterPolicy::new(10)
         .with_prefix_extractor(Arc::new(MyPrefixExtractor::new()))
@@ -522,22 +538,31 @@ impl Filter for BloomFilter {
     fn might_match(&self, query: &FilterQuery) -> bool {
         match &query.target {
             FilterTarget::Point(key) => {
-                if !self.whole_key_filtering {
-                    return true; // Cannot answer point queries
+                // Full-key hash gives the tightest answer when available.
+                if self.whole_key_filtering {
+                    return self.might_contain(filter_hash(key.as_ref()));
                 }
-                self.might_contain(filter_hash(key.as_ref()))
+                // Fall back to probing with the key's extracted prefix.
+                // The filter contains `hash(extract(k'))` for every stored
+                // key `k'`, so if the extracted prefix of `key` is not in
+                // the filter, no key with that prefix is in the SST — and
+                // therefore `key` isn't either.
+                let Some(ref extractor) = self.prefix_extractor else {
+                    return true; // No coverage for point queries
+                };
+                let Some(n) = extractor.prefix_len(key.as_ref()) else {
+                    return true; // Key has no extractable prefix
+                };
+                self.might_contain(filter_hash(&key[..n]))
             }
             FilterTarget::Prefix(prefix) => {
-                // No PrefixExtractor → cannot answer prefix queries
                 let Some(ref extractor) = self.prefix_extractor else {
+                    return true; // No extractor → cannot answer
+                };
+                let Some(n) = extractor.prefix_len(prefix.as_ref()) else {
                     return true;
                 };
-                // in_domain check prevents false negatives when the prefix
-                // is shorter/incompatible with what was indexed
-                if !extractor.in_domain(prefix.as_ref()) {
-                    return true;
-                }
-                self.might_contain(filter_hash(prefix.as_ref()))
+                self.might_contain(filter_hash(&prefix[..n]))
             }
         }
     }
@@ -631,10 +656,20 @@ iterator chain so each SST's filters can be checked before opening it, skipping
 SSTs where any filter returns `false`.
 
 When a `prefix_extractor` is configured on the `BloomFilterPolicy`, prefix
-scans probe the bloom filter with `filter_hash(prefix)`. The default
+scans probe the bloom filter with `filter_hash(scan_prefix[..n])` where
+`n = extractor.prefix_len(scan_prefix)`. This naturally handles scan
+prefixes both shorter and longer than the extractor's output; see
+[Read path](#read-path-querying-the-filter) for the full rule. The default
 configuration (no `prefix_extractor`) returns `true` for prefix queries, so no
 filtering. This is safe: point lookups still use the full-key hash. Other
 filters in the array may still reject the SST based on context or other criteria.
+
+With `whole_key_filtering = false` and a `prefix_extractor` configured,
+point lookups (`get`) also benefit from the filter without any additional
+storage: `might_match(Point(k))` probes with `hash(k[..extractor.prefix_len(k)])`.
+This fits `GroupId ‖ Suffix` key schemas: the extractor matches the
+group id and hashing the suffix contributes no extra pruning power,
+since any point query already knows which group it targets.
 
 Note: prefix filtering alone is not ideal for recency access patterns where
 the caller only needs a recent entry for a prefix. See
@@ -831,7 +866,8 @@ method. On the write path, `KeySelector::includes` gates entry inclusion — if
 `false`, the entry is skipped entirely (no full-key hash, no prefix hash). On
 the read path for Point queries, excluded keys return `true` (inapplicable).
 
-Prefix scan will still need `PrefixExtractor::in_domain` as the filter is mainly for keys.
+Prefix scan still relies on the configured `PrefixExtractor`, which
+operates on the extracted prefix of each selected key.
 
 Example configuration:
 
@@ -844,7 +880,7 @@ let db = Db::builder("path", object_store)
         // Prefix bloom, only for "post::" keys
         Arc::new(BloomFilterPolicy::new(10)
             .with_key_selector(Arc::new(StartsWithSelector::new("post::")))
-            .with_prefix_extractor(Arc::new(FixedPrefixExtractor::new(6)))
+            .with_prefix_extractor(Arc::new(MyPrefixExtractor::new()))
             .with_whole_key_filtering(false)),
     ])
     .build().await?;
@@ -912,3 +948,10 @@ instead of just a prefix.
 - [SuRF: Succinct Range Filters (SIGMOD 2018)](https://dl.acm.org/doi/fullHtml/10.1145/3375660)
 
 ## Updates
+
+- **2026-04-20** — With `whole_key_filtering = false` and a configured
+  `prefix_extractor`, `FilterTarget::Point(k)` now probes with
+  `hash(k[..extractor.prefix_len(k)])` instead of returning `true`.
+  Dropped `PrefixExtractor::in_domain` — `prefix_len` is applied
+  uniformly to stored keys, point queries, and scan prefixes, which also
+  lets over-length scan prefixes be truncated and probed.
