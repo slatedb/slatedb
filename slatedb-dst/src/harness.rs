@@ -26,10 +26,29 @@ type DbFactoryFuture = Pin<Box<dyn Future<Output = Result<Arc<Db>, Error>> + Sen
 type ActorFuture = Pin<Box<dyn Future<Output = Result<(), Error>> + Send + 'static>>;
 type StartupFactory = Box<dyn FnOnce(StartupCtx) -> DbFactoryFuture + Send + 'static>;
 type ActorFn = Arc<dyn Fn(ActorCtx) -> ActorFuture + Send + Sync + 'static>;
+
+/// Controls whether an actor drives scenario completion or is aborted once all
+/// foreground actors finish.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ActorType {
+    /// Completion-driving actor. The harness waits for all foreground actors to
+    /// finish successfully before considering the scenario complete.
+    Foreground,
+    /// Long-running support actor. Background actors may run indefinitely and
+    /// are aborted when the foreground actors finish successfully.
+    Background,
+}
+
 struct ActorRegistration {
     role: String,
+    actor_type: ActorType,
     count: usize,
     actor: ActorFn,
+}
+
+struct ActorExit {
+    actor_type: ActorType,
+    result: Result<(), Error>,
 }
 
 #[derive(Clone)]
@@ -354,18 +373,27 @@ impl Harness {
     ///
     /// ## Arguments
     /// - `role`: Logical name assigned to each actor in the registration.
+    /// - `actor_type`: Whether the registered actors drive completion or run as
+    ///   abortable background support tasks.
     /// - `count`: Number of actor instances to spawn for the role.
     /// - `actor`: Async actor function to execute once per instance.
     ///
     /// ## Returns
     /// - `Harness`: The updated harness builder.
-    pub fn actor<F, Fut>(mut self, role: impl Into<String>, count: usize, actor: F) -> Self
+    pub fn actor<F, Fut>(
+        mut self,
+        role: impl Into<String>,
+        actor_type: ActorType,
+        count: usize,
+        actor: F,
+    ) -> Self
     where
         F: Fn(ActorCtx) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<(), Error>> + Send + 'static,
     {
         self.actors.push(ActorRegistration {
             role: role.into(),
+            actor_type,
             count,
             actor: Arc::new(move |ctx| Box::pin(actor(ctx))),
         });
@@ -376,6 +404,8 @@ impl Harness {
     ///
     /// ## Arguments
     /// - `role`: Logical name assigned to each actor in the registration.
+    /// - `actor_type`: Whether the registered actors drive completion or run as
+    ///   abortable background support tasks.
     /// - `count`: Number of actor instances to spawn for the role.
     /// - `state`: Shared state cloned into each actor invocation.
     /// - `actor`: Async actor function that receives an [`ActorCtx`] and the
@@ -386,6 +416,7 @@ impl Harness {
     pub fn actor_with_state<T, F, Fut>(
         mut self,
         role: impl Into<String>,
+        actor_type: ActorType,
         count: usize,
         state: Arc<T>,
         actor: F,
@@ -397,6 +428,7 @@ impl Harness {
     {
         self.actors.push(ActorRegistration {
             role: role.into(),
+            actor_type,
             count,
             actor: Arc::new(move |ctx| {
                 let state = Arc::clone(&state);
@@ -409,8 +441,9 @@ impl Harness {
     /// Runs the harness to completion on a seeded current-thread Tokio runtime.
     ///
     /// ## Returns
-    /// - `Ok(())`: All actors completed successfully.
-    /// - `Err(Error)`: Database startup failed or an actor returned an error.
+    /// - `Ok(())`: All foreground actors completed successfully.
+    /// - `Err(Error)`: Database startup failed, no foreground actors were
+    ///   configured, or an actor returned an error.
     ///
     /// # Panics
     /// Panics if [`Harness::with_db`] was not configured, if the runtime cannot
@@ -479,29 +512,49 @@ impl Harness {
             db_slot: Arc::new(RwLock::new(db)),
         };
 
+        let mut foreground_remaining = actors
+            .iter()
+            .filter(|registration| registration.actor_type == ActorType::Foreground)
+            .map(|registration| registration.count)
+            .sum::<usize>();
+        let mut success_shutdown = false;
         let mut join_set = JoinSet::new();
         for registration in actors {
             for instance in 0..registration.count {
                 let actor_seed = rand.rng().next_u64();
-                let role = registration.role.clone();
+                let actor_type = registration.actor_type;
                 let actor = Arc::clone(&registration.actor);
                 let ctx = ActorCtx {
-                    role: role.clone(),
+                    role: registration.role.clone(),
                     instance,
                     rand: Arc::new(DbRand::new(actor_seed)),
                     shared: shared.clone(),
                 };
-                join_set.spawn(async move { actor(ctx).await });
+                join_set.spawn(async move {
+                    let result = actor(ctx).await;
+                    ActorExit { actor_type, result }
+                });
             }
         }
 
         while let Some(result) = join_set.join_next().await {
             match result {
-                Ok(Ok(())) => {}
-                Ok(Err(error)) => {
-                    join_set.abort_all();
-                    return Err(error);
-                }
+                Ok(exit) => match exit.result {
+                    Ok(()) => {
+                        if exit.actor_type == ActorType::Foreground {
+                            foreground_remaining -= 1;
+                            if foreground_remaining == 0 && !success_shutdown {
+                                success_shutdown = true;
+                                join_set.abort_all();
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        join_set.abort_all();
+                        return Err(error);
+                    }
+                },
+                Err(error) if success_shutdown && error.is_cancelled() => {}
                 Err(error) => {
                     join_set.abort_all();
                     panic!("dst actor task failed to join: {error}");

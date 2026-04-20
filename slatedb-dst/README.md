@@ -103,8 +103,8 @@ use object_store::ObjectStore;
 use rand::RngCore;
 use slatedb::Db;
 use slatedb_dst::{
-    utils::build_settings, DeterministicLocalFilesystem, Harness, Operation,
-    StreamDirection, Toxic, ToxicKind,
+    utils::build_settings, ActorType, DeterministicLocalFilesystem, Harness,
+    Operation, StreamDirection, Toxic, ToxicKind,
 };
 use tempfile::TempDir;
 
@@ -145,7 +145,7 @@ fn dst_smoke_test() -> Result<(), Box<dyn std::error::Error>> {
                 Ok(Arc::new(db))
             }
         })
-        .actor("writer", 1, |ctx| async move {
+        .actor("writer", ActorType::Foreground, 1, |ctx| async move {
             ctx.failures().add_toxic(Toxic {
                 name: "put-latency".into(),
                 kind: ToxicKind::Latency {
@@ -181,11 +181,13 @@ fn dst_smoke_test() -> Result<(), Box<dyn std::error::Error>> {
 - `with_main_object_store(store)`: replaces the default in-memory main store
 - `with_wal_object_store(store)`: configures a separate WAL store
 - `with_db(factory)`: registers the startup factory that opens the database
-- `actor(role, count, actor_fn)`: registers `count` actors for the same role
-- `actor_with_state(role, count, shared_state, actor_fn)`: same as `actor`, but
-  clones user-supplied shared state into each actor
+- `actor(role, actor_type, count, actor_fn)`: registers `count` actors for the
+  same role and lifecycle
+- `actor_with_state(role, actor_type, count, shared_state, actor_fn)`: same as
+  `actor`, but clones user-supplied shared state into each actor
 - `run()`: builds the seeded runtime, opens the DB, spawns actors, and waits
-  for them to finish
+  for foreground actors to finish before aborting any remaining background
+  actors
 
 If `with_path(...)` is not set, the harness uses:
 
@@ -232,6 +234,15 @@ Each registered actor instance receives its own `ActorCtx`.
 
 `swap_db(...)` is useful for reopen scenarios and tests that intentionally
 replace the database instance mid-run.
+
+### `ActorType`
+
+Each actor registration declares an `ActorType`:
+
+- `ActorType::Foreground`: completion-driving work. The harness succeeds once
+  all foreground actors finish successfully.
+- `ActorType::Background`: long-running support work. Background actors may run
+  indefinitely and are aborted when the foreground actors finish.
 
 ## Failure injection
 

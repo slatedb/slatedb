@@ -27,7 +27,7 @@ use slatedb::config::{FlushOptions, FlushType, PutOptions, WriteOptions};
 use slatedb::{Db, DbRand, Error};
 use slatedb_common::clock::{MockSystemClock, SystemClock};
 use slatedb_dst::{
-    utils::build_settings, ActorCtx, DeterministicLocalFilesystem, Harness, Operation,
+    utils::build_settings, ActorCtx, ActorType, DeterministicLocalFilesystem, Harness, Operation,
     StreamDirection, Toxic, ToxicKind,
 };
 use tempfile::TempDir;
@@ -117,7 +117,9 @@ fn run_seed_once(seed: u64) -> Result<(u64, DateTime<Utc>), Box<dyn std::error::
                 Ok(Arc::new(db))
             }
         })
-        .actor("writer", 1, |ctx| async move { run_actor(ctx).await })
+        .actor("writer", ActorType::Foreground, 1, |ctx| async move {
+            run_actor(ctx).await
+        })
         .run()?;
 
     let next_u64 = rand.rng().next_u64();
