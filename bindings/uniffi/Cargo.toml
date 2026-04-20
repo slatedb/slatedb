@@ -15,6 +15,7 @@ doc = false
 bench = false
 
 [dependencies]
+chrono = { workspace = true }
 log = { workspace = true }
 parking_lot = { workspace = true }
 slatedb = { workspace = true, features = ["all"] }
@@ -25,6 +26,7 @@ tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync"] }
 tracing = { workspace = true }
 tracing-log = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["fmt"] }
+ulid = { workspace = true }
 uniffi = { workspace = true, features = ["tokio"] }
 uuid = { workspace = true }
 

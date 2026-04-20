@@ -1439,7 +1439,7 @@ impl CloneSourceSpec<(Bound<Bytes>, Bound<Bytes>)> {
 /// A builder for configuring database clone operations.
 pub struct CloneBuilder<R: RangeBounds<Bytes> + Clone = (Bound<Bytes>, Bound<Bytes>)> {
     clone_path: Path,
-    source: CloneSourceSpec<R>,
+    sources: Vec<CloneSourceSpec<R>>,
     object_store: Arc<dyn ObjectStore>,
     wal_object_store: Option<Arc<dyn ObjectStore>>,
     system_clock: Option<Arc<dyn SystemClock>>,
@@ -1455,7 +1455,7 @@ impl<R: RangeBounds<Bytes> + Clone> CloneBuilder<R> {
     ) -> Self {
         CloneBuilder {
             clone_path,
-            source,
+            sources: vec![source],
             object_store,
             wal_object_store: None,
             system_clock: None,
@@ -1470,7 +1470,7 @@ impl<R: RangeBounds<Bytes> + Clone> CloneBuilder<R> {
     }
 
     pub fn with_source(mut self, source: CloneSourceSpec<R>) -> Self {
-        self.source = source;
+        self.sources.push(source);
         self
     }
 
@@ -1502,7 +1502,7 @@ impl<R: RangeBounds<Bytes> + Clone> CloneBuilder<R> {
     /// Build and execute the clone operation.
     pub async fn build(self) -> Result<(), Box<dyn std::error::Error>> {
         crate::clone::create_clone(
-            self.source,
+            self.sources,
             self.clone_path,
             ObjectStores::new(self.object_store, self.wal_object_store),
             Arc::new(FailPointRegistry::new()),
