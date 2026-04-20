@@ -239,6 +239,7 @@ struct HarnessCtx {
 pub struct Harness {
     name: String,
     rand: Arc<DbRand>,
+    system_clock: Arc<MockSystemClock>,
     path: Option<Path>,
     main_object_store: Arc<dyn ObjectStore>,
     wal_object_store: Option<Arc<dyn ObjectStore>>,
@@ -261,6 +262,7 @@ impl Harness {
         Self {
             name: name.into(),
             rand: Arc::new(DbRand::new(seed)),
+            system_clock: Arc::new(MockSystemClock::new()),
             path: None,
             main_object_store: Arc::new(InMemory::new()),
             wal_object_store: None,
@@ -278,6 +280,32 @@ impl Harness {
     /// - `Harness`: The updated harness builder.
     pub fn with_path(mut self, path: impl Into<Path>) -> Self {
         self.path = Some(path.into());
+        self
+    }
+
+    /// Overrides the root deterministic random number generator.
+    ///
+    /// ## Arguments
+    /// - `rand`: The RNG to use for deriving runtime, startup, failure, and
+    ///   actor-local seeds.
+    ///
+    /// ## Returns
+    /// - `Harness`: The updated harness builder.
+    pub fn with_rand(mut self, rand: Arc<DbRand>) -> Self {
+        self.rand = rand;
+        self
+    }
+
+    /// Overrides the shared mock system clock used by the harness run.
+    ///
+    /// ## Arguments
+    /// - `system_clock`: The mock clock to share across startup, actors, and
+    ///   wrapped object stores.
+    ///
+    /// ## Returns
+    /// - `Harness`: The updated harness builder.
+    pub fn with_system_clock(mut self, system_clock: Arc<MockSystemClock>) -> Self {
+        self.system_clock = system_clock;
         self
     }
 
@@ -404,6 +432,7 @@ impl Harness {
         let Harness {
             name,
             rand,
+            system_clock,
             path,
             main_object_store,
             wal_object_store,
@@ -413,7 +442,7 @@ impl Harness {
 
         let seed = rand.seed();
         let path = path.unwrap_or_else(|| Path::from(format!("dst/{name}/seed-{seed:016x}")));
-        let system_clock: Arc<dyn SystemClock> = Arc::new(MockSystemClock::new());
+        let system_clock: Arc<dyn SystemClock> = system_clock;
         let fp_registry = Arc::new(FailPointRegistry::new());
         let startup_seed = rand.rng().next_u64();
         let failures_seed = rand.rng().next_u64();

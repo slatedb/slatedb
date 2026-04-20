@@ -11,6 +11,7 @@ mod clocked_object_store;
 mod deterministic_local_filesystem;
 pub mod failing_object_store;
 mod harness;
+pub mod utils;
 
 pub use self::deterministic_local_filesystem::DeterministicLocalFilesystem;
 pub use self::failing_object_store::{
