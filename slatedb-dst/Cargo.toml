@@ -19,6 +19,7 @@ bench = false
 async-trait = { workspace = true }
 bytes = { workspace = true }
 chrono = { workspace = true }
+ctor = { workspace = true }
 fail-parallel = { workspace = true }
 futures = { workspace = true }
 object_store = { workspace = true }
