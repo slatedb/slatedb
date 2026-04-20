@@ -23,68 +23,10 @@ type DbFactoryFuture = Pin<Box<dyn Future<Output = Result<Arc<Db>, Error>> + Sen
 type ActorFuture = Pin<Box<dyn Future<Output = Result<(), Error>> + Send + 'static>>;
 type StartupFactory = Box<dyn FnOnce(StartupCtx) -> DbFactoryFuture + Send + 'static>;
 type ActorFn = Arc<dyn Fn(ActorCtx) -> ActorFuture + Send + Sync + 'static>;
-
-pub struct Harness {
-    name: String,
-    rand: Arc<DbRand>,
-    path: Option<Path>,
-    main_object_store: Arc<dyn ObjectStore>,
-    wal_object_store: Option<Arc<dyn ObjectStore>>,
-    startup_factory: Option<StartupFactory>,
-    actors: Vec<ActorRegistration>,
-}
-
 struct ActorRegistration {
     role: String,
     count: usize,
     actor: ActorFn,
-}
-
-#[derive(Clone)]
-pub struct StartupCtx {
-    path: Path,
-    main_object_store: Arc<dyn ObjectStore>,
-    wal_object_store: Option<Arc<dyn ObjectStore>>,
-    system_clock: Arc<dyn SystemClock>,
-    fp_registry: Arc<FailPointRegistry>,
-    rand: Arc<DbRand>,
-}
-
-impl StartupCtx {
-    pub fn path(&self) -> &Path {
-        &self.path
-    }
-
-    pub fn main_object_store(&self) -> Arc<dyn ObjectStore> {
-        Arc::clone(&self.main_object_store)
-    }
-
-    pub fn wal_object_store(&self) -> Option<Arc<dyn ObjectStore>> {
-        self.wal_object_store.clone()
-    }
-
-    pub fn system_clock(&self) -> Arc<dyn SystemClock> {
-        Arc::clone(&self.system_clock)
-    }
-
-    pub fn fp_registry(&self) -> Arc<FailPointRegistry> {
-        Arc::clone(&self.fp_registry)
-    }
-
-    pub fn rand(&self) -> &DbRand {
-        self.rand.as_ref()
-    }
-}
-
-#[derive(Clone)]
-struct HarnessCtx {
-    path: Path,
-    main_object_store: Arc<dyn ObjectStore>,
-    wal_object_store: Option<Arc<dyn ObjectStore>>,
-    system_clock: Arc<dyn SystemClock>,
-    fp_registry: Arc<FailPointRegistry>,
-    failures: Arc<FailingObjectStoreController>,
-    db_slot: Arc<RwLock<Arc<Db>>>,
 }
 
 #[derive(Clone)]
@@ -145,6 +87,64 @@ impl ActorCtx {
         Arc::clone(&self.shared.fp_registry)
     }
 }
+
+#[derive(Clone)]
+pub struct StartupCtx {
+    path: Path,
+    main_object_store: Arc<dyn ObjectStore>,
+    wal_object_store: Option<Arc<dyn ObjectStore>>,
+    system_clock: Arc<dyn SystemClock>,
+    fp_registry: Arc<FailPointRegistry>,
+    rand: Arc<DbRand>,
+}
+
+impl StartupCtx {
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn main_object_store(&self) -> Arc<dyn ObjectStore> {
+        Arc::clone(&self.main_object_store)
+    }
+
+    pub fn wal_object_store(&self) -> Option<Arc<dyn ObjectStore>> {
+        self.wal_object_store.clone()
+    }
+
+    pub fn system_clock(&self) -> Arc<dyn SystemClock> {
+        Arc::clone(&self.system_clock)
+    }
+
+    pub fn fp_registry(&self) -> Arc<FailPointRegistry> {
+        Arc::clone(&self.fp_registry)
+    }
+
+    pub fn rand(&self) -> &DbRand {
+        self.rand.as_ref()
+    }
+}
+
+#[derive(Clone)]
+struct HarnessCtx {
+    path: Path,
+    main_object_store: Arc<dyn ObjectStore>,
+    wal_object_store: Option<Arc<dyn ObjectStore>>,
+    system_clock: Arc<dyn SystemClock>,
+    fp_registry: Arc<FailPointRegistry>,
+    failures: Arc<FailingObjectStoreController>,
+    db_slot: Arc<RwLock<Arc<Db>>>,
+}
+
+pub struct Harness {
+    name: String,
+    rand: Arc<DbRand>,
+    path: Option<Path>,
+    main_object_store: Arc<dyn ObjectStore>,
+    wal_object_store: Option<Arc<dyn ObjectStore>>,
+    startup_factory: Option<StartupFactory>,
+    actors: Vec<ActorRegistration>,
+}
+
 
 impl Harness {
     pub fn new(name: impl Into<String>, seed: u64) -> Self {
