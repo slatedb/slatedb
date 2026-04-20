@@ -83,8 +83,6 @@ pub mod compactor;
 pub mod config;
 pub mod db_cache;
 pub mod db_stats;
-#[cfg(all(feature = "test-util", tokio_unstable))]
-pub mod dst;
 pub mod manifest;
 pub mod seq_tracker;
 pub mod size_tiered_compaction;

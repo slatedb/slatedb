@@ -4,6 +4,7 @@ members = [
     "bindings/uniffi",
     "examples",
     "slatedb",
+    "slatedb-dst",
     "slatedb-common",
     "slatedb-bencher",
     "slatedb-cli",
@@ -99,8 +100,7 @@ unexpected_cfgs = { level = "allow", check-cfg = [
     'cfg(dst)',
     # Enables slow tests
     'cfg(slow)',
-    # Enables tokio unstable features, which are required for DST
-    # (see slatedb-dst/src/utils.rs for details)
+    # Enables tokio unstable features, which are required for the DST harness.
     'cfg(tokio_unstable)',
 ] }
 unreachable_pub = "warn"
