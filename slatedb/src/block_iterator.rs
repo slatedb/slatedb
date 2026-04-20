@@ -50,6 +50,56 @@ impl BlockLike for Arc<Block> {
 #[cfg(test)]
 pub(crate) type BlockIteratorLatest<B> = crate::block_iterator_v2::BlockIteratorV2<B>;
 
+/// Block iterator that dispatches on the SST format version.
+pub(crate) enum DataBlockIterator<B: BlockLike> {
+    V1(BlockIterator<B>),
+    V2(crate::block_iterator_v2::BlockIteratorV2<B>),
+}
+
+impl<B: BlockLike> DataBlockIterator<B> {
+    pub(crate) fn new(
+        block: B,
+        sst_version: u16,
+        order: IterationOrder,
+    ) -> Result<Self, SlateDBError> {
+        use crate::format::sst::{SST_FORMAT_VERSION, SST_FORMAT_VERSION_V2};
+        match sst_version {
+            SST_FORMAT_VERSION => Ok(Self::V1(BlockIterator::new(block, order))),
+            SST_FORMAT_VERSION_V2 => Ok(Self::V2(crate::block_iterator_v2::BlockIteratorV2::new(
+                block, order,
+            ))),
+            _ => Err(SlateDBError::InvalidVersion {
+                format_name: "SST",
+                supported_versions: vec![SST_FORMAT_VERSION, SST_FORMAT_VERSION_V2],
+                actual_version: sst_version,
+            }),
+        }
+    }
+
+    pub(crate) async fn next(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
+        match self {
+            Self::V1(iter) => iter.next().await,
+            Self::V2(iter) => iter.next().await,
+        }
+    }
+
+    #[allow(dead_code)]
+    pub(crate) async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
+        match self {
+            Self::V1(iter) => iter.seek(next_key).await,
+            Self::V2(iter) => iter.seek(next_key).await,
+        }
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn is_empty(&self) -> bool {
+        match self {
+            Self::V1(iter) => iter.is_empty(),
+            Self::V2(iter) => iter.is_empty(),
+        }
+    }
+}
+
 pub(crate) struct BlockIterator<B: BlockLike> {
     block: B,
     off_off: usize,
