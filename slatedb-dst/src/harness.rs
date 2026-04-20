@@ -27,12 +27,13 @@ type ActorFn = Arc<dyn Fn(ActorCtx) -> ActorFuture + Send + Sync + 'static>;
 pub struct Harness;
 
 impl Harness {
-    pub fn builder(seed: u64) -> HarnessBuilder {
-        HarnessBuilder::new(seed)
+    pub fn builder(name: impl Into<String>, seed: u64) -> HarnessBuilder {
+        HarnessBuilder::new(name, seed)
     }
 }
 
 pub struct HarnessBuilder {
+    name: String,
     seed: u64,
     path: Option<Path>,
     main_object_store: Arc<dyn ObjectStore>,
@@ -154,8 +155,9 @@ impl ActorCtx {
 }
 
 impl HarnessBuilder {
-    fn new(seed: u64) -> Self {
+    fn new(name: impl Into<String>, seed: u64) -> Self {
         Self {
+            name: name.into(),
             seed,
             path: None,
             main_object_store: Arc::new(InMemory::new()),
@@ -226,12 +228,10 @@ impl HarnessBuilder {
     }
 
     pub async fn run(self) -> Result<(), Error> {
-        if self.startup_factory.is_none() {
-            return Err(Error::invalid(
-                "dst harness requires with_db(...) before run()".to_string(),
-            ));
-        }
-
+        assert!(
+            !self.actors.is_empty(),
+            "dst harness requires with_db(...) before run()"
+        );
         let (tx, rx) = oneshot::channel();
         std::thread::Builder::new()
             .name("slatedb-dst-harness".to_string())
@@ -256,7 +256,9 @@ impl HarnessBuilder {
     }
 
     async fn run_inner(self) -> Result<(), Error> {
-        let path = self.path.unwrap_or_else(|| default_path(self.seed));
+        let path = self
+            .path
+            .unwrap_or_else(|| default_path(&self.name, self.seed));
         let system_clock: Arc<dyn SystemClock> = Arc::new(MockSystemClock::new());
         let fp_registry = Arc::new(FailPointRegistry::new());
         let failures = Arc::new(FailingObjectStoreController::new(Arc::new(DbRand::new(
@@ -344,9 +346,10 @@ fn wrap_store(
     Arc::new(FailingObjectStore::new(clocked, failures, system_clock))
 }
 
-fn default_path(seed: u64) -> Path {
+fn default_path(name: &str, seed: u64) -> Path {
     Path::from(format!(
-        "dst/seed-{:016x}",
+        "dst/{}/seed-{:016x}",
+        name,
         derive_seed(seed, "path", "", 0)
     ))
 }
