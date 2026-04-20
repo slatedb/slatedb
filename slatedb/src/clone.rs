@@ -125,6 +125,8 @@ async fn create_clone_manifest<R: RangeBounds<Bytes> + Clone>(
                 .await?;
 
                 let manifest: Manifest = match &sources[..] {
+                    // no need to call validate_no_wal() because for single source, WAL is copied
+                    // by the caller (create_clone)
                     [single_source] => Manifest::cloned(
                         &single_source.manifest,
                         single_source.path.to_string(),
@@ -204,6 +206,10 @@ struct CloneSource {
     pub checkpoint: Checkpoint,
 }
 
+/// Builds a list of clone sources from the provided specifications. For each source spec, a
+/// manifest at the specified checkpoint is loaded (if the checkpoint is not specified then it is
+/// created). Additionally, if projection_range is specified then it is applied to the returned
+/// manifests using `Manifest::projected`.
 async fn build_sources<R: RangeBounds<Bytes> + Clone>(
     source_specs: &Vec<CloneSourceSpec<R>>,
     object_store: &Arc<dyn ObjectStore>,
