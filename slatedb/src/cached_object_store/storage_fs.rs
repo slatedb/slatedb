@@ -326,14 +326,12 @@ impl LocalCacheEntry for FsCacheEntry {
         let result = tokio::task::spawn_blocking(move || {
             use std::io::Read;
 
-            let metadata = match std::fs::metadata(&head_path) {
-                Ok(m) => m,
+            let mut file = match std::fs::File::open(&head_path) {
+                Ok(f) => f,
                 Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
                 Err(err) => return Err(wrap_io_err(err)),
             };
-            let head_size_bytes = metadata.len() as usize;
-
-            let mut file = std::fs::File::open(&head_path).map_err(wrap_io_err)?;
+            let head_size_bytes = file.metadata().map_err(wrap_io_err)?.len() as usize;
             let mut content = String::new();
             file.read_to_string(&mut content).map_err(wrap_io_err)?;
 
