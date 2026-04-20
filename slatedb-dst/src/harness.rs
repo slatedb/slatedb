@@ -85,7 +85,7 @@ impl StartupCtx {
 }
 
 #[derive(Clone)]
-struct SharedHarness {
+struct HarnessCtx {
     path: Path,
     main_object_store: Arc<dyn ObjectStore>,
     wal_object_store: Option<Arc<dyn ObjectStore>>,
@@ -100,7 +100,7 @@ pub struct ActorCtx {
     role: String,
     instance: usize,
     rand: Arc<DbRand>,
-    shared: SharedHarness,
+    shared: HarnessCtx,
 }
 
 impl ActorCtx {
@@ -280,7 +280,7 @@ impl HarnessBuilder {
 
         let db = startup_factory.expect("validated before runtime startup")(startup_ctx).await?;
 
-        let shared = SharedHarness {
+        let shared = HarnessCtx {
             path,
             main_object_store,
             wal_object_store,
