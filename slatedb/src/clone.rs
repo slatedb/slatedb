@@ -94,13 +94,8 @@ async fn create_clone_manifest<R: RangeBounds<Bytes> + Clone>(
                         source_spec.checkpoint,
                         &initialized_clone_manifest,
                     )?;
-                }
-
-                for source_spec in &source_specs {
-                    let parent_manifest_store =
-                        Arc::new(ManifestStore::new(&source_spec.path, object_store.clone()));
                     validate_external_dbs_contain_final_checkpoint(
-                        parent_manifest_store,
+                        Arc::new(ManifestStore::new(&source_spec.path, object_store.clone())),
                         source_spec.path.to_string(),
                         &initialized_clone_manifest,
                         object_store.clone(),
