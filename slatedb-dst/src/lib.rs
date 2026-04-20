@@ -1,3 +1,9 @@
+//! Deterministic scenario testing utilities and fault-injecting object stores
+//! for SlateDB.
+//!
+//! The crate re-exports the harness API and the public fault-injection types
+//! used to build deterministic DST scenarios.
+
 #![doc = include_str!("../README.md")]
 #![cfg(tokio_unstable)]
 

@@ -1,3 +1,6 @@
+//! Deterministic scenario test harness primitives for orchestrating seeded
+//! SlateDB actors.
+
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -30,6 +33,11 @@ struct ActorRegistration {
 }
 
 #[derive(Clone)]
+/// Per-actor context passed to each registered harness task.
+///
+/// The context exposes deterministic randomness, the shared database slot, the
+/// wrapped object stores, and shared test infrastructure such as the failpoint
+/// registry and mock clock.
 pub struct ActorCtx {
     role: String,
     instance: usize,
@@ -38,57 +46,117 @@ pub struct ActorCtx {
 }
 
 impl ActorCtx {
+    /// Returns the logical role assigned when the actor was registered.
+    ///
+    /// ## Returns
+    /// - `&str`: The role label shared by all instances in the registration.
     pub fn role(&self) -> &str {
         &self.role
     }
 
+    /// Returns the zero-based instance index within the actor's role.
+    ///
+    /// ## Returns
+    /// - `usize`: The actor instance number for this role.
     pub fn instance(&self) -> usize {
         self.instance
     }
 
+    /// Returns the actor-local deterministic random number generator.
+    ///
+    /// ## Returns
+    /// - `&DbRand`: The seeded RNG derived from the harness seed for this actor.
     pub fn rand(&self) -> &DbRand {
         self.rand.as_ref()
     }
 
+    /// Returns the current database handle from the shared harness slot.
+    ///
+    /// ## Returns
+    /// - `Arc<Db>`: A clone of the currently installed database handle.
     pub fn db(&self) -> Arc<Db> {
         Arc::clone(&self.shared.db_slot.read())
     }
 
+    /// Replaces the shared database handle for all actors.
+    ///
+    /// ## Arguments
+    /// - `new_db`: The new database handle to install in the shared slot.
+    ///
+    /// ## Returns
+    /// - `Arc<Db>`: The previously installed database handle.
     pub fn swap_db(&self, new_db: Arc<Db>) -> Arc<Db> {
         let mut guard = self.shared.db_slot.write();
         std::mem::replace(&mut *guard, new_db)
     }
 
+    /// Advances the shared mock system clock by the provided duration.
+    ///
+    /// ## Arguments
+    /// - `duration`: The amount of simulated time to add.
     pub async fn advance_time(&self, duration: Duration) {
         self.shared.system_clock.advance(duration).await;
     }
 
+    /// Returns the shared fault-injection controller for the wrapped stores.
+    ///
+    /// ## Returns
+    /// - `&FailingObjectStoreController`: The controller used to install or
+    ///   clear toxics and HTTP failures.
     pub fn failures(&self) -> &FailingObjectStoreController {
         self.shared.failures.as_ref()
     }
 
+    /// Returns the root path used to open the database under test.
+    ///
+    /// ## Returns
+    /// - `&Path`: The path configured for the harness run.
     pub fn path(&self) -> &Path {
         &self.shared.path
     }
 
+    /// Returns the wrapped main object store used by the harness.
+    ///
+    /// ## Returns
+    /// - `Arc<dyn ObjectStore>`: The main object store wrapped with deterministic
+    ///   clock and failure injection behavior.
     pub fn main_object_store(&self) -> Arc<dyn ObjectStore> {
         Arc::clone(&self.shared.main_object_store)
     }
 
+    /// Returns the wrapped WAL object store, if one was configured.
+    ///
+    /// ## Returns
+    /// - `Option<Arc<dyn ObjectStore>>`: The WAL store wrapped with deterministic
+    ///   clock and failure injection behavior, or `None`.
     pub fn wal_object_store(&self) -> Option<Arc<dyn ObjectStore>> {
         self.shared.wal_object_store.clone()
     }
 
+    /// Returns the shared system clock used by the harness.
+    ///
+    /// ## Returns
+    /// - `Arc<dyn SystemClock>`: The clock backing time-sensitive test behavior.
     pub fn system_clock(&self) -> Arc<dyn SystemClock> {
         Arc::clone(&self.shared.system_clock)
     }
 
+    /// Returns the shared failpoint registry for the harness run.
+    ///
+    /// ## Returns
+    /// - `Arc<FailPointRegistry>`: The registry used to configure failpoints in
+    ///   participating components.
     pub fn fp_registry(&self) -> Arc<FailPointRegistry> {
         Arc::clone(&self.shared.fp_registry)
     }
 }
 
 #[derive(Clone)]
+/// Startup context passed to the database factory configured with
+/// [`Harness::with_db`].
+///
+/// The startup context exposes the wrapped object stores and shared
+/// infrastructure before actors begin running.
 pub struct StartupCtx {
     path: Path,
     main_object_store: Arc<dyn ObjectStore>,
@@ -99,26 +167,54 @@ pub struct StartupCtx {
 }
 
 impl StartupCtx {
+    /// Returns the root path that the database factory should open.
+    ///
+    /// ## Returns
+    /// - `&Path`: The harness path for this run.
     pub fn path(&self) -> &Path {
         &self.path
     }
 
+    /// Returns the wrapped main object store for database startup.
+    ///
+    /// ## Returns
+    /// - `Arc<dyn ObjectStore>`: The main object store wrapped for deterministic
+    ///   clock and failure injection behavior.
     pub fn main_object_store(&self) -> Arc<dyn ObjectStore> {
         Arc::clone(&self.main_object_store)
     }
 
+    /// Returns the wrapped WAL object store for database startup, if present.
+    ///
+    /// ## Returns
+    /// - `Option<Arc<dyn ObjectStore>>`: The wrapped WAL object store, or `None`
+    ///   when the harness was configured with only a main store.
     pub fn wal_object_store(&self) -> Option<Arc<dyn ObjectStore>> {
         self.wal_object_store.clone()
     }
 
+    /// Returns the shared system clock for the harness run.
+    ///
+    /// ## Returns
+    /// - `Arc<dyn SystemClock>`: The clock used by the harness and wrapped
+    ///   object stores.
     pub fn system_clock(&self) -> Arc<dyn SystemClock> {
         Arc::clone(&self.system_clock)
     }
 
+    /// Returns the shared failpoint registry for the harness run.
+    ///
+    /// ## Returns
+    /// - `Arc<FailPointRegistry>`: The registry used to configure failpoints in
+    ///   the database under test.
     pub fn fp_registry(&self) -> Arc<FailPointRegistry> {
         Arc::clone(&self.fp_registry)
     }
 
+    /// Returns the startup-local deterministic random number generator.
+    ///
+    /// ## Returns
+    /// - `&DbRand`: The seeded RNG reserved for database initialization.
     pub fn rand(&self) -> &DbRand {
         self.rand.as_ref()
     }
@@ -135,6 +231,11 @@ struct HarnessCtx {
     db_slot: Arc<RwLock<Arc<Db>>>,
 }
 
+/// Builder and executor for deterministic SlateDB scenario tests.
+///
+/// A harness owns the seeded runtime configuration, shared mock clock,
+/// failpoint registry, wrapped object stores, and the shared database slot
+/// visible to all registered actors.
 pub struct Harness {
     name: String,
     rand: Arc<DbRand>,
@@ -145,8 +246,17 @@ pub struct Harness {
     actors: Vec<ActorRegistration>,
 }
 
-
 impl Harness {
+    /// Creates a new deterministic harness builder.
+    ///
+    /// ## Arguments
+    /// - `name`: Scenario name used when deriving the default database path.
+    /// - `seed`: Root seed used to derive deterministic randomness for startup,
+    ///   failure injection, and actor-local RNGs.
+    ///
+    /// ## Returns
+    /// - `Harness`: A harness builder with an in-memory main object store and no
+    ///   WAL object store configured.
     pub fn new(name: impl Into<String>, seed: u64) -> Self {
         Self {
             name: name.into(),
@@ -159,21 +269,50 @@ impl Harness {
         }
     }
 
+    /// Overrides the default database path derived from the harness name and seed.
+    ///
+    /// ## Arguments
+    /// - `path`: The root path to use for opening the database under test.
+    ///
+    /// ## Returns
+    /// - `Harness`: The updated harness builder.
     pub fn with_path(mut self, path: impl Into<Path>) -> Self {
         self.path = Some(path.into());
         self
     }
 
+    /// Replaces the default in-memory main object store.
+    ///
+    /// ## Arguments
+    /// - `store`: The object store to wrap and expose as the harness main store.
+    ///
+    /// ## Returns
+    /// - `Harness`: The updated harness builder.
     pub fn with_main_object_store(mut self, store: Arc<dyn ObjectStore>) -> Self {
         self.main_object_store = store;
         self
     }
 
+    /// Configures an optional WAL object store for the harness.
+    ///
+    /// ## Arguments
+    /// - `store`: The object store to wrap and expose as the harness WAL store.
+    ///
+    /// ## Returns
+    /// - `Harness`: The updated harness builder.
     pub fn with_wal_object_store(mut self, store: Arc<dyn ObjectStore>) -> Self {
         self.wal_object_store = Some(store);
         self
     }
 
+    /// Installs the database startup factory executed before actors begin running.
+    ///
+    /// ## Arguments
+    /// - `factory`: A function that receives a [`StartupCtx`] and returns the
+    ///   database handle that actors should share.
+    ///
+    /// ## Returns
+    /// - `Harness`: The updated harness builder.
     pub fn with_db<F, Fut>(mut self, factory: F) -> Self
     where
         F: FnOnce(StartupCtx) -> Fut + Send + 'static,
@@ -183,6 +322,15 @@ impl Harness {
         self
     }
 
+    /// Registers a group of actor tasks that share the same role label.
+    ///
+    /// ## Arguments
+    /// - `role`: Logical name assigned to each actor in the registration.
+    /// - `count`: Number of actor instances to spawn for the role.
+    /// - `actor`: Async actor function to execute once per instance.
+    ///
+    /// ## Returns
+    /// - `Harness`: The updated harness builder.
     pub fn actor<F, Fut>(mut self, role: impl Into<String>, count: usize, actor: F) -> Self
     where
         F: Fn(ActorCtx) -> Fut + Send + Sync + 'static,
@@ -196,6 +344,17 @@ impl Harness {
         self
     }
 
+    /// Registers a group of actor tasks that receive shared external state.
+    ///
+    /// ## Arguments
+    /// - `role`: Logical name assigned to each actor in the registration.
+    /// - `count`: Number of actor instances to spawn for the role.
+    /// - `state`: Shared state cloned into each actor invocation.
+    /// - `actor`: Async actor function that receives an [`ActorCtx`] and the
+    ///   shared state.
+    ///
+    /// ## Returns
+    /// - `Harness`: The updated harness builder.
     pub fn actor_with_state<T, F, Fut>(
         mut self,
         role: impl Into<String>,
@@ -219,12 +378,21 @@ impl Harness {
         self
     }
 
+    /// Runs the harness to completion on a seeded current-thread Tokio runtime.
+    ///
+    /// ## Returns
+    /// - `Ok(())`: All actors completed successfully.
+    /// - `Err(Error)`: Database startup failed or an actor returned an error.
+    ///
+    /// # Panics
+    /// Panics if [`Harness::with_db`] was not configured, if the runtime cannot
+    /// be created, or if an actor task fails to join.
     pub fn run(self) -> Result<(), Error> {
         assert!(
-            self.startup_factory.is_none(),
+            self.startup_factory.is_some(),
             "dst harness requires with_db(...) before run()"
         );
-        let seed = self.rand.next_u64();
+        let seed = self.rand.rng().next_u64();
         let runtime = tokio::runtime::Builder::new_current_thread()
             .rng_seed(RngSeed::from_bytes(&seed.to_le_bytes()))
             .build_local(Default::default())

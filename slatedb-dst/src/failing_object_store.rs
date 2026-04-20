@@ -1,3 +1,9 @@
+//! Fault-injecting object-store wrappers used by deterministic SlateDB tests.
+//!
+//! The public types in this module let tests install probabilistic latency,
+//! bandwidth, connection reset, and synthetic HTTP failures on top of an
+//! existing [`ObjectStore`] implementation.
+
 use std::fmt;
 use std::ops::Range;
 use std::sync::Arc;
@@ -18,48 +24,92 @@ use slatedb::DbRand;
 use slatedb_common::clock::SystemClock;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Direction of traffic affected by a configured toxic.
 pub enum StreamDirection {
+    /// Apply the toxic before the wrapped store processes the request.
     Upstream,
+    /// Apply the toxic after the wrapped store produces a response.
     Downstream,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// Object-store operations that can be targeted by a toxic or HTTP failure.
 pub enum Operation {
+    /// `put_opts` and multipart upload creation requests.
     PutOpts,
+    /// `get_opts` requests.
     GetOpts,
+    /// `get_range` requests.
     GetRange,
+    /// `get_ranges` requests.
     GetRanges,
+    /// `head` requests.
     Head,
+    /// `list` and `list_with_delimiter` requests.
     List,
+    /// `list_with_offset` requests.
     ListWithOffset,
+    /// `delete` requests.
     Delete,
+    /// `copy` and `copy_if_not_exists` requests.
     Copy,
+    /// `rename` and `rename_if_not_exists` requests.
     Rename,
 }
 
 #[derive(Debug, Clone)]
+/// Fault behavior that can be sampled and applied to a matching request or
+/// response path.
 pub enum ToxicKind {
-    Latency { latency: Duration, jitter: Duration },
-    Bandwidth { bytes_per_sec: u64 },
+    /// Advances the shared clock by a base latency plus sampled jitter.
+    Latency {
+        /// Fixed latency added whenever the toxic triggers.
+        latency: Duration,
+        /// Maximum additional latency sampled uniformly from zero.
+        jitter: Duration,
+    },
+    /// Delays transfer completion based on payload size.
+    Bandwidth {
+        /// Effective transfer rate used to translate bytes into delay.
+        bytes_per_sec: u64,
+    },
+    /// Fails the operation with a connection-reset style error.
     ResetPeer,
-    SlowClose { delay: Duration },
+    /// Delays stream shutdown after the response is produced.
+    SlowClose {
+        /// Additional delay applied while closing the response stream.
+        delay: Duration,
+    },
 }
 
 #[derive(Debug, Clone)]
+/// Configuration for a probabilistic toxic applied to matching operations.
 pub struct Toxic {
+    /// Human-readable label for the toxic.
     pub name: String,
+    /// The fault behavior to apply when the toxic is sampled.
     pub kind: ToxicKind,
+    /// Whether the toxic applies to the request or response side.
     pub direction: StreamDirection,
+    /// Probability in the inclusive range `0.0..=1.0` that the toxic applies.
     pub toxicity: f64,
+    /// Optional operation filter. An empty list matches every operation.
     pub operations: Vec<Operation>,
+    /// Optional path-prefix filter. `None` matches every path.
     pub path_prefix: Option<String>,
 }
 
 #[derive(Debug, Clone)]
+/// Configuration for a synthetic HTTP error returned before dispatching a
+/// request to the wrapped store.
 pub struct HttpFailBefore {
+    /// Percentage in the inclusive range `0..=100` that the failure triggers.
     pub percentage: u8,
+    /// HTTP status code exposed through [`HttpStatusError`].
     pub status_code: u16,
+    /// Optional operation filter. An empty list matches every operation.
     pub operations: Vec<Operation>,
+    /// Optional path-prefix filter. `None` matches every path.
     pub path_prefix: Option<String>,
 }
 
@@ -71,6 +121,8 @@ struct ControllerState {
 }
 
 #[derive(Clone, Debug)]
+/// Mutable controller used to install or clear failure modes on a
+/// [`FailingObjectStore`].
 pub struct FailingObjectStoreController {
     state: Arc<ControllerState>,
 }
@@ -86,18 +138,28 @@ impl FailingObjectStoreController {
         }
     }
 
+    /// Removes all configured toxics.
     pub fn clear_toxics(&self) {
         self.state.toxics.write().clear();
     }
 
+    /// Adds a toxic to the active controller configuration.
+    ///
+    /// ## Arguments
+    /// - `toxic`: The toxic to append to the controller's active set.
     pub fn add_toxic(&self, toxic: Toxic) {
         self.state.toxics.write().push(toxic);
     }
 
+    /// Clears any configured synthetic HTTP failure.
     pub fn clear_http_failures(&self) {
         *self.state.http_fail_before.write() = None;
     }
 
+    /// Installs a synthetic HTTP failure returned before dispatch.
+    ///
+    /// ## Arguments
+    /// - `failure`: The failure policy to apply to matching operations.
     pub fn set_http_fail_before(&self, failure: HttpFailBefore) {
         *self.state.http_fail_before.write() = Some(failure);
     }
@@ -181,6 +243,8 @@ impl FailingObjectStoreController {
 }
 
 #[derive(Clone)]
+/// [`ObjectStore`] wrapper that injects deterministic latency and failure modes
+/// controlled by a [`FailingObjectStoreController`].
 pub struct FailingObjectStore {
     inner: Arc<dyn ObjectStore>,
     controller: FailingObjectStoreController,
@@ -188,6 +252,15 @@ pub struct FailingObjectStore {
 }
 
 impl FailingObjectStore {
+    /// Wraps an object store with deterministic fault injection.
+    ///
+    /// ## Arguments
+    /// - `inner`: The base object store to wrap.
+    /// - `controller`: The mutable controller that configures injected faults.
+    /// - `clock`: The clock advanced when latency or bandwidth toxics fire.
+    ///
+    /// ## Returns
+    /// - `FailingObjectStore`: The wrapped object store.
     pub fn new(
         inner: Arc<dyn ObjectStore>,
         controller: FailingObjectStoreController,
@@ -496,11 +569,16 @@ impl ObjectStore for FailingObjectStore {
 }
 
 #[derive(Debug)]
+/// Error type used when [`HttpFailBefore`] injects a synthetic HTTP response.
 pub struct HttpStatusError {
     status_code: u16,
 }
 
 impl HttpStatusError {
+    /// Returns the configured HTTP status code for the synthetic failure.
+    ///
+    /// ## Returns
+    /// - `u16`: The HTTP status code carried by this error.
     pub fn status_code(&self) -> u16 {
         self.status_code
     }

@@ -1,3 +1,6 @@
+//! Internal object-store wrapper that records object timestamps using a shared
+//! deterministic clock.
+
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
