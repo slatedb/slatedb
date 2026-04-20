@@ -514,7 +514,7 @@ impl TokioCompactionExecutorInner {
             tasks.drain().map(|(_, task)| task.task).collect::<Vec<_>>()
         };
 
-        self.handle.block_on(async {
+        let wait_for_task_termination = async move {
             let results = join_all(task_handles).await;
             for result in results {
                 match result {
@@ -524,8 +524,12 @@ impl TokioCompactionExecutorInner {
                     _ => {}
                 }
             }
-        });
+        };
 
+        #[cfg(dst)]
+        self.handle.spawn(wait_for_task_termination);
+        #[cfg(not(dst))]
+        self.handle.block_on(wait_for_task_termination);
         self.is_stopped.store(true, atomic::Ordering::SeqCst);
     }
 
