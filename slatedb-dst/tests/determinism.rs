@@ -14,19 +14,17 @@
 //! If either the harness or SlateDB consumes randomness differently, advances
 //! the clock differently, or executes different deterministic branches for the
 //! same seed, one of those post-run checks will diverge.
-
 #![cfg(dst)]
 
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use fail_parallel::FailPointRegistry;
 use object_store::path::Path;
 use object_store::ObjectStore;
 use rand::RngCore;
 use slatedb::config::{FlushOptions, FlushType, PutOptions, WriteOptions};
-use slatedb::{Db, DbRand, Error, Settings};
+use slatedb::{Db, DbRand, Error};
 use slatedb_common::clock::{MockSystemClock, SystemClock};
 use slatedb_dst::{
     utils::build_settings, ActorCtx, DeterministicLocalFilesystem, Harness, Operation,
@@ -96,9 +94,6 @@ fn run_seed_once(seed: u64) -> Result<(u64, DateTime<Utc>), Box<dyn std::error::
         Arc::new(DeterministicLocalFilesystem::new_with_prefix(&main_dir)?);
     let wal_store: Arc<dyn ObjectStore> =
         Arc::new(DeterministicLocalFilesystem::new_with_prefix(&wal_dir)?);
-    let settings = Arc::new(OnceLock::new());
-    let startup_settings = Arc::clone(&settings);
-
     Harness::new("determinism", seed)
         .with_rand(Arc::clone(&rand))
         .with_system_clock(Arc::clone(&system_clock))
@@ -106,31 +101,23 @@ fn run_seed_once(seed: u64) -> Result<(u64, DateTime<Utc>), Box<dyn std::error::
         .with_main_object_store(main_store)
         .with_wal_object_store(wal_store)
         .with_db(move |ctx| {
-            let settings_slot = Arc::clone(&startup_settings);
             let cache_dir = cache_dir.clone();
             async move {
                 let db_seed = ctx.rand().rng().next_u64();
                 let settings = build_settings(ctx.rand(), &cache_dir).await;
-                assert!(
-                    settings_slot.set(settings.clone()).is_ok(),
-                    "settings should only be initialized once",
-                );
 
-                open_db(
-                    ctx.path().clone(),
-                    ctx.main_object_store(),
-                    ctx.wal_object_store().expect("configured"),
-                    ctx.system_clock(),
-                    ctx.fp_registry(),
-                    settings,
-                    db_seed,
-                )
-                .await
+                let db = Db::builder(ctx.path().clone(), ctx.main_object_store())
+                    .with_wal_object_store(ctx.wal_object_store().expect("configured"))
+                    .with_system_clock(ctx.system_clock())
+                    .with_fp_registry(ctx.fp_registry())
+                    .with_seed(db_seed)
+                    .with_settings(settings)
+                    .build()
+                    .await?;
+                Ok(Arc::new(db))
             }
         })
-        .actor_with_state("writer", 1, settings, |ctx, settings| async move {
-            run_actor(ctx, settings).await
-        })
+        .actor("writer", 1, |ctx| async move { run_actor(ctx).await })
         .run()?;
 
     let next_u64 = rand.rng().next_u64();
@@ -148,10 +135,7 @@ fn run_seed_once(seed: u64) -> Result<(u64, DateTime<Utc>), Box<dyn std::error::
 /// - a weighted mix of puts, deletes, memtable flushes, and advance-only steps
 ///   selected from the actor RNG
 /// - explicit mock-clock advancement on most, but not all, steps
-/// - two reopen passes using the exact startup settings, which exercises DB
-///   reopen logic and any randomized object-store cache configuration chosen
-///   by `build_settings`
-async fn run_actor(ctx: ActorCtx, settings: Arc<OnceLock<Settings>>) -> Result<(), Error> {
+async fn run_actor(ctx: ActorCtx) -> Result<(), Error> {
     ctx.failures().add_toxic(Toxic {
         name: "put-latency".into(),
         kind: ToxicKind::Latency {
@@ -204,26 +188,4 @@ async fn run_actor(ctx: ActorCtx, settings: Arc<OnceLock<Settings>>) -> Result<(
     })
     .await?;
     db.close().await
-}
-
-/// Opens a [`Db`] with the deterministic harness infrastructure and supplied
-/// settings and seed.
-async fn open_db(
-    path: Path,
-    main_object_store: Arc<dyn ObjectStore>,
-    wal_object_store: Arc<dyn ObjectStore>,
-    system_clock: Arc<dyn SystemClock>,
-    fp_registry: Arc<FailPointRegistry>,
-    settings: Settings,
-    seed: u64,
-) -> Result<Arc<Db>, Error> {
-    let db = Db::builder(path, main_object_store)
-        .with_wal_object_store(wal_object_store)
-        .with_system_clock(system_clock)
-        .with_fp_registry(fp_registry)
-        .with_seed(seed)
-        .with_settings(settings)
-        .build()
-        .await?;
-    Ok(Arc::new(db))
 }
