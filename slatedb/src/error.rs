@@ -579,9 +579,9 @@ impl From<SlateDBError> for Error {
             SlateDBError::TransactionalObjectError(err) => {
                 Error::internal(msg).with_source(Box::new(err))
             }
-            SlateDBError::DuplicatedCloneSourcePath(_) => Error::internal(msg),
-            SlateDBError::InvalidUnionSourceWithWal { .. } => Error::internal(msg),
-            SlateDBError::InvalidUnionSetEmpty() => Error::internal(msg),
+            SlateDBError::DuplicatedCloneSourcePath(_) => Error::invalid(msg),
+            SlateDBError::InvalidUnionSourceWithWal { .. } => Error::invalid(msg),
+            SlateDBError::InvalidUnionSetEmpty() => Error::invalid(msg),
         }
     }
 }
