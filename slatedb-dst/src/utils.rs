@@ -80,7 +80,6 @@ pub async fn build_settings(rand: &DbRand, cache_root: &StdPath) -> Settings {
                 min_age: rng.random_range(Duration::from_millis(20)..Duration::from_secs(900)),
             }),
         }),
-        compactor_options: None,
         #[cfg(feature = "wal_disable")]
         wal_enabled: rng.random_bool(0.5),
         ..Default::default()
