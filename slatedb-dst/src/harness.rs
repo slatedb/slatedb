@@ -34,7 +34,7 @@ impl Harness {
 
 pub struct HarnessBuilder {
     name: String,
-    seed: u64,
+    rand: Arc<DbRand>,
     path: Option<Path>,
     main_object_store: Arc<dyn ObjectStore>,
     wal_object_store: Option<Arc<dyn ObjectStore>>,
@@ -158,7 +158,7 @@ impl HarnessBuilder {
     fn new(name: impl Into<String>, seed: u64) -> Self {
         Self {
             name: name.into(),
-            seed,
+            rand: Arc::new(DbRand::new(seed)),
             path: None,
             main_object_store: Arc::new(InMemory::new()),
             wal_object_store: None,
@@ -229,9 +229,10 @@ impl HarnessBuilder {
 
     pub async fn run(self) -> Result<(), Error> {
         assert!(
-            !self.actors.is_empty(),
+            !self.startup_factory.is_none(),
             "dst harness requires with_db(...) before run()"
         );
+
         let (tx, rx) = oneshot::channel();
         std::thread::Builder::new()
             .name("slatedb-dst-harness".to_string())
@@ -247,7 +248,7 @@ impl HarnessBuilder {
     fn run_blocking(self) -> Result<(), Error> {
         let mut builder = tokio::runtime::Builder::new_current_thread();
         builder.enable_all();
-        builder.rng_seed(RngSeed::from_bytes(&self.seed.to_le_bytes()));
+        builder.rng_seed(RngSeed::from_bytes(&self.rand.seed().to_le_bytes()));
 
         let runtime = builder
             .build()
@@ -256,13 +257,12 @@ impl HarnessBuilder {
     }
 
     async fn run_inner(self) -> Result<(), Error> {
-        let path = self
-            .path
-            .unwrap_or_else(|| default_path(&self.name, self.seed));
+        let seed = self.rand.seed();
+        let path = self.path.unwrap_or_else(|| default_path(&self.name, seed));
         let system_clock: Arc<dyn SystemClock> = Arc::new(MockSystemClock::new());
         let fp_registry = Arc::new(FailPointRegistry::new());
         let failures = Arc::new(FailingObjectStoreController::new(Arc::new(DbRand::new(
-            derive_seed(self.seed, "failures", "", 0),
+            derive_seed(seed, "failures", "", 0),
         ))));
 
         let main_object_store = wrap_store(
@@ -280,7 +280,7 @@ impl HarnessBuilder {
             wal_object_store: wal_object_store.clone(),
             system_clock: Arc::clone(&system_clock),
             fp_registry: Arc::clone(&fp_registry),
-            rand: Arc::new(DbRand::new(derive_seed(self.seed, "startup", "", 0))),
+            rand: Arc::new(DbRand::new(derive_seed(seed, "startup", "", 0))),
         };
 
         let db = self
@@ -307,7 +307,7 @@ impl HarnessBuilder {
                     role: role.clone(),
                     instance,
                     rand: Arc::new(DbRand::new(derive_seed(
-                        self.seed,
+                        seed,
                         "actor",
                         &role,
                         instance as u64,
