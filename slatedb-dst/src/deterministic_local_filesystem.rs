@@ -16,23 +16,25 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use futures::stream::{self, BoxStream};
-use futures::StreamExt;
+use futures::{StreamExt, TryStreamExt};
 use object_store::path::Path;
 use object_store::{
     Attributes, GetOptions, GetResult, GetResultPayload, ListResult, MultipartUpload, ObjectMeta,
     ObjectStore, PutMode, PutMultipartOptions, PutOptions, PutPayload, PutResult, UploadPart,
 };
 use parking_lot::{Mutex, RwLock};
+use tokio::task::yield_now;
 use walkdir::{DirEntry, WalkDir};
 
 const STORE_NAME: &str = "DeterministicLocalFilesystem";
+const IO_CHUNK_SIZE: usize = 64 * 1024;
 
 /// Deterministic filesystem-backed object store for DST harnesses.
 ///
 /// This store preserves local filesystem path behavior while avoiding Tokio's
 /// blocking thread pool, sorting list results by path, and synthesizing stable
 /// `last_modified` metadata from a logical clock.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct DeterministicLocalFilesystem {
     root: PathBuf,
     automatic_cleanup: bool,
@@ -216,58 +218,73 @@ impl DeterministicLocalFilesystem {
         }
     }
 
-    fn list_with_maybe_offset(
+    async fn collect_list_with_maybe_offset(
         &self,
-        prefix: Option<&Path>,
-        maybe_offset: Option<&Path>,
-    ) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
+        prefix: Option<Path>,
+        maybe_offset: Option<Path>,
+    ) -> object_store::Result<Vec<ObjectMeta>> {
         let root_path = prefix
+            .as_ref()
             .map(|prefix| self.prefix_to_filesystem(prefix))
             .unwrap_or_else(|| self.root.clone());
 
         let mut objects = Vec::new();
         let walkdir = WalkDir::new(root_path).min_depth(1).follow_links(true);
-        let offset = maybe_offset.cloned();
 
         for entry_result in walkdir {
+            yield_now().await;
+
             let entry = match convert_walkdir_result(entry_result) {
                 Ok(Some(entry)) => entry,
                 Ok(None) => continue,
-                Err(error) => {
-                    return stream::once(async move { Err::<ObjectMeta, _>(error) }).boxed();
-                }
+                Err(error) => return Err(error),
             };
 
             if !entry.path().is_file() {
                 continue;
             }
 
-            let location = match self.filesystem_to_location(entry.path()) {
-                Ok(location) => location,
-                Err(error) => {
-                    return stream::once(async move { Err::<ObjectMeta, _>(error) }).boxed();
-                }
-            };
+            let location = self.filesystem_to_location(entry.path())?;
 
             if !is_valid_file_path(&location) {
                 continue;
             }
 
-            if offset.as_ref().is_some_and(|offset| location <= *offset) {
+            if maybe_offset
+                .as_ref()
+                .is_some_and(|offset| location <= *offset)
+            {
                 continue;
             }
 
             match self.convert_entry(entry, location) {
                 Ok(Some(meta)) => objects.push(meta),
                 Ok(None) => {}
-                Err(error) => {
-                    return stream::once(async move { Err::<ObjectMeta, _>(error) }).boxed();
-                }
+                Err(error) => return Err(error),
             }
         }
 
         objects.sort_by(|left, right| left.location.cmp(&right.location));
-        stream::iter(objects.into_iter().map(Ok)).boxed()
+        Ok(objects)
+    }
+
+    fn list_with_maybe_offset(
+        &self,
+        prefix: Option<&Path>,
+        maybe_offset: Option<&Path>,
+    ) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
+        let store = self.clone();
+        let prefix = prefix.cloned();
+        let maybe_offset = maybe_offset.cloned();
+
+        stream::once(async move {
+            store
+                .collect_list_with_maybe_offset(prefix, maybe_offset)
+                .await
+        })
+        .map_ok(|objects| stream::iter(objects.into_iter().map(Ok)))
+        .try_flatten()
+        .boxed()
     }
 }
 
@@ -288,12 +305,10 @@ impl ObjectStore for DeterministicLocalFilesystem {
 
         let path = self.path_to_filesystem(location)?;
         let (mut file, staging_path) = new_staged_upload(&path)?;
+        yield_now().await;
 
-        let result = (|| -> object_store::Result<()> {
-            payload
-                .iter()
-                .try_for_each(|bytes| file.write_all(bytes))
-                .map_err(generic_error)?;
+        let result = async {
+            write_payload_with_yields(&mut file, &payload).await?;
 
             match opts.mode {
                 PutMode::Overwrite => {
@@ -313,7 +328,8 @@ impl ObjectStore for DeterministicLocalFilesystem {
             }
 
             Ok(())
-        })();
+        }
+        .await;
 
         if result.is_err() {
             let _ = std::fs::remove_file(&staging_path);
@@ -322,6 +338,7 @@ impl ObjectStore for DeterministicLocalFilesystem {
         }
 
         result?;
+        yield_now().await;
         Ok(PutResult {
             e_tag: None,
             version: None,
@@ -347,6 +364,7 @@ impl ObjectStore for DeterministicLocalFilesystem {
 
         let dest = self.path_to_filesystem(location)?;
         let (file, src) = new_staged_upload(&dest)?;
+        yield_now().await;
         Ok(Box::new(LocalUpload::new(
             Arc::clone(&self.metadata_state),
             location.clone(),
@@ -361,6 +379,7 @@ impl ObjectStore for DeterministicLocalFilesystem {
         location: &Path,
         options: GetOptions,
     ) -> object_store::Result<GetResult> {
+        yield_now().await;
         let path = self.path_to_filesystem(location)?;
         let (_, metadata) = open_file(&path)?;
         let meta = self.object_meta(metadata, location.clone());
@@ -389,9 +408,10 @@ impl ObjectStore for DeterministicLocalFilesystem {
 
         let path_for_stream = path.clone();
         let range_for_stream = range.clone();
-        let payload =
-            stream::once(async move { read_range_from_path(&path_for_stream, range_for_stream) })
-                .boxed();
+        let payload = stream::once(async move {
+            read_range_with_yields(&path_for_stream, range_for_stream).await
+        })
+        .boxed();
 
         Ok(GetResult {
             payload: GetResultPayload::Stream(payload),
@@ -403,7 +423,7 @@ impl ObjectStore for DeterministicLocalFilesystem {
 
     async fn get_range(&self, location: &Path, range: Range<u64>) -> object_store::Result<Bytes> {
         let path = self.path_to_filesystem(location)?;
-        read_range_from_path(&path, range)
+        read_range_with_yields(&path, range).await
     }
 
     async fn get_ranges(
@@ -413,20 +433,23 @@ impl ObjectStore for DeterministicLocalFilesystem {
     ) -> object_store::Result<Vec<Bytes>> {
         let path = self.path_to_filesystem(location)?;
         let mut file = open_file(&path)?.0;
-        ranges
-            .iter()
-            .cloned()
-            .map(|range| read_range(&mut file, &path, range))
-            .collect()
+        let mut results = Vec::with_capacity(ranges.len());
+        for range in ranges.iter().cloned() {
+            results.push(read_range_with_yields_from_file(&mut file, &path, range).await?);
+        }
+        Ok(results)
     }
 
     async fn head(&self, location: &Path) -> object_store::Result<ObjectMeta> {
+        yield_now().await;
         let path = self.path_to_filesystem(location)?;
         let (_, metadata) = open_file(&path)?;
+        yield_now().await;
         Ok(self.object_meta(metadata, location.clone()))
     }
 
     async fn delete(&self, location: &Path) -> object_store::Result<()> {
+        yield_now().await;
         let path = self.path_to_filesystem(location)?;
         match std::fs::remove_file(&path) {
             Ok(()) => {
@@ -441,6 +464,7 @@ impl ObjectStore for DeterministicLocalFilesystem {
         if self.automatic_cleanup {
             let mut parent = path.parent();
             while let Some(candidate) = parent {
+                yield_now().await;
                 if candidate != self.root && std::fs::remove_dir(candidate).is_ok() {
                     parent = candidate.parent();
                 } else {
@@ -477,6 +501,7 @@ impl ObjectStore for DeterministicLocalFilesystem {
         let mut objects = Vec::new();
 
         for entry_result in walkdir {
+            yield_now().await;
             let Some(entry) = convert_walkdir_result(entry_result)? else {
                 continue;
             };
@@ -519,6 +544,7 @@ impl ObjectStore for DeterministicLocalFilesystem {
         let mut suffix = 0_u64;
 
         loop {
+            yield_now().await;
             let staged = staged_upload_path(&to_path, &suffix.to_string());
             match std::fs::hard_link(&from_path, &staged) {
                 Ok(()) => {
@@ -548,6 +574,7 @@ impl ObjectStore for DeterministicLocalFilesystem {
         let to_path = self.path_to_filesystem(to)?;
 
         loop {
+            yield_now().await;
             match std::fs::rename(&from_path, &to_path) {
                 Ok(()) => {
                     self.metadata_state.remove(from);
@@ -571,6 +598,7 @@ impl ObjectStore for DeterministicLocalFilesystem {
         let to_path = self.path_to_filesystem(to)?;
 
         loop {
+            yield_now().await;
             match std::fs::hard_link(&from_path, &to_path) {
                 Ok(()) => {
                     self.metadata_state.record_modified(to);
@@ -652,11 +680,27 @@ impl MultipartUpload for LocalUpload {
 
         let state = Arc::clone(&self.state);
         Box::pin(async move {
-            let mut file = state.file.lock();
-            file.seek(SeekFrom::Start(offset)).map_err(generic_error)?;
-            data.iter()
-                .try_for_each(|bytes| file.write_all(bytes))
-                .map_err(generic_error)?;
+            let mut current_offset = offset;
+            for bytes in data.iter() {
+                let mut remaining = bytes.as_ref();
+                while !remaining.is_empty() {
+                    yield_now().await;
+
+                    let chunk_len = remaining.len().min(IO_CHUNK_SIZE);
+                    let (chunk, rest) = remaining.split_at(chunk_len);
+                    {
+                        let mut file = state.file.lock();
+                        file.seek(SeekFrom::Start(current_offset))
+                            .map_err(generic_error)?;
+                        file.write_all(chunk).map_err(generic_error)?;
+                    }
+
+                    current_offset += u64::try_from(chunk_len).unwrap_or(0);
+                    remaining = rest;
+                }
+            }
+
+            yield_now().await;
             Ok(())
         })
     }
@@ -669,11 +713,15 @@ impl MultipartUpload for LocalUpload {
             ))
         })?;
 
-        let _file = self.state.file.lock();
-        std::fs::rename(&src, &self.state.dest).map_err(generic_error)?;
+        yield_now().await;
+        {
+            let _file = self.state.file.lock();
+            std::fs::rename(&src, &self.state.dest).map_err(generic_error)?;
+        }
         self.state
             .metadata_state
             .record_modified(&self.state.location);
+        yield_now().await;
         Ok(PutResult {
             e_tag: None,
             version: None,
@@ -687,7 +735,9 @@ impl MultipartUpload for LocalUpload {
                 "multipart upload was already completed or aborted",
             ))
         })?;
+        yield_now().await;
         std::fs::remove_file(&src).map_err(generic_error)?;
+        yield_now().await;
         Ok(())
     }
 }
@@ -762,6 +812,23 @@ fn new_staged_upload(base: &StdPath) -> object_store::Result<(File, PathBuf)> {
     }
 }
 
+async fn write_payload_with_yields(
+    file: &mut File,
+    payload: &PutPayload,
+) -> object_store::Result<()> {
+    for bytes in payload.iter() {
+        let mut remaining = bytes.as_ref();
+        while !remaining.is_empty() {
+            yield_now().await;
+            let chunk_len = remaining.len().min(IO_CHUNK_SIZE);
+            let (chunk, rest) = remaining.split_at(chunk_len);
+            file.write_all(chunk).map_err(generic_error)?;
+            remaining = rest;
+        }
+    }
+    Ok(())
+}
+
 fn staged_upload_path(dest: &StdPath, suffix: &str) -> PathBuf {
     let mut staging_path = dest.as_os_str().to_owned();
     staging_path.push("#");
@@ -781,12 +848,19 @@ fn open_file(path: &PathBuf) -> object_store::Result<(File, Metadata)> {
     }
 }
 
-fn read_range_from_path(path: &PathBuf, range: Range<u64>) -> object_store::Result<Bytes> {
+async fn read_range_with_yields(path: &PathBuf, range: Range<u64>) -> object_store::Result<Bytes> {
+    yield_now().await;
     let (mut file, _) = open_file(path)?;
-    read_range(&mut file, path, range)
+    let result = read_range_with_yields_from_file(&mut file, path, range).await;
+    yield_now().await;
+    result
 }
 
-fn read_range(file: &mut File, path: &PathBuf, range: Range<u64>) -> object_store::Result<Bytes> {
+async fn read_range_with_yields_from_file(
+    file: &mut File,
+    path: &PathBuf,
+    range: Range<u64>,
+) -> object_store::Result<Bytes> {
     let metadata = file.metadata().map_err(generic_error)?;
     let file_len = metadata.len();
 
@@ -804,26 +878,33 @@ fn read_range(file: &mut File, path: &PathBuf, range: Range<u64>) -> object_stor
         .map_err(generic_error)?;
 
     let mut buffer = Vec::with_capacity(usize::try_from(to_read).unwrap_or(0));
-    let read = file
-        .take(to_read)
-        .read_to_end(&mut buffer)
-        .map_err(generic_error)? as u64;
+    let mut remaining = to_read;
+    while remaining > 0 {
+        yield_now().await;
 
-    if read != to_read {
-        return Err(generic_error(io::Error::new(
-            ErrorKind::UnexpectedEof,
-            format!(
-                "short read for {}: expected {} bytes, read {}",
-                path.display(),
-                to_read,
-                read
-            ),
-        )));
+        let chunk_len =
+            usize::try_from(remaining.min(IO_CHUNK_SIZE as u64)).unwrap_or(IO_CHUNK_SIZE);
+        let start = buffer.len();
+        buffer.resize(start + chunk_len, 0);
+        let read = file.read(&mut buffer[start..]).map_err(generic_error)?;
+
+        if read == 0 {
+            return Err(generic_error(io::Error::new(
+                ErrorKind::UnexpectedEof,
+                format!(
+                    "short read for {}: expected {} more bytes",
+                    path.display(),
+                    remaining
+                ),
+            )));
+        }
+
+        buffer.truncate(start + read);
+        remaining -= u64::try_from(read).unwrap_or(0);
     }
 
     Ok(buffer.into())
 }
-
 fn convert_walkdir_result(
     result: std::result::Result<DirEntry, walkdir::Error>,
 ) -> object_store::Result<Option<DirEntry>> {
