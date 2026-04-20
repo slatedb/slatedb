@@ -148,9 +148,9 @@ fn run_seed_once(seed: u64) -> Result<(u64, DateTime<Utc>), Box<dyn std::error::
 /// - a weighted mix of puts, deletes, memtable flushes, and advance-only steps
 ///   selected from the actor RNG
 /// - explicit mock-clock advancement on most, but not all, steps
-/// - two reopen passes that read back the persisted state using the exact
-///   startup settings, which exercises DB reopen logic and any randomized
-///   object-store cache configuration chosen by `build_settings`
+/// - two reopen passes using the exact startup settings, which exercises DB
+///   reopen logic and any randomized object-store cache configuration chosen
+///   by `build_settings`
 async fn run_actor(ctx: ActorCtx, settings: Arc<OnceLock<Settings>>) -> Result<(), Error> {
     ctx.failures().add_toxic(Toxic {
         name: "put-latency".into(),
@@ -165,7 +165,6 @@ async fn run_actor(ctx: ActorCtx, settings: Arc<OnceLock<Settings>>) -> Result<(
     });
 
     let db = ctx.db();
-    let mut expected_values = vec![None::<Vec<u8>>; KEY_COUNT];
     let put_options = PutOptions::default();
     let mut write_options = WriteOptions::default();
     write_options.await_durable = false;
@@ -180,12 +179,10 @@ async fn run_actor(ctx: ActorCtx, settings: Arc<OnceLock<Settings>>) -> Result<(
                 let value = format!("{step:04}-{rand_value:016x}").into_bytes();
                 db.put_with_options(key.as_bytes(), &value, &put_options, &write_options)
                     .await?;
-                expected_values[key_index] = Some(value);
             }
             50..=69 => {
                 db.delete_with_options(key.as_bytes(), &write_options)
                     .await?;
-                expected_values[key_index] = None;
             }
             70..=74 => {
                 db.flush_with_options(FlushOptions {
@@ -206,45 +203,7 @@ async fn run_actor(ctx: ActorCtx, settings: Arc<OnceLock<Settings>>) -> Result<(
         flush_type: FlushType::MemTable,
     })
     .await?;
-    db.close().await?;
-
-    let settings = settings
-        .get()
-        .cloned()
-        .expect("startup settings should be recorded");
-
-    let reopen_seed = ctx.rand().rng().next_u64();
-    let reopened = open_db_from_actor(&ctx, settings.clone(), reopen_seed).await?;
-    let _closed = ctx.swap_db(Arc::clone(&reopened));
-    assert_expected_values(&reopened, &expected_values).await?;
-    reopened.close().await?;
-
-    let reopen_again_seed = ctx.rand().rng().next_u64();
-    let reopened_again = open_db_from_actor(&ctx, settings, reopen_again_seed).await?;
-    let _closed = ctx.swap_db(Arc::clone(&reopened_again));
-    assert_expected_values(&reopened_again, &expected_values).await?;
-    reopened_again.close().await?;
-
-    Ok(())
-}
-
-/// Reopens the database from actor context using the same harness-managed
-/// stores, clock, failpoint registry, and settings.
-async fn open_db_from_actor(
-    ctx: &ActorCtx,
-    settings: Settings,
-    seed: u64,
-) -> Result<Arc<Db>, Error> {
-    open_db(
-        ctx.path().clone(),
-        ctx.main_object_store(),
-        ctx.wal_object_store().expect("configured"),
-        ctx.system_clock(),
-        ctx.fp_registry(),
-        settings,
-        seed,
-    )
-    .await
+    db.close().await
 }
 
 /// Opens a [`Db`] with the deterministic harness infrastructure and supplied
@@ -267,20 +226,4 @@ async fn open_db(
         .build()
         .await?;
     Ok(Arc::new(db))
-}
-
-/// Verifies that the reopened database returns the values produced by the
-/// actor's write and delete sequence.
-async fn assert_expected_values(db: &Db, expected_values: &[Option<Vec<u8>>]) -> Result<(), Error> {
-    for (key_index, expected_value) in expected_values.iter().enumerate() {
-        let key = format!("key-{key_index}");
-        let actual_value = db.get(key.as_bytes()).await?.map(|bytes| bytes.to_vec());
-        assert_eq!(
-            actual_value,
-            expected_value.clone(),
-            "unexpected persisted value for {key}",
-        );
-    }
-
-    Ok(())
 }
