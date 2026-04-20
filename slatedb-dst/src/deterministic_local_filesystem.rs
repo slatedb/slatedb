@@ -100,15 +100,8 @@ impl DeterministicLocalFilesystem {
     /// - `Ok(Self)`: A deterministic filesystem-backed object store.
     /// - `Err(object_store::Error)`: The prefix could not be canonicalized.
     pub fn new_with_prefix(prefix: impl AsRef<StdPath>) -> object_store::Result<Self> {
-        let root = std::fs::canonicalize(prefix.as_ref()).map_err(|source| {
-            generic_error(io::Error::new(
-                source.kind(),
-                format!(
-                    "failed to canonicalize deterministic local filesystem root {}: {source}",
-                    prefix.as_ref().display()
-                ),
-            ))
-        })?;
+        let root = std::fs::canonicalize(prefix.as_ref())
+            .expect("failed to canonicalize deterministic local filesystem root");
 
         Ok(Self {
             root,
@@ -157,13 +150,9 @@ impl DeterministicLocalFilesystem {
     }
 
     fn filesystem_to_location(&self, path: &StdPath) -> object_store::Result<Path> {
-        let relative = path.strip_prefix(&self.root).map_err(|_| {
-            invalid_input_error(format!(
-                "path {} is outside deterministic local filesystem root {}",
-                path.display(),
-                self.root.display()
-            ))
-        })?;
+        let relative = path
+            .strip_prefix(&self.root)
+            .expect("path is outside deterministic local filesystem root");
 
         let mut parts = Vec::new();
         for component in relative.components() {
@@ -313,7 +302,8 @@ impl ObjectStore for DeterministicLocalFilesystem {
             match opts.mode {
                 PutMode::Overwrite => {
                     drop(file);
-                    std::fs::rename(&staging_path, &path).map_err(generic_error)?;
+                    std::fs::rename(&staging_path, &path)
+                        .expect("failed to move staged file into place");
                 }
                 PutMode::Create => match std::fs::hard_link(&staging_path, &path) {
                     Ok(()) => {
@@ -395,14 +385,7 @@ impl ObjectStore for DeterministicLocalFilesystem {
         }
 
         let range = match options.range {
-            Some(range) => {
-                range
-                    .as_range(meta.size)
-                    .map_err(|source| object_store::Error::Generic {
-                        store: STORE_NAME,
-                        source: Box::new(source),
-                    })?
-            }
+            Some(range) => range.as_range(meta.size).expect("invalid requested range"),
             None => 0..meta.size,
         };
 
@@ -548,13 +531,10 @@ impl ObjectStore for DeterministicLocalFilesystem {
             let staged = staged_upload_path(&to_path, &suffix.to_string());
             match std::fs::hard_link(&from_path, &staged) {
                 Ok(()) => {
-                    let rename_result = std::fs::rename(&staged, &to_path).map_err(generic_error);
-                    if rename_result.is_ok() {
-                        self.metadata_state.record_modified(to);
-                    } else {
-                        let _ = std::fs::remove_file(&staged);
-                    }
-                    return rename_result;
+                    std::fs::rename(&staged, &to_path)
+                        .expect("failed to move copied object into place");
+                    self.metadata_state.record_modified(to);
+                    return Ok(());
                 }
                 Err(source) if source.kind() == ErrorKind::AlreadyExists => suffix += 1,
                 Err(source) if source.kind() == ErrorKind::NotFound => {
@@ -691,8 +671,9 @@ impl MultipartUpload for LocalUpload {
                     {
                         let mut file = state.file.lock();
                         file.seek(SeekFrom::Start(current_offset))
-                            .map_err(generic_error)?;
-                        file.write_all(chunk).map_err(generic_error)?;
+                            .expect("failed to seek multipart upload file");
+                        file.write_all(chunk)
+                            .expect("failed to write multipart upload chunk");
                     }
 
                     current_offset += u64::try_from(chunk_len).unwrap_or(0);
@@ -716,7 +697,7 @@ impl MultipartUpload for LocalUpload {
         yield_now().await;
         {
             let _file = self.state.file.lock();
-            std::fs::rename(&src, &self.state.dest).map_err(generic_error)?;
+            std::fs::rename(&src, &self.state.dest).expect("failed to finalize multipart upload");
         }
         self.state
             .metadata_state
@@ -736,7 +717,7 @@ impl MultipartUpload for LocalUpload {
             ))
         })?;
         yield_now().await;
-        std::fs::remove_file(&src).map_err(generic_error)?;
+        std::fs::remove_file(&src).expect("failed to remove aborted multipart upload");
         yield_now().await;
         Ok(())
     }
@@ -792,7 +773,7 @@ fn is_valid_file_path(path: &Path) -> bool {
 
 fn create_parent_dirs(path: &StdPath, source: io::Error) -> object_store::Result<()> {
     let parent = path.parent().ok_or_else(|| generic_error(source))?;
-    std::fs::create_dir_all(parent).map_err(generic_error)?;
+    std::fs::create_dir_all(parent).expect("failed to create parent directories");
     Ok(())
 }
 
@@ -822,7 +803,8 @@ async fn write_payload_with_yields(
             yield_now().await;
             let chunk_len = remaining.len().min(IO_CHUNK_SIZE);
             let (chunk, rest) = remaining.split_at(chunk_len);
-            file.write_all(chunk).map_err(generic_error)?;
+            file.write_all(chunk)
+                .expect("failed to write deterministic local filesystem payload");
             remaining = rest;
         }
     }
@@ -861,7 +843,9 @@ async fn read_range_with_yields_from_file(
     path: &PathBuf,
     range: Range<u64>,
 ) -> object_store::Result<Bytes> {
-    let metadata = file.metadata().map_err(generic_error)?;
+    let metadata = file
+        .metadata()
+        .expect("failed to read deterministic local filesystem metadata");
     let file_len = metadata.len();
 
     if range.start >= file_len {
@@ -875,7 +859,7 @@ async fn read_range_with_yields_from_file(
 
     let to_read = range.end.min(file_len) - range.start;
     file.seek(SeekFrom::Start(range.start))
-        .map_err(generic_error)?;
+        .expect("failed to seek deterministic local filesystem file");
 
     let mut buffer = Vec::with_capacity(usize::try_from(to_read).unwrap_or(0));
     let mut remaining = to_read;
@@ -886,7 +870,9 @@ async fn read_range_with_yields_from_file(
             usize::try_from(remaining.min(IO_CHUNK_SIZE as u64)).unwrap_or(IO_CHUNK_SIZE);
         let start = buffer.len();
         buffer.resize(start + chunk_len, 0);
-        let read = file.read(&mut buffer[start..]).map_err(generic_error)?;
+        let read = file
+            .read(&mut buffer[start..])
+            .expect("failed to read deterministic local filesystem file");
 
         if read == 0 {
             return Err(generic_error(io::Error::new(
