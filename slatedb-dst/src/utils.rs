@@ -1,5 +1,6 @@
 use std::path::Path as StdPath;
 use std::str::FromStr;
+use std::sync::Once;
 use std::time::Duration;
 
 use rand::Rng;
@@ -7,6 +8,8 @@ use slatedb::config::{
     CompressionCodec, GarbageCollectorDirectoryOptions, GarbageCollectorOptions,
 };
 use slatedb::{DbRand, Settings};
+use tracing_subscriber::fmt::format::FmtSpan;
+use tracing_subscriber::EnvFilter;
 
 const MIB_1: usize = 1024 * 1024;
 const MIB_500: usize = 500 * MIB_1;
@@ -92,4 +95,21 @@ pub async fn build_settings(rand: &DbRand, cache_root: &StdPath) -> Settings {
     }
 
     settings
+}
+
+// A flag so we only initialize logging once.
+static INIT_LOGGING: Once = Once::new();
+
+/// Initialize logging for tests so we get log output. Uses `RUST_LOG` environment
+/// variable to set the log level, or defaults to `info` if not set.
+#[ctor::ctor]
+fn init_tracing() {
+    INIT_LOGGING.call_once(|| {
+        let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+        tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_span_events(FmtSpan::NEW | FmtSpan::CLOSE)
+            .with_test_writer()
+            .init();
+    });
 }
