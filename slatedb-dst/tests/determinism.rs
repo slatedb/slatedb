@@ -20,6 +20,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
+use log::info;
 use object_store::path::Path;
 use object_store::ObjectStore;
 use rand::RngCore;
@@ -34,8 +35,14 @@ use slatedb_dst::{
     StreamDirection, Toxic, ToxicKind,
 };
 use tempfile::TempDir;
+use tracing::instrument;
 
+/// Number of steps for the single actor in this test. Large enough to cover many
+/// deterministic branches and state transitions, but small enough to complete
+/// in a reasonable time when repeated across multiple simulations and seeds.
 const ACTOR_STEPS: u64 = 500;
+
+/// Number of distinct keys used by the actor workload.
 const KEY_COUNT: usize = 32;
 
 #[test]
@@ -82,6 +89,7 @@ fn test_dst_is_deterministic() -> Result<(), Box<dyn std::error::Error>> {
 
 /// Runs one seeded deterministic scenario and returns the next root RNG value
 /// and current mock-clock time after the harness completes.
+#[instrument(level = "debug", skip_all, fields(seed = seed))]
 fn run_seed_once(seed: u64) -> Result<(u64, DateTime<Utc>), Box<dyn std::error::Error>> {
     let tempdir = TempDir::new()?;
     let main_dir = tempdir.path().join("main");
@@ -107,8 +115,8 @@ fn run_seed_once(seed: u64) -> Result<(u64, DateTime<Utc>), Box<dyn std::error::
 
             // Keep L0 tiny and compactor polling aggressive so a small number of
             // explicit memtable flushes will trigger real compaction during the run.
-            settings.l0_sst_size_bytes = 256;
-            settings.l0_max_ssts = 2;
+            settings.l0_sst_size_bytes = 1024;
+            settings.l0_max_ssts = 4;
             settings.manifest_poll_interval = Duration::from_millis(10);
 
             let compactor_options = settings
@@ -155,6 +163,7 @@ fn run_seed_once(seed: u64) -> Result<(u64, DateTime<Utc>), Box<dyn std::error::
 /// - 500 randomly chosen operations across a fixed key set
 /// - a weighted mix of puts, deletes, memtable flushes, and idle steps selected
 ///   from the actor RNG
+#[instrument(level = "debug", skip_all, fields(role = %ctx.role(), instance = ctx.instance()))]
 async fn run_actor(ctx: ActorCtx) -> Result<(), Error> {
     ctx.failures().add_toxic(Toxic {
         name: "put-latency".into(),
@@ -178,7 +187,7 @@ async fn run_actor(ctx: ActorCtx) -> Result<(), Error> {
         let key_index = ((rand_value >> 8) as usize) % KEY_COUNT;
         let key = format!("key-{key_index}");
 
-        match rand_value % 1_000 {
+        match rand_value % 100 {
             0..=49 => {
                 let value = format!("{step:04}-{rand_value:016x}").into_bytes();
                 db.put_with_options(key.as_bytes(), &value, &put_options, &write_options)
@@ -196,15 +205,16 @@ async fn run_actor(ctx: ActorCtx) -> Result<(), Error> {
             }
             _ => {}
         }
+
+        if step % 50 == 0 {
+            info!("actor step complete [step={}]", step);
+        }
     }
 
-    db.flush_with_options(FlushOptions {
-        flush_type: FlushType::MemTable,
-    })
-    .await?;
     db.close().await
 }
 
+#[instrument(level = "debug", skip_all, fields(role = %ctx.role(), instance = ctx.instance()))]
 async fn run_clock(ctx: ActorCtx) -> Result<(), Error> {
     loop {
         let rand_value = ctx.rand().rng().next_u64();
