@@ -23,7 +23,10 @@ use chrono::{DateTime, Utc};
 use object_store::path::Path;
 use object_store::ObjectStore;
 use rand::RngCore;
-use slatedb::config::{FlushOptions, FlushType, PutOptions, WriteOptions};
+use slatedb::config::{
+    CompactorOptions, FlushOptions, FlushType, PutOptions, SizeTieredCompactionSchedulerOptions,
+    WriteOptions,
+};
 use slatedb::{Db, DbRand, Error};
 use slatedb_common::clock::{MockSystemClock, SystemClock};
 use slatedb_dst::{
@@ -100,7 +103,25 @@ fn run_seed_once(seed: u64) -> Result<(u64, DateTime<Utc>), Box<dyn std::error::
         .with_wal_object_store(wal_store)
         .with_db(move |ctx| async move {
             let db_seed = ctx.rand().rng().next_u64();
-            let settings = build_settings(ctx.rand()).await;
+            let mut settings = build_settings(ctx.rand()).await;
+
+            // Keep L0 tiny and compactor polling aggressive so a small number of
+            // explicit memtable flushes will trigger real compaction during the run.
+            settings.l0_sst_size_bytes = 256;
+            settings.l0_max_ssts = 2;
+            settings.manifest_poll_interval = Duration::from_millis(10);
+
+            let compactor_options = settings
+                .compactor_options
+                .get_or_insert_with(CompactorOptions::default);
+            compactor_options.poll_interval = Duration::from_millis(100);
+            compactor_options.max_concurrent_compactions = 1;
+            compactor_options.scheduler_options = SizeTieredCompactionSchedulerOptions {
+                min_compaction_sources: 2,
+                max_compaction_sources: 999,
+                include_size_threshold: 4.0,
+            }
+            .into();
 
             let db = Db::builder(ctx.path().clone(), ctx.main_object_store())
                 .with_wal_object_store(ctx.wal_object_store().expect("configured"))
