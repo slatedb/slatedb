@@ -171,6 +171,10 @@ export default defineConfig({
 							link: '/docs/operations/configuration/',
 						},
 						{
+							label: 'Configuring Foyer Cache',
+							link: '/docs/operations/foyer-cache/',
+						},
+						{
 							label: 'Data Modeling',
 							link: '/docs/operations/data-modeling/',
 						},

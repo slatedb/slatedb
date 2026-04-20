@@ -41,6 +41,7 @@ pub use compaction_filter::{
     CompactionJobContext,
 };
 pub use compactor::CompactorBuilder;
+pub use compactor_state::VersionedCompactions;
 pub use config::{Settings, SstBlockSize};
 pub use db::{Db, DbBuilder, DbReaderBuilder, DbStatus, WriteHandle};
 pub use db_cache::stats as db_cache_stats;
@@ -50,10 +51,16 @@ pub use db_reader::DbReader;
 pub use db_snapshot::DbSnapshot;
 pub use db_transaction::DbTransaction;
 pub use error::{CloseReason, Error, ErrorKind};
+pub use filter::BloomFilter;
+pub use filter_policy::{
+    BloomFilterPolicy, Filter, FilterBuilder, FilterPolicy, FilterQuery, FilterTarget,
+    PrefixExtractor,
+};
 pub use format::sst::BlockTransformer;
 pub use garbage_collector::stats as garbage_collector_stats;
 pub use garbage_collector::GarbageCollectorBuilder;
 pub use iter::IterationOrder;
+pub use manifest::VersionedManifest;
 pub use merge_operator::{MergeOperator, MergeOperatorError};
 pub use rand::DbRand;
 #[cfg(test)]
@@ -110,8 +117,9 @@ mod db_status;
 mod db_transaction;
 mod dispatcher;
 mod error;
-mod filter;
+pub mod filter;
 mod filter_iterator;
+pub mod filter_policy;
 mod flatbuffer_types;
 mod flush;
 mod format;

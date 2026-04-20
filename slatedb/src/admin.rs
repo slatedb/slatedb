@@ -1,6 +1,10 @@
+pub use crate::db::builder::CloneBuilder;
+pub use crate::db::builder::CloneSourceSpec;
+
 use crate::checkpoint::{Checkpoint, CheckpointCreateResult};
 use crate::compactions_store::CompactionsStore;
 use crate::compactor::{Compaction, CompactionSpec, Compactor, CompactorStateView};
+use crate::compactor_state::VersionedCompactions;
 use crate::compactor_state_protocols::CompactorStateReader;
 use crate::config::{CheckpointOptions, GarbageCollectorOptions};
 use crate::db::builder::GarbageCollectorBuilder;
@@ -8,24 +12,23 @@ use crate::dispatcher::MessageHandlerExecutor;
 use crate::error::SlateDBError;
 use crate::garbage_collector::GC_TASK_NAME;
 use crate::manifest::store::{ManifestStore, StoredManifest};
+use crate::manifest::VersionedManifest;
 use slatedb_common::clock::SystemClock;
 
-use crate::clone;
 use crate::db_status::ClosedResultWriter;
 use crate::object_stores::{ObjectStoreType, ObjectStores};
 use crate::rand::DbRand;
 use crate::seq_tracker::FindOption;
 use crate::utils::IdGenerator;
 use crate::utils::WatchableOnceCell;
+use bytes::Bytes;
 use chrono::{DateTime, Utc};
-use fail_parallel::FailPointRegistry;
 use object_store::path::Path;
 use object_store::ObjectStore;
 use rand::RngCore;
 use std::env;
 use std::env::VarError;
-use std::error::Error;
-use std::ops::RangeBounds;
+use std::ops::{Bound, RangeBounds};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::runtime::Handle;
@@ -56,69 +59,92 @@ pub struct Admin {
 }
 
 impl Admin {
-    /// Read-only access to the latest manifest file
+    /// Read-only access to a specific or the latest manifest file.
+    ///
+    /// ## Arguments
+    /// - `maybe_id`: Optional ID of the manifest file to read. If `None`, reads the latest.
+    ///
+    /// ## Returns
+    /// - `Ok(Some(VersionedManifest))`: The manifest if found.
+    /// - `Ok(None)`: If the manifest file does not exist.
     pub async fn read_manifest(
         &self,
         maybe_id: Option<u64>,
-    ) -> Result<Option<String>, Box<dyn Error>> {
+    ) -> Result<Option<VersionedManifest>, crate::Error> {
         let manifest_store = ManifestStore::new(
             &self.path,
             self.object_stores.store_of(ObjectStoreType::Main).clone(),
         );
-        let id_manifest = if let Some(id) = maybe_id {
+        let manifest = if let Some(id) = maybe_id {
             manifest_store
                 .try_read_manifest(id)
-                .await?
-                .map(|manifest| (id, manifest))
+                .await
+                .map_err(crate::Error::from)?
+                .map(|manifest| VersionedManifest::from_manifest(id, manifest))
         } else {
-            manifest_store.try_read_latest_manifest().await?
+            manifest_store
+                .try_read_latest_manifest()
+                .await
+                .map_err(crate::Error::from)?
         };
 
-        match id_manifest {
-            None => Ok(None),
-            Some(result) => Ok(Some(serde_json::to_string(&result)?)),
-        }
+        Ok(manifest)
     }
 
-    /// List manifests within a range
+    /// List manifests within a range.
+    ///
+    /// ## Returns
+    /// - `Ok(Vec<VersionedManifest>)`: The manifests in ascending ID order.
     pub async fn list_manifests<R: RangeBounds<u64>>(
         &self,
         range: R,
-    ) -> Result<String, Box<dyn Error>> {
+    ) -> Result<Vec<VersionedManifest>, crate::Error> {
         let manifest_store = ManifestStore::new(
             &self.path,
             self.object_stores.store_of(ObjectStoreType::Main).clone(),
         );
-        let manifests = manifest_store.list_manifests(range).await?;
-        Ok(serde_json::to_string(&manifests)?)
+        let manifest_metadata = manifest_store
+            .list_manifests(range)
+            .await
+            .map_err(crate::Error::from)?;
+        let mut manifests = Vec::with_capacity(manifest_metadata.len());
+        for metadata in manifest_metadata {
+            let manifest = manifest_store
+                .read_manifest(metadata.id)
+                .await
+                .map_err(crate::Error::from)?;
+            manifests.push(VersionedManifest::from_manifest(metadata.id, manifest));
+        }
+        Ok(manifests)
     }
 
-    /// Read-only access to the latest compactions file
+    /// Read-only access to a specific or the latest compactions file.
     ///
     /// ## Arguments
     /// - `maybe_id`: Optional ID of the compactions file to read. If None, reads from the latest.
     ///
     /// ## Returns
-    /// - `Ok(Some(String))`: The compactions as a JSON string if found.
+    /// - `Ok(Some(VersionedCompactions))`: The compactions if found.
     /// - `Ok(None)`: If the compactions file does not exist.
     pub async fn read_compactions(
         &self,
         maybe_id: Option<u64>,
-    ) -> Result<Option<String>, Box<dyn Error>> {
+    ) -> Result<Option<VersionedCompactions>, crate::Error> {
         let compactions_store = self.compactions_store();
-        let id_compactions = if let Some(id) = maybe_id {
+        let compactions = if let Some(id) = maybe_id {
             compactions_store
                 .try_read_compactions(id)
-                .await?
-                .map(|compactions| (id, compactions))
+                .await
+                .map_err(crate::Error::from)?
+                .map(|compactions| VersionedCompactions::from_compactions(id, compactions))
         } else {
-            compactions_store.try_read_latest_compactions().await?
+            compactions_store
+                .try_read_latest_compactions()
+                .await
+                .map_err(crate::Error::from)?
         };
 
-        match id_compactions {
-            None => Ok(None),
-            Some(result) => Ok(Some(serde_json::to_string(&result)?)),
-        }
+        Ok(compactions)
     }
 
     /// Read-only access to a compaction by id from a specific or latest compactions file.
@@ -134,17 +160,19 @@ impl Admin {
         &self,
         compaction_id: Ulid,
         maybe_id: Option<u64>,
-    ) -> Result<Option<Compaction>, Box<dyn Error>> {
+    ) -> Result<Option<Compaction>, crate::Error> {
         let compactions_store = self.compactions_store();
         let compactions = if let Some(compactions_id) = maybe_id {
             compactions_store
                 .try_read_compactions(compactions_id)
-                .await?
+                .await
+                .map_err(crate::Error::from)?
         } else {
             compactions_store
                 .try_read_latest_compactions()
-                .await?
-                .map(|(_id, compactions)| compactions)
+                .await
+                .map_err(crate::Error::from)?
+                .map(|compactions| compactions.compactions)
         };
         let Some(compactions) = compactions else {
             return Ok(None);
@@ -157,14 +185,14 @@ impl Admin {
     }
 
     /// Returns a read-only view of the current compactor state.
-    pub async fn read_compactor_state_view(&self) -> Result<CompactorStateView, Box<dyn Error>> {
+    pub async fn read_compactor_state_view(&self) -> Result<CompactorStateView, crate::Error> {
         let manifest_store = Arc::new(ManifestStore::new(
             &self.path,
             self.object_stores.store_of(ObjectStoreType::Main).clone(),
         ));
         let compactions_store = Arc::new(self.compactions_store());
         let reader = CompactorStateReader::new(&manifest_store, &compactions_store);
-        Ok(reader.read_view().await?)
+        reader.read_view().await.map_err(crate::Error::from)
     }
 
     /// Generate a compaction from a spec and submit it.
@@ -175,26 +203,43 @@ impl Admin {
     pub async fn submit_compaction(
         &self,
         spec: CompactionSpec,
-    ) -> Result<Compaction, Box<dyn Error>> {
+    ) -> Result<Compaction, crate::Error> {
         let compactions_store = Arc::new(self.compactions_store());
         let rand = Arc::new(DbRand::new(self.rand.rng().next_u64()));
         let compaction_id =
             Compactor::submit(spec, compactions_store, rand, self.system_clock.clone()).await?;
         let Some(compaction) = self.read_compaction(compaction_id, None).await? else {
-            return Err(Box::new(SlateDBError::InvalidDBState));
+            return Err(crate::Error::from(SlateDBError::InvalidDBState));
         };
 
         Ok(compaction)
     }
 
-    /// List compactions files within a range
+    /// List compactions files within a range.
+    ///
+    /// ## Returns
+    /// - `Ok(Vec<VersionedCompactions>)`: The compactions files in ascending ID order.
     pub async fn list_compactions<R: RangeBounds<u64>>(
         &self,
         range: R,
-    ) -> Result<String, Box<dyn Error>> {
+    ) -> Result<Vec<VersionedCompactions>, crate::Error> {
         let compactions_store = self.compactions_store();
-        let compactions = compactions_store.list_compactions(range).await?;
-        Ok(serde_json::to_string(&compactions)?)
+        let compactions_metadata = compactions_store
+            .list_compactions(range)
+            .await
+            .map_err(crate::Error::from)?;
+        let mut compactions = Vec::with_capacity(compactions_metadata.len());
+        for metadata in compactions_metadata {
+            let stored_compactions = compactions_store
+                .read_compactions(metadata.id)
+                .await
+                .map_err(crate::Error::from)?;
+            compactions.push(VersionedCompactions::from_compactions(
+                metadata.id,
+                stored_compactions,
+            ));
+        }
+        Ok(compactions)
     }
 
     /// List checkpoints, optionally filtering by name. When name is provided, only checkpoints
@@ -206,12 +251,16 @@ impl Admin {
     pub async fn list_checkpoints(
         &self,
         name_filter: Option<&str>,
-    ) -> Result<Vec<Checkpoint>, Box<dyn Error>> {
+    ) -> Result<Vec<Checkpoint>, crate::Error> {
         let manifest_store = ManifestStore::new(
             &self.path,
             self.object_stores.store_of(ObjectStoreType::Main).clone(),
         );
-        let (_, manifest) = manifest_store.read_latest_manifest().await?;
+        let manifest = manifest_store
+            .read_latest_manifest()
+            .await
+            .map_err(crate::Error::from)?
+            .manifest;
 
         let checkpoints = match name_filter {
             Some("") => manifest
@@ -240,10 +289,7 @@ impl Admin {
     ///
     /// * `gc_opts`: The garbage collector options.
     ///
-    pub async fn run_gc_once(
-        &self,
-        gc_opts: GarbageCollectorOptions,
-    ) -> Result<(), Box<dyn Error>> {
+    pub async fn run_gc_once(&self, gc_opts: GarbageCollectorOptions) -> Result<(), crate::Error> {
         let gc = GarbageCollectorBuilder::new(
             self.path.clone(),
             self.object_stores.store_of(ObjectStoreType::Main).clone(),
@@ -474,7 +520,7 @@ impl Admin {
         let manifest_store = self.manifest_store();
 
         let id_manifest = manifest_store.try_read_latest_manifest().await?;
-        let Some((_id, manifest)) = id_manifest else {
+        let Some(manifest) = id_manifest else {
             return Ok(None);
         };
 
@@ -483,7 +529,7 @@ impl Admin {
         } else {
             FindOption::RoundDown
         };
-        Ok(manifest.core.sequence_tracker.find_ts(seq, opt))
+        Ok(manifest.core().sequence_tracker.find_ts(seq, opt))
     }
 
     /// Returns the sequence for a given timestamp from the latest manifest's sequence tracker.
@@ -496,7 +542,7 @@ impl Admin {
         let manifest_store = self.manifest_store();
 
         let id_manifest = manifest_store.try_read_latest_manifest().await?;
-        let Some((_id, manifest)) = id_manifest else {
+        let Some(manifest) = id_manifest else {
             return Ok(None);
         };
 
@@ -505,7 +551,7 @@ impl Admin {
         } else {
             FindOption::RoundDown
         };
-        Ok(manifest.core.sequence_tracker.find_seq(ts, opt))
+        Ok(manifest.core().sequence_tracker.find_seq(ts, opt))
     }
 
     fn manifest_store(&self) -> ManifestStore {
@@ -522,18 +568,13 @@ impl Admin {
         )
     }
 
-    /// Clone a database. If no db already exists at the specified path, then this will create
-    /// a new db under the path that is a clone of the db at parent_path.
+    /// Clone a database using a builder pattern. If no db already exists at the specified path,
+    /// then this will create a new db under the path that is a clone of the db at parent_path.
     ///
     /// A clone is a shallow copy of the parent database - it starts with a manifest that
     /// references the same SSTs, but doesn't actually copy those SSTs, except for the WAL.
     /// New writes will be written to the newly created db and will not be reflected in the
     /// parent database.
-    ///
-    /// The clone can optionally be created from an existing checkpoint. If
-    /// `parent_checkpoint` is present, then the referenced manifest is used
-    /// as the base for the clone db's manifest. Otherwise, this method creates a new checkpoint
-    /// for the current version of the parent db.
     ///
     /// # Examples
     ///
@@ -552,31 +593,26 @@ impl Admin {
     ///    db.close().await?;
     ///
     ///    let admin = AdminBuilder::new("clone_path", object_store).build();
-    ///    admin.create_clone(
-    ///      "parent_path",
-    ///      None,
-    ///    ).await?;
+    ///    admin.create_clone_builder("parent_path", None).build().await?;
     ///
     ///    Ok(())
     /// }
     /// ```
-    pub async fn create_clone<P: Into<Path>>(
+    pub fn create_clone_builder<P: Into<Path>>(
         &self,
         parent_path: P,
         parent_checkpoint: Option<Uuid>,
-    ) -> Result<(), Box<dyn Error>> {
-        clone::create_clone(
+    ) -> CloneBuilder<(Bound<Bytes>, Bound<Bytes>)> {
+        let source = match parent_checkpoint {
+            Some(cp) => CloneSourceSpec::with_checkpoint(parent_path, cp),
+            None => CloneSourceSpec::new(parent_path),
+        };
+        CloneBuilder::new(
             self.path.clone(),
-            parent_path.into(),
+            source,
             self.object_stores.store_of(ObjectStoreType::Main).clone(),
-            self.object_stores.store_of(ObjectStoreType::Wal).clone(),
-            parent_checkpoint,
-            Arc::new(FailPointRegistry::new()),
-            self.system_clock.clone(),
-            self.rand.clone(),
         )
-        .await?;
-        Ok(())
+        .with_wal_object_store(self.object_stores.store_of(ObjectStoreType::Wal).clone())
     }
 
     /// Creates a new builder for an admin client at the given path.
@@ -608,12 +644,13 @@ impl Admin {
 
 fn get_env_variable(name: &str) -> Result<String, SlateDBError> {
     env::var(name).map_err(|e| match e {
-        VarError::NotPresent => SlateDBError::UndefinedEnvironmentVariable {
+        VarError::NotPresent => SlateDBError::InvalidEnvironmentVariable {
             key: name.to_string(),
+            value: None,
         },
         VarError::NotUnicode(not_unicode_value) => SlateDBError::InvalidEnvironmentVariable {
             key: name.to_string(),
-            value: format!("{:?}", not_unicode_value),
+            value: Some(format!("{:?}", not_unicode_value)),
         },
     })
 }
@@ -632,7 +669,7 @@ fn get_env_variable(name: &str) -> Result<String, SlateDBError> {
 /// | OpenDAL | `opendal` | [load_opendal] |
 pub fn load_object_store_from_env(
     env_file: Option<String>,
-) -> Result<Arc<dyn ObjectStore>, Box<dyn Error>> {
+) -> Result<Arc<dyn ObjectStore>, crate::Error> {
     dotenvy::from_filename(env_file.unwrap_or(String::from(".env"))).ok();
     let cloud_provider = get_env_variable("CLOUD_PROVIDER")?;
     match cloud_provider.to_lowercase().as_str() {
@@ -646,7 +683,7 @@ pub fn load_object_store_from_env(
         "opendal" => load_opendal(),
         invalid_value => Err(SlateDBError::InvalidEnvironmentVariable {
             key: "CLOUD_PROVIDER".to_string(),
-            value: invalid_value.to_string(),
+            value: Some(invalid_value.to_string()),
         }
         .into()),
     }
@@ -657,14 +694,20 @@ pub fn load_object_store_from_env(
 /// | Env Variable | Doc | Required |
 /// |--------------|-----|----------|
 /// | LOCAL_PATH | The path to the local directory where all data will be stored | Yes |
-pub fn load_local() -> Result<Arc<dyn ObjectStore>, Box<dyn Error>> {
+pub fn load_local() -> Result<Arc<dyn ObjectStore>, crate::Error> {
     let local_path = get_env_variable("LOCAL_PATH")?;
-    let lfs = object_store::local::LocalFileSystem::new_with_prefix(local_path)?;
+    let lfs =
+        object_store::local::LocalFileSystem::new_with_prefix(local_path).map_err(|error| {
+            SlateDBError::ObjectStoreError(Arc::new(object_store::Error::Generic {
+                store: "local",
+                source: Box::new(error),
+            }))
+        })?;
     Ok(Arc::new(lfs) as Arc<dyn ObjectStore>)
 }
 
 /// Loads an in-memory object store instance.
-pub fn load_memory() -> Result<Arc<dyn ObjectStore>, Box<dyn Error>> {
+pub fn load_memory() -> Result<Arc<dyn ObjectStore>, crate::Error> {
     Ok(Arc::new(object_store::memory::InMemory::new()) as Arc<dyn ObjectStore>)
 }
 
@@ -673,13 +716,18 @@ pub fn load_memory() -> Result<Arc<dyn ObjectStore>, Box<dyn Error>> {
 /// builder documentation for the full list and meaning of supported variables:
 /// <https://docs.rs/object_store/latest/object_store/aws/struct.AmazonS3Builder.html#method.with_config>
 #[cfg(feature = "aws")]
-pub fn load_aws() -> Result<Arc<dyn ObjectStore>, Box<dyn Error>> {
+pub fn load_aws() -> Result<Arc<dyn ObjectStore>, crate::Error> {
     use object_store::aws::S3ConditionalPut;
 
     let builder = object_store::aws::AmazonS3Builder::from_env()
         .with_conditional_put(S3ConditionalPut::ETagMatch);
 
-    Ok(Arc::new(builder.build()?) as Arc<dyn ObjectStore>)
+    Ok(Arc::new(builder.build().map_err(|error| {
+        SlateDBError::ObjectStoreError(Arc::new(object_store::Error::Generic {
+            store: "AmazonS3",
+            source: Box::new(error),
+        }))
+    })?) as Arc<dyn ObjectStore>)
 }
 
 /// Loads an Azure Object store instance. The environment variables consumed are
@@ -687,9 +735,14 @@ pub fn load_aws() -> Result<Arc<dyn ObjectStore>, Box<dyn Error>> {
 /// the builder documentation for the full list and meaning of supported variables:
 /// <https://docs.rs/object_store/latest/object_store/azure/struct.MicrosoftAzureBuilder.html#method.with_config>
 #[cfg(feature = "azure")]
-pub fn load_azure() -> Result<Arc<dyn ObjectStore>, Box<dyn Error>> {
+pub fn load_azure() -> Result<Arc<dyn ObjectStore>, crate::Error> {
     let builder = object_store::azure::MicrosoftAzureBuilder::from_env();
-    Ok(Arc::new(builder.build()?) as Arc<dyn ObjectStore>)
+    Ok(Arc::new(builder.build().map_err(|error| {
+        SlateDBError::ObjectStoreError(Arc::new(object_store::Error::Generic {
+            store: "MicrosoftAzure",
+            source: Box::new(error),
+        }))
+    })?) as Arc<dyn ObjectStore>)
 }
 
 /// Loads an OpenDAL Object store instance.
@@ -721,18 +774,34 @@ pub fn load_azure() -> Result<Arc<dyn ObjectStore>, Box<dyn Error>> {
 /// ```
 /// full list of config: https://docs.rs/opendal/latest/opendal/services/oss/config/struct.OssConfig.html
 #[cfg(feature = "opendal")]
-pub fn load_opendal() -> Result<Arc<dyn ObjectStore>, Box<dyn Error>> {
+pub fn load_opendal() -> Result<Arc<dyn ObjectStore>, crate::Error> {
     use opendal::{Operator, Scheme};
     use std::collections::HashMap;
     use std::str::FromStr;
 
+    let scheme_value = get_env_variable("OPENDAL_SCHEME")?;
     let scheme =
-        Scheme::from_str(&env::var("OPENDAL_SCHEME").expect("OPENDAL_SCHEME must be set"))?;
+        Scheme::from_str(&scheme_value).map_err(|_| SlateDBError::InvalidEnvironmentVariable {
+            key: "OPENDAL_SCHEME".to_string(),
+            value: Some(scheme_value.clone()),
+        })?;
+    if !Scheme::enabled().contains(&scheme) {
+        return Err(SlateDBError::InvalidEnvironmentVariable {
+            key: "OPENDAL_SCHEME".to_string(),
+            value: Some(scheme_value),
+        }
+        .into());
+    }
     let iter = env::vars()
         .filter_map(|(k, v)| k.strip_prefix("OPENDAL_").map(|k| (k.to_lowercase(), v)))
         .collect::<HashMap<String, String>>();
 
-    let op = Operator::via_iter(scheme, iter)?;
+    let op = Operator::via_iter(scheme, iter).map_err(|error| {
+        SlateDBError::ObjectStoreError(Arc::new(object_store::Error::Generic {
+            store: "OpenDAL",
+            source: Box::new(error),
+        }))
+    })?;
     Ok(Arc::new(object_store_opendal::OpendalStore::new(op)) as Arc<dyn ObjectStore>)
 }
 
@@ -741,9 +810,14 @@ mod tests {
     use crate::admin::{load_object_store_from_env, AdminBuilder};
     use crate::compactions_store::{CompactionsStore, StoredCompactions};
     use crate::compactor_state::{Compaction, CompactionSpec, CompactionStatus, SourceId};
+    use crate::manifest::store::{ManifestStore, StoredManifest};
+    use crate::manifest::ManifestCore;
+    use crate::test_utils::FlakyObjectStore;
+    use crate::ErrorKind;
     use object_store::memory::InMemory;
     use object_store::path::Path;
     use object_store::ObjectStore;
+    use slatedb_common::clock::DefaultSystemClock;
     use std::sync::Arc;
     use ulid::Ulid;
 
@@ -751,20 +825,21 @@ mod tests {
     fn test_load_object_store_from_env() {
         figment::Jail::expect_with(|jail| {
             // creating an object store without CLOUD_PROVIDER env variable
-            let r = load_object_store_from_env(None);
-            assert!(r.is_err());
+            let err = load_object_store_from_env(None).expect_err("expected invalid env error");
+            assert_eq!(err.kind(), ErrorKind::Invalid);
             assert_eq!(
-                r.unwrap_err().to_string(),
-                "undefined environment variable CLOUD_PROVIDER"
+                err.to_string(),
+                "Invalid error: invalid environment variable CLOUD_PROVIDER value `null`"
             );
 
             jail.create_file("invalid.env", "CLOUD_PROVIDER=invalid")
                 .expect("failed to create temp env file");
-            let r = load_object_store_from_env(Some("invalid.env".to_string()));
-            assert!(r.is_err());
+            let err = load_object_store_from_env(Some("invalid.env".to_string()))
+                .expect_err("expected invalid provider error");
+            assert_eq!(err.kind(), ErrorKind::Invalid);
             assert_eq!(
-                r.unwrap_err().to_string(),
-                "invalid environment variable CLOUD_PROVIDER value `invalid`"
+                err.to_string(),
+                "Invalid error: invalid environment variable CLOUD_PROVIDER value `invalid`"
             );
             // unset since the environment variable loaded in from invalid.env
             // takes precedence over the memory.env file.
@@ -778,6 +853,192 @@ mod tests {
 
             Ok(())
         });
+    }
+
+    #[cfg(feature = "opendal")]
+    #[test]
+    fn test_load_opendal_invalid_scheme_maps_to_invalid_environment_variable() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("OPENDAL_SCHEME", "not-a-scheme");
+
+            let err = super::load_opendal().expect_err("expected invalid OpenDAL scheme");
+
+            assert_eq!(err.kind(), ErrorKind::Invalid);
+            assert_eq!(
+                err.to_string(),
+                "Invalid error: invalid environment variable OPENDAL_SCHEME value `not-a-scheme`"
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn test_load_local_invalid_path_maps_to_unavailable() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("LOCAL_PATH", "missing-local-path");
+
+            let err = super::load_local().expect_err("expected invalid local-path error");
+
+            assert_eq!(err.kind(), ErrorKind::Unavailable);
+            Ok(())
+        });
+    }
+
+    #[tokio::test]
+    async fn test_admin_read_manifest() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_admin_read_manifest");
+        let manifest_store = Arc::new(ManifestStore::new(&path, object_store.clone()));
+        let mut stored = StoredManifest::create_new_db(
+            manifest_store,
+            ManifestCore::new(),
+            Arc::new(DefaultSystemClock::new()),
+        )
+        .await
+        .unwrap();
+
+        let mut dirty = stored.prepare_dirty().unwrap();
+        dirty.value.core.next_wal_sst_id = 17;
+        dirty.value.core.last_l0_seq = 9;
+        dirty.value.writer_epoch = 3;
+        dirty.value.compactor_epoch = 5;
+        stored.update(dirty).await.unwrap();
+
+        let admin = AdminBuilder::new(path.clone(), object_store).build();
+
+        let latest = admin
+            .read_manifest(None)
+            .await
+            .unwrap()
+            .expect("expected manifest");
+        assert_eq!(latest.id, 2);
+        assert_eq!(latest.manifest.writer_epoch, 3);
+        assert_eq!(latest.manifest.compactor_epoch, 5);
+        assert_eq!(latest.manifest.core.next_wal_sst_id, 17);
+        assert_eq!(latest.manifest.core.last_l0_seq, 9);
+
+        let first = admin
+            .read_manifest(Some(1))
+            .await
+            .unwrap()
+            .expect("expected manifest");
+        assert_eq!(first.id, 1);
+        assert_eq!(first.manifest.writer_epoch, 0);
+        assert_eq!(first.manifest.compactor_epoch, 0);
+        assert_eq!(first.manifest.core.next_wal_sst_id, 1);
+        assert_eq!(first.manifest.core.last_l0_seq, 0);
+    }
+
+    #[tokio::test]
+    async fn test_admin_list_manifests() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_admin_list_manifests");
+        let manifest_store = Arc::new(ManifestStore::new(&path, object_store.clone()));
+        let mut stored = StoredManifest::create_new_db(
+            manifest_store,
+            ManifestCore::new(),
+            Arc::new(DefaultSystemClock::new()),
+        )
+        .await
+        .unwrap();
+
+        let mut dirty = stored.prepare_dirty().unwrap();
+        dirty.value.core.next_wal_sst_id = 5;
+        dirty.value.core.last_l0_seq = 10;
+        dirty.value.writer_epoch = 2;
+        dirty.value.compactor_epoch = 4;
+        stored.update(dirty).await.unwrap();
+
+        let mut dirty = stored.prepare_dirty().unwrap();
+        dirty.value.core.next_wal_sst_id = 8;
+        dirty.value.core.last_l0_seq = 20;
+        dirty.value.writer_epoch = 3;
+        dirty.value.compactor_epoch = 6;
+        stored.update(dirty).await.unwrap();
+
+        let admin = AdminBuilder::new(path.clone(), object_store).build();
+
+        let all = admin.list_manifests(..).await.unwrap();
+        assert_eq!(
+            all.iter().map(|manifest| manifest.id).collect::<Vec<_>>(),
+            vec![1, 2, 3]
+        );
+        assert_eq!(
+            all.iter()
+                .map(|manifest| manifest.manifest.core.last_l0_seq)
+                .collect::<Vec<_>>(),
+            vec![0, 10, 20]
+        );
+        assert_eq!(
+            all.iter()
+                .map(|manifest| manifest.manifest.writer_epoch)
+                .collect::<Vec<_>>(),
+            vec![0, 2, 3]
+        );
+        assert_eq!(
+            all.iter()
+                .map(|manifest| manifest.manifest.compactor_epoch)
+                .collect::<Vec<_>>(),
+            vec![0, 4, 6]
+        );
+
+        let bounded = admin.list_manifests(2..3).await.unwrap();
+        assert_eq!(
+            bounded
+                .iter()
+                .map(|manifest| manifest.id)
+                .collect::<Vec<_>>(),
+            vec![2]
+        );
+
+        let left_bounded = admin.list_manifests(2..).await.unwrap();
+        assert_eq!(
+            left_bounded
+                .iter()
+                .map(|manifest| manifest.id)
+                .collect::<Vec<_>>(),
+            vec![2, 3]
+        );
+
+        let right_bounded = admin.list_manifests(..3).await.unwrap();
+        assert_eq!(
+            right_bounded
+                .iter()
+                .map(|manifest| manifest.id)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_admin_list_manifests_list_failure_maps_to_unavailable() {
+        let inner: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let object_store: Arc<dyn ObjectStore> =
+            Arc::new(FlakyObjectStore::new(inner, 0).with_list_failures(1, 0));
+        let path = Path::from("/tmp/test_admin_list_manifests_list_failure");
+        let admin = AdminBuilder::new(path, object_store).build();
+
+        let err = admin
+            .list_manifests(..)
+            .await
+            .expect_err("expected list failure");
+
+        assert_eq!(err.kind(), ErrorKind::Unavailable);
+    }
+
+    #[tokio::test]
+    async fn test_admin_read_compactor_state_view_missing_manifest_maps_to_data() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_admin_read_compactor_state_view_missing_manifest");
+        let admin = AdminBuilder::new(path, object_store).build();
+
+        let err = admin
+            .read_compactor_state_view()
+            .await
+            .err()
+            .expect("expected missing manifest error");
+
+        assert_eq!(err.kind(), ErrorKind::Data);
     }
 
     #[tokio::test]
@@ -796,6 +1057,7 @@ mod tests {
         );
         let mut dirty = stored.prepare_dirty().unwrap();
         dirty.value.insert(compaction);
+        dirty.value.compactor_epoch = 9;
         stored.update(dirty).await.unwrap();
 
         let admin = AdminBuilder::new(path.clone(), object_store).build();
@@ -805,53 +1067,20 @@ mod tests {
             .await
             .unwrap()
             .expect("expected compactions");
-        let latest_value: serde_json::Value = serde_json::from_str(&latest).unwrap();
-        let latest_pair = latest_value.as_array().expect("expected [id, compactions]");
-        assert_eq!(latest_pair[0].as_u64().unwrap(), 2);
-
-        let latest_compactions = latest_pair[1].as_object().unwrap();
-        assert_eq!(
-            latest_compactions
-                .get("compactor_epoch")
-                .and_then(|v| v.as_u64())
-                .unwrap(),
-            7
-        );
-        let recent = latest_compactions
-            .get("core")
-            .expect("expected core")
-            .get("recent_compactions")
-            .and_then(|v| v.as_object())
-            .unwrap();
-        assert_eq!(recent.len(), 1);
-        let compaction_id_str = compaction_id.to_string();
-        let stored_compaction = recent
-            .get(compaction_id_str.as_str())
-            .expect("expected compaction entry");
-        assert_eq!(
-            stored_compaction
-                .get("id")
-                .and_then(|v| v.as_str())
-                .unwrap(),
-            compaction_id_str
-        );
+        let expected_latest = compactions_store.read_compactions(2).await.unwrap();
+        assert_eq!(latest.id, 2);
+        assert_eq!(latest.compactions.compactor_epoch, 9);
+        assert_eq!(latest.compactions, expected_latest);
 
         let first = admin
             .read_compactions(Some(1))
             .await
             .unwrap()
             .expect("expected compactions");
-        let first_value: serde_json::Value = serde_json::from_str(&first).unwrap();
-        let first_pair = first_value.as_array().expect("expected [id, compactions]");
-        assert_eq!(first_pair[0].as_u64().unwrap(), 1);
-        let first_compactions = first_pair[1].as_object().unwrap();
-        let first_recent = first_compactions
-            .get("core")
-            .expect("expected core")
-            .get("recent_compactions")
-            .and_then(|v| v.as_object())
-            .unwrap();
-        assert_eq!(first_recent.len(), 0);
+        let expected_first = compactions_store.read_compactions(1).await.unwrap();
+        assert_eq!(first.id, 1);
+        assert_eq!(first.compactions.compactor_epoch, 7);
+        assert_eq!(first.compactions, expected_first);
     }
 
     #[tokio::test]
@@ -859,23 +1088,71 @@ mod tests {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/tmp/test_admin_list_compactions");
         let compactions_store = Arc::new(CompactionsStore::new(&path, object_store.clone()));
-        let mut stored = StoredCompactions::create(compactions_store.clone(), 0)
+        let mut stored = StoredCompactions::create(compactions_store.clone(), 2)
             .await
             .unwrap();
-        stored
-            .update(stored.prepare_dirty().unwrap())
-            .await
-            .unwrap();
+
+        let mut dirty = stored.prepare_dirty().unwrap();
+        dirty.value.insert(Compaction::new(
+            Ulid::new(),
+            CompactionSpec::new(vec![SourceId::SortedRun(3)], 7),
+        ));
+        dirty.value.compactor_epoch = 4;
+        stored.update(dirty).await.unwrap();
+
+        let mut dirty = stored.prepare_dirty().unwrap();
+        dirty.value.insert(Compaction::new(
+            Ulid::new(),
+            CompactionSpec::new(vec![SourceId::SortedRun(5)], 9),
+        ));
+        dirty.value.compactor_epoch = 6;
+        stored.update(dirty).await.unwrap();
 
         let admin = AdminBuilder::new(path.clone(), object_store).build();
         let listed = admin.list_compactions(..).await.unwrap();
-        let listed_value: Vec<serde_json::Value> = serde_json::from_str(&listed).unwrap();
-        let ids: Vec<u64> = listed_value
-            .iter()
-            .filter_map(|item| item.get("id").and_then(|id| id.as_u64()))
-            .collect();
+        let ids: Vec<u64> = listed.iter().map(|compactions| compactions.id).collect();
+        assert_eq!(ids, vec![1, 2, 3]);
+        assert_eq!(
+            listed
+                .iter()
+                .map(|compactions| compactions.compactions.core.recent_compactions().count())
+                .collect::<Vec<_>>(),
+            vec![0, 1, 2]
+        );
+        assert_eq!(
+            listed
+                .iter()
+                .map(|compactions| compactions.compactions.compactor_epoch)
+                .collect::<Vec<_>>(),
+            vec![2, 4, 6]
+        );
 
-        assert_eq!(ids, vec![1, 2]);
+        let bounded = admin.list_compactions(2..3).await.unwrap();
+        assert_eq!(
+            bounded
+                .iter()
+                .map(|compactions| compactions.id)
+                .collect::<Vec<_>>(),
+            vec![2]
+        );
+
+        let left_bounded = admin.list_compactions(2..).await.unwrap();
+        assert_eq!(
+            left_bounded
+                .iter()
+                .map(|compactions| compactions.id)
+                .collect::<Vec<_>>(),
+            vec![2, 3]
+        );
+
+        let right_bounded = admin.list_compactions(..3).await.unwrap();
+        assert_eq!(
+            right_bounded
+                .iter()
+                .map(|compactions| compactions.id)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
     }
 
     #[tokio::test]
@@ -965,5 +1242,114 @@ mod tests {
             .build();
 
         assert!(admin.compaction_filter_supplier.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_create_clone_builder() {
+        use crate::manifest::store::ManifestStore;
+        use crate::Db;
+
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let parent_path = Path::from("/tmp/test_parent");
+        let clone_path = Path::from("/tmp/test_clone");
+
+        let parent_db = Db::open(parent_path.clone(), object_store.clone())
+            .await
+            .unwrap();
+        parent_db.close().await.unwrap();
+
+        let admin = AdminBuilder::new(clone_path.clone(), object_store.clone()).build();
+
+        // Test basic builder without checkpoint
+        let r = admin.create_clone_builder(parent_path.clone(), None);
+        r.build().await.expect("clone should succeed");
+
+        // Verify clone was created
+        let clone_manifest_store = ManifestStore::new(&clone_path, object_store.clone());
+        let manifest = clone_manifest_store.read_latest_manifest().await;
+        assert!(manifest.is_ok(), "cloned manifest should exist");
+    }
+
+    #[cfg(feature = "wal_disable")]
+    #[tokio::test]
+    async fn test_create_clone_with_multiple_sources() {
+        use crate::config::{PutOptions, Settings, WriteOptions};
+        use crate::manifest::store::ManifestStore;
+        use crate::{admin::CloneSourceSpec, Db};
+
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let grandparent_path1 = Path::from("/tmp/test_grandparent1");
+        let grandparent_path2 = Path::from("/tmp/test_grandparent2");
+        let parent_path1 = Path::from("/tmp/test_parent1");
+        let parent_path2 = Path::from("/tmp/test_parent2");
+        let clone_path = Path::from("/tmp/test_clone_multi");
+
+        let settings = Settings {
+            wal_enabled: false,
+            ..Settings::default()
+        };
+        let write_opts = WriteOptions {
+            await_durable: false,
+        };
+
+        // Two grandparents, each with a single-key SST. Disjoint ranges are required
+        // because the union path rejects overlapping source manifests.
+        let grandparent_db1 = Db::builder(grandparent_path1.clone(), object_store.clone())
+            .with_settings(settings.clone())
+            .build()
+            .await
+            .unwrap();
+        grandparent_db1
+            .put_with_options(b"a", b"1", &PutOptions::default(), &write_opts)
+            .await
+            .unwrap();
+        grandparent_db1.close().await.unwrap();
+
+        let grandparent_db2 = Db::builder(grandparent_path2.clone(), object_store.clone())
+            .with_settings(settings)
+            .build()
+            .await
+            .unwrap();
+        grandparent_db2
+            .put_with_options(b"z", b"2", &PutOptions::default(), &write_opts)
+            .await
+            .unwrap();
+        grandparent_db2.close().await.unwrap();
+
+        // Make each source a clone, so its manifest carries an external_db entry that
+        // propagates through `cloned_from_union`.
+        AdminBuilder::new(parent_path1.clone(), object_store.clone())
+            .build()
+            .create_clone_builder(grandparent_path1.clone(), None)
+            .build()
+            .await
+            .expect("parent clone 1 should succeed");
+
+        AdminBuilder::new(parent_path2.clone(), object_store.clone())
+            .build()
+            .create_clone_builder(grandparent_path2.clone(), None)
+            .build()
+            .await
+            .expect("parent clone 2 should succeed");
+
+        let admin = AdminBuilder::new(clone_path.clone(), object_store.clone()).build();
+
+        admin
+            .create_clone_builder(parent_path1.clone(), None)
+            .with_source(CloneSourceSpec::new(parent_path2.clone()))
+            .build()
+            .await
+            .expect("clone with multiple sources should succeed");
+
+        let clone_manifest_store = ManifestStore::new(&clone_path, object_store.clone());
+        let manifest = clone_manifest_store.read_latest_manifest().await;
+        assert!(manifest.is_ok(), "cloned manifest should exist");
+
+        let manifest_data = manifest.unwrap();
+        assert_eq!(
+            manifest_data.manifest.external_dbs.len(),
+            2,
+            "clone should have an external database for each parent"
+        );
     }
 }

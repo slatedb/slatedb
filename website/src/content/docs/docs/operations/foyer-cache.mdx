@@ -1,0 +1,127 @@
+---
+title: Configuring Foyer Cache
+description: Configuration and tuning guide for SlateDB's FoyerHybridCache block cache
+---
+
+[`FoyerHybridCache`][foyer-hybrid] wraps Foyer's `HybridCache` to give SlateDB a two-tier
+block cache: a fast in-memory tier backed by a persistent disk tier. For background on how
+it fits into SlateDB's cache layers, see the [Caching](/docs/design/caching) design doc.
+
+## Disk write pipeline
+
+Two mechanisms control whether an in-memory entry reaches disk. Both need configuration for
+the disk tier to be useful.
+
+### Write policy and admission
+
+The write policy (`HybridCachePolicy`) decides *when* Foyer submits an entry to the disk
+flusher. `WriteOnEviction` (default) submits entries only when they are evicted from the
+memory tier. `WriteOnInsertion` submits them on insert.
+
+The admission filter decides *whether* the flusher accepts a submitted entry. The default
+accepts everything.
+
+These two checks run in series. Under the defaults, entries only reach the flusher when
+memory pressure forces an eviction. If the memory tier is large enough to hold the working
+set, nothing is ever evicted, and nothing reaches disk until the db is closed.
+
+### Flusher pipeline tuning
+
+Even after an entry is submitted, the default `BlockEngineConfig` settings can silently drop
+it. The defaults allocate a single flusher thread (`with_flushers(1)`) and a 16 MiB buffer
+pool (`with_buffer_pool_size`). The submit queue threshold defaults to twice the buffer pool
+size (32 MiB). When inserts outpace the flusher, entries are dropped in two ways: the submit
+queue discards entries once it exceeds `submit_queue_size_threshold`, and the IO buffer drops
+entries that don't fit in the buffer pool.
+
+If this happens, you will notice the `storage_queue_channel_overflow` /
+`storage_queue_buffer_overflow` counters increment, which are available in foyer's internal
+metrics and accessible via `with_metrics_registry()` when you construct your cache.
+
+Ensure that your flusher and buffer pools are configured large enough to avoid the
+backpressure mechanism (see section on Monitoring below for sizing guidance):
+
+```rust
+use foyer::{
+    BlockEngineConfig, DeviceBuilder, FsDeviceBuilder, HybridCacheBuilder, PsyncIoEngineConfig,
+};
+use slatedb::db_cache::CachedEntry;
+use slatedb::db_cache::foyer_hybrid::FoyerHybridCache;
+
+let cache = HybridCacheBuilder::new()
+    .with_name("slatedb_block_cache")
+    .memory(8 * 1024 * 1024 * 1024)  // 8 GB memory tier
+    .with_weighter(|_, v: &CachedEntry| v.size())
+    .storage()
+    .with_io_engine_config(PsyncIoEngineConfig::new())
+    .with_engine_config(
+        BlockEngineConfig::new(
+            FsDeviceBuilder::new("/data/slatedb-cache")
+                .with_capacity(100 * 1024 * 1024 * 1024)  // 100 GB disk tier
+                .build()
+                .unwrap(),
+        )
+        .with_block_size(64 * 1024)
+        .with_flushers(4)
+        .with_buffer_pool_size(256 * 1024 * 1024)         // large buffer pool
+        .with_submit_queue_size_threshold(1024 * 1024 * 1024), // large queue size
+    )
+    .build()
+    .await
+    .unwrap();
+
+let cache = FoyerHybridCache::new_with_cache(cache);
+```
+
+### Write policy choice
+
+`WriteOnEviction` (default) only writes entries to disk under memory pressure or at
+`close()`. This is fine when the memory tier is smaller than the working set (so eviction
+happens naturally) or when you can guarantee a clean shutdown via `Db::close()` /
+`DbReader::close()`.
+
+`WriteOnInsertion` writes entries to disk on insert. At `close()` time, in-memory entries
+already have disk copies, so the shutdown flush only waits for the current queue to purge.
+
+Set the policy via `HybridCacheBuilder::with_policy()` before calling `.storage()`:
+
+```rust
+use foyer::{
+    BlockEngineConfig, DeviceBuilder, FsDeviceBuilder, HybridCacheBuilder,
+    HybridCachePolicy, PsyncIoEngineConfig,
+};
+
+let cache = HybridCacheBuilder::new()
+    // ...
+    .with_policy(HybridCachePolicy::WriteOnInsertion)
+    .storage()
+    // ...
+    .build()
+    .await
+    .unwrap();
+```
+
+## Shutdown
+
+If the process exits without calling `close()` (`SIGKILL`, panic, or dropping the `Db`
+without closing), the in-memory tier is lost. Only entries that Foyer wrote to disk during
+normal operation survive.
+
+:::caution
+Always call `Db::close()` or `DbReader::close()` before shutdown. Dropping without
+closing races with tokio runtime teardown and will lose in-memory cached entries.
+:::
+
+## Monitoring
+
+Foyer exposes internal metrics through `with_metrics_registry()` on the builder. Two
+counters are especially important to know whether you are dropping entries without
+tiering to disk:
+
+| Counter | Meaning |
+|---------|---------|
+| `storage_queue_channel_overflow` | Entries dropped because the submit queue was full |
+| `storage_queue_buffer_overflow` | Entries dropped because the IO buffer was full |
+
+If either counter is climbing, increase `with_flushers()`, `with_buffer_pool_size()`, or
+`with_submit_queue_size_threshold()` on your `BlockEngineConfig`.

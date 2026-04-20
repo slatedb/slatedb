@@ -14,8 +14,8 @@ use crate::compactor_state::{
     Compaction as CompactorCompaction, CompactionSpec as CompactorCompactionSpec, CompactionStatus,
     Compactions as CompactorCompactions, SourceId,
 };
-use crate::db_state::{self, SsTableInfo, SsTableInfoCodec, SstType};
-use crate::db_state::{ManifestCore, SsTableHandle, SsTableView};
+use crate::db_state::{self, FilterFormat, SsTableInfo, SsTableInfoCodec, SstType};
+use crate::db_state::{SsTableHandle, SsTableView};
 
 #[path = "./generated/root_generated.rs"]
 #[allow(warnings, clippy::disallowed_macros, clippy::disallowed_types, clippy::disallowed_methods, unreachable_pub)]
@@ -23,8 +23,8 @@ use crate::db_state::{ManifestCore, SsTableHandle, SsTableView};
 mod root_generated;
 pub(crate) use root_generated::{
     BlockMeta, BlockMetaArgs, BlockStats as FbBlockStats, BlockStatsArgs as FbBlockStatsArgs,
-    ManifestV1, ManifestV2, ManifestV2Args, SsTableIndex, SsTableIndexArgs,
-    SsTableInfo as FbSsTableInfo, SsTableInfoArgs, SstStats as FbSstStats,
+    FilterFormat as FbFilterFormat, ManifestV1, ManifestV2, ManifestV2Args, SsTableIndex,
+    SsTableIndexArgs, SsTableInfo as FbSsTableInfo, SsTableInfoArgs, SstStats as FbSstStats,
     SstStatsArgs as FbSstStatsArgs,
 };
 
@@ -43,7 +43,7 @@ use crate::flatbuffer_types::root_generated::{
     UuidArgs,
 };
 use crate::format::sst::SST_FORMAT_VERSION;
-use crate::manifest::{ExternalDb, Manifest};
+use crate::manifest::{ExternalDb, Manifest, ManifestCore};
 use crate::partitioned_keyspace::RangePartitionedKeySpace;
 use crate::seq_tracker::SequenceTracker;
 use crate::utils::clamp_allocated_size_bytes;
@@ -143,6 +143,7 @@ impl FlatBufferSsTableInfoCodec {
             sst_type: info.sst_type().into(),
             stats_offset: info.stats_offset(),
             stats_len: info.stats_len(),
+            filter_format: info.filter_format().into(),
         }
     }
 
@@ -286,6 +287,22 @@ impl FlatBufferManifestCodec {
                 .expect("Invalid encoding of sequence tracker in manifest."),
             None => SequenceTracker::new(),
         };
+        let external_dbs = manifest
+            .external_dbs()
+            .map(|external_dbs| {
+                external_dbs
+                    .iter()
+                    .map(|db| ExternalDb {
+                        path: db.path().to_string(),
+                        source_checkpoint_id: Self::decode_uuid(db.source_checkpoint_id()),
+                        final_checkpoint_id: db
+                            .final_checkpoint_id()
+                            .map(|id| Self::decode_uuid(id)),
+                        sst_ids: db.sst_ids().iter().map(|id| Compacted(id.ulid())).collect(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         let core = ManifestCore {
             initialized: manifest.initialized(),
             // In V1, view IDs are SST IDs, so both fields are the same.
@@ -302,20 +319,8 @@ impl FlatBufferManifestCodec {
             recent_snapshot_min_seq: manifest.recent_snapshot_min_seq(),
             sequence_tracker,
         };
-        let external_dbs = manifest.external_dbs().map(|external_dbs| {
-            external_dbs
-                .iter()
-                .map(|db| ExternalDb {
-                    path: db.path().to_string(),
-                    source_checkpoint_id: Self::decode_uuid(db.source_checkpoint_id()),
-                    final_checkpoint_id: db.final_checkpoint_id().map(|id| Self::decode_uuid(id)),
-                    sst_ids: db.sst_ids().iter().map(|id| Compacted(id.ulid())).collect(),
-                })
-                .collect()
-        });
-
         Ok(Manifest {
-            external_dbs: external_dbs.unwrap_or_default(),
+            external_dbs,
             core,
             writer_epoch: manifest.writer_epoch(),
             compactor_epoch: manifest.compactor_epoch(),
@@ -400,6 +405,22 @@ impl FlatBufferManifestCodec {
                 .expect("Invalid encoding of sequence tracker in manifest."),
             None => SequenceTracker::new(),
         };
+        let external_dbs = manifest
+            .external_dbs()
+            .map(|external_dbs| {
+                external_dbs
+                    .iter()
+                    .map(|db| ExternalDb {
+                        path: db.path().to_string(),
+                        source_checkpoint_id: Self::decode_uuid(db.source_checkpoint_id()),
+                        final_checkpoint_id: db
+                            .final_checkpoint_id()
+                            .map(|id| Self::decode_uuid(id)),
+                        sst_ids: db.sst_ids().iter().map(|id| Compacted(id.ulid())).collect(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         let core = ManifestCore {
             initialized: manifest.initialized(),
             last_compacted_l0_sst_view_id: l0_last_compacted,
@@ -416,20 +437,8 @@ impl FlatBufferManifestCodec {
             recent_snapshot_min_seq: manifest.recent_snapshot_min_seq(),
             sequence_tracker,
         };
-        let external_dbs = manifest.external_dbs().map(|external_dbs| {
-            external_dbs
-                .iter()
-                .map(|db| ExternalDb {
-                    path: db.path().to_string(),
-                    source_checkpoint_id: Self::decode_uuid(db.source_checkpoint_id()),
-                    final_checkpoint_id: db.final_checkpoint_id().map(|id| Self::decode_uuid(id)),
-                    sst_ids: db.sst_ids().iter().map(|id| Compacted(id.ulid())).collect(),
-                })
-                .collect()
-        });
-
         Ok(Manifest {
-            external_dbs: external_dbs.unwrap_or_default(),
+            external_dbs,
             core,
             writer_epoch: manifest.writer_epoch(),
             compactor_epoch: manifest.compactor_epoch(),
@@ -587,7 +596,6 @@ impl<'b> DbFlatBufferBuilder<'b> {
             None => None,
             Some(last_entry_vector) => Some(self.builder.create_vector(last_entry_vector)),
         };
-
         FbSsTableInfo::create(
             &mut self.builder,
             &SsTableInfoArgs {
@@ -601,6 +609,7 @@ impl<'b> DbFlatBufferBuilder<'b> {
                 sst_type: info.sst_type.into(),
                 stats_offset: info.stats_offset,
                 stats_len: info.stats_len,
+                filter_format: info.filter_format.into(),
             },
         )
     }
@@ -1147,6 +1156,25 @@ impl From<FbSstType> for SstType {
     }
 }
 
+impl From<FilterFormat> for FbFilterFormat {
+    fn from(value: FilterFormat) -> Self {
+        match value {
+            FilterFormat::Legacy => FbFilterFormat::Legacy,
+            FilterFormat::Composite => FbFilterFormat::Composite,
+        }
+    }
+}
+
+impl From<FbFilterFormat> for FilterFormat {
+    fn from(value: FbFilterFormat) -> Self {
+        match value {
+            FbFilterFormat::Legacy => FilterFormat::Legacy,
+            FbFilterFormat::Composite => FilterFormat::Composite,
+            _ => unreachable!("unknown FilterFormat value: {:?}", value),
+        }
+    }
+}
+
 impl From<CompressionFormat> for Option<CompressionCodec> {
     fn from(value: CompressionFormat) -> Self {
         match value {
@@ -1202,13 +1230,11 @@ mod tests {
     use crate::compactor_state::{
         Compaction, CompactionSpec, CompactionStatus, Compactions, SourceId,
     };
-    use crate::db_state::{
-        ManifestCore, SortedRun, SsTableHandle, SsTableId, SsTableInfo, SsTableView, SstType,
-    };
+    use crate::db_state::{SortedRun, SsTableHandle, SsTableId, SsTableInfo, SsTableView, SstType};
     use crate::flatbuffer_types::{
         FlatBufferCompactionsCodec, FlatBufferManifestCodec, SsTableIndexOwned,
     };
-    use crate::manifest::{ExternalDb, Manifest};
+    use crate::manifest::{ExternalDb, Manifest, ManifestCore};
     use crate::{checkpoint, error::SlateDBError};
     use slatedb_txn_obj::ObjectCodec;
     use std::collections::VecDeque;
@@ -1647,6 +1673,43 @@ mod tests {
 
         // then:
         assert_eq!(decoded.sst_type, SstType::Compacted);
+    }
+
+    #[test]
+    fn test_should_round_trip_filter_format_composite() {
+        use crate::db_state::{FilterFormat, SsTableInfoCodec};
+        let codec = super::FlatBufferSsTableInfoCodec {};
+        let info = SsTableInfo {
+            first_entry: Some(Bytes::from_static(b"key1")),
+            filter_format: FilterFormat::Composite,
+            ..Default::default()
+        };
+
+        let bytes = codec.encode(&info);
+        let decoded = codec.decode(&bytes).unwrap();
+
+        assert_eq!(decoded.filter_format, FilterFormat::Composite);
+        assert_eq!(decoded, info);
+    }
+
+    #[test]
+    fn test_should_default_filter_format_to_legacy_for_missing_field() {
+        use super::root_generated::SsTableInfoBuilder;
+        use crate::db_state::{FilterFormat, SsTableInfoCodec};
+
+        let mut fbb = flatbuffers::FlatBufferBuilder::new();
+        let first_entry = fbb.create_vector(b"key1");
+        let mut builder = SsTableInfoBuilder::new(&mut fbb);
+        builder.add_first_entry(first_entry);
+        // deliberately not calling builder.add_filter_format(...)
+        let info = builder.finish();
+        fbb.finish(info, None);
+        let bytes = Bytes::copy_from_slice(fbb.finished_data());
+
+        let codec = super::FlatBufferSsTableInfoCodec {};
+        let decoded = codec.decode(&bytes).unwrap();
+
+        assert_eq!(decoded.filter_format, FilterFormat::Legacy);
     }
 
     #[test]

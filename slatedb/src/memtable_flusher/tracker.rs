@@ -389,12 +389,13 @@ mod tests {
     use crate::config::{CheckpointOptions, Settings};
     use crate::db::DbInner;
     use crate::db_state::{
-        ManifestCore, SsTableHandle, SsTableId, SsTableInfo, SsTableView, SstType,
+        FilterFormat, SsTableHandle, SsTableId, SsTableInfo, SsTableView, SstType,
     };
     use crate::db_status::{ClosedResultWriter, DbStatusManager};
     use crate::error::SlateDBError;
     use crate::format::sst::{SsTableFormat, SST_FORMAT_VERSION_LATEST};
     use crate::manifest::store::{FenceableManifest, ManifestStore, StoredManifest};
+    use crate::manifest::ManifestCore;
     use crate::memtable_flusher::{FlushTarget, MemtableFlusher};
     use crate::object_stores::ObjectStores;
     use crate::paths::PathResolver;
@@ -516,8 +517,8 @@ mod tests {
         object_store: Arc<dyn ObjectStore>,
     ) -> usize {
         let manifest_store = ManifestStore::new(&Path::from(path), object_store);
-        let (_, manifest) = manifest_store.read_latest_manifest().await.unwrap();
-        manifest.core.checkpoints.len()
+        let manifest = manifest_store.read_latest_manifest().await.unwrap();
+        manifest.manifest.core.checkpoints.len()
     }
 
     fn seeded_l0_handle(first_key: &[u8]) -> SsTableHandle {
@@ -535,6 +536,7 @@ mod tests {
                 sst_type: SstType::Compacted,
                 stats_offset: 0,
                 stats_len: 0,
+                filter_format: FilterFormat::default(),
             },
         )
     }

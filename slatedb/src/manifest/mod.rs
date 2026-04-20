@@ -1,32 +1,254 @@
 use std::cmp::{max, min};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt::Debug;
 use std::ops::Bound;
 use std::sync::Arc;
 
 use crate::bytes_range::BytesRange;
+use crate::checkpoint::Checkpoint;
 use crate::rand::DbRand;
+use crate::seq_tracker::SequenceTracker;
 use crate::utils::IdGenerator;
 use bytes::Bytes;
-use log::warn;
+use log::{debug, warn};
 use serde::Serialize;
+use slatedb_txn_obj::DirtyObject;
 use uuid::Uuid;
 
 pub(crate) mod store;
 
-// TODO: should probably move these into manifest/mod.rs (this file)
-pub use crate::db_state::{
-    ManifestCore, SortedRun, SsTableHandle, SsTableId, SsTableInfo, SsTableView,
-};
+pub use crate::db_state::{SortedRun, SsTableHandle, SsTableId, SsTableInfo, SsTableView};
+
+/// Internal immutable in-memory view of a `.manifest` file.
+#[derive(Clone, PartialEq, Serialize, Debug)]
+pub(crate) struct ManifestCore {
+    /// Flag to indicate whether initialization has finished. When creating the initial manifest for
+    /// a root db (one that is not a clone), this flag will be set to true. When creating the initial
+    /// manifest for a clone db, this flag will be set to false and then updated to true once clone
+    /// initialization has completed.
+    pub initialized: bool,
+
+    /// The last compacted l0 SstView ID.
+    pub last_compacted_l0_sst_view_id: Option<ulid::Ulid>,
+
+    /// The SST ID of the last compacted L0. In V2, view IDs differ from SST IDs,
+    /// but V1 only stores SST IDs. This field preserves the SST ID so that a
+    /// V1-encoded manifest can correctly reference the compacted L0.
+    pub last_compacted_l0_sst_id: Option<ulid::Ulid>,
+
+    /// A list of the L0 SST views that are valid to read in the `compacted` folder.
+    pub l0: VecDeque<SsTableView>,
+
+    /// A list of the sorted runs that are valid to read in the `compacted` folder.
+    pub compacted: Vec<SortedRun>,
+
+    /// The next WAL SST ID to be assigned when creating a new WAL SST. The manifest FlatBuffer
+    /// contains `wal_id_last_seen`, which is always one less than this value.
+    pub next_wal_sst_id: u64,
+
+    /// the WAL ID after which the WAL replay should start. Default to 0,
+    /// which means all the WAL IDs should be greater than or equal to 1.
+    /// When a new L0 is flushed, we update this field to the recent
+    /// flushed WAL ID.
+    pub replay_after_wal_id: u64,
+
+    /// the `last_l0_clock_tick` includes all data in L0 and below --
+    /// WAL entries will have their latest ticks recovered on replay
+    /// into the in-memory state.
+    pub last_l0_clock_tick: i64,
+
+    /// it's persisted in the manifest, and only updated when a new L0
+    /// SST is created in the manifest.
+    pub last_l0_seq: u64,
+
+    /// Minimum sequence number across all recent in-memory snapshots. The compactor
+    /// needs this to determine whether it's safe to drop duplicate key writes. If a
+    /// recent snapshot still references an older version of a key, it should not be
+    /// recycled. This field is updated when a new L0 is flushed.
+    pub recent_snapshot_min_seq: u64,
+
+    /// A sequence tracker that maps sequence numbers to timestamps as defined in
+    /// RFC-0012.
+    pub sequence_tracker: SequenceTracker,
+
+    /// A list of checkpoints that are currently open.
+    pub checkpoints: Vec<Checkpoint>,
+
+    /// The URI of the object store dedicated specifically for WAL, if any.
+    pub wal_object_store_uri: Option<String>,
+}
+
+impl ManifestCore {
+    pub(crate) fn new() -> Self {
+        Self {
+            initialized: true,
+            last_compacted_l0_sst_view_id: None,
+            last_compacted_l0_sst_id: None,
+            l0: VecDeque::new(),
+            compacted: vec![],
+            next_wal_sst_id: 1,
+            replay_after_wal_id: 0,
+            last_l0_clock_tick: i64::MIN,
+            last_l0_seq: 0,
+            checkpoints: vec![],
+            wal_object_store_uri: None,
+            recent_snapshot_min_seq: 0,
+            sequence_tracker: SequenceTracker::new(),
+        }
+    }
+
+    pub(crate) fn new_with_wal_object_store(wal_object_store_uri: Option<String>) -> Self {
+        let mut this = Self::new();
+        this.wal_object_store_uri = wal_object_store_uri;
+        this
+    }
+
+    pub(crate) fn init_clone_db(&self) -> ManifestCore {
+        let mut clone = self.clone();
+        clone.initialized = false;
+        clone.checkpoints.clear();
+        clone
+    }
+
+    pub(crate) fn log_db_runs(&self) {
+        let l0s: Vec<_> = self.l0.iter().map(|l0| l0.estimate_size()).collect();
+        let compacted: Vec<_> = self
+            .compacted
+            .iter()
+            .map(|sr| (sr.id, sr.estimate_size()))
+            .collect();
+        debug!("DB Levels:");
+        debug!("-----------------");
+        debug!("{:?}", l0s);
+        debug!("{:?}", compacted);
+        debug!("-----------------");
+    }
+
+    pub(crate) fn find_checkpoint(&self, checkpoint_id: Uuid) -> Option<&Checkpoint> {
+        self.checkpoints.iter().find(|c| c.id == checkpoint_id)
+    }
+}
 
 #[derive(Clone, Serialize, PartialEq, Debug)]
 pub(crate) struct Manifest {
     // todo: try to make this writable only from module
     pub(crate) external_dbs: Vec<ExternalDb>,
+    #[serde(flatten)]
     pub(crate) core: ManifestCore,
     // todo: try to make this writable only from module
     pub(crate) writer_epoch: u64,
     pub(crate) compactor_epoch: u64,
+}
+
+/// A manifest snapshot paired with its version ID for monotonic ordering.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct VersionedManifest {
+    /// The version ID of the manifest.
+    pub(crate) id: u64,
+    /// The flattened manifest state at this version.
+    #[serde(flatten)]
+    pub(crate) manifest: Manifest,
+}
+
+impl VersionedManifest {
+    pub(crate) fn from_manifest(id: u64, manifest: Manifest) -> Self {
+        Self { id, manifest }
+    }
+
+    /// Returns the manifest version ID.
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+
+    /// Returns the writer epoch recorded in this manifest snapshot.
+    pub fn writer_epoch(&self) -> u64 {
+        self.manifest.writer_epoch
+    }
+
+    /// Returns the compactor epoch recorded in this manifest snapshot.
+    pub fn compactor_epoch(&self) -> u64 {
+        self.manifest.compactor_epoch
+    }
+
+    /// Returns the external DB references recorded in this manifest snapshot.
+    pub fn external_dbs(&self) -> &Vec<ExternalDb> {
+        &self.manifest.external_dbs
+    }
+
+    /// Returns whether initialization has completed.
+    pub fn initialized(&self) -> bool {
+        self.manifest.core.initialized
+    }
+
+    /// Returns the last compacted L0 SST view ID, if any.
+    pub fn last_compacted_l0_sst_view_id(&self) -> Option<ulid::Ulid> {
+        self.manifest.core.last_compacted_l0_sst_view_id
+    }
+
+    /// Returns the last compacted L0 SST ID, if any.
+    pub fn last_compacted_l0_sst_id(&self) -> Option<ulid::Ulid> {
+        self.manifest.core.last_compacted_l0_sst_id
+    }
+
+    /// Returns the current L0 SST views.
+    pub fn l0(&self) -> &VecDeque<SsTableView> {
+        &self.manifest.core.l0
+    }
+
+    /// Returns the current compacted sorted runs.
+    pub fn compacted(&self) -> &Vec<SortedRun> {
+        &self.manifest.core.compacted
+    }
+
+    /// Returns the next WAL SST ID to assign.
+    pub fn next_wal_sst_id(&self) -> u64 {
+        self.manifest.core.next_wal_sst_id
+    }
+
+    /// Returns the WAL replay watermark.
+    pub fn replay_after_wal_id(&self) -> u64 {
+        self.manifest.core.replay_after_wal_id
+    }
+
+    /// Returns the last persisted L0 clock tick.
+    pub fn last_l0_clock_tick(&self) -> i64 {
+        self.manifest.core.last_l0_clock_tick
+    }
+
+    /// Returns the last persisted L0 sequence number.
+    pub fn last_l0_seq(&self) -> u64 {
+        self.manifest.core.last_l0_seq
+    }
+
+    /// Returns the minimum sequence number still visible to recent snapshots.
+    pub fn recent_snapshot_min_seq(&self) -> u64 {
+        self.manifest.core.recent_snapshot_min_seq
+    }
+
+    /// Returns the persisted sequence tracker.
+    pub fn sequence_tracker(&self) -> &SequenceTracker {
+        &self.manifest.core.sequence_tracker
+    }
+
+    /// Returns the checkpoints tracked by this manifest snapshot.
+    pub fn checkpoints(&self) -> &Vec<Checkpoint> {
+        &self.manifest.core.checkpoints
+    }
+
+    /// Returns the dedicated WAL object store URI, if any.
+    pub fn wal_object_store_uri(&self) -> Option<&str> {
+        self.manifest.core.wal_object_store_uri.as_deref()
+    }
+
+    pub(crate) fn core(&self) -> &ManifestCore {
+        &self.manifest.core
+    }
+}
+
+impl From<DirtyObject<Manifest>> for VersionedManifest {
+    fn from(dirty: DirtyObject<Manifest>) -> Self {
+        Self::from_manifest(dirty.id.id(), dirty.value)
+    }
 }
 
 impl Manifest {
@@ -85,7 +307,6 @@ impl Manifest {
         }
     }
 
-    #[allow(unused)]
     pub(crate) fn projected(source_manifest: &Manifest, range: BytesRange) -> Manifest {
         let mut projected = source_manifest.clone();
         let mut sorter_runs_filtered = vec![];
@@ -139,8 +360,7 @@ impl Manifest {
         filtered_handles
     }
 
-    #[allow(unused)]
-    pub(crate) fn union(manifests: Vec<Manifest>) -> Manifest {
+    pub(crate) fn cloned_from_union(manifests: Vec<Manifest>) -> Manifest {
         if manifests.len() == 1 {
             manifests[0].clone()
         } else {
@@ -188,6 +408,10 @@ impl Manifest {
                 sorted_run.id = idx as u32;
             }
 
+            for manifest in &manifests {
+                core.last_l0_seq = max(core.last_l0_seq, manifest.core.last_l0_seq);
+            }
+
             Self {
                 external_dbs,
                 core,
@@ -227,11 +451,11 @@ impl Manifest {
 }
 
 #[derive(Clone, Serialize, PartialEq, Debug)]
-pub(crate) struct ExternalDb {
-    pub(crate) path: String,
-    pub(crate) source_checkpoint_id: Uuid,
-    pub(crate) final_checkpoint_id: Option<Uuid>,
-    pub(crate) sst_ids: Vec<SsTableId>,
+pub struct ExternalDb {
+    pub path: String,
+    pub source_checkpoint_id: Uuid,
+    pub final_checkpoint_id: Option<Uuid>,
+    pub sst_ids: Vec<SsTableId>,
 }
 
 impl Manifest {
@@ -259,10 +483,9 @@ mod tests {
 
     use super::{ExternalDb, Manifest};
     use crate::config::CheckpointOptions;
-    use crate::db_state::{
-        ManifestCore, SortedRun, SsTableHandle, SsTableId, SsTableInfo, SsTableView,
-    };
+    use crate::db_state::{SortedRun, SsTableHandle, SsTableId, SsTableInfo, SsTableView};
     use crate::format::sst::SST_FORMAT_VERSION_LATEST;
+    use crate::manifest::ManifestCore;
     use crate::rand::DbRand;
     use bytes::Bytes;
     use object_store::memory::InMemory;
@@ -297,12 +520,14 @@ mod tests {
 
         let clone_path = Path::from("/tmp/test_clone");
         let clone_manifest_store = Arc::new(ManifestStore::new(&clone_path, object_store.clone()));
-        let clone_stored_manifest = StoredManifest::create_uninitialized_clone(
-            Arc::clone(&clone_manifest_store),
-            parent_manifest.manifest(),
-            parent_path.to_string(),
-            checkpoint.id,
-            Arc::new(DbRand::default()),
+        let clone_stored_manifest = StoredManifest::store_uninitialized_clone(
+            clone_manifest_store,
+            Manifest::cloned(
+                parent_manifest.manifest(),
+                parent_path.to_string(),
+                checkpoint.id,
+                Arc::new(DbRand::default()),
+            ),
             Arc::new(DefaultSystemClock::new()),
         )
         .await
@@ -353,7 +578,7 @@ mod tests {
             .await
             .unwrap();
 
-        let latest_manifest_id = manifest_store.read_latest_manifest().await.unwrap().0;
+        let latest_manifest_id = manifest_store.read_latest_manifest().await.unwrap().id;
         assert_eq!(latest_manifest_id, checkpoint.manifest_id);
         assert_eq!(None, checkpoint.expire_time);
     }
@@ -615,7 +840,7 @@ mod tests {
         let expected_manifest =
             build_manifest(&test_case.expected, |alias| *sst_ids.get(alias).unwrap());
 
-        let union = Manifest::union(manifests);
+        let union = Manifest::cloned_from_union(manifests);
 
         assert_manifest_equal(&union, &expected_manifest, &sst_ids);
     }
@@ -647,7 +872,7 @@ mod tests {
             |_| SsTableId::Compacted(Ulid::new()),
         );
 
-        let union = Manifest::union(vec![manifest1, manifest2]);
+        let union = Manifest::cloned_from_union(vec![manifest1, manifest2]);
 
         // After union, we should have 5 SRs with IDs 0, 1, 2, 3, 4
         assert_eq!(union.core.compacted.len(), 5);
@@ -660,6 +885,31 @@ mod tests {
         for id in &sr_ids {
             assert!(seen.insert(id), "Duplicate SR ID: {}", id);
         }
+    }
+
+    #[test]
+    fn test_union_propagates_last_l0_seq() {
+        let mut manifest1 = build_manifest(
+            &SimpleManifest {
+                l0: vec![],
+                sorted_runs: vec![vec![SstEntry::projected("sr1", "a", "a".."m")]],
+            },
+            |_| SsTableId::Compacted(Ulid::new()),
+        );
+        manifest1.core.last_l0_seq = 100;
+
+        let mut manifest2 = build_manifest(
+            &SimpleManifest {
+                l0: vec![],
+                sorted_runs: vec![vec![SstEntry::projected("sr2", "m", "m"..)]],
+            },
+            |_| SsTableId::Compacted(Ulid::new()),
+        );
+        manifest2.core.last_l0_seq = 200;
+
+        let union = Manifest::cloned_from_union(vec![manifest1, manifest2]);
+
+        assert_eq!(union.core.last_l0_seq, 200);
     }
 
     #[test]
