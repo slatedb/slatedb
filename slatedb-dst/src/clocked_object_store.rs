@@ -80,7 +80,9 @@ impl ObjectStore for ClockedObjectStore {
         location: &Path,
         options: GetOptions,
     ) -> object_store::Result<GetResult> {
-        self.inner.get_opts(location, options).await
+        let mut result = self.inner.get_opts(location, options).await?;
+        result.meta = self.with_recorded_times(result.meta);
+        Ok(result)
     }
 
     async fn head(&self, location: &Path) -> object_store::Result<ObjectMeta> {

@@ -8,9 +8,11 @@
 #![cfg(tokio_unstable)]
 
 mod clocked_object_store;
+mod deterministic_local_filesystem;
 pub mod failing_object_store;
 mod harness;
 
+pub use self::deterministic_local_filesystem::DeterministicLocalFilesystem;
 pub use self::failing_object_store::{
     FailingObjectStore, FailingObjectStoreController, HttpFailBefore, HttpStatusError, Operation,
     StreamDirection, Toxic, ToxicKind,

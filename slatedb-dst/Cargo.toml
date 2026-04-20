@@ -28,7 +28,9 @@ rand = { workspace = true }
 slatedb = { workspace = true }
 slatedb-common = { workspace = true, features = ["test-util"] }
 tokio = { workspace = true, features = ["macros", "rt", "test-util"] }
+walkdir = { workspace = true }
 
 [dev-dependencies]
+tempfile = { workspace = true }
 [lints]
 workspace = true
