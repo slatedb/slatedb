@@ -246,12 +246,10 @@ impl HarnessBuilder {
     }
 
     fn run_blocking(self) -> Result<(), Error> {
-        let mut builder = tokio::runtime::Builder::new_current_thread();
-        builder.enable_all();
-        builder.rng_seed(RngSeed::from_bytes(&self.rand.seed().to_le_bytes()));
-
-        let runtime = builder
-            .build()
+        let seed = self.rand.next_u64();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .rng_seed(RngSeed::from_bytes(&seed.to_le_bytes()))
+            .build_local(Default::default())
             .expect("failed to build dst harness runtime");
         runtime.block_on(self.run_inner())
     }
@@ -268,7 +266,7 @@ impl HarnessBuilder {
         } = self;
 
         let seed = rand.seed();
-        let path = path.unwrap_or_else(|| default_path(&name, seed));
+        let path = path.unwrap_or_else(|| Path::from(format!("dst/{name}/seed-{seed:016x}")));
         let system_clock: Arc<dyn SystemClock> = Arc::new(MockSystemClock::new());
         let fp_registry = Arc::new(FailPointRegistry::new());
         let startup_seed = rand.rng().next_u64();
@@ -348,8 +346,4 @@ fn wrap_store(
     let clocked: Arc<dyn ObjectStore> =
         Arc::new(ClockedObjectStore::new(base, system_clock.clone()));
     Arc::new(FailingObjectStore::new(clocked, failures, system_clock))
-}
-
-fn default_path(name: &str, seed: u64) -> Path {
-    Path::from(format!("dst/{}/seed-{:016x}", name, seed))
 }
