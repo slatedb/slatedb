@@ -3,7 +3,6 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
-use futures::channel::oneshot;
 use object_store::memory::InMemory;
 use object_store::path::Path;
 use object_store::ObjectStore;
@@ -228,24 +227,11 @@ impl HarnessBuilder {
         self
     }
 
-    pub async fn run(self) -> Result<(), Error> {
+    pub fn run(self) -> Result<(), Error> {
         assert!(
             self.startup_factory.is_none(),
             "dst harness requires with_db(...) before run()"
         );
-        let (tx, rx) = oneshot::channel();
-        std::thread::Builder::new()
-            .name("slatedb-dst-harness".to_string())
-            .spawn(move || {
-                let _ = tx.send(self.run_blocking());
-            })
-            .expect("failed to spawn dst harness runtime thread");
-
-        rx.await
-            .expect("dst harness runtime terminated before producing a result")
-    }
-
-    fn run_blocking(self) -> Result<(), Error> {
         let seed = self.rand.next_u64();
         let runtime = tokio::runtime::Builder::new_current_thread()
             .rng_seed(RngSeed::from_bytes(&seed.to_le_bytes()))
