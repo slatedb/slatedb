@@ -1104,6 +1104,23 @@ impl DbMetadataOps for DbReader {
     }
 }
 
+impl DbReader {
+    /// See [`DbMetadataOps::manifest`].
+    pub fn manifest(&self) -> VersionedManifest {
+        <Self as DbMetadataOps>::manifest(self)
+    }
+
+    /// See [`DbMetadataOps::subscribe`].
+    pub fn subscribe(&self) -> tokio::sync::watch::Receiver<DbStatus> {
+        <Self as DbMetadataOps>::subscribe(self)
+    }
+
+    /// See [`DbMetadataOps::status`].
+    pub fn status(&self) -> DbStatus {
+        <Self as DbMetadataOps>::status(self)
+    }
+}
+
 /// Checks if the error or any of its sources is an `object_store::Error::NotFound` error.
 fn has_not_found_object_store_error(err: &(dyn std::error::Error + 'static)) -> bool {
     let mut current = Some(err);
@@ -1149,7 +1166,7 @@ mod tests {
     use crate::store_provider::StoreProvider;
     use crate::tablestore::TableStore;
     use crate::types::RowEntry;
-    use crate::{error::SlateDBError, test_utils, CloseReason, Db, DbMetadataOps};
+    use crate::{error::SlateDBError, test_utils, CloseReason, Db};
     use bytes::Bytes;
     use fail_parallel::FailPointRegistry;
     use object_store::memory::InMemory;

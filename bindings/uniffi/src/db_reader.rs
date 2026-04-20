@@ -1,7 +1,5 @@
 use std::sync::Arc;
 
-use slatedb::DbMetadataOps;
-
 use crate::config::{ReadOptions, ScanOptions};
 use crate::error::Error;
 use crate::iterator::DbIterator;

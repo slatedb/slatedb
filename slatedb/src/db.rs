@@ -1660,6 +1660,23 @@ impl DbMetadataOps for Db {
     }
 }
 
+impl Db {
+    /// See [`DbMetadataOps::manifest`].
+    pub fn manifest(&self) -> VersionedManifest {
+        <Self as DbMetadataOps>::manifest(self)
+    }
+
+    /// See [`DbMetadataOps::subscribe`].
+    pub fn subscribe(&self) -> tokio::sync::watch::Receiver<DbStatus> {
+        <Self as DbMetadataOps>::subscribe(self)
+    }
+
+    /// See [`DbMetadataOps::status`].
+    pub fn status(&self) -> DbStatus {
+        <Self as DbMetadataOps>::status(self)
+    }
+}
+
 /// Handle returned from write operations, containing metadata about the write.
 /// This structure is designed to be extensible for future enhancements.
 #[derive(Debug, Clone)]
