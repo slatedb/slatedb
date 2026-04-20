@@ -83,10 +83,8 @@ fn run_seed_once(seed: u64) -> Result<(u64, DateTime<Utc>), Box<dyn std::error::
     let tempdir = TempDir::new()?;
     let main_dir = tempdir.path().join("main");
     let wal_dir = tempdir.path().join("wal");
-    let cache_dir = tempdir.path().join("cache");
     std::fs::create_dir_all(&main_dir)?;
     std::fs::create_dir_all(&wal_dir)?;
-    std::fs::create_dir_all(&cache_dir)?;
 
     let rand = Arc::new(DbRand::new(seed));
     let system_clock = Arc::new(MockSystemClock::new());
@@ -100,22 +98,19 @@ fn run_seed_once(seed: u64) -> Result<(u64, DateTime<Utc>), Box<dyn std::error::
         .with_path(Path::from("determinism"))
         .with_main_object_store(main_store)
         .with_wal_object_store(wal_store)
-        .with_db(move |ctx| {
-            let cache_dir = cache_dir.clone();
-            async move {
-                let db_seed = ctx.rand().rng().next_u64();
-                let settings = build_settings(ctx.rand(), &cache_dir).await;
+        .with_db(move |ctx| async move {
+            let db_seed = ctx.rand().rng().next_u64();
+            let settings = build_settings(ctx.rand()).await;
 
-                let db = Db::builder(ctx.path().clone(), ctx.main_object_store())
-                    .with_wal_object_store(ctx.wal_object_store().expect("configured"))
-                    .with_system_clock(ctx.system_clock())
-                    .with_fp_registry(ctx.fp_registry())
-                    .with_seed(db_seed)
-                    .with_settings(settings)
-                    .build()
-                    .await?;
-                Ok(Arc::new(db))
-            }
+            let db = Db::builder(ctx.path().clone(), ctx.main_object_store())
+                .with_wal_object_store(ctx.wal_object_store().expect("configured"))
+                .with_system_clock(ctx.system_clock())
+                .with_fp_registry(ctx.fp_registry())
+                .with_seed(db_seed)
+                .with_settings(settings)
+                .build()
+                .await?;
+            Ok(Arc::new(db))
         })
         .actor("writer", ActorType::Foreground, 1, |ctx| async move {
             run_actor(ctx).await

@@ -1,4 +1,3 @@
-use std::path::Path as StdPath;
 use std::str::FromStr;
 use std::sync::Once;
 use std::time::Duration;
@@ -25,10 +24,11 @@ const COMPRESSION_CODECS: [Option<&str>; 5] = [
 
 /// Builds a randomized deterministic [`Settings`] value for DST scenarios.
 ///
-/// The returned settings are entirely derived from `rand`. Object-store caching
-/// is deterministically enabled or disabled per run; when enabled it uses
-/// `cache_root` as the cache directory.
-pub async fn build_settings(rand: &DbRand, cache_root: &StdPath) -> Settings {
+/// The returned settings are entirely derived from `rand`, except that
+/// object-store caching is always disabled. The cache implementation uses
+/// filesystem and blocking-task wakeups outside the seeded current-thread DST
+/// runtime, which breaks logical-clock determinism for background clock actors.
+pub async fn build_settings(rand: &DbRand) -> Settings {
     let mut rng = rand.rng();
     let flush_interval = rng.random_range(Duration::from_millis(1)..Duration::from_secs(60));
     let manifest_poll_interval = rng.random_range(Duration::from_secs(1)..Duration::from_secs(60));
@@ -45,9 +45,7 @@ pub async fn build_settings(rand: &DbRand, cache_root: &StdPath) -> Settings {
         } else {
             None
         };
-    let object_store_cache_enabled = rng.random_bool(0.5);
-
-    let mut settings = Settings {
+    let settings = Settings {
         flush_interval: Some(flush_interval),
         manifest_poll_interval,
         manifest_update_timeout,
@@ -87,12 +85,6 @@ pub async fn build_settings(rand: &DbRand, cache_root: &StdPath) -> Settings {
         wal_enabled: rng.random_bool(0.5),
         ..Default::default()
     };
-
-    if object_store_cache_enabled {
-        settings.object_store_cache_options.root_folder = Some(cache_root.to_path_buf());
-        settings.object_store_cache_options.part_size_bytes = 1024;
-        settings.object_store_cache_options.scan_interval = None;
-    }
 
     settings
 }

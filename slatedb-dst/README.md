@@ -113,10 +113,8 @@ fn dst_smoke_test() -> Result<(), Box<dyn std::error::Error>> {
     let tempdir = TempDir::new()?;
     let main_dir = tempdir.path().join("main");
     let wal_dir = tempdir.path().join("wal");
-    let cache_dir = tempdir.path().join("cache");
     std::fs::create_dir_all(&main_dir)?;
     std::fs::create_dir_all(&wal_dir)?;
-    std::fs::create_dir_all(&cache_dir)?;
 
     let main_store: Arc<dyn ObjectStore> =
         Arc::new(DeterministicLocalFilesystem::new_with_prefix(&main_dir)?);
@@ -127,23 +125,20 @@ fn dst_smoke_test() -> Result<(), Box<dyn std::error::Error>> {
         .with_path(Path::from("dst/smoke"))
         .with_main_object_store(main_store)
         .with_wal_object_store(wal_store)
-        .with_db(move |ctx| {
-            let cache_dir = cache_dir.clone();
-            async move {
-                let db_seed = ctx.rand().rng().next_u64();
-                let settings = build_settings(ctx.rand(), &cache_dir).await;
+        .with_db(move |ctx| async move {
+            let db_seed = ctx.rand().rng().next_u64();
+            let settings = build_settings(ctx.rand()).await;
 
-                let db = Db::builder(ctx.path().clone(), ctx.main_object_store())
-                    .with_wal_object_store(ctx.wal_object_store().expect("configured"))
-                    .with_system_clock(ctx.system_clock())
-                    .with_fp_registry(ctx.fp_registry())
-                    .with_seed(db_seed)
-                    .with_settings(settings)
-                    .build()
-                    .await?;
+            let db = Db::builder(ctx.path().clone(), ctx.main_object_store())
+                .with_wal_object_store(ctx.wal_object_store().expect("configured"))
+                .with_system_clock(ctx.system_clock())
+                .with_fp_registry(ctx.fp_registry())
+                .with_seed(db_seed)
+                .with_settings(settings)
+                .build()
+                .await?;
 
-                Ok(Arc::new(db))
-            }
+            Ok(Arc::new(db))
         })
         .actor("writer", ActorType::Foreground, 1, |ctx| async move {
             ctx.failures().add_toxic(Toxic {
@@ -339,7 +334,7 @@ metadata or stable listing order.
 
 ## `utils::build_settings`
 
-`utils::build_settings(rand, cache_root)` produces a randomized deterministic
+`utils::build_settings(rand)` produces a randomized deterministic
 `slatedb::Settings` value from a supplied `DbRand`.
 
 It currently randomizes several useful dimensions of a SlateDB run, including:
