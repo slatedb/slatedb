@@ -238,15 +238,10 @@ impl HarnessBuilder {
             .spawn(move || {
                 let _ = tx.send(self.run_blocking());
             })
-            .map_err(|error| {
-                Error::internal(format!(
-                    "failed to spawn dst harness runtime thread: {error}"
-                ))
-            })?;
+            .expect("failed to spawn dst harness runtime thread");
 
-        rx.await.map_err(|_| {
-            Error::internal("dst harness runtime terminated before producing a result".to_string())
-        })?
+        rx.await
+            .expect("dst harness runtime terminated before producing a result")
     }
 
     fn run_blocking(self) -> Result<(), Error> {
@@ -254,9 +249,9 @@ impl HarnessBuilder {
         builder.enable_all();
         builder.rng_seed(RngSeed::from_bytes(&self.seed.to_le_bytes()));
 
-        let runtime = builder.build().map_err(|error| {
-            Error::internal(format!("failed to build dst harness runtime: {error}"))
-        })?;
+        let runtime = builder
+            .build()
+            .expect("failed to build dst harness runtime");
         runtime.block_on(self.run_inner())
     }
 
@@ -330,9 +325,7 @@ impl HarnessBuilder {
                 }
                 Err(error) => {
                     join_set.abort_all();
-                    return Err(Error::internal(format!(
-                        "dst actor task failed to join: {error}"
-                    )));
+                    panic!("dst actor task failed to join: {error}");
                 }
             }
         }
