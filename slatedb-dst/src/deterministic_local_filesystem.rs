@@ -38,6 +38,7 @@ const IO_CHUNK_SIZE: usize = 64 * 1024;
 pub struct DeterministicLocalFilesystem {
     root: PathBuf,
     automatic_cleanup: bool,
+    attribute_state: Arc<AttributeState>,
     metadata_state: Arc<MetadataState>,
 }
 
@@ -45,6 +46,11 @@ pub struct DeterministicLocalFilesystem {
 struct MetadataState {
     last_modified: RwLock<HashMap<Path, DateTime<Utc>>>,
     next_micros: AtomicI64,
+}
+
+#[derive(Debug, Default)]
+struct AttributeState {
+    values: RwLock<HashMap<Path, Attributes>>,
 }
 
 impl Default for MetadataState {
@@ -84,6 +90,45 @@ impl MetadataState {
     }
 }
 
+impl AttributeState {
+    fn get(&self, location: &Path) -> Attributes {
+        self.values
+            .read()
+            .get(location)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    fn set(&self, location: &Path, attributes: Attributes) {
+        let mut values = self.values.write();
+        if attributes.is_empty() {
+            values.remove(location);
+        } else {
+            values.insert(location.clone(), attributes);
+        }
+    }
+
+    fn copy(&self, from: &Path, to: &Path) {
+        self.set(to, self.get(from));
+    }
+
+    fn rename(&self, from: &Path, to: &Path) {
+        let mut values = self.values.write();
+        match values.remove(from) {
+            Some(attributes) if !attributes.is_empty() => {
+                values.insert(to.clone(), attributes);
+            }
+            _ => {
+                values.remove(to);
+            }
+        }
+    }
+
+    fn remove(&self, location: &Path) {
+        self.values.write().remove(location);
+    }
+}
+
 impl std::fmt::Display for DeterministicLocalFilesystem {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{STORE_NAME}({})", self.root.display())
@@ -106,6 +151,7 @@ impl DeterministicLocalFilesystem {
         Ok(Self {
             root,
             automatic_cleanup: false,
+            attribute_state: Arc::new(AttributeState::default()),
             metadata_state: Arc::new(MetadataState::default()),
         })
     }
@@ -288,13 +334,11 @@ impl ObjectStore for DeterministicLocalFilesystem {
         if matches!(opts.mode, PutMode::Update(_)) {
             return Err(object_store::Error::NotImplemented);
         }
-        if !opts.attributes.is_empty() {
-            return Err(object_store::Error::NotImplemented);
-        }
 
         let path = self.path_to_filesystem(location)?;
         let (mut file, staging_path) = new_staged_upload(&path)?;
         yield_now().await;
+        let attributes = opts.attributes.clone();
 
         let result = async {
             write_payload_with_yields(&mut file, &payload).await?;
@@ -324,6 +368,7 @@ impl ObjectStore for DeterministicLocalFilesystem {
         if result.is_err() {
             let _ = std::fs::remove_file(&staging_path);
         } else {
+            self.attribute_state.set(location, attributes);
             self.metadata_state.record_modified(location);
         }
 
@@ -348,16 +393,14 @@ impl ObjectStore for DeterministicLocalFilesystem {
         location: &Path,
         opts: PutMultipartOptions,
     ) -> object_store::Result<Box<dyn MultipartUpload>> {
-        if !opts.attributes.is_empty() {
-            return Err(object_store::Error::NotImplemented);
-        }
-
         let dest = self.path_to_filesystem(location)?;
         let (file, src) = new_staged_upload(&dest)?;
         yield_now().await;
         Ok(Box::new(LocalUpload::new(
+            Arc::clone(&self.attribute_state),
             Arc::clone(&self.metadata_state),
             location.clone(),
+            opts.attributes,
             src,
             dest,
             file,
@@ -378,7 +421,7 @@ impl ObjectStore for DeterministicLocalFilesystem {
         if options.head {
             return Ok(GetResult {
                 payload: GetResultPayload::Stream(stream::empty().boxed()),
-                attributes: Attributes::default(),
+                attributes: self.attribute_state.get(location),
                 range: 0..0,
                 meta,
             });
@@ -398,7 +441,7 @@ impl ObjectStore for DeterministicLocalFilesystem {
 
         Ok(GetResult {
             payload: GetResultPayload::Stream(payload),
-            attributes: Attributes::default(),
+            attributes: self.attribute_state.get(location),
             range,
             meta,
         })
@@ -436,6 +479,7 @@ impl ObjectStore for DeterministicLocalFilesystem {
         let path = self.path_to_filesystem(location)?;
         match std::fs::remove_file(&path) {
             Ok(()) => {
+                self.attribute_state.remove(location);
                 self.metadata_state.remove(location);
             }
             Err(source) if source.kind() == ErrorKind::NotFound => {
@@ -533,6 +577,7 @@ impl ObjectStore for DeterministicLocalFilesystem {
                 Ok(()) => {
                     std::fs::rename(&staged, &to_path)
                         .expect("failed to move copied object into place");
+                    self.attribute_state.copy(from, to);
                     self.metadata_state.record_modified(to);
                     return Ok(());
                 }
@@ -557,6 +602,7 @@ impl ObjectStore for DeterministicLocalFilesystem {
             yield_now().await;
             match std::fs::rename(&from_path, &to_path) {
                 Ok(()) => {
+                    self.attribute_state.rename(from, to);
                     self.metadata_state.remove(from);
                     self.metadata_state.record_modified(to);
                     return Ok(());
@@ -581,6 +627,7 @@ impl ObjectStore for DeterministicLocalFilesystem {
             yield_now().await;
             match std::fs::hard_link(&from_path, &to_path) {
                 Ok(()) => {
+                    self.attribute_state.copy(from, to);
                     self.metadata_state.record_modified(to);
                     return Ok(());
                 }
@@ -627,14 +674,18 @@ struct LocalUpload {
 struct UploadState {
     dest: PathBuf,
     location: Path,
+    attributes: Attributes,
+    attribute_state: Arc<AttributeState>,
     file: Mutex<File>,
     metadata_state: Arc<MetadataState>,
 }
 
 impl LocalUpload {
     fn new(
+        attribute_state: Arc<AttributeState>,
         metadata_state: Arc<MetadataState>,
         location: Path,
+        attributes: Attributes,
         src: PathBuf,
         dest: PathBuf,
         file: File,
@@ -643,6 +694,8 @@ impl LocalUpload {
             state: Arc::new(UploadState {
                 dest,
                 location,
+                attributes,
+                attribute_state,
                 file: Mutex::new(file),
                 metadata_state,
             }),
@@ -699,6 +752,9 @@ impl MultipartUpload for LocalUpload {
             let _file = self.state.file.lock();
             std::fs::rename(&src, &self.state.dest).expect("failed to finalize multipart upload");
         }
+        self.state
+            .attribute_state
+            .set(&self.state.location, self.state.attributes.clone());
         self.state
             .metadata_state
             .record_modified(&self.state.location);
@@ -912,17 +968,33 @@ fn convert_walkdir_result(
 
 #[cfg(test)]
 mod tests {
+    use std::borrow::Cow;
     use std::sync::Arc;
     use std::time::Duration;
 
     use futures::TryStreamExt;
-    use object_store::{GetResultPayload, PutOptions};
+    use object_store::{
+        Attribute, AttributeValue, Attributes, GetResultPayload, PutMultipartOptions, PutOptions,
+    };
     use slatedb_common::clock::SystemClock;
     use slatedb_common::MockSystemClock;
     use tempfile::TempDir;
 
     use super::*;
     use crate::clocked_object_store::ClockedObjectStore;
+
+    fn test_attributes() -> Attributes {
+        let mut attributes = Attributes::new();
+        attributes.insert(
+            Attribute::ContentType,
+            AttributeValue::from("application/octet-stream"),
+        );
+        attributes.insert(
+            Attribute::Metadata(Cow::Borrowed("custom-key")),
+            AttributeValue::from("custom-value"),
+        );
+        attributes
+    }
 
     #[tokio::test]
     async fn should_list_objects_in_sorted_order() {
@@ -1019,5 +1091,140 @@ mod tests {
 
         assert_eq!(head.last_modified, get.meta.last_modified);
         assert_eq!(head.last_modified.timestamp_millis(), 1_000);
+    }
+
+    #[tokio::test]
+    async fn should_preserve_attributes_for_put_get_copy_and_rename() {
+        let tempdir = TempDir::new().unwrap();
+        let store = DeterministicLocalFilesystem::new_with_prefix(tempdir.path()).unwrap();
+        let attributes = test_attributes();
+
+        store
+            .put_opts(
+                &Path::from("foo"),
+                b"hello".to_vec().into(),
+                PutOptions {
+                    attributes: attributes.clone(),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        let head = store
+            .get_opts(
+                &Path::from("foo"),
+                GetOptions {
+                    head: true,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(head.attributes, attributes);
+
+        store
+            .copy(&Path::from("foo"), &Path::from("bar"))
+            .await
+            .unwrap();
+        let copied = store
+            .get_opts(
+                &Path::from("bar"),
+                GetOptions {
+                    head: true,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(copied.attributes, test_attributes());
+
+        store
+            .rename(&Path::from("bar"), &Path::from("baz"))
+            .await
+            .unwrap();
+        let renamed = store
+            .get_opts(
+                &Path::from("baz"),
+                GetOptions {
+                    head: true,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(renamed.attributes, test_attributes());
+    }
+
+    #[tokio::test]
+    async fn should_clear_attributes_on_overwrite_with_defaults() {
+        let tempdir = TempDir::new().unwrap();
+        let store = DeterministicLocalFilesystem::new_with_prefix(tempdir.path()).unwrap();
+
+        store
+            .put_opts(
+                &Path::from("foo"),
+                b"hello".to_vec().into(),
+                PutOptions {
+                    attributes: test_attributes(),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        store
+            .put_opts(
+                &Path::from("foo"),
+                b"world".to_vec().into(),
+                PutOptions::default(),
+            )
+            .await
+            .unwrap();
+
+        let result = store
+            .get_opts(
+                &Path::from("foo"),
+                GetOptions {
+                    head: true,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert!(result.attributes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn should_preserve_attributes_for_multipart_uploads() {
+        let tempdir = TempDir::new().unwrap();
+        let store = DeterministicLocalFilesystem::new_with_prefix(tempdir.path()).unwrap();
+        let attributes = test_attributes();
+
+        let mut upload = store
+            .put_multipart_opts(
+                &Path::from("foo"),
+                PutMultipartOptions {
+                    attributes: attributes.clone(),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        upload.put_part(b"he".to_vec().into()).await.unwrap();
+        upload.put_part(b"llo".to_vec().into()).await.unwrap();
+        upload.complete().await.unwrap();
+
+        let result = store
+            .get_opts(
+                &Path::from("foo"),
+                GetOptions {
+                    head: true,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.attributes, attributes);
     }
 }
