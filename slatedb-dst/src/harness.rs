@@ -24,27 +24,16 @@ type ActorFuture = Pin<Box<dyn Future<Output = Result<(), Error>> + Send + 'stat
 type StartupFactory = Box<dyn FnOnce(StartupCtx) -> DbFactoryFuture + Send + 'static>;
 type ActorFn = Arc<dyn Fn(ActorCtx) -> ActorFuture + Send + Sync + 'static>;
 
-#[derive(Clone, Debug)]
-pub struct Config {
-    seed: u64,
-}
-
-impl Config {
-    pub fn new(seed: u64) -> Self {
-        Self { seed }
-    }
-}
-
 pub struct Harness;
 
 impl Harness {
-    pub fn builder(config: Config) -> HarnessBuilder {
-        HarnessBuilder::new(config)
+    pub fn builder(seed: u64) -> HarnessBuilder {
+        HarnessBuilder::new(seed)
     }
 }
 
 pub struct HarnessBuilder {
-    config: Config,
+    seed: u64,
     path: Option<Path>,
     main_object_store: Arc<dyn ObjectStore>,
     wal_object_store: Option<Arc<dyn ObjectStore>>,
@@ -164,13 +153,10 @@ impl ActorCtx {
     }
 }
 
-#[derive(Debug, Default, Clone, Copy)]
-pub struct RunResult;
-
 impl HarnessBuilder {
-    fn new(config: Config) -> Self {
+    fn new(seed: u64) -> Self {
         Self {
-            config,
+            seed,
             path: None,
             main_object_store: Arc::new(InMemory::new()),
             wal_object_store: None,
@@ -239,7 +225,7 @@ impl HarnessBuilder {
         self
     }
 
-    pub async fn run(self) -> Result<RunResult, Error> {
+    pub async fn run(self) -> Result<(), Error> {
         if self.startup_factory.is_none() {
             return Err(Error::invalid(
                 "dst harness requires with_db(...) before run()".to_string(),
@@ -263,10 +249,10 @@ impl HarnessBuilder {
         })?
     }
 
-    fn run_blocking(self) -> Result<RunResult, Error> {
+    fn run_blocking(self) -> Result<(), Error> {
         let mut builder = tokio::runtime::Builder::new_current_thread();
         builder.enable_all();
-        builder.rng_seed(RngSeed::from_bytes(&self.config.seed.to_le_bytes()));
+        builder.rng_seed(RngSeed::from_bytes(&self.seed.to_le_bytes()));
 
         let runtime = builder.build().map_err(|error| {
             Error::internal(format!("failed to build dst harness runtime: {error}"))
@@ -274,12 +260,12 @@ impl HarnessBuilder {
         runtime.block_on(self.run_inner())
     }
 
-    async fn run_inner(self) -> Result<RunResult, Error> {
-        let path = self.path.unwrap_or_else(|| default_path(self.config.seed));
+    async fn run_inner(self) -> Result<(), Error> {
+        let path = self.path.unwrap_or_else(|| default_path(self.seed));
         let system_clock: Arc<dyn SystemClock> = Arc::new(MockSystemClock::new());
         let fp_registry = Arc::new(FailPointRegistry::new());
         let failures = Arc::new(FailingObjectStoreController::new(Arc::new(DbRand::new(
-            derive_seed(self.config.seed, "failures", "", 0),
+            derive_seed(self.seed, "failures", "", 0),
         ))));
 
         let main_object_store = wrap_store(
@@ -297,7 +283,7 @@ impl HarnessBuilder {
             wal_object_store: wal_object_store.clone(),
             system_clock: Arc::clone(&system_clock),
             fp_registry: Arc::clone(&fp_registry),
-            rand: Arc::new(DbRand::new(derive_seed(self.config.seed, "startup", "", 0))),
+            rand: Arc::new(DbRand::new(derive_seed(self.seed, "startup", "", 0))),
         };
 
         let db = self
@@ -324,7 +310,7 @@ impl HarnessBuilder {
                     role: role.clone(),
                     instance,
                     rand: Arc::new(DbRand::new(derive_seed(
-                        self.config.seed,
+                        self.seed,
                         "actor",
                         &role,
                         instance as u64,
@@ -351,7 +337,7 @@ impl HarnessBuilder {
             }
         }
 
-        Ok(RunResult)
+        Ok(())
     }
 }
 
