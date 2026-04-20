@@ -6,8 +6,8 @@
 //! - starts from a fresh shared [`MockSystemClock`]
 //! - opens a real [`Db`] using randomized deterministic settings from
 //!   [`build_settings`]
-//! - exercises 500 randomized actor steps covering writes, deletes, flushes,
-//!   explicit clock advancement, and DB reopen paths against deterministic
+//! - runs a background clock actor alongside 500 randomized writer-actor steps
+//!   covering writes, deletes, flushes, and idle steps against deterministic
 //!   local filesystem-backed object stores
 //! - compares the next random `u64` and current clock time after the run
 //!
@@ -115,6 +115,9 @@ fn run_seed_once(seed: u64) -> Result<(u64, DateTime<Utc>), Box<dyn std::error::
         .actor("writer", ActorType::Foreground, 1, |ctx| async move {
             run_actor(ctx).await
         })
+        .actor("clock", ActorType::Background, 1, |ctx| async move {
+            run_clock(ctx).await
+        })
         .run()?;
 
     let next_u64 = rand.rng().next_u64();
@@ -129,9 +132,8 @@ fn run_seed_once(seed: u64) -> Result<(u64, DateTime<Utc>), Box<dyn std::error::
 /// - object-store fault injection via a deterministic latency toxic on writes
 /// - actor-local RNG consumption on every iteration
 /// - 500 randomly chosen operations across a fixed key set
-/// - a weighted mix of puts, deletes, memtable flushes, and advance-only steps
-///   selected from the actor RNG
-/// - explicit mock-clock advancement on most, but not all, steps
+/// - a weighted mix of puts, deletes, memtable flushes, and idle steps selected
+///   from the actor RNG
 async fn run_actor(ctx: ActorCtx) -> Result<(), Error> {
     ctx.failures().add_toxic(Toxic {
         name: "put-latency".into(),
@@ -173,11 +175,6 @@ async fn run_actor(ctx: ActorCtx) -> Result<(), Error> {
             }
             _ => {}
         }
-
-        if rand_value % 8 != 0 {
-            ctx.advance_time(Duration::from_millis(1 + (rand_value % 5)))
-                .await;
-        }
     }
 
     db.flush_with_options(FlushOptions {
@@ -185,4 +182,12 @@ async fn run_actor(ctx: ActorCtx) -> Result<(), Error> {
     })
     .await?;
     db.close().await
+}
+
+async fn run_clock(ctx: ActorCtx) -> Result<(), Error> {
+    loop {
+        let rand_value = ctx.rand().rng().next_u64();
+        ctx.advance_time(Duration::from_millis(1 + (rand_value % 5)))
+            .await;
+    }
 }
