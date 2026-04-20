@@ -37,10 +37,10 @@ use crate::flatbuffer_types::root_generated::{
     CompactedSsTableArgs, CompactedSsTableV2, CompactedSsTableV2Args, CompactedSsTableView,
     CompactedSsTableViewArgs, Compaction as FbCompaction, CompactionArgs as FbCompactionArgs,
     CompactionSpec as FbCompactionSpec, CompactionStatus as FbCompactionStatus, CompactionsV1,
-    CompactionsV1Args, CompressionFormat, ManifestV1Args, SortedRun as FbSortedRunV1,
-    SortedRunArgs as FbSortedRunV1Args, SortedRunV2, SortedRunV2Args, SstType as FbSstType,
-    TieredCompactionSpec, TieredCompactionSpecArgs, Ulid as FbUlid, UlidArgs as FbUlidArgs, Uuid,
-    UuidArgs,
+    CompactionsV1Args, CompressionFormat, LeveledCompactionSpec, LeveledCompactionSpecArgs,
+    ManifestV1Args, SortedRun as FbSortedRunV1, SortedRunArgs as FbSortedRunV1Args, SortedRunV2,
+    SortedRunV2Args, SstType as FbSstType, TieredCompactionSpec, TieredCompactionSpecArgs,
+    Ulid as FbUlid, UlidArgs as FbUlidArgs, Uuid, UuidArgs,
 };
 use crate::format::sst::SST_FORMAT_VERSION;
 use crate::manifest::{ExternalDb, Manifest, ManifestCore};
@@ -543,6 +543,37 @@ impl FlatBufferCompactionsCodec {
                 let destination = sorted_runs.iter().copied().min().unwrap_or(0);
                 Ok(CompactorCompactionSpec::new(sources, destination))
             }
+            FbCompactionSpec::LeveledCompactionSpec => {
+                let Some(spec) = compaction.spec_as_leveled_compaction_spec() else {
+                    return Err(SlateDBError::InvalidCompaction);
+                };
+                let mut sources = Vec::new();
+                if let Some(view_ids) = spec.l0_view_ids() {
+                    sources.extend(view_ids.iter().map(|id| SourceId::SstView(id.ulid())));
+                }
+
+                // Collect per-SR SST selections for file-level compaction.
+                // Maps SR ID -> set of selected view ULIDs.
+                let mut sst_selections: std::collections::HashMap<u32, Vec<Ulid>> =
+                    std::collections::HashMap::new();
+                if let Some(selections) = spec.sr_sst_selections() {
+                    for sel in selections.iter() {
+                        if let Some(view_ids) = sel.view_ids() {
+                            let views: Vec<Ulid> = view_ids.iter().map(|id| id.ulid()).collect();
+                            sst_selections.insert(sel.sr_id(), views);
+                        }
+                    }
+                }
+
+                let sorted_runs: Vec<u32> = spec
+                    .sorted_runs()
+                    .map(|runs| runs.iter().collect())
+                    .unwrap_or_default();
+                sources.extend(sorted_runs.iter().copied().map(SourceId::SortedRun));
+
+                let destination = spec.destination();
+                Ok(CompactorCompactionSpec::new(sources, destination))
+            }
             _ => Err(SlateDBError::InvalidCompaction),
         }
     }
@@ -827,21 +858,47 @@ impl<'b> DbFlatBufferBuilder<'b> {
                 SourceId::SortedRun(id) => sorted_runs.push(*id),
             }
         }
-        let l0_view_ids = (!view_ids.is_empty()).then(|| self.add_ulids(view_ids.iter()));
-        let sorted_runs =
-            (!sorted_runs.is_empty()).then(|| self.builder.create_vector(sorted_runs.as_slice()));
-        let tiered_spec = TieredCompactionSpec::create(
-            &mut self.builder,
-            &TieredCompactionSpecArgs {
-                ssts: None,
-                sorted_runs,
-                l0_view_ids,
-            },
-        );
-        (
-            FbCompactionSpec::TieredCompactionSpec,
-            tiered_spec.as_union_value(),
-        )
+
+        // Use LeveledCompactionSpec when the destination cannot be derived
+        // from min(sorted_runs). This happens with leveled compaction where
+        // the destination level may not be among the sources (e.g. compacting
+        // L1 into a not-yet-existing L2). TieredCompactionSpec is used
+        // otherwise for backward compatibility.
+        let derived_dest = sorted_runs.iter().copied().min().unwrap_or(0);
+        if spec.destination() != derived_dest {
+            let l0_view_ids = (!view_ids.is_empty()).then(|| self.add_ulids(view_ids.iter()));
+            let sr_vec = (!sorted_runs.is_empty())
+                .then(|| self.builder.create_vector(sorted_runs.as_slice()));
+            let leveled_spec = LeveledCompactionSpec::create(
+                &mut self.builder,
+                &LeveledCompactionSpecArgs {
+                    l0_view_ids,
+                    sorted_runs: sr_vec,
+                    destination: spec.destination(),
+                    sr_sst_selections: None,
+                },
+            );
+            (
+                FbCompactionSpec::LeveledCompactionSpec,
+                leveled_spec.as_union_value(),
+            )
+        } else {
+            let l0_view_ids = (!view_ids.is_empty()).then(|| self.add_ulids(view_ids.iter()));
+            let sorted_runs = (!sorted_runs.is_empty())
+                .then(|| self.builder.create_vector(sorted_runs.as_slice()));
+            let tiered_spec = TieredCompactionSpec::create(
+                &mut self.builder,
+                &TieredCompactionSpecArgs {
+                    ssts: None,
+                    sorted_runs,
+                    l0_view_ids,
+                },
+            );
+            (
+                FbCompactionSpec::TieredCompactionSpec,
+                tiered_spec.as_union_value(),
+            )
+        }
     }
 
     fn add_compaction(&mut self, compaction: &CompactorCompaction) -> WIPOffset<FbCompaction<'b>> {
@@ -1562,6 +1619,67 @@ mod tests {
                 .expect("missing sr compaction"),
             &compaction_sr
         );
+    }
+
+    #[test]
+    fn test_should_encode_decode_leveled_compaction_spec() {
+        // Tests LeveledCompactionSpec round-trip:
+        // 1. Explicit destination that differs from min(sorted_runs)
+        // 2. Backward compat: specs where dest == min(sorted_runs) still use TieredCompactionSpec
+
+        // Case 1: destination (4) != min(sorted_runs) (5) — uses LeveledCompactionSpec
+        let compaction_leveled = Compaction::new(
+            ulid::Ulid::new(),
+            CompactionSpec::new(vec![SourceId::SortedRun(5)], 4),
+        )
+        .with_status(CompactionStatus::Submitted);
+
+        // Case 2: destination == min(sorted_runs) — uses TieredCompactionSpec (backward compat)
+        let compaction_tiered = Compaction::new(
+            ulid::Ulid::new(),
+            CompactionSpec::new(vec![SourceId::SortedRun(5), SourceId::SortedRun(3)], 3),
+        )
+        .with_status(CompactionStatus::Running);
+
+        // Case 3: L0-only with destination 5, no sorted runs — min defaults to 0,
+        // so destination (5) != 0 — uses LeveledCompactionSpec
+        let compaction_l0_leveled = Compaction::new(
+            ulid::Ulid::new(),
+            CompactionSpec::new(vec![SourceId::SstView(ulid::Ulid::new())], 5),
+        )
+        .with_status(CompactionStatus::Completed);
+
+        let mut compactions = Compactions::new(42);
+        compactions.insert(compaction_leveled.clone());
+        compactions.insert(compaction_tiered.clone());
+        compactions.insert(compaction_l0_leveled.clone());
+
+        let codec = FlatBufferCompactionsCodec {};
+        let bytes = codec.encode(&compactions);
+        let decoded = codec.decode(&bytes).expect("failed to decode");
+
+        // Verify all three round-trip correctly
+        let decoded_leveled = decoded
+            .get(&compaction_leveled.id())
+            .expect("missing leveled compaction");
+        assert_eq!(decoded_leveled.spec(), compaction_leveled.spec());
+        assert_eq!(decoded_leveled.spec().destination(), 4);
+        assert_eq!(
+            decoded_leveled.spec().sources(),
+            &vec![SourceId::SortedRun(5)]
+        );
+
+        let decoded_tiered = decoded
+            .get(&compaction_tiered.id())
+            .expect("missing tiered compaction");
+        assert_eq!(decoded_tiered.spec(), compaction_tiered.spec());
+        assert_eq!(decoded_tiered.spec().destination(), 3);
+
+        let decoded_l0 = decoded
+            .get(&compaction_l0_leveled.id())
+            .expect("missing l0 leveled compaction");
+        assert_eq!(decoded_l0.spec(), compaction_l0_leveled.spec());
+        assert_eq!(decoded_l0.spec().destination(), 5);
     }
 
     #[test]

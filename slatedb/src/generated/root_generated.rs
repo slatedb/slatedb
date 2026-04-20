@@ -372,12 +372,13 @@ impl flatbuffers::SimpleToVerifyInSlice for FilterFormat {}
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
 pub const ENUM_MIN_COMPACTION_SPEC: u8 = 0;
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
-pub const ENUM_MAX_COMPACTION_SPEC: u8 = 1;
+pub const ENUM_MAX_COMPACTION_SPEC: u8 = 2;
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
 #[allow(non_camel_case_types)]
-pub const ENUM_VALUES_COMPACTION_SPEC: [CompactionSpec; 2] = [
+pub const ENUM_VALUES_COMPACTION_SPEC: [CompactionSpec; 3] = [
   CompactionSpec::NONE,
   CompactionSpec::TieredCompactionSpec,
+  CompactionSpec::LeveledCompactionSpec,
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
@@ -387,18 +388,21 @@ pub struct CompactionSpec(pub u8);
 impl CompactionSpec {
   pub const NONE: Self = Self(0);
   pub const TieredCompactionSpec: Self = Self(1);
+  pub const LeveledCompactionSpec: Self = Self(2);
 
   pub const ENUM_MIN: u8 = 0;
-  pub const ENUM_MAX: u8 = 1;
+  pub const ENUM_MAX: u8 = 2;
   pub const ENUM_VALUES: &'static [Self] = &[
     Self::NONE,
     Self::TieredCompactionSpec,
+    Self::LeveledCompactionSpec,
   ];
   /// Returns the variant's name or "" if unknown.
   pub fn variant_name(self) -> Option<&'static str> {
     match self {
       Self::NONE => Some("NONE"),
       Self::TieredCompactionSpec => Some("TieredCompactionSpec"),
+      Self::LeveledCompactionSpec => Some("LeveledCompactionSpec"),
       _ => None,
     }
   }
@@ -2537,6 +2541,120 @@ impl core::fmt::Debug for SortedRunV2<'_> {
       ds.finish()
   }
 }
+pub enum SortedRunSstSelectionOffset {}
+#[derive(Copy, Clone, PartialEq)]
+
+pub struct SortedRunSstSelection<'a> {
+  pub _tab: flatbuffers::Table<'a>,
+}
+
+impl<'a> flatbuffers::Follow<'a> for SortedRunSstSelection<'a> {
+  type Inner = SortedRunSstSelection<'a>;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    Self { _tab: flatbuffers::Table::new(buf, loc) }
+  }
+}
+
+impl<'a> SortedRunSstSelection<'a> {
+  pub const VT_SR_ID: flatbuffers::VOffsetT = 4;
+  pub const VT_VIEW_IDS: flatbuffers::VOffsetT = 6;
+
+  #[inline]
+  pub unsafe fn init_from_table(table: flatbuffers::Table<'a>) -> Self {
+    SortedRunSstSelection { _tab: table }
+  }
+  #[allow(unused_mut)]
+  pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: flatbuffers::Allocator + 'bldr>(
+    _fbb: &'mut_bldr mut flatbuffers::FlatBufferBuilder<'bldr, A>,
+    args: &'args SortedRunSstSelectionArgs<'args>
+  ) -> flatbuffers::WIPOffset<SortedRunSstSelection<'bldr>> {
+    let mut builder = SortedRunSstSelectionBuilder::new(_fbb);
+    if let Some(x) = args.view_ids { builder.add_view_ids(x); }
+    builder.add_sr_id(args.sr_id);
+    builder.finish()
+  }
+
+
+  #[inline]
+  pub fn sr_id(&self) -> u32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u32>(SortedRunSstSelection::VT_SR_ID, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn view_ids(&self) -> Option<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<Ulid<'a>>>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<Ulid>>>>(SortedRunSstSelection::VT_VIEW_IDS, None)}
+  }
+}
+
+impl flatbuffers::Verifiable for SortedRunSstSelection<'_> {
+  #[inline]
+  fn run_verifier(
+    v: &mut flatbuffers::Verifier, pos: usize
+  ) -> Result<(), flatbuffers::InvalidFlatbuffer> {
+    use self::flatbuffers::Verifiable;
+    v.visit_table(pos)?
+     .visit_field::<u32>("sr_id", Self::VT_SR_ID, false)?
+     .visit_field::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'_, flatbuffers::ForwardsUOffset<Ulid>>>>("view_ids", Self::VT_VIEW_IDS, false)?
+     .finish();
+    Ok(())
+  }
+}
+pub struct SortedRunSstSelectionArgs<'a> {
+    pub sr_id: u32,
+    pub view_ids: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<Ulid<'a>>>>>,
+}
+impl<'a> Default for SortedRunSstSelectionArgs<'a> {
+  #[inline]
+  fn default() -> Self {
+    SortedRunSstSelectionArgs {
+      sr_id: 0,
+      view_ids: None,
+    }
+  }
+}
+
+pub struct SortedRunSstSelectionBuilder<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> {
+  fbb_: &'b mut flatbuffers::FlatBufferBuilder<'a, A>,
+  start_: flatbuffers::WIPOffset<flatbuffers::TableUnfinishedWIPOffset>,
+}
+impl<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> SortedRunSstSelectionBuilder<'a, 'b, A> {
+  #[inline]
+  pub fn add_sr_id(&mut self, sr_id: u32) {
+    self.fbb_.push_slot::<u32>(SortedRunSstSelection::VT_SR_ID, sr_id, 0);
+  }
+  #[inline]
+  pub fn add_view_ids(&mut self, view_ids: flatbuffers::WIPOffset<flatbuffers::Vector<'b , flatbuffers::ForwardsUOffset<Ulid<'b >>>>) {
+    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(SortedRunSstSelection::VT_VIEW_IDS, view_ids);
+  }
+  #[inline]
+  pub fn new(_fbb: &'b mut flatbuffers::FlatBufferBuilder<'a, A>) -> SortedRunSstSelectionBuilder<'a, 'b, A> {
+    let start = _fbb.start_table();
+    SortedRunSstSelectionBuilder {
+      fbb_: _fbb,
+      start_: start,
+    }
+  }
+  #[inline]
+  pub fn finish(self) -> flatbuffers::WIPOffset<SortedRunSstSelection<'a>> {
+    let o = self.fbb_.end_table(self.start_);
+    flatbuffers::WIPOffset::new(o.value())
+  }
+}
+
+impl core::fmt::Debug for SortedRunSstSelection<'_> {
+  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+    let mut ds = f.debug_struct("SortedRunSstSelection");
+      ds.field("sr_id", &self.sr_id());
+      ds.field("view_ids", &self.view_ids());
+      ds.finish()
+  }
+}
 pub enum TieredCompactionSpecOffset {}
 #[derive(Copy, Clone, PartialEq)]
 
@@ -2668,6 +2786,154 @@ impl core::fmt::Debug for TieredCompactionSpec<'_> {
       ds.finish()
   }
 }
+pub enum LeveledCompactionSpecOffset {}
+#[derive(Copy, Clone, PartialEq)]
+
+pub struct LeveledCompactionSpec<'a> {
+  pub _tab: flatbuffers::Table<'a>,
+}
+
+impl<'a> flatbuffers::Follow<'a> for LeveledCompactionSpec<'a> {
+  type Inner = LeveledCompactionSpec<'a>;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    Self { _tab: flatbuffers::Table::new(buf, loc) }
+  }
+}
+
+impl<'a> LeveledCompactionSpec<'a> {
+  pub const VT_L0_VIEW_IDS: flatbuffers::VOffsetT = 4;
+  pub const VT_SORTED_RUNS: flatbuffers::VOffsetT = 6;
+  pub const VT_DESTINATION: flatbuffers::VOffsetT = 8;
+  pub const VT_SR_SST_SELECTIONS: flatbuffers::VOffsetT = 10;
+
+  #[inline]
+  pub unsafe fn init_from_table(table: flatbuffers::Table<'a>) -> Self {
+    LeveledCompactionSpec { _tab: table }
+  }
+  #[allow(unused_mut)]
+  pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: flatbuffers::Allocator + 'bldr>(
+    _fbb: &'mut_bldr mut flatbuffers::FlatBufferBuilder<'bldr, A>,
+    args: &'args LeveledCompactionSpecArgs<'args>
+  ) -> flatbuffers::WIPOffset<LeveledCompactionSpec<'bldr>> {
+    let mut builder = LeveledCompactionSpecBuilder::new(_fbb);
+    if let Some(x) = args.sr_sst_selections { builder.add_sr_sst_selections(x); }
+    builder.add_destination(args.destination);
+    if let Some(x) = args.sorted_runs { builder.add_sorted_runs(x); }
+    if let Some(x) = args.l0_view_ids { builder.add_l0_view_ids(x); }
+    builder.finish()
+  }
+
+
+  #[inline]
+  pub fn l0_view_ids(&self) -> Option<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<Ulid<'a>>>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<Ulid>>>>(LeveledCompactionSpec::VT_L0_VIEW_IDS, None)}
+  }
+  #[inline]
+  pub fn sorted_runs(&self) -> Option<flatbuffers::Vector<'a, u32>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'a, u32>>>(LeveledCompactionSpec::VT_SORTED_RUNS, None)}
+  }
+  #[inline]
+  pub fn destination(&self) -> u32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u32>(LeveledCompactionSpec::VT_DESTINATION, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn sr_sst_selections(&self) -> Option<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<SortedRunSstSelection<'a>>>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<SortedRunSstSelection>>>>(LeveledCompactionSpec::VT_SR_SST_SELECTIONS, None)}
+  }
+}
+
+impl flatbuffers::Verifiable for LeveledCompactionSpec<'_> {
+  #[inline]
+  fn run_verifier(
+    v: &mut flatbuffers::Verifier, pos: usize
+  ) -> Result<(), flatbuffers::InvalidFlatbuffer> {
+    use self::flatbuffers::Verifiable;
+    v.visit_table(pos)?
+     .visit_field::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'_, flatbuffers::ForwardsUOffset<Ulid>>>>("l0_view_ids", Self::VT_L0_VIEW_IDS, false)?
+     .visit_field::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'_, u32>>>("sorted_runs", Self::VT_SORTED_RUNS, false)?
+     .visit_field::<u32>("destination", Self::VT_DESTINATION, false)?
+     .visit_field::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'_, flatbuffers::ForwardsUOffset<SortedRunSstSelection>>>>("sr_sst_selections", Self::VT_SR_SST_SELECTIONS, false)?
+     .finish();
+    Ok(())
+  }
+}
+pub struct LeveledCompactionSpecArgs<'a> {
+    pub l0_view_ids: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<Ulid<'a>>>>>,
+    pub sorted_runs: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, u32>>>,
+    pub destination: u32,
+    pub sr_sst_selections: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<SortedRunSstSelection<'a>>>>>,
+}
+impl<'a> Default for LeveledCompactionSpecArgs<'a> {
+  #[inline]
+  fn default() -> Self {
+    LeveledCompactionSpecArgs {
+      l0_view_ids: None,
+      sorted_runs: None,
+      destination: 0,
+      sr_sst_selections: None,
+    }
+  }
+}
+
+pub struct LeveledCompactionSpecBuilder<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> {
+  fbb_: &'b mut flatbuffers::FlatBufferBuilder<'a, A>,
+  start_: flatbuffers::WIPOffset<flatbuffers::TableUnfinishedWIPOffset>,
+}
+impl<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> LeveledCompactionSpecBuilder<'a, 'b, A> {
+  #[inline]
+  pub fn add_l0_view_ids(&mut self, l0_view_ids: flatbuffers::WIPOffset<flatbuffers::Vector<'b , flatbuffers::ForwardsUOffset<Ulid<'b >>>>) {
+    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(LeveledCompactionSpec::VT_L0_VIEW_IDS, l0_view_ids);
+  }
+  #[inline]
+  pub fn add_sorted_runs(&mut self, sorted_runs: flatbuffers::WIPOffset<flatbuffers::Vector<'b , u32>>) {
+    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(LeveledCompactionSpec::VT_SORTED_RUNS, sorted_runs);
+  }
+  #[inline]
+  pub fn add_destination(&mut self, destination: u32) {
+    self.fbb_.push_slot::<u32>(LeveledCompactionSpec::VT_DESTINATION, destination, 0);
+  }
+  #[inline]
+  pub fn add_sr_sst_selections(&mut self, sr_sst_selections: flatbuffers::WIPOffset<flatbuffers::Vector<'b , flatbuffers::ForwardsUOffset<SortedRunSstSelection<'b >>>>) {
+    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(LeveledCompactionSpec::VT_SR_SST_SELECTIONS, sr_sst_selections);
+  }
+  #[inline]
+  pub fn new(_fbb: &'b mut flatbuffers::FlatBufferBuilder<'a, A>) -> LeveledCompactionSpecBuilder<'a, 'b, A> {
+    let start = _fbb.start_table();
+    LeveledCompactionSpecBuilder {
+      fbb_: _fbb,
+      start_: start,
+    }
+  }
+  #[inline]
+  pub fn finish(self) -> flatbuffers::WIPOffset<LeveledCompactionSpec<'a>> {
+    let o = self.fbb_.end_table(self.start_);
+    flatbuffers::WIPOffset::new(o.value())
+  }
+}
+
+impl core::fmt::Debug for LeveledCompactionSpec<'_> {
+  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+    let mut ds = f.debug_struct("LeveledCompactionSpec");
+      ds.field("l0_view_ids", &self.l0_view_ids());
+      ds.field("sorted_runs", &self.sorted_runs());
+      ds.field("destination", &self.destination());
+      ds.field("sr_sst_selections", &self.sr_sst_selections());
+      ds.finish()
+  }
+}
 pub enum CompactionOffset {}
 #[derive(Copy, Clone, PartialEq)]
 
@@ -2758,6 +3024,20 @@ impl<'a> Compaction<'a> {
     }
   }
 
+  #[inline]
+  #[allow(non_snake_case)]
+  pub fn spec_as_leveled_compaction_spec(&self) -> Option<LeveledCompactionSpec<'a>> {
+    if self.spec_type() == CompactionSpec::LeveledCompactionSpec {
+      let u = self.spec();
+      // Safety:
+      // Created from a valid Table for this object
+      // Which contains a valid union in this slot
+      Some(unsafe { LeveledCompactionSpec::init_from_table(u) })
+    } else {
+      None
+    }
+  }
+
 }
 
 impl flatbuffers::Verifiable for Compaction<'_> {
@@ -2771,6 +3051,7 @@ impl flatbuffers::Verifiable for Compaction<'_> {
      .visit_union::<CompactionSpec, _>("spec_type", Self::VT_SPEC_TYPE, "spec", Self::VT_SPEC, true, |key, v, pos| {
         match key {
           CompactionSpec::TieredCompactionSpec => v.verify_union_variant::<flatbuffers::ForwardsUOffset<TieredCompactionSpec>>("CompactionSpec::TieredCompactionSpec", pos),
+          CompactionSpec::LeveledCompactionSpec => v.verify_union_variant::<flatbuffers::ForwardsUOffset<LeveledCompactionSpec>>("CompactionSpec::LeveledCompactionSpec", pos),
           _ => Ok(()),
         }
      })?
@@ -2850,6 +3131,13 @@ impl core::fmt::Debug for Compaction<'_> {
       match self.spec_type() {
         CompactionSpec::TieredCompactionSpec => {
           if let Some(x) = self.spec_as_tiered_compaction_spec() {
+            ds.field("spec", &x)
+          } else {
+            ds.field("spec", &"InvalidFlatbuffer: Union discriminant does not match value.")
+          }
+        },
+        CompactionSpec::LeveledCompactionSpec => {
+          if let Some(x) = self.spec_as_leveled_compaction_spec() {
             ds.field("spec", &x)
           } else {
             ds.field("spec", &"InvalidFlatbuffer: Union discriminant does not match value.")
