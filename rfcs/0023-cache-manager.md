@@ -36,7 +36,7 @@ Table of Contents:
 
 <!-- TOC end -->
 
-Status: Draft
+Status: Accepted
 
 Authors:
 
@@ -78,8 +78,10 @@ Two gaps show up today.
 
 ### Public API
 
-`Db` exposes two low-level methods: one for warming selected cache content, and
-one for best-effort eviction.
+Warming and eviction are exposed through a `DbCacheManagerOps` trait, following
+the pattern established by `DbMetadataOps` (PR #1559). Both `Db` and `DbReader`
+implement the trait, so callers import it once and use the same methods against
+either handle.
 
 ```rust
 /// Cache content that `warm_sst()` should populate.
@@ -88,6 +90,8 @@ pub enum CacheTarget {
     Filters,
     /// Warm the SST index.
     Index,
+    /// Warm the SST stats block, if one exists.
+    Stats,
     /// Warm the SST data blocks that overlap the supplied key range.
     ///
     /// This also warms the SST index, since block planning depends on it.
@@ -116,7 +120,12 @@ pub struct EvictBlocks {
     pub blocks_evicted: Vec<u64>,
 }
 
-impl Db {
+/// Trait for block-cache warming and eviction operations.
+///
+/// Implemented by both [`Db`](crate::Db) and [`DbReader`](crate::DbReader) so
+/// callers can use the same methods against either handle.
+#[async_trait::async_trait]
+pub trait DbCacheManagerOps {
     /// Warms selected cache content for one SST.
     ///
     /// Returns an entry per requested target, each carrying the per-target
@@ -125,7 +134,7 @@ impl Db {
     ///
     /// If no block cache is configured, logs a warning and returns an empty
     /// list.
-    pub async fn warm_sst(
+    async fn warm_sst(
         &self,
         sst_id: SsTableId,
         targets: &[CacheTarget],
@@ -135,20 +144,23 @@ impl Db {
     ///
     /// If no block cache is configured, logs a warning and returns empty
     /// `EvictBlocks`.
-    pub async fn evict_cached_sst(
+    async fn evict_cached_sst(
         &self,
         sst_id: SsTableId,
     ) -> Result<EvictBlocks, crate::Error>;
 }
 ```
 
-`DbReader` exposes the same two methods with identical signatures.
+Both `Db` and `DbReader` also re-export thin inherent wrappers that delegate to
+the trait (e.g. `<Self as DbCacheManagerOps>::warm_sst(self, ...)`), so callers
+that already have a concrete handle do not need the trait import to discover the
+methods in documentation.
 
 This API makes three deliberate choices.
 
 1. The public surface stays at the SST level. Callers pass a physical SST ID,
    not an `SsTableView` or a lower-level cache key.
-2. `warm_sst()` takes explicit targets. 
+2. `warm_sst()` takes explicit targets.
 3. Each method operates on a single SST. Callers fan out over SST IDs with
    their own concurrency primitive. This keeps the API small and pushes
    policy (parallelism, rate-limiting, ordering) to the caller.
@@ -162,6 +174,7 @@ the first target that fails.
 
 - `CacheTarget::Index` warms the SST index.
 - `CacheTarget::Filters` warms all filters on the SST, if any exist.
+- `CacheTarget::Stats` warms the SST stats block, if one exists.
 - `CacheTarget::Data(BytesRange)` warms the data blocks that overlap the
   supplied key range. It also warms the SST index, since data-block planning
   depends on that index.
@@ -381,9 +394,9 @@ Suggested `Info`-level metrics:
   Labels: `{result=success|miss}`
 - `slatedb.cache_api.warm_duration_seconds`
 - `slatedb.cache_api.warm_error_count`
-  Labels: `{stage=index|filters|blocks|request}`
+  Labels: `{stage=index|filters|stats|blocks|request}`
 - `slatedb.cache_api.warm_target_count`
-  Labels: `{target=index|filters|data}`
+  Labels: `{target=index|filters|stats|data}`
 - `slatedb.cache_api.evict_sst_count`
   Labels: `{result=success|error}`
 - `slatedb.cache_api.evict_block_count`
@@ -401,7 +414,9 @@ Logs are still useful:
 
 - Existing data on object storage / on-disk formats: no format changes
 - Existing public APIs (including bindings): adds new APIs, does not change
-  existing read or write semantics
+  existing read or write semantics. The trait methods are also re-exported as
+  inherent methods on `Db` and `DbReader`, so callers with a concrete handle do
+  not need to import `DbCacheManagerOps`.
 - Rolling upgrades / mixed-version behavior (if applicable): safe, because the
   behavior is local to a running process and does not change stored metadata
 
