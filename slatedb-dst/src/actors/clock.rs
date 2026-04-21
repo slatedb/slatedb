@@ -8,6 +8,19 @@ use crate::ActorCtx;
 
 /// Advances the shared mock clock forever using actor-local deterministic
 /// randomness.
+///
+/// This actor is intended to be registered as a background helper, not a
+/// completion-driving foreground actor. It never returns on its own.
+///
+/// On each loop iteration it:
+/// - consumes one `u64` from the actor-local seeded RNG
+/// - derives a delay in the inclusive range `1..=5` milliseconds
+/// - advances the shared harness clock by that amount
+///
+/// Because the harness clock is shared by all actors and the wrapped object
+/// stores, this actor provides deterministic passage of logical time for
+/// features such as polling loops, age-based behavior, and fault-injection
+/// latency. The harness aborts it once all foreground actors have completed.
 #[instrument(level = "debug", skip_all, fields(role = %ctx.role(), instance = ctx.instance()))]
 pub async fn clock(ctx: ActorCtx) -> Result<(), Error> {
     loop {
