@@ -16,7 +16,7 @@ use std::ops::RangeBounds;
 /// The trait is designed to be object-safe, allowing for dynamic dispatch
 /// when needed.
 #[async_trait::async_trait]
-pub trait DbRead {
+pub trait DbReadOps {
     /// Get a value from the database with default read options.
     ///
     /// The `Bytes` object returned contains a slice of an entire

@@ -9,7 +9,7 @@ use crate::db_iter::DbIterator;
 use crate::types::KeyValue;
 
 use crate::db::DbInner;
-use crate::DbRead;
+use crate::DbReadOps;
 
 pub struct DbSnapshot {
     snapshot_id: Uuid,
@@ -182,7 +182,7 @@ impl DbSnapshot {
 }
 
 #[async_trait::async_trait]
-impl DbRead for DbSnapshot {
+impl DbReadOps for DbSnapshot {
     async fn get_with_options<K: AsRef<[u8]> + Send>(
         &self,
         key: K,
