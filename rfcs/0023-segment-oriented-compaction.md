@@ -20,7 +20,7 @@ SlateDB's current compaction primarily optimizes generic LSM shape. For append-h
 - compaction decisions are not aligned to segment lifecycle,
 - and retention is often executed at row granularity even when whole segments are expired.
 
-In append-oriented systems, writes are concentrated in the newest segment(s), while older segments are rarely updated. Segments are therefore a natural unit for lifecycle policy, including time-based and size-based retention.
+In append-oriented systems, writes concentrate on a single active segment at a time, which the application rolls over infrequently (for example, hourly for a timeseries, or at a size or time threshold for a log). Older segments are rarely updated except for occasional backfill. Segments are therefore a natural unit for lifecycle policy, including time-based and size-based retention.
 
 Representative segment ranges include:
 
@@ -29,6 +29,8 @@ Representative segment ranges include:
 - or a log segment key range (`log/segment/042/*`).
 
 This RFC aims to let compaction operate on those append-ordered boundaries directly, so older groups can be compacted and retired independently with less unnecessary rewrite work.
+
+The design targets the common single-active-segment case. Concurrent writes to multiple segments are supported within this framework — e.g. to handle occasional data backfills— but the design is not specifically optimized for workloads that sustain writes to many concurrently-active segments.
 
 ## Goals
 
@@ -258,6 +260,14 @@ The reason is the **flush cursor invariant**, not durability. The WAL replay cur
 
 **Operational consideration.** In typical append-oriented workloads, writes concentrate on one or two segments (e.g. the current hour plus occasional backfill), so a flush produces a small number of L0 SSTs and parallel upload keeps latency comparable to today. A pathological wide backfill touching many segments in a single memtable does produce a correspondingly wide flush, and the memtable cannot be released until all uploads land and the manifest update succeeds. Near-term mitigation is to bound memtable width (size- or segment-count-based) so such flushes are frozen earlier; finer-grained WAL tracking to allow partial multi-segment flushes is deferred to [Future Work](#future-work).
 
+### Backpressure
+
+SlateDB has two backpressure mechanisms today: a memory-based one driven by `max_unflushed_bytes` (pauses writers when unflushed bytes exceed the threshold) and an L0-count-based one driven by `l0_max_ssts` (pauses memtable flushes when uncompacted L0 SSTs pile up faster than compaction can drain them). Segmentation interacts with each differently.
+
+**Memory-based backpressure is unchanged.** Unflushed bytes are tracked at the WAL and memtable level, above the extractor. The threshold applies to the total in-memory footprint regardless of how it will later split into per-segment L0 SSTs. Writers pause when the total exceeds the configured limit, exactly as today.
+
+**L0-count-based backpressure uses a global count across all trees.** `l0_max_ssts` is compared against the sum of L0 entries in the unsegmented tree and across every named segment's `l0` list. This preserves today's operator-facing contract — "if the database has more than N uncompacted L0s, slow down flushes" — and is robust to pathological cases where a workload spreads writes thinly across many segments. The tradeoff is that a wide multi-segment flush contributes multiple entries at once (one per touched segment), so the threshold is reached sooner than in a single-tree configuration with the same data volume. This is aligned with the single-active-segment workload assumption in [Motivation](#motivation): a typical flush touches one or two segments, so global counting matches per-segment counting in the common case. Multi-active-segment workloads are where per-segment policies would begin to pay off — see [Future Work](#future-work) for segment-aware backpressure.
+
 ### Read Path
 
 Because each named segment is its own LSM tree with its own ordered `compacted` list, read-path logic within a segment is identical to today's single-tree read path. The only new behavior is routing: for a given query, determining which trees need to be consulted. Routing falls out of the extractor with no user-visible segment filter — there is no `segment_filter` predicate on `ReadOptions`.
@@ -369,6 +379,8 @@ The resume mechanism is unchanged: the executor reads the last output SST to com
 This RFC focuses on segment-oriented planning and explicit drop semantics. Natural next steps include key-rewriting transforms and multi-stage timeseries rollups built on top of these primitives.
 
 **Finer-grained WAL tracking for partial multi-segment flushes.** The current design requires a multi-segment flush to become visible atomically via the manifest, which keeps a single WAL replay cursor but can extend flush latency for wide backfills (see [Write Path](#write-path)). A future iteration could track per-segment flush frontiers in the WAL or in the manifest, allowing partial flushes to become visible incrementally. This involves extending WAL replay to advance the frontier per segment and reconciling checkpoint semantics with per-segment progress; deferred until operational experience shows the wide-flush case is a real bottleneck.
+
+**Segment-aware L0 backpressure for multi-active-segment workloads.** The first iteration applies `l0_max_ssts` as a global count across all trees (see [Backpressure](#backpressure)), which matches the single-active-segment assumption in [Motivation](#motivation). Workloads that sustain writes to multiple active segments in parallel would benefit from per-segment accounting — for example, allowing cold segments to accumulate more L0s without blocking flushes to hot segments, or exposing per-segment thresholds. Such policies would require the memtable flusher to consult per-segment L0 counts when deciding whether to stall, and the scheduler to prioritize compactions for segments near their threshold.
 
 **Parallel execution of independent segment compactions.** The execution model in this RFC can be extended to run compactions for disjoint segments concurrently. Each segment has its own L0 list, its own `l0_last_compacted` watermark, and its own `compacted` list in the manifest, so parallel compactions in different segments commit to disjoint `Segment` entries with distinct destination IDs drawn from the shared counter — no cross-segment ordering conflict arises. Parallel compaction *within* a single segment is a separate concern tied to the `l0_last_compacted` watermark's single-cursor design and is not addressed here.
 
