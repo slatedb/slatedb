@@ -110,7 +110,7 @@ pub trait FilterPolicy {
     ///   stored, so querying with a different extractor produces false
     ///   negatives.
     ///
-    /// Examples: `"_bf"`, `"_bf:prefix=fixed3"`.
+    /// Examples: `"_bf"`, `"_bf:p=fixed3"`.
     fn name(&self) -> &str;
 
     /// Creates a new builder for constructing a filter.
@@ -276,7 +276,7 @@ pub trait PrefixExtractor {
     /// to a delimiter-based one) changes which hashes are stored in the
     /// filter, so existing filters become invalid. `BloomFilterPolicy`
     /// includes this name in the policy name it writes to SST metadata
-    /// (e.g. `"_bf:prefix=fixed3"`), which lets the reader
+    /// (e.g. `"_bf:p=fixed3"`), which lets the reader
     /// detect the mismatch and skip the filter instead of returning wrong
     /// results.
     fn name(&self) -> &str;
@@ -365,7 +365,7 @@ impl BloomFilterPolicy {
     /// The extractor's name is included in the policy name to ensure that
     /// filters built with different extractors are not mismatched.
     pub fn with_prefix_extractor(mut self, extractor: Arc<dyn PrefixExtractor>) -> Self {
-        self.name = format!("{}:prefix={}", Self::NAME, extractor.name());
+        self.name = format!("{}:p={}", Self::NAME, extractor.name());
         self.prefix_extractor = Some(extractor);
         self
     }
@@ -765,8 +765,8 @@ SlateDB features and components that this RFC interacts with. Check all that app
   to decode filters as bloom filters, which is correct as long as the bloom
   filter policy is still in use.
 - **Prefix extractor changes**: Changing the prefix extractor changes the policy
-  name (e.g., `"_bf:prefix=fixed3"` →
-  `"_bf:prefix=delim:"`). With the array design, the old
+  name (e.g., `"_bf:p=fixed3"` →
+  `"_bf:p=delim:"`). With the array design, the old
   policy can remain in `filter_policies` alongside the new one, so existing
   SSTs' filters remain usable while new SSTs are written with both. After
   compaction rewrites all SSTs, the old policy can be removed.

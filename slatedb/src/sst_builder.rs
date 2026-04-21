@@ -1713,7 +1713,7 @@ mod tests {
 
         let policy1 = Arc::new(BloomFilterPolicy::new(10)); // name "_bf"
         let policy2 = Arc::new(
-            BloomFilterPolicy::new(10).with_prefix_extractor(Arc::new(Fixed3Extractor)), // name "_bf:prefix=fixed3"
+            BloomFilterPolicy::new(10).with_prefix_extractor(Arc::new(Fixed3Extractor)), // name "_bf:p=fixed3"
         );
 
         let root_path = Path::from("");
@@ -1760,7 +1760,7 @@ mod tests {
             .expect("policy1 filter missing");
         let f2 = filters
             .iter()
-            .find(|nf| nf.name == "_bf:prefix=fixed3")
+            .find(|nf| nf.name == "_bf:p=fixed3")
             .expect("policy2 filter missing");
 
         // policy1 answers point queries for inserted keys.

@@ -224,11 +224,13 @@ impl BloomFilterPolicy {
     /// By default, whole-key filtering is enabled and no prefix extractor
     /// is configured.
     pub fn new(bits_per_key: u32) -> Self {
+        let whole_key_filtering = true;
+        let prefix_extractor: Option<Arc<dyn PrefixExtractor>> = None;
         Self {
             bits_per_key,
-            whole_key_filtering: true,
-            prefix_extractor: None,
-            name: Self::NAME.to_string(),
+            name: Self::compose_name(whole_key_filtering, prefix_extractor.as_deref()),
+            whole_key_filtering,
+            prefix_extractor,
         }
     }
 
@@ -241,8 +243,8 @@ impl BloomFilterPolicy {
     /// The extractor's name is included in the policy name to ensure that
     /// filters built with different extractors are not mismatched.
     pub fn with_prefix_extractor(mut self, extractor: Arc<dyn PrefixExtractor>) -> Self {
-        self.name = format!("{}:prefix={}", Self::NAME, extractor.name());
         self.prefix_extractor = Some(extractor);
+        self.name = Self::compose_name(self.whole_key_filtering, self.prefix_extractor.as_deref());
         self
     }
 
@@ -253,7 +255,23 @@ impl BloomFilterPolicy {
     /// filter size.
     pub fn with_whole_key_filtering(mut self, enabled: bool) -> Self {
         self.whole_key_filtering = enabled;
+        self.name = Self::compose_name(self.whole_key_filtering, self.prefix_extractor.as_deref());
         self
+    }
+
+    fn compose_name(
+        whole_key_filtering: bool,
+        prefix_extractor: Option<&dyn PrefixExtractor>,
+    ) -> String {
+        let mut name = Self::NAME.to_string();
+        if let Some(extractor) = prefix_extractor {
+            name.push_str(":p=");
+            name.push_str(extractor.name());
+        }
+        if !whole_key_filtering {
+            name.push_str(":wh=0");
+        }
+        name
     }
 
     /// Returns the bits per key setting.
@@ -410,7 +428,7 @@ mod tests {
     fn test_prefix_bloom_filter_policy_name() {
         let extractor = Arc::new(FixedPrefixExtractor::new(3));
         let policy = BloomFilterPolicy::new(10).with_prefix_extractor(extractor);
-        assert_eq!(policy.name(), "_bf:prefix=fixed3");
+        assert_eq!(policy.name(), "_bf:p=fixed3");
     }
 
     #[test]
