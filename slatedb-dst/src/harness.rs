@@ -467,9 +467,14 @@ impl Harness {
         let system_clock: Arc<dyn SystemClock> = system_clock;
         let fp_registry = Arc::new(FailPointRegistry::new());
         let startup_seed = rand.rng().next_u64();
-        let main_object_store = wrap_store(main_object_store, Arc::clone(&system_clock));
-        let wal_object_store =
-            wal_object_store.map(|store| wrap_store(store, Arc::clone(&system_clock)));
+        let main_object_store: Arc<dyn ObjectStore> = Arc::new(ClockedObjectStore::new(
+            main_object_store.clone(),
+            system_clock.clone(),
+        ));
+        let wal_object_store = wal_object_store.map(|store| {
+            Arc::new(ClockedObjectStore::new(store.clone(), system_clock.clone()))
+                as Arc<dyn ObjectStore>
+        });
 
         let startup_ctx = StartupCtx {
             path: path.clone(),
@@ -546,11 +551,4 @@ impl Harness {
 
         Ok(())
     }
-}
-
-fn wrap_store(
-    base: Arc<dyn ObjectStore>,
-    system_clock: Arc<dyn SystemClock>,
-) -> Arc<dyn ObjectStore> {
-    Arc::new(ClockedObjectStore::new(base, system_clock))
 }
