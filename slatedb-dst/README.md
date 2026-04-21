@@ -98,7 +98,6 @@ object-store latency.
 use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::{DateTime, Utc};
 use object_store::path::Path;
 use object_store::ObjectStore;
 use rand::RngCore;
@@ -143,7 +142,7 @@ fn dst_smoke_test() -> Result<(), Box<dyn std::error::Error>> {
         failures,
         system_clock.clone(),
     ));
-    let shutdown_at = DateTime::from_timestamp_millis(10).expect("shutdown timestamp must be valid");
+    let shutdown_at_millis = 10u64;
 
     Harness::new("smoke", 7)
         .with_path(Path::from("dst/smoke"))
@@ -167,7 +166,7 @@ fn dst_smoke_test() -> Result<(), Box<dyn std::error::Error>> {
         })
         .actor("writer", 1, writer)
         .actor("clock", 1, clock)
-        .actor_with_state("shutdown", 1, shutdown_at, shutdown)
+        .actor_with_state("shutdown", 1, shutdown_at_millis, shutdown)
         .run()?;
 
     Ok(())

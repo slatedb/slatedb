@@ -1,14 +1,17 @@
-use chrono::{DateTime, Utc};
+use chrono::DateTime;
 use slatedb::Error;
 use tracing::instrument;
 
 use crate::ActorCtx;
 
-/// Cancels the harness once the shared mock clock reaches `shutdown_at`.
+/// Cancels the harness once the shared mock clock reaches
+/// `shutdown_at_millis`.
 #[instrument(level = "debug", skip_all, fields(role = %ctx.role(), instance = ctx.instance()))]
-pub async fn shutdown(ctx: ActorCtx, shutdown_at: DateTime<Utc>) -> Result<(), Error> {
+pub async fn shutdown(ctx: ActorCtx, shutdown_at_ms: i64) -> Result<(), Error> {
     let shutdown_token = ctx.shutdown_token();
     let system_clock = ctx.system_clock();
+    let shutdown_at =
+        DateTime::from_timestamp_millis(shutdown_at_ms).expect("shutdown timestamp must be valid");
 
     while !shutdown_token.is_cancelled() {
         let now = system_clock.now();

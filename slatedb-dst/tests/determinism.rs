@@ -40,7 +40,7 @@ use tracing::instrument;
 const WRITER_COUNT: usize = 10;
 const DELETER_COUNT: usize = 4;
 const FLUSHER_COUNT: usize = 1;
-const SHUTDOWN_AT_MILLIS: i64 = 10;
+const SHUTDOWN_AT_MILLIS: i64 = 100;
 
 #[test]
 fn test_dst_is_deterministic() -> Result<(), Box<dyn std::error::Error>> {
@@ -119,8 +119,6 @@ fn run_seed_once(seed: u64) -> Result<(u64, DateTime<Utc>), Box<dyn std::error::
         failures,
         system_clock.clone(),
     ));
-    let shutdown_at = DateTime::from_timestamp_millis(SHUTDOWN_AT_MILLIS)
-        .expect("shutdown timestamp must be valid");
     Harness::new("determinism", seed)
         .with_rand(Arc::clone(&rand))
         .with_system_clock(Arc::clone(&system_clock))
@@ -163,7 +161,7 @@ fn run_seed_once(seed: u64) -> Result<(u64, DateTime<Utc>), Box<dyn std::error::
         .actor("deleter", DELETER_COUNT, deleter)
         .actor("flusher", FLUSHER_COUNT, flusher)
         .actor("clock", 1, clock)
-        .actor_with_state("shutdown", 1, shutdown_at, shutdown)
+        .actor_with_state("shutdown", 1, SHUTDOWN_AT_MILLIS, shutdown)
         .run()?;
 
     let next_u64 = rand.rng().next_u64();
