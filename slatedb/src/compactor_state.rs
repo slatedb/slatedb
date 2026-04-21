@@ -728,6 +728,7 @@ impl CompactorState {
             db_state.l0 = new_l0;
             db_state.compacted = new_compacted;
             self.manifest.value.core = db_state;
+            self.manifest.value.prune_external_sst_ids();
             self.update_compaction(&compaction_id, |c| {
                 c.set_status(CompactionStatus::Completed);
             });
@@ -982,6 +983,61 @@ mod tests {
             .map(|h| h.sst.id)
             .collect();
         assert_eq!(expected_ids, found_ids);
+    }
+
+    #[test]
+    fn test_finish_compaction_prunes_external_sst_ids() {
+        use crate::manifest::ExternalDb;
+        use uuid::Uuid;
+
+        let rt = build_runtime();
+        let (_, _, mut state, system_clock, rand) = build_test_state(rt.handle());
+        let before_compaction = state.db_state().clone();
+
+        // Seed external_dbs with a mix of IDs that are currently in L0 (will move to the
+        // compacted sorted run and remain live) and a stale ID that was never in the
+        // manifest (simulating a parent SST already compacted away on a prior cycle).
+        let live_id = before_compaction.l0.front().unwrap().sst.id;
+        let stale_id = SsTableId::Compacted(Ulid::new());
+        state.manifest.value.external_dbs = vec![
+            ExternalDb {
+                path: "/parent/db".to_string(),
+                source_checkpoint_id: Uuid::new_v4(),
+                final_checkpoint_id: Some(Uuid::new_v4()),
+                sst_ids: vec![live_id, stale_id],
+            },
+            ExternalDb {
+                path: "/other/parent".to_string(),
+                source_checkpoint_id: Uuid::new_v4(),
+                final_checkpoint_id: Some(Uuid::new_v4()),
+                sst_ids: vec![stale_id],
+            },
+        ];
+
+        let compaction_id = rand.rng().gen_ulid(system_clock.as_ref());
+        let spec = build_l0_compaction(&before_compaction.l0, 0);
+        state
+            .add_compaction(Compaction::new(compaction_id, spec))
+            .expect("failed to add compaction");
+
+        let sr = SortedRun {
+            id: 0,
+            sst_views: before_compaction.l0.iter().cloned().collect(),
+        };
+        state.finish_compaction(compaction_id, sr);
+
+        let external_dbs = &state.manifest().value.external_dbs;
+        assert_eq!(external_dbs.len(), 2, "entries must be retained");
+        assert_eq!(
+            external_dbs[0].sst_ids,
+            vec![live_id],
+            "stale id must be pruned, live id kept"
+        );
+        assert!(
+            external_dbs[1].sst_ids.is_empty(),
+            "fully-stale entry must be retained with empty sst_ids (detach is GC's job)"
+        );
+        assert!(external_dbs[1].final_checkpoint_id.is_some());
     }
 
     #[test]
