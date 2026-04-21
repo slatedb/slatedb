@@ -10,7 +10,7 @@ Authors:
 
 Append-only structures often organize data into ordered segments for metadata efficiency and retention. For example, a timeseries system may group new data and associated indexes into hourly buckets, while a log may group data by size- or time-based segments. As segments age out, they can be removed as an atomic unit along with their metadata.
 
-This RFC proposes a segment-oriented compaction framework for SlateDB to align LSM compaction with that append-only structure. The central use case is append-ordered segments that map to contiguous key ranges (for example time buckets or log chunks). The proposal focuses on segment metadata propagation from writes through compaction, unordered sorted run management, and explicit segment-level retention/deletion semantics.
+This RFC proposes a segment-oriented compaction framework for SlateDB to align LSM compaction with that append-only structure. The central use case is append-ordered segments that map to contiguous key ranges (for example time buckets or log chunks). Segment membership is derived deterministically from keys via a prefix extractor, so segments partition the key space and can be compacted and retired independently. The proposal focuses on segment metadata propagation from writes through compaction, per-segment LSM state in the manifest, and explicit segment-level retention/deletion semantics.
 
 ## Motivation
 
@@ -32,11 +32,11 @@ This RFC aims to let compaction operate on those append-ordered boundaries direc
 
 ## Goals
 
-- Introduce a deterministic segment mapper (`key -> Option<Bytes>`) that derives segment metadata from keys, propagated through L0 and sorted runs.
-- Enable segment-aware compaction scheduling based on manifest-visible segment annotations.
+- Introduce a deterministic prefix-based segment extractor that derives segment membership from keys, propagated through L0 and sorted runs.
+- Model each segment as an independent logical LSM tree in the manifest, sharing a single manifest structure alongside unsegmented data.
+- Enable segment-aware compaction scheduling based on manifest-visible per-segment state.
 - Support explicit segment-level deletion as part of compaction lifecycle and retention.
-- Replace ordered sorted run lists with unordered (bag) semantics, using sequence number ranges for read-path correctness.
-- Support segment-scoped queries to prune the merge tree at read time.
+- Support automatic read-path pruning of segments based on query ranges.
 - Keep the framework general enough to support both timeseries and log-style segmentation.
 
 ## Non-Goals
@@ -48,10 +48,10 @@ This RFC aims to let compaction operate on those append-ordered boundaries direc
 
 This section describes the intuitive LSM shape this RFC is trying to enable.
 
-A segment is a scope for compaction and retention. Each L0 SST and sorted run belongs to exactly one segment. A deterministic segment mapper derives the segment from each key at memtable flush time, producing one L0 SST per segment. Sorted runs are managed as an unordered bag — there is no global ordering between them. The read path resolves precedence using key ranges and sequence numbers. It does not use segments for ordering, but can filter on them to prune irrelevant data before building the merge iterator.
+A segment is a scope for compaction and retention. Each named segment is an independent logical LSM tree with its own L0 list and its own ordered list of sorted runs. A deterministic prefix extractor derives the segment from each key at memtable flush time, producing one L0 SST per segment touched by that flush. Because segments own disjoint key intervals, each segment's chain is read independently and there is no ordering relationship between segments. The read path routes queries to the segments whose key intervals overlap the query range.
 
 ```text
-segment mapper derives segments from keys at flush time
+prefix extractor derives segment tags from keys at flush time
                      |
                      v
 
@@ -61,11 +61,12 @@ L0: per-segment SSTs produced at memtable flush
             compact by segment (parallel-safe)
                      v
 
-SRs (bag):  {hour=15}  {hour=14}  {hour=13}  {hour=10}
+SRs (per-segment, list-ordered):
+  hour=15: [SR1]    hour=14: [SR1]    hour=13: [SR1]    hour=10: [SR1]
                      |
                      | age / rollup compactions (future work)
                      v
-SRs (bag):  {day=2026-03-10}  {day=2026-03-09}
+SRs:  day=2026-03-10: [SR1]   day=2026-03-09: [SR1]
                      |
                      | retention policy
                      v
@@ -78,7 +79,7 @@ Each segment provides an isolated compaction scope and a natural boundary for pa
 
 This section works through several examples to build an intuition about the rules that control segment-aware shaping. We will use the example of a time-series database in which each segment corresponds to a single hour "bucket" of time. Typically inbound metric samples would be grouped into the latest hour buckets, but backfills into older hours are also possible.
 
-We represent the LSM state as a table where each row is a segment. The entries in each row form the merge chain for that segment, listed from newest to oldest. Each entry is either an L0 SST or a sorted run, annotated with its sequence range:
+We represent the LSM state as a table where each row is a segment. The entries in each row form the merge chain for that segment, listed from newest to oldest (i.e. in manifest list order). Each entry is either an L0 SST or a sorted run, annotated with its sequence range `{seq=a..b}`. The sequence ranges are illustrative only — within a segment, list position (not seq range) determines read precedence, and the ranges are *not* stored in the manifest.
 
 ```text
 segment    chain (newest → oldest)
@@ -87,9 +88,9 @@ hour=11    SR{seq=100..150}
 hour=10    L0{seq=300..350}, SR{seq=1..99}
 ```
 
-Within a segment, sequence ranges are disjoint and determine read precedence (higher wins). Across segments, sequence ranges may overlap — this is expected and has no correctness impact since each segment's chain is merged independently.
+Within a segment, list position determines read precedence — the first entry wins for overlapping keys. This is the same rule the existing single-tree read path applies to the current `compacted` list. Across segments no ordering is needed because the prefix extractor guarantees disjoint key spaces.
 
-For a range scan, the reader merges across segment chains by key. A segment filter on the query can prune entire rows from the table before iteration begins.
+For a range scan, the reader identifies the segments whose key intervals overlap the scan range and spins up a per-segment merge iterator for each.
 
 #### Example 1: Accumulated L0 state
 
@@ -98,11 +99,11 @@ After several rounds of writes and flushes, the LSM has accumulated L0 SSTs acro
 ```text
 segment    chain
 hour=12    L0{seq=700..800}
-hour=11    L0{seq=300..400}, L0{seq=400..500}, L0{seq=500..600}
-hour=10    L0{seq=1..100}, L0{seq=100..200}, L0{seq=200..300}
+hour=11    L0{seq=500..600}, L0{seq=400..500}, L0{seq=300..400}
+hour=10    L0{seq=200..300}, L0{seq=100..200}, L0{seq=1..100}
 ```
 
-Within each segment, the L0 SSTs have disjoint sequence ranges. Across segments, sequence ranges may overlap (e.g. `hour=11` and `hour=10` both cover the `seq=300..400` range) — this is expected since concurrent writes to different segments share sequence number space.
+Within each segment, the L0 SSTs have disjoint sequence ranges. Across segments, sequence ranges may interleave since concurrent writes to different segments share sequence number space — this is expected and has no correctness impact, since each segment's chain is merged independently.
 
 #### Example 2: L0 compaction for the oldest segment
 
@@ -111,7 +112,7 @@ The compaction scheduler targets `hour=10`, the oldest segment. Its three L0s ar
 ```text
 segment    chain
 hour=12    L0{seq=700..800}
-hour=11    L0{seq=300..400}, L0{seq=400..500}, L0{seq=500..600}
+hour=11    L0{seq=500..600}, L0{seq=400..500}, L0{seq=300..400}
 hour=10    SR{seq=1..300}
 ```
 
@@ -119,245 +120,228 @@ The other segments remain in L0. Compactions are segment-scoped, so the schedule
 
 #### Example 3: New writes and backfill arrive together
 
-New data for `hour=12` (the current hour) arrives alongside a backfill for `hour=10`. After flush:
+A single memtable flush carries new data for `hour=12` (the current hour) alongside a backfill for `hour=10`. The flush produces two L0 SSTs — one per segment — sharing the same sequence range, and they become visible together in one atomic manifest update:
 
 ```text
 segment    chain
 hour=12    L0{seq=801..900}, L0{seq=700..800}
-hour=11    L0{seq=300..400}, L0{seq=400..500}, L0{seq=500..600}
+hour=11    L0{seq=500..600}, L0{seq=400..500}, L0{seq=300..400}
 hour=10    L0{seq=801..900}, SR{seq=1..300}
 ```
 
-The new `hour=12` and `hour=10` L0 SSTs share the same sequence range (same memtable flush), but belong to different segments. The `hour=10` row now has a new L0 entry ahead of its existing SR — the backfill data has a higher sequence range and takes precedence during reads.
+Both new L0s are recorded in their respective segments' `l0` lists. The `hour=10` row now has a new L0 ahead of its existing SR — the backfill takes precedence over the older compacted data for any overlapping keys. The matching `seq=801..900` range on the two new L0s shows they come from a single flush; because they live in disjoint key spaces, no ordering between them is needed on the read path.
 
 #### Example 4: Compacting backfill within a segment
 
-The scheduler compacts `hour=10`, merging its L0 and SR into a single sorted run:
+The scheduler compacts `hour=10`, merging its L0 and existing SR into a new sorted run whose seq range is the union of the inputs:
 
 ```text
 segment    chain
 hour=12    L0{seq=801..900}, L0{seq=700..800}
-hour=11    L0{seq=300..400}, L0{seq=400..500}, L0{seq=500..600}
+hour=11    L0{seq=500..600}, L0{seq=400..500}, L0{seq=300..400}
 hour=10    SR{seq=1..900}
 ```
 
-The `hour=10` SR now spans a wider sequence range that overlaps with other segments. This is fine — the deterministic mapper guarantees that key ranges across segments do not overlap, so no ordering relationship is needed between them.
+The `hour=10` SR now covers the full seq range of the merged inputs. The range `1..900` overlaps what other segments are holding, but that's fine — disjoint key spaces make cross-segment ordering unnecessary.
 
 #### Example 5: Segment retention
 
-Retention expires `hour=10`. All L0 SSTs and sorted runs annotated with `segment=hour=10` are dropped atomically:
+Retention expires `hour=10`. Its entire LSM state — all L0 SSTs, all sorted runs, and the segment entry itself — is dropped atomically from the manifest:
 
 ```text
 segment    chain
 hour=12    L0{seq=801..900}, L0{seq=700..800}
-hour=11    L0{seq=300..400}, L0{seq=400..500}, L0{seq=500..600}
+hour=11    L0{seq=500..600}, L0{seq=400..500}, L0{seq=300..400}
 ```
 
 ## Detailed Design
 
 ### Overview
 
-This RFC introduces a deterministic segment mapper that derives segment metadata from keys. The mapper is configured at database open time as a function `key -> Option<Bytes>`. Because the mapping is deterministic, the system guarantees that a given key always belongs to the same segment. All segments share a common WAL, but each segment is effectively a complete LSM tree in its own right, with its own L0 and sorted runs. This structure is logical and maintained by the shared manifest.
+This RFC introduces a deterministic prefix-based segment extractor that derives segment membership from keys. The extractor is configured at database open time and returns a key prefix that identifies the segment for each key. Because segments are prefix-based, each segment owns a contiguous key interval, and segments partition the key space into disjoint ranges. All segments share a common WAL and a single manifest, but each segment carries its own independent LSM state (L0 SSTs and sorted runs) within that manifest.
 
-When no segment mapper is configured, all data is unsegmented and the system behaves identically to today.
+When no segment extractor is configured, all data is unsegmented and the system behaves identically to today.
 
-### Segment Mapper
+### Segment Extractor
 
-The segment mapper is configured at database open time:
+Segment membership is derived via a `PrefixExtractor` — the same trait introduced in [RFC 22](./0022-pluggable-filter.md) for prefix bloom filters. For segmentation, the trait is hoisted out of the `BloomFilterPolicy` scope into a neutral location (e.g. `slatedb::config`) so it can be used independently of the filter subsystem. Users may configure the same extractor for both purposes, or configure them independently.
 
 ```rust
 pub struct DbOptions {
-    pub segment_mapper: Option<Arc<dyn Fn(&[u8]) -> Option<Bytes> + Send + Sync>>,
+    pub segment_extractor: Option<Arc<dyn PrefixExtractor>>,
     // ... existing fields
 }
 ```
 
-The mapper receives a key and returns an optional segment tag. Keys for which the mapper returns `None` are unsegmented. The segment tag is an opaque byte sequence whose semantics are defined by the application — for a timeseries database, it might encode a time bucket; for a log, a segment identifier based on size or time. Ordering, age, and expiry semantics on segments are the application's responsibility. The application (via its custom compaction scheduler) defines what "oldest" or "expired" means for its segments.
+Keys for which `extract` returns `None` are unsegmented and stored in the shared unsegmented LSM state (see [Manifest](#manifest)). Keys for which `extract` returns `Some(prefix)` belong to the segment identified by that prefix. The application defines the key encoding such that segment boundaries are represented in the key itself — for a timeseries database, the prefix encodes a time bucket; for a log, a segment identifier chosen by the writer when advancing to the next segment.
 
-Because the mapping is deterministic, a given key always maps to the same segment. This guarantees disjoint key spaces across segments, which makes segment retention unconditionally safe — dropping a segment cannot affect keys in other segments.
+Two properties follow directly from the trait contract:
+
+- **Determinism.** `extract` is a pure function of the key. A given key always maps to the same segment across flushes, compactions, and restarts.
+- **Disjoint key spaces.** Because the output of `extract` is a prefix of the input, each segment tag `t` owns exactly the key interval `[t, t++)` (where `t++` is the lexicographic successor of `t`). Two distinct segment tags cannot share any key, so dropping a segment is unconditionally safe — it cannot affect keys in other segments.
+
+The extractor's `name()` is persisted in the manifest. On restart, if the configured extractor's name does not match the persisted one, the database refuses to open rather than silently routing data differently than before. Reconfiguring the extractor is therefore treated as a one-way, offline operation — in general, changing segmentation on existing data requires a rewrite, which is out of scope for this RFC.
 
 ### WAL
 
-The WAL requires no format changes to support segments. Because the segment mapper is deterministic and configured at database open time, segment membership can be recomputed from keys during WAL replay. The mapper is applied at memtable flush time to group entries by segment — there is no need to persist segment information in the WAL.
+The WAL requires no format changes to support segments. Because the extractor is deterministic and configured at database open time, segment membership can be recomputed from keys during WAL replay. The extractor is applied at memtable flush time to group entries by segment — there is no need to persist segment information in the WAL.
 
-The segment mapper must be configured consistently across restarts. If the mapper changes between the time data was written and when the WAL is replayed, entries may be assigned to different segments than intended. The mapper should be treated as a fixed property of the database.
+The extractor must be configured consistently across restarts. The persisted extractor `name()` in the manifest guards against accidental reconfiguration; see the [Segment Extractor](#segment-extractor) section for details.
 
 ### Manifest
 
-The manifest is responsible for tracking the logical structure of the LSM tree: the set of L0 SSTs and compacted sorted runs that together represent the current state of the database. With segments, the manifest effectively tracks multiple logical LSM trees — one per segment — within a single shared structure. This section describes the current manifest model, the changes needed to support segments, and the migration path.
+The manifest is responsible for tracking the logical structure of the LSM tree: the set of L0 SSTs and compacted sorted runs that together represent the current state of the database. With segments, the manifest tracks multiple logical LSM trees — one per segment plus the shared unsegmented tree — within a single shared structure.
 
-#### Current Model: Ordered Sorted Runs
+#### Current Model
 
-Today, sorted runs are stored as an ordered list (`compacted: [SortedRunV2]`), where each run has a `u32` identifier. The list is maintained in strictly descending ID order, and this ordering encodes read precedence — earlier entries in the list take priority over later ones for overlapping keys. The compaction scheduler assigns IDs to maintain this invariant: for example, when L0 SSTs are compacted into a new sorted run, the new run receives an ID higher than all existing runs.
+Today, the manifest holds a single LSM state consisting of:
 
-This design works well for a single logical LSM tree, but creates friction for segment-oriented compaction. When multiple segments are compacted independently and potentially in parallel, coordinating sequential ID assignment across concurrent compactions becomes complex. More fundamentally, a single global ordering between sorted runs is unnecessary when segments partition the compaction and retention scope — there is no need to order runs from different segments relative to each other.
+- `l0_last_compacted: Ulid` — the last L0 SST that has been compacted (gates L0 visibility).
+- `l0: [CompactedSsTable]` — the set of L0 SSTs visible above `l0_last_compacted`.
+- `compacted: [SortedRun]` — the set of sorted runs, ordered by descending `u32` ID (list position encodes read precedence).
 
-#### Proposed Change: Ulid Identity and Sequence-Based Ordering
+This structure works for a single logical LSM tree. Segment-oriented compaction needs multiple independent trees that can evolve (flush, compact, retire) on their own schedule without coordinating ID assignment or ordering with each other.
 
-This RFC replaces the `u32` sorted run identifier with a `Ulid`. Ulids provide globally unique identifiers without coordination, which is essential for parallel segment-scoped compactions. The sorted run list becomes an unordered bag — the manifest no longer maintains or enforces an ordering between sorted runs.
+#### Proposed Change: Per-Segment LSM State
 
-Read precedence is determined by sequence number ranges rather than sorted run position. To avoid requiring the reader to load SST metadata before every query, the sequence range is made explicit in the manifest on both L0 SSTs and sorted runs. Within a segment, sorted runs have disjoint sequence ranges, and the run with the higher range takes precedence for overlapping keys. Across segments, sequence ranges may overlap, but this has no correctness impact since the reader merges per-segment chains independently.
-
-#### New Manifest Fields
-
-Both L0 SSTs and sorted runs gain two new fields: an explicit sequence range and an optional segment annotation.
-
-The sequence range (`min_seq`, `max_seq`) records the minimum and maximum sequence numbers across all entries in the L0 SST or sorted run. This allows the reader to determine merge precedence directly from the manifest without loading SST index metadata. Combined with key ranges (already available from SST metadata in the manifest), the reader has everything it needs to build the merge DAG.
-
-The segment annotation (`segment: [ubyte]`) is an optional field recording the segment derived from the mapper at flush time. L0 SSTs and sorted runs without a segment annotation are unsegmented and are handled by the existing compaction path.
-
-Every sorted run has a `Ulid` identifier. Legacy sorted runs migrated from `ManifestV2` also retain their original `u32` ID so that the read path can fall back to list-position ordering for those runs. The FlatBuffer schema introduces `SortedRunV3`:
+This RFC preserves the existing manifest fields as the unsegmented LSM state and adds a new `segments` list. Each entry in `segments` carries its own independent LSM state, structurally identical to the existing top-level fields:
 
 ```flatbuffer
-table SortedRunV3 {
-    id: Ulid (required);
-    legacy_id: uint32;          // set only for migrated runs, absent for new runs
+// Existing fields, now interpreted as the unsegmented LSM state ("None" segment):
+l0_last_compacted: Ulid;
+l0: [CompactedSsTable] (required);
+compacted: [SortedRun] (required);
 
-    min_seq: ulong;
-    max_seq: ulong;
-    segment: [ubyte];
-    ssts: [CompactedSsTableView] (required);
+// New field — one entry per named segment:
+segments: [Segment];
+
+// New:
+table Segment {
+    tag: [ubyte] (required);
+    l0_last_compacted: Ulid;
+    l0: [CompactedSsTable] (required);
+    compacted: [SortedRun] (required);
 }
+
+// Extractor identity is persisted at the manifest root so the writer
+// can detect accidental reconfiguration on startup.
+segment_extractor_name: string;
 ```
 
-For L0 SSTs, `CompactedSsTableView` gains sequence range and segment fields:
+Within each segment, `l0` and `compacted` follow today's semantics exactly: `l0` is the set of L0 SSTs above `l0_last_compacted`, and `compacted` is an ordered list of sorted runs where list position determines read precedence. Sorted run `u32` IDs remain globally unique across the database — a single shared counter allocates IDs monotonically regardless of which segment (or the unsegmented tree) a run belongs to. Within a segment, list position and ID order agree (newer runs have higher IDs), so list-position reads and ID-based debugging align.
 
-```flatbuffer
-table CompactedSsTableViewV2 {
-    id: Ulid (required);
-    sst_id: Ulid (required);
-    visible_range: BytesRange;
-    min_seq: ulong;
-    max_seq: ulong;
-    segment: [ubyte];
-}
-```
+This scoping has three consequences:
 
-The public `SortedRun` struct exposed through `ManifestCore` is updated to use an opaque `SortedRunId` (defined in the [Compaction](#compaction) section below) in place of the current `u32`:
-
-```rust
-pub struct SortedRun {
-    pub id: SortedRunId,
-    pub segment: Option<Bytes>,
-    pub sst_views: Vec<SsTableView>,
-}
-```
-
-Together, these changes allow the manifest to represent multiple logical LSM trees within a single structure. The reader can determine merge order, the compaction scheduler can plan segment-scoped work, and segment-filtered queries can prune irrelevant data — all from manifest metadata alone.
+- **No cross-segment ordering.** Because the extractor guarantees disjoint key spaces, two sorted runs in different segments cannot contain overlapping keys and therefore need no ordering relationship. Each segment's read path is identical to today's single-tree read path.
+- **No new sequence bookkeeping.** Read precedence within a segment is determined by list position, as today. The manifest does not need `min_seq`/`max_seq` annotations on SSTs or sorted runs.
+- **Parallel compaction across segments is safe.** Two compactions in different segments each draw a distinct destination ID from the shared counter and apply their manifest updates to disjoint `Segment` entries (or to disjoint lists within the unsegmented tree vs. a segment), so their commits do not conflict. Parallel compaction *within* a single segment remains constrained by the existing `l0_last_compacted` watermark design and is out of scope for this RFC.
 
 #### Migration
 
-The migration is performed in two phases: first the decoder is updated to understand V3, then the encoder is switched to write V3.
+Because the change is purely additive, migration is a one-step schema bump. The manifest is revved to `ManifestV3`, which is `ManifestV2` plus the `segments` list and `segment_extractor_name` field.
 
-**Phase 1: Decoder rollout.** The manifest decoder is updated to handle both V2 and V3 formats. This can be deployed independently — the encoder continues writing V2, so no state changes occur. Both the writer and the compactor gain the ability to read V3 manifests before any V3 manifests exist. This is a prerequisite for Phase 2.
+- A V3 manifest with an empty `segments` list is semantically identical to a V2 manifest — the existing `l0`/`compacted` fields carry the unsegmented state.
+- The writer upgrades lazily: the first manifest write under a V3-capable binary emits V3. No SST metadata rereads are required — existing sorted runs and L0 SSTs keep their current IDs and representation in the top-level fields.
+- Databases that never configure a segment extractor continue to operate entirely through the top-level fields, with `segments` always empty.
 
-**Phase 2: Writer-driven upgrade.** The writer is responsible for performing the V2→V3 migration. On its first manifest write after the encoder is switched to V3, the writer reads the existing V2 manifest, migrates the in-memory representation, and writes it back as V3. The migration involves:
+The manifest decoder is updated to handle both V2 and V3. The standalone compactor reads whichever version the writer has published and does not independently upgrade. Because no field changes require backfill, there is no decoder-first/encoder-later rollout phase.
 
-- Assigning a Ulid to each existing `u32`-identified sorted run and L0 SST view.
-- Retaining the original `u32` in the `legacy_id` field for each sorted run.
-- Computing the sequence range (`min_seq`, `max_seq`) for each sorted run and L0 SST. This requires reading SST index metadata from object storage to determine the first and last sequence numbers. This is the most expensive part of the migration — for a database with many sorted runs, it involves one read per SST. However, it is a one-time cost.
-- Leaving all existing runs and L0 SSTs unsegmented (no segment annotation).
-
-The standalone compactor must not upgrade the manifest version on its own. If it encounters a V2 manifest, it continues operating in V2 mode. This prevents a compactor from writing a V3 manifest that the writer does not yet understand. The compactor only begins writing V3 after it reads a V3 manifest that the writer has already produced.
-
-After the upgrade, the read path handles both run types: runs with a `legacy_id` use their list position for precedence (as today), while runs without one use their explicit sequence ranges. The compaction scheduler and `CompactionSpec` reference sorted runs through the opaque `SortedRunId` type — the scheduler is unaware of the legacy distinction. Because every sorted run has a Ulid after migration (including legacy ones), the post-upgrade `CompactionSpecV2` can reference all runs uniformly by Ulid. The compactor resolves each Ulid through the manifest, which knows whether the underlying run has a `legacy_id` and handles the indirection.
-
-New compactions always produce runs without a `legacy_id`. Over time, as legacy runs are compacted into newer ones, the `legacy_id` field is no longer present on any run and the database is fully migrated.
+When an extractor is configured for the first time on an existing database, the existing unsegmented data remains in the top-level fields. New writes are routed through the extractor: keys for which `extract` returns `Some(tag)` flow into `segments[tag]`, and keys for which it returns `None` continue to flow into the top-level fields. Existing unsegmented data is not automatically migrated into segments — if the application wants old data segmented, it must rewrite it (out of scope for this RFC).
 
 ### Write Path
 
-The write path is unchanged up to memtable flush. Writes go through the WAL and memtable as today — the segment mapper is not involved until flush time. When a memtable is frozen and flushed, the mapper is applied to each entry's key to determine its segment. Entries are grouped by segment and one L0 SST is produced per segment. Each L0 SST is recorded in the manifest with its segment annotation.
+The write path is unchanged up to memtable flush. Writes go through the WAL and memtable as today — the extractor is not involved until flush time. When a memtable is frozen and flushed, the extractor is applied to each entry's key to determine its target tree. Entries are grouped accordingly and one L0 SST is produced per target: one per named segment that received entries from this flush, plus at most one for the unsegmented tree.
 
-When the WAL is enabled, each batch is individually durable in the WAL, and the multi-segment split at flush time is an internal concern. When the WAL is disabled, all L0 SSTs from a single flush must be uploaded and then added to the manifest in a single atomic update. Partial visibility of a multi-segment flush would break durability semantics for batches that have not yet been persisted to L0.
+All L0 SSTs from a single flush are uploaded (in parallel) and then added to the manifest in a single atomic update. This update appends the new L0 SST to each affected tree's `l0` list and advances the corresponding `l0_last_compacted` cursors as appropriate. Partial visibility of a multi-segment flush is not supported — the manifest either reflects the entire flush or none of it.
+
+The reason is the **flush cursor invariant**, not durability. The WAL replay cursor advances past a single contiguous sequence range once the corresponding writes have been durably captured in L0. If a multi-segment flush could be partially visible, replay would need to track a per-segment flush frontier and replay WAL entries selectively per target tree. Forcing atomicity at the manifest level keeps the cursor single-valued and keeps WAL replay logic unchanged. This holds regardless of whether the WAL is enabled — the simplification is in the state machine, not the durability guarantee.
+
+**Operational consideration.** In typical append-oriented workloads, writes concentrate on one or two segments (e.g. the current hour plus occasional backfill), so a flush produces a small number of L0 SSTs and parallel upload keeps latency comparable to today. A pathological wide backfill touching many segments in a single memtable does produce a correspondingly wide flush, and the memtable cannot be released until all uploads land and the manifest update succeeds. Near-term mitigation is to bound memtable width (size- or segment-count-based) so such flushes are frozen earlier; finer-grained WAL tracking to allow partial multi-segment flushes is deferred to [Future Work](#future-work).
 
 ### Read Path
 
-Queries accept an optional segment filter predicate:
+Because each named segment is its own LSM tree with its own ordered `compacted` list, read-path logic within a segment is identical to today's single-tree read path. The only new behavior is routing: for a given query, determining which trees need to be consulted. Routing falls out of the extractor with no user-visible segment filter — there is no `segment_filter` predicate on `ReadOptions`.
 
-```rust
-pub struct ReadOptions {
-    pub segment_filter: Option<Box<dyn Fn(Option<&Bytes>) -> bool>>,
-    // ... existing fields
-}
-```
+**Point lookups.** For `get(key)`, the reader applies the extractor:
 
-The predicate receives `None` for unsegmented data and `Some(&bytes)` for tagged segments. When set, the reader prunes L0 SSTs and sorted runs that do not match before building the merge iterator.
+- If `extract(key)` returns `Some(tag)`, the reader consults only the segment with that tag. If no segment with that tag exists, the key is not present.
+- If `extract(key)` returns `None`, the reader consults only the unsegmented tree.
 
-After filtering, the reader builds a merge iterator from the remaining L0 SSTs and sorted runs. For runs with explicit sequence ranges (`Sequenced` runs), entries are ordered by sequence number (higher wins). Legacy runs (those with a `legacy_id` from the V2 migration) continue to use their list position for precedence until they are compacted into newer runs. Across segments, per-segment streams are merged by key, again with sequence number precedence. The reader does not interpret segment metadata beyond filtering — all merge ordering is derived from key ranges, sequence numbers, and (for legacy runs) list position.
+Point lookups never need to fan out across multiple trees because a given key belongs to exactly one tree by construction.
+
+**Range scans.** See [Scans](#scans) below.
+
+Within each consulted tree, the reader builds a merge iterator from that tree's `l0` and `compacted` lists using list-position precedence, exactly as today. Across trees (for scans that touch multiple), per-tree streams are merged by key — but because trees have disjoint key spaces, no two trees can contribute entries for the same key, so the "merge" is simply a concatenation ordered by key.
+
+### Scans
+
+A range scan `scan(lo..hi)` touches a tree if and only if the tree's key interval intersects `[lo, hi)`. For named segments, the key interval is `[tag, tag++)` where `tag++` is the lexicographic successor of `tag`. The reader computes the set of overlapping segments from the manifest's `segments` list and spins up a per-segment merge iterator for each, plus (conservatively) an iterator over the unsegmented tree.
+
+Pruning the unsegmented tree requires knowing whether any key in `[lo, hi)` could have `extract(key) == None`. In the general case the reader cannot decide this without examining keys, so by default the unsegmented tree is consulted for every scan. Two common-case optimizations fall out of the extractor's contract:
+
+- **Fully-in-domain scans.** If `in_domain(lo)` and `in_domain(hi)` both hold and `lo`/`hi` agree on a single segment tag — e.g. `scan(b"hour=10/".."hour=10/\xff")` under an extractor that emits `hour=NN/` as the segment prefix — the scan lies entirely within one segment and the unsegmented tree can be skipped.
+- **`scan_prefix(p)` with `in_domain(p)`.** When `p` itself is a valid segment tag, the scan collapses to a single segment. The extractor already exposes `in_domain` for exactly this kind of check in RFC 22's filter path; reusing it for scan routing is natural.
+
+Databases that use the extractor consistently (i.e. all keys segmented) can configure the scan path to assume an empty unsegmented tree, skipping that iterator entirely. The default is conservative: include the unsegmented tree unless pruning is provably safe.
+
+**Implications for existing APIs.** `scan`, `scan_prefix`, `scan_with_options`, and `scan_prefix_with_options` on `Db`, `DbReader`, `DbSnapshot`, and `DbTransaction` pick up segment-aware pruning automatically — they all resolve to a range scan internally, and the pruning logic lives beneath that. No API additions are required for scan pruning.
 
 ### Compaction
 
-Today, `CompactionSpec` references sources by a mix of `Ulid` (for L0 SST views) and `u32` (for sorted runs), and specifies a single `u32` destination SR ID. Because the manifest version determines whether sorted runs are identified by `u32` (V2) or `Ulid` (V3), the compaction scheduler needs a way to reference sorted runs without being coupled to either representation. Otherwise, the scheduler would need version-specific branching to construct specs.
+Each compaction reads and writes within a single logical LSM tree — either a named segment or the unsegmented tree. Because sorted run IDs are globally unique across the database, compaction spec construction and execution follow today's single-tree logic with the target tree identified by an explicit segment tag on the spec.
 
-To solve this, the sorted run ID is abstracted behind an opaque `SortedRunId` type:
+A compaction spec identifies the target tree via an optional segment tag, lists source SSTs and sorted runs from that tree, and specifies an action:
 
 ```rust
-/// Opaque sorted run identifier. Taken from the manifest or generated
-/// via ManifestCore::next_sorted_run_id(). The scheduler never inspects
-/// the inner representation.
-pub struct SortedRunId(SortedRunIdInner);
-
-enum SortedRunIdInner {
-    Legacy(u32),
-    Sequenced(Ulid),
-}
-
-pub enum SourceId {
-    SortedRun(SortedRunId),
-    SstView(Ulid),
-}
-
-pub enum Action {
-    /// Merge sources into a new sorted run with the given ID.
-    Merge(SortedRunId),
-    /// Drop sources without producing output (retention).
+pub enum CompactionAction {
+    /// Merge sources into a new sorted run with the given (globally
+    /// unique) u32 ID, appended to the target tree's `compacted` list.
+    Merge { destination: u32 },
+    /// Drop sources without producing output (segment retention).
     Drop,
 }
 
 pub struct CompactionSpec {
-    sources: Vec<SourceId>,
-    action: Action,
+    /// `None` targets the unsegmented tree; `Some(tag)` targets the
+    /// segment with that tag.
+    segment: Option<Bytes>,
+    l0_view_ids: Vec<Ulid>,
+    sorted_runs: Vec<u32>,
+    action: CompactionAction,
 }
 ```
 
-The scheduler takes sorted run IDs directly from the manifest when building sources and calls `ManifestCore::next_sorted_run_id()` to generate the destination for a merge:
+All sources in a single compaction must be drawn from the target tree (either all from the unsegmented state or all from the same named segment). A `CompactionSpec` that mixes trees is invalid and is rejected during validation.
+
+For `Merge`, the executor merges inputs and produces one output sorted run appended to the target tree's `compacted` list with the specified `u32` ID. The scheduler obtains the destination ID from the manifest's shared counter via a convenience helper:
 
 ```rust
 impl ManifestCore {
-    /// Generate a new sorted run ID appropriate for the current manifest version.
-    /// Returns Legacy(u32) for V2 manifests, Sequenced(Ulid) for V3.
-    pub fn next_sorted_run_id(&self) -> SortedRunId { ... }
+    /// Generate the next sorted run ID. IDs are globally unique across
+    /// all segments and the unsegmented tree, allocated monotonically
+    /// for the lifetime of the database.
+    pub fn next_sorted_run_id(&self) -> u32 { ... }
 }
 ```
 
-This keeps the scheduler version-agnostic. It never constructs or inspects `SortedRunId` internals — it copies them from the manifest for sources and uses the generation hook for destinations. The compactor resolves the opaque ID back to the appropriate storage references.
+The helper is a convenience — the scheduler could equivalently track the counter itself — but centralizing allocation in `ManifestCore` keeps the counter authoritative and avoids drift between planning and commit.
 
-All sources in a single compaction must share the same segment annotation. A `CompactionSpec` with sources from different segments is invalid and will be rejected during validation. This invariant ensures that compaction remains segment-scoped — each compaction reads and writes within a single segment's logical LSM tree.
+For `Drop`, the sources are removed from the target tree with no output. Dropping every L0 SST and sorted run in a named segment (combined with removing the segment entry itself) is how segment retention is expressed. `Drop` only removes references from the latest manifest; the underlying SST files are not deleted immediately. The garbage collector is responsible for cleaning up SST files once no remaining manifest versions (including those pinned by snapshots or checkpoints) reference them.
 
-For `Merge`, the executor merges inputs and produces one output sorted run, annotated with the same segment. For `Drop`, the sources are removed from the current manifest with no output — this is how segment retention is expressed. Note that `Drop` only removes references from the latest manifest; the underlying SST files are not deleted immediately. The garbage collector is responsible for cleaning up SST files once no remaining manifest versions (including those pinned by snapshots or checkpoints) reference them.
-
-To support segment-aware scheduling, `ManifestCore` exposes a segment index:
+To support segment-aware scheduling, `ManifestCore` exposes the segment list directly:
 
 ```rust
-pub struct SegmentView {
-    pub l0: Vec<SsTableView>,
-    pub sorted_runs: Vec<SortedRun>,
-}
-
 impl ManifestCore {
-    /// Returns a map from segment tag to the L0 SSTs and sorted runs
-    /// belonging to that segment. Unsegmented data is not included.
-    /// Unsegmented L0 SSTs and sorted runs are accessible through the
-    /// existing l0 and compacted fields.
-    pub fn segments(&self) -> HashMap<Bytes, SegmentView> { ... }
+    /// Returns the set of named segments and their LSM state.
+    /// Unsegmented state is accessible through the existing `l0()`
+    /// and `compacted()` accessors.
+    pub fn segments(&self) -> &[Segment];
 }
 ```
 
-The scheduler uses this index to plan work: selecting segments with many L0s, merging sorted runs within a segment, or identifying expired segments for retention.
+The scheduler uses this to plan work: selecting segments with many L0s, merging sorted runs within a segment, or identifying expired segments for retention. Segmented and unsegmented data may coexist in the same database — for example, a TSDB might segment time-bucketed metric data while keeping permanent configuration unsegmented. The scheduler handles both by planning per-segment compactions from `segments()` and unsegmented compactions from the top-level state.
 
-Segmented and unsegmented data may coexist in the same database. For example, a TSDB might use segments for time-bucketed metric data while keeping permanent configuration state as unsegmented. Migration from an unsegmented to a segmented layout is another scenario. When both are present, the scheduler is responsible for handling both: using `segments()` to plan segment-scoped compactions and the existing `l0`/`compacted` fields for unsegmented data.
-
-The `.compactions` file schema is updated to match. Before the V3 manifest upgrade, the existing `TieredCompactionSpec` continues to be used. After the upgrade, a new `CompactionSpecV2` replaces it:
+The `.compactions` file schema is updated to carry the segment tag alongside the existing fields:
 
 ```flatbuffer
 enum CompactionActionType : byte {
@@ -366,12 +350,15 @@ enum CompactionActionType : byte {
 }
 
 table CompactionSpecV2 {
+    segment: [ubyte];         // absent/empty = unsegmented tree
     l0_view_ids: [Ulid];
-    sorted_runs: [Ulid];
-    destination: Ulid;
+    sorted_runs: [uint];      // globally unique SR IDs, all from the target tree
+    destination: uint;        // globally unique SR ID; only meaningful for Merge
     action: CompactionActionType;
 }
 ```
+
+Compared to the existing `TieredCompactionSpec`, the V2 schema adds the `segment` tag and replaces the single-action shape with an explicit `action` enum to express `Drop` alongside `Merge`. The ID fields remain `uint` (globally unique), matching today's `u32` SR IDs.
 
 ### Recovery and Progress Tracking
 
@@ -381,14 +368,16 @@ The resume mechanism is unchanged: the executor reads the last output SST to com
 
 This RFC focuses on segment-oriented planning and explicit drop semantics. Natural next steps include key-rewriting transforms and multi-stage timeseries rollups built on top of these primitives.
 
-An additional optimization opportunity is to parallelize independent segment merges. The execution model in this RFC can be extended in the future to process disjoint segments concurrently.
+**Finer-grained WAL tracking for partial multi-segment flushes.** The current design requires a multi-segment flush to become visible atomically via the manifest, which keeps a single WAL replay cursor but can extend flush latency for wide backfills (see [Write Path](#write-path)). A future iteration could track per-segment flush frontiers in the WAL or in the manifest, allowing partial flushes to become visible incrementally. This involves extending WAL replay to advance the frontier per segment and reconciling checkpoint semantics with per-segment progress; deferred until operational experience shows the wide-flush case is a real bottleneck.
 
-For example, daily timeseries compactions can build on hourly segmentation:
+**Parallel execution of independent segment compactions.** The execution model in this RFC can be extended to run compactions for disjoint segments concurrently. Each segment has its own L0 list, its own `l0_last_compacted` watermark, and its own `compacted` list in the manifest, so parallel compactions in different segments commit to disjoint `Segment` entries with distinct destination IDs drawn from the shared counter — no cross-segment ordering conflict arises. Parallel compaction *within* a single segment is a separate concern tied to the `l0_last_compacted` watermark's single-cursor design and is not addressed here.
+
+**Multi-stage timeseries rollups.** Daily timeseries compactions can build on hourly segmentation:
 
 - First, compaction shapes data into hourly segment-aligned sorted runs.
 - Then, daily compactions select exactly the 24 hourly segments for a target day as inputs.
 
-This staged model gives a clean source-selection boundary for day rollups and avoids mixing unrelated segment data, reducing unnecessary write amplification.
+This staged model gives a clean source-selection boundary for day rollups and avoids mixing unrelated segment data, reducing unnecessary write amplification. Implementing it requires key-rewriting transforms (to relabel hourly keys into daily keys), which are out of scope for this RFC.
 
 ## Alternatives
 
@@ -396,23 +385,48 @@ This staged model gives a clean source-selection boundary for day rollups and av
 
 A more traditional approach would implement TWCS directly: the system defines time windows (e.g. 1 hour), routes data by event or ingestion time, and manages window lifecycle automatically — closing windows after a threshold, never merging across windows, and dropping expired windows based on a configured retention period. This provides good out-of-the-box behavior for timeseries workloads with minimal application involvement.
 
-This RFC opts for a more general approach: opaque segment metadata defined by the application rather than time windows defined by the system. This is more flexible — segments can represent time buckets, log partitions, or any other application-defined scope — but requires a custom compaction scheduler and shifts more responsibility to the application. The generality also paves the way for key-rewriting transforms (e.g. rolling hourly buckets into daily ones), which would be difficult to retrofit into a TWCS model where window identity is system-managed.
+This RFC opts for a more general approach: opaque segment identifiers defined by the application's key encoding rather than time windows defined by the system. This is more flexible — segments can represent time buckets, log partitions, or any other application-defined scope — but requires a custom compaction scheduler and shifts more responsibility to the application. The generality also paves the way for key-rewriting transforms (e.g. rolling hourly buckets into daily ones), which would be difficult to retrofit into a TWCS model where window identity is system-managed.
+
+### Arbitrary-function segment mapper
+
+An earlier draft of this RFC used an arbitrary `Fn(&[u8]) -> Option<Bytes>` mapper instead of a `PrefixExtractor`. This gave the application free rein to derive a segment tag from a key in any way it chose.
+
+The prefix-extractor approach was chosen instead because:
+
+- **Scan pruning falls out automatically.** With an arbitrary function, the reader cannot map a scan range to a segment set without enumerating keys. A prefix extractor means each segment owns a contiguous key interval `[tag, tag++)`, so scan pruning is a straightforward range intersection against the manifest's `segments` list.
+- **Determinism is structurally enforced.** `PrefixExtractor`'s `in_domain`/`name()` contract gives the read path a way to validate scan prefixes and the manifest a way to detect accidental reconfiguration. An arbitrary function has no such hooks.
+- **Trait reuse with RFC 22.** The same extractor can power prefix bloom filters and segment routing, with no duplication of concepts or versioning logic.
+
+The arbitrary-function mapper remains viable for use cases that genuinely need segment identity to depend on non-prefix key structure, but none of the target use cases (timeseries time buckets, log segment IDs) require it.
+
+### Sequence-range bookkeeping and unordered sorted run bag
+
+An earlier draft of this RFC annotated every L0 SST and sorted run with explicit `min_seq`/`max_seq` ranges in the manifest, treated the sorted run list as an unordered "bag" identified by `Ulid`, and determined read precedence from sequence ranges rather than list position. This was motivated by the need to coordinate IDs across parallel segment compactions without a shared counter.
+
+With the tree-per-segment manifest layout, each segment has its own independent `u32` counter and its own ordered `compacted` list, so:
+
+- Parallel compactions in different segments draw from separate counters — no coordination needed.
+- Within a segment, list-position ordering (as today) is sufficient; sequence ranges would be redundant bookkeeping.
+- Across segments, disjoint key spaces eliminate any need for cross-tree ordering.
+
+Dropping this bookkeeping also eliminates the most expensive part of the migration (reading SST index metadata to backfill sequence ranges for existing runs) and reduces manifest size. This RFC therefore preserves the existing `u32`-based list ordering and does not introduce per-run sequence ranges.
 
 ### Unifying L0 and sorted runs
 
-With the move to sequence-based ordering and bag semantics, the structural distinction between L0 SSTs and sorted runs becomes less meaningful. An L0 SST is semantically equivalent to a sorted run containing a single SST — both carry a segment annotation and a sequence range, and the read path treats them uniformly when building the merge DAG. Collapsing the two into a single abstraction would simplify the manifest schema and the read/compaction paths. This RFC preserves the existing L0/SR distinction to limit scope, but unification is a natural follow-on.
+The structural distinction between L0 SSTs and sorted runs is independent of segmentation. An L0 SST is semantically equivalent to a sorted run containing a single SST, and unifying the two into a single abstraction would simplify the manifest schema. This RFC preserves the existing L0/SR distinction to limit scope — unification is a natural follow-on that would apply equally to segmented and unsegmented LSM state.
 
-### Segment tag in WriteOptions instead of a mapper
+### Segment tag in WriteOptions instead of an extractor
 
-An alternative to the deterministic mapper is to specify the segment tag directly in `WriteOptions` as `segment: Option<Bytes>`. This gives the caller full control over segment assignment per write batch, without requiring the segment to be derivable from the key.
+An alternative to the deterministic extractor is to specify the segment tag directly in `WriteOptions` as `segment: Option<Bytes>`. This gives the caller full control over segment assignment per write batch, without requiring the segment to be derivable from the key.
 
 This approach is more flexible — the caller can assign segments based on external context, not just key structure. However, it introduces significant complexity:
 
 - **WAL format changes required.** Because the segment tag is transient (it exists only in `WriteOptions`), the WAL must persist it so that WAL replay can reconstruct segment groupings. This requires extending the WAL block format with a segment field and splitting blocks on segment transitions.
 - **Cross-segment tombstone issues.** Without a deterministic mapping, the same key can appear in multiple segments. This makes segment retention unsafe: dropping a segment can resurface a shadowed key in another segment. Tombstone elision also becomes conservative — tombstones must be retained until the segment is dropped, since a key may exist in another segment with a lower sequence number.
 - **Batch atomicity constraints.** Since `WriteOptions` is per-batch, all entries in a batch must belong to the same segment. Cross-segment batches are not supported.
+- **Loss of scan pruning.** Because segment membership is not derivable from the key, the reader cannot prune segments based on a scan range — every scan must consider every segment.
 
-This RFC uses the deterministic mapper approach because it avoids WAL changes, provides unconditionally safe retention, and simplifies tombstone handling. The `WriteOptions` approach could be revisited if use cases emerge that require segment assignment independent of key structure.
+This RFC uses the deterministic extractor approach because it avoids WAL changes, provides unconditionally safe retention, simplifies tombstone handling, and enables automatic scan pruning. The `WriteOptions` approach could be revisited if use cases emerge that require segment assignment independent of key structure.
 
 ### Default segment-aware scheduler
 
@@ -454,8 +468,10 @@ This appendix summarizes the OpenData log shape relevant to this RFC. See the [O
 ### B.1 Segment Model
 
 - Data is organized into ordered log segments.
-- Segment boundaries may be defined by time windows or by size thresholds.
-- Segments are represented as contiguous key ranges.
+- Segment boundaries are encoded in the key via a `segment_id` prefix.
+- Segments are therefore represented as contiguous key ranges and can be derived by a `PrefixExtractor` that extracts the `segment_id` portion of the key.
+
+The writer decides when to advance `segment_id` — for example, when the current segment reaches a size threshold or a time boundary. That policy lives in the writer's key-encoding layer, not in SlateDB. From SlateDB's perspective the segment is a key prefix, which is what the extractor sees.
 
 Simplified conceptual key sketches (actual OpenData encoding is binary with typed prefixes/fields):
 
