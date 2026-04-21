@@ -45,18 +45,20 @@ Authors:
 ## Summary
 
 This RFC adds low-level APIs for warming and evicting SlateDB block-cache
-entries for selected SSTs.
+entries for one SST at a time.
 
-Callers choose the physical SST IDs they want to touch. For warming, callers
-also choose the cache content they want to populate: the SST index, the bloom
-filter, specific data ranges, or some combination of the three. 
+Callers choose the physical SST ID they want to touch and fan out themselves
+when they want to act on many SSTs. For warming, callers also choose the cache
+content they want to populate: the SST index, the filters, specific data
+ranges, or some combination of the three. 
 
 Some additional notes:
 1. Warming uses the normal `TableStore` path, so it may populate the
    object-store cache as a side effect. 
 1. Eviction is best effort. 
-1. If SlateDB cannot recover enough metadata to enumerate an SST's cached
-   blocks, the remaining entries stay in the cache until normal pressure
+1. If an SST has already been deleted by GC before `evict_cached_sst` runs,
+   SlateDB cannot read its index to enumerate the cached block offsets. Any
+   remaining entries for that SST stay in the cache until normal pressure
    removes them.
 
 ## Motivation
@@ -75,7 +77,7 @@ Two gaps show up today.
 
 - Warm selected block-cache content for selected SSTs.
 - Let callers warm only the parts of an SST they care about.
-- Provide a best-effort `evict_ssts()` API for reclaiming dead block-cache
+- Provide a best-effort `evict_cached_sst()` API for reclaiming dead block-cache
   entries.
 
 ## Non-Goals
@@ -94,10 +96,10 @@ Two gaps show up today.
 one for best-effort eviction.
 
 ```rust
-/// Cache content that `warm_ssts()` should populate for each selected SST.
+/// Cache content that `warm_sst()` should populate.
 pub enum CacheTarget {
-    /// Warm the SST bloom filter, if the SST has one.
-    Bloom,
+    /// Warm all filters on the SST, if any exist.
+    Filters,
     /// Warm the SST index.
     Index,
     /// Warm the SST data blocks that overlap the supplied key range.
@@ -109,71 +111,87 @@ pub enum CacheTarget {
     Data(BytesRange),
 }
 
-/// Aggregate results returned by `warm_ssts()`.
-pub struct WarmStats {
-    pub warmed_ssts: usize,
-    pub skipped_ssts: usize,
-    pub error_ssts: usize,
-    pub warmed_blocks: usize,
+/// Per-target outcome from `warm_sst()`. One entry is returned for each
+/// target the caller requested.
+pub struct WarmResult {
+    pub target: CacheTarget,
+    pub outcome: Result<WarmBlocks, crate::Error>,
 }
 
-/// Aggregate results returned by `evict_ssts()`.
-pub struct EvictStats {
-    pub evicted_ssts: usize,
-    pub error_ssts: usize,
-    pub evicted_blocks: usize,
+pub struct WarmBlocks {
+    /// Offsets of blocks newly inserted into the block cache by this call.
+    pub blocks_warmed: Vec<u64>,
+    /// Offsets of blocks skipped because they were already cached.
+    pub blocks_skipped: Vec<u64>,
+}
+
+pub struct EvictBlocks {
+    /// Offsets of blocks removed from the block cache.
+    pub blocks_evicted: Vec<u64>,
 }
 
 impl Db {
-    /// Warms selected cache content for the currently reachable SSTs whose
-    /// physical IDs appear in `sst_ids`.
+    /// Warms selected cache content for one SST.
     ///
-    /// Returns an error if the block cache is not configured.
-    pub async fn warm_ssts(
+    /// Returns an entry per requested target, each carrying the per-target
+    /// outcome. Callers fan out over SSTs themselves (for example with
+    /// `FuturesUnordered`) to get the concurrency they want.
+    ///
+    /// If no block cache is configured, logs a warning and returns an empty
+    /// list.
+    pub async fn warm_sst(
         &self,
-        sst_ids: &[SsTableId],
+        sst_id: SsTableId,
         targets: &[CacheTarget],
-    ) -> Result<WarmStats, crate::Error>;
+    ) -> Result<Vec<WarmResult>, crate::Error>;
 
-    /// Best-effort eviction of block-cache entries for the given SST IDs.
+    /// Best-effort eviction of block-cache entries for one SST.
     ///
-    /// Returns an error if the block cache is not configured.
-    pub async fn evict_ssts(
+    /// If no block cache is configured, logs a warning and returns empty
+    /// `EvictBlocks`.
+    pub async fn evict_cached_sst(
         &self,
-        sst_ids: &[SsTableId],
-    ) -> Result<EvictStats, crate::Error>;
+        sst_id: SsTableId,
+    ) -> Result<EvictBlocks, crate::Error>;
 }
 ```
 
-This API makes three deliberate choices.
+`DbReader` exposes the same two methods with identical signatures.
 
-1. The public surface stays at the SST level. Callers pass physical SST IDs,
-   not `SsTableView`s or lower-level cache keys.
-2. `warm_ssts()` takes explicit targets. We stop overloading "empty range" to
+This API makes four deliberate choices.
+
+1. The public surface stays at the SST level. Callers pass a physical SST ID,
+   not an `SsTableView` or a lower-level cache key.
+2. `warm_sst()` takes explicit targets. We stop overloading "empty range" to
    mean "warm metadata only."
-3. The API does not prescribe policy. Callers decide when to warm or evict, and
-   how they derive the SST set.
+3. Each method operates on a single SST. Callers fan out over SST IDs with
+   their own concurrency primitive. This keeps the API small and pushes
+   policy (parallelism, rate-limiting, ordering) to the caller.
+4. The API does not prescribe policy. Callers decide when to warm or evict,
+   and how they derive the SST set.
 
-Both APIs return structured results instead of failing the whole request on the
-first disappearing SST.
+`warm_sst()` returns per-target outcomes instead of failing the whole call on
+the first target that fails.
 
 ### Warm Targets
 
-`CacheTarget` gives callers control over what `warm_ssts()` populates.
+`CacheTarget` gives callers control over what `warm_sst()` populates.
 
 - `CacheTarget::Index` warms the SST index.
-- `CacheTarget::Bloom` warms the bloom filter if the SST has one.
+- `CacheTarget::Filters` warms all filters on the SST, if any exist.
 - `CacheTarget::Data(BytesRange)` warms the data blocks that overlap the
   supplied key range. It also warms the SST index, since data-block planning
   depends on that index.
 
-`warm_ssts()` accepts multiple targets for the same call. A caller can warm
-only metadata, data ranges plus their required indexes, or both.
+`warm_sst()` accepts multiple targets for the same call. A caller can warm
+only metadata, data ranges plus their required indexes, or both. Batching
+targets into one call lets SlateDB share the SST index read across
+`CacheTarget::Index` and `CacheTarget::Data(_)`.
 
 For data warming, SlateDB uses the same range model it already uses elsewhere:
-`BytesRange` describes key intervals, and overlapping target ranges are
-coalesced before the read. If the caller provides redundant ranges, SlateDB
-should not fetch the same block twice.
+`BytesRange` describes key intervals, and overlapping target ranges in a
+single call are coalesced before the read. If the caller provides redundant
+ranges, SlateDB should not fetch the same block twice.
 
 `BytesRange` can also express "all data" with an unbounded range, so
 `CacheTarget::Data(..)` is enough for full-SST data warming. This RFC does not
@@ -181,36 +199,37 @@ need a separate `AllData` target.
 
 `CacheTarget::Data(...)` implies `CacheTarget::Index` as part of the API
 contract, because SlateDB cannot warm data blocks without using the index to
-plan those reads. It does not imply `CacheTarget::Bloom`. If callers want the
-bloom filter warmed too, they should ask for it explicitly.
+plan those reads. It does not imply `CacheTarget::Filters`. If callers want the
+filters warmed too, they should ask for it explicitly.
 
 An empty `targets` slice is a no-op.
 
 ### Warm Execution
 
-`warm_ssts()` is request-scoped. This RFC does not add a background task or a
-SlateDB-owned subscriber.
+`warm_sst()` is request-scoped. This RFC does not add a background task or a
+SlateDB-owned subscriber. Cross-SST consistency (for example, "all calls see
+the same manifest snapshot") is not guaranteed; each call observes the
+manifest that is current when it runs.
 
-The call operates on the manifest that is current when the request runs. For
-each requested SST, SlateDB:
+For one call, SlateDB:
 
 1. Checks whether the physical SST is reachable from the current manifest.
 2. Gathers the manifest entries that reference that SST. A physical SST can
    appear through more than one projected `SsTableView`, each with its own
    visible range.
 3. Unions the visible ranges from those projections.
-4. Applies the requested `CacheTarget`s.
+4. Applies each requested `CacheTarget`.
 
 For `CacheTarget::Index`, SlateDB reads the index through `TableStore`.
 
-For `CacheTarget::Bloom`, SlateDB reads the bloom filter through `TableStore` if
-the SST has one.
+For `CacheTarget::Filters`, SlateDB reads each filter on the SST through
+`TableStore`.
 
 For each `CacheTarget::Data(range)`, SlateDB:
 
-1. Intersects the requested key range with the visible ranges for that SST.
+1. Intersects the requested key range with the visible ranges for the SST.
 2. Skips the target if that intersection is empty.
-3. Reads the SST index if it has not already done so for this SST.
+3. Reads the SST index if it has not already done so for this call.
 4. Uses the index to map the overlapping key range to block intervals.
 5. Coalesces overlapping intervals.
 6. Reads those blocks through
@@ -219,46 +238,45 @@ For each `CacheTarget::Data(range)`, SlateDB:
 As a result, any successful data warm also leaves the SST index warm, even if
 the caller did not list `CacheTarget::Index` separately.
 
-`warm_ssts()` skips SST IDs that are not reachable from the current manifest. It
-does not try to recreate a previous session's cache contents. If a block cache
-implementation persists entries across restarts, callers decide whether
-rewarming is worth the duplicate reads.
+If the SST is not reachable from the current manifest, `warm_sst()` returns an
+empty result list. It does not try to recreate a previous session's cache
+contents. If a block cache implementation persists entries across restarts,
+callers decide whether rewarming is worth the cost of redundant cache lookups,
+which is non-trivial for large ranges even when every block hits.
 
 ### Best-Effort Eviction
 
-`evict_ssts()` removes SlateDB block-cache entries for the supplied physical SST
-IDs.
+`evict_cached_sst()` removes SlateDB block-cache entries for one physical SST.
 
-The method targets all block-cache content associated with each SST:
+The method targets all block-cache content associated with the SST:
 
 - data blocks
 - index
-- bloom filter
+- filters
 - stats
 
-This API does not take `CacheTarget`s. Eviction is the broad operation. 
+This API does not take `CacheTarget`s. Eviction is the broad operation.
 
 The cache key includes the physical SST ID and an offset. To remove all data
-blocks for one SST, SlateDB needs the SST index so it can enumerate block
-offsets. The eviction path therefore reads the index with `cache=false`, then
-removes the entries one by one from the block cache.
+blocks, SlateDB needs the SST index so it can enumerate block offsets. The
+eviction path therefore reads the index with `cache=false`, then removes the
+entries one by one from the block cache. The `cache=false` read avoids
+repopulating the index entry for an SST that is being evicted.
 
 With current defaults, the cost is easy to estimate. A full-sized compacted SST
 is capped at 256 MiB, and the default SST block size is 4 KiB. In the worst
 case that is about `256 MiB / 4 KiB = 65,536` data-block cache keys, plus one
-index entry, up to one bloom-filter entry, and one stats entry. So a full SST
-is on the order of 65.5k `remove()` calls.
+index entry, a small number of filter entries, and one stats entry. So a full
+SST is on the order of 65.5k `remove()` calls.
 
-This is still best effort.
+This is still best effort. If the index read fails because the SST is already
+gone, or because the read fails for some other reason, `evict_cached_sst()`
+returns `Err`. Any entries it did not remove stay in the cache until normal
+pressure evicts them.
 
-- If SlateDB can read the index, it removes the block-cache entries for that
-  SST.
-- If the index read fails because the SST is already gone, or because the read
-  fails for some other reason, SlateDB records the failure for that SST and
-  moves on.
-
-`evict_ssts()` does not check whether an SST is still live in the current
-manifest. The method operates on physical IDs. Callers own that policy.
+`evict_cached_sst()` does not check whether the SST is still live in the
+current manifest. The method operates on the physical ID. Callers own that
+policy.
 
 This RFC does not add a cache-side "remove by SST prefix" API, a persistent
 auxiliary index, or a startup sweep for persisted block caches.
@@ -271,7 +289,9 @@ and it matches the real read path.
 
 It is still a side effect, not a goal of this RFC.
 
-- The API only exists when the SlateDB block cache exists.
+- If no block cache is configured, both methods log a warning and return an
+  empty result (empty list for `warm_sst`, empty `EvictBlocks` for
+  `evict_cached_sst`).
 - Eviction only targets SlateDB block-cache entries.
 - Object-store cache behavior stays unchanged.
 
@@ -283,18 +303,20 @@ two caches behind one policy surface.
 
 These APIs should not put database availability at risk.
 
-- `warm_ssts()` and `evict_ssts()` return `Err` for request-level failures, such
-  as database shutdown or invalid request setup.
-- Per-SST races and read failures should be reported in the returned stats and
-  logs, not by aborting the whole request.
-- If an SST disappears while warming or eviction is in flight, SlateDB should
-  record that outcome and continue with the remaining SSTs.
+- `warm_sst()` and `evict_cached_sst()` return `Err` for call-level failures,
+  such as database shutdown or invalid request setup.
+- For `warm_sst()`, per-target failures are reported inside each `WarmResult`
+  (`outcome: Err(...)`) rather than by aborting the call. One failing target
+  does not prevent other targets in the same call from succeeding.
+- Cross-SST orchestration is the caller's responsibility. A caller fanning out
+  over many SSTs decides whether one failing `warm_sst()` or
+  `evict_cached_sst()` should short-circuit the rest.
 
-Warming is not atomic. If `warm_ssts()` fails partway through, some SSTs or
-blocks may already be warm. Eviction is not atomic either. If `evict_ssts()`
-fails on one SST, SlateDB may already have evicted entries for earlier SSTs.
-That is acceptable. The contract is best effort plus reporting, not
-transactional cache state.
+Warming is not atomic. If one target inside a `warm_sst()` call fails, other
+targets may already have inserted blocks into the cache. Eviction is not
+atomic either. If `evict_cached_sst()` fails partway through, SlateDB may
+already have removed some of the SST's cache entries. That is acceptable. The
+contract is best effort plus reporting, not transactional cache state.
 
 ## Impact Analysis
 
@@ -364,8 +386,8 @@ This feature adds extra reads only when callers invoke the new APIs.
   bandwidth and CPU when callers trigger them. They do not add continuous
   background work on their own.
 - Object-store request (GET/LIST/PUT) and cost profile: warming adds targeted
-  GETs for indexes, bloom filters, and selected block ranges. Best-effort
-  eviction may add one index read per SST.
+  GETs for indexes, filters, and selected block ranges. Best-effort eviction
+  may add one index read per SST.
 - Space, read, and write amplification: warming spends block-cache space on the
   targets the caller chose. Eviction reduces stale entries when SlateDB can
   enumerate them, but it does not guarantee immediate reclamation.
@@ -383,9 +405,9 @@ Suggested `Info`-level metrics:
   Labels: `{result=success|miss}`
 - `slatedb.cache_api.warm_duration_seconds`
 - `slatedb.cache_api.warm_error_count`
-  Labels: `{stage=index|bloom|blocks|request}`
+  Labels: `{stage=index|filters|blocks|request}`
 - `slatedb.cache_api.warm_target_count`
-  Labels: `{target=index|bloom|data}`
+  Labels: `{target=index|filters|data}`
 - `slatedb.cache_api.evict_sst_count`
   Labels: `{result=success|error}`
 - `slatedb.cache_api.evict_block_count`
@@ -411,21 +433,22 @@ Logs are still useful:
 
 - Unit tests should cover target parsing, range intersection, per-SST warm
   planning, and per-SST eviction enumeration.
-- Integration tests should cover `warm_ssts()` with metadata-only targets,
+- Integration tests should cover `warm_sst()` with metadata-only targets,
   range-based data targets, mixed targets, and IDs that are no longer reachable
   from the manifest.
-- Integration tests should cover `evict_ssts()` for live and dead SST IDs, and
+- Integration tests should cover `evict_cached_sst()` for live and dead SST IDs, and
   confirm that the method only touches SlateDB block-cache entries.
-- Fault-injection tests should cover object-store read failures, GC races during
-  eviction, and partial failures during a multi-SST request.
+- Fault-injection tests should cover object-store read failures, GC races
+  during eviction, and partial per-target failures within a single
+  `warm_sst()` call.
 - Performance tests should measure warm-up cost and hot-range latency
   stability.
 
 ## Rollout
 
 - Milestones / phases:
-  - land `warm_ssts()` with `CacheTarget`
-  - land best-effort `evict_ssts()`
+  - land `warm_sst()` with `CacheTarget`
+  - land best-effort `evict_cached_sst()`
   - document startup warming and application-owned manifest/subscription usage
 - Feature flags / opt-in:
   - explicit API use only. There is no builder flag or background manager in
@@ -455,11 +478,11 @@ an SST to warm, and wire the policy to their own control plane. A smaller API
 is a better fit for that.
 
 If we want a batteries-included helper later, we can add it on top of
-`warm_ssts()` and `evict_ssts()`.
+`warm_sst()` and `evict_cached_sst()`.
 
 **Expose lower-level block read and cache insertion primitives**
 
-This goes further in the other direction. Instead of `warm_ssts()`, SlateDB
+This goes further in the other direction. Instead of `warm_sst()`, SlateDB
 would expose enough low-level API for applications to read specific block ranges
 and insert cache entries directly.
 
@@ -470,7 +493,7 @@ That is more flexible, but it also leaks more internals:
 - cached-entry construction
 - more of `TableStore` than we want to commit to publicly
 
-`warm_ssts()` is the middle ground. It gives callers control over SST selection
+`warm_sst()` is the middle ground. It gives callers control over SST selection
 and target selection without turning cache internals into public API.
 
 **Automatic warming on open**
@@ -479,6 +502,17 @@ We could bake warming into `Db::open()` or builder setup. This RFC does not do
 that. Some users will want to block on warm-up before serving reads. Others will
 want to skip it, or make that decision with external state. The lower-level API
 keeps that choice with the caller.
+
+**Plural `warm_ssts(&[SsTableId], &[CacheTarget])`**
+
+An earlier draft took a list of SST IDs in a single call. That version could
+share one manifest snapshot across all SSTs and do internal parallelism in one
+place. We rejected it because the SST-level fan-out is trivial to write at the
+call site, and every caller ends up wanting different concurrency, rate
+limiting, and error policies. Keeping the method per-SST pushes that policy
+out of SlateDB, matches the "building blocks" philosophy called out above, and
+keeps the return type small. Cross-SST manifest consistency is not a
+requirement for any warming workload we have today.
 
 ## Open Questions
 
