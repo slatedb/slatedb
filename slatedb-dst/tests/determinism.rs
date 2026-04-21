@@ -6,9 +6,10 @@
 //! - starts from a fresh shared [`MockSystemClock`]
 //! - opens a real [`Db`] using randomized deterministic settings from
 //!   [`build_settings`]
-//! - runs a background clock actor alongside 500 randomized writer-actor steps
-//!   covering writes, deletes, flushes, and idle steps against deterministic
-//!   local filesystem-backed object stores
+//! - runs a background clock actor alongside split foreground writer, deleter,
+//!   and flusher actors sized to preserve the old `rand_value % 100`
+//!   50/20/5 active-operation mix against deterministic local filesystem-backed
+//!   object stores
 //! - compares the next random `u64` and current clock time after the run
 //!
 //! If either the harness or SlateDB consumes randomness differently, advances
@@ -16,34 +17,72 @@
 //! same seed, one of those post-run checks will diverge.
 #![cfg(dst)]
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use log::info;
 use object_store::path::Path;
 use object_store::ObjectStore;
 use rand::RngCore;
-use slatedb::config::{
-    CompactorOptions, FlushOptions, FlushType, PutOptions, SizeTieredCompactionSchedulerOptions,
-    WriteOptions,
-};
-use slatedb::{Db, DbRand, Error};
+use slatedb::config::{CompactorOptions, SizeTieredCompactionSchedulerOptions};
+use slatedb::{Db, DbRand};
 use slatedb_common::clock::{MockSystemClock, SystemClock};
 use slatedb_dst::{
-    utils::build_settings, ActorCtx, ActorType, DeterministicLocalFilesystem, Harness, Operation,
-    StreamDirection, Toxic, ToxicKind,
+    actors::{clock, deleter, flusher, writer},
+    utils::build_settings,
+    ActorCtx, ActorType, DeterministicLocalFilesystem, Harness, Operation, StreamDirection, Toxic,
+    ToxicKind,
 };
 use tempfile::TempDir;
 use tracing::instrument;
 
-/// Number of steps for the single actor in this test. Large enough to cover many
-/// deterministic branches and state transitions, but small enough to complete
-/// in a reasonable time when repeated across multiple simulations and seeds.
-const ACTOR_STEPS: u64 = 500;
+/// Split actor counts that preserve the old `rand_value % 100` active-operation
+/// mix of 50% writes, 20% deletes, and 5% memtable flushes.
+const WRITER_COUNT: usize = 10;
+const DELETER_COUNT: usize = 4;
+const FLUSHER_COUNT: usize = 1;
 
-/// Number of distinct keys used by the actor workload.
-const KEY_COUNT: usize = 32;
+struct WriterSetup {
+    put_latency_installing: AtomicBool,
+    put_latency_ready: AtomicBool,
+}
+
+impl WriterSetup {
+    fn new() -> Self {
+        Self {
+            put_latency_installing: AtomicBool::new(false),
+            put_latency_ready: AtomicBool::new(false),
+        }
+    }
+
+    fn install_put_latency_once(&self, ctx: &ActorCtx) {
+        if self
+            .put_latency_installing
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            ctx.failures().add_toxic(Toxic {
+                name: "put-latency".into(),
+                kind: ToxicKind::Latency {
+                    latency: Duration::from_millis(1),
+                    jitter: Duration::from_millis(3),
+                },
+                direction: StreamDirection::Upstream,
+                toxicity: 1.0,
+                operations: vec![Operation::PutOpts],
+                path_prefix: None,
+            });
+            self.put_latency_ready.store(true, Ordering::Release);
+        }
+    }
+
+    async fn wait_until_ready(&self) {
+        while !self.put_latency_ready.load(Ordering::Acquire) {
+            tokio::task::yield_now().await;
+        }
+    }
+}
 
 #[test]
 fn test_dst_is_deterministic() -> Result<(), Box<dyn std::error::Error>> {
@@ -103,6 +142,7 @@ fn run_seed_once(seed: u64) -> Result<(u64, DateTime<Utc>), Box<dyn std::error::
         Arc::new(DeterministicLocalFilesystem::new_with_prefix(&main_dir)?);
     let wal_store: Arc<dyn ObjectStore> =
         Arc::new(DeterministicLocalFilesystem::new_with_prefix(&wal_dir)?);
+    let writer_setup = Arc::new(WriterSetup::new());
     Harness::new("determinism", seed)
         .with_rand(Arc::clone(&rand))
         .with_system_clock(Arc::clone(&system_clock))
@@ -141,84 +181,35 @@ fn run_seed_once(seed: u64) -> Result<(u64, DateTime<Utc>), Box<dyn std::error::
                 .await?;
             Ok(Arc::new(db))
         })
-        .actor("writer", ActorType::Foreground, 1, |ctx| async move {
-            run_actor(ctx).await
-        })
+        .actor_with_state(
+            "writer",
+            ActorType::Foreground,
+            WRITER_COUNT,
+            writer_setup,
+            |ctx, writer_setup| async move {
+                writer_setup.install_put_latency_once(&ctx);
+                writer_setup.wait_until_ready().await;
+                writer(ctx).await
+            },
+        )
+        .actor(
+            "deleter",
+            ActorType::Foreground,
+            DELETER_COUNT,
+            |ctx| async move { deleter(ctx).await },
+        )
+        .actor(
+            "flusher",
+            ActorType::Foreground,
+            FLUSHER_COUNT,
+            |ctx| async move { flusher(ctx).await },
+        )
         .actor("clock", ActorType::Background, 1, |ctx| async move {
-            run_clock(ctx).await
+            clock(ctx).await
         })
         .run()?;
 
     let next_u64 = rand.rng().next_u64();
     let next_time = system_clock.now();
     Ok((next_u64, next_time))
-}
-
-/// Executes the single-actor deterministic workload used by this test.
-///
-/// The workload is intentionally simple structurally, but large enough to
-/// exercise many seeded state transitions:
-/// - object-store fault injection via a deterministic latency toxic on writes
-/// - actor-local RNG consumption on every iteration
-/// - 500 randomly chosen operations across a fixed key set
-/// - a weighted mix of puts, deletes, memtable flushes, and idle steps selected
-///   from the actor RNG
-#[instrument(level = "debug", skip_all, fields(role = %ctx.role(), instance = ctx.instance()))]
-async fn run_actor(ctx: ActorCtx) -> Result<(), Error> {
-    ctx.failures().add_toxic(Toxic {
-        name: "put-latency".into(),
-        kind: ToxicKind::Latency {
-            latency: Duration::from_millis(1),
-            jitter: Duration::from_millis(3),
-        },
-        direction: StreamDirection::Upstream,
-        toxicity: 1.0,
-        operations: vec![Operation::PutOpts],
-        path_prefix: None,
-    });
-
-    let db = ctx.db();
-    let put_options = PutOptions::default();
-    let mut write_options = WriteOptions::default();
-    write_options.await_durable = false;
-
-    for step in 0..ACTOR_STEPS {
-        let rand_value = ctx.rand().rng().next_u64();
-        let key_index = ((rand_value >> 8) as usize) % KEY_COUNT;
-        let key = format!("key-{key_index}");
-
-        match rand_value % 100 {
-            0..=49 => {
-                let value = format!("{step:04}-{rand_value:016x}").into_bytes();
-                db.put_with_options(key.as_bytes(), &value, &put_options, &write_options)
-                    .await?;
-            }
-            50..=69 => {
-                db.delete_with_options(key.as_bytes(), &write_options)
-                    .await?;
-            }
-            70..=74 => {
-                db.flush_with_options(FlushOptions {
-                    flush_type: FlushType::MemTable,
-                })
-                .await?;
-            }
-            _ => {}
-        }
-
-        if step % 50 == 0 {
-            info!("actor step complete [step={}]", step);
-        }
-    }
-
-    db.close().await
-}
-
-#[instrument(level = "debug", skip_all, fields(role = %ctx.role(), instance = ctx.instance()))]
-async fn run_clock(ctx: ActorCtx) -> Result<(), Error> {
-    loop {
-        let rand_value = ctx.rand().rng().next_u64();
-        ctx.advance_time(Duration::from_millis(1 + (rand_value % 5)))
-            .await;
-    }
 }

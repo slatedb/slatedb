@@ -562,6 +562,9 @@ impl Harness {
             }
         }
 
+        let db = Arc::clone(&shared.db_slot.read());
+        db.close().await?;
+
         Ok(())
     }
 }

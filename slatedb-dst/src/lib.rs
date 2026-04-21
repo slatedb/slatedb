@@ -7,6 +7,7 @@
 #![doc = include_str!("../README.md")]
 #![cfg(tokio_unstable)]
 
+pub mod actors;
 mod clocked_object_store;
 mod deterministic_local_filesystem;
 pub mod failing_object_store;
