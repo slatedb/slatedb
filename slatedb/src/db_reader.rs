@@ -3,7 +3,7 @@ use crate::cached_object_store::CachedObjectStore;
 use crate::clock::MonotonicClock;
 use crate::config::{CheckpointOptions, DbReaderOptions, ReadOptions, ScanOptions};
 use crate::db_metadata::DbMetadataOps;
-use crate::db_read::DbRead;
+use crate::db_read::DbReadOps;
 use crate::db_stats::DbStats;
 use crate::db_status::{ClosedResultWriter, DbStatus, DbStatusManager};
 use crate::dispatcher::{MessageFactory, MessageHandler, MessageHandlerExecutor};
@@ -1059,7 +1059,7 @@ impl DbReader {
 }
 
 #[async_trait::async_trait]
-impl DbRead for DbReader {
+impl DbReadOps for DbReader {
     async fn get_with_options<K: AsRef<[u8]> + Send>(
         &self,
         key: K,

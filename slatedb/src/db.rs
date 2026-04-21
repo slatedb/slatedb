@@ -52,7 +52,7 @@ use crate::config::{
     WriteOptions,
 };
 use crate::db_iter::DbIterator;
-use crate::db_read::DbRead;
+use crate::db_read::DbReadOps;
 use crate::db_snapshot::DbSnapshot;
 use crate::db_state::{DbState, SsTableId};
 use crate::db_stats::DbStats;
@@ -1616,7 +1616,7 @@ impl Db {
 }
 
 #[async_trait::async_trait]
-impl DbRead for Db {
+impl DbReadOps for Db {
     async fn get_with_options<K: AsRef<[u8]> + Send>(
         &self,
         key: K,
