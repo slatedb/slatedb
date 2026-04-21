@@ -128,7 +128,12 @@ pub struct FailingObjectStoreController {
 }
 
 impl FailingObjectStoreController {
-    pub(crate) fn new(rand: Arc<DbRand>) -> Self {
+    /// Creates a new deterministic fault controller.
+    ///
+    /// ## Arguments
+    /// - `rand`: RNG used to sample toxic probabilities, jitter, and synthetic
+    ///   HTTP failures.
+    pub fn new(rand: Arc<DbRand>) -> Self {
         Self {
             state: Arc::new(ControllerState {
                 toxics: RwLock::new(Vec::new()),

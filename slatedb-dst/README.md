@@ -22,11 +22,11 @@ an internal path dependency rather than from crates.io.
 - `StartupCtx`: context passed to the database factory configured with
   `Harness::with_db`
 - `ActorCtx`: per-actor context with deterministic RNG, DB access, shared
-  clock, failpoint registry, and failure controller
+  clock, failpoint registry, and harness object stores
 - `DeterministicLocalFilesystem`: filesystem-backed `ObjectStore` with stable
   metadata and deterministic listing behavior
-- `FailingObjectStoreController`: shared controller used to install and clear
-  object-store faults during a run
+- `FailingObjectStoreController`: controller used to install and clear
+  object-store faults on any wrapped store
 - `Toxic`, `ToxicKind`, `StreamDirection`, `Operation`: fault-injection
   building blocks
 - `HttpFailBefore` and `HttpStatusError`: synthetic HTTP failures injected
@@ -43,12 +43,12 @@ The harness is built around one root seed:
    simulation on a current-thread runtime.
 3. The harness derives additional deterministic seeds for:
    - database startup (`StartupCtx::rand()`)
-   - object-store fault sampling
    - each actor instance (`ActorCtx::rand()`)
 4. The harness wraps the configured object stores with:
    - a clock-aware layer that reports deterministic `last_modified` metadata
-   - a failure-injecting layer driven by the shared controller
-5. The shared `MockSystemClock` advances only when your test advances it or a
+5. If your scenario uses `FailingObjectStore`, seed its controller explicitly
+   so fault sampling stays reproducible.
+6. The shared `MockSystemClock` advances only when your test advances it or a
    configured toxic adds latency/bandwidth delay.
 
 Given the same seed and the same DST-compatible code paths, the harness is
@@ -101,10 +101,12 @@ use std::time::Duration;
 use object_store::path::Path;
 use object_store::ObjectStore;
 use rand::RngCore;
-use slatedb::Db;
+use slatedb::{Db, DbRand};
+use slatedb_common::clock::MockSystemClock;
 use slatedb_dst::{
-    utils::build_settings, ActorType, DeterministicLocalFilesystem, Harness,
-    Operation, StreamDirection, Toxic, ToxicKind,
+    utils::build_settings, ActorType, DeterministicLocalFilesystem,
+    FailingObjectStore, FailingObjectStoreController, Harness, Operation,
+    StreamDirection, Toxic, ToxicKind,
 };
 use tempfile::TempDir;
 
@@ -116,13 +118,34 @@ fn dst_smoke_test() -> Result<(), Box<dyn std::error::Error>> {
     std::fs::create_dir_all(&main_dir)?;
     std::fs::create_dir_all(&wal_dir)?;
 
-    let main_store: Arc<dyn ObjectStore> =
-        Arc::new(DeterministicLocalFilesystem::new_with_prefix(&main_dir)?);
-    let wal_store: Arc<dyn ObjectStore> =
-        Arc::new(DeterministicLocalFilesystem::new_with_prefix(&wal_dir)?);
+    let system_clock = Arc::new(MockSystemClock::new());
+    let failures = FailingObjectStoreController::new(Arc::new(DbRand::new(11)));
+    failures.add_toxic(Toxic {
+        name: "put-latency".into(),
+        kind: ToxicKind::Latency {
+            latency: Duration::from_millis(2),
+            jitter: Duration::from_millis(3),
+        },
+        direction: StreamDirection::Upstream,
+        toxicity: 1.0,
+        operations: vec![Operation::PutOpts],
+        path_prefix: None,
+    });
+
+    let main_store: Arc<dyn ObjectStore> = Arc::new(FailingObjectStore::new(
+        Arc::new(DeterministicLocalFilesystem::new_with_prefix(&main_dir)?),
+        failures.clone(),
+        system_clock.clone(),
+    ));
+    let wal_store: Arc<dyn ObjectStore> = Arc::new(FailingObjectStore::new(
+        Arc::new(DeterministicLocalFilesystem::new_with_prefix(&wal_dir)?),
+        failures,
+        system_clock.clone(),
+    ));
 
     Harness::new("smoke", 7)
         .with_path(Path::from("dst/smoke"))
+        .with_system_clock(system_clock)
         .with_main_object_store(main_store)
         .with_wal_object_store(wal_store)
         .with_db(move |ctx| async move {
@@ -141,18 +164,6 @@ fn dst_smoke_test() -> Result<(), Box<dyn std::error::Error>> {
             Ok(Arc::new(db))
         })
         .actor("writer", ActorType::Foreground, 1, |ctx| async move {
-            ctx.failures().add_toxic(Toxic {
-                name: "put-latency".into(),
-                kind: ToxicKind::Latency {
-                    latency: Duration::from_millis(2),
-                    jitter: Duration::from_millis(3),
-                },
-                direction: StreamDirection::Upstream,
-                toxicity: 1.0,
-                operations: vec![Operation::PutOpts],
-                path_prefix: None,
-            });
-
             let db = ctx.db();
             db.put(b"hello", b"world").await?;
             ctx.advance_time(Duration::from_millis(10)).await;
@@ -223,7 +234,6 @@ Each registered actor instance receives its own `ActorCtx`.
 - `db()` to read the currently installed shared `Arc<Db>`
 - `swap_db(new_db)` to replace the shared DB handle for all actors
 - `advance_time(duration)` to move the shared mock clock forward
-- `failures()` to configure object-store faults
 - `path()`, `main_object_store()`, `wal_object_store()`
 - `system_clock()` and `fp_registry()`
 
@@ -241,13 +251,14 @@ Each actor registration declares an `ActorType`:
 
 ## Failure injection
 
-The harness wraps the configured object stores with a shared
-`FailingObjectStoreController`. Every actor sees the same controller through
-`ctx.failures()`, so changes to the fault configuration affect the main store
-and optional WAL store consistently.
+To inject faults, wrap the relevant object stores with `FailingObjectStore`
+before passing them to the harness. Reuse the same
+`FailingObjectStoreController` anywhere you want a shared fault configuration,
+for example across the main store and WAL store.
 
 ### Controller operations
 
+- `FailingObjectStoreController::new(rand)`: creates a deterministic controller
 - `add_toxic(toxic)`: appends a toxic to the active set
 - `clear_toxics()`: removes all toxics
 - `set_http_fail_before(failure)`: installs a synthetic HTTP failure policy
@@ -291,9 +302,13 @@ Supported `ToxicKind` values:
 is dispatched to the wrapped store.
 
 ```rust,ignore
-use slatedb_dst::{HttpFailBefore, Operation};
+use std::sync::Arc;
 
-ctx.failures().set_http_fail_before(HttpFailBefore {
+use slatedb::DbRand;
+use slatedb_dst::{FailingObjectStoreController, HttpFailBefore, Operation};
+
+let failures = FailingObjectStoreController::new(Arc::new(DbRand::new(7)));
+failures.set_http_fail_before(HttpFailBefore {
     percentage: 100,
     status_code: 503,
     operations: vec![Operation::GetOpts],
@@ -356,8 +371,8 @@ scenario coverage without sacrificing reproducibility.
 - Seed everything through the harness and avoid unseeded randomness.
 - Use the harness-provided clock for time-sensitive behavior.
 - Prefer `DeterministicLocalFilesystem` over ad hoc local filesystem wrappers.
-- Install object-store faults through `ctx.failures()` so they remain visible to
-  every actor.
+- Install object-store faults on the shared `FailingObjectStoreController`
+  before or during the scenario, depending on when they should take effect.
 - Use `swap_db(...)` when the scenario includes reopen or failover behavior.
 - Keep actor behavior inside the seeded current-thread Tokio runtime when you
   care about replayability.

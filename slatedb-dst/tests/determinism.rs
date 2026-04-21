@@ -17,7 +17,6 @@
 //! same seed, one of those post-run checks will diverge.
 #![cfg(dst)]
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -31,8 +30,8 @@ use slatedb_common::clock::{MockSystemClock, SystemClock};
 use slatedb_dst::{
     actors::{clock, deleter, flusher, writer},
     utils::build_settings,
-    ActorCtx, ActorType, DeterministicLocalFilesystem, Harness, Operation, StreamDirection, Toxic,
-    ToxicKind,
+    ActorType, DeterministicLocalFilesystem, FailingObjectStore, FailingObjectStoreController,
+    Harness, Operation, StreamDirection, Toxic, ToxicKind,
 };
 use tempfile::TempDir;
 use tracing::instrument;
@@ -42,47 +41,6 @@ use tracing::instrument;
 const WRITER_COUNT: usize = 10;
 const DELETER_COUNT: usize = 4;
 const FLUSHER_COUNT: usize = 1;
-
-struct WriterSetup {
-    put_latency_installing: AtomicBool,
-    put_latency_ready: AtomicBool,
-}
-
-impl WriterSetup {
-    fn new() -> Self {
-        Self {
-            put_latency_installing: AtomicBool::new(false),
-            put_latency_ready: AtomicBool::new(false),
-        }
-    }
-
-    fn install_put_latency_once(&self, ctx: &ActorCtx) {
-        if self
-            .put_latency_installing
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_ok()
-        {
-            ctx.failures().add_toxic(Toxic {
-                name: "put-latency".into(),
-                kind: ToxicKind::Latency {
-                    latency: Duration::from_millis(1),
-                    jitter: Duration::from_millis(3),
-                },
-                direction: StreamDirection::Upstream,
-                toxicity: 1.0,
-                operations: vec![Operation::PutOpts],
-                path_prefix: None,
-            });
-            self.put_latency_ready.store(true, Ordering::Release);
-        }
-    }
-
-    async fn wait_until_ready(&self) {
-        while !self.put_latency_ready.load(Ordering::Acquire) {
-            tokio::task::yield_now().await;
-        }
-    }
-}
 
 #[test]
 fn test_dst_is_deterministic() -> Result<(), Box<dyn std::error::Error>> {
@@ -138,11 +96,29 @@ fn run_seed_once(seed: u64) -> Result<(u64, DateTime<Utc>), Box<dyn std::error::
 
     let rand = Arc::new(DbRand::new(seed));
     let system_clock = Arc::new(MockSystemClock::new());
-    let main_store: Arc<dyn ObjectStore> =
-        Arc::new(DeterministicLocalFilesystem::new_with_prefix(&main_dir)?);
-    let wal_store: Arc<dyn ObjectStore> =
-        Arc::new(DeterministicLocalFilesystem::new_with_prefix(&wal_dir)?);
-    let writer_setup = Arc::new(WriterSetup::new());
+    let failure_seed = rand.rng().next_u64();
+    let failures = FailingObjectStoreController::new(Arc::new(DbRand::new(failure_seed)));
+    failures.add_toxic(Toxic {
+        name: "put-latency".into(),
+        kind: ToxicKind::Latency {
+            latency: Duration::from_millis(1),
+            jitter: Duration::from_millis(3),
+        },
+        direction: StreamDirection::Upstream,
+        toxicity: 1.0,
+        operations: vec![Operation::PutOpts],
+        path_prefix: None,
+    });
+    let main_store: Arc<dyn ObjectStore> = Arc::new(FailingObjectStore::new(
+        Arc::new(DeterministicLocalFilesystem::new_with_prefix(&main_dir)?),
+        failures.clone(),
+        system_clock.clone(),
+    ));
+    let wal_store: Arc<dyn ObjectStore> = Arc::new(FailingObjectStore::new(
+        Arc::new(DeterministicLocalFilesystem::new_with_prefix(&wal_dir)?),
+        failures,
+        system_clock.clone(),
+    ));
     Harness::new("determinism", seed)
         .with_rand(Arc::clone(&rand))
         .with_system_clock(Arc::clone(&system_clock))
@@ -181,16 +157,11 @@ fn run_seed_once(seed: u64) -> Result<(u64, DateTime<Utc>), Box<dyn std::error::
                 .await?;
             Ok(Arc::new(db))
         })
-        .actor_with_state(
+        .actor(
             "writer",
             ActorType::Foreground,
             WRITER_COUNT,
-            writer_setup,
-            |ctx, writer_setup| async move {
-                writer_setup.install_put_latency_once(&ctx);
-                writer_setup.wait_until_ready().await;
-                writer(ctx).await
-            },
+            |ctx| async move { writer(ctx).await },
         )
         .actor(
             "deleter",
