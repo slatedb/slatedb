@@ -130,7 +130,13 @@ impl FsCacheEntry {
                 .open(tmp_path)
                 .map_err(wrap_io_err)?;
             file.write_all(&buf).map_err(wrap_io_err)?;
-            file.sync_all().map_err(wrap_io_err)?;
+            // No fsync: the disk cache is ephemeral (the remote object store
+            // is the source of truth) so durability is unnecessary. After an
+            // unclean shutdown a cached entry may come back truncated or
+            // with lost pages; every cached payload carries a CRC (SST block
+            // footers, or the manifest v3 envelope) which the fetching layer
+            // validates, and `ChecksumMismatch` self-heals by invalidating
+            // the cache entry and refetching from the remote store.
             std::fs::rename(tmp_path, path).map_err(wrap_io_err)
         })
         .await?
@@ -312,6 +318,23 @@ impl LocalCacheEntry for FsCacheEntry {
         let meta_path = Self::make_head_path(self.root_folder.clone(), &self.location);
 
         self.atomic_write(meta_path, buf).await
+    }
+
+    async fn invalidate(&self) -> object_store::Result<()> {
+        // Every cache file for a given location lives under
+        // `root_folder / <location>`: `_head` plus `_part{size}-{N}` files.
+        // Remove that whole directory. A missing directory means the entry
+        // was already evicted (or never existed) and is treated as success.
+        let mut dir = self.root_folder.clone();
+        dir.push(self.location.to_string());
+        #[allow(clippy::disallowed_methods)]
+        tokio::task::spawn_blocking(move || match std::fs::remove_dir_all(&dir) {
+            Ok(()) => Ok(()),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(err) => Err(wrap_io_err(err)),
+        })
+        .await
+        .map_err(wrap_io_err)?
     }
 
     async fn read_head(&self) -> object_store::Result<Option<(ObjectMeta, Attributes)>> {

@@ -1,4 +1,6 @@
+use crate::cached_object_store::CachedObjectStore;
 use crate::db_state::SsTableId;
+use object_store::path::Path;
 use object_store::ObjectStore;
 use std::sync::Arc;
 
@@ -9,6 +11,12 @@ pub(crate) struct ObjectStores {
     main_object_store: Arc<dyn ObjectStore>,
     /// Optional WAL object store dedicated specifically for WAL.
     wal_object_store: Option<Arc<dyn ObjectStore>>,
+    /// Concrete handle to the main-side local disk cache, if one is in use.
+    /// Needed so higher layers can drop a corrupt cached entry after a
+    /// checksum mismatch and refetch from the remote object store. The WAL
+    /// path is never routed through `CachedObjectStore` today, so there is
+    /// no corresponding WAL invalidator.
+    main_cache: Option<Arc<CachedObjectStore>>,
 }
 
 /// Whether the object store holds the main data path or the WAL.
@@ -37,6 +45,32 @@ impl ObjectStores {
         Self {
             main_object_store,
             wal_object_store,
+            main_cache: None,
+        }
+    }
+
+    pub(crate) fn with_main_cache(mut self, cache: Arc<CachedObjectStore>) -> Self {
+        self.main_cache = Some(cache);
+        self
+    }
+
+    /// Invalidate the cached copy (if any) of the given path on the store
+    /// that serves the supplied SST id. Used by SST readers to drop a
+    /// corrupt cache entry after the SST-level checksum check fails.
+    pub(crate) async fn invalidate_cache_for(&self, id: &SsTableId, path: &Path) {
+        let cache = match id {
+            SsTableId::Compacted(..) => self.main_cache.as_ref(),
+            // WAL is not served through the local disk cache.
+            SsTableId::Wal(..) => None,
+        };
+        if let Some(cache) = cache {
+            if let Err(err) = cache.invalidate(path).await {
+                log::warn!(
+                    "failed to invalidate cached SST entry [path={}, error={}]",
+                    path,
+                    err
+                );
+            }
         }
     }
 

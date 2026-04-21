@@ -1,9 +1,11 @@
+use crate::cached_object_store::CachedObjectStore;
 use crate::compactor_state::{Compactions, VersionedCompactions};
 use crate::error::SlateDBError;
 #[allow(dead_code)]
 use crate::error::SlateDBError::LatestTransactionalObjectVersionMissing;
 use crate::flatbuffer_types::FlatBufferCompactionsCodec;
 use chrono::Utc;
+use log::warn;
 use object_store::path::Path;
 use object_store::ObjectStore;
 use serde::Serialize;
@@ -11,11 +13,24 @@ use slatedb_common::clock::SystemClock;
 use slatedb_txn_obj::object_store::ObjectStoreSequencedStorageProtocol;
 use slatedb_txn_obj::{
     DirtyObject, FenceableTransactionalObject, MonotonicId, SequencedStorageProtocol,
-    SimpleTransactionalObject, TransactionalObject, TransactionalStorageProtocol,
+    SimpleTransactionalObject, TransactionalObject, TransactionalObjectError,
+    TransactionalStorageProtocol,
 };
 use std::ops::RangeBounds;
 use std::sync::Arc;
 use std::time::Duration;
+
+const COMPACTIONS_SUBDIR: &str = "compactions";
+const COMPACTIONS_FILE_SUFFIX: &str = "compactions";
+
+fn is_checksum_mismatch(err: &TransactionalObjectError) -> bool {
+    if let TransactionalObjectError::CallbackError(inner) = err {
+        if let Some(e) = inner.downcast_ref::<SlateDBError>() {
+            return matches!(e, SlateDBError::ChecksumMismatch);
+        }
+    }
+    false
+}
 
 /// Represents the compactions stored in the object store. This type tracks the current
 /// contents and id of the stored compactions state, and allows callers to read and update
@@ -197,6 +212,8 @@ where
 
 pub(crate) struct CompactionsStore {
     inner: Arc<dyn SequencedStorageProtocol<Compactions>>,
+    compactions_dir: Path,
+    cached_object_store: Option<Arc<CachedObjectStore>>,
 }
 
 impl CompactionsStore {
@@ -204,11 +221,69 @@ impl CompactionsStore {
         let inner = Arc::new(ObjectStoreSequencedStorageProtocol::<Compactions>::new(
             root_path,
             object_store,
-            "compactions",
-            "compactions",
+            COMPACTIONS_SUBDIR,
+            COMPACTIONS_FILE_SUFFIX,
             Box::new(FlatBufferCompactionsCodec {}),
         ));
-        Self { inner }
+        Self {
+            inner,
+            compactions_dir: root_path.child(COMPACTIONS_SUBDIR),
+            cached_object_store: None,
+        }
+    }
+
+    /// Attach a `CachedObjectStore` so reads can self-heal from a corrupt
+    /// cache entry (e.g. after an unclean shutdown) by invalidating it and
+    /// refetching from the remote object store.
+    pub(crate) fn with_cache_invalidator(
+        mut self,
+        cached_object_store: Arc<CachedObjectStore>,
+    ) -> Self {
+        self.cached_object_store = Some(cached_object_store);
+        self
+    }
+
+    fn compactions_path(&self, id: MonotonicId) -> Path {
+        self.compactions_dir
+            .child(format!("{:020}.{}", id.id(), COMPACTIONS_FILE_SUFFIX))
+    }
+
+    async fn invalidate_on_checksum_mismatch(
+        &self,
+        id: MonotonicId,
+        err: &TransactionalObjectError,
+    ) -> bool {
+        let Some(cache) = self.cached_object_store.as_ref() else {
+            return false;
+        };
+        if !is_checksum_mismatch(err) {
+            return false;
+        }
+        let path = self.compactions_path(id);
+        warn!(
+            "compactions failed checksum on read, invalidating cache and retrying once [id={}, path={}]",
+            id.id(),
+            path
+        );
+        if let Err(invalidate_err) = cache.invalidate(&path).await {
+            warn!(
+                "failed to invalidate cached compactions [path={}, error={}]",
+                path, invalidate_err
+            );
+        }
+        true
+    }
+
+    async fn try_read_with_retry(
+        &self,
+        id: MonotonicId,
+    ) -> Result<Option<Compactions>, TransactionalObjectError> {
+        match self.inner.try_read(id).await {
+            Err(err) if self.invalidate_on_checksum_mismatch(id, &err).await => {
+                self.inner.try_read(id).await
+            }
+            other => other,
+        }
     }
 
     /// Delete a compactions file from the object store.
@@ -245,11 +320,32 @@ impl CompactionsStore {
     pub(crate) async fn try_read_latest_compactions(
         &self,
     ) -> Result<Option<VersionedCompactions>, SlateDBError> {
-        Ok(self.inner.try_read_latest().await.map(|opt| {
-            opt.map(|(id, compactions)| {
-                VersionedCompactions::from_compactions(id.into(), compactions)
-            })
-        })?)
+        // Mirror `ObjectStoreSequencedStorageProtocol::try_read_latest`:
+        // list, take the newest id, read via the retry path. Re-list on
+        // `Ok(None)` to handle the existing race with GC.
+        loop {
+            let files = self
+                .inner
+                .list(std::ops::Bound::Unbounded, std::ops::Bound::Unbounded)
+                .await?;
+            let Some(file) = files.last() else {
+                return Ok(None);
+            };
+            match self.try_read_with_retry(file.id).await? {
+                Some(compactions) => {
+                    return Ok(Some(VersionedCompactions::from_compactions(
+                        file.id.into(),
+                        compactions,
+                    )));
+                }
+                None => {
+                    warn!(
+                        "listed compactions file missing on read, retrying [location={}]",
+                        file.location
+                    );
+                }
+            }
+        }
     }
 
     #[cfg(test)]
@@ -266,7 +362,7 @@ impl CompactionsStore {
         &self,
         id: u64,
     ) -> Result<Option<Compactions>, SlateDBError> {
-        Ok(self.inner.try_read(MonotonicId::new(id)).await?)
+        Ok(self.try_read_with_retry(MonotonicId::new(id)).await?)
     }
 
     #[allow(dead_code)]

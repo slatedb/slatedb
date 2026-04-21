@@ -1,3 +1,4 @@
+use crate::cached_object_store::CachedObjectStore;
 use crate::checkpoint::Checkpoint;
 use crate::config::CheckpointOptions;
 use crate::error::SlateDBError;
@@ -7,7 +8,7 @@ use crate::error::SlateDBError::{
 use crate::flatbuffer_types::FlatBufferManifestCodec;
 use crate::manifest::{Manifest, ManifestCore, VersionedManifest};
 use chrono::Utc;
-use log::debug;
+use log::{debug, warn};
 use object_store::path::Path;
 use object_store::ObjectStore;
 use serde::Serialize;
@@ -15,13 +16,28 @@ use slatedb_common::clock::SystemClock;
 use slatedb_txn_obj::object_store::ObjectStoreSequencedStorageProtocol;
 use slatedb_txn_obj::{
     DirtyObject, FenceableTransactionalObject, MonotonicId, SequencedStorageProtocol,
-    SimpleTransactionalObject, TransactionalObject, TransactionalStorageProtocol,
+    SimpleTransactionalObject, TransactionalObject, TransactionalObjectError,
+    TransactionalStorageProtocol,
 };
 use std::collections::BTreeMap;
 use std::ops::RangeBounds;
 use std::sync::Arc;
 use std::time::Duration;
 use uuid::Uuid;
+
+const MANIFEST_SUBDIR: &str = "manifest";
+const MANIFEST_FILE_SUFFIX: &str = "manifest";
+
+fn is_checksum_mismatch(err: &TransactionalObjectError) -> bool {
+    // The codec returns `SlateDBError::ChecksumMismatch` when a manifest fails
+    // its CRC check; it reaches us wrapped as `CallbackError`.
+    if let TransactionalObjectError::CallbackError(inner) = err {
+        if let Some(e) = inner.downcast_ref::<SlateDBError>() {
+            return matches!(e, SlateDBError::ChecksumMismatch);
+        }
+    }
+    false
+}
 
 pub(crate) struct FenceableManifest {
     clock: Arc<dyn SystemClock>,
@@ -459,6 +475,11 @@ where
 
 pub(crate) struct ManifestStore {
     inner: Arc<dyn SequencedStorageProtocol<Manifest>>,
+    /// Absolute path prefix used to compute full cache keys for invalidation.
+    manifest_dir: Path,
+    /// When set, a `ChecksumMismatch` on read invalidates the corresponding
+    /// cache entry and retries against the remote object store.
+    cached_object_store: Option<Arc<CachedObjectStore>>,
 }
 
 impl ManifestStore {
@@ -466,11 +487,71 @@ impl ManifestStore {
         let inner = Arc::new(ObjectStoreSequencedStorageProtocol::<Manifest>::new(
             root_path,
             object_store,
-            "manifest",
-            "manifest",
+            MANIFEST_SUBDIR,
+            MANIFEST_FILE_SUFFIX,
             Box::new(FlatBufferManifestCodec {}),
         ));
-        Self { inner }
+        Self {
+            inner,
+            manifest_dir: root_path.child(MANIFEST_SUBDIR),
+            cached_object_store: None,
+        }
+    }
+
+    /// Attach a `CachedObjectStore` so that reads can self-heal from a
+    /// corrupted cache entry by invalidating it and refetching from the
+    /// remote object store.
+    pub(crate) fn with_cache_invalidator(
+        mut self,
+        cached_object_store: Arc<CachedObjectStore>,
+    ) -> Self {
+        self.cached_object_store = Some(cached_object_store);
+        self
+    }
+
+    fn manifest_path(&self, id: MonotonicId) -> Path {
+        self.manifest_dir
+            .child(format!("{:020}.{}", id.id(), MANIFEST_FILE_SUFFIX))
+    }
+
+    /// If `err` represents a manifest that failed its checksum on decode,
+    /// drop the cached copy so the next read goes to the remote store.
+    async fn invalidate_on_checksum_mismatch(
+        &self,
+        id: MonotonicId,
+        err: &TransactionalObjectError,
+    ) -> bool {
+        let Some(cache) = self.cached_object_store.as_ref() else {
+            return false;
+        };
+        if !is_checksum_mismatch(err) {
+            return false;
+        }
+        let path = self.manifest_path(id);
+        warn!(
+            "manifest failed checksum on read, invalidating cache and retrying once [id={}, path={}]",
+            id.id(),
+            path
+        );
+        if let Err(invalidate_err) = cache.invalidate(&path).await {
+            warn!(
+                "failed to invalidate cached manifest [path={}, error={}]",
+                path, invalidate_err
+            );
+        }
+        true
+    }
+
+    async fn try_read_with_retry(
+        &self,
+        id: MonotonicId,
+    ) -> Result<Option<Manifest>, TransactionalObjectError> {
+        match self.inner.try_read(id).await {
+            Err(err) if self.invalidate_on_checksum_mismatch(id, &err).await => {
+                self.inner.try_read(id).await
+            }
+            other => other,
+        }
     }
 
     /// Delete a manifest from the object store.
@@ -550,9 +631,33 @@ impl ManifestStore {
     pub(crate) async fn try_read_latest_manifest(
         &self,
     ) -> Result<Option<VersionedManifest>, SlateDBError> {
-        Ok(self.inner.try_read_latest().await.map(|opt| {
-            opt.map(|(id, manifest)| VersionedManifest::from_manifest(id.into(), manifest))
-        })?)
+        // Mirrors `ObjectStoreSequencedStorageProtocol::try_read_latest`:
+        // list, take the newest id, read it. If that read returns `None`
+        // (concurrent GC) we re-list. If it returns `ChecksumMismatch`,
+        // `try_read_with_retry` invalidates the cache entry and retries.
+        loop {
+            let files = self
+                .inner
+                .list(std::ops::Bound::Unbounded, std::ops::Bound::Unbounded)
+                .await?;
+            let Some(file) = files.last() else {
+                return Ok(None);
+            };
+            match self.try_read_with_retry(file.id).await? {
+                Some(manifest) => {
+                    return Ok(Some(VersionedManifest::from_manifest(
+                        file.id.into(),
+                        manifest,
+                    )));
+                }
+                None => {
+                    warn!(
+                        "listed manifest missing on read, retrying [location={}]",
+                        file.location
+                    );
+                }
+            }
+        }
     }
 
     pub(crate) async fn read_latest_manifest(&self) -> Result<VersionedManifest, SlateDBError> {
@@ -565,7 +670,7 @@ impl ManifestStore {
         &self,
         id: u64,
     ) -> Result<Option<Manifest>, SlateDBError> {
-        Ok(self.inner.try_read(MonotonicId::new(id)).await?)
+        Ok(self.try_read_with_retry(MonotonicId::new(id)).await?)
     }
 
     pub(crate) async fn read_manifest(&self, id: u64) -> Result<Manifest, SlateDBError> {
@@ -1430,5 +1535,94 @@ mod tests {
             Some(SlateDBError::Fenced)
         ));
         assert!(fm_a.refresh().await.is_ok());
+    }
+
+    /// End-to-end check that a manifest served out of a corrupt cache entry
+    /// self-heals: the CRC check at decode fires `ChecksumMismatch`, the
+    /// ManifestStore invalidates the cache, and the retry succeeds against
+    /// the remote object store.
+    #[tokio::test]
+    async fn test_should_retry_manifest_read_on_cache_corruption() {
+        use crate::cached_object_store::stats::CachedObjectStoreStats;
+        use crate::cached_object_store::{CachedObjectStore, FsCacheStorage};
+        use crate::rand::DbRand;
+        use slatedb_common::metrics::MetricsRecorderHelper;
+
+        let remote = Arc::new(InMemory::new());
+        let tmp = tempfile::Builder::new()
+            .prefix("manifest_cache_corrupt_")
+            .tempdir()
+            .unwrap();
+        let recorder = MetricsRecorderHelper::noop();
+        let stats = Arc::new(CachedObjectStoreStats::new(&recorder));
+        let cache_storage = Arc::new(FsCacheStorage::new(
+            tmp.path().to_path_buf(),
+            None,
+            None,
+            stats.clone(),
+            Arc::new(DefaultSystemClock::new()),
+            Arc::new(DbRand::default()),
+        ));
+        let part_size = 4 * 1024;
+        let cached = CachedObjectStore::new(
+            remote.clone() as Arc<dyn object_store::ObjectStore>,
+            cache_storage,
+            part_size,
+            false,
+            stats,
+        )
+        .unwrap();
+
+        let ms = Arc::new(
+            ManifestStore::new(
+                &Path::from(ROOT),
+                cached.clone() as Arc<dyn object_store::ObjectStore>,
+            )
+            .with_cache_invalidator(cached.clone()),
+        );
+
+        let _sm = StoredManifest::create_new_db(
+            Arc::clone(&ms),
+            ManifestCore::new(),
+            Arc::new(DefaultSystemClock::new()),
+        )
+        .await
+        .unwrap();
+
+        // Warm the cache by reading the manifest through the cached path.
+        let latest = ms.try_read_latest_manifest().await.unwrap().unwrap();
+        let manifest_id = latest.id;
+        assert_eq!(1, manifest_id);
+
+        // Corrupt every cached file for this manifest on disk. This simulates
+        // an unclean shutdown in which pages flushed to disk were lost.
+        let mut corrupted_any = false;
+        for entry in walkdir::WalkDir::new(tmp.path())
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_type().is_file())
+        {
+            let mut bytes = std::fs::read(entry.path()).unwrap();
+            if !bytes.is_empty() {
+                let last = bytes.len() - 1;
+                bytes[last] ^= 0xff;
+                std::fs::write(entry.path(), bytes).unwrap();
+                corrupted_any = true;
+            }
+        }
+        assert!(
+            corrupted_any,
+            "expected at least one cached file to corrupt"
+        );
+
+        // The retry must invalidate the cache and refetch from the remote store.
+        let refetched = ms.read_manifest(manifest_id).await.unwrap();
+        assert_eq!(refetched, latest.manifest);
+
+        // Without cache invalidation wired up the read would still fail on
+        // the second attempt. Sanity-check by corrupting again and confirming
+        // a fresh read succeeds (the cache is now warm with good bytes).
+        let refetched_again = ms.read_manifest(manifest_id).await.unwrap();
+        assert_eq!(refetched_again, latest.manifest);
     }
 }

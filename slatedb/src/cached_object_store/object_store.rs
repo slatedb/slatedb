@@ -157,6 +157,22 @@ impl CachedObjectStore {
 
     /// Returns the canonical cache key for a requested location.
     ///
+    /// Delete any cached parts and head for `location`. Called from higher
+    /// layers (SST reader, manifest reader) when a checksum mismatch is
+    /// detected on content served via this store - the entry is dropped so
+    /// the next request bypasses the cache and refetches from the remote
+    /// object store. A no-op if the cache root has not been resolved yet or
+    /// the entry does not exist.
+    pub(crate) async fn invalidate(&self, location: &Path) -> object_store::Result<()> {
+        let Some(cache_location) = self.cache_location_for(location) else {
+            return Ok(());
+        };
+        let entry = self
+            .cache_storage
+            .entry(&cache_location, self.part_size_bytes);
+        entry.invalidate().await
+    }
+
     /// The key is `resolved_root + location` once root resolution succeeds.
     /// Returns `None` while the root is still unresolved. The root is resolved
     /// lazily from observed metadata locations, so this method may return `None`

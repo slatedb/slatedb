@@ -95,6 +95,12 @@ pub trait LocalCacheEntry: Send + Sync + std::fmt::Debug + 'static {
     async fn save_head(&self, meta: (&ObjectMeta, &Attributes)) -> object_store::Result<()>;
 
     async fn read_head(&self) -> object_store::Result<Option<(ObjectMeta, Attributes)>>;
+
+    /// Remove the head file and all part files for this entry. Used when a
+    /// higher layer (e.g. the SST or manifest reader) observes a checksum
+    /// mismatch and wants to refetch from the remote object store. Missing
+    /// files are treated as already-invalidated.
+    async fn invalidate(&self) -> object_store::Result<()>;
 }
 
 pub type PartID = usize;
