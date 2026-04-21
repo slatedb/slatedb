@@ -392,7 +392,14 @@ impl Manifest {
             let manifest = &source.manifest;
 
             // First, we need to add all the external dbs
-            external_dbs.extend_from_slice(&manifest.external_dbs);
+            for parent_external_db in &manifest.external_dbs {
+                external_dbs.push(ExternalDb {
+                    path: parent_external_db.path.clone(),
+                    source_checkpoint_id: parent_external_db.source_checkpoint_id,
+                    final_checkpoint_id: Some(rand.rng().gen_uuid()),
+                    sst_ids: parent_external_db.sst_ids.clone(),
+                });
+            }
             // Then, we can add all the l0 ssts
             for sst in &manifest.core.l0 {
                 core.l0.push_back(sst.clone());
@@ -988,6 +995,8 @@ mod tests {
         let parent1_sst1 = SsTableId::Compacted(Ulid::new());
         let parent2_sst1 = SsTableId::Compacted(Ulid::new());
         let grandparent_sst = SsTableId::Compacted(Ulid::new());
+        let grandparent_source_cp = Uuid::new_v4();
+        let grandparent_final_cp = Uuid::new_v4();
 
         let mut manifest1 = build_manifest(
             &SimpleManifest {
@@ -998,8 +1007,8 @@ mod tests {
         );
         manifest1.external_dbs.push(ExternalDb {
             path: "/tmp/grandparent".to_string(),
-            source_checkpoint_id: Uuid::new_v4(),
-            final_checkpoint_id: Some(Uuid::new_v4()),
+            source_checkpoint_id: grandparent_source_cp,
+            final_checkpoint_id: Some(grandparent_final_cp),
             sst_ids: vec![grandparent_sst],
         });
 
@@ -1050,10 +1059,22 @@ mod tests {
         assert!(db2.final_checkpoint_id.is_some());
         assert_eq!(db2.sst_ids, vec![parent2_sst1]);
 
-        assert!(union
+        let grandparent = union
             .external_dbs
             .iter()
-            .any(|e| e.path == "/tmp/grandparent"));
+            .find(|e| e.path == "/tmp/grandparent")
+            .unwrap();
+        // source_checkpoint_id is preserved so the union still depends on the
+        // same checkpoint on grandparent that the parent's clone depends on.
+        assert_eq!(grandparent.source_checkpoint_id, grandparent_source_cp);
+        // final_checkpoint_id must be regenerated — the union clone owns its own
+        // checkpoint and must not claim ownership over the parent's.
+        assert!(grandparent.final_checkpoint_id.is_some());
+        assert_ne!(
+            grandparent.final_checkpoint_id,
+            Some(grandparent_final_cp),
+            "inherited final_checkpoint_id must be regenerated"
+        );
 
         // All three SSTs must resolve to their correct source paths
         let external_ssts = union.external_ssts();
