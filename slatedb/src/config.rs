@@ -1181,6 +1181,15 @@ pub struct GarbageCollectorOptions {
     ///
     /// None means garbage collection is disabled for the compactions directory.
     pub compactions_options: Option<GarbageCollectorDirectoryOptions>,
+
+    /// Garbage collection options for detaching a clone from its parent database(s).
+    ///
+    /// When a clone no longer references any of a parent's SSTs (in its current
+    /// manifest or any live checkpoint), the detach pass removes the pinning
+    /// checkpoint from the parent and drops the external DB entry from the clone.
+    ///
+    /// None means detach is disabled. `min_age` is currently ignored.
+    pub detach_options: Option<GarbageCollectorDirectoryOptions>,
 }
 
 impl GarbageCollectorOptions {
@@ -1189,6 +1198,7 @@ impl GarbageCollectorOptions {
             && self.wal_options.is_none()
             && self.compacted_options.is_none()
             && self.compactions_options.is_none()
+            && self.detach_options.is_none()
     }
 }
 
@@ -1239,6 +1249,7 @@ impl Default for GarbageCollectorOptions {
             wal_options: Some(GarbageCollectorDirectoryOptions::default()),
             compacted_options: Some(GarbageCollectorDirectoryOptions::default()),
             compactions_options: Some(GarbageCollectorDirectoryOptions::default()),
+            detach_options: Some(GarbageCollectorDirectoryOptions::default()),
         }
     }
 }

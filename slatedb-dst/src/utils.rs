@@ -161,6 +161,12 @@ pub async fn build_settings(rand: &DbRand) -> Settings {
                 ),
                 min_age: rng.random_range(Duration::from_millis(20)..Duration::from_secs(900)),
             }),
+            detach_options: Some(GarbageCollectorDirectoryOptions {
+                interval: Some(
+                    rng.random_range(Duration::from_millis(1)..Duration::from_secs(600)),
+                ),
+                min_age: rng.random_range(Duration::from_millis(20)..Duration::from_secs(900)),
+            }),
         }),
         compactor_options: None,
         wal_enabled: rng.random_bool(0.5),
