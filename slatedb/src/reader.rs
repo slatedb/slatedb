@@ -251,25 +251,28 @@ impl Reader {
     ) -> Result<VecDeque<Box<dyn RowEntryIterator + 'a>>, SlateDBError> {
         let range_clone = range.clone();
         let table_store = self.table_store.clone();
-        build_concurrent(
-            db_state.core().compacted.iter().cloned(),
-            max_parallel,
-            move |sr| {
-                let table_store = table_store.clone();
-                let range = range_clone.clone();
-                async move {
-                    SortedRunIterator::new_owned_initialized_with_stats(
-                        range.clone(),
-                        sr,
-                        table_store,
-                        sst_iter_options,
-                        Some(self.db_stats.clone()),
-                    )
-                    .await
-                    .map(|iter| Some(Box::new(iter) as Box<dyn RowEntryIterator + 'a>))
-                }
-            },
-        )
+        let overlapping: Vec<_> = db_state
+            .core()
+            .compacted
+            .iter()
+            .filter(|sr| sr.overlaps_range(range))
+            .cloned()
+            .collect();
+        build_concurrent(overlapping.into_iter(), max_parallel, move |sr| {
+            let table_store = table_store.clone();
+            let range = range_clone.clone();
+            async move {
+                SortedRunIterator::new_owned_initialized_with_stats(
+                    range.clone(),
+                    sr,
+                    table_store,
+                    sst_iter_options,
+                    Some(self.db_stats.clone()),
+                )
+                .await
+                .map(|iter| Some(Box::new(iter) as Box<dyn RowEntryIterator + 'a>))
+            }
+        })
         .await
     }
 

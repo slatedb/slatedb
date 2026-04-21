@@ -364,6 +364,25 @@ impl SortedRun {
         self.sst_views.iter().map(|sst| sst.estimate_size()).sum()
     }
 
+    /// Cheap O(1) check: does the run's overall key span overlap `range`?
+    ///
+    /// Lets scan init skip whole runs with no potential overlap before spawning
+    /// any per-run work.
+    pub(crate) fn overlaps_range(&self, range: &BytesRange) -> bool {
+        let Some(first) = self.sst_views.first() else {
+            return false;
+        };
+        let last = self
+            .sst_views
+            .last()
+            .expect("non-empty: first exists, so last exists");
+        let span = BytesRange::new(
+            first.compacted_effective_range().start_bound().cloned(),
+            last.compacted_effective_range().end_bound().cloned(),
+        );
+        span.intersect(range).is_some()
+    }
+
     pub(crate) fn find_last_sst_with_range_covering_key(&self, key: &[u8]) -> Option<usize> {
         // returns the sst after the one whose range includes the key
         let first_sst = self
@@ -423,24 +442,59 @@ impl SortedRun {
     }
 
     fn table_idx_covering_range(&self, range: &BytesRange) -> Range<usize> {
-        let mut min_idx = None;
-        let mut max_idx = 0;
+        let views = &self.sst_views;
+        if views.is_empty() {
+            return 0..0;
+        }
 
-        for idx in 0..self.sst_views.len() {
-            let current_sst = &self.sst_views[idx];
-            if current_sst.intersects_range(self.table_end_bound(idx), range) {
-                if min_idx.is_none() {
-                    min_idx = Some(idx);
+        // Upper bound: last SST whose start key falls within the range's upper
+        // bound. SST[i]'s slot begins at start_key[i]; if start_key[i] is past
+        // the range's upper bound the slot cannot overlap.
+        let max_idx = match range.end_bound() {
+            Included(hi) => {
+                let p = views.partition_point(|sst| sst.compacted_effective_start_key() <= hi);
+                if p == 0 {
+                    return 0..0;
                 }
-
-                max_idx = idx;
+                p - 1
             }
+            Excluded(hi) => {
+                let p = views.partition_point(|sst| sst.compacted_effective_start_key() < hi);
+                if p == 0 {
+                    return 0..0;
+                }
+                p - 1
+            }
+            Unbounded => views.len() - 1,
+        };
+
+        if !views[max_idx].intersects_range(self.table_end_bound(max_idx), range) {
+            return 0..0;
         }
 
-        match min_idx {
-            Some(min_idx) => min_idx..(max_idx + 1),
-            None => 0..0,
+        // Lower bound candidate: last SST whose start_key <= range.start. SSTs
+        // before it cannot intersect except via boundary-key overlap, handled
+        // by the backward walk below.
+        let start_candidate = match range.start_bound() {
+            Included(lo) | Excluded(lo) => views
+                .partition_point(|sst| sst.compacted_effective_start_key() <= lo)
+                .checked_sub(1),
+            Unbounded => None,
+        };
+
+        let mut min_idx = match start_candidate {
+            Some(idx) if views[idx].intersects_range(self.table_end_bound(idx), range) => idx,
+            Some(idx) => idx + 1,
+            None => 0,
+        };
+
+        while min_idx > 0
+            && views[min_idx - 1].intersects_range(self.table_end_bound(min_idx - 1), range)
+        {
+            min_idx -= 1;
         }
+
+        min_idx..(max_idx + 1)
     }
 
     /// Returns the SST views in this sorted run that overlap the given key range.
