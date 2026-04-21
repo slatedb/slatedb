@@ -51,7 +51,7 @@ This section describes the intuitive LSM shape this RFC is trying to enable.
 A segment is a scope for compaction and retention. Each named segment is an independent logical LSM tree with its own L0 list and its own ordered list of sorted runs. A deterministic prefix extractor derives the segment from each key at memtable flush time, producing one L0 SST per segment touched by that flush. Because segments own disjoint key intervals, each segment's chain is read independently and there is no ordering relationship between segments. The read path routes queries to the segments whose key intervals overlap the query range.
 
 ```text
-prefix extractor derives segment tags from keys at flush time
+prefix extractor derives segment prefixes from keys at flush time
                      |
                      v
 
@@ -178,7 +178,7 @@ Keys for which `extract` returns `None` are unsegmented and stored in the shared
 Two properties follow directly from the trait contract:
 
 - **Determinism.** `extract` is a pure function of the key. A given key always maps to the same segment across flushes, compactions, and restarts.
-- **Disjoint key spaces.** Because the output of `extract` is a prefix of the input, each segment tag `t` owns exactly the key interval `[t, t++)` (where `t++` is the lexicographic successor of `t`). Two distinct segment tags cannot share any key, so dropping a segment is unconditionally safe — it cannot affect keys in other segments.
+- **Disjoint key spaces.** Because the output of `extract` is a prefix of the input, each segment prefix `p` owns exactly the key interval `[p, p++)` (where `p++` is the lexicographic successor of `p`). Two distinct segment prefixes cannot share any key, so dropping a segment is unconditionally safe — it cannot affect keys in other segments.
 
 The extractor's `name()` is persisted in the manifest. On restart, if the configured extractor's name does not match the persisted one, the database refuses to open rather than silently routing data differently than before. Reconfiguring the extractor is therefore treated as a one-way, offline operation — in general, changing segmentation on existing data requires a rewrite, which is out of scope for this RFC.
 
@@ -217,7 +217,7 @@ segments: [Segment];
 
 // New:
 table Segment {
-    tag: [ubyte] (required);
+    prefix: [ubyte] (required);
     l0_last_compacted: Ulid;
     l0: [CompactedSsTable] (required);
     compacted: [SortedRun] (required);
@@ -246,7 +246,7 @@ Because the change is purely additive, migration is a one-step schema bump. The 
 
 The manifest decoder is updated to handle both V2 and V3. The standalone compactor reads whichever version the writer has published and does not independently upgrade. Because no field changes require backfill, there is no decoder-first/encoder-later rollout phase.
 
-When an extractor is configured for the first time on an existing database, the existing unsegmented data remains in the top-level fields. New writes are routed through the extractor: keys for which `extract` returns `Some(tag)` flow into `segments[tag]`, and keys for which it returns `None` continue to flow into the top-level fields. Existing unsegmented data is not automatically migrated into segments — if the application wants old data segmented, it must rewrite it (out of scope for this RFC).
+When an extractor is configured for the first time on an existing database, the existing unsegmented data remains in the top-level fields. New writes are routed through the extractor: keys for which `extract` returns `Some(prefix)` flow into the segment identified by that prefix, and keys for which it returns `None` continue to flow into the top-level fields. Existing unsegmented data is not automatically migrated into segments — if the application wants old data segmented, it must rewrite it (out of scope for this RFC).
 
 ### Write Path
 
@@ -264,7 +264,7 @@ Because each named segment is its own LSM tree with its own ordered `compacted` 
 
 **Point lookups.** For `get(key)`, the reader applies the extractor:
 
-- If `extract(key)` returns `Some(tag)`, the reader consults only the segment with that tag. If no segment with that tag exists, the key is not present.
+- If `extract(key)` returns `Some(prefix)`, the reader consults only the segment with that prefix. If no segment with that prefix exists, the key is not present.
 - If `extract(key)` returns `None`, the reader consults only the unsegmented tree.
 
 Point lookups never need to fan out across multiple trees because a given key belongs to exactly one tree by construction.
@@ -275,12 +275,12 @@ Within each consulted tree, the reader builds a merge iterator from that tree's 
 
 ### Scans
 
-A range scan `scan(lo..hi)` touches a tree if and only if the tree's key interval intersects `[lo, hi)`. For named segments, the key interval is `[tag, tag++)` where `tag++` is the lexicographic successor of `tag`. The reader computes the set of overlapping segments from the manifest's `segments` list and spins up a per-segment merge iterator for each, plus (conservatively) an iterator over the unsegmented tree.
+A range scan `scan(lo..hi)` touches a tree if and only if the tree's key interval intersects `[lo, hi)`. For named segments, the key interval is `[prefix, prefix++)` where `prefix++` is the lexicographic successor of the segment prefix. The reader computes the set of overlapping segments from the manifest's `segments` list and spins up a per-segment merge iterator for each, plus (conservatively) an iterator over the unsegmented tree.
 
 Pruning the unsegmented tree requires knowing whether any key in `[lo, hi)` could have `extract(key) == None`. In the general case the reader cannot decide this without examining keys, so by default the unsegmented tree is consulted for every scan. Two common-case optimizations fall out of the extractor's contract:
 
-- **Fully-in-domain scans.** If `in_domain(lo)` and `in_domain(hi)` both hold and `lo`/`hi` agree on a single segment tag — e.g. `scan(b"hour=10/".."hour=10/\xff")` under an extractor that emits `hour=NN/` as the segment prefix — the scan lies entirely within one segment and the unsegmented tree can be skipped.
-- **`scan_prefix(p)` with `in_domain(p)`.** When `p` itself is a valid segment tag, the scan collapses to a single segment. The extractor already exposes `in_domain` for exactly this kind of check in RFC 22's filter path; reusing it for scan routing is natural.
+- **Fully-in-domain scans.** If `in_domain(lo)` and `in_domain(hi)` both hold and `lo`/`hi` agree on a single segment prefix — e.g. `scan(b"hour=10/".."hour=10/\xff")` under an extractor that emits `hour=NN/` as the segment prefix — the scan lies entirely within one segment and the unsegmented tree can be skipped.
+- **`scan_prefix(p)` with `in_domain(p)`.** When `p` itself is a valid segment prefix, the scan collapses to a single segment. The extractor already exposes `in_domain` for exactly this kind of check in RFC 22's filter path; reusing it for scan routing is natural.
 
 Databases that use the extractor consistently (i.e. all keys segmented) can configure the scan path to assume an empty unsegmented tree, skipping that iterator entirely. The default is conservative: include the unsegmented tree unless pruning is provably safe.
 
@@ -288,9 +288,9 @@ Databases that use the extractor consistently (i.e. all keys segmented) can conf
 
 ### Compaction
 
-Each compaction reads and writes within a single logical LSM tree — either a named segment or the unsegmented tree. Because sorted run IDs are globally unique across the database, compaction spec construction and execution follow today's single-tree logic with the target tree identified by an explicit segment tag on the spec.
+Each compaction reads and writes within a single logical LSM tree — either a named segment or the unsegmented tree. Because sorted run IDs are globally unique across the database, compaction spec construction and execution follow today's single-tree logic with the target tree identified by an explicit segment prefix on the spec.
 
-A compaction spec identifies the target tree via an optional segment tag, lists source SSTs and sorted runs from that tree, and specifies an action:
+A compaction spec identifies the target tree via an optional segment prefix, lists source SSTs and sorted runs from that tree, and specifies an action:
 
 ```rust
 pub enum CompactionAction {
@@ -302,8 +302,8 @@ pub enum CompactionAction {
 }
 
 pub struct CompactionSpec {
-    /// `None` targets the unsegmented tree; `Some(tag)` targets the
-    /// segment with that tag.
+    /// `None` targets the unsegmented tree; `Some(prefix)` targets the
+    /// segment with that prefix.
     segment: Option<Bytes>,
     l0_view_ids: Vec<Ulid>,
     sorted_runs: Vec<u32>,
@@ -341,7 +341,7 @@ impl ManifestCore {
 
 The scheduler uses this to plan work: selecting segments with many L0s, merging sorted runs within a segment, or identifying expired segments for retention. Segmented and unsegmented data may coexist in the same database — for example, a TSDB might segment time-bucketed metric data while keeping permanent configuration unsegmented. The scheduler handles both by planning per-segment compactions from `segments()` and unsegmented compactions from the top-level state.
 
-The `.compactions` file schema is updated to carry the segment tag alongside the existing fields:
+The `.compactions` file schema is updated to carry the segment prefix alongside the existing fields:
 
 ```flatbuffer
 enum CompactionActionType : byte {
@@ -358,7 +358,7 @@ table CompactionSpecV2 {
 }
 ```
 
-Compared to the existing `TieredCompactionSpec`, the V2 schema adds the `segment` tag and replaces the single-action shape with an explicit `action` enum to express `Drop` alongside `Merge`. The ID fields remain `uint` (globally unique), matching today's `u32` SR IDs.
+Compared to the existing `TieredCompactionSpec`, the V2 schema adds the `segment` prefix and replaces the single-action shape with an explicit `action` enum to express `Drop` alongside `Merge`. The ID fields remain `uint` (globally unique), matching today's `u32` SR IDs.
 
 ### Recovery and Progress Tracking
 
