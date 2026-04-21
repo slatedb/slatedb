@@ -47,20 +47,6 @@ Authors:
 This RFC adds low-level APIs for warming and evicting SlateDB block-cache
 entries for one SST at a time.
 
-Callers choose the physical SST ID they want to touch and fan out themselves
-when they want to act on many SSTs. For warming, callers also choose the cache
-content they want to populate: the SST index, the filters, specific data
-ranges, or some combination of the three. 
-
-Some additional notes:
-1. Warming uses the normal `TableStore` path, so it may populate the
-   object-store cache as a side effect. 
-1. Eviction is best effort. 
-1. If an SST has already been deleted by GC before `evict_cached_sst` runs,
-   SlateDB cannot read its index to enumerate the cached block offsets. Any
-   remaining entries for that SST stay in the cache until normal pressure
-   removes them.
-
 ## Motivation
 
 SlateDB depends on object storage for durability, so cache misses are expensive.
@@ -158,17 +144,14 @@ impl Db {
 
 `DbReader` exposes the same two methods with identical signatures.
 
-This API makes four deliberate choices.
+This API makes three deliberate choices.
 
 1. The public surface stays at the SST level. Callers pass a physical SST ID,
    not an `SsTableView` or a lower-level cache key.
-2. `warm_sst()` takes explicit targets. We stop overloading "empty range" to
-   mean "warm metadata only."
+2. `warm_sst()` takes explicit targets. 
 3. Each method operates on a single SST. Callers fan out over SST IDs with
    their own concurrency primitive. This keeps the API small and pushes
    policy (parallelism, rate-limiting, ordering) to the caller.
-4. The API does not prescribe policy. Callers decide when to warm or evict,
-   and how they derive the SST set.
 
 `warm_sst()` returns per-target outcomes instead of failing the whole call on
 the first target that fails.
@@ -220,11 +203,6 @@ For one call, SlateDB:
 3. Unions the visible ranges from those projections.
 4. Applies each requested `CacheTarget`.
 
-For `CacheTarget::Index`, SlateDB reads the index through `TableStore`.
-
-For `CacheTarget::Filters`, SlateDB reads each filter on the SST through
-`TableStore`.
-
 For each `CacheTarget::Data(range)`, SlateDB:
 
 1. Intersects the requested key range with the visible ranges for the SST.
@@ -234,9 +212,6 @@ For each `CacheTarget::Data(range)`, SlateDB:
 5. Coalesces overlapping intervals.
 6. Reads those blocks through
    `TableStore::read_blocks_using_index(..., cache=true)`.
-
-As a result, any successful data warm also leaves the SST index warm, even if
-the caller did not list `CacheTarget::Index` separately.
 
 If the SST is not reachable from the current manifest, `warm_sst()` returns an
 empty result list. It does not try to recreate a previous session's cache
@@ -255,7 +230,8 @@ The method targets all block-cache content associated with the SST:
 - filters
 - stats
 
-This API does not take `CacheTarget`s. Eviction is the broad operation.
+This API does not take `CacheTarget`s because eviction is the broad operation
+(if an SST is being evicted, it is likely that it is unreachable).
 
 The cache key includes the physical SST ID and an offset. To remove all data
 blocks, SlateDB needs the SST index so it can enumerate block offsets. The
