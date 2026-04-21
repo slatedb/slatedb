@@ -98,15 +98,16 @@ object-store latency.
 use std::sync::Arc;
 use std::time::Duration;
 
+use chrono::{DateTime, Utc};
 use object_store::path::Path;
 use object_store::ObjectStore;
 use rand::RngCore;
 use slatedb::{Db, DbRand};
 use slatedb_common::clock::MockSystemClock;
 use slatedb_dst::{
-    utils::build_settings, ActorType, DeterministicLocalFilesystem,
-    FailingObjectStore, FailingObjectStoreController, Harness, Operation,
-    StreamDirection, Toxic, ToxicKind,
+    actors::{clock, shutdown, writer}, utils::build_settings, DeterministicLocalFilesystem,
+    FailingObjectStore, FailingObjectStoreController, Harness, Operation, StreamDirection, Toxic,
+    ToxicKind,
 };
 use tempfile::TempDir;
 
@@ -142,6 +143,9 @@ fn dst_smoke_test() -> Result<(), Box<dyn std::error::Error>> {
         failures,
         system_clock.clone(),
     ));
+    let shutdown_at = Arc::new(
+        DateTime::from_timestamp_millis(10).expect("shutdown timestamp must be valid"),
+    );
 
     Harness::new("smoke", 7)
         .with_path(Path::from("dst/smoke"))
@@ -163,13 +167,9 @@ fn dst_smoke_test() -> Result<(), Box<dyn std::error::Error>> {
 
             Ok(Arc::new(db))
         })
-        .actor("writer", ActorType::Foreground, 1, |ctx| async move {
-            let db = ctx.db();
-            db.put(b"hello", b"world").await?;
-            ctx.advance_time(Duration::from_millis(10)).await;
-            db.close().await?;
-            Ok(())
-        })
+        .actor("writer", 1, writer)
+        .actor("clock", 1, clock)
+        .actor_with_state("shutdown", 1, shutdown_at, shutdown)
         .run()?;
 
     Ok(())
@@ -187,13 +187,12 @@ fn dst_smoke_test() -> Result<(), Box<dyn std::error::Error>> {
 - `with_main_object_store(store)`: replaces the default in-memory main store
 - `with_wal_object_store(store)`: configures a separate WAL store
 - `with_db(factory)`: registers the startup factory that opens the database
-- `actor(role, actor_type, count, actor_fn)`: registers `count` actors for the
-  same role and lifecycle
-- `actor_with_state(role, actor_type, count, shared_state, actor_fn)`: same as
-  `actor`, but clones user-supplied shared state into each actor
-- `run()`: builds the seeded runtime, opens the DB, spawns actors, and waits
-  for foreground actors to finish before aborting any remaining background
-  actors
+- `actor(role, count, actor_fn)`: registers `count` actors for the same role
+- `actor_with_state(role, count, shared_state, actor_fn)`: same as `actor`,
+  but clones user-supplied shared state into each actor
+- `run()`: builds the seeded runtime, opens the DB, spawns actors, and runs
+  until all actors finish successfully or some actor cancels the shared
+  shutdown token
 
 If `with_path(...)` is not set, the harness uses:
 
@@ -233,6 +232,7 @@ Each registered actor instance receives its own `ActorCtx`.
 - `rand()` for actor-local deterministic randomness
 - `db()` to read the currently installed shared `Arc<Db>`
 - `swap_db(new_db)` to replace the shared DB handle for all actors
+- `shutdown_token()` to request or observe harness shutdown
 - `advance_time(duration)` to move the shared mock clock forward
 - `path()`, `main_object_store()`, `wal_object_store()`
 - `system_clock()` and `fp_registry()`
@@ -240,14 +240,21 @@ Each registered actor instance receives its own `ActorCtx`.
 `swap_db(...)` is useful for reopen scenarios and tests that intentionally
 replace the database instance mid-run.
 
-### `ActorType`
+### Shutdown semantics
 
-Each actor registration declares an `ActorType`:
+Actors may finish normally without cancelling the shared shutdown token. If all
+actors return `Ok(())`, the harness closes the DB and returns success.
 
-- `ActorType::Foreground`: completion-driving work. The harness succeeds once
-  all foreground actors finish successfully.
-- `ActorType::Background`: long-running support work. Background actors may run
-  indefinitely and are aborted when the foreground actors finish.
+Once shutdown is requested, the harness aborts all remaining tasks and drains
+them with these rules:
+
+- cancelled task: ignored
+- task returned `Ok(())` before the abort landed: ignored
+- task returned `Err(e)` before the abort landed: run fails with `Err(e)`
+- panicked task or non-cancel join error: run fails with an internal error
+
+If the drain completes with only cancelled or successful tasks, the harness
+closes the DB and returns success.
 
 ## Failure injection
 

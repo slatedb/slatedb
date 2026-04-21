@@ -5,13 +5,11 @@ use tracing::instrument;
 
 use crate::ActorCtx;
 
-use super::{PROGRESS_LOG_INTERVAL, WORKLOAD_STEPS};
+use super::PROGRESS_LOG_INTERVAL;
 
 /// Forces explicit memtable flushes on the shared database.
 ///
-/// The actor clones the current shared database handle once at startup, then
-/// performs exactly [`super::WORKLOAD_STEPS`] explicit memtable flush requests
-/// before returning.
+/// The actor runs until the shared shutdown token is cancelled.
 ///
 /// Unlike the writer and deleter actors, the flusher does not consume any
 /// actor-local randomness. Its role is to impose deterministic pressure on the
@@ -23,13 +21,16 @@ use super::{PROGRESS_LOG_INTERVAL, WORKLOAD_STEPS};
 /// on background intervals.
 #[instrument(level = "debug", skip_all, fields(role = %ctx.role(), instance = ctx.instance()))]
 pub async fn flusher(ctx: ActorCtx) -> Result<(), Error> {
-    let db = ctx.db();
+    let shutdown_token = ctx.shutdown_token();
+    let mut step = 0u64;
 
-    for step in 0..WORKLOAD_STEPS {
-        db.flush_with_options(FlushOptions {
-            flush_type: FlushType::MemTable,
-        })
-        .await?;
+    while !shutdown_token.is_cancelled() {
+        ctx.db()
+            .flush_with_options(FlushOptions {
+                flush_type: FlushType::MemTable,
+            })
+            .await?;
+        step += 1;
 
         if step % PROGRESS_LOG_INTERVAL == 0 {
             info!("flusher step complete [step={}]", step);

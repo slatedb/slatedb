@@ -7,13 +7,11 @@ use tracing::instrument;
 use crate::utils::{nondurable_write_options, workload_key};
 use crate::ActorCtx;
 
-use super::{PROGRESS_LOG_INTERVAL, WORKLOAD_STEPS};
+use super::PROGRESS_LOG_INTERVAL;
 
 /// Writes deterministic key/value updates against the shared database.
 ///
-/// The actor clones the current shared database handle once at startup, then
-/// performs exactly [`super::WORKLOAD_STEPS`] `put` operations before
-/// returning.
+/// The actor runs until the shared shutdown token is cancelled.
 ///
 /// On each step it:
 /// - consumes one `u64` from the actor-local seeded RNG
@@ -28,16 +26,19 @@ use super::{PROGRESS_LOG_INTERVAL, WORKLOAD_STEPS};
 /// remaining fully deterministic for a given seed and actor count.
 #[instrument(level = "debug", skip_all, fields(role = %ctx.role(), instance = ctx.instance()))]
 pub async fn writer(ctx: ActorCtx) -> Result<(), Error> {
-    let db = ctx.db();
+    let shutdown_token = ctx.shutdown_token();
     let put_options = PutOptions::default();
     let write_options = nondurable_write_options();
+    let mut step = 0u64;
 
-    for step in 0..WORKLOAD_STEPS {
+    while !shutdown_token.is_cancelled() {
         let rand_value = ctx.rand().rng().next_u64();
         let key = workload_key(rand_value);
         let value = format!("{step:04}-{rand_value:016x}").into_bytes();
-        db.put_with_options(key.as_bytes(), &value, &put_options, &write_options)
+        ctx.db()
+            .put_with_options(key.as_bytes(), &value, &put_options, &write_options)
             .await?;
+        step += 1;
 
         if step % PROGRESS_LOG_INTERVAL == 0 {
             info!("writer step complete [step={}]", step);

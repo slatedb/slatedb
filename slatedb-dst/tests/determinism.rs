@@ -6,10 +6,9 @@
 //! - starts from a fresh shared [`MockSystemClock`]
 //! - opens a real [`Db`] using randomized deterministic settings from
 //!   [`build_settings`]
-//! - runs a background clock actor alongside split foreground writer, deleter,
-//!   and flusher actors sized to preserve the old `rand_value % 100`
-//!   50/20/5 active-operation mix against deterministic local filesystem-backed
-//!   object stores
+//! - runs looping writer, deleter, flusher, and clock actors against
+//!   deterministic local filesystem-backed object stores until a shutdown actor
+//!   cancels the shared token at a fixed mock-clock deadline
 //! - compares the next random `u64` and current clock time after the run
 //!
 //! If either the harness or SlateDB consumes randomness differently, advances
@@ -28,19 +27,20 @@ use slatedb::config::{CompactorOptions, SizeTieredCompactionSchedulerOptions};
 use slatedb::{Db, DbRand};
 use slatedb_common::clock::{MockSystemClock, SystemClock};
 use slatedb_dst::{
-    actors::{clock, deleter, flusher, writer},
+    actors::{clock, deleter, flusher, shutdown, writer},
     utils::build_settings,
-    ActorType, DeterministicLocalFilesystem, FailingObjectStore, FailingObjectStoreController,
-    Harness, Operation, StreamDirection, Toxic, ToxicKind,
+    DeterministicLocalFilesystem, FailingObjectStore, FailingObjectStoreController, Harness,
+    Operation, StreamDirection, Toxic, ToxicKind,
 };
 use tempfile::TempDir;
 use tracing::instrument;
 
-/// Split actor counts that preserve the old `rand_value % 100` active-operation
-/// mix of 50% writes, 20% deletes, and 5% memtable flushes.
+/// Split actor counts that preserve the old relative workload mix of roughly
+/// 50% writes, 20% deletes, and 5% memtable flushes.
 const WRITER_COUNT: usize = 10;
 const DELETER_COUNT: usize = 4;
 const FLUSHER_COUNT: usize = 1;
+const SHUTDOWN_AT_MILLIS: i64 = 10;
 
 #[test]
 fn test_dst_is_deterministic() -> Result<(), Box<dyn std::error::Error>> {
@@ -119,6 +119,10 @@ fn run_seed_once(seed: u64) -> Result<(u64, DateTime<Utc>), Box<dyn std::error::
         failures,
         system_clock.clone(),
     ));
+    let shutdown_at = Arc::new(
+        DateTime::from_timestamp_millis(SHUTDOWN_AT_MILLIS)
+            .expect("shutdown timestamp must be valid"),
+    );
     Harness::new("determinism", seed)
         .with_rand(Arc::clone(&rand))
         .with_system_clock(Arc::clone(&system_clock))
@@ -157,27 +161,11 @@ fn run_seed_once(seed: u64) -> Result<(u64, DateTime<Utc>), Box<dyn std::error::
                 .await?;
             Ok(Arc::new(db))
         })
-        .actor(
-            "writer",
-            ActorType::Foreground,
-            WRITER_COUNT,
-            |ctx| async move { writer(ctx).await },
-        )
-        .actor(
-            "deleter",
-            ActorType::Foreground,
-            DELETER_COUNT,
-            |ctx| async move { deleter(ctx).await },
-        )
-        .actor(
-            "flusher",
-            ActorType::Foreground,
-            FLUSHER_COUNT,
-            |ctx| async move { flusher(ctx).await },
-        )
-        .actor("clock", ActorType::Background, 1, |ctx| async move {
-            clock(ctx).await
-        })
+        .actor("writer", WRITER_COUNT, writer)
+        .actor("deleter", DELETER_COUNT, deleter)
+        .actor("flusher", FLUSHER_COUNT, flusher)
+        .actor("clock", 1, clock)
+        .actor_with_state("shutdown", 1, shutdown_at, shutdown)
         .run()?;
 
     let next_u64 = rand.rng().next_u64();

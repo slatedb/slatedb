@@ -1,6 +1,7 @@
 //! Deterministic scenario test harness primitives for orchestrating seeded
 //! SlateDB actors.
 
+use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -13,6 +14,7 @@ use parking_lot::RwLock;
 use rand::RngCore;
 use tokio::runtime::RngSeed;
 use tokio::task::JoinSet;
+use tokio_util::sync::CancellationToken;
 
 use fail_parallel::FailPointRegistry;
 use slatedb::{Db, DbRand, Error};
@@ -26,36 +28,18 @@ type ActorFuture = Pin<Box<dyn Future<Output = Result<(), Error>> + Send + 'stat
 type StartupFactory = Box<dyn FnOnce(StartupCtx) -> DbFactoryFuture + Send + 'static>;
 type ActorFn = Arc<dyn Fn(ActorCtx) -> ActorFuture + Send + Sync + 'static>;
 
-/// Controls whether an actor drives scenario completion or is aborted once all
-/// foreground actors finish.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ActorType {
-    /// Completion-driving actor. The harness waits for all foreground actors to
-    /// finish successfully before considering the scenario complete.
-    Foreground,
-    /// Long-running support actor. Background actors may run indefinitely and
-    /// are aborted when the foreground actors finish successfully.
-    Background,
-}
-
 struct ActorRegistration {
     role: String,
-    actor_type: ActorType,
     count: usize,
     actor: ActorFn,
-}
-
-struct ActorExit {
-    actor_type: ActorType,
-    result: Result<(), Error>,
 }
 
 #[derive(Clone)]
 /// Per-actor context passed to each registered harness task.
 ///
 /// The context exposes deterministic randomness, the shared database slot,
-/// clock-wrapped object stores, and shared test infrastructure such as the
-/// failpoint registry and mock clock.
+/// clock-wrapped object stores, the shared shutdown token, and test
+/// infrastructure such as the failpoint registry and mock clock.
 pub struct ActorCtx {
     role: String,
     instance: usize,
@@ -158,6 +142,14 @@ impl ActorCtx {
     pub fn fp_registry(&self) -> Arc<FailPointRegistry> {
         Arc::clone(&self.shared.fp_registry)
     }
+
+    /// Returns the shared shutdown token for the current harness run.
+    ///
+    /// Actors may call `cancel()` to request harness shutdown, or observe the
+    /// token to exit cleanly once shutdown has started.
+    pub fn shutdown_token(&self) -> CancellationToken {
+        self.shared.shutdown_token.clone()
+    }
 }
 
 #[derive(Clone)]
@@ -237,6 +229,7 @@ struct HarnessCtx {
     system_clock: Arc<dyn SystemClock>,
     fp_registry: Arc<FailPointRegistry>,
     db_slot: Arc<RwLock<Arc<Db>>>,
+    shutdown_token: CancellationToken,
 }
 
 /// Builder and executor for deterministic SlateDB scenario tests.
@@ -362,27 +355,18 @@ impl Harness {
     ///
     /// ## Arguments
     /// - `role`: Logical name assigned to each actor in the registration.
-    /// - `actor_type`: Whether the registered actors drive completion or run as
-    ///   abortable background support tasks.
     /// - `count`: Number of actor instances to spawn for the role.
     /// - `actor`: Async actor function to execute once per instance.
     ///
     /// ## Returns
     /// - `Harness`: The updated harness builder.
-    pub fn actor<F, Fut>(
-        mut self,
-        role: impl Into<String>,
-        actor_type: ActorType,
-        count: usize,
-        actor: F,
-    ) -> Self
+    pub fn actor<F, Fut>(mut self, role: impl Into<String>, count: usize, actor: F) -> Self
     where
         F: Fn(ActorCtx) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<(), Error>> + Send + 'static,
     {
         self.actors.push(ActorRegistration {
             role: role.into(),
-            actor_type,
             count,
             actor: Arc::new(move |ctx| Box::pin(actor(ctx))),
         });
@@ -393,8 +377,6 @@ impl Harness {
     ///
     /// ## Arguments
     /// - `role`: Logical name assigned to each actor in the registration.
-    /// - `actor_type`: Whether the registered actors drive completion or run as
-    ///   abortable background support tasks.
     /// - `count`: Number of actor instances to spawn for the role.
     /// - `state`: Shared state cloned into each actor invocation.
     /// - `actor`: Async actor function that receives an [`ActorCtx`] and the
@@ -405,7 +387,6 @@ impl Harness {
     pub fn actor_with_state<T, F, Fut>(
         mut self,
         role: impl Into<String>,
-        actor_type: ActorType,
         count: usize,
         state: Arc<T>,
         actor: F,
@@ -417,7 +398,6 @@ impl Harness {
     {
         self.actors.push(ActorRegistration {
             role: role.into(),
-            actor_type,
             count,
             actor: Arc::new(move |ctx| {
                 let state = Arc::clone(&state);
@@ -430,13 +410,14 @@ impl Harness {
     /// Runs the harness to completion on a seeded current-thread Tokio runtime.
     ///
     /// ## Returns
-    /// - `Ok(())`: All foreground actors completed successfully.
-    /// - `Err(Error)`: Database startup failed, no foreground actors were
-    ///   configured, or an actor returned an error.
+    /// - `Ok(())`: All actors completed successfully, or an actor requested
+    ///   shutdown and all remaining actor exits were neutral.
+    /// - `Err(Error)`: Database startup failed, no actors were configured, or
+    ///   an actor returned or joined with an error.
     ///
     /// # Panics
-    /// Panics if [`Harness::with_db`] was not configured, if the runtime cannot
-    /// be created, or if an actor task fails to join.
+    /// Panics if [`Harness::with_db`] was not configured or if the runtime
+    /// cannot be created.
     pub fn run(self) -> Result<(), Error> {
         assert!(
             self.startup_factory.is_some(),
@@ -461,6 +442,11 @@ impl Harness {
             startup_factory,
             actors,
         } = self;
+
+        assert!(
+            !actors.is_empty(),
+            "dst harness requires at least one actor"
+        );
 
         let seed = rand.seed();
         let path = path.unwrap_or_else(|| Path::from(format!("dst/{name}/seed-{seed:016x}")));
@@ -494,54 +480,69 @@ impl Harness {
             system_clock,
             fp_registry,
             db_slot: Arc::new(RwLock::new(db)),
+            shutdown_token: CancellationToken::new(),
         };
 
-        let mut foreground_remaining = actors
-            .iter()
-            .filter(|registration| registration.actor_type == ActorType::Foreground)
-            .map(|registration| registration.count)
-            .sum::<usize>();
-        let mut success_shutdown = false;
         let mut join_set = JoinSet::new();
+        let mut actor_names = HashMap::new();
         for registration in actors {
             for instance in 0..registration.count {
                 let actor_seed = rand.rng().next_u64();
-                let actor_type = registration.actor_type;
                 let actor = Arc::clone(&registration.actor);
+                let role = registration.role.clone();
                 let ctx = ActorCtx {
-                    role: registration.role.clone(),
+                    role: role.clone(),
                     instance,
                     rand: Arc::new(DbRand::new(actor_seed)),
                     shared: shared.clone(),
                 };
-                join_set.spawn(async move {
-                    let result = actor(ctx).await;
-                    ActorExit { actor_type, result }
-                });
+                let actor_name = format!("{role}[{instance}]");
+                let handle = join_set.spawn(async move { actor(ctx).await });
+                actor_names.insert(handle.id(), actor_name);
             }
         }
 
-        while let Some(result) = join_set.join_next().await {
-            match result {
-                Ok(exit) => match exit.result {
-                    Ok(()) => {
-                        if exit.actor_type == ActorType::Foreground {
-                            foreground_remaining -= 1;
-                            if foreground_remaining == 0 && !success_shutdown {
-                                success_shutdown = true;
-                                join_set.abort_all();
-                            }
-                        }
-                    }
-                    Err(error) => {
+        let shutdown_token = shared.shutdown_token.clone();
+        let mut shutdown_requested = false;
+        while let Some(result) = {
+            if shutdown_requested {
+                join_set.join_next_with_id().await
+            } else {
+                tokio::select! {
+                    biased;
+                    result = join_set.join_next_with_id() => result,
+                    _ = shutdown_token.cancelled() => {
+                        shutdown_requested = true;
                         join_set.abort_all();
-                        return Err(error);
+                        join_set.join_next_with_id().await
                     }
-                },
-                Err(error) if success_shutdown && error.is_cancelled() => {}
+                }
+            }
+        } {
+            if !shutdown_requested && shutdown_token.is_cancelled() {
+                shutdown_requested = true;
+                join_set.abort_all();
+            }
+
+            match result {
+                Ok((id, Ok(()))) => {
+                    actor_names.remove(&id);
+                }
                 Err(error) => {
+                    let id = error.id();
+                    let actor_name = actor_names
+                        .remove(&id)
+                        .unwrap_or_else(|| format!("task {id:?}"));
+                    if shutdown_requested && error.is_cancelled() {
+                        continue;
+                    }
                     join_set.abort_all();
-                    panic!("dst actor task failed to join: {error}");
+                    panic!("dst harness actor {actor_name} failed: {error}");
+                }
+                Ok((id, Err(error))) => {
+                    actor_names.remove(&id);
+                    join_set.abort_all();
+                    return Err(error);
                 }
             }
         }

@@ -29,6 +29,7 @@ rand = { workspace = true }
 slatedb = { workspace = true }
 slatedb-common = { workspace = true, features = ["test-util"] }
 tokio = { workspace = true, features = ["macros", "rt", "test-util"] }
+tokio-util = { workspace = true, default-features = false, features = ["rt"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["fmt", "env-filter"] }
 walkdir = { workspace = true }

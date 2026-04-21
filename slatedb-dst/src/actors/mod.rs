@@ -5,32 +5,25 @@
 //! its behavior is driven entirely by the harness-provided seeded RNG, shared
 //! database handle, and shared mock clock.
 //!
-//! The `writer`, `deleter`, and `flusher` actors are bounded foreground-style
-//! workloads. Each one executes exactly [`WORKLOAD_STEPS`] iterations and then
-//! returns. Registering them with counts `10/4/1` reproduces the legacy
-//! weighted workload mix of roughly 50% writes, 20% deletes, and 5% explicit
-//! flushes that previously came from 500 `rand_value % 100` iterations.
+//! The `writer`, `deleter`, `flusher`, and `clock` actors are unbounded loops.
+//! Register them alongside a separate shutdown actor to build deterministic,
+//! time-bounded scenarios.
 //!
-//! The `clock` actor is different: it is an unbounded background helper that
-//! advances the shared mock clock forever. It is meant to be registered as a
-//! background actor so the harness aborts it once all foreground actors finish.
+//! Registering `writer`/`deleter`/`flusher` with counts `10/4/1` preserves the
+//! same relative workload mix as the old bounded scenario, but the total number
+//! of operations now depends on when the scenario requests shutdown.
 
 pub mod clock;
 pub mod deleter;
 pub mod flusher;
+pub mod shutdown;
 pub mod writer;
 
 pub use self::clock::clock;
 pub use self::deleter::deleter;
 pub use self::flusher::flusher;
+pub use self::shutdown::shutdown;
 pub use self::writer::writer;
 
-/// Each bounded workload actor executes 25 steps.
-///
-/// A `10/4/1` writer/deleter/flusher registration therefore reproduces the old
-/// `250/100/25` active-operation mix from 500 weighted `rand_value % 100`
-/// iterations.
-const WORKLOAD_STEPS: u64 = 25;
-
-/// Emit one progress log line every N completed steps for the bounded actors.
+/// Emit one progress log line every N completed steps for the looping actors.
 const PROGRESS_LOG_INTERVAL: u64 = 10;
