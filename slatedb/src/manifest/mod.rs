@@ -507,6 +507,23 @@ impl Manifest {
     pub(crate) fn has_wal_sst_reference(&self, wal_sst_id: u64) -> bool {
         wal_sst_id > self.core.replay_after_wal_id && wal_sst_id < self.core.next_wal_sst_id
     }
+
+    /// Shrinks each `ExternalDb.sst_ids` to only IDs still referenced by this manifest's
+    /// L0 and compacted sorted runs. `ExternalDb` entries are retained even when their
+    /// `sst_ids` becomes empty — detaching a clone from its parent is done by the GC,
+    /// not here, because it also requires that no live checkpoint references those IDs.
+    pub(crate) fn prune_external_sst_ids(&mut self) {
+        let used_sst_ids: HashSet<SsTableId> = self
+            .core
+            .compacted
+            .iter()
+            .flat_map(|sr| sr.sst_views.iter().map(|v| v.sst.id))
+            .chain(self.core.l0.iter().map(|v| v.sst.id))
+            .collect();
+        for external_db in self.external_dbs.iter_mut() {
+            external_db.sst_ids.retain(|id| used_sst_ids.contains(id));
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1311,6 +1328,50 @@ mod tests {
 
         assert_eq!(projected.external_dbs.len(), 1);
         assert_eq!(projected.external_dbs[0].path, "/path/to/db1");
+    }
+
+    #[test]
+    fn test_prune_external_sst_ids_shrinks_and_keeps_entries() {
+        let live_l0 = SsTableId::Compacted(Ulid::new());
+        let live_compacted = SsTableId::Compacted(Ulid::new());
+        let stale_a = SsTableId::Compacted(Ulid::new());
+        let stale_b = SsTableId::Compacted(Ulid::new());
+
+        let mut core = ManifestCore::new();
+        core.l0.push_back(create_sst_view(live_l0, b"a"));
+        core.compacted.push(SortedRun {
+            id: 0,
+            sst_views: vec![create_sst_view(live_compacted, b"b")],
+        });
+
+        let mut manifest = Manifest::initial(core);
+        manifest.external_dbs = vec![
+            // Mix of live and stale IDs: stale ones should be pruned, live kept.
+            ExternalDb {
+                path: "/path/to/partially_referenced".to_string(),
+                source_checkpoint_id: Uuid::new_v4(),
+                final_checkpoint_id: Some(Uuid::new_v4()),
+                sst_ids: vec![live_l0, stale_a, live_compacted],
+            },
+            // No live IDs: entry must be retained (with empty sst_ids) so that GC can
+            // later detach using the final_checkpoint_id.
+            ExternalDb {
+                path: "/path/to/fully_compacted".to_string(),
+                source_checkpoint_id: Uuid::new_v4(),
+                final_checkpoint_id: Some(Uuid::new_v4()),
+                sst_ids: vec![stale_a, stale_b],
+            },
+        ];
+
+        manifest.prune_external_sst_ids();
+
+        assert_eq!(manifest.external_dbs.len(), 2);
+        assert_eq!(
+            manifest.external_dbs[0].sst_ids,
+            vec![live_l0, live_compacted]
+        );
+        assert!(manifest.external_dbs[1].sst_ids.is_empty());
+        assert!(manifest.external_dbs[1].final_checkpoint_id.is_some());
     }
 
     fn create_sst_view(sst_id: SsTableId, first_entry_bytes: &'static [u8; 1]) -> SsTableView {
