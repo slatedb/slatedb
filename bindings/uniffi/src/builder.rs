@@ -3,6 +3,7 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 use uuid::Uuid;
 
+use crate::admin::Admin;
 use crate::config::{ReaderOptions, SstBlockSize};
 use crate::db::Db;
 use crate::db_reader::DbReader;
@@ -196,5 +197,65 @@ impl DbReaderBuilder {
         let builder = self.take_builder()?;
         let reader = builder.build().await?;
         Ok(Arc::new(DbReader::new(reader)))
+    }
+}
+
+/// Builder for opening an administrative [`crate::Admin`] handle.
+///
+/// Builders are single-use: calling [`AdminBuilder::build`] consumes the builder.
+#[derive(uniffi::Object)]
+pub struct AdminBuilder {
+    builder: Mutex<Option<slatedb::admin::AdminBuilder<String>>>,
+}
+
+impl AdminBuilder {
+    fn update_builder(
+        &self,
+        update: impl FnOnce(
+            slatedb::admin::AdminBuilder<String>,
+        ) -> slatedb::admin::AdminBuilder<String>,
+    ) -> Result<(), SlateDbError> {
+        let mut guard = self.builder.lock();
+        let builder = guard.take().ok_or(SlateDbError::BuilderConsumed)?;
+        *guard = Some(update(builder));
+        Ok(())
+    }
+
+    fn take_builder(&self) -> Result<slatedb::admin::AdminBuilder<String>, SlateDbError> {
+        let mut guard = self.builder.lock();
+        guard.take().ok_or(SlateDbError::BuilderConsumed)
+    }
+}
+
+#[uniffi::export]
+impl AdminBuilder {
+    /// Creates a new admin builder for `path` in `object_store`.
+    #[uniffi::constructor]
+    pub fn new(path: String, object_store: Arc<ObjectStore>) -> Arc<Self> {
+        Arc::new(Self {
+            builder: Mutex::new(Some(slatedb::admin::Admin::builder(
+                path,
+                object_store.inner.clone(),
+            ))),
+        })
+    }
+
+    /// Uses a separate object store for WAL-backed administrative operations.
+    pub fn with_wal_object_store(&self, wal_object_store: Arc<ObjectStore>) -> Result<(), Error> {
+        self.update_builder(|builder| builder.with_wal_object_store(wal_object_store.inner.clone()))
+            .map_err(Into::into)
+    }
+
+    /// Sets the seed used for SlateDB's internal random number generation.
+    pub fn with_seed(&self, seed: u64) -> Result<(), Error> {
+        self.update_builder(|builder| builder.with_seed(seed))
+            .map_err(Into::into)
+    }
+
+    /// Builds the admin handle and consumes this builder.
+    pub fn build(&self) -> Result<Arc<Admin>, Error> {
+        let builder = self.take_builder()?;
+        let admin = builder.build();
+        Ok(Arc::new(Admin { inner: admin }))
     }
 }

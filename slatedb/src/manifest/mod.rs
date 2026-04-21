@@ -360,8 +360,7 @@ impl Manifest {
         filtered_handles
     }
 
-    #[allow(unused)]
-    pub(crate) fn union(manifests: Vec<Manifest>) -> Manifest {
+    pub(crate) fn cloned_from_union(manifests: Vec<Manifest>) -> Manifest {
         if manifests.len() == 1 {
             manifests[0].clone()
         } else {
@@ -521,12 +520,14 @@ mod tests {
 
         let clone_path = Path::from("/tmp/test_clone");
         let clone_manifest_store = Arc::new(ManifestStore::new(&clone_path, object_store.clone()));
-        let clone_stored_manifest = StoredManifest::create_uninitialized_clone(
-            Arc::clone(&clone_manifest_store),
-            parent_manifest.manifest(),
-            parent_path.to_string(),
-            checkpoint.id,
-            Arc::new(DbRand::default()),
+        let clone_stored_manifest = StoredManifest::store_uninitialized_clone(
+            clone_manifest_store,
+            Manifest::cloned(
+                parent_manifest.manifest(),
+                parent_path.to_string(),
+                checkpoint.id,
+                Arc::new(DbRand::default()),
+            ),
             Arc::new(DefaultSystemClock::new()),
         )
         .await
@@ -839,7 +840,7 @@ mod tests {
         let expected_manifest =
             build_manifest(&test_case.expected, |alias| *sst_ids.get(alias).unwrap());
 
-        let union = Manifest::union(manifests);
+        let union = Manifest::cloned_from_union(manifests);
 
         assert_manifest_equal(&union, &expected_manifest, &sst_ids);
     }
@@ -871,7 +872,7 @@ mod tests {
             |_| SsTableId::Compacted(Ulid::new()),
         );
 
-        let union = Manifest::union(vec![manifest1, manifest2]);
+        let union = Manifest::cloned_from_union(vec![manifest1, manifest2]);
 
         // After union, we should have 5 SRs with IDs 0, 1, 2, 3, 4
         assert_eq!(union.core.compacted.len(), 5);
@@ -906,7 +907,7 @@ mod tests {
         );
         manifest2.core.last_l0_seq = 200;
 
-        let union = Manifest::union(vec![manifest1, manifest2]);
+        let union = Manifest::cloned_from_union(vec![manifest1, manifest2]);
 
         assert_eq!(union.core.last_l0_seq, 200);
     }

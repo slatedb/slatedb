@@ -1,6 +1,6 @@
 # SlateDB Merge Operator
 
-Status: Draft
+Status: Accepted
 
 Authors:
 
