@@ -143,9 +143,7 @@ fn dst_smoke_test() -> Result<(), Box<dyn std::error::Error>> {
         failures,
         system_clock.clone(),
     ));
-    let shutdown_at = Arc::new(
-        DateTime::from_timestamp_millis(10).expect("shutdown timestamp must be valid"),
-    );
+    let shutdown_at = DateTime::from_timestamp_millis(10).expect("shutdown timestamp must be valid");
 
     Harness::new("smoke", 7)
         .with_path(Path::from("dst/smoke"))
@@ -188,8 +186,8 @@ fn dst_smoke_test() -> Result<(), Box<dyn std::error::Error>> {
 - `with_wal_object_store(store)`: configures a separate WAL store
 - `with_db(factory)`: registers the startup factory that opens the database
 - `actor(role, count, actor_fn)`: registers `count` actors for the same role
-- `actor_with_state(role, count, shared_state, actor_fn)`: same as `actor`,
-  but clones user-supplied shared state into each actor
+- `actor_with_state(role, count, state, actor_fn)`: same as `actor`, but
+  clones the supplied state into each actor
 - `run()`: builds the seeded runtime, opens the DB, spawns actors, and runs
   until all actors finish successfully or some actor cancels the shared
   shutdown token

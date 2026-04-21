@@ -119,10 +119,8 @@ fn run_seed_once(seed: u64) -> Result<(u64, DateTime<Utc>), Box<dyn std::error::
         failures,
         system_clock.clone(),
     ));
-    let shutdown_at = Arc::new(
-        DateTime::from_timestamp_millis(SHUTDOWN_AT_MILLIS)
-            .expect("shutdown timestamp must be valid"),
-    );
+    let shutdown_at = DateTime::from_timestamp_millis(SHUTDOWN_AT_MILLIS)
+        .expect("shutdown timestamp must be valid");
     Harness::new("determinism", seed)
         .with_rand(Arc::clone(&rand))
         .with_system_clock(Arc::clone(&system_clock))

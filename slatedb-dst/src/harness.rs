@@ -378,9 +378,9 @@ impl Harness {
     /// ## Arguments
     /// - `role`: Logical name assigned to each actor in the registration.
     /// - `count`: Number of actor instances to spawn for the role.
-    /// - `state`: Shared state cloned into each actor invocation.
+    /// - `state`: State value cloned into each actor invocation.
     /// - `actor`: Async actor function that receives an [`ActorCtx`] and the
-    ///   shared state.
+    ///   cloned state.
     ///
     /// ## Returns
     /// - `Harness`: The updated harness builder.
@@ -388,19 +388,19 @@ impl Harness {
         mut self,
         role: impl Into<String>,
         count: usize,
-        state: Arc<T>,
+        state: T,
         actor: F,
     ) -> Self
     where
-        T: Send + Sync + 'static,
-        F: Fn(ActorCtx, Arc<T>) -> Fut + Send + Sync + 'static,
+        T: Clone + Send + Sync + 'static,
+        F: Fn(ActorCtx, T) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<(), Error>> + Send + 'static,
     {
         self.actors.push(ActorRegistration {
             role: role.into(),
             count,
             actor: Arc::new(move |ctx| {
-                let state = Arc::clone(&state);
+                let state = state.clone();
                 Box::pin(actor(ctx, state))
             }),
         });
