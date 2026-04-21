@@ -233,7 +233,6 @@ impl DbInner {
         &self,
         range: BytesRange,
         options: &ScanOptions,
-        prefix: Option<Bytes>,
     ) -> Result<DbIterator, SlateDBError> {
         self.check_closed()?;
         let db_state = self.state.read().view();
@@ -246,7 +245,30 @@ impl DbInner {
                     write_batch_iter: None,
                     max_seq: None,
                     range_tracker: None,
-                    prefix,
+                    prefix: None,
+                },
+            )
+            .await
+    }
+
+    pub(crate) async fn scan_prefix_with_options(
+        &self,
+        prefix: Bytes,
+        options: &ScanOptions,
+    ) -> Result<DbIterator, SlateDBError> {
+        self.check_closed()?;
+        let range = BytesRange::from_prefix(prefix.as_ref());
+        let db_state = self.state.read().view();
+        self.reader
+            .scan_with_options(
+                range,
+                options,
+                ScanContext {
+                    db_state: &db_state,
+                    write_batch_iter: None,
+                    max_seq: None,
+                    range_tracker: None,
+                    prefix: Some(prefix),
                 },
             )
             .await
@@ -1025,7 +1047,7 @@ impl Db {
             .map(|b| Bytes::copy_from_slice(b.as_ref()));
         let range = (start, end);
         self.inner
-            .scan_with_options(BytesRange::from(range), options, None)
+            .scan_with_options(BytesRange::from(range), options)
             .await
             .map_err(Into::into)
     }
@@ -1121,9 +1143,8 @@ impl Db {
         P: AsRef<[u8]> + Send,
     {
         let prefix = Bytes::copy_from_slice(prefix.as_ref());
-        let range = BytesRange::from_prefix(prefix.as_ref());
         self.inner
-            .scan_with_options(range, options, Some(prefix))
+            .scan_prefix_with_options(prefix, options)
             .await
             .map_err(Into::into)
     }
@@ -2894,7 +2915,7 @@ mod tests {
                 let iter = self
                     .db
                     .inner
-                    .scan_with_options(range, &ScanOptions::default(), None)
+                    .scan_with_options(range, &ScanOptions::default())
                     .await
                     .unwrap();
                 Box::new(iter)
@@ -2934,7 +2955,7 @@ mod tests {
     ) {
         let mut iter = db
             .inner
-            .scan_with_options(range.clone(), scan_options, None)
+            .scan_with_options(range.clone(), scan_options)
             .await
             .unwrap();
         test_utils::assert_ranged_db_scan(table, range, &mut iter).await;
@@ -3077,7 +3098,7 @@ mod tests {
         ) {
             let mut iter = db
                 .inner
-                .scan_with_options(scan_range.clone(), &ScanOptions::default(), None)
+                .scan_with_options(scan_range.clone(), &ScanOptions::default())
                 .await
                 .unwrap();
 
