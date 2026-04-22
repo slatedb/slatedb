@@ -56,6 +56,7 @@ pub struct WriteBatch {
     /// batch (unrelated to the sequence number of the batch, which is assigned
     /// atomically by the oracle when the batch is committed).
     pub(crate) write_idx: u64,
+    pub(crate) merge_op_count: usize,
 }
 
 impl Default for WriteBatch {
@@ -146,6 +147,7 @@ impl WriteBatch {
             ops: BTreeMap::new(),
             txn_id: None,
             write_idx: 0,
+            merge_op_count: 0,
         }
     }
 
@@ -164,7 +166,10 @@ impl WriteBatch {
 
         // Remove them
         for k in keys_to_remove {
-            self.ops.remove(&k);
+            match self.ops.remove(&k) {
+                Some(WriteOp::Merge(..)) => self.merge_op_count -= 1,
+                _ => {}
+            }
         }
     }
 
@@ -173,6 +178,7 @@ impl WriteBatch {
             ops: self.ops,
             txn_id: Some(txn_id),
             write_idx: self.write_idx,
+            merge_op_count: self.merge_op_count,
         }
     }
 
@@ -286,6 +292,7 @@ impl WriteBatch {
             WriteOp::Merge(key, Bytes::copy_from_slice(value.as_ref()), options.clone()),
         );
 
+        self.merge_op_count += 1;
         self.write_idx += 1;
     }
 
@@ -308,6 +315,10 @@ impl WriteBatch {
 
     pub fn is_empty(&self) -> bool {
         self.ops.is_empty()
+    }
+
+    pub(crate) fn has_merge_ops(&self) -> bool {
+        self.merge_op_count > 0
     }
 
     pub(crate) fn keys(&self) -> HashSet<Bytes> {
@@ -882,6 +893,44 @@ mod tests {
         assert!(batch
             .ops
             .contains_key(&SequencedKey::new(Bytes::from_static(b"key3"), 2)));
+    }
+
+    #[test]
+    fn should_track_merge_presence() {
+        let mut batch = WriteBatch::new();
+        assert!(!batch.has_merge_ops());
+
+        batch.merge(b"key1", b"value1");
+
+        assert!(batch.has_merge_ops());
+        assert_eq!(batch.merge_op_count, 1);
+    }
+
+    #[test]
+    fn should_clear_merge_presence_when_put_overwrites_merge_ops() {
+        let mut batch = WriteBatch::new();
+        batch.merge(b"key1", b"value1");
+        batch.merge(b"key1", b"value2");
+        assert!(batch.has_merge_ops());
+
+        batch.put(b"key1", b"final");
+
+        assert!(!batch.has_merge_ops());
+        assert_eq!(batch.merge_op_count, 0);
+    }
+
+    #[test]
+    fn should_preserve_merge_presence_when_removing_only_one_keys_merges() {
+        let mut batch = WriteBatch::new();
+        batch.merge(b"key1", b"value1");
+        batch.merge(b"key2", b"value2");
+        assert!(batch.has_merge_ops());
+        assert_eq!(batch.merge_op_count, 2);
+
+        batch.delete(b"key1");
+
+        assert!(batch.has_merge_ops());
+        assert_eq!(batch.merge_op_count, 1);
     }
 
     #[test]
